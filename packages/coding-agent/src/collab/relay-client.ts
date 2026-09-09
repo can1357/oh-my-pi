@@ -21,14 +21,19 @@ const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 const MAX_PENDING_SENDS = 256;
 /**
- * Budget for everything the queue is holding on to, charged once per entry when
- * it is admitted: a frame's serialized length, and for a lazy batch the size of
- * the data its iterator keeps reachable. Retained data is the dominant cost —
- * a batch is one entry that can pin a whole session snapshot for as long as the
- * transport takes to drain it — so charging it at admission is what makes this
- * number the real ceiling. Serialized chunk bytes are transient by comparison
- * (one chunk is materialized at a time, bounded by the producer's chunk size)
- * and are not charged again as they pass through.
+ * Ceiling on the charge the queue is carrying, levied once per entry when it is
+ * admitted: a frame's serialized byte length, and for a lazy batch whatever the
+ * caller declares its iterator keeps reachable. Declaring retention is the point
+ * — a batch is one entry that can pin a whole session snapshot for as long as
+ * the transport takes to drain it, and nothing else in the accounting would show
+ * that.
+ *
+ * A bound on the declarations, not on the heap and not on cumulative work: for
+ * finite non-negative declarations the queue carries at most this much charge, or
+ * one oversized entry admitted with nothing ahead of it. A declaration is only a
+ * proxy for the object graph, loose in both directions. Serialized chunk bytes
+ * are transient by comparison — one chunk is materialized at a time — and are
+ * not charged again as they pass through.
  */
 const MAX_PENDING_SEND_BYTES = 16 * 1024 * 1024;
 /**
