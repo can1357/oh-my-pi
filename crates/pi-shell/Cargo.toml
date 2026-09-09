@@ -40,3 +40,6 @@ winreg.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# `test-util` gates `tokio::time::pause`, which lets the polling waiters be held
+# to their deadlines on a virtual clock instead of a wall-clock assertion.
+tokio = { workspace = true, features = ["test-util"] }

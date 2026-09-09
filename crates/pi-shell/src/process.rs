@@ -2211,16 +2211,27 @@ async fn wait_for_processes(
 	}
 
 	let poll_interval = Duration::from_millis(50);
-	let mut elapsed = Duration::ZERO;
-	while timeout.is_none_or(|limit| elapsed < limit) {
-		let sleep_for =
-			timeout.map_or(poll_interval, |limit| limit.saturating_sub(elapsed).min(poll_interval));
-		if sleep_for.is_zero() {
-			break;
-		}
+	// Measured against the clock, never summed from the naps this loop asked
+	// for. A task resumed after runtime saturation, a suspended host, or a long
+	// scheduler pause has spent that wall time whether or not it slept through
+	// it, and a waiter crediting itself only what it requested buys another
+	// near-complete budget past the deadline it advertised. `tokio`'s clock
+	// rather than the standard one because it is the clock the naps below are
+	// scheduled against, so the two cannot disagree.
+	let started = tokio::time::Instant::now();
+	loop {
+		let sleep_for = match timeout {
+			Some(limit) => {
+				let remaining = limit.saturating_sub(started.elapsed());
+				if remaining.is_zero() {
+					break;
+				}
+				remaining.min(poll_interval)
+			},
+			None => poll_interval,
+		};
 		ct.heartbeat()?;
 		tokio::time::sleep(sleep_for).await;
-		elapsed += sleep_for;
 
 		if processes
 			.iter()
@@ -2588,6 +2599,53 @@ mod tests {
 		assert!(!pending.expect("wait for live child"), "a live process must exhaust the deadline");
 		assert!(finished.expect("wait after hard kill"), "an unreaped child has already exited");
 		assert_eq!(status, ProcessStatus::Exited);
+	}
+
+	/// The poll loop's budget is wall time, not the sum of the naps it asked
+	/// for. A task delayed by runtime saturation, a suspended host, or a long
+	/// scheduler pause resumes having spent far more than it requested, and a
+	/// waiter that credits itself only the requested amount then replays nearly
+	/// its whole budget past the deadline it advertised.
+	///
+	/// Held to a virtual clock rather than a wall-clock stopwatch: the jump is
+	/// injected, so the assertion is about the waiter's arithmetic and not about
+	/// how loaded the machine running it happens to be.
+	#[cfg(unix)]
+	#[tokio::test(start_paused = true)]
+	async fn exit_waiter_measures_its_budget_against_the_clock_not_its_own_naps() {
+		let mut child = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn sleep");
+		let root =
+			Process::from_pid(i32::try_from(child.id()).expect("child pid")).expect("pin child");
+		let budget = Duration::from_millis(5_000);
+		let jump = Duration::from_secs(60);
+
+		let started = tokio::time::Instant::now();
+		let waiter = tokio::spawn(async move {
+			wait_for_processes(&[root], Some(budget), CancelToken::default()).await
+		});
+		// Let the waiter reach its first poll nap before the clock moves, so the
+		// jump lands inside a sleep the way a suspend or a stalled runtime would.
+		tokio::task::yield_now().await;
+		tokio::time::advance(jump).await;
+		let pending = waiter.await.expect("waiter task");
+		let total = started.elapsed();
+
+		let _ = child.kill();
+		let _ = child.wait();
+		assert!(!pending.expect("wait for live child"), "a live process must exhaust the deadline");
+		// Five poll intervals of slack. A waiter that reads the clock wakes past
+		// its deadline and returns without napping again; one that credits itself
+		// only the nap it asked for restarts on nearly the whole budget, which no
+		// amount of slack this side of `budget` can absorb.
+		let slack = Duration::from_millis(250);
+		assert!(
+			total < jump + slack,
+			"a budget already spent must not buy another round of polling: {total:?} of virtual time \
+			 against a {budget:?} deadline that a {jump:?} stall had already exhausted"
+		);
 	}
 
 	/// A root that dies to its own polite signal reparents the descendants that
