@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- `--no-tools` (`toolNames: []`) active-set assembly uses an explicit undefined check so the empty whitelist cannot be mis-read as “omit tools” and fall through to the full registry.
 - Cold `--provider`/`--model` refresh also gates on built-in catalog model-manager descriptors (e.g. Grok Bot), not only `getDiscoverableProviders()` (models.yml / runtime / implicit local).
 - Cold catalog refresh also covers a single-provider `--models provider/id` scope (no `parsed.model`), and empty `--models` scopes refresh built-in descriptor providers when `getDiscoverableProviders()` is empty.
 - Task descriptions containing tabs no longer misalign or overflow task rows; tabs are expanded before measuring and rendering.

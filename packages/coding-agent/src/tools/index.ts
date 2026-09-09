@@ -506,7 +506,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const enableLsp = session.enableLsp ?? true;
 	const requestedTools = restrictToolNames
 		? normalizeToolNames(toolNames ?? [])
-		: toolNames
+		: toolNames !== undefined
 			? normalizeToolNames(toolNames)
 			: undefined;
 	// Explicit empty whitelist (`--no-tools`) must stay empty — do not widen with

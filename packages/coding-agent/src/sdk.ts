@@ -1802,7 +1802,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			enableIrc: restrictToolNames ? false : options.enableIrc,
 			restrictToolNames,
 			get hasEditTool() {
-				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
+				// Keep `toolNames: []` (`--no-tools`) distinct from an omitted list —
+				// empty arrays are truthy, but callers must use an explicit undefined check.
+				const requestedToolNames =
+					options.toolNames !== undefined ? normalizeToolNames(options.toolNames) : undefined;
 				return restrictToolNames
 					? requestedToolNames?.includes("edit") === true
 					: !requestedToolNames || requestedToolNames.includes("edit");
@@ -3229,7 +3232,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
-		const explicitlyRequestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
+		// Explicit `!== undefined` so `toolNames: []` (`--no-tools`) stays an empty
+		// whitelist instead of falling through to the full registry via `??`.
+		const explicitlyRequestedToolNames =
+			options.toolNames !== undefined ? normalizeToolNames(options.toolNames) : undefined;
+		const emptyToolWhitelist = Array.isArray(options.toolNames) && options.toolNames.length === 0;
 		// When `requireYieldTool` is set, the subagent's prompts and idle-reminders demand a
 		// `yield` call to terminate. The tool registry already includes `yield` (see
 		// `createTools`), but an explicit `toolNames` list would otherwise drop it from the
@@ -3238,6 +3245,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (
 			options.requireYieldTool === true &&
 			explicitlyRequestedToolNames &&
+			!emptyToolWhitelist &&
 			!explicitlyRequestedToolNames.includes("yield")
 		) {
 			explicitlyRequestedToolNames.push("yield");
@@ -3245,7 +3253,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Session-managed builtins may be force-included by createTools. Keep the
 		// active set consistent with that registry decision, using built-in
 		// provenance so same-named extension tools are never force-activated.
-		if (!restrictToolNames && explicitlyRequestedToolNames) {
+		// Do not widen an explicit empty `--no-tools` whitelist.
+		if (!restrictToolNames && explicitlyRequestedToolNames && !emptyToolWhitelist) {
 			for (const name of ["manage_skill", "learn", "context_notes", "new_context"]) {
 				if (builtInToolNames.includes(name) && !explicitlyRequestedToolNames.includes(name)) {
 					explicitlyRequestedToolNames.push(name);
@@ -3257,8 +3266,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// drop it from the ACTIVE set — leaving the agent able to checkpoint but
 		// unable to rewind (or vice versa). Mirror the pairing here. Unlike the
 		// manage_skill/learn mirror above, this is a safety pairing — it applies
-		// to restricted sessions too.
-		if (explicitlyRequestedToolNames) {
+		// to restricted sessions too. Still skip widening `--no-tools`.
+		if (explicitlyRequestedToolNames && !emptyToolWhitelist) {
 			if (builtInToolNames.includes("checkpoint") && !explicitlyRequestedToolNames.includes("rewind")) {
 				explicitlyRequestedToolNames.push("rewind");
 			} else if (builtInToolNames.includes("rewind") && !explicitlyRequestedToolNames.includes("checkpoint")) {
@@ -3274,9 +3283,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}),
 		);
 		const requestedActiveToolNames = normalizedRequested.filter(name => name !== "goal");
-		const explicitlyRequestedToolNameSet = explicitlyRequestedToolNames
-			? new Set(explicitlyRequestedToolNames)
-			: undefined;
+		const explicitlyRequestedToolNameSet =
+			explicitlyRequestedToolNames !== undefined ? new Set(explicitlyRequestedToolNames) : undefined;
 		const xdevReadAvailable =
 			builtInRegistryToolNames.has("read") &&
 			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("read"));
@@ -3285,16 +3293,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			(explicitlyRequestedToolNameSet === undefined ||
 				explicitlyRequestedToolNameSet.has("write") ||
 				toolSession.deviceOnlyWrite === true);
-		const initialRequestedActiveToolNames = options.toolNames
-			? requestedActiveToolNames
-			: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));
+		const initialRequestedActiveToolNames =
+			options.toolNames !== undefined
+				? requestedActiveToolNames
+				: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));
 		let initialToolNames = [...initialRequestedActiveToolNames];
 
 		// Custom tools and extension-registered tools are always included
 		// unless the effective registry winner is hidden / defaultInactive. Restricted callers own the list.
 		// An explicit empty `--no-tools` whitelist must also skip alwaysInclude so
 		// MCP/custom tools stay off the wire without the broader restrictToolNames lockdown.
-		const emptyToolWhitelist = Array.isArray(options.toolNames) && options.toolNames.length === 0;
 		const alwaysInclude: string[] =
 			restrictToolNames || emptyToolWhitelist
 				? []

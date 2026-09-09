@@ -96,6 +96,9 @@ describe("--no-tools leak prevention", () => {
 	});
 
 	it("excludes ambient custom tools with an empty whitelist without restrictToolNames", async () => {
+		// Contract: `toolNames: []` must stay an empty active set even when custom
+		// tools are registered. Assembly must use `toolNames !== undefined` (not a
+		// truthy check that could be misread as collapsing `[]` into the full registry).
 		const { session } = await createAgentSession({
 			cwd: registryDir,
 			agentDir: registryDir,
