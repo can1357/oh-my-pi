@@ -1825,18 +1825,16 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					!output.content.some(b => b.type === "toolCall")
 				) {
 					const advertised = advertisedNamesForJsonTextToolCall(body.tools, context.tools);
-					const promotedList = promoteJsonTextToolCallsFromContent(
+					const promotion = promoteJsonTextToolCallsFromContent(
 						output.content,
 						advertised,
 						sendToUserTextIndexes,
 					);
+					const promotedList = promotion.calls;
 					if (promotedList.length > 0) {
-						const removedIndexes = new Set<number>();
-						for (let i = 0; i < output.content.length; i++) {
-							if (sendToUserTextIndexes.has(i)) continue;
-							const block = output.content[i];
-							if (block?.type === "text" || block?.type === "thinking") removedIndexes.add(i);
-						}
+						// Drop only blocks that produced promoted calls — ordinary prose
+						// that already streamed live must remain on the final message.
+						const removedIndexes = new Set<number>(promotion.sourceIndexes);
 						// Compacting content shifts retained SendToUser text left —
 						// remap buffered event indices so flush matches the final message.
 						const oldToNew = new Map<number, number>();

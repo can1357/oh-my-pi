@@ -125,7 +125,8 @@ describe("parseJsonTextToolCall", () => {
 			],
 			advertised,
 		);
-		expect(promoted).toEqual([{ name: "Shell", arguments: { command: "echo hi" } }]);
+		expect(promoted.calls).toEqual([{ name: "Shell", arguments: { command: "echo hi" } }]);
+		expect(promoted.sourceIndexes).toEqual([1]);
 		// Combined candidate would start with prose and fail — individual text wins.
 		expect(
 			parseJsonTextToolCall(
@@ -145,7 +146,10 @@ describe("parseJsonTextToolCall", () => {
 				[{ type: "thinking", thinking: '{"name":"bash","arguments":{"command":"echo hi"}}' }],
 				advertised,
 			),
-		).toEqual([{ name: "bash", arguments: { command: "echo hi" } }]);
+		).toEqual({
+			calls: [{ name: "bash", arguments: { command: "echo hi" } }],
+			sourceIndexes: [0],
+		});
 	});
 
 	test("promoteJsonTextToolCallsFromContent accumulates calls across multiple blocks", () => {
@@ -159,10 +163,13 @@ describe("parseJsonTextToolCall", () => {
 				],
 				advertised,
 			),
-		).toEqual([
-			{ name: "Read", arguments: { path: "a.ts" } },
-			{ name: "Shell", arguments: { command: "echo hi" } },
-		]);
+		).toEqual({
+			calls: [
+				{ name: "Read", arguments: { path: "a.ts" } },
+				{ name: "Shell", arguments: { command: "echo hi" } },
+			],
+			sourceIndexes: [1, 2],
+		});
 	});
 
 	test("advertisedNamesForJsonTextToolCall aliases only from advertised wire tools", () => {
@@ -572,13 +579,14 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		const result = await stream.result();
 		expect(result.stopReason).toBe("toolUse");
 		expect(result.content).toEqual([
+			expect.objectContaining({ type: "text", text: "Looking into it." }),
 			expect.objectContaining({
 				type: "toolCall",
 				name: "bash",
 				arguments: { command: "echo tools-pong-after-prose" },
 			}),
 		]);
-		// Prose may stream live; the later JSON dump must not — promotion cannot retract it.
+		// Prose streams live and stays on the final message; only the JSON dump is dropped.
 		expect(textDeltas.join("")).toBe("Looking into it.");
 		expect(textDeltas.join("")).not.toContain("tools-pong-after-prose");
 	});

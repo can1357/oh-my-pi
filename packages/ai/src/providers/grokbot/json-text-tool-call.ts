@@ -349,12 +349,19 @@ function parsePromotableToolCallsFromText(
  * calls across every eligible block (parallel one-call-per-block dumps) before
  * falling back to the joined assistant text for thought-only / split dumps.
  */
+export type JsonTextToolCallPromotion = {
+	calls: JsonTextToolCall[];
+	/** Content indexes that produced the promoted calls (only those are safe to drop). */
+	sourceIndexes: number[];
+};
+
 export function promoteJsonTextToolCallsFromContent(
 	content: ReadonlyArray<{ type: string; text?: string; thinking?: string }>,
 	advertisedNames: Iterable<string>,
 	excludeIndexes?: ReadonlySet<number>,
-): JsonTextToolCall[] {
+): JsonTextToolCallPromotion {
 	const collected: JsonTextToolCall[] = [];
+	const sourceIndexes: number[] = [];
 	for (let i = 0; i < content.length; i++) {
 		if (excludeIndexes?.has(i)) continue;
 		const block = content[i];
@@ -362,10 +369,22 @@ export function promoteJsonTextToolCallsFromContent(
 		const text = blockTextForJsonPromotion(block);
 		if (!text?.trim()) continue;
 		const promoted = parsePromotableToolCallsFromText(text, advertisedNames);
-		if (promoted.length > 0) collected.push(...promoted);
+		if (promoted.length > 0) {
+			collected.push(...promoted);
+			sourceIndexes.push(i);
+		}
 	}
-	if (collected.length > 0) return collected;
+	if (collected.length > 0) return { calls: collected, sourceIndexes };
 	const combined = assistantTextForJsonPromotion(content, excludeIndexes);
-	if (!combined.trim()) return [];
-	return parsePromotableToolCallsFromText(combined, advertisedNames);
+	if (!combined.trim()) return { calls: [], sourceIndexes: [] };
+	const fallback = parsePromotableToolCallsFromText(combined, advertisedNames);
+	if (fallback.length === 0) return { calls: [], sourceIndexes: [] };
+	// Combined fallback: every joined text/thinking block was part of the source.
+	const fallbackIndexes: number[] = [];
+	for (let i = 0; i < content.length; i++) {
+		if (excludeIndexes?.has(i)) continue;
+		const block = content[i];
+		if (block?.type === "text" || block?.type === "thinking") fallbackIndexes.push(i);
+	}
+	return { calls: fallback, sourceIndexes: fallbackIndexes };
 }

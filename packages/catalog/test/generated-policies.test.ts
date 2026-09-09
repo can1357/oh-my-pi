@@ -1022,6 +1022,46 @@ describe("Grok Bot generated thinking policy", () => {
 		expect(grok.sandNativeToolSchema).toBeUndefined();
 	});
 
+	it("reapplies KDL Sand policy over stale cached sandEmptyToolsRetryWire values", () => {
+		// Cached live rows can retain a prior release's resolved Sand fields.
+		// buildModel must overwrite/clear them from the current KDL result rather
+		// than treating a cached value as authoritative forever.
+		const gemini = buildModel({
+			id: "gemini-3-flash",
+			name: "gemini-3-flash",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+			sandEmptyToolsRetryWire: "native",
+			sandToolsWire: "error",
+			sandAcceptEmptyWriteFollowup: undefined,
+		});
+		expect(gemini.sandEmptyToolsRetryWire).toBe("keep-model");
+		expect(gemini.sandToolsWire).toBeUndefined();
+		expect(gemini.sandAcceptEmptyWriteFollowup).toBe(true);
+		const grok = buildModel({
+			id: "grok-4.6",
+			name: "grok-4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+			sandEmptyToolsRetryWire: "keep-model",
+			sandAcceptEmptyWriteFollowup: true,
+		});
+		expect(grok.sandEmptyToolsRetryWire).toBeUndefined();
+		expect(grok.sandAcceptEmptyWriteFollowup).toBeUndefined();
+	});
+
 	it("excludes grokbot from gen:models catalog discovery like other credential-scoped providers", () => {
 		// A renewer in the generator environment must not bake AvailableModels into models.json,
 		// and prior private roster rows must not resurrect from the previous snapshot.

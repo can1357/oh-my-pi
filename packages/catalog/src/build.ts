@@ -69,53 +69,65 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 		model.contextPromotionTarget = contextPromotionTarget;
 	}
 	const sandParameterIds = catalog.sandParameterIds;
+	// Live AvailableModels owns parameter ids when present; only fill from KDL when absent.
 	if (Array.isArray(sandParameterIds) && model.sandParameterIds === undefined) {
 		model.sandParameterIds = sandParameterIds.filter((entry): entry is string => typeof entry === "string");
 	}
+	// KDL-owned Sand policy must always win over stale cached values so a
+	// rebuilt row after a rule change does not keep a removed retry/wire policy.
 	const sandToolsWire = catalog.sandToolsWire;
 	if (
-		(sandToolsWire === "parent-chat" ||
-			sandToolsWire === "automation" ||
-			sandToolsWire === "keep-model" ||
-			sandToolsWire === "error" ||
-			sandToolsWire === "native" ||
-			sandToolsWire === "sand-default-fallback") &&
-		model.sandToolsWire === undefined
+		sandToolsWire === "parent-chat" ||
+		sandToolsWire === "automation" ||
+		sandToolsWire === "keep-model" ||
+		sandToolsWire === "error" ||
+		sandToolsWire === "native" ||
+		sandToolsWire === "sand-default-fallback"
 	) {
 		model.sandToolsWire = sandToolsWire;
+	} else {
+		delete model.sandToolsWire;
 	}
 	const sandEmptyToolsRetryWire = catalog.sandEmptyToolsRetryWire;
 	if (
-		(sandEmptyToolsRetryWire === "parent-chat" ||
-			sandEmptyToolsRetryWire === "automation" ||
-			sandEmptyToolsRetryWire === "keep-model" ||
-			sandEmptyToolsRetryWire === "error" ||
-			sandEmptyToolsRetryWire === "native" ||
-			sandEmptyToolsRetryWire === "sand-default-fallback") &&
-		model.sandEmptyToolsRetryWire === undefined
+		sandEmptyToolsRetryWire === "parent-chat" ||
+		sandEmptyToolsRetryWire === "automation" ||
+		sandEmptyToolsRetryWire === "keep-model" ||
+		sandEmptyToolsRetryWire === "error" ||
+		sandEmptyToolsRetryWire === "native" ||
+		sandEmptyToolsRetryWire === "sand-default-fallback"
 	) {
 		model.sandEmptyToolsRetryWire = sandEmptyToolsRetryWire;
+	} else {
+		delete model.sandEmptyToolsRetryWire;
 	}
 	const sandWireModelId = catalog.sandWireModelId;
-	if (typeof sandWireModelId === "string" && sandWireModelId.trim() && model.sandWireModelId === undefined) {
+	if (typeof sandWireModelId === "string" && sandWireModelId.trim()) {
 		model.sandWireModelId = sandWireModelId.trim();
+	} else {
+		delete model.sandWireModelId;
 	}
 	const sandWireModelIdWhen = catalog.sandWireModelIdWhen;
-	if (sandWireModelIdWhen === "tools" && model.sandWireModelIdWhen === undefined) {
+	if (sandWireModelIdWhen === "tools") {
 		model.sandWireModelIdWhen = "tools";
+	} else {
+		delete model.sandWireModelIdWhen;
 	}
-	if (catalog.sandPromoteJsonTextTools === true && model.sandPromoteJsonTextTools === undefined) {
+	if (catalog.sandPromoteJsonTextTools === true) {
 		model.sandPromoteJsonTextTools = true;
+	} else {
+		delete model.sandPromoteJsonTextTools;
 	}
-	if (catalog.sandAcceptEmptyWriteFollowup === true && model.sandAcceptEmptyWriteFollowup === undefined) {
+	if (catalog.sandAcceptEmptyWriteFollowup === true) {
 		model.sandAcceptEmptyWriteFollowup = true;
+	} else {
+		delete model.sandAcceptEmptyWriteFollowup;
 	}
 	const sandNativeToolSchema = catalog.sandNativeToolSchema;
-	if (
-		(sandNativeToolSchema === "google" || sandNativeToolSchema === "strict") &&
-		model.sandNativeToolSchema === undefined
-	) {
+	if (sandNativeToolSchema === "google" || sandNativeToolSchema === "strict") {
 		model.sandNativeToolSchema = sandNativeToolSchema;
+	} else {
+		delete model.sandNativeToolSchema;
 	}
 }
 

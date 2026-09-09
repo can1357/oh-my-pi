@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Grok Bot JSON-as-text promotion keeps ordinary prose/thinking blocks on the final message and only drops the blocks that produced promoted tool calls.
 - Grok Bot empty/incomplete tool retries merge abandoned-attempt usage into error responses when the replay fails.
 - Grok Bot JSON-as-text promotion buffers later promotable text/thinking blocks even after earlier prose went live, so raw tool dumps are not published before end-of-stream promotion.
 - Grok Bot catalog keep-model on non-Anthropic retries keeps advertised `context` (and other non-retry) parameters while still stripping effort/reasoning/thinking/fast.
