@@ -3,6 +3,7 @@ use std::{
 	path::{Component, Path, PathBuf},
 };
 
+use omp_core::encoding::hex;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -63,7 +64,7 @@ fn load_entry(category: &str, entry: FixtureEntry) -> Fixture {
 	assert_safe_relative_path(&entry.path);
 	let path = corpus_root().join(category).join(&entry.path);
 	let bytes = fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-	let actual = format!("{:x}", Sha256::digest(&bytes));
+	let actual = hex::encode(Sha256::digest(&bytes).as_slice()).into_string();
 	assert_eq!(actual, entry.sha256, "fixture digest drift for {}", entry.id);
 	Fixture { entry, bytes }
 }

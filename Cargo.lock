@@ -321,7 +321,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7af50940b73bf4e16c15c448a2b121c63f2d68e3e54b6a8731673cb4aa0cdff5"
 dependencies = [
  "base64ct",
- "blake2 0.11.0-rc.6",
+ "blake2 0.11.0",
  "cpufeatures 0.3.1",
  "password-hash",
 ]
@@ -908,9 +908,9 @@ dependencies = [
 
 [[package]]
 name = "blake2"
-version = "0.11.0-rc.6"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "061f1a09225e328e1ffbb378d2d49923c0ca5fee19fb5ac1cc9c1e9d52b93690"
+checksum = "5b5d4d889834ee8ecfc0f8426ad30faf7cdcb10f741a8e6d7224d95325479f6f"
 dependencies = [
  "digest 0.11.3",
 ]
@@ -5937,15 +5937,6 @@ dependencies = [
 
 [[package]]
 name = "keccak"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb26cec98cce3a3d96cbb7bced3c4b16e3d13f27ec56dbd62cbc8f39cfb9d653"
-dependencies = [
- "cpufeatures 0.2.17",
-]
-
-[[package]]
-name = "keccak"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8f198d1db720e4940b5a493201d199d9f24f568f8f746bd13706243a2f71598"
@@ -6311,7 +6302,7 @@ dependencies = [
  "itoa",
  "jiff",
  "log",
- "md-5",
+ "md-5 0.10.6",
  "nom 8.0.0",
  "rand 0.10.2",
  "rangemap",
@@ -6438,6 +6429,16 @@ checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
 dependencies = [
  "cfg-if",
  "digest 0.10.7",
+]
+
+[[package]]
+name = "md-5"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+dependencies = [
+ "cfg-if",
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -7652,7 +7653,7 @@ dependencies = [
  "security-framework",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "smallvec 2.0.0-alpha.13",
  "strum",
  "tempfile",
@@ -7691,7 +7692,7 @@ dependencies = [
  "insta",
  "jiff",
  "libc",
- "md-5",
+ "md-5 0.11.0",
  "miette",
  "nix 0.31.3",
  "objc2 0.6.4",
@@ -7740,7 +7741,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "smallvec 2.0.0-alpha.13",
  "strum",
  "tempfile",
@@ -7768,7 +7769,7 @@ dependencies = [
  "flate2",
  "omp-core",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "smallvec 2.0.0-alpha.13",
  "strum",
  "tempfile",
@@ -7881,7 +7882,7 @@ dependencies = [
  "rand 0.10.2",
  "rusqlite",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "strum",
  "tempfile",
  "thiserror 2.0.20",
@@ -7902,7 +7903,7 @@ dependencies = [
  "postcard",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "smallvec 2.0.0-alpha.13",
  "strum",
  "thiserror 2.0.20",
@@ -8010,7 +8011,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "smallvec 2.0.0-alpha.13",
  "smol_bitmap",
  "strum",
@@ -8336,7 +8337,7 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "strum",
  "tempfile",
  "thiserror 2.0.20",
@@ -8446,7 +8447,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
@@ -8598,14 +8599,14 @@ dependencies = [
 name = "omp-secrets"
 version = "0.1.0"
 dependencies = [
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "omp-cache",
  "omp-core",
  "parking_lot",
  "pretty_assertions",
  "regex",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "strum",
  "tempfile",
  "thiserror 2.0.20",
@@ -8699,7 +8700,7 @@ version = "0.1.0"
 dependencies = [
  "argmax",
  "bigdecimal",
- "blake2 0.10.6",
+ "blake2 0.11.0",
  "blake3",
  "bstr",
  "bytecount",
@@ -8708,7 +8709,7 @@ dependencies = [
  "clap",
  "codesnake",
  "crc32fast",
- "digest 0.10.7",
+ "digest 0.11.3",
  "fancy-regex 0.17.0",
  "flume",
  "futures",
@@ -8729,7 +8730,7 @@ dependencies = [
  "jiff",
  "libc",
  "lscolors",
- "md-5",
+ "md-5 0.11.0",
  "memchr",
  "memmap2",
  "nix 0.31.3",
@@ -8749,9 +8750,9 @@ dependencies = [
  "rustix 1.1.4",
  "self_cell",
  "serde_json",
- "sha1 0.10.7",
- "sha2 0.10.9",
- "sha3 0.10.9",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
+ "sha3 0.12.0",
  "similar 3.2.0",
  "smallvec 2.0.0-alpha.13",
  "strum",
@@ -11050,7 +11051,7 @@ dependencies = [
  "hmac 0.13.0",
  "inout 0.2.2",
  "internal-russh-num-bigint",
- "keccak 0.2.2",
+ "keccak",
  "log",
  "md5",
  "ml-kem",
@@ -11715,7 +11716,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
- "sha2-asm",
 ]
 
 [[package]]
@@ -11730,32 +11730,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "sha2-asm"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
-dependencies = [
- "cc",
-]
-
-[[package]]
-name = "sha3"
-version = "0.10.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77fd7028345d415a4034cf8777cd4f8ab1851274233b45f84e3d955502d93874"
-dependencies = [
- "digest 0.10.7",
- "keccak 0.1.6",
-]
-
-[[package]]
 name = "sha3"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be176f1a57ce4e3d31c1a166222d9768de5954f811601fb7ca06fc8203905ce1"
 dependencies = [
  "digest 0.11.3",
- "keccak 0.2.2",
+ "keccak",
 ]
 
 [[package]]
@@ -11765,7 +11746,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc9bad02c26382724b2d2692c6f179285e4b54eeecd7968f52a50059c3c11759"
 dependencies = [
  "digest 0.11.3",
- "keccak 0.2.2",
+ "keccak",
  "sponge-cursor",
 ]
 
@@ -12241,7 +12222,7 @@ dependencies = [
  "base64 0.22.1",
  "crc",
  "lazy_static",
- "md-5",
+ "md-5 0.10.6",
  "rand 0.9.5",
  "ring",
  "subtle",
@@ -13619,7 +13600,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "log",
- "md-5",
+ "md-5 0.10.6",
  "portable-atomic",
  "rand 0.9.5",
  "ring",

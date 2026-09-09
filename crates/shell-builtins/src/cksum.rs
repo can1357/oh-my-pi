@@ -25,7 +25,7 @@ use crate::{
 			AlgoKind, BlakeLength, ChecksumError, DigestOutput, ReadingMode, SUPPORTED_ALGORITHMS,
 			ShaLength, SizedAlgoKind, digest_reader, escape_filename, os_str_from_bytes,
 			parse_blake_length, read_os_string_lines,
-			sum::{self, Blake2b, Blake3},
+			sum::{Blake2b, Blake3},
 			unescape_filename,
 		},
 		line_ending::LineEnding,
@@ -494,14 +494,6 @@ fn sanitize_cksum_length(
 					Err(failure(ChecksumError::InvalidLengthForSha(algo.to_uppercase().into())))
 				},
 			}
-		},
-
-		// SHAKE128 and SHAKE256 algorithms optionally take a bit length. No
-		// validation is performed on this length, any value is valid.
-		(Some(AlgoKind::Shake128 | AlgoKind::Shake256), Some(len)) => match len.parse::<usize>() {
-			Ok(0) => Ok(None),
-			Ok(parsed) => Ok(Some(parsed)),
-			Err(_) => Err(failure(ChecksumError::InvalidLength(len.into()))),
 		},
 
 		// For BLAKE, if a length is provided, validate it.
@@ -1539,7 +1531,6 @@ fn identify_algo_name_and_length(
 				}
 			},
 			ak::Sha2 | ak::Sha3 if [224, 256, 384, 512].contains(&bitlen) => Some(bitlen),
-			ak::Shake128 | ak::Shake256 => Some(bitlen),
 			// Either
 			//  the algo based line is provided with a bit length with an
 			//  algorithm that does not support it (only Blake2b, Blake3, sha2,
@@ -1637,9 +1628,6 @@ fn process_algo_based_line(
 	// checksum with it.
 	let digest_bit_length_hint = match (algo_kind, algo_len) {
 		(AlgoKind::Blake2b | AlgoKind::Blake3, Some(byte_len)) => Some(byte_len * 8),
-		(AlgoKind::Shake128 | AlgoKind::Shake256, Some(bit_len)) => Some(bit_len),
-		(AlgoKind::Shake128, None) => Some(sum::Shake128::DEFAULT_BIT_SIZE),
-		(AlgoKind::Shake256, None) => Some(sum::Shake256::DEFAULT_BIT_SIZE),
 		_ => None,
 	};
 

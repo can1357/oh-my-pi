@@ -27,7 +27,7 @@ ashpd = { version = "=0.11.1", default-features = false, features = ["tokio"] }
 atspi = { version = "=0.30.0", features = ["tokio", "zbus"] }
 audiopus_sys = { version = "0.2.2", features = ["static"] }
 bigdecimal = "0.4"
-blake2 = "0.10"
+blake2 = "0.11"
 blake3 = { version = "1.8" }
 brotli = { version = "8", default-features = false, features = ["std"] }
 block2 = "0.6.2"
@@ -50,7 +50,7 @@ codesnake = "0.2"
 command-fds = "0.3"
 core-graphics = { version = "0.25", features = ["highsierra"] }
 crc32fast = "1.5"
-digest = "0.10"
+digest = "0.11"
 dashmap = "6"
 dispatch2 = "0.3"
 encoding_rs = "0.8"
@@ -76,7 +76,7 @@ grep-regex = "0.1"
 grep-searcher = "0.1"
 hayro = "0.7.1"
 heapless = { version = "0.9.3", features = ["serde"] }
-hmac = "0.12"
+hmac = "0.13"
 hifijson = "0.2"
 html-to-markdown-rs = { version = "3.9.2", default-features = false }
 http = "1.5"
@@ -102,7 +102,7 @@ libc = "0.2"
 linkme = "0.3"
 lscolors = { version = "0.21", default-features = false, features = ["gnu_legacy"] }
 memchr = "2"
-md-5 = "0.10"
+md-5 = "0.11"
 miette = { version = "7.6.0", features = ["fancy"] }
 memmap2 = "0.9"
 mermaid-text = "0.57"
@@ -213,9 +213,9 @@ serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.151", features = ["preserve_order", "raw_value"] }
 serde_yaml = "0.9"
 seccompiler = "0.5"
-sha1 = "0.10"
-sha2 = { version = "0.10", features = ["asm"] }
-sha3 = { version = "0.10", features = ["asm"] }
+sha1 = "0.11"
+sha2 = "0.11"
+sha3 = "0.12"
 similar = "3"
 smallvec = { version = "2.0.0-alpha.12", features = ["serde"] }
 smol_bitmap = { version = "0.3.2", features = ["serde"] }

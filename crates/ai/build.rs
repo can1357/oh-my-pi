@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeSet, env, fs, path::Path};
 
+use omp_core::encoding::hex;
 use prost::Message as _;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
@@ -14,7 +15,7 @@ fn main() {
 	let schema = manifest.join("../../fixtures/llm-oracle/vendor-schemas/cursor/agent.proto");
 	println!("cargo::rerun-if-changed={}", schema.display());
 	let source = fs::read(&schema).expect("checked-in Cursor agent.proto is missing");
-	let actual = format!("{:x}", Sha256::digest(&source));
+	let actual = hex::encode(Sha256::digest(&source).as_slice()).into_string();
 	assert_eq!(
 		actual, CURSOR_SCHEMA_SHA256,
 		"Cursor agent.proto drifted from its verified b6e01c8a3c source; update provenance and the \
@@ -122,7 +123,7 @@ fn compile_devin(manifest_dir: &Path) {
 		let path = vendor.join(&fixture.path);
 		println!("cargo::rerun-if-changed={}", path.display());
 		let source = fs::read(&path).expect("verified Devin schema file is missing");
-		let actual = format!("{:x}", Sha256::digest(&source));
+		let actual = hex::encode(Sha256::digest(&source).as_slice()).into_string();
 		assert_eq!(
 			actual, fixture.sha256,
 			"Devin schema drifted from its verified source: {}",

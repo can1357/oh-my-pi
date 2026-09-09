@@ -76,11 +76,6 @@ xutf.workspace = true
 notify.workspace = true
 rustix.workspace = true
 
-[target.'cfg(target_arch = "aarch64")'.dependencies]
-# Enable runtime-dispatched ARMv8 SHA instructions in checksum builtins.
-sha2.workspace = true
-sha3.workspace = true
-
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 nix.workspace = true

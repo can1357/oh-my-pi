@@ -7,7 +7,10 @@ use std::{
 	iter, str,
 };
 
-use digest::{ExtendableOutput, Update, VariableOutput};
+use digest::{
+	Output,
+	block_api::{Buffer, UpdateCore, VariableOutputCore},
+};
 use omp_core::encoding::{base64, hex};
 use strum::{EnumProperty, EnumString, IntoStaticStr};
 use thiserror::Error;
@@ -90,14 +93,16 @@ pub(crate) mod sum {
 	}
 
 	pub(super) struct Blake2bDigest {
-		state: blake2::Blake2bVar,
-		bytes: usize,
+		state:  blake2::Blake2bVarCore,
+		buffer: Buffer<blake2::Blake2bVarCore>,
+		bytes:  usize,
 	}
 
 	impl Blake2bDigest {
 		pub(super) fn new(bytes: usize) -> Self {
 			Self {
-				state: blake2::Blake2bVar::new(bytes).expect("validated BLAKE2b output length"),
+				state: blake2::Blake2bVarCore::new(bytes).expect("validated BLAKE2b output length"),
+				buffer: Buffer::<blake2::Blake2bVarCore>::default(),
 				bytes,
 			}
 		}
@@ -109,17 +114,20 @@ pub(crate) mod sum {
 		}
 
 		fn update(&mut self, input: &[u8]) {
-			Update::update(&mut self.state, input);
+			let Self { state, buffer, .. } = self;
+			buffer.digest_blocks(input, |blocks| state.update_blocks(blocks));
 		}
 
 		fn result(&mut self) -> DigestOutput {
-			let mut output = vec![0; self.bytes];
-			self
-				.state
-				.clone()
-				.finalize_variable(&mut output)
-				.expect("output has the configured length");
-			DigestOutput::Vec(output)
+			// digest 0.11 dropped its runtime-output wrapper, so the removed
+			// `RtVariableCoreWrapper` buffering logic is inlined here on the
+			// `Blake2bVarCore` path; finalize on clones to stay reusable.
+			let mut state = self.state.clone();
+			let mut buffer = self.buffer.clone();
+			let mut full = Output::<blake2::Blake2bVarCore>::default();
+			state.finalize_variable_core(&mut buffer, &mut full);
+			// BLAKE2b truncates from the left (`TruncSide::Left`).
+			DigestOutput::Vec(full[..self.bytes].to_vec())
 		}
 	}
 
@@ -166,88 +174,6 @@ pub(crate) mod sum {
 	impl Blake3 {
 		/// Default BLAKE3 output size in bytes.
 		pub(crate) const DEFAULT_BYTE_SIZE: usize = 32;
-	}
-
-	pub(super) struct Shake128Digest {
-		state: sha3::Shake128,
-		bits:  usize,
-	}
-
-	impl Shake128Digest {
-		pub(super) fn new(bits: usize) -> Self {
-			Self { state: sha3::Shake128::default(), bits }
-		}
-	}
-
-	impl Digest for Shake128Digest {
-		fn reset(&mut self) {
-			*self = Self::new(self.bits);
-		}
-
-		fn update(&mut self, input: &[u8]) {
-			Update::update(&mut self.state, input);
-		}
-
-		fn result(&mut self) -> DigestOutput {
-			let mut output = vec![0; self.bits.div_ceil(8)];
-			digest::XofReader::read(&mut self.state.clone().finalize_xof(), &mut output);
-			if !self.bits.is_multiple_of(8) {
-				let keep = self.bits % 8;
-				if let Some(last) = output.last_mut() {
-					*last &= (1 << keep) - 1;
-				}
-			}
-			DigestOutput::Vec(output)
-		}
-	}
-
-	pub(super) struct Shake256Digest {
-		state: sha3::Shake256,
-		bits:  usize,
-	}
-
-	impl Shake256Digest {
-		pub(super) fn new(bits: usize) -> Self {
-			Self { state: sha3::Shake256::default(), bits }
-		}
-	}
-
-	impl Digest for Shake256Digest {
-		fn reset(&mut self) {
-			*self = Self::new(self.bits);
-		}
-
-		fn update(&mut self, input: &[u8]) {
-			Update::update(&mut self.state, input);
-		}
-
-		fn result(&mut self) -> DigestOutput {
-			let mut output = vec![0; self.bits.div_ceil(8)];
-			digest::XofReader::read(&mut self.state.clone().finalize_xof(), &mut output);
-			if !self.bits.is_multiple_of(8) {
-				let keep = self.bits % 8;
-				if let Some(last) = output.last_mut() {
-					*last &= (1 << keep) - 1;
-				}
-			}
-			DigestOutput::Vec(output)
-		}
-	}
-
-	/// SHAKE128 defaults used by checksum-line validation.
-	pub(crate) struct Shake128;
-
-	impl Shake128 {
-		/// Default SHAKE128 output size in bits.
-		pub(crate) const DEFAULT_BIT_SIZE: usize = 256;
-	}
-
-	/// SHAKE256 defaults used by checksum-line validation.
-	pub(crate) struct Shake256;
-
-	impl Shake256 {
-		/// Default SHAKE256 output size in bits.
-		pub(crate) const DEFAULT_BIT_SIZE: usize = 512;
 	}
 
 	#[derive(Default)]
@@ -353,9 +279,9 @@ use std::num;
 pub(crate) use sum::DigestOutput;
 
 /// Algorithms accepted by `cksum --algorithm`.
-pub(crate) const SUPPORTED_ALGORITHMS: [&str; 16] = [
+pub(crate) const SUPPORTED_ALGORITHMS: [&str; 14] = [
 	"sysv", "bsd", "crc", "crc32b", "md5", "sha1", "sha2", "sha3", "blake2b", "sha224", "sha256",
-	"sha384", "sha512", "blake3", "shake128", "shake256",
+	"sha384", "sha512", "blake3",
 ];
 
 /// An algorithm name before its output length has been resolved.
@@ -387,10 +313,6 @@ pub(crate) enum AlgoKind {
 	Sha384,
 	#[strum(to_string = "sha512", serialize = "sha512sum", props(Upper = "SHA512"))]
 	Sha512,
-	#[strum(serialize = "shake128", props(Upper = "SHAKE128"))]
-	Shake128,
-	#[strum(serialize = "shake256", props(Upper = "SHAKE256"))]
-	Shake256,
 	#[strum(serialize = "blake3", props(Upper = "BLAKE3"))]
 	Blake3,
 }
@@ -495,8 +417,6 @@ pub(crate) enum SizedAlgoKind {
 	Sha3(ShaLength),
 	Blake2b(usize),
 	Blake3(usize),
-	Shake128(Option<usize>),
-	Shake256(Option<usize>),
 }
 
 impl SizedAlgoKind {
@@ -529,8 +449,6 @@ impl SizedAlgoKind {
 			(A::Sha1, _) => Self::Sha1,
 			(A::Blake2b, value) => Self::Blake2b(value.unwrap_or(sum::Blake2b::DEFAULT_BYTE_SIZE)),
 			(A::Blake3, value) => Self::Blake3(value.unwrap_or(sum::Blake3::DEFAULT_BYTE_SIZE)),
-			(A::Shake128, value) => Self::Shake128(value),
-			(A::Shake256, value) => Self::Shake256(value),
 			(A::Sha2, Some(value)) => Self::Sha2(value.try_into()?),
 			(A::Sha3, Some(value)) => Self::Sha3(value.try_into()?),
 			(algo @ (A::Sha2 | A::Sha3), None) => {
@@ -564,12 +482,6 @@ impl SizedAlgoKind {
 			Self::Sha3(L::Len512) => Box::new(sum::Fixed::<sha3::Sha3_512>::default()),
 			Self::Blake2b(bytes) => Box::new(sum::Blake2bDigest::new(bytes)),
 			Self::Blake3(bytes) => Box::new(sum::Blake3Digest::new(bytes)),
-			Self::Shake128(bits) => {
-				Box::new(sum::Shake128Digest::new(bits.unwrap_or(sum::Shake128::DEFAULT_BIT_SIZE)))
-			},
-			Self::Shake256(bits) => {
-				Box::new(sum::Shake256Digest::new(bits.unwrap_or(sum::Shake256::DEFAULT_BIT_SIZE)))
-			},
 		}
 	}
 
@@ -585,8 +497,6 @@ impl SizedAlgoKind {
 			Self::Sha1 => 160,
 			Self::Sha2(length) | Self::Sha3(length) => length.as_usize(),
 			Self::Blake2b(bytes) | Self::Blake3(bytes) => bytes * 8,
-			Self::Shake128(bits) => bits.unwrap_or(sum::Shake128::DEFAULT_BIT_SIZE),
-			Self::Shake256(bits) => bits.unwrap_or(sum::Shake256::DEFAULT_BIT_SIZE),
 		}
 	}
 
@@ -605,12 +515,6 @@ impl SizedAlgoKind {
 			Self::Blake2b(64) => "BLAKE2b".into(),
 			Self::Blake2b(bytes) => format!("BLAKE2b-{}", bytes * 8),
 			Self::Blake3(bytes) => format!("BLAKE3-{}", bytes * 8),
-			Self::Shake128(bits) => {
-				format!("SHAKE128-{}", bits.unwrap_or(sum::Shake128::DEFAULT_BIT_SIZE))
-			},
-			Self::Shake256(bits) => {
-				format!("SHAKE256-{}", bits.unwrap_or(sum::Shake256::DEFAULT_BIT_SIZE))
-			},
 			_ => panic!("legacy algorithms do not have tagged names"),
 		}
 	}
@@ -893,16 +797,6 @@ mod tests {
 			"af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
 			"6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85",
 			"b7d65b48420d1033cb2595293263b6f72eabee20d55e699d0df1973b3c9deed1",
-		]);
-		assert_hex_vectors(SizedAlgoKind::Shake128(Some(128)), [
-			"7f9c2ba4e88f827d616045507605853e",
-			"5881092dd818bf5cf8a3ddb793fbcba7",
-			"1aca6b9e651b5f20079a305ca8f86d39",
-		]);
-		assert_hex_vectors(SizedAlgoKind::Shake256(Some(256)), [
-			"46b9dd2b0ba88d13233b3feb743eeb243fcd52ea62b81b82b50c27646ed5762f",
-			"483366601360a8771c6863080cc4114d8db44530f8f1e1ee4f94ea37e78b5739",
-			"24347b9c4b6da2fc9cde08c87f33edd2e603c8dcd6840e6b3920f62b1dd69d7b",
 		]);
 		assert_eq!(hex(SizedAlgoKind::Blake2b(64), b"abc"), "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923");
 		assert_eq!(

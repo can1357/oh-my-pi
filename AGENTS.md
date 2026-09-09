@@ -97,8 +97,9 @@ wrap.
 
 Hashing: two primitives, both in `omp-core` — benchmarked on Apple Silicon,
 don't relitigate. Content/crypto digests → `omp_core::Hash32` (SHA-256 via
-`sha2`, hardware `asm` on aarch64; beat blake3 3.3× at 32 B, single-stream at
-every size). Discretionary in-memory maps/cache keys/dirty-check fingerprints
+`sha2` 0.11+ is pure-Rust and portable; the Apple-Silicon figures "beat blake3
+3.3× at 32 B, single-stream at every size" are historic, measured on the old
+`asm` build). Discretionary in-memory maps/cache keys/dirty-check fingerprints
 → `omp_core::{FastHashMap, FastHashSet, FastState, fast_hash64}` (foldhash;
 beat fxhash/ahash/xxh3/SipHash on ints, short keys, and buffers). NEVER add
 hasher crates (`blake3`, `xxhash-*`, `rustc-hash`, `ahash`, `fnv`,
