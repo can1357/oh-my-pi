@@ -27,6 +27,7 @@ function capture(options: {
 	cursorClientSupportsPromptContextUsageRpc?: boolean;
 	cursorRunId?: string;
 	cursorAgentSessionId?: string;
+	conversationId?: string;
 }): Promise<AgentRunRequest> {
 	const { promise, resolve, reject } = Promise.withResolvers<AgentRunRequest>();
 	streamCursor(cursorModel(), { messages: [{ role: "user", content: "pong", timestamp: 0 }] } satisfies Context, {
@@ -68,8 +69,21 @@ describe("Cursor AgentRunRequest option wiring", () => {
 			clientSupportsInlineImages: false,
 			clientSupportsRoutedModelUpdate: false,
 			clientSupportsPromptContextUsageRpc: false,
-			runId: "",
 			agentSessionId: "",
 		});
+	});
+
+	it("mints a fresh run id per request when cursorRunId is unset", async () => {
+		const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+		const first = await capture({});
+		const second = await capture({});
+		expect(first.runId).toMatch(uuidPattern);
+		expect(second.runId).toMatch(uuidPattern);
+		expect(second.runId).not.toBe(first.runId);
+	});
+
+	it("defaults conversationGroupId to the request conversation", async () => {
+		const payload = await capture({ conversationId: "conv-group-check" });
+		expect(payload.conversationGroupId).toBe("conv-group-check");
 	});
 });

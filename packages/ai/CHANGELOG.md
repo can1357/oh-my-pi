@@ -3,6 +3,7 @@
 ### Fixed
 
 - Restored Cursor capability/session option wiring (`cursorClientSupportsInlineImages`, `cursorClientSupportsRoutedModelUpdate`, `cursorClientSupportsPromptContextUsageRpc`, `cursorRunId`, `cursorAgentSessionId`) onto `AgentRunRequest`.
+- Cursor mints a fresh `runId` per request (linked to `x-request-id`, like the CLI) and defaults `conversationGroupId` to the conversation instead of sending empty ids.
 - Cursor auto mode echoes a roster-resolved `requestModelId` of `auto` verbatim on `requestedModel`/`modelDetails` (matching the CLI); the synthetic catalog id without roster proof keeps the `default` wire contract.
 - Cursor user messages default to `AgentMode.AGENT` (1) like the CLI instead of serializing `UNSPECIFIED` (0).
 - Forward OpenRouter Responses `previous_response_id` / `parallel_tool_calls` and Chat Completions `parallel_tool_calls` through the API mapper.
