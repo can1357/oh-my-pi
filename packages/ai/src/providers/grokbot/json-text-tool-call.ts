@@ -7,7 +7,7 @@
  * `type: "toolCall"` blocks — so a text dump is a failed tool turn.
  */
 import { GeminiInbandScanner } from "../../dialect/gemini";
-import { toOmpToolName, toSandField2Name } from "./product-wire";
+import { shouldClaimSandWireName, toOmpToolName, toSandField2Name } from "./product-wire";
 
 export type JsonTextToolCall = {
 	name: string;
@@ -98,10 +98,36 @@ function asArgsObject(value: unknown): Record<string, unknown> | undefined {
 	return undefined;
 }
 
+type OmpToolNameSource = {
+	name?: string;
+	customWireName?: string;
+};
+
+/** Prefer the omp tool that owns an advertised sand/wire name (same collision policy as product wire). */
+function preferredOmpOwnerForWireName(
+	wireName: string,
+	ompTools: ReadonlyArray<OmpToolNameSource> | undefined,
+): string | undefined {
+	if (!Array.isArray(ompTools) || ompTools.length === 0) return undefined;
+	let winner: string | undefined;
+	for (const tool of ompTools) {
+		const ompName = typeof tool?.name === "string" ? tool.name.trim() : "";
+		if (!ompName) continue;
+		const custom =
+			typeof tool.customWireName === "string" && tool.customWireName.trim() ? tool.customWireName.trim() : "";
+		const sand = custom || toSandField2Name(ompName);
+		if (sand !== wireName && ompName !== wireName) continue;
+		if (shouldClaimSandWireName(wireName, ompName, winner)) {
+			winner = ompName;
+		}
+	}
+	return winner;
+}
+
 /** Collect advertised field-2 names plus preferred omp aliases (bash↔Shell). */
 export function advertisedNamesForJsonTextToolCall(
 	wireTools: unknown,
-	ompTools?: Array<{ name?: string }> | readonly { name?: string }[] | undefined,
+	ompTools?: Array<OmpToolNameSource> | readonly OmpToolNameSource[] | undefined,
 ): Set<string> {
 	const names = new Set<string>();
 	let hasWire = false;
@@ -112,12 +138,19 @@ export function advertisedNamesForJsonTextToolCall(
 			if (typeof name !== "string" || !name.trim()) continue;
 			hasWire = true;
 			const trimmed = name.trim();
-			// Aliases come from tools that survived wire-name collision resolution
-			// (Write→write, not the dropped edit owner). Do not re-expand the full
-			// omp catalog — collision losers must not promote.
 			names.add(trimmed);
-			names.add(toOmpToolName(trimmed));
 			names.add(toSandField2Name(trimmed));
+			// Alias only the omp/custom owner that survived wire-name collision —
+			// not an unconditional PascalCase→preferred-omp map (that invents bash
+			// when an extension owns Shell via customWireName).
+			const owner = preferredOmpOwnerForWireName(trimmed, ompTools);
+			if (owner) {
+				names.add(owner);
+				names.add(toSandField2Name(owner));
+			} else if (!Array.isArray(ompTools) || ompTools.length === 0) {
+				// No omp catalog provided (tests / wire-only): keep built-in alias.
+				names.add(toOmpToolName(trimmed));
+			}
 		}
 	}
 	// Native / no field-2 rewrite: wire tools absent → alias from omp tools alone.

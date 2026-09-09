@@ -40,6 +40,7 @@ import {
 	expandRoleAlias,
 	formatModelSelectorValue,
 	getModelMatchPreferences,
+	parseModelString,
 	resolveCliModel,
 	resolveModelRoleValue,
 	resolveModelScope,
@@ -830,7 +831,10 @@ function notifyResumeCwdFallback(parsedArgs: Args, resumedProject: ResumedProjec
  */
 export async function resolveScopedModels(
 	parsed: Args,
-	modelRegistry: Pick<ModelRegistry, "getAvailable" | "getDiscoverableProviders" | "refresh">,
+	modelRegistry: Pick<
+		ModelRegistry,
+		"getAvailable" | "getDiscoverableProviders" | "refresh" | "refreshProvider" | "hasProvider"
+	>,
 	activeSettings: Settings,
 ): Promise<ScopedModel[]> {
 	const modelPatterns = parsed.models ?? activeSettings.get("enabledModels");
@@ -839,10 +843,24 @@ export async function resolveScopedModels(
 	}
 	const preferences = getModelMatchPreferences(activeSettings);
 	const scopedModels = await resolveModelScope(modelPatterns, modelRegistry, preferences, activeSettings);
-	if (scopedModels.length > 0 || modelRegistry.getDiscoverableProviders().length === 0) {
+	if (scopedModels.length > 0) {
 		return scopedModels;
 	}
-	await modelRegistry.refresh("online-if-uncached");
+	const discoverable = modelRegistry.getDiscoverableProviders();
+	const builtInProviders = credentialScopedProvidersFromPatterns(modelPatterns).filter(
+		providerId =>
+			modelRegistry.hasProvider(providerId) && providerSupportsCredentialScopedRefresh(providerId, modelRegistry),
+	);
+	if (discoverable.length === 0 && builtInProviders.length === 0) {
+		return scopedModels;
+	}
+	if (discoverable.length > 0) {
+		await modelRegistry.refresh("online-if-uncached");
+	} else {
+		for (const providerId of builtInProviders) {
+			await modelRegistry.refreshProvider(providerId, "online-if-uncached");
+		}
+	}
 	return await resolveModelScope(modelPatterns, modelRegistry, preferences, activeSettings);
 }
 
@@ -852,7 +870,8 @@ export async function resolveScopedModels(
  * profile, no credential-scoped cache), refresh that provider before
  * {@link buildSessionOptions} exits on miss. Credentials may come from
  * `--api-key`, env, secrets file, or `models.yml` — not specifically a CLI key.
- * `--models` scopes already refresh via {@link resolveScopedModels}.
+ * A single-provider `--models grokbot/<id>` scope is accepted the same way
+ * (no `parsed.model`); multi-provider / bare scopes stay unbound.
  *
  * Built-in descriptor providers (e.g. Grok Bot) are not listed by
  * {@link ModelRegistry.getDiscoverableProviders} — that API only covers
@@ -860,25 +879,27 @@ export async function resolveScopedModels(
  * accepts catalog entries with `createModelManagerOptions`.
  */
 export async function refreshCredentialScopedModelIfMissing(
-	parsed: Pick<Args, "model">,
+	parsed: Pick<Args, "model" | "models">,
 	modelRegistry: Pick<ModelRegistry, "getAvailable" | "hasProvider" | "refreshProvider" | "getDiscoverableProviders">,
 	providerId: string | undefined,
 ): Promise<boolean> {
-	if (!parsed.model || !providerId) return false;
+	if (!providerId) return false;
 	if (!modelRegistry.hasProvider(providerId)) return false;
 	if (!providerSupportsCredentialScopedRefresh(providerId, modelRegistry)) return false;
-	const raw = parsed.model.trim();
-	const withoutThinking = raw.includes(":") ? raw.slice(0, raw.indexOf(":")) : raw;
-	const slash = withoutThinking.indexOf("/");
-	const bare = slash >= 0 ? withoutThinking.slice(slash + 1) : withoutThinking;
-	const present = modelRegistry
-		.getAvailable()
-		.some(
+	const selectors = credentialScopedRefreshSelectors(parsed, providerId);
+	if (selectors.length === 0) return false;
+	const available = modelRegistry.getAvailable();
+	const allPresent = selectors.every(raw => {
+		const withoutThinking = raw.includes(":") ? raw.slice(0, raw.indexOf(":")) : raw;
+		const slash = withoutThinking.indexOf("/");
+		const bare = slash >= 0 ? withoutThinking.slice(slash + 1) : withoutThinking;
+		return available.some(
 			model =>
 				model.provider === providerId &&
 				(model.id === bare || model.id === withoutThinking || `${model.provider}/${model.id}` === withoutThinking),
 		);
-	if (present) return false;
+	});
+	if (allPresent) return false;
 	await modelRegistry.refreshProvider(providerId, "online-if-uncached");
 	return true;
 }
@@ -890,6 +911,41 @@ function providerSupportsCredentialScopedRefresh(
 ): boolean {
 	if (modelRegistry.getDiscoverableProviders().includes(providerId)) return true;
 	return Boolean(getCatalogProviderEntry(providerId)?.createModelManagerOptions);
+}
+
+/** `--model` or single-provider-qualified `--models` selectors for `providerId`. */
+function credentialScopedRefreshSelectors(parsed: Pick<Args, "model" | "models">, providerId: string): string[] {
+	if (parsed.model?.trim()) {
+		return [parsed.model.trim()];
+	}
+	const out: string[] = [];
+	const providers = new Set<string>();
+	for (const pattern of parsed.models ?? []) {
+		const trimmed = pattern.trim();
+		if (!trimmed) continue;
+		const parsedModel = parseModelString(trimmed);
+		if (!parsedModel?.provider) {
+			// Bare selector — ownership indeterminate (same as runtime api-key bind).
+			return [];
+		}
+		const normalized = parsedModel.provider.trim().toLowerCase();
+		providers.add(normalized);
+		if (normalized === providerId) out.push(trimmed);
+	}
+	if (providers.size !== 1) return [];
+	return out;
+}
+
+function credentialScopedProvidersFromPatterns(patterns: readonly string[]): string[] {
+	const providers = new Set<string>();
+	for (const pattern of patterns) {
+		const trimmed = pattern.trim();
+		if (!trimmed) continue;
+		const parsedModel = parseModelString(trimmed);
+		if (!parsedModel?.provider) continue;
+		providers.add(parsedModel.provider.trim().toLowerCase());
+	}
+	return [...providers];
 }
 
 /**

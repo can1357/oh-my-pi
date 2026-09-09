@@ -114,6 +114,16 @@ describe("parseJsonTextToolCall", () => {
 		expect(names.has("Read")).toBe(false);
 	});
 
+	test("advertisedNamesForJsonTextToolCall aliases the surviving custom Shell owner, not bash", () => {
+		const names = advertisedNamesForJsonTextToolCall(
+			[{ name: "Shell" }],
+			[{ name: "customThing", customWireName: "Shell" }],
+		);
+		expect(names.has("Shell")).toBe(true);
+		expect(names.has("customThing")).toBe(true);
+		expect(names.has("bash")).toBe(false);
+	});
+
 	test("advertisedNamesForJsonTextToolCall falls back to omp tools when wire tools absent", () => {
 		const names = advertisedNamesForJsonTextToolCall(undefined, [{ name: "bash" }, { name: "edit" }]);
 		expect(names.has("bash")).toBe(true);
