@@ -641,11 +641,12 @@ export class CollabHost {
 	async #handleFetchTranscript(reqId: number, agentId: string, fromByte: number, fromPeer: number): Promise<void> {
 		const reply = (text: string, newSize: number, error?: string) =>
 			this.#socket?.send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
-		const file = AgentRegistry.global().get(agentId)?.sessionFile;
-		if (!file) {
+		const ref = AgentRegistry.global().get(agentId);
+		if (!ref?.sessionFile || ref.kind === "advisor") {
 			reply("", fromByte, "no transcript available");
 			return;
 		}
+		const file = ref.sessionFile;
 		try {
 			const stat = await fs.stat(file);
 			if (stat.size <= fromByte) {
