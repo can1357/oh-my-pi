@@ -1861,6 +1861,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
+		// /vibe can be enabled while the gate was awaiting: the pre-gate guard
+		// above is stale, and handleClearCommand would only warn and then let
+		// the iteration submit without resetting.
+		if (action === "reset" && this.vibeModeEnabled) {
+			this.disableLoopMode("Exit vibe mode before using reset loops. Loop mode disabled.");
+			return;
+		}
+
 		if (!consumeLoopLimitIteration(this.loopLimit)) {
 			this.disableLoopMode("Loop limit reached. Loop mode disabled.");
 			return;

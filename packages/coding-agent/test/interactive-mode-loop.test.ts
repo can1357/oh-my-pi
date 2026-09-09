@@ -360,5 +360,33 @@ describe("InteractiveMode loop auto-submit", () => {
 			mode.setLoopPrompt("keep going");
 			expect(captured?.aborted).toBe(true);
 		});
+
+		// /vibe enabled while the gate is awaiting must kill a reset loop: the
+		// pre-gate guard is stale by then, and handleClearCommand would only
+		// warn while the iteration still submitted without resetting.
+		it("disables a reset loop when vibe is enabled while the condition is in flight", async () => {
+			vi.useFakeTimers();
+			settings.set("loop.mode", "reset");
+			idleSession();
+			const pending = Promise.withResolvers<LoopConditionVerdict>();
+			vi.spyOn(loopCondition, "evaluateLoopCondition").mockImplementation(async () => await pending.promise);
+			const clear = vi.spyOn(mode, "handleClearCommand");
+			const showStatus = vi.spyOn(mode, "showStatus");
+			mode.loopCondition = { command: "sleep 30", until: false };
+
+			const resolved = armLoop("reset me");
+			vi.advanceTimersByTime(800);
+			await flushMicrotasks();
+
+			mode.vibeModeEnabled = true;
+			pending.resolve({ kind: "continue" });
+			await flushMicrotasks();
+
+			expect(clear).not.toHaveBeenCalled();
+			expect(resolved).toHaveLength(0);
+			expect(mode.loopModeEnabled).toBe(false);
+			expect(mode.loopPrompt).toBeUndefined();
+			expect(showStatus).toHaveBeenCalledWith("Exit vibe mode before using reset loops. Loop mode disabled.");
+		});
 	});
 });
