@@ -354,25 +354,23 @@ fn plain_change(
 	peer_root: Option<&Path>,
 ) -> IsoResult<FileChange> {
 	let full = side.join(rel);
-	let primary = std::fs::read(&full)
-		.map_err(|err| IsoError::other(format!("read {}: {err}", full.display())))?;
-	if looks_binary(&primary) {
-		return Ok(FileChange { path: rel.to_path_buf(), op, diff: None });
-	}
+	let (primary_link, primary) = read_entry(&full)?;
+	let mut peer_link = false;
 	let (old_bytes, new_bytes) = match op {
 		ChangeKind::Added => (Vec::new(), primary),
 		ChangeKind::Removed => (primary, Vec::new()),
 		ChangeKind::Modified => {
 			let peer = peer_root.expect("modified change requires peer root");
 			let peer_full = peer.join(rel);
-			let peer_bytes = std::fs::read(&peer_full)
-				.map_err(|err| IsoError::other(format!("read {}: {err}", peer_full.display())))?;
-			if looks_binary(&peer_bytes) {
-				return Ok(FileChange { path: rel.to_path_buf(), op, diff: None });
-			}
+			let (pl, peer_bytes) = read_entry(&peer_full)?;
+			peer_link = pl;
 			(peer_bytes, primary)
 		},
 	};
+	let is_link = primary_link || (op == ChangeKind::Modified && peer_link);
+	if !is_link && (looks_binary(&old_bytes) || looks_binary(&new_bytes)) {
+		return Ok(FileChange { path: rel.to_path_buf(), op, diff: None });
+	}
 	let (Ok(old_text), Ok(new_text)) =
 		(std::str::from_utf8(&old_bytes), std::str::from_utf8(&new_bytes))
 	else {
@@ -381,11 +379,28 @@ fn plain_change(
 	Ok(FileChange {
 		path: rel.to_path_buf(),
 		op,
-		diff: Some(render_unified(rel, op, old_text, new_text)),
+		diff: Some(render_unified(rel, op, old_text, new_text, is_link)),
 	})
 }
 
-fn render_unified(rel: &Path, op: ChangeKind, old: &str, new: &str) -> String {
+/// Read one tree entry without following symlinks: regular files yield their
+/// contents, symlinks yield the link target so an out-of-tree target's data
+/// never lands in the patch (mirroring git's mode-120000 blob).
+fn read_entry(path: &Path) -> IsoResult<(bool, Vec<u8>)> {
+	if std::fs::symlink_metadata(path)
+		.map_err(|err| IsoError::other(format!("metadata {}: {err}", path.display())))?
+		.is_symlink()
+	{
+		let target = std::fs::read_link(path)
+			.map_err(|err| IsoError::other(format!("readlink {}: {err}", path.display())))?;
+		return Ok((true, target.to_string_lossy().into_owned().into_bytes()));
+	}
+	let bytes = std::fs::read(path)
+		.map_err(|err| IsoError::other(format!("read {}: {err}", path.display())))?;
+	Ok((false, bytes))
+}
+
+fn render_unified(rel: &Path, op: ChangeKind, old: &str, new: &str, is_link: bool) -> String {
 	let rel_str = rel.to_string_lossy();
 	let (from_label, to_label) = match op {
 		ChangeKind::Added => (String::from("/dev/null"), format!("b/{rel_str}")),
@@ -394,13 +409,12 @@ fn render_unified(rel: &Path, op: ChangeKind, old: &str, new: &str) -> String {
 	};
 	use std::fmt::Write as _;
 	let mut out = String::new();
-	let _ = writeln!(out, "diff --git a/{rel_str} b/{rel_str}");
 	match op {
 		ChangeKind::Added => {
-			let _ = writeln!(out, "new file mode 100644");
+			let _ = writeln!(out, "new file mode {}", if is_link { 120000 } else { 100644 });
 		},
 		ChangeKind::Removed => {
-			let _ = writeln!(out, "deleted file mode 100644");
+			let _ = writeln!(out, "deleted file mode {}", if is_link { 120000 } else { 100644 });
 		},
 		ChangeKind::Modified => {},
 	}

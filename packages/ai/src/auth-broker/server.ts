@@ -55,7 +55,7 @@ export interface AuthBrokerServerOptions {
 	storage: AuthStorage;
 	/** Listen address; accepts `host:port` or just `port`. */
 	bind?: string;
-	/** Accept any of these bearer tokens. Empty disables auth (loopback only). */
+	/** Accept any of these bearer tokens. An empty set only allows unauthenticated access on a loopback bind. */
 	bearerTokens: string[];
 	/** Broker version string surfaced on `/v1/healthz`. */
 	version?: string;
@@ -97,8 +97,15 @@ function empty(status: number, headers?: Record<string, string>): Response {
 	return new Response(null, { status, headers });
 }
 
-function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean {
-	if (tokens.size === 0) return true;
+/**
+ * Invariant: an empty token set never grants unauthenticated access on a
+ * non-loopback bind. `allowUnauthenticated` is true only when the caller
+ * explicitly opted in (empty token set) AND the server is bound to loopback,
+ * where no off-host peer can reach it anyway. Every other case requires a
+ * matching bearer token — fail closed.
+ */
+function isAuthorized(req: Request, tokens: ReadonlySet<string>, allowUnauthenticated: boolean): boolean {
+	if (allowUnauthenticated) return true;
 	const header = req.headers.get("authorization");
 	if (!header) return false;
 	const match = header.match(/^Bearer\s+(.+)$/i);
@@ -648,6 +655,16 @@ function serveSnapshotStream(
 export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServerHandle {
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_BROKER_BIND);
 	const tokens = new Set<string>(opts.bearerTokens);
+	// Empty token set = explicit unauthenticated opt-in, tolerated only on a
+	// loopback bind (see {@link isAuthorized}); any non-loopback bind always
+	// enforces bearer auth — fail closed.
+	// parseBind retains brackets on `[::1]`, and Bun may report either form.
+	const allowUnauthenticated =
+		tokens.size === 0 &&
+		(bind.hostname === "localhost" ||
+			bind.hostname === "127.0.0.1" ||
+			bind.hostname === "::1" ||
+			bind.hostname === "[::1]");
 	const version = opts.version;
 	const streamKeepaliveMs = opts.streamKeepaliveMs ?? DEFAULT_STREAM_KEEPALIVE_MS;
 	const externalChangePollMs = opts.externalChangePollMs ?? DEFAULT_EXTERNAL_CHANGE_POLL_MS;
@@ -676,7 +693,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					const body: HealthzResponse = { ok: true, version };
 					return json(200, body);
 				}
-				if (!isAuthorized(req, tokens)) {
+				if (!isAuthorized(req, tokens, allowUnauthenticated)) {
 					logger.info("auth-broker request unauthorized", { method: req.method, path: pathname, peer });
 					return json(401, { error: "unauthorized" });
 				}

@@ -6,6 +6,16 @@ const textEncoder = new TextEncoder();
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 let nextSessionId = 1;
+// Header values that must never reach the rr-session dump in plaintext
+// (same name-based approach as http-inspector.ts). Names are kept so the dump
+// still shows what was sent; values are replaced with a fixed marker.
+const SENSITIVE_DEBUG_HEADERS: Record<string, true> = {
+	authorization: true,
+	"proxy-authorization": true,
+	"x-api-key": true,
+	"api-key": true,
+	cookie: true,
+};
 
 type RequestBodyInit = NonNullable<RequestInit["body"]>;
 
@@ -62,7 +72,7 @@ export async function createRequestDebugSession(payload: RequestDebugPayload): P
 		url: payload.url,
 	};
 	const headers = headersToRecord(payload.headers);
-	if (headers) requestDump.headers = headers;
+	if (headers) requestDump.headers = redactSensitiveHeaders(headers);
 	if (payload.body !== undefined) requestDump.body = payload.body;
 	if (payload.bodyText !== undefined) requestDump.bodyText = payload.bodyText;
 	if (payload.bodyBase64 !== undefined) requestDump.bodyBase64 = payload.bodyBase64;
@@ -320,7 +330,18 @@ function headersToRecord(headers: RequestDebugHeaders): Record<string, string | 
 			record[key] = Array.isArray(value) ? value.map(String) : String(value);
 		}
 	}
+
 	return hasHeaders ? record : undefined;
+}
+
+/** Replace sensitive header values in a fresh {@link headersToRecord} record in place. */
+function redactSensitiveHeaders(record: Record<string, string | string[]>): Record<string, string | string[]> {
+	for (const name in record) {
+		if (SENSITIVE_DEBUG_HEADERS[name.toLowerCase()]) {
+			record[name] = "[redacted]";
+		}
+	}
+	return record;
 }
 
 function isFileExistsError(error: unknown): boolean {

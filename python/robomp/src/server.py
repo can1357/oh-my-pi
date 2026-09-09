@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -13,6 +14,7 @@ from typing import Any, Protocol
 from fastapi import Body, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from robomp import github_events, issue_index
 from robomp.autoclose import AutocloseScheduler
@@ -350,7 +352,14 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                 kill_timeout=cfg.shutdown_kill_timeout_seconds,
             )
 
+    cfg = settings or get_settings()
     app = FastAPI(title="robomp", version="0.1.0", lifespan=lifespan)
+    if cfg.trusted_hosts:
+        allowed_hosts = [h.strip() for h in cfg.trusted_hosts.split(",") if h.strip()]
+        if allowed_hosts:
+            # DNS-rebinding defense-in-depth; unset by default so token-less
+            # loopback dev and existing tests see zero behavior change.
+            app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -545,7 +554,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         cfg: Settings = bag["settings"]
         if cfg.replay_token is None:
             raise HTTPException(404, "replay disabled")
-        if x_robomp_token != cfg.replay_token.get_secret_value():
+        if not hmac.compare_digest((x_robomp_token or "").encode(), cfg.replay_token.get_secret_value().encode()):
             raise HTTPException(401, "invalid replay token")
         db: Database = bag["db"]
         row = db.get_event(delivery_id)
@@ -559,7 +568,17 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
     def _require_trigger_token(cfg: Settings, token: str | None) -> None:
         if cfg.replay_token is None:
             raise HTTPException(404, "trigger disabled (set ROBOMP_REPLAY_TOKEN to enable)")
-        if token != cfg.replay_token.get_secret_value():
+        if not hmac.compare_digest((token or "").encode(), cfg.replay_token.get_secret_value().encode()):
+            raise HTTPException(401, "invalid replay token")
+
+    def _require_read_token(cfg: Settings, token: str | None) -> None:
+        """Dashboard read endpoints. Without `ROBOMP_REPLAY_TOKEN` these stay
+        open (dev mode; the loopback bind is the mitigation); with a token
+        configured they are gated with the same constant-time compare as the
+        write endpoints."""
+        if cfg.replay_token is None:
+            return
+        if not hmac.compare_digest((token or "").encode(), cfg.replay_token.get_secret_value().encode()):
             raise HTTPException(401, "invalid replay token")
 
     @app.get("/api/github/issues")
@@ -743,7 +762,12 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         )
 
     @app.get("/events")
-    async def events(request: Request, limit: int = 50) -> dict[str, Any]:
+    async def events(
+        request: Request,
+        limit: int = 50,
+        x_robomp_token: str | None = Header(None, alias="X-Robomp-Replay-Token"),
+    ) -> dict[str, Any]:
+        _require_read_token(request.app.state.bag["settings"], x_robomp_token)
         rows = request.app.state.bag["db"].list_events(limit=limit)
         return {
             "events": [
@@ -762,7 +786,12 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         }
 
     @app.get("/issues")
-    async def issues(request: Request, limit: int = 100) -> dict[str, Any]:
+    async def issues(
+        request: Request,
+        limit: int = 100,
+        x_robomp_token: str | None = Header(None, alias="X-Robomp-Replay-Token"),
+    ) -> dict[str, Any]:
+        _require_read_token(request.app.state.bag["settings"], x_robomp_token)
         rows = request.app.state.bag["db"].list_issues(limit=limit)
         return {
             "issues": [
@@ -781,7 +810,12 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         }
 
     @app.get("/releases")
-    async def releases(request: Request, limit: int = 50) -> dict[str, Any]:
+    async def releases(
+        request: Request,
+        limit: int = 50,
+        x_robomp_token: str | None = Header(None, alias="X-Robomp-Replay-Token"),
+    ) -> dict[str, Any]:
+        _require_read_token(request.app.state.bag["settings"], x_robomp_token)
         capped = max(1, min(int(limit), 500))
         rows = request.app.state.bag["db"].list_releases(limit=capped)
         return {"releases": [_release_payload(row) for row in rows]}
@@ -793,9 +827,13 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         return HTMLResponse(render_index(token))
 
     @app.get("/api/status")
-    async def api_status(request: Request) -> dict[str, Any]:
+    async def api_status(
+        request: Request,
+        x_robomp_token: str | None = Header(None, alias="X-Robomp-Replay-Token"),
+    ) -> dict[str, Any]:
         bag = request.app.state.bag
         cfg: Settings = bag["settings"]
+        _require_read_token(cfg, x_robomp_token)
         db: Database = bag["db"]
         pool: _AppPool = bag["pool"]
         started = float(bag.get("started_at") or time.time())
@@ -892,8 +930,13 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         }
 
     @app.get("/api/logs")
-    async def api_logs(request: Request, limit: int = 400) -> dict[str, Any]:
+    async def api_logs(
+        request: Request,
+        limit: int = 400,
+        x_robomp_token: str | None = Header(None, alias="X-Robomp-Replay-Token"),
+    ) -> dict[str, Any]:
         cfg: Settings = request.app.state.bag["settings"]
+        _require_read_token(cfg, x_robomp_token)
         capped = max(1, min(int(limit), 2000))
         entries = tail_jsonl(cfg.log_dir / "robomp.log.jsonl", limit=capped)
         return {"entries": entries, "count": len(entries), "limit": capped}

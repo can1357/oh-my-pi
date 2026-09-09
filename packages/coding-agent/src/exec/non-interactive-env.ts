@@ -119,7 +119,10 @@ export function buildNonInteractiveEnv(
 	const base =
 		baseEnv.PI_BASH_NO_CI || baseEnv.CLAUDE_BASH_NO_CI ? withoutCI(NON_INTERACTIVE_ENV) : NON_INTERACTIVE_ENV;
 	if (platform !== "win32") {
-		return overrides ? { ...base, ...overrides } : base;
+		// Guard keys must beat overrides (e.g. direnv-provided env arrives here
+		// and must not re-enable credential prompts or pagers); non-guard
+		// override keys still pass through.
+		return overrides ? { ...overrides, ...base } : base;
 	}
 
 	const env: Record<string, string> = { ...base };
@@ -131,5 +134,5 @@ export function buildNonInteractiveEnv(
 			env[key] = value;
 		}
 	}
-	return overrides ? { ...env, ...overrides } : env;
+	return overrides ? { ...env, ...overrides, ...base } : env;
 }
