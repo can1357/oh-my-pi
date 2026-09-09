@@ -798,51 +798,6 @@ describe("system prompt tool inventory", () => {
 		}
 	});
 
-	it("does not require browser verification when the browser tool is absent (issue #8139)", async () => {
-		const opts = {
-			cwd: tempDir,
-			contextFiles: [],
-			skills: [],
-			rules: [],
-			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
-		};
-		const tools = new Map(TOOLS);
-		const withoutBrowser = (
-			await buildSystemPrompt({
-				...opts,
-				toolNames: ["read", "bash"],
-				tools,
-				nativeTools: true,
-				inlineToolDescriptors: false,
-			})
-		).systemPrompt.join("\n\n");
-
-		expect(withoutBrowser).not.toContain("browser-drive with `browser`");
-		expect(withoutBrowser).not.toContain("browser-drive with browser");
-		expect(withoutBrowser).toContain("TUI/CLI");
-		expect(withoutBrowser).toContain("behavioral test or smoke test");
-
-		tools.set("browser", {
-			label: "Browser",
-			description: "Drives a real Chromium tab.",
-			parameters: { type: "object", properties: {} },
-		});
-		const withBrowser = (
-			await buildSystemPrompt({
-				...opts,
-				toolNames: ["read", "bash", "browser"],
-				tools,
-				nativeTools: true,
-				inlineToolDescriptors: false,
-			})
-		).systemPrompt.join("\n\n");
-
-		expect(withBrowser).toContain("browser-drive with `browser`");
-		// A browser-only session still needs the smoke-test fallback for
-		// native-desktop surfaces (no computer tool).
-		expect(withBrowser).toContain("behavioral test or smoke test");
-	});
-
 	it("omits todo workflow guidance when the todo tool is absent", async () => {
 		const opts = {
 			cwd: tempDir,

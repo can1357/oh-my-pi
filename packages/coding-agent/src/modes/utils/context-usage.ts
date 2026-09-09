@@ -5,6 +5,7 @@ import type { Tool as AiTool, Model } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import { applyCatalogDescriptionBudget } from "../../catalog-budget";
+import type { SettingPath, SettingValue } from "../../config/settings-schema";
 import type { Skill } from "../../extensibility/skills";
 import type { AgentSession } from "../../session/agent-session";
 import { resolveSpeculationMethod } from "../../session/compaction-methods";
@@ -92,8 +93,7 @@ export interface NonMessageTokenSource {
 	readonly skills?: readonly Skill[];
 	readonly skillsSettings?: { readonly catalogDescriptionBudgetChars?: number };
 	readonly settings?: {
-		get(key: "skillful"): boolean;
-		get(key: "task.agentCatalogDescriptionBudgetChars" | "skills.catalogDescriptionBudgetChars"): number;
+		get<P extends SettingPath>(path: P): SettingValue<P>;
 	};
 }
 
