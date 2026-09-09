@@ -55,20 +55,7 @@ export async function validatePluginSource(
 ): Promise<string | undefined> {
 	const { source } = entry;
 	if (typeof source === "string") {
-		if (!source.startsWith("./")) {
-			throw new Error(`Relative plugin source paths must start with "./" — got: "${source}"`);
-		}
-		if (!context.marketplaceClonePath) {
-			throw new Error(`Cannot resolve relative source "${source}": marketplaceClonePath is required`);
-		}
-		const pluginRoot = context.catalogMetadata?.pluginRoot;
-		const relativePath = pluginRoot ? `./${path.join(pluginRoot, source.slice(2))}` : source;
-		const resolved = path.resolve(context.marketplaceClonePath, relativePath);
-		if (!pathIsWithin(context.marketplaceClonePath, resolved)) {
-			throw new Error(
-				`Plugin source "${source}" resolves outside marketplace root ("${context.marketplaceClonePath}")`,
-			);
-		}
+		const resolved = resolveRelativeSourcePath(source, context);
 		await verifyDirExists(resolved, `Plugin source directory does not exist: "${resolved}"`);
 		return resolved;
 	}
@@ -104,31 +91,33 @@ export async function validatePluginSource(
 
 // ── Relative string source ("./plugins/foo") ────────────────────────
 
-async function resolveRelativeSource(
+function resolveRelativeSourcePath(
 	source: string,
-	context: ResolveContext,
-): Promise<{ dir: string; tempCloneRoot?: string }> {
+	context: Pick<ResolveContext, "marketplaceClonePath" | "catalogMetadata">,
+): string {
 	if (!source.startsWith("./")) {
 		throw new Error(`Relative plugin source paths must start with "./" — got: "${source}"`);
 	}
-
 	if (!context.marketplaceClonePath) {
 		throw new Error(`Cannot resolve relative source "${source}": marketplaceClonePath is required`);
 	}
 
-	// If pluginRoot is set, prepend it to the path segment after "./"
 	const pluginRoot = context.catalogMetadata?.pluginRoot;
 	const relativePath = pluginRoot ? `./${path.join(pluginRoot, source.slice(2))}` : source;
-
-	// Resolve against marketplace root (not the .claude-plugin/ catalog subdirectory)
 	const resolved = path.resolve(context.marketplaceClonePath, relativePath);
-
 	if (!pathIsWithin(context.marketplaceClonePath, resolved)) {
 		throw new Error(
 			`Plugin source "${source}" resolves outside marketplace root ("${context.marketplaceClonePath}")`,
 		);
 	}
+	return resolved;
+}
 
+async function resolveRelativeSource(
+	source: string,
+	context: ResolveContext,
+): Promise<{ dir: string; tempCloneRoot?: string }> {
+	const resolved = resolveRelativeSourcePath(source, context);
 	await verifyDirExists(resolved, `Plugin source directory does not exist: "${resolved}"`);
 	return { dir: resolved };
 }

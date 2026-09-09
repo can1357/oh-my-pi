@@ -402,7 +402,7 @@ export class MarketplaceManager {
 		field: "lspServers" | "dapAdapters",
 		value: unknown,
 	): Promise<void> {
-		if (typeof value !== "string") return;
+		if (typeof value !== "string" || value.length === 0) return;
 		const resolved = path.resolve(sourcePath, value);
 		if (!pathIsWithin(sourcePath, resolved)) {
 			throw new Error(`Plugin "${entry.name}" ${field} path escapes the plugin directory`);
