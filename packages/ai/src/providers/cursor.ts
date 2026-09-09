@@ -851,8 +851,7 @@ function streamCursorWithWireMode(
 				const declared = (context.tools ?? [])
 					.map(tool => tool.name)
 					.filter(name => name.length > 0 && !CURSOR_PASSTHROUGH_SERVER_ONLY_TOOLS.has(name));
-				const allowedTools =
-					options.toolChoice === "none" ? "" : forcedName ? forcedName : declared.join(",");
+				const allowedTools = options.toolChoice === "none" ? "" : forcedName ? forcedName : declared.join(",");
 				requestHeaders["x-cursor-agent-allowed-tools"] = allowedTools || "__none__";
 			}
 			const debugSession = isRequestDebugEnabled()

@@ -554,9 +554,7 @@ function applyEntry(
 			// Model init must not erase unresolved model drops the settle gate protects.
 			const retained: TodoPhase[] = [];
 			for (const phase of phases) {
-				const drops = phase.tasks.filter(
-					t => t.status === "abandoned" && t.droppedBy !== "user",
-				);
+				const drops = phase.tasks.filter(t => t.status === "abandoned" && t.droppedBy !== "user");
 				if (drops.length === 0) continue;
 				const existing = next.find(p => p.name === phase.name);
 				if (existing) {

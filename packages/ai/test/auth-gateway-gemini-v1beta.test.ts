@@ -115,10 +115,7 @@ describe("auth-gateway gemini-v1beta: parseRequest", () => {
 				},
 				{
 					role: "user",
-					parts: [
-						{ text: "caption" },
-						{ inline_data: { mime_type: "image/jpeg", data: "def456" } },
-					],
+					parts: [{ text: "caption" }, { inline_data: { mime_type: "image/jpeg", data: "def456" } }],
 				},
 			],
 		});
@@ -246,9 +243,10 @@ it("correlates id-less functionResponse with the preceding same-name functionCal
 	const assistant = parsed.context.messages.find(m => m.role === "assistant");
 	const toolResult = parsed.context.messages.find(m => m.role === "toolResult");
 	expect(assistant?.role).toBe("assistant");
-	const call = assistant && "content" in assistant
-		? assistant.content.find(c => typeof c === "object" && c !== null && "type" in c && c.type === "toolCall")
-		: undefined;
+	const call =
+		assistant && "content" in assistant
+			? assistant.content.find(c => typeof c === "object" && c !== null && "type" in c && c.type === "toolCall")
+			: undefined;
 	expect(call && "id" in call ? call.id : undefined).toBeTruthy();
 	expect(toolResult && "toolCallId" in toolResult ? toolResult.toolCallId : undefined).toBe(
 		call && "id" in call ? call.id : undefined,
@@ -276,14 +274,18 @@ it("emits functionCall parts for toolCall content blocks", () => {
 		api: "google-generative-ai",
 		provider: "google",
 		model: "gemini-2.5-flash",
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
 		stopReason: "toolUse",
 		timestamp: 0,
 	} as AssistantMessage;
 	const encoded = encodeResponse(message, "gemini-2.5-flash");
 	const parts = (encoded.candidates as Array<{ content: { parts: unknown[] } }>)[0]!.content.parts;
-	expect(parts).toEqual([
-		{ text: "calling" },
-		{ functionCall: { name: "lookup", args: { q: "x" }, id: "call_1" } },
-	]);
+	expect(parts).toEqual([{ text: "calling" }, { functionCall: { name: "lookup", args: { q: "x" }, id: "call_1" } }]);
 });

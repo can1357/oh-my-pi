@@ -344,4 +344,3 @@ function freezeFallbacks(
 	}
 	return Object.freeze(out);
 }
-

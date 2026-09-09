@@ -6,7 +6,8 @@ const INCOMPLETE_TODOS_HEADING = "## Incomplete Todos";
 /** Unique marker emitted by {@link formatIncompleteTodosSection}; required for durable parse. */
 export const INCOMPLETE_TODOS_MARKER = "<!-- omp-incomplete-todos-v1 -->";
 /** Exact h2 plus required durable marker on the following line. */
-const INCOMPLETE_TODOS_HEADING_RE = /^## Incomplete Todos(?:[ \t]*:.*|[ \t]+.+)?[ \t]*\n[ \t]*<!-- omp-incomplete-todos-v1 -->[ \t]*$/m;
+const INCOMPLETE_TODOS_HEADING_RE =
+	/^## Incomplete Todos(?:[ \t]*:.*|[ \t]+.+)?[ \t]*\n[ \t]*<!-- omp-incomplete-todos-v1 -->[ \t]*$/m;
 
 export type IncompleteTodoStatus = "pending" | "in_progress" | "abandoned" | "blocked";
 

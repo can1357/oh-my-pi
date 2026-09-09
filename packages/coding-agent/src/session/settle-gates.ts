@@ -1,6 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { extractLeadingCdTarget, hasTopLevelShellBackground, hasTopLevelStatusMaskingOperator } from "../tools/shell-tokenize";
+import {
+	extractLeadingCdTarget,
+	hasTopLevelShellBackground,
+	hasTopLevelStatusMaskingOperator,
+} from "../tools/shell-tokenize";
 
 /** Isolated apply succeeded; parent must re-run acceptance on this tree. */
 export const MERGED_UNVERIFIED_MARKER = "MERGED — child yield is not evidence; re-run acceptance on this tree.";

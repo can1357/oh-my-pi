@@ -560,12 +560,7 @@ describe("unverified isolated merge latch", () => {
 			cwd: "/repo",
 			command: "cd /tmp && bun test",
 		});
-		tracker.onToolResult(
-			"bash",
-			false,
-			{ cwd: "/repo", async: { state: "running", jobId: "bg_out" } },
-			"call-async",
-		);
+		tracker.onToolResult("bash", false, { cwd: "/repo", async: { state: "running", jobId: "bg_out" } }, "call-async");
 		expect(latch.latched).toBe(true);
 		tracker.onAsyncJobTerminal("bg_out", "bash", "completed");
 		expect(latch.latched).toBe(true);

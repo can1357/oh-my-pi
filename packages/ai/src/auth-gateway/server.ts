@@ -150,8 +150,7 @@ export const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string
 };
 
 /** Canonical Gemini SDK paths: `/v1beta/models/{model}:generateContent[|stream…]`. */
-const GEMINI_CANONICAL_PATH =
-	/^\/v1beta\/models\/([^/:]+):(generateContent|streamGenerateContent)$/;
+const GEMINI_CANONICAL_PATH = /^\/v1beta\/models\/([^/:]+):(generateContent|streamGenerateContent)$/;
 
 function matchFormatRoute(
 	pathname: string,
@@ -162,9 +161,7 @@ function matchFormatRoute(
 	if (!gemini) return undefined;
 	const op = gemini[2]!;
 	const staticPath =
-		op === "streamGenerateContent"
-			? "/v1beta/models/streamGenerateContent"
-			: "/v1beta/models/generateContent";
+		op === "streamGenerateContent" ? "/v1beta/models/streamGenerateContent" : "/v1beta/models/generateContent";
 	const route = FORMAT_ROUTES[staticPath];
 	if (!route) return undefined;
 	return { route, pathname: staticPath, pathModel: decodeURIComponent(gemini[1]!) };
@@ -776,7 +773,6 @@ export function releaseTurnOnStreamEnd(
 	});
 }
 
-
 function payloadContainsOpenAIFileId(value: unknown): boolean {
 	if (value === null || value === undefined) return false;
 	if (typeof value === "string") return false;
@@ -1000,7 +996,7 @@ async function handleFormatEndpoint(
 			"invalid_request_error",
 			"OpenAI image file IDs require a Responses-compatible upstream model",
 		);
-	};
+	}
 
 	// Sticky credential id: honour the client's `prompt_cache_key` when
 	// supplied (so external session ids align), otherwise derive from
@@ -1098,10 +1094,7 @@ async function handleFormatEndpoint(
 			return classifiedError(classified);
 		}
 		if (parsed.options.previousResponseId) {
-			const originOk =
-				providerOrigin === undefined
-					? false
-					: resolved.provider === providerOrigin;
+			const originOk = providerOrigin === undefined ? false : resolved.provider === providerOrigin;
 			const apiOk =
 				resolved.api === "openai-responses" ||
 				resolved.api === "azure-openai-responses" ||
@@ -1135,7 +1128,9 @@ async function handleFormatEndpoint(
 			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
 			return "skipped";
 		}
-		if (targetRejectsOpenAIImageFileReferences(route.label, model, parsed.context.messages, { providerPayload: body })) {
+		if (
+			targetRejectsOpenAIImageFileReferences(route.label, model, parsed.context.messages, { providerPayload: body })
+		) {
 			return formatError(
 				400,
 				"invalid_request_error",
@@ -1703,10 +1698,7 @@ async function handlePiNative(
 			return classifiedError(classified);
 		}
 		if (parsed.options.previousResponseId) {
-			const originOk =
-				providerOrigin === undefined
-					? false
-					: resolved.provider === providerOrigin;
+			const originOk = providerOrigin === undefined ? false : resolved.provider === providerOrigin;
 			const apiOk =
 				resolved.api === "openai-responses" ||
 				resolved.api === "azure-openai-responses" ||

@@ -472,7 +472,11 @@ describe("worktree isolation helpers", () => {
 						runGit(repo, ["log", "--pretty=%s", `${initialSha}..HEAD`]),
 					]);
 
-					expect(result).toEqual({ failed: [], merged: [TASK_BRANCH, REDUNDANT_BRANCH], processed: [TASK_BRANCH, REDUNDANT_BRANCH] });
+					expect(result).toEqual({
+						failed: [],
+						merged: [TASK_BRANCH, REDUNDANT_BRANCH],
+						processed: [TASK_BRANCH, REDUNDANT_BRANCH],
+					});
 					// No cherry-pick sequencer state, no unmerged entries: the
 					// skip advanced cleanly.
 					expect(status).toBe("");
@@ -1137,7 +1141,11 @@ describe("commitToBranch preserves agent commits", () => {
 		const merge = await mergeTaskBranches(parent, [
 			{ branchName: result!.branchName!, taskId: "dirty-baseline", baseSha: result!.baseSha! },
 		]);
-		expect(merge).toEqual({ failed: [], merged: ["omp/task/dirty-baseline"], processed: ["omp/task/dirty-baseline"] });
+		expect(merge).toEqual({
+			failed: [],
+			merged: ["omp/task/dirty-baseline"],
+			processed: ["omp/task/dirty-baseline"],
+		});
 
 		const [headSubject, status, fixture] = await Promise.all([
 			runGit(parent, ["log", "-1", "--pretty=%s"]),

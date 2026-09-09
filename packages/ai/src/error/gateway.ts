@@ -62,7 +62,8 @@ const REVOKED_PATTERN = /\brevoked\b|\binvalid_grant\b/i;
 const TIMEOUT_OR_CONNECTION_PATTERN =
 	/\b(?:operation\s+)?timed?\s*out\b|\btimeout\b|\bconnection(?:\s+error|\s+refused)?\b|\bsocket hang up\b|\bfetch failed\b/i;
 const POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
-const MODEL_UNAVAILABLE_PATTERN = /\bmodel[_ ]?(?:not[_ ]found|unavailable|not[_ ]supported)\b|\b(?:the\s+)?(?:requested\s+)?model\s+does\s+not\s+exist\b|\bmodel\s+is\s+not\s+supported\b/i;
+const MODEL_UNAVAILABLE_PATTERN =
+	/\bmodel[_ ]?(?:not[_ ]found|unavailable|not[_ ]supported)\b|\b(?:the\s+)?(?:requested\s+)?model\s+does\s+not\s+exist\b|\bmodel\s+is\s+not\s+supported\b/i;
 const INVALID_REQUEST_PATTERN =
 	/\b(?:unsupported|invalid_request|invalid request|bad request|malformed|GenerateContentRequest)\b/i;
 const GATEWAY_INVARIANT_PATTERN = /\bgateway_terminal\b|\binternal invariant\b/i;
@@ -208,11 +209,7 @@ function classifyOwnerDisposition(
 	if (is(errorId, Flag.ContextOverflow)) {
 		return { owner: "request", disposition: "context_overflow" };
 	}
-	if (
-		is(errorId, Flag.ContentBlocked) ||
-		is(errorId, Flag.AccountPolicy) ||
-		kind === "content-blocked"
-	) {
+	if (is(errorId, Flag.ContentBlocked) || is(errorId, Flag.AccountPolicy) || kind === "content-blocked") {
 		return { owner: "policy", disposition: "policy_terminal" };
 	}
 
@@ -338,7 +335,10 @@ function classifyOwnerDisposition(
 	// before the generic 5xx provider_unavailable bucket, otherwise overflow /
 	// policy / usage wording is unreachable.
 	const authoritativeStatus =
-		(typeof err === "object" && err !== null && "status" in err && typeof (err as { status: unknown }).status === "number") ||
+		(typeof err === "object" &&
+			err !== null &&
+			"status" in err &&
+			typeof (err as { status: unknown }).status === "number") ||
 		extractEmbeddedStatus(message) !== undefined;
 	if (!authoritativeStatus || status < 500) {
 		if (isUsageLimit(err) || isUsageLimit(message)) {
@@ -387,7 +387,6 @@ function classifyOwnerDisposition(
 
 	return { owner: "provider", disposition: "provider_unavailable" };
 }
-
 
 /** True when message text or a structured `code` property signals account policy. */
 function hasPolicySignal(err: unknown, message: string): boolean {

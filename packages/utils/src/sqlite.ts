@@ -24,11 +24,7 @@ function isBenignCheckpointIoError(err: unknown): boolean {
 		return false;
 	}
 	const code = err.code;
-	return (
-		code === "SQLITE_IOERR_VNODE" ||
-		code === "SQLITE_IOERR_DELETE" ||
-		code === "SQLITE_IOERR_DELETE_NOENT"
-	);
+	return code === "SQLITE_IOERR_VNODE" || code === "SQLITE_IOERR_DELETE" || code === "SQLITE_IOERR_DELETE_NOENT";
 }
 
 /** Checkpoints committed WAL frames without waiting for concurrent readers. */

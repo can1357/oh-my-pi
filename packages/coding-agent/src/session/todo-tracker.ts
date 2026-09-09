@@ -6,9 +6,7 @@ import type { Settings } from "../config/settings";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
-import postCompactionIncompleteTodosPrompt from "../prompts/system/post-compaction-incomplete-todos.md" with {
-	type: "text",
-};
+import postCompactionIncompleteTodosPrompt from "../prompts/system/post-compaction-incomplete-todos.md" with { type: "text" };
 import todoCompletionReminderPrompt from "../prompts/system/todo-completion-reminder.md" with { type: "text" };
 import { resolveLeadingCdChain } from "../tools/shell-tokenize";
 import { resolveToCwd } from "../tools/path-utils";
@@ -340,8 +338,7 @@ export class TodoTracker {
 					// New incarnation of this job id — allow a fresh early terminal.
 					this.#finishedVerifyJobIds.delete(jobId);
 					const early =
-						this.#takeEarlyAsyncTerminal(toolCallId, jobId) ??
-						this.#takeEarlyAsyncTerminal(jobId, jobId);
+						this.#takeEarlyAsyncTerminal(toolCallId, jobId) ?? this.#takeEarlyAsyncTerminal(jobId, jobId);
 					if (early !== undefined) {
 						this.#markFinishedVerifyJob(jobId);
 						this.#applyAsyncVerifyClear(withCwd, early.jobType, early.status);

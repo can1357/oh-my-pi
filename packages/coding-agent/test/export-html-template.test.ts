@@ -200,9 +200,12 @@ describe("HTML export template", () => {
 		});
 	});
 
-	test.skipIf(!COMPILED_BINARIES_WORK)("preserves exact bytes in a compiled bundle launched from an unrelated directory", async () => {
-		expect(await runProbe([compiledPath])).toEqual(expectedTemplate);
-	});
+	test.skipIf(!COMPILED_BINARIES_WORK)(
+		"preserves exact bytes in a compiled bundle launched from an unrelated directory",
+		async () => {
+			expect(await runProbe([compiledPath])).toEqual(expectedTemplate);
+		},
+	);
 
 	test("does not retain source asset strings during a static import", async () => {
 		const proc = Bun.spawn([process.execPath, heapProbePath], {

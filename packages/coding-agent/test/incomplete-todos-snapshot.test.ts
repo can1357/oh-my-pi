@@ -280,7 +280,11 @@ describe("getLatestTodoPhasesFromEntries reconstructs leftover todos after compa
 					timestamp: 1,
 				},
 			},
-			compaction("c1", "todo", `## Goal\nHost cleared todos before compact.\n\n${formatIncompleteTodosSection([])}\n`),
+			compaction(
+				"c1",
+				"todo",
+				`## Goal\nHost cleared todos before compact.\n\n${formatIncompleteTodosSection([])}\n`,
+			),
 		] as SessionEntry[];
 
 		expect(getLatestTodoPhasesFromEntries(entries)).toEqual([]);
@@ -339,9 +343,7 @@ describe("getLatestTodoPhasesFromEntries reconstructs leftover todos after compa
 	});
 
 	it("round-trips CRLF and CR distinctly from LF in durable titles", () => {
-		const rows = [
-			{ phase: "Work", status: "pending" as const, title: "a\r\nb\rc\nd" },
-		];
+		const rows = [{ phase: "Work", status: "pending" as const, title: "a\r\nb\rc\nd" }];
 		const section = formatIncompleteTodosSection(rows);
 		expect(section).toContain("\\r\\n");
 		expect(section).toContain("\\r");

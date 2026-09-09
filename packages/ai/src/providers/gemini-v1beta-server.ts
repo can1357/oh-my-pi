@@ -108,10 +108,7 @@ function contentFromGeminiParts(parts: unknown): string | (TextContent | ImageCo
 	return blocks;
 }
 
-function readFunctionCall(
-	part: Record<string, unknown>,
-	lastCallIdByName?: Map<string, string>,
-): ToolCall | undefined {
+function readFunctionCall(part: Record<string, unknown>, lastCallIdByName?: Map<string, string>): ToolCall | undefined {
 	const call = part.functionCall ?? part.function_call;
 	if (!isRecord(call)) return undefined;
 	const name = typeof call.name === "string" ? call.name : undefined;
@@ -393,7 +390,6 @@ function applyOpenAiSampling(options: ParsedRequest["options"], body: Record<str
 	if (stopSequences && options.stopSequences === undefined) options.stopSequences = stopSequences;
 }
 
-
 function walkGeminiTools(tools: unknown): Tool[] | undefined {
 	if (!Array.isArray(tools)) return undefined;
 	const out: Tool[] = [];
@@ -486,7 +482,6 @@ export function parseRequest(body: unknown, _headers?: Headers, defaultStream = 
 	};
 }
 
-
 // ---------------------------------------------------------------------------
 // encodeResponse (non-streaming)
 // ---------------------------------------------------------------------------
@@ -539,7 +534,6 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 		modelVersion: requestedModelId,
 	};
 }
-
 
 // ---------------------------------------------------------------------------
 // encodeStream (SSE)

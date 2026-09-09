@@ -1269,13 +1269,9 @@ export function buildParams(
 					type: "json_schema",
 					name: format.json_schema.name ?? "response",
 					schema: format.json_schema.schema,
-					...(format.json_schema.description !== undefined
-						? { description: format.json_schema.description }
-						: {}),
+					...(format.json_schema.description !== undefined ? { description: format.json_schema.description } : {}),
 					...(format.json_schema.strict !== undefined ? { strict: format.json_schema.strict } : {}),
-					...(format.json_schema.description !== undefined
-						? { description: format.json_schema.description }
-						: {}),
+					...(format.json_schema.description !== undefined ? { description: format.json_schema.description } : {}),
 				} as never,
 			};
 		} else {

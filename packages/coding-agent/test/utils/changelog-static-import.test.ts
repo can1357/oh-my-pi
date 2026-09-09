@@ -122,35 +122,39 @@ describe("changelog static import resources", () => {
 		}
 	}, 30_000);
 
-	test.skipIf(!COMPILED_BINARIES_WORK)("reads the emitted changelog asset from a compiled binary", async () => {
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-changelog-compiled-"));
-		try {
-			const binaryPath = path.join(tempDir, "changelog-probe");
-			const unrelatedCwd = path.join(tempDir, "cwd");
-			const missingPackageChangelogPath = path.join(tempDir, "missing-package", "CHANGELOG.md");
-			await fs.mkdir(unrelatedCwd);
-			const sourceResult = await runProbe([process.execPath, bundleProbePath, missingPackageChangelogPath]);
+	test.skipIf(!COMPILED_BINARIES_WORK)(
+		"reads the emitted changelog asset from a compiled binary",
+		async () => {
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-changelog-compiled-"));
+			try {
+				const binaryPath = path.join(tempDir, "changelog-probe");
+				const unrelatedCwd = path.join(tempDir, "cwd");
+				const missingPackageChangelogPath = path.join(tempDir, "missing-package", "CHANGELOG.md");
+				await fs.mkdir(unrelatedCwd);
+				const sourceResult = await runProbe([process.execPath, bundleProbePath, missingPackageChangelogPath]);
 
-			const buildOutput = await Bun.build({
-				entrypoints: [bundleProbePath],
-				root: repoRoot,
-				external: ["omp-legacy-pi-modules"],
-				plugins: [changelogUtilsStubPlugin()],
-				compile: {
-					outfile: binaryPath,
-					autoloadBunfig: false,
-					autoloadDotenv: false,
-					autoloadTsconfig: false,
-					autoloadPackageJson: false,
-				},
-			});
-			expect(buildOutput.success, buildOutput.logs.map(log => log.message).join("\n")).toBe(true);
+				const buildOutput = await Bun.build({
+					entrypoints: [bundleProbePath],
+					root: repoRoot,
+					external: ["omp-legacy-pi-modules"],
+					plugins: [changelogUtilsStubPlugin()],
+					compile: {
+						outfile: binaryPath,
+						autoloadBunfig: false,
+						autoloadDotenv: false,
+						autoloadTsconfig: false,
+						autoloadPackageJson: false,
+					},
+				});
+				expect(buildOutput.success, buildOutput.logs.map(log => log.message).join("\n")).toBe(true);
 
-			const result = await runProbe([binaryPath, missingPackageChangelogPath], unrelatedCwd);
-			expect(result.entries).toBe(sourceResult.entries);
-			expect(result.version).toBe(sourceResult.version);
-		} finally {
-			await fs.rm(tempDir, { force: true, recursive: true });
-		}
-	}, 30_000);
+				const result = await runProbe([binaryPath, missingPackageChangelogPath], unrelatedCwd);
+				expect(result.entries).toBe(sourceResult.entries);
+				expect(result.version).toBe(sourceResult.version);
+			} finally {
+				await fs.rm(tempDir, { force: true, recursive: true });
+			}
+		},
+		30_000,
+	);
 });

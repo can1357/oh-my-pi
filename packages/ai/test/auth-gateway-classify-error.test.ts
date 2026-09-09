@@ -189,9 +189,7 @@ describe("auth-gateway classifyGatewayError", () => {
 	});
 
 	it("maps structured cyber_policy code on 403 to policy_terminal even with a bland message", () => {
-		const c = classifyGatewayError(
-			Object.assign(new Error("Forbidden"), { status: 403, code: "cyber_policy" }),
-		);
+		const c = classifyGatewayError(Object.assign(new Error("Forbidden"), { status: 403, code: "cyber_policy" }));
 		expect(c.owner).toBe("policy");
 		expect(c.disposition).toBe("policy_terminal");
 		expect(c.disposition).not.toBe("credential_transient");
@@ -257,7 +255,6 @@ describe("auth-gateway classifyGatewayError", () => {
 		expect(result.disposition).toBe("model_unavailable");
 		expect(result.owner).toBe("model");
 	});
-
 });
 
 describe("classifyGatewayError authoritative-status precedence", () => {
@@ -414,17 +411,18 @@ describe("classifyGatewayError review follow-ups", () => {
 describe("classifyGatewayError model availability", () => {
 	it("maps OpenAI-style model-does-not-exist 404 to model_unavailable", () => {
 		const classified = classifyGatewayError(
-			Object.assign(new Error("The model `gpt-nope` does not exist or you do not have access to it"), { status: 404 }),
+			Object.assign(new Error("The model `gpt-nope` does not exist or you do not have access to it"), {
+				status: 404,
+			}),
 		);
 		expect(classified.disposition).toBe("model_unavailable");
 	});
 });
 
-	it("classifies OpenAI missing-model 404 wording as model_unavailable", () => {
-		const classified = classifyGatewayError(
-			Object.assign(new Error("The model does not exist or you do not have access to it"), { status: 404 }),
-		);
-		expect(classified.disposition).toBe("model_unavailable");
-		expect(classified.owner).toBe("model");
-	});
-
+it("classifies OpenAI missing-model 404 wording as model_unavailable", () => {
+	const classified = classifyGatewayError(
+		Object.assign(new Error("The model does not exist or you do not have access to it"), { status: 404 }),
+	);
+	expect(classified.disposition).toBe("model_unavailable");
+	expect(classified.owner).toBe("model");
+});

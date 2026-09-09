@@ -110,5 +110,4 @@ describe("compaction summary output budget", () => {
 		expect(promptText).toContain("[Work] [pending] do the thing");
 		expect(promptText).toContain("## Incomplete Todos");
 	});
-
 });
