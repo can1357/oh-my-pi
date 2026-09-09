@@ -275,10 +275,9 @@ export class ImageBudget {
 	}
 
 	/**
-	 * Bound the terminal's image store to `cap` once the frame's complete image
-	 * set is known — the renderer calls this at emit time, not at
-	 * {@link endPass}, because overlays composite into the window after the pass
-	 * closes and their {@link observe} calls land in the same pass record.
+	 * Bound the terminal's image store to `cap`. Demotion ({@link endPass}) already
+	 * retires the graphics this frame replaced with text; this sweeps the ones no
+	 * frame shows any more — images the pass simply stopped observing.
 	 *
 	 * Eviction removes the image's scrollback placements too, and a frame diff
 	 * only rewrites rows whose text changed, so an image still shown on the

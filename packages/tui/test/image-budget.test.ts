@@ -922,6 +922,53 @@ describe("TUI inline-image budget", () => {
 		}
 	});
 
+	it("holds the cap over a provider frame plus its non-fullscreen overlay", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { resident, placed } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
+		const modalImages = [makeImage(tui.imageBudget, "modal-0"), makeImage(tui.imageBudget, "modal-1")];
+		const modalIds = modalImages.map((_, i) => tui.imageBudget.acquireId(`modal-${i}`));
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: behind.flatMap(image => image.render(size.columns)) }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(resident.size).toBe(2);
+
+			const overlay = tui.showOverlay(
+				{ render: width => modalImages.flatMap(image => image.render(width)), invalidate: () => {} },
+				{ anchor: "center" },
+			);
+			await settle(term);
+
+			// The overlay's images are the newest in display order, so the cap keeps
+			// them and demotes the transcript's — it may not simply stop counting.
+			const sizes: number[] = [];
+			for (let i = 0; i < 4; i++) {
+				tui.requestRender();
+				await settle(term);
+				sizes.push(resident.size);
+			}
+			expect(sizes).toEqual([2, 2, 2, 2]);
+			expect(modalIds.every(id => placed.has(id))).toBe(true);
+
+			overlay.hide();
+			await settle(term);
+			expect(resident.size).toBe(2);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
 	it("applies the image budget before emitting the first frame", async () => {
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];

@@ -1769,13 +1769,15 @@ export class TUI extends Container {
 		provider.beginHistoryFlush();
 		while (true) {
 			let plan: TerminalFramePlan;
+			let viewport: string[];
 			do {
 				this.#imageBudget.beginPass();
 				plan = provider.renderFrame({ columns: width, rows: height });
+				viewport = Array.from(plan.viewport);
+				if (viewport.length > height) viewport = viewport.slice(0, height);
+				viewport = this.#compositeVisibleOverlays(viewport, width, height);
 			} while (this.#imageBudget.endPass());
 			if (plan.history === undefined) return;
-			let viewport = Array.from(plan.viewport);
-			if (viewport.length > height) viewport = viewport.slice(0, height);
 			const acceptedBefore = this.#acceptedHistoryBatchId;
 			this.#emitPlanFrame(width, height, viewport, plan.history, provider);
 			if (plan.history.id > acceptedBefore && this.#acceptedHistoryBatchId === acceptedBefore) {
@@ -2294,6 +2296,19 @@ export class TUI extends Container {
 	 * frozen while an overlay is visible, so overlay pixels can never enter
 	 * native scrollback.
 	 */
+	/**
+	 * Composite the visible overlays onto a full-height copy of `viewport`, or
+	 * hand it back untouched when nothing is stacked. Callers run this inside
+	 * their image-budget pass so the frame's whole image set — transcript plus
+	 * modal — reaches one reconcile, instead of leaving the overlay's graphics
+	 * outside the cap for as long as it stays up.
+	 */
+	#compositeVisibleOverlays(viewport: string[], width: number, height: number): string[] {
+		if (this.#getTopmostVisibleOverlay() === undefined) return viewport;
+		while (viewport.length < height) viewport.push("");
+		return this.#compositeOverlaysIntoWindow(viewport, width, height);
+	}
+
 	#compositeOverlaysIntoWindow(window: string[], termWidth: number, termHeight: number): string[] {
 		const result = [...window];
 		for (const entry of this.overlayStack) {
@@ -2445,17 +2460,19 @@ export class TUI extends Container {
 		if (!provider || width <= 0 || height <= 0) return;
 		this.#debugNextWindowTop = 0;
 		let plan: TerminalFramePlan;
+		let viewport: string[];
 		do {
 			this.#imageBudget.beginPass();
 			plan = provider.renderFrame({ columns: width, rows: height });
+			viewport = Array.from(plan.viewport);
+			if (viewport.length > height) {
+				const message = `Frame provider returned ${viewport.length} rows for a ${height}-row viewport`;
+				if (Bun.env.NODE_ENV === "test" || Bun.env.NODE_ENV === "development") throw new Error(message);
+				logger.error("TUI layout contract violated", { rows: viewport.length, height });
+				viewport = viewport.slice(0, height);
+			}
+			viewport = this.#compositeVisibleOverlays(viewport, width, height);
 		} while (this.#imageBudget.endPass());
-		let viewport = Array.from(plan.viewport);
-		if (viewport.length > height) {
-			const message = `Frame provider returned ${viewport.length} rows for a ${height}-row viewport`;
-			if (Bun.env.NODE_ENV === "test" || Bun.env.NODE_ENV === "development") throw new Error(message);
-			logger.error("TUI layout contract violated", { rows: viewport.length, height });
-			viewport = viewport.slice(0, height);
-		}
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
 		this.#emitPlanFrame(width, height, viewport, plan.history, provider);
 	}
@@ -2557,13 +2574,11 @@ export class TUI extends Container {
 		offered: HistoryBatch | undefined,
 		provider: TerminalFrameProvider | undefined,
 	): void {
+		// Callers composite their overlays inside the budget pass, so `viewportRows`
+		// is already the complete frame. Bound the store here rather than at
+		// endPass(): this is the last point before the purge and transmit bytes go
+		// out, and it runs once per emitted frame instead of once per retry.
 		let viewport = viewportRows;
-		if (this.#getTopmostVisibleOverlay() !== undefined) {
-			while (viewport.length < height) viewport.push("");
-			viewport = this.#compositeOverlaysIntoWindow(viewport, width, height);
-		}
-		// Every image of this frame — overlays included — has now been observed,
-		// so the store bound can tell a retired graphic from a displayed one.
 		this.#imageBudget.limitResidentImages();
 		const history = offered !== undefined && offered.id > this.#acceptedHistoryBatchId ? offered : undefined;
 		if (offered !== undefined && offered.id <= this.#acceptedHistoryBatchId) provider?.acknowledgeHistory(offered.id);
@@ -2839,14 +2854,15 @@ export class TUI extends Container {
 	 * mutable viewport. Nothing is ever appended to terminal history.
 	 */
 	#renderChildrenFrame(width: number, height: number): void {
-		let composed: readonly string[];
+		let viewport: string[];
 		do {
 			this.#imageBudget.beginPass();
-			composed = this.render(width);
+			const composed = this.render(width);
+			this.#debugNextWindowTop = Math.max(0, composed.length - height);
+			viewport = composed.length > height ? composed.slice(composed.length - height) : Array.from(composed);
+			viewport = this.#compositeVisibleOverlays(viewport, width, height);
 		} while (this.#imageBudget.endPass());
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
-		this.#debugNextWindowTop = Math.max(0, composed.length - height);
-		const viewport = composed.length > height ? composed.slice(composed.length - height) : Array.from(composed);
 		this.#emitPlanFrame(width, height, viewport, undefined, undefined);
 	}
 
