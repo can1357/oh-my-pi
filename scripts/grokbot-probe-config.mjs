@@ -5,6 +5,9 @@
  * (profile / XDG aware). Env credentials still work when the secrets file is
  * absent. Secrets-file parsing uses the shared dotenv loader so `export`,
  * quotes, and inline comments match CLI/catalog minting.
+ *
+ * Tests should pass `{ agentDir | secretsPath, env }` into `loadGrokbotConfig`
+ * rather than mutating `process.env` or `setAgentDir`.
  */
 import * as path from "node:path";
 import { getAgentDir } from "../packages/utils/src/dirs.ts";
@@ -47,19 +50,44 @@ export function grokbotSecretsPath(agentDir = resolveAgentDir()) {
 	return path.join(agentDir, "secrets", "grokbot.env");
 }
 
+/**
+ * Parallel-safe auth source for tests. When `env` is provided, listed keys
+ * override (or clear, when `undefined`) without mutating `process.env`; absent
+ * keys still fall through to the process environment. Prefer `secretsPath` /
+ * `agentDir` over `setAgentDir`.
+ *
+ * @typedef {{ secretsPath?: string, agentDir?: string, env?: Record<string, string|undefined> }} GrokbotProbeAuthSource
+ */
+
+/** Read one credential key: overlay (when present) beats process env. */
+function grokbotProbeEnv(name, source) {
+	const overlay = source?.env;
+	if (overlay && Object.prototype.hasOwnProperty.call(overlay, name)) {
+		const value = overlay[name];
+		return typeof value === "string" && value.trim() ? value.trim() : undefined;
+	}
+	const fromProcess = process.env[name];
+	return typeof fromProcess === "string" && fromProcess.trim() ? fromProcess.trim() : undefined;
+}
+
 /** Env overrides secrets file; missing file is empty (env-only configs work). */
-export function loadGrokbotConfig() {
-	const file = parseEnvFile(grokbotSecretsPath());
-	const namespace = process.env.GROKBOT_NAMESPACE || file.GROKBOT_NAMESPACE || GROKBOT_DEFAULT_NAMESPACE;
-	const explicitVersion = process.env.GROKBOT_CLIENT_VERSION || file.GROKBOT_CLIENT_VERSION || undefined;
+export function loadGrokbotConfig(source = {}) {
+	const secretsPath =
+		source.secretsPath ??
+		(source.agentDir ? grokbotSecretsPath(source.agentDir) : grokbotSecretsPath());
+	const file = parseEnvFile(secretsPath);
+	const namespace =
+		grokbotProbeEnv("GROKBOT_NAMESPACE", source) || file.GROKBOT_NAMESPACE || GROKBOT_DEFAULT_NAMESPACE;
+	const explicitVersion =
+		grokbotProbeEnv("GROKBOT_CLIENT_VERSION", source) || file.GROKBOT_CLIENT_VERSION || undefined;
 	return {
 		renewal:
-			process.env.GROKBOT_RENEWAL_CREDENTIAL ||
-			process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL ||
+			grokbotProbeEnv("GROKBOT_RENEWAL_CREDENTIAL", source) ||
+			grokbotProbeEnv("SAND_INFERENCE_RENEWAL_CREDENTIAL", source) ||
 			file.GROKBOT_RENEWAL_CREDENTIAL ||
 			file.SAND_INFERENCE_RENEWAL_CREDENTIAL ||
 			"",
-		machineId: process.env.GROKBOT_MACHINE_ID || file.GROKBOT_MACHINE_ID || "",
+		machineId: grokbotProbeEnv("GROKBOT_MACHINE_ID", source) || file.GROKBOT_MACHINE_ID || "",
 		namespace,
 		clientVersion: resolveGrokbotClientVersion(namespace, GROKBOT_STAMPED_CLIENT_VERSION, explicitVersion),
 	};

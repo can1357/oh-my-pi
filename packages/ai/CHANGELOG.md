@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Grok Bot history keeps collision-loser `customWireName` tools under their internal name when another tool owns the advertised slot (e.g. `extension_shell` vs `bash` → Shell).
 - Grok Bot honors `toolChoice: "none"` by advertising no tools (handoff keeps `context.tools` for prompt-cache reuse).
 - Grok Bot rejects `toolChoice` values other than `"auto"` / `"none"` (InferenceStreamRequest has no tool_choice field).
 - Grok Bot history replay treats grammar mode from the live tool index (`isGrammar`), not from `customWireName` alone.

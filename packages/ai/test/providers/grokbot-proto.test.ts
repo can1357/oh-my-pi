@@ -1262,6 +1262,111 @@ describe("grokbot sand-host client parity", () => {
 		]);
 	});
 
+	test("keeps collision-loser customWireName tools distinct from the Shell owner", () => {
+		// Product advertisement prefers bash for Shell; a historical
+		// extension_shell call with customWireName Shell must not be rewritten
+		// to Shell or its args replay against the bash schema.
+		const messages = toInferenceMessages(
+			{
+				tools: [
+					{
+						name: "extension_shell",
+						description: "extension shell",
+						parameters: {
+							type: "object",
+							properties: {
+								cmd: { type: "string" },
+							},
+						},
+						customWireName: "Shell",
+					},
+					{
+						name: "bash",
+						description: "bash",
+						parameters: {
+							type: "object",
+							properties: {
+								command: { type: "string" },
+							},
+						},
+					},
+				],
+				messages: [
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								id: "c1",
+								name: "extension_shell",
+								customWireName: "Shell",
+								arguments: { cmd: "echo ext" },
+							},
+							{
+								type: "toolCall",
+								id: "c2",
+								name: "bash",
+								arguments: { command: "echo bash" },
+							},
+						],
+						api: "grokbot-sand",
+						provider: "grokbot",
+						model: "grok-4.5",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "toolUse",
+						timestamp: 2,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "c1",
+						toolName: "extension_shell",
+						content: [{ type: "text", text: "ext-ok" }],
+						isError: false,
+						timestamp: 3,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "c2",
+						toolName: "bash",
+						content: [{ type: "text", text: "bash-ok" }],
+						isError: false,
+						timestamp: 4,
+					},
+				],
+			},
+			conversionModel,
+		);
+		const assistant = messages.find(m => m.role === 2) as {
+			toolCalls?: Array<{ toolCallId: string; toolName: string; args?: unknown }>;
+		};
+		expect(assistant?.toolCalls).toEqual([
+			{
+				toolCallId: "c1",
+				toolName: "extension_shell",
+				args: { cmd: "echo ext" },
+			},
+			{
+				toolCallId: "c2",
+				toolName: "bash",
+				args: { command: "echo bash" },
+			},
+		]);
+		const results = messages.filter(m => m.role === 3) as Array<{
+			toolContent?: { parts?: Array<{ toolCallId: string; toolName: string; result?: unknown }> };
+		}>;
+		expect(results.map(m => m.toolContent?.parts?.[0])).toEqual([
+			{ toolCallId: "c1", toolName: "extension_shell", result: "ext-ok" },
+			{ toolCallId: "c2", toolName: "bash", result: "bash-ok" },
+		]);
+	});
+
 	test("redacts credential-shaped tokens from system and history when enabled", () => {
 		configureCredentialRedaction(true);
 		try {

@@ -305,6 +305,26 @@ function assertGrokbotToolChoiceSupported(choice: ToolChoice | undefined): void 
 	);
 }
 
+/**
+ * Prefer a custom wire alias only when this internal tool owns that advertised
+ * slot. Collision losers (e.g. `extension_shell` with `customWireName: "Shell"`
+ * while `bash` owns Shell) must keep their internal name so product-wire replay
+ * does not attribute their args to the winner's schema.
+ */
+function resolveOwnedCustomWireName(
+	internalName: string,
+	persistedAlias: string | undefined,
+	meta: ProductWireToolIndexMeta | undefined,
+	grammarTools?: Map<string, ProductWireToolIndexMeta>,
+): string {
+	const alias = persistedAlias || meta?.customWireName;
+	if (!alias) return internalName;
+	if (!grammarTools) return alias;
+	const owner = grammarTools.get(alias)?.name;
+	if (owner === undefined || owner === internalName) return alias;
+	return internalName;
+}
+
 function toolCallFromPart(part: unknown, grammarTools?: Map<string, ProductWireToolIndexMeta>) {
 	if (!part || typeof part !== "object") return undefined;
 	const p = part as Record<string, unknown>;
@@ -324,7 +344,11 @@ function toolCallFromPart(part: unknown, grammarTools?: Map<string, ProductWireT
 	// when tools are absent — never treat a wire alias alone as grammar while
 	// the advertised tool declares structured field-3 parameters.
 	const isGrammar = meta !== undefined ? Boolean(meta.isGrammar) : Boolean(customWireName);
-	const wireName = customWireName || meta?.customWireName || name;
+	const internalName = name || meta?.name || "";
+	const wireName =
+		resolveOwnedCustomWireName(internalName, customWireName || undefined, meta, grammarTools) ||
+		customWireName ||
+		name;
 	const tc: { toolCallId: string; toolName: string; args?: Record<string, unknown>; rawToolCallArgs?: string } = {
 		toolCallId: id,
 		toolName: wireName,
@@ -448,6 +472,9 @@ export function toInferenceMessages(context: Context, model: Model<"grokbot-sand
 	};
 
 	const toolWireIndex = buildGrammarToolIndex(context.tools);
+	// Align Shell/Read/Write (and customWireName) ownership with product
+	// advertisement so history aliases match collision winners.
+	augmentToolIndexForProductWire(toolWireIndex, context.tools);
 	// Prefer the wire name from the preceding assistant call with the same
 	// toolCallId — edit.mode / tool set can change after a grammar call is in
 	// history, so looking up the current context.tools would mismatch names.
@@ -464,7 +491,9 @@ export function toInferenceMessages(context: Context, model: Model<"grokbot-sand
 			const callId = String(record.toolCallId || record.tool_call_id || "");
 			const internalName = String(record.toolName || record.tool_name || "");
 			const meta = internalName ? toolWireIndex.get(internalName) : undefined;
-			const wireName = (callId ? wireNameByCallId.get(callId) : undefined) || meta?.customWireName || internalName;
+			const wireName =
+				(callId ? wireNameByCallId.get(callId) : undefined) ||
+				resolveOwnedCustomWireName(internalName, undefined, meta, toolWireIndex);
 			const part: Record<string, unknown> = {
 				toolCallId: callId,
 				toolName: wireName,
