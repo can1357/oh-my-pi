@@ -2818,19 +2818,105 @@ mod tests {
 		assert_eq!(survivor_status, ProcessStatus::Exited, "the survivor must be swept");
 	}
 
-	/// The accessor callers gate on has to answer for the kernel, not for the
-	/// probe's own premise. Corroborated against the independent measurement
-	/// below, which builds a real group and requires the scoped call to resolve
-	/// it — where the production probe asks only the syscall's argument
-	/// validation and needs no process at all.
-	#[cfg(unix)]
+	/// The accessor callers gate on has to answer for the kernel, not restate
+	/// its own premise, and it has to answer for the case it is read in: a
+	/// group whose leader has already been reaped. A live leader proves nothing
+	/// here — its pid still holds the group, so the number alone would do.
+	#[cfg(target_os = "linux")]
 	#[test]
-	fn group_outlives_its_leader_agrees_with_the_kernel() {
+	fn group_outlives_its_leader_agrees_with_the_kernel_after_a_reap() {
 		assert_eq!(
 			group_outlives_its_leader(),
-			kernel_scopes_pidfd_signals_to_groups(),
-			"the gate callers read must match what the kernel actually does with a group scope"
+			kernel_reaches_a_reaped_leaders_group(),
+			"the gate callers read must match what the kernel does with a group whose leader is gone"
 		);
+	}
+
+	/// No pidfd, so no scope, and the accessor has to say so rather than
+	/// inherit an answer from the Linux branch.
+	#[cfg(all(unix, not(target_os = "linux")))]
+	#[test]
+	fn group_never_outlives_its_leader_without_pidfds() {
+		assert!(
+			!group_outlives_its_leader(),
+			"a platform with no pidfd cannot reach a reaped leader's group"
+		);
+	}
+
+	/// Whether this kernel reaches a process group through a pidfd retained
+	/// from before its leader was reaped.
+	///
+	/// Deliberately built the *other* way round from the production probe,
+	/// which asks the syscall's argument validation on a deliberately closed
+	/// descriptor and needs no process at all. Re-deriving it that way would
+	/// not be independence — both copies would carry the same premise.
+	///
+	/// Everything that is setup rather than measurement asserts instead of
+	/// answering `false`: a group that could not be built agrees with a gate
+	/// that is wrong in the opposite direction, which is the one way this
+	/// corroboration could pass while establishing nothing.
+	#[cfg(target_os = "linux")]
+	fn kernel_reaches_a_reaped_leaders_group() -> bool {
+		const SYS_PIDFD_OPEN: libc::c_long = 434;
+		const PROCESS_GROUP: libc::c_uint = 4;
+
+		let (mut leader, leader_pin, survivor) = spawn_own_group_with_survivor();
+		let pgid = leader_pin.pid();
+		// SAFETY: `pidfd_open` takes the pid by value and reads no caller-owned
+		// memory. Flags are zero, which is valid. Taken while the leader is still a
+		// task, because that is the descriptor the production path retains.
+		let opened = unsafe { libc::syscall(SYS_PIDFD_OPEN, pgid, 0 as libc::c_uint) };
+		let open_error = std::io::Error::last_os_error();
+
+		let reaped = leader.wait().is_ok();
+		let leader_gone = Process::from_pid(pgid).is_none();
+		let survivor_group = survivor.group_id();
+		// SAFETY: integer identifiers by value; the null signal delivers nothing.
+		let group_alive = unsafe { libc::kill(-pgid, 0) == 0 };
+
+		let scoped = (opened >= 0).then(|| {
+			let pidfd = opened as libc::c_int;
+			// SAFETY: `pidfd` came from `pidfd_open` above and is closed here exactly
+			// once. A null `siginfo_t` makes the kernel synthesize the same metadata
+			// as `kill(2)`, and signal 0 delivers nothing.
+			unsafe {
+				let ret = libc::syscall(
+					libc::SYS_pidfd_send_signal,
+					pidfd,
+					0,
+					std::ptr::null::<libc::siginfo_t>(),
+					PROCESS_GROUP,
+				);
+				let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+				libc::close(pidfd);
+				(ret, errno)
+			}
+		});
+
+		let _ = survivor.inner.kill(KILL_SIGNAL);
+
+		assert!(opened >= 0, "pidfd_open on a live group leader failed: {open_error}");
+		assert!(reaped, "the leader has to be reaped for this to measure the post-reap case");
+		assert!(
+			leader_gone,
+			"the reaped leader's pid must be unoccupied, or this measures a live leader instead"
+		);
+		assert_eq!(
+			survivor_group,
+			Some(pgid),
+			"the survivor has to still carry the group for there to be anything to reach"
+		);
+		assert!(group_alive, "the group must outlive its leader for this to measure anything");
+		match scoped.expect("the scoped call runs whenever the descriptor opened") {
+			(0, _) => true,
+			// The flags are validated before the descriptor is looked up, so this is
+			// the scope being refused rather than anything about this group.
+			(_, libc::EINVAL) => false,
+			(_, errno) => panic!(
+				"pidfd_send_signal on a retained group pidfd answered neither success nor a refused \
+				 scope: errno {errno}"
+			),
+		}
 	}
 
 	/// Whether this kernel scopes a pidfd signal to the process group, measured

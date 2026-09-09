@@ -408,25 +408,37 @@ describe("LspMuxServer", () => {
 	);
 
 	it.skipIf(process.platform === "win32")(
-		"terminates a helper through pinned identities when the group is not owned",
+		"cannot reach a handshake-spawned helper when the group is not owned",
 		async () => {
-			// The pinned sweep is the whole mechanism on a host that cannot attribute
-			// a reaped leader's group, so it has to keep working with the gate shut.
+			// What the gate governs, stated from the shut side. A helper pinned before
+			// the handshake is still swept by identity, so it says nothing about the
+			// gate — it dies either way. The one the gate decides is the late one: on
+			// a host that cannot attribute a reaped leader's group the mux never takes
+			// the group, and nothing then names a helper born after the pin.
 			const gateSpy = spyOn(groupOwnership, "available").mockReturnValue(false);
+			const startupFile = path.join(tmpDir, "startup-helper.pid");
+			const handshakeFile = path.join(tmpDir, "late-helper.pid");
+			connectParams.env = {
+				TEST_LSP_HELPER_PID_FILE: startupFile,
+				TEST_LSP_HANDSHAKE_HELPER_PID_FILE: handshakeFile,
+			};
+			const { client } = await link();
+			await initialize(client);
+			expect(gateSpy).toHaveBeenCalled();
+			const startupPid = await readPid(startupFile);
+			const settled = server.shutdown().then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+			const latePid = await readPid(handshakeFile);
 			try {
-				const helperFile = path.join(tmpDir, "helper.pid");
-				connectParams.env = { TEST_LSP_HELPER_PID_FILE: helperFile };
-				const { client } = await link();
-				await initialize(client);
-				const helperPid = await readPid(helperFile);
-				try {
-					expect(processRunning(helperPid)).toBe(true);
-					await server.shutdown();
-					expect(processRunning(helperPid)).toBe(false);
-				} finally {
-					killPid(helperPid);
-				}
+				const failure = await settled;
+				if (failure !== undefined) throw failure;
+				expect(processRunning(startupPid)).toBe(false);
+				expect(processRunning(latePid)).toBe(true);
 			} finally {
+				killPid(startupPid);
+				killPid(latePid);
 				gateSpy.mockRestore();
 			}
 		},
