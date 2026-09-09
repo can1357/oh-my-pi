@@ -1242,6 +1242,7 @@ export type AnthropicClientOptionsArgs = {
 	fetch?: FetchImpl;
 	maxRetryDelayMs?: number;
 	sessionId?: string;
+	cliDisabled?: boolean;
 };
 
 export type AnthropicClientOptionsResult = {
@@ -2175,6 +2176,7 @@ const streamAnthropicOnce = (
 				const created = createClient(model, {
 					model,
 					apiKey,
+					cliDisabled,
 					extraBetas,
 					stream: !zeroOutputCacheRefresh,
 					interleavedThinking: options?.interleavedThinking ?? true,
@@ -3075,6 +3077,7 @@ const streamAnthropicOnce = (
 							const created = createClient(model, {
 								model,
 								apiKey,
+								cliDisabled: true,
 								extraBetas,
 								stream: true,
 								interleavedThinking: options?.interleavedThinking ?? true,
@@ -3272,6 +3275,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		maxRetryDelayMs,
 		sessionId,
 		disableStrictTools: disableStrictToolsOverride,
+		cliDisabled: cliDisabledOverride,
 	} = args;
 	const compat = model.compat;
 	const disableStrictTools = disableStrictToolsOverride ?? compat.disableStrictTools;
@@ -3318,7 +3322,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	if (model.provider === "github-copilot") {
 		const parsedKey = parseGitHubCopilotApiKey(apiKey);
 		const copilotApiKey = parsedKey.accessToken;
-		const cliDisabled = parsedKey.cliDisabled ?? isCopilotCliDisabled(copilotApiKey);
+		const cliDisabled = cliDisabledOverride ?? parsedKey.cliDisabled ?? isCopilotCliDisabled(copilotApiKey);
 		// The GitHub Copilot Anthropic proxy doesn't accept Anthropic beta
 		// features. Forward only caller-supplied betas.
 		const betaFeatures = [...extraBetas];
