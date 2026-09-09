@@ -8,6 +8,7 @@
 - Grok Bot `sand-wire-model-id` rewrites are tools-scoped (`sand-wire-model-id-when=tools`) so text-only requests keep the selected model.
 - Grok Bot JSON-as-text tool promotion requires catalog `sand-promote-json-text-tools` or a product wire profile (native example JSON stays text).
 - Grok Bot remaps retained SendToUser content indexes after dropping incomplete leftover tools so JSON-shaped user text is not promoted into a tool call.
+- Grok Bot correlates name-less SendToUser continuation frames by call id/index so parent-chat replies stay synthetic text.
 
 ## [18.1.15] - 2026-09-08
 

@@ -1143,10 +1143,24 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				let sendToUserLastContent = "";
 				/** Content indexes whose text came from synthetic SendToUser — never promote. */
 				const sendToUserTextIndexes = new Set<number>();
+				/** Open SendToUser correlation keys (`id:…` / `idx:…`) for name-less continuation frames. */
+				const openSendToUserKeys = new Set<string>();
 				const toolStates = new Map<
 					string,
 					{ key: string; index: number; block: ToolCall; argsText: string; ended: boolean; isGrammar: boolean }
 				>();
+
+				const sendToUserKeysForPart = (part: Record<string, unknown>): string[] => {
+					const keys: string[] = [];
+					const id = String(part.toolCallId || part.tool_call_id || "");
+					if (id) keys.push(`id:${id}`);
+					const indexHint = part.toolIndex ?? part.tool_index;
+					if (typeof indexHint === "number") keys.push(`idx:${indexHint}`);
+					return keys;
+				};
+
+				const isOpenSendToUserPart = (part: Record<string, unknown>): boolean =>
+					sendToUserKeysForPart(part).some(key => openSendToUserKeys.has(key));
 
 				const closeOpen = () => {
 					if (openKind === "text" && openIndex >= 0) {
@@ -1217,6 +1231,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				};
 
 				const handleSendToUser = (part: Record<string, unknown>) => {
+					for (const key of sendToUserKeysForPart(part)) openSendToUserKeys.add(key);
 					const argsText =
 						part.args == null ? "" : typeof part.args === "string" ? part.args : JSON.stringify(part.args);
 					if (argsText) sendToUserArgsText = argsText;
@@ -1239,6 +1254,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						// suffix/dedupe against the previous message's content.
 						sendToUserArgsText = "";
 						sendToUserLastContent = "";
+						// Drop every correlation key for this call (id and/or index).
+						// Continuations may omit one side; clearing the whole set
+						// avoids leaving a stale id after an index-only final frame.
+						openSendToUserKeys.clear();
 					}
 				};
 
@@ -1462,6 +1481,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							);
 							// Only intercept the synthetic parent-chat helper. When an
 							// extension owns the SendToUser wire name, dispatch it.
+							// Name-less continuation frames (id/index only) stay on this
+							// path via openSendToUserKeys — same correlation as upsertTool.
 							const ompOwnsSendToUser =
 								Array.isArray(context.tools) &&
 								context.tools.some(tool => {
@@ -1470,7 +1491,11 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 									const custom = typeof tool.customWireName === "string" ? tool.customWireName.trim() : "";
 									return name === SEND_TO_USER_WIRE_NAME || custom === SEND_TO_USER_WIRE_NAME;
 								});
-							if (wireToolName === SEND_TO_USER_WIRE_NAME && !ompOwnsSendToUser) {
+							const isSyntheticSendToUser =
+								!ompOwnsSendToUser &&
+								(wireToolName === SEND_TO_USER_WIRE_NAME ||
+									isOpenSendToUserPart(toolPart as Record<string, unknown>));
+							if (isSyntheticSendToUser) {
 								handleSendToUser(toolPart as Record<string, unknown>);
 							} else {
 								upsertTool(toolPart as Record<string, unknown>);
