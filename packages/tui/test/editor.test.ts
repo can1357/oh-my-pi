@@ -314,14 +314,17 @@ describe("Editor component", () => {
 			expect(editor.getCursor()).toEqual({ line: 2, col: 5 });
 		});
 
-		it("anchors history entry at bottom when navigating with Down", () => {
+		it("anchors older history at the bottom when navigating with Down", () => {
 			const editor = new Editor(defaultEditorTheme);
 
 			editor.addToHistory("older");
 			editor.addToHistory("line1\nline2\nline3");
 			editor.handleInput("\x1b[A"); // latest, anchored at bottom
+			editor.handleInput("\x1b[A"); // move within latest entry
+			editor.handleInput("\x1b[A"); // first visual line of latest entry
 			editor.handleInput("\x1b[A"); // older, anchored at bottom
-			expect(editor.getCursor()).toEqual({ line: 2, col: 5 });
+			expect(editor.getText()).toBe("older");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 5 });
 
 			editor.handleInput("\x1b[B"); // newer, anchored at bottom
 			expect(editor.getText()).toBe("line1\nline2\nline3");
