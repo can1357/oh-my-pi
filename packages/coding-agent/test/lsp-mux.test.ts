@@ -12,7 +12,7 @@ import {
 	type MuxConnectParams,
 	type MuxConnectResult,
 } from "../src/lsp/mux/protocol";
-import { LspMuxServer } from "../src/lsp/mux/server";
+import { LspMuxServer, TERMINATION_BUDGET_MS } from "../src/lsp/mux/server";
 import { ChildProcess } from "@oh-my-pi/pi-utils/ptree";
 
 interface RpcMessage {
@@ -160,6 +160,41 @@ async function withTimeout<T>(promise: Promise<T>, description: string, timeoutM
 	}
 }
 
+function processAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code !== "ESRCH";
+	}
+}
+
+function killPid(pid: number): void {
+	try {
+		process.kill(pid, "SIGKILL");
+	} catch {}
+}
+
+async function readPid(file: string): Promise<number> {
+	let pid = 0;
+	await pollUntil(
+		async () => {
+			pid =
+				Number.parseInt(
+					(
+						await Bun.file(file)
+							.text()
+							.catch(() => "")
+					).trim(),
+					10,
+				) || 0;
+			return pid > 0;
+		},
+		`pid in ${path.basename(file)}`,
+	);
+	return pid;
+}
+
 const fixturePath = path.join(import.meta.dir, "fixtures", "fake-lsp-server.ts");
 const initializeParams = (processId = 424242): Record<string, unknown> => ({
 	processId,
@@ -263,6 +298,87 @@ describe("LspMuxServer", () => {
 				try {
 					process.kill(helperPid, "SIGKILL");
 				} catch {}
+			}
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"terminates a helper subtree whose direct child dies during the handshake",
+		async () => {
+			// The helper is killed while answering `shutdown`, so by termination time
+			// only its reparented grandchild is left, reachable from neither the
+			// helper nor the exited server.
+			const grandchildFile = path.join(tmpDir, "grandchild.pid");
+			connectParams.env = { TEST_LSP_GRANDCHILD_PID_FILE: grandchildFile };
+			const { client } = await link();
+			await initialize(client);
+			const grandchildPid = await readPid(grandchildFile);
+			try {
+				expect(processAlive(grandchildPid)).toBe(true);
+				await server.shutdown();
+				await pollUntil(() => Promise.resolve(!processAlive(grandchildPid)), "grandchild termination", 6_000);
+			} finally {
+				killPid(grandchildPid);
+			}
+		},
+		10_000,
+	);
+
+	for (const failure of ["timeout", "error"] as const) {
+		it.skipIf(process.platform === "win32")(
+			`reports incomplete shutdown when helper termination ${failure}s`,
+			async () => {
+				const helperFile = path.join(tmpDir, "helper.pid");
+				connectParams.env = { TEST_LSP_HELPER_PID_FILE: helperFile };
+				const { client } = await link();
+				await initialize(client);
+				const helperPid = await readPid(helperFile);
+				const killTreeAndWait = Process.prototype.killTreeAndWait;
+				const spy = spyOn(Process.prototype, "killTreeAndWait").mockImplementation(
+					async function (this: Process, options) {
+						if (this.pid !== helperPid) return killTreeAndWait.call(this, options);
+						if (failure === "error") throw new Error("Native helper termination failed");
+						return false;
+					},
+				);
+				try {
+					await expect(server.shutdown()).rejects.toThrow("LSP mux shutdown incomplete");
+				} finally {
+					spy.mockRestore();
+					killPid(helperPid);
+					// The memoized rejection would resurface in afterEach's own shutdown.
+					server = new LspMuxServer();
+				}
+			},
+			10_000,
+		);
+	}
+
+	it.skipIf(process.platform === "win32")(
+		"bounds helper termination by the hard-termination budget",
+		async () => {
+			// Asserted on the budget handed to the native wait rather than on elapsed
+			// wall clock, which goes flaky under load.
+			const helperFile = path.join(tmpDir, "helper.pid");
+			connectParams.env = { TEST_LSP_HELPER_PID_FILE: helperFile };
+			const { client } = await link();
+			await initialize(client);
+			const helperPid = await readPid(helperFile);
+			const budgets: (number | undefined)[] = [];
+			const killTreeAndWait = Process.prototype.killTreeAndWait;
+			const spy = spyOn(Process.prototype, "killTreeAndWait").mockImplementation(
+				async function (this: Process, options) {
+					if (this.pid === helperPid) budgets.push(options?.timeoutMs ?? undefined);
+					return killTreeAndWait.call(this, options);
+				},
+			);
+			try {
+				await server.shutdown();
+				expect(budgets).toEqual([TERMINATION_BUDGET_MS]);
+			} finally {
+				spy.mockRestore();
+				killPid(helperPid);
 			}
 		},
 		10_000,

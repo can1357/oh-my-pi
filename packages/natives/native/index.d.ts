@@ -319,6 +319,15 @@ export declare class Process {
   waitForExit(options?: ProcessWaitOptions | undefined | null): Promise<boolean>
   /** Process group id for this process, when supported by the platform. */
   groupId(): number | null
+  /**
+   * Live descendants of this process as stable process references, with any
+   * protected subtree pruned.
+   *
+   * Unlike [`Process::children`] this is the whole subtree, which is what a
+   * caller pinning a tree for later termination needs: once the root exits
+   * its survivors are reparented out of reach of a walk rooted at its pid.
+   */
+  descendants(): Array<Process>
   /** Direct children of this process as stable process references. */
   children(): Array<Process>
   /** Current status of this process reference. */

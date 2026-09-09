@@ -31,6 +31,21 @@ if (Bun.env.TEST_LSP_HELPER_PID_FILE) {
 	helper.unref();
 	await Bun.write(Bun.env.TEST_LSP_HELPER_PID_FILE, String(helper.pid));
 }
+// A helper that itself has a child and is killed while the shutdown handshake
+// runs, so the grandchild is reparented out of reach of both the helper and
+// this server before the mux gets to terminate anything.
+let dyingHelperPid: number | null = null;
+if (Bun.env.TEST_LSP_GRANDCHILD_PID_FILE) {
+	const grandchildFile = Bun.env.TEST_LSP_GRANDCHILD_PID_FILE;
+	const helper = Bun.spawn(["/bin/sh", "-c", `sleep 60 & echo $! > ${grandchildFile}; exec sleep 60`], {
+		stdin: "ignore",
+		stdout: "ignore",
+		stderr: "ignore",
+	});
+	helper.unref();
+	dyingHelperPid = helper.pid;
+	while (!(await Bun.file(grandchildFile).exists())) await Bun.sleep(5);
+}
 let shutdownReceived = false;
 let processId: number | null = null;
 const didOpen: Record<string, number> = {};
@@ -132,6 +147,12 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 		}
 		case "shutdown":
 			shutdownReceived = true;
+			if (dyingHelperPid !== null) {
+				try {
+					process.kill(dyingHelperPid, "SIGKILL");
+				} catch {}
+				dyingHelperPid = null;
+			}
 			respond(id, null);
 			break;
 		default:

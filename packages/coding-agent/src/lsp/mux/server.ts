@@ -20,7 +20,8 @@ import {
 const SERVER_LINGER_MS = 5 * 60 * 1_000;
 const MUX_IDLE_MS = 15 * 60 * 1_000;
 const SHUTDOWN_BUDGET_MS = 2_000;
-const TERMINATION_BUDGET_MS = 1_000;
+/** Hard-termination budget for a server root and anything it left behind. */
+export const TERMINATION_BUDGET_MS = 1_000;
 
 type RpcMessage = LspJsonRpcRequest | LspJsonRpcResponse | LspJsonRpcNotification;
 
@@ -756,7 +757,10 @@ export class LspMuxServer {
 		// Pinned before the handshake, because this method waits for the root to
 		// exit: a walk rooted at an exited pid finds nothing, so a helper the
 		// server leaves running would be unreachable by the time it is killed.
-		const helpers = Process.fromPid(server.proc.pid)?.children() ?? [];
+		// The whole subtree, not just direct children: a helper that dies during
+		// the handshake reparents its own children out of reach of both it and the
+		// exited root.
+		const helpers = Process.fromPid(server.proc.pid)?.descendants() ?? [];
 		try {
 			await withTimeout(
 				(async () => {
@@ -773,28 +777,45 @@ export class LspMuxServer {
 		} finally {
 			resolve();
 			server.pending.delete(id);
-			const [termination] = await Promise.allSettled([this.#killServer(server), this.#killHelpers(server, helpers)]);
-			if (termination.status === "rejected") throw termination.reason;
+			const outcomes = await Promise.allSettled([this.#killServer(server), this.#killHelpers(server, helpers)]);
+			const failures = outcomes.flatMap(outcome => (outcome.status === "rejected" ? [outcome.reason] : []));
+			// A helper left behind is an incomplete termination exactly like a root
+			// left behind, so it fails the shutdown rather than only warning.
+			if (failures.length === 1) throw failures[0];
+			if (failures.length > 1)
+				throw new AggregateError(failures, `LSP mux server termination incomplete: ${server.key}`);
 		}
 	}
 
 	/**
-	 * Hard-kill helpers pinned before the root exited.
+	 * Hard-kill anything pinned from the server's tree before its root exited.
 	 *
 	 * `killAndWait()` captures the tree when it runs, and by then the root is
-	 * gone, so these pinned references are the only remaining handle on anything
+	 * gone, so these pinned references are the only remaining handle on whatever
 	 * the server left behind. Each is identity-checked natively, so a pid that
 	 * has since been recycled is not signalled.
+	 *
+	 * Held to the same contract as the root: the same hard-termination budget,
+	 * and an outcome that leaves a process alive — a rejection or an exhausted
+	 * budget alike — is reported rather than logged and dropped.
 	 */
 	async #killHelpers(server: ServerInstance, helpers: Process[]): Promise<void> {
 		const survivors = helpers.filter(helper => helper.status() === ProcessStatus.Running);
 		if (survivors.length === 0) return;
-		const results = await Promise.allSettled(survivors.map(helper => helper.killTreeAndWait()));
-		for (const result of results) {
+		const results = await Promise.allSettled(
+			survivors.map(helper => helper.killTreeAndWait({ timeoutMs: TERMINATION_BUDGET_MS })),
+		);
+		const failures = results.flatMap((result, index) => {
+			const pid = survivors[index].pid;
 			if (result.status === "rejected")
-				logger.warn("LSP mux helper termination failed", { server: server.key, error: String(result.reason) });
-			else if (result.value === false) logger.warn("LSP mux helper termination timed out", { server: server.key });
-		}
+				return [new Error(`LSP mux helper termination failed: ${pid}: ${String(result.reason)}`)];
+			return result.value ? [] : [new Error(`LSP mux helper termination timed out: ${pid}`)];
+		});
+		if (failures.length === 0) return;
+		for (const failure of failures)
+			logger.warn("LSP mux helper termination incomplete", { server: server.key, error: failure.message });
+		if (failures.length === 1) throw failures[0];
+		throw new AggregateError(failures, `LSP mux helper termination incomplete: ${server.key}`);
 	}
 
 	#killServer(server: ServerInstance): Promise<void> {

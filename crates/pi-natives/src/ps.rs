@@ -220,6 +220,22 @@ impl Process {
 		self.inner.group_id()
 	}
 
+	/// Live descendants of this process as stable process references, with any
+	/// protected subtree pruned.
+	///
+	/// Unlike [`Process::children`] this is the whole subtree, which is what a
+	/// caller pinning a tree for later termination needs: once the root exits
+	/// its survivors are reparented out of reach of a walk rooted at its pid.
+	#[napi]
+	pub fn descendants(&self) -> Vec<Process> {
+		self
+			.inner
+			.descendants()
+			.into_iter()
+			.map(Self::from_inner)
+			.collect()
+	}
+
 	/// Direct children of this process as stable process references.
 	#[napi]
 	pub fn children(&self) -> Vec<Process> {

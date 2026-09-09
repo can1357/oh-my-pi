@@ -1450,6 +1450,16 @@ impl Process {
 		self.signal_tree(signal.unwrap_or(KILL_SIGNAL))
 	}
 
+	/// Live descendants of this process, with every protected subtree pruned.
+	///
+	/// A snapshot for callers that must terminate a tree *later*: once the root
+	/// exits, its survivors are reparented and a walk rooted at its pid can no
+	/// longer see them, so the references have to be pinned while it is alive.
+	#[must_use]
+	pub fn descendants(&self) -> Vec<Self> {
+		self.signalable_descendants(&host_protected_pids())
+	}
+
 	/// Snapshot and hard-kill the tree before returning its exit waiter.
 	pub fn hard_kill_tree(&self) -> ProcessExitWait {
 		let protected = host_protected_pids();
