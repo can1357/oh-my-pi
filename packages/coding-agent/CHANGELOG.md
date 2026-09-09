@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an ask dialog preview side panel, expandable option descriptions (`→`/`←`), number-key jumps to options, and `/` filtering for long option lists.
 ## [18.1.16] - 2026-09-09
 
 ### Added
@@ -23,6 +26,17 @@
 - Extensions loaded by the npm CLI now apply settings overrides to the active session, so generated agents and model choices remain isolated between sessions ([#11047](https://github.com/can1357/oh-my-pi/pull/11047) by [@mgpai22](https://github.com/mgpai22)).
 - Live task dispatch now reloads added, changed, removed, and deleted project task and retry settings before resolving subagents ([#11191](https://github.com/can1357/oh-my-pi/issues/11191)).
 - Reset `/loop` iterations combined with `--while` / `--until` no longer keep submitting without resetting when vibe mode is enabled while the condition command is still running; the loop now disables itself instead ([#10858](https://github.com/can1357/oh-my-pi/pull/10858)).
+
+### Changed
+
+- Unified ask option markers across the dialog, transcript, and legacy prompts, with a visible count whenever option text is clipped.
+
+### Fixed
+
+- Kept the ask filter available after a query that fits the viewport so `/` can reopen it.
+- Rechecked ask list overflow when the focused row changes so a short option is not rendered one column narrower.
+- Reserved the filter count suffix when measuring ask dialog height so opening the filter cannot grow the frozen panel.
+- Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 
 ## [18.1.15] - 2026-09-08
 
