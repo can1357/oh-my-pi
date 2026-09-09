@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { getBlobsDir, isEnoent, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { Semaphore } from "../task/parallel";
 import { BlobStore, isBlobRef, resolveImageData, resolveImageDataUrl } from "./blob-store";
 import { buildSessionContext } from "./session-context";
 import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
@@ -17,6 +18,7 @@ import {
 const STREAM_LOAD_THRESHOLD_BYTES = 8 * 1024 * 1024;
 const STREAM_YIELD_BYTES = 1 * 1024 * 1024;
 const STREAM_YIELD_ENTRIES = 8_192;
+const BLOB_READ_CONCURRENCY = 8;
 
 export interface VisitEntriesFromFileStreamOptions {
 	/** Stop after the visitor returns `false`. */
@@ -331,14 +333,16 @@ function hasImageUrl(value: unknown): value is { image_url: string } {
 	return typeof value === "object" && value !== null && "image_url" in value && typeof value.image_url === "string";
 }
 
-async function resolvePersistedBlobRefs(value: unknown, blobStore: BlobStore, key?: string): Promise<void> {
+type BlobReferenceResolver = (data: string, asDataUrl?: boolean) => Promise<string>;
+
+async function resolvePersistedBlobRefs(value: unknown, resolve: BlobReferenceResolver, key?: string): Promise<void> {
 	if (isExternalizableImagePosition(value, key) && isBlobRef(value.data)) {
-		value.data = await resolveImageData(blobStore, value.data);
+		value.data = await resolve(value.data);
 		return;
 	}
 
 	if (Array.isArray(value)) {
-		await Promise.all(value.map(item => resolvePersistedBlobRefs(item, blobStore, key)));
+		await Promise.all(value.map(item => resolvePersistedBlobRefs(item, resolve, key)));
 		return;
 	}
 
@@ -350,15 +354,15 @@ async function resolvePersistedBlobRefs(value: unknown, blobStore: BlobStore, ke
 		typeof value.result === "string" &&
 		isBlobRef(value.result)
 	) {
-		value.result = await resolveImageData(blobStore, value.result);
+		value.result = await resolve(value.result);
 	}
 
 	if (hasImageUrl(value) && isBlobRef(value.image_url)) {
-		value.image_url = await resolveImageDataUrl(blobStore, value.image_url);
+		value.image_url = await resolve(value.image_url, true);
 	}
 
 	await Promise.all(
-		Object.entries(value).map(([childKey, item]) => resolvePersistedBlobRefs(item, blobStore, childKey)),
+		Object.entries(value).map(([childKey, item]) => resolvePersistedBlobRefs(item, resolve, childKey)),
 	);
 }
 
@@ -404,18 +408,28 @@ function repairTruncatedSnapcompactFrames(entry: FileEntry): void {
 	});
 }
 
-export async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore: BlobStore): Promise<void> {
+async function resolveBlobRefs(values: readonly unknown[], blobStore: BlobStore): Promise<void> {
+	const semaphore = new Semaphore(BLOB_READ_CONCURRENCY);
+	const resolve: BlobReferenceResolver = async (data, asDataUrl = false) => {
+		await semaphore.acquire();
+		try {
+			return await (asDataUrl ? resolveImageDataUrl(blobStore, data) : resolveImageData(blobStore, data));
+		} finally {
+			semaphore.release();
+		}
+	};
 	const pending: Promise<void>[] = [];
-	// Interleave precheck + initiation per entry so a positive entry begins resolution at the same
-	// relative point as the old filter+map schedule (no scan-all-first pass that could observe a
-	// later entry before an earlier resolution mutates it).
-	for (const entry of entries) {
-		if (entry.type === "session") continue;
-		repairTruncatedSnapcompactFrames(entry);
-		if (!containsBlobRef(entry)) continue;
-		pending.push(resolvePersistedBlobRefs(entry, blobStore));
+	for (const value of values) {
+		if (!containsBlobRef(value)) continue;
+		pending.push(resolvePersistedBlobRefs(value, resolve));
 	}
 	await Promise.all(pending);
+}
+
+export async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore: BlobStore): Promise<void> {
+	const sessionEntries = entries.filter(entry => entry.type !== "session");
+	for (const entry of sessionEntries) repairTruncatedSnapcompactFrames(entry);
+	await resolveBlobRefs(sessionEntries, blobStore);
 }
 
 /**
@@ -430,10 +444,21 @@ export async function loadSessionMessagesReadOnly(filePath: string): Promise<Age
 	const entries = await loadEntriesFromFile(filePath);
 	if (entries.length === 0) return [];
 	migrateToCurrentVersion(entries);
-	await resolveBlobRefsInEntries(entries, new BlobStore(getBlobsDir()));
+	for (const entry of entries) repairTruncatedSnapcompactFrames(entry);
 	const sessionEntries = entries.filter((e): e is SessionEntry => e.type !== "session");
-	return buildSessionContext(sessionEntries, undefined, undefined, {
+	const { messages } = buildSessionContext(sessionEntries, undefined, undefined, {
 		transcript: true,
 		collapseCompactedHistory: true,
-	}).messages;
+	});
+	// A collapsed summary carries the remote-compaction replacement history for
+	// provider replay only; this transcript is never replayed, and the renderer
+	// reads just the summary. Dropping it keeps hydration off every image blob
+	// buried in that hidden history.
+	const displayMessages = messages.map(message =>
+		message.role === "compactionSummary" && message.providerPayload !== undefined
+			? { ...message, providerPayload: undefined }
+			: message,
+	);
+	await resolveBlobRefs(displayMessages, new BlobStore(getBlobsDir()));
+	return displayMessages;
 }
