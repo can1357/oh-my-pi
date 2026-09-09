@@ -39,7 +39,7 @@ import type { DevinOptions } from "./devin";
 import type { GoogleOptions } from "./google";
 import type { GoogleGeminiCliOptions } from "./google-gemini-cli";
 import type { GoogleVertexOptions } from "./google-vertex";
-import type { GrokbotOptions } from "./grokbot";
+import { streamGrokBot as streamGrokBotImpl } from "./grokbot";
 import type { OllamaChatOptions } from "./ollama";
 import type { OpenAICodexResponsesOptions } from "./openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./openai-completions";
@@ -137,14 +137,6 @@ interface DevinProviderModule {
 	streamDevin: (model: Model<"devin-agent">, context: Context, options: DevinOptions) => AssistantMessageEventStream;
 }
 
-interface GrokbotProviderModule {
-	streamGrokBot: (
-		model: Model<"grokbot-sand">,
-		context: Context,
-		options: GrokbotOptions,
-	) => AssistantMessageEventStream;
-}
-
 interface BedrockProviderModule {
 	streamBedrock: (
 		model: Model<"bedrock-converse-stream">,
@@ -169,7 +161,6 @@ let ollamaProviderModulePromise: Promise<LazyProviderModule<"ollama-chat">> | un
 let cursorProviderModulePromise: Promise<LazyProviderModule<"cursor-agent">> | undefined;
 let cursorProviderModuleOverride: LazyProviderModule<"cursor-agent"> | undefined;
 let devinProviderModulePromise: Promise<LazyProviderModule<"devin-agent">> | undefined;
-let grokbotProviderModulePromise: Promise<LazyProviderModule<"grokbot-sand">> | undefined;
 let bedrockProviderModuleOverride: LazyProviderModule<"bedrock-converse-stream"> | undefined;
 let bedrockProviderModulePromise: Promise<LazyProviderModule<"bedrock-converse-stream">> | undefined;
 
@@ -469,11 +460,9 @@ function loadDevinProviderModule(): Promise<LazyProviderModule<"devin-agent">> {
 }
 
 function loadGrokbotProviderModule(): Promise<LazyProviderModule<"grokbot-sand">> {
-	grokbotProviderModulePromise ||= import("./grokbot").then(module => {
-		const provider = module as GrokbotProviderModule;
-		return { stream: provider.streamGrokBot };
-	});
-	return grokbotProviderModulePromise;
+	// Top-level import (AGENTS.md): no `import("./grokbot")` dynamic path.
+	// Grok Bot still goes through createLazyStream for idle/first-event wrappers.
+	return Promise.resolve({ stream: streamGrokBotImpl });
 }
 
 function loadBedrockProviderModule(): Promise<LazyProviderModule<"bedrock-converse-stream">> {

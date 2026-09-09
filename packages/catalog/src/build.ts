@@ -231,15 +231,17 @@ function supportsOpenAIGAComputerUse(
  * this only runs for discovered/custom/override specs.
  */
 export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi> {
-	const policy = resolveModelPolicy(spec);
-	// Variant/legacy selectors keep `id` for lookup but derive class membership
-	// (glyph tokenization, computer-use wire identity, …) from the canonical
-	// `requestModelId` when present — opaque aliases otherwise classify unknown.
+	// Variant/legacy selectors keep opaque `id` for lookup but resolve the full
+	// model policy (identity, thinking, compat, catalog assignments/corrections)
+	// against the canonical `requestModelId` when present — otherwise opaque
+	// aliases of e.g. grok-4.5 miss supports-tools=false and gemini-3-flash
+	// misses sand-wire-model-id.
 	const requestModelId = spec.requestModelId?.trim();
-	const identity =
+	const policy =
 		requestModelId && requestModelId !== spec.id
-			? resolveModelPolicy({ ...spec, id: requestModelId }).identity
-			: policy.identity;
+			? resolveModelPolicy({ ...spec, id: requestModelId })
+			: resolveModelPolicy(spec);
+	const identity = policy.identity;
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
 	const model: Model<TApi> = {
 		...spec,

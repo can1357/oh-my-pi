@@ -187,6 +187,40 @@ describe("buildModel", () => {
 		expect(getBundledModel("anthropic", "claude-opus-4-8").requiresGlyphTokenization).toBe(true);
 	});
 
+	it("resolves full catalog policy from requestModelId for opaque grokbot aliases", () => {
+		const opaqueGrok = buildModel({
+			id: "opaque-grok-45",
+			name: "Opaque Grok",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+			requestModelId: "grok-4.5",
+		});
+		expect(opaqueGrok.id).toBe("opaque-grok-45");
+		expect(opaqueGrok.supportsTools).toBe(false);
+
+		const opaqueGemini = buildModel({
+			id: "opaque-gemini-flash",
+			name: "Opaque Gemini",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+			requestModelId: "gemini-3-flash",
+		});
+		expect(opaqueGemini.id).toBe("opaque-gemini-flash");
+		expect(opaqueGemini.sandWireModelId).toBe("gemini-3.8-flash");
+	});
+
 	it("loads bundled OpenRouter models with resolved compat", () => {
 		const model = getBundledModel<"openrouter">("openrouter", "anthropic/claude-sonnet-4");
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Grok Bot `register-builtins` loads `streamGrokBot` via a top-level import (AGENTS.md; no `import("./grokbot")` dynamic path).
+
 ## [18.1.15] - 2026-09-08
 
 ### Fixed

@@ -13,8 +13,8 @@
 
 ### Fixed
 
-- Grok Bot backend URL join appends endpoints onto the pathname while preserving reverse-proxy query strings (mint + AvailableModels).
-- Opaque Grok Bot variant/legacy selectors inherit Anthropic (and other) identity from `requestModelId` in `buildModel` so glyph tokenization applies.
+- Grok Bot backend URL join appends endpoints onto the pathname while preserving reverse-proxy query strings, including trailing `/` inside query values (mint + AvailableModels).
+- Opaque Grok Bot variant/legacy selectors resolve full model policy (identity, thinking, compat, catalog assignments/corrections) from `requestModelId` in `buildModel`.
 - Grok Bot model-manager discovery mints with the captured `cacheCredential` when `apiKey` is the `<authenticated>` sentinel (does not re-read ambient secrets mid-flight).
 - Grok Bot auth/discovery tests inject secrets path and env via `runWithGrokbotAuthSource` (no process-wide `setAgentDir` / `process.env` mutation).
 - Grok Bot AvailableModels no longer invents a low/medium/high/xhigh effort ladder when a param is advertised without values; reviewed ladders stay KDL-owned.

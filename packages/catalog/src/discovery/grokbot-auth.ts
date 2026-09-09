@@ -21,9 +21,10 @@ export const GROKBOT_CLIENT_TYPE = "sand";
  * appending onto `pathname` keeps path + search intact.
  */
 export function joinGrokbotBackendUrl(baseUrl: string, apiPath: string): URL {
-	const normalized = (baseUrl.trim() || GROKBOT_BACKEND).replace(/\/+$/, "") || GROKBOT_BACKEND;
+	// Parse first so trailing-slash normalization only touches pathname — never
+	// a query value that happens to end in `/` (e.g. `?token=signed-value/`).
+	const url = new URL(baseUrl.trim() || GROKBOT_BACKEND);
 	const suffix = apiPath.startsWith("/") ? apiPath : `/${apiPath}`;
-	const url = new URL(normalized);
 	const basePath = url.pathname.replace(/\/+$/, "");
 	url.pathname = `${basePath}${suffix}`;
 	return url;

@@ -426,6 +426,13 @@ describe("grokbot backend URL join", () => {
 		).toBe("https://proxy.example/grokbot/aiserver.v1.AiService/AvailableModels?api_key=secret");
 	});
 
+	test("preserves trailing slash inside query values", () => {
+		// Pre-parse `.replace(/\/+$/, "")` on the whole URL would strip `signed-value/`.
+		expect(
+			joinGrokbotBackendUrl("https://proxy.example/grokbot?token=signed-value/", GROKBOT_RENEWAL_PATH).href,
+		).toBe("https://proxy.example/grokbot/sand-box/inference-credential?token=signed-value/");
+	});
+
 	test("mintGrokbotAccessToken posts to the path-preserving renewal URL", async () => {
 		const seen: string[] = [];
 		const fetchImpl = Object.assign(
