@@ -5,6 +5,9 @@
 ### Added
 
 - Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
+### Added
+
+- Extensions can observe the current root agent tree through the read-only `ctx.subagents` v1 snapshot and subscription API, with stable nested identities, lifecycle/progress events, bounded records, and sanitized executor metadata.
 
 ### Fixed
 

@@ -129,6 +129,7 @@ describe("runEvalAgent", () => {
 		expect(options?.mcpManager).toBe(mcpManager);
 		expect(options?.localProtocolOptions).toBe(localProtocolOptions);
 		expect(options?.parentAgentId).toBe("BridgeParent");
+		expect((options as { invocationKind?: string } | undefined)?.invocationKind).toBe("eval");
 	});
 
 	it("returns executor-parsed structured data through the public eval bridge", async () => {

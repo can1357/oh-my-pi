@@ -23,6 +23,7 @@ import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-wr
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
+import type { SubagentObservabilityController } from "./subagent-observability";
 import type {
 	AfterProviderResponseEvent,
 	AssistantThinkingRenderer,
@@ -395,6 +396,7 @@ export async function emitSessionShutdownEvent(extensionRunner: ExtensionRunner 
 	} finally {
 		extensionRunner.disposeFileFallbacks();
 		extensionRunner.clearManagedTimers();
+		extensionRunner.disposeSubagentObservability();
 	}
 }
 
@@ -607,6 +609,7 @@ export class ExtensionRunner {
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
+		private readonly subagents?: SubagentObservabilityController,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
@@ -1173,6 +1176,7 @@ export class ExtensionRunner {
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
 			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
+			subagents: this.subagents,
 			hasUI: this.hasUI(),
 			cwd: this.cwd,
 			sessionManager: this.sessionManager,
@@ -1222,6 +1226,11 @@ export class ExtensionRunner {
 	 */
 	clearManagedTimers(): void {
 		this.#managedTimers.clearAll();
+	}
+
+	/** Release the registry and root-bus listeners owned by the public observer. */
+	disposeSubagentObservability(): void {
+		this.subagents?.dispose();
 	}
 
 	/**

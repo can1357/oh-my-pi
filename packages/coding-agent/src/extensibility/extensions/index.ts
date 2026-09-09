@@ -12,6 +12,7 @@ export {
 	loadExtensions,
 } from "./loader";
 export * from "./runner";
+export * from "./subagent-observability";
 // Type guards
 export * from "./types";
 export * from "./wrapper";
