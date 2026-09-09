@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The `set_auto_compaction` and `set_auto_retry` RPC commands are now session-scoped like `set_thinking_level`, so a short-lived RPC client no longer silently writes `compaction.enabled`/`retry.enabled` to the machine-global `config.yml` ([#11431](https://github.com/can1357/oh-my-pi/issues/11431)).
+
 ## [18.1.16] - 2026-09-09
 
 ### Added

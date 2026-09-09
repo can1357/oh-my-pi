@@ -4652,12 +4652,24 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Toggle auto-compaction setting.
+	 * Toggle auto-compaction. When `persist` is false (the default) the change is
+	 * applied as a session-scoped runtime override — like `setThinkingLevel` — so
+	 * transient callers (e.g. the `set_auto_compaction` RPC command) configure
+	 * only their own session instead of mutating the machine-global `config.yml`.
+	 * The settings panel passes `persist: true` to save the preference durably.
 	 */
-	setAutoCompactionEnabled(enabled: boolean): void {
-		this.#host.settings.set("compaction.enabled", enabled);
+	setAutoCompactionEnabled(enabled: boolean, persist = false): void {
+		if (persist) {
+			this.#host.settings.set("compaction.enabled", enabled);
+		} else {
+			this.#host.settings.override("compaction.enabled", enabled);
+		}
 		if (enabled && resolveCompactionMethodOrder(this.#host.settings.get("compaction.methodOrder")).length === 0) {
-			this.#host.settings.set("compaction.methodOrder", [...DEFAULT_COMPACTION_METHOD_ORDER]);
+			if (persist) {
+				this.#host.settings.set("compaction.methodOrder", [...DEFAULT_COMPACTION_METHOD_ORDER]);
+			} else {
+				this.#host.settings.override("compaction.methodOrder", [...DEFAULT_COMPACTION_METHOD_ORDER]);
+			}
 		}
 	}
 
