@@ -18,7 +18,7 @@ ctor = "0.2"
 arc-swap = "1.7"
 anydoc = "0.1.9"
 arboard = { version = "3.6", features = ["wayland-data-control"] }
-ast-grep-core = { version = "0.39", default-features = false, features = ["tree-sitter"] }
+ast-grep-core = { version = "0.45", default-features = false, features = ["tree-sitter"] }
 argmax = "0.3"
 async-recursion = "1.1"
 async-stream = "0.3"
@@ -240,12 +240,12 @@ tonic-prost-build = "0.14.6"
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "parking_lot"] }
-tree-sitter = "0.25"
+tree-sitter = "0.27"
 tree-sitter-astro = { version = "0.1.1", package = "tree-sitter-astro-next" }
 tree-sitter-bash = "0.25"
 tree-sitter-c = "0.24"
 tree-sitter-c-sharp = "0.23"
-tree-sitter-clojure = "0.1"
+tree-sitter-clojure = { version = "0.2.8", package = "tree-sitter-clojure-orchard" }
 tree-sitter-cmake = "0.7.1"
 tree-sitter-cpp = "0.23"
 tree-sitter-css = "0.25"
@@ -266,7 +266,7 @@ tree-sitter-java = "0.23"
 tree-sitter-javascript = "0.25"
 tree-sitter-json = "0.24"
 tree-sitter-julia = "0.23"
-tree-sitter-just = "0.2.0"
+tree-sitter-just = { version = "2.18.2", package = "arborium-just" }
 tree-sitter-kotlin = { version = "0.4", package = "tree-sitter-kotlin-sg" }
 tree-sitter-lua = "0.5"
 tree-sitter-make = "1.1"

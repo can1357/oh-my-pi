@@ -11,7 +11,6 @@ mod parsers;
 
 use std::{
 	borrow::Cow,
-	collections::HashMap,
 	fmt::{self, Display},
 	iter,
 	path::Path,
@@ -231,27 +230,27 @@ impl LanguageExt for Html {
 	fn extract_injections<L: LanguageExt>(
 		&self,
 		root: Node<StrDoc<L>>,
-	) -> HashMap<String, Vec<TSRange>> {
+	) -> Vec<(String, Vec<TSRange>)> {
 		let lang = root.lang();
-		let mut map = HashMap::new();
+		let mut injections = Vec::new();
 		let matcher = KindMatcher::new("script_element", lang.clone());
 		for script in root.find_all(matcher) {
 			if let Some(content) = script.children().find(|child| child.kind() == "raw_text") {
-				push_html_injection(&mut map, &script, "js", node_to_range(&content));
+				push_html_injection(&mut injections, &script, "js", node_to_range(&content));
 			}
 		}
 		let matcher = KindMatcher::new("style_element", lang.clone());
 		for style in root.find_all(matcher) {
 			if let Some(content) = style.children().find(|child| child.kind() == "raw_text") {
-				push_html_injection(&mut map, &style, "css", node_to_range(&content));
+				push_html_injection(&mut injections, &style, "css", node_to_range(&content));
 			}
 		}
-		map
+		injections
 	}
 }
 
 fn push_html_injection<D: Doc>(
-	map: &mut HashMap<String, Vec<TSRange>>,
+	injections: &mut Vec<(String, Vec<TSRange>)>,
 	node: &Node<D>,
 	default_language: &'static str,
 	range: TSRange,
@@ -268,18 +267,22 @@ fn push_html_injection<D: Doc>(
 	});
 	if let Some(value) = value {
 		let language = value.text();
-		push_injection_range(map, language.as_ref(), range);
+		push_injection_range(injections, language.as_ref(), range);
 	} else {
-		push_injection_range(map, default_language, range);
+		push_injection_range(injections, default_language, range);
 	}
 }
 
-fn push_injection_range(map: &mut HashMap<String, Vec<TSRange>>, language: &str, range: TSRange) {
-	if let Some(ranges) = map.get_mut(language) {
+fn push_injection_range(
+	injections: &mut Vec<(String, Vec<TSRange>)>,
+	language: &str,
+	range: TSRange,
+) {
+	if let Some((_, ranges)) = injections.iter_mut().find(|(name, _)| name == language) {
 		ranges.push(range);
 		return;
 	}
-	map.insert(language.to_owned(), vec![range]);
+	injections.push((language.to_owned(), vec![range]));
 }
 
 fn node_to_range<D: Doc>(node: &Node<D>) -> TSRange {
@@ -663,10 +666,10 @@ impl LanguageExt for SupportLang {
 	fn extract_injections<L: LanguageExt>(
 		&self,
 		root: Node<StrDoc<L>>,
-	) -> HashMap<String, Vec<TSRange>> {
+	) -> Vec<(String, Vec<TSRange>)> {
 		match self {
 			Self::Html => Html.extract_injections(root),
-			_ => HashMap::new(),
+			_ => Vec::new(),
 		}
 	}
 }
