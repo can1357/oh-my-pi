@@ -7,7 +7,6 @@ use std::{
 	os::unix::fs::{MetadataExt as _, PermissionsExt as _},
 	path::{Path, PathBuf},
 	process::Command,
-	sync::Mutex,
 	time::Duration,
 };
 
@@ -16,8 +15,9 @@ use omp_sandbox::{
 	ResourceLimits, RunOptions, Runner, SandboxError, SandboxSpec, WriteMode,
 };
 use tempfile::TempDir;
+use tokio::sync::Mutex;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 struct EnvRestore(Vec<(&'static str, Option<OsString>)>);
 
@@ -86,7 +86,7 @@ fn assert_honest(plan: &omp_sandbox::Plan) {
 
 #[test]
 fn docker_plans_are_hardened_deterministic_and_secret_free() {
-	let _lock = ENV_LOCK.lock().expect("environment mutex poisoned");
+	let _lock = ENV_LOCK.blocking_lock();
 	let root = TempDir::new().expect("temp root");
 	let readable = root.path().join("readable");
 	let writable = root.path().join("writable");
@@ -150,7 +150,7 @@ fn docker_plans_are_hardened_deterministic_and_secret_free() {
 
 #[test]
 fn docker_write_and_network_modes_map_exactly() {
-	let _lock = ENV_LOCK.lock().expect("environment mutex poisoned");
+	let _lock = ENV_LOCK.blocking_lock();
 	let _env = EnvRestore::set(&[
 		("OMP_SANDBOX_DOCKER_IMAGE", OsStr::new("alpine:latest")),
 		("OMP_SANDBOX_DOCKER_RUNTIME", OsStr::new("")),
@@ -190,7 +190,7 @@ fn docker_write_and_network_modes_map_exactly() {
 
 #[test]
 fn docker_runsc_forces_only_the_configured_registered_runtime() {
-	let _lock = ENV_LOCK.lock().expect("environment mutex poisoned");
+	let _lock = ENV_LOCK.blocking_lock();
 	let _env = EnvRestore::set(&[
 		("OMP_SANDBOX_DOCKER_IMAGE", OsStr::new("alpine:latest")),
 		("OMP_SANDBOX_DOCKER_RUNSC_RUNTIME", OsStr::new("runsc-custom")),
@@ -218,7 +218,7 @@ fn docker_runsc_forces_only_the_configured_registered_runtime() {
 
 #[test]
 fn docker_overlay_is_rejected_strictly_and_caveated_honestly() {
-	let _lock = ENV_LOCK.lock().expect("environment mutex poisoned");
+	let _lock = ENV_LOCK.blocking_lock();
 	let root = TempDir::new().unwrap();
 	let _env = EnvRestore::set(&[("OMP_SANDBOX_DOCKER_IMAGE", OsStr::new("alpine"))]);
 	let mut spec = SandboxSpec::new("/bin/true");
@@ -248,7 +248,7 @@ fn docker_overlay_is_rejected_strictly_and_caveated_honestly() {
 
 #[test]
 fn docker_mounted_workdir_uses_component_boundaries() {
-	let _lock = ENV_LOCK.lock().expect("environment mutex poisoned");
+	let _lock = ENV_LOCK.blocking_lock();
 	let root = TempDir::new().unwrap();
 	let work = root.path().join("work");
 	let worker = root.path().join("worker");
@@ -292,7 +292,7 @@ exit 97
 
 #[test]
 fn docker_prepare_locks_image_materializes_private_files_and_owns_cleanup() {
-	let _lock = ENV_LOCK.lock().expect("environment mutex poisoned");
+	let _lock = ENV_LOCK.blocking_lock();
 	let root = TempDir::new().unwrap();
 	let docker = fake_docker(root.path());
 	let denied = root.path().join("secret");
@@ -358,7 +358,7 @@ fn docker_prepare_locks_image_materializes_private_files_and_owns_cleanup() {
 
 #[test]
 fn docker_runsc_prepare_rejects_an_unregistered_runtime() {
-	let _lock = ENV_LOCK.lock().expect("environment mutex poisoned");
+	let _lock = ENV_LOCK.blocking_lock();
 	let root = TempDir::new().unwrap();
 	let docker = fake_docker(root.path());
 	let inspect = r#"[{"Id":"sha256:immutable","Config":{"Volumes":{}}}]"#;
@@ -385,7 +385,7 @@ fn docker_runsc_prepare_rejects_an_unregistered_runtime() {
 
 #[test]
 fn docker_prepare_rejects_undeclared_writable_image_volumes() {
-	let _lock = ENV_LOCK.lock().expect("environment mutex poisoned");
+	let _lock = ENV_LOCK.blocking_lock();
 	let root = TempDir::new().unwrap();
 	let docker = fake_docker(root.path());
 	let inspect = r#"[{"Id":"sha256:immutable","Config":{"Volumes":{"/data":{}}}}]"#;
@@ -413,7 +413,7 @@ async fn docker_live_ephemeral_environment_and_outbound_listen_contract() {
 	if std::env::var_os("OMP_SANDBOX_DOCKER_E2E").as_deref() != Some(OsStr::new("1")) {
 		return;
 	}
-	let _lock = ENV_LOCK.lock().expect("environment mutex poisoned");
+	let _lock = ENV_LOCK.lock().await;
 	let mut layer = SandboxSpec::new("/bin/sh");
 	layer
 		.args([
