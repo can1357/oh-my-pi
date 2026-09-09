@@ -168,6 +168,174 @@ describe("github-copilot multi-account discovery failures", () => {
 		expect(model.oauthCredentialIds).toEqual([101, 102]);
 	});
 
+	it("preserves contextPromotionTarget contributed by a later account in the union", async () => {
+		const options = githubCopilotModelManagerOptions({
+			baseUrl: BASE_URL,
+			resolveAccounts: async () => [
+				{ apiKey: "account-1", accountId: "acc-1", credentialId: 101 },
+				{ apiKey: "account-2", accountId: "acc-2", credentialId: 102 },
+			],
+			fetch: async (_input, init) => {
+				const auth = new Headers(init?.headers).get("Authorization");
+				if (auth === "Bearer account-1") {
+					return Response.json({
+						data: [
+							{
+								id: "test-model",
+								capabilities: {
+									type: "chat",
+									limits: { max_context_window_tokens: 128_000, max_output_tokens: 4_000 },
+								},
+							},
+						],
+					});
+				}
+				return Response.json({
+					data: [
+						{
+							id: "test-model",
+							capabilities: {
+								type: "chat",
+								limits: { max_context_window_tokens: 128_000, max_output_tokens: 4_000 },
+							},
+							billing: {
+								token_prices: {
+									default: {
+										context_max: 32_000,
+									},
+									long_context: {
+										context_max: 128_000,
+									},
+								},
+							},
+						},
+					],
+				});
+			},
+		});
+
+		const models = await options.fetchDynamicModels?.();
+		expect(models).toBeDefined();
+		const baseModel = models!.find(m => m.id === "test-model");
+		const longContextVariant = models!.find(m => m.id === "test-model-1m");
+		expect(longContextVariant).toBeDefined();
+		expect(baseModel?.contextPromotionTarget).toBe("github-copilot/test-model-1m");
+	});
+
+	it("reconciles token pricing by adopting reported prices when a sibling omits them", async () => {
+		const options = githubCopilotModelManagerOptions({
+			baseUrl: BASE_URL,
+			resolveAccounts: async () => [
+				{ apiKey: "account-1", accountId: "acc-1", credentialId: 101 },
+				{ apiKey: "account-2", accountId: "acc-2", credentialId: 102 },
+			],
+			fetch: async (_input, init) => {
+				const auth = new Headers(init?.headers).get("Authorization");
+				if (auth === "Bearer account-1") {
+					return Response.json({
+						data: [
+							{
+								id: "test-price-model",
+								capabilities: {
+									type: "chat",
+									limits: { max_context_window_tokens: 128_000, max_output_tokens: 4_000 },
+								},
+							},
+						],
+					});
+				}
+				return Response.json({
+					data: [
+						{
+							id: "test-price-model",
+							capabilities: {
+								type: "chat",
+								limits: { max_context_window_tokens: 128_000, max_output_tokens: 4_000 },
+							},
+							billing: {
+								token_prices: {
+									default: {
+										input_price: 300,
+										output_price: 1500,
+									},
+								},
+							},
+						},
+					],
+				});
+			},
+		});
+
+		const models = await options.fetchDynamicModels?.();
+		expect(models).toBeDefined();
+		const model = models!.find(m => m.id === "test-price-model");
+		expect(model).toBeDefined();
+		expect(model?.cost.input).toBe(3);
+		expect(model?.cost.output).toBe(15);
+		expect(model?.oauthCredentialIds).toEqual([101, 102]);
+	});
+
+	it("isolates credentials when accounts report conflicting token pricing", async () => {
+		const options = githubCopilotModelManagerOptions({
+			baseUrl: BASE_URL,
+			resolveAccounts: async () => [
+				{ apiKey: "account-1", accountId: "acc-1", credentialId: 101 },
+				{ apiKey: "account-2", accountId: "acc-2", credentialId: 102 },
+			],
+			fetch: async (_input, init) => {
+				const auth = new Headers(init?.headers).get("Authorization");
+				if (auth === "Bearer account-1") {
+					return Response.json({
+						data: [
+							{
+								id: "conflict-price-model",
+								capabilities: {
+									type: "chat",
+									limits: { max_context_window_tokens: 128_000, max_output_tokens: 4_000 },
+								},
+								billing: {
+									token_prices: {
+										default: {
+											input_price: 300,
+											output_price: 1500,
+										},
+									},
+								},
+							},
+						],
+					});
+				}
+				return Response.json({
+					data: [
+						{
+							id: "conflict-price-model",
+							capabilities: {
+								type: "chat",
+								limits: { max_context_window_tokens: 128_000, max_output_tokens: 4_000 },
+							},
+							billing: {
+								token_prices: {
+									default: {
+										input_price: 500,
+										output_price: 2500,
+									},
+								},
+							},
+						},
+					],
+				});
+			},
+		});
+
+		const models = await options.fetchDynamicModels?.();
+		expect(models).toBeDefined();
+		const model = models!.find(m => m.id === "conflict-price-model");
+		expect(model).toBeDefined();
+		expect(model?.cost.input).toBe(3);
+		expect(model?.cost.output).toBe(15);
+		expect(model?.oauthCredentialIds).toEqual([101]);
+	});
+
 	it("updates cacheProviderId to match the refreshed primary account key after account resolution", async () => {
 		const oldKey = JSON.stringify({ token: "old-token" });
 		const refreshedKey = JSON.stringify({ token: "refreshed-token" });

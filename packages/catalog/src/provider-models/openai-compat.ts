@@ -6204,6 +6204,27 @@ function copilotTierCost(
 	};
 }
 
+function areModelCostsEqual(a: ModelSpec["cost"], b: ModelSpec["cost"]): boolean {
+	if (a.input !== b.input || a.output !== b.output || a.cacheRead !== b.cacheRead || a.cacheWrite !== b.cacheWrite) {
+		return false;
+	}
+	if (Boolean(a.longContext) !== Boolean(b.longContext)) {
+		return false;
+	}
+	if (a.longContext && b.longContext) {
+		if (
+			a.longContext.input !== b.longContext.input ||
+			a.longContext.output !== b.longContext.output ||
+			a.longContext.cacheRead !== b.longContext.cacheRead ||
+			a.longContext.cacheWrite !== b.longContext.cacheWrite ||
+			a.longContext.inputThreshold !== b.longContext.inputThreshold
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
 /**
  * Synthesize the opt-in long-context sibling for a Copilot model that reports
  * a `billing.token_prices.long_context` tier (e.g. Claude Opus 200k → 1M, as
@@ -6467,29 +6488,40 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 					}
 					byId.set(model.id, model);
 				} else {
-					if (credentialId !== undefined) {
-						existing.oauthCredentialIds ??= [];
-						if (!existing.oauthCredentialIds.includes(credentialId)) {
-							existing.oauthCredentialIds.push(credentialId);
+					const existingHasCost = hasTokenPrice(existing.cost);
+					const modelHasCost = hasTokenPrice(model.cost);
+					let costsCompatible = true;
+					if (!existingHasCost && modelHasCost) {
+						existing.cost = { ...model.cost };
+					} else if (existingHasCost && modelHasCost && !areModelCostsEqual(existing.cost, model.cost)) {
+						costsCompatible = false;
+					}
+					if (costsCompatible) {
+						if (credentialId !== undefined) {
+							existing.oauthCredentialIds ??= [];
+							if (!existing.oauthCredentialIds.includes(credentialId)) {
+								existing.oauthCredentialIds.push(credentialId);
+							}
 						}
-					}
-					// Reconcile capabilities conservatively so routing to either account
-					// respects the lowest common limits and input modalities. Keep
-					// the minimum of reported numeric limits rather than letting an
-					// omitted value (null) erase a concrete constraint.
-					if (typeof existing.contextWindow === "number" && typeof model.contextWindow === "number") {
-						existing.contextWindow = Math.min(existing.contextWindow, model.contextWindow);
-					} else if (typeof model.contextWindow === "number") {
-						existing.contextWindow = model.contextWindow;
-					}
-					if (typeof existing.maxTokens === "number" && typeof model.maxTokens === "number") {
-						existing.maxTokens = Math.min(existing.maxTokens, model.maxTokens);
-					} else if (typeof model.maxTokens === "number") {
-						existing.maxTokens = model.maxTokens;
-					}
-					if (Array.isArray(existing.input) && Array.isArray(model.input)) {
-						const otherInput = new Set(model.input);
-						existing.input = existing.input.filter(modality => otherInput.has(modality));
+						// Reconcile capabilities conservatively so routing to either account
+						// respects the lowest common limits and input modalities. Keep
+						// the minimum of reported numeric limits rather than letting an
+						// omitted value (null) erase a concrete constraint.
+						if (typeof existing.contextWindow === "number" && typeof model.contextWindow === "number") {
+							existing.contextWindow = Math.min(existing.contextWindow, model.contextWindow);
+						} else if (typeof model.contextWindow === "number") {
+							existing.contextWindow = model.contextWindow;
+						}
+						if (typeof existing.maxTokens === "number" && typeof model.maxTokens === "number") {
+							existing.maxTokens = Math.min(existing.maxTokens, model.maxTokens);
+						} else if (typeof model.maxTokens === "number") {
+							existing.maxTokens = model.maxTokens;
+						}
+						if (Array.isArray(existing.input) && Array.isArray(model.input)) {
+							const otherInput = new Set(model.input);
+							existing.input = existing.input.filter(modality => otherInput.has(modality));
+						}
+						existing.contextPromotionTarget ??= model.contextPromotionTarget;
 					}
 				}
 			}
@@ -6498,6 +6530,14 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 			for (const [id, model] of byId) {
 				if (!model.oauthCredentialIds || model.oauthCredentialIds.length === 0) {
 					byId.delete(id);
+				}
+			}
+		}
+		for (const model of byId.values()) {
+			if (model.contextPromotionTarget) {
+				const targetId = model.contextPromotionTarget.replace(/^github-copilot\//, "");
+				if (!byId.has(targetId)) {
+					delete model.contextPromotionTarget;
 				}
 			}
 		}
