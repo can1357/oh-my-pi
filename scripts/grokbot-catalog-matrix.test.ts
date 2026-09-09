@@ -282,6 +282,10 @@ describe("toolSmokePrompt", () => {
 		// Earlier exit/return stops the shell before a later echo can run.
 		expect(echoLikeShellCommand(`exit 0; echo ${ping}`, ping)).toBe(false);
 		expect(echoLikeShellCommand(`return; echo ${ping}`, ping)).toBe(false);
+		// printf must emit the ping — unused args / zero-precision write nothing.
+		expect(echoLikeShellCommand(`printf '' ${ping}`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`printf '%0.s' ${ping}`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`printf '%s\\n' ${ping}`, ping)).toBe(true);
 	});
 
 	test("binds read/write shell smoke evidence to the operation statement", () => {
@@ -340,6 +344,31 @@ describe("toolSmokePrompt", () => {
 				id,
 			),
 		).toBe(false);
+		// Readers configured to emit nothing must not pass (fabricated tool results).
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `head -n 0 ${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `sed -n '1d' ${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `sed -n '1p' ${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(true);
 		expect(
 			matchesToolSmokeCall(
 				"write",

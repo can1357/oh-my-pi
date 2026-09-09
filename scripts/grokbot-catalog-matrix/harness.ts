@@ -418,19 +418,31 @@ function printfEmittedText(before: string): string | undefined {
 		// flags / width / precision (enough for smoke; not a full printf parser)
 		while (j < format.length && /[-+ #0]/.test(format[j]!)) j++;
 		while (j < format.length && /[0-9]/.test(format[j]!)) j++;
+		let precision: number | undefined;
 		if (format[j] === ".") {
 			j++;
-			while (j < format.length && /[0-9]/.test(format[j]!)) j++;
+			precision = 0;
+			while (j < format.length && /[0-9]/.test(format[j]!)) {
+				precision = precision * 10 + Number(format[j]!);
+				j++;
+			}
 		}
 		if (j >= format.length) break;
 		const spec = format[j]!;
 		i = j;
 		const arg = args[argIdx++] ?? "";
 		// Smoke only needs whether `ping` lands in the written bytes.
-		if (spec === "s" || spec === "b" || spec === "c") out += arg;
-		else if (/[diouxXeEfFgGaA]/.test(spec)) out += arg;
-		// Unknown / incomplete conversion: stop consuming (reject via empty emit).
-		else return out;
+		// Precision truncates `%s`/`%b` (`%0.s` / `%.0s` emit nothing).
+		if (spec === "s" || spec === "b") {
+			out += precision === undefined ? arg : arg.slice(0, precision);
+		} else if (spec === "c") {
+			out += precision === 0 ? "" : arg.slice(0, 1);
+		} else if (/[diouxXeEfFgGaA]/.test(spec)) {
+			out += arg;
+		} else {
+			// Unknown / incomplete conversion: stop consuming (reject via empty emit).
+			return out;
+		}
 	}
 	return out;
 }
@@ -450,6 +462,65 @@ function redirectBeforeEmitsPing(before: string, ping: string): boolean {
 		return emitted !== undefined && emitted.includes(ping);
 	}
 	// `cat … > path` does not invent the ping from argv; reject for write smoke.
+	return false;
+}
+
+/** True when echo/printf would emit `ping` (shared by bash smoke and write smoke). */
+function commandEmitsPing(segment: string, ping: string): boolean {
+	return redirectBeforeEmitsPing(segment, ping);
+}
+
+/**
+ * Read smoke readers must be configured to emit file contents. `head -n 0`
+ * and `sed -n` without a print command produce nothing, but `runOneTool`
+ * fabricates the expected token without executing.
+ */
+function readerEmitsContent(segment: string, filePath: string): boolean {
+	if (!commandMentionsPath(segment, filePath)) return false;
+	const words = shellWords(segment);
+	const cmd = words[0];
+	if (cmd === "cat") return true;
+	if (cmd === "head" || cmd === "tail") {
+		for (let i = 1; i < words.length; i++) {
+			const w = words[i]!;
+			if (w === "-n" || w === "-c" || w === "--lines" || w === "--bytes") {
+				const v = words[i + 1];
+				if (v !== undefined && Number(v) === 0) return false;
+				i++;
+				continue;
+			}
+			const eq = /^(?:-n|--lines=|-c|--bytes=)(.*)$/.exec(w);
+			if (eq && eq[1] !== "" && Number(eq[1]) === 0) return false;
+			// `head -0 path`
+			if (/^-[0-9]+$/.test(w) && Number(w.slice(1)) === 0) return false;
+		}
+		return true;
+	}
+	if (cmd === "sed") {
+		let quiet = false;
+		const scripts: string[] = [];
+		for (let i = 1; i < words.length; i++) {
+			const w = words[i]!;
+			if (w === "-n" || w === "--quiet" || w === "--silent") {
+				quiet = true;
+				continue;
+			}
+			if (w === "-e" || w === "--expression") {
+				scripts.push(words[++i] ?? "");
+				continue;
+			}
+			if (w === "-f" || w === "--file") {
+				i++;
+				continue;
+			}
+			if (w.startsWith("-")) continue;
+			if (commandMentionsPath(w, filePath)) continue;
+			if (scripts.length === 0) scripts.push(w);
+		}
+		if (!quiet) return true;
+		// `-n` suppresses default print — require an explicit print-like command.
+		return scripts.some(script => /(?:^|[\n;])\s*(?:\d+|\$)?\s*(?:p|P|l|=)\b/.test(script));
+	}
 	return false;
 }
 
@@ -480,7 +551,8 @@ function isTrailingPathBoundary(ch: string): boolean {
  * Bash smoke must actually echo/printf the ping to stdout — not in a sibling
  * statement, comment, redirect filename (`echo wrong > ping`), diverted stdout
  * (`echo ping >/dev/null`, `echo ping | tee file`), a pipeline that can filter
- * the token away (`echo ping | grep -v ping`), or after an earlier `exit`/`return`
+ * the token away (`echo ping | grep -v ping`), a no-op printf (`printf '' ping`,
+ * `printf '%0.s' ping`), or after an earlier `exit`/`return`
  * (`exit; echo ping` — `runOneTool` fabricates success without executing).
  */
 export function echoLikeShellCommand(command: string, ping: string): boolean {
@@ -492,7 +564,7 @@ export function echoLikeShellCommand(command: string, ping: string): boolean {
 		if (!/^(?:echo|printf)\b/.test(segment)) continue;
 		// Redirects / any pipeline can discard or transform stdout.
 		if (/(?:>>?|\|)/.test(segment)) continue;
-		if (segment.includes(ping)) return true;
+		if (commandEmitsPing(segment, ping)) return true;
 	}
 	return false;
 }
@@ -509,7 +581,7 @@ export function readPathInShellCommand(command: string, filePath: string): boole
 		// fabricates the expected token without executing, so `cat path | grep -v`
 		// would otherwise pass the gate.
 		if (/(?:>>?|\|)/.test(segment)) continue;
-		if (commandMentionsPath(segment, filePath)) return true;
+		if (readerEmitsContent(segment, filePath)) return true;
 	}
 	return false;
 }

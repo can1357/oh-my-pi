@@ -10,6 +10,8 @@
 - Catalog matrix write smoke matches only the redirect destination word (not trailing args after `> /dev/null path`).
 - Catalog matrix bash/read smoke stops after an earlier `exit`/`return` (same as write), so `exit; echo ping` cannot pass a fabricated gate.
 - Catalog matrix write smoke requires printf/echo to actually emit the ping (`printf '' ping > path` no longer passes).
+- Catalog matrix bash smoke validates printf emitted bytes (rejects `printf '' ping` / `%0.s`); read smoke rejects `head -n 0` and quiet sed without print.
+- Grok Bot empty/incomplete tool retries preserve abandoned-attempt usage and add it to the successful attempt.
 - Catalog matrix OMP tool descriptions load from static `.md` prompt assets.
 - Grok Bot Anthropic keep-model auto wire comes from catalog `sand-tools-wire` (KDL), so a reviewed row can opt into `native` / `error` without a TypeScript class branch.
 - Grok Bot parent-chat SendToUser ownership uses the advertised wire name (`customWireName` or name), so an internal `SendToUser` aliased to another wire still treats injected `SendToUser` as visible text.

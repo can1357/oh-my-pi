@@ -353,6 +353,11 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 					responseInfo: { id: "abandoned-resp", model: "abandoned-model" },
 				}),
 			),
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					usage: { promptTokens: 11, completionTokens: 7, totalTokens: 18 },
+				}),
+			),
 			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
 		]);
 		const toolCall = Buffer.concat([
@@ -364,6 +369,11 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 						args: '{"command":"echo retried"}',
 						isComplete: true,
 					},
+				}),
+			),
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					usage: { promptTokens: 20, completionTokens: 5, totalTokens: 25 },
 				}),
 			),
 			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
@@ -407,6 +417,10 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		// Abandoned first-attempt responseInfo must not stick on the accepted retry.
 		expect(result.responseId).toBeUndefined();
 		expect(result.upstreamModel).toBeUndefined();
+		// Abandoned attempt usage is preserved and added to the successful attempt.
+		expect(result.usage.input).toBe(31);
+		expect(result.usage.output).toBe(12);
+		expect(result.usage.totalTokens).toBe(43);
 	});
 
 	test("toolChoice none omits tools even when context.tools is retained", async () => {

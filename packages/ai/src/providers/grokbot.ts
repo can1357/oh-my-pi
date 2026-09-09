@@ -659,6 +659,37 @@ function applyUsage(output: AssistantMessage, usage: Record<string, unknown>) {
 	output.usage.cacheWrite = safeCacheWrite;
 }
 
+function emptyAssistantUsage(): AssistantMessage["usage"] {
+	return {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
+/** Sum token buckets from an abandoned attempt into a running total (costs stay 0 until calculateCost). */
+function addAbandonedUsage(
+	into: AssistantMessage["usage"] | undefined,
+	from: AssistantMessage["usage"],
+): AssistantMessage["usage"] {
+	const base = into ?? emptyAssistantUsage();
+	return {
+		input: base.input + from.input,
+		output: base.output + from.output,
+		cacheRead: base.cacheRead + from.cacheRead,
+		cacheWrite: base.cacheWrite + from.cacheWrite,
+		totalTokens: base.totalTokens + from.totalTokens,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
+function usageHasTokens(usage: AssistantMessage["usage"]): boolean {
+	return usage.input > 0 || usage.output > 0 || usage.cacheRead > 0 || usage.cacheWrite > 0 || usage.totalTokens > 0;
+}
+
 function canFinalizeIncompleteToolArgs(argsText: string, isGrammar: boolean): boolean {
 	if (isGrammar) return argsText.trim().length > 0;
 	const trimmed = argsText.trim();
@@ -868,6 +899,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			let incompleteToolRetryUsed = false;
 			/** Catalog `sand-empty-tools-retry-wire` engaged for this empty-tool replay. */
 			let emptyToolsRetryWire: typeof model.sandEmptyToolsRetryWire | undefined;
+			/** Token usage from abandoned empty/incomplete tool attempts (added into the final attempt). */
+			let abandonedAttemptUsage: AssistantMessage["usage"] | undefined;
 			let started = false;
 			let anthropicWire: AnthropicSandToolWireResult = {
 				requestedModel: { modelId: model.id },
@@ -1066,6 +1099,14 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				delete output.responseId;
 				delete output.upstreamModel;
 				routedResponseModel = "";
+			};
+
+			/** Stash usage from an abandoned tool attempt, then zero for the replay stream. */
+			const resetUsageForToolRetry = () => {
+				if (usageHasTokens(output.usage)) {
+					abandonedAttemptUsage = addAbandonedUsage(abandonedAttemptUsage, output.usage);
+				}
+				output.usage = emptyAssistantUsage();
 			};
 
 			attempt: while (true) {
@@ -1716,14 +1757,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						discardAttemptEvents();
 						clearAbandonedAttemptMetadata();
 						output.content = [];
-						output.usage = {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-						};
+						resetUsageForToolRetry();
 						output.stopReason = "stop";
 						logger.info("grokbot: retrying incomplete tool turn", { modelId: model.id });
 						continue attempt;
@@ -1839,14 +1873,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						discardAttemptEvents();
 						clearAbandonedAttemptMetadata();
 						output.content = [];
-						output.usage = {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-						};
+						resetUsageForToolRetry();
 						output.stopReason = "stop";
 						logger.info("grokbot: retrying empty tool turn", {
 							modelId: model.id,
@@ -1885,6 +1912,9 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			}
 			output.duration = Math.round(performance.now() - startTime);
 			if (firstTokenTime !== undefined) output.ttft = firstTokenTime - startTime;
+			if (abandonedAttemptUsage) {
+				output.usage = addAbandonedUsage(abandonedAttemptUsage, output.usage);
+			}
 			calculateCost(model, output.usage);
 			logger.debug("grokbot: stream done", {
 				stopReason: output.stopReason,
