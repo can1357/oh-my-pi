@@ -1033,13 +1033,17 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 });
 chrome.tabs.onCreated.addListener((tab) => {
   const snap = snapshot(tab);
-  if (snap)
+  if (snap) {
+    invalidateHelloRefresh();
     post({ t: "tabCreated", tab: snap });
+  }
 });
 chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
   const snap = snapshot(tab);
-  if (snap)
+  if (snap) {
+    invalidateHelloRefresh();
     post({ t: "tabUpdated", tab: snap });
+  }
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
   forgetRecoverable(tabId);
