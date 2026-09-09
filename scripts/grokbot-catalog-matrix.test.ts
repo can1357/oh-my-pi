@@ -255,6 +255,8 @@ describe("toolSmokePrompt", () => {
 		expect(readLikeShellCommand("cat notes/grokbot-read-x.txt")).toBe(true);
 		expect(readLikeShellCommand("sed -n '1p' notes/grokbot-read-x.txt")).toBe(true);
 		expect(readLikeShellCommand("printf '%s\\n' x > notes/grokbot-write-x.txt")).toBe(false);
+		// Quoted `>` is not a redirect — must not look like a write.
+		expect(writeLikeShellCommand("echo 'tools-pong-write-x > notes/grokbot-write-x.txt'")).toBe(false);
 	});
 
 	test("requires bash smoke commands to echo/printf the ping, not comment it", () => {
@@ -312,6 +314,32 @@ describe("toolSmokePrompt", () => {
 				id,
 			),
 		).toBe(true);
+		// Quoted redirect character must not count as a write (no file is created).
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Shell", arguments: { command: `echo '${ping} > ${writePath}'` } },
+				ping,
+				id,
+			),
+		).toBe(false);
+		// Earlier exit prevents a later matching write from running under fabricated tool results.
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Shell", arguments: { command: `exit 0; printf '%s\\n' ${ping} > ${writePath}` } },
+				ping,
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Shell", arguments: { command: `exit 0 && printf '%s\\n' ${ping} > ${writePath}` } },
+				ping,
+				id,
+			),
+		).toBe(false);
 	});
 
 	test("rejects tool calls that only match by name", () => {

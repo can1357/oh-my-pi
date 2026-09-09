@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Grok Bot is excluded from `gen:models` catalog discovery (credential-scoped like Devin) so a maintainer renewer cannot bake AvailableModels into the shared `models.json`.
 - Grok Bot backend URL join appends endpoints onto the pathname while preserving reverse-proxy query strings, including trailing `/` inside query values (mint + AvailableModels).
 - Grok Bot AvailableModels discovery passes the configured base URL unmodified into `joinGrokbotBackendUrl` (no whole-URL trailing-slash strip before parse).
 - Opaque Grok Bot variant/legacy selectors resolve full model policy (identity, thinking, compat, catalog assignments/corrections) from `requestModelId` in `buildModel`.

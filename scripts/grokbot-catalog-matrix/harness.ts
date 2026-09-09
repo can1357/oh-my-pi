@@ -158,7 +158,7 @@ export function classifyError(message: string | undefined, status?: number): str
 export function writeLikeShellCommand(command: string): boolean {
 	const cmd = command.trim();
 	if (!cmd) return false;
-	return /(?:^|[;&|\n]\s*)(?:echo|printf|cat|tee)\b/.test(cmd) && /(?:>>?|tee\b)/.test(cmd);
+	return shellStatementSegments(cmd).some(segment => shellWriteRedirect(segment) != null);
 }
 
 export function readLikeShellCommand(command: string): boolean {
@@ -177,6 +177,58 @@ function shellStatementSegments(command: string): string[] {
 		.split(/\n|&&|&|;/)
 		.map(s => s.trim())
 		.filter(Boolean);
+}
+
+/** True when a statement would prevent later statements from running. */
+function earlyExitShellSegment(segment: string): boolean {
+	return /^(?:exit|return)\b/.test(segment);
+}
+
+/**
+ * Split on the first unquoted `>`, `>>`, or `| tee` so quoted redirect
+ * characters (`echo 'ping > path'`) do not count as writes.
+ */
+function shellWriteRedirect(segment: string): { before: string; after: string; op: ">" | ">>" | "tee" } | null {
+	let quote: "'" | '"' | "`" | null = null;
+	let escaped = false;
+	for (let i = 0; i < segment.length; i++) {
+		const ch = segment[i]!;
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (quote) {
+			if (ch === "\\" && quote !== "'") {
+				escaped = true;
+				continue;
+			}
+			if (ch === quote) quote = null;
+			continue;
+		}
+		if (ch === "'" || ch === '"' || ch === "`") {
+			quote = ch;
+			continue;
+		}
+		if (ch === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (ch === ">") {
+			const op = segment[i + 1] === ">" ? ">>" : ">";
+			const before = segment.slice(0, i).trim();
+			const after = segment.slice(i + op.length).trim();
+			if (!/^(?:echo|printf|cat)\b/.test(before)) return null;
+			return { before, after, op };
+		}
+		if (ch === "|") {
+			const rest = segment.slice(i + 1).trim();
+			if (!/^tee\b/.test(rest)) continue;
+			const before = segment.slice(0, i).trim();
+			if (!/^(?:echo|printf|cat)\b/.test(before)) return null;
+			return { before, after: rest.replace(/^tee\b/, "").trim(), op: "tee" };
+		}
+	}
+	return null;
 }
 
 /** True when `filePath` appears as a path segment (not a suffix of `wrongnotes/...`). */
@@ -221,14 +273,24 @@ export function readPathInShellCommand(command: string, filePath: string): boole
 	);
 }
 
-/** Write smoke: path + ping must appear in the same write statement (incl. pipes). */
+/**
+ * Write smoke: unquoted redirect/`tee` of the ping into `filePath` in the same
+ * statement. Quoted `>` (`echo 'ping > path'`) and earlier `exit`/`return`
+ * statements do not count — `runOneTool` fabricates success without executing.
+ */
 export function writePathPingInShellCommand(command: string, filePath: string, ping: string): boolean {
 	if (!filePath || !ping) return false;
 	const cmd = command.trim();
 	if (!cmd) return false;
-	return shellStatementSegments(cmd).some(
-		segment => writeLikeShellCommand(segment) && commandMentionsPath(segment, filePath) && segment.includes(ping),
-	);
+	for (const segment of shellStatementSegments(cmd)) {
+		if (earlyExitShellSegment(segment)) return false;
+		const redirect = shellWriteRedirect(segment);
+		if (!redirect) continue;
+		if (!redirect.before.includes(ping)) continue;
+		if (!commandMentionsPath(redirect.after, filePath)) continue;
+		return true;
+	}
+	return false;
 }
 
 export function expectedReadPath(safeId: string): string {

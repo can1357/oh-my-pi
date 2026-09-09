@@ -8,6 +8,7 @@ import {
 	applyOllamaCloudOutputCap,
 	linkOpenAIPromotionTargets,
 } from "../scripts/generated-policies";
+import { CREDENTIAL_SCOPED_PROVIDERS, mergePreviousSnapshotModels } from "../scripts/generate-models";
 import { buildModel } from "../src/build";
 import { resolveModelPolicy } from "../src/compat/resolve";
 import { buildGrokbotStaticSeed } from "../src/provider-models/grokbot";
@@ -943,6 +944,27 @@ describe("Grok Bot generated thinking policy", () => {
 	it("marks grokbot credential-scoped catalog via provider KDL", () => {
 		const [seed] = buildGrokbotStaticSeed();
 		expect(resolveModelPolicy(seed).catalog.credentialScopedCatalog).toBe(true);
+	});
+
+	it("excludes grokbot from gen:models catalog discovery like other credential-scoped providers", () => {
+		// A renewer in the generator environment must not bake AvailableModels into models.json,
+		// and prior private roster rows must not resurrect from the previous snapshot.
+		expect(CREDENTIAL_SCOPED_PROVIDERS.has("grokbot")).toBe(true);
+		expect(CREDENTIAL_SCOPED_PROVIDERS.has("devin")).toBe(true);
+		const stale = buildModel({
+			id: "account-private-model",
+			name: "private",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+		const merged = mergePreviousSnapshotModels([], { grokbot: { [stale.id]: stale } }, new Set());
+		expect(merged.map(m => `${m.provider}/${m.id}`)).toEqual([]);
 	});
 
 	it("forces supportsTools false for grok-4.5 via provider KDL", () => {

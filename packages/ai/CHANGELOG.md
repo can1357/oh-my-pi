@@ -17,6 +17,7 @@
 - Grok Bot parent-chat `SendToUser` tool/schema descriptions load from static `.md` prompt assets.
 - Catalog matrix omp `-p` slice derives `--thinking` from each selected model's probe effort (omits the flag when none is known).
 - Catalog matrix bash smoke rejects pipelines that can suppress the probe token (not only redirects/`tee`).
+- Catalog matrix Shell write smoke requires an unquoted redirect/`tee` of the ping into the expected path and rejects earlier `exit`/`return` statements (quoted `>` does not count).
 - Keep-model Anthropic probe validates and replays returned Shell arguments (no fabricated echo).
 - `/grokbot` Host status omits the entire URL query string (not only a credential-name allowlist) so proxy auth keys cannot leak.
 - `/grokbot` Host status also strips userinfo/query from malformed endpoints that fail `URL` parsing (e.g. scheme-less proxy URLs).

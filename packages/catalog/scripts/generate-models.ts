@@ -96,16 +96,17 @@ const packageRoot = path.join(import.meta.dir, "..");
 const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm"]);
 /**
  * Credential-scoped catalogs (Devin's Cascade roster is gated per account/team
- * via `allowed_model_uids`). Fetching them during generation would bake one
- * private account's entitlements into the shared bundle, and those rows then
- * survive forever as previous-snapshot zombies: a later regen without that
- * credential can never mark the provider authoritative to prune them. These
- * providers are never fetched at generation time and their previous-snapshot
- * rows are dropped — the curated static seed is the only bundled surface, and
- * runtime discovery is authoritative per credential (mirrors the GitLab Duo
- * fallback-only policy below).
+ * via `allowed_model_uids`; Grok Bot AvailableModels is renewer-account entitlements).
+ * Fetching them during generation would bake one private account's entitlements
+ * into the shared bundle, and those rows then survive forever as previous-snapshot
+ * zombies: a later regen without that credential can never mark the provider
+ * authoritative to prune them. These providers are never fetched at generation
+ * time and their previous-snapshot rows are dropped — the curated static seed is
+ * the only bundled surface, and runtime discovery is authoritative per credential
+ * (mirrors the GitLab Duo fallback-only policy below). Keep in sync with
+ * `credential-scoped-catalog` in providers/*.kdl.
  */
-const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin"]);
+export const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin", "grokbot"]);
 
 /**
  * Restores unfetched rows from a previous generated catalog while pruning
@@ -126,10 +127,10 @@ export function mergePreviousSnapshotModels(
 				!fetchedKeys.has(`${model.provider}/${model.id}`) &&
 				!DISCOVERY_ONLY_PROVIDERS.has(model.provider) &&
 				!CREDENTIAL_SCOPED_PROVIDERS.has(model.provider) &&
-				// Yolo-Auto / Grok Bot documented static seeds are the complete
-				// offline fallback; never resurrect retired ids from the previous snapshot.
+				// Yolo-Auto documented static seeds are the complete offline fallback;
+				// never resurrect retired ids from the previous snapshot. (Grok Bot is
+				// covered by CREDENTIAL_SCOPED_PROVIDERS.)
 				model.provider !== "yolo-auto" &&
-				model.provider !== "grokbot" &&
 				!isRetiredProvider(model.provider) &&
 				!excludedProviders.has(model.provider)
 			) {
