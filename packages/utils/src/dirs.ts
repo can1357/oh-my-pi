@@ -383,9 +383,18 @@ class DirResolver {
 		return result;
 	}
 
+	/** Preserve the no-I/O fast path for the usual omitted or exact active path. */
+	isActiveAgentDir(userAgentDir: string | undefined): boolean {
+		return (
+			!userAgentDir ||
+			userAgentDir === this.agentDir ||
+			normalizePathForComparison(userAgentDir) === normalizePathForComparison(this.agentDir)
+		);
+	}
+
 	/** Agent subdirectory, with optional XDG override. */
 	agentSubdir(userAgentDir: string | undefined, subdir: string, xdg?: XdgCategory): string {
-		if (!userAgentDir || userAgentDir === this.agentDir) {
+		if (this.isActiveAgentDir(userAgentDir)) {
 			const cached = this.#agentCache.get(subdir);
 			if (cached) return cached;
 			const base = xdg ? this.#agentDirs[xdg] : this.agentDir;
@@ -393,7 +402,7 @@ class DirResolver {
 			this.#agentCache.set(subdir, result);
 			return result;
 		}
-		return path.join(userAgentDir, subdir);
+		return path.join(userAgentDir!, subdir);
 	}
 }
 
@@ -801,8 +810,8 @@ export function getNativesDir(): string {
  * a different custom directory uses <agentDir>/stats.db, matching GC's historical scope.
  */
 export function getStatsDbPath(agentDir?: string): string {
-	if (agentDir !== undefined && normalizePathForComparison(agentDir) !== normalizePathForComparison(dirs.agentDir)) {
-		return path.join(agentDir, "stats.db");
+	if (!dirs.isActiveAgentDir(agentDir)) {
+		return path.join(agentDir!, "stats.db");
 	}
 	return dirs.rootSubdir("stats.db", "data");
 }

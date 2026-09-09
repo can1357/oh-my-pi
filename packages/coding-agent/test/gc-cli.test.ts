@@ -145,6 +145,22 @@ describe("runGcCommand blob sweep", () => {
 		expect(await Bun.file(blob).exists()).toBe(true);
 	});
 
+	test("scans legacy journal backups using the shared filename classifier", async () => {
+		const referencedHash = hashFor("legacy-backup-reference");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		await agePath(referenced);
+		const sessionDir = path.join(getSessionsDir(root), "project");
+		await fs.mkdir(sessionDir, { recursive: true });
+		await Bun.write(
+			path.join(sessionDir, "legacy.jsonl..bak"),
+			JSON.stringify({ type: "message", message: { role: "user", content: `blob:sha256:${referencedHash}` } }),
+		);
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		expect(result.blobs?.referenced).toBe(1);
+		expect(result.blobs?.deleted).toBe(0);
+		expect(await Bun.file(referenced).exists()).toBe(true);
+	});
+
 	test("storage reports and blob GC agree on canonical files, typed sidecars, and auxiliary files", async () => {
 		const hash = "a".repeat(64);
 		const otherHash = "b".repeat(64);
@@ -235,22 +251,6 @@ describe("runGcCommand blob sweep", () => {
 
 		expect(result.blobs?.referenced).toBe(1);
 		expect(result.blobs?.wouldDelete).toBe(0);
-		expect(result.blobs?.deleted).toBe(0);
-		expect(await Bun.file(referenced).exists()).toBe(true);
-	});
-
-	test("scans legacy journal backups using the shared filename classifier", async () => {
-		const referencedHash = hashFor("legacy-backup-reference");
-		const referenced = await writeBlob(root, referencedHash, "referenced");
-		await agePath(referenced);
-		const sessionDir = path.join(getSessionsDir(root), "project");
-		await fs.mkdir(sessionDir, { recursive: true });
-		await Bun.write(
-			path.join(sessionDir, "legacy.jsonl..bak"),
-			JSON.stringify({ type: "message", message: { role: "user", content: `blob:sha256:${referencedHash}` } }),
-		);
-		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
-		expect(result.blobs?.referenced).toBe(1);
 		expect(result.blobs?.deleted).toBe(0);
 		expect(await Bun.file(referenced).exists()).toBe(true);
 	});

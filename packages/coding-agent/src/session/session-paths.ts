@@ -5,6 +5,13 @@ import { getTerminalId } from "@oh-my-pi/pi-tui";
 import { getSessionsDir, getTerminalSessionsDir, isEnoent, logger, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
 import type { SessionStorage } from "./session-storage";
 
+/** Shared discovery and filename grammar for journals, gzip archives, and recovery backups. */
+export const SESSION_JOURNAL_GLOBS = {
+	plain: new Bun.Glob("**/*.jsonl"),
+	compressed: new Bun.Glob("**/*.jsonl.gz"),
+	backup: new Bun.Glob("**/*.jsonl.*.bak"),
+};
+
 const migratedSessionRoots = new Set<string>();
 
 /**
@@ -198,7 +205,11 @@ export function computeDefaultSessionDir(
 
 /** Return whether a basename belongs to a managed session journal or backup. */
 export function isSessionJournalFilename(name: string): boolean {
-	return name.endsWith(".jsonl") || name.endsWith(".jsonl.gz") || /\.jsonl\..*\.bak$/.test(name);
+	return (
+		SESSION_JOURNAL_GLOBS.plain.match(name) ||
+		SESSION_JOURNAL_GLOBS.compressed.match(name) ||
+		SESSION_JOURNAL_GLOBS.backup.match(name)
+	);
 }
 
 // =============================================================================

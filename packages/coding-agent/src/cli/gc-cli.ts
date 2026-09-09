@@ -16,14 +16,11 @@ import {
 import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import { BLOB_FILE_RE, BLOB_HASH_RE } from "../session/blob-store";
-import { isSessionJournalFilename } from "../session/session-paths";
+import { SESSION_JOURNAL_GLOBS } from "../session/session-paths";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { FileSessionStorage } from "../session/session-storage";
 
 const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
-const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
-const JSONL_GZ_GLOB = new Bun.Glob("**/*.jsonl.gz");
-const JSONL_BACKUP_GLOB = new Bun.Glob("**/*.jsonl.*.bak");
 const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["pending", "interrupted", "unknown"]);
 const DAY_MS = 86_400_000;
 const GC_WRITE_GRACE_MS = 5 * 60_000;
@@ -242,9 +239,9 @@ async function readTextIfPresent(file: string): Promise<string> {
 
 async function collectJsonlFiles(root: string): Promise<string[]> {
 	try {
-		const files = await Array.fromAsync(JSONL_GLOB.scan(root), name => path.join(root, name));
+		const files = await Array.fromAsync(SESSION_JOURNAL_GLOBS.plain.scan(root), name => path.join(root, name));
 		files.sort();
-		return files.filter(file => isSessionJournalFilename(path.basename(file)));
+		return files;
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return [];
 		throw error;
@@ -253,9 +250,9 @@ async function collectJsonlFiles(root: string): Promise<string[]> {
 
 async function collectCompressedJsonlFiles(root: string): Promise<string[]> {
 	try {
-		const files = await Array.fromAsync(JSONL_GZ_GLOB.scan(root), name => path.join(root, name));
+		const files = await Array.fromAsync(SESSION_JOURNAL_GLOBS.compressed.scan(root), name => path.join(root, name));
 		files.sort();
-		return files.filter(file => isSessionJournalFilename(path.basename(file)));
+		return files;
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return [];
 		throw error;
@@ -264,9 +261,9 @@ async function collectCompressedJsonlFiles(root: string): Promise<string[]> {
 
 async function collectBackupJsonlFiles(root: string): Promise<string[]> {
 	try {
-		const files = await Array.fromAsync(JSONL_BACKUP_GLOB.scan(root), name => path.join(root, name));
+		const files = await Array.fromAsync(SESSION_JOURNAL_GLOBS.backup.scan(root), name => path.join(root, name));
 		files.sort();
-		return files.filter(file => isSessionJournalFilename(path.basename(file)));
+		return files;
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return [];
 		throw error;

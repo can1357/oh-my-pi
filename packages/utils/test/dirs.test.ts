@@ -57,7 +57,7 @@ describe("project directory state", () => {
 	});
 });
 
-describe("stats database directory", () => {
+describe("agent storage directories", () => {
 	it.each([
 		{ name: "default", profile: "", xdg: false, migrateProfile: false, customActive: false },
 		{ name: "custom active agent", profile: "", xdg: false, migrateProfile: false, customActive: true },
@@ -72,12 +72,16 @@ describe("stats database directory", () => {
 			await using temp = await TempDir.create("@omp-stats-dirs-");
 			const home = temp.join("home");
 			const dataHome = temp.join("data");
+			const stateHome = temp.join("state");
+			const cacheHome = temp.join("cache");
 			const xdgRoot = path.join(dataHome, "omp");
 			const profileParts = profile ? ["profiles", profile] : [];
 			const configRoot = path.join(home, ".omp", ...profileParts);
 			const activeAgent = customActive ? temp.join("active-agent") : path.join(configRoot, "agent");
-			if (xdg) await fs.promises.mkdir(xdgRoot, { recursive: true });
-			if (migrateProfile) await fs.promises.mkdir(path.join(xdgRoot, ...profileParts), { recursive: true });
+			for (const base of [dataHome, stateHome, cacheHome]) {
+				if (xdg) await fs.promises.mkdir(path.join(base, "omp"), { recursive: true });
+				if (migrateProfile) await fs.promises.mkdir(path.join(base, "omp", ...profileParts), { recursive: true });
+			}
 			await fs.promises.mkdir(activeAgent, { recursive: true });
 			const linkedAgent = temp.join("linked-agent");
 			await fs.promises.symlink(activeAgent, linkedAgent, "junction");
@@ -87,11 +91,23 @@ describe("stats database directory", () => {
 				(!profile || migrateProfile) &&
 				(process.platform === "linux" || process.platform === "darwin");
 			const defaultStats = path.join(usesXdg ? path.join(xdgRoot, ...profileParts) : configRoot, "stats.db");
+			const dataRoot = usesXdg ? path.join(xdgRoot, ...profileParts) : activeAgent;
+			const stateRoot = usesXdg ? path.join(stateHome, "omp", ...profileParts) : activeAgent;
+			const cacheRoot = usesXdg ? path.join(cacheHome, "omp", ...profileParts) : activeAgent;
+			const expectedRoots = {
+				sessions: path.join(dataRoot, "sessions"),
+				blobs: path.join(dataRoot, "blobs"),
+				agentDb: path.join(dataRoot, "agent.db"),
+				memories: path.join(stateRoot, "memories"),
+				cache: path.join(cacheRoot, "cache", "tiny-models"),
+				themes: path.join(activeAgent, "themes"),
+			};
 			const source = [
 				'import * as path from "node:path";',
-				`import { getAgentDir, getStatsDbPath } from ${JSON.stringify(new URL("../src/dirs.ts", import.meta.url).href)};`,
+				`import { getAgentDir, getStatsDbPath, getSessionsDir, getBlobsDir, getAgentDbPath, getMemoriesDir, getTinyModelsCacheDir, getCustomThemesDir } from ${JSON.stringify(new URL("../src/dirs.ts", import.meta.url).href)};`,
 				"const agent = getAgentDir();",
 				'const alias = agent + path.sep + "unused" + path.sep + "..";',
+				"const roots = dir => ({ sessions: getSessionsDir(dir), blobs: getBlobsDir(dir), agentDb: getAgentDbPath(dir), memories: getMemoriesDir(dir), cache: getTinyModelsCacheDir(dir), themes: getCustomThemesDir(dir) });",
 				"process.stdout.write(JSON.stringify({",
 				"  agent,",
 				"  implicit: getStatsDbPath(),",
@@ -102,6 +118,8 @@ describe("stats database directory", () => {
 				'  caseVariant: getStatsDbPath(process.platform === "win32" ? agent.toUpperCase() : agent),',
 				`  custom: getStatsDbPath(${JSON.stringify(temp.join("custom-agent"))}),`,
 				'  relativeCustom: getStatsDbPath("custom-agent"),',
+				`  roots: [undefined, agent, alias, path.relative(process.cwd(), agent), ${JSON.stringify(linkedAgent)}, process.platform === "win32" ? agent.toUpperCase() : agent].map(roots),`,
+				'  customRoots: roots("custom-agent"),',
 				"}));",
 			].join("\n");
 			const child = Bun.spawn([process.execPath, "--eval", source], {
@@ -115,8 +133,8 @@ describe("stats database directory", () => {
 					OMP_PROFILE: profile,
 					PI_PROFILE: profile,
 					XDG_DATA_HOME: dataHome,
-					XDG_STATE_HOME: temp.join("state"),
-					XDG_CACHE_HOME: temp.join("cache"),
+					XDG_STATE_HOME: stateHome,
+					XDG_CACHE_HOME: cacheHome,
 					XDG_CONFIG_HOME: temp.join("config"),
 				},
 				stdin: "ignore",
@@ -139,6 +157,15 @@ describe("stats database directory", () => {
 				caseVariant: defaultStats,
 				custom: temp.join("custom-agent", "stats.db"),
 				relativeCustom: path.join("custom-agent", "stats.db"),
+				roots: Array.from({ length: 6 }, () => expectedRoots),
+				customRoots: {
+					sessions: path.join("custom-agent", "sessions"),
+					blobs: path.join("custom-agent", "blobs"),
+					agentDb: path.join("custom-agent", "agent.db"),
+					memories: path.join("custom-agent", "memories"),
+					cache: path.join("custom-agent", "cache", "tiny-models"),
+					themes: path.join("custom-agent", "themes"),
+				},
 			});
 		},
 	);

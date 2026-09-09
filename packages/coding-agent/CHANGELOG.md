@@ -6,6 +6,7 @@
 
 - Storage reports safely render control characters and share blob classification and stats database paths with GC.
 - Storage reports recognize active agent directory aliases and keep session-local and nested blob-store artifacts in their correct categories.
+- Storage reports classify legacy journal backups consistently with GC, including empty backup suffixes.
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 ### Added
 
