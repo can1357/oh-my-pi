@@ -801,7 +801,7 @@ export function getNativesDir(): string {
  * a different custom directory uses <agentDir>/stats.db, matching GC's historical scope.
  */
 export function getStatsDbPath(agentDir?: string): string {
-	if (agentDir !== undefined && path.resolve(agentDir) !== path.resolve(dirs.agentDir)) {
+	if (agentDir !== undefined && normalizePathForComparison(agentDir) !== normalizePathForComparison(dirs.agentDir)) {
 		return path.join(agentDir, "stats.db");
 	}
 	return dirs.rootSubdir("stats.db", "data");
@@ -878,6 +878,11 @@ export function getComposerCacheDir(agentDir?: string): string {
 /** Get the sessions directory (~/.omp/agent/sessions). */
 export function getSessionsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "sessions", "data");
+}
+
+/** Get archived sessions alongside the active sessions tree. */
+export function getArchivedSessionsDir(agentDir?: string): string {
+	return path.join(path.dirname(getSessionsDir(agentDir)), "archive", "sessions");
 }
 
 /** Get the content-addressed blob store directory (~/.omp/agent/blobs). */

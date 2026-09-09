@@ -5,6 +5,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import {
 	getAgentDir,
+	getArchivedSessionsDir,
 	getBlobsDir,
 	getHistoryDbPath,
 	getModelDbPath,
@@ -195,10 +196,6 @@ export function collectGcErrors(result: GcResult): string[] {
 		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
 	];
-}
-
-function getArchivedSessionsDir(agentDir: string): string {
-	return path.join(path.dirname(getSessionsDir(agentDir)), "archive", "sessions");
 }
 
 function errorMessage(error: unknown): string {

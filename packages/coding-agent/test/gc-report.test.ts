@@ -21,9 +21,13 @@ describe("read-only storage reports", () => {
 			[path.join(sessions, "project", "main", "Child.jsonl"), "nested journal"],
 			[path.join(sessions, "project", "main", "0.bash.log"), "output".repeat(40)],
 			[path.join(sessions, "project", "main", "Child.md"), "child output"],
+			[path.join(sessions, "project", "main", "local", "capture.jsonl"), "local capture"],
+			[path.join(sessions, "project", "main", "local", "nested", "build.log"), "local log"],
 			[path.join(archive, "project", "old.jsonl.gz"), "not a gzip stream"],
 			[path.join(archive, "project", "old", "1.read.log"), "old output"],
 			[path.join(archive, "project", "old", "local", "asset.txt"), "archived local file"],
+			[path.join(archive, "project", "old", "local", "capture.jsonl"), "archived local capture"],
+			[path.join(archive, "project", "old", "local", "nested", "build.log"), "archived local log"],
 			[path.join(blobDir, hash), "blob"],
 			[path.join(blobDir, "index.json"), "blob index"],
 			[getHistoryDbPath(agentDir), "not a database"],
@@ -40,6 +44,9 @@ describe("read-only storage reports", () => {
 		expect(report.categories.sessionJournals.logicalBytes).toBe(Buffer.byteLength("invalid journalnested journal"));
 		expect(report.categories.sessionLogs.logicalBytes).toBe(240);
 		expect(report.categories.archiveJournals.logicalBytes).toBe(Buffer.byteLength("not a gzip stream"));
+		expect(report.categories.sessionArtifacts).toEqual({ files: 3, logicalBytes: 34 });
+		expect(report.categories.archiveLogs).toEqual({ files: 1, logicalBytes: 10 });
+		expect(report.categories.archiveArtifacts).toEqual({ files: 3, logicalBytes: 59 });
 		expect(report.categories.blobs).toEqual({ files: 1, logicalBytes: 4 });
 		expect(report.categories.blobAuxiliary).toEqual({ files: 1, logicalBytes: 10 });
 		expect(report.categories.databases).toEqual({ files: 2, logicalBytes: 28 });

@@ -160,6 +160,8 @@ describe("runGcCommand blob sweep", () => {
 			`${hash}._png`,
 			`${hash}.-png`,
 			`${otherHash}.${"x".repeat(33)}`,
+			path.join("nested", hash),
+			path.join("nested", `${otherHash}.png`),
 		];
 		for (const name of [...blobNames, ...auxiliaryNames]) {
 			await agePath(await writeBlob(root, name, name));
@@ -179,7 +181,10 @@ describe("runGcCommand blob sweep", () => {
 			bytes: blobBytes,
 			errors: [],
 		});
-		expect((await fs.readdir(getBlobsDir(root))).sort()).toEqual(auxiliaryNames.sort());
+		expect((await fs.readdir(getBlobsDir(root))).sort()).toEqual(
+			[...new Set(auxiliaryNames.map(name => name.split(path.sep)[0]!))].sort(),
+		);
+		expect(await Bun.file(path.join(getBlobsDir(root), "nested", hash)).text()).toBe(path.join("nested", hash));
 	});
 
 	test("--apply deletes unreferenced blobs and keeps referenced blobs", async () => {

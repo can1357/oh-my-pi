@@ -4,6 +4,7 @@ import {
 	formatBytes,
 	getAgentDbPath,
 	getAgentDir,
+	getArchivedSessionsDir,
 	getBlobsDir,
 	getHistoryDbPath,
 	getModelDbPath,
@@ -111,7 +112,12 @@ export async function collectStorageReport(agentDir = getAgentDir()): Promise<St
 		if (largest.length > LARGEST_FILE_LIMIT) largest.pop();
 	};
 
-	const scan = async (file: string, tree: StorageTree | undefined, category?: StorageCategory): Promise<void> => {
+	const scan = async (
+		file: string,
+		tree: StorageTree | undefined,
+		category?: StorageCategory,
+		depth = 0,
+	): Promise<void> => {
 		try {
 			const info = await fs.lstat(file);
 			if (info.isSymbolicLink()) {
@@ -119,8 +125,16 @@ export async function collectStorageReport(agentDir = getAgentDir()): Promise<St
 				return;
 			}
 			if (info.isDirectory() && tree) {
+				// Blob keys are direct store children. Session-local trees contain
+				// arbitrary artifacts, even when their names resemble journals/logs.
+				if (!category) {
+					if (tree === "blobs" && depth > 0) category = "blobAuxiliary";
+					else if (tree !== "blobs" && depth >= 3 && path.basename(file) === "local") {
+						category = tree === "sessions" ? "sessionArtifacts" : "archiveArtifacts";
+					}
+				}
 				for await (const entry of await fs.opendir(file)) {
-					await scan(path.join(file, entry.name), tree);
+					await scan(path.join(file, entry.name), tree, category, depth + 1);
 				}
 			} else if (info.isFile()) {
 				recordFile(file, category ?? treeFileCategory(path.basename(file), tree!), info.size);
@@ -134,14 +148,15 @@ export async function collectStorageReport(agentDir = getAgentDir()): Promise<St
 	};
 
 	const sessionsRoot = getSessionsDir(resolvedAgentDir);
-	const archiveContainer = path.join(path.dirname(sessionsRoot), "archive");
+	const archiveRoot = getArchivedSessionsDir(resolvedAgentDir);
+	const archiveContainer = path.dirname(archiveRoot);
 	await scan(sessionsRoot, "sessions");
 	try {
 		const archiveInfo = await fs.lstat(archiveContainer);
 		if (archiveInfo.isSymbolicLink()) {
 			report.skipped.symlinks++;
 		} else if (archiveInfo.isDirectory()) {
-			await scan(path.join(archiveContainer, "sessions"), "archive");
+			await scan(archiveRoot, "archive");
 		} else {
 			report.skipped.specialFiles++;
 		}

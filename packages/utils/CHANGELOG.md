@@ -5,6 +5,7 @@
 ### Added
 
 - `getStatsDbPath()` accepts an agent directory so storage reports and maintenance share the same profile-aware database selection.
+- `getArchivedSessionsDir()` exposes the shared profile/XDG-aware archive location for storage tools.
 
 ## [18.1.13] - 2026-09-07
 

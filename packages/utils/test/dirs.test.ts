@@ -78,6 +78,9 @@ describe("stats database directory", () => {
 			const activeAgent = customActive ? temp.join("active-agent") : path.join(configRoot, "agent");
 			if (xdg) await fs.promises.mkdir(xdgRoot, { recursive: true });
 			if (migrateProfile) await fs.promises.mkdir(path.join(xdgRoot, ...profileParts), { recursive: true });
+			await fs.promises.mkdir(activeAgent, { recursive: true });
+			const linkedAgent = temp.join("linked-agent");
+			await fs.promises.symlink(activeAgent, linkedAgent, "junction");
 			const usesXdg =
 				xdg &&
 				!customActive &&
@@ -95,6 +98,8 @@ describe("stats database directory", () => {
 				"  active: getStatsDbPath(agent),",
 				"  alias: getStatsDbPath(alias),",
 				"  relativeActive: getStatsDbPath(path.relative(process.cwd(), agent)),",
+				`  linked: getStatsDbPath(${JSON.stringify(linkedAgent)}),`,
+				'  caseVariant: getStatsDbPath(process.platform === "win32" ? agent.toUpperCase() : agent),',
 				`  custom: getStatsDbPath(${JSON.stringify(temp.join("custom-agent"))}),`,
 				'  relativeCustom: getStatsDbPath("custom-agent"),',
 				"}));",
@@ -130,6 +135,8 @@ describe("stats database directory", () => {
 				active: defaultStats,
 				alias: defaultStats,
 				relativeActive: defaultStats,
+				linked: defaultStats,
+				caseVariant: defaultStats,
 				custom: temp.join("custom-agent", "stats.db"),
 				relativeCustom: path.join("custom-agent", "stats.db"),
 			});
