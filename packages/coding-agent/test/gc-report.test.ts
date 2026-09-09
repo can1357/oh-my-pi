@@ -27,6 +27,7 @@ describe("read-only storage reports", () => {
 			[path.join(blobDir, hash), "blob"],
 			[path.join(blobDir, "index.json"), "blob index"],
 			[getHistoryDbPath(agentDir), "not a database"],
+			[path.join(agentDir, "stats.db"), "stats database"],
 			[`${getHistoryDbPath(agentDir)}-wal`, "wal"],
 			[`${getHistoryDbPath(agentDir)}-shm`, "shm"],
 		] as const;
@@ -41,6 +42,7 @@ describe("read-only storage reports", () => {
 		expect(report.categories.archiveJournals.logicalBytes).toBe(Buffer.byteLength("not a gzip stream"));
 		expect(report.categories.blobs).toEqual({ files: 1, logicalBytes: 4 });
 		expect(report.categories.blobAuxiliary).toEqual({ files: 1, logicalBytes: 10 });
+		expect(report.categories.databases).toEqual({ files: 2, logicalBytes: 28 });
 		expect(report.categories.databaseSidecars).toEqual({ files: 2, logicalBytes: 6 });
 		expect(report.total).toEqual({
 			files: entries.length,
@@ -98,6 +100,50 @@ describe("read-only storage reports", () => {
 			const report = await collectStorageReport(agentDir);
 			expect(report.errors).toEqual([{ path: sessions, message: "permission denied" }]);
 		} finally {
+			openSpy.mockRestore();
+		}
+	});
+
+	test("CLI text sanitizes paths and errors while JSON preserves their original values", async () => {
+		await using temp = await TempDir.create("@omp-gc-report-controls-");
+		const controls = String.fromCharCode(...Array.from({ length: 33 }, (_, index) => 0x7f + index));
+		const agentDir = temp.join(`agent${controls}`);
+		const sessions = getSessionsDir(agentDir);
+		const largestFile = path.join(sessions, `largest${controls}.log`);
+		const deniedDir = path.join(sessions, `denied${controls}`);
+		const message = `permission${controls} denied\nretry\tlater`;
+		await Bun.write(largestFile, "output");
+		await fs.mkdir(deniedDir);
+		const denied = Object.assign(new Error(message), { code: "EACCES" });
+		const originalOpen = fs.opendir;
+		const openSpy = spyOn(fs, "opendir").mockImplementation((file, options) => {
+			if (file === deniedDir) return Promise.reject(denied);
+			return originalOpen(file, options);
+		});
+		const output: string[] = [];
+		const stdoutSpy = spyOn(process.stdout, "write").mockImplementation(chunk => {
+			output.push(String(chunk));
+			return true;
+		});
+		const originalExitCode = process.exitCode;
+		try {
+			await new Gc(["--report", "--agent-dir", agentDir], commandConfig).run();
+			const text = output.join("");
+			for (const control of controls) expect(text).not.toContain(control);
+			const safeAgentDir = temp.join("agent");
+			expect(text).toContain(JSON.stringify(safeAgentDir));
+			expect(text).toContain(JSON.stringify(path.join(safeAgentDir, "sessions", "largest.log")));
+			expect(text).toContain(JSON.stringify(path.join(safeAgentDir, "sessions", "denied")));
+			expect(text).toContain(JSON.stringify("permission denied\nretry\tlater"));
+			output.length = 0;
+			await new Gc(["--report", "--json", "--agent-dir", agentDir], commandConfig).run();
+			const report = JSON.parse(output.join("")) as StorageReport;
+			expect(report.agentDir).toBe(agentDir);
+			expect(report.largestFiles).toEqual([{ path: largestFile, category: "sessionLogs", logicalBytes: 6 }]);
+			expect(report.errors).toEqual([{ path: deniedDir, message }]);
+		} finally {
+			process.exitCode = originalExitCode ?? 0;
+			stdoutSpy.mockRestore();
 			openSpy.mockRestore();
 		}
 	});

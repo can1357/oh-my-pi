@@ -8,6 +8,9 @@ const BLOB_PREFIX = "blob:sha256:";
 /** Canonical blob hash shape: exactly 64 lowercase hex chars (a SHA-256 digest). */
 export const BLOB_HASH_RE = /^[a-f0-9]{64}$/;
 
+/** Canonical blob filename or typed sidecar; captures the lowercase hash and excludes auxiliary metadata names. */
+export const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
+
 export interface BlobPutOptions {
 	/** Optional file extension for a sidecar hardlink/copy that OS openers can type-detect. */
 	extension?: string;

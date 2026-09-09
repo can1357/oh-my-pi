@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
+import { collectStorageReport } from "@oh-my-pi/pi-coding-agent/cli/gc-report";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	getAgentDir,
@@ -142,6 +143,43 @@ describe("runGcCommand blob sweep", () => {
 		expect(result.blobs?.wouldDelete).toBe(1);
 		expect(result.blobs?.deleted).toBe(0);
 		expect(await Bun.file(blob).exists()).toBe(true);
+	});
+
+	test("storage reports and blob GC agree on canonical files, typed sidecars, and auxiliary files", async () => {
+		const hash = "a".repeat(64);
+		const otherHash = "b".repeat(64);
+		const blobNames = [hash, `${hash}.PNG`, `${hash}.9.a_-`, `${otherHash}.x`, `${otherHash}.${"x".repeat(32)}`];
+		const auxiliaryNames = [
+			"index.json",
+			"metadata.json",
+			"C".repeat(64),
+			`${"D".repeat(64)}.png`,
+			"e".repeat(63),
+			"e".repeat(65),
+			`${hash}..png`,
+			`${hash}._png`,
+			`${hash}.-png`,
+			`${otherHash}.${"x".repeat(33)}`,
+		];
+		for (const name of [...blobNames, ...auxiliaryNames]) {
+			await agePath(await writeBlob(root, name, name));
+		}
+		const blobBytes = blobNames.reduce((total, name) => total + Buffer.byteLength(name), 0);
+		const auxiliaryBytes = auxiliaryNames.reduce((total, name) => total + Buffer.byteLength(name), 0);
+		const report = await collectStorageReport(root);
+		expect(report.categories.blobs).toEqual({ files: blobNames.length, logicalBytes: blobBytes });
+		expect(report.categories.blobAuxiliary).toEqual({ files: auxiliaryNames.length, logicalBytes: auxiliaryBytes });
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		expect(result.blobs).toEqual({
+			referenced: 0,
+			candidates: 2,
+			wouldDelete: blobNames.length,
+			deleted: blobNames.length,
+			bytes: blobBytes,
+			errors: [],
+		});
+		expect((await fs.readdir(getBlobsDir(root))).sort()).toEqual(auxiliaryNames.sort());
 	});
 
 	test("--apply deletes unreferenced blobs and keeps referenced blobs", async () => {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `getStatsDbPath()` accepts an agent directory so storage reports and maintenance share the same profile-aware database selection.
+
 ## [18.1.13] - 2026-09-07
 
 ### Fixed

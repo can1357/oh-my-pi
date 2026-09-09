@@ -795,8 +795,15 @@ export function getNativesDir(): string {
 	return dirs.rootSubdir("natives", "cache");
 }
 
-/** Get the stats database path (~/.omp/stats.db). */
-export function getStatsDbPath(): string {
+/**
+ * Get the stats database path (~/.omp/stats.db), honoring profile and XDG resolution.
+ * An omitted or active agent directory uses the normal root-level database;
+ * a different custom directory uses <agentDir>/stats.db, matching GC's historical scope.
+ */
+export function getStatsDbPath(agentDir?: string): string {
+	if (agentDir !== undefined && path.resolve(agentDir) !== path.resolve(dirs.agentDir)) {
+		return path.join(agentDir, "stats.db");
+	}
 	return dirs.rootSubdir("stats.db", "data");
 }
 

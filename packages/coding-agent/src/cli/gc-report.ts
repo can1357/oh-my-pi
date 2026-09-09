@@ -10,8 +10,9 @@ import {
 	getSessionsDir,
 	getStatsDbPath,
 	isEnoent,
+	sanitizeText,
 } from "@oh-my-pi/pi-utils";
-import { BLOB_HASH_RE } from "../session/blob-store";
+import { BLOB_FILE_RE } from "../session/blob-store";
 
 const CATEGORY_LABELS = {
 	sessionJournals: "Session journals",
@@ -53,19 +54,12 @@ export interface StorageReport {
 }
 
 const LARGEST_FILE_LIMIT = 10;
-const BLOB_EXTENSION_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
 
 type StorageTree = "sessions" | "archive" | "blobs";
 
 function treeFileCategory(name: string, tree: StorageTree): StorageCategory {
 	if (tree === "blobs") {
-		const separator = name.indexOf(".");
-		const isBlob =
-			BLOB_HASH_RE.test(name) ||
-			(separator > 0 &&
-				BLOB_HASH_RE.test(name.slice(0, separator)) &&
-				BLOB_EXTENSION_RE.test(name.slice(separator + 1)));
-		return isBlob ? "blobs" : "blobAuxiliary";
+		return BLOB_FILE_RE.test(name) ? "blobs" : "blobAuxiliary";
 	}
 	const journal = name.endsWith(".jsonl") || name.endsWith(".jsonl.gz") || /\.jsonl\..+\.bak$/.test(name);
 	if (tree === "sessions") {
@@ -161,13 +155,11 @@ export async function collectStorageReport(agentDir = getAgentDir()): Promise<St
 	}
 	await scan(getBlobsDir(resolvedAgentDir), "blobs");
 
-	const statsDb =
-		resolvedAgentDir === path.resolve(getAgentDir()) ? getStatsDbPath() : path.join(resolvedAgentDir, "stats.db");
 	for (const database of [
 		getAgentDbPath(resolvedAgentDir),
 		getHistoryDbPath(resolvedAgentDir),
 		getModelDbPath(resolvedAgentDir),
-		statsDb,
+		getStatsDbPath(resolvedAgentDir),
 	]) {
 		await scan(database, undefined, "databases");
 		await scan(`${database}-wal`, undefined, "databaseSidecars");
@@ -177,7 +169,7 @@ export async function collectStorageReport(agentDir = getAgentDir()): Promise<St
 	return report;
 }
 
-/** Text output deliberately escapes paths so filenames cannot inject terminal control sequences. */
+/** Quote paths and sanitize remaining controls for text output without changing the original report data. */
 export function formatStorageReport(report: StorageReport): string {
 	const lines = [
 		`Storage report (${JSON.stringify(report.agentDir)})`,
@@ -199,5 +191,5 @@ export function formatStorageReport(report: StorageReport): string {
 	for (const error of report.errors) {
 		lines.push(`Scan error: ${JSON.stringify(error.path)}: ${JSON.stringify(error.message)}`);
 	}
-	return `${lines.join("\n")}\n`;
+	return sanitizeText(`${lines.join("\n")}\n`);
 }

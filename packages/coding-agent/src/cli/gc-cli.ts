@@ -14,11 +14,10 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
-import { BLOB_HASH_RE } from "../session/blob-store";
+import { BLOB_FILE_RE, BLOB_HASH_RE } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { FileSessionStorage } from "../session/session-storage";
 
-const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
 const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
 const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
 const JSONL_GZ_GLOB = new Bun.Glob("**/*.jsonl.gz");
@@ -1159,10 +1158,7 @@ async function cleanupStatsRowsForArchivedSessions(
 	newlyArchivedSessions: SessionInfo[],
 	result: ArchiveGcResult,
 ): Promise<void> {
-	const dbPath =
-		path.resolve(options.agentDir) === path.resolve(getAgentDir())
-			? getStatsDbPath()
-			: path.join(options.agentDir, "stats.db");
+	const dbPath = getStatsDbPath(options.agentDir);
 	if (!(await pathExists(dbPath))) return;
 	const sessionsRoot = getSessionsDir(options.agentDir);
 
