@@ -2046,6 +2046,24 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"loop.conditionTimeoutMs": {
+		type: "number",
+		default: 30_000,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Loop Condition Timeout (ms)",
+			description:
+				"Max wait for a `/loop --while` / `--until` condition command before treating it as broken and stopping the loop. Set to 0 to wait indefinitely",
+			options: [
+				{ value: "0", label: "Unlimited" },
+				{ value: "10000", label: "10 seconds" },
+				{ value: "30000", label: "30 seconds" },
+				{ value: "120000", label: "2 minutes" },
+			],
+		},
+	},
+
 	// Input and startup
 	doubleEscapeAction: {
 		type: "enum",
@@ -2557,6 +2575,17 @@ export const SETTINGS_SCHEMA = {
 			group: "Compaction",
 			label: "Auto-Compact",
 			description: "Automatically compact context when it gets too large",
+		},
+	},
+	"compaction.experimentalContextManagement": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Notes-backed context windows (experimental)",
+			description:
+				"Keep persistent notes and searchable raw history across context windows. Restart to update available tools.",
 		},
 	},
 
@@ -6209,6 +6238,7 @@ export type Personality = SettingValue<"personality">;
 
 export interface CompactionSettings {
 	enabled: boolean;
+	experimentalContextManagement?: boolean;
 	methodOrder: CompactionMethod[];
 	thresholdPercent: number;
 	thresholdTokens: number;

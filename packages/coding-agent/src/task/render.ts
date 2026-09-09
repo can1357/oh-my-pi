@@ -6,20 +6,22 @@
  */
 import path from "node:path";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { Container, Markdown, Text } from "@oh-my-pi/pi-tui";
+import { Container, Markdown, Text, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
-import { settings } from "../config/settings";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { formatContextUsage } from "../modes/components/status-line/context-thresholds";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
 import { stripGeneratedOutputNotice, stripRawOutputArtifactNotice } from "../tools/output-meta";
 import {
 	capPreviewLines,
+	FEED_MODEL_BADGE_WIDTH,
 	formatBadge,
 	formatDuration,
 	formatExpandHint,
+	formatFeedModelBadge,
 	formatMoreItems,
 	formatStatusIcon,
+	isFeedModelBadgeEnabled,
 	previewLine,
 	previewWindowRows,
 	replaceTabs,
@@ -34,7 +36,7 @@ import {
 	parseFindingDetails,
 	type SubmitReviewDetails,
 } from "../tools/review";
-import { framedBlock, renderStatusLine } from "../tui";
+import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../tui";
 import { repairDoubleEncodedJsonString } from "./repair-args";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails, YieldItem } from "./types";
@@ -97,8 +99,6 @@ function appendAgentStats(
 		contextTokens?: number;
 		contextWindow?: number;
 		cost: number;
-		resolvedModel?: string;
-		showResolvedModelBadge?: boolean;
 	},
 	theme: Theme,
 ): string {
@@ -118,9 +118,6 @@ function appendAgentStats(
 	}
 	if (opts.cost > 0) {
 		line += `${theme.sep.dot}${theme.fg("statusLineCost", `$${opts.cost.toFixed(2)}`)}`;
-	}
-	if (opts.resolvedModel && opts.showResolvedModelBadge) {
-		line += `${theme.sep.dot}${theme.fg("dim", truncateToWidth(replaceTabs(opts.resolvedModel), 30))}`;
 	}
 	return line;
 }
@@ -882,6 +879,17 @@ export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: 
 	});
 }
 
+function truncateTaskRow(text: string, width: number, ellipsis?: ""): string {
+	return Number.isFinite(width) ? truncateToWidth(text, width, ellipsis) : text;
+}
+
+function renderDescriptionLines(description: string, prefix: string, width: number, theme: Theme): string[] {
+	if (!Number.isFinite(width)) return description.split("\n").map(line => `${prefix}${theme.fg("dim", line)}`);
+	const boundedPrefix = truncateToWidth(prefix, Math.max(0, width - 1), "");
+	const contentWidth = Math.max(1, width - visibleWidth(boundedPrefix));
+	return wrapTextWithAnsi(description, contentWidth).map(line => `${boundedPrefix}${theme.fg("dim", line)}`);
+}
+
 /**
  * Render streaming progress for a single agent.
  */
@@ -896,6 +904,7 @@ function renderAgentProgress(
 	seenNestedTasks?: WeakSet<object>,
 	nestedDepth = 0,
 	nowMs = Date.now(),
+	maxWidth = Number.POSITIVE_INFINITY,
 ): string[] {
 	const lines: string[] = [];
 
@@ -907,12 +916,50 @@ function renderAgentProgress(
 				? "error"
 				: "accent";
 
-	// Main status line: id: description [status] · stats · ⟨agent⟩
-	const trimmedDescription = progress.description?.trim();
-	const description = trimmedDescription ? previewLine(sanitizeText(trimmedDescription), 64) : undefined;
-	const displayId = formatTaskId(progress.id);
-	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
+	// Reserve the name and required badges before optional model metadata and details.
+	const fullDescription = progress.description ? replaceTabs(sanitizeText(progress.description)).trim() : undefined;
 	const indent = prefix ? `${prefix} ` : "";
+	let statusBadge = "";
+	// Provider retry state takes precedence over the generic failure marker.
+	if (progress.retryState && progress.status === "running") {
+		statusBadge = ` ${formatBadge("retrying", "warning", theme)}`;
+	} else if (progress.retryFailure && (progress.status === "failed" || progress.status === "aborted")) {
+		statusBadge = ` ${formatBadge("rate-limited", "error", theme)}`;
+	} else if (progress.status === "failed" || progress.status === "aborted") {
+		statusBadge = ` ${formatBadge(progress.status, iconColor, theme)}`;
+	}
+	const rowIcon =
+		progress.status === "running" || progress.status === "pending" || progress.status === "completed"
+			? theme.status.done
+			: icon;
+	const displayId = truncateTaskRow(
+		formatTaskId(progress.id),
+		Math.max(0, maxWidth - visibleWidth(`${indent}${rowIcon} ${statusBadge}`)),
+	);
+	const roleBadge = truncateTaskRow(
+		agentTypeBadge(progress.agent, theme),
+		Math.max(0, maxWidth - visibleWidth(`${indent}${rowIcon} ${displayId}${statusBadge}`)),
+	);
+	const badges = `${roleBadge}${statusBadge}`;
+	const modelBadge = isFeedModelBadgeEnabled()
+		? formatFeedModelBadge(
+				progress.resolvedModelIdentity ?? progress.resolvedModel,
+				progress.resolvedThinkingLevel,
+				progress.advisor,
+				theme,
+				Math.min(
+					FEED_MODEL_BADGE_WIDTH,
+					Math.max(0, maxWidth - visibleWidth(`${indent}${rowIcon} ${displayId}${badges}`) - 1),
+				),
+			)
+		: "";
+	const modelLead = modelBadge ? `${modelBadge} ` : "";
+	const description =
+		fullDescription &&
+		visibleWidth(`${indent}${rowIcon} ${modelLead}${displayId}: ${fullDescription}${badges}`) <= maxWidth
+			? fullDescription
+			: undefined;
+	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
 	let statusLine: string;
 	if (progress.status === "running" || progress.status === "pending") {
 		// Live (or queued) agents use the same dot finished rows keep: detached
@@ -922,44 +969,33 @@ function renderAgentProgress(
 		const dot = theme.styledSymbol("status.done", frozen ? "dim" : "accent");
 		const nameColor = frozen ? "dim" : "accent";
 		const name = theme.fg(nameColor, description ? theme.bold(displayId) : displayId);
-		statusLine = `${indent}${dot} ${name}`;
+		statusLine = `${indent}${dot} ${modelLead}${name}`;
 		if (description) {
 			statusLine += `${theme.fg(nameColor, ":")} ${theme.fg(nameColor, description)}`;
 		}
 	} else if (progress.status === "completed") {
 		// Finished rows keep the dot but settle from accent to the plain
 		// foreground: completion reads as a color change, not a new glyph.
-		statusLine = `${indent}${theme.styledSymbol("status.done", "text")} ${theme.fg("text", titlePart)}`;
+		statusLine = `${indent}${theme.styledSymbol("status.done", "text")} ${modelLead}${theme.fg("text", titlePart)}`;
 	} else {
-		statusLine = `${indent}${theme.fg(iconColor, icon)} ${theme.fg("accent", titlePart)}`;
+		statusLine = `${indent}${theme.fg(iconColor, icon)} ${modelLead}${theme.fg("accent", titlePart)}`;
 	}
-	statusLine += agentTypeBadge(progress.agent, theme);
+	statusLine += badges;
 
-	// Show retry-blocked badge so the parent immediately sees that a child
-	// is sleeping on a provider 429, not silently progressing. Wins over the
-	// generic running marker because "we're waiting on a quota window" is
-	// the operationally meaningful state.
-	if (progress.retryState && progress.status === "running") {
-		statusLine += ` ${formatBadge("retrying", "warning", theme)}`;
-	} else if (progress.retryFailure && (progress.status === "failed" || progress.status === "aborted")) {
-		statusLine += ` ${formatBadge("rate-limited", "error", theme)}`;
-	} else if (progress.status === "failed" || progress.status === "aborted") {
-		const statusLabel = progress.status === "failed" ? "failed" : "aborted";
-		statusLine += ` ${formatBadge(statusLabel, iconColor, theme)}`;
-	}
-
-	const showBadge = settings.get("task.showResolvedModelBadge");
 	if (progress.status === "running") {
-		if (!description) {
+		if (!fullDescription) {
 			const taskPreview = previewLine(sanitizeText(progress.assignment ?? progress.task), 40);
 			statusLine += ` ${theme.fg("muted", taskPreview)}`;
 		}
-		statusLine = appendAgentStats(statusLine, { ...progress, showResolvedModelBadge: showBadge }, theme);
+		statusLine = appendAgentStats(statusLine, progress, theme);
 	} else if (progress.status === "completed") {
-		statusLine = appendAgentStats(statusLine, { ...progress, showResolvedModelBadge: showBadge }, theme);
+		statusLine = appendAgentStats(statusLine, progress, theme);
 	}
 
-	lines.push(statusLine);
+	lines.push(truncateTaskRow(statusLine, maxWidth, ""));
+	if (fullDescription && !description) {
+		lines.push(...renderDescriptionLines(fullDescription, continuePrefix, maxWidth, theme));
+	}
 
 	lines.push(...renderTaskSection(progress.assignment ?? progress.task, continuePrefix, expanded, theme));
 
@@ -1088,6 +1124,7 @@ function renderAgentProgress(
 			seenNestedTasks,
 			nestedDepth,
 			nowMs,
+			Math.max(0, maxWidth - visibleWidth(continuePrefix)),
 		);
 		for (const line of nestedLines) {
 			lines.push(`${continuePrefix}${line}`);
@@ -1218,6 +1255,7 @@ function renderAgentResult(
 	theme: Theme,
 	seenNestedTasks?: WeakSet<object>,
 	nestedDepth = 0,
+	maxWidth = Number.POSITIVE_INFINITY,
 ): string[] {
 	const lines: string[] = [];
 
@@ -1244,16 +1282,42 @@ function renderAgentResult(
 					? "merge failed"
 					: "failed";
 
-	// Main status line: id: description [status] · stats · ⟨agent⟩
-	const trimmedDescription = result.description ? sanitizeText(result.description).trim() : undefined;
-	const description = trimmedDescription ? previewLine(trimmedDescription, 64) : undefined;
-	const displayId = formatTaskId(result.id);
+	// Reserve the name and required badges before optional model metadata and details.
+	const fullDescription = result.description ? replaceTabs(sanitizeText(result.description)).trim() : undefined;
+	const indent = prefix ? `${prefix} ` : "";
+	const statusBadge = ` ${formatBadge(statusText, iconColor, theme)}`;
+	const displayId = truncateTaskRow(
+		formatTaskId(result.id),
+		Math.max(0, maxWidth - visibleWidth(`${indent}${icon} ${statusBadge}`)),
+	);
+	const roleBadge = truncateTaskRow(
+		agentTypeBadge(result.agent, theme),
+		Math.max(0, maxWidth - visibleWidth(`${indent}${icon} ${displayId}${statusBadge}`)),
+	);
+	const badges = `${roleBadge}${statusBadge}`;
+	const modelBadge = isFeedModelBadgeEnabled()
+		? formatFeedModelBadge(
+				result.resolvedModelIdentity ?? result.resolvedModel,
+				result.resolvedThinkingLevel,
+				result.advisor,
+				theme,
+				Math.min(
+					FEED_MODEL_BADGE_WIDTH,
+					Math.max(0, maxWidth - visibleWidth(`${indent}${icon} ${displayId}${badges}`) - 1),
+				),
+			)
+		: "";
+	const modelLead = modelBadge ? `${modelBadge} ` : "";
+	const description =
+		fullDescription &&
+		visibleWidth(`${indent}${icon} ${modelLead}${displayId}: ${fullDescription}${badges}`) <= maxWidth
+			? fullDescription
+			: undefined;
 	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
-	let statusLine = `${prefix ? `${prefix} ` : ""}${theme.fg(iconColor, icon)} ${theme.fg(
+	let statusLine = `${indent}${theme.fg(iconColor, icon)} ${modelLead}${theme.fg(
 		success && !needsWarning ? "text" : "accent",
 		titlePart,
-	)}${agentTypeBadge(result.agent, theme)} ${formatBadge(statusText, iconColor, theme)}`;
-	const showBadge = settings.get("task.showResolvedModelBadge");
+	)}${badges}`;
 	statusLine = appendAgentStats(
 		statusLine,
 		{
@@ -1262,8 +1326,6 @@ function renderAgentResult(
 			contextTokens: result.contextTokens,
 			contextWindow: result.contextWindow,
 			cost: result.usage?.cost.total ?? 0,
-			resolvedModel: result.resolvedModel,
-			showResolvedModelBadge: showBadge,
 		},
 		theme,
 	);
@@ -1273,7 +1335,10 @@ function renderAgentResult(
 		statusLine += ` ${theme.fg("warning", "[truncated]")}`;
 	}
 
-	lines.push(statusLine);
+	lines.push(truncateTaskRow(statusLine, maxWidth, ""));
+	if (fullDescription && !description) {
+		lines.push(...renderDescriptionLines(fullDescription, continuePrefix, maxWidth, theme));
+	}
 
 	lines.push(...renderTaskSection(result.assignment ?? result.task, continuePrefix, expanded, theme));
 
@@ -1336,6 +1401,7 @@ function renderAgentResult(
 					theme,
 					seenNestedTasks,
 					nestedDepth,
+					Math.max(0, maxWidth - visibleWidth(continuePrefix)),
 				)) {
 					deferredToolLines.push(`${continuePrefix}${line}`);
 				}
@@ -1571,6 +1637,7 @@ export function renderResult(
 		const frozen = options.renderContext?.frozen === true;
 		const nowMs = options.renderContext?.nowMs ?? Date.now();
 		const lines: string[] = [];
+		const contentWidth = outputBlockContentWidth(width);
 
 		// Result rows win once any exist; progress rows for spawns without a
 		// result (a mixed call's async subset) render as a supplement below.
@@ -1588,14 +1655,26 @@ export function renderResult(
 			}
 			for (const progress of visible) {
 				lines.push(
-					...renderAgentProgress(progress, "", "  ", expanded, theme, spinnerFrame, frozen, undefined, 0, nowMs),
+					...renderAgentProgress(
+						progress,
+						"",
+						"  ",
+						expanded,
+						theme,
+						spinnerFrame,
+						frozen,
+						undefined,
+						0,
+						nowMs,
+						contentWidth,
+					),
 				);
 			}
 		} else if (details.results && details.results.length > 0) {
 			const ordered = orderResultsForDisplay(details.results);
 			const visible = expanded ? ordered : selectCollapsedResults(ordered);
 			for (const res of visible) {
-				lines.push(...renderAgentResult(res, "", "  ", expanded, theme));
+				lines.push(...renderAgentResult(res, "", "  ", expanded, theme, undefined, 0, contentWidth));
 			}
 			if (visible.length < ordered.length) {
 				const hint = formatExpandHint(theme, false, true);
@@ -1615,7 +1694,19 @@ export function renderResult(
 				: [];
 			for (const progress of supplementalProgress) {
 				lines.push(
-					...renderAgentProgress(progress, "", "  ", expanded, theme, spinnerFrame, frozen, undefined, 0, nowMs),
+					...renderAgentProgress(
+						progress,
+						"",
+						"  ",
+						expanded,
+						theme,
+						spinnerFrame,
+						frozen,
+						undefined,
+						0,
+						nowMs,
+						contentWidth,
+					),
 				);
 			}
 
@@ -1711,6 +1802,7 @@ function renderNestedTaskResults(
 	theme: Theme,
 	seen: WeakSet<object> = new WeakSet<object>(),
 	depth = 0,
+	maxWidth = Number.POSITIVE_INFINITY,
 ): string[] {
 	const lines: string[] = [];
 	for (const details of detailsList) {
@@ -1732,7 +1824,7 @@ function renderNestedTaskResults(
 		const hiddenCount = ordered.length - visible.length;
 		visible.forEach((result, index) => {
 			const { prefix, continuePrefix } = nestedMarkers(hiddenCount === 0 && index === visible.length - 1, theme);
-			lines.push(...renderAgentResult(result, prefix, continuePrefix, expanded, theme, seen, depth + 1));
+			lines.push(...renderAgentResult(result, prefix, continuePrefix, expanded, theme, seen, depth + 1, maxWidth));
 		});
 		if (hiddenCount > 0) {
 			const { prefix } = nestedMarkers(true, theme);
@@ -1757,6 +1849,7 @@ function renderNestedTaskTree(
 	seen: WeakSet<object> = new WeakSet<object>(),
 	depth = 0,
 	nowMs = Date.now(),
+	maxWidth = Number.POSITIVE_INFINITY,
 ): string[] {
 	const lines: string[] = [];
 	for (const details of detailsList) {
@@ -1776,7 +1869,9 @@ function renderNestedTaskTree(
 			const hiddenCount = ordered.length - visible.length;
 			visible.forEach((result, index) => {
 				const { prefix, continuePrefix } = nestedMarkers(hiddenCount === 0 && index === visible.length - 1, theme);
-				lines.push(...renderAgentResult(result, prefix, continuePrefix, expanded, theme, seen, depth + 1));
+				lines.push(
+					...renderAgentResult(result, prefix, continuePrefix, expanded, theme, seen, depth + 1, maxWidth),
+				);
 			});
 			if (hiddenCount > 0) {
 				const { prefix } = nestedMarkers(true, theme);
@@ -1804,6 +1899,7 @@ function renderNestedTaskTree(
 						seen,
 						depth + 1,
 						nowMs,
+						maxWidth,
 					),
 				);
 			});

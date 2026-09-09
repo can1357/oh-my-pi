@@ -1185,11 +1185,19 @@ export class InputController {
 			return;
 		}
 
+		// TUI teardown pauses stdin, which leaves Bun with no referenced handles
+		// while the editor waits on an unresolved Promise. Keep the event loop
+		// alive across SIGSTOP so it can deliver SIGCONT; without this handle Bun
+		// exits successfully immediately after `fg` instead of restarting the TUI
+		// (issue #8585).
+		const suspendKeepalive = setInterval(() => {}, 2 ** 30);
+
 		// Capture the listener so we can detach it if the signal never fires;
 		// otherwise a failed suspend would leave a stale SIGCONT handler that
 		// fires on the next unrelated continue and tries to re-`start()` an
 		// already-running TUI.
 		const onResume = (): void => {
+			clearInterval(suspendKeepalive);
 			this.ctx.ui.start();
 			this.ctx.ui.requestRender(true);
 		};
@@ -1232,6 +1240,7 @@ export class InputController {
 			// their own sessions, so pgid=0 does not reach them.
 			process.kill(0, "SIGSTOP");
 		} catch (err) {
+			clearInterval(suspendKeepalive);
 			// The runtime refused the signal (e.g. seccomp filter blocks SIGSTOP
 			// delivery to the process group). Tear the resume hook down and
 			// bring the TUI back so the user is not stranded on a frozen prompt.
