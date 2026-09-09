@@ -460,7 +460,7 @@ export interface InteractiveModeContext {
 	handleResumeSession(sessionPath: string): Promise<void>;
 	handleSessionDeleteCommand(): Promise<void>;
 	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void>;
-	showSessionPinSelector(): Promise<void>;
+	showSessionPinSelector(options?: { exclusive?: boolean }): Promise<void>;
 	showResetUsageSelector(): Promise<void>;
 	showProviderSetup(): Promise<void>;
 	showHookConfirm(title: string, message: string): Promise<boolean>;

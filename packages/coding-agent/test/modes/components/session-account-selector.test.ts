@@ -50,4 +50,22 @@ describe("SessionAccountSelectorComponent", () => {
 		ctrlCComponent.handleInput("\x03");
 		expect(cancellations).toBe(2);
 	});
+
+	it("shows exclusive markers in account descriptions", () => {
+		const exclusiveAccounts = toSessionPinAccounts([
+			{ position: 0, credentialId: 11, email: "held@example.com", active: true, exclusive: true },
+			{ position: 1, credentialId: 12, email: "other@example.com", active: false, exclusive: true },
+			{ position: 2, credentialId: 13, email: "plain@example.com", active: true },
+		]);
+		const component = new SessionAccountSelectorComponent(
+			"Anthropic",
+			exclusiveAccounts,
+			() => {},
+			() => {},
+		);
+		const rendered = component.render(80).join("\n");
+		expect(rendered).toContain("active, exclusive");
+		expect(rendered).toContain("exclusive to another session");
+		expect(rendered).toContain("active for this session");
+	});
 });

@@ -21,10 +21,17 @@ export class SessionAccountSelectorComponent extends OverlayPanel {
 		const items: SelectItem[] = accounts.map(account => {
 			const value = String(account.credentialId);
 			accountsByValue.set(value, account);
+			const description = account.exclusive
+				? account.active
+					? "active, exclusive"
+					: "exclusive to another session"
+				: account.active
+					? "active for this session"
+					: undefined;
 			return {
 				value,
 				label: account.label,
-				description: account.active ? "active for this session" : undefined,
+				description,
 			};
 		});
 

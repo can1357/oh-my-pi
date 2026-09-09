@@ -104,13 +104,25 @@ async function handleSessionPinCommand(
 		return;
 	}
 
-	const selector = arg.trim();
+	const exclusive = /(?:^|\s)--exclusive(?:\s|$)/.test(arg);
+	const selector = arg.replace(/--exclusive/g, "").trim();
 	if (!selector) {
 		const lines = [`OAuth accounts for ${providerName}:`];
 		for (const account of accounts) {
-			lines.push(`${account.position + 1}. ${account.label}${account.active ? " (active)" : ""}`);
+			const state = account.exclusive
+				? account.active
+					? " (active, exclusive)"
+					: " (exclusive to another session)"
+				: account.active
+					? " (active)"
+					: "";
+			lines.push(`${account.position + 1}. ${account.label}${state}`);
 		}
-		lines.push("", "Pin one with `/session pin <number|email|account id>`.");
+		lines.push(
+			"",
+			"Pin one with `/session pin <number|email|account id>`; add `--exclusive` to reserve the account for this session only.",
+			"Release a pin with `/session unpin`.",
+		);
 		await output(lines.join("\n"));
 		return;
 	}
@@ -129,11 +141,35 @@ async function handleSessionPinCommand(
 		return;
 	}
 	const account = matches[0];
-	if (!account || !session.pinCurrentProviderOAuthAccount(account.credentialId)) {
-		await output(`${account?.label ?? selector} is no longer available to pin.`);
+	if (!account) {
+		await output(`${selector} is no longer available to pin.`);
 		return;
 	}
-	await output(`Pinned ${account.label} to this session for ${providerName}.`);
+	if (exclusive && account.exclusive && !account.active) {
+		await output(`${account.label} is exclusively pinned by another session.`);
+		return;
+	}
+	if (!session.pinCurrentProviderOAuthAccount(account.credentialId, { exclusive })) {
+		await output(`${account.label} is no longer available to pin.`);
+		return;
+	}
+	await output(
+		exclusive
+			? `Pinned ${account.label} exclusively to this session for ${providerName}; other sessions will not use it. Release with \`/session unpin\`.`
+			: `Pinned ${account.label} to this session for ${providerName}.`,
+	);
+}
+
+async function handleSessionUnpinCommand(session: AgentSession, output: SlashCommandRuntime["output"]): Promise<void> {
+	if (session.isStreaming) {
+		await output("Cannot unpin an account while the session is streaming.");
+		return;
+	}
+	if (!session.unpinCurrentProviderOAuthAccount()) {
+		await output("No pinned account to release for the current provider.");
+		return;
+	}
+	await output("Released the pinned account; this session rejoins the shared account pool.");
 }
 
 export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -180,15 +216,16 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "session",
 		description: "Session management commands",
 		acpDescription: "Show or configure the current session",
-		acpInputHint: "[info|delete|pin [account]]",
+		acpInputHint: "[info|delete|pin [account] [--exclusive]|unpin]",
 		subcommands: [
 			{ name: "info", description: "Show session info and stats" },
 			{ name: "delete", description: "Delete current session and return to selector" },
 			{
 				name: "pin",
 				description: "Pin the current provider to a stored OAuth account",
-				usage: "[account]",
+				usage: "[account] [--exclusive]",
 			},
+			{ name: "unpin", description: "Release the session's pinned OAuth account" },
 		],
 		allowArgs: true,
 		handle: async (command, runtime) => {
@@ -226,7 +263,11 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				await handleSessionPinCommand(rest, runtime.session, runtime.output);
 				return commandConsumed();
 			}
-			return usage("Usage: /session [info|delete|pin [account]]", runtime);
+			if (verb === "unpin" && !rest) {
+				await handleSessionUnpinCommand(runtime.session, runtime.output);
+				return commandConsumed();
+			}
+			return usage("Usage: /session [info|delete|pin [account] [--exclusive]|unpin]", runtime);
 		},
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
@@ -236,19 +277,26 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return;
 			}
 			if (verb === "pin") {
-				if (rest) {
+				const exclusiveOnly = /^(?:\s*)--exclusive(?:\s*)$/.test(rest);
+				if (rest && !exclusiveOnly) {
 					await handleSessionPinCommand(rest, runtime.ctx.session, text => runtime.ctx.showStatus(text));
 					refreshStatusLine(runtime.ctx);
 				} else {
-					await runtime.ctx.showSessionPinSelector();
+					await runtime.ctx.showSessionPinSelector({ exclusive: exclusiveOnly || undefined });
 				}
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (verb === "unpin" && !rest) {
+				await handleSessionUnpinCommand(runtime.ctx.session, text => runtime.ctx.showStatus(text));
+				refreshStatusLine(runtime.ctx);
 				runtime.ctx.editor.setText("");
 				return;
 			}
 			if (!verb || (verb === "info" && !rest)) {
 				await runtime.ctx.handleSessionCommand();
 			} else {
-				runtime.ctx.showStatus("Usage: /session [info|delete|pin [account]]");
+				runtime.ctx.showStatus("Usage: /session [info|delete|pin [account] [--exclusive]|unpin]");
 			}
 			runtime.ctx.editor.setText("");
 		},
