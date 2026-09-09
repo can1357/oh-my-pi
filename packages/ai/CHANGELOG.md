@@ -13,6 +13,9 @@
 
 ### Fixed
 
+- Restored Cursor capability/session option wiring (`cursorClientSupportsInlineImages`, `cursorClientSupportsRoutedModelUpdate`, `cursorClientSupportsPromptContextUsageRpc`, `cursorRunId`, `cursorAgentSessionId`) onto `AgentRunRequest`.
+- Cursor auto mode echoes a roster-resolved `requestModelId` of `auto` verbatim on `requestedModel`/`modelDetails` (matching the CLI); the synthetic catalog id without roster proof keeps the `default` wire contract.
+- Cursor user messages default to `AgentMode.AGENT` (1) like the CLI instead of serializing `UNSPECIFIED` (0).
 - Fixed account selection for OpenCode Go and SuperGrok (xai-oauth) so accounts without available funds or included quota are skipped in favor of eligible accounts.
 - Improved visibility into automatically disabled authentication credentials by logging a warning and including the affected account details in credential-disabled events.
 
