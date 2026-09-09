@@ -252,6 +252,7 @@ export class CollabHost {
 		socket.onControl = msg => {
 			if (msg.t === "peer-left") this.#handlePeerLeft(msg.peer);
 		};
+		socket.onPeerOverload = peer => this.#handlePeerOverload(peer);
 		socket.onClose = (reason, willReconnect) => {
 			if (this.#stopped) return;
 			if (!opened) {
@@ -283,7 +284,14 @@ export class CollabHost {
 		}
 
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
-			if (isWireAgentEvent(event)) this.#broadcast({ t: "event", event: shrinkForReplication(event) });
+			if (isWireAgentEvent(event)) {
+				// Notices are advisory: the roster guests render comes from `state`
+				// frames, so losing one costs a transcript line and nothing else. That
+				// matters because a guest causes one per `hello` without it being
+				// addressed to them, and unshedable peer-caused broadcasts would
+				// otherwise reach the terminal overload path.
+				this.#broadcast({ t: "event", event: shrinkForReplication(event) }, event.type === "notice");
+			}
 			this.#onEventForState(event);
 		});
 		// Subagent frames publish on the session tree's observability bus at
@@ -341,14 +349,17 @@ export class CollabHost {
 		this.#ctx.ui.requestRender();
 	}
 
-	#broadcast(frame: CollabFrame): void {
-		if (this.#stopped || !this.#socket) return;
+	/** @returns false when a saturated queue discarded an advisory frame. */
+	#broadcast(frame: CollabFrame, advisory = false): boolean {
+		if (this.#stopped || !this.#socket) return false;
 		if (this.#ctx.sessionManager.getSessionId() !== this.#sessionId) {
 			void this.stop("session switched");
 			this.#ctx.session.emitNotice("warning", "Collab ended: session switched", "collab");
-			return;
+			return false;
 		}
+		if (advisory) return this.#socket.broadcastAdvisory(frame);
 		this.#socket.send(frame);
+		return true;
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
@@ -409,8 +420,8 @@ export class CollabHost {
 		const canWrite = this.#verifyWriteToken(writeToken);
 		this.#peers.set(fromPeer, { name: cleanName, canWrite });
 
-		// Enqueue the snapshot synchronously so live traffic cannot overtake it;
-		// materialize its chunks only as the transport drains.
+		// Enqueue the welcome and its snapshot synchronously so live traffic cannot
+		// overtake them; materialize the chunks only as the transport drains.
 		const snapshot = this.#ctx.sessionManager.snapshotForReplication();
 		let serialized = JSON.stringify(snapshot);
 		// Two units, deliberately. The strip threshold compares UTF-16 code units,
@@ -437,23 +448,20 @@ export class CollabHost {
 		const entries = snapshot.entries.filter(isWireSessionEntry);
 		const socket = this.#socket;
 		if (!socket) return;
-		socket.send(
-			{
-				t: "welcome",
-				proto: COLLAB_PROTO,
-				header: snapshot.header,
-				state: this.#buildState(),
-				agents: this.#snapshotAgents(),
-				entryCount: entries.length,
-				readOnly: canWrite ? undefined : true,
-			},
-			fromPeer,
-		);
+		const welcome: CollabFrame = {
+			t: "welcome",
+			proto: COLLAB_PROTO,
+			header: snapshot.header,
+			state: this.#buildState(),
+			agents: this.#snapshotAgents(),
+			entryCount: entries.length,
+			readOnly: canWrite ? undefined : true,
+		};
 		// snapshotForReplication clones, and the batch holds that clone until it
 		// drains, so the queue is told what it is keeping alive: the serialized byte
 		// length of what stripping left, before an entry filter that only shrinks it
 		// further.
-		socket.sendBatch(this.#snapshotChunks(entries), fromPeer, snapshotBytes);
+		socket.sendBatch(this.#welcomeWithSnapshot(welcome, entries), fromPeer, snapshotBytes);
 		if (canWrite) {
 			for (const pending of this.#pendingUi.values()) {
 				socket.send({ t: "ui-request", request: pending.request }, fromPeer);
@@ -466,6 +474,22 @@ export class CollabHost {
 		);
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
+	}
+
+	/**
+	 * The welcome and the chunks built from the same {@link entries} are one unit:
+	 * the welcome primes the guest's accumulator with `entryCount` and the train
+	 * terminates it, so a guest given one without the other finalizes a replica it
+	 * believes is complete. Yielding both from one generator makes them a single
+	 * queue entry, so admission, supersede and cancellation are one decision and a
+	 * partial admission cannot be expressed.
+	 */
+	*#welcomeWithSnapshot(
+		welcome: CollabFrame,
+		entries: (StoredSessionEntry & WireSessionEntry)[],
+	): Generator<CollabFrame> {
+		yield welcome;
+		yield* this.#snapshotChunks(entries);
 	}
 
 	/**
@@ -592,6 +616,28 @@ export class CollabHost {
 		this.#scheduleStateBroadcast();
 	}
 
+	/** The socket discarded this peer's backlog to keep the room alive; drop it and tell it to rejoin. */
+	#handlePeerOverload(peer: number): void {
+		if (this.#stopped) return;
+		const name = this.#peers.get(peer)?.name;
+		this.#peers.delete(peer);
+		this.#socket?.send({ t: "error", message: "the host discarded your backlog; rejoin to resync" }, peer);
+		if (name) {
+			this.#ctx.session.emitNotice(
+				"warning",
+				`${name} fell too far behind and was dropped; they can rejoin`,
+				"collab",
+			);
+		}
+		this.#updateStatusSegment();
+		// Deliberately no state broadcast. Removing the peer changes `participants`,
+		// so the frame would defeat the JSON dedupe, and admitting it into a queue
+		// that is still full sheds the next peer, whose report schedules another
+		// changed state — walking the whole roster one participant per debounce
+		// interval. `state` is level-triggered, so the next real change re-sends the
+		// current roster; the local status segment above is already up to date.
+	}
+
 	#buildState(): CollabSessionState {
 		const session = this.#ctx.session;
 		// Context numbers come from the status line's memoized breakdown so guests
@@ -652,7 +698,8 @@ export class CollabHost {
 		if (this.#stopped || this.#agentsDebounce) return;
 		this.#agentsDebounce = setTimeout(() => {
 			this.#agentsDebounce = null;
-			this.#broadcast({ t: "agents", agents: this.#snapshotAgents() });
+			// Level-triggered like `state`, and re-sent on the next registry change.
+			this.#broadcast({ t: "agents", agents: this.#snapshotAgents() }, true);
 		}, AGENTS_DEBOUNCE_MS);
 	}
 
@@ -752,8 +799,12 @@ export class CollabHost {
 			const state = this.#buildState();
 			const json = JSON.stringify(state);
 			if (json === this.#lastStateJson) return;
-			this.#lastStateJson = json;
-			this.#broadcast({ t: "state", state });
+			// `state` is a level-triggered snapshot: a guest can cause an endless
+			// stream of distinct ones (a repeated hello under a new name defeats the
+			// dedupe), and as replica-bearing broadcasts they would reach the terminal
+			// path and end the room. Advisory instead — and only recorded as sent when
+			// it was admitted, or the dedupe would pin a value the guests never saw.
+			if (this.#broadcast({ t: "state", state }, true)) this.#lastStateJson = json;
 		}, STATE_DEBOUNCE_MS);
 	}
 

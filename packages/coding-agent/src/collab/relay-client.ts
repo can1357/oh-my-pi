@@ -37,6 +37,26 @@ const MAX_PENDING_SENDS = 256;
  */
 const MAX_PENDING_SEND_BYTES = 16 * 1024 * 1024;
 /**
+ * Per-guest share of the queue. Legitimate targeted traffic for one peer is a
+ * welcome, one lazy snapshot batch and a handful of ui-requests, so a peer that
+ * holds this many entries is spamming or hopelessly behind. It loses its own
+ * backlog; the room keeps running.
+ */
+const MAX_PEER_PENDING_SENDS = 32;
+/**
+ * Lazy batches one peer may hold. A batch is a single queue entry whose byte
+ * charge covers only the chunk in flight, so the entry caps above put no bound
+ * at all on how long it occupies the head of a queue shared with every other
+ * peer.
+ *
+ * One, and `CollabHost` puts the welcome at the head of the same generator, so
+ * this reads as one welcome-plus-snapshot per peer. That is what makes the pair
+ * atomic: the newest one supersedes the previous whole unit, and there is no way
+ * to express admitting a welcome without the chunks built with it — a guest
+ * given one without the other finalizes a replica it believes is complete.
+ */
+const MAX_PEER_PENDING_BATCHES = 1;
+/**
  * Settled retirement records kept, as a memory backstop only. Correctness is an
  * *ordering* obligation, not a count: a record must outlive the frames that were
  * already on {@link CollabSocket.#recvChain} when the departure arrived, and
@@ -55,6 +75,14 @@ interface PendingSend {
 	frames: Iterator<CollabFrame | string>;
 	targetPeer: number;
 	bytes: number;
+	/**
+	 * One entry that materializes its chunks as the transport drains and holds the
+	 * snapshot they come from until it does. Charged once, at admission, for what
+	 * it keeps reachable — so a discard refunds exactly what was levied.
+	 */
+	lazy: boolean;
+	/** Carries no replica state, so it may be discarded instead of ending the room. */
+	advisory: boolean;
 	cancelled: boolean;
 }
 
@@ -72,6 +100,8 @@ export class CollabSocket {
 	onControl?: (msg: RelayControlMessage) => void;
 	/** Fires once per terminal close (intentional, fatal code, or bad key). willReconnect=true for transient drops that will retry. */
 	onClose?: (reason: string, willReconnect: boolean) => void;
+	/** A targeted backlog was discarded to keep the room alive; the peer must resync. Always deferred to a microtask. */
+	onPeerOverload?: (peerId: number) => void;
 
 	readonly #opts: CollabSocketOptions;
 	#ws: WebSocket | null = null;
@@ -82,6 +112,17 @@ export class CollabSocket {
 	#closed = false;
 	/** Set while a transient drop is being retried; the next open is a new room. */
 	#rejoining = false;
+	/**
+	 * Set for the dynamic extent of an overload report. Nothing a report causes
+	 * may cause another shed: the owner answers with a targeted resync error, and
+	 * mirrors a warning notice that `AgentSession#emit` dispatches to listeners
+	 * synchronously, so `CollabHost`'s own subscription turns it into a broadcast
+	 * from inside this scope. Letting either evict somebody would cost a
+	 * quota-abiding peer its backlog as a side effect of another peer's report,
+	 * and letting the broadcast reach the terminal path would end the room over an
+	 * advisory line. Remedy traffic fits in the queue or is dropped.
+	 */
+	#reporting = false;
 	#sending = false;
 	#sendGeneration = 0;
 	#wakeSender: (() => void) | undefined;
@@ -90,22 +131,30 @@ export class CollabSocket {
 	#pendingSends: PendingSend[] = [];
 	#pendingSendBytes = 0;
 	/**
-	 * Peers the relay has retired. Sole authority for the queue invariant: **every
-	 * entry in {@link #pendingSends} with a non-zero `targetPeer` is work for a
-	 * peer absent from here.**
+	 * Why a peer is currently not being served; absence means it is. Sole
+	 * authority for the queue invariant: **every entry in {@link #pendingSends}
+	 * with a non-zero `targetPeer` is work for a peer absent from here.**
 	 *
 	 * Entered synchronously in {@link #handleMessage}, before any owner callback
 	 * runs, so it changes atomically with respect to anything that can enqueue.
 	 * Kept past the departure because decryption reorders dispatch: a frame that
 	 * finishes opening after its sender's `peer-left` must still be recognised as
-	 * stale.
+	 * stale. Stored as the exceptions rather than as the served set because a
+	 * socket cannot enumerate who it serves — `peer-joined` is advisory and an
+	 * owner may legitimately address a peer it learned of out of band — but it
+	 * always knows who it has written off.
 	 *
-	 * The value is whether that ordering obligation is met — whether the frames
-	 * received before the departure have been dispatched. Only settled records may
-	 * be evicted, so churn cannot retire a tombstone whose frame is still in the
-	 * chain; {@link MAX_RETIRED_PEERS} then bounds the settled remainder.
+	 * - `left`: the relay retired the id. `settled` records whether the frames
+	 *   received before the departure have been dispatched; only settled records
+	 *   may be evicted, so connection churn cannot retire a record whose frame is
+	 *   still in the chain, and {@link MAX_RETIRED_PEERS} bounds the settled
+	 *   remainder.
+	 * - `shed`: {@link #shedPeer} discarded the peer's backlog and has not
+	 *   reported it yet. Lives one microtask turn, so the cap never evicts it. A
+	 *   shed peer is still owed a resync error, so the mask lifts before the
+	 *   report; `left` overwrites it, because departure wins.
 	 */
-	#retiredPeers = new Map<number, boolean>();
+	#notServing = new Map<number, { reason: "left" | "shed"; settled: boolean }>();
 	/**
 	 * Bumped when the relay recreates the room. Bookkeeping deferred from one room
 	 * may not be applied in the next: the ids are reissued and the records cleared,
@@ -129,7 +178,7 @@ export class CollabSocket {
 	 * exact even though dispatch order is not.
 	 */
 	isServing(peerId: number): boolean {
-		return !this.#retiredPeers.has(peerId);
+		return this.#notServing.get(peerId)?.reason !== "left";
 	}
 
 	/** Fires on every reconnect: the relay recreated the room and reissues peer ids from 1. */
@@ -146,14 +195,14 @@ export class CollabSocket {
 		if (this.#closed) return;
 		try {
 			const serialized = JSON.stringify(frame);
-			this.#enqueueSend([serialized].values(), targetPeer, Buffer.byteLength(serialized));
+			this.#enqueueSend([serialized].values(), targetPeer, Buffer.byteLength(serialized), false, false);
 		} catch (err) {
 			this.#failFatal(`could not serialize collab frame: ${String(err)}; rejoin to resync`);
 		}
 	}
 
 	/**
-	 * Keeps a snapshot contiguous with its welcome and ahead of subsequent live traffic.
+	 * Keeps a lazy snapshot contiguous with its welcome and ahead of subsequent live traffic.
 	 *
 	 * @param retainedBytes size of the data {@link frames} keeps reachable until the
 	 * batch drains. Charged against the send budget at admission, since a lazy batch
@@ -163,7 +212,24 @@ export class CollabSocket {
 	 */
 	sendBatch(frames: Iterable<CollabFrame>, targetPeer: number, retainedBytes: number): void {
 		if (this.#closed) return;
-		this.#enqueueSend(frames[Symbol.iterator](), targetPeer, retainedBytes);
+		this.#enqueueSend(frames[Symbol.iterator](), targetPeer, retainedBytes, true, false);
+	}
+
+	/**
+	 * Broadcast that carries no replica state, so a full queue may discard it
+	 * rather than end the room. Guests can cause this traffic without it being
+	 * addressed to them — one notice per `hello` — and a peer-caused pile-up must
+	 * never reach the terminal path, so it is shed ahead of everything else.
+	 */
+	broadcastAdvisory(frame: CollabFrame): boolean {
+		if (this.#closed) return false;
+		try {
+			const serialized = JSON.stringify(frame);
+			return this.#enqueueSend([serialized].values(), 0, Buffer.byteLength(serialized), false, true);
+		} catch (err) {
+			this.#failFatal(`could not serialize collab frame: ${String(err)}; rejoin to resync`);
+			return false;
+		}
 	}
 
 	/**
@@ -203,7 +269,7 @@ export class CollabSocket {
 	 * out peer ids from 1 again. No `peer-left` announces any of it, so every id
 	 * this socket knew is meaningless and may already have been reissued.
 	 *
-	 * Targeted work is therefore undeliverable and must go. A batch is the
+	 * Targeted work is therefore undeliverable and must go. A lazy batch is the
 	 * pressing case: it is one queue entry whose accounting covers only the chunk
 	 * in flight, so nothing bounds how long it keeps iterating at a retired id
 	 * while every new guest's welcome waits behind it. Retirement records go too —
@@ -215,28 +281,96 @@ export class CollabSocket {
 	 */
 	#resetForRecreatedRoom(): void {
 		this.#roomGeneration++;
-		this.#retiredPeers.clear();
+		this.#notServing.clear();
 		const discarded = this.#discardWhere(pending => pending.targetPeer !== 0);
 		if (discarded > 0) logger.debug("collab: discarded targeted sends across a reconnect", { discarded });
 	}
 
-	#enqueueSend(frames: Iterator<CollabFrame | string>, targetPeer: number, bytes: number): void {
+	#enqueueSend(
+		frames: Iterator<CollabFrame | string>,
+		targetPeer: number,
+		bytes: number,
+		lazy: boolean,
+		advisory: boolean,
+	): boolean {
 		// The queue invariant, enforced in one place: targeted work is only ever
-		// admitted for a peer still being served. A batch queued for a peer that has
-		// left would hold the head of a queue shared with everyone else, which is
-		// the stall dropPeer exists to prevent, and reception order settles the
-		// peer's lifetime even though decryption reorders dispatch.
-		if (targetPeer !== 0 && this.#retiredPeers.has(targetPeer)) {
-			logger.debug("collab: refusing frame for a peer that has left", { targetPeer });
-			return;
+		// admitted for a peer still being served. Covers a peer that left — its
+		// queued batch would hold the head of a queue shared with everyone else —
+		// and the window between a shed and its report, since CollabHost#handleHello
+		// queues a snapshot batch on the line after the welcome that shed the peer.
+		if (targetPeer !== 0 && this.#notServing.has(targetPeer)) {
+			logger.debug("collab: refusing frame for a peer that is not being served", {
+				targetPeer,
+				reason: this.#notServing.get(targetPeer)?.reason,
+			});
+			return false;
 		}
-		if (this.#overCapacity(bytes)) {
-			this.#failOverload();
-			return;
+		// Enforced once here rather than per capacity branch: a saturated queue plus
+		// remedy traffic is always a drop, whoever it is addressed to. Reading the
+		// flag inside the branches instead left the broadcast path — which the
+		// notice mirror reaches — able to shed and able to go terminal.
+		if (this.#reporting && this.#overCapacity(bytes)) {
+			logger.debug("collab: dropping frame emitted while reporting a shed", { targetPeer });
+			return false;
 		}
-		this.#pendingSends.push({ frames, targetPeer, bytes, cancelled: false });
+		// Newest-wins supersede, not a shed: a second welcome re-primes the guest's
+		// accumulator, so only the newest welcome/batch pair is self-consistent.
+		// Keeping the older batch and refusing this one would let the older train's
+		// `final` terminate a replica that is missing everything the reset dropped.
+		// Nothing is reported, because superseding is the ordinary consequence of a
+		// second hello rather than a peer falling behind.
+		if (lazy && targetPeer !== 0 && this.#pendingBatchesFor(targetPeer) >= MAX_PEER_PENDING_BATCHES) {
+			const superseded = this.#discardWhere(pending => pending.targetPeer === targetPeer && pending.lazy);
+			logger.debug("collab: superseded queued snapshot batches", { targetPeer, superseded });
+		}
+		if (targetPeer === 0) {
+			// Broadcasts and every guest-role send land here. Shed guest-attributable
+			// backlog first so only a genuinely host-generated pile-up is fatal.
+			// Advisory first: a transcript line is the cheapest thing to lose, and it
+			// is the one kind of broadcast a guest can cause at will.
+			while (this.#overCapacity(bytes)) {
+				if (this.#discardWhere(pending => pending.advisory) > 0) continue;
+				// Before shedding anyone: a frame classified as safe to lose must never
+				// buy its own admission with a quota-abiding peer's backlog. Guests can
+				// cause advisory traffic at will, so the cheapest frame in the system
+				// would otherwise evict the most expensive.
+				if (advisory) {
+					logger.debug("collab: dropping advisory broadcast, only replica state is left to shed");
+					return false;
+				}
+				if (this.#shedHeaviestPeer()) continue;
+				this.#failOverload();
+				return false;
+			}
+		} else if (this.#pendingForPeer(targetPeer) >= MAX_PEER_PENDING_SENDS) {
+			this.#shedPeer(targetPeer);
+			return false;
+		} else if (this.#overCapacity(bytes)) {
+			// A welcome-plus-snapshot is the one frame a newcomer cannot obtain any
+			// other way, and without a reservation a handful of peers at their full
+			// share lock out every later join for as long as the uplink stays
+			// backpressured. So shed the heaviest holder for that, and never the
+			// requester itself: that would discard its backlog to make room for its
+			// own frame and report it as overloaded.
+			//
+			// Only for that. Ordinary targeted responses — read-only errors,
+			// transcript replies, ui-requests — answer something the peer asked for,
+			// and the host sends them without requiring a registered peer, so letting
+			// them evict would let a guest spam requests, be shed, resume once the
+			// mask lifts, and walk through everyone else's backlog. Those drop
+			// instead: the cost of a peer's own requests stays with that peer.
+			while (lazy && this.#overCapacity(bytes)) {
+				if (!this.#shedHeaviestPeer(targetPeer)) break;
+			}
+			if (this.#overCapacity(bytes)) {
+				logger.debug("collab: dropping targeted frame, no shed can make room", { targetPeer, lazy });
+				return false;
+			}
+		}
+		this.#pendingSends.push({ frames, targetPeer, bytes, lazy, advisory, cancelled: false });
 		this.#pendingSendBytes += bytes;
 		this.#pumpSends();
+		return true;
 	}
 
 	#overCapacity(bytes: number): boolean {
@@ -246,6 +380,69 @@ export class CollabSocket {
 		// only shrink from here. The ceiling is therefore the budget plus one entry.
 		if (this.#pendingSends.length === 0) return false;
 		return this.#pendingSendBytes + bytes > MAX_PENDING_SEND_BYTES;
+	}
+
+	#pendingForPeer(peerId: number): number {
+		let count = 0;
+		for (const pending of this.#pendingSends) {
+			if (pending.targetPeer === peerId) count++;
+		}
+		return count;
+	}
+
+	#pendingBatchesFor(peerId: number): number {
+		let count = 0;
+		for (const pending of this.#pendingSends) {
+			if (pending.targetPeer === peerId && pending.lazy) count++;
+		}
+		return count;
+	}
+
+	/**
+	 * Drop the queued work of the peer holding the most of it, skipping
+	 * {@link exclude}. False when no other peer holds any, which is the only case
+	 * that means the queue is genuinely broadcast-owned.
+	 */
+	#shedHeaviestPeer(exclude = 0): boolean {
+		const counts = new Map<number, number>();
+		for (const pending of this.#pendingSends) {
+			if (pending.targetPeer === 0 || pending.targetPeer === exclude) continue;
+			counts.set(pending.targetPeer, (counts.get(pending.targetPeer) ?? 0) + 1);
+		}
+		let worst = 0;
+		let worstCount = 0;
+		for (const [peerId, count] of counts) {
+			if (count > worstCount) {
+				worst = peerId;
+				worstCount = count;
+			}
+		}
+		if (worst === 0) return false;
+		this.#shedPeer(worst);
+		return true;
+	}
+
+	#shedPeer(peerId: number): void {
+		// Reporting a shed that freed nothing invites the owner to answer with a
+		// send that cannot be admitted, which schedules another report: an
+		// unbounded microtask cascade that starves the drain timer.
+		if (this.dropPeer(peerId) === 0) return;
+		// Deferred: the owner reacts by sending, and re-entering the queue mid-shed
+		// would let a callback refill what the shedding loop is trying to free. The
+		// mask closes the window that deferral opens; it lifts before the report so
+		// the owner's resync error is admitted. A departure inside the window
+		// overwrites the mask, and lifting it then would un-retire the peer.
+		if (this.#notServing.has(peerId)) return;
+		this.#notServing.set(peerId, { reason: "shed", settled: true });
+		queueMicrotask(() => {
+			if (this.#notServing.get(peerId)?.reason === "shed") this.#notServing.delete(peerId);
+			this.#reporting = true;
+			try {
+				this.onPeerOverload?.(peerId);
+			} finally {
+				this.#reporting = false;
+			}
+		});
 	}
 
 	#failOverload(): void {
@@ -343,7 +540,7 @@ export class CollabSocket {
 		this.#roomGeneration++;
 		this.#pendingSends.length = 0;
 		this.#pendingSendBytes = 0;
-		this.#retiredPeers.clear();
+		this.#notServing.clear();
 		this.#sending = false;
 		this.#wakeSender?.();
 	}
@@ -459,7 +656,7 @@ export class CollabSocket {
 		if (msg.t !== "peer-left") return;
 		const peer = msg.peer;
 		const generation = this.#roomGeneration;
-		this.#retiredPeers.set(peer, false);
+		this.#notServing.set(peer, { reason: "left", settled: false });
 		this.dropPeer(peer);
 		// The obligation is discharged once everything received before this control
 		// message has been dispatched; nothing can arrive from the id afterwards.
@@ -473,17 +670,18 @@ export class CollabSocket {
 		// peer's frame reaches the owner with authority the relay already withdrew.
 		void this.#recvChain.then(() => {
 			if (generation !== this.#roomGeneration) return;
-			if (this.#retiredPeers.has(peer)) this.#retiredPeers.set(peer, true);
+			const record = this.#notServing.get(peer);
+			if (record?.reason === "left") record.settled = true;
 			this.#trimRetired();
 		});
 	}
 
 	/** Forget the oldest *settled* retirements past the cap; insertion order is Map order. */
 	#trimRetired(): void {
-		if (this.#retiredPeers.size <= MAX_RETIRED_PEERS) return;
-		for (const [peer, settled] of this.#retiredPeers) {
-			if (this.#retiredPeers.size <= MAX_RETIRED_PEERS) return;
-			if (settled) this.#retiredPeers.delete(peer);
+		if (this.#notServing.size <= MAX_RETIRED_PEERS) return;
+		for (const [peer, record] of this.#notServing) {
+			if (this.#notServing.size <= MAX_RETIRED_PEERS) return;
+			if (record.reason === "left" && record.settled) this.#notServing.delete(peer);
 		}
 	}
 

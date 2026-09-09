@@ -4,9 +4,12 @@
  *
  * A welcome snapshot ships as a single lazy queue entry whose iterator holds a
  * whole cloned session until the transport drains it. Charged as zero bytes,
- * repeated `hello` frames from one view-only guest stack clone on clone with
- * nothing but the queue's entry count to stop them — hundreds of megabytes
- * later, for a session of a few megabytes.
+ * one clone per joiner accumulated with nothing but the queue's entry count to
+ * stop it — hundreds of megabytes later, for a session of a few megabytes.
+ *
+ * Repeated hellos from one guest are already bounded by the per-peer batch cap
+ * (`host-peer-overload.test.ts`), so what is left to bound is the room filling
+ * up with joiners, each holding a clone it is entitled to.
  *
  * Drives the production `CollabHost` over the in-memory relay.
  */
@@ -31,10 +34,10 @@ afterEach(() => {
 	uninstallInMemoryRelay();
 });
 
-/** Above the 16 MB budget's reach for a 1.5 MB snapshot, below the 256-entry cap's. */
-const HELLO_LIMIT = 40;
+/** Past the 16 MB budget's reach for a 1.5 MB snapshot, inside the 256-entry cap's. */
+const JOINERS = 14;
 
-it("bounds retained welcome snapshots by the send budget rather than the queue's entry count", async () => {
+it("sheds an earlier guest's retained snapshot instead of holding every joiner's clone", async () => {
 	const relay = installInMemoryRelay();
 	const probe = instrumentRelay(relay, { throttle: true });
 	const snapshot = makeSnapshot();
@@ -47,30 +50,27 @@ it("bounds retained welcome snapshots by the send budget rather than the queue's
 	if ("error" in parsed) throw new Error(parsed.error);
 	const key = await importRoomKey(parsed.key);
 
-	const guest = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
-	cleanups.push(() => guest.close());
-	const opened = Promise.withResolvers<void>();
-	guest.onOpen = opened.resolve;
-	guest.connect();
-	await opened.promise;
-
 	const welcomed = () => seen.notices.filter(notice => notice.includes("joined the collab session")).length;
+	const dropped = () => seen.notices.filter(notice => notice.includes("fell too far behind")).length;
 	const ended = () => seen.notices.some(notice => notice.includes("Collab ended"));
 
-	let sent = 0;
-	while (sent < HELLO_LIMIT && !ended()) {
+	for (let i = 0; i < JOINERS && !ended(); i++) {
+		const guest = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+		cleanups.push(() => guest.close());
 		const before = welcomed();
-		guest.send({ t: "hello", proto: COLLAB_PROTO, name: `flood-${sent}` });
-		sent++;
-		// Lockstep, so the assertion below reads an accounted-for total rather than
-		// however many hellos happened to pipeline ahead of the host.
-		await waitFor(() => welcomed() > before || ended(), `host never handled hello ${sent}`);
+		guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name: `joiner-${i}` });
+		guest.connect();
+		// Lockstep, so the totals below read admitted work rather than however many
+		// joins happened to pipeline ahead of the host.
+		await waitFor(() => welcomed() > before || ended(), `host never welcomed joiner ${i}`);
 	}
 
-	// Precondition: nothing drained, so every welcome snapshot admitted is still
-	// being held by its queue entry.
+	// Precondition: nothing drained, so every welcome snapshot still admitted is
+	// still being held by its queue entry.
 	expect(probe.hostSocket().bufferedAmount).toBeGreaterThanOrEqual(HIGH_WATER_MARK);
-	expect(ended()).toBe(true);
-	expect(welcomed()).toBeGreaterThan(1);
-	expect(welcomed()).toBeLessThan(20);
-}, 20_000);
+	// Room capacity is made by discarding the oldest retained snapshot, so every
+	// joiner is still welcomed and sharing survives.
+	expect(ended()).toBe(false);
+	expect(welcomed()).toBe(JOINERS);
+	expect(dropped()).toBeGreaterThan(0);
+}, 30_000);
