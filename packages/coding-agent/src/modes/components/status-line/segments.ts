@@ -147,7 +147,7 @@ const piSegment: StatusLineSegment = {
 		if (ctx.focusedAgentId) {
 			const icon = theme.icon.ghost ? `${theme.icon.ghost} ` : "";
 			return {
-				content: theme.fg("warning", `${icon}${statusValue(ctx, ctx.focusedAgentId)} `),
+				content: theme.fg("warning", `${icon}${statusValue(ctx, ctx.focusedAgentId)}`),
 				visible: true,
 			};
 		}
@@ -156,11 +156,13 @@ const piSegment: StatusLineSegment = {
 		const fgAnsi = ctx.brandFgAnsi ?? theme.getFgAnsi("dim");
 		// While a turn runs the brand icon becomes a braille spinner plus a
 		// whole-unit turn timer (port of rust omp's status-band active brand).
+		// No trailing pad: the group renderer owns inter-segment spacing, so a
+		// trailing space here would double the gap at the first separator (#11103).
 		const content =
 			ctx.turnElapsedMs != null
-				? `${brandSpinnerFrame(ctx.now?.getTime())} ${statusValue(ctx, brandTimer(ctx.turnElapsedMs))} `
+				? `${brandSpinnerFrame(ctx.now?.getTime())} ${statusValue(ctx, brandTimer(ctx.turnElapsedMs))}`
 				: theme.icon.omp
-					? `${theme.icon.omp} `
+					? theme.icon.omp
 					: "";
 		return { content: `${fgAnsi}${content}\x1b[39m`, visible: true };
 	},
