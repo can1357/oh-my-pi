@@ -6307,7 +6307,10 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 	// drops rows the account isn't granted (isCopilotModelAvailableForAccount)
 	// and synthesizes the long-context tiers, so the returned list is that
 	// account's complete granted catalog.
-	const fetchCopilotAccountModels = async (rawKey: string, fetchImpl: FetchImpl): Promise<ModelSpec<Api>[] | null> => {
+	const fetchCopilotAccountModels = async (
+		rawKey: string,
+		fetchImpl: FetchImpl,
+	): Promise<{ models: ModelSpec<Api>[]; reportedCostModelIds: Set<string> } | null> => {
 		const parsed = parseGitHubCopilotApiKey(rawKey);
 		const accountApiKey = parsed?.accessToken;
 		if (!accountApiKey) {
@@ -6325,6 +6328,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 				)) ?? accountBaseUrl)
 			: accountBaseUrl;
 		const longContextVariants: ModelSpec<Api>[] = [];
+		const reportedCostModelIds = new Set<string>();
 		const models = await fetchOpenAICompatibleModels<Api>({
 			api: "openai-completions",
 			provider: "github-copilot",
@@ -6460,10 +6464,17 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 				if (defaultCost) {
 					// Cache writes are not reported per tier; retain the bundled provider rate.
 					base.cost = { ...defaultCost, cacheWrite: base.cost.cacheWrite };
+					reportedCostModelIds.add(base.id);
 				}
 				const variant = createCopilotLongContextVariant(base, contextWindow, maxTokens, tokenPrices.longContext);
 				if (variant) {
 					longContextVariants.push(variant);
+					if (
+						tokenPrices.longContext?.inputPrice !== undefined &&
+						tokenPrices.longContext.outputPrice !== undefined
+					) {
+						reportedCostModelIds.add(variant.id);
+					}
 					// Overflowing the default tier promotes into the 1M sibling
 					// unless the reference already pins a target.
 					base.contextPromotionTarget ??= `github-copilot/${variant.id}`;
@@ -6485,7 +6496,10 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 			takenIds.add(variant.id);
 			models.push(variant);
 		}
-		return models.sort((left, right) => left.id.localeCompare(right.id));
+		return {
+			models: models.sort((left, right) => left.id.localeCompare(right.id)),
+			reportedCostModelIds,
+		};
 	};
 
 	// Merge complete per-account Copilot catalogs into one authoritative list,
@@ -6498,11 +6512,13 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 			accountId: string | undefined;
 			credentialId: number | undefined;
 			result: ModelSpec<Api>[] | null;
+			reportedCostModelIds?: ReadonlySet<string>;
 		}[],
 	): ModelSpec<Api>[] | null => {
 		const byId = new Map<string, ModelSpec<Api>>();
+		const unionedReportedCostModelIds = new Set<string>();
 		const hasAnyCredentialIds = results.some(account => account.credentialId !== undefined);
-		for (const { accountId, credentialId, result } of results) {
+		for (const { accountId, credentialId, result, reportedCostModelIds } of results) {
 			if (result === null) {
 				logger.warn("Copilot model discovery aborted: an account failed to fetch", { accountId });
 				return null;
@@ -6517,13 +6533,17 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 					if (credentialId !== undefined) {
 						model.oauthCredentialIds = [credentialId];
 					}
+					if (reportedCostModelIds?.has(model.id)) {
+						unionedReportedCostModelIds.add(model.id);
+					}
 					byId.set(model.id, model);
 				} else {
-					const existingHasCost = hasTokenPrice(existing.cost);
-					const modelHasCost = hasTokenPrice(model.cost);
+					const existingHasCost = unionedReportedCostModelIds.has(model.id);
+					const modelHasCost = Boolean(reportedCostModelIds?.has(model.id));
 					let costsCompatible = true;
 					if (!existingHasCost && modelHasCost) {
 						existing.cost = { ...model.cost };
+						unionedReportedCostModelIds.add(model.id);
 					} else if (existingHasCost && modelHasCost && !areModelCostsEqual(existing.cost, model.cost)) {
 						costsCompatible = false;
 					}
@@ -6617,18 +6637,23 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 								accountIdentities,
 							});
 							const results = await Promise.all(
-								accounts.map(async account => ({
-									accountId: account.accountId,
-									credentialId: account.credentialId,
-									result: await fetchCopilotAccountModels(account.apiKey, fetchImpl),
-								})),
+								accounts.map(async account => {
+									const fetchResult = await fetchCopilotAccountModels(account.apiKey, fetchImpl);
+									return {
+										accountId: account.accountId,
+										credentialId: account.credentialId,
+										result: fetchResult?.models ?? null,
+										reportedCostModelIds: fetchResult?.reportedCostModelIds,
+									};
+								}),
 							);
 							return unionCopilotModels(results);
 						}
 						if (!apiKey) {
 							return null;
 						}
-						return fetchCopilotAccountModels(rawApiKey!, fetchImpl);
+						const singleResult = await fetchCopilotAccountModels(rawApiKey!, fetchImpl);
+						return singleResult?.models ?? null;
 					},
 				}
 			: {}),

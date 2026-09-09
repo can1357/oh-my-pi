@@ -275,6 +275,60 @@ describe("github-copilot multi-account discovery failures", () => {
 		expect(model?.oauthCredentialIds).toEqual([101, 102]);
 	});
 
+	it("treats bundled fallback prices as unreported so sibling's reported price can be adopted", async () => {
+		const options = githubCopilotModelManagerOptions({
+			baseUrl: BASE_URL,
+			resolveAccounts: async () => [
+				{ apiKey: "account-1", accountId: "acc-1", credentialId: 101 },
+				{ apiKey: "account-2", accountId: "acc-2", credentialId: 102 },
+			],
+			fetch: async (_input, init) => {
+				const auth = new Headers(init?.headers).get("Authorization");
+				if (auth === "Bearer account-1") {
+					return Response.json({
+						data: [
+							{
+								id: "claude-fable-5",
+								capabilities: {
+									type: "chat",
+									limits: { max_context_window_tokens: 128_000, max_output_tokens: 4_000 },
+								},
+								// omits billing -> inherits bundled fallback cost (input: 10, output: 50)
+							},
+						],
+					});
+				}
+				return Response.json({
+					data: [
+						{
+							id: "claude-fable-5",
+							capabilities: {
+								type: "chat",
+								limits: { max_context_window_tokens: 128_000, max_output_tokens: 4_000 },
+							},
+							billing: {
+								token_prices: {
+									default: {
+										input_price: 250,
+										output_price: 1250,
+									},
+								},
+							},
+						},
+					],
+				});
+			},
+		});
+
+		const models = await options.fetchDynamicModels?.();
+		expect(models).toBeDefined();
+		const model = models!.find(m => m.id === "claude-fable-5");
+		expect(model).toBeDefined();
+		expect(model?.cost.input).toBe(2.5);
+		expect(model?.cost.output).toBe(12.5);
+		expect(model?.oauthCredentialIds).toEqual([101, 102]);
+	});
+
 	it("isolates credentials when accounts report conflicting token pricing", async () => {
 		const options = githubCopilotModelManagerOptions({
 			baseUrl: BASE_URL,
