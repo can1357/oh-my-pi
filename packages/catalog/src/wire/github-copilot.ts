@@ -1,3 +1,4 @@
+import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import type { FetchImpl } from "../types";
 import { isRecord } from "../utils";
 
@@ -6,7 +7,6 @@ import { isRecord } from "../utils";
  * derivation shared by catalog discovery and the pi-ai OAuth flow. The device
  * login / token refresh flow lives in `@oh-my-pi/pi-ai`'s registry.
  */
-
 const COPILOT_CLI_VERSION = "1.0.82";
 const COPILOT_CLI_USER_AGENT = `copilot/${COPILOT_CLI_VERSION}`;
 
@@ -24,6 +24,31 @@ export const COPILOT_CAPI_IDENTITY_HEADERS = {
 	"Openai-Intent": "conversation-agent",
 } as const;
 
+/** Chat identity used when Copilot CLI entitlement is not active on the subscription. */
+export const COPILOT_CHAT_IDENTITY_HEADERS = {
+	"User-Agent": USER_AGENT,
+	"Openai-Intent": "conversation-edits",
+} as const;
+
+const copilotCliDisabledTokens = new Set<string>();
+
+export function markCopilotCliDisabled(token?: string): void {
+	if (token?.trim()) {
+		copilotCliDisabledTokens.add(token.trim());
+	}
+}
+
+export function isCopilotCliDisabled(token?: string): boolean {
+	if (!token?.trim()) return false;
+	return copilotCliDisabledTokens.has(token.trim());
+}
+
+export function getCopilotCapiIdentityHeaders(options?: { cliDisabled?: boolean }): Record<string, string> {
+	if (options?.cliDisabled) {
+		return { ...COPILOT_CHAT_IDENTITY_HEADERS };
+	}
+	return { ...COPILOT_CAPI_IDENTITY_HEADERS };
+}
 /**
  * Copilot API version sent on `api.githubcopilot.com` requests (`/models`,
  * chat endpoints). Newer versions unlock tiered context metadata: `/models`
@@ -40,7 +65,6 @@ export const COPILOT_API_HEADERS = {
 	...COPILOT_CAPI_IDENTITY_HEADERS,
 	"X-GitHub-Api-Version": COPILOT_API_VERSION,
 } as const;
-
 /** Copilot CLI headers for user-initiated model discovery. */
 export const COPILOT_DISCOVERY_HEADERS = {
 	...COPILOT_API_HEADERS,
@@ -50,6 +74,7 @@ export const COPILOT_DISCOVERY_HEADERS = {
 const MANAGED_COPILOT_HEADER_NAMES: Record<string, true> = {
 	"user-agent": true,
 	"editor-version": true,
+	"editor-plugin-version": true,
 	"copilot-integration-id": true,
 	"copilot-harness-id": true,
 	"openai-intent": true,
@@ -57,31 +82,41 @@ const MANAGED_COPILOT_HEADER_NAMES: Record<string, true> = {
 	"x-initiator": true,
 	"x-interaction-type": true,
 };
-
-/** Preserve model-specific headers while enforcing the current Copilot API identity. */
-export function mergeCopilotApiHeaders(headers?: Readonly<Record<string, string>>): Record<string, string> {
-	const merged: Record<string, string> = {};
+export function sanitizeCopilotHeaders(headers?: Readonly<Record<string, string>>): Record<string, string> {
+	const result: Record<string, string> = {};
 	if (headers) {
-		for (const name in headers) {
-			const value = headers[name];
-			if (value !== undefined && !MANAGED_COPILOT_HEADER_NAMES[name.toLowerCase()]) {
-				merged[name] = value;
+		for (const [key, value] of Object.entries(headers)) {
+			if (value !== undefined && !MANAGED_COPILOT_HEADER_NAMES[key.toLowerCase()]) {
+				result[key] = value;
 			}
 		}
 	}
-	return { ...merged, ...COPILOT_API_HEADERS };
+	return result;
+}
+/** Preserve model-specific headers while enforcing the current Copilot API identity. */
+export function mergeCopilotApiHeaders(
+	headers?: Readonly<Record<string, string>>,
+	options?: { cliDisabled?: boolean },
+): Record<string, string> {
+	const baseIdentity = getCopilotCapiIdentityHeaders(options);
+	const custom = sanitizeCopilotHeaders(headers);
+	return { ...custom, ...baseIdentity, "X-GitHub-Api-Version": COPILOT_API_VERSION };
 }
 
 type GitHubCopilotApiKeyPayload = {
 	token?: unknown;
 	enterpriseUrl?: unknown;
 	apiEndpoint?: unknown;
+	cliDisabled?: unknown;
+	cli_enabled?: unknown;
+	cliEnabled?: unknown;
 };
 
 export type ParsedGitHubCopilotApiKey = {
 	accessToken: string;
 	enterpriseUrl?: string;
 	apiEndpoint?: string;
+	cliDisabled?: boolean;
 };
 
 const PUBLIC_GITHUB_HOSTS = new Set(["api.github.com", "github.com", "www.github.com"]);
@@ -139,7 +174,11 @@ export async function discoverGitHubCopilotApiEndpoint(
 		});
 		if (!response.ok) return undefined;
 		const data: unknown = await response.json();
-		if (!isRecord(data) || !isRecord(data.endpoints)) return undefined;
+		if (!isRecord(data)) return undefined;
+		if (data.cli_enabled === false) {
+			markCopilotCliDisabled(token);
+		}
+		if (!isRecord(data.endpoints)) return undefined;
 		const endpoint = data.endpoints.api;
 		return typeof endpoint === "string" ? normalizeGitHubCopilotApiEndpoint(endpoint) : undefined;
 	} catch {
@@ -151,6 +190,14 @@ export function parseGitHubCopilotApiKey(apiKeyRaw: string): ParsedGitHubCopilot
 	try {
 		const parsed = JSON.parse(apiKeyRaw) as GitHubCopilotApiKeyPayload;
 		if (typeof parsed.token === "string") {
+			const cliDisabled =
+				parsed.cliDisabled === true ||
+				parsed.cli_enabled === false ||
+				parsed.cliEnabled === false ||
+				isCopilotCliDisabled(parsed.token);
+			if (cliDisabled) {
+				markCopilotCliDisabled(parsed.token);
+			}
 			return {
 				accessToken: parsed.token,
 				enterpriseUrl:
@@ -161,11 +208,15 @@ export function parseGitHubCopilotApiKey(apiKeyRaw: string): ParsedGitHubCopilot
 					typeof parsed.apiEndpoint === "string"
 						? normalizeGitHubCopilotApiEndpoint(parsed.apiEndpoint)
 						: undefined,
+				cliDisabled: cliDisabled ? true : undefined,
 			};
 		}
 	} catch {}
 
-	return { accessToken: apiKeyRaw };
+	return {
+		accessToken: apiKeyRaw,
+		cliDisabled: isCopilotCliDisabled(apiKeyRaw) ? true : undefined,
+	};
 }
 
 export function normalizeDomain(input: string): string | null {

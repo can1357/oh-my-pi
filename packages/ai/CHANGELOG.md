@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Fixed GitHub Copilot requests failing with HTTP 403 on subscriptions without Copilot CLI access.
 - Codex SSE streams that end without a terminal completion event now retry when replay-safe and remain transient errors when partial output prevents replay ([#11349](https://github.com/can1357/oh-my-pi/issues/11349)).
 
 ## [18.1.15] - 2026-09-08

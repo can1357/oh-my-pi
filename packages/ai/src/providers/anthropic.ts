@@ -7,7 +7,12 @@ import { hostMatchesUrl, isVertexRawPredictUrl } from "@oh-my-pi/pi-catalog/host
 import { mapEffortToAnthropicAdaptiveEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
-import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import {
+	isCopilotCliDisabled,
+	markCopilotCliDisabled,
+	mergeCopilotApiHeaders,
+	parseGitHubCopilotApiKey,
+} from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import {
 	$env,
 	getInstallId,
@@ -2018,7 +2023,12 @@ const streamAnthropicOnce = (
 			// Built inside the try so a copilot credential/header failure surfaces as
 			// an error event instead of an unhandled rejection that leaves the stream
 			// (and any consumer awaiting `result()`) hanging forever.
-			const copilotDynamicHeaders =
+			const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
+			const parsedKey = model.provider === "github-copilot" ? parseGitHubCopilotApiKey(apiKey) : undefined;
+			const copilotApiKey = parsedKey?.accessToken;
+			let cliDisabled = parsedKey?.cliDisabled ?? isCopilotCliDisabled(copilotApiKey);
+			let hasFallenBackToCopilotChat = false;
+			let copilotDynamicHeaders =
 				model.provider === "github-copilot"
 					? buildCopilotDynamicHeaders({
 							messages: context.messages,
@@ -2026,12 +2036,12 @@ const streamAnthropicOnce = (
 							premiumMultiplier: model.premiumMultiplier,
 							headers: { ...model.headers, ...options?.headers },
 							initiatorOverride: options?.initiatorOverride,
+							cliDisabled,
 						})
 					: undefined;
 			if (copilotDynamicHeaders?.premiumRequests !== undefined) {
 				output.usage.premiumRequests = copilotDynamicHeaders.premiumRequests;
 			}
-			const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
 			const baseUrl = resolveAnthropicBaseUrl(model, apiKey) ?? "https://api.anthropic.com";
 			const supportsEagerToolInputStreaming = resolveEagerToolInputStreamingSupport(model, baseUrl);
 			const providerSessionState = getAnthropicProviderSessionState(
@@ -2073,12 +2083,13 @@ const streamAnthropicOnce = (
 			const zeroOutputCacheRefresh = options?.anthropicCacheRefreshRequest === true;
 			let client: AnthropicMessagesClientLike;
 			let isOAuthToken: boolean;
+			let extraBetas: string[] = [];
 
 			if (options?.client) {
 				client = options.client;
 				isOAuthToken = false;
 			} else {
-				const extraBetas = normalizeExtraBetas(options?.betas);
+				extraBetas = normalizeExtraBetas(options?.betas);
 				const wantsAnthropicPriority = model.provider === "anthropic" && options?.serviceTier === "priority";
 				// Skip the fast-mode beta when this session already learned the
 				// endpoint+model rejects fast mode; `speed` is dropped from the params
@@ -3041,6 +3052,59 @@ const streamAnthropicOnce = (
 						firstTokenTime = undefined;
 						continue;
 					}
+					if (
+						model.provider === "github-copilot" &&
+						!hasFallenBackToCopilotChat &&
+						firstTokenTime === undefined &&
+						AIError.status(streamFailure) === 403
+					) {
+						hasFallenBackToCopilotChat = true;
+						markCopilotCliDisabled(copilotApiKey);
+						cliDisabled = true;
+						copilotDynamicHeaders = buildCopilotDynamicHeaders({
+							messages: context.messages,
+							hasImages: hasCopilotVisionInput(context.messages),
+							premiumMultiplier: model.premiumMultiplier,
+							headers: { ...model.headers, ...options?.headers },
+							initiatorOverride: options?.initiatorOverride,
+							cliDisabled: true,
+						});
+						if (!options?.client) {
+							const created = createClient(model, {
+								model,
+								apiKey,
+								extraBetas,
+								stream: true,
+								interleavedThinking: options?.interleavedThinking ?? true,
+								headers: options?.headers,
+								dynamicHeaders: copilotDynamicHeaders?.headers,
+								isOAuth: options?.isOAuth,
+								hasTools: !!context.tools?.length,
+								thinkingEnabled: options?.thinkingEnabled,
+								thinkingDisplay: options?.thinkingDisplay,
+								fetch: options?.fetch,
+								maxRetryDelayMs: options?.maxRetryDelayMs,
+								sessionId:
+									options?.sessionId ??
+									extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
+									options?.promptCacheKey,
+								disableStrictTools,
+							});
+							client = created.client;
+							isOAuthToken = created.isOAuthToken;
+						}
+						params = await prepareParams();
+						providerRetryAttempt = 0;
+						output.content.length = 0;
+						output.model = model.id;
+						output.responseId = undefined;
+						output.errorMessage = undefined;
+						output.providerPayload = undefined;
+						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.stopReason = "stop";
+						firstTokenTime = undefined;
+						continue;
+					}
 					const isTransientEnvelopeFailure =
 						AIError.isTransientStreamParseError(streamFailure) || AIError.isStreamEnvelopeError(streamFailure);
 					const isLocalIdleTimeout =
@@ -3250,7 +3314,9 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	// contain it, so there is no need to install the rewriter for those.
 	const cchFetch = oauthToken ? wrapFetchForCch(baseFetch) : baseFetch;
 	if (model.provider === "github-copilot") {
-		const copilotApiKey = parseGitHubCopilotApiKey(apiKey).accessToken;
+		const parsedKey = parseGitHubCopilotApiKey(apiKey);
+		const copilotApiKey = parsedKey.accessToken;
+		const cliDisabled = parsedKey.cliDisabled ?? isCopilotCliDisabled(copilotApiKey);
 		// The GitHub Copilot Anthropic proxy doesn't accept Anthropic beta
 		// features. Forward only caller-supplied betas.
 		const betaFeatures = [...extraBetas];
@@ -3263,7 +3329,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 				Authorization: `Bearer ${copilotApiKey}`,
 				...(betaFeatures.length > 0 ? { "anthropic-beta": buildBetaHeader([], betaFeatures) } : {}),
 			},
-			model.headers,
+			mergeCopilotApiHeaders(model.headers, { cliDisabled }),
 			dynamicHeaders,
 			headers,
 		);

@@ -20,7 +20,11 @@ import {
 	hasCoreWeaveProjectHeader,
 	removeBlankCoreWeaveProjectHeaders,
 } from "@oh-my-pi/pi-catalog/wire/coreweave";
-import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import {
+	isCopilotCliDisabled,
+	mergeCopilotApiHeaders,
+	parseGitHubCopilotApiKey,
+} from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import {
 	$env,
 	classifyJsonPrefix,
@@ -252,15 +256,18 @@ export function resolveOpenAIRequestSetup(
 		}
 	}
 	if (model.provider === "github-copilot") {
-		apiKey = parseGitHubCopilotApiKey(rawApiKey).accessToken;
+		const parsedKey = parseGitHubCopilotApiKey(rawApiKey);
+		apiKey = parsedKey.accessToken;
+		const cliDisabled = parsedKey.cliDisabled ?? isCopilotCliDisabled(apiKey);
 		const copilot = buildCopilotDynamicHeaders({
 			messages: options.messages,
 			hasImages: hasCopilotVisionInput(options.messages),
 			premiumMultiplier: model.premiumMultiplier,
 			headers,
 			initiatorOverride: options.initiatorOverride,
+			cliDisabled,
 		});
-		Object.assign(headers, copilot.headers);
+		headers = Object.assign(mergeCopilotApiHeaders(headers, { cliDisabled }), copilot.headers);
 		copilotPremiumRequests = copilot.premiumRequests;
 		baseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, rawApiKey) ?? model.baseUrl;
 	}

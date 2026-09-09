@@ -33,9 +33,11 @@ import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gat
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
 import {
 	COPILOT_API_HEADERS,
-	COPILOT_DISCOVERY_HEADERS,
+	COPILOT_API_VERSION,
 	discoverGitHubCopilotApiEndpoint,
+	getCopilotCapiIdentityHeaders,
 	getGitHubCopilotBaseUrl,
+	isCopilotCliDisabled,
 	isPersonalGitHubCopilotBaseUrl,
 	mergeCopilotApiHeaders,
 	parseGitHubCopilotApiKey,
@@ -6290,12 +6292,19 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 						)) ?? baseUrl)
 					: baseUrl;
 				const longContextVariants: ModelSpec<Api>[] = [];
+				const parsedKey = parseGitHubCopilotApiKey(apiKey);
+				const cliDisabled = parsedKey.cliDisabled ?? isCopilotCliDisabled(parsedKey.accessToken);
+				const discoveryHeaders = {
+					...getCopilotCapiIdentityHeaders({ cliDisabled }),
+					"X-GitHub-Api-Version": COPILOT_API_VERSION,
+					"X-Initiator": "user",
+				};
 				const models = await fetchOpenAICompatibleModels<Api>({
 					api: "openai-completions",
 					provider: "github-copilot",
 					baseUrl: requestBaseUrl,
 					apiKey,
-					headers: COPILOT_DISCOVERY_HEADERS,
+					headers: discoveryHeaders,
 					mapModel: (
 						entry: OpenAICompatibleModelRecord,
 						defaults: ModelSpec<Api>,
@@ -6369,7 +6378,9 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 									input,
 									contextWindow: defaultTierWindow,
 									maxTokens,
-									headers: mergeCopilotApiHeaders(getProviderReferences().get(defaults.id)?.headers),
+									headers: mergeCopilotApiHeaders(getProviderReferences().get(defaults.id)?.headers, {
+										cliDisabled,
+									}),
 									...(api === "openai-completions"
 										? {
 												compat: {
@@ -6388,7 +6399,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 									input,
 									contextWindow: defaultTierWindow,
 									maxTokens,
-									headers: mergeCopilotApiHeaders(),
+									headers: mergeCopilotApiHeaders(undefined, { cliDisabled }),
 									// Copilot's `/models` advertises no reasoning bit, so a
 									// thinking-capable Claude with no bundled reference would
 									// fall back to `reasoning: false` and lose its effort dial.

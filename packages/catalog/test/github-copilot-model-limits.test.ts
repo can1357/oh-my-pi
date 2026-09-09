@@ -686,6 +686,37 @@ describe("github copilot tiered context windows", () => {
 		}
 	});
 
+	it("discovers models without requiring Copilot CLI entitlement", async () => {
+		const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			const headers = new Headers(init?.headers);
+			if (headers.has("Copilot-Integration-Id") || headers.has("Copilot-Harness-Id")) {
+				return Response.json({ message: "Access denied" }, { status: 403 });
+			}
+			return Response.json({
+				data: [
+					tieredCopilotEntry({
+						id: "gemini-3.7-flash",
+						name: "Gemini 3.7 Flash",
+						window: 1_000_000,
+						maxOutput: 64_000,
+					}),
+				],
+			});
+		});
+		const options = githubCopilotModelManagerOptions({
+			apiKey: JSON.stringify({
+				token: "ghu_chat_only",
+				apiEndpoint: "https://api.business.githubcopilot.com",
+				cliDisabled: true,
+			}),
+			fetch: fetchMock,
+		});
+		const models = await options.fetchDynamicModels?.();
+
+		expect(models?.map(model => model.id)).toContain("gemini-3.7-flash");
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
 	it("caps the base entry to the default tier and synthesizes a 1M sibling", async () => {
 		const { models } = await discoverCopilotModels({
 			data: [
