@@ -33,7 +33,17 @@ describe("parseJsonTextToolCall", () => {
 	});
 
 	test("accepts bare JSON and omp bash name against product advertisements", () => {
-		expect(parseJsonTextToolCall('{"name":"bash","arguments":{"command":"echo hi"}}', ["Shell", "Read"])).toEqual({
+		// Owner aliases come from advertisedNamesForJsonTextToolCall — not a raw
+		// toSandField2Name fallback that would also revive collision losers.
+		const names = advertisedNamesForJsonTextToolCall(
+			[{ name: "Shell" }, { name: "Read" }],
+			[{ name: "bash" }, { name: "read" }],
+		);
+		expect(parseJsonTextToolCall('{"name":"bash","arguments":{"command":"echo hi"}}', names)).toEqual({
+			name: "bash",
+			arguments: { command: "echo hi" },
+		});
+		expect(parseJsonTextToolCall('{"name":"Shell","arguments":{"command":"echo hi"}}', names)).toEqual({
 			name: "Shell",
 			arguments: { command: "echo hi" },
 		});
@@ -195,6 +205,33 @@ describe("parseJsonTextToolCall", () => {
 		expect(names.has("Shell")).toBe(true);
 		expect(names.has("customThing")).toBe(true);
 		expect(names.has("bash")).toBe(false);
+	});
+
+	test("parseJsonTextToolCall rejects collision-loser edit/bash when write/custom owns the wire slot", () => {
+		const writeOwns = advertisedNamesForJsonTextToolCall(
+			[{ name: "Write" }, { name: "Shell" }],
+			[{ name: "write" }, { name: "edit" }, { name: "bash" }],
+		);
+		expect(writeOwns.has("write")).toBe(true);
+		expect(writeOwns.has("edit")).toBe(false);
+		expect(parseJsonTextToolCall('{"name":"edit","arguments":{"path":"a.ts"}}', writeOwns)).toBeUndefined();
+		expect(parseJsonTextToolCall('{"name":"Write","arguments":{"path":"a.ts","content":"x"}}', writeOwns)).toEqual({
+			name: "Write",
+			arguments: { path: "a.ts", content: "x" },
+		});
+		// Extension owns Shell (bash not among omp tools) — raw "bash" must not
+		// promote via toSandField2Name fallback onto the extension slot.
+		const customShell = advertisedNamesForJsonTextToolCall(
+			[{ name: "Shell" }],
+			[{ name: "customThing", customWireName: "Shell" }],
+		);
+		expect(customShell.has("bash")).toBe(false);
+		expect(customShell.has("customThing")).toBe(true);
+		expect(parseJsonTextToolCall('{"name":"bash","arguments":{"command":"echo hi"}}', customShell)).toBeUndefined();
+		expect(parseJsonTextToolCall('{"name":"customThing","arguments":{"command":"echo hi"}}', customShell)).toEqual({
+			name: "customThing",
+			arguments: { command: "echo hi" },
+		});
 	});
 
 	test("advertisedNamesForJsonTextToolCall falls back to omp tools when wire tools absent", () => {
@@ -1128,6 +1165,106 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		expect(result.errorMessage).toBeUndefined();
 		expect(result.content.some(b => b.type === "toolCall")).toBe(false);
 	});
+
+	test("rejects empty follow-up after edit when write owns the product-wire Write slot", async () => {
+		// Collision policy: write owns Write; historical edit results keep omp `edit`
+		// and must not trigger the empty Write follow-up workaround.
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const thinkingOnly = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					thinkingPart: { text: "done editing", isFinal: true },
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		const fetchImpl = (async () => connectBody(thinkingOnly)) as FetchImpl;
+		const gemini = buildModel({
+			id: "gemini-3-flash",
+			name: "gemini-3-flash",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 512,
+			sandToolsWire: "keep-model",
+		});
+		const editTool = {
+			name: "edit",
+			description: "Edit a file.",
+			parameters: {
+				type: "object",
+				properties: { path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" } },
+				required: ["path", "oldText", "newText"],
+			},
+		} as Tool;
+		const writeTool = {
+			name: "write",
+			description: "Write a file.",
+			parameters: {
+				type: "object",
+				properties: { path: { type: "string" }, content: { type: "string" } },
+				required: ["path", "content"],
+			},
+		} as Tool;
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Edit /tmp/x", timestamp: 1 },
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "e1",
+							name: "edit",
+							arguments: { path: "/tmp/x", oldText: "a", newText: "b" },
+						},
+					],
+					api: "grokbot-sand",
+					provider: "grokbot",
+					model: "gemini-3-flash",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "e1",
+					toolName: "edit",
+					content: [{ type: "text", text: "ok" }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+			tools: [editTool, writeTool],
+		};
+
+		const result = await streamGrokBot(gemini as Model<"grokbot-sand">, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+			maxTokens: 512,
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage ?? "").toMatch(/no text or tool call/i);
+	});
+
 
 	test("rejects empty follow-up after a non-Write tool result", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({

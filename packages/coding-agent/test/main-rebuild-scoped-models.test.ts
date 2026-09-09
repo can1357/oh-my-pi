@@ -315,6 +315,17 @@ describe("refreshCredentialScopedModelIfMissing", () => {
 			providerId: "openai",
 			selectors: { model: "openai/gpt-4o", models: undefined },
 		});
+		// Bare / unbound CLI selectors must not fall through to the default role.
+		expect(resolveCredentialScopedRefreshTarget({ model: "composer-2.5" }, "grokbot/live-only")).toBeUndefined();
+		expect(
+			resolveCredentialScopedRefreshTarget({ models: ["composer-2.5"] }, "grokbot/live-only"),
+		).toBeUndefined();
+		expect(
+			resolveCredentialScopedRefreshTarget(
+				{ models: ["openai/gpt-4o", "anthropic/claude"] },
+				"grokbot/live-only",
+			),
+		).toBeUndefined();
 	});
 
 	it("refreshes a cold credential-scoped provider when --model is absent from startup catalog", async () => {

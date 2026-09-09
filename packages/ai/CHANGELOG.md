@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Grok Bot JSON-as-text promotion only accepts owner aliases from `advertisedNamesForJsonTextToolCall` (no `edit`→Write / `bash`→Shell fallback onto collision losers).
+- Grok Bot empty Write follow-up acceptance uses the product-wire Write owner from `context.tools`, so historical `edit` results are ignored when `write` owns Write.
 - Grok Bot JSON-as-text promotion keeps ordinary prose/thinking blocks on the final message and only drops the blocks that produced promoted tool calls.
 - Grok Bot empty/incomplete tool retries merge abandoned-attempt usage into error responses when the replay fails.
 - Grok Bot JSON-as-text promotion buffers later promotable text/thinking blocks even after earlier prose went live, so raw tool dumps are not published before end-of-stream promotion.

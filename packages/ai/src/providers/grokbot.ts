@@ -708,6 +708,21 @@ type GrokbotToolState = {
 	isGrammar: boolean;
 };
 
+/** Omp tool that currently owns the product-wire Write slot (collision-aware). */
+function writeOwnerFromContextTools(tools: Context["tools"]): string | undefined {
+	if (!Array.isArray(tools)) return undefined;
+	let owner: string | undefined;
+	for (const tool of tools) {
+		const ompName = typeof tool?.name === "string" ? tool.name.trim() : "";
+		if (!ompName) continue;
+		const sandName = toSandField2Name(ompName);
+		if (sandName !== "Write") continue;
+		if (!shouldClaimSandWireName("Write", ompName, owner)) continue;
+		owner = ompName;
+	}
+	return owner;
+}
+
 /** True when the immediately preceding message is a Write toolResult (current tool turn). */
 function contextEndsWithWriteToolResult(context: Context): boolean {
 	const messages = context.messages ?? [];
@@ -716,7 +731,11 @@ function contextEndsWithWriteToolResult(context: Context): boolean {
 		if (!msg || typeof msg !== "object") continue;
 		if (msg.role !== "toolResult") return false;
 		const name = typeof msg.toolName === "string" ? msg.toolName : "";
-		// Product wire advertises edit as Write; decoded history keeps omp `edit`.
+		// When both edit and write are active, write owns Write and historical
+		// edit results keep the internal name — only the Write owner counts.
+		const writeOwner = writeOwnerFromContextTools(context.tools);
+		if (writeOwner !== undefined) return name === writeOwner;
+		// No Write-capable tools advertised: fall back to sand/id match.
 		return toSandField2Name(name) === "Write" || /^(write|Write)$/i.test(name);
 	}
 	return false;

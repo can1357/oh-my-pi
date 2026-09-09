@@ -877,10 +877,12 @@ export async function resolveScopedModels(
 
 /**
  * Provider + selectors for the pre-session cold catalog refresh.
- * Prefers CLI `--provider`/`--model`/`--models`; when those leave ownership
- * unbound, falls back to a provider-qualified `modelRoles.default` so a fresh
- * profile whose default is a live-only Grok Bot id still warms AvailableModels
- * before session construction (no CLI model flags).
+ * Prefers CLI `--provider`/`--model`/`--models`. When those leave API-key
+ * ownership unbound but a model selector is still present (bare `--model` /
+ * multi-provider `--models`), returns undefined so startup does not warm the
+ * configured default role. Only with no CLI model selectors does it fall back
+ * to a provider-qualified `modelRoles.default` so a fresh profile whose default
+ * is a live-only Grok Bot id still warms AvailableModels before session build.
  */
 export function resolveCredentialScopedRefreshTarget(
 	parsed: Pick<Args, "provider" | "model" | "models">,
@@ -892,6 +894,12 @@ export function resolveCredentialScopedRefreshTarget(
 			providerId: cliProvider,
 			selectors: { model: parsed.model, models: parsed.models },
 		};
+	}
+	// Bare `--model` / unbound `--models` leave API-key ownership undefined but
+	// still take precedence over the configured default role — do not warm the
+	// default provider (and its discovery timeout) in that case.
+	if (parsed.model?.trim() || (parsed.models ?? []).some(pattern => pattern.trim().length > 0)) {
+		return undefined;
 	}
 	const defaultRole = configuredDefault?.trim();
 	if (!defaultRole) return undefined;

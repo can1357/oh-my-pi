@@ -67,10 +67,9 @@ function resolveAdvertisedName(raw: string, advertised: ReadonlySet<string>): st
 	for (const name of advertised) {
 		if (name.toLowerCase() === lower) return name;
 	}
-	const sand = toSandField2Name(raw);
-	if (advertised.has(sand)) return sand;
-	const omp = toOmpToolName(raw);
-	if (advertised.has(omp)) return omp;
+	// Do not map via toSandField2Name/toOmpToolName here — that reintroduces
+	// collision losers (edit→Write, bash→Shell) that advertisedNamesForJsonTextToolCall
+	// deliberately omitted for the surviving owner.
 	return undefined;
 }
 
