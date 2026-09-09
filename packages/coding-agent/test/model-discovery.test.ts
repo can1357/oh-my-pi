@@ -3829,4 +3829,33 @@ providers:
 		expect(registry.find("github-copilot", cachedAlias.id)).toBeUndefined();
 		expect(registry.find("github-copilot", bundledBase.id)?.headers).toEqual(bundledBase.headers);
 	});
+
+	test("refresh rejects incomplete authoritative cache when cached models have unrestorable headers", async () => {
+		const bundledBase = getBundledModel("github-copilot", "gpt-5.6-sol");
+		if (!bundledBase?.headers) {
+			throw new Error("Expected bundled Copilot base to carry transport headers");
+		}
+		const cachedAlias = buildModel({
+			...(bundledBase as ModelSpec<"openai-responses">),
+			id: "gpt-5.6-sol-custom",
+			name: "GPT-5.6 Sol Custom Route",
+			requestModelId: "gpt-5.6-sol",
+			headers: { "X-Tenant-Route": "tenant-a" },
+		});
+		authStorage.setRuntimeApiKey("github-copilot", "ghp_test_token");
+		const cacheProviderId = resolveModelCacheProviderId("github-copilot", { apiKey: "ghp_test_token" });
+		writeModelCache(cacheProviderId, Date.now(), [cachedAlias], true, "", cacheDbPath, [bundledBase]);
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async () => {
+				throw new Error("network down");
+			},
+		});
+
+		await registry.refreshProvider("github-copilot", "online");
+
+		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(false);
+		expect(registry.find("github-copilot", bundledBase.id)).toBeDefined();
+		expect(registry.find("github-copilot", cachedAlias.id)).toBeUndefined();
+	});
 });

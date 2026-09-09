@@ -311,7 +311,11 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	// to cache fallback too, including snapshots written by an older binary.
 	// Skip this when the cache is authoritative for a dynamic provider, where
 	// cached rows are the authoritative catalog rather than additive supplements.
-	const isAuthoritativeCached = dynamicModelsAuthoritative && (cache?.authoritative ?? false);
+	const isAuthoritativeCached =
+		dynamicModelsAuthoritative &&
+		cacheFingerprintMatches &&
+		!cacheHasUnresolvedHeaders &&
+		(cache?.authoritative ?? false);
 	const cacheModels =
 		additiveStaticModelIds && !isAuthoritativeCached
 			? preparedCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
@@ -337,6 +341,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const retainAuthoritativeCache =
 		dynamicModelsAuthoritative &&
 		cacheFingerprintMatches &&
+		!cacheHasUnresolvedHeaders &&
 		(cache?.authoritative ?? false) &&
 		!dynamicFetchSucceeded;
 	const models = collapseBuiltVariants(
@@ -385,9 +390,11 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				cacheFingerprintMatches,
 				options.dropCachedModelIdsOnStaticMismatch,
 			);
+			const latestCacheHasUnresolvedHeaders = latestRestoredCache.unresolvedModelIds.size > 0;
 			const isAuthoritativePreserved =
 				dynamicModelsAuthoritative &&
 				cacheFingerprintMatches &&
+				!latestCacheHasUnresolvedHeaders &&
 				(latestCache?.authoritative ?? cache?.authoritative ?? false);
 			const latestCacheModels =
 				additiveStaticModelIds && !isAuthoritativePreserved

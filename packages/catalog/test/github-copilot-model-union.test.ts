@@ -2,8 +2,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "bun:test";
+import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { githubCopilotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { readModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { createModelManager } from "../src/model-manager";
 
 const BASE_URL = "https://copilot.example.com";
@@ -328,6 +330,58 @@ describe("github-copilot multi-account discovery failures", () => {
 			expect(result.authoritative).toBe(true);
 			expect(result.source).toBe("cache");
 			expect(result.models).toEqual([]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects incomplete authoritative cache when cached models have unrestorable headers and refresh fails", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-copilot-cache-unrestorable-"));
+		try {
+			const cacheDbPath = path.join(tempDir, "models.db");
+			let failFetch = false;
+			const staticSpec: ModelSpec<"openai-completions"> = {
+				id: "bundled-model",
+				name: "Bundled Model",
+				api: "openai-completions",
+				provider: "github-copilot",
+				baseUrl: BASE_URL,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 4096,
+				maxTokens: 1024,
+			};
+			const dynamicModelWithUnrestorableHeaders: ModelSpec<"openai-completions"> = {
+				...staticSpec,
+				id: "dynamic-model",
+				headers: { "X-Non-Restorable-Secret": "dyn-value" },
+			};
+			const manager = createModelManager({
+				providerId: "github-copilot",
+				staticModels: [staticSpec],
+				dynamicModelsAuthoritative: true,
+				cacheDbPath,
+				fetchDynamicModels: async () => {
+					if (failFetch) return null;
+					return [dynamicModelWithUnrestorableHeaders];
+				},
+			});
+
+			const initial = await manager.refresh("online");
+			expect(initial.authoritative).toBe(true);
+			expect(initial.models.map(m => m.id)).toEqual(["dynamic-model"]);
+
+			failFetch = true;
+			const result = await manager.refresh("online");
+			// Incomplete cache must not be retained as authoritative
+			expect(result.authoritative).toBe(false);
+			// Bundled models must be merged rather than pruned to an incomplete list
+			expect(result.models.map(m => m.id)).toEqual(["bundled-model"]);
+
+			// Persisted cache snapshot must not be authoritative
+			const cached = readModelCache("github-copilot", 24 * 60 * 60 * 1000, Date.now, cacheDbPath);
+			expect(cached?.authoritative).toBe(false);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
