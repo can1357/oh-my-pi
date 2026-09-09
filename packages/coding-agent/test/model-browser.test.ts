@@ -261,9 +261,14 @@ describe("credits badge promos", () => {
 		const model = makeDroidModel("gpt-5.6-sol", {
 			input: 2,
 			output: 2,
-			promoDiscount: 0.2,
-			promoExpiresAt: "2026-11-22T00:00:00Z",
-			promoLabel: ", Promo Pricing",
+			promotions: [
+				{
+					discount: 0.2,
+					startsAt: "2026-08-22T00:00:00Z",
+					expiresAt: "2026-11-22T00:00:00Z",
+					label: ", Promo Pricing",
+				},
+			],
 		});
 
 		expect(formatCostPair(model, NOW)).toBe("$1.25/10 1.6×*");
@@ -276,9 +281,7 @@ describe("credits badge promos", () => {
 		const model = makeDroidModel("kimi-k3", {
 			input: 1.2,
 			output: 6,
-			promoDiscount: 0.5,
-			promoExpiresAt: "2026-08-10T00:00:00Z",
-			promoLabel: ", 50% Off",
+			promotions: [{ discount: 0.5, expiresAt: "2026-08-10T00:00:00Z", label: ", 50% Off" }],
 		});
 
 		expect(formatCostPair(model, NOW)).toBe("$1.25/10 1.2×");
@@ -288,8 +291,7 @@ describe("credits badge promos", () => {
 		const credits: FactoryDroidCredits = {
 			input: 1.2,
 			output: 6,
-			promoDiscount: 0.5,
-			promoExpiresAt: "2026-08-25T00:00:00Z",
+			promotions: [{ discount: 0.5, expiresAt: "2026-08-25T00:00:00Z" }],
 		};
 
 		expect(formatCostPair(makeDroidModel("kimi-k3", credits), NOW - 1)).toBe("$1.25/10 0.6×*");
@@ -308,8 +310,7 @@ describe("credits badge promos", () => {
 		const promoted = makeDroidModel("gpt-5.6-sol", {
 			input: 2,
 			output: 2,
-			promoDiscount: 0.2,
-			promoExpiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+			promotions: [{ discount: 0.2, expiresAt: new Date(Date.now() + 86_400_000).toISOString() }],
 		});
 		const plain = makeDroidModel("claude-opus-5", { input: 2, output: 2 });
 		const browser = new ModelBrowser(Settings.isolated({}));

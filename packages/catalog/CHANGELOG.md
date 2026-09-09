@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- factory-droid: added Gemini 3.8 Flash and GPT-6 Astra (OpenAI-direct, EU-unavailable) to the model registry
+
+### Changed
+
+- factory-droid: promo pricing now mirrors droid 0.213.0's stacked promo windows (first active window applies); GPT-5.6 Sol models carry their 20% fallback promo; expired promos for Opus 4.7 and Kimi K3 removed
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed

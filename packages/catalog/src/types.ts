@@ -1069,16 +1069,38 @@ export interface FactoryDroidCredits {
 	input: number;
 	output: number;
 	cacheRead?: number;
-	/** Fraction off the list rate while the promo runs, e.g. 0.5 for half price. */
-	promoDiscount?: number;
 	/**
-	 * ISO 8601 instant the promo lapses. Mirrored verbatim from the registry
-	 * and may already be in the past: consumers compare it against the clock,
-	 * because a lapsed promo stays in Factory's table until the entry changes.
+	 * Stacked promo windows, mirrored verbatim from the registry (droid
+	 * 0.213.0+): the first currently-active window applies — see
+	 * `activeFactoryDroidPromotion`. Windows may already be in the past, and
+	 * a lapsed window stays in Factory's table until the entry changes.
 	 */
-	promoExpiresAt?: string;
+	promotions?: FactoryDroidCreditPromotion[];
+}
+
+/** One Factory Droid promo window: `discount` is the fraction off the list rate. */
+export interface FactoryDroidCreditPromotion {
+	discount: number;
+	startsAt?: string;
+	expiresAt?: string;
 	/** Suffix Factory appends to the display name while the promo applies. */
-	promoLabel?: string;
+	label?: string;
+}
+
+/**
+ * First currently-active promo window, mirroring the CLI's
+ * `promotions.find(active)` — a window with no `startsAt`/`expiresAt` bound
+ * is open on that side.
+ */
+export function activeFactoryDroidPromotion(
+	credits: FactoryDroidCredits,
+	now: Date = new Date(),
+): FactoryDroidCreditPromotion | undefined {
+	return credits.promotions?.find(
+		promo =>
+			(promo.startsAt == null || new Date(promo.startsAt) <= now) &&
+			(promo.expiresAt == null || now < new Date(promo.expiresAt)),
+	);
 }
 
 export interface Model<TApi extends Api = Api> {

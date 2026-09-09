@@ -8,7 +8,7 @@
  * model" list.
  */
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { FactoryDroidCredits, Model } from "@oh-my-pi/pi-ai";
+import { activeFactoryDroidPromotion, type FactoryDroidCredits, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -359,23 +359,18 @@ export function formatRoleChip(role: string, assignment: RoleAssignment, setting
 const PROMO_MARK = "*";
 
 /**
- * The promo-discounted Standard Credits input rate, or undefined when the
- * model has no promo or its promo has lapsed.
+ * The promo-discounted Standard Credits input rate, or undefined when no
+ * promo window is active.
  *
- * The registry mirrors Factory's catalog verbatim, expired promos included
- * (kimi-k3's 50% off ran out on 2026-08-10 and the entry still carries it), so
- * expiry is decided here at render time against the same clock the user reads
- * the badge with. A promo with no expiry date never applies — the CLI gates on
- * `promoExpiresAt > now`, which is false when the field is absent.
+ * The registry mirrors Factory's stacked promo windows verbatim (droid
+ * 0.213.0+), expired ones included, so the active window is decided here at
+ * render time against the same clock the user reads the badge with — first
+ * active window wins, matching the CLI's `promotions.find(active)`.
  */
 function promoCreditRate(credits: FactoryDroidCredits, now: number): number | undefined {
-	const discount = credits.promoDiscount;
-	if (discount == null || discount <= 0) return undefined;
-	const expiresAt = credits.promoExpiresAt;
-	if (expiresAt === undefined) return undefined;
-	const expiry = Date.parse(expiresAt);
-	if (Number.isNaN(expiry) || expiry <= now) return undefined;
-	return credits.input * (1 - discount);
+	const promo = activeFactoryDroidPromotion(credits, new Date(now));
+	if (promo == null || promo.discount <= 0) return undefined;
+	return credits.input * (1 - promo.discount);
 }
 
 /**

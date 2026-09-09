@@ -162,6 +162,14 @@ export interface FactoryDroidResponsesConfig {
 	safetyId?: boolean;
 }
 
+/** One promo window from the CLI's stacked `promotions[]` (droid 0.213.0+). */
+export interface FactoryDroidPromotion {
+	discount: number;
+	startsAt?: string;
+	expiresAt?: string;
+	label?: string;
+}
+
 export interface FactoryDroidModelInput {
 	id: string;
 	/** Display name, e.g. "Kimi K3 (Droid Core)". */
@@ -185,21 +193,21 @@ export interface FactoryDroidModelInput {
 	 * output and cache-read tokens (`outputTokenMultiplier`,
 	 * `cacheReadTokenMultiplier`). Absent `output` defaults to 1 (output
 	 * billed at the input rate); absent `cacheRead` means cache reads are
-	 * not separately metered. Promo fields are mirrored verbatim, expired ones
-	 * included: the CLI keeps a promo in the table past `promoExpiresAt` and
-	 * resolves expiry at display time, so the registry stays a faithful
+	 * not separately metered. Promo windows are mirrored verbatim, expired
+	 * ones included: the CLI keeps a window in the table past `expiresAt` and
+	 * resolves it at display time, so the registry stays a faithful
 	 * snapshot and the badge layer owns the "is it still live" decision.
-	 * `promoDiscount` is the fraction off the list rate; `promoLabel` is the
-	 * suffix the CLI appends to the model's display name while it applies.
+	 * Since droid 0.213.0 the CLI stacks promo windows (`promotions[]`); the
+	 * first currently-active window applies, so entries are ordered by
+	 * precedence. `discount` is the fraction off the list rate; `label` is
+	 * the suffix the CLI appends to the model's display name while it
+	 * applies.
 	 */
 	credits?: {
 		input: number;
 		output?: number;
 		cacheRead?: number;
-		promoDiscount?: number;
-		/** ISO 8601 instant; may already be in the past. */
-		promoExpiresAt?: string;
-		promoLabel?: string;
+		promotions?: FactoryDroidPromotion[];
 	};
 	/**
 	 * Upstream catalog entry providing the raw-API list price for this model
@@ -369,7 +377,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		maxTokens: 128000,
 		apiProviders: ["anthropic", "vertex_anthropic", "bedrock_anthropic"],
 		euApiProviders: ["bedrock_anthropic"],
-		credits: { input: 2, promoDiscount: 0.5, promoExpiresAt: "2026-05-01T00:00:00Z", promoLabel: ", 50% Off" },
+		credits: { input: 2 },
 		priceRef: { provider: "anthropic", modelId: "claude-opus-4-7" },
 		supportedReasoningEfforts: ["off", "low", "medium", "high", "xhigh", "max"],
 		defaultReasoningEffort: "high",
@@ -551,9 +559,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		apiProviders: ["openai", "azure_openai"],
 		credits: {
 			input: 0.7,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" }],
 		},
 		priceRef: { provider: "openai", modelId: "gpt-5.2" },
 		supportedReasoningEfforts: ["off", "low", "medium", "high", "xhigh"],
@@ -586,9 +592,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		apiProviders: ["openai", "azure_openai"],
 		credits: {
 			input: 0.7,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" }],
 		},
 		priceRef: { provider: "openai", modelId: "gpt-5.3-codex" },
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
@@ -606,9 +610,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		credits: {
 			input: 1.4,
 			output: 8,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" }],
 		},
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
 		defaultReasoningEffort: "medium",
@@ -633,9 +635,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		credits: {
 			input: 1,
 			output: 6,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" }],
 		},
 		priceRef: { provider: "openai", modelId: "gpt-5.4" },
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
@@ -653,9 +653,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		credits: {
 			input: 2,
 			output: 6,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" }],
 		},
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
 		defaultReasoningEffort: "medium",
@@ -679,9 +677,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		credits: {
 			input: 0.3,
 			output: 6,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" }],
 		},
 		priceRef: { provider: "openai", modelId: "gpt-5.4-mini" },
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
@@ -699,9 +695,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		credits: {
 			input: 0.6,
 			output: 6,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" }],
 		},
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
 		defaultReasoningEffort: "high",
@@ -726,9 +720,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		credits: {
 			input: 2,
 			output: 6,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" }],
 		},
 		priceRef: { provider: "openai", modelId: "gpt-5.5" },
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
@@ -746,9 +738,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		credits: {
 			input: 5,
 			output: 6,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" }],
 		},
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
 		defaultReasoningEffort: "medium",
@@ -772,9 +762,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		credits: {
 			input: 12,
 			output: 6,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" }],
 		},
 		priceRef: { provider: "openai", modelId: "gpt-5.5-pro" },
 		supportedReasoningEfforts: ["medium", "high", "xhigh"],
@@ -792,9 +780,15 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		credits: {
 			input: 2,
 			output: 5,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [
+				{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" },
+				{
+					discount: 0.2,
+					startsAt: "2026-08-22T00:00:00Z",
+					expiresAt: "2026-11-22T00:00:00Z",
+					label: ", Promo Pricing",
+				},
+			],
 		},
 		priceRef: { provider: "openai", modelId: "gpt-5.6-sol" },
 		supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
@@ -812,9 +806,15 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		credits: {
 			input: 4,
 			output: 5,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [
+				{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" },
+				{
+					discount: 0.2,
+					startsAt: "2026-08-22T00:00:00Z",
+					expiresAt: "2026-11-22T00:00:00Z",
+					label: ", Promo Pricing",
+				},
+			],
 		},
 		supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
 		defaultReasoningEffort: "medium",
@@ -839,12 +839,29 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		credits: {
 			input: 0.8,
 			output: 6,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" }],
 		},
 		priceRef: { provider: "openai", modelId: "gpt-5.6-terra" },
 		supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
+		defaultReasoningEffort: "medium",
+		responsesConfig: { verbosity: "low", parallelToolCalls: true, extendedCache: true, safetyId: true },
+		noImageSupport: true,
+	},
+	{
+		id: "gpt-6-astra",
+		name: "GPT-6 Astra",
+		wire: "openai-responses",
+		contextWindow: 922000,
+		maxTokens: 128000,
+		apiProviders: ["openai"],
+		euApiProviders: [],
+		credits: {
+			input: 4,
+			output: 5,
+			promotions: [{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" }],
+		},
+		// No priceRef: openai/gpt-6-astra is not in the bundled catalog yet.
+		supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
 		defaultReasoningEffort: "medium",
 		responsesConfig: { verbosity: "low", parallelToolCalls: true, extendedCache: true, safetyId: true },
 		noImageSupport: true,
@@ -859,9 +876,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		credits: {
 			input: 0.08,
 			output: 6,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" }],
 		},
 		priceRef: { provider: "openai", modelId: "gpt-5.6-luna" },
 		supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
@@ -932,14 +947,32 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		credits: {
 			input: 0.6,
 			output: 5,
-			promoDiscount: 0.5,
-			promoExpiresAt: "2027-01-01T00:00:00Z",
-			promoLabel: ", 50% Off",
+			promotions: [
+				{ discount: 0.5, startsAt: "2026-08-17T21:10:19Z", expiresAt: "2027-01-01T00:00:00Z", label: ", 50% Off" },
+			],
 		},
 		// No priceRef: google/gemini-3.7-flash is not in the bundled catalog yet.
 		supportedReasoningEfforts: ["low", "medium", "high"],
 		defaultReasoningEffort: "high",
 		noImageSupport: true,
+	},
+	{
+		id: "gemini-3.8-flash",
+		name: "Gemini 3.8 Flash",
+		wire: "google-generate",
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+		apiProviders: ["google"],
+		credits: {
+			input: 0.6,
+			output: 5,
+			promotions: [
+				{ discount: 0.5, startsAt: "2026-08-17T21:10:19Z", expiresAt: "2027-01-01T00:00:00Z", label: ", 50% Off" },
+			],
+		},
+		// No priceRef: google/gemini-3.8-flash is not in the bundled catalog yet.
+		supportedReasoningEfforts: ["low", "medium", "high"],
+		defaultReasoningEffort: "high",
 	},
 	{
 		id: "garnet-07-15",
@@ -965,9 +998,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 			input: 0.8,
 			output: 3,
 			cacheRead: 0.25,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" }],
 		},
 		// No priceRef: xai/grok-4.6 is not in the bundled catalog yet; zero-cost SKU with credit badge until a models.json regen picks it up.
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
@@ -984,9 +1015,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 			input: 0.8,
 			output: 3,
 			cacheRead: 0.15,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" }],
 		},
 		priceRef: { provider: "xai", modelId: "grok-4.5" },
 		supportedReasoningEfforts: ["low", "medium", "high"],
@@ -1061,9 +1090,6 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		credits: {
 			input: 1.2,
 			output: 5,
-			promoDiscount: 0.5,
-			promoExpiresAt: "2026-08-10T00:00:00Z",
-			promoLabel: ", 50% Off",
 		},
 		priceRef: { provider: "fireworks", modelId: "kimi-k3" },
 		toolMessageIncludesName: true,

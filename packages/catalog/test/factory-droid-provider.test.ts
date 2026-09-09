@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getFactoryDroidRegionBlocklistPath } from "@oh-my-pi/pi-utils";
 import { buildFactoryDroidModel, fetchFactoryDroidModels } from "../src/discovery/factory-droid";
+import { activeFactoryDroidPromotion } from "../src/types";
 import {
 	FACTORY_DROID_ANTHROPIC_BASE_URL,
 	FACTORY_DROID_COMPLETIONS_BASE_URL,
@@ -326,9 +327,7 @@ describe("Factory Droid catalog", () => {
 			input: 0.8,
 			output: 2.4,
 			cacheRead: 0.12,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: [{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" }],
 		});
 
 		// No outputTokenMultiplier -> output billed at the input rate.
@@ -353,39 +352,36 @@ describe("Factory Droid catalog", () => {
 		expect(atlas.factoryDroidCredits).toEqual({ input: 2, output: 2 });
 	});
 
-	it("mirrors promo credit terms verbatim, expired ones included", () => {
-		// The registry is a snapshot of Factory's table, not a live price
-		// oracle: an elapsed promoExpiresAt stays recorded and the display
-		// layer decides whether the promo still applies.
-		expect(FACTORY_DROID_MODEL_META["gpt-5.6-sol"].credits).toEqual({
-			input: 2,
-			output: 5,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
-		});
+	it("mirrors promo credit windows verbatim and applies the first active one", () => {
+		// The registry is a snapshot of Factory's stacked promotions[] table,
+		// expired windows included; the display layer decides which applies.
+		const windows = [
+			{ discount: 0.6, expiresAt: "2026-09-05T02:00:00Z", label: ", 60% Off" },
+			{
+				discount: 0.2,
+				startsAt: "2026-08-22T00:00:00Z",
+				expiresAt: "2026-11-22T00:00:00Z",
+				label: ", Promo Pricing",
+			},
+		];
+		expect(FACTORY_DROID_MODEL_META["gpt-5.6-sol"].credits).toEqual({ input: 2, output: 5, promotions: windows });
 		expect(FACTORY_DROID_MODEL_META["gpt-5.6-sol-fast"].credits).toEqual({
 			input: 4,
 			output: 5,
-			promoDiscount: 0.6,
-			promoExpiresAt: "2026-09-05T02:00:00Z",
-			promoLabel: ", 60% Off",
+			promotions: windows,
 		});
-		expect(FACTORY_DROID_MODEL_META["kimi-k3"].credits).toEqual({
-			input: 1.2,
-			output: 5,
-			promoDiscount: 0.5,
-			promoExpiresAt: "2026-08-10T00:00:00Z",
-			promoLabel: ", 50% Off",
-		});
-		// The projection turns multipliers into rates but leaves promo terms
-		// untouched and unfiltered — the badge needs the raw terms to decide.
+		// The CLI applies the first currently-active window: 60% off until
+		// 2026-09-05, then the 20% fallback through 2026-11-22, then list.
+		const sol = buildFactoryDroidModel(FACTORY_DROID_MODEL_META["gpt-5.6-sol"]).factoryDroidCredits!;
+		expect(activeFactoryDroidPromotion(sol, new Date("2026-09-04T00:00:00Z"))?.discount).toBe(0.6);
+		expect(activeFactoryDroidPromotion(sol, new Date("2026-09-06T00:00:00Z"))?.discount).toBe(0.2);
+		expect(activeFactoryDroidPromotion(sol, new Date("2026-11-23T00:00:00Z"))).toBeUndefined();
+		// Kimi K3's 50% promo ran out on 2026-08-10 and droid 0.213.0 dropped
+		// it from the table; the entry carries no promo fields at all.
+		expect(FACTORY_DROID_MODEL_META["kimi-k3"].credits).toEqual({ input: 1.2, output: 5 });
 		expect(buildFactoryDroidModel(FACTORY_DROID_MODEL_META["kimi-k3"]).factoryDroidCredits).toEqual({
 			input: 1.2,
 			output: 6,
-			promoDiscount: 0.5,
-			promoExpiresAt: "2026-08-10T00:00:00Z",
-			promoLabel: ", 50% Off",
 		});
 		// A model with no promo carries no promo fields at all.
 		expect(buildFactoryDroidModel(FACTORY_DROID_MODEL_META["kimi-k2.6"]).factoryDroidCredits).toEqual({
@@ -417,9 +413,14 @@ describe("Factory Droid catalog", () => {
 		expect(model.factoryDroidCredits).toEqual({
 			input: 0.6,
 			output: 3,
-			promoDiscount: 0.5,
-			promoExpiresAt: "2027-01-01T00:00:00Z",
-			promoLabel: ", 50% Off",
+			promotions: [
+				{
+					discount: 0.5,
+					startsAt: "2026-08-17T21:10:19Z",
+					expiresAt: "2027-01-01T00:00:00Z",
+					label: ", 50% Off",
+				},
+			],
 		});
 		// 3.6 lost its minimal rung in the same release; 3.7 never had one.
 		expect(FACTORY_DROID_MODEL_META["gemini-3.6-flash"].supportedReasoningEfforts).toEqual(["low", "medium", "high"]);

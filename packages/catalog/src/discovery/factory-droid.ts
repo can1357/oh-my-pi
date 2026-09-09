@@ -254,11 +254,9 @@ export function projectFactoryDroidCredits(
 		input: rate(credits.input),
 		output: rate(credits.input * (credits.output ?? 1)),
 		...(credits.cacheRead != null ? { cacheRead: rate(credits.input * credits.cacheRead) } : {}),
-		// Promo terms ride through untouched: they are display metadata, and
-		// whether one still applies is a clock question the badge layer owns.
-		...(credits.promoDiscount != null ? { promoDiscount: credits.promoDiscount } : {}),
-		...(credits.promoExpiresAt != null ? { promoExpiresAt: credits.promoExpiresAt } : {}),
-		...(credits.promoLabel != null ? { promoLabel: credits.promoLabel } : {}),
+		// Promo windows ride through untouched: they are display metadata, and
+		// which one applies is a clock question the badge layer owns.
+		...(credits.promotions != null ? { promotions: credits.promotions } : {}),
 	};
 }
 
