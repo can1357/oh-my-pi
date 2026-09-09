@@ -182,6 +182,37 @@ describe("parseJsonTextToolCall", () => {
 		});
 	});
 
+	test("promoteJsonTextToolCallsFromContent prefers text over matching thinking duplicates", () => {
+		const advertised = new Set(["Shell", "Write"]);
+		const shell = '{"name":"Shell","arguments":{"command":"echo once"}}';
+		const promoted = promoteJsonTextToolCallsFromContent(
+			[
+				{ type: "thinking", thinking: shell },
+				{ type: "text", text: shell },
+			],
+			advertised,
+		);
+		// One intended action mirrored in thinking + text must not become two tool calls.
+		expect(promoted.calls).toEqual([{ name: "Shell", arguments: { command: "echo once" } }]);
+		expect(promoted.sourceIndexes).toEqual([0, 1]);
+	});
+
+	test("promoteJsonTextToolCallsFromContent keeps distinct thinking calls alongside text", () => {
+		const advertised = new Set(["Shell", "Write"]);
+		const promoted = promoteJsonTextToolCallsFromContent(
+			[
+				{ type: "thinking", thinking: '{"name":"Write","arguments":{"path":"a.ts","contents":"x"}}' },
+				{ type: "text", text: '{"name":"Shell","arguments":{"command":"echo hi"}}' },
+			],
+			advertised,
+		);
+		expect(promoted.calls).toEqual([
+			{ name: "Write", arguments: { path: "a.ts", contents: "x" } },
+			{ name: "Shell", arguments: { command: "echo hi" } },
+		]);
+		expect(promoted.sourceIndexes).toEqual([0, 1]);
+	});
+
 	test("advertisedNamesForJsonTextToolCall aliases only from advertised wire tools", () => {
 		const names = advertisedNamesForJsonTextToolCall(
 			[{ name: "Shell" }, { name: "Write" }],

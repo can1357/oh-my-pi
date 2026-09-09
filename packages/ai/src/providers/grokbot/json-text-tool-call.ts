@@ -354,13 +354,22 @@ export type JsonTextToolCallPromotion = {
 	sourceIndexes: number[];
 };
 
+/** Stable identity for cross-block duplicate suppression (name + args). */
+function jsonTextToolCallFingerprint(call: JsonTextToolCall): string {
+	return `${call.name}\0${JSON.stringify(call.arguments)}`;
+}
+
 export function promoteJsonTextToolCallsFromContent(
 	content: ReadonlyArray<{ type: string; text?: string; thinking?: string }>,
 	advertisedNames: Iterable<string>,
 	excludeIndexes?: ReadonlySet<number>,
 ): JsonTextToolCallPromotion {
-	const collected: JsonTextToolCall[] = [];
-	const sourceIndexes: number[] = [];
+	type BlockPromotion = {
+		index: number;
+		type: string;
+		calls: JsonTextToolCall[];
+	};
+	const blocks: BlockPromotion[] = [];
 	for (let i = 0; i < content.length; i++) {
 		if (excludeIndexes?.has(i)) continue;
 		const block = content[i];
@@ -369,11 +378,31 @@ export function promoteJsonTextToolCallsFromContent(
 		if (!text?.trim()) continue;
 		const promoted = parsePromotableToolCallsFromText(text, advertisedNames);
 		if (promoted.length > 0) {
-			collected.push(...promoted);
-			sourceIndexes.push(i);
+			blocks.push({ index: i, type: block.type, calls: promoted });
 		}
 	}
-	if (collected.length > 0) return { calls: collected, sourceIndexes };
+	if (blocks.length > 0) {
+		// Prefer final text dumps over the same call mirrored in thinking — otherwise
+		// the caller mints two toolCall ids and Shell/Write can run twice.
+		const textFingerprints = new Set<string>();
+		for (const entry of blocks) {
+			if (entry.type !== "text") continue;
+			for (const call of entry.calls) textFingerprints.add(jsonTextToolCallFingerprint(call));
+		}
+		const collected: JsonTextToolCall[] = [];
+		const sourceIndexes: number[] = [];
+		for (const entry of blocks) {
+			let kept = entry.calls;
+			if (entry.type === "thinking" && textFingerprints.size > 0) {
+				kept = entry.calls.filter(call => !textFingerprints.has(jsonTextToolCallFingerprint(call)));
+			}
+			if (kept.length > 0) collected.push(...kept);
+			// Always drop the source block when it produced promotable JSON, even if
+			// every call was suppressed as a text duplicate (avoids leaving the dump).
+			sourceIndexes.push(entry.index);
+		}
+		return { calls: collected, sourceIndexes };
+	}
 	const combined = assistantTextForJsonPromotion(content, excludeIndexes);
 	if (!combined.trim()) return { calls: [], sourceIndexes: [] };
 	const fallback = parsePromotableToolCallsFromText(combined, advertisedNames);

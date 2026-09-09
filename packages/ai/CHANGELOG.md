@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Grok Bot JSON-as-text promotion prefers final text dumps over the same call mirrored in thinking, so Shell/Write is not executed twice.
 - Grok Bot live probes require a completed Shell tool call and a Connect end-stream trailer (incomplete `toolCallPart` or missing trailer no longer passes).
 - Grok Bot JSON-as-text promotion only accepts owner aliases from `advertisedNamesForJsonTextToolCall` (no `edit`→Write / `bash`→Shell fallback onto collision losers).
 - Grok Bot empty Write follow-up acceptance uses the product-wire Write owner from `context.tools`, so historical `edit` results are ignored when `write` owns Write.
