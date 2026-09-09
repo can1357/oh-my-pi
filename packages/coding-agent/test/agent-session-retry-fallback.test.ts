@@ -20,7 +20,11 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { parseModelPattern, parseModelString } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import {
+	formatModelStringWithRouting,
+	parseModelPattern,
+	parseModelString,
+} from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
@@ -5482,6 +5486,71 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe("deepseek-v4-tiered");
 		expect(session.model?.contextWindow).toBe(400_000);
 		expect(session.getContextUsage()?.contextWindow).toBe(400_000);
+	});
+
+	it("preserves an explicit upstream pin while rebinding refreshed model metadata", async () => {
+		const buildRoutedModel = (contextWindow: number): Model<"openai-completions"> =>
+			buildModel({
+				id: "acme/routed-tiered",
+				name: "Routed Tiered Model",
+				api: "openai-completions",
+				provider: "openrouter",
+				baseUrl: "https://openrouter.ai/api/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow,
+				maxTokens: 8_192,
+			});
+
+		const staleModel = buildRoutedModel(1_000_000);
+		const refreshedModel = buildRoutedModel(400_000);
+		const routedModel = parseModelPattern("openrouter/acme/routed-tiered@cerebras", [staleModel]).model;
+		if (!routedModel) throw new Error("Expected routed OpenRouter model");
+
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "routed-rebind-models.yml"));
+		const refreshGate = Promise.withResolvers<void>();
+		vi.spyOn(registry, "awaitInitialBackgroundRefresh").mockImplementation(() => refreshGate.promise);
+		const find = registry.find.bind(registry);
+		vi.spyOn(registry, "find").mockImplementation((provider, id) =>
+			provider === refreshedModel.provider && id === refreshedModel.id ? refreshedModel : find(provider, id),
+		);
+
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: routedModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				throw new Error("stream should not run during discovery rebind");
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry: registry,
+			rebindModelAfterDiscovery: true,
+		});
+
+		const { promise: modelChanged, resolve: resolveModelChanged } = Promise.withResolvers<void>();
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "model_changed") {
+				unsubscribe();
+				resolveModelChanged();
+			}
+		});
+
+		refreshGate.resolve();
+		await Promise.race([
+			modelChanged,
+			scheduler.wait(5_000).then(() => {
+				throw new Error("model_changed was not emitted after routed discovery settled");
+			}),
+		]);
+
+		if (!session.model) throw new Error("Expected rebound model");
+		expect(session.model.contextWindow).toBe(400_000);
+		expect(formatModelStringWithRouting(session.model)).toBe("openrouter/acme/routed-tiered@cerebras");
 	});
 
 	it("warns on unknown or malformed model-selector chain keys at startup", () => {

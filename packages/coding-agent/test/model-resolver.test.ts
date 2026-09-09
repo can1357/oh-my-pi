@@ -2170,6 +2170,29 @@ describe("provider routing selector (@upstream)", () => {
 		expect(withThinking.thinkingLevel).toBe(Effort.High);
 		expect(openRouterOnly(withThinking.model)).toEqual(["google-ai-studio"]);
 	});
+
+	test("resolveCliModel keeps routed matching scoped to the explicit provider", () => {
+		const proxyModel = buildModel({
+			id: "openrouter/acme/model",
+			name: "Proxy OpenRouter-shaped model",
+			api: "openai-completions",
+			provider: "proxy",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		});
+		const catalog = [...allModels, proxyModel];
+		const result = resolveCliModel({
+			cliModel: "openrouter/acme/model@cerebras",
+			modelRegistry: { getAll: () => catalog, getAvailable: () => catalog },
+		});
+
+		expect(result.model).toBeUndefined();
+		expect(result.error).toContain('Model "openrouter/acme/model@cerebras" not found');
+	});
 });
 
 describe("filterAvailableModelsByEnabledPatterns", () => {

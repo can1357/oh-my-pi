@@ -412,6 +412,12 @@ function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
 	} as ModelSpec<Api>);
 }
 
+/** Preserve an explicit single-upstream pin while refreshing an aggregator model's metadata. */
+export function preserveUpstreamRouting(source: Model<Api>, refreshed: Model<Api>): Model<Api> {
+	const upstream = getSingleUpstreamRoute(source);
+	return upstream && supportsUpstreamRouting(refreshed) ? applyUpstreamRouting(refreshed, upstream) : refreshed;
+}
+
 const kProviderModelIndex = Symbol("model-resolver.providerIndex");
 const kProviderSpellingIndex = Symbol("model-resolver.providerSpellingIndex");
 type ModelsWithProviderIndex = readonly Model<Api>[] & {
@@ -2089,7 +2095,7 @@ export function resolveCliModel(options: {
 		provider && providerCandidates?.some(supportsUpstreamRouting) && splitUpstreamRouting(pattern)
 			? `${provider}/${pattern}`
 			: undefined;
-	const candidates = routedProviderPattern ? allModels : (providerCandidates ?? availableModels);
+	const candidates = providerCandidates ?? availableModels;
 	let parsed = parseModelPattern(routedProviderPattern ?? pattern, candidates, preferences, {
 		allowInvalidThinkingSelectorFallback: false,
 	});
