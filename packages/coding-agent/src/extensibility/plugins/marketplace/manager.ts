@@ -269,7 +269,11 @@ export class MarketplaceManager {
 		if (!pluginEntry) {
 			throw new Error(`Plugin "${name}" not found in marketplace "${marketplace}"`);
 		}
-		if (pluginEntry.version !== undefined && !isValidVersionForCache(pluginEntry.version)) {
+		if (
+			typeof pluginEntry.version === "string" &&
+			pluginEntry.version.length > 0 &&
+			!isValidVersionForCache(pluginEntry.version)
+		) {
 			throw new Error(`Invalid version for cache: "${pluginEntry.version}"`);
 		}
 
