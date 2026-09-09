@@ -450,6 +450,15 @@ export async function loadSessionMessagesReadOnly(filePath: string): Promise<Age
 		transcript: true,
 		collapseCompactedHistory: true,
 	});
-	await resolveBlobRefs(messages, new BlobStore(getBlobsDir()));
-	return messages;
+	// A collapsed summary carries the remote-compaction replacement history for
+	// provider replay only; this transcript is never replayed, and the renderer
+	// reads just the summary. Dropping it keeps hydration off every image blob
+	// buried in that hidden history.
+	const displayMessages = messages.map(message =>
+		message.role === "compactionSummary" && message.providerPayload !== undefined
+			? { ...message, providerPayload: undefined }
+			: message,
+	);
+	await resolveBlobRefs(displayMessages, new BlobStore(getBlobsDir()));
+	return displayMessages;
 }

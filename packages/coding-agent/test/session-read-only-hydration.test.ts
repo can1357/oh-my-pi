@@ -6,6 +6,7 @@ import type {
 	FileEntry,
 	SessionMessageEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { formatSessionHistoryMarkdown } from "@oh-my-pi/pi-coding-agent/session/session-history-format";
 import {
 	loadSessionMessagesReadOnly,
 	resolveBlobRefsInEntries,
@@ -123,6 +124,62 @@ describe("read-only session blob hydration", () => {
 			expect(messages).toHaveLength(2);
 			expect(messages[0]).toMatchObject({ role: "user", content: "keep" });
 			expect(messages[1]).toMatchObject({ role: "compactionSummary", summary: "summary" });
+		} finally {
+			readSpy.mockRestore();
+		}
+	});
+
+	it("does not read images hidden in a remote-compaction replacement history", async () => {
+		using dir = TempDir.createSync("@read-only-remote-compaction-");
+		const store = new BlobStore(path.join(dir.path(), "blobs"));
+		const hidden = await store.put(Buffer.from("data:image/png;base64,aGlkZGVu"));
+		const generated = await store.put(Buffer.from("generated"));
+		const compaction: CompactionEntry = {
+			type: "compaction",
+			id: "compact",
+			parentId: "keep",
+			timestamp,
+			firstKeptEntryId: "keep",
+			summary: "remote summary",
+			tokensBefore: 1000,
+			preserveData: {
+				openaiRemoteCompaction: {
+					provider: "openai-codex",
+					replacementHistory: [
+						{ type: "message", role: "user", content: [{ type: "input_image", image_url: hidden.ref }] },
+						{ type: "image_generation_call", id: "ig_1", result: generated.ref },
+					],
+				},
+			},
+		};
+		const file = path.join(dir.path(), "session.jsonl");
+		await Bun.write(
+			file,
+			[
+				header,
+				{
+					type: "message",
+					id: "keep",
+					parentId: null,
+					timestamp,
+					message: { role: "user", content: "keep", timestamp: 0 },
+				},
+				compaction,
+			]
+				.map(value => JSON.stringify(value))
+				.join("\n"),
+		);
+		const get = store.get.bind(store);
+		const reads: string[] = [];
+		const readSpy = spyOn(BlobStore.prototype, "get").mockImplementation(async hash => {
+			reads.push(hash);
+			return get(hash);
+		});
+		try {
+			const messages = await loadSessionMessagesReadOnly(file);
+			expect(reads).toEqual([]);
+			expect(messages.map(message => message.role)).toEqual(["user", "compactionSummary"]);
+			expect(formatSessionHistoryMarkdown(messages)).toContain("[compaction] remote summary");
 		} finally {
 			readSpy.mockRestore();
 		}
