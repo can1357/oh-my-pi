@@ -1149,17 +1149,28 @@ describe("resolveAgentModelPatterns", () => {
 		expect(resolveAgentModelPatterns({ agentModel: "@advisor", settings })).toEqual(["baseten/custom-slow:max"]);
 	});
 
-	test("outer advisor thinking level overrides the inherited slow suffix", () => {
+	test("outer advisor thinking level overrides the inherited slow effort", () => {
 		const settings = Settings.isolated({
-			modelRoles: {
-				default: "local/default",
-				slow: "baseten/custom-slow:max",
-			},
+			modelRoles: { slow: "nanogpt/coding-router:max" },
 		});
 
-		expect(resolveAgentModelPatterns({ agentModel: "@advisor:high", settings })).toEqual([
-			"baseten/custom-slow:high",
-		]);
+		const result = resolveModelRoleValue("@advisor:high", [mockMaxSuffixModels[0]], { settings });
+
+		expect(result.model?.id).toBe("coding-router");
+		expect(result.thinkingLevel).toBe(Effort.High);
+		expect(result.explicitThinkingLevel).toBe(true);
+	});
+
+	test("outer advisor thinking level preserves an inherited literal suffix model id", () => {
+		const settings = Settings.isolated({
+			modelRoles: { slow: "nanogpt/coding-router:max" },
+		});
+
+		const result = resolveModelRoleValue("@advisor:high", mockMaxSuffixModels, { settings });
+
+		expect(result.model?.id).toBe("coding-router:max");
+		expect(result.thinkingLevel).toBe(Effort.High);
+		expect(result.explicitThinkingLevel).toBe(true);
 	});
 
 	test("keeps advisor on the built-in slow chain when slow is unconfigured", () => {
