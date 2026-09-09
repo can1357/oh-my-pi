@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { GoalRuntime, type GoalRuntimeHost, renderGoalPrompt } from "@oh-my-pi/pi-coding-agent/goals/runtime";
+import {
+	GoalRuntime,
+	parseGoalFromModeData,
+	renderGoalPrompt,
+	type GoalRuntimeHost,
+} from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import type {
 	Goal,
 	GoalModeState,
@@ -212,7 +217,7 @@ describe("goal wayfinding", () => {
 		expect(harness.persists).toHaveLength(0);
 	});
 
-	it("preserves the committed waypoint across pause and resume", async () => {
+	it("rehydrates committed waypoint across persisted mode data", async () => {
 		const harness = createHarness();
 		await harness.runtime.updateGoalWayfinding({
 			goalId: "goal-1",
@@ -220,14 +225,34 @@ describe("goal wayfinding", () => {
 			waypoint: { action: "Run the integration test", rationale: "Implementation is complete" },
 		});
 		const committed = harness.getState()?.goal.wayfinding;
+		const persisted = harness.persists.at(-1)?.state;
+		if (!committed || !persisted) throw new Error("expected a persisted waypoint");
 
-		const paused = await harness.runtime.pauseGoal();
-		expect(paused?.goal.status).toBe("paused");
-		expect(paused?.goal.wayfinding).toEqual(committed);
+		const roundTripped: unknown = JSON.parse(JSON.stringify(persisted));
+		const restored = parseGoalFromModeData(roundTripped);
+		expect(restored?.wayfinding).toEqual(committed);
 
-		const resumed = await harness.runtime.resumeGoal();
-		expect(resumed.goal.status).toBe("active");
-		expect(resumed.goal.wayfinding).toEqual(committed);
+		const corrupted: unknown = JSON.parse(
+			JSON.stringify({
+				...persisted,
+				goal: {
+					...persisted.goal,
+					wayfinding: {
+						...committed,
+						waypoint: { ...committed.waypoint, action: "x".repeat(1_001) },
+					},
+				},
+			}),
+		);
+		const degraded = parseGoalFromModeData(corrupted);
+		expect(degraded).toMatchObject({
+			id: "goal-1",
+			objective: "Ship the adaptive goal safely",
+			status: "active",
+			tokensUsed: 42,
+			timeUsedSeconds: 7,
+		});
+		expect(degraded?.wayfinding).toBeUndefined();
 	});
 
 	it("allows a final navigation snapshot at the budget limit but rejects paused goals", async () => {
@@ -308,13 +333,11 @@ describe("goal wayfinding", () => {
 			op: "update",
 			goal: { id: "goal-1", wayfinding: { revision: 1 } },
 		});
-		expect(result.content[0]).toMatchObject({
-			type: "text",
-			text: expect.stringContaining("Goal ID: goal-1\nWayfinding revision: 1"),
-		});
-		expect(result.content[0]).toMatchObject({
-			text: expect.stringContaining("Next action: Inspect the installed SDK types"),
-		});
+		const [content] = result.content;
+		expect(content?.type).toBe("text");
+		const text = content?.type === "text" ? content.text : "";
+		expect(text).toContain("Goal ID: goal-1\nWayfinding revision: 1");
+		expect(text).toContain("Next action: Inspect the installed SDK types");
 	});
 
 	it("requires observation and outcome as one atomic pair", async () => {

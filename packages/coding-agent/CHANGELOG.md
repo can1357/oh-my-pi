@@ -8,6 +8,7 @@
 ### Added
 
 - Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
+- Added the `goal.update` operation so the agent can record bounded wayfinding context that survives goal resumes.
 
 ## [18.1.15] - 2026-09-08
 

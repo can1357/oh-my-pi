@@ -7,6 +7,7 @@ import {
 	cloneGoalWayfindingState,
 	createGoalWayfindingState,
 	normalizeGoalWayfindingUpdate,
+	parseGoalWayfindingState,
 	renderGoalWayfindingState,
 	type GoalWayfindingUpdate,
 	type NormalizedGoalWayfindingUpdate,
@@ -68,6 +69,36 @@ export function remainingTokens(goal: Goal | null | undefined): number | null {
 
 export function renderTrustedObjective(objective: string): string {
 	return `<objective>\n${escapeXmlText(objective)}\n</objective>`;
+}
+
+export function parseGoalFromModeData(modeData: unknown): Goal | undefined {
+	if (!modeData || typeof modeData !== "object") return undefined;
+	const modeValue = modeData as Record<string, unknown>;
+	const goal = modeValue.goal;
+	if (!goal || typeof goal !== "object") return undefined;
+	const value = goal as Record<string, unknown>;
+	if (
+		typeof value.id !== "string" ||
+		typeof value.objective !== "string" ||
+		typeof value.status !== "string" ||
+		typeof value.tokensUsed !== "number" ||
+		typeof value.timeUsedSeconds !== "number" ||
+		typeof value.createdAt !== "number" ||
+		typeof value.updatedAt !== "number"
+	) {
+		return undefined;
+	}
+	return {
+		id: value.id,
+		objective: value.objective,
+		status: value.status as Goal["status"],
+		tokenBudget: typeof value.tokenBudget === "number" ? value.tokenBudget : undefined,
+		tokensUsed: value.tokensUsed,
+		timeUsedSeconds: value.timeUsedSeconds,
+		createdAt: value.createdAt,
+		updatedAt: value.updatedAt,
+		wayfinding: parseGoalWayfindingState(value.wayfinding),
+	};
 }
 
 export function goalTokenDelta(current: GoalTokenUsage, baseline: GoalTokenUsage): number {

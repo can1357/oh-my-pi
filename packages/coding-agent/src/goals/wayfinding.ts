@@ -1,10 +1,6 @@
-import { escapeXmlText } from "@oh-my-pi/pi-utils";
-import type {
-	GoalObservation,
-	GoalWayfindingOutcome,
-	GoalWayfindingState,
-	GoalWaypoint,
-} from "./state";
+import { isRecord, prompt } from "@oh-my-pi/pi-utils";
+import goalWayfindingTemplate from "../prompts/goals/goal-wayfinding.md" with { type: "text" };
+import type { GoalObservation, GoalWayfindingOutcome, GoalWayfindingState, GoalWaypoint } from "./state";
 
 const MAX_GOAL_ID_LENGTH = 256;
 const MAX_TEXT_LENGTH = 1_000;
@@ -144,6 +140,102 @@ export function normalizeGoalWayfindingUpdate(input: GoalWayfindingUpdate): Norm
 	return normalized;
 }
 
+const INVALID_PERSISTED_VALUE = Symbol("invalid persisted wayfinding value");
+
+function isWayfindingOutcome(value: unknown): value is GoalWayfindingOutcome {
+	return typeof value === "string" && WAYFINDING_OUTCOMES.has(value as GoalWayfindingOutcome);
+}
+
+function parsePersistedText(
+	value: unknown,
+	maxLength = MAX_TEXT_LENGTH,
+): string | undefined | typeof INVALID_PERSISTED_VALUE {
+	if (value === undefined) return undefined;
+	return typeof value === "string" && value.length <= maxLength ? value : INVALID_PERSISTED_VALUE;
+}
+
+function parsePersistedList(value: unknown): readonly string[] | undefined | typeof INVALID_PERSISTED_VALUE {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value) || value.length > MAX_LIST_ITEMS) return INVALID_PERSISTED_VALUE;
+	const values: string[] = [];
+	for (const item of value) {
+		if (typeof item !== "string" || item.length > MAX_LIST_ITEM_LENGTH) return INVALID_PERSISTED_VALUE;
+		values.push(item);
+	}
+	return values;
+}
+
+export function parseGoalWayfindingState(value: unknown): GoalWayfindingState | undefined {
+	if (!isRecord(value)) return undefined;
+	const revision = value.revision;
+	if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision <= 0) {
+		return undefined;
+	}
+	if (!isRecord(value.waypoint)) return undefined;
+	const action = value.waypoint.action;
+	const rationale = value.waypoint.rationale;
+	if (
+		typeof action !== "string" ||
+		action.length > MAX_TEXT_LENGTH ||
+		action.trim().length === 0 ||
+		typeof rationale !== "string" ||
+		rationale.length > MAX_TEXT_LENGTH ||
+		rationale.trim().length === 0
+	) {
+		return undefined;
+	}
+
+	const focus = parsePersistedText(value.focus);
+	const guidance = parsePersistedText(value.waypoint.guidance);
+	const successSignal = parsePersistedText(value.waypoint.successSignal);
+	const replanIf = parsePersistedText(value.waypoint.replanIf);
+	const blockers = parsePersistedList(value.blockers);
+	const assumptions = parsePersistedList(value.assumptions);
+	if (
+		focus === INVALID_PERSISTED_VALUE ||
+		guidance === INVALID_PERSISTED_VALUE ||
+		successSignal === INVALID_PERSISTED_VALUE ||
+		replanIf === INVALID_PERSISTED_VALUE ||
+		blockers === INVALID_PERSISTED_VALUE ||
+		assumptions === INVALID_PERSISTED_VALUE
+	) {
+		return undefined;
+	}
+
+	let lastObservation: GoalObservation | undefined;
+	if (value.lastObservation !== undefined) {
+		if (!isRecord(value.lastObservation) || !isWayfindingOutcome(value.lastObservation.outcome)) {
+			return undefined;
+		}
+		const summary = value.lastObservation.summary;
+		if (typeof summary !== "string" || summary.length > MAX_TEXT_LENGTH || summary.trim().length === 0) {
+			return undefined;
+		}
+		lastObservation = { outcome: value.lastObservation.outcome, summary };
+	}
+
+	const totalLength =
+		(focus?.length ?? 0) +
+		action.length +
+		rationale.length +
+		(guidance?.length ?? 0) +
+		(successSignal?.length ?? 0) +
+		(replanIf?.length ?? 0) +
+		(lastObservation?.summary.length ?? 0) +
+		(blockers?.reduce((total, item) => total + item.length, 0) ?? 0) +
+		(assumptions?.reduce((total, item) => total + item.length, 0) ?? 0);
+	if (totalLength > MAX_TOTAL_LENGTH) return undefined;
+
+	return {
+		revision,
+		focus,
+		waypoint: { action, rationale, guidance, successSignal, replanIf },
+		lastObservation,
+		blockers,
+		assumptions,
+	};
+}
+
 export function createGoalWayfindingState(
 	update: NormalizedGoalWayfindingUpdate,
 	revision: number,
@@ -172,38 +264,16 @@ export function cloneGoalWayfindingState(state: GoalWayfindingState | undefined)
 	};
 }
 
-function pushTextElement(lines: string[], tag: string, value: string | undefined, indent: string): void {
-	if (value === undefined) return;
-	lines.push(`${indent}<${tag}>${escapeXmlText(value)}</${tag}>`);
-}
-
-function pushListElement(lines: string[], tag: string, values: readonly string[] | undefined): void {
-	if (!values?.length) return;
-	lines.push(`\t<${tag}>`);
-	for (const value of values) {
-		lines.push(`\t\t<item>${escapeXmlText(value)}</item>`);
-	}
-	lines.push(`\t</${tag}>`);
-}
-
 export function renderGoalWayfindingState(state: GoalWayfindingState | undefined): string {
 	if (!state) return "";
-	const lines = [`<wayfinding revision="${state.revision}">`];
-	pushTextElement(lines, "focus", state.focus, "\t");
-	lines.push("\t<waypoint>");
-	pushTextElement(lines, "action", state.waypoint.action, "\t\t");
-	pushTextElement(lines, "rationale", state.waypoint.rationale, "\t\t");
-	pushTextElement(lines, "guidance", state.waypoint.guidance, "\t\t");
-	pushTextElement(lines, "success_signal", state.waypoint.successSignal, "\t\t");
-	pushTextElement(lines, "replan_if", state.waypoint.replanIf, "\t\t");
-	lines.push("\t</waypoint>");
-	if (state.lastObservation) {
-		lines.push(`\t<last_observation outcome="${state.lastObservation.outcome}">`);
-		pushTextElement(lines, "summary", state.lastObservation.summary, "\t\t");
-		lines.push("\t</last_observation>");
-	}
-	pushListElement(lines, "blockers", state.blockers);
-	pushListElement(lines, "assumptions", state.assumptions);
-	lines.push("</wayfinding>");
-	return lines.join("\n");
+	return prompt
+		.render(goalWayfindingTemplate, {
+			revision: state.revision,
+			focus: state.focus,
+			waypoint: state.waypoint,
+			lastObservation: state.lastObservation,
+			blockers: state.blockers,
+			assumptions: state.assumptions,
+		})
+		.trim();
 }

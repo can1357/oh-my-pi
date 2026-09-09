@@ -2,13 +2,13 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import { formatNumber, prompt } from "@oh-my-pi/pi-utils";
+import { formatNumber, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import type { Theme, ThemeColor } from "../../modes/theme/theme";
 import goalDescription from "../../prompts/tools/goal.md" with { type: "text" };
 import { formatDuration } from "../../slash-commands/helpers/format";
 import type { ToolSession } from "../../tools";
-import { formatErrorDetail, replaceTabs, TRUNCATE_LENGTHS } from "../../tools/render-utils";
+import { formatErrorDetail, previewLine, replaceTabs, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { ToolError } from "../../tools/tool-errors";
 import { framedBlock, renderStatusLine, truncateToWidth } from "../../tui";
 import { completionBudgetReport, remainingTokens } from "../runtime";
@@ -270,9 +270,8 @@ export const goalToolRenderer = {
 		}
 		const nextAction = args.next_action?.trim();
 		if (args.op === "update" && nextAction) {
-			meta.push(
-				uiTheme.italic(uiTheme.fg("muted", truncateToWidth(replaceTabs(nextAction), TRUNCATE_LENGTHS.TITLE))),
-			);
+			const actionPreview = previewLine(sanitizeText(nextAction), TRUNCATE_LENGTHS.TITLE);
+			meta.push(uiTheme.italic(uiTheme.fg("muted", actionPreview)));
 		}
 		if (args.op === "update" && args.expected_revision !== undefined) {
 			meta.push(`rev ${formatNumber(args.expected_revision)}`);
@@ -325,15 +324,10 @@ export const goalToolRenderer = {
 		const objectiveText = truncateToWidth(replaceTabs(goal.objective.trim()), TRUNCATE_LENGTHS.LONG);
 		lines.push(uiTheme.italic(uiTheme.fg("muted", `"${objectiveText}"`)));
 		if (goal.wayfinding) {
-			const action = truncateToWidth(replaceTabs(goal.wayfinding.waypoint.action), TRUNCATE_LENGTHS.LONG);
+			const action = previewLine(sanitizeText(goal.wayfinding.waypoint.action), TRUNCATE_LENGTHS.LONG);
 			lines.push(uiTheme.fg("accent", `route r${formatNumber(goal.wayfinding.revision)} → ${action}`));
 			if (goal.wayfinding.focus) {
-				lines.push(
-					uiTheme.fg(
-						"muted",
-						truncateToWidth(replaceTabs(goal.wayfinding.focus), TRUNCATE_LENGTHS.LONG),
-					),
-				);
+				lines.push(uiTheme.fg("muted", previewLine(sanitizeText(goal.wayfinding.focus), TRUNCATE_LENGTHS.LONG)));
 			}
 		}
 
