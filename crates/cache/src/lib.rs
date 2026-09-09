@@ -17,3 +17,5 @@ pub mod secret_key;
 pub mod stats_cache;
 /// Rebuildable diagnostic and AutoQA issue cache.
 pub mod telemetry_cache;
+/// Conformance assertions shared by public byte-storage backend tests.
+pub mod testing;
