@@ -131,10 +131,7 @@ fn valid_role_id(id: &str) -> bool {
 }
 
 fn role_reference(selector: &str) -> Result<Option<(&str, Option<&str>)>, SelectionError> {
-	let Some(reference) = selector
-		.strip_prefix('@')
-		.or_else(|| selector.strip_prefix("pi/"))
-	else {
+	let Some(reference) = selector.strip_prefix('@') else {
 		return Ok(None);
 	};
 	if reference.contains('/') {
@@ -410,7 +407,7 @@ fn split_upstream(input: &str) -> Result<(&str, Option<Str>), SelectionError> {
 	}
 }
 
-/// Matches a selector by pi's ordered cascade: exact provider/id, bare id,
+/// Matches a selector by the ordered cascade: exact provider/id, bare id,
 /// alias, provider-scoped fuzzy match, then substring.
 ///
 /// Ambiguity is ranked by MRU, route priority, and canonical identity, never
@@ -535,7 +532,7 @@ fn select_inner(
 		mru,
 		id,
 		provider,
-		parsed.route.as_ref().map(|route| &**route),
+		parsed.route.as_deref(),
 		parsed.upstream.clone(),
 		ModelKey::from_ref(id),
 		selector,
@@ -549,21 +546,19 @@ fn select_inner(
 			mru,
 			parsed.model.as_str(),
 			None,
-			parsed.route.as_ref().map(|route| &**route),
+			parsed.route.as_deref(),
 			parsed.upstream.clone(),
 			ModelKey::from_ref(parsed.model.as_str()),
 			selector,
 		) {
 		return Ok(with_annotations(found, parsed));
 	}
-	let mut matches =
-		candidates(models, routes, provider, id, parsed.route.as_ref().map(|route| &**route));
+	let mut matches = candidates(models, routes, provider, id, parsed.route.as_deref());
 	if matches.is_empty() && provider.is_some() {
 		matches = candidates(models, routes, provider, id, None);
 	}
 	if matches.is_empty() {
-		matches =
-			candidates(models, routes, provider, id, parsed.route.as_ref().map(|route| &**route));
+		matches = candidates(models, routes, provider, id, parsed.route.as_deref());
 	}
 	matches.retain(|(_, model)| model.key.as_str().contains(id));
 	match choose_candidates(matches, routes, mru, parsed.clone(), selector) {
@@ -600,7 +595,7 @@ fn choose_alias(
 	provider: Option<&str>,
 	original: &str,
 ) -> Result<SelectedModel, SelectionError> {
-	let route = parsed.route.as_ref().map(|route| &**route);
+	let route = parsed.route.as_deref();
 	let candidates = aliases
 		.iter()
 		.filter(|alias| {
@@ -965,15 +960,14 @@ pub fn retry_fallback_chain_key(
 		let Some(prefix) = key.strip_suffix("/*") else {
 			continue;
 		};
-		if full == prefix.as_str()
+		if (full == prefix.as_str()
 			|| full
 				.strip_prefix(prefix.as_str())
-				.is_some_and(|tail| tail.starts_with('/'))
+				.is_some_and(|tail| tail.starts_with('/')))
+			&& prefix.len() > wildcard_len
 		{
-			if prefix.len() > wildcard_len {
-				wildcard = Some(key.clone());
-				wildcard_len = prefix.len();
-			}
+			wildcard = Some(key.clone());
+			wildcard_len = prefix.len();
 		}
 	}
 	if wildcard.is_some() {
@@ -1200,7 +1194,7 @@ mod tests {
 		let roles = [
 			ModelRole::assignment("slow", target.model.as_str(), None).expect("slow"),
 			ModelRole::assignment("task", "@slow", Some("high")).expect("task"),
-			ModelRole::assignment("advisor", "pi/slow", None).expect("advisor"),
+			ModelRole::assignment("advisor", "@slow", None).expect("advisor"),
 		];
 		assert_eq!(roles[1].selectors.as_ref(), [Str::new_static("@slow:high")]);
 		for (selector, thinking) in [("@task", Some("high")), ("@advisor", None)] {
@@ -1503,7 +1497,7 @@ mod tests {
 			.expect("commit assignment");
 		let unavailable_tiny =
 			ModelRole::assignment("tiny", "definitely-missing-model", None).expect("tiny assignment");
-		let roles = known_roles(&[original.clone(), unavailable_tiny.clone()]);
+		let roles = known_roles(&[original, unavailable_tiny.clone()]);
 		for selector in ["@tiny", "@memory"] {
 			let selected = select_model(
 				catalog.models(),

@@ -18,8 +18,8 @@ use im::OrdSet;
 use omp_core::{ExposeSecret as _, IntoStr, SecretString, Str, Ulid, sf};
 use omp_proto::toolhost::v1::PreludeParamKind;
 use omp_tool::{
-	CapsBase, ErasedEv, ErasedOutcome, IncomingParams, ModelClass, Part, PromptCaps, Registry,
-	ToolIdentity, ToolRoute,
+	CapsBase, Diag, DiagEnvelope, ErasedEv, ErasedOutcome, IncomingParams, ModelClass, Part,
+	PromptCaps, Registry, ToolIdentity, ToolRoute,
 };
 use omp_tools::eval::{RuntimeSnapshot, idle_timeout::TimeoutHandle, kernel::NamespaceInstaller};
 use parking_lot::Mutex;
@@ -38,6 +38,7 @@ use super::PYTHON_PRELUDE;
 
 const COMPLETION: &str = "__completion__";
 const AGENT: &str = "__agent__";
+const WORKPOOL: &str = "__workpool__";
 const CONCURRENCY: &str = "__concurrency__";
 const BUDGET: &str = "__budget__";
 /// Wire prefix reserved for extension-provided eval prelude helpers.
@@ -54,6 +55,8 @@ pub const PRELUDE_RESERVED_NAMES: &[&str] = &[
 	"tool",
 	"completion",
 	"agent",
+	"workpool",
+	"WorkPool",
 	"parallel",
 	"pipeline",
 	"log",
@@ -263,6 +266,7 @@ pub struct BridgeCapabilities {
 	prelude:     OrdSet<Str>,
 	completion:  bool,
 	agent:       bool,
+	workpool:    bool,
 	concurrency: bool,
 	budget:      bool,
 }
@@ -279,6 +283,11 @@ impl BridgeCapabilities {
 
 	pub(crate) const fn with_agent(mut self) -> Self {
 		self.agent = true;
+		self
+	}
+
+	pub(crate) const fn with_workpool(mut self) -> Self {
+		self.workpool = true;
 		self
 	}
 
@@ -307,6 +316,7 @@ impl BridgeCapabilities {
 		match name {
 			COMPLETION => self.completion,
 			AGENT => self.agent,
+			WORKPOOL => self.workpool,
 			CONCURRENCY => self.concurrency,
 			BUDGET => self.budget,
 			_ => self.tools.iter().any(|tool| tool.as_str() == name),
@@ -327,6 +337,9 @@ impl BridgeCapabilities {
 		if self.agent {
 			names.push(sf!(AGENT));
 		}
+		if self.workpool {
+			names.push(sf!(WORKPOOL));
+		}
 		if self.concurrency {
 			names.push(sf!(CONCURRENCY));
 		}
@@ -346,6 +359,7 @@ impl BridgeCapabilities {
 			match name.as_str() {
 				COMPLETION => capabilities.completion = true,
 				AGENT => capabilities.agent = true,
+				WORKPOOL => capabilities.workpool = true,
 				CONCURRENCY => capabilities.concurrency = true,
 				BUDGET => capabilities.budget = true,
 				_ => {
@@ -384,6 +398,9 @@ pub enum BridgeHostError {
 	/// Model-facing failure message produced by the host-side operation.
 	#[error("{0}")]
 	Message(Str),
+	/// Canonical policy denial produced before a child session exists.
+	#[error("child session spawn was denied by policy")]
+	PolicyDenied(Arc<omp_tool::PolicyDenied>),
 }
 
 impl BridgeHostError {
@@ -409,8 +426,8 @@ impl BridgeProgressSink for NoopBridgeProgress {
 }
 
 /// Real host-side boundary used for ordinary tools and the privileged eval
-/// completion/agent/budget operations. Implementations receive only calls that
-/// passed grant authentication and capability checks.
+/// completion/agent/workpool/budget operations. Implementations receive only
+/// calls that passed grant authentication and capability checks.
 #[async_trait]
 pub trait BridgeHost: Send + Sync {
 	/// Dispatches one authenticated, capability-checked eval request into the
@@ -490,10 +507,15 @@ impl BridgeDispatcher {
 			token: SecretString::from(Ulid::generate().to_string()),
 			generation: Ulid::generate(),
 		};
-		registrations.insert(key, Registration { grant: grant.clone(), capabilities, host, timeout });
+		registrations.insert(key, Registration {
+			grant: grant.clone(),
+			capabilities: capabilities.clone(),
+			host,
+			timeout,
+		});
 		drop(registrations);
 		Ok(BridgeRegistration {
-			lease: Arc::new(RegistrationLease { dispatcher: self.clone(), grant }),
+			lease: Arc::new(RegistrationLease { dispatcher: self.clone(), grant, capabilities }),
 		})
 	}
 
@@ -543,8 +565,9 @@ impl BridgeDispatcher {
 
 #[must_use]
 struct RegistrationLease {
-	dispatcher: BridgeDispatcher,
-	grant:      BridgeGrant,
+	dispatcher:   BridgeDispatcher,
+	grant:        BridgeGrant,
+	capabilities: BridgeCapabilities,
 }
 
 impl Drop for RegistrationLease {
@@ -656,6 +679,10 @@ impl BridgeClient {
 		self.grant.session.as_str()
 	}
 
+	fn allowed_names(&self) -> Vec<Str> {
+		self._lease.capabilities.allowed_names()
+	}
+
 	fn revoke(&self) {
 		self.dispatcher.unregister(&self.grant);
 	}
@@ -725,9 +752,14 @@ impl BridgeHost for RegistryBridgeHost {
 			.args_committed(Str::from(raw))
 			.map_err(|error| BridgeHostError::message(error.to_string()))?;
 		let mut events = self.registry.invoke(name, params).map_err(registry_error)?;
+		let mut diags = Vec::<Diag>::new();
 		while let Some(event) = events.next().await {
 			match event.map_err(registry_error)? {
 				ErasedEv::Update(update) => {
+					if let Ok(envelope) = serde_json::from_slice::<DiagEnvelope>(&update) {
+						diags.push(envelope.diag);
+						continue;
+					}
 					let update: Value = serde_json::from_slice(&update).map_err(|error| {
 						BridgeHostError::message(format!(
 							"tool {name} returned invalid update JSON: {error}"
@@ -738,7 +770,7 @@ impl BridgeHost for RegistryBridgeHost {
 				ErasedEv::Done(ErasedOutcome::Detached(job)) => {
 					let value = serde_json::to_value(job)
 						.map_err(|error| BridgeHostError::message(error.to_string()))?;
-					return Ok(value);
+					return attach_diags(value, diags);
 				},
 				ErasedEv::Done(ErasedOutcome::Done { verdict, .. }) => {
 					let projected = self
@@ -767,12 +799,27 @@ impl BridgeHost for RegistryBridgeHost {
 							_ => value = json!({ "text": value, "hasError": true }),
 						}
 					}
-					return Ok(value);
+					return attach_diags(value, diags);
 				},
 			}
 		}
 		Err(BridgeHostError::message(format!("tool {name} ended without a terminal result")))
 	}
+}
+
+fn attach_diags(mut value: Value, diags: Vec<Diag>) -> Result<Value, BridgeHostError> {
+	if diags.is_empty() {
+		return Ok(value);
+	}
+	let diags =
+		serde_json::to_value(diags).map_err(|error| BridgeHostError::message(error.to_string()))?;
+	match &mut value {
+		Value::Object(object) => {
+			object.insert("diags".to_owned(), diags);
+		},
+		_ => value = json!({ "result": value, "diags": diags }),
+	}
+	Ok(value)
 }
 
 /// Optional capabilities owned by the live parent agent session.
@@ -786,6 +833,15 @@ pub trait ParentSessionHost: Send + Sync {
 	/// parent session.
 	fn eval_session_config(&self) -> Result<EvalSessionConfig, BridgeHostError>;
 
+	/// Releases process-local child schedulers when this authenticated parent
+	/// binding is retired or replaced. Durable observations remain journaled.
+	fn release_eval_owner(&self) {}
+
+	/// Whether this parent owns a completion implementation.
+	fn completion_available(&self) -> bool {
+		true
+	}
+
 	/// Runs a parent-session model completion and forwards ordered progress to
 	/// the eval caller.
 	async fn completion(
@@ -793,6 +849,11 @@ pub trait ParentSessionHost: Send + Sync {
 		args: Value,
 		progress: &dyn BridgeProgressSink,
 	) -> Result<Value, BridgeHostError>;
+	/// Whether this parent owns a child-agent implementation.
+	fn agent_available(&self) -> bool {
+		true
+	}
+
 	/// Runs a parent-session child agent and forwards ordered progress to the
 	/// eval caller.
 	async fn agent(
@@ -800,39 +861,59 @@ pub trait ParentSessionHost: Send + Sync {
 		args: Value,
 		progress: &dyn BridgeProgressSink,
 	) -> Result<Value, BridgeHostError>;
+	/// Whether this parent owns a live workpool scheduler. Capability
+	/// advertisement is withheld until this returns true.
+	fn workpool_available(&self) -> bool {
+		false
+	}
+
+	/// Creates or operates a parent-owned persistent subagent workpool.
+	async fn workpool(
+		&self,
+		args: Value,
+		progress: &dyn BridgeProgressSink,
+	) -> Result<Value, BridgeHostError> {
+		let _ = (args, progress);
+		Err(BridgeHostError::message("eval workpool is unavailable for this parent session"))
+	}
+	/// Whether this parent owns concurrency controls.
+	fn concurrency_available(&self) -> bool {
+		true
+	}
+
 	/// Applies the parent session's concurrency operation to extension-supplied
 	/// arguments.
 	async fn concurrency(&self, args: Value) -> Result<Value, BridgeHostError>;
+	/// Whether this parent owns budget controls.
+	fn budget_available(&self) -> bool {
+		true
+	}
+
 	/// Reads or updates parent-session budget state using extension-supplied
 	/// arguments.
 	async fn budget(&self, args: Value) -> Result<Value, BridgeHostError>;
 }
 
-/// Filesystem and managed-environment authority projected by a live parent
-/// session into one eval run.
+/// Filesystem authority projected by a live parent session into one eval run.
+///
+/// Session and artifact access never enters the child environment: `output()`
+/// uses the authenticated Read bridge against journal-derived agent/job views
+/// and the session CAS.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvalSessionConfig {
 	/// Environment-authorized working directory for each cell.
 	pub cwd:              PathBuf,
 	/// Serialized bounded `local://` root projection, or removal when absent.
 	pub local_roots_json: Option<Str>,
-	/// Session artifact directory, or removal when absent.
-	pub artifacts_dir:    Option<Str>,
-	/// Append-only session journal path, or removal when absent.
-	pub session_file:     Option<Str>,
 }
 
 impl EvalSessionConfig {
 	fn runtime_snapshot(&self) -> RuntimeSnapshot {
 		RuntimeSnapshot {
 			cwd:         Some(self.cwd.clone()),
-			managed_env: [
-				(sf!("OMP_EVAL_LOCAL_ROOTS"), self.local_roots_json.clone()),
-				(sf!("OMP_ARTIFACTS_DIR"), self.artifacts_dir.clone()),
-				(sf!("OMP_SESSION_FILE"), self.session_file.clone()),
-			]
-			.into_iter()
-			.collect(),
+			managed_env: [(sf!("OMP_EVAL_LOCAL_ROOTS"), self.local_roots_json.clone())]
+				.into_iter()
+				.collect(),
 		}
 	}
 }
@@ -847,12 +928,19 @@ pub struct ParentBindingLease {
 
 impl Drop for ParentBindingLease {
 	fn drop(&mut self) {
-		let mut parents = self.parents.lock();
-		if parents
-			.get(&self.owner)
-			.is_some_and(|binding| binding.generation == self.generation)
-		{
-			parents.remove(&self.owner);
+		let parent = {
+			let mut parents = self.parents.lock();
+			if parents
+				.get(&self.owner)
+				.is_some_and(|binding| binding.generation == self.generation)
+			{
+				parents.remove(&self.owner).map(|binding| binding.parent)
+			} else {
+				None
+			}
+		};
+		if let Some(parent) = parent {
+			parent.release_eval_owner();
 		}
 	}
 }
@@ -1007,12 +1095,47 @@ impl SessionBridgeHost {
 		} else {
 			capabilities
 		};
-		Ok(if !self.parents.lock().is_empty() {
+		let parents = self.parents.lock();
+		if parents.is_empty() {
+			return Ok(capabilities);
+		}
+		let has_completion = parents
+			.values()
+			.all(|binding| binding.parent.completion_available());
+		let has_agent = parents
+			.values()
+			.all(|binding| binding.parent.agent_available());
+		let has_concurrency = parents
+			.values()
+			.all(|binding| binding.parent.concurrency_available());
+		let has_budget = parents
+			.values()
+			.all(|binding| binding.parent.budget_available());
+		let has_workpool = parents
+			.values()
+			.all(|binding| binding.parent.workpool_available());
+		let capabilities = if has_completion {
+			capabilities.with_completion()
+		} else {
 			capabilities
-				.with_completion()
-				.with_agent()
-				.with_concurrency()
-				.with_budget()
+		};
+		let capabilities = if has_agent {
+			capabilities.with_agent()
+		} else {
+			capabilities
+		};
+		let capabilities = if has_concurrency {
+			capabilities.with_concurrency()
+		} else {
+			capabilities
+		};
+		let capabilities = if has_budget {
+			capabilities.with_budget()
+		} else {
+			capabilities
+		};
+		Ok(if has_workpool {
+			capabilities.with_workpool()
 		} else {
 			capabilities
 		})
@@ -1051,7 +1174,7 @@ impl SessionBridgeHost {
 			// Bare in-process sessions carry no parent lease: registry-backed
 			// native tools stay available while parent-scoped helpers fail with
 			// their typed absence below.
-			if matches!(name, COMPLETION | AGENT | CONCURRENCY | BUDGET) {
+			if matches!(name, COMPLETION | AGENT | WORKPOOL | CONCURRENCY | BUDGET) {
 				return Err(BridgeHostError::message(
 					"eval bridge parent session is not bound for this owner",
 				));
@@ -1085,6 +1208,7 @@ impl SessionBridgeHost {
 		match name {
 			COMPLETION => parent.completion(args, progress).await,
 			AGENT => parent.agent(args, progress).await,
+			WORKPOOL => parent.workpool(args, progress).await,
 			CONCURRENCY => parent.concurrency(args).await,
 			BUDGET => parent.budget(args).await,
 			_ => {
@@ -1375,6 +1499,11 @@ pub fn install_python_bridge(
 	runtime: Handle,
 ) -> PyResult<()> {
 	globals.set_item("__omp_bridge_session__", client.session())?;
+	let allowed_names = client.allowed_names();
+	globals.set_item(
+		"__omp_bridge_capabilities__",
+		allowed_names.iter().map(Str::as_str).collect::<Vec<_>>(),
+	)?;
 	globals.set_item(
 		"__omp_bridge_call__",
 		Py::new(py, PythonBridgeCallable { client, runtime, globals: globals.clone().unbind() })?,
@@ -1398,7 +1527,8 @@ mod tests {
 	use async_stream::stream;
 	use futures::Stream;
 	use omp_tool::{
-		Claims, Constraint, Effects, Ev, Precedence, Presentation, Rev, Tool, ToolSpec, ToolTerminal,
+		Claims, Constraint, DiagKind, Effects, Ev, Precedence, Presentation, Rev, Tool, ToolSpec,
+		ToolTerminal, Unit,
 	};
 	use serde::{Deserialize, Deserializer, Serialize, ser};
 
@@ -1440,7 +1570,8 @@ mod tests {
 	}
 
 	struct RecordingParent {
-		calls: AtomicUsize,
+		calls:    AtomicUsize,
+		releases: AtomicUsize,
 	}
 
 	impl RecordingParent {
@@ -1456,9 +1587,11 @@ mod tests {
 			Ok(EvalSessionConfig {
 				cwd:              PathBuf::from("/runtime"),
 				local_roots_json: Some(Str::new_static(r#"{"local":"/runtime/local"}"#)),
-				artifacts_dir:    Some(sf!("/runtime/artifacts")),
-				session_file:     Some(sf!("/runtime/session.jsonl")),
 			})
+		}
+
+		fn release_eval_owner(&self) {
+			self.releases.fetch_add(1, Ordering::Relaxed);
 		}
 
 		async fn completion(
@@ -1475,6 +1608,18 @@ mod tests {
 			_progress: &dyn BridgeProgressSink,
 		) -> Result<Value, BridgeHostError> {
 			Ok(self.response("agent", args))
+		}
+
+		fn workpool_available(&self) -> bool {
+			true
+		}
+
+		async fn workpool(
+			&self,
+			args: Value,
+			_progress: &dyn BridgeProgressSink,
+		) -> Result<Value, BridgeHostError> {
+			Ok(self.response("workpool", args))
 		}
 
 		async fn concurrency(&self, args: Value) -> Result<Value, BridgeHostError> {
@@ -1551,6 +1696,11 @@ mod tests {
 					yield Ev::Update(ProbeUpdate::Invalid);
 				} else {
 					yield Ev::Update(ProbeUpdate::Value(json!({"step": 1})));
+					yield Ev::Diag(
+						Diag::info(DiagKind::Pagination, "more results")
+							.continuation("skip=2")
+							.omitted(3, Unit::Items),
+					);
 					yield Ev::Update(ProbeUpdate::Value(json!({"step": 2})));
 				}
 				yield Ev::Done(ToolTerminal::Done {
@@ -1784,7 +1934,8 @@ mod tests {
 
 	#[test]
 	fn runtime_snapshots_are_keyed_by_owner_and_eval_session() {
-		let parent = Arc::new(RecordingParent { calls: AtomicUsize::new(0) });
+		let parent =
+			Arc::new(RecordingParent { calls: AtomicUsize::new(0), releases: AtomicUsize::new(0) });
 		let host = SessionBridgeHost::new();
 		let _binding = host
 			.bind_sdk_parent(sf!("owner-a"), parent.clone())
@@ -1822,7 +1973,8 @@ mod tests {
 	}
 	#[tokio::test]
 	async fn composite_principals_share_parent_authority_but_isolate_runtime_keys() {
-		let parent = Arc::new(RecordingParent { calls: AtomicUsize::new(0) });
+		let parent =
+			Arc::new(RecordingParent { calls: AtomicUsize::new(0), releases: AtomicUsize::new(0) });
 		let host = SessionBridgeHost::new();
 		host
 			.bind_registry(Arc::new(Registry::new()))
@@ -1856,19 +2008,21 @@ mod tests {
 
 	#[tokio::test]
 	async fn dropping_parent_binding_revokes_frozen_runtime_routes() {
-		let parent = Arc::new(RecordingParent { calls: AtomicUsize::new(0) });
+		let parent =
+			Arc::new(RecordingParent { calls: AtomicUsize::new(0), releases: AtomicUsize::new(0) });
 		let host = SessionBridgeHost::new();
 		host
 			.bind_registry(Arc::new(Registry::new()))
 			.expect("bind registry");
 		let binding = host
-			.bind_sdk_parent(sf!("owner"), parent)
+			.bind_sdk_parent(sf!("owner"), parent.clone())
 			.expect("bind parent");
 		let session = Bytes::from_static(b"eval-a");
 		host
 			.freeze_runtime("owner", &session)
 			.expect("freeze runtime");
 		drop(binding);
+		assert_eq!(parent.releases.load(Ordering::Relaxed), 1);
 		assert!(matches!(
 			host.call_for("owner", &session, BUDGET, json!({}), &NoopBridgeProgress).await,
 			Err(BridgeHostError::Message(message)) if message == "eval bridge parent lease was revoked"
@@ -1877,7 +2031,8 @@ mod tests {
 
 	#[tokio::test]
 	async fn parent_helpers_use_only_the_bound_session_host() {
-		let parent = Arc::new(RecordingParent { calls: AtomicUsize::new(0) });
+		let parent =
+			Arc::new(RecordingParent { calls: AtomicUsize::new(0), releases: AtomicUsize::new(0) });
 		let host = Arc::new(SessionBridgeHost::new());
 		host
 			.bind_registry(Arc::new(Registry::new()))
@@ -1889,9 +2044,16 @@ mod tests {
 		host
 			.freeze_runtime("owner", &session)
 			.expect("freeze owner runtime");
+		assert!(
+			host
+				.capabilities()
+				.expect("parent capabilities")
+				.allows(WORKPOOL)
+		);
 		for (name, operation) in [
 			(COMPLETION, "completion"),
 			(AGENT, "agent"),
+			(WORKPOOL, "workpool"),
 			(CONCURRENCY, "concurrency"),
 			(BUDGET, "budget"),
 		] {
@@ -1909,7 +2071,7 @@ mod tests {
 				json!({ "operation": operation, "args": { "marker": operation } })
 			);
 		}
-		assert_eq!(parent.calls.load(Ordering::Relaxed), 4);
+		assert_eq!(parent.calls.load(Ordering::Relaxed), 5);
 	}
 
 	#[tokio::test]
@@ -1919,6 +2081,7 @@ mod tests {
 			.bind_registry(Arc::new(Registry::new()))
 			.expect("bind registry");
 		let capabilities = host.capabilities().expect("bound capabilities");
+		assert!(!capabilities.allows(WORKPOOL));
 		let registration = dispatcher()
 			.register(sf!("owner"), sf!("cell"), capabilities, host, TimeoutHandle::new(None))
 			.expect("register owner");
@@ -1945,7 +2108,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn registry_bridge_streams_ordered_updates_before_its_response() {
+	async fn registry_bridge_collects_diags_and_streams_ordered_updates_before_its_response() {
 		let mut registry = Registry::new();
 		registry
 			.register(StreamingProbe::new("update_probe", false), Presentation::Slot, test_claims())
@@ -1957,7 +2120,16 @@ mod tests {
 				.call("update_probe", json!({"i":"py prelude"}), &progress)
 				.await
 				.expect("bridge probe call"),
-			json!("done")
+			json!({
+				"result": "done",
+				"diags": [{
+					"severity": "info",
+					"kind": "pagination",
+					"text": "more results",
+					"continuation": "skip=2",
+					"omitted": {"count": 3, "unit": "items"},
+				}],
+			})
 		);
 		assert_eq!(*progress.0.lock(), vec![
 			json!({"op":"tool","name":"update_probe","update":{"step":1}}),

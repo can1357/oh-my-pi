@@ -1,4 +1,4 @@
-//! Ignored deterministic timing harness for pi-walker.
+//! Ignored deterministic timing harness for omp-walker.
 //!
 //! Run with:
 //! cargo nextest run --cargo-profile ci -p omp-walker --test perf \
@@ -105,7 +105,7 @@ fn run_bench(mut name: &str, mut run: impl FnMut() -> usize) {
 }
 
 fn build_synthetic_tree() -> PathBuf {
-	let root = unique_temp_root("pi-walker-perf");
+	let root = unique_temp_root("omp-walker-perf");
 	fs::create_dir_all(&root).expect("create synthetic root");
 	fs::create_dir_all(root.join(".git")).expect("create repo marker");
 

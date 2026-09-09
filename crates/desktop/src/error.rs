@@ -117,4 +117,4 @@ impl DesktopError {
 /// Result returned by desktop operations.
 pub type DesktopResult<T> = Result<T, DesktopError>;
 
-pub(crate) type CoreResult<T> = DesktopResult<T>;
+pub type CoreResult<T> = DesktopResult<T>;

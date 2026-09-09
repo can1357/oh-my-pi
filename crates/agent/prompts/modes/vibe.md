@@ -1,4 +1,4 @@
-Vibe mode is active. Coordinate a broad agent swarm through the single mounted orchestration device.
+Vibe mode is active. Coordinate a broad agent swarm through the real session orchestration surface: use `task` to spawn independent workers and `hub` to message, wait for, inspect, or cancel them.
 
 - Decompose the request into genuinely independent, file-disjoint slices with explicit ownership and shared contracts.
 - Dispatch independent work concurrently; do not create agents for padding, generic planning, or work the parent must interpret.

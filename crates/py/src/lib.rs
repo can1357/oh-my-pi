@@ -33,9 +33,7 @@ pub mod interrupt;
 
 use std::{
 	env,
-	error::Error,
 	ffi::CString,
-	fmt::{self, Display},
 	mem::MaybeUninit,
 	os::unix::ffi::OsStrExt,
 	path::{Path, PathBuf},
@@ -89,25 +87,16 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// CPython-side boot failures (corrupt frozen data, allocator failure) do
 /// not surface here: the interpreter prints its diagnostic and exits the
 /// process, per embedding convention.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum InitError {
 	/// The engine was already initialized in this process.
+	#[error("python engine already initialized")]
 	AlreadyInitialized,
 	/// A configured search path contains an interior NUL byte.
+	#[error("search path contains NUL byte: {}", .0.display())]
 	InvalidPath(PathBuf),
 }
-
-impl Display for InitError {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::AlreadyInitialized => f.write_str("python engine already initialized"),
-			Self::InvalidPath(p) => write!(f, "search path contains NUL byte: {}", p.display()),
-		}
-	}
-}
-
-impl Error for InitError {}
 
 /// Processing policy for the one host-authorized site-packages directory.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -122,7 +111,7 @@ pub enum SitePolicy {
 	PthFilesAndSiteCustomize,
 }
 
-/// Configures the isolated embedded CPython runtime and its authorized-site
+/// Configures the isolated embedded `CPython` runtime and its authorized-site
 /// policy. Created by [`Engine::builder`].
 #[derive(Debug, Default)]
 pub struct Builder {
@@ -156,18 +145,49 @@ impl Builder {
 	/// # Errors
 	/// [`InitError::AlreadyInitialized`] on repeat calls;
 	/// [`InitError::InvalidPath`] if the site-packages path contains NUL.
+	#[tracing::instrument(
+		level = "debug",
+		name = "python_engine_init",
+		skip_all,
+		fields(site_policy = ?self.site_policy)
+	)]
 	pub fn init(self) -> Result<Engine, InitError> {
 		if INITIALIZED.swap(true, Ordering::SeqCst) {
+			tracing::warn!(reason = "already_initialized", "Python engine initialization rejected");
 			return Err(InitError::AlreadyInitialized);
 		}
-		let site = self.site_packages.unwrap_or_else(default_site_packages);
-		let site_c = CString::new(site.as_os_str().as_bytes())
-			.map_err(|_| InitError::InvalidPath(site.clone()))?;
-		bindings::register();
-		install_frozen_modules();
-		init_python(&site_c);
+		let site_policy = self.site_policy;
+		let site = match self.site_packages {
+			Some(site) => {
+				tracing::debug!(
+					site.path = %site.display(),
+					source = "builder",
+					"resolved Python site-packages directory"
+				);
+				site
+			},
+			None => default_site_packages(),
+		};
+		let site_c = if let Ok(site_c) = CString::new(site.as_os_str().as_bytes()) {
+			site_c
+		} else {
+			tracing::warn!(
+				site.path = %site.display(),
+				reason = "interior_nul",
+				"Python engine initialization rejected"
+			);
+			return Err(InitError::InvalidPath(site));
+		};
+		tracing::debug_span!("python_inittab").in_scope(bindings::register);
+		tracing::debug_span!(
+			"python_stdlib_install",
+			stdlib_bytes = STDLIB_BLOB.len(),
+			project_module_bytes = OMP_MODULES_BLOB.len()
+		)
+		.in_scope(install_frozen_modules);
+		tracing::debug_span!("python_runtime_boot").in_scope(|| init_python(&site_c));
 		let engine = Engine { site_packages: site };
-		initialize_authorized_site(&engine, self.site_policy);
+		initialize_authorized_site(&engine, site_policy);
 		Ok(engine)
 	}
 }
@@ -223,14 +243,23 @@ pub fn bootstrap_extension_host(engine: &Engine) -> PyResult<()> {
 /// with any free-threaded 3.14 interpreter, e.g.
 /// `uv pip install --python "$(uv python find 3.14t)" --target <dir> numpy`.
 pub fn default_site_packages() -> PathBuf {
-	env::var_os("OMP_PY_SITE").map_or_else(
+	let (site, source) = env::var_os("OMP_PY_SITE").map_or_else(
 		|| {
-			env::home_dir()
-				.map_or_else(env::temp_dir, |home| home.join(".local/share/omp-py"))
-				.join("site-packages")
+			(
+				env::home_dir()
+					.map_or_else(env::temp_dir, |home| home.join(".local/share/omp-py"))
+					.join("site-packages"),
+				"default",
+			)
 		},
-		PathBuf::from,
-	)
+		|configured| (PathBuf::from(configured), "environment"),
+	);
+	tracing::debug!(
+		site.path = %site.display(),
+		source,
+		"resolved Python site-packages directory"
+	);
+	site
 }
 
 /// Registers every embedded module (stdlib + repo-provided) as a frozen
@@ -276,6 +305,7 @@ fn check(status: ffi::PyStatus) {
 	// and Py_ExitStatusException never returns for failure statuses.
 	unsafe {
 		if ffi::PyStatus_Exception(status) != 0 {
+			tracing::error!("embedded Python runtime initialization failed");
 			ffi::Py_ExitStatusException(status);
 		}
 	}
@@ -283,22 +313,38 @@ fn check(status: ffi::PyStatus) {
 
 /// Applies the selected policy only to the configured site directory.
 ///
-/// Initialization failures follow CPython's embedding convention and abort
+/// Initialization failures follow `CPython`'s embedding convention and abort
 /// with its diagnostic, like failures from [`init_python`]. `addsitedir`
 /// deliberately retains standard `.pth` semantics because this directory is
 /// the explicit installation authority selected by the host.
+#[tracing::instrument(
+	level = "debug",
+	name = "python_site_scan",
+	skip_all,
+	fields(site_path = %engine.site_packages.display(), site_policy = ?policy)
+)]
 fn initialize_authorized_site(engine: &Engine, policy: SitePolicy) {
 	if policy == SitePolicy::Direct {
 		return;
 	}
 	engine.attach(|py| {
 		let site = py.import("site").unwrap_or_else(|error| {
+			tracing::warn!(
+				site_path = %engine.site_packages.display(),
+				step = "site_import",
+				"authorized Python site initialization failed"
+			);
 			error.print(py);
 			panic!("embedded site module is unavailable");
 		});
 		site
 			.call_method1("addsitedir", (&engine.site_packages,))
 			.unwrap_or_else(|error| {
+				tracing::warn!(
+					site_path = %engine.site_packages.display(),
+					step = "pth_files",
+					"authorized Python site initialization failed"
+				);
 				error.print(py);
 				panic!("failed to process authorized site directory");
 			});
@@ -306,6 +352,11 @@ fn initialize_authorized_site(engine: &Engine, policy: SitePolicy) {
 			site
 				.call_method0("execsitecustomize")
 				.unwrap_or_else(|error| {
+					tracing::warn!(
+						site_path = %engine.site_packages.display(),
+						step = "sitecustomize",
+						"authorized Python site initialization failed"
+					);
 					error.print(py);
 					panic!("failed to execute authorized site customization");
 				});
@@ -341,7 +392,10 @@ fn init_python(site_packages: &CString) {
 		));
 		(*config).module_search_paths_set = 1;
 		let wide = ffi::Py_DecodeLocale(site_packages.as_ptr(), null_mut());
-		assert!(!wide.is_null(), "failed to decode search path");
+		if wide.is_null() {
+			tracing::error!("embedded Python search path decoding failed");
+			panic!("failed to decode search path");
+		}
 		let status = ffi::PyWideStringList_Append(&raw mut (*config).module_search_paths, wide);
 		ffi::PyMem_RawFree(wide.cast());
 		check(status);
@@ -349,6 +403,25 @@ fn init_python(site_packages: &CString) {
 		ffi::PyConfig_Clear(config);
 		check(status);
 		let initial = ffi::PyEval_SaveThread();
-		assert!(!initial.is_null(), "CPython initialization did not create a thread state");
+		if initial.is_null() {
+			tracing::error!("embedded Python initialization created no thread state");
+			panic!("CPython initialization did not create a thread state");
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn init_error_reports_its_cause() {
+		let already: &dyn std::error::Error = &InitError::AlreadyInitialized;
+		assert_eq!(already.to_string(), "python engine already initialized");
+		assert!(already.source().is_none());
+		assert_eq!(
+			InitError::InvalidPath(PathBuf::from("/opt/site\u{0}bad")).to_string(),
+			"search path contains NUL byte: /opt/site\u{0}bad"
+		);
 	}
 }

@@ -6,9 +6,9 @@
 
 pub mod backends;
 pub mod cancel;
-pub mod context;
 pub mod control;
 pub mod dispatch;
+pub mod extensions;
 pub mod lifecycle;
 pub mod params;
 pub mod presentation;
@@ -19,26 +19,35 @@ pub use cancel::{
 	CANCEL_GRACE, CancelStage, CancellationError, CancellationJournal, CancellationLadder,
 	CancellationOutcome, MAX_KILL_ESCALATIONS_PER_SESSION,
 };
-pub use context::LiveContextControlOwner;
 pub use control::{
-	ControlAuthority, ControlAuthorityFactory, ControlCompositionError, EnvdControlAuthorities,
-	ExternalControlAuthorities, FixedControlAuthorityFactory, HostControlAuthorityFactory,
-	PersistenceControlAuthorities, PolicyControlAuthorities, PresentationControlAuthorities,
-	ProviderControlAuthorities, RegistryControlAuthorities,
+	ControlAuthority, ControlAuthorityFactory, ControlCompositionError, ConvarControlFactory,
+	EnvdControlAuthorities, ExternalControlAuthorities, FixedControlAuthorityFactory,
+	HostControlAuthorityFactory, PersistenceControlAuthorities, PolicyControlAuthorities,
+	PresentationControlAuthorities, ProviderControlAuthorities, RegistryControlAuthorities,
 };
 pub use dispatch::{
 	CallbackConcurrency, DispatchError, DispatchPending, DispatchRequest, DispatchRouter,
-	EventDeadline, REGIME_SUBMISSION_TIMEOUT, RegimeDispatch, RegimeDispatchError,
-	decode_regime_draft,
+	EventDeadline, PromptContributionProvider, PromptContributionRecord, PromptDispatchError,
+	PromptPullContext, PromptSlotBinding, UiCallbackDispatch, UiCallbackOwner, UiCommandRosterEntry,
+	UiCompletionRosterEntry, UiDispatchError, UiMessageRendererRosterEntry, UiRendererRosterEntry,
+	UiRoster, UiRosterConflict, UiShortcutRosterEntry, decode_ui_dispatch_result,
+	prompt_dispatch_arguments, shortcut_dispatch_succeeded,
+};
+pub use extensions::{
+	DEFAULT_EXTENSION_HOOK_TIMEOUT, ExtensionConvarError, PyComponent, PyDirector, PyExtensionError,
+	SealedHookRegistration, SealedRegistryEvidence, SealedRegistryEvidenceError,
+	register_extension_setting_convars, seal_registry_evidence,
 };
 pub use lifecycle::{
 	ActivateReason, ActivationCause, ActivationDisposition, ActivationEvent, ActivationTrigger,
 	AvailabilityBatch, AvailabilitySink, ControlLifecycleHost, DeclarationDrift, DeclarationSet,
 	ExtensionManifest, GenerationFence, HookDeclarationKey, LifecycleError, LifecycleHost,
-	LifecycleMachine, Principal, PrincipalAuthority, PrincipalMismatch, RegimeDeclarationTable,
-	RegimeManifestError, RegistryAvailabilitySink, RestartReason, ToolDeclarationKey,
-	validate_regime_manifests,
+	LifecycleMachine, Principal, PrincipalAuthority, PrincipalMismatch, RegistryAvailabilitySink,
+	RestartReason, ToolDeclarationKey, UiRegistrationError, VerifiedMarkdownTransformer,
+	VerifiedMessageRendererDeclaration, VerifiedRendererDeclaration, VerifiedUiRoster,
+	verify_ui_registration,
 };
+pub(crate) use lifecycle::{notify_extension_load, notify_extension_unload, notify_host_reconnect};
 pub use params::{
 	DIRECT_FILESYSTEM_CAPABILITY, DirectFilesystemAuthorityError, DirectFilesystemControlOwner,
 	DirectFilesystemEntry, DirectFilesystemExecutor, DirectFilesystemJournal,
@@ -51,8 +60,9 @@ pub use presentation::{
 	UiControlAuthority, UiControlOwner, UiControlRequest, UiControlResult,
 };
 pub use quota::{
-	ChargeOutcome, ControlQuotaLedger, FairControlQueue, QuotaBehavior, QuotaError, QuotaExceeded,
-	QuotaScope, QuotaSpec, QuotaStatus, ResourceReceipt,
+	ChargeOutcome, ControlQuotaLedger, ControlQuotaRuntime, FairControlQueue, QuotaBehavior,
+	QuotaError, QuotaExceeded, QuotaReceiptUpdate, QuotaScope, QuotaSpec, QuotaStatus,
+	ResourceReceipt, request_quota,
 };
 pub use services::{
 	PendingServiceCall, ServiceBroker, ServiceCallError, ServiceCallId, ServiceCancellation,
@@ -66,7 +76,6 @@ pub use spawn::{
 };
 
 pub use crate::worker::{
-	ControlHostStartError, ExtHostSupervisor, ExtensionRegimeResolver,
-	ExternalControlAuthorityBinding, ExternalDomainControlBinding, ExternalDomainControlFactories,
-	HostKey,
+	ControlHostStartError, ExtHostSupervisor, ExternalControlAuthorityBinding,
+	ExternalDomainControlBinding, ExternalDomainControlFactories, HostKey,
 };

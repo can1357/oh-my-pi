@@ -115,7 +115,7 @@ impl Default for RecallBounds {
 }
 
 impl RecallBounds {
-	fn normalized(self) -> Self {
+	pub(crate) fn normalized(self) -> Self {
 		Self {
 			limit:        self.limit.clamp(1, 50),
 			token_budget: self.token_budget.clamp(1, 32 * 1024),
@@ -165,19 +165,17 @@ impl<'a> RecallEngine<'a> {
 				false,
 				&mut voices,
 			)?;
-			if shared {
-				if let Some(fallback) = broadened.as_deref() {
-					let fallback_terms = query_terms(fallback);
-					self.collect_store(
-						store,
-						fallback,
-						&fallback_terms,
-						query_embedding,
-						bounds.voice_limit,
-						true,
-						&mut voices,
-					)?;
-				}
+			if shared && let Some(fallback) = broadened.as_deref() {
+				let fallback_terms = query_terms(fallback);
+				self.collect_store(
+					store,
+					fallback,
+					&fallback_terms,
+					query_embedding,
+					bounds.voice_limit,
+					true,
+					&mut voices,
+				)?;
 			}
 		}
 		Ok(fuse(voices, bounds))
@@ -201,7 +199,14 @@ impl<'a> RecallEngine<'a> {
 					.map(|candidate| VoiceCandidate::new(candidate, broadened)),
 			);
 		}
-		voices.entry(RecallVoice::Graph).or_default().extend(
+		let graph = voices.entry(RecallVoice::Graph).or_default();
+		graph.extend(
+			store
+				.search_facts(query, limit)?
+				.into_iter()
+				.map(|candidate| VoiceCandidate::new(candidate, broadened)),
+		);
+		graph.extend(
 			store
 				.graph_candidates(terms, limit)?
 				.into_iter()
@@ -260,7 +265,7 @@ fn vector_candidates(
 			.map(|(left, right)| f64::from(*left) * f64::from(*right))
 			.sum::<f64>();
 		if let Some(record) = store.get(stored.memory_id.as_str())? {
-			output.push(RankedCandidate { record, score: ((cosine + 1.0) * 0.5).clamp(0.0, 1.0) });
+			output.push(RankedCandidate { record, score: f64::midpoint(cosine, 1.0).clamp(0.0, 1.0) });
 		}
 	}
 	output.sort_by(|left, right| {
@@ -296,8 +301,11 @@ fn fuse(
 			.filter(|candidate| seen.insert(candidate.record.id.clone()))
 			.enumerate()
 		{
-			let contribution =
-				voice.weight() / (RRF_K + (rank + 1) as f64) + voice.weight() * candidate.native * 0.01;
+			let contribution = f64::mul_add(
+				(voice.weight() * candidate.native),
+				0.01,
+				voice.weight() / (RRF_K + (rank + 1) as f64),
+			);
 			let result = fused
 				.entry(candidate.record.id.clone())
 				.or_insert_with(|| RecallResult {
@@ -309,7 +317,7 @@ fn fuse(
 			result.score += contribution;
 			result.voice_scores.add(voice, contribution);
 			result.broadened &= candidate.broadened;
-			if candidate.native > native_proxy(result) {
+			if prefer_record(&candidate.record, &result.memory) {
 				result.memory = candidate.record.clone();
 			}
 		}
@@ -357,12 +365,11 @@ fn fuse(
 	selected
 }
 
-fn native_proxy(result: &RecallResult) -> f64 {
-	(result.voice_scores.vector
-		+ result.voice_scores.graph
-		+ result.voice_scores.episodic
-		+ result.voice_scores.working)
-		.min(1.0)
+fn prefer_record(left: &MemoryRecord, right: &MemoryRecord) -> bool {
+	left.importance > right.importance
+		|| (left.importance == right.importance
+			&& (left.timestamp > right.timestamp
+				|| (left.timestamp == right.timestamp && left.bank < right.bank)))
 }
 
 fn prefer(left: &RecallResult, right: &RecallResult) -> bool {

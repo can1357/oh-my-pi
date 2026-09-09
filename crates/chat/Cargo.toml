@@ -1,0 +1,52 @@
+[package]
+name = "omp-chat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Projection-only interactive chat actor for the OMP session DOM"
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes.workspace = true
+flume.workspace = true
+image.workspace = true
+jiff.workspace = true
+notify.workspace = true
+omp-agent.workspace = true
+omp-con.workspace = true
+omp-core.workspace = true
+omp-dom.workspace = true
+omp-ai.workspace = true
+omp-journal.workspace = true
+omp-proto.workspace = true
+omp-session.workspace = true
+omp-tui.workspace = true
+omp-tool.workspace = true
+omp-tools.workspace = true
+omp-audio.workspace = true
+omp-vcs.workspace = true
+omp-walker.workspace = true
+parking_lot.workspace = true
+regex.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smallvec.workspace = true
+strum.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+xutf.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

@@ -1,49 +1,25 @@
 #![recursion_limit = "256"]
 
-//! Headless coding-agent harness: session composition, execution modes,
-//! orchestration, discovery, and settings for OMP.
+//! Journal-first production composition for OMP application modes.
 
-pub mod advisor;
 pub mod auth_backend;
 pub mod auth_flow;
-pub mod autolearn;
-pub mod autoresearch;
 pub mod bridges;
-pub mod chat;
+pub mod cfg;
 pub mod cleanse;
-pub mod codex_redemption;
 pub mod collab;
+pub mod commit;
 pub mod compress;
 pub mod discovery;
-pub mod export;
-pub mod goal;
+pub mod ext_updates;
 pub mod headless;
-pub mod hub;
-pub mod memory;
-pub mod model_controls;
-pub mod modes;
-pub mod plan;
-pub mod power;
-pub mod prompt_head;
 pub mod prompt_input;
-pub mod prompt_prep;
 pub mod prompt_templates;
 pub mod registry;
-pub mod rulebook;
 pub mod rules;
 pub mod secrets;
-pub mod security_review;
-pub mod session_search;
-pub mod session_state;
-pub mod session_title;
+pub mod sessions;
 pub mod settings;
 pub mod share;
-pub mod skills;
-pub mod stats_api;
-pub mod stats_dashboard;
-pub mod stats_server;
 pub mod subagent;
-pub mod task;
 pub mod telemetry_upload;
-pub mod vibe;
-pub mod workspace_roots;

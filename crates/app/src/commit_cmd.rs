@@ -1,52 +1,92 @@
-//! Agentic commit command over the production durable headless loop.
+//! Conventional commit command over the shared driver generation service.
 
-use omp_core::Str;
+use std::{env, fs};
 
-use crate::{
-	cli::{ChatArgs, CommitCliArgs, PrintArgs},
-	print_mode,
+use miette::{IntoDiagnostic as _, miette};
+use omp_driver::commit::{CommitGenerator, CommitRequest};
+use omp_envd::vcs::git::{
+	diff::{DiffOptions, GitDiff},
+	mutation::{CommitOptions, GitMutation, GitMutationConsumer, PushOptions},
+	query::GitQuery,
+	repo,
 };
+use tokio::io::{AsyncWriteExt as _, stdout};
+use tokio_util::sync::CancellationToken;
 
-/// Runs the canonical agentic commit workflow with explicit mutation approval.
+use crate::cli::CommitCliArgs;
+
+/// Generates one conventional message from the index, then commits it when not
+/// running in preview mode.
 pub(crate) async fn run(args: CommitCliArgs) -> miette::Result<()> {
-	let mut launch = ChatArgs::default_interactive();
-	launch.model = args.model;
-	launch.yolo = !args.dry_run;
-	launch.no_title = true;
-	let mut request = String::from(
-		"Inspect the complete Git worktree and produce one coherent conventional commit. Stage only \
-		 intentional changes. ",
-	);
-	if args.dry_run {
-		request.push_str(
-			"Dry run: do not mutate files, the index, refs, or remotes; print the proposed commit \
-			 and changelog edits. ",
-		);
+	let cwd = fs::canonicalize(env::current_dir().into_diagnostic()?).into_diagnostic()?;
+	let repository = repo::discover(&cwd)
+		.await
+		.into_diagnostic()?
+		.ok_or_else(|| miette!("not a git repository"))?;
+	let cwd = repository.worktree_root.clone();
+	let cancel = CancellationToken::new();
+	let diff = GitDiff::new();
+	let mutation = GitMutation::new(repository, GitMutationConsumer::InteractiveGit);
+	let mut staged = diff
+		.raw(&cwd, DiffOptions { cached: true, ..Default::default() }, &[], &cancel)
+		.await
+		.into_diagnostic()?;
+	if staged.is_empty() {
+		if args.dry_run {
+			return Err(miette!("no staged changes to analyze"));
+		}
+		mutation.stage_all(&cancel).await.into_diagnostic()?;
+		staged = diff
+			.raw(&cwd, DiffOptions { cached: true, ..Default::default() }, &[], &cancel)
+			.await
+			.into_diagnostic()?;
+	}
+	if staged.is_empty() {
+		return Err(miette!("no staged changes to analyze"));
+	}
+	let staged = String::from_utf8_lossy(&staged);
+	let recent_subjects = GitQuery::new()
+		.log_subjects(&cwd, 10, &cancel)
+		.await
+		.unwrap_or_default();
+	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
+	let generator = CommitGenerator::production(&data_dir, &cwd, args.model.as_deref())
+		.await
+		.into_diagnostic()?;
+	let generated = generator
+		.generate(CommitRequest {
+			staged_diff:     staged.as_ref(),
+			recent_subjects: &recent_subjects,
+			amend_base:      None,
+		})
+		.await
+		.into_diagnostic()?;
+	let message = if generated.body.is_empty() {
+		generated.summary.to_string()
 	} else {
-		request.push_str("Update applicable changelogs, then create exactly one commit. ");
+		format!("{}\n\n{}", generated.summary, generated.body)
+	};
+
+	if args.dry_run {
+		let mut output = stdout();
+		output
+			.write_all(message.as_bytes())
+			.await
+			.into_diagnostic()?;
+		output.write_all(b"\n").await.into_diagnostic()?;
+		output.flush().await.into_diagnostic()?;
+		return Ok(());
 	}
-	if args.no_changelog {
-		request.push_str("Do not edit changelog files. ");
-	}
-	if args.legacy {
-		request.push_str(
-			"Use the conservative deterministic legacy classification and formatting policy. ",
-		);
-	}
+
+	mutation
+		.create_commit(message.as_bytes(), CommitOptions::default(), &cancel)
+		.await
+		.into_diagnostic()?;
 	if args.push {
-		request.push_str("After the commit succeeds, push the current branch. ");
+		mutation
+			.push("origin", &["HEAD"], PushOptions::default(), &cancel)
+			.await
+			.into_diagnostic()?;
 	}
-	if let Some(context) = args.context {
-		request.push_str("Additional operator context: ");
-		request.push_str(&context);
-	}
-	launch.prompt = vec![Str::from(request)];
-	print_mode::run(PrintArgs {
-		launch,
-		mode: "text".into(),
-		print_thoughts: false,
-		follow_ups: Vec::new(),
-		shape_transcript: false,
-	})
-	.await
+	Ok(())
 }

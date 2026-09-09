@@ -300,7 +300,7 @@
           },
           "legacy": {
             "includeThoughts": true,
-            "thinkingLevel": "THINKING_LEVEL_UNSPECIFIED"
+            "thinkingLevel": "HIGH"
           }
         },
         {

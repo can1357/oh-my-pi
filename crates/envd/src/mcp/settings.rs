@@ -1,11 +1,21 @@
 //! Typed settings owned by the Environment MCP runtime.
 
-use omp_settings::{
-	DomainRegistration, FieldDescriptor, SettingKind, SettingScope, SettingsDomain,
-};
+use omp_con::Ctx;
 use serde::{Deserialize, Serialize};
 
-const PERSISTED: &[SettingScope] = &[SettingScope::Global, SettingScope::Project];
+omp_con::var! {
+	/// Load .mcp.json/mcp.json from project root.
+	pub static SV_MCP_ENABLE_PROJECT_CONFIG = sv_mcp_enable_project_config: bool {
+		default: true,
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Discovery & MCP",
+			"ui.label": "MCP Project Config",
+			"legacy.path": "mcp.enableProjectConfig",
+		},
+	};
+}
 
 /// Native MCP discovery policy.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -21,47 +31,20 @@ impl Default for McpSettings {
 	}
 }
 
-impl SettingsDomain for McpSettings {
-	const DOMAIN: &'static str = "mcp";
-	const FIELDS: &'static [FieldDescriptor] = &[FieldDescriptor {
-		path:        "mcp.enableProjectConfig",
-		label:       "Project MCP configuration",
-		description: "Load native project MCP server configuration.",
-		kind:        SettingKind::Boolean,
-		scopes:      PERSISTED,
-		order:       10,
-		options:     None,
-		condition:   None,
-		secret:      false,
-	}];
-
-	fn validate(&self) -> Result<(), omp_settings::ValidationError> {
-		Ok(())
+impl McpSettings {
+	/// Resolves MCP discovery policy from the process control context.
+	#[must_use]
+	pub fn from_con(ctx: &Ctx) -> Self {
+		Self { enable_project_config: SV_MCP_ENABLE_PROJECT_CONFIG.get(ctx) }
 	}
 }
 
-omp_settings::inventory::submit! { DomainRegistration::of::<McpSettings>() }
-
 #[cfg(test)]
 mod tests {
-	use omp_settings::SettingsSnapshot;
-
 	use super::*;
 
 	#[test]
-	fn projection_defaults_enabled_and_registration_is_linked() {
-		let snapshot = SettingsSnapshot::isolated(McpSettings::default()).expect("snapshot");
-		assert!(
-			snapshot
-				.project::<McpSettings>()
-				.expect("projection")
-				.get()
-				.enable_project_config
-		);
-		assert!(
-			omp_settings::registered_domains()
-				.iter()
-				.any(|registration| registration.name == McpSettings::DOMAIN)
-		);
+	fn con_defaults_enabled() {
+		assert!(McpSettings::from_con(&Ctx::new()).enable_project_config);
 	}
 }

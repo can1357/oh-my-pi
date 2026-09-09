@@ -11,7 +11,7 @@ class "mistral" {
 			thinking-mode "budget"
 		}
 	}
-	on "kilo" "mistral" "nanogpt" "nvidia" "scaleway" "venice" "vercel-ai-gateway" {
+	on "kilo" "mistral" "nanogpt" "nvidia" "venice" "vercel-ai-gateway" {
 		family "mistral" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 		}

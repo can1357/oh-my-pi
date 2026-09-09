@@ -5,6 +5,7 @@
 
 mod authorization;
 mod callback;
+mod device;
 mod discovery;
 mod http;
 mod metadata;
@@ -18,6 +19,10 @@ pub use authorization::{
 };
 pub use callback::{
 	CallbackBindError, CallbackError, CallbackGrant, LoopbackCallback, validate_redirect_pair,
+};
+pub use device::{
+	DeviceAuthorizationError, DeviceAuthorizationRequest, PendingDeviceAuthorization,
+	begin_device_authorization, poll_device_token,
 };
 pub use discovery::{
 	AuthChallenge, ChallengeKind, discover_auth_challenge, discover_auth_challenge_with_base,

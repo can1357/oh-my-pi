@@ -1,4 +1,4 @@
-//! Device catalog rendering and the `xd` CLI transport support.
+//! Device catalog rendering and the `dyn` CLI transport support.
 
 use std::{
 	collections::BTreeMap,
@@ -28,19 +28,27 @@ pub const EXTERNAL_SUMMARY_CAP: usize = 200;
 /// Stable model-facing guidance for the live dynamic-device transport.
 pub const PROMPT_GUIDANCE: &str =
 	"\
-Dynamic devices are invoked through the `xd` builtin inside the shell tool. Run `xd` to list the \
-	 live device catalog (`xd --q <text>` searches it), `xd <device> --help` for exact usage and \
-	 schema, and `xd <device> [args…]` to invoke one (`xd <device> --json '<payload>'` passes raw \
-	 JSON arguments). Retry an empty or narrow search with different terms; absent devices are \
+Dynamic devices are invoked through the `dyn` builtin inside the shell tool. Run `dyn` to list the \
+	 live device catalog (`dyn --q <text>` searches it), `dyn <device> --help` for exact usage and \
+	 schema, and `dyn <device> [args…]` to invoke one. Usage is derived from each device's schema: \
+	 required string/number/enum properties are positionals in declaration order, every property \
+	 has a `--flag` (`--no-flag` for booleans, repeated for arrays, dotted for nested keys), `dyn \
+	 <device> --json '<payload>'` passes raw JSON arguments, and `@FILE` or `-` (stdin) supply \
+	 either a JSON object or literal text for the next positional. Image results arrive as \
+	 attachments. Retry an empty or narrow search with different terms; absent devices are \
 	 unavailable and MUST NOT be advertised or guessed.";
 
-/// Conditional model-facing guidance for the mounted AutoQA recorder.
+/// Conditional model-facing guidance for the mounted `AutoQA` recorder.
 pub const AUTO_QA_PROMPT_GUIDANCE: &str =
 	"\
 Automated QA reporting is available through the live `report_issue` device. When a tool or device \
-	 result contradicts its documented behavior for the supplied parameters, run `xd report_issue \
-	 \"<session-id>\" \"<device>\" --rev \"<revision>\" --verdict '<JSON verdict>'` in the shell. \
-	 False positives are acceptable.";
+	 result contradicts its documented behavior for the supplied parameters, run `dyn report_issue \
+	 <session-id> <device> <rev> --verdict '<JSON verdict>'` in the shell, using the current exact \
+	 session id and the reported call's canonical device revision. The verdict requires a one-line \
+	 `summary`; it may include `expected`, `observed`, bounded `evidence`, and at most one \
+	 structured `outcome` or `fault`. False positives are acceptable and should be reported rather \
+	 than suppressed. Filing persists a redacted local-only record; external delivery requires a \
+	 separate explicit user consent action.";
 
 /// How much dynamic-device documentation is inlined into a prompt.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -98,12 +106,12 @@ pub fn flatten_slots(
 	Ok(slots)
 }
 
-/// Whether the `xd` builtin is present under `policy`.
-pub const fn xd_enabled(policy: ToolsPolicy) -> bool {
+/// Whether the `dyn` builtin is present under `policy`.
+pub const fn dyn_enabled(policy: ToolsPolicy) -> bool {
 	!matches!(policy, ToolsPolicy::ToolOnly)
 }
 
-/// Late-bound immutable registry access for the envd-owned `xd` host.
+/// Late-bound immutable registry access for the envd-owned `dyn` host.
 ///
 /// The registry is frozen in an [`Arc`] and installed exactly once. The catalog
 /// retains only a weak reference, so registry assembly creates no ownership
@@ -355,6 +363,7 @@ const DEVICE_TAGS: &[&str] = &[
 	"builtin",
 	"external",
 	"native",
+	"remote",
 	"worker",
 ];
 
@@ -389,8 +398,9 @@ fn has_tag(device: &MountedDevice<'_>, tag: &str) -> bool {
 			.is_some_and(|effects| !effects.is_empty()),
 		"subagent" => device.effects.subagents != 0,
 		"builtin" => is_builtin(device),
-		"external" => !is_builtin(device),
+		"external" => matches!(device.route, ToolRoute::Remote) || !is_builtin(device),
 		"native" => matches!(device.route, ToolRoute::Native),
+		"remote" => matches!(device.route, ToolRoute::Remote),
 		"worker" => matches!(device.route, ToolRoute::Worker { .. }),
 		_ => false,
 	}
@@ -533,12 +543,12 @@ const fn glob_matches(pattern: &str, value: &str) -> bool {
 #[cfg(test)]
 mod tests {
 	use omp_core::{Str, sf};
-	use omp_tool::{Effects, MountedDevice, Rev, ToolRoute, ToolsPolicy};
+	use omp_tool::{Effects, MountedDevice, Precedence, Rev, ToolRoute, ToolsPolicy};
 
 	use super::{
 		AUTO_QA_PROMPT_GUIDANCE, CatalogQuery, DOCS_TOTAL_BUDGET, DocsMode, EXTERNAL_SUMMARY_CAP,
-		PER_DEVICE_DOCS_CAP, PROMPT_GUIDANCE, flatten_slots, render_catalog, render_catalog_query,
-		render_near_miss, render_prompt_docs, xd_enabled,
+		PER_DEVICE_DOCS_CAP, PROMPT_GUIDANCE, dyn_enabled, flatten_slots, render_catalog,
+		render_catalog_query, render_near_miss, render_prompt_docs,
 	};
 
 	fn mounted<'a>(
@@ -554,22 +564,35 @@ mod tests {
 			name,
 			rev,
 			claimant,
+			precedence: Precedence::DEFAULT,
 			summary,
 			schema: br#"{"type":"object"}"#,
 			effects,
 			docs,
 			route,
+			metadata: None,
 		}
 	}
 
 	#[test]
-	fn prompt_guidance_names_xd_help_without_inventing_urls() {
-		assert!(PROMPT_GUIDANCE.contains("`xd`"));
+	fn prompt_guidance_names_dyn_help_without_inventing_urls() {
+		assert!(PROMPT_GUIDANCE.contains("`dyn`"));
 		assert!(PROMPT_GUIDANCE.contains("--help"));
+		assert!(PROMPT_GUIDANCE.contains("positionals"));
 		assert!(AUTO_QA_PROMPT_GUIDANCE.contains("report_issue"));
+		// The AutoQA command is schema-shaped: report_issue@1 requires
+		// `session_id`, `device`, `rev` (positionals, in that order) and the
+		// `verdict` object, which is never positional.
+		assert!(
+			AUTO_QA_PROMPT_GUIDANCE
+				.contains("`dyn report_issue <session-id> <device> <rev> --verdict '<JSON verdict>'`")
+		);
+		assert!(!AUTO_QA_PROMPT_GUIDANCE.contains("--rev"));
+		assert!(AUTO_QA_PROMPT_GUIDANCE.contains("False positives are acceptable"));
+		assert!(AUTO_QA_PROMPT_GUIDANCE.contains("external delivery requires"));
 		for guidance in [PROMPT_GUIDANCE, AUTO_QA_PROMPT_GUIDANCE] {
-			assert!(!guidance.contains("xd://"));
-			assert!(!guidance.contains("xd:"));
+			assert!(!guidance.contains("dyn://"));
+			assert!(!guidance.contains("dyn:"));
 		}
 	}
 
@@ -699,7 +722,7 @@ mod tests {
 	}
 
 	#[test]
-	fn tool_only_flattening_refuses_collisions_and_xd() {
+	fn tool_only_flattening_refuses_collisions_and_dyn() {
 		let collision = flatten_slots([
 			("jira/create".into(), "acme/jira".into()),
 			("jira_create".into(), "other/tools".into()),
@@ -708,7 +731,7 @@ mod tests {
 		assert_eq!(collision.slot, "jira_create");
 		assert_eq!(collision.existing_owner, "acme/jira");
 		assert_eq!(collision.conflicting_owner, "other/tools");
-		assert!(xd_enabled(ToolsPolicy::Auto));
-		assert!(!xd_enabled(ToolsPolicy::ToolOnly));
+		assert!(dyn_enabled(ToolsPolicy::Auto));
+		assert!(!dyn_enabled(ToolsPolicy::ToolOnly));
 	}
 }

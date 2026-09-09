@@ -24,6 +24,12 @@ impl GatewayRpc {
 impl ForwardProxy for GatewayRpc {
 	type ForwardStream = <InferenceRpc as Inference>::NativeStream;
 
+	#[tracing::instrument(
+		name = "gateway_request",
+		level = "debug",
+		skip_all,
+		fields(method = "gateway.forward")
+	)]
 	async fn forward(
 		&self,
 		request: Request<ForwardRequest>,

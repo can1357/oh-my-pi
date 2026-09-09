@@ -49,8 +49,26 @@ impl BridgeHost for PreludeHost {
 		self.calls.lock().push((name.to_owned(), args.clone()));
 		match name {
 			"echo" => Ok(args),
-			"read" => {
-				Ok(Value::String(format!("delegated:{}", args["path"].as_str().unwrap_or_default())))
+			"read" => match args["path"].as_str().unwrap_or_default() {
+				"agent://alpha:raw" => Ok(Value::String(
+					r#"{"id":"alpha","status":"completed","output":"one\ntwo\nthree\n"}"#.to_owned(),
+				)),
+				"agent://data:raw" => Ok(Value::String(
+					r#"{"id":"data","status":"completed","output":{"endpoints":[{"file":"src/a.rs"}]}}"#
+						.to_owned(),
+				)),
+				"agent://ansi:raw" => Ok(Value::String(
+					r#"{"id":"ansi","status":"completed","output":"\u001b[31mred\u001b[0m"}"#.to_owned(),
+				)),
+				"artifact://sha256/\
+				 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:raw" => {
+					Ok(Value::String("durable artifact".to_owned()))
+				},
+				"artifact://sha256/\
+				 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:2-2" => {
+					Ok(Value::String("artifact line two".to_owned()))
+				},
+				path => Ok(Value::String(format!("delegated:{path}"))),
 			},
 			"fail" => Err(BridgeHostError::message("host exploded")),
 			"updates" => Ok(json!({
@@ -68,6 +86,14 @@ impl BridgeHost for PreludeHost {
 				"text": "child output",
 				"details": { "id": "child-1", "agent": "task", "isolated": true }
 			})),
+			"__workpool__" => match args["op"].as_str() {
+				Some("create") => Ok(json!({ "name": "audit", "agent": "task", "limit": 2 })),
+				Some("push") => Ok(json!({ "ids": ["audit#1", "audit#2"] })),
+				Some("status") => Ok(json!({ "name": "audit", "closed": false })),
+				Some("peek") => Ok(json!({ "batches": [], "pending": 2 })),
+				Some("close") => Ok(json!({ "dropped": ["audit#2"] })),
+				_ => Err(BridgeHostError::message("unexpected workpool operation")),
+			},
 			"__concurrency__" => {
 				Ok(json!({ "limit": self.concurrency_limit.load(Ordering::Acquire) }))
 			},
@@ -90,14 +116,8 @@ fn run(py: Python<'_>, globals: &Bound<'_, PyDict>, source: String) -> PyResult<
 #[test]
 fn complete_prelude_persists_and_bridges_host_helpers() {
 	let root = tempdir().expect("temp root");
-	let artifacts = root.path().join("artifacts");
 	let local = root.path().join("local");
-	fs::create_dir_all(&artifacts).expect("artifacts directory");
 	fs::create_dir_all(&local).expect("local directory");
-	fs::write(artifacts.join("alpha.md"), "one\ntwo\nthree\n").expect("raw output fixture");
-	fs::write(artifacts.join("data.md"), r#"{"endpoints":[{"file":"src/a.rs"}]}"#)
-		.expect("json output fixture");
-	fs::write(artifacts.join("ansi.md"), "\u{1b}[31mred\u{1b}[0m").expect("ansi fixture");
 
 	let runtime = Runtime::new().expect("test runtime");
 	let dispatcher = BridgeDispatcher::new();
@@ -109,6 +129,7 @@ fn complete_prelude_persists_and_bridges_host_helpers() {
 			BridgeCapabilities::new([sf!("echo"), sf!("read"), sf!("updates"), sf!("fail")])
 				.with_completion()
 				.with_agent()
+				.with_workpool()
 				.with_concurrency()
 				.with_budget(),
 			host.clone(),
@@ -131,13 +152,13 @@ def __omp_timeout_resume__():
 		install_python_bridge(py, &globals, registration.client(), runtime.handle().clone())?;
 		install_python_prelude(py, &globals)?;
 		let setup = format!(
-			"OMP_ARTIFACTS_DIR = {artifacts}\nOMP_EVAL_LOCAL_ROOTS = json.dumps({{'local': {local}}})\n",
-			artifacts = serde_json::to_string(&artifacts.to_string_lossy()).unwrap(),
+			"OMP_EVAL_LOCAL_ROOTS = json.dumps({{'local': {local}}})\n",
 			local = serde_json::to_string(&local.to_string_lossy()).unwrap(),
 		);
 		run(py, &globals, setup)?;
 		run(py, &globals, r#"
 import contextlib, io
+assert "__workpool__" in __omp_bridge_capabilities__
 
 # display + ordinary print output
 display({"answer": 42})
@@ -162,6 +183,8 @@ assert _alpha["content"] == "two" and _alpha["range"] == {"start_line": 2, "end_
 assert output("ansi", format="stripped") == "red"
 assert output("data", query=".endpoints[0].file") == '"src/a.rs"'
 assert output("alpha", "data")[0] == {"id": "alpha", "content": "one\ntwo\nthree\n"}
+assert output("artifact://sha256/" + "a" * 64) == "durable artifact"
+assert output("artifact://sha256/" + "a" * 64, offset=2, limit=1) == "artifact line two"
 try:
     output("alpha", query=".x", offset=1)
 except ValueError as error:
@@ -193,6 +216,46 @@ assert _child == {
     "id": "child-1", "agent": "task", "isolated": True,
 }
 assert agent("structured", outputSchema={"type": "object"}) == {"answer": 42}
+
+@tool(rev=3)
+def remember(key: str, value: int = 1):
+    """Retain a structured key/value pair."""
+    return {"key": key, "value": value}
+
+assert tool.defined() == ["remember"]
+_roster = __omp_eval_tool_request__({"op": "describe", "names": ["remember"]})
+assert _roster["ok"] is True and _roster["missing"] == []
+_registration = _roster["tools"][0]
+assert _registration["rev"] == 3
+assert _registration["parameters"]["required"] == ["key"]
+assert __omp_eval_tool_request__({
+    "op": "call",
+    "name": "remember",
+    "rev": _registration["rev"],
+    "handler": _registration["handler"],
+    "generation": _registration["generation"],
+    "args": {"key": "alpha", "value": 7},
+}) == {"ok": True, "value": {"key": "alpha", "value": 7}}
+_pool = workpool("task", name="audit", context="shared", tools=["remember"])
+assert repr(_pool) == "<workpool audit (task) 2 agents>"
+
+@tool(name="remember", rev=4)
+def remember_replacement(key: str):
+    return {"replacement": key}
+
+_stale = __omp_eval_tool_request__({
+    "op": "call",
+    "name": "remember",
+    "rev": _registration["rev"],
+    "handler": _registration["handler"],
+    "generation": _registration["generation"],
+    "args": {"key": "alpha"},
+})
+assert _stale["ok"] is False and "stale" in _stale["error"]
+assert _pool.push("left", "right") == ["audit#1", "audit#2"]
+assert _pool.status() == {"name": "audit", "closed": False}
+assert _pool.peek() == {"batches": [], "pending": 2}
+assert _pool.close() == {"dropped": ["audit#2"]}
 assert parallel([lambda: 1, lambda: 2]) == [1, 2]
 assert pipeline([1, 2], lambda n: n + 1, lambda n: n * 2) == [4, 6]
 log("working")
@@ -254,7 +317,45 @@ def _observed_parallel_width(item_count):
 		name == "__agent__" && args["name"] == "Worker" && args["effort"] == "high"
 	}));
 	assert!(calls.iter().any(|(name, _)| name == "__completion__"));
+	assert!(calls.iter().any(|(name, args)| {
+		name == "__workpool__"
+			&& args["op"] == "create"
+			&& args["tools"] == json!(["remember"])
+			&& args["tool_registrations"][0]["name"] == "remember"
+			&& args["tool_registrations"][0]["rev"] == 3
+			&& args["tool_registrations"][0]["handler"]
+				.as_str()
+				.is_some_and(|handler| handler.len() == 32)
+	}));
 	drop(calls);
+}
+
+#[test]
+fn workpool_helper_is_absent_without_an_authenticated_parent_capability() {
+	let runtime = Runtime::new().expect("test runtime");
+	let dispatcher = BridgeDispatcher::new();
+	let registration = dispatcher
+		.register(
+			sf!("session-without-parent"),
+			sf!("run-without-parent"),
+			BridgeCapabilities::new([]),
+			Arc::new(PreludeHost::default()),
+			TimeoutHandle::new(None),
+		)
+		.expect("bridge registration");
+
+	python()
+		.attach(|py| -> PyResult<()> {
+			let globals = PyDict::new(py);
+			globals.set_item("__builtins__", PyModule::import(py, "builtins")?)?;
+			globals.set_item("__omp_display", py.None())?;
+			install_python_bridge(py, &globals, registration.client(), runtime.handle().clone())?;
+			install_python_prelude(py, &globals)?;
+			assert!(!globals.contains("workpool")?);
+			assert!(!globals.contains("WorkPool")?);
+			Ok(())
+		})
+		.expect("prelude without workpool capability");
 }
 
 #[test]

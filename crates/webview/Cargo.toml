@@ -12,32 +12,40 @@ description = "Modular embedded-browser surfaces: system webview or the user's i
 workspace = true
 
 [dependencies]
-bytes = { workspace = true }
-flume = { workspace = true }
-futures = { workspace = true }
-omp-core = { workspace = true }
-parking_lot = { workspace = true }
-png = { workspace = true }
-raw-window-handle = { workspace = true }
-serde_json = { workspace = true }
-strum = { workspace = true }
-tempfile = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-tokio-tungstenite = { workspace = true }
-zune-jpeg = { workspace = true }
+bytes.workspace = true
+flume.workspace = true
+futures.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
+omp-core.workspace = true
+parking_lot.workspace = true
+png.workspace = true
+raw-window-handle.workspace = true
+rustls.workspace = true
+serde_json.workspace = true
+strum.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tokio-tungstenite.workspace = true
+url.workspace = true
+zune-jpeg.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-block2 = { workspace = true }
-dispatch2 = { workspace = true }
-objc2 = { workspace = true }
-objc2-app-kit = { workspace = true }
-objc2-core-foundation = { workspace = true }
-objc2-core-media = { workspace = true }
-objc2-core-video = { workspace = true }
-objc2-foundation = { workspace = true }
-objc2-screen-capture-kit = { workspace = true }
-objc2-web-kit = { workspace = true }
+block2.workspace = true
+dispatch2.workspace = true
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-core-foundation.workspace = true
+objc2-core-media.workspace = true
+objc2-core-video.workspace = true
+objc2-foundation.workspace = true
+objc2-screen-capture-kit.workspace = true
+objc2-web-kit.workspace = true
 
 [dev-dependencies]
-winit = { workspace = true }
+winit.workspace = true

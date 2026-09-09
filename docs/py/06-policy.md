@@ -286,20 +286,20 @@ because getting them wrong is a privilege-escalation bug, not a style problem.
 
 **One event, one gate, one tagged target.** `tool_call` fires exactly once per logical
 dispatch, whether the dispatch is a core tool, a device invoked through the
-`xd` shell builtin, or an MCP endpoint.
+`dyn` shell builtin, or an MCP endpoint.
 `event.target` is `omp.CallTarget` — `omp.CoreTool | omp.DeviceCall | omp.McpCall`, defined in
 `docs/py/05-hooks.md` — and `event.kind` is the `omp.TargetKind` tag for cheap dispatch.
-An `xd shell_exec …` invocation (`docs/py/01-devices.md`) does **not** fire a gate on
+An `dyn shell_exec …` invocation (`docs/py/01-devices.md`) does **not** fire a gate on
 `CoreTool("shell")` followed by a device gate; it fires one `tool_call` with
 `kind is TargetKind.DEVICE` and the RESOLVED `target=DeviceCall(...)`. The builtin is transport,
 never the policy subject for a device dispatch — a guard on the resolved device cannot be
-bypassed by CLI spelling — while catalog and docs reads (`xd`, `xd --q <text>`,
-`xd <path> --help`) fire `tool_call` with `target=CoreTool("shell")`. A policy that gated the
+bypassed by CLI spelling — while catalog and docs reads (`dyn`, `dyn --q <text>`,
+`dyn <path> --help`) fire `tool_call` with `target=CoreTool("shell")`. A policy that gated the
 transport believing it had covered devices would be gating the invocation mechanism, not the
 capability. The one-gate rule binds the resolved target regardless of transport.
 
 **Args at the gate are always decoded.** `event.args` mirrors `event.target.args` and is the
-mapping `omp.Modify(args=…)` / `omp.Modify(patch=…)` writes. A policy never receives `xd` argv
+mapping `omp.Modify(args=…)` / `omp.Modify(patch=…)` writes. A policy never receives `dyn` argv
 or a raw `--json` payload it has to re-parse, and never has to know which transport a device call
 arrived through.
 
@@ -513,7 +513,7 @@ def touches(self, *patterns: str) -> tuple[PathRef, ...]: ...
 - `writes_outside(roots)` / `reads_outside(roots)` filter on `PathRef.resolved` (realpath-
   resolved env-side), so a symlink out of the workspace is caught. `roots` is
   `omp.Context.roots: tuple[WorkspaceUri, ...]` (`docs/py/14-deploy.md` owns the type) — omp
-  workspaces are multi-root (`workspace.additionalDirectories`, `/add-dir`), so a single root
+  workspaces are multi-root (`workspace.additionalDirectories`, `/dir add`), so a single root
   is not a containment boundary; a path is outside only when it is outside *every* root. A
   single `WorkspaceUri` is accepted for the one-root case. A `PathRef` whose
   `resolved` is `None` because it is `dynamic` is **always** included: unknown is outside.
@@ -1359,6 +1359,12 @@ def confirm_privileged(event: omp.ToolCallEvent, ctx: omp.Context) -> omp.HookDe
     ))
 ```
 
+Extension admission reuses this reserved ticket presentation for missing or stale install
+grants ([`14-deploy.md`](14-deploy.md) §3.9.5), but not the Python hook API: Core constructs
+that ticket from authenticated lock and grant facts before extension code starts. Its local
+dialog offers allow once, allow and remember, and deny; an extension cannot supply the
+specification, renderer, or decision.
+
 Four properties are consequences of Core ownership, not conventions:
 
 - **The ticket survives extension restarts.** It is Core state, journaled at filing. The
@@ -1620,7 +1626,7 @@ allow.
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `omp.POLICY_DEADLINE` | `Duration("30s")` | wall clock the admission phases get before core synthesises a `Deny`; matches pi's `runner.ts` `emitToolCall` timeout |
+| `omp.POLICY_DEADLINE` | `Duration("30s")` | wall clock the admission phases get before core synthesises a `Deny` |
 | `omp.APPROVAL_DEADLINE` | `Duration("5m")` | default `ApprovalSpec.timeout` |
 | `omp.VIOLATION_COALESCE` | `Duration("1s")` | window in which identical violations increment `count` instead of re-firing the hook |
 | `omp.BASH_IR_REV`, `omp.BASH_IR_MAX_SOURCE`, `omp.BASH_IR_MAX_NODES`, `omp.BASH_IR_MAX_DEPTH` | see above | IR limits |
@@ -2533,7 +2539,7 @@ is what makes a 30-minute Slack round trip legitimate rather than a leak.
 **Explicitly not satisfied:** the entire `security://` scan slice of `secrets-security.md`
 (`:58-200`) — `SecurityScan`, `SecurityStore`, preflight, SARIF import/export, the Codex
 Security cloud client, `security_publish`. That is a *tool*, not a policy: it belongs behind
-a `security` device exposed through the `xd` shell builtin (`docs/py/01-devices.md`), with its
+a `security` device exposed through the `dyn` shell builtin (`docs/py/01-devices.md`), with its
 store in the environment. Nothing in `omp.policy` should be read as covering it.
 
 **Conflicts, and how they resolve.** `.plan/feature-map/ROADMAP.md` marks thirteen approval
@@ -2782,6 +2788,6 @@ Changes this file made for Revision 2, and the review point that drove each:
   approval tickets) instead of flagging it. Both Rev 2 flags are kept in prose as
   historical records.
 
-**Revision 2.2** — the `xd` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `xd` builtin of the embedded shell, inside the core `shell` tool: `xd` lists the catalog (`xd --q <text>` searches), `xd <device> --help` returns docs plus schema-derived CLI usage, and `xd <device> [args…]` (or `xd <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `xd resolve "<reason>"` / `xd reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `xd` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
+**Revision 2.2** — the `dyn` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `dyn` builtin of the embedded shell, inside the core `shell` tool: `dyn` lists the catalog (`dyn --q <text>` searches), `dyn <device> --help` returns docs plus schema-derived CLI usage, and `dyn <device> [args…]` (or `dyn <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `dyn resolve "<reason>"` / `dyn reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `dyn` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
 
-In this file, the live admission semantics now resolve `xd` device invocations directly to one `DeviceCall` gate, expose only decoded nested arguments to policy, and gate catalog/docs reads as `CoreTool("shell")`.
+In this file, the live admission semantics now resolve `dyn` device invocations directly to one `DeviceCall` gate, expose only decoded nested arguments to policy, and gate catalog/docs reads as `CoreTool("shell")`.

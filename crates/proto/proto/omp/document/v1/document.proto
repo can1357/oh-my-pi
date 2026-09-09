@@ -943,6 +943,50 @@ message LspBindingEvent {
   DocumentRef document = 3;
 }
 
+// Workspace language-server roster query. Returns every discovered native
+// declaration matching the project root with its current lifecycle stage.
+message LspStatusRequest {
+  // Re-runs configuration discovery before answering, admitting new or
+  // changed declarations without restarting running servers.
+  bool reload = 1;
+  // Starts every matched declaration and waits for startup settlement so
+  // workspace-wide requests can address each ready binding.
+  bool start = 2;
+}
+
+enum LspServerStage {
+  LSP_SERVER_STAGE_UNSPECIFIED = 0;
+  // Declaration matched workspace markers and resolves to a runnable binary,
+  // but no process has started.
+  LSP_SERVER_STAGE_AVAILABLE = 1;
+  // Process spawn and initialize are in flight.
+  LSP_SERVER_STAGE_STARTING = 2;
+  // Initialized and installed; workspace readiness polling is in flight.
+  LSP_SERVER_STAGE_INDEXING = 3;
+  LSP_SERVER_STAGE_READY = 4;
+  // Spawn or initialize failed; `detail` carries the failure.
+  LSP_SERVER_STAGE_FAILED = 5;
+}
+
+message LspServerStatus {
+  string name = 1;
+  LspServerStage stage = 2;
+  // Accepted extensions or exact filenames from the resolved declaration.
+  repeated string file_types = 3;
+  // Failure detail populated when stage is FAILED.
+  string detail = 4;
+  // Winning configuration source description (bundled, project, user, ...).
+  string source = 5;
+  // Installed binding identity, present after successful startup.
+  bytes server_id = 6;
+  // Exact InitializeResult capabilities, present after successful startup.
+  bytes capabilities_json = 7;
+}
+
+message LspStatusResponse {
+  repeated LspServerStatus servers = 1;
+}
+
 enum DapCapability {
   DAP_CAPABILITY_UNSPECIFIED = 0;
   DAP_CAPABILITY_READ = 1;
@@ -975,6 +1019,7 @@ message DapSessionResponse {
   DapSessionRef session = 1;
   repeated DapCapability granted_capabilities = 2;
   bytes adapter_capabilities_json = 3;
+  string adapter = 4;
 }
 
 message DapActionRequest {
@@ -984,6 +1029,7 @@ message DapActionRequest {
   string command = 4;
   bytes arguments_json = 5;
   uint32 max_response_bytes = 6;
+  uint32 timeout_ms = 7;
 }
 
 message DapActionResponse {
@@ -1169,6 +1215,7 @@ message ClientFrame {
     DapLaunchRequest dap_launch = 25;
     DapAttachRequest dap_attach = 26;
     DapActionRequest dap_action = 27;
+    LspStatusRequest lsp_status = 28;
   }
 }
 
@@ -1219,5 +1266,6 @@ message ServerFrame {
     DapActionResponse dap_action = 30;
     DapOutput dap_output = 31;
     DapEvent dap_event = 32;
+    LspStatusResponse lsp_status = 33;
   }
 }

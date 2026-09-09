@@ -1,4 +1,4 @@
-//! `top` builtin, moved from `pi-shell`.
+//! `top` builtin.
 
 use std::{
 	collections::{HashMap, HashSet},
@@ -11,7 +11,7 @@ use std::{
 
 use clap::Parser;
 use omp_core::Str;
-use omp_shell_engine::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
+use omp_shell::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
 use tokio::time::sleep;
 
 use crate::proc_snapshot::{ProcInfo, sanitize_process_command};
@@ -202,19 +202,27 @@ fn normalize_top_flag(arg: String) -> String {
 }
 
 impl builtins::Command for TopCommand {
-	type Error = omp_shell_engine::Error;
+	type Error = omp_shell::Error;
 
 	fn new<I>(args: I) -> Result<Self, clap::Error>
 	where
 		I: IntoIterator<Item = String>,
 	{
-		Self::try_parse_from(args.into_iter().map(normalize_top_flag))
+		Self::try_parse_from(args.into_iter().map(normalize_top_flag)).inspect_err(|error| {
+			if error.use_stderr() {
+				tracing::warn!(
+					builtin = "top",
+					error_kind = ?error.kind(),
+					"builtin arguments rejected"
+				);
+			}
+		})
 	}
 
-	fn execute<SE: omp_shell_engine::ShellExtensions>(
+	fn execute<SE: omp_shell::ShellExtensions>(
 		&self,
 		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = result::Result<ExecutionResult, omp_shell_engine::Error>> + Send {
+	) -> impl Future<Output = result::Result<ExecutionResult, omp_shell::Error>> + Send {
 		let iterations = self.iterations;
 		let delay = self.delay;
 		let row_limit = self.rows;
@@ -230,15 +238,18 @@ impl builtins::Command for TopCommand {
 		};
 		async move {
 			if !delay.is_finite() || delay < 0.0 || delay > Duration::MAX.as_secs_f64() {
+				tracing::warn!(builtin = "top", "builtin delay rejected");
 				writeln!(context.stderr(), "top: invalid delay '{delay}'")?;
 				return Ok(ExecutionResult::new(1));
 			}
 			if row_limit == Some(0) {
+				tracing::warn!(builtin = "top", "builtin row count rejected");
 				writeln!(context.stderr(), "top: row count must be greater than zero")?;
 				return Ok(ExecutionResult::new(1));
 			}
 			#[cfg(target_os = "windows")]
 			if user.is_some() {
+				tracing::warn!(builtin = "top", "builtin user filter unavailable");
 				writeln!(context.stderr(), "top: user filtering is unavailable on Windows")?;
 				return Ok(ExecutionResult::new(2));
 			}
@@ -262,7 +273,12 @@ impl builtins::Command for TopCommand {
 				next_previous.clear();
 				rows.clear();
 
-				for process in ProcInfo::all() {
+				for process in ProcInfo::all_filtered(|pid| {
+					context
+						.params
+						.process_scope()
+						.is_none_or(|scope| scope.may_observe(pid))
+				}) {
 					if !pid_filter.is_empty() && !pid_filter.contains(&process.pid()) {
 						continue;
 					}
@@ -325,6 +341,11 @@ impl builtins::Command for TopCommand {
 					if err.kind() == io::ErrorKind::BrokenPipe {
 						return Ok(ExecutionResult::success());
 					}
+					tracing::warn!(
+						builtin = "top",
+						error_kind = ?err.kind(),
+						"builtin output failed"
+					);
 					return Err(err.into());
 				}
 
@@ -612,7 +633,7 @@ mod tests {
 
 	#[test]
 	fn parses_macos_single_dash_long_options() {
-		use omp_shell_engine::builtins::Command as _;
+		use omp_shell::builtins::Command as _;
 		let cmd = TopCommand::new(
 			["top", "-pid", "56943,101", "-stats", "pid,cpu,th,mem,pstate"]
 				.into_iter()

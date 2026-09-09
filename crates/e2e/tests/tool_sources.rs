@@ -115,7 +115,7 @@ async fn production_env_reads_special_sources_and_shares_write_edit_snapshots() 
 		("read-image", "images/pixel.png"),
 		("read-profile", "profiles/run.cpuprofile"),
 	] {
-		let payload = invoke_ok(env.client(), id, "read", "1", json!({"path": path})).await?;
+		let payload = invoke_ok(env.client(), id, "read", "2", json!({"path": path})).await?;
 		assert!(payload.is_object(), "read payload for {path}: {payload}");
 	}
 
@@ -124,14 +124,14 @@ async fn production_env_reads_special_sources_and_shares_write_edit_snapshots() 
 		env.client(),
 		"write-create",
 		"write",
-		"1",
+		"2",
 		json!({"path":"roundtrip.txt", "content":initial}),
 	)
 	.await?;
 	assert_eq!(write["byte_len"].as_u64(), Some(initial.len() as u64));
 	assert_eq!(scratch.read("roundtrip.txt")?, initial.as_bytes());
 
-	let tag = omp_hashline::compute_snapshot_tag(initial.as_bytes());
+	let tag = omp_edit::store::file_hash(&initial);
 	let edit_input = format!("[roundtrip.txt#{tag}]\nPUT 2.=2:\n+gamma\n");
 	invoke_ok(env.client(), "edit-after-write", "edit", "hl.1", json!({"input":edit_input})).await?;
 	assert_eq!(scratch.read("roundtrip.txt")?, b"alpha\ngamma\n");
@@ -141,7 +141,7 @@ async fn production_env_reads_special_sources_and_shares_write_edit_snapshots() 
 		env.client(),
 		"write-overwrite",
 		"write",
-		"1",
+		"2",
 		json!({"path":"roundtrip.txt", "content":final_content}),
 	)
 	.await?;

@@ -1,12 +1,9 @@
-//! Regex workspace search with pi-compatible grouping and pagination.
+//! Regex workspace search with grouped output and pagination.
 
 use std::{
 	collections::{HashMap, HashSet},
-	error,
-	fmt::{self, Display, Write as _},
+	fmt::Write as _,
 	future,
-	future::Future,
-	mem,
 	sync::Arc,
 };
 
@@ -14,19 +11,23 @@ use async_stream::stream;
 use bytes::Bytes;
 use futures::{FutureExt, Stream, pin_mut, select_biased};
 use omp_core::{Str, sf};
-use omp_hashline::format_hashline_header;
+use omp_edit::modes::hashline::format::format_hashline_header;
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, BlobRef, CommitError, Constraint, DocEffects, Effects, Ev,
-	IncomingParams, InterruptWaitError, ParamError, Part, PromptCaps, Rev, Tool, ToolSpec,
-	ToolTerminal,
+	Abort, ArgIssue, ArgIssueKind, CommitError, Constraint, Diag, DiagKind, DocEffects, Effects, Ev,
+	IncomingParams, InterruptWaitError, ParamError, Part, ProjectionAuthorizationError,
+	ProjectionSpan, PromptCaps, PromptProjection, Rev, Tool, ToolSpec, ToolTerminal, Unit,
+	VisibilityReceipt,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
+use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::{
 	glob::{Fault as GlobFault, WalkRequest, WalkResult},
+	path::tracing_path_metadata,
 	read::{
-		ReadBlobs,
 		resolver::Scheme,
 		selector::{
 			LineRange, ParsedSelector, line_is_in_ranges, parse_selector, parse_uri,
@@ -36,7 +37,7 @@ use crate::{
 	render::{
 		TextProjection,
 		paths::{GroupedTreeEventKind, PathTreeInput, build_path_tree, walk_path_tree},
-		truncate::{DEFAULT_MAX_COLUMN, TruncationOptions, spill_truncated_text, truncate_head},
+		truncate::DEFAULT_MAX_COLUMN,
 	},
 };
 
@@ -178,15 +179,22 @@ pub struct SearchSnapshot {
 	pub bytes:      Bytes,
 }
 
-/// One snapshot whose exact model-visible source lines are ready to record.
+/// One staged snapshot identity carried in the durable grep payload.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SnapshotCandidate {
+	/// Stable canonical identity shared with matching rows.
+	pub source_key: Str,
+	/// Exact revision identity staged by the document authority.
+	pub revision:   Bytes,
+}
+
+/// One staged snapshot whose centrally receipted lines may be authorized.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SnapshotRecord {
 	/// Stable canonical identity shared with matching rows.
 	pub source_key: Str,
-	/// Exact revision identity for the retained bytes.
+	/// Exact staged revision identity.
 	pub revision:   Bytes,
-	/// Complete bytes used to compute the model-facing snapshot tag.
-	pub bytes:      Bytes,
 	/// One-based source lines retained by final output projection.
 	pub seen_lines: Vec<usize>,
 }
@@ -245,6 +253,9 @@ pub struct FileGroup {
 pub struct Payload {
 	/// Current page of grouped file matches.
 	pub files:                   Vec<FileGroup>,
+	/// Revision-pinned candidates staged without authorizing source lines.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub snapshots:               Vec<SnapshotCandidate>,
 	/// Number of distinct matching files observed before pagination.
 	pub total_files:             u64,
 	/// Whether the total is a lower bound because native grep stopped early.
@@ -257,18 +268,6 @@ pub struct Payload {
 	pub file_limit_reached:      bool,
 	/// Whether any hot file was clipped at its diversity cap.
 	pub per_file_limit_reached:  bool,
-	/// Ordered model-facing diagnostic notes.
-	pub notes:                   Vec<Str>,
-	/// Exact bounded model-facing text prepared before prompt projection.
-	pub projected_text:          Str,
-	/// Durable complete output when `projected_text` was pre-truncated.
-	pub output_blob:             Option<BlobRef>,
-	/// Resolver-valid address of `output_blob`.
-	pub output_artifact_uri:     Option<Str>,
-	/// Complete lines retained in `projected_text` before its footer.
-	pub output_shown_lines:      u64,
-	/// Complete line count in the pre-truncation output.
-	pub output_total_lines:      u64,
 }
 
 /// Ephemeral progress from `grep@1`; grep has no durable updates.
@@ -276,81 +275,75 @@ pub struct Payload {
 pub enum Update {}
 
 /// Durable typed `grep@1` failure.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Fault {
 	/// The expression was empty or whitespace-only.
+	#[error("Pattern must not be empty")]
 	EmptyPattern,
 	/// The requested file offset was negative or not finite.
+	#[error("Skip must be a non-negative number")]
 	InvalidSkip,
 	/// A path selector was invalid for grep.
+	#[error("{message}")]
 	InvalidSelector {
 		/// Exact model-facing diagnostic.
 		message: Str,
 	},
 	/// A URI target uses a backend that has not landed yet.
+	#[error("{message}")]
 	UnsupportedTarget {
 		/// Exact model-facing diagnostic.
 		message: Str,
 	},
 	/// Neither the Rust regex engine nor PCRE2 accepted the expression.
+	#[error("Invalid regex: {message}")]
 	InvalidRegex {
 		/// Parser detail without the `Invalid regex:` prefix.
 		message: Str,
 	},
 	/// The fixed 30-second native deadline elapsed.
+	#[error("Grep timed out after 30s; narrow paths or pattern, or scope with `glob` first")]
 	TimedOut,
 	/// Every submitted path was missing.
+	#[error(
+		"Path not found: {}; list each target in the semicolon-delimited `path`",
+		join_strs(.paths)
+	)]
 	AllPathsMissing {
 		/// Missing paths in caller order.
 		paths: Vec<Str>,
 	},
 	/// The workspace owner rejected or failed the request.
+	#[error("{message}")]
 	Workspace {
 		/// Stable resource-owned explanation.
 		message: Str,
 	},
-	/// Durable blob storage failed while preserving complete output.
-	Blob {
-		/// Stable blob-owned explanation.
-		message: Str,
-	},
 	/// The resource itself observed cancellation without an invocation
 	/// interrupt.
+	#[error("workspace search was cancelled: {reason}")]
 	Cancelled {
 		/// Stable resource-owned cancellation reason.
 		reason: Str,
 	},
 }
 
-impl Display for Fault {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::EmptyPattern => formatter.write_str("Pattern must not be empty"),
-			Self::InvalidSkip => formatter.write_str("Skip must be a non-negative number"),
-			Self::InvalidSelector { message }
-			| Self::UnsupportedTarget { message }
-			| Self::Workspace { message }
-			| Self::Blob { message } => formatter.write_str(message),
-			Self::InvalidRegex { message } => write!(formatter, "Invalid regex: {message}"),
-			Self::TimedOut => formatter.write_str(
-				"Grep timed out after 30s; narrow paths or pattern, or scope with `glob` first",
-			),
-			Self::AllPathsMissing { paths } => write!(
-				formatter,
-				"Path not found: {}; list each target in the semicolon-delimited `path`",
-				join_strs(paths)
-			),
-			Self::Cancelled { reason } => {
-				write!(formatter, "workspace search was cancelled: {reason}")
-			},
-		}
-	}
-}
-impl error::Error for Fault {}
-
 /// Zero-box workspace traversal boundary shared by `grep@1` and `glob@1`.
 pub trait WorkspaceSearch: Send + Sync + 'static {
+	/// Resolves the authored root list before search.
+	///
+	/// Environment owners use `unsplit` to preserve an existing literal path
+	/// containing semicolons. The default keeps the schema-level split for
+	/// host-free implementations.
+	fn prepare_roots(
+		&self,
+		roots: Vec<SearchRoot>,
+		_unsplit: Option<SearchRoot>,
+	) -> impl Future<Output = Result<Vec<SearchRoot>, Fault>> + Send + '_ {
+		future::ready(Ok(roots))
+	}
+
 	/// Execute a native regex search and return revision-pinned snapshot
 	/// candidates without authorizing any source lines.
 	fn search(
@@ -358,71 +351,76 @@ pub trait WorkspaceSearch: Send + Sync + 'static {
 		request: SearchRequest,
 	) -> impl Future<Output = Result<SearchResult, Fault>> + Send + '_;
 
-	/// Records only source lines retained by final grep filtering and output
-	/// truncation.
+	/// Stages exact snapshot bytes without authorizing any source line.
+	fn stage_snapshots(&self, snapshots: Vec<SearchSnapshot>) -> Result<(), Fault>;
+	/// Authorizes only source lines named by the central dispatcher's final
+	/// visibility receipt.
 	fn record_snapshots(&self, records: Vec<SnapshotRecord>) -> Result<(), Fault>;
 	/// Match paths in deterministic workspace traversal order.
 	fn glob(
 		&self,
 		request: WalkRequest,
+		cancellation: CancellationToken,
 	) -> impl Future<Output = Result<WalkResult, GlobFault>> + Send + '_;
 	/// Attempts a resolver-backed glob such as `ssh://`; `None` keeps ordinary
 	/// workspace dispatch or reports an unsupported scheme.
 	fn glob_resource(
 		&self,
 		_request: WalkRequest,
+		_cancellation: CancellationToken,
 	) -> impl Future<Output = Option<Result<WalkResult, GlobFault>>> + Send + '_ {
 		future::ready(None)
 	}
 }
 
-/// Generic `grep@1` executor over environment-owned workspace and blob
-/// resources.
-pub struct Grep<W, B> {
-	workspace: W,
-	blobs:     B,
-	spec:      ToolSpec,
+/// Generic `grep@1` executor over an environment-owned workspace resource.
+pub struct Grep<W> {
+	workspace:      W,
+	context_before: u32,
+	context_after:  u32,
+	spec:           ToolSpec,
 }
 
-/// Construct `grep@1` over `workspace` and the shared durable blob namespace.
-pub fn tool<W: WorkspaceSearch, B: ReadBlobs>(workspace: W, blobs: B) -> Grep<W, B> {
-	Grep {
-		workspace,
-		blobs,
-		spec: ToolSpec {
-			name:            sf!("grep"),
-			rev:             Rev { family: Str::new(""), n: 1 },
-			description:     sf!(
-				"Searches files/internal URLs: Rust regex, PCRE2 fallback.\n\n<instruction>\n- \
-				 `path`: known files, directories, globs, internal URLs; roots `;`-separated.\n- \
-				 Broad searches may time out → narrow scope or use `glob` first.\n- One-file line \
-				 selector: `src/foo.ts:50-100`; never selects search root.\n- Literal `\\n` or \
-				 `\\\\n` enables cross-line patterns.\n</instruction>\n\n<critical>\n- MUST use \
-				 instead of shell `grep`/`rg`.\n</critical>",
-			),
-			schema:          omp_tool::schema::<Params>(),
-			constraint:      Constraint::Schema {
-				priority:       100,
-				on_unsupported: omp_tool::Fallback::Unspecified,
-			},
-			effects:         Effects {
-				documents: Some(DocEffects { read: true, write_globs: Arc::default() }),
-				exec:      None,
-				inference: None,
-				desktop:   None,
-				subagents: 0,
-			},
-			projection_code: omp_tool::native_projection_code(
-				env!("CARGO_PKG_NAME"),
-				env!("CARGO_PKG_VERSION"),
-				include_bytes!("grep.rs"),
-			)
-			.into(),
+/// Returns the host-free `grep@1` specification.
+pub fn spec() -> ToolSpec {
+	ToolSpec {
+		name:            sf!("grep"),
+		rev:             Rev { family: Str::new(""), n: 1 },
+		description:     sf!(
+			"Searches files/internal URLs: Rust regex, PCRE2 fallback.\n\n<instruction>\n- `path`: \
+			 known files, directories, globs, internal URLs; roots `;`-separated.\n- Broad searches \
+			 may time out → narrow scope or use `glob` first.\n- One-file line selector: \
+			 `src/foo.ts:50-100`; never selects search root.\n- Literal `\\n` or `\\\\n` enables \
+			 cross-line patterns.\n</instruction>\n\n<critical>\n- MUST use instead of shell \
+			 `grep`/`rg`.\n</critical>",
+		),
+		schema:          omp_tool::schema::<Params>(),
+		constraint:      Constraint::Schema {
+			priority:       100,
+			on_unsupported: omp_tool::Fallback::Unspecified,
 		},
+		effects:         Effects {
+			documents: Some(DocEffects { read: true, write_globs: Arc::default() }),
+			exec:      None,
+			inference: None,
+			desktop:   None,
+			subagents: 0,
+		},
+		projection_code: omp_tool::native_projection_code(
+			env!("CARGO_PKG_NAME"),
+			env!("CARGO_PKG_VERSION"),
+			include_bytes!("grep.rs"),
+		)
+		.into(),
 	}
 }
 
-impl<W: WorkspaceSearch, B: ReadBlobs> Tool for Grep<W, B> {
+/// Construct `grep@1` over `workspace`.
+pub fn tool<W: WorkspaceSearch>(workspace: W, context_before: u32, context_after: u32) -> Grep<W> {
+	Grep { workspace, context_before, context_after, spec: spec() }
+}
+
+impl<W: WorkspaceSearch> Tool for Grep<W> {
 	type Fault = Fault;
 	type Params = Params;
 	type Payload = Payload;
@@ -436,6 +434,12 @@ impl<W: WorkspaceSearch, B: ReadBlobs> Tool for Grep<W, B> {
 		&'c self,
 		mut params: IncomingParams<'c>,
 	) -> impl Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
+		let span = tracing::debug_span!(
+			"grep_execution",
+			pattern_len = tracing::field::Empty,
+			multiline = tracing::field::Empty,
+			path = tracing::field::Empty,
+		);
 		stream! {
 			let arguments = match params.whole::<Params>().await {
 				Ok(arguments) => arguments,
@@ -456,6 +460,17 @@ impl<W: WorkspaceSearch, B: ReadBlobs> Tool for Grep<W, B> {
 				yield done(Err(Fault::EmptyPattern));
 				return;
 			}
+			span.record("pattern_len", arguments.pattern.len());
+			span.record(
+				"multiline",
+				arguments.pattern.contains('\n') || arguments.pattern.contains("\\n"),
+			);
+			span.record(
+				"path",
+				tracing::field::display(tracing_path_metadata(
+					arguments.path.as_deref().unwrap_or("."),
+				)),
+			);
 			let skip = match normalize_skip(arguments.skip) {
 				Ok(skip) => skip,
 				Err(fault) => {
@@ -463,50 +478,120 @@ impl<W: WorkspaceSearch, B: ReadBlobs> Tool for Grep<W, B> {
 					return;
 				},
 			};
-			let roots = match parse_roots(arguments.path.as_deref()) {
+			let (roots, unsplit) = match parse_roots(arguments.path.as_deref()) {
 				Ok(roots) => roots,
 				Err(fault) => {
 					yield done(Err(fault));
 					return;
 				},
 			};
-			let request = build_request(arguments, &roots);
 			let operation = async {
+				let roots = self.workspace.prepare_roots(roots, unsplit).await?;
+				let request =
+					build_request(arguments, &roots, self.context_before, self.context_after);
 				let result = self.workspace.search(request).await?;
-				prepare_payload(result, &roots, skip, &self.workspace, &self.blobs).await
-			}.fuse();
+				prepare_payload(result, &roots, skip, &self.workspace)
+			}.instrument(span.clone()).fuse();
 			let interruption = params.next_interrupt().fuse();
 			pin_mut!(operation, interruption);
 			select_biased! {
-				result = operation => yield done(result),
+				result = operation => {
+					match result {
+						Ok((payload, diags)) => {
+							for diag in diags {
+								yield Ev::Diag(diag);
+							}
+							yield done(Ok(payload));
+						},
+						Err(fault) => yield done(Err(fault)),
+					}
+				},
 				interrupt = interruption => {
 					yield interrupt_event(interrupt, "grep traversal owner disappeared");
-			},
+				},
 			}
 		}
 	}
 
 	fn prompt(&self, view: Result<&Self::Payload, &Self::Fault>, caps: &PromptCaps) -> Vec<Part> {
-		let Some(mut projection) = TextProjection::new(*caps) else {
-			return Vec::new();
+		grep_projection(view, caps).parts
+	}
+
+	fn projection(
+		&self,
+		view: Result<&Self::Payload, &Self::Fault>,
+		caps: &PromptCaps,
+	) -> PromptProjection {
+		grep_projection(view, caps)
+	}
+
+	fn authorize_visibility(
+		&self,
+		view: Result<&Self::Payload, &Self::Fault>,
+		receipt: &VisibilityReceipt,
+	) -> Result<(), ProjectionAuthorizationError> {
+		let Ok(payload) = view else {
+			return Ok(());
 		};
-		let text = match view {
-			Ok(payload) => payload.projected_text.as_str(),
-			Err(fault) => {
-				let message = fault.to_string();
-				projection.push(&message);
-				return projection.finish();
-			},
-		};
-		for fragment in text.split_inclusive('\n') {
-			if !projection.push(fragment) {
-				break;
-			}
+		let mut visible = HashMap::<Str, Vec<usize>>::new();
+		for line in &receipt.lines {
+			visible
+				.entry(line.source_key.clone())
+				.or_default()
+				.push(line.line);
 		}
-		projection.finish()
+		let records = payload
+			.snapshots
+			.iter()
+			.filter_map(|snapshot| {
+				let mut seen_lines = visible.remove(&snapshot.source_key)?;
+				seen_lines.sort_unstable();
+				seen_lines.dedup();
+				Some(SnapshotRecord {
+					source_key: snapshot.source_key.clone(),
+					revision: snapshot.revision.clone(),
+					seen_lines,
+				})
+			})
+			.collect();
+		self
+			.workspace
+			.record_snapshots(records)
+			.map_err(ProjectionAuthorizationError::new)
 	}
 }
-fn build_request(arguments: Params, roots: &[SearchRoot]) -> SearchRequest {
+
+fn grep_projection(view: Result<&Payload, &Fault>, caps: &PromptCaps) -> PromptProjection {
+	let Some(mut projection) = TextProjection::new(*caps) else {
+		return PromptProjection::default();
+	};
+	let mut visibility = Vec::new();
+	match view {
+		Ok(payload) => {
+			let (text, source_rows) = render_payload(payload);
+			for fragment in text.split_inclusive('\n') {
+				projection.push(fragment);
+			}
+			visibility.extend(source_rows.into_iter().map(|row| ProjectionSpan {
+				part:       0,
+				start_byte: row.start_byte,
+				end_byte:   row.end_byte,
+				source_key: row.source_key,
+				line:       row.line_number,
+			}));
+		},
+		Err(fault) => {
+			projection.push(&fault.to_string());
+		},
+	}
+	PromptProjection { parts: projection.finish(), visibility }
+}
+fn build_request(
+	arguments: Params,
+	roots: &[SearchRoot],
+	context_before: u32,
+	context_after: u32,
+) -> SearchRequest {
 	let (single_file_max_count, multi_file_max_count, max_count) = fetch_budgets(roots);
 	SearchRequest {
 		multiline: arguments.pattern.contains('\n') || arguments.pattern.contains("\\n"),
@@ -518,8 +603,8 @@ fn build_request(arguments: Params, roots: &[SearchRoot]) -> SearchRequest {
 		max_count,
 		single_file_max_count,
 		multi_file_max_count,
-		context_before: 0,
-		context_after: 0,
+		context_before,
+		context_after,
 		max_columns: DEFAULT_MAX_COLUMN,
 		timeout_ms: SEARCH_GREP_TIMEOUT_MS,
 	}
@@ -533,14 +618,21 @@ fn normalize_skip(skip: Option<f64>) -> Result<u64, Fault> {
 	Ok(skip.floor() as u64)
 }
 
-fn parse_roots(path: Option<&str>) -> Result<Vec<SearchRoot>, Fault> {
+fn parse_roots(path: Option<&str>) -> Result<(Vec<SearchRoot>, Option<SearchRoot>), Fault> {
 	let entries = path.map(split_semicolon_targets).unwrap_or_default();
 	let entries = if entries.is_empty() {
 		vec![sf!(".")]
 	} else {
 		entries
 	};
-	entries.into_iter().map(parse_root).collect()
+	let roots = entries
+		.into_iter()
+		.map(parse_root)
+		.collect::<Result<Vec<_>, _>>()?;
+	let unsplit = path
+		.filter(|path| path.contains(';'))
+		.and_then(|path| parse_root(Str::new(path.trim_end())).ok());
+	Ok((roots, unsplit))
 }
 
 fn parse_root(original: Str) -> Result<SearchRoot, Fault> {
@@ -628,7 +720,11 @@ fn fetch_budgets(roots: &[SearchRoot]) -> (u32, u32, u32) {
 	(single, multi, max_count)
 }
 
-fn make_payload(result: SearchResult, roots: &[SearchRoot], requested_skip: u64) -> Payload {
+fn make_payload(
+	result: SearchResult,
+	roots: &[SearchRoot],
+	requested_skip: u64,
+) -> (Payload, SmallVec<Diag, 6>) {
 	let per_file_cap = if result.multi_scope {
 		MULTI_FILE_PER_FILE_MATCHES
 	} else {
@@ -700,97 +796,108 @@ fn make_payload(result: SearchResult, roots: &[SearchRoot], requested_skip: u64)
 	let end = start.saturating_add(DEFAULT_FILE_LIMIT).min(groups.len());
 	let file_limit_reached = result.multi_scope && end < groups.len();
 	let files = groups.drain(start..end).collect();
-	let mut notes = Vec::new();
+	let mut diags = SmallVec::new();
 	if !result.missing_paths.is_empty() {
-		notes.push(sf!("Skipped missing paths: {}", join_strs(&result.missing_paths)));
+		diags.push(Diag::warn(DiagKind::MissingPaths, Str::new(join_strs(&result.missing_paths))));
 	}
 	if !result.archive_unreadable.is_empty() {
-		notes.push(sf!(
-			"Skipped archive entries (search supports text members only): {}",
-			join_strs(&result.archive_unreadable)
+		diags.push(Diag::warn(
+			DiagKind::Skipped,
+			sf!("Archive entries not searched: {}", join_strs(&result.archive_unreadable)),
 		));
 	}
 	if !result.oversized_files.is_empty() {
-		notes.push(sf!(
-			"Searched only the first 4MB of large files (matches past the 4MB window are not shown; \
-			 use `read` for the rest): {}",
-			join_strs(&result.oversized_files)
+		diags.push(Diag::warn(
+			DiagKind::PartialScan,
+			sf!("Only the first 4 MB was searched: {}", join_strs(&result.oversized_files)),
 		));
 	} else if result.skipped_oversized > 0 {
-		notes.push(sf!(
-			"Skipped {} unreadable large file(s); target them directly with `read`",
-			result.skipped_oversized
+		diags.push(Diag::warn(
+			DiagKind::Skipped,
+			sf!("{} unreadable large files were not searched", result.skipped_oversized),
 		));
 	}
-	Payload {
-		files,
-		total_files,
-		total_files_lower_bound: result.limit_reached,
-		multi_scope: result.multi_scope,
-		skip,
-		file_limit_reached,
-		per_file_limit_reached,
-		notes,
-		projected_text: Str::new(""),
-		output_blob: None,
-		output_artifact_uri: None,
-		output_shown_lines: 0,
-		output_total_lines: 0,
-	}
+	(
+		Payload {
+			files,
+			snapshots: Vec::new(),
+			total_files,
+			total_files_lower_bound: result.limit_reached,
+			multi_scope: result.multi_scope,
+			skip,
+			file_limit_reached,
+			per_file_limit_reached,
+		},
+		diags,
+	)
 }
 
-async fn prepare_payload<W: WorkspaceSearch, B: ReadBlobs>(
+fn prepare_payload<W: WorkspaceSearch>(
 	mut result: SearchResult,
 	roots: &[SearchRoot],
 	requested_skip: u64,
 	workspace: &W,
-	blobs: &B,
-) -> Result<Payload, Fault> {
-	let snapshots = mem::take(&mut result.snapshots);
-	let mut payload = make_payload(result, roots, requested_skip);
-	let (rendered, source_rows) = render_payload(&payload);
-	let retained_bytes = truncate_head(&rendered, TruncationOptions::default())
-		.content
-		.len();
-	let mut visible = HashMap::<Str, Vec<usize>>::new();
-	for row in source_rows {
-		if row.end_byte <= retained_bytes {
-			visible
-				.entry(row.source_key)
-				.or_default()
-				.push(row.line_number);
-		}
-	}
-	let output = spill_truncated_text(rendered, blobs)
-		.await
-		.map_err(|fault| Fault::Blob { message: fault.message().clone() })?;
-	let records = snapshots
+) -> Result<(Payload, SmallVec<Diag, 6>), Fault> {
+	let snapshots = std::mem::take(&mut result.snapshots);
+	let (mut payload, mut diags) = make_payload(result, roots, requested_skip);
+	let visible_sources = payload
+		.files
+		.iter()
+		.map(|file| file.source_key.clone())
+		.collect::<HashSet<_>>();
+	let snapshots = snapshots
 		.into_iter()
-		.filter_map(|snapshot| {
-			let mut seen_lines = visible.remove(&snapshot.source_key)?;
-			seen_lines.sort_unstable();
-			seen_lines.dedup();
-			Some(SnapshotRecord {
-				source_key: snapshot.source_key,
-				revision: snapshot.revision,
-				bytes: snapshot.bytes,
-				seen_lines,
-			})
+		.filter(|snapshot| visible_sources.contains(&snapshot.source_key))
+		.collect::<Vec<_>>();
+	payload.snapshots = snapshots
+		.iter()
+		.map(|snapshot| SnapshotCandidate {
+			source_key: snapshot.source_key.clone(),
+			revision:   snapshot.revision.clone(),
 		})
 		.collect();
-	workspace.record_snapshots(records)?;
-	payload.projected_text = output.content;
-	payload.output_blob = output.blob;
-	payload.output_artifact_uri = output.artifact_uri;
-	payload.output_shown_lines = output.shown_lines;
-	payload.output_total_lines = output.total_lines;
-	Ok(payload)
+	workspace.stage_snapshots(snapshots)?;
+	if payload.files.is_empty()
+		&& payload.multi_scope
+		&& payload.skip > 0
+		&& payload.total_files > 0
+		&& payload.skip >= payload.total_files
+	{
+		let suffix = if payload.total_files_lower_bound {
+			"+"
+		} else {
+			""
+		};
+		diags.push(Diag::warn(
+			DiagKind::RangeOutOfBounds,
+			sf!("skip={} is past the end of {}{} files", payload.skip, payload.total_files, suffix),
+		));
+	} else if payload.file_limit_reached {
+		let next_skip = payload
+			.skip
+			.saturating_add(u64::try_from(payload.files.len()).unwrap_or(u64::MAX));
+		diags.push(
+			Diag::info(
+				DiagKind::Pagination,
+				sf!(
+					"files {}-{} of {}",
+					payload.skip.saturating_add(1),
+					next_skip,
+					payload.total_files
+				),
+			)
+			.continuation(sf!("skip={next_skip}"))
+			.omitted(payload.total_files.saturating_sub(next_skip), Unit::Files),
+		);
+	}
+	Ok((payload, diags))
 }
 
 #[derive(Debug)]
 struct RenderedSourceLine {
 	source_key:  Str,
 	line_number: usize,
+	start_byte:  usize,
 	end_byte:    usize,
 }
 
@@ -798,25 +905,9 @@ fn render_payload(payload: &Payload) -> (String, Vec<RenderedSourceLine>) {
 	let mut output = String::new();
 	let mut source_rows = Vec::new();
 	if payload.files.is_empty() {
-		if payload.multi_scope
-			&& payload.skip > 0
-			&& payload.total_files > 0
-			&& payload.skip >= payload.total_files
-		{
-			let suffix = if payload.total_files_lower_bound {
-				"+"
-			} else {
-				""
-			};
-			let _ = write!(
-				output,
-				"No more results ({}{} files total; skip={} is past the end)",
-				payload.total_files, suffix, payload.skip
-			);
-		} else {
+		if payload.total_files == 0 {
 			output.push_str("No matches found");
 		}
-		append_notes(&mut output, &payload.notes);
 		return (output, source_rows);
 	}
 
@@ -833,26 +924,6 @@ fn render_payload(payload: &Payload) -> (String, Vec<RenderedSourceLine>) {
 			render_file_matches(&mut output, &mut source_rows, file);
 		}
 	}
-	if payload.file_limit_reached {
-		let next_skip = payload
-			.skip
-			.saturating_add(u64::try_from(payload.files.len()).unwrap_or(u64::MAX));
-		let suffix = if payload.total_files_lower_bound {
-			"+"
-		} else {
-			""
-		};
-		let _ = write!(
-			output,
-			"\n\nShowing files {}-{} of {}{}. Use skip={} for the next page, or narrow paths/pattern.",
-			payload.skip.saturating_add(1),
-			next_skip,
-			payload.total_files,
-			suffix,
-			next_skip
-		);
-	}
-	append_notes(&mut output, &payload.notes);
 	(output, source_rows)
 }
 
@@ -957,28 +1028,17 @@ fn push_match_line(
 		output.push_str("...\n");
 	}
 	let marker = if matched { '*' } else { ' ' };
+	let start_byte = output.len();
 	let _ = writeln!(output, "{marker}{number}:{line}");
 	if let Ok(line_number) = usize::try_from(number) {
 		source_rows.push(RenderedSourceLine {
 			source_key: source_key.clone(),
 			line_number,
+			start_byte,
 			end_byte: output.len().saturating_sub(1),
 		});
 	}
 	*last = Some(number);
-}
-
-fn append_notes(output: &mut String, notes: &[Str]) {
-	if notes.is_empty() {
-		return;
-	}
-	output.push_str("\n\n");
-	for (index, note) in notes.iter().enumerate() {
-		if index > 0 {
-			output.push('\n');
-		}
-		output.push_str(note);
-	}
 }
 
 fn join_strs(values: &[Str]) -> String {
@@ -1063,7 +1123,7 @@ mod tests {
 
 	#[test]
 	fn semicolon_roots_preserve_order_and_parse_per_file_ranges() {
-		let roots = parse_roots(Some(" src ; tests/grep.rs:5-8,12-13 ")).unwrap();
+		let (roots, unsplit) = parse_roots(Some(" src ; tests/grep.rs:5-8,12-13 ")).unwrap();
 		assert_eq!(roots.len(), 2);
 		assert_eq!(roots[0].path, "src");
 		assert!(roots[0].ranges.is_empty());
@@ -1072,11 +1132,18 @@ mod tests {
 			LineRange { start_line: 5, end_line: Some(8) },
 			LineRange { start_line: 12, end_line: Some(13) },
 		]);
+		let unsplit = unsplit.expect("literal-preserving candidate");
+		assert_eq!(unsplit.original, " src ; tests/grep.rs:5-8,12-13");
+		assert_eq!(unsplit.path, " src ; tests/grep.rs");
+		assert_eq!(unsplit.ranges.as_ref(), [
+			LineRange { start_line: 5, end_line: Some(8) },
+			LineRange { start_line: 12, end_line: Some(13) },
+		]);
 	}
 
 	#[test]
 	fn internal_roots_keep_ranges_and_ignore_display_only_modes() {
-		let roots = parse_roots(Some(
+		let (roots, _) = parse_roots(Some(
 			"artifact://7:raw:2-4; skill://prompt:conflicts; bundle.7z:docs/readme.txt",
 		))
 		.unwrap();
@@ -1099,7 +1166,7 @@ mod tests {
 
 	#[test]
 	fn request_applies_case_gitignore_and_cross_line_rules() {
-		let roots = parse_roots(Some("src; tests")).unwrap();
+		let (roots, _) = parse_roots(Some("src; tests")).unwrap();
 		let request = build_request(
 			Params {
 				pattern:   sf!(r"alpha\nbeta"),
@@ -1109,11 +1176,15 @@ mod tests {
 				skip:      None,
 			},
 			&roots,
+			1,
+			3,
 		);
 		assert!(request.ignore_case);
 		assert!(request.multiline);
 		assert!(!request.gitignore);
 		assert_eq!(request.roots, roots);
+		assert_eq!(request.context_before, 1);
+		assert_eq!(request.context_after, 3);
 
 		let default_case = build_request(
 			Params {
@@ -1123,7 +1194,9 @@ mod tests {
 				gitignore: None,
 				skip:      None,
 			},
-			&parse_roots(None).unwrap(),
+			&parse_roots(None).unwrap().0,
+			0,
+			0,
 		);
 		assert!(!default_case.ignore_case);
 		assert!(default_case.gitignore);
@@ -1132,11 +1205,11 @@ mod tests {
 
 	#[test]
 	fn skip_paginates_matching_files_not_match_rows() {
-		let roots = parse_roots(Some(".")).unwrap();
+		let (roots, _) = parse_roots(Some(".")).unwrap();
 		let matches: Vec<_> = (0..22)
 			.map(|index| search_match(format!("src/file-{index:02}.rs"), 0))
 			.collect();
-		let first = make_payload(
+		let (first, _) = make_payload(
 			SearchResult { matches: matches.clone(), multi_scope: true, ..SearchResult::default() },
 			&roots,
 			0,
@@ -1145,7 +1218,7 @@ mod tests {
 		assert_eq!(first.files[0].path, "src/file-00.rs");
 		assert!(first.file_limit_reached);
 
-		let second = make_payload(
+		let (second, _) = make_payload(
 			SearchResult { matches, multi_scope: true, ..SearchResult::default() },
 			&roots,
 			20,

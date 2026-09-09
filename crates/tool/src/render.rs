@@ -3,7 +3,7 @@
 use std::{any::Any, collections::BTreeMap, iter, str, sync::Arc};
 
 use bytes::Bytes;
-use omp_core::Str;
+use omp_core::{Str, StrMut};
 use serde::de::DeserializeOwned;
 use smallvec::SmallVec;
 use thiserror::Error;
@@ -224,7 +224,7 @@ pub trait RenderFold: Send + Sync + 'static {
 	/// so overriding renderers replace prior argument state instead of
 	/// appending. The default ignores arguments; renderers that preview
 	/// arguments while they stream override it.
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, complete: bool) {
 		let _ = (state, args, complete);
 	}
 
@@ -239,8 +239,9 @@ pub trait RenderFold: Send + Sync + 'static {
 /// accumulator on the first fold.
 #[derive(Default)]
 pub struct ViewState {
-	identity: Option<Arc<ToolIdentity>>,
-	fold:     FoldState,
+	identity:    Option<Arc<ToolIdentity>>,
+	fold:        FoldState,
+	decorations: BTreeMap<u64, Box<dyn Any + Send + Sync>>,
 }
 
 enum FoldState {
@@ -358,7 +359,7 @@ trait ErasedRender: Send + Sync {
 		&self,
 		identity: &ToolIdentity,
 		state: &mut dyn Any,
-		args: &omp_slopjson::Value,
+		args: &omp_core::slopjson::Value,
 		complete: bool,
 	) -> Result<(), RenderRegistryError>;
 	fn view(
@@ -395,7 +396,7 @@ impl<R: RenderFold> ErasedRender for RegisteredRender<R> {
 		&self,
 		identity: &ToolIdentity,
 		state: &mut dyn Any,
-		args: &omp_slopjson::Value,
+		args: &omp_core::slopjson::Value,
 		complete: bool,
 	) -> Result<(), RenderRegistryError> {
 		let state = state
@@ -442,7 +443,7 @@ impl RenderEntry<'_> {
 	pub fn fold_args(
 		self,
 		state: &mut ViewState,
-		args: &omp_slopjson::Value,
+		args: &omp_core::slopjson::Value,
 		complete: bool,
 	) -> Result<(), RenderRegistryError> {
 		state.bind(self.identity)?;
@@ -524,7 +525,10 @@ impl RenderEntry<'_> {
 /// Immutable-by-key registry of exact-revision renderer folds.
 #[derive(Default)]
 pub struct RenderRegistry {
-	entries: BTreeMap<Arc<ToolIdentity>, Box<dyn ErasedRender>>,
+	entries:           BTreeMap<Arc<ToolIdentity>, Box<dyn ErasedRender>>,
+	extension_entries: BTreeMap<Arc<ToolIdentity>, Box<dyn ErasedRender>>,
+	decorations:       BTreeMap<Arc<ToolIdentity>, Vec<(u64, Box<dyn ErasedRender>)>>,
+	next_extension_id: u64,
 }
 
 impl RenderRegistry {
@@ -536,11 +540,16 @@ impl RenderRegistry {
 	/// Iterates exact registered renderer identities in stable key order.
 	pub fn identities(
 		&self,
-	) -> impl DoubleEndedIterator<Item = &ToolIdentity> + ExactSizeIterator + iter::FusedIterator {
-		self.entries.keys().map(Arc::as_ref)
+	) -> impl DoubleEndedIterator<Item = &ToolIdentity> + iter::FusedIterator {
+		self
+			.entries
+			.keys()
+			.chain(self.extension_entries.keys())
+			.chain(self.decorations.keys())
+			.map(Arc::as_ref)
 	}
 
-	/// Registers one renderer for one exact `(name, revision)` identity.
+	/// Registers one native renderer for one exact `(name, revision)` identity.
 	pub fn register<R: RenderFold>(
 		&mut self,
 		identity: ToolIdentity,
@@ -550,15 +559,62 @@ impl RenderRegistry {
 		if self.entries.contains_key(&identity) {
 			return Err(RenderRegistryError::Duplicate((*identity).clone()));
 		}
+		self.extension_entries.remove(&identity);
 		self
 			.entries
 			.insert(identity, Box::new(RegisteredRender(render)));
 		Ok(())
 	}
 
+	/// Registers one extension renderer for one exact revision.
+	///
+	/// Non-decorating extension folds fill revisions without a native fold.
+	/// Native folds remain authoritative regardless of registration order.
+	/// Decorating folds are composed after the winning base renderer.
+	pub fn register_extension<R: RenderFold>(
+		&mut self,
+		identity: ToolIdentity,
+		render: R,
+		decorates: bool,
+	) -> Result<bool, RenderRegistryError> {
+		let identity = Arc::new(identity);
+		if decorates {
+			let id = self.next_extension_id;
+			self.next_extension_id = self.next_extension_id.wrapping_add(1);
+			self
+				.decorations
+				.entry(identity)
+				.or_default()
+				.push((id, Box::new(RegisteredRender(render))));
+			return Ok(true);
+		}
+		if self.entries.contains_key(&identity) || self.extension_entries.contains_key(&identity) {
+			return Ok(false);
+		}
+		self
+			.extension_entries
+			.insert(identity, Box::new(RegisteredRender(render)));
+		Ok(true)
+	}
+
+	/// Returns whether a native fold is authoritative for this exact revision.
+	pub fn has_native(&self, identity: &ToolIdentity) -> bool {
+		self.entries.contains_key(identity)
+	}
+
+	/// Returns whether this exact revision has a base fold or decoration.
+	pub fn contains(&self, identity: &ToolIdentity) -> bool {
+		self.entries.contains_key(identity)
+			|| self.extension_entries.contains_key(identity)
+			|| self.decorations.contains_key(identity)
+	}
+
 	/// Borrows the renderer cached for this exact identity.
 	pub fn get(&self, identity: &ToolIdentity) -> Option<RenderEntry<'_>> {
-		let (stored, render) = self.entries.get_key_value(identity)?;
+		let (stored, render) = self
+			.entries
+			.get_key_value(identity)
+			.or_else(|| self.extension_entries.get_key_value(identity))?;
 		Some(RenderEntry { identity: stored, render: render.as_ref() })
 	}
 
@@ -570,13 +626,23 @@ impl RenderRegistry {
 		&self,
 		identity: &ToolIdentity,
 		state: &mut ViewState,
-		args: &omp_slopjson::Value,
+		args: &omp_core::slopjson::Value,
 		complete: bool,
 	) -> Result<(), RenderRegistryError> {
-		match self.get(identity) {
-			Some(entry) => entry.fold_args(state, args, complete),
-			None => Ok(()),
+		if let Some(entry) = self.get(identity) {
+			entry.fold_args(state, args, complete)?;
 		}
+		state.bind(identity)?;
+		if let Some(decorations) = self.decorations.get(identity) {
+			for (id, render) in decorations {
+				let reduced = state
+					.decorations
+					.entry(*id)
+					.or_insert_with(|| render.initial());
+				render.fold_args(identity, reduced.as_mut(), args, complete)?;
+			}
+		}
+		Ok(())
 	}
 
 	/// Resolves the latest registered identity for a tool name.
@@ -588,6 +654,8 @@ impl RenderRegistry {
 		self
 			.entries
 			.keys()
+			.chain(self.extension_entries.keys())
+			.chain(self.decorations.keys())
 			.filter(|identity| identity.name == name)
 			.max_by_key(|identity| identity.rev.n)
 			.map(Arc::as_ref)
@@ -601,20 +669,59 @@ impl RenderRegistry {
 		state: &mut ViewState,
 		update: Bytes,
 	) -> Result<(), RenderRegistryError> {
-		if let Some(entry) = self.get(identity) {
-			return entry.fold(state, &update);
-		}
 		state.bind(identity)?;
-		match &mut state.fold {
-			FoldState::Updates(updates) => {
-				if updates.len() == 4 {
-					let _ = updates.remove(0);
-				}
-				updates.push(update);
-				Ok(())
-			},
-			FoldState::Reduced(_) => Err(RenderRegistryError::StateType(identity.clone())),
+		if let Some(entry) = self.get(identity) {
+			entry.fold(state, &update)?;
+		} else {
+			match &mut state.fold {
+				FoldState::Updates(updates) => {
+					if updates.len() == 4 {
+						let _ = updates.remove(0);
+					}
+					updates.push(update.clone());
+				},
+				FoldState::Reduced(_) => {
+					return Err(RenderRegistryError::StateType(identity.clone()));
+				},
+			}
 		}
+		if let Some(decorations) = self.decorations.get(identity) {
+			for (id, render) in decorations {
+				if let Some(reduced) = state.decorations.get_mut(id) {
+					render.fold(identity, reduced.as_mut(), &update)?;
+					continue;
+				}
+				let mut reduced = render.initial();
+				if self.get(identity).is_none()
+					&& let FoldState::Updates(updates) = &state.fold
+				{
+					for prior in updates {
+						render.fold(identity, reduced.as_mut(), prior)?;
+					}
+				} else {
+					render.fold(identity, reduced.as_mut(), &update)?;
+				}
+				state.decorations.insert(*id, reduced);
+			}
+		}
+		Ok(())
+	}
+
+	/// Replays a complete retained update stream through this registry.
+	pub fn replay<I>(
+		&self,
+		identity: &ToolIdentity,
+		updates: I,
+		outcome: Option<&[u8]>,
+	) -> Result<Str, RenderRegistryError>
+	where
+		I: IntoIterator<Item = Bytes>,
+	{
+		let mut state = ViewState::new();
+		for update in updates {
+			self.fold(identity, &mut state, update)?;
+		}
+		self.view(identity, &state, outcome)
 	}
 
 	/// Dispatches an exact-revision renderer or the generic built-in fallback.
@@ -626,15 +733,54 @@ impl RenderRegistry {
 		state: &ViewState,
 		outcome: Option<&[u8]>,
 	) -> Result<Str, RenderRegistryError> {
-		if let Some(entry) = self.get(identity) {
-			if let Some(rendered) = entry.view(state, outcome)? {
-				return Ok(rendered);
-			}
+		state.check(identity)?;
+		let mut rendered = if let Some(entry) = self.get(identity) {
+			entry
+				.view(state, outcome)?
+				.unwrap_or(generic_view(identity, state, outcome)?)
 		} else {
-			state.check(identity)?;
+			generic_view(identity, state, outcome)?
+		};
+		if let Some(decorations) = self.decorations.get(identity) {
+			for (id, render) in decorations {
+				let decoration = if let Some(reduced) = state.decorations.get(id) {
+					render.view(identity, reduced.as_ref(), outcome)?
+				} else {
+					let mut reduced = render.initial();
+					if let FoldState::Updates(updates) = &state.fold {
+						for update in updates {
+							render.fold(identity, reduced.as_mut(), update)?;
+						}
+					}
+					render.view(identity, reduced.as_ref(), outcome)?
+				};
+				if let Some(decoration) = decoration {
+					let mut composed = StrMut::with_capacity(rendered.len() + decoration.len());
+					composed.push_str(&rendered);
+					composed.push_str(&decoration);
+					rendered = composed.freeze();
+				}
+			}
 		}
-		generic_view(identity, state, outcome)
+		Ok(rendered)
 	}
+}
+
+fn generic_view(
+	identity: &ToolIdentity,
+	state: &ViewState,
+	outcome: Option<&[u8]>,
+) -> Result<Str, RenderRegistryError> {
+	let data = outcome.or_else(|| match &state.fold {
+		FoldState::Updates(updates) => updates.last().map(Bytes::as_ref),
+		FoldState::Reduced(_) => None,
+	});
+	let Some(data) = data else {
+		return Ok(Str::new_static("{}"));
+	};
+	let data = str::from_utf8(data)
+		.map_err(|source| RenderRegistryError::Utf8 { identity: identity.clone(), source })?;
+	Ok(Str::new(data))
 }
 
 #[cfg(test)]
@@ -679,21 +825,4 @@ mod jtd_tests {
 		.expect_err("mixed authoring formats must be rejected");
 		assert!(matches!(error, JtdImportError::InvalidForm));
 	}
-}
-
-fn generic_view(
-	identity: &ToolIdentity,
-	state: &ViewState,
-	outcome: Option<&[u8]>,
-) -> Result<Str, RenderRegistryError> {
-	let data = outcome.or_else(|| match &state.fold {
-		FoldState::Updates(updates) => updates.last().map(Bytes::as_ref),
-		FoldState::Reduced(_) => None,
-	});
-	let Some(data) = data else {
-		return Ok(Str::new_static("{}"));
-	};
-	let data = str::from_utf8(data)
-		.map_err(|source| RenderRegistryError::Utf8 { identity: identity.clone(), source })?;
-	Ok(Str::new(data))
 }

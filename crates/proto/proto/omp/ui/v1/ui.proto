@@ -176,6 +176,9 @@ message Dialog {
   string title = 2;
   optional Tml content = 3;
   repeated string choices = 4;
+  // Lossless dialog-specific controls and DialogOptions serialized by the
+  // extension host. Renderers consume only the fields supported by the kind.
+  omp.inference.v1.ValueMap props = 15;
 }
 message ComposerText {}
 message Presentation {
@@ -205,6 +208,10 @@ message DialogOutcome {
   bool cancelled = 2;
   optional string value = 3;
   repeated string values = 4;
+  // Form field values or ask-user answers, preserving their JSON shape.
+  omp.inference.v1.ValueMap answers = 5;
+  // Stable cancellation reason: dismissed, timed_out, superseded, unavailable.
+  optional string reason = 6;
 }
 message OverlayOpened {
   string overlay_id = 1;
@@ -251,6 +258,8 @@ message CompletionQuery {
   string trigger = 1;
   string text = 2;
   uint32 cursor = 3;
+  repeated string argv = 4;
+  optional string command = 5;
 }
 message RenderRequest {
   string name = 1;
@@ -263,6 +272,11 @@ message OverlayEvent {
   string kind = 2;
   optional string value = 3;
 }
+message ShortcutInvoked {
+  string action_id = 1;
+  string chord = 2;
+  string phase = 3;
+}
 
 message UiDispatch {
   oneof kind {
@@ -272,7 +286,10 @@ message UiDispatch {
     RenderRequest render = 4;
     OverlayEvent overlay = 5;
     FrameActionFired frame_action = 6;
+    ShortcutInvoked shortcut = 7;
   }
+  uint64 generation = 8;
+  string declaration_id = 9;
   omp.inference.v1.ValueMap props = 15;
 }
 
@@ -280,36 +297,79 @@ message CompletionCandidate {
   string value = 1;
   optional string display = 2;
   optional string description = 3;
+  optional string hint = 4;
+  optional string group = 5;
+  optional string icon = 6;
+  sint32 sort = 7;
 }
 message RenderedView {
   Tml content = 1;
   bytes state = 2;
 }
+message CommandDispatchResult {
+  oneof outcome {
+    Tml consumed = 1;
+    string prompt = 2;
+  }
+  optional bool submit = 3;
+}
+message ShortcutDispatchResult {}
 message UiDispatchResult {
   oneof result {
     Values values = 1;
     RenderedView rendered = 2;
     UiError error = 3;
+    CommandDispatchResult command = 5;
+    ShortcutDispatchResult shortcut = 6;
   }
   repeated CompletionCandidate candidates = 4;
+  uint64 generation = 7;
+  string declaration_id = 8;
   omp.inference.v1.ValueMap props = 15;
 }
 
+message CommandArgDecl {
+  string name = 1;
+  string description = 2;
+  optional string usage = 3;
+}
 message CommandDecl {
   string name = 1;
-  string summary = 2;
-  string usage = 3;
-  sint32 precedence = 4;
+  string description = 2;
+  optional string hint = 3;
+  repeated string aliases = 4;
+  repeated CommandArgDecl args = 5;
+  string declaration_id = 6;
+  string callback = 7;
+  string module = 8;
+  string activation_trigger = 9;
+  optional string arg_completion_callback = 10;
   omp.inference.v1.ValueMap props = 15;
 }
 message ShortcutDecl {
   string chord = 1;
-  string action = 2;
+  string action_id = 2;
+  string description = 3;
+  repeated string when = 4;
+  string declaration_id = 5;
+  string callback = 6;
+  string module = 7;
+  string activation_trigger = 8;
   omp.inference.v1.ValueMap props = 15;
 }
 message TriggerDecl {
   string prefix = 1;
   string kind = 2;
+  bool at_line_start = 3;
+  uint32 min_chars = 4;
+  uint64 debounce_ms = 5;
+  uint32 max_results = 6;
+  uint64 cache_ms = 7;
+  bool refine_locally = 8;
+  string declaration_id = 9;
+  string callback = 10;
+  string module = 11;
+  string activation_trigger = 12;
   omp.inference.v1.ValueMap props = 15;
 }
 message RendererDecl {
@@ -324,5 +384,7 @@ message RegisterUi {
   repeated ShortcutDecl shortcuts = 2;
   repeated TriggerDecl triggers = 3;
   repeated RendererDecl renderers = 4;
+  uint64 generation = 5;
+  string extension_id = 6;
   omp.inference.v1.ValueMap props = 15;
 }

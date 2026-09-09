@@ -1,9 +1,12 @@
-//! Worker-capable OMP executable used by cross-crate acceptance proofs.
+#![recursion_limit = "256"]
+
+//! Extension-host-capable OMP executable used by cross-crate acceptance proofs.
 
 use std::{env, process::ExitCode};
 
 #[tokio::main]
 async fn main() -> ExitCode {
+	omp_observability::logging::init();
 	if env::args_os()
 		.nth(1)
 		.is_some_and(|arg| arg == omp_envd::exthost::EXT_HOST_ARG)
@@ -16,22 +19,9 @@ async fn main() -> ExitCode {
 			},
 		};
 	}
-	if env::args_os()
-		.nth(1)
-		.is_some_and(|arg| arg == omp_envd::worker::WORKER_ARG)
-	{
-		return match omp_envd::worker::run_py_worker_entry() {
-			Ok(()) => ExitCode::SUCCESS,
-			Err(error) => {
-				eprintln!("omp e2e Python worker: {error}");
-				ExitCode::FAILURE
-			},
-		};
-	}
-
-	omp_telemetry::export::init();
+	omp_observability::export::init();
 	let result = omp_app::run().await;
-	omp_telemetry::export::shutdown();
+	omp_observability::export::shutdown();
 	match result {
 		Ok(()) => ExitCode::SUCCESS,
 		Err(error) => {

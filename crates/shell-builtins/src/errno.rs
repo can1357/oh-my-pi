@@ -1,14 +1,13 @@
 //! `errno` builtin: look up errno names, numbers, and descriptions.
 //!
-//! Ported from pi-shell's in-process implementation of the moreutils-inspired
-//! `errno` utility. A name prints its `NAME NUMBER Description` line; numeric
+//! A name prints its `NAME NUMBER Description` line; numeric
 //! arguments reverse-map to the first-listed canonical name. Lists include
 //! aliases and are sorted by number, then name.
 
 use std::{io, io::Write};
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::host::{Host, Utility, format_usage, matches_parser, util};
 
@@ -143,7 +142,7 @@ impl Utility for Errno {
 /// The `errno` argument model.
 fn command() -> Command {
 	Command::new(Errno::NAME)
-		.version(concat!("errno (pi-shell) ", env!("CARGO_PKG_VERSION")))
+		.version(concat!("errno ", env!("CARGO_PKG_VERSION")))
 		.about("Look up errno names and descriptions.")
 		.override_usage(format_usage("errno [-ls] [--] [name-or-number...]"))
 		.disable_help_flag(true)

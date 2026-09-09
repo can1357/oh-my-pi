@@ -19,9 +19,8 @@ use http::{
 	HeaderMap, HeaderName, HeaderValue, StatusCode,
 	header::{ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, CONTENT_TYPE, RETRY_AFTER, USER_AGENT},
 };
+use omp_cache::document_cache::{DocumentCache, DocumentCacheKey};
 use omp_core::{Hash32, Str, dirs::home_dir, sf, shorten_home_path};
-use omp_hashline::RevisionToken;
-use omp_storage::document_cache::{DocumentCache, DocumentCacheKey};
 use omp_tools::read::{
 	DirectoryEntry, DirectorySource, Fault, ReadLease, ReadSources, SNAPSHOT_MAX_BYTES,
 	SnapshotRecord, SourceKind, SourceStat,
@@ -38,22 +37,23 @@ use url::Url;
 
 use super::{
 	docs::{DocumentHost, DocumentLease},
-	tool_document::{read_document_metadata, read_whole, resolve_read_document},
+	tool_document::{read_document_metadata, read_whole, resolve_read_document, snapshot_text},
 	workspace::WorkspaceHost,
 };
 
 const MAX_REDIRECTS: usize = 20;
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(10);
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
-static READ_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+static READ_CLIENT: LazyLock<omp_http::Client> = LazyLock::new(|| {
 	omp_http::client_builder()
 		.redirect(redirect::Policy::limited(MAX_REDIRECTS))
 		.referer(false)
 		.build()
 		.expect("build read HTTP client")
+		.into()
 });
 
-use omp_storage::atomic;
+use omp_cache::atomic;
 use reqwest::redirect;
 use thiserror::Error;
 use tokio::task;
@@ -100,7 +100,7 @@ pub fn commit_document_media(
 	fs::create_dir(&stage)?;
 	let committed = (|| {
 		for attachment in &conversion.attachments {
-			omp_storage::atomic::commit(
+			omp_cache::atomic::commit(
 				&stage.join(attachment.name.as_str()),
 				&attachment.bytes,
 				|| true,
@@ -140,7 +140,7 @@ fn rewrite_document_media_links(destination: &Path, conversion: &mut Conversion)
 
 #[derive(Clone)]
 struct SystemHttpClient {
-	inner: reqwest::Client,
+	inner: omp_http::Client,
 }
 
 impl SystemHttpClient {
@@ -556,14 +556,12 @@ impl HttpClient for ReadSourceAdapter {
 		let result = task::spawn_blocking(move || {
 			let key = document_cache_key(request)?;
 			let entry = cache.get(key, SystemTime::now())?;
-			Ok::<_, omp_storage::document_cache::DocumentCacheError>(entry.map(|entry| {
-				CachedDocument {
-					content:  entry.content,
-					location: DocumentCacheLocation {
-						key:  entry.metadata.key.digest(),
-						blob: entry.metadata.blob,
-					},
-				}
+			Ok::<_, omp_cache::document_cache::DocumentCacheError>(entry.map(|entry| CachedDocument {
+				content:  entry.content,
+				location: DocumentCacheLocation {
+					key:  entry.metadata.key.digest(),
+					blob: entry.metadata.blob,
+				},
 			}))
 		})
 		.await;
@@ -590,7 +588,7 @@ impl HttpClient for ReadSourceAdapter {
 		let result = task::spawn_blocking(move || {
 			let key = document_cache_key(request)?;
 			let metadata = cache.put(key, &published, SystemTime::now(), None)?;
-			Ok::<_, omp_storage::document_cache::DocumentCacheError>(DocumentCacheLocation {
+			Ok::<_, omp_cache::document_cache::DocumentCacheError>(DocumentCacheLocation {
 				key:  metadata.key.digest(),
 				blob: metadata.blob,
 			})
@@ -612,7 +610,7 @@ impl HttpClient for ReadSourceAdapter {
 
 fn document_cache_key(
 	request: DocumentCacheRequest,
-) -> Result<DocumentCacheKey, omp_storage::document_cache::DocumentCacheError> {
+) -> Result<DocumentCacheKey, omp_cache::document_cache::DocumentCacheError> {
 	DocumentCacheKey::derive(
 		request.source_digest,
 		request.converter,
@@ -857,18 +855,21 @@ impl ReadSources for ReadSourceAdapter {
 			let canonical = fs::canonicalize(&authored).unwrap_or(authored);
 			Str::from(canonical.to_string_lossy().into_owned())
 		};
-		let revision = RevisionToken::new(record.revision.as_bytes());
+		let text = snapshot_text(&record.bytes)
+			.ok_or_else(|| Fault::source("snapshot content is not UTF-8"))?;
 		let seen = record
 			.seen
 			.into_iter()
 			.flat_map(|range| range.start_line..=range.end_line)
-			.filter_map(|line| usize::try_from(line).ok());
-		Ok(self
-			.documents
-			.snapshot_store()
-			.lock()
-			.record(snapshot_path, revision, record.bytes, seen)
-			.ok())
+			.filter_map(|line| u32::try_from(line).ok())
+			.collect::<Vec<_>>();
+		Ok(Some(
+			self
+				.documents
+				.snapshot_store()
+				.record(Path::new(snapshot_path.as_str()), &text, Some(&seen))
+				.into(),
+		))
 	}
 }
 

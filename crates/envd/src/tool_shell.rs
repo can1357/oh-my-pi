@@ -2,7 +2,7 @@ use std::{
 	collections::{BTreeMap, BTreeSet},
 	env,
 	future::{self, Future},
-	path::{Path, PathBuf},
+	path::Path,
 	pin::Pin,
 	sync::Arc,
 	time::Duration,
@@ -10,15 +10,17 @@ use std::{
 
 use bytes::Bytes;
 use flume::Receiver;
-use omp_core::{CowBytes, EnvPath, Str, encoding::hex, sf};
-use omp_env::{EnvClient, ExecEvent as ClientExecEvent, ExecRun as ClientExecRun};
-use omp_proto::env::{
-	v1,
-	v1::{
-		CloseSessionRequest, EnvironmentDelta, ExecOutcome as EnvExecOutcome, ExecRequest,
-		OpenSessionRequest, OutputChannel as EnvOutputChannel, ProcessSpec, PtySpec, RestartPolicy,
-		RestartSpec, Script, ShellProfileInput, StartProcess,
+use omp_core::{CowBytes, Str, encoding::hex, sf};
+use omp_proto::{
+	env::{
+		v1,
+		v1::{
+			EnvironmentDelta, ExecOutcome as EnvExecOutcome, ExecRequest, OpenSessionRequest,
+			OutputChannel as EnvOutputChannel, ProcessSpec, PtySpec, RestartPolicy, RestartSpec,
+			Script, ShellProfileInput, StartProcess,
+		},
 	},
+	inference::v1::value,
 };
 use omp_tool::{BlobRef, JobOwner};
 use omp_tools::{
@@ -38,9 +40,12 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::{
+	blobs::BlobHost,
 	direnv::DirenvDelta,
 	exec::{ExecError, ExecEvent, ExecHost, ExecRun},
-	exec_settings::{DirenvMode, ShellProfile, ShellSettings},
+	exec_settings::{
+		DirenvMode, ExecSandboxMode, ReadMode, SandboxNetworkMode, SandboxSettings, ShellSettings,
+	},
 	tool_url::UrlResolver,
 	tools,
 };
@@ -89,32 +94,29 @@ impl AcpExecSlot {
 	}
 
 	fn backend(&self) -> Option<Arc<dyn AcpExecBackend>> {
-		self.backend.read().clone()
+		tools::invocation_acp_exec().or_else(|| self.backend.read().clone())
 	}
 }
 
-/// Shell resource adapter backed by either the local execution authority or a
-/// retained remote Environment owner.
+/// Shell resource adapter backed by the local execution authority.
 #[derive(Clone)]
 pub struct ShellExecHost {
-	backend:      ShellBackend,
-	cwd_uri:      Str,
-	resolvers:    Arc<ResolverTable<UrlResolver>>,
-	settings:     ShellSettings,
-	acp:          AcpExecSlot,
-	acp_routing:  bool,
-	acp_sessions: Arc<Mutex<BTreeMap<Bytes, AcpSessionOptions>>>,
-}
-#[derive(Clone)]
-enum ShellBackend {
-	Local(ExecHost),
-	Remote(EnvClient),
+	host:               ExecHost,
+	blobs:              BlobHost,
+	cwd_uri:            Str,
+	resolvers:          Arc<ResolverTable<UrlResolver>>,
+	settings:           ShellSettings,
+	/// Sandbox posture compiled for external commands and in-process writes.
+	pub(crate) sandbox: SandboxSettings,
+	acp:                AcpExecSlot,
+	acp_routing:        bool,
+	acp_sessions:       Arc<Mutex<BTreeMap<Bytes, AcpSessionOptions>>>,
 }
 #[derive(Clone)]
 struct AcpSessionOptions {
-	cwd:            Option<Str>,
-	env:            BTreeMap<Str, Str>,
-	command_prefix: Str,
+	cwd:   Option<Str>,
+	env:   BTreeMap<Str, Str>,
+	unset: Vec<String>,
 }
 
 impl ShellExecHost {
@@ -122,38 +124,26 @@ impl ShellExecHost {
 	/// detached processes.
 	pub(crate) fn new(
 		host: ExecHost,
+		blobs: BlobHost,
 		cwd_uri: Str,
 		resolvers: Arc<ResolverTable<UrlResolver>>,
 		settings: ShellSettings,
+		sandbox: SandboxSettings,
 		acp: AcpExecSlot,
 		acp_routing: bool,
 	) -> Self {
-		Self {
-			backend: ShellBackend::Local(host),
-			cwd_uri,
-			resolvers,
-			settings,
-			acp,
-			acp_routing,
-			acp_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+		if let Ok(uri) = Url::parse(&cwd_uri)
+			&& let Ok(root) = uri.to_file_path()
+		{
+			host.configure_sandbox(&sandbox, &root);
 		}
-	}
-
-	/// Binds shell execution to a retained Environment owner connection while
-	/// preserving this composition's URL resolvers and shell settings.
-	pub(crate) fn new_remote(
-		client: EnvClient,
-		cwd_uri: Str,
-		resolvers: Arc<ResolverTable<UrlResolver>>,
-		settings: ShellSettings,
-		acp: AcpExecSlot,
-		acp_routing: bool,
-	) -> Self {
 		Self {
-			backend: ShellBackend::Remote(client),
+			host,
+			blobs,
 			cwd_uri,
 			resolvers,
 			settings,
+			sandbox,
 			acp,
 			acp_routing,
 			acp_sessions: Arc::new(Mutex::new(BTreeMap::new())),
@@ -161,102 +151,32 @@ impl ShellExecHost {
 	}
 }
 impl ShellExecHost {
-	async fn shell_profile(&self) -> ShellProfileInput {
-		use super::shell_profile::capture;
-		let mut profile = self.settings.profile;
-		let mut executable = self
-			.settings
-			.executable
-			.as_deref()
-			.unwrap_or_default()
-			.to_owned();
-		if profile == ShellProfile::User && executable.is_empty() {
-			executable = env::var("SHELL")
-				.ok()
-				.filter(|shell| {
-					let path = Path::new(shell);
-					path.is_absolute()
-						&& path.is_file()
-						&& path
-							.file_name()
-							.and_then(|name| name.to_str())
-							.is_some_and(|name| matches!(name, "bash" | "zsh" | "fish"))
-				})
-				.unwrap_or_default();
-			if executable.is_empty() {
-				profile = ShellProfile::Brush;
-			}
-		}
-		if executable.is_empty() {
-			executable = match profile {
-				ShellProfile::Bash => String::from("bash"),
-				ShellProfile::Zsh => String::from("zsh"),
-				ShellProfile::Fish => String::from("fish"),
-				ShellProfile::Brush | ShellProfile::User => String::new(),
-			};
-		}
-		let profile_name: &'static str = profile.into();
-		let args = self
-			.settings
-			.args
-			.iter()
-			.filter(|argument| {
-				profile != ShellProfile::Fish || !matches!(argument.as_str(), "-l" | "--login")
-			})
-			.map(ToString::to_string)
-			.collect();
-		let snapshot_prefix =
-			if matches!(profile, ShellProfile::Bash | ShellProfile::Zsh | ShellProfile::User) {
-				let home = env::var_os("HOME").map(PathBuf::from);
-				match home {
-					Some(home) => capture(&executable, &home)
-						.await
-						.ok()
-						.flatten()
-						.map(|path| format!(". {} &&", shell_word(&path.to_string_lossy()))),
-					None => None,
-				}
-			} else {
-				None
-			};
-		let command_prefix = match (snapshot_prefix, self.settings.command_prefix.as_deref()) {
-			(Some(snapshot), Some(prefix)) => format!("{snapshot} {prefix}"),
-			(Some(snapshot), None) => snapshot,
-			(None, Some(prefix)) => prefix.to_owned(),
-			(None, None) => String::new(),
-		};
+	/// The only shell profile is the embedded in-process interpreter (ADR 0028);
+	/// the profile input carries just the configured command prefix.
+	fn shell_profile(&self) -> ShellProfileInput {
 		ShellProfileInput {
-			profile: profile_name.to_owned(),
-			executable,
-			args,
-			command_prefix,
-			env_delta: None,
-			login: self.settings.login && profile != ShellProfile::Fish,
-			wire_revision: omp_proto::SCHEMA_REV,
+			profile:        String::from("brush"),
+			executable:     String::new(),
+			args:           Vec::new(),
+			command_prefix: self
+				.settings
+				.command_prefix
+				.as_deref()
+				.unwrap_or_default()
+				.to_owned(),
+			env_delta:      None,
+			login:          false,
+			wire_revision:  omp_proto::SCHEMA_REV,
 		}
 	}
 
-	async fn detached_command(&self, command: &Str) -> String {
-		let profile = self.shell_profile().await;
-		let command = if profile.command_prefix.is_empty() {
-			command.to_string()
-		} else {
-			format!("{} {command}", profile.command_prefix)
-		};
-		if matches!(profile.profile.as_str(), "" | "brush") {
-			return command;
+	/// Detached processes run the same in-process interpreter; only the
+	/// configured command prefix is applied to the script.
+	fn detached_command(&self, command: &Str) -> String {
+		match self.settings.command_prefix.as_deref() {
+			Some(prefix) => format!("{prefix} {command}"),
+			None => command.to_string(),
 		}
-		let mut rendered = shell_word(&profile.executable);
-		for argument in profile.args {
-			rendered.push(' ');
-			rendered.push_str(&shell_word(&argument));
-		}
-		if profile.login {
-			rendered.push_str(" -l");
-		}
-		rendered.push_str(" -c ");
-		rendered.push_str(&shell_word(&command));
-		rendered
 	}
 
 	async fn expand_internal_uris(&self, input: &str, shell_source: bool) -> Result<Str, Fault> {
@@ -310,11 +230,15 @@ impl ShellExecHost {
 
 	async fn expand_environment(
 		&self,
-		environment: BTreeMap<Str, Str>,
-	) -> Result<BTreeMap<Str, Str>, Fault> {
+		environment: BTreeMap<Str, Option<Str>>,
+	) -> Result<BTreeMap<Str, Option<Str>>, Fault> {
 		let mut expanded = BTreeMap::new();
 		for (name, value) in environment {
-			expanded.insert(name, self.expand_internal_uris(value.as_str(), false).await?);
+			let value = match value {
+				Some(value) => Some(self.expand_internal_uris(value.as_str(), false).await?),
+				None => None,
+			};
+			expanded.insert(name, value);
 		}
 		Ok(expanded)
 	}
@@ -358,8 +282,8 @@ impl ShellExecHost {
 		Ok(Str::from(uri.to_string()))
 	}
 
-	async fn acp_command_prefix(&self, unset: &[String]) -> Str {
-		let profile = self.shell_profile().await;
+	fn acp_command_prefix(&self, unset: &[String]) -> Str {
+		let profile = self.shell_profile();
 		let mut prefix = String::new();
 		#[cfg(not(windows))]
 		{
@@ -390,7 +314,7 @@ impl ShellExecHost {
 	async fn environment(
 		&self,
 		cwd_uri: &str,
-		user: BTreeMap<Str, Str>,
+		user: BTreeMap<Str, Option<Str>>,
 		pty: bool,
 	) -> EnvironmentDelta {
 		use super::direnv::load;
@@ -413,7 +337,7 @@ impl ShellExecHost {
 }
 
 fn hardened_environment(
-	user: BTreeMap<Str, Str>,
+	user: BTreeMap<Str, Option<Str>>,
 	pty: bool,
 	direnv: Option<DirenvDelta>,
 ) -> EnvironmentDelta {
@@ -478,23 +402,39 @@ fn hardened_environment(
 	}) {
 		set.remove("CI");
 	}
-	let explicit = user.keys().cloned().collect::<BTreeSet<_>>();
-	set.extend(
-		user
-			.into_iter()
-			.map(|(key, value)| (key.to_string(), value.to_string())),
-	);
-	let unset = direnv
+	let mut unset = direnv
 		.into_iter()
 		.flat_map(|delta| delta.unset)
-		.filter(|key| !explicit.contains(key) && !set.contains_key(key.as_str()))
 		.map(|key| key.to_string())
-		.collect();
-	EnvironmentDelta { set, unset, props: None }
+		.collect::<BTreeSet<_>>();
+	for (key, value) in user {
+		let key = key.to_string();
+		match value {
+			Some(value) => {
+				unset.remove(&key);
+				set.insert(key, value.to_string());
+			},
+			None => {
+				set.remove(&key);
+				unset.insert(key);
+			},
+		}
+	}
+	EnvironmentDelta { set, unset: unset.into_iter().collect(), props: None }
 }
 
-fn shell_word(word: &str) -> String {
-	format!("'{}'", word.replace('\'', "'\\''"))
+fn command_environment(environment: BTreeMap<Str, Option<Str>>) -> EnvironmentDelta {
+	let mut set = BTreeMap::new();
+	let mut unset = Vec::new();
+	for (name, value) in environment {
+		match value {
+			Some(value) => {
+				set.insert(name.to_string(), value.to_string());
+			},
+			None => unset.push(name.to_string()),
+		}
+	}
+	EnvironmentDelta { set, unset, props: None }
 }
 
 fn valid_env_name(name: &str) -> bool {
@@ -519,26 +459,21 @@ fn named_process(started: v1::ProcessStarted) -> DetachedJob {
 fn cwd_fault(message: impl Into<Str>) -> Fault {
 	Fault::Resource { operation: sf!("cwd"), message: message.into() }
 }
-fn env_path(cwd_uri: &str) -> Result<EnvPath, Fault> {
-	let path = Url::parse(cwd_uri)
-		.map_err(|error| cwd_fault(format!("working-directory URI is invalid: {error}")))?
-		.to_file_path()
-		.map_err(|()| cwd_fault("working-directory URI is not a local file URI"))?;
-	EnvPath::new(Str::from(path.to_string_lossy().as_ref()))
-		.map_err(|error| cwd_fault(format!("working-directory path is invalid: {error}")))
-}
 /// Foreground shell run retaining the concrete host's process-tree guard.
 pub(crate) struct HostShellRun {
 	host: ExecHost,
 	run:  ExecRun,
 }
 
+impl HostShellRun {
+	fn new(host: ExecHost, run: ExecRun) -> Self {
+		Self { host, run }
+	}
+}
+
 impl ShellRun for HostShellRun {
 	async fn next_event(&mut self) -> Result<Option<RunEvent>, Fault> {
-		let Some(event) = self.run.next_event().await else {
-			return Ok(None);
-		};
-		map_event(event).map(Some)
+		self.run.next_event().await.map(map_event).transpose()
 	}
 
 	fn cancel(&self) -> impl Future<Output = Result<(), Fault>> + Send + '_ {
@@ -557,58 +492,6 @@ impl ShellRun for HostShellRun {
 	}
 }
 
-struct RemoteShellRun {
-	client: EnvClient,
-	run:    tokio::sync::Mutex<Option<ClientExecRun>>,
-	exec:   Mutex<Option<Bytes>>,
-}
-
-impl ShellRun for RemoteShellRun {
-	async fn next_event(&mut self) -> Result<Option<RunEvent>, Fault> {
-		let mut run = self.run.lock().await;
-		let Some(run) = run.as_mut() else {
-			return Ok(None);
-		};
-		let event = run
-			.next_event()
-			.await
-			.map_err(|error| protocol_fault("run", sf!("{error}")))?;
-		if let Some(ClientExecEvent::Started(started)) = &event {
-			*self.exec.lock() = Some(started.exec.clone());
-		}
-		event.map(map_client_event).transpose()
-	}
-
-	async fn cancel(&self) -> Result<(), Fault> {
-		if let Some(run) = self.run.lock().await.as_ref() {
-			run.guard().cancel();
-		}
-		Ok(())
-	}
-
-	async fn detach(&self, name: Str) -> Result<DetachedJob, Fault> {
-		let exec = self.exec.lock().clone().ok_or_else(|| Fault::Resource {
-			operation: sf!("detach_running"),
-			message:   sf!("remote execution has not started"),
-		})?;
-		let run = self
-			.run
-			.lock()
-			.await
-			.take()
-			.ok_or_else(|| Fault::Resource {
-				operation: sf!("detach_running"),
-				message:   sf!("remote execution is no longer active"),
-			})?;
-		self
-			.client
-			.detach_exec(run, exec, name.to_string())
-			.await
-			.map(named_process)
-			.map_err(|error| protocol_fault("detach_running", sf!("{error}")))
-	}
-}
-
 /// Foreground run selected from the capability-advertised ACP backend or the
 /// normal Environment host.
 pub struct SelectedShellRun {
@@ -617,7 +500,6 @@ pub struct SelectedShellRun {
 
 enum SelectedShellRunKind {
 	Host(HostShellRun),
-	Remote(RemoteShellRun),
 	Acp(AcpExecRun),
 }
 
@@ -625,7 +507,6 @@ impl ShellRun for SelectedShellRun {
 	async fn next_event(&mut self) -> Result<Option<RunEvent>, Fault> {
 		match &mut self.kind {
 			SelectedShellRunKind::Host(run) => run.next_event().await,
-			SelectedShellRunKind::Remote(run) => run.next_event().await,
 			SelectedShellRunKind::Acp(run) => match run.events.recv_async().await {
 				Ok(event) => event.map(Some),
 				Err(_) => Ok(None),
@@ -635,11 +516,7 @@ impl ShellRun for SelectedShellRun {
 
 	async fn cancel(&self) -> Result<(), Fault> {
 		match &self.kind {
-			SelectedShellRunKind::Host(run) => {
-				run.run.cancel();
-				Ok(())
-			},
-			SelectedShellRunKind::Remote(run) => run.cancel().await,
+			SelectedShellRunKind::Host(run) => run.cancel().await,
 			SelectedShellRunKind::Acp(run) => {
 				run.cancel.cancel();
 				Ok(())
@@ -654,7 +531,6 @@ impl ShellRun for SelectedShellRun {
 				.detach_exec(run.run.id(), &name)
 				.map(named_process)
 				.map_err(|error| resource_fault("detach_running", error)),
-			SelectedShellRunKind::Remote(run) => run.detach(name).await,
 			SelectedShellRunKind::Acp(_) => Err(Fault::Resource {
 				operation: sf!("detach_running"),
 				message:   sf!("ACP terminal runs remain foreground-owned by the editor"),
@@ -675,7 +551,11 @@ impl ShellExec for ShellExecHost {
 		let environment = self
 			.environment(&cwd_uri, self.expand_environment(options.env).await?, pty)
 			.await;
-		if self.acp_routing && self.acp.backend().is_some() && !pty {
+		if sandbox_authority_is_inactive(&self.sandbox)
+			&& self.acp_routing
+			&& self.acp.backend().is_some()
+			&& !pty
+		{
 			let cwd = Url::parse(&cwd_uri)
 				.ok()
 				.and_then(|uri| uri.to_file_path().ok())
@@ -685,12 +565,12 @@ impl ShellExec for ShellExecHost {
 				.iter()
 				.map(|(name, value)| (Str::from(name.as_str()), Str::from(value.as_str())))
 				.collect();
-			let command_prefix = self.acp_command_prefix(&environment.unset).await;
+			let unset = environment.unset;
 			let id = Bytes::from(format!("acp:{}", omp_core::Ulid::generate()));
 			self
 				.acp_sessions
 				.lock()
-				.insert(id.clone(), AcpSessionOptions { cwd, env, command_prefix });
+				.insert(id.clone(), AcpSessionOptions { cwd, env, unset });
 			return Ok(Session { id });
 		}
 		let request = OpenSessionRequest {
@@ -698,20 +578,14 @@ impl ShellExec for ShellExecHost {
 			env_delta: Some(environment),
 			pty: pty
 				.then(|| PtySpec { terminal: String::from("xterm-256color"), ..Default::default() }),
-			shell_profile: Some(self.shell_profile().await),
+			shell_profile: Some(self.shell_profile()),
 			..Default::default()
 		};
-		let opened =
-			match &self.backend {
-				ShellBackend::Local(host) => host
-					.open_session(request)
-					.await
-					.map_err(|error| resource_fault("open_session", error))?,
-				ShellBackend::Remote(client) => client
-					.open_session(&env_path(&cwd_uri)?, request)
-					.await
-					.map_err(|error| protocol_fault("open_session", sf!("{error}")))?,
-			};
+		let opened = self
+			.host
+			.open_session(request)
+			.await
+			.map_err(|error| resource_fault("open_session", error))?;
 		Ok(Session { id: opened.session })
 	}
 
@@ -723,20 +597,11 @@ impl ShellExec for ShellExecHost {
 			if self.acp_sessions.lock().remove(&session.id).is_some() {
 				return Ok(());
 			}
-			match &self.backend {
-				ShellBackend::Local(host) => host
-					.close_session(&session.id)
-					.map(|_| ())
-					.map_err(|error| resource_fault("close_session", error)),
-				ShellBackend::Remote(client) => client
-					.close_session(CloseSessionRequest {
-						session: session.id.clone(),
-						..Default::default()
-					})
-					.await
-					.map(|_| ())
-					.map_err(|error| protocol_fault("close_session", sf!("{error}"))),
-			}
+			self
+				.host
+				.close_session(&session.id)
+				.map(|_| ())
+				.map_err(|error| resource_fault("close_session", error))
 		}
 	}
 
@@ -748,55 +613,77 @@ impl ShellExec for ShellExecHost {
 		let command = self
 			.expand_internal_uris(request.command.as_str(), true)
 			.await?;
+		let environment = command_environment(self.expand_environment(request.environment).await?);
 		let acp_options = self.acp_sessions.lock().get(&session.id).cloned();
-		if let Some(options) = acp_options {
+		if sandbox_authority_is_inactive(&self.sandbox)
+			&& let Some(options) = acp_options
+		{
 			let backend = self.acp.backend().ok_or_else(|| Fault::Resource {
 				operation: sf!("run"),
 				message:   sf!("ACP terminal backend disconnected"),
 			})?;
+			let mut env = options.env;
+			env.extend(
+				environment
+					.set
+					.iter()
+					.map(|(name, value)| (Str::from(name.as_str()), Str::from(value.as_str()))),
+			);
+			let mut unset = options.unset;
+			unset.retain(|name| !environment.set.contains_key(name));
+			unset.extend(environment.unset.iter().cloned());
+			let command_prefix = self.acp_command_prefix(&unset);
 			return backend
 				.run(AcpExecRequest {
-					command:    if options.command_prefix.is_empty() {
+					command: if command_prefix.is_empty() {
 						command
 					} else {
-						sf!("{}{}", options.command_prefix, command)
+						sf!("{}{}", command_prefix, command)
 					},
-					cwd:        options.cwd,
-					env:        options.env,
+					cwd: options.cwd,
+					env,
 					timeout_ms: request.timeout_ms,
 				})
 				.await
 				.map(|run| SelectedShellRun { kind: SelectedShellRunKind::Acp(run) });
 		}
-		let exec_request = ExecRequest {
+		let mut exec_request = ExecRequest {
 			session: session.id.clone(),
 			source: Some(Script { text: command.to_string(), ..Default::default() }),
+			output_request: match tools::invocation_output_request() {
+				omp_tool::OutputRequest::Bounded => v1::OutputRequest::Bounded as i32,
+				omp_tool::OutputRequest::Complete => v1::OutputRequest::Complete as i32,
+			},
 			..Default::default()
 		};
-		match &self.backend {
-			ShellBackend::Local(host) => {
-				let (_, run) = host
-					.exec(exec_request, request.timeout_ms.map(Duration::from_millis))
-					.await
-					.map_err(|error| resource_fault("run", error))?;
-				Ok(SelectedShellRun {
-					kind: SelectedShellRunKind::Host(HostShellRun { host: host.clone(), run }),
-				})
-			},
-			ShellBackend::Remote(client) => {
-				let run = client
-					.exec(exec_request)
-					.await
-					.map_err(|error| protocol_fault("run", sf!("{error}")))?;
-				Ok(SelectedShellRun {
-					kind: SelectedShellRunKind::Remote(RemoteShellRun {
-						client: client.clone(),
-						run:    tokio::sync::Mutex::new(Some(run)),
-						exec:   Mutex::new(None),
-					}),
-				})
-			},
-		}
+		super::exec::set_run_environment(&mut exec_request, environment);
+		let (_, run) = self
+			.host
+			.exec(exec_request, request.timeout_ms.map(Duration::from_millis))
+			.await
+			.map_err(|error| resource_fault("run", error))?;
+		Ok(SelectedShellRun {
+			kind: SelectedShellRunKind::Host(HostShellRun::new(self.host.clone(), run)),
+		})
+	}
+
+	async fn store_attachment(&self, bytes: Bytes, media_type: Str) -> Result<BlobRef, Fault> {
+		let blobs = self.blobs.clone();
+		let id = tokio::task::spawn_blocking(move || blobs.put(&bytes))
+			.await
+			.map_err(|error| Fault::Resource {
+				operation: sf!("store_shell_attachment"),
+				message:   Str::new(error.to_string()),
+			})?
+			.map_err(|error| Fault::Resource {
+				operation: sf!("store_shell_attachment"),
+				message:   Str::new(error.to_string()),
+			})?;
+		Ok(BlobRef {
+			hash: Str::from(hex::encode(&id.hash).into_string()),
+			media_type,
+			byte_len: id.size,
+		})
 	}
 
 	async fn detach(&self, request: DetachRequest) -> Result<DetachedJob, Fault> {
@@ -814,10 +701,7 @@ impl ShellExec for ShellExecHost {
 		let start = StartProcess {
 			name: request.name.to_string(),
 			spec: Some(ProcessSpec {
-				source: Some(Script {
-					text: self.detached_command(&command).await,
-					..Default::default()
-				}),
+				source: Some(Script { text: self.detached_command(&command), ..Default::default() }),
 				cwd_uri: cwd_uri.to_string(),
 				env_delta: Some(environment),
 				pty: pty
@@ -831,29 +715,16 @@ impl ShellExec for ShellExecHost {
 			}),
 			..Default::default()
 		};
-		let started = match &self.backend {
-			ShellBackend::Local(host) => host
-				.start_process(start)
-				.await
-				.map_err(|error| resource_fault("detach", error))?,
-			ShellBackend::Remote(client) => client
-				.start_process(&env_path(&cwd_uri)?, start)
-				.await
-				.map_err(|error| protocol_fault("detach", sf!("{error}")))?,
-		};
+		let started = self
+			.host
+			.start_process(start)
+			.await
+			.map_err(|error| resource_fault("detach", error))?;
 		Ok(named_process(started))
 	}
 }
 
-fn map_client_event(event: ClientExecEvent) -> Result<RunEvent, Fault> {
-	match event {
-		ClientExecEvent::Started(started) => map_event(ExecEvent::Started { exec_id: started.exec }),
-		ClientExecEvent::Output(output) => map_event(ExecEvent::Output(output)),
-		ClientExecEvent::Exit(exit) => map_event(ExecEvent::Exit(exit)),
-	}
-}
-
-fn map_event(event: ExecEvent) -> Result<RunEvent, Fault> {
+pub(crate) fn map_event(event: ExecEvent) -> Result<RunEvent, Fault> {
 	match event {
 		ExecEvent::Started { exec_id } => Ok(RunEvent::Started { exec_id }),
 		ExecEvent::Output(frame) => {
@@ -873,8 +744,9 @@ fn map_event(event: ExecEvent) -> Result<RunEvent, Fault> {
 				data: CowBytes::owned(frame.data),
 				sequence: frame.sequence,
 				exec_id: frame.exec,
-				started: false,
-				terminal: channel == OutputChannel::Pty,
+				started: wire_bool(&frame.props, "acp/started").unwrap_or(false),
+				terminal: wire_bool(&frame.props, "acp/terminal")
+					.unwrap_or(channel == OutputChannel::Pty),
 			}))
 		},
 		ExecEvent::Exit(event) => {
@@ -907,12 +779,82 @@ fn map_event(event: ExecEvent) -> Result<RunEvent, Fault> {
 				wall_clock_ms: status.wall_clock_ms,
 				spilled_output,
 				aborted: status.aborted,
-				effects_unknown: false,
+				effects_unknown: wire_bool(&status.props, "acp/effects-unknown").unwrap_or(false),
+				diags: status
+					.diags
+					.into_iter()
+					.map(tool_diag)
+					.collect::<Result<Vec<_>, _>>()?,
 				final_cwd_uri: (!event.final_cwd_uri.is_empty())
 					.then(|| Str::from(event.final_cwd_uri)),
 				final_cwd_revision: event.final_cwd_revision,
 			}))
 		},
+	}
+}
+
+fn tool_diag(diag: v1::ToolDiag) -> Result<omp_tool::Diag, Fault> {
+	let severity = match v1::ToolDiagSeverity::try_from(diag.severity) {
+		Ok(v1::ToolDiagSeverity::Info) => omp_tool::Severity::Info,
+		Ok(v1::ToolDiagSeverity::Warn) => omp_tool::Severity::Warn,
+		Ok(v1::ToolDiagSeverity::Error) => omp_tool::Severity::Error,
+		Ok(v1::ToolDiagSeverity::Unspecified) | Err(_) => {
+			return Err(protocol_fault(
+				"next_event",
+				sf!("invalid tool diagnostic severity {}", diag.severity),
+			));
+		},
+	};
+	let omitted = diag
+		.omitted
+		.map(|omitted| {
+			let unit = match v1::ToolDiagUnit::try_from(omitted.unit) {
+				Ok(v1::ToolDiagUnit::Lines) => omp_tool::Unit::Lines,
+				Ok(v1::ToolDiagUnit::Rows) => omp_tool::Unit::Rows,
+				Ok(v1::ToolDiagUnit::Entries) => omp_tool::Unit::Entries,
+				Ok(v1::ToolDiagUnit::Files) => omp_tool::Unit::Files,
+				Ok(v1::ToolDiagUnit::Bytes) => omp_tool::Unit::Bytes,
+				Ok(v1::ToolDiagUnit::Chars) => omp_tool::Unit::Chars,
+				Ok(v1::ToolDiagUnit::Items) => omp_tool::Unit::Items,
+				Ok(v1::ToolDiagUnit::Unspecified) | Err(_) => {
+					return Err(protocol_fault(
+						"next_event",
+						sf!("invalid tool diagnostic unit {}", omitted.unit),
+					));
+				},
+			};
+			Ok(omp_tool::Omitted { count: omitted.count, unit })
+		})
+		.transpose()?;
+	Ok(omp_tool::Diag {
+		severity,
+		kind: Str::from(diag.kind),
+		text: Str::from(diag.text),
+		continuation: diag.continuation.map(Str::from),
+		artifact: diag.artifact.map(Str::from),
+		omitted,
+	})
+}
+
+fn sandbox_authority_is_inactive(sandbox: &SandboxSettings) -> bool {
+	sandbox.mode == ExecSandboxMode::Off
+		&& sandbox.environment_policy_is_default()
+		&& sandbox.read_mode == ReadMode::Host
+		&& sandbox.readable_roots.is_empty()
+		&& sandbox.read_deny.is_empty()
+		&& sandbox.read_deny_globs.is_empty()
+		&& sandbox.network_mode == SandboxNetworkMode::Disabled
+		&& sandbox.allow_domains.is_empty()
+		&& sandbox.deny_domains.is_empty()
+		&& sandbox.allow_ports == [80, 443]
+		&& !sandbox.allow_localhost
+		&& sandbox.allow_unix_sockets.is_empty()
+}
+
+fn wire_bool(props: &Option<omp_proto::inference::v1::ValueMap>, key: &str) -> Option<bool> {
+	match props.as_ref()?.fields.get(key)?.kind.as_ref()? {
+		value::Kind::Bool(value) => Some(*value),
+		_ => None,
 	}
 }
 
@@ -928,18 +870,321 @@ fn protocol_fault(operation: &'static str, message: impl Into<Str>) -> Fault {
 mod tests {
 	use super::*;
 
+	#[test]
+	fn exec_diagnostics_preserve_typed_recovery_fields_across_the_wire() {
+		let expected =
+			omp_tool::Diag::warn(omp_tool::DiagKind::Pagination, "More output is available.")
+				.continuation(":16")
+				.artifact("artifact://sha256/abcd")
+				.omitted(45, omp_tool::Unit::Lines);
+		let actual = tool_diag(crate::exec::wire_diag(&expected)).expect("valid diagnostic");
+		assert_eq!(actual, expected);
+	}
+
+	#[test]
+	fn acp_requires_all_sandbox_authority_to_be_inactive() {
+		assert!(sandbox_authority_is_inactive(&SandboxSettings::default()));
+		for sandbox in [
+			SandboxSettings { network_mode: SandboxNetworkMode::Open, ..SandboxSettings::default() },
+			SandboxSettings { network_mode: SandboxNetworkMode::Scoped, ..SandboxSettings::default() },
+			SandboxSettings {
+				allow_domains: vec![sf!("api.example.test")],
+				..SandboxSettings::default()
+			},
+			SandboxSettings {
+				allow_unix_sockets: vec![sf!("/tmp/service.sock")],
+				..SandboxSettings::default()
+			},
+		] {
+			assert!(!sandbox_authority_is_inactive(&sandbox));
+		}
+	}
+
 	fn test_host(root: &Path) -> ShellExecHost {
 		let root_uri = Url::from_directory_path(root)
 			.expect("workspace URI")
 			.to_string();
 		ShellExecHost::new(
 			ExecHost::new(),
+			BlobHost::open(root.join(".omp-test-blobs")).expect("blob host"),
 			Str::from(root_uri),
 			Arc::new(ResolverTable::default()),
 			ShellSettings::default(),
+			SandboxSettings::default(),
 			AcpExecSlot::default(),
 			false,
 		)
+	}
+
+	#[cfg(target_os = "macos")]
+	async fn approval_gated_sandbox_run(
+		root: &Path,
+	) -> (ShellExecHost, Session, SelectedShellRun, omp_agent::ApprovalInbox) {
+		std::fs::create_dir(root.join(".git")).expect("git carve-out");
+		let exec = ExecHost::new();
+		let book = Arc::new(omp_agent::ApprovalBook::new());
+		let (route, inbox) = omp_agent::ApprovalRoute::new(book, None);
+		exec.bind_sandbox_approval_route(Some(route));
+		let root_uri = Url::from_directory_path(root)
+			.expect("workspace URI")
+			.to_string();
+		let host = ShellExecHost::new(
+			exec,
+			BlobHost::open(root.join(".omp-test-blobs")).expect("blob host"),
+			Str::from(root_uri),
+			Arc::new(ResolverTable::default()),
+			ShellSettings::default(),
+			SandboxSettings { mode: ExecSandboxMode::WorkspaceWrite, ..SandboxSettings::default() },
+			AcpExecSlot::default(),
+			false,
+		);
+		let session = host
+			.open_session(SessionOptions::default())
+			.await
+			.expect("sandbox session");
+		let run = host
+			.run(&session, RunRequest {
+				command:     sf!("echo approved > .git/approved.txt"),
+				environment: BTreeMap::new(),
+				timeout_ms:  Some(5_000),
+			})
+			.await
+			.expect("sandboxed command starts");
+		(host, session, run, inbox)
+	}
+
+	#[cfg(target_os = "macos")]
+	async fn pending_sandbox_approval(
+		run: &mut SelectedShellRun,
+		inbox: &omp_agent::ApprovalInbox,
+	) -> omp_agent::ApprovalRequest {
+		loop {
+			let pending = run.next_event();
+			tokio::pin!(pending);
+			tokio::select! {
+				request = inbox.recv() => return request.expect("sandbox approval ticket"),
+				event = &mut pending => match event.expect("sandboxed command event") {
+					Some(RunEvent::Started { .. } | RunEvent::Output(_)) => {},
+					Some(RunEvent::Exit(status)) => {
+						panic!("sandboxed command exited before approval: {status:?}")
+					},
+					None => panic!("sandboxed command stream closed before approval"),
+				},
+			}
+		}
+	}
+
+	#[cfg(target_os = "macos")]
+	fn approve_sandbox_amendment(request: omp_agent::ApprovalRequest) {
+		request
+			.respond(omp_agent::ApprovalDecision {
+				approved:   true,
+				scope:      omp_agent::ApprovalScope::Once,
+				source:     omp_agent::ApprovalSource::User,
+				decided_by: Some(sf!("test approver")),
+				reason:     None,
+				audited:    false,
+			})
+			.expect("approve sandbox amendment");
+	}
+
+	#[cfg(target_os = "macos")]
+	async fn assert_cancelled_without_sandbox_amendment(run: &mut SelectedShellRun, root: &Path) {
+		let status = loop {
+			let event = run
+				.next_event()
+				.await
+				.expect("cancelled sandbox event")
+				.expect("cancelled terminal event");
+			match event {
+				RunEvent::Started { .. } | RunEvent::Output(_) => {},
+				RunEvent::Exit(status) => break status,
+			}
+		};
+		assert_eq!(status.outcome, ExecOutcome::Cancelled);
+		assert!(status.aborted);
+		assert!(
+			run.next_event()
+				.await
+				.expect("closed cancelled stream")
+				.is_none(),
+			"cancellation must not emit a second execution start"
+		);
+		assert!(
+			!root.join(".git/approved.txt").exists(),
+			"cancellation must not permit the approved scoped write"
+		);
+	}
+
+	#[cfg(target_os = "macos")]
+	#[tokio::test]
+	async fn cancelling_before_sandbox_approval_never_reruns() {
+		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
+			return;
+		}
+		let root = tempfile::tempdir().expect("workspace");
+		let (host, session, mut run, inbox) = approval_gated_sandbox_run(root.path()).await;
+		let request = pending_sandbox_approval(&mut run, &inbox).await;
+
+		run.cancel().await.expect("cancel sandboxed command");
+
+		assert_cancelled_without_sandbox_amendment(&mut run, root.path()).await;
+		drop(request);
+		host.close_session(&session).await.expect("close session");
+	}
+
+	#[cfg(target_os = "macos")]
+	#[tokio::test]
+	async fn cancelling_concurrent_with_sandbox_approval_never_reruns() {
+		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
+			return;
+		}
+		let root = tempfile::tempdir().expect("workspace");
+		let (host, session, mut run, inbox) = approval_gated_sandbox_run(root.path()).await;
+		let request = pending_sandbox_approval(&mut run, &inbox).await;
+
+		let approval = async move { approve_sandbox_amendment(request) };
+		let cancellation = run.cancel();
+		let (_, result) = tokio::join!(approval, cancellation);
+		result.expect("cancel sandboxed command");
+
+		assert_cancelled_without_sandbox_amendment(&mut run, root.path()).await;
+		host.close_session(&session).await.expect("close session");
+	}
+
+	#[cfg(target_os = "macos")]
+	#[tokio::test]
+	async fn cancelling_after_dropping_pending_sandbox_event_blocks_late_approval() {
+		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
+			return;
+		}
+		let root = tempfile::tempdir().expect("workspace");
+		let (host, session, mut run, inbox) = approval_gated_sandbox_run(root.path()).await;
+		let request = pending_sandbox_approval(&mut run, &inbox).await;
+
+		run.cancel().await.expect("cancel sandboxed command");
+		approve_sandbox_amendment(request);
+
+		assert_cancelled_without_sandbox_amendment(&mut run, root.path()).await;
+		host.close_session(&session).await.expect("close session");
+	}
+
+	#[cfg(target_os = "macos")]
+	#[tokio::test]
+	async fn approved_sandbox_denial_reruns_once_with_scoped_policy() {
+		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
+			return;
+		}
+		let root = tempfile::tempdir().expect("workspace");
+		std::fs::create_dir(root.path().join(".git")).expect("git carve-out");
+		let exec = ExecHost::new();
+		let book = Arc::new(omp_agent::ApprovalBook::new());
+		let (route, inbox) = omp_agent::ApprovalRoute::new(Arc::clone(&book), None);
+		exec.bind_sandbox_approval_route(Some(route));
+		let root_uri = Url::from_directory_path(root.path())
+			.expect("workspace URI")
+			.to_string();
+		let host = ShellExecHost::new(
+			exec,
+			BlobHost::open(root.path().join(".omp-test-blobs")).expect("blob host"),
+			Str::from(root_uri),
+			Arc::new(ResolverTable::default()),
+			ShellSettings::default(),
+			SandboxSettings { mode: ExecSandboxMode::WorkspaceWrite, ..SandboxSettings::default() },
+			AcpExecSlot::default(),
+			false,
+		);
+		let approver = tokio::spawn(async move {
+			let request = inbox.recv().await.expect("sandbox approval ticket");
+			let reason = request
+				.ticket
+				.reasons
+				.first()
+				.expect("sandbox approval reason");
+			assert_eq!(reason.kind, "sandbox_amendment");
+			assert!(
+				reason
+					.pattern
+					.as_deref()
+					.is_some_and(|command| command == "echo approved > .git/approved.txt")
+			);
+			assert!(reason.subject.ends_with(".git"));
+			assert!(
+				reason
+					.evidence
+					.iter()
+					.any(|fact| fact.ends_with(".git/approved.txt"))
+			);
+			request
+				.respond(omp_agent::ApprovalDecision {
+					approved:   true,
+					scope:      omp_agent::ApprovalScope::Once,
+					source:     omp_agent::ApprovalSource::User,
+					decided_by: Some(sf!("test approver")),
+					reason:     None,
+					audited:    false,
+				})
+				.expect("approve sandbox amendment");
+		});
+
+		let session = host
+			.open_session(SessionOptions::default())
+			.await
+			.expect("sandbox session");
+		let mut run = host
+			.run(&session, RunRequest {
+				command:     sf!("echo approved > .git/approved.txt"),
+				environment: BTreeMap::new(),
+				timeout_ms:  Some(5_000),
+			})
+			.await
+			.expect("sandboxed command starts");
+		let mut output = Vec::new();
+		let mut starts = 0;
+		let status = loop {
+			match run.next_event().await.expect("shell event") {
+				Some(RunEvent::Started { .. }) => starts += 1,
+				Some(RunEvent::Output(update)) => output.extend_from_slice(update.data.as_ref()),
+				Some(RunEvent::Exit(status)) => break status,
+				None => panic!("shell event stream closed before exit"),
+			}
+		};
+		approver.await.expect("approver task");
+		assert_eq!(starts, 2);
+		assert_eq!(
+			status.outcome,
+			ExecOutcome::Exited,
+			"output={}",
+			String::from_utf8_lossy(&output)
+		);
+		assert_eq!(status.exit_code, Some(0));
+		let output = String::from_utf8_lossy(&output);
+		assert!(output.contains("sandbox denied write"));
+		assert!(!output.contains("rerun with approved scope"));
+		assert!(
+			status
+				.diags
+				.iter()
+				.any(|diag| diag.text.contains("sandbox: rerun with approved scope"))
+		);
+		let mut restored = host
+			.run(&session, RunRequest {
+				command:     sf!("echo blocked > .git/blocked-again.txt"),
+				environment: BTreeMap::new(),
+				timeout_ms:  Some(5_000),
+			})
+			.await
+			.expect("restored sandboxed command starts");
+		let restored = loop {
+			match restored.next_event().await.expect("restored sandbox event") {
+				Some(RunEvent::Exit(status)) => break status,
+				Some(_) => {},
+				None => panic!("restored sandbox event stream closed before exit"),
+			}
+		};
+		assert_eq!(restored.outcome, ExecOutcome::Denied);
+		assert!(!root.path().join(".git/blocked-again.txt").exists());
+		host.close_session(&session).await.expect("close session");
 	}
 
 	#[tokio::test]
@@ -974,8 +1219,9 @@ mod tests {
 			.expect("denied scope permits non-PTY session");
 		let mut run = host
 			.run(&plain_session, RunRequest {
-				command:    sf!("printf scope-ok"),
-				timeout_ms: Some(5_000),
+				command:     sf!("printf scope-ok"),
+				environment: BTreeMap::new(),
+				timeout_ms:  Some(5_000),
 			})
 			.await
 			.expect("plain execution starts");

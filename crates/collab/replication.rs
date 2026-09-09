@@ -21,7 +21,7 @@ pub struct ReplicationPayload<'a> {
 	passes: u8,
 }
 
-impl<'a> ReplicationPayload<'a> {
+impl ReplicationPayload<'_> {
 	/// Returns the original borrowed value or its reduced owned shadow.
 	pub fn value(&self) -> &Value {
 		&self.value

@@ -6,13 +6,13 @@ use std::sync::{
 };
 
 use flume::Receiver;
+use omp_ai::call::AuthInput;
 use omp_core::Str;
-use omp_inference::call::AuthInput;
 
 /// Explanation shown when encrypted credential storage is unavailable.
 pub const CREDENTIAL_STORAGE_LOCKED_MESSAGE: &str =
 	"Credential storage is locked. Run interactively for owner-only local storage, or set \
-	 OMP_LLM_KEYCHAIN=1 to use the OS keychain.";
+	 OMP_LLM_KEY_SOURCE=os-keychain to use the OS keychain.";
 
 /// Kind of caller response requested by an authentication provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,7 +35,12 @@ pub enum AuthPromptKind {
 #[derive(Debug, Eq, PartialEq)]
 pub enum ChatAuthEvent {
 	/// Public browser authorization URL.
-	Url(Str),
+	Url {
+		/// Full provider authorization URL.
+		url:    Str,
+		/// Short loopback launch URL when a callback server is available.
+		launch: Option<Str>,
+	},
 	/// Short-lived device code and public verification URL.
 	DeviceCode {
 		/// Short-lived device code.
@@ -89,12 +94,19 @@ impl ChatAuth {
 	}
 
 	/// Starts one provider login unless another flow is already active.
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		name = "provider_auth_start",
+		fields(provider = %provider)
+	)]
 	pub fn start(&self, provider: Str) -> Result<(), &'static str> {
 		if self
 			.active
 			.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
 			.is_err()
 		{
+			tracing::debug!(provider = %provider, "provider authentication start lost active-flow race");
 			return Err("authentication is already in progress");
 		}
 		if self
@@ -103,8 +115,10 @@ impl ChatAuth {
 			.is_err()
 		{
 			self.active.store(false, Ordering::Release);
+			tracing::warn!("provider authentication worker unavailable");
 			return Err("authentication worker is unavailable");
 		}
+		tracing::debug!("provider authentication admitted");
 		Ok(())
 	}
 

@@ -1,10 +1,9 @@
-//! Pi-compatible whole-file writes over the session document host.
+//! Whole-file writes over the session document host.
 
 use std::{
 	collections::BTreeMap,
-	fmt::{self, Display, Write as _},
+	fmt::Write as _,
 	future,
-	future::Future,
 	sync::{
 		Arc,
 		atomic::{AtomicU8, Ordering},
@@ -15,10 +14,11 @@ use async_stream::stream;
 use bytes::Bytes;
 use futures::{FutureExt as _, Stream, pin_mut, select_biased};
 use omp_core::{Str, sf};
-use omp_hashline::format_hashline_header;
+use omp_edit::modes::hashline::format::format_hashline_header;
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, CommitError, Constraint, DocEffects, Effects, Ev, IncomingParams,
-	InterruptWaitError, ParamError, Part, PromptCaps, Rev, Tool, ToolSpec, ToolTerminal,
+	Abort, ArgIssue, ArgIssueKind, CommitError, Constraint, Diag, DiagKind, DocEffects, Effects, Ev,
+	IncomingParams, InterruptWaitError, ParamError, Part, PromptCaps, Rev, Tool, ToolSpec,
+	ToolTerminal, Unit,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -50,15 +50,16 @@ const DESCRIPTION: &str =
 	 `.tar.gz`/`.tgz`, and `.tar.zst` archive entries via `archive.ext:path/inside/archive`; other \
 	 archive formats (including `.asar`) are read-only\n- Supports SQLite row operations via \
 	 `db.sqlite:table` (insert), `db.sqlite:table:key` (update with JSON content, delete with \
-	 empty content)\n- Supports registered merge-conflict splices via `conflict://<id>` and \
+	 empty content)\n- Supports whole-file writes to configured or Obsidian-discovered \
+	 `vault://<name>/path` resources; Obsidian operations use `?op=create[&overwrite]`, \
+	 `?op=move&to=<path>`, `?op=delete[&permanent]`, or `?op=open[&newtab]` (the latter three \
+	 require empty content); partial selectors remain read-only\n- Supports registered \
+	 merge-conflict splices via `conflict://<id>` and \
 	 `@ours`/`@base`/`@theirs`/`@both`\n</conditions>\n\n<critical>\n- You SHOULD use Edit tool \
 	 for modifying existing files\n- You NEVER create documentation files (*.md, README) unless \
 	 explicitly requested\n- You NEVER use emojis unless requested\n</critical>";
-const EXECUTABLE_NOTICE: &str = "[Notice: Made executable via chmod +x]";
-const STRIPPED_NOTICE: &str =
-	"Note: auto-stripped hashline display prefixes from content before writing.";
 
-/// Model arguments for `write@1`.
+/// Model arguments for `write@2`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[schemars(description = "")]
 #[serde(deny_unknown_fields)]
@@ -87,7 +88,7 @@ pub enum WriteDisposition {
 	Overwrote,
 }
 
-/// Mutation family used to project pi's exact special-write response text.
+/// Mutation family used to project exact special-write response text.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WriteOperation {
@@ -228,20 +229,21 @@ pub struct ConflictBulkFailure {
 	pub message: Str,
 }
 
-/// Durable successful `write@1` result.
+/// Durable successful `write@2` result.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Payload {
 	/// Canonical absolute committed path.
 	pub resolved_path:      Str,
 	/// Stable model-facing committed path.
 	pub display_path:       Str,
-	/// Recovery notice when the authored target required lexical normalization.
+	/// Authored-to-canonical mapping when the target required lexical
+	/// normalization.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub canonical_recovery: Option<Str>,
 	/// Exact UTF-8 byte length persisted.
 	pub byte_len:           u64,
-	/// Pi-compatible JavaScript string length (UTF-16 code units) reported in
-	/// the model-facing success line.
+	/// JavaScript string length (UTF-16 code units) reported in the model-facing
+	/// success line.
 	pub reported_len:       u64,
 	/// Whether the transaction created or replaced the target.
 	pub disposition:        WriteDisposition,
@@ -255,21 +257,29 @@ pub struct Payload {
 	pub operation:          WriteOperation,
 }
 
-/// Durable typed `write@1` failure.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Durable typed `write@2` failure.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Fault {
 	/// A URI scheme has no writable resource implementation yet.
+	#[error("{scheme}:// targets are not supported yet")]
 	UnsupportedScheme {
 		/// Lowercase URI scheme without punctuation.
 		scheme: Str,
 	},
 	/// A malformed URI-like path was refused instead of becoming a local file.
+	#[error("{message}")]
 	UriLikeTarget {
 		/// Exact model-facing diagnostic.
 		message: Str,
 	},
 	/// An empty write was accidentally addressed to a read range.
+	#[error(
+		"write target '{target}' ends with a read-tool selector ':{selector}' and no such file \
+		 exists — refusing to create a literal file by that name. If you meant to read it, use \
+		 read({{ path: \"{target}\" }}). If you truly intend to create this file, pass its contents \
+		 in `content` (a non-empty write is never blocked)."
+	)]
 	ReadSelectorMisfire {
 		/// Original authored target.
 		target:   Str,
@@ -277,6 +287,11 @@ pub enum Fault {
 		selector: Str,
 	},
 	/// A semicolon-joined multi-read expression was passed as one write target.
+	#[error(
+		"write target '{target}' is a semicolon-joined list of {count} read-tool selectors, not a \
+		 filesystem path — refusing to create it. write creates a single file; issue one read() per \
+		 path to read these ranges (e.g. read({{ path: \"<one path>:<range>\" }}))."
+	)]
 	ReadSelectorListMisfire {
 		/// Original authored target.
 		target: Str,
@@ -284,37 +299,11 @@ pub enum Fault {
 		count:  usize,
 	},
 	/// The document resource rejected the request without changing the target.
+	#[error("{message}")]
 	Document {
 		/// Exact resource-owned explanation.
 		message: Str,
 	},
-}
-
-impl Display for Fault {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::UnsupportedScheme { scheme } => {
-				write!(formatter, "{scheme}:// targets are not supported yet")
-			},
-			Self::UriLikeTarget { message } | Self::Document { message } => {
-				formatter.write_str(message)
-			},
-			Self::ReadSelectorMisfire { target, selector } => write!(
-				formatter,
-				"write target '{target}' ends with a read-tool selector ':{selector}' and no such \
-				 file exists — refusing to create a literal file by that name. If you meant to read \
-				 it, use read({{ path: \"{target}\" }}). If you truly intend to create this file, \
-				 pass its contents in `content` (a non-empty write is never blocked)."
-			),
-			Self::ReadSelectorListMisfire { target, count } => write!(
-				formatter,
-				"write target '{target}' is a semicolon-joined list of {count} read-tool selectors, \
-				 not a filesystem path — refusing to create it. write creates a single file; issue \
-				 one read() per path to read these ranges (e.g. read({{ path: \"<one path>:<range>\" \
-				 }}))."
-			),
-		}
-	}
 }
 
 /// Resource failure classification for the effectful whole-file transaction.
@@ -413,7 +402,7 @@ impl Default for SpecialWriteControl {
 	}
 }
 
-/// Session document boundary used by `write@1`.
+/// Session document boundary used by `write@2`.
 ///
 /// Implementations MUST use the same transaction coordinator and hashline
 /// snapshot store as read/edit. A successful `write_plain` atomically creates
@@ -494,7 +483,7 @@ pub trait WriteDocuments: Send + Sync + 'static {
 	}
 }
 
-/// `write@1` executor.
+/// `write@2` executor.
 pub struct WriteTool<D> {
 	documents:       D,
 	conflicts:       Arc<ConflictRegistry>,
@@ -503,12 +492,42 @@ pub struct WriteTool<D> {
 	spec:            ToolSpec,
 }
 
+/// Returns the host-free `write@2` specification.
+pub fn spec() -> ToolSpec {
+	ToolSpec {
+		name:            sf!("write"),
+		rev:             Rev { family: Str::new(""), n: 2 },
+		description:     sf!(DESCRIPTION),
+		schema:          omp_tool::schema::<Params>(),
+		constraint:      Constraint::Schema {
+			priority:       100,
+			on_unsupported: omp_tool::Fallback::Unspecified,
+		},
+		effects:         Effects {
+			documents: Some(DocEffects {
+				read:        true,
+				write_globs: [sf!("**")].into_iter().collect(),
+			}),
+			exec:      None,
+			inference: None,
+			desktop:   None,
+			subagents: 0,
+		},
+		projection_code: omp_tool::native_projection_code(
+			env!("CARGO_PKG_NAME"),
+			env!("CARGO_PKG_VERSION"),
+			include_bytes!("write.rs"),
+		)
+		.into(),
+	}
+}
+
 /// Construct the built-in whole-file write tool.
 pub fn tool<D: WriteDocuments>(documents: D) -> WriteTool<D> {
 	tool_with_conflicts(documents, Arc::new(ConflictRegistry::default()))
 }
 
-/// Construct `write@1` sharing conflict registrations with `read@1`.
+/// Construct `write@2` sharing conflict registrations with `read@2`.
 pub fn tool_with_conflicts<D: WriteDocuments>(
 	documents: D,
 	conflicts: Arc<ConflictRegistry>,
@@ -516,45 +535,14 @@ pub fn tool_with_conflicts<D: WriteDocuments>(
 	tool_with_policy_and_conflicts(documents, conflicts, FormatPolicy::BestEffort, true)
 }
 
-/// Constructs `write@1` with frozen formatting policy and shared conflicts.
+/// Constructs `write@2` with frozen formatting policy and shared conflicts.
 pub fn tool_with_policy_and_conflicts<D: WriteDocuments>(
 	documents: D,
 	conflicts: Arc<ConflictRegistry>,
 	format_policy: FormatPolicy,
 	guard_generated: bool,
 ) -> WriteTool<D> {
-	WriteTool {
-		documents,
-		conflicts,
-		format_policy,
-		guard_generated,
-		spec: ToolSpec {
-			name:            sf!("write"),
-			rev:             Rev { family: Str::new(""), n: 1 },
-			description:     sf!(DESCRIPTION),
-			schema:          omp_tool::schema::<Params>(),
-			constraint:      Constraint::Schema {
-				priority:       100,
-				on_unsupported: omp_tool::Fallback::Unspecified,
-			},
-			effects:         Effects {
-				documents: Some(DocEffects {
-					read:        true,
-					write_globs: [sf!("**")].into_iter().collect(),
-				}),
-				exec:      None,
-				inference: None,
-				desktop:   None,
-				subagents: 0,
-			},
-			projection_code: omp_tool::native_projection_code(
-				env!("CARGO_PKG_NAME"),
-				env!("CARGO_PKG_VERSION"),
-				include_bytes!("write.rs"),
-			)
-			.into(),
-		},
-	}
+	WriteTool { documents, conflicts, format_policy, guard_generated, spec: spec() }
 }
 
 impl<D: WriteDocuments> Tool for WriteTool<D> {
@@ -572,445 +560,466 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 		mut params: IncomingParams<'c>,
 	) -> impl Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
 		stream! {
-							let arguments = match params.whole::<Params>().await {
-								Ok(arguments) => arguments,
-								Err(error) => {
-									yield param_event(error);
-									return;
-								},
-							};
-							let authored_path = unwrap_hashline_header_path(&arguments.path);
-							let normalized = normalize_target(authored_path, None, HostPaths::current());
-							let path = normalized.canonical.clone();
-							let canonical_recovery = normalized.recovery_notice();
-							let conflict_request = match parse_uri(&path) {
-														Ok(Some(uri))
-									if uri.scheme == Scheme::Conflict && uri.resource == "*" =>
-								{
-									None
-								},
-		Ok(Some(uri)) if uri.scheme == Scheme::Conflict => {
-									if uri.selector_text.is_some() || uri.resource.contains('/') {
-										yield done(Err(Fault::UriLikeTarget {
-											message: sf!(
-												"Conflict splices target conflict://<id> without a scope or read selector",
-											),
-										}));
-										return;
-									}
-									let address = match parse_conflict_address(uri.resource) {
-										Ok(address) => address,
-										Err(fault) => {
-											yield done(Err(Fault::Document { message: fault.message().clone() }));
-											return;
-										},
-									};
-									let Some(entry) = self.conflicts.get(address.id) else {
-										yield done(Err(Fault::Document {
-											message: sf!(
-												"Conflict #{} is no longer registered",
-												address.id
-											),
-										}));
-										return;
-									};
-									Some(ConflictSpliceRequest {
-										entry,
-										replacement: parse_replacement(arguments.content.clone()),
-									})
-								},
-								Ok(_) => None,
-								Err(error) => {
-									yield done(Err(Fault::UriLikeTarget { message: Str::new(error.to_string()) }));
-									return;
-								},
-							};
-							let stripped = strip_write_content(&arguments.content);
-							let reported_len =
-								u64::try_from(stripped.text.encode_utf16().count()).unwrap_or(u64::MAX);
+			let arguments = match params.whole::<Params>().await {
+				Ok(arguments) => arguments,
+				Err(error) => {
+					yield param_event(error);
+					return;
+				},
+			};
+			let authored_path = unwrap_hashline_header_path(&arguments.path);
+			let normalized = normalize_target(authored_path, None, HostPaths::current());
+			let path = normalized.canonical.clone();
+			let canonical_recovery = normalized
+				.recovered()
+				.then(|| sf!("{} -> {}", normalized.authored, normalized.canonical));
+			let conflict_request = match parse_uri(&path) {
+				Ok(Some(uri))
+				if uri.scheme == Scheme::Conflict && uri.resource == "*" =>
+				{
+					None
+				},
+				Ok(Some(uri)) if uri.scheme == Scheme::Conflict => {
+					if uri.selector_text.is_some() || uri.resource.contains('/') {
+						yield done(Err(Fault::UriLikeTarget {
+							message: sf!(
+								"Conflict splices target conflict://<id> without a scope or read selector",
+							),
+						}));
+						return;
+					}
+					let address = match parse_conflict_address(uri.resource) {
+						Ok(address) => address,
+						Err(fault) => {
+							yield done(Err(Fault::Document { message: fault.message().clone() }));
+							return;
+						},
+					};
+					let Some(entry) = self.conflicts.get(address.id) else {
+						yield done(Err(Fault::Document {
+							message: sf!(
+								"Conflict #{} is no longer registered",
+								address.id
+							),
+						}));
+						return;
+					};
+					Some(ConflictSpliceRequest {
+						entry,
+						replacement: parse_replacement(arguments.content.clone()),
+					})
+				},
+				Ok(_) => None,
+				Err(error) => {
+					yield done(Err(Fault::UriLikeTarget { message: Str::new(error.to_string()) }));
+					return;
+				},
+			};
+			let stripped = strip_write_content(&arguments.content);
+			let reported_len =
+				u64::try_from(stripped.text.encode_utf16().count()).unwrap_or(u64::MAX);
 
-							match params.interruptable().committed().await {
-								Ok(_) => {},
-								Err(error) => {
-									yield commit_event(error);
-									return;
-								},
+			match params.interruptable().committed().await {
+				Ok(_) => {},
+				Err(error) => {
+					yield commit_event(error);
+					return;
+				},
+			}
+
+
+			if path == "conflict://*" {
+				let entries = self.conflicts.entries();
+				if entries.is_empty() {
+					yield done(Err(Fault::Document {
+						message: sf!("conflict://* has no registered conflicts to resolve"),
+					}));
+					return;
+				}
+				let directives = match parse_bulk_directives(&arguments.content) {
+					Ok(directives) => directives,
+					Err(fault) => {
+						yield done(Err(Fault::Document { message: fault.message().clone() }));
+						return;
+					},
+				};
+				if let Some(directives) = &directives {
+					let unknown = directives
+						.keys()
+						.filter(|id| !entries.iter().any(|entry| entry.id == **id))
+						.copied()
+						.collect::<Vec<_>>();
+					if !unknown.is_empty() {
+						yield done(Err(Fault::Document {
+							message: sf!(
+								"Bulk directive references unknown conflict ids: {:?}",
+								unknown
+							),
+						}));
+						return;
+					}
+				}
+				let uniform = parse_replacement(stripped.text.clone());
+				let mut by_file = BTreeMap::<Str, Vec<_>>::new();
+				for entry in entries {
+					let replacement = match &directives {
+						Some(directives) => {
+							let Some(replacement) = directives.get(&entry.id) else {
+								continue;
+							};
+							replacement.clone()
+						},
+						None => uniform.clone(),
+					};
+					by_file
+						.entry(entry.display_path.clone())
+						.or_default()
+						.push((entry, replacement));
+				}
+				if by_file.is_empty() {
+					yield done(Err(Fault::Document {
+						message: sf!("conflict://* directive block selected no conflicts"),
+					}));
+					return;
+				}
+				let mut succeeded = Vec::new();
+				let mut failed = Vec::new();
+				let mut resolved = 0usize;
+				let mut echo_trimmed = 0usize;
+				let mut byte_len = 0u64;
+				for (display_path, entries) in by_file {
+					let request =
+						ConflictBulkFileRequest { display_path: display_path.clone(), entries };
+					match self.documents.splice_conflict_file(request).await {
+						Ok(Some(result)) => {
+							for id in &result.resolved_ids {
+								self.conflicts.remove(*id);
 							}
-
-
-							if path == "conflict://*" {
-								let entries = self.conflicts.entries();
-								if entries.is_empty() {
-									yield done(Err(Fault::Document {
-										message: sf!("conflict://* has no registered conflicts to resolve"),
-									}));
-									return;
-								}
-								let directives = match parse_bulk_directives(&arguments.content) {
-									Ok(directives) => directives,
-									Err(fault) => {
-										yield done(Err(Fault::Document { message: fault.message().clone() }));
-										return;
-									},
-								};
-								if let Some(directives) = &directives {
-									let unknown = directives
-										.keys()
-										.filter(|id| !entries.iter().any(|entry| entry.id == **id))
-										.copied()
-										.collect::<Vec<_>>();
-									if !unknown.is_empty() {
-										yield done(Err(Fault::Document {
-											message: sf!(
-												"Bulk directive references unknown conflict ids: {:?}",
-												unknown
-											),
-										}));
-										return;
-									}
-								}
-								let uniform = parse_replacement(stripped.text.clone());
-								let mut by_file = BTreeMap::<Str, Vec<_>>::new();
-								for entry in entries {
-									let replacement = match &directives {
-										Some(directives) => {
-											let Some(replacement) = directives.get(&entry.id) else {
-												continue;
-											};
-											replacement.clone()
-										},
-										None => uniform.clone(),
-									};
-									by_file
-										.entry(entry.display_path.clone())
-										.or_default()
-										.push((entry, replacement));
-								}
-								if by_file.is_empty() {
-									yield done(Err(Fault::Document {
-										message: sf!("conflict://* directive block selected no conflicts"),
-									}));
-									return;
-								}
-								let mut succeeded = Vec::new();
-								let mut failed = Vec::new();
-								let mut resolved = 0usize;
-								let mut echo_trimmed = 0usize;
-								let mut byte_len = 0u64;
-								for (display_path, entries) in by_file {
-									let request =
-										ConflictBulkFileRequest { display_path: display_path.clone(), entries };
-									match self.documents.splice_conflict_file(request).await {
-										Ok(Some(result)) => {
-											for id in &result.resolved_ids {
-												self.conflicts.remove(*id);
-											}
-											resolved = resolved.saturating_add(result.resolved_ids.len());
-											echo_trimmed =
-												echo_trimmed.saturating_add(result.echo_trimmed);
-											byte_len = byte_len.saturating_add(result.write.byte_len);
-											succeeded.push(display_path);
-										},
-										Ok(None) => {
-											failed.push(ConflictBulkFailure {
-												path: display_path,
-												message: sf!(
-													"bulk conflict splices are unavailable in this deployment"
-												),
-											});
-										},
-										Err(WriteCommitError::Rejected(fault)) => {
-											failed.push(ConflictBulkFailure {
-												path: display_path,
-												message: Str::new(fault.to_string()),
-											});
-										},
-										Err(WriteCommitError::EffectsUnknown { reason }) => {
-											yield Ev::Aborted(Abort::EffectsUnknown {
-												reason: sf!(
-													"bulk conflict resolution committed {} files before \
+							resolved = resolved.saturating_add(result.resolved_ids.len());
+							echo_trimmed =
+								echo_trimmed.saturating_add(result.echo_trimmed);
+							byte_len = byte_len.saturating_add(result.write.byte_len);
+							succeeded.push(display_path);
+						},
+						Ok(None) => {
+							failed.push(ConflictBulkFailure {
+								path: display_path,
+								message: sf!(
+									"bulk conflict splices are unavailable in this deployment"
+								),
+							});
+						},
+						Err(WriteCommitError::Rejected(fault)) => {
+							failed.push(ConflictBulkFailure {
+								path: display_path,
+								message: Str::new(fault.to_string()),
+							});
+						},
+						Err(WriteCommitError::EffectsUnknown { reason }) => {
+							yield Ev::Aborted(Abort::EffectsUnknown {
+								reason: sf!(
+									"bulk conflict resolution committed {} files before \
 													 an uncertain outcome for {display_path}: {reason}",
-													succeeded.len()
-												),
-											});
-											return;
-										},
-									}
-								}
-								if succeeded.is_empty() {
-									let mut message =
-										String::from("conflict://* left every file unchanged:");
-									for failure in &failed {
-										write!(message, "\n  {}: {}", failure.path, failure.message)
-											.expect("writing to String cannot fail");
-									}
-									yield done(Err(Fault::Document { message: Str::new(message) }));
-									return;
-								}
-								yield done(Ok(Payload {
-									resolved_path: path.clone(),
-									display_path: path.clone(),
-									canonical_recovery,
-									byte_len,
-									reported_len,
-									disposition: WriteDisposition::Overwrote,
-									stripped_wrapper: stripped.stripped,
-									made_executable: false,
-									snapshot_tag: None,
-									operation: WriteOperation::ConflictBulk {
-										resolved,
-										succeeded,
-										failed,
-										echo_trimmed,
-									},
-								}));
-								return;
-							}
-							if conflict_request.is_none()
-								&& retired_device_syntax(&path)
-								&& let Some(fault) = reject_uri_like_target(&path)
-							{
-								yield done(Err(fault));
-								return;
-							}
-		let resource_request = match route_resource_mutation(&path, stripped.text.clone()) {
-								Ok(request) => request,
-								Err(error) => {
-									yield done(Err(Fault::Document { message: Str::new(error.to_string()) }));
-									return;
+									succeeded.len()
+								),
+							});
+							return;
+						},
+					}
+				}
+				if succeeded.is_empty() {
+					let mut message =
+						String::from("conflict://* left every file unchanged:");
+					for failure in &failed {
+						write!(message, "\n  {}: {}", failure.path, failure.message)
+							.expect("writing to String cannot fail");
+					}
+					yield done(Err(Fault::Document { message: Str::new(message) }));
+					return;
+				}
+				let payload = Payload {
+					resolved_path: path.clone(),
+					display_path: path.clone(),
+					canonical_recovery,
+					byte_len,
+					reported_len,
+					disposition: WriteDisposition::Overwrote,
+					stripped_wrapper: stripped.stripped,
+					made_executable: false,
+					snapshot_tag: None,
+					operation: WriteOperation::ConflictBulk {
+						resolved,
+						succeeded,
+						failed,
+						echo_trimmed,
+					},
+				};
+				for diag in diags(&payload) {
+					yield Ev::Diag(diag);
+				}
+				yield done(Ok(payload));
+				return;
+			}
+			let resource_request = match route_resource_mutation(&path, stripped.text.clone()) {
+				Ok(request) => request,
+				Err(error) => {
+					yield done(Err(Fault::Document { message: Str::new(error.to_string()) }));
+					return;
+				},
+			};
+			if let Some(request) = resource_request {
+				let operation = self.documents.write_resource(request).fuse();
+				let interruption = params.next_interrupt().fuse();
+				pin_mut!(operation, interruption);
+				select_biased! {
+					result = operation => match result {
+						Ok(Some(receipt)) => {
+							let payload = Payload {
+								resolved_path: receipt.canonical_uri.clone(),
+								display_path: receipt.canonical_uri.clone(),
+								canonical_recovery,
+								byte_len: receipt.byte_len,
+								reported_len,
+								disposition: WriteDisposition::Overwrote,
+								stripped_wrapper: stripped.stripped,
+								made_executable: false,
+								snapshot_tag: None,
+								operation: WriteOperation::Resource {
+									uri: receipt.canonical_uri,
+									revision: receipt.revision,
 								},
 							};
-							if let Some(request) = resource_request {
-								let operation = self.documents.write_resource(request).fuse();
-								let interruption = params.next_interrupt().fuse();
-								pin_mut!(operation, interruption);
-								select_biased! {
-									result = operation => match result {
-										Ok(Some(receipt)) => {
-											yield done(Ok(Payload {
-												resolved_path: receipt.canonical_uri.clone(),
-												display_path: receipt.canonical_uri.clone(),
-												canonical_recovery,
-												byte_len: receipt.byte_len,
-												reported_len,
-												disposition: WriteDisposition::Overwrote,
-												stripped_wrapper: stripped.stripped,
-												made_executable: false,
-												snapshot_tag: None,
-												operation: WriteOperation::Resource {
-													uri: receipt.canonical_uri,
-													revision: receipt.revision,
-												},
-											}));
-											return;
-										},
-										Ok(None) => {
-											yield done(Err(Fault::UnsupportedScheme {
-												scheme: Str::new(path.split_once(':').map_or("resource", |(scheme, _)| scheme)),
-											}));
-											return;
-										},
-										Err(WriteCommitError::Rejected(fault)) => {
-											yield done(Err(fault));
-											return;
-										},
-										Err(WriteCommitError::EffectsUnknown { reason }) => {
-											yield Ev::Aborted(Abort::EffectsUnknown { reason });
-											return;
-										},
-									},
-									interrupt = interruption => {
-										yield interrupt_event(interrupt, true);
-										return;
-									},
-								}
+							for diag in diags(&payload) {
+								yield Ev::Diag(diag);
 							}
-							if conflict_request.is_none() && let Some(fault) = reject_uri_like_target(&path) {
-								yield done(Err(fault));
-								return;
-							}
-				if let Some(request) = conflict_request {
-								let id = request.entry.id;
-								let operation = self.documents.splice_conflict(request).fuse();
-								let interruption = params.next_interrupt().fuse();
-								pin_mut!(operation, interruption);
-								select_biased! {
-									result = operation => match result {
-										Ok(Some(result)) => {
-											self.conflicts.remove(id);
-											yield done(Ok(Payload {
-												resolved_path: result.write.resolved_path,
-												display_path: result.write.display_path,
-												canonical_recovery: canonical_recovery.clone(),
-												byte_len: result.write.byte_len,
-												reported_len,
-												disposition: result.write.disposition,
-												stripped_wrapper: stripped.stripped,
-												made_executable: result.write.made_executable,
-												snapshot_tag: result.write.snapshot_tag,
-												operation: WriteOperation::ConflictSplice {
-													id,
-													start_line: result.range.0,
-													end_line: result.range.1,
-																							echo_trimmed: result.echo_trimmed,
-		},
-											}));
-										},
-										Ok(None) => yield done(Err(Fault::Document {
-											message: sf!(
-												"conflict:// writes are unavailable in this deployment",
-											),
-										})),
-										Err(WriteCommitError::Rejected(fault)) => yield done(Err(fault)),
-										Err(WriteCommitError::EffectsUnknown { reason }) => {
-											yield Ev::Aborted(Abort::EffectsUnknown { reason });
-										},
-									},
-									interrupt = interruption => {
-										yield interrupt_event(interrupt, true);
-									},
-								}
-								return;
-							}
-
-							let archive_result = {
-								let control = SpecialWriteControl::new();
-								let operation = self.documents.write_archive_member(
-									path.clone(),
-									Bytes::copy_from_slice(stripped.text.as_bytes()),
-									control.clone(),
-								).fuse();
-								let interruption = params.next_interrupt().fuse();
-								pin_mut!(operation, interruption);
-								select_biased! {
-									result = operation => match result {
-										Ok(result) => result,
-										Err(fault) => {
-											yield done(Err(Fault::Document { message: fault.message }));
-											return;
-										},
-									},
-									interrupt = interruption => {
-										let effects_started =
-											control.cancel() == SpecialWriteCancellation::EffectsUnknown;
-										yield interrupt_event(interrupt, effects_started);
-										return;
-									},
-								}
-							};
-							if let Some(result) = archive_result {
-								yield done(Ok(special_payload(
-									result,
-									stripped.stripped,
-									reported_len,
-									canonical_recovery.clone(),
-								)));
-								return;
-							}
-
-							let sqlite_result = {
-								let control = SpecialWriteControl::new();
-								let operation = self.documents.write_sqlite_row(
-									path.clone(),
-									stripped.text.clone(),
-									control.clone(),
-								).fuse();
-								let interruption = params.next_interrupt().fuse();
-								pin_mut!(operation, interruption);
-								select_biased! {
-									result = operation => match result {
-										Ok(result) => result,
-										Err(fault) => {
-											yield done(Err(Fault::Document { message: fault.message }));
-											return;
-										},
-									},
-									interrupt = interruption => {
-										let effects_started =
-											control.cancel() == SpecialWriteCancellation::EffectsUnknown;
-										yield interrupt_event(interrupt, effects_started);
-										return;
-									},
-								}
-							};
-							if let Some(result) = sqlite_result {
-								yield done(Ok(special_payload(
-									result,
-									stripped.stripped,
-									reported_len,
-									canonical_recovery.clone(),
-								)));
-								return;
-							}
-
-							let literal = {
-								let probe = self.documents.probe_literal(path.clone()).fuse();
-								let interruption = params.next_interrupt().fuse();
-								pin_mut!(probe, interruption);
-								select_biased! {
-									result = probe => match result {
-										Ok(result) => result,
-										Err(fault) => {
-											yield done(Err(fault));
-											return;
-										},
-									},
-									interrupt = interruption => {
-										yield interrupt_event(interrupt, false);
-										return;
-									},
-								}
-							};
-							if literal == LiteralPathProbe::Missing {
-								if let Some(count) = read_selector_list_misfire(&path) {
-									yield done(Err(Fault::ReadSelectorListMisfire { target: path, count }));
-									return;
-								}
-								if stripped.text.is_empty() {
-									let split = crate::read::selector::split_path_and_selector(&path);
-									if let Some(selector) = split.selector.map(Str::new) {
-										yield done(Err(Fault::ReadSelectorMisfire {
-											target: path.clone(),
-											selector,
-										}));
-										return;
-									}
-								}
-							}
-
-							let request = PlainWriteRequest {
-								path,
-								content: stripped.text,
-								format_policy: self.format_policy,
-								guard_generated: self.guard_generated,
-							};
-							let operation = self.documents.write_plain(request).fuse();
-							let interruption = params.next_interrupt().fuse();
-							pin_mut!(operation, interruption);
-							select_biased! {
-								result = operation => match result {
-									Ok(result) => yield done(Ok(Payload {
-										resolved_path: result.resolved_path,
-										display_path: result.display_path,
-										canonical_recovery,
-										byte_len: result.byte_len,
-										reported_len,
-										disposition: result.disposition,
-										stripped_wrapper: stripped.stripped,
-										made_executable: result.made_executable,
-										snapshot_tag: result.snapshot_tag,
-										operation: WriteOperation::Plain,
-									})),
-									Err(WriteCommitError::Rejected(fault)) => yield done(Err(fault)),
-									Err(WriteCommitError::EffectsUnknown { reason }) => {
-										yield Ev::Aborted(Abort::EffectsUnknown { reason });
-									},
+							yield done(Ok(payload));
+							return;
+						},
+						Ok(None) => {
+							yield done(Err(Fault::UnsupportedScheme {
+								scheme: Str::new(path.split_once(':').map_or("resource", |(scheme, _)| scheme)),
+							}));
+							return;
+						},
+						Err(WriteCommitError::Rejected(fault)) => {
+							yield done(Err(fault));
+							return;
+						},
+						Err(WriteCommitError::EffectsUnknown { reason }) => {
+							yield Ev::Aborted(Abort::EffectsUnknown { reason });
+							return;
+						},
+					},
+					interrupt = interruption => {
+						yield interrupt_event(interrupt, true);
+						return;
+					},
+				}
+			}
+			if conflict_request.is_none() && let Some(fault) = reject_uri_like_target(&path) {
+				yield done(Err(fault));
+				return;
+			}
+			if let Some(request) = conflict_request {
+				let id = request.entry.id;
+				let operation = self.documents.splice_conflict(request).fuse();
+				let interruption = params.next_interrupt().fuse();
+				pin_mut!(operation, interruption);
+				select_biased! {
+					result = operation => match result {
+						Ok(Some(result)) => {
+							self.conflicts.remove(id);
+							let payload = Payload {
+								resolved_path: result.write.resolved_path,
+								display_path: result.write.display_path,
+								canonical_recovery: canonical_recovery.clone(),
+								byte_len: result.write.byte_len,
+								reported_len,
+								disposition: result.write.disposition,
+								stripped_wrapper: stripped.stripped,
+								made_executable: result.write.made_executable,
+								snapshot_tag: result.write.snapshot_tag,
+								operation: WriteOperation::ConflictSplice {
+									id,
+									start_line: result.range.0,
+									end_line: result.range.1,
+									echo_trimmed: result.echo_trimmed,
 								},
-								interrupt = interruption => {
-									yield interrupt_event(interrupt, true);
-								},
+							};
+							for diag in diags(&payload) {
+								yield Ev::Diag(diag);
 							}
+							yield done(Ok(payload));
+						},
+						Ok(None) => yield done(Err(Fault::Document {
+							message: sf!(
+								"conflict:// writes are unavailable in this deployment",
+							),
+						})),
+						Err(WriteCommitError::Rejected(fault)) => yield done(Err(fault)),
+						Err(WriteCommitError::EffectsUnknown { reason }) => {
+							yield Ev::Aborted(Abort::EffectsUnknown { reason });
+						},
+					},
+					interrupt = interruption => {
+						yield interrupt_event(interrupt, true);
+					},
+				}
+				return;
+			}
+
+			let archive_result = {
+				let control = SpecialWriteControl::new();
+				let operation = self.documents.write_archive_member(
+					path.clone(),
+					Bytes::copy_from_slice(stripped.text.as_bytes()),
+					control.clone(),
+				).fuse();
+				let interruption = params.next_interrupt().fuse();
+				pin_mut!(operation, interruption);
+				select_biased! {
+					result = operation => match result {
+						Ok(result) => result,
+						Err(fault) => {
+							yield done(Err(Fault::Document { message: fault.message }));
+							return;
+						},
+					},
+					interrupt = interruption => {
+						let effects_started =
+							control.cancel() == SpecialWriteCancellation::EffectsUnknown;
+						yield interrupt_event(interrupt, effects_started);
+						return;
+					},
+				}
+			};
+			if let Some(result) = archive_result {
+				let payload = special_payload(
+					result,
+					stripped.stripped,
+					reported_len,
+					canonical_recovery.clone(),
+				);
+				for diag in diags(&payload) {
+					yield Ev::Diag(diag);
+				}
+				yield done(Ok(payload));
+				return;
+			}
+
+			let sqlite_result = {
+				let control = SpecialWriteControl::new();
+				let operation = self.documents.write_sqlite_row(
+					path.clone(),
+					stripped.text.clone(),
+					control.clone(),
+				).fuse();
+				let interruption = params.next_interrupt().fuse();
+				pin_mut!(operation, interruption);
+				select_biased! {
+					result = operation => match result {
+						Ok(result) => result,
+						Err(fault) => {
+							yield done(Err(Fault::Document { message: fault.message }));
+							return;
+						},
+					},
+					interrupt = interruption => {
+						let effects_started =
+							control.cancel() == SpecialWriteCancellation::EffectsUnknown;
+						yield interrupt_event(interrupt, effects_started);
+						return;
+					},
+				}
+			};
+			if let Some(result) = sqlite_result {
+				let payload = special_payload(
+					result,
+					stripped.stripped,
+					reported_len,
+					canonical_recovery.clone(),
+				);
+				for diag in diags(&payload) {
+					yield Ev::Diag(diag);
+				}
+				yield done(Ok(payload));
+				return;
+			}
+
+			let literal = {
+				let probe = self.documents.probe_literal(path.clone()).fuse();
+				let interruption = params.next_interrupt().fuse();
+				pin_mut!(probe, interruption);
+				select_biased! {
+					result = probe => match result {
+						Ok(result) => result,
+						Err(fault) => {
+							yield done(Err(fault));
+							return;
+						},
+					},
+					interrupt = interruption => {
+						yield interrupt_event(interrupt, false);
+						return;
+					},
+				}
+			};
+			if literal == LiteralPathProbe::Missing {
+				if let Some(count) = read_selector_list_misfire(&path) {
+					yield done(Err(Fault::ReadSelectorListMisfire { target: path, count }));
+					return;
+				}
+				if stripped.text.is_empty() {
+					let split = crate::read::selector::split_path_and_selector(&path);
+					if let Some(selector) = split.selector.map(Str::new) {
+						yield done(Err(Fault::ReadSelectorMisfire {
+							target: path.clone(),
+							selector,
+						}));
+						return;
+					}
+				}
+			}
+
+			let request = PlainWriteRequest {
+				path,
+				content: stripped.text,
+				format_policy: self.format_policy,
+				guard_generated: self.guard_generated,
+			};
+			let operation = self.documents.write_plain(request).fuse();
+			let interruption = params.next_interrupt().fuse();
+			pin_mut!(operation, interruption);
+			select_biased! {
+				result = operation => match result {
+					Ok(result) => {
+						let payload = Payload {
+							resolved_path: result.resolved_path,
+							display_path: result.display_path,
+							canonical_recovery,
+							byte_len: result.byte_len,
+							reported_len,
+							disposition: result.disposition,
+							stripped_wrapper: stripped.stripped,
+							made_executable: result.made_executable,
+							snapshot_tag: result.snapshot_tag,
+							operation: WriteOperation::Plain,
+						};
+						for diag in diags(&payload) {
+							yield Ev::Diag(diag);
 						}
+						yield done(Ok(payload));
+					},
+					Err(WriteCommitError::Rejected(fault)) => yield done(Err(fault)),
+					Err(WriteCommitError::EffectsUnknown { reason }) => {
+						yield Ev::Aborted(Abort::EffectsUnknown { reason });
+					},
+				},
+				interrupt = interruption => {
+					yield interrupt_event(interrupt, true);
+				},
+			}
+		}
 	}
 
 	fn prompt(&self, view: Result<&Payload, &Fault>, caps: &PromptCaps) -> Vec<Part> {
@@ -1202,58 +1211,18 @@ fn read_selector_list_misfire(target: &str) -> Option<usize> {
 	(count >= 2).then_some(count)
 }
 
-fn retired_device_syntax(target: &str) -> bool {
-	let trimmed = target.trim();
-	if trimmed
-		.get(..3)
-		.is_some_and(|prefix| prefix.eq_ignore_ascii_case("xd/"))
-	{
-		return true;
-	}
-	let Some((scheme, suffix)) = trimmed.split_once(':') else {
-		return false;
-	};
-	matches!(scheme.to_ascii_lowercase().as_str(), "xd" | "dx" | "xdd" | "xdt" | "device")
-		&& suffix.starts_with('/')
-}
-
 fn reject_uri_like_target(target: &str) -> Option<Fault> {
 	let trimmed = target.trim();
 	if windows_absolute(trimmed) {
 		return None;
-	}
-	if trimmed
-		.get(..3)
-		.is_some_and(|prefix| prefix.eq_ignore_ascii_case("xd/"))
-	{
-		let rest = trimmed[3..].trim_start_matches('/');
-		let guidance = device_guidance(Some(rest));
-		return Some(Fault::UriLikeTarget {
-			message: sf!(
-				"Unknown retired device target.{guidance} Prefix the path with './' to write it as a \
-				 filesystem path."
-			),
-		});
 	}
 	let colon = trimmed.find(':')?;
 	let scheme = &trimmed[..colon];
 	if !valid_uri_scheme(scheme) {
 		return None;
 	}
-	let is_retired_device_scheme =
-		matches!(scheme.to_ascii_lowercase().as_str(), "xd" | "dx" | "xdd" | "xdt");
 	let suffix = &trimmed[colon + 1..];
-	if let Some(body) = suffix.strip_prefix("//") {
-		if is_retired_device_scheme {
-			let rest = body.trim_start_matches('/');
-			let guidance = device_guidance(Some(rest));
-			return Some(Fault::UriLikeTarget {
-				message: sf!(
-					"Unknown retired device target.{guidance} Prefix the path with './' to write it as \
-					 a filesystem path."
-				),
-			});
-		}
+	if suffix.starts_with("//") {
 		return Some(Fault::UnsupportedScheme { scheme: Str::new(scheme.to_ascii_lowercase()) });
 	}
 	if !suffix.starts_with('/') {
@@ -1261,14 +1230,10 @@ fn reject_uri_like_target(target: &str) -> Option<Fault> {
 	}
 	let rest = suffix.trim_start_matches('/');
 	let guidance = device_guidance(Some(rest));
-	let prefix = if is_retired_device_scheme {
-		"Unknown retired device target.".to_owned()
-	} else {
-		format!("Unknown URI-like write target '{trimmed}'.")
-	};
 	Some(Fault::UriLikeTarget {
 		message: sf!(
-			"{prefix}{guidance} Prefix the path with './' to write it as a filesystem path."
+			"Unknown URI-like write target '{trimmed}'.{guidance} Prefix the path with './' to write \
+			 it as a filesystem path."
 		),
 	})
 }
@@ -1276,11 +1241,11 @@ fn reject_uri_like_target(target: &str) -> Option<Fault> {
 fn device_guidance(tool_path: Option<&str>) -> String {
 	match tool_path.filter(|path| !path.is_empty()) {
 		Some(path) => format!(
-			" `xd` runs in the bash tool: `xd` lists devices, `xd {path} --help` shows usage, `xd \
-			 {path} [args…]` invokes."
+			" `dyn` runs in the bash tool: `dyn` lists devices, `dyn {path} --help` shows usage, \
+			 `dyn {path} [args…]` invokes."
 		),
-		None => " `xd` runs in the bash tool: `xd` lists devices, `xd <device> --help` shows usage, \
-		         `xd <device> [args…]` invokes."
+		None => " `dyn` runs in the bash tool: `dyn` lists devices, `dyn <device> --help` shows \
+		         usage, `dyn <device> [args…]` invokes."
 			.to_owned(),
 	}
 }
@@ -1320,12 +1285,37 @@ fn special_payload(
 	}
 }
 
+fn diags(payload: &Payload) -> impl Iterator<Item = Diag> {
+	let echo_trimmed = match &payload.operation {
+		WriteOperation::ConflictSplice { echo_trimmed, .. }
+		| WriteOperation::ConflictBulk { echo_trimmed, .. } => *echo_trimmed,
+		_ => 0,
+	};
+	[
+		payload
+			.canonical_recovery
+			.as_ref()
+			.map(|recovery| Diag::info(DiagKind::PathRecovered, recovery.clone())),
+		payload.stripped_wrapper.then(|| {
+			Diag::info(DiagKind::ContentNormalized, "stripped hashline display prefixes from content")
+		}),
+		payload
+			.made_executable
+			.then(|| Diag::info(DiagKind::MadeExecutable, "added execute bits for the shebang")),
+		(echo_trimmed > 0).then(|| {
+			Diag::info(
+				DiagKind::ContentNormalized,
+				"dropped duplicated echo lines next to the conflict region",
+			)
+			.omitted(u64::try_from(echo_trimmed).unwrap_or(u64::MAX), Unit::Lines)
+		}),
+	]
+	.into_iter()
+	.flatten()
+}
+
 fn render_payload(payload: &Payload) -> String {
 	let mut output = String::new();
-	if let Some(recovery) = &payload.canonical_recovery {
-		output.push_str(recovery);
-		output.push('\n');
-	}
 	if let Some(tag) = &payload.snapshot_tag {
 		output.push_str(&format_hashline_header(&payload.display_path, tag));
 		output.push('\n');
@@ -1341,31 +1331,19 @@ fn render_payload(payload: &Payload) -> String {
 			payload.reported_len, payload.display_path
 		)
 		.expect("writing to String cannot fail"),
-		WriteOperation::ConflictSplice { id, start_line, end_line, echo_trimmed } => {
+		WriteOperation::ConflictSplice { id, start_line, end_line, .. } => {
 			write!(
 				output,
 				"Resolved conflict #{id} at {}:L{start_line}-L{end_line}",
 				payload.display_path
 			)
 			.expect("writing to String cannot fail");
-			if *echo_trimmed > 0 {
-				write!(
-					output,
-					"\nNote: dropped {echo_trimmed} content line(s) duplicated next to the conflict \
-					 region."
-				)
-				.expect("writing to String cannot fail");
-			}
 		},
-		WriteOperation::ConflictBulk { resolved, succeeded, failed, echo_trimmed } => {
+		WriteOperation::ConflictBulk { resolved, succeeded, failed, .. } => {
 			write!(output, "Resolved {resolved} conflicts across {} files", succeeded.len())
 				.expect("writing to String cannot fail");
 			for path in succeeded {
 				write!(output, "\n  {path}: committed").expect("writing to String cannot fail");
-			}
-			if *echo_trimmed > 0 {
-				write!(output, "\nDropped {echo_trimmed} adjacent echo lines")
-					.expect("writing to String cannot fail");
 			}
 			if !failed.is_empty() {
 				output.push_str("\nFiles left unchanged for retry:");
@@ -1396,14 +1374,6 @@ fn render_payload(payload: &Payload) -> String {
 					.expect("writing to String cannot fail");
 			}
 		},
-	}
-	if payload.stripped_wrapper {
-		output.push('\n');
-		output.push_str(STRIPPED_NOTICE);
-	}
-	if payload.made_executable {
-		output.push('\n');
-		output.push_str(EXECUTABLE_NOTICE);
 	}
 	output
 }
@@ -1466,6 +1436,8 @@ fn protocol_issue(message: Str) -> ArgIssue {
 
 #[cfg(test)]
 mod tests {
+	use omp_tool::{Omitted, Severity};
+
 	use super::*;
 
 	#[test]
@@ -1510,7 +1482,7 @@ mod tests {
 	}
 
 	#[test]
-	fn renders_plain_write_exactly() {
+	fn renders_plain_write_without_structured_diags() {
 		let payload = Payload {
 			resolved_path:      "/repo/bin/run".into(),
 			display_path:       "bin/run".into(),
@@ -1525,9 +1497,54 @@ mod tests {
 		};
 		assert_eq!(
 			render_payload(&payload),
-			"[bin/run#A1B2]\nSuccessfully wrote 10 bytes to bin/run\nNote: auto-stripped hashline \
-			 display prefixes from content before writing.\n[Notice: Made executable via chmod +x]"
+			"[bin/run#A1B2]\nSuccessfully wrote 10 bytes to bin/run"
 		);
+		let diags = diags(&payload).collect::<Vec<_>>();
+		assert_eq!(diags.len(), 2);
+		assert_eq!(diags[0].native_kind(), Some(DiagKind::ContentNormalized));
+		assert_eq!(diags[0].severity, Severity::Info);
+		assert_eq!(diags[0].continuation, None);
+		assert_eq!(diags[0].artifact, None);
+		assert_eq!(diags[0].omitted, None);
+		assert_eq!(diags[1].native_kind(), Some(DiagKind::MadeExecutable));
+		assert_eq!(diags[1].severity, Severity::Info);
+		assert_eq!(diags[1].continuation, None);
+		assert_eq!(diags[1].artifact, None);
+		assert_eq!(diags[1].omitted, None);
+	}
+
+	#[test]
+	fn conflict_echo_and_path_recovery_are_structured_diags() {
+		let payload = Payload {
+			resolved_path:      "/repo/src/a.rs".into(),
+			display_path:       "src/a.rs".into(),
+			canonical_recovery: Some("\"src/a.rs\" -> src/a.rs".into()),
+			byte_len:           10,
+			reported_len:       10,
+			disposition:        WriteDisposition::Overwrote,
+			stripped_wrapper:   false,
+			made_executable:    false,
+			snapshot_tag:       None,
+			operation:          WriteOperation::ConflictSplice {
+				id:           3,
+				start_line:   4,
+				end_line:     8,
+				echo_trimmed: 2,
+			},
+		};
+		assert_eq!(render_payload(&payload), "Resolved conflict #3 at src/a.rs:L4-L8");
+		let diags = diags(&payload).collect::<Vec<_>>();
+		assert_eq!(diags.len(), 2);
+		assert_eq!(diags[0].native_kind(), Some(DiagKind::PathRecovered));
+		assert_eq!(diags[0].severity, Severity::Info);
+		assert_eq!(diags[0].continuation, None);
+		assert_eq!(diags[0].artifact, None);
+		assert_eq!(diags[0].omitted, None);
+		assert_eq!(diags[1].native_kind(), Some(DiagKind::ContentNormalized));
+		assert_eq!(diags[1].severity, Severity::Info);
+		assert_eq!(diags[1].continuation, None);
+		assert_eq!(diags[1].artifact, None);
+		assert_eq!(diags[1].omitted, Some(Omitted { count: 2, unit: Unit::Lines }));
 	}
 
 	#[test]
@@ -1578,38 +1595,12 @@ mod tests {
 		);
 		assert!(reject_uri_like_target("C:\\tmp\\x").is_none());
 
-		let guidance_cases = [
-			("xd/report_issue", "report_issue"),
-			("xd://report_issue", "report_issue"),
-			("xd:/report_issue", "report_issue"),
-			("dx:/report_issue", "report_issue"),
-			("device:/custom", "custom"),
-		];
-		for (target, device) in guidance_cases {
-			let fault = reject_uri_like_target(target).expect("fault rejected");
-			let message = fault.to_string();
-			assert!(message.contains("`xd` runs in the bash tool"), "missing shell hint: {message}");
-			assert!(message.contains("`xd` lists devices"), "missing catalog hint: {message}");
-			assert!(
-				message.contains(&format!("`xd {device} --help` shows usage")),
-				"missing device help hint: {message}"
-			);
-			assert!(
-				message.contains(&format!("`xd {device} [args…]` invokes")),
-				"missing device invocation hint: {message}"
-			);
-			assert!(!message.contains("dyn"), "found retired tool: {message}");
-			assert!(!message.contains("do_"), "found retired envelope: {message}");
-			assert!(!message.contains("xd://"), "found invocation URL: {message}");
-		}
-		let generic_fault = reject_uri_like_target("xd/")
+		let fault = reject_uri_like_target("device:/custom")
 			.expect("fault rejected")
 			.to_string();
-		assert!(generic_fault.contains("`xd` lists devices"));
-		assert!(generic_fault.contains("`xd <device> --help` shows usage"));
-		assert!(generic_fault.contains("`xd <device> [args…]` invokes"));
-		assert!(!generic_fault.contains("dyn"));
-		assert!(!generic_fault.contains("do_"));
-		assert!(!generic_fault.contains("xd://"));
+		assert!(fault.contains("`dyn` runs in the bash tool"));
+		assert!(fault.contains("`dyn` lists devices"));
+		assert!(fault.contains("`dyn custom --help` shows usage"));
+		assert!(fault.contains("`dyn custom [args…]` invokes"));
 	}
 }

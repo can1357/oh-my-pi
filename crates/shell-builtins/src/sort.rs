@@ -47,6 +47,7 @@ impl Compressor {
 				prog:  self.prog.clone(),
 				error: err,
 			})?;
+		self.env.observe_spawn(child.id());
 		// Piped by `ChildEnv::command`, so this is always present.
 		let stderr = child.stderr.take().expect("compressor stderr is piped");
 		let forwarder = self.env.forward_stderr(stderr);
@@ -988,8 +989,11 @@ mod ext_sort {
 					.stderr(process::Stdio::null());
 				match probe.spawn() {
 					Ok(mut child) => {
+						compress.env.observe_spawn(child.id());
 						// Kill the test process immediately
-						let _ = child.kill();
+						if compress.env.may_signal(child.id()) {
+							let _ = child.kill();
+						}
 					},
 					Err(err) => {
 						// Print the error and disable compression
@@ -1445,7 +1449,7 @@ mod merge {
 		let mut batch_size = settings.merge_batch_size.max(MIN_BATCH_SIZE);
 
 		if let Some(limit) = fd_soft_limit() {
-			let open_fds = current_open_fd_count().unwrap_or(3);
+			let open_fds = current_open_fd_count(settings.may_observe_host).unwrap_or(3);
 			let mut reserved = RESERVED_TMP_OUTPUT + RESERVED_CTRL_C + SAFETY_MARGIN;
 			if settings.salt.is_some() {
 				reserved = reserved.saturating_add(RESERVED_RANDOM_SOURCE);
@@ -2489,7 +2493,7 @@ use custom_str_cmp::custom_str_cmp;
 use ext_sort::ext_sort;
 use numeric_str_cmp::{NumInfo, NumInfoParseSettings, human_numeric_str_cmp, numeric_str_cmp};
 use omp_core::{FastHashMap, FastState};
-use omp_shell_engine::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use omp_shell::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 use rand::{RngExt as _, rng};
 #[cfg(not(target_os = "wasi"))]
 use rayon::slice::ParallelSliceMut;
@@ -2791,6 +2795,7 @@ pub struct GlobalSettings {
 	numeric_locale:          NumericLocaleSettings,
 	precomputed:             Precomputed,
 	cancel:                  Arc<AtomicBool>,
+	may_observe_host:        bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2956,6 +2961,7 @@ impl Default for GlobalSettings {
 			merge_batch_size:        default_merge_batch_size(),
 			numeric_locale:          NumericLocaleSettings::default(),
 			cancel:                  Arc::new(AtomicBool::new(false)),
+			may_observe_host:        true,
 			precomputed:             Precomputed::default(),
 		}
 	}
@@ -3823,7 +3829,7 @@ pub(crate) fn fd_soft_limit() -> Option<usize> {
 }
 
 #[cfg(unix)]
-pub(crate) fn current_open_fd_count() -> Option<usize> {
+pub(crate) fn current_open_fd_count(allow_proc_self: bool) -> Option<usize> {
 	use nix::libc;
 
 	fn count_dir(path: &str) -> Option<usize> {
@@ -3839,7 +3845,11 @@ pub(crate) fn current_open_fd_count() -> Option<usize> {
 		Some(count)
 	}
 
-	if let Some(count) = count_dir("/proc/self/fd").or_else(|| count_dir("/dev/fd")) {
+	if let Some(count) = count_dir("/dev/fd").or_else(|| {
+		allow_proc_self
+			.then(|| count_dir("/proc/self/fd"))
+			.flatten()
+	}) {
 		return Some(count);
 	}
 
@@ -3860,7 +3870,7 @@ pub(crate) fn current_open_fd_count() -> Option<usize> {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn current_open_fd_count() -> Option<usize> {
+pub(crate) fn current_open_fd_count(_allow_proc_self: bool) -> Option<usize> {
 	None
 }
 
@@ -4444,6 +4454,7 @@ fn uu_sort(
 	let mut settings = GlobalSettings {
 		numeric_locale: detect_numeric_locale(),
 		cancel: host.cancel_flag(),
+		may_observe_host: i32::try_from(std::process::id()).is_ok_and(|pid| host.may_observe(pid)),
 		..Default::default()
 	};
 	// Prevent -o/--output to be specified multiple times
@@ -4600,7 +4611,11 @@ fn uu_sort(
 		.map(PathBuf::from)
 		.or_else(|| host.var("TMPDIR").map(PathBuf::from))
 		.unwrap_or_else(|| PathBuf::from("/tmp"));
-	let mut tmp_dir = TmpDirWrapper::new(host.resolve(tmp_base));
+	let mut tmp_dir = TmpDirWrapper::new(
+		host
+			.ensure_writable(tmp_base)
+			.map_err(|error| SortError::OpenTmpFileFailed { error })?,
+	);
 
 	settings.compress = matches
 		.get_one::<String>(options::COMPRESS_PROG)
@@ -4750,9 +4765,18 @@ fn uu_sort(
 		open(file)?;
 	}
 
-	let output_path = matches
-		.get_one::<OsString>(options::OUTPUT)
-		.map(|path| host.resolve(path).into_os_string());
+	let output_path = match matches.get_one::<OsString>(options::OUTPUT) {
+		Some(path) => Some(
+			host
+				.ensure_writable(path)
+				.map_err(|error| SortError::OpenFailed {
+					path: PathBuf::from(path.as_os_str()),
+					error,
+				})?
+				.into_os_string(),
+		),
+		None => None,
+	};
 	let output = Output::new(output_path.as_ref(), Some(host.stdout_clone()))?;
 
 	if settings.debug {
@@ -5038,8 +5062,8 @@ fn sort_by<'a>(unsorted: &mut Vec<Line<'a>>, settings: &GlobalSettings, line_dat
 	let cmp = |a: &Line<'a>, b: &Line<'a>| compare_by(a, b, settings, line_data, line_data);
 	// WASI does not support threads, so use non-parallel sort to avoid
 	// rayon's thread pool which triggers an unreachable trap. Windows can also
-	// force sequential sort when pi-natives could not safely configure Rayon's
-	// process-global worker pool under commit pressure.
+	// force sequential sort when the global pool cannot be safely configured
+	// under commit pressure.
 	if settings.stable || settings.unique {
 		#[cfg(not(target_os = "wasi"))]
 		if rayon_global_pool_available() {
@@ -5570,8 +5594,26 @@ fn format_error_message(error: &ParseSizeError, s: &str, option: &str) -> String
 #[cfg(test)]
 mod tests {
 
+	use omp_shell::{OpenRequest, PathAccess, PathDenied, PathPolicy};
+
 	use super::*;
-	use crate::host::run_util;
+	use crate::host::{run_util, run_util_with_policy};
+
+	struct DenyWrites;
+
+	impl PathPolicy for DenyWrites {
+		fn check_read(&self, path: &Path) -> Result<(), PathDenied> {
+			Err(PathDenied { path: path.to_path_buf(), access: PathAccess::Read })
+		}
+
+		fn check_write(&self, path: &Path) -> Result<(), PathDenied> {
+			Err(PathDenied { path: path.to_path_buf(), access: PathAccess::Write })
+		}
+
+		fn open(&self, path: &Path, request: OpenRequest) -> Result<std::fs::File, PathDenied> {
+			Err(PathDenied { path: path.to_path_buf(), access: request.access })
+		}
+	}
 
 	fn tokenize_helper(line: &[u8], separator: Option<u8>) -> Vec<Field> {
 		let mut buffer = vec![];
@@ -5587,6 +5629,18 @@ mod tests {
 		let c = get_rand_string();
 
 		assert_eq!(Ordering::Equal, random_shuffle(a, b, &c));
+	}
+	#[test]
+	fn temporary_directory_obeys_path_policy() {
+		let cwd = std::env::temp_dir();
+		let (code, capture) = run_util_with_policy::<Sort>(
+			&["--temporary-directory", cwd.to_str().expect("temporary path is UTF-8")],
+			"b\na\n",
+			&cwd,
+			std::sync::Arc::new(DenyWrites),
+		);
+		assert_ne!(code, 0);
+		assert!(capture.err().contains("sandbox denied write"));
 	}
 
 	#[test]

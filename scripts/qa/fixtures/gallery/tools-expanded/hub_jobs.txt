@@ -1,0 +1,30 @@
+── hub_jobs — Hub jobs ─────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ poll job_a1                                                                                       
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ poll 3 jobs                                                                                       
+                                                                                                    
+
+  · done
+                                                                                                    
+ 3 jobs settled 2 done · 1 failed                                                                  
+├─  job_c3 ⟨bash⟩ bunx biome check packages/server/src/auth 4.1s                                   
+│    biome: 2 errors in tokens.ts — noUnusedVariables, useConst                                     
+├─ • job_b2 ⟨task⟩ Migrate rate limiter to a sliding window 1m36s                                   
+│    Rewrote rate-limit.ts to a token-bucket; added per-account keys.                               
+└─ • job_a1 ⟨bash⟩ bun test packages/server/test/auth.test.ts 18.4s                                 
+     42 pass, 0 fail (18.4s)                                                                        
+                                                                                                    
+
+  · failed
+                                                                                                    
+ 1 job settled 1 failed                                                                            
+└─  job_d4 ⟨task⟩ Refactor the session store to Redis 52.3s                                        
+     Subagent exited 1: Redis connection string is missing.                                         
+                                                                                                    
+

@@ -107,13 +107,13 @@ impl SecretRule {
 	}
 
 	/// Returns the compiled expression for a regex rule.
-	pub fn regex(&self) -> Option<&Regex> {
+	pub const fn regex(&self) -> Option<&Regex> {
 		self.regex.as_ref()
 	}
 
 	/// Requires matches to sit on credential-alphabet boundaries.
 	///
-	/// Emulates pi's `(?<![0-9A-Za-z_*-])…(?![0-9A-Za-z_*-])` lookarounds,
+	/// Enforces `(?<![0-9A-Za-z_*-])(?![0-9A-Za-z_*-])` lookaround semantics,
 	/// which the guaranteed linear-time engine cannot express; the obfuscator
 	/// rejects matches adjacent to credential-alphabet characters instead.
 	pub const fn with_boundary_guard(mut self) -> Self {
@@ -228,7 +228,7 @@ fn split_regex_literal(pattern: &str) -> (&str, &str) {
 	(pattern, "")
 }
 
-fn is_escaped(bytes: &[u8], index: usize) -> bool {
+const fn is_escaped(bytes: &[u8], index: usize) -> bool {
 	let mut slash_count = 0;
 	let mut cursor = index;
 	while cursor > 0 && bytes[cursor - 1] == b'\\' {

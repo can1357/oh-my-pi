@@ -1,22 +1,11 @@
 // Model-lineage compat for "deepseek"; regenerated from the frozen census using class taxonomy selectors.
 
 class "deepseek" {
-	image-encoding-format "none"
-	models "*deepseek-ocr*" "*janus*" "*vl*" token="vision" {
-		image-encoding-format "open_ai_url"
-	}
-	on "aiand" "aimlapi" "alibaba-token-plan" "baseten" "coreweave" "deepseek" "fireworks" \
-		"huggingface" "kilo" "nanogpt" "novita" "nvidia" "opencode-go" "opencode-zen" "together" \
-		"venice" "vercel-ai-gateway" "wafer-serverless" "zenmux" {
-		family "pro" {
-			requires-reasoning-content-for-all-assistant-turns #true
-		}
-	}
 	on "aiand" "aimlapi" "alibaba-token-plan" "baseten" "coreweave" "deepseek" "fireworks" \
 		"huggingface" "kilo" "nanogpt" "novita" "nvidia" "opencode-go" "opencode-zen" "together" \
 		"venice" "wafer-serverless" "zenmux" {
 		family "pro" {
-			thinking-efforts "high" "max"
+			thinking-efforts "low" "high" "max"
 		}
 	}
 	on "aiand" "aimlapi" "coreweave" "deepseek" "fireworks" "gmi-cloud" "huggingface" "kilo" \
@@ -26,38 +15,49 @@ class "deepseek" {
 			thinking-efforts "low" "high" "max"
 		}
 	}
-	on "aiand" "aimlapi" "coreweave" "deepseek" "fireworks" "gmi-cloud" "huggingface" "novita" \
-		"nvidia" "ollama-cloud" "opencode-go" "opencode-zen" "together" "umans" "vercel-ai-gateway" \
-		"wafer-serverless" "zenmux" {
-		family "flash" {
-			requires-reasoning-content-for-all-assistant-turns #true
-		}
+	// DeepSeek V4 ladders are model properties: the wire-exact low/high/max
+	// scale holds on every host (medium/xhigh fold into high). OpenRouter's
+	// non-Flash V4 route exposes only high, except the dated -0813 SKU.
+	family "pro" {
+		thinking-efforts "low" "high" "max"
 	}
-	on "aimlapi" "groq" "huggingface" "kilo" "nanogpt" "novita" "nvidia" "together" "zenmux" {
-		family "r1" {
-			thinking-efforts "high" "max"
-		}
+	family "flash" {
+		thinking-efforts "low" "high" "max"
 	}
-	on "aimlapi" "groq" "huggingface" "novita" "nvidia" "together" "vercel-ai-gateway" "zenmux" {
+	family "v4" {
+		thinking-efforts "low" "high" "max"
+	}
+	family "r1" {
+		thinking-efforts "high" "max"
+	}
+	family "v3" {
+		thinking-efforts "high" "max"
+	}
+	family "reasoner" {
+		thinking-efforts "high" "max"
+	}
+	on "openrouter" {
+		family "pro" {
+			thinking-efforts "high"
+			models "*deepseek-v4-pro-0813*" {
+				thinking-efforts "low" "high" "max"
+			}
+		}
+		family "v4" {
+			thinking-efforts "high"
+		}
 		family "r1" {
-			requires-reasoning-content-for-all-assistant-turns #true
+			thinking-efforts "high"
+		}
+		family "v3" {
+			thinking-efforts "high"
+		}
+		family "reasoner" {
+			thinking-efforts "high"
 		}
 	}
 	on "alibaba-token-plan" "deepseek" {
 		supports-developer-role #false
-	}
-	on "amazon-bedrock" "umans" "vercel-ai-gateway" {
-		thinking-mode "budget"
-	}
-	on "deepseek" "fireworks" {
-		family "pro" {
-			requires-assistant-content-for-tool-calls #true
-		}
-	}
-	on "deepseek" "fireworks" "opencode-go" {
-		family "pro" {
-			supports-tool-choice #false
-		}
 	}
 	on "deepseek" "opencode-go" {
 		family "pro" {
@@ -66,18 +66,15 @@ class "deepseek" {
 			requires-reasoning-content-for-tool-calls #true
 		}
 	}
-	on "friendli" "huggingface" "kilo" "nanogpt" "novita" "nvidia" "ollama-cloud" "qianfan" \
-		"together" "venice" "yandex" "zenmux" {
-		family "v3" {
-			thinking-efforts "high" "max"
-		}
+	strip-image-input #true
+	models token="ocr" {
+		strip-image-input #false
 	}
-	on "friendli" "nvidia" "ollama-cloud" "qianfan" "venice" "yandex" "zenmux" {
-		family "v3" {
-			requires-reasoning-content-for-all-assistant-turns #true
-		}
+	models token="vision" {
+		strip-image-input #false
 	}
-	on "umans" "vercel-ai-gateway" {
-		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	on "ollama-cloud" "nvidia" "deepseek" "fireworks" "nanogpt" "opencode-go" "openrouter" {
+		stream-markup-healing-pattern "dsml"
 	}
+	thinking-loop-guard "deepseek"
 }

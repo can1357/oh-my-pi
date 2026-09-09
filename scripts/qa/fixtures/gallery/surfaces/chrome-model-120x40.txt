@@ -1,0 +1,40 @@
+╭─ Models ───────────────────┬─────────────────────────────────────────────────────────────────────────────────────────╮
+│   ✦ Roles             1/10 │  All available models                                                                   │
+│ ❯ ⬢ All models          26 │  🔍 >                                                                                   │ 
+│ ────────────────────────── │                                                                                         │
+│   ● anthropic           26 │   anthropic/claude-fable-5                                            1m ◫      $10/50  │
+│ ────────────────────────── │   anthropic/claude-haiku-4-5                                        200k ◫        $1/5  │
+│   ○ aiand                  │   anthropic/claude-opus-4-8                                           1m ◫       $5/25  │
+│   ○ aimlapi                │   ──────────────────────────────────────────────────────────────────────────────────    │
+│   ○ alibaba-coding-plan    │   anthropic/claude-mythos-5                                           1m ◫      $10/50  │
+│   ○ alibaba-token-plan     │   anthropic/claude-opus-5                                             1m ◫       $5/25  │
+│   ○ amazon-bedrock         │   anthropic/claude-sonnet-5                                           1m ◫       $2/10  │
+│   ○ azure                  │   anthropic/claude-opus-4-7                                           1m ◫       $5/25  │
+│   ○ baseten                │   anthropic/claude-opus-4-6                                           1m ◫       $5/25  │
+│   ○ bedrock-mantle         │   anthropic/claude-sonnet-4-6                                         1m ◫       $3/15  │
+│   ○ cerebras               │   anthropic/claude-opus-4-5-20251101                                200k ◫       $5/25  │
+│   ○ cline-pass             │   anthropic/claude-haiku-4-5-20251001                               200k ◫        $1/5  │
+│   ○ cloudflare-ai-gateway  │   anthropic/claude-sonnet-4-5-20250929                                1m ◫       $3/15  │
+│   ○ coreweave              │   anthropic/claude-opus-4-5                                         200k ◫       $5/25  │
+│   ○ cursor                 │   anthropic/claude-sonnet-4-5                                         1m ◫       $3/15  │
+│   ○ deepinfra              │   anthropic/claude-opus-4-1-20250805                                200k ◫      $15/75  │
+│   ○ deepseek               │   anthropic/claude-opus-4-1                                         200k ◫      $15/75  │
+│   ○ devin                  │   anthropic/claude-opus-4-20250514                                  200k ◫      $15/75  │
+│   ○ firepass               │   anthropic/claude-sonnet-4-20250514                                200k ◫       $3/15  │
+│   ○ fireworks              │   anthropic/claude-opus-4-0                                         200k ◫      $15/75  │
+│   ○ github-copilot         │   anthropic/claude-sonnet-4-0                                       200k ◫       $3/15  │
+│   ○ gitlab-duo             │   anthropic/claude-3-7-sonnet-20250219                              200k ◫       $3/15  │
+│   ○ gitlab-duo-agent       │   anthropic/claude-3-5-sonnet-20241022                              200k ◫       $3/15  │
+│   ○ gmi-cloud              │   anthropic/claude-3-5-sonnet-20240620                              200k ◫       $3/15  │
+│   ○ google                 │   anthropic/claude-3-haiku-20240307                                 200k ◫  $0.25/1.25  │
+│   ○ google-antigravity     │   anthropic/claude-3-opus-20240229                                  200k ◫      $15/75  │
+│   ○ google-gemini-cli      │   anthropic/claude-3-sonnet-20240229                                200k ◫       $3/15  │
+│   ○ google-vertex          │                                                                                         │
+│   ○ groq                   │                                                                                         │
+│   ○ huggingface            │                                                                                         │
+│   ○ kilo                   │                                                                                         │
+│   ○ kimi-code              │   Claude Fable 5 · 1m ctx · 128k out · $10/50 per M · reasoning · vision                │
+│   ○ meta                   │   ● default ◒ · ○ smol · ○ slow · ○ designer                                            │
+├────────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────┤
+│ Enter assign roles · ↑/↓ providers · → models · type to search · Esc close                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

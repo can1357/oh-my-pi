@@ -92,7 +92,7 @@ pub async fn extract_and_store<L: ExtractionLane>(
 	Ok(ExtractionReport { parsed: facts.len(), inserted, rejected })
 }
 
-/// Parses Pi's compact extraction line format:
+/// Parses the compact extraction line format:
 /// `FACT<TAB>subject<TAB>predicate<TAB>object<TAB>confidence`.
 pub fn parse_facts(output: &str, source_id: &str) -> (Vec<ExtractedFact>, usize) {
 	let mut facts = Vec::new();

@@ -1,0 +1,39 @@
+# DEFERRED: cross-session memory settings are intentionally not reflected in o2 yet.
+# User ruling (2026-08-30): retain only the 31 Pi settings whose UI tab is Memory.
+# Pi source: /work/.tree/pi-oracle-ec5188ad/packages/coding-agent/src/config/settings-schema.ts
+# Parity backlog: .plan/parity/sweep/BACKLOG.md (Deferred — Memory / Hindsight / mnemopi / Sharpshooter)
+# One exact dotted path per line.
+# browser.enabled and browser.headless are already owned by the dedicated
+# BrowserSettings domain, so they are landed without duplicate Product rows.
+
+autolearn.autoContinue
+autolearn.enabled
+hindsight.apiToken
+hindsight.apiUrl
+hindsight.autoRecall
+hindsight.autoRetain
+hindsight.bankId
+hindsight.mentalModelAutoSeed
+hindsight.mentalModelsEnabled
+hindsight.retainMode
+hindsight.scoping
+memory.backend
+mnemopi.autoRecall
+mnemopi.autoRetain
+mnemopi.bank
+mnemopi.dbPath
+mnemopi.embeddingApiKey
+mnemopi.embeddingApiUrl
+mnemopi.embeddingModel
+mnemopi.embeddingVariant
+mnemopi.enhancedRecall
+mnemopi.llmApiKey
+mnemopi.llmBaseUrl
+mnemopi.llmMode
+mnemopi.llmModel
+mnemopi.noEmbeddings
+mnemopi.polyphonicRecall
+mnemopi.proactiveLinking
+mnemopi.scoping
+providers.memoryModel
+sharpshooter.model

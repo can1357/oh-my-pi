@@ -22,7 +22,46 @@ type CellColors = (Option<Rgb>, Option<Rgb>);
 enum AutoBox {
 	#[default]
 	Unresolved,
-	Resolved((u32, u16, u16)),
+	/// Interned box resolved for the given column budget.
+	Resolved { budget: u16, cell_box: (u32, u16, u16) },
+}
+
+/// Row budget for a decoded image (`h` and `max-rows` props).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RowBound {
+	/// Rows follow the source aspect ratio at the requested width.
+	Aspect,
+	/// Exactly this many rows, stretching the source.
+	Fixed(u16),
+	/// Aspect-derived rows capped here; columns shrink to keep the aspect.
+	Max(u16),
+}
+
+impl RowBound {
+	const fn from_props(props: &Props) -> Self {
+		match (props.h(), props.max_rows()) {
+			(Some(rows), _) => Self::Fixed(rows),
+			(None, Some(cap)) => Self::Max(cap),
+			(None, None) => Self::Aspect,
+		}
+	}
+
+	/// Cell box for a `px`-sized source at `width_cells` columns.
+	fn fit(self, px: ImageDimensions, width_cells: u16) -> (u16, u16) {
+		let width_cells = width_cells.max(1);
+		match self {
+			Self::Fixed(rows) => (width_cells, rows.max(1)),
+			Self::Aspect => {
+				let scaled = u64::from(width_cells) * u64::from(px.height);
+				let denominator = u64::from(px.width.max(1)) * 2;
+				let rows = ((scaled + denominator / 2) / denominator)
+					.max(1)
+					.min(u64::from(u16::MAX)) as u16;
+				(width_cells, rows)
+			},
+			Self::Max(cap) => image_cell_box(px, width_cells, cap),
+		}
+	}
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -64,31 +103,35 @@ impl ImgState {
 /// compositors always show the full source), so padded logo sources stay
 /// visible even as tiny thumbnails.
 pub struct Img {
-	props:  Props,
-	slot:   Slot,
-	state:  ImgState,
-	bytes:  Option<Bytes>,
-	dims:   Option<ImageDimensions>,
-	kitty:  Option<(u32, u16, u16)>,
-	/// Cached `src`-interned placeholder box, resolved at most once.
-	auto:   AutoBox,
-	top:    String,
-	bottom: String,
+	props:       Props,
+	slot:        Slot,
+	state:       ImgState,
+	bytes:       Option<Bytes>,
+	dims:        Option<ImageDimensions>,
+	kitty:       Option<(u32, u16, u16)>,
+	/// Cached `src`-interned placeholder box, resolved once per column budget.
+	auto:        AutoBox,
+	/// Column budget the current `state` was decoded for; a `max-rows` cap
+	/// can leave the sampled width narrower than the budget.
+	decoded_for: u16,
+	top:         String,
+	bottom:      String,
 }
 
 impl Img {
 	/// Creates an image with no source.
 	pub fn new() -> Self {
 		Self {
-			props:  Props::new(),
-			slot:   next_slot(),
-			state:  ImgState::default(),
-			bytes:  None,
-			dims:   None,
-			kitty:  None,
-			auto:   AutoBox::Unresolved,
-			top:    String::new(),
-			bottom: String::new(),
+			props:       Props::new(),
+			slot:        next_slot(),
+			state:       ImgState::default(),
+			bytes:       None,
+			dims:        None,
+			kitty:       None,
+			auto:        AutoBox::Unresolved,
+			decoded_for: 0,
+			top:         String::new(),
+			bottom:      String::new(),
 		}
 	}
 
@@ -118,7 +161,7 @@ impl Img {
 
 	/// Sets one image property.
 	pub fn with(mut self, prop: Prop, value: impl Into<PropValue>) -> Self {
-		if self.bytes.is_some() && matches!(prop, Prop::W | Prop::H | Prop::Trim) {
+		if self.bytes.is_some() && matches!(prop, Prop::W | Prop::H | Prop::MaxRows | Prop::Trim) {
 			self.state = ImgState::default();
 		}
 		self.props.set(prop, value);
@@ -146,8 +189,9 @@ impl Img {
 
 	/// The typed-cell box for this context: the explicit [`Img::kitty`] box
 	/// on any pixel tier, else a `src`-interned placeholder box on the
-	/// Kitty-placeholder tier. `None` selects the half-block/box fallback.
-	fn cell_box(&mut self, ctx: &UiContext) -> Option<(u32, u16, u16)> {
+	/// Kitty-placeholder tier, its columns clamped to `available` when the
+	/// layout pass knows it. `None` selects the half-block/box fallback.
+	fn cell_box(&mut self, ctx: &UiContext, available: Option<u16>) -> Option<(u32, u16, u16)> {
 		if ctx.graphics == Graphics::Cells || self.bytes.is_some() {
 			return None;
 		}
@@ -157,14 +201,14 @@ impl Img {
 		if ctx.graphics != Graphics::KittyPlaceholders {
 			return None;
 		}
-		if matches!(self.auto, AutoBox::Unresolved) {
-			if let Some(cell_box) = resolve_placeholder_box(&self.props) {
-				self.auto = AutoBox::Resolved(cell_box);
-			}
-		}
+		let budget = available.unwrap_or(u16::MAX).max(1);
 		match self.auto {
-			AutoBox::Resolved(cell_box) => Some(cell_box),
-			AutoBox::Unresolved => None,
+			AutoBox::Resolved { budget: cached, cell_box } if cached == budget => Some(cell_box),
+			_ => {
+				let cell_box = resolve_placeholder_box(&self.props, budget)?;
+				self.auto = AutoBox::Resolved { budget, cell_box };
+				Some(cell_box)
+			},
 		}
 	}
 
@@ -190,14 +234,16 @@ impl Img {
 			.map_or("", |value| value.as_str());
 		let width = self.requested_width(available);
 		if self.state.phase != Load::Unloaded {
-			if self.bytes.is_none() || self.state.width == width {
+			if self.bytes.is_none() || self.decoded_for == width {
 				return;
 			}
 			self.state = ImgState::default();
 		}
+		self.decoded_for = width;
 		let trim = self.props.flag(Prop::Trim);
+		let rows = RowBound::from_props(&self.props);
 		if let Some(bytes) = &self.bytes {
-			self.state = decode_bytes(bytes, width, self.props.h(), trim);
+			self.state = decode_bytes(bytes, width, rows, trim);
 			return;
 		}
 		if let Some(loader) = &ctx.loader {
@@ -205,7 +251,7 @@ impl Img {
 				self.slot,
 				source.to_str(),
 				width,
-				self.props.h(),
+				rows,
 				trim,
 				ctx.graphics == Graphics::KittyPlaceholders,
 			);
@@ -216,7 +262,7 @@ impl Img {
 			if ctx.graphics == Graphics::KittyPlaceholders {
 				let _ = imagereg::prepare_png(source);
 			}
-			self.state = decode_source(source, width, self.props.h(), trim);
+			self.state = decode_source(source, width, rows, trim);
 		}
 	}
 
@@ -229,29 +275,22 @@ impl Img {
 	}
 }
 
-/// Resolves an interned placeholder box from `src`, `w`, and `h` props:
-/// PNG-backed, fixed-cell widths only, aspect-derived rows when `h` is
+/// Resolves an interned placeholder box from `src`, `w`, `h`, and
+/// `max-rows` props: PNG-backed, fixed-cell widths only (clamped to the
+/// `budget` columns the layout offers), aspect-derived rows when `h` is
 /// omitted, bounded by Kitty's diacritic table.
-fn resolve_placeholder_box(props: &Props) -> Option<(u32, u16, u16)> {
+fn resolve_placeholder_box(props: &Props, budget: u16) -> Option<(u32, u16, u16)> {
 	let source = props.str_of(Prop::Src)?;
 	let interned = imagereg::intern(source.as_str())?;
 	let cols = match props.w() {
 		Some(Dim::Cells(cells)) => cells,
 		Some(Dim::Pct(_)) => return None,
 		None => 24,
-	};
-	let rows = props.h().unwrap_or_else(|| {
-		let scaled = u64::from(cols) * u64::from(interned.dimensions.height);
-		let denominator = u64::from(interned.dimensions.width) * 2;
-		((scaled + denominator / 2) / denominator)
-			.max(1)
-			.min(u64::from(PLACEHOLDER_LIMIT)) as u16
-	});
-	(rows > 0 && cols > 0 && rows <= PLACEHOLDER_LIMIT && cols <= PLACEHOLDER_LIMIT).then_some((
-		interned.id,
-		rows,
-		cols,
-	))
+	}
+	.min(budget);
+	let (cols, rows) = RowBound::from_props(props).fit(interned.dimensions, cols);
+	let rows = rows.min(PLACEHOLDER_LIMIT);
+	(rows > 0 && cols > 0 && cols <= PLACEHOLDER_LIMIT).then_some((interned.id, rows, cols))
 }
 
 impl Default for Img {
@@ -274,7 +313,7 @@ impl Component for Img {
 	}
 
 	fn measure(&mut self, ctx: &UiContext) -> (u16, u16) {
-		if let Some((_, rows, cols)) = self.cell_box(ctx) {
+		if let Some((_, rows, cols)) = self.cell_box(ctx, None) {
 			return (cols, rows);
 		}
 		let width = match self.props.w() {
@@ -285,7 +324,7 @@ impl Component for Img {
 	}
 
 	fn height(&mut self, ctx: &UiContext, width: u16) -> u16 {
-		if let Some((_, rows, _)) = self.cell_box(ctx) {
+		if let Some((_, rows, _)) = self.cell_box(ctx, Some(width)) {
 			return rows;
 		}
 		self.ensure_decoded(ctx, width);
@@ -293,13 +332,13 @@ impl Component for Img {
 	}
 
 	fn place(&mut self, ctx: &UiContext, content: Rect) {
-		if self.cell_box(ctx).is_none() {
+		if self.cell_box(ctx, Some(content.width)).is_none() {
 			self.ensure_decoded(ctx, content.width);
 		}
 	}
 
 	fn paint(&mut self, pc: &mut PaintCtx<'_>, rect: Rect) {
-		if let Some((id, rows, cols)) = self.cell_box(pc.ctx) {
+		if let Some((id, rows, cols)) = self.cell_box(pc.ctx, Some(rect.width)) {
 			for row in 0..rows.min(rect.height) {
 				let y = rect.y + row;
 				if y >= pc.clip {
@@ -472,7 +511,7 @@ pub fn draw_image_inline(
 	}
 	let px = ImageDimensions { width: pixels[0].len() as u32, height: pixels.len() as u32 };
 	let (cols, rows) = image_cell_box(px, max_width, max_rows);
-	let state = sample_cells(&pixels, cols, Some(rows), PAINT_GATE);
+	let state = sample_cells(&pixels, cols, RowBound::Fixed(rows), PAINT_GATE);
 	for row_index in 0..state.rows {
 		let row_y = y.saturating_add(row_index);
 		let mut cell_x = x;
@@ -493,12 +532,7 @@ enum DecodedImage {
 /// Reads, decodes, and cell-samples `source` at `width_cells`. Never
 /// panics; a settled no-pixel outcome (failure or probe-only format)
 /// returns a [`Load::Boxed`] state.
-pub fn decode_source(
-	source: &str,
-	width_cells: u16,
-	height_cells: Option<u16>,
-	trim: bool,
-) -> ImgState {
+pub fn decode_source(source: &str, width_cells: u16, rows: RowBound, trim: bool) -> ImgState {
 	let Some(bytes) = imagereg::source_bytes(source) else {
 		return ImgState {
 			cells: Box::default(),
@@ -507,19 +541,14 @@ pub fn decode_source(
 			phase: Load::Boxed,
 		};
 	};
-	decode_bytes(&bytes, width_cells, height_cells, trim)
+	decode_bytes(&bytes, width_cells, rows, trim)
 }
 
 /// Decodes and cell-samples immutable in-memory image bytes.
 ///
 /// Invalid or dimension-only formats settle to a boxed placeholder rather
 /// than panicking.
-pub fn decode_bytes(
-	bytes: &[u8],
-	width_cells: u16,
-	height_cells: Option<u16>,
-	trim: bool,
-) -> ImgState {
+pub fn decode_bytes(bytes: &[u8], width_cells: u16, rows: RowBound, trim: bool) -> ImgState {
 	match decode_image_bytes(bytes) {
 		Some(DecodedImage::Pixels(mut pixels))
 			if !pixels.is_empty() && pixels.first().is_some_and(|row| !row.is_empty()) =>
@@ -528,10 +557,10 @@ pub fn decode_bytes(
 				pixels = trim_transparent(pixels);
 			}
 			let gate = if trim { TRIMMED_PAINT_GATE } else { PAINT_GATE };
-			sample_cells(&pixels, width_cells, height_cells, gate)
+			sample_cells(&pixels, width_cells, rows, gate)
 		},
 		Some(DecodedImage::Placeholder(dimensions)) => {
-			placeholder_state(dimensions, width_cells, height_cells)
+			placeholder_state(dimensions, width_cells, rows)
 		},
 		_ => {
 			ImgState { cells: Box::default(), width: width_cells.max(1), rows: 3, phase: Load::Boxed }
@@ -670,19 +699,9 @@ fn decode_ppm(bytes: &[u8]) -> Option<Vec<Vec<[u8; 4]>>> {
 	)
 }
 
-fn placeholder_state(
-	dimensions: ImageDimensions,
-	width_cells: u16,
-	height_cells: Option<u16>,
-) -> ImgState {
-	let rows = height_cells.unwrap_or_else(|| {
-		let scaled = u64::from(width_cells) * u64::from(dimensions.height);
-		let denominator = u64::from(dimensions.width) * 2;
-		((scaled + denominator / 2) / denominator)
-			.max(1)
-			.min(u64::from(u16::MAX)) as u16
-	});
-	ImgState { cells: Box::default(), width: width_cells.max(1), rows, phase: Load::Boxed }
+fn placeholder_state(dimensions: ImageDimensions, width_cells: u16, bound: RowBound) -> ImgState {
+	let (width, rows) = bound.fit(dimensions, width_cells);
+	ImgState { cells: Box::default(), width, rows, phase: Load::Boxed }
 }
 
 /// Paint gate for untrimmed sources: a half-cell must be at least half
@@ -692,19 +711,16 @@ const PAINT_GATE: u64 = 128;
 /// any half-cell with meaningful coverage (≥ 12.5%) keeps its glyph color.
 const TRIMMED_PAINT_GATE: u64 = 32;
 
-fn sample_cells(
-	pixels: &[Vec<[u8; 4]>],
-	width_cells: u16,
-	height_cells: Option<u16>,
-	gate: u64,
-) -> ImgState {
+fn sample_cells(pixels: &[Vec<[u8; 4]>], width_cells: u16, bound: RowBound, gate: u64) -> ImgState {
 	let source_height = pixels.len();
 	let source_width = pixels[0].len();
-	let width = usize::from(width_cells.max(1));
-	let height = usize::from(height_cells.unwrap_or_else(|| {
-		let ratio = source_height as f32 / source_width as f32;
-		((f32::from(width_cells) * ratio) / 2.0).round().max(1.0) as u16
-	}));
+	let px = ImageDimensions {
+		width:  u32::try_from(source_width).unwrap_or(u32::MAX),
+		height: u32::try_from(source_height).unwrap_or(u32::MAX),
+	};
+	let (cols, rows) = bound.fit(px, width_cells);
+	let width = usize::from(cols);
+	let height = usize::from(rows);
 	let mut cells = Vec::with_capacity(width * height);
 	for cell_y in 0..height {
 		let upper_y0 = cell_y * 2 * source_height / (height * 2);
@@ -827,7 +843,7 @@ mod tests {
 		let red = [255_u8, 0, 0, 255];
 		let clear = [0_u8, 0, 0, 0];
 		let pixels = vec![vec![red, red, clear, clear], vec![clear, clear, clear, clear]];
-		let state = sample_cells(&pixels, 2, None, PAINT_GATE);
+		let state = sample_cells(&pixels, 2, RowBound::Aspect, PAINT_GATE);
 		assert_eq!(state.rows, 1);
 		assert_eq!(&*state.cells, &[(Some([255, 0, 0]), None), (None, None)]);
 	}
@@ -844,10 +860,11 @@ mod tests {
 				*pixel = blue;
 			}
 		}
-		let padded = sample_cells(&pixels, 1, None, PAINT_GATE);
+		let padded = sample_cells(&pixels, 1, RowBound::Aspect, PAINT_GATE);
 		assert_eq!(&*padded.cells, &[(None, None)], "padding averages the glyph away");
 
-		let trimmed = sample_cells(&trim_transparent(pixels), 1, None, TRIMMED_PAINT_GATE);
+		let trimmed =
+			sample_cells(&trim_transparent(pixels), 1, RowBound::Aspect, TRIMMED_PAINT_GATE);
 		assert_eq!(
 			&*trimmed.cells,
 			&[(Some([0, 0, 255]), Some([0, 0, 255]))],
@@ -1027,6 +1044,52 @@ mod tests {
 		assert_eq!(sibling.id, id);
 		assert_eq!(sibling.png.as_ptr(), cached.as_ptr(), "cache avoids a second conversion");
 		fs::remove_file(path).unwrap();
+	}
+
+	#[test]
+	fn max_rows_caps_height_and_narrows_columns_on_every_tier() {
+		let path = env::temp_dir().join(format!("omp-tui-img-max-rows-{}.png", std::process::id()));
+		let pixels = image::RgbaImage::from_pixel(10, 40, image::Rgba([200, 30, 30, 255]));
+		image::DynamicImage::ImageRgba8(pixels)
+			.save_with_format(&path, image::ImageFormat::Png)
+			.unwrap();
+		let source = path.to_string_lossy().into_owned();
+
+		// Cells tier: aspect alone would want 40 rows at 20 columns; the cap
+		// shrinks columns to keep the aspect at the row budget.
+		let ctx = UiContext::default();
+		let mut capped = Img::new()
+			.with(Prop::Src, source.as_str())
+			.with(Prop::W, 20_u16)
+			.with(Prop::MaxRows, 4_u16);
+		assert_eq!(capped.height(&ctx, 20), 4);
+		assert_eq!(capped.state.width, 2);
+		assert_eq!(capped.state.phase, Load::Ready);
+		let mut uncapped = Img::new()
+			.with(Prop::Src, source.as_str())
+			.with(Prop::W, 20_u16);
+		assert_eq!(uncapped.height(&ctx, 20), 40);
+		// A narrower layout re-decodes once; the same budget is a no-op.
+		assert_eq!(capped.height(&ctx, 10), 4);
+		assert_eq!(capped.state.width, 2);
+
+		// Kitty placeholder tier: the interned box honors the cap and the
+		// column budget the layout offers.
+		let kitty = UiContext { graphics: Graphics::KittyPlaceholders, ..UiContext::default() };
+		let mut typed = Img::new()
+			.with(Prop::Src, source.as_str())
+			.with(Prop::W, 100_u16)
+			.with(Prop::MaxRows, 4_u16);
+		assert_eq!(typed.height(&kitty, 60), 4);
+		let (_, rows, cols) = typed.cell_box(&kitty, Some(60)).expect("interned box");
+		assert_eq!((rows, cols), (4, 2));
+		let mut wide = Img::new()
+			.with(Prop::Src, source.as_str())
+			.with(Prop::W, 100_u16);
+		let (_, rows, cols) = wide.cell_box(&kitty, Some(30)).expect("interned box");
+		assert_eq!(cols, 30, "the placeholder box clamps to the offered columns");
+		assert_eq!(rows, 60);
+		let _ = fs::remove_file(path);
 	}
 
 	#[test]

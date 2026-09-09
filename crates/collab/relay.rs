@@ -102,6 +102,7 @@ impl Handshake {
 			});
 		}
 		self.state = HandshakeState::Established;
+		tracing::info!(role = ?self.role, "collaboration session joined");
 		Ok(())
 	}
 
@@ -247,6 +248,12 @@ impl RelayClient {
 	}
 
 	/// Connects with explicit role and protocol revision query metadata.
+	#[tracing::instrument(
+		level = "debug",
+		name = "collaboration_join",
+		skip_all,
+		fields(role = ?self.role)
+	)]
 	pub async fn connect(&mut self) -> Result<(), RelayError> {
 		if self.terminal {
 			return Err(RelayError::Terminal);
@@ -266,6 +273,7 @@ impl RelayClient {
 			.map_err(RelayError::Socket)?;
 		self.socket = Some(socket);
 		self.backoff.reset();
+		tracing::info!(role = ?self.role, "collaboration relay connected");
 		Ok(())
 	}
 
@@ -288,7 +296,8 @@ impl RelayClient {
 		};
 		match socket.send(Message::Binary(encoded)).await {
 			Ok(()) => Ok(SendDisposition::Sent),
-			Err(_) => {
+			Err(error) => {
+				tracing::warn!(%error, "collaboration relay send failed; reconnect required");
 				self.socket = None;
 				Ok(SendDisposition::Queued)
 			},
@@ -307,7 +316,8 @@ impl RelayClient {
 			};
 			let message = match message {
 				Ok(message) => message,
-				Err(_) => {
+				Err(error) => {
+					tracing::warn!(%error, "collaboration relay receive failed; reconnect required");
 					self.socket = None;
 					return Ok(None);
 				},
@@ -319,6 +329,10 @@ impl RelayClient {
 						return Ok(Some(RelayInbound::Frame(frame)));
 					},
 					Err(error @ CodecError::Crypto(_)) => {
+						tracing::warn!(
+							%error,
+							"collaboration relay authentication failed; connection closed"
+						);
 						self.fail_terminal();
 						return Err(RelayError::Authentication(error));
 					},
@@ -333,6 +347,11 @@ impl RelayClient {
 						},
 						TextControl::PeerLeft { peer_id } => RelayInbound::PeerLeft(PeerLeft { peer_id }),
 						TextControl::RoomClosed => {
+							tracing::warn!(
+								close_code = 4001_u16,
+								reason = "room closed",
+								"collaboration relay closed terminally"
+							);
 							self.fail_terminal();
 							return Err(RelayError::FatalClose { code: 4001, reason: "room closed" });
 						},
@@ -343,13 +362,22 @@ impl RelayClient {
 					if let Some(frame) = frame
 						&& let Some(reason) = fatal_close(&frame)
 					{
+						tracing::warn!(
+							close_code = u16::from(frame.code),
+							reason,
+							"collaboration relay closed terminally"
+						);
 						self.fail_terminal();
 						return Err(RelayError::FatalClose { code: u16::from(frame.code), reason });
 					}
 					return Ok(None);
 				},
 				Message::Ping(payload) => {
-					if socket.send(Message::Pong(payload)).await.is_err() {
+					if let Err(error) = socket.send(Message::Pong(payload)).await {
+						tracing::warn!(
+							%error,
+							"collaboration relay heartbeat failed; reconnect required"
+						);
 						self.socket = None;
 						return Ok(None);
 					}
@@ -364,7 +392,12 @@ impl RelayClient {
 		if self.terminal {
 			Err(RelayError::Terminal)
 		} else {
-			Ok(self.backoff.next_delay())
+			let delay = self.backoff.next_delay();
+			tracing::warn!(
+				delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+				"collaboration relay reconnect scheduled"
+			);
+			Ok(delay)
 		}
 	}
 
@@ -374,6 +407,7 @@ impl RelayClient {
 		if let Some(mut socket) = self.socket.take() {
 			socket.close(None).await.map_err(RelayError::Socket)?;
 		}
+		tracing::info!(role = ?self.role, "collaboration relay closed");
 		Ok(())
 	}
 

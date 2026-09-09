@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use omp_core::sf;
+#[cfg(test)]
+use omp_tool::Severity;
+use omp_tool::{Diag, DiagKind};
 use quick_xml::{
 	Reader,
 	escape::{resolve_xml_entity, unescape},
@@ -104,11 +106,11 @@ pub(super) async fn render<C: HttpClient + Sync>(
 	});
 	markdown.push_str("\n\n");
 
-	let mut notes = Vec::new();
+	let mut diags = Vec::new();
 	if target.pdf
 		&& let Some(pdf_link) = entry.pdf_link
 	{
-		notes.push(sf!("Fetching PDF for full content..."));
+		diags.push(Diag::info(DiagKind::Provenance, "Fetching PDF for full content"));
 		if let Ok(pdf) = client.get(HttpRequest::new(pdf_link)).await
 			&& pdf.is_success()
 			&& let Ok(Some(converted)) = markit::convert_cached(
@@ -125,15 +127,17 @@ pub(super) async fn render<C: HttpClient + Sync>(
 			markdown.push_str("---\n\n## Full Paper\n\n");
 			markdown.push_str(&converted.conversion.text);
 			markdown.push('\n');
-			notes.push(sf!("PDF converted via markit"));
+			diags.push(Diag::info(DiagKind::Provenance, "PDF converted via markit"));
 		}
 	}
 
 	let mut result = RenderResult::markdown(&markdown, "arxiv");
-	if notes.is_empty() {
-		result.notes.insert(0, sf!("Fetched via arXiv API"));
+	if diags.is_empty() {
+		result
+			.diags
+			.insert(0, Diag::info(DiagKind::Provenance, "Fetched via arXiv API"));
 	} else {
-		result.notes.extend(notes);
+		result.diags.extend(diags);
 	}
 	Ok(Some(result))
 }
@@ -646,7 +650,9 @@ mod tests {
 		);
 		assert_eq!(result.content_type.as_deref(), Some("text/markdown"));
 		assert_eq!(result.method.as_str(), "arxiv");
-		assert_eq!(result.notes.as_slice(), ["Fetched via arXiv API"]);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 	}
 
 	#[tokio::test]
@@ -671,7 +677,9 @@ mod tests {
 			 2025-01-02\n**Categories:** cs.AI&ML, cs.LG\n**arXiv:** 2501.01234v3\n\n---\n\n## \
 			 Abstract\n\nFirst\u{a0}<line> & α ©."
 		);
-		assert_eq!(result.notes.as_slice(), ["Fetching PDF for full content..."]);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 	}
 
 	#[tokio::test]
@@ -686,7 +694,9 @@ mod tests {
 			result.content.as_str(),
 			"# arXiv Paper\n\n**arXiv:** 2501.01234\n\n---\n\n## Abstract\n\nNo abstract available."
 		);
-		assert_eq!(result.notes.as_slice(), ["Fetched via arXiv API"]);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 	}
 
 	#[tokio::test]

@@ -3,9 +3,7 @@
 use std::{
 	borrow::Cow,
 	collections::HashMap,
-	env, error,
-	fmt::{self, Display},
-	fs, io,
+	env, fs, io,
 	path::{Path, PathBuf},
 };
 
@@ -70,7 +68,8 @@ impl ParsedSelector {
 }
 
 /// A selector syntax or bounds error suitable for a model-facing tool fault.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("{0}")]
 pub struct SelectorError(Str);
 
 impl SelectorError {
@@ -84,14 +83,6 @@ impl SelectorError {
 		self.0.as_ref()
 	}
 }
-
-impl Display for SelectorError {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.write_str(self.message())
-	}
-}
-
-impl error::Error for SelectorError {}
 
 /// Parse one `N`, `N-M`, `N-`, `N+K`, `N..M`, or `N..` range chunk.
 pub fn parse_line_range_chunk(input: &str) -> Result<Option<LineRange>, SelectorError> {
@@ -742,19 +733,6 @@ impl SuffixMatchCache {
 	}
 }
 
-/// Prefix rendered output with pi's exact suffix-resolution notice.
-pub fn prepend_suffix_resolution_notice(text: &str, from: &str, resolved: &SuffixMatch) -> String {
-	let notice = format!(
-		"[Path '{from}' not found; resolved to '{}' via suffix match]",
-		resolved.display_path
-	);
-	if text.is_empty() {
-		notice
-	} else {
-		format!("{notice}\n{text}")
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use omp_core::sf;
@@ -805,7 +783,7 @@ mod tests {
 		assert_eq!(http.resource, "example.com/page");
 		assert!(matches!(http.selector, ParsedSelector::Lines { .. }));
 
-		let unknown = parse_uri("xd://pending:raw").unwrap().unwrap();
+		let unknown = parse_uri("custom://pending:raw").unwrap().unwrap();
 		assert_eq!(unknown.scheme, Scheme::Unknown);
 		assert_eq!(unknown.resource, "pending:raw");
 		assert_eq!(unknown.selector, ParsedSelector::None);

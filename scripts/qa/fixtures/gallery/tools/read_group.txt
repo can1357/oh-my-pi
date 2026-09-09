@@ -1,0 +1,32 @@
+── read_group — Read Groups ────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+  Read (2)                                                                                         
+   ├─  packages/coding-agent/test/streaming-preview-height.test.ts:301-409                         
+   └─  packages/coding-agent/test/tool-live-region-scrollback.test.ts:143-                         
+
+  · in progress
+  Read (4)                                                                                         
+   ├─  packages/coding-agent/test/streaming-preview-height.test.ts:301-409                         
+   ├─  packages/coding-agent/test/tool-live-region-scrollback.test.ts:143-310                      
+   ├─  packages/tui/test/streaming-scrollback-defer.test.ts:89-464                                 
+   └─  packages/coding-agent/src/task/render.ts:507-605,1070-1194,…,1270-1274                      
+
+  · done
+  Read (4)                                                                                         
+   ├─ packages/coding-agent/test/streaming-preview-height.test.ts:301-409                           
+   ├─ packages/coding-agent/test/tool-live-region-scrollback.test.ts:143-310                        
+   ├─ packages/tui/test/streaming-scrollback-defer.test.ts:89-464                                   
+   │  2026-07-28 21:05:47   2.4K   113   103K   2.2s   21.3/s                                  
+   └─ packages/coding-agent/src/task/render.ts:507-605,1070-1194,…,1270-1274                        
+      2026-07-28 21:05:52   2.4K   113   103K   1.9s   24.0/s                                  
+
+  · failed
+  Read (4)                                                                                         
+   ├─ packages/coding-agent/test/streaming-preview-height.test.ts:301-409                           
+   ├─ packages/coding-agent/test/tool-live-region-scrollback.test.ts:143-310                        
+   ├─ packages/tui/test/streaming-scrollback-defer.test.ts:89-464                                   
+   │  2026-07-28 21:05:47   2.4K   113   103K   2.2s   21.3/s                                  
+   └─  packages/coding-agent/src/task/render.ts:507-605,1070-1194,…,1270-1274                      
+      2026-07-28 21:05:52   2.4K   113   103K   1.9s   24.0/s                                  
+

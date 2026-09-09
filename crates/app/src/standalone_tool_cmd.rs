@@ -1,23 +1,22 @@
 //! Standalone canonical read and web-search tool invocations.
 
-use std::{env, sync::Arc};
+use std::{env, fmt::Write as _, sync::Arc};
 
 use futures::StreamExt as _;
 use miette::{IntoDiagnostic as _, miette};
 use omp_core::{Str, sf};
-use omp_driver::headless::{HeadlessSession, HeadlessSessionOptions};
-use omp_settings::manager::{SettingsManager, SettingsPaths};
-use omp_tool::{CallOutcome, ErasedEv, ErasedOutcome, Registry};
+use omp_driver::headless::kernel::{ComposedInference, KernelOptions, compose_kernel};
+use omp_tool::{CallOutcome, DiagEnvelope, ErasedEv, ErasedOutcome, Registry};
 
 use crate::cli::{ReadCliArgs, SearchCliArgs};
 
-/// Executes `read@1` and prints precisely the model-visible parts.
+/// Executes `read@2` and prints precisely the model-visible parts.
 pub(crate) async fn read(args: ReadCliArgs) -> miette::Result<()> {
 	let session = session().await?;
 	let payload: omp_tools::read::Payload = invoke::<_, _, omp_tools::read::Fault>(
 		session.tool_registry(),
 		"read",
-		&omp_tools::read::Params { path: args.path },
+		&omp_tools::read::Params { path: args.path, question: None },
 	)
 	.await?;
 	for part in payload.parts {
@@ -34,7 +33,7 @@ pub(crate) async fn read(args: ReadCliArgs) -> miette::Result<()> {
 	Ok(())
 }
 
-/// Executes `web_search@1` through the production inference facade.
+/// Executes `web_search@2` through the production inference facade.
 pub(crate) async fn search(args: SearchCliArgs) -> miette::Result<()> {
 	let session = session().await?;
 	let payload: omp_tools::web_search::Payload = invoke::<_, _, omp_tools::web_search::Fault>(
@@ -49,10 +48,22 @@ pub(crate) async fn search(args: SearchCliArgs) -> miette::Result<()> {
 				crate::cli::SearchRecency::Year => omp_tools::web_search::Recency::Year,
 			}),
 			limit:              args.limit,
+			after:              None,
+			before:             None,
+			allowed_domains:    Vec::new(),
+			excluded_domains:   Vec::new(),
+			country:            None,
+			language:           None,
 			max_tokens:         None,
 			temperature:        None,
 			num_search_results: None,
-			provider:           args.provider,
+			provider:           args
+				.provider
+				.as_deref()
+				.map(str::parse)
+				.transpose()
+				.map_err(|_| miette!("unknown web search provider"))?,
+			timeout_ms:         None,
 		},
 	)
 	.await?;
@@ -67,19 +78,38 @@ pub(crate) async fn search(args: SearchCliArgs) -> miette::Result<()> {
 			println!("\n{}\n{}\n{}", source.title, source.url, source.snippet);
 		}
 	}
+	if !response.warnings.is_empty() {
+		tracing::warn!(warning_count = response.warnings.len(), "web search completed with warnings");
+	}
 	for warning in response.warnings {
 		eprintln!("Warning: {warning}");
 	}
 	Ok(())
 }
 
-pub(crate) async fn session() -> miette::Result<HeadlessSession> {
+pub(crate) struct StandaloneSession {
+	_kernel:  omp_agent::Kernel<ComposedInference>,
+	_session: omp_session::Session,
+	registry: Arc<Registry>,
+}
+
+impl StandaloneSession {
+	fn tool_registry(&self) -> Arc<Registry> {
+		Arc::clone(&self.registry)
+	}
+
+	pub(crate) fn env(&self) -> &omp_env::EnvClient {
+		self._kernel.inference().environment_client()
+	}
+}
+
+async fn session() -> miette::Result<StandaloneSession> {
 	session_at(None).await
 }
 
 pub(crate) async fn session_at(
 	project: Option<std::path::PathBuf>,
-) -> miette::Result<HeadlessSession> {
+) -> miette::Result<StandaloneSession> {
 	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
 	let project = project
 		.map_or_else(env::current_dir, Ok)
@@ -87,14 +117,9 @@ pub(crate) async fn session_at(
 		.canonicalize()
 		.into_diagnostic()?;
 	let home = env::var_os("HOME").map_or_else(|| project.clone(), std::path::PathBuf::from);
-	let settings_manager = SettingsManager::open(SettingsPaths::discover(&data_dir, Some(&project)))
-		.into_diagnostic()?;
-	let settings_snapshot = settings_manager.snapshot();
-	let model_settings = settings_snapshot
-		.project::<omp_catalog::settings::ModelSettings>()
-		.into_diagnostic()?
-		.get()
-		.resolve_path_scopes(&project, &home);
+	let ctx = Arc::new(crate::process_ctx(&project)?);
+	let model_settings =
+		omp_catalog::settings::ModelSettings::from_con(&ctx).resolve_path_scopes(&project, &home);
 	let catalog = omp_driver::registry::production_catalog(&data_dir).into_diagnostic()?;
 	let roles = omp_driver::discovery::roles::resolve_launch_roles(
 		catalog.as_ref(),
@@ -109,26 +134,16 @@ pub(crate) async fn session_at(
 		.primary
 		.map(|model| Str::from(model.as_str()))
 		.ok_or_else(|| miette!("standalone tools require a configured default model role"))?;
-	HeadlessSession::open(data_dir, HeadlessSessionOptions {
-		project,
-		settings_overlays: Box::default(),
-		additional_roots: Box::default(),
-		model,
-		initial_regime: None,
-		initial_prompt_slot: None,
-		plan_handoff: None,
-		resume: None,
-		fork: None,
-		py_eval: false,
-		approval_mode: None,
-		pty_denied: true,
-		credential_provider: None,
-		api_key: None,
-		prompt_cache_affinity: None,
-		session_generation: 1,
-	})
-	.await
-	.into_diagnostic()
+	let (kernel, session, _) =
+		compose_kernel(&data_dir, &project, model.as_str(), ctx, KernelOptions {
+			ephemeral: true,
+			no_tools: false,
+			..KernelOptions::default()
+		})
+		.await
+		.into_diagnostic()?;
+	let registry = Arc::clone(kernel.tool_registry());
+	Ok(StandaloneSession { _kernel: kernel, _session: session, registry })
 }
 
 trait StandaloneFault {
@@ -160,7 +175,19 @@ where
 	let mut stream = registry.invoke(name, incoming).into_diagnostic()?;
 	while let Some(event) = stream.next().await {
 		match event.into_diagnostic()? {
-			ErasedEv::Update(_) => {},
+			ErasedEv::Update(update) => {
+				if let Ok(envelope) = serde_json::from_slice::<DiagEnvelope>(&update) {
+					let diag = envelope.diag;
+					let mut notice = format!("[{}] {}: {}", diag.severity, diag.kind, diag.text);
+					if let Some(continuation) = diag.continuation {
+						let _ = write!(notice, " continuation={continuation}");
+					}
+					if let Some(artifact) = diag.artifact {
+						let _ = write!(notice, " artifact={artifact}");
+					}
+					eprintln!("{notice}");
+				}
+			},
 			ErasedEv::Done(ErasedOutcome::Detached(_)) => {
 				return Err(miette!("{name} detached unexpectedly"));
 			},

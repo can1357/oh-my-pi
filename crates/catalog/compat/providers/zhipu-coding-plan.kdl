@@ -1,8 +1,20 @@
 // Provider-wire compat for "zhipu-coding-plan"; regenerated from the frozen census using deployment contract selectors.
 
 provider "zhipu-coding-plan" {
+	// Replaces the Zhipu provider thinking-format branch.
+	thinking-format "zai"
 	class "glm" {
 		thinking-mode "effort"
+		// Vision family and flash >=5.3 accept image input; the /models
+		// listing carries no modality metadata.
+		family "vision" {
+			input-modalities "text" "image"
+		}
+		family "flash" {
+			revision ">=5.3" {
+				input-modalities "text" "image"
+			}
+		}
 		family "turbo" {
 			reasoning-content-field "reasoning_content"
 			supports-developer-role #false

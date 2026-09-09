@@ -2,8 +2,7 @@
 
 use std::{
 	collections::HashMap,
-	env, error, fmt,
-	fmt::Display,
+	env,
 	io::{self, Cursor, Read as _},
 	path::Path,
 	sync::LazyLock,
@@ -35,6 +34,10 @@ pub const MAX_IMAGE_HEIGHT: u32 = 1_568;
 pub const MIN_IMAGE_DIMENSION: u32 = 200;
 /// Preferred encoded output budget (500 KiB).
 pub const MAX_IMAGE_OUTPUT_BYTES: usize = 500 * 1024;
+/// Largest decoded source accepted by the image normalization boundary.
+///
+/// Encoded bytes alone do not bound a compressed image's pixel allocation.
+pub const MAX_IMAGE_DECODE_PIXELS: u64 = 64 * 1024 * 1024;
 
 const IMAGE_METADATA_HEADER_BYTES: usize = 256 * 1024;
 const DATA_URL_HEADER_MAX_BYTES: usize = 1_024;
@@ -182,21 +185,44 @@ pub struct ProcessedImage {
 }
 
 /// Typed image-processing failure.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ImageFault {
 	/// The string is an image data URL but its header is malformed.
+	#[error("Invalid image data URL.")]
 	InvalidDataUrl,
 	/// The data URL payload is not valid padded standard Base64.
+	#[error("Invalid Base64 image data.")]
 	InvalidBase64,
 	/// The encoded input exceeds the hard read limit.
+	#[error(
+		"Image file too large: {actual} exceeds {maximum} limit.",
+		actual = format_bytes(*bytes),
+		maximum = format_bytes(*max_bytes)
+	)]
 	TooLarge {
 		/// Actual encoded byte count.
 		bytes:     usize,
 		/// Maximum accepted byte count.
 		max_bytes: usize,
 	},
+	/// Header dimensions would require an excessive decoded pixel allocation.
+	#[error(
+		"Image dimensions too large: {width}x{height} exceeds the {max_pixels} pixel decode limit."
+	)]
+	DimensionsTooLarge {
+		/// Source width.
+		width:      u32,
+		/// Source height.
+		height:     u32,
+		/// Maximum accepted decoded pixel count.
+		max_pixels: u64,
+	},
+	/// The encoded bytes advertise an image format but do not decode.
+	#[error("Invalid or truncated image data.")]
+	InvalidImageData,
 	/// A WebP image required by an STB-backed model could not be decoded and
 	/// converted to PNG.
+	#[error("WebP image could not be converted for this model.")]
 	WebpConversionFailed,
 }
 
@@ -231,20 +257,17 @@ impl ImageFault {
 				format_bytes(bytes),
 				format_bytes(max_bytes)
 			),
+			Self::DimensionsTooLarge { width, height, max_pixels } => sf!(
+				"Image dimensions too large: {width}x{height} exceeds the {max_pixels} pixel decode \
+				 limit."
+			),
+			Self::InvalidImageData => sf!("Invalid or truncated image data."),
 			Self::WebpConversionFailed => sf!("WebP image could not be converted for this model."),
 		}
 	}
 }
 
-impl Display for ImageFault {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		formatter.write_str(self.message().as_ref())
-	}
-}
-
-impl error::Error for ImageFault {}
-
-/// Returns whether a path has one of pi's supported image extensions.
+/// Returns whether a path has one of the supported image extensions.
 ///
 /// Byte sniffing remains authoritative: an image may be recognized without one
 /// of these extensions, and a file with one of these extensions may not decode
@@ -308,8 +331,7 @@ pub fn rasterize_svg(source: &[u8], gzip: bool) -> Result<Bytes, SvgRasterFault>
 /// Classifies PNG, JPEG, GIF, and WebP bytes.
 ///
 /// Extracts dimensions available in their headers. This intentionally
-/// recognizes truncated images after a valid magic signature, matching pi's
-/// classification behavior.
+/// recognizes truncated images after a valid magic signature.
 pub fn sniff_metadata(header: &[u8]) -> Option<ImageMetadata> {
 	parse_png(header)
 		.or_else(|| parse_jpeg(header))
@@ -425,6 +447,7 @@ pub fn process_image_for_stb(input: Bytes) -> Result<Option<ProcessedImage>, Ima
 	else {
 		return Ok(None);
 	};
+	validate_decode_dimensions(metadata)?;
 	if metadata.kind != ImageKind::WebP {
 		return process_image(input);
 	}
@@ -469,8 +492,9 @@ pub fn process_image_for_stb(input: Bytes) -> Result<Option<ProcessedImage>, Ima
 /// return `None` when their bytes are not one of the four supported image
 /// encodings. Inputs within the dimension bounds and at most one quarter of the
 /// output budget are retained verbatim. Other inputs are resized/recompressed
-/// using pi's dimension, quality, and scale ladders. GIF/WebP animation is
-/// retained on the verbatim path; re-encoding produces the decoded first frame.
+/// using the configured dimension, quality, and scale ladders. GIF/WebP
+/// animation is retained on the verbatim path; re-encoding produces the decoded
+/// first frame.
 pub fn process_image(input: Bytes) -> Result<Option<ProcessedImage>, ImageFault> {
 	if input.len() > MAX_IMAGE_INPUT_BYTES {
 		return Err(ImageFault::TooLarge {
@@ -482,18 +506,15 @@ pub fn process_image(input: Bytes) -> Result<Option<ProcessedImage>, ImageFault>
 	else {
 		return Ok(None);
 	};
+	validate_decode_dimensions(metadata)?;
 
 	let exclude_webp = webp_is_excluded();
 	let cache_key = ImageCacheKey { digest: Hash32::sum(&input), auto_resize: true, exclude_webp };
 	if let Some(cached) = IMAGE_CACHE.lock().get(cache_key) {
 		return Ok(Some(cached));
 	}
-	let decoded = decode_image(&input, metadata.kind);
-	let Ok((image, was_animated)) = decoded else {
-		let processed = unchanged_image(input, metadata, false);
-		IMAGE_CACHE.lock().insert(cache_key, &processed);
-		return Ok(Some(processed));
-	};
+	let (image, was_animated) =
+		decode_image(&input, metadata.kind).map_err(|_| ImageFault::InvalidImageData)?;
 	let original_width = image.width();
 	let original_height = image.height();
 	let channels = image.color().channel_count();
@@ -557,6 +578,21 @@ pub fn process_image(input: Bytes) -> Result<Option<ProcessedImage>, ImageFault>
 	};
 	IMAGE_CACHE.lock().insert(cache_key, &processed);
 	Ok(Some(processed))
+}
+
+fn validate_decode_dimensions(metadata: ImageMetadata) -> Result<(), ImageFault> {
+	let Some((width, height)) = metadata.width.zip(metadata.height) else {
+		return Ok(());
+	};
+	let pixels = u64::from(width).saturating_mul(u64::from(height));
+	if pixels > MAX_IMAGE_DECODE_PIXELS {
+		return Err(ImageFault::DimensionsTooLarge {
+			width,
+			height,
+			max_pixels: MAX_IMAGE_DECODE_PIXELS,
+		});
+	}
+	Ok(())
 }
 
 struct EncodedImage {
@@ -1031,6 +1067,30 @@ mod tests {
 			sniff_metadata(&png),
 			Some(ImageMetadata { kind: ImageKind::Png, width: Some(3), height: Some(2) })
 		);
+	}
+
+	#[test]
+	fn decode_rejects_pixel_bombs_before_allocating_and_rejects_truncated_images() {
+		let mut huge = vec![0; 26];
+		huge[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+		huge[12..16].copy_from_slice(b"IHDR");
+		huge[16..20].copy_from_slice(&100_000_u32.to_be_bytes());
+		huge[20..24].copy_from_slice(&100_000_u32.to_be_bytes());
+		assert_eq!(
+			process_image(Bytes::from(huge)),
+			Err(ImageFault::DimensionsTooLarge {
+				width:      100_000,
+				height:     100_000,
+				max_pixels: MAX_IMAGE_DECODE_PIXELS,
+			})
+		);
+
+		let mut truncated = vec![0; 26];
+		truncated[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+		truncated[12..16].copy_from_slice(b"IHDR");
+		truncated[16..20].copy_from_slice(&8_u32.to_be_bytes());
+		truncated[20..24].copy_from_slice(&6_u32.to_be_bytes());
+		assert_eq!(process_image(Bytes::from(truncated)), Err(ImageFault::InvalidImageData));
 	}
 
 	fn assert_reported_dimensions_match_bytes(encoded: &EncodedImage) {

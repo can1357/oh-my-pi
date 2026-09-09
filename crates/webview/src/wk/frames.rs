@@ -337,6 +337,7 @@ define_class!(
 		/// The stream died (window gone, capture revoked, ...).
 		#[unsafe(method(stream:didStopWithError:))]
 		fn did_stop(&self, _stream: &SCStream, error: &NSError) {
+			tracing::warn!("screen capture device stopped unexpectedly");
 			let _ = self
 				.ivars()
 				.events
@@ -954,9 +955,12 @@ fn barrier_snapshot(spec: &Rc<ArmSpec>) {
 		config
 	};
 	let block_spec = Rc::clone(spec);
-	let done = RcBlock::new(move |_image: *mut NSImage, _error: *mut NSError| {
+	let done = RcBlock::new(move |_image: *mut NSImage, error: *mut NSError| {
 		// Start capture even when the barrier snapshot failed: a transient
 		// snapshot error must not leave the surface frameless.
+		if !error.is_null() {
+			tracing::warn!("webview paint-barrier capture failed; continuing");
+		}
 		*block_spec.capture.borrow_mut() = Some(start_capture(&block_spec));
 	});
 	// SAFETY: snapshotting our own live webview; WebKit copies the block and
@@ -977,14 +981,26 @@ fn start_capture(spec: &ArmSpec) -> CaptureMode {
 	let size = spec.webview.frame().size;
 	#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "dims are small")]
 	let px = pixel_dims(size.width.max(1.0) as u32, size.height.max(1.0) as u32, spec.scale);
-	let sck = if preflight_screen_capture() {
-		try_sck(spec.window.windowNumber(), px, spec.fps_cap, spec.sink.clone(), spec.events.clone())
-	} else {
-		None
-	};
+	let screen_capture_available = preflight_screen_capture();
+	let sck = screen_capture_available
+		.then(|| {
+			try_sck(
+				spec.window.windowNumber(),
+				px,
+				spec.fps_cap,
+				spec.sink.clone(),
+				spec.events.clone(),
+			)
+		})
+		.flatten();
 	if let Some(sck) = sck {
 		CaptureMode::Sck(sck)
 	} else {
+		if screen_capture_available {
+			tracing::warn!("screen capture device initialization failed; using snapshot fallback");
+		} else {
+			tracing::debug!("screen capture permission unavailable; using snapshot fallback");
+		}
 		let state = Rc::new(SnapState {
 			webview:      spec.webview.clone(),
 			sink:         spec.sink.clone(),

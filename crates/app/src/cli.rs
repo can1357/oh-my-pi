@@ -14,10 +14,11 @@ use std::{
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory as _, FromArgMatches as _, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use futures::StreamExt as _;
 use miette::{IntoDiagnostic as _, miette};
+use omp_catalog::settings::TierSetting;
 use omp_core::{SecretString, Str, encoding::hex};
 use omp_driver::{cleanse::CleanseArgs, compress::CompressArgs};
 use omp_envd::{site::TrustedModule, worker::ExtHostSpec};
@@ -39,15 +40,9 @@ fn parse_cli_secret(value: &str) -> Result<SecretString, convert::Infallible> {
 
 use std::{convert, env, fs, time};
 
-use omp_catalog::{ModelKey, compile::compile_oracle};
-use omp_driver::bridges::{AgentGoalControl, InferenceBridge};
-use omp_envd::{
-	exthost::{ActivationTrigger, DeclarationSet, ExtensionManifest, ServiceManifest},
-	worker::HostKey,
-};
 #[cfg(feature = "local-applefm")]
-use omp_inference::local::applefm::{AppleFm, AppleFmEvent, AppleFmOptions};
-use omp_inference::{
+use omp_ai::local::applefm::{AppleFm, AppleFmEvent, AppleFmOptions};
+use omp_ai::{
 	Client,
 	call::{
 		CallMeta, ChatRequest, ContentPart, Message, NegotiationPolicy, Role, Sampling, Setting,
@@ -57,6 +52,12 @@ use omp_inference::{
 	id::RequestId,
 	receipt::ExecutionBudget,
 	router,
+};
+use omp_catalog::{ModelKey, compile::compile_oracle};
+use omp_driver::bridges::{AgentGoalControl, InferenceBridge};
+use omp_envd::{
+	exthost::{ActivationTrigger, DeclarationSet, ExtensionManifest, ServiceManifest},
+	worker::HostKey,
 };
 use tokio::io::{AsyncWriteExt as _, stdout};
 
@@ -77,13 +78,13 @@ use crate::{
 	gallery_cmd::GalleryArgs,
 	gc_cmd, git_cmd,
 	git_cmd::GitArgs,
-	grep_cmd, grievances_cmd, join_cmd, models_cmd, print_mode, profile_alias, render_cmd,
+	grievances_cmd, models_cmd, print_mode, profile_alias, render_cmd,
 	render_cmd::RenderArgs,
-	rpc_mode, say_cmd, setup_cmd, share_cmd, smoke_test, ssh_cmd,
+	rpc_mode, say_cmd, setup_cmd, smoke_test, ssh_cmd,
 	ssh_cmd::SshArgs,
 	startup_notice,
 	startup_notice::Eligibility,
-	stats_cmd, tiny_models_cmd, ttsr_cmd, update_cmd, usage_cmd,
+	stats_cmd, tiny_models_cmd, update_cmd, usage_cmd,
 	usage_error::CliUsageError,
 	worktree_cmd,
 };
@@ -110,22 +111,6 @@ pub enum ThinkingLevel {
 	Max,
 	/// Leave effort selection to the provider.
 	Auto,
-}
-
-impl From<ThinkingLevel> for omp_driver::chat::ThinkingLevel {
-	fn from(value: ThinkingLevel) -> Self {
-		match value {
-			ThinkingLevel::Off => Self::Off,
-			ThinkingLevel::Minimal => Self::Minimal,
-			ThinkingLevel::Low => Self::Low,
-			ThinkingLevel::Medium => Self::Medium,
-			ThinkingLevel::High => Self::High,
-			ThinkingLevel::Extreme => Self::Extreme,
-			ThinkingLevel::XHigh => Self::XHigh,
-			ThinkingLevel::Max => Self::Max,
-			ThinkingLevel::Auto => Self::Auto,
-		}
-	}
 }
 
 impl FromStr for ThinkingLevel {
@@ -157,39 +142,23 @@ impl FromStr for ThinkingLevel {
 	}
 }
 
-/// Validated provider service tier.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ServiceTier {
-	/// Disable provider tier routing.
-	None,
-	/// Let the provider choose a tier.
-	Auto,
-	/// Use the provider default tier.
-	Default,
-	/// Select the flex tier.
-	Flex,
-	/// Select the priority tier.
-	Priority,
-	/// Select the scale tier.
-	Scale,
-	/// Select the standard tier.
-	Standard,
-}
-
-impl FromStr for ServiceTier {
-	type Err = String;
-
-	fn from_str(value: &str) -> Result<Self, Self::Err> {
-		match value {
-			"none" => Ok(Self::None),
-			"auto" => Ok(Self::Auto),
-			"default" => Ok(Self::Default),
-			"flex" => Ok(Self::Flex),
-			"priority" => Ok(Self::Priority),
-			"scale" => Ok(Self::Scale),
-			"standard" => Ok(Self::Standard),
-			_ => Err(format!("unknown service tier `{value}`")),
-		}
+/// Parses `--service-tier` into the session's OpenAI-family tier setting
+/// (`ai_tier_openai`). `inherit` is a subagent-only value and is rejected at
+/// the CLI.
+fn parse_service_tier(value: &str) -> Result<TierSetting, String> {
+	use strum::VariantNames as _;
+	match value.parse::<TierSetting>() {
+		Ok(TierSetting::Inherit) => Err("`inherit` is not valid for --service-tier".into()),
+		Ok(tier) => Ok(tier),
+		Err(_) => Err(format!(
+			"unknown service tier `{value}`; expected one of {}",
+			TierSetting::VARIANTS
+				.iter()
+				.filter(|name| **name != "inherit")
+				.copied()
+				.collect::<Vec<_>>()
+				.join(", ")
+		)),
 	}
 }
 
@@ -235,23 +204,23 @@ impl FromStr for CliDuration {
 	type Err = String;
 
 	fn from_str(value: &str) -> Result<Self, Self::Err> {
+		let value = value.trim();
 		let (number, multiplier) = match value.as_bytes().last() {
-			Some(b's') => (&value[..value.len() - 1], 1),
-			Some(b'm') => (&value[..value.len() - 1], 60),
-			Some(b'h') => (&value[..value.len() - 1], 3_600),
-			_ => (value, 1),
+			Some(b's') => (&value[..value.len() - 1], 1.0),
+			Some(b'm') => (&value[..value.len() - 1], 60.0),
+			Some(b'h') => (&value[..value.len() - 1], 3_600.0),
+			_ => (value, 1.0),
 		};
 		let seconds = number
-			.parse::<u64>()
-			.map_err(|_| "duration must be seconds or use s, m, or h".to_owned())?;
-		if seconds == 0 {
-			return Err("duration must be greater than zero".into());
+			.parse::<f64>()
+			.map_err(|_| "duration must be seconds or use s, m, or h".to_owned())?
+			* multiplier;
+		if !seconds.is_finite() || seconds <= 0.0 {
+			return Err("duration must be a finite value greater than zero".into());
 		}
-		seconds
-			.checked_mul(multiplier)
-			.map(Duration::from_secs)
+		Duration::try_from_secs_f64(seconds)
 			.map(Self)
-			.ok_or_else(|| "duration is too large".into())
+			.map_err(|_| "duration is too large".into())
 	}
 }
 
@@ -295,21 +264,72 @@ pub struct ToolNames(
 	pub Vec<Str>,
 );
 
+fn is_builtin_tool_name(name: &str) -> bool {
+	matches!(
+		name,
+		"read"
+			| "write"
+			| "bash"
+			| "edit"
+			| "grep"
+			| "glob"
+			| "eval"
+			| "task"
+			| "hub"
+			| "browser"
+			| "learn"
+			| "manage_skill"
+			| "computer"
+			| "lsp"
+			| "debug"
+			| "todo"
+			| "ask"
+			| "web_search"
+			| "think"
+			| "goal"
+			| "yield"
+			| "checkpoint"
+			| "rewind"
+			| "github"
+			| "image_gen"
+			| "tts"
+			| "report_issue"
+			| "retain"
+			| "recall"
+			| "reflect"
+			| "memory_edit"
+			| "security_scan"
+			| "ast_grep"
+			| "ast_edit"
+			| "fetch"
+	)
+}
+
 impl FromStr for ToolNames {
-	type Err = String;
+	type Err = convert::Infallible;
 
 	fn from_str(value: &str) -> Result<Self, Self::Err> {
-		let names = value.split(',').map(str::trim).collect::<Vec<_>>();
-		if names.is_empty()
-			|| names.iter().any(|name| {
-				name.is_empty()
-					|| !name
-						.bytes()
-						.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-			}) {
-			return Err("tools must be a non-empty comma-separated list of tool names".into());
+		let mut names = Vec::new();
+		for name in value
+			.split(',')
+			.map(str::trim)
+			.filter(|name| !name.is_empty())
+		{
+			let lowercase = name.to_ascii_lowercase();
+			let normalized = match lowercase.as_str() {
+				"search" => "grep",
+				"find" => "glob",
+				name if is_builtin_tool_name(name) => name,
+				_ => name,
+			};
+			if !names
+				.iter()
+				.any(|candidate: &Str| candidate.as_str() == normalized)
+			{
+				names.push(Str::new(normalized));
+			}
 		}
-		Ok(Self(names.into_iter().map(Str::from).collect()))
+		Ok(Self(names))
 	}
 }
 
@@ -322,6 +342,10 @@ pub struct SelectorList(
 	/// Ordered selectors.
 	pub Vec<Str>,
 );
+
+fn extension_setting_override(value: &str) -> Result<omp_ext::config::CliSettingOverride, String> {
+	omp_ext::config::CliSettingOverride::parse(value).map_err(|error| error.to_string())
+}
 
 impl FromStr for SelectorList {
 	type Err = String;
@@ -346,13 +370,23 @@ impl FromStr for SelectorList {
 )]
 pub struct OmpCli {
 	/// Enable an extension specification for this invocation.
-	#[arg(long = "extension", short = 'e', visible_aliases = ["ext", "hook"], global = true, value_name = "SPEC", conflicts_with = "no_ext")]
+	#[arg(
+		long = "extension",
+		short = 'e',
+		visible_alias = "hook",
+		hide = true,
+		value_name = "SPEC",
+		conflicts_with = "no_ext"
+	)]
 	pub ext:               Vec<Str>,
+	/// Override one manifest-declared extension setting for this invocation.
+	#[arg(long = "ext", hide = true, value_name = "ID.KEY=VALUE", value_parser = extension_setting_override)]
+	pub ext_overrides:     Vec<omp_ext::config::CliSettingOverride>,
 	/// Load only this local extension path for this invocation.
 	#[arg(
 		long = "plugin-dir",
 		visible_alias = "ext-only",
-		global = true,
+		hide = true,
 		value_name = "PATH",
 		conflicts_with = "no_ext"
 	)]
@@ -361,7 +395,7 @@ pub struct OmpCli {
 	/// supervisor.
 	#[arg(
 		long = "trusted-extension",
-		global = true,
+		hide = true,
 		value_name = "ABSOLUTE_PATH",
 		value_parser = trusted_extension_path,
 		conflicts_with_all = ["ext", "ext_only", "no_ext"]
@@ -371,16 +405,15 @@ pub struct OmpCli {
 	#[arg(
 		long = "no-ext",
 		visible_alias = "no-extensions",
-		global = true,
+		hide = true,
 		conflicts_with_all = ["ext", "ext_only", "trusted_extension"]
 	)]
 	pub no_ext:            bool,
 	/// Suppress the workspace extension layer for this invocation.
-	#[arg(long = "no-workspace-ext", global = true)]
+	#[arg(long = "no-workspace-ext", hide = true)]
 	pub no_workspace_ext:  bool,
-	/// Export one durable session journal to a self-contained HTML file and
-	/// exit.
-	#[arg(long, global = true, value_name = "SESSION_JSONL")]
+	/// Export one durable session to a standalone HTML transcript, then exit.
+	#[arg(long, global = true, value_name = "SESSION_OMS")]
 	pub export:            Option<PathBuf>,
 	/// Operation to run. Defaults to interactive project chat.
 	#[command(subcommand)]
@@ -398,7 +431,7 @@ pub struct OmpCli {
 	#[arg(long, global = true, exclusive = true)]
 	pub license:           bool,
 	/// Print the application version and exit.
-	#[arg(short = 'v', long = "version")]
+	#[arg(id = "app_version", short = 'v', long = "version", global = true)]
 	pub version:           bool,
 	/// Select a named profile before settings and extensions are loaded.
 	#[arg(skip)]
@@ -416,89 +449,36 @@ pub struct OmpCli {
 	#[arg(skip)]
 	pub contributed:       Vec<ContributedCliValue>,
 }
+fn omp_command(hide_launch_controls: bool) -> clap::Command {
+	let command = OmpCli::command();
+	if !hide_launch_controls {
+		return command;
+	}
+	command
+		.mut_arg("ext", |arg| arg.hide(true))
+		.mut_arg("ext_overrides", |arg| arg.hide(true))
+		.mut_arg("ext_only", |arg| arg.hide(true))
+		.mut_arg("trusted_extension", |arg| arg.hide(true))
+		.mut_arg("no_ext", |arg| arg.hide(true))
+		.mut_arg("no_workspace_ext", |arg| arg.hide(true))
+}
 
 /// Production application commands.
-/// Statistics dashboard and JSON query options.
-#[derive(Clone, Debug, Args)]
-pub struct StatsArgs {
-	/// Override the profile state directory containing `sessions.sqlite3`.
-	#[arg(long, value_name = "PATH")]
-	pub state_dir: Option<PathBuf>,
-	/// Statistics operation; omitted prints a concise 30-day summary.
-	#[command(subcommand)]
-	pub command:   Option<StatsCommand>,
-}
-
-/// Statistics service operations.
-#[derive(Clone, Debug, Subcommand)]
-pub enum StatsCommand {
-	/// Print a concise summary from the authoritative write-time index.
-	Summary {
-		/// Time range: 24h, 7d, 30d, 90d, or all.
-		#[arg(long)]
-		range: Option<String>,
-	},
-	/// Serve the embedded read-only dashboard and versioned REST API.
-	Serve {
-		/// IP address to bind; non-loopback addresses require authentication.
-		#[arg(long, default_value = "127.0.0.1")]
-		host:       String,
-		/// TCP port; zero requests an ephemeral port.
-		#[arg(long, default_value_t = omp_driver::stats_server::DEFAULT_PORT)]
-		port:       u16,
-		/// Bearer token required for non-loopback service access.
-		#[arg(long)]
-		auth_token: Option<String>,
-		/// Do not open the dashboard in the default browser.
-		#[arg(long)]
-		no_open:    bool,
-	},
-	/// Print the API overview envelope as JSON.
-	Json {
-		/// Time range: 24h, 7d, 30d, 90d, or all.
-		#[arg(long, default_value = "30d")]
-		range: String,
-	},
-	/// Serialize a manual write-time index synchronization checkpoint.
-	Sync,
-}
-
 /// Lock-safe storage maintenance options.
 #[derive(Clone, Debug, Args)]
 pub struct GcArgs {
 	/// Override the profile data directory.
 	#[arg(long, value_name = "PATH")]
-	pub data_dir:                Option<PathBuf>,
+	pub data_dir:     Option<PathBuf>,
 	/// Override the session-journal directory.
 	#[arg(long, value_name = "PATH")]
-	pub sessions_dir:            Option<PathBuf>,
-	/// Override the authoritative sessions index.
-	#[arg(long, value_name = "SQLITE")]
-	pub index:                   Option<PathBuf>,
+	pub sessions_dir: Option<PathBuf>,
 	/// Apply destructive operations; omission is a dry run.
 	#[arg(long)]
-	pub apply:                   bool,
-	/// Gzip cold journals and move their artifact directories.
-	#[arg(long)]
-	pub archive:                 bool,
-	/// Minimum inactive age in days for cold archives.
-	#[arg(long, default_value_t = 30)]
-	pub cold_archive_after_days: u64,
-	/// Protect this many newest sessions globally.
-	#[arg(long, default_value_t = 20)]
-	pub retain_newest_global:    usize,
-	/// Protect this many newest sessions per working directory.
-	#[arg(long, default_value_t = 3)]
-	pub retain_newest_per_cwd:   usize,
-	/// Blob put-before-journal grace period.
-	#[arg(long, default_value_t = 300)]
-	pub min_age_seconds:         u64,
-	/// Truncate SQLite WAL files after maintenance.
-	#[arg(long)]
-	pub wal:                     bool,
+	pub apply:        bool,
 	/// Emit machine-readable JSON.
 	#[arg(long)]
-	pub json:                    bool,
+	pub json:         bool,
 }
 /// Image blob-store inspection and maintenance options.
 #[derive(Clone, Debug, Args)]
@@ -509,12 +489,6 @@ pub struct ImagesArgs {
 	/// Emit machine-readable JSON.
 	#[arg(long)]
 	pub json:    bool,
-	/// Apply destructive purge operations; omission is a dry run.
-	#[arg(long)]
-	pub apply:   bool,
-	/// Purge all unreachable blobs, including those inside the normal grace period.
-	#[arg(long)]
-	pub all:     bool,
 	/// Override the profile data directory containing the blob store.
 	#[arg(long, value_name = "PATH")]
 	pub dir:     Option<PathBuf>,
@@ -524,9 +498,7 @@ pub struct ImagesArgs {
 }
 
 /// Image blob-store operation.
-#[derive(
-	Clone, Copy, Debug, Eq, PartialEq, ValueEnum, serde::Serialize, strum::IntoStaticStr,
-)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, serde::Serialize, strum::IntoStaticStr)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum ImagesAction {
@@ -536,8 +508,6 @@ pub enum ImagesAction {
 	Doctor,
 	/// Exercise a write, verified read, and cleanup against the real store.
 	Probe,
-	/// Reclaim blobs not rooted by sessions or the durable artifact catalog.
-	Purge,
 }
 
 /// Top-level extension installation shorthand.
@@ -560,10 +530,22 @@ pub struct InstallArgs {
 	pub scope:   ExtScope,
 }
 
+/// Non-interactive historical usage-statistics options.
+#[derive(Clone, Debug, Args)]
+pub struct StatsArgs {
+	/// Emit the complete aggregate as machine-readable JSON.
+	#[arg(short = 'j', long)]
+	pub json:    bool,
+	/// Print the human-readable aggregate (the default).
+	#[arg(short = 's', long)]
+	pub summary: bool,
+}
+
 /// Durable quota-history options.
 #[derive(Clone, Debug, Args)]
 pub struct UsageArgs {
-	/// Override the profile data directory containing `credentials.db`.
+	/// Override the profile data directory containing credentials and usage
+	/// state.
 	#[arg(long, value_name = "PATH")]
 	pub data_dir:   Option<PathBuf>,
 	/// Restrict snapshots to one provider.
@@ -773,49 +755,6 @@ pub struct SayArgs {
 	pub output:          Option<PathBuf>,
 }
 
-/// Standalone native grep options.
-#[derive(Clone, Debug, Args)]
-pub struct GrepArgs {
-	/// Rust/PCRE2 regular expression.
-	pub pattern:      Str,
-	/// File or directory to search.
-	#[arg(default_value = ".")]
-	pub path:         PathBuf,
-	/// Recursive file glob.
-	#[arg(short = 'g', long)]
-	pub glob:         Option<Str>,
-	/// Maximum returned matches.
-	#[arg(short = 'l', long, default_value_t = 20)]
-	pub limit:        u32,
-	/// Context lines before and after each match.
-	#[arg(short = 'C', long, default_value_t = 2)]
-	pub context:      u32,
-	/// Return matching file names only.
-	#[arg(short = 'f', long, conflicts_with = "count")]
-	pub files:        bool,
-	/// Return match counts per file.
-	#[arg(short = 'c', long)]
-	pub count:        bool,
-	/// Match without regard to ASCII case.
-	#[arg(short = 'i', long)]
-	pub ignore_case:  bool,
-	/// Enable multiline matching.
-	#[arg(long)]
-	pub multiline:    bool,
-	/// Include dot-prefixed paths.
-	#[arg(long, default_value_t = true)]
-	pub hidden:       bool,
-	/// Ignore repository ignore files.
-	#[arg(long)]
-	pub no_gitignore: bool,
-	/// Operation deadline in milliseconds.
-	#[arg(long)]
-	pub timeout_ms:   Option<u32>,
-	/// Emit machine-readable JSON.
-	#[arg(long)]
-	pub json:         bool,
-}
-
 /// Grievance operation selected by the positional action.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum GrievanceAction {
@@ -932,20 +871,30 @@ pub enum TtsrCommand {
 /// Core updater options.
 #[derive(Clone, Debug, Args)]
 pub struct UpdateArgs {
-	/// Only report whether a newer signed release is available.
-	#[arg(long)]
+	/// Only report whether the selected channel has a newer release.
+	#[arg(long, short = 'c', conflicts_with = "plugins")]
 	pub check:     bool,
 	/// Reinstall even when the selected release matches this binary.
-	#[arg(long)]
+	#[arg(long, short = 'f', conflicts_with = "plugins")]
 	pub force:     bool,
 	/// Upgrade extensions instead; equivalent to `omp ext upgrade`.
-	#[arg(long)]
+	#[arg(
+		long,
+		short = 'l',
+		conflicts_with_all = ["check", "force", "canary", "stable", "index", "index_key"]
+	)]
 	pub plugins:   bool,
+	/// Switch to the canary release channel and update.
+	#[arg(long, conflicts_with_all = ["stable", "plugins", "index", "index_key"])]
+	pub canary:    bool,
+	/// Switch back to the stable release channel and update.
+	#[arg(long, conflicts_with_all = ["canary", "plugins", "index", "index_key"])]
+	pub stable:    bool,
 	/// Offline/operator signed package-index override.
-	#[arg(long, value_name = "JSON")]
+	#[arg(long, value_name = "JSON", conflicts_with_all = ["plugins", "canary", "stable"])]
 	pub index:     Option<PathBuf>,
 	/// Ed25519 key for the offline/operator index override.
-	#[arg(long, value_name = "KEY")]
+	#[arg(long, value_name = "KEY", conflicts_with_all = ["plugins", "canary", "stable"])]
 	pub index_key: Option<PathBuf>,
 }
 
@@ -964,23 +913,6 @@ pub struct RegistryArgs {
 	/// Emit machine-readable JSON.
 	#[arg(long)]
 	pub json:      bool,
-}
-
-/// Encrypted transcript sharing options.
-#[derive(Clone, Debug, Args)]
-pub struct ShareArgs {
-	/// Durable session journal. Omit to choose from the native session index.
-	#[arg(value_name = "SESSION_JSONL")]
-	pub journal:   Option<PathBuf>,
-	/// HTTPS blob-store endpoint accepting the sealed envelope.
-	#[arg(long, value_name = "URL")]
-	pub server:    Option<Str>,
-	/// Browser viewer base URL.
-	#[arg(long, value_name = "URL", default_value = "https://omp.dev/share")]
-	pub viewer:    Str,
-	/// Disable irreversible secret redaction.
-	#[arg(long)]
-	pub no_redact: bool,
 }
 
 /// Standalone collaboration guest options.
@@ -1036,12 +968,10 @@ pub struct CompressCliArgs {
 /// Production application commands.
 #[derive(Clone, Debug, Subcommand)]
 pub enum Command {
-	/// Materialize bundled task-agent definitions.
-	Agents(AgentsArgs),
 	/// Install or serve the local Chrome CDP relay.
 	#[command(name = "browser-relay")]
 	BrowserRelay(BrowserRelayArgs),
-	/// Generate changelog updates and one coherent commit.
+	/// Generate one conventional commit from staged changes.
 	Commit(CommitCliArgs),
 	/// Start the inference gateway on a platform-native local endpoint.
 	Serve(ServeArgs),
@@ -1064,8 +994,6 @@ pub enum Command {
 	Acp(AcpArgs),
 	/// Run one typed operation in process.
 	Infer(InferArgs),
-	/// Join a live collaboration in a replica-backed standalone composer.
-	Join(JoinArgs),
 	/// Manage provider credentials.
 	Auth(AuthArgs),
 	/// Manage generated model-catalog data.
@@ -1093,20 +1021,16 @@ pub enum Command {
 	Shell(ShellCliArgs),
 	/// Reveal one provider credential through the audited operator boundary.
 	Token(TokenArgs),
-	/// Check or install a signed native OMP release.
+	/// Check or install a verified native OMP release.
 	Update(UpdateArgs),
 	/// Inspect the signed native package registry and platform assets.
 	Registry(RegistryArgs),
-	/// Redact, encrypt, and upload a durable transcript projection.
-	Share(ShareArgs),
 	/// Inspect models from the validated embedded catalog.
 	#[command(alias = "model")]
 	Models(ModelsArgs),
 	/// Inspect or clear Environment-owned worktrees.
 	#[command(alias = "wt")]
 	Worktree(WorktreeArgs),
-	/// Inspect usage statistics or serve the embedded dashboard.
-	Stats(StatsArgs),
 	/// Inspect or apply lock-safe session and blob maintenance.
 	Gc(GcArgs),
 	/// Render native tool lifecycle cards to text or PNG fixtures.
@@ -1118,6 +1042,8 @@ pub enum Command {
 	Git(GitArgs),
 	/// Inspect or invalidate durable provider quota observations.
 	Usage(UsageArgs),
+	/// Aggregate historical usage from durable session journals.
+	Stats(StatsArgs),
 	/// Benchmark model chat, prefill, and generation TTFT/decode/cache
 	/// performance.
 	#[command(alias = "if-bench")]
@@ -1132,14 +1058,10 @@ pub enum Command {
 	Setup(SetupArgs),
 	/// Synthesize text with local Kokoro and play or export it.
 	Say(SayArgs),
-	/// Run the native grep engine as a standalone operator.
-	Grep(GrepArgs),
 	/// View, clean, or manually push reported tool issues.
 	Grievances(GrievancesArgs),
 	/// Manage scoped native SSH hosts and run bounded client operations.
 	Ssh(SshArgs),
-	/// Inspect and test active Time-Traveling Stream Rules.
-	Ttsr(TtsrArgs),
 	/// Detect, repair, and verify native project diagnostics.
 	Cleanse(CleanseCliArgs),
 	/// Generate a static shell completion script.
@@ -1216,8 +1138,14 @@ pub struct BrowserRelayArgs {
 	#[arg(value_enum, default_value = "serve")]
 	pub action:   BrowserRelayAction,
 	/// Loopback port.
-	#[arg(long, default_value_t = 9222)]
+	#[arg(long, default_value_t = 9224)]
 	pub port:     u16,
+	/// Loopback bind address used by the internal managed launcher.
+	#[arg(long, default_value = "127.0.0.1", hide = true)]
+	pub bind:     std::net::IpAddr,
+	/// Run under machine-global consumer lease ownership.
+	#[arg(long, hide = true)]
+	pub managed:  bool,
 	/// Optional extension authentication token.
 	#[arg(long)]
 	pub token:    Option<Str>,
@@ -1241,27 +1169,18 @@ pub enum BrowserRelayAction {
 	Install,
 }
 
-/// Agentic commit workflow options.
+/// Conventional commit workflow options.
 #[derive(Clone, Debug, Args)]
 pub struct CommitCliArgs {
 	/// Push the committed branch after success.
 	#[arg(long)]
-	pub push:         bool,
+	pub push:    bool,
 	/// Preview the proposed commit without mutation.
 	#[arg(long)]
-	pub dry_run:      bool,
-	/// Skip changelog updates.
-	#[arg(long)]
-	pub no_changelog: bool,
-	/// Use the conservative legacy commit policy.
-	#[arg(long)]
-	pub legacy:       bool,
-	/// Additional commit-classification context.
-	#[arg(long, short = 'c')]
-	pub context:      Option<String>,
-	/// Commit-agent model override.
+	pub dry_run: bool,
+	/// Commit generation model override.
 	#[arg(long, short = 'm')]
-	pub model:        Option<Str>,
+	pub model:   Option<Str>,
 }
 
 /// Environment process supervisor options.
@@ -1336,7 +1255,7 @@ impl PsAction {
 /// Standalone read-tool options.
 #[derive(Clone, Debug, Args)]
 pub struct ReadCliArgs {
-	/// Path, URL, or internal URI passed to `read@1`.
+	/// Path, URL, or internal URI passed to `read@2`.
 	pub path: Str,
 }
 
@@ -1389,6 +1308,9 @@ pub struct ShellCliArgs {
 
 /// Provider credential projection options.
 #[derive(Clone, Debug, Args)]
+#[command(after_long_help = "Unattended credential stores require an explicit key source. Set \
+                             OMP_LLM_KEY_SOURCE=local-file for an owner-only local encrypted \
+                             store, or configure the platform keyring.")]
 pub struct TokenArgs {
 	/// Provider identifier.
 	pub provider:      Str,
@@ -1461,7 +1383,6 @@ pub struct CommandSpec {
 
 /// Complete registry for the commands implemented by this binary.
 pub const COMMAND_REGISTRY: &[CommandSpec] = &[
-	CommandSpec { name: "agents", aliases: &[] },
 	CommandSpec { name: "browser-relay", aliases: &[] },
 	CommandSpec { name: "commit", aliases: &[] },
 	CommandSpec { name: "serve", aliases: &[] },
@@ -1470,7 +1391,6 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
 	CommandSpec { name: "print", aliases: &["p"] },
 	CommandSpec { name: "render", aliases: &[] },
 	CommandSpec { name: "infer", aliases: &[] },
-	CommandSpec { name: "join", aliases: &[] },
 	CommandSpec { name: "rpc", aliases: &[] },
 	CommandSpec { name: "rpc-ui", aliases: &[] },
 	CommandSpec { name: "acp", aliases: &[] },
@@ -1503,10 +1423,8 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
 	CommandSpec { name: "tiny-models", aliases: &[] },
 	CommandSpec { name: "setup", aliases: &[] },
 	CommandSpec { name: "say", aliases: &[] },
-	CommandSpec { name: "grep", aliases: &[] },
 	CommandSpec { name: "grievances", aliases: &[] },
 	CommandSpec { name: "ssh", aliases: &[] },
-	CommandSpec { name: "ttsr", aliases: &[] },
 	CommandSpec { name: "cleanse", aliases: &[] },
 	CommandSpec { name: "completions", aliases: &[] },
 	CommandSpec { name: "__complete", aliases: &[] },
@@ -1567,6 +1485,10 @@ fn launch_option(argument: &OsString) -> Option<bool> {
 			| "--prewalk-into"
 			| "--plan-yolo-into"
 			| "--skills"
+			| "--skill"
+			| "--prompt-template"
+			| "--theme"
+			| "--use-theme"
 			| "--api-key"
 			| "--system-prompt"
 			| "--append-system-prompt"
@@ -1586,7 +1508,6 @@ fn launch_option(argument: &OsString) -> Option<bool> {
 			| "--no-session"
 			| "--py-eval"
 			| "--print-thoughts"
-			| "--shape-transcript"
 			| "--acp-terminal-auth"
 			| "--smoke-test"
 			| "--plan-mode"
@@ -1604,6 +1525,8 @@ fn launch_option(argument: &OsString) -> Option<bool> {
 			| "--no-lsp"
 			| "--no-pty"
 			| "--no-skills"
+			| "--no-prompt-templates"
+			| "--no-context-files"
 			| "--no-rules"
 			| "--no-title"
 	)
@@ -1665,7 +1588,7 @@ impl EnvdArgs {
 pub struct PromptArgs {
 	/// Select the prompt personality preset.
 	#[arg(long, value_name = "PRESET")]
-	pub personality:             Option<omp_agent::Personality>,
+	pub personality:             Option<Str>,
 	/// Surface the active model identifier in workstation facts.
 	#[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
 	pub include_model_in_prompt: Option<bool>,
@@ -1726,208 +1649,287 @@ pub struct LaunchExtensions {
 	pub trusted:      Vec<ExtHostSpec>,
 	/// Declaration-owned typed CLI values delivered once at activation.
 	pub contributed:  Vec<ContributedCliValue>,
+	/// Inert manifest setting overrides validated during extension admission.
+	pub settings:     Vec<omp_ext::config::CliSettingOverride>,
+}
+
+/// Extension controls accepted only by commands that launch an agent session.
+#[derive(Clone, Debug, Default, Args)]
+pub struct InvocationExtensionArgs {
+	/// Enable an extension specification for this invocation.
+	#[arg(
+		long = "extension",
+		short = 'e',
+		visible_alias = "hook",
+		value_name = "SPEC",
+		conflicts_with = "no_ext"
+	)]
+	pub ext:               Vec<Str>,
+	/// Override one manifest-declared extension setting for this invocation.
+	#[arg(long = "ext", value_name = "ID.KEY=VALUE", value_parser = extension_setting_override)]
+	pub ext_overrides:     Vec<omp_ext::config::CliSettingOverride>,
+	/// Load only this local extension path for this invocation.
+	#[arg(
+		long = "plugin-dir",
+		visible_alias = "ext-only",
+		value_name = "PATH",
+		conflicts_with = "no_ext"
+	)]
+	pub ext_only:          Vec<PathBuf>,
+	/// Load exactly these absolute Python modules through the trusted
+	/// supervisor.
+	#[arg(
+		long = "trusted-extension",
+		hide = true,
+		value_name = "ABSOLUTE_PATH",
+		value_parser = trusted_extension_path,
+		conflicts_with_all = ["ext", "ext_only", "no_ext"]
+	)]
+	pub trusted_extension: Vec<omp_envd::site::TrustedModule>,
+	/// Suppress all configured extensions for this invocation.
+	#[arg(
+		long = "no-ext",
+		visible_alias = "no-extensions",
+		conflicts_with_all = ["ext", "ext_only", "trusted_extension"]
+	)]
+	pub no_ext:            bool,
+	/// Suppress the workspace extension layer for this invocation.
+	#[arg(long = "no-workspace-ext")]
+	pub no_workspace_ext:  bool,
 }
 
 /// Interactive project-chat options.
 #[derive(Clone, Debug, Args)]
 pub struct ChatArgs {
+	/// Extension controls for this session.
+	#[command(flatten)]
+	pub extensions:          InvocationExtensionArgs,
 	/// Catalog model key, alias, or role.
 	#[arg(long)]
-	pub model:             Option<Str>,
+	pub model:               Option<Str>,
 	/// Provider preference for the selected model.
 	#[arg(long)]
-	pub provider:          Option<Str>,
+	pub provider:            Option<Str>,
 	/// Fast/low-cost model-role selector.
 	#[arg(long)]
-	pub smol:              Option<Str>,
+	pub smol:                Option<Str>,
 	/// Deep-reasoning model-role selector.
 	#[arg(long)]
-	pub slow:              Option<Str>,
+	pub slow:                Option<Str>,
 	/// Planning model-role selector.
 	#[arg(long)]
-	pub plan:              Option<Str>,
+	pub plan:                Option<Str>,
 	/// Ordered model selectors available for interactive cycling.
 	#[arg(long)]
-	pub models:            Option<SelectorList>,
+	pub models:              Option<SelectorList>,
 	/// Provider session selector, never inferred from prompt text.
 	#[arg(long = "provider-session-id")]
-	pub provider_session:  Option<Str>,
+	pub provider_session:    Option<Str>,
 	/// Project root whose environment and durable sessions are used.
 	#[arg(long, value_name = "PATH", default_value = ".")]
-	pub project:           PathBuf,
+	pub project:             PathBuf,
 	/// Existing inference gateway endpoint. Omit to run inference in process.
 	#[arg(long, value_name = "LOCAL_ENDPOINT")]
-	pub gateway:           Option<LocalEndpoint>,
+	pub gateway:             Option<LocalEndpoint>,
 	/// Existing ULID session to reopen strictly.
 	#[arg(long, short = 'r', visible_alias = "session", value_name = "ULID")]
-	pub resume:            Option<Str>,
+	pub resume:              Option<Str>,
 	/// Continue the most recent session for this terminal.
 	#[arg(
 		long = "continue",
 		short = 'c',
 		conflicts_with_all = ["resume", "fork", "no_session", "from_claude", "from_codex"]
 	)]
-	pub continue_session:  bool,
+	pub continue_session:    bool,
 	/// Fork an existing session before opening the chat.
 	#[arg(long, value_name = "SESSION", conflicts_with_all = ["resume", "continue_session", "no_session"])]
-	pub fork:              Option<Str>,
+	pub fork:                Option<Str>,
 	/// Import a Claude Code session interactively before opening the chat.
 	#[arg(long = "from-claude", conflicts_with_all = ["from_codex", "resume", "continue_session", "fork", "no_session"])]
-	pub from_claude:       bool,
+	pub from_claude:         bool,
 	/// Import a Codex CLI session interactively before opening the chat.
 	#[arg(long = "from-codex", conflicts_with_all = ["resume", "continue_session", "fork", "no_session"])]
-	pub from_codex:        bool,
+	pub from_codex:          bool,
 	/// Do not persist a durable session for this chat.
-	#[arg(long, conflicts_with_all = ["resume", "continue_session", "fork", "session_dir"])]
-	pub no_session:        bool,
+	#[arg(long, conflicts_with_all = ["resume", "continue_session", "fork"])]
+	pub no_session:          bool,
 	/// Override the native session storage directory.
-	#[arg(long, value_name = "PATH", conflicts_with = "no_session")]
-	pub session_dir:       Option<PathBuf>,
+	#[arg(long, value_name = "PATH")]
+	pub session_dir:         Option<PathBuf>,
 	/// Select provider reasoning effort with unambiguous prefix abbreviations.
 	#[arg(long, value_parser = <ThinkingLevel as FromStr>::from_str)]
-	pub thinking:          Option<ThinkingLevel>,
-	/// Select the provider's service tier.
-	#[arg(long)]
-	pub service_tier:      Option<ServiceTier>,
+	pub thinking:            Option<ThinkingLevel>,
+	/// Select the OpenAI-family service tier for this session.
+	#[arg(long, value_parser = parse_service_tier)]
+	pub service_tier:        Option<TierSetting>,
 	/// Tool approval policy.
 	#[arg(long)]
-	pub approval_mode:     Option<ApprovalMode>,
+	pub approval_mode:       Option<ApprovalMode>,
 	/// Approve every tool without asking; an explicit `--approval-mode` wins.
-	#[arg(long, visible_alias = "auto-approve")]
-	pub yolo:              bool,
+	#[arg(long = "auto-approve", alias = "yolo")]
+	pub yolo:                bool,
 	/// Stop after this strictly positive duration.
 	#[arg(long)]
-	pub max_time:          Option<CliDuration>,
+	pub max_time:            Option<CliDuration>,
 	/// Restrict enabled tools to these normalized names.
-	#[arg(long, conflicts_with = "no_tools")]
-	pub tools:             Option<ToolNames>,
+	#[arg(long)]
+	pub tools:               Option<ToolNames>,
 	/// Disable every built-in tool.
 	#[arg(long)]
-	pub no_tools:          bool,
+	pub no_tools:            bool,
 	/// Disable LSP tools, formatting, and diagnostics.
 	#[arg(long)]
-	pub no_lsp:            bool,
+	pub no_lsp:              bool,
 	/// Disable PTY-backed shell execution.
 	#[arg(long)]
-	pub no_pty:            bool,
+	pub no_pty:              bool,
 	/// Enter read-only planning mode at startup.
 	#[arg(long = "plan-mode")]
-	pub plan_mode:         bool,
+	pub plan_mode:           bool,
 	/// Enter plan mode with one explicitly authorized mutation transition.
 	#[arg(long = "plan-yolo", conflicts_with = "plan_mode")]
-	pub plan_yolo:         bool,
+	pub plan_yolo:           bool,
 	/// Model selector switched to once the plan-yolo plan is approved.
 	#[arg(long = "plan-yolo-into", value_name = "SELECTOR", requires = "plan_yolo")]
-	pub plan_yolo_into:    Option<Str>,
+	pub plan_yolo_into:      Option<Str>,
 	/// Enter prewalk automation.
-	#[arg(long, conflicts_with = "no_prewalk")]
-	pub prewalk:           bool,
+	#[arg(long)]
+	pub prewalk:             bool,
 	/// Disable configured prewalk automation.
-	#[arg(long, conflicts_with = "prewalk")]
-	pub no_prewalk:        bool,
+	#[arg(long)]
+	pub no_prewalk:          bool,
 	/// Model selector used when prewalk begins.
 	#[arg(long)]
-	pub prewalk_into:      Option<Str>,
-	/// Read-only native TOML or YAML settings overlays in precedence order.
+	pub prewalk_into:        Option<Str>,
+	/// Read-only command-stream cfg overlays in precedence order.
 	#[arg(long = "config", value_name = "PATH")]
-	pub config:            Vec<PathBuf>,
+	pub config:              Vec<PathBuf>,
 	/// Additional authorized workspace roots.
 	#[arg(long = "add-dir", value_name = "PATH")]
-	pub add_dir:           Vec<PathBuf>,
+	pub add_dir:             Vec<PathBuf>,
 	/// Comma-separated skill glob filters.
 	#[arg(long)]
-	pub skills:            Option<SelectorList>,
+	pub skills:              Option<SelectorList>,
+	/// Additional skill file or directory for this invocation.
+	#[arg(long = "skill", value_name = "PATH")]
+	pub skill:               Vec<PathBuf>,
 	/// Disable skill discovery.
-	#[arg(long, conflicts_with = "skills")]
-	pub no_skills:         bool,
+	#[arg(long)]
+	pub no_skills:           bool,
+	/// Additional prompt-template file or directory for this invocation.
+	#[arg(long = "prompt-template", value_name = "PATH")]
+	pub prompt_template:     Vec<PathBuf>,
+	/// Disable prompt-template discovery.
+	#[arg(long)]
+	pub no_prompt_templates: bool,
+	/// Additional JSON theme file or directory for this invocation.
+	#[arg(long = "theme", value_name = "PATH")]
+	pub theme:               Vec<PathBuf>,
+	/// Select a theme by registry name for this invocation.
+	#[arg(long = "use-theme", value_name = "NAME")]
+	pub use_theme:           Option<Str>,
+	/// Disable repository context-file discovery.
+	#[arg(long = "no-context-files")]
+	pub no_context_files:    bool,
 	/// Disable rule discovery.
 	#[arg(long)]
-	pub no_rules:          bool,
+	pub no_rules:            bool,
 	/// Disable generated terminal titles.
 	#[arg(long)]
-	pub no_title:          bool,
+	pub no_title:            bool,
 	/// Enable the advisor watchdog runtime for this session.
 	#[arg(long)]
-	pub advisor:           bool,
+	pub advisor:             bool,
 	/// Ephemeral provider API key; never journaled or rendered by `Debug`.
 	#[arg(long, value_parser = parse_cli_secret)]
-	pub api_key:           Option<SecretString>,
+	pub api_key:             Option<SecretString>,
 	/// Ephemeral provider prompt-cache affinity.
 	#[arg(long = "prompt-cache-key")]
-	pub prompt_cache_key:  Option<Str>,
+	pub prompt_cache_key:    Option<Str>,
 	#[arg(long)]
 	/// Enable the built-in Python expression-evaluation tool for this chat's
 	/// environment.
-	pub py_eval:           bool,
+	pub py_eval:             bool,
+	/// Detached daemon idle timeout used by isolated acceptance harnesses.
+	#[arg(long, value_name = "SECONDS", hide = true)]
+	pub envd_idle_timeout:   Option<u64>,
 	/// Hide thinking blocks in the transcript for this invocation.
 	#[arg(long = "hide-thinking")]
-	pub hide_thinking:     bool,
+	pub hide_thinking:       bool,
 	/// Force external thinking: provider reasoning off, hidden `think` tool on.
 	/// Providers have flagged the resulting request shape as abuse risk, up to
 	/// account-level enforcement.
 	#[arg(long = "external-thinking")]
-	pub external_thinking: bool,
+	pub external_thinking:   bool,
 	/// Deployment-authenticated exact modules admitted by the CLI boundary.
 	#[arg(skip)]
-	pub extension_launch:  LaunchExtensions,
+	pub extension_launch:    LaunchExtensions,
 	/// Typed prompt settings and invocation overrides.
 	#[command(flatten)]
-	pub prompt_settings:   PromptArgs,
-	/// Ordered initial message words; `@path` remains an attachment mention.
+	pub prompt_settings:     PromptArgs,
+	/// Ordered initial messages; `@path` materializes context for the first.
 	#[arg(num_args = 0..)]
-	pub prompt:            Vec<Str>,
+	pub prompt:              Vec<Str>,
 }
 
 impl ChatArgs {
 	/// Returns the default options for an interactive project chat.
 	pub fn default_interactive() -> Self {
 		Self {
-			model:             None,
-			provider:          None,
-			smol:              None,
-			slow:              None,
-			plan:              None,
-			models:            None,
-			provider_session:  None,
-			project:           ".".into(),
-			gateway:           None,
-			resume:            None,
-			continue_session:  false,
-			fork:              None,
-			from_claude:       false,
-			from_codex:        false,
-			no_session:        false,
-			session_dir:       None,
-			thinking:          None,
-			service_tier:      None,
-			approval_mode:     None,
-			yolo:              false,
-			max_time:          None,
-			tools:             None,
-			no_tools:          false,
-			no_lsp:            false,
-			no_pty:            false,
-			plan_mode:         false,
-			plan_yolo:         false,
-			plan_yolo_into:    None,
-			prewalk:           false,
-			no_prewalk:        false,
-			prewalk_into:      None,
-			config:            Vec::new(),
-			add_dir:           Vec::new(),
-			skills:            None,
-			no_skills:         false,
-			no_rules:          false,
-			no_title:          false,
-			advisor:           false,
-			api_key:           None,
-			prompt_cache_key:  None,
-			py_eval:           false,
-			hide_thinking:     false,
-			external_thinking: false,
-			extension_launch:  LaunchExtensions::default(),
-			prompt_settings:   PromptArgs::default(),
-			prompt:            Vec::new(),
+			extensions:          InvocationExtensionArgs::default(),
+			model:               None,
+			provider:            None,
+			smol:                None,
+			slow:                None,
+			plan:                None,
+			models:              None,
+			provider_session:    None,
+			project:             ".".into(),
+			gateway:             None,
+			resume:              None,
+			continue_session:    false,
+			fork:                None,
+			from_claude:         false,
+			from_codex:          false,
+			no_session:          false,
+			session_dir:         None,
+			thinking:            None,
+			service_tier:        None,
+			approval_mode:       None,
+			yolo:                false,
+			max_time:            None,
+			tools:               None,
+			no_tools:            false,
+			no_lsp:              false,
+			no_pty:              false,
+			plan_mode:           false,
+			plan_yolo:           false,
+			plan_yolo_into:      None,
+			prewalk:             false,
+			no_prewalk:          false,
+			prewalk_into:        None,
+			config:              Vec::new(),
+			add_dir:             Vec::new(),
+			skills:              None,
+			skill:               Vec::new(),
+			no_skills:           false,
+			prompt_template:     Vec::new(),
+			no_prompt_templates: false,
+			theme:               Vec::new(),
+			use_theme:           None,
+			no_context_files:    false,
+			no_rules:            false,
+			no_title:            false,
+			advisor:             false,
+			api_key:             None,
+			prompt_cache_key:    None,
+			py_eval:             false,
+			envd_idle_timeout:   None,
+			hide_thinking:       false,
+			external_thinking:   false,
+			extension_launch:    LaunchExtensions::default(),
+			prompt_settings:     PromptArgs::default(),
+			prompt:              Vec::new(),
 		}
 	}
 
@@ -1944,19 +1946,16 @@ impl ChatArgs {
 pub struct PrintArgs {
 	/// Launch and session settings shared with interactive, RPC, and ACP modes.
 	#[command(flatten)]
-	pub launch:           ChatArgs,
+	pub launch:         ChatArgs,
 	/// Emit newline-delimited JSON events rather than final text.
 	#[arg(long, value_parser = ["text", "json"], default_value = "text")]
-	pub mode:             String,
+	pub mode:           String,
 	/// Include streamed reasoning in text output.
 	#[arg(long)]
-	pub print_thoughts:   bool,
+	pub print_thoughts: bool,
 	/// Additional user messages applied in order after the initial prompt.
 	#[arg(long = "follow-up", value_name = "TEXT")]
-	pub follow_ups:       Vec<Str>,
-	/// Drop provider payloads and partial transcript snapshots from NDJSON.
-	#[arg(long)]
-	pub shape_transcript: bool,
+	pub follow_ups:     Vec<Str>,
 }
 
 impl std::ops::Deref for PrintArgs {
@@ -1964,13 +1963,6 @@ impl std::ops::Deref for PrintArgs {
 
 	fn deref(&self) -> &Self::Target {
 		&self.launch
-	}
-}
-
-impl PrintArgs {
-	/// Effective tool approval policy for this launch.
-	pub fn effective_approval(&self) -> Option<ApprovalMode> {
-		self.launch.effective_approval()
 	}
 }
 
@@ -2042,6 +2034,12 @@ pub enum AuthCommand {
 		#[arg(long)]
 		provider: Option<Str>,
 	},
+	/// Show actionable credential status and lifecycle account selectors.
+	Status {
+		/// Optional provider filter.
+		#[arg(long)]
+		provider: Option<Str>,
+	},
 	/// Refresh one account.
 	Refresh {
 		/// Target account identifier.
@@ -2068,7 +2066,7 @@ pub enum ConfigScope {
 	/// User/profile settings.
 	#[default]
 	Global,
-	/// Nearest project `.omp/config.toml`.
+	/// Exact project `.omp/config.cfg`.
 	Project,
 }
 
@@ -2078,7 +2076,7 @@ pub enum ConfigScope {
 )]
 #[strum(serialize_all = "lowercase")]
 pub enum McpConfigScope {
-	/// User-level `~/.omp/mcp.json`.
+	/// User/profile-level `~/.o2/mcp.json`.
 	Global,
 	/// Project-owned `.omp/mcp.json`.
 	#[default]
@@ -2144,9 +2142,13 @@ pub enum McpConfigCommand {
 	},
 }
 
-/// Schema-validated settings operations.
+/// Typed command-stream configuration operations.
 #[derive(Clone, Debug, Subcommand)]
 pub enum ConfigCommand {
+	/// Convert legacy settings/keybindings and relocate data-root MCP config.
+	Migrate,
+	/// Print the deterministic current `config.cfg` script.
+	Dump,
 	/// Initialize canonical XDG roots and migrate recognized legacy storage
 	/// without replacing existing destinations.
 	#[command(name = "init-xdg")]
@@ -2155,20 +2157,20 @@ pub enum ConfigCommand {
 		#[arg(long)]
 		json: bool,
 	},
-	/// List schema keys, types, and effective values.
+	/// List convars with their values, defaults, and policy flags.
 	List {
 		/// Emit structured JSON.
 		#[arg(long)]
 		json: bool,
 	},
-	/// Read one schema key.
+	/// Read one convar.
 	Get {
-		/// Schema key.
+		/// Convar name.
 		key: Str,
 	},
-	/// Set one schema key after validating its typed value.
+	/// Set one convar after validating its typed value.
 	Set {
-		/// Schema key.
+		/// Convar name.
 		key:   Str,
 		/// Typed value.
 		value: Str,
@@ -2176,15 +2178,15 @@ pub enum ConfigCommand {
 		#[arg(long, value_enum, default_value_t)]
 		scope: ConfigScope,
 	},
-	/// Remove one schema key from a writable layer.
+	/// Restore one convar to its default in a writable cfg.
 	Unset {
-		/// Schema key.
+		/// Convar name.
 		key:   Str,
 		/// Writable native scope.
 		#[arg(long, value_enum, default_value_t)]
 		scope: ConfigScope,
 	},
-	/// Print a native settings file path.
+	/// Print a native cfg file path.
 	Path {
 		/// Writable native scope.
 		#[arg(long, value_enum, default_value_t)]
@@ -2201,19 +2203,23 @@ pub enum ConfigCommand {
 /// Model catalog command tree.
 #[derive(Clone, Debug, Args)]
 pub struct ModelsArgs {
+	/// Invocation-local extension launch controls used to compose provider
+	/// declarations.
+	#[command(flatten)]
+	pub extensions: InvocationExtensionArgs,
 	/// Catalog operation; omitted means list.
 	#[command(subcommand)]
-	pub command: Option<ModelsCommand>,
+	pub command:    Option<ModelsCommand>,
 	/// Optional provider/model/display-name filter for the default list
 	/// operation.
 	#[arg(value_name = "FILTER")]
-	pub filter:  Option<Str>,
+	pub filter:     Option<Str>,
 	/// Emit structured JSON for the default list operation.
 	#[arg(long)]
-	pub json:    bool,
+	pub json:       bool,
 	/// Pick one deterministic cycling role from matching rows.
 	#[arg(long)]
-	pub role:    Option<ModelRole>,
+	pub role:       Option<ModelRole>,
 }
 
 /// Model catalog operations.
@@ -2418,10 +2424,9 @@ pub struct LocalInferArgs {
 	pub prompt: Str,
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 enum DispatchTarget {
-	Agents,
 	BrowserRelay,
 	Commit,
 	Serve,
@@ -2433,7 +2438,6 @@ enum DispatchTarget {
 	RpcUi,
 	Acp,
 	Infer,
-	Join,
 	Auth,
 	CatalogImport,
 	LocalInfer,
@@ -2448,36 +2452,31 @@ enum DispatchTarget {
 	Token,
 	Update,
 	Registry,
-	Share,
 	Models,
 	AuthBroker,
 	AuthGateway,
 	Worktree,
-	Stats,
 	Gc,
 	Gallery,
 	Git,
 	Usage,
+	Stats,
 	Bench,
 	DryBalance,
 	TinyModels,
 	Setup,
 	Say,
-	Grep,
 	Grievances,
 	Ssh,
-	Ttsr,
 	Cleanse,
 	Completions,
 	Complete,
 	Compress,
 }
 
-#[cfg(test)]
 const fn dispatch_target(command: Option<&Command>) -> DispatchTarget {
 	match command {
 		None | Some(Command::Chat(_)) => DispatchTarget::Chat,
-		Some(Command::Agents(_)) => DispatchTarget::Agents,
 		Some(Command::BrowserRelay(_)) => DispatchTarget::BrowserRelay,
 		Some(Command::Commit(_)) => DispatchTarget::Commit,
 		Some(Command::Print(_)) => DispatchTarget::Print,
@@ -2488,7 +2487,6 @@ const fn dispatch_target(command: Option<&Command>) -> DispatchTarget {
 		Some(Command::Serve(_)) => DispatchTarget::Serve,
 		Some(Command::Envd(_)) => DispatchTarget::Envd,
 		Some(Command::Infer(_)) => DispatchTarget::Infer,
-		Some(Command::Join(_)) => DispatchTarget::Join,
 		Some(Command::Auth(_)) => DispatchTarget::Auth,
 		Some(Command::Catalog(CatalogArgs { command: CatalogCommand::Import(_) })) => {
 			DispatchTarget::CatalogImport
@@ -2507,23 +2505,20 @@ const fn dispatch_target(command: Option<&Command>) -> DispatchTarget {
 		Some(Command::Token(_)) => DispatchTarget::Token,
 		Some(Command::Update(_)) => DispatchTarget::Update,
 		Some(Command::Registry(_)) => DispatchTarget::Registry,
-		Some(Command::Share(_)) => DispatchTarget::Share,
 		Some(Command::Models(_)) => DispatchTarget::Models,
 		Some(Command::Worktree(_)) => DispatchTarget::Worktree,
-		Some(Command::Stats(_)) => DispatchTarget::Stats,
 		Some(Command::Gc(_)) => DispatchTarget::Gc,
 		Some(Command::Gallery(_)) => DispatchTarget::Gallery,
 		Some(Command::Git(_)) => DispatchTarget::Git,
 		Some(Command::Usage(_)) => DispatchTarget::Usage,
+		Some(Command::Stats(_)) => DispatchTarget::Stats,
 		Some(Command::Bench(_)) => DispatchTarget::Bench,
 		Some(Command::DryBalance(_)) => DispatchTarget::DryBalance,
 		Some(Command::TinyModels(_)) => DispatchTarget::TinyModels,
 		Some(Command::Setup(_)) => DispatchTarget::Setup,
 		Some(Command::Say(_)) => DispatchTarget::Say,
-		Some(Command::Grep(_)) => DispatchTarget::Grep,
 		Some(Command::Grievances(_)) => DispatchTarget::Grievances,
 		Some(Command::Ssh(_)) => DispatchTarget::Ssh,
-		Some(Command::Ttsr(_)) => DispatchTarget::Ttsr,
 		Some(Command::Cleanse(_)) => DispatchTarget::Cleanse,
 		Some(Command::Completions { .. }) => DispatchTarget::Completions,
 		Some(Command::Complete { .. }) => DispatchTarget::Complete,
@@ -2563,11 +2558,7 @@ async fn run_interactive_chat(
 	Box::pin(chat_cmd::run(args, start, presentation)).await
 }
 
-fn extension_shorthand_args(
-	command: ExtCommand,
-	scope: ExtScope,
-	json: bool,
-) -> ExtArgs {
+fn extension_shorthand_args(command: ExtCommand, scope: ExtScope, json: bool) -> ExtArgs {
 	ExtArgs {
 		project: ".".into(),
 		data_dir: None,
@@ -2613,7 +2604,10 @@ fn local_install_path(target: &str) -> PathBuf {
 	if target == "~" {
 		return omp_core::dirs::home_dir().unwrap_or_else(|| PathBuf::from(target));
 	}
-	if let Some(relative) = target.strip_prefix("~/").or_else(|| target.strip_prefix("~\\")) {
+	if let Some(relative) = target
+		.strip_prefix("~/")
+		.or_else(|| target.strip_prefix("~\\"))
+	{
 		if let Some(home) = omp_core::dirs::home_dir() {
 			return home.join(relative);
 		}
@@ -2627,10 +2621,7 @@ async fn install_shorthand(args: InstallArgs) -> miette::Result<()> {
 		if looks_like_local_install_target(target.as_str()) {
 			if args.dry_run {
 				if args.json {
-					println!(
-						"{}",
-						serde_json::json!({"action":"link","target":target,"applied":false})
-					);
+					println!("{}", serde_json::json!({"action":"link","target":target,"applied":false}));
 				} else {
 					println!("would link {}", target);
 				}
@@ -2667,20 +2658,44 @@ async fn install_shorthand(args: InstallArgs) -> miette::Result<()> {
 	ext_cli::run(extension_shorthand_args(command, args.scope, args.json)).await
 }
 
-fn lower_launch_extensions(cli: &OmpCli) -> miette::Result<LaunchExtensions> {
-	let mode = if cli.no_ext {
+fn command_extension_args(command: Option<&Command>) -> Option<&InvocationExtensionArgs> {
+	match command {
+		None => None,
+		Some(Command::Chat(args)) => Some(&args.extensions),
+		Some(Command::Print(args)) => Some(&args.launch.extensions),
+		Some(Command::Rpc(args) | Command::RpcUi(args)) => Some(&args.launch.extensions),
+		Some(Command::Acp(args)) => Some(&args.launch.extensions),
+		Some(Command::Models(args)) => Some(&args.extensions),
+		_ => None,
+	}
+}
+
+fn lower_launch_extensions(
+	cli: &OmpCli,
+	command_args: Option<&InvocationExtensionArgs>,
+) -> miette::Result<LaunchExtensions> {
+	let nested_ext = command_args.map_or(&[][..], |args| args.ext.as_slice());
+	let nested_ext_only = command_args.map_or(&[][..], |args| args.ext_only.as_slice());
+	let nested_trusted = command_args.map_or(&[][..], |args| args.trusted_extension.as_slice());
+	let nested_overrides = command_args.map_or(&[][..], |args| args.ext_overrides.as_slice());
+	let nested_no_ext = command_args.is_some_and(|args| args.no_ext);
+	let nested_no_workspace = command_args.is_some_and(|args| args.no_workspace_ext);
+	let no_ext = cli.no_ext || nested_no_ext;
+	let mode = if no_ext {
 		InvocationExtensionMode::Disabled
-	} else if cli.ext_only.is_empty() {
+	} else if cli.ext_only.is_empty() && nested_ext_only.is_empty() {
 		InvocationExtensionMode::Merge
 	} else {
 		InvocationExtensionMode::ExplicitOnly
 	};
-	let mut native_roots = Vec::with_capacity(cli.ext.len() + cli.ext_only.len());
+	let mut native_roots = Vec::with_capacity(
+		cli.ext.len() + nested_ext.len() + cli.ext_only.len() + nested_ext_only.len(),
+	);
 	if mode != InvocationExtensionMode::Disabled {
-		for spec in &cli.ext {
+		for spec in cli.ext.iter().chain(nested_ext) {
 			native_roots.push(invocation_extension_root(spec.as_str())?);
 		}
-		for root in &cli.ext_only {
+		for root in cli.ext_only.iter().chain(nested_ext_only) {
 			native_roots.push(canonical_extension_root(root)?);
 		}
 		native_roots.dedup();
@@ -2688,14 +2703,21 @@ fn lower_launch_extensions(cli: &OmpCli) -> miette::Result<LaunchExtensions> {
 	Ok(LaunchExtensions {
 		native_roots,
 		mode,
-		no_workspace: cli.no_workspace_ext,
+		no_workspace: cli.no_workspace_ext || nested_no_workspace,
 		trusted: cli
 			.trusted_extension
 			.iter()
+			.chain(nested_trusted)
 			.cloned()
 			.map(trusted_extension)
 			.collect(),
 		contributed: cli.contributed.clone(),
+		settings: cli
+			.ext_overrides
+			.iter()
+			.chain(nested_overrides)
+			.cloned()
+			.collect(),
 	})
 }
 
@@ -2745,12 +2767,11 @@ fn canonical_extension_root(path: &Path) -> miette::Result<PathBuf> {
 /// Parses the process arguments and dispatches the selected operation.
 pub async fn run() -> miette::Result<()> {
 	let arguments = env::args_os().collect::<Vec<_>>();
-	if arguments.len() == 2 && arguments[1] == "--license" {
-		write_license_output(io::stdout().lock()).into_diagnostic()?;
-		return Ok(());
-	}
-	let is_interactive = io::stdin().is_terminal() || omp_tui::tty_overridden();
-	let cli = match parse_with_terminal(arguments, is_interactive) {
+	let stdin_is_terminal = io::stdin().is_terminal() || omp_tui::tty_overridden();
+	// Parse exactly once before selecting the stdin owner. In particular, RPC
+	// and ACP keep their protocol stream untouched; ordinary non-TTY launches
+	// read to EOF and only non-empty input promotes chat to print mode.
+	let mut cli = match parse_arguments(arguments) {
 		Ok(cli) => cli,
 		Err(error)
 			if matches!(
@@ -2761,9 +2782,86 @@ pub async fn run() -> miette::Result<()> {
 			error.print().into_diagnostic()?;
 			return Ok(());
 		},
-		Err(error) => return Err(CliUsageError::new(error.to_string()).into()),
+		Err(error) => {
+			let rendered = error.to_string();
+			let message = rendered.strip_prefix("error: ").unwrap_or(&rendered);
+			let error = if error.kind() == clap::error::ErrorKind::InvalidSubcommand
+				&& message.starts_with('`')
+			{
+				CliUsageError::redirect(message.to_owned())
+			} else if message.starts_with("Invalid OMP profile")
+				|| message.starts_with("--profile requires")
+				|| message.starts_with("--alias requires")
+			{
+				CliUsageError::startup(message.to_owned())
+			} else {
+				CliUsageError::new(message.to_owned())
+			};
+			return Err(error.into());
+		},
 	};
-	dispatch(cli).await
+	let piped_input = if stdin_is_terminal || !cli_accepts_piped_prompt(&cli) {
+		None
+	} else {
+		read_piped_input().await
+	};
+	if piped_input.is_some() {
+		promote_piped_launch(&mut cli);
+	}
+	dispatch_with_input(cli, piped_input).await
+}
+
+async fn read_piped_input() -> Option<Str> {
+	read_nonempty_piped_input(tokio::io::stdin()).await
+}
+
+async fn read_nonempty_piped_input(mut input: impl tokio::io::AsyncRead + Unpin) -> Option<Str> {
+	use tokio::io::AsyncReadExt as _;
+
+	let mut bytes = Vec::new();
+	input.read_to_end(&mut bytes).await.ok()?;
+	match String::from_utf8(bytes) {
+		Ok(text) => (!text.trim().is_empty()).then(|| Str::from(text)),
+		Err(error) => {
+			let text = String::from_utf8_lossy(error.as_bytes());
+			(!text.trim().is_empty()).then(|| Str::new(text.as_ref()))
+		},
+	}
+}
+
+const fn command_owns_stdin(command: Option<&Command>) -> bool {
+	matches!(command, Some(Command::Rpc(_) | Command::RpcUi(_) | Command::Acp(_)))
+}
+
+const fn command_accepts_piped_prompt(command: Option<&Command>) -> bool {
+	matches!(command, None | Some(Command::Chat(_) | Command::Print(_)))
+		&& !command_owns_stdin(command)
+}
+
+fn cli_accepts_piped_prompt(cli: &OmpCli) -> bool {
+	!cli.version
+		&& !cli.license
+		&& !cli.smoke_test
+		&& !cli.gui
+		&& cli.export.is_none()
+		&& cli.alias.is_none()
+		&& command_accepts_piped_prompt(cli.command.as_ref())
+}
+
+fn promote_piped_launch(cli: &mut OmpCli) {
+	let command = cli
+		.command
+		.take()
+		.unwrap_or_else(|| Command::Chat(ChatArgs::default_interactive()));
+	cli.command = Some(match command {
+		Command::Chat(launch) => Command::Print(PrintArgs {
+			launch,
+			mode: "text".to_owned(),
+			print_thoughts: false,
+			follow_ups: Vec::new(),
+		}),
+		other => other,
+	});
 }
 
 /// Dispatches one parsed command to its production implementation.
@@ -2772,29 +2870,26 @@ pub async fn run() -> miette::Result<()> {
 	reason = "chat dispatch preserves the thread-confined omp_tui::App future"
 )]
 pub async fn dispatch(cli: OmpCli) -> miette::Result<()> {
+	dispatch_with_input(cli, None).await
+}
+
+#[expect(
+	clippy::future_not_send,
+	reason = "chat dispatch preserves the thread-confined omp_tui::App future"
+)]
+#[tracing::instrument(
+	level = "debug",
+	name = "cli_dispatch",
+	skip_all,
+	fields(command = <&'static str>::from(dispatch_target(cli.command.as_ref())))
+)]
+async fn dispatch_with_input(cli: OmpCli, piped_input: Option<Str>) -> miette::Result<()> {
 	startup_notice::stop_watchdog();
-	if cli.version {
-		println!("{}", env!("CARGO_PKG_VERSION"));
-		return Ok(());
-	}
-	if cli.license {
-		write_license_output(io::stdout().lock()).into_diagnostic()?;
-		return Ok(());
-	}
-	if let Some(journal) = cli.export.as_deref() {
-		let output = journal.with_extension("html");
-		let exported = omp_driver::export::export_session(journal, &output).into_diagnostic()?;
-		println!("Exported to: {}", exported.display());
-		return Ok(());
-	}
-	if cli.smoke_test {
-		return smoke_test::run().await;
-	}
 	if let Some(alias) = cli.alias.as_deref() {
 		let profile = cli
 			.profile
 			.as_deref()
-			.ok_or_else(|| CliUsageError::new("--alias requires --profile or OMP_PROFILE"))?;
+			.ok_or_else(|| CliUsageError::startup("--alias requires --profile or OMP_PROFILE"))?;
 		let installed = profile_alias::install(alias, profile, None).into_diagnostic()?;
 		println!(
 			"installed {} profile wrapper `{}` in {}",
@@ -2804,8 +2899,26 @@ pub async fn dispatch(cli: OmpCli) -> miette::Result<()> {
 		);
 		return Ok(());
 	}
+	if cli.version {
+		println!("{}", env!("CARGO_PKG_VERSION"));
+		return Ok(());
+	}
+	if cli.license {
+		write_license_output(io::stdout().lock()).into_diagnostic()?;
+		return Ok(());
+	}
 	if let Some(cwd) = cli.cwd.as_deref() {
 		env::set_current_dir(cwd).into_diagnostic()?;
+	}
+	if let Some(journal) = cli.export.as_deref() {
+		let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
+		let cwd = env::current_dir().into_diagnostic()?;
+		let exported = crate::render_cmd::export_session(journal, &data_dir, &cwd)?;
+		println!("Exported to: {}", exported.html.display());
+		return Ok(());
+	}
+	if cli.smoke_test {
+		return smoke_test::run().await;
 	}
 	let terminal_auth = cli.acp_terminal_auth;
 	if !cli.allow_home
@@ -2824,6 +2937,7 @@ pub async fn dispatch(cli: OmpCli) -> miette::Result<()> {
 			| Some(Command::Rpc(_))
 			| Some(Command::RpcUi(_))
 			| Some(Command::Acp(_))
+			| Some(Command::Models(_))
 	);
 	if !launch_command
 		&& (!cli.ext.is_empty()
@@ -2831,16 +2945,18 @@ pub async fn dispatch(cli: OmpCli) -> miette::Result<()> {
 			|| !cli.trusted_extension.is_empty()
 			|| cli.no_ext
 			|| cli.no_workspace_ext
-			|| !cli.contributed.is_empty())
+			|| !cli.contributed.is_empty()
+			|| !cli.ext_overrides.is_empty())
 	{
 		return Err(
 			CliUsageError::new(
-				"extension launch controls are only valid for chat, print, RPC, or ACP",
+				"extension launch controls are only valid for chat, print, RPC, ACP, or models",
 			)
 			.into(),
 		);
 	}
-	let launch_extensions = lower_launch_extensions(&cli)?;
+	let launch_extensions =
+		lower_launch_extensions(&cli, command_extension_args(cli.command.as_ref()))?;
 	let command = cli
 		.command
 		.unwrap_or_else(|| Command::Chat(ChatArgs::default_interactive()));
@@ -2848,19 +2964,19 @@ pub async fn dispatch(cli: OmpCli) -> miette::Result<()> {
 		return Err(miette!("--gui is only supported by interactive chat"));
 	}
 	match command {
-		Command::Agents(args) => crate::agents_cmd::run(args),
 		Command::BrowserRelay(args) => crate::browser_relay_cmd::run(args).await,
 		Command::Commit(args) => crate::commit_cmd::run(args).await,
 		Command::Serve(args) => serve(args).await,
 		Command::Envd(args) => {
+			let project = std::fs::canonicalize(&args.root).into_diagnostic()?;
+			let ctx = Arc::new(crate::process_ctx(&project)?);
 			let bridges = omp_driver::bridges::builtin(
 				&args.root,
 				Arc::new(InferenceBridge::default()),
 				AgentGoalControl::default(),
 				None,
-				omp_agent::advisor::AdvisorAdviceQueue::default(),
 			);
-			omp_envd::run(args.into_config(), bridges).await
+			omp_envd::run(args.into_config(), ctx, bridges).await
 		},
 		Command::Chat(args) => {
 			run_interactive_chat(
@@ -2876,38 +2992,28 @@ pub async fn dispatch(cli: OmpCli) -> miette::Result<()> {
 		},
 		Command::Print(mut args) => {
 			args.launch.extension_launch = launch_extensions;
-			refresh_marketplace(&args.launch).await?;
-			print_mode::run(args).await
+			print_mode::run(args, piped_input).await
 		},
 		Command::Render(args) => {
 			render_cmd::run(args, &omp_core::dirs::data_dir(None).into_diagnostic()?)
 		},
 		Command::Rpc(mut args) => {
 			args.launch.extension_launch = launch_extensions;
-			refresh_marketplace(&args.launch).await?;
 			rpc_mode::run(args, false).await
 		},
 		Command::RpcUi(mut args) => {
 			args.launch.extension_launch = launch_extensions;
-			refresh_marketplace(&args.launch).await?;
 			rpc_mode::run(args, true).await
 		},
 		Command::Acp(mut args) => {
 			if terminal_auth {
-				run_interactive_chat(
-					args.launch,
-					launch_extensions,
-					ChatPresentation::Terminal,
-				)
-				.await
+				run_interactive_chat(args.launch, launch_extensions, ChatPresentation::Terminal).await
 			} else {
 				args.launch.extension_launch = launch_extensions;
-				refresh_marketplace(&args.launch).await?;
 				acp_mode::run(args).await
 			}
 		},
 		Command::Infer(args) => infer(args).await,
-		Command::Join(args) => join_cmd::run(args).await,
 		Command::Auth(args) => auth(args).await,
 		Command::Catalog(CatalogArgs { command: CatalogCommand::Import(args) }) => {
 			catalog_import(&args)
@@ -2926,25 +3032,22 @@ pub async fn dispatch(cli: OmpCli) -> miette::Result<()> {
 		Command::Token(args) => crate::token_cmd::run(args).await,
 		Command::Update(args) => update_cmd::run(args).await,
 		Command::Registry(args) => update_cmd::registry(args),
-		Command::Share(args) => share_cmd::run(args).await,
-		Command::Models(args) => models_cmd::run(&args).await,
+		Command::Models(args) => models_cmd::run(&args, &launch_extensions).await,
 		Command::Worktree(args) => {
 			worktree_cmd::run(&omp_core::dirs::data_dir(None).into_diagnostic()?, &args)
 		},
-		Command::Stats(args) => stats_cmd::run(args).await,
-		Command::Gc(args) => gc_cmd::run(args),
+		Command::Gc(args) => gc_cmd::run(args).await,
 		Command::Gallery(args) => gallery_cmd::run(args),
 		Command::Git(args) => git_cmd::run(args).await,
 		Command::Usage(args) => usage_cmd::run(args).await,
+		Command::Stats(args) => stats_cmd::run(args),
 		Command::Bench(args) => bench_cmd::run(args).await,
 		Command::DryBalance(args) => dry_balance_cmd::run(args).await,
 		Command::TinyModels(args) => tiny_models_cmd::run(args).await,
 		Command::Setup(args) => setup_cmd::run(args).await,
 		Command::Say(args) => say_cmd::run(args).await,
-		Command::Grep(args) => grep_cmd::run(args),
 		Command::Grievances(args) => grievances_cmd::run(args).await,
 		Command::Ssh(args) => ssh_cmd::run(args).await,
-		Command::Ttsr(args) => ttsr_cmd::run(args),
 		Command::Cleanse(args) => {
 			cleanse_cmd::run(CleanseArgs {
 				agents:  args.agents,
@@ -2977,60 +3080,51 @@ pub async fn dispatch(cli: OmpCli) -> miette::Result<()> {
 }
 
 /// Parses process arguments after routing commands hidden behind launch
-/// options, normalizing bare prompts, and selecting print mode for a
-/// terminal invocation.
+/// options and normalizing bare prompts. Stdin content is deliberately absent
+/// from parsing; the process entry point assigns its single owner afterwards.
 pub fn parse_from_os(arguments: impl IntoIterator<Item = OsString>) -> Result<OmpCli, clap::Error> {
-	parse_with_terminal(arguments, true)
+	parse_arguments(arguments)
 }
 
-/// [`parse_from_os`] with an explicit interactive-stdin fact, so tests can
-/// exercise both terminal and piped normalization deterministically.
-fn parse_with_terminal(
-	arguments: impl IntoIterator<Item = OsString>,
-	interactive: bool,
-) -> Result<OmpCli, clap::Error> {
+fn parse_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<OmpCli, clap::Error> {
 	use clap::error::ErrorKind;
 	let profile = profile_bootstrap::extract(arguments)
 		.map_err(|error| clap::Error::raw(ErrorKind::InvalidValue, error.to_string()))?;
 	omp_core::dirs::set_selected_profile(profile.profile.clone());
-	if let Some(message) = routing::redirect(&profile.arguments) {
+	let mut routed_arguments = profile.arguments;
+	// Hoist a known command before extension bootstrap so launch-only roots
+	// placed before a non-launch command are discarded without loading them.
+	normalize_hidden_command(&mut routed_arguments);
+	if let Some(message) = routing::redirect(&routed_arguments) {
 		return Err(clap::Error::raw(ErrorKind::InvalidSubcommand, message.to_string()));
 	}
-	let mut bootstrap = bootstrap::run(profile.arguments, builtin_contribution_names())
+	let mut bootstrap = bootstrap::run(routed_arguments, builtin_contribution_names())
 		.map_err(|error| clap::Error::raw(ErrorKind::InvalidValue, error.to_string()))?;
 	profile_bootstrap::remove_boundaries(&mut bootstrap.arguments);
 	let mut arguments = bootstrap.arguments;
 	normalize_hidden_command(&mut arguments);
-	if !interactive
-		&& first_positional(&arguments).is_none()
-		&& !arguments.iter().skip(1).any(|argument| {
-			matches!(
-				argument.to_string_lossy().as_ref(),
-				"--help" | "-h" | "--version" | "-v" | "--license"
-			) || argument == "--gui"
-		}) {
-		arguments.push(OsString::from("print"));
-	}
 	if let Some(index) = first_positional(&arguments) {
 		if arguments[index] == "resume" {
 			arguments[index] = OsString::from("chat");
 			arguments.insert(index + 1, OsString::from("--resume=__omp_picker__"));
-		} else if !is_command(&arguments[index])
-			&& !arguments[index].to_string_lossy().starts_with('-')
+		} else if !(index == 1 && arguments[index] == "help")
+			&& !is_command(&arguments[index])
+			&& (matches!(arguments[index].to_str(), Some("--" | "-"))
+				|| !arguments[index].to_string_lossy().starts_with('-'))
 		{
+			// Clap's generated root help command is special only in the leading
+			// position; after launch flags, `help` is prompt text.
 			arguments.insert(index, OsString::from("chat"));
 		}
 	}
 	normalize_hidden_command(&mut arguments);
 	normalize_transport_mode(&mut arguments);
-	if !interactive {
-		normalize_piped_launch(&mut arguments);
-	}
-	if interactive {
-		normalize_interactive_launch(&mut arguments);
-	}
+	normalize_interactive_launch(&mut arguments);
 	normalize_bare_resume(&mut arguments);
-	let mut cli = OmpCli::try_parse_from(arguments)?;
+	let serve = first_positional(&arguments)
+		.is_some_and(|index| arguments[index].to_string_lossy() == "serve");
+	let matches = omp_command(serve).try_get_matches_from(arguments)?;
+	let mut cli = OmpCli::from_arg_matches(&matches)?;
 	if cli.license && cli.command.is_some() {
 		return Err(clap::Error::raw(
 			ErrorKind::ArgumentConflict,
@@ -3046,51 +3140,69 @@ fn parse_with_terminal(
 fn builtin_contribution_names() -> impl Iterator<Item = Str> {
 	[
 		"add-dir",
+		"advisor",
 		"alias",
 		"allow-home",
 		"api-key",
+		"append-system-prompt",
+		"approval-mode",
+		"auto-approve",
 		"config",
+		"continue",
 		"cwd",
+		"export",
 		"ext",
 		"ext-only",
 		"extension",
-		"hook",
-		"plugin-dir",
+		"external-thinking",
+		"fork",
+		"from-claude",
+		"from-codex",
 		"gui",
+		"help",
+		"hide-thinking",
+		"hook",
 		"license",
+		"max-time",
+		"mode",
 		"model",
 		"models",
 		"no-ext",
 		"no-extensions",
 		"no-lsp",
+		"no-prewalk",
 		"no-pty",
 		"no-rules",
+		"no-session",
 		"no-skills",
 		"no-title",
 		"no-tools",
 		"plan",
-		"prewalk",
-		"prewalk-into",
-		"advisor",
+		"plan-mode",
 		"plan-yolo",
 		"plan-yolo-into",
-		"yolo",
-		"auto-approve",
-		"hide-thinking",
-		"external-thinking",
-		"from-claude",
-		"from-codex",
+		"plugin-dir",
+		"prewalk",
+		"prewalk-into",
+		"print",
+		"print-thoughts",
 		"profile",
+		"prompt-cache-key",
 		"provider",
 		"provider-session-id",
-		"plan-mode",
+		"resume",
+		"service-tier",
+		"session",
+		"session-dir",
 		"skills",
 		"slow",
 		"smol",
 		"system-prompt",
-		"append-system-prompt",
+		"thinking",
 		"tools",
 		"trusted-extension",
+		"version",
+		"yolo",
 	]
 	.into_iter()
 	.map(Str::new_static)
@@ -3120,8 +3232,18 @@ fn normalize_hidden_command(arguments: &mut Vec<OsString>) {
 	let mut leading = leading.into_iter();
 	while let Some(argument) = leading.next() {
 		if let Some(consumes_value) = launch_option(&argument) {
-			if consumes_value {
-				leading.next();
+			// The ambiguous short `-c` belongs to a hoisted non-launch command
+			// (`omp -c update` means update --check). All long launch controls
+			// are inapplicable there and are stripped.
+			let retain = argument == "-c";
+			if retain {
+				kept.push(argument);
+			}
+			if consumes_value
+				&& let Some(value) = leading.next()
+				&& retain
+			{
+				kept.push(value);
 			}
 		} else {
 			kept.push(argument);
@@ -3149,7 +3271,7 @@ fn first_positional(arguments: &[OsString]) -> Option<usize> {
 	let mut index = 1;
 	while index < arguments.len() {
 		let argument = arguments[index].to_string_lossy();
-		if argument == "--" {
+		if argument == "--" || argument == "-" {
 			return Some(index);
 		}
 		if launch_option(&arguments[index]) == Some(true) {
@@ -3231,8 +3353,10 @@ fn normalize_transport_mode(arguments: &mut Vec<OsString>) {
 	}
 }
 
-/// Returns whether a launch option belongs to the chat/print surface rather
-/// than the root-global set clap already parses without a command.
+/// Returns whether a launch option alone should synthesize a chat command.
+///
+/// Root-position compatibility options already default to chat without an
+/// explicit command and therefore do not participate in this predicate.
 fn chat_launch_option(argument: &OsString) -> bool {
 	if launch_option(argument).is_none() {
 		return false;
@@ -3261,15 +3385,6 @@ fn chat_launch_option(argument: &OsString) -> bool {
 	)
 }
 
-fn normalize_piped_launch(arguments: &mut [OsString]) {
-	let Some(index) = leading_command_index(arguments) else {
-		return;
-	};
-	if matches!(arguments[index].to_string_lossy().as_ref(), "chat" | "i" | "launch") {
-		arguments[index] = OsString::from("print");
-	}
-}
-
 /// Opens interactive chat for flag-only terminal invocations such as
 /// `omp --model sonnet` or `omp -c`, which carry launch options that only a
 /// launch-shaped command accepts.
@@ -3287,7 +3402,9 @@ fn normalize_bare_resume(arguments: &mut Vec<OsString>) {
 	let mut index = 1;
 	while index < arguments.len() {
 		let argument = &arguments[index];
-		if (argument == "--resume" || argument == "-r" || argument == "--session")
+		if matches!(argument.to_str(), Some("--resume=" | "--session=")) {
+			arguments[index] = OsString::from("--resume=__omp_picker__");
+		} else if (argument == "--resume" || argument == "-r" || argument == "--session")
 			&& arguments
 				.get(index + 1)
 				.is_none_or(|next| next.to_string_lossy().starts_with('-'))
@@ -3314,13 +3431,15 @@ fn trusted_extension_path(value: &str) -> Result<omp_envd::site::TrustedModule, 
 /// activation contract admitted by the extension supervisor.
 ///
 /// A bare trusted module has no static OMP declaration metadata. The CLI trust
-/// act authenticates its exact startup module and bytes; named tools,
-/// inter-extension services, and CONTROL quota classes stay empty because pi
-/// supplies no deployment-owned metadata for those sets. Python registration
-/// is never promoted into an authenticated manifest.
+/// act authenticates its exact startup module and bytes, and explicitly allows
+/// its frozen runtime registry to publish named declarations. Inter-extension
+/// services and CONTROL quota classes stay empty because the trusted module
+/// supplies no deployment-owned metadata for those sets.
 pub fn trusted_extension(module: TrustedModule) -> ExtHostSpec {
 	let encoded = hex::encode_n(module.artifact_digest.as_bytes());
-	let extension_id = Str::from(format!("trusted.{}.{}", module.module, &encoded[..16],));
+	// Dashes, not dots: the id becomes a tool-revision family, whose
+	// `name@family.rev` grammar reserves the dot.
+	let extension_id = Str::from(format!("trusted-{}-{}", module.module, &encoded[..16]));
 	let key = HostKey::new("invocation", "trusted", extension_id.clone());
 	let provenance = omp_core::Provenance::new(
 		Str::new_static("operator-cli"),
@@ -3331,7 +3450,7 @@ pub fn trusted_extension(module: TrustedModule) -> ExtHostSpec {
 		Str::new_static("trusted"),
 		1,
 	);
-	let manifest = ExtensionManifest::new(
+	let mut manifest = ExtensionManifest::new(
 		provenance,
 		module.module,
 		[],
@@ -3340,26 +3459,25 @@ pub fn trusted_extension(module: TrustedModule) -> ExtHostSpec {
 		[],
 		[ActivationTrigger::FirstReach],
 	);
+	manifest.trust_runtime_declarations();
 	let mut extension = ExtHostSpec::new(key, manifest);
-	extension.python_site = module.path.parent().map(Path::to_path_buf);
+	// A package `__init__.py` imports as its directory: the site root is the
+	// directory CONTAINING the package, not the package itself.
+	extension.python_site = if module
+		.path
+		.file_stem()
+		.is_some_and(|stem| stem == "__init__")
+	{
+		module
+			.path
+			.parent()
+			.and_then(Path::parent)
+			.map(Path::to_path_buf)
+	} else {
+		module.path.parent().map(Path::to_path_buf)
+	};
 	extension.entry_path = Some(module.path);
 	extension
-}
-
-async fn refresh_marketplace(args: &ChatArgs) -> miette::Result<()> {
-	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
-	let project = fs::canonicalize(&args.project).into_diagnostic()?;
-	let settings = omp_driver::settings::current_for_project_with_overlays(
-		&data_dir,
-		Some(&project),
-		&args.config,
-	)
-	.into_diagnostic()?;
-	let mode: &'static str = settings.lifecycle.marketplace_auto_update.into();
-	for diagnostic in ext_cli::service::refresh_stale_and_update(&data_dir, &project, mode).await? {
-		eprintln!("{diagnostic}");
-	}
-	Ok(())
 }
 
 fn is_home_dir() -> miette::Result<bool> {
@@ -3408,11 +3526,13 @@ async fn infer(args: InferArgs) -> miette::Result<()> {
 		.into_diagnostic()?;
 	let planner = router::Router::new(registry.clone(), time::Duration::from_secs(30));
 	let meta = CallMeta {
-		id:       RequestId::from(turn_id()),
-		target:   Target::Model(ModelKey::from(args.model)),
-		deadline: None,
-		budget:   ExecutionBudget::default(),
-		session:  None,
+		id:             RequestId::from(turn_id()),
+		target:         Target::Model(ModelKey::from(args.model)),
+		deadline:       None,
+		budget:         ExecutionBudget::default(),
+		session:        None,
+		debug_session:  None,
+		response_hooks: Default::default(),
 	};
 	let mut client = Client::new(registry.service(), planner, meta);
 	let mut events = client
@@ -3482,6 +3602,7 @@ pub(crate) fn chat_request_with_messages(
 		top_logprobs:      None,
 		safety:            Arc::from([]),
 		negotiation:       NegotiationPolicy::default(),
+		forced_call:       None,
 	}
 }
 
@@ -3573,21 +3694,44 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_hidden_managed_relay_mode_and_ipv6_bind() {
+		let Some(Command::BrowserRelay(args)) = parse(&[
+			"omp",
+			"browser-relay",
+			"serve",
+			"--managed",
+			"--bind",
+			"::1",
+			"--port",
+			"9333",
+		])
+		.command
+		else {
+			panic!("browser relay command");
+		};
+		assert!(args.managed);
+		assert_eq!(args.bind, std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
+		assert_eq!(args.port, 9333);
+		let help = omp_command(false)
+			.try_get_matches_from(["omp", "browser-relay", "--help"])
+			.expect_err("help exits before parsing")
+			.to_string();
+		assert!(!help.contains("--managed"));
+		assert!(!help.contains("--bind"));
+	}
+
+	#[test]
 	fn parses_exclusive_embedded_license_flag() {
 		let cli = parse(&["omp", "--license"]);
 		assert!(cli.license);
 		assert!(cli.command.is_none());
-		let normalized =
-			parse_with_terminal(["omp", "--license"].map(OsString::from), false).expect("license");
+		let normalized = parse_arguments(["omp", "--license"].map(OsString::from)).expect("license");
 		assert!(normalized.license);
 		assert!(normalized.command.is_none());
 		assert_eq!(
-			parse_with_terminal(
-				["omp", "--license", "bench", "provider/model"].map(OsString::from),
-				true,
-			)
-			.expect_err("license must be exclusive")
-			.kind(),
+			parse_arguments(["omp", "--license", "bench", "provider/model"].map(OsString::from))
+				.expect_err("license must be exclusive")
+				.kind(),
 			ErrorKind::ArgumentConflict
 		);
 	}
@@ -3692,15 +3836,6 @@ mod tests {
 	}
 
 	#[test]
-	fn parses_standalone_join_link() {
-		let Some(Command::Join(args)) = parse(&["omp", "join", "room.credentials"]).command else {
-			panic!("join command");
-		};
-		assert_eq!(args.link.as_str(), "room.credentials");
-		assert_eq!(dispatch_target(Some(&Command::Join(args))), DispatchTarget::Join);
-	}
-
-	#[test]
 	fn parses_grievance_actions_and_selectors() {
 		let Some(Command::Grievances(list)) = parse(&["omp", "grievances"]).command else {
 			panic!("grievances list command");
@@ -3787,7 +3922,6 @@ mod tests {
 	#[test]
 	fn parses_documented_standalone_command_surface() {
 		let cases = [
-			(&["omp", "agents", "unpack", "--json"][..], DispatchTarget::Agents),
 			(&["omp", "browser-relay", "install"][..], DispatchTarget::BrowserRelay),
 			(&["omp", "commit", "--dry-run"][..], DispatchTarget::Commit),
 			(&["omp", "ps", "list", "--json"][..], DispatchTarget::Ps),
@@ -3802,6 +3936,99 @@ mod tests {
 		}
 	}
 	#[test]
+	fn literal_pi_launch_flag_oracle_is_reserved_by_the_cli() {
+		// Literal oracle from pi
+		// `packages/coding-agent/src/cli/flag-tables.ts`
+		// STRING_SETTERS + OPTIONAL_FLAGS + VALUELESS_FLAGS. Short aliases are
+		// represented by their long spellings because contribution names do
+		// not carry dashes.
+		const PI_LONG_FLAGS: &[&str] = &[
+			"--cwd",
+			"--config",
+			"--add-dir",
+			"--mode",
+			"--fork",
+			"--provider",
+			"--model",
+			"--smol",
+			"--slow",
+			"--plan",
+			"--prewalk-into",
+			"--plan-yolo-into",
+			"--max-time",
+			"--service-tier",
+			"--api-key",
+			"--system-prompt",
+			"--append-system-prompt",
+			"--provider-session-id",
+			"--prompt-cache-key",
+			"--session-dir",
+			"--models",
+			"--tools",
+			"--thinking",
+			"--export",
+			"--hook",
+			"--extension",
+			"--trusted-extension",
+			"--plugin-dir",
+			"--skills",
+			"--approval-mode",
+			"--resume",
+			"--session",
+			"--help",
+			"--version",
+			"--allow-home",
+			"--continue",
+			"--from-claude",
+			"--from-codex",
+			"--no-session",
+			"--no-tools",
+			"--no-lsp",
+			"--no-pty",
+			"--hide-thinking",
+			"--advisor",
+			"--external-thinking",
+			"--prewalk",
+			"--no-prewalk",
+			"--plan-yolo",
+			"--print",
+			"--print-thoughts",
+			"--no-extensions",
+			"--no-skills",
+			"--no-rules",
+			"--no-title",
+			"--auto-approve",
+			"--yolo",
+		];
+		fn collect(command: &clap::Command, flags: &mut Vec<String>) {
+			for argument in command.get_arguments() {
+				if let Some(long) = argument.get_long() {
+					flags.push(format!("--{long}"));
+				}
+				for alias in argument.get_visible_aliases().into_iter().flatten() {
+					flags.push(format!("--{alias}"));
+				}
+			}
+			for child in command.get_subcommands() {
+				collect(child, flags);
+			}
+		}
+		// `--help` is Clap's generated action rather than a declared argument;
+		// `--print` is normalized into the `print` command before Clap.
+		let mut parsed = vec!["--help".to_owned(), "--print".to_owned(), "--yolo".to_owned()];
+		collect(&omp_command(false), &mut parsed);
+		let reserved = builtin_contribution_names().collect::<Vec<_>>();
+		for flag in PI_LONG_FLAGS {
+			let name = flag.trim_start_matches("--");
+			assert!(parsed.iter().any(|parsed| parsed == flag), "pi launch flag {flag} is not parsed");
+			assert!(
+				reserved.iter().any(|reserved| reserved.as_str() == name),
+				"pi launch flag {flag} is not reserved by omp"
+			);
+		}
+	}
+
+	#[test]
 	fn parses_chat_composition_options() {
 		let Some(Command::Chat(args)) = parse(&[
 			"omp",
@@ -3815,6 +4042,8 @@ mod tests {
 			"--resume",
 			"01ARZ3NDEKTSV4RRFFQ69G5FAV",
 			"--py-eval",
+			"--envd-idle-timeout",
+			"2",
 		])
 		.command
 		else {
@@ -3825,20 +4054,25 @@ mod tests {
 		assert_eq!(args.gateway.as_ref().map(LocalEndpoint::as_path), Some(Path::new(TEST_ENDPOINT)));
 		assert_eq!(args.resume, Some(sf!("01ARZ3NDEKTSV4RRFFQ69G5FAV")));
 		assert!(args.py_eval);
+		assert_eq!(args.envd_idle_timeout, Some(2));
 	}
 	#[test]
 	fn parses_ephemeral_inference_overrides_without_debugging_secret() {
-		for arguments in [
-			&["omp", "print", "--continue", "--resume", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "prompt"][..],
-			&["omp", "print", "--no-session", "--session-dir", "sessions", "prompt"][..],
-		] {
-			assert_eq!(
-				OmpCli::try_parse_from(arguments)
-					.expect_err("conflicting session policy")
-					.kind(),
-				ErrorKind::ArgumentConflict
-			);
-		}
+		let conflict =
+			&["omp", "print", "--continue", "--resume", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "prompt"];
+		assert_eq!(
+			OmpCli::try_parse_from(conflict)
+				.expect_err("conflicting session policy")
+				.kind(),
+			ErrorKind::ArgumentConflict
+		);
+		let Some(Command::Print(ephemeral)) =
+			parse(&["omp", "print", "--no-session", "--session-dir", "sessions", "prompt"]).command
+		else {
+			panic!("ephemeral print command");
+		};
+		assert!(ephemeral.no_session);
+		assert_eq!(ephemeral.session_dir, Some(PathBuf::from("sessions")));
 
 		let Some(Command::Chat(chat)) = parse(&[
 			"omp",
@@ -3894,6 +4128,7 @@ mod tests {
 		assert_eq!(extension.manifest.services.provides().len(), 0);
 		assert_eq!(extension.manifest.services.requires().len(), 0);
 		assert!(extension.manifest.resource_limits.is_empty());
+		assert!(extension.manifest.runtime_declarations_trusted());
 		assert_eq!(
 			extension.manifest.activation_triggers,
 			[omp_envd::exthost::ActivationTrigger::FirstReach]
@@ -3919,11 +4154,43 @@ mod tests {
 	}
 
 	#[test]
+	fn generic_ext_setting_parse_is_inert_until_admission() {
+		let cli = parse(&["omp", "--ext", "demo.verbose=true"]);
+		assert!(cli.trusted_extension.is_empty());
+		let launch = lower_launch_extensions(&cli, command_extension_args(cli.command.as_ref()))
+			.expect("inert launch lowering");
+		assert!(launch.native_roots.is_empty());
+		assert!(launch.trusted.is_empty(), "argv parsing must not compose an extension host");
+		assert_eq!(launch.settings.len(), 1);
+		assert_eq!(launch.settings[0].extension, "demo");
+		assert_eq!(launch.settings[0].key, "verbose");
+		assert_eq!(launch.settings[0].value, "true");
+	}
+
+	#[test]
+	fn registered_plugin_alias_is_never_rejected_as_a_reserved_prompt_word() {
+		let cli = parse_from_os(["omp", "plugin", "list"].map(OsString::from))
+			.expect("plugin aliases the extension command");
+		assert!(matches!(cli.command, Some(Command::Ext(_))));
+		let error = parse_from_os(["omp", "list"].map(OsString::from))
+			.expect_err("bare obsolete management word receives a redirect");
+		assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+		let Some(Command::Chat(chat)) = parse_from_os(["omp", "--model", "list"].map(OsString::from))
+			.expect("a reserved word used as a flag value is not a redirect")
+			.command
+		else {
+			panic!("chat command");
+		};
+		assert_eq!(chat.model.as_deref(), Some("list"));
+	}
+
+	#[test]
 	fn parses_ext_group_flags_and_subcommands() {
 		let cli = parse(&[
 			"omp",
-			"--ext=publisher/example",
-			"--ext-only",
+			"--extension=publisher/example",
+			"--ext=demo.verbose=true",
+			"--plugin-dir",
 			"local-ext",
 			"--no-workspace-ext",
 			"ext",
@@ -3938,6 +4205,11 @@ mod tests {
 			"literal-spec",
 		]);
 		assert_eq!(cli.ext, vec![sf!("publisher/example")]);
+		assert_eq!(cli.ext_overrides, vec![omp_ext::config::CliSettingOverride {
+			extension: sf!("demo"),
+			key:       sf!("verbose"),
+			value:     sf!("true"),
+		}]);
 		assert_eq!(cli.ext_only, vec![PathBuf::from("local-ext")]);
 		assert!(cli.no_workspace_ext);
 		let Some(Command::Ext(args)) = cli.command else {
@@ -3949,6 +4221,22 @@ mod tests {
 		};
 		assert_eq!(install.pool, Some(sf!("shared")));
 		assert_eq!(install.specs, vec![sf!("publisher/example"), sf!("literal-spec")]);
+
+		let verbose = parse_from_os(["omp", "plugin", "--verbose", "list"].map(OsString::from))
+			.expect("plugin verbose");
+		assert!(!verbose.version);
+		let Some(Command::Ext(verbose)) = verbose.command else {
+			panic!("plugin aliases the extension command");
+		};
+		assert!(verbose.verbose);
+
+		let version = parse_from_os(["omp", "plugin", "-v", "list"].map(OsString::from))
+			.expect("global short version");
+		assert!(version.version);
+		let Some(Command::Ext(version)) = version.command else {
+			panic!("plugin aliases the extension command");
+		};
+		assert!(!version.verbose, "extension verbosity is long-only");
 
 		for arguments in [
 			&["omp", "ext", "list"][..],
@@ -4009,19 +4297,15 @@ mod tests {
 	#[test]
 	fn parses_images_actions_alias_and_flags() {
 		let Some(Command::Images(args)) =
-			parse(&["omp", "img", "purge", "--apply", "--all", "--dir", "profile"]).command
+			parse(&["omp", "img", "status", "--dir", "profile"]).command
 		else {
 			panic!("images command");
 		};
-		assert_eq!(args.action, ImagesAction::Purge);
-		assert!(args.apply && args.all);
+		assert_eq!(args.action, ImagesAction::Status);
 		assert_eq!(args.dir, Some(PathBuf::from("profile")));
 
-		for action in ["status", "doctor", "probe", "purge"] {
-			assert!(matches!(
-				parse(&["omp", "images", action]).command,
-				Some(Command::Images(_))
-			));
+		for action in ["status", "doctor", "probe"] {
+			assert!(matches!(parse(&["omp", "images", action]).command, Some(Command::Images(_))));
 		}
 	}
 
@@ -4047,12 +4331,53 @@ mod tests {
 			OsString::from("chat"),
 		])
 		.expect("invocation extension flags");
-		let lowered = lower_launch_extensions(&cli).expect("lowered launch policy");
+		let lowered = lower_launch_extensions(&cli, command_extension_args(cli.command.as_ref()))
+			.expect("lowered launch policy");
 		assert_eq!(lowered.mode, InvocationExtensionMode::ExplicitOnly);
 		assert!(lowered.no_workspace);
 		assert_eq!(lowered.native_roots, vec![
 			directory.path().canonicalize().expect("canonical root")
 		]);
+	}
+
+	#[test]
+	fn plugin_dir_alias_selects_explicit_extension_mode() {
+		let directory = tempfile::tempdir().expect("extension root");
+		let cli = OmpCli::try_parse_from([
+			OsString::from("omp"),
+			OsString::from("chat"),
+			OsString::from("--plugin-dir"),
+			directory.path().as_os_str().to_owned(),
+		])
+		.expect("plugin directory");
+		let lowered = lower_launch_extensions(&cli, command_extension_args(cli.command.as_ref()))
+			.expect("explicit launch policy");
+		assert_eq!(lowered.mode, InvocationExtensionMode::ExplicitOnly);
+		assert_eq!(lowered.native_roots, vec![
+			directory.path().canonicalize().expect("canonical root")
+		]);
+	}
+
+	#[test]
+	fn extension_launch_flags_are_only_advertised_on_launch_commands() {
+		let compress_help = OmpCli::try_parse_from(["omp", "compress", "--help"])
+			.expect_err("help exits through clap")
+			.to_string();
+		assert!(!compress_help.contains("--plugin-dir"));
+		assert!(!compress_help.contains("--trusted-extension"));
+		assert!(!compress_help.contains("--no-ext"));
+		let compressed = parse_arguments(
+			["omp", "--plugin-dir", "/tmp/demo", "compress", "file.txt"].map(OsString::from),
+		)
+		.expect("inapplicable leading launch controls are stripped");
+		assert!(matches!(compressed.command, Some(Command::Compress(_))));
+
+		let chat_help = OmpCli::try_parse_from(["omp", "chat", "--help"])
+			.expect_err("help exits through clap")
+			.to_string();
+		assert!(chat_help.contains("--plugin-dir"));
+		assert!(!chat_help.contains("--trusted-extension"));
+		assert!(chat_help.contains("--no-extensions"));
 	}
 
 	#[test]
@@ -4062,6 +4387,59 @@ mod tests {
 		assert_eq!(error.kind(), ErrorKind::UnknownArgument);
 		assert_eq!(error.exit_code(), 2);
 		assert!(error.to_string().contains("Usage:"));
+	}
+
+	#[test]
+	fn disabling_flags_can_override_selected_resources() {
+		let Some(Command::Chat(args)) = parse(&[
+			"omp",
+			"chat",
+			"--tools=read,grep",
+			"--no-tools",
+			"--skills=git-*",
+			"--no-skills",
+			"--prewalk",
+			"--no-prewalk",
+		])
+		.command
+		else {
+			panic!("chat command");
+		};
+		assert!(args.tools.is_some());
+		assert!(args.no_tools);
+		assert!(args.skills.is_some());
+		assert!(args.no_skills);
+		assert!(args.prewalk);
+		assert!(args.no_prewalk);
+	}
+
+	#[test]
+	fn parses_one_shot_resource_controls() {
+		let cli = parse(&[
+			"omp",
+			"chat",
+			"--no-context-files",
+			"--no-prompt-templates",
+			"--use-theme",
+			"ocean",
+			"--skill",
+			"review/SKILL.md",
+			"--skill",
+			"debug",
+			"--prompt-template",
+			"review.md",
+			"--theme",
+			"ocean.json",
+		]);
+		let Some(Command::Chat(args)) = cli.command else {
+			panic!("chat command");
+		};
+		assert!(args.no_context_files);
+		assert!(args.no_prompt_templates);
+		assert_eq!(args.use_theme.as_deref(), Some("ocean"));
+		assert_eq!(args.skill, [PathBuf::from("review/SKILL.md"), PathBuf::from("debug")]);
+		assert_eq!(args.prompt_template, [PathBuf::from("review.md")]);
+		assert_eq!(args.theme, [PathBuf::from("ocean.json")]);
 	}
 
 	#[test]
@@ -4082,7 +4460,7 @@ mod tests {
 		let Some(Command::Chat(args)) = cli.command else {
 			panic!("chat command");
 		};
-		assert_eq!(args.prompt_settings.personality, Some(omp_agent::Personality::Pragmatic));
+		assert_eq!(args.prompt_settings.personality.as_deref(), Some("pragmatic"));
 		assert_eq!(args.prompt_settings.include_model_in_prompt, Some(false));
 		assert_eq!(args.prompt_settings.include_workstation, Some(true));
 		assert_eq!(args.prompt_settings.include_workspace_tree, Some(true));
@@ -4104,12 +4482,86 @@ mod tests {
 			Some(Command::Auth(AuthArgs { command: AuthCommand::List { provider: Some(_) }, .. }))
 		));
 		assert!(matches!(
+			parse(&["omp", "auth", "status"]).command,
+			Some(Command::Auth(AuthArgs { command: AuthCommand::Status { provider: None }, .. }))
+		));
+		assert!(matches!(
 			parse(&["omp", "auth", "refresh", "account"]).command,
 			Some(Command::Auth(AuthArgs { command: AuthCommand::Refresh { .. }, .. }))
 		));
 		assert!(matches!(
 			parse(&["omp", "auth", "logout", "account"]).command,
 			Some(Command::Auth(AuthArgs { command: AuthCommand::Logout { .. }, .. }))
+		));
+	}
+
+	#[test]
+	fn help_and_version_keep_their_process_exit_contract() {
+		let root_help = parse_from_os(["omp", "--help"].map(OsString::from))
+			.expect_err("root help")
+			.to_string();
+		assert!(root_help.contains("--profile <NAME>"));
+		assert!(root_help.contains("--alias <COMMAND>"));
+		assert!(root_help.contains("-p, --print"));
+		assert!(root_help.contains("--no-extensions"));
+		assert!(root_help.contains("--auto-approve"));
+		assert!(!root_help.contains("--yolo"));
+		assert!(root_help.contains("bash"));
+		assert!(!root_help.contains("report_issue"));
+		for flag in ["--version", "-v"] {
+			let cli = parse_from_os(["omp", "-p", flag].map(OsString::from))
+				.expect("version is global across launch forms");
+			assert!(cli.version);
+			assert!(matches!(cli.command, Some(Command::Print(_))));
+		}
+		for arguments in
+			[&["omp", "--help"][..], &["omp", "help"][..], &["omp", "chat", "--help"][..]]
+		{
+			let error = parse_from_os(arguments.iter().map(OsString::from))
+				.expect_err("help is a successful clap display");
+			assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+			assert_eq!(error.exit_code(), 0);
+		}
+		let Some(Command::Chat(args)) =
+			parse_from_os(["omp", "--model", "provider/model", "help"].map(OsString::from))
+				.expect("help after launch flags remains prompt text")
+				.command
+		else {
+			panic!("chat command");
+		};
+		assert_eq!(args.prompt, [sf!("help")]);
+	}
+
+	#[tokio::test]
+	async fn empty_pipe_falls_back_without_synthesizing_print() {
+		assert_eq!(read_nonempty_piped_input(&b" \n\t"[..]).await, None);
+		assert_eq!(
+			read_nonempty_piped_input(&b"prompt\n"[..]).await,
+			Some(Str::new_static("prompt\n"))
+		);
+	}
+
+	#[test]
+	fn piped_launch_promotion_is_post_parse_and_protocol_safe() {
+		let mut cli = parse_arguments(["omp", "first", "second"].map(OsString::from))
+			.expect("interactive-shaped parse");
+		assert!(matches!(cli.command, Some(Command::Chat(_))));
+		promote_piped_launch(&mut cli);
+		let Some(Command::Print(args)) = cli.command else {
+			panic!("non-empty pipe promotes chat");
+		};
+		assert_eq!(args.prompt, [sf!("first"), sf!("second")]);
+		assert!(command_owns_stdin(
+			parse_arguments(["omp", "--mode", "rpc"].map(OsString::from))
+				.expect("rpc")
+				.command
+				.as_ref()
+		));
+		assert!(command_owns_stdin(
+			parse_arguments(["omp", "acp"].map(OsString::from))
+				.expect("acp")
+				.command
+				.as_ref()
 		));
 	}
 
@@ -4123,6 +4575,21 @@ mod tests {
 			panic!("chat command");
 		};
 		assert_eq!(args.prompt, vec![sf!("explain"), sf!("this")]);
+
+		let Some(Command::Chat(args)) = parse_from_os(["omp", "--", "--literal"].map(OsString::from))
+			.expect("root POSIX separator")
+			.command
+		else {
+			panic!("chat command");
+		};
+		assert_eq!(args.prompt, vec![sf!("--literal")]);
+		let Some(Command::Chat(args)) = parse_from_os(["omp", "-"].map(OsString::from))
+			.expect("lone dash positional")
+			.command
+		else {
+			panic!("chat command");
+		};
+		assert_eq!(args.prompt, vec![sf!("-")]);
 
 		let Some(Command::Print(args)) =
 			parse_from_os([OsString::from("omp"), OsString::from("-p"), OsString::from("explain")])
@@ -4154,11 +4621,9 @@ mod tests {
 			(&["omp", "--mode", "acp"][..], DispatchTarget::Acp),
 			(&["omp", "--model", "provider/model", "--mode", "rpc"][..], DispatchTarget::Rpc),
 		] {
-			for interactive in [false, true] {
-				let cli = parse_with_terminal(arguments.iter().map(OsString::from), interactive)
-					.expect("transport invocation");
-				assert_eq!(dispatch_target(cli.command.as_ref()), target);
-			}
+			let cli =
+				parse_arguments(arguments.iter().map(OsString::from)).expect("transport invocation");
+			assert_eq!(dispatch_target(cli.command.as_ref()), target);
 		}
 		let Some(Command::Print(args)) =
 			parse_from_os(["omp", "-p", "--mode=json", "hello"].map(OsString::from))
@@ -4171,41 +4636,33 @@ mod tests {
 	}
 
 	#[test]
-	fn flag_only_terminal_invocations_open_interactive_chat() {
-		let cli = parse_with_terminal(
-			["omp", "chat", "--model", "provider/model"].map(OsString::from),
-			false,
-		)
-		.expect("explicit chat with piped stdin");
-		assert!(matches!(cli.command, Some(Command::Print(_))));
-		let cli = parse_with_terminal(
-			["omp", "launch", "--model", "provider/model"].map(OsString::from),
-			false,
-		)
-		.expect("launch alias with piped stdin");
-		assert!(matches!(cli.command, Some(Command::Print(_))));
+	fn flag_only_invocations_parse_as_interactive_until_nonempty_stdin_is_known() {
+		let cli = parse_arguments(["omp", "chat", "--model", "provider/model"].map(OsString::from))
+			.expect("explicit chat");
+		assert!(matches!(cli.command, Some(Command::Chat(_))));
+		let cli = parse_arguments(["omp", "launch", "--model", "provider/model"].map(OsString::from))
+			.expect("launch alias");
+		assert!(matches!(cli.command, Some(Command::Chat(_))));
 
-		let cli = parse_with_terminal(
+		let cli = parse_arguments(
 			["omp", "--model", "provider/model", "--thinking", "high"].map(OsString::from),
-			true,
 		)
-		.expect("interactive launch");
+		.expect("interactive-shaped launch");
 		let Some(Command::Chat(args)) = cli.command else {
 			panic!("chat command");
 		};
 		assert_eq!(args.model, Some(sf!("provider/model")));
 		assert_eq!(args.thinking, Some(ThinkingLevel::High));
-		// Piped stdin keeps the print-with-stdin-prompt contract.
-		let cli =
-			parse_with_terminal(["omp", "--model", "provider/model"].map(OsString::from), false)
-				.expect("piped launch");
+		// A non-empty pipe promotes only after this parse.
+		let mut cli =
+			parse_arguments(["omp", "--model", "provider/model"].map(OsString::from)).expect("launch");
+		promote_piped_launch(&mut cli);
 		assert!(matches!(cli.command, Some(Command::Print(_))));
-		// A bare interactive invocation stays the default chat composition.
-		let cli = parse_with_terminal([OsString::from("omp")], true).expect("bare invocation");
+		// A bare invocation stays the default chat composition.
+		let cli = parse_arguments([OsString::from("omp")]).expect("bare invocation");
 		assert!(cli.command.is_none());
 		// Root-global options alone never force a launch command.
-		let cli =
-			parse_with_terminal(["omp", "--gui"].map(OsString::from), true).expect("gui invocation");
+		let cli = parse_arguments(["omp", "--gui"].map(OsString::from)).expect("gui invocation");
 		assert!(cli.command.is_none());
 		assert!(cli.gui);
 	}
@@ -4246,8 +4703,35 @@ mod tests {
 	#[test]
 	fn hoists_global_flags_after_the_subcommand() {
 		let cli = parse(&["omp", "print", "hello", "--no-ext", "--cwd=workspace"]);
-		assert!(cli.no_ext);
+		let Some(Command::Print(args)) = &cli.command else {
+			panic!("print command: {cli:?}");
+		};
+		assert!(args.launch.extensions.no_ext);
 		assert_eq!(cli.cwd, Some(PathBuf::from("workspace")));
+	}
+	#[test]
+	fn serve_help_hides_rejected_extension_launch_controls() {
+		let serve = omp_command(true)
+			.try_get_matches_from(["omp", "serve", "--help"])
+			.expect_err("help exits before parsing")
+			.to_string();
+		for option in [
+			"--extension",
+			"--ext ",
+			"--plugin-dir",
+			"--trusted-extension",
+			"--no-ext",
+			"--no-workspace-ext",
+		] {
+			assert!(!serve.contains(option), "serve help advertised {option}");
+		}
+		let chat = omp_command(false)
+			.try_get_matches_from(["omp", "chat", "--help"])
+			.expect_err("help exits before parsing")
+			.to_string();
+		assert!(chat.contains("--no-extensions"));
+		assert!(chat.contains("--auto-approve"));
+		assert!(!chat.contains("--yolo"));
 	}
 
 	#[test]
@@ -4296,7 +4780,11 @@ mod tests {
 			};
 			assert_eq!(args.resume, Some(sf!("01ARZ3NDEKTSV4RRFFQ69G5FAV")));
 		}
-		for arguments in [&["omp", "chat", "--session"][..], &["omp", "chat", "-r"][..]] {
+		for arguments in [
+			&["omp", "chat", "--session"][..],
+			&["omp", "chat", "-r"][..],
+			&["omp", "chat", "--resume="][..],
+		] {
 			let cli = parse_from_os(arguments.iter().map(OsString::from)).expect("bare resume");
 			let Some(Command::Chat(mut args)) = cli.command else {
 				panic!("chat command");
@@ -4359,6 +4847,9 @@ mod tests {
 		let cli = parse_from_os(["omp", "--json", "models"].map(OsString::from))
 			.expect("a non-launch flag before its command is retained");
 		assert!(matches!(cli.command, Some(Command::Models(ModelsArgs { json: true, .. }))));
+		let cli = parse_from_os(["omp", "-c", "update"].map(OsString::from))
+			.expect("short command flag before update is retained");
+		assert!(matches!(cli.command, Some(Command::Update(UpdateArgs { check: true, .. }))));
 	}
 
 	#[test]
@@ -4396,17 +4887,26 @@ mod tests {
 			panic!("print command");
 		};
 		assert_eq!(args.thinking, Some(ThinkingLevel::Minimal));
-		assert_eq!(args.service_tier, Some(ServiceTier::Priority));
+		assert_eq!(args.service_tier, Some(TierSetting::Priority));
 		assert_eq!(args.approval_mode, Some(ApprovalMode::Write));
 		assert_eq!(args.max_time, Some(CliDuration(Duration::from_secs(120))));
 		assert_eq!(args.follow_ups, vec![sf!("then summarize")]);
 		assert_eq!(args.tools, Some(ToolNames(vec![sf!("read"), sf!("write")])));
+		assert_eq!(
+			"1.5m".parse::<CliDuration>().expect("fractional duration"),
+			CliDuration(Duration::from_secs(90))
+		);
+		assert_eq!(
+			"Read,search,find,read,,Publisher.Tool"
+				.parse::<ToolNames>()
+				.expect("compatible tool aliases"),
+			ToolNames(vec![sf!("read"), sf!("grep"), sf!("glob"), sf!("Publisher.Tool")])
+		);
 		for arguments in [
 			["omp", "print", "--thinking=inherit", "prompt"],
 			["omp", "print", "--thinking=m", "prompt"],
 			["omp", "print", "--max-time=0", "prompt"],
 			["omp", "print", "--service-tier=fast", "prompt"],
-			["omp", "print", "--tools=read,,write", "prompt"],
 		] {
 			assert_eq!(
 				OmpCli::try_parse_from(arguments)
@@ -4467,16 +4967,50 @@ mod tests {
 			Some(Command::Models(_))
 		));
 		assert!(matches!(
+			parse(&["omp", "stats", "--json"]).command,
+			Some(Command::Stats(StatsArgs { json: true, summary: false }))
+		));
+		assert!(matches!(
+			parse(&["omp", "stats", "--summary"]).command,
+			Some(Command::Stats(StatsArgs { json: false, summary: true }))
+		));
+		assert!(matches!(
 			parse(&["omp", "update", "--check"]).command,
 			Some(Command::Update(UpdateArgs { check: true, .. }))
 		));
 		assert!(matches!(
-			parse(&["omp", "registry", "--json"]).command,
-			Some(Command::Registry(RegistryArgs { json: true, .. }))
+			parse(&["omp", "update", "--canary"]).command,
+			Some(Command::Update(UpdateArgs { canary: true, stable: false, .. }))
 		));
 		assert!(matches!(
-			parse(&["omp", "share", "--server", "https://share.example"]).command,
-			Some(Command::Share(_))
+			parse(&["omp", "update", "--stable"]).command,
+			Some(Command::Update(UpdateArgs { canary: false, stable: true, .. }))
+		));
+		let mut command = OmpCli::command();
+		let help = command
+			.find_subcommand_mut("update")
+			.expect("update command")
+			.render_long_help()
+			.to_string();
+		assert!(help.contains("--canary"));
+		assert!(help.contains("Switch to the canary release channel and update"));
+		assert!(help.contains("--stable"));
+		assert!(help.contains("Switch back to the stable release channel and update"));
+		for arguments in [
+			&["omp", "update", "--canary", "--stable"][..],
+			&["omp", "update", "--plugins", "--canary"][..],
+			&["omp", "update", "--index", "release.json", "--stable"][..],
+		] {
+			assert_eq!(
+				OmpCli::try_parse_from(arguments)
+					.expect_err("conflicting updater controls")
+					.kind(),
+				ErrorKind::ArgumentConflict
+			);
+		}
+		assert!(matches!(
+			parse(&["omp", "registry", "--json"]).command,
+			Some(Command::Registry(RegistryArgs { json: true, .. }))
 		));
 		assert!(matches!(
 			parse(&["omp", "auth-broker", "status"]).command,

@@ -9,7 +9,7 @@ Most applications use `dom!` for their initial tree, stable `id` attributes for 
 - `components` and the `dom!` macro define retained layout, text, navigation, data, and input trees; runtime `markup` and typed builders provide alternate construction paths.
 - `Ui`, `App`, and the event/input modules retain widget state and route keyboard, mouse, paste, resize, and application events.
 - `Frame` and `Renderer` turn component output into differential terminal updates, while `terminal`, `graphics`, `notify`, and protocol-specific modules manage lifecycle and terminal capabilities.
-`Renderer::retire` is the explicit finalized-row scrolling path. `Renderer::replay_frames` handles width-sensitive logical-history replay atomically from ordered frame segments, so total history is not limited by one `Frame`'s `u16` height: it moves the suffix that fits into leading blank viewport rows, buffers the prefix remainder with the completed viewport, and makes one synchronous writer call. `HistoryReplay::Append` preserves the existing native epoch; `HistoryReplay::Rebuild` includes the destructive history reset in the same buffered transaction. Writer failure poisons the renderer and never admits a retry against uncertain physical history.
+- `slots` owns transcript block lifecycle, logical history, viewport allocation, resize replay, and the staged delivery transaction. `Renderer::present_plan` is the only slots-to-terminal seam: it acknowledges `Delivered::All` or returns a `DeliveryError` carrying the exact complete-row prefix.
 - `editcore`, `rich`, `markdown`, `latex`, `syntax`, `scene`, and `shader` provide editing and richer content pipelines. `build.rs` validates `icons.tsv` and generates the icon lookup catalog.
 
 ## Philosophy
@@ -414,6 +414,16 @@ A terminal image with a cell-rendered fallback.
 - **Source:** `src` is a filesystem path to PNG or binary P6 PPM data. `trim` crops fully transparent margins before cell sampling, keeping padded logos visible as tiny thumbnails.
 - **Graphics:** `UiContext::graphics` selects cells, sixel, Kitty placeholders, Kitty direct placements, or iTerm2. For protocol images, pair `Img::kitty(id, rows, cols)` with `Renderer::register_image`.
 
+#### `<diff>`
+
+A unified diff painted for tool edits.
+
+- **Content:** Diff source, one row per line. `+`/`-`/space markers may carry a canonical `123|` or legacy `123 ` line-number gutter (`DiffLine::parse`); `!` rows are diagnostics; hunk headers and other unmarked rows stay verbatim; blank or `...` rows become a gap marker.
+- **Props:** Shared; `path`; `context`; `max-rows`; `overflow`.
+- **Gutter:** Numbered rows reserve at least three digits (`  -88│`), so a streaming diff never reflows rows it already painted; a number repeated by the next row is blanked. Unnumbered rows keep the bare marker.
+- **Emphasis:** A single removed row followed by a single added row is word-diffed and the changed tokens paint in reverse video; leading indentation is never emphasized. Leading tabs and spaces render as dim `→`/`·` glyphs (`diff-indent-tab`, `diff-indent-space`); interior tabs expand to three cells.
+- **Highlighting:** `path` infers a language from the extension (or bare file name) and syntax-highlights context rows; added and removed rows keep their semantic color.
+
 #### `DiffPane` — Rust-built interactive source diff
 
 `components::DiffPane` presents a `DiffDocument::build(old, new, path, options)` as split,
@@ -517,7 +527,7 @@ let tree = dom! {
 # let _ = tree;
 ```
 
-Cell options build pi-style browsers — aligned stat columns that survive narrow widths:
+Cell options build aligned browsers — stat columns survive narrow widths:
 
 ```rust
 # use omp_tui::dom;
@@ -621,6 +631,15 @@ A determinate progress bar.
 - **Defaults:** `value=0`, `max=100`; values are clamped to the maximum.
 - **Presentation:** The theme supplies filled, empty, label, and percentage colors.
 
+#### `<qr>`
+
+A scannable QR code encoding the tag body.
+
+- **Content:** The payload text, whitespace-trimmed; URLs are the common case.
+- **Props:** Shared sizing; `kind=l|m|q|h` selects the error-correction level (default `m`); `fg`/`bg` recolor the dark/light modules; `label` names the degraded row.
+- **Presentation:** Unicode half-block cells (two module rows per terminal row) inside the spec-required four-module quiet zone, black on white by default — a scanner contract, not theming. URL-shaped payloads wrap the symbol in an OSC-8 hyperlink.
+- **Degradation:** A viewport too narrow or short for the full symbol, or a payload beyond QR capacity, renders one hyperlinked text row (`label`, defaulting to the payload) instead of a clipped, unscannable code.
+
 ### Custom elements
 
 Any unknown tag becomes a `CustomElement`.
@@ -716,6 +735,7 @@ Runtime markup inherits `fg`, text-style flags, and `truncate` into descendants.
 | `required` | Flag | Wizard validation for an ID-bearing value component |
 | `match` | Anchored simple pattern | Wizard validation after trimming nonempty text |
 | `src` | Filesystem path | PNG or P6 PPM image source |
+| `path` | Source file path | `<diff>` language inference for context-row syntax highlighting |
 | `icon` | Icon name | Callout leading icon; runtime `<icon>` name |
 | `badge` | String | Compact callout header badge |
 | `submit` | Flag | Submit button or submitting wizard |
@@ -923,9 +943,49 @@ terminal.edit_keymap(|keymap| keymap.bind(alt_n, Key::PageDown));
 
 `Keymap::disable` masks a chord, including its identity fallback; `Keymap::unbind` removes a table entry and restores fallback handling. Exact bindings win before shift-folded spellings and identity fallbacks. `InputDecoder` exposes `keymap()` and `keymap_mut()` accessors for applications that decode their own byte streams.
 
-### Viewport presentation and explicit retirement
+### Elastic transcript slots and delivery
 
-`Ui::present(&mut renderer, viewport_height)` paints exactly one history-neutral viewport. It never infers durable output from scene geometry and never scrolls terminal history. Applications move finalized output into native scrollback only through `Renderer::retire(finalized, viewport, viewport_height, layers)`: `finalized` contains the immutable rows selected by the application, while `viewport` is the exact screen that must remain after retirement. A successful retirement scrolls exactly the finalized row count; ordinary presents and full repaints scroll zero rows.
+`slots::Slots` is the transcript protocol. `open` creates a block in commitment order. A
+`Mode::Mutable` block may replace its retained component with `set`; none of those speculative
+snapshots can enter `logical_history`. A `Mode::AppendOnly` block grows through `append`; it keeps
+one retained reveal-enabled `TextLeaf`, updates it through `Ui::set_text`, and advances pacing
+through `Slots::tick`. While it is the first uncommitted block, complete stable rows may be staged
+under viewport pressure. `finalize` seals either mode but writes nothing.
+
+`plan` returns a `WritePlan` containing ordered one-row history frames and the exact viewport that
+must remain visible. Planning is side-effect free and idempotent until the presenter reports the
+result:
+
+```rust,no_run
+# use omp_tui::{Renderer, TtyOut, slots::{Delivered, ResizePolicy, Slots}};
+# fn paint(slots: &mut Slots, renderer: &mut Renderer<TtyOut>) -> Result<(), omp_tui::DeliveryError> {
+let plan = slots.plan();
+match renderer.present_plan(&plan, &[]) {
+    Ok(delivered) => slots.commit(plan, delivered),
+    Err(error) => {
+        slots.commit(plan, error.delivered());
+        return Err(error);
+    }
+}
+# Ok(())
+# }
+```
+
+`Delivered::Partial(n)` acknowledges only that complete prefix. The next `plan` stages precisely
+the suffix, so a short write cannot silently drop a history row. A writer error still poisons the
+terminal renderer because the current row may have been delivered only in bytes; production hosts
+stop rather than risk duplicating that uncertain row.
+
+Blocks move `Active → Finalized → Committed`; the frontier advances only across a contiguous,
+fully acknowledged finalized prefix. Live viewport slots allocate one row first, then grow toward
+three rows while capacity remains; finalized-but-waiting blocks consume no live rows. Resizing
+never changes the logical ledger. Width changes use `ResizePolicy::Preserve`, `Append`, or
+`Rebuild` (the default); Rebuild starts a new physical epoch and replays logical history at the new
+width. The host reads `cl_resize_policy` and passes the parsed enum into `Slots::new`; `omp-tui`
+does not depend on the control plane.
+
+`Ui::present(&mut renderer, viewport_height)` remains the history-neutral path for non-transcript
+surfaces. It never infers durable output from scene geometry and never scrolls terminal history.
 
 ### Resize without losing state
 
@@ -1071,6 +1131,8 @@ let ui = Ui::from_root(dom! { <text fg=accent>{"portable"}</text> }, 40, context
 
 The context stays swappable after construction: `Ui::set_context` applies a new context to the retained tree and every stacked overlay, discarding cached themed output and relaying out — no rebuild, and widget state (scroll, selection, filter queries, animations) survives. `App` does this automatically when the terminal flips between dark and light: a stock palette follows the flip, a custom theme is preserved, and either way the host surfaces `AppEvent::Appearance` so the app can refresh colors it derived outside the theme. Structure parsed from markup is retained; swapping `elements` affects future parses only.
 
+Named themes come from JSON files. `JsonTheme::parse` accepts omp's compact `dark`/`light` token patches or a rich `colors` palette (with `vars`), and `ThemeCatalog::load(explicit, dirs)` loads the files or directories an operator named (`--theme`; a broken one is an error) ahead of discovered theme directories (`<config root>/agent/themes`, `<project>/.omp/themes`; a broken one is a warning), keyed by file stem. `UiContext::with_palette(Some(theme))` selects the variant for the current appearance and remembers the theme, so a later `apply_appearance` re-selects its dark or light side instead of falling back to the stock palette; `with_palette(None)` returns to stock.
+
 ## Graphics protocols and images
 
 `Graphics` selects one of five renderer paths:
@@ -1129,7 +1191,10 @@ let mut ui = Ui::from_root(
 );
 
 assert_eq!(ui.values()["query"], "a");
-assert_eq!(ui.handle_key(Key::Char('b')), UiEvent::None);
+assert_eq!(ui.handle_key(Key::Char('b')), UiEvent::Changed {
+    id:    "query".into(),
+    value: "ab".into(),
+});
 assert_eq!(ui.values()["query"], "ab");
 assert!(ui.frame().size().height > 0);
 ```
@@ -1193,7 +1258,7 @@ resizes, and raw byte-stream statistics as one session-based tool.
 - **Treating construction-time `if` as reactive:** use `when=` for value-driven retained visibility.
 - **Rebuilding on resize:** call `resize` and `set_height` so focus, selections, and scroll offsets survive.
 - **Passing document rows to `handle_mouse`:** coordinates are viewport-local; pass terminal report rows directly.
-- **Retiring live content:** call `retire` only with immutable finalized rows selected in application order; ordinary viewport updates belong in `present`.
+- **Committing before delivery:** never mutate transcript history from geometry or after `plan` alone. Present the `WritePlan`, then pass the exact `Delivered` acknowledgement to `Slots::commit`.
 - **Skipping terminal restoration:** enter through `Terminal`; its explicit `leave`, `Drop`, panic hook, and fatal-signal handlers restore the modes it owns.
 
 ## Run the bundled examples
@@ -1205,4 +1270,4 @@ cargo run -p omp-tui --example companies
 cargo run -p omp-tui --example footers
 ```
 
-`gallery` is one tabbed application hosting every showcase pane: Markdown, Math, Mermaid, and Graphviz rendering, a `dom!`-built macro pane, a live editor-driven preview, the `Anim` prop-tween lab (autoplaying, with scene hotkeys), the `Overlay` modal demo (`Ctrl+K`/`Ctrl+G`), the fullscreen `Eclipse` shader, and the chat example's model `Picker` inline. It demonstrates `dom!`, retained updates, unclaimed-key routing (`AppEvent::Key`), mouse input, resize handling, and differential rendering in one compact application. `chat` remains the standalone interactive chat demo with its picker, sidebar, and alt-screen welcome scene.
+`gallery` is one tabbed application hosting every showcase pane: Markdown, Math, Mermaid, and Graphviz rendering, a `dom!`-built macro pane, a live editor-driven preview, the `Anim` prop-tween lab (autoplaying, with scene hotkeys), the `Overlay` modal demo (`Ctrl+K`/`Ctrl+G`), the fullscreen `Eclipse` shader, and the chat example's model `Picker` inline. It demonstrates `dom!`, retained updates, unclaimed-key routing (`AppEvent::Key`), mouse input, resize handling, and differential rendering in one compact application. `elastic-slots` is the inline transcript proof: it delivers finalized rows through `WritePlan`, keeps live assistant/composer blocks in the viewport, rebuilds on width resize, and exits cleanly on Ctrl-C.

@@ -1,27 +1,7 @@
 //! Native ACP exec-backend routing settings.
 
-use omp_settings::{
-	DomainRegistration, FieldDescriptor, OptionProvider, SettingKind, SettingOption, SettingScope,
-	SettingsDomain,
-};
+use omp_con::Ctx;
 use serde::{Deserialize, Serialize};
-
-const PERSISTED: &[SettingScope] = &[SettingScope::Global, SettingScope::Project];
-const ROUTING_VALUES: &[&str] = &["auto", "never"];
-const ROUTING_OPTIONS: &[SettingOption] = &[
-	SettingOption {
-		value:       "auto",
-		label:       "Automatic",
-		description: Some(
-			"Prefer a capable ACP terminal and fall back to the normal Environment backend.",
-		),
-	},
-	SettingOption {
-		value:       "never",
-		label:       "Never",
-		description: Some("Always use the normal Environment backend."),
-	},
-];
 
 /// Routing policy for capability-advertised ACP terminal execution.
 #[derive(
@@ -36,6 +16,7 @@ const ROUTING_OPTIONS: &[SettingOption] = &[
 	strum::Display,
 	strum::EnumString,
 	strum::IntoStaticStr,
+	strum::VariantNames,
 )]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
@@ -47,6 +28,19 @@ pub enum AcpRouting {
 	Never,
 }
 
+omp_con::con_enum!(AcpRouting);
+
+omp_con::var! {
+	/// Choose whether eligible shell calls prefer a capable ACP terminal backend.
+	pub static SV_ACP_ROUTING = sv_acp_routing: AcpRouting {
+		default: AcpRouting::Auto,
+		flags: archive,
+		meta: {
+			"legacy.path": "acp.routing",
+		},
+	};
+}
+
 /// ACP execution settings consumed by shell backend selection.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -55,40 +49,24 @@ pub struct AcpSettings {
 	pub routing: AcpRouting,
 }
 
-impl SettingsDomain for AcpSettings {
-	const DOMAIN: &'static str = "acp";
-	const FIELDS: &'static [FieldDescriptor] = &[FieldDescriptor {
-		path:        "acp.routing",
-		label:       "ACP Shell Routing",
-		description: "Choose whether eligible shell calls prefer a capable ACP terminal backend.",
-		kind:        SettingKind::Enum(ROUTING_VALUES),
-		scopes:      PERSISTED,
-		order:       10,
-		options:     Some(OptionProvider::Static(ROUTING_OPTIONS)),
-		condition:   None,
-		secret:      false,
-	}];
-}
-
-omp_settings::inventory::submit! {
-	DomainRegistration::of::<AcpSettings>()
+impl AcpSettings {
+	/// Resolves ACP routing policy from the process control context.
+	#[must_use]
+	pub fn from_con(ctx: &Ctx) -> Self {
+		Self { routing: SV_ACP_ROUTING.get(ctx) }
+	}
 }
 
 #[cfg(test)]
 mod tests {
-	use omp_settings::{SettingsSnapshot, registered_domains};
-
 	use super::*;
 
 	#[test]
-	fn acp_projection_round_trips_and_is_registered() {
-		let expected = AcpSettings { routing: AcpRouting::Never };
-		let snapshot = SettingsSnapshot::isolated(expected.clone()).expect("isolated snapshot");
-		assert_eq!(snapshot.project::<AcpSettings>().expect("projection").get(), &expected);
-		assert!(
-			registered_domains()
-				.iter()
-				.any(|domain| domain.name == AcpSettings::DOMAIN)
-		);
+	fn acp_con_projection_round_trips() {
+		let ctx = Ctx::new();
+		SV_ACP_ROUTING
+			.set(&ctx, AcpRouting::Never)
+			.expect("set routing");
+		assert_eq!(AcpSettings::from_con(&ctx), AcpSettings { routing: AcpRouting::Never });
 	}
 }

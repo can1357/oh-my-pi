@@ -11,7 +11,7 @@ use std::{
 	process::Stdio,
 	sync::{
 		Arc,
-		atomic::{AtomicBool, Ordering},
+		atomic::{AtomicBool, AtomicUsize, Ordering},
 	},
 	time::Duration,
 };
@@ -373,11 +373,13 @@ async fn resolve_windows_npm_shim(config: &StdioConfig) -> Option<SpawnPlan> {
 enum PendingResult {
 	Value(Value),
 	RpcError(i64),
+	Malformed,
+	FrameTooLarge,
 	Closed,
 }
 
 struct Inner {
-	stdin:       AsyncMutex<ChildStdin>,
+	stdin:       AsyncMutex<Option<ChildStdin>>,
 	child:       AsyncMutex<Option<Child>>,
 	pending:     Mutex<HashMap<RequestId, oneshot::Sender<PendingResult>>>,
 	incoming_tx: flume::Sender<IncomingMessage>,
@@ -385,14 +387,56 @@ struct Inner {
 	ids:         Mutex<RequestIdAllocator>,
 	id_format:   RequestIdFormat,
 	timeout:     Option<Duration>,
+	pid:         Option<u32>,
 	detached:    bool,
+	owners:      AtomicUsize,
 	closed:      AtomicBool,
+	teardown:    AtomicBool,
+}
+
+struct PendingGuard<'a> {
+	pending: &'a Mutex<HashMap<RequestId, oneshot::Sender<PendingResult>>>,
+	id:      RequestId,
+}
+
+impl Drop for PendingGuard<'_> {
+	fn drop(&mut self) {
+		self.pending.lock().remove(&self.id);
+	}
 }
 
 /// Concurrent newline-delimited JSON-RPC child transport.
-#[derive(Clone)]
 pub struct StdioTransport {
 	inner: Arc<Inner>,
+}
+
+impl Clone for StdioTransport {
+	fn clone(&self) -> Self {
+		self.inner.owners.fetch_add(1, Ordering::Relaxed);
+		Self { inner: Arc::clone(&self.inner) }
+	}
+}
+
+impl Drop for StdioTransport {
+	fn drop(&mut self) {
+		if self.inner.owners.fetch_sub(1, Ordering::AcqRel) != 1 {
+			return;
+		}
+		self.inner.closed.store(true, Ordering::Release);
+		close_pending(&self.inner);
+		if self.inner.teardown.swap(true, Ordering::AcqRel) {
+			return;
+		}
+		// Drop has no async grace window. Terminate the complete execution unit
+		// synchronously, then reap it opportunistically on the live runtime.
+		signal_child(self.inner.pid, self.inner.detached, true);
+		if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+			let inner = Arc::clone(&self.inner);
+			runtime.spawn(async move {
+				reap_inner(&inner).await;
+			});
+		}
+	}
 }
 
 impl StdioTransport {
@@ -400,7 +444,7 @@ impl StdioTransport {
 	pub async fn spawn(config: StdioConfig) -> Result<Self, TransportError> {
 		let plan = resolve_host_spawn_plan(&config)
 			.await
-			.map_err(|_| TransportError::pre_dispatch(TransportFailure::Correlation))?;
+			.map_err(|_| TransportError::pre_dispatch(TransportFailure::InvalidSpawnPlan))?;
 		let mut command = Command::new(&plan.executable);
 		#[cfg(not(windows))]
 		command.args(&plan.args);
@@ -410,7 +454,7 @@ impl StdioTransport {
 			let (line, ordinary) = plan
 				.args
 				.split_last()
-				.ok_or_else(|| TransportError::pre_dispatch(TransportFailure::Correlation))?;
+				.ok_or_else(|| TransportError::pre_dispatch(TransportFailure::InvalidSpawnPlan))?;
 			command.args(ordinary);
 			command.as_std_mut().raw_arg(line);
 		} else {
@@ -467,8 +511,9 @@ impl StdioTransport {
 			.take()
 			.ok_or_else(|| TransportError::pre_dispatch(TransportFailure::Closed))?;
 		let (incoming_tx, incoming_rx) = flume::bounded(256);
+		let pid = child.id();
 		let inner = Arc::new(Inner {
-			stdin: AsyncMutex::new(stdin),
+			stdin: AsyncMutex::new(Some(stdin)),
 			child: AsyncMutex::new(Some(child)),
 			pending: Mutex::new(HashMap::new()),
 			incoming_tx,
@@ -476,8 +521,14 @@ impl StdioTransport {
 			ids: Mutex::new(RequestIdAllocator::default()),
 			id_format: config.request_id_format,
 			timeout: config.timeout,
-			detached: cfg!(unix),
+			pid,
+			// Every host spawn path creates a targetable process group: a session
+			// on POSIX, a process group on macOS, and CREATE_NEW_PROCESS_GROUP on
+			// Windows. Always sweep it after the leader settles.
+			detached: true,
+			owners: AtomicUsize::new(1),
 			closed: AtomicBool::new(false),
+			teardown: AtomicBool::new(false),
 		});
 		tokio::spawn(read_stdout(Arc::clone(&inner), stdout));
 		tokio::spawn(async move {
@@ -506,6 +557,9 @@ impl StdioTransport {
 			() = cancellation.cancelled() => return Err(TransportError::pre_dispatch(TransportFailure::Cancelled)),
 			stdin = self.inner.stdin.lock() => stdin,
 		};
+		let stdin = stdin
+			.as_mut()
+			.ok_or_else(|| TransportError::pre_dispatch(TransportFailure::Closed))?;
 		let write = async {
 			stdin.write_all(&frame).await?;
 			stdin.flush().await
@@ -530,6 +584,7 @@ impl StdioTransport {
 			.map_err(|_| TransportError::pre_dispatch(TransportFailure::Correlation))?;
 		let (sender, receiver) = oneshot::channel();
 		self.inner.pending.lock().insert(id.clone(), sender);
+		let _pending = PendingGuard { pending: &self.inner.pending, id: id.clone() };
 		let frame = json!({"jsonrpc":"2.0", "id":id, "method":method, "params":params});
 		if let Err(error) = self.send(&frame, &cancellation).await {
 			self.inner.pending.lock().remove(&id);
@@ -552,27 +607,21 @@ impl StdioTransport {
 				dispatch: DispatchState::Responded,
 				cause:    TransportFailure::JsonRpc { code },
 			}),
+			PendingResult::Malformed => {
+				Err(TransportError::effects_unknown(TransportFailure::MalformedFrame))
+			},
+			PendingResult::FrameTooLarge => {
+				Err(TransportError::effects_unknown(TransportFailure::FrameTooLarge))
+			},
 			PendingResult::Closed => Err(TransportError::effects_unknown(TransportFailure::Closed)),
 		}
 	}
 
 	async fn close_inner(&self) -> Result<(), TransportError> {
-		if self.inner.closed.swap(true, Ordering::AcqRel) {
-			return Ok(());
+		if !self.inner.closed.swap(true, Ordering::AcqRel) {
+			close_pending(&self.inner);
 		}
-		close_pending(&self.inner);
-		let Some(mut child) = self.inner.child.lock().await.take() else {
-			return Ok(());
-		};
-		let pid = child.id();
-		signal_child(pid, self.inner.detached, false);
-		let exited = time::timeout(TERM_GRACE, child.wait()).await.is_ok();
-		if !exited || self.inner.detached {
-			signal_child(pid, self.inner.detached, true);
-			if !exited {
-				let _ = time::timeout(KILL_GRACE, child.wait()).await;
-			}
-		}
+		terminate_inner(&self.inner).await;
 		Ok(())
 	}
 }
@@ -584,7 +633,15 @@ impl McpTransport for StdioTransport {
 		params: Value,
 		cancellation: CancellationToken,
 	) -> TransportFuture<'a, Result<TransportResponse, TransportError>> {
-		Box::pin(self.request_inner(method, params, cancellation))
+		Box::pin(async move {
+			let operation = self.request_inner(method, params, cancellation);
+			match self.inner.timeout {
+				Some(timeout) => time::timeout(timeout, operation)
+					.await
+					.map_err(|_| TransportError::effects_unknown(TransportFailure::TimedOut))?,
+				None => operation.await,
+			}
+		})
 	}
 
 	fn notify<'a>(
@@ -634,23 +691,69 @@ impl McpTransport for StdioTransport {
 async fn read_stdout(inner: Arc<Inner>, stdout: process::ChildStdout) {
 	let mut reader = BufReader::new(stdout);
 	let mut frame = Vec::new();
-	loop {
-		frame.clear();
-		match reader.read_until(b'\n', &mut frame).await {
-			Ok(0) | Err(_) => break,
-			Ok(_) if frame.len() > MAX_FRAME_BYTES => break,
-			Ok(_) => match serde_json::from_slice::<Value>(&frame) {
-				Ok(value) => dispatch(&inner, value),
-				Err(_) => continue,
+	let mut malformed = false;
+	let mut frame_too_large = false;
+	'stream: loop {
+		let available = match reader.fill_buf().await {
+			Ok(bytes) if bytes.is_empty() => {
+				if !frame.is_empty() {
+					match serde_json::from_slice::<Value>(&frame) {
+						Ok(value) => dispatch(&inner, value),
+						Err(_) => malformed = true,
+					}
+				}
+				break;
 			},
+			Ok(bytes) => bytes,
+			Err(_) => break,
+		};
+		let newline = available.iter().position(|byte| *byte == b'\n');
+		let consumed = newline.map_or(available.len(), |position| position + 1);
+		if frame.len().saturating_add(consumed) > MAX_FRAME_BYTES {
+			frame_too_large = true;
+			break;
+		}
+		frame.extend_from_slice(&available[..consumed]);
+		reader.consume(consumed);
+		if newline.is_none() {
+			continue;
+		}
+		match serde_json::from_slice::<Value>(&frame) {
+			Ok(value) => dispatch(&inner, value),
+			Err(_) => {
+				malformed = true;
+				break;
+			},
+		}
+		frame.clear();
+		if inner.closed.load(Ordering::Acquire) {
+			break 'stream;
 		}
 	}
 	inner.closed.store(true, Ordering::Release);
-	close_pending(&inner);
+	if malformed || frame_too_large {
+		for (_, sender) in inner.pending.lock().drain() {
+			let result = if malformed {
+				PendingResult::Malformed
+			} else {
+				PendingResult::FrameTooLarge
+			};
+			let _ = sender.send(result);
+		}
+	} else {
+		close_pending(&inner);
+	}
 	let _ = inner.incoming_tx.try_send(IncomingMessage::Closed);
+	terminate_inner(&inner).await;
 }
 
 fn dispatch(inner: &Inner, message: Value) {
+	if let Value::Array(messages) = message {
+		for message in messages {
+			dispatch(inner, message);
+		}
+		return;
+	}
 	let Some(object) = message.as_object() else {
 		return;
 	};
@@ -659,14 +762,18 @@ fn dispatch(inner: &Inner, message: Value) {
 		&& let Ok(id) = serde_json::from_value::<RequestId>(id_value.clone())
 		&& let Some(pending) = inner.pending.lock().remove(&id)
 	{
-		let result = object
-			.get("error")
-			.and_then(|error| error.get("code"))
-			.and_then(Value::as_i64)
-			.map_or_else(
-				|| PendingResult::Value(object.get("result").cloned().unwrap_or(Value::Null)),
-				PendingResult::RpcError,
-			);
+		let result = if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+			PendingResult::Malformed
+		} else {
+			match (object.get("result"), object.get("error")) {
+				(Some(result), None) => PendingResult::Value(result.clone()),
+				(None, Some(error)) => error
+					.get("code")
+					.and_then(Value::as_i64)
+					.map_or(PendingResult::Malformed, PendingResult::RpcError),
+				_ => PendingResult::Malformed,
+			}
+		};
 		let _ = pending.send(result);
 		return;
 	}
@@ -674,12 +781,13 @@ fn dispatch(inner: &Inner, message: Value) {
 		return;
 	};
 	let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
-	let incoming = match object
-		.get("id")
-		.and_then(|value| serde_json::from_value::<RequestId>(value.clone()).ok())
-	{
-		Some(id) => IncomingMessage::Request { id, method: Str::from(method), params },
-		None => IncomingMessage::Notification { method: Str::from(method), params },
+	let incoming = if let Some(value) = object.get("id") {
+		let Ok(id) = serde_json::from_value::<RequestId>(value.clone()) else {
+			return;
+		};
+		IncomingMessage::Request { id, method: Str::from(method), params }
+	} else {
+		IncomingMessage::Notification { method: Str::from(method), params }
 	};
 	let _ = inner.incoming_tx.try_send(incoming);
 }
@@ -687,6 +795,31 @@ fn dispatch(inner: &Inner, message: Value) {
 fn close_pending(inner: &Inner) {
 	for (_, sender) in inner.pending.lock().drain() {
 		let _ = sender.send(PendingResult::Closed);
+	}
+}
+
+async fn terminate_inner(inner: &Inner) {
+	if inner.teardown.swap(true, Ordering::AcqRel) {
+		return;
+	}
+	reap_inner(inner).await;
+}
+
+async fn reap_inner(inner: &Inner) {
+	if let Ok(mut stdin) = inner.stdin.try_lock() {
+		stdin.take();
+	}
+	let Some(mut child) = inner.child.lock().await.take() else {
+		return;
+	};
+	let pid = child.id().or(inner.pid);
+	signal_child(pid, inner.detached, false);
+	let exited = time::timeout(TERM_GRACE, child.wait()).await.is_ok();
+	if !exited || inner.detached {
+		signal_child(pid, inner.detached, true);
+		if !exited {
+			let _ = time::timeout(KILL_GRACE, child.wait()).await;
+		}
 	}
 }
 
@@ -699,18 +832,100 @@ fn signal_child(pid: Option<u32>, detached: bool, hard: bool) {
 			signal::Signal::SIGTERM
 		};
 		let raw = Pid::from_raw(pid.cast_signed());
-		let _ = signal::kill(
-			if detached {
-				Pid::from_raw(-raw.as_raw())
-			} else {
-				raw
-			},
-			signal,
-		);
+		if detached {
+			match signal::kill(Pid::from_raw(-raw.as_raw()), signal) {
+				Ok(()) | Err(nix::errno::Errno::ESRCH) => {},
+				Err(_) => {
+					let _ = signal::kill(raw, signal);
+				},
+			}
+		} else {
+			let _ = signal::kill(raw, signal);
+		}
 	}
 	#[cfg(windows)]
-	{
-		let _ = (pid, detached, hard);
+	if let Some(pid) = pid {
+		let _ = detached;
+		if hard {
+			terminate_windows_process_tree(pid);
+		} else {
+			// CREATE_NEW_PROCESS_GROUP makes `pid` a valid CTRL_BREAK group.
+			// Failure is harmless: the bounded hard-kill sweep follows.
+			// SAFETY: the event code and process-group identifier are plain values;
+			// Windows validates whether the target group still exists.
+			unsafe {
+				windows_sys::Win32::System::Console::GenerateConsoleCtrlEvent(
+					windows_sys::Win32::System::Console::CTRL_BREAK_EVENT,
+					pid,
+				);
+			}
+		}
+	}
+}
+
+#[cfg(windows)]
+fn terminate_windows_process_tree(root: u32) {
+	use std::mem::size_of;
+
+	use windows_sys::Win32::{
+		Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+		System::{
+			Diagnostics::ToolHelp::{
+				CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+				TH32CS_SNAPPROCESS,
+			},
+			Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess},
+		},
+	};
+
+	// SAFETY: the flags request a system-owned snapshot and require no caller
+	// pointers.
+	let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+	if snapshot == INVALID_HANDLE_VALUE {
+		return;
+	}
+	let mut entry =
+		PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..PROCESSENTRY32W::default() };
+	let mut relationships = Vec::new();
+	// SAFETY: `snapshot` is live and `entry` has the required size initialized.
+	if unsafe { Process32FirstW(snapshot, &mut entry) } != 0 {
+		loop {
+			relationships.push((entry.th32ProcessID, entry.th32ParentProcessID));
+			// SAFETY: the same live snapshot and initialized writable entry remain
+			// valid for the duration of enumeration.
+			if unsafe { Process32NextW(snapshot, &mut entry) } == 0 {
+				break;
+			}
+		}
+	}
+	// SAFETY: `snapshot` is a live owned handle and is closed exactly once here.
+	unsafe {
+		CloseHandle(snapshot);
+	}
+
+	let mut tree = vec![root];
+	loop {
+		let before = tree.len();
+		for &(pid, parent) in &relationships {
+			if !tree.contains(&pid) && tree.contains(&parent) {
+				tree.push(pid);
+			}
+		}
+		if tree.len() == before {
+			break;
+		}
+	}
+	for pid in tree.into_iter().rev() {
+		// SAFETY: Windows validates the process identifier and requested access.
+		let process = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+		if !process.is_null() {
+			// SAFETY: `process` is a live owned handle, terminated and then closed
+			// exactly once in this branch.
+			unsafe {
+				TerminateProcess(process, 1);
+				CloseHandle(process);
+			}
+		}
 	}
 }
 
@@ -786,6 +1001,10 @@ mod tests {
 				Str::from("--exact"),
 				Str::from("mcp::stdio::tests::stdio_fixture_child"),
 				Str::from("--nocapture"),
+				Str::from("-Z"),
+				Str::from("unstable-options"),
+				Str::from("--format"),
+				Str::from("json"),
 			],
 			env:               BTreeMap::from([(
 				Str::from("OMP_MCP_STDIO_FIXTURE"),
@@ -816,6 +1035,10 @@ mod tests {
 				Str::from("--exact"),
 				Str::from("mcp::stdio::tests::stdio_fixture_child"),
 				Str::from("--nocapture"),
+				Str::from("-Z"),
+				Str::from("unstable-options"),
+				Str::from("--format"),
+				Str::from("json"),
 			],
 			env:               BTreeMap::from([(
 				Str::from("OMP_MCP_STDIO_FIXTURE"),

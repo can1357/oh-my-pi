@@ -257,6 +257,21 @@ pub fn notify(
 	notify_with_system(out, caps, notification, &RealSystem)
 }
 
+/// Delivers a notification through the platform desktop sink alone — the
+/// path a host without a terminal (a native window) takes: cmux surface
+/// routing when present, else `osascript` on macOS, else `notify-send` /
+/// D-Bus on a Linux desktop session. Detached and best-effort.
+pub fn notify_desktop(notification: &Notification) {
+	notify_desktop_with_system(notification, &RealSystem);
+}
+
+fn notify_desktop_with_system(notification: &Notification, system: &impl System) {
+	if route_cmux(notification, system) {
+		return;
+	}
+	deliver_desktop_fallback(notification, system);
+}
+
 trait System {
 	fn var(&self, name: &str) -> Option<OsString>;
 	fn is_linux(&self) -> bool;
@@ -843,5 +858,33 @@ mod tests {
 			"{\"urgency\": <byte 0>}",
 			"5000",
 		],);
+	}
+
+	#[test]
+	fn desktop_sink_delivers_without_a_terminal_and_prefers_cmux() {
+		let mut system = MockSystem { macos: true, ..MockSystem::default() };
+		system
+			.programs
+			.insert("osascript".into(), "/usr/bin/osascript".into());
+		let notification = Notification::builder()
+			.title("refactor")
+			.body("Complete")
+			.build();
+		notify_desktop_with_system(&notification, &system);
+		let argv = strings(&system.spawns.borrow()[0]);
+		assert_eq!(argv[0], "/usr/bin/osascript");
+		assert_eq!(&argv[argv.len() - 2..], ["refactor", "Complete"]);
+
+		let mut system = MockSystem { macos: true, ..MockSystem::default() };
+		system
+			.programs
+			.insert("osascript".into(), "/usr/bin/osascript".into());
+		system
+			.env
+			.insert("CMUX_SURFACE_ID".into(), "01234567-89AB-cdef-0123-456789abcdef".into());
+		notify_desktop_with_system(&notification, &system);
+		let spawns = system.spawns.borrow();
+		assert_eq!(spawns.len(), 1, "a cmux surface outranks the desktop sink");
+		assert_eq!(strings(&spawns[0])[..2], ["cmux", "notify"]);
 	}
 }

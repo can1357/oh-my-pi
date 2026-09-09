@@ -10,29 +10,30 @@ description = "Typed provider, route, model, and capability catalog for OMP infe
 readme = "README.md"
 
 [dependencies]
-arc-swap = { workspace = true }
-globset = { workspace = true }
-omp-core = { workspace = true }
-omp-settings = { workspace = true }
-kdl = { workspace = true }
-postcard = { workspace = true }
-parking_lot = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-sha2 = { workspace = true }
-smallvec = { workspace = true }
-strum = { workspace = true }
-thiserror = { workspace = true }
-toml = { workspace = true }
-zstd = { workspace = true }
+arc-swap.workspace = true
+globset.workspace = true
+omp-con.workspace = true
+omp-core.workspace = true
+kdl.workspace = true
+postcard.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+smallvec.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+toml.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
-serde_json = { workspace = true }
+serde_json.workspace = true
 
 [build-dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
-sha2 = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

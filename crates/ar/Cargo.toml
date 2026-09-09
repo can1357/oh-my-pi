@@ -12,18 +12,19 @@ description = "Bounded lazy multi-format archive reading (zip, tar, asar, rar, 7
 workspace = true
 
 [dependencies]
-cap-std = { workspace = true }
-crc32fast = { workspace = true }
-flate2 = { workspace = true, features = ["zlib-rs"] }
-omp-core = { workspace = true }
-smallvec = { workspace = true }
-serde_json = { workspace = true }
-sha2 = { workspace = true }
-strum = { workspace = true }
-thiserror = { workspace = true }
-xutf = { workspace = true }
-zerocopy = { workspace = true }
-zstd = { workspace = true }
+cap-std.workspace = true
+crc32fast.workspace = true
+flate2.workspace = true
+omp-core.workspace = true
+smallvec.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+xutf.workspace = true
+zerocopy.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
-tempfile = { workspace = true }
+tempfile.workspace = true

@@ -1,0 +1,58 @@
+── browser — Browser ───────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+╭─── 󱑌 running tab "docs" ─────────────────────────────────────────────────────────────────────────╮
+│ const obs = await tab.observe();                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · in progress
+                                                                                                    
+╭─── 󱑌 running tab "docs" ─────────────────────────────────────────────────────────────────────────╮
+│ const obs = await tab.observe();                                                                 │
+│ const heading = obs.elements.find(e => e.role === 'heading');                                    │
+│ display({                                                                                        │
+│     url: obs.url,                                                                                │
+│     title: obs.title,                                                                            │
+│     headings: obs.elements.filter(e => e.role === 'heading').length                              │
+│ });                                                                                              │
+│ return heading?.name ?? 'no heading found';                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · done
+                                                                                                    
+╭─── • tab "docs" · https://bun.sh/docs · headless ────────────────────────────────────────────────╮
+│ const obs = await tab.observe();                                                                 │
+│ const heading = obs.elements.find(e => e.role === 'heading');                                    │
+│ display({                                                                                        │
+│     url: obs.url,                                                                                │
+│     title: obs.title,                                                                            │
+│     headings: obs.elements.filter(e => e.role === 'heading').length                              │
+│ });                                                                                              │
+│ return heading?.name ?? 'no heading found';                                                      │
+├─── Output ───────────────────────────────────────────────────────────────────────────────────────┤
+│ { url: "https://bun.sh/docs", title: "Bun Documentation", headings: 14 }                         │
+│ "Get started with Bun"                                                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭───  tab "docs" · https://bun.sh/docs · headless ────────────────────────────────────────────────╮
+│ const obs = await tab.observe();                                                                 │
+│ const heading = obs.elements.find(e => e.role === 'heading');                                    │
+│ display({                                                                                        │
+│     url: obs.url,                                                                                │
+│     title: obs.title,                                                                            │
+│     headings: obs.elements.filter(e => e.role === 'heading').length                              │
+│ });                                                                                              │
+│ return heading?.name ?? 'no heading found';                                                      │
+├─── Output ───────────────────────────────────────────────────────────────────────────────────────┤
+│ TimeoutError: waiting for selector `aria/Sign in` failed: timeout 30000ms exceeded               │
+│     at Tab.waitFor (browser/tab.ts:212:13)                                                       │
+│     at run (eval:3:7)                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

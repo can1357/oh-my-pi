@@ -1,4 +1,4 @@
-//! The `ps` process-status builtin, moved from `pi-shell`.
+//! The `ps` process-status builtin.
 
 #[cfg(unix)]
 use std::collections::HashSet;
@@ -17,7 +17,7 @@ use std::{fs, mem, ptr};
 
 use clap::Parser;
 use jiff::{Timestamp, fmt::strtime, tz::TimeZone};
-use omp_shell_engine::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
+use omp_shell::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
 
 use crate::proc_snapshot::{ProcInfo, sanitize_process_command};
 
@@ -293,12 +293,12 @@ impl PsProcessRow {
 }
 
 impl builtins::Command for PsCommand {
-	type Error = omp_shell_engine::Error;
+	type Error = omp_shell::Error;
 
-	fn execute<SE: omp_shell_engine::ShellExtensions>(
+	fn execute<SE: omp_shell::ShellExtensions>(
 		&self,
 		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = result::Result<ExecutionResult, omp_shell_engine::Error>> + Send {
+	) -> impl Future<Output = result::Result<ExecutionResult, omp_shell::Error>> + Send {
 		let argv = self.argv.clone();
 		async move {
 			let options = match parse_ps_args(&argv) {
@@ -312,6 +312,7 @@ impl builtins::Command for PsCommand {
 					return Ok(ExecutionResult::success());
 				},
 				Err((code, message)) => {
+					tracing::warn!(builtin = "ps", exit_code = code, "builtin arguments rejected");
 					writeln!(context.stderr(), "ps: {message}")?;
 					return Ok(ExecutionResult::new(code));
 				},
@@ -320,8 +321,18 @@ impl builtins::Command for PsCommand {
 				return Ok(ExecutionExitCode::Interrupted.into());
 			}
 
-			let mut processes = ProcInfo::all();
-			let current_pid = i32::try_from(process::id()).ok();
+			let mut processes = ProcInfo::all_filtered(|pid| {
+				context
+					.params
+					.process_scope()
+					.is_none_or(|scope| scope.may_observe(pid))
+			});
+			let current_pid = context
+				.params
+				.process_scope()
+				.is_none()
+				.then(|| i32::try_from(process::id()).ok())
+				.flatten();
 			let current =
 				current_pid.and_then(|pid| processes.iter().find(|process| process.pid() == pid));
 			let current_user = current.and_then(|process| {
@@ -354,6 +365,11 @@ impl builtins::Command for PsCommand {
 				if err.kind() == io::ErrorKind::BrokenPipe {
 					return Ok(ExecutionResult::success());
 				}
+				tracing::warn!(
+					builtin = "ps",
+					error_kind = ?err.kind(),
+					"builtin output failed"
+				);
 				return Err(err.into());
 			}
 			Ok(if rows.is_empty() {

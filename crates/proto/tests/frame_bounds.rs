@@ -4,8 +4,9 @@
 use omp_proto::bounds::{
 	DECLARATION_MAX_COUNT, FRAME_MAX_BYTES, FrameBoundsError, LENGTH_DELIMITED_MAX_COUNT,
 	PROTOBUF_MAX_DEPTH, PULL_ALIAS_MAX_COUNT, PULL_CHUNK_MAX_BYTES, PULL_EXPECTED_MAX_BYTES,
-	PULL_NAME_MAX_BYTES, PULL_PATH_MAX_SEGMENTS, REPEATED_MAX_COUNT, TML_MAX_BYTES, TML_MAX_DEPTH,
-	TOOL_EXAMPLE_MAX_COUNT, validate_host_frame, validate_worker_frame,
+	PULL_NAME_MAX_BYTES, PULL_PATH_MAX_SEGMENTS, REPEATED_MAX_COUNT, RESULT_CHUNK_MAX_BYTES,
+	TML_MAX_BYTES, TML_MAX_DEPTH, TOOL_EXAMPLE_MAX_COUNT, validate_host_frame,
+	validate_worker_frame,
 };
 
 fn push_varint(mut value: u64, out: &mut Vec<u8>) {
@@ -238,9 +239,20 @@ fn bounds_tool_examples_and_repeated_part_buffers() {
 	for _ in 0..=REPEATED_MAX_COUNT {
 		push_len(2, &[], &mut completion);
 	}
+	let mut result = Vec::new();
+	push_len(1, &completion, &mut result);
 	assert!(matches!(
-		validate_worker_frame(&worker_frame(5, &completion)),
-		Err(FrameBoundsError::TooManyRepeatedValues { message: "ToolComplete", field: 2, .. })
+		validate_worker_frame(&worker_frame(22, &result)),
+		Err(FrameBoundsError::TooManyRepeatedValues { message: "ToolResultStart", field: 2, .. })
+	));
+
+	let mut chunk = Vec::new();
+	push_len(2, &vec![0; RESULT_CHUNK_MAX_BYTES + 1], &mut chunk);
+	let mut result = Vec::new();
+	push_len(2, &chunk, &mut result);
+	assert!(matches!(
+		validate_worker_frame(&worker_frame(22, &result)),
+		Err(FrameBoundsError::FieldTooLarge { message: "ToolResultChunk", field: 2, .. })
 	));
 }
 

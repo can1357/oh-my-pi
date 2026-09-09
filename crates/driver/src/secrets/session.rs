@@ -39,7 +39,7 @@ impl SecretSessionSnapshot {
 		let needs_key = rules_need_placeholder_key(&configured);
 		let mut rules = configured;
 		rules.extend(credential_rules()?);
-		if !needs_key && let Ok(Some(existing_key)) = omp_storage::secret_key::read_without_create() {
+		if !needs_key && let Ok(Some(existing_key)) = omp_cache::secret_key::read_without_create() {
 			rules.push(placeholder_key_rule(&existing_key)?);
 		}
 		let transform = if needs_key {

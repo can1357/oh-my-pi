@@ -311,6 +311,32 @@ impl Ui {
 		true
 	}
 
+	/// Locates a named component, downcasts it to `T`, and reads through
+	/// `probe` without invalidating anything; an unknown id or mismatched
+	/// concrete type returns `None`.
+	pub fn with_component<T: Component, R>(
+		&self,
+		id: &str,
+		probe: impl FnOnce(&T) -> R,
+	) -> Option<R> {
+		fn find<'a>(cached: &'a Cached, id: &str) -> Option<&'a Cached> {
+			if cached
+				.comp()
+				.props()
+				.id()
+				.is_some_and(|candidate| candidate == id)
+			{
+				return Some(cached);
+			}
+			cached
+				.comp()
+				.children()
+				.iter()
+				.find_map(|child| find(child, id))
+		}
+		find(&self.root, id)?.comp().downcast_ref::<T>().map(probe)
+	}
+
 	/// Locates a named component, downcasts it to `T`, and applies `update`.
 	/// A successful typed mutation invalidates the component and returns the
 	/// closure's value; an unknown id or mismatched concrete type returns
@@ -703,7 +729,7 @@ impl Ui {
 	/// component, or spent moving focus. An unclaimed key routed through
 	/// the tree untouched — pending damage from animations or unrelated
 	/// components never counts as a claim.
-	pub(crate) fn handle_key_claimed(&mut self, key: Key) -> (UiEvent, bool) {
+	pub fn handle_key_claimed(&mut self, key: Key) -> (UiEvent, bool) {
 		if let Some(index) = self.key_target() {
 			let modal = self.overlays[index].options.modal;
 			let had_focus = self.overlays[index].ui.focus.is_some();
@@ -847,6 +873,41 @@ impl Ui {
 		if self.focus.is_none() {
 			self.move_focus(true);
 		}
+	}
+
+	/// Stable id of the component that currently owns keyboard focus.
+	#[must_use]
+	pub fn focused_id(&self) -> Option<Str> {
+		let slot = self.focus?;
+		find_slot_ref(&self.root, slot)
+			.and_then(|cached| cached.comp().props().id())
+			.map(Str::new)
+	}
+
+	/// Stable id of the topmost press target at one painted coordinate.
+	///
+	/// Drag owners use this to inspect the current drop target while the
+	/// keyboard focus and routed mouse capture correctly remain on the
+	/// component where the press began.
+	#[must_use]
+	pub fn id_at(&self, x: u16, y: u16) -> Option<Str> {
+		let source_y = y.saturating_add(
+			self
+				.viewport
+				.map_or(0, |viewport| self.frame.size().height.saturating_sub(viewport.height)),
+		);
+		let hit = self.hit_at(x, source_y, false)?;
+		find_slot_ref(&self.root, hit.slot)
+			.and_then(|cached| cached.comp().props().id())
+			.map(Str::new)
+	}
+
+	/// Returns the laid-out document rectangle of a named component.
+	///
+	/// Pointer-driven hosts use this to map coordinates onto semantic rows
+	/// whose focus container intentionally emits no press event.
+	pub fn rect(&mut self, id: &str) -> Option<Rect> {
+		self.snapshot_id(id).map(|(_, _, rect, _)| rect)
 	}
 
 	/// Moves keyboard focus to the named component when it is visible and
@@ -2245,7 +2306,7 @@ mod tests {
 			}
 		};
 	}
-	omp_tui_vocab::for_each_component! { assert_tag_types }
+	omp_vocab::for_each_component! { assert_tag_types }
 
 	fn frame_text(ui: &Ui) -> Vec<String> {
 		let size = ui.frame().size();
@@ -2735,7 +2796,7 @@ mod tests {
 				.cell(string_column, string_row as u16)
 				.style
 				.foreground_color(),
-			ui.ctx.theme.ok,
+			ui.ctx.theme.code_border,
 		);
 	}
 	/// A theme swap through [`Ui::set_context`] must reach output cached
@@ -3156,6 +3217,33 @@ mod tests {
 		let narrow =
 			Ui::from_markup(r#"<text pad="0 9">ab</text>"#, 4, UiContext::default()).unwrap();
 		assert_eq!(narrow.height(), 1, "oversized padding still lays out safely");
+	}
+
+	#[test]
+	fn text_zone_prompt_marks_its_first_and_last_rows() {
+		use crate::RowMark;
+
+		let ui = Ui::from_markup(
+			r#"<col><text>above</text><text zone=prompt pad="1 1">hello world again</text><text>below</text></col>"#,
+			8,
+			UiContext::default(),
+		)
+		.unwrap();
+		let frame = ui.frame();
+		let rows = frame_text(&ui);
+		assert_eq!(ui.height(), 7, "{rows:?}");
+		assert!(frame.row_mark(1, RowMark::PromptStart), "top padding row opens: {rows:?}");
+		assert!(frame.row_mark(5, RowMark::PromptEnd), "bottom padding row closes: {rows:?}");
+		for row in [0, 2, 3, 4, 6] {
+			assert!(!frame.row_mark(row, RowMark::PromptStart), "row {row}: {rows:?}");
+		}
+		for row in [0, 1, 2, 3, 4, 6] {
+			assert!(!frame.row_mark(row, RowMark::PromptEnd), "row {row}: {rows:?}");
+		}
+
+		let plain = Ui::from_markup(r#"<text zone=none>hi</text>"#, 8, UiContext::default()).unwrap();
+		assert!(!plain.frame().row_mark(0, RowMark::PromptStart));
+		assert!(!plain.frame().row_mark(0, RowMark::PromptEnd));
 	}
 
 	#[test]

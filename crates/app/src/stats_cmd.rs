@@ -1,200 +1,164 @@
-//! `omp stats` command composition.
+//! Non-interactive historical usage statistics over durable session journals.
+//!
+//! This is the CLI adapter for the same journal fold and rebuildable SQLite
+//! index that powers chat's `/stats` panel. The journal remains authoritative;
+//! invoking the command synchronizes changed `.oms` files before projecting a
+//! human or JSON report.
 
-use std::{
-	fs, io,
-	io::IsTerminal as _,
-	net::{IpAddr, Ipv4Addr, SocketAddr},
-	path::Path,
-	sync::Arc,
-};
+use std::{env, fs};
 
-use miette::{IntoDiagnostic as _, miette};
-use omp_core::{Str, sf};
-use omp_driver::{stats_api::StatsApi, stats_server};
-use omp_storage::index::SessionIndex;
-use tokio::{signal, sync::Mutex};
+use miette::IntoDiagnostic as _;
+use omp_chat::overlays::services::{StatsGroup, StatsReport, StatsTool};
+use serde_json::{Value, json};
 
-use crate::cli::{StatsArgs, StatsCommand};
-static ACTIVE_STATS_SERVER: Mutex<Option<stats_server::RunningServer>> = Mutex::const_new(None);
+use crate::cli::StatsArgs;
 
-/// Result of launching or locating the process-local dashboard.
-pub struct DashboardLaunch {
-	/// Browser-safe loopback URL for the dashboard.
-	pub url:     Str,
-	/// Human-facing launch status.
-	pub message: Str,
-}
+/// Synchronizes stored journals and prints one historical usage report.
+pub fn run(StatsArgs { json: emit_json, .. }: StatsArgs) -> miette::Result<()> {
+	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
+	fs::create_dir_all(&data_dir).into_diagnostic()?;
+	let project = env::current_dir().into_diagnostic()?;
+	let sessions_dir = omp_env::project_state::directory(&data_dir, &project)
+		.into_diagnostic()?
+		.join("sessions");
+	let report = crate::chat_services::stats::sync(&data_dir, &sessions_dir).into_diagnostic()?;
 
-/// Runs a statistics CLI operation against the authoritative write-time index.
-pub async fn run(args: StatsArgs) -> miette::Result<()> {
-	let state_dir = args
-		.state_dir
-		.unwrap_or(omp_core::dirs::data_dir(None).into_diagnostic()?);
-	fs::create_dir_all(&state_dir).into_diagnostic()?;
-	let (index, api) = open_stats(&state_dir)?;
-	match args.command {
-		None | Some(StatsCommand::Summary { range: None }) => summary(&api, "30d"),
-		Some(StatsCommand::Summary { range: Some(range) }) => summary(&api, &range),
-		Some(StatsCommand::Json { range }) => {
-			let document = api
-				.overview_document(&range)
-				.map_err(|message| miette!(message))?;
-			println!("{}", serde_json::to_string_pretty(&document).into_diagnostic()?);
-			Ok(())
-		},
-		Some(StatsCommand::Sync) => {
-			if io::stderr().is_terminal() {
-				eprint!("Synchronizing write-time statistics... ");
-			}
-			let document = api.sync_document().map_err(|message| miette!(message))?;
-			if io::stderr().is_terminal() {
-				eprintln!("done");
-			}
-			println!("{}", serde_json::to_string_pretty(&document).into_diagnostic()?);
-			Ok(())
-		},
-		Some(StatsCommand::Serve { host, port, auth_token, no_open }) => {
-			let ip = host
-				.parse::<IpAddr>()
-				.map_err(|_| miette!("--host must be an IP address"))?;
-			let server = stats_server::start(
-				stats_server::Config { address: SocketAddr::new(ip, port), auth_token, state_dir },
-				index,
-			)
-			.await
-			.into_diagnostic()?;
-			let address = server.address();
-			let display_host = if address.ip().is_unspecified() {
-				"127.0.0.1".to_owned()
-			} else {
-				address.ip().to_string()
-			};
-			let url = format!("http://{display_host}:{}", address.port());
-			println!("Dashboard available at: {url}");
-			if !no_open {
-				omp_core::open::open_path(&url);
-			}
-			signal::ctrl_c().await.into_diagnostic()?;
-			server.shutdown().await;
-			Ok(())
-		},
-	}
-}
-
-fn open_stats(state_dir: &Path) -> miette::Result<(Arc<SessionIndex>, StatsApi)> {
-	let index = Arc::new(
-		SessionIndex::open_authoritative_reader(state_dir.join("sessions.sqlite3"))
-			.into_diagnostic()?,
-	);
-	let api = StatsApi::new(Arc::clone(&index), state_dir.join("stats-sync.lock"));
-	Ok((index, api))
-}
-
-/// Starts the local dashboard once per process and opens it in the browser.
-pub async fn launch_dashboard(
-	state_dir: &Path,
-	flags: &[(Str, Option<Str>)],
-) -> miette::Result<DashboardLaunch> {
-	fs::create_dir_all(state_dir).into_diagnostic()?;
-	let mut host = IpAddr::V4(Ipv4Addr::LOCALHOST);
-	let mut port = stats_server::DEFAULT_PORT;
-	for (flag, value) in flags {
-		match flag.as_str() {
-			"--host" => {
-				let value = value
-					.as_ref()
-					.ok_or_else(|| miette!("Missing host. Usage: /stats [--host HOST] [--port PORT]"))?;
-				host = value
-					.parse::<IpAddr>()
-					.map_err(|_| miette!("--host must be an IP address"))?;
-			},
-			"--port" => {
-				let value = value
-					.as_ref()
-					.ok_or_else(|| miette!("Missing port. Usage: /stats [--host HOST] [--port PORT]"))?;
-				port = value
-					.parse::<u16>()
-					.map_err(|_| miette!("Invalid port: {value}"))?;
-			},
-			unknown => {
-				return Err(miette!(
-					"Unknown option: {unknown}. Usage: /stats [--host HOST] [--port PORT]"
-				));
-			},
-		}
-	}
-
-	let requested = SocketAddr::new(host, port);
-	let mut active = ACTIVE_STATS_SERVER.lock().await;
-	if let Some(server) = active.as_ref() {
-		let address = server.address();
-		let url = dashboard_url(address);
-		omp_core::open::open_path(url.as_str());
-		let message = if requested == address {
-			sf!("Dashboard available at: {url}")
-		} else {
-			sf!("Dashboard already running at: {url} (requested {requested} ignored)")
-		};
-		return Ok(DashboardLaunch { url, message });
-	}
-
-	let (index, api) = open_stats(state_dir)?;
-	api.sync_document().map_err(|message| miette!(message))?;
-	let server = match stats_server::start(
-		stats_server::Config {
-			address:    requested,
-			auth_token: None,
-			state_dir:  state_dir.to_path_buf(),
-		},
-		index,
-	)
-	.await
-	{
-		Ok(server) => server,
-		Err(stats_server::Error::AlreadyRunning { address }) => {
-			let url = dashboard_url(address);
-			omp_core::open::open_path(url.as_str());
-			return Ok(DashboardLaunch { message: sf!("Dashboard already running at: {url}"), url });
-		},
-		Err(error) => return Err(error).into_diagnostic(),
-	};
-	let url = dashboard_url(server.address());
-	omp_core::open::open_path(url.as_str());
-	let message = sf!("Dashboard available at: {url}");
-	*active = Some(server);
-	Ok(DashboardLaunch { url, message })
-}
-
-fn dashboard_url(address: SocketAddr) -> Str {
-	let host = if address.ip().is_unspecified() {
-		IpAddr::V4(Ipv4Addr::LOCALHOST)
+	if emit_json {
+		println!("{}", serde_json::to_string_pretty(&report_json(&report)).into_diagnostic()?);
 	} else {
-		address.ip()
-	};
-	sf!("http://{host}:{}", address.port())
+		let summary = omp_chat::overlays::stats::stats_report(&report);
+		// The shared projection uses Markdown emphasis inside the chat panel;
+		// stdout is plain text; terminal emphasis belongs only on a TTY.
+		print!("{}", summary.as_str().replace("**", ""));
+	}
+	Ok(())
 }
 
-fn summary(api: &StatsApi, range: &str) -> miette::Result<()> {
-	let document = api
-		.overview_document(range)
-		.map_err(|message| miette!(message))?;
-	let overall = &document["data"]["overall"];
-	let requests = overall["requests"].as_u64().unwrap_or_default();
-	let errors = overall["errors"].as_u64().unwrap_or_default();
-	let error_rate = if requests == 0 {
+fn report_json(report: &StatsReport) -> Value {
+	json!({
+		"sync": {
+			"processed": report.synced,
+			"files": report.files,
+		},
+		"overall": {
+			"totalRequests": report.requests,
+			"successfulRequests": report.requests.saturating_sub(report.errors),
+			"failedRequests": report.errors,
+			"errorRate": ratio(report.errors, report.requests),
+			"totalInputTokens": report.input_tokens,
+			"totalOutputTokens": report.output_tokens,
+			"totalCacheReadTokens": report.cache_read,
+			"totalCacheWriteTokens": report.cache_write,
+			"cacheRate": ratio(
+				report.cache_read,
+				report.input_tokens.saturating_add(report.cache_read),
+			),
+			"totalCost": dollars(report.cost_nano_usd),
+			"costNanoUsd": report.cost_nano_usd,
+			"unpricedRequests": report.unpriced,
+			"avgDuration": report.avg_duration_ms,
+			"avgTtft": report.avg_ttft_ms,
+			"avgTokensPerSecond": report.tokens_per_second,
+		},
+		"byModel": report
+			.by_model
+			.iter()
+			.map(|group| group_json("model", group))
+			.collect::<Vec<_>>(),
+		"byFolder": report
+			.by_folder
+			.iter()
+			.map(|group| group_json("folder", group))
+			.collect::<Vec<_>>(),
+		"tools": report.tools.iter().map(tool_json).collect::<Vec<_>>(),
+	})
+}
+
+fn group_json(label: &'static str, group: &StatsGroup) -> Value {
+	let mut value = json!({
+		"totalRequests": group.requests,
+		"totalInputTokens": group.input_tokens,
+		"totalOutputTokens": group.output_tokens,
+		"totalCacheReadTokens": group.cache_read,
+		"totalCacheWriteTokens": group.cache_write,
+		"cacheRate": ratio(
+			group.cache_read,
+			group.input_tokens.saturating_add(group.cache_read),
+		),
+		"totalCost": dollars(group.cost_nano_usd),
+		"costNanoUsd": group.cost_nano_usd,
+		"unpricedRequests": group.unpriced,
+	});
+	value[label] = Value::String(group.key.to_string());
+	value
+}
+
+fn tool_json(tool: &StatsTool) -> Value {
+	json!({
+		"tool": tool.tool.as_str(),
+		"calls": tool.calls,
+		"errors": tool.errors,
+	})
+}
+
+fn ratio(numerator: u64, denominator: u64) -> f64 {
+	if denominator == 0 {
 		0.0
 	} else {
-		errors as f64 * 100.0 / requests as f64
-	};
-	println!("Range: {range}");
-	println!("Sessions: {}", overall["sessions"].as_u64().unwrap_or_default());
-	println!("Requests: {requests} ({error_rate:.2}% errors)");
-	println!(
-		"Tokens: {} input, {} output, {} cache read",
-		overall["input_tokens"].as_u64().unwrap_or_default(),
-		overall["output_tokens"].as_u64().unwrap_or_default(),
-		overall["cache_read_tokens"].as_u64().unwrap_or_default(),
-	);
-	println!("Cost: ${:.6}", overall["cost_usd"].as_f64().unwrap_or_default());
-	Ok(())
+		numerator as f64 / denominator as f64
+	}
+}
+
+fn dollars(nano_usd: u64) -> f64 {
+	nano_usd as f64 / 1_000_000_000.0
+}
+
+#[cfg(test)]
+mod tests {
+	use omp_core::Str;
+
+	use super::*;
+
+	#[test]
+	fn json_projection_keeps_aggregate_precision_and_group_identity() {
+		let report = StatsReport {
+			synced:            2,
+			files:             3,
+			requests:          4,
+			errors:            1,
+			input_tokens:      300,
+			output_tokens:     100,
+			cache_read:        100,
+			cache_write:       20,
+			cost_nano_usd:     1_250_000_000,
+			unpriced:          1,
+			avg_duration_ms:   Some(900),
+			avg_ttft_ms:       Some(120),
+			tokens_per_second: Some(42.5),
+			by_model:          vec![StatsGroup {
+				key:           Str::new_static("anthropic/claude"),
+				requests:      4,
+				cost_nano_usd: 1_250_000_000,
+				unpriced:      1,
+				input_tokens:  300,
+				output_tokens: 100,
+				cache_read:    100,
+				cache_write:   20,
+			}],
+			by_folder:         Vec::new(),
+			tools:             vec![StatsTool {
+				tool:   Str::new_static("read"),
+				calls:  2,
+				errors: 1,
+			}],
+		};
+
+		let value = report_json(&report);
+		assert_eq!(value["sync"]["processed"], 2);
+		assert_eq!(value["overall"]["errorRate"], 0.25);
+		assert_eq!(value["overall"]["cacheRate"], 0.25);
+		assert_eq!(value["overall"]["costNanoUsd"], 1_250_000_000_u64);
+		assert_eq!(value["byModel"][0]["model"], "anthropic/claude");
+		assert_eq!(value["tools"][0]["errors"], 1);
+	}
 }

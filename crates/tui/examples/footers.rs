@@ -9,7 +9,7 @@
 //! What's still open is where the *session title* lives: the named task
 //! ("Immutable Commit Placement…"), which is not the same thing as the
 //! current working narration. Each study places that title somewhere
-//! else, pi's border-fused layout included as the reference point.
+//! else, the border-fused layout included as the reference point.
 //!
 //! Every study animates live — spinner, session timer, and the narration
 //! shimmer all run — so spacing can be judged in motion.
@@ -77,7 +77,8 @@ async fn run<'a>(
 	loop {
 		tokio::select! {
 			event = terminal.next() => match event? {
-				TerminalEvent::Input(event) => {
+				TerminalEvent::Input(event)
+				| TerminalEvent::InputWithMeta { event, .. } => {
 					match event {
 						InputEvent::Key(key) => match key {
 							Key::Char('q') | Key::Esc | Key::Ctrl('c') => return Ok(()),
@@ -89,6 +90,21 @@ async fn run<'a>(
 							Key::End => scroll = u16::MAX,
 							_ => {},
 						},
+						InputEvent::Chord(event) if event.pressed => {
+							if let Some(key) = event.key {
+								match key {
+									Key::Char('q') | Key::Esc | Key::Ctrl('c') => return Ok(()),
+									Key::Up | Key::Char('k') => scroll = scroll.saturating_sub(1),
+									Key::Down | Key::Char('j') => scroll = scroll.saturating_add(1),
+									Key::PageUp => scroll = scroll.saturating_sub(viewport.height),
+									Key::PageDown => scroll = scroll.saturating_add(viewport.height),
+									Key::Home => scroll = 0,
+									Key::End => scroll = u16::MAX,
+									_ => {},
+								}
+							}
+						},
+						InputEvent::Chord(_) => {},
 						InputEvent::Mouse(report) => match report.kind {
 							Mouse::WheelUp => scroll = scroll.saturating_sub(2),
 							Mouse::WheelDown => scroll = scroll.saturating_add(2),
@@ -157,11 +173,11 @@ struct Study {
 
 const STUDIES: [Study; 6] = [
 	Study {
-		title: "pi parity",
+		title: "border-fused",
 		note:  "border carries the band left and the title right; the intent rides its own spinner \
 		        row",
 		rows:  4,
-		draw:  study_pi_parity,
+		draw:  study_primary,
 	},
 	Study {
 		title: "gap title",
@@ -228,10 +244,10 @@ fn compose(scene: &Scene) -> Frame {
 
 // ── studies ─────────────────────────────────────────────────────────────────
 
-/// 1: the pi layout verbatim — a bordered composer whose top border
+/// 1: a bordered composer whose top border
 /// carries the session band on the left and the title on the right, with
 /// the spinner narrating intent on its own row above the box.
-fn study_pi_parity(frame: &mut Frame, y: u16, scene: &Scene) {
+fn study_primary(frame: &mut Frame, y: u16, scene: &Scene) {
 	draw_working_spin(frame, 1, y, scene);
 	let (tl, tr, bl, br, horizontal, vertical) = border_glyphs(scene.charset);
 	let right = scene.right_edge();
@@ -512,7 +528,7 @@ fn draw_working(frame: &mut Frame, x: u16, y: u16, scene: &Scene) {
 	draw_shimmer(frame, &mut column, x, y, scene.right_edge(), WORKING, shimmer, ink(GREEN));
 }
 
-/// The pi flavor of the working line: the spinner and timer lead, then
+/// The working line: the spinner and timer lead, then
 /// the shimmering narration — the band below carries no brand segment.
 fn draw_working_spin(frame: &mut Frame, x: u16, y: u16, scene: &Scene) {
 	let mut column = frame.put(x, y, scene.spinner(), ink(GREEN));

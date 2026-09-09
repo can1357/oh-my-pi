@@ -296,8 +296,16 @@ struct Worker {
 }
 
 impl Worker {
+	#[tracing::instrument(name = "desktop_device_initialize", level = "debug", skip_all)]
 	fn new(selector: DisplaySelector, capabilities: Arc<Mutex<DesktopCapabilities>>) -> Self {
 		let backend = create_backend(selector);
+		if let Err(error) = &backend {
+			tracing::warn!(
+				error_code = %error.code,
+				%error,
+				"desktop device initialization failed"
+			);
+		}
 		Self { backend, registry: AxRegistry::default(), frames: HashMap::new(), capabilities }
 	}
 
@@ -743,6 +751,7 @@ impl SessionCore {
 				let _ = done_tx.send(());
 			})
 			.map_err(|e| {
+				tracing::warn!(error = %e, "desktop worker initialization failed");
 				DesktopError::internal(format!("failed to start native desktop worker: {e}"))
 			})?;
 		lifecycle.tx = Some(tx.clone());
@@ -889,8 +898,15 @@ impl DesktopSession {
 	}
 
 	/// Capture a desktop or window and remember its coordinate frame.
+	#[tracing::instrument(
+		name = "desktop_capture",
+		level = "debug",
+		skip_all,
+		fields(target = target.kind())
+	)]
 	pub async fn capture(&self, target: Target, caps: CaptureCaps) -> CoreResult<DesktopCapture> {
-		self
+		let target_kind = target.kind();
+		let result = self
 			.operation(
 				move |reply| Request::Capture { target, caps, reply },
 				|response| match response {
@@ -898,7 +914,16 @@ impl DesktopSession {
 					_ => Err(DesktopError::internal("unexpected desktop worker response")),
 				},
 			)
-			.await
+			.await;
+		if let Err(error) = &result {
+			tracing::warn!(
+				target = target_kind,
+				error_code = %error.code,
+				%error,
+				"desktop capture failed"
+			);
+		}
+		result
 	}
 
 	/// Click in coordinates from the latest capture of `target`.

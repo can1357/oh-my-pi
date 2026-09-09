@@ -5,7 +5,7 @@
 use std::io::Write;
 
 use clap::{ArgMatches, Command};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::host::{Host, Utility, matches_parser, os_bytes, util};
 

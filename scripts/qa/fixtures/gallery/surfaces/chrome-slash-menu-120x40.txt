@@ -1,0 +1,40 @@
+                                                                                                                        
+╭─── omp v18.0.11 ─────────────────────────────────────────────────────────────────────────────────╮                    
+│                          │ Tips                                                                  │                    
+│      Welcome back!       │ # for prompt actions                                                  │                    
+│                          │ / for commands                                                        │                    
+│       ████████████       │ ! to run bash                                                         │                    
+│          ██  ██          │ $ to run python                                                       │                    
+│          ██  ██          │ ───────────────────────────────────────────────────────────────────── │                    
+│          ▒▒  ██          │ LSP Servers                                                           │                    
+│              ██          │ No LSP servers                                                        │                    
+│                          │                                                                       │                    
+│      Claude Fable 5      │                                                                       │                    
+│        anthropic         │                                                                       │                    
+│                          │ ───────────────────────────────────────────────────────────────────── │                    
+│                          │ Recent sessions                                                       │                    
+│                          │ No recent sessions                                                    │                    
+│                          │                                                                       │                    
+│                          │                                                                       │                    
+│                          │                                                                       │                    
+│                          │                                                                       │                    
+╰──────────────────────────┴───────────────────────────────────────────────────────────────────────╯                    
+ Tip: Please use nerdfont 😭.                                                                                            
+                                                                                                                        
+                                                                                                                        
+ π  > ◒ Fable 5 > 🗑 …sh-menu-120x40-parent-eCBpwd/pi-capture > ⑂ main ▶─2%────────────────────────────────────┃──────1M─
+╰─ /                                                                                                                    
+❯ 🛡  security          Plan, run, inspect, import, and compare OMP-native security scans                               █
+  🎛  settings          Open settings menu                                                                              │
+  ⚙  setup             Open provider setup                                                                             │
+  🗺  plan              Plan: off                                                                                       │
+  🗺  plan-review       Plan review: plan mode inactive                                                                 │
+  ∿  vibe              Vibe: off                                                                                       │
+  🎯 goal              Goal: off                                                                                       │ 
+  🧭 guided-goal       Have the agent interview you in chat, then set up goal mode                                     │ 
+  ↻  loop              Loop: off                                                                                       │
+  📥 queue             Queue a message for after the agent yields                                                      │ 
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        

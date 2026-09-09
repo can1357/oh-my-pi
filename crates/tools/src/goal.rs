@@ -74,6 +74,8 @@ pub enum Status {
 	/// User-paused with accounting retained.
 	Paused,
 	/// Hard token budget reached.
+	#[serde(rename = "budget-limited")]
+	#[strum(serialize = "budget-limited")]
 	BudgetLimited,
 	/// Objective achieved.
 	Complete,
@@ -96,6 +98,18 @@ pub struct Goal {
 	pub tokens_used:    u64,
 	/// Accumulated wall-clock seconds.
 	pub time_used_secs: u64,
+	/// Epoch millisecond when this objective was created.
+	///
+	/// Defaults to zero when decoding historical `goal@1` settlements written
+	/// before timestamps became part of the durable projection.
+	#[serde(default)]
+	pub created_at_ms:  u64,
+	/// Epoch millisecond of the latest durable transition or accounting tick.
+	///
+	/// Defaults to zero when decoding historical `goal@1` settlements written
+	/// before timestamps became part of the durable projection.
+	#[serde(default)]
+	pub updated_at_ms:  u64,
 }
 
 /// Durable result of one goal operation.
@@ -164,30 +178,34 @@ pub struct GoalTool<C> {
 	spec:    ToolSpec,
 }
 
+/// Returns the exact `goal@1` declaration shared by native and session-owned
+/// execution.
+#[must_use]
+pub fn spec() -> ToolSpec {
+	ToolSpec {
+		name:            sf!("goal"),
+		rev:             Rev { family: Str::default(), n: 1 },
+		description:     sf!(
+			"Creates, inspects, completes, resumes, or drops the durable goal-mode objective."
+		),
+		schema:          omp_tool::schema::<Params>(),
+		constraint:      Constraint::Schema {
+			priority:       100,
+			on_unsupported: omp_tool::Fallback::Unspecified,
+		},
+		effects:         Effects::empty(),
+		projection_code: omp_tool::native_projection_code(
+			env!("CARGO_PKG_NAME"),
+			env!("CARGO_PKG_VERSION"),
+			include_bytes!("goal.rs"),
+		)
+		.into(),
+	}
+}
+
 /// Creates `goal@1`; production composition registers it as hidden.
 pub fn tool<C: GoalControl>(control: C) -> GoalTool<C> {
-	GoalTool {
-		control,
-		spec: ToolSpec {
-			name:            sf!("goal"),
-			rev:             Rev { family: Str::default(), n: 1 },
-			description:     sf!(
-				"Creates, inspects, completes, resumes, or drops the durable goal-mode objective."
-			),
-			schema:          omp_tool::schema::<Params>(),
-			constraint:      Constraint::Schema {
-				priority:       100,
-				on_unsupported: omp_tool::Fallback::Unspecified,
-			},
-			effects:         Effects::empty(),
-			projection_code: omp_tool::native_projection_code(
-				env!("CARGO_PKG_NAME"),
-				env!("CARGO_PKG_VERSION"),
-				include_bytes!("goal.rs"),
-			)
-			.into(),
-		},
-	}
+	GoalTool { control, spec: spec() }
 }
 
 impl<C: GoalControl> Tool for GoalTool<C> {
@@ -230,7 +248,7 @@ impl<C: GoalControl> Tool for GoalTool<C> {
 						goal.token_budget.map(|budget| budget.saturating_sub(goal.tokens_used))
 					});
 					let completion_report = (op == Operation::Complete)
-						.then(|| goal.as_ref())
+						.then_some(goal.as_ref())
 						.flatten()
 						.map(completion_report);
 					yield Ev::Done(ToolTerminal::Done {
@@ -244,11 +262,16 @@ impl<C: GoalControl> Tool for GoalTool<C> {
 	}
 
 	fn prompt(&self, view: Result<&Payload, &Fault>, _: &PromptCaps) -> Vec<Part> {
-		let text = match view {
-			Ok(payload) => render_payload(payload),
-			Err(fault) => Str::new(fault.to_string()),
-		};
-		vec![Part::Text { text }]
+		vec![Part::Text { text: model_output(view) }]
+	}
+}
+
+/// Projects one typed Goal outcome into the canonical model-visible text.
+#[must_use]
+pub fn model_output(view: Result<&Payload, &Fault>) -> Str {
+	match view {
+		Ok(payload) => render_payload(payload),
+		Err(fault) => Str::new(fault.to_string()),
 	}
 }
 
@@ -351,6 +374,49 @@ mod tests {
 			.token_budget,
 			Some(0)
 		);
+	}
+
+	#[test]
+	fn pre_timestamp_goal_v1_payload_defaults_migration_fields() {
+		let payload = serde_json::from_value::<Payload>(serde_json::json!({
+			"op": "get",
+			"goal": {
+				"id": "goal_legacy",
+				"objective": "ship",
+				"status": "active",
+				"token_budget": 1000,
+				"tokens_used": 100,
+				"time_used_secs": 60
+			},
+			"remaining_tokens": 900,
+			"completion_report": null
+		}))
+		.expect("pre-timestamp goal@1 payload decodes");
+		let goal = payload.goal.expect("legacy payload retains goal");
+		assert_eq!(goal.created_at_ms, 0);
+		assert_eq!(goal.updated_at_ms, 0);
+	}
+
+	#[test]
+	fn current_goal_v1_payload_retains_timestamps() {
+		let payload = Payload {
+			op:                Operation::Get,
+			goal:              Some(Goal {
+				id:             Str::new_static("goal_current"),
+				objective:      Str::new_static("ship"),
+				status:         Status::Active,
+				token_budget:   None,
+				tokens_used:    100,
+				time_used_secs: 60,
+				created_at_ms:  1_749_200_000_000,
+				updated_at_ms:  1_749_200_312_000,
+			}),
+			remaining_tokens:  None,
+			completion_report: None,
+		};
+		let value = serde_json::to_value(payload).expect("current goal@1 payload serializes");
+		assert_eq!(value["goal"]["created_at_ms"], 1_749_200_000_000_u64);
+		assert_eq!(value["goal"]["updated_at_ms"], 1_749_200_312_000_u64);
 	}
 
 	#[test]

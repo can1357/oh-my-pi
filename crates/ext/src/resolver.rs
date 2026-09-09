@@ -3,7 +3,7 @@
 use std::{
 	collections::BTreeSet,
 	ffi::OsString,
-	io,
+	fs, io,
 	path::PathBuf,
 	process::{Command, Output},
 	str::FromStr as _,
@@ -13,6 +13,7 @@ use omp_core::Str;
 use pep440_rs::{Version, VersionSpecifiers};
 
 use super::{ExtensionCode, ExtensionError};
+use crate::config::FeatureManifest;
 
 /// The `CPython` ABI tags allowed by R3.
 pub const ACCEPTED_ABIS: [&str; 3] = ["cp314t", "abi3t", "none"];
@@ -37,9 +38,13 @@ pub struct UvRequest {
 	pub indexes:           Vec<String>,
 	/// Optional R9 timestamp clamp.
 	pub exclude_newer:     Option<Str>,
-	/// Requirement file whose entries contain SHA-256 hashes.
+	/// Forbid all network access and require uv's local cache.
+	pub offline:           bool,
+	/// Resolver input containing the root requirements and any pinned closure.
 	pub requirements_file: PathBuf,
-	/// Additional root requirements (one host child or explicit pool).
+	/// PEP 751 output written by uv and returned through [`ResolveOutcome`].
+	pub output_file:       PathBuf,
+	/// Root requirements used for frozen-conflict checks and diagnostics.
 	pub requirements:      Vec<ResolveRequirement>,
 }
 
@@ -49,13 +54,13 @@ impl UvRequest {
 	pub fn argv(&self) -> Vec<OsString> {
 		let mut argv = vec![
 			OsString::from("pip"),
-			OsString::from("install"),
-			OsString::from("--dry-run"),
-			OsString::from("--report"),
-			OsString::from("-"),
+			OsString::from("compile"),
+			OsString::from("--format"),
+			OsString::from("pylock.toml"),
+			OsString::from("--output-file"),
+			self.output_file.clone().into_os_string(),
 			OsString::from("--only-binary"),
 			OsString::from(":all:"),
-			OsString::from("--require-hashes"),
 			OsString::from("--python-platform"),
 			OsString::from(self.target.as_str()),
 			OsString::from("--python-version"),
@@ -71,24 +76,32 @@ impl UvRequest {
 			argv.push(OsString::from("--exclude-newer"));
 			argv.push(OsString::from(exclude_newer.as_str()));
 		}
-		argv.push(OsString::from("--requirement"));
+		if self.offline {
+			argv.push(OsString::from("--offline"));
+		}
 		argv.push(self.requirements_file.clone().into_os_string());
-		argv.extend(
-			self
-				.requirements
-				.iter()
-				.map(|requirement| OsString::from(requirement.requirement.as_str())),
-		);
 		argv
 	}
 
 	/// R7 checks PEP 508 requirements against actual frozen runtime metadata
 	/// before invoking uv, preventing a silently shadowed site copy.
 	pub fn reject_frozen_conflicts(&self, frozen: &[(&str, &str)]) -> Result<(), ExtensionError> {
+		let target = TargetEnvironment::from_triple(self.target.as_str());
 		for requirement in &self.requirements {
-			let Some(parsed) = FrozenRequirement::parse(requirement.requirement.as_str())? else {
+			let Some(parsed) = FrozenRequirement::parse(requirement.requirement.as_str(), &target)?
+			else {
 				continue;
 			};
+			if parsed.direct_url {
+				return Err(ExtensionError::new(
+					ExtensionCode::EUrlRequire,
+					format!(
+						"{} declares a direct URL; extension requirements must resolve through a \
+						 configured index",
+						requirement.requirement
+					),
+				));
+			}
 			if !parsed.marker_applies {
 				continue;
 			}
@@ -175,8 +188,53 @@ struct FrozenRequirement {
 	marker_applies: bool,
 }
 
+#[derive(Clone, Copy)]
+struct TargetEnvironment<'a> {
+	sys_platform:     &'a str,
+	platform_machine: &'a str,
+	os_name:          &'a str,
+}
+
+impl<'a> TargetEnvironment<'a> {
+	fn from_triple(target: &'a str) -> Self {
+		let sys_platform = if target.contains("windows") {
+			"win32"
+		} else if target.contains("darwin") || target.contains("apple") {
+			"darwin"
+		} else {
+			"linux"
+		};
+		let platform_machine = if target.starts_with("aarch64") {
+			if sys_platform == "darwin" {
+				"arm64"
+			} else {
+				"aarch64"
+			}
+		} else if target.starts_with("x86_64") {
+			if sys_platform == "win32" {
+				"AMD64"
+			} else {
+				"x86_64"
+			}
+		} else if target.starts_with("i686") || target.starts_with("i386") {
+			"x86"
+		} else {
+			target.split('-').next().unwrap_or(target)
+		};
+		let os_name = if sys_platform == "win32" {
+			"nt"
+		} else {
+			"posix"
+		};
+		TargetEnvironment { sys_platform, platform_machine, os_name }
+	}
+}
+
 impl FrozenRequirement {
-	fn parse(requirement: &str) -> Result<Option<Self>, ExtensionError> {
+	fn parse(
+		requirement: &str,
+		target: &TargetEnvironment<'_>,
+	) -> Result<Option<Self>, ExtensionError> {
 		let (requirement, marker) = requirement
 			.split_once(';')
 			.map_or((requirement, None), |(requirement, marker)| (requirement, Some(marker)));
@@ -187,15 +245,24 @@ impl FrozenRequirement {
 				"empty PEP 508 requirement",
 			));
 		}
+		if requirement.starts_with("git+")
+			|| requirement.starts_with("https://")
+			|| requirement.starts_with("http://")
+			|| requirement.starts_with('/')
+			|| requirement.starts_with("./")
+			|| requirement.starts_with("../")
+		{
+			return Ok(None);
+		}
 		let name_len = requirement
 			.bytes()
 			.take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 			.count();
 		if name_len == 0 {
-			return Err(ExtensionError::new(
-				ExtensionCode::EFrozenConflict,
-				format!("invalid PEP 508 requirement {requirement:?}"),
-			));
+			// Top-level git/archive/path sources are parsed by `SourceSpec`
+			// before becoming resolver roots. They are not manifest `requires`
+			// entries and therefore are outside E-URL-REQUIRE.
+			return Ok(None);
 		}
 		let name = normalize_distribution_name(&requirement[..name_len]);
 		let mut remainder = requirement[name_len..].trim_start();
@@ -224,20 +291,20 @@ impl FrozenRequirement {
 			name,
 			specifiers,
 			direct_url,
-			marker_applies: marker.is_none_or(marker_applies),
+			marker_applies: marker.is_none_or(|marker| marker_applies(marker, target)),
 		}))
 	}
 }
 
-fn marker_applies(marker: &str) -> bool {
+fn marker_applies(marker: &str, target: &TargetEnvironment<'_>) -> bool {
 	marker.split(" or ").any(|disjunction| {
 		disjunction
 			.split(" and ")
-			.all(|expression| marker_atom_applies(expression.trim()))
+			.all(|expression| marker_atom_applies(expression.trim(), target))
 	})
 }
 
-fn marker_atom_applies(expression: &str) -> bool {
+fn marker_atom_applies(expression: &str, target: &TargetEnvironment<'_>) -> bool {
 	for operator in [" not in ", " in ", "==", "!=", ">=", "<=", ">", "<"] {
 		let Some((variable, expected)) = expression.split_once(operator) else {
 			continue;
@@ -246,8 +313,10 @@ fn marker_atom_applies(expression: &str) -> bool {
 			"python_version" => "3.14",
 			"python_full_version" => "3.14.0",
 			"implementation_name" => "cpython",
-			"sys_platform" => std::env::consts::OS,
-			"platform_machine" => std::env::consts::ARCH,
+			"platform_python_implementation" => "CPython",
+			"sys_platform" => target.sys_platform,
+			"platform_machine" => target.platform_machine,
+			"os_name" => target.os_name,
 			"extra" => "",
 			_ => return true,
 		};
@@ -285,18 +354,38 @@ pub struct ResolvePlan {
 	pub requests: Vec<UvRequest>,
 }
 
+/// Returns base requirements plus requirements owned by selected features.
+///
+/// Unknown features fail before a resolver process is constructed.
+pub fn selected_requirements(
+	base: &[Str],
+	features: &std::collections::BTreeMap<Str, FeatureManifest>,
+	selected: &[Str],
+) -> Result<Vec<Str>, ExtensionError> {
+	let mut requirements = base.to_vec();
+	for name in selected {
+		let feature = features.get(name).ok_or_else(|| {
+			ExtensionError::new(ExtensionCode::EFeature, format!("unknown feature {name}"))
+		})?;
+		requirements.extend(feature.requires.iter().cloned());
+	}
+	requirements.sort();
+	requirements.dedup();
+	Ok(requirements)
+}
+
 impl ResolvePlan {
 	/// Builds per-target invocations without spawning `uv`.
 	///
-	/// `requirements_file` is the hash-pinned closure emitted by the install
-	/// backend from the manifest or durable lock. The CLI never reconstructs
-	/// dependency resolution itself.
+	/// `requirements_file` is the complete resolver input emitted by the
+	/// install backend from the manifest or durable lock.
 	pub fn build(
 		executable: PathBuf,
 		enabled: &[EnabledExtension],
 		targets: &[Str],
 		indexes: Vec<String>,
 		exclude_newer: Option<Str>,
+		offline: bool,
 		requirements_file: PathBuf,
 	) -> Result<Self, ExtensionError> {
 		if targets.is_empty() {
@@ -317,13 +406,24 @@ impl ResolvePlan {
 		Ok(Self {
 			requests: targets
 				.iter()
-				.map(|target| UvRequest {
-					executable:        executable.clone(),
-					target:            target.clone(),
-					indexes:           indexes.clone(),
-					exclude_newer:     exclude_newer.clone(),
-					requirements_file: requirements_file.clone(),
-					requirements:      enabled.to_vec(),
+				.enumerate()
+				.map(|(ordinal, target)| {
+					let stem = requirements_file
+						.file_stem()
+						.and_then(|stem| stem.to_str())
+						.unwrap_or("resolve");
+					let output_file =
+						requirements_file.with_file_name(format!("pylock.{stem}-{ordinal}.toml"));
+					UvRequest {
+						executable: executable.clone(),
+						target: target.clone(),
+						indexes: indexes.clone(),
+						exclude_newer: exclude_newer.clone(),
+						offline,
+						requirements_file: requirements_file.clone(),
+						output_file,
+						requirements: enabled.to_vec(),
+					}
 				})
 				.collect(),
 		})
@@ -334,17 +434,41 @@ impl ResolvePlan {
 		self.requests.iter().map(UvRequest::argv).collect()
 	}
 
+	/// Executes each target through a kill-on-drop Tokio child. Cancelling this
+	/// future therefore cancels the active resolver process rather than merely
+	/// abandoning its output future.
+	pub async fn run_system(
+		&self,
+		frozen: &[(&str, &str)],
+	) -> Result<Vec<ResolveOutcome>, ExtensionError> {
+		let mut outcomes = Vec::with_capacity(self.requests.len());
+		for request in &self.requests {
+			outcomes.push(resolve_system_with(request, frozen).await?);
+		}
+		Ok(outcomes)
+	}
+
 	/// Executes every planned target and preserves each exact invocation.
+	#[tracing::instrument(
+		name = "extension_resolve",
+		level = "debug",
+		skip_all,
+		fields(target_count = self.requests.len(), frozen_count = frozen.len())
+	)]
 	pub fn run<R: UvRunner>(
 		&self,
 		runner: &R,
 		frozen: &[(&str, &str)],
 	) -> Result<Vec<ResolveOutcome>, ExtensionError> {
-		self
+		let result = self
 			.requests
 			.iter()
 			.map(|request| resolve_with(runner, request, frozen))
-			.collect()
+			.collect::<Result<Vec<_>, _>>();
+		if let Ok(outcomes) = &result {
+			tracing::debug!(outcome_count = outcomes.len(), "extension resolution completed");
+		}
+		result
 	}
 }
 
@@ -352,7 +476,7 @@ impl ResolvePlan {
 /// a deterministic resolver without a network or executable.
 pub trait UvRunner {
 	/// Executes an argv prepared by [`UvRequest::argv`].
-	fn run(&self, executable: &PathBuf, argv: &[OsString]) -> io::Result<Output>;
+	fn run(&self, request: &UvRequest) -> io::Result<Output>;
 }
 
 /// The production `uv` process runner.
@@ -360,8 +484,15 @@ pub trait UvRunner {
 pub struct SystemUv;
 
 impl UvRunner for SystemUv {
-	fn run(&self, executable: &PathBuf, argv: &[OsString]) -> io::Result<Output> {
-		Command::new(executable).args(argv).output()
+	fn run(&self, request: &UvRequest) -> io::Result<Output> {
+		let mut output = Command::new(&request.executable)
+			.args(request.argv())
+			.output()?;
+		if output.status.success() {
+			output.stdout = fs::read(&request.output_file)?;
+			let _ = fs::remove_file(&request.output_file);
+		}
+		Ok(output)
 	}
 }
 
@@ -376,6 +507,33 @@ pub struct ResolveOutcome {
 	pub stderr: Vec<u8>,
 }
 
+/// Resolves one host-child unit asynchronously through the production process
+/// boundary. The child is killed when this future is dropped.
+pub async fn resolve_system_with(
+	request: &UvRequest,
+	frozen: &[(&str, &str)],
+) -> Result<ResolveOutcome, ExtensionError> {
+	request.reject_frozen_conflicts(frozen)?;
+	let argv = request.argv();
+	let mut command = tokio::process::Command::new(&request.executable);
+	command.args(&argv).kill_on_drop(true);
+	let output = command
+		.output()
+		.await
+		.map_err(|error| ExtensionError::new(ExtensionCode::EUnsat, error.to_string()))?;
+	if !output.status.success() {
+		return Err(ExtensionError::new(
+			ExtensionCode::EUnsat,
+			String::from_utf8_lossy(&output.stderr),
+		));
+	}
+	let stdout = tokio::fs::read(&request.output_file)
+		.await
+		.map_err(|error| ExtensionError::new(ExtensionCode::EUnsat, error.to_string()))?;
+	let _ = tokio::fs::remove_file(&request.output_file).await;
+	Ok(ResolveOutcome { argv, stdout, stderr: output.stderr })
+}
+
 /// Resolves one host-child unit after all pure R1–R12 inputs have been checked.
 pub fn resolve_with<R: UvRunner>(
 	runner: &R,
@@ -385,7 +543,7 @@ pub fn resolve_with<R: UvRunner>(
 	request.reject_frozen_conflicts(frozen)?;
 	let argv = request.argv();
 	let output = runner
-		.run(&request.executable, &argv)
+		.run(request)
 		.map_err(|error| ExtensionError::new(ExtensionCode::EUnsat, error.to_string()))?;
 	if !output.status.success() {
 		return Err(ExtensionError::new(
@@ -481,7 +639,9 @@ mod tests {
 			target:            sf!("aarch64-apple-darwin"),
 			indexes:           vec!["https://ext.omp.dev/simple".to_owned()],
 			exclude_newer:     Some(sf!("2026-08-20T00:00:00Z")),
+			offline:           false,
 			requirements_file: PathBuf::from("requirements.txt"),
+			output_file:       PathBuf::from("pylock.test.toml"),
 			requirements:      vec![],
 		};
 		let argv = request
@@ -491,13 +651,13 @@ mod tests {
 			.collect::<Vec<_>>();
 		assert_eq!(argv, [
 			"pip",
-			"install",
-			"--dry-run",
-			"--report",
-			"-",
+			"compile",
+			"--format",
+			"pylock.toml",
+			"--output-file",
+			"pylock.test.toml",
 			"--only-binary",
 			":all:",
-			"--require-hashes",
 			"--python-platform",
 			"aarch64-apple-darwin",
 			"--python-version",
@@ -508,7 +668,6 @@ mod tests {
 			"https://ext.omp.dev/simple",
 			"--exclude-newer",
 			"2026-08-20T00:00:00Z",
-			"--requirement",
 			"requirements.txt"
 		]);
 	}
@@ -519,7 +678,9 @@ mod tests {
 			target:            sf!("aarch64-apple-darwin"),
 			indexes:           Vec::new(),
 			exclude_newer:     None,
+			offline:           false,
 			requirements_file: PathBuf::from("requirements.txt"),
+			output_file:       PathBuf::from("pylock.test.toml"),
 			requirements:      vec![ResolveRequirement {
 				extension_id: sf!("example"),
 				requirement:  sf!("{requirement}"),
@@ -549,6 +710,43 @@ mod tests {
 				.reject_frozen_conflicts(&frozen)
 				.unwrap_err()
 				.code,
+			ExtensionCode::EUrlRequire
+		);
+	}
+
+	#[test]
+	fn frozen_markers_are_evaluated_for_the_materializing_target() {
+		let request = |target: &'static str, requirement: &'static str| UvRequest {
+			executable:        PathBuf::from("uv"),
+			target:            sf!("{target}"),
+			indexes:           Vec::new(),
+			exclude_newer:     None,
+			offline:           false,
+			requirements_file: PathBuf::from("requirements.txt"),
+			output_file:       PathBuf::from("pylock.test.toml"),
+			requirements:      vec![ResolveRequirement {
+				extension_id: sf!("example"),
+				requirement:  sf!("{requirement}"),
+			}],
+		};
+		let frozen = [("cloudpickle", "4.0.0")];
+
+		assert!(
+			request(
+				"aarch64-apple-darwin",
+				"cloudpickle<4; sys_platform == 'linux' and platform_machine == 'aarch64'",
+			)
+			.reject_frozen_conflicts(&frozen)
+			.is_ok()
+		);
+		assert_eq!(
+			request(
+				"aarch64-unknown-linux-gnu",
+				"cloudpickle<4; sys_platform == 'linux' and platform_machine == 'aarch64'",
+			)
+			.reject_frozen_conflicts(&frozen)
+			.unwrap_err()
+			.code,
 			ExtensionCode::EFrozenConflict
 		);
 	}

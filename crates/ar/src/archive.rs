@@ -635,6 +635,15 @@ impl<R: Read + Seek> Archive<R> {
 	/// and symbolic links are recreated (Unix only) after their targets are
 	/// validated to stay inside the destination. Directory aliases
 	/// materialize nothing. The returned count covers files and symlinks.
+	#[tracing::instrument(
+		level = "debug",
+		name = "archive_extract",
+		skip_all,
+		fields(
+			entry_count = self.entries.len(),
+			extracted_count = tracing::field::Empty
+		)
+	)]
 	pub fn extract_to(&mut self, destination: &Dir) -> Result<usize> {
 		for entry in &self.entries {
 			if entry.is_directory() && !entry.is_link() {
@@ -664,7 +673,13 @@ impl<R: Read + Seek> Archive<R> {
 			let mut file = destination.create(Path::new(path.as_str()))?;
 			if let Err(error) = self.read_to(path.as_str(), &mut file) {
 				drop(file);
-				let _ = destination.remove_file(Path::new(path.as_str()));
+				if let Err(cleanup_error) = destination.remove_file(Path::new(path.as_str())) {
+					tracing::warn!(
+						path = %path,
+						%cleanup_error,
+						"failed to remove partial archive extraction"
+					);
+				}
 				return Err(error);
 			}
 			drop(file);
@@ -706,6 +721,7 @@ impl<R: Read + Seek> Archive<R> {
 				let _ = target;
 			}
 		}
+		tracing::Span::current().record("extracted_count", written);
 		Ok(written)
 	}
 

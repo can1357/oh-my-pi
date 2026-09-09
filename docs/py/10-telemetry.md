@@ -105,14 +105,14 @@ Without the rev they are one row and the signal is destroyed.
 
 The heaviest user of every device is the model. omp's system prompt therefore carries a standing
 instruction: any tool result inconsistent with the tool's documented behaviour gets a one-line report
-filed by running `xd report_issue "<session-id>" "<device>" --rev "<revision>" --verdict '<JSON verdict>'` inside the shell. False positives
+filed by running `dyn report_issue "<session-id>" "<device>" --rev "<revision>" --verdict '<JSON verdict>'` inside the shell. False positives
 are **explicitly welcome** — a false positive is training data for the detector, and a report costs
 one line.
 
 ```mermaid
 flowchart TD
     A["standing instruction<br/>in system prompt"] --> B["model notices<br/>result ≠ docs"]
-    B --> C["xd report_issue &quot;&lt;session-id&gt;&quot; &quot;&lt;device&gt;&quot; --rev &quot;&lt;revision&gt;&quot; --verdict '&lt;JSON verdict&gt;'<br/>inside shell"]
+    B --> C["dyn report_issue &quot;&lt;session-id&gt;&quot; &quot;&lt;device&gt;&quot; --rev &quot;&lt;revision&gt;&quot; --verdict '&lt;JSON verdict&gt;'<br/>inside shell"]
     C --> D["IssueReport<br/>device + rev + raw args<br/>+ structured outcome"]
     D --> E["firehose kind<br/>issue_report"]
     D --> F["durable issue store"]
@@ -178,7 +178,7 @@ links rather than restating them:
 | Consumed here | Owner |
 |---|---|
 | `omp.Context`, `omp.CapabilityError`, `omp.Duration`, `omp.state_dir()`, trust tiers, principal identity, the resource receipt (quotas), host generations | `docs/py/00-overview.md` |
-| `@omp.device`, `@omp.tool`, `omp.devices`, `omp.mcp`, the `xd` shell builtin and its schema-derived CLI grammar, `omp.ToolPath`, the dynamic tool policy | `docs/py/01-devices.md` |
+| `@omp.device`, `@omp.tool`, `omp.devices`, `omp.mcp`, the `dyn` shell builtin and its schema-derived CLI grammar, `omp.ToolPath`, the dynamic tool policy | `docs/py/01-devices.md` |
 | `omp.CallOutcome`, `omp.Payload`, `omp.Fault`, `PolicyDenied`, the postcondition finding, `prompt(view, caps)`, `PromptCaps`, `lift`, spill budget, the `schema_rev`/`artifact_digest` split | `docs/py/02-verdicts.md` |
 | `omp.InvocationPhase`, charitable decoding, `Ev`/`Update`/`Done` | `docs/py/03-params.md` |
 | `omp.Place`, `omp.PlaceKind`, `omp.workers`, `omp.Spill`/`omp.BlobRef` | `docs/py/04-placement.md` |
@@ -539,7 +539,7 @@ the prompt rather than reconstructed by an extension hashing whatever it could r
   (`docs/py/08-context.md`). Each value carries `digest: str`, `size_bytes: int`, and
   `band: SlotClass`; the band uses the frozen stability vocabulary from that page. Covers every
   contribution: harness sections, `AGENTS.md`, skills, device docs fetched with
-  `xd <path> --help` inside the core `shell` tool, and each `@omp.prompt_slot`.
+  `dyn <path> --help` inside the core `shell` tool, and each `@omp.prompt_slot`.
 
 **Resolved (2026-08-20 ruling): slot fingerprints carry their assembled byte size and frozen
 stability band; extensions never infer either from a slot key.**
@@ -739,7 +739,7 @@ digest, layer, trust tier, and host generation ride every durable record per the
 - `remote: str | None` — remote target identifier when `place` is not local.
 - `model: str`, `provider: str` — the initially selected route.
 - `devices: tuple[str, ...]` — extension and MCP device wire names mounted at start, reachable
-  through the `xd` shell builtin (`docs/py/01-devices.md`).
+  through the `dyn` shell builtin (`docs/py/01-devices.md`).
 - `core_tools: tuple[str, ...]` — the tool names actually advertised to the model. This is the
   regression detector for Lesson #6, and **it fires today**: `Registry::advertise`
   (`crates/tool/src/registry.rs:483-492`) iterates all of `self.live` with no route filter, while
@@ -934,7 +934,7 @@ discriminant and the identity fields flat, because that is the shape a `group_by
 - `decoded_args: object | None` — the arguments as the executor received them, after charitable
   decoding: the one canonical effective object shared by policy, device, journal, and telemetry
   (`docs/py/03-params.md`). Delivered from `Capture.STRUCTURE` up. For a `"device"` target these
-  are the one nested JSON argument document mapped from the `xd` CLI, never the shell argv
+  are the one nested JSON argument document mapped from the `dyn` CLI, never the shell argv
   transport that carried them, exactly as at the gate.
 - `updates: int` — number of `Update` events the renderer folded.
 - `prompt_bytes: int`, `prompt_parts: int` — size of the model-facing projection actually shipped,
@@ -951,7 +951,7 @@ discriminant and the identity fields flat, because that is the shape a `group_by
 Declaration-time capability budget outcomes, distinct from the per-request `Degradation` records on
 `ModelRequest`. Extensions register with the **host**, never with the **model**: a device's name,
 schema, revision, and constraint intents reach the host through `RegisterTools`/`ToolDecl` so the
-host can answer `xd <name> --help` inside the core `shell` tool, while the model's tool array never
+host can answer `dyn <name> --help` inside the core `shell` tool, while the model's tool array never
 grows (`docs/py/01-devices.md`). These events record how the harness spent a *provider* constraint
 budget across declared intents (`docs/py/13-inference.md`).
 
@@ -1320,7 +1320,7 @@ sound today; across families it becomes sound when devices implement `lift`.
 ### `await report_issue(draft: IssueDraft) -> str`
 
 Files an AutoQA report from extension code, alongside the ones the model files by running
-`xd report_issue "<session-id>" "<device>" --rev "<revision>" --verdict '<JSON verdict>'` inside the shell. Returns the issue identifier.
+`dyn report_issue "<session-id>" "<device>" --rev "<revision>" --verdict '<JSON verdict>'` inside the shell. Returns the issue identifier.
 
 **Raises** `omp.CapabilityError` without the `telemetry.report_issue` capability; `ValueError` for an
 empty `summary` or an unparsable `rev`.
@@ -1948,7 +1948,7 @@ per-revision rather than an average over a hundred dialects. The outcome is **st
 some edit twenty minutes later.
 
 Wiring that into the loop closes it. The model files reports by running
-`xd report_issue "<session-id>" "<device>" --rev "<revision>" --verdict '<JSON verdict>'` inside the shell under the standing instruction;
+`dyn report_issue "<session-id>" "<device>" --rev "<revision>" --verdict '<JSON verdict>'` inside the shell under the standing instruction;
 an extension triages them against per-rev metrics and folds the obvious ones:
 
 ```python
@@ -2259,7 +2259,7 @@ has every field in hand — `TurnEnd` from the turn's own accumulators, `ModelRe
 `Outcome` message the loop already receives.
 
 `ToolCall` is published **agent/env-side, never worker-side**, and that placement is what makes
-`args_raw`, `repairs`, and `pulls` obtainable at all. Charitable decoding happens in `omp-slopjson`
+`args_raw`, `repairs`, and `pulls` obtainable at all. Charitable decoding happens in `omp_core::slopjson`
 and `omp-tool` before dispatch, so by the time a worker sees `InvokeTool.args_json` the repair has
 already been applied and the raw emission is gone from that side of the boundary. The raw text is
 available where it is produced: `env/v1`'s `ArgsCommitted` documents `raw` as "the exact committed
@@ -2670,6 +2670,6 @@ Changes this file made in the post-review revision, and the review point that dr
   processes; D6: per-invocation decision procedure permitted). This file carried no
   flagged-amendment passages, so no claims changed.
 
-**Revision 2.2** — the `xd` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `xd` builtin of the embedded shell, inside the core `shell` tool: `xd` lists the catalog (`xd --q <text>` searches), `xd <device> --help` returns docs plus schema-derived CLI usage, and `xd <device> [args…]` (or `xd <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `xd resolve "<reason>"` / `xd reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `xd` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
+**Revision 2.2** — the `dyn` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `dyn` builtin of the embedded shell, inside the core `shell` tool: `dyn` lists the catalog (`dyn --q <text>` searches), `dyn <device> --help` returns docs plus schema-derived CLI usage, and `dyn <device> [args…]` (or `dyn <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `dyn resolve "<reason>"` / `dyn reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `dyn` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
 
-- **Telemetry transport prose.** AutoQA now files through `xd report_issue` in `shell`; prompt fingerprints, session capture, decoded arguments, device declarations, and ownership tables consistently describe the `xd` catalog/help/invocation surface without an envelope.
+- **Telemetry transport prose.** AutoQA now files through `dyn report_issue` in `shell`; prompt fingerprints, session capture, decoded arguments, device declarations, and ownership tables consistently describe the `dyn` catalog/help/invocation surface without an envelope.

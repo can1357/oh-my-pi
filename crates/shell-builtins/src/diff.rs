@@ -1,7 +1,7 @@
 //! `diff` builtin: compare files line by line using the `similar` library.
 //!
-//! Ported from `pi-uu-diff` 0.8.0, extended toward GNU diff: normal output by
-//! default, unified (`-u`/`-U`) and context (`-c`/`-C`) formats, whitespace and
+//! Extended toward GNU diff: normal output by default, unified (`-u`/`-U`) and
+//! context (`-c`/`-C`) formats, whitespace and
 //! case ignore flags, `-x` exclusion globs, and `-r`-gated directory recursion.
 
 use std::{
@@ -16,7 +16,7 @@ use std::{
 };
 
 use clap::{ArgAction, Parser};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 use omp_walker::glob::CompiledPattern;
 use similar::{Algorithm, DiffOp, DiffTag, capture_diff_slices};
 
@@ -26,7 +26,7 @@ use crate::host::{Host, Utility, util};
 #[derive(Parser)]
 #[command(
 	name = "diff",
-	version = "diff (pi-uu-diff) 0.8.0",
+	version = "diff 0.8.0",
 	about = "Compare files line by line.",
 	override_usage = "diff [OPTION]... FILE1 FILE2",
 	infer_long_args = true

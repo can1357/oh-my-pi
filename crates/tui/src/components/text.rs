@@ -10,9 +10,10 @@ use crate::{
 	anim::{self},
 	component::{Component, MemoKey, PaintCtx, Slot, next_slot},
 	frame::{Decor, DecorKind, Rect, Style},
+	markdown::highlight::{self, HighlightStyles},
 	markup::{Align, TextWrap, Truncate},
 	props::{Prop, PropValue, Props},
-	rich::{Pipeline, RichSink, RichText, cell_width},
+	rich::{Pipeline, RichSink, RichText, cell_width, decompose},
 };
 
 /// Wrapped or truncated text backing the `<text>` markup tag.
@@ -278,6 +279,16 @@ impl TextLeaf {
 	pub(crate) const fn content(&self) -> &Str {
 		&self.text
 	}
+
+	/// Whether the leaf shows all of its text: no `reveal`, or a cursor
+	/// that has caught up with the current text.
+	pub fn reveal_settled(&self) -> bool {
+		self.props.reveal().is_none()
+			|| self
+				.reveal
+				.as_deref()
+				.is_some_and(|reveal| reveal.covers(&self.text))
+	}
 }
 
 /// Reveal bookkeeping for one leaf: the pacing cursor plus grapheme-cluster
@@ -286,7 +297,7 @@ impl TextLeaf {
 /// those clusters but never earlier ones — so each streamed chunk and each
 /// cursor step re-segments only the suffix it touched.
 #[derive(Default)]
-struct RevealState {
+pub struct RevealState {
 	pace:        anim::Reveal,
 	/// The text the memos below describe (O(1) clone of the leaf's text).
 	seen:        Str,
@@ -306,7 +317,7 @@ impl RevealState {
 	/// Reconciles the memos with the leaf's current text: an extension
 	/// recounts from the final counted cluster, anything else recounts in
 	/// full and restarts the cursor.
-	fn sync(&mut self, text: &Str) {
+	pub(crate) fn sync(&mut self, text: &Str) {
 		if self.seen == *text {
 			return;
 		}
@@ -333,7 +344,7 @@ impl RevealState {
 	/// Advances the cursor at `now` and returns the byte end of the shown
 	/// prefix. Always re-walks from the final shown cluster, so an append
 	/// that extended it is picked up even when the cursor held still.
-	fn advance(&mut self, now: Duration, horizon: Duration) -> usize {
+	pub(crate) fn advance(&mut self, now: Duration, horizon: Duration) -> usize {
 		let units = self.pace.advance(now, self.total, horizon);
 		if units >= self.total {
 			self.shown_units = self.total;
@@ -369,9 +380,15 @@ impl RevealState {
 		self.shown_end
 	}
 
-	/// Whether the shown prefix covers the whole text.
-	const fn is_settled(&self) -> bool {
+	/// Whether the shown prefix covers the whole synced text.
+	pub(crate) const fn is_settled(&self) -> bool {
 		self.shown_units >= self.total
+	}
+
+	/// Whether the shown prefix covers all of `text` — settled, and no
+	/// unsynced append is waiting for the next render.
+	pub(crate) fn covers(&self, text: &Str) -> bool {
+		self.is_settled() && self.seen == *text
 	}
 }
 
@@ -389,7 +406,7 @@ fn count_clusters(text: &str, start: usize) -> (usize, usize) {
 	}
 	(count, tail)
 }
-fn decimal_width(mut value: u64) -> u16 {
+const fn decimal_width(mut value: u64) -> u16 {
 	let mut width = 1;
 	while value >= 10 {
 		value /= 10;
@@ -424,22 +441,30 @@ fn line_number_prefix<'a>(
 
 /// Preformatted text backing the `<pre>` markup tag.
 pub struct Pre {
-	props:      Props,
-	slot:       Slot,
-	text:       Str,
-	line_count: u16,
-	max_width:  u16,
+	props:           Props,
+	slot:            Slot,
+	text:            Str,
+	line_count:      u16,
+	max_width:       u16,
+	highlighted:     RichText,
+	highlighted_for: Option<(crate::Theme, Str)>,
+	authored:        RichText,
+	authored_ansi:   bool,
 }
 
 impl Pre {
 	/// Creates an empty preformatted block.
 	pub fn new() -> Self {
 		Self {
-			props:      Props::new(),
-			slot:       next_slot(),
-			text:       Str::default(),
-			line_count: 0,
-			max_width:  0,
+			props:           Props::new(),
+			slot:            next_slot(),
+			text:            Str::default(),
+			line_count:      0,
+			max_width:       0,
+			highlighted:     RichText::default(),
+			highlighted_for: None,
+			authored:        RichText::default(),
+			authored_ansi:   false,
 		}
 	}
 
@@ -467,14 +492,65 @@ impl Pre {
 	}
 
 	fn refresh_metrics(&mut self) {
-		let mut line_count = 0_u16;
-		let mut max_width = 0_u16;
-		for line in self.text.lines() {
-			line_count = line_count.saturating_add(1);
-			max_width = max_width.max(cell_width(line));
+		self.authored.clear();
+		self.authored_ansi = self.text.as_bytes().contains(&b'\x1b');
+		if self.authored_ansi {
+			decompose(&self.text, &mut self.authored);
+			self.line_count = RichText::rows(&self.authored);
+			self.max_width = (0..self.line_count)
+				.map(|row| self.authored.row_width(row))
+				.max()
+				.unwrap_or(0);
+		} else {
+			let mut line_count = 0_u16;
+			let mut max_width = 0_u16;
+			for line in self.text.lines() {
+				line_count = line_count.saturating_add(1);
+				max_width = max_width.max(cell_width(line));
+			}
+			self.line_count = line_count;
+			self.max_width = max_width;
 		}
-		self.line_count = line_count;
-		self.max_width = max_width;
+		self.highlighted_for = None;
+	}
+
+	fn syntax_token(&self) -> Option<&str> {
+		if self.authored_ansi {
+			return None;
+		}
+		let path = self.props.str_of(Prop::Path)?.as_str();
+		let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+		let token = name
+			.rsplit_once('.')
+			.map_or(name, |(_, extension)| extension)
+			.split(':')
+			.next()
+			.unwrap_or_default();
+		highlight::supports_language(token).then_some(token)
+	}
+
+	fn refresh_highlight(&mut self, ctx: &UiContext) {
+		let Some(token) = self.syntax_token().map(str::to_owned) else {
+			self.highlighted_for = None;
+			self.highlighted.clear();
+			return;
+		};
+		if self
+			.highlighted_for
+			.as_ref()
+			.is_some_and(|(theme, cached)| *theme == ctx.theme && cached.as_str() == token)
+		{
+			return;
+		}
+		self.highlighted.clear();
+		highlight::render(
+			&self.text,
+			&token,
+			usize::from(self.line_count),
+			&HighlightStyles::from_theme(&ctx.theme),
+			&mut self.highlighted,
+		);
+		self.highlighted_for = Some((ctx.theme, Str::new(token)));
 	}
 }
 
@@ -493,7 +569,7 @@ impl Pre {
 		self.props.start()
 	}
 
-	fn line_count(&self) -> u16 {
+	const fn line_count(&self) -> u16 {
 		self.line_count
 	}
 
@@ -545,6 +621,7 @@ impl Component for Pre {
 	}
 
 	fn paint(&mut self, pc: &mut PaintCtx<'_>, rect: Rect) {
+		self.refresh_highlight(pc.ctx);
 		let plan = overflow_plan(&self.props, self.line_count(), rect.height);
 		let content_rows = plan.map_or(rect.height, |plan| plan.content_rows);
 		let clip = pc.clip.min(rect.y.saturating_add(content_rows));
@@ -562,22 +639,83 @@ impl Component for Pre {
 		let gutter_style = Style::new().fg(pc.ctx.theme.muted);
 		let digits = gutter.saturating_sub(3) as usize;
 		let mut prefix_buffer = [0_u8; 32];
-		for (row, line) in self.text.lines().enumerate() {
-			let y = rect
-				.y
-				.saturating_add(u16::try_from(row).unwrap_or(u16::MAX));
-			if y >= clip {
-				break;
+		if self.authored_ansi {
+			for row in 0..self.line_count {
+				let y = rect.y.saturating_add(row);
+				if y >= clip {
+					break;
+				}
+				if gutter > 0 {
+					let number = self.start().saturating_add(u64::from(row));
+					let prefix = line_number_prefix(
+						number,
+						digits,
+						pc.ctx.charset.quote_rail(),
+						&mut prefix_buffer,
+					);
+					put_clipped(pc.frame, x, y, content_x, prefix, gutter_style);
+				}
+				let mut run_x = content_x;
+				for (authored, text) in self.authored.row_runs(row) {
+					run_x = put_clipped(pc.frame, run_x, y, right, text, authored.inherit(style));
+				}
 			}
-			if gutter > 0 {
-				let number = self
-					.start()
-					.saturating_add(u64::try_from(row).unwrap_or(u64::MAX));
-				let prefix =
-					line_number_prefix(number, digits, pc.ctx.charset.quote_rail(), &mut prefix_buffer);
-				put_clipped(pc.frame, x, y, content_x, &prefix, gutter_style);
+		} else {
+			for (row, line) in self.text.lines().enumerate() {
+				let y = rect
+					.y
+					.saturating_add(u16::try_from(row).unwrap_or(u16::MAX));
+				if y >= clip {
+					break;
+				}
+				if gutter > 0 {
+					let number = self
+						.start()
+						.saturating_add(u64::try_from(row).unwrap_or(u64::MAX));
+					let prefix = line_number_prefix(
+						number,
+						digits,
+						pc.ctx.charset.quote_rail(),
+						&mut prefix_buffer,
+					);
+					put_clipped(pc.frame, x, y, content_x, prefix, gutter_style);
+				}
+				if self.highlighted_for.is_some() {
+					let inline_number = line
+						.bytes()
+						.position(|byte| !byte.is_ascii_whitespace() && !byte.is_ascii_digit())
+						.and_then(|first| {
+							let prefix = &line[..first];
+							(prefix.bytes().any(|byte| byte.is_ascii_digit())).then_some(first)
+						})
+						.unwrap_or(0);
+					let mut run_x = content_x;
+					if inline_number > 0 {
+						run_x = put_clipped(
+							pc.frame,
+							run_x,
+							y,
+							right,
+							&line[..inline_number],
+							style.fg(pc.ctx.theme.muted),
+						);
+					}
+					let mut skip = inline_number;
+					for (run_style, text) in self.highlighted.row_runs(row as u16) {
+						let text = if skip >= text.len() {
+							skip -= text.len();
+							continue;
+						} else {
+							let text = &text[skip..];
+							skip = 0;
+							text
+						};
+						run_x = put_clipped(pc.frame, run_x, y, right, text, style.inherit(run_style));
+					}
+				} else {
+					put_clipped(pc.frame, content_x, y, right, line, style);
+				}
 			}
-			put_clipped(pc.frame, content_x, y, right, line, style);
 		}
 		if let Some(plan) = plan {
 			paint_overflow_footer(pc, rect, plan);
@@ -820,7 +958,7 @@ mod tests {
 		component::{Component, PaintCtx},
 		components::{Callout, Icon, Latex, Markdown},
 		context::Charset,
-		frame::{Frame, Rect, Size},
+		frame::{Color, Frame, Rect, Size},
 		test_support::frame_row_text,
 		ui::Ui,
 	};
@@ -901,6 +1039,22 @@ mod tests {
 		let frame = paint(&mut pre, 4, 2);
 		assert_eq!(frame_row_text(&frame, 0), "A");
 		assert_eq!(frame_row_text(&frame, 1), " B");
+	}
+
+	#[test]
+	fn pre_decomposes_authored_ansi_without_flattening_attributes() {
+		let ctx = UiContext::default();
+		let mut pre = Pre::new().text("\x1b[31;1;3mhot\x1b[0m plain");
+		assert_eq!(pre.measure(&ctx), (9, 9));
+		let frame = paint(&mut pre, 12, 1);
+		assert_eq!(frame_row_text(&frame, 0), "hot plain");
+		let authored = frame.cell(0, 0).style().spec();
+		assert_eq!(authored.foreground, Color::Indexed(1));
+		assert!(authored.bold);
+		assert!(authored.italic);
+		let plain = frame.cell(4, 0).style().spec();
+		assert!(!plain.bold);
+		assert!(!plain.italic);
 	}
 
 	#[test]

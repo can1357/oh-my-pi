@@ -55,7 +55,7 @@ pub(crate) async fn invoke(
 		match manager.connection(&server, &cancel).await {
 			Ok(connection) => Ok(connection),
 			Err(ManagerError::Cancelled) => Err(ManagerError::Cancelled),
-			Err(_) => manager.reconnect_for_invoke(&server).await,
+			Err(_) => manager.reconnect_for_invoke(&server, &cancel).await,
 		}
 	};
 	let mut connection = match timeout.run(&cancel, acquisition).await {
@@ -82,19 +82,25 @@ pub(crate) async fn invoke(
 	let first = call(&connection, &request.tool, args.clone(), timeout, &cancel).await;
 	let response = match first {
 		CallResult::Response(response) => {
-			if let Some(challenges) = auth_challenges(&response)
-				&& manager
+			if let Some(challenges) = auth_challenges(&response) {
+				let refreshed = manager
 					.refresh_auth(&server, &challenges, cancel.child_token())
-					.await
-			{
-				auth_retried = true;
-				match manager.reconnect_for_invoke(&server).await {
-					Ok(reconnected) => {
-						retry_count = 1;
-						connection = reconnected;
-						call(&connection, &request.tool, args, timeout, &cancel).await
-					},
-					Err(_) => CallResult::Response(response),
+					.await;
+				if cancel.is_cancelled() {
+					CallResult::Cancelled
+				} else if refreshed {
+					auth_retried = true;
+					match manager.reconnect_for_invoke(&server, &cancel).await {
+						Ok(reconnected) => {
+							retry_count = 1;
+							connection = reconnected;
+							call(&connection, &request.tool, args, timeout, &cancel).await
+						},
+						Err(ManagerError::Cancelled) => CallResult::Cancelled,
+						Err(_) => CallResult::Response(response),
+					}
+				} else {
+					CallResult::Response(response)
 				}
 			} else {
 				CallResult::Response(response)
@@ -105,12 +111,13 @@ pub(crate) async fn invoke(
 			effects_unknown =
 				matches!(error.dispatch, DispatchState::Dispatched | DispatchState::EffectsUnknown);
 			if retry_safe && retriable(&error) {
-				match manager.reconnect_for_invoke(&server).await {
+				match manager.reconnect_for_invoke(&server, &cancel).await {
 					Ok(reconnected) => {
 						retry_count = 1;
 						connection = reconnected;
 						call(&connection, &request.tool, args, timeout, &cancel).await
 					},
+					Err(ManagerError::Cancelled) => CallResult::Cancelled,
 					Err(_) => CallResult::Transport(error),
 				}
 			} else {
@@ -164,11 +171,9 @@ async fn call(
 	timeout: McpTimeout,
 	cancel: &CancellationToken,
 ) -> CallResult {
-	let operation = connection.client.transport().request(
-		"tools/call",
-		json!({ "name": tool, "arguments": args }),
-		cancel.child_token(),
-	);
+	let operation = connection
+		.client
+		.call_tool(tool, args, cancel.child_token());
 	match timeout.run(cancel, operation).await {
 		Ok(Ok(response)) => CallResult::Response(response),
 		Ok(Err(error)) => CallResult::Transport(error),
@@ -330,6 +335,9 @@ fn retriable(error: &TransportError) -> bool {
 		TransportFailure::NotConnected
 			| TransportFailure::Closed
 			| TransportFailure::Io(_)
+			| TransportFailure::HttpConnect(_)
+			| TransportFailure::HttpReset(_)
+			| TransportFailure::HttpEof(_)
 			| TransportFailure::Http(_)
 			| TransportFailure::HttpStatus { status: 404 | 502 | 503 }
 	)
@@ -423,13 +431,18 @@ fn failure_message(failure: &TransportFailure) -> &'static str {
 		TransportFailure::TimedOut => "MCP operation timed out",
 		TransportFailure::NotConnected | TransportFailure::Closed => "MCP connection is unavailable",
 		TransportFailure::FrameTooLarge => "MCP response exceeded its size limit",
+		TransportFailure::InvalidSpawnPlan => "MCP server process command is invalid",
 		TransportFailure::Spawn(_) => "MCP server process could not be started",
 		TransportFailure::Io(_) | TransportFailure::Http(_) => "MCP transport failed",
+		TransportFailure::HttpConnect(_) => "MCP endpoint could not be reached",
+		TransportFailure::HttpReset(_) => "MCP connection was reset",
+		TransportFailure::HttpEof(_) => "MCP connection ended before the response completed",
 		TransportFailure::HttpStatus { .. } => "MCP server returned an HTTP error",
 		TransportFailure::HeaderPolicy(_) => "MCP header policy rejected the request",
-		TransportFailure::Json(_) | TransportFailure::Correlation | TransportFailure::SseProtocol => {
-			"MCP server returned an invalid response"
-		},
+		TransportFailure::Json(_)
+		| TransportFailure::MalformedFrame
+		| TransportFailure::Correlation
+		| TransportFailure::SseProtocol => "MCP server returned an invalid response",
 		TransportFailure::JsonRpc { .. } => "MCP server returned a protocol error",
 	}
 }

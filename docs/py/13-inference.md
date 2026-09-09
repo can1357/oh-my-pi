@@ -1319,16 +1319,16 @@ harness can, which is the whole point.
 #### Intents that cannot apply
 
 Extensions register nothing with the model (`docs/py/01-devices.md`), so under the default dynamic
-tool policy an extension's capability reaches the model through the `xd` shell builtin
-inside the core `shell` tool: `xd <name> --help` fetches docs and schema-derived CLI usage,
-`xd --q <text>` searches the catalog, and `xd <name> [args…]` dispatches. A device therefore
+tool policy an extension's capability reaches the model through the `dyn` shell builtin
+inside the core `shell` tool: `dyn <name> --help` fetches docs and schema-derived CLI usage,
+`dyn --q <text>` searches the catalog, and `dyn <name> [args…]` dispatches. A device therefore
 has **no schema in the request**, and its arguments arrive as one nested JSON document mapped
 from the CLI at `ARGS_FINALIZED`.
 Sampling constraints have nothing to attach
 to.
 
-Consequently `omp.intent.strict` and `omp.intent.grammar` on a `xd`-dispatched device resolve to
-`Adjustment.Dropped(feature=…, reason="device.xd-transport")`. **That is a normal receipt, not an
+Consequently `omp.intent.strict` and `omp.intent.grammar` on a `dyn`-dispatched device resolve to
+`Adjustment.Dropped(feature=…, reason="device.dyn-transport")`. **That is a normal receipt, not an
 error.** It is not a budget denial either — the budget is never consulted, because there is no slot to
 spend on. `omp.intent.force_call`, `service_tier`, `verbosity`, `cache_retention`, `reasoning`,
 `safety`, `determinism`, and `hosted_tool` are unaffected, because they constrain the turn rather than
@@ -1339,7 +1339,7 @@ describes what happens once devices actually stay out of the advertised tool arr
 today they do not: `Registry::advertise` (`crates/tool/src/registry.rs:483-492`) lowers every entry in
 `self.live`, which `register_worker` (`:413-426`) populates with worker declarations, and it applies no
 route filter despite its comment. So a device's `SchemaConstraint` currently *does* reach the wire and
-*is* honored, which means `strict` on a device presently works and the `device.xd-transport` drop
+*is* honored, which means `strict` on a device presently works and the `device.dyn-transport` drop
 described here does not yet fire. Do not read this section as documentation of current behavior, and do
 not rely on either the drop or the honoring: one is unimplemented and the other is a Lesson #6 violation
 scheduled for removal. The closing section carries the fix.
@@ -2285,7 +2285,7 @@ Concretely:
    Note what does *not* need a frame. `omp.intent.strict` and `omp.intent.grammar` ride the existing
    `ToolConstraint` on `ToolDecl`; adding a second path for them would be the parallel mechanism this
    design exists to avoid. And extensions register with the **host**, never with the model —
-   `RegisterTools` is host-facing, which is precisely why the host can answer the device catalog behind `xd` at all.
+   `RegisterTools` is host-facing, which is precisely why the host can answer the device catalog behind `dyn` at all.
 
    **`omp/inference/v1/models.proto` — one additive change, and one reuse.**
 
@@ -2343,14 +2343,14 @@ identity, hashing, and advertisement". `advertise` (`registry.rs:483-492`) then 
 `self.live` and calls `lower()` on every entry — its comment claims it lowers "for one selected route",
 but the body contains no route check whatsoever. So every Python worker declaration occupies a slot in
 the model's advertised tool array right now, and its `Constraint` is lowered onto the wire alongside
-the core tools'. The exact failure mode the `xd` design exists to prevent is live.
+the core tools'. The exact failure mode the `dyn` design exists to prevent is live.
 
 The encouraging half is that this is a clean fix rather than a redesign, because route-awareness already
 exists and `advertise` simply does not consult it. `invoke` (`registry.rs:470-473`) checks
 `entry.route() == ToolRoute::Worker` and refuses; `live_identities` (`registry.rs:438-440`) documents
 that "callers still need to inspect [`Self::route`] before granting an execution capability."
 `advertise` needs the same check — filter `ToolRoute::Worker` out of the advertised set — plus a
-separate accessor for the host-facing view that the device catalog behind `xd` uses, since the host must still know
+separate accessor for the host-facing view that the device catalog behind `dyn` uses, since the host must still know
 every device's name, schema, rev, and constraint to answer at all.
 
 Once that filter lands, the budget has a real but far smaller job: arbitrating a bounded, known set of
@@ -2802,6 +2802,6 @@ Changes in this file, and the review point that drove each:
   as the historical record, and the shipped single-worker supervisor is described as
   not yet caught up.
 
-**Revision 2.2** — the `xd` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `xd` builtin of the embedded shell, inside the core `shell` tool: `xd` lists the catalog (`xd --q <text>` searches), `xd <device> --help` returns docs plus schema-derived CLI usage, and `xd <device> [args…]` (or `xd <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `xd resolve "<reason>"` / `xd reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `xd` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
+**Revision 2.2** — the `dyn` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `dyn` builtin of the embedded shell, inside the core `shell` tool: `dyn` lists the catalog (`dyn --q <text>` searches), `dyn <device> --help` returns docs plus schema-derived CLI usage, and `dyn <device> [args…]` (or `dyn <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `dyn resolve "<reason>"` / `dyn reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `dyn` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
 
-In this file, live intent-drop and host-catalog prose now names the `xd` transport and uses the docs-only reason `device.xd-transport`.
+In this file, live intent-drop and host-catalog prose now names the `dyn` transport and uses the docs-only reason `device.dyn-transport`.

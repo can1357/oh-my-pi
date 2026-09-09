@@ -1,0 +1,64 @@
+── write — Write ───────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+╭─── Write:  packages/coding-agent/test/parse-sel.test.ts ────────────────────────────────────────╮
+│   1 import { describe, expect, it } from "bun:test";                                             │
+│   2 import { parseSel } from "../src/tools/read";                                                │
+│   3                                                                                              │
+│ 󱑍 … (streaming)                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · in progress
+                                                                                                    
+╭─── Write:  packages/coding-agent/test/parse-sel.test.ts ────────────────────────────────────────╮
+│   1 import { describe, expect, it } from "bun:test";                                             │
+│   2 import { parseSel } from "../src/tools/read";                                                │
+│   3                                                                                              │
+│   4 describe("parseSel", () => {                                                                 │
+│   5    it("parses a single line range", () => {                                                  │
+│   6       expect(parseSel("42-58")).toEqual({                                                    │
+│   7          kind: "lines",                                                                      │
+│   8          ranges: [{ startLine: 42, endLine: 58 }],                                           │
+│   9       });                                                                                    │
+│  10    });                                                                                       │
+│  11                                                                                              │
+│  12    it("treats raw as a verbatim selector", () => {                                           │
+│  13       expect(parseSel("raw")).toEqual({ kind: "raw" });                                      │
+│  14    });                                                                                       │
+│  15 });                                                                                          │
+│  16                                                                                              │
+│ … (streaming)                                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · done
+                                                                                                    
+╭───  Write:  packages/coding-agent/test/parse-sel.test.ts · 16 lines ───────────────────────────╮
+│   1 import { describe, expect, it } from "bun:test";                                             │
+│   2 import { parseSel } from "../src/tools/read";                                                │
+│   3                                                                                              │
+│   4 describe("parseSel", () => {                                                                 │
+│   5    it("parses a single line range", () => {                                                  │
+│   6       expect(parseSel("42-58")).toEqual({                                                    │
+│   7          kind: "lines",                                                                      │
+│   8          ranges: [{ startLine: 42, endLine: 58 }],                                           │
+│   9       });                                                                                    │
+│  10    });                                                                                       │
+│  11                                                                                              │
+│  12    it("treats raw as a verbatim selector", () => {                                           │
+│  13       expect(parseSel("raw")).toEqual({ kind: "raw" });                                      │
+│  14    });                                                                                       │
+│  15 });                                                                                          │
+│  16                                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭───  Write:  packages/coding-agent/test/parse-sel.test.ts ──────────────────────────────────────╮
+│   EACCES: permission denied, open 'packages/coding-agent/test/parse-sel.test.ts'                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

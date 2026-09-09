@@ -1,0 +1,27 @@
+── goal — Goal ─────────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ Goal: set "Ship the auth hardening"                                                               
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ Goal: set "Ship the auth hardening pass: per-account rate limits and s…" · budget 500K            
+                                                                                                    
+
+  · done
+                                                                                                    
+╭───  Goal: set ⟨active⟩ ─────────────────────────────────────────────────────────────────────────╮
+│ "Ship the auth hardening pass: per-account rate limits and sliding session expiry."              │
+│ 48K / 500K tokens (452K left) · 5m elapsed                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭───  Goal: set ──────────────────────────────────────────────────────────────────────────────────╮
+│   Goal tool failed: objective is required when op=create.                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

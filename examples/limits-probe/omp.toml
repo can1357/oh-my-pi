@@ -1,6 +1,0 @@
-id = "examples.limits-probe"
-entry = "limits_probe"
-version = "0.1.0"
-description = "Mechanical boundary probe for every frozen extension ceiling."
-requires = []
-capabilities = []

@@ -400,6 +400,7 @@ define_class!(
 		#[unsafe(method(webView:didCommitNavigation:))]
 		fn did_commit(&self, webview: &WKWebView, _navigation: &WKNavigation) {
 			let url = current_url(webview);
+			tracing::debug!(scheme = crate::navigation_scheme(&url), "webview navigation committed");
 			self.ivars().state.lock().url = url.clone();
 			let _ = self.ivars().events.send(WebViewEvent::Navigated(url));
 		}

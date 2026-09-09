@@ -14,7 +14,7 @@ use bytes::Bytes;
 #[cfg(unix)]
 use bytes::BytesMut;
 use flume::{Receiver, Sender};
-use omp_core::{EnvPath, Str, sf};
+use omp_core::{EnvPath, Hash32, Str, hash32::Hasher, sf};
 #[cfg(unix)]
 use omp_proto::prost::Message as _;
 use omp_proto::{
@@ -22,31 +22,33 @@ use omp_proto::{
 		Chunk, DeleteRequest, DeleteResponse, GetRequest, PutResponse, StatRequest, StatResponse,
 	},
 	document::v1::{
-		self as document, CommitTransactionRequest, DocumentEvent, DocumentHead,
+		self as document, CommitTransactionRequest, DocumentEvent, DocumentHead, DocumentMutation,
 		GetLspBindingsRequest, GetLspBindingsResponse, LspBindingEvent, LspEvent,
 		OpenDocumentRequest, ReadDocumentRequest, ReadDocumentResponse, ReadSelection, Revision,
-		TransactionCommitted, TransactionPartiallyCommitted, TransactionRejected,
-		commit_transaction_response, document_target, read_document_response,
+		TextMutation, TransactionCommitted, TransactionPartiallyCommitted, TransactionRejected,
+		commit_transaction_response, document_mutation, document_target, read_document_response,
 	},
 	env::{
 		v1,
 		v1::{
-			self as env_wire, Admission, AdmitInvocation, ArgText, ArgsCommitted, AttachOutput,
-			BlobGetComplete, CancelRequest, ClientFrame, ClientHello, CloseSessionRequest,
-			CloseSessionResponse, CommitBlobPut, CreateWorktree, CurrentWorktree,
+			self as env_wire, AcpBind, AcpDocumentAnswer, AcpExecCancel, AcpExecEvent, AcpExecQuery,
+			AcpReadQuery, AcpWriteQuery, Admission, AdmitInvocation, ArgText, ArgsCommitted,
+			AttachOutput, BlobGetComplete, CancelRequest, ClientFrame, ClientHello,
+			CloseSessionRequest, CloseSessionResponse, CommitBlobPut, CreateWorktree, CurrentWorktree,
 			CurrentWorktreeResult, DataEvent, DataRequest, DataResponse, DestroyWorktree, DetachExec,
-			EventStreamError, EventStreamKind, ExecRequest, ExecStarted, ExitEvent, GetProcess,
-			HttpRequest, HttpResponse, Interrupt, InvocationScope, InvokeAccepted, InvokeTool,
-			ListProcesses, MaterializeSite, MergeWorktree, OpenSessionRequest, OpenSessionResponse,
-			OutputAttached, OutputFrame, PresenceRegistered, PresenceReleased, ProcessCommandAccepted,
-			ProcessInfo, ProcessList, ProcessOutput, ProcessStarted, ProcessStateEvent, ProtocolError,
-			ProtocolErrorCode, RegisterPresence, ReleasePresence, ResourceCompletion, RestartProcess,
-			Retire, SearchComplete, SearchMatchMsg, SearchRequest, SendInput, ServerFrame,
-			ServerHello, SignalProcess, SignalRequest, SiteMaterialized, StartProcess, StdinFrame,
-			StopProcess, Update, Verdict, WalkComplete, WalkEntry, WalkRequest, WorktreeResult,
-			cancel_request, client_frame, data_event, data_request, data_response, document_op,
-			document_result, exec_session_op, exec_session_result, mcp_op, mcp_result, resource_op,
-			server_frame, stdin_frame, workspace_op, workspace_result, worktree_op,
+			EditRepairAnswer, EditRepairQuery, EvalResetRequest, EventStreamError, EventStreamKind,
+			ExecRequest, ExecStarted, ExitEvent, GetProcess, HttpRequest, HttpResponse, Interrupt,
+			InvocationScope, InvokeAccepted, InvokeTool, ListProcesses, MaterializeSite,
+			MergeWorktree, OpenSessionRequest, OpenSessionResponse, OutputAttached, OutputFrame,
+			PresenceRegistered, PresenceReleased, ProcessCommandAccepted, ProcessInfo, ProcessList,
+			ProcessOutput, ProcessStarted, ProcessStateEvent, ProtocolError, ProtocolErrorCode,
+			RegisterPresence, ReleasePresence, ResourceCompletion, RestartProcess, Retire,
+			SearchComplete, SearchMatchMsg, SearchRequest, SendInput, ServerFrame, ServerHello,
+			SignalProcess, SignalRequest, SiteMaterialized, StartProcess, StdinFrame, StopProcess,
+			Update, Verdict, WalkComplete, WalkEntry, WalkRequest, WorktreeResult, cancel_request,
+			client_frame, data_event, data_request, data_response, document_op, document_result,
+			exec_session_op, exec_session_result, mcp_op, mcp_result, resource_op, server_frame,
+			stdin_frame, workspace_op, workspace_result, worktree_op,
 		},
 	},
 };
@@ -69,6 +71,9 @@ pub enum ClientError {
 	/// The frame transport closed before the operation completed.
 	#[error("environment frame transport closed")]
 	TransportClosed,
+	/// A nonblocking transport send could not proceed without waiting.
+	#[error("environment frame transport is busy")]
+	TransportBusy,
 	/// All nonzero request identifiers have been consumed.
 	#[error("environment request identifier space exhausted")]
 	RequestIdExhausted,
@@ -98,6 +103,52 @@ pub enum ClientError {
 	UnexpectedResponse {
 		/// The response body expected by the operation.
 		expected: &'static str,
+	},
+	/// A blob digest did not contain exactly 32 raw SHA-256 bytes.
+	#[error("environment blob digest has {actual} bytes; expected 32")]
+	InvalidBlobDigest {
+		/// Observed digest width.
+		actual: usize,
+	},
+	/// A declared blob is larger than the caller's total transfer bound.
+	#[error("environment blob is {size} bytes; transfer limit is {limit} bytes")]
+	BlobTooLarge {
+		/// Complete size declared by the content reference.
+		size:  u64,
+		/// Maximum accepted total size.
+		limit: u64,
+	},
+	/// A resumed range did not begin at the next verified byte.
+	#[error("environment blob resume offset mismatch: expected {expected}, requested {actual}")]
+	BlobResumeOffsetMismatch {
+		/// Next byte required by the retained transfer state.
+		expected: u64,
+		/// Byte offset requested from the environment.
+		actual:   u64,
+	},
+	/// The blob stream omitted or repeated first-chunk provenance metadata.
+	#[error("environment blob stream metadata is invalid")]
+	InvalidBlobMetadata,
+	/// Blob stream provenance disagreed with the requested content reference.
+	#[error("environment blob stream digest does not match the requested reference")]
+	BlobDigestMismatch,
+	/// Blob stream size metadata disagreed with the requested content reference.
+	#[error("environment blob stream size mismatch: expected {expected} bytes, got {actual}")]
+	BlobSizeMismatch {
+		/// Size declared by the requested content reference.
+		expected: u64,
+		/// Size observed in metadata or transferred bytes.
+		actual:   u64,
+	},
+	/// The blob stream ended without its successful completion marker.
+	#[error("environment blob stream ended before completion")]
+	IncompleteBlob,
+	/// The destination rejected bytes from a verified blob transfer.
+	#[error("failed to persist environment blob")]
+	BlobWrite {
+		/// Destination write failure.
+		#[source]
+		source: io::Error,
 	},
 }
 
@@ -276,7 +327,7 @@ pub struct ActiveExecControl {
 
 impl ActiveExecControl {
 	/// Returns the opaque execution identity.
-	pub fn exec_id(&self) -> &Bytes {
+	pub const fn exec_id(&self) -> &Bytes {
 		&self.exec
 	}
 
@@ -348,16 +399,21 @@ impl ActiveExecControl {
 	}
 }
 struct ClientInner {
-	outgoing:       Sender<ClientFrame>,
-	pending:        Mutex<HashMap<u64, Sender<ServerFrame>>>,
-	request_scopes: Mutex<HashMap<u64, InvocationScope>>,
-	hello_waiter:   Mutex<Option<Sender<ServerFrame>>>,
-	info:           Mutex<Option<ServerHello>>,
-	events:         Receiver<ServerFrame>,
-	next_id:        AtomicU64,
-	cancel:         Sender<u64>,
-	lease_close:    Sender<LeaseClose>,
-	admitter:       Mutex<Option<Arc<dyn AdmissionDispatcher>>>,
+	outgoing:               Sender<ClientFrame>,
+	pending:                Mutex<HashMap<u64, Sender<ServerFrame>>>,
+	request_scopes:         Mutex<HashMap<u64, InvocationScope>>,
+	edit_repair_scopes:     Mutex<HashMap<u64, InvocationScope>>,
+	acp_request_scopes:     Mutex<HashMap<u64, InvocationScope>>,
+	hello_waiter:           Mutex<Option<Sender<ServerFrame>>>,
+	info:                   Mutex<Option<ServerHello>>,
+	owner_last_transaction: Mutex<Option<TransactionId>>,
+	events:                 Receiver<ServerFrame>,
+	edit_repair_requests:   Receiver<EditRepairRequest>,
+	acp_requests:           Receiver<AcpRequest>,
+	next_id:                AtomicU64,
+	cancel:                 Sender<u64>,
+	lease_close:            Sender<LeaseClose>,
+	admitter:               Mutex<Option<Arc<dyn AdmissionDispatcher>>>,
 }
 
 trait AdmissionDispatcher: Send + Sync {
@@ -400,7 +456,48 @@ impl fmt::Debug for ClientInner {
 #[derive(Debug)]
 struct LeaseClose {
 	lease_id: Bytes,
-	scope:    DataScope,
+	scope:    Option<DataScope>,
+}
+
+/// One daemon-generated syntax-repair request.
+#[derive(Clone, Debug)]
+pub struct EditRepairRequest {
+	/// Correlation identifier to echo when answering this query.
+	pub request_id: u64,
+	/// Typed prompt and invoking tool identity supplied by the daemon.
+	pub query:      EditRepairQuery,
+}
+/// One typed ACP request initiated by the environment daemon.
+#[derive(Clone, Debug)]
+pub enum AcpRequest {
+	/// Reads one document through the bound ACP editor.
+	Read {
+		/// Frame request identifier used to retain invocation authority.
+		request_id: u64,
+		/// Typed document read query.
+		query:      AcpReadQuery,
+	},
+	/// Writes one document through the bound ACP editor.
+	Write {
+		/// Frame request identifier used to retain invocation authority.
+		request_id: u64,
+		/// Typed document write query.
+		query:      AcpWriteQuery,
+	},
+	/// Starts one command through the bound ACP terminal.
+	Exec {
+		/// Frame request identifier used to retain invocation authority.
+		request_id: u64,
+		/// Typed command query.
+		query:      AcpExecQuery,
+	},
+	/// Cancels one command running through the bound ACP terminal.
+	ExecCancel {
+		/// Frame request identifier carrying the original invocation authority.
+		request_id: u64,
+		/// Typed command cancellation.
+		cancel:     AcpExecCancel,
+	},
 }
 
 /// The server half of an in-process `env/v1` frame transport.
@@ -484,9 +581,13 @@ pub enum ProcessAttachmentEvent {
 }
 
 /// A streaming blob download.
+///
+/// Unlike a detached raw request stream, dropping an incomplete blob download
+/// cancels its server-side transfer.
 #[derive(Debug)]
 pub struct BlobDownload {
-	stream: RequestStream,
+	request: GetRequest,
+	stream:  RequestStream,
 }
 
 /// One event from a blob download.
@@ -496,6 +597,75 @@ pub enum BlobDownloadEvent {
 	Chunk(Chunk),
 	/// The successful terminal download marker.
 	Complete(BlobGetComplete),
+}
+
+/// Provenance verified after a complete bounded blob download.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VerifiedBlobTransfer {
+	/// SHA-256 digest declared by the caller and recomputed over transferred
+	/// bytes.
+	pub hash: Hash32,
+	/// Exact complete blob size.
+	pub size: u64,
+}
+
+/// Stateful verifier for a bounded download that may cross connections.
+///
+/// The state advances only after the destination accepts a complete chunk. If
+/// a stream is cancelled or disconnected, [`Self::request`] produces the exact
+/// next range request for any replacement environment client. Digest
+/// verification spans all resumed segments rather than trusting
+/// per-connection metadata alone.
+pub struct ResumableBlobTransfer {
+	hash:        Hash32,
+	size:        u64,
+	max_bytes:   u64,
+	next_offset: u64,
+	hasher:      Hasher,
+}
+
+impl ResumableBlobTransfer {
+	/// Starts a whole-blob transfer under a caller-owned total byte bound.
+	///
+	/// # Errors
+	///
+	/// Returns [`ClientError::BlobTooLarge`] before any request when the
+	/// declared complete size exceeds `max_bytes`.
+	pub fn new(hash: Hash32, size: u64, max_bytes: u64) -> Result<Self, ClientError> {
+		if size > max_bytes {
+			return Err(ClientError::BlobTooLarge { size, limit: max_bytes });
+		}
+		Ok(Self { hash, size, max_bytes, next_offset: 0, hasher: Hasher::new() })
+	}
+
+	/// Builds a request for the complete remainder, suitable for a newly
+	/// connected client.
+	pub fn request(&self) -> GetRequest {
+		self.request_range(0)
+	}
+
+	/// Builds the next contiguous bounded range request.
+	///
+	/// `length` follows the wire convention: zero selects the complete
+	/// remainder, while a nonzero value caps this request without changing the
+	/// complete transfer's digest or size provenance.
+	pub fn request_range(&self, length: u64) -> GetRequest {
+		GetRequest {
+			hash: Bytes::copy_from_slice(self.hash.as_bytes()),
+			offset: self.next_offset,
+			length,
+		}
+	}
+
+	/// Returns the first byte not yet persisted and verified.
+	pub const fn next_offset(&self) -> u64 {
+		self.next_offset
+	}
+
+	/// Returns whether all declared bytes have been persisted.
+	pub const fn is_complete(&self) -> bool {
+		self.next_offset == self.size
+	}
 }
 
 /// A streaming, correlated blob upload.
@@ -555,7 +725,7 @@ pub struct TransactionId {
 #[must_use]
 pub struct DocumentLease {
 	client:   EnvClient,
-	scope:    DataScope,
+	scope:    Option<DataScope>,
 	lease_id: Bytes,
 	head:     DocumentHead,
 	events:   DocumentEvents,
@@ -706,22 +876,31 @@ impl EnvClient {
 	/// this client owns no async runtime or world resource.
 	pub fn from_channels(outgoing: Sender<ClientFrame>, incoming: Receiver<ServerFrame>) -> Self {
 		let (events_tx, events) = flume::unbounded();
+		let (edit_repair_tx, edit_repair_requests) = flume::unbounded();
+		let (acp_tx, acp_requests) = flume::unbounded();
 		let (cancel, cancellations) = flume::unbounded();
 		let (lease_close, lease_closes) = flume::unbounded();
 		let inner = Arc::new(ClientInner {
-			outgoing: outgoing.clone(),
+			outgoing,
 			pending: Mutex::new(HashMap::new()),
 			request_scopes: Mutex::new(HashMap::new()),
+			edit_repair_scopes: Mutex::new(HashMap::new()),
+			acp_request_scopes: Mutex::new(HashMap::new()),
 			hello_waiter: Mutex::new(None),
 			info: Mutex::new(None),
+			owner_last_transaction: Mutex::new(None),
 			events,
+			edit_repair_requests,
+			acp_requests,
 			next_id: AtomicU64::new(1),
 			cancel,
 			lease_close,
 			admitter: Mutex::new(None),
 		});
 		let router = Arc::downgrade(&inner);
-		let _ = thread::spawn(move || route_responses(router, incoming, events_tx));
+		let _ = thread::spawn(move || {
+			route_responses(router, incoming, events_tx, edit_repair_tx, acp_tx);
+		});
 		let canceller = Arc::downgrade(&inner);
 		let _ = thread::spawn(move || route_cancellations(canceller, cancellations));
 		let closer = Arc::downgrade(&inner);
@@ -760,15 +939,13 @@ impl EnvClient {
 	/// first queued on a separate unbounded control channel so drop never
 	/// blocks.
 	pub fn in_process(capacity: usize) -> (Self, InProcessEnvTransport) {
-		let (requests_tx, requests) = channel(capacity);
-		let (responses, responses_rx) = channel(capacity);
-		(Self::from_channels(requests_tx, responses_rx), InProcessEnvTransport {
-			requests,
-			responses,
-		})
+		let (frames, transport) = crate::partition::in_process_frames(capacity);
+		let (outgoing, incoming) = frames.into_parts();
+		(Self::from_channels(outgoing, incoming), transport)
 	}
 
 	/// Performs the request-id-zero protocol handshake.
+	#[tracing::instrument(name = "environment_handshake", level = "debug", skip_all)]
 	pub async fn hello(&self, hello: ClientHello) -> Result<ServerHello, ClientError> {
 		let (sender, receiver) = flume::bounded(1);
 		{
@@ -808,6 +985,143 @@ impl EnvClient {
 	/// Returns the cached server handshake, if this client has completed one.
 	pub fn info(&self) -> Option<ServerHello> {
 		self.inner.info.lock().clone()
+	}
+
+	/// Subscribes to daemon-generated syntax-repair queries.
+	///
+	/// Every clone receives work from the same single-consumer queue. The queue
+	/// closes when the environment response transport disconnects.
+	pub fn edit_repair_requests(&self) -> Receiver<EditRepairRequest> {
+		self.inner.edit_repair_requests.clone()
+	}
+
+	/// Answers one syntax-repair query without opening a correlated response
+	/// route.
+	///
+	/// The answer retains the invoking tool's original authority scope.
+	pub async fn answer_edit_repair(
+		&self,
+		request_id: u64,
+		answer: EditRepairAnswer,
+	) -> Result<(), ClientError> {
+		let scope = self
+			.inner
+			.edit_repair_scopes
+			.lock()
+			.remove(&request_id)
+			.ok_or(ClientError::ScopedOperationDenied)?;
+		self
+			.inner
+			.outgoing
+			.send_async(ClientFrame {
+				request_id,
+				body: Some(client_frame::Body::EditRepairAnswer(answer)),
+				scope: Some(scope),
+				..ClientFrame::default()
+			})
+			.await
+			.map_err(|_| ClientError::TransportClosed)
+	}
+
+	/// Subscribes to typed ACP document and terminal requests.
+	///
+	/// Every clone receives work from the same single-consumer queue. ACP
+	/// requests bypass ordinary correlated response streams, and this queue
+	/// closes when the environment response transport disconnects.
+	pub fn acp_requests(&self) -> Receiver<AcpRequest> {
+		self.inner.acp_requests.clone()
+	}
+
+	/// Binds or unbinds this connection as an ACP document and terminal host.
+	///
+	/// Binding is an unsolicited request-id-zero control frame and is only
+	/// valid after the protocol handshake. The send never waits for transport
+	/// capacity.
+	pub fn bind_acp(&self, documents: bool, exec: bool) -> Result<(), ClientError> {
+		if self.inner.info.lock().is_none() {
+			return Err(ClientError::UnexpectedResponse {
+				expected: "a completed environment handshake before ACP binding",
+			});
+		}
+		self
+			.inner
+			.outgoing
+			.try_send(ClientFrame {
+				request_id: 0,
+				body: Some(client_frame::Body::AcpBind(AcpBind { documents, exec })),
+				..ClientFrame::default()
+			})
+			.map_err(|error| match error {
+				flume::TrySendError::Full(_) => ClientError::TransportBusy,
+				flume::TrySendError::Disconnected(_) => ClientError::TransportClosed,
+			})
+	}
+
+	/// Answers one ACP document query without opening a correlated response
+	/// route.
+	///
+	/// The answer retains the invocation authority captured from the query's
+	/// original request scope.
+	pub async fn answer_acp_document(
+		&self,
+		request_id: u64,
+		answer: AcpDocumentAnswer,
+	) -> Result<(), ClientError> {
+		let scope = self
+			.inner
+			.acp_request_scopes
+			.lock()
+			.remove(&request_id)
+			.ok_or(ClientError::ScopedOperationDenied)?;
+		self
+			.inner
+			.outgoing
+			.send_async(ClientFrame {
+				request_id,
+				body: Some(client_frame::Body::AcpDocumentAnswer(answer)),
+				scope: Some(scope),
+				..ClientFrame::default()
+			})
+			.await
+			.map_err(|_| ClientError::TransportClosed)
+	}
+
+	/// Sends one typed ACP execution event without opening a correlated
+	/// response route.
+	///
+	/// Started and output events retain the query scope for later events. Exit
+	/// and protocol-error events terminate that retained correlation.
+	pub async fn send_acp_exec_event(
+		&self,
+		request_id: u64,
+		event: AcpExecEvent,
+	) -> Result<(), ClientError> {
+		let terminal = matches!(
+			event.body.as_ref(),
+			Some(env_wire::acp_exec_event::Body::Exit(_) | env_wire::acp_exec_event::Body::Error(_))
+		);
+		let scope = if terminal {
+			self.inner.acp_request_scopes.lock().remove(&request_id)
+		} else {
+			self
+				.inner
+				.acp_request_scopes
+				.lock()
+				.get(&request_id)
+				.cloned()
+		}
+		.ok_or(ClientError::ScopedOperationDenied)?;
+		self
+			.inner
+			.outgoing
+			.send_async(ClientFrame {
+				request_id,
+				body: Some(client_frame::Body::AcpExecEvent(event)),
+				scope: Some(scope),
+				..ClientFrame::default()
+			})
+			.await
+			.map_err(|_| ClientError::TransportClosed)
 	}
 
 	/// Installs the handler for server-initiated admission queries.
@@ -857,6 +1171,34 @@ impl EnvClient {
 		{
 			server_frame::Body::ShutdownAcknowledged(acknowledged) => Ok(acknowledged),
 			_ => Err(ClientError::UnexpectedResponse { expected: "ShutdownAcknowledged" }),
+		}
+	}
+
+	/// Disposes every persistent evaluation session owned by the Environment.
+	pub async fn reset_eval(&self) -> Result<(), ClientError> {
+		match self
+			.one_shot(client_frame::Body::EvalReset(EvalResetRequest {}), None)
+			.await?
+		{
+			server_frame::Body::EvalReset(_) => Ok(()),
+			_ => Err(ClientError::UnexpectedResponse { expected: "EvalResetResponse" }),
+		}
+	}
+
+	/// Runs one due-checked workspace extension update inspection.
+	///
+	/// The environment never rewrites the committed workspace lock; `auto`
+	/// therefore has notify semantics on this authority.
+	pub async fn check_workspace_updates(
+		&self,
+		request: env_wire::WorkspaceUpdateCheck,
+	) -> Result<env_wire::WorkspaceUpdateReport, ClientError> {
+		match self
+			.one_shot(client_frame::Body::WorkspaceUpdateCheck(request), None)
+			.await?
+		{
+			server_frame::Body::WorkspaceUpdateReport(report) => Ok(report),
+			_ => Err(ClientError::UnexpectedResponse { expected: "WorkspaceUpdateReport" }),
 		}
 	}
 
@@ -949,6 +1291,23 @@ impl EnvClient {
 		match response.body {
 			Some(data_response::Body::WorkspaceRoots(result)) => Ok(result),
 			_ => Err(ClientError::UnexpectedResponse { expected: "WorkspaceRootSet" }),
+		}
+	}
+
+	/// Reads the Environment-owned repository snapshot for a granted root.
+	pub async fn repository_snapshot(
+		&self,
+		request: env_wire::RepositorySnapshotRequest,
+	) -> Result<env_wire::RepositorySnapshot, ClientError> {
+		let response = self
+			.data_request_owned(DataRequest {
+				body: Some(data_request::Body::RepositorySnapshot(request)),
+				..DataRequest::default()
+			})
+			.await?;
+		match response.body {
+			Some(data_response::Body::RepositorySnapshot(snapshot)) => Ok(snapshot),
+			_ => Err(ClientError::UnexpectedResponse { expected: "RepositorySnapshot" }),
 		}
 	}
 
@@ -1125,6 +1484,315 @@ impl EnvClient {
 		self.worktree_request(worktree_op::Op::Merge(request)).await
 	}
 
+	/// Opens a connection-owned document lease without an invocation scope.
+	///
+	/// Owner document operations are routed to the Environment's DATA authority
+	/// with an omitted frame scope.
+	pub async fn open_document(
+		&self,
+		path: &EnvPath,
+		language_id: Option<&str>,
+	) -> Result<DocumentLease, ClientError> {
+		self.open_document_scoped(path, language_id, None).await
+	}
+
+	/// Reads a revision or selection from an owner document lease.
+	pub async fn read_document(
+		&self,
+		lease: &DocumentLease,
+		revision: Option<Revision>,
+		selection: Option<ReadSelection>,
+	) -> Result<DocumentRead, ClientError> {
+		self
+			.read_document_scoped(lease, revision, selection, None)
+			.await
+	}
+
+	/// Reads policy-authorized metadata for an exact environment path.
+	pub async fn stat_path(&self, path: &EnvPath) -> Result<document::PathMetadata, ClientError> {
+		let response = self
+			.data_request_owned(document_request(document_op::Op::Stat(document::StatPathRequest {
+				uri:             self.path_uri(path)?,
+				follow_symlinks: document::FollowSymlinks::Yes as i32,
+			})))
+			.await?;
+		document_result(response, "StatPathResponse", |result| {
+			let document_result::Result::Stat(stat) = result else {
+				return None;
+			};
+			stat.metadata
+		})
+	}
+
+	/// Lists policy-authorized immediate children of an exact environment path.
+	pub async fn list_directory(
+		&self,
+		path: &EnvPath,
+	) -> Result<Vec<document::DirectoryEntry>, ClientError> {
+		let response = self
+			.data_request_owned(document_request(document_op::Op::ListDirectory(
+				document::ListDirectoryRequest {
+					uri:             self.path_uri(path)?,
+					follow_symlinks: document::FollowSymlinks::Yes as i32,
+				},
+			)))
+			.await?;
+		document_result(response, "ListDirectoryResponse", |result| {
+			let document_result::Result::Directory(directory) = result else {
+				return None;
+			};
+			Some(directory.entries)
+		})
+	}
+
+	/// Commits an idempotent owner document transaction.
+	///
+	/// The epoch-qualified transaction id is retained before transmission so a
+	/// caller can reuse it after an ambiguous disconnect.
+	pub async fn commit_transaction(
+		&self,
+		request: CommitTransactionRequest,
+	) -> Result<TransactionOutcome, ClientError> {
+		self
+			.commit_transaction_scoped(request, None, &self.inner.owner_last_transaction)
+			.await
+	}
+
+	/// Commits one text mutation against an owner lease's pinned revision.
+	///
+	/// A committed response must contain exactly one complete operation head;
+	/// only then is the lease advanced. Rejected and partial outcomes retain the
+	/// previous head.
+	pub async fn commit_document(
+		&self,
+		lease: &mut DocumentLease,
+		transaction_id: Bytes,
+		mutation: TextMutation,
+	) -> Result<TransactionOutcome, ClientError> {
+		self
+			.commit_document_scoped(
+				lease,
+				transaction_id,
+				mutation,
+				None,
+				&self.inner.owner_last_transaction,
+			)
+			.await
+	}
+
+	/// Returns the epoch-qualified id of the most recently attempted owner
+	/// document transaction.
+	pub fn last_transaction(&self) -> Option<TransactionId> {
+		self.inner.owner_last_transaction.lock().clone()
+	}
+
+	/// Returns the native language-server roster, optionally rediscovering its
+	/// configuration.
+	pub async fn lsp_status(
+		&self,
+		reload: bool,
+	) -> Result<omp_proto::document::v1::LspStatusResponse, ClientError> {
+		let response = self
+			.data_request_owned(document_request(document_op::Op::LspStatus(
+				document::LspStatusRequest { reload, start: false },
+			)))
+			.await?;
+		document_result(response, "LspStatusResponse", |result| {
+			let document_result::Result::LspStatus(status) = result else {
+				return None;
+			};
+			Some(status)
+		})
+	}
+
+	async fn open_document_scoped(
+		&self,
+		path: &EnvPath,
+		language_id: Option<&str>,
+		scope: Option<&DataScope>,
+	) -> Result<DocumentLease, ClientError> {
+		let request = DataRequest {
+			body: Some(data_request::Body::Document(v1::DocumentOp {
+				op: Some(document_op::Op::Open(OpenDocumentRequest {
+					uri:         self.path_uri(path)?,
+					language_id: language_id.unwrap_or_default().to_owned(),
+				})),
+				..v1::DocumentOp::default()
+			})),
+			..DataRequest::default()
+		};
+		let mut stream = self.open(client_frame::Body::Data(request), scope).await?;
+		let frame = stream.next().await?.ok_or(ClientError::TransportClosed)?;
+		let opened = document_result(response_data(frame)?, "OpenDocumentResponse", |result| {
+			let document_result::Result::Opened(opened) = result else {
+				return None;
+			};
+			Some(opened)
+		})?;
+		let head = opened
+			.head
+			.ok_or(ClientError::UnexpectedResponse { expected: "DocumentHead" })?;
+		if opened.lease_id.is_empty() || !is_revision_pinned(&head) {
+			return Err(ClientError::UnexpectedResponse {
+				expected: "connection-owned lease id and revision-pinned DocumentHead",
+			});
+		}
+		Ok(DocumentLease {
+			client: self.clone(),
+			scope: scope.cloned(),
+			lease_id: opened.lease_id,
+			head,
+			events: DocumentEvents { stream },
+			released: false,
+		})
+	}
+
+	async fn read_document_scoped(
+		&self,
+		lease: &DocumentLease,
+		revision: Option<Revision>,
+		selection: Option<ReadSelection>,
+		scope: Option<&DataScope>,
+	) -> Result<DocumentRead, ClientError> {
+		self.ensure_lease_scope(lease, scope)?;
+		let request = document_request(document_op::Op::Read(ReadDocumentRequest {
+			document: Some(lease_target(lease)),
+			revision,
+			selection,
+		}));
+		let response = self.data_request_scoped(request, scope).await?;
+		let read = document_result(response, "ReadDocumentResponse", |result| {
+			let document_result::Result::Read(read) = result else {
+				return None;
+			};
+			Some(read)
+		})?;
+		let complete_head = read.head.as_ref().is_some_and(is_revision_pinned);
+		if !complete_head || read.body.is_none() {
+			return Err(ClientError::UnexpectedResponse {
+				expected: "complete revision-pinned ReadDocumentResponse",
+			});
+		}
+		Ok(DocumentRead { response: read })
+	}
+
+	async fn commit_transaction_scoped(
+		&self,
+		request: CommitTransactionRequest,
+		scope: Option<&DataScope>,
+		last_transaction: &Mutex<Option<TransactionId>>,
+	) -> Result<TransactionOutcome, ClientError> {
+		let server_epoch = self
+			.inner
+			.info
+			.lock()
+			.as_ref()
+			.map(|info| info.server_epoch.clone())
+			.filter(|epoch| !epoch.is_empty())
+			.ok_or(ClientError::UnexpectedResponse {
+				expected: "nonempty ServerHello.server_epoch before transaction",
+			})?;
+		let expected_transaction_id = request.transaction_id.clone();
+		*last_transaction.lock() =
+			Some(TransactionId { server_epoch, txn_id: expected_transaction_id.clone() });
+		let response = self
+			.data_request_scoped(document_request(document_op::Op::CommitTransaction(request)), scope)
+			.await?;
+		let transaction = document_result(response, "CommitTransactionResponse", |result| {
+			let document_result::Result::Transaction(transaction) = result else {
+				return None;
+			};
+			Some(transaction)
+		})?;
+		match transaction.outcome {
+			Some(commit_transaction_response::Outcome::Committed(committed))
+				if committed.transaction_id == expected_transaction_id =>
+			{
+				Ok(TransactionOutcome::Committed(committed))
+			},
+			Some(commit_transaction_response::Outcome::Rejected(rejected))
+				if rejected.transaction_id == expected_transaction_id =>
+			{
+				Ok(TransactionOutcome::Rejected(rejected))
+			},
+			Some(commit_transaction_response::Outcome::PartiallyCommitted(partial))
+				if partial.transaction_id == expected_transaction_id =>
+			{
+				Ok(TransactionOutcome::Partial(partial))
+			},
+			Some(_) => Err(ClientError::UnexpectedResponse { expected: "matching transaction id" }),
+			None => Err(ClientError::UnexpectedResponse { expected: "transaction outcome" }),
+		}
+	}
+
+	async fn commit_document_scoped(
+		&self,
+		lease: &mut DocumentLease,
+		transaction_id: Bytes,
+		mut mutation: TextMutation,
+		scope: Option<&DataScope>,
+		last_transaction: &Mutex<Option<TransactionId>>,
+	) -> Result<TransactionOutcome, ClientError> {
+		self.ensure_lease_scope(lease, scope)?;
+		mutation.base_revision = Some(
+			lease
+				.head
+				.revision
+				.clone()
+				.ok_or(ClientError::UnexpectedResponse { expected: "revision-pinned DocumentHead" })?,
+		);
+		let outcome = self
+			.commit_transaction_scoped(
+				CommitTransactionRequest {
+					transaction_id,
+					operations: vec![DocumentMutation {
+						document:  Some(lease_target(lease)),
+						operation: Some(document_mutation::Operation::Text(mutation)),
+					}],
+				},
+				scope,
+				last_transaction,
+			)
+			.await?;
+		if let TransactionOutcome::Committed(committed) = &outcome {
+			let head = (committed.operations.len() == 1)
+				.then(|| committed.operations[0].head.clone())
+				.flatten()
+				.filter(is_revision_pinned)
+				.ok_or(ClientError::UnexpectedResponse {
+					expected: "one committed operation with revision-pinned DocumentHead",
+				})?;
+			lease.head = head;
+		}
+		Ok(outcome)
+	}
+
+	fn ensure_lease_scope(
+		&self,
+		lease: &DocumentLease,
+		scope: Option<&DataScope>,
+	) -> Result<(), ClientError> {
+		if Arc::ptr_eq(&self.inner, &lease.client.inner) && lease.scope.as_ref() == scope {
+			Ok(())
+		} else {
+			Err(ClientError::ScopedOperationDenied)
+		}
+	}
+
+	async fn data_request_scoped(
+		&self,
+		request: DataRequest,
+		scope: Option<&DataScope>,
+	) -> Result<DataResponse, ClientError> {
+		match self
+			.one_shot(client_frame::Body::Data(request), scope)
+			.await?
+		{
+			server_frame::Body::Data(response) => Ok(response),
+			_ => Err(ClientError::UnexpectedResponse { expected: "DataResponse" }),
+		}
+	}
+
 	async fn data_request_owned(&self, request: DataRequest) -> Result<DataResponse, ClientError> {
 		match self
 			.one_shot(client_frame::Body::Data(request), None)
@@ -1242,6 +1910,16 @@ impl EnvClient {
 	}
 
 	/// Opens a tool invocation before its arguments have committed.
+	#[tracing::instrument(
+		name = "invocation_open",
+		level = "debug",
+		skip_all,
+		fields(
+			invocation_id = %request.invocation_id,
+			tool = %request.name,
+			revision = %request.rev,
+		)
+	)]
 	pub async fn invoke(&self, request: InvokeTool) -> Result<Invocation, ClientError> {
 		let id = Str::new(request.invocation_id.as_str());
 		let (stream, guard) = self
@@ -1414,9 +2092,29 @@ impl EnvClient {
 	/// Starts a streaming blob download.
 	pub async fn blob_get(&self, request: GetRequest) -> Result<BlobDownload, ClientError> {
 		let stream = self
-			.open(client_frame::Body::BlobGet(request), None)
+			.open(client_frame::Body::BlobGet(request.clone()), None)
 			.await?;
-		Ok(BlobDownload { stream })
+		Ok(BlobDownload { request, stream })
+	}
+
+	/// Starts a streaming blob download attributed to one tool invocation.
+	///
+	/// The durable session principal bound by [`Self::with_principal`] and the
+	/// invocation id travel in the outer frame scope. A remote blob authority
+	/// uses that provenance to release exactly the matching delivery lease
+	/// after a complete or resumed transfer; generic hash reads never release a
+	/// detached-job lease.
+	pub async fn blob_get_for_invocation(
+		&self,
+		invocation_id: &str,
+		request: GetRequest,
+	) -> Result<BlobDownload, ClientError> {
+		let scope = self.grant.wire(invocation_id, self.principal.as_ref());
+		let (stream, guard) = self
+			.open_guarded_wire(client_frame::Body::BlobGet(request.clone()), Some(scope))
+			.await?;
+		guard.relinquish();
+		Ok(BlobDownload { request, stream })
 	}
 
 	/// Starts a streaming blob upload.
@@ -1494,10 +2192,10 @@ impl EnvClient {
 	) -> Result<(RequestStream, RunGuard), ClientError> {
 		let request_id = self.allocate_request_id()?;
 		let stream = self.register(request_id);
-		let cancel = scope
-			.clone()
-			.map(|scope| scoped_cancel_sender(Arc::downgrade(&self.inner), scope))
-			.unwrap_or_else(|| self.inner.cancel.clone());
+		let cancel = scope.clone().map_or_else(
+			|| self.inner.cancel.clone(),
+			|scope| scoped_cancel_sender(Arc::downgrade(&self.inner), scope),
+		);
 		let guard = RunGuard::new(request_id, cancel);
 		if self.send_wire(request_id, body, scope).await.is_err() {
 			stream.unregister();
@@ -1641,6 +2339,12 @@ impl ExtensionEnvClient {
 	/// Connects to an environment UDS, starts its framing task, completes the
 	/// handshake, and permanently installs `scope` on the returned client.
 	#[cfg(unix)]
+	#[tracing::instrument(
+		name = "environment_connect",
+		level = "debug",
+		skip_all,
+		fields(endpoint = %path.as_ref().display())
+	)]
 	pub async fn connect_uds(
 		path: impl AsRef<Path>,
 		hello: &ClientHello,
@@ -2077,43 +2781,10 @@ impl WorkerEnvClient {
 		path: &EnvPath,
 		language_id: Option<&str>,
 	) -> Result<DocumentLease, ClientError> {
-		let request = DataRequest {
-			body: Some(data_request::Body::Document(v1::DocumentOp {
-				op: Some(document_op::Op::Open(OpenDocumentRequest {
-					uri:         self.client.path_uri(path)?,
-					language_id: language_id.unwrap_or_default().to_owned(),
-				})),
-				..v1::DocumentOp::default()
-			})),
-			..DataRequest::default()
-		};
-		let mut stream = self
+		self
 			.client
-			.open(client_frame::Body::Data(request), Some(&self.scope))
-			.await?;
-		let frame = stream.next().await?.ok_or(ClientError::TransportClosed)?;
-		let opened = document_result(response_data(frame)?, "OpenDocumentResponse", |result| {
-			let document_result::Result::Opened(opened) = result else {
-				return None;
-			};
-			Some(opened)
-		})?;
-		let head = opened
-			.head
-			.ok_or(ClientError::UnexpectedResponse { expected: "DocumentHead" })?;
-		if opened.lease_id.is_empty() || !is_revision_pinned(&head) {
-			return Err(ClientError::UnexpectedResponse {
-				expected: "connection-owned lease id and revision-pinned DocumentHead",
-			});
-		}
-		Ok(DocumentLease {
-			client: self.client.clone(),
-			scope: self.scope.clone(),
-			lease_id: opened.lease_id,
-			head,
-			events: DocumentEvents { stream },
-			released: false,
-		})
+			.open_document_scoped(path, language_id, Some(&self.scope))
+			.await
 	}
 
 	/// Reads a revision or selection from an owned document lease.
@@ -2123,25 +2794,10 @@ impl WorkerEnvClient {
 		revision: Option<Revision>,
 		selection: Option<ReadSelection>,
 	) -> Result<DocumentRead, ClientError> {
-		let request = document_request(document_op::Op::Read(ReadDocumentRequest {
-			document: Some(lease_target(lease)),
-			revision,
-			selection,
-		}));
-		let response = self.request(request).await?;
-		let read = document_result(response, "ReadDocumentResponse", |result| {
-			let document_result::Result::Read(read) = result else {
-				return None;
-			};
-			Some(read)
-		})?;
-		let complete_head = read.head.as_ref().is_some_and(is_revision_pinned);
-		if !complete_head || read.body.is_none() {
-			return Err(ClientError::UnexpectedResponse {
-				expected: "complete revision-pinned ReadDocumentResponse",
-			});
-		}
-		Ok(DocumentRead { response: read })
+		self
+			.client
+			.read_document_scoped(lease, revision, selection, Some(&self.scope))
+			.await
 	}
 
 	/// Commits an idempotent document transaction.
@@ -2152,48 +2808,32 @@ impl WorkerEnvClient {
 		&self,
 		request: CommitTransactionRequest,
 	) -> Result<TransactionOutcome, ClientError> {
-		let server_epoch = self
+		self
 			.client
-			.inner
-			.info
-			.lock()
-			.as_ref()
-			.map(|info| info.server_epoch.clone())
-			.filter(|epoch| !epoch.is_empty())
-			.ok_or(ClientError::UnexpectedResponse {
-				expected: "nonempty ServerHello.server_epoch before transaction",
-			})?;
-		let expected_transaction_id = request.transaction_id.clone();
-		*self.last_transaction.lock() =
-			Some(TransactionId { server_epoch, txn_id: expected_transaction_id.clone() });
-		let response = self
-			.request(document_request(document_op::Op::CommitTransaction(request)))
-			.await?;
-		let transaction = document_result(response, "CommitTransactionResponse", |result| {
-			let document_result::Result::Transaction(transaction) = result else {
-				return None;
-			};
-			Some(transaction)
-		})?;
-		match transaction.outcome {
-			Some(commit_transaction_response::Outcome::Committed(committed))
-				if committed.transaction_id == expected_transaction_id =>
-			{
-				Ok(TransactionOutcome::Committed(committed))
-			},
-			Some(commit_transaction_response::Outcome::Rejected(rejected))
-				if rejected.transaction_id == expected_transaction_id =>
-			{
-				Ok(TransactionOutcome::Rejected(rejected))
-			},
-			Some(commit_transaction_response::Outcome::PartiallyCommitted(partial))
-				if partial.transaction_id == expected_transaction_id =>
-			{
-				Ok(TransactionOutcome::Partial(partial))
-			},
-			Some(_) => Err(ClientError::UnexpectedResponse { expected: "matching transaction id" }),
-			None => Err(ClientError::UnexpectedResponse { expected: "transaction outcome" }),
-		}
+			.commit_transaction_scoped(request, Some(&self.scope), &self.last_transaction)
+			.await
+	}
+
+	/// Commits one text mutation against this worker's lease.
+	///
+	/// The mutation is pinned to the lease head and advances that head only
+	/// after a validated committed response.
+	pub async fn commit_document(
+		&self,
+		lease: &mut DocumentLease,
+		transaction_id: Bytes,
+		mutation: TextMutation,
+	) -> Result<TransactionOutcome, ClientError> {
+		self
+			.client
+			.commit_document_scoped(
+				lease,
+				transaction_id,
+				mutation,
+				Some(&self.scope),
+				&self.last_transaction,
+			)
+			.await
 	}
 
 	/// Returns the epoch-qualified id of the most recently attempted
@@ -2212,23 +2852,6 @@ impl WorkerEnvClient {
 			.open(client_frame::Body::Data(request), Some(&self.scope))
 			.await?;
 		Ok(LspEvents { stream })
-	}
-
-	/// Reads the Environment-owned repository snapshot for a granted root.
-	pub async fn repository_snapshot(
-		&self,
-		request: env_wire::RepositorySnapshotRequest,
-	) -> Result<env_wire::RepositorySnapshot, ClientError> {
-		let response = self
-			.request(DataRequest {
-				body: Some(data_request::Body::RepositorySnapshot(request)),
-				..DataRequest::default()
-			})
-			.await?;
-		match response.body {
-			Some(data_response::Body::RepositorySnapshot(snapshot)) => Ok(snapshot),
-			_ => Err(ClientError::UnexpectedResponse { expected: "RepositorySnapshot" }),
-		}
 	}
 
 	/// Executes an attributed, approval-ticketed privileged write or unlink.
@@ -2526,9 +3149,9 @@ impl WorkerEnvClient {
 	pub async fn blob_get(&self, request: GetRequest) -> Result<BlobDownload, ClientError> {
 		let stream = self
 			.client
-			.open(client_frame::Body::BlobGet(request), Some(&self.scope))
+			.open(client_frame::Body::BlobGet(request.clone()), Some(&self.scope))
 			.await?;
-		Ok(BlobDownload { stream })
+		Ok(BlobDownload { request, stream })
 	}
 
 	/// Starts a scoped streaming blob upload.
@@ -2568,7 +3191,7 @@ impl DocumentLease {
 		self.events.stream.finish();
 		let response = self
 			.client
-			.one_shot(client_frame::Body::Data(request), Some(&self.scope))
+			.one_shot(client_frame::Body::Data(request), self.scope.as_ref())
 			.await?;
 		let _ = document_result(response_data_body(response)?, "CloseDocumentResponse", |result| {
 			let document_result::Result::Closed(closed) = result else {
@@ -2630,6 +3253,13 @@ impl DocumentRead {
 }
 
 impl InProcessEnvTransport {
+	pub(crate) const fn from_parts(
+		requests: Receiver<ClientFrame>,
+		responses: Sender<ServerFrame>,
+	) -> Self {
+		Self { requests, responses }
+	}
+
 	/// Receives the next client frame asynchronously.
 	pub async fn recv(&self) -> Result<ClientFrame, flume::RecvError> {
 		self.requests.recv_async().await
@@ -2671,6 +3301,14 @@ impl RequestStream {
 	/// keeps the stream returned by detached work safe to discard; callers that
 	/// own an ordinary long-lived request can cancel it explicitly here.
 	pub fn cancel(mut self) {
+		self.request_cancel();
+		self.finish();
+	}
+
+	fn request_cancel(&mut self) {
+		if self.finished {
+			return;
+		}
 		if let Some(client) = self.client.upgrade() {
 			let scope = client.request_scopes.lock().get(&self.request_id).cloned();
 			let _ = client.outgoing.try_send(ClientFrame {
@@ -2683,7 +3321,6 @@ impl RequestStream {
 				..ClientFrame::default()
 			});
 		}
-		self.finish();
 	}
 
 	fn finish(&mut self) {
@@ -2714,6 +3351,12 @@ mod policy_effects {
 	impl Invocation {
 		/// Sends the exact committed argument bytes, authorizing effects
 		/// env-side.
+		#[tracing::instrument(
+			name = "invocation_commit",
+			level = "debug",
+			skip_all,
+			fields(invocation_id = %self.id)
+		)]
 		pub async fn commit_args(
 			&self,
 			raw: Bytes,
@@ -2773,6 +3416,12 @@ impl Invocation {
 	}
 
 	/// Answers the environment's admission query for this invocation.
+	#[tracing::instrument(
+		name = "invocation_admit",
+		level = "debug",
+		skip_all,
+		fields(invocation_id = %self.id)
+	)]
 	pub async fn admit(&self, mut admission: Admission) -> Result<(), ClientError> {
 		admission.invocation_id = self.id.to_string();
 		self
@@ -2782,6 +3431,12 @@ impl Invocation {
 	}
 
 	/// Sends cooperative interrupt steering to this invocation only.
+	#[tracing::instrument(
+		name = "invocation_interrupt",
+		level = "debug",
+		skip_all,
+		fields(invocation_id = %self.id)
+	)]
 	pub async fn interrupt(&self, reason: Str) -> Result<(), ClientError> {
 		self
 			.client
@@ -2805,6 +3460,11 @@ impl Invocation {
 		let body = match response_body(frame) {
 			Ok(body) => body,
 			Err(error) => {
+				tracing::warn!(
+					invocation_id = %self.id,
+					error = %error,
+					"invocation protocol error"
+				);
 				self.complete();
 				return Err(error);
 			},
@@ -2821,12 +3481,23 @@ impl Invocation {
 			},
 			server_frame::Body::EventStreamError(event) => {
 				let error = stream_lost(event);
+				tracing::warn!(
+					invocation_id = %self.id,
+					error = %error,
+					"invocation event stream lost continuity"
+				);
 				self.complete();
 				Err(error)
 			},
 			_ => {
+				let error = ClientError::UnexpectedResponse { expected: "invocation event" };
+				tracing::warn!(
+					invocation_id = %self.id,
+					error = %error,
+					"unexpected invocation protocol response"
+				);
 				self.complete();
-				Err(ClientError::UnexpectedResponse { expected: "invocation event" })
+				Err(error)
 			},
 		}
 	}
@@ -3274,6 +3945,7 @@ impl BlobDownload {
 		let body = match response_body(frame) {
 			Ok(body) => body,
 			Err(error) => {
+				self.stream.request_cancel();
 				self.stream.finish();
 				return Err(error);
 			},
@@ -3286,20 +3958,177 @@ impl BlobDownload {
 			},
 			server_frame::Body::EventStreamError(event) => {
 				let error = stream_lost(event);
+				self.stream.request_cancel();
 				self.stream.finish();
 				Err(error)
 			},
 			_ => {
+				self.stream.request_cancel();
 				self.stream.finish();
 				Err(ClientError::UnexpectedResponse { expected: "blob chunk or completion" })
 			},
 		}
 	}
 
-	/// Stops this download before its completion marker.
-	pub fn cancel(self) {
-		self.stream.cancel();
+	/// Streams a complete blob into `destination` under a caller-owned total
+	/// bound while verifying first-chunk metadata, the completion marker,
+	/// transferred length, and the SHA-256 digest.
+	///
+	/// This single-request convenience delegates to
+	/// [`ResumableBlobTransfer::receive`], keeping verdict consumers and generic
+	/// blob consumers on one verifier. Use [`ResumableBlobTransfer`] directly
+	/// when a replacement connection must continue after interruption.
+	pub async fn write_verified(
+		self,
+		expected_hash: Hash32,
+		expected_size: u64,
+		max_bytes: u64,
+		destination: &mut (impl io::Write + Send),
+	) -> Result<VerifiedBlobTransfer, ClientError> {
+		let mut transfer = ResumableBlobTransfer::new(expected_hash, expected_size, max_bytes)?;
+		transfer
+			.receive(self, destination)
+			.await?
+			.ok_or(ClientError::IncompleteBlob)
 	}
+
+	/// Stops this download before its completion marker.
+	pub fn cancel(mut self) {
+		self.stream.request_cancel();
+		self.stream.finish();
+	}
+}
+
+impl Drop for BlobDownload {
+	fn drop(&mut self) {
+		if !self.stream.finished {
+			self.stream.request_cancel();
+			self.stream.finish();
+		}
+	}
+}
+
+impl ResumableBlobTransfer {
+	/// Consumes one requested range and advances durable transfer progress.
+	///
+	/// Each chunk is written before the next frame is requested, preserving
+	/// destination backpressure. On transport loss or cancellation, fully
+	/// written chunks remain represented by [`Self::next_offset`]; the caller
+	/// may open a replacement client with [`Self::request`] and call `receive`
+	/// again.
+	/// A destination write error is terminal because `std::io::Write` cannot
+	/// report how much of a failed `write_all` reached the destination.
+	///
+	/// # Errors
+	///
+	/// Returns a typed [`ClientError`] for mismatched range position,
+	/// provenance, size, digest, destination failure, or transport loss.
+	pub async fn receive(
+		&mut self,
+		mut download: BlobDownload,
+		destination: &mut (impl io::Write + Send),
+	) -> Result<Option<VerifiedBlobTransfer>, ClientError> {
+		let requested_hash = parse_blob_hash(&download.request.hash)?;
+		if requested_hash != self.hash {
+			return Err(ClientError::BlobDigestMismatch);
+		}
+		if download.request.offset != self.next_offset {
+			return Err(ClientError::BlobResumeOffsetMismatch {
+				expected: self.next_offset,
+				actual:   download.request.offset,
+			});
+		}
+
+		let available = self.size - self.next_offset;
+		let expected_segment = if download.request.length == 0 {
+			available
+		} else {
+			download.request.length.min(available)
+		};
+		let segment_start = self.next_offset;
+		let mut first = true;
+
+		loop {
+			match download.next_event().await? {
+				Some(BlobDownloadEvent::Chunk(chunk)) => {
+					if first {
+						let hash = parse_blob_hash(&chunk.hash)?;
+						if hash != self.hash {
+							return Err(ClientError::BlobDigestMismatch);
+						}
+						let size = chunk.size.ok_or(ClientError::InvalidBlobMetadata)?;
+						if size != self.size {
+							return Err(ClientError::BlobSizeMismatch {
+								expected: self.size,
+								actual:   size,
+							});
+						}
+						first = false;
+					} else if !chunk.hash.is_empty() || chunk.size.is_some() {
+						return Err(ClientError::InvalidBlobMetadata);
+					}
+
+					let chunk_len = u64::try_from(chunk.data.len()).unwrap_or(u64::MAX);
+					let segment_received = self.next_offset - segment_start;
+					if chunk_len == 0 && segment_received < expected_segment {
+						return Err(ClientError::InvalidBlobMetadata);
+					}
+					let next_segment = segment_received
+						.checked_add(chunk_len)
+						.ok_or(ClientError::BlobTooLarge { size: u64::MAX, limit: self.max_bytes })?;
+					let next_offset = self
+						.next_offset
+						.checked_add(chunk_len)
+						.ok_or(ClientError::BlobTooLarge { size: u64::MAX, limit: self.max_bytes })?;
+					if next_segment > expected_segment
+						|| next_offset > self.size
+						|| next_offset > self.max_bytes
+					{
+						return Err(ClientError::BlobSizeMismatch {
+							expected: expected_segment,
+							actual:   next_segment,
+						});
+					}
+
+					io::Write::write_all(destination, &chunk.data)
+						.map_err(|source| ClientError::BlobWrite { source })?;
+					self.hasher.update(&chunk.data);
+					self.next_offset = next_offset;
+				},
+				Some(BlobDownloadEvent::Complete(complete)) => {
+					if first {
+						return Err(ClientError::InvalidBlobMetadata);
+					}
+					let hash = parse_blob_hash(&complete.hash)?;
+					if hash != self.hash {
+						return Err(ClientError::BlobDigestMismatch);
+					}
+					let segment_received = self.next_offset - segment_start;
+					if complete.bytes_sent != segment_received || segment_received != expected_segment {
+						return Err(ClientError::BlobSizeMismatch {
+							expected: expected_segment,
+							actual:   segment_received,
+						});
+					}
+					if self.is_complete() {
+						if self.hasher.finalize() != self.hash {
+							return Err(ClientError::BlobDigestMismatch);
+						}
+						return Ok(Some(VerifiedBlobTransfer { hash: self.hash, size: self.size }));
+					}
+					return Ok(None);
+				},
+				None => return Err(ClientError::IncompleteBlob),
+			}
+		}
+	}
+}
+
+fn parse_blob_hash(bytes: &[u8]) -> Result<Hash32, ClientError> {
+	let hash: [u8; 32] = bytes
+		.try_into()
+		.map_err(|_| ClientError::InvalidBlobDigest { actual: bytes.len() })?;
+	Ok(Hash32::new(hash))
 }
 
 impl BlobUpload {
@@ -3459,18 +4288,12 @@ const fn ensure_worker_data(request: &DataRequest) -> Result<(), ClientError> {
 	}
 }
 
-fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
-	if capacity == 0 {
-		flume::unbounded()
-	} else {
-		flume::bounded(capacity)
-	}
-}
-
 fn route_responses(
 	client: Weak<ClientInner>,
 	incoming: Receiver<ServerFrame>,
 	events: Sender<ServerFrame>,
+	edit_repair_requests: Sender<EditRepairRequest>,
+	acp_requests: Sender<AcpRequest>,
 ) {
 	while let Ok(frame) = incoming.recv() {
 		let Some(client) = client.upgrade() else {
@@ -3491,6 +4314,68 @@ fn route_responses(
 			}
 			continue;
 		}
+		if let Some(server_frame::Body::EditRepairQuery(query)) = frame.body.as_ref() {
+			let scope = {
+				let scopes = client.request_scopes.lock();
+				scopes.get(&frame.request_id).cloned().or_else(|| {
+					scopes
+						.values()
+						.find(|scope| scope.invocation_id == query.invocation_id)
+						.cloned()
+				})
+			};
+			if let Some(scope) = scope {
+				client
+					.edit_repair_scopes
+					.lock()
+					.insert(frame.request_id, scope);
+				let _ = edit_repair_requests
+					.send(EditRepairRequest { request_id: frame.request_id, query: query.clone() });
+			}
+			continue;
+		}
+		let acp_request = match frame.body.as_ref() {
+			Some(server_frame::Body::AcpReadQuery(query)) => Some((
+				query.invocation_id.as_str(),
+				AcpRequest::Read { request_id: frame.request_id, query: query.clone() },
+				true,
+			)),
+			Some(server_frame::Body::AcpWriteQuery(query)) => Some((
+				query.invocation_id.as_str(),
+				AcpRequest::Write { request_id: frame.request_id, query: query.clone() },
+				true,
+			)),
+			Some(server_frame::Body::AcpExecQuery(query)) => Some((
+				query.invocation_id.as_str(),
+				AcpRequest::Exec { request_id: frame.request_id, query: query.clone() },
+				true,
+			)),
+			Some(server_frame::Body::AcpExecCancel(cancel)) => Some((
+				cancel.invocation_id.as_str(),
+				AcpRequest::ExecCancel { request_id: frame.request_id, cancel: cancel.clone() },
+				false,
+			)),
+			_ => None,
+		};
+		if let Some((invocation_id, request, retains_scope)) = acp_request {
+			let scope = {
+				let scopes = client.request_scopes.lock();
+				scopes.get(&frame.request_id).cloned().or_else(|| {
+					scopes
+						.values()
+						.find(|scope| scope.invocation_id == invocation_id)
+						.cloned()
+				})
+			};
+			if retains_scope && let Some(scope) = scope {
+				client
+					.acp_request_scopes
+					.lock()
+					.insert(frame.request_id, scope);
+			}
+			let _ = acp_requests.send(request);
+			continue;
+		}
 		if let Some(server_frame::Body::AdmitInvocation(query)) = frame.body.as_ref()
 			&& let Some(admitter) = client.admitter.lock().clone()
 		{
@@ -3504,6 +4389,8 @@ fn route_responses(
 	}
 	if let Some(client) = client.upgrade() {
 		client.pending.lock().clear();
+		client.edit_repair_scopes.lock().clear();
+		client.acp_request_scopes.lock().clear();
 		client.hello_waiter.lock().take();
 	}
 }
@@ -3571,7 +4458,7 @@ fn route_lease_closes(client: Weak<ClientInner>, closes: Receiver<LeaseClose>) {
 		let frame = ClientFrame {
 			request_id,
 			body: Some(client_frame::Body::Data(request)),
-			scope: Some(close.scope.wire()),
+			scope: close.scope.as_ref().map(DataScope::wire),
 			..ClientFrame::default()
 		};
 		if client.outgoing.send(frame).is_err() {
@@ -3665,6 +4552,367 @@ async fn read_extension_frame_length<R: AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[tokio::test]
+	async fn invocation_blob_get_carries_stable_delivery_provenance() {
+		let (client, transport) = EnvClient::in_process(0);
+		let client = client
+			.with_principal("session-a", "agent-a")
+			.expect("valid principal");
+		let request = tokio::spawn({
+			let client = client.clone();
+			async move {
+				client
+					.blob_get_for_invocation("call-a", GetRequest {
+						hash:   Bytes::from_static(&[7; 32]),
+						offset: 12,
+						length: 34,
+					})
+					.await
+			}
+		});
+		let frame = transport.recv().await.expect("receive blob request");
+		assert!(matches!(
+			&frame.body,
+			Some(client_frame::Body::BlobGet(GetRequest {
+				hash,
+				offset: 12,
+				length: 34,
+			})) if hash.as_ref() == [7; 32]
+		));
+		assert_eq!(
+			frame.scope,
+			Some(InvocationScope {
+				invocation_id: "call-a".into(),
+				session_id: "session-a".into(),
+				agent_id: "agent-a".into(),
+				..InvocationScope::default()
+			})
+		);
+		request
+			.await
+			.expect("blob request task")
+			.expect("open blob download")
+			.cancel();
+	}
+
+	#[tokio::test]
+	async fn reset_eval_uses_one_correlated_typed_request() {
+		let (client, transport) = EnvClient::in_process(0);
+		let (requests, responses) = transport.into_parts();
+		let request = tokio::spawn({
+			let client = client.clone();
+			async move { client.reset_eval().await }
+		});
+		let frame = requests
+			.recv_async()
+			.await
+			.expect("receive eval reset request");
+		assert_ne!(frame.request_id, 0);
+		assert!(matches!(frame.body, Some(client_frame::Body::EvalReset(EvalResetRequest {}))));
+		responses
+			.send_async(ServerFrame {
+				request_id: frame.request_id,
+				body: Some(server_frame::Body::EvalReset(env_wire::EvalResetResponse {})),
+				..ServerFrame::default()
+			})
+			.await
+			.expect("send eval reset response");
+		request.await.expect("reset task").expect("reset response");
+		assert!(requests.try_recv().is_err(), "reset sent more than one request");
+	}
+
+	#[tokio::test]
+	async fn reset_eval_rejects_a_different_response_type() {
+		let (client, transport) = EnvClient::in_process(0);
+		let request = tokio::spawn({
+			let client = client.clone();
+			async move { client.reset_eval().await }
+		});
+		let frame = transport.recv().await.expect("receive eval reset request");
+		transport
+			.send(ServerFrame {
+				request_id: frame.request_id,
+				body: Some(server_frame::Body::RetireStarted(env_wire::RetireStarted::default())),
+				..ServerFrame::default()
+			})
+			.await
+			.expect("send mismatched response");
+		assert!(matches!(
+			request.await.expect("reset task"),
+			Err(ClientError::UnexpectedResponse { expected: "EvalResetResponse" })
+		));
+	}
+	#[tokio::test]
+	async fn reset_eval_surfaces_typed_protocol_errors() {
+		let (client, transport) = EnvClient::in_process(0);
+		let request = tokio::spawn({
+			let client = client.clone();
+			async move { client.reset_eval().await }
+		});
+		let frame = transport.recv().await.expect("receive eval reset request");
+		transport
+			.send(ServerFrame {
+				request_id: frame.request_id,
+				body: Some(server_frame::Body::Error(ProtocolError {
+					code: ProtocolErrorCode::Unsupported as i32,
+					message: "eval reset unavailable".into(),
+					..ProtocolError::default()
+				})),
+				..ServerFrame::default()
+			})
+			.await
+			.expect("send protocol error");
+		assert!(matches!(
+			request.await.expect("reset task"),
+			Err(ClientError::Protocol(ProtocolError { code, .. }))
+				if code == ProtocolErrorCode::Unsupported as i32
+		));
+	}
+
+	#[tokio::test]
+	async fn edit_repair_queries_bypass_invocation_events_and_preserve_scope() {
+		let (outgoing, requests) = flume::unbounded();
+		let (responses, incoming) = flume::unbounded();
+		let client = EnvClient::from_channels(outgoing, incoming);
+		let scope = InvocationScope {
+			invocation_id: "edit-1".into(),
+			effect_token: Bytes::from_static(b"authority"),
+			host_generation: 7,
+			session_generation: 11,
+			..InvocationScope::default()
+		};
+		client.inner.request_scopes.lock().insert(42, scope.clone());
+		let pending = client.register(42);
+		let repair_requests = client.edit_repair_requests();
+
+		responses
+			.send(ServerFrame {
+				request_id: 700,
+				body: Some(server_frame::Body::EditRepairQuery(EditRepairQuery {
+					invocation_id: "edit-1".into(),
+					prompt:        Some(env_wire::EditRepairPrompt {
+						language:         "rust".into(),
+						before:           "fn good() {}".into(),
+						after:            "fn broken( {}".into(),
+						previous_attempt: None,
+					}),
+				})),
+				..ServerFrame::default()
+			})
+			.expect("send repair query");
+
+		let request =
+			tokio::time::timeout(std::time::Duration::from_secs(1), repair_requests.recv_async())
+				.await
+				.expect("repair request timed out")
+				.expect("repair request channel closed");
+		assert_eq!(request.request_id, 700);
+		assert_eq!(request.query.invocation_id, "edit-1");
+		assert!(pending.receiver.try_recv().is_err(), "repair query entered invocation events");
+
+		client
+			.answer_edit_repair(request.request_id, EditRepairAnswer {
+				invocation_id: request.query.invocation_id,
+				body:          Some(env_wire::edit_repair_answer::Body::Content(
+					"fn fixed() {}".into(),
+				)),
+			})
+			.await
+			.expect("answer repair query");
+		let answer = requests.recv_async().await.expect("receive repair answer");
+		assert_eq!(answer.request_id, 700);
+		assert_eq!(client.inner.pending.lock().len(), 1, "answer opened a correlation waiter");
+		assert_eq!(answer.scope, Some(scope));
+		assert!(matches!(
+			&answer.body,
+			Some(client_frame::Body::EditRepairAnswer(EditRepairAnswer {
+				body: Some(env_wire::edit_repair_answer::Body::Content(content)),
+				..
+			})) if content == "fn fixed() {}"
+		));
+
+		drop(responses);
+		tokio::time::timeout(std::time::Duration::from_secs(1), repair_requests.recv_async())
+			.await
+			.expect("repair request disconnect timed out")
+			.expect_err("repair request channel remained open");
+	}
+
+	#[tokio::test]
+	async fn bind_acp_is_request_zero_and_requires_hello() {
+		let (outgoing, requests) = flume::unbounded();
+		let (responses, incoming) = flume::unbounded();
+		let client = EnvClient::from_channels(outgoing, incoming);
+		assert!(matches!(client.bind_acp(true, true), Err(ClientError::UnexpectedResponse { .. })));
+
+		let handshake = tokio::spawn({
+			let client = client.clone();
+			async move { client.hello(ClientHello::default()).await }
+		});
+		let hello = requests.recv_async().await.expect("receive client hello");
+		assert_eq!(hello.request_id, 0);
+		responses
+			.send_async(ServerFrame {
+				request_id: 0,
+				body: Some(server_frame::Body::Hello(ServerHello::default())),
+				..ServerFrame::default()
+			})
+			.await
+			.expect("send server hello");
+		handshake
+			.await
+			.expect("hello task")
+			.expect("complete hello");
+
+		client.bind_acp(true, false).expect("bind ACP documents");
+		let bind = requests.recv_async().await.expect("receive ACP bind");
+		assert_eq!(bind.request_id, 0);
+		assert!(bind.scope.is_none());
+		assert!(matches!(
+			bind.body,
+			Some(client_frame::Body::AcpBind(AcpBind { documents: true, exec: false }))
+		));
+		assert!(client.inner.pending.lock().is_empty(), "bind opened a response correlation");
+	}
+
+	#[tokio::test]
+	async fn acp_requests_bypass_pending_and_answers_preserve_scope() {
+		let (outgoing, requests) = flume::unbounded();
+		let (responses, incoming) = flume::unbounded();
+		let client = EnvClient::from_channels(outgoing, incoming);
+		let scope = InvocationScope {
+			invocation_id: "acp-1".into(),
+			effect_token: Bytes::from_static(b"acp-authority"),
+			host_generation: 5,
+			session_generation: 8,
+			..InvocationScope::default()
+		};
+		client.inner.request_scopes.lock().insert(42, scope.clone());
+		let pending = client.register(42);
+		let acp_requests = client.acp_requests();
+
+		let server_requests = [
+			ServerFrame {
+				request_id: 700,
+				body: Some(server_frame::Body::AcpReadQuery(AcpReadQuery {
+					query_id:      1,
+					invocation_id: "acp-1".into(),
+					path:          "one.rs".into(),
+				})),
+				..ServerFrame::default()
+			},
+			ServerFrame {
+				request_id: 701,
+				body: Some(server_frame::Body::AcpWriteQuery(AcpWriteQuery {
+					query_id:      2,
+					invocation_id: "acp-1".into(),
+					path:          "two.rs".into(),
+					content:       "updated".into(),
+				})),
+				..ServerFrame::default()
+			},
+			ServerFrame {
+				request_id: 702,
+				body: Some(server_frame::Body::AcpExecQuery(AcpExecQuery {
+					query_id:      3,
+					invocation_id: "acp-1".into(),
+					command:       "cargo metadata".into(),
+					cwd:           "/workspace".into(),
+					env:           std::collections::BTreeMap::new(),
+					timeout_ms:    Some(2_000),
+				})),
+				..ServerFrame::default()
+			},
+			ServerFrame {
+				request_id: 703,
+				body: Some(server_frame::Body::AcpExecCancel(AcpExecCancel {
+					query_id:      3,
+					invocation_id: "acp-1".into(),
+				})),
+				..ServerFrame::default()
+			},
+		];
+		for frame in server_requests {
+			responses.send_async(frame).await.expect("send ACP request");
+		}
+
+		let read = acp_requests.recv_async().await.expect("receive ACP read");
+		let write = acp_requests.recv_async().await.expect("receive ACP write");
+		let exec = acp_requests.recv_async().await.expect("receive ACP exec");
+		let cancel = acp_requests
+			.recv_async()
+			.await
+			.expect("receive ACP cancellation");
+		assert!(matches!(
+			&read,
+			AcpRequest::Read { request_id: 700, query } if query.query_id == 1
+		));
+		assert!(matches!(
+			&write,
+			AcpRequest::Write { request_id: 701, query } if query.query_id == 2
+		));
+		assert!(matches!(
+			&exec,
+			AcpRequest::Exec { request_id: 702, query } if query.query_id == 3
+		));
+		assert!(matches!(
+			&cancel,
+			AcpRequest::ExecCancel { request_id: 703, cancel } if cancel.query_id == 3
+		));
+		assert!(pending.receiver.try_recv().is_err(), "ACP request entered invocation events");
+
+		client
+			.answer_acp_document(700, AcpDocumentAnswer {
+				query_id:      1,
+				invocation_id: "acp-1".into(),
+				body:          Some(env_wire::acp_document_answer::Body::Content("source".into())),
+			})
+			.await
+			.expect("answer ACP read");
+		client
+			.answer_acp_document(701, AcpDocumentAnswer {
+				query_id:      2,
+				invocation_id: "acp-1".into(),
+				body:          Some(env_wire::acp_document_answer::Body::Error(
+					ProtocolError::default(),
+				)),
+			})
+			.await
+			.expect("answer ACP write");
+		for body in [
+			env_wire::acp_exec_event::Body::Started(ExecStarted::default()),
+			env_wire::acp_exec_event::Body::Output(OutputFrame::default()),
+			env_wire::acp_exec_event::Body::Exit(ExitEvent::default()),
+		] {
+			client
+				.send_acp_exec_event(702, AcpExecEvent {
+					query_id:      3,
+					invocation_id: "acp-1".into(),
+					body:          Some(body),
+				})
+				.await
+				.expect("send ACP exec event");
+		}
+
+		for expected_request_id in [700, 701, 702, 702, 702] {
+			let answer = requests
+				.recv_async()
+				.await
+				.expect("receive ACP answer or event");
+			assert_eq!(answer.request_id, expected_request_id);
+			assert_eq!(answer.scope, Some(scope.clone()));
+		}
+		assert_eq!(client.inner.pending.lock().len(), 1, "ACP answer opened a response waiter");
+		assert!(client.inner.acp_request_scopes.lock().is_empty());
+		assert!(pending.receiver.try_recv().is_err(), "ACP answer entered invocation events");
+
+		drop(responses);
+		tokio::time::timeout(std::time::Duration::from_secs(1), acp_requests.recv_async())
+			.await
+			.expect("ACP request disconnect timed out")
+			.expect_err("ACP request channel remained open");
+	}
 
 	#[test]
 	fn terminal_request_streams_remove_all_correlation_state() {

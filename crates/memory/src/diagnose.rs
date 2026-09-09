@@ -34,9 +34,7 @@ pub struct BankDiagnostic {
 
 /// Collects complete diagnostics for one bank.
 pub fn inspect(store: &BankStore) -> Result<BankDiagnostic> {
-	let database_bytes = fs::metadata(store.path())
-		.map(|value| value.len())
-		.unwrap_or(0);
+	let database_bytes = fs::metadata(store.path()).map_or(0, |value| value.len());
 	Ok(BankDiagnostic {
 		bank: store.bank().to_string(),
 		database: store.path().to_path_buf(),
@@ -62,7 +60,7 @@ pub const fn generations(report: &BankDiagnostic) -> IndexGeneration {
 ///
 /// Windows may retain transient locks after the last handle closes. Permission,
 /// would-block, and directory-not-empty failures are retried for the
-/// Pi-compatible one-second window.
+/// one-second window.
 pub fn remove_database_files(path: &Path) -> Result<()> {
 	for suffix in ["", "-wal", "-shm"] {
 		let target = if suffix.is_empty() {

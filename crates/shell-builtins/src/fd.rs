@@ -1,6 +1,4 @@
 //! In-process `fd` builtin backed by `omp_walker` and `regex`.
-//!
-//! Relocated from pi-shell's native implementation.
 
 use std::{
 	collections::HashMap,
@@ -17,7 +15,7 @@ use std::{
 
 use clap::{ArgAction, Parser, ValueEnum};
 use ignore::{gitignore, gitignore::Gitignore};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 use omp_walker::{
 	CollectedEntry,
 	glob::{CompiledPattern, PatternBuilder},
@@ -1562,7 +1560,7 @@ mod tests {
 	use std::{cell, fs, io, path::Path, sync::atomic::AtomicBool};
 
 	use clap::Parser;
-	use omp_shell_engine::openfiles::OpenFile;
+	use omp_shell::openfiles::OpenFile;
 	use tempfile::{Builder, TempDir};
 
 	use super::{FdCli, cancel_heartbeat};

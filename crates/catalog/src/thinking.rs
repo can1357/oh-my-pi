@@ -1,18 +1,15 @@
 //! Typed reasoning effort, budget, display, and wire-routing policies.
 
 #![allow(missing_docs, reason = "strum IntoStaticStr emits undocumented inherent methods")]
-use std::{
-	collections::{BTreeMap, btree_map},
-	error,
-	fmt::{self, Display},
-};
+use std::collections::{BTreeMap, btree_map};
 
 use omp_core::Str;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use strum::{Display, EnumString, IntoStaticStr};
+use strum::{Display, EnumString, IntoStaticStr, VariantNames};
 
 use crate::{
+	capability::ReasoningEffort,
 	id::{ThinkingPolicyId, WireModelId},
 	policy::content_id,
 };
@@ -32,6 +29,7 @@ use crate::{
 	PartialOrd,
 	Serialize,
 	Deserialize,
+	VariantNames,
 )]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase", ascii_case_insensitive, const_into_str)]
@@ -78,6 +76,34 @@ impl ThinkingEffort {
 			Self::Max => ("max", "Maximum reasoning the model supports"),
 		};
 		ThinkingEffortMetadata { effort: self, label, description }
+	}
+}
+
+impl From<ReasoningEffort> for ThinkingEffort {
+	fn from(effort: ReasoningEffort) -> Self {
+		match effort {
+			ReasoningEffort::Off => Self::Off,
+			ReasoningEffort::Minimal => Self::Minimal,
+			ReasoningEffort::Low => Self::Low,
+			ReasoningEffort::Medium => Self::Medium,
+			ReasoningEffort::High => Self::High,
+			ReasoningEffort::Xhigh => Self::XHigh,
+			ReasoningEffort::Max => Self::Max,
+		}
+	}
+}
+
+impl From<ThinkingEffort> for ReasoningEffort {
+	fn from(effort: ThinkingEffort) -> Self {
+		match effort {
+			ThinkingEffort::Off => Self::Off,
+			ThinkingEffort::Minimal => Self::Minimal,
+			ThinkingEffort::Low => Self::Low,
+			ThinkingEffort::Medium => Self::Medium,
+			ThinkingEffort::High => Self::High,
+			ThinkingEffort::XHigh => Self::Xhigh,
+			ThinkingEffort::Max => Self::Max,
+		}
 	}
 }
 
@@ -186,6 +212,12 @@ pub struct ThinkingPolicy {
 	/// Per-effort thinking token budgets.
 	#[serde(default)]
 	pub effort_budgets:    BTreeMap<ThinkingEffort, u64>,
+	/// Per-effort native control spellings.
+	#[serde(default)]
+	pub effort_map:        BTreeMap<ThinkingEffort, Str>,
+	/// Whether signed thinking binds to the exact preceding prefix.
+	#[serde(default)]
+	pub prefix_binding:    Option<bool>,
 	/// Whether adaptive-thinking display controls are supported.
 	pub supports_display:  Option<bool>,
 	/// Whether disabling reasoning must be explicit on the wire.
@@ -205,6 +237,8 @@ impl ThinkingPolicy {
 			efforts: efforts.into_iter().collect(),
 			default_level: None,
 			effort_budgets: BTreeMap::new(),
+			effort_map: BTreeMap::new(),
+			prefix_binding: None,
 			supports_display: None,
 			suppress_when_off: None,
 			requires_effort: None,
@@ -435,7 +469,7 @@ impl ThinkingRouting {
 		let native_effort = self.effort_map.get(&effort).cloned();
 		// A collapsed family may alias `minimal` onto the sibling `low` wire
 		// identity (Cloud Code Assist Gemini 3.6/3.7 Flash route both onto the
-		// `-low` SKU, which rejects wire `MINIMAL`; pi f7df5d4970). The wire
+		// `-low` SKU, which rejects wire `MINIMAL`. The wire
 		// effort names the canonical effort that owns the routed identity so
 		// codecs spell the level that SKU actually accepts.
 		let wire_effort = if effort == ThinkingEffort::Minimal
@@ -450,6 +484,18 @@ impl ThinkingRouting {
 			.effort_routing
 			.get(&effort)
 			.map_or_else(|| default_wire_model.to_owned(), Clone::clone);
+		// MiniMax on Anthropic-shaped routes maps every advertised effort onto
+		// the literal `adaptive` tag: the control surface is `thinking.type`,
+		// not `output_config.effort`, so codecs must neither pin an effort nor
+		// treat the model as adaptive-only when thinking is off.
+		let adaptive_tag_only = policy.mode == ThinkingMode::AnthropicAdaptive
+			&& !policy.efforts.is_empty()
+			&& policy.efforts.iter().all(|effort| {
+				self
+					.effort_map
+					.get(effort)
+					.is_some_and(|native| native.as_str() == ADAPTIVE_TAG)
+			});
 		Ok(ThinkingSelection {
 			effort,
 			wire_effort,
@@ -458,9 +504,13 @@ impl ThinkingRouting {
 			wire_model,
 			reasoning_mode: self.reasoning_mode,
 			suppress_when_off: effort == ThinkingEffort::Off && policy.suppress_when_off == Some(true),
+			adaptive_tag_only,
 		})
 	}
 }
+
+/// Native effort spelling that turns `output_config.effort` into a no-op tag.
+const ADAPTIVE_TAG: &str = "adaptive";
 
 /// Fully resolved reasoning controls for one encoded request.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -483,70 +533,42 @@ pub struct ThinkingSelection {
 	pub reasoning_mode:    Option<ReasoningMode>,
 	/// Whether the wire reasoning control must be suppressed while off.
 	pub suppress_when_off: bool,
+	/// Whether every advertised effort spells the native `adaptive` tag, so
+	/// the model is driven by `thinking.type` alone and still accepts
+	/// `thinking.type: disabled` (`MiniMax` on Anthropic-shaped routes).
+	pub adaptive_tag_only: bool,
 }
 
 /// Invalid structural reasoning profile.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ThinkingPolicyError {
 	/// A reasoning profile advertised no effort.
+	#[error("thinking policy must advertise at least one effort")]
 	NoEfforts,
 	/// Off was incorrectly included in the advertised non-off effort list.
+	#[error("off is implicit and cannot be advertised as a non-off effort")]
 	OffAdvertised,
 	/// Efforts were duplicated or not ordered least-to-most.
+	#[error("thinking efforts must be unique and strictly ordered")]
 	EffortsNotStrictlyOrdered,
 	/// The default effort was not advertised.
+	#[error("default thinking effort `{0}` is not advertised")]
 	UnknownDefault(ThinkingEffort),
 	/// A budget referred to an unadvertised effort.
+	#[error("thinking budget effort `{0}` is not advertised")]
 	UnknownBudget(ThinkingEffort),
 }
 
-impl Display for ThinkingPolicyError {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::NoEfforts => {
-				formatter.write_str("thinking policy must advertise at least one effort")
-			},
-			Self::OffAdvertised => {
-				formatter.write_str("off is implicit and cannot be advertised as a non-off effort")
-			},
-			Self::EffortsNotStrictlyOrdered => {
-				formatter.write_str("thinking efforts must be unique and strictly ordered")
-			},
-			Self::UnknownDefault(effort) => {
-				write!(formatter, "default thinking effort `{effort}` is not advertised")
-			},
-			Self::UnknownBudget(effort) => {
-				write!(formatter, "thinking budget effort `{effort}` is not advertised")
-			},
-		}
-	}
-}
-
-impl error::Error for ThinkingPolicyError {}
-
 /// Invalid reasoning selection or model-specific routing table.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ThinkingSelectionError {
 	/// A required effort was omitted.
+	#[error("this model requires an explicit reasoning effort")]
 	RequiredEffortMissing,
 	/// An effort is not supported by the structural profile.
+	#[error("reasoning effort `{0}` is not supported")]
 	UnsupportedEffort(ThinkingEffort),
 }
-
-impl Display for ThinkingSelectionError {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::RequiredEffortMissing => {
-				formatter.write_str("this model requires an explicit reasoning effort")
-			},
-			Self::UnsupportedEffort(effort) => {
-				write!(formatter, "reasoning effort `{effort}` is not supported")
-			},
-		}
-	}
-}
-
-impl error::Error for ThinkingSelectionError {}
 
 /// Stable structural table that interns equal reasoning profiles once.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -663,12 +685,46 @@ mod tests {
 			.expect("off resolves when effort is optional");
 		assert!(off.suppress_when_off);
 		assert_eq!(off.wire_model, "model-default");
+		assert!(!off.adaptive_tag_only);
+	}
+
+	#[test]
+	fn adaptive_tag_only_requires_every_effort_to_spell_adaptive() {
+		let policy = ThinkingPolicy::new(ThinkingMode::AnthropicAdaptive, [
+			ThinkingEffort::Low,
+			ThinkingEffort::High,
+		])
+		.expect("ordered efforts");
+		let mut routing = ThinkingRouting::default();
+		routing
+			.effort_map
+			.insert(ThinkingEffort::Low, Str::new_static("adaptive"));
+		let partial = routing
+			.resolve(&policy, Some(ThinkingEffort::Off), WireModelId::from_ref("m"))
+			.expect("off resolves");
+		assert!(!partial.adaptive_tag_only, "one mapped effort is not a tag-only profile");
+
+		routing
+			.effort_map
+			.insert(ThinkingEffort::High, Str::new_static("adaptive"));
+		let tag_only = routing
+			.resolve(&policy, Some(ThinkingEffort::Off), WireModelId::from_ref("m"))
+			.expect("off resolves");
+		assert!(tag_only.adaptive_tag_only);
+
+		let budget =
+			ThinkingPolicy::new(ThinkingMode::Budget, [ThinkingEffort::Low, ThinkingEffort::High])
+				.expect("ordered efforts");
+		let budget_selection = routing
+			.resolve(&budget, Some(ThinkingEffort::Off), WireModelId::from_ref("m"))
+			.expect("off resolves");
+		assert!(!budget_selection.adaptive_tag_only, "only anthropic-adaptive profiles qualify");
 	}
 
 	#[test]
 	fn minimal_aliased_onto_the_low_wire_model_spells_low() {
 		// Cloud Code Assist Gemini 3.6/3.7 Flash route both minimal and low
-		// onto the `-low` SKU, which rejects wire `MINIMAL` (pi f7df5d4970).
+		// onto the `-low` SKU, which rejects wire `MINIMAL`.
 		let policy = ThinkingPolicy::new(ThinkingMode::GoogleLevel, [
 			ThinkingEffort::Minimal,
 			ThinkingEffort::Low,

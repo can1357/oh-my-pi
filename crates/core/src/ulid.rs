@@ -67,6 +67,11 @@ impl Ulid {
 		self.0.to_be_bytes()
 	}
 
+	/// Returns the Unix-millisecond timestamp encoded in the high 48 bits.
+	pub const fn timestamp_ms(self) -> u64 {
+		(self.0 >> 80) as u64
+	}
+
 	/// Creates a ULID from its big-endian 16-byte representation.
 	pub const fn from_bytes(bytes: [u8; 16]) -> Self {
 		Self(u128::from_be_bytes(bytes))

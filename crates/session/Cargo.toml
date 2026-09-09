@@ -1,0 +1,31 @@
+[package]
+name = "omp-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Journal-derived authoritative session tree for OMP"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+flume = { workspace = true }
+omp-core = { workspace = true }
+omp-dom = { workspace = true }
+omp-journal = { workspace = true }
+omp-observability = { workspace = true }
+omp-proto = { workspace = true }
+omp-tool = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

@@ -1,0 +1,208 @@
+
+── segment · pi ────────────────────────────────────────────────────────────────────────────────────
+
+  · idle
+  󰵗 
+
+  · active
+  ⠹ 1m 
+
+  · focused subagent
+  󰊠 Scout 
+
+── segment · model ─────────────────────────────────────────────────────────────────────────────────
+
+  · normal
+   Sonnet 4.5 · 󰪣 high
+
+  · fast + advisor active
+   Sonnet 4.5   · 󰪣 high
+
+  · advisor warning
+   Sonnet 4.5  · 󰪣 high
+
+  · advisor error
+   Sonnet 4.5  · 󰪣 high
+
+  · advisor paused
+   Sonnet 4.5  · 󰪣 high
+
+── segment · mode ──────────────────────────────────────────────────────────────────────────────────
+
+  · active
+   Plan
+
+  · warning / paused
+   Plan 
+
+  · prewalk active
+   Prewalk
+
+  · vibe active
+   Vibe
+
+  · loop active
+   Loop running 4/10
+
+  · loop paused
+   Loop paused 4/10
+
+  · goal active
+   Goal 12K/50K
+
+  · goal paused
+   Goal 12K/50K
+
+  · goal complete
+   Goal 12K/50K
+
+  · goal budget warning
+   Goal 12K/50K
+
+  · goal dropped
+   Goal 12K/50K
+
+── segment · path ──────────────────────────────────────────────────────────────────────────────────
+
+  · workspace path
+   /workspace/oh-my-pi ↳ oh-my-pi
+
+  · linked worktree
+   oh-my-pi
+
+── segment · git ───────────────────────────────────────────────────────────────────────────────────
+
+  · clean
+   main
+
+  · dirty
+   gallery/reference *3 +2 ?1
+
+── segment · pr ────────────────────────────────────────────────────────────────────────────────────
+
+  · canonical
+   #1842
+
+── segment · subagents ─────────────────────────────────────────────────────────────────────────────
+
+  · canonical
+   3
+
+── segment · token_in ──────────────────────────────────────────────────────────────────────────────
+
+  · canonical
+   12K
+
+── segment · token_out ─────────────────────────────────────────────────────────────────────────────
+
+  · canonical
+   3.6K
+
+── segment · token_total ───────────────────────────────────────────────────────────────────────────
+
+  · canonical
+   18K
+
+── segment · token_rate ────────────────────────────────────────────────────────────────────────────
+
+  · canonical
+   87.3 tok/s
+
+── segment · cost ──────────────────────────────────────────────────────────────────────────────────
+
+  · metered + premium + advisor
+  $0.42 ★ 2 +  $0.08
+
+  · subscription
+  󰙺
+
+  · premium requests
+  ★ 2
+
+── segment · context_pct ───────────────────────────────────────────────────────────────────────────
+
+  · normal
+   22.0%/200K 󰁨
+
+  · warning
+   72.0%/200K 󰁨
+
+  · error
+   96.0%/200K 󰁨
+
+  · active compaction
+   72.0%/200K 󰁨
+
+  · armed compaction
+   72.0%/200K 󰁨
+
+── segment · context_total ─────────────────────────────────────────────────────────────────────────
+
+  · canonical
+   200K
+
+── segment · time_spent ────────────────────────────────────────────────────────────────────────────
+
+  · canonical
+   6m12s
+
+── segment · time ──────────────────────────────────────────────────────────────────────────────────
+
+  · 24-hour with seconds
+   14:07:09
+
+  · 12-hour
+   2:07pm
+
+── segment · session ───────────────────────────────────────────────────────────────────────────────
+
+  · canonical
+  󰁑 gallery-
+
+── segment · hostname ──────────────────────────────────────────────────────────────────────────────
+
+  · canonical
+   gallery-host
+
+── segment · cache_read ────────────────────────────────────────────────────────────────────────────
+
+  · canonical
+   48K
+
+── segment · cache_write ───────────────────────────────────────────────────────────────────────────
+
+  · canonical
+   1.2K
+
+── segment · cache_hit ─────────────────────────────────────────────────────────────────────────────
+
+  · canonical
+   77.92%
+
+── segment · session_name ──────────────────────────────────────────────────────────────────────────
+
+  · canonical
+  gallery
+
+── segment · usage ─────────────────────────────────────────────────────────────────────────────────
+
+  · all windows
+   Pro · 5h 32% (1h 11m) · 1d 44% (5h 10m) · 7d 68% (2d 4h) · mo 77% (9d)
+
+  · normal
+   Pro · 5h 24% (1h 15m)
+
+  · warning
+   Pro · 5h 65% (1h 15m)
+
+  · error
+   Pro · 5h 92% (1h 15m)
+
+── segment · collab ────────────────────────────────────────────────────────────────────────────────
+
+  · host active
+  ⇄ collab:3
+
+  · guest active
+  ⇄ collab guest:3
+

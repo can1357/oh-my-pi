@@ -1,0 +1,22 @@
+id = "qaext"
+version = "0.1.0"
+omp_api = 1
+entry = "qaext"
+
+[[declarations]]
+id = "hello"
+kind = "hard"
+module = "qaext"
+key = "hello@qaext.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[[declarations]]
+id = "activated"
+kind = "hook"
+module = "qaext"
+key = "tool_call/precheck"
+trigger = "lazy"
+api = 1
+failure = "fail-open"

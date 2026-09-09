@@ -1,0 +1,27 @@
+[38;2;0;180;255m── glob — Glob ─────────────────────────────────────────────────────────────────────────────────────[39m
+
+[38;2;107;114;128m  · streaming args[39m
+                                                                                                    
+ [38;2;156;163;176m[39m [39mGlob[39m: [38;2;156;163;176mpackages/coding-agent/src/tools/*-render[39m                                                   
+                                                                                                    
+
+[38;2;107;114;128m  · in progress[39m
+                                                                                                    
+ [38;2;156;163;176m[39m [39mGlob[39m: [38;2;156;163;176mpackages/coding-agent/src/**/*.test.ts[39m [38;2;107;114;128mlimit:50[39m                                            
+                                                                                                    
+
+[38;2;107;114;128m  · done[39m
+                                                                                                    
+ [39m[39m [39mGlob[39m: [38;2;156;163;176mpackages/coding-agent/src/**/*.test.ts[39m [38;2;107;114;128m5 files · in packages/coding-agent/src[39m              
+ [38;2;107;114;128m├─[39m [38;2;156;163;176m[39m ]8;id=4ac3c39a;file:///Users/dev/Projects/pi/packages/coding-agent/src/cli/gallery-cli.test.ts\[38;2;156;163;176mpackages/coding-agent/src/cli/gallery-cli.test.ts[39m]8;;\                                             
+ [38;2;107;114;128m├─[39m [38;2;156;163;176m[39m ]8;id=cc9f4513;file:///Users/dev/Projects/pi/packages/coding-agent/src/edit/edit.test.ts\[38;2;156;163;176mpackages/coding-agent/src/edit/edit.test.ts[39m]8;;\                                                   
+ [38;2;107;114;128m├─[39m [38;2;156;163;176m[39m ]8;id=b54aa5c2;file:///Users/dev/Projects/pi/packages/coding-agent/src/tools/glob.test.ts\[38;2;156;163;176mpackages/coding-agent/src/tools/glob.test.ts[39m]8;;\                                                  
+ [38;2;107;114;128m├─[39m [38;2;156;163;176m[39m ]8;id=c4308be0;file:///Users/dev/Projects/pi/packages/coding-agent/src/tools/read.test.ts\[38;2;156;163;176mpackages/coding-agent/src/tools/read.test.ts[39m]8;;\                                                  
+ [38;2;107;114;128m└─[39m [38;2;156;163;176m[39m ]8;id=2efe070f;file:///Users/dev/Projects/pi/packages/coding-agent/src/tools/write.test.ts\[38;2;156;163;176mpackages/coding-agent/src/tools/write.test.ts[39m]8;;\                                                 
+                                                                                                    
+
+[38;2;107;114;128m  · failed[39m
+                                                                                                    
+ [38;2;255;71;87m[39m [38;2;255;71;87mError: invalid glob pattern '[unclosed'[39m                                                          
+                                                                                                    
+

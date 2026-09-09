@@ -1540,7 +1540,7 @@ mod follow {
 		};
 
 		use notify::{RecommendedWatcher, RecursiveMode, Watcher, WatcherKind};
-		use omp_shell_engine::openfiles::OpenFile;
+		use omp_shell::openfiles::OpenFile;
 
 		#[cfg(target_os = "linux")]
 		use crate::support::sys::signals::ensure_stdout_not_broken;
@@ -2806,9 +2806,7 @@ mod text {
 
 use std::{
 	cmp::Ordering,
-	error,
 	ffi::OsString,
-	fmt::{self, Display},
 	fs::File,
 	io::{self, BufReader, ErrorKind, Read, Seek, SeekFrom, Write},
 	path::{Path, PathBuf},
@@ -2819,8 +2817,9 @@ use chunks::ReverseChunks;
 use clap::ArgMatches;
 use follow::Observer;
 use memchr::{memchr_iter, memrchr_iter};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 use paths::{FileExtTail, HeaderPrinter, Input, InputKind};
+use thiserror::Error;
 
 use crate::{
 	host::{Host, Utility, matches_parser, util},
@@ -2830,10 +2829,13 @@ use crate::{
 
 const SIGPIPE_EXIT_CODE: i32 = 141;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub(crate) enum TailError {
-	Io(io::Error),
+	#[error("{0}")]
+	Io(#[source] io::Error),
+	#[error("{0}")]
 	Message(String),
+	#[error("Broken pipe")]
 	BrokenPipe,
 }
 
@@ -2850,18 +2852,6 @@ impl TailError {
 		}
 	}
 }
-
-impl Display for TailError {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::Io(error) => error.fmt(f),
-			Self::Message(message) => f.write_str(message),
-			Self::BrokenPipe => f.write_str("Broken pipe"),
-		}
-	}
-}
-
-impl error::Error for TailError {}
 
 impl From<io::Error> for TailError {
 	fn from(error: io::Error) -> Self {
@@ -3000,6 +2990,11 @@ impl Utility for Tail {
 				return error.code();
 			},
 		};
+		if settings.pid != 0 && i32::try_from(settings.pid).map_or(true, |pid| !host.may_signal(pid))
+		{
+			host.error("the requested PID is outside this shell's process scope", 1);
+			return 1;
+		}
 		settings.resolve_paths(host);
 
 		match tail_main(&settings, host) {
@@ -3648,11 +3643,11 @@ where
 
 #[cfg(test)]
 mod tests {
-	use std::{ffi::OsString, fs, io::Cursor};
+	use std::{error::Error as _, ffi::OsString, fs, io::Cursor};
 
 	use clap::Parser;
 
-	use super::{Tail, Utility, forwards_thru_file};
+	use super::{Tail, TailError, Utility, forwards_thru_file};
 	use crate::host::{Host, run_util};
 
 	fn rewritten(argv: &[&str]) -> Vec<String> {
@@ -3661,6 +3656,13 @@ mod tests {
 			.into_iter()
 			.map(|arg| arg.to_str().unwrap().to_owned())
 			.collect()
+	}
+
+	#[test]
+	fn tail_io_error_keeps_message_and_typed_source() {
+		let error = TailError::from(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"));
+		assert_eq!(error.to_string(), "gone");
+		assert_eq!(error.source().map(ToString::to_string).as_deref(), Some("gone"));
 	}
 
 	#[test]

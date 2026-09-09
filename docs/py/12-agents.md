@@ -19,6 +19,12 @@ registry: an extension that calls a model spends the user's money. Spawning a
 subagent and classifying a bash command are the same authority at different
 scales, so they answer to the same budget, the same role indirection, and the
 same attribution.
+Creating a new top-level interactive session is deliberately not an agent
+operation. `omp.sessions.create` records a visible, non-submitted handoff and
+switches the user's existing UI; it starts no inference. Use it only from an
+interactive command. Use the APIs in this chapter for subagents, later
+injection, scheduling, or any operation intended to make model work happen
+(see `docs/py/09-journal.md`).
 
 "Forks no process, opens no socket" is the entire point. In pi, `ExtensionAPI`
 had *no* subagent primitive at all — not one member of the interface in
@@ -187,7 +193,7 @@ CONTROL round-trip is tens of microseconds; the latency classes below describe
 how often a call is *appropriate*, not how fast it is.
 
 Symbols owned elsewhere are referenced, never redefined: `@omp.device`,
-`@omp.tool`, the `xd` shell builtin, `omp.ToolPath`, the dynamic tool policy, and
+`@omp.tool`, the `dyn` shell builtin, `omp.ToolPath`, the dynamic tool policy, and
 the `omp.Effects` envelope in `docs/py/01-devices.md`;
 `omp.Payload` / `omp.Fault` / `omp.PromptCaps`, `omp.CallOutcome`, and
 `@omp.renderer` in `docs/py/02-verdicts.md`; the invocation state machine
@@ -214,13 +220,13 @@ publisher-qualified identity in `docs/py/14-deploy.md`.
 Two facts from sibling namespaces are load-bearing here and are not restated
 anywhere below. First, an extension registers with the **host**, never with the
 **model**. The host must know a device's name, schema, and rev to answer the
-device catalog behind `xd` and `xd <name> --help` at all — that is what `RegisterTools` is for — but the
+device catalog behind `dyn` and `dyn <name> --help` at all — that is what `RegisterTools` is for — but the
 model's tool array never grows, and a change in what the model can reach arrives
 as one system-notification item rather than a re-registration. Every "spawn a
 subagent" capability in the Patterns section is therefore a device, and
 `omp.agents` itself is a namespace an extension *calls*, not something it
 declares: a session using it has a byte-identical registration set to one that
-does not. Second, an `xd` device dispatch fires exactly one `tool_call` with
+does not. Second, an `dyn` device dispatch fires exactly one `tool_call` with
 the RESOLVED `target=DeviceCall(...)` carrying decoded arguments — so a policy extension gating
 `subagent_spawn` sees the decoded spec, not an envelope to re-parse, and the user is
 never prompted twice for one delegation.
@@ -303,7 +309,7 @@ would make revival unfaithful.
 | `model` | `str \| None` | `None` | Model pattern or role alias (`"@smol"`, `"anthropic/claude-*"`). `None` inherits the parent's resolved model. What happens when the pattern resolves to no usable credential is `on_model_unavailable`'s decision, never an automatic downgrade. |
 | `on_model_unavailable` | `Literal["fail", "parent"]` | `"fail"` | Explicit fallback policy. `"fail"` refuses the spawn with `SpawnDenied`; `"parent"` runs on the parent's resolved model and sets `SubagentResult.model_fallback`. Revision 1 fell back silently and flagged it afterwards; the review is right that a model chosen for cost, privacy, or capability reasons must not be substitutable behind the caller's back, so the default refuses (`docs/py/13-inference.md` owns the inference-side fallback rules). |
 | `thinking` | `ThinkingLevel \| None` | `None` | Reasoning request. `None` takes the agent definition's level. |
-| `allowed_devices` | `frozenset[str] \| None` | `None` | Allowlist of device names (see `docs/py/01-devices.md`) the child may reach through the `xd` shell builtin inside the core `shell` tool. `None` inherits the parent's set. The empty frozenset yields a child with core tools only. |
+| `allowed_devices` | `frozenset[str] \| None` | `None` | Allowlist of device names (see `docs/py/01-devices.md`) the child may reach through the `dyn` shell builtin inside the core `shell` tool. `None` inherits the parent's set. The empty frozenset yields a child with core tools only. |
 | `disallowed_devices` | `frozenset[str]` | `frozenset()` | Subtracted after `allowed_devices` resolves. Use this to make a child a leaf for one capability without enumerating the rest. |
 | `isolation` | `Isolation` | `Isolation.CLEAN` | Context inheritance, above. |
 | `max_depth` | `int` | `1` | How deep a subtree the child may build beneath itself. `0` makes the child a hard leaf. Clamped by the Core against remaining session depth; a value above the remaining budget is silently reduced and reported in `SubagentHandle.effective_max_depth`. |
@@ -630,7 +636,7 @@ exactly the reason a subagent does: it spends the user's tokens.
 `usage: Usage`, `model: str`, `fell_back: bool`,
 `fault: omp.Fault | None` (why the fallback fired, when it did).
 
-#### `async omp.agents.completion(prompt: str | Sequence[omp.TextPart | omp.BlobPart], *, role="smol", system=None, choices=None, schema=None, default=..., scope="turn", max_output_tokens=None, deadline=omp.Duration("10s"), labels={}) -> Completion`
+#### `async omp.agents.completion(prompt: str | Sequence[omp.TextPart | omp.BlobPart], *, role="smol", system=None, choices=None, schema=None, default=..., scope="turn", context="none", max_output_tokens=None, deadline=omp.Duration("10s"), labels={}) -> Completion`
 
 - **Channel** CONTROL. **Latency class** per-call, network-bound. **Failure**
   depends entirely on `default`, below.
@@ -638,6 +644,17 @@ exactly the reason a subagent does: it spends the user's tokens.
   journal item. Use it for classification, extraction, and titling — the
   `ctx.model.call` / `ctx.model.stream` shape from
   `.plan/feature-map/discovery.md:190`.
+- **`context="thread"` trades statelessness for the live conversation.** The
+  call becomes one non-persisted side-channel turn over the caller's projected
+  thread — the same mechanism behind the interactive `/btw` command and the
+  idle recap: the session model answers with the full conversation in context
+  (tool catalog attached only to keep the prompt cache warm; tool calls are
+  discarded), and the emission still never becomes a thread item. Because the
+  session model and its live params answer, `role`, `system`, `choices`,
+  `schema`, and `max_output_tokens` are stateless-only and rejected; the
+  prompt must be plain text. `default`, `scope`, `deadline`, and `labels`
+  keep their meaning, and usage is debited against the session task budget
+  like any other completion.
 - `prompt` is either plain text or an ordered sequence containing only
   `omp.TextPart` and `omp.BlobPart` values. The typed sequence is the media path
   for one-shot vision requests; blobs remain typed and are never encoded into
@@ -784,9 +801,8 @@ further continuation, and no policy can exceed it without a configured session
 override plus the manifest grant. A policy asking for `100` on a default
 session gets `8` and sees it in `ContinuationLedger.cap`; it is not an error,
 because a goal loop must be able to declare its ambition without knowing the
-deployment. Eight is deliberately low: it is the ported value of pi's
-`SESSION_STOP_CONTINUATION_CAP`, and a loop that genuinely needs a hundred
-turns of autonomy should be raising the session ceiling in configuration where
+deployment. Eight is deliberately low: a loop that genuinely needs a hundred turns of autonomy
+should be raising the session ceiling in configuration where
 a human can see it, not asserting it from a plugin.
 
 #### `@dataclass(frozen=True, slots=True) class omp.agents.ContinuationLedger`
@@ -829,18 +845,104 @@ CONTROL, per-turn, fail-open. Reading `stalled` and returning `Settle()` is the
 whole of "repeat detection", which `@narumitw/pi-goal` shipped as its own
 heuristic over message text.
 
-#### `async omp.agents.inject(prompt: str, *, mode: DeliveryMode = DeliveryMode.NEXT_TURN, visible: bool = False, role: Literal["user", "system"] = "system") -> Receipt`
+#### `async omp.agents.set_model(model: str, *, thinking: str | None = None) -> omp.ModelRef`
+
+CONTROL, per-call, fail-closed. Switches the active interactive session's model
+for subsequent turns through the same durable session-override path as the
+built-in model command. The optional portable thinking level is applied
+atomically to the next-turn composition. The call requires
+`EFFECTS_AUTHORIZED` and is admitted only from an interactive command or a
+device body; precheck/transform hooks must patch `turn_start` instead. Unknown,
+disabled, or unroutable models raise the host's typed model-switch error.
+`omp.Context.current().model` and `.thinking` expose the callback's immutable
+current values.
+
+#### `async omp.agents.abort() -> None`
+
+CONTROL, per-call, fail-closed. Requests the same out-of-band interruption as
+the interactive interrupt action. The acknowledgement means Core accepted the
+request; the active model stream or tool batch settles through its normal
+interrupted path. Requires `EFFECTS_AUTHORIZED`.
+
+#### `async omp.agents.shutdown(reason: str = "") -> None`
+
+CONTROL, per-session, fail-closed. Requests a graceful interactive-session
+shutdown through the user-quit path. Active work is interrupted, the loop is
+allowed to settle, and the bounded `session_shutdown` hooks run before the host
+exits. `reason` is an optional operator diagnostic; the lifecycle event remains
+the typed `ShutdownReason.USER_EXIT`. Requires `EFFECTS_AUTHORIZED`.
+
+#### `async omp.agents.reload_extensions() -> None`
+
+CONTROL, per-session, fail-closed. Triggers the existing supervised
+extension-host hot-reload. The request acknowledges scheduling; each reloadable
+host drains its active callback before its generation is replaced. Requires
+`EFFECTS_AUTHORIZED`.
+
+#### `async omp.agents.is_idle() -> bool`
+
+CONTROL, per-call, read-only. Returns whether the main agent loop is currently
+waiting for work.
+
+#### `async omp.agents.wait_for_idle() -> None`
+
+CONTROL, per-call, read-only. Returns immediately when the main agent is idle,
+otherwise waits for its next transition to idle.
+
+#### `async omp.agents.pending_messages() -> int`
+
+CONTROL, per-call, read-only. Returns the number of interrupts retained for a
+future main-agent mailbox drain, including queued producer, peer, schedule, and
+continuation messages.
+
+Abort and shutdown have durable `OperationSpec` metadata; reload is an
+ephemeral Core effect. All three require a minimum phase of
+`EFFECTS_AUTHORIZED`. The three introspection requests are
+ephemeral and legal from `OPEN` until settlement. They are async because
+extension actors cross the CONTROL boundary; pi's corresponding synchronous
+booleans depended on sharing the agent process.
+
+#### `async omp.agents.inject(prompt: str, *, mode: DeliveryMode = DeliveryMode.NEXT_TURN, visible: bool = False, role: Literal["user", "system"] = "system", session: str | None = None) -> Receipt`
 
 - CONTROL, per-call, fail-closed.
 - Out-of-band injection for producers that are **not** at a settled boundary: a
   schedule firing, an inter-session message, a background child settling. It
   posts an item into this agent's mailbox and, if the loop is idle, wakes it.
+  `session=None` targets the current session. A non-current `session` must have
+  been created by this authenticated client; unknown and foreign IDs are
+  refused. An inactive newly created target is durably buffered and reclaimed
+  by its normal mailbox/startup delivery path.
 - It is *not* the way to build a goal loop. A goal loop that injects from a
   timer rather than deciding at the boundary races the model mid-turn, which is
   precisely the bug that made pi goal extensions inject continuations during
   tool batches.
 - Counts against the continuation ledger when it wakes an idle loop, and does
   not when it merely queues behind an in-flight turn.
+
+A command can seed, switch, and queue the first model turn without pretending
+that the visible setup prompt itself is submitted:
+
+```python
+@omp.command("handoff")
+async def handoff(_: omp.CommandContext) -> None:
+    created = await omp.sessions.create(
+        omp.sessions.SessionSetup(
+            title="Focused follow-up",
+            parent=omp.sessions.current().id,
+            initial_prompt="The extension prepared this follow-up.",
+        )
+    )
+    await omp.agents.inject(
+        "Continue the focused follow-up now.",
+        session=created.id,
+        mode=omp.agents.DeliveryMode.NEXT_TURN,
+        visible=True,
+        role="user",
+    )
+```
+
+`create` publishes and requests the UI switch first; the targeted injection is
+then durably queued under the same authenticated client ownership.
 
 ### Scheduling
 
@@ -1340,8 +1442,8 @@ API never exposed.
 
 The omp version puts **nothing** in the model's tool array under the default
 dynamic tool policy (`docs/py/01-devices.md`). One device,
-registered with the host, discovered with `xd --q agent`, documented on
-demand with `xd agent --help`, and dispatched with `xd agent [args…]`.
+registered with the host, discovered with `dyn --q agent`, documented on
+demand with `dyn agent --help`, and dispatched with `dyn agent [args…]`.
 
 ```python
 import omp
@@ -2004,7 +2106,7 @@ More than the assignment implies, which changes the shape of the work from
   propagation this document specifies all depend on a caller identity travelling
   with the request, which today it does not.
 - **No constrained one-shot.** `ChatParentHost::completion` sends a plain turn
-  and reads `bridge_outcome_text`; there is no ordered-choice ladder, no
+  and reads `outcome_text`; there is no ordered-choice ladder, no
   earliest-match resolution, no budget check, and no fallback path. The
   `SchemaConstraint { priority }` / `GrammarConstraint` pair in `toolhost.proto`
   is the right substrate for `schema=`, but the arbitration that spends the
@@ -2035,7 +2137,7 @@ Three things about the existing file shape this namespace's work:
 
 - **`RegisterTools` is host-facing, and `omp.agents` adds nothing to it.**
   Extensions register with the *host* — the host must know a device's name,
-  schema, rev, and constraints to answer the device catalog behind `xd` at all — and never
+  schema, rev, and constraints to answer the device catalog behind `dyn` at all — and never
   with the model. `omp.agents` is a namespace an extension *calls*, not a
   device it declares, so a session using it has a byte-identical `ToolDecl` set
   to one that does not.
@@ -2267,7 +2369,7 @@ exactly as the model issued it: no batch-level admission scheduler, no
 parallelism detection, no reordering." `AgentTree::admit` is not that. It
 does not order, delay, or inspect tool calls, and it does not sit on the batch
 path at all; it is a resource ceiling on how many *LLM sessions* run at once —
-the ported behavior of pi's `task.maxConcurrency` semaphore, and the thing that
+and the thing that
 stops a forty-step fan-out from opening forty concurrent provider streams. D6's
 justifying clause — "safety lives in env invariants" — does not reach it either:
 a docserver revision and a serialized exec session say nothing about how many
@@ -2561,11 +2663,11 @@ worktree capability.
 - `task.md:3-21` makes `task` a registered tool with a dynamically generated
   schema. **Lesson #6 voids that.** `task` either is a core harness tool — one
   schema, in every request, because delegation is skeletal — or it is a device
-  dispatched through the `xd` shell builtin inside `shell` (soft/hard intent, surface decided by
+  dispatched through the `dyn` shell builtin inside `shell` (soft/hard intent, surface decided by
   the dynamic tool policy — `docs/py/01-devices.md`). It is never a
   plugin-registered schema slot. The dynamic-description
   machinery (agent roster, IRC status, isolation status) becomes device
-  documentation fetched on demand by `xd agent --help`, which costs zero TTFT
+  documentation fetched on demand by `dyn agent --help`, which costs zero TTFT
   when unused.
 - `task.md:90,195` (`subprocess-tool-registry.ts`) and everything else built
   around subprocess subagents. **Deleted, not ported.** Children are in-tree
@@ -2886,6 +2988,6 @@ Changes this file made for Revision 2, and the review point that drove each:
   durable approval tickets (`PLAN.md` §D5). Rev 2's flags and Revision 1's "not
   mine to make" quote are kept as historical records.
 
-**Revision 2.2** — the `xd` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `xd` builtin of the embedded shell, inside the core `shell` tool: `xd` lists the catalog (`xd --q <text>` searches), `xd <device> --help` returns docs plus schema-derived CLI usage, and `xd <device> [args…]` (or `xd <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `xd resolve "<reason>"` / `xd reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `xd` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
+**Revision 2.2** — the `dyn` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `dyn` builtin of the embedded shell, inside the core `shell` tool: `dyn` lists the catalog (`dyn --q <text>` searches), `dyn <device> --help` returns docs plus schema-derived CLI usage, and `dyn <device> [args…]` (or `dyn <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `dyn resolve "<reason>"` / `dyn reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `dyn` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
 
-In this file, the live sibling facts, `allowed_devices` semantics, and agent-device pattern now use `xd` discovery, help, and dispatch through `shell`.
+In this file, the live sibling facts, `allowed_devices` semantics, and agent-device pattern now use `dyn` discovery, help, and dispatch through `shell`.

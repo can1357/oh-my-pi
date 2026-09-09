@@ -1,0 +1,470 @@
+{
+	"source": "packages/hashline/test/landing-shift.test.ts",
+	"cases": [
+		{
+			"name": "slides a shallower body past the closing line and warns",
+			"parse": [
+				{
+					"input": "PUT >3:\n+    c();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "function f() {\n    if (x) {\n        a();\n    }\n    b();\n}\n",
+					"input": "PUT >3:\n+    c();",
+					"expect": {
+						"text": "function f() {\n    if (x) {\n        a();\n    }\n    c();\n    b();\n}\n",
+						"firstChangedLine": 4,
+						"warnings": [
+							"PUT >3: body indented shallower than the anchor, so the landing moved past 1 closing line to after line 4. For the deeper position inside the block, re-issue with the body indented to match."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "crosses multiple closer levels and stops when depth returns to the body's",
+			"parse": [
+				{
+					"input": "PUT >4:\n+    c();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT >4:\n+        c();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "function f() {\n    if (x) {\n        for (y) {\n            a();\n        }\n    }\n    b();\n}\n",
+					"input": "PUT >4:\n+    c();",
+					"expect": {
+						"text": "function f() {\n    if (x) {\n        for (y) {\n            a();\n        }\n    }\n    c();\n    b();\n}\n",
+						"firstChangedLine": 6,
+						"warnings": [
+							"PUT >4: body indented shallower than the anchor, so the landing moved past 2 closing lines to after line 6. For the deeper position inside the block, re-issue with the body indented to match."
+						]
+					}
+				},
+				{
+					"text": "function f() {\n    if (x) {\n        for (y) {\n            a();\n        }\n    }\n    b();\n}\n",
+					"input": "PUT >4:\n+        c();",
+					"expect": {
+						"text": "function f() {\n    if (x) {\n        for (y) {\n            a();\n        }\n        c();\n    }\n    b();\n}\n",
+						"firstChangedLine": 5,
+						"warnings": [
+							"PUT >4: body indented shallower than the anchor, so the landing moved past 1 closing line to after line 5. For the deeper position inside the block, re-issue with the body indented to match."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "does not shift when the body matches the anchor's depth",
+			"parse": [
+				{
+					"input": "PUT >3:\n+        c();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "function f() {\n    if (x) {\n        a();\n    }\n    b();\n}\n",
+					"input": "PUT >3:\n+        c();",
+					"expect": {
+						"text": "function f() {\n    if (x) {\n        a();\n        c();\n    }\n    b();\n}\n",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "never crosses content lines (indentation-only languages stay put)",
+			"parse": [
+				{
+					"input": "PUT >3:\n+    c()",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "def f():\n    if x:\n        a()\n    b()\n",
+					"input": "PUT >3:\n+    c()",
+					"expect": {
+						"text": "def f():\n    if x:\n        a()\n    c()\n    b()\n",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "treats a body of pure closers as depth-neutral",
+			"parse": [
+				{
+					"input": "PUT >3:\n+    }",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "function f() {\n    if (x) {\n        a();\n    }\n    b();\n}\n",
+					"input": "PUT >3:\n+    }",
+					"expect": {
+						"text": "function f() {\n    if (x) {\n        a();\n    }\n    }\n    b();\n}\n",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "skips incomparable indentation styles (tabs file, spaces body)",
+			"parse": [
+				{
+					"input": "PUT >3:\n+    c();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "function f() {\n\tif (x) {\n\t\ta();\n\t}\n\tb();\n}\n",
+					"input": "PUT >3:\n+    c();",
+					"expect": {
+						"text": "function f() {\n\tif (x) {\n\t\ta();\n    c();\n\t}\n\tb();\n}\n",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "refuses to cross a line targeted by another hunk",
+			"parse": [
+				{
+					"input": "PUT >3:\n+    c();\nCUT 4",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "function f() {\n    if (x) {\n        a();\n    }\n    b();\n}\n",
+					"input": "PUT >3:\n+    c();\nCUT 4",
+					"expect": {
+						"text": "function f() {\n    if (x) {\n        a();\n    c();\n    b();\n}\n",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "looks past blank lines between the anchor and the closer",
+			"parse": [
+				{
+					"input": "PUT >3:\n+    c();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "function f() {\n    if (x) {\n        a();\n\n    }\n    b();\n}\n",
+					"input": "PUT >3:\n+    c();",
+					"expect": {
+						"text": "function f() {\n    if (x) {\n        a();\n\n    }\n    c();\n    b();\n}\n",
+						"firstChangedLine": 5,
+						"warnings": [
+							"PUT >3: body indented shallower than the anchor, so the landing moved past 1 closing line to after line 5. For the deeper position inside the block, re-issue with the body indented to match."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "leaves `PUT < N:` untouched",
+			"parse": [
+				{
+					"input": "PUT <4:\n+    c();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "function f() {\n    if (x) {\n        a();\n    }\n    b();\n}\n",
+					"input": "PUT <4:\n+    c();",
+					"expect": {
+						"text": "function f() {\n    if (x) {\n        a();\n    c();\n    }\n    b();\n}\n",
+						"firstChangedLine": 4
+					}
+				}
+			]
+		},
+		{
+			"name": "composes with `PUT >N*: N:` to escape enclosing closers",
+			"parse": [
+				{
+					"input": "PUT >2*:\n+ref = t;",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "pulls a deeper body inside the block, after its last content line",
+			"parse": [
+				{
+					"input": "PUT >2*:\n+        setup();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "lands right after the opener of an empty block",
+			"parse": [
+				{
+					"input": "PUT >2*:\n+        setup();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "crosses nested trailing closers and stops at the body's claimed depth",
+			"parse": [
+				{
+					"input": "PUT >1*:\n+    baz();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "leaves a sibling-depth body after the block (the literal contract)",
+			"parse": [
+				{
+					"input": "PUT >2*:\n+    cleanup();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "never shifts a plain `insert after M:` anchored on a closer",
+			"parse": [
+				{
+					"input": "PUT >4:\n+        leak();",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "function f() {\n    afterEach(() => {\n        destroy();\n    });\n}\n",
+					"input": "PUT >4:\n+        leak();",
+					"expect": {
+						"text": "function f() {\n    afterEach(() => {\n        destroy();\n    });\n        leak();\n}\n",
+						"firstChangedLine": 4
+					}
+				}
+			]
+		},
+		{
+			"name": "refuses to cross a closer targeted by another hunk",
+			"parse": [
+				{
+					"input": "PUT 4-4:\n+    }); // bar\nPUT >1*:\n+        y();",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "lands a tab-indented construct body after the block, not inside the opener",
+			"parse": [
+				{
+					"input": "PUT >5:\n+\n+\tmod stdout_policy {\n+\t\tuse super::MemStream;\n+\n+\t\t#[test]\n+\t\tfn line_policy() {\n+\t\t\tassert!(true);\n+\t\t}\n+\t}",
+					"expect": {
+						"editCount": 9,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "mod testing {\n   struct MemStream;\n\n   impl Stream for MemStream {\n      fn clone_box(&self) -> u32 {\n         1\n      }\n\n      fn try_borrow(&self) -> u32 {\n         7\n      }\n   }\n}\n",
+					"input": "PUT >5:\n+\n+\tmod stdout_policy {\n+\t\tuse super::MemStream;\n+\n+\t\t#[test]\n+\t\tfn line_policy() {\n+\t\t\tassert!(true);\n+\t\t}\n+\t}",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "mod testing {\n   struct MemStream;\n\n   impl Stream for MemStream {\n      fn clone_box(&self) -> u32 {\n         1\n      }\n\n      fn try_borrow(&self) -> u32 {\n         7\n      }\n   }\n\n\tmod stdout_policy {\n\t\tuse super::MemStream;\n\n\t\t#[test]\n\t\tfn line_policy() {\n\t\t\tassert!(true);\n\t\t}\n\t}\n}\n",
+						"firstChangedLine": 12,
+						"warnings": [
+							"PUT >5: line 5 opens a block, and the body's indentation claims a position outside it, so the body was landed after line 12 (verified by the syntax probe). To insert after a whole construct, anchor on its closing line or use `PUT >N*:`."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "keeps a bare shallower statement literal (first-statement inserts survive)",
+			"parse": [
+				{
+					"input": "PUT >5:\n+   let x = 1;",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "mod testing {\n   struct MemStream;\n\n   impl Stream for MemStream {\n      fn clone_box(&self) -> u32 {\n         1\n      }\n\n      fn try_borrow(&self) -> u32 {\n         7\n      }\n   }\n}\n",
+					"input": "PUT >5:\n+   let x = 1;",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "mod testing {\n   struct MemStream;\n\n   impl Stream for MemStream {\n      fn clone_box(&self) -> u32 {\n   let x = 1;\n         1\n      }\n\n      fn try_borrow(&self) -> u32 {\n         7\n      }\n   }\n}\n",
+						"firstChangedLine": 5
+					}
+				}
+			]
+		},
+		{
+			"name": "keeps an equal-depth body literal (matches the outward shift's contract)",
+			"parse": [
+				{
+					"input": "PUT >5:\n+      fn extra(&self) -> u32 {\n+         2\n+      }",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "mod testing {\n   struct MemStream;\n\n   impl Stream for MemStream {\n      fn clone_box(&self) -> u32 {\n         1\n      }\n\n      fn try_borrow(&self) -> u32 {\n         7\n      }\n   }\n}\n",
+					"input": "PUT >5:\n+      fn extra(&self) -> u32 {\n+         2\n+      }",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "mod testing {\n   struct MemStream;\n\n   impl Stream for MemStream {\n      fn clone_box(&self) -> u32 {\n      fn extra(&self) -> u32 {\n         2\n      }\n         1\n      }\n\n      fn try_borrow(&self) -> u32 {\n         7\n      }\n   }\n}\n",
+						"firstChangedLine": 5
+					}
+				}
+			]
+		},
+		{
+			"name": "abandons the escape when the relocated result does not parse",
+			"parse": [
+				{
+					"input": "PUT >5:\n+   Some(1) => {\n+   }",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "mod testing {\n   struct MemStream;\n\n   impl Stream for MemStream {\n      fn clone_box(&self) -> u32 {\n         1\n      }\n\n      fn try_borrow(&self) -> u32 {\n         7\n      }\n   }\n}\n",
+					"input": "PUT >5:\n+   Some(1) => {\n+   }",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "mod testing {\n   struct MemStream;\n\n   impl Stream for MemStream {\n      fn clone_box(&self) -> u32 {\n   Some(1) => {\n   }\n         1\n      }\n\n      fn try_borrow(&self) -> u32 {\n         7\n      }\n   }\n}\n",
+						"firstChangedLine": 5,
+						"warnings": [
+							"This edit introduced a syntax error near line 5: the file parsed before the patch and no longer does. It was applied exactly as written, so a line number or range endpoint is likely wrong — re-read the touched region and re-issue a correcting edit."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "stays literal without a parseable path (no probe, no relocation)",
+			"parse": [
+				{
+					"input": "PUT >5:\n+\n+\tmod stdout_policy {\n+\t\tuse super::MemStream;\n+\n+\t\t#[test]\n+\t\tfn line_policy() {\n+\t\t\tassert!(true);\n+\t\t}\n+\t}",
+					"expect": {
+						"editCount": 9,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "mod testing {\n   struct MemStream;\n\n   impl Stream for MemStream {\n      fn clone_box(&self) -> u32 {\n         1\n      }\n\n      fn try_borrow(&self) -> u32 {\n         7\n      }\n   }\n}\n",
+					"input": "PUT >5:\n+\n+\tmod stdout_policy {\n+\t\tuse super::MemStream;\n+\n+\t\t#[test]\n+\t\tfn line_policy() {\n+\t\t\tassert!(true);\n+\t\t}\n+\t}",
+					"expect": {
+						"text": "mod testing {\n   struct MemStream;\n\n   impl Stream for MemStream {\n      fn clone_box(&self) -> u32 {\n\n\tmod stdout_policy {\n\t\tuse super::MemStream;\n\n\t\t#[test]\n\t\tfn line_policy() {\n\t\t\tassert!(true);\n\t\t}\n\t}\n         1\n      }\n\n      fn try_borrow(&self) -> u32 {\n         7\n      }\n   }\n}\n",
+						"firstChangedLine": 5
+					}
+				}
+			]
+		},
+		{
+			"name": "escapes a shallower function body past a class in TypeScript",
+			"parse": [
+				{
+					"input": "PUT >2:\n+function helper() {\n+   return 2;\n+}",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "class A {\n   method() {\n      return 1;\n   }\n}\n",
+					"input": "PUT >2:\n+function helper() {\n+   return 2;\n+}",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "class A {\n   method() {\n      return 1;\n   }\n}\nfunction helper() {\n   return 2;\n}\n",
+						"firstChangedLine": 5,
+						"warnings": [
+							"PUT >2: line 2 opens a block, and the body's indentation claims a position outside it, so the body was landed after line 5 (verified by the syntax probe). To insert after a whole construct, anchor on its closing line or use `PUT >N*:`."
+						]
+					}
+				}
+			]
+		}
+	]
+}

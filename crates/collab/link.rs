@@ -1,10 +1,9 @@
 //! Revision-3 browser-compatible room-link formatting, parsing, and endpoint
 //! validation.
 
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
-use omp_core::{Str, base64_url};
-use qrcode::{EcLevel, QrCode, render::unicode};
+use omp_core::{Str, base64_url, qr};
 use thiserror::Error;
 use url::Url;
 
@@ -21,6 +20,8 @@ const OSC8_CLOSE: &str = "\x1b]8;;\x1b\\";
 const STRING_TERMINATOR: &str = "\x1b\\";
 const QR_ANSI_DARK_ON_LIGHT: &str = "\x1b[30;47m";
 const ANSI_RESET: &str = "\x1b[0m";
+/// Light modules framing the symbol on each side, per the QR specification.
+const QR_QUIET_ZONE: u16 = 4;
 
 /// Terminal-ready browser join presentation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,6 +34,48 @@ pub struct TerminalJoinPresentation {
 	pub qr_rows:     Vec<Str>,
 	/// Minimum terminal columns required to display the QR rows.
 	pub min_columns: usize,
+}
+
+impl TerminalJoinPresentation {
+	/// Selects QR rows for a transcript allocation.
+	///
+	/// A clipped symbol becomes one width-bounded row whose visible `Join`
+	/// label retains the full browser URL as its OSC-8 target.
+	pub fn qr_rows_for_layout(&self, columns: usize, allocated_rows: usize) -> Cow<'_, [Str]> {
+		if columns >= self.min_columns && allocated_rows >= self.qr_rows.len() {
+			return Cow::Borrowed(self.qr_rows.as_slice());
+		}
+		Cow::Owned(vec![self.clipped_qr_row(columns)])
+	}
+
+	fn clipped_qr_row(&self, columns: usize) -> Str {
+		if columns == 0 {
+			return Str::new_static("");
+		}
+		const LABEL: &str = "Join";
+		const WIDTH_REASON: &str = " QR hidden: narrow terminal";
+		const HEIGHT_REASON: &str = " QR hidden: clipped viewport";
+		let label = &LABEL[..columns.min(LABEL.len())];
+		let reason = if columns < self.min_columns {
+			WIDTH_REASON
+		} else {
+			HEIGHT_REASON
+		};
+		let remaining = columns.saturating_sub(label.len());
+		let suffix = &reason[..remaining.min(reason.len())];
+		let mut row = String::with_capacity(
+			OSC8_OPEN
+				.len()
+				.saturating_add(self.browser_url.len())
+				.saturating_add(STRING_TERMINATOR.len())
+				.saturating_add(label.len())
+				.saturating_add(OSC8_CLOSE.len())
+				.saturating_add(suffix.len()),
+		);
+		push_osc8_hyperlink(&mut row, &self.browser_url, label);
+		row.push_str(suffix);
+		Str::from(row)
+	}
 }
 
 /// A query-free collaboration relay origin.
@@ -148,7 +191,7 @@ impl LinkCredentials {
 	}
 
 	/// Returns a write token only for full-access links.
-	pub fn write_token(&self) -> Option<WriteToken> {
+	pub const fn write_token(&self) -> Option<WriteToken> {
 		match self {
 			Self::ReadOnly(_) => None,
 			Self::Full { write_token, .. } => Some(WriteToken::from_bytes(*write_token)),
@@ -277,22 +320,9 @@ impl CollabLink {
 			.or_else(|| browser_url.strip_prefix("http://"))
 			.unwrap_or(&browser_url);
 		let hyperlink = osc8_hyperlink(&browser_url, display);
-		let code = QrCode::with_error_correction_level(browser_url.as_bytes(), EcLevel::M)?;
-		let rendered = code
-			.render::<unicode::Dense1x2>()
-			.quiet_zone(true)
-			.module_dimensions(1, 1)
-			.build();
-		let qr_rows = rendered
-			.lines()
-			.map(|row| Str::from(format!("{QR_ANSI_DARK_ON_LIGHT}{row}{ANSI_RESET}")))
-			.collect::<Vec<_>>();
-		let min_columns = rendered
-			.lines()
-			.map(str::chars)
-			.map(Iterator::count)
-			.max()
-			.unwrap_or(0);
+		let code = qr::QrCode::encode(browser_url.as_bytes(), qr::QrEc::M)?;
+		let qr_rows = half_block_rows(&code);
+		let min_columns = usize::from(code.side() + 2 * QR_QUIET_ZONE);
 		Ok(TerminalJoinPresentation {
 			browser_url: Str::from(browser_url),
 			hyperlink,
@@ -313,15 +343,24 @@ impl CollabLink {
 /// Control characters are stripped from the visible label. Callers should
 /// pass a URL produced by [`CollabLink::browser`].
 pub fn osc8_hyperlink(target: &str, label: &str) -> Str {
-	let safe_target = target
-		.chars()
-		.filter(|character| !character.is_control())
-		.collect::<String>();
-	let safe_label = label
-		.chars()
-		.filter(|character| !character.is_control())
-		.collect::<String>();
-	Str::from(format!("{OSC8_OPEN}{safe_target}{STRING_TERMINATOR}{safe_label}{OSC8_CLOSE}"))
+	let mut rendered = String::with_capacity(
+		OSC8_OPEN
+			.len()
+			.saturating_add(target.len())
+			.saturating_add(STRING_TERMINATOR.len())
+			.saturating_add(label.len())
+			.saturating_add(OSC8_CLOSE.len()),
+	);
+	push_osc8_hyperlink(&mut rendered, target, label);
+	Str::from(rendered)
+}
+
+fn push_osc8_hyperlink(rendered: &mut String, target: &str, label: &str) {
+	rendered.push_str(OSC8_OPEN);
+	rendered.extend(target.chars().filter(|character| !character.is_control()));
+	rendered.push_str(STRING_TERMINATOR);
+	rendered.extend(label.chars().filter(|character| !character.is_control()));
+	rendered.push_str(OSC8_CLOSE);
 }
 
 fn parse_inner(input: &str, depth: u8) -> Result<CollabLink, LinkError> {
@@ -340,12 +379,11 @@ fn parse_inner(input: &str, depth: u8) -> Result<CollabLink, LinkError> {
 		format!("wss://{text}")
 	};
 	let url = Url::parse(&candidate).map_err(LinkError::Parse)?;
-	if matches!(url.scheme(), "http" | "https") {
-		if let Some(fragment) = url.fragment() {
-			if let Ok(link) = parse_inner(fragment, depth + 1) {
-				return Ok(link);
-			}
-		}
+	if matches!(url.scheme(), "http" | "https")
+		&& let Some(fragment) = url.fragment()
+		&& let Ok(link) = parse_inner(fragment, depth + 1)
+	{
+		return Ok(link);
 	}
 	if !matches!(url.scheme(), "ws" | "wss" | "http" | "https") {
 		if let Some(fragment) = url.fragment() {
@@ -418,6 +456,36 @@ fn encode_room_id(room_id: &RoomId) -> String {
 	base64_url::encode_raw(room_id.as_bytes()).into_string()
 }
 
+/// Renders a symbol as ANSI dark-on-light half-block rows with the
+/// four-module quiet zone; each terminal row carries two module rows.
+fn half_block_rows(code: &qr::QrCode) -> Vec<Str> {
+	let columns = code.side() + 2 * QR_QUIET_ZONE;
+	let dark = |x: u16, y: u16| {
+		let (Some(x), Some(y)) = (x.checked_sub(QR_QUIET_ZONE), y.checked_sub(QR_QUIET_ZONE)) else {
+			return false;
+		};
+		code.dark(x, y)
+	};
+	(0..columns.div_ceil(2))
+		.map(|row| {
+			let mut line = String::with_capacity(
+				QR_ANSI_DARK_ON_LIGHT.len() + usize::from(columns) * 3 + ANSI_RESET.len(),
+			);
+			line.push_str(QR_ANSI_DARK_ON_LIGHT);
+			for column in 0..columns {
+				line.push(match (dark(column, row * 2), dark(column, row * 2 + 1)) {
+					(true, true) => '█',
+					(true, false) => '▀',
+					(false, true) => '▄',
+					(false, false) => ' ',
+				});
+			}
+			line.push_str(ANSI_RESET);
+			Str::from(line)
+		})
+		.collect()
+}
+
 fn validate_origin(url: &Url) -> Result<(), EndpointError> {
 	validate_authority(url)?;
 	if url.path() != "/" && !url.path().is_empty() {
@@ -486,7 +554,7 @@ pub enum EndpointError {
 pub enum TerminalLinkError {
 	/// Browser link exceeded QR byte-mode capacity.
 	#[error(transparent)]
-	Qr(#[from] qrcode::types::QrError),
+	Qr(#[from] qr::QrOverflow),
 }
 
 /// Invalid collaboration room link.
@@ -602,5 +670,30 @@ mod tests {
 				.all(|row| { row.starts_with(QR_ANSI_DARK_ON_LIGHT) && row.ends_with(ANSI_RESET) })
 		);
 		assert!(presentation.min_columns > 0);
+	}
+
+	#[test]
+	fn clipped_qr_keeps_a_width_bounded_browser_link_row() {
+		let presentation = link(true)
+			.terminal_join(&WebEndpoint::parse("https://collab.example").expect("web"))
+			.expect("terminal join");
+		let height_clipped = presentation.qr_rows_for_layout(presentation.min_columns, 1);
+		assert_eq!(height_clipped.len(), 1);
+		assert!(
+			height_clipped[0].contains(presentation.browser_url.as_str()),
+			"{:?}",
+			height_clipped[0]
+		);
+		let rows = presentation.qr_rows_for_layout(10, 1);
+		assert_eq!(rows.len(), 1);
+		let row = &rows[0];
+		assert!(row.contains(presentation.browser_url.as_str()), "{row:?}");
+		let (_, after_target) = row
+			.split_once(STRING_TERMINATOR)
+			.expect("fallback carries an OSC-8 target");
+		let (label, suffix) = after_target
+			.split_once(OSC8_CLOSE)
+			.expect("fallback closes its OSC-8 target");
+		assert!(label.chars().count() + suffix.chars().count() <= 10, "{row:?}");
 	}
 }

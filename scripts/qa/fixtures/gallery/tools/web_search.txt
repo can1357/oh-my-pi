@@ -1,0 +1,39 @@
+── web_search — Web Search ─────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ Web Search: bun vs node performance                                                               
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ Web Search: Bun vs Node.js performance benchmarks 2026                                            
+                                                                                                    
+
+  · done
+                                                                                                    
+╭───  Web Search: Perplexity 4 sources ───────────────────────────────────────────────────────────╮
+│ Query: Bun vs Node.js performance benchmarks 2026                                                │
+├─── Answer ───────────────────────────────────────────────────────────────────────────────────────┤
+│ Bun continues to outperform Node.js on raw HTTP throughput and cold-start                        │
+│ time thanks to its JavaScriptCore engine and native-Zig runtime, while                           │
+│ Node.js retains an edge in ecosystem maturity and long-term stability.                           │
+│ For script-heavy workflows Bun's faster startup is the decisive factor.                          │
+├─── Sources ──────────────────────────────────────────────────────────────────────────────────────┤
+│ ├─ Bun 1.2 Benchmarks: HTTP, SQLite, and Startup Time (bun.sh) · 1w ago                          │
+│ ├─ Node.js vs Bun: A 2026 Performance Deep Dive (blog.platformatic.dev) · 3d ago                 │
+│ ├─ Real-world API latency: Bun, Deno, and Node compared (theregister.com) · 2w ago               │
+│ └─ Why we migrated our CLI tooling from Node to Bun (engineering.example.com) · 3w ago           │
+├─── Metadata ─────────────────────────────────────────────────────────────────────────────────────┤
+│ Provider: sonar-pro @ Perplexity (API)                                                           │
+│ Usage: in 312 · out 248 · total 560 · search 2                                                   │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭───  Web Search: Perplexity ─────────────────────────────────────────────────────────────────────╮
+│ Error: Provider returned HTTP 429 (rate limited). Retry after 30s.                               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

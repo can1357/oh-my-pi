@@ -74,6 +74,14 @@ pub enum ProbeFailure {
 		/// Missing environment variable.
 		variable: &'static str,
 	},
+	/// The running Linux kernel exposes an older Landlock ABI than required.
+	#[error("landlock ABI {required} is required, but the kernel exposes ABI {available}")]
+	LandlockAbi {
+		/// Minimum ABI providing the capabilities advertised by the backend.
+		required:  u32,
+		/// ABI reported by the running kernel.
+		available: u32,
+	},
 	/// The current host cannot execute this backend.
 	#[error("{backend} is not executable on {os}")]
 	WrongHost {
@@ -135,12 +143,18 @@ pub enum SpecViolation {
 	/// Scoped write mode needs at least one writable location.
 	#[error("write mode scope requires a writable path or temporary writes")]
 	EmptyWriteScope,
+	/// A write-deny carve-out must be nested under an effective writable scope.
+	#[error("write-deny paths must be inside an effective writable scope")]
+	WriteDenyOutsideScope,
 	/// A scoped-read working directory must itself be readable or writable.
 	#[error("the working directory is outside every readable and writable scope")]
 	DirectoryOutsideScope,
 	/// A Mach service allow entry is blank.
 	#[error("Mach service names must not be blank")]
 	EmptyMachService,
+	/// A scoped proxy endpoint has no usable TCP port.
+	#[error("sandbox proxy port must be nonzero")]
+	ProxyPortZero,
 }
 
 /// One failed best-effort cleanup operation.
@@ -221,7 +235,7 @@ pub struct CleanupFailures {
 }
 
 impl CleanupFailures {
-	pub(crate) fn new(failures: Vec<CleanupFailure>) -> Self {
+	pub(crate) const fn new(failures: Vec<CleanupFailure>) -> Self {
 		Self { failures }
 	}
 
@@ -337,11 +351,37 @@ pub enum SandboxError {
 		/// Rejected deny path.
 		path: PathBuf,
 	},
+	/// A configured read-deny glob cannot be enforced by the selected sandbox
+	/// backends.
+	#[error("sandbox read-deny glob {pattern} cannot be enforced")]
+	UnsupportedReadDenyGlob {
+		/// Rejected glob pattern.
+		pattern: Str,
+	},
+	/// A writable-root carve-out crosses a symlink that Bubblewrap cannot
+	/// protect.
+	#[error("sandbox writable root {writable_root} cannot protect {path} through symlink {symlink}")]
+	ProtectedWriteDenySymlink {
+		/// Writable root containing the protected path.
+		writable_root: PathBuf,
+		/// Logical path requested as a read-only carve-out.
+		path:          PathBuf,
+		/// Symlink component a read-only bind would follow.
+		symlink:       PathBuf,
+	},
 	/// A Unix-socket allowance did not identify a socket.
 	#[error("sandbox Unix-socket allowance {path} is not a socket")]
 	NotUnixSocket {
 		/// Rejected path.
 		path: PathBuf,
+	},
+	/// The active backend cannot enforce an exact requested authority.
+	#[error("sandbox backend {backend} cannot enforce exact {authority}")]
+	EnforcementUnavailable {
+		/// Backend which cannot represent the restriction.
+		backend:   Backend,
+		/// Exact authority which would otherwise be widened.
+		authority: &'static str,
 	},
 	/// An environment glob is syntactically invalid.
 	#[error("invalid environment pattern {pattern}")]
@@ -377,6 +417,30 @@ pub enum SandboxError {
 	ExecutableNotFound {
 		/// Unresolved executable name.
 		program: OsString,
+	},
+	/// The hidden same-binary sandbox child received a malformed argv contract.
+	#[error("invalid hidden sandbox child arguments")]
+	InvalidSandboxChildArguments,
+	/// The kernel accepted the Landlock ruleset request without fully enforcing
+	/// it.
+	#[cfg(target_os = "linux")]
+	#[error("the kernel did not fully enforce the Landlock ruleset")]
+	LandlockNotEnforced,
+	/// A Landlock ruleset could not be built or installed.
+	#[cfg(target_os = "linux")]
+	#[error("failed to install the Landlock ruleset")]
+	Landlock {
+		/// Landlock ruleset failure.
+		#[from]
+		source: landlock::RulesetError,
+	},
+	/// A seccomp program could not be built or installed.
+	#[cfg(target_os = "linux")]
+	#[error("failed to build or install the seccomp filter")]
+	Seccomp {
+		/// Seccomp compiler or kernel-installation failure.
+		#[from]
+		source: seccompiler::Error,
 	},
 	/// A backend mount path cannot be represented safely.
 	#[error("sandbox backend {backend} cannot mount path {path}")]
@@ -471,6 +535,18 @@ pub enum SandboxError {
 	#[error("sandbox backend {backend} cannot produce an external command")]
 	ExternalCommandUnsupported {
 		/// In-process backend.
+		backend: Backend,
+	},
+	/// The selected backend cannot compile a reusable command wrapper.
+	#[error("sandbox backend {backend} cannot compile a reusable command wrapper")]
+	CommandWrapperUnsupported {
+		/// Backend without a native reusable launcher.
+		backend: Backend,
+	},
+	/// A reusable wrapper cannot enforce a command-specific no-exec rule.
+	#[error("sandbox backend {backend} cannot apply no-exec to a program-less command wrapper")]
+	CommandWrapperNoExec {
+		/// Native backend requiring the initial executable path.
 		backend: Backend,
 	},
 	/// A preparation artifact could not be created or populated.

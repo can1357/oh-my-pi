@@ -73,6 +73,37 @@ pub fn environment_socket(state_dir: &Path) -> PathBuf {
 pub fn document_socket(state_dir: &Path) -> PathBuf {
 	socket_path(state_dir, "doc")
 }
+/// Returns the short owner-local DATA socket for one extension host identity.
+///
+/// The address is domain-separated by the canonical state directory, exact
+/// host key fields, runtime session, and runtime generation while its
+/// fixed-size filename remains within every supported Unix `sockaddr_un`.
+#[cfg(unix)]
+#[must_use]
+pub fn extension_socket(
+	state_dir: &Path,
+	layer: &str,
+	tier: &str,
+	extension: &str,
+	session_id: &str,
+	session_generation: u64,
+) -> PathBuf {
+	let canonical = fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
+	let mut digest = Hash32::hasher();
+	digest.update(b"omp/extension-data-socket/v1");
+	for field in [
+		canonical.as_os_str().as_encoded_bytes(),
+		layer.as_bytes(),
+		tier.as_bytes(),
+		extension.as_bytes(),
+		session_id.as_bytes(),
+	] {
+		digest.update((field.len() as u64).to_le_bytes());
+		digest.update(field);
+	}
+	digest.update(session_generation.to_le_bytes());
+	unix_socket_path(&digest.finalize(), "ext")
+}
 
 /// Returns the deterministic current-user document-authority named pipe.
 #[cfg(windows)]
@@ -132,9 +163,14 @@ fn owning_data_dir(state_dir: &Path) -> PathBuf {
 fn socket_path(state_dir: &Path, kind: &str) -> PathBuf {
 	let canonical = fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
 	let digest = Hash32::sum(canonical.as_os_str().as_encoded_bytes());
+	unix_socket_path(&digest, kind)
+}
+
+#[cfg(unix)]
+fn unix_socket_path(digest: &Hash32, kind: &str) -> PathBuf {
 	let short: [u8; 16] = digest.as_bytes()[..16]
 		.try_into()
-		.expect("a Blake3 digest contains 16 prefix bytes");
+		.expect("a SHA-256 digest contains 16 prefix bytes");
 	PathBuf::from("/tmp").join(format!(
 		"omp-{}-{}-{kind}.sock",
 		nix::unistd::geteuid().as_raw(),
@@ -163,21 +199,32 @@ fn windows_pipe_path(state_dir: &Path, kind: &str) -> PathBuf {
 mod tests {
 	use std::{mem, path::PathBuf};
 
-	use super::{document_socket, environment_socket};
+	use super::{document_socket, environment_socket, extension_socket};
 
 	#[test]
 	fn socket_paths_fit_the_platform_address_limit() {
 		let state_dir = PathBuf::from("/").join("long-project-state-segment".repeat(32));
 		let env = environment_socket(&state_dir);
 		let docs = document_socket(&state_dir);
+		let extension = extension_socket(
+			&state_dir,
+			"workspace",
+			"trusted",
+			"fixture.extension",
+			"fixture-session",
+			u64::MAX,
+		);
 		// SAFETY: every all-zero bit pattern is valid for libc's sockaddr_un
 		// integer fields and fixed-size character array.
 		let address: libc::sockaddr_un = unsafe { mem::zeroed() };
 		let capacity = address.sun_path.len();
 
 		assert_ne!(env, docs);
+		assert_ne!(env, extension);
+		assert_ne!(docs, extension);
 		assert!(env.as_os_str().as_encoded_bytes().len() < capacity);
 		assert!(docs.as_os_str().as_encoded_bytes().len() < capacity);
+		assert!(extension.as_os_str().as_encoded_bytes().len() < capacity);
 	}
 }
 

@@ -3,12 +3,12 @@
 use std::{env, sync::Arc, time, time::Duration};
 
 use http::{HeaderMap, HeaderValue, header::USER_AGENT};
-use omp_envd::github_url::GithubCredentialBridge;
-use omp_inference::auth::HeaderPlacement;
-use omp_storage::{
-	telemetry_index,
-	telemetry_index::{PendingIssue, TelemetryIndex},
+use omp_ai::auth::HeaderPlacement;
+use omp_cache::{
+	telemetry_cache,
+	telemetry_cache::{PendingIssue, TelemetryIndex},
 };
+use omp_envd::github_url::GithubCredentialBridge;
 use serde_json::{Value, json};
 
 const ENDPOINT: &str = "https://qa.omp.sh/v1/grievances";
@@ -27,13 +27,13 @@ pub struct ManualPushResult {
 /// revision. Model-facing report arguments never reach this authority.
 pub fn apply_consent(
 	store: &TelemetryIndex,
-	intent: omp_storage::telemetry_index::ConsentIntent,
-) -> Result<bool, omp_storage::telemetry_index::QueryError> {
+	intent: omp_cache::telemetry_cache::ConsentIntent,
+) -> Result<bool, omp_cache::telemetry_cache::QueryError> {
 	match intent.decision {
-		telemetry_index::Decision::Upload => {
+		telemetry_cache::Decision::Upload => {
 			store.consent_upload(&intent.issue_id, &intent.revision, now_ms())
 		},
-		telemetry_index::Decision::LocalOnly => {
+		telemetry_cache::Decision::LocalOnly => {
 			store.reject_upload(&intent.issue_id)?;
 			Ok(true)
 		},
@@ -65,7 +65,7 @@ pub(crate) fn start(store: Arc<TelemetryIndex>, credentials: Arc<GithubCredentia
 pub async fn manual_push(
 	store: &TelemetryIndex,
 	credentials: &GithubCredentialBridge,
-) -> Result<ManualPushResult, omp_storage::telemetry_index::QueryError> {
+) -> Result<ManualPushResult, omp_cache::telemetry_cache::QueryError> {
 	let client = omp_http::no_redirect_client();
 	let endpoint = env::var("OMP_AUTO_QA_PUSH_URL").unwrap_or_else(|_| ENDPOINT.to_owned());
 	let mut pushed = 0;
@@ -85,7 +85,7 @@ pub async fn manual_push(
 }
 
 async fn deliver_to(
-	client: &reqwest::Client,
+	client: &omp_http::Client,
 	endpoint: &str,
 	store: &TelemetryIndex,
 	credentials: &GithubCredentialBridge,
@@ -111,7 +111,7 @@ async fn deliver_to(
 		"session_id": pending.issue.session_id,
 		"device": pending.issue.device,
 		"revision": revision,
-		"payload": omp_telemetry::autoqa::project_payload(&pending.payload),
+		"payload": omp_observability::autoqa::project_payload(&pending.payload),
 	});
 	let mut headers = HeaderMap::new();
 	headers.insert(USER_AGENT, HeaderValue::from_static("omp-autoqa/1"));
@@ -174,7 +174,7 @@ fn retry(
 	store: &TelemetryIndex,
 	pending: &PendingIssue,
 	now: u64,
-) -> Result<(), omp_storage::telemetry_index::QueryError> {
+) -> Result<(), omp_cache::telemetry_cache::QueryError> {
 	let exponent = pending.issue.attempt_count.min(10);
 	let delay = 1_000u64
 		.checked_shl(exponent)
@@ -193,8 +193,8 @@ fn now_ms() -> u64 {
 }
 #[cfg(test)]
 mod tests {
+	use omp_cache::telemetry_cache::StoredIssue;
 	use omp_core::sf;
-	use omp_storage::telemetry_index::StoredIssue;
 	use tempfile::tempdir;
 
 	use super::*;

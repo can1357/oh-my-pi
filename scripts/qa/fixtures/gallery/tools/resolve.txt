@@ -1,0 +1,30 @@
+── resolve ─────────────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ Resolve: apply ⟨proposed -> resolved⟩ The rename touches only                                     
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ Resolve: apply ⟨proposed -> resolved⟩ The rename touches only tokens.ts and matches the request.  
+                                                                                                    
+
+  · done
+                                                                                                    
+                                                                                                    
+  Accept: pending action                                                                           
+                                                                                                    
+ The rename touches only tokens.ts and matches the request.                                         
+                                                                                                    
+                                                                                                    
+
+  · failed
+                                                                                                    
+                                                                                                    
+  Failed: pending action                                                                           
+                                                                                                    
+ The rename touches only tokens.ts and matches the request.                                         
+                                                                                                    
+                                                                                                    
+

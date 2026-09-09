@@ -193,7 +193,7 @@ fn fallback_table(
 	}
 }
 
-/// Renders a GFM table as a box-bordered grid using pi's column allocation.
+/// Renders a GFM table as a box-bordered grid using shared column allocation.
 pub fn render_table(
 	rows: &[Vec<&str>],
 	alignments: &[Alignment],

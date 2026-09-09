@@ -1,0 +1,27 @@
+── retain — Retain ─────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ Retain                                                                                            
+   User prefers Bun over Node for all new scripts in this repo.                                    
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ Retain                                                                                            
+   User prefers Bun over Node for all new scripts in this repo.                                    
+   The TUI renderers live in packages/coding-agent/src/tools/*-render.ts.                          
+                                                                                                    
+
+  · done
+                                                                                                    
+ Retain 2 memories stored                                                                          
+   User prefers Bun over Node for all new scripts in this repo.                                    
+   The TUI renderers live in packages/coding-agent/src/tools/*-render.ts.                          
+                                                                                                    
+
+  · failed
+                                                                                                    
+ Error: Retain failed: memory store is not initialized.                                            
+                                                                                                    
+

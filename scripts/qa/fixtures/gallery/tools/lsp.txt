@@ -1,0 +1,42 @@
+── lsp — LSP ───────────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ LSP: references src/server/auth.ts                                                                
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ LSP: references src/server/auth.ts:42 (validateToken)                                             
+                                                                                                    
+
+  · done
+                                                                                                    
+╭───  LSP references ─────────────────────────────────────────────────────────────────────────────╮
+│ src/server/auth.ts                                                                               │
+│ line 42                                                                                          │
+│ symbol: validateToken                                                                            │
+├─── Response ─────────────────────────────────────────────────────────────────────────────────────┤
+│  6 found⟨Ctrl+O: Expand⟩                                                                        │
+│  ├─ src/server/auth.ts 2 references                                                              │
+│  │  ├─ line 42, col 14                                                                           │
+│  │  └─ … 1 more                                                                                  │
+│  ├─ src/server/middleware/session.ts 1 reference                                                 │
+│  │  └─ line 57, col 18                                                                           │
+│  ├─ src/server/router.ts 1 reference                                                             │
+│  │  └─ line 153, col 20                                                                          │
+│  └─ … 1 more file                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭───  LSP references ─────────────────────────────────────────────────────────────────────────────╮
+│ src/server/auth.ts                                                                               │
+│ line 42                                                                                          │
+│ symbol: validateToken                                                                            │
+├─── Response ─────────────────────────────────────────────────────────────────────────────────────┤
+│  No language server found for this file                                                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

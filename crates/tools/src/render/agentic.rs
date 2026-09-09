@@ -1,5 +1,7 @@
 //! Native goal lifecycle renderer.
 
+use std::time::Duration;
+
 use omp_core::Str;
 use omp_tool::{CallOutcome, ToolIdentity, render::RenderFold};
 
@@ -27,14 +29,14 @@ impl RenderFold for GoalRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
 		state.op = args
 			.get("op")
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.and_then(|value| value.parse().ok());
 		state.objective = args
 			.get("objective")
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.map(Str::from);
 	}
 
@@ -114,7 +116,7 @@ fn render_goal_payload(payload: &GoalPayload) -> El {
 				</row>
 				if goal.time_used_secs > 0 {
 					<row sep="">
-						<time ms={goal.time_used_secs.saturating_mul(1_000)} kind="duration"/>
+						<time ms={Duration::from_secs(goal.time_used_secs)} kind="duration"/>
 						<text>{" elapsed"}</text>
 					</row>
 				}
@@ -127,14 +129,13 @@ fn render_goal_payload(payload: &GoalPayload) -> El {
 }
 
 /// Native goal renderer lifecycle fixtures for the visual QA gallery.
-pub(crate) fn gallery_fixtures(goal: ToolIdentity) -> Vec<RendererGalleryFixture> {
+pub fn gallery_fixtures(goal: ToolIdentity) -> Vec<RendererGalleryFixture> {
 	vec![RendererGalleryFixture {
 		identity: goal,
-		title: "create auth-hardening goal with a 500K token budget",
 		streaming_args: r#"{"op":"create","objective":"Ship the auth hardening pass: per-account rate"#,
 		args: r#"{"op":"create","objective":"Ship the auth hardening pass: per-account rate limits and sliding session expiry.","token_budget":500000}"#,
 		progress_update: None,
-		success_outcome: br#"{"kind":"ok","value":{"op":"create","goal":{"id":"goal_8f2a","objective":"Ship the auth hardening pass: per-account rate limits and sliding session expiry.","status":"active","token_budget":500000,"tokens_used":48200,"time_used_secs":312},"remaining_tokens":451800,"completion_report":null}}"#,
+		success_outcome: br#"{"kind":"ok","value":{"op":"create","goal":{"id":"goal_8f2a","objective":"Ship the auth hardening pass: per-account rate limits and sliding session expiry.","status":"active","token_budget":500000,"tokens_used":48200,"time_used_secs":312,"created_at_ms":1749200000000,"updated_at_ms":1749200312000},"remaining_tokens":451800,"completion_report":null}}"#,
 		error_outcome: br#"{"kind":"faulted","value":{"kind":"objective_required"}}"#,
 	}]
 }
@@ -152,7 +153,7 @@ mod tests {
 			ToolIdentity { name: Str::new_static("goal"), rev: Rev { family: Str::default(), n: 1 } };
 		let fixture = gallery_fixtures(identity).pop().expect("goal fixture");
 		assert!(fixture.progress_update.is_none());
-		let args = omp_slopjson::parse_streaming(fixture.streaming_args);
+		let args = omp_core::slopjson::parse_streaming(fixture.streaming_args);
 		let mut state = GoalState::default();
 		GoalRenderer.fold_args(&mut state, &args, false);
 		assert!(
@@ -178,6 +179,8 @@ mod tests {
 				token_budget:   Some(500_000),
 				tokens_used:    48_200,
 				time_used_secs: 312,
+				created_at_ms:  0,
+				updated_at_ms:  0,
 			}),
 			remaining_tokens:  Some(451_800),
 			completion_report: None,
@@ -209,6 +212,8 @@ mod tests {
 				token_budget:   None,
 				tokens_used:    987,
 				time_used_secs: 0,
+				created_at_ms:  0,
+				updated_at_ms:  0,
 			}),
 			remaining_tokens:  None,
 			completion_report: Some(Str::new_static("Shipped <all> renderers & fixtures")),
@@ -241,7 +246,7 @@ mod tests {
 	#[test]
 	fn live_objective_is_semantically_bounded_and_escaped() {
 		let mut state = GoalState::default();
-		let args = omp_slopjson::parse_streaming(
+		let args = omp_core::slopjson::parse_streaming(
 			"{\"op\":\"create\",\"objective\":\"Harden <session> & cookie validation while rotating \
 			 every signing key without interrupting active requests END\\nsecond line\"",
 		);

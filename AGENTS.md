@@ -10,34 +10,43 @@ rewrite of `pi`: port observable behavior, not TS shape.
 - `crates/app`: process startup plus CLI, TUI, ACP, RPC, and print adapters.
   It presents compositions built by `omp-driver`; hidden same-binary child
   dispatch delegates to `omp-envd` entry points and does not make app the host.
-- `crates/driver`: headless coding-agent harness core — session and environment
-  composition, execution modes, orchestration, discovery, settings, and the
-  higher-layer bridges injected into `omp-envd`. `crates/driver` +
+- `crates/driver`: headless coding-agent composition — discovery, con context
+  and cfg execution, registries, environment wiring, and subagent spawn.
+  `compose_kernel` is the production construction boundary. `crates/driver` +
   `crates/app` = the production stack (driver composes, app presents); other
   libraries NEVER build a second production stack.
-- `crates/settings`: typed settings schemas, immutable snapshot projections,
-  persistence IO, migration, and live subscriptions (`omp-settings`).
+- `crates/journal`: authoritative `.oms` journal and blob CAS. `crates/dom`:
+  materialized session tree and patch stream. `crates/vocab`: shared closed
+  DOM/TUI vocabulary. `crates/session`: journal-first session API, fold,
+  components, rewind, and pure projections.
+- `crates/con`: typed convars, commands, bindings, aliases, and cfg persistence.
+  `crates/cache`: unrelated document, GitHub, MCP, secret-key, and statistics
+  caches; it does not own session history.
 - `crates/ext`: extension configuration, dependency resolution, lockfiles,
   index metadata, and trust domain (`omp-ext`).
 - `crates/serve`: gRPC transport projections serving inference, auth, and
   blob services (`omp-serve`).
-- `crates/core|storage|proto|rpc|telemetry`: allocation-aware primitives,
-  append-only transcript/blob persistence, wire contracts, RPC, observability.
-- `crates/agent`: durable turn state, interrupts, event projection, tool
-  batching. `crates/catalog`: model/provider data (`data/`) + transports.
-  `crates/inference`: typed requests → concrete Tower services, routing,
-  recovery middleware → `ChatEvent` streams.
+- `crates/core|proto|rpc|observability`: allocation-aware primitives, wire
+  contracts, RPC, and observability.
+- `crates/agent`: the `Kernel`, dispatcher, job board, cancellation tree,
+  Directors, hooks, extensions, and approvals. A live turn flows app →
+  driver `compose_kernel` → `omp-agent` `Kernel` → `omp-session`, which appends
+  to `omp-journal` and folds into `omp-dom`; `omp-chat` is an actor over
+  `Session::subscribe()` and never owns controller state.
+  `crates/catalog`: model/provider data (`data/`) + transports.
+  `crates/ai`: typed requests → concrete Tower services, routing,
+  recovery middleware → `ChatEvent` streams (`omp-ai`).
 - `crates/tool`: revisioned tool contracts; `crates/tools`: implementations.
   `crates/env` (`omp-env`) is the typed environment-protocol client and owns no
   host resources. `crates/envd` (`omp-envd`) is the live project-environment
   host: daemon transport, filesystem/process/document/tool authorities, and
   Python extension-host/worker supervision. Host changes go to `omp-envd`;
   client protocol APIs go to `omp-env`.
-  `crates/docserver|ast|walker|hashline`: document authority, syntax, fs
-  discovery, anchored edits.
-  `crates/shell|shell-engine|shell-builtins`: facade, parser/runtime, built-ins.
-- `crates/tui`+`tui-macros`: retained declarative DOM; `crates/gui`: native.
-  Neither owns agent/provider policy.
+  `crates/edit|ast|walker`: multi-paradigm edit engine, syntax, fs discovery.
+  `crates/shell|shell-builtins`: in-process Bash parser/runtime, built-ins.
+- `crates/tui`+`tui-macros`: retained declarative UI; `crates/chat`: terminal
+  and native chat actor/projections; `crates/gui`: native window host.
+  None owns agent/provider policy.
 - `crates/e2e/tests`: authoritative joined-system proofs P1-P8.
 - `PLAN.md`: authoritative plan — locked decisions D1-D8, defect ledger, 8
   parts + checklists.
@@ -53,7 +62,7 @@ adapter) → `omp-driver` chat/headless composition (environment, registries,
 journal, agent session, and higher-layer host bridges) → `omp-envd`
 project-environment host, reached through `omp-env` clients for effects →
 `agent/src/loop.rs` (mailbox input/interrupts, `TurnClient`, typed tool batches,
-durable `AgentEvent`s) → `omp-inference` (facade + Tower spine; streamed events
+durable `AgentEvent`s) → `omp-ai` (facade + Tower spine; streamed events
 → storage → app adapter) → TUI retained tree → terminal output materialized
 once at final renderer.
 
@@ -76,7 +85,7 @@ Linux; lint/tests/P1-P8/baseline on `macos-15` arm64 (CPython bundle
 Deps: all in root `[workspace.dependencies]`; members `{ workspace = true }`,
 NEVER pin versions. Extra features fine:
 `serde = { workspace = true, features = ["rc"] }`. `serde_json` always
-`preserve_order` + `raw_value`; `crates/slopjson` (broken/partial/streaming
+`preserve_order` + `raw_value`; `omp_core::slopjson` (broken/partial/streaming
 JSON) mirrors that surface.
 
 Env vars `OMP_*`, never `PI_*`; ported code strips upstream (`pi`, `uu`, …)
@@ -126,7 +135,7 @@ workspace = true
 Taxonomy: domain prefix after `omp-` (`omp-llm-*`, `omp-shell*`).
 **transport** = provider wire protocol ≠ **dialect** = thread rendering to the
 LLM; NEVER conflate. Providers = catalog data entries; code only for genuinely
-distinct wire behavior; routing stays in inference. `omp-tool` defines
+distinct wire behavior; routing stays in ai. `omp-tool` defines
 contracts, `omp-tools` implements — never inverted. Public daemon commands and
 same-binary child roles are dispatched by app; daemon implementation belongs
 in its host crate (`omp-envd` for the project environment), never in app
@@ -146,7 +155,7 @@ irregularity ≠ excuse to hand-write); `ascii_case_insensitive` lax input;
 derive + `map_err`. ONLY escape hatch when strum can't express the shape
 (per-arm logic, data variants w/ dynamic strings, one labeled error across
 many enums): local `macro_rules!` emitting both directions from one
-variant→string table (`vocab!`, `crates/telemetry/src/semconv.rs`). New bare
+variant→string table (`vocab!`, `crates/observability/src/semconv.rs`). New bare
 match table = reviewer-reject; migrate on touch.
 
 Composition/errors/state:
@@ -446,6 +455,49 @@ heap-grooming. Non-negotiable:
 5. Close pi's gaps (missing builtins, slash-arg completion, …) while in the
    area.
 
+### Locked Deviations from pi (owner decisions — NEVER port back)
+"pi does X" is NEVER an argument for any item below. Each was decided
+explicitly; regressing to pi shape = defect, not parity. Full audit ledger:
+`.plan/parity-regression-audit.md`.
+- Extensions/eval: embedded free-threaded CPython only — no JS/TS plugin
+  runtime, no multi-language eval; stdlib frozen in-binary.
+- Shell: in-process bash parser/interpreter + builtin coreutils; NEVER shell
+  out to `/bin/bash` or resolve via `$PATH`. Session shell owns pgids,
+  signal escalation (TERM → grace → KILL), persistent cwd/exports,
+  process-tree cleanup.
+- File edits go through the envd document authority (versioned CAS + fuzzy
+  3-way rebase, typed conflict ranges) — never pi's direct disk read/write.
+- Tools: minimal fixed wire roster; optional capabilities/MCP ride `dyn`
+  builtin devices — NEVER pi's discoverable `loadMode`/dynamic schema
+  mutation (prompt-cache invalidation). Versioned identities (`name@rev`);
+  single-stream lifecycle (ArgFeed → speculative preview → commit → typed
+  verdict), never pi's renderCall/execute/renderResult callbacks; renderers
+  consume `IncomingParams` live during streaming, not after settle.
+  Charitable arg decoding + faithful raw journaling. Central spill gate +
+  `artifact://` addressing — no tool-local string truncation. Every tool
+  schema carries the `i` intent param.
+- Inference: providers-as-data (catalog/KDL); model-name conditionals
+  (`model_id.contains(…)`) and hardcoded model counts/metadata in `.rs` =
+  reviewer-reject (lintx-enforced). Typed serde/prost wire structs — no
+  `json!`/untyped `Value` traversal. Forced tool calls are caller intents
+  with an escalation ladder (soft prompt first; native flags only when
+  cache-free). Provider stream frames decode to canonical semantic events,
+  never forwarded literally. No vendor server-side tools (lock-in).
+- Prompts: scribe compiled templates with banded named slots
+  (Frozen/Stable/Dynamic/Volatile); volatile facts (date, cwd, mounts) NEVER
+  in a stable prefix; one structured notices channel, not pi's seven ad-hoc
+  XML tag formats.
+- Control plane: stacked regimes + campaign arbiter (`omp.Decision`,
+  `docs/py/15-regimes.md`); the agent loop is a generic hook surface —
+  hardcoded per-feature outcome tracking (TTSR-style) prohibited.
+- Runtime: tokio + rayon only (custom executor crates prohibited); local
+  audio/ML via candle, never C/C++ binding graphs (whisper-rs, llama-cpp).
+- Feature graphs earn their weight: a crate enabling a feature whose code it
+  never imports (e.g. app → `omp-inference/realtime` → WebRTC/DTLS/
+  Opus) is a defect; cold `cargo run --bin omp` build time is a gate. No
+  dual-committed catalog formats, no leftover port fixtures, no lockfiles
+  nothing reads.
+
 ### Working Style
 - Orchestrate in parallel: one agent per crate/util/provider/category; `sonic`
   for mechanical moves/renames (`sd`/bash bulk renames, never hand edits);
@@ -477,11 +529,15 @@ generated inputs.
 - Tests run under `cargo nextest run` (config: `.config/nextest.toml`), never
   bare `cargo test`. nextest does NOT run doctests, so every recipe pairs it
   with `cargo test --doc`; omp has doctests in 25+ modules (`crates/core`,
-  `crates/shell-*`, `crates/slopjson`). Adding a nextest call without the
+  `crates/shell`, `omp_core::slopjson`). Adding a nextest call without the
   doctest half silently drops that coverage. Prefer `just test` /
   `just test-pkg <crate>`, which already run both.
 - Protobuf: `protox`; no system `protoc`.
 - Workspace env vars `OMP_*` only: `OMP_TUI_DEBUG`, `OMP_TTY`, `OMP_PY_SITE`.
+- User configuration lives in `~/.o2` (owner decision; `OMP_CONFIG_DIR` overrides): `config.cfg`,
+  agent assets, cfg scripts. Single source: `omp_core::dirs::config_dir` (`CONFIG_DIR_NAME = ".o2"`,
+  pinned by test). NEVER put config under the data dir, `~/.omp`, or XDG config; cfg files load
+  leniently (`Ctx::exec_configs`) so a stale line from an older build never blocks startup.
   `PYO3_CONFIG_FILE` = required upstream pyo3 exception.
 - Release profile deliberate (`opt-level = 2`, thin LTO, 1 codegen unit,
   stripped, unwind panics); change only w/ measured evidence.

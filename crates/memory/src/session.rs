@@ -122,11 +122,23 @@ impl SessionMemory {
 	}
 
 	/// Retains a settled durable suffix at the configured user-turn interval.
+	#[tracing::instrument(
+		level = "debug",
+		name = "memory_session_retention",
+		skip_all,
+		fields(top_level = self.top_level, message_count = messages.len())
+	)]
 	pub fn retain_settled(&self, messages: &[OwnedRetentionMessage]) -> Result<RetentionOutcome> {
 		if !self.top_level || !self.shared.runtime.is_active() {
+			tracing::debug!(
+				top_level = self.top_level,
+				active = self.shared.runtime.is_active(),
+				"memory retention skipped"
+			);
 			return Ok(RetentionOutcome::default());
 		}
 		if !self.shared.runtime.mnemopi_settings()?.auto_retain {
+			tracing::debug!(reason = "disabled", "memory retention skipped");
 			return Ok(RetentionOutcome::default());
 		}
 		let borrowed = borrow_messages(messages);
@@ -160,6 +172,12 @@ impl SessionMemory {
 	/// configured shutdown budget. A timed-out write remains detached and owns
 	/// its runtime until it settles, so SQLite handles are never closed
 	/// underneath an in-flight transaction.
+	#[tracing::instrument(
+		level = "debug",
+		name = "memory_shutdown_retention",
+		skip_all,
+		fields(top_level = self.top_level, message_count = messages.len())
+	)]
 	pub fn shutdown_flush(&self, messages: Vec<OwnedRetentionMessage>) -> Result<ShutdownOutcome> {
 		if !self.top_level
 			|| !self.shared.runtime.is_active()
@@ -180,6 +198,10 @@ impl SessionMemory {
 		match receiver.recv_timeout(timeout) {
 			Ok(result) => Ok(ShutdownOutcome { retention: Some(result?), timed_out: false }),
 			Err(flume::RecvTimeoutError::Timeout) => {
+				tracing::warn!(
+					timeout_ms = timeout.as_millis() as u64,
+					"memory shutdown retention timed out; durable write detached"
+				);
 				Ok(ShutdownOutcome { retention: None, timed_out: true })
 			},
 			Err(flume::RecvTimeoutError::Disconnected) => Err(Error::EmbeddingWorker),

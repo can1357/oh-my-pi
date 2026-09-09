@@ -3,6 +3,7 @@
 use std::{
 	collections::HashMap,
 	path::{Path, PathBuf},
+	str::FromStr,
 	sync::{
 		Arc,
 		atomic::{AtomicU64, Ordering},
@@ -11,12 +12,17 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use omp_agent::{
+	ApprovalDecision, ApprovalRoute, ApprovalScope, ApprovalSource, ApprovalSpec, ApprovalTicket,
+	TicketState,
+};
 use omp_core::{InvocationPhase, LifecyclePhase, Str};
 use omp_proto::policy::v1;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
+use url::Url;
 
 use super::{
 	admission,
@@ -32,6 +38,7 @@ pub const CAPABILITIES: &[&str] = &[
 	"invocation",
 	"env.exec",
 	"env.process",
+	"env.net",
 	"env.workspace.snapshot",
 	"env.worktree",
 	"env.blob",
@@ -117,12 +124,13 @@ impl Grants {
 				grants.extend(["env.doc.write", "env.fs.write", "env.blob"]);
 			}
 		}
-		if envelope
-			.exec
-			.as_ref()
-			.is_some_and(|exec| !exec.commands.is_empty())
-		{
-			grants.extend(["env.exec", "env.dap.read", "env.dap.execute", "env.blob"]);
+		if let Some(exec) = &envelope.exec {
+			if !exec.commands.is_empty() {
+				grants.extend(["env.exec", "env.dap.read", "env.dap.execute", "env.blob"]);
+			}
+			if exec.network {
+				grants.push("env.net");
+			}
 		}
 		if let Some(desktop) = &envelope.desktop {
 			if desktop.capture {
@@ -181,30 +189,32 @@ pub const fn lsp_tier_capability(tier: LspOperationTier) -> &'static str {
 }
 
 /// Returns the immutable Environment tier for one DAP action.
-pub const fn dap_action_tier(action: omp_docserver::DapAction) -> omp_docserver::DapApprovalTier {
+pub const fn dap_action_tier(
+	action: crate::docserver::DapAction,
+) -> crate::docserver::DapApprovalTier {
 	action.approval_tier()
 }
 
 /// Classifies one DAP wire action, failing closed for unknown/custom commands.
-pub fn dap_command_tier(command: &str) -> omp_docserver::DapApprovalTier {
+pub fn dap_command_tier(command: &str) -> crate::docserver::DapApprovalTier {
 	command
-		.parse::<omp_docserver::DapAction>()
-		.map_or(omp_docserver::DapApprovalTier::Execution, dap_action_tier)
+		.parse::<crate::docserver::DapAction>()
+		.map_or(crate::docserver::DapApprovalTier::Execution, dap_action_tier)
 }
 
 /// Returns the exact DATA capability required by one DAP action.
-pub const fn dap_action_capability(action: omp_docserver::DapAction) -> &'static str {
+pub const fn dap_action_capability(action: crate::docserver::DapAction) -> &'static str {
 	match dap_action_tier(action) {
-		omp_docserver::DapApprovalTier::ReadOnly => "env.dap.read",
-		omp_docserver::DapApprovalTier::Execution => "env.dap.execute",
+		crate::docserver::DapApprovalTier::ReadOnly => "env.dap.read",
+		crate::docserver::DapApprovalTier::Execution => "env.dap.execute",
 	}
 }
 
 /// Returns the exact DATA capability required by one DAP wire command.
 pub fn dap_command_capability(command: &str) -> &'static str {
 	match dap_command_tier(command) {
-		omp_docserver::DapApprovalTier::ReadOnly => "env.dap.read",
-		omp_docserver::DapApprovalTier::Execution => "env.dap.execute",
+		crate::docserver::DapApprovalTier::ReadOnly => "env.dap.read",
+		crate::docserver::DapApprovalTier::Execution => "env.dap.execute",
 	}
 }
 
@@ -612,6 +622,10 @@ pub enum PolicyControlFailure {
 	/// A different durable decision already owns the ticket.
 	#[error("approval ticket already has a different decision")]
 	DecisionConflict,
+	/// The ticket carries a `require_human` reason and the decision did not
+	/// come from a human-facing route.
+	#[error("approval ticket requires a human decision")]
+	HumanRequired,
 	/// Durable audit failed before state could change.
 	#[error("policy audit append failed: {0}")]
 	Audit(Str),
@@ -629,6 +643,7 @@ impl PolicyControlFailure {
 			Self::UnknownHandle => "UnknownProfileHandle",
 			Self::UnknownTicket => "UnknownApprovalTicket",
 			Self::DecisionConflict => "ApprovalDecisionConflict",
+			Self::HumanRequired => "ApprovalHumanRequired",
 			Self::Audit(_) => "PolicyAuditFailed",
 		};
 		ControlProtocolError::new(code, Str::from(self.to_string()))
@@ -664,7 +679,7 @@ pub trait SandboxPolicyRuntime: Send + Sync + 'static {
 		patch: SandboxProfile,
 		scope: PolicyScope,
 		reason: Str,
-		approval: Option<omp_agent::ApprovalSpec>,
+		approval: Option<ApprovalSpec>,
 	) -> Result<(), PolicyControlFailure>;
 }
 
@@ -672,10 +687,7 @@ pub trait SandboxPolicyRuntime: Send + Sync + 'static {
 #[async_trait]
 pub trait PolicyAuditSink: Send + Sync + 'static {
 	/// Persists the exact terminal approval record.
-	async fn approval_decided(
-		&self,
-		ticket: &omp_agent::ApprovalTicket,
-	) -> Result<(), PolicyControlFailure>;
+	async fn approval_decided(&self, ticket: &ApprovalTicket) -> Result<(), PolicyControlFailure>;
 }
 
 /// Authoritative policy/profile/approval CONTROL owner for one authenticated
@@ -683,7 +695,7 @@ pub trait PolicyAuditSink: Send + Sync + 'static {
 pub struct PolicyControlOwner {
 	identity:  Arc<ControlConnectionIdentity>,
 	runtime:   Arc<dyn SandboxPolicyRuntime>,
-	approvals: Arc<omp_agent::ApprovalBook>,
+	approvals: ApprovalRoute,
 	audit:     Arc<dyn PolicyAuditSink>,
 }
 
@@ -692,7 +704,7 @@ impl PolicyControlOwner {
 	pub fn new(
 		identity: Arc<ControlConnectionIdentity>,
 		runtime: Arc<dyn SandboxPolicyRuntime>,
-		approvals: Arc<omp_agent::ApprovalBook>,
+		approvals: ApprovalRoute,
 		audit: Arc<dyn PolicyAuditSink>,
 	) -> Self {
 		Self { identity, runtime, approvals, audit }
@@ -775,18 +787,8 @@ impl PolicyControlOwner {
 		}
 		let decision: Decision = serde_json::from_value(value)
 			.map_err(|error| PolicyControlFailure::Invalid(Str::from(error.to_string())))?;
-		let source = match decision.source.as_str() {
-			"user" => omp_agent::ApprovalSource::User,
-			"external" => omp_agent::ApprovalSource::External,
-			"forwarded" => omp_agent::ApprovalSource::Forwarded,
-			"config" => omp_agent::ApprovalSource::Config,
-			"extension" => omp_agent::ApprovalSource::Extension,
-			"timeout" => omp_agent::ApprovalSource::Timeout,
-			"unavailable" => omp_agent::ApprovalSource::Unavailable,
-			_ => {
-				return Err(PolicyControlFailure::Invalid(Str::new_static("unknown approval source")));
-			},
-		};
+		let source = ApprovalSource::from_str(decision.source.as_str())
+			.map_err(|_| PolicyControlFailure::Invalid(Str::new_static("unknown approval source")))?;
 		let scope = match decision.scope {
 			PolicyScope::Once => Str::new_static("once"),
 			PolicyScope::Call => Str::new_static("call"),
@@ -794,9 +796,10 @@ impl PolicyControlOwner {
 			PolicyScope::Session => Str::new_static("session"),
 			PolicyScope::Persist => Str::new_static("persist"),
 		};
-		let decision = omp_agent::ApprovalDecision {
+		let decision = ApprovalDecision {
 			approved: decision.approved,
-			scope,
+			scope: ApprovalScope::from_str(scope.as_str())
+				.expect("approval scope parsing is infallible"),
 			source,
 			decided_by: decision.decided_by,
 			reason: decision.reason,
@@ -813,8 +816,17 @@ impl PolicyControlOwner {
 				Err(PolicyControlFailure::DecisionConflict)
 			};
 		}
+		// One human-only reason makes the whole merged prompt human-only.
+		// Forwarding, configuration, extensions, and synthesized fallbacks
+		// remain non-human even when they arrive through an authenticated
+		// policy connection.
+		if !matches!(decision.source, ApprovalSource::User | ApprovalSource::External)
+			&& existing.reasons.iter().any(|reason| reason.require_human)
+		{
+			return Err(PolicyControlFailure::HumanRequired);
+		}
 		let mut durable = existing;
-		durable.state = omp_agent::TicketState::Decided;
+		durable.state = TicketState::Decided;
 		durable.decision = Some(decision.clone());
 		self.audit.approval_decided(&durable).await?;
 		self
@@ -902,7 +914,7 @@ impl ControlAuthority for PolicyControlOwner {
 					));
 				}
 				let cwd = policy_cwd(&context, arguments.remove("cwd").as_ref())?;
-				Ok(bash_ir_json(&script, &cwd, &policy_root(&context)?))
+				Ok(user_bash_ir(&script, &cwd, &policy_root(&context)?))
 			},
 			"omp.policy.match_paths" => match_paths_json(&context, &mut arguments),
 			"omp.policy.capabilities" => serde_json::to_value(
@@ -1069,7 +1081,7 @@ fn policy_cwd(
 	let roots = invocation
 		.roots
 		.iter()
-		.map(|root| PathBuf::from(root.as_str()))
+		.map(|root| control_root_path(root.as_str()))
 		.collect::<Vec<_>>();
 	let root = roots.first().ok_or_else(|| {
 		ControlProtocolError::new(
@@ -1095,12 +1107,18 @@ fn policy_cwd(
 		))
 	}
 }
+fn control_root_path(root: &str) -> PathBuf {
+	Url::parse(root)
+		.ok()
+		.and_then(|url| url.to_file_path().ok())
+		.unwrap_or_else(|| PathBuf::from(root))
+}
 fn policy_root(context: &ControlRequestContext) -> Result<PathBuf, ControlProtocolError> {
 	context
 		.invocation
 		.as_ref()
 		.and_then(|invocation| invocation.roots.first())
-		.map(|root| PathBuf::from(root.as_str()))
+		.map(|root| control_root_path(root.as_str()))
 		.ok_or_else(|| {
 			ControlProtocolError::new(
 				"WorkspaceScopeDenied",
@@ -1198,7 +1216,7 @@ fn command_json(command: &v1::BashCommand) -> Value {
 		"index": command.index,
 		"name": command.name,
 		"argv": command.argv.iter().map(|arg| json!({
-			"text": arg.text,
+			"text": literal_argument_text(arg.text.as_str()),
 			"dynamic": arg.dynamic,
 			"dynamism": arg.dynamism,
 			"quoting": if arg.quoting.is_empty() { "bare" } else { arg.quoting.as_str() },
@@ -1259,10 +1277,25 @@ fn command_json(command: &v1::BashCommand) -> Value {
 		"span": span_json(command.span.as_ref()),
 	})
 }
+fn literal_argument_text(text: &str) -> &str {
+	match text.as_bytes() {
+		[first, .., last] if first == last && matches!(first, b'\'' | b'"') => {
+			&text[1..text.len() - 1]
+		},
+		_ => text,
+	}
+}
 
-fn bash_ir_json(script: &str, cwd: &Path, root: &Path) -> Value {
+/// Parses one direct user shell submission into the canonical BashIR JSON
+/// consumed by policy and hook admission.
+pub fn user_bash_ir(script: &str, cwd: &Path, root: &Path) -> Value {
 	let ir = admission::bash_ir("bash", &json!({"command": script}), cwd, root)
 		.expect("shell analysis always returns BashIr");
+	bash_ir_json(&ir, script)
+}
+
+/// Projects one environment-produced Bash IR fact into the public hook shape.
+pub(crate) fn bash_ir_json(ir: &v1::BashIr, script: &str) -> Value {
 	let parse_error = ir
 		.parse_error
 		.as_ref()
@@ -1279,18 +1312,65 @@ fn bash_ir_json(script: &str, cwd: &Path, root: &Path) -> Value {
 			})
 		})
 		.collect::<Vec<_>>();
+	let command_values = ir.commands.iter().map(command_json).collect::<Vec<_>>();
+	let mut pipeline_commands = vec![Vec::<Value>::new()];
+	let mut operators = Vec::<&str>::new();
+	for (index, command) in ir.commands.iter().enumerate() {
+		if index > 0 {
+			let previous_end = ir.commands[index - 1]
+				.span
+				.as_ref()
+				.map_or(0, |span| span.end as usize);
+			let next_start = command
+				.span
+				.as_ref()
+				.map_or(previous_end, |span| span.start as usize);
+			let separator = script.get(previous_end..next_start).unwrap_or_default();
+			if separator.contains("&&") || separator.contains("||") {
+				operators.push(if separator.contains("&&") {
+					"and"
+				} else {
+					"or"
+				});
+				pipeline_commands.push(Vec::new());
+			}
+		}
+		pipeline_commands
+			.last_mut()
+			.expect("at least one pipeline exists")
+			.push(command_values[index].clone());
+	}
+	let lists = (!command_values.is_empty()).then(|| {
+		let pipelines = pipeline_commands
+			.into_iter()
+			.map(|commands| {
+				let span = commands
+					.first()
+					.and_then(|command| command.get("span"))
+					.cloned()
+					.unwrap_or_else(|| span_json(None));
+				json!({"commands": commands, "negated": false, "timed": false, "span": span})
+			})
+			.collect::<Vec<_>>();
+		json!({
+			"pipelines": pipelines,
+			"operators": operators,
+			"separator": "sequence",
+			"span": span_json(ir.commands.first().and_then(|command| command.span.as_ref())),
+		})
+	});
 	json!({
 		"source": script,
 		"rev": if ir.rev.is_empty() { "bashir@3" } else { ir.rev.as_str() },
-		"parser_rev": if ir.parser_rev.is_empty() { "omp-shell-engine" } else { ir.parser_rev.as_str() },
+		"parser_rev": if ir.parser_rev.is_empty() { "omp-shell" } else { ir.parser_rev.as_str() },
 		"parse_ok": ir.parse_ok,
 		"parse_error": parse_error,
 		"truncated": ir.truncated,
 		"node_count": ir.node_count,
 		"is_compound": ir.is_compound,
 		"has_dynamic_eval": ir.has_dynamic_eval,
-		"lists": Vec::<Value>::new(),
-		"commands": ir.commands.iter().map(command_json).collect::<Vec<_>>(),
+		"lists": lists.into_iter().collect::<Vec<_>>(),
+		"commands": command_values,
 		"functions": Vec::<Value>::new(),
 		"reads": ir.reads.iter().map(path_ref_json).collect::<Vec<_>>(),
 		"writes": ir.writes.iter().map(path_ref_json).collect::<Vec<_>>(),
@@ -1363,7 +1443,7 @@ fn match_paths_json(
 	})]))
 }
 
-fn approval_spec(value: Value) -> Result<omp_agent::ApprovalSpec, ControlProtocolError> {
+pub(crate) fn approval_spec(value: Value) -> Result<ApprovalSpec, ControlProtocolError> {
 	let object = value
 		.as_object()
 		.ok_or_else(|| ControlProtocolError::new("InvalidArguments", "approval must be an object"))?;
@@ -1392,7 +1472,7 @@ fn approval_spec(value: Value) -> Result<omp_agent::ApprovalSpec, ControlProtoco
 		.get("timeout")
 		.and_then(Value::as_f64)
 		.map_or(300_000, |seconds| (seconds.max(0.0) * 1_000.0) as u64);
-	Ok(omp_agent::ApprovalSpec {
+	Ok(ApprovalSpec {
 		title: required("title")?,
 		body: required("body")?,
 		subject: required("subject")?,
@@ -1431,7 +1511,7 @@ fn approval_spec(value: Value) -> Result<omp_agent::ApprovalSpec, ControlProtoco
 	})
 }
 
-fn approval_decision_json(decision: &omp_agent::ApprovalDecision) -> Value {
+fn approval_decision_json(decision: &ApprovalDecision) -> Value {
 	json!({
 		"approved": decision.approved,
 		"scope": decision.scope,
@@ -1442,7 +1522,7 @@ fn approval_decision_json(decision: &omp_agent::ApprovalDecision) -> Value {
 	})
 }
 
-fn approval_ticket_json(ticket: &omp_agent::ApprovalTicket) -> Value {
+fn approval_ticket_json(ticket: &ApprovalTicket) -> Value {
 	json!({
 		"ticket_id": ticket.ticket_id,
 		"invocation_id": ticket.invocation_id,
@@ -1855,6 +1935,73 @@ mod tests {
 		assert_eq!(dap_command_capability("evaluate"), "env.dap.execute");
 		assert_eq!(dap_command_capability("continue"), "env.dap.execute");
 		assert_eq!(dap_command_capability("vendor_mutation"), "env.dap.execute");
+	}
+
+	/// HTTP DATA operations require `env.net`; the closed capability set must
+	/// accept the grant and network exec effects must derive it independently
+	/// of process execution.
+	#[test]
+	fn network_effects_derive_a_grantable_env_net_capability() {
+		assert!(Grants::supported(["env.net"]).contains("env.net"));
+		assert!(Grants::all().contains("env.net"));
+		for (commands, network, expected_net, expected_exec) in [
+			(Vec::new(), false, false, false),
+			(Vec::new(), true, true, false),
+			(vec![String::from("curl")], false, false, true),
+			(vec![String::from("curl")], true, true, true),
+		] {
+			let envelope = v1::EffectEnvelope {
+				exec: Some(v1::ExecEffects { commands, network, props: None }),
+				..v1::EffectEnvelope::default()
+			};
+			let grants = Grants::from_effect_envelope(&envelope);
+			assert_eq!(grants.contains("env.net"), expected_net);
+			assert_eq!(grants.contains("env.exec"), expected_exec);
+		}
+	}
+
+	/// Both the host manifest and the authorized effect envelope must grant
+	/// network access; either deny takes precedence.
+	#[test]
+	fn network_data_authority_requires_host_and_effect_grants() {
+		for (host_grant, effect_grant, expected) in [
+			(true, true, Ok(())),
+			(true, false, Err(PolicyError::Denied { capability: "env.net" })),
+			(false, true, Err(PolicyError::Denied { capability: "env.net" })),
+			(false, false, Err(PolicyError::Denied { capability: "env.net" })),
+		] {
+			let table = AuthorityTable::default();
+			let host = HostKey::new("project", "trusted", "fixture.extension");
+			let host_grants = host_grant.then_some("env.net");
+			table.register_host(host.clone(), Grants::supported(host_grants));
+			table.open(host.clone(), Str::new_static("call"));
+			let effect_grants = effect_grant.then_some("env.net");
+			table
+				.authorize(
+					&host,
+					"call",
+					Bytes::from_static(b"token"),
+					Grants::supported(effect_grants),
+					1,
+					7,
+					11,
+				)
+				.expect("authorization transition succeeds");
+			assert_eq!(
+				table.validate(
+					&host,
+					1,
+					DataAuthority {
+						invocation_id:      "call",
+						effect_token:       b"token",
+						host_generation:    7,
+						session_generation: 11,
+					},
+					"env.net",
+				),
+				expected,
+			);
+		}
 	}
 
 	#[test]

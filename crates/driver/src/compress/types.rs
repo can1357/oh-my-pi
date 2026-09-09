@@ -93,9 +93,9 @@ pub struct CompressArgs {
 	pub files:       Vec<Str>,
 	/// Model override; absent uses configured session model.
 	pub model:       Option<Str>,
-	/// Maximum drafts per file. Pi default: 3.
+	/// Maximum drafts per file. Default: 3.
 	pub rounds:      u32,
-	/// Concurrent file children. Pi default: 4.
+	/// Concurrent file children. Default: 4.
 	pub concurrency: usize,
 	/// Single-file destination.
 	pub out:         Option<PathBuf>,

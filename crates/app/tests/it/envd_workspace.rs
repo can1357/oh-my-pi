@@ -4,13 +4,13 @@ use std::{fs, future::Future, time::Duration};
 
 use bytes::Bytes;
 use omp_core::Str;
-use omp_docserver::{
-	Environment, ServerConfig,
-	connection::{ConnectionConfig, serve_connection},
-};
 use omp_envd::{
 	blobs::BlobHost,
 	docs::DocumentHost,
+	docserver::{
+		Environment, ServerConfig,
+		connection::{ConnectionConfig, serve_connection},
+	},
 	exec::{ExecEvent, ExecHost, ProcessEvent},
 	workspace::{WorkspaceHost, WorkspaceOperationError, WorkspaceOperations},
 };
@@ -57,6 +57,7 @@ async fn snapshot_restore_is_content_addressed_and_always_produces_undo() {
 	let root = TempDir::new().expect("workspace");
 	let state = TempDir::new().expect("state");
 	fs::write(root.path().join("tracked.txt"), b"before\n").expect("fixture");
+	fs::write(root.path().join("deleted.txt"), b"restore me\n").expect("deleted fixture");
 	let (operations, external) = operations(&root, &state).await;
 	let cancel = CancellationToken::new();
 
@@ -80,6 +81,8 @@ async fn snapshot_restore_is_content_addressed_and_always_produces_undo() {
 	assert_eq!(snapshot.manifest_hash.as_ref(), duplicate.manifest_hash.as_ref());
 
 	fs::write(root.path().join("tracked.txt"), b"after\n").expect("mutate fixture");
+	fs::remove_file(root.path().join("deleted.txt")).expect("delete fixture");
+	fs::write(root.path().join("untracked.txt"), b"discard me\n").expect("untracked fixture");
 	let uri = Str::from(
 		Url::from_file_path(root.path().join("tracked.txt"))
 			.expect("tracked file URI")
@@ -121,6 +124,10 @@ async fn snapshot_restore_is_content_addressed_and_always_produces_undo() {
 	assert!(!restored.partial);
 	assert!(restored.conflicts.is_empty());
 	assert_eq!(std::fs::read(root.path().join("tracked.txt")).unwrap(), b"before\n");
+	assert_eq!(std::fs::read(root.path().join("deleted.txt")).unwrap(), b"restore me\n");
+	assert!(!root.path().join("untracked.txt").exists());
+	assert_eq!(restored.written, 2);
+	assert_eq!(restored.deleted, 1);
 }
 
 #[tokio::test]
@@ -151,6 +158,56 @@ async fn snapshot_rejects_parent_escape_and_observes_cancellation() {
 			)
 			.is_err()
 	);
+}
+
+#[tokio::test]
+async fn workspace_snapshots_are_project_scoped_and_cancel_before_mutation() {
+	let root_a = TempDir::new().expect("workspace a");
+	let state_a = TempDir::new().expect("state a");
+	let root_b = TempDir::new().expect("workspace b");
+	let state_b = TempDir::new().expect("state b");
+	fs::write(root_a.path().join("file.txt"), b"checkpoint").expect("fixture a");
+	fs::write(root_b.path().join("file.txt"), b"other project").expect("fixture b");
+	let (operations_a, _) = operations(&root_a, &state_a).await;
+	let (operations_b, _) = operations(&root_b, &state_b).await;
+	let active = CancellationToken::new();
+	let snapshot = operations_a
+		.snapshot(
+			&SnapshotWorkspace { wire_revision: omp_proto::SCHEMA_REV, ..Default::default() },
+			&active,
+		)
+		.expect("snapshot a");
+
+	assert!(
+		within(operations_b.restore(
+			&RestoreWorkspace {
+				snapshot_id: snapshot.snapshot_id.clone(),
+				wire_revision: omp_proto::SCHEMA_REV,
+				..Default::default()
+			},
+			&active,
+		))
+		.await
+		.is_err(),
+		"a project cannot consume another project's snapshot identity"
+	);
+
+	fs::write(root_a.path().join("file.txt"), b"dirty").expect("dirty a");
+	let cancelled = CancellationToken::new();
+	cancelled.cancel();
+	assert!(
+		within(operations_a.restore(
+			&RestoreWorkspace {
+				snapshot_id: snapshot.snapshot_id,
+				wire_revision: omp_proto::SCHEMA_REV,
+				..Default::default()
+			},
+			&cancelled,
+		))
+		.await
+		.is_err()
+	);
+	assert_eq!(fs::read(root_a.path().join("file.txt")).expect("unchanged dirty file"), b"dirty");
 }
 
 #[tokio::test]

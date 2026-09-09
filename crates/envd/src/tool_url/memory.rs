@@ -94,7 +94,8 @@ impl Resolve for MemoryUrlResolver {
 					});
 				}
 			},
-			MemoryProjection::Bank { records, .. } => {
+			MemoryProjection::Bank { records, truncated: projection_truncated, .. } => {
+				truncated |= projection_truncated;
 				for record in records {
 					let uri = Str::new(format!("memory://{}", record.id));
 					let entry_bytes = uri.len().saturating_add(record.content.len());
@@ -169,7 +170,7 @@ fn render_projection(projection: MemoryProjection) -> Result<Vec<u8>, Fault> {
 		MemoryProjection::Root { status } => serde_yaml::to_string(&status)
 			.map(String::into_bytes)
 			.map_err(yaml_fault),
-		MemoryProjection::Bank { bank, records } => {
+		MemoryProjection::Bank { bank, records, .. } => {
 			let mut rendered = String::new();
 			for record in records {
 				rendered.push_str("- id: ");

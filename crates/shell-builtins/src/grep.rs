@@ -1,6 +1,7 @@
 //! `grep` builtin implemented on top of the ripgrep libraries.
 //!
-//! Matching uses `grep-regex`/`grep-searcher`; recursive walks use `pi-walker`.
+//! Matching uses `grep-regex`/`grep-searcher`; recursive walks use
+//! `omp-walker`.
 
 use std::{
 	borrow::Cow,
@@ -20,7 +21,7 @@ use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
 	BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,
 };
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 use omp_walker::glob::{CompiledPattern, PatternBuilder};
 
 use crate::host::{Host, Utility, util};
@@ -38,7 +39,7 @@ pub(crate) fn pcre2_jit_enabled(host: &Host) -> bool {
 #[derive(Parser, Debug)]
 #[command(
 	name = "grep",
-	version = concat!("grep (pi-uu-grep) ", env!("CARGO_PKG_VERSION")),
+	version = concat!("grep ", env!("CARGO_PKG_VERSION")),
 	about = "Search for PATTERN in each FILE or standard input.",
 	disable_help_flag = true,
 	disable_version_flag = true,
@@ -1576,7 +1577,7 @@ mod tests {
 		sync::Arc,
 	};
 
-	use omp_shell_engine::{
+	use omp_shell::{
 		error,
 		openfiles::{self, OpenFile},
 	};
@@ -1640,12 +1641,12 @@ mod tests {
 		}
 
 		#[cfg(unix)]
-		fn try_clone_to_owned(&self) -> Result<fd::OwnedFd, omp_shell_engine::Error> {
+		fn try_clone_to_owned(&self) -> Result<fd::OwnedFd, omp_shell::Error> {
 			Err(error::ErrorKind::CannotConvertToNativeFd.into())
 		}
 
 		#[cfg(unix)]
-		fn try_borrow_as_fd(&self) -> Result<fd::BorrowedFd<'_>, omp_shell_engine::Error> {
+		fn try_borrow_as_fd(&self) -> Result<fd::BorrowedFd<'_>, omp_shell::Error> {
 			Err(error::ErrorKind::CannotConvertToNativeFd.into())
 		}
 	}
@@ -1799,6 +1800,6 @@ mod tests {
 		let (code, out, err) = run(&["--version"], "");
 		assert_eq!(code, 0);
 		assert!(err.is_empty());
-		assert!(out.contains("grep") && out.contains("pi-uu-grep"));
+		assert!(out.contains("grep"));
 	}
 }

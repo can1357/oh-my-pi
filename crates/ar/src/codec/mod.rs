@@ -1,8 +1,7 @@
 //! Shared stream codecs and magic probes for compressed-tar variants and
 //! single-stream pseudo-archives. gzip decoding stays in `archive` (flate2);
 //! zstd uses the workspace `zstd` crate; each remaining decoder lives in its
-//! own submodule pending its pure-Rust port from the TypeScript
-//! implementation in pi `packages/utils/src/ar/codecs/`.
+//! own submodule as a pure-Rust implementation of the archive codecs.
 
 mod bzip2;
 mod lzma;

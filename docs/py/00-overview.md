@@ -5,7 +5,7 @@ omp's Python extension surface, from the process outward.
 | Doc | Owns |
 |---|---|
 | **00-overview.md** (this file) | host children, the two sockets, the six verbs and their `OperationSpec` gating, the phase legality matrix, the manifest, lifecycle and activation triggers, trust tiers, `omp.Context`, `omp.LifecyclePhase`, `omp.Duration`, principal identity, idempotency and generation fencing, per-extension quotas, `@omp.service` / `omp.services`, cancellation, crash/restart, package-root constants and exceptions |
-| [01-devices.md](01-devices.md) | `@omp.device`, `@omp.tool` (soft/hard intent, `kind`), the `xd` shell builtin and its schema-derived CLI grammar, the dynamic tool policy (`tools.policy`), `omp.ToolPath`, schema-on-demand, precedence, MCP mounting |
+| [01-devices.md](01-devices.md) | `@omp.device`, `@omp.tool` (soft/hard intent, `kind`), the `dyn` shell builtin and its schema-derived CLI grammar, the dynamic tool policy (`tools.policy`), `omp.ToolPath`, schema-on-demand, precedence, MCP mounting |
 | [02-verdicts.md](02-verdicts.md) | `omp.Payload` / `omp.Fault`, `omp.CallOutcome`, `PolicyDenied`, `prompt(view, caps)`, `omp.PromptCaps`, `lift()`, `family@rev`, `schema_rev` vs `artifact_digest`, spill budget, `@omp.renderer` |
 | [03-params.md](03-params.md) | `omp.InvocationPhase` (the invocation state machine), `IncomingParams` (core-internal), the `Ev` vocabulary, charitable decoding |
 | [04-placement.md](04-placement.md) | `place=` semantics, `omp.Place`, `omp_remote`, `omp.workers`, `omp.WorkerSpec`, `omp.Spill` |
@@ -47,22 +47,22 @@ flowchart TB
         LOOP --- SUP
     end
 
-    subgraph HC1["child (client, sandboxed, dev.a.lint)"]
+    subgraph HC1["__omp-ext-host (client, sandboxed, dev.a.lint)"]
         PY1["CPython 3.14t · own site tree"]
     end
 
-    subgraph HC2["child (client, trusted, dev.me.tools)"]
+    subgraph HC2["__omp-ext-host (client, trusted, dev.me.tools)"]
         PY2["CPython 3.14t · own site tree"]
     end
 
     subgraph Envd["environment (envd, may be remote)"]
         ENV["env/v1 · fs · exec · blobs · processes · doc leases"]
-        subgraph HC3["child (workspace, sandboxed, org.repo.ci)"]
+        subgraph HC3["__omp-ext-host (workspace, sandboxed, org.repo.ci)"]
             PY3["CPython 3.14t · own site tree"]
         end
     end
 
-    subgraph Eval["eval kernel (separate child)"]
+    subgraph Eval["eval execution (separate child)"]
         K["omp __omp-eval-child"]
     end
 
@@ -99,23 +99,23 @@ The memory objection is weaker than it looks, for two reasons. Every child is th
 
 A session boots at most `omp.MAX_HOST_CHILDREN`, and boots them lazily. A session with no extensions never starts an interpreter; an installed extension that is never reached this session never starts one either. Lazy spawn is only possible because the manifest is authoritative for what an extension *offers* — see *Manifest* and *Lifecycle*.
 
-Each child re-enters the `omp` binary under a private argv selector, exactly like the two children that already exist: `__omp-eval-child` (`crates/app/src/envd/eval/process.rs:40`) and `__omp-tool-worker` (`crates/app/src/envd/worker.rs:45`), both dispatched from `crates/app/src/main.rs:7-30` before the CLI graph loads. There is no separate interpreter to install and no `python3` on `$PATH` to pray for: `omp-py` statically links CPython 3.14t and freezes the stdlib into the binary (`crates/py/README.md:3`), so a child boots with `Engine::builder().init()` and runs Python under `engine.attach(|py| …)` (`crates/py/src/lib.rs:117`, `:144`).
+Every Python extension child re-enters the `omp` binary through the single private `__omp-ext-host` role and communicates with its supervisor over CONTROL. Eval execution re-enters through the separate `__omp-eval-child` role. There is no Python tool-worker child: named workers are placement targets owned by the named-worker facility, not an extension or eval process. The app and environment parents dispatch these roles without initializing CPython or performing an interpreter preflight. Only the selected child boots an `omp-py` `Engine`; `omp-py` statically links CPython 3.14t and freezes the stdlib into the binary, so no `python3` on `$PATH` is involved.
 
 **What this costs, stated plainly.** Extensions no longer share `sys.modules`, so the in-process inter-extension event bus is gone. Twenty-eight catalogued packages use pi's shared emitter as an RPC channel between extensions; under omp that traffic routes over CONTROL, and the sanctioned shape is the typed service surface — `@omp.service` / `omp.services.connect` (*Extension services*, below). Agent messaging and journal entries are explicitly **not** an RPC substrate ([12-agents.md](12-agents.md), [09-journal.md](09-journal.md)). This was already going to be true across layers and tiers; per-extension keying makes it true everywhere. A sharing group is the opt-out, and it is an explicit install-time choice rather than an accident of co-residence.
 
 `place=` moves a function body out of the child — to an ephemeral worker beside the environment, or to a named persistent worker that may be on another machine. A worker is a leaf **with respect to Agent Core**: no hooks, no UI effects, no journal writes, no credential or subagent requests. It is *not* a leaf with respect to the Environment. See [04-placement.md](04-placement.md).
 
-### Why the eval kernel stays a separate child
+### Why eval stays in a separate child
 
-The eval kernel is LLM scratch space. Its defining feature is `reset`: the model asks for a clean namespace and gets one, and the strongest form of that reset is replacing the process (`crates/tools/src/eval/kernel.rs:3-5`). Its cells are hostile by construction — the model writes them, they are expected to crash, hang, and leak threads, and its whole timeout story is a Tokio watchdog raising `KeyboardInterrupt` through `PyThreadState_SetAsyncExc` (`crates/tools/src/eval/kernel.rs:17-20`).
+Eval is LLM scratch execution. Cells are hostile by construction — the model writes them, and they are expected to crash, hang, and leak threads — so the killable `EvalExec` boundary runs them in `__omp-eval-child`. The built-in `py_eval` tool uses that same machinery through an Environment route and gives every call a fresh, disposable namespace; it is not declared by an extension manifest and never takes a Worker route.
 
-The extension host is session infrastructure. Its declarations must be stable for the life of the session, its state is not the model's to discard, and a reset would silently unregister every device the model was told about two turns ago. Sharing one interpreter between the two would mean either the model can `reset` away the user's extensions, or extensions leak into the model's namespace. Both are worse than one more child process.
+The extension host is session infrastructure. Its declarations must be stable for the life of the session, its state is not the model's to discard, and replacing its interpreter for an eval reset would silently unregister devices. Sharing one interpreter between the two would mean either the model can discard the user's extensions, or extensions leak into the model's namespace.
 
-They do share machinery, and should: `omp-py`'s `Engine`, the frozen-module tables, the `NamespaceInstaller` seam (`crates/tools/src/eval/kernel.rs:618-656`), the length-prefixed stdio framing, and the supervisor shape.
+They share `omp-py`'s engine and frozen-module building blocks, but not a process or protocol role: extension calls use the `__omp-ext-host` CONTROL connection, while eval calls use the eval-child protocol. Each child creates its sole process-local `Engine`; neither parent preflight-boots CPython.
 
 ### Two sockets
 
-The target model. Every host child holds exactly two, and the split is a security boundary rather than a layering preference. What is on disk today is one of them — see *What exists today* below, and read the rest of this section as the destination.
+Every host child holds exactly two, and the split is a security boundary rather than a layering preference.
 
 **CONTROL ⇄ Agent Core.** One multiplexed, reentrant, bidirectional channel carrying `toolhost/v1` frames (`crates/proto/proto/omp/toolhost/v1/toolhost.proto`): declarations, hook dispatch and decisions, device invocation and updates, UI effects, journal requests, request mutations, credential and subagent requests, session queries. Reentrant in the strict sense — a device body may `await omp.ui.confirm(...)` and core must service that request while the device's own invocation is still outstanding. Round-trip is tens of microseconds over varint-framed protobuf on a **dedicated inherited descriptor** — deliberately not the child's stdio, so a stray `print()` can never be a protocol violation (*Idempotency and generation fencing*); for a workspace-layer child it is tunnelled and correspondingly slower. **CONTROL carries no world access.** Nothing on this channel reads a file, runs a command, or opens a connection.
 
@@ -133,19 +133,19 @@ Latency classes, because they decide what a hook may be:
 | per-keystroke | — | **no** — declare a trigger; the TUI matches locally ([07-ui.md](07-ui.md)) |
 | per-token | — | **prohibited** — there is no such hook and there will not be one |
 
-### What exists today
+### Runtime boundaries
 
-The two-socket topology is a target, not a description. Verified on disk:
+The two-socket extension-host topology is live and distinct from eval-child and named-worker execution:
 
-**CONTROL exists in embryo.** `toolhost/v1` is real, framed, supervised, and health-checked, and it carries declarations, invocation, updates, terminal verdicts, and cancellation. What it does not carry is hooks, effects, host-initiated requests, or a subscription mask. Those are additive — new oneof arms on the existing envelopes — and the build section below specifies them.
+**CONTROL is live.** `toolhost/v1` is framed, supervised, health-checked, multiplexed, and reentrant. Alongside declarations, device invocation, updates, terminal verdicts, and cancellation, it carries hook dispatch and decisions, UI effects, host-initiated requests and their responses, and the published subscription mask. The mask is installed into Core's `HookGate`, so an unsubscribed event takes the bitmap-only path and constructs no payload or CONTROL frame.
 
-**DATA does not exist for Python at all.** `EnvServer` holds `_documents: DocumentHost` and `_workspace: WorkspaceHost` as underscore-prefixed fields (`crates/app/src/envd/server.rs:179`, `:182`) — constructed, never dispatched. The Python side is a `toolhost/v1` stdio worker with **zero world access**, and `toolhost.proto:66-67` states plainly that speculative `ArgText` never crosses that boundary. `env/v1` is wire-complete for exec, named processes, and blobs, and has a `ServerHello` (`env.proto:29`); documents, filesystem, LSP, and search have no reachable frame for a Python client. So today an extension cannot read a file.
+**DATA is live and invocation-scoped for Python.** Every admitted extension `HostKey` receives a private owner-mode endpoint through `OMP_EXT_ENV_SOCKET`. Import and declaration remain worldless: the child opens no DATA connection until an active invocation carries Core-minted effect authority. At first reach, `omp.env` connects through `ExtensionEnvClient` with the exact invocation id, effect token, host generation, and session generation.
 
-The concrete path is short, which is the good news. `EnvServer::serve_io` already accepts any `AsyncRead + AsyncWrite + Unpin + Send` (`server.rs:412-418`) and differentiates per connection through `ConnectionPolicy` (`server.rs:130-136`, `:421-428`, `:549-551`). Giving a host child a DATA edge is: pass the env UDS path in one `OMP_*` variable beside the existing `OMP_PY_SITE` and `OMP_PY_MODULES` (`crates/app/src/envd/worker.rs:387-399`), connect from the child, and hand the accepted stream to `serve_io_with_policy` with an extension-scoped `ConnectionPolicy`. No new plane, no new transport.
+`EnvServer` serves each endpoint with an extension-scoped `ConnectionPolicy`, intersects the requested capabilities with that extension's manifest grants, and checks the generation-fenced invocation envelope before dispatch to the live document and workspace owners. Endpoint teardown removes the socket and cancels accepted connections; another extension's credentials cannot reuse it. DATA remains separate from CONTROL and stdio.
 
-**Lesson #6 is violated in shipped code.** `Registry::register_worker` inserts into `self.live` (`crates/tool/src/registry.rs:424`) and its own doc comment says worker declarations "participate in identity, hashing, and advertisement" (`:411`). `advertise` then iterates all of `self.live` and lowers every entry with no route filter (`:483-492`) — its comment says "for one selected route" but the body contains no route check. Every Python worker declaration therefore occupies a slot in the model's advertised tool array today, which is exactly the failure Lesson #6 exists to prevent. The asymmetry makes the fix clean: `invoke` *does* check route and refuses `ToolRoute::Worker` (`:476-478`), and `live_identities` documents that callers "still need to inspect `route` before granting an execution capability" (`:439-440`). Route-awareness exists; `advertise` does not use it. The Revision 2.2 ruling pins the target behavior exactly: under the default dynamic tool policy (`tools.policy = "auto"`, [01-devices.md](01-devices.md)) `advertise` filters to core tools plus granted hard tools, and nothing else.
+**Lesson #6 is enforced in the live registry.** `Registry::advertise` delegates to `advertise_matching`, whose inclusion predicate requires both slot presentation and `is_model_callable(entry.tool.route())` (`crates/tool/src/registry.rs::advertise`, `::advertise_matching`, and `::is_model_callable`). Worker-routed device declarations therefore remain resolvable through the device route without occupying the model's advertised tool array. Under the default dynamic tool policy (`tools.policy = "auto"`, [01-devices.md](01-devices.md)), the advertised array contains core tools plus granted hard tools, and nothing else.
 
-Related, and load-bearing for [01-devices.md](01-devices.md)'s availability-by-notification claim: `live_hash` is one digest over *all* live identities (`registry.rs:458-467`). Reusing it as prompt-cache identity would make every device registration look like a prompt change. It needs splitting into a slot digest (what the model sees: core tools, granted hard slots — the `slot_hash` of [01-devices.md](01-devices.md)) and a device digest (what the device catalog behind `xd` sees).
+The cache identities are split along that same boundary. `Registry::slot_hash` digests only policy-resolved model-visible slots and applies the route predicate; `Registry::device_hash` separately digests device-catalog availability, including claimant and route identity (`crates/tool/src/registry.rs::slot_hash`, `::device_hash`). A device registration can therefore change availability without falsely reporting a prompt-toolset change, which is the notification contract in [01-devices.md](01-devices.md).
 
 ### The six verbs
 
@@ -162,7 +162,7 @@ Every one of the 194 catalogued extensions reduces to six interaction shapes. Na
 
 An earlier revision classified `omp.journal.append` as an Effect. That was wrong on the taxonomy's own terms — `journal.append` returns only after the record has been durably assigned and written, which makes it an acknowledged, durable Request, not a fire-and-forget push — and the misclassification mattered, because Effects were exempt from phase gating and a durable journal write must never be. The row above is the correction; [09-journal.md](09-journal.md) owns the surface.
 
-Notice what is missing: there is no per-extension *tool slot*. **Extensions register with the host, never with the model.** The host must know a tool's name, family, rev, schema, and constraints — that is what `RegisterTools` is for, and it is what makes the catalog answerable at all. What never happens is unbounded registration with the *model*: no schema slot per extension, no tool-array growth, no `setActiveTools`, no `loadMode`. On Codex, TTFT scales roughly 1:1 with registered tool count because every schema feeds the sampler's grammar — 40 dormant MCP endpoints tax every token of every turn. Extension capabilities ride the device catalog instead, reached through the permanently stable `xd` builtin inside the core `shell` tool ([01-devices.md](01-devices.md) owns its CLI grammar and `omp.ToolPath`): `xd` lists, `xd <name> --help` fetches full docs and schema-derived usage on demand, and `xd <name> [args…]` dispatches with CLI arguments mapped into one nested JSON document. Which declarations also occupy model-facing slots is the user's call, not the extension's: the **dynamic tool policy** (`tools.policy`, [01-devices.md](01-devices.md)) resolves each declaration's soft/hard *intent* into a surface. Under the default `auto` policy **hard tools** are the one sanctioned exception to extension-driven slot growth — `@omp.tool(kind="hard")` declarations granted a budgeted, audited model-facing slot each while remaining in the device catalog, addressable by `omp.ToolPath`; devices ride `xd` inside the existing `shell` slot. Under `tool_only` the user has explicitly bought slot growth wholesale — every declaration surfaces as a slot and the `xd` builtin is dropped; `device_only` demotes even hard intent to a device. Availability changes append one system-notification item; the request's tool array is byte-identical before and after, so the prompt prefix cache survives. (Rev 2 of this passage dispatched and read docs through the retired read/write device URL scheme; the Rev 2.1 rulings replaced that scheme with `dyn` ops, and Revision 2.2 supersedes those ops with the `xd` shell builtin — both reversals are recorded in their historical addenda below and at the transport's owner.)
+Notice what is missing: there is no per-extension *tool slot*. **Extensions register with the host, never with the model.** The host must know a tool's name, family, rev, schema, and constraints — that is what `RegisterTools` is for, and it is what makes the catalog answerable at all. What never happens is unbounded registration with the *model*: no schema slot per extension, no tool-array growth, no `setActiveTools`, no `loadMode`. On Codex, TTFT scales roughly 1:1 with registered tool count because every schema feeds the sampler's grammar — 40 dormant MCP endpoints tax every token of every turn. Extension capabilities ride the device catalog instead, reached through the permanently stable `dyn` builtin inside the core `shell` tool ([01-devices.md](01-devices.md) owns its CLI grammar and `omp.ToolPath`): `dyn` lists, `dyn <name> --help` fetches full docs and schema-derived usage on demand, and `dyn <name> [args…]` dispatches with CLI arguments mapped into one nested JSON document. Which declarations also occupy model-facing slots is the user's call, not the extension's: the **dynamic tool policy** (`tools.policy`, [01-devices.md](01-devices.md)) resolves each declaration's soft/hard *intent* into a surface. Under the default `auto` policy **hard tools** are the one sanctioned exception to extension-driven slot growth — `@omp.tool(kind="hard")` declarations granted a budgeted, audited model-facing slot each while remaining in the device catalog, addressable by `omp.ToolPath`; devices ride `dyn` inside the existing `shell` slot. Under `tool_only` the user has explicitly bought slot growth wholesale — every declaration surfaces as a slot and the `dyn` builtin is dropped; `device_only` demotes even hard intent to a device. Availability changes append one system-notification item; the request's tool array is byte-identical before and after, so the prompt prefix cache survives. (Rev 2 of this passage dispatched and read docs through the retired read/write device URL scheme; the Rev 2.1 rulings replaced that scheme with `dyn` ops, and Revision 2.2 supersedes those ops with the `dyn` shell builtin — both reversals are recorded in their historical addenda below and at the transport's owner.)
 
 `@amaster.ai/pi-computer-use` registers 49 version-pinned tools in pi. In omp it is one device and zero schema slots.
 
@@ -211,9 +211,9 @@ SPAWN ──► IMPORT ──► FREEZE ──► VERIFY ──► ACTIVATE
 
 **ADMIT** rejects, per extension: an `omp_api` outside `omp.API_LEVELS`; a capability the install grant does not cover; a malformed `settings` schema. It also *routes* — `(layer, tier, extension)` names the child this extension will eventually get. Rejection raises `ManifestError` or a subclass, is journaled, and removes that extension only.
 
-**PUBLISH** hands core the union of every admitted manifest's declaration tables — tools, hooks, services, and every other lazy-reachable surface kind ([14-deploy.md](14-deploy.md) owns the schema): the device catalog behind `xd`, the subscription mask, and the activation-trigger index. **Nothing has booted.** A session whose extensions are never reached pays one TOML parse each and no interpreter at all.
+**PUBLISH** hands core the union of every admitted manifest's declaration tables — tools, hooks, services, and every other lazy-reachable surface kind ([14-deploy.md](14-deploy.md) owns the schema): the device catalog behind `dyn`, the subscription mask, and the activation-trigger index. **Nothing has booted.** A session whose extensions are never reached pays one TOML parse each and no interpreter at all.
 
-**SPAWN** happens the first time an extension is actually needed — an `xd <name> --help` fetch for one of its tools, an `xd <name> [args…]` dispatch, a hook it subscribed to firing, or any other declared surface's activation trigger (*Activation triggers*, below). The child boots; the model's turn waits on it exactly as it would wait on any tool.
+**SPAWN** happens the first time an extension is actually needed — an `dyn <name> --help` fetch for one of its tools, an `dyn <name> [args…]` dispatch, a hook it subscribed to firing, or any other declared surface's activation trigger (*Activation triggers*, below). The child boots; the model's turn waits on it exactly as it would wait on any tool.
 
 **IMPORT is declaration.** The host resolves a canonical module order from the manifest — `entry` first, then every distinct `module` named in the declaration tables, in manifest order — and imports them **sequentially, in that order**. Python module bodies and decorators execute *during* import; there is no later phase in which they could run. Decorators record declarations into the registry as import executes. An import that raises fails the spawn and marks the extension `LifecyclePhase.DEGRADED`.
 
@@ -235,7 +235,7 @@ Lazy spawn only works if *every* declared surface names what wakes it. Rev 1 ans
 
 | Class | Meaning | Examples (the linked owner states each trigger) |
 |---|---|---|
-| static, no Python | served from the manifest alone; the child never boots for it | the device catalog behind `xd`; the subscription mask; command and completion *names* |
+| static, no Python | served from the manifest alone; the child never boots for it | the device catalog behind `dyn`; the subscription mask; command and completion *names* |
 | lazy on first reach | the child boots when the surface is used | device dispatch ([01](01-devices.md)); a subscribed hook firing ([05](05-hooks.md)); `omp.services.connect` to a declared service; a command body on invocation, a completion/trigger body on match ([07](07-ui.md)); a verdict/entry-kind renderer when a replayed session declares that entry kind ([02](02-verdicts.md), [09](09-journal.md)) |
 | eager before first prompt | must be active before the first model request | `@omp.provider` (model resolution, [13](13-inference.md)); `@omp.prompt_slot` ([08](08-context.md)) |
 | eager before UI input | must be active before the UI first paints or accepts input | message renderers needed to draw a resumed session's visible history ([07](07-ui.md)) |
@@ -262,12 +262,12 @@ Because nothing before `EFFECTS_AUTHORIZED` has touched the world ([03-params.md
 
 ### Crash and restart
 
-The supervisor treats crash and reload as one mechanism with different reason codes. `crates/app/src/envd/worker.rs` already implements the shape for the single-slot Python tool worker and it generalizes directly:
+The extension-host supervisor treats crash and reload as one mechanism with different reason codes:
 
-1. Socket EOF, protocol violation, or health-probe timeout marks the child unhealthy (`WorkerError::HealthTimeout`, `::Exited`, `::Protocol` — `worker.rs:316-324`).
-2. Every in-flight invocation on that child receives a terminal abort: `WorkerAbortKind::Crashed` with `effects_unknown: true` (`worker.rs:132-155`). Invocations that never reached `EFFECTS_AUTHORIZED` get `effects_unknown: false` — no effect token was ever issued, so nothing can have escaped.
-3. Respawn with bounded backoff (`initial_backoff` 25 ms → `max_backoff` 500 ms, `worker.rs:97-98`).
-4. Re-run SPAWN → VERIFY. The comparison is against the **manifest**, not against whatever the pre-crash boot happened to emit — which is strictly stronger than `validate_registrations` / `expected_registrations` does today (`worker.rs:823-848`, `:529-533`), because the manifest is a fixed external artifact under the wheel digest rather than a remembered first impression. Drift marks the extension `LifecyclePhase.DEGRADED`, unloads it, and is journaled. Declarations must be a pure function of the installed code, which is why the import phase forbids I/O.
+1. CONTROL EOF, protocol violation, or health-probe timeout marks that `__omp-ext-host` child unhealthy.
+2. Every in-flight invocation on that child receives a terminal abort with `effects_unknown: true`. Invocations that never reached `EFFECTS_AUTHORIZED` get `effects_unknown: false` — no effect token was ever issued, so nothing can have escaped.
+3. The supervisor respawns the extension host with bounded backoff.
+4. The new host repeats SPAWN → VERIFY against the authenticated, sealed manifest evidence published before boot. It never trusts a remembered first registration. Drift marks the extension `LifecyclePhase.DEGRADED`, unloads it, and is journaled.
 5. `extension_activate(reason=RESTART)` replays on that child with `ctx.generation` incremented and `omp.restart_reason()` set to the finer-grained cause.
 
 **Replay is the contract.** `extension_activate` handlers must be idempotent. They are re-entered after every restart, so "create the table if it does not exist" is correct and "insert the initial row" is a bug. State that must survive lives in the journal or the state directory ([09-journal.md](09-journal.md)) or in an env-owned named process ([11-env.md](11-env.md)) — never in host memory. `pi-intercom` auto-spawns an out-of-process IPC broker; under omp that broker is env-owned, so it survives host restarts untouched and activation merely re-attaches.
@@ -292,15 +292,15 @@ Agent Core holds an RAII guard per invocation — `omp_env::RunGuard` today, who
 
 **Stage 1 — `asyncio.CancelledError` at the next await point.** The invocation runs in a task owned by a scope; the host cancels the task. Async code unwinds through `finally` blocks, `async with` exits run, and `ctx.on_cancel` callbacks fire. Doc leases, blob writes, and exec sessions release because their owner is the environment, not the extension — a lease drops when its request is cancelled whether or not the Python that opened it cooperates. This handles well-behaved code and is the only stage most extensions ever see.
 
-**Stage 2 — `KeyboardInterrupt` in the executing thread, after `omp.CANCEL_GRACE` (150 ms, matching `interrupt_grace` at `worker.rs:96`).** Cancellation cannot reach a synchronous frame; a plain `for` loop over a million paths has no await point. The host raises asynchronously through `PyThreadState_SetAsyncExc`, which the interpreter checks between bytecodes — the identical mechanism the eval kernel's watchdog already uses (`crates/tools/src/eval/kernel.rs:17-20`), and deliberately *not* accompanied by line tracing, "because Python-side line tracing deoptimizes the whole cell without covering anything the async interrupt cannot."
+**Stage 2 — `KeyboardInterrupt` in the executing thread, after `omp.CANCEL_GRACE` (150 ms).** Cancellation cannot reach a synchronous frame; a plain `for` loop over a million paths has no await point. The host raises asynchronously through `PyThreadState_SetAsyncExc`, which the interpreter checks between bytecodes — the identical mechanism the eval-child watchdog uses — and deliberately does not add Python-side line tracing, which would deoptimize the whole call without covering anything the async interrupt cannot.
 
-**Stage 3 — process-group kill and respawn, after a second grace. This is the mechanism.** A thread blocked inside a C extension checks no bytecodes and receives nothing. There is no fourth lever inside the interpreter, so the supervisor stops trying to be inside it: it kills that child's process group, reports `effects_unknown` for anything past `EFFECTS_AUTHORIZED`, and replaces the child — precisely what `WorkerInvocation::drop` already specifies ("kills only the worker process group, reports effects-unknown, and replaces the worker before it accepts the next invocation", `crates/app/src/envd/worker.rs:168-179`). Which effects may have landed is reported by the owner in the abort payload, "because only the owner knows" (D5).
+**Stage 3 — process-group kill and respawn, after a second grace. This is the mechanism.** A thread blocked inside a C extension checks no bytecodes and receives nothing. There is no fourth lever inside the interpreter, so the supervisor stops trying to be inside it: it kills that `__omp-ext-host` process group, reports `effects_unknown` for anything past `EFFECTS_AUTHORIZED`, and replaces the child before accepting its next invocation. Which effects may have landed is reported by the owner in the abort payload, "because only the owner knows" (D5).
 
 Stage 3 is loud on purpose. It is journaled with the offending extension and the frame it was last seen in, it is a metric, and an extension that reaches it twice in a session is disabled for the remainder of it.
 
 > **What stage 3 still costs, and what remains unresolved.** Stage 3 kills a *process*. Per-extension keying bounds that: cancelling a call in `dev.example.lint`'s child cannot touch `dev.other.tool`'s. Two residues survive, and neither is hidden by the keying.
 >
-> **Residue 1 — an extension's own concurrent calls die together, when there are any.** If the model dispatches two `xd lint [args…]` invocations in one batch and one is cancelled, what dies depends on the concurrency the extension opted into. Under the actor default (*Process model*) callback entry is serialized, so the second call was queued rather than running — the loss is a queued call, requeueable in principle — and this matches the shipped `ToolWorkerSupervisor` exactly: one worker, `run_invocation` serving one invocation at a time (`crates/app/src/envd/worker.rs:231-237`, `:592-727`). An extension that declares `concurrency=N` makes the loss real: N in-flight calls share one process group, and stage 3 kills them together, reported as `effects_unknown` on every sibling. That is the stated price of the opt-in, printed where the opt-in is declared — not an accident. An earlier revision ended this paragraph with "this document does not claim the design is safe under concurrent same-extension device calls", because concurrency within a child was undefined; the actor default defines it, and the residual risk now attaches to an explicit declaration rather than to everyone.
+> **Residue 1 — an extension's own concurrent calls die together, when there are any.** If the model dispatches two `dyn lint [args…]` invocations in one batch and one is cancelled, what dies depends on the concurrency the extension opted into. Under the actor default (*Process model*) callback entry is serialized, so the second call was queued rather than running — the loss is a queued call, requeueable in principle. An extension that declares `concurrency=N` makes the loss real: N in-flight calls share one `__omp-ext-host` process group, and stage 3 kills them together, reported as `effects_unknown` on every sibling. That is the stated price of the opt-in, printed where the opt-in is declared — not an accident. An earlier revision ended this paragraph with "this document does not claim the design is safe under concurrent same-extension device calls", because concurrency within a child was undefined; the actor default defines it, and the residual risk now attaches to an explicit declaration rather than to everyone.
 >
 > **Residue 2 — a sharing group re-widens the radius to the group.** That is the price of the memory it saves, it is an explicit install-time choice, and [14-deploy.md](14-deploy.md) should say so at the point of choosing.
 >
@@ -405,9 +405,9 @@ Everything in this section lives at the package root: `import omp`.
 
 `omp.toml`. Static, parsed without executing extension code. [14-deploy.md](14-deploy.md) owns where the file comes from — hand-authored, or generated at wheel-build time by `omp-build` importing the extension in a subprocess and reading its decorator registry into `<dist>-<ver>.dist-info/omp.toml` — and which layer wins on conflict. What the host parses is always `omp.toml`; what the keys mean is here.
 
-**The manifest is authoritative for what an extension offers.** Its declaration tables — `[[tools]]` (named `[[devices]]` before the Rev 2.1 rulings), `[[hooks]]`, `[[services]]`, and one table per lazy-reachable surface kind ([14-deploy.md](14-deploy.md) owns the full schema; its normalized declaration table carries every entry as one row with a `kind` column) — are the existence set: enough to serve the device catalog behind `xd`, build the subscription mask, index the activation triggers, and decide whether an extension is reachable this session — all without booting anything. `RegisterTools` at handshake **verifies** that set; it does not define it. Divergence marks the extension `LifecyclePhase.DEGRADED` and is journaled, and because the generated tables ship inside the wheel and are covered by its digest, divergence is evidence the artifact was built from different code than it claims, not a mere warning ([14-deploy.md](14-deploy.md)).
+**The manifest is authoritative for what an extension offers.** Its declaration tables — `[[tools]]` (named `[[devices]]` before the Rev 2.1 rulings), `[[hooks]]`, `[[services]]`, and one table per lazy-reachable surface kind ([14-deploy.md](14-deploy.md) owns the full schema; its normalized declaration table carries every entry as one row with a `kind` column) — are the existence set: enough to serve the device catalog behind `dyn`, build the subscription mask, index the activation triggers, and decide whether an extension is reachable this session — all without booting anything. `RegisterTools` at handshake **verifies** that set; it does not define it. Divergence marks the extension `LifecyclePhase.DEGRADED` and is journaled, and because the generated tables ship inside the wheel and are covered by its digest, divergence is evidence the artifact was built from different code than it claims, not a mere warning ([14-deploy.md](14-deploy.md)).
 
-This is what makes lazy spawn possible, and it is the same principle as ADMIT-before-IMPORT one step further: you cannot run code to find out what code offers, if the whole point is to avoid running it. Detail that genuinely requires import — the full JSON schema, docs, examples — is fetched by `xd <name> --help`, which may boot the child. That is a deliberate model action and an acceptable place to pay for a boot.
+This is what makes lazy spawn possible, and it is the same principle as ADMIT-before-IMPORT one step further: you cannot run code to find out what code offers, if the whole point is to avoid running it. Detail that genuinely requires import — the full JSON schema, docs, examples — is fetched by `dyn <name> --help`, which may boot the child. That is a deliberate model action and an acceptable place to pay for a boot.
 
 ```toml
 id          = "dev.example.lint"
@@ -455,7 +455,7 @@ wheels = ["ruff==0.14.*"]
 | `description` | `str` | no | One line, shown by install and doctor surfaces. |
 | `entry` | `str` | yes | Dotted import name imported first at IMPORT. Must be importable from the extension's own package root. |
 | `capabilities` | `list[str]` | no | Requested `omp.Capability` values. A capability the install grant does not cover is a hard `CapabilityError` at ADMIT, not a runtime surprise. Empty means the extension can Declare and Hook but never touch the world. |
-| `tools` | `array of table` | no | The tool existence set — `[[devices]]` until the Rev 2.1 rulings renamed it. Each entry: `name` (wire name, the `omp.ToolPath` leaf), `kind` (`"soft" \| "hard"`, default `"soft"` — **intent**, not surface: `@omp.device` entries carry implicit soft intent (the decorator has no `kind` parameter), and the surface each declaration gets — device in the device catalog behind `xd` or model-facing slot — is resolved by the dynamic tool policy, `tools.policy` ([01-devices.md](01-devices.md)); under the default `auto` policy a hard-intent entry additionally requires the `tools.hard` capability in the install grant, [14-deploy.md](14-deploy.md)), `family` and `rev` (together the `family.n` revision, [02-verdicts.md](02-verdicts.md)), `module` (imported at IMPORT so the decorator runs), and `summary` (one line, shown by `xd`). Full schema, docs, and examples are *not* here — they come from the decorator at import and are served on demand by `xd <name> --help` ([01-devices.md](01-devices.md)). |
+| `tools` | `array of table` | no | The tool existence set — `[[devices]]` until the Rev 2.1 rulings renamed it. Each entry: `name` (wire name, the `omp.ToolPath` leaf), `kind` (`"soft" \| "hard"`, default `"soft"` — **intent**, not surface: `@omp.device` entries carry implicit soft intent (the decorator has no `kind` parameter), and the surface each declaration gets — device in the device catalog behind `dyn` or model-facing slot — is resolved by the dynamic tool policy, `tools.policy` ([01-devices.md](01-devices.md)); under the default `auto` policy a hard-intent entry additionally requires the `tools.hard` capability in the install grant, [14-deploy.md](14-deploy.md)), `family` and `rev` (together the `family.n` revision, [02-verdicts.md](02-verdicts.md)), `module` (imported at IMPORT so the decorator runs), and `summary` (one line, shown by `dyn`). Full schema, docs, and examples are *not* here — they come from the decorator at import and are served on demand by `dyn <name> --help` ([01-devices.md](01-devices.md)). |
 | `hooks` | `array of table` | no | The subscription set. Each entry: `event` (name from the catalogue in [05-hooks.md](05-hooks.md)), `phase` (one of `omp.HookPhase`, [05-hooks.md](05-hooks.md)), `order` (int, TRANSFORM only), and `module`. This table alone produces the subscription mask, so an extension that is never dispatched to is never imported. Split from `tools` so an extension contributing only policy never imports its device dependencies. |
 | `services` | `array of table` | no | Services this extension provides (`@omp.service`, *Extension services*): `name`, `rev`, `module`. Consumed services are declared under `[requires]`, never here. |
 | `workers` | `table[str, WorkerSpec]` | no | Named persistent workers this extension may address with `place="worker:<name>"`. Each entry is an `omp.WorkerSpec` ([04-placement.md](04-placement.md)). Declaring a worker does not start it; the first `place=` invocation does. |
@@ -509,7 +509,7 @@ class ToolEntry:
     family: str                                 # dialect family; with rev forms "family.n"
     rev: int
     module: str                                 # imported at IMPORT so the decorator runs
-    summary: str                                # one line, shown by xd
+    summary: str                                # one line, shown by dyn
 
 @dataclass(frozen=True, slots=True)
 class HookEntry:
@@ -575,7 +575,7 @@ class HostInfo:
 - **Channel** — none; captured at boot.
 - **Latency** — nanoseconds.
 
-`(layer, trust, pool)` is the child's key. Two extensions observing different values are in different processes and share nothing.
+`(layer, trust, extension-or-sharing-group)` is the child's key. Two extensions with different keys are in different `__omp-ext-host` processes and share nothing.
 
 #### `omp.Context.current() -> Context`
 
@@ -639,7 +639,7 @@ The scope a handler runs in. The callback ABI is uniform — **`(payload, ctx)`*
 | `caps` | `frozenset[Capability]` | Capabilities granted to *this* extension — a subset of what the child can do. |
 | `place` | `Place` | Where this code is running ([04-placement.md](04-placement.md)). |
 | `phase` | `LifecyclePhase` | This extension's lifecycle state in this child. `ACTIVE` in the steady state; `DECLARED` during activation; `UNLOADED` during shutdown. The *invocation* state machine is `omp.InvocationPhase` ([03-params.md](03-params.md)) and is deliberately not on `Context`. |
-| `roots` | `tuple[WorkspaceUri, ...]` | Workspace roots as typed `WorkspaceUri` values ([14-deploy.md](14-deploy.md)), primary first. May be remote. The authoritative containment boundary — pass the whole tuple to a predicate, never just the first element, because multi-root workspaces are a shipped feature (`workspace.additionalDirectories`, `/add-dir`). |
+| `roots` | `tuple[WorkspaceUri, ...]` | Workspace roots as typed `WorkspaceUri` values ([14-deploy.md](14-deploy.md)), primary first. May be remote. The authoritative containment boundary — pass the whole tuple to a predicate, never just the first element, because multi-root workspaces are a shipped feature (`workspace.additionalDirectories`, `/dir add`). |
 | `root` | `WorkspaceUri` | `roots[0]`. A convenience for the common single-root case and for display. Never a containment check. |
 | `remote` | `bool` | True when `omp.env` addresses a remote environment rather than the client's disk. |
 | `has_ui` | `bool` | A TUI is attached and can render effects. pi's `ctx.hasUI`, used by 96 of 194 catalogued packages. |
@@ -647,6 +647,7 @@ The scope a handler runs in. The callback ABI is uniform — **`(payload, ctx)`*
 | `model` | `omp.ModelRef \| None` | Currently selected model ([13-inference.md](13-inference.md)). `None` before model resolution. |
 | `settings` | `Mapping[str, object]` | This extension's resolved settings, typed per the manifest `settings` schema. |
 | `deadline` | `float \| None` | `time.monotonic()` value past which this scope is cancelled, or `None` when unbounded. |
+| `signal` | `asyncio.Event` | Per-invocation cancellation event. Poll with `is_set()` or `await signal.wait()`; a replacement generation receives a different event. |
 
 > **Never derive a path from `os.getcwd()`, `Path.cwd()`, or `__file__`.** Those name the host child's own filesystem. For a workspace-layer child that is not the client's disk; for a sandboxed child it may be a confined view of neither; for `place="env"` code it is a third machine. `ctx.roots` and `omp.env` are the only correct sources of workspace location, and a sandbox profile built from `getcwd()` is the single easiest way to write a policy that is silently wrong against a remote workspace ([06-policy.md](06-policy.md)).
 
@@ -924,13 +925,13 @@ There is no `critical`. An extension cannot declare a session-fatal condition; t
 | `omp.API_LEVELS` | `frozenset[int]` | `frozenset({1})` | Every level this host can admit. Older levels stay in the set until dropped in a release note; membership is the entire compatibility story. |
 | `omp.HOST_VERSION` | `str` | build-stamped | The omp build string. Informational — never branch on it; branch on `API_LEVEL`. |
 | `omp.SCHEMA_REV` | `int` | `7` | Wire schema revision, mirroring `omp_proto::SCHEMA_REV` (currently `7` at `crates/proto/src/lib.rs:42`). A mismatch between child and core is a startup failure, not a negotiation. |
-| `omp.PYTHON_REV` | `str` | `"3.14t"` | Interpreter ABI revision, mirroring `PYTHON_REV` (`crates/app/src/envd/worker.rs:48`). Native wheels in a site tree must match it. |
+| `omp.PYTHON_REV` | `str` | `"3.14t"` | Interpreter ABI revision used by `__omp-ext-host`. Native wheels in a site tree must match it. |
 
 #### Limits
 
 | Constant | Type | Value | Meaning |
 |---|---|---|---|
-| `omp.MAX_FRAME_BYTES` | `int` | `67_108_864` | Largest encoded CONTROL or DATA frame, matching `DEFAULT_MAX_FRAME_BYTES` (`worker.rs:53`). Exceeding it raises `FrameTooLarge`; the payload was never sent. Anything near this bound belongs in a blob or an artifact ([09-journal.md](09-journal.md)). |
+| `omp.MAX_FRAME_BYTES` | `int` | `67_108_864` | Largest encoded CONTROL or DATA frame. Exceeding it raises `FrameTooLarge`; the payload was never sent. Anything near this bound belongs in a blob or an artifact ([09-journal.md](09-journal.md)). |
 | `omp.MAX_DECLARATIONS` | `int` | `256` | Declarations (devices + commands + prompt slots + providers + renderers + services) per extension. Exceeding it fails the import phase with `DeclarationLimit`. A number this high is already a smell — `@bdsqqq/pi` registers 33 entrypoints and is the ecosystem's outlier. |
 | `omp.MAX_PENDING_EFFECTS` | `int` | `1024` | Shared bound for pending CONTROL correlations and the fire-and-forget effect mailbox per child. Past the effect bound the oldest cosmetic effects drop and the drop is counted. |
 | `omp.MAX_WORKERS` | `int` | `8` | Concurrent named workers per extension ([04-placement.md](04-placement.md)). |
@@ -945,9 +946,9 @@ All are `omp.Duration` values (*Value types*). An earlier revision wrote this ta
 | `omp.DEFAULT_HOOK_TIMEOUT` | `omp.Duration("5s")` | Host-level fallback budget for one handler when its event declares none. Deliberately much tighter than pi's default, which is `EXTENSION_HANDLER_TIMEOUT_MS = 30_000` (`/work/pi/packages/coding-agent/src/extensibility/extensions/runner.ts:85`, overridable by `extensionHandlers.toolCallTimeoutMs`). Most events *do* declare one: the per-latency-class table in [05-hooks.md](05-hooks.md) is authoritative, and notably sets the per-call class to 30 s because that is the number the ecosystem's external approvers were written against. Expiry behaviour is likewise per-event, fail-open or fail-closed, and also [05-hooks.md](05-hooks.md)'s. |
 | `omp.ACTIVATION_TIMEOUT` | `omp.Duration("10s")` | Per-extension budget for `extension_activate`. Expiry marks that extension `DEGRADED`; the rest of the child proceeds. |
 | `omp.SHUTDOWN_GRACE` | `omp.Duration("2s")` | Time authorized work gets to settle on reload or shutdown, and the maximum a `ctx.shield()` can hold. |
-| `omp.CANCEL_GRACE` | `omp.Duration("150ms")` | Stage 1 → stage 2 interval, matching `interrupt_grace` (`worker.rs:96`). The same value again separates stage 2 from stage 3. |
-| `omp.HEALTH_TIMEOUT` | `omp.Duration("5s")` | Handshake, registration, ping, and single-frame-read budget, matching `health_timeout` (`worker.rs:94`). |
-| `omp.PING_INTERVAL` | `omp.Duration("15s")` | Idle health-probe interval, matching `ping_interval` (`worker.rs:95`). |
+| `omp.CANCEL_GRACE` | `omp.Duration("150ms")` | Stage 1 → stage 2 interval. The same value again separates stage 2 from stage 3. |
+| `omp.HEALTH_TIMEOUT` | `omp.Duration("5s")` | Handshake, registration, ping, and single-frame-read budget. |
+| `omp.PING_INTERVAL` | `omp.Duration("15s")` | Idle health-probe interval. |
 
 Timeouts are host defaults, not policy. Settings may shorten them; nothing may lengthen `CANCEL_GRACE`.
 
@@ -1060,7 +1061,7 @@ async def review_dynamic_eval(call, ctx: omp.Context) -> omp.HookDecision:
 
 What changed, concretely:
 
-- **One event, one chain.** `tool_call` fires exactly once per logical dispatch, carrying a tagged `target` — core tool, device, or MCP endpoint ([05-hooks.md](05-hooks.md)). A device invocation through `xd shell_exec [args…]` fires one `tool_call` with the RESOLVED `target=DeviceCall(...)` and **decoded** args — the `xd` builtin is transport, never the policy subject, so a guard on the resolved device cannot be bypassed by the shell command. The catalog and docs reads fire `tool_call` with `target=CoreTool("shell")`. A policy author cannot accidentally guard `bash` while waving through the device that does the same thing, and cannot double-prompt the user for one action.
+- **One event, one chain.** `tool_call` fires exactly once per logical dispatch, carrying a tagged `target` — core tool, device, or MCP endpoint ([05-hooks.md](05-hooks.md)). A device invocation through `dyn shell_exec [args…]` fires one `tool_call` with the RESOLVED `target=DeviceCall(...)` and **decoded** args — the `dyn` builtin is transport, never the policy subject, so a guard on the resolved device cannot be bypassed by the shell command. The catalog and docs reads fire `tool_call` with `target=CoreTool("shell")`. A policy author cannot accidentally guard `bash` while waving through the device that does the same thing, and cannot double-prompt the user for one action.
 - **Unrecognized targets `Defer`.** The `case _` arm is not boilerplate; it is the difference between a policy that fails safe on a target kind added after it shipped and one that silently allows.
 - **Ordering is a phase, not a number.** PRECHECK is consulted before APPROVAL because the phases themselves are ordered — PRECHECK → TRANSFORM → REVIEW → APPROVAL → OBSERVE ([05-hooks.md](05-hooks.md)) — and a `Deny` in an earlier phase short-circuits the rest. Rev 1 spelled this `priority=900` versus `priority=500` and implied that arbitrary integers sequenced handlers even inside one concurrent band; that pretense is retracted. Core runs the per-invocation phase walk and the environment enforces the composed answer (the D6 scope reading, *Lifecycle*).
 - **The bash AST comes from core.** `@shinynito/pi-menshen` bundles tree-sitter WASM to do this itself — 1.3 MB and 50–200 ms of init per session, with its own idea of what counts as evasion. omp already ships a real bash parser (`crates/shell-engine/src/parser/ast.rs`) and attaches a normalized IR with an explicit `has_dynamic_eval` flag, so `eval "$CMD"` forces review instead of quietly satisfying an allowlist ([06-policy.md](06-policy.md)).
@@ -1103,7 +1104,7 @@ async def computer(args: ComputerArgs, ctx: omp.Context) -> ComputerResult:
     return ComputerResult(await _driver_call(args.action, args))
 ```
 
-- **Zero schema slots.** The model sees `computer` in the catalog (`xd`), pulls the full schema with `xd computer --help` only in the turn it needs it, and dispatches with `xd computer [args…]`, whose CLI arguments become one nested JSON document. Malformed args produce a usage hint so the model self-corrects in place ([01-devices.md](01-devices.md)).
+- **Zero schema slots.** The model sees `computer` in the catalog (`dyn`), pulls the full schema with `dyn computer --help` only in the turn it needs it, and dispatches with `dyn computer [args…]`, whose CLI arguments become one nested JSON document. Malformed args produce a usage hint so the model self-corrects in place ([01-devices.md](01-devices.md)).
 - **The driver outlives the child.** It is a named process owned by the environment, so a crash, a hot reload, or a stage-3 kill leaves it running; `extension_activate` re-attaches. In pi the driver is a child of the harness and dies with it.
 - **`place="env"` keeps frames small.** Screenshots never transit the host to reach the environment's blob store ([04-placement.md](04-placement.md)).
 - **The native binary cannot kill the session.** Worst case it kills its host child, and that child comes back.
@@ -1162,13 +1163,13 @@ The omp version of `pi-cache-optimizer` is: nothing. That is the strongest form 
 
 -----
 
-## What this requires us to build
+## Implementation architecture
 
-Honest engineering, per crate, with what already exists.
+Current ownership and runtime boundaries, per crate.
 
 ### `crates/py`
 
-**Exists.** `Engine` / `Builder` with a one-shot process guard, isolated-mode boot, and frozen stdlib plus repo modules (`crates/py/src/lib.rs:117`, `:157`, `:168-203`). `build.rs` packs `crates/py/python/**` and pinned pure-Python wheels into `OMP_PY_MODULES_BLOB` (`lib.rs:52-56`). `omp_remote` already implements content-addressed one-time code shipping in three modes, pickle-5 out-of-band buffers, HMAC-SHA256 mutual handshake, and threaded workers under the free-threaded runtime (`crates/py/python/omp_remote.py:21-43`, `:138-159`, `:414-428`). Native modules register with `pyo3::append_to_inittab!` before `Builder::init` (`lib.rs:14-15`).
+**Runtime.** `Engine` / `Builder` provide the one-shot process guard, isolated-mode boot, and frozen stdlib plus repo modules. `build.rs` packs `crates/py/python/**` and pinned pure-Python wheels into `OMP_PY_MODULES_BLOB`. `omp_remote` implements content-addressed one-time code shipping in three modes, pickle-5 out-of-band buffers, HMAC-SHA256 mutual handshake, and threaded named-worker execution under the free-threaded runtime. Native modules register with `pyo3::append_to_inittab!` before `Builder::init`.
 
 > **Known defects, verified on disk, not fixed here.** Two, in `crates/py/python/omp_remote.py`.
 >
@@ -1180,9 +1181,9 @@ Honest engineering, per crate, with what already exists.
 >
 > Fix shape, now normative rather than suggested (P0 #19): bound `hlen` and `nbufs` against explicit constants before allocating, raising the connection-level protocol error `:125` already raises; refuse `authkey=None` on any non-`AF_UNIX` address — authentication is mandatory in v1, and today's opt-out default is documented as a defect; require an encrypted or already-authenticated tunnel for any non-UDS transport, because `authkey` authenticates without encrypting (the docstring says so itself, `:38-43`); and reject old-generation frames after a reconnect (*Idempotency and generation fencing*). A worker socket is an authentication boundary, and a default of "no authentication" does not make it one ([06-policy.md](06-policy.md), [04-placement.md](04-placement.md)).
 
-**New.**
+**Extension-host surface.**
 
-1. `crates/py/python/omp/` — the frozen `omp` package, packed by the existing build script with no new machinery:
+1. `crates/py/python/omp/` is the frozen `omp` package, packed by the existing build script:
    - `__init__.py` — constants, `manifest()`, `host()`, `context()`, `is_subscribed()`, `restart_reason()`, `require()`, `resources()`, `operation_spec()`, the value types (`Duration`, `Principal`, `OperationSpec`), the `CancelledError` re-export.
    - `_host.py` — the CONTROL client: frame codec over the dedicated inherited descriptor, request correlation, reentrancy, the effect mailbox, stdout/stderr capture into structured logs.
    - `_scope.py` — `Context`, the `ContextVar`, `checkpoint`, `shield`, `on_cancel`, `child`.
@@ -1192,152 +1193,52 @@ Honest engineering, per crate, with what already exists.
 
    Constraint: this package must import with **zero** I/O and zero socket work, because it is imported before ADMIT completes for later extensions.
 
-2. `_omp` native module, `#[pymodule(gil_used = false)]`, following `omp_py_eval` (`crates/app/src/envd/worker.rs:894-908`). It exposes `#[pyclass(frozen)]` handles for the CONTROL and DATA channels plus the cancellation primitives. `frozen` matters: these objects are touched from many Python threads at once under the free-threaded build, and `frozen` is what makes that sound without a lock.
+2. The `_omp` native module is `#[pymodule(gil_used = false)]`. It exposes `#[pyclass(frozen)]` handles for the CONTROL and DATA channels plus the cancellation primitives. `frozen` matters: these objects are touched from many Python threads at once under the free-threaded build, and `frozen` is what makes that sound without a lock.
 
-3. Cancellation plumbing. Stage 2 needs `PyThreadState_SetAsyncExc` against the thread executing a given invocation, so the child must maintain an invocation → thread-id map. `crates/tools/src/eval/kernel.rs` already declares `PyThread_get_thread_ident` (`kernel.rs:233-235`) and drives the async-exception watchdog; lift that into a shared `omp_py::interrupt` module rather than copying it.
+3. Cancellation plumbing maps each invocation to its executing thread so stage 2 can deliver `PyThreadState_SetAsyncExc`. Extension-host and eval-child execution share the `omp_py` interrupt primitive rather than maintaining two implementations.
 
-4. Per-child site tree selection. `Builder::site_packages` already takes one path (`lib.rs:106`), and `default_site_packages()` reads `$OMP_PY_SITE` (`lib.rs:157-166`) — which is precisely how the existing tool worker is configured (`worker.rs:387-389`). Per-extension keying means each child gets its own value, so the mechanism exists and only the naming scheme is new. That naming scheme is [14-deploy.md](14-deploy.md)'s, and it is where the isolation from import shadowing actually comes from: separate `sys.path`, not a runtime check.
+4. Per-child site tree selection. `Builder::site_packages` takes one path, and `default_site_packages()` reads `$OMP_PY_SITE`; each `__omp-ext-host` child gets the value for its extension key. [14-deploy.md](14-deploy.md) owns the naming scheme. Separate `sys.path` values, not a runtime check, provide isolation from import shadowing.
 
 **Risk.** Free-threaded 3.14t plus arbitrary native wheels is the least-tested corner of this design. A wheel built without `Py_GIL_DISABLED` support re-enables the GIL process-wide on import, silently turning parallel extension work serial. The child must detect `sys._is_gil_enabled()` flipping after IMPORT and journal it — a performance cliff that is invisible is worse than one that is loud.
 
-### `crates/app`
+### `crates/app` and `crates/envd`
 
-**Exists.** Two supervised same-binary children with private argv selectors, dispatched before the CLI graph loads (`crates/app/src/main.rs:7-30`). `ToolWorkerSupervisor` is a near-complete model of what is needed: flume command mailbox, actor task, spawn-and-verify handshake, declaration verification, health pings, bounded backoff respawn, and `WorkerInvocation` whose `Drop` requests cancellation (`crates/app/src/envd/worker.rs:220-291`, `:529-584`, `:806-848`). `ProjectEnvironment::connect_or_start` is the single composition point (`crates/app/src/chat.rs:711-719`).
+`crates/app` dispatches exactly two embedded-Python child roles before loading the public CLI: `__omp-ext-host` and `__omp-eval-child`. It owns neither runtime and never initializes CPython as a preflight.
 
-**New.**
+`crates/envd` owns both implementations. `ExtHostSupervisor` launches each Python extension through `__omp-ext-host`, derives its declarations from authenticated sealed CONTROL evidence, and invokes tools, prompts, and services over that same multiplexed CONTROL connection. The lazy, killable eval executor launches `__omp-eval-child`; built-in `py_eval` is registered at the Environment locus and runs each call in a fresh disposable namespace through that executor. It has no extension manifest and no Worker route.
 
-1. `crates/app/src/exthost/` — sibling of `envd/worker.rs`:
-   - `mod.rs` — `ExtHostSupervisor`, `ExtHostConfig`, `ExtHostError`, and `HostKey { layer, tier, unit }` where `unit` is an extension `id` or a sharing-group name. Children are held in a `SparseMap<HostKey, Child>`-shaped table sized by `omp.MAX_HOST_CHILDREN`; most entries are vacant for the whole session, because a key exists as soon as an extension is admitted and a *child* exists only once it is reached.
-   - `spawn.rs` — argv selector `__omp-ext-host`, added to `main.rs` beside the existing two. Per-child env: `OMP_PY_SITE` for the site tree, plus the confinement profile for sandboxed children. This selector supersedes rather than joins `__omp-tool-worker`: `run_worker_entry` (`worker.rs:921-933`) and `serve_worker` (`:935-1031`) are the extension host's direct ancestors — one warm interpreter, `OMP_PY_MODULES` naming what to import, module-level declarations collected and verified at handshake — and the work is to generalize that entry point, not to run two Python children with overlapping jobs. The migration is mechanical because the frame vocabulary is the same file, with one deliberate transport change: CONTROL rides a dedicated inherited descriptor rather than the child's stdio, and the child's stdout/stderr are captured into structured extension logs (*Idempotency and generation fencing*).
-   - `dispatch.rs` — the multiplexed reentrant router. This is the real difference from `ToolWorkerSupervisor`, which serves one invocation at a time (`run_invocation`, `worker.rs:592-727`). Many *frames* must be in flight at once — hook dispatches, effects, and worker-initiated requests all interleave with an invocation — so correlation is a `SparseMap<u64, Pending>` over request ids rather than a single `PendingInvocation`. Note the scope: frame multiplexing is not the same as concurrent device invocations. Per the actor default (*Process model*) callback entry is serialized per extension; `dispatch.rs` admits N in-flight invocations for one child only where a declaration opted into `concurrency=N`.
-   - `mask.rs` — the subscription bitmap: a `u128` per child plus a `u128` union, with a `SparseSet<EventId>` fallback if the catalogue ever exceeds 128 members. Dispatch is `union & (1 << id)`, then per-child bit tests to build the recipient list. No map lookup, no allocation on the negative path.
-   - `relay.rs` — the per-invocation decision procedure: fan-out to every subscribed child, then the phase walk of [05-hooks.md](05-hooks.md) composing their decisions into the one answer the environment's admission query receives. No *batch* scheduling lives here — no cross-invocation ordering, no batch approval prompts (the D6 scope reading, *Lifecycle*).
-   - `admit.rs` — manifest parse, api-level check, capability grant intersection, host-key routing, and PUBLISH: folding every admitted manifest's declaration tables into the listing, the union mask, and the activation-trigger index. This module must never touch an interpreter; if it does, lazy spawn is gone.
-   - `verify.rs` — compares a child's `RegisterTools` against the manifest that was published for it. Set equality on `(name, family, rev)` and on `(event, phase)`; detail fields are accepted, membership changes are not.
-   - `cancel.rs` — the three-stage ladder and its escalation timers.
-   - `quota.rs` — CONTROL-side per-extension quota accounting and the resource receipt (*Quotas and fairness*); DATA-side quotas are the environment's ([11-env.md](11-env.md)).
-
-2. `crates/app/src/settings.rs` — `extensions`, `disabled_extensions`, per-extension settings, timeout overrides. Names follow pi's (`.plan/feature-map/config.md:120`, `:76`) so migration is mechanical.
-
-3. Composition: `ProjectEnvironment` gains the supervisor, and children spawn lazily on first routed extension.
+Named-worker placement remains a third, distinct facility owned by `worker_pool`. A named worker may be persistent or remote and serves explicit `place="worker:<name>"` execution; it is not a hidden Python child role and is not used to host extensions or `py_eval`.
 
 **Tradeoff, resolved twice.** The first draft used one child at the weakest tier present, demoting trusted extensions loaded beside sandboxed ones. The second keyed children by `(layer, tier, pool)`, isolating tiers but still co-residing every extension of a tier. Both are superseded by `(layer, tier, extension)`, and the reasons are cumulative rather than competing: tier co-residence made the sandbox unenforceable per-object; extension co-residence made a shared site tree, so one extension's dependency graph could define a module another imports, which no runtime check repairs; and extension co-residence made D5's SIGKILL the blast radius of a whole session rather than of one extension. What per-extension keying costs is resident memory and the in-process inter-extension event bus — the first is mitigated by the shared frozen-stdlib image and by umbrella packages counting as one extension, the second is a real loss documented in *Process model*. A sharing group buys the old behaviour back for anyone who wants it, as an explicit choice rather than a default.
 
 ### `crates/proto`
 
-**Exists, and it is already this protocol.** `crates/proto/proto/omp/toolhost/v1/toolhost.proto` is the varint-framed stdio contract between the environment host and a supervised Python worker. It is not a template to copy — it is the CONTROL channel, missing four capabilities. What is already there:
+`crates/proto/proto/omp/toolhost/v1/toolhost.proto` is the varint-framed CONTROL contract between the supervisor and `__omp-ext-host`. It is not stdio: CONTROL uses a dedicated inherited descriptor, while stdout and stderr remain extension output. The protocol includes:
 
-- `WorkerHello` / `RegisterTools` / `Ping` / `Pong` / `ProtocolError` on `request_id` 0; nonzero, unique request ids per in-flight invocation; a terminal `ToolComplete` or `ToolAborted` fuses the stream (`toolhost.proto:9-18`).
-- `HostFrame` and `WorkerFrame` oneof envelopes (`toolhost.proto:133-156`).
-- `InvokeTool` / `CancelTool` / `ToolUpdate` / `ToolComplete` / `ToolAborted` — the device invocation lifecycle, with `ToolAborted.effects_unknown` already carrying the exact abort truth the cancellation ladder needs (`toolhost.proto:101-106`).
-- **`family@rev` is implemented, not proposed.** `omp_tool::Rev { family: Str, n: u16 }` exists (`crates/tool/src/lib.rs:49-56`) and its `Display` renders `family.n`, so a `ToolDecl.rev` of `"hl.3"` already carries both halves — a separate `family` field would be redundant and is not proposed here. `ToolSpec::identity()` returns the durable `(name, family/n)` pair (`lib.rs:92-94`); `TOOL_REV_PROP = "omp/tool-rev"` (`lib.rs:46`) is the namespaced thread-item property that stamps the committed rev, written by the loop at `crates/agent/src/loop.rs:1368-1370` and read back at `:1129-1131`. `ToolDecl` "adds revision and constraint identity to the canonical inference tool definition instead of duplicating name/description/schema" (`toolhost.proto:52-59`). Any doc needing per-rev attribution should stamp `TOOL_REV_PROP` rather than invent a parallel marker.
-- **Verdicts and spill are implemented too.** `Verdict<P, F>` (`crates/tool/src/lib.rs:251`), `VerdictDetails` discriminated inline-vs-spilled by `#[serde(tag = "storage")]` (`:420`), and the `VerdictSpill` trait plus `VerdictDetailsError` (`:436`, `:446`). `Registry::live_hash()` is a blake3 digest over every live `(name, rev.family, rev.n)` (`crates/tool/src/registry.rs:458-464`) — a ready-made stable identity for "did the reachable capability set change", which is what makes availability-by-notification checkable rather than hopeful. What is genuinely missing: `Tool::lift` defaults to `None` (`lib.rs:213-215`) so no device migrates history yet; `VerdictSpill` has no wired environment implementation; and `ToolComplete.is_error` is one bool (`toolhost.proto:95`) that cannot express the four `Verdict` branches across the toolhost boundary. All three are [02-verdicts.md](02-verdicts.md)'s to specify.
+- `WorkerHello` / `RegisterTools` / `Ping` / `Pong` / `ProtocolError` on `request_id` 0; nonzero, unique request ids per in-flight exchange; a terminal result or `ToolAborted` fuses an invocation.
+- `HostFrame` and `WorkerFrame` oneof envelopes with one top-level tag per CONTROL domain.
+- `InvokeTool` / `CancelTool` / `ToolUpdate` / `ResultWorkerEnvelope` / `ToolAborted` carry the device lifecycle, with `ToolAborted.effects_unknown` carrying the exact abort truth the cancellation ladder needs.
+- **`family@rev` is implemented, not proposed.** `omp_tool::Rev { family: Str, n: u16 }` renders `family.n`, so a `ToolDecl.rev` of `"hl.3"` carries both halves. `ToolSpec::identity()` returns the durable `(name, family/n)` pair; `TOOL_REV_PROP = "omp/tool-rev"` is the namespaced thread-item property that stamps the committed rev. Any doc needing per-rev attribution should stamp `TOOL_REV_PROP` rather than invent a parallel marker.
+- **Verdicts, spill, and capability identities are implemented too.** `Verdict<P, F>` and `VerdictDetails` retain the four durable outcome branches; `ToolResultStart.kind` carries those branches before the chunk stream; envd's `SpillDiverter` implements `VerdictSpill`. `Registry::slot_hash` is the stable prompt-toolset identity and `Registry::device_hash` independently tracks device-catalog availability. `Tool::lift` still defaults to `None`, so historical device-call migration remains opt-in per tool ([02-verdicts.md](02-verdicts.md)).
   > **Known defect, verified on disk, not fixed here.** `verdict_details` (`crates/tool/src/lib.rs:455-476`) serializes unconditionally — `serde_json::to_vec(verdict)` at `:466` — and only then compares `json.len()` against `inline_limit` at `:467`. The gate prevents *storing* a large verdict inline; it does not prevent *building* it, and JSON encoding inflates byte fields on the way. Under the workspace allocation discipline that is a real defect on a path a device hits on every call. Fix shape: a counting or budget-limited serializer that aborts past `inline_limit` and re-serializes into the spill sink, so the peak is bounded by the limit rather than by the payload. This is also why out-of-band frame diversion at the worker boundary ([04-placement.md](04-placement.md)) is complementary rather than redundant: it keeps the bytes from ever reaching a serializer in the host at all.
 - **Constraint-as-intent is already wired.** `SchemaConstraint { uint32 priority }` and `GrammarConstraint { GrammarSyntax syntax; string definition; uint32 priority }`, with the comment: "the host lowers it against the selected inference route rather than silently discarding unsupported forms" (`toolhost.proto:27-50`). That is the blogpost's constrained-sampling budget, in the protocol, today. Nothing here should invent a parallel intent mechanism; what is missing is the arbitration that spends the budget, owned by [13-inference.md](13-inference.md).
 
-The evolution rules are binding on every proposal below: additive fields only, field numbers never reused, unknown fields and enum values skipped, experimental extensions on the namespaced `ValueMap` at tag 15 (`toolhost.proto:14-18`).
+The evolution rules are binding: additive fields only, field numbers never reused, unknown fields and enum values skipped, experimental extensions on the namespaced `ValueMap` at tag 15.
 
-**Missing capability 1 — host identity beyond a revision pair.** `WorkerHello` carries `schema_rev`, `python_rev`, `worker_id` (`toolhost.proto:20-25`). The supervisor now needs the child's key. Additive, tags 4–8:
+**Host identity and fencing.** `WorkerHello` carries the schema and Python revisions, host identity, layer, tier, pool, host version, and both generation fences. Core and the Environment reject stale-generation requests after a restart or reconnect.
 
-```protobuf
-message WorkerHello {
-  uint32 schema_rev  = 1;
-  string python_rev  = 2;
-  bytes  worker_id   = 3;
-  uint32 api_level   = 4;   // omp.API_LEVEL served by this child
-  Layer  layer       = 5;   // client | workspace
-  Trust  tier        = 6;   // sandboxed | trusted
-  string pool        = 7;   // "main" unless installed into a named pool
-  string host_version = 8;
-  uint64 host_generation    = 9;   // fencing: this child's restart counter
-  uint64 session_generation = 10;  // fencing: the session epoch at spawn
-  omp.inference.v1.ValueMap props = 15;
-}
-```
+**Authenticated declarations.** Registration frames carry extension-attributed tool and slot declarations. `ExtHostSupervisor` validates this CONTROL traffic, seals the accepted evidence, and derives the public declarations from that evidence. Later tool, prompt, and service invocations return over the same authenticated CONTROL connection; there is no parallel stdio worker protocol.
 
-The two generation fields are the wire half of *Idempotency and generation fencing*: every durable Request payload additionally carries its `idempotency_key`, and core rejects frames whose generations are stale after a reload or reconnect.
+**Multiplexed CONTROL.** Correlated host and extension envelopes carry tool invocation and cancellation, hooks and decisions, effects, subscriptions, prompts, services, health traffic, and reentrant extension-initiated requests. `CancelScope` is separate from call-id cancellation because hook and service work can have a CONTROL request id without a tool call id. Stdout and stderr remain ordinary extension output and cannot corrupt framing.
 
-**Missing capability 2 — extension identity on declarations.** `RegisterTools` carries only `tools` (`toolhost.proto:61-64`), and `ToolDecl` has no attribution. Additive on both:
+**Committed-arguments boundary.** `env/v1` keeps speculative `ArgText` inside Core and treats `ArgsCommitted` as the sole effect-authorization gate. Extension hosts receive only final, policy-approved arguments. The separate future `@streaming_device` facility is specified in [03-params.md](03-params.md); it does not revive the removed Python worker route.
 
-```protobuf
-message ToolDecl {
-  omp.inference.v1.ToolDef definition = 1;
-  string rev                = 2;   // already "family.n", e.g. "hl.3"
-  ToolConstraint constraint = 3;
-  string extension_id       = 4;   // NEW — attribution: state dir, metrics, unload
-  omp.inference.v1.ValueMap props = 15;
-}
-
-message RegisterTools {
-  repeated ToolDecl tools           = 1;
-  repeated ExtensionDecl extensions = 2;   // NEW — id, version, omp_api, caps
-  repeated SlotDecl    slots        = 3;   // NEW — 08-context.md
-  repeated CommandDecl commands     = 4;   // NEW — 07-ui.md
-  omp.inference.v1.ValueMap props = 15;
-}
-```
-
-The subscription mask does **not** ride `RegisterTools`. It travels inside the `Subscribe` frame specified in [05-hooks.md](05-hooks.md), alongside the per-subscription `phase`, `order` (TRANSFORM only), `When`, `timeout` (an `omp.Duration` in the API, whole milliseconds on the wire), `on_failure`, and `name` that core needs for `When` filtering and cross-child phase ordering. An earlier draft of this document put `hook_mask_lo`/`hook_mask_hi` on `RegisterTools` as well; that is dropped rather than kept as a fast-path duplicate, because two carriers for one fact can disagree and the whole value of the mask is that core trusts it enough never to construct the payload. The representation argument still holds and belongs with the owner: a repeated `uint64` decodes into registers where a `bytes` bitset allocates, and event ordinals must be append-only.
-
-**Missing capability 3 — hooks, effects, subscriptions, and host-initiated requests.** New messages plus new oneof arms at unused tags. `HostFrame` uses 1–4 and 15; `WorkerFrame` uses 1–9 and 15.
-
-```protobuf
-message DispatchHook { uint32 event = 1; bytes payload_json = 2; uint64 deadline_ms = 3; }
-message HookVerdict  { uint32 event = 1; bytes verdict_json = 2; }
-message EffectFrame  { uint32 kind  = 1; bytes payload_json = 2; }
-message HostRequest  { uint32 kind  = 1; bytes payload_json = 2; }
-message HostResponse { bytes payload_json = 1; ProtocolError error = 2; }
-message CancelScope  { string reason = 1; CancelStage stage = 2; }
-
-message HostFrame {
-  uint64 request_id = 1;
-  oneof body {
-    InvokeTool   invoke_tool   = 2;
-    CancelTool   cancel_tool   = 3;
-    Ping         ping          = 4;
-    DispatchHook dispatch_hook = 5;   // NEW
-    CancelScope  cancel_scope  = 6;   // NEW — cancels by request_id, not call_id
-    HostResponse host_response = 7;   // NEW — answers a WorkerFrame.host_request
-  }
-  omp.inference.v1.ValueMap props = 15;
-}
-
-message WorkerFrame {
-  uint64 request_id = 1;
-  oneof body {
-    WorkerHello   hello          = 2;
-    RegisterTools register_tools = 3;
-    ToolUpdate    tool_update    = 4;
-    ToolComplete  tool_complete  = 5;
-    ToolAborted   tool_aborted   = 6;
-    Pong          pong           = 7;
-    Ping          ping           = 8;
-    ProtocolError error          = 9;
-    HookVerdict   hook_verdict   = 10;  // NEW
-    EffectFrame   effect         = 11;  // NEW — fire-and-forget, request_id 0
-    HostRequest   host_request   = 12;  // NEW — worker-initiated, awaits HostResponse
-    Subscribe    subscribe      = 13;  // NEW — mask + specs, defined in 05-hooks.md
-  }
-  omp.inference.v1.ValueMap props = 15;
-}
-```
-
-`CancelScope` is a new message rather than a third field on `CancelTool` because `CancelTool` is keyed by `call_id` (`toolhost.proto:77-81`) and a hook dispatch has a `request_id` and no call. Reusing it would mean sending an empty `call_id`, which is exactly the kind of overloading the evolution rules exist to prevent.
-
-`HostRequest` / `HostResponse` are what make CONTROL reentrant. Today every frame flows host→worker as a command and worker→host as a result; a device body's `omp.ui.confirm` inverts that while its own `ToolComplete` is still outstanding. (Approval *hooks* never do this — they return durable tickets, P0 #6.) The envelope already supports it — request ids are unique per in-flight exchange, not per direction — so this is two oneof arms and a correlation table, not a new channel.
-
-*Why JSON payload bodies inside protobuf frames.* Hook payloads and verdicts are open, per-event, and versioned by the event catalogue rather than by the transport. Modelling each as a protobuf message means the proto file changes whenever a hook gains a field, and every change is a `SCHEMA_REV` bump. Bytes-of-JSON keeps the transport stable and pushes evolution into the event schema — which is exactly what this file already does for `ToolUpdate.json` and `ToolComplete.details_json` (`toolhost.proto:83-97`). Cost: one serde round trip per hook. At ~200 µs of per-call budget and payloads measured in hundreds of bytes that is affordable; at per-token rates it would not be, which is another reason no per-token hook exists.
-
-**Missing capability 4 — speculative arguments, which are not mine to fix.** `env/v1` already defines `ArgText` and `ArgsCommitted` in its invocation union (`env.proto:70-82`, `:437-438`), and `ArgsCommitted` is documented as "the sole effect-commit gate". But `toolhost.proto:66-67` states plainly: "Python workers receive only committed args; speculative `ArgText` never crosses this boundary." That boundary is now the v1 contract, not a gap: third-party devices receive only final, policy-approved args (P0 #2), so the pull cursor stays core-internal. Forwarding the existing `env/v1` frames across the toolhost boundary — not designing new ones — is what the future, explicitly separate `@streaming_device` facility will need, and [03-params.md](03-params.md) specifies it.
-
-**`SCHEMA_REV` bumps to 7.** Every change above is additive and skip-safe, so a strict revision bump is not required for wire compatibility — but the handshake compares it exactly (`WorkerError::SchemaRevision`, `crates/app/src/envd/worker.rs:326-332`), and that exact check is right for a same-binary child: it catches a stale `omp` on `$PATH` before anything subtle happens. Bumping records the vocabulary change honestly.
-
-One honest consequence: a *workspace-layer* child next to a remote environment may not be the same binary as the client. Under exact-match `schema_rev`, a version-skewed remote workspace fails the handshake rather than degrading. That is the correct default — a partially-understood CONTROL channel is worse than none — but it makes host version alignment a deployment requirement, which is [14-deploy.md](14-deploy.md)'s to state.
+`SCHEMA_REV` is checked exactly. A version-skewed workspace host fails its handshake instead of degrading onto a partially understood CONTROL vocabulary; [14-deploy.md](14-deploy.md) owns that deployment requirement.
 
 ### `crates/agent`, `crates/env`, `crates/telemetry`
 
 - **`crates/agent`** — hook dispatch points in the loop, and nothing more than dispatch: each point is a bit test against the union mask, then, only if set, a handoff to the supervisor's per-invocation decision procedure. The union lives in the loop's own state, not behind an `Arc<Mutex<…>>`; it is replaced wholesale at REGISTER with a single atomic store. The mailbox loop holds one flume oneshot per invocation and never schedules admission across the batch (D6); composition happens in `relay.rs`, off the loop, one composed answer per oneshot.
-- **`crates/env`** — extension scopes become a new scope kind on the existing `env/v1` handshake (`ClientHello`, `env.proto:21`); no new plane. Worker-scoped clients are a narrower variant of the same scope ([04-placement.md](04-placement.md), [11-env.md](11-env.md)). `RunGuard` already provides drop-cancellation with CAS disarm and explicit `relinquish` for detached work (`crates/env/src/guard.rs:24-79`) and needs nothing added.
+- **`crates/env`** — extension scopes are a scope kind on the existing `env/v1` handshake; there is no new plane. Named-worker clients are a narrower variant of the same scope ([04-placement.md](04-placement.md), [11-env.md](11-env.md)). `RunGuard` provides drop-cancellation with CAS disarm and explicit `relinquish` for detached work.
 - **`crates/telemetry`** — extension identity (`extension`, `version`, `layer`, `tier`, `pool`, `generation`) as span attributes, plus counters for stage-2 and stage-3 escalations, mask hit rate, and effect-mailbox drops. Stage-3 rate is the health metric for this entire subsystem.
 
 ### Feature-map reconciliation
@@ -1367,11 +1268,11 @@ Against the workspace discipline (`AGENTS.md:216-258`, `:259-370`):
 
 - **The negative path is a bit test.** No allocation, no `Box`, no future, no mailbox for an unsubscribed event. This is the single most important number in the subsystem: it is what lets the event catalogue be generous.
 - **No `BoxFuture` on dispatch.** `ExtHostSupervisor`'s client methods are plain RPITIT (`fn dispatch(&self, …) -> impl Future<Output = …> + Send + '_`). The one `dyn` boundary — the erased hook-handler table — boxes once at REGISTER behind a `type BoxFut<'a, T>` alias, never per call.
-- **One reusable encode scratch per child.** `BytesMut` threaded through the codec, exactly as `serve_invocation` already does (`worker.rs:1133`). Frames are encoded in place; nothing is concatenated.
+- **One reusable encode scratch per child.** `BytesMut` is threaded through the CONTROL codec. Frames are encoded in place; nothing is concatenated.
 - **`Str` for every identity.** Extension ids, device names, event names, worker names, pool names, `family@rev` — all stored, cloned, and sliced, all under 23 bytes in practice, all inline in `omp_core::Str` with O(1) clone.
 - **`CowBytes` for payload bodies** crossing the boundary, so a JSON body handed from the codec to the dispatcher to the journal is sliced, not copied.
 - **`SparseMap<HostKey, Child>`** for the child table, sized once at PUBLISH. Keys are dense because they are assigned in admission order; most slots stay vacant because a key is created at ADMIT and a child only at first reach, so the common session allocates the table once and never spawns into most of it.
-- **`flume` mailboxes**, unbounded for commands (matching `ToolWorkerSupervisor::spawn`, `worker.rs:248`), bounded at `MAX_PENDING_EFFECTS` for effects with drop-oldest.
+- **`flume` mailboxes**, unbounded for commands and bounded at `MAX_PENDING_EFFECTS` for effects with drop-oldest.
 - **`SparseMap<u64, Pending>`** for in-flight correlation. Request ids are dense and monotonic; a `HashMap` would hash a `u64` for nothing.
 - **Spawn cost.** Interpreter boot dominates the one-time cost, and it is the price of the child-per-key decision. Frozen modules point straight into the mapped binary and are never paged in unless imported (`crates/py/src/lib.rs:45-49`), so the floor is low but not zero — hence lazy spawn per key, and hence the hard requirement that a zero-extension session spawns nothing.
 
@@ -1450,6 +1351,6 @@ User rulings, decided — recorded with the reversals of Rev-2 positions stated 
 - **Manifest `[[devices]]` renamed `[[tools]]`, entries gaining `kind = "soft" | "hard"` (default soft).** The example manifest, the key table, `omp.Manifest.tools`, and `ToolEntry` (formerly `DeviceEntry`, now carrying `kind: ToolKind`) updated; [14-deploy.md](14-deploy.md)'s normalized declaration table represents the same entries as rows with a `kind` column, and hard-intent entries require the `tools.hard` capability in the install grant under the default `auto` policy. (Rev 2.1-internal correction: an earlier cut of this addendum spelled the vocabulary `"device" | "tool" | "hard"`; `kind` states intent only, and the surface is decided by the dynamic tool policy — [01-devices.md](01-devices.md).)
 - **D5 and D6 amendments ratified.** Rev 2 flagged "D5 amendment recommended" and "D6 wording amendment recommended" as open items, never silently assumed. `PLAN.md` §D5/§D6 was amended 2026-08-19: D5 now locks supervised worker processes one per active extension with pooling as explicit opt-in fate-sharing, and D6 now states that the no-gate-chain prohibition binds the batch dispatch path, not the per-invocation decision procedure. Every "recommended" passage in this file (*Lifecycle*, *Cancellation*, this section's Rev-2 items) is updated to cite the amended text as ratified; the flip records are extended, never deleted.
 
-**Revision 2.2** — the `xd` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `xd` builtin of the embedded shell, inside the core `shell` tool: `xd` lists the catalog (`xd --q <text>` searches), `xd <device> --help` returns docs plus schema-derived CLI usage, and `xd <device> [args…]` (or `xd <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `xd resolve "<reason>"` / `xd reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `xd` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
+**Revision 2.2** — the `dyn` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `dyn` builtin of the embedded shell, inside the core `shell` tool: `dyn` lists the catalog (`dyn --q <text>` searches), `dyn <device> --help` returns docs plus schema-derived CLI usage, and `dyn <device> [args…]` (or `dyn <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `dyn resolve "<reason>"` / `dyn reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `dyn` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
 
-In this file, the ownership table, slot accounting, lifecycle and activation examples, manifest/catalog prose, cancellation example, policy-gate account, and computer-use example now use `xd`; the prior Revision 2.1 ruling remains unchanged as the historical record it supersedes.
+In this file, the ownership table, slot accounting, lifecycle and activation examples, manifest/catalog prose, cancellation example, policy-gate account, and computer-use example now use `dyn`; the prior Revision 2.1 ruling remains unchanged as the historical record it supersedes.

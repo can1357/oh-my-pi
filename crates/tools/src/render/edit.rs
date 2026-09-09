@@ -27,8 +27,11 @@ impl RenderFold for EditRenderer {
 		state.latest = Some(update);
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
-		if let Some(input) = args.get("input").and_then(omp_slopjson::Value::as_str) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
+		if let Some(input) = args
+			.get("input")
+			.and_then(omp_core::slopjson::Value::as_str)
+		{
 			state.input = Some(Str::new(input));
 		}
 	}
@@ -43,7 +46,7 @@ impl RenderFold for EditRenderer {
 	}
 }
 
-const COLLAPSED_EDIT_DIFF_ROWS: u16 = omp_hashline::diff_preview::COLLAPSED_DIFF_ROWS;
+const COLLAPSED_EDIT_DIFF_ROWS: u16 = omp_edit::COLLAPSED_DIFF_ROWS;
 
 fn render_edit_live(update: Option<&EditUpdate>, input: Option<&str>) -> El {
 	if let Some(update) = update {
@@ -246,17 +249,16 @@ fn render_edit_fault(fault: &EditFault) -> El {
 }
 
 /// Native edit renderer lifecycle fixtures for the visual QA gallery.
-pub(crate) fn gallery_fixtures(edit: ToolIdentity) -> Vec<RendererGalleryFixture> {
+pub fn gallery_fixtures(edit: ToolIdentity) -> Vec<RendererGalleryFixture> {
 	vec![
 		RendererGalleryFixture {
 			identity: edit,
-			title: "rename readFileSlice in packages/coding-agent/src/tools/read.ts",
 			streaming_args: r#"{"input":"[packages/coding-agent/src/tools/read.ts#7F18]\nPUT 82.=82:\n+function readTextSli"#,
 			args: r#"{"input":"[packages/coding-agent/src/tools/read.ts#7F18]\nPUT 82.=82:\n+function readTextSlice(raw: string, offset: number, limit: number): string {\nPUT 212.=212:\n+\tconst content = readTextSlice(raw, offset, limit);"}"#,
 			progress_update: Some(
 				br#"{"applied_ops":2,"paths":["packages/coding-agent/src/tools/read.ts"],"preview":"@@ -80,5 +80,5 @@\n-function readFileSlice(raw: string, offset: number, limit: number): string {\n+function readTextSlice(raw: string, offset: number, limit: number): string {\n \treturn raw.split(\"\\n\").slice(offset - 1, offset - 1 + limit).join(\"\\n\");\n@@ -210,5 +210,5 @@\n-\tconst content = readFileSlice(raw, offset, limit);\n+\tconst content = readTextSlice(raw, offset, limit);","added_lines":2,"removed_lines":2}"#,
 			),
-			success_outcome: r#"{"kind":"ok","value":{"sections":[{"path":"packages/coding-agent/src/tools/read.ts","canonical_path":"/work/pi/packages/coding-agent/src/tools/read.ts","op":"update","move_dest":null,"old_revision":"sha256:7f18a2","new_revision":"sha256:c2e940","applied_ops":[{"kind":"replace","patch_line":3,"index":0},{"kind":"replace","patch_line":8,"index":1}],"rebased":true,"before":[],"after":[],"header":"packages/coding-agent/src/tools/read.ts#c2e9","diff":"@@ -80,7 +80,7 @@\n  80│type ReadWindow = { offset: number; limit: number };\n  81│\n- 82│function readFileSlice(raw: string, offset: number, limit: number): string {\n+ 82│function readTextSlice(raw: string, offset: number, limit: number): string {\n  83│\treturn raw.split(\"\\n\").slice(offset - 1, offset - 1 + limit).join(\"\\n\");\n  84│}\n@@ -210,5 +210,5 @@\n 210│\tconst offset = args.offset ?? 1;\n 211│\tconst limit = args.limit ?? 4000;\n-212│\tconst content = readFileSlice(raw, offset, limit);\n+212│\tconst content = readTextSlice(raw, offset, limit);\n 213│\treturn { content, offset, limit };","preview":"@@ -80,7 +80,7 @@\n-function readFileSlice(raw: string, offset: number, limit: number): string {\n+function readTextSlice(raw: string, offset: number, limit: number): string {\n@@ -210,5 +210,5 @@\n-\tconst content = readFileSlice(raw, offset, limit);\n+\tconst content = readTextSlice(raw, offset, limit);","first_changed_line":82,"block_resolutions":[],"warnings":[],"diagnostics":[],"diagnostics_complete":true}]}}"#.as_bytes(),
+			success_outcome: r#"{"kind":"ok","value":{"sections":[{"path":"packages/coding-agent/src/tools/read.ts","canonical_path":"/work/omp/packages/coding-agent/src/tools/read.ts","op":"update","move_dest":null,"old_revision":"sha256:7f18a2","new_revision":"sha256:c2e940","applied_ops":[{"kind":"replace","patch_line":3,"index":0},{"kind":"replace","patch_line":8,"index":1}],"rebased":true,"before":[],"after":[],"header":"packages/coding-agent/src/tools/read.ts#c2e9","diff":"@@ -80,7 +80,7 @@\n  80│type ReadWindow = { offset: number; limit: number };\n  81│\n- 82│function readFileSlice(raw: string, offset: number, limit: number): string {\n+ 82│function readTextSlice(raw: string, offset: number, limit: number): string {\n  83│\treturn raw.split(\"\\n\").slice(offset - 1, offset - 1 + limit).join(\"\\n\");\n  84│}\n@@ -210,5 +210,5 @@\n 210│\tconst offset = args.offset ?? 1;\n 211│\tconst limit = args.limit ?? 4000;\n-212│\tconst content = readFileSlice(raw, offset, limit);\n+212│\tconst content = readTextSlice(raw, offset, limit);\n 213│\treturn { content, offset, limit };","preview":"@@ -80,7 +80,7 @@\n-function readFileSlice(raw: string, offset: number, limit: number): string {\n+function readTextSlice(raw: string, offset: number, limit: number): string {\n@@ -210,5 +210,5 @@\n-\tconst content = readFileSlice(raw, offset, limit);\n+\tconst content = readTextSlice(raw, offset, limit);","first_changed_line":82,"block_resolutions":[],"warnings":[],"diagnostics":[],"diagnostics_complete":true}]}}"#.as_bytes(),
 			error_outcome: br#"{"kind":"faulted","value":{"reason":{"kind":"invalid_patch","message":"No match for the expected context near `function readFileSlice`. The file now declares `function readTextSlice`; re-read the file and retry with its current contents."},"conflicts":[{"start_line":82,"end_line":84,"message":"Function declaration no longer matches the submitted hunk context"},{"start_line":210,"end_line":213,"message":"Callsite range changed after the edit was prepared"}]}}"#,
 		},
 	]
@@ -309,8 +311,9 @@ mod tests {
 	fn edit_streaming_args_render_partial_hashline_preview() {
 		let (registry, identities) = registry(identities());
 		let identity = identities.edit.as_ref().expect("edit identity");
-		let args =
-			omp_slopjson::parse_streaming(r#"{"input":"[src/read.rs#1234]\nPUT 4.=4:\n+fn new_name("#);
+		let args = omp_core::slopjson::parse_streaming(
+			r#"{"input":"[src/read.rs#1234]\nPUT 4.=4:\n+fn new_name("#,
+		);
 		let mut state = ViewState::new();
 		registry
 			.fold_args(identity, &mut state, &args, false)

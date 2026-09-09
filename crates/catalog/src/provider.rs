@@ -11,8 +11,8 @@ use crate::{
 	capability::{OperationBits, OperationKind},
 	discover::DiscoveryDefaults,
 	id::{
-		AuthSpecId, CodecId, DiscoverySpecId, HeaderProfileId, OAuthSpecId, ProviderId, RouteId,
-		WirePolicyId,
+		AuthSpecId, CodecId, DiscoverySpecId, HeaderProfileId, ModelKey, OAuthSpecId, ProviderId,
+		RouteId, WirePolicyId,
 	},
 };
 
@@ -330,9 +330,12 @@ pub enum OAuthExchangeKind {
 	CursorPoll,
 	/// Completes Google Antigravity PKCE and Cloud Code Assist provisioning.
 	GoogleAntigravity,
+	/// Completes Gemini CLI PKCE and Cloud Code Assist project discovery.
+	GoogleGeminiCli,
 	/// Exchanges a Z.AI authorization result for an API key.
 	ZaiApiKey,
-	/// Exchanges an OpenRouter PKCE authorization result for a durable API key.
+	/// Exchanges an `OpenRouter` PKCE authorization result for a durable API
+	/// key.
 	OpenRouterApiKey,
 	/// Exchanges a Devin CLI authorization result for a token.
 	DevinCliToken,
@@ -697,6 +700,8 @@ pub struct ProviderDef {
 	pub id:                 ProviderId,
 	/// Human-readable provider name.
 	pub name:               Str,
+	/// Provider-recommended default model selector.
+	pub default_model:      Option<ModelKey>,
 	/// Eligible authentication specifications in preference order.
 	pub auth:               Box<[AuthSpecId]>,
 	/// Provider account and management capabilities.

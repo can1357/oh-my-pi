@@ -94,12 +94,13 @@ fn render_range(
 			if let Some((code, consumed)) = code_span(tail) {
 				flush_plain_marked(&text[plain_start..offset], style, html, sink);
 				if let Some(rgb) = exact_hex_color(code.as_str(), false) {
-					push_swatch(sink, style, rgb);
+					push_swatch(sink, style, rgb, code.as_str());
+				} else {
+					let code_style = style
+						.fg(theme.code.foreground_color())
+						.bg(theme.code.background_color());
+					emit_text(sink, code_style, code.as_str());
 				}
-				let code_style = style
-					.fg(theme.code.foreground_color())
-					.bg(theme.code.background_color());
-				emit_text(sink, code_style, code.as_str());
 				html.has_content = true;
 				html.at_line_start = false;
 				offset += consumed;
@@ -182,12 +183,13 @@ fn render_range(
 				let changed = decode_entities(inner, &mut decoded);
 				let code = if changed { decoded.as_str() } else { inner };
 				if let Some(rgb) = exact_hex_color(code, false) {
-					push_swatch(sink, style, rgb);
+					push_swatch(sink, style, rgb, code);
+				} else {
+					let code_style = style
+						.fg(theme.code.foreground_color())
+						.bg(theme.code.background_color());
+					emit_text(sink, code_style, code);
 				}
-				let code_style = style
-					.fg(theme.code.foreground_color())
-					.bg(theme.code.background_color());
-				emit_text(sink, code_style, code);
 				html.has_content = true;
 				html.at_line_start = false;
 				offset += consumed;
@@ -277,22 +279,7 @@ fn render_range(
 /// The Markdown math span at `text`'s start — `$$…$$`, `\[…\]`, `\(…\)`,
 /// or `$…$` under the anti-currency rule — with its consumed length.
 pub fn math_span(text: &str) -> Option<(&str, usize)> {
-	if let Some(rest) = text.strip_prefix("$$") {
-		let end = rest.find("$$")?;
-		let expr = &rest[..end];
-		return (!expr.trim().is_empty()).then_some((expr, end + 4));
-	}
-	if let Some(rest) = text.strip_prefix("\\[") {
-		let end = rest.find("\\]")?;
-		return Some((&rest[..end], end + 4));
-	}
-	if let Some(rest) = text.strip_prefix("\\(") {
-		let end = rest.find("\\)")?;
-		return Some((&rest[..end], end + 4));
-	}
-	let rest = text.strip_prefix('$')?;
-	let end = latex::inline_math_span_end(rest)?;
-	Some((&rest[..end], end + 2))
+	latex::math_span(text)
 }
 
 fn push_math(expr: &str, style: Style, sink: &mut dyn RichSink) {
@@ -500,9 +487,7 @@ fn span_style(mut style: Style, attrs: &str, theme: &MdTheme) -> Style {
 				style = style.bg(color);
 			}
 		} else if value.is_none() {
-			if let Some(color) = theme.semantic_color(key) {
-				style = style.fg(color);
-			} else if key.eq_ignore_ascii_case("bold") {
+			if key.eq_ignore_ascii_case("bold") {
 				style = style.bold();
 			} else if key.eq_ignore_ascii_case("dim") {
 				style = style.dim();
@@ -514,6 +499,8 @@ fn span_style(mut style: Style, attrs: &str, theme: &MdTheme) -> Style {
 				style = style.strikethrough();
 			} else if key.eq_ignore_ascii_case("reverse") {
 				style = style.reverse();
+			} else if let Some(color) = theme.semantic_color(key) {
+				style = style.fg(color);
 			} else if let Some(color) = Color::parse(key) {
 				// bare CSS color names color the foreground, like `<span cyan>`
 				style = style.fg(color);
@@ -1034,8 +1021,7 @@ fn flush_plain(text: &str, style: Style, sink: &mut dyn RichSink) {
 			&& let Some((consumed, rgb)) = prose_hex_color(text, offset)
 		{
 			emit_text(sink, style, &text[literal_start..offset]);
-			push_swatch(sink, style, rgb);
-			emit_text(sink, style, &text[offset..offset + consumed]);
+			push_swatch(sink, style, rgb, &text[offset..offset + consumed]);
 			offset += consumed;
 			literal_start = offset;
 			continue;
@@ -1064,8 +1050,8 @@ fn decoded_entity(text: &str) -> Option<(DecodedEntity, usize)> {
 	} else if body.eq_ignore_ascii_case("apos") {
 		DecodedEntity::Text("'")
 	} else if body.eq_ignore_ascii_case("nbsp") {
-		// pi decodes to a plain space; the run survives because prose
-		// whitespace is never collapsed
+		// Decode to a plain space; the run survives because prose whitespace
+		// is never collapsed.
 		DecodedEntity::Text(" ")
 	} else if let Some(hex) = body.strip_prefix("#x").or_else(|| body.strip_prefix("#X")) {
 		if hex.is_empty() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -1207,9 +1193,19 @@ fn is_uuid_prefix(text: &str) -> bool {
 	true
 }
 
-fn push_swatch(sink: &mut dyn RichSink, style: Style, color: Color) {
+fn push_swatch(sink: &mut dyn RichSink, style: Style, color: Color, token: &str) {
+	let contrast = match color {
+		Color::Rgb(red, green, blue)
+			if u32::from(red) * 299 + u32::from(green) * 587 + u32::from(blue) * 114 >= 128_000 =>
+		{
+			Color::Rgb(0, 0, 0)
+		},
+		Color::Rgb(..) => Color::Rgb(255, 255, 255),
+		_ => style.foreground_color(),
+	};
 	sink.run(style.fg(color), "■");
 	sink.run(style, " ");
+	sink.run(style.fg(contrast).bg(color), token);
 }
 
 fn byte_run(bytes: &[u8], start: usize, byte: u8) -> usize {
@@ -1435,6 +1431,9 @@ mod tests {
 		assert_eq!(plain("$5 and $10"), "$5 and $10");
 		assert_eq!(plain("$x^2$"), "x²");
 		assert_eq!(plain(r"\(x^2\)"), "x²");
+		assert_eq!(plain(r"\$x$"), "$x$");
+		assert_eq!(math_span(r"\(x \\) y\) end"), Some((r"x \\) y", 11)));
+		assert_eq!(math_span(r"$$a \$$ b$$"), Some((r"a \$$ b", 11)));
 	}
 
 	#[test]
@@ -1442,6 +1441,33 @@ mod tests {
 		let prose = render("#C5FFD6 #fff");
 		assert_eq!(prose.row_text(0), "■ #C5FFD6 ■ #fff");
 		assert_eq!(first_style(&prose), theme().base.fg(Color::Rgb(0xc5, 0xff, 0xd6)));
+		assert!(prose.row_runs(0).any(|(style, text)| {
+			text == "#C5FFD6"
+				&& style
+					== theme()
+						.base
+						.fg(Color::Rgb(0, 0, 0))
+						.bg(Color::Rgb(0xc5, 0xff, 0xd6))
+		}));
+		let dark = render("#000080");
+		assert!(dark.row_runs(0).any(|(style, text)| {
+			text == "#000080"
+				&& style
+					== theme()
+						.base
+						.fg(Color::Rgb(255, 255, 255))
+						.bg(Color::Rgb(0, 0, 0x80))
+		}));
+		let line_background = Color::Rgb(9, 8, 7);
+		let mut painted_theme = theme();
+		painted_theme.base = painted_theme.base.bg(line_background);
+		let mut painted = RichText::default();
+		parse_inline("before #C5FFD6 after", &painted_theme, painted_theme.base, &mut painted);
+		let after = painted
+			.row_runs(0)
+			.find(|(_, text)| text.ends_with(" after"))
+			.expect("trailing prose");
+		assert_eq!(after.0.background_color(), line_background);
 		assert_eq!(plain("#123 #6C5E"), "#123 #6C5E");
 		assert_eq!(plain("`#123`"), "■ #123");
 		assert_eq!(

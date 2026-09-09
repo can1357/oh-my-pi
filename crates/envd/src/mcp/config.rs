@@ -30,27 +30,92 @@ pub const SUPPORTED_PROTOCOL_REVISIONS: [&str; 3] = ["2025-06-18", "2025-03-26",
 pub enum ConfigSourceKind {
 	/// Project-owned `.omp/mcp.json`.
 	Project,
-	/// User-owned `~/.omp/mcp.json`.
+	/// User-owned `~/.o2/mcp.json`.
 	User,
 	/// Native OMP extension manifest mount.
 	Manifest,
 	/// Project-root `.mcp.json` fallback.
 	Root,
+	/// Claude Code project configuration.
+	ClaudeProject,
+	/// Claude Code user configuration.
+	ClaudeUser,
+	/// Portable Agent Plugin project package.
+	AgentPluginProject,
+	/// Portable Agent Plugin user package.
+	AgentPluginUser,
+	/// OpenAI Codex project configuration.
+	CodexProject,
+	/// OpenAI Codex user configuration.
+	CodexUser,
+	/// Gemini CLI project configuration.
+	GeminiProject,
+	/// Gemini CLI user configuration.
+	GeminiUser,
+	/// OpenCode project configuration.
+	OpenCodeProject,
+	/// OpenCode user configuration.
+	OpenCodeUser,
+	/// Cursor project configuration.
+	CursorProject,
+	/// Cursor user configuration.
+	CursorUser,
+	/// Windsurf project configuration.
+	WindsurfProject,
+	/// Windsurf user configuration.
+	WindsurfUser,
+	/// VS Code project configuration.
+	VsCodeProject,
+	/// Lowest-priority standalone project fallback.
+	StandaloneProject,
 }
 
 impl ConfigSourceKind {
 	const fn precedence(self) -> u8 {
 		match self {
-			Self::Project => 4,
-			Self::User => 3,
-			Self::Manifest => 2,
-			Self::Root => 1,
+			Self::Project => 200,
+			Self::User => 199,
+			Self::Manifest => 180,
+			Self::ClaudeProject => 161,
+			Self::ClaudeUser => 160,
+			Self::AgentPluginProject => 151,
+			Self::AgentPluginUser => 150,
+			Self::CodexProject => 141,
+			Self::CodexUser => 140,
+			Self::GeminiProject => 121,
+			Self::GeminiUser => 120,
+			Self::OpenCodeProject => 111,
+			Self::OpenCodeUser => 110,
+			Self::CursorProject => 101,
+			Self::CursorUser => 100,
+			Self::WindsurfProject => 99,
+			Self::WindsurfUser => 98,
+			Self::VsCodeProject => 40,
+			Self::Root => 10,
+			Self::StandaloneProject => 9,
 		}
 	}
 
 	/// Whether OMP may mutate this source directly.
 	pub const fn writable(self) -> bool {
 		matches!(self, Self::Project | Self::User | Self::Root)
+	}
+
+	const fn project_scoped(self) -> bool {
+		matches!(
+			self,
+			Self::Project
+				| Self::Root
+				| Self::ClaudeProject
+				| Self::AgentPluginProject
+				| Self::CodexProject
+				| Self::GeminiProject
+				| Self::OpenCodeProject
+				| Self::CursorProject
+				| Self::WindsurfProject
+				| Self::VsCodeProject
+				| Self::StandaloneProject
+		)
 	}
 }
 
@@ -228,6 +293,10 @@ pub struct McpServerConfig {
 	/// Environment expansion policy.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub env_policy:        Option<EnvironmentPolicy>,
+	/// Environment keys whose values are final package data even when the rest
+	/// of the environment uses dynamic resolution.
+	#[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+	pub env_literal_keys:  BTreeSet<Str>,
 	/// Stdio working directory.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub cwd:               Option<PathBuf>,
@@ -282,12 +351,41 @@ impl McpServerConfig {
 				self.command == other.command
 					&& self.args == other.args
 					&& self.env == other.env
+					&& self.same_env_literal_semantics(other)
 					&& self.cwd == other.cwd
 			},
 			TransportKind::Http | TransportKind::Sse => {
 				self.url == other.url && self.headers == other.headers
 			},
 		}
+	}
+
+	fn same_env_literal_semantics(&self, other: &Self) -> bool {
+		let self_all = self.env_policy == Some(EnvironmentPolicy::Literal);
+		let other_all = other.env_policy == Some(EnvironmentPolicy::Literal);
+		match (self_all, other_all) {
+			(true, true) => true,
+			(false, false) => self.env_literal_keys == other.env_literal_keys,
+			(true, false) => {
+				other.env_literal_keys.len() == self.env.len()
+					&& self
+						.env
+						.keys()
+						.all(|key| other.env_literal_keys.contains(key))
+			},
+			(false, true) => {
+				self.env_literal_keys.len() == other.env.len()
+					&& other
+						.env
+						.keys()
+						.all(|key| self.env_literal_keys.contains(key))
+			},
+		}
+	}
+
+	/// Whether one configured environment value bypasses dynamic resolution.
+	pub(crate) fn env_value_is_literal(&self, key: &str) -> bool {
+		self.env_policy == Some(EnvironmentPolicy::Literal) || self.env_literal_keys.contains(key)
 	}
 }
 
@@ -341,10 +439,7 @@ pub fn resolve_sources(sources: &[ConfigSource], enable_project_config: bool) ->
 	let forced = user.map_or_else(BTreeSet::new, |source| source.file.enabled_servers.clone());
 	let mut ordered: Vec<&ConfigSource> = sources
 		.iter()
-		.filter(|source| {
-			enable_project_config
-				|| !matches!(source.kind, ConfigSourceKind::Project | ConfigSourceKind::Root)
-		})
+		.filter(|source| enable_project_config || !source.kind.project_scoped())
 		.collect();
 	ordered.sort_by(|left, right| right.kind.precedence().cmp(&left.kind.precedence()));
 
@@ -594,6 +689,7 @@ mod tests {
 			args:              Vec::new(),
 			env:               BTreeMap::new(),
 			env_policy:        None,
+			env_literal_keys:  BTreeSet::new(),
 			cwd:               None,
 			url:               None,
 			headers:           BTreeMap::new(),
@@ -659,6 +755,39 @@ mod tests {
 		let project_off = resolve_sources(&sources, false);
 		assert!(project_off.servers.contains_key("user-alias"));
 		assert!(!project_off.servers.contains_key("root-alias"));
+	}
+
+	#[test]
+	fn literal_environment_semantics_prevent_false_connection_deduplication() {
+		let mut project_config = stdio("server");
+		project_config
+			.env
+			.insert(Str::from("TOKEN"), Str::from("TOKEN"));
+		project_config.env_literal_keys.insert(Str::from("TOKEN"));
+		let mut project = McpConfigFile::default();
+		project
+			.mcp_servers
+			.insert(Str::from("literal"), project_config);
+
+		let mut user_config = stdio("server");
+		user_config
+			.env
+			.insert(Str::from("TOKEN"), Str::from("TOKEN"));
+		let mut user = McpConfigFile::default();
+		user.mcp_servers.insert(Str::from("dynamic"), user_config);
+
+		let resolved = resolve_sources(
+			&[
+				ConfigSource {
+					path: PathBuf::from("project"),
+					kind: ConfigSourceKind::Project,
+					file: project,
+				},
+				ConfigSource { path: PathBuf::from("user"), kind: ConfigSourceKind::User, file: user },
+			],
+			true,
+		);
+		assert_eq!(resolved.servers.len(), 2);
 	}
 
 	#[test]

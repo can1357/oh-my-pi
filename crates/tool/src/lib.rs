@@ -5,6 +5,7 @@
 //! projection and revision lifting remain deterministic shared code.
 
 mod device_path;
+mod diag;
 mod incoming;
 mod registry;
 pub mod render;
@@ -24,23 +25,24 @@ use std::{
 
 use bytes::Bytes;
 pub use device_path::{DevicePath, DevicePathError};
+pub use diag::{Diag, DiagEnvelope, DiagKind, Omitted, Severity, Unit};
 use futures::Stream;
 pub use incoming::{
 	CommitError, FinalizedArgs, IncomingCursor, IncomingParams, Interrupt, InterruptWaitError,
 	InterruptibleParams, InvocationEvent, InvocationFeed, InvocationSendError, ParamError,
 };
-use omp_core::{Hash32, InvocationPhase, SparseMap, Str};
-pub use omp_proto::inference::v1::Fallback;
-use omp_proto::{inference::v1::InvokeInput, policy::v1};
-pub use omp_slopjson::{PullMode, Pulled, PulledKind, PulledValueKind};
+pub use omp_core::slopjson::{PullMode, Pulled, PulledKind, PulledValueKind};
+use omp_core::{Hash32, InvocationPhase, SparseMap, Str, sf};
+pub use omp_proto::inference::v1::{Fallback, InvokeInput};
+use omp_proto::policy::v1;
 pub use registry::{
-	AvailabilityDelta, Claim, Claims, ConstraintDisposition, DeviceTarget, ErasedEv, ErasedOutcome,
-	ErasedStream, GoalToolState, HostToolExecutor, HostToolInvocation, HostToolResult, HostToolSpec,
-	HostToolUpdateSink, InclusionPolicy, LeafCatalogSnapshot, LeafOwner, LeafReplacementError,
-	LeafReplacementRegistry, LeafVersion, LoweredTool, LoweringCaps, MemoryToolState, MountedDevice,
-	Precedence, ProjectedCall, ProjectedVerdict, ProjectionKey, ProjectionRequest, PublishedLeaf,
-	Registry, RegistryError, RegistryLeaf, ShadowClaim, ToolPromptEntry, ToolPromptProjection,
-	ToolRoute, WorkerSiteKind,
+	AvailabilityDelta, Claim, Claims, ConstraintDisposition, DeviceMetadata, DeviceTarget, ErasedEv,
+	ErasedOutcome, ErasedStream, GoalToolState, HostToolExecutor, HostToolInvocation,
+	HostToolResult, HostToolSpec, HostToolUpdateSink, InclusionPolicy, LeafCatalogSnapshot,
+	LeafOwner, LeafReplacementError, LeafReplacementRegistry, LeafVersion, LoweredTool,
+	LoweringCaps, MemoryToolState, MountedDevice, Precedence, ProjectedCall, ProjectedVerdict,
+	ProjectionKey, ProjectionRequest, PublishedLeaf, Registry, RegistryError, RegistryLeaf,
+	ShadowClaim, ToolLocus, ToolPromptEntry, ToolPromptProjection, ToolRoute, WorkerSiteKind,
 };
 use schemars::generate::SchemaSettings;
 use serde::{Deserialize, Serialize, de, de::DeserializeOwned};
@@ -51,10 +53,77 @@ pub use spec_generated::{
 };
 use thiserror::Error;
 
+/// Failure while adding protocol-owned fields to a model-facing tool schema.
+#[derive(Debug, Error)]
+pub enum ProtocolSchemaError {
+	/// The schema bytes were not valid JSON.
+	#[error("tool parameter schema is invalid JSON")]
+	Json(#[from] serde_json::Error),
+	/// Tool parameters must be described by an object schema.
+	#[error("tool parameter schema must have `type: \"object\"`")]
+	Object,
+	/// The schema's `properties` keyword was present with the wrong shape.
+	#[error("tool parameter schema `properties` must be an object")]
+	Properties,
+	/// The schema's `required` keyword was present with the wrong shape.
+	#[error("tool parameter schema `required` must be an array of strings")]
+	Required,
+}
+
+/// Injects the caller-owned fields shared by every model-facing tool schema.
+///
+/// `i` is always the first required property. `notrunc` is always optional;
+/// omitting it retains the default central output bound. Setting it requests
+/// complete inline output only up to the runtime's fixed security ceiling;
+/// larger results remain complete in the returned artifact.
+pub fn inject_protocol_schema(schema: &[u8]) -> Result<Bytes, ProtocolSchemaError> {
+	let mut value = serde_json::from_slice(schema)?;
+	inject_protocol_fields(&mut value)?;
+	Ok(Bytes::from(serde_json::to_vec(&value)?))
+}
+
+fn inject_protocol_fields(value: &mut serde_json::Value) -> Result<(), ProtocolSchemaError> {
+	let object = value.as_object_mut().ok_or(ProtocolSchemaError::Object)?;
+	if object.get("type").and_then(serde_json::Value::as_str) != Some("object") {
+		return Err(ProtocolSchemaError::Object);
+	}
+	let properties = object
+		.entry("properties")
+		.or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+		.as_object_mut()
+		.ok_or(ProtocolSchemaError::Properties)?;
+	properties.insert(
+		"i".to_owned(),
+		serde_json::json!({
+			"type": "string",
+			"description": "Short present-participle intent for this call."
+		}),
+	);
+	properties.insert(
+		"notrunc".to_owned(),
+		serde_json::json!({
+			"type": "boolean",
+			"description": "Prefer complete output inline up to the host security ceiling; overflow or transport backpressure remains available through its artifact."
+		}),
+	);
+	let required = object
+		.entry("required")
+		.or_insert_with(|| serde_json::Value::Array(Vec::new()))
+		.as_array_mut()
+		.ok_or(ProtocolSchemaError::Required)?;
+	if required.iter().any(|name| !name.is_string()) {
+		return Err(ProtocolSchemaError::Required);
+	}
+	required.retain(|name| !matches!(name.as_str(), Some("i" | "notrunc")));
+	required.insert(0, serde_json::Value::String("i".to_owned()));
+	Ok(())
+}
+
 /// Generates the compact, deterministic JSON Schema exposed to models for `T`.
 ///
 /// Subschemas are inlined and generator metadata is omitted. Schemas describe
-/// deserialization, matching how tool parameters are consumed.
+/// deserialization, matching how tool parameters are consumed, then receive
+/// the shared required `i` and optional `notrunc` protocol fields.
 pub fn schema<T: schemars::JsonSchema>() -> Bytes {
 	let generator = SchemaSettings::draft2020_12()
 		.with(|settings| {
@@ -66,10 +135,28 @@ pub fn schema<T: schemars::JsonSchema>() -> Bytes {
 	let mut root = generator.into_root_schema_for::<T>();
 	root.remove("$schema");
 	root.remove("title");
+	let mut value =
+		serde_json::to_value(root.as_value()).expect("schemars-generated JSON Schema must serialize");
+	inject_protocol_fields(&mut value)
+		.expect("schemars-generated tool parameter schemas must describe an object");
 	Bytes::from(
-		serde_json::to_vec(root.as_value())
+		serde_json::to_vec(&value)
 			.expect("schemars-generated JSON Schema must serialize to compact JSON"),
 	)
+}
+
+/// Deserializes a tool's parameters after removing the protocol-owned fields.
+///
+/// `i` and `notrunc` remain in the canonical invocation arguments for
+/// journaling and dispatch policy, but are not fields each executor must
+/// duplicate in its domain-specific parameter type.
+pub fn decode_params<T: DeserializeOwned>(json: &str) -> Result<T, serde_json::Error> {
+	let mut value = serde_json::from_str::<serde_json::Value>(json)?;
+	if let Some(object) = value.as_object_mut() {
+		object.remove("i");
+		object.remove("notrunc");
+	}
+	serde_json::from_value(value)
 }
 
 /// Namespaced thread-item property carrying a committed tool revision.
@@ -132,6 +219,30 @@ pub enum ToolsPolicy {
 	DeviceOnly,
 	/// Advertise only tool slots.
 	ToolOnly,
+}
+
+/// Batch scheduling constraint declared by one tool revision.
+#[derive(
+	Clone,
+	Copy,
+	Debug,
+	Default,
+	Deserialize,
+	Eq,
+	PartialEq,
+	Serialize,
+	strum::Display,
+	strum::EnumString,
+	strum::IntoStaticStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ExecutionMode {
+	/// Calls may execute concurrently with sibling calls.
+	#[default]
+	Parallel,
+	/// Any batch containing this tool executes in issued order.
+	Sequential,
 }
 
 /// One argument-dialect revision within a revision family.
@@ -359,6 +470,12 @@ pub struct Effects {
 
 const _: () = assert!(size_of::<Effects>() <= 96, "Effects must stay compact");
 
+/// Returns whether an effect envelope may mutate environment-owned state.
+#[must_use]
+pub fn effects_mutate_environment(effects: &Effects) -> bool {
+	effects.mutates_environment()
+}
+
 impl Effects {
 	/// Empty deny-all envelope for an explicitly effect-free tool.
 	pub const fn empty() -> Self {
@@ -375,6 +492,16 @@ impl Effects {
 				.is_none_or(InferenceEffects::is_empty)
 			&& self.desktop.as_ref().is_none_or(DesktopEffects::is_empty)
 			&& self.subagents == 0
+	}
+
+	/// Returns whether this envelope may mutate environment-owned state.
+	pub fn mutates_environment(&self) -> bool {
+		self
+			.documents
+			.as_ref()
+			.is_some_and(|documents| !documents.write_globs.is_empty())
+			|| self.exec.as_ref().is_some_and(|exec| !exec.is_empty())
+			|| self.subagents != 0
 	}
 
 	/// Returns whether this envelope is a conservative subset of `maximum`.
@@ -624,6 +751,12 @@ pub enum Constraint {
 		on_unsupported: Fallback,
 	},
 	/// Freeform input constrained by a grammar.
+	///
+	/// The tool is offered as raw grammar-constrained text on grammar-capable
+	/// transports and as its ordinary JSON schema everywhere else; recovery
+	/// canonicalizes freeform text into the schema's `input` string property.
+	/// Registration therefore rejects grammar declarations whose schema lacks
+	/// one ([`RegistryError::GrammarInputProperty`]).
 	Grammar {
 		/// Grammar language.
 		syntax:         GrammarSyntax,
@@ -882,6 +1015,35 @@ pub struct OperationSpec {
 	pub authority:     Authority,
 }
 
+/// Caller-selected inline-output policy.
+///
+/// `Complete` bypasses the ordinary projection limit, but never the fixed host
+/// security ceiling. Results larger than that ceiling remain artifact-backed.
+#[derive(
+	Clone,
+	Copy,
+	Debug,
+	Default,
+	Deserialize,
+	Eq,
+	Hash,
+	PartialEq,
+	Serialize,
+	strum::Display,
+	strum::EnumString,
+	strum::IntoStaticStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum OutputRequest {
+	/// Apply the runtime's ordinary inline projection limit.
+	#[default]
+	Bounded,
+	/// Prefer complete inline output up to the host security ceiling; a stalled
+	/// consumer still falls back to the complete artifact.
+	Complete,
+}
+
 /// A content-addressed blob reference suitable for durable projection.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BlobRef {
@@ -891,6 +1053,29 @@ pub struct BlobRef {
 	pub media_type: Str,
 	/// Exact stored byte length.
 	pub byte_len:   u64,
+}
+
+/// Typed receipt for the one output projection applied at a trust boundary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OutputProjection {
+	/// Caller policy in force when the projection was made.
+	pub request:      OutputRequest,
+	/// Exact bytes observed before projection.
+	pub source_bytes: u64,
+	/// Bytes emitted inline after projection.
+	pub inline_bytes: u64,
+	/// Whether any source byte was omitted from the inline result.
+	pub omitted:      bool,
+	/// Complete retained bytes when an artifact store is available.
+	pub artifact:     Option<BlobRef>,
+}
+
+impl OutputProjection {
+	/// Returns whether all source bytes were emitted inline.
+	#[must_use]
+	pub const fn complete_inline(&self) -> bool {
+		!self.omitted && self.inline_bytes == self.source_bytes
+	}
 }
 
 /// One model-facing tool-result part.
@@ -916,6 +1101,73 @@ pub enum Part {
 	},
 }
 
+/// One source-backed range in a model-facing projection.
+///
+/// The central dispatcher resolves these candidates against the bytes it
+/// actually retained inline. Tools never guess visibility from a local byte
+/// limit or from a rendered truncation notice.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectionSpan {
+	/// Index of the projected [`Part`] containing this range.
+	pub part:       usize,
+	/// Inclusive UTF-8 byte offset in the unbounded part.
+	pub start_byte: usize,
+	/// Exclusive UTF-8 byte offset in the unbounded part.
+	pub end_byte:   usize,
+	/// Stable document-authority identity.
+	pub source_key: Str,
+	/// One-based source line represented by the complete range.
+	pub line:       usize,
+}
+
+/// Complete model projection before central output bounding.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PromptProjection {
+	/// Unbounded deterministic model-facing parts.
+	pub parts:      Vec<Part>,
+	/// Source ranges whose visibility requires authority acknowledgement.
+	pub visibility: Vec<ProjectionSpan>,
+}
+
+impl PromptProjection {
+	/// Wraps ordinary tool parts which carry no document visibility.
+	#[must_use]
+	pub const fn new(parts: Vec<Part>) -> Self {
+		Self { parts, visibility: Vec::new() }
+	}
+}
+
+/// One source line proven visible by the central dispatcher.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct VisibleSourceLine {
+	/// Stable document-authority identity.
+	pub source_key: Str,
+	/// One-based source line fully retained inline.
+	pub line:       usize,
+}
+
+/// Typed authorization receipt returned after central projection.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VisibilityReceipt {
+	/// Exact source lines fully visible to the model, sorted and deduplicated.
+	pub lines: Vec<VisibleSourceLine>,
+}
+
+/// Typed failure while returning a visibility receipt to its authority.
+#[derive(Debug, Error)]
+#[error("tool projection visibility authorization failed")]
+pub struct ProjectionAuthorizationError {
+	#[source]
+	source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl ProjectionAuthorizationError {
+	/// Preserves the authority's typed failure across the erased registry seam.
+	pub fn new(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+		Self { source: Box::new(source) }
+	}
+}
+
 /// One model-facing example attached to an exact tool revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolPromptExample {
@@ -938,6 +1190,14 @@ pub trait Tool: Send + Sync + 'static {
 
 	/// Returns this implementation's immutable specification.
 	fn spec(&self) -> &ToolSpec;
+
+	/// Returns the batch scheduling constraint for this tool.
+	///
+	/// Interactive tools use [`ExecutionMode::Sequential`] so concurrent
+	/// calls cannot compete for one host-owned presentation surface.
+	fn execution_mode(&self) -> ExecutionMode {
+		ExecutionMode::Parallel
+	}
 
 	/// Returns model-facing examples for this exact revision.
 	///
@@ -963,6 +1223,32 @@ pub trait Tool: Send + Sync + 'static {
 	/// Deterministically projects either durable tool branch for one model.
 	fn prompt(&self, view: Result<&Self::Payload, &Self::Fault>, caps: &PromptCaps) -> Vec<Part>;
 
+	/// Projects model parts together with any source ranges requiring a
+	/// post-bound visibility receipt.
+	///
+	/// Ordinary tools inherit a range-free projection. Source-backed tools
+	/// override this method so rendering and range attribution happen once.
+	fn projection(
+		&self,
+		view: Result<&Self::Payload, &Self::Fault>,
+		caps: &PromptCaps,
+	) -> PromptProjection {
+		PromptProjection::new(self.prompt(view, caps))
+	}
+
+	/// Returns the dispatcher's final visibility receipt to the tool's
+	/// document authority.
+	///
+	/// This runs only for the live call after central bounding, never while
+	/// replaying or re-projecting historical calls.
+	fn authorize_visibility(
+		&self,
+		_view: Result<&Self::Payload, &Self::Fault>,
+		_receipt: &VisibilityReceipt,
+	) -> Result<(), ProjectionAuthorizationError> {
+		Ok(())
+	}
+
 	/// Projects one typed ephemeral update into an optional live invocation
 	/// frame.
 	///
@@ -983,6 +1269,9 @@ pub trait Tool: Send + Sync + 'static {
 pub enum Ev<U, P, F> {
 	/// Ephemeral progress, never transcript history.
 	Update(U),
+	/// Durable harness notice materialized as a `<diag>` child of the call
+	/// (ADR 0008); never interpolated into the result body.
+	Diag(Diag),
 	/// Terminal structured failure of a parameter the tool pulled.
 	Args(ArgIssue),
 	/// Terminal structured cancellation or effect-uncertainty report.
@@ -1209,7 +1498,7 @@ pub struct ArgSpec {
 	pub additional_properties: bool,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct RevArgSpecs {
 	path_ids: BTreeMap<SmallVec<ArgPath, 4>, u32>,
 	specs:    SparseMap<u32, ArgSpec>,
@@ -1220,7 +1509,7 @@ struct RevArgSpecs {
 /// Canonical paths and final-key aliases intern to the same dense identifier.
 /// Once sealed, the table serves borrowed lock-free index lookups and rejects
 /// every later mutation.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ArgSpecRegistry {
 	revisions: BTreeMap<Rev, RevArgSpecs>,
 	sealed:    bool,
@@ -1443,6 +1732,18 @@ pub enum Abort {
 }
 
 impl Abort {
+	/// Renders the harness-owned model-facing text for an aborted call.
+	#[must_use]
+	pub fn render(&self) -> Str {
+		match self {
+			Self::Skipped { reason } => sf!("skipped: {reason}"),
+			Self::Interrupted { reason } => sf!("interrupted: {reason}"),
+			Self::EffectsUnknown { reason } => sf!("aborted with effects unknown: {reason}"),
+			Self::InputDropped => sf!("aborted: invocation input dropped before commit"),
+			Self::MissingOutcome => sf!("aborted: executor ended without a terminal outcome"),
+		}
+	}
+
 	/// Returns the coarse class implied by this owner-reported reason.
 	pub const fn kind(&self) -> AbortKind {
 		match self {
@@ -1664,7 +1965,7 @@ pub struct JobMetadata {
 
 impl JobMetadata {
 	/// Builds metadata for work that begins running as it is registered.
-	pub fn running(kind: JobKind, label: Str, started_at_ms: u64) -> Self {
+	pub const fn running(kind: JobKind, label: Str, started_at_ms: u64) -> Self {
 		Self {
 			kind,
 			status: JobStatus::Running,

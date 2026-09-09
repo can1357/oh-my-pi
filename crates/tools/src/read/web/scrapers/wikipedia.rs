@@ -1,6 +1,10 @@
 //! Wikipedia article renderer backed by the public REST API.
 
+#[cfg(test)]
 use omp_core::sf;
+#[cfg(test)]
+use omp_tool::Severity;
+use omp_tool::{Diag, DiagKind};
 use serde::Deserialize;
 use url::Url;
 
@@ -88,7 +92,9 @@ pub(super) async fn render<C: HttpClient + Sync>(
 	}
 
 	let mut result = RenderResult::markdown(&markdown, "wikipedia");
-	result.notes.insert(0, sf!("Fetched via Wikipedia API"));
+	result
+		.diags
+		.insert(0, Diag::info(DiagKind::Provenance, "Fetched via Wikipedia API"));
 	Ok(Some(result))
 }
 
@@ -507,7 +513,9 @@ mod tests {
 		);
 		assert_eq!(result.content_type.as_deref(), Some("text/markdown"));
 		assert_eq!(result.method.as_str(), "wikipedia");
-		assert_eq!(result.notes.as_slice(), [sf!("Fetched via Wikipedia API")]);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 		assert_eq!(client.requested_urls(), vec![
 			String::from("https://en.wikipedia.org/api/rest_v1/page/summary/C%2B%2B"),
 			String::from("https://en.wikipedia.org/api/rest_v1/page/mobile-html/C%2B%2B"),
@@ -569,7 +577,9 @@ mod tests {
 			result.content.as_str(),
 			"## Available section\n\nThe mobile article body remains available without its summary."
 		);
-		assert_eq!(result.notes.as_slice(), [sf!("Fetched via Wikipedia API")]);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 	}
 
 	#[tokio::test]

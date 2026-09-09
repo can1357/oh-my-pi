@@ -33,6 +33,10 @@ class UnknownEvent(OmpError, ValueError):
     """A hook declaration or catalog lookup named no frozen event."""
 
 
+class UnsupportedEvent(OmpError, ValueError):
+    """A known hook name has no typed production route in this build."""
+
+
 class HookContractError(OmpError, ValueError):
     """A hook declaration or decision violates the frozen hook contract."""
 
@@ -202,11 +206,34 @@ class Modify:
     target: CallTarget | None = None
     args: Mapping[str, Any] | None = None
     patch: Mapping[str, Any] | None = None
+    env_overrides: Mapping[str, str | None] | None = None
     reason: str | None = None
 
     def __post_init__(self) -> None:
-        if self.args is not None and self.patch is not None:
-            raise HookContractError("Modify args and patch are mutually exclusive")
+        if self.args is not None and (
+            self.patch is not None or self.env_overrides is not None
+        ):
+            raise HookContractError(
+                "Modify args and patch fields are mutually exclusive"
+            )
+        if (
+            self.env_overrides is not None
+            and self.patch is not None
+            and "env_overrides" in self.patch
+        ):
+            raise HookContractError(
+                "Modify env_overrides cannot also appear in patch"
+            )
+        if self.env_overrides is not None and (
+            any(not isinstance(key, str) for key in self.env_overrides)
+            or any(
+                value is not None and not isinstance(value, str)
+                for value in self.env_overrides.values()
+            )
+        ):
+            raise HookContractError(
+                "Modify env_overrides must map strings to strings or None"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +302,7 @@ class When:
     server: frozenset[str] | None = None
     rev: frozenset[str] | None = None
     path_globs: tuple[str, ...] = ()
+    method_globs: tuple[str, ...] = ()
     origin: frozenset["CallOrigin"] | None = None
     reason: frozenset[str] | None = None
     provider: frozenset[str] | None = None
@@ -290,6 +318,8 @@ class When:
                 object.__setattr__(self, field, frozenset(value))
         if not isinstance(self.path_globs, tuple):
             object.__setattr__(self, "path_globs", tuple(self.path_globs))
+        if not isinstance(self.method_globs, tuple):
+            object.__setattr__(self, "method_globs", tuple(self.method_globs))
 
 
 _EVENT_NAMES = (
@@ -307,9 +337,21 @@ _EVENT_NAMES = (
     "capability_budget", "model_changed", "credential_disabled", "compaction",
     "compaction_done", "context_reset", "thread_projection", "subagent_spawn", "worker_state",
     "job_registered", "job_settled", "extension_activate", "extension_load",
-    "extension_unload", "host_reconnect", "ttsr_triggered", "todo_reminder",
+    "extension_unload", "host_reconnect", "ttsr_triggered",
     "retry_start", "retry_end", "fallback_applied", "fallback_succeeded",
+    "mcp_notification", "provider_response", "session_renamed",
 )
+
+_REJECTED_EVENTS = types.MappingProxyType(
+    {
+        "search_parse": "no HookEventId or production search-parser emitter exists",
+        "sandbox_profile": "no HookEventId or production sandbox-profile emitter exists",
+        "sandbox_violation": "no HookEventId or production sandbox-violation emitter exists",
+        "context_reset": "no HookEventId or production context-reset emitter exists",
+    }
+)
+_ROUTABLE_EVENT_NAMES = frozenset(_EVENT_NAMES) - _REJECTED_EVENTS.keys()
+_TRANSFORM_UNSUPPORTED = frozenset({"session_branch", "session_rewind"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,8 +379,9 @@ _OBSERVATION_EVENTS = frozenset(
         "capability_budget", "model_changed", "credential_disabled",
         "compaction_done", "context_reset", "worker_state", "job_registered", "job_settled",
         "extension_activate", "extension_load", "extension_unload", "host_reconnect",
-        "ttsr_triggered", "todo_reminder", "retry_start", "retry_end",
-        "fallback_applied", "fallback_succeeded",
+        "ttsr_triggered", "retry_start", "retry_end",
+        "fallback_applied", "fallback_succeeded", "mcp_notification",
+        "provider_response", "session_renamed",
     }
 )
 _DOMAIN_EVENTS = frozenset(
@@ -346,7 +389,9 @@ _DOMAIN_EVENTS = frozenset(
         "agent_settled",
         "compaction",
         "models_discover",
+        "provider_login",
         "provider_refresh",
+        "provider_sign",
         "provider_error",
         "provider_usage",
         "search_parse",
@@ -375,6 +420,8 @@ def hook(
 
     if event not in _EVENT_NAMES:
         raise UnknownEvent(f"unknown hook event {event!r}")
+    if reason := _REJECTED_EVENTS.get(event):
+        raise UnsupportedEvent(f"unsupported hook event {event!r}: {reason}")
     if registry.sealed:
         raise LateRegistration("hook declarations are sealed")
     if isinstance(phase, str):
@@ -384,6 +431,10 @@ def hook(
             raise HookContractError(f"unknown hook phase {phase!r}") from error
     if phase is not None and not isinstance(phase, HookPhase):
         raise TypeError("phase must be HookPhase or None")
+    if event in _TRANSFORM_UNSUPPORTED and phase is HookPhase.TRANSFORM:
+        raise HookContractError(
+            f"{event!r} does not support TRANSFORM until Core applies its mutable fields"
+        )
     if event in _DOMAIN_EVENTS:
         if phase is not None:
             raise HookContractError(f"domain event {event!r} does not accept phase")
@@ -442,6 +493,23 @@ def hook(
         raise HookContractError(f"stream event {event!r} requires coalesce")
     if event not in _STREAM_EVENTS and coalesce is not None:
         raise HookContractError(f"non-stream event {event!r} does not accept coalesce")
+    if event == "mcp_notification":
+        if when is None or not (
+            (when.server is not None and len(when.server) > 0)
+            or when.method_globs
+        ):
+            raise HookContractError(
+                "mcp_notification requires a non-empty When.server or When.method_globs"
+            )
+        if (
+            when.server is not None
+            and any(not isinstance(value, str) or not value for value in when.server)
+        ) or any(
+            not isinstance(value, str) or not value for value in when.method_globs
+        ):
+            raise HookContractError(
+                "mcp_notification filters must contain non-empty strings"
+            )
     if coalesce is not None:
         if not isinstance(coalesce, Duration):
             raise TypeError("coalesce must be omp.Duration or None")
@@ -452,7 +520,8 @@ def hook(
             raise HookContractError("provider and When.provider are mutually exclusive")
         when = When(provider=frozenset({provider})) if when is None else When(
             target=when.target, name=when.name, server=when.server, rev=when.rev,
-            path_globs=when.path_globs, origin=when.origin, reason=when.reason,
+            path_globs=when.path_globs, method_globs=when.method_globs,
+            origin=when.origin, reason=when.reason,
             provider=frozenset({provider}), once=when.once, after_gap=when.after_gap,
         )
     if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
@@ -463,6 +532,16 @@ def hook(
     def decorate(handler: _HookFn) -> _HookFn:
         if not callable(handler):
             raise TypeError("@omp.hook may decorate only a callable")
+        if event in _OBSERVATION_EVENTS:
+            annotation = inspect.signature(handler).return_annotation
+            if annotation not in (
+                inspect.Signature.empty,
+                None,
+                type(None),
+                "None",
+                "NoneType",
+            ):
+                raise HookContractError("observation hooks may only annotate a None return")
         stable_name = name or f"{handler.__module__}.{handler.__qualname__}"
         if not stable_name:
             raise ValueError("hook name must be non-empty")
@@ -679,6 +758,10 @@ def _decision_to_wire(decision: HookDecision) -> dict[str, object]:
                     unset.append(key)
                 else:
                     patch[key] = _wire_value(value)
+        if decision.env_overrides is not None:
+            if patch is None:
+                patch = {}
+            patch["env_overrides"] = _wire_value(decision.env_overrides)
         return {
             "kind": "modify",
             "target": (
@@ -772,10 +855,23 @@ def _decision_from_wire(value: object) -> HookDecision:
             if patch is None:
                 patch = {}
             patch.update((key, UNSET) for key in unset)
+        env_overrides = None
+        if patch is not None and "env_overrides" in patch:
+            env_overrides = patch.pop("env_overrides")
+            if not isinstance(env_overrides, Mapping):
+                raise HookContractError(
+                    "Modify env_overrides response must be a mapping"
+                )
+        decoded_patch = (
+            None
+            if env_overrides is not None and not patch
+            else patch
+        )
         return Modify(
             target=_target_from_wire(target) if target is not None else None,
             args=dict(args) if args is not None else None,
-            patch=patch,
+            patch=decoded_patch,
+            env_overrides=env_overrides,
             reason=reason,
         )
     if kind == "defer":
@@ -791,6 +887,9 @@ def _decision_from_wire(value: object) -> HookDecision:
 
 
 def _wire_value(value: object) -> object:
+    if isinstance(value, Secret):
+        with value.use() as revealed:
+            return bytes(revealed)
     if isinstance(value, StrEnum):
         return value.value
     if isinstance(value, float) and not math.isfinite(value):
@@ -881,6 +980,12 @@ def _value_from_wire(annotation: object, value: object) -> object:
         if not isinstance(value, bytes):
             raise HookContractError("hook secret field must use the sealed bytes envelope")
         return Secret(value)
+    if (
+        isinstance(annotation, type)
+        and annotation.__name__ == "LoginUi"
+        and annotation.__module__ == "omp.provider"
+    ):
+        return annotation()
     if isinstance(annotation, type) and is_dataclass(annotation):
         if not isinstance(value, Mapping):
             raise HookContractError(
@@ -1025,5 +1130,5 @@ __all__ = (
     "Deny", "DeviceCall", "HookContractError", "HookDecision", "HookPhase",
     "HostShuttingDown", "LatencyClass", "LateRegistration", "McpCall", "Modify", "OnFailure",
     "PhaseConflict", "PolicyScope", "ReentrancyError", "RequireApproval", "TargetKind",
-    "UNSET", "UnknownEvent", "Unreachable", "When", "dispatch_hook", "hook",
+    "UNSET", "UnknownEvent", "UnsupportedEvent", "Unreachable", "When", "dispatch_hook", "hook",
 )

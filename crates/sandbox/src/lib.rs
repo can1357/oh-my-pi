@@ -15,15 +15,20 @@ mod runner;
 mod runtime;
 mod spec;
 
+pub use backends::landlock::{HIDDEN_CHILD_ARG, abi as landlock_abi, run_child_entry};
 pub use capability::{Backend, Capability, CapabilitySet, portable_capabilities};
-pub use environment::{EnvironmentPolicy, EnvironmentSource};
+pub use environment::{
+	EnvironmentPolicy, EnvironmentSource, core_environment_names, validate_env_pattern,
+};
 pub use error::{
 	BackendStatus, CleanupFailure, CleanupFailures, ProbeFailure, ResourceKind, RunFailure,
 	SandboxError, SandboxOperation, SpecViolation,
 };
 pub use plan::{Caveat, FilesystemVirtualizationKind, Plan};
 pub use runner::{
-	OutputMode, PreparedSandbox, RunOptions, RunOutput, Runner, SandboxExit, SandboxInput,
-	backend_status, backend_statuses,
+	CommandWrapper, OutputMode, PreparedSandbox, RunOptions, RunOutput, Runner, SandboxExit,
+	SandboxInput, backend_status, backend_statuses,
 };
-pub use spec::{DegradationPolicy, NetworkMode, ResourceLimits, SandboxSpec, WriteMode};
+pub use spec::{
+	DegradationPolicy, NetworkMode, RUNTIME_READ_ROOTS, ResourceLimits, SandboxSpec, WriteMode,
+};

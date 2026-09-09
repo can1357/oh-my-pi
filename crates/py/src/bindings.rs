@@ -4,6 +4,7 @@ use std::{
 	cmp::Ordering,
 	collections::{BTreeMap, hash_map::DefaultHasher},
 	fmt::Display,
+	future::Future,
 	hash::{Hash, Hasher},
 	str::{self, FromStr},
 	sync::{Arc, LazyLock, OnceLock, atomic},
@@ -32,7 +33,6 @@ use omp_env::{
 use omp_scribe::{
 	Engine as ScribeEngine, Error as ScribeError, Props as ScribeProps, Value as ScribeValue, canon,
 };
-use omp_storage::state::StateScope;
 use omp_tool::{Authority, CostClass, Durability, OperationSpec};
 use parking_lot::{Mutex, RwLock};
 use pyo3::{
@@ -67,6 +67,43 @@ create_exception!(
 	"A request carries a retired host or session generation."
 );
 create_exception!(_omp, TemplateError, OmpError, "A scribe template failed to compile or render.");
+/// Immutable declarative inputs for one atomic interactive-session transition.
+#[pyclass(name = "SessionSetup", frozen, module = "_omp")]
+pub struct PySessionSetup {
+	title:          Option<Str>,
+	parent:         Option<Str>,
+	initial_prompt: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl PySessionSetup {
+	#[new]
+	#[pyo3(signature = (title = None, parent = None, initial_prompt = None))]
+	fn new(title: Option<&str>, parent: Option<&str>, initial_prompt: Option<Py<PyAny>>) -> Self {
+		Self { title: title.map(Str::from), parent: parent.map(Str::from), initial_prompt }
+	}
+
+	/// Optional user-assigned title.
+	#[getter]
+	fn title(&self) -> Option<&str> {
+		self.title.as_deref()
+	}
+
+	/// Optional accessible lineage parent.
+	#[getter]
+	fn parent(&self) -> Option<&str> {
+		self.parent.as_deref()
+	}
+
+	/// Optional visible user prompt which is persisted without submission.
+	#[getter]
+	fn initial_prompt(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+		self
+			.initial_prompt
+			.as_ref()
+			.map(|value| value.clone_ref(py))
+	}
+}
 
 #[derive(Debug, Default)]
 struct ResourceState {
@@ -111,7 +148,26 @@ static ASYNC_RUNTIME: LazyLock<runtime::Runtime> = LazyLock::new(|| {
 		.build()
 		.expect("omp Python DATA runtime must initialize")
 });
-static PY_TRANSACTION_ID: atomic::AtomicU64 = atomic::AtomicU64::new(1);
+
+/// Blocks on DATA I/O without entering a Tokio runtime from one of its workers.
+fn block_on_data<F>(future: F) -> F::Output
+where
+	F: Future + Send,
+	F::Output: Send,
+{
+	if runtime::Handle::try_current().is_err() {
+		return ASYNC_RUNTIME.block_on(future);
+	}
+	std::thread::scope(|scope| match scope.spawn(move || ASYNC_RUNTIME.block_on(future)).join() {
+		Ok(output) => output,
+		Err(payload) => std::panic::resume_unwind(payload),
+	})
+}
+
+/// Document transactions require exactly 16 id bytes; ulids are unique and fit.
+fn fresh_transaction_id() -> Vec<u8> {
+	omp_core::Ulid::generate().to_bytes().to_vec()
+}
 
 /// Replaces the live URL resolver snapshot used by `omp.urls.schemes()`.
 pub fn set_scheme_snapshot<I, M, D>(device_hash: [u8; 32], entries: I)
@@ -166,7 +222,7 @@ fn value_error(error: impl Display) -> PyErr {
 /// Immutable Python duration retaining its explicit source unit.
 #[pyclass(name = "Duration", frozen, module = "_omp", from_py_object)]
 #[derive(Clone, Debug)]
-pub(crate) struct PyDuration(pub(crate) Duration);
+pub struct PyDuration(pub(crate) Duration);
 
 #[pymethods]
 impl PyDuration {
@@ -417,6 +473,15 @@ fn compare(ordering: Ordering, op: CompareOp) -> bool {
 		CompareOp::Gt => ordering == Ordering::Greater,
 		CompareOp::Ge => ordering != Ordering::Less,
 	}
+}
+
+#[derive(Clone, Copy, Debug, strum::Display)]
+#[strum(serialize_all = "lowercase")]
+enum StateScope {
+	Session,
+	Project,
+	User,
+	Organization,
 }
 
 macro_rules! string_enum {
@@ -716,7 +781,7 @@ typed_location!(PyWorkspaceUri, "WorkspaceUri", WorkspaceUri);
 #[pyclass(name = "EnvPath", frozen, module = "_omp", from_py_object)]
 /// A path in the workspace Environment filesystem namespace.
 #[derive(Clone, Debug)]
-pub(crate) struct PyEnvPath(pub(crate) EnvPath);
+pub struct PyEnvPath(pub(crate) EnvPath);
 
 #[pymethods]
 impl PyEnvPath {
@@ -887,7 +952,7 @@ fn path_uri(path: &str) -> PyResult<String> {
 #[pyclass(name = "BlobRef", frozen, module = "_omp", from_py_object)]
 /// A content-addressed reference in one Environment blob store.
 #[derive(Clone, Debug)]
-pub(crate) struct PyBlobRef {
+pub struct PyBlobRef {
 	hash: [u8; 32],
 	size: u64,
 }
@@ -1003,27 +1068,85 @@ struct PyResourceReceipt {
 	dropped: Py<PyAny>,
 }
 
+fn parse_resource_quotas(
+	quotas: Vec<(String, u64, u64, Option<String>)>,
+) -> PyResult<Vec<(Str, u64, u64, Option<Duration>)>> {
+	quotas
+		.into_iter()
+		.map(|(name, limit, used, window)| {
+			let window = window
+				.map(|window| Duration::from_str(&window))
+				.transpose()
+				.map_err(value_error)?;
+			Ok((Str::from(name), limit, used, window))
+		})
+		.collect()
+}
+
 #[pyfunction]
-fn resources(py: Python<'_>) -> PyResult<PyResourceReceipt> {
-	let state = RUNTIME.resources.read();
-	let quotas = PyDict::new(py);
-	for (name, status) in &state.quotas {
+fn _set_resource_receipt(
+	quotas: Vec<(String, u64, u64, Option<String>)>,
+	dropped: Vec<(String, u64)>,
+) -> PyResult<()> {
+	set_resource_receipt(
+		parse_resource_quotas(quotas)?,
+		dropped
+			.into_iter()
+			.map(|(name, count)| (Str::from(name), count)),
+	);
+	Ok(())
+}
+
+fn bind_resource_receipt(
+	py: Python<'_>,
+	quotas: impl IntoIterator<Item = (Str, QuotaStatusValue)>,
+	dropped_rows: impl IntoIterator<Item = (Str, u64)>,
+) -> PyResult<PyResourceReceipt> {
+	let quotas_mapping = PyDict::new(py);
+	for (name, status) in quotas {
 		let value = Py::new(py, PyQuotaStatus {
 			limit:  status.limit,
 			used:   status.used,
 			window: status.window.map(PyDuration),
 		})?;
-		quotas.set_item(name.as_str(), value)?;
+		quotas_mapping.set_item(name.as_str(), value)?;
 	}
 	let dropped = PyDict::new(py);
-	for (name, count) in &state.dropped {
+	for (name, count) in dropped_rows {
 		dropped.set_item(name.as_str(), count)?;
 	}
 	let proxy = py.import("types")?.getattr("MappingProxyType")?;
 	Ok(PyResourceReceipt {
-		quotas:  proxy.call1((quotas,))?.unbind(),
+		quotas:  proxy.call1((quotas_mapping,))?.unbind(),
 		dropped: proxy.call1((dropped,))?.unbind(),
 	})
+}
+
+#[pyfunction]
+fn _resource_receipt_from_host(
+	py: Python<'_>,
+	quotas: Vec<(String, u64, u64, Option<String>)>,
+	dropped: Vec<(String, u64)>,
+) -> PyResult<PyResourceReceipt> {
+	let quotas = parse_resource_quotas(quotas)?
+		.into_iter()
+		.map(|(name, limit, used, window)| (name, QuotaStatusValue { limit, used, window }));
+	bind_resource_receipt(
+		py,
+		quotas,
+		dropped
+			.into_iter()
+			.map(|(name, count)| (Str::from(name), count)),
+	)
+}
+
+#[pyfunction]
+fn resources(py: Python<'_>) -> PyResult<PyResourceReceipt> {
+	let (quotas, dropped) = {
+		let state = RUNTIME.resources.read();
+		(state.quotas.clone(), state.dropped.clone())
+	};
+	bind_resource_receipt(py, quotas, dropped)
 }
 
 #[pyfunction]
@@ -1086,6 +1209,37 @@ fn environment_exception(py: Python<'_>, name: &str, message: &str) -> PyErr {
 	}
 }
 
+fn edit_rejection_exception(py: Python<'_>, rejected: &document_pb::TransactionRejected) -> PyErr {
+	let Some(conflict) = rejected.conflicts.first() else {
+		return environment_exception(py, "Stale", &rejected.message);
+	};
+	let result = (|| -> PyResult<PyErr> {
+		let value = py
+			.import("omp.env")?
+			.getattr("Conflict")?
+			.call1((&rejected.message,))?;
+		value.setattr("expected", revision_value(py, conflict.expected.as_ref())?)?;
+		value.setattr(
+			"current",
+			revision_value(
+				py,
+				conflict
+					.current
+					.as_ref()
+					.and_then(|head| head.revision.as_ref()),
+			)?,
+		)?;
+		let ranges: Vec<(u64, u64)> = conflict
+			.conflicting_ranges
+			.iter()
+			.map(|range| (range.start, range.end))
+			.collect();
+		value.setattr("ranges", ranges)?;
+		Ok(PyErr::from_value(value))
+	})();
+	result.unwrap_or_else(|error| error)
+}
+
 fn client_error(py: Python<'_>, error: ClientError) -> PyErr {
 	match error {
 		ClientError::EffectsNotAuthorized(protocol) => {
@@ -1109,7 +1263,15 @@ fn client_error(py: Python<'_>, error: ClientError) -> PyErr {
 		ClientError::TransportClosed | ClientError::Transport(_) => {
 			environment_exception(py, "Disconnected", &error.to_string())
 		},
-		ClientError::InvalidEnvPath(_) => environment_exception(py, "Invalid", &error.to_string()),
+		ClientError::InvalidEnvPath(_)
+		| ClientError::InvalidBlobDigest { .. }
+		| ClientError::BlobTooLarge { .. }
+		| ClientError::BlobResumeOffsetMismatch { .. }
+		| ClientError::InvalidBlobMetadata
+		| ClientError::BlobDigestMismatch
+		| ClientError::BlobSizeMismatch { .. } => {
+			environment_exception(py, "Invalid", &error.to_string())
+		},
 		ClientError::InvalidInvocationPrincipal => environment_exception(
 			py,
 			"Invalid",
@@ -1117,9 +1279,11 @@ fn client_error(py: Python<'_>, error: ClientError) -> PyErr {
 		),
 		ClientError::ScopedOperationDenied => environment_exception(py, "Denied", &error.to_string()),
 		ClientError::StreamLost(_) => environment_exception(py, "StreamLost", &error.to_string()),
-		ClientError::RequestIdExhausted | ClientError::UnexpectedResponse { .. } => {
-			environment_exception(py, "Io", &error.to_string())
-		},
+		ClientError::IncompleteBlob => environment_exception(py, "Disconnected", &error.to_string()),
+		ClientError::TransportBusy
+		| ClientError::RequestIdExhausted
+		| ClientError::UnexpectedResponse { .. }
+		| ClientError::BlobWrite { .. } => environment_exception(py, "Io", &error.to_string()),
 	}
 }
 
@@ -1244,8 +1408,7 @@ fn path_metadata(py: Python<'_>, value: &document_pb::PathMetadata) -> PyResult<
 	let (read_only, executable) = value
 		.permissions
 		.as_ref()
-		.map(|permissions| (permissions.read_only, permissions.executable))
-		.unwrap_or((None, None));
+		.map_or((None, None), |permissions| (permissions.read_only, permissions.executable));
 	Ok(Py::new(py, env_types::PathMeta {
 		path: path_value(py, &value.uri)?,
 		kind,
@@ -1360,11 +1523,13 @@ impl NativeStream {
 				Self::Search(stream) => stream.next_event().await?.map(NativeStreamItem::Search),
 			};
 			match item {
-				Some(NativeStreamItem::Exec(ExecEvent::Started(_)))
-				| Some(NativeStreamItem::Process(ProcessAttachmentEvent::Attached(_)))
-				| Some(NativeStreamItem::Blob(BlobDownloadEvent::Complete(_)))
-				| Some(NativeStreamItem::Walk(WalkEvent::Complete(_)))
-				| Some(NativeStreamItem::Search(SearchEvent::Complete(_))) => continue,
+				Some(
+					NativeStreamItem::Exec(ExecEvent::Started(_))
+					| NativeStreamItem::Process(ProcessAttachmentEvent::Attached(_))
+					| NativeStreamItem::Blob(BlobDownloadEvent::Complete(_))
+					| NativeStreamItem::Walk(WalkEvent::Complete(_))
+					| NativeStreamItem::Search(SearchEvent::Complete(_)),
+				) => continue,
 				Some(NativeStreamItem::Lsp(LspStreamEvent::Bindings(_))) => continue,
 				item => return Ok(item),
 			}
@@ -1380,7 +1545,7 @@ struct PyEnvironmentStream {
 
 #[pymethods]
 impl PyEnvironmentStream {
-	fn __iter__(slf: Py<Self>) -> Py<Self> {
+	const fn __iter__(slf: Py<Self>) -> Py<Self> {
 		slf
 	}
 
@@ -1975,12 +2140,7 @@ impl PyEnvironmentBackend {
 			.filter(|value| !value.is_none())
 			.map(|value| value.extract::<Vec<u8>>())
 			.transpose()?
-			.unwrap_or_else(|| {
-				PY_TRANSACTION_ID
-					.fetch_add(1, atomic::Ordering::Relaxed)
-					.to_be_bytes()
-					.to_vec()
-			});
+			.unwrap_or_else(fresh_transaction_id);
 		let mut mutations = Vec::new();
 		let operations = arguments
 			.get_item("operations")?
@@ -2126,8 +2286,10 @@ impl PyEnvironmentBackend {
 	}
 }
 
-#[pymethods]
-impl PyEnvironmentBackend {
+macro_rules! backend_methods {
+	($($table:tt)*) => {
+		emit_backend_methods! {
+			custom {
 	fn process_endpoint(&self, name: &str, generation: u64) -> Option<String> {
 		self
 			.endpoints
@@ -2161,17 +2323,16 @@ impl PyEnvironmentBackend {
 				})
 			})
 			.transpose()?;
-		let response = ASYNC_RUNTIME
-			.block_on(self.client.open_session(&cwd, env_pb::OpenSessionRequest {
-				env_delta: Some(env_pb::EnvironmentDelta {
-					set:   env,
-					unset: Vec::new(),
-					props: Default::default(),
-				}),
-				pty,
-				..Default::default()
-			}))
-			.map_err(|error| client_error(py, error))?;
+		let response = block_on_data(self.client.open_session(&cwd, env_pb::OpenSessionRequest {
+			env_delta: Some(env_pb::EnvironmentDelta {
+				set:   env,
+				unset: Vec::new(),
+				props: Default::default(),
+			}),
+			pty,
+			..Default::default()
+		}))
+		.map_err(|error| client_error(py, error))?;
 		let result = PyDict::new(py);
 		result.set_item("id", PyBytes::new(py, &response.session))?;
 		result.set_item("cwd", path_value(py, &response.cwd_uri)?)?;
@@ -2240,11 +2401,7 @@ impl PyEnvironmentBackend {
 						.ok_or_else(|| PyTypeError::new_err("path is required"))?
 						.extract::<PyEnvPath>()?;
 					let request = document_pb::CommitTransactionRequest {
-						transaction_id: PY_TRANSACTION_ID
-							.fetch_add(1, atomic::Ordering::Relaxed)
-							.to_be_bytes()
-							.to_vec()
-							.into(),
+						transaction_id: fresh_transaction_id().into(),
 						operations:     vec![document_pb::DocumentMutation {
 							document:  Some(document_pb::DocumentTarget {
 								target: Some(document_target::Target::Uri(path_uri(path.0.as_str())?)),
@@ -2533,11 +2690,7 @@ impl PyEnvironmentBackend {
 					})
 				};
 				let request = document_pb::CommitTransactionRequest {
-					transaction_id: PY_TRANSACTION_ID
-						.fetch_add(1, atomic::Ordering::Relaxed)
-						.to_be_bytes()
-						.to_vec()
-						.into(),
+					transaction_id: fresh_transaction_id().into(),
 					operations:     vec![document_pb::DocumentMutation {
 						document:  Some(document_pb::DocumentTarget {
 							target: Some(document_target::Target::LeaseId(lease_id.into())),
@@ -2575,9 +2728,7 @@ impl PyEnvironmentBackend {
 						}
 						Ok(result.unbind().into_any())
 					},
-					TransactionOutcome::Rejected(value) => {
-						Err(environment_exception(py, "Stale", &value.message))
-					},
+					TransactionOutcome::Rejected(value) => Err(edit_rejection_exception(py, &value)),
 					TransactionOutcome::Partial(value) => {
 						Err(environment_exception(py, "Partial", &value.message))
 					},
@@ -3186,15 +3337,14 @@ impl PyEnvironmentBackend {
 					.get_item("script")?
 					.ok_or_else(|| PyTypeError::new_err("script is required"))?
 					.extract::<String>()?;
-				let mut run = ASYNC_RUNTIME
-					.block_on(self.client.exec(env_pb::ExecRequest {
-						session: session.into(),
-						source:  Some(env_pb::Script { text: script, props: Default::default() }),
-						props:   Default::default(),
-					}))
-					.map_err(|error| client_error(py, error))?;
-				let started = ASYNC_RUNTIME
-					.block_on(run.next_event())
+				let mut run = block_on_data(self.client.exec(env_pb::ExecRequest {
+					session:        session.into(),
+					source:         Some(env_pb::Script { text: script, props: Default::default() }),
+					output_request: env_pb::OutputRequest::Unspecified as i32,
+					props:          Default::default(),
+				}))
+				.map_err(|error| client_error(py, error))?;
+				let started = block_on_data(run.next_event())
 					.map_err(|error| client_error(py, error))?
 					.ok_or_else(|| {
 						environment_exception(py, "Disconnected", "exec stream ended before start")
@@ -3216,12 +3366,11 @@ impl PyEnvironmentBackend {
 					.get_item("session")?
 					.ok_or_else(|| PyTypeError::new_err("session is required"))?
 					.extract::<Vec<u8>>()?;
-				ASYNC_RUNTIME
-					.block_on(self.client.close_session(env_pb::CloseSessionRequest {
-						session: session.into(),
-						props:   Default::default(),
-					}))
-					.map_err(|error| client_error(py, error))?;
+				block_on_data(self.client.close_session(env_pb::CloseSessionRequest {
+					session: session.into(),
+					props:   Default::default(),
+				}))
+				.map_err(|error| client_error(py, error))?;
 				Ok(py.None())
 			},
 			"omp.env.Run.stdin" | "omp.env.Run.eof" | "omp.env.Run.signal" | "omp.env.Run.resize" => {
@@ -3920,6 +4069,10 @@ impl PyEnvironmentBackend {
 		};
 		Ok(Py::new(py, PyEnvironmentStream { stream: Mutex::new(Some(stream)) })?.into_any())
 	}
+			}
+			$($table)*
+		}
+	};
 }
 include!("env_backend.rs");
 
@@ -3944,9 +4097,9 @@ fn _open_environment_scope(
 		scope = scope.deny_pty();
 	}
 	let hello = env_pb::ClientHello {
-		client:       String::from("omp-py"),
-		schema_rev:   omp_env::SCHEMA_REV,
-		capabilities: vec![
+		client:        String::from("omp-py"),
+		schema_rev:    omp_env::SCHEMA_REV,
+		capabilities:  vec![
 			"env.doc.read",
 			"env.doc.write",
 			"env.fs.read",
@@ -3963,8 +4116,9 @@ fn _open_environment_scope(
 		.into_iter()
 		.map(str::to_owned)
 		.collect(),
-		client_id:    format!("omp-py:{}:{host_generation}", std::process::id()).into(),
-		props:        Default::default(),
+		client_id:     format!("omp-py:{}:{host_generation}", std::process::id()).into(),
+		approval_mode: env_pb::ApprovalMode::Unspecified as i32,
+		props:         Default::default(),
 	};
 	let client = ASYNC_RUNTIME
 		.block_on(ExtensionEnvClient::connect_uds(socket, &hello, scope))
@@ -4191,14 +4345,14 @@ mod _omp {
 	#[pymodule_export]
 	use super::{
 		_interrupt, _local_path_string, _open_environment_scope, _phase_legality_matrix,
-		_principal_from_host, _runtime_metadata, _scheme_snapshot, _scribe_canonicalize, _thread_id,
-		EnvUnavailable, HostDisconnected, OmpError, PlacementError, PyActivateReason, PyAgentUrl,
-		PyArtifactUrl, PyAuthority, PyBlobRef, PyBlobUpload, PyCancellation, PyClientPath,
-		PyControlHandle, PyCostClass, PyDurability, PyDuration, PyEnvPath, PyEnvironmentBackend,
-		PyEnvironmentStream, PyHistoryUrl, PyInvocationPhase, PyLifecyclePhase, PyOperationSpec,
-		PyPrincipal, PyQuotaStatus, PyResourceReceipt, PyRestartReason, PyScribeTemplate, PySecret,
-		PySecretUse, PyStateScope, PyWorkspaceUri, StaleGeneration, TemplateError, operation_spec,
-		resources,
+		_principal_from_host, _resource_receipt_from_host, _runtime_metadata, _scheme_snapshot,
+		_scribe_canonicalize, _set_resource_receipt, _thread_id, EnvUnavailable, HostDisconnected,
+		OmpError, PlacementError, PyActivateReason, PyAgentUrl, PyArtifactUrl, PyAuthority,
+		PyBlobRef, PyBlobUpload, PyCancellation, PyClientPath, PyControlHandle, PyCostClass,
+		PyDurability, PyDuration, PyEnvPath, PyEnvironmentBackend, PyEnvironmentStream, PyHistoryUrl,
+		PyInvocationPhase, PyLifecyclePhase, PyOperationSpec, PyPrincipal, PyQuotaStatus,
+		PyResourceReceipt, PyRestartReason, PyScribeTemplate, PySecret, PySecretUse, PySessionSetup,
+		PyStateScope, PyWorkspaceUri, StaleGeneration, TemplateError, operation_spec, resources,
 	};
 	#[pymodule_export]
 	use crate::env_types::{

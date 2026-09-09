@@ -7,6 +7,7 @@ use std::{
 	time::Duration,
 };
 
+use omp_con::Ctx;
 use omp_core::Hash32;
 use omp_tool::Registry;
 use tokio::{
@@ -18,6 +19,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
+	exec::ExecHost,
 	host_settings,
 	server::{ConnectionPolicy, EnvServer, EnvdError, ExtensionDataBinding},
 	workspace::WorkspaceHost,
@@ -137,13 +139,16 @@ async fn serve_pipe(
 }
 
 /// Assembles and runs the Windows project environment daemon.
-pub(crate) async fn run(args: EnvdConfig, bridges: RegistryBridges) -> Result<(), EnvdError> {
+pub(crate) async fn run(
+	args: EnvdConfig,
+	con: Arc<Ctx>,
+	bridges: RegistryBridges,
+) -> Result<(), EnvdError> {
 	use super::worker_config;
 	let workspace = WorkspaceHost::open(&args.root)?;
 	let root = workspace.root().to_path_buf();
 	let data_dir = omp_core::dirs::data_dir(None).map_err(io::Error::other)?;
-	let settings = host_settings::load(&data_dir, &root).map_err(io::Error::other)?;
-	let interrupt_grace = settings.runtime.interrupt_grace;
+	let interrupt_grace = host_settings::SV_INTERRUPT_GRACE.get(&con);
 	let state_dir = if let Some(path) = args.state_dir {
 		path
 	} else {
@@ -153,14 +158,16 @@ pub(crate) async fn run(args: EnvdConfig, bridges: RegistryBridges) -> Result<()
 	let socket = args
 		.socket
 		.unwrap_or_else(|| omp_env::project_state::environment_socket(&state_dir));
+	let require_document_ownership = args.docserver_socket.is_none();
 	let docserver_socket = args
 		.docserver_socket
 		.unwrap_or_else(|| omp_env::project_state::document_socket(&state_dir));
 	let owner_listener = OwnerPipeListener::bind(&socket)?;
 	let (worker_config, extension_bindings) =
-		worker_config(&state_dir, args.py_eval, &[], interrupt_grace)?;
+		worker_config(&state_dir, args.py_eval, &[], &[], interrupt_grace)?;
 	let (env_connections, env_connection_rx) = watch::channel(0);
 	let (doc_connections, doc_connection_rx) = watch::channel(0);
+	let convars = Arc::new(crate::exthost::ConvarControlFactory::new(Arc::clone(&con)));
 	let server = Arc::new(
 		EnvServer::open_project(
 			&root,
@@ -169,8 +176,10 @@ pub(crate) async fn run(args: EnvdConfig, bridges: RegistryBridges) -> Result<()
 			Registry::new(),
 			worker_config,
 			Some(doc_connections),
+			require_document_ownership,
 			None,
-			None,
+			&con,
+			convars,
 			bridges,
 		)
 		.await?,
@@ -196,7 +205,8 @@ pub(crate) async fn run(args: EnvdConfig, bridges: RegistryBridges) -> Result<()
 		});
 	}
 	let idle_timeout = Duration::from_secs(args.idle_timeout);
-	let idle = wait_idle(env_connection_rx, doc_connection_rx, 1, idle_timeout);
+	let idle =
+		wait_idle(env_connection_rx, doc_connection_rx, 1, idle_timeout, server.process_host());
 	tokio::pin!(idle);
 	tokio::select! {
 		() = process_shutdown.cancelled() => {
@@ -229,6 +239,7 @@ async fn wait_idle(
 	mut docs: Receiver<usize>,
 	reserved_docs: usize,
 	timeout: Duration,
+	processes: ExecHost,
 ) {
 	if timeout.is_zero() {
 		future::pending::<()>().await;
@@ -237,11 +248,14 @@ async fn wait_idle(
 	let mut env_open = true;
 	let mut docs_open = true;
 	loop {
-		while *env.borrow() != 0 || *docs.borrow() > reserved_docs {
+		while *env.borrow() != 0
+			|| *docs.borrow() > reserved_docs
+			|| processes.has_live_persistent_processes()
+		{
 			tokio::select! {
 				result = env.changed(), if env_open => env_open = result.is_ok(),
 				result = docs.changed(), if docs_open => docs_open = result.is_ok(),
-				else => std::future::pending::<()>().await,
+				() = time::sleep(Duration::from_millis(50)) => {},
 			}
 		}
 		let idle = time::sleep(timeout);
@@ -258,6 +272,11 @@ async fn wait_idle(
 				result = docs.changed(), if docs_open => {
 					docs_open = result.is_ok();
 					if *env.borrow() != 0 || *docs.borrow() > reserved_docs {
+						break;
+					}
+				},
+				() = time::sleep(Duration::from_millis(50)) => {
+					if processes.has_live_persistent_processes() {
 						break;
 					}
 				},

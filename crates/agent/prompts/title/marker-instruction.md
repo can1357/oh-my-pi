@@ -1,0 +1,1 @@
+Output only the title wrapped in `<title>` and `</title>` tags, with nothing before or after. When the message carries no concrete task yet (a bare greeting, acknowledgement, or small talk), output exactly `<title>none</title>`.

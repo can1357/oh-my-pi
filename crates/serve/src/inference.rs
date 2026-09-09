@@ -12,14 +12,8 @@ use bytes::Bytes;
 use flume::Receiver;
 use futures::{Stream, StreamExt as _, stream};
 use im::OrdMap;
-use omp_agent::{empty_stop, project_thread_history};
-use omp_catalog::{
-	Availability, GrammarBits, ModalityBits, ModelAvailability, ModelKey, ModelSpec, OperationKind,
-	ProviderDef, ProviderId,
-};
-use omp_core::{Str, encoding::hex, sf};
-use omp_inference::{
-	Client, Registry, RetryAction,
+use omp_ai::{
+	Client, ProviderResponseHooks, Registry, RetryAction,
 	answer::{
 		Artifact, ArtifactBody, AudioChunk, ChatControl, ChatControlError, ChatStream,
 		GenerationEvent, ImageArtifact, NativeResponse, NativeResponseBody,
@@ -27,11 +21,11 @@ use omp_inference::{
 		TranscriptEvent, UsageReport, UsageStatus, UsageUnit, UsageWindowKind, VideoArtifact,
 	},
 	call::{
-		self, CallMeta, ContentPart, ContextStrategy, CountAccuracy, CountTokensRequest,
-		DetokenizeRequest, Dimensions, EmbedRequest, EmbeddingInput, ImageFormat, ImageQuality,
-		ImageRequest, MediaInput, Message, NativeMethod, NativePath, NativePayload, NativeRequest,
+		self, CallMeta, ContextStrategy, CountAccuracy, CountTokensRequest, DetokenizeRequest,
+		Dimensions, EmbedRequest, EmbeddingInput, ImageFormat, ImageQuality, ImageRequest,
+		MediaInput, Message, NativeMethod, NativePath, NativePayload, NativeRequest,
 		NativeResponseFraming, NegotiationPolicy, OpaqueJson, RawJson, RealtimeModality,
-		RealtimeRequest, Role, Sampling, SearchRecency, SearchRequest, SessionRequest, Setting,
+		RealtimeRequest, Sampling, SearchRecency, SearchRequest, SessionRequest, Setting,
 		SpeechRequest, Target, TimestampGranularity, TokenizeRequest, ToolChoice, ToolDefinition,
 		ToolGrammar, ToolGrammarSyntax, ToolInputConstraint, ToolResultContent, TranscriptionRequest,
 		TruncationPolicy, UsageRequest, UsageScope, VideoRequest,
@@ -46,6 +40,7 @@ use omp_inference::{
 		TurnId as ProviderTurnId,
 	},
 	operation::{
+		discovery::CatalogDiscoveryProjectorError,
 		job::{JobCancelError, JobCancellationReceipt},
 		search::fallback_allowed as search_fallback_allowed,
 		search_query::{parse_date_value, parse_search_query},
@@ -54,6 +49,11 @@ use omp_inference::{
 	router::Router,
 	session::{ConversationError, ConversationSessionPlanner, TurnReplay},
 };
+use omp_catalog::{
+	Availability, GrammarBits, ModalityBits, ModelAvailability, ModelKey, ModelSpec, OperationKind,
+	ProviderDef, ProviderId, model::ProvenanceKind, provider::AuthSpecKind,
+};
+use omp_core::{Str, format_rfc3339};
 use omp_proto::{
 	inference::v1::{
 		self as pb, count_tokens_request, exec_status, generate_image_request, generation_status,
@@ -70,6 +70,7 @@ use omp_proto::{
 	prost::Message as _,
 	thread::v1::{self as thread_pb, blob, item, part},
 };
+use omp_session::projection::{PROVIDER_RESET_PROP, empty_stop, project_thread_history};
 use omp_tool::{CapsBase, LoweringCaps, ModelClass, Registry as ToolRegistry, TOOL_REV_PROP};
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, oneshot};
@@ -86,8 +87,11 @@ const RPC_HISTORY_CAPS_BASE: CapsBase = CapsBase {
 
 /// Stream returned by RPC methods whose typed operation produces events.
 pub type RpcStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
-/// Authoritative provider application operations exposed only when the
-/// application installs its live provider owner.
+/// Authoritative provider application operations exposed only when an
+/// extension CONTROL session installs its live provider owner.
+///
+/// Plain `serve` has no authenticated extension caller or capability grant and
+/// must not manufacture one from protobuf identity fields.
 #[tonic::async_trait]
 pub trait ProviderGatewayAuthority: Send + Sync + 'static {
 	/// Returns the current model catalog, optionally filtered to one provider.
@@ -148,10 +152,11 @@ pub struct InferenceRpc {
 	test_live_responses:   Option<flume::Sender<WorkflowResponse>>,
 	contexts:              Arc<Mutex<BTreeMap<String, RpcContext>>>,
 	generations:           Arc<Mutex<BTreeMap<String, RpcGeneration>>>,
-	search_settings:       Arc<omp_inference::search_settings::WebSearchSettings>,
+	search_settings:       Arc<omp_ai::search_settings::WebSearchSettings>,
 	session_provider:      Option<ProviderId>,
 	prompt_cache_affinity: Option<Str>,
 	provider_authority:    Option<Arc<dyn ProviderGatewayAuthority>>,
+	response_hooks:        ProviderResponseHooks,
 }
 
 #[derive(Clone, Default)]
@@ -170,12 +175,41 @@ struct ResolvedTurn {
 	provider_session:      Option<SessionRequest>,
 	provider_conversation: Option<ConversationId>,
 	provider_heads:        OrdMap<u64, ProviderRevision>,
+	resolved_route:        Arc<Mutex<ResolvedRoute>>,
+}
+
+#[derive(Default)]
+struct ResolvedRoute {
+	provider: Option<ProviderId>,
+	model:    Option<ModelKey>,
 }
 
 #[derive(Default)]
 struct TurnProjection {
-	assistant_text: String,
-	output:         Vec<thread_pb::Item>,
+	message_parts: Vec<MessagePart>,
+	output:        Vec<thread_pb::Item>,
+}
+
+impl TurnProjection {
+	/// Appends streamed prose to the assistant message, opening a new part
+	/// when the block index or kind changes.
+	fn append_part(&mut self, index: u32, thinking: bool, text: &str) {
+		match self.message_parts.last_mut() {
+			Some(part) if part.index == index && part.thinking == thinking => {
+				part.text.push_str(text);
+			},
+			_ => self
+				.message_parts
+				.push(MessagePart { index, thinking, text: text.to_owned() }),
+		}
+	}
+}
+
+/// One streamed text or thinking block of the assistant message.
+struct MessagePart {
+	index:    u32,
+	thinking: bool,
+	text:     String,
 }
 
 #[derive(Clone)]
@@ -232,7 +266,14 @@ impl InferenceRpc {
 			session_provider: None,
 			prompt_cache_affinity: None,
 			provider_authority: None,
+			response_hooks: ProviderResponseHooks::default(),
 		}
+	}
+
+	/// Installs the session-owned provider response observation sink.
+	pub fn with_provider_response_hooks(mut self, response_hooks: ProviderResponseHooks) -> Self {
+		self.response_hooks = response_hooks;
+		self
 	}
 
 	/// Installs the application's live provider owner on the gateway surface.
@@ -243,14 +284,17 @@ impl InferenceRpc {
 
 	fn provider_authority(&self) -> Result<&Arc<dyn ProviderGatewayAuthority>, Status> {
 		self.provider_authority.as_ref().ok_or_else(|| {
-			Status::failed_precondition("provider application authority is not installed")
+			Status::failed_precondition(
+				"provider application authority is not installed; an extension CONTROL session must \
+				 establish provider declaration and operation authority",
+			)
 		})
 	}
 
 	/// Replaces web-search routing settings for this immutable RPC facade.
 	pub fn with_search_settings(
 		mut self,
-		settings: omp_inference::search_settings::WebSearchSettings,
+		settings: omp_ai::search_settings::WebSearchSettings,
 	) -> Self {
 		self.search_settings = Arc::new(settings);
 		self
@@ -311,15 +355,20 @@ impl InferenceRpc {
 
 	/// Resolves a model selector to a routing target.
 	///
-	/// Exact catalog keys pass through; declared catalog aliases canonicalize
-	/// to their target key. Anything else stays verbatim so the router reports
+	/// Exact catalog keys and aliases canonicalize to their target key. A wire
+	/// `provider/model` ID for a provider-local configured key additionally pins
+	/// that provider domain. Anything else stays verbatim so the router reports
 	/// the typed `TargetNotFound`.
 	fn target(&self, selector: &str, operation: OperationKind) -> Result<Target, Status> {
 		if !selector.is_empty() {
 			let catalog = self.registry.catalog();
-			if catalog.model(ModelKey::from_ref(selector)).is_none()
-				&& let Some(spec) = catalog.resolve_alias(selector)
-			{
+			let direct = catalog.model(ModelKey::from_ref(selector));
+			let aliased = if direct.is_none() {
+				catalog.resolve_alias(selector)
+			} else {
+				None
+			};
+			if let Some(spec) = direct.or(aliased) {
 				if let Some(provider) = &self.session_provider {
 					return Ok(Target::Provider {
 						provider: provider.clone(),
@@ -327,6 +376,21 @@ impl InferenceRpc {
 					});
 				}
 				return Ok(Target::Model(spec.key.clone()));
+			}
+			if let Some((provider, local_model)) = selector.split_once('/')
+				&& let Some(spec) = catalog.models().iter().find(|model| {
+					model.key.as_str() == local_model
+						&& model.routes.iter().any(|route| {
+							catalog
+								.route(route)
+								.is_some_and(|route| route.provider.as_str() == provider)
+						})
+				}) {
+				let provider = self
+					.session_provider
+					.clone()
+					.unwrap_or_else(|| ProviderId::from(provider));
+				return Ok(Target::Provider { provider, model: spec.key.clone() });
 			}
 			if let Some(provider) = &self.session_provider {
 				return Ok(Target::Provider {
@@ -348,11 +412,7 @@ impl InferenceRpc {
 			})
 	}
 
-	fn client(
-		&self,
-		target: Target,
-		request: RequestId,
-	) -> Client<omp_inference::ProviderService, Router> {
+	fn client(&self, target: Target, request: RequestId) -> Client<omp_ai::ProviderService, Router> {
 		self.client_with_deadline(target, request, None)
 	}
 
@@ -361,7 +421,7 @@ impl InferenceRpc {
 		target: Target,
 		request: RequestId,
 		deadline: Option<Instant>,
-	) -> Client<omp_inference::ProviderService, Router> {
+	) -> Client<omp_ai::ProviderService, Router> {
 		Client::new(
 			self.registry.service(),
 			Router::new(self.registry.clone(), Duration::from_secs(30)),
@@ -371,6 +431,8 @@ impl InferenceRpc {
 				deadline,
 				budget: ExecutionBudget::default(),
 				session: None,
+				debug_session: None,
+				response_hooks: self.response_hooks.clone(),
 			},
 		)
 	}
@@ -380,7 +442,7 @@ impl InferenceRpc {
 		target: Target,
 		request: RequestId,
 		session: Option<SessionRequest>,
-	) -> Client<omp_inference::ProviderService, Router> {
+	) -> Client<omp_ai::ProviderService, Router> {
 		Client::new(
 			self.registry.service(),
 			Router::new(self.registry.clone(), Duration::from_secs(30)),
@@ -389,9 +451,19 @@ impl InferenceRpc {
 				target,
 				deadline: None,
 				budget: ExecutionBudget::default(),
+				debug_session: session
+					.as_ref()
+					.map(|session| Str::new(session.conversation.as_str())),
 				session,
+				response_hooks: self.response_hooks.clone(),
 			},
 		)
+		// The invocation key rides on the call so it reaches the wire whether
+		// or not a provider conversation is bound.
+		.with_affinity(call::CallAffinity {
+			prompt_cache:     self.prompt_cache_affinity.clone(),
+			provider_session: None,
+		})
 	}
 
 	fn management_target(
@@ -439,6 +511,7 @@ impl InferenceRpc {
 						provider_session:      None,
 						provider_conversation: None,
 						provider_heads:        OrdMap::new(),
+						resolved_route:        Arc::default(),
 					});
 				}
 				if self.contexts.lock().contains_key(&seed.context_id) {
@@ -452,6 +525,7 @@ impl InferenceRpc {
 						provider_session:      None,
 						provider_conversation: None,
 						provider_heads:        OrdMap::new(),
+						resolved_route:        Arc::default(),
 					});
 				}
 				let root = self
@@ -465,7 +539,6 @@ impl InferenceRpc {
 					revision: revision.clone(),
 					turn,
 					strategy,
-					prompt_cache_affinity: self.prompt_cache_affinity.clone(),
 					append_only: true,
 					provider_reset,
 					forked: false,
@@ -477,6 +550,7 @@ impl InferenceRpc {
 					provider_session:      Some(provider_session),
 					provider_conversation: Some(conversation),
 					provider_heads:        [(0u64, revision)].into_iter().collect(),
+					resolved_route:        Arc::default(),
 				})
 			},
 			Some(turn_request::Input::Incremental(incremental)) => {
@@ -521,6 +595,7 @@ impl InferenceRpc {
 						provider_session: None,
 						provider_conversation: None,
 						provider_heads: OrdMap::new(),
+						resolved_route: Arc::default(),
 					});
 				}
 				let (request_messages, conversation, revision, provider_heads, forked) =
@@ -573,7 +648,6 @@ impl InferenceRpc {
 					revision,
 					turn,
 					strategy,
-					prompt_cache_affinity: self.prompt_cache_affinity.clone(),
 					append_only: true,
 					provider_reset,
 					forked,
@@ -585,6 +659,7 @@ impl InferenceRpc {
 					provider_session: Some(provider_session),
 					provider_conversation: Some(conversation),
 					provider_heads,
+					resolved_route: Arc::default(),
 				})
 			},
 			None => Err(Status::invalid_argument("TurnRequest.input is required")),
@@ -614,6 +689,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 	type TurnStream = RpcStream<pb::TurnEvent>;
 	type WatchModelsStream = RpcStream<pb::ModelEvent>;
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "turn")
+	)]
 	async fn turn(
 		&self,
 		request: Request<tonic::Streaming<pb::TurnFrame>>,
@@ -646,7 +726,7 @@ impl pb::inference_server::Inference for InferenceRpc {
 		let provider_reset = open
 			.props
 			.as_ref()
-			.and_then(|props| props.fields.get(omp_agent::PROVIDER_RESET_PROP))
+			.and_then(|props| props.fields.get(PROVIDER_RESET_PROP))
 			.and_then(|value| value.kind.as_ref())
 			.is_some_and(|kind| matches!(kind, value::Kind::Bool(true)));
 		let mut resolved =
@@ -662,32 +742,49 @@ impl pb::inference_server::Inference for InferenceRpc {
 			};
 		let projection = Arc::new(Mutex::new(TurnProjection::default()));
 		let request_id = RequestId::from(open.turn_id.as_str());
+		let chat =
+			chat_request(mem::take(&mut resolved.request_messages), params, &self.tool_registry)?;
+		let target = self.target(&params.model, OperationKind::Chat)?;
+		let mut client =
+			self.turn_client(target, request_id.clone(), resolved.provider_session.clone());
+		let planned = match client.plan(&chat) {
+			Ok(planned) => planned,
+			Err(error) => {
+				let event = inference_turn_error(error);
+				return Ok(Response::new(Box::pin(stream::once(async move { Ok(event) }))));
+			},
+		};
+		{
+			let mut route = resolved.resolved_route.lock();
+			route.provider = Some(planned.execution_plan().provider.clone());
+			route.model = planned.execution_plan().model.clone();
+		}
 		if resolved.provider_session.is_some() {
 			let replay_projection = Arc::clone(&projection);
 			let replay_context = resolved.context_id.clone();
 			let committed_len = resolved.committed_messages.len();
+			let resolved_route = Arc::clone(&resolved.resolved_route);
 			self.sessions.stage_turn_replay(
-				request_id.clone(),
+				request_id,
 				turn.clone(),
 				request_bytes.clone(),
 				move |completion| {
+					let route = resolved_route.lock();
 					Ok(Bytes::from(
 						build_turn_outcome(
 							&replay_projection.lock(),
 							completion,
 							replay_context.as_deref(),
 							committed_len,
+							route.provider.as_ref().map(|provider| provider.as_str()),
+							route.model.as_ref().map(|model| model.as_str()),
 						)
 						.encode_to_vec(),
 					))
 				},
 			);
 		}
-		let chat =
-			chat_request(mem::take(&mut resolved.request_messages), params, &self.tool_registry)?;
-		let target = self.target(&params.model, OperationKind::Chat)?;
-		let mut client = self.turn_client(target, request_id, resolved.provider_session.clone());
-		let events = match client.execute(chat).await {
+		let events = match client.execute_plan(planned).await {
 			Ok(events) => events,
 			Err(error) => {
 				let event = inference_turn_error(error);
@@ -709,6 +806,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Ok(Response::new(Box::pin(output)))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "realtime")
+	)]
 	async fn realtime(
 		&self,
 		request: Request<tonic::Streaming<pb::RealtimeFrame>>,
@@ -787,9 +889,9 @@ impl pb::inference_server::Inference for InferenceRpc {
 			loop {
 				let event = tokio::select! {
 					error = errors.recv_async(), if errors_open => if let Ok(error) = error { Err(error) } else {
-								  errors_open = false;
-								  continue;
-							  },
+						errors_open = false;
+						continue;
+					},
 					event = session.recv() => match event {
 						Ok(Ok(event)) => Ok(event),
 						Ok(Err(error)) => Err(inference_status(error)),
@@ -806,6 +908,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Ok(Response::new(Box::pin(output)))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "fork")
+	)]
 	async fn fork(
 		&self,
 		request: Request<pb::ForkRequest>,
@@ -856,6 +963,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Ok(Response::new(pb::ForkResponse { revision: Some(revision(&request.context_id, at)) }))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "drop")
+	)]
 	async fn drop(
 		&self,
 		request: Request<pb::DropRequest>,
@@ -870,6 +982,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Ok(Response::new(pb::DropResponse {}))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "count_tokens")
+	)]
 	async fn count_tokens(
 		&self,
 		request: Request<pb::CountTokensRequest>,
@@ -902,7 +1019,10 @@ impl pb::inference_server::Inference for InferenceRpc {
 		};
 		let target = self.target(&request.model, OperationKind::CountTokens)?;
 		let mut client = self.client(target, rpc_request_id("count"));
-		let answer = client.execute(operation).await.map_err(inference_status)?;
+		let answer = client
+			.execute(operation)
+			.await
+			.map_err(|error| capability_status(error, &request.model, OperationKind::CountTokens))?;
 		Ok(Response::new(pb::CountTokensResponse {
 			tokens:     answer.tokens,
 			accuracy:   if answer.provenance.exact {
@@ -914,6 +1034,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		}))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "tokenize")
+	)]
 	async fn tokenize(
 		&self,
 		request: Request<pb::TokenizeRequest>,
@@ -925,13 +1050,21 @@ impl pb::inference_server::Inference for InferenceRpc {
 		};
 		let target = self.target(&request.model, OperationKind::Tokenize)?;
 		let mut client = self.client(target, rpc_request_id("tokenize"));
-		let answer = client.execute(operation).await.map_err(inference_status)?;
+		let answer = client
+			.execute(operation)
+			.await
+			.map_err(|error| capability_status(error, &request.model, OperationKind::Tokenize))?;
 		Ok(Response::new(pb::TokenizeResponse {
 			tokens:     answer.tokens,
 			provenance: Some(tokenizer_provenance(answer.provenance)),
 		}))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "detokenize")
+	)]
 	async fn detokenize(
 		&self,
 		request: Request<pb::DetokenizeRequest>,
@@ -947,6 +1080,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		}))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "embed")
+	)]
 	async fn embed(
 		&self,
 		request: Request<pb::EmbedRequest>,
@@ -980,6 +1118,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		}))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "generate_image")
+	)]
 	async fn generate_image(
 		&self,
 		request: Request<pb::GenerateImageRequest>,
@@ -1044,6 +1187,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Ok(Response::new(Box::pin(image_events(events))))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "speak")
+	)]
 	async fn speak(
 		&self,
 		request: Request<pb::SpeakRequest>,
@@ -1083,6 +1231,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Ok(Response::new(Box::pin(output)))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "transcribe")
+	)]
 	async fn transcribe(
 		&self,
 		request: Request<pb::TranscribeRequest>,
@@ -1157,6 +1310,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Ok(Response::new(response))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "search")
+	)]
 	async fn search(
 		&self,
 		request: Request<pb::SearchRequest>,
@@ -1297,6 +1455,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Err(inference_status(aggregate_search_failures(failures)))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "generate_video")
+	)]
 	async fn generate_video(
 		&self,
 		request: Request<pb::GenerateVideoRequest>,
@@ -1357,6 +1520,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Ok(Response::new(initial))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "get_generation")
+	)]
 	async fn get_generation(
 		&self,
 		request: Request<pb::GetGenerationRequest>,
@@ -1366,6 +1534,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Ok(Response::new(status))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "attach_generation")
+	)]
 	async fn attach_generation(
 		&self,
 		request: Request<pb::AttachGenerationRequest>,
@@ -1397,6 +1570,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Ok(Response::new(Box::pin(output)))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "cancel_generation")
+	)]
 	async fn cancel_generation(
 		&self,
 		request: Request<pb::CancelGenerationRequest>,
@@ -1420,11 +1598,23 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Ok(Response::new(status))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "usage")
+	)]
 	async fn usage(
 		&self,
 		request: Request<pb::UsageRequest>,
 	) -> Result<Response<pb::UsageResponse>, Status> {
 		let request = request.into_inner();
+		if request.provider.is_empty()
+			&& request.account.is_empty()
+			&& request.scope == usage_request::Scope::Unspecified as i32
+			&& !request.allow_stale
+		{
+			return Err(Status::invalid_argument("UsageRequest must specify a provider or scope"));
+		}
 		let provider =
 			(!request.provider.is_empty()).then(|| ProviderId::from(request.provider.as_str()));
 		let operation = UsageRequest {
@@ -1449,6 +1639,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Ok(Response::new(usage_response(*answer)))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "native")
+	)]
 	async fn native(
 		&self,
 		request: Request<pb::NativeRequest>,
@@ -1507,6 +1702,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Ok(Response::new(Box::pin(native_response_stream(answer))))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "list_providers")
+	)]
 	async fn list_providers(
 		&self,
 		request: Request<pb::ListProvidersRequest>,
@@ -1528,6 +1728,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Ok(Response::new(pb::ListProvidersResponse { providers, cursor: Some(self.cursor()) }))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "list_models")
+	)]
 	async fn list_models(
 		&self,
 		request: Request<pb::ListModelsRequest>,
@@ -1535,6 +1740,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Ok(Response::new(self.list_models_response(&request.into_inner())))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "watch_models")
+	)]
 	async fn watch_models(
 		&self,
 		_request: Request<pb::WatchModelsRequest>,
@@ -1546,6 +1756,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		Ok(Response::new(Box::pin(stream::once(async move { Ok(event) }))))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "refresh_models")
+	)]
 	async fn refresh_models(
 		&self,
 		request: Request<pb::RefreshModelsRequest>,
@@ -1558,6 +1773,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		})))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "provider_catalog")
+	)]
 	async fn provider_catalog(
 		&self,
 		request: Request<pb::ProviderCatalogRequest>,
@@ -1570,6 +1790,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "watch_provider_catalog")
+	)]
 	async fn watch_provider_catalog(
 		&self,
 		request: Request<pb::WatchProviderCatalogRequest>,
@@ -1582,6 +1807,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "provider_authenticated")
+	)]
 	async fn provider_authenticated(
 		&self,
 		request: Request<pb::ProviderAuthenticatedRequest>,
@@ -1594,6 +1824,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "declare_provider")
+	)]
 	async fn declare_provider(
 		&self,
 		request: Request<pb::ProviderDeclarationRequest>,
@@ -1606,6 +1841,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "replace_provider")
+	)]
 	async fn replace_provider(
 		&self,
 		request: Request<pb::ProviderDeclarationRequest>,
@@ -1618,6 +1858,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "retract_provider")
+	)]
 	async fn retract_provider(
 		&self,
 		request: Request<pb::RetractProviderRequest>,
@@ -1630,6 +1875,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "execute_provider_request")
+	)]
 	async fn execute_provider_request(
 		&self,
 		request: Request<pb::ProviderOperationRequest>,
@@ -1642,6 +1892,11 @@ impl pb::inference_server::Inference for InferenceRpc {
 		))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "inference", rpc.method = "mint_provider_session")
+	)]
 	async fn mint_provider_session(
 		&self,
 		request: Request<pb::ProviderOperationRequest>,
@@ -1675,11 +1930,21 @@ fn provider_card(registry: &Registry, provider: &ProviderDef) -> pb::ProviderCar
 		.collect::<BTreeSet<_>>()
 		.into_iter()
 		.collect();
+	let auth = if provider
+		.auth
+		.iter()
+		.filter_map(|auth| registry.catalog().auth_spec(auth))
+		.any(|auth| matches!(auth.kind, AuthSpecKind::None | AuthSpecKind::OptionalBearer))
+	{
+		vec![pb::provider_card::AuthKind::None as i32]
+	} else {
+		Vec::new()
+	};
 	pb::ProviderCard {
 		id: provider.id.as_str().to_owned(),
 		name: provider.name.as_str().to_owned(),
 		facets,
-		auth: Vec::new(),
+		auth,
 		credentialed: provider
 			.routes
 			.iter()
@@ -1690,10 +1955,33 @@ fn provider_card(registry: &Registry, provider: &ProviderDef) -> pb::ProviderCar
 }
 
 fn model_card(model: &ModelSpec, provider: &str, facets: Vec<i32>) -> pb::ModelCard {
+	let local_model = model
+		.key
+		.as_str()
+		.strip_prefix(provider)
+		.and_then(|model| model.strip_prefix('/'))
+		.unwrap_or(model.key.as_str());
+	let source = if model
+		.provenance
+		.sources
+		.iter()
+		.any(|source| source.kind == ProvenanceKind::Configured)
+	{
+		model_card::Source::Configured
+	} else if model
+		.provenance
+		.sources
+		.iter()
+		.any(|source| source.kind == ProvenanceKind::Discovered)
+	{
+		model_card::Source::Discovered
+	} else {
+		model_card::Source::Bundled
+	};
 	pb::ModelCard {
-		id: model.key.as_str().to_owned(),
+		id: format!("{provider}/{local_model}"),
 		provider: provider.to_owned(),
-		model: model.key.as_str().to_owned(),
+		model: local_model.to_owned(),
 		name: model.display_name.as_str().to_owned(),
 		family: model.class.as_str().to_owned(),
 		facets,
@@ -1711,7 +1999,7 @@ fn model_card(model: &ModelSpec, provider: &str, facets: Vec<i32>) -> pb::ModelC
 			ModelAvailability::Blocked => pb::Availability::Blocked,
 			ModelAvailability::Disabled => pb::Availability::Disabled,
 		} as i32,
-		source: model_card::Source::Bundled as i32,
+		source: source as i32,
 		blocked_until_ms: model.provenance.blocked_until_ms.unwrap_or_default(),
 		deprecated: model.provenance.deprecated,
 		updated_at_ms: model.provenance.updated_at_ms.unwrap_or_default(),
@@ -1775,6 +2063,15 @@ fn rpc_request_id(prefix: &str) -> RequestId {
 	use std::sync::atomic::{AtomicU64, Ordering};
 	static NEXT: AtomicU64 = AtomicU64::new(1);
 	RequestId::from(format!("{prefix}-{}", NEXT.fetch_add(1, Ordering::Relaxed)))
+}
+
+fn capability_status(error: Error, model: &str, operation: OperationKind) -> Status {
+	if matches!(error.kind, ErrorKind::CapabilityMismatch | ErrorKind::CapabilityUnknown) {
+		return Status::failed_precondition(format!(
+			"model `{model}` lacks required capability `{operation}`"
+		));
+	}
+	inference_status(error)
 }
 
 fn inference_status(error: Error) -> Status {
@@ -1854,6 +2151,12 @@ fn inference_turn_error(error: Error) -> pb::TurnEvent {
 		}
 		if let Some(evidence) = error.detail_ref() {
 			let _ = write!(detail, ": {evidence}");
+		}
+		if error.kind == ErrorKind::RouteUnavailable
+			&& let Some(source) = std::error::Error::source(&error)
+			&& let Some(projector) = source.downcast_ref::<CatalogDiscoveryProjectorError>()
+		{
+			let _ = write!(detail, " (source: {projector})");
 		}
 		detail
 	};
@@ -1972,7 +2275,7 @@ pub fn project_provider_turn_for_test(
 	thread: &thread_pb::Thread,
 	params: &pb::ChatParams,
 	tool_registry: &ToolRegistry,
-) -> Result<(thread_pb::Thread, omp_inference::call::ChatRequest), Status> {
+) -> Result<(thread_pb::Thread, omp_ai::call::ChatRequest), Status> {
 	let projected = project_thread_history(thread, tool_registry, &RPC_HISTORY_CAPS_BASE)
 		.map_err(|error| Status::invalid_argument(error.to_string()))?;
 	let request = chat_request(thread_messages(&projected)?, params, tool_registry)?;
@@ -1983,109 +2286,19 @@ fn thread_messages(thread: &thread_pb::Thread) -> Result<Vec<Message>, Status> {
 	items_messages(&thread.items)
 }
 
+/// Projects thread items into canonical messages, exactly one per item.
+///
+/// The 1:1 mapping is load-bearing: context revisions (`Revision.head`,
+/// `truncate_to`, `provider_heads`) count items, and the context store indexes
+/// its retained message list by those heads. Wire-shape concerns (merging one
+/// assistant turn's parallel tool calls into a single provider message) belong
+/// to the codecs, never to this projection.
 fn items_messages(items: &[thread_pb::Item]) -> Result<Vec<Message>, Status> {
-	items
-		.iter()
-		.map(|item| match item.kind.as_ref() {
-			Some(item::Kind::Message(message)) => message_from_proto(message),
-			Some(item::Kind::ToolCall(call)) => Ok(Message {
-				role:    Role::Assistant,
-				content: Arc::from([ContentPart::ToolCall {
-					call:      ToolCallId::from(call.id.as_str()),
-					name:      call.name.as_str().into(),
-					arguments: opaque_json(&call.args_json, "ToolCall.args_json")?,
-					proof:     None,
-				}]),
-				name:    None,
-			}),
-			Some(item::Kind::ToolResult(result)) => {
-				let content = result
-					.parts
-					.iter()
-					.map(tool_result_part)
-					.collect::<Result<Vec<_>, _>>()?;
-				Ok(Message {
-					role:    Role::Tool,
-					content: Arc::from([ContentPart::ToolResult {
-						call:     ToolCallId::from(result.call_id.as_str()),
-						name:     (!result.name.is_empty()).then(|| result.name.as_str().into()),
-						content:  content.into(),
-						is_error: result.is_error,
-					}]),
-					name:    None,
-				})
-			},
-			None => Err(Status::invalid_argument("thread item kind is required")),
-		})
-		.collect()
-}
-
-fn message_from_proto(message: &thread_pb::Message) -> Result<Message, Status> {
-	let role = match thread_pb::Role::try_from(message.role).unwrap_or(thread_pb::Role::Unspecified)
-	{
-		thread_pb::Role::System => Role::System,
-		thread_pb::Role::User => Role::User,
-		thread_pb::Role::Assistant => Role::Assistant,
-		thread_pb::Role::Unspecified => {
-			return Err(Status::invalid_argument("message role is required"));
-		},
-	};
-	let content = message
-		.parts
-		.iter()
-		.map(content_part)
-		.collect::<Result<Vec<_>, _>>()?;
-	Ok(Message { role, content: content.into(), name: None })
-}
-
-fn content_part(part: &thread_pb::Part) -> Result<ContentPart, Status> {
-	match part.kind.as_ref() {
-		Some(part::Kind::Text(text)) => {
-			Ok(ContentPart::Text { text: text.as_str().into(), proof: None })
-		},
-		Some(part::Kind::Thinking(thinking)) if thinking.signature.is_empty() => {
-			Ok(ContentPart::Reasoning { text: thinking.text.as_str().into(), proof: None })
-		},
-		Some(part::Kind::Thinking(_)) => Err(Status::invalid_argument(
-			"unscoped reasoning signatures cannot enter canonical inference",
-		)),
-		Some(part::Kind::Blob(blob)) => Ok(ContentPart::Image(media_input(blob)?)),
-		Some(part::Kind::Fallback(_) | part::Kind::ServerTool(_)) => Err(Status::invalid_argument(
-			"legacy fallback/server-tool parts require an explicit canonical projection",
-		)),
-		None => Err(Status::invalid_argument("message part kind is required")),
-	}
-}
-
-fn tool_result_part(part: &thread_pb::Part) -> Result<ToolResultContent, Status> {
-	match part.kind.as_ref() {
-		Some(part::Kind::Text(text)) => Ok(ToolResultContent::Text(text.as_str().into())),
-		Some(part::Kind::Blob(blob)) => Ok(ToolResultContent::Document(media_input(blob)?)),
-		_ => Err(Status::invalid_argument(
-			"tool result contains a part that has no canonical projection",
-		)),
-	}
+	Message::from_thread_items(items).map_err(|error| Status::invalid_argument(error.to_string()))
 }
 
 fn media_input(blob: &thread_pb::Blob) -> Result<MediaInput, Status> {
-	if blob.mime.is_empty() {
-		return Err(Status::invalid_argument("Blob.mime is required"));
-	}
-	if !blob.inline.is_empty() {
-		return Ok(MediaInput::Bytes {
-			media_type: blob.mime.as_str().into(),
-			data:       Bytes::copy_from_slice(&blob.inline),
-		});
-	}
-	if blob.hash.is_empty() {
-		return Err(Status::invalid_argument("Blob requires inline bytes or a content hash"));
-	}
-	let id = hex::encode(&blob.hash).into_string();
-	Ok(MediaInput::Stored(omp_inference::answer::ArtifactRef {
-		store:    sf!("omp-rpc-blobs"),
-		id:       id.as_str().into(),
-		revision: id.as_str().into(),
-	}))
+	call::media_from_thread(blob).map_err(|error| Status::invalid_argument(error.to_string()))
 }
 
 fn opaque_json(bytes: &[u8], field: &'static str) -> Result<OpaqueJson, Status> {
@@ -2143,7 +2356,7 @@ fn chat_request(
 	messages: Vec<Message>,
 	params: &pb::ChatParams,
 	tool_registry: &ToolRegistry,
-) -> Result<omp_inference::call::ChatRequest, Status> {
+) -> Result<omp_ai::call::ChatRequest, Status> {
 	if let Some(tool) = params
 		.tools
 		.iter()
@@ -2157,21 +2370,26 @@ fn chat_request(
 	let tools: Vec<ToolDefinition> = if params.tools.is_empty() {
 		Vec::new()
 	} else {
+		// Selected advertisement keeps caller-requested hidden slots (`think`
+		// under external thinking, subagent `yield`) that plain `advertise`
+		// would drop.
+		let selected = params
+			.tools
+			.iter()
+			.map(|tool| Str::new(tool.name.as_str()))
+			.collect::<Vec<_>>();
 		tool_registry
-			.advertise(LoweringCaps {
-				strict_schema:  true,
-				grammar:        GrammarBits::ALL,
-				maximum_tools:  None,
-				maximum_strict: None,
-			})
+			.advertise_selected(
+				LoweringCaps {
+					strict_schema:  true,
+					grammar:        GrammarBits::ALL,
+					maximum_tools:  None,
+					maximum_strict: None,
+				},
+				&selected,
+			)
 			.map_err(|error| Status::failed_precondition(error.to_string()))?
 			.into_iter()
-			.filter(|tool| {
-				params
-					.tools
-					.iter()
-					.any(|requested| requested.name == tool.identity.name.as_str())
-			})
 			.map(|tool| tool.definition)
 			.collect()
 	};
@@ -2213,7 +2431,7 @@ fn chat_request(
 			presence_penalty:   sampling.presence_penalty.map(|value| value as f32),
 			frequency_penalty:  sampling.frequency_penalty.map(|value| value as f32),
 		});
-	Ok(omp_inference::call::ChatRequest {
+	Ok(omp_ai::call::ChatRequest {
 		messages: messages.into(),
 		tools: tools.into(),
 		hosted_tools: Arc::from([]),
@@ -2231,6 +2449,7 @@ fn chat_request(
 		top_logprobs: None,
 		safety: Arc::from([]),
 		negotiation: NegotiationPolicy::default(),
+		forced_call: None,
 	})
 }
 
@@ -2239,7 +2458,8 @@ fn configured_search_providers(name: &str) -> Vec<ProviderId> {
 		"perplexity" => {
 			&["perplexity-cookie", "perplexity", "perplexity-openrouter", "perplexity-anonymous"]
 		},
-		_ => &[omp_inference::search_settings::catalog_provider_name(name)],
+		"public" => &["startpage", "google-search", "duckduckgo", "ecosia", "mojeek"],
+		_ => &[omp_ai::search_settings::catalog_provider_name(name)],
 	};
 	names.iter().map(|name| ProviderId::from(*name)).collect()
 }
@@ -2271,7 +2491,7 @@ fn proto_usage(usage: Usage) -> pb::Usage {
 }
 
 fn tokenizer_provenance(
-	provenance: omp_inference::answer::TokenizerProvenance,
+	provenance: omp_ai::answer::TokenizerProvenance,
 ) -> pb::TokenizerProvenance {
 	pb::TokenizerProvenance {
 		tokenizer: provenance.tokenizer.as_str().to_owned(),
@@ -2310,17 +2530,34 @@ fn build_turn_outcome(
 	completion: &Completion,
 	context_id: Option<&str>,
 	committed_len: usize,
+	resolved_provider: Option<&str>,
+	resolved_model: Option<&str>,
 ) -> pb::Outcome {
 	let mut output = projection.output.clone();
-	if !projection.assistant_text.is_empty() {
+	let parts = projection
+		.message_parts
+		.iter()
+		.filter(|part| !part.text.is_empty())
+		.map(|part| thread_pb::Part {
+			kind: Some(if part.thinking {
+				part::Kind::Thinking(thread_pb::Thinking {
+					text:      part.text.clone(),
+					signature: Bytes::new(),
+					redacted:  false,
+				})
+			} else {
+				part::Kind::Text(part.text.clone())
+			}),
+		})
+		.collect::<Vec<_>>();
+	if !parts.is_empty() {
 		output.insert(0, thread_pb::Item {
 			seq:           0,
 			created_at_ms: 0,
 			kind:          Some(item::Kind::Message(thread_pb::Message {
-				role:  thread_pb::Role::Assistant as i32,
-				parts: vec![thread_pb::Part {
-					kind: Some(part::Kind::Text(projection.assistant_text.clone())),
-				}],
+				role: thread_pb::Role::Assistant as i32,
+				parts,
+				..Default::default()
 			})),
 			props:         None,
 		});
@@ -2330,18 +2567,28 @@ fn build_turn_outcome(
 		head = head.saturating_add(1);
 		item.seq = head;
 	}
-	let provider = completion
-		.receipt
-		.plan
-		.provider
-		.as_ref()
-		.map_or_else(String::new, |value| value.as_str().to_owned());
-	let model = completion
-		.receipt
-		.plan
-		.model
-		.as_ref()
-		.map_or_else(String::new, |value| value.as_str().to_owned());
+	let provider = resolved_provider
+		.or_else(|| {
+			completion
+				.receipt
+				.plan
+				.provider
+				.as_ref()
+				.map(|value| value.as_str())
+		})
+		.unwrap_or_default()
+		.to_owned();
+	let model = resolved_model
+		.or_else(|| {
+			completion
+				.receipt
+				.plan
+				.model
+				.as_ref()
+				.map(|value| value.as_str())
+		})
+		.unwrap_or_default()
+		.to_owned();
 	let diagnostics = completion
 		.receipt
 		.recoveries
@@ -2685,6 +2932,10 @@ fn turn_events(
 		};
 		let mut pending = BTreeMap::<String, PendingInvocation>::new();
 		let mut incoming_open = true;
+		// Index of the currently streaming text/thinking part. Providers close
+		// these blocks implicitly (next block start or stream completion), so
+		// the projection owes consumers an explicit `PartEnd`.
+		let mut open_part: Option<u32> = None;
 		loop {
 			let event = loop {
 				let next_timeout = pending
@@ -2749,7 +3000,11 @@ fn turn_events(
 				},
 			};
 			match event {
-				ChatEvent::Started(_) => {},
+				ChatEvent::Started(meta) => {
+					let mut route = resolved.resolved_route.lock();
+					route.provider = Some(meta.provider);
+					route.model = meta.model;
+				},
 				ChatEvent::BlockStarted { index, kind } => {
 					let kind = match kind {
 						BlockKind::Text => part_start::Kind::Text,
@@ -2761,6 +3016,17 @@ fn turn_events(
 							))?
 						},
 					};
+					if open_part.is_some_and(|open| open != index)
+						&& let Some(open) = open_part.take()
+					{
+						yield pb::TurnEvent {
+							event: Some(turn_event::Event::PartEnd(pb::PartEnd {
+								index:     open,
+								signature: Bytes::new(),
+							})),
+						};
+					}
+					open_part = Some(index);
 					yield pb::TurnEvent {
 						event: Some(turn_event::Event::PartStart(pb::PartStart {
 							index,
@@ -2771,7 +3037,7 @@ fn turn_events(
 					};
 				},
 				ChatEvent::TextDelta { index, text } => {
-					projection.lock().assistant_text.push_str(text.as_str());
+					projection.lock().append_part(index, false, text.as_str());
 					yield pb::TurnEvent {
 						event: Some(turn_event::Event::PartDelta(pb::PartDelta {
 							index,
@@ -2780,6 +3046,7 @@ fn turn_events(
 					};
 				},
 				ChatEvent::ThinkingDelta { index, text } => {
+					projection.lock().append_part(index, true, text.as_str());
 					yield pb::TurnEvent {
 						event: Some(turn_event::Event::PartDelta(pb::PartDelta {
 							index,
@@ -2788,6 +3055,14 @@ fn turn_events(
 					};
 				},
 				ChatEvent::ToolCallStarted { index, id, name } => {
+					if let Some(open) = open_part.take() {
+						yield pb::TurnEvent {
+							event: Some(turn_event::Event::PartEnd(pb::PartEnd {
+								index:     open,
+								signature: Bytes::new(),
+							})),
+						};
+					}
 					yield pb::TurnEvent {
 						event: Some(turn_event::Event::PartStart(pb::PartStart {
 							index,
@@ -2899,11 +3174,25 @@ fn turn_events(
 							"provider completed with live invocations outstanding",
 						))?;
 					}
+					if let Some(open) = open_part.take() {
+						yield pb::TurnEvent {
+							event: Some(turn_event::Event::PartEnd(pb::PartEnd {
+								index:     open,
+								signature: Bytes::new(),
+							})),
+						};
+					}
+					let (route_provider, route_model) = {
+						let route = resolved.resolved_route.lock();
+						(route.provider.clone(), route.model.clone())
+					};
 					let outcome = build_turn_outcome(
 						&projection.lock(),
 						&completion,
 						resolved.context_id.as_deref(),
 						resolved.committed_messages.len(),
+						route_provider.as_ref().map(|provider| provider.as_str()),
+						route_model.as_ref().map(|model| model.as_str()),
 					);
 					let provider_revision = if let Some(conversation) =
 						resolved.provider_conversation.as_ref()
@@ -2966,7 +3255,7 @@ fn turn_events(
 }
 
 fn image_events(
-	mut events: omp_inference::answer::GenerationStream<ImageArtifact>,
+	mut events: omp_ai::answer::GenerationStream<ImageArtifact>,
 ) -> impl Stream<Item = Result<pb::ImageEvent, Status>> + Send + 'static {
 	async_stream::try_stream! {
 		let mut images = Vec::new();
@@ -3065,7 +3354,8 @@ fn speak_event(chunk: AudioChunk) -> pb::SpeakEvent {
 }
 
 fn search_response(answer: SearchResults) -> pb::SearchResponse {
-	let omp_inference::answer::SearchResults { results, answer, usage, metadata } = answer;
+	let omp_ai::answer::SearchResults { results, answer, usage, metadata } = answer;
+	let projected_at = SystemTime::now();
 	let engine = metadata
 		.provider
 		.as_ref()
@@ -3081,14 +3371,15 @@ fn search_response(answer: SearchResults) -> pb::SearchResponse {
 				snippet:      result
 					.snippet
 					.map_or_else(String::new, |snippet| snippet.as_str().to_owned()),
-				published_at: result
-					.published_at
-					.and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-					.map_or_else(String::new, |duration| duration.as_secs().to_string()),
+				published_at: result.published_at.map_or_else(String::new, format_rfc3339),
 				author:       result
 					.author
 					.map_or_else(String::new, |author| author.as_str().to_owned()),
 				score:        result.score.map(f64::from),
+				age_seconds:  result
+					.published_at
+					.and_then(|time| projected_at.duration_since(time).ok())
+					.map_or(0, |age| age.as_secs()),
 			})
 			.collect(),
 		citations: metadata
@@ -3142,7 +3433,7 @@ fn search_response(answer: SearchResults) -> pb::SearchResponse {
 	}
 }
 
-fn search_failure_kind(kind: SearchFailureKind) -> failure::Kind {
+const fn search_failure_kind(kind: SearchFailureKind) -> failure::Kind {
 	match kind {
 		SearchFailureKind::Authentication => failure::Kind::Authentication,
 		SearchFailureKind::Quota => failure::Kind::Quota,
@@ -3233,6 +3524,7 @@ fn usage_response(report: UsageReport) -> pb::UsageResponse {
 					UsageUnit::Percent => window::Unit::Percent,
 					UsageUnit::Tokens => window::Unit::Tokens,
 					UsageUnit::Requests => window::Unit::Requests,
+					UsageUnit::Credits => window::Unit::Credits,
 					UsageUnit::Usd => window::Unit::Usd,
 					UsageUnit::Minutes => window::Unit::Minutes,
 					UsageUnit::Bytes => window::Unit::Bytes,
@@ -3292,8 +3584,9 @@ fn realtime_input(frame: pb::RealtimeFrame) -> Result<RealtimeInput, Status> {
 			content:  result
 				.parts
 				.iter()
-				.map(tool_result_part)
-				.collect::<Result<Vec<_>, _>>()?
+				.map(ToolResultContent::from_thread_part)
+				.collect::<Result<Vec<_>, _>>()
+				.map_err(|error| Status::invalid_argument(error.to_string()))?
 				.into(),
 			is_error: result.is_error,
 		}),
@@ -3391,6 +3684,8 @@ fn realtime_chat_event(event: ChatEvent) -> Result<pb::TurnEvent, Status> {
 			&completion,
 			None,
 			0,
+			None,
+			None,
 		)),
 		ChatEvent::WorkflowAction(_)
 		| ChatEvent::WorkflowResume(_)
@@ -3484,7 +3779,7 @@ const fn video_dimensions(resolution: i32, aspect_ratio: i32) -> Setting<Dimensi
 }
 
 async fn run_generation(
-	mut session: omp_inference::answer::GenerationSession<VideoArtifact>,
+	mut session: omp_ai::answer::GenerationSession<VideoArtifact>,
 	status: Arc<Mutex<pb::GenerationStatus>>,
 	updates: broadcast::Sender<pb::GenerationStatus>,
 	cancel: Receiver<oneshot::Sender<Result<JobCancellationReceipt, JobCancelError>>>,
@@ -3601,18 +3896,89 @@ fn system_time_ms(time: SystemTime) -> u64 {
 
 #[cfg(test)]
 mod tests {
-	use omp_catalog::snapshot;
-	use omp_inference::{
-		RouteId,
+	use omp_ai::{
+		Role, RouteId,
 		error::{ErrorPhase, RetryAction},
 		receipt::{ExecutionReceipt, ReasonId, RecoveryKind, RecoveryRecord},
 	};
+	use omp_catalog::snapshot;
+	use omp_core::sf;
 	use omp_tool::{
 		Claims, Constraint, Effects, Ev, GrammarSyntax, IncomingParams, Part, Precedence,
 		Presentation, PromptCaps, Rev, Tool, ToolSpec,
 	};
 
 	use super::*;
+
+	#[test]
+	fn items_project_to_exactly_one_message_each() {
+		// Context revisions (`Revision.head`, `truncate_to`, `provider_heads`)
+		// count items and index the retained message list by that head, so the
+		// projection must stay 1:1. Assistant-run merging for strict OpenAI
+		// validators happens in the codecs instead.
+		let items = vec![
+			thread_pb::Item {
+				seq:           0,
+				created_at_ms: 0,
+				props:         None,
+				kind:          Some(item::Kind::Message(thread_pb::Message {
+					role:            thread_pb::Role::Assistant as i32,
+					parts:           vec![thread_pb::Part {
+						kind: Some(part::Kind::Text("writing two files".to_owned())),
+					}],
+					synthetic:       None,
+					user_initiated:  None,
+					completed_at_ms: None,
+					usage:           None,
+				})),
+			},
+			tool_call_item("call_a"),
+			tool_call_item("call_b"),
+			tool_result_item("call_a"),
+			tool_result_item("call_b"),
+		];
+		let messages = items_messages(&items).expect("items project");
+		assert_eq!(messages.len(), items.len());
+		let roles = messages
+			.iter()
+			.map(|message| message.role)
+			.collect::<Vec<_>>();
+		assert_eq!(roles, [
+			Role::Assistant,
+			Role::Assistant,
+			Role::Assistant,
+			Role::Tool,
+			Role::Tool
+		]);
+	}
+
+	fn tool_call_item(id: &str) -> thread_pb::Item {
+		thread_pb::Item {
+			seq:           0,
+			created_at_ms: 0,
+			props:         None,
+			kind:          Some(item::Kind::ToolCall(thread_pb::ToolCall {
+				id: id.to_owned(),
+				name: "write".to_owned(),
+				args_json: br#"{"path":"a"}"#.to_vec().into(),
+				..Default::default()
+			})),
+		}
+	}
+
+	fn tool_result_item(id: &str) -> thread_pb::Item {
+		thread_pb::Item {
+			seq:           0,
+			created_at_ms: 0,
+			props:         None,
+			kind:          Some(item::Kind::ToolResult(thread_pb::ToolResult {
+				call_id: id.to_owned(),
+				name: "write".to_owned(),
+				parts: vec![thread_pb::Part { kind: Some(part::Kind::Text("ok".to_owned())) }],
+				..Default::default()
+			})),
+		}
+	}
 
 	struct GrammarFixture {
 		spec: ToolSpec,
@@ -3668,7 +4034,7 @@ mod tests {
 						name:            sf!("edit"),
 						rev:             Rev { family: sf!("hl"), n: 1 },
 						description:     sf!("Sparse edit"),
-						schema:          Bytes::from_static(br#"{"type":"object"}"#),
+						schema:          Bytes::from_static(br#"{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}"#),
 						constraint:      Constraint::Grammar {
 							syntax:         GrammarSyntax::Lark,
 							definition:     Str::new_static(LIVE_EDIT_GRAMMAR),
@@ -3697,7 +4063,10 @@ mod tests {
 		};
 		assert_eq!(grammar.syntax, ToolGrammarSyntax::Lark);
 		assert_eq!(grammar.definition, LIVE_EDIT_GRAMMAR);
-		assert_eq!(fallback.as_value(), &serde_json::json!({"type": "object"}));
+		assert_eq!(
+			fallback.as_value(),
+			&serde_json::json!({"type": "object", "properties": {"input": {"type": "string"}}, "required": ["input"]})
+		);
 	}
 
 	#[test]
@@ -3766,6 +4135,7 @@ mod tests {
 		model.display_name = sf!("Fixture Display");
 		model.limits.context_window = Some(1_000_000);
 		model.limits.maximum_output_tokens = Some(128_000);
+		model.provenance.sources[0].kind = ProvenanceKind::Configured;
 		let chat = model
 			.capabilities
 			.chat
@@ -3775,11 +4145,52 @@ mod tests {
 		chat.tools = Availability::Unsupported;
 
 		let card = model_card(&model, "fixture", Vec::new());
+		assert_eq!(card.id, format!("fixture/{}", model.key));
+		assert_eq!(card.provider, "fixture");
+		assert_eq!(card.model, model.key.as_str());
+		assert_eq!(card.source, model_card::Source::Configured as i32);
 		assert_eq!(card.name, "Fixture Display");
 		assert_eq!(card.context_window, 1_000_000);
 		assert_eq!(card.max_output_tokens, 128_000);
 		assert_eq!(card.inputs, vec![pb::Modality::Text as i32, pb::Modality::Image as i32]);
 		assert_eq!(card.supports_tools, Some(false));
+	}
+
+	#[test]
+	fn tokenizer_capability_errors_are_failed_preconditions() {
+		let error = Error::new(
+			ErrorKind::CapabilityMismatch,
+			ErrorPhase::Planning,
+			RetryAction::Never,
+			ExecutionReceipt::default(),
+		);
+		let status = capability_status(error, "provider/model", OperationKind::Tokenize);
+		assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+		assert!(status.message().contains("provider/model"));
+		assert!(status.message().contains("tokenize"));
+		assert!(!status.message().contains("Planning"));
+	}
+
+	#[test]
+	fn turn_outcome_uses_planned_identity_when_provider_receipt_omits_it() {
+		let completion = Completion {
+			reason:  FinishReason::Stop,
+			blocks:  0,
+			usage:   Usage::default(),
+			receipt: ExecutionReceipt::default().into(),
+		};
+
+		let outcome = build_turn_outcome(
+			&TurnProjection::default(),
+			&completion,
+			None,
+			0,
+			Some("provider-planned"),
+			Some("model-planned"),
+		);
+
+		assert_eq!(outcome.provider, "provider-planned");
+		assert_eq!(outcome.model, "model-planned");
 	}
 
 	#[test]
@@ -3810,7 +4221,8 @@ mod tests {
 			receipt: receipt.into(),
 		};
 
-		let outcome = build_turn_outcome(&TurnProjection::default(), &completion, None, 0);
+		let outcome =
+			build_turn_outcome(&TurnProjection::default(), &completion, None, 0, None, None);
 
 		assert_eq!(outcome.diagnostics, vec![
 			pb::Diagnostic {
@@ -3883,7 +4295,8 @@ mod tests {
 			Some("route-fork")
 		);
 		assert_eq!(completion.receipt.recoveries.len(), 1);
-		let outcome = build_turn_outcome(&TurnProjection::default(), &completion, None, 0);
+		let outcome =
+			build_turn_outcome(&TurnProjection::default(), &completion, None, 0, None, None);
 		assert_eq!(outcome.provider, "provider-fork");
 		assert_eq!(outcome.model, "model-fork");
 		assert_eq!(outcome.diagnostics.len(), 1);
@@ -3892,7 +4305,7 @@ mod tests {
 	}
 
 	fn empty_stop_receipt(classification: &str, billed_output: u64) -> ExecutionReceipt {
-		use omp_inference::{
+		use omp_ai::{
 			body::{AttemptBodyEvidence, Replayability, RetryDecision, RetryDecisionReason},
 			receipt::{AttemptOutcome, AttemptReceipt, ProviderEvidence},
 		};
@@ -3948,14 +4361,14 @@ mod tests {
 		let thought_only = expect_turn_error(inference_turn_error(thought_only));
 		assert_eq!(thought_only.kind, turn_error::Kind::EmptyOutput as i32);
 		assert_eq!(thought_only.diagnostics.len(), 1);
-		assert_eq!(thought_only.diagnostics[0].code, omp_agent::empty_stop::NO_FINAL_OUTPUT);
+		assert_eq!(thought_only.diagnostics[0].code, empty_stop::NO_FINAL_OUTPUT);
 
 		// Zero-block empty stops join the session-level bounded continuation
 		// instead of failing as opaque upstream errors.
 		let no_content = expect_turn_error(inference_turn_error(no_content));
 		assert_eq!(no_content.kind, turn_error::Kind::EmptyOutput as i32);
 		assert_eq!(no_content.diagnostics.len(), 1);
-		assert_eq!(no_content.diagnostics[0].code, omp_agent::empty_stop::EMPTY);
+		assert_eq!(no_content.diagnostics[0].code, empty_stop::EMPTY);
 	}
 
 	#[test]
@@ -3965,7 +4378,7 @@ mod tests {
 		let error = expect_turn_error(inference_turn_error(error));
 		assert_eq!(error.kind, turn_error::Kind::EmptyOutput as i32);
 		assert_eq!(error.diagnostics.len(), 1);
-		assert_eq!(error.diagnostics[0].code, omp_agent::empty_stop::BILLED_OUTPUT);
+		assert_eq!(error.diagnostics[0].code, empty_stop::BILLED_OUTPUT);
 		assert_eq!(error.diagnostics[0].detail, "42");
 		assert_eq!(error.diagnostics[0].model, "model-a");
 		assert_eq!(error.diagnostics[0].attempt, 1);
@@ -3979,7 +4392,7 @@ mod tests {
 		let whitespace =
 			empty_stop_error(ErrorKind::EmptyCompletion, empty_stop_receipt("whitespace-only", 42));
 		let whitespace = expect_turn_error(inference_turn_error(whitespace));
-		assert_eq!(whitespace.diagnostics[0].code, omp_agent::empty_stop::EMPTY);
+		assert_eq!(whitespace.diagnostics[0].code, empty_stop::EMPTY);
 
 		// Reasoning-only billing is reported in the separate reasoning
 		// dimension; a zero-block stop without billed output keeps the
@@ -3987,7 +4400,7 @@ mod tests {
 		let reasoning_only =
 			empty_stop_error(ErrorKind::EmptyCompletion, empty_stop_receipt("no-content", 0));
 		let reasoning_only = expect_turn_error(inference_turn_error(reasoning_only));
-		assert_eq!(reasoning_only.diagnostics[0].code, omp_agent::empty_stop::EMPTY);
+		assert_eq!(reasoning_only.diagnostics[0].code, empty_stop::EMPTY);
 	}
 
 	#[test]

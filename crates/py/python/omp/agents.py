@@ -25,6 +25,7 @@ from . import limits as _limits
 from . import Fault
 from ._verdicts import BlobPart, TextPart
 from .policy import PolicyDenied, RuleRef
+from .provider import ModelRef
 
 
 DEFAULT_MAX_DEPTH = 2
@@ -41,6 +42,14 @@ depth: int = 0
 
 class AgentsError(OmpError):
     """Base error for agent operations."""
+
+
+class ModelSwitchDenied(AgentsError):
+    """Raised when the active interactive model cannot be changed."""
+
+
+class SessionInjectionDenied(AgentsError):
+    """Raised when a targeted session injection is unknown or foreign."""
 
 
 class SpawnDenied(AgentsError):
@@ -294,11 +303,39 @@ async def completion(
     schema: Mapping[str, object] | None = None,
     default: object = _DEFAULT,
     scope: Literal["turn", "session"] = "turn",
+    context: Literal["none", "thread"] = "none",
     max_output_tokens: int | None = None,
     deadline: Duration = Duration("10s"),
     labels: Mapping[str, str] | None = None,
 ) -> Completion:
-    """Request a budgeted stateless completion from text or typed media parts."""
+    """Request a budgeted stateless completion from text or typed media parts.
+
+    ``context="thread"`` instead runs one non-persisted side-channel turn over
+    the caller's live conversation thread on the session model: the reply sees
+    the full context but never becomes a thread item. Thread-context calls
+    accept only a plain-text prompt; ``role``, ``system``, ``choices``,
+    ``schema``, and ``max_output_tokens`` are stateless-only.
+    """
+    if context not in ("none", "thread"):
+        raise ValueError('completion context must be "none" or "thread"')
+    if context == "thread":
+        if not isinstance(prompt, str):
+            raise TypeError("thread-context completion prompt must be plain text")
+        if (
+            system is not None
+            or choices is not None
+            or schema is not None
+            or max_output_tokens is not None
+        ):
+            raise ValueError(
+                "thread-context completions accept only prompt, default, scope,"
+                " deadline, and labels"
+            )
+        if role != "smol":
+            raise ValueError(
+                "thread-context completions run on the session model;"
+                " role is not selectable"
+            )
     if not isinstance(prompt, str):
         if not isinstance(prompt, Sequence) or any(
             not isinstance(part, (TextPart, BlobPart)) for part in prompt
@@ -318,15 +355,20 @@ async def completion(
         raise ValueError("completion choices and schema are mutually exclusive")
     arguments: dict[str, object] = {
         "prompt": prompt_wire,
-        "role": role,
-        "system": system,
-        "choices": _wire(choices),
-        "schema": _wire(schema),
         "scope": scope,
-        "max_output_tokens": max_output_tokens,
         "deadline_ms": _duration_ms(deadline),
         "labels": _wire(labels or {}),
     }
+    if context == "thread":
+        arguments["context"] = "thread"
+    else:
+        arguments.update(
+            role=role,
+            system=system,
+            choices=_wire(choices),
+            schema=_wire(schema),
+            max_output_tokens=max_output_tokens,
+        )
     if default is not _DEFAULT:
         arguments["default"] = _wire(default)
     row = _mapping(await _request("omp.agents.completion", **arguments), "completion")
@@ -1108,20 +1150,77 @@ async def peers(
     return [_agent_ref(row) for row in response]
 
 
+async def set_model(model: str, *, thinking: str | None = None) -> ModelRef:
+    """Switch the active interactive session model for subsequent turns."""
+    if not isinstance(model, str) or not model:
+        raise TypeError("model must be a non-empty string")
+    if thinking is not None and not isinstance(thinking, str):
+        raise TypeError("thinking must be a string or None")
+    response = _mapping(
+        await _request("omp.agents.set_model", model=model, thinking=thinking),
+        "model reference",
+    )
+    return ModelRef(
+        provider=str(response["provider"]),
+        api=str(response["api"]),
+        model=str(response["model"]),
+    )
+
+
+async def abort() -> None:
+    """Abort the main agent's active run, if any."""
+    await _request("omp.agents.abort")
+
+
+async def shutdown(reason: str = "") -> None:
+    """Gracefully shut down the current interactive session."""
+    if not isinstance(reason, str):
+        raise TypeError("reason must be a string")
+    await _request("omp.agents.shutdown", reason=reason)
+
+
+async def reload_extensions() -> None:
+    """Request a supervised hot reload of the extension hosts."""
+    await _request("omp.agents.reload_extensions")
+
+
+async def is_idle() -> bool:
+    """Return whether the main agent currently has no active run."""
+    response = await _request("omp.agents.is_idle")
+    if not isinstance(response, bool):
+        raise TypeError("agent idle response must be a boolean")
+    return response
+
+
+async def wait_for_idle() -> None:
+    """Wait until the main agent has no active run."""
+    await _request("omp.agents.wait_for_idle")
+
+
+async def pending_messages() -> int:
+    """Return the number of messages queued for the main agent."""
+    response = await _request("omp.agents.pending_messages")
+    if isinstance(response, bool) or not isinstance(response, int) or response < 0:
+        raise TypeError("pending message response must be a non-negative integer")
+    return response
+
+
 async def inject(
     prompt: str,
     *,
     mode: DeliveryMode = DeliveryMode.NEXT_TURN,
     visible: bool = False,
     role: Literal["user", "system"] = "system",
+    session: str | None = None,
 ) -> Receipt:
-    """Inject an out-of-band item into this agent's mailbox."""
+    """Inject an out-of-band item into the current or newly created session."""
     response = await _request(
         "omp.agents.inject",
         prompt=prompt,
         mode=mode.value,
         visible=visible,
         role=role,
+        session=session,
     )
     return _receipt(response)
 
@@ -1807,6 +1906,7 @@ __all__ = (
     "LoopSignal",
     "MAILBOX_CAPACITY",
     "MAX_BACKFILL",
+    "ModelSwitchDenied",
     "MIN_SCHEDULE_INTERVAL",
     "MergeMode",
     "Message",
@@ -1829,6 +1929,7 @@ __all__ = (
     "Settle",
     "Snapshot",
     "SnapshotUnsupported",
+    "SessionInjectionDenied",
     "Spawn",
     "SpawnDenied",
     "SpawnLimits",
@@ -1841,6 +1942,7 @@ __all__ = (
     "UpgradePolicy",
     "Usage",
     "WorktreeOutcome",
+    "abort",
     "broadcast",
     "completion",
     "continuations",
@@ -1848,10 +1950,14 @@ __all__ = (
     "get",
     "inbox",
     "inject",
+    "is_idle",
     "limits",
+    "set_model",
     "list",
     "loop_signal",
     "peers",
+    "pending_messages",
+    "reload_extensions",
     "restore",
     "revive",
     "rewind",
@@ -1860,6 +1966,7 @@ __all__ = (
     "schedules",
     "send",
     "set_continuation_policy",
+    "shutdown",
     "snapshot",
     "snapshots",
     "spawn",
@@ -1867,4 +1974,5 @@ __all__ = (
     "timer",
     "unschedule",
     "wait_for",
+    "wait_for_idle",
 )

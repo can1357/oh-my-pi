@@ -21,7 +21,7 @@ const PRIVATE_NETWORK_CLIENT_SERVER_SID: u32 = 87;
 const CPU_RATE_MAX: u32 = 10_000;
 
 #[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
-pub(crate) enum CapabilitySid {
+pub enum CapabilitySid {
 	#[strum(serialize = "WinCapabilityInternetClientSid")]
 	InternetClient,
 	#[strum(serialize = "WinCapabilityInternetClientServerSid")]
@@ -41,9 +41,9 @@ impl CapabilitySid {
 	}
 }
 
-/// Purely compiles the inspectable AppContainer preview. Environment values are
-/// deliberately absent; they are resolved only during runtime preparation.
-pub(crate) fn compile(
+/// Purely compiles the inspectable `AppContainer` preview. Environment values
+/// are deliberately absent; they are resolved only during runtime preparation.
+pub fn compile(
 	spec: &SandboxSpec,
 	program: &Path,
 	requested: CapabilitySet,
@@ -51,6 +51,16 @@ pub(crate) fn compile(
 ) -> Result<Plan, SandboxError> {
 	if spec.write == WriteMode::Overlay {
 		enforced = enforced.difference(CapabilitySet::one(Capability::FsWriteEphemeral));
+	}
+	let has_future_write_deny = spec.write_deny.iter().any(|path| !path.exists());
+	if has_future_write_deny {
+		enforced = enforced.difference(CapabilitySet::one(Capability::FsWriteDeny));
+		if spec.degradation == DegradationPolicy::Reject {
+			return Err(SandboxError::BackendCapabilities {
+				backend: Backend::AppContainer,
+				missing: CapabilitySet::one(Capability::FsWriteDeny),
+			});
+		}
 	}
 	let capability_sids = capability_sids(spec.network);
 	let loses_ipc = !capability_sids.is_empty() && enforced.contains(Capability::IpcRestrict);
@@ -109,6 +119,18 @@ pub(crate) fn compile(
 			Capability::FsReadDeny,
 			"temporary deny ACEs are applied only to existing paths whose DACL can be changed",
 		));
+	}
+	if !spec.write_deny.is_empty() {
+		plan.add_caveat(Caveat::capability(
+			Capability::FsWriteDeny,
+			"temporary write-deny ACEs make existing carve-out paths read-only while the process runs",
+		));
+		if has_future_write_deny {
+			plan.add_caveat(Caveat::capability(
+				Capability::FsWriteDeny,
+				"AppContainer cannot apply a write-deny ACE to a path that does not yet exist",
+			));
+		}
 	}
 	if !spec.unix_sockets.is_empty() {
 		plan.add_caveat(Caveat::general(
@@ -173,7 +195,7 @@ pub(crate) fn compile(
 	Ok(plan)
 }
 
-pub(crate) fn probe() -> BackendStatus {
+pub fn probe() -> BackendStatus {
 	#[cfg(windows)]
 	{
 		return crate::runtime::windows::probe_appcontainer();
@@ -187,7 +209,7 @@ pub(crate) fn probe() -> BackendStatus {
 	}
 }
 
-pub(crate) fn capability_sids(network: NetworkMode) -> Vec<CapabilitySid> {
+pub fn capability_sids(network: NetworkMode) -> Vec<CapabilitySid> {
 	match network {
 		NetworkMode::Disabled => Vec::new(),
 		NetworkMode::Enabled => {
@@ -229,6 +251,14 @@ fn render_profile(spec: &SandboxSpec, program: &Path, sids: &[CapabilitySid]) ->
 		profile.push_str(&path.to_string_lossy());
 	}
 	if spec.read_deny.is_empty() {
+		profile.push_str(" none");
+	}
+	profile.push_str("\n  write deny:");
+	for path in &spec.write_deny {
+		profile.push(' ');
+		profile.push_str(&path.to_string_lossy());
+	}
+	if spec.write_deny.is_empty() {
 		profile.push_str(" none");
 	}
 	profile.push_str("\n  read grants: ");

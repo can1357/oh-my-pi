@@ -36,16 +36,15 @@ async fn main() -> io::Result<()> {
 		if frame.last() == Some(&b'\n') {
 			frame.pop();
 		}
-		let inbound = match serde_json::from_slice::<InboundFrame>(&frame) {
-			Ok(inbound) => inbound,
-			Err(_) => {
-				write_frame(&mut output, &OutboundFrame::Log {
-					level:   LogLevel::Error,
-					message: Str::new_static("embedding input frame was invalid JSON"),
-				})
-				.await?;
-				continue;
-			},
+		let inbound = if let Ok(inbound) = serde_json::from_slice::<InboundFrame>(&frame) {
+			inbound
+		} else {
+			write_frame(&mut output, &OutboundFrame::Log {
+				level:   LogLevel::Error,
+				message: Str::new_static("embedding input frame was invalid JSON"),
+			})
+			.await?;
+			continue;
 		};
 		for response in worker.handle(inbound, generation) {
 			write_frame(&mut output, &response).await?;

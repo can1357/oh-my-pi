@@ -1,0 +1,30 @@
+[38;2;0;180;255m── resolve ─────────────────────────────────────────────────────────────────────────────────────────[39m
+
+[38;2;107;114;128m  · streaming args[39m
+                                                                                                    
+[38;2;156;163;176m[39m [38;2;0;180;255mResolve[39m: [38;2;156;163;176mapply[39m [38;2;0;255;136m⟨proposed -> resolved⟩[39m [38;2;107;114;128m[38;2;156;163;176mThe rename touches only[39m[39m                                     
+                                                                                                    
+
+[38;2;107;114;128m  · in progress[39m
+                                                                                                    
+[38;2;156;163;176m[39m [38;2;0;180;255mResolve[39m: [38;2;156;163;176mapply[39m [38;2;0;255;136m⟨proposed -> resolved⟩[39m [38;2;107;114;128m[38;2;156;163;176mThe rename touches only tokens.ts and matches the request.[39m[39m  
+                                                                                                    
+
+[38;2;107;114;128m  · done[39m
+                                                                                                    
+[38;2;0;255;136m                                                                                                    [39m
+[38;2;0;255;136m  Accept: pending action                                                                           [39m
+[38;2;0;255;136m                                                                                                    [39m
+[38;2;0;255;136m The rename touches only tokens.ts and matches the request.                                         [39m
+[38;2;0;255;136m                                                                                                    [39m
+                                                                                                    
+
+[38;2;107;114;128m  · failed[39m
+                                                                                                    
+[38;2;255;71;87m                                                                                                    [39m
+[38;2;255;71;87m  Failed: pending action                                                                           [39m
+[38;2;255;71;87m                                                                                                    [39m
+[38;2;255;71;87m The rename touches only tokens.ts and matches the request.                                         [39m
+[38;2;255;71;87m                                                                                                    [39m
+                                                                                                    
+

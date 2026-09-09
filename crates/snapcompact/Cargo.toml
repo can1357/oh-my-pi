@@ -9,9 +9,10 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-fontdue = { workspace = true }
-png = { workspace = true }
-thiserror = { workspace = true }
+fontdue.workspace = true
+png.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

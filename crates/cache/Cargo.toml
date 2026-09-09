@@ -1,0 +1,30 @@
+[package]
+name = "omp-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Reusable document, GitHub, MCP, and secret caches for omp"
+
+[dependencies]
+bytes.workspace = true
+omp-core.workspace = true
+parking_lot.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+strum.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

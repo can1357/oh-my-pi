@@ -10,6 +10,7 @@ pub mod build_id;
 mod bundle;
 mod client;
 mod guard;
+pub mod partition;
 pub mod project_state;
 #[cfg(windows)]
 pub mod windows;
@@ -20,13 +21,14 @@ pub use bundle::{
 	push_bundle, unpack_bundle,
 };
 pub use client::{
-	ActiveExecControl, BlobDownload, BlobDownloadEvent, BlobUpload, ClientError, DapStream,
-	DapStreamEvent, DataScope, DataStream, DataStreamItem, DocumentEvents, DocumentLease,
+	AcpRequest, ActiveExecControl, BlobDownload, BlobDownloadEvent, BlobUpload, ClientError,
+	DapStream, DapStreamEvent, DataScope, DataStream, DataStreamItem, DocumentEvents, DocumentLease,
 	DocumentRead, EnvClient, ExecEvent, ExecRun, ExtensionEnvClient, InProcessEnvTransport,
 	Invocation, InvocationEvent, InvocationGrant, InvocationPrincipal, LspEvents, LspStreamEvent,
 	McpSubscription, McpSubscriptionEvent, ProcessAttachment, ProcessAttachmentEvent, RequestStream,
-	ResourceCompletionEvent, ResourceCompletionStream, SearchEvent, SearchStream, StreamLost,
-	TransactionId, TransactionOutcome, WalkEvent, WalkStream, WorkerEnvClient,
+	ResourceCompletionEvent, ResourceCompletionStream, ResumableBlobTransfer, SearchEvent,
+	SearchStream, StreamLost, TransactionId, TransactionOutcome, VerifiedBlobTransfer, WalkEvent,
+	WalkStream, WorkerEnvClient,
 };
 pub use guard::{RunGuard, WorkerLease};
 /// Generated blob protocol messages accepted by scoped blob operations.
@@ -37,5 +39,6 @@ pub use omp_proto::document::v1 as document_frame;
 pub use omp_proto::env::v1 as frame;
 /// Protobuf codec trait used by UDS framing consumers.
 pub use omp_proto::prost;
+pub use partition::{FramePipe, PartitionError, PartitionedEnvTransport, in_process_frames};
 /// Wire schema revision required by extension-host requests.
 pub const SCHEMA_REV: u32 = omp_proto::SCHEMA_REV;

@@ -5,15 +5,17 @@ correlates invocation, command, session, named-process, worker, and blob
 requests over bidirectional frame transports and exposes server events as
 asynchronous request streams.
 
-`omp-env` does not expose or implement the environment host. The live daemon,
-tool executor, document and process authorities, Python extension host, and
-worker supervision are in `omp-envd`.
+`omp-env` does not expose or implement either host. `omp-envd` owns both the
+detached project daemon and the slim in-process session host; `omp-env`
+provides the one client that routes between them.
 
 ## Structure
 
 - `EnvClient` is the general environment-protocol client. It supports decoded
   in-process transports as well as connected transports without changing the
   request API.
+- `partition` routes one ID-minting client between the session host and
+  detached daemon from registry-stamped tool loci and exhaustive frame kinds.
 - `Invocation`, `RunGuard`, and the streaming handles retain request identity,
   cancellation, and server-event correlation.
 - `ExtensionEnvClient` and `WorkerEnvClient` are capability-reduced DATA
@@ -26,11 +28,12 @@ worker supervision are in `omp-envd`.
 ## Philosophy
 
 The crate deliberately owns no world resources. Files, processes, document
-leases, workspace search, and blob storage remain behind the environment
-service. In-process and remote deployments feed the same frame client;
-per-invocation and per-command `RunGuard`s provide nonblocking,
-request-scoped cancellation without ending server-owned sessions. Detached
-work must relinquish its guard explicitly.
+leases, workspace search, and blob storage remain behind the detached
+environment service. Session tools use an in-process backend under the same
+client; environment tools and DATA effects route to the build-keyed daemon.
+Per-invocation and per-command `RunGuard`s provide nonblocking, request-scoped
+cancellation without ending server-owned sessions. Detached work must
+relinquish its guard explicitly.
 
 Extension hosts connect with `ExtensionEnvClient::connect_uds`. Construction
 completes the `ClientHello` handshake and consumes a `DataScope`; the resulting

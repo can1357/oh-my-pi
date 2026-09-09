@@ -4,10 +4,10 @@
 //! keycap a terminal would report regardless of layout or Option-modified
 //! characters; plain text rides the event's resolved `text`.
 
-use omp_tui::{Key, Mods, MouseButton};
+use omp_tui::{Chord, Key, Keymap, Mods, MouseButton};
 use winit::{
 	event::MouseButton as WinitButton,
-	keyboard::{Key as WinitKey, KeyCode, ModifiersState, NamedKey, PhysicalKey},
+	keyboard::{Key as WinitKey, KeyCode, ModifiersState, PhysicalKey},
 };
 
 /// winit modifiers → the report's modifier bits.
@@ -22,108 +22,96 @@ pub fn modifiers(state: ModifiersState) -> Mods {
 	}
 }
 
-/// Maps one key press to the terminal-vocabulary key, or `None` for host
-/// chrome chords (⌘-prefixed) and unrecognized input.
-pub fn map_key(event: &winit::event::KeyEvent, mods: ModifiersState) -> Option<Key> {
+/// Maps one key press through the configured terminal-vocabulary keymap.
+///
+/// Printable input without command modifiers keeps winit's layout-resolved
+/// logical text. Chords use the physical keycap plus the complete modifier set
+/// so their semantics match terminal input.
+pub fn map_key(
+	event: &winit::event::KeyEvent,
+	mods: ModifiersState,
+	keymap: &Keymap,
+) -> Option<Key> {
 	if mods.super_key() {
 		return None;
 	}
-	if let Some(key) = physical_ctrl_key(event.physical_key, mods) {
-		return Some(key);
+	let native = physical_key(event.physical_key).or_else(|| {
+		if mods.control_key() || mods.alt_key() {
+			return None;
+		}
+		let WinitKey::Character(text) = &event.logical_key else {
+			return None;
+		};
+		text.chars().next().map(Key::Char)
+	})?;
+	let resolved = keymap.resolve(Chord::new(native, modifiers(mods)))?;
+	if !mods.control_key()
+		&& !mods.alt_key()
+		&& resolved == identity_key(native, mods.shift_key())
+		&& let WinitKey::Character(text) = &event.logical_key
+	{
+		let mut chars = text.chars();
+		let character = chars.next()?;
+		return Some(if character == ' ' && chars.next().is_none() {
+			Key::Space
+		} else {
+			Key::Char(character)
+		});
 	}
-	match &event.logical_key {
-		WinitKey::Named(named) => map_named(*named, mods),
-		WinitKey::Character(text) => {
-			let letter = letter_of(event.physical_key);
-			match (mods.control_key(), mods.alt_key()) {
-				(true, true) => return letter.map(Key::CtrlAlt),
-				(true, false) => {
-					if mods.shift_key() && letter == Some('v') {
-						return Some(Key::PasteRaw);
-					}
-					if letter == Some('v') {
-						return Some(Key::Paste);
-					}
-					return letter.map(Key::Ctrl);
-				},
-				(false, true) => return letter.map(Key::Alt),
-				(false, false) => {},
-			}
-			let mut chars = text.chars();
-			let c = chars.next()?;
-			Some(if c == ' ' && chars.next().is_none() {
-				Key::Space
-			} else {
-				Key::Char(c)
-			})
-		},
-		_ => None,
-	}
-}
-/// Maps a Ctrl chord by physical key before text-input normalization.
-fn physical_ctrl_key(physical: PhysicalKey, mods: ModifiersState) -> Option<Key> {
-	if !mods.control_key() || mods.alt_key() {
-		return None;
-	}
-	let letter = letter_of(physical)?;
-	if mods.shift_key() && letter == 'v' {
-		return Some(Key::PasteRaw);
-	}
-	if letter == 'v' {
-		return Some(Key::Paste);
-	}
-	Some(Key::Ctrl(letter))
+	Some(resolved)
 }
 
-/// Maps a named (non-character) key with its modifiers; shift promotes
-/// motions to their selection-extending counterparts.
-fn map_named(named: NamedKey, mods: ModifiersState) -> Option<Key> {
-	Some(match named {
-		NamedKey::ArrowUp if mods.shift_key() => Key::SelectUp,
-		NamedKey::ArrowUp => Key::Up,
-		NamedKey::ArrowDown if mods.shift_key() => Key::SelectDown,
-		NamedKey::ArrowDown => Key::Down,
-		NamedKey::ArrowLeft if mods.shift_key() && (mods.alt_key() || mods.control_key()) => {
-			Key::SelectWordLeft
-		},
-		NamedKey::ArrowRight if mods.shift_key() && (mods.alt_key() || mods.control_key()) => {
-			Key::SelectWordRight
-		},
-		NamedKey::ArrowLeft if mods.shift_key() => Key::SelectLeft,
-		NamedKey::ArrowRight if mods.shift_key() => Key::SelectRight,
-		NamedKey::ArrowLeft if mods.alt_key() || mods.control_key() => Key::WordLeft,
-		NamedKey::ArrowRight if mods.alt_key() || mods.control_key() => Key::WordRight,
-		NamedKey::ArrowLeft => Key::Left,
-		NamedKey::ArrowRight => Key::Right,
-		NamedKey::Tab if mods.shift_key() => Key::BackTab,
-		NamedKey::Tab => Key::Tab,
-		NamedKey::Enter if mods.shift_key() => Key::ShiftEnter,
-		NamedKey::Enter => Key::Enter,
-		NamedKey::Escape => Key::Esc,
-		NamedKey::Backspace => Key::Backspace,
-		NamedKey::Delete if mods.alt_key() => Key::WordDelete,
-		NamedKey::Delete => Key::Delete,
-		NamedKey::Insert => Key::Insert,
-		NamedKey::Home if mods.shift_key() => Key::SelectHome,
-		NamedKey::Home => Key::Home,
-		NamedKey::End if mods.shift_key() => Key::SelectEnd,
-		NamedKey::End => Key::End,
-		NamedKey::PageUp => Key::PageUp,
-		NamedKey::PageDown => Key::PageDown,
-		NamedKey::F1 => Key::Function(1),
-		NamedKey::F2 => Key::Function(2),
-		NamedKey::F3 => Key::Function(3),
-		NamedKey::F4 => Key::Function(4),
-		NamedKey::F5 => Key::Function(5),
-		NamedKey::F6 => Key::Function(6),
-		NamedKey::F7 => Key::Function(7),
-		NamedKey::F8 => Key::Function(8),
-		NamedKey::F9 => Key::Function(9),
-		NamedKey::F10 => Key::Function(10),
-		NamedKey::F11 => Key::Function(11),
-		NamedKey::F12 => Key::Function(12),
-		NamedKey::Space => Key::Space,
-		_ => return None,
+/// The fallback result for a plain physical key, used to recognize when
+/// layout-resolved printable text should replace keycap identity.
+const fn identity_key(key: Key, shifted: bool) -> Key {
+	match key {
+		Key::Char(' ') => Key::Space,
+		Key::Char(character) if shifted => Key::Char(character.to_ascii_uppercase()),
+		key => key,
+	}
+}
+
+/// Resolves a physical winit key through the shared keymap.
+#[cfg(test)]
+fn resolve_physical(physical: PhysicalKey, mods: ModifiersState, keymap: &Keymap) -> Option<Key> {
+	let key = physical_key(physical)?;
+	keymap.resolve(Chord::new(key, modifiers(mods)))
+}
+
+/// Converts a physical winit keycap to the keymap's native key vocabulary.
+fn physical_key(physical: PhysicalKey) -> Option<Key> {
+	let PhysicalKey::Code(code) = physical else {
+		return None;
+	};
+	Some(match code {
+		KeyCode::ArrowUp => Key::Up,
+		KeyCode::ArrowDown => Key::Down,
+		KeyCode::ArrowLeft => Key::Left,
+		KeyCode::ArrowRight => Key::Right,
+		KeyCode::Tab => Key::Tab,
+		KeyCode::Enter | KeyCode::NumpadEnter => Key::Enter,
+		KeyCode::Escape => Key::Esc,
+		KeyCode::Backspace => Key::Backspace,
+		KeyCode::Delete => Key::Delete,
+		KeyCode::Insert => Key::Insert,
+		KeyCode::Home => Key::Home,
+		KeyCode::End => Key::End,
+		KeyCode::PageUp => Key::PageUp,
+		KeyCode::PageDown => Key::PageDown,
+		KeyCode::F1 => Key::Function(1),
+		KeyCode::F2 => Key::Function(2),
+		KeyCode::F3 => Key::Function(3),
+		KeyCode::F4 => Key::Function(4),
+		KeyCode::F5 => Key::Function(5),
+		KeyCode::F6 => Key::Function(6),
+		KeyCode::F7 => Key::Function(7),
+		KeyCode::F8 => Key::Function(8),
+		KeyCode::F9 => Key::Function(9),
+		KeyCode::F10 => Key::Function(10),
+		KeyCode::F11 => Key::Function(11),
+		KeyCode::F12 => Key::Function(12),
+		KeyCode::Space => Key::Space,
+		_ => Key::Char(letter_of(physical)?),
 	})
 }
 
@@ -174,8 +162,13 @@ pub const fn letter_of(physical: PhysicalKey) -> Option<char> {
 		KeyCode::Equal => '=',
 		KeyCode::BracketLeft => '[',
 		KeyCode::BracketRight => ']',
+		KeyCode::Semicolon => ';',
+		KeyCode::Quote => '\'',
+		KeyCode::Backquote => '`',
+		KeyCode::Backslash => '\\',
 		KeyCode::Comma => ',',
 		KeyCode::Period => '.',
+		KeyCode::Slash => '/',
 		_ => return None,
 	})
 }
@@ -195,45 +188,48 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn shift_promotes_motions_to_selection_keys() {
-		let shift = ModifiersState::SHIFT;
-		let cases = [
-			(NamedKey::ArrowLeft, Key::SelectLeft),
-			(NamedKey::ArrowRight, Key::SelectRight),
-			(NamedKey::ArrowUp, Key::SelectUp),
-			(NamedKey::ArrowDown, Key::SelectDown),
-			(NamedKey::Home, Key::SelectHome),
-			(NamedKey::End, Key::SelectEnd),
-		];
-		for (named, expected) in cases {
-			assert_eq!(map_named(named, shift), Some(expected));
-		}
-	}
-
-	#[test]
-	fn shifted_word_motions_extend_the_selection() {
-		for word_mods in [ModifiersState::ALT, ModifiersState::CONTROL] {
-			let mods = ModifiersState::SHIFT | word_mods;
-			assert_eq!(map_named(NamedKey::ArrowLeft, mods), Some(Key::SelectWordLeft));
-			assert_eq!(map_named(NamedKey::ArrowRight, mods), Some(Key::SelectWordRight));
-			assert_eq!(map_named(NamedKey::ArrowLeft, word_mods), Some(Key::WordLeft));
-			assert_eq!(map_named(NamedKey::ArrowRight, word_mods), Some(Key::WordRight));
-		}
-	}
-
-	#[test]
-	fn plain_motions_stay_unpromoted() {
-		let none = ModifiersState::empty();
-		assert_eq!(map_named(NamedKey::ArrowLeft, none), Some(Key::Left));
-		assert_eq!(map_named(NamedKey::Home, none), Some(Key::Home));
-		assert_eq!(map_named(NamedKey::Tab, ModifiersState::SHIFT), Some(Key::BackTab));
-	}
-	#[test]
-	fn ctrl_b_uses_the_physical_key_before_text_normalization() {
+	fn default_keymap_resolves_gui_chords_like_terminal_chords() {
+		let keymap = Keymap::default();
 		assert_eq!(
-			physical_ctrl_key(PhysicalKey::Code(KeyCode::KeyB), ModifiersState::CONTROL),
-			Some(Key::Ctrl('b'))
+			resolve_physical(PhysicalKey::Code(KeyCode::Enter), ModifiersState::ALT, &keymap,),
+			Some(Key::FollowUp),
 		);
+		assert_eq!(
+			resolve_physical(
+				PhysicalKey::Code(KeyCode::KeyD),
+				ModifiersState::CONTROL | ModifiersState::SHIFT,
+				&keymap,
+			),
+			Some(Key::DebugMenu),
+		);
+	}
+
+	#[test]
+	fn supplied_keymap_changes_gui_dispatch() {
+		let mut keymap = Keymap::default();
+		let mods = ModifiersState::ALT | ModifiersState::SHIFT;
+		keymap.bind(Chord::new(Key::Char('k'), modifiers(mods)), Key::ToggleToolVisibility);
+
+		assert_eq!(
+			resolve_physical(PhysicalKey::Code(KeyCode::KeyK), mods, &keymap),
+			Some(Key::ToggleToolVisibility),
+		);
+	}
+
+	#[test]
+	fn chord_conversion_preserves_every_modifier() {
+		let state = ModifiersState::SHIFT
+			| ModifiersState::ALT
+			| ModifiersState::CONTROL
+			| ModifiersState::SUPER;
+		assert_eq!(modifiers(state), Mods {
+			shift:     true,
+			alt:       true,
+			ctrl:      true,
+			super_key: true,
+			hyper:     false,
+			meta:      false,
+		},);
 	}
 
 	#[test]

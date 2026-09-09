@@ -118,6 +118,86 @@ fn select_cell_options_align_and_seeded_filter_prunes() {
 	);
 }
 
+fn select_of(ui: &mut Ui) -> &Select {
+	let slot = ui.focus_ring()[0];
+	ui.root_mut()
+		.find_slot(slot)
+		.unwrap()
+		.comp()
+		.downcast_ref::<Select>()
+		.unwrap()
+}
+
+/// A preselected (recommended) row deep in a long list is painted with the
+/// cursor on the very first layout: the window jumps to it in one pass
+/// instead of creeping one row per frame.
+#[test]
+fn select_scrolls_the_preselected_row_into_view_on_the_first_layout() {
+	let options: String = (0..200)
+		.map(|index| {
+			let recommended = if index == 150 { " recommended" } else { "" };
+			format!("<option value=m{index} label=\"model {index}\"{recommended}/>")
+		})
+		.collect();
+	let mut ui = Ui::from_markup(
+		&format!("<select id=pick filter h=6>{options}</select>"),
+		40,
+		UiContext::default(),
+	)
+	.unwrap();
+	let select = select_of(&mut ui);
+	assert_eq!(select.cursor_option(), Some(150), "focus rests on the chosen row");
+	let scroll = select.scroll_offset();
+	assert!((146..=150).contains(&scroll), "window contains the cursor: scroll {scroll}");
+	let painted = rows(&ui).join("\n");
+	assert!(painted.contains("model 150"), "the chosen row is on screen:\n{painted}");
+	assert!(!painted.contains("model 0\n"), "the top of the list scrolled away:\n{painted}");
+	// End jumps the whole distance in one frame too.
+	ui.handle_key(Key::End);
+	let painted = rows(&ui).join("\n");
+	assert!(painted.contains("model 199"), "End lands on the last row:\n{painted}");
+}
+
+/// Filtering ranks whole-word and contiguous matches ahead of scattered
+/// subsequences, puts the current (recommended) option
+/// first among equals, and returns the cursor to the best match whenever
+/// the rows above it changed.
+#[test]
+fn select_filter_ranks_word_matches_first_and_resets_the_cursor_to_the_best_match() {
+	let mut ui = Ui::from_markup(
+		"<select id=models filter h=8><option value=0 label=\"Abliteration llama-3 \
+		 abliteration/llama-3\"/><option value=1 label=\"OpenRouter Qwen Plus \
+		 openrouter/qwen/qwen-plus\"/><option value=2 label=\"OpenRouter gpt-oss-120b \
+		 openrouter/openai/gpt-oss-120b\"/><option value=3 label=\"Zai glm-4-plus \
+		 zai/glm-4-plus\"/><option value=4 label=\"Anthropic Claude Opus 4.6 \
+		 anthropic/claude-opus-4-6\"/><option value=5 label=\"Anthropic Claude Opus 5 \
+		 anthropic/claude-opus-5\" recommended/><option value=6 label=\"OpenRouter Claude Opus 5 \
+		 openrouter/anthropic/claude-opus-5\"/></select>",
+		80,
+		UiContext::default(),
+	)
+	.unwrap();
+	assert_eq!(select_of(&mut ui).cursor_option(), Some(5), "the current model preselects");
+	for character in "opus".chars() {
+		ui.handle_key(Key::Char(character));
+	}
+	let select = select_of(&mut ui);
+	assert_eq!(select.visible_len(), 3, "o-p-u-s scattered across words never matches");
+	assert_eq!(select.cursor_option(), Some(5), "the current model ranks first for `opus`");
+	// Typing on keeps the cursor only while the rows above it are unchanged.
+	ui.handle_key(Key::Down);
+	assert_ne!(select_of(&mut ui).cursor_option(), Some(5));
+	ui.handle_key(Key::Char(' '));
+	ui.handle_key(Key::Char('4'));
+	let select = select_of(&mut ui);
+	assert_eq!(select.visible_len(), 1);
+	assert_eq!(
+		select.cursor_option(),
+		Some(4),
+		"the list changed above the cursor: back to the top"
+	);
+}
+
 #[test]
 fn segmented_and_checkbox_export_keyboard_and_mouse_transitions() {
 	let mut ui = Ui::from_markup(
@@ -572,7 +652,7 @@ fn editor_word_motion_crosses_line_boundaries() {
 	ui.handle_key(Key::Enter);
 	ui.handle_key(Key::Char('c'));
 	ui.handle_key(Key::Home);
-	// Pi crosses one logical-line boundary per word-motion command.
+	// Word-motion commands cross one logical-line boundary at a time.
 	ui.handle_key(Key::WordLeft);
 	ui.handle_key(Key::Char('X'));
 	assert_eq!(ui.values()["e"], json!("alpha betaX\nc"));
@@ -1239,8 +1319,8 @@ fn icon_catalog_resolves_short_names_and_qualified_aliases() {
 
 	let omp = Icon::from_name("omp").unwrap();
 	assert_eq!(omp, Icon::from_name("icon.omp").unwrap());
-	assert_eq!(Charset::Ascii.icon(omp), "⍧");
-	assert_eq!(Charset::Unicode.icon(omp), "⍧");
+	assert_eq!(Charset::Ascii.icon(omp), "pi");
+	assert_eq!(Charset::Unicode.icon(omp), "π");
 	assert_eq!(Charset::NerdFont.icon(omp), "󰵗");
 	assert_eq!(Charset::NerdFont.icon(Icon::Csharp), "\u{e7b2}");
 	let command_types = [
@@ -1497,7 +1577,10 @@ fn bracketed_paste_sanitizes_multiline_editor_and_single_line_input() {
 
 	let input = ui.focus_ring()[1];
 	ui.set_focus_slot(Some(input));
-	assert_eq!(ui.handle_paste("a\r\nb"), UiEvent::None);
+	assert_eq!(ui.handle_paste("a\r\nb"), UiEvent::Changed {
+		id:    "i".into(),
+		value: "a b".into(),
+	});
 	assert_eq!(ui.values()["i"], json!("a b"));
 }
 

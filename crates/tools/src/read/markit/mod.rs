@@ -1,11 +1,6 @@
 //! In-memory document-to-Markdown conversion.
 
-use std::{
-	error,
-	fmt::{self, Display},
-	path::Path,
-	str,
-};
+use std::{path::Path, str};
 
 use bytes::Bytes;
 use omp_core::{Hash32, IntoStr, Str};
@@ -145,9 +140,10 @@ pub struct ConversionResult {
 }
 
 /// A typed document conversion failure.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum MarkitError {
 	/// A converter accepted the document but could not produce Markdown.
+	#[error("{format} conversion failed: {message}")]
 	Conversion {
 		/// Stable converter name.
 		format:  &'static str,
@@ -176,14 +172,6 @@ impl MarkitError {
 		}
 	}
 }
-
-impl Display for MarkitError {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		write!(formatter, "{} conversion failed: {}", self.format(), self.message())
-	}
-}
-
-impl error::Error for MarkitError {}
 
 fn convert_with_anydoc(
 	bytes: &[u8],

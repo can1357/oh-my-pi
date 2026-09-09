@@ -1,0 +1,13 @@
+omp-core slopjson attribution notice
+====================================
+
+The `json!` token-tree muncher in `src/slopjson/macros.rs` is adapted from the
+`serde_json` `json!` macro.
+
+Upstream project: https://github.com/serde-rs/json
+
+serde_json is licensed under either the Apache License, Version 2.0 or the MIT
+License, at the recipient's option. Complete MIT terms are in `LICENSE` in this
+package and Apache terms are in `THIRD-PARTY-NOTICES.txt` in the repository root.
+Copyright in the upstream material remains with its upstream owner; this notice
+does not claim ownership of that material.

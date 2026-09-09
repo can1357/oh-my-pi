@@ -1,0 +1,31 @@
+id = "qa_placement"
+version = "0.1.0"
+omp_api = 1
+entry = "qa_placement"
+
+[[declarations]]
+id = "host_probe"
+kind = "soft"
+module = "qa_placement"
+key = "host_probe@.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[[declarations]]
+id = "env_probe"
+kind = "soft"
+module = "qa_placement"
+key = "env_probe@.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[[declarations]]
+id = "worker_probe"
+kind = "soft"
+module = "qa_placement"
+key = "worker_probe@.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"

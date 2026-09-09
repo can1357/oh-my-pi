@@ -12,18 +12,55 @@ use std::{
 	},
 };
 
+use bytes::BytesMut;
+use omp_agent::{GateError, HookEvent, HookGate, HookPatch};
 use omp_core::Str;
+use omp_proto::toolhost::v1::HookEventId;
 use omp_tools::manage_skill::{
 	Action, AuthorityError, ManagedSkillAuthority, MutationOutcome, MutationRequest,
 };
 use parking_lot::Mutex;
+use serde::Serialize;
 
 use crate::managed_skills_domain::{CandidateError, ManagedSkillCandidate, is_valid_name};
+
+#[derive(Serialize)]
+struct ManagedResourceRef<'a> {
+	uri:    &'a str,
+	kind:   &'static str,
+	origin: &'static str,
+}
+
+#[derive(Serialize)]
+struct ManagedResourcesChangedEvent<'a> {
+	added:   Box<[ManagedResourceRef<'a>]>,
+	removed: Box<[ManagedResourceRef<'a>]>,
+	reason:  &'static str,
+}
+
+impl HookEvent for ManagedResourcesChangedEvent<'_> {
+	type Return = ();
+
+	const ID: HookEventId = HookEventId::HookEventResourcesChanged;
+	const REV: u32 = 1;
+
+	fn encode_into(&self, out: &mut BytesMut) {
+		out.extend_from_slice(b"\n");
+		out.extend_from_slice(
+			&serde_json::to_vec(self).expect("managed resource payload must serialize to JSON"),
+		);
+	}
+
+	fn apply(&mut self, _: &HookPatch) -> Result<(), GateError> {
+		Ok(())
+	}
+}
 
 /// Environment authority for one profile-scoped managed-skill root.
 pub struct ManagedSkills {
 	root:           PathBuf,
 	authored_names: BTreeSet<Str>,
+	hooks:          Arc<HookGate>,
 	mutation_locks: Mutex<BTreeMap<Str, Arc<Mutex<()>>>>,
 	revision:       AtomicU64,
 	temp_sequence:  AtomicU64,
@@ -32,14 +69,41 @@ pub struct ManagedSkills {
 impl ManagedSkills {
 	/// Creates an authority with an immutable set of authored names which
 	/// generated skills may never claim.
-	pub fn new(root: PathBuf, authored_names: BTreeSet<Str>) -> Self {
+	pub fn new(root: PathBuf, authored_names: BTreeSet<Str>, hooks: Arc<HookGate>) -> Self {
 		Self {
 			root,
 			authored_names,
+			hooks,
 			mutation_locks: Mutex::new(BTreeMap::new()),
 			revision: AtomicU64::new(0),
 			temp_sequence: AtomicU64::new(0),
 		}
+	}
+
+	fn notify_changed(&self, action: Action, name: &str) {
+		if !self
+			.hooks
+			.subscribed(HookEventId::HookEventResourcesChanged)
+		{
+			return;
+		}
+		let uri = self.root.join(name).join("SKILL.md");
+		let uri = uri.to_string_lossy();
+		let resource = || ManagedResourceRef {
+			uri:    uri.as_ref(),
+			kind:   "skill",
+			origin: crate::managed_skills_domain::PROVIDER_ID,
+		};
+		let (added, removed) = match action {
+			Action::Create => (vec![resource()].into_boxed_slice(), Vec::new().into_boxed_slice()),
+			Action::Update => {
+				(vec![resource()].into_boxed_slice(), vec![resource()].into_boxed_slice())
+			},
+			Action::Delete => (Vec::new().into_boxed_slice(), vec![resource()].into_boxed_slice()),
+		};
+		self
+			.hooks
+			.notify(&ManagedResourcesChangedEvent { added, removed, reason: "reload" });
 	}
 
 	fn serialize_name<'a>(&self, raw: &'a str) -> Result<(Str, NameLock<'_>), AuthorityError> {
@@ -204,11 +268,15 @@ impl ManagedSkills {
 
 impl ManagedSkillAuthority for ManagedSkills {
 	fn mutate(&self, request: MutationRequest<'_>) -> Result<MutationOutcome, AuthorityError> {
+		let action = request.action;
 		let (name, lock) = self.serialize_name(request.name)?;
 		let guard = lock.lock.lock();
 		let outcome = self.mutate_locked(&name, request);
 		drop(guard);
 		drop(lock);
+		if outcome.is_ok() {
+			self.notify_changed(action, name.as_str());
+		}
 		outcome
 	}
 }
@@ -293,7 +361,11 @@ mod tests {
 	fn serializes_mutations_and_refuses_links_and_authored_shadows() {
 		let tree = tempfile::tempdir().unwrap();
 		let root = tree.path().join("managed-skills");
-		let authority = ManagedSkills::new(root.clone(), BTreeSet::from([Str::from("authored")]));
+		let authority = ManagedSkills::new(
+			root.clone(),
+			BTreeSet::from([Str::from("authored")]),
+			Arc::new(HookGate::channel().0),
+		);
 		let shadowed = authority.mutate(MutationRequest {
 			action:      Action::Create,
 			name:        "authored",

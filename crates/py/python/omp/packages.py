@@ -385,7 +385,7 @@ def _install_snapshot_json(envelope: bytes | str) -> None:
         raise ResolutionError("package snapshot envelope must be an object")
     distributions = value.get("distributions")
     modules = value.get("modules", {})
-    if not isinstance(distributions, list) or not isinstance(modules, Mapping):
+    if not isinstance(distributions, _builtins.list) or not isinstance(modules, Mapping):
         raise ResolutionError("package snapshot has invalid distributions or modules")
     _install_snapshot(
         distributions,

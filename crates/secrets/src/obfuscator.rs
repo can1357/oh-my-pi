@@ -109,11 +109,18 @@ impl SecretObfuscator {
 
 	fn key(&mut self) -> &str {
 		if self.key.is_none() {
+			let provider_configured = self.key_provider.is_some();
+			tracing::debug!(provider_configured, "secret placeholder key access started");
 			self.key = Some(
 				self
 					.key_provider
 					.take()
 					.map_or_else(String::new, |provider| provider()),
+			);
+			tracing::debug!(
+				provider_configured,
+				key_available = self.key.as_ref().is_some_and(|key| !key.is_empty()),
+				"secret placeholder key access completed"
 			);
 			self.register_key_redaction();
 		}
@@ -304,7 +311,7 @@ fn replace_literal_outside(
 }
 /// Returns whether `start..end` is not flanked by credential-alphabet bytes.
 ///
-/// Enforces [`SecretRule::boundary_guard`]: pi's lookaround boundary over
+/// Enforces [`SecretRule::boundary_guard`]: the lookaround boundary over
 /// `[0-9A-Za-z_*-]`, checked here because the linear-time engine cannot.
 fn on_credential_boundary(source: &str, start: usize, end: usize) -> bool {
 	let alphabet = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'*' | b'-');

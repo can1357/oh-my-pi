@@ -3,35 +3,40 @@
 use std::sync::Arc;
 
 use async_stream::stream;
+use bytes::Bytes;
 use futures::Stream;
 use omp_core::{Str, StrMut, sf};
+pub use omp_memory::runtime::EditOutcome;
 use omp_memory::{
 	MemoryRuntime,
-	runtime::{EditOperation, EditOutcome, EditStatus},
+	runtime::{EditOperation, EditStatus, MAX_MEMORY_CONTENT_BYTES},
 };
 use omp_tool::{
-	ArgIssue, ArgIssueKind, CommitError, Constraint, Effects, Ev, IncomingParams, ParamError, Part,
-	PromptCaps, Rev, Tool, ToolSpec, ToolTerminal,
+	ArgIssue, ArgIssueKind, CallOutcome, CommitError, Constraint, Effects, Ev, IncomingParams,
+	LiftedCall, ParamError, Part, PromptCaps, RecordedCall, Rev, Tool, ToolSpec, ToolTerminal,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Arguments accepted by `memory_edit@1`.
+/// Arguments accepted by `memory_edit@2`.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Params {
 	/// Edit operation.
 	pub op:             Operation,
 	/// Memory id returned by recall or a full `memory://` read.
+	#[schemars(length(min = 1, max = 128))]
 	pub id:             Str,
 	/// Whole replacement content for update.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[schemars(length(min = 1, max = 262144))]
 	pub content:        Option<Str>,
 	/// Replacement importance, clamped to `[0, 1]`.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub importance:     Option<f64>,
 	/// Optional superseding memory id for invalidate.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[schemars(length(min = 1, max = 128))]
 	pub replacement_id: Option<Str>,
 }
 
@@ -95,28 +100,30 @@ pub struct MemoryEditTool {
 	spec:    ToolSpec,
 }
 
-/// Creates `memory_edit@1` over one active runtime.
-pub fn tool(runtime: Arc<MemoryRuntime>) -> MemoryEditTool {
-	MemoryEditTool {
-		runtime,
-		spec: ToolSpec {
-			name:            sf!("memory_edit"),
-			rev:             Rev { family: Str::default(), n: 1 },
-			description:     sf!(DESCRIPTION),
-			schema:          omp_tool::schema::<Params>(),
-			constraint:      Constraint::Schema {
-				priority:       100,
-				on_unsupported: omp_tool::Fallback::Unspecified,
-			},
-			effects:         Effects::empty(),
-			projection_code: omp_tool::native_projection_code(
-				env!("CARGO_PKG_NAME"),
-				env!("CARGO_PKG_VERSION"),
-				include_bytes!("memory_edit.rs"),
-			)
-			.into(),
+/// Builds the host-free `memory_edit@2` declaration.
+pub fn spec() -> ToolSpec {
+	ToolSpec {
+		name:            sf!("memory_edit"),
+		rev:             Rev { family: Str::default(), n: 2 },
+		description:     sf!(DESCRIPTION),
+		schema:          omp_tool::schema::<Params>(),
+		constraint:      Constraint::Schema {
+			priority:       100,
+			on_unsupported: omp_tool::Fallback::Unspecified,
 		},
+		effects:         Effects::empty(),
+		projection_code: omp_tool::native_projection_code(
+			env!("CARGO_PKG_NAME"),
+			env!("CARGO_PKG_VERSION"),
+			include_bytes!("memory_edit.rs"),
+		)
+		.into(),
 	}
+}
+
+/// Creates `memory_edit@2` over one active runtime.
+pub fn tool(runtime: Arc<MemoryRuntime>) -> MemoryEditTool {
+	MemoryEditTool { runtime, spec: spec() }
 }
 
 impl Tool for MemoryEditTool {
@@ -139,11 +146,17 @@ impl Tool for MemoryEditTool {
 				Err(error) => { yield param_event(error); return; },
 			};
 			if params.id.trim().is_empty()
+				|| params.id.len() > 128
 				|| params.importance.is_some_and(|value| !value.is_finite())
 				|| (params.op == Operation::Update
 					&& params.content.is_none()
 					&& params.importance.is_none())
-				|| params.content.as_ref().is_some_and(|value| value.trim().is_empty())
+				|| params.content.as_ref().is_some_and(|value| {
+					value.trim().is_empty() || value.len() > MAX_MEMORY_CONTENT_BYTES
+				})
+				|| params.replacement_id.as_ref().is_some_and(|value| {
+					value.trim().is_empty() || value.len() > 128
+				})
 			{
 				yield done(Err(Fault::InvalidInput), true);
 				return;
@@ -164,10 +177,38 @@ impl Tool for MemoryEditTool {
 					yield done(Ok(outcome), useless);
 				},
 				Err(omp_memory::Error::Inactive) => yield done(Err(Fault::Unavailable), false),
-				Err(omp_memory::Error::InvalidIdentifier) => yield done(Err(Fault::InvalidInput), true),
+				Err(omp_memory::Error::InvalidIdentifier | omp_memory::Error::InputTooLarge) => {
+					yield done(Err(Fault::InvalidInput), true);
+				},
 				Err(_) => yield done(Err(Fault::Operation), false),
 			}
 		}
+	}
+
+	fn lift(&self, from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
+		if !from.family.is_empty() || from.n != 1 {
+			return None;
+		}
+		let mut raw_args = serde_json::from_slice::<serde_json::Value>(call.raw_args).ok()?;
+		let object = raw_args.as_object_mut()?;
+		object.remove("i");
+		object.remove("notrunc");
+		serde_json::from_value::<Params>(raw_args).ok()?;
+		let mut verdict = serde_json::from_slice::<serde_json::Value>(call.verdict).ok()?;
+		if verdict.get("kind").and_then(serde_json::Value::as_str) == Some("ok") {
+			let value = verdict.get_mut("value")?.as_object_mut()?;
+			let tier = match value.get("status").and_then(serde_json::Value::as_str) {
+				Some("updated" | "forgotten") => serde_json::Value::String("working".to_owned()),
+				Some("not_editable") => serde_json::Value::String("fact".to_owned()),
+				_ => serde_json::Value::Null,
+			};
+			value.insert("tier".to_owned(), tier);
+		}
+		serde_json::from_value::<CallOutcome<EditOutcome, Fault>>(verdict.clone()).ok()?;
+		Some(LiftedCall {
+			raw_args: Bytes::copy_from_slice(call.raw_args),
+			verdict:  Bytes::from(serde_json::to_vec(&verdict).ok()?),
+		})
 	}
 
 	fn prompt(&self, view: Result<&EditOutcome, &Fault>, _: &PromptCaps) -> Vec<Part> {
@@ -198,11 +239,16 @@ fn render_outcome(outcome: &EditOutcome) -> Str {
 		text.push_str(" in bank ");
 		text.push_str(bank.as_str());
 	}
+	if let Some(tier) = outcome.tier {
+		text.push_str(" (");
+		text.push_str(<&'static str>::from(tier));
+		text.push(')');
+	}
 	text.push('.');
 	text.freeze()
 }
 
-fn done(result: Result<EditOutcome, Fault>, useless: bool) -> Ev<Update, EditOutcome, Fault> {
+const fn done(result: Result<EditOutcome, Fault>, useless: bool) -> Ev<Update, EditOutcome, Fault> {
 	Ev::Done(ToolTerminal::Done { result, useless })
 }
 

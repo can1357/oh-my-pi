@@ -23,12 +23,17 @@ setup-python:
 
 # Format the whole repo in place: Rust (rustfmt) + Protobuf (buf).
 [group('format & lint')]
-fmt: fmt-rust proto-fmt
+fmt: fmt-rust fmt-streams proto-fmt
 
 # Format every Rust source in place (hard tabs, see rustfmt.toml).
 [group('format & lint')]
 fmt-rust:
     cargo fmt --all
+
+# Reindent stream!/try_stream! macro bodies that rustfmt cannot parse (yield).
+[group('format & lint')]
+fmt-streams *paths='crates':
+    python3 scripts/fmt-stream.py {{ paths }}
 
 # Check the whole repo's formatting without writing (CI gate).
 [group('format & lint')]
@@ -53,10 +58,11 @@ proto-fmt-check:
 proto-lint:
     cd crates/proto && buf lint
 
-# Lint the Rust workspace with clippy (matches CI exactly).
+# Lint the Rust workspace with clippy (CI flags; own target dir so the
+# RUSTC_WORKSPACE_WRAPPER fingerprint never ping-pongs check/test artifacts).
 [group('format & lint')]
 clippy:
-    cargo clippy --workspace --locked
+    CARGO_TARGET_DIR=target/clippy cargo clippy --workspace --locked
 
 # Warn (never fails) on lock-wrapped map/set state (`Mutex<HashMap<…>>` etc.); prefer
 # `dashmap::DashMap`/`DashSet` or another concurrent structure. clippy's `disallowed-types`
@@ -137,14 +143,14 @@ test-all:
     cargo nextest run --workspace --locked
     cargo test --doc --workspace --locked
 
-# Run tests for a single crate, e.g. `just test-pkg omp-hashline`.
+# Run tests for a single crate, e.g. `just test-pkg omp-edit`.
 [group('test')]
 test-pkg pkg:
     cargo nextest run -p {{ pkg }} --locked
     cargo test --doc -p {{ pkg }} --locked
 
 # ---------------------------------------------------------------------------
-# E2E acceptance suite (crates/e2e, joined-system proofs P1-P8)
+# E2E acceptance suite (crates/e2e, joined-system proofs P1-P10)
 # ---------------------------------------------------------------------------
 
 # Compile every acceptance proof without running them.
@@ -173,16 +179,29 @@ e2e-p7:
 e2e-p8:
     cargo nextest run -p omp-e2e --test p8_baselines --locked
 
+# Run proof P9: isolated environment and extension control registration.
+[group('e2e')]
+e2e-p9:
+    cargo nextest run -p omp-e2e --locked \
+        --test p9_isolation \
+        --test p9_extension_control
+
+# Run proof P10: idempotent historical tool lift through live dispatch.
+[group('e2e')]
+e2e-p10:
+    cargo nextest run -p omp-e2e --test p10_lift_idempotence --locked
+
 # Record a fresh P8 performance-baseline artifact.
 [group('e2e')]
 e2e-baseline:
     cargo run -p omp-e2e --bin baseline --locked -- \
         --artifact target/e2e-artifacts/p8-baselines.json
 
-# Run every P1-P8 proof plus the tool-sources check, in CI order.
+# Run every P1-P10 proof plus the tool-sources check, in CI order.
 [group('e2e')]
-e2e: e2e-build e2e-core e2e-p7 e2e-p8
+e2e: e2e-build e2e-core e2e-p7 e2e-p9 e2e-p10
     cargo nextest run -p omp-e2e --test tool_sources --locked
+    cargo nextest run -p omp-e2e --test p8_baselines --locked
 
 # ---------------------------------------------------------------------------
 # LLM catalog & compat cascade (crates/llm-catalog)
@@ -203,10 +222,10 @@ catalog-test:
 run *args:
     cargo run -p omp-app --bin omp --locked -- {{ args }}
 
-# Run the standalone `omp-sh` shell (facade over shell-engine + builtins).
+# Run the standalone `omp-sh` shell (shell-engine composed with builtins).
 [group('run')]
 run-shell *args:
-    cargo run -p omp-shell --bin omp-sh --locked -- {{ args }}
+    cargo run -p omp-shell-builtins --bin omp-sh --locked -- {{ args }}
 
 # ---------------------------------------------------------------------------
 # Example galleries (visual smoke tests for tui/gui/webview/ar/inference)

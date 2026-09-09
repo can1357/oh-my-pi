@@ -9,6 +9,7 @@ use crate::{Backend, CleanupFailure, SandboxError, SandboxOperation};
 pub(crate) enum AclAccess {
 	Traverse,
 	ReadExecute,
+	WriteDelete,
 	ReadWriteExecuteDelete,
 }
 
@@ -25,6 +26,7 @@ pub(crate) struct AclMutation {
 #[cfg(any(windows, test))]
 pub(crate) fn mutation_plan(
 	read_deny: &[PathBuf],
+	write_deny: &[PathBuf],
 	read_grants: &[PathBuf],
 	write_grants: &[PathBuf],
 ) -> Vec<AclMutation> {
@@ -32,6 +34,11 @@ pub(crate) fn mutation_plan(
 	mutations.extend(read_deny.iter().cloned().map(|path| AclMutation {
 		path,
 		access: AclAccess::ReadExecute,
+		deny: true,
+	}));
+	mutations.extend(write_deny.iter().cloned().map(|path| AclMutation {
+		path,
+		access: AclAccess::WriteDelete,
 		deny: true,
 	}));
 	for path in read_grants {
@@ -62,11 +69,12 @@ impl AclMutationStack {
 	pub(crate) fn apply(
 		sid: windows_sys::Win32::Security::PSID,
 		read_deny: &[PathBuf],
+		write_deny: &[PathBuf],
 		read_grants: &[PathBuf],
 		write_grants: &[PathBuf],
 	) -> Result<Self, (SandboxError, Vec<CleanupFailure>)> {
 		let mut stack = Self { sid, applied: Vec::new() };
-		for mutation in mutation_plan(read_deny, read_grants, write_grants) {
+		for mutation in mutation_plan(read_deny, write_deny, read_grants, write_grants) {
 			if mutation.deny && !mutation.path.exists() {
 				continue;
 			}
@@ -285,6 +293,7 @@ unsafe fn update_acl(
 
 	let permissions = match mutation.access {
 		AclAccess::Traverse | AclAccess::ReadExecute => GENERIC_READ | GENERIC_EXECUTE,
+		AclAccess::WriteDelete => GENERIC_WRITE | DELETE | FILE_DELETE_CHILD,
 		AclAccess::ReadWriteExecuteDelete => {
 			GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE | FILE_DELETE_CHILD
 		},
@@ -345,12 +354,14 @@ mod tests {
 
 	#[test]
 	fn denies_precede_allows() {
-		let plan =
-			mutation_plan(&[PathBuf::from("secret")], &[PathBuf::from("read")], &[PathBuf::from(
-				"write",
-			)]);
-		assert!(plan[0].deny);
-		assert!(plan[1..].iter().all(|mutation| !mutation.deny));
+		let plan = mutation_plan(
+			&[PathBuf::from("read-secret")],
+			&[PathBuf::from("write-secret")],
+			&[PathBuf::from("read")],
+			&[PathBuf::from("write")],
+		);
+		assert!(plan[..2].iter().all(|mutation| mutation.deny));
+		assert!(plan[2..].iter().all(|mutation| !mutation.deny));
 	}
 
 	#[test]

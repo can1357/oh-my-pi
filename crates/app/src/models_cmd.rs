@@ -3,30 +3,33 @@
 use std::{
 	collections::BTreeMap,
 	fs,
+	path::Path,
+	sync::Arc,
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use miette::{IntoDiagnostic as _, miette};
-use omp_catalog::{DiscoveredModel, ModelSpec, OperationBits, ProviderId, snapshot::Catalog};
-use omp_core::Str;
-use omp_inference::{
+use omp_ai::{
 	Client,
 	call::{CallMeta, DiscoveryRequest, Target},
-	discovery::{DiscoveryCacheKey, DiscoveryStore},
+	discovery::{DiscoveryCacheKey, DiscoveryStore, ProviderDiscoveryState, ProviderLifecycle},
 	id::RequestId,
 	receipt::ExecutionBudget,
 	router,
 };
+use omp_catalog::{DiscoveredModel, ModelSpec, OperationBits, ProviderId, snapshot::Catalog};
+use omp_core::Str;
 
-use crate::cli::{ModelRole, ModelsArgs, ModelsCommand};
+use crate::cli::{LaunchExtensions, ModelRole, ModelsArgs, ModelsCommand};
+
+const DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// Runs a model catalog operation. Refresh travels through the same inference
 /// routes and credentials used at call time, then atomically updates only the
 /// runtime discovery cache.
-pub async fn run(args: &ModelsArgs) -> miette::Result<()> {
-	let catalog =
-		omp_driver::registry::production_catalog(&omp_core::dirs::data_dir(None).into_diagnostic()?)
-			.into_diagnostic()?;
+pub async fn run(args: &ModelsArgs, extensions: &LaunchExtensions) -> miette::Result<()> {
+	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
+	let catalog = composed_catalog(&data_dir, extensions).await?;
 	match args.command.as_ref() {
 		None => print_rows(&select(catalog.as_ref(), args.filter.as_deref(), args.role), args.json),
 		Some(ModelsCommand::List { filter, json, role }) => {
@@ -37,6 +40,13 @@ pub async fn run(args: &ModelsArgs) -> miette::Result<()> {
 		},
 		Some(ModelsCommand::Refresh) => refresh().await,
 	}
+}
+
+async fn composed_catalog(
+	data_dir: &Path,
+	_launch: &LaunchExtensions,
+) -> miette::Result<Arc<Catalog>> {
+	omp_driver::registry::production_catalog(data_dir).into_diagnostic()
 }
 
 async fn refresh() -> miette::Result<()> {
@@ -66,18 +76,29 @@ async fn refresh() -> miette::Result<()> {
 		.as_millis()
 		.try_into()
 		.map_err(|_| miette!("system clock exceeds discovery timestamp range"))?;
-	let mut refreshed = 0_usize;
+	store.prune_expired(now_ms).into_diagnostic()?;
+	let loaded_config =
+		omp_driver::discovery::models::load_or_import_legacy(&data_dir).into_diagnostic()?;
+	let mut refreshed = refresh_local_providers(
+		&store,
+		catalog,
+		loaded_config.as_ref().map(|loaded| &loaded.config),
+		now_ms,
+	)
+	.await?;
 	let mut failures = Vec::new();
 	for (provider, provider_routes) in routes {
 		let mut rows = Vec::new();
 		for route in provider_routes {
 			let planner = router::Router::new(registry.clone(), Duration::from_secs(30));
 			let meta = CallMeta {
-				id:       RequestId::from(format!("omp-model-refresh-{}", provider.as_str())),
-				target:   Target::ProviderService(provider.clone()),
-				deadline: None,
-				budget:   ExecutionBudget::default(),
-				session:  None,
+				id:             RequestId::from(format!("omp-model-refresh-{}", provider.as_str())),
+				target:         Target::ProviderService(provider.clone()),
+				deadline:       None,
+				budget:         ExecutionBudget::default(),
+				session:        None,
+				debug_session:  None,
+				response_hooks: Default::default(),
 			};
 			let mut cursor = None;
 			loop {
@@ -93,6 +114,12 @@ async fn refresh() -> miette::Result<()> {
 				let page = match page {
 					Ok(page) => page,
 					Err(error) => {
+						tracing::warn!(
+							provider = %provider,
+							route = %route,
+							%error,
+							"model discovery refresh failed"
+						);
 						failures.push(format!("{}: {error}", provider.as_str()));
 						break;
 					},
@@ -115,7 +142,7 @@ async fn refresh() -> miette::Result<()> {
 					&DiscoveryCacheKey::provider(provider.clone()),
 					&rows,
 					now_ms,
-					Duration::from_secs(24 * 60 * 60),
+					DISCOVERY_CACHE_TTL,
 				)
 				.into_diagnostic()?;
 			refreshed = refreshed.saturating_add(rows.len());
@@ -126,6 +153,62 @@ async fn refresh() -> miette::Result<()> {
 	}
 	println!("refreshed {refreshed} runtime model row(s); configured catalog models remain visible");
 	Ok(())
+}
+
+async fn refresh_local_providers(
+	store: &DiscoveryStore,
+	catalog: &Catalog,
+	config: Option<&omp_driver::discovery::models::ModelsConfig>,
+	now_ms: u64,
+) -> miette::Result<usize> {
+	let probes =
+		omp_driver::discovery::models::discovery_probes(config, catalog).into_diagnostic()?;
+	let http = omp_envd::model_discovery::ModelDiscoveryHttpHost::new();
+	let mut refreshed = 0_usize;
+	for probe in probes {
+		let provider = probe.provider.clone();
+		let key = DiscoveryCacheKey::endpoint(provider.clone(), &probe.endpoint);
+		store
+			.set_lifecycle(&ProviderLifecycle {
+				provider:       provider.clone(),
+				cache_scope:    key.credential_scope.clone(),
+				state:          ProviderDiscoveryState::Probing,
+				error_code:     None,
+				observed_at_ms: now_ms,
+				retry_at_ms:    None,
+			})
+			.into_diagnostic()?;
+		match probe
+			.probe(&http, tokio_util::sync::CancellationToken::new())
+			.await
+		{
+			Ok(mut rows) => {
+				omp_driver::discovery::models::apply_runtime_discovery_overrides(&probe, &mut rows);
+				for row in &mut rows {
+					row.observed_at_ms = Some(now_ms);
+				}
+				store
+					.publish(&key, &rows, now_ms, DISCOVERY_CACHE_TTL)
+					.into_diagnostic()?;
+				refreshed = refreshed.saturating_add(rows.len());
+			},
+			Err(error) => {
+				let error_code: &'static str = error.into();
+				store
+					.set_lifecycle(&ProviderLifecycle {
+						provider:       provider.clone(),
+						cache_scope:    key.credential_scope.clone(),
+						state:          ProviderDiscoveryState::Failed,
+						error_code:     Some(Str::new_static(error_code)),
+						observed_at_ms: now_ms,
+						retry_at_ms:    Some(now_ms.saturating_add(5 * 60 * 1000)),
+					})
+					.into_diagnostic()?;
+				eprintln!("warning: local model discovery failed for {}: {error}", provider.as_str());
+			},
+		}
+	}
+	Ok(refreshed)
 }
 
 fn discovered(
@@ -148,6 +231,7 @@ fn discovered(
 		declared_operations: OperationBits::empty(),
 		declared_capabilities: Some(model.capabilities.clone()),
 		declared_limits: Some(model.limits.clone()),
+		declared_pricing: Box::new([]),
 		extended_context_mode: None,
 		availability: Some(model.availability.clone()),
 		source: Str::new_static("runtime-inference-discovery"),

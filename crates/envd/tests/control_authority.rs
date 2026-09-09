@@ -101,15 +101,8 @@ fn identity() -> Arc<ControlConnectionIdentity> {
 async fn configured_composition_routes_every_owned_namespace() {
 	let calls = Arc::new(Mutex::new(Vec::new()));
 	let envd = EnvdControlAuthorities::new(
-		RegistryControlAuthorities::new(
-			factory("registry", &calls),
-			factory("devices", &calls),
-			factory("hooks", &calls),
-		),
+		RegistryControlAuthorities::new(factory("devices", &calls), factory("hooks", &calls)),
 		PersistenceControlAuthorities::new(
-			factory("context", &calls),
-			factory("journal", &calls),
-			factory("state", &calls),
 			factory("sessions", &calls),
 			factory("artifacts", &calls),
 			factory("credentials", &calls),
@@ -120,11 +113,7 @@ async fn configured_composition_routes_every_owned_namespace() {
 			factory("telemetry", &calls),
 			factory("verdicts", &calls),
 		),
-		ProviderControlAuthorities::new(
-			factory("provider", &calls),
-			factory("regimes", &calls),
-			factory("services", &calls),
-		),
+		ProviderControlAuthorities::new(factory("provider", &calls), factory("services", &calls)),
 		factory("auxiliary", &calls),
 		factory("effects", &calls),
 	);
@@ -148,13 +137,9 @@ async fn configured_composition_routes_every_owned_namespace() {
 		.control_authority(Arc::clone(&identity))
 		.expect("lifecycle-bound composition");
 	let routes = [
-		("omp.registry.freeze", "registry"),
 		("omp.devices.invoke", "devices"),
 		("omp.hooks.dispatch", "hooks"),
-		("omp.context.view", "context"),
-		("omp.journal.append", "journal"),
-		("omp.state.latest", "state"),
-		("omp.state_dir", "state"),
+		("omp.state_dir", "auxiliary"),
 		("omp.sessions.get", "sessions"),
 		("omp.artifacts.stat", "artifacts"),
 		("omp.creds.list", "credentials"),
@@ -164,10 +149,6 @@ async fn configured_composition_routes_every_owned_namespace() {
 		("omp.telemetry.query", "telemetry"),
 		("omp.jobs.register", "verdicts"),
 		("omp.provider.request", "provider"),
-		("omp.regimes.start", "regimes"),
-		("omp.regimes.active", "regimes"),
-		("omp.regimes.stop", "regimes"),
-		("omp.regimes.apply", "regimes"),
 		("omp.services.call", "services"),
 		("omp.params.pull", "auxiliary"),
 		("omp.direct_filesystem.request", "auxiliary"),
@@ -193,6 +174,11 @@ async fn configured_composition_routes_every_owned_namespace() {
 		assert_eq!(result["host_generation"], 7);
 		assert_eq!(result["session_generation"], 11);
 	}
+	assert!(!authority.handles("omp.registry.freeze"));
+	assert!(!authority.handles("omp.context.view"));
+	assert!(!authority.handles("omp.journal.append"));
+	assert!(!authority.handles("omp.state.latest"));
+	assert!(!authority.handles("omp.regimes.start"));
 
 	authority
 		.effect(

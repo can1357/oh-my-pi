@@ -1,0 +1,1 @@
+{"name": "qaenvlive", "worker": {"module": "qaenvlive"}, "capabilities": {"data": ["env.doc.read", "env.exec"]}, "declarations": [{"id": "hello", "kind": "hard", "module": "qaenvlive", "key": "hello@qaenvlive.1", "trigger": "lazy", "api": 1, "failure": "fail-closed"}]}

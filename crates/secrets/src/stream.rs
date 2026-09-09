@@ -35,23 +35,19 @@ impl PlaceholderStream {
 
 fn possible_placeholder_suffix_len(text: &str) -> usize {
 	let bytes = text.as_bytes();
-	if text.ends_with("$$") {
-		let before_close = &text[..text.len() - 2];
-		if let Some(open) = before_close.rfind("$$") {
-			if complete_body(&before_close[open + 2..]) {
-				return 0;
-			}
-		}
+	if let Some(before_close) = text.strip_suffix("$$")
+		&& let Some(open) = before_close.rfind("$$")
+		&& complete_body(&before_close[open + 2..])
+	{
+		return 0;
 	}
-	if bytes.last() == Some(&b'$') {
-		if bytes.len() == 1 || bytes[bytes.len() - 2] != b'$' {
-			if let Some(start) = text.rfind("$$") {
-				if possible_body_prefix(&text[start + 2..]) {
-					return text.len() - start;
-				}
-			}
-			return 1;
+	if bytes.last() == Some(&b'$') && (bytes.len() == 1 || bytes[bytes.len() - 2] != b'$') {
+		if let Some(start) = text.rfind("$$")
+			&& possible_body_prefix(&text[start + 2..])
+		{
+			return text.len() - start;
 		}
+		return 1;
 	}
 	let mut end = text.len();
 	while let Some(start) = text[..end].rfind("$$") {

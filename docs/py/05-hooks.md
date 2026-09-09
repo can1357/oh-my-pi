@@ -7,7 +7,7 @@
 > protocol.
 > Siblings: [`00-overview.md`](00-overview.md) (host, sockets, manifest, trust tiers,
 > `omp.Context`, activation order, cancellation),
-> [`01-devices.md`](01-devices.md) (`@omp.device`, `@omp.tool`, the `xd` shell builtin, `omp.devices`),
+> [`01-devices.md`](01-devices.md) (`@omp.device`, `@omp.tool`, the `dyn` shell builtin, `omp.devices`),
 > [`02-verdicts.md`](02-verdicts.md) (`omp.Payload`, `omp.Fault`, `prompt()`, `lift()`,
 > `family@rev`, spill budget),
 > [`03-params.md`](03-params.md) (`IncomingParams`, `omp.InvocationPhase` — the seven-state
@@ -254,16 +254,11 @@ Every event carries three fixed properties, queryable at runtime:
   disk ([`14-deploy.md`](14-deploy.md)). Path-bearing event fields are therefore env-scoped URIs,
   never assumed-local paths.
 
-  **What exists today is one socket, and it carries no world access.** CONTROL exists in embryo as
-  `omp.toolhost.v1` stdio framing; the DATA edge is specified and partly wire-complete in
-  `omp.env.v1` but is not reachable from Python. `crates/app/src/envd/server.rs:177-181` holds
-  `_documents: DocumentHost`, `_document_authority: Option<DocumentAuthority>` and
-  `_workspace: WorkspaceHost` as underscore-prefixed fields — constructed, never dispatched — so
-  documents, fs, LSP and search have no reachable frame for a Python client even though exec, named
-  processes and blobs are wire-complete. Everything below that says "a hook uses `omp.env`" is the
-  target model; the additive path to it is in [`11-env.md`](11-env.md) and named in this document's
-  closing section. Until then, every hook in this catalog is CONTROL-only, which is sufficient for
-  every decision but not for the `omp.env` calls the worked examples show.
+  Both channels are live. CONTROL is the dedicated inherited, multiplexed `omp.toolhost.v1`
+  descriptor and carries hook dispatch and decisions, effects, host-initiated requests, and the
+  subscription mask without world access. Invocation-scoped DATA is reachable from Python through
+  `ExtensionEnvClient`; envd authenticates its invocation id, effect token, host generation, and
+  session generation before routing documents, workspace operations, processes, and blobs.
 - **Latency class.** How often the event can fire, hence what a handler may afford. CONTROL
   round-trip on a local socket is tens of microseconds; `SESSION`, `SUBMISSION`, `TURN`, `CALL` and
   `INPUT` hooks may do real work, `STREAM` hooks must be coalesced and cheap, `ASYNC` hooks are off
@@ -304,7 +299,7 @@ dead extension's subscriptions cannot keep them fail-closed.
 Hook subscription is the sibling of device registration, and the distinction Main settled applies
 to both: **extensions register with the HOST, never with the MODEL.** `RegisterTools` / `ToolDecl`
 (`crates/proto/proto/omp/toolhost/v1/toolhost.proto:54-64`) exists because the host must know a
-device's name, schema, rev and constraints in order to render `xd <name> --help` from the device
+device's name, schema, rev and constraints in order to render `dyn <name> --help` from the device
 catalog at all; `Subscribe`
 exists because the core must know which events are worth constructing. Neither is meant to add a
 schema slot to a request.
@@ -618,7 +613,7 @@ wave through a mechanism it was not written for.
 ```python
 class TargetKind(enum.StrEnum):
 	CORE = "core"      # a core harness tool the model sees in every request
-	DEVICE = "device"  # an extension or MCP-mounted device, dispatched via the xd shell builtin
+	DEVICE = "device"  # an extension or MCP-mounted device, dispatched via the dyn shell builtin
 	MCP = "mcp"        # an MCP endpoint reached through a mounted server
 
 @dataclass(frozen=True, slots=True)
@@ -651,16 +646,16 @@ type CallTarget = CoreTool | DeviceCall | McpCall
 | `TargetKind.CORE` | `read`, `write`, `edit`, `bash`, `glob`, `grep` and the rest of the harness skeleton. `rev` is the dialect-qualified revision (`"hl.3"` for hashline `edit`), so `When(rev="hl.*")` is meaningful |
 | `TargetKind.DEVICE` | Everything extensions and MCP mounts expose. `family` and `rev` together are the `family@rev` identity from [`02-verdicts.md`](02-verdicts.md); `f"{name}@{family}.{rev}"` is the display form |
 | `TargetKind.MCP` | An endpoint on a mounted MCP server addressed as `(server, tool)`. There is no meaningful flat `name`, which is exactly why the union has no top-level `name` field |
-| `.args` | Present on all three variants with the same name, and **always decoded**. The `xd` CLI transport and its raw `--json` payload never reach a policy hook |
+| `.args` | Present on all three variants with the same name, and **always decoded**. The `dyn` CLI transport and its raw `--json` payload never reach a policy hook |
 
 Two rules make this safe, both binding.
 
-**One gate per action.** An `xd <name> [args…]` invocation through the `xd` builtin of the
+**One gate per action.** An `dyn <name> [args…]` invocation through the `dyn` builtin of the
 embedded shell ([`01-devices.md`](01-devices.md)) fires exactly one `tool_call`, with the RESOLVED
 `target=DeviceCall(...)` carrying decoded nested arguments. It does **not** first fire a gate on
 `CoreTool("shell")`: the builtin is transport, never the policy subject for a device dispatch, so
-a guard on the resolved device cannot be bypassed by CLI spelling. Catalog and docs reads — `xd`,
-`xd --q <text>`, and `xd <path> --help` — instead fire `tool_call` with
+a guard on the resolved device cannot be bypassed by CLI spelling. Catalog and docs reads — `dyn`,
+`dyn --q <text>`, and `dyn <path> --help` — instead fire `tool_call` with
 `target=CoreTool("shell")`, because there the shell-hosted catalog itself is the thing being
 touched. Double-gating would prompt the user twice for one action and, worse, would let an author
 gate the transport while believing they had gated the capability. The one-gate rule therefore
@@ -669,7 +664,7 @@ binds the resolved target regardless of transport.
 **One event, one procedure.** There is no separate `device_call` event. Policy extensions must
 gate core tools, devices and MCP endpoints with identical phase ordering, deny short-circuit and
 failure semantics. Two event names would mean every policy author subscribes twice, and the one
-who forgets ships a guard that blocks `bash` and waves through the `xd shell_exec …` device
+who forgets ships a guard that blocks `bash` and waves through the `dyn shell_exec …` device
 dispatch.
 That is a privilege escalation, and splitting the event would be designing it in on purpose.
 
@@ -940,8 +935,8 @@ this event's bit set — useful to skip building an expensive
 |---|---|---|
 | `omp.limits.REENTRANCY_DEPTH` | 4 | Maximum nested CONTROL round-trips from inside a hook. Exceeding raises `omp.ReentrancyError` |
 | `omp.limits.INTERACTIVE_CAP` | `15m` | Wall-clock ceiling (`omp.Duration`) for a suspended deadline budget across all legal interactive round-trips in one hook invocation. Approval waits are excluded: the ticket is Core's (§2.6) |
-| `omp.limits.SETTLE_CONTINUATION_CAP` | 8 | Maximum consecutive `agent_settled` continuations per session before the core refuses further continuation. Ports pi's `SESSION_STOP_CONTINUATION_CAP = 8` (`.plan/feature-map/session.md`) |
-| `omp.limits.SHUTDOWN_BUDGET` | `2s` | Total budget (`omp.Duration`) for all `session_shutdown` handlers, dispatched concurrently. Ports pi's `SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS = 2_000` (`runner.ts:109`) |
+| `omp.limits.SETTLE_CONTINUATION_CAP` | 8 | Maximum consecutive `agent_settled` continuations per session before the core refuses further continuation. |
+| `omp.limits.SHUTDOWN_BUDGET` | `2s` | Total budget (`omp.Duration`) for all `session_shutdown` handlers, dispatched concurrently. |
 | `omp.limits.OBSERVE_CAP` | 64 | Maximum `OBSERVE` subscriptions dispatched for one event; beyond it observers are truncated and the truncation journaled. **Gate phases have no truncation cap**: exceeding mandatory gate capacity is an activation-time error, never a runtime truncation (§3.13). A previous revision applied this cap to whole chains, silently dropping policy past the 64th hook — proceeding with "the top 64" of a mandatory policy set is not defensible, and that rule is reversed |
 | `omp.limits.MODIFY_ROUNDS` | 1 | The decision procedure runs exactly once per invocation. There is no re-run after mutation; a transform that needs to see final arguments declares a higher `order` |
 
@@ -1089,6 +1084,7 @@ Types owned elsewhere and referenced here: `Role`, `StopReason`, `omp.MessageRef
 | `session_rewind` | `SessionRewindEvent` | `HookDecision` | any | SESSION | **DENY** | yes | `Allow` |
 | `session_rewound` | `SessionRewoundEvent` | — | OBSERVE | SESSION | DEFER | yes | — |
 | `session_reset` | `SessionResetEvent` | — | OBSERVE | SESSION | DEFER | yes | — |
+| `session_renamed` | `SessionRenamedEvent` | — | OBSERVE | ASYNC | DEFER | no | — |
 
 `session_rewind` is fail-closed because a rewind with `restore_workspace=True` destroys working
 files; a host that cannot answer must not be read as consent.
@@ -1112,12 +1108,19 @@ class SessionStartEvent:
 	trust: TrustTier
 	head_event: int
 	prompt_rev: str
+	previous_session: str | None = None
 
 @dataclass(frozen=True, slots=True)
 class SessionShutdownEvent:
 	session_id: str
 	reason: ShutdownReason
 	budget: Duration
+	target_session: str | None = None
+
+@dataclass(frozen=True, slots=True)
+class SessionRenamedEvent:
+	session: str
+	name: str | None
 
 @dataclass(frozen=True, slots=True)
 class SessionSwitchEvent:
@@ -1158,6 +1161,8 @@ class SessionRewoundEvent:
 	to_event: int | None
 	new_head: int
 	restored_workspace: bool
+	running_jobs: tuple[str, ...] = ()
+	cancelled_jobs: tuple[str, ...] = ()
 
 @dataclass(frozen=True, slots=True)
 class SessionResetEvent:
@@ -1185,8 +1190,15 @@ class BranchReason(enum.StrEnum):
 	COMPACTION = "compaction"  # branch created by a handoff compaction
 ```
 
-`session_rewind` / `session_rewound` correspond exactly to `Agent::rewind`
-(`crates/agent/src/loop.rs:235`) and its `RewindTarget` list (`loop.rs:251-281`); `session_reset` to
+`session_rewind` is the admission gate for **user-initiated UI rewinds only**; loop-internal
+flavors (retry, checkpoint-regime rewinds, extension-requested `omp.agents.rewind`) are core turn
+machinery and are never gateable. `session_rewound` fires after **every** history rewrite — UI
+rewind, retry, checkpoint-regime rewind, and `omp.agents.rewind` — once the agent has reconciled
+journal-derived environment state (todo slot restore, background-job policy). `running_jobs` lists
+background jobs still pending after the rewrite; `cancelled_jobs` lists jobs whose launch the
+rewrite dropped and which were therefore cancelled (checkpoint rewinds cancel nothing). State
+rehydration remains fold-on-hook: `omp.sessions.journal(live=True)` opens a fresh reader per
+request and is immediately consistent with the truncated view. `session_reset` corresponds to
 journal `Kind::Reset`; `session_branch*` to `Kind::Branch`; `forked_from` to `Kind::ForkedFrom`
 (`crates/storage/src/transcript/event.rs:256-283`). `restore_workspace=True` is served by env
 snapshot/restore ([`11-env.md`](11-env.md)), not by an extension's shadow git repository — the
@@ -1212,7 +1224,7 @@ async def flush_index(event: omp.SessionShutdownEvent, ctx: omp.Context) -> None
 | `agent_start` | `AgentStartEvent` | — | OBSERVE | SUBMISSION | DEFER | yes | — |
 | `turn_start` | `TurnStartEvent` | `HookDecision` | any | TURN | DEFER | yes | `Allow` |
 | `turn_end` | `TurnEndEvent` | — | OBSERVE | TURN | DEFER | yes | — |
-| `agent_settled` | `AgentSettledEvent` | `Continue \| Settle` | domain | SUBMISSION | DEFER | yes | `Settle` |
+| `agent_settled` | `AgentSettledEvent` rev 2 | `Continue \| Settle` | domain | SUBMISSION | DEFER | yes | `Settle` |
 | `agent_end` | `AgentEndEvent` | — | OBSERVE | SUBMISSION | DEFER | yes | — |
 | `interrupt` | `InterruptEvent` | — | OBSERVE | TURN | DEFER | no | — |
 | `deadline` | `DeadlineEvent` | — | OBSERVE | TURN | DEFER | no | — |
@@ -1268,6 +1280,12 @@ class TurnEndEvent:
 	items: tuple[ItemRef, ...]
 
 @dataclass(frozen=True, slots=True)
+class TodoRef:
+	phase: str
+	text: str
+	status: Literal["pending", "in_progress"]
+
+@dataclass(frozen=True, slots=True)
 class AgentSettledEvent:
 	submission_id: str
 	reason: SettleReason
@@ -1275,6 +1293,7 @@ class AgentSettledEvent:
 	last_stop: StopReason | None
 	pending_jobs: tuple[str, ...]
 	continuations_used: int
+	incomplete_todos: tuple[TodoRef, ...] = ()
 
 @dataclass(frozen=True, slots=True)
 class AgentEndEvent:
@@ -1368,6 +1387,27 @@ and project-model-pin — required that selection across three review rounds; th
 to model, route, and deadline was ruled wrong.**
 
 `agent_settled` has no mutable payload fields; its outcome is the domain return.
+At `DrainPoint::Idle`, Core snapshots the built-in `todo@1` state into
+`incomplete_todos` in stable phase/item order. Only `pending` and `in_progress` items are
+actionable; completed, abandoned, and blocked items are omitted. The snapshot is read-only.
+An extension can use the existing bounded continuation protocol rather than inject a hidden
+reminder:
+
+```python
+@omp.hook("agent_settled")
+async def continue_unfinished(
+	event: omp.AgentSettledEvent,
+	ctx: omp.Context,
+) -> omp.agents.Continue | omp.agents.Settle:
+	if not event.incomplete_todos:
+		return omp.agents.Settle()
+	body = "\n".join(
+		f"- {todo.phase}: {todo.text}" for todo in event.incomplete_todos
+	)
+	return omp.agents.Continue(
+		prompt=f"Continue or resolve these unfinished tasks:\n{body}"
+	)
+```
 
 ---
 
@@ -1587,21 +1627,21 @@ happened to the world. Nothing here can write `prompt`, `text`, `content` or `pa
 
 `device_list` replaces pi's whole family of tool-visibility hacks — `setActiveTools`,
 `restoreIdleTools`, `hidden`, `loadMode` — with one `INTERSECT`-composed allowlist over what
-the device catalog exposed through `xd` reports. In the target design, because extensions
+the device catalog exposed through `dyn` reports. In the target design, because extensions
 register with the host and not with the model, narrowing the list appends one system-notification
 thread item naming the delta and leaves the request's tool array byte-identical, so the prompt
 prefix cache survives
 ([`01-devices.md`](01-devices.md)) and `pi-cache-optimizer` has no counterpart here.
 
-That property does not hold in the shipped code yet, for two verified reasons.
-`Registry::advertise` (`crates/tool/src/registry.rs:483-492`) lowers every live entry with no route
-filter, so worker-routed declarations are in the advertised array (§2.5). And
-`Registry::live_hash` (`registry.rs:458-467`) is a single blake3 digest over *all* live identities,
-so using it as the prompt-cache identity would report a change whenever a device is enabled or
-disabled — falsifying availability-as-notification precisely when devices exist. The correction is
-the `slot_hash` / `device_hash` split specified in [`01-devices.md`](01-devices.md): the former over
-advertised core tools only, the latter over device availability, with `TurnStartEvent.toolset_hash`
-carrying the former.
+That property is enforced by the registry. `Registry::advertise` delegates to
+`advertise_matching`, which requires slot presentation and
+`is_model_callable(entry.tool.route())`; worker-routed devices never enter the model's advertised
+array (`crates/tool/src/registry.rs::advertise`, `::advertise_matching`,
+`::is_model_callable`). Cache identity is split as specified in
+[`01-devices.md`](01-devices.md): `Registry::slot_hash` covers policy-resolved model-visible slots,
+while `Registry::device_hash` covers device-catalog availability
+(`crates/tool/src/registry.rs::slot_hash`, `::device_hash`), with
+`TurnStartEvent.toolset_hash` carrying the former.
 
 Mutable fields: `tool_call.{target, args, cwd, deadline}` (REPLACE each),
 `tool_result.annotate` (APPEND), `tool_result.spill` (REPLACE), `device_list.devices` (INTERSECT).
@@ -1632,7 +1672,7 @@ class UserBashEvent:
 	cwd: EnvPath
 	exclude_from_context: bool
 	bash: BashIR | None
-	env_overrides: Mapping[str, str]
+	env_overrides: Mapping[str, str | None]
 
 @dataclass(frozen=True, slots=True)
 class UserEvalEvent:
@@ -1660,6 +1700,9 @@ class EvalLanguage(enum.StrEnum):
 is shown to the *user*, never to the model. This is the honest form of pi's
 `InputEventResult.handled`, which conflated "I rewrote this" with "I swallowed this"
 (`runner.ts:1580`).
+
+Pi `ToolDefinition.shellEnv(ctx)` migrates to a fail-closed `user_bash/TRANSFORM` returning `omp.Modify(env_overrides={...})`; values are `str | None`, `None` unsets, and later TRANSFORM handlers observe the earlier ordered REPLACE result.
+A device that executes for itself does not trigger `user_bash`; pass the same one-run delta explicitly as `await omp.env.sh.run(script, env=delta)`.
 
 `user_bash` and `user_eval` are fail-closed because they are the seam sandbox extensions attach to —
 `pi-sandbox` intercepts `user_bash` to inject proxy environment variables and a sandbox profile. If
@@ -1714,6 +1757,14 @@ path is additive and safe. `keep` is `INTERSECT`: `None` means "no opinion", and
 a set narrows the result. Every resource location is a typed `EnvPath`, so a remote-workspace
 extension contributes resources from the remote filesystem ([`14-deploy.md`](14-deploy.md)).
 
+For skills, a TRANSFORM handler appends
+`ResourceRef(uri=EnvPath("…/SKILL.md"), kind=ResourceKind.SKILL,
+origin="publisher.extension")`. The host accepts only a regular, at-most-64,000-byte `SKILL.md`
+whose canonical path remains under a root granted to that invocation. It then reads the file into
+the first session snapshot; changing the file does not mutate that snapshot, and reload or a new
+session reruns discovery. Static `@omp.skill` content does not use this hook and does not activate a
+Python child; [`08-context.md`](08-context.md) owns decorator, precedence, and snapshot semantics.
+
 Fail-closed, on the exact reasoning the surveys produced: omitting a resource is safe, adding one is
 not, so a host failure must not be read as "keep everything". pi's `emitResourcesDiscover` is
 fail-open and purely additive (`runner.ts:1522-1563`), which means a read-only-audit extension there
@@ -1723,8 +1774,8 @@ cannot hide a skill that grants write access.
 
 #### G. Provider events
 
-Payloads for the seven provider-scoped events are catalog-typed and defined in
-[`13-inference.md`](13-inference.md); this document owns only their catalog properties. All seven
+Payloads for the provider-scoped decision events are catalog-typed and defined in
+[`13-inference.md`](13-inference.md); this document owns only their catalog properties. All provider events
 accept `provider=` scoping (§3.1).
 
 | Event | Payload | Ret | Ph | Lat | Fail | Re | Def |
@@ -1736,6 +1787,7 @@ accept `provider=` scoping (§3.1).
 | `models_discover` | `13-inference.md` | `Sequence[omp.ModelSpec] \| omp.DiscoveryPage` | domain | SESSION | DEFER | yes | — |
 | `provider_error` | `13-inference.md` | `omp.Failover` | domain | TURN | **DENY** | yes | — |
 | `provider_usage` | `13-inference.md` | `omp.UsageReport \| None` | domain | TURN | DEFER | no | — |
+| `provider_response` | `ProviderResponseEvent` | — | OBSERVE | ASYNC | DEFER | no | — |
 | `capability_budget` | `CapabilityBudgetEvent` | — | OBSERVE | TURN | DEFER | no | — |
 | `model_changed` | `ModelChangedEvent` | — | OBSERVE | TURN | DEFER | yes | — |
 | `credential_disabled` | `CredentialDisabledEvent` | — | OBSERVE | SESSION | DEFER | yes | — |
@@ -1750,11 +1802,21 @@ class CapabilityBudgetEvent:
 	refused: tuple[CapabilityIntent, ...]
 
 @dataclass(frozen=True, slots=True)
+class ProviderResponseEvent:
+	provider: str
+	model: ModelRef
+	status: int
+	headers: Mapping[str, str]
+	request_id: str | None
+
+@dataclass(frozen=True, slots=True)
 class ModelChangedEvent:
 	from_model: ModelRef | None
 	to_model: ModelRef
 	role: str
 	reason: ModelChangeReason
+	previous_thinking: Effort | None = None
+	thinking: Effort | None = None
 
 @dataclass(frozen=True, slots=True)
 class CredentialDisabledEvent:
@@ -1762,6 +1824,10 @@ class CredentialDisabledEvent:
 	account: str | None
 	cause: str
 ```
+`model_changed` fires immediately when either the selected model or its effective thinking effort
+changes. A thinking-only change repeats the same model in `from_model` and `to_model` and reports
+the transition through `previous_thinking` and `thinking`; extensions need not wait for the next
+`turn_start` to observe it.
 
 ```python
 class ModelChangeReason(enum.StrEnum):
@@ -1942,6 +2008,46 @@ restarts the host, delivers `extension_activate(reason=RESTART)` to each extensi
 `host_reconnect` carrying how many events were missed — so an extension resyncs from `omp.journal`
 ([`09-journal.md`](09-journal.md)) instead of assuming its in-memory state is still coherent.
 `extension_load` / `extension_unload` are host-local dispatches and never cross CONTROL.
+
+---
+
+#### J. MCP notifications
+
+| Event | Payload | Ret | Ph | Lat | Fail | Re | Def |
+|---|---|---|---|---|---|---|---|
+| `mcp_notification` | `McpNotificationEvent` | — | OBSERVE | ASYNC | DEFER | yes | — |
+
+```python
+@dataclass(frozen=True, slots=True)
+class McpNotificationEvent:
+	server: str
+	method: str
+	params: Any | None
+	sequence: int
+
+@omp.hook(
+	"mcp_notification",
+	when=omp.When(
+		server=frozenset({"github"}),
+		method_globs=("notifications/*", "acme/*"),
+	),
+)
+async def observe(
+	event: omp.McpNotificationEvent,
+	ctx: omp.Context,
+) -> None:
+	...
+```
+
+This revision-1 observation is declaration-filtered before Python starts or `params` is decoded.
+`params` is a validated JSON value (or `None`), never a request or response/result frame.
+`When.server` matches raw `McpMount.server` names exactly and `When.method_globs` contains anchored
+JSON-RPC method globs. At least one must be non-empty; `method_globs=("**",)` explicitly opts into
+all methods. The event accepts only OBSERVE, never `coalesce=`, has no return/default/composition,
+and carries no ambient authority to call its source server. Per-session delivery retains at most
+100 matching notifications, dropping the oldest with a journaled count; `sequence` is monotonic
+per server so a subscriber can observe the gap. Delivery preserves arrival order within each
+server while independent servers may dispatch concurrently.
 
 ### 3.12 The decision procedure
 
@@ -2402,44 +2508,22 @@ the protobuf files themselves.
   pattern to copy, including the async interrupt path (`PyThreadState_SetAsyncExc` with
   `PyExc_KeyboardInterrupt`).
 
-### What does not exist yet, and known defects
+### Implementation status and bounded gaps
 
-Four verified gaps and two verified defects bound what this document can honestly claim. Each is
-stated here rather than worked around, and none is fixed as part of this documentation work.
+The joined Python host has both live edges: multiplexed CONTROL carries hook dispatch and
+decisions, UI effects, host-initiated requests, and the subscription mask; invocation-scoped DATA
+routes through the extension's generation-fenced `ExtensionEnvClient`. The registry applies
+`is_model_callable` during advertisement and exposes separate `slot_hash` and `device_hash`
+identities. `ToolComplete.kind` carries the four `OutcomeKind` branches at tag 16, and envd's
+`SpillDiverter` implements `VerdictSpill`.
 
-**Gap 1 — there is no DATA edge from Python.** The two-socket topology is the target, not the
-present. `crates/app/src/envd/server.rs:177-181` holds `_documents: DocumentHost`,
-`_document_authority: Option<DocumentAuthority>` and `_workspace: WorkspaceHost` as
-underscore-prefixed, constructed-never-dispatched fields, so documents, fs, LSP and search have no
-reachable frame for a Python client, while exec, named processes and blobs are wire-complete in
-`env.proto`. Consequence for this document: every hook in §3.11 works CONTROL-only, but the
-`omp.env` calls in the worked examples do not. The additive path is
-[`11-env.md`](11-env.md)'s — pass the env UDS path in one `OMP_*` variable beside `OMP_PY_SITE`, and
-let `EnvServer::serve_io` accept the connection, since it already takes any
-`AsyncRead + AsyncWrite` and differentiates per connection via `ConnectionPolicy`.
-
-**Gap 2 — devices currently occupy model tool slots.** `Registry::advertise`
-(`crates/tool/src/registry.rs:483-492`) lowers all of `self.live` with no route filter, despite its
-own doc comment at L482 saying "for one selected route", and `register_worker` (`registry.rs:413-426`)
-puts worker declarations into `self.live` at L424. `Registry::invoke` (`registry.rs:476-478`) does
-check the route and refuses `ToolRoute::Worker`, and `live_identities` (`registry.rs:437-443`)
-documents that callers must inspect `route` first — so route-awareness exists and `advertise` simply
-does not use it. Until it does, Lesson #6 is violated in shipped code and §3.11's `device_list`
-notes describe the target. Related: `live_hash` (`registry.rs:458-467`) is one digest over all live
-identities, so it cannot serve as prompt-cache identity once devices exist; `TurnStartEvent`'s
-`toolset_hash` needs the `slot_hash` / `device_hash` split from [`01-devices.md`](01-devices.md).
-
-**Gap 3 — `ToolComplete.is_error` cannot express the four outcome branches.** It is a single `bool`
-(`toolhost.proto:95`), so a Python-hosted device cannot distinguish `Verdict::Fault` from
-`Verdict::Args` or `Verdict::Aborted` across the toolhost boundary, and `ToolResultEvent.outcome`
-will report `FAULTED` where `ARGS_REJECTED` or `ABORTED` is true. Fix shape: an additive
-`OutcomeKind kind = 16` whose absence keeps meaning `is_error`.
-
-**Gap 4 — `Tool::lift` and `VerdictSpill` are contracts without implementations.**
-`Tool::lift` defaults to `None` (`crates/tool/src/lib.rs:214`), so no device migrates history today
-even though `Registry::project` implements the walk; `VerdictSpill` (`lib.rs:436-442`) is a trait
-with no wired env implementation. `ToolResultEvent.artifact` is therefore always `None` in practice,
-and `tool_result`'s `spill` override has nothing to override yet.
+The emission ledger is
+[`.plan/ext-gaps/emit-coverage.md`](../../.plan/ext-gaps/emit-coverage.md). Every non-tombstoned
+ordinal is wired except `provider_login`, `provider_refresh`, `provider_sign`, `models_discover`,
+`capability_budget`, and `worker_state`; those six await the owning provider-callback or worker
+lifecycle authority rather than a fabricated emit. Partial payload facts at otherwise real emit
+sites are recorded in
+[`.plan/ext-gaps/emit-remainder.md`](../../.plan/ext-gaps/emit-remainder.md).
 
 **Defect 1 — `omp_remote.py` framing.** Two distinct exposures, and the first is the serious one.
 (a) *Authentication is opt-in and defaults to off.* `serve(sock, authkey=None)`
@@ -2995,6 +3079,6 @@ recorded in prose at the site of the change, per the verify-then-retract standar
   flagging the "warm pool of one" change. Both Rev 2 flags are kept in prose as
   historical records.
 
-**Revision 2.2** — the `xd` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `xd` builtin of the embedded shell, inside the core `shell` tool: `xd` lists the catalog (`xd --q <text>` searches), `xd <device> --help` returns docs plus schema-derived CLI usage, and `xd <device> [args…]` (or `xd <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `xd resolve "<reason>"` / `xd reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `xd` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
+**Revision 2.2** — the `dyn` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `dyn` builtin of the embedded shell, inside the core `shell` tool: `dyn` lists the catalog (`dyn --q <text>` searches), `dyn <device> --help` returns docs plus schema-derived CLI usage, and `dyn <device> [args…]` (or `dyn <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `dyn resolve "<reason>"` / `dyn reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `dyn` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
 
-In this file, the live hook ABI and one-gate examples now name the `xd` shell builtin, keep device arguments decoded and transport-independent, and assign catalog/docs reads to `CoreTool("shell")`.
+In this file, the live hook ABI and one-gate examples now name the `dyn` shell builtin, keep device arguments decoded and transport-independent, and assign catalog/docs reads to `CoreTool("shell")`.

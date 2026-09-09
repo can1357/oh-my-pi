@@ -1,0 +1,284 @@
+[
+  {
+    "name": "version",
+    "pattern": "\\bv\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.-]+)?\\b",
+    "replacement": "v<VERSION>",
+    "widthFill": "─"
+  },
+  {
+    "name": "cwd",
+    "pattern": "(?<![0-9A-Za-z._-])(?:(?:…[0-9A-Za-z._/-]*/)?(?:pi-capture|pi-seeded-[0-9A-Za-z._-]+-cwd-[0-9A-Za-z._-]+|(?:dual-drive-[0-9A-Za-z._-]+/)?workspace|o2-face-[0-9A-Za-z._-]+)|…<PATH>)(?=\\s*(?:>||$))",
+    "replacement": "<CWD>"
+  },
+  {
+    "name": "path",
+    "pattern": "(?<![0-9A-Za-z._-])(?:/[0-9A-Za-z._-]+){2,}",
+    "replacement": "<PATH>"
+  },
+  {
+    "name": "pi-cursor-save-artifact",
+    "comment": "Pi's non-negotiated PTY presenter leaks the final `s` of CSI cursor-save at the hardware cursor cell; this is not editor state.",
+    "pattern": "pasted block two(?:s)?$",
+    "replacement": "<PASTE_END>"
+  },
+  {
+    "name": "pi-cursor-save-artifact-restore",
+    "pattern": "<PASTE_END>$",
+    "replacement": "pasted block two"
+  },
+  {
+    "name": "pi-update-banner",
+    "comment": "Pinned pi may asynchronously paint a version-update banner; it is startup ephemera, not application interaction state.",
+    "type": "block",
+    "scenarios": ["boot", "autocomplete"],
+    "pattern": "^─+$",
+    "continuationPattern": "^(?:\\s*Update Available\\s*|\\s*New version .*|─+)$",
+    "replacement": ""
+  },
+  {
+    "name": "branch",
+    "pattern": "(?<= )[^ ]+",
+    "replacement": "<BRANCH>"
+  },
+  {
+    "name": "model-pane-data",
+    "type": "model-data",
+    "scenarios": ["model"],
+    "replacement": "<DATA>"
+  },
+  {
+    "name": "model-id",
+    "pattern": "\\b(?:anthropic|openai|google|replay)/[0-9A-Za-z._:/-]+\\b",
+    "replacement": "<MODEL_ID>"
+  },
+  {
+    "name": "welcome-model",
+    "scenarios": ["boot", "slash-menu", "autocomplete", "user-message", "resize"],
+    "pattern": "(?<=^│)(?=[^│]{0,25}\\d) {2,}[A-Z][^│]*? {2,}(?=│)",
+    "replacement": "         <MODEL>          ",
+    "flags": "gmu"
+  },
+  {
+    "name": "welcome-replay-model",
+    "scenarios": ["boot", "slash-menu", "autocomplete", "user-message", "resize"],
+    "pattern": "(?<=^│) {2,}Greeting {2,}(?=│)",
+    "replacement": "         <MODEL>          ",
+    "flags": "gmu"
+  },
+  {
+    "name": "welcome-provider",
+    "scenarios": ["boot", "slash-menu", "autocomplete", "user-message", "resize"],
+    "pattern": "(?<=^│) {2,}(?:anthropic|replay) {2,}(?=│)",
+    "replacement": "        <PROVIDER>        ",
+    "flags": "gmu"
+  },
+  {
+    "name": "status-model",
+    "scenarios": ["boot", "slash-menu", "autocomplete", "user-message", "resize"],
+    "pattern": "(󰪣 )[^]+(?= )",
+    "replacement": "$1<MODEL>"
+  },
+  {
+    "name": "status-pinned-model",
+    "scenarios": ["boot", "slash-menu", "autocomplete", "user-message", "resize"],
+    "pattern": "(◒ )(?:Fable 5|Greeting)(?= >)",
+    "replacement": "$1<MODEL>",
+    "widthFill": "─"
+  },
+  {
+    "name": "percentage",
+    "pattern": "\\b\\d+(?:\\.\\d+)?%",
+    "replacement": "<PERCENT>"
+  },
+  {
+    "name": "context-used-tokens",
+    "comment": "Autocomplete projects each architecture's live prompt/context footprint; the command semantics are the shared percentage and context-window capacity.",
+    "scenarios": ["autocomplete"],
+    "pattern": "(?<=Context: <PERCENT> \\()\\d[\\d,]*(?=/[\\d,]+\\))",
+    "replacement": "<TOKENS>"
+  },
+  {
+    "name": "bytes",
+    "pattern": "\\b\\d+(?:\\.\\d+)?\\s*(?:B|KiB|MiB|GiB|TiB|KB|MB|GB|TB)\\b",
+    "replacement": "<BYTES>"
+  },
+  {
+    "name": "session-fork-file",
+    "comment": "Pi and o2 use their architecture-owned journal filename formats for the same fork result.",
+    "scenarios": ["autocomplete"],
+    "pattern": "(?<=Session forked to )\\S+",
+    "replacement": "<SESSION_FILE>"
+  },
+  {
+    "name": "session-count",
+    "pattern": "\\b\\d+\\s+sessions?\\b",
+    "replacement": "<SESSION_COUNT>"
+  },
+  {
+    "name": "date-time",
+    "pattern": "\\b\\d{4}-\\d{2}-\\d{2}(?:[T ]\\d{2}:\\d{2}(?::\\d{2}(?:\\.\\d+)?)?(?:Z|[+-]\\d{2}:?\\d{2})?)?\\b",
+    "replacement": "<TIMESTAMP>"
+  },
+  {
+    "name": "clock-time",
+    "pattern": "\\b(?:[01]?\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d)?(?:\\s?[AP]M)?\\b",
+    "replacement": "<TIMESTAMP>"
+  },
+  {
+    "name": "rotating-tip",
+    "type": "block",
+    "pattern": "^\\s*Tip:\\s?(.*)$",
+    "continuationPattern": "^ {6}\\S",
+    "replacement": "<TIP>",
+    "corpus": [
+      "Tired of typing \"keep going\"? Just send a '.'",
+      "You can /btw to ask a side question",
+      "Use /tan to fork the current conversation into a background agent",
+      "Ctrl+D can be used to exit, but with your draft saved!",
+      "Find out which model you emotionally abuse the most with `omp stats`",
+      "Try task isolation to create CoW worktrees",
+      "Need a cheap nested model call? Use `completion(x...)`. Have a big batch of tasks? Ask clanker to use it!",
+      "Spaghetti code? Try complaining with /omfg",
+      "Did you know? Each kitty/tmux/cmux/zellij/wezterm split keeps its own session — `omp -c` resumes the right one",
+      "Drop the word `ultrathink` in your message for harder multi-step reasoning — watch it glow rainbow as you type",
+      "Say `orchestrate` in your message to drive a multi-phase task with parallel subagents — watch it glow as you type",
+      "Say `workflowz` in your message to drive the task with parallel subagents in eval — watch it glow as you type",
+      "Log in to several accounts of the same provider — `/login` again — and omp load-balances across them automatically",
+      "Run `omp auth-broker serve` once and every machine pulls live tokens over the wire — refresh keys never leave the host; `omp auth-gateway` fronts it as a drop-in proxy any OpenAI-compatible client can hit",
+      "Press alt+p (or /switch) to switch provider, and ctrl+p to cycle role models smol -> slow -> etc",
+      "Press ctrl+r to search your prompt history and reuse a past message",
+      "`/force read` pins the next turn to one specific tool when the model keeps reaching for the wrong one",
+      "`/copy code` grabs the last code block to your clipboard — `/copy cmd` grabs the last shell/python command",
+      "`/shake` rips heavy tool results out of context to reclaim tokens without a full /compact — `/shake images` drops just images",
+      "Pair up live: `/collab` shares your session through an end-to-end encrypted relay link — a teammate runs `/join <link>` to watch tool calls stream and prompt the agent from their own omp",
+      "Press ← ← to drill into a running or finished agent and inspect its tool calls and transcript",
+      "Hit a Codex rate limit? `/usage reset` spends a saved reset credit to immediately restore your quota",
+      "No native tool_calling? Inference provider botches parsing them? `PI_DIALECT=glm|kimi|anthropic…` rolls it locally for them!",
+      "Turn on `/advisor` to attach a second model that reviews every turn and quietly injects advice",
+      "Try starting your prompt with a ->, and writing a list (1. Do X, 2. Do Y)",
+      "Press shift+tab to cycle through reasoning effort levels",
+      "Lint/type errors piling up? `omp cleanse` (or /cleanse right here) hunts project diagnostics and fixes them with parallel subagents — esc cancels"
+    ]
+  },
+  {
+    "name": "status-session-title-row",
+    "comment": "omp keeps the session title inside its retained status-bar presentation; pi paints the same title on a separate right-aligned row.",
+    "type": "block",
+    "scenarios": ["autocomplete"],
+    "pattern": "^ {20,}\\S.*$",
+    "continuationPattern": "(?!)",
+    "replacement": ""
+  },
+  {
+    "name": "status-session-title-segment",
+    "comment": "Normalize omp's inline session-title segment against pi's separate title row.",
+    "scenarios": ["autocomplete"],
+    "pattern": "┃─*◀ [^\\n]+?\\s+(?=\\d+(?:\\.\\d+)?[KM]─?\\s*$)",
+    "replacement": "┃"
+  },
+  {
+    "name": "status-budget",
+    "pattern": "\\b\\d+(?:\\.\\d+)?[KM](?=─?\\s*$)",
+    "replacement": "<BUDGET>"
+  },
+  {
+    "name": "editing-submitted-message",
+    "scenarios": ["user-message"],
+    "pattern": "^\\s*first line.*$",
+    "replacement": "<MESSAGE>"
+  },
+  {
+    "name": "composer-reply-height-border",
+    "scenarios": ["user-message"],
+    "pattern": "^(   .*?)(?:\\s+╯)?$",
+    "replacement": "$1<COMPOSER_END>"
+  },
+  {
+    "name": "composer-reply-height-border-restore",
+    "scenarios": ["user-message"],
+    "pattern": "<COMPOSER_END>$",
+    "replacement": ""
+  },
+  {
+    "name": "assistant-reply",
+    "type": "region",
+    "scenarios": ["user-message"],
+    "startPattern": "^(?:\\s*hello world\\s*|<MESSAGE>)$",
+    "endPattern": "^(?:| π  >|╭─ History )",
+    "replacement": "<REPLY>",
+    "failureReplacement": "<FAIL: EMPTY REPLY>"
+  },
+  {
+    "name": "post-turn-cost",
+    "scenarios": ["user-message"],
+    "pattern": "(󰙺 |\\$)\\d+(?:\\.\\d+)?(?= )",
+    "replacement": "$1<COST>"
+  },
+  {
+    "name": "status-turn-cost-value",
+    "scenarios": ["user-message"],
+    "pattern": " > \\$\\d+\\.\\d+(?= ▶)",
+    "replacement": ""
+  },
+  {
+    "name": "status-turn-cost-layout",
+    "scenarios": ["user-message"],
+    "pattern": "(?= ▶)",
+    "replacement": " <TURN_COST>"
+  },
+  {
+    "name": "status-turn-cost-layout-restore",
+    "scenarios": ["user-message"],
+    "pattern": " <TURN_COST>(?= ▶)",
+    "replacement": ""
+  },
+  {
+    "name": "status-data-layout",
+    "pattern": "(?<=<PERCENT>)─*󰁨─*<BUDGET>(?=─?\\s*$)",
+    "replacement": "<GAUGE>󰁨<BUDGET>"
+  },
+  {
+    "name": "status-progress-layout",
+    "pattern": "(▶)─*<PERCENT>─*┃─*<BUDGET>─?\\s*$",
+    "replacement": "$1<PERCENT><GAUGE>┃<BUDGET>"
+  },
+  {
+    "name": "settings-value",
+    "scenarios": ["settings"],
+    "pattern": "^((?=│[^│]*│)(?=.{24,54}[A-Za-z]).{55})\\S+(?= {2,}(?:[█│] )?│$)",
+    "replacement": "$1<VALUE>",
+    "flags": "gmu",
+    "widthFill": " "
+  },
+  {
+    "name": "deferred-memory-tab",
+    "comment": "User-authorized parity-ledger deferral: the memory settings family is intentionally deferred.",
+    "scenarios": ["settings"],
+    "pattern": "(?:󰧑 Memory    |(?<=) {12}(?=   │$))",
+    "replacement": "",
+    "flags": "gmu"
+  },
+  {
+    "name": "settings-preview-data",
+    "scenarios": ["settings"],
+    "pattern": "^(│ )( )(󰵗   )([^ ]+) [^]+  ([^ ]+) <CWD>   <BRANCH>(?:  [^]+)? (─+)<PERCENT>─*󰁨─*(?:\\d+(?:\\.\\d+)?[KM]|…)─? ?│$",
+    "replacement": "$1$2$3$4 <MODEL>  $5 <CWD>   <BRANCH> <SUB> $6<PERCENT><GAUGE>󰁨<BUDGET> │",
+    "flags": "gmu"
+  },
+  {
+    "name": "deferred-memory-tab-unseeded-120x40",
+    "comment": "User-authorized parity-ledger deferral: the unseeded Unicode memory settings tab is intentionally deferred.",
+    "scenarios": ["settings"],
+    "pattern": "(?:🧠 Memory    |(?<=📦) {13}(?=     │$))",
+    "replacement": "",
+    "flags": "gmu"
+  },
+  {
+    "name": "settings-preview-data-unseeded-120x40",
+    "comment": "Unseeded 120x40 settings preview: normalize live values while requiring the no-cap Unicode status structure.",
+    "scenarios": ["settings"],
+    "pattern": "^(│  )(π  > )(◒) [^>]+ > (🗑) (?:<CWD>|[^>]+) > (⑂) ([^>▶]+?)(?: > [^▶]+)? (▶)(─+)<PERCENT>─*(┃)─*(?:\\d+(?:\\.\\d+)?[KM]|…)─? ?│$",
+    "replacement": "$1$2$3 <MODEL> > $4 <CWD> > $5 <BRANCH> <SUB> $7$8<PERCENT><GAUGE>$9<BUDGET> │",
+    "flags": "gmu"
+  }
+]

@@ -1,4 +1,4 @@
-//! Pi `/login` provider roster with vendored logos and live paint statistics.
+//! `/login` provider roster with vendored logos and live paint statistics.
 //!
 //! ```sh
 //! cargo run -p omp-tui --example companies

@@ -1,15 +1,32 @@
 //! Typed settings owned by the project LSP runtime.
 
-use std::path::Path;
-
-use omp_settings::{
-	DomainRegistration, FieldDescriptor, SettingKind, SettingScope, SettingsDomain,
-	manager::{SettingsManager, SettingsManagerError, SettingsPaths},
-};
+use omp_con::Ctx;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
-const PERSISTED: &[SettingScope] = &[SettingScope::Global, SettingScope::Project];
+omp_con::var! {
+	/// Enable the lsp tool for code intelligence (definitions, references, diagnostics, rename).
+	pub static SV_LSP_ENABLED = sv_lsp_enabled: bool {
+		default: true,
+		flags: archive,
+		meta: {
+			"ui.tab": "files",
+			"ui.group": "LSP",
+			"ui.label": "LSP",
+			"legacy.path": "lsp.enabled",
+		},
+	};
+	/// Start language servers on first use (lsp tool or editing a matching file type) instead of at session startup.
+	pub static SV_LSP_LAZY = sv_lsp_lazy: bool {
+		default: true,
+		flags: archive,
+		meta: {
+			"ui.tab": "files",
+			"ui.group": "LSP",
+			"ui.label": "Lazy LSP Startup",
+			"legacy.path": "lsp.lazy",
+		},
+	};
+}
 
 /// Layered language-server enablement and mutation feedback policy.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -42,149 +59,41 @@ impl Default for LspSettings {
 	}
 }
 
-impl SettingsDomain for LspSettings {
-	const DOMAIN: &'static str = "lsp";
-	const FIELDS: &'static [FieldDescriptor] = &[
-		FieldDescriptor {
-			path:        "lsp.enabled",
-			label:       "Language Servers",
-			description: "Enable project language-server bindings and tools.",
-			kind:        SettingKind::Boolean,
-			scopes:      PERSISTED,
-			order:       10,
-			options:     None,
-			condition:   None,
-			secret:      false,
-		},
-		FieldDescriptor {
-			path:        "lsp.lazy",
-			label:       "Lazy LSP Startup",
-			description: "Start matching language servers on first use.",
-			kind:        SettingKind::Boolean,
-			scopes:      PERSISTED,
-			order:       20,
-			options:     None,
-			condition:   None,
-			secret:      false,
-		},
-		FieldDescriptor {
-			path:        "lsp.formatOnWrite",
-			label:       "Format on Write",
-			description: "Format supported files after write transactions.",
-			kind:        SettingKind::Boolean,
-			scopes:      PERSISTED,
-			order:       30,
-			options:     None,
-			condition:   None,
-			secret:      false,
-		},
-		FieldDescriptor {
-			path:        "lsp.diagnosticsOnWrite",
-			label:       "Diagnostics on Write",
-			description: "Return language-server diagnostics after writes.",
-			kind:        SettingKind::Boolean,
-			scopes:      PERSISTED,
-			order:       40,
-			options:     None,
-			condition:   None,
-			secret:      false,
-		},
-		FieldDescriptor {
-			path:        "lsp.diagnosticsOnEdit",
-			label:       "Diagnostics on Edit",
-			description: "Return language-server diagnostics after edits.",
-			kind:        SettingKind::Boolean,
-			scopes:      PERSISTED,
-			order:       50,
-			options:     None,
-			condition:   None,
-			secret:      false,
-		},
-		FieldDescriptor {
-			path:        "lsp.diagnosticsDeduplicate",
-			label:       "Deduplicate Diagnostics",
-			description: "Suppress unchanged diagnostics already shown for a file.",
-			kind:        SettingKind::Boolean,
-			scopes:      PERSISTED,
-			order:       60,
-			options:     None,
-			condition:   None,
-			secret:      false,
-		},
-	];
-}
-
-omp_settings::inventory::submit! {
-	DomainRegistration::of::<LspSettings>()
-}
-
-/// Loading the immutable LSP projection from native settings failed.
-#[derive(Debug, Error)]
-pub enum LspSettingsError {
-	/// Native settings layers could not be read or composed.
-	#[error(transparent)]
-	Manager(#[from] SettingsManagerError),
-	/// The layered LSP table did not decode as its owning Rust type.
-	#[error(transparent)]
-	Projection(#[from] omp_settings::SnapshotError),
-}
-
-/// Loads one immutable global/project/overlay LSP policy snapshot.
-pub fn load(data_dir: &Path, project_root: &Path) -> Result<LspSettings, LspSettingsError> {
-	let manager =
-		SettingsManager::open_read_only(SettingsPaths::discover(data_dir, Some(project_root)))?;
-	Ok(manager.snapshot().project::<LspSettings>()?.get().clone())
+impl LspSettings {
+	/// Resolves language-server policy from the process control context.
+	#[must_use]
+	pub fn from_con(ctx: &Ctx) -> Self {
+		Self {
+			enabled:                 SV_LSP_ENABLED.get(ctx),
+			lazy:                    SV_LSP_LAZY.get(ctx),
+			format_on_write:         omp_tools::settings::SV_LSP_FORMAT_ON_WRITE.get(ctx),
+			diagnostics_on_write:    omp_tools::settings::SV_LSP_DIAGNOSTICS_ON_WRITE.get(ctx),
+			diagnostics_on_edit:     omp_tools::settings::SV_LSP_DIAGNOSTICS_ON_EDIT.get(ctx),
+			diagnostics_deduplicate: omp_tools::settings::SV_LSP_DIAGNOSTICS_DEDUPLICATE.get(ctx),
+		}
+	}
 }
 
 #[cfg(test)]
 mod tests {
-	use omp_settings::{SettingsSnapshot, registered_domains};
-
 	use super::*;
 
 	#[test]
 	fn defaults_match_pi_policy_without_shared_toggle() {
-		assert_eq!(LspSettings::default(), LspSettings {
-			enabled:                 true,
-			lazy:                    true,
-			format_on_write:         false,
-			diagnostics_on_write:    true,
-			diagnostics_on_edit:     false,
-			diagnostics_deduplicate: true,
+		assert_eq!(LspSettings::from_con(&Ctx::new()), LspSettings::default());
+	}
+
+	#[test]
+	fn con_projection_is_typed() {
+		let ctx = Ctx::new();
+		SV_LSP_ENABLED.set(&ctx, false).expect("set enabled");
+		omp_tools::settings::SV_LSP_DIAGNOSTICS_ON_EDIT
+			.set(&ctx, true)
+			.expect("set diagnostics");
+		assert_eq!(LspSettings::from_con(&ctx), LspSettings {
+			enabled: false,
+			diagnostics_on_edit: true,
+			..LspSettings::default()
 		});
-		assert!(
-			!LspSettings::FIELDS
-				.iter()
-				.any(|field| field.path == "lsp.shared")
-		);
-	}
-
-	#[test]
-	fn isolated_projection_and_registration_are_typed() {
-		let expected =
-			LspSettings { enabled: false, diagnostics_on_edit: true, ..LspSettings::default() };
-		let snapshot = SettingsSnapshot::isolated(expected.clone()).expect("isolated LSP snapshot");
-		assert_eq!(
-			snapshot
-				.project::<LspSettings>()
-				.expect("LSP projection")
-				.get(),
-			&expected
-		);
-		assert!(
-			registered_domains()
-				.iter()
-				.any(|domain| domain.name == LspSettings::DOMAIN)
-		);
-	}
-
-	#[test]
-	fn removed_shared_toggle_is_rejected_by_the_live_domain() {
-		let document = toml::toml! {
-			[lsp]
-			shared = true
-		};
-		let snapshot = SettingsSnapshot::read_only(document);
-		assert!(snapshot.project::<LspSettings>().is_err());
 	}
 }

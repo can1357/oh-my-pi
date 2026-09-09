@@ -1,0 +1,14 @@
+id = "pyui"
+version = "0.1.0"
+omp_api = 1
+entry = "pyui"
+capabilities = ["ui.notify", "ui.title", "ui.ghost", "ui.slots"]
+
+[[declarations]]
+id = "hello"
+kind = "hard"
+module = "pyui"
+key = "hello@pyui.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"

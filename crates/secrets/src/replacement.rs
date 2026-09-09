@@ -22,7 +22,7 @@ pub struct RegexMatchContext<'a> {
 	pub end:   usize,
 }
 
-/// Generates pi's deterministic, byte-length-preserving `ZZ` replacement.
+/// Generates a deterministic, byte-length-preserving `ZZ` replacement.
 pub fn generate_deterministic_replacement(secret: &str) -> String {
 	let length = secret.encode_utf16().count();
 	if length == 0 {
@@ -150,7 +150,7 @@ pub fn regex_rematches_in_context(
 		.any(|(_, end)| end > context.start)
 }
 
-/// Performs pi's bounded fixed-point search for a same-length non-matching
+/// Performs a bounded fixed-point search for a same-length non-matching
 /// marker.
 pub fn find_non_matching_replacement(
 	value: &str,
@@ -179,7 +179,7 @@ pub fn find_non_matching_replacement(
 			return Some(candidate.to_owned());
 		}
 	}
-	for whitespace in [b' ', b'\t'] {
+	for whitespace in *b" \t" {
 		candidate.fill(whitespace);
 		let full = str::from_utf8(&candidate).expect("replacement alphabet is ASCII");
 		if full != value && !regex_rematches_in_context(full, regex, context) {
@@ -222,7 +222,7 @@ pub fn build_keyed_replacement_run(key: &str, length: usize) -> String {
 	output
 }
 
-fn decimal_bytes(mut value: u64) -> ([u8; 20], usize) {
+const fn decimal_bytes(mut value: u64) -> ([u8; 20], usize) {
 	let mut bytes = [0_u8; 20];
 	let mut cursor = bytes.len();
 	loop {

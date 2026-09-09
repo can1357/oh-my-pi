@@ -277,6 +277,13 @@ impl Target {
 			Self::Window(id) => id,
 		}
 	}
+
+	pub(crate) const fn kind(&self) -> &'static str {
+		match self {
+			Self::Desktop => "desktop",
+			Self::Window(_) => "window",
+		}
+	}
 }
 
 /// Display subset selected when constructing a backend.

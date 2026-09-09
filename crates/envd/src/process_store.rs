@@ -87,6 +87,9 @@ pub struct ProcessRecord {
 	/// Protobuf-encoded readiness probes used for restart and recovery.
 	#[serde(default)]
 	pub ready_wire:  Vec<Vec<u8>>,
+	/// Protobuf-encoded terminal execution status retained across owner restart.
+	#[serde(default)]
+	pub status_wire: Vec<u8>,
 	/// Directory containing the process log files.
 	#[serde(default)]
 	pub process_dir: PathBuf,
@@ -107,6 +110,9 @@ pub struct ProcessRecord {
 	pub log_end_offset:       u64,
 	/// Number of completed log rotations.
 	pub log_rotations:        u32,
+	/// Whether a supervised replacement is durably scheduled.
+	#[serde(default)]
+	pub restart_pending:      bool,
 	/// Total supervised restarts for this named generation.
 	pub restart_count:        u32,
 	/// Consecutive failures not reset by healthy uptime.
@@ -419,6 +425,7 @@ mod tests {
 			name: Str::from(name),
 			spec_wire: Vec::new(),
 			ready_wire: Vec::new(),
+			status_wire: vec![0x08, 0x01],
 			process_dir: PathBuf::new(),
 			generation: 1,
 			identity: ProcessIdentity::current().unwrap(),
@@ -428,6 +435,7 @@ mod tests {
 			log_start_offset: 4,
 			log_end_offset: 19,
 			log_rotations: 1,
+			restart_pending: false,
 			restart_count: 2,
 			consecutive_failures: 1,
 			restart_history: vec![RestartRecord {

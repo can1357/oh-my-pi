@@ -27,6 +27,12 @@ pub struct SweepSummary {
 ///
 /// Candidates newer than five minutes, live leases, malformed metadata, and
 /// verified active detached processes are conservatively retained.
+#[tracing::instrument(
+	name = "stale_runtime_sweep",
+	level = "debug",
+	skip_all,
+	fields(root = %root.display())
+)]
 pub fn sweep_stale_runtime_dirs(root: &Path) -> io::Result<SweepSummary> {
 	let mut candidates = match fs::read_dir(root) {
 		Ok(entries) => entries
@@ -60,6 +66,11 @@ pub fn sweep_stale_runtime_dirs(root: &Path) -> io::Result<SweepSummary> {
 		drop(lease);
 		fs::remove_dir_all(quarantine)?;
 		summary.removed += 1;
+		tracing::info!(
+			path = %candidate.display(),
+			examined = summary.examined,
+			"stale environment runtime reclaimed",
+		);
 	}
 	Ok(summary)
 }

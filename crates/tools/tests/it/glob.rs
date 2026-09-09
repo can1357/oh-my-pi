@@ -1,24 +1,28 @@
-//! Pi-equivalent `glob@1` schema, traversal, and model-facing output contracts.
+//! `glob@1` schema, traversal, and model-facing output contracts.
 
-use std::{future, str, sync::Arc};
+use std::{
+	future,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
+};
 
-use bytes::Bytes;
 use futures::{StreamExt, executor::block_on};
 use omp_core::{Str, sf};
 use omp_tool::{
-	BlobRef, CapsBase, Ev, IncomingParams, ModelClass, Part, PromptCaps, Tool, ToolTerminal,
+	Abort, CapsBase, Diag, DiagKind, Ev, IncomingParams, Interrupt, ModelClass, Omitted, Part,
+	PromptCaps, Severity, Tool, ToolTerminal, Unit,
 };
-use omp_tools::{
-	glob, grep,
-	read::{Fault as ReadFault, ReadBlobs, StoredArtifact},
-};
+use omp_tools::{glob, grep};
 use parking_lot::Mutex;
 use serde_json::json;
 
 #[derive(Clone)]
 struct FakeWorkspace {
-	result: Result<glob::WalkResult, glob::Fault>,
-	seen:   Arc<Mutex<Vec<glob::WalkRequest>>>,
+	result:            Result<glob::WalkResult, glob::Fault>,
+	seen:              Arc<Mutex<Vec<glob::WalkRequest>>>,
+	stopped_on_cancel: Option<Arc<AtomicBool>>,
 }
 
 impl grep::WorkspaceSearch for FakeWorkspace {
@@ -29,6 +33,10 @@ impl grep::WorkspaceSearch for FakeWorkspace {
 		future::ready(Err(grep::Fault::Workspace { message: sf!("unused fake search boundary") }))
 	}
 
+	fn stage_snapshots(&self, _snapshots: Vec<grep::SearchSnapshot>) -> Result<(), grep::Fault> {
+		Err(grep::Fault::Workspace { message: sf!("unused fake snapshot boundary") })
+	}
+
 	fn record_snapshots(&self, _records: Vec<grep::SnapshotRecord>) -> Result<(), grep::Fault> {
 		Err(grep::Fault::Workspace { message: sf!("unused fake snapshot boundary") })
 	}
@@ -36,48 +44,19 @@ impl grep::WorkspaceSearch for FakeWorkspace {
 	fn glob(
 		&self,
 		request: glob::WalkRequest,
+		cancellation: tokio_util::sync::CancellationToken,
 	) -> impl Future<Output = Result<glob::WalkResult, glob::Fault>> + Send + '_ {
 		let result = self.result.clone();
 		let seen = Arc::clone(&self.seen);
+		let stopped_on_cancel = self.stopped_on_cancel.clone();
 		async move {
 			seen.lock().push(request);
+			if let Some(stopped) = stopped_on_cancel {
+				cancellation.cancelled().await;
+				stopped.store(true, Ordering::Release);
+				return Err(glob::Fault::Cancelled { reason: sf!("cancelled by test") });
+			}
 			result
-		}
-	}
-}
-
-#[derive(Clone, Default)]
-struct RecordingBlobs {
-	stored: Arc<Mutex<Vec<Bytes>>>,
-}
-
-impl ReadBlobs for RecordingBlobs {
-	fn store(
-		&self,
-		bytes: Bytes,
-		media_type: Str,
-	) -> impl Future<Output = Result<BlobRef, ReadFault>> + Send + '_ {
-		let stored = Arc::clone(&self.stored);
-		async move {
-			let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-			stored.lock().push(bytes);
-			Ok(BlobRef { hash: sf!("glob-full"), media_type, byte_len })
-		}
-	}
-
-	fn store_artifact(
-		&self,
-		bytes: Bytes,
-		media_type: Str,
-	) -> impl Future<Output = Result<StoredArtifact, ReadFault>> + Send + '_ {
-		let stored = Arc::clone(&self.stored);
-		async move {
-			let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-			stored.lock().push(bytes);
-			Ok(StoredArtifact {
-				blob: BlobRef { hash: sf!("glob-full"), media_type, byte_len },
-				uri:  sf!("artifact://1"),
-			})
 		}
 	}
 }
@@ -86,14 +65,23 @@ struct Invocation {
 	result:  Result<glob::Payload, glob::Fault>,
 	useless: bool,
 	text:    String,
+	diags:   Vec<Diag>,
 }
 
 fn fake(result: glob::WalkResult) -> FakeWorkspace {
-	FakeWorkspace { result: Ok(result), seen: Arc::new(Mutex::new(Vec::new())) }
+	FakeWorkspace {
+		result:            Ok(result),
+		seen:              Arc::new(Mutex::new(Vec::new())),
+		stopped_on_cancel: None,
+	}
 }
 
 fn faulty(fault: glob::Fault) -> FakeWorkspace {
-	FakeWorkspace { result: Err(fault), seen: Arc::new(Mutex::new(Vec::new())) }
+	FakeWorkspace {
+		result:            Err(fault),
+		seen:              Arc::new(Mutex::new(Vec::new())),
+		stopped_on_cancel: None,
+	}
 }
 
 const fn walk(matches: Vec<glob::WalkMatch>) -> glob::WalkResult {
@@ -108,22 +96,31 @@ const fn directory(path: &'static str, modified_ms: u64) -> glob::WalkMatch {
 	glob::WalkMatch { path: sf!(path), modified_ms, is_dir: true }
 }
 
-fn invoke_with_blobs(workspace: FakeWorkspace, raw: &str, blobs: RecordingBlobs) -> Invocation {
-	let tool = glob::tool(workspace, blobs);
+fn invoke(workspace: FakeWorkspace, raw: &str) -> Invocation {
+	let tool = glob::tool(workspace);
 	let (feed, params) = IncomingParams::channel();
 	feed
 		.args_committed(Str::new(raw))
 		.expect("invocation consumer remains live");
 	let events = block_on(tool.call(params).collect::<Vec<_>>());
-	let [Ev::Done(ToolTerminal::Done { result, useless })] = events.as_slice() else {
-		panic!("expected one terminal glob outcome: {events:?}");
-	};
+	let mut diags = Vec::new();
+	let mut terminal = None;
+	for event in events {
+		match event {
+			Ev::Diag(diag) => diags.push(diag),
+			Ev::Done(ToolTerminal::Done { result, useless }) => {
+				terminal = Some((result, useless));
+			},
+			other => panic!("unexpected glob event: {other:?}"),
+		}
+	}
+	let (result, useless) = terminal.expect("glob emits one terminal outcome");
 	let parts = tool.prompt(
 		result.as_ref(),
 		&PromptCaps::for_tool(
 			CapsBase {
 				maximum_parts:      1,
-				maximum_text_bytes: 64 * 1024,
+				maximum_text_bytes: u32::MAX,
 				media:              false,
 				model_class:        ModelClass::Standard,
 			},
@@ -138,20 +135,19 @@ fn invoke_with_blobs(workspace: FakeWorkspace, raw: &str, blobs: RecordingBlobs)
 			Part::Blob { .. } => panic!("glob must never project blobs"),
 		})
 		.collect();
-	Invocation { result: result.clone(), useless: *useless, text }
-}
-
-fn invoke(workspace: FakeWorkspace, raw: &str) -> Invocation {
-	invoke_with_blobs(workspace, raw, RecordingBlobs::default())
+	Invocation { result, useless, text, diags }
 }
 
 #[test]
-fn pi_schema_and_defaults_are_exact() {
+fn schema_and_defaults_are_exact() {
 	let workspace = fake(walk(Vec::new()));
 	let seen = Arc::clone(&workspace.seen);
-	let tool = glob::tool(workspace.clone(), RecordingBlobs::default());
+	let tool = glob::tool(workspace.clone());
 	let actual: serde_json::Value =
 		serde_json::from_slice(&tool.spec().schema).expect("glob schema is JSON");
+	assert_eq!(tool.spec().name, "glob");
+	assert!(tool.spec().rev.family.is_empty());
+	assert_eq!(tool.spec().rev.n, 1);
 	assert_eq!(
 		tool.spec().schema.as_ref(),
 		omp_tool::schema::<glob::Params>().as_ref(),
@@ -162,6 +158,7 @@ fn pi_schema_and_defaults_are_exact() {
 		json!({
 			"type": "object",
 			"additionalProperties": false,
+			"required": ["i"],
 			"properties": {
 				"path": {
 					"type": "string",
@@ -178,6 +175,14 @@ fn pi_schema_and_defaults_are_exact() {
 				"limit": {
 					"type": "number",
 					"description": "max results"
+				},
+				"i": {
+					"type": "string",
+					"description": "Short present-participle intent for this call."
+				},
+				"notrunc": {
+					"type": "boolean",
+					"description": "Prefer complete output inline up to the host security ceiling; overflow or transport backpressure remains available through its artifact."
 				}
 			}
 		})
@@ -229,8 +234,14 @@ fn limit_one_keeps_only_the_newest_match_and_records_truncation_truth() {
 	let workspace = fake(walk(vec![matched("old.rs", 1), matched("new.rs", 2)]));
 	let seen = Arc::clone(&workspace.seen);
 	let invocation = invoke(workspace, r#"{"path":"*.rs","limit":1}"#);
-	assert_eq!(invocation.text, "new.rs\n\n1 results limit reached. Use limit=2 for more.");
+	assert_eq!(invocation.text, "new.rs");
 	assert!(!invocation.useless);
+	assert_eq!(invocation.diags.len(), 1);
+	let diag = &invocation.diags[0];
+	assert_eq!(diag.native_kind(), Some(DiagKind::LimitReached));
+	assert_eq!(diag.severity, Severity::Info);
+	assert_eq!(diag.continuation.as_deref(), Some("limit=2"));
+	assert_eq!(diag.omitted, Some(Omitted { count: 1, unit: Unit::Files }));
 	let payload = invocation.result.expect("glob succeeds");
 	assert_eq!(payload.matches, vec![matched("new.rs", 2)]);
 	assert!(payload.truncated);
@@ -247,6 +258,40 @@ fn root_search_is_rejected_before_workspace_traversal() {
 	assert_eq!(invocation.text, "Searching from root directory '/' is not allowed");
 	assert!(!invocation.useless);
 	assert!(seen.lock().is_empty());
+}
+
+#[test]
+fn interrupt_waits_until_the_workspace_traversal_has_stopped() {
+	let stopped = Arc::new(AtomicBool::new(false));
+	let workspace = FakeWorkspace {
+		result:            Ok(walk(Vec::new())),
+		seen:              Arc::default(),
+		stopped_on_cancel: Some(Arc::clone(&stopped)),
+	};
+	let started = Arc::clone(&workspace.seen);
+	let tool = glob::tool(workspace);
+	let (feed, params) = IncomingParams::channel();
+	feed
+		.args_committed(Str::new_static(r#"{"path":"**/*"}"#))
+		.expect("invocation consumer remains live");
+	let events = std::thread::scope(|scope| {
+		let execution = scope.spawn(|| block_on(tool.call(params).collect::<Vec<_>>()));
+		while started.lock().is_empty() {
+			std::thread::yield_now();
+		}
+		feed
+			.interrupt(Interrupt { class: sf!("user"), reason: sf!("stop glob") })
+			.expect("glob invocation accepts interruption");
+		execution.join().expect("glob execution thread")
+	});
+	assert!(
+		stopped.load(Ordering::Acquire),
+		"the tool must not report cancellation before its traversal has stopped"
+	);
+	assert!(matches!(
+		events.as_slice(),
+		[Ev::Aborted(Abort::Interrupted { reason })] if reason == "stop glob"
+	));
 }
 
 #[test]
@@ -273,8 +318,12 @@ fn surviving_multi_target_appends_the_missing_path_note() {
 	let mut result = walk(vec![matched("src/lib.rs", 1)]);
 	result.missing_paths = vec![sf!("gone"), sf!("also-gone")];
 	let invocation = invoke(fake(result), r#"{"path":"src; gone; also-gone"}"#);
-	assert_eq!(invocation.text, "# src/\nlib.rs\n\nSkipped missing paths: gone, also-gone");
+	assert_eq!(invocation.text, "# src/\nlib.rs");
 	assert!(!invocation.useless);
+	assert_eq!(invocation.diags.len(), 1);
+	assert_eq!(invocation.diags[0].native_kind(), Some(DiagKind::MissingPaths));
+	assert_eq!(invocation.diags[0].severity, Severity::Warn);
+	assert_eq!(invocation.diags[0].text, "gone, also-gone");
 	assert_eq!(
 		invocation
 			.result
@@ -318,12 +367,11 @@ fn timeout_with_partial_matches_returns_ranked_incomplete_output() {
 	let mut result = walk(vec![matched("old.rs", 1), matched("new.rs", 2)]);
 	result.timed_out = true;
 	let invocation = invoke(fake(result), r#"{"path":"*.rs"}"#);
-	assert_eq!(
-		invocation.text,
-		"new.rs\nold.rs\n\nglob timed out after 5s; returning 2 partial matches — results are \
-		 incomplete, scope to a deeper directory instead of retrying blindly"
-	);
+	assert_eq!(invocation.text, "new.rs\nold.rs");
 	assert!(!invocation.useless);
+	assert_eq!(invocation.diags.len(), 1);
+	assert_eq!(invocation.diags[0].native_kind(), Some(DiagKind::Timeout));
+	assert_eq!(invocation.diags[0].severity, Severity::Warn);
 	let payload = invocation.result.expect("partial timeout is successful");
 	assert!(payload.timed_out);
 	assert!(payload.truncated);
@@ -336,13 +384,11 @@ fn timeout_without_matches_is_not_reported_as_proof_of_absence() {
 	let mut result = walk(Vec::new());
 	result.timed_out = true;
 	let invocation = invoke(fake(result), r#"{"path":"*.rs"}"#);
-	assert_eq!(
-		invocation.text,
-		"Glob timed out after 5s before finding any matches — the scan is incomplete, NOT proof of \
-		 absence. The walk is bounded by directory size, not pattern width; scope the search to a \
-		 deeper directory (e.g. `sub/dir/*.ext` instead of `*.ext` at a huge root)."
-	);
+	assert_eq!(invocation.text, "");
 	assert!(!invocation.useless, "an incomplete traversal is useful partial truth");
+	assert_eq!(invocation.diags.len(), 1);
+	assert_eq!(invocation.diags[0].native_kind(), Some(DiagKind::Timeout));
+	assert_eq!(invocation.diags[0].severity, Severity::Warn);
 	let payload = invocation.result.expect("empty timeout is successful");
 	assert!(payload.timed_out);
 	assert!(payload.truncated);
@@ -351,7 +397,7 @@ fn timeout_without_matches_is_not_reported_as_proof_of_absence() {
 }
 
 #[test]
-fn oversized_projection_spills_complete_output_with_truthful_footer() {
+fn oversized_projection_remains_complete_for_central_dispatch() {
 	let matches = (0..200)
 		.map(|index| glob::WalkMatch {
 			path:        sf!("dir/{index:03}-{}.rs", "x".repeat(400)),
@@ -359,30 +405,17 @@ fn oversized_projection_spills_complete_output_with_truthful_footer() {
 			is_dir:      false,
 		})
 		.collect();
-	let blobs = RecordingBlobs::default();
-	let invocation = invoke_with_blobs(fake(walk(matches)), r#"{"path":"dir/*.rs"}"#, blobs.clone());
+	let invocation = invoke(fake(walk(matches)), r#"{"path":"dir/*.rs"}"#);
 	let payload = invocation
 		.result
 		.as_ref()
 		.expect("large glob output succeeds");
-	let stored = blobs.stored.lock();
-	let [full] = stored.as_slice() else {
-		panic!("glob must store exactly one complete pre-truncation output");
-	};
-	let full = str::from_utf8(full).expect("rendered glob output is UTF-8");
-	assert!(full.starts_with("# dir/\n199-"));
-	assert!(full.to_ascii_lowercase().ends_with(".rs"));
-	assert_eq!(payload.output_total_lines, 201);
-	assert!(payload.output_shown_lines < payload.output_total_lines);
-	assert_eq!(payload.output_blob.as_ref().map(|blob| blob.hash.as_str()), Some("glob-full"));
-	assert_eq!(payload.output_artifact_uri.as_deref(), Some("artifact://1"));
-	let expected_footer = format!(
-		"[truncated: {} of {} lines shown; read artifact://1 for full output]",
-		payload.output_shown_lines, payload.output_total_lines
-	);
-	assert!(invocation.text.ends_with(expected_footer.as_str()));
+	assert!(invocation.text.starts_with("# dir/\n199-"));
+	assert!(invocation.text.to_ascii_lowercase().ends_with(".rs"));
+	assert!(!invocation.text.contains("[truncated"));
+	assert_eq!(payload.matches.len(), 200);
 
-	let zero_tool = glob::tool(fake(walk(Vec::new())), RecordingBlobs::default());
+	let zero_tool = glob::tool(fake(walk(Vec::new())));
 	let zero = zero_tool.prompt(
 		Ok(payload),
 		&PromptCaps::for_tool(

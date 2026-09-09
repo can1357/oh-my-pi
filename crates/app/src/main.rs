@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! OMP command-line entry point.
 
 use std::{env, panic, process::ExitCode};
@@ -6,6 +8,7 @@ use std::{env, panic, process::ExitCode};
 use windows_sys::Win32::System::Console;
 
 fn process_bootstrap() {
+	omp_http::install_tls_provider();
 	// Safety: this runs as the first statement in `main`, before OMP starts any
 	// daemon, worker, or application thread that could concurrently read env.
 	unsafe {
@@ -49,6 +52,7 @@ fn set_process_title() {}
 
 fn install_panic_hook() {
 	panic::set_hook(Box::new(|info| {
+		tracing::error!(target: "omp", panic = %info, "panic");
 		eprintln!("\x1b[31momp internal error:\x1b[0m {info}");
 	}));
 }
@@ -56,7 +60,20 @@ fn install_panic_hook() {
 #[tokio::main]
 async fn main() -> ExitCode {
 	process_bootstrap();
+	omp_observability::logging::init();
 	install_panic_hook();
+	if env::args_os()
+		.nth(1)
+		.is_some_and(|arg| arg == omp_sandbox::HIDDEN_CHILD_ARG)
+	{
+		return match omp_sandbox::run_child_entry() {
+			Ok(()) => ExitCode::SUCCESS,
+			Err(error) => {
+				eprintln!("omp sandbox child: {error}");
+				ExitCode::FAILURE
+			},
+		};
+	}
 	if env::args_os()
 		.nth(1)
 		.is_some_and(|arg| arg == omp_envd::EVAL_CHILD_ARG)
@@ -65,6 +82,18 @@ async fn main() -> ExitCode {
 			Ok(()) => ExitCode::SUCCESS,
 			Err(error) => {
 				eprintln!("omp eval child: {error}");
+				ExitCode::FAILURE
+			},
+		};
+	}
+	if env::args_os()
+		.nth(1)
+		.is_some_and(|arg| arg == omp_envd::shell_child::SHELL_CHILD_ARG)
+	{
+		return match omp_envd::shell_child::run_shell_child_entry().await {
+			Ok(code) => code,
+			Err(error) => {
+				eprintln!("omp shell child: {error}");
 				ExitCode::FAILURE
 			},
 		};
@@ -81,35 +110,42 @@ async fn main() -> ExitCode {
 			},
 		};
 	}
-	if env::args_os()
-		.nth(1)
-		.is_some_and(|arg| arg == omp_envd::worker::WORKER_ARG)
-	{
-		return match omp_envd::worker::run_py_worker_entry() {
-			Ok(()) => ExitCode::SUCCESS,
-			Err(error) => {
-				eprintln!("omp Python worker: {error}");
-				ExitCode::FAILURE
-			},
-		};
-	}
-	omp_telemetry::export::init();
+	omp_observability::export::init();
 	omp_app::startup_notice::start_watchdog();
 	let result = omp_app::run().await;
 	omp_app::startup_notice::stop_watchdog();
-	omp_telemetry::export::shutdown();
+	omp_observability::export::shutdown();
 	match result {
 		Ok(()) => ExitCode::SUCCESS,
 		Err(error) => {
-			// Usage diagnostics are intentionally stack-free and follow the
-			// conventional exit status 2; other execution failures remain 1.
-			eprintln!("{error:?}");
-			if error
-				.downcast_ref::<omp_app::usage_error::CliUsageError>()
+			// A signal already committed its durable exit diagnostic. Preserve
+			// the shell status without printing a second, misleading failure.
+			// Usage diagnostics are stack-free and carry their explicit status.
+			if let Some(signal) = error.downcast_ref::<omp_app::exit_diagnostics::SignalExit>() {
+				ExitCode::from(signal.exit_code())
+			} else if error
+				.downcast_ref::<omp_app::print_mode::PrintFailure>()
 				.is_some()
 			{
-				ExitCode::from(2)
+				ExitCode::FAILURE
+			} else if let Some(usage) = error.downcast_ref::<omp_app::usage_error::CliUsageError>() {
+				if usage.lowercase() {
+					eprintln!("error: {usage}");
+				} else {
+					eprintln!("Error: {usage}");
+				}
+				ExitCode::from(usage.exit_code())
+			} else if let Some(extension) =
+				error.downcast_ref::<omp_app::ext_cli::ExtensionCliFailure>()
+			{
+				eprintln!("{error:?}");
+				ExitCode::from(extension.exit_code())
+			} else if let Some(interrupt) =
+				error.downcast_ref::<omp_app::ext_cli::ExtensionInterrupt>()
+			{
+				ExitCode::from(interrupt.exit_code())
 			} else {
+				eprintln!("{error:?}");
 				ExitCode::FAILURE
 			}
 		},

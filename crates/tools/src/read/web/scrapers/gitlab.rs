@@ -3,8 +3,8 @@
 use std::fmt::Write as _;
 
 use omp_core::{Str, sf};
+use omp_tool::{Diag, DiagKind, Unit};
 use serde::Deserialize;
-use smallvec::SmallVec;
 use url::Url;
 
 use super::utils::{format_iso_date, format_number, html_to_basic_markdown};
@@ -42,7 +42,7 @@ pub(super) async fn render<C: HttpClient + Sync>(
 	let Some(target) = parse(url) else {
 		return Ok(None);
 	};
-	let (content, content_type, method, note) = match target.kind {
+	let (content, content_type, method, provenance) = match target.kind {
 		Kind::Repo => {
 			let endpoint = format!(
 				"{API}/projects/{}",
@@ -246,14 +246,19 @@ pub(super) async fn render<C: HttpClient + Sync>(
 	let mut rendered = if content_type.is_none() {
 		RenderResult::markdown(&content, method)
 	} else {
-		let (content, truncated) = finalize_output(&content);
-		let mut notes = SmallVec::new();
-		if truncated {
-			notes.push(sf!("Output truncated to 500000 characters"));
+		let (content, omitted) = finalize_output(&content);
+		let mut diags = Vec::new();
+		if omitted != 0 {
+			diags.push(
+				Diag::warn(DiagKind::OutputBounded, "scraper output truncated")
+					.omitted(omitted as u64, Unit::Chars),
+			);
 		}
-		RenderResult { content, content_type, method: Str::new(method), notes }
+		RenderResult { content, content_type, method: Str::new(method), diags }
 	};
-	rendered.notes.insert(0, Str::new(note));
+	rendered
+		.diags
+		.insert(0, Diag::info(DiagKind::Provenance, provenance));
 	Ok(Some(rendered))
 }
 
@@ -547,7 +552,9 @@ mod tests {
 		);
 		assert_eq!(result.content_type.as_deref(), Some("text/markdown"));
 		assert_eq!(result.method.as_str(), "gitlab-repo");
-		assert_eq!(result.notes.as_slice(), ["Fetched repository via GitLab API"]);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 		let requests = client.requests.lock();
 		assert_eq!(requests.len(), 2);
 		assert_eq!(requests[0].url.as_str(), "https://gitlab.com/api/v4/projects/group%2Fproject");
@@ -596,7 +603,9 @@ mod tests {
 		assert_eq!(result.content.as_str(), "fn main() {}");
 		assert_eq!(result.content_type.as_deref(), Some("text/plain"));
 		assert_eq!(result.method.as_str(), "gitlab-raw");
-		assert_eq!(result.notes.as_slice(), ["Fetched raw file via GitLab API"]);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 		let requests = client.requests.lock();
 		assert_eq!(
 			requests[0].url.as_str(),
@@ -627,7 +636,9 @@ mod tests {
 			 📁 src/\n- 📁 tests/\n\n## Files (2)\n\n- 📄 Cargo.toml\n- 📄 README.md"
 		);
 		assert_eq!(result.method.as_str(), "gitlab-tree");
-		assert_eq!(result.notes.as_slice(), ["Fetched directory tree via GitLab API"]);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 		let requests = client.requests.lock();
 		assert_eq!(
 			requests[1].url.as_str(),

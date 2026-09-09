@@ -442,6 +442,14 @@ read. Backed by `Kind::Label` (`event.rs:326-332`).
 
 **Channel** CONTROL. **Latency class** per-event. **Failure** fail-closed.
 
+#### `async omp.journal.label_of(target) -> str | None`
+
+Returns the latest live label assignment for an addressable entry. A durable
+clear written by `label(target, None)` resolves to `None`; callers never need
+to scan `Label` events or guess whether a later rewind abandoned an assignment.
+
+**Channel** CONTROL. **Latency class** per-command. **Failure** fail-closed.
+
 #### `omp.journal.decode(raw) -> Any`
 
 Parses the verbatim `data` bytes of an entry into plain Python values. Only
@@ -683,7 +691,71 @@ The fork/handoff chain reaching a session, oldest first. Backed by
 inference from filenames — which is what pi's advisor/subagent classifier had to
 do, keying off `__advisor.jsonl` basenames and path layout.
 
-#### Session mutation
+#### `async omp.sessions.tree(session_id=None) -> tuple[omp.SessionNode, ...]`
+
+Materializes the physical journal as immutable root nodes in durable order.
+Each `SessionNode` has `id`, `parent`, `kind`, `ts`, `data`, resolved `label`,
+and nested `children`. Rewinds form sibling branches. Broken parent references
+are returned as additional roots rather than dropping durable records.
+
+#### `async omp.sessions.branch(from_id=None) -> tuple[omp.SessionNode, ...]`
+
+Returns one root-first path. `from_id` accepts an `EntryId` (including another
+visible session) or a non-negative physical index in the current session.
+Omitting it selects the current live leaf. An unknown entry returns an empty
+path.
+
+#### `omp.sessions.SessionSetup` and `async omp.sessions.create(setup=SessionSetup())`
+
+`SessionSetup` is a frozen declarative value:
+
+```python
+setup = omp.sessions.SessionSetup(
+    title="Review follow-up",
+    parent=omp.sessions.current().id,
+    entries=(ReviewState(findings=3),),
+    initial_prompt="Continue from the recorded findings.",
+)
+created = await omp.sessions.create(setup)
+```
+
+`entries` accepts only instances of classes declared by the calling extension's
+`@omp.entry_kind`. `initial_prompt` is text or a tuple of visible
+`omp.Part.text()` / `omp.Part.blob()` values and becomes exactly one visible
+user journal item. It never submits a turn, enqueues work, starts a model
+request, or encodes hidden context.
+
+Creation is one atomic create/seed/switch transaction. Before allocating
+anything, Core validates parent access, declaration ownership, quotas,
+invocation phase, and UI state. It stages the header, durable lineage, optional
+user title, typed entries, and optional prompt in that order. Journal
+publication plus the write-time index/idempotency receipt is the durability
+point; only then does the existing interactive owner switch the UI once.
+`list`, `get`, `lineage`, `journal`, and `resume` immediately observe the
+complete result.
+
+Only an idle, user-initiated interactive `@omp.command` invocation at
+`EFFECTS_AUTHORIZED` is admitted. Hooks, tools, shortcuts, headless/RPC
+commands, subagents, and a transitioning UI raise
+`omp.SessionTransitionDenied` without creating anything. Pre-durability failure
+rolls back and leaves the old session current. If durability or switch
+acknowledgement is ambiguous, Core fuses the generation- and invocation-bound
+idempotency identity and raises `omp.SessionTransitionIndeterminate`; retry
+cannot create a duplicate.
+
+No session manager or mutable journal handle crosses CONTROL. A command may
+immediately queue the first turn with
+`await omp.agents.inject(prompt, session=created.id)` after `create` returns;
+the target is accepted only for the authenticated client that created it.
+See the create → switch → inject recipe in `docs/py/12-agents.md`. Later
+automation can use a durable schedule after the user reaches the new session.
+
+| Symbol | Kind / trigger | `OperationSpec` |
+|---|---|---|
+| `omp.sessions.SessionSetup` | Declare / static; no manifest row | `minimum_phase=OPEN`, `durability=EPHEMERAL`, `cost=NONE`, `authority=CORE` |
+| `omp.sessions.create` | Request / static; no manifest row | `minimum_phase=EFFECTS_AUTHORIZED`, `durability=DURABLE`, `cost=NONE`, `authority=CORE` |
+
+#### Historical session mutation
 
 Historical-session management uses named CONTROL requests; the extension never
 opens, rewrites, renames, or removes journal files itself.
@@ -1179,10 +1251,10 @@ extensions instead returned `/tmp` paths and hoped.
 The sanctioned way to add capability is a device. This is worth being exact
 about, because it is the one place where minting an address and registering a
 schema are easy to confuse: `@omp.device` places a typed `omp.ToolPath`
-(`docs/py/01-devices.md`) in the device catalog behind the `xd` shell builtin,
+(`docs/py/01-devices.md`) in the device catalog behind the `dyn` shell builtin,
 with docs and a JSON schema the model fetches on demand with
-`xd <name> --help` and discovers with `xd` or `xd --q <text>`. It adds **zero**
-registered tool slots to any request; invocation runs `xd <name> [args…]` inside
+`dyn <name> --help` and discovers with `dyn` or `dyn --q <text>`. It adds **zero**
+registered tool slots to any request; invocation runs `dyn <name> [args…]` inside
 the core `shell` tool, where the schema-derived CLI maps arguments into one nested
 JSON document. No URL scheme is ever writable by declaring a device. Availability
 changes arrive as one
@@ -1888,7 +1960,7 @@ in shipped code.** `Registry::register_worker` inserts worker declarations into
 `advertise` (`:483-492`) lowers every `self.live` entry with no route filter
 despite a comment describing "one selected route." So a Python worker declaration
 occupies a slot in the model's advertised tool array today — exactly the failure
-the `xd` device transport exists to prevent, and exactly what the device paragraph
+the `dyn` device transport exists to prevent, and exactly what the device paragraph
 under `omp.Scheme` describes as costing "zero registered tool slots." That design is the target. The
 fix is clean because route-awareness already exists elsewhere: `invoke` checks
 route and refuses `ToolRoute::Worker` (`:476-478`), and `live_identities`
@@ -2500,6 +2572,6 @@ Changes this file made in response to the external review, by review point:
   durable approval tickets (`PLAN.md` §D5) — where Rev 2 flagged it as a
   recommendation. The Rev 2 flags are kept in prose as historical records.
 
-**Revision 2.2** — the `xd` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `xd` builtin of the embedded shell, inside the core `shell` tool: `xd` lists the catalog (`xd --q <text>` searches), `xd <device> --help` returns docs plus schema-derived CLI usage, and `xd <device> [args…]` (or `xd <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `xd resolve "<reason>"` / `xd reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `xd` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
+**Revision 2.2** — the `dyn` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `dyn` builtin of the embedded shell, inside the core `shell` tool: `dyn` lists the catalog (`dyn --q <text>` searches), `dyn <device> --help` returns docs plus schema-derived CLI usage, and `dyn <device> [args…]` (or `dyn <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `dyn resolve "<reason>"` / `dyn reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `dyn` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
 
-- **Journal and scheme prose.** The live minting-versus-registering account now uses `xd` catalog, help, and invocation commands, identifies `shell` as the transport's core-tool target, and keeps devices out of the model's registered tool slots.
+- **Journal and scheme prose.** The live minting-versus-registering account now uses `dyn` catalog, help, and invocation commands, identifies `shell` as the transport's core-tool target, and keeps devices out of the model's registered tool slots.

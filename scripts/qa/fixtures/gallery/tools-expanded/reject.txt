@@ -1,0 +1,30 @@
+── reject ──────────────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ Resolve: reject ⟨proposed -> rejected⟩ The patch would also                                       
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ Resolve: reject ⟨proposed -> rejected⟩ The patch would also delete the migration script.          
+                                                                                                    
+
+  · done
+                                                                                                    
+                                                                                                    
+  Discard: pending action                                                                          
+                                                                                                    
+ The patch would also delete the migration script.                                                  
+                                                                                                    
+                                                                                                    
+
+  · failed
+                                                                                                    
+                                                                                                    
+  Discard: pending action                                                                          
+                                                                                                    
+ The patch would also delete the migration script.                                                  
+                                                                                                    
+                                                                                                    
+

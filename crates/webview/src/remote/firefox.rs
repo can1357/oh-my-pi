@@ -107,7 +107,7 @@ pub async fn drive_window(binary: PathBuf, config: WindowConfig, ctx: DriverCtx)
 /// Shared driver body: launch, set up, signal readiness, then pump until a
 /// shutdown condition and terminate the browser.
 async fn drive(binary: PathBuf, surface: Surface, ctx: DriverCtx) -> Result<()> {
-	let DriverCtx { commands, events, state, page, ready } = ctx;
+	let DriverCtx { commands, cancelled: _, events, state, page, ready } = ctx;
 	// `_profile` lives past the child so an ephemeral dir outlasts the process.
 	let (_profile, mut child, mut link, mut driver) =
 		match setup(binary, &surface, page, events, state).await {
@@ -458,6 +458,10 @@ impl Driver {
 		match method {
 			"browsingContext.navigationStarted" if ours => {
 				if let Some(url) = params["url"].as_str() {
+					tracing::debug!(
+						scheme = crate::navigation_scheme(url),
+						"webview navigation observed"
+					);
 					let url = url.to_str();
 					self.state.lock().url = url.clone();
 					let _ = self.events.send(WebViewEvent::LoadStarted(url.clone()));
@@ -682,6 +686,11 @@ impl Driver {
 				if self.shot_failures >= MAX_SHOT_FAILURES {
 					return Err(Error::Protocol(err));
 				}
+				tracing::warn!(
+					attempt = self.shot_failures,
+					max_attempts = MAX_SHOT_FAILURES,
+					"webview frame capture failed; retrying"
+				);
 				return Ok(true);
 			},
 			Err(err) => return Err(err),
@@ -789,7 +798,7 @@ fn pointer_move(x: f64, y: f64) -> Value {
 	json!({ "type": "pointerMove", "x": x, "y": y, "duration": 0 })
 }
 
-/// Checks the source browsing context carried by a BiDi script message.
+/// Checks the source browsing context carried by a `BiDi` script message.
 fn script_message_is_from_top(params: &Value, top: &str) -> bool {
 	params.pointer("/source/context").and_then(Value::as_str) == Some(top)
 }

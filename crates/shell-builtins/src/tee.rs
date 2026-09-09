@@ -15,7 +15,7 @@ use std::{
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::PossibleValue};
-use omp_shell_engine::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use omp_shell::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 
 use crate::{
 	host::{Host, Utility, matches_parser, util},
@@ -103,7 +103,10 @@ fn tee(options: &Options, host: &mut Host) -> io::Result<()> {
 			});
 			continue;
 		}
-		match open(name, &host.resolve(name), options.append) {
+		match host
+			.ensure_writable(name)
+			.and_then(|path| open(name, &path, options.append))
+		{
 			Ok(writer) => writers.push(writer),
 			Err(err) => {
 				let _ = writeln!(host.stderr, "tee: {}: {err}", name.maybe_quote());

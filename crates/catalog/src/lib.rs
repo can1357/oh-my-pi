@@ -7,6 +7,7 @@
 pub mod capability;
 pub mod cascade;
 pub mod classify;
+pub mod compat;
 pub mod compile;
 pub mod contrib;
 pub mod discover;
@@ -26,6 +27,7 @@ pub mod thinking;
 pub use capability::*;
 pub use cascade::*;
 pub use classify::*;
+pub use compat::*;
 pub use compile::*;
 pub use contrib::*;
 pub use discover::*;

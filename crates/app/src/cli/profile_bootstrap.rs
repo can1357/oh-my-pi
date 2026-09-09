@@ -27,6 +27,19 @@ pub enum ProfileBootstrapError {
 	/// A global flag lacked a value.
 	#[error("{0} requires a non-empty value")]
 	MissingValue(&'static str),
+	/// A profile name could escape its profile directory or is not portable.
+	#[error(
+		"Invalid OMP profile \"{profile}\". Profile names must start with a lowercase letter or \
+		 digit, contain at most 64 lowercase letters, digits, dots, underscores, or dashes, cannot \
+		 be \".\" or \"..\", cannot end with \".\", and cannot be a Windows reserved device name"
+	)]
+	InvalidProfile {
+		/// Rejected operator input.
+		profile: Str,
+	},
+	/// `OMP_PROFILE` was not Unicode.
+	#[error("OMP_PROFILE must be valid Unicode")]
+	NonUnicodeProfile,
 }
 
 /// Extracts global profile flags without stealing strict-subcommand arguments.
@@ -39,6 +52,7 @@ pub fn extract(
 		output.push(program.clone());
 	}
 	let mut profile = None;
+	let mut profile_set = false;
 	let mut alias = None;
 	let mut index = 1;
 	let mut strict = false;
@@ -72,7 +86,8 @@ pub fn extract(
 				output.push(OsString::from(PROFILE_BOUNDARY));
 			}
 			if flag == "--profile" {
-				profile = Some(Str::new(value));
+				profile = normalize_profile_name(value)?;
+				profile_set = true;
 			} else {
 				alias = Some(Str::new(value));
 			}
@@ -83,7 +98,8 @@ pub fn extract(
 			if value.is_empty() {
 				return Err(ProfileBootstrapError::MissingValue("--profile"));
 			}
-			profile = Some(Str::new(value));
+			profile = normalize_profile_name(value)?;
+			profile_set = true;
 			if needs_boundary(&output) {
 				output.push(OsString::from(PROFILE_BOUNDARY));
 			}
@@ -120,13 +136,25 @@ pub fn extract(
 		}
 		index += 1;
 	}
-	let profile = profile.or_else(|| {
-		env::var("OMP_PROFILE")
-			.ok()
-			.filter(|value| !value.is_empty())
-			.map(Str::from)
-	});
+	let profile = if profile_set {
+		profile
+	} else {
+		env::var_os("OMP_PROFILE")
+			.map(|value| {
+				value
+					.to_str()
+					.ok_or(ProfileBootstrapError::NonUnicodeProfile)
+					.and_then(normalize_profile_name)
+			})
+			.transpose()?
+			.flatten()
+	};
 	Ok(ProfileBootstrap { arguments: output, profile, alias })
+}
+
+fn normalize_profile_name(value: &str) -> Result<Option<Str>, ProfileBootstrapError> {
+	omp_core::dirs::normalize_profile_name(value)
+		.map_err(|_| ProfileBootstrapError::InvalidProfile { profile: Str::new(value.trim()) })
 }
 
 fn needs_boundary(output: &[OsString]) -> bool {
@@ -155,5 +183,35 @@ mod tests {
 		let literal =
 			extract(["omp", "--", "--profile", "literal"].map(OsString::from)).expect("literal");
 		assert!(literal.profile.is_none());
+	}
+
+	#[test]
+	fn explicit_default_profile_selects_the_default_root() {
+		let result = extract(["omp", "--profile", "default", "--version"].map(OsString::from))
+			.expect("explicit default profile");
+		assert!(result.profile.is_none());
+	}
+
+	#[test]
+	fn profile_names_are_portable_single_path_components() {
+		for value in ["work", "team.one", "a_b-c9"] {
+			assert_eq!(
+				normalize_profile_name(value)
+					.expect("valid profile")
+					.as_deref(),
+				Some(value)
+			);
+		}
+		for value in ["..", "Team", "ends.", "two/slashes", "con", "lpt9.logs"] {
+			assert!(matches!(
+				normalize_profile_name(value),
+				Err(ProfileBootstrapError::InvalidProfile { .. })
+			));
+		}
+		assert!(
+			normalize_profile_name(" default ")
+				.expect("default profile")
+				.is_none()
+		);
 	}
 }

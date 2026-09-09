@@ -1,11 +1,10 @@
-//! Native web search and URL fetch renderers.
+//! Native web search renderer.
 
 use omp_core::{Str, sf};
 use omp_tool::{CallOutcome, ToolIdentity, render::RenderFold};
 
 use super::{live_view, view::El};
 use crate::{
-	fetch::{Fault as FetchFault, Payload as FetchPayload, Update as FetchUpdate},
 	gallery::RendererGalleryFixture,
 	view,
 	web_search::{Fault as WebSearchFault, Payload as WebSearchPayload, Update as WebSearchUpdate},
@@ -22,7 +21,7 @@ impl RenderFold for WebSearchRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
 		if let Some(query) = args.get("query").and_then(|value| value.as_str()) {
 			*state = Some(Str::new(query));
 		}
@@ -37,46 +36,6 @@ impl RenderFold for WebSearchRenderer {
 			Some(CallOutcome::Faulted(fault)) => Some(render_web_search_fault(fault).into()),
 			Some(CallOutcome::ArgsRejected(_) | CallOutcome::Aborted { .. }) => None,
 		}
-	}
-}
-
-pub(super) struct FetchRenderer;
-
-impl RenderFold for FetchRenderer {
-	type Outcome = CallOutcome<FetchPayload, FetchFault>;
-	type State = Option<Str>;
-	type Update = FetchUpdate;
-
-	fn fold(&self, _state: &mut Self::State, update: Self::Update) {
-		match update {}
-	}
-
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
-		if let Some(url) = args.get("url").and_then(|value| value.as_str()) {
-			*state = Some(Str::new(url));
-		}
-	}
-
-	fn view(&self, state: &Self::State, outcome: Option<&Self::Outcome>) -> Option<Str> {
-		match outcome {
-			None => Some(render_fetch_live(state.as_deref()).into()),
-			Some(CallOutcome::Ok(payload)) => Some(render_fetch_payload(payload).into()),
-			Some(CallOutcome::Faulted(fault)) => Some(render_fetch_fault(&fault.to_string()).into()),
-			Some(CallOutcome::ArgsRejected(_) | CallOutcome::Aborted { .. }) => None,
-		}
-	}
-}
-
-fn render_fetch_live(url: Option<&str>) -> El {
-	let Some(url) = url else {
-		return live_view("fetch", "fetching URL");
-	};
-	view! {
-		<row gap=1>
-			<spinner color=accent/>
-			<text fg=muted>{"Fetching"}</text>
-			<text>{url}</text>
-		</row>
 	}
 }
 
@@ -131,6 +90,20 @@ fn render_web_search_payload(query: Option<&str>, payload: &WebSearchPayload) ->
 					}
 				</col>
 			}
+			if !response.citations.is_empty() {
+				<text bold>{"Citations"}</text>
+				<col max-rows=8 overflow="citations">
+					for citation in &response.citations {
+						<col>
+							<text>{if citation.title.is_empty() { citation.url.as_str() } else { citation.title.as_str() }}</text>
+							<text fg=muted>{citation.url.as_str()}</text>
+							if !citation.cited_text.is_empty() {
+								<text fg=muted>{citation.cited_text.as_str()}</text>
+							}
+						</col>
+					}
+				</col>
+			}
 			<text bold>{"Metadata"}</text>
 			if !response.engine.is_empty() {
 				<fact label="Provider">{response.engine.as_str()}</fact>
@@ -171,73 +144,32 @@ fn source_domain(url: &str) -> Option<&str> {
 	let remainder = url
 		.strip_prefix("https://")
 		.or_else(|| url.strip_prefix("http://"))?;
-	let authority = remainder
-		.split(|character| matches!(character, '/' | '?' | '#'))
-		.next()?;
+	let authority = remainder.split(['/', '?', '#']).next()?;
 	let host = authority.rsplit('@').next()?.split(':').next()?;
 	(!host.is_empty()).then_some(host)
 }
 
 fn render_web_search_fault(fault: &WebSearchFault) -> El {
-	let WebSearchFault::Search { code, message } = fault;
+	let WebSearchFault::Search { category, code, status, .. } = fault;
+	let category: &'static str = (*category).into();
 	view! {
-		<callout kind="error">{"Provider error ("}{code}{"): "}{message}</callout>
+		<callout kind="error">
+			{"Provider error ("}{category}{": "}{code}{")"}
+			if let Some(status) = status { {sf!(" HTTP {status}")} }
+		</callout>
 	}
 }
 
-fn render_fetch_payload(payload: &FetchPayload) -> El {
-	view! {
-		<col gap=1>
-			if let Some(title) = payload.title.as_deref() {
-				<fact label="Title">{title}</fact>
-			}
-			<fact label="Final URL">{&payload.url}</fact>
-			<fact label="Content">
-				<row sep=" · ">
-					<text>
-						if let Some(content_type) = payload.content_type.as_deref() {
-							{content_type}
-						} else {
-							{"unknown type"}
-						}
-					</text>
-					<bytes value={u64::try_from(payload.content.len()).unwrap_or(u64::MAX)}/>
-				</row>
-			</fact>
-		</col>
-	}
-}
-
-fn render_fetch_fault(message: &str) -> El {
-	view! {
-		<callout kind="error">{"Fetch failed: "}{message}</callout>
-	}
-}
-
-/// Native web search and fetch renderer lifecycle fixtures for the visual QA
-/// gallery.
-pub(crate) fn gallery_fixtures(
-	web_search: ToolIdentity,
-	fetch: ToolIdentity,
-) -> Vec<RendererGalleryFixture> {
+/// Native web search renderer lifecycle fixtures for the visual QA gallery.
+pub fn gallery_fixtures(web_search: ToolIdentity) -> Vec<RendererGalleryFixture> {
 	vec![
 		RendererGalleryFixture {
 			identity: web_search,
-			title: "Bun vs Node.js performance benchmarks 2026",
 			streaming_args: r#"{"query":"Bun vs Node.js performance bench"#,
 			args: r#"{"query":"Bun vs Node.js performance benchmarks 2026","recency":"month","limit":4}"#,
 			progress_update: None,
 			success_outcome: br#"{"kind":"ok","value":{"response":{"engine":"sonar-pro @ Perplexity","answer":"Bun continues to outperform Node.js on raw HTTP throughput and cold-start time thanks to its JavaScriptCore engine and native-Zig runtime, while Node.js retains an edge in ecosystem maturity and long-term stability.\n\nFor script-heavy workflows, Bun's faster startup is the decisive factor.","sources":[{"title":"Bun 1.2 Benchmarks: HTTP, SQLite, and Startup Time","url":"https://bun.sh/blog/bun-v1.2-benchmarks","snippet":"Bun serves roughly 2.5x the requests per second of Node.js on a simple HTTP server and starts in under 10ms.","published_at":"12d ago","author":"The Bun Team"},{"title":"Node.js vs Bun: A 2026 Performance Deep Dive","url":"https://blog.platformatic.dev/nodejs-vs-bun-2026","snippet":"Across CPU-bound workloads the gap narrows, but Bun's faster module resolution keeps cold starts ahead.","published_at":"3d ago","author":"Matteo Collina"},{"title":"Real-world API latency: Bun, Deno, and Node compared","url":"https://www.theregister.com/2026/05/18/js_runtime_latency/","snippet":"Under sustained load p99 latencies converge, suggesting runtime choice matters less for steady-state services.","published_at":"19d ago"},{"title":"Why we migrated our CLI tooling from Node to Bun","url":"https://engineering.example.com/posts/bun-cli-migration","snippet":"Startup dropped from 180ms to 22ms, shaving seconds off every developer command invocation.","published_at":"27d ago","author":"Dana Whitfield"}],"citations":[{"url":"https://bun.sh/blog/bun-v1.2-benchmarks","title":"Bun 1.2 Benchmarks","cited_text":"Bun serves roughly 2.5x the requests per second of Node.js"}],"search_queries":["bun vs node.js performance benchmarks 2026","bun http throughput vs node"],"usage":{"input_tokens":312,"output_tokens":248,"total_tokens":560,"server_tools":{"web_search_requests":2}},"auth_mode":"api_key"}}}"#,
-			error_outcome: br#"{"kind":"faulted","value":{"kind":"search","code":"rate_limit","message":"Perplexity provider returned HTTP 429 (rate limited). Retry after 30s."}}"#,
-		},
-		RendererGalleryFixture {
-			identity: fetch,
-			title: "https://docs.rs/tokio/latest/tokio/",
-			streaming_args: r#"{"url":"https://docs.rs/tokio/latest/tok"#,
-			args: r#"{"url":"https://docs.rs/tokio/latest/tokio/"}"#,
-			progress_update: None,
-			success_outcome: br##"{"kind":"ok","value":{"url":"https://docs.rs/tokio/latest/tokio/","title":"Tokio - asynchronous Rust runtime","content_type":"text/markdown","method":"native","content":"# Tokio - asynchronous Rust runtime\n\nTokio is an event-driven, non-blocking I/O platform for writing asynchronous applications with Rust.\n\n## Getting started\n\nAdd Tokio to your Cargo.toml and select the runtime features your application needs.","notes":[]}}"##,
-			error_outcome: br#"{"kind":"faulted","value":{"kind":"fetch","message":"HTTP 503 Service Unavailable while fetching https://docs.rs/tokio/latest/tokio/"}}"#,
+			error_outcome: br#"{"kind":"faulted","value":{"kind":"search","provider":"perplexity","category":"rate_limited","code":"resource_exhausted","status":429}}"#,
 		},
 	]
 }
@@ -249,12 +181,12 @@ mod tests {
 	use super::*;
 
 	fn identity(name: &'static str) -> ToolIdentity {
-		ToolIdentity { name: Str::new_static(name), rev: Rev { family: Default::default(), n: 1 } }
+		ToolIdentity { name: Str::new_static(name), rev: Rev { family: Default::default(), n: 2 } }
 	}
 
 	#[test]
 	fn fixtures_decode_and_render_the_rich_sections() {
-		let fixtures = gallery_fixtures(identity("web_search"), identity("fetch"));
+		let fixtures = gallery_fixtures(identity("web_search"));
 		let web = &fixtures[0];
 		assert!(web.progress_update.is_none());
 		let success: CallOutcome<WebSearchPayload, WebSearchFault> =
@@ -263,14 +195,18 @@ mod tests {
 			serde_json::from_slice(web.error_outcome).expect("web search fault decodes");
 		let renderer = WebSearchRenderer;
 		let mut state = None;
-		renderer.fold_args(&mut state, &omp_slopjson::parse_streaming(web.streaming_args), false);
+		renderer.fold_args(
+			&mut state,
+			&omp_core::slopjson::parse_streaming(web.streaming_args),
+			false,
+		);
 		assert!(
 			renderer
 				.view(&state, None)
 				.expect("streaming query renders")
 				.contains("Bun vs Node.js performance bench"),
 		);
-		renderer.fold_args(&mut state, &omp_slopjson::parse_streaming(web.args), true);
+		renderer.fold_args(&mut state, &omp_core::slopjson::parse_streaming(web.args), true);
 		let view = renderer
 			.view(&state, Some(&success))
 			.expect("success renders");
@@ -281,6 +217,8 @@ mod tests {
 		assert!(view.contains("<row sep=\" · \"><text>Bun 1.2 Benchmarks"));
 		assert!(view.contains("<text fg=muted>bun.sh</text>"));
 		assert!(view.contains("<text fg=muted>12d ago</text>"));
+		assert!(view.contains("<text bold>Citations</text>"));
+		assert!(view.contains("Bun 1.2 Benchmarks"));
 		assert!(view.contains("<fact label=Provider>sonar-pro @ Perplexity</fact>"));
 		assert!(view.contains("<fact label=Usage><row sep=\" · \">"));
 		assert!(view.contains("<num value=560/>"));
@@ -290,8 +228,7 @@ mod tests {
 				.view(&state, Some(&error))
 				.expect("fault renders")
 				.contains(
-					"<callout kind=error>Provider error (rate_limit): Perplexity provider returned \
-					 HTTP 429"
+					"<callout kind=error>Provider error (rate_limited: resource_exhausted) HTTP 429"
 				),
 		);
 
@@ -324,41 +261,5 @@ mod tests {
 		let empty_view = render_web_search_payload(None, &empty).to_tml();
 		assert!(empty_view.contains("No answer text returned"));
 		assert!(empty_view.contains("No sources returned"));
-
-		let fetch = &fixtures[1];
-		let mut fetch_state = None;
-		FetchRenderer.fold_args(
-			&mut fetch_state,
-			&omp_slopjson::parse_streaming(fetch.streaming_args),
-			false,
-		);
-		assert!(
-			FetchRenderer
-				.view(&fetch_state, None)
-				.expect("streaming URL renders")
-				.contains("https://docs.rs/tokio/latest/tok"),
-		);
-		FetchRenderer.fold_args(&mut fetch_state, &omp_slopjson::parse_streaming(fetch.args), true);
-		let success: CallOutcome<FetchPayload, FetchFault> =
-			serde_json::from_slice(fetch.success_outcome).expect("fetch success decodes");
-		let error: CallOutcome<FetchPayload, FetchFault> =
-			serde_json::from_slice(fetch.error_outcome).expect("fetch fault decodes");
-		let view = FetchRenderer
-			.view(&fetch_state, Some(&success))
-			.expect("fetch success renders");
-		assert!(view.contains("<fact label=Title>Tokio - asynchronous Rust runtime</fact>"));
-		assert!(view.contains("<fact label=\"Final URL\">"));
-		assert!(view.contains("text/markdown"));
-		assert!(view.contains("<bytes value=243/>"));
-		assert!(
-			FetchRenderer
-				.view(&fetch_state, Some(&error))
-				.expect("fetch fault renders")
-				.contains("<callout kind=error>Fetch failed: HTTP 503"),
-		);
-		assert_eq!(
-			render_fetch_fault("<failed&>").to_tml(),
-			"<callout kind=error>Fetch failed: &lt;failed&amp;&gt;</callout>",
-		);
 	}
 }

@@ -7,7 +7,7 @@ use std::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const MAGIC: &[u8; 8] = b"OMPLLCAT";
 const HEADER_LEN: usize = 8 + 4 + 32 + 32 + 32;
 

@@ -1,23 +1,31 @@
 //! Production built-in tool registry assembly.
 
+#[cfg(test)]
+use std::sync::LazyLock;
 use std::{
-	collections::{BTreeMap, BTreeSet},
+	collections::{BTreeMap, BTreeSet, VecDeque},
 	env,
 	env::consts,
 	future::Future,
 	path::{Path, PathBuf},
 	sync::{
-		Arc, LazyLock,
-		atomic::{AtomicU64, Ordering},
+		Arc,
+		atomic::{AtomicBool, AtomicU64, Ordering},
 	},
 	time,
 };
 
-use omp_agent::control;
-use omp_catalog::{ModelKey, ProviderId, snapshot::Catalog};
-use omp_core::{Duration, ExposeSecret as _, Hash32, InvocationPhase, LifecyclePhase, Str, sf};
-use omp_env::EnvClient;
-use omp_inference::{
+use futures::StreamExt as _;
+use omp_agent::{
+	GateDecision, GateEvent, GateOutcome, HookDispatch as AgentHookDispatch, HookGate, HookPatch,
+	HookPhase, KernelSender, OBSERVE_HANDLER_CAP,
+};
+use omp_ai::{
+	BeforeRequestDenied, BeforeRequestDraft, BeforeRequestMutation, CredentialDisabledObservation,
+	ModelsDiscoverHookPage, ModelsDiscoverHookRequest, ProviderHookCredential, ProviderHookError,
+	ProviderHookObserver, ProviderLoginHookRequest, ProviderRefreshHookRequest,
+	ProviderResponseObservation, ProviderResponseObserver, ProviderSignHookRequest,
+	ProviderSignature,
 	answer::{
 		UsageAccountMetadata, UsageAmount, UsageQuantity, UsageUnit, UsageWindow, UsageWindowKind,
 	},
@@ -27,28 +35,33 @@ use omp_inference::{
 	},
 	receipt::UsageSource,
 };
+use omp_cache::{github_cache::GithubCache, telemetry_cache::TelemetryIndex};
+use omp_catalog::{ModelKey, ProviderId, snapshot::Catalog};
+use omp_con::Ctx;
+use omp_core::{
+	Duration, ExposeSecret as _, FastHashSet, Hash32, InvocationPhase, LifecyclePhase, SecretString,
+	Str, Ulid, sf,
+};
+use omp_env::EnvClient;
 use omp_proto::{
+	env::v1 as env_wire,
 	inference::{v1, v1::tool_def},
 	prost::Message as _,
 	thread::v1::Blob,
 	toolhost::v1::{
-		GrammarSyntax as WorkerGrammarSyntax, PreludeParamKind, ToolDecl, tool_constraint,
+		GrammarSyntax as WorkerGrammarSyntax, HookEventId, PreludeParamKind, ToolDecl,
+		ToolExecutionMode as WorkerExecutionMode, tool_constraint,
 	},
 };
-use omp_settings::{
-	BrowserSettings,
-	manager::{SettingsManager, SettingsPaths},
-};
-use omp_storage::{github_cache::GithubCache, telemetry_index::TelemetryIndex};
 use omp_tool::{
-	AvailabilityDelta, Claims, Constraint, GrammarSyntax, LeafOwner, LeafReplacementError,
-	LeafReplacementRegistry, LeafVersion, Precedence, Presentation, Registry, RegistryLeaf, Rev,
-	Tool, ToolSpec, ToolsPolicy,
+	AvailabilityDelta, Claims, Constraint, Ev, ExecutionMode, GrammarSyntax, IncomingParams,
+	LeafOwner, LeafReplacementError, LeafReplacementRegistry, LeafVersion, Precedence, Presentation,
+	Registry, RegistryLeaf, Rev, Tool, ToolLocus, ToolSpec, ToolTerminal, ToolsPolicy,
 };
 use omp_tools::{
 	ask::PresenterSlot,
 	checkpoint,
-	device::{DeviceCatalog, flatten_slots, xd_enabled},
+	device::{DeviceCatalog, dyn_enabled, flatten_slots},
 	edit::{EditRevisionCandidates, resolve_edit_revision},
 	eval::{EvalSessionControl, TaskDescriptionSnapshot},
 	goal,
@@ -63,11 +76,15 @@ use omp_tools::{
 };
 use parking_lot::{Mutex, RwLock};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
+use tokio::sync::{Mutex as AsyncMutex, Notify};
+use tokio_util::sync::CancellationToken;
 
 use super::{
 	EnvdError,
+	admission::DynamicAdmission,
 	blobs::BlobHost,
 	computer::ComputerSessionHost,
+	devices_host::DynHost,
 	docs::{DocumentHost, ResourceMutationServices},
 	document_cache,
 	eval::{
@@ -75,7 +92,7 @@ use super::{
 		PreludeParamStub, PreludeTable, ProcessEvalExec, SessionBridgeHost,
 	},
 	exec::ExecHost,
-	exec_settings::{AcpRouting, AcpSettings, ShellSettings},
+	exec_settings::{AcpRouting, AcpSettings, SandboxSettings, ShellSettings},
 	exthost::{
 		CallbackConcurrency, ExtensionManifest,
 		control::{
@@ -84,14 +101,22 @@ use super::{
 			ControlProtocolError, ControlRequestContext,
 		},
 		dispatch::{CallbackDispatcher, EventDeadline, NestedCallbackDispatcher},
+		extensions::{SealedRegistryEvidence, SealedRegistryEvidenceError, seal_registry_evidence},
 	},
 	github::GithubService,
 	managed_skills::ManagedSkills,
-	mcp::McpService,
+	mcp::{
+		McpService,
+		manager::{McpHookNotification, McpManager, McpNotificationSink},
+	},
 	media_devices,
+	media_tts::{SpeechConfig, SpeechPreference},
 	memory::ReflectionBridgeHost,
+	report_issue,
 	search_backend::SearchBridgeHost,
-	ssh::{HostStore, SshService},
+	security_scan::SecurityScanService,
+	ssh::{HostPaths, HostStore, SshService},
+	tool_ast_grep::AstSearchAuthority,
 	tool_debug::DocumentDebugControl,
 	tool_document::SessionReadBlobs,
 	tool_lsp::DocumentLspControl,
@@ -100,20 +125,53 @@ use super::{
 	tool_settings::ToolSettings,
 	tool_shell::{AcpExecSlot, ShellExecHost},
 	tool_url::{UrlResolver, production_url_resolvers},
-	vault::VaultService,
-	worker::{
-		ExtHostSupervisor, SealedRegistryEvidence, SealedRegistryEvidenceError,
-		seal_registry_evidence,
-	},
-	workspace::WorkspaceHost,
-	xd::XdHost,
+	vault::{VaultPaths, VaultService},
+	worker::ExtHostSupervisor,
+	workspace::{WorkspaceHost, WorkspaceOperationError, WorkspaceOperations},
 };
 use crate::{
-	browser_daemon::BrowserDaemon, github_url::GithubCredentialBridge, host_settings::HostSettings,
+	browser_daemon::{BrowserDaemon, BrowserSettings},
+	github_url::GithubCredentialBridge,
 };
 
 tokio::task_local! {
 	static PTY_DENIED: bool;
+	static INVOCATION_SESSION_ID: Option<Str>;
+	static OUTPUT_REQUEST: omp_tool::OutputRequest;
+	static EDIT_REPAIR_CONTEXT: InvocationEditRepairContext;
+	static ACP_BACKENDS: InvocationAcpBackends;
+}
+/// Session-owned edit repair capability scoped to one native invocation.
+#[derive(Clone, Default)]
+pub(super) struct InvocationEditRepairContext {
+	repair: Option<omp_tools::edit::observer::EditRepairClient>,
+	model:  Option<Str>,
+}
+
+impl InvocationEditRepairContext {
+	/// Captures the invoking connection's optional repair route and model tag.
+	pub(super) fn new(
+		repair: Option<omp_tools::edit::observer::EditRepairClient>,
+		model: Option<Str>,
+	) -> Self {
+		Self { repair, model }
+	}
+}
+/// Editor-owned capabilities authenticated by the invoking Environment
+/// connection.
+#[derive(Clone, Default)]
+pub(super) struct InvocationAcpBackends {
+	documents: Option<Arc<dyn super::docs::AcpDocumentBackend>>,
+	exec:      Option<Arc<dyn super::tool_shell::AcpExecBackend>>,
+}
+
+impl InvocationAcpBackends {
+	pub(super) fn new(
+		documents: Option<Arc<dyn super::docs::AcpDocumentBackend>>,
+		exec: Option<Arc<dyn super::tool_shell::AcpExecBackend>>,
+	) -> Self {
+		Self { documents, exec }
+	}
 }
 
 /// Composition-supplied capabilities the environment host cannot own.
@@ -138,6 +196,9 @@ pub struct RegistryBridges {
 	pub edit_repair:            Option<omp_tools::edit::observer::EditRepairClient>,
 	/// Host-resource broker used by composition-owned internal resource URLs.
 	pub host_resources:         Option<Arc<dyn HostResources>>,
+	/// Live session routing authority for `agent://`, `history://`, and
+	/// attachments.
+	pub session_authority:      Option<Arc<dyn omp_agent::SessionAuthority>>,
 	/// Background telemetry delivery started once credentials exist.
 	pub telemetry_upload:       Option<Arc<dyn TelemetryUpload>>,
 	/// Fallback presenter for interactive `ask` invocations.
@@ -157,7 +218,7 @@ pub trait CommandCredentialExecutorFactory: Send + Sync + 'static {
 		&self,
 		client: omp_env::EnvClient,
 		cwd: &Path,
-	) -> Arc<dyn omp_inference::auth::command::CommandCredentialExecutor>;
+	) -> Arc<dyn omp_ai::auth::command::CommandCredentialExecutor>;
 }
 /// Restricted registration capability for caller-supplied dynamic tool
 /// factories.
@@ -186,7 +247,7 @@ impl DynamicToolRegistrar<'_> {
 /// Registers host-owned tools before registry freeze, then binds their live
 /// Environment client after transport composition.
 pub trait DynamicToolFactory: Send + Sync + 'static {
-	/// Registers every declaration-backed tool using factory-retained slots.
+	/// Registers every declaration-backed tool using the restricted registrar.
 	fn register(
 		&self,
 		registrar: &mut DynamicToolRegistrar<'_>,
@@ -206,12 +267,127 @@ impl DynamicTool {
 	where
 		T: Tool,
 	{
-		Self { register: Box::new(move |registry| registry.register(tool, presentation, claims)) }
+		Self {
+			register: Box::new(move |registry| {
+				register_instrumented(registry, tool, presentation, claims)
+			}),
+		}
 	}
 
 	fn register(self, registry: &mut Registry) -> Result<(), omp_tool::RegistryError> {
 		(self.register)(registry)
 	}
+}
+
+struct InstrumentedTool<T> {
+	inner: T,
+}
+
+impl<T> Tool for InstrumentedTool<T>
+where
+	T: Tool,
+{
+	type Fault = T::Fault;
+	type Params = T::Params;
+	type Payload = T::Payload;
+	type Update = T::Update;
+
+	fn spec(&self) -> &ToolSpec {
+		self.inner.spec()
+	}
+
+	fn execution_mode(&self) -> ExecutionMode {
+		self.inner.execution_mode()
+	}
+
+	fn prompt_examples(&self) -> &[omp_tool::ToolPromptExample] {
+		self.inner.prompt_examples()
+	}
+
+	fn prompt_docs(&self) -> Option<&str> {
+		self.inner.prompt_docs()
+	}
+
+	fn call<'c>(
+		&'c self,
+		params: IncomingParams<'c>,
+	) -> impl futures::Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
+		let spec = self.inner.spec();
+		let span = tracing::debug_span!(
+			"tool_invocation",
+			tool = %spec.name,
+			revision = %spec.rev,
+			outcome = tracing::field::Empty,
+		);
+		let events = self.inner.call(params);
+		async_stream::stream! {
+			tokio::pin!(events);
+			while let Some(event) = events.next().await {
+				match &event {
+					Ev::Done(ToolTerminal::Done { result: Ok(_), .. }) => {
+						span.record("outcome", "success");
+					},
+					Ev::Done(ToolTerminal::Done { result: Err(_), .. }) => {
+						span.record("outcome", "fault");
+						tracing::warn!(
+							parent: &span,
+							outcome = "fault",
+							"tool invocation returned error verdict"
+						);
+					},
+					Ev::Done(ToolTerminal::Detached(_)) => {
+						span.record("outcome", "detached");
+					},
+					Ev::Args(_) => {
+						span.record("outcome", "invalid_arguments");
+					},
+					Ev::Aborted(_) => {
+						span.record("outcome", "aborted");
+					},
+					Ev::Update(_) | Ev::Diag(_) => {},
+				}
+				yield event;
+			}
+		}
+	}
+
+	fn prompt(
+		&self,
+		view: Result<&Self::Payload, &Self::Fault>,
+		caps: &omp_tool::PromptCaps,
+	) -> Vec<omp_tool::Part> {
+		self.inner.prompt(view, caps)
+	}
+
+	fn invoke_input(
+		&self,
+		update: &Self::Update,
+		invocation_id: &str,
+	) -> Option<omp_proto::inference::v1::InvokeInput> {
+		self.inner.invoke_input(update, invocation_id)
+	}
+
+	fn lift(&self, from: &Rev, call: omp_tool::RecordedCall<'_>) -> Option<omp_tool::LiftedCall> {
+		self.inner.lift(from, call)
+	}
+}
+
+fn register_instrumented<T: Tool>(
+	registry: &mut Registry,
+	tool: T,
+	presentation: Presentation,
+	claims: Claims,
+) -> Result<(), omp_tool::RegistryError> {
+	Registry::register(registry, InstrumentedTool { inner: tool }, presentation, claims)
+}
+/// Registers one concrete executor in the authoritative environment half.
+pub(crate) fn environment_registry<T: Tool>(
+	registry: &mut Registry,
+	tool: T,
+	presentation: Presentation,
+	claims: Claims,
+) -> Result<(), omp_tool::RegistryError> {
+	registry.register_environment(InstrumentedTool { inner: tool }, presentation, claims)
 }
 
 type ControlConnectionKey = (Str, Str, Str, u64, u64);
@@ -253,6 +429,7 @@ fn stale_connection() -> ControlProtocolError {
 pub struct RegistryControlFactory {
 	manifests: Arc<BTreeMap<(Str, Str, Str), ExtensionManifest>>,
 	evidence:  Arc<RwLock<BTreeMap<ControlConnectionKey, Arc<SealedRegistryEvidence>>>>,
+	published: Arc<Notify>,
 }
 
 impl RegistryControlFactory {
@@ -261,6 +438,7 @@ impl RegistryControlFactory {
 		Arc::new(Self {
 			manifests: Arc::new(manifests),
 			evidence:  Arc::new(RwLock::new(BTreeMap::new())),
+			published: Arc::new(Notify::new()),
 		})
 	}
 
@@ -271,6 +449,23 @@ impl RegistryControlFactory {
 		identity: &ControlConnectionIdentity,
 	) -> Option<Arc<SealedRegistryEvidence>> {
 		self.evidence.read().get(&connection_key(identity)).cloned()
+	}
+
+	/// Waits until the exact child generation publishes sealed registry
+	/// evidence.
+	pub async fn wait_evidence(
+		&self,
+		identity: &ControlConnectionIdentity,
+	) -> Arc<SealedRegistryEvidence> {
+		loop {
+			let published = self.published.notified();
+			tokio::pin!(published);
+			published.as_mut().enable();
+			if let Some(evidence) = self.evidence(identity) {
+				return evidence;
+			}
+			published.await;
+		}
 	}
 
 	fn admits(&self, identity: &ControlConnectionIdentity) -> bool {
@@ -298,13 +493,47 @@ impl RegistryControlFactory {
 				"no authenticated manifest owns this registry publication",
 			)
 		})?;
+		let session = context
+			.invocation
+			.as_ref()
+			.map(|invocation| invocation.session.clone())
+			.ok_or_else(|| {
+				ControlProtocolError::new(
+					"InvalidPhase",
+					"registry FREEZE evidence has no authenticated lifecycle session",
+				)
+			})?;
 		let evidence = Arc::new(
-			seal_registry_evidence(context, manifest, payload).map_err(registry_evidence_error)?,
+			seal_registry_evidence(
+				Arc::clone(&context.connection),
+				session,
+				manifest,
+				payload.clone(),
+			)
+			.map_err(registry_evidence_error)?,
 		);
-		let connection = connection_key(&context.connection);
+		self.install_evidence(evidence)
+	}
+
+	/// Installs evidence already sealed by the trusted extension-host lifecycle.
+	///
+	/// A newer host/session generation replaces the retained generation for
+	/// the same deployment. Re-publication within one exact generation must be
+	/// declaration-identical.
+	pub fn install_evidence(
+		&self,
+		evidence: Arc<SealedRegistryEvidence>,
+	) -> Result<Arc<SealedRegistryEvidence>, ControlProtocolError> {
+		if !self.admits(&evidence.identity) {
+			return Err(ControlProtocolError::new(
+				"RegistryUnauthorized",
+				"no authenticated manifest owns this sealed registry evidence",
+			));
+		}
+		let connection = connection_key(&evidence.identity);
 		let mut published = self.evidence.write();
 		if let Some(current) = published.get(&connection) {
-			if current.tools != evidence.tools || current.hooks != evidence.hooks {
+			if !same_registry_evidence(current, &evidence) {
 				return Err(ControlProtocolError::new(
 					"RegistryConflict",
 					"sealed registry changed within one host generation",
@@ -312,97 +541,59 @@ impl RegistryControlFactory {
 			}
 			return Ok(Arc::clone(current));
 		}
+		let generation = (connection.3, connection.4);
+		if published.iter().any(|(key, _)| {
+			key.0 == connection.0
+				&& key.1 == connection.1
+				&& key.2 == connection.2
+				&& (key.3, key.4) > generation
+		}) {
+			return Err(stale_connection());
+		}
 		published
 			.retain(|key, _| key.0 != connection.0 || key.1 != connection.1 || key.2 != connection.2);
 		published.insert(connection, Arc::clone(&evidence));
+		drop(published);
+		self.published.notify_waiters();
 		Ok(evidence)
 	}
+}
+
+fn same_registry_evidence(
+	current: &SealedRegistryEvidence,
+	candidate: &SealedRegistryEvidence,
+) -> bool {
+	same_connection(&current.identity, &candidate.identity)
+		&& current.session == candidate.session
+		&& current.tools == candidate.tools
+		&& current.prompts == candidate.prompts
+		&& current.services == candidate.services
+		&& current.hooks == candidate.hooks
+		&& current.ui_registration == candidate.ui_registration
+		&& current.ui.generation == candidate.ui.generation
+		&& current.ui.extension == candidate.ui.extension
+		&& current.ui.commands == candidate.ui.commands
+		&& current.ui.shortcuts == candidate.ui.shortcuts
+		&& current.ui.triggers == candidate.ui.triggers
+		&& current.ui.message_renderers == candidate.ui.message_renderers
+		&& current.ui.markdown_transformers == candidate.ui.markdown_transformers
+		&& current.ui.renderers == candidate.ui.renderers
+		&& current.providers == candidate.providers
+		&& current.directors == candidate.directors
+		&& current.components == candidate.components
 }
 
 fn registry_evidence_error(error: SealedRegistryEvidenceError) -> ControlProtocolError {
 	let code = match error {
 		SealedRegistryEvidenceError::Identity => "RegistryUnauthorized",
-		SealedRegistryEvidenceError::ManifestDrift
-		| SealedRegistryEvidenceError::ExecutableDrift
-		| SealedRegistryEvidenceError::Duplicate
-		| SealedRegistryEvidenceError::SourceModule => "RegistryDrift",
-		SealedRegistryEvidenceError::Nested => "InvalidPhase",
-		SealedRegistryEvidenceError::Malformed(_) => "RegistryMalformed",
+		SealedRegistryEvidenceError::ManifestDrift => "DeclarationDrift",
+		SealedRegistryEvidenceError::Duplicate
+		| SealedRegistryEvidenceError::SourceModule
+		| SealedRegistryEvidenceError::Ui(_)
+		| SealedRegistryEvidenceError::Prompt(_) => "RegistryDrift",
+		SealedRegistryEvidenceError::Malformed => "RegistryMalformed",
 	};
 	ControlProtocolError::new(code, Str::from(error.to_string()))
-}
-
-impl ControlAuthorityFactory for RegistryControlFactory {
-	fn bind(
-		&self,
-		identity: Arc<ControlConnectionIdentity>,
-	) -> Result<Arc<dyn ControlAuthority>, ControlCompositionError> {
-		if !self.manifests.contains_key(&(
-			identity.layer.clone(),
-			identity.tier.clone(),
-			identity.extension.clone(),
-		)) {
-			return Err(ControlCompositionError::unavailable(
-				"registry",
-				"authenticated extension has no deployment manifest",
-			));
-		}
-		Ok(Arc::new(BoundRegistryControl { identity, owner: self.clone() }))
-	}
-}
-
-struct BoundRegistryControl {
-	identity: Arc<ControlConnectionIdentity>,
-	owner:    RegistryControlFactory,
-}
-
-#[async_trait::async_trait]
-impl ControlAuthority for BoundRegistryControl {
-	fn handles(&self, _operation: &str) -> bool {
-		false
-	}
-
-	fn authorize(
-		&self,
-		context: &ControlRequestContext,
-		_operation: &str,
-		_arguments: &JsonMap<String, JsonValue>,
-	) -> Result<(), ControlProtocolError> {
-		if same_connection(&self.identity, &context.connection) {
-			Ok(())
-		} else {
-			Err(stale_connection())
-		}
-	}
-
-	async fn request(
-		&self,
-		context: ControlRequestContext,
-		operation: Str,
-		_arguments: JsonMap<String, JsonValue>,
-	) -> Result<JsonValue, ControlProtocolError> {
-		self.authorize(&context, operation.as_str(), &JsonMap::new())?;
-		Err(ControlProtocolError::new(
-			"InvalidOperation",
-			"registry publications are effects, not request operations",
-		))
-	}
-
-	async fn effect(
-		&self,
-		context: ControlRequestContext,
-		effect: ControlEffect,
-	) -> Result<(), ControlProtocolError> {
-		self.authorize(&context, "omp.registry.publish", &JsonMap::new())?;
-		let ControlEffect::Registry(payload) = effect else {
-			return Err(ControlProtocolError::new(
-				"InvalidEffect",
-				"registry owner accepts only Registry effects",
-			));
-		};
-		self.owner.publish(&context, &payload)?;
-		Ok(())
-	}
 }
 
 /// One live dynamic device row published to catalog observers.
@@ -457,6 +648,7 @@ struct DynamicDeviceBinding {
 	identity: Arc<ControlConnectionIdentity>,
 }
 
+/// Composes sealed registry evidence with dynamic device dispatch authority.
 #[derive(Clone)]
 pub struct DeviceControlFactory {
 	registries: Arc<RegistryControlFactory>,
@@ -530,14 +722,20 @@ impl DeviceControlFactory {
 		let parent_name = required_string(parent, "name")?;
 		let family = required_string(parent, "family")?;
 		let rev = required_u16(parent, "rev")?;
+		let parent_revision = Rev { family: family.clone(), n: rev };
 		let place = required_string(parent, "place")?;
 		let _registration = evidence
 			.tools
 			.iter()
 			.find(|tool| {
-				tool.name == parent_name
-					&& tool.family == family
-					&& tool.rev == rev
+				tool
+					.definition
+					.as_ref()
+					.is_some_and(|definition| definition.name.as_str() == parent_name.as_str())
+					&& tool
+						.rev
+						.parse::<Rev>()
+						.is_ok_and(|revision| revision == parent_revision)
 					&& tool.place == place
 			})
 			.ok_or_else(|| {
@@ -1014,6 +1212,8 @@ pub struct HookEventPolicy {
 pub struct HookSubscription {
 	/// Authenticated child generation owning the callback.
 	pub identity:     Arc<ControlConnectionIdentity>,
+	/// Authenticated durable session owning this callback.
+	pub session:      Str,
 	/// Stable event name.
 	pub event:        Str,
 	/// Frozen phase spelling.
@@ -1030,12 +1230,17 @@ pub struct HookSubscription {
 	pub concurrency:  CallbackConcurrency,
 	/// Provider ids admitted by this callback, when provider-scoped.
 	pub providers:    Option<Box<[Str]>>,
+	/// Exact raw MCP mount names admitted by this callback.
+	pub servers:      Option<Box<[Str]>>,
+	/// Anchored MCP JSON-RPC method globs admitted by this callback.
+	pub method_globs: Box<[Str]>,
 	/// Event policy frozen with the Python registry declaration.
 	pub event_policy: HookEventPolicy,
 }
 #[derive(Clone)]
 struct ExtensionUsageFetcher {
 	provider:    ProviderId,
+	settings:    JsonMap<String, JsonValue>,
 	identity:    Arc<ControlConnectionIdentity>,
 	session:     Str,
 	dispatcher:  Arc<dyn CallbackDispatcher>,
@@ -1099,7 +1304,7 @@ impl ConsoleUsageFetcher for ExtensionUsageFetcher {
 						remote:            false,
 						has_ui:            false,
 						headless:          true,
-						settings:          JsonMap::new(),
+						settings:          self.settings.clone(),
 						secret_settings:   Box::new([]),
 						data:              None,
 						direct_filesystem: None,
@@ -1213,13 +1418,59 @@ fn usage_registration_id(subscription: &HookSubscription) -> Str {
 }
 
 #[derive(Clone)]
+struct McpQueuedDelivery {
+	notification:  McpHookNotification,
+	subscriptions: Vec<HookSubscription>,
+}
+
+struct McpDeliveryQueue {
+	pending:         VecDeque<McpQueuedDelivery>,
+	running_servers: BTreeSet<Str>,
+	dropped:         u64,
+}
+
+impl McpDeliveryQueue {
+	fn push(&mut self, delivery: McpQueuedDelivery) -> bool {
+		let dropped = self.pending.len() == MCP_HOOK_QUEUE_CAPACITY;
+		if dropped {
+			self.pending.pop_front();
+			self.dropped = self.dropped.saturating_add(1);
+		}
+		self.pending.push_back(delivery);
+		dropped
+	}
+}
+
+/// Per-session MCP notification queue capacity.
+pub const MCP_HOOK_QUEUE_CAPACITY: usize = 100;
+
+#[derive(Clone)]
 pub struct HookControlFactory {
-	registries:     Arc<RegistryControlFactory>,
-	dispatcher:     Arc<dyn CallbackDispatcher>,
-	callbacks:      Arc<NestedCallbackDispatcher>,
-	policies:       Arc<RwLock<BTreeMap<Str, HookEventPolicy>>>,
-	subscriptions:  Arc<RwLock<BTreeMap<ControlConnectionKey, Vec<HookSubscription>>>>,
-	usage_fetchers: UsageFetcherRegistry,
+	registries:                   Arc<RegistryControlFactory>,
+	dispatcher:                   Arc<dyn CallbackDispatcher>,
+	callbacks:                    Arc<NestedCallbackDispatcher>,
+	policies:                     Arc<RwLock<BTreeMap<Str, HookEventPolicy>>>,
+	subscriptions:                Arc<RwLock<BTreeMap<ControlConnectionKey, Vec<HookSubscription>>>>,
+	usage_fetchers:               UsageFetcherRegistry,
+	mcp_queues:                   Arc<Mutex<BTreeMap<u64, McpDeliveryQueue>>>,
+	mcp_journal:                  Arc<RwLock<Option<(Arc<TelemetryIndex>, Str)>>>,
+	provider_response_subscribed: Arc<AtomicBool>,
+	settings:                     Arc<BTreeMap<(Str, Str, Str), JsonMap<String, JsonValue>>>,
+	tool_call_timeout:            time::Duration,
+	admission_gate:               Arc<HookGate>,
+}
+
+fn extension_callback_timeout(
+	event: &str,
+	configured: time::Duration,
+	subscription: Option<time::Duration>,
+	event_default: time::Duration,
+) -> time::Duration {
+	if event == "tool_call" {
+		subscription.map_or(configured, |timeout| timeout.min(configured))
+	} else {
+		subscription.unwrap_or(event_default)
+	}
 }
 
 impl HookControlFactory {
@@ -1228,15 +1479,170 @@ impl HookControlFactory {
 		registries: Arc<RegistryControlFactory>,
 		dispatcher: Arc<dyn CallbackDispatcher>,
 		policies: BTreeMap<Str, HookEventPolicy>,
+		settings: BTreeMap<(Str, Str, Str), JsonMap<String, JsonValue>>,
+		tool_call_timeout: time::Duration,
 	) -> Arc<Self> {
-		Arc::new(Self {
+		let admission_timeout = tool_call_timeout
+			.checked_mul(OBSERVE_HANDLER_CAP as u32)
+			.unwrap_or(time::Duration::MAX);
+		let (admission_gate, dispatches) =
+			HookGate::delegated_channel_with_tool_call_timeout(admission_timeout);
+		let owner = Arc::new(Self {
 			registries,
 			dispatcher: Arc::clone(&dispatcher),
 			callbacks: Arc::new(NestedCallbackDispatcher::new(dispatcher)),
 			policies: Arc::new(RwLock::new(policies)),
 			subscriptions: Arc::new(RwLock::new(BTreeMap::new())),
 			usage_fetchers: UsageFetcherRegistry::default(),
-		})
+			mcp_queues: Arc::new(Mutex::new(BTreeMap::new())),
+			mcp_journal: Arc::new(RwLock::new(None)),
+			provider_response_subscribed: Arc::new(AtomicBool::new(false)),
+			settings: Arc::new(settings),
+			tool_call_timeout,
+			admission_gate: Arc::new(admission_gate),
+		});
+		let weak = Arc::downgrade(&owner);
+		tokio::spawn(async move {
+			while let Ok(dispatch) = dispatches.recv_async().await {
+				let Some(owner) = weak.upgrade() else {
+					break;
+				};
+				tokio::spawn(async move {
+					owner.answer_admission_dispatch(dispatch).await;
+				});
+			}
+		});
+		owner
+	}
+
+	fn settings_for(&self, identity: &ControlConnectionIdentity) -> JsonMap<String, JsonValue> {
+		self
+			.settings
+			.get(&(identity.layer.clone(), identity.tier.clone(), identity.extension.clone()))
+			.cloned()
+			.unwrap_or_default()
+	}
+
+	fn callback_timeout(
+		&self,
+		event: &str,
+		subscription: &HookSubscription,
+		policy: &HookEventPolicy,
+	) -> time::Duration {
+		extension_callback_timeout(
+			event,
+			self.tool_call_timeout,
+			subscription.timeout,
+			policy.timeout,
+		)
+	}
+
+	async fn answer_admission_dispatch(&self, dispatch: AgentHookDispatch) {
+		let event = hook_event_name(dispatch.event);
+		let identity = event.as_deref().and_then(|event| {
+			self
+				.subscriptions
+				.read()
+				.values()
+				.flatten()
+				.find(|row| row.event == event)
+				.map(|row| (Arc::clone(&row.identity), row.session.clone()))
+		});
+		let decision = match (event, identity) {
+			(Some(event), Some((identity, session))) => {
+				let payload = if dispatch.phase == HookPhase::Observe {
+					serde_json::from_slice::<JsonValue>(&dispatch.payload).ok()
+				} else {
+					dispatch
+						.payload
+						.iter()
+						.position(|byte| *byte == b'\n')
+						.and_then(|separator| {
+							serde_json::from_slice::<JsonValue>(&dispatch.payload[separator + 1..]).ok()
+						})
+				};
+				match payload {
+					Some(mut payload) => {
+						if event == "tool_call" && !hydrate_tool_call_bash(&mut payload) {
+							let _ = self.admission_gate.answer(dispatch.dispatch_id, vec![(
+								0,
+								GateDecision::Deny(sf!("malformed tool_call Bash IR admission payload")),
+							)]);
+							return;
+						}
+						let shutdown_bounded = event == "session_shutdown";
+						let event_id = Str::from(event.as_str());
+						let mut arguments = JsonMap::new();
+						arguments.insert("event".to_owned(), JsonValue::String(event.clone()));
+						arguments
+							.insert("event_rev".to_owned(), JsonValue::from(u64::from(dispatch.rev)));
+						arguments.insert("payload".to_owned(), payload.clone());
+						let settings = self.settings_for(&identity);
+						let context = ControlRequestContext {
+							connection: identity,
+							request_id: dispatch.dispatch_id,
+							invocation: Some(ControlInvocationAuthority {
+								invocation: sf!("hook-admission:{}", dispatch.dispatch_id),
+								phase: InvocationPhase::EffectsAuthorized,
+								session,
+								turn: None,
+								event: Some(event_id.clone()),
+								call: None,
+								device: None,
+								effects: Box::new([]),
+								place_kind: sf!("host"),
+								lifecycle: LifecyclePhase::Active,
+								roots: Box::new([]),
+								remote: false,
+								has_ui: false,
+								headless: true,
+								settings,
+								secret_settings: Box::new([]),
+								data: None,
+								direct_filesystem: None,
+							}),
+						};
+						if dispatch.phase == HookPhase::Observe {
+							self.observe(&context, event_id.as_str(), &payload).await;
+							GateDecision::Defer
+						} else {
+							let composed = if shutdown_bounded {
+								match tokio::time::timeout(
+									time::Duration::from_secs(2),
+									self.compose(&context, &arguments),
+								)
+								.await
+								{
+									Ok(result) => result,
+									Err(_) => Ok(json!({"kind": "defer"})),
+								}
+							} else {
+								self.compose(&context, &arguments).await
+							};
+							match composed {
+								Ok(value) => gate_decision_from_json(value, payload),
+								Err(error) => GateDecision::Deny(error.message),
+							}
+						}
+					},
+					None => GateDecision::Deny(sf!("malformed hook admission payload")),
+				}
+			},
+			_ => GateDecision::Deny(sf!("required hook subscription unavailable")),
+		};
+		let _ = self
+			.admission_gate
+			.answer(dispatch.dispatch_id, vec![(0, decision)]);
+	}
+
+	/// Binds durable accounting for drop-oldest MCP queue overflow.
+	pub fn bind_mcp_drop_journal(&self, telemetry: Arc<TelemetryIndex>, session: Str) {
+		*self.mcp_journal.write() = Some((telemetry, session));
+	}
+
+	/// Returns the per-session admission gate backed by this live composer.
+	pub fn admission_gate(&self) -> Arc<HookGate> {
+		Arc::clone(&self.admission_gate)
 	}
 
 	/// Returns the shared runtime provider usage registry.
@@ -1313,15 +1719,13 @@ impl HookControlFactory {
 		if rows.last().is_some_and(|row| row.event == "provider_usage") {
 			let fetchers = self.usage_fetchers.clone();
 			let row = rows.last().expect("subscription was just inserted");
-			let session = evidence
-				.session
-				.clone()
-				.unwrap_or_else(|| row.identity.extension.clone());
+			let session = row.session.clone();
 			for provider in row.providers.as_deref().unwrap_or_default() {
 				fetchers.register_runtime(
 					usage_registration_id(row),
 					Arc::new(ExtensionUsageFetcher {
 						provider:    ProviderId::from(provider.clone()),
+						settings:    self.settings_for(&row.identity),
 						identity:    Arc::clone(&row.identity),
 						session:     session.clone(),
 						dispatcher:  Arc::clone(&self.dispatcher),
@@ -1333,7 +1737,318 @@ impl HookControlFactory {
 				);
 			}
 		}
+		self.provider_response_subscribed.store(
+			subscriptions
+				.values()
+				.flatten()
+				.any(|row| row.event == "provider_response" && row.phase == "observe"),
+			Ordering::Release,
+		);
+		let mask = subscriptions
+			.values()
+			.flatten()
+			.filter_map(|row| hook_event_id(row.event.as_str()))
+			.fold(0_u128, |mask, event| mask | (1_u128 << event as u32));
+		let fail_closed = subscriptions
+			.values()
+			.flatten()
+			.filter(|row| {
+				row.on_failure.unwrap_or(row.event_policy.on_failure) == HookFailurePolicy::Deny
+			})
+			.filter_map(|row| hook_event_id(row.event.as_str()))
+			.fold(0_u128, |mask, event| mask | (1_u128 << event as u32));
+		self.admission_gate.replace_masks(mask, fail_closed);
 		Ok(())
+	}
+
+	fn enqueue_mcp(&self, session_generation: u64, delivery: McpQueuedDelivery) {
+		{
+			let mut queues = self.mcp_queues.lock();
+			let queue = queues
+				.entry(session_generation)
+				.or_insert_with(|| McpDeliveryQueue {
+					pending:         VecDeque::with_capacity(MCP_HOOK_QUEUE_CAPACITY),
+					running_servers: BTreeSet::new(),
+					dropped:         0,
+				});
+			if queue.push(delivery) {
+				let dropped = queue.dropped;
+				tracing::warn!(
+					session_generation,
+					dropped,
+					"journal: dropped oldest MCP hook notification"
+				);
+				if let Some((telemetry, session)) = self.mcp_journal.read().clone() {
+					let encoded = json!({
+						"session_generation": session_generation,
+						"dropped": dropped,
+					})
+					.to_string();
+					tokio::task::spawn_blocking(move || {
+						let occurred_at_ms = time::SystemTime::now()
+							.duration_since(time::UNIX_EPOCH)
+							.map_or(0, |elapsed| elapsed.as_millis().try_into().unwrap_or(u64::MAX));
+						let _ = telemetry.append(
+							session.as_str(),
+							"mcp_notification_dropped",
+							occurred_at_ms,
+							encoded.as_bytes(),
+						);
+					});
+				}
+			}
+		}
+		self.schedule_mcp(session_generation);
+	}
+
+	fn schedule_mcp(&self, session_generation: u64) {
+		loop {
+			let delivery = {
+				let mut queues = self.mcp_queues.lock();
+				let Some(queue) = queues.get_mut(&session_generation) else {
+					return;
+				};
+				let Some(index) = queue.pending.iter().position(|delivery| {
+					!queue
+						.running_servers
+						.contains(&delivery.notification.server)
+				}) else {
+					return;
+				};
+				let delivery = queue
+					.pending
+					.remove(index)
+					.expect("selected delivery exists");
+				queue
+					.running_servers
+					.insert(delivery.notification.server.clone());
+				delivery
+			};
+			let owner = self.clone();
+			tokio::spawn(async move {
+				let server = delivery.notification.server.clone();
+				owner
+					.clone()
+					.deliver_mcp(session_generation, delivery)
+					.await;
+				{
+					let mut queues = owner.mcp_queues.lock();
+					if let Some(queue) = queues.get_mut(&session_generation) {
+						queue.running_servers.remove(&server);
+					}
+				}
+				owner.schedule_mcp(session_generation);
+			});
+		}
+	}
+
+	async fn deliver_mcp(self, session_generation: u64, delivery: McpQueuedDelivery) {
+		for subscription in delivery.subscriptions {
+			let notification = &delivery.notification;
+			let mut arguments = JsonMap::new();
+			arguments
+				.insert(String::from("event"), JsonValue::String(String::from("mcp_notification")));
+			arguments.insert(String::from("phase"), JsonValue::String(String::from("observe")));
+			arguments.insert(String::from("name"), JsonValue::String(subscription.name.to_string()));
+			arguments.insert(
+				String::from("payload"),
+				json!({
+					"server": notification.server,
+					"method": notification.method,
+					"params": notification.params,
+					"sequence": notification.sequence,
+				}),
+			);
+			let _ = self
+				.dispatcher
+				.dispatch(Arc::clone(&subscription.identity), ControlDispatch {
+					operation: sf!("omp.hooks.dispatch"),
+					arguments,
+					authority: ControlInvocationAuthority {
+						invocation:        sf!(
+							"mcp-notification:{}:{}",
+							notification.server,
+							notification.sequence
+						),
+						phase:             InvocationPhase::Open,
+						session:           sf!("session-{session_generation}"),
+						turn:              None,
+						event:             Some(sf!("mcp_notification")),
+						call:              None,
+						device:            None,
+						effects:           Box::new([]),
+						place_kind:        sf!("host"),
+						lifecycle:         LifecyclePhase::Active,
+						roots:             Box::new([]),
+						remote:            false,
+						has_ui:            false,
+						headless:          true,
+						settings:          self.settings_for(&subscription.identity),
+						secret_settings:   Box::new([]),
+						data:              None,
+						direct_filesystem: None,
+					},
+					policy: subscription.concurrency,
+					deadline: EventDeadline {
+						at: time::Instant::now()
+							+ subscription
+								.timeout
+								.unwrap_or(subscription.event_policy.timeout),
+					},
+				})
+				.await;
+		}
+	}
+
+	async fn dispatch_provider_domain(
+		&self,
+		event: &'static str,
+		provider: &ProviderId<str>,
+		payload: JsonValue,
+		fail_closed: bool,
+	) -> Result<Vec<JsonValue>, ProviderHookError> {
+		let mut rows = self
+			.subscriptions
+			.read()
+			.values()
+			.flat_map(|rows| rows.iter())
+			.filter(|row| {
+				row.event == event
+					&& row.phase == "domain"
+					&& row.providers.as_ref().is_none_or(|providers| {
+						providers
+							.iter()
+							.any(|candidate| candidate.as_str() == provider.as_str())
+					})
+			})
+			.cloned()
+			.collect::<Vec<_>>();
+		rows.sort_by(|left, right| {
+			left
+				.identity
+				.layer
+				.cmp(&right.identity.layer)
+				.then_with(|| left.identity.tier.cmp(&right.identity.tier))
+				.then_with(|| left.identity.extension.cmp(&right.identity.extension))
+				.then_with(|| left.name.cmp(&right.name))
+		});
+		if rows.is_empty() {
+			return Err(ProviderHookError::Unavailable);
+		}
+		let mut values = Vec::with_capacity(rows.len());
+		for row in rows {
+			let session = row.session.clone();
+			let context = ControlRequestContext {
+				connection: Arc::clone(&row.identity),
+				request_id: 0,
+				invocation: Some(ControlInvocationAuthority {
+					invocation: sf!("{event}:{}", Ulid::generate()),
+					phase: InvocationPhase::EffectsAuthorized,
+					session,
+					turn: None,
+					event: Some(Str::new_static(event)),
+					call: None,
+					device: None,
+					effects: Box::new([]),
+					place_kind: sf!("host"),
+					lifecycle: LifecyclePhase::Active,
+					roots: Box::new([]),
+					remote: false,
+					has_ui: event == "provider_login",
+					headless: event != "provider_login",
+					settings: self.settings_for(&row.identity),
+					secret_settings: Box::new([]),
+					data: None,
+					direct_filesystem: None,
+				}),
+			};
+			let mut callback = JsonMap::new();
+			callback.insert("event".to_owned(), JsonValue::String(event.to_owned()));
+			callback.insert("phase".to_owned(), JsonValue::String("domain".to_owned()));
+			callback.insert("name".to_owned(), JsonValue::String(row.name.to_string()));
+			callback.insert("payload".to_owned(), payload.clone());
+			match self
+				.callbacks
+				.dispatch_provider_hook(
+					Arc::clone(&row.identity),
+					&context,
+					event,
+					callback,
+					row.concurrency,
+					row.timeout.unwrap_or(row.event_policy.timeout),
+				)
+				.await
+			{
+				Ok(value) => values.push(value),
+				Err(_) if fail_closed => return Err(ProviderHookError::Failed),
+				Err(_) => {},
+			}
+		}
+		if values.is_empty() {
+			Err(if fail_closed {
+				ProviderHookError::Failed
+			} else {
+				ProviderHookError::Unavailable
+			})
+		} else {
+			Ok(values)
+		}
+	}
+
+	async fn observe(&self, context: &ControlRequestContext, event: &str, payload: &JsonValue) {
+		let scoped_provider = payload.get("provider").and_then(JsonValue::as_str);
+		let mut rows = self
+			.subscriptions
+			.read()
+			.values()
+			.flat_map(|rows| rows.iter())
+			.filter(|row| {
+				row.event == event
+					&& row.phase == "observe"
+					&& row.identity.session_generation == context.connection.session_generation
+					&& row.providers.as_ref().is_none_or(|providers| {
+						scoped_provider.is_none_or(|provider| {
+							providers
+								.iter()
+								.any(|candidate| candidate.as_str() == provider)
+						})
+					}) && lifecycle_hook_recipient(event, payload, row.identity.extension.as_str())
+			})
+			.cloned()
+			.collect::<Vec<_>>();
+		rows.sort_by(|left, right| {
+			left
+				.identity
+				.layer
+				.cmp(&right.identity.layer)
+				.then_with(|| left.identity.tier.cmp(&right.identity.tier))
+				.then_with(|| left.identity.extension.cmp(&right.identity.extension))
+				.then_with(|| left.name.cmp(&right.name))
+		});
+		rows.truncate(OBSERVE_HANDLER_CAP);
+		let deliveries = rows.into_iter().map(|row| {
+			let mut callback = JsonMap::new();
+			callback.insert(String::from("event"), JsonValue::String(event.to_owned()));
+			callback.insert(String::from("phase"), JsonValue::String(String::from("observe")));
+			callback.insert(String::from("name"), JsonValue::String(row.name.to_string()));
+			callback.insert(String::from("payload"), payload.clone());
+			async move {
+				let _ = self
+					.callbacks
+					.dispatch(
+						Arc::clone(&row.identity),
+						context,
+						"omp.hooks.dispatch",
+						callback,
+						row.concurrency,
+						row.timeout.unwrap_or(row.event_policy.timeout),
+						Some(row.event.clone()),
+						None,
+					)
+					.await;
+			}
+		});
+		let _ = futures::future::join_all(deliveries).await;
 	}
 
 	async fn compose(
@@ -1354,6 +2069,7 @@ impl HookControlFactory {
 			));
 		}
 		let mut payload = arguments.get("payload").cloned().unwrap_or(JsonValue::Null);
+		let scoped_provider = payload.get("provider").and_then(JsonValue::as_str);
 		let mut rows = self
 			.subscriptions
 			.read()
@@ -1361,7 +2077,19 @@ impl HookControlFactory {
 			.flat_map(|rows| rows.iter())
 			.filter(|row| {
 				row.event == event
+					&& row.phase != "observe"
 					&& row.identity.session_generation == context.connection.session_generation
+					&& row.providers.as_ref().is_none_or(|providers| {
+						scoped_provider.is_none_or(|provider| {
+							providers
+								.iter()
+								.any(|candidate| candidate.as_str() == provider)
+						})
+					}) && lifecycle_hook_recipient(
+					event.as_str(),
+					&payload,
+					row.identity.extension.as_str(),
+				)
 			})
 			.cloned()
 			.collect::<Vec<_>>();
@@ -1369,10 +2097,13 @@ impl HookControlFactory {
 			hook_phase_rank(&left.phase)
 				.cmp(&hook_phase_rank(&right.phase))
 				.then_with(|| left.order.cmp(&right.order))
-				.then_with(|| left.name.cmp(&right.name))
+				.then_with(|| left.identity.layer.cmp(&right.identity.layer))
+				.then_with(|| left.identity.tier.cmp(&right.identity.tier))
 				.then_with(|| left.identity.extension.cmp(&right.identity.extension))
+				.then_with(|| left.name.cmp(&right.name))
 		});
 		let mut modification: Option<JsonMap<String, JsonValue>> = None;
+		let mut approvals = Vec::new();
 		for row in rows {
 			let mut callback = JsonMap::new();
 			callback.insert(String::from("event"), JsonValue::String(event.to_string()));
@@ -1387,7 +2118,7 @@ impl HookControlFactory {
 					"omp.hooks.dispatch",
 					callback,
 					row.concurrency,
-					row.timeout.unwrap_or(policy.timeout),
+					self.callback_timeout(event.as_str(), &row, &policy),
 					Some(event.clone()),
 					None,
 				)
@@ -1401,28 +2132,930 @@ impl HookControlFactory {
 					}
 				},
 			};
-			let decision = result.as_object().ok_or_else(|| {
-				ControlProtocolError::new(
+			let result = if row.phase == "domain" {
+				match domain_reply_decision(result)? {
+					Some(decision) => decision,
+					None => continue,
+				}
+			} else {
+				result
+			};
+			let Some(decision) = result.as_object() else {
+				let error = ControlProtocolError::new(
 					"HookContractError",
 					"hook callback returned a non-object decision",
-				)
-			})?;
-			match decision.get("kind").and_then(JsonValue::as_str) {
-				Some("deny" | "require_approval") => return Ok(result),
-				Some("allow" | "defer") => {},
-				Some("modify") => {
-					compose_hook_modify(&policy, &mut payload, &mut modification, decision)?;
-				},
-				_ => {
-					return Err(ControlProtocolError::new(
-						"HookContractError",
-						"hook callback returned an unknown decision kind",
+				);
+				match hook_callback_failure(row.on_failure.unwrap_or(policy.on_failure), error) {
+					None => continue,
+					Some(decision) => return Ok(decision),
+				}
+			};
+			let kind = decision.get("kind").and_then(JsonValue::as_str);
+			if !hook_decision_is_legal(row.phase.as_str(), kind) {
+				let error = ControlProtocolError::new(
+					"HookContractError",
+					"hook callback returned a decision illegal in its phase",
+				);
+				match hook_callback_failure(row.on_failure.unwrap_or(policy.on_failure), error) {
+					None => continue,
+					Some(decision) => return Ok(decision),
+				}
+			}
+			match kind {
+				Some("deny") => return Ok(result),
+				Some("require_approval") => {
+					let Some(spec) = decision.get("spec").cloned() else {
+						let error = ControlProtocolError::new(
+							"HookContractError",
+							"approval decision omitted its specification",
+						);
+						match hook_callback_failure(row.on_failure.unwrap_or(policy.on_failure), error) {
+							None => continue,
+							Some(decision) => return Ok(decision),
+						}
+					};
+					approvals.push(approval_spec_with_provenance(
+						spec,
+						row.name.as_str(),
+						row.identity.extension.as_str(),
+						row.identity.host_generation,
+						row.identity.session_generation,
 					));
 				},
+				Some("allow" | "defer") => {},
+				Some("modify") => {
+					if let Err(error) = compose_hook_modify(
+						event.as_str(),
+						&policy,
+						&mut payload,
+						&mut modification,
+						decision,
+					) {
+						match hook_callback_failure(row.on_failure.unwrap_or(policy.on_failure), error) {
+							None => continue,
+							Some(decision) => return Ok(decision),
+						}
+					}
+				},
+				_ => unreachable!("phase legality checked the closed decision vocabulary"),
 			}
 		}
-		Ok(modification.map_or_else(|| policy.default.clone(), JsonValue::Object))
+		if approvals.is_empty() {
+			Ok(modification.map_or_else(|| policy.default.clone(), JsonValue::Object))
+		} else {
+			Ok(json!({
+				"kind": "require_approvals",
+				"specs": approvals,
+				"effective": payload,
+			}))
+		}
 	}
+}
+
+fn hook_event_id(event: &str) -> Option<HookEventId> {
+	let mut name = String::with_capacity("HOOK_EVENT_".len() + event.len());
+	name.push_str("HOOK_EVENT_");
+	name.extend(
+		event
+			.chars()
+			.map(|character| character.to_ascii_uppercase()),
+	);
+	HookEventId::from_str_name(&name)
+}
+
+fn hook_event_name(event: HookEventId) -> Option<String> {
+	event
+		.as_str_name()
+		.strip_prefix("HOOK_EVENT_")
+		.map(str::to_ascii_lowercase)
+}
+
+fn hydrate_tool_call_bash(payload: &mut JsonValue) -> bool {
+	let Some(object) = payload.as_object_mut() else {
+		return false;
+	};
+	let Some(wire) = object.remove("__omp_bash_proto") else {
+		return true;
+	};
+	if wire.is_null() {
+		return true;
+	}
+	let Some(encoded) = wire
+		.as_object()
+		.and_then(|wire| wire.get("$bytes"))
+		.and_then(JsonValue::as_str)
+	else {
+		return false;
+	};
+	let Ok(bytes) = omp_core::base64::decode(encoded).into_vec() else {
+		return false;
+	};
+	let Ok(ir) = omp_proto::policy::v1::BashIr::decode(bytes.as_slice()) else {
+		return false;
+	};
+	let source = ir.source.clone();
+	object.insert(String::from("bash"), crate::policy::bash_ir_json(&ir, &source));
+	true
+}
+
+fn gate_decision_from_json(value: JsonValue, mut payload: JsonValue) -> GateDecision {
+	let Some(decision) = value.as_object() else {
+		return GateDecision::Deny(sf!("hook composer returned a non-object decision"));
+	};
+	match decision.get("kind").and_then(JsonValue::as_str) {
+		Some("allow") => GateDecision::Allow,
+		Some("defer") => GateDecision::Defer,
+		Some("modify") => {
+			let Some(effective) = payload.as_object_mut() else {
+				return GateDecision::Deny(sf!("hook modification requires an object payload"));
+			};
+			for (field, value) in decision
+				.get("patch")
+				.and_then(JsonValue::as_object)
+				.into_iter()
+				.flatten()
+			{
+				effective.insert(field.clone(), value.clone());
+			}
+			for field in decision
+				.get("unset")
+				.and_then(JsonValue::as_array)
+				.into_iter()
+				.flatten()
+				.filter_map(JsonValue::as_str)
+			{
+				effective.remove(field);
+			}
+			match serde_json::to_vec(&payload) {
+				Ok(args) => GateDecision::Modify(HookPatch {
+					target: None,
+					args:   Some(bytes::Bytes::from(args)),
+				}),
+				Err(error) => GateDecision::Deny(Str::from(format!(
+					"could not encode effective hook payload: {error}"
+				))),
+			}
+		},
+		Some("deny") => {
+			let reason = decision
+				.get("reason")
+				.and_then(JsonValue::as_str)
+				.map_or_else(|| sf!("hook policy denied operation"), Str::from);
+			let code = decision
+				.get("code")
+				.and_then(JsonValue::as_str)
+				.map(Str::from);
+			let decision_id = decision
+				.get("decision_id")
+				.and_then(JsonValue::as_str)
+				.map_or_else(|| Str::from(Ulid::generate().to_string()), Str::from);
+			let rules = decision
+				.get("rules")
+				.and_then(JsonValue::as_array)
+				.into_iter()
+				.flatten()
+				.filter_map(|rule| {
+					rule
+						.as_object()
+						.and_then(|rule| rule.get("id"))
+						.and_then(JsonValue::as_str)
+						.map(Str::from)
+				})
+				.collect::<Vec<_>>();
+			GateDecision::DenyPolicy(Arc::new(omp_tool::PolicyDenied {
+				reason,
+				code,
+				decision_id,
+				rules: rules.into(),
+			}))
+		},
+		Some("require_approval") => {
+			match decision
+				.get("spec")
+				.cloned()
+				.ok_or_else(|| {
+					ControlProtocolError::new(
+						"HookContractError",
+						"approval decision omitted its specification",
+					)
+				})
+				.and_then(crate::policy::approval_spec)
+			{
+				Ok(spec) => GateDecision::RequireApproval(spec),
+				Err(error) => GateDecision::Deny(error.message),
+			}
+		},
+		Some("require_approvals") => {
+			let specs = decision
+				.get("specs")
+				.and_then(JsonValue::as_array)
+				.ok_or_else(|| {
+					ControlProtocolError::new(
+						"HookContractError",
+						"composed approval decision omitted its specifications",
+					)
+				})
+				.and_then(|specs| {
+					specs
+						.iter()
+						.cloned()
+						.map(crate::policy::approval_spec)
+						.collect::<Result<Vec<_>, _>>()
+				});
+			match specs {
+				Ok(specs) if !specs.is_empty() => {
+					let patch = decision
+						.get("effective")
+						.map(serde_json::to_vec)
+						.transpose()
+						.map(|args| args.map(bytes::Bytes::from))
+						.map(|args| args.map(|args| HookPatch { target: None, args: Some(args) }));
+					match patch {
+						Ok(patch) => GateDecision::RequireApprovals { specs, patch },
+						Err(error) => GateDecision::Deny(Str::from(format!(
+							"could not encode effective hook payload: {error}"
+						))),
+					}
+				},
+				Ok(_) => GateDecision::Deny(sf!("composed approval decision was empty")),
+				Err(error) => GateDecision::Deny(error.message),
+			}
+		},
+		_ => GateDecision::Deny(sf!("hook composer returned an illegal admission decision")),
+	}
+}
+
+impl McpNotificationSink for HookControlFactory {
+	fn interested(&self, server: &str, method: &str) -> bool {
+		self
+			.subscriptions
+			.read()
+			.values()
+			.flat_map(|rows| rows.iter())
+			.any(|row| {
+				row.event == "mcp_notification"
+					&& row.phase == "observe"
+					&& mcp_subscription_matches(row, server, method)
+			})
+	}
+
+	fn offer(&self, notification: McpHookNotification) {
+		let rows = self
+			.subscriptions
+			.read()
+			.values()
+			.flat_map(|rows| rows.iter())
+			.filter(|row| {
+				row.event == "mcp_notification"
+					&& row.phase == "observe"
+					&& mcp_subscription_matches(
+						row,
+						notification.server.as_str(),
+						notification.method.as_str(),
+					)
+			})
+			.cloned()
+			.collect::<Vec<_>>();
+		if rows.is_empty() {
+			return;
+		}
+		let mut by_session = BTreeMap::<u64, Vec<HookSubscription>>::new();
+		for row in rows {
+			by_session
+				.entry(row.identity.session_generation)
+				.or_default()
+				.push(row);
+		}
+		for (session_generation, subscriptions) in by_session {
+			self.enqueue_mcp(session_generation, McpQueuedDelivery {
+				notification: notification.clone(),
+				subscriptions,
+			});
+		}
+	}
+}
+
+impl ProviderHookObserver for HookControlFactory {
+	fn provider_login_subscribed(&self, provider: &ProviderId<str>) -> bool {
+		provider_hook_subscribed(self, "provider_login", provider)
+	}
+
+	fn provider_login<'a>(
+		&'a self,
+		request: ProviderLoginHookRequest,
+	) -> std::pin::Pin<
+		Box<dyn Future<Output = Result<ProviderHookCredential, ProviderHookError>> + Send + 'a>,
+	> {
+		Box::pin(async move {
+			let method: &'static str = request.method.into();
+			let mut values = self
+				.dispatch_provider_domain(
+					"provider_login",
+					&request.provider,
+					json!({
+						"provider": request.provider,
+						"method": method.replace('-', "_"),
+						"ui": {},
+					}),
+					true,
+				)
+				.await?;
+			parse_provider_credential(values.pop().ok_or(ProviderHookError::Failed)?)
+		})
+	}
+
+	fn provider_refresh_subscribed(&self, provider: &ProviderId<str>) -> bool {
+		provider_hook_subscribed(self, "provider_refresh", provider)
+	}
+
+	fn provider_refresh<'a>(
+		&'a self,
+		request: ProviderRefreshHookRequest,
+	) -> std::pin::Pin<
+		Box<dyn Future<Output = Result<ProviderHookCredential, ProviderHookError>> + Send + 'a>,
+	> {
+		Box::pin(async move {
+			let mut values = self
+				.dispatch_provider_domain(
+					"provider_refresh",
+					&request.provider,
+					json!({
+						"provider": request.provider,
+						"identity": request.identity,
+						"refresh_token": {
+							"$bytes": omp_core::base64::encode(
+								request.refresh_token.expose_secret().as_bytes()
+							),
+						},
+						"expires_at_ms": request.expires_at_ms,
+						"props": request.props,
+						"reason": request.reason.to_string(),
+					}),
+					true,
+				)
+				.await?;
+			parse_provider_credential(values.pop().ok_or(ProviderHookError::Failed)?)
+		})
+	}
+
+	fn provider_sign_subscribed(&self, provider: &ProviderId<str>) -> bool {
+		provider_hook_subscribed(self, "provider_sign", provider)
+	}
+
+	fn provider_sign<'a>(
+		&'a self,
+		request: ProviderSignHookRequest,
+	) -> std::pin::Pin<
+		Box<dyn Future<Output = Result<ProviderSignature, ProviderHookError>> + Send + 'a>,
+	> {
+		Box::pin(async move {
+			let provider = request.provider.clone();
+			let headers = request
+				.headers
+				.iter()
+				.map(|header| (header.name.to_string(), JsonValue::String(header.value.to_string())))
+				.collect::<JsonMap<_, _>>();
+			let mut values = self
+				.dispatch_provider_domain(
+					"provider_sign",
+					&provider,
+					json!({
+						"provider": request.provider,
+						"route": request.route,
+						"method": request.method,
+						"url": request.url,
+						"headers": headers,
+						"body_sha256": {
+							"$bytes": omp_core::base64::encode(&request.body_sha256),
+						},
+						"signer": {},
+					}),
+					true,
+				)
+				.await?;
+			parse_provider_signature(values.pop().ok_or(ProviderHookError::Failed)?)
+		})
+	}
+
+	fn models_discover_subscribed(&self, provider: &ProviderId<str>) -> bool {
+		provider_hook_subscribed(self, "models_discover", provider)
+	}
+
+	fn models_discover<'a>(
+		&'a self,
+		request: ModelsDiscoverHookRequest,
+	) -> std::pin::Pin<
+		Box<dyn Future<Output = Result<ModelsDiscoverHookPage, ProviderHookError>> + Send + 'a>,
+	> {
+		Box::pin(async move {
+			let values = self
+				.dispatch_provider_domain(
+					"models_discover",
+					&request.provider,
+					json!({
+						"provider": request.provider,
+						"route": request.route,
+						"cursor": request.cursor,
+						"page_size": request.page_size,
+						"trigger": request.trigger,
+					}),
+					false,
+				)
+				.await?;
+			let mut pages = values
+				.into_iter()
+				.map(parse_discovery_page)
+				.collect::<Result<Vec<_>, _>>()?;
+			let Some(mut page) = pages.pop() else {
+				return Err(ProviderHookError::Unavailable);
+			};
+			for prior in pages {
+				let ids = page
+					.models
+					.iter()
+					.filter_map(|model| model.get("id").and_then(JsonValue::as_str))
+					.map(Str::new)
+					.collect::<BTreeSet<_>>();
+				let retained = prior
+					.models
+					.into_vec()
+					.into_iter()
+					.filter(|model| {
+						model
+							.get("id")
+							.and_then(JsonValue::as_str)
+							.is_some_and(|id| ids.contains(id))
+					})
+					.collect::<Vec<_>>();
+				page.models = retained.into_boxed_slice();
+				page.authoritative |= prior.authoritative;
+			}
+			Ok(page)
+		})
+	}
+}
+
+fn provider_hook_subscribed(
+	owner: &HookControlFactory,
+	event: &str,
+	provider: &ProviderId<str>,
+) -> bool {
+	owner.subscriptions.read().values().flatten().any(|row| {
+		row.event == event
+			&& row.phase == "domain"
+			&& row.providers.as_ref().is_none_or(|providers| {
+				providers
+					.iter()
+					.any(|candidate| candidate.as_str() == provider.as_str())
+			})
+	})
+}
+
+fn parse_provider_credential(
+	value: JsonValue,
+) -> Result<ProviderHookCredential, ProviderHookError> {
+	let object = value.as_object().ok_or(ProviderHookError::InvalidResult)?;
+	let kind = object
+		.get("kind")
+		.and_then(JsonValue::as_str)
+		.filter(|kind| matches!(*kind, "api_key" | "bearer" | "oauth" | "aws" | "session"))
+		.ok_or(ProviderHookError::InvalidResult)?;
+	let secret = parse_hook_secret(
+		object
+			.get("secret")
+			.ok_or(ProviderHookError::InvalidResult)?,
+	)?;
+	let refresh_token = object
+		.get("refresh_token")
+		.filter(|value| !value.is_null())
+		.map(parse_hook_secret)
+		.transpose()?;
+	let props = object
+		.get("props")
+		.and_then(JsonValue::as_object)
+		.cloned()
+		.unwrap_or_default();
+	if props.values().any(|value| {
+		!matches!(value, JsonValue::Bool(_) | JsonValue::Number(_) | JsonValue::String(_))
+	}) {
+		return Err(ProviderHookError::InvalidResult);
+	}
+	Ok(ProviderHookCredential {
+		kind: Str::new(kind),
+		secret,
+		refresh_token,
+		expires_at_ms: object.get("expires_at_ms").and_then(JsonValue::as_u64),
+		identity: object
+			.get("identity")
+			.and_then(JsonValue::as_str)
+			.map(Str::new),
+		props,
+	})
+}
+
+fn parse_hook_secret(value: &JsonValue) -> Result<SecretString, ProviderHookError> {
+	let encoded = value
+		.as_object()
+		.and_then(|object| object.get("$bytes"))
+		.and_then(JsonValue::as_str)
+		.ok_or(ProviderHookError::InvalidResult)?;
+	let bytes = omp_core::base64::decode(encoded)
+		.into_vec()
+		.map_err(|_| ProviderHookError::InvalidResult)?;
+	let value = String::from_utf8(bytes).map_err(|_| ProviderHookError::InvalidResult)?;
+	if value.is_empty() {
+		return Err(ProviderHookError::InvalidResult);
+	}
+	Ok(SecretString::from(value))
+}
+
+fn parse_provider_signature(value: JsonValue) -> Result<ProviderSignature, ProviderHookError> {
+	let object = value.as_object().ok_or(ProviderHookError::InvalidResult)?;
+	let parse = |field: &str| {
+		object
+			.get(field)
+			.and_then(JsonValue::as_object)
+			.into_iter()
+			.flatten()
+			.map(|(name, value)| {
+				let value = value
+					.as_str()
+					.filter(|value| !value.is_empty())
+					.ok_or(ProviderHookError::InvalidResult)?;
+				Ok((Str::new(name), SecretString::from(value)))
+			})
+			.collect::<Result<Vec<_>, ProviderHookError>>()
+			.map(Vec::into_boxed_slice)
+	};
+	Ok(ProviderSignature { headers: parse("headers")?, query: parse("query")? })
+}
+
+fn parse_discovery_page(value: JsonValue) -> Result<ModelsDiscoverHookPage, ProviderHookError> {
+	if let JsonValue::Array(models) = value {
+		return Ok(ModelsDiscoverHookPage {
+			models:        models.into_boxed_slice(),
+			next_cursor:   None,
+			authoritative: false,
+		});
+	}
+	let object = value.as_object().ok_or(ProviderHookError::InvalidResult)?;
+	let models = object
+		.get("models")
+		.and_then(JsonValue::as_array)
+		.cloned()
+		.ok_or(ProviderHookError::InvalidResult)?;
+	if models
+		.iter()
+		.any(|model| model.get("id").and_then(JsonValue::as_str).is_none())
+	{
+		return Err(ProviderHookError::InvalidResult);
+	}
+	Ok(ModelsDiscoverHookPage {
+		models:        models.into_boxed_slice(),
+		next_cursor:   object
+			.get("next_cursor")
+			.and_then(JsonValue::as_str)
+			.map(Str::new),
+		authoritative: object
+			.get("authoritative")
+			.and_then(JsonValue::as_bool)
+			.unwrap_or(false),
+	})
+}
+
+impl ProviderResponseObserver for HookControlFactory {
+	fn before_request_subscribed(&self) -> bool {
+		self
+			.admission_gate
+			.subscribed(HookEventId::HookEventBeforeRequest)
+	}
+
+	fn before_request<'a>(
+		&'a self,
+		draft: &'a BeforeRequestDraft,
+	) -> std::pin::Pin<
+		Box<dyn Future<Output = Result<BeforeRequestMutation, BeforeRequestDenied>> + Send + 'a>,
+	> {
+		let owner = self.clone();
+		Box::pin(async move {
+			let headers = draft
+				.headers
+				.iter()
+				.map(|header| (header.name.to_string(), JsonValue::String(header.value.to_string())))
+				.collect::<JsonMap<_, _>>();
+			let payload = json!({
+				"provider": draft.provider,
+				"route": draft.route,
+				"model": draft.model,
+				"operation": draft.operation.to_string(),
+				"scalars": draft.scalars,
+				"headers": headers,
+				"intents": draft.intents,
+				"message_count": draft.message_count,
+				"approx_prompt_tokens": draft.approx_prompt_tokens,
+			});
+			let requested = serde_json::to_vec(&payload)
+				.map(bytes::Bytes::from)
+				.map_err(|_| BeforeRequestDenied {
+					reason: sf!("provider request hook payload could not be encoded"),
+					code:   Some(sf!("HookContractError")),
+				})?;
+			let effective = match owner
+				.admission_gate
+				.gate(
+					HookEventId::HookEventBeforeRequest,
+					GateEvent::new(sf!("before_request"), requested.clone()),
+				)
+				.await
+			{
+				GateOutcome::Allow { event, .. } => {
+					if event.effective_args == requested {
+						return Ok(BeforeRequestMutation::default());
+					}
+					serde_json::from_slice::<JsonValue>(&event.effective_args).map_err(|_| {
+						BeforeRequestDenied {
+							reason: sf!("provider request hook payload could not be decoded"),
+							code:   Some(sf!("HookContractError")),
+						}
+					})?
+				},
+				GateOutcome::Deny { reason, .. } => {
+					return Err(BeforeRequestDenied { reason, code: None });
+				},
+				GateOutcome::Approval { .. } => {
+					return Err(BeforeRequestDenied {
+						reason: sf!("provider request hook requested unsupported approval"),
+						code:   Some(sf!("HookContractError")),
+					});
+				},
+			};
+			let effective = effective.as_object().ok_or_else(|| BeforeRequestDenied {
+				reason: sf!("provider request hook returned a non-object payload"),
+				code:   Some(sf!("HookContractError")),
+			})?;
+			let body = effective
+				.get("body")
+				.and_then(JsonValue::as_object)
+				.cloned()
+				.unwrap_or_default();
+			let headers = effective
+				.get("headers")
+				.and_then(JsonValue::as_object)
+				.map(|headers| {
+					headers
+						.iter()
+						.filter_map(|(name, value)| {
+							(value.is_null() || value.is_string())
+								.then(|| (Str::new(name), value.as_str().map(Str::new)))
+						})
+						.collect::<Vec<_>>()
+						.into_boxed_slice()
+				})
+				.unwrap_or_default();
+			let intents = effective
+				.get("intents")
+				.and_then(JsonValue::as_array)
+				.map(|values| values.clone().into_boxed_slice());
+			let timeout = effective
+				.get("timeout")
+				.and_then(|value| {
+					value
+						.as_str()
+						.or_else(|| value.get("$duration").and_then(JsonValue::as_str))
+				})
+				.and_then(|value| value.parse::<omp_core::Duration>().ok())
+				.and_then(|value| value.to_std().ok());
+			Ok(BeforeRequestMutation { body, headers, intents, timeout })
+		})
+	}
+
+	fn credential_disabled_subscribed(&self) -> bool {
+		self
+			.admission_gate
+			.subscribed(HookEventId::HookEventCredentialDisabled)
+	}
+
+	fn observe_credential_disabled(&self, observation: CredentialDisabledObservation) {
+		let subscriptions = self
+			.subscriptions
+			.read()
+			.values()
+			.flatten()
+			.filter(|row| {
+				row.event == "credential_disabled"
+					&& row.phase == "observe"
+					&& row.providers.as_ref().is_none_or(|providers| {
+						providers
+							.iter()
+							.any(|provider| provider == observation.provider.as_str())
+					})
+			})
+			.cloned()
+			.collect::<Vec<_>>();
+		if subscriptions.is_empty() {
+			return;
+		}
+		let owner = self.clone();
+		tokio::spawn(async move {
+			for subscription in subscriptions {
+				let mut arguments = JsonMap::new();
+				arguments.insert(
+					String::from("event"),
+					JsonValue::String(String::from("credential_disabled")),
+				);
+				arguments.insert(String::from("phase"), JsonValue::String(String::from("observe")));
+				arguments
+					.insert(String::from("name"), JsonValue::String(subscription.name.to_string()));
+				arguments.insert(
+					String::from("payload"),
+					json!({
+						"provider": observation.provider,
+						"account": observation.account.as_ref().map(ToString::to_string),
+						"cause": observation.cause,
+					}),
+				);
+				let session_generation = subscription.identity.session_generation;
+				let _ = owner
+					.dispatcher
+					.dispatch(Arc::clone(&subscription.identity), ControlDispatch {
+						operation: sf!("omp.hooks.dispatch"),
+						arguments,
+						authority: ControlInvocationAuthority {
+							invocation:        sf!("credential-disabled:{}", observation.provider),
+							phase:             InvocationPhase::Open,
+							session:           sf!("session-{session_generation}"),
+							turn:              None,
+							event:             Some(sf!("credential_disabled")),
+							call:              None,
+							device:            None,
+							effects:           Box::new([]),
+							place_kind:        sf!("host"),
+							lifecycle:         LifecyclePhase::Active,
+							roots:             Box::new([]),
+							remote:            false,
+							has_ui:            false,
+							headless:          true,
+							settings:          owner.settings_for(&subscription.identity),
+							secret_settings:   Box::new([]),
+							data:              None,
+							direct_filesystem: None,
+						},
+						policy: subscription.concurrency,
+						deadline: EventDeadline {
+							at: time::Instant::now()
+								+ subscription
+									.timeout
+									.unwrap_or(subscription.event_policy.timeout),
+						},
+					})
+					.await;
+			}
+		});
+	}
+
+	fn subscribed(&self) -> bool {
+		self.provider_response_subscribed.load(Ordering::Relaxed)
+	}
+
+	fn observe(&self, observation: ProviderResponseObservation) {
+		let subscriptions = self
+			.subscriptions
+			.read()
+			.values()
+			.flatten()
+			.filter(|row| {
+				row.event == "provider_response"
+					&& row.phase == "observe"
+					&& row.providers.as_ref().is_none_or(|providers| {
+						providers
+							.iter()
+							.any(|provider| provider == observation.provider.as_str())
+					})
+			})
+			.cloned()
+			.collect::<Vec<_>>();
+		if subscriptions.is_empty() {
+			return;
+		}
+		let owner = self.clone();
+		tokio::spawn(async move {
+			for subscription in subscriptions {
+				let headers = observation
+					.headers
+					.iter()
+					.map(|(name, value)| (name.to_string(), JsonValue::String(value.to_string())))
+					.collect::<JsonMap<_, _>>();
+				let mut arguments = JsonMap::new();
+				arguments
+					.insert(String::from("event"), JsonValue::String(String::from("provider_response")));
+				arguments.insert(String::from("phase"), JsonValue::String(String::from("observe")));
+				arguments
+					.insert(String::from("name"), JsonValue::String(subscription.name.to_string()));
+				arguments.insert(
+					String::from("payload"),
+					json!({
+						"provider": observation.provider,
+						"model": {
+							"provider": observation.provider,
+							"api": observation.api,
+							"model": observation.model,
+						},
+						"status": observation.status,
+						"headers": headers,
+						"request_id": observation.request_id,
+					}),
+				);
+				let _ = owner
+					.dispatcher
+					.dispatch(Arc::clone(&subscription.identity), ControlDispatch {
+						operation: sf!("omp.hooks.dispatch"),
+						arguments,
+						authority: ControlInvocationAuthority {
+							invocation:        sf!(
+								"provider-response:{}:{}",
+								observation.provider,
+								observation.status
+							),
+							phase:             InvocationPhase::Open,
+							session:           sf!("session-{}", subscription.identity.session_generation),
+							turn:              None,
+							event:             Some(sf!("provider_response")),
+							call:              None,
+							device:            None,
+							effects:           Box::new([]),
+							place_kind:        sf!("host"),
+							lifecycle:         LifecyclePhase::Active,
+							roots:             Box::new([]),
+							remote:            false,
+							has_ui:            false,
+							headless:          true,
+							settings:          owner.settings_for(&subscription.identity),
+							secret_settings:   Box::new([]),
+							data:              None,
+							direct_filesystem: None,
+						},
+						policy: subscription.concurrency,
+						deadline: EventDeadline {
+							at: time::Instant::now()
+								+ subscription
+									.timeout
+									.unwrap_or(subscription.event_policy.timeout),
+						},
+					})
+					.await;
+			}
+		});
+	}
+}
+
+fn mcp_subscription_matches(subscription: &HookSubscription, server: &str, method: &str) -> bool {
+	mcp_filter_matches(subscription.servers.as_deref(), &subscription.method_globs, server, method)
+}
+
+fn mcp_filter_matches(
+	servers: Option<&[Str]>,
+	method_globs: &[Str],
+	server: &str,
+	method: &str,
+) -> bool {
+	let server_matches =
+		servers.is_none_or(|servers| servers.iter().any(|candidate| candidate == server));
+	let method_matches = method_globs.is_empty()
+		|| method_globs
+			.iter()
+			.any(|pattern| anchored_glob_matches(pattern, method));
+	server_matches && method_matches
+}
+
+fn anchored_glob_matches(pattern: &str, value: &str) -> bool {
+	let pattern = pattern.as_bytes();
+	let value = value.as_bytes();
+	let mut pattern_index = 0;
+	let mut value_index = 0;
+	let mut star = None;
+	let mut retry_value = 0;
+	while value_index < value.len() {
+		if pattern_index < pattern.len()
+			&& (pattern[pattern_index] == b'?' || pattern[pattern_index] == value[value_index])
+		{
+			pattern_index += 1;
+			value_index += 1;
+		} else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+			star = Some(pattern_index);
+			pattern_index += 1;
+			retry_value = value_index;
+		} else if let Some(star_index) = star {
+			pattern_index = star_index + 1;
+			retry_value += 1;
+			value_index = retry_value;
+		} else {
+			return false;
+		}
+	}
+	while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+		pattern_index += 1;
+	}
+	pattern_index == pattern.len()
 }
 
 fn hook_callback_failure(
@@ -1439,6 +3072,59 @@ fn hook_callback_failure(
 	})
 }
 
+fn hook_decision_is_legal(phase: &str, kind: Option<&str>) -> bool {
+	matches!(
+		(phase, kind),
+		("precheck", Some("deny" | "defer"))
+			| ("transform", Some("modify" | "defer"))
+			| ("review", Some("allow" | "deny" | "defer"))
+			| ("approval", Some("allow" | "deny" | "defer" | "require_approval"))
+			| ("domain", Some("allow" | "deny" | "defer" | "modify"))
+	)
+}
+
+fn approval_spec_with_provenance(
+	mut spec: JsonValue,
+	hook: &str,
+	extension: &str,
+	host_generation: u64,
+	session_generation: u64,
+) -> JsonValue {
+	if let Some(object) = spec.as_object_mut() {
+		let evidence = object
+			.entry(String::from("evidence"))
+			.or_insert_with(|| JsonValue::Array(Vec::new()));
+		if !evidence.is_array() {
+			*evidence = JsonValue::Array(Vec::new());
+		}
+		let evidence = evidence.as_array_mut().expect("normalized to array");
+		evidence.push(JsonValue::String(format!(
+			"hook={hook} extension={extension} host_generation={host_generation} \
+			 session_generation={session_generation}",
+		)));
+	}
+	spec
+}
+
+/// Lifts a domain handler's raw return (Python returns the dataclass itself:
+/// `ContextPatch`, `CustomSummary`, … or `None`) into the five-arm decision
+/// vocabulary the composer folds: `None` contributes nothing, a bare object
+/// is a transform whose fields patch the effective payload, and an object
+/// already spelled as a decision passes through.
+fn domain_reply_decision(result: JsonValue) -> Result<Option<JsonValue>, ControlProtocolError> {
+	match result {
+		JsonValue::Null => Ok(None),
+		JsonValue::Object(object) if object.get("kind").is_some_and(JsonValue::is_string) => {
+			Ok(Some(JsonValue::Object(object)))
+		},
+		JsonValue::Object(object) => Ok(Some(json!({"kind": "modify", "patch": object}))),
+		_ => Err(ControlProtocolError::new(
+			"HookContractError",
+			"domain hook callback returned neither an object nor None",
+		)),
+	}
+}
+
 fn hook_phase_rank(phase: &str) -> u8 {
 	match phase {
 		"precheck" => 0,
@@ -1450,7 +3136,16 @@ fn hook_phase_rank(phase: &str) -> u8 {
 	}
 }
 
+fn lifecycle_hook_recipient(event: &str, payload: &JsonValue, extension: &str) -> bool {
+	!matches!(event, "extension_load" | "extension_unload")
+		|| payload
+			.get("extension")
+			.and_then(JsonValue::as_str)
+			.is_none_or(|subject| subject != extension)
+}
+
 fn compose_hook_modify(
+	event: &str,
 	policy: &HookEventPolicy,
 	payload: &mut JsonValue,
 	modification: &mut Option<JsonMap<String, JsonValue>>,
@@ -1459,17 +3154,15 @@ fn compose_hook_modify(
 	let output = modification.get_or_insert_with(|| {
 		JsonMap::from_iter([(String::from("kind"), JsonValue::String(String::from("modify")))])
 	});
-	for field in ["target", "args", "reason"] {
-		if let Some(value) = decision.get(field).filter(|value| !value.is_null()) {
-			output.insert(String::from(field), value.clone());
-		}
+	if let Some(reason) = decision.get("reason").filter(|value| !value.is_null()) {
+		output.insert(String::from("reason"), reason.clone());
 	}
-	let patch = decision
+	let mut patch = decision
 		.get("patch")
 		.and_then(JsonValue::as_object)
 		.cloned()
 		.unwrap_or_default();
-	let unset = decision
+	let mut unset = decision
 		.get("unset")
 		.and_then(JsonValue::as_array)
 		.cloned()
@@ -1477,6 +3170,49 @@ fn compose_hook_modify(
 	let payload_object = payload.as_object_mut().ok_or_else(|| {
 		ControlProtocolError::new("HookContractError", "hook modification requires an object payload")
 	})?;
+	if event == "tool_call" {
+		let mut args = decision
+			.get("args")
+			.and_then(JsonValue::as_object)
+			.cloned()
+			.or_else(|| {
+				payload_object
+					.get("args")
+					.and_then(JsonValue::as_object)
+					.cloned()
+			})
+			.unwrap_or_default();
+		let mut args_changed = decision.get("args").is_some_and(JsonValue::is_object);
+		patch.retain(|field, value| {
+			if policy.composition.contains_key(field.as_str()) {
+				true
+			} else {
+				args.insert(field.clone(), value.clone());
+				args_changed = true;
+				false
+			}
+		});
+		unset.retain(|field| {
+			let Some(field) = field.as_str() else {
+				return true;
+			};
+			if policy.composition.contains_key(field) {
+				true
+			} else {
+				args.remove(field);
+				args_changed = true;
+				false
+			}
+		});
+		if args_changed {
+			patch.insert(String::from("args"), JsonValue::Object(args));
+		}
+	} else if let Some(args) = decision.get("args").filter(|value| !value.is_null()) {
+		patch.insert(String::from("args"), args.clone());
+	}
+	if let Some(target) = decision.get("target").filter(|value| !value.is_null()) {
+		patch.insert(String::from("target"), target.clone());
+	}
 	let output_patch = output
 		.entry(String::from("patch"))
 		.or_insert_with(|| JsonValue::Object(JsonMap::new()))
@@ -1517,12 +3253,14 @@ fn compose_hook_modify(
 						format!("intersect-composed hook field {field} must be an array"),
 					)
 				})?;
-				JsonValue::Array(
+				JsonValue::Array(if payload_object.get(&field).is_none_or(JsonValue::is_null) {
+					requested.clone()
+				} else {
 					current
 						.into_iter()
 						.filter(|item| requested.contains(item))
-						.collect(),
-				)
+						.collect()
+				})
 			},
 		};
 		payload_object.insert(field.clone(), composed.clone());
@@ -1612,6 +3350,9 @@ pub struct ActiveContentInputs {
 	pub authored_skills:     BTreeSet<Str>,
 	/// Managed-skill authority root.
 	pub managed_skills_root: Option<PathBuf>,
+	/// Explicit Agent Plugins roots whose data-only MCP declarations join
+	/// automatic project discovery.
+	pub agent_plugin_roots:  Vec<PathBuf>,
 }
 
 /// Object-safe composition boundary for one active internal-URL resolver.
@@ -1730,38 +3471,6 @@ pub trait TelemetryUpload: Send + Sync + 'static {
 	fn start(&self, index: Arc<TelemetryIndex>, credentials: Arc<GithubCredentialBridge>);
 }
 
-/// Deferred start of background telemetry delivery.
-///
-/// Registry assembly itself must not spawn the handle-less upload loop: both
-/// server construction paths continue with the fallible control-host
-/// activation after assembly, and a failed activation returns from
-/// construction while a spawned loop would keep retrying against the
-/// telemetry index and the credential bridge. Composition therefore returns
-/// the start instead of performing it, and the construction path runs it
-/// only after that final fallible step has succeeded.
-pub struct TelemetryUploadStart {
-	upload:      Option<Arc<dyn TelemetryUpload>>,
-	telemetry:   Arc<TelemetryIndex>,
-	credentials: Arc<GithubCredentialBridge>,
-}
-
-impl TelemetryUploadStart {
-	fn new(
-		upload: Option<Arc<dyn TelemetryUpload>>,
-		telemetry: &Arc<TelemetryIndex>,
-		credentials: &Arc<GithubCredentialBridge>,
-	) -> Self {
-		Self { upload, telemetry: Arc::clone(telemetry), credentials: Arc::clone(credentials) }
-	}
-
-	/// Starts background delivery exactly once, consuming the deferred start.
-	pub(crate) fn start(self) {
-		if let Some(upload) = self.upload {
-			upload.start(self.telemetry, self.credentials);
-		}
-	}
-}
-
 /// Runs one native tool stream under its authenticated invocation restrictions.
 pub(super) async fn with_invocation_scope<T>(
 	pty_denied: bool,
@@ -1770,28 +3479,100 @@ pub(super) async fn with_invocation_scope<T>(
 	PTY_DENIED.scope(pty_denied, future).await
 }
 
+/// Runs one native tool stream with its caller-selected output policy.
+///
+/// The value is intent only: host implementations always retain their fixed
+/// security ceiling.
+pub(super) async fn with_output_request_scope<T>(
+	request: omp_tool::OutputRequest,
+	future: impl Future<Output = T>,
+) -> T {
+	OUTPUT_REQUEST.scope(request, future).await
+}
+
+/// Runs one native registry stream with its authenticated durable session
+/// principal. `None` deliberately represents an invocation without a principal.
+pub(super) async fn with_invocation_session_scope<T>(
+	session_id: Option<Str>,
+	future: impl Future<Output = T>,
+) -> T {
+	INVOCATION_SESSION_ID.scope(session_id, future).await
+}
+/// Runs one native tool stream with its invoking connection's edit repair
+/// route.
+pub(super) async fn with_edit_repair_scope<T>(
+	context: InvocationEditRepairContext,
+	future: impl Future<Output = T>,
+) -> T {
+	EDIT_REPAIR_CONTEXT.scope(context, future).await
+}
+
+/// Runs one native tool stream with editor capabilities from its invoking
+/// connection.
+pub(super) async fn with_acp_scope<T>(
+	context: InvocationAcpBackends,
+	future: impl Future<Output = T>,
+) -> T {
+	ACP_BACKENDS.scope(context, future).await
+}
+
+pub(super) fn invocation_acp_documents() -> Option<Arc<dyn super::docs::AcpDocumentBackend>> {
+	ACP_BACKENDS
+		.try_with(|context| context.documents.clone())
+		.ok()
+		.flatten()
+}
+
+pub(super) fn invocation_acp_exec() -> Option<Arc<dyn super::tool_shell::AcpExecBackend>> {
+	ACP_BACKENDS
+		.try_with(|context| context.exec.clone())
+		.ok()
+		.flatten()
+}
+/// Returns the caller-selected output policy for the current invocation.
+pub(super) fn invocation_output_request() -> omp_tool::OutputRequest {
+	OUTPUT_REQUEST
+		.try_with(|request| *request)
+		.unwrap_or(omp_tool::OutputRequest::Bounded)
+}
+
+/// Returns the durable session principal for the current native invocation.
+pub(super) fn invocation_session_id() -> Option<Str> {
+	INVOCATION_SESSION_ID.try_with(Clone::clone).ok().flatten()
+}
+
+async fn invocation_edit_repair(
+	prompt: omp_tools::edit::observer::EditRepairPrompt,
+) -> Result<Str, omp_tools::edit::observer::EditRepairError> {
+	let repair = EDIT_REPAIR_CONTEXT
+		.try_with(|context| context.repair.clone())
+		.ok()
+		.flatten()
+		.ok_or(omp_tools::edit::observer::EditRepairError::Unavailable)?;
+	repair.complete(prompt).await
+}
+
+fn invocation_edit_model() -> Option<Str> {
+	EDIT_REPAIR_CONTEXT
+		.try_with(|context| context.model.clone())
+		.ok()
+		.flatten()
+}
+
 /// Returns whether the current authenticated invocation denies PTY allocation.
 pub(super) fn pty_denied() -> bool {
 	PTY_DENIED.try_with(|denied| *denied).unwrap_or(false)
 }
 
-fn configured_model_edit_revision(
-	data_dir: &Path,
-	project_root: &Path,
-) -> Result<Option<Rev>, EnvdError> {
-	let manager = SettingsManager::open(SettingsPaths::discover(data_dir, Some(project_root)))
-		.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
-	let snapshot = manager.snapshot();
-	let settings = snapshot
-		.project::<HostSettings>()
-		.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
-	let Some(selector) = settings.get().default_model.clone() else {
+fn configured_model_edit_revision(ctx: &Ctx) -> Result<Option<Rev>, EnvdError> {
+	let settings = omp_catalog::settings::ModelSettings::from_con(ctx);
+	let Some(selector) = settings.role_selector("default") else {
 		return Ok(None);
 	};
 	let catalog = Catalog::embedded();
 	let model = catalog
-		.model(ModelKey::from_ref(&selector))
-		.or_else(|| catalog.resolve_alias(&selector));
+		.model(ModelKey::from_ref(selector))
+		.or_else(|| catalog.resolve_alias(selector));
 	let Some(revision) = model.and_then(|model| model.edit_revision.as_deref()) else {
 		return Ok(None);
 	};
@@ -1801,609 +3582,255 @@ fn configured_model_edit_revision(
 		.map_err(|error| EnvdError::EditDialect(error.to_string().into()))
 }
 
-fn configured_model_identity(
-	data_dir: &Path,
-	project_root: &Path,
-) -> Result<Option<Str>, EnvdError> {
-	let manager = SettingsManager::open(SettingsPaths::discover(data_dir, Some(project_root)))
-		.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
-	let snapshot = manager.snapshot();
-	let settings = snapshot
-		.project::<HostSettings>()
-		.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
-	Ok(settings.get().default_model.as_deref().map(Str::new))
+fn configured_model_identity(ctx: &Ctx) -> Option<Str> {
+	let settings = omp_catalog::settings::ModelSettings::from_con(ctx);
+	let selected = omp_agent::AI_MODEL.get(ctx);
+	if let Some(role) = selected.strip_prefix("@") {
+		return settings.role_selector(role.as_str()).cloned();
+	}
+	if !selected.is_empty() {
+		return Some(selected);
+	}
+	settings.role_selector("default").cloned()
 }
 
-/// Builds the complete registry shared by environment dispatch and the agent.
-///
-/// Resource adapters are cloned into their typed executors. Worker declarations
-/// occupy device presentation entries and explicit worker routes; only the
-/// environment's worker supervisor can invoke them.
-pub(crate) fn production_registry<
-	I: omp_tools::device::DeviceInvoker + Clone + 'static,
-	P: PreludeInvoker + 'static,
->(
-	documents: &DocumentHost,
-	blobs: &BlobHost,
-	exec: &ExecHost,
-	daemon_process_client: Option<EnvClient>,
-	state_dir: &Path,
-	session_id: &str,
-	github_cache: Arc<GithubCache>,
-	mcp: &Arc<McpService>,
-	workspace: &WorkspaceHost,
-	memory: &Arc<omp_memory::MemoryRuntime>,
-	telemetry: &Arc<TelemetryIndex>,
-	root_uri: &Str,
-	workers: &ExtHostSupervisor,
-	interrupt_grace: Duration,
-	tool_settings: &ToolSettings,
-	browser_settings: &BrowserSettings,
-	shell_settings: &ShellSettings,
-	acp_settings: &AcpSettings,
-	acp_exec: AcpExecSlot,
-	autolearn_settings: &omp_memory::config::AutolearnSettings,
-	device_invoker: I,
-	prelude_invoker: P,
-	policy: ToolsPolicy,
-	mut registry: Registry,
-	bridges: RegistryBridges,
-) -> Result<
-	(
-		Arc<Registry>,
-		Arc<SessionBridgeHost>,
-		Arc<ReflectionBridgeHost>,
-		EvalSessionControl,
-		AgentCheckpointControl,
-		StagedProposalRegistry,
-		Arc<ResolverTable<UrlResolver>>,
-		Arc<SearchBridgeHost>,
-		Arc<GithubCredentialBridge>,
-		PresenterSlot,
-		TelemetryUploadStart,
-	),
-	EnvdError,
-> {
-	let RegistryBridges {
-		command_credentials: _,
-		dynamic_tools,
-		dynamic_tool_factories,
-		url_resolvers,
-		goal_control,
-		search,
-		edit_model,
-		edit_repair,
-		host_resources,
-		telemetry_upload,
-		ask_presenter,
-		content,
-	} = bridges;
-	let previews = StagedProposalRegistry::new();
+fn image_config(ctx: &Ctx) -> media_devices::ImageConfig {
+	let provider_order = omp_ai::settings::AI_PROVIDERS_IMAGE_ORDER
+		.get(ctx)
+		.into_iter()
+		.filter_map(|provider| provider.parse().ok())
+		.filter(|provider| *provider != media_devices::ImageProvider::Auto)
+		.collect();
+	media_devices::ImageConfig { provider_order, active_model: configured_model_identity(ctx) }
+}
+
+fn speech_config(ctx: &Ctx) -> SpeechConfig {
+	use omp_ai::speech_settings::{AI_TTS_PROVIDER, CL_TTS_MODEL, CL_TTS_VOICE, TtsProvider};
+	let preference = match AI_TTS_PROVIDER.get(ctx) {
+		TtsProvider::Auto => SpeechPreference::Auto,
+		TtsProvider::Local => SpeechPreference::Local,
+		TtsProvider::Xai => SpeechPreference::Xai,
+		TtsProvider::Deepinfra => SpeechPreference::Deepinfra,
+	};
+	SpeechConfig {
+		preference,
+		local_model: Str::new(<&'static str>::from(CL_TTS_MODEL.get(ctx))),
+		local_voice: Str::new(<&'static str>::from(CL_TTS_VOICE.get(ctx))),
+	}
+}
+
+fn prepare_registry(registry: &mut Registry) -> Result<(), EnvdError> {
 	registry.reject_reserved_claims()?;
+	registry.protect_user_visible_core([
+		"read",
+		"write",
+		"bash",
+		"edit",
+		"grep",
+		"glob",
+		"eval",
+		"todo",
+		"ask",
+		"web_search",
+		"checkpoint",
+		"rewind",
+		"browser",
+		"github",
+		"image_gen",
+		"tts",
+		"retain",
+		"recall",
+		"reflect",
+		"memory_edit",
+		"lsp",
+		"debug",
+		"security_scan",
+	]);
+	registry.protect_core_claims([
+		"task",
+		"hub",
+		"vibe",
+		"learn",
+		"manage_skill",
+		"computer",
+		"think",
+		"goal",
+		"yield",
+	]);
+	Ok(())
+}
+
+struct SessionBaseOutput {
+	search_bridge:      Arc<SearchBridgeHost>,
+	github_credentials: Arc<GithubCredentialBridge>,
+	ask_presenter:      PresenterSlot,
+	checkpoint_control: AgentCheckpointControl,
+}
+
+#[allow(
+	clippy::too_many_arguments,
+	reason = "session tool composition carries independent typed authorities"
+)]
+fn register_session_base(
+	registry: &mut Registry,
+	dynamic_tools: Vec<DynamicTool>,
+	dynamic_tool_factories: Vec<Arc<dyn DynamicToolFactory>>,
+	search: Option<Arc<dyn SearchInference>>,
+	ask_presenter: Option<Arc<dyn omp_tools::ask::AskPresenter>>,
+	goal_control: Option<Arc<dyn GoalAuthority>>,
+	telemetry_upload: Option<Arc<dyn TelemetryUpload>>,
+	blobs: &BlobHost,
+	project_root: &Path,
+	state_dir: &Path,
+	telemetry: &Arc<TelemetryIndex>,
+	github_cache: Arc<GithubCache>,
+	tool_settings: &ToolSettings,
+	image_config: media_devices::ImageConfig,
+	speech_config: SpeechConfig,
+	policy: ToolsPolicy,
+) -> Result<SessionBaseOutput, EnvdError> {
+	for dynamic in dynamic_tools {
+		dynamic.register(registry)?;
+	}
+	{
+		let mut registrar = DynamicToolRegistrar { registry };
+		for factory in dynamic_tool_factories {
+			factory.register(&mut registrar)?;
+		}
+	}
+	if registry.live_identity("vibe").is_some() {
+		registry.unlist_from_roster("vibe")?;
+	}
+	let search_bridge = Arc::new(SearchBridgeHost::new(search));
+	let github_credentials = Arc::new(GithubCredentialBridge::new());
 	let ask_presenter = PresenterSlot::new(
 		ask_presenter.unwrap_or_else(|| Arc::new(omp_tools::ask::HeadlessPresenter)),
 	);
-
-	let search_bridge = Arc::new(SearchBridgeHost::new(search));
-	registry.protect_user_visible_core(["browser"]);
-	if browser_settings.enabled && tool_settings.enabled("browser") {
-		let browser_daemon = BrowserDaemon::start(blobs.clone(), *browser_settings);
-		registry.register(
-			omp_tools::browser::tool(browser_daemon),
-			Presentation::Device,
-			builtin_device_claims(),
-		)?;
-	}
-	let computer = ComputerSessionHost::new(blobs.clone());
-	registry.register(
-		omp_tools::computer::tool(computer),
-		Presentation::Device,
-		builtin_device_claims(),
-	)?;
-	// The dynamic composition slots (dynamic_tools, factories) run before the
-	// final protect_live_claims sweep, so `computer` must be reserved at its
-	// registration seam or a factory could shadow the core device.
-	registry.protect_core_claims(["computer"]);
 	for device in [
 		media_devices::image_gen(
 			Arc::clone(&search_bridge),
+			image_config,
 			blobs.clone(),
-			workspace.root().to_path_buf(),
+			project_root.to_path_buf(),
 		),
-		media_devices::tts(Arc::clone(&search_bridge), blobs.clone(), workspace.root().to_path_buf()),
+		media_devices::tts_with_config(
+			Arc::clone(&search_bridge),
+			Arc::clone(&github_credentials),
+			speech_config,
+			blobs.clone(),
+			project_root.to_path_buf(),
+		),
 	] {
-		registry.register(device, Presentation::Device, builtin_device_claims())?;
+		register_instrumented(
+			registry,
+			device,
+			long_tail_presentation(policy),
+			builtin_device_claims(),
+		)?;
 	}
-	registry.register(
-		media_devices::report_issue(Arc::clone(telemetry)),
-		Presentation::Device,
+	register_instrumented(
+		registry,
+		report_issue::tool(Arc::clone(telemetry)),
+		long_tail_presentation(policy),
 		builtin_device_claims(),
 	)?;
 	registry.unlist_from_roster("report_issue")?;
-	let reflection_bridge = Arc::new(ReflectionBridgeHost::new());
-	let memory_capabilities = memory.capabilities();
-	registry.protect_user_visible_core(["retain"]);
-	if memory_capabilities.writable {
-		registry.register(
-			omp_tools::memory::retain_tool(Arc::clone(memory)),
-			Presentation::Device,
-			builtin_device_claims(),
-		)?;
-	}
-	registry.protect_user_visible_core(["recall", "reflect"]);
-	if memory_capabilities.searchable {
-		registry.register(
-			omp_tools::memory::recall_tool(Arc::clone(memory)),
-			Presentation::Device,
-			builtin_device_claims(),
-		)?;
-		registry.register(
-			omp_tools::memory::reflect_tool(Arc::clone(memory), Arc::clone(&reflection_bridge)),
-			Presentation::Device,
-			builtin_device_claims(),
-		)?;
-	}
-	registry.protect_user_visible_core(["memory_edit"]);
-	if memory_capabilities.editable {
-		registry.register(
-			omp_tools::memory_edit::tool(Arc::clone(memory)),
-			Presentation::Device,
-			builtin_device_claims(),
-		)?;
-	}
-	registry.protect_core_claims(["manage_skill", "learn"]);
-	if autolearn_settings.enabled {
-		if let Some(managed_skills_root) = content.managed_skills_root {
-			let authority = Arc::new(ManagedSkills::new(managed_skills_root, content.authored_skills));
-			registry.register(
-				omp_tools::manage_skill::tool(Arc::clone(&authority)),
-				Presentation::Device,
-				builtin_device_claims(),
-			)?;
-			registry.unlist_from_roster("manage_skill")?;
-			if memory_capabilities.writable {
-				registry.register(
-					omp_tools::learn::tool(Arc::clone(memory), authority),
-					Presentation::Device,
-					builtin_device_claims(),
-				)?;
-				registry.unlist_from_roster("learn")?;
-			}
-		}
-	}
-	let github_credentials = Arc::new(GithubCredentialBridge::new());
 	let github = GithubService::new(
-		workspace.root().to_path_buf(),
+		project_root.to_path_buf(),
 		state_dir,
 		Arc::clone(&github_credentials),
+		github_cache,
+		blobs.clone(),
 	);
-	registry.register(
+	if let Some(upload) = telemetry_upload {
+		upload.start(Arc::clone(telemetry), Arc::clone(&github_credentials));
+	}
+	register_instrumented(
+		registry,
 		omp_tools::github::tool(github),
-		Presentation::Device,
+		long_tail_presentation(policy),
 		builtin_device_claims(),
 	)?;
-	let ssh = SshService::new(
-		HostStore::load(&state_dir.join("ssh/hosts.toml"))
-			.map_err(|error| EnvdError::State(Str::new(error.to_string())))?,
-	);
-	let vault = VaultService::load(&state_dir.join("vaults.toml"))
-		.map_err(|error| EnvdError::State(Str::new(error.to_string())))?;
-	documents.set_resource_mutations(ResourceMutationServices {
-		ssh:   ssh.clone(),
-		vault: vault.clone(),
-	});
-	let read_sources = ReadSourceAdapter::new(
-		documents.clone(),
-		workspace.clone(),
-		document_cache::project_document_cache(state_dir),
-	);
-	let read_blobs = SessionReadBlobs::open(blobs.clone(), session_id).map_err(EnvdError::State)?;
-	let conflicts = Arc::new(ConflictRegistry::default());
-	let local_root =
-		crate::tool_url::local::session_local_root(&state_dir.join("sessions"), session_id);
-	let resolvers = production_url_resolvers(
-		Arc::clone(&conflicts),
-		blobs.store().clone(),
-		session_id,
-		local_root,
-		workspace.root().to_path_buf(),
-		github_cache,
-		Arc::clone(&github_credentials),
-		url_resolvers,
-		host_resources,
-		Arc::clone(mcp),
-		ssh,
-		vault,
-	);
-	let environment_edit_dialect = env::var("OMP_EDIT_DIALECT").ok();
-	let force_hashline = env::var_os("OMP_STRICT_EDIT_MODE").is_some();
-	let model_edit_revision = configured_model_edit_revision(state_dir, workspace.root())?;
-	let selected_edit = resolve_edit_revision(EditRevisionCandidates {
-		environment: environment_edit_dialect.as_deref(),
-		model_rule: model_edit_revision.as_ref(),
-		setting: tool_settings.edit_dialect.as_deref(),
-		force_hashline,
-		..EditRevisionCandidates::default()
-	})
-	.map_err(EnvdError::EditDialect)?
-	.revision;
-	let read = omp_tools::read::tool_with_policy(
-		read_sources.clone(),
-		read_blobs.clone(),
-		Arc::clone(&resolvers),
-		Arc::clone(&conflicts),
-		omp_tools::read::ReadPolicy {
-			fetch_enabled:      tool_settings.fetch_enabled,
-			render_markdown:    tool_settings.render_markdown,
-			auto_resize_images: tool_settings.auto_resize_images,
-			hashline_headers:   tool_settings.enabled("edit") && selected_edit.family.as_str() == "hl",
-		},
-	);
-	registry.protect_user_visible_core(["read"]);
-	if tool_settings.enabled("read") {
-		registry.register(read, Presentation::Slot, core_claims())?;
-	}
-	let fetch = omp_tools::fetch::tool(read_sources.clone());
-	registry.protect_user_visible_core(["fetch"]);
-	if tool_settings.enabled("fetch") && tool_settings.fetch_enabled {
-		registry.register(fetch, Presentation::Slot, core_claims())?;
-	}
-	registry.protect_user_visible_core(["web_search"]);
 	if tool_settings.enabled("web_search") {
-		let web_search = omp_tools::web_search::tool(Arc::clone(&search_bridge));
-		registry.register(web_search, Presentation::Slot, core_claims())?;
-	}
-	let edit_observer = omp_tools::edit::observer::EditObserver::new(
-		omp_tools::edit::observer::EditBlackboxConfig {
-			path: tool_settings.edit_blackbox_path.as_ref().map(|path| {
-				if path.is_absolute() {
-					path.clone()
-				} else {
-					workspace.root().join(path)
-				}
-			}),
-			model: edit_model
-				.or(configured_model_identity(state_dir, workspace.root())?)
-				.unwrap_or_else(|| sf!("unknown")),
-			..omp_tools::edit::observer::EditBlackboxConfig::default()
-		},
-		tool_settings
-			.edit_auto_repair
-			.then_some(edit_repair)
-			.flatten(),
-	);
-	let mut hashline_edit = Some(omp_tools::edit::tool_with_observer(
-		documents.clone(),
-		blobs.clone(),
-		tool_settings.format_policy,
-		edit_observer.clone(),
-		tool_settings.edit_guard_generated,
-	));
-	let mut replace_edit = Some(omp_tools::edit::replace_tool_with_observer(
-		documents.clone(),
-		tool_settings.format_policy,
-		edit_observer.clone(),
-		tool_settings.edit_guard_generated,
-	));
-	let mut patch_edit = Some(omp_tools::edit::patch_tool_with_observer(
-		documents.clone(),
-		tool_settings.format_policy,
-		edit_observer.clone(),
-		tool_settings.edit_guard_generated,
-	));
-	let mut apply_patch_edit = Some(omp_tools::edit::apply_patch_tool_with_observer(
-		documents.clone(),
-		tool_settings.format_policy,
-		edit_observer.clone(),
-		tool_settings.edit_guard_generated,
-	));
-	let mut sloppy_edit = Some(omp_tools::edit::sloppy_tool_with_observer(
-		documents.clone(),
-		tool_settings.format_policy,
-		edit_observer,
-		tool_settings.edit_guard_generated,
-	));
-	registry.protect_user_visible_core(["edit"]);
-	if tool_settings.enabled("edit") {
-		let mut edits = [
-			(
-				hashline_edit
-					.as_ref()
-					.expect("constructed")
-					.spec()
-					.identity(),
-				0_u8,
-			),
-			(
-				replace_edit
-					.as_ref()
-					.expect("constructed")
-					.spec()
-					.identity(),
-				1,
-			),
-			(patch_edit.as_ref().expect("constructed").spec().identity(), 2),
-			(
-				apply_patch_edit
-					.as_ref()
-					.expect("constructed")
-					.spec()
-					.identity(),
-				3,
-			),
-			(sloppy_edit.as_ref().expect("constructed").spec().identity(), 4),
-		];
-		edits.sort_by_key(|(identity, _)| identity.rev == selected_edit);
-		for (_, index) in edits {
-			match index {
-				0 => registry.register(
-					hashline_edit.take().expect("once"),
-					Presentation::Slot,
-					core_claims(),
-				)?,
-				1 => registry.register(
-					replace_edit.take().expect("once"),
-					Presentation::Slot,
-					core_claims(),
-				)?,
-				2 => registry.register(
-					patch_edit.take().expect("once"),
-					Presentation::Slot,
-					core_claims(),
-				)?,
-				3 => registry.register(
-					apply_patch_edit.take().expect("once"),
-					Presentation::Slot,
-					core_claims(),
-				)?,
-				4 => registry.register(
-					sloppy_edit.take().expect("once"),
-					Presentation::Slot,
-					core_claims(),
-				)?,
-				_ => unreachable!(),
-			}
-		}
-	}
-	let write = omp_tools::write::tool_with_policy_and_conflicts(
-		documents.clone(),
-		conflicts,
-		tool_settings.format_policy,
-		tool_settings.edit_guard_generated,
-	);
-	registry.protect_user_visible_core(["write"]);
-	if tool_settings.enabled("write") {
-		registry.register(write, Presentation::Slot, core_claims())?;
-	}
-	registry.protect_user_visible_core(["lsp"]);
-	if tool_settings.enabled("lsp") {
-		let maximum = tool_settings
-			.max_timeout
-			.and_then(|duration| duration.to_std().ok())
-			.unwrap_or_else(|| time::Duration::from_secs(300));
-		registry.register(
-			omp_tools::lsp::tool(DocumentLspControl::new(documents.clone(), exec.clone()), maximum),
-			Presentation::Slot,
-			core_claims(),
+		register_instrumented(
+			registry,
+			omp_tools::web_search::tool(Arc::clone(&search_bridge)),
+			long_tail_presentation(policy),
+			long_tail_claims(policy),
 		)?;
 	}
-	registry.protect_user_visible_core(["debug"]);
-	if tool_settings.enabled("debug") {
-		let maximum = tool_settings
-			.max_timeout
-			.and_then(|duration| duration.to_std().ok())
-			.unwrap_or_else(|| time::Duration::from_secs(300));
-		registry.register(
-			omp_tools::debug::tool(DocumentDebugControl::new(documents.clone()), maximum),
-			Presentation::Slot,
-			core_claims(),
-		)?;
-	}
-	let search = WorkspaceSearchAdapter::new(
-		workspace.clone(),
-		documents.clone(),
-		read_sources.clone(),
-		Arc::clone(&resolvers),
-	);
-	let grep = omp_tools::grep::tool(search.clone(), read_blobs.clone());
-	registry.protect_user_visible_core(["grep"]);
-	if tool_settings.enabled("grep") {
-		registry.register(grep, Presentation::Slot, core_claims())?;
-	}
-	let glob = omp_tools::glob::tool(search, read_blobs);
-	registry.protect_user_visible_core(["glob"]);
-	if tool_settings.enabled("glob") {
-		registry.register(glob, Presentation::Slot, core_claims())?;
-	}
-	registry.protect_user_visible_core(["ast_grep"]);
-	if tool_settings.enabled("ast_grep") {
-		registry.register(
-			omp_tools::ast_grep::tool(workspace.root().to_path_buf()),
-			Presentation::Slot,
-			core_claims(),
-		)?;
-	}
-	registry.protect_user_visible_core(["ast_edit"]);
-	if tool_settings.enabled("ast_edit") {
-		registry.register(
-			omp_tools::ast_edit::tool(workspace.root().to_path_buf(), previews.clone()),
-			Presentation::Slot,
-			core_claims(),
-		)?;
-	}
-	let prelude = Arc::new(build_prelude_table(workers)?);
-	let helper_docs = prelude
-		.helpers()
-		.map(|helper| omp_tools::eval::PreludeHelperDescription {
-			signature: helper.signature.as_str(),
-			summary:   helper.summary.as_str(),
-		})
-		.collect::<Vec<_>>();
-	let eval_host = Arc::new(SessionBridgeHost::new());
-	let mut eval_control = EvalSessionControl::default();
-	registry.protect_user_visible_core(["eval"]);
-	registry.protect_core_claims(["task"]);
-	if tool_settings.enabled("eval") {
-		match preflight_python_eval(
-			Arc::clone(&eval_host),
-			interrupt_grace,
-			blobs.clone(),
-			tool_settings
-				.eval_interpreters
-				.get("py")
-				.map(|path| PathBuf::from(path.as_str())),
-		) {
-			Ok(eval_exec) => {
-				let mut task_snapshot = TaskDescriptionSnapshot {
-					helpers: &helper_docs,
-					..TaskDescriptionSnapshot::standard()
-				};
-				if !tool_settings.enabled("task") {
-					task_snapshot.agents = &[];
-				}
-				let (eval_tool, control) =
-					omp_tools::eval::eval_controlled_with_task_snapshot(eval_exec, task_snapshot);
-				registry.register(eval_tool, Presentation::Slot, core_claims())?;
-				eval_control = control;
-			},
-			Err(error) => {
-				tracing::warn!(
-					error = %error,
-					"eval omitted because CPython is unreachable; run `just setup-python` and restart OMP"
-				);
-			},
-		}
-	}
-	registry.protect_user_visible_core(["todo"]);
 	if tool_settings.enabled("todo") {
-		registry.register(omp_tools::todo::tool(), Presentation::Slot, core_claims())?;
+		register_instrumented(
+			registry,
+			omp_tools::todo::tool(),
+			long_tail_presentation(policy),
+			long_tail_claims(policy),
+		)?;
 	}
-	registry.protect_user_visible_core(["ask"]);
 	if tool_settings.enabled("ask") {
-		registry.register(
+		register_instrumented(
+			registry,
 			omp_tools::ask::tool_with_vocalizer(
 				Arc::new(ask_presenter.clone()),
 				media_devices::ask_vocalizer(Arc::clone(&search_bridge)),
 			),
-			Presentation::Slot,
-			core_claims(),
+			long_tail_presentation(policy),
+			long_tail_claims(policy),
 		)?;
 	}
-	registry.protect_core_claims(["think"]);
 	if tool_settings.enabled("think") {
-		registry.register(omp_tools::think::tool(), Presentation::Slot, core_claims())?;
+		// External-thinking sessions select `think` explicitly via
+		// `advertise_selected`; ordinary models must never see it.
+		register_instrumented(
+			registry,
+			omp_tools::think::tool(),
+			Presentation::Hidden,
+			core_claims(),
+		)?;
 		registry.unlist_from_roster("think")?;
 	}
-	registry.protect_core_claims(["goal"]);
 	if let Some(goal_control) = goal_control {
-		registry.register(
+		register_instrumented(
+			registry,
 			omp_tools::goal::tool(GoalControlAdapter(goal_control)),
 			Presentation::Hidden,
 			core_claims(),
 		)?;
 	}
-	registry.protect_core_claims(["yield"]);
 	if tool_settings.enabled("yield") {
-		// Children finalize through `yield`; the top-level agent never
-		// advertises it, so registration is selection-only (`Hidden`).
-		registry.register(omp_tools::yield_tool::tool(), Presentation::Hidden, core_claims())?;
+		register_instrumented(
+			registry,
+			omp_tools::yield_tool::tool(),
+			Presentation::Hidden,
+			core_claims(),
+		)?;
 	}
 	let checkpoint_control = AgentCheckpointControl::default();
 	let (checkpoint, rewind) = omp_tools::checkpoint::tools(checkpoint_control.clone());
-	registry.protect_user_visible_core(["checkpoint"]);
 	if tool_settings.enabled("checkpoint") {
-		registry.register(checkpoint, Presentation::Slot, core_claims())?;
+		register_instrumented(
+			registry,
+			checkpoint,
+			long_tail_presentation(policy),
+			long_tail_claims(policy),
+		)?;
 	}
-	registry.protect_user_visible_core(["rewind"]);
 	if tool_settings.enabled("rewind") {
-		registry.register(rewind, Presentation::Slot, core_claims())?;
+		register_instrumented(
+			registry,
+			rewind,
+			long_tail_presentation(policy),
+			long_tail_claims(policy),
+		)?;
 	}
-	let catalog = DeviceCatalog::default();
-	let xd_installed = tool_settings.enabled("xd") && xd_enabled(policy);
-	if xd_installed {
-		exec.install_devices(Arc::new(XdHost::new(
-			catalog.clone(),
-			Arc::new(device_invoker),
-			previews.clone(),
-		)));
-	}
+	Ok(SessionBaseOutput { search_bridge, github_credentials, ask_presenter, checkpoint_control })
+}
 
-	registry.protect_user_visible_core(["bash"]);
-	for dynamic in dynamic_tools {
-		dynamic.register(&mut registry)?;
-	}
-	registry.protect_core_claims(["hub", "vibe"]);
-	// vibe stays callable and model-visible but is omitted from the
-	// user-facing roster; users drive it through the /vibe mode command.
-	// Compositions without the dynamic vibe device (tests) skip the unlist.
-	if registry.live_identity("vibe").is_some() {
-		registry.unlist_from_roster("vibe")?;
-	}
-	{
-		let mut registrar = DynamicToolRegistrar { registry: &mut registry };
-		for factory in dynamic_tool_factories {
-			factory.register(&mut registrar)?;
-		}
-	}
-	registry.protect_live_claims();
-	if tool_settings.enabled("bash") && shell_settings.enabled {
-		let sibling_tools = registry
-			.live_identities()
-			.filter_map(|(name, _)| {
-				(name != "bash" && registry.presentation(name).ok() == Some(Presentation::Slot))
-					.then(|| name.clone())
-			})
-			.collect::<Arc<[_]>>();
-		let snapshot = omp_tools::shell::ShellPromptSnapshot {
-			sibling_tools,
-			platform: Str::new(consts::OS),
-			devices: xd_installed,
-			embedded_builtins: shell_settings.embedded_builtins,
-			interceptor_enabled: shell_settings.interceptor.enabled,
-			interceptor_rules: shell_settings
-				.interceptor
-				.patterns
-				.iter()
-				.map(|rule| omp_tools::shell_intercept::Rule {
-					pattern: rule.pattern.clone(),
-					tool:    rule.tool.clone(),
-					message: rule.message.clone(),
-				})
-				.collect(),
-			acp_routing: acp_settings.routing != AcpRouting::Never,
-			profile: Str::new(<&'static str>::from(shell_settings.profile)),
-			command_prefix: shell_settings.command_prefix.is_some(),
-			minimizer_enabled: shell_settings.minimizer.enabled,
-		};
-		let shell = omp_tools::shell::shell_with_snapshot_and_timeout_bounds(
-			if let Some(client) = daemon_process_client {
-				ShellExecHost::new_remote(
-					client,
-					root_uri.clone(),
-					Arc::clone(&resolvers),
-					shell_settings.clone(),
-					acp_exec,
-					acp_settings.routing != AcpRouting::Never,
-				)
-			} else {
-				ShellExecHost::new(
-					exec.clone(),
-					root_uri.clone(),
-					Arc::clone(&resolvers),
-					shell_settings.clone(),
-					acp_exec,
-					acp_settings.routing != AcpRouting::Never,
-				)
-			},
-			shell_timeout_bounds(tool_settings),
-			&snapshot,
-		)
-		.with_auto_background(
-			shell_settings.auto_background.enabled,
-			time::Duration::from_millis(shell_settings.auto_background.threshold_ms),
-		);
-		registry.register(shell, Presentation::Slot, core_claims())?;
-	}
+fn register_session_workers(
+	registry: &mut Registry,
+	workers: &ExtHostSupervisor,
+	policy: ToolsPolicy,
+) -> Result<(), EnvdError> {
 	let flattened_slots = if policy == ToolsPolicy::ToolOnly {
 		let mut slots = Vec::new();
 		for registration in workers.registrations() {
@@ -2426,10 +3853,8 @@ pub(crate) fn production_registry<
 	} else {
 		None
 	};
-	// A replacement that names its own root must reach the registry after the
-	// incumbent it replaces: the same-claimant claim fold keeps the last
-	// registration, so payload order would otherwise pick the winner. The
-	// claim also records the declared chain instead of discarding it.
+	// Process chained roots after ordinary declarations so a replacement wins
+	// independently of the supervisor's payload order.
 	let mut ordinary = Vec::new();
 	let mut root_replacements = Vec::new();
 	for registration in workers.registrations() {
@@ -2452,12 +3877,29 @@ pub(crate) fn production_registry<
 	for registration in ordinary.into_iter().chain(root_replacements) {
 		let declaration = &registration.declaration;
 		let mut spec = worker_spec(declaration)?;
-		if flattened_slots.is_some() {
+		let flattened = flattened_slots.is_some();
+		if flattened {
 			spec.name = Str::from(spec.name.as_str().replace('/', "_"));
 		}
-		registry.register_worker(
+		let device_name = spec.name.clone();
+		let owner = registration.owner.clone();
+		let execution = match WorkerExecutionMode::try_from(declaration.execution_mode) {
+			Ok(WorkerExecutionMode::Unspecified | WorkerExecutionMode::Parallel) => {
+				ExecutionMode::Parallel
+			},
+			Ok(WorkerExecutionMode::Sequential) => ExecutionMode::Sequential,
+			Err(_) => return Err(worker_declaration_error("worker execution mode is invalid")),
+		};
+		let replaces = declaration.replaces.first().map(|name| {
+			if flattened {
+				Str::from(name.replace('/', "_"))
+			} else {
+				Str::from(name.as_str())
+			}
+		});
+		registry.register_worker_with_mode(
 			spec,
-			if flattened_slots.is_some() {
+			if flattened {
 				Presentation::Slot
 			} else {
 				Presentation::Device
@@ -2465,13 +3907,1007 @@ pub(crate) fn production_registry<
 			Claims {
 				precedence: Precedence::DEFAULT,
 				claimant:   registration.owner.extension().clone(),
-				replaces:   declaration
-					.replaces
-					.first()
-					.map(|name| Str::from(name.as_str())),
+				replaces,
 			},
+			execution,
+		)?;
+		registry.bind_device_metadata(
+			device_name,
+			owner.extension().clone(),
+			omp_tool::DeviceMetadata {
+				extension_id: Some(owner.extension().clone()),
+				layer: Some(owner.layer().clone()),
+				tier: Some(owner.tier().clone()),
+				..omp_tool::DeviceMetadata::default()
+			},
+		);
+	}
+	Ok(())
+}
+
+#[derive(Clone)]
+pub(crate) struct EnvironmentDeclarationInputs {
+	pub read_policy:      omp_tools::read::ReadPolicy,
+	pub selected_edit:    Rev,
+	pub eval_description: Option<Str>,
+	pub shell_snapshot:   Option<omp_tools::shell::ShellPromptSnapshot>,
+	pub memory:           omp_memory::Capabilities,
+	pub managed_skills:   bool,
+}
+#[allow(
+	clippy::too_many_arguments,
+	reason = "declaration projection mirrors independent tool setting domains"
+)]
+pub(crate) fn build_environment_declaration_inputs(
+	_state_dir: &Path,
+	_project_root: &Path,
+	con: &Ctx,
+	workers: &ExtHostSupervisor,
+	tool_settings: &ToolSettings,
+	shell_settings: &ShellSettings,
+	acp_settings: &AcpSettings,
+	memory_settings: &omp_memory::MemorySettings,
+	autolearn_settings: &omp_memory::AutolearnSettings,
+	content: &ActiveContentInputs,
+	policy: ToolsPolicy,
+) -> Result<EnvironmentDeclarationInputs, EnvdError> {
+	let environment_edit_dialect = env::var("OMP_EDIT_DIALECT").ok();
+	let force_hashline = env::var_os("OMP_STRICT_EDIT_MODE").is_some();
+	let model_edit_revision = configured_model_edit_revision(con)?;
+	let selected_edit = resolve_edit_revision(EditRevisionCandidates {
+		environment: environment_edit_dialect.as_deref(),
+		model_rule: model_edit_revision.as_ref(),
+		setting: tool_settings.edit_dialect.as_deref(),
+		force_hashline,
+		..EditRevisionCandidates::default()
+	})
+	.map_err(EnvdError::EditDialect)?
+	.revision;
+	let prelude = build_prelude_table(workers)?;
+	let helper_docs = prelude
+		.helpers()
+		.map(|helper| omp_tools::eval::PreludeHelperDescription {
+			signature: helper.signature.as_str(),
+			summary:   helper.summary.as_str(),
+		})
+		.collect::<Vec<_>>();
+	let mut task_snapshot =
+		TaskDescriptionSnapshot { helpers: &helper_docs, ..TaskDescriptionSnapshot::standard() };
+	if !tool_settings.enabled("task") {
+		task_snapshot.agents = &[];
+	}
+	let eval_description = tool_settings
+		.enabled("eval")
+		.then(|| omp_tools::eval::task_description(task_snapshot));
+	let dyn_installed = tool_settings.enabled("dyn") && dyn_enabled(policy);
+	let shell_snapshot = (tool_settings.enabled("bash") && shell_settings.enabled).then(|| {
+		omp_tools::shell::ShellPromptSnapshot {
+			sibling_tools:       Arc::default(),
+			platform:            Str::new(consts::OS),
+			devices:             dyn_installed,
+			embedded_builtins:   shell_settings.embedded_builtins,
+			interceptor_enabled: shell_settings.interceptor.enabled,
+			interceptor_rules:   shell_settings
+				.interceptor
+				.patterns
+				.iter()
+				.map(|rule| omp_tools::shell_intercept::Rule {
+					pattern: rule.pattern.clone(),
+					tool:    rule.tool.clone(),
+					message: rule.message.clone(),
+				})
+				.collect(),
+			acp_routing:         acp_settings.routing != AcpRouting::Never,
+			command_prefix:      shell_settings.command_prefix.is_some(),
+		}
+	});
+	let memory = if memory_settings.backend == omp_memory::MemoryBackend::Off {
+		omp_memory::Capabilities::default()
+	} else {
+		omp_memory::Capabilities {
+			writable:   true,
+			searchable: true,
+			resolvable: true,
+			editable:   true,
+			lifecycle:  true,
+			embeddings: false,
+		}
+	};
+	Ok(EnvironmentDeclarationInputs {
+		read_policy: omp_tools::read::ReadPolicy {
+			fetch_enabled:      tool_settings.fetch_enabled,
+			render_markdown:    tool_settings.render_markdown,
+			auto_resize_images: tool_settings.auto_resize_images,
+			hashline_headers:   tool_settings.enabled("edit") && selected_edit.family.as_str() == "hl",
+			summarize:          tool_settings.read_summarize,
+			line_numbers:       tool_settings.read_line_numbers,
+		},
+		selected_edit,
+		eval_description,
+		shell_snapshot,
+		memory,
+		managed_skills: autolearn_settings.enabled && content.managed_skills_root.is_some(),
+	})
+}
+
+#[derive(Clone)]
+struct EnvironmentDeclaration {
+	spec:         ToolSpec,
+	presentation: Presentation,
+	claims:       Claims,
+}
+
+fn environment_declarations(
+	tool_settings: &ToolSettings,
+	browser_settings: &BrowserSettings,
+	inputs: &EnvironmentDeclarationInputs,
+	py_eval: bool,
+	policy: ToolsPolicy,
+) -> Vec<EnvironmentDeclaration> {
+	let mut declarations = Vec::new();
+	let mut push = |spec, presentation, claims| {
+		declarations.push(EnvironmentDeclaration { spec, presentation, claims });
+	};
+	if browser_settings.enabled && tool_settings.enabled("browser") {
+		push(omp_tools::browser::spec(), long_tail_presentation(policy), builtin_device_claims());
+	}
+	if tool_settings.enabled("computer") {
+		push(omp_tools::computer::spec(), long_tail_presentation(policy), builtin_device_claims());
+	}
+	if tool_settings.enabled("security_scan") {
+		push(omp_tools::security_scan::spec(), Presentation::Device, builtin_device_claims());
+	}
+	if inputs.memory.writable {
+		push(
+			omp_tools::memory::retain_spec(),
+			long_tail_presentation(policy),
+			builtin_device_claims(),
+		);
+	}
+	if inputs.memory.searchable {
+		push(
+			omp_tools::memory::recall_spec(),
+			long_tail_presentation(policy),
+			builtin_device_claims(),
+		);
+		push(
+			omp_tools::memory::reflect_spec(),
+			long_tail_presentation(policy),
+			builtin_device_claims(),
+		);
+	}
+	if inputs.memory.editable {
+		push(omp_tools::memory_edit::spec(), long_tail_presentation(policy), builtin_device_claims());
+	}
+	if inputs.managed_skills {
+		push(
+			omp_tools::manage_skill::spec(),
+			long_tail_presentation(policy),
+			builtin_device_claims(),
+		);
+		if inputs.memory.writable {
+			push(omp_tools::learn::spec(), long_tail_presentation(policy), builtin_device_claims());
+		}
+	}
+	if tool_settings.enabled("read") {
+		push(
+			omp_tools::read::spec(inputs.read_policy),
+			essential_presentation(policy),
+			core_claims(),
+		);
+	}
+	if tool_settings.enabled("edit") {
+		let mut edits = [
+			omp_tools::edit::replace::legacy_replace_spec(),
+			omp_tools::edit::apply_patch::legacy_patch_spec(),
+			omp_tools::edit::hashline_spec(),
+			omp_tools::edit::replace::replace_spec(),
+			omp_tools::edit::apply_patch::patch_spec(),
+			omp_tools::edit::apply_patch::apply_patch_spec(),
+			omp_tools::edit::apply_patch::sloppy_spec(),
+		];
+		edits.sort_by_key(|spec| spec.rev == inputs.selected_edit);
+		for spec in edits {
+			push(spec, essential_presentation(policy), core_claims());
+		}
+	}
+	if tool_settings.enabled("write") {
+		push(omp_tools::write::spec(), long_tail_presentation(policy), long_tail_claims(policy));
+	}
+	if tool_settings.enabled("lsp") {
+		push(omp_tools::lsp::spec(), long_tail_presentation(policy), long_tail_claims(policy));
+	}
+	if tool_settings.enabled("debug") {
+		push(omp_tools::debug::spec(), long_tail_presentation(policy), long_tail_claims(policy));
+	}
+	if tool_settings.enabled("grep") {
+		push(omp_tools::grep::spec(), essential_presentation(policy), core_claims());
+	}
+	if tool_settings.enabled("glob") {
+		push(omp_tools::glob::spec(), essential_presentation(policy), core_claims());
+	}
+	if tool_settings.enabled("ast_grep") {
+		push(omp_tools::ast_grep::spec(), long_tail_presentation(policy), long_tail_claims(policy));
+	}
+	if tool_settings.enabled("ast_edit") {
+		push(omp_tools::ast_edit::spec(), long_tail_presentation(policy), long_tail_claims(policy));
+	}
+	if tool_settings.enabled("eval") {
+		if let Some(description) = &inputs.eval_description {
+			push(
+				omp_tools::eval::spec(description.clone()),
+				long_tail_presentation(policy),
+				long_tail_claims(policy),
+			);
+		}
+	}
+	if py_eval {
+		push(
+			omp_tools::eval::py_eval_spec(),
+			long_tail_presentation(policy),
+			long_tail_claims(policy),
+		);
+	}
+	if tool_settings.enabled("bash") {
+		if let Some(snapshot) = &inputs.shell_snapshot {
+			push(omp_tools::shell::spec(snapshot), bash_presentation(policy), core_claims());
+		}
+	}
+	declarations
+}
+
+/// Declares the enabled environment half in a session-owned registry.
+///
+/// All inputs are frozen settings or content-derived snapshots; constructing
+/// this half never opens an environment resource host.
+fn declare_remote_environment(
+	registry: &mut Registry,
+	tool_settings: &ToolSettings,
+	browser_settings: &BrowserSettings,
+	inputs: &EnvironmentDeclarationInputs,
+	py_eval: bool,
+	policy: ToolsPolicy,
+) -> Result<(), EnvdError> {
+	for declaration in
+		environment_declarations(tool_settings, browser_settings, inputs, py_eval, policy)
+	{
+		registry.declare_remote(
+			declaration.spec,
+			declaration.presentation,
+			declaration.claims,
+			ExecutionMode::Parallel,
 		)?;
 	}
+	Ok(())
+}
+
+pub(crate) struct SessionRegistryBridges {
+	pub dynamic_tools:          Vec<DynamicTool>,
+	pub dynamic_tool_factories: Vec<Arc<dyn DynamicToolFactory>>,
+	pub goal_control:           Option<Arc<dyn GoalAuthority>>,
+	pub search:                 Option<Arc<dyn SearchInference>>,
+	pub telemetry_upload:       Option<Arc<dyn TelemetryUpload>>,
+	pub ask_presenter:          Option<Arc<dyn omp_tools::ask::AskPresenter>>,
+}
+
+pub(crate) struct SessionRegistryOutput {
+	pub registry:           Arc<Registry>,
+	pub search_bridge:      Arc<SearchBridgeHost>,
+	pub github_credentials: Arc<GithubCredentialBridge>,
+	pub ask_presenter:      PresenterSlot,
+	pub checkpoint_control: AgentCheckpointControl,
+}
+
+#[allow(
+	clippy::too_many_arguments,
+	reason = "session registry composition carries independent typed authorities"
+)]
+pub(crate) fn session_registry(
+	mut registry: Registry,
+	blobs: &BlobHost,
+	project_root: &Path,
+	state_dir: &Path,
+	telemetry: &Arc<TelemetryIndex>,
+	github_cache: Arc<GithubCache>,
+	workers: &ExtHostSupervisor,
+	py_eval: bool,
+	con: &Ctx,
+	policy: ToolsPolicy,
+	tool_settings: &ToolSettings,
+	browser_settings: &BrowserSettings,
+	environment: &EnvironmentDeclarationInputs,
+	bridges: SessionRegistryBridges,
+) -> Result<SessionRegistryOutput, EnvdError> {
+	prepare_registry(&mut registry)?;
+	let SessionRegistryBridges {
+		dynamic_tools,
+		dynamic_tool_factories,
+		goal_control,
+		search,
+		telemetry_upload,
+		ask_presenter,
+	} = bridges;
+	let base = register_session_base(
+		&mut registry,
+		dynamic_tools,
+		dynamic_tool_factories,
+		search,
+		ask_presenter,
+		goal_control,
+		telemetry_upload,
+		blobs,
+		project_root,
+		state_dir,
+		telemetry,
+		github_cache,
+		tool_settings,
+		image_config(con),
+		speech_config(con),
+		policy,
+	)?;
+	let mut declarations = environment.clone();
+	let shell = declarations.shell_snapshot.take();
+	declare_remote_environment(
+		&mut registry,
+		tool_settings,
+		browser_settings,
+		&declarations,
+		py_eval,
+		policy,
+	)?;
+	if tool_settings.enabled("bash") {
+		if let Some(mut snapshot) = shell {
+			snapshot.sibling_tools = registry
+				.live_identities()
+				.filter_map(|(name, _)| {
+					(name != "bash" && registry.presentation(name).ok() == Some(Presentation::Slot))
+						.then(|| name.clone())
+				})
+				.collect();
+			let declaration = omp_tools::shell::spec(&snapshot);
+			ensure_name_absent(&registry, &declaration.name)?;
+			registry.declare_remote(
+				declaration,
+				bash_presentation(policy),
+				core_claims(),
+				ExecutionMode::Parallel,
+			)?;
+		}
+	}
+	register_session_workers(&mut registry, workers, policy)?;
+	registry.protect_live_claims();
+	Ok(SessionRegistryOutput {
+		registry:           Arc::new(registry),
+		search_bridge:      base.search_bridge,
+		github_credentials: base.github_credentials,
+		ask_presenter:      base.ask_presenter,
+		checkpoint_control: base.checkpoint_control,
+	})
+}
+
+/// Returns the live tools whose authoritative executor is the environment.
+///
+/// The set is derived exclusively from registry locus metadata so settings,
+/// revisions, and contributed entries cannot drift from routing.
+pub(crate) fn environment_tool_names(registry: &Registry) -> FastHashSet<Str> {
+	registry
+		.live_identities()
+		.filter_map(|(name, _)| {
+			(registry.locus(name).ok() == Some(ToolLocus::Environment)).then(|| name.clone())
+		})
+		.collect()
+}
+
+fn managed_skills_enabled(con: &Ctx, autolearn_enabled: bool) -> bool {
+	autolearn_enabled && crate::SV_SKILLS_ENABLED.get(con)
+}
+
+/// Builds the complete registry shared by environment dispatch and the agent.
+///
+/// Resource adapters are cloned into their typed executors. Worker declarations
+/// occupy device presentation entries and explicit worker routes; only the
+/// environment's worker supervisor can invoke them.
+pub(crate) fn production_registry<
+	I: omp_tools::device::DeviceInvoker + Clone + 'static,
+	P: PreludeInvoker + 'static,
+>(
+	documents: &DocumentHost,
+	blobs: &BlobHost,
+	exec: &ExecHost,
+	state_dir: &Path,
+	con: &Ctx,
+	session_id: &str,
+	github_cache: Arc<GithubCache>,
+	mcp: &Arc<McpService>,
+	mcp_manager: Arc<McpManager>,
+	workspace: &WorkspaceHost,
+	memory: &Arc<omp_memory::MemoryRuntime>,
+	telemetry: &Arc<TelemetryIndex>,
+	root_uri: &Str,
+	workers: &ExtHostSupervisor,
+	interrupt_grace: Duration,
+	py_eval: bool,
+	tool_settings: &ToolSettings,
+	browser_settings: &BrowserSettings,
+	shell_settings: &ShellSettings,
+	sandbox_settings: &SandboxSettings,
+	acp_settings: &AcpSettings,
+	acp_exec: AcpExecSlot,
+	autolearn_settings: &omp_memory::config::AutolearnSettings,
+	hooks: Arc<HookGate>,
+	device_invoker: I,
+	prelude_invoker: P,
+	policy: ToolsPolicy,
+	mut registry: Registry,
+	bridges: RegistryBridges,
+) -> Result<
+	(
+		Arc<Registry>,
+		Arc<SessionBridgeHost>,
+		Arc<ReflectionBridgeHost>,
+		EvalSessionControl,
+		AgentCheckpointControl,
+		StagedProposalRegistry,
+		Arc<ResolverTable<UrlResolver>>,
+		Arc<SearchBridgeHost>,
+		Arc<GithubCredentialBridge>,
+		PresenterSlot,
+	),
+	EnvdError,
+> {
+	let RegistryBridges {
+		command_credentials: _,
+		dynamic_tools,
+		dynamic_tool_factories,
+		url_resolvers,
+		goal_control,
+		search,
+		edit_model,
+		edit_repair,
+		host_resources,
+		session_authority,
+		telemetry_upload,
+		ask_presenter,
+		content,
+	} = bridges;
+	exec.configure_sandbox(sandbox_settings, workspace.root());
+	let previews = StagedProposalRegistry::new();
+	prepare_registry(&mut registry)?;
+	let SessionBaseOutput { search_bridge, github_credentials, ask_presenter, checkpoint_control } =
+		register_session_base(
+			&mut registry,
+			dynamic_tools,
+			dynamic_tool_factories,
+			search,
+			ask_presenter,
+			goal_control,
+			telemetry_upload,
+			blobs,
+			workspace.root(),
+			state_dir,
+			telemetry,
+			Arc::clone(&github_cache),
+			tool_settings,
+			image_config(con),
+			speech_config(con),
+			policy,
+		)?;
+	if browser_settings.enabled && tool_settings.enabled("browser") {
+		let browser_daemon = BrowserDaemon::start(blobs.clone(), browser_settings.clone());
+		environment_registry(
+			&mut registry,
+			omp_tools::browser::tool(browser_daemon),
+			long_tail_presentation(policy),
+			builtin_device_claims(),
+		)?;
+	}
+	if tool_settings.enabled("computer") {
+		let computer = ComputerSessionHost::new(blobs.clone(), con);
+		environment_registry(
+			&mut registry,
+			omp_tools::computer::tool(computer),
+			long_tail_presentation(policy),
+			builtin_device_claims(),
+		)?;
+	}
+	let security = SecurityScanService::new(workspace.root().to_path_buf(), state_dir)
+		.with_credentials(Arc::clone(&github_credentials));
+	if tool_settings.enabled("security_scan") {
+		environment_registry(
+			&mut registry,
+			omp_tools::security_scan::tool(security.clone()),
+			Presentation::Device,
+			builtin_device_claims(),
+		)?;
+	}
+	let reflection_bridge = Arc::new(ReflectionBridgeHost::new());
+	let memory_capabilities = memory.capabilities();
+	if memory_capabilities.writable {
+		environment_registry(
+			&mut registry,
+			omp_tools::memory::retain_tool(Arc::clone(memory)),
+			long_tail_presentation(policy),
+			builtin_device_claims(),
+		)?;
+	}
+	if memory_capabilities.searchable {
+		environment_registry(
+			&mut registry,
+			omp_tools::memory::recall_tool(Arc::clone(memory)),
+			long_tail_presentation(policy),
+			builtin_device_claims(),
+		)?;
+		environment_registry(
+			&mut registry,
+			omp_tools::memory::reflect_tool(Arc::clone(memory), Arc::clone(&reflection_bridge)),
+			long_tail_presentation(policy),
+			builtin_device_claims(),
+		)?;
+	}
+	if memory_capabilities.editable {
+		environment_registry(
+			&mut registry,
+			omp_tools::memory_edit::tool(Arc::clone(memory)),
+			long_tail_presentation(policy),
+			builtin_device_claims(),
+		)?;
+	}
+	if managed_skills_enabled(con, autolearn_settings.enabled) {
+		if let Some(managed_skills_root) = content.managed_skills_root {
+			let authority = Arc::new(ManagedSkills::new(
+				managed_skills_root,
+				content.authored_skills,
+				Arc::clone(&hooks),
+			));
+			environment_registry(
+				&mut registry,
+				omp_tools::manage_skill::tool(Arc::clone(&authority)),
+				Presentation::Device,
+				builtin_device_claims(),
+			)?;
+			registry.unlist_from_roster("manage_skill")?;
+			if memory_capabilities.writable {
+				environment_registry(
+					&mut registry,
+					omp_tools::learn::tool(Arc::clone(memory), authority),
+					Presentation::Device,
+					builtin_device_claims(),
+				)?;
+				registry.unlist_from_roster("learn")?;
+			}
+		}
+	}
+	let user_config_root = omp_core::dirs::user_config_root()?;
+	let ssh = SshService::new(
+		HostStore::load_layered(&HostPaths::new(&user_config_root, workspace.root()))
+			.map_err(|error| EnvdError::State(Str::new(error.to_string())))?,
+	);
+	let vault = VaultService::load_layered(&VaultPaths::new(&user_config_root, workspace.root()))
+		.map_err(|error| EnvdError::State(Str::new(error.to_string())))?
+		.with_obsidian_enabled(omp_tools::settings::SV_VAULT_ENABLED.get(con));
+	documents.set_resource_mutations(ResourceMutationServices {
+		ssh:   ssh.clone(),
+		vault: vault.clone(),
+	});
+	let read_sources = ReadSourceAdapter::new(
+		documents.clone(),
+		workspace.clone(),
+		document_cache::project_document_cache(state_dir),
+	);
+	let read_blobs = SessionReadBlobs::open(blobs.clone(), session_id).map_err(EnvdError::State)?;
+	let conflicts = Arc::new(ConflictRegistry::default());
+	let catalog = DeviceCatalog::default();
+	let resolvers = production_url_resolvers(
+		Arc::clone(&conflicts),
+		blobs.store().clone(),
+		session_id,
+		state_dir.join("sessions"),
+		workspace.root().to_path_buf(),
+		github_cache,
+		Arc::clone(&github_credentials),
+		url_resolvers,
+		host_resources,
+		session_authority,
+		Arc::clone(mcp),
+		ssh,
+		security,
+		vault,
+	);
+	let environment_edit_dialect = env::var("OMP_EDIT_DIALECT").ok();
+	let force_hashline = env::var_os("OMP_STRICT_EDIT_MODE").is_some();
+	let model_edit_revision = configured_model_edit_revision(con)?;
+	let selected_edit = resolve_edit_revision(EditRevisionCandidates {
+		environment: environment_edit_dialect.as_deref(),
+		model_rule: model_edit_revision.as_ref(),
+		setting: tool_settings.edit_dialect.as_deref(),
+		force_hashline,
+		..EditRevisionCandidates::default()
+	})
+	.map_err(EnvdError::EditDialect)?
+	.revision;
+	let read = omp_tools::read::tool_with_policy(
+		read_sources.clone(),
+		read_blobs.clone(),
+		Arc::clone(&resolvers),
+		Arc::clone(&conflicts),
+		omp_tools::read::ReadPolicy {
+			fetch_enabled:      tool_settings.fetch_enabled,
+			render_markdown:    tool_settings.render_markdown,
+			auto_resize_images: tool_settings.auto_resize_images,
+			hashline_headers:   tool_settings.enabled("edit") && selected_edit.family.as_str() == "hl",
+			summarize:          tool_settings.read_summarize,
+			line_numbers:       tool_settings.read_line_numbers,
+		},
+	);
+	if tool_settings.enabled("read") {
+		environment_registry(&mut registry, read, essential_presentation(policy), core_claims())?;
+	}
+	let edit_repair = tool_settings.edit_auto_repair.then(|| {
+		edit_repair
+			.unwrap_or_else(|| {
+				omp_tools::edit::observer::EditRepairClient::from_completion(invocation_edit_repair)
+			})
+			.with_model_identity(invocation_edit_model)
+	});
+	let edit_observer = omp_tools::edit::observer::EditObserver::new(
+		omp_tools::edit::observer::EditBlackboxConfig {
+			path: tool_settings.edit_blackbox_path.as_ref().map(|path| {
+				if path.is_absolute() {
+					path.clone()
+				} else {
+					workspace.root().join(path)
+				}
+			}),
+			model: edit_model
+				.or_else(|| configured_model_identity(con))
+				.unwrap_or_else(|| sf!("unknown")),
+			..omp_tools::edit::observer::EditBlackboxConfig::default()
+		},
+		edit_repair,
+	);
+	let mut hashline_edit = Some(omp_tools::edit::tool_with_observer(
+		documents.clone(),
+		blobs.clone(),
+		tool_settings.format_policy,
+		edit_observer.clone(),
+		tool_settings.edit_guard_generated,
+	));
+	let mut legacy_replace_edit = Some(
+		omp_tools::edit::legacy_replace_tool_with_observer(
+			documents.clone(),
+			tool_settings.format_policy,
+			edit_observer.clone(),
+			tool_settings.edit_guard_generated,
+			tool_settings.edit_fuzzy,
+			tool_settings.edit_require_seen,
+		)
+		.with_fuzzy_threshold(tool_settings.edit_fuzzy_threshold),
+	);
+	let mut replace_edit = Some(
+		omp_tools::edit::replace_tool_with_observer(
+			documents.clone(),
+			tool_settings.format_policy,
+			edit_observer.clone(),
+			tool_settings.edit_guard_generated,
+			tool_settings.edit_fuzzy,
+			tool_settings.edit_require_seen,
+		)
+		.with_fuzzy_threshold(tool_settings.edit_fuzzy_threshold),
+	);
+	let mut legacy_patch_edit = Some(omp_tools::edit::legacy_patch_tool_with_observer(
+		documents.clone(),
+		tool_settings.format_policy,
+		edit_observer.clone(),
+		tool_settings.edit_guard_generated,
+		tool_settings.edit_require_seen,
+	));
+	let mut patch_edit = Some(omp_tools::edit::patch_tool_with_observer(
+		documents.clone(),
+		tool_settings.format_policy,
+		edit_observer.clone(),
+		tool_settings.edit_guard_generated,
+		tool_settings.edit_require_seen,
+	));
+	let mut apply_patch_edit = Some(omp_tools::edit::apply_patch_tool_with_observer(
+		documents.clone(),
+		tool_settings.format_policy,
+		edit_observer.clone(),
+		tool_settings.edit_guard_generated,
+		tool_settings.edit_require_seen,
+	));
+	let mut sloppy_edit = Some(omp_tools::edit::sloppy_tool_with_observer(
+		documents.clone(),
+		tool_settings.format_policy,
+		edit_observer,
+		tool_settings.edit_guard_generated,
+		tool_settings.edit_require_seen,
+	));
+	if tool_settings.enabled("edit") {
+		let mut edits = [
+			(
+				legacy_replace_edit
+					.as_ref()
+					.expect("constructed")
+					.spec()
+					.identity(),
+				0_u8,
+			),
+			(
+				legacy_patch_edit
+					.as_ref()
+					.expect("constructed")
+					.spec()
+					.identity(),
+				1,
+			),
+			(
+				hashline_edit
+					.as_ref()
+					.expect("constructed")
+					.spec()
+					.identity(),
+				2,
+			),
+			(
+				replace_edit
+					.as_ref()
+					.expect("constructed")
+					.spec()
+					.identity(),
+				3,
+			),
+			(patch_edit.as_ref().expect("constructed").spec().identity(), 4),
+			(
+				apply_patch_edit
+					.as_ref()
+					.expect("constructed")
+					.spec()
+					.identity(),
+				5,
+			),
+			(sloppy_edit.as_ref().expect("constructed").spec().identity(), 6),
+		];
+		edits.sort_by_key(|(identity, _)| identity.rev == selected_edit);
+		for (_, index) in edits {
+			match index {
+				0 => environment_registry(
+					&mut registry,
+					legacy_replace_edit.take().expect("once"),
+					essential_presentation(policy),
+					core_claims(),
+				)?,
+				1 => environment_registry(
+					&mut registry,
+					legacy_patch_edit.take().expect("once"),
+					essential_presentation(policy),
+					core_claims(),
+				)?,
+				2 => environment_registry(
+					&mut registry,
+					hashline_edit.take().expect("once"),
+					essential_presentation(policy),
+					core_claims(),
+				)?,
+				3 => environment_registry(
+					&mut registry,
+					replace_edit.take().expect("once"),
+					essential_presentation(policy),
+					core_claims(),
+				)?,
+				4 => environment_registry(
+					&mut registry,
+					patch_edit.take().expect("once"),
+					essential_presentation(policy),
+					core_claims(),
+				)?,
+				5 => environment_registry(
+					&mut registry,
+					apply_patch_edit.take().expect("once"),
+					essential_presentation(policy),
+					core_claims(),
+				)?,
+				6 => environment_registry(
+					&mut registry,
+					sloppy_edit.take().expect("once"),
+					essential_presentation(policy),
+					core_claims(),
+				)?,
+				_ => unreachable!(),
+			}
+		}
+	}
+	let write = omp_tools::write::tool_with_policy_and_conflicts(
+		documents.clone(),
+		conflicts,
+		tool_settings.format_policy,
+		tool_settings.edit_guard_generated,
+	);
+	if tool_settings.enabled("write") {
+		environment_registry(
+			&mut registry,
+			write,
+			long_tail_presentation(policy),
+			long_tail_claims(policy),
+		)?;
+	}
+	if tool_settings.enabled("lsp") {
+		let maximum = tool_settings
+			.max_timeout
+			.and_then(|duration| duration.to_std().ok())
+			.unwrap_or_else(|| time::Duration::from_secs(300));
+		environment_registry(
+			&mut registry,
+			omp_tools::lsp::tool(DocumentLspControl::new(documents.clone(), exec.clone()), maximum),
+			long_tail_presentation(policy),
+			long_tail_claims(policy),
+		)?;
+	}
+	if tool_settings.enabled("debug") {
+		let maximum = tool_settings
+			.max_timeout
+			.and_then(|duration| duration.to_std().ok())
+			.unwrap_or_else(|| time::Duration::from_secs(300));
+		environment_registry(
+			&mut registry,
+			omp_tools::debug::tool(DocumentDebugControl::new(documents.clone()), maximum),
+			long_tail_presentation(policy),
+			long_tail_claims(policy),
+		)?;
+	}
+	let search = WorkspaceSearchAdapter::new(
+		workspace.clone(),
+		documents.clone(),
+		read_sources.clone(),
+		Arc::clone(&resolvers),
+	);
+	let grep = omp_tools::grep::tool(
+		search.clone(),
+		u32::from(tool_settings.grep_context_before),
+		u32::from(tool_settings.grep_context_after),
+	);
+	if tool_settings.enabled("grep") {
+		environment_registry(&mut registry, grep, essential_presentation(policy), core_claims())?;
+	}
+	let glob = omp_tools::glob::tool(search);
+	if tool_settings.enabled("glob") {
+		environment_registry(&mut registry, glob, essential_presentation(policy), core_claims())?;
+	}
+	if tool_settings.enabled("ast_grep") {
+		let ast_search = AstSearchAuthority::new(
+			workspace.clone(),
+			read_sources.clone(),
+			Arc::clone(&resolvers),
+			state_dir,
+		);
+		environment_registry(
+			&mut registry,
+			omp_tools::ast_grep::tool(ast_search),
+			long_tail_presentation(policy),
+			long_tail_claims(policy),
+		)?;
+	}
+	if tool_settings.enabled("ast_edit") {
+		environment_registry(
+			&mut registry,
+			omp_tools::ast_edit::tool(workspace.root().to_path_buf(), previews.clone()),
+			long_tail_presentation(policy),
+			long_tail_claims(policy),
+		)?;
+	}
+	let prelude = Arc::new(build_prelude_table(workers)?);
+	let helper_docs = prelude
+		.helpers()
+		.map(|helper| omp_tools::eval::PreludeHelperDescription {
+			signature: helper.signature.as_str(),
+			summary:   helper.summary.as_str(),
+		})
+		.collect::<Vec<_>>();
+	let eval_host = Arc::new(SessionBridgeHost::new());
+	let mut eval_control = EvalSessionControl::default();
+	if tool_settings.enabled("eval") || py_eval {
+		let eval_exec = compose_eval_executor(
+			ProcessEvalExec::production(
+				exec.clone(),
+				Arc::clone(&eval_host),
+				interrupt_grace,
+				blobs.clone(),
+				tool_settings
+					.eval_interpreters
+					.get("py")
+					.map(|path| PathBuf::from(path.as_str())),
+			),
+			py_eval,
+		)?;
+		if let Some(eval_exec) = eval_exec {
+			let mut task_snapshot = TaskDescriptionSnapshot {
+				helpers: &helper_docs,
+				..TaskDescriptionSnapshot::standard()
+			};
+			if !tool_settings.enabled("task") {
+				task_snapshot.agents = &[];
+			}
+			let (eval_tool, control) =
+				omp_tools::eval::eval_controlled_with_task_snapshot(eval_exec.clone(), task_snapshot);
+			eval_control = control;
+			if tool_settings.enabled("eval") {
+				environment_registry(
+					&mut registry,
+					eval_tool,
+					long_tail_presentation(policy),
+					long_tail_claims(policy),
+				)?;
+			}
+			if py_eval {
+				environment_registry(
+					&mut registry,
+					omp_tools::eval::py_eval(eval_exec),
+					long_tail_presentation(policy),
+					long_tail_claims(policy),
+				)?;
+			}
+		}
+	}
+	let dyn_installed = tool_settings.enabled("dyn") && dyn_enabled(policy);
+	if dyn_installed {
+		exec.install_devices(Arc::new(DynHost::new(
+			catalog.clone(),
+			Arc::new(device_invoker),
+			previews.clone(),
+			Arc::clone(&hooks),
+			blobs.clone(),
+			mcp_manager,
+			DynamicAdmission::new(tool_settings.approval_mode, tool_settings.approval.clone(), None),
+		)));
+	}
+	if tool_settings.enabled("bash") && shell_settings.enabled {
+		let sibling_tools = registry
+			.live_identities()
+			.filter_map(|(name, _)| {
+				(name != "bash" && registry.presentation(name).ok() == Some(Presentation::Slot))
+					.then(|| name.clone())
+			})
+			.collect::<Arc<[_]>>();
+		let snapshot = omp_tools::shell::ShellPromptSnapshot {
+			sibling_tools,
+			platform: Str::new(consts::OS),
+			devices: dyn_installed,
+			embedded_builtins: shell_settings.embedded_builtins,
+			interceptor_enabled: shell_settings.interceptor.enabled,
+			interceptor_rules: shell_settings
+				.interceptor
+				.patterns
+				.iter()
+				.map(|rule| omp_tools::shell_intercept::Rule {
+					pattern: rule.pattern.clone(),
+					tool:    rule.tool.clone(),
+					message: rule.message.clone(),
+				})
+				.collect(),
+			acp_routing: acp_settings.routing != AcpRouting::Never,
+			command_prefix: shell_settings.command_prefix.is_some(),
+		};
+		let shell = omp_tools::shell::shell_with_snapshot_and_timeout_bounds(
+			ShellExecHost::new(
+				exec.clone(),
+				blobs.clone(),
+				root_uri.clone(),
+				Arc::clone(&resolvers),
+				shell_settings.clone(),
+				sandbox_settings.clone(),
+				acp_exec,
+				acp_settings.routing != AcpRouting::Never,
+			),
+			shell_timeout_bounds(tool_settings),
+			&snapshot,
+		)
+		.with_auto_background(
+			shell_settings.auto_background.enabled,
+			time::Duration::from_millis(shell_settings.auto_background.threshold_ms),
+		);
+		environment_registry(&mut registry, shell, bash_presentation(policy), core_claims())?;
+	}
+	register_session_workers(&mut registry, workers, policy)?;
+	registry.protect_live_claims();
 	let registry = Arc::new(registry);
 	catalog
 		.install_registry(Arc::clone(&registry))
@@ -2482,12 +4918,6 @@ pub(crate) fn production_registry<
 	eval_host
 		.bind_prelude(prelude, Arc::new(prelude_invoker))
 		.map_err(|error| EnvdError::Eval(Str::from(error.to_string())))?;
-	// Assembly returns the telemetry start instead of performing it: the
-	// construction paths still cross the fallible control-host activation
-	// after this function, and a spawned upload loop must not outlive a
-	// failed construction.
-	let telemetry_upload_start =
-		TelemetryUploadStart::new(telemetry_upload, &telemetry, &github_credentials);
 	Ok((
 		registry,
 		eval_host,
@@ -2499,9 +4929,29 @@ pub(crate) fn production_registry<
 		search_bridge,
 		github_credentials,
 		ask_presenter,
-		telemetry_upload_start,
 	))
 }
+
+fn compose_eval_executor<T>(
+	executor: Result<T, std::io::Error>,
+	py_eval_explicit: bool,
+) -> Result<Option<T>, EnvdError> {
+	match executor {
+		Ok(executor) => Ok(Some(executor)),
+		Err(error) if py_eval_explicit => Err(EnvdError::Eval(Str::from(format!(
+			"environment composition could not construct the explicitly requested py_eval executor: \
+			 {error}"
+		)))),
+		Err(error) => {
+			tracing::warn!(
+				error = %error,
+				"Python tools omitted because the eval child configuration is unavailable"
+			);
+			Ok(None)
+		},
+	}
+}
+
 #[derive(Clone)]
 struct GoalControlAdapter(Arc<dyn GoalAuthority>);
 
@@ -2517,106 +4967,606 @@ impl omp_tools::goal::GoalControl for GoalControlAdapter {
 #[derive(Clone)]
 struct CheckpointBinding {
 	id:     u64,
-	sender: omp_agent::ControlSender,
+	sender: KernelSender,
+}
+
+#[derive(Clone)]
+enum CheckpointWorkspace {
+	Local(WorkspaceOperations),
+	Owner(EnvClient),
+}
+
+#[derive(Clone)]
+struct ActiveCheckpoint {
+	binding_id: u64,
+	info:       Arc<checkpoint::CheckpointInfo>,
 }
 
 /// Late-bound bridge from environment-owned checkpoint tools to the active
 /// Agent CONTROL mailbox.
 #[derive(Clone, Default)]
 pub struct AgentCheckpointControl {
-	sender: Arc<RwLock<Option<CheckpointBinding>>>,
+	sender:             Arc<RwLock<Option<CheckpointBinding>>>,
+	workspace:          Arc<RwLock<Option<CheckpointWorkspace>>>,
+	active_checkpoints: Arc<RwLock<Vec<ActiveCheckpoint>>>,
+	rewind_pending:     Arc<RwLock<bool>>,
+	transition:         Arc<AsyncMutex<()>>,
 }
 
 impl AgentCheckpointControl {
+	/// Binds the local project environment's document-backed workspace owner.
+	pub fn bind_local_workspace(&self, workspace: WorkspaceOperations) {
+		*self.workspace.write() = Some(CheckpointWorkspace::Local(workspace));
+	}
+
+	/// Binds a child session host to its project environment's workspace owner.
+	pub fn bind_owner_workspace(&self, workspace: EnvClient) {
+		*self.workspace.write() = Some(CheckpointWorkspace::Owner(workspace));
+	}
+
 	/// Replaces the active session binding.
-	pub fn bind(&self, id: u64, sender: omp_agent::ControlSender) {
+	pub fn bind(&self, id: u64, sender: KernelSender) {
 		*self.sender.write() = Some(CheckpointBinding { id, sender });
+		self.active_checkpoints.write().clear();
+		*self.rewind_pending.write() = false;
 	}
 
-	/// Releases the binding only when it is still owned by `id`.
-	pub fn unbind(&self, id: u64) {
-		let mut binding = self.sender.write();
-		if binding.as_ref().is_some_and(|binding| binding.id == id) {
-			*binding = None;
-		}
-	}
-
-	fn sender(&self) -> Result<omp_agent::ControlSender, omp_tools::checkpoint::CheckpointFault> {
-		self
+	/// Re-derives checkpoint execution state from the selected journal's DOM.
+	/// The process-local cache never decides whether a checkpoint survives a
+	/// switch, rewind, or resume.
+	pub fn restore_session(&self, id: u64, dom: &omp_dom::Dom) {
+		if !self
 			.sender
 			.read()
 			.as_ref()
-			.map(|binding| binding.sender.clone())
+			.is_some_and(|binding| binding.id == id)
+		{
+			return;
+		}
+		let checkpoints = dom
+			.handles()
+			.filter_map(|handle| {
+				let node = dom.get(handle)?;
+				if node.tag != omp_dom::Tag::Custom(Str::new_static("rewind-checkpoint")) {
+					return None;
+				}
+				let text = |name: &'static str| {
+					node
+						.prop(&omp_dom::PropKey::Custom(Str::new_static(name)))
+						.and_then(omp_dom::Value::as_str)
+						.map(Str::new)
+				};
+				let number = |name: &'static str| match node
+					.prop(&omp_dom::PropKey::Custom(Str::new_static(name)))?
+				{
+					omp_dom::Value::Int(value) => u64::try_from(*value).ok(),
+					_ => None,
+				};
+				let boolean = |name: &'static str| match node
+					.prop(&omp_dom::PropKey::Custom(Str::new_static(name)))?
+				{
+					omp_dom::Value::Bool(value) => Some(*value),
+					_ => None,
+				};
+				let label = node
+					.prop(&omp_dom::PropKey::from(omp_dom::PropId::Label))
+					.and_then(omp_dom::Value::as_str)
+					.map(Str::new)?;
+				let snapshot = env_wire::WorkspaceSnapshot {
+					snapshot_id: text("workspace-snapshot")?.to_string(),
+					generation: number("workspace-generation")?,
+					root_uri: text("workspace-root")?.to_string(),
+					tree_hash: text("workspace-tree")?.to_string(),
+					files: number("workspace-files")?,
+					bytes: number("workspace-bytes")?,
+					entry_count: number("workspace-files")?,
+					created_ms: number("workspace-created-at")?,
+					label: Some(label.to_string()),
+					parent_snapshot_id: text("workspace-parent").map(|value| value.to_string()),
+					partial: boolean("workspace-partial")?,
+					wire_revision: omp_proto::SCHEMA_REV,
+					..Default::default()
+				};
+				Some(ActiveCheckpoint {
+					binding_id: id,
+					info:       Arc::new(checkpoint::CheckpointInfo {
+						token: text("token")?,
+						label,
+						goal: text("goal")?,
+						started_at: number("started-at")?,
+						parent_token: text("parent-token"),
+						session_target: text("target"),
+						workspace: checkpoint_snapshot(&snapshot),
+					}),
+				})
+			})
+			.collect();
+		*self.active_checkpoints.write() = checkpoints;
+		*self.rewind_pending.write() = false;
+	}
+
+	/// Releases the binding only when it is still owned by `id`, returning
+	/// whether this lease was current.
+	pub fn unbind(&self, id: u64) -> bool {
+		let mut binding = self.sender.write();
+		if binding.as_ref().is_some_and(|binding| binding.id == id) {
+			*binding = None;
+			self.active_checkpoints.write().clear();
+			*self.rewind_pending.write() = false;
+			true
+		} else {
+			false
+		}
+	}
+
+	fn binding(&self) -> Result<CheckpointBinding, omp_tools::checkpoint::CheckpointFault> {
+		self
+			.sender
+			.read()
+			.clone()
 			.ok_or_else(|| omp_tools::checkpoint::CheckpointFault {
 				code:    checkpoint::FaultCode::Control,
 				message: sf!("active Agent CONTROL is not bound"),
 			})
 	}
+
+	fn ensure_binding(&self, id: u64) -> Result<(), omp_tools::checkpoint::CheckpointFault> {
+		if self
+			.sender
+			.read()
+			.as_ref()
+			.is_some_and(|binding| binding.id == id)
+		{
+			Ok(())
+		} else {
+			Err(checkpoint_fault(
+				checkpoint::FaultCode::NotFound,
+				"checkpoint belongs to another session",
+			))
+		}
+	}
+
+	fn workspace(&self) -> Result<CheckpointWorkspace, omp_tools::checkpoint::CheckpointFault> {
+		self
+			.workspace
+			.read()
+			.clone()
+			.ok_or_else(|| omp_tools::checkpoint::CheckpointFault {
+				code:    checkpoint::FaultCode::Control,
+				message: sf!("workspace authority is not bound"),
+			})
+	}
+}
+
+impl CheckpointWorkspace {
+	async fn snapshot(
+		&self,
+		request: env_wire::SnapshotWorkspace,
+		cancel: &CancellationToken,
+	) -> Result<env_wire::WorkspaceSnapshot, omp_tools::checkpoint::CheckpointFault> {
+		let result = match self {
+			Self::Local(workspace) => {
+				let workspace = workspace.clone();
+				let cancel = cancel.clone();
+				tokio::task::spawn_blocking(move || workspace.snapshot(&request, &cancel))
+					.await
+					.map_err(|source| {
+						tracing::warn!(?source, "checkpoint workspace snapshot worker failed");
+						checkpoint_fault(
+							checkpoint::FaultCode::SnapshotFailed,
+							"workspace snapshot worker failed",
+						)
+					})?
+					.map_err(local_snapshot_fault)
+			},
+			Self::Owner(workspace) => {
+				tokio::select! {
+					result = workspace.snapshot_workspace(request) => {
+						result.map_err(|source| {
+							tracing::warn!(?source, "checkpoint workspace capture failed");
+							checkpoint_fault(
+								checkpoint::FaultCode::SnapshotFailed,
+								"workspace snapshot failed",
+							)
+						})
+					},
+					() = cancel.cancelled() => {
+						Err(checkpoint_fault(
+							checkpoint::FaultCode::RestoreCancelled,
+							"workspace snapshot was cancelled",
+						))
+					},
+				}
+			},
+		};
+		if cancel.is_cancelled() {
+			return Err(checkpoint_fault(
+				checkpoint::FaultCode::RestoreCancelled,
+				"workspace snapshot was cancelled",
+			));
+		}
+		result
+	}
+
+	async fn restore(
+		&self,
+		request: env_wire::RestoreWorkspace,
+		cancel: &CancellationToken,
+	) -> Result<env_wire::WorkspaceRestored, omp_tools::checkpoint::CheckpointFault> {
+		match self {
+			Self::Local(workspace) => workspace
+				.restore(&request, cancel)
+				.await
+				.map_err(local_workspace_fault),
+			Self::Owner(workspace) => {
+				if cancel.is_cancelled() {
+					return Err(checkpoint_fault(
+						checkpoint::FaultCode::RestoreCancelled,
+						"workspace restoration was cancelled",
+					));
+				}
+				let dry_run = request.dry_run;
+				let restore = workspace.restore_workspace(request);
+				tokio::pin!(restore);
+				let result = if dry_run {
+					tokio::select! {
+						result = &mut restore => result,
+						() = cancel.cancelled() => {
+							return Err(checkpoint_fault(
+								checkpoint::FaultCode::RestoreCancelled,
+								"workspace restoration was cancelled",
+							));
+						},
+					}
+				} else {
+					restore.await
+				};
+				result.map_err(|source| {
+					tracing::warn!(?source, "checkpoint workspace restore failed");
+					checkpoint_fault(
+						checkpoint::FaultCode::RestoreFailed,
+						"workspace restoration failed",
+					)
+				})
+			},
+		}
+	}
 }
 
 impl omp_tools::checkpoint::CheckpointControl for AgentCheckpointControl {
-	async fn checkpoint(
+	async fn create_checkpoint(
 		&self,
 		goal: Str,
+		label: Str,
+		cancel: CancellationToken,
 	) -> Result<omp_tools::checkpoint::CheckpointAck, omp_tools::checkpoint::CheckpointFault> {
-		let ack = self
-			.sender()?
-			.checkpoint(goal)
-			.await
-			.map_err(checkpoint_fault)?;
-		Ok(omp_tools::checkpoint::CheckpointAck { token: ack.token, started_at: ack.started_at })
+		let _transition = self.transition.lock().await;
+		let binding = self.binding()?;
+		let parent_token = {
+			let checkpoints = self.active_checkpoints.read();
+			if checkpoints
+				.iter()
+				.any(|checkpoint| checkpoint.info.label == label)
+			{
+				return Err(checkpoint_fault(
+					checkpoint::FaultCode::DuplicateLabel,
+					"checkpoint label already exists on the selected branch",
+				));
+			}
+			checkpoints
+				.last()
+				.map(|checkpoint| checkpoint.info.token.clone())
+		};
+		let started_at = epoch_millis()?;
+		let token = sf!("checkpoint-{}-{}", binding.id, Ulid::generate());
+		let snapshot = self
+			.workspace()?
+			.snapshot(
+				env_wire::SnapshotWorkspace {
+					scope: "checkpoint".to_owned(),
+					label: Some(label.to_string()),
+					wire_revision: omp_proto::SCHEMA_REV,
+					..Default::default()
+				},
+				&cancel,
+			)
+			.await?;
+		self.ensure_binding(binding.id)?;
+		let info = Arc::new(checkpoint::CheckpointInfo {
+			token: token.clone(),
+			label: label.clone(),
+			goal: goal.clone(),
+			started_at,
+			parent_token: parent_token.clone(),
+			session_target: None,
+			workspace: checkpoint_snapshot(&snapshot),
+		});
+		binding
+			.sender
+			.send(omp_agent::Up::Env(omp_agent::EnvEvent::CheckpointOpened {
+				token,
+				label,
+				goal,
+				parent_token,
+				started_at,
+				workspace: snapshot,
+			}))
+			.map_err(|_| {
+				checkpoint_fault(checkpoint::FaultCode::Control, "active Agent mailbox is closed")
+			})?;
+		self
+			.active_checkpoints
+			.write()
+			.push(ActiveCheckpoint { binding_id: binding.id, info: info.clone() });
+		Ok(omp_tools::checkpoint::CheckpointAck { checkpoint: info })
+	}
+
+	fn list_checkpoints(
+		&self,
+		limit: u16,
+	) -> impl Future<
+		Output = Result<Vec<Arc<checkpoint::CheckpointInfo>>, omp_tools::checkpoint::CheckpointFault>,
+	> + Send {
+		let result = self.binding().map(|binding| {
+			self
+				.active_checkpoints
+				.read()
+				.iter()
+				.rev()
+				.filter(|checkpoint| checkpoint.binding_id == binding.id)
+				.take(usize::from(limit))
+				.map(|checkpoint| checkpoint.info.clone())
+				.collect()
+		});
+		std::future::ready(result)
 	}
 
 	async fn schedule_rewind(
 		&self,
-		token: Str,
+		selector: Str,
 		report: Str,
+		cancel: CancellationToken,
 	) -> Result<omp_tools::checkpoint::RewindAck, omp_tools::checkpoint::CheckpointFault> {
-		let ack = self
-			.sender()?
-			.schedule_rewind(token, report)
-			.await
-			.map_err(checkpoint_fault)?;
-		Ok(omp_tools::checkpoint::RewindAck { token: ack.token, receipt: ack.receipt })
+		let _transition = self.transition.lock().await;
+		if *self.rewind_pending.read() {
+			return Err(checkpoint_fault(
+				checkpoint::FaultCode::AlreadyScheduled,
+				"a rewind is already scheduled",
+			));
+		}
+		let binding = self.binding()?;
+		let active = {
+			let checkpoints = self.active_checkpoints.read();
+			checkpoints
+				.iter()
+				.find(|checkpoint| {
+					checkpoint.binding_id == binding.id && checkpoint.info.token == selector
+				})
+				.cloned()
+				.or_else(|| {
+					let mut labels = checkpoints.iter().filter(|checkpoint| {
+						checkpoint.binding_id == binding.id && checkpoint.info.label == selector
+					});
+					let checkpoint = labels.next()?.clone();
+					labels.next().is_none().then_some(checkpoint)
+				})
+		}
+		.ok_or_else(|| {
+			let ambiguous = self
+				.active_checkpoints
+				.read()
+				.iter()
+				.filter(|checkpoint| {
+					checkpoint.binding_id == binding.id && checkpoint.info.label == selector
+				})
+				.count() > 1;
+			if ambiguous {
+				checkpoint_fault(
+					checkpoint::FaultCode::AmbiguousSelector,
+					"checkpoint label is ambiguous; select by token",
+				)
+			} else {
+				checkpoint_fault(
+					checkpoint::FaultCode::NotFound,
+					"checkpoint token or label is not on the selected branch",
+				)
+			}
+		})?;
+		let workspace = self.workspace()?;
+		let request = env_wire::RestoreWorkspace {
+			snapshot_id: active.info.workspace.snapshot_id.to_string(),
+			dry_run: true,
+			scope: "checkpoint".to_owned(),
+			wire_revision: omp_proto::SCHEMA_REV,
+			..Default::default()
+		};
+		let preview = workspace.restore(request.clone(), &cancel).await?;
+		ensure_complete_restore(&preview)?;
+		self.ensure_binding(binding.id)?;
+		if cancel.is_cancelled() {
+			return Err(checkpoint_fault(
+				checkpoint::FaultCode::RestoreCancelled,
+				"workspace restoration was cancelled",
+			));
+		}
+		let restored = workspace
+			.restore(
+				env_wire::RestoreWorkspace {
+					dry_run: false,
+					expected_generation: preview.from_generation,
+					..request
+				},
+				&cancel,
+			)
+			.await?;
+		if let Err(fault) = ensure_complete_restore(&restored) {
+			if restored.partial {
+				rollback_workspace(&workspace, &restored).await;
+			}
+			return Err(fault);
+		}
+		if let Err(fault) = self.ensure_binding(binding.id) {
+			rollback_workspace(&workspace, &restored).await;
+			return Err(fault);
+		}
+		let receipt = sf!("rewind-{}", Ulid::generate());
+		let rewound_at = epoch_millis()?;
+		if binding
+			.sender
+			.send(omp_agent::Up::Env(omp_agent::EnvEvent::CheckpointRewind {
+				token: active.info.token.clone(),
+				report: report.clone(),
+				receipt: receipt.clone(),
+				workspace: restored.clone(),
+				rewound_at,
+			}))
+			.is_err()
+		{
+			rollback_workspace(&workspace, &restored).await;
+			return Err(checkpoint_fault(
+				checkpoint::FaultCode::Control,
+				"active Agent mailbox is closed",
+			));
+		}
+		*self.rewind_pending.write() = true;
+		Ok(omp_tools::checkpoint::RewindAck {
+			checkpoint: active.info,
+			receipt,
+			workspace: checkpoint_restore(&restored),
+		})
 	}
 }
 
-fn checkpoint_fault(error: control::ControlError) -> omp_tools::checkpoint::CheckpointFault {
-	let (code, message) = match error {
-		control::ControlError::CheckpointAlreadyActive => {
-			(checkpoint::FaultCode::AlreadyActive, sf!("checkpoint already active"))
-		},
-		control::ControlError::NoActiveCheckpoint => (
-			checkpoint::FaultCode::NoActive,
-			sf!("no active checkpoint; create a checkpoint before calling rewind"),
-		),
-		control::ControlError::CheckpointAlreadyCompleted => (
-			checkpoint::FaultCode::AlreadyCompleted,
-			sf!("checkpoint already completed; continue from the retained rewind report"),
-		),
-		control::ControlError::WrongCheckpointToken => (
-			checkpoint::FaultCode::WrongToken,
-			sf!("checkpoint token does not belong to the active session"),
-		),
-		control::ControlError::EmptyRewindReport => {
-			(checkpoint::FaultCode::EmptyReport, sf!("rewind report must not be empty"))
-		},
-		control::ControlError::RewindAlreadyScheduled => (
-			checkpoint::FaultCode::AlreadyScheduled,
-			sf!("rewind already scheduled for the active checkpoint"),
-		),
-		control::ControlError::Closed
-		| control::ControlError::Journal(_)
-		| control::ControlError::RegimeStart(_)
-		| control::ControlError::RegimeStop(_)
-		| control::ControlError::RegimeArbiter(_)
-		| control::ControlError::UnknownCoreRegime { .. } => {
-			(checkpoint::FaultCode::Control, sf!("active Agent CONTROL checkpoint operation failed"))
-		},
-	};
-	omp_tools::checkpoint::CheckpointFault { code, message }
+async fn rollback_workspace(
+	workspace: &CheckpointWorkspace,
+	restored: &env_wire::WorkspaceRestored,
+) {
+	if restored.undo_snapshot_id.is_empty() {
+		return;
+	}
+	let rollback_cancel = CancellationToken::new();
+	let rollback = workspace
+		.restore(
+			env_wire::RestoreWorkspace {
+				snapshot_id: restored.undo_snapshot_id.clone(),
+				scope: "checkpoint-rollback".to_owned(),
+				wire_revision: omp_proto::SCHEMA_REV,
+				..Default::default()
+			},
+			&rollback_cancel,
+		)
+		.await;
+	if rollback.as_ref().is_err()
+		|| rollback
+			.as_ref()
+			.is_ok_and(|value| value.partial || !value.conflicts.is_empty())
+	{
+		tracing::error!(
+			snapshot = %restored.undo_snapshot_id,
+			"checkpoint restoration and automatic rollback both failed"
+		);
+	}
 }
 
+fn epoch_millis() -> Result<u64, omp_tools::checkpoint::CheckpointFault> {
+	let elapsed = std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.map_err(|source| {
+			tracing::warn!(?source, "checkpoint clock is before the Unix epoch");
+			checkpoint_fault(checkpoint::FaultCode::Control, "system clock is unavailable")
+		})?;
+	Ok(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn local_snapshot_fault(source: WorkspaceOperationError) -> omp_tools::checkpoint::CheckpointFault {
+	let cancelled = matches!(
+		&source,
+		WorkspaceOperationError::Workspace(crate::workspace::WorkspaceError::Cancelled)
+	);
+	tracing::warn!(?source, "checkpoint workspace snapshot failed");
+	if cancelled {
+		checkpoint_fault(checkpoint::FaultCode::RestoreCancelled, "workspace snapshot was cancelled")
+	} else {
+		checkpoint_fault(checkpoint::FaultCode::SnapshotFailed, "workspace snapshot failed")
+	}
+}
+
+fn local_workspace_fault(
+	source: WorkspaceOperationError,
+) -> omp_tools::checkpoint::CheckpointFault {
+	let cancelled = matches!(
+		&source,
+		WorkspaceOperationError::Workspace(crate::workspace::WorkspaceError::Cancelled)
+	);
+	tracing::warn!(?source, "checkpoint workspace operation failed");
+	if cancelled {
+		checkpoint_fault(checkpoint::FaultCode::RestoreCancelled, "workspace operation was cancelled")
+	} else {
+		checkpoint_fault(checkpoint::FaultCode::RestoreFailed, "workspace operation failed")
+	}
+}
+
+fn ensure_complete_restore(
+	restored: &env_wire::WorkspaceRestored,
+) -> Result<(), omp_tools::checkpoint::CheckpointFault> {
+	if restored.partial {
+		return Err(checkpoint_fault(
+			checkpoint::FaultCode::RestoreFailed,
+			"workspace restoration partially committed; the undo snapshot was retained",
+		));
+	}
+	if !restored.conflicts.is_empty() {
+		return Err(omp_tools::checkpoint::CheckpointFault {
+			code:    checkpoint::FaultCode::RestoreConflict,
+			message: sf!(
+				"workspace restoration blocked by {} conflict(s), first at {}",
+				restored.conflicts.len(),
+				restored.conflicts[0].path
+			),
+		});
+	}
+	Ok(())
+}
+
+fn checkpoint_snapshot(
+	snapshot: &env_wire::WorkspaceSnapshot,
+) -> omp_tools::checkpoint::WorkspaceSnapshot {
+	omp_tools::checkpoint::WorkspaceSnapshot {
+		snapshot_id:        Str::new(&snapshot.snapshot_id),
+		root_uri:           Str::new(&snapshot.root_uri),
+		generation:         snapshot.generation,
+		tree_hash:          Str::new(&snapshot.tree_hash),
+		files:              snapshot.files,
+		bytes:              snapshot.bytes,
+		label:              snapshot.label.as_deref().map(Str::new),
+		parent_snapshot_id: snapshot.parent_snapshot_id.as_deref().map(Str::new),
+		created_at:         snapshot.created_ms,
+		partial:            snapshot.partial,
+	}
+}
+
+fn checkpoint_restore(
+	restored: &env_wire::WorkspaceRestored,
+) -> omp_tools::checkpoint::WorkspaceRestore {
+	omp_tools::checkpoint::WorkspaceRestore {
+		snapshot_id:      Str::new(&restored.snapshot_id),
+		undo_snapshot_id: Str::new(&restored.undo_snapshot_id),
+		written:          restored.written,
+		deleted:          restored.deleted,
+		unchanged:        restored.unchanged,
+		from_generation:  restored.from_generation,
+		to_generation:    restored.to_generation,
+	}
+}
+
+fn checkpoint_fault(
+	code: checkpoint::FaultCode,
+	message: &'static str,
+) -> omp_tools::checkpoint::CheckpointFault {
+	omp_tools::checkpoint::CheckpointFault { code, message: sf!(message) }
+}
+
+#[cfg(test)]
 pub(super) fn python_engine() -> Result<Arc<omp_py::Engine>, EnvdError> {
 	static ENGINE: LazyLock<Result<Arc<omp_py::Engine>, Str>> = LazyLock::new(|| {
 		omp_py::Engine::builder()
@@ -2630,19 +5580,45 @@ pub(super) fn python_engine() -> Result<Arc<omp_py::Engine>, EnvdError> {
 		.map_err(|error| EnvdError::Eval(error.clone()))
 }
 
-fn preflight_python_eval(
-	host: Arc<SessionBridgeHost>,
-	interrupt_grace: Duration,
-	blobs: BlobHost,
-	configured_interpreter: Option<PathBuf>,
-) -> Result<ProcessEvalExec, EnvdError> {
-	python_engine()?;
-	ProcessEvalExec::production(host, interrupt_grace, blobs, configured_interpreter)
-		.map_err(|error| EnvdError::Eval(Str::from(error.to_string())))
+fn ensure_name_absent(registry: &Registry, name: &str) -> Result<(), EnvdError> {
+	if registry.live_identity(name).is_some() {
+		return Err(EnvdError::DuplicateToolName(Str::from(name)));
+	}
+	Ok(())
+}
+
+const fn essential_presentation(policy: ToolsPolicy) -> Presentation {
+	if matches!(policy, ToolsPolicy::DeviceOnly) {
+		Presentation::Device
+	} else {
+		Presentation::Slot
+	}
+}
+
+const fn bash_presentation(_policy: ToolsPolicy) -> Presentation {
+	Presentation::Slot
+}
+
+const fn long_tail_presentation(policy: ToolsPolicy) -> Presentation {
+	if matches!(policy, ToolsPolicy::ToolOnly) {
+		Presentation::Slot
+	} else {
+		Presentation::Device
+	}
 }
 
 const fn core_claims() -> Claims {
 	Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None }
+}
+
+/// Claims for a long-tail tool: core precedence only while it rides the wire
+/// roster as a slot; the registry refuses devices at core precedence.
+const fn long_tail_claims(policy: ToolsPolicy) -> Claims {
+	if matches!(policy, ToolsPolicy::ToolOnly) {
+		core_claims()
+	} else {
+		builtin_device_claims()
+	}
 }
 
 const fn builtin_device_claims() -> Claims {
@@ -2873,7 +5849,7 @@ fn worker_spec(declaration: &ToolDecl) -> Result<ToolSpec, EnvdError> {
 		name:            Str::from(definition.name.as_str()),
 		rev:             worker_revision(declaration)?,
 		description:     Str::from(definition.description.as_str()),
-		schema:          json_schema.schema_json.clone(),
+		schema:          omp_tool::inject_protocol_schema(&json_schema.schema_json)?,
 		constraint:      worker_constraint(declaration)?,
 		projection_code: worker_projection_code(declaration),
 		effects:         declaration
@@ -2917,12 +5893,13 @@ fn worker_constraint(declaration: &ToolDecl) -> Result<Constraint, EnvdError> {
 	match kind {
 		tool_constraint::Kind::Schema(schema) => Ok(Constraint::Schema {
 			priority:       constraint_priority(schema.priority)?,
-			on_unsupported: v1::Fallback::Unspecified,
+			on_unsupported: worker_fallback(schema.on_unsupported)?,
 		}),
 		tool_constraint::Kind::Grammar(grammar) => {
 			let syntax = match WorkerGrammarSyntax::try_from(grammar.syntax) {
 				Ok(WorkerGrammarSyntax::Lark) => GrammarSyntax::Lark,
 				Ok(WorkerGrammarSyntax::Regex) => GrammarSyntax::Regex,
+				Ok(WorkerGrammarSyntax::Ebnf) => GrammarSyntax::Ebnf,
 				_ => {
 					return Err(worker_declaration_error(
 						"worker grammar constraint has an unsupported syntax",
@@ -2933,7 +5910,7 @@ fn worker_constraint(declaration: &ToolDecl) -> Result<Constraint, EnvdError> {
 				syntax,
 				definition: Str::from(grammar.definition.as_str()),
 				priority: constraint_priority(grammar.priority)?,
-				on_unsupported: v1::Fallback::Unspecified,
+				on_unsupported: worker_fallback(grammar.on_unsupported)?,
 			})
 		},
 		tool_constraint::Kind::Textual(_) => {
@@ -2943,6 +5920,11 @@ fn worker_constraint(declaration: &ToolDecl) -> Result<Constraint, EnvdError> {
 			Err(worker_declaration_error("worker JSON constraints are not supported"))
 		},
 	}
+}
+
+fn worker_fallback(value: i32) -> Result<v1::Fallback, EnvdError> {
+	v1::Fallback::try_from(value)
+		.map_err(|_| worker_declaration_error("worker constraint fallback is invalid"))
 }
 
 fn constraint_priority(priority: u32) -> Result<u8, EnvdError> {
@@ -2956,29 +5938,629 @@ const fn worker_declaration_error(message: &'static str) -> EnvdError {
 
 #[cfg(test)]
 mod tests {
-	use async_stream::stream;
-	use futures::Stream;
-	use omp_proto::toolhost::v1;
-	use omp_tool::{Effects, Ev, IncomingParams, Part, PromptCaps, ToolTerminal};
-
 	use super::*;
-	use crate::{
-		eval::BridgeHostError,
-		worker::{HostKey, OwnedToolDecl},
-	};
 
+	static EVAL_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+	struct EvalEnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+	impl EvalEnvRestore {
+		fn set(values: &[(&'static str, &std::ffi::OsStr)]) -> Self {
+			let previous = values
+				.iter()
+				.map(|(name, _)| (*name, env::var_os(name)))
+				.collect();
+			for (name, value) in values {
+				// SAFETY: every mutation of these eval-specific variables in this
+				// module is serialized by EVAL_ENV_LOCK and restored on drop.
+				unsafe { env::set_var(name, value) };
+			}
+			Self(previous)
+		}
+	}
+
+	impl Drop for EvalEnvRestore {
+		fn drop(&mut self) {
+			for (name, value) in self.0.drain(..).rev() {
+				// SAFETY: EVAL_ENV_LOCK remains held until after this guard drops.
+				unsafe {
+					if let Some(value) = value {
+						env::set_var(name, value);
+					} else {
+						env::remove_var(name);
+					}
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn explicit_py_eval_failure_is_typed_and_environment_override_has_precedence() {
+		let _lock = EVAL_ENV_LOCK.lock();
+		let scratch = tempfile::tempdir().expect("eval scratch");
+		let current_exe = env::current_exe().expect("current test executable");
+		let invalid_override = scratch.path().join("missing-python");
+		let _restore = EvalEnvRestore::set(&[
+			("CARGO_BIN_EXE_omp", current_exe.as_os_str()),
+			("OMP_PYTHON_INTERPRETER", invalid_override.as_os_str()),
+		]);
+		let blobs = BlobHost::open(scratch.path().join("blobs")).expect("blob host");
+		let constructed = ProcessEvalExec::production(
+			ExecHost::new(),
+			Arc::new(SessionBridgeHost::new()),
+			"1s".parse().expect("interrupt grace"),
+			blobs,
+			Some(current_exe),
+		);
+		let error = match compose_eval_executor(constructed, true) {
+			Err(error) => error,
+			Ok(_) => panic!("explicit py_eval must reject an invalid environment override"),
+		};
+		let EnvdError::Eval(message) = error else {
+			panic!("explicit py_eval failure must use the typed eval composition error");
+		};
+		assert!(message.contains("explicitly requested py_eval"));
+		assert!(
+			message.contains(invalid_override.to_string_lossy().as_ref()),
+			"the environment override must win over the valid configured interpreter"
+		);
+	}
+
+	#[test]
+	fn incidental_eval_executor_failure_remains_an_omission() {
+		let unavailable = std::io::Error::new(
+			std::io::ErrorKind::NotFound,
+			"configured Python interpreter is unavailable",
+		);
+		assert!(matches!(compose_eval_executor::<()>(Err(unavailable), false), Ok(None)));
+	}
+
+	#[test]
+	fn extension_tool_call_timeout_caps_only_tool_call_handlers() {
+		let configured = time::Duration::from_millis(125);
+		let short = time::Duration::from_millis(25);
+		let long = time::Duration::from_secs(5);
+		assert_eq!(extension_callback_timeout("tool_call", configured, None, long), configured);
+		assert_eq!(extension_callback_timeout("tool_call", configured, Some(short), long), short);
+		assert_eq!(extension_callback_timeout("tool_call", configured, Some(long), long), configured);
+		assert_eq!(extension_callback_timeout("tool_result", configured, None, long), long);
+	}
+
+	#[tokio::test]
+	async fn checkpoint_cache_rehydrates_from_the_selected_branch_and_clears_on_switch() {
+		let control = AgentCheckpointControl::default();
+		let (sender, _mailbox) = flume::unbounded();
+		control.bind(7, sender);
+		let mut dom = omp_dom::Dom::new();
+		dom.apply(&omp_dom::Txn {
+			cause: omp_journal::EntryId::default(),
+			label: None,
+			ops:   vec![omp_dom::Op::Ins {
+				parent: dom.meta(),
+				after:  None,
+				node:   omp_dom::NodeSpec::new(omp_dom::Tag::Custom(sf!("rewind-checkpoint")))
+					.with_prop(
+						omp_dom::PropKey::Custom(sf!("token")),
+						omp_dom::Value::Str(sf!("checkpoint-1")),
+					)
+					.with_prop(omp_dom::PropId::Label, omp_dom::Value::Str(sf!("parser-baseline")))
+					.with_prop(
+						omp_dom::PropKey::Custom(sf!("goal")),
+						omp_dom::Value::Str(sf!("inspect parser")),
+					)
+					.with_prop(
+						omp_dom::PropKey::Custom(sf!("target")),
+						omp_dom::Value::Str(sf!("01K4TARGET")),
+					)
+					.with_prop(
+						omp_dom::PropKey::Custom(sf!("workspace-snapshot")),
+						omp_dom::Value::Str(sf!("snapshot-1")),
+					)
+					.with_prop(
+						omp_dom::PropKey::Custom(sf!("workspace-generation")),
+						omp_dom::Value::Int(3),
+					)
+					.with_prop(
+						omp_dom::PropKey::Custom(sf!("workspace-root")),
+						omp_dom::Value::Str(sf!("file:///workspace")),
+					)
+					.with_prop(
+						omp_dom::PropKey::Custom(sf!("workspace-tree")),
+						omp_dom::Value::Str(sf!("tree")),
+					)
+					.with_prop(omp_dom::PropKey::Custom(sf!("workspace-files")), omp_dom::Value::Int(2))
+					.with_prop(omp_dom::PropKey::Custom(sf!("workspace-bytes")), omp_dom::Value::Int(12))
+					.with_prop(
+						omp_dom::PropKey::Custom(sf!("workspace-parent")),
+						omp_dom::Value::Str(sf!("snapshot-0")),
+					)
+					.with_prop(
+						omp_dom::PropKey::Custom(sf!("workspace-created-at")),
+						omp_dom::Value::Int(42),
+					)
+					.with_prop(
+						omp_dom::PropKey::Custom(sf!("workspace-partial")),
+						omp_dom::Value::Bool(false),
+					)
+					.with_prop(omp_dom::PropKey::Custom(sf!("started-at")), omp_dom::Value::Int(42)),
+			}],
+		})
+		.expect("checkpoint DOM");
+
+		control.restore_session(7, &dom);
+		let active = control.active_checkpoints.read();
+		assert_eq!(active.first().map(|value| value.info.token.as_str()), Some("checkpoint-1"));
+		assert_eq!(
+			active
+				.first()
+				.map(|value| value.info.workspace.snapshot_id.as_str()),
+			Some("snapshot-1")
+		);
+		assert_eq!(
+			active
+				.first()
+				.and_then(|value| value.info.session_target.as_deref()),
+			Some("01K4TARGET")
+		);
+		assert_eq!(
+			active
+				.first()
+				.and_then(|value| value.info.workspace.parent_snapshot_id.as_deref()),
+			Some("snapshot-0")
+		);
+		drop(active);
+		let listed = omp_tools::checkpoint::CheckpointControl::list_checkpoints(&control, 10)
+			.await
+			.expect("checkpoint list");
+		assert_eq!(listed.first().map(|value| value.label.as_str()), Some("parser-baseline"));
+
+		control.restore_session(7, &omp_dom::Dom::new());
+		assert!(control.active_checkpoints.read().is_empty());
+	}
+
+	#[test]
+	fn skills_enabled_gates_managed_skill_runtime() {
+		let ctx = Ctx::new();
+		assert!(managed_skills_enabled(&ctx, true));
+		crate::SV_SKILLS_ENABLED
+			.set(&ctx, false)
+			.expect("disable skills");
+		assert!(!managed_skills_enabled(&ctx, true));
+		assert!(!managed_skills_enabled(&Ctx::new(), false));
+	}
+
+	fn worker_declaration_with_schema(schema: &'static [u8]) -> ToolDecl {
+		ToolDecl {
+			definition: Some(omp_proto::inference::v1::ToolDef {
+				name:        "worker".to_owned(),
+				description: "worker tool".to_owned(),
+				input:       Some(tool_def::Input::JsonSchema(
+					omp_proto::inference::v1::tool_def::JsonSchema {
+						schema_json: bytes::Bytes::from_static(schema),
+						strict:      Some(true),
+					},
+				)),
+			}),
+			rev: "1".to_owned(),
+			extension_id: "test.extension".to_owned(),
+			..ToolDecl::default()
+		}
+	}
+
+	#[test]
+	fn worker_schema_injects_exact_protocol_fields() {
+		let declaration = worker_declaration_with_schema(
+			br#"{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}"#,
+		);
+		let spec = worker_spec(&declaration).expect("valid worker schema");
+		let schema: JsonValue = serde_json::from_slice(&spec.schema).expect("injected schema");
+		assert_eq!(schema["required"], json!(["i", "value"]));
+		assert_eq!(schema["properties"]["i"]["type"], "string");
+		assert_eq!(schema["properties"]["notrunc"]["type"], "boolean");
+	}
+
+	#[test]
+	fn worker_schema_rejects_invalid_protocol_shapes() {
+		for schema in [
+			&b"{"[..],
+			br#"{"type":"array"}"#,
+			br#"{"type":"object","properties":[]}"#,
+			br#"{"type":"object","required":{}}"#,
+			br#"{"type":"object","required":[1]}"#,
+		] {
+			assert!(
+				matches!(
+					worker_spec(&worker_declaration_with_schema(schema)),
+					Err(EnvdError::WorkerProtocolSchema(_))
+				),
+				"schema should be rejected: {}",
+				String::from_utf8_lossy(schema)
+			);
+		}
+	}
+
+	#[tokio::test]
+	async fn invocation_edit_repair_is_unavailable_without_connection_capability() {
+		let result = with_edit_repair_scope(
+			InvocationEditRepairContext::default(),
+			invocation_edit_repair(omp_tools::edit::observer::EditRepairPrompt {
+				language:         sf!("rust"),
+				before:           Str::new_static("fn ok() {}"),
+				after:            Str::new_static("fn bad( {}"),
+				previous_attempt: None,
+			}),
+		)
+		.await;
+		assert_eq!(result, Err(omp_tools::edit::observer::EditRepairError::Unavailable));
+	}
+
+	#[tokio::test]
+	async fn invocation_edit_models_are_task_local() {
+		let first = with_edit_repair_scope(
+			InvocationEditRepairContext::new(None, Some(sf!("model-a"))),
+			async { invocation_edit_model() },
+		);
+		let second = with_edit_repair_scope(
+			InvocationEditRepairContext::new(None, Some(sf!("model-b"))),
+			async { invocation_edit_model() },
+		);
+		let (first, second) = tokio::join!(first, second);
+		assert_eq!(first, Some(sf!("model-a")));
+		assert_eq!(second, Some(sf!("model-b")));
+		assert_eq!(invocation_edit_model(), None);
+	}
+
+	#[test]
+	fn default_roster_has_exactly_five_slots_and_keeps_long_tail_devices_live() {
+		let inputs = EnvironmentDeclarationInputs {
+			read_policy:      omp_tools::read::ReadPolicy::default(),
+			selected_edit:    omp_tools::edit::hashline_spec().rev,
+			eval_description: Some(sf!("Evaluate code.")),
+			shell_snapshot:   Some(omp_tools::shell::ShellPromptSnapshot {
+				sibling_tools:       Arc::default(),
+				platform:            sf!("linux"),
+				command_prefix:      false,
+				embedded_builtins:   true,
+				devices:             true,
+				interceptor_enabled: false,
+				interceptor_rules:   Arc::default(),
+				acp_routing:         false,
+			}),
+			memory:           omp_memory::Capabilities::default(),
+			managed_skills:   false,
+		};
+		let mut tool_settings = ToolSettings::default();
+		tool_settings
+			.enabled
+			.insert(Str::new_static("ast_grep"), true);
+		let browser_settings = BrowserSettings::default();
+		let py_eval_declaration = environment_declarations(
+			&tool_settings,
+			&browser_settings,
+			&inputs,
+			true,
+			ToolsPolicy::Auto,
+		)
+		.into_iter()
+		.find(|declaration| declaration.spec.name == "py_eval")
+		.expect("explicit py_eval declaration");
+		assert_eq!(py_eval_declaration.spec, omp_tools::eval::py_eval_spec());
+
+		let declarations = environment_declarations(
+			&tool_settings,
+			&browser_settings,
+			&inputs,
+			false,
+			ToolsPolicy::Auto,
+		);
+		assert!(
+			declarations
+				.iter()
+				.all(|declaration| declaration.spec.name != "py_eval"),
+			"py_eval must remain absent unless explicitly requested"
+		);
+		let slots = declarations
+			.iter()
+			.filter(|declaration| declaration.presentation == Presentation::Slot)
+			.map(|declaration| declaration.spec.name.clone())
+			.collect::<BTreeSet<_>>();
+		assert_eq!(
+			slots,
+			[sf!("bash"), sf!("edit"), sf!("glob"), sf!("grep"), sf!("read")]
+				.into_iter()
+				.collect()
+		);
+
+		let mut registry = Registry::new();
+		for declaration in declarations {
+			registry
+				.declare_remote(
+					declaration.spec,
+					declaration.presentation,
+					declaration.claims,
+					ExecutionMode::Parallel,
+				)
+				.expect("declare environment tool");
+		}
+		let registry = Arc::new(registry);
+		let catalog = DeviceCatalog::default();
+		catalog
+			.install_registry(Arc::clone(&registry))
+			.expect("install device catalog");
+		let live = catalog.registry().expect("live catalog");
+		let lsp = live
+			.devices()
+			.find(|device| device.name.as_str() == "lsp")
+			.expect("LSP dynamic device");
+		assert_eq!(lsp.rev.n, 3);
+		assert_eq!(lsp.schema, omp_tools::lsp::spec().schema.as_ref());
+		let devices = live
+			.devices()
+			.map(|device| device.name.clone())
+			.collect::<BTreeSet<_>>();
+		for expected in ["ast_edit", "ast_grep", "debug", "eval", "lsp", "write"] {
+			assert!(devices.contains(expected), "{expected} must remain reachable through dyn");
+		}
+	}
+
+	#[test]
+	fn registry_loci_and_remote_names_follow_authoritative_metadata() {
+		let mut registry = Registry::new();
+		register_instrumented(
+			&mut registry,
+			omp_tools::todo::tool(),
+			Presentation::Slot,
+			core_claims(),
+		)
+		.expect("session tool");
+		environment_registry(
+			&mut registry,
+			omp_tools::ast_grep::tool(PathBuf::from(".")),
+			Presentation::Slot,
+			core_claims(),
+		)
+		.expect("environment tool");
+		let remote = omp_tools::write::spec();
+		let expected_description = remote.description.clone();
+		registry
+			.declare_remote(remote, Presentation::Slot, core_claims(), ExecutionMode::Parallel)
+			.expect("remote environment declaration");
+
+		assert_eq!(registry.locus("write").expect("write locus"), ToolLocus::Environment);
+		assert_eq!(registry.locus("ast_grep").expect("ast_grep locus"), ToolLocus::Environment);
+		assert_eq!(registry.locus("todo").expect("todo locus"), ToolLocus::Session);
+		assert_eq!(registry.presentation("write").expect("write presentation"), Presentation::Slot);
+		assert_eq!(
+			&registry
+				.live_spec("write")
+				.expect("remote spec")
+				.description,
+			&expected_description
+		);
+		let names = environment_tool_names(&registry);
+		assert!(names.contains("write"));
+		assert!(names.contains("ast_grep"));
+		assert!(!names.contains("todo"));
+	}
 	fn prelude_param(
 		name: &str,
 		kind: PreludeParamKind,
 		default_json: Option<&'static [u8]>,
-	) -> v1::PreludeParam {
-		v1::PreludeParam {
+	) -> omp_proto::toolhost::v1::PreludeParam {
+		omp_proto::toolhost::v1::PreludeParam {
 			name:         name.to_owned(),
 			kind:         kind as i32,
 			default_json: default_json.map(bytes::Bytes::from_static),
 			annotation:   None,
 			props:        None,
 		}
+	}
+
+	#[test]
+	fn tool_call_bash_wire_expands_to_public_hook_shape() {
+		let ir = omp_proto::policy::v1::BashIr {
+			source: String::from("touch marker"),
+			rev: String::from("bashir@3"),
+			parser_rev: String::from("qa"),
+			parse_ok: true,
+			commands: vec![omp_proto::policy::v1::BashCommand {
+				name: Some(String::from("touch")),
+				..omp_proto::policy::v1::BashCommand::default()
+			}],
+			..omp_proto::policy::v1::BashIr::default()
+		};
+		let mut payload = json!({
+			"bash": null,
+			"__omp_bash_proto": {
+				"$bytes": omp_core::base64::encode(&ir.encode_to_vec()),
+			},
+		});
+		assert!(hydrate_tool_call_bash(&mut payload), "hydrate Bash IR");
+		assert!(payload.get("__omp_bash_proto").is_none());
+		assert_eq!(payload["bash"]["source"], "touch marker");
+		assert_eq!(payload["bash"]["commands"][0]["name"], "touch");
+	}
+
+	#[test]
+	fn lifecycle_observe_excludes_subject_and_reaches_second_active_extension() {
+		let payload = json!({"extension": "publisher.subject"});
+		let active = ["publisher.subject", "publisher.observer"];
+		let recipients = active
+			.into_iter()
+			.filter(|extension| lifecycle_hook_recipient("extension_load", &payload, extension))
+			.collect::<Vec<_>>();
+		assert_eq!(recipients, ["publisher.observer"]);
+		assert!(!lifecycle_hook_recipient("extension_unload", &payload, "publisher.subject",));
+		assert!(lifecycle_hook_recipient("extension_unload", &payload, "publisher.observer",));
+	}
+
+	#[test]
+	fn lifecycle_phase_vocabulary_is_closed_and_observe_cannot_authorize() {
+		for kind in ["deny", "defer"] {
+			assert!(hook_decision_is_legal("precheck", Some(kind)));
+		}
+		assert!(hook_decision_is_legal("transform", Some("modify")));
+		assert!(hook_decision_is_legal("review", Some("allow")));
+		assert!(hook_decision_is_legal("approval", Some("require_approval")));
+		assert!(!hook_decision_is_legal("observe", Some("allow")));
+		assert!(!hook_decision_is_legal("precheck", Some("require_approval")));
+		assert!(!hook_decision_is_legal("review", Some("modify")));
+	}
+
+	#[test]
+	fn approval_requirement_retains_authenticated_generation_evidence() {
+		let spec = approval_spec_with_provenance(
+			json!({
+				"title": "Approve",
+				"body": "Policy requires approval",
+				"subject": "bash",
+				"evidence": ["rule=destructive"],
+			}),
+			"publisher.guard",
+			"publisher.extension",
+			11,
+			19,
+		);
+		assert_eq!(
+			spec["evidence"],
+			json!([
+				"rule=destructive",
+				"hook=publisher.guard extension=publisher.extension host_generation=11 \
+				 session_generation=19",
+			]),
+		);
+	}
+
+	#[test]
+	fn delegated_composer_decodes_every_merged_approval_requirement() {
+		let decision = json!({
+			"kind": "require_approvals",
+			"specs": [
+				{
+					"title": "Hook approval",
+					"body": "extension policy",
+					"subject": "bash",
+					"kind": "exec",
+					"evidence": ["host_generation=4"],
+				},
+				{
+					"title": "Capability approval",
+					"body": "native policy",
+					"subject": "network",
+					"kind": "network",
+				},
+			],
+			"effective": {"args": {"value": 2}},
+		});
+		let GateDecision::RequireApprovals { specs, patch } =
+			gate_decision_from_json(decision, json!({"args": {}}))
+		else {
+			panic!("merged approval decision");
+		};
+		assert_eq!(specs.len(), 2);
+		let patch = patch.expect("effective transform");
+		assert_eq!(
+			serde_json::from_slice::<JsonValue>(patch.args.as_deref().expect("argument patch"))
+				.expect("effective JSON"),
+			json!({"args": {"value": 2}}),
+		);
+		assert_eq!(specs[0].evidence, [sf!("host_generation=4")]);
+		assert_eq!(specs[1].subject, "network");
+	}
+
+	#[test]
+	fn session_branch_transform_composes_summarize() {
+		let policy = HookEventPolicy {
+			revision:    1,
+			timeout:     time::Duration::from_secs(1),
+			on_failure:  HookFailurePolicy::Defer,
+			default:     json!({"kind": "allow"}),
+			composition: BTreeMap::from([(sf!("summarize"), HookFieldComposition::Replace)]),
+		};
+		let mut payload = json!({
+			"at_event": 9,
+			"keep_event": 9,
+			"reason": "user",
+			"summarize": false,
+		});
+		let mut modification = None;
+		let decision = json!({"kind": "modify", "patch": {"summarize": true}});
+		compose_hook_modify(
+			"session_branch",
+			&policy,
+			&mut payload,
+			&mut modification,
+			decision.as_object().expect("modify object"),
+		)
+		.expect("compose branch summarize");
+		assert_eq!(payload["summarize"], true);
+		assert_eq!(
+			modification
+				.as_ref()
+				.and_then(|value| value.get("patch"))
+				.and_then(JsonValue::as_object)
+				.and_then(|patch| patch.get("summarize")),
+			Some(&JsonValue::Bool(true)),
+		);
+	}
+
+	#[test]
+	fn tool_call_transform_patches_effective_arguments() {
+		let policy = HookEventPolicy {
+			revision:    1,
+			timeout:     time::Duration::from_secs(1),
+			on_failure:  HookFailurePolicy::Deny,
+			default:     json!({"kind": "allow"}),
+			composition: BTreeMap::from([
+				(sf!("target"), HookFieldComposition::Replace),
+				(sf!("args"), HookFieldComposition::Replace),
+				(sf!("cwd"), HookFieldComposition::Replace),
+				(sf!("deadline"), HookFieldComposition::Replace),
+			]),
+		};
+		let mut payload = json!({
+			"target": {"kind": "core", "name": "bash", "rev": "core.1", "args": {
+				"command": "printf original"
+			}},
+			"args": {"command": "printf original"},
+			"cwd": ".",
+			"deadline": null,
+		});
+		let mut modification = None;
+		let decision = json!({"kind": "modify", "patch": {"command": "printf modified"}});
+		compose_hook_modify(
+			"tool_call",
+			&policy,
+			&mut payload,
+			&mut modification,
+			decision.as_object().expect("modify object"),
+		)
+		.expect("compose tool arguments");
+		assert_eq!(payload["args"]["command"], "printf modified");
+		assert_eq!(
+			modification
+				.as_ref()
+				.and_then(|value| value.get("patch"))
+				.and_then(JsonValue::as_object)
+				.and_then(|patch| patch.get("args"))
+				.and_then(JsonValue::as_object)
+				.and_then(|args| args.get("command")),
+			Some(&JsonValue::String(String::from("printf modified"))),
+		);
+	}
+
+	#[test]
+	fn domain_replies_compose_as_transforms_or_nothing() {
+		assert_eq!(domain_reply_decision(JsonValue::Null).expect("none"), None);
+		assert_eq!(
+			domain_reply_decision(json!({"prune": [{"ids": ["3"]}], "note": "trim"})).expect("patch"),
+			Some(json!({"kind": "modify", "patch": {"prune": [{"ids": ["3"]}], "note": "trim"}}))
+		);
+		assert_eq!(
+			domain_reply_decision(json!({"kind": "deny", "reason": "no"})).expect("decision"),
+			Some(json!({"kind": "deny", "reason": "no"}))
+		);
+		assert!(domain_reply_decision(json!("continue")).is_err());
 	}
 
 	#[test]
@@ -3006,6 +6588,63 @@ mod tests {
 		);
 	}
 	#[test]
+	fn mcp_filter_is_anchored_and_queue_drops_oldest() {
+		let servers = [sf!("github")];
+		let methods = [sf!("notifications/*"), sf!("acme/*")];
+		assert!(mcp_filter_matches(
+			Some(&servers),
+			&methods,
+			"github",
+			"notifications/tools/list_changed",
+		));
+		assert!(mcp_filter_matches(Some(&servers), &methods, "github", "acme/custom"));
+		assert!(!mcp_filter_matches(
+			Some(&servers),
+			&methods,
+			"linear",
+			"notifications/tools/list_changed",
+		));
+		assert!(!mcp_filter_matches(Some(&servers), &methods, "github", "other/update",));
+		assert!(anchored_glob_matches("notifications/*", "notifications/tools/list_changed"));
+		assert!(anchored_glob_matches("acme/??", "acme/ok"));
+		assert!(!anchored_glob_matches("notifications/*", "prefix/notifications/update"));
+		assert!(!anchored_glob_matches("acme/??", "acme/long"));
+
+		let mut queue = McpDeliveryQueue {
+			pending:         VecDeque::new(),
+			running_servers: BTreeSet::new(),
+			dropped:         0,
+		};
+		for sequence in 1..=102 {
+			queue.push(McpQueuedDelivery {
+				notification:  McpHookNotification {
+					server: sf!("github"),
+					method: sf!("notifications/update"),
+					params: JsonValue::Null,
+					sequence,
+				},
+				subscriptions: Vec::new(),
+			});
+		}
+		assert_eq!(queue.pending.len(), MCP_HOOK_QUEUE_CAPACITY);
+		assert_eq!(queue.dropped, 2);
+		assert_eq!(
+			queue
+				.pending
+				.front()
+				.map(|delivery| delivery.notification.sequence),
+			Some(3)
+		);
+		assert_eq!(
+			queue
+				.pending
+				.back()
+				.map(|delivery| delivery.notification.sequence),
+			Some(102)
+		);
+	}
+
+	#[test]
 	fn extension_usage_projection_is_typed_and_rejects_malformed_reports() {
 		let observed = time::UNIX_EPOCH + time::Duration::from_secs(10);
 		let report = decode_extension_usage(
@@ -3029,6 +6668,29 @@ mod tests {
 			decode_extension_usage(json!({"windows": [{"id": "bad", "unit": "secret"}]}), observed),
 			Err(UsageFetchError::Protocol),
 		));
+	}
+
+	#[test]
+	fn worker_tools_never_expand_the_auto_slot_roster() {
+		assert_eq!(long_tail_presentation(ToolsPolicy::Auto), Presentation::Device);
+		assert_eq!(long_tail_presentation(ToolsPolicy::ToolOnly), Presentation::Slot);
+	}
+
+	#[test]
+	fn worker_constraint_preserves_registration_fallback() {
+		let declaration = ToolDecl {
+			constraint: Some(omp_proto::toolhost::v1::ToolConstraint {
+				kind: Some(tool_constraint::Kind::Schema(omp_proto::toolhost::v1::SchemaConstraint {
+					priority:       73,
+					on_unsupported: omp_proto::inference::v1::Fallback::Error as i32,
+				})),
+			}),
+			..ToolDecl::default()
+		};
+		assert_eq!(worker_constraint(&declaration).expect("constraint lowers"), Constraint::Schema {
+			priority:       73,
+			on_unsupported: omp_proto::inference::v1::Fallback::Error,
+		});
 	}
 
 	#[test]
@@ -3070,603 +6732,6 @@ mod tests {
 			let error = prelude_params("contract_helper", &declaration)
 				.expect_err("invalid prelude signature was accepted");
 			assert!(error.to_string().contains(expected), "{error}");
-		}
-	}
-
-	/// Counts telemetry uploader starts through the composition bridge.
-	#[derive(Default)]
-	struct RecordingUpload(AtomicU64);
-
-	impl TelemetryUpload for RecordingUpload {
-		fn start(&self, _index: Arc<TelemetryIndex>, _credentials: Arc<GithubCredentialBridge>) {
-			self.0.fetch_add(1, Ordering::SeqCst);
-		}
-	}
-
-	#[derive(Clone, Default)]
-	struct UnusedDeviceInvoker;
-
-	impl omp_tools::device::DeviceInvoker for UnusedDeviceInvoker {
-		async fn invoke(
-			&self,
-			_request: omp_tools::device::DeviceInvokeRequest,
-		) -> omp_tool::ErasedStream<'static> {
-			Box::pin(async_stream::stream! {
-				yield Err(omp_tool::RegistryError::UnknownTool(sf!(
-					"no worker devices in assembly tests"
-				)));
-			})
-		}
-	}
-
-	struct UnusedPreludeInvoker;
-
-	#[async_trait::async_trait]
-	impl PreludeInvoker for UnusedPreludeInvoker {
-		async fn invoke(
-			&self,
-			_name: &str,
-			_rev: &str,
-			_args: serde_json::Value,
-		) -> Result<serde_json::Value, BridgeHostError> {
-			Err(BridgeHostError::message(sf!("no prelude helpers in assembly tests")))
-		}
-	}
-
-	/// Serves exactly the document hello handshake so assembly can bind a
-	/// `DocumentHost` without a live document server; assembly never issues
-	/// document calls, so the transport then just stays open.
-	async fn handshake_document_host(root: &Path) -> DocumentHost {
-		let (client, mut server) = tokio::io::duplex(64 * 1024);
-		let root_uri = format!("file://{}", root.display());
-		tokio::spawn(async move {
-			use omp_docserver::{
-				connection::{PROTOCOL_MAJOR, PROTOCOL_MINOR},
-				wire,
-			};
-			let config = wire::FrameConfig::default();
-			let mut scratch = bytes::BytesMut::new();
-			if wire::read_client_frame(&mut server, config, &mut scratch)
-				.await
-				.is_err()
-			{
-				return;
-			}
-			let hello = omp_proto::document::v1::ServerFrame {
-				request_id: 0,
-				body:       Some(omp_proto::document::v1::server_frame::Body::Hello(
-					omp_proto::document::v1::ServerHello {
-						protocol_major: PROTOCOL_MAJOR,
-						protocol_minor: PROTOCOL_MINOR,
-						workspace_id: bytes::Bytes::from_static(b"assembly-test"),
-						root_uri,
-						server_epoch: bytes::Bytes::from_static(b"epoch"),
-						server_build: "envd-test".to_owned(),
-					},
-				)),
-			};
-			if wire::write_server_frame(&mut server, &hello, config, &mut scratch)
-				.await
-				.is_err()
-			{
-				return;
-			}
-			std::future::pending::<()>().await;
-		});
-		DocumentHost::connect(client)
-			.await
-			.expect("document host handshake")
-	}
-
-	/// Assembles the production registry over throwaway hosts and returns the
-	/// deferred telemetry uploader start for the construction path to run.
-	async fn assemble_registry(
-		project: &Path,
-		state: &Path,
-		workers: ExtHostSupervisor,
-		bridges: RegistryBridges,
-	) -> Result<(Arc<Registry>, TelemetryUploadStart), EnvdError> {
-		let documents = handshake_document_host(project).await;
-		let exec = ExecHost::new();
-		let blobs = BlobHost::open(state.join("blobs")).expect("blob host");
-		let github_cache = Arc::new(
-			GithubCache::open(state.join("github-cache.sqlite3"), time::Duration::from_secs(300))
-				.expect("github cache"),
-		);
-		let mcp = Arc::new(McpService::open(state.join("mcp-cache.sqlite3")).expect("MCP service"));
-		let workspace = WorkspaceHost::open(project).expect("workspace host");
-		let memory = omp_memory::runtime::MemoryRuntime::start(omp_memory::runtime::RuntimeStart {
-			session_id:             sf!("assembly-test"),
-			data_dir:               state.join("memory"),
-			workspace_root:         workspace.root().to_path_buf(),
-			canonical_primary_root: None,
-			backend:                omp_memory::MemoryBackend::Off,
-			mnemopi:                omp_memory::MnemopiSettings::default(),
-		})
-		.expect("memory runtime");
-		let telemetry = Arc::new(
-			TelemetryIndex::open(&state.join("telemetry"), &state.join("telemetry.sqlite3"))
-				.expect("telemetry index"),
-		);
-		let supervisor = Arc::new(workers);
-		let root_uri = sf!("file:///assembly-test");
-		let browser_settings = BrowserSettings { enabled: false, ..BrowserSettings::default() };
-		let autolearn = omp_memory::AutolearnSettings::default();
-		let (
-			registry,
-			_eval_bridge,
-			_reflection_bridge,
-			_eval_control,
-			_checkpoint_control,
-			_previews,
-			_resolvers,
-			_search_bridge,
-			_credentials,
-			_ask_presenter,
-			telemetry_upload_start,
-		) = production_registry(
-			&documents,
-			&blobs,
-			&exec,
-			None,
-			state,
-			"assembly-test",
-			Arc::clone(&github_cache),
-			&mcp,
-			&workspace,
-			&memory,
-			&telemetry,
-			&root_uri,
-			supervisor.as_ref(),
-			Duration::new(30, omp_core::DurationUnit::Seconds),
-			&ToolSettings::default(),
-			&browser_settings,
-			&ShellSettings::default(),
-			&AcpSettings::default(),
-			AcpExecSlot::default(),
-			&autolearn,
-			UnusedDeviceInvoker,
-			UnusedPreludeInvoker,
-			ToolsPolicy::Auto,
-			Registry::new(),
-			bridges,
-		)?;
-		Ok((registry, telemetry_upload_start))
-	}
-
-	#[tokio::test]
-	async fn failed_worker_assembly_leaves_the_telemetry_uploader_unstarted() {
-		let project = tempfile::tempdir().expect("project directory");
-		let state = tempfile::tempdir().expect("state directory");
-		// A malformed declaration: assembly must reject it and never reach
-		// the uploader start.
-		let malformed = OwnedToolDecl {
-			owner:       HostKey::new(sf!("workspace"), sf!("trusted"), sf!("fixture")),
-			declaration: ToolDecl { rev: "helper.1".to_owned(), ..ToolDecl::default() },
-		};
-		let upload = Arc::new(RecordingUpload::default());
-		let telemetry_upload: Arc<dyn TelemetryUpload> = upload.clone();
-		let Err(error) = assemble_registry(
-			project.path(),
-			state.path(),
-			ExtHostSupervisor::inert_with_registrations(Arc::from([malformed])),
-			RegistryBridges { telemetry_upload: Some(telemetry_upload), ..RegistryBridges::default() },
-		)
-		.await
-		else {
-			panic!("a declaration without a definition must fail assembly");
-		};
-		assert!(error.to_string().contains("no definition"), "unexpected assembly failure: {error}");
-		assert_eq!(
-			upload.0.load(Ordering::SeqCst),
-			0,
-			"failed assembly must not start the telemetry uploader",
-		);
-	}
-
-	#[tokio::test]
-	async fn assembly_defers_the_telemetry_uploader_start_to_the_construction_path() {
-		let project = tempfile::tempdir().expect("project directory");
-		let state = tempfile::tempdir().expect("state directory");
-		let upload = Arc::new(RecordingUpload::default());
-		let telemetry_upload: Arc<dyn TelemetryUpload> = upload.clone();
-		let (registry, telemetry_start) = assemble_registry(
-			project.path(),
-			state.path(),
-			ExtHostSupervisor::inert_with_registrations(Arc::from([])),
-			RegistryBridges { telemetry_upload: Some(telemetry_upload), ..RegistryBridges::default() },
-		)
-		.await
-		.expect("empty worker assembly succeeds");
-		assert!(registry.live_identity("bash").is_some(), "core tools registered");
-		assert_eq!(
-			upload.0.load(Ordering::SeqCst),
-			0,
-			"assembly must leave the uploader unstarted for the construction path",
-		);
-		telemetry_start.start();
-		assert_eq!(
-			upload.0.load(Ordering::SeqCst),
-			1,
-			"the deferred start runs delivery exactly once",
-		);
-	}
-
-	#[tokio::test]
-	async fn default_bridges_reserve_vibe_without_a_dynamic_bridge() {
-		let project = tempfile::tempdir().expect("project directory");
-		let state = tempfile::tempdir().expect("state directory");
-		let vibe = OwnedToolDecl {
-			owner:       HostKey::new(sf!("workspace"), sf!("trusted"), sf!("fixture")),
-			declaration: ToolDecl {
-				extension_id: "publisher/extension".to_owned(),
-				definition: Some(omp_proto::inference::v1::ToolDef {
-					name:        "vibe".to_owned(),
-					description: "shadow".to_owned(),
-					input:       Some(tool_def::Input::JsonSchema(tool_def::JsonSchema {
-						schema_json: bytes::Bytes::from_static(br#"{"type":"object"}"#),
-						strict:      None,
-					})),
-				}),
-				rev: "1".to_owned(),
-				..ToolDecl::default()
-			},
-		};
-		let Err(error) = assemble_registry(
-			project.path(),
-			state.path(),
-			ExtHostSupervisor::inert_with_registrations(Arc::from([vibe])),
-			RegistryBridges {
-				telemetry_upload: Some(Arc::new(RecordingUpload::default())),
-				..RegistryBridges::default()
-			},
-		)
-		.await
-		else {
-			panic!("a worker cannot claim the reserved vibe name");
-		};
-		assert!(error.to_string().contains("vibe"), "unexpected assembly failure: {error}");
-	}
-
-	#[tokio::test]
-	async fn dynamic_vibe_device_stays_model_visible_but_off_the_user_roster() {
-		let project = tempfile::tempdir().expect("project directory");
-		let state = tempfile::tempdir().expect("state directory");
-		let (registry, _) = assemble_registry(
-			project.path(),
-			state.path(),
-			ExtHostSupervisor::inert_with_registrations(Arc::from([])),
-			RegistryBridges {
-				dynamic_tools: vec![DynamicTool::new(
-					VibeDeviceTool::new(),
-					Presentation::Device,
-					Claims {
-						precedence: Precedence::ENHANCEMENT,
-						claimant:   sf!("omp/core"),
-						replaces:   None,
-					},
-				)],
-				..RegistryBridges::default()
-			},
-		)
-		.await
-		.expect("assembly with the dynamic vibe device succeeds");
-		assert!(registry.live_identity("vibe").is_some(), "the dynamic vibe device stays registered");
-		assert_ne!(
-			registry.presentation("vibe").expect("vibe presentation"),
-			Presentation::Hidden,
-			"vibe stays model-visible"
-		);
-		assert!(
-			!registry.roster().any(|(name, _)| name.as_str() == "vibe"),
-			"vibe must be omitted from the user-facing roster"
-		);
-	}
-
-	struct ShadowDeviceTool {
-		spec: ToolSpec,
-	}
-
-	impl ShadowDeviceTool {
-		fn new(name: &'static str) -> Self {
-			Self {
-				spec: ToolSpec {
-					name:            Str::new_static(name),
-					rev:             Rev { family: sf!("shadow-device"), n: 1 },
-					description:     sf!("extension shadow for a core device"),
-					schema:          bytes::Bytes::from_static(br#"{"type":"object"}"#),
-					constraint:      Constraint::None,
-					effects:         Effects::empty(),
-					projection_code: [0; 32],
-				},
-			}
-		}
-	}
-
-	impl Tool for ShadowDeviceTool {
-		type Fault = JsonValue;
-		type Params = JsonValue;
-		type Payload = JsonValue;
-		type Update = JsonValue;
-
-		fn spec(&self) -> &ToolSpec {
-			&self.spec
-		}
-
-		fn call<'c>(
-			&'c self,
-			params: IncomingParams<'c>,
-		) -> impl Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
-			drop(params);
-			stream! {
-				yield Ev::Done(ToolTerminal::Done {
-					result: Ok(JsonValue::Null),
-					useless: false,
-				});
-			}
-		}
-
-		fn prompt(
-			&self,
-			_view: Result<&Self::Payload, &Self::Fault>,
-			_caps: &PromptCaps,
-		) -> Vec<Part> {
-			Vec::new()
-		}
-	}
-
-	struct VibeDeviceTool {
-		spec: ToolSpec,
-	}
-
-	impl VibeDeviceTool {
-		fn new() -> Self {
-			Self {
-				spec: ToolSpec {
-					name:            sf!("vibe"),
-					rev:             Rev { family: sf!("vibe-device"), n: 1 },
-					description:     sf!("dynamic vibe device fixture"),
-					schema:          bytes::Bytes::from_static(br#"{"type":"object"}"#),
-					constraint:      Constraint::None,
-					effects:         Effects::empty(),
-					projection_code: [0; 32],
-				},
-			}
-		}
-	}
-
-	impl Tool for VibeDeviceTool {
-		type Fault = JsonValue;
-		type Params = JsonValue;
-		type Payload = JsonValue;
-		type Update = JsonValue;
-
-		fn spec(&self) -> &ToolSpec {
-			&self.spec
-		}
-
-		fn call<'c>(
-			&'c self,
-			params: IncomingParams<'c>,
-		) -> impl Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
-			drop(params);
-			stream! {
-				yield Ev::Done(ToolTerminal::Done {
-					result: Ok(JsonValue::Null),
-					useless: false,
-				});
-			}
-		}
-
-		fn prompt(
-			&self,
-			_view: Result<&Self::Payload, &Self::Fault>,
-			_caps: &PromptCaps,
-		) -> Vec<Part> {
-			Vec::new()
-		}
-	}
-
-	struct DeviceShadowFactory {
-		name:         &'static str,
-		claimant:     &'static str,
-		precedence:   Precedence,
-		presentation: Presentation,
-	}
-
-	impl DynamicToolFactory for DeviceShadowFactory {
-		fn register(
-			&self,
-			registrar: &mut DynamicToolRegistrar<'_>,
-		) -> Result<(), omp_tool::RegistryError> {
-			registrar.register(ShadowDeviceTool::new(self.name), self.presentation, Claims {
-				precedence: self.precedence,
-				claimant:   Str::new_static(self.claimant),
-				replaces:   None,
-			})
-		}
-
-		fn bind(&self, _client: EnvClient, _root: &Path) {}
-	}
-
-	#[tokio::test]
-	async fn factory_cannot_shadow_the_protected_computer_device() {
-		let project = tempfile::tempdir().expect("project directory");
-		let state = tempfile::tempdir().expect("state directory");
-		let Err(error) = assemble_registry(
-			project.path(),
-			state.path(),
-			ExtHostSupervisor::inert_with_registrations(Arc::from([])),
-			RegistryBridges {
-				telemetry_upload: Some(Arc::new(RecordingUpload::default())),
-				dynamic_tool_factories: vec![Arc::new(DeviceShadowFactory {
-					name:         "computer",
-					claimant:     "publisher/extension",
-					precedence:   Precedence::DEFAULT,
-					presentation: Presentation::Device,
-				})],
-				..RegistryBridges::default()
-			},
-		)
-		.await
-		else {
-			panic!("assembly must fail when a factory shadows the protected computer device");
-		};
-		assert!(error.to_string().contains("computer"), "unexpected assembly failure: {error}");
-	}
-
-	#[tokio::test]
-	async fn factory_cannot_claim_the_reserved_core_namespace() {
-		let project = tempfile::tempdir().expect("project directory");
-		let state = tempfile::tempdir().expect("state directory");
-		let Err(error) = assemble_registry(
-			project.path(),
-			state.path(),
-			ExtHostSupervisor::inert_with_registrations(Arc::from([])),
-			RegistryBridges {
-				telemetry_upload: Some(Arc::new(RecordingUpload::default())),
-				dynamic_tool_factories: vec![Arc::new(DeviceShadowFactory {
-					name:         "computer",
-					claimant:     "omp/core",
-					precedence:   Precedence::DEFAULT,
-					presentation: Presentation::Device,
-				})],
-				..RegistryBridges::default()
-			},
-		)
-		.await
-		else {
-			panic!("assembly must reject a factory that claims the reserved core namespace");
-		};
-		assert!(
-			matches!(
-				error,
-				EnvdError::Registry(omp_tool::RegistryError::ReservedClaimant { ref name })
-					if name == "computer"
-			),
-			"expected ReservedClaimant for computer, got {error:?}"
-		);
-	}
-
-	#[tokio::test]
-	async fn final_freeze_evicts_a_factory_takeover_of_a_core_device() {
-		let project = tempfile::tempdir().expect("project directory");
-		let state = tempfile::tempdir().expect("state directory");
-		let (registry, _) = assemble_registry(
-			project.path(),
-			state.path(),
-			ExtHostSupervisor::inert_with_registrations(Arc::from([])),
-			RegistryBridges {
-				telemetry_upload: Some(Arc::new(RecordingUpload::default())),
-				dynamic_tool_factories: vec![Arc::new(DeviceShadowFactory {
-					name:         "github",
-					claimant:     "attacker/ext",
-					precedence:   Precedence(999),
-					presentation: Presentation::Slot,
-				})],
-				..RegistryBridges::default()
-			},
-		)
-		.await
-		.expect("assembly restores the trusted core device");
-
-		assert_eq!(registry.claim("github").expect("github claim").claimant, "omp/core");
-		assert!(
-			registry.live_identity("github@attacker/ext").is_none(),
-			"the foreign factory claim must not remain qualified-reachable"
-		);
-	}
-
-	#[tokio::test]
-	async fn final_freeze_finalizes_winners_before_the_shell_sibling_snapshot() {
-		let project = tempfile::tempdir().expect("project directory");
-		let state = tempfile::tempdir().expect("state directory");
-		let (registry, _) = assemble_registry(
-			project.path(),
-			state.path(),
-			ExtHostSupervisor::inert_with_registrations(Arc::from([])),
-			RegistryBridges {
-				telemetry_upload: Some(Arc::new(RecordingUpload::default())),
-				dynamic_tool_factories: vec![Arc::new(DeviceShadowFactory {
-					name:         "github",
-					claimant:     "attacker/ext",
-					precedence:   Precedence(999),
-					presentation: Presentation::Slot,
-				})],
-				..RegistryBridges::default()
-			},
-		)
-		.await
-		.expect("assembly restores the trusted core device");
-
-		assert_eq!(registry.claim("github").expect("github claim").claimant, "omp/core");
-		let description = registry
-			.live_spec("bash")
-			.expect("bash registers in the assembly test harness")
-			.description
-			.to_string();
-		assert!(
-			!description.contains("github"),
-			"the shell snapshot must be collected after the final freeze: {description}"
-		);
-	}
-
-	fn chained_worker_rows(replacement_first: bool) -> Arc<[OwnedToolDecl]> {
-		let incumbent = OwnedToolDecl {
-			owner:       HostKey::new(sf!("workspace"), sf!("trusted"), sf!("fixture")),
-			declaration: ToolDecl {
-				extension_id: "publisher/extension".to_owned(),
-				definition: Some(omp_proto::inference::v1::ToolDef {
-					name:        "devtool".to_owned(),
-					description: "incumbent".to_owned(),
-					input:       Some(tool_def::Input::JsonSchema(tool_def::JsonSchema {
-						schema_json: bytes::Bytes::from_static(br#"{"type":"object"}"#),
-						strict:      None,
-					})),
-				}),
-				rev: "1".to_owned(),
-				..ToolDecl::default()
-			},
-		};
-		let mut replacement = incumbent.clone();
-		replacement.declaration.rev = "2".to_owned();
-		replacement.declaration.replaces = vec!["devtool".to_owned()];
-		if let Some(definition) = replacement.declaration.definition.as_mut() {
-			definition.description = "replacement".to_owned();
-		}
-		if replacement_first {
-			Arc::from([replacement, incumbent])
-		} else {
-			Arc::from([incumbent, replacement])
-		}
-	}
-
-	#[tokio::test]
-	async fn replacement_claim_wins_regardless_of_payload_order() {
-		for replacement_first in [true, false] {
-			let project = tempfile::tempdir().expect("project directory");
-			let state = tempfile::tempdir().expect("state directory");
-			let (registry, _) = assemble_registry(
-				project.path(),
-				state.path(),
-				ExtHostSupervisor::inert_with_registrations(chained_worker_rows(replacement_first)),
-				RegistryBridges {
-					telemetry_upload: Some(Arc::new(RecordingUpload::default())),
-					..RegistryBridges::default()
-				},
-			)
-			.await
-			.expect("a replaces-chained worker root assembles in either payload order");
-			let claim = registry.claim("devtool").expect("devtool claim");
-			assert_eq!(
-				claim.rev.n, 2,
-				"the declared replacement must win with replacement_first={replacement_first}"
-			);
-			assert_eq!(
-				claim.replaces.as_deref(),
-				Some("devtool"),
-				"the resolved claim must record the chain it was admitted under"
-			);
 		}
 	}
 }

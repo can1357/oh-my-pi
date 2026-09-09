@@ -6,11 +6,11 @@
 
 use std::{collections::BTreeMap, fmt};
 
+use omp_ai::auth::command::{CommandCredentialError, CommandCredentialResolver};
 use omp_core::{ExposeSecret as _, SecretString, Str};
-use omp_inference::auth::command::{CommandCredentialError, CommandCredentialResolver};
 use tokio_util::sync::CancellationToken;
 
-use super::config::{EnvironmentPolicy, HeaderPolicy, McpServerConfig};
+use super::config::{HeaderPolicy, McpServerConfig};
 
 /// Resolved configuration value retaining secret typing.
 #[derive(Clone)]
@@ -52,24 +52,16 @@ pub struct ResolvedTransportValues {
 /// Resolves the dynamic portions of one MCP declaration.
 ///
 /// Literal environment and origin-locked header policies bypass both exact
-/// environment lookup and command execution. Other values follow pi parity:
-/// `!command` uses the shared secret resolver; otherwise an exact environment
-/// variable name wins, falling back to the literal text.
+/// environment lookup and command execution. Other values use the shared secret
+/// resolver for `!command`; otherwise an exact environment variable name wins,
+/// falling back to the literal text.
 pub async fn resolve_transport_values(
 	config: &McpServerConfig,
 	environment: &BTreeMap<Str, Str>,
 	commands: Option<&CommandCredentialResolver>,
 	cancellation: &CancellationToken,
 ) -> Result<ResolvedTransportValues, ConfigValueError> {
-	let env = if config.env_policy == Some(EnvironmentPolicy::Literal) {
-		config
-			.env
-			.iter()
-			.map(|(key, value)| (key.clone(), ResolvedConfigValue::Public(value.clone())))
-			.collect()
-	} else {
-		resolve_map(&config.env, environment, commands, cancellation).await?
-	};
+	let env = resolve_map(&config.env, Some(config), environment, commands, cancellation).await?;
 	let headers = if config.header_policy == Some(HeaderPolicy::OriginLocked) {
 		config
 			.headers
@@ -77,19 +69,24 @@ pub async fn resolve_transport_values(
 			.map(|(key, value)| (key.clone(), ResolvedConfigValue::Public(value.clone())))
 			.collect()
 	} else {
-		resolve_map(&config.headers, environment, commands, cancellation).await?
+		resolve_map(&config.headers, None, environment, commands, cancellation).await?
 	};
 	Ok(ResolvedTransportValues { env, headers })
 }
 
 async fn resolve_map(
 	values: &BTreeMap<Str, Str>,
+	env_config: Option<&McpServerConfig>,
 	environment: &BTreeMap<Str, Str>,
 	commands: Option<&CommandCredentialResolver>,
 	cancellation: &CancellationToken,
 ) -> Result<BTreeMap<Str, ResolvedConfigValue>, ConfigValueError> {
 	let mut resolved = BTreeMap::new();
 	for (key, value) in values {
+		if env_config.is_some_and(|config| config.env_value_is_literal(key)) {
+			resolved.insert(key.clone(), ResolvedConfigValue::Public(value.clone()));
+			continue;
+		}
 		let value = resolve_value(value, environment, commands, cancellation).await?;
 		let empty = value.with_exposed(str::is_empty);
 		if !empty {
@@ -135,6 +132,7 @@ pub enum ConfigValueError {
 #[cfg(test)]
 mod tests {
 	use std::{
+		collections::BTreeSet,
 		sync::{
 			Arc,
 			atomic::{AtomicUsize, Ordering},
@@ -142,10 +140,10 @@ mod tests {
 		time::Duration,
 	};
 
-	use omp_inference::auth::command::{CommandCredentialExecutor, CommandExecutionFuture};
+	use omp_ai::auth::command::{CommandCredentialExecutor, CommandExecutionFuture};
 
 	use super::*;
-	use crate::mcp::config::{McpServerConfig, TransportKind};
+	use crate::mcp::config::{EnvironmentPolicy, McpServerConfig, TransportKind};
 
 	struct Executor {
 		calls: AtomicUsize,
@@ -174,6 +172,7 @@ mod tests {
 				(Str::from("FROM_ENV"), Str::from("ENV_NAME")),
 			]),
 			env_policy:        None,
+			env_literal_keys:  BTreeSet::new(),
 			cwd:               None,
 			url:               None,
 			headers:           BTreeMap::new(),
@@ -220,5 +219,27 @@ mod tests {
 		.expect("resolve");
 		assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
 		assert_eq!(values.env["TOKEN"].with_exposed(str::to_owned), "!credential");
+	}
+
+	#[tokio::test]
+	async fn literal_environment_keys_bypass_resolution_individually() {
+		let executor = Arc::new(Executor { calls: AtomicUsize::new(0) });
+		let resolver = CommandCredentialResolver::new(executor.clone(), Duration::from_millis(50));
+		let mut config = config();
+		config.env_literal_keys.insert(Str::from("TOKEN"));
+		config.env.insert(Str::from("EMPTY"), Str::new_static(""));
+		config.env_literal_keys.insert(Str::from("EMPTY"));
+		let values = resolve_transport_values(
+			&config,
+			&BTreeMap::from([(Str::from("ENV_NAME"), Str::from("public"))]),
+			Some(&resolver),
+			&CancellationToken::new(),
+		)
+		.await
+		.expect("resolve");
+		assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+		assert_eq!(values.env["TOKEN"].with_exposed(str::to_owned), "!credential");
+		assert_eq!(values.env["EMPTY"].with_exposed(str::to_owned), "");
+		assert_eq!(values.env["FROM_ENV"].with_exposed(str::to_owned), "public");
 	}
 }

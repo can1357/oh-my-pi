@@ -13,7 +13,8 @@ use futures::StreamExt as _;
 use omp_ar::zip::Writer;
 use omp_core::{Str, sf};
 use omp_tool::{
-	BlobRef, CapsBase, Ev, IncomingParams, ModelClass, Part, PromptCaps, Tool, ToolTerminal,
+	BlobRef, CapsBase, Diag, DiagKind, Ev, IncomingParams, ModelClass, Part, PromptCaps, Severity,
+	Tool, ToolTerminal, Unit,
 };
 use omp_tools::read::{
 	self, DirectorySource, Fault, ReadBlobs, ReadLease, ReadSources, SnapshotRecord, SourceKind,
@@ -178,12 +179,12 @@ impl ReadBlobs for RecordingBlobs {
 	}
 }
 
-async fn read_document_tool_text_with_blobs<B: ReadBlobs>(
+async fn read_document_tool_text_with_blobs_and_diags<B: ReadBlobs>(
 	path: &str,
 	document_path: &str,
 	bytes: Vec<u8>,
 	blobs: B,
-) -> String {
+) -> (String, Vec<Diag>) {
 	let tool = read::tool(
 		DocumentSources { path: Str::new(document_path), bytes: Bytes::from(bytes) },
 		blobs,
@@ -193,9 +194,16 @@ async fn read_document_tool_text_with_blobs<B: ReadBlobs>(
 		.args_committed(Str::new(json!({ "path": path }).to_string()))
 		.expect("read invocation remains live");
 	let events = tool.call(params).collect::<Vec<_>>().await;
-	let [Ev::Done(ToolTerminal::Done { result, .. })] = events.as_slice() else {
-		panic!("expected one terminal document read event: {events:?}");
-	};
+	let mut diags = Vec::new();
+	let mut terminal = None;
+	for event in events {
+		match event {
+			Ev::Diag(diag) => diags.push(diag),
+			Ev::Done(ToolTerminal::Done { result, .. }) => terminal = Some(result),
+			other => panic!("unexpected document read event: {other:?}"),
+		}
+	}
+	let result = terminal.expect("one terminal document read event");
 	let parts = tool.prompt(
 		result.as_ref(),
 		&PromptCaps::for_tool(
@@ -211,11 +219,30 @@ async fn read_document_tool_text_with_blobs<B: ReadBlobs>(
 	let [Part::Text { text }] = parts.as_slice() else {
 		panic!("expected one model-facing document text part: {parts:?}");
 	};
-	text.to_string()
+	(text.to_string(), diags)
+}
+
+async fn read_document_tool_text_with_blobs<B: ReadBlobs>(
+	path: &str,
+	document_path: &str,
+	bytes: Vec<u8>,
+	blobs: B,
+) -> String {
+	read_document_tool_text_with_blobs_and_diags(path, document_path, bytes, blobs)
+		.await
+		.0
 }
 
 async fn read_document_tool_text(path: &str, document_path: &str, bytes: Vec<u8>) -> String {
 	read_document_tool_text_with_blobs(path, document_path, bytes, NoBlobs).await
+}
+
+async fn read_document_tool_text_and_diags(
+	path: &str,
+	document_path: &str,
+	bytes: Vec<u8>,
+) -> (String, Vec<Diag>) {
+	read_document_tool_text_with_blobs_and_diags(path, document_path, bytes, NoBlobs).await
 }
 
 #[test]
@@ -278,12 +305,20 @@ fn selector_fixture_docx() -> Vec<u8> {
 
 #[tokio::test]
 async fn read_tool_dispatches_docx_bytes_and_applies_line_selectors_to_converted_text() {
-	let output =
-		read_document_tool_text("fixture.docx:3-3", "fixture.docx", selector_fixture_docx()).await;
-	assert_eq!(
-		output,
-		"2:# Range Fixture\n3:\n4:alpha\n5:\n6:beta\n\n[4 more lines in file. Use :7 to continue]"
-	);
+	let (output, diags) = read_document_tool_text_and_diags(
+		"fixture.docx:3-3",
+		"fixture.docx",
+		selector_fixture_docx(),
+	)
+	.await;
+	assert_eq!(output, "2:# Range Fixture\n3:\n4:alpha\n5:\n6:beta");
+	let [diag] = diags.as_slice() else {
+		panic!("document range emits one diagnostic: {diags:?}");
+	};
+	assert_eq!(diag.native_kind(), Some(DiagKind::Pagination));
+	assert_eq!(diag.severity, Severity::Info);
+	assert_eq!(diag.continuation.as_deref(), Some(":7"));
+	assert_eq!(diag.omitted, Some(omp_tool::Omitted { count: 4, unit: Unit::Lines }));
 }
 
 #[tokio::test]
@@ -308,7 +343,7 @@ async fn read_tool_routes_new_document_extensions_through_markit() {
 }
 
 #[tokio::test]
-async fn converted_document_truncation_spills_the_complete_numbered_markdown() {
+async fn oversized_converted_document_returns_the_complete_numbered_markdown() {
 	let mut document = String::from(
 		r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#,
 	);
@@ -322,34 +357,32 @@ async fn converted_document_truncation_spills_the_complete_numbered_markdown() {
 		.expect("DOCX is supported");
 	let framed = format!("Content-Type: text/markdown\n{}", converted.text);
 	let numbered = framed
-		.split("\n")
+		.split('\n')
 		.enumerate()
 		.map(|(index, line)| format!("{}:{line}", index + 1))
 		.collect::<Vec<_>>()
 		.join("\n");
 	let full = numbered;
-	let total_lines = full.lines().count();
+	assert!(full.lines().count() > 3000, "fixture must exceed the former 3,000-line read cap");
 	let blobs = RecordingBlobs::default();
 
 	let output =
 		read_document_tool_text_with_blobs("large.docx", "large.docx", bytes, blobs.clone()).await;
+	assert!(!output.contains("[truncated:"), "read must not append its own notice: {output}");
+	let last_line_at = full
+		.find("Converted line 3200")
+		.expect("fixture renders its final converted line");
 	assert!(
-		output
-			.ends_with(&format!(" of {total_lines} lines shown; read artifact://1 for full output]")),
-		"{output}"
+		output.starts_with(&full[..last_line_at])
+			&& output
+				.get(last_line_at..)
+				.is_some_and(|tail| tail.starts_with("Converted line 3200")),
+		"converted output must be complete through its final line"
 	);
-	let visible = output
-		.split_once("\n\n[truncated: ")
-		.expect("converted output has the shared blob truncation footer")
-		.0;
-	assert_eq!(visible, &full[..visible.len()]);
-
-	let stored = blobs.stored.lock();
-	let [(stored_text, media_type)] = stored.as_slice() else {
-		panic!("converted output must spill exactly one blob: {stored:?}");
-	};
-	assert_eq!(stored_text.as_ref(), full.as_bytes());
-	assert_eq!(media_type.as_str(), "text/plain; charset=utf-8");
+	assert!(
+		blobs.stored.lock().is_empty(),
+		"read must not spill its own artifact; the dispatcher bounds output once"
+	);
 }
 
 #[tokio::test]

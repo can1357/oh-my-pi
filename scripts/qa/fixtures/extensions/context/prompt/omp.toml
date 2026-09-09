@@ -1,0 +1,22 @@
+id = "qacontext"
+version = "0.1.0"
+omp_api = 1
+entry = "qacontext"
+
+[[declarations]]
+id = "context-marker"
+kind = "prompt_slot"
+module = "qacontext"
+key = "guidance"
+trigger = "eager-prompt"
+api = 1
+failure = "fail-open"
+
+[[declarations]]
+id = "context-projection"
+kind = "hook"
+module = "qacontext"
+key = "thread_projection/domain"
+trigger = "lazy"
+api = 1
+failure = "fail-open"

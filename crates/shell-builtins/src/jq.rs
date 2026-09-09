@@ -25,7 +25,7 @@ use jaq_core::{
 	load::{self, test},
 };
 use jaq_json::Val;
-use omp_shell_engine::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use omp_shell::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 
 use crate::host::{Host, StreamWriter, Utility, util};
 
@@ -1133,6 +1133,7 @@ fn real_main(cli: &Cli, host: &mut Host) -> Result<i32, Error> {
 				read::load_file(path).map_err(|e| Error::Io(Some(path.display().to_string()), e))?;
 			let inputs = read::slice(cli, &file);
 			if cli.in_place {
+				host.ensure_writable(path)?;
 				// create a temporary file where output is written to,
 				// in the resolved target's directory so the final rename
 				// stays on the same filesystem

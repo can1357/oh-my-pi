@@ -91,32 +91,82 @@ struct HostFile {
 	hosts: BTreeMap<Str, HostConfig>,
 }
 
+/// The two `hosts.toml` files one process reads and mutates.
+///
+/// User configuration lives under `~/.o2`
+/// ([`omp_core::dirs::user_config_root`], profile-aware) and never under the
+/// data or state directory; project declarations live in
+/// `<project>/.omp/hosts.toml` and shadow user aliases.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostPaths {
+	/// User-owned `<config root>/hosts.toml`.
+	pub user:              PathBuf,
+	/// Project-owned `<project>/.omp/hosts.toml`.
+	pub project:           PathBuf,
+	/// Legacy user JSON source, read-only and lower precedence than TOML.
+	legacy_user:           PathBuf,
+	/// Legacy project JSON source, read-only and lower precedence than TOML.
+	legacy_project:        PathBuf,
+	/// Legacy hidden project JSON source.
+	legacy_project_hidden: PathBuf,
+}
+
+impl HostPaths {
+	/// Resolves both files from the user configuration root and the project
+	/// root.
+	#[must_use]
+	pub fn new(user_config_root: &Path, project_root: &Path) -> Self {
+		Self {
+			user:                  user_config_root.join("hosts.toml"),
+			project:               project_root.join(".omp/hosts.toml"),
+			legacy_user:           user_config_root.join("ssh.json"),
+			legacy_project:        project_root.join("ssh.json"),
+			legacy_project_hidden: project_root.join(".ssh.json"),
+		}
+	}
+}
+
 /// Immutable configured-host store, reloadable by its owner.
 #[derive(Clone, Debug, Default)]
 pub struct HostStore {
 	hosts: Arc<RwLock<BTreeMap<Str, HostConfig>>>,
+	paths: Option<Arc<HostPaths>>,
 }
 
 impl HostStore {
+	/// Loads the effective host authority: every user host, shadowed by any
+	/// project host with the same alias. The result is read-only; scoped
+	/// writers load one file with [`HostStore::load`].
+	pub fn load_layered(paths: &HostPaths) -> Result<Self, SshError> {
+		Ok(Self {
+			hosts: Arc::new(RwLock::new(load_effective_hosts(paths)?)),
+			paths: Some(Arc::new(paths.clone())),
+		})
+	}
+
 	/// Loads `hosts.toml`. A missing file produces an empty store.
 	pub fn load(path: &Path) -> Result<Self, SshError> {
-		let body = match fs::read_to_string(path) {
-			Ok(body) => body,
-			Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
-			Err(source) => return Err(SshError::ConfigIo { path: path.to_path_buf(), source }),
+		Ok(Self { hosts: Arc::new(RwLock::new(parse_hosts(path)?)), paths: None })
+	}
+
+	/// Atomically refreshes a layered store from every retained source.
+	///
+	/// Missing foreign files remain empty, malformed foreign files are
+	/// contained to that source, and a malformed native file leaves the
+	/// previously published snapshot intact.
+	pub fn refresh(&self) -> Result<(), SshError> {
+		let Some(paths) = &self.paths else {
+			return Ok(());
 		};
-		let parsed: HostFile = toml::from_str(&body)
-			.map_err(|source| SshError::ConfigParse { path: path.to_path_buf(), source })?;
-		for (alias, host) in &parsed.hosts {
-			validate_alias(alias)?;
-			validate_host(host)?;
-		}
-		Ok(Self { hosts: Arc::new(RwLock::new(parsed.hosts)) })
+		let hosts = load_effective_hosts(paths)?;
+		*self.hosts.write() = hosts;
+		Ok(())
 	}
 
 	/// Returns a configured host without permitting URI-provided connection
 	/// overrides.
 	pub fn get(&self, alias: &str) -> Result<HostConfig, SshError> {
+		self.refresh()?;
 		self
 			.hosts
 			.read()
@@ -127,6 +177,9 @@ impl HostStore {
 
 	/// Returns configured aliases in deterministic order.
 	pub fn aliases(&self) -> Vec<Str> {
+		if let Err(error) = self.refresh() {
+			tracing::warn!(%error, "failed to refresh configured SSH hosts");
+		}
 		self.hosts.read().keys().cloned().collect()
 	}
 
@@ -151,10 +204,102 @@ impl HostStore {
 	}
 }
 
+fn load_effective_hosts(paths: &HostPaths) -> Result<BTreeMap<Str, HostConfig>, SshError> {
+	let mut hosts = parse_legacy_hosts(&paths.legacy_user);
+	hosts.extend(parse_hosts(&paths.user)?);
+	hosts.extend(parse_legacy_hosts(&paths.legacy_project_hidden));
+	hosts.extend(parse_legacy_hosts(&paths.legacy_project));
+	hosts.extend(parse_hosts(&paths.project)?);
+	Ok(hosts)
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LegacyHostFile {
+	#[serde(default)]
+	hosts: BTreeMap<Str, LegacyHostConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyHostConfig {
+	host:     Str,
+	username: Str,
+	#[serde(default = "default_port")]
+	port:     u16,
+	host_key: Str,
+	#[serde(default)]
+	key_path: Option<PathBuf>,
+}
+
+fn parse_legacy_hosts(path: &Path) -> BTreeMap<Str, HostConfig> {
+	let body = match fs::read_to_string(path) {
+		Ok(body) => body,
+		Err(source)
+			if matches!(source.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) =>
+		{
+			return BTreeMap::new();
+		},
+		Err(source) => {
+			tracing::warn!(path = %path.display(), %source, "failed to read legacy SSH configuration");
+			return BTreeMap::new();
+		},
+	};
+	let parsed = match serde_json::from_str::<LegacyHostFile>(&body) {
+		Ok(parsed) => parsed,
+		Err(source) => {
+			tracing::warn!(path = %path.display(), %source, "failed to parse legacy SSH configuration");
+			return BTreeMap::new();
+		},
+	};
+	let home = omp_core::dirs::home_dir();
+	parsed
+		.hosts
+		.into_iter()
+		.filter_map(|(alias, legacy)| {
+			let key = legacy.key_path.map(|path| {
+				let home_relative = path.strip_prefix("~").ok().map(Path::to_path_buf);
+				match (home_relative, &home) {
+					(Some(rest), Some(home)) => home.join(rest),
+					_ => path,
+				}
+			});
+			let host = HostConfig {
+				address:      legacy.host,
+				port:         legacy.port,
+				user:         legacy.username,
+				host_key:     legacy.host_key,
+				auth:         key.map_or(AuthPolicy::Agent, |path| AuthPolicy::Key { path }),
+				timeout_secs: default_timeout(),
+			};
+			if validate_alias(&alias).is_err() || validate_host(&host).is_err() {
+				tracing::warn!(path = %path.display(), host = %alias, "ignored invalid legacy SSH host");
+				None
+			} else {
+				Some((alias, host))
+			}
+		})
+		.collect()
+}
+
+fn parse_hosts(path: &Path) -> Result<BTreeMap<Str, HostConfig>, SshError> {
+	let body = match fs::read_to_string(path) {
+		Ok(body) => body,
+		Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+		Err(source) => return Err(SshError::ConfigIo { path: path.to_path_buf(), source }),
+	};
+	let parsed: HostFile = toml::from_str(&body)
+		.map_err(|source| SshError::ConfigParse { path: path.to_path_buf(), source })?;
+	for (alias, host) in &parsed.hosts {
+		validate_alias(alias)?;
+		validate_host(host)?;
+	}
+	Ok(parsed.hosts)
+}
+
 fn persist_hosts(path: &Path, hosts: &BTreeMap<Str, HostConfig>) -> Result<(), SshError> {
 	let body = toml::to_string_pretty(&HostFile { hosts: hosts.clone() })
 		.map_err(|source| SshError::ConfigEncode { path: path.to_path_buf(), source })?;
-	omp_settings::io::atomic_replace(path, &body)
+	crate::atomic_replace(path, &body)
 		.map_err(|source| SshError::ConfigWrite { path: path.to_path_buf(), source })
 }
 
@@ -365,13 +510,22 @@ impl SshService {
 		let host = self.hosts.get(alias)?;
 		let timeout = Duration::from_secs(host.timeout_secs.clamp(1, MAX_TIMEOUT_SECS));
 		let deadline = time::Instant::now() + timeout;
-		time::timeout_at(deadline, operation)
-			.await
-			.map_err(|_| SshError::Timeout)?
+		match time::timeout_at(deadline, operation).await {
+			Ok(result) => result,
+			Err(_) => Err(SshError::Timeout),
+		}
 	}
 
+	#[tracing::instrument(
+		name = "ssh_connect",
+		level = "debug",
+		skip_all,
+		fields(alias = %alias, host = tracing::field::Empty, port = tracing::field::Empty),
+	)]
 	async fn connect(&self, alias: &str) -> Result<client::Handle<ClientHandler>, SshError> {
 		let host = self.hosts.get(alias)?;
+		tracing::Span::current().record("host", host.address.as_str());
+		tracing::Span::current().record("port", host.port);
 		let connect = client::connect(
 			Arc::new(client::Config::default()),
 			(host.address.as_str(), host.port),
@@ -416,6 +570,7 @@ impl SshService {
 
 	/// Initializes SFTP, then marks both SFTP and exec available without running
 	/// a probe command.
+	#[tracing::instrument(name = "ssh_probe", level = "debug", skip_all, fields(alias = %alias))]
 	pub async fn probe(&self, alias: &str) -> Result<HostCapabilities, SshError> {
 		self
 			.with_deadline(alias, async {
@@ -433,6 +588,7 @@ impl SshService {
 	/// The effective bound is the smaller of `max_bytes` and 8 MiB; metadata
 	/// known to exceed it, or a stream that crosses it, returns
 	/// [`SshError::Limit`].
+	#[tracing::instrument(name = "ssh_read", level = "debug", skip_all, fields(alias = %alias, path = %path, max_bytes = max_bytes))]
 	pub async fn read(
 		&self,
 		alias: &str,
@@ -470,6 +626,12 @@ impl SshService {
 	///
 	/// The UTF-8 `path` is passed directly to SFTP, and completion includes a
 	/// server sync and channel shutdown.
+	#[tracing::instrument(
+		name = "ssh_write",
+		level = "debug",
+		skip_all,
+		fields(alias = %alias, path = %path, bytes = bytes.len()),
+	)]
 	pub async fn write(&self, alias: &str, path: &str, bytes: &[u8]) -> Result<(), SshError> {
 		if bytes.len() > DEFAULT_WRITE_LIMIT {
 			return Err(SshError::Limit { limit: DEFAULT_WRITE_LIMIT });
@@ -493,6 +655,7 @@ impl SshService {
 	///
 	/// The UTF-8 path is passed directly to SFTP; an omitted server length is
 	/// reported as zero.
+	#[tracing::instrument(name = "ssh_stat", level = "debug", skip_all, fields(alias = %alias, path = %path))]
 	pub async fn stat(&self, alias: &str, path: &str) -> Result<RemoteMetadata, SshError> {
 		self
 			.with_deadline(alias, async {
@@ -510,6 +673,7 @@ impl SshService {
 	///
 	/// At most the smaller of `max_entries` and 1,000 entries are returned; the
 	/// boolean result reports whether additional entries were discarded.
+	#[tracing::instrument(name = "ssh_list", level = "debug", skip_all, fields(alias = %alias, path = %path, max_entries = max_entries))]
 	pub async fn list(
 		&self,
 		alias: &str,
@@ -544,6 +708,7 @@ impl SshService {
 	}
 
 	/// Opens a bounded bidirectional channel to one remote command.
+	#[tracing::instrument(name = "ssh_interactive_open", level = "debug", skip_all, fields(alias = %alias))]
 	pub async fn open_interactive(
 		&self,
 		alias: &str,
@@ -566,6 +731,12 @@ impl SshService {
 
 	/// Binds a loopback listener and forwards accepted TCP connections through
 	/// the configured SSH host.
+	#[tracing::instrument(
+		name = "ssh_local_forward",
+		level = "debug",
+		skip_all,
+		fields(alias = %alias, local_port = local_port, remote_host = %remote_host, remote_port = remote_port),
+	)]
 	pub async fn local_forward(
 		&self,
 		alias: &str,
@@ -601,6 +772,7 @@ impl SshService {
 	///
 	/// NUL-containing commands are rejected. Stdout and stderr are each bounded
 	/// independently by the smaller of `max_bytes` and 1 MiB.
+	#[tracing::instrument(name = "ssh_exec", level = "debug", skip_all, fields(alias = %alias, max_bytes = max_bytes))]
 	pub async fn exec(
 		&self,
 		alias: &str,
@@ -852,9 +1024,9 @@ pub enum SshError {
 	ConfigWrite {
 		/// Configuration path that could not be replaced.
 		path:   PathBuf,
-		/// Atomic settings-write failure.
+		/// Atomic filesystem failure.
 		#[source]
-		source: omp_settings::io::SettingsIoError,
+		source: io::Error,
 	},
 	/// A host alias was empty, exceeded 128 bytes, or contained a disallowed
 	/// ASCII character.
@@ -1009,6 +1181,67 @@ mod tests {
 			.await;
 		assert!(matches!(result, Err(SshError::Timeout)));
 		assert!(started.elapsed() < Duration::from_secs(3));
+	}
+
+	#[test]
+	fn layered_store_reads_user_config_root_and_project_shadows_it() {
+		let temp = tempfile::tempdir().expect("tempdir");
+		let user_root = temp.path().join("o2");
+		let project_root = temp.path().join("project");
+		fs::create_dir_all(&user_root).expect("user root");
+		fs::create_dir_all(project_root.join(".omp")).expect("project root");
+		let paths = HostPaths::new(&user_root, &project_root);
+		assert_eq!(paths.user, user_root.join("hosts.toml"));
+		assert_eq!(paths.project, project_root.join(".omp/hosts.toml"));
+
+		let host = |user: &str| HostConfig {
+			address:      sf!("localhost"),
+			port:         22,
+			user:         Str::new(user),
+			host_key:     sf!("SHA256:test"),
+			auth:         AuthPolicy::Agent,
+			timeout_secs: 30,
+		};
+		HostStore::default()
+			.upsert(&paths.user, sf!("shared"), host("from-user"))
+			.expect("write user host");
+		let user_store = HostStore::load(&paths.user).expect("load user store");
+		user_store
+			.upsert(&paths.user, sf!("user-only"), host("user-only"))
+			.expect("write second user host");
+		HostStore::default()
+			.upsert(&paths.project, sf!("shared"), host("from-project"))
+			.expect("write project host");
+
+		let layered = HostStore::load_layered(&paths).expect("layered load");
+		assert_eq!(layered.aliases(), vec![sf!("shared"), sf!("user-only")]);
+		assert_eq!(layered.get("shared").expect("shared").user, "from-project");
+		assert_eq!(layered.get("user-only").expect("user-only").user, "user-only");
+		assert!(matches!(layered.get("absent"), Err(SshError::UnknownHost { .. })));
+
+		fs::write(
+			&paths.legacy_project,
+			r#"{"hosts":{"legacy":{"host":"example.test","username":"legacy","hostKey":"SHA256:legacy"},"shared":{"host":"ignored.test","username":"legacy","hostKey":"SHA256:legacy"}}}"#,
+		)
+		.expect("write legacy project source");
+		fs::write(&paths.legacy_project_hidden, "{").expect("write malformed independent source");
+		assert_eq!(layered.aliases(), vec![sf!("legacy"), sf!("shared"), sf!("user-only")]);
+		assert_eq!(layered.get("legacy").expect("legacy").user, "legacy");
+		assert_eq!(layered.get("shared").expect("shared").user, "from-project");
+
+		let project_store = HostStore::load(&paths.project).expect("reload project writer");
+		project_store
+			.upsert(&paths.project, sf!("refreshed"), host("new"))
+			.expect("write refreshed host");
+		assert_eq!(layered.get("refreshed").expect("refreshed").user, "new");
+
+		let missing = HostPaths::new(&temp.path().join("nope"), &temp.path().join("nope"));
+		assert!(
+			HostStore::load_layered(&missing)
+				.expect("missing files are empty")
+				.aliases()
+				.is_empty()
+		);
 	}
 
 	#[tokio::test]

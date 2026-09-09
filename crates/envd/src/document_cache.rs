@@ -7,10 +7,10 @@ use std::{
 	time::{Duration, SystemTime},
 };
 
-use omp_core::Hash32;
-use omp_storage::document_cache::{
+use omp_cache::document_cache::{
 	DocumentCache, DocumentCacheError, DocumentCacheGcReport, DocumentCachePolicy,
 };
+use omp_core::Hash32;
 use tokio::{
 	sync::watch::Receiver,
 	task::JoinHandle,

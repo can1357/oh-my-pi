@@ -6,11 +6,6 @@ provider "ollama-cloud" {
 		thinking-efforts "minimal" "low" "medium" "high"
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
-	models "deepseek-v4-pro" {
-		requires-reasoning-content-for-all-assistant-turns #true
-		thinking-efforts "high" "max"
-	}
-	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "deepseek-v4-pro:preview" {
 		thinking-efforts "low" "high" "max"
 	}

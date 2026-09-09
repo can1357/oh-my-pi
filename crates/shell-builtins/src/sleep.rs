@@ -1,9 +1,9 @@
-//! The `sleep` builtin, moved from `pi-shell`.
+//! The `sleep` builtin.
 
 use std::{future::Future, io::Write, result, time::Duration};
 
 use clap::Parser;
-use omp_shell_engine::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
+use omp_shell::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
 use tokio::time;
 
 use crate::host::parse_duration;
@@ -17,12 +17,27 @@ pub(crate) struct SleepCommand {
 }
 
 impl builtins::Command for SleepCommand {
-	type Error = omp_shell_engine::Error;
+	type Error = omp_shell::Error;
 
-	fn execute<SE: omp_shell_engine::ShellExtensions>(
+	fn new<I>(args: I) -> result::Result<Self, clap::Error>
+	where
+		I: IntoIterator<Item = String>,
+	{
+		Self::try_parse_from(args).inspect_err(|error| {
+			if error.use_stderr() {
+				tracing::warn!(
+					builtin = "sleep",
+					error_kind = ?error.kind(),
+					"builtin arguments rejected"
+				);
+			}
+		})
+	}
+
+	fn execute<SE: omp_shell::ShellExtensions>(
 		&self,
 		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = result::Result<ExecutionResult, omp_shell_engine::Error>> + Send {
+	) -> impl Future<Output = result::Result<ExecutionResult, omp_shell::Error>> + Send {
 		let durations = self.durations.clone();
 		async move {
 			if context.is_cancelled() {
@@ -31,6 +46,7 @@ impl builtins::Command for SleepCommand {
 			let mut total = Duration::ZERO;
 			for duration in &durations {
 				let Some(parsed) = parse_duration(duration) else {
+					tracing::warn!(builtin = "sleep", "builtin duration rejected");
 					let _ = writeln!(context.stderr(), "sleep: invalid time interval '{duration}'");
 					return Ok(ExecutionResult::new(1));
 				};
@@ -55,7 +71,7 @@ impl builtins::Command for SleepCommand {
 mod tests {
 	use std::io::{self, Read};
 
-	use omp_shell_engine::{
+	use omp_shell::{
 		ExecutionParameters, Shell,
 		builtins::Command,
 		openfiles::{OpenFile, OpenFiles},

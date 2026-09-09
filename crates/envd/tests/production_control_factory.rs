@@ -1,6 +1,7 @@
 //! Proves normal server construction installs live production CONTROL owners.
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
+use omp_con::Ctx;
 use omp_core::{Principal, sf};
 use omp_envd::{
 	EnvServer, EnvdError, RegistryBridges, exthost::control::ControlConnectionIdentity,
@@ -33,11 +34,15 @@ async fn normal_server_refuses_control_identity_without_admitted_manifest() {
 		sf!("fixture-session"),
 		11,
 	);
+	let con = Arc::new(Ctx::new());
+	let convars = Arc::new(omp_envd::exthost::ConvarControlFactory::new(Arc::clone(&con)));
 	let server = EnvServer::open_local(
 		project.path(),
 		state.path(),
 		Registry::new(),
 		config,
+		&con,
+		convars,
 		RegistryBridges::default(),
 	)
 	.await

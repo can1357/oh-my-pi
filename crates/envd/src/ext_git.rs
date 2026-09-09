@@ -1,43 +1,34 @@
 //! Environment-backed native Git materialization for pinned extension trees.
-//!
-//! The host owns the Git runner, so the fetch/checkout driver lives beside it
-//! rather than in the extension domain crate.
 
 use std::{
 	fs, io,
 	path::{Path, PathBuf},
-	sync::atomic::{AtomicU64, Ordering},
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
 };
 
 use omp_core::Hash32;
 use omp_ext::{ExtensionCode, ExtensionError, config::SourceSpec};
 use tokio_util::sync::CancellationToken;
 
-use super::vcs::git::{
-	commands::{CommandError, GitCommands},
-	repo::Repository,
-	runner::{GitDeadline, GitRunError, GitRunOptions, GitRunner},
-};
-
+use super::vcs::git::{blocking, commands::GitCommands, repo::Repository};
 static GIT_MATERIALIZATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-/// Environment-backed native Git source fetcher for pinned extension trees.
 #[derive(Clone)]
+/// Materializes pinned Git extension sources through the shared VCS backend.
 pub struct NativeGitResolver {
-	runner:     GitRunner,
 	commands:   GitCommands,
 	cache_root: PathBuf,
 }
-
 impl NativeGitResolver {
-	/// Creates a resolver over the Environment Git runner and an app-owned
-	/// content cache.
-	pub fn new(runner: GitRunner, cache_root: PathBuf) -> Self {
-		Self { commands: GitCommands::new(runner.clone()), runner, cache_root }
+	/// Creates a resolver rooted at the app-owned repository cache.
+	pub fn new(cache_root: PathBuf) -> Self {
+		Self { commands: GitCommands::new(), cache_root }
 	}
 
-	/// Fetches exactly the pinned revision and atomically materializes a clean
-	/// source tree. Returns the validated contained subdirectory when declared.
+	/// Fetches and verifies one pinned source before atomically publishing it.
 	pub async fn materialize(
 		&self,
 		source: &SourceSpec,
@@ -51,50 +42,32 @@ impl NativeGitResolver {
 			return Err(ext_git_error("Git materialization destination already exists"));
 		}
 		fs::create_dir_all(&self.cache_root).map_err(git_io)?;
-		let cache_name = Hash32::sum(repository.as_bytes()).to_hex();
-		let cache = self.cache_root.join(cache_name.as_str());
+		let cache = self
+			.cache_root
+			.join(Hash32::sum(repository.as_bytes()).to_hex().as_str());
 		if !cache.is_dir() {
 			let sequence = GIT_MATERIALIZATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
 			let stage = self
 				.cache_root
 				.join(format!(".git-cache-{sequence:016x}.tmp"));
-			let stage_arg = utf8_path(&stage)?;
-			let output = self
-				.runner
-				.run(
-					&self.cache_root,
-					&["init", "--bare", stage_arg],
-					GitRunOptions {
-						read_only:       false,
-						parse_sensitive: true,
-						deadline:        GitDeadline::Local,
-					},
-					cancel,
-				)
+			let stage2 = stage.clone();
+			let repo = blocking(Some(cancel), move || omp_vcs::git::init_bare(&stage2))
 				.await
-				.map_err(git_run)?;
-			if output.exit_code != 0 {
-				let _ = fs::remove_dir_all(&stage);
-				return Err(git_exit(output.exit_code));
-			}
+				.map_err(git_vcs)?;
+			drop(repo);
 			match fs::rename(&stage, &cache) {
 				Ok(()) => {},
 				Err(_) if cache.is_dir() => {
 					let _ = fs::remove_dir_all(&stage);
 				},
-				Err(error) => {
+				Err(e) => {
 					let _ = fs::remove_dir_all(&stage);
-					return Err(git_io(error));
+					return Err(git_io(e));
 				},
 			}
 		}
-		let bare = Repository {
-			worktree_root: cache.clone(),
-			git_dir:       cache.clone(),
-			common_dir:    cache.clone(),
-			primary_root:  cache.clone(),
-			bare:          true,
-		};
+		let handle = Arc::new(omp_vcs::git::GitRepo::require(&cache).map_err(git_vcs)?);
+		let bare = Repository::from_handle(handle);
 		self
 			.commands
 			.add_remote(&bare, "origin", repository, cancel)
@@ -106,66 +79,39 @@ impl NativeGitResolver {
 			.fetch_refspec(&bare, "origin", revision, target, cancel)
 			.await
 			.map_err(git_command)?;
-		let commit_ref = format!("{target}^{{commit}}");
 		let resolved = self
 			.commands
-			.resolve_ref(&cache, &commit_ref, cancel)
+			.resolve_ref(&cache, &format!("{target}^{{commit}}"), cancel)
 			.await
 			.map_err(git_command)?
 			.ok_or_else(|| ext_git_error("fetched Git revision is absent"))?;
 		if matches!(revision.len(), 40 | 64) && !resolved.eq_ignore_ascii_case(revision) {
 			return Err(ext_git_error("fetched Git revision differs from the pinned commit"));
 		}
-
 		let sequence = GIT_MATERIALIZATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
 		if let Some(parent) = destination.parent() {
 			fs::create_dir_all(parent).map_err(git_io)?;
 		}
 		let stage = destination.with_file_name(format!(".git-source-{sequence:016x}.tmp"));
-		let cache_arg = utf8_path(&cache)?;
-		let stage_arg = utf8_path(&stage)?;
-		let output = self
-			.runner
-			.run(
-				&self.cache_root,
-				&["clone", "--no-checkout", cache_arg, stage_arg],
-				GitRunOptions {
-					read_only:       false,
-					parse_sensitive: true,
-					deadline:        GitDeadline::Local,
-				},
-				cancel,
-			)
+		omp_vcs::git::clone(
+			utf8_path(&cache)?,
+			&stage,
+			&omp_vcs::CloneOptions { sha: Some(resolved.as_str().to_owned()), ..Default::default() },
+			Some(cancel.clone()),
+		)
+		.await
+		.map_err(git_vcs)?;
+		let repo = Arc::new(omp_vcs::git::GitRepo::require(&stage).map_err(git_vcs)?);
+		let selected = resolved.as_str().to_owned();
+		blocking(Some(cancel), move || repo.checkout(&selected))
 			.await
-			.map_err(git_run)?;
-		if output.exit_code != 0 {
-			let _ = fs::remove_dir_all(&stage);
-			return Err(git_exit(output.exit_code));
-		}
-		let output = self
-			.runner
-			.run(
-				&stage,
-				&["checkout", "--detach", resolved.as_str()],
-				GitRunOptions {
-					read_only:       false,
-					parse_sensitive: true,
-					deadline:        GitDeadline::Local,
-				},
-				cancel,
-			)
-			.await
-			.map_err(git_run)?;
-		if output.exit_code != 0 {
-			let _ = fs::remove_dir_all(&stage);
-			return Err(git_exit(output.exit_code));
-		}
+			.map_err(git_vcs)?;
 		fs::remove_dir_all(stage.join(".git")).map_err(git_io)?;
 		fs::rename(&stage, destination).map_err(git_io)?;
 		let root = fs::canonicalize(destination).map_err(git_io)?;
 		let selected = subdirectory
 			.as_ref()
-			.map_or_else(|| root.clone(), |path| root.join(path));
+			.map_or_else(|| root.clone(), |p| root.join(p));
 		let selected = fs::canonicalize(selected).map_err(git_io)?;
 		if !selected.starts_with(&root) {
 			return Err(ext_git_error("Git source subdirectory escapes the materialized tree"));
@@ -173,32 +119,20 @@ impl NativeGitResolver {
 		Ok(selected)
 	}
 }
-
 fn utf8_path(path: &Path) -> Result<&str, ExtensionError> {
 	path
 		.to_str()
 		.ok_or_else(|| ext_git_error("Git materialization path is not UTF-8"))
 }
-
 fn ext_git_error(detail: &str) -> ExtensionError {
 	ExtensionError::new(ExtensionCode::EIntegrity, detail)
 }
-
 fn git_io(error: io::Error) -> ExtensionError {
 	ExtensionError::new(ExtensionCode::EIntegrity, format!("Git materialization I/O: {error}"))
 }
-
-fn git_run(error: GitRunError) -> ExtensionError {
+fn git_vcs(error: omp_vcs::Error) -> ExtensionError {
 	ExtensionError::new(ExtensionCode::EIntegrity, format!("Environment Git failed: {error}"))
 }
-
-fn git_command(error: CommandError) -> ExtensionError {
+fn git_command(error: super::vcs::git::commands::CommandError) -> ExtensionError {
 	ExtensionError::new(ExtensionCode::EIntegrity, format!("Environment Git failed: {error}"))
-}
-
-fn git_exit(code: i32) -> ExtensionError {
-	ExtensionError::new(
-		ExtensionCode::EIntegrity,
-		format!("Environment Git exited with status {code}"),
-	)
 }

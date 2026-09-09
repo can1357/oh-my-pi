@@ -1,608 +1,1228 @@
-//! Transport seam contracts for in-process and RPC agent turns.
+//! Journal and DOM contracts for complete, tool-using, steered, and interrupted
+//! turns.
 
 use std::{
-	collections::{BTreeMap, VecDeque},
-	pin::Pin,
+	future::{Future, ready},
 	sync::{
 		Arc,
 		atomic::{AtomicUsize, Ordering},
 	},
-	time::Duration,
+	time::{Duration, SystemTime},
 };
 
-use bytes::Bytes;
-use flume::Receiver;
-use futures::{Stream, StreamExt};
 use omp_agent::{
-	Error, InProcTurnClient, RpcTurnSession, TurnClient, TurnId, TurnInput, TurnOptions, TurnSession,
+	DispatchPolicy, Inference, Kernel, KernelEvent, RunControl, StaticPrompt, ToolScopedAbortReason,
+	TurnInput, TurnStop, Up,
 };
-use omp_proto::{
-	inference::v1::{
-		self as pb, exec_status, inference_server::Inference, invoke_input, invoke_input::chunk,
-		turn_error, turn_event, turn_request, value,
-	},
-	thread::{
-		v1,
-		v1::{Item, Revision, Thread, item},
-	},
+use omp_ai::{
+	BlockKind, ChatEvent, ChatRequest, ChatStream, ContentPart, FinishReason, ProviderId, RequestId,
+	ResponseMeta, Role, RouteId, ToolCall, ToolCallId, call::OpaqueJson,
 };
-use parking_lot::Mutex;
-use tokio::time;
-use tonic::{Request, Response, Status};
+use omp_core::Str;
+use omp_dom::{PropId, PropKey};
+use omp_journal::{blob::BlobStore, kind};
 
-type RpcStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
+mod support;
+use support::{
+	ScriptedInference, assert_all_entries_caused, completed, fresh_session, journal_entries,
+	registry, spec, text_script, tool_script,
+};
 
-fn flume_stream<T: Send + 'static>(receiver: Receiver<T>) -> impl Stream<Item = T> + Send {
-	futures::stream::unfold(receiver, |receiver| async move {
-		let item = receiver.recv_async().await.ok()?;
-		Some((item, receiver))
-	})
-}
+struct PendingCallInference;
 
-struct Exchange {
-	before_input: Vec<Result<pb::TurnEvent, Status>>,
-	input_count:  usize,
-	after_input:  Vec<Result<pb::TurnEvent, Status>>,
-}
-
-impl Exchange {
-	fn events(events: Vec<pb::TurnEvent>) -> Self {
-		Self {
-			before_input: events.into_iter().map(Ok).collect(),
-			input_count:  0,
-			after_input:  Vec::new(),
-		}
-	}
-
-	fn duplex(before_input: Vec<pb::TurnEvent>, after_input: Vec<pb::TurnEvent>) -> Self {
-		Self {
-			before_input: before_input.into_iter().map(Ok).collect(),
-			input_count:  2,
-			after_input:  after_input.into_iter().map(Ok).collect(),
-		}
-	}
-}
-
-#[derive(Clone)]
-struct ScriptedInference {
-	state: Arc<ScriptState>,
-}
-
-struct ScriptState {
-	exchanges: Mutex<VecDeque<Exchange>>,
-	opens:     flume::Sender<pb::TurnRequest>,
-	inputs:    flume::Sender<Vec<pb::TurnFrame>>,
-	calls:     AtomicUsize,
-}
-
-struct Observed {
-	opens:  Receiver<pb::TurnRequest>,
-	inputs: Receiver<Vec<pb::TurnFrame>>,
-	state:  Arc<ScriptState>,
-}
-
-impl ScriptedInference {
-	fn new(exchanges: Vec<Exchange>) -> (Self, Observed) {
-		let (open_sender, opens) = flume::bounded(exchanges.len().max(1));
-		let (input_sender, inputs) = flume::bounded(exchanges.len().max(1));
-		let state = Arc::new(ScriptState {
-			exchanges: Mutex::new(exchanges.into()),
-			opens:     open_sender,
-			inputs:    input_sender,
-			calls:     AtomicUsize::new(0),
-		});
-		(Self { state: Arc::clone(&state) }, Observed { opens, inputs, state })
+impl Inference for PendingCallInference {
+	fn chat(
+		&mut self,
+		_: ChatRequest,
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
+		ready(Ok(ChatStream::ordinary(Box::pin(async_stream::stream! {
+			yield Ok(ChatEvent::Started(ResponseMeta {
+				request_id: RequestId::from("cancel-pending"),
+				provider: ProviderId::from("scripted"),
+				route: RouteId::from("scripted/test"),
+				model: None,
+				provider_request_id: None,
+				created_at: SystemTime::UNIX_EPOCH,
+			}));
+			yield Ok(ChatEvent::ToolCallStarted {
+				index: 0,
+				id: ToolCallId::from("pending-1"),
+				name: Str::new_static("echo"),
+			});
+			futures::future::pending::<()>().await;
+		}))))
 	}
 }
 
-macro_rules! impl_scripted_inference {
-	(
-		unary { $($unary:ident: $unary_request:ty => $unary_response:ty),* $(,)? }
-		stream { $($stream:ident: $stream_request:ty => $stream_response:ty),* $(,)? }
-	) => {
-		#[tonic::async_trait]
-		impl Inference for ScriptedInference {
-			type AttachGenerationStream = RpcStream<pb::GenerationStatus>;
-			type GenerateImageStream = RpcStream<pb::ImageEvent>;
-			type NativeStream = RpcStream<pb::NativeChunk>;
-			type RealtimeStream = RpcStream<pb::RealtimeEvent>;
-			type SpeakStream = RpcStream<pb::SpeakEvent>;
-			type TurnStream = RpcStream<pb::TurnEvent>;
-			type WatchModelsStream = RpcStream<pb::ModelEvent>;
-
-			async fn turn(
-				&self,
-				request: Request<tonic::Streaming<pb::TurnFrame>>,
-			) -> Result<Response<Self::TurnStream>, Status> {
-				self.state.calls.fetch_add(1, Ordering::SeqCst);
-				let mut incoming = request.into_inner();
-				let first = incoming
-					.message()
-					.await?
-					.ok_or_else(|| Status::invalid_argument("missing opening frame"))?;
-				let Some(pb::turn_frame::Frame::Open(open)) = first.frame else {
-					return Err(Status::invalid_argument("first frame was not open"));
-				};
-				self.state
-					.opens
-					.send_async(open)
-					.await
-					.map_err(|_| Status::internal("test observer closed"))?;
-				let exchange = self
-					.state
-					.exchanges
-					.lock()
-					.pop_front()
-					.ok_or_else(|| Status::failed_precondition("no scripted exchange"))?;
-
-				let inputs = self.state.inputs.clone();
-				let (sender, receiver) = flume::bounded(1);
-				tokio::spawn(async move {
-					for event in exchange.before_input {
-						if sender.send_async(event).await.is_err() {
-							return;
-						}
-					}
-
-					if exchange.input_count != 0 {
-						let mut observed = Vec::with_capacity(exchange.input_count);
-						for _ in 0..exchange.input_count {
-							match incoming.message().await {
-								Ok(Some(frame)) => observed.push(frame),
-								Ok(None) => {
-									let _ = sender
-										.send_async(Err(Status::failed_precondition(
-											"invocation stream closed early",
-										)))
-										.await;
-									return;
-								},
-								Err(status) => {
-									let _ = sender.send_async(Err(status)).await;
-									return;
-								},
-							}
-						}
-						if inputs.send_async(observed).await.is_err() {
-							return;
-						}
-					}
-
-					for event in exchange.after_input {
-						if sender.send_async(event).await.is_err() {
-							return;
-						}
-					}
-				});
-				Ok(Response::new(Box::pin(flume_stream(receiver))))
-			}
-
-			$(
-				async fn $unary(
-					&self,
-					_request: Request<$unary_request>,
-				) -> Result<Response<$unary_response>, Status> {
-					Err(Status::unimplemented(stringify!($unary)))
-				}
-			)*
-
-			$(
-				async fn $stream(
-					&self,
-					_request: Request<$stream_request>,
-				) -> Result<Response<$stream_response>, Status> {
-					Err(Status::unimplemented(stringify!($stream)))
-				}
-			)*
-		}
-	};
+struct ScopedAbortInference {
+	ready: Arc<tokio::sync::Notify>,
 }
 
-impl_scripted_inference! {
-	unary {
-		fork: pb::ForkRequest => pb::ForkResponse,
-		drop: pb::DropRequest => pb::DropResponse,
-		count_tokens: pb::CountTokensRequest => pb::CountTokensResponse,
-		tokenize: pb::TokenizeRequest => pb::TokenizeResponse,
-		detokenize: pb::DetokenizeRequest => pb::DetokenizeResponse,
-		embed: pb::EmbedRequest => pb::EmbedResponse,
-		transcribe: pb::TranscribeRequest => pb::TranscribeResponse,
-		generate_video: pb::GenerateVideoRequest => pb::GenerationStatus,
-		get_generation: pb::GetGenerationRequest => pb::GenerationStatus,
-		cancel_generation: pb::CancelGenerationRequest => pb::GenerationStatus,
-		search: pb::SearchRequest => pb::SearchResponse,
-		usage: pb::UsageRequest => pb::UsageResponse,
-		list_providers: pb::ListProvidersRequest => pb::ListProvidersResponse,
-		list_models: pb::ListModelsRequest => pb::ListModelsResponse,
-		refresh_models: pb::RefreshModelsRequest => pb::ListModelsResponse,
-		provider_catalog: pb::ProviderCatalogRequest => pb::ProviderCatalogResponse,
-		watch_provider_catalog: pb::WatchProviderCatalogRequest => pb::WatchProviderCatalogResponse,
-		provider_authenticated: pb::ProviderAuthenticatedRequest => pb::ProviderAuthenticatedResponse,
-		declare_provider: pb::ProviderDeclarationRequest => pb::ProviderMutationResponse,
-		replace_provider: pb::ProviderDeclarationRequest => pb::ProviderMutationResponse,
-		retract_provider: pb::RetractProviderRequest => pb::ProviderMutationResponse,
-		execute_provider_request: pb::ProviderOperationRequest => pb::ProviderOperationResponse,
-		mint_provider_session: pb::ProviderOperationRequest => pb::ProviderOperationResponse,
-	}
-	stream {
-		realtime: tonic::Streaming<pb::RealtimeFrame> => Self::RealtimeStream,
-		generate_image: pb::GenerateImageRequest => Self::GenerateImageStream,
-		speak: pb::SpeakRequest => Self::SpeakStream,
-		attach_generation: pb::AttachGenerationRequest => Self::AttachGenerationStream,
-		native: pb::NativeRequest => Self::NativeStream,
-		watch_models: pb::WatchModelsRequest => Self::WatchModelsStream,
+impl Inference for ScopedAbortInference {
+	fn chat(
+		&mut self,
+		_: ChatRequest,
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
+		let calls_ready = Arc::clone(&self.ready);
+		ready(Ok(ChatStream::ordinary(Box::pin(async_stream::stream! {
+			yield Ok(ChatEvent::Started(ResponseMeta {
+				request_id: RequestId::from("scoped-abort"),
+				provider: ProviderId::from("scripted"),
+				route: RouteId::from("scripted/test"),
+				model: None,
+				provider_request_id: None,
+				created_at: SystemTime::UNIX_EPOCH,
+			}));
+			yield Ok(ChatEvent::ToolCallReady {
+				index: 0,
+				call: ToolCall {
+					id: ToolCallId::from("innocent-read"),
+					name: Str::new_static("read"),
+					arguments: OpaqueJson::new(serde_json::json!({})),
+				},
+			});
+			yield Ok(ChatEvent::ToolCallReady {
+				index: 1,
+				call: ToolCall {
+					id: ToolCallId::from("invalid-edit"),
+					name: Str::new_static("edit"),
+					arguments: OpaqueJson::new(serde_json::json!({})),
+				},
+			});
+			calls_ready.notify_one();
+			std::future::pending::<()>().await;
+		}))))
 	}
 }
 
-const fn event(event: turn_event::Event) -> pb::TurnEvent {
-	pb::TurnEvent { event: Some(event) }
+fn input(text: &str) -> TurnInput {
+	TurnInput { text: Str::new(text), attachments: Vec::new() }
 }
 
-const fn accepted(replay: bool) -> pb::TurnEvent {
-	event(turn_event::Event::Accepted(pb::Accepted { replay }))
+fn pause_script(text: &str) -> Vec<ChatEvent> {
+	vec![
+		ChatEvent::BlockStarted { index: 0, kind: BlockKind::Text },
+		ChatEvent::TextDelta { index: 0, text: Str::new(text) },
+		completed(FinishReason::Other(Str::new_static("pause_turn")), 1),
+	]
 }
 
-fn outcome(provider: &str, revision: Option<Revision>) -> pb::TurnEvent {
-	event(turn_event::Event::Outcome(pb::Outcome {
-		provider: provider.to_owned(),
-		revision,
-		..Default::default()
-	}))
+fn policy(path: &std::path::Path) -> DispatchPolicy {
+	DispatchPolicy::new(BlobStore::open(path).expect("blob store opens"))
 }
 
-fn tool_call_item() -> Item {
-	Item {
-		seq:           17,
-		created_at_ms: 23,
-		kind:          Some(item::Kind::ToolCall(v1::ToolCall {
-			id: "call-1".to_owned(),
-			name: "edit".to_owned(),
-			args_json: Bytes::from_static(br#"{"path":"src/lib.rs"}"#),
-			..Default::default()
-		})),
-		props:         Some(pb::ValueMap {
-			fields: BTreeMap::from([("omp/tool-rev".to_owned(), pb::Value {
-				kind: Some(value::Kind::String("hl.2".to_owned())),
-			})]),
-		}),
-	}
-}
-
-fn outcome_with_output(provider: &str, output: Vec<Item>) -> pb::TurnEvent {
-	event(turn_event::Event::Outcome(pb::Outcome {
-		provider: provider.to_owned(),
-		output,
-		..Default::default()
-	}))
-}
-
-async fn observe<T>(receiver: &Receiver<T>) -> T {
-	time::timeout(Duration::from_secs(2), receiver.recv_async())
-		.await
-		.expect("scripted service did not observe the request")
-		.expect("scripted service observation channel closed")
-}
-
-async fn next_event(session: &mut RpcTurnSession) -> Option<Result<pb::TurnEvent, Error>> {
-	let mut events = session.events();
-	time::timeout(Duration::from_secs(2), events.next())
-		.await
-		.expect("scripted service did not produce the next event")
+fn prop_text<'a>(session: &'a omp_session::Session, selector: &str, prop: PropId) -> &'a str {
+	let handle = session
+		.dom()
+		.select(selector)
+		.expect("selector parses")
+		.next()
+		.expect("node exists");
+	let key = PropKey::from(prop);
+	session
+		.dom()
+		.get(handle)
+		.expect("node materializes")
+		.prop(&key)
+		.and_then(omp_dom::Value::as_str)
+		.expect("text property exists")
 }
 
 #[tokio::test]
-async fn full_then_delta_preserve_the_injected_services_context_revision() {
-	let revision = Revision { head: 9, token: Bytes::from_static(b"service-revision") };
-	let (service, observed) = ScriptedInference::new(vec![
-		Exchange::events(vec![accepted(false), outcome("injected/full", Some(revision.clone()))]),
-		Exchange::events(vec![accepted(false), outcome("injected/delta", None)]),
-	]);
-	let client = InProcTurnClient::new(service)
-		.await
-		.expect("in-process channel");
-	let thread = Thread { items: vec![Item { seq: 4, ..Default::default() }] };
-	let options =
-		TurnOptions { context_id: Some("context-from-caller".into()), ..Default::default() };
+async fn user_turn_journals_assistant_text_in_the_explicit_turn() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("text.oms");
+	let (inference, requests) = ScriptedInference::new([text_script("pong")]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry(std::iter::empty()),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let mut session = fresh_session(&journal_path);
 
-	let mut full = client
-		.turn(TurnId::new("full-turn"), TurnInput::Full(thread.clone()), &options)
+	let outcome = kernel
+		.run_turn(&mut session, input("reply once"), RunControl::default())
 		.await
-		.expect("full turn opens");
+		.expect("turn completes");
+
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	assert_eq!(outcome.assistant_text, "pong");
+	assert_eq!(requests.lock().len(), 1);
+	assert_eq!(
+		session
+			.dom()
+			.select("body turn user")
+			.expect("selector")
+			.count(),
+		1
+	);
+	assert_eq!(
+		session
+			.dom()
+			.select("body turn assistant")
+			.expect("selector")
+			.count(),
+		1
+	);
+	assert_eq!(prop_text(&session, "body turn assistant", PropId::Text), "pong");
+	// The receipt needs TTFT and duration; both are kernel-clock measurements
+	// the projection cannot derive later.
+	let usage = session
+		.dom()
+		.select("body turn usage")
+		.expect("selector")
+		.next()
+		.expect("receipt materializes");
+	let usage = session.dom().get(usage).expect("usage node");
+	assert!(matches!(usage.prop(&PropKey::from(PropId::DurationMs)), Some(omp_dom::Value::Int(_))));
+	assert!(matches!(usage.prop(&PropKey::from(PropId::TtftMs)), Some(omp_dom::Value::Int(_))));
+	assert!(matches!(usage.prop(&PropKey::from(PropId::CacheRead)), Some(omp_dom::Value::Int(0))));
+
+	drop(session);
+	let entries = journal_entries(&journal_path);
+	assert_all_entries_caused(&entries);
+	for required in [
+		kind::TURN_START,
+		kind::MSG_USER,
+		kind::MSG_ASSISTANT_START,
+		kind::MSG_ASSISTANT_END,
+		kind::TURN_RECEIPT,
+	] {
+		assert!(
+			entries
+				.iter()
+				.any(|entry| entry.kind.name.as_str() == required),
+			"missing {required}"
+		);
+	}
+}
+
+#[tokio::test]
+async fn paused_completion_resamples_and_replays_durable_evidence() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("paused.oms");
+	let (inference, requests) =
+		ScriptedInference::new([pause_script("Scanning first."), text_script("All done.")]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry(std::iter::empty()),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let mut session = fresh_session(&journal_path);
+
+	let outcome = kernel
+		.run_turn(&mut session, input("inspect"), RunControl::default())
+		.await
+		.expect("paused completion continues");
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	let requests = requests.lock();
+	assert_eq!(requests.len(), 2);
+	assert!(requests[1].messages.iter().any(|message| {
+		message.role == Role::Assistant
+			&& message.content.iter().any(
+				|part| matches!(part, ContentPart::Text { text, .. } if text.as_str() == "Scanning first."),
+			)
+	}));
+	drop(requests);
+	let paused = session
+		.dom()
+		.select("body turn assistant[stop-reason=pause_turn]")
+		.expect("selector")
+		.next()
+		.expect("paused assistant");
+	let paused = session.dom().get(paused).expect("assistant materializes");
+	assert_eq!(
+		paused
+			.prop(&PropKey::Custom(Str::new_static("continuation-decision")))
+			.and_then(omp_dom::Value::as_str),
+		Some("scheduled")
+	);
 	assert!(matches!(
-		next_event(&mut full).await,
-		Some(Ok(pb::TurnEvent {
-			event: Some(omp_proto::inference::v1::turn_event::Event::Accepted(pb::Accepted {
-				replay: false,
-			})),
-		}))
+		paused.prop(&PropKey::Custom(Str::new_static("continuation-attempt"))),
+		Some(omp_dom::Value::Int(1))
 	));
-	let returned_revision = match next_event(&mut full).await {
-		Some(Ok(pb::TurnEvent { event: Some(turn_event::Event::Outcome(outcome)) })) => {
-			assert_eq!(outcome.provider, "injected/full");
-			outcome.revision.expect("stateful outcome revision")
-		},
-		other => panic!("expected full outcome, got {other:?}"),
-	};
-	assert_eq!(returned_revision, revision);
 
-	let full_open = observe(&observed.opens).await;
-	assert_eq!(full_open.turn_id, "full-turn");
-	match full_open.input {
-		Some(turn_request::Input::Seed(seed)) => {
-			assert_eq!(seed.context_id, "context-from-caller");
-			assert_eq!(seed.thread, Some(thread));
-		},
-		other => panic!("expected seed input, got {other:?}"),
-	}
-
-	let context = pb::ContextRef {
-		context_id: "context-from-caller".to_owned(),
-		expected:   Some(returned_revision.clone()),
-	};
-	let delta = pb::ThreadDelta {
-		truncate_to: Some(7),
-		append:      vec![Item { seq: 0, ..Default::default() }],
-	};
-	let mut incremental = client
-		.turn(TurnId::new("delta-turn"), TurnInput::Delta(context.clone(), delta.clone()), &options)
-		.await
-		.expect("delta turn opens");
-	let _ = next_event(&mut incremental)
-		.await
-		.expect("accepted")
-		.expect("accepted event");
-	match next_event(&mut incremental).await {
-		Some(Ok(pb::TurnEvent { event: Some(turn_event::Event::Outcome(outcome)) })) => {
-			assert_eq!(outcome.provider, "injected/delta");
-		},
-		other => panic!("expected delta outcome, got {other:?}"),
-	}
-
-	let delta_open = observe(&observed.opens).await;
-	assert_eq!(delta_open.turn_id, "delta-turn");
-	match delta_open.input {
-		Some(turn_request::Input::Incremental(incremental)) => {
-			assert_eq!(incremental.context, Some(context));
-			assert_eq!(incremental.delta, Some(delta));
-		},
-		other => panic!("expected incremental input, got {other:?}"),
-	}
-	assert_eq!(observed.state.calls.load(Ordering::SeqCst), 2);
+	let live = session.dom().snapshot();
+	drop(session);
+	let replayed =
+		omp_session::Session::open(&journal_path, omp_session::ComponentRegistry::default())
+			.expect("journal replays");
+	assert_eq!(replayed.dom().snapshot().as_bytes(), live.as_bytes());
+	let paused = replayed
+		.dom()
+		.select("body turn assistant[stop-reason=pause_turn]")
+		.expect("selector")
+		.next()
+		.expect("paused assistant replays");
+	let paused = replayed.dom().get(paused).expect("replayed assistant");
+	assert_eq!(
+		paused
+			.prop(&PropKey::Custom(Str::new_static("continuation-decision")))
+			.and_then(omp_dom::Value::as_str),
+		Some("scheduled")
+	);
 }
 
 #[tokio::test]
-async fn conflict_and_need_full_are_typed_terminal_recoveries_without_seam_policy() {
-	let conflict = pb::TurnError {
-		kind: turn_error::Kind::Conflict as i32,
-		detail: "stale revision".to_owned(),
-		actual: Some(Revision { head: 12, token: Bytes::from_static(&[12]) }),
-		error_id: Some(41),
-		..Default::default()
-	};
-	let need_full = pb::TurnError {
-		kind: turn_error::Kind::NeedFull as i32,
-		detail: "context evicted".to_owned(),
-		error_id: Some(42),
-		..Default::default()
-	};
-	let (service, observed) = ScriptedInference::new(vec![
-		Exchange::events(vec![event(omp_proto::inference::v1::turn_event::Event::Error(
-			conflict.clone(),
-		))]),
-		Exchange::events(vec![event(omp_proto::inference::v1::turn_event::Event::Error(
-			need_full.clone(),
-		))]),
+async fn paused_completion_caps_consecutive_resamples_without_spinning() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("paused-cap.oms");
+	let scripts = (0..9).map(|_| pause_script(""));
+	let (inference, requests) = ScriptedInference::new(scripts);
+	let mut kernel = Kernel::new(
+		inference,
+		registry(std::iter::empty()),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let mut session = fresh_session(&journal_path);
+
+	let outcome = kernel
+		.run_turn(&mut session, input("inspect"), RunControl::default())
+		.await
+		.expect("cap yields cleanly");
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	assert_eq!(requests.lock().len(), 9, "initial sample plus eight continuations");
+	assert_eq!(
+		session
+			.dom()
+			.count("body turn assistant[stop-reason=pause_turn]")
+			.expect("selector"),
+		9
+	);
+	let last = session
+		.dom()
+		.select("body turn assistant[stop-reason=pause_turn]")
+		.expect("selector")
+		.last()
+		.expect("last paused assistant");
+	let last = session.dom().get(last).expect("assistant materializes");
+	assert_eq!(
+		last
+			.prop(&PropKey::Custom(Str::new_static("continuation-decision")))
+			.and_then(omp_dom::Value::as_str),
+		Some("capped")
+	);
+	assert!(matches!(
+		last.prop(&PropKey::Custom(Str::new_static("continuation-attempt"))),
+		Some(omp_dom::Value::Int(8))
+	));
+}
+
+#[tokio::test]
+async fn tool_progress_rearms_paused_completion_cap() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("paused-rearm.oms");
+	let mut scripts = (0..8)
+		.map(|_| pause_script("phase one"))
+		.collect::<Vec<_>>();
+	scripts.push(tool_script("echo-1", "echo", serde_json::json!({})));
+	scripts.extend((0..8).map(|_| pause_script("phase two")));
+	scripts.push(text_script("done"));
+	let (inference, requests) = ScriptedInference::new(scripts);
+	let mut kernel = Kernel::new(
+		inference,
+		registry([spec("echo", 1, "progress")]),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let mut session = fresh_session(&journal_path);
+
+	let outcome = kernel
+		.run_turn(&mut session, input("inspect"), RunControl::default())
+		.await
+		.expect("tool progress rearms continuation cap");
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	assert_eq!(requests.lock().len(), 18);
+	let attempts =
+		session
+			.dom()
+			.select("body turn assistant[stop-reason=pause_turn]")
+			.expect("selector")
+			.map(|handle| {
+				match session.dom().get(handle).and_then(|node| {
+					node.prop(&PropKey::Custom(Str::new_static("continuation-attempt")))
+				}) {
+					Some(omp_dom::Value::Int(attempt)) => *attempt,
+					_ => panic!("paused completion carries an attempt"),
+				}
+			})
+			.collect::<Vec<_>>();
+	assert_eq!(attempts, [1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8]);
+}
+
+#[tokio::test]
+async fn queued_follow_up_blocks_paused_completion_resample() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("paused-pending.oms");
+	let (inference, requests) = ScriptedInference::new([pause_script("waiting")]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry(std::iter::empty()),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	kernel
+		.mailbox()
+		.send(Up::Queue { text: Str::new_static("next user turn"), attachments: Vec::new() })
+		.expect("follow-up queues");
+	let mut session = fresh_session(&journal_path);
+
+	let outcome = kernel
+		.run_turn(&mut session, input("inspect"), RunControl::default())
+		.await
+		.expect("pending input yields");
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	assert_eq!(requests.lock().len(), 1);
+	let paused = session
+		.dom()
+		.select("body turn assistant[stop-reason=pause_turn]")
+		.expect("selector")
+		.next()
+		.expect("paused assistant");
+	assert_eq!(
+		session.dom().get(paused).and_then(|node| {
+			node
+				.prop(&PropKey::Custom(Str::new_static("continuation-decision")))
+				.and_then(omp_dom::Value::as_str)
+		}),
+		Some("pending-input")
+	);
+}
+
+#[tokio::test]
+async fn runtime_pause_blocks_paused_completion_provider_admission() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("paused-runtime.oms");
+	let (inference, requests) =
+		ScriptedInference::new([pause_script("waiting"), text_script("done")]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry(std::iter::empty()),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let up = kernel.mailbox();
+	up.send(Up::Pause { active: true }).expect("pause queues");
+	let mut session = fresh_session(&journal_path);
+	let run = kernel.run_turn(&mut session, input("inspect"), RunControl::default());
+	tokio::pin!(run);
+
+	assert!(
+		tokio::time::timeout(Duration::from_millis(25), &mut run)
+			.await
+			.is_err(),
+		"paused runtime must hold the turn"
+	);
+	assert!(requests.lock().is_empty(), "pause prevents provider admission");
+	up.send(Up::Pause { active: false }).expect("resume queues");
+	let outcome = tokio::time::timeout(Duration::from_secs(2), &mut run)
+		.await
+		.expect("resumed turn settles")
+		.expect("resumed turn succeeds");
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	assert_eq!(requests.lock().len(), 2);
+}
+
+#[tokio::test]
+async fn tool_call_round_settles_in_the_dom_then_runs_second_inference() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("tool.oms");
+	let mut tool_round = vec![
+		ChatEvent::BlockStarted { index: 0, kind: BlockKind::Thinking },
+		ChatEvent::ThinkingDelta { index: 0, text: Str::new_static("unsigned reasoning") },
+	];
+	tool_round.extend(tool_script("echo-1", "echo", serde_json::json!({})));
+	let (inference, requests) = ScriptedInference::new([tool_round, text_script("hello from tool")]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry([spec("echo", 1, "hello").streaming("progress", Duration::ZERO)]),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let events = kernel.subscribe();
+	let mut session = fresh_session(&journal_path);
+
+	let outcome = kernel
+		.run_turn(&mut session, input("use echo"), RunControl::default())
+		.await
+		.expect("tool turn completes");
+
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	assert_eq!(outcome.assistant_text, "hello from tool");
+	let events = events.try_iter().collect::<Vec<_>>();
+	assert_eq!(events, [
+		KernelEvent::InferenceStarted,
+		KernelEvent::ThinkingDelta(Str::new_static("unsigned reasoning")),
+		KernelEvent::ToolReady {
+			call_id: Str::new_static("echo-1"),
+			name:    Str::new_static("echo"),
+		},
+		KernelEvent::ToolUpdate { call_id: Str::new_static("echo-1") },
+		KernelEvent::ToolSettled { call_id: Str::new_static("echo-1"), is_error: false },
+		KernelEvent::InferenceStarted,
+		KernelEvent::TextDelta(Str::new_static("hello from tool")),
+		KernelEvent::TurnEnded { stop: TurnStop::Completed },
 	]);
-	let client = InProcTurnClient::new(service)
-		.await
-		.expect("in-process channel");
+	let requests = requests.lock();
+	assert_eq!(requests.len(), 2);
+	assert!(!requests[1].messages.iter().any(|message| {
+		message
+			.content
+			.iter()
+			.any(|part| matches!(part, ContentPart::Reasoning { proof: None, .. }))
+	}));
+	assert!(requests[1].messages.iter().any(|message| {
+		message.content.iter().any(|part| matches!(part, ContentPart::ToolResult { content, .. }
+			if content.iter().any(|part| matches!(part, omp_ai::ToolResultContent::Text(text) if text == "hello"))))
+	}));
+	drop(requests);
+	assert_eq!(
+		session
+			.dom()
+			.select("body turn echo")
+			.expect("selector")
+			.count(),
+		1
+	);
+	assert_eq!(
+		session
+			.dom()
+			.select("body turn echo input")
+			.expect("selector")
+			.count(),
+		1
+	);
+	assert_eq!(
+		session
+			.dom()
+			.select("body turn echo result")
+			.expect("selector")
+			.count(),
+		1
+	);
+	assert_eq!(prop_text(&session, "body turn echo result", PropId::Text), "progress");
 
-	for (turn_id, expected) in [("conflict", &conflict), ("need-full", &need_full)] {
-		let mut session = client
-			.turn(TurnId::new(turn_id), TurnInput::Full(Thread::default()), &TurnOptions::default())
-			.await
-			.expect("turn opens");
-		let error = next_event(&mut session)
-			.await
-			.expect("terminal error event")
-			.expect_err("error is not exposed as a regular event");
-		match (&error, turn_error::Kind::try_from(expected.kind).expect("known kind")) {
-			(Error::Conflict(actual), turn_error::Kind::Conflict)
-			| (Error::NeedFull(actual), turn_error::Kind::NeedFull) => {
-				assert_eq!(actual.as_ref(), expected);
-				assert!(error.is_recovery());
-				assert_eq!(error.turn_error(), Some(expected));
-			},
-			other => panic!("wrong recovery classification: {other:?}"),
-		}
-		assert!(next_event(&mut session).await.is_none());
-	}
-	assert_eq!(observed.state.calls.load(Ordering::SeqCst), 2);
-	assert_eq!(observe(&observed.opens).await.turn_id, "conflict");
-	assert_eq!(observe(&observed.opens).await.turn_id, "need-full");
+	drop(session);
+	let entries = journal_entries(&journal_path);
+	assert_all_entries_caused(&entries);
+	let call = entries
+		.iter()
+		.find(|entry| entry.kind.name.as_str() == kind::TOOL_CALL)
+		.expect("tool call journals");
+	let result = entries
+		.iter()
+		.find(|entry| entry.kind.name.as_str() == kind::TOOL_RESULT)
+		.expect("tool result journals");
+	assert_eq!(result.by, Some(call.id));
 }
 
 #[tokio::test]
-async fn replay_acceptance_and_unknown_terminal_errors_pass_through_verbatim() {
-	let unknown = pb::TurnError {
-		kind: 777,
-		detail: "future arbiter error".to_owned(),
-		retry_after_ms: 55,
-		error_id: Some(99),
-		..Default::default()
+async fn scoped_stream_abort_labels_siblings_in_call_order_and_replays() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("scoped-stream-abort.oms");
+	let ready = Arc::new(tokio::sync::Notify::new());
+	let mut kernel = Kernel::new(
+		ScopedAbortInference { ready: Arc::clone(&ready) },
+		registry([spec("read", 1, "unused"), spec("edit", 1, "unused")]),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let up = kernel.mailbox();
+	let mut session = fresh_session(&journal_path);
+
+	let outcome = {
+		let run = kernel.run_turn(&mut session, input("stream two calls"), RunControl::default());
+		tokio::pin!(run);
+		tokio::select! {
+			() = ready.notified() => {},
+			result = &mut run => panic!("turn ended before both calls were authorized: {result:?}"),
+		}
+		up.send(Up::AbortTools(ToolScopedAbortReason::one(
+			"invalid-edit",
+			"TTSR matched rule: no-unwrap",
+			"TTSR interrupt on another tool call",
+		)))
+		.expect("scoped abort queues");
+		(&mut run)
+			.await
+			.expect("scoped abort is a terminal turn outcome")
 	};
-	let committed_call = tool_call_item();
-	let (service, _observed) = ScriptedInference::new(vec![
-		Exchange::events(vec![
-			accepted(true),
-			outcome_with_output("replayed", vec![committed_call.clone()]),
+	assert_eq!(outcome.stop, TurnStop::Cancelled);
+	let innocent_text = support::result_text(&session, "innocent-read");
+	assert!(
+		innocent_text[0].contains("TTSR interrupt on another tool call"),
+		"innocent sibling receives the neutral label"
+	);
+	assert!(
+		!innocent_text[0].contains("TTSR matched rule"),
+		"innocent sibling is not blamed for the matching call"
+	);
+	assert!(
+		support::result_text(&session, "invalid-edit")[0].contains("TTSR matched rule: no-unwrap"),
+		"matching call receives its own abort reason"
+	);
+
+	let entries = journal_entries(&journal_path);
+	let calls = entries
+		.iter()
+		.filter(|entry| entry.kind.name.as_str() == kind::TOOL_CALL)
+		.map(|entry| entry.id)
+		.collect::<Vec<_>>();
+	let results = entries
+		.iter()
+		.filter(|entry| entry.kind.name.as_str() == kind::TOOL_RESULT)
+		.map(|entry| entry.by.expect("result is caused by its call"))
+		.collect::<Vec<_>>();
+	assert_eq!(results, calls, "placeholder settlement follows provider call order");
+	let execution_started = PropKey::Custom(Str::new_static("execution-started"));
+	for selector in ["body turn read[id=innocent-read]", "body turn edit[id=invalid-edit]"] {
+		let call = session
+			.dom()
+			.select(selector)
+			.expect("selector parses")
+			.next()
+			.expect("call materializes");
+		let node = session.dom().get(call).expect("call remains materialized");
+		assert_eq!(
+			node.prop(&execution_started),
+			None,
+			"inference placeholders must not claim execution started"
+		);
+		assert_eq!(
+			node
+				.prop(&PropKey::from(PropId::Status))
+				.and_then(omp_dom::Value::as_str),
+			Some("error")
+		);
+	}
+	assert!(
+		!entries
+			.iter()
+			.any(|entry| entry.kind.name.as_str() == kind::TURN_RECEIPT),
+		"an aborted inference is never recorded as a completed request"
+	);
+
+	let live = session.dom().snapshot();
+	drop(session);
+	let replayed =
+		omp_session::Session::open(&journal_path, omp_session::ComponentRegistry::default())
+			.expect("journal replays");
+	assert_eq!(replayed.dom().snapshot(), live);
+	assert!(
+		support::result_text(&replayed, "innocent-read")[0]
+			.contains("TTSR interrupt on another tool call")
+	);
+	assert!(
+		support::result_text(&replayed, "invalid-edit")[0].contains("TTSR matched rule: no-unwrap")
+	);
+}
+
+#[tokio::test]
+async fn independent_calls_from_one_turn_execute_concurrently() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let first = ToolCall {
+		id:        ToolCallId::from("first"),
+		name:      Str::new_static("first"),
+		arguments: OpaqueJson::new(serde_json::json!({})),
+	};
+	let second = ToolCall {
+		id:        ToolCallId::from("second"),
+		name:      Str::new_static("second"),
+		arguments: OpaqueJson::new(serde_json::json!({})),
+	};
+	let tool_round = vec![
+		ChatEvent::ToolCallReady { index: 0, call: first },
+		ChatEvent::ToolCallReady { index: 1, call: second },
+		completed(omp_ai::FinishReason::ToolCalls, 2),
+	];
+	let (inference, _) = ScriptedInference::new([tool_round, text_script("done")]);
+	let barrier = Arc::new(tokio::sync::Barrier::new(3));
+	let started = Arc::new(AtomicUsize::new(0));
+	let mut kernel = Kernel::new(
+		inference,
+		registry([
+			spec("first", 1, "one").concurrency_probe(Arc::clone(&started), Arc::clone(&barrier)),
+			spec("second", 1, "two").concurrency_probe(Arc::clone(&started), Arc::clone(&barrier)),
 		]),
-		Exchange::events(vec![event(omp_proto::inference::v1::turn_event::Event::Error(
-			unknown.clone(),
-		))]),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let mut session = fresh_session(&directory.path().join("parallel.oms"));
+	let turn = kernel.run_turn(&mut session, input("parallel"), RunControl::default());
+	tokio::pin!(turn);
+	let settled = tokio::time::timeout(Duration::from_secs(1), async {
+		tokio::select! {
+			_ = barrier.wait() => None,
+			result = &mut turn => Some(result),
+		}
+	})
+	.await
+	.expect("both independent calls must start before either settles");
+	assert_eq!(started.load(Ordering::SeqCst), 2);
+	if let Some(result) = settled {
+		result.expect("parallel calls settle");
+	} else {
+		turn.await.expect("parallel calls settle");
+	}
+}
+
+#[tokio::test]
+async fn steering_is_drained_after_tool_results_before_the_yield_decision() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("steer.oms");
+	let (inference, requests) = ScriptedInference::new([
+		tool_script("echo-1", "echo", serde_json::json!({})),
+		text_script("steered answer"),
 	]);
-	let client = InProcTurnClient::new(service)
-		.await
-		.expect("in-process channel");
+	let mut kernel = Kernel::new(
+		inference,
+		registry([spec("echo", 1, "tool settled")]),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	kernel
+		.mailbox()
+		.send(Up::Steer {
+			text:        Str::new_static("include the settled result"),
+			attachments: Vec::new(),
+		})
+		.expect("steering queues");
+	let mut session = fresh_session(&journal_path);
 
-	let mut replay = client
-		.turn(TurnId::new("same-turn"), TurnInput::Full(Thread::default()), &TurnOptions::default())
+	let outcome = kernel
+		.run_turn(&mut session, input("use echo"), RunControl::default())
 		.await
-		.expect("replay opens");
-	match next_event(&mut replay).await {
-		Some(Ok(pb::TurnEvent { event: Some(turn_event::Event::Accepted(accepted)) })) => {
-			assert!(accepted.replay);
-		},
-		other => panic!("expected replay acceptance, got {other:?}"),
-	}
-	match next_event(&mut replay).await {
-		Some(Ok(pb::TurnEvent { event: Some(turn_event::Event::Outcome(outcome)) })) => {
-			assert_eq!(outcome.output, vec![committed_call]);
-		},
-		other => panic!("expected replay outcome, got {other:?}"),
-	}
+		.expect("steered turn completes");
 
-	let mut future_error = client
-		.turn(
-			TurnId::new("future-error"),
-			TurnInput::Full(Thread::default()),
-			&TurnOptions::default(),
-		)
-		.await
-		.expect("future-error turn opens");
-	match next_event(&mut future_error).await {
-		Some(Err(Error::Terminal(actual))) => assert_eq!(*actual, unknown),
-		other => panic!("expected retained unknown terminal error, got {other:?}"),
-	}
-	assert!(next_event(&mut future_error).await.is_none());
+	assert_eq!(outcome.stop, TurnStop::Steered);
+	let requests = requests.lock();
+	assert_eq!(requests.len(), 2);
+	let second = &requests[1];
+	assert!(second.messages.iter().any(|message| {
+		message.role == Role::Tool
+			&& message
+				.content
+				.iter()
+				.any(|part| matches!(part, ContentPart::ToolResult { .. }))
+	}));
+	assert!(second.messages.iter().any(|message| {
+		message.role == Role::User
+			&& message.content.iter().any(|part| {
+				matches!(part,
+					ContentPart::Text { text, .. } if text.contains("include the settled result"))
+			})
+	}));
+	drop(requests);
+	assert_eq!(
+		session
+			.dom()
+			.select("queues steering user")
+			.expect("selector")
+			.count(),
+		0
+	);
+	assert_eq!(
+		session
+			.dom()
+			.select("body turn user")
+			.expect("selector")
+			.count(),
+		2
+	);
+
+	drop(session);
+	assert_all_entries_caused(&journal_entries(&journal_path));
 }
 
 #[tokio::test]
-async fn invocation_frames_flow_while_the_response_stream_is_live() {
-	let invoke = pb::Invoke {
-		invocation_id: "invoke-7".to_owned(),
-		name: "exec.shell".to_owned(),
-		..Default::default()
-	};
-	let (service, observed) = ScriptedInference::new(vec![Exchange::duplex(
-		vec![
-			accepted(false),
-			event(omp_proto::inference::v1::turn_event::Event::Invoke(invoke.clone())),
-		],
-		vec![outcome("after-invocation", None)],
-	)]);
-	let client = InProcTurnClient::new(service)
+async fn cancellation_settles_a_streamed_tool_call_with_a_synthetic_result() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("pending-call-cancel.oms");
+	let mut kernel = Kernel::new(
+		PendingCallInference,
+		registry([spec("echo", 1, "unused")]),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let cancellation = tokio_util::sync::CancellationToken::new();
+	let trigger = cancellation.clone();
+	tokio::spawn(async move {
+		tokio::time::sleep(Duration::from_millis(10)).await;
+		trigger.cancel();
+	});
+	let mut session = fresh_session(&journal_path);
+	let outcome = kernel
+		.run_turn(&mut session, input("cancel pending call"), RunControl::new(cancellation, None))
 		.await
-		.expect("in-process channel");
-	let options = TurnOptions {
-		executor: Some(pb::Executor { tools: vec!["exec.shell".to_owned()] }),
-		..Default::default()
-	};
-	let mut session = client
-		.turn(TurnId::new("duplex"), TurnInput::Full(Thread::default()), &options)
-		.await
-		.expect("duplex turn opens");
+		.expect("cancellation settles");
+	assert_eq!(outcome.stop, TurnStop::Cancelled);
+	let call = session
+		.dom()
+		.select("body turn echo")
+		.expect("selector")
+		.next()
+		.expect("streamed call remains");
+	assert_eq!(
+		session
+			.dom()
+			.get(call)
+			.and_then(|node| node.prop(&PropKey::from(PropId::Status)))
+			.and_then(omp_dom::Value::as_str),
+		Some("error")
+	);
+	let entries = journal_entries(&journal_path);
+	let call_entry = entries
+		.iter()
+		.find(|entry| entry.kind.name.as_str() == kind::TOOL_CALL)
+		.expect("call entry");
+	assert!(entries.iter().any(|entry| {
+		entry.kind.name.as_str() == kind::TOOL_RESULT && entry.by == Some(call_entry.id)
+	}));
+}
 
-	let _ = next_event(&mut session)
+#[tokio::test]
+async fn soft_request_budget_notice_grants_one_final_request_only_when_enabled() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("soft-budget.oms");
+	let (inference, requests) = ScriptedInference::new([text_script("wrapped")]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry(std::iter::empty()),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let mut session = fresh_session(&journal_path);
+	let outcome = kernel
+		.run_turn(
+			&mut session,
+			input("bounded child"),
+			RunControl::default()
+				.with_request_budget(0)
+				.with_request_budget_notice(true),
+		)
 		.await
-		.expect("accepted")
-		.expect("accepted event");
-	match next_event(&mut session).await {
-		Some(Ok(pb::TurnEvent { event: Some(turn_event::Event::Invoke(actual)) })) => {
-			assert_eq!(actual, invoke);
+		.expect("budget wrap-up settles");
+	assert_eq!(outcome.assistant_text, "wrapped");
+	assert_eq!(requests.lock().len(), 1);
+	assert_eq!(session.dom().count("body turn notice").expect("selector"), 1);
+}
+
+#[tokio::test]
+async fn request_budget_prevents_the_first_disallowed_provider_call() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("request-budget.oms");
+	let (inference, requests) = ScriptedInference::new(Vec::<Vec<ChatEvent>>::new());
+	let mut kernel = Kernel::new(
+		inference,
+		registry(std::iter::empty()),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let mut session = fresh_session(&journal_path);
+	let outcome = kernel
+		.run_turn(
+			&mut session,
+			input("bounded child"),
+			RunControl::default()
+				.with_request_budget(0)
+				.with_request_budget_notice(false),
+		)
+		.await
+		.expect("budget settles");
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	assert!(requests.lock().is_empty());
+	assert_eq!(
+		session
+			.dom()
+			.select("body turn notice")
+			.expect("selector")
+			.count(),
+		1
+	);
+}
+
+#[tokio::test]
+async fn interrupt_returns_cancelled_without_journaling_a_false_completion() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("interrupt.oms");
+	let (inference, _requests) =
+		ScriptedInference::new([vec![completed(omp_ai::FinishReason::Stop, 0)]]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry(std::iter::empty()),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	kernel
+		.mailbox()
+		.send(Up::Interrupt)
+		.expect("interrupt queues");
+	let mut session = fresh_session(&journal_path);
+
+	let outcome = kernel
+		.run_turn(&mut session, input("cancel me"), RunControl::default())
+		.await
+		.expect("interrupt settles turn");
+
+	assert_eq!(outcome.stop, TurnStop::Cancelled);
+	assert_eq!(outcome.assistant_text, "");
+	assert_eq!(session.dom().select("body turn").expect("selector").count(), 1);
+	assert_eq!(
+		session
+			.dom()
+			.select("body turn assistant")
+			.expect("selector")
+			.count(),
+		0
+	);
+	drop(session);
+	let entries = journal_entries(&journal_path);
+	assert_all_entries_caused(&entries);
+	assert!(
+		!entries
+			.iter()
+			.any(|entry| entry.kind.name.as_str() == kind::MSG_ASSISTANT_END)
+	);
+	assert!(
+		!entries
+			.iter()
+			.any(|entry| entry.kind.name.as_str() == kind::TURN_RECEIPT)
+	);
+}
+
+/// R2Kernel #1: a subagent/detached job settling while the parent idles is
+/// journaled from the turn loop and delivered to the model as an async-result
+/// follow-up, so the parent never has to `hub wait`.
+#[tokio::test]
+async fn settled_background_job_is_delivered_to_the_model_as_a_follow_up_turn() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("deliver.oms");
+	let (inference, requests) =
+		ScriptedInference::new([text_script("delegated; waiting"), text_script("child says hello")]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry([spec("echo", 1, "tool settled")]),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let mut session = fresh_session(&journal_path);
+	let before = session.head().expect("genesis head");
+	let txn = omp_session::components::jobs::insert(
+		session.dom(),
+		before,
+		omp_session::components::jobs::JobSpec {
+			id:      Str::new_static("child-1"),
+			kind:    Str::new_static("subagent"),
+			owner:   Str::new_static("Main"),
+			started: Str::new_static("1"),
+			agent:   Some(Str::new_static("task")),
 		},
-		other => panic!("expected invocation, got {other:?}"),
-	}
-
-	let input = pb::InvokeInput {
-		invocation_id: "invoke-7".to_owned(),
-		payload:       Some(invoke_input::Payload::Chunk(pb::invoke_input::Chunk {
-			channel: chunk::Channel::Stdout as i32,
-			data:    Bytes::from_static(b"streamed output"),
-		})),
-	};
-	let complete = pb::InvokeComplete {
-		invocation_id: "invoke-7".to_owned(),
-		status: Some(pb::ExecStatus {
-			outcome: exec_status::Outcome::Exited as i32,
-			exit_code: 0,
-			..Default::default()
+	)
+	.expect("jobs root");
+	session.patch(txn).expect("insert subagent");
+	let handle = session
+		.dom()
+		.select("jobs subagent[id=child-1]")
+		.expect("valid selector")
+		.into_iter()
+		.next()
+		.expect("subagent element");
+	let (done_tx, done_rx) = flume::bounded::<()>(1);
+	assert!(kernel.jobs().attach_task(
+		session.dom(),
+		handle,
+		tokio_util::sync::CancellationToken::new(),
+		tokio::spawn(async move {
+			let _ = done_rx.recv_async().await;
+			omp_agent::JobSettlement {
+				status:     Str::new_static("completed"),
+				output:     Some(
+					serde_json::value::to_raw_value(&serde_json::json!({"text": "hello from child"}))
+						.expect("raw"),
+				),
+				error:      None,
+				completion: None,
+			}
 		}),
-		..Default::default()
-	};
-	session
-		.submit(input.clone().into())
+	));
+	// The child settles shortly after the parent reaches its candidate yield.
+	tokio::spawn(async move {
+		tokio::time::sleep(Duration::from_millis(60)).await;
+		let _ = done_tx.send(());
+	});
+	let outcome = kernel
+		.run_turn(&mut session, input("delegate"), RunControl::default())
 		.await
-		.expect("input accepted");
-	session
-		.submit(complete.clone().into())
-		.await
-		.expect("completion accepted");
-
-	let frames = observe(&observed.inputs).await;
-	assert_eq!(frames.len(), 2);
-	assert_eq!(frames[0].frame, Some(pb::turn_frame::Frame::Input(input)));
-	assert_eq!(frames[1].frame, Some(pb::turn_frame::Frame::Complete(complete)));
-	match next_event(&mut session).await {
-		Some(Ok(pb::TurnEvent { event: Some(turn_event::Event::Outcome(outcome)) })) => {
-			assert_eq!(outcome.provider, "after-invocation");
-		},
-		other => panic!("expected post-invocation outcome, got {other:?}"),
-	}
+		.expect("turn completes after delivery");
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	let requests = requests.lock();
+	assert_eq!(requests.len(), 2, "the settlement re-woke the loop for one follow-up request");
+	assert!(requests[1].messages.iter().any(|message| {
+		message.role == Role::User
+			&& message.content.iter().any(|part| {
+				matches!(part, ContentPart::Text { text, .. }
+					if text.contains("Background job child-1 has completed") && text.contains("hello from child"))
+			})
+	}));
+	drop(requests);
+	let node = session.dom().get(handle).expect("subagent element");
+	assert_eq!(
+		node
+			.prop(&PropKey::from(PropId::Status))
+			.and_then(omp_dom::Value::as_str),
+		Some("completed"),
+		"the settlement was journaled from the turn loop"
+	);
+	assert!(
+		node
+			.prop(&PropKey::Custom(Str::new_static(omp_agent::DELIVERED)))
+			.is_some(),
+		"delivery is a journaled fact, so a resumed session never re-delivers"
+	);
+	assert!(
+		session
+			.dom()
+			.select("body turn user[async_result=true]")
+			.expect("selector")
+			.count()
+			== 1
+	);
 }
 
+/// R2 (Fx2Transcript): an interrupted tool tail is re-executable without a
+/// model round trip: the journal rewinds past the aborted result, the same
+/// call id runs again, and the live chain ends with exactly one
+/// `tool.result@1` for it.
 #[tokio::test]
-async fn sessions_keep_the_injected_server_alive_and_report_response_channel_shutdown() {
-	let (service, _observed) = ScriptedInference::new(vec![Exchange::events(vec![
-		accepted(false),
-		outcome("server-owned-by-session", None),
-	])]);
-	let client = InProcTurnClient::new(service)
+async fn retry_tool_tail_reruns_the_aborted_call_and_continues_the_turn() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("retry-tail.oms");
+	let mut kernel = Kernel::new(
+		PendingCallInference,
+		registry([spec("echo", 1, "tool settled")]),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let cancellation = tokio_util::sync::CancellationToken::new();
+	let trigger = cancellation.clone();
+	tokio::spawn(async move {
+		tokio::time::sleep(Duration::from_millis(10)).await;
+		trigger.cancel();
+	});
+	let mut session = fresh_session(&journal_path);
+	let outcome = kernel
+		.run_turn(&mut session, input("use echo"), RunControl::new(cancellation, None))
 		.await
-		.expect("in-process channel");
-	let mut session = client
-		.turn(
-			TurnId::new("survives-client"),
-			TurnInput::Full(Thread::default()),
-			&TurnOptions::default(),
+		.expect("cancellation settles");
+	assert_eq!(outcome.stop, TurnStop::Cancelled);
+	let turn = *session
+		.dom()
+		.children(session.dom().body())
+		.last()
+		.expect("turn");
+	assert!(omp_agent::aborted_tool_tail(session.dom(), turn), "the tail is retryable");
+
+	let (inference, requests) = ScriptedInference::new([text_script("after retry")]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry([spec("echo", 1, "tool settled")]),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	);
+	let outcome = kernel
+		.retry_tool_tail(&mut session, RunControl::default())
+		.await
+		.expect("retry succeeds");
+	assert_eq!(outcome.stop, TurnStop::Completed);
+	assert_eq!(outcome.assistant_text.as_str(), "after retry");
+	assert!(!omp_agent::aborted_tool_tail(session.dom(), turn));
+	assert_eq!(
+		prop_text(&session, "body turn echo", PropId::Status),
+		"ok",
+		"the replayed call settled normally"
+	);
+	assert_eq!(requests.lock().len(), 1, "no model round trip before the replay");
+	let entries = journal_entries(&journal_path);
+	let live = omp_journal::live_chain(&entries).collect::<Vec<_>>();
+	let results = live
+		.iter()
+		.filter(|entry| entry.kind.name.as_str() == kind::TOOL_RESULT)
+		.count();
+	assert_eq!(results, 1, "the live chain carries exactly one result for the call");
+	assert!(
+		live.len() < entries.len(),
+		"the aborted result and interrupt notice are abandoned, not deleted"
+	);
+	assert!(matches!(
+		kernel
+			.retry_tool_tail(&mut session, RunControl::default())
+			.await,
+		Err(omp_agent::KernelError::NothingToRetry)
+	));
+}
+
+/// A user image attachment reaches the provider with the blob's bytes inline
+/// and its journaled MIME, read from the session's blob store at request build
+/// (no process-local attachment index); the resumed session projects the same
+/// request.
+#[tokio::test]
+async fn user_image_attachment_reaches_the_request_with_its_bytes_and_mime() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("image.oms");
+	let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x04\0\0\0\x03";
+	let (inference, requests) = ScriptedInference::new([text_script("a tiny png")]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry(std::iter::empty()),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	)
+	.with_route_facts(omp_agent::RouteFacts { image_input: true, ..Default::default() });
+	let mut session = fresh_session(&journal_path);
+	let attachment = session
+		.store_attachment("image/png", png)
+		.expect("attachment stores");
+
+	let outcome = kernel
+		.run_turn(
+			&mut session,
+			TurnInput {
+				text:        Str::new_static("what is this? [Image #1, 4x3]"),
+				attachments: vec![attachment.clone()],
+			},
+			RunControl::default(),
 		)
 		.await
-		.expect("turn opens");
-	drop(client);
-	let _ = next_event(&mut session)
-		.await
-		.expect("accepted after client drop")
-		.expect("accepted");
-	match next_event(&mut session).await {
-		Some(Ok(pb::TurnEvent { event: Some(turn_event::Event::Outcome(outcome)) })) => {
-			assert_eq!(outcome.provider, "server-owned-by-session");
-		},
-		other => panic!("expected outcome after dropping client, got {other:?}"),
-	}
+		.expect("turn completes");
+	assert_eq!(outcome.stop, TurnStop::Completed);
 
-	let (service, _observed) = ScriptedInference::new(vec![Exchange::events(vec![accepted(false)])]);
-	let client = InProcTurnClient::new(service)
-		.await
-		.expect("in-process channel");
-	let options = TurnOptions {
-		executor: Some(pb::Executor { tools: vec!["exec.shell".to_owned()] }),
-		..Default::default()
+	let images = |request: &ChatRequest| {
+		request
+			.messages
+			.iter()
+			.filter(|message| message.role == Role::User)
+			.flat_map(|message| message.content.iter())
+			.filter_map(|part| match part {
+				ContentPart::Image(omp_ai::MediaInput::Bytes { media_type, data }) => {
+					Some((media_type.clone(), data.clone()))
+				},
+				ContentPart::Image(other) => panic!("image must be inline bytes, got {other:?}"),
+				_ => None,
+			})
+			.collect::<Vec<_>>()
 	};
-	let mut shutdown = client
-		.turn(TurnId::new("shutdown"), TurnInput::Full(Thread::default()), &options)
+	let live = {
+		let requests = requests.lock();
+		assert_eq!(requests.len(), 1);
+		images(&requests[0])
+	};
+	assert_eq!(live.len(), 1);
+	assert_eq!(live[0].0, "image/png");
+	assert_eq!(live[0].1.as_ref(), png);
+	let user_texts = requests.lock()[0]
+		.messages
+		.iter()
+		.filter(|message| message.role == Role::User)
+		.flat_map(|message| message.content.iter())
+		.filter_map(|part| match part {
+			ContentPart::Text { text, .. } => Some(text.clone()),
+			_ => None,
+		})
+		.collect::<Vec<_>>();
+	assert_eq!(user_texts, ["what is this? [Image #1, 4x3]"]);
+
+	// The journal carries the MIME beside the reference, so a resumed
+	// session builds the identical media part.
+	let journal = std::fs::read_to_string(&journal_path).expect("journal reads");
+	assert!(
+		journal.contains(&format!(
+			r#""h":"{}","n":{},"mime":"image/png""#,
+			attachment.blob,
+			png.len()
+		)),
+		"{journal}"
+	);
+	drop(session);
+	let restored =
+		omp_session::Session::open(&journal_path, omp_session::ComponentRegistry::default())
+			.expect("session restores");
+	let (inference, requests) = ScriptedInference::new([text_script("still a png")]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry(std::iter::empty()),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	)
+	.with_route_facts(omp_agent::RouteFacts { image_input: true, ..Default::default() });
+	let mut restored = restored;
+	kernel
+		.run_turn(&mut restored, input("and now?"), RunControl::default())
 		.await
-		.expect("turn opens");
-	let _ = next_event(&mut shutdown)
+		.expect("resumed turn completes");
+	assert_eq!(images(&requests.lock()[0]), live);
+}
+
+/// A steering aside with an image keeps its attachment through the queue and
+/// the safe point: the second request's steered user message carries the
+/// bytes and MIME, not a dangling marker.
+#[tokio::test]
+async fn steered_image_attachment_reaches_the_next_request() {
+	let directory = tempfile::tempdir().expect("temporary directory");
+	let journal_path = directory.path().join("steer-image.oms");
+	let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x02\0\0\0\x02";
+	let (inference, requests) = ScriptedInference::new([
+		tool_script("echo-1", "echo", serde_json::json!({})),
+		text_script("steered answer"),
+	]);
+	let mut kernel = Kernel::new(
+		inference,
+		registry([spec("echo", 1, "tool settled")]),
+		policy(&directory.path().join("blobs")),
+		StaticPrompt(Str::new_static("test system")),
+	)
+	.with_route_facts(omp_agent::RouteFacts { image_input: true, ..Default::default() });
+	let mut session = fresh_session(&journal_path);
+	let attachment = session
+		.store_attachment("image/png", png)
+		.expect("attachment stores");
+	kernel
+		.mailbox()
+		.send(Up::Steer {
+			text:        Str::new_static("also look at [Image #1, 2x2]"),
+			attachments: vec![attachment],
+		})
+		.expect("steering queues");
+
+	let outcome = kernel
+		.run_turn(&mut session, input("use echo"), RunControl::default())
 		.await
-		.expect("accepted before shutdown")
-		.expect("accepted");
-	assert!(matches!(
-		next_event(&mut shutdown).await,
-		Some(Err(Error::Protocol("turn stream ended without a terminal event")))
-	));
-	assert!(next_event(&mut shutdown).await.is_none());
-	assert!(matches!(
-		shutdown.submit(pb::InvokeComplete::default().into()).await,
-		Err(Error::Closed)
-	));
+		.expect("steered turn completes");
+	assert_eq!(outcome.stop, TurnStop::Steered);
+
+	let requests = requests.lock();
+	assert_eq!(requests.len(), 2);
+	let steered = requests[1]
+		.messages
+		.iter()
+		.find(|message| {
+			message.role == Role::User
+				&& message.content.iter().any(
+					|part| matches!(part, ContentPart::Text { text, .. } if text.contains("also look at")),
+				)
+		})
+		.expect("steered user message");
+	let image = steered
+		.content
+		.iter()
+		.find_map(|part| match part {
+			ContentPart::Image(omp_ai::MediaInput::Bytes { media_type, data }) => {
+				Some((media_type.as_str(), data.as_ref()))
+			},
+			_ => None,
+		})
+		.expect("steered message carries the image inline");
+	assert_eq!(image, ("image/png", png.as_slice()));
 }

@@ -2,6 +2,7 @@
 //! history.
 
 use std::{
+	collections::BTreeSet,
 	future::{Future, ready},
 	io::{self, Write},
 	sync,
@@ -15,9 +16,9 @@ use async_stream::stream;
 use bytes::Bytes;
 use flume::Receiver;
 use futures::{FutureExt, Stream, StreamExt, executor::block_on};
+use omp_ai::{Adjustment, ToolGrammarSyntax};
 use omp_catalog::GrammarBits;
 use omp_core::{Hash32, Str, sf};
-use omp_inference::{Adjustment, ToolGrammarSyntax};
 use omp_proto::policy::v1;
 use omp_tool::{
 	Abort, AbortKind, ArgIssue, ArgIssueKind, ArgPath, ArgSpec, ArgSpecRegistry,
@@ -302,6 +303,44 @@ fn worker_spec(name: &str, projection_code: [u8; 32]) -> ToolSpec {
 		projection_code,
 	}
 }
+fn assert_worker_declaration_projection(
+	registry: &Registry,
+	slot: &str,
+	device: &str,
+	hidden: &str,
+) {
+	let caps = LoweringCaps {
+		strict_schema:  false,
+		grammar:        GrammarBits::empty(),
+		maximum_tools:  None,
+		maximum_strict: None,
+	};
+	let advertised = registry.advertise(caps).unwrap();
+	assert_eq!(advertised.len(), 1);
+	assert_eq!(advertised[0].identity.name, slot);
+
+	let selected = [Str::new(slot), Str::new(device), Str::new(hidden)];
+	let selected_names = registry
+		.advertise_selected(caps, &selected)
+		.unwrap()
+		.into_iter()
+		.map(|tool| tool.identity.name)
+		.collect::<BTreeSet<_>>();
+	assert_eq!(selected_names, BTreeSet::from([Str::new(slot), Str::new(hidden)]));
+
+	let projection = registry.prompt_projection(None);
+	let prompt_names = projection
+		.entries()
+		.map(|tool| tool.name.as_str())
+		.collect::<BTreeSet<_>>();
+	assert_eq!(prompt_names, BTreeSet::from([slot]));
+	let selected_projection = registry.prompt_projection(Some(&selected));
+	let selected_prompt_names = selected_projection
+		.entries()
+		.map(|tool| tool.name.as_str())
+		.collect::<BTreeSet<_>>();
+	assert_eq!(selected_prompt_names, BTreeSet::from([slot, hidden]));
+}
 
 #[test]
 fn duplicate_registration_never_replaces_the_erased_implementation() {
@@ -400,9 +439,73 @@ fn hashes_are_registration_order_independent() {
 	assert_eq!(first.device_hash(), second.device_hash());
 	assert_eq!(first.projection_hash(), second.projection_hash());
 }
+#[test]
+fn slot_and_device_hashes_track_distinct_projection_domains() {
+	let calls = Arc::new(AtomicUsize::new(0));
+	let mut registry = Registry::new();
+	let empty_slots = registry.slot_hash();
+	let empty_devices = registry.device_hash();
+	registry
+		.register_worker(
+			worker_spec("worker_device", [7; 32]),
+			Presentation::Device,
+			claims("publisher/device", Precedence::DEFAULT),
+		)
+		.unwrap();
+
+	let mounted_devices = registry.device_hash();
+	assert_eq!(registry.slot_hash(), empty_slots);
+	assert_ne!(mounted_devices, empty_devices);
+	assert_eq!(registry.devices().count(), 1);
+
+	let unmounted = registry.apply_availability(&[AvailabilityDelta {
+		name:    sf!("worker_device"),
+		mounted: false,
+		reason:  None,
+	}]);
+	assert_eq!(unmounted.len(), 1);
+	let unmounted_devices = registry.device_hash();
+	assert_eq!(registry.slot_hash(), empty_slots);
+	assert_ne!(unmounted_devices, mounted_devices);
+	assert_eq!(unmounted_devices, empty_devices);
+
+	registry
+		.register(
+			fake_tool(1, "native", Arc::clone(&calls)).named("native_slot"),
+			Presentation::Slot,
+			claims("omp/core", Precedence::CORE),
+		)
+		.unwrap();
+	let native_slots = registry.slot_hash();
+	assert_ne!(native_slots, empty_slots);
+	assert_eq!(registry.device_hash(), unmounted_devices);
+
+	let mut reversed = Registry::new();
+	reversed
+		.register(
+			fake_tool(1, "native", calls).named("native_slot"),
+			Presentation::Slot,
+			claims("omp/core", Precedence::CORE),
+		)
+		.unwrap();
+	reversed
+		.register_worker(
+			worker_spec("worker_device", [7; 32]),
+			Presentation::Device,
+			claims("publisher/device", Precedence::DEFAULT),
+		)
+		.unwrap();
+	reversed.apply_availability(&[AvailabilityDelta {
+		name:    sf!("worker_device"),
+		mounted: false,
+		reason:  None,
+	}]);
+	assert_eq!(reversed.slot_hash(), native_slots);
+	assert_eq!(reversed.device_hash(), unmounted_devices);
+}
 
 #[test]
-fn worker_device_is_catalogued_without_consuming_a_model_slot() {
+fn worker_presentations_partition_device_catalog_and_model_slots() {
 	let mut registry = Registry::new();
 	let empty_slots = registry.slot_hash();
 	let empty_devices = registry.device_hash();
@@ -413,19 +516,28 @@ fn worker_device_is_catalogued_without_consuming_a_model_slot() {
 			claims("publisher/catalogue", Precedence::DEFAULT),
 		)
 		.unwrap();
+	registry
+		.register_worker(
+			worker_spec("catalogued_slot", [4; 32]),
+			Presentation::Slot,
+			claims("publisher/catalogue", Precedence::DEFAULT),
+		)
+		.unwrap();
+	registry
+		.register_worker(
+			worker_spec("catalogued_hidden", [5; 32]),
+			Presentation::Hidden,
+			claims("publisher/catalogue", Precedence::DEFAULT),
+		)
+		.unwrap();
 
-	assert_eq!(registry.slot_hash(), empty_slots);
+	assert_ne!(registry.slot_hash(), empty_slots);
 	assert_ne!(registry.device_hash(), empty_devices);
-	assert!(
-		registry
-			.advertise(LoweringCaps {
-				strict_schema:  false,
-				grammar:        GrammarBits::empty(),
-				maximum_tools:  None,
-				maximum_strict: None,
-			})
-			.unwrap()
-			.is_empty()
+	assert_worker_declaration_projection(
+		&registry,
+		"catalogued_slot",
+		"catalogued",
+		"catalogued_hidden",
 	);
 	assert!(matches!(
 		registry.route("catalogued").unwrap(),
@@ -451,7 +563,7 @@ fn worker_device_is_catalogued_without_consuming_a_model_slot() {
 }
 
 #[test]
-fn worker_slots_are_catalogued_without_consuming_model_slots() {
+fn worker_slots_are_model_callable_while_devices_stay_catalog_only() {
 	let mut registry = Registry::new();
 	registry
 		.register(
@@ -467,16 +579,22 @@ fn worker_slots_are_catalogued_without_consuming_model_slots() {
 			claims("publisher/hard", Precedence::INTEGRATION),
 		)
 		.unwrap();
-
-	let advertised = registry
-		.advertise(LoweringCaps {
-			strict_schema:  false,
-			grammar:        GrammarBits::empty(),
-			maximum_tools:  None,
-			maximum_strict: None,
-		})
+	registry
+		.register_worker(
+			worker_spec("worker_device", [6; 32]),
+			Presentation::Device,
+			claims("publisher/hard", Precedence::INTEGRATION),
+		)
 		.unwrap();
-	assert!(advertised.is_empty());
+	registry
+		.register_worker(
+			worker_spec("worker_hidden", [7; 32]),
+			Presentation::Hidden,
+			claims("publisher/hard", Precedence::INTEGRATION),
+		)
+		.unwrap();
+
+	assert_worker_declaration_projection(&registry, "worker_slot", "worker_device", "worker_hidden");
 	assert!(matches!(
 		registry.route("worker_slot").unwrap(),
 		omp_tool::ToolRoute::Worker { site: omp_tool::WorkerSiteKind::Env, name }
@@ -488,6 +606,9 @@ fn worker_slots_are_catalogued_without_consuming_model_slots() {
 	let device = devices.next().expect("native soft tool is catalogued");
 	assert_eq!(device.name, "native_device");
 	assert_eq!(device.route, &omp_tool::ToolRoute::Native);
+	let device = devices.next().expect("worker device is catalogued");
+	assert_eq!(device.name, "worker_device");
+	assert!(matches!(device.route, omp_tool::ToolRoute::Worker { .. }));
 	assert!(devices.next().is_none());
 }
 
@@ -1557,7 +1678,7 @@ fn advertisement_contains_only_the_live_schema_and_preserves_supported_grammar()
 			FakeTool::new(
 				2,
 				"live",
-				br#"{"type":"object","properties":{"live":{"const":true}},"required":["live"]}"#,
+				br#"{"type":"object","properties":{"live":{"const":true},"input":{"type":"string"}},"required":["live"]}"#,
 				Constraint::Grammar {
 					syntax:         GrammarSyntax::Regex,
 					definition:     sf!(r"live=(true|false)"),
@@ -1666,7 +1787,7 @@ fn live_identity_and_advertisement_are_the_same_exact_revision() {
 fn unsupported_grammar_degrades_to_live_lenient_schema_with_a_receipt() {
 	let live_schema = json!({
 		"type": "object",
-		"properties": {"live": {"const": true}},
+		"properties": {"live": {"const": true}, "input": {"type": "string"}},
 		"required": ["live"]
 	});
 	let mut registry = Registry::new();
@@ -1688,7 +1809,7 @@ fn unsupported_grammar_degrades_to_live_lenient_schema_with_a_receipt() {
 			FakeTool::new(
 				2,
 				"live",
-				br#"{"type":"object","properties":{"live":{"const":true}},"required":["live"]}"#,
+				br#"{"type":"object","properties":{"live":{"const":true},"input":{"type":"string"}},"required":["live"]}"#,
 				Constraint::Grammar {
 					syntax:         GrammarSyntax::Ebnf,
 					definition:     sf!("root = 'live';"),
@@ -2525,7 +2646,7 @@ fn cursor_refuses_concurrent_pulls_and_keeps_lazy_chunk_offsets() {
 	feed.args_committed(sf!(r#"{{"text":"hello"}}"#)).unwrap();
 	let pulled = block_on(cursor.pull_at(&path, PullMode::Complete, "string")).unwrap();
 	assert!(
-		matches!(pulled.kind, PulledKind::Complete(omp_slopjson::Value::String(value)) if value == "hello")
+		matches!(pulled.kind, PulledKind::Complete(omp_core::slopjson::Value::String(value)) if value == "hello")
 	);
 
 	let (feed, mut params) = bound_params(&rev, &specs);
@@ -2580,6 +2701,22 @@ impl RenderFold for CountRender {
 
 	fn view(&self, state: &Self::State, outcome: Option<&Self::Outcome>) -> Option<Str> {
 		Some(sf!("count={state};settled={}", outcome.is_some()))
+	}
+}
+
+struct LabeledRender(&'static str);
+
+impl RenderFold for LabeledRender {
+	type Outcome = serde_json::Value;
+	type State = usize;
+	type Update = CountUpdate;
+
+	fn fold(&self, state: &mut Self::State, update: Self::Update) {
+		*state += update.count;
+	}
+
+	fn view(&self, state: &Self::State, _outcome: Option<&Self::Outcome>) -> Option<Str> {
+		Some(sf!("{}={state}", self.0))
 	}
 }
 
@@ -2653,6 +2790,57 @@ fn renderers_are_exact_revision_cached_and_fall_back_without_name_lookup() {
 		.unwrap();
 	assert_eq!(renderers.view(&unknown, &fallback, None).unwrap(), r#"{"progress":7}"#,);
 	assert_eq!(fallback.raw_update_count(), 1);
+}
+
+#[test]
+fn extension_renderers_fill_exact_revisions_decorate_native_and_replay() {
+	let native = ToolIdentity { name: sf!("counter"), rev: Rev { family: sf!("counter"), n: 1 } };
+	let extension = ToolIdentity {
+		name: native.name.clone(),
+		rev:  Rev { family: native.rev.family.clone(), n: 2 },
+	};
+	let decoration_only = ToolIdentity {
+		name: native.name.clone(),
+		rev:  Rev { family: native.rev.family.clone(), n: 3 },
+	};
+	let mut renderers = RenderRegistry::new();
+	renderers
+		.register(native.clone(), LabeledRender("native"))
+		.unwrap();
+	assert!(
+		!renderers
+			.register_extension(native.clone(), LabeledRender("replacement"), false)
+			.unwrap(),
+		"an extension base must not replace a native exact-revision fold",
+	);
+	assert!(
+		renderers
+			.register_extension(native.clone(), LabeledRender(";decorated"), true)
+			.unwrap(),
+	);
+	assert!(
+		renderers
+			.register_extension(extension.clone(), LabeledRender("extension"), false)
+			.unwrap(),
+	);
+	assert!(
+		renderers
+			.register_extension(decoration_only.clone(), LabeledRender(";decoration-only"), true,)
+			.unwrap(),
+	);
+
+	let update = Bytes::from_static(br#"{"count":4}"#);
+	assert_eq!(renderers.replay(&native, [update.clone()], None).unwrap(), "native=4;decorated=4",);
+	assert_eq!(
+		renderers
+			.replay(&extension, [update.clone()], None)
+			.unwrap(),
+		"extension=4",
+	);
+	assert_eq!(
+		renderers.replay(&decoration_only, [update], None).unwrap(),
+		r#"{"count":4};decoration-only=4"#,
+	);
 }
 
 #[test]

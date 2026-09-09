@@ -21,7 +21,7 @@ pub mod ast_edit;
 pub mod ast_grep;
 /// Supervised embedded browser automation.
 pub mod browser;
-/// Durable exploration checkpoint and boundary-rewind tools.
+/// Named durable workspace/session checkpoint and boundary-rewind tools.
 pub mod checkpoint;
 /// Native desktop capture, input, and accessibility.
 pub mod computer;
@@ -50,8 +50,6 @@ pub mod device_ctl;
 pub mod edit;
 /// Persistent Python evaluation.
 pub mod eval;
-/// Reader-mode URL fetching through the shared read conversion pipeline.
-pub mod fetch;
 /// Native renderer lifecycle fixtures for visual QA.
 pub mod gallery;
 /// Direct GitHub API and isolated pull-request operations.
@@ -74,23 +72,29 @@ pub mod manage_skill;
 pub mod memory;
 /// Typed Mnemopi mutation tool.
 pub mod memory_edit;
-/// Pi-compatible reads across local and special sources.
+/// Structured child-output validation against caller-provided JSON Schemas.
+pub mod output_schema;
+/// Reads across local and special sources.
 pub mod read;
 /// Review finding parsing and priority normalization.
 pub mod review;
+/// Long-tail repository security scan device.
+pub mod security_scan;
 /// Persistent-session shell execution.
 pub mod shell;
 /// Pre-authorization guidance for shell intents served by dedicated tools.
 pub mod shell_intercept;
 /// Internal-resource URI scanner used before environment execution.
 pub mod shell_uri;
+/// Child-agent runs over an injected host-side spawner.
+pub mod task;
 /// Private no-op reasoning scratch notes.
 pub mod think;
 /// Phased session task tracking.
 pub mod todo;
 /// Canonical provider-routed web search.
 pub mod web_search;
-/// Pi-compatible whole-file writes.
+/// Whole-file writes.
 pub mod write;
 /// Structured subagent result submission.
 pub mod yield_tool;

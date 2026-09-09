@@ -14,13 +14,13 @@ use std::{
 use async_stream::stream;
 use bytes::Bytes;
 use futures::{Stream, StreamExt, pin_mut};
-use omp_catalog::GrammarBits;
-use omp_core::{Hash32, SparseMap, Str, hash32::Hasher, sf};
-use omp_inference::{
-	Adjustment, FeatureId, OpaqueJson, ReasonId, ToolDefinition, ToolGrammar, ToolGrammarSyntax,
-	ToolInputConstraint,
+use omp_ai::{
+	Adjustment, FREEFORM_INPUT_PROPERTY, FeatureId, OpaqueJson, ReasonId, ToolDefinition,
+	ToolGrammar, ToolGrammarSyntax, ToolInputConstraint,
 	recovery::tools::{ToolAssemblyLimits, schema_within_strict_subset},
 };
+use omp_catalog::GrammarBits;
+use omp_core::{Hash32, SparseMap, Str, hash32::Hasher, sf};
 use omp_proto::inference::{v1, v1::InvokeInput};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -31,9 +31,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
 	Abort, ArgIssue, ArgIssueKind, ArgPath, ArgSpec, ArgSpecRegistry, ArgSpecRegistryError,
-	CallOutcome, Constraint, DeviceIssue, DevicePath, Effects, GrammarSyntax, IncomingParams,
-	JobRef, LiftedCall, Part, Presentation, PromptCaps, RecordedCall, RecordedCallOwned, Rev, Tool,
-	ToolIdentity, ToolPromptExample, ToolSpec,
+	CallOutcome, Constraint, DeviceIssue, DevicePath, Effects, ExecutionMode, GrammarSyntax,
+	IncomingParams, JobRef, LiftedCall, Part, Presentation, ProjectionAuthorizationError,
+	ProjectionSpan, PromptCaps, RecordedCall, RecordedCallOwned, Rev, Tool, ToolIdentity,
+	ToolPromptExample, ToolSpec, VisibilityReceipt,
 };
 
 /// Catalog capabilities needed for deterministic tool lowering.
@@ -83,11 +84,22 @@ pub enum WorkerSiteKind {
 	Attached,
 }
 
+/// Process boundary at which a tool executes.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ToolLocus {
+	/// Tool executes in the project environment host.
+	Environment,
+	/// Tool executes in the calling session host.
+	Session,
+}
+
 /// Execution route associated with a live registry entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolRoute {
 	/// In-process typed Rust executor erased at registration.
 	Native,
+	/// Presentation-only declaration executed by the remote environment host.
+	Remote,
 	/// Externally supervised worker executor and its resolved placement.
 	Worker {
 		/// Worker site kind.
@@ -95,6 +107,13 @@ pub enum ToolRoute {
 		/// Named worker target at that site.
 		name: Str,
 	},
+}
+
+const fn is_model_callable(route: &ToolRoute) -> bool {
+	match route {
+		ToolRoute::Native | ToolRoute::Worker { .. } => true,
+		ToolRoute::Remote => true,
+	}
 }
 /// Model-visible tool declaration supplied by an attached RPC host.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -105,6 +124,9 @@ pub struct HostToolSpec {
 	pub description: Str,
 	/// JSON Schema for the tool argument object.
 	pub parameters:  Value,
+	/// Exact semantic revision when the host contract declares one.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub rev:         Option<Rev>,
 }
 
 /// One correlated invocation delivered to an attached RPC host.
@@ -288,21 +310,45 @@ pub struct Claim {
 #[derive(Clone, Copy, Debug)]
 pub struct MountedDevice<'a> {
 	/// Stable catalog name.
-	pub name:     &'a Str,
+	pub name:       &'a Str,
 	/// Current schema revision.
-	pub rev:      &'a Rev,
+	pub rev:        &'a Rev,
 	/// Publisher-qualified implementation identity.
-	pub claimant: &'a Str,
+	pub claimant:   &'a Str,
+	/// Winning claimant precedence.
+	pub precedence: Precedence,
 	/// Short catalog summary.
-	pub summary:  &'a Str,
+	pub summary:    &'a Str,
 	/// Complete JSON Schema bytes.
-	pub schema:   &'a [u8],
+	pub schema:     &'a [u8],
 	/// Maximum declared authority before per-invocation narrowing.
-	pub effects:  &'a Effects,
+	pub effects:    &'a Effects,
 	/// Long-form documentation, when supplied by the declaration surface.
-	pub docs:     Option<&'a str>,
+	pub docs:       Option<&'a str>,
 	/// Execution placement, independent of device presentation.
-	pub route:    &'a ToolRoute,
+	pub route:      &'a ToolRoute,
+	/// Authenticated extension provenance retained by the mount path, when
+	/// available.
+	pub metadata:   Option<&'a DeviceMetadata>,
+}
+
+/// Authenticated device provenance known by the registry mount path.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DeviceMetadata {
+	/// Artifact publisher, when retained by the mount owner.
+	pub publisher:       Option<Str>,
+	/// Stable extension identity.
+	pub extension_id:    Option<Str>,
+	/// Artifact version, when retained by the mount owner.
+	pub version:         Option<Str>,
+	/// Verified artifact digest, when retained by the mount owner.
+	pub artifact_digest: Option<Str>,
+	/// Extension resolution layer.
+	pub layer:           Option<Str>,
+	/// Extension trust tier.
+	pub tier:            Option<Str>,
+	/// Live host generation, when retained by the mount owner.
+	pub generation:      Option<u64>,
 }
 /// Resolved device dispatch target.
 ///
@@ -318,6 +364,8 @@ pub struct DeviceTarget<'a> {
 	pub claimant: &'a Str,
 	/// Execution placement selected by the declaration.
 	pub route:    &'a ToolRoute,
+	/// Maximum effect envelope of the exact selected claimant and revision.
+	pub effects:  &'a Effects,
 }
 
 impl DeviceTarget<'_> {
@@ -795,7 +843,7 @@ impl ToolPromptProjection<'_> {
 				},
 				None => entry.presentation == Presentation::Slot,
 			};
-			(included && matches!(entry.tool.route(), ToolRoute::Native)).then(|| ToolPromptEntry {
+			(included && is_model_callable(entry.tool.route())).then(|| ToolPromptEntry {
 				name,
 				revision: &claim.rev,
 				description: &entry.tool.spec().description,
@@ -929,11 +977,13 @@ pub struct ProjectedVerdict {
 	///
 	/// Shared ownership avoids copying immutable parts into each projected
 	/// thread item.
-	pub parts:    Arc<[Part]>,
+	pub parts:      Arc<[Part]>,
+	/// Source ranges awaiting the live dispatcher's final visibility receipt.
+	pub visibility: Arc<[ProjectionSpan]>,
 	/// Whether the decoded verdict branch is a fault, argument error, or abort.
-	pub is_error: bool,
+	pub is_error:   bool,
 	/// Durable compaction hint, forced false for argument errors and aborts.
-	pub useless:  bool,
+	pub useless:    bool,
 }
 
 struct ProjectionCache {
@@ -987,7 +1037,14 @@ impl ProjectionCache {
 	}
 
 	fn insert(&self, device_id: u32, key: &ProjectionKey, value: ProjectedVerdict) {
-		let bytes = projected_part_bytes(&value.parts);
+		let bytes = projected_part_bytes(&value.parts).saturating_add(value.visibility.iter().fold(
+			0,
+			|bytes, span| {
+				bytes
+					.saturating_add(size_of::<ProjectionSpan>())
+					.saturating_add(span.source_key.len())
+			},
+		));
 		if bytes > Self::MAX_PART_BYTES {
 			return;
 		}
@@ -1172,6 +1229,18 @@ pub enum RegistryError {
 		/// Parser failure.
 		source: serde_json::Error,
 	},
+	/// A grammar-constrained declaration cannot receive canonicalized freeform
+	/// input.
+	#[error(
+		"grammar tool {name}@{rev} must declare a string `input` property: freeform calls \
+		 canonicalize into it"
+	)]
+	GrammarInputProperty {
+		/// Tool name.
+		name: Str,
+		/// Tool revision.
+		rev:  Rev,
+	},
 	/// Typed event or verdict serialization failed.
 	#[error("tool value serialization failed: {0}")]
 	Serialize(#[from] serde_json::Error),
@@ -1187,6 +1256,15 @@ pub enum RegistryError {
 		rev:    Rev,
 		/// Typed update decoder failure.
 		source: serde_json::Error,
+	},
+	/// A document authority rejected the dispatcher's visibility receipt.
+	#[error("tool {name} rejected its model visibility receipt")]
+	ProjectionAuthorization {
+		/// Tool receiving the receipt.
+		name:   Str,
+		/// Typed authority failure.
+		#[source]
+		source: ProjectionAuthorizationError,
 	},
 	/// Selected route cannot honor a constraint whose fallback is `ERROR`.
 	#[error("tool {name}@{rev} requires unsupported constraint: {feature}")]
@@ -1216,6 +1294,11 @@ trait ErasedTool: Send + Sync {
 	fn project_cached(&self, key: &ProjectionKey) -> Option<Arc<ProjectedVerdict>>;
 	fn cache_projected(&self, key: &ProjectionKey, projected: ProjectedVerdict);
 	fn warm(&self, requests: &[ProjectionRequest<'_>]) -> ProjectionWarm;
+	fn authorize_visibility(
+		&self,
+		verdict: &[u8],
+		receipt: &VisibilityReceipt,
+	) -> Result<(), RegistryError>;
 	fn invoke_input(
 		&self,
 		invocation_id: &str,
@@ -1245,22 +1328,25 @@ impl HostTool {
 			CallOutcome::Faulted(value) => (value, true, recorded_useless),
 			CallOutcome::ArgsRejected(issue) => {
 				return Ok(ProjectedVerdict {
-					parts:    vec![Part::Text { text: render_arg_issue(&issue) }].into(),
-					is_error: true,
-					useless:  false,
+					parts:      vec![Part::Text { text: render_arg_issue(&issue) }].into(),
+					visibility: Arc::from([]),
+					is_error:   true,
+					useless:    false,
 				});
 			},
 			CallOutcome::Aborted { abort, .. } => {
 				return Ok(ProjectedVerdict {
-					parts:    vec![Part::Text { text: render_abort(&abort) }].into(),
-					is_error: true,
-					useless:  false,
+					parts:      vec![Part::Text { text: abort.render() }].into(),
+					visibility: Arc::from([]),
+					is_error:   true,
+					useless:    false,
 				});
 			},
 		};
 		let text = serde_json::to_string(&value).map_err(RegistryError::Serialize)?;
 		Ok(ProjectedVerdict {
 			parts: vec![Part::Text { text: Str::new(text) }].into(),
+			visibility: Arc::from([]),
 			is_error,
 			useless,
 		})
@@ -1315,6 +1401,14 @@ impl ErasedTool for HostTool {
 		ProjectionWarm::ready(result)
 	}
 
+	fn authorize_visibility(
+		&self,
+		_verdict: &[u8],
+		_receipt: &VisibilityReceipt,
+	) -> Result<(), RegistryError> {
+		Ok(())
+	}
+
 	fn invoke_input(
 		&self,
 		_invocation_id: &str,
@@ -1328,6 +1422,7 @@ impl ErasedTool for HostTool {
 	}
 }
 
+#[derive(Clone)]
 struct HostToolRoster {
 	revision: u64,
 	executor: Arc<dyn HostToolExecutor>,
@@ -1388,6 +1483,14 @@ impl ErasedTool for Worker {
 		ProjectionWarm::ready(Err(external_error(&self.spec, "warm")))
 	}
 
+	fn authorize_visibility(
+		&self,
+		_verdict: &[u8],
+		_receipt: &VisibilityReceipt,
+	) -> Result<(), RegistryError> {
+		Ok(())
+	}
+
 	fn invoke_input(
 		&self,
 		_invocation_id: &str,
@@ -1418,25 +1521,35 @@ impl<T: Tool> Registered<T> {
 		let verdict: CallOutcome<T::Payload, T::Fault> = serde_json::from_slice(verdict)
 			.map_err(|_| RegistryError::VerdictShape(self.tool.spec().name.clone()))?;
 		Ok(match &verdict {
-			CallOutcome::Ok(payload) => ProjectedVerdict {
-				parts:    self.tool.prompt(Ok(payload), &caps).into(),
-				is_error: false,
-				useless:  recorded_useless,
+			CallOutcome::Ok(payload) => {
+				let projected = self.tool.projection(Ok(payload), &caps);
+				ProjectedVerdict {
+					parts:      projected.parts.into(),
+					visibility: projected.visibility.into(),
+					is_error:   false,
+					useless:    recorded_useless,
+				}
 			},
-			CallOutcome::Faulted(fault) => ProjectedVerdict {
-				parts:    self.tool.prompt(Err(fault), &caps).into(),
-				is_error: true,
-				useless:  recorded_useless,
+			CallOutcome::Faulted(fault) => {
+				let projected = self.tool.projection(Err(fault), &caps);
+				ProjectedVerdict {
+					parts:      projected.parts.into(),
+					visibility: projected.visibility.into(),
+					is_error:   true,
+					useless:    recorded_useless,
+				}
 			},
 			CallOutcome::ArgsRejected(issue) => ProjectedVerdict {
-				parts:    vec![Part::Text { text: render_arg_issue(issue) }].into(),
-				is_error: true,
-				useless:  false,
+				parts:      vec![Part::Text { text: render_arg_issue(issue) }].into(),
+				visibility: Arc::from([]),
+				is_error:   true,
+				useless:    false,
 			},
 			CallOutcome::Aborted { abort, .. } => ProjectedVerdict {
-				parts:    vec![Part::Text { text: render_abort(abort) }].into(),
-				is_error: true,
-				useless:  false,
+				parts:      vec![Part::Text { text: abort.render() }].into(),
+				visibility: Arc::from([]),
+				is_error:   true,
+				useless:    false,
 			},
 		})
 	}
@@ -1477,6 +1590,16 @@ impl<T: Tool> ErasedTool for Registered<T> {
 							yield Err(RegistryError::Serialize(error));
 							break;
 						},
+					},
+					crate::Ev::Diag(diag) => {
+						match serde_json::to_vec(&crate::DiagEnvelope { diag: &diag }) {
+							Ok(json) => yield Ok(ErasedEv::Update(Bytes::from(json))),
+							Err(error) => {
+								terminal = true;
+								yield Err(RegistryError::Serialize(error));
+								break;
+							},
+						}
 					},
 					crate::Ev::Args(issue) => {
 						terminal = true;
@@ -1564,6 +1687,27 @@ impl<T: Tool> ErasedTool for Registered<T> {
 		ProjectionWarm::ready(result)
 	}
 
+	fn authorize_visibility(
+		&self,
+		verdict: &[u8],
+		receipt: &VisibilityReceipt,
+	) -> Result<(), RegistryError> {
+		let verdict: CallOutcome<T::Payload, T::Fault> = serde_json::from_slice(verdict)
+			.map_err(|_| RegistryError::VerdictShape(self.tool.spec().name.clone()))?;
+		let view = match &verdict {
+			CallOutcome::Ok(payload) => Ok(payload),
+			CallOutcome::Faulted(fault) => Err(fault),
+			CallOutcome::ArgsRejected(_) | CallOutcome::Aborted { .. } => return Ok(()),
+		};
+		self
+			.tool
+			.authorize_visibility(view, receipt)
+			.map_err(|source| RegistryError::ProjectionAuthorization {
+				name: self.tool.spec().name.clone(),
+				source,
+			})
+	}
+
 	fn invoke_input(
 		&self,
 		invocation_id: &str,
@@ -1583,10 +1727,13 @@ impl<T: Tool> ErasedTool for Registered<T> {
 	}
 }
 
+#[derive(Clone)]
 struct RegistryEntry {
 	tool:         Arc<dyn ErasedTool>,
 	presentation: Presentation,
 	claims:       Claims,
+	execution:    ExecutionMode,
+	locus:        ToolLocus,
 }
 
 /// Revision-aware tool registry.
@@ -1605,20 +1752,140 @@ pub struct Registry {
 	retired:               BTreeMap<ToolIdentity, Arc<dyn ErasedTool>>,
 	live:                  BTreeMap<Str, Claim>,
 	unlisted:              BTreeSet<Str>,
+	device_metadata:       BTreeMap<(Str, Str), DeviceMetadata>,
 	protected_core:        BTreeSet<Str>,
 	/// Core-family names that should still appear in the user-facing roster
 	/// when they are unavailable for runtime or policy reasons.
 	user_visible_reserved: BTreeSet<Str>,
-	unmounted:             RwLock<BTreeMap<Str, Option<Str>>>,
 	arg_specs:             ArgSpecRegistry,
 	projection_cache:      Arc<ProjectionCache>,
 	host_tools:            RwLock<HostToolState>,
+	/// Conservatively unmounted device roots keyed by name, with the reported
+	/// unavailability reason. Populated only by
+	/// [`Registry::apply_availability`]; cleared by fresh registry composition.
+	unmounted:             RwLock<BTreeMap<Str, Option<Str>>>,
 }
 
 impl Registry {
 	/// Creates an empty registry.
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// Projects this registry onto an explicit stable-name allow-list: the
+	/// returned registry knows only the named
+	/// tools, so a kernel built on it neither advertises nor dispatches any
+	/// other native or host tool. Unknown names are ignored; the caller
+	/// validates them against [`Self::live_identities`] first when a typo
+	/// must be an error.
+	///
+	/// Revision history, arg specs, and the projection cache travel with the
+	/// retained names so historical lifts keep working for them.
+	#[must_use]
+	pub fn restrict<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Self {
+		let names = names.into_iter().map(Str::new).collect::<BTreeSet<Str>>();
+		let keep = |name: &Str| names.contains(name);
+		let host_tools = {
+			let state = self.host_tools.read();
+			HostToolState {
+				rosters: state
+					.rosters
+					.iter()
+					.map(|(claimant, roster)| {
+						(claimant.clone(), HostToolRoster {
+							revision: roster.revision,
+							executor: Arc::clone(&roster.executor),
+							entries:  roster
+								.entries
+								.iter()
+								.filter(|(name, _)| keep(name))
+								.map(|(name, entry)| (name.clone(), entry.clone()))
+								.collect(),
+						})
+					})
+					.collect(),
+				live:    state
+					.live
+					.iter()
+					.filter(|(name, _)| keep(name))
+					.map(|(name, claimant)| (name.clone(), claimant.clone()))
+					.collect(),
+				protected: state
+					.protected
+					.iter()
+					.filter(|(name, _)| keep(name))
+					.map(|(name, claimant)| (name.clone(), claimant.clone()))
+					.collect(),
+				history: state
+					.history
+					.iter()
+					.filter(|(identity, _)| keep(&identity.name))
+					.map(|(identity, tool)| (identity.clone(), Arc::clone(tool)))
+					.collect(),
+			}
+		};
+		Self {
+			versions:         self
+				.versions
+				.iter()
+				.filter(|(name, _)| keep(name))
+				.map(|(name, revisions)| (name.clone(), revisions.clone()))
+				.collect(),
+			retired:          self
+				.retired
+				.iter()
+				.filter(|(identity, _)| keep(&identity.name))
+				.map(|(identity, tool)| (identity.clone(), Arc::clone(tool)))
+				.collect(),
+			live:             self
+				.live
+				.iter()
+				.filter(|(name, _)| keep(name))
+				.map(|(name, claim)| (name.clone(), claim.clone()))
+				.collect(),
+			unlisted:         self
+				.unlisted
+				.iter()
+				.filter(|name| keep(name))
+				.cloned()
+				.collect(),
+			device_metadata:  self
+				.device_metadata
+				.iter()
+				.filter(|((name, _), _)| keep(name))
+				.map(|(key, metadata)| (key.clone(), metadata.clone()))
+				.collect(),
+			protected_core:   self
+				.protected_core
+				.iter()
+				.filter(|name| keep(name))
+				.cloned()
+				.collect(),
+			user_visible_reserved: self
+				.user_visible_reserved
+				.iter()
+				.filter(|name| keep(name))
+				.cloned()
+				.collect(),
+			arg_specs:        self.arg_specs.clone(),
+			projection_cache: Arc::clone(&self.projection_cache),
+			host_tools:       RwLock::new(host_tools),
+			unmounted:        RwLock::new(self.unmounted.read().clone()),
+		}
+	}
+
+	/// Retains authenticated mount provenance for one exact device claimant.
+	///
+	/// Metadata never participates in claim resolution or either registry hash.
+	pub fn bind_device_metadata(
+		&mut self,
+		name: impl Into<Str>,
+		claimant: impl Into<Str>,
+		metadata: DeviceMetadata,
+	) {
+		self
+			.device_metadata
+			.insert((name.into(), claimant.into()), metadata);
 	}
 
 	/// Rejects pre-populated claims that impersonate harness-owned core tools.
@@ -1660,10 +1927,16 @@ impl Registry {
 		}
 		let mut names = BTreeSet::new();
 		for spec in &specs {
-			if spec.name.trim().is_empty() || !spec.parameters.is_object() {
+			if spec.name.trim().is_empty()
+				|| !spec.parameters.is_object()
+				|| spec.rev.as_ref().is_some_and(|rev| rev.n == 0)
+			{
 				return Err(RegistryError::InvalidHostToolSpec {
 					name:    spec.name.clone(),
-					message: sf!("name must be non-empty and parameters must be a JSON Schema object"),
+					message: sf!(
+						"name must be non-empty, parameters must be a JSON Schema object, and an \
+						 explicit revision must be nonzero"
+					),
 				});
 			}
 
@@ -1711,7 +1984,9 @@ impl Registry {
 		let mut entries = BTreeMap::new();
 		for (index, declared) in specs.into_iter().enumerate() {
 			let schema = serde_json::to_vec(&declared.parameters)?;
-			let rev = Rev { family: family.clone(), n: 1 };
+			let rev = declared
+				.rev
+				.unwrap_or_else(|| Rev { family: family.clone(), n: 1 });
 			let value = serde_json::from_slice(&schema).map_err(|source| {
 				RegistryError::InvalidSchema { name: declared.name.clone(), rev: rev.clone(), source }
 			})?;
@@ -1740,6 +2015,8 @@ impl Registry {
 					cache_id,
 				}),
 				presentation: Presentation::Slot,
+				execution:    ExecutionMode::Parallel,
+				locus:        ToolLocus::Session,
 				claims:       Claims {
 					precedence: Precedence::INTEGRATION,
 					claimant:   claimant.clone(),
@@ -1789,6 +2066,7 @@ impl Registry {
 					name:        spec.name.clone(),
 					description: spec.description.clone(),
 					parameters:  serde_json::from_slice(&spec.schema).ok()?,
+					rev:         Some(spec.rev.clone()),
 				})
 			})
 			.collect()
@@ -2066,59 +2344,56 @@ impl Registry {
 			}
 		};
 
-		match requested {
-			Some(requested) => {
-				for name in requested {
-					push(name, &mut names, &mut seen);
+		if let Some(requested) = requested {
+			for name in requested {
+				push(name, &mut names, &mut seen);
+			}
+			if policy.checkpoint {
+				if seen.contains("checkpoint") {
+					push("rewind", &mut names, &mut seen);
+				} else if seen.contains("rewind") {
+					push("checkpoint", &mut names, &mut seen);
 				}
-				if policy.checkpoint {
-					if seen.contains("checkpoint") {
-						push("rewind", &mut names, &mut seen);
-					} else if seen.contains("rewind") {
-						push("checkpoint", &mut names, &mut seen);
+			}
+			if !policy.restricted {
+				if seen.contains("grep") && policy.ast {
+					push("ast_grep", &mut names, &mut seen);
+				}
+				if seen.contains("edit") && policy.ast {
+					push("ast_edit", &mut names, &mut seen);
+				}
+				if policy.memory == MemoryToolState::Mnemopi {
+					for name in ["recall", "retain", "reflect", "memory_edit"] {
+						push(name, &mut names, &mut seen);
 					}
 				}
-				if !policy.restricted {
-					if seen.contains("grep") && policy.ast {
-						push("ast_grep", &mut names, &mut seen);
-					}
-					if seen.contains("edit") && policy.ast {
-						push("ast_edit", &mut names, &mut seen);
-					}
+				if policy.external_thinking {
+					push("think", &mut names, &mut seen);
+				}
+				if policy.goal == GoalToolState::Active {
+					push("goal", &mut names, &mut seen);
+				}
+				if policy.autolearn && policy.top_level {
+					push("manage_skill", &mut names, &mut seen);
 					if policy.memory == MemoryToolState::Mnemopi {
-						for name in ["recall", "retain", "reflect", "memory_edit"] {
-							push(name, &mut names, &mut seen);
-						}
-					}
-					if policy.external_thinking {
-						push("think", &mut names, &mut seen);
-					}
-					if policy.goal == GoalToolState::Active {
-						push("goal", &mut names, &mut seen);
-					}
-					if policy.autolearn && policy.top_level {
-						push("manage_skill", &mut names, &mut seen);
-						if policy.memory == MemoryToolState::Mnemopi {
-							push("learn", &mut names, &mut seen);
-						}
+						push("learn", &mut names, &mut seen);
 					}
 				}
-			},
-			None => {
-				for name in self.live.keys() {
-					push(name, &mut names, &mut seen);
-				}
-				let host_names = self
-					.host_tools
-					.read()
-					.live
-					.keys()
-					.cloned()
-					.collect::<Vec<_>>();
-				for name in &host_names {
-					push(name, &mut names, &mut seen);
-				}
-			},
+			}
+		} else {
+			for name in self.live.keys() {
+				push(name, &mut names, &mut seen);
+			}
+			let host_names = self
+				.host_tools
+				.read()
+				.live
+				.keys()
+				.cloned()
+				.collect::<Vec<_>>();
+			for name in &host_names {
+				push(name, &mut names, &mut seen);
+			}
 		}
 		names
 	}
@@ -2187,12 +2462,37 @@ impl Registry {
 		presentation: Presentation,
 		claims: Claims,
 	) -> Result<(), RegistryError> {
+		self.register_typed(tool, presentation, claims, ToolLocus::Session)
+	}
+
+	/// Registers a typed tool that executes in the project environment host.
+	///
+	/// Older revisions from the same claimant remain only as pure lift steps.
+	/// Competing lower-precedence claimants remain qualified-addressable.
+	pub fn register_environment<T: Tool>(
+		&mut self,
+		tool: T,
+		presentation: Presentation,
+		claims: Claims,
+	) -> Result<(), RegistryError> {
+		self.register_typed(tool, presentation, claims, ToolLocus::Environment)
+	}
+
+	fn register_typed<T: Tool>(
+		&mut self,
+		tool: T,
+		presentation: Presentation,
+		claims: Claims,
+		locus: ToolLocus,
+	) -> Result<(), RegistryError> {
+		let execution = tool.execution_mode();
 		let spec = tool.spec();
 		let name = spec.name.clone();
 		let rev = spec.rev.clone();
 		let value = serde_json::from_slice(&spec.schema).map_err(|source| {
 			RegistryError::InvalidSchema { name: name.clone(), rev: rev.clone(), source }
 		})?;
+		validate_grammar_schema(spec, &value)?;
 		let cache_id = self.next_projection_cache_id()?;
 		let entry = RegistryEntry {
 			tool: Arc::new(Registered {
@@ -2203,6 +2503,8 @@ impl Registry {
 			}),
 			presentation,
 			claims,
+			execution,
+			locus,
 		};
 		self.insert(name, rev, entry)
 	}
@@ -2216,7 +2518,34 @@ impl Registry {
 		claims: Claims,
 	) -> Result<(), RegistryError> {
 		let worker_name = spec.name.clone();
-		self.register_worker_at(spec, presentation, claims, WorkerSiteKind::Env, worker_name)
+		self.register_worker_at_with_mode(
+			spec,
+			presentation,
+			claims,
+			WorkerSiteKind::Env,
+			worker_name,
+			ExecutionMode::Parallel,
+		)
+	}
+
+	/// Registers an externally supervised declaration with a batch scheduling
+	/// constraint.
+	pub fn register_worker_with_mode(
+		&mut self,
+		spec: ToolSpec,
+		presentation: Presentation,
+		claims: Claims,
+		execution: ExecutionMode,
+	) -> Result<(), RegistryError> {
+		let worker_name = spec.name.clone();
+		self.register_worker_at_with_mode(
+			spec,
+			presentation,
+			claims,
+			WorkerSiteKind::Env,
+			worker_name,
+			execution,
+		)
 	}
 
 	/// Registers an externally supervised declaration with its resolved worker
@@ -2229,25 +2558,90 @@ impl Registry {
 		site: WorkerSiteKind,
 		worker_name: Str,
 	) -> Result<(), RegistryError> {
+		self.register_worker_at_with_mode(
+			spec,
+			presentation,
+			claims,
+			site,
+			worker_name,
+			ExecutionMode::Parallel,
+		)
+	}
+
+	/// Registers an externally supervised declaration at a placement with
+	/// scheduling metadata.
+	pub fn register_worker_at_with_mode(
+		&mut self,
+		spec: ToolSpec,
+		presentation: Presentation,
+		claims: Claims,
+		site: WorkerSiteKind,
+		worker_name: Str,
+		execution: ExecutionMode,
+	) -> Result<(), RegistryError> {
+		self.register_external(
+			spec,
+			presentation,
+			claims,
+			execution,
+			ToolRoute::Worker { site, name: worker_name },
+			ToolLocus::Session,
+		)
+	}
+
+	/// Declares a presentation-only tool executed by the remote environment.
+	///
+	/// The declaration participates in model advertisement and projection
+	/// identity, but direct registry invocation is rejected as externally
+	/// routed.
+	pub fn declare_remote(
+		&mut self,
+		spec: ToolSpec,
+		presentation: Presentation,
+		claims: Claims,
+		execution: ExecutionMode,
+	) -> Result<(), RegistryError> {
+		self.register_external(
+			spec,
+			presentation,
+			claims,
+			execution,
+			ToolRoute::Remote,
+			ToolLocus::Environment,
+		)
+	}
+
+	fn register_external(
+		&mut self,
+		spec: ToolSpec,
+		presentation: Presentation,
+		claims: Claims,
+		execution: ExecutionMode,
+		route: ToolRoute,
+		locus: ToolLocus,
+	) -> Result<(), RegistryError> {
 		let name = spec.name.clone();
-		if claims.claimant == "omp/core" {
+		if matches!(&route, ToolRoute::Worker { .. }) && claims.claimant == "omp/core" {
 			return Err(RegistryError::ReservedClaimant { name });
 		}
 		let rev = spec.rev.clone();
 		let value = serde_json::from_slice(&spec.schema).map_err(|source| {
 			RegistryError::InvalidSchema { name: name.clone(), rev: rev.clone(), source }
 		})?;
+		validate_grammar_schema(&spec, &value)?;
 		let cache_id = self.next_projection_cache_id()?;
 		let entry = RegistryEntry {
 			tool: Arc::new(Worker {
 				spec,
 				schema: OpaqueJson::new(value),
-				route: ToolRoute::Worker { site, name: worker_name },
+				route,
 				cache: Arc::clone(&self.projection_cache),
 				cache_id,
 			}),
 			presentation,
 			claims,
+			execution,
+			locus,
 		};
 		self.insert(name, rev, entry)
 	}
@@ -2343,7 +2737,7 @@ impl Registry {
 	///
 	/// `selected = None` projects all visible slots. A selected set matches
 	/// [`Self::advertise_selected`] inclusion semantics, including explicitly
-	/// selected hidden slots. Worker and device declarations are absent.
+	/// selected hidden slots. Device declarations are absent.
 	pub const fn prompt_projection<'a>(
 		&'a self,
 		selected: Option<&'a [Str]>,
@@ -2382,11 +2776,23 @@ impl Registry {
 		Ok(entry.tool.spec().effects.clone())
 	}
 
-	/// Iterates winning identities in deterministic name order.
+	/// Iterates winning native identities in deterministic name order.
 	pub fn live_identities(
 		&self,
 	) -> impl DoubleEndedIterator<Item = (&Str, &Rev)> + ExactSizeIterator + '_ {
 		self.live.iter().map(|(name, claim)| (name, &claim.rev))
+	}
+
+	/// Snapshots every live stable name, including replaceable host tools.
+	///
+	/// Unlike [`Self::live_identities`], this is the complete allow-list needed
+	/// when a composition projects the registry without silently dropping
+	/// dynamic host declarations.
+	#[must_use]
+	pub fn live_names(&self) -> Vec<Str> {
+		let mut names = self.live.keys().cloned().collect::<BTreeSet<_>>();
+		names.extend(self.host_tools.read().live.keys().cloned());
+		names.into_iter().collect()
 	}
 
 	/// Borrows the resolved claim and its shadow provenance.
@@ -2412,6 +2818,24 @@ impl Registry {
 		Ok(entry.tool.route().clone())
 	}
 
+	/// Returns the execution locus of a winning or claimant-qualified entry.
+	pub fn locus(&self, name: &str) -> Result<ToolLocus, RegistryError> {
+		if let Ok(entry) = self.live_entry(name) {
+			return Ok(entry.locus);
+		}
+		let state = self.host_tools.read();
+		let claimant = state
+			.live
+			.get(name)
+			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
+		state
+			.rosters
+			.get(claimant)
+			.and_then(|roster| roster.entries.get(name))
+			.map(|entry| entry.locus)
+			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))
+	}
+
 	/// Returns the presentation of a winning or claimant-qualified entry.
 	pub fn presentation(&self, name: &str) -> Result<Presentation, RegistryError> {
 		if let Ok(entry) = self.live_entry(name) {
@@ -2430,10 +2854,28 @@ impl Registry {
 			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))
 	}
 
+	/// Returns the batch scheduling constraint of the resolved live tool.
+	pub fn execution_mode(&self, name: &str) -> Result<ExecutionMode, RegistryError> {
+		if let Ok(entry) = self.live_entry(name) {
+			return Ok(entry.execution);
+		}
+		let state = self.host_tools.read();
+		let claimant = state
+			.live
+			.get(name)
+			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))?;
+		state
+			.rosters
+			.get(claimant)
+			.and_then(|roster| roster.entries.get(name))
+			.map(|entry| entry.execution)
+			.ok_or_else(|| RegistryError::UnknownTool(Str::new(name)))
+	}
+
 	/// Resolves a typed device path without admitting it to the model slot
 	/// catalog.
 	///
-	/// The optional sub-tool component remains owned by the `xd` router; the
+	/// The optional sub-tool component remains owned by the `dyn` router; the
 	/// registry resolves the root claim and its live semantic revision.
 	pub fn resolve_device(&self, path: &DevicePath) -> Result<DeviceTarget<'_>, DeviceIssue> {
 		if self.unmounted.read().contains_key(path.root()) {
@@ -2465,6 +2907,7 @@ impl Registry {
 			rev: selected.rev,
 			claimant: selected.claimant,
 			route: entry.tool.route(),
+			effects: &entry.tool.spec().effects,
 		})
 	}
 
@@ -2508,11 +2951,15 @@ impl Registry {
 					name,
 					rev: &claim.rev,
 					claimant: &claim.claimant,
+					precedence: claim.precedence,
 					summary: &entry.tool.spec().description,
 					schema: entry.tool.spec().schema.as_ref(),
 					effects: &entry.tool.spec().effects,
 					docs: None,
 					route: entry.tool.route(),
+					metadata: self
+						.device_metadata
+						.get(&(name.clone(), claim.claimant.clone())),
 				})
 		})
 	}
@@ -2529,7 +2976,7 @@ impl Registry {
 			else {
 				continue;
 			};
-			if entry.presentation == Presentation::Slot {
+			if entry.presentation == Presentation::Slot && is_model_callable(entry.tool.route()) {
 				hash_identity(&mut hasher, name, &claim.rev);
 			}
 		}
@@ -2539,6 +2986,7 @@ impl Registry {
 				.rosters
 				.get(claimant)
 				.and_then(|roster| roster.entries.get(name))
+				.filter(|entry| is_model_callable(entry.tool.route()))
 			{
 				hash_identity(&mut hasher, name, &entry.tool.spec().rev);
 			}
@@ -2627,7 +3075,7 @@ impl Registry {
 		mut params: IncomingParams<'a>,
 	) -> Result<ErasedStream<'a>, RegistryError> {
 		if let Ok(entry) = self.live_entry(name) {
-			if matches!(entry.tool.route(), ToolRoute::Worker { .. }) {
+			if !matches!(entry.tool.route(), ToolRoute::Native) {
 				return Err(external_error(entry.tool.spec(), "invoke"));
 			}
 			params.bind_arg_specs(&entry.tool.spec().rev, &self.arg_specs);
@@ -2671,8 +3119,8 @@ impl Registry {
 	/// Dispatches one resolved native device while preserving the normal slot
 	/// invocation path unchanged.
 	///
-	/// Worker-routed devices are intentionally rejected here: the environment
-	/// router owns their `InvokeTool` transport after inspecting
+	/// Externally routed devices are intentionally rejected here: the
+	/// environment router owns their `InvokeTool` transport after inspecting
 	/// [`DeviceTarget::route`] from [`Self::resolve_device`].
 	pub fn invoke_device<'a>(
 		&'a self,
@@ -2687,14 +3135,14 @@ impl Registry {
 			.get(target.name)
 			.and_then(|versions| versions.get(target.rev))
 			.expect("resolved device target must retain its registered entry");
-		if matches!(entry.tool.route(), ToolRoute::Worker { .. }) {
+		if !matches!(entry.tool.route(), ToolRoute::Native) {
 			return Err(external_error(entry.tool.spec(), "invoke_device"));
 		}
 		params.bind_arg_specs(&entry.tool.spec().rev, &self.arg_specs);
 		Ok(entry.tool.call(params))
 	}
 
-	/// Lowers only policy-resolved native model-visible slots in priority order.
+	/// Lowers policy-resolved model-visible slots in priority order.
 	///
 	/// Larger priorities win. Core slots occupy the upper priority band, so an
 	/// extension declaration can never displace a core intent when a route is
@@ -2706,8 +3154,8 @@ impl Registry {
 	/// Lowers an exact frozen session selection, including selected hidden
 	/// tools.
 	///
-	/// Unknown, worker-routed, device-only, and unselected declarations are
-	/// omitted. Callers should obtain `names` from [`Self::resolve_inclusions`].
+	/// Unknown, device-only, and unselected declarations are omitted. Callers
+	/// should obtain `names` from [`Self::resolve_inclusions`].
 	pub fn advertise_selected(
 		&self,
 		caps: LoweringCaps,
@@ -2730,14 +3178,14 @@ impl Registry {
 			.iter()
 			.filter_map(|(name, claim)| {
 				let entry = self.versions.get(name)?.get(&claim.rev)?;
-				(include(entry) && matches!(entry.tool.route(), ToolRoute::Native)).then_some(entry)
+				(include(entry) && is_model_callable(entry.tool.route())).then_some(entry)
 			})
 			.collect::<Vec<_>>();
 		let host_tools = self.host_tools.read();
 		entries.extend(host_tools.live.iter().filter_map(|(name, claimant)| {
 			let roster = host_tools.rosters.get(claimant)?;
 			let entry = roster.entries.get(name)?;
-			(include(entry) && matches!(entry.tool.route(), ToolRoute::Native)).then_some(entry)
+			(include(entry) && is_model_callable(entry.tool.route())).then_some(entry)
 		}));
 		entries.sort_by(|left, right| {
 			advertisement_priority(right)
@@ -2865,6 +3313,19 @@ impl Registry {
 		entry
 			.project_cached(&request.key)
 			.ok_or_else(|| RegistryError::ProjectionCacheMiss(identity.clone()))
+	}
+
+	/// Returns the live dispatcher's final source visibility receipt to the
+	/// exact registered tool revision.
+	pub fn authorize_visibility(
+		&self,
+		identity: &ToolIdentity,
+		verdict: &[u8],
+		receipt: &VisibilityReceipt,
+	) -> Result<(), RegistryError> {
+		self
+			.projection_tool(identity)?
+			.authorize_visibility(verdict, receipt)
 	}
 
 	/// Projects one exact serialized update through its registered typed tool.
@@ -3123,6 +3584,7 @@ fn projection_caps_hash(caps: &PromptCaps) -> Hash32 {
 fn hash_tool_route(hasher: &mut Hasher, route: &ToolRoute) {
 	match route {
 		ToolRoute::Native => hash_field(hasher, &[0]),
+		ToolRoute::Remote => hash_field(hasher, &[2]),
 		ToolRoute::Worker { site, name } => {
 			hash_field(hasher, &[1]);
 			hash_field(hasher, &[*site as u8]);
@@ -3184,25 +3646,11 @@ fn render_arg_issue(issue: &ArgIssue) -> Str {
 	Str::new(text)
 }
 
-fn render_abort(abort: &Abort) -> Str {
-	match abort {
-		Abort::Skipped { reason } => sf!("skipped: {reason}"),
-		Abort::Interrupted { reason } => sf!("interrupted: {reason}"),
-		Abort::EffectsUnknown { reason } => {
-			sf!("aborted with effects unknown: {reason}")
-		},
-		Abort::InputDropped => sf!("aborted: invocation input dropped before commit"),
-		Abort::MissingOutcome => {
-			sf!("aborted: executor ended without a terminal outcome")
-		},
-	}
-}
-
-fn host_tool_stream<'a>(
+fn host_tool_stream(
 	executor: Arc<dyn HostToolExecutor>,
 	mut invocation: HostToolInvocation,
-	mut params: IncomingParams<'a>,
-) -> ErasedStream<'a> {
+	mut params: IncomingParams<'_>,
+) -> ErasedStream<'_> {
 	Box::pin(stream! {
 		invocation.arguments = match params.whole::<Map<String, Value>>().await {
 			Ok(arguments) => arguments,
@@ -3300,6 +3748,31 @@ fn host_tool_stream<'a>(
 			}
 		}
 	})
+}
+
+/// Enforces the freeform canonicalization contract on grammar declarations.
+///
+/// Recovery canonicalizes a freeform wire call into the schema's
+/// [`FREEFORM_INPUT_PROPERTY`] string property; a grammar tool whose schema
+/// cannot hold it could never execute on a grammar-capable transport.
+fn validate_grammar_schema(spec: &ToolSpec, schema: &Value) -> Result<(), RegistryError> {
+	if !matches!(spec.constraint, Constraint::Grammar { .. }) {
+		return Ok(());
+	}
+	let accepts_input = schema
+		.get("properties")
+		.and_then(|properties| properties.get(FREEFORM_INPUT_PROPERTY))
+		.is_some_and(|property| match property.get("type") {
+			None => true,
+			Some(Value::String(kind)) => kind == "string",
+			Some(Value::Array(kinds)) => kinds.iter().any(|kind| kind == "string"),
+			Some(_) => false,
+		});
+	if accepts_input {
+		Ok(())
+	} else {
+		Err(RegistryError::GrammarInputProperty { name: spec.name.clone(), rev: spec.rev.clone() })
+	}
 }
 
 fn lower(entry: &dyn ErasedTool, caps: LoweringCaps) -> Result<LoweredTool, RegistryError> {
@@ -3498,7 +3971,7 @@ fn dropped(name: &Str, feature: &str, reason: &'static str) -> Adjustment {
 mod tests {
 
 	use super::*;
-	use crate::{Dialect, Effects, Ev, ModelClass, ToolSpec};
+	use crate::{Dialect, Effects, Ev, ExecEffects, ModelClass, ToolSpec};
 
 	struct LiftTool {
 		spec: ToolSpec,
@@ -3602,13 +4075,49 @@ mod tests {
 			ProjectionKey::new(&identity(1), b"{\"kind\":\"ok\"}", &caps(), [2; 32].into());
 		assert!(cache.get(0, &key).is_none());
 		cache.insert(0, &key, ProjectedVerdict {
-			parts:    Arc::<[Part]>::from([]),
-			is_error: false,
-			useless:  false,
+			parts:      Arc::<[Part]>::from([]),
+			visibility: Arc::from([]),
+			is_error:   false,
+			useless:    false,
 		});
 		let hit = cache.get(0, &key).expect("matching key hits");
 		assert!(Arc::ptr_eq(&hit, &cache.get(0, &key).expect("second matching key hits")));
 		assert!(cache.get(0, &different).is_none());
+	}
+
+	#[test]
+	fn claimant_qualified_device_retains_exact_selected_effects() {
+		let mut registry = Registry::new();
+		let low = tool(1);
+		registry
+			.register(low, Presentation::Device, Claims {
+				precedence: Precedence::DEFAULT,
+				claimant:   sf!("test/low"),
+				replaces:   None,
+			})
+			.expect("low claimant");
+		let mut high = tool(2);
+		high.spec.effects = Effects {
+			exec: Some(ExecEffects { commands: Arc::from([sf!("*")]), network: true }),
+			..Effects::empty()
+		};
+		registry
+			.register(high, Presentation::Device, Claims {
+				precedence: Precedence::ENHANCEMENT,
+				claimant:   sf!("test/high"),
+				replaces:   None,
+			})
+			.expect("high claimant");
+
+		let live = registry
+			.resolve_device(&DevicePath::parse("lift").expect("live path"))
+			.expect("live target");
+		assert!(!live.effects.is_empty());
+		let shadow = registry
+			.resolve_device(&DevicePath::parse("lift@test/low").expect("shadow path"))
+			.expect("shadow target");
+		assert!(shadow.effects.is_empty());
+		assert_eq!(shadow.claimant, "test/low");
 	}
 
 	#[test]
@@ -3634,6 +4143,112 @@ mod tests {
 		assert_eq!(lifted.raw_args, original.raw_args);
 		assert_eq!(lifted.verdict, original.verdict);
 	}
+
+	#[test]
+	fn registrations_retain_locus_and_remote_entries_are_presentation_only() {
+		let claims = Claims {
+			precedence: Precedence::DEFAULT,
+			claimant:   sf!("test/locus"),
+			replaces:   None,
+		};
+
+		let mut session = Registry::new();
+		session
+			.register(tool(1), Presentation::Slot, claims.clone())
+			.expect("session tool registers");
+		assert_eq!(session.locus("lift").expect("session locus resolves"), ToolLocus::Session);
+
+		let mut environment = Registry::new();
+		environment
+			.register_environment(tool(1), Presentation::Slot, claims.clone())
+			.expect("environment tool registers");
+		assert_eq!(
+			environment
+				.locus("lift")
+				.expect("environment locus resolves"),
+			ToolLocus::Environment
+		);
+
+		let mut qualified = Registry::new();
+		qualified
+			.register(tool(1), Presentation::Slot, Claims {
+				precedence: Precedence::DEFAULT,
+				claimant:   sf!("test/session"),
+				replaces:   None,
+			})
+			.expect("qualified session tool registers");
+		qualified
+			.register_environment(tool(2), Presentation::Slot, Claims {
+				precedence: Precedence::ENHANCEMENT,
+				claimant:   sf!("test/environment"),
+				replaces:   None,
+			})
+			.expect("winning environment tool registers");
+		assert_eq!(qualified.locus("lift").expect("winning locus resolves"), ToolLocus::Environment);
+		assert_eq!(
+			qualified
+				.locus("lift@test/session")
+				.expect("claimant-qualified locus resolves"),
+			ToolLocus::Session
+		);
+
+		let mut worker = Registry::new();
+		worker
+			.register_worker(tool(1).spec, Presentation::Slot, claims.clone())
+			.expect("worker tool registers");
+		assert_eq!(worker.locus("lift").expect("worker locus resolves"), ToolLocus::Session);
+
+		let mut remote = Registry::new();
+		let spec = tool(1).spec;
+		let expected_spec = spec.clone();
+		remote
+			.declare_remote(spec, Presentation::Slot, claims, ExecutionMode::Parallel)
+			.expect("remote declaration registers");
+		assert_eq!(remote.locus("lift").expect("remote locus resolves"), ToolLocus::Environment);
+		assert_eq!(remote.route("lift").expect("remote route resolves"), ToolRoute::Remote);
+		assert_eq!(remote.live_spec("lift").expect("remote spec is live"), &expected_spec);
+		assert_eq!(
+			remote
+				.advertise(LoweringCaps {
+					strict_schema:  true,
+					grammar:        GrammarBits::empty(),
+					maximum_tools:  None,
+					maximum_strict: None,
+				})
+				.expect("remote declaration advertises")
+				.len(),
+			1
+		);
+		let projection_key = ProjectionKey::new(
+			&expected_spec.identity(),
+			br#"{"kind":"ok","value":null}"#,
+			&caps(),
+			remote.projection_hash(),
+		);
+		let projected = ProjectedVerdict {
+			parts:      Arc::<[Part]>::from([]),
+			visibility: Arc::from([]),
+			is_error:   false,
+			useless:    false,
+		};
+		remote
+			.cache_projected(&projection_key, projected.clone())
+			.expect("remote projection can be supplied externally");
+		assert_eq!(
+			remote
+				.project_cached(&projection_key)
+				.expect("remote projection cache is readable")
+				.expect("remote projection cache hits")
+				.as_ref(),
+			&projected
+		);
+		let (_feed, params) = IncomingParams::channel();
+		assert!(matches!(
+			remote.invoke("lift", params),
+			Err(RegistryError::UnsupportedExternal { operation: "invoke", .. })
+		));
+	}
+
 	struct HostExecutor;
 
 	impl HostToolExecutor for HostExecutor {
@@ -3648,6 +4263,41 @@ mod tests {
 				is_error: false,
 			})))
 		}
+	}
+
+	#[test]
+	fn child_local_host_roster_does_not_mutate_parent_and_keeps_declared_revision() {
+		let mut parent = Registry::new();
+		parent
+			.register(tool(1), Presentation::Slot, Claims {
+				precedence: Precedence::DEFAULT,
+				claimant:   sf!("test/native"),
+				replaces:   None,
+			})
+			.expect("native tool registers");
+		let names = parent.live_names();
+		let child = parent.restrict(names.iter().map(Str::as_str));
+		child
+			.replace_host_tools(
+				sf!("eval/owner/generation/handler"),
+				1,
+				vec![HostToolSpec {
+					name:        sf!("score"),
+					description: sf!("Score a candidate"),
+					parameters:  serde_json::json!({"type":"object"}),
+					rev:         Some(Rev { family: Str::default(), n: 9 }),
+				}],
+				Arc::new(HostExecutor),
+			)
+			.expect("child roster installs");
+		assert!(parent.resolved_identity("score").is_none());
+		assert_eq!(
+			child
+				.resolved_identity("score")
+				.map(|identity| identity.rev.n),
+			Some(9)
+		);
+		assert_eq!(child.live_names(), vec![sf!("lift"), sf!("score")]);
 	}
 
 	#[test]
@@ -3669,12 +4319,19 @@ mod tests {
 					name:        sf!("alpha"),
 					description: sf!("alpha host tool"),
 					parameters:  serde_json::json!({"type": "object"}),
+					rev:         Some(Rev { family: Str::default(), n: 7 }),
 				}],
 				Arc::clone(&executor),
 			)
 			.expect("first host roster installs");
 		assert!(registry.resolved_identity("lift").is_some());
-		assert!(registry.resolved_identity("alpha").is_some());
+		assert_eq!(
+			registry
+				.resolved_identity("alpha")
+				.map(|identity| identity.rev.n),
+			Some(7)
+		);
+		assert_eq!(registry.live_names(), vec![sf!("alpha"), sf!("lift")]);
 		registry
 			.replace_host_tools(
 				sf!("rpc/client"),
@@ -3683,18 +4340,85 @@ mod tests {
 					name:        sf!("beta"),
 					description: sf!("beta host tool"),
 					parameters:  serde_json::json!({"type": "object"}),
+					rev:         None,
 				}],
 				executor,
 			)
 			.expect("replacement host roster installs");
 		assert!(registry.resolved_identity("alpha").is_none());
 		assert!(registry.resolved_identity("beta").is_some());
+		assert_eq!(registry.live_names(), vec![sf!("beta"), sf!("lift")]);
+		assert_eq!(registry.locus("beta").expect("host locus resolves"), ToolLocus::Session);
 		assert!(matches!(
 			registry.replace_host_tools(sf!("rpc/client"), 2, Vec::new(), Arc::new(HostExecutor),),
 			Err(RegistryError::StaleHostRoster { .. })
 		));
 	}
 
+	/// An allow-list bounds both what the model sees and what can execute, for
+	/// native and host tools alike.
+	#[test]
+	fn restrict_keeps_only_the_named_native_and_host_tools() {
+		let mut registry = Registry::new();
+		registry
+			.register(tool(1), Presentation::Slot, Claims {
+				precedence: Precedence::DEFAULT,
+				claimant:   sf!("test/native"),
+				replaces:   None,
+			})
+			.expect("native tool registers");
+		let mut other = tool(1);
+		other.spec.name = sf!("other");
+		registry
+			.register(other, Presentation::Slot, Claims {
+				precedence: Precedence::DEFAULT,
+				claimant:   sf!("test/native"),
+				replaces:   None,
+			})
+			.expect("second native tool registers");
+		registry
+			.replace_host_tools(
+				sf!("rpc/client"),
+				1,
+				vec![
+					HostToolSpec {
+						name:        sf!("alpha"),
+						description: sf!("alpha host tool"),
+						parameters:  serde_json::json!({"type": "object"}),
+						rev:         None,
+					},
+					HostToolSpec {
+						name:        sf!("beta"),
+						description: sf!("beta host tool"),
+						parameters:  serde_json::json!({"type": "object"}),
+						rev:         None,
+					},
+				],
+				Arc::new(HostExecutor),
+			)
+			.expect("host roster installs");
+
+		let restricted = registry.restrict(["lift", "beta", "missing"]);
+		let advertised = restricted
+			.advertise(LoweringCaps {
+				strict_schema:  false,
+				grammar:        GrammarBits::empty(),
+				maximum_tools:  None,
+				maximum_strict: None,
+			})
+			.expect("restricted registry advertises")
+			.into_iter()
+			.map(|tool| tool.definition.name)
+			.collect::<Vec<_>>();
+		assert_eq!(advertised, vec![sf!("beta"), sf!("lift")]);
+		assert!(restricted.resolved_identity("other").is_none());
+		assert!(restricted.resolved_identity("alpha").is_none());
+		assert!(matches!(restricted.live_spec("other"), Err(RegistryError::UnknownTool(_))));
+		let (_feed, params) = IncomingParams::channel();
+		assert!(matches!(restricted.invoke("other", params), Err(RegistryError::UnknownTool(_))));
+		assert_eq!(restricted.host_tool_revision("rpc/client"), Some(1));
+		assert!(registry.resolved_identity("other").is_some(), "the source is untouched");
+	}
 	#[test]
 	fn preloaded_core_claims_are_rejected_before_production_composition() {
 		let mut registry = Registry::new();
@@ -3725,6 +4449,7 @@ mod tests {
 					name:        sf!("read"),
 					description: sf!("host read"),
 					parameters:  serde_json::json!({"type": "object"}),
+					rev:         None,
 				}],
 				executor,
 			)
@@ -3752,6 +4477,7 @@ mod tests {
 						name:        Str::new_static(name),
 						description: sf!("qualified host tool"),
 						parameters:  serde_json::json!({"type": "object"}),
+						rev:         None,
 					}],
 					Arc::new(HostExecutor),
 				)
@@ -3779,6 +4505,7 @@ mod tests {
 					name:        sf!("read"),
 					description: sf!("host read"),
 					parameters:  serde_json::json!({"type": "object"}),
+					rev:         None,
 				}],
 				Arc::new(HostExecutor),
 			)
@@ -3909,6 +4636,7 @@ mod tests {
 					name:        sf!("shadowed"),
 					description: sf!("shadowed host tool"),
 					parameters:  serde_json::json!({"type": "object"}),
+					rev:         None,
 				}],
 				executor,
 			)
@@ -4012,6 +4740,7 @@ mod tests {
 						name:        sf!("read"),
 						description: Str::new(description),
 						parameters:  serde_json::json!({"type": "object"}),
+						rev:         None,
 					}],
 					Arc::new(HostExecutor),
 				)
@@ -4043,6 +4772,7 @@ mod tests {
 					name:        sf!("alpha"),
 					description: sf!("alpha host tool"),
 					parameters:  serde_json::json!({"type": "object"}),
+					rev:         None,
 				}],
 				Arc::new(HostExecutor),
 			)
@@ -4103,6 +4833,7 @@ mod tests {
 					name:        sf!("alpha"),
 					description: sf!("alpha host tool"),
 					parameters:  serde_json::json!({"type": "object"}),
+					rev:         None,
 				}],
 				Arc::new(HostExecutor),
 			)
@@ -4151,6 +4882,7 @@ mod tests {
 					name:        sf!("alpha"),
 					description: sf!("alpha host tool"),
 					parameters:  serde_json::json!({"type": "object"}),
+					rev:         None,
 				}],
 				Arc::clone(&executor),
 			)
@@ -4170,6 +4902,7 @@ mod tests {
 					name:        sf!("alpha"),
 					description: sf!("alpha host tool, third generation"),
 					parameters:  serde_json::json!({"type": "object"}),
+					rev:         None,
 				}],
 				executor,
 			)
@@ -4184,6 +4917,7 @@ mod tests {
 					name:        sf!("alpha"),
 					description: sf!("takeover"),
 					parameters:  serde_json::json!({"type": "object"}),
+					rev:         None,
 				}],
 				Arc::new(HostExecutor),
 			)
