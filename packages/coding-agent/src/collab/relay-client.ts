@@ -45,10 +45,10 @@ const MAX_PENDING_SEND_BYTES = 16 * 1024 * 1024;
  */
 const MAX_PEER_PENDING_SENDS = 32;
 /**
- * Lazy batches one peer may hold. A batch is a single queue entry whose byte
- * charge covers only the chunk in flight, so the entry caps above put no bound
- * at all on how long it occupies the head of a queue shared with every other
- * peer.
+ * Lazy batches one peer may hold. A batch is a single queue entry that
+ * materializes a chunk at a time, so the entry caps above put no bound at all on
+ * how long it occupies the head of a queue shared with every other peer — its
+ * byte charge bounds the memory it pins, not its residency.
  *
  * One, and `CollabHost` puts the welcome at the head of the same generator, so
  * this reads as one welcome-plus-snapshot per peer. That is what makes the pair
@@ -78,8 +78,9 @@ interface PendingSend {
 	bytes: number;
 	/**
 	 * One entry that materializes its chunks as the transport drains and holds the
-	 * snapshot they come from until it does. Charged once, at admission, for what
-	 * it keeps reachable — so a discard refunds exactly what was levied.
+	 * snapshot they come from until it does. Declared once, at admission, for what
+	 * it keeps reachable, and the declaration lives here rather than in a running
+	 * total — so dropping the entry is the refund, exact by construction.
 	 */
 	lazy: boolean;
 	/** Carries no replica state, so it may be discarded instead of ending the room. */
@@ -136,7 +137,6 @@ export class CollabSocket {
 	/** Serializes open() so frames are delivered in arrival order. */
 	#recvChain: Promise<void> = Promise.resolve();
 	#pendingSends: PendingSend[] = [];
-	#pendingSendBytes = 0;
 	/**
 	 * Why a peer is currently not being served; absence means it is. Sole
 	 * authority for the queue invariant: **every entry in {@link #pendingSends}
@@ -330,7 +330,6 @@ export class CollabSocket {
 				continue;
 			}
 			pending.cancelled = true;
-			this.#pendingSendBytes -= pending.bytes;
 			pending.frames.return?.(undefined);
 		}
 		const discarded = this.#pendingSends.length - keep.length;
@@ -345,9 +344,9 @@ export class CollabSocket {
 	 * this socket knew is meaningless and may already have been reissued.
 	 *
 	 * Targeted work is therefore undeliverable and must go. A lazy batch is the
-	 * pressing case: it is one queue entry whose accounting covers only the chunk
-	 * in flight, so nothing bounds how long it keeps iterating at a retired id
-	 * while every new guest's welcome waits behind it. Retirement records go too —
+	 * pressing case: its charge bounds the snapshot it pins but says nothing about
+	 * how long it iterates, so nothing stops it running to the end of a whole
+	 * session at a retired id while every new guest's welcome waits behind it. Retirement records go too —
 	 * keeping them would permanently refuse a reissued id, and so does the owner's
 	 * view of who is in the room — see {@link onRoomRecreated}, because an id is
 	 * also what the owner keys write permission off. Broadcast work is addressed to
@@ -439,8 +438,17 @@ export class CollabSocket {
 			// them evict would let a guest spam requests, be shed, resume once the
 			// mask lifts, and walk through everyone else's backlog. Those drop
 			// instead: the cost of a peer's own requests stays with that peer.
-			while (lazy && this.#overCapacity(bytes)) {
-				if (!this.#shedHeaviestPeer(targetPeer)) break;
+			//
+			// Preflight before the first shed, never during it. Shedding peer by peer
+			// and stopping when it stops helping destroys a viable guest's snapshot to
+			// buy nothing: a broadcast the shed cannot touch is enough to keep the
+			// floor out of reach, so an oversized batch fails anyway and the peer it
+			// evicted on the way out is a second casualty of a join that never
+			// happened.
+			if (lazy && this.#shedCouldAdmit(bytes, targetPeer)) {
+				while (this.#overCapacity(bytes)) {
+					if (!this.#shedHeaviestPeer(targetPeer)) break;
+				}
 			}
 			if (this.#overCapacity(bytes)) {
 				logger.debug("collab: dropping targeted frame, no shed can make room", { targetPeer, lazy });
@@ -452,7 +460,6 @@ export class CollabSocket {
 		// read as pressure afterwards — see #chargedBytes.
 		const exempt = this.#pendingSends.length === 0 && bytes > MAX_PENDING_SEND_BYTES;
 		this.#pendingSends.push({ frames, targetPeer, bytes, lazy, advisory, exempt, cancelled: false });
-		this.#pendingSendBytes += bytes;
 		this.#pumpSends();
 		return true;
 	}
@@ -481,19 +488,45 @@ export class CollabSocket {
 	 * the floor always meant: live traffic queues behind the oversized snapshot in
 	 * order rather than evicting it.
 	 *
-	 * Derived rather than accumulated, so it cannot drift from {@link
-	 * CollabSocket.#pendingSendBytes} across the four sites that maintain it. At
-	 * most one entry is ever exempt — the floor only fires on an empty queue, so a
-	 * second cannot be admitted while the first is still queued — and what bounds
-	 * the traffic behind it is {@link MAX_PENDING_SENDS} plus a full budget's worth
-	 * of charge, both of which still shed as usual.
+	 * Summed rather than subtracted from a running total, because a declaration is
+	 * a caller's number and floating-point addition is lossy at scale: against an
+	 * accumulator holding a declared 1e30, every later frame's bytes vanish into
+	 * rounding and subtracting the exemption returns zero forever, admitting an
+	 * unbounded backlog. Summed, an exempt declaration is never added in the first
+	 * place, and what remains is exact — every entry over the budget is exempt by
+	 * construction, so this adds at most {@link MAX_PENDING_SENDS} terms of at most
+	 * {@link MAX_PENDING_SEND_BYTES} each, three orders of magnitude inside the
+	 * range where integer addition is exact.
 	 */
 	#chargedBytes(): number {
-		let charged = this.#pendingSendBytes;
+		let charged = 0;
 		for (const pending of this.#pendingSends) {
-			if (pending.exempt) charged -= pending.bytes;
+			if (!pending.exempt) charged += pending.bytes;
 		}
 		return charged;
+	}
+
+	/**
+	 * Whether shedding every peer's queued work but {@link exclude}'s would leave
+	 * room for {@link bytes} — the fixed point of the shed loop, evaluated before it
+	 * takes anything.
+	 *
+	 * Modelled on exactly what {@link #shedHeaviestPeer} can reach, so the two
+	 * cannot disagree: it skips broadcasts and the requester, and a shed takes a
+	 * peer's entries whole. What survives is therefore what this counts, including
+	 * the empty-queue floor when nothing survives at all.
+	 */
+	#shedCouldAdmit(bytes: number, exclude: number): boolean {
+		let count = 0;
+		let charged = 0;
+		for (const pending of this.#pendingSends) {
+			if (pending.targetPeer !== 0 && pending.targetPeer !== exclude) continue;
+			count++;
+			if (!pending.exempt) charged += pending.bytes;
+		}
+		if (count >= MAX_PENDING_SENDS) return false;
+		if (count === 0) return true;
+		return charged + bytes <= MAX_PENDING_SEND_BYTES;
 	}
 
 	/** Whether admitting {@link bytes} for {@link targetPeer} would have to evict something first. */
@@ -605,7 +638,6 @@ export class CollabSocket {
 			const next = pending.frames.next();
 			if (next.done) {
 				this.#pendingSends.shift();
-				this.#pendingSendBytes -= pending.bytes;
 				continue;
 			}
 			const serialized = typeof next.value === "string" ? next.value : JSON.stringify(next.value);
@@ -666,7 +698,6 @@ export class CollabSocket {
 		// synchronous trigger instead of a timer.
 		this.#roomGeneration++;
 		this.#pendingSends.length = 0;
-		this.#pendingSendBytes = 0;
 		this.#notServing.clear();
 		// With the records. A lease only exists to hold one against eviction, so
 		// leaving them behind protects nothing and, across a `connect()` that reopens

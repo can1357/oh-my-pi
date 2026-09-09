@@ -1261,6 +1261,84 @@ describe("CollabSocket send backpressure", () => {
 		}
 	});
 
+	it("does not shed a viable snapshot for an oversized one that cannot be admitted either", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const key = await importRoomKey(generateRoomKey());
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/preflight", role: "host", key });
+		let reason: string | undefined;
+		socket.onClose = message => {
+			reason = message;
+		};
+		const shed: number[] = [];
+		socket.onPeerOverload = peer => shed.push(peer);
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			// Half the budget: a join with room to spare, and nothing here is its fault.
+			socket.sendBatch(welcomeBatch("viable snapshot"), GREEDY, 8 * 1024 * 1024);
+			// One broadcast behind it. A shed cannot touch a broadcast, so this is what
+			// keeps the empty-queue floor out of reach for whatever arrives next.
+			expect(socket.send({ t: "error", message: "live" })).toBe(true);
+			// Which makes this join impossible: past the budget, and past it even with
+			// every other peer gone. Shedding for it costs a guest its snapshot and
+			// still admits nothing.
+			socket.sendBatch(welcomeBatch("oversized snapshot"), BYSTANDER, 64 * 1024 * 1024);
+			for (let flush = 0; flush < 4; flush++) await Promise.resolve();
+			expect(shed).toEqual([]);
+			expect(reason).toBeUndefined();
+
+			// And the batch that was already viable still drains, ahead of the
+			// broadcast that was admitted behind it.
+			const deadline = Date.now() + 3_000;
+			while (ws.sent.length < 2 && Date.now() < deadline) {
+				ws.bufferedAmount = 0;
+				await Bun.sleep(10);
+			}
+			expect(ws.sent.map(bytes => unpackEnvelope(bytes)?.peerId)).toEqual([GREEDY, 0]);
+		} finally {
+			socket.close();
+		}
+	});
+
+	it("measures the budget exactly against a declaration too large to add to", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/lossy", role: "host", key: {} as CryptoKey });
+		let reason: string | undefined;
+		socket.onClose = message => {
+			reason = message;
+		};
+		try {
+			socket.connect();
+			BackpressuredWebSocket.instances[0]!.open();
+			// Finite and non-negative, which is the whole precondition the budget's
+			// invariant is stated for. Held in an accumulator, it swallows every later
+			// frame's bytes in rounding and the queue reads as empty forever.
+			socket.sendBatch(welcomeBatch("astronomical"), GREEDY, 1e30);
+			const frame: CollabFrame = { t: "error", message: "y".repeat(512 * 1024) };
+			const frameBytes = Buffer.byteLength(JSON.stringify(frame));
+			let admitted = 0;
+			for (let i = 0; i < 64; i++) {
+				if (!socket.send(frame)) break;
+				admitted++;
+			}
+			// The bound itself, not a count that happens to match it: what was admitted
+			// fits the budget and one more would not.
+			expect(admitted).toBeGreaterThan(0);
+			expect(admitted * frameBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+			expect((admitted + 1) * frameBytes).toBeGreaterThan(16 * 1024 * 1024);
+			// Refusing the next one is the terminal path, not a silent drop: only
+			// replica-bearing broadcasts are left and the exempt holder frees no charge.
+			expect(reason).toBeDefined();
+		} finally {
+			socket.close();
+		}
+	});
+
 	it("keeps admitting live traffic behind an oversized snapshot, and still sheds its peer for a flood", async () => {
 		BackpressuredWebSocket.instances = [];
 		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
