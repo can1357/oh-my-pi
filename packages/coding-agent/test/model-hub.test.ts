@@ -7,6 +7,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { formatModelSelectorValue } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -16,7 +17,7 @@ import {
 	resetProviderAutoRefreshGuard,
 } from "@oh-my-pi/pi-coding-agent/modes/components/model-hub";
 import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
+import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
 function normalize(lines: readonly string[]): string {
@@ -59,8 +60,8 @@ interface RegistryOverrides {
 	getAll?: () => Model[];
 	getDiscoverableProviders?: () => string[];
 	getProviderDiscoveryState?: (providerId: string) => unknown;
+	find?: (provider: string, id: string) => Model | undefined;
 }
-
 function makeRegistry(models: () => Model[], overrides: RegistryOverrides = {}): ModelRegistry {
 	return {
 		refresh: overrides.refresh ?? (async () => {}),
@@ -71,6 +72,8 @@ function makeRegistry(models: () => Model[], overrides: RegistryOverrides = {}):
 		getDiscoverableProviders: overrides.getDiscoverableProviders ?? (() => []),
 		getProviderDiscoveryState: overrides.getProviderDiscoveryState ?? (() => undefined),
 		authStorage: { hasAuth: () => false },
+		find:
+			overrides.find ?? ((provider, id) => models().find(model => model.provider === provider && model.id === id)),
 	} as unknown as ModelRegistry;
 }
 
@@ -136,6 +139,8 @@ const DOWN = "\x1b[B";
 const UP = "\x1b[A";
 const LEFT = "\x1b[D";
 const ESC = "\x1b";
+const SHIFT_UP = "\x1b[1;2A";
+const SHIFT_DOWN = "\x1b[1;2B";
 
 describe("ModelHub", () => {
 	beforeAll(async () => {
@@ -393,7 +398,7 @@ describe("ModelHub", () => {
 	});
 
 	describe("quick-switch cycle and custom roles", () => {
-		test("c toggles cycle membership, [ reorders, and the preview tracks the order", () => {
+		test("c toggles cycle membership, shift+↑ reorders, and the preview tracks the order", () => {
 			const model = makeModel("test", "cycle-model");
 			const settings = Settings.isolated({});
 			const changes: string[][] = [];
@@ -419,8 +424,8 @@ describe("ModelHub", () => {
 			// …c again re-appends it at the end…
 			hub.handleInput("c");
 			expect(changes[1]).toEqual(["smol", "slow", "default"]);
-			// …and [ moves it one slot earlier.
-			hub.handleInput("[");
+			// …and shift+↑ moves it one slot earlier.
+			hub.handleInput(SHIFT_UP);
 			expect(changes[2]).toEqual(["smol", "default", "slow"]);
 
 			// The preview line renders the resulting ctrl+p track in order.
@@ -830,6 +835,298 @@ describe("ModelHub", () => {
 			// Cursor followed the moved entry: x removes model-a, not model-b.
 			hub.handleInput("x");
 			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/model-b"]);
+		});
+		test("] on a role demotes the primary into the chain and promotes the first fallback", () => {
+			const a = makeModel("test", "model-a");
+			const b = makeModel("test", "model-b");
+			const c = makeModel("test", "model-c");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/model-a" },
+				"retry.fallbackChains": { default: ["test/model-b", "test/model-c"] },
+			});
+			const onAssign = vi.fn(
+				(model: Model, role: string, thinkingLevel: ConfiguredThinkingLevel | undefined, selector: string) => {
+					settings.setModelRole(role, formatModelSelectorValue(selector, thinkingLevel));
+				},
+			);
+			const { hub, onFallbackChainChange } = createHub({
+				models: [a, b, c],
+				scoped: true,
+				settings,
+				callbacks: { onAssign },
+			});
+
+			enterRolesView(hub);
+			hub.handleInput("]"); // primary model-a trades places with fallback model-b
+			expect(onAssign).toHaveBeenCalledTimes(1);
+			expect(onAssign.mock.calls[0]?.[0]).toBe(b);
+			expect(onAssign.mock.calls[0]?.[1]).toBe("default");
+			expect(onAssign.mock.calls[0]?.[2]).toBe(ThinkingLevel.Inherit);
+			expect(onAssign.mock.calls[0]?.[3]).toBe("test/model-b");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/model-a", "test/model-c"]);
+
+			// Cursor followed the demoted primary: x removes model-a, not model-b.
+			hub.handleInput("x");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/model-c"]);
+		});
+
+		test("[ on the first fallback promotes it to primary", () => {
+			const a = makeModel("test", "model-a");
+			const b = makeModel("test", "model-b");
+			const c = makeModel("test", "model-c");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/model-a" },
+				"retry.fallbackChains": { default: ["test/model-b", "test/model-c"] },
+			});
+			const onAssign = vi.fn(
+				(model: Model, role: string, thinkingLevel: ConfiguredThinkingLevel | undefined, selector: string) => {
+					settings.setModelRole(role, formatModelSelectorValue(selector, thinkingLevel));
+				},
+			);
+			const { hub, onFallbackChainChange } = createHub({
+				models: [a, b, c],
+				scoped: true,
+				settings,
+				callbacks: { onAssign },
+			});
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // first chain entry (model-b)
+			hub.handleInput("[");
+			expect(onAssign).toHaveBeenCalledTimes(1);
+			expect(onAssign.mock.calls[0]?.[0]).toBe(b);
+			expect(onAssign.mock.calls[0]?.[3]).toBe("test/model-b");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/model-a", "test/model-c"]);
+
+			// Cursor followed the promoted entry back to the role row.
+			expect(footerLine(hub.render(220))).toContain("Enter pick");
+		});
+
+		test("reorder carries each model's thinking level across the primary boundary", () => {
+			const a = makeModel("test", "model-a");
+			const b = makeModel("test", "model-b");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/model-a:low" },
+				"retry.fallbackChains": { default: ["test/model-b"] },
+			});
+			const onAssign = vi.fn(
+				(model: Model, role: string, thinkingLevel: ConfiguredThinkingLevel | undefined, selector: string) => {
+					settings.setModelRole(role, formatModelSelectorValue(selector, thinkingLevel));
+				},
+			);
+			const { hub, onFallbackChainChange } = createHub({
+				models: [a, b],
+				scoped: true,
+				settings,
+				callbacks: { onAssign },
+			});
+
+			enterRolesView(hub);
+			hub.handleInput("]");
+			expect(onAssign.mock.calls[0]?.[0]).toBe(b);
+			expect(onAssign.mock.calls[0]?.[2]).toBe(ThinkingLevel.Inherit);
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/model-a:low"]);
+		});
+
+		test("] on an auto-selected role promotes the first fallback with no demotion", () => {
+			const a = makeModel("test", "model-a");
+			const b = makeModel("test", "model-b");
+			const settings = Settings.isolated({
+				"retry.fallbackChains": { default: ["test/model-a", "test/model-b"] },
+			});
+			const onAssign = vi.fn(
+				(model: Model, role: string, thinkingLevel: ConfiguredThinkingLevel | undefined, selector: string) => {
+					settings.setModelRole(role, formatModelSelectorValue(selector, thinkingLevel));
+				},
+			);
+			const { hub, onFallbackChainChange } = createHub({
+				models: [a, b],
+				scoped: true,
+				settings,
+				callbacks: { onAssign },
+			});
+
+			enterRolesView(hub);
+			hub.handleInput("]");
+			expect(onAssign).toHaveBeenCalledTimes(1);
+			expect(onAssign.mock.calls[0]?.[0]).toBe(a);
+			expect(onAssign.mock.calls[0]?.[3]).toBe("test/model-a");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/model-b"]);
+		});
+
+		test("complex primaries refuse the cross-boundary move instead of overwriting config", () => {
+			const a = makeModel("test", "model-a");
+			const b = makeModel("test", "model-b");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/model-a,test/model-b" },
+				"retry.fallbackChains": { default: ["test/model-b"] },
+			});
+			const { hub, onAssign, onFallbackChainChange } = createHub({
+				models: [a, b],
+				scoped: true,
+				settings,
+			});
+
+			enterRolesView(hub);
+			hub.handleInput("]"); // role row: complex primary stays put
+			expect(onAssign).not.toHaveBeenCalled();
+			expect(onFallbackChainChange).not.toHaveBeenCalled();
+
+			hub.handleInput(DOWN); // first chain entry
+			hub.handleInput("["); // promote past a complex primary also refuses
+			expect(onAssign).not.toHaveBeenCalled();
+			expect(onFallbackChainChange).not.toHaveBeenCalled();
+		});
+		test("legacy pi/ alias primaries refuse the cross-boundary move", () => {
+			const a = makeModel("test", "model-a");
+			const b = makeModel("test", "model-b");
+			const settings = Settings.isolated({
+				modelRoles: { default: "pi/smol", smol: "test/model-a" },
+				"retry.fallbackChains": { default: ["test/model-b"] },
+			});
+			const { hub, onAssign, onFallbackChainChange } = createHub({
+				models: [a, b],
+				scoped: true,
+				settings,
+			});
+
+			enterRolesView(hub);
+			hub.handleInput("]"); // role row: the alias stays put, nothing demotes into the chain
+			expect(onAssign).not.toHaveBeenCalled();
+			expect(onFallbackChainChange).not.toHaveBeenCalled();
+			expect(settings.getModelRole("default")).toBe("pi/smol");
+		});
+
+		test("unavailable fallback models refuse promotion instead of moving the chain", () => {
+			const a = makeModel("test", "model-a");
+			const b = makeModel("test", "model-b");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/model-a" },
+				"retry.fallbackChains": { default: ["test/model-b"] },
+			});
+			const { hub, onAssign, onFallbackChainChange } = createHub({
+				models: [a, b],
+				settings,
+				registry: { getAvailable: () => [a] },
+			});
+
+			enterRolesView(hub);
+			hub.handleInput("]");
+			expect(onAssign).not.toHaveBeenCalled();
+			expect(onFallbackChainChange).not.toHaveBeenCalled();
+		});
+
+		test("scoped literal :max ids promote as literal models, not thinking levels", () => {
+			const a = makeModel("test", "model-a");
+			const literalMax = makeModel("test", "model:max");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/model-a" },
+				"retry.fallbackChains": { default: ["test/model:max"] },
+			});
+			const onAssign = vi.fn(
+				(model: Model, role: string, thinkingLevel: ConfiguredThinkingLevel | undefined, selector: string) => {
+					settings.setModelRole(role, formatModelSelectorValue(selector, thinkingLevel));
+				},
+			);
+			const { hub, onFallbackChainChange } = createHub({
+				models: [a, literalMax],
+				scoped: true,
+				settings,
+				registry: { getAll: () => [a] },
+				callbacks: { onAssign },
+			});
+
+			enterRolesView(hub);
+			hub.handleInput("]");
+			expect(onAssign).toHaveBeenCalledTimes(1);
+			expect(onAssign.mock.calls[0]?.[0]).toBe(literalMax);
+			expect(onAssign.mock.calls[0]?.[2]).toBe(ThinkingLevel.Inherit);
+			expect(onAssign.mock.calls[0]?.[3]).toBe("test/model:max");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/model-a"]);
+		});
+		test("a custom provider literally named pi still crosses the boundary", () => {
+			const a = makeModel("test", "model-a");
+			const piModel = makeModel("pi", "somemodel");
+			const b = makeModel("test", "model-b");
+			const settings = Settings.isolated({
+				modelRoles: { default: "pi/somemodel" },
+				"retry.fallbackChains": { default: ["test/model-b"] },
+			});
+			const onAssign = vi.fn(
+				(model: Model, role: string, thinkingLevel: ConfiguredThinkingLevel | undefined, selector: string) => {
+					settings.setModelRole(role, formatModelSelectorValue(selector, thinkingLevel));
+				},
+			);
+			const { hub, onFallbackChainChange } = createHub({
+				models: [a, piModel, b],
+				scoped: true,
+				settings,
+				callbacks: { onAssign },
+			});
+
+			enterRolesView(hub);
+			hub.handleInput("]");
+			expect(onAssign).toHaveBeenCalledTimes(1);
+			expect(onAssign.mock.calls[0]?.[0]).toBe(b);
+			expect(onAssign.mock.calls[0]?.[3]).toBe("test/model-b");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["pi/somemodel"]);
+		});
+		test("alias-spelled fallbacks promote when they resolve to an available model", () => {
+			const a = makeModel("test", "model-a");
+			const canonical = makeModel("test", "model-b");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/model-a" },
+				"retry.fallbackChains": { default: ["test/model-b-alias"] },
+			});
+			const onAssign = vi.fn(
+				(model: Model, role: string, thinkingLevel: ConfiguredThinkingLevel | undefined, selector: string) => {
+					settings.setModelRole(role, formatModelSelectorValue(selector, thinkingLevel));
+				},
+			);
+			const { hub, onFallbackChainChange } = createHub({
+				models: [a, canonical],
+				scoped: true,
+				settings,
+				registry: {
+					find: (provider: string, id: string) =>
+						provider === "test" && id === "model-b-alias" ? canonical : undefined,
+				},
+				callbacks: { onAssign },
+			});
+
+			enterRolesView(hub);
+			hub.handleInput("]");
+			expect(onAssign).toHaveBeenCalledTimes(1);
+			expect(onAssign.mock.calls[0]?.[0]).toBe(canonical);
+			expect(onAssign.mock.calls[0]?.[3]).toBe("test/model-b-alias");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/model-a"]);
+		});
+
+		test("[ and ] on a role leave the quick-switch cycle alone; shift+arrows still reorder it", () => {
+			const model = makeModel("test", "cycle-model");
+			const settings = Settings.isolated({});
+			const changes: string[][] = [];
+			const { hub } = createHub({
+				models: [model],
+				scoped: true,
+				settings,
+				callbacks: {
+					onCycleOrderChange: order => {
+						changes.push([...order]);
+						settings.set("cycleOrder", order);
+					},
+				},
+			});
+
+			enterRolesView(hub);
+			hub.handleInput("[");
+			hub.handleInput("]");
+			expect(changes).toEqual([]);
+
+			hub.handleInput(SHIFT_DOWN);
+			expect(changes[0]).toEqual(["smol", "slow", "default"]);
+			hub.handleInput(SHIFT_UP);
+			expect(changes[1]).toEqual(["smol", "default", "slow"]);
 		});
 
 		test("windows the roles list so model-keyed chains past the panel height stay reachable", () => {

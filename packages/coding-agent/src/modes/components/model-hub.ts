@@ -28,7 +28,13 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../config/model-registry";
-import { type ModelRoleLookup, type ResolvedModelRoleValue, resolveModelRoleValue } from "../../config/model-resolver";
+import {
+	type ModelRoleLookup,
+	type ResolvedModelRoleValue,
+	parseModelString,
+	resolveExplicitModelRole,
+	resolveModelRoleValue,
+} from "../../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
@@ -1139,8 +1145,103 @@ export class ModelHubComponent implements Component {
 		this.#roleIndex = Math.min(this.#roleIndex, Math.max(0, this.#rolesRows.length - 1));
 	}
 
-	/** Move a chain entry one slot earlier/later; the cursor follows the moved entry. */
+	/** Effective persisted primary for `role` plus the scope a rewrite belongs in. */
+	#effectivePrimary(role: string): { value: string | undefined; scope: ModelRoleSelectionScope | undefined } {
+		if (this.#settings.get("modelRoleStorage") === "project") {
+			const source = this.#settings.getModelRoleSource(role);
+			if (source === "project") return { value: this.#settings.getProjectModelRole(role), scope: "project" };
+			if (source === "global") return { value: this.#settings.getGlobalModelRole(role), scope: "global" };
+			return { value: undefined, scope: undefined };
+		}
+		return { value: this.#settings.getModelRole(role), scope: undefined };
+	}
+	#hasLiteralModel(provider: string, id: string): boolean {
+		const selector = `${provider}/${id}`;
+		if (this.#availableItems.some(item => item.selector === selector)) return true;
+		if (this.#registry.find(provider, id) !== undefined) return true;
+		return this.#registry.getAll().some(model => model.provider === provider && model.id === id);
+	}
+
+	#parseSimpleSelector(value: string): { base: string; level: ConfiguredThinkingLevel | undefined } | undefined {
+		const trimmed = value.trim();
+		if (!trimmed || trimmed.includes(",") || trimmed.includes("*") || trimmed.includes("@")) return undefined;
+		// Legacy `pi/<role>` aliases share the provider/id shape, so only a
+		// value that actually resolves as a role alias refuses the move. A
+		// custom provider literally named `pi` still crosses the boundary.
+		if (resolveExplicitModelRole(trimmed, this.#settings) !== undefined) return undefined;
+		const parsed = parseModelString(trimmed, {
+			allowMaxSuffix: true,
+			allowAutoAlias: true,
+			isLiteralModelId: (provider, id) => this.#hasLiteralModel(provider, id),
+		});
+		if (!parsed) return undefined;
+		return { base: `${parsed.provider}/${parsed.id}`, level: parsed.thinkingLevel };
+	}
+	#findModelForBase(base: string): Model | undefined {
+		const slash = base.indexOf("/");
+		if (slash <= 0) return undefined;
+		const provider = base.slice(0, slash);
+		const id = base.slice(slash + 1);
+		if (!provider || !id) return undefined;
+		return (
+			this.#registry.find(provider, id) ??
+			this.#registry.getAll().find(model => model.provider === provider && model.id === id) ??
+			this.#availableItems.find(item => item.selector === base)?.model
+		);
+	}
+
+	/**
+	 * Exchange `role`'s primary with its first fallback entry. Promoting out of
+	 * an auto-selected role drops the chain head into the primary slot with no
+	 * demotion. The promoted model must be currently available: the primary
+	 * write can fail asynchronously (the live default role switches the
+	 * session), and the chain must not move under a rejected primary.
+	 * Returns true when both callbacks ran.
+	 */
+	#swapPrimaryWithFirstFallback(role: string): boolean {
+		if (role.includes("/")) return false;
+		const chain = [...(this.#fallbackChains()[role] ?? [])];
+		if (chain.length === 0) return false;
+		const primary = this.#effectivePrimary(role);
+		if (primary.value !== undefined && !this.#parseSimpleSelector(primary.value)) return false;
+		const newPrimaryRaw = chain[0];
+		if (newPrimaryRaw === undefined) return false;
+		const parsed = this.#parseSimpleSelector(newPrimaryRaw);
+		if (!parsed) return false;
+		const model = this.#findModelForBase(parsed.base);
+		if (!model) return false;
+		// Gate on the resolved model, not the raw spelling: chain entries may
+		// use alias spellings (collapsed variants, dotted revisions, routed
+		// references) that resolve to a differently spelled available model.
+		if (
+			!this.#availableItems.some(
+				item => item.model === model || (item.model.provider === model.provider && item.model.id === model.id),
+			)
+		)
+			return false;
+		const newChain = primary.value === undefined ? chain.slice(1) : [primary.value, ...chain.slice(1)];
+		this.#callbacks.onAssign(model, role, parsed.level ?? ThinkingLevel.Inherit, parsed.base, primary.scope);
+		this.#setFallbackChain(role, newChain);
+		return true;
+	}
+
+	/** Move `role`'s primary one slot later; the cursor follows the demoted model. */
+	#moveRoleModel(role: string, delta: -1 | 1): void {
+		if (delta < 0 || role.includes("/")) return;
+		const hadPrimary = this.#effectivePrimary(role).value !== undefined;
+		if (!this.#swapPrimaryWithFirstFallback(role)) return;
+		this.#roleIndex += hadPrimary ? 1 : 0;
+	}
+
+	/**
+	 * Move a chain entry one slot earlier/later; crossing the top promotes the
+	 * entry to primary. The cursor follows the moved entry.
+	 */
 	#moveFallback(row: { role: string; chainIndex: number }, delta: -1 | 1): void {
+		if (!row.role.includes("/") && row.chainIndex === 0 && delta === -1) {
+			if (this.#swapPrimaryWithFirstFallback(row.role)) this.#roleIndex -= 1;
+			return;
+		}
 		const chain = [...(this.#fallbackChains()[row.role] ?? [])];
 		const target = row.chainIndex + delta;
 		if (row.chainIndex >= chain.length || target < 0 || target >= chain.length) return;
@@ -1449,8 +1550,9 @@ export class ModelHubComponent implements Component {
 			else if (row?.kind === "chainKey") this.#setFallbackChain(row.role, []);
 			return;
 		}
-		// Reordering: [ / shift+↑ moves the row earlier, ] / shift+↓ later —
-		// cycle order on a role row, chain order on a fallback row.
+		// Reordering: brackets walk the role's model order (primary plus
+		// fallbacks as one set; the primary cannot move earlier). Shift+arrows
+		// walk the quick-switch cycle on a role row, the model order below it.
 		if (matchesKey(data, "shift+up")) {
 			if (role) this.#moveCycleMembership(role, -1);
 			else if (row?.kind === "fallback") this.#moveFallback(row, -1);
@@ -1480,12 +1582,12 @@ export class ModelHubComponent implements Component {
 			return;
 		}
 		if (printable === "[") {
-			if (role) this.#moveCycleMembership(role, -1);
+			if (role) this.#moveRoleModel(role, -1);
 			else if (row?.kind === "fallback") this.#moveFallback(row, -1);
 			return;
 		}
 		if (printable === "]") {
-			if (role) this.#moveCycleMembership(role, 1);
+			if (role) this.#moveRoleModel(role, 1);
 			else if (row?.kind === "fallback") this.#moveFallback(row, 1);
 			return;
 		}
@@ -2017,7 +2119,7 @@ export class ModelHubComponent implements Component {
 			if (row?.kind === "newFallback") {
 				return "↑/↓ rows · Enter new model/provider fallback chain · ← providers";
 			}
-			return "↑/↓ rows · Enter pick · f fallback · x clear · t thinking · c cycle · [/] reorder · n new";
+			return "↑/↓ rows · Enter pick · f fallback · x clear · t thinking · c cycle · [/] models · shift+↑/↓ cycle · n new";
 		}
 		if (entry.kind === "provider" && entry.locked) {
 			return entry.oauth ? "Enter log in · ↑/↓ providers · Esc close" : "↑/↓ providers · Esc close";
