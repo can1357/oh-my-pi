@@ -5,16 +5,20 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionActions, LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	finalizeSubprocessOutput,
+	runSubagentFollowUpTurn,
 	runSubprocess,
 	SUBAGENT_WARNING_MISSING_YIELD,
 } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { logger } from "@oh-my-pi/pi-utils";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 function createAssistantStopMessage(text: string): AssistantMessage {
 	return {
@@ -54,6 +58,7 @@ function createMockSession(
 	};
 
 	const session = {
+		...createSessionDefaults(),
 		state,
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
@@ -63,7 +68,6 @@ function createMockSession(
 		},
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
-		setActiveToolsByName: async (_toolNames: string[]) => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
 			return () => {
@@ -75,14 +79,7 @@ function createMockSession(
 			promptIndex += 1;
 			await onPrompt({ text, options, promptIndex, emit, state });
 		},
-		waitForIdle: async () => {},
-		prepareForHeadlessAdvisorDrain: () => {},
-		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
-		abort: async () => {},
-		dispose: async () => {},
-		setIrcWakeTurnObserver: () => {},
-		subscribeRunState: () => () => {},
 	};
 
 	return session as unknown as AgentSession;
@@ -244,7 +241,281 @@ describe("runSubprocess yield reminders", () => {
 		expect(systemPrompt?.[3]).toBe("now");
 		expect(userPrompt).not.toMatch(/CONTEXT\n=+/);
 	});
-
+	it("does not let an intervening wake yield satisfy the batch after a lost prompt race", async () => {
+		let prompts = 0;
+		let wakeEmitted = false;
+		let emitWake: ((event: AgentSessionEvent) => void) | undefined;
+		const session = createMockSession(({ emit }) => {
+			emitWake ??= emit;
+			prompts++;
+			// An IRC wake owns the session when the follow-up first dispatches.
+			if (prompts === 1) throw new AgentBusyError("wake turn is running");
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-batch",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { batch: true } },
+				},
+				isError: false,
+			});
+		});
+		const mutable = session as unknown as {
+			setWorkPoolYieldItems: (items: unknown[]) => Promise<void>;
+			waitForIdle: () => Promise<void>;
+		};
+		mutable.setWorkPoolYieldItems = async () => {};
+		mutable.waitForIdle = async () => {
+			// The wake turn yields while the batch backs off. The batch monitor
+			// must be detached, so this yield neither marks the batch yielded
+			// nor leaks wake output into the batch result.
+			if (!wakeEmitted) {
+				wakeEmitted = true;
+				emitWake?.({
+					type: "tool_execution_end",
+					toolCallId: "tool-wake",
+					toolName: "yield",
+					result: {
+						content: [{ type: "text", text: "Wake done." }],
+						details: { status: "success", data: { intruder: true } },
+					},
+					isError: false,
+				});
+			}
+		};
+		AgentRegistry.global().register({
+			id: "subagent-race",
+			displayName: "subagent-race",
+			kind: "sub",
+			status: "idle",
+			session,
+		});
+		try {
+			const result = await runSubagentFollowUpTurn({ ...baseOptions, id: "subagent-race", message: "batch work" });
+			expect(prompts).toBe(2);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain('"batch": true');
+			expect(result.output).not.toContain("intruder");
+		} finally {
+			AgentRegistry.global().unregister("subagent-race");
+		}
+	});
+	it("waits out a running turn before installing the pooled contract", async () => {
+		const calls: string[] = [];
+		let streaming = true;
+		const session = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-batch",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { batch: true } },
+				},
+				isError: false,
+			});
+		});
+		const mutable = session as unknown as {
+			isStreaming: boolean;
+			setWorkPoolYieldItems: (items: unknown[]) => Promise<void>;
+			waitForIdle: () => Promise<void>;
+		};
+		Object.defineProperty(mutable, "isStreaming", { get: () => streaming, configurable: true });
+		mutable.setWorkPoolYieldItems = async () => {
+			calls.push("setYield");
+		};
+		mutable.waitForIdle = async () => {
+			calls.push("waitForIdle");
+			streaming = false;
+		};
+		AgentRegistry.global().register({
+			id: "subagent-prewait",
+			displayName: "subagent-prewait",
+			kind: "sub",
+			status: "idle",
+			session,
+		});
+		try {
+			// Installing pooled items under the running ordinary wake would reject
+			// its in-flight calls, so the follow-up must observe idle first.
+			const result = await runSubagentFollowUpTurn({
+				...baseOptions,
+				id: "subagent-prewait",
+				message: "batch work",
+			});
+			expect(calls.slice(0, 2)).toEqual(["waitForIdle", "setYield"]);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain('"batch": true');
+		} finally {
+			AgentRegistry.global().unregister("subagent-prewait");
+		}
+	});
+	it("fails the follow-up instead of installing under a wedged turn", async () => {
+		const calls: string[] = [];
+		const session = createMockSession(() => {});
+		const mutable = session as unknown as {
+			isStreaming: boolean;
+			setWorkPoolYieldItems: (items: unknown[]) => Promise<void>;
+			waitForIdle: () => Promise<void>;
+		};
+		Object.defineProperty(mutable, "isStreaming", { value: true, configurable: true });
+		mutable.setWorkPoolYieldItems = async () => {
+			calls.push("setYield");
+		};
+		mutable.waitForIdle = async () => {
+			calls.push("waitForIdle");
+		};
+		AgentRegistry.global().register({
+			id: "subagent-wedged",
+			displayName: "subagent-wedged",
+			kind: "sub",
+			status: "idle",
+			session,
+		});
+		try {
+			// Three waits still streaming: installing now would corrupt the active
+			// turn, and waiting forever would hang the pool, so fail instead.
+			await expect(
+				runSubagentFollowUpTurn({ ...baseOptions, id: "subagent-wedged", message: "batch work" }),
+			).rejects.toThrow("stayed busy through 3 ownership waits");
+			expect(calls).toEqual(["waitForIdle", "waitForIdle", "waitForIdle"]);
+			expect(calls).not.toContain("setYield");
+		} finally {
+			AgentRegistry.global().unregister("subagent-wedged");
+		}
+	});
+	it("drives the reacquired session when parking replaces the worker mid-install", async () => {
+		const calls: string[] = [];
+		const stale = createMockSession(() => {});
+		const revived = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-revive",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { revived: true } },
+				},
+				isError: false,
+			});
+		});
+		// Mock sessions lack the real yield-contract method; attach a tracker.
+		const staleMutable = stale as unknown as {
+			setWorkPoolYieldItems: (items: unknown[]) => Promise<void>;
+		};
+		staleMutable.setWorkPoolYieldItems = async () => {
+			calls.push("setYield:stale");
+		};
+		const revivedMutable = revived as unknown as {
+			setWorkPoolYieldItems: (items: unknown[]) => Promise<void>;
+		};
+		revivedMutable.setWorkPoolYieldItems = async () => {
+			calls.push("setYield:revived");
+		};
+		// The idle TTL fires during the install rebuild: the follow-up must drive
+		// the revived replacement (reinstalling its empty contract) instead of
+		// the detached corpse.
+		const ensureLive = vi
+			.spyOn(AgentLifecycleManager.global(), "ensureLive")
+			.mockResolvedValueOnce(stale)
+			.mockResolvedValue(revived);
+		try {
+			const result = await runSubagentFollowUpTurn({ ...baseOptions, id: "subagent-revive", message: "batch work" });
+			expect(ensureLive).toHaveBeenCalledTimes(3);
+			expect(calls).toEqual(["setYield:stale", "setYield:revived"]);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain('"revived": true');
+		} finally {
+			AgentRegistry.global().unregister("subagent-revive");
+		}
+	});
+	it("fails fast when parking replaces the worker on every install", async () => {
+		const sessions = [
+			createMockSession(() => {}),
+			createMockSession(() => {}),
+			createMockSession(() => {}),
+			createMockSession(() => {}),
+		];
+		for (const session of sessions) {
+			const mutable: { setWorkPoolYieldItems: (items: unknown[]) => Promise<void> } = session as unknown as {
+				setWorkPoolYieldItems: (items: unknown[]) => Promise<void>;
+			};
+			mutable.setWorkPoolYieldItems = async () => {};
+		}
+		// A park slipping into every rebuild window replaces the worker each
+		// round trip: fail after three instead of chasing replacements forever.
+		const ensureLive = vi
+			.spyOn(AgentLifecycleManager.global(), "ensureLive")
+			.mockResolvedValueOnce(sessions[0]!)
+			.mockResolvedValueOnce(sessions[1]!)
+			.mockResolvedValueOnce(sessions[2]!)
+			.mockResolvedValue(sessions[3]!);
+		try {
+			await expect(
+				runSubagentFollowUpTurn({ ...baseOptions, id: "subagent-churn", message: "batch work" }),
+			).rejects.toThrow("was replaced during every install attempt");
+			expect(ensureLive).toHaveBeenCalledTimes(4);
+		} finally {
+			AgentRegistry.global().unregister("subagent-churn");
+		}
+	});
+	it("waits out a wake running on the replacement worker before reinstalling", async () => {
+		const calls: string[] = [];
+		let revivedStreaming = true;
+		const stale = createMockSession(() => {});
+		const revived = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-revive-wake",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { revived: true } },
+				},
+				isError: false,
+			});
+		});
+		// Mock sessions lack the real session surface; attach trackers.
+		const staleMutable = stale as unknown as {
+			setWorkPoolYieldItems: (items: unknown[]) => Promise<void>;
+		};
+		staleMutable.setWorkPoolYieldItems = async () => {
+			calls.push("setYield:stale");
+		};
+		const revivedMutable = revived as unknown as {
+			isStreaming: boolean;
+			setWorkPoolYieldItems: (items: unknown[]) => Promise<void>;
+			waitForIdle: () => Promise<void>;
+		};
+		Object.defineProperty(revivedMutable, "isStreaming", { get: () => revivedStreaming, configurable: true });
+		revivedMutable.setWorkPoolYieldItems = async () => {
+			calls.push("setYield:revived");
+		};
+		revivedMutable.waitForIdle = async () => {
+			calls.push("waitForIdle:revived");
+			revivedStreaming = false;
+		};
+		// Parking swaps the worker mid-install while an IRC delivery revives the
+		// replacement straight into an ordinary wake: the follow-up must wait out
+		// that wake before installing the keyed contract, not reject its yield.
+		const ensureLive = vi
+			.spyOn(AgentLifecycleManager.global(), "ensureLive")
+			.mockResolvedValueOnce(stale)
+			.mockResolvedValue(revived);
+		try {
+			const result = await runSubagentFollowUpTurn({
+				...baseOptions,
+				id: "subagent-revive-wake",
+				message: "batch work",
+			});
+			expect(calls).toEqual(["setYield:stale", "waitForIdle:revived", "setYield:revived"]);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain('"revived": true');
+		} finally {
+			AgentRegistry.global().unregister("subagent-revive-wake");
+		}
+	});
 	it("sends reminder prompt when subagent stops without yield", async () => {
 		const prompts: string[] = [];
 		const promptOptions: Array<PromptOptions | undefined> = [];

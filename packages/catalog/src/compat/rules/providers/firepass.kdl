@@ -7,9 +7,13 @@ provider "firepass" {
 	}
 	// Replaces the Fire Pass wire-model-id dispatch baseline.
 	wire-model-id-mode "firepass"
-	// residue: taxonomy ranks and exact globs do not isolate these models.
-	models "kimi-k2.6-turbo" {
-		thinking-efforts "low" "medium" "high" "xhigh" "max"
+	class "glm" priority=1 {
 		thinking-mode "effort"
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+	}
+
+	class "kimi" priority=1 {
+		thinking-mode "effort"
+		thinking-efforts "low" "high" "max"
 	}
 }

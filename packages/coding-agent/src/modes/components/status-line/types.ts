@@ -7,6 +7,7 @@ import type {
 } from "../../../config/settings-schema";
 import type { AgentSession } from "../../../session/agent-session";
 import type { ActiveRepoContext } from "../../../utils/active-repo-context";
+import type { LoopConditionConfig } from "../../loop-condition";
 import type { LoopLimitRuntime } from "../../loop-limit";
 
 export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
@@ -88,6 +89,7 @@ export interface SegmentContext {
 	loopMode: {
 		state: "waiting" | "running" | "paused";
 		limit?: LoopLimitRuntime;
+		condition?: LoopConditionConfig;
 	} | null;
 	goalMode: {
 		enabled: boolean;
