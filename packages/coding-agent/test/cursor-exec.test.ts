@@ -16,6 +16,7 @@ import {
 	McpArgsSchema,
 	ReadArgsSchema,
 	ShellArgsSchema,
+	WriteArgsSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -33,7 +34,7 @@ import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { BUILTIN_TOOLS, GrepTool, ReadTool, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
-import type { TruncationMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { type TruncationMeta, wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { AdviseTool } from "../src/advisor/advise-tool";
 
@@ -1395,6 +1396,147 @@ function newBlockState(): BlockState {
 		setFirstTokenTime: () => {},
 	};
 }
+
+describe("Cursor new-file write preflight", () => {
+	let cwd: string;
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-create-file-"));
+	});
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	it("returns fileNotFound for a missing destination, then creates it through write", async () => {
+		const session = createTestSession(cwd);
+		const write = await BUILTIN_TOOLS.write(session);
+		const read = await BUILTIN_TOOLS.read(session);
+		if (!write || !read) throw new Error("read/write unavailable");
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, AgentTool>([
+				["read", new ExtensionToolWrapper(wrapToolWithMetaNotice(read), passthroughRunner())],
+				["write", new ExtensionToolWrapper(wrapToolWithMetaNotice(write), passthroughRunner())],
+			]),
+		});
+		const target = path.join(cwd, "created.txt");
+		const written: Uint8Array[] = [];
+		const h2 = {
+			write: (chunk: Uint8Array) => {
+				written.push(chunk);
+				return true;
+			},
+		} as unknown as Parameters<typeof handleServerMessage>[5];
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "execServerMessage",
+					value: create(ExecServerMessageSchema, {
+						id: 1,
+						execId: "preflight",
+						message: { case: "readArgs", value: create(ReadArgsSchema, { path: target, toolCallId: "create" }) },
+					}),
+				},
+			}),
+			output,
+			stream,
+			state,
+			new Map(),
+			h2,
+			handlers,
+			undefined,
+			{ sawTokenDelta: false },
+			[],
+		);
+		const readReply = fromBinary(AgentClientMessageSchema, written[0]!.subarray(5));
+		if (readReply.message.case !== "execClientMessage" || readReply.message.value.message.case !== "readResult")
+			throw new Error("missing read reply");
+		expect(readReply.message.value.message.value.result.case).toBe("fileNotFound");
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "execServerMessage",
+					value: create(ExecServerMessageSchema, {
+						id: 2,
+						execId: "write",
+						message: {
+							case: "writeArgs",
+							value: create(WriteArgsSchema, {
+								path: target,
+								fileText: "created via Cursor\n",
+								toolCallId: "create",
+							}),
+						},
+					}),
+				},
+			}),
+			output,
+			stream,
+			state,
+			new Map(),
+			h2,
+			handlers,
+			undefined,
+			{ sawTokenDelta: false },
+			[],
+		);
+		expect(await Bun.file(target).text()).toBe("created via Cursor\n");
+		const writeReply = fromBinary(AgentClientMessageSchema, written[1]!.subarray(5));
+		if (writeReply.message.case !== "execClientMessage" || writeReply.message.value.message.case !== "writeResult")
+			throw new Error("missing write reply");
+		expect(writeReply.message.value.message.value.result.case).toBe("success");
+	});
+
+	it("does not turn a denied read of a missing path into permission to create it", async () => {
+		const settings = Settings.isolated({ "tools.approval": { read: "deny" } });
+		const read = await BUILTIN_TOOLS.read(createTestSession(cwd, { settings }));
+		if (!read) throw new Error("read unavailable");
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, AgentTool>([
+				["read", new ExtensionToolWrapper(wrapToolWithMetaNotice(read), passthroughRunner())],
+			]),
+			getToolContext: () => ({ settings }) as AgentToolContext,
+		});
+		const written: Uint8Array[] = [];
+		const h2 = {
+			write: (chunk: Uint8Array) => {
+				written.push(chunk);
+				return true;
+			},
+		} as unknown as Parameters<typeof handleServerMessage>[5];
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "execServerMessage",
+					value: create(ExecServerMessageSchema, {
+						id: 1,
+						execId: "denied",
+						message: {
+							case: "readArgs",
+							value: create(ReadArgsSchema, { path: path.join(cwd, "missing.txt"), toolCallId: "denied" }),
+						},
+					}),
+				},
+			}),
+			cursorAssistantMessage(),
+			new AssistantMessageEventStream(),
+			newBlockState(),
+			new Map(),
+			h2,
+			handlers,
+			undefined,
+			{ sawTokenDelta: false },
+			[],
+		);
+		const reply = fromBinary(AgentClientMessageSchema, written[0]!.subarray(5));
+		if (reply.message.case !== "execClientMessage" || reply.message.value.message.case !== "readResult")
+			throw new Error("missing read reply");
+		expect(reply.message.value.message.value.result.case).toBe("error");
+	});
+});
 
 // Regression for issue #5680: the advisor's own tools run through the same
 // Cursor exec bridge the primary agent uses. Without a bridge wired into the

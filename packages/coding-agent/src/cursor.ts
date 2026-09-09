@@ -27,12 +27,13 @@ import {
 	piReadPath,
 	piTimeout,
 } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { isEnoent, sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
 import type { MCPResourceReadResult } from "./mcp/types";
 import type { ApprovalMode } from "./tools/approval";
 import { resolveApproval } from "./tools/approval";
 import { confineToWorkspace, resolveToCwd } from "./tools/path-utils";
+import { ToolError } from "./tools/tool-errors";
 import type { TodoItem, TodoPhase, TodoStatus } from "./tools/todo";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
@@ -277,6 +278,14 @@ async function executeTool(
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		result = buildToolErrorResult(message);
+		// Cursor probes the destination before creating a file. Preserve a
+		// structured missing-file result; a generic error aborts that write.
+		if (
+			toolName === "read" &&
+			(isEnoent(error) || (error instanceof ToolError && error.context?.code === "ENOENT"))
+		) {
+			result.details = { errorCode: "ENOENT" };
+		}
 		isError = true;
 	}
 	isError ||= result.isError === true;

@@ -2,6 +2,10 @@
 
 ### Fixed
 
+- Cursor can create new files after its destination probe reports a missing file.
+
+### Fixed
+
 - Restored Cursor capability/session option wiring (`cursorClientSupportsInlineImages`, `cursorClientSupportsRoutedModelUpdate`, `cursorClientSupportsPromptContextUsageRpc`, `cursorRunId`, `cursorAgentSessionId`) onto `AgentRunRequest`.
 - Cursor mints a fresh `runId` per request (linked to `x-request-id`, like the CLI) and defaults `conversationGroupId` to the conversation instead of sending empty ids.
 - Cursor auto mode echoes a roster-resolved `requestModelId` of `auto` verbatim on `requestedModel`/`modelDetails` (matching the CLI); the synthetic catalog id without roster proof keeps the `default` wire contract.

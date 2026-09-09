@@ -3,6 +3,7 @@
 
 - JSON print mode exits nonzero on provider errors and aborts after flushing the complete event transcript.
 - Starting with a model scope and a remembered default model no longer crashes before the session opens.
+- Cursor new-file writes preserve missing-file errors through tool wrappers, allowing the write to proceed.
 
 - Zero-billed empty-stop promotion treats Devin-style `usage.credits` (`cost` / `committedCost` / `acuCost`) as billed usage so committed credit charges are not replayed as never-dispatched.
 - Zero-billed empty stops that exhaust the retry cap now consult `retry.modelFallback` / `retry.fallbackChains` instead of surfacing a retry-cap error. Turns that billed any usage bucket, including provider-side orchestration tokens, still settle terminal ([#9480](https://github.com/can1357/oh-my-pi/issues/9480)). Same-model effort-only chain entries no longer count as a model takeover.

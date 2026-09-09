@@ -100,6 +100,7 @@ import {
 	McpToolResultSchema,
 	ModelDetailsSchema,
 	ReadErrorSchema,
+	ReadFileNotFoundSchema,
 	ReadMcpResourceErrorSchema,
 	type ReadMcpResourceExecResult,
 	ReadMcpResourceExecResultSchema,
@@ -3235,6 +3236,12 @@ function readFileSizeFromDetails(toolResult: ToolResultMessage): number | undefi
 function buildReadResultFromToolResult(path: string, toolResult: ToolResultMessage, rangeApplied = false) {
 	const text = toolResultToText(toolResult);
 	if (toolResult.isError) {
+		const details = toolResult.details;
+		if (details && typeof details === "object" && "errorCode" in details && details.errorCode === "ENOENT") {
+			return create(ReadResultSchema, {
+				result: { case: "fileNotFound", value: create(ReadFileNotFoundSchema, { path }) },
+			});
+		}
 		return buildReadErrorResult(path, text || "Read failed");
 	}
 	// Counting the payload is only the file's length when the payload is the
