@@ -12,6 +12,7 @@ import {
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import corpus from "./fixtures/harmony-leak-corpus.json" with { type: "json" };
+import collapseCorpus from "./fixtures/harmony-visible-collapse-corpus.json" with { type: "json" };
 
 interface CorpusPositive {
 	id: string;
@@ -26,6 +27,8 @@ interface CorpusNegative {
 }
 const positives = corpus.positives as CorpusPositive[];
 const negatives = corpus.negatives as CorpusNegative[];
+const collapsePositives = collapseCorpus.positives as Array<{ id: string; signal: string; text: string }>;
+const collapseNegatives = collapseCorpus.negatives as Array<{ id: string; text: string }>;
 
 const codexModel: Model = buildModel({ ...getBundledModel("openai-codex", "gpt-5.4") });
 const anthropicModel: Model = buildModel({ ...getBundledModel("anthropic", "claude-sonnet-4-5") });
@@ -91,25 +94,74 @@ describe("isHarmonyLeakMitigationTarget", () => {
 describe("detectHarmonyLeak — negative cases (must NOT trip)", () => {
 	for (const neg of negatives) {
 		it(neg.name, () => {
-			// Base content guards (co-signal requirement, fence exemption) are
-			// surface-independent; the extra `tool_arg` `T`-gate would mask them, so
-			// assert them on a surface without it — a pass proves the heuristics.
-			const detection = detectHarmonyLeak(neg.input, "assistant_text");
-			expect(detection).toBeUndefined();
+			// Base content guards (co-signal requirement, code exemption) are
+			// asserted on `assistant_thinking`: `tool_arg` would mask them behind
+			// the `T`-gate, and `assistant_text` adds the `V` visible-answer rule.
+			expect(detectHarmonyLeak(neg.input, "assistant_thinking")).toBeUndefined();
 		});
 	}
 
-	it("user prose mentioning marker is not scanned (caller responsibility)", () => {
-		// Sanity: detector itself fires on bare M only when paired with co-signals.
-		// User-message exemption is enforced by the call site, not the detector.
-		const harmless = "I read about to=functions.edit in the docs.";
-		expect(detectHarmonyLeak(harmless, "assistant_text")).toBeUndefined();
+	it("quoted marker in a rendered answer stays clean", () => {
+		// Documentation, bug reports and this suite all quote the marker, and all
+		// of them put it in a code span or a fence.
+		expect(detectHarmonyLeak("I read about `to=functions.edit` in the docs.", "assistant_text")).toBeUndefined();
+		expect(detectHarmonyLeak("Shape:\n```\nto=functions.edit code\n```\nThat is the bug.", "assistant_text")).toBeUndefined();
 	});
 
 	it("streaming chunk-boundary split does not trip on partial marker", () => {
 		// Detector only fires once the full marker resolves in the buffer.
 		expect(detectHarmonyLeak("...to=funct", "tool_arg")).toBeUndefined();
 		expect(detectHarmonyLeak("...to=functions.", "tool_arg")).toBeUndefined();
+	});
+});
+
+describe("detectHarmonyLeak — visible-answer marker (`V`)", () => {
+	it("trips on an unquoted routing marker in the final answer", () => {
+		// Captured onset, session 2026-09-09T15-58-05Z row 1630: a normal sentence
+		// followed by the bare routing marker and reasoning residue. Nothing else
+		// in the block co-signals, so before `V` this committed silently and
+		// re-seeded the collapse on every later turn.
+		const onset = "All input remains scoped to the isolated X display. \n check to=functions.hub  ... stop one correction. no. Need wait auto.";
+		const detection = detectHarmonyLeak(onset, "assistant_text");
+		expect(detection?.signals[0]?.classes).toEqual(["M", "V"]);
+	});
+
+	it("leaves thinking and tool arguments to the co-signal rule", () => {
+		const onset = "check to=functions.hub  ... stop one correction.";
+		expect(detectHarmonyLeak(onset, "assistant_thinking")).toBeUndefined();
+		expect(detectHarmonyLeak(onset, "tool_arg")).toBeUndefined();
+	});
+});
+
+describe("detectHarmonyLeak — visible-channel collapse corpus", () => {
+	for (const pos of collapsePositives) {
+		it(`${pos.id} trips ${pos.signal} on the rendered answer`, () => {
+			const detection = detectHarmonyLeak(pos.text, "assistant_text");
+			expect(signalListLabel(detection?.signals ?? [])).toContain(pos.signal);
+		});
+	}
+
+	for (const neg of collapseNegatives) {
+		it(`${neg.id} stays clean`, () => {
+			expect(detectHarmonyLeak(neg.text, "assistant_text")).toBeUndefined();
+		});
+	}
+
+	it("does not scan thinking blocks for collapse", () => {
+		// Reasoning traces are legitimately staccato and legitimately quote other
+		// scripts; only the committed answer is held to the collapse rules.
+		for (const pos of collapsePositives) {
+			if (pos.signal === "M+V") continue;
+			expect(detectHarmonyLeak(pos.text, "assistant_thinking")).toBeUndefined();
+		}
+	});
+
+	it("reports the collapse span, not the whole answer, for auditing", () => {
+		const answer = "The export finished and the artifact is uploaded.\n stop. \n no. \n end. \n done. \n final.";
+		const detection = detectHarmonyLeak(answer, "assistant_text");
+		const signal = detection?.signals[0];
+		expect(signal?.classes).toEqual(["D"]);
+		expect(answer.slice(0, signal?.start)).toBe("The export finished and the artifact is uploaded.\n");
 	});
 });
 

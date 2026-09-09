@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Harmony leak detection now catches marker-free prior collapse in the visible answer, the shape gpt-5.6-sol produces most often. The detector previously required a surviving `to=functions.NAME` marker before it would evaluate any co-signal, so a turn that collapsed into staccato terminators (`stop.` `no.` `end.` `done.`), a fabricated harness notice (`You have 1431 weighted tokens left`), or stranded non-Latin script residue committed silently and then re-seeded itself on every later turn — remote compaction preserves provider-native history, so `/compact` does not clear it. Three visible-channel signals (`D`, `N`, `S`) plus a bare marker in a rendered answer (`V`) now abort and retry the turn. Thresholds are measured against 6,178 assistant text blocks from 261 persisted sessions: 103 hits across 6 sessions, none on the other 255 and none on 75,159 thinking blocks. Fenced blocks and inline code spans are exempt, so answers that quote the marker stay clean. See `docs/ERRATA-GPT5-HARMONY.md` §2.9.
+
 ## [18.1.16] - 2026-09-09
 
 ### Fixed

@@ -72,13 +72,52 @@ const BODY_CASCADE_RE = /to=functions\.\w+\s+code\b[\s\S]{0,200}?to=functions\./
 // Fake-result framing (`R`): marker followed within 80 chars by Cell N: framing.
 const FAKE_RESULT_RE = /to=functions\.\w+[\s\S]{0,80}?code_output\s*\nCell\s+\d+:/;
 
-const FENCE_RE = /^\s*(?:```+|~~~+)/;
+// ── Visible-channel collapse signals (`assistant_text` only) ────────────────
+//
+// The marker-anchored signals above only fire when `to=functions.` survives
+// into the output. Prior collapse (errata §2.8) frequently lands *without* it:
+// the routing token is simply unavailable and the mass spreads over ordinary
+// English terminators, script residue, and fabricated harness chatter. The
+// three signals below detect that state directly. Thresholds are measured, not
+// guessed — see `test/fixtures/harmony-visible-collapse-corpus.json` and the
+// note in `docs/ERRATA-GPT5-HARMONY.md` §2.9.
 
-// Non-Latin scripts seen in the corpus: CJK + ext, Cyrillic, Thai, Georgian,
-// Armenian, Kannada, Telugu, Devanagari, Arabic, Malayalam.
+// Staccato collapse (`D`): a run of consecutive ultra-short lines. Blank lines
+// do not break the run — the observed cascades interleave `\n \n` separators.
+// Markdown list/quote/heading/table rows and numbered steps are ordinary prose
+// structure and never count.
+const COLLAPSE_MIN_RUN = 5;
+const COLLAPSE_MAX_LINE_LEN = 24;
+const COLLAPSE_MAX_LINE_WORDS = 3;
+const COLLAPSE_STRUCTURE_RE = /^[-*+>#|\d]/;
+
+// Fabricated harness notice (`N`): the model narrates a token budget that no
+// omp surface ever emits (the system prompt forbids narrating budgets at all),
+// or emits a repeated single-token filler line. Both are pure fabrication in
+// the visible channel.
+const FABRICATED_NOTICE_RE = /\bYou have [\d,]+ (?:weighted )?tokens left\b/;
+const REPEATED_TOKEN_LINE_RE = /^[ \t]*(\S{1,2})[ \t]+\1[ \t]*$/m;
+
+// Script residue (`S`, standalone form): a handful of non-Latin characters
+// stranded in an otherwise ASCII answer — including substitutions *inside* an
+// ASCII word (`declauding` → `decl\u10D0\u10E3\u10D3ing`). Distinct from
+// `hasScriptMismatchNear`, which only qualifies a marker.
+const RESIDUE_MAX_CHARS = 8;
+const RESIDUE_MIN_TEXT_LEN = 8;
+const RESIDUE_MIN_ASCII_RATIO = 0.9;
+
+const FENCE_RE = /^\s*(?:```+|~~~+)/;
+// Inline code spans, matched per line: a backtick run closed by an equal run.
+const INLINE_CODE_RE = /(`+)(?:(?!\1)[\s\S])*?\1/g;
+
+// Non-Latin scripts seen in the corpora: CJK + ext, Cyrillic, Thai, Georgian,
+// Armenian, Kannada, Telugu, Devanagari, Arabic, Malayalam, plus Khmer,
+// Gujarati, Bengali, Tamil, Gurmukhi, Ethiopic and Syriac observed in the
+// visible-channel collapse corpus.
 const SCRIPT_CLASS =
-	"\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u0400-\u04FF\u0E00-\u0E7F\u10A0-\u10FF\u0530-\u058F\u0C80-\u0CFF\u0C00-\u0C7F\u0900-\u097F\u0600-\u06FF\u0D00-\u0D7F";
+	"\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u0400-\u04FF\u0E00-\u0E7F\u10A0-\u10FF\u0530-\u058F\u0C80-\u0CFF\u0C00-\u0C7F\u0900-\u097F\u0600-\u06FF\u0D00-\u0D7F\u1780-\u17FF\u0A80-\u0AFF\u0980-\u09FF\u0B80-\u0BFF\u0A00-\u0A7F\u1200-\u137F\u0700-\u074F";
 const SCRIPT_RUN_RE = new RegExp(`[${SCRIPT_CLASS}]{2,}`, "u");
+const SCRIPT_CHAR_RE = new RegExp(`[${SCRIPT_CLASS}]+`, "gu");
 
 // Recovery registry. Each entry's parser must recognize the configured
 // sentinel (per-tool, see eval/parse.ts and hashline/executor.ts) and surface
@@ -106,7 +145,7 @@ const RECOVERY_REGISTRY: Record<string, RecoveryConfig> = {
 	},
 };
 
-const SIGNAL_ORDER = ["M", "C", "G", "S", "B", "R", "T"] as const;
+const SIGNAL_ORDER = ["M", "V", "C", "G", "S", "B", "D", "N", "R", "T"] as const;
 
 export type HarmonySignalClass = "H" | (typeof SIGNAL_ORDER)[number];
 
@@ -169,9 +208,17 @@ export function signalListLabel(signals: readonly HarmonySignal[]): string {
 /**
  * Detect harmony-protocol leakage in `text`. Returns undefined if clean.
  *
- * Trip rule: `H` alone, or `M` paired with at least one co-signal
- * (`C`/`G`/`S`/`B`/`R`/`T`). Bare `M` does not trip — this document, its
- * tests, and bug reports legitimately carry the marker.
+ * Trip rule: `H` alone, `D`/`N`/`S` alone on the visible-answer surface, or
+ * `M` paired with at least one co-signal (`V`/`C`/`G`/`S`/`B`/`R`/`T`).
+ *
+ * `V` is set for every marker on `assistant_text` that sits outside fenced and
+ * inline code, so a routing marker in a rendered answer trips on its own. Code
+ * spans are exempt because documentation, this module's tests, and bug reports
+ * legitimately quote the marker — and always do so in backticks.
+ *
+ * `D`/`N`/`S` are visible-channel collapse signals and are scanned only on
+ * `assistant_text`. Thinking blocks are legitimately staccato and legitimately
+ * discuss non-Latin text, and a tool argument is arbitrary data.
  *
  * The `tool_arg` surface is held to a stricter rule. A tool argument is
  * arbitrary file/data content that can legitimately carry the marker, a
@@ -180,8 +227,7 @@ export function signalListLabel(signals: readonly HarmonySignal[]): string {
  * is content trailing the structurally-valid parse, so a `tool_arg` detection
  * additionally requires the `T` co-signal. Absent a `parsedEnd` boundary `T`
  * is never set, so `tool_arg` scanning stays inert and a legitimate codex tool
- * call is never hard-aborted. `assistant_text`/`assistant_thinking` keep the
- * base rule.
+ * call is never hard-aborted.
  *
  * `parsedEnd`, when supplied, marks the byte at which a structurally valid
  * tool-argument parse ends; markers at or past it set the `T` co-signal.
@@ -198,18 +244,19 @@ export function detectHarmonyLeak(
 		toolCallId?: string;
 	} = {},
 ): HarmonyDetection | undefined {
-	const fences = computeFenceRanges(text);
+	const code = computeCodeRanges(text);
 	const signals: HarmonySignal[] = [];
+	const visible = surface === "assistant_text";
 
 	for (const match of text.matchAll(HARMONY_RE)) {
 		const start = match.index ?? 0;
-		if (isInsideFence(fences, start)) continue;
+		if (isInsideCode(code, start)) continue;
 		signals.push(makeSignal(["H"], start, start + match[0].length, match[0]));
 	}
 
 	for (const match of text.matchAll(MARKER_RE)) {
 		const start = match.index ?? 0;
-		if (isInsideFence(fences, start)) continue;
+		if (isInsideCode(code, start)) continue;
 		const end = start + match[0].length;
 		const classes: HarmonySignalClass[] = ["M"];
 
@@ -217,6 +264,7 @@ export function detectHarmonyLeak(
 		const near = text.slice(Math.max(0, start - 16), Math.min(text.length, end + 16));
 		const forward = text.slice(start, Math.min(text.length, start + 240));
 
+		if (visible) classes.push("V");
 		if (CHANNEL_WORD_RE.test(adjacent)) classes.push("C");
 		if (GLITCH_RE.test(near)) classes.push("G");
 		if (hasScriptMismatchNear(text, start, end)) classes.push("S");
@@ -228,6 +276,15 @@ export function detectHarmonyLeak(
 		if (classes.length > 1) {
 			signals.push(makeSignal(classes, start, end, match[0]));
 		}
+	}
+
+	if (visible) {
+		const collapse = findStaccatoCollapse(text, code);
+		if (collapse) signals.push(makeSignal(["D"], collapse.start, collapse.end, collapse.text));
+		const notice = findFabricatedNotice(text, code);
+		if (notice) signals.push(makeSignal(["N"], notice.start, notice.end, notice.text));
+		const residue = findScriptResidue(text, code);
+		if (residue) signals.push(makeSignal(["S"], residue.start, residue.end, residue.text));
 	}
 
 	if (signals.length === 0) return undefined;
@@ -387,11 +444,12 @@ function makeSignal(classes: HarmonySignalClass[], start: number, end: number, t
 }
 
 /**
- * Precompute fenced-code-block ranges once per text. Each range is a
- * [start, end) span of bytes inside any ```/~~~ fence. O(n) once instead of
- * O(n) per detected match.
+ * Precompute code ranges once per text: every fenced block, plus every inline
+ * backtick span on the lines outside those blocks. Each range is a
+ * [start, end) span. O(n) once instead of O(n) per detected match. Ranges come
+ * out ordered by start, which {@link isInsideCode} relies on to break early.
  */
-function computeFenceRanges(text: string): Array<[number, number]> {
+function computeCodeRanges(text: string): Array<[number, number]> {
 	const ranges: Array<[number, number]> = [];
 	let inFence = false;
 	let fenceStart = 0;
@@ -408,6 +466,12 @@ function computeFenceRanges(text: string): Array<[number, number]> {
 				fenceStart = lineStart;
 				inFence = true;
 			}
+		} else if (!inFence && line.includes("`")) {
+			INLINE_CODE_RE.lastIndex = 0;
+			for (const span of line.matchAll(INLINE_CODE_RE)) {
+				const spanStart = span.index ?? 0;
+				ranges.push([lineStart + spanStart, lineStart + spanStart + span[0].length]);
+			}
 		}
 		if (newline === -1) break;
 		lineStart = newline + 1;
@@ -416,12 +480,107 @@ function computeFenceRanges(text: string): Array<[number, number]> {
 	return ranges;
 }
 
-function isInsideFence(ranges: Array<[number, number]>, position: number): boolean {
+function isInsideCode(ranges: Array<[number, number]>, position: number): boolean {
 	for (const [start, end] of ranges) {
 		if (position >= start && position < end) return true;
 		if (start > position) break;
 	}
 	return false;
+}
+
+/** A line is staccato when it is short, holds few words, and is not markdown structure. */
+function isStaccatoLine(line: string): boolean {
+	if (line.length > COLLAPSE_MAX_LINE_LEN) return false;
+	if (COLLAPSE_STRUCTURE_RE.test(line)) return false;
+	let words = 0;
+	let inWord = false;
+	for (let i = 0; i < line.length; i++) {
+		const c = line.charCodeAt(i);
+		const space = c === 32 || c === 9;
+		if (!space && !inWord) {
+			words++;
+			if (words > COLLAPSE_MAX_LINE_WORDS) return false;
+		}
+		inWord = !space;
+	}
+	return words > 0;
+}
+
+/**
+ * Longest run of consecutive staccato lines, reported when it reaches
+ * {@link COLLAPSE_MIN_RUN}. Blank lines are transparent: the observed cascades
+ * interleave whitespace-only separators between every emitted terminator.
+ */
+function findStaccatoCollapse(
+	text: string,
+	code: Array<[number, number]>,
+): { start: number; end: number; text: string } | undefined {
+	let runStart = 0;
+	let runEnd = 0;
+	let run = 0;
+	let lineStart = 0;
+	while (lineStart <= text.length) {
+		const newline = text.indexOf("\n", lineStart);
+		const lineEnd = newline === -1 ? text.length : newline;
+		const raw = text.slice(lineStart, lineEnd);
+		const trimmed = raw.trim();
+		if (trimmed.length > 0) {
+			if (isStaccatoLine(trimmed) && !isInsideCode(code, lineStart)) {
+				if (run === 0) runStart = lineStart;
+				run++;
+				runEnd = lineEnd;
+			} else {
+				if (run >= COLLAPSE_MIN_RUN) return { start: runStart, end: runEnd, text: text.slice(runStart, runEnd) };
+				run = 0;
+			}
+		}
+		if (newline === -1) break;
+		lineStart = newline + 1;
+	}
+	if (run >= COLLAPSE_MIN_RUN) return { start: runStart, end: runEnd, text: text.slice(runStart, runEnd) };
+	return undefined;
+}
+
+function findFabricatedNotice(
+	text: string,
+	code: Array<[number, number]>,
+): { start: number; end: number; text: string } | undefined {
+	for (const pattern of [FABRICATED_NOTICE_RE, REPEATED_TOKEN_LINE_RE]) {
+		const match = pattern.exec(text);
+		if (!match || isInsideCode(code, match.index)) continue;
+		return { start: match.index, end: match.index + match[0].length, text: match[0] };
+	}
+	return undefined;
+}
+
+/**
+ * A few non-Latin characters stranded in an otherwise ASCII answer. Bounded by
+ * an absolute character budget rather than a ratio so a one-line answer and a
+ * long report are held to the same rule; genuinely multilingual answers blow
+ * the budget and stay clean.
+ */
+function findScriptResidue(
+	text: string,
+	code: Array<[number, number]>,
+): { start: number; end: number; text: string } | undefined {
+	if (text.length < RESIDUE_MIN_TEXT_LEN) return undefined;
+	SCRIPT_CHAR_RE.lastIndex = 0;
+	let residue = 0;
+	let first: RegExpExecArray | undefined;
+	for (const match of text.matchAll(SCRIPT_CHAR_RE)) {
+		if (isInsideCode(code, match.index ?? 0)) continue;
+		residue += match[0].length;
+		if (residue > RESIDUE_MAX_CHARS) return undefined;
+		first ??= match as RegExpExecArray;
+	}
+	if (!first) return undefined;
+	let ascii = 0;
+	for (let i = 0; i < text.length; i++) {
+		if (text.charCodeAt(i) < 128) ascii++;
+	}
+	if (ascii / text.length < RESIDUE_MIN_ASCII_RATIO) return undefined;
+	const start = first.index ?? 0;
+	return { start, end: start + first[0].length, text: first[0] };
 }
 
 function hasScriptMismatchNear(text: string, start: number, end: number): boolean {

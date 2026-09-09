@@ -14,10 +14,16 @@ Current behavior is implemented in
   untrusted text, tool results, and serialized tool arguments before replay.
 - Response leak detection is enabled for every model whose provider is
   `openai-codex`, rather than for a fixed model-ID list.
-- A bare `to=functions.NAME` marker is not sufficient. Detection requires a
-  co-signal (channel adjacency, glitch token, script mismatch, cascade,
-  fake-result framing, or a trusted trailing-parse boundary); fenced examples
-  are ignored.
+- A bare `to=functions.NAME` marker in thinking or tool arguments is not
+  sufficient. Detection there requires a co-signal (channel adjacency, glitch
+  token, script mismatch, cascade, fake-result framing, or a trusted
+  trailing-parse boundary). In the *visible answer* the marker trips on its own
+  (`V`): fenced blocks and inline code spans are exempt, and documentation, bug
+  reports and this repository's tests all quote the marker in backticks.
+- The visible answer is additionally scanned for marker-free prior collapse
+  (§2.9): staccato line runs (`D`), fabricated harness notices (`N`), and
+  stranded non-Latin script residue (`S`). Thinking blocks are exempt — they are
+  legitimately staccato and legitimately multilingual.
 - The agent loop scans finalized visible text and thinking. On a hit it discards
   the partial response and retries up to two times, then escalates with an
   error. Audit callbacks receive action/signal metadata and a hash/redacted
@@ -238,3 +244,48 @@ The 2023 SolidGoldMagikarp paper documented mechanism (1)+(2)+(4). The
 new piece is (5): when constrained decoding masks the natural collapse
 target, the mass laundered through the un-masked plain-text shadow
 becomes a structurally-invisible exfiltration channel.
+
+### 2.9 Marker-free collapse in the visible channel (gpt-5.6)
+
+Source: 261 persisted omp sessions, 6,178 assistant text blocks and 75,159
+thinking blocks, 2026-08-13 .. 2026-09-09, scanned with the shipped detector.
+
+§2.8 steps 4–7 do not require the routing marker to survive. When the tool-name
+token is simply unavailable, the collapse still happens and lands in the *final
+answer* with no marker at all. Every marker-anchored signal (`C`/`G`/`S`/`B`/`R`)
+is therefore blind to it: the earlier detector needed `M` before it would
+evaluate any co-signal.
+
+Three shapes, all observed:
+
+| Signal | Shape | Blocks |
+| ------ | ----- | -----: |
+| `D` | Staccato run — one short clause per line, whitespace-only separators between them: `stop.` `no.` `end.` `done.` `final.` | 53 |
+| `N` | Fabricated harness notice — `You have 1431 weighted tokens left`, `a a`, `A third-party application wants to take over your screen. Continue? (y/n)` | 33 |
+| `S` | Script residue stranded in an ASCII answer, including substitution *inside* an ASCII word: `declauding` rendered as `declაუდing` 14 times in one session | 25 |
+
+103 distinct blocks across 6 sessions and 4 projects. Zero hits on the other 255
+sessions and zero on all 75,159 thinking blocks.
+
+Two observations that matter for the runtime contract:
+
+- **The notice text is fabricated, not echoed.** No omp surface emits
+  `You have N weighted tokens left`; the phrase appears nowhere in the harness
+  or in the session's system prompt, which explicitly forbids narrating token
+  budgets. The model invented a system-notice-shaped string and rendered it to
+  the user.
+- **Recurrence is driven by replay, not by the provider.** In the
+  2026-09-09T15-58-05Z session the first contaminated turn is 63 minutes and 412
+  records before the first full cascade; the same fragment reappears verbatim.
+  Remote compaction preserves provider-native history, so `/compact` does not
+  clear it. Detection has to fire on the *first* contaminated turn, which is why
+  `V` trips on a bare marker in a rendered answer.
+
+Thresholds are measured against that corpus, not chosen:
+
+- `D` requires 5 consecutive staccato lines. The longest run in a legitimate
+  block was 4.
+- `S` allows at most 8 non-Latin characters in a block that is ≥90% ASCII.
+  Genuinely multilingual answers blow the budget and stay clean.
+
+Fixtures: `packages/ai/test/fixtures/harmony-visible-collapse-corpus.json`.

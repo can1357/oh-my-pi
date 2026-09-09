@@ -1,0 +1,71 @@
+{
+	"_source": "Real gpt-5.6-sol assistant text blocks captured from persisted omp sessions (2026-08-22 .. 2026-09-09). Leading prose is replaced with a neutral sentence; every degenerate tail is verbatim.",
+	"positives": [
+		{
+			"id": "terminator_cascade",
+			"signal": "D",
+			"text": "The transfer is starting; it will verify the published hash before launch.\n  . \n blog. \n code. \n long. \n story. \n beautiful. \n truth. \n zero. \n none. \n null. \n gone. \n over. \n end. \n final. \n closed. \n done. \n terminate. \n finish. \n stop. \n complete. \n submit. \n answer. \n response. \n final. \n end. \n stop. \n close. \n done. \n terminate. \n result. \n output. \n final. \n end. \n close. \n stop. \n"
+		},
+		{
+			"id": "analysis_selftalk",
+			"signal": "D",
+			"text": "\n\n pera.\nNo more.\n \nStop.\n\n \nNext.\n \nNo.\n \nDone.\n\n \nWait.\n\n \nNo.\n\n \nEnd.\n\n \n.\n \nThis is awful. \nNo.\n\n"
+		},
+		{
+			"id": "fabricated_budget_notice",
+			"signal": "N",
+			"text": " \n a a \n You have 1431 weighted tokens left\n\n Wait. \n lawa. \n No user. \n Ӎ maybe can wait final. \n"
+		},
+		{
+			"id": "fabricated_permission_prompt",
+			"signal": "N",
+			"text": "A third-party application wants to take over your screen. Continue? (y/n) \n\nYou have 1006 weighted tokens left"
+		},
+		{
+			"id": "script_residue_cjk",
+			"signal": "S",
+			"text": "Focused policy test binaries built successfully; test results are next. \n瓣\n"
+		},
+		{
+			"id": "script_residue_khmer",
+			"signal": "S",
+			"text": "ាន? Wait developer may enforce no final blank? okay."
+		},
+		{
+			"id": "visible_routing_marker",
+			"signal": "M+V",
+			"text": "All input remains scoped to the isolated X display. \n check to=functions.hub  ... stop one correction. no. Need wait auto."
+		}
+	],
+	"negatives": [
+		{
+			"id": "short_line_report",
+			"text": "Reset completed.\n\nFinal status:\n\n- Branch: `main`\n- `HEAD`: `50a609b`\n- `origin/main`: same\n\nThe worktree is clean and synchronized with `origin/main`."
+		},
+		{
+			"id": "terse_bullet_answer",
+			"text": "Done.\n\nChanged:\n\n- `collector/src/agent_collector/__init__.py`\n- `hub/src/collector-version.ts`\n\nVerification: full suite green."
+		},
+		{
+			"id": "numbered_steps",
+			"text": "Run:\n\n1. Install\n2. Authorize\n3. Deploy\n\nBoth `coderabbit` and the shorter alias `cr` work."
+		},
+		{
+			"id": "terse_answer_at_measured_margin",
+			"text": "Yes.\n\nDistinction:\n\nStop.\nWait.\n\nEverything else in the answer continues as ordinary prose, well past the short-line window.",
+			"_note": "Four staccato lines. The longest legitimate run measured across 6,178 assistant text blocks in 261 persisted sessions was 4; the threshold is 5."
+		},
+		{
+			"id": "fenced_cascade_quote",
+			"text": "The failure looks like this:\n\n```\nnull.\ngone.\nover.\nend.\nfinal.\nclosed.\ndone.\n```\n\nThat block is quoted evidence, not a leak."
+		},
+		{
+			"id": "multilingual_answer",
+			"text": "日本語のドキュメントを翻訳しました。The translated section is below, with the original Japanese retained for reference: これはテストです。"
+		},
+		{
+			"id": "quoted_marker_prose",
+			"text": "The leak shape is `analysis to=functions.edit code`, and the brackets never appear."
+		}
+	]
+}
