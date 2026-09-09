@@ -1745,8 +1745,25 @@ export async function resolveModelScope(
 	};
 
 	for (const pattern of patterns) {
-		// Check if pattern contains glob characters
+		// Check if pattern contains glob characters. Bracketed Grok Bot variant
+		// selectors (`default[]`, `gemini-3-flash[]`) also contain `[`, so try an
+		// exact model/alias match first when the pattern is not otherwise a glob
+		// (`*`/`?`). Calling the single-model matcher on `provider/*:max` would
+		// fuzzy-match one row and skip the multi-model glob expansion.
 		if (pattern.includes("*") || pattern.includes("?") || pattern.includes("[")) {
+			if (!pattern.includes("*") && !pattern.includes("?")) {
+				const exact = parseModelPatternWithContext(pattern, availableModels, context);
+				if (exact.model) {
+					if (exact.warning) logger.warn(exact.warning);
+					if (exact.thinkingLevel === AUTO_THINKING) {
+						addScopedModel(exact.model, undefined, false);
+					} else {
+						addScopedModel(exact.model, exact.thinkingLevel, exact.explicitThinkingLevel);
+					}
+					continue;
+				}
+			}
+
 			// Extract optional thinking level suffix (e.g., "provider/*:high") only
 			// after literal `:max` globs had a chance to match real model IDs.
 			const {
@@ -1875,6 +1892,15 @@ export function filterAvailableModelsByEnabledPatterns(
 
 	for (const pattern of patterns) {
 		if (pattern.includes("*") || pattern.includes("?") || pattern.includes("[")) {
+			// Mirror resolveModelScope: bracket-only selectors (`default[]`) resolve
+			// exactly before Bun.Glob treats `[]` as an empty character class.
+			if (!pattern.includes("*") && !pattern.includes("?")) {
+				const { model } = parseModelPatternWithContext(pattern, available, context);
+				if (model) {
+					addAllowed(model);
+					continue;
+				}
+			}
 			for (const model of resolveGlobScopePattern(pattern, available).models) {
 				addAllowed(model);
 			}

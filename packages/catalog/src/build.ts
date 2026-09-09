@@ -105,6 +105,9 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (catalog.sandPromoteJsonTextTools === true && model.sandPromoteJsonTextTools === undefined) {
 		model.sandPromoteJsonTextTools = true;
 	}
+	if (catalog.sandAcceptEmptyWriteFollowup === true && model.sandAcceptEmptyWriteFollowup === undefined) {
+		model.sandAcceptEmptyWriteFollowup = true;
+	}
 }
 
 /**

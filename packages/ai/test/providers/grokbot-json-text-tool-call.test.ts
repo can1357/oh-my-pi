@@ -700,6 +700,7 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 			maxTokens: 512,
 			sandToolsWire: "keep-model",
 		});
+		expect(gemini.sandAcceptEmptyWriteFollowup).toBe(true);
 		const writeTool = {
 			name: "write",
 			description: "Write a file.",

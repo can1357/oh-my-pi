@@ -1772,9 +1772,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						});
 						continue attempt;
 					}
-					// Some Gemini turns empty-stop after Write. Only accept that
-					// documented workaround — not empty stops after bash/read/etc.
-					if (identity.class === "gemini" && contextEndsWithWriteToolResult(context)) {
+					// Some Sand Gemini turns empty-stop after Write. Only accept that
+					// documented workaround when catalog opts in — not empty stops
+					// after bash/read/etc., and not every Gemini-class route.
+					if (model.sandAcceptEmptyWriteFollowup === true && contextEndsWithWriteToolResult(context)) {
 						logger.info("grokbot: accepting empty follow-up after Write tool result", {
 							modelId: model.id,
 							class: identity.class,

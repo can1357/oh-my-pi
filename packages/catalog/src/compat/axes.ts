@@ -350,6 +350,15 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 */
 	"sand-promote-json-text-tools": { key: "sandPromoteJsonTextTools", set: "catalog", shape: "scalar" },
 	/**
+	 * Accept an empty stop after a Write tool result (no visible text). Sand
+	 * Gemini rows often empty-stop after Write; other classes must still error.
+	 */
+	"sand-accept-empty-write-followup": {
+		key: "sandAcceptEmptyWriteFollowup",
+		set: "catalog",
+		shape: "scalar",
+	},
+	/**
 	 * Reviewed reasoning capability. Applied as a correction so synthetic
 	 * discovery/seed rows can stay neutral (`reasoning: false`) while KDL
 	 * upgrades specific routers (e.g. sand-default) without id compares in TS.

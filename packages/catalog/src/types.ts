@@ -1156,6 +1156,11 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	sandPromoteJsonTextTools?: boolean;
 	/**
+	 * Accept empty stop after Write tool results (KDL `sand-accept-empty-write-followup`).
+	 * Sand Gemini rows often empty-stop after Write; unset elsewhere.
+	 */
+	sandAcceptEmptyWriteFollowup?: boolean;
+	/**
 	 * Default Grok Bot `requestedModel.parameters` values from live AvailableModels
 	 * variants (e.g. default `context` tier). Wire mapping prefers explicit request
 	 * options, then these defaults, then reviewed fallbacks.

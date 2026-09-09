@@ -8928,7 +8928,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:53",
+				"source": "providers/grokbot.kdl:54",
 				"providers": [
 					"grokbot"
 				],
@@ -8939,11 +8939,12 @@
 					}
 				],
 				"catalog": {
-					"sandEmptyToolsRetryWire": "keep-model"
+					"sandEmptyToolsRetryWire": "keep-model",
+					"sandAcceptEmptyWriteFollowup": true
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:56",
+				"source": "providers/grokbot.kdl:58",
 				"providers": [
 					"grokbot"
 				],
@@ -8982,7 +8983,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:64",
+				"source": "providers/grokbot.kdl:66",
 				"providers": [
 					"grokbot"
 				],
@@ -9011,7 +9012,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:72",
+				"source": "providers/grokbot.kdl:74",
 				"providers": [
 					"grokbot"
 				],

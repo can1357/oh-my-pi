@@ -960,6 +960,7 @@ describe("Grok Bot generated thinking policy", () => {
 			maxTokens: 8_000,
 		});
 		expect(gemini.sandEmptyToolsRetryWire).toBe("keep-model");
+		expect(gemini.sandAcceptEmptyWriteFollowup).toBe(true);
 		const grok = buildModel({
 			id: "grok-4.6",
 			name: "grok-4.6",
@@ -973,6 +974,7 @@ describe("Grok Bot generated thinking policy", () => {
 			maxTokens: 8_000,
 		});
 		expect(grok.sandEmptyToolsRetryWire).toBeUndefined();
+		expect(grok.sandAcceptEmptyWriteFollowup).toBeUndefined();
 	});
 
 	it("excludes grokbot from gen:models catalog discovery like other credential-scoped providers", () => {
