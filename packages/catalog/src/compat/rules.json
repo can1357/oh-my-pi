@@ -21,6 +21,7 @@
 		"auth/deepseek.kdl",
 		"auth/devin.kdl",
 		"auth/exa.kdl",
+		"auth/factory-droid.kdl",
 		"auth/firepass.kdl",
 		"auth/fireworks.kdl",
 		"auth/github-copilot.kdl",
@@ -16436,6 +16437,19 @@
 						"url": "https://api.cline.bot/api/v1/users/me",
 						"headersHook": "cline-pass-client"
 					}
+				}
+			},
+			{
+				"id": "factory-droid",
+				"apiKeyFormat": "bearer",
+				"name": "Factory Droid",
+				"login": {
+					"kind": "custom",
+					"hook": "factory-droid"
+				},
+				"refresh": {
+					"kind": "hook",
+					"hook": "factory-droid"
 				}
 			},
 			{

@@ -55,6 +55,7 @@ import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
 import { clinePassUsageProvider } from "./usage/cline-pass";
 import { cursorUsageProvider } from "./usage/cursor";
 import { devinUsageProvider } from "./usage/devin";
+import { factoryDroidUsageProvider } from "./usage/factory-droid";
 import { googleGeminiCliUsageProvider } from "./usage/gemini";
 import { githubCopilotUsageProvider } from "./usage/github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./usage/google-antigravity";
@@ -674,6 +675,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	opencodeGoUsageProvider,
 	githubCopilotUsageProvider,
 	cursorUsageProvider,
+	factoryDroidUsageProvider,
 	syntheticUsageProvider,
 	xaiOauthUsageProvider,
 	devinUsageProvider,
@@ -2792,6 +2794,7 @@ export class AuthStorage {
 						apiEndpoint: refreshed.apiEndpoint ?? current.apiEndpoint,
 						orgId: refreshed.orgId ?? current.orgId,
 						orgName: refreshed.orgName ?? current.orgName,
+						region: refreshed.region ?? current.region,
 					};
 			if (this.#store.tryUpdateAuthCredentialIfMatches) {
 				if (
@@ -5788,6 +5791,7 @@ export class AuthStorage {
 				apiEndpoint: result.newCredentials.apiEndpoint ?? selection.credential.apiEndpoint,
 				orgId: result.newCredentials.orgId ?? selection.credential.orgId,
 				orgName: result.newCredentials.orgName ?? selection.credential.orgName,
+				region: result.newCredentials.region ?? selection.credential.region,
 				authorizedAt: result.newCredentials.authorizedAt ?? selection.credential.authorizedAt,
 			};
 			if (credentialId !== undefined) {
@@ -7167,6 +7171,7 @@ export class AuthStorage {
 				apiEndpoint: refreshed.apiEndpoint ?? attempted.apiEndpoint,
 				orgId: refreshed.orgId ?? attempted.orgId,
 				orgName: refreshed.orgName ?? attempted.orgName,
+				region: refreshed.region ?? attempted.region,
 				authorizedAt: refreshed.authorizedAt ?? attempted.authorizedAt,
 			};
 			// Persist by id: the array may have been reordered/shrunk while the

@@ -83,6 +83,20 @@ Schemas sent on the Google JSON Schema path MUST follow:
 
 4. **Object schemas get an explicit properties map**
    - `{ "type": "object" }` becomes `{ "type": "object", "properties": {} }`.
+
+### 2.1 Factory droid Gemini (`normalizeSchemaForFactoryDroid`)
+
+The droid CLI's gemini wire (`factory-droid/google-generate`) uses an
+ALLOWLIST copier instead of the shared denylist normalizer — it preserves
+`type`/`title`/`description`/`required`/`format`/`minimum`/`maximum`/
+`minLength`/`maxLength`/`pattern`/`minItems`/`maxItems`/`default`/`example`,
+converts `const` to a stringified single-entry `enum`, merges `allOf`,
+collapses `anyOf`/`oneOf`-with-null to `nullable: true`, and silently drops
+everything else. It never adds `propertyOrdering`, never edits descriptions,
+and does not spill stripped keywords. Use `normalizeSchemaForFactoryDroid`
+only in `packages/ai/src/providers/factory-droid/gemini.ts`; the shared
+Google/Vertex/Gemini CLI path must stay on `normalizeSchemaForGoogle`.
+
 ---
 
 ## 3) Claude via Cloud Code Assist (`normalizeSchemaForCCA`)

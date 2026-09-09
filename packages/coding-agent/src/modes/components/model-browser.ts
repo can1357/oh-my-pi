@@ -8,7 +8,7 @@
  * model" list.
  */
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import { activeFactoryDroidPromotion, type FactoryDroidCredits, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -355,16 +355,43 @@ export function formatRoleChip(role: string, assignment: RoleAssignment, setting
 	return theme.fg(info.color ?? "muted", `${theme.status.enabled} ${label}`) + suffix;
 }
 
-/** `$in/out` per-million cost pair; `free` when both legs are zero. */
-function formatCostPair(model: Model): string {
+/** Suffix on a Standard Credits badge whose rate is a live promo, not the list rate. */
+const PROMO_MARK = "*";
+
+/**
+ * The promo-discounted Standard Credits input rate, or undefined when no
+ * promo window is active.
+ *
+ * The registry mirrors Factory's stacked promo windows verbatim (droid
+ * 0.213.0+), expired ones included, so the active window is decided here at
+ * render time against the same clock the user reads the badge with — first
+ * active window wins, matching the CLI's `promotions.find(active)`.
+ */
+function promoCreditRate(credits: FactoryDroidCredits, now: number): number | undefined {
+	const promo = activeFactoryDroidPromotion(credits, new Date(now));
+	if (promo == null || promo.discount <= 0) return undefined;
+	return credits.input * (1 - promo.discount);
+}
+
+/**
+ * `$in/out` per-million cost pair; `free` when both legs are zero. Factory
+ * Droid models also carry an `N×` Standard Credits badge (effective per-token
+ * input rate) — the $ pair is the upstream-list counterfactual, the badge is
+ * what the subscription actually burns. A live promo rate is marked `N×*` so
+ * the discounted figure cannot be mistaken for the standing list rate.
+ */
+export function formatCostPair(model: Model, now: number = Date.now()): string {
 	const cost = model.cost;
-	if (!cost || (cost.input <= 0 && cost.output <= 0)) return "free";
 	const fmt = (n: number): string => {
 		if (n <= 0) return "0";
 		const s = n >= 100 ? String(Math.round(n)) : n >= 10 ? n.toFixed(1) : n.toFixed(2);
 		return s.replace(/\.?0+$/, "");
 	};
-	return `$${fmt(cost.input)}/${fmt(cost.output)}`;
+	const base = !cost || (cost.input <= 0 && cost.output <= 0) ? "free" : `$${fmt(cost.input)}/${fmt(cost.output)}`;
+	const credits = model.factoryDroidCredits;
+	if (!credits) return base;
+	const promo = promoCreditRate(credits, now);
+	return promo === undefined ? `${base} ${fmt(credits.input)}×` : `${base} ${fmt(promo)}×${PROMO_MARK}`;
 }
 
 /** Provider-supplied blurb, flattened to a single renderable detail-line cell. */

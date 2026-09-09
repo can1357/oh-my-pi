@@ -1216,8 +1216,8 @@ function isZaiReasoningEffortDialect(_model: Model<"openai-completions">, compat
  *
  * Most OpenAI-compatible endpoints retain the conservative 64k ceiling from
  * {@link resolveOpenAIOutputTokenParam}. ClinePass, Z.AI/GLM-5.2 reasoning,
- * and native Moonshot K3 explicitly accept their full advertised model caps,
- * so those routes clamp to `model.maxTokens` instead.
+ * native Moonshot K3, and Factory's Droid proxy accept their full advertised
+ * model caps, so those routes clamp to `model.maxTokens` instead.
  */
 export function resolveOpenAICompletionsOutputClamp(
 	model: Model<"openai-completions">,
@@ -1230,6 +1230,10 @@ export function resolveOpenAICompletionsOutputClamp(
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
 	}
 	if (compat.clampOutputToModelMax) {
+		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
+	}
+	if (model.provider === "factory-droid") {
+		// Factory's proxy accepts each model's advertised output cap.
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
 	}
 	return undefined;
