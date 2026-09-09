@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
+import * as os from "node:os";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { isRecord, logger, postmortem, ptree, setProcessName, withTimeout } from "@oh-my-pi/pi-utils";
 import { MessageFramer } from "../../jsonrpc/message-framing";
@@ -16,6 +17,35 @@ import {
 	type MuxConnectResult,
 	muxServerKey,
 } from "./protocol";
+
+/**
+ * Whether a process group on this host stays attributable after its leader has
+ * been reaped.
+ *
+ * Taking group ownership of a language server is only sound where it does. The
+ * mux learns the root exited from Bun, which has already reaped it by then, and
+ * a pgid whose leader is gone is just a number the kernel is free to hand to an
+ * unrelated session — so the native sweep refuses to signal it, which is right.
+ * Linux 6.9's `PIDFD_SIGNAL_PROCESS_GROUP` reaches the group through the
+ * leader's retained pidfd instead, where no such proof is needed.
+ *
+ * Read from the release string rather than measured. The measured form is the
+ * `pidfd_send_signal` argument-validation probe in `pi-shell`, which the native
+ * bindings do not expose; a host that reports 6.9 while refusing the flag falls
+ * back to reporting the group as unattributable, never to signalling it.
+ */
+export function serverGroupOutlivesItsLeader(): boolean {
+	if (process.platform !== "linux") return false;
+	const [major, minor] = os
+		.release()
+		.split(".", 2)
+		.map(part => Number.parseInt(part, 10));
+	if (!Number.isInteger(major) || !Number.isInteger(minor)) return false;
+	return major > 6 || (major === 6 && minor >= 9);
+}
+
+/** Fixed for the process: the kernel does not gain the scope while it runs. */
+const OWNS_SERVER_GROUP = serverGroupOutlivesItsLeader();
 
 const SERVER_LINGER_MS = 5 * 60 * 1_000;
 const MUX_IDLE_MS = 15 * 60 * 1_000;
@@ -110,10 +140,23 @@ class ServerInstance {
 
 	constructor(key: string, params: MuxConnectParams) {
 		this.key = key;
+		// Detached, so the server leads a process group of its own. Every earlier
+		// attempt to reach what a server leaves behind pinned a set of processes at
+		// one instant, and each such pin has the same hole: the server can spawn a
+		// helper after it — while answering `shutdown`, or between the last walk and
+		// its own exit — and once the root is gone that helper is reparented out of
+		// reach of any walk rooted at its pid. Group membership is inherited at fork
+		// and outlives the leader, so it names the subtree at termination time
+		// rather than at capture time, which is the one thing an instant cannot do.
+		//
+		// Only where the group stays attributable once the leader is reaped. Taking
+		// ownership of a group the sweep will then refuse to signal would turn a
+		// helper the pinned sweep can still reach into a failed shutdown.
 		this.proc = ptree.spawn([params.command, ...params.args], {
 			cwd: params.cwd,
 			stdin: "pipe",
 			env: { ...Bun.env, ...params.env },
+			detached: OWNS_SERVER_GROUP,
 		});
 	}
 
@@ -802,6 +845,11 @@ export class LspMuxServer {
 		// The whole subtree, not just direct children: a helper that dies during
 		// the handshake reparents its own children out of reach of both it and the
 		// exited root.
+		//
+		// No instant is the right one, which is why the group above exists: this
+		// pin cannot hold a helper the server spawns while answering `shutdown`.
+		// What it does hold is a helper that leaves the group afterwards, and
+		// everything at all on a host where the group is unattributable.
 		const helpers = Process.fromPid(server.proc.pid)?.descendants() ?? [];
 		try {
 			await withTimeout(
@@ -819,7 +867,14 @@ export class LspMuxServer {
 		} finally {
 			resolve();
 			server.pending.delete(id);
-			const outcomes = await Promise.allSettled([this.#killServer(server), this.#killHelpers(server, helpers)]);
+			// Started before the root's own termination, which now sweeps the whole
+			// process group: the group signal would otherwise reach these helpers
+			// first, and a sweep whose targets are already dying reports nothing
+			// about whether it could have terminated them. This one holds pinned
+			// identities and needs no proof of the group's ownership, so it is also
+			// the only sweep that still works where the group cannot be attributed.
+			const helperSweep = this.#killHelpers(server, helpers);
+			const outcomes = await Promise.allSettled([helperSweep, this.#killServer(server)]);
 			const failures = outcomes.flatMap(outcome => (outcome.status === "rejected" ? [outcome.reason] : []));
 			// A helper left behind is an incomplete termination exactly like a root
 			// left behind, so it fails the shutdown rather than only warning.
@@ -833,9 +888,11 @@ export class LspMuxServer {
 	 * Hard-kill anything pinned from the server's tree before its root exited.
 	 *
 	 * `killAndWait()` captures the tree when it runs, and by then the root is
-	 * gone, so these pinned references are the only remaining handle on whatever
-	 * the server left behind. Each is identity-checked natively, so a pid that
-	 * has since been recycled is not signalled.
+	 * gone. Where the mux owns the server's process group that sweep still
+	 * reaches the subtree, but the group is not always attributable and a helper
+	 * can leave it, so these pinned references remain the handle that needs no
+	 * proof of ownership. Each is identity-checked natively, so a pid that has
+	 * since been recycled is not signalled.
 	 *
 	 * Held to the same contract as the root: the same hard-termination budget,
 	 * and an outcome that leaves a process alive — a rejection or an exhausted

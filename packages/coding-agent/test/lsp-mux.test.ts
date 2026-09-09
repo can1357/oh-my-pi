@@ -12,7 +12,7 @@ import {
 	type MuxConnectParams,
 	type MuxConnectResult,
 } from "../src/lsp/mux/protocol";
-import { LspMuxServer, TERMINATION_BUDGET_MS } from "../src/lsp/mux/server";
+import { LspMuxServer, serverGroupOutlivesItsLeader, TERMINATION_BUDGET_MS } from "../src/lsp/mux/server";
 import { ChildProcess } from "@oh-my-pi/pi-utils/ptree";
 
 interface RpcMessage {
@@ -320,6 +320,32 @@ describe("LspMuxServer", () => {
 				await pollUntil(() => Promise.resolve(!processAlive(grandchildPid)), "grandchild termination", 6_000);
 			} finally {
 				killPid(grandchildPid);
+			}
+		},
+		10_000,
+	);
+
+	// Gated on the same precondition the mechanism is: where a reaped leader's
+	// group cannot be attributed, the mux does not take group ownership at all
+	// and this helper is still unreachable.
+	it.skipIf(!serverGroupOutlivesItsLeader())(
+		"terminates a helper the language server spawns during the shutdown handshake",
+		async () => {
+			// Every snapshot this shutdown could take of the server's subtree predates
+			// the helper: the server creates it while answering `shutdown` and then
+			// exits on `exit`, reparenting it out of reach of a walk rooted at the
+			// dead root. Only a relation the helper inherited at fork — its process
+			// group — can still name it here.
+			const handshakeFile = path.join(tmpDir, "handshake-helper.pid");
+			connectParams.env = { TEST_LSP_HANDSHAKE_HELPER_PID_FILE: handshakeFile };
+			const { client } = await link();
+			await initialize(client);
+			await server.shutdown();
+			const helperPid = await readPid(handshakeFile);
+			try {
+				await pollUntil(() => Promise.resolve(!processAlive(helperPid)), "handshake helper termination", 6_000);
+			} finally {
+				killPid(helperPid);
 			}
 		},
 		10_000,

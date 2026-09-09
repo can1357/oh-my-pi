@@ -145,7 +145,7 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 			respond(id, response);
 			break;
 		}
-		case "shutdown":
+		case "shutdown": {
 			shutdownReceived = true;
 			if (dyingHelperPid !== null) {
 				try {
@@ -153,8 +153,18 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 				} catch {}
 				dyingHelperPid = null;
 			}
+			// A helper born inside the handshake window: it exists in no snapshot
+			// taken before `shutdown` was sent, and this server exits on `exit`, so
+			// it is reparented away before the mux terminates anything.
+			const handshakeFile = Bun.env.TEST_LSP_HANDSHAKE_HELPER_PID_FILE;
+			if (handshakeFile) {
+				const helper = Bun.spawn(["sleep", "60"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+				helper.unref();
+				await Bun.write(handshakeFile, String(helper.pid));
+			}
 			respond(id, null);
 			break;
+		}
 		default:
 			respond(id, undefined, { code: -32601, message: `Method not found: ${message.method}` });
 	}
