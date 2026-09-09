@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Storage maintenance streams large session journals and gzip archives instead of loading complete files into memory.
+
 ### Fixed
 
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
@@ -19,7 +23,6 @@
 
 ### Changed
 
-- Storage maintenance streams large session journals and gzip archives instead of loading complete files into memory.
 - When enabled (`task.showResolvedModelBadge`), subagent model badges show the thinking-level icon, model name, and attached-advisor eye before the agent name in task, eval, job, and HUD rows.
 
 ### Fixed

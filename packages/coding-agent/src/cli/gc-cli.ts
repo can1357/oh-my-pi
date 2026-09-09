@@ -241,8 +241,15 @@ async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array
 	try {
 		const stream = Bun.file(file).stream();
 		if (file.endsWith(COMPRESSED_SESSION_SUFFIX)) {
-			await pipeline(stream, createGunzip(), async (source: NodeJS.ReadableStream) => {
-				await scan(Readable.toWeb(source, { strategy: { highWaterMark: 1 } }));
+			const gunzip = createGunzip();
+			await pipeline(stream, gunzip, async (source: NodeJS.ReadableStream) => {
+				// Match the native stream's byte budget, not one arbitrary chunk or
+				// a default queue that counts each potentially large chunk as size 1.
+				await scan(
+					Readable.toWeb(source, {
+						strategy: new ByteLengthQueuingStrategy({ highWaterMark: gunzip.readableHighWaterMark }),
+					}),
+				);
 			});
 		} else {
 			await scan(stream);
@@ -528,12 +535,11 @@ async function gzipSessionFile(source: string, destination: string): Promise<voi
 	const tempPath = `${destination}.${process.pid}.${Date.now()}.tmp`;
 	let renamed = false;
 	try {
-		const output = await fs.open(tempPath, "w");
-		try {
-			await pipeline(Bun.file(source).stream(), createGzip({ level: 9 }), output.createWriteStream());
-		} finally {
-			await output.close();
-		}
+		await pipeline(
+			Bun.file(source).stream(),
+			createGzip({ level: 9 }),
+			(await fs.open(tempPath, "w")).createWriteStream(),
+		);
 		await fs.rename(tempPath, destination);
 		renamed = true;
 		await fs.unlink(source);
@@ -548,12 +554,7 @@ async function restoreGzipSessionFile(source: string, destination: string): Prom
 	await fs.mkdir(path.dirname(destination), { recursive: true });
 	const tempPath = `${destination}.${process.pid}.${Date.now()}.tmp`;
 	try {
-		const output = await fs.open(tempPath, "w");
-		try {
-			await pipeline(Bun.file(source).stream(), createGunzip(), output.createWriteStream());
-		} finally {
-			await output.close();
-		}
+		await pipeline(Bun.file(source).stream(), createGunzip(), (await fs.open(tempPath, "w")).createWriteStream());
 		await fs.rename(tempPath, destination);
 		await fs.unlink(source);
 	} catch (error) {
