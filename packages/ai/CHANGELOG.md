@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Grok Bot empty/incomplete tool retries merge abandoned-attempt usage into error responses when the replay fails.
+- Grok Bot JSON-as-text promotion buffers later promotable text/thinking blocks even after earlier prose went live, so raw tool dumps are not published before end-of-stream promotion.
+- Grok Bot catalog keep-model on non-Anthropic retries keeps advertised `context` (and other non-retry) parameters while still stripping effort/reasoning/thinking/fast.
 - Grok Bot JSON-as-text promotion accumulates tool calls from every eligible text/thinking block so parallel one-call-per-block dumps are not dropped after the first.
 - Grok Bot native tool-schema projection (`google` / `strict`) comes from catalog KDL `sand-native-tool-schema`, not TypeScript model-class branches.
 - Grok Bot JSON-as-text promotion tries individual text/thinking blocks before joining them, so ordinary reasoning before a tool JSON dump still promotes.

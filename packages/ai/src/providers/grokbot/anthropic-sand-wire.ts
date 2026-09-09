@@ -114,9 +114,12 @@ function productProfileForWire(wire: AnthropicSandToolsWire): ProductWireProfile
 
 /**
  * Catalog-owned non-Anthropic keep-model (e.g. gemini empty-tool retry) drops
- * thinking/effort/fast parameters, but must keep routing flags that
+ * retry-disabled thinking/effort/fast parameters, but must keep routing flags
+ * and other advertised parameters (e.g. `context`) that
  * `resolveGrokbotRequestedModel()` already selected.
  */
+const KEEP_MODEL_RETRY_STRIPPED_PARAMS = new Set(["effort", "reasoning", "thinking", "fast"]);
+
 function keepModelRequestedModel(
 	requested: GrokbotRequestedModel,
 	anthropic: boolean,
@@ -125,6 +128,8 @@ function keepModelRequestedModel(
 	const next: GrokbotRequestedModel = { modelId: requested.modelId };
 	if (requested.maxMode) next.maxMode = true;
 	if (requested.isVariantStringRepresentation) next.isVariantStringRepresentation = true;
+	const kept = requested.parameters?.filter(p => !KEEP_MODEL_RETRY_STRIPPED_PARAMS.has(p.id));
+	if (kept && kept.length > 0) next.parameters = kept;
 	return next;
 }
 

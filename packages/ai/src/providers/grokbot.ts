@@ -856,6 +856,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			timestamp: Date.now(),
 		};
 		let firstTokenTime: number | undefined;
+		/** Token usage from abandoned empty/incomplete tool attempts (added into the final attempt / error path). */
+		let abandonedAttemptUsage: AssistantMessage["usage"] | undefined;
 
 		try {
 			const cfg = await loadGrokbotConfig();
@@ -896,8 +898,6 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			let incompleteToolRetryUsed = false;
 			/** Catalog `sand-empty-tools-retry-wire` engaged for this empty-tool replay. */
 			let emptyToolsRetryWire: typeof model.sandEmptyToolsRetryWire | undefined;
-			/** Token usage from abandoned empty/incomplete tool attempts (added into the final attempt). */
-			let abandonedAttemptUsage: AssistantMessage["usage"] | undefined;
 			let started = false;
 			let anthropicWire: AnthropicSandToolWireResult = {
 				requestedModel: { modelId: model.id },
@@ -1058,6 +1058,51 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						attemptStreamingLive = false;
 						attemptEventBuffer.push(event);
 						return;
+					}
+					// Product-wire may emit ordinary prose (already live) then a later
+					// standalone JSON / tool_code block. Buffer that later block so
+					// end-of-stream promotion can remove it — live consumers cannot
+					// retract a published dump.
+					const mayPromote = shouldPromoteJsonTextToolCall({
+						sandPromoteJsonTextTools: model.sandPromoteJsonTextTools,
+						wireMode: anthropicWire.wireMode,
+					});
+					if (
+						mayPromote &&
+						typeof contentIndex === "number" &&
+						(event.type === "text_start" ||
+							event.type === "text_delta" ||
+							event.type === "text_end" ||
+							event.type === "thinking_start" ||
+							event.type === "thinking_delta" ||
+							event.type === "thinking_end")
+					) {
+						const block = output.content[contentIndex];
+						const text =
+							block?.type === "text" && typeof block.text === "string"
+								? block.text
+								: block?.type === "thinking" && typeof block.thinking === "string"
+									? block.thinking
+									: "";
+						if (shouldHoldPromotableToolText(text)) {
+							attemptEventBuffer.push(event);
+							return;
+						}
+						// Block resolved to ordinary prose — publish any held events for
+						// this index (e.g. text_start while still undecided) then continue live.
+						if (attemptEventBuffer.some(e => "contentIndex" in e && e.contentIndex === contentIndex)) {
+							const held: AssistantMessageEvent[] = [];
+							const rest: AssistantMessageEvent[] = [];
+							for (const buffered of attemptEventBuffer) {
+								if ("contentIndex" in buffered && buffered.contentIndex === contentIndex) {
+									held.push(buffered);
+								} else {
+									rest.push(buffered);
+								}
+							}
+							attemptEventBuffer = rest;
+							for (const buffered of held) pushConsumerEvent(buffered);
+						}
 					}
 					pushConsumerEvent(event);
 					return;
@@ -1943,6 +1988,12 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			output.errorMessage = result.message;
 			output.duration = Math.round(performance.now() - startTime);
 			if (firstTokenTime !== undefined) output.ttft = firstTokenTime - startTime;
+			// Retry setup resets usage; restore tokens from abandoned empty/incomplete
+			// attempts so error messages still report the full spend.
+			if (abandonedAttemptUsage) {
+				output.usage = addAbandonedUsage(abandonedAttemptUsage, output.usage);
+			}
+			calculateCost(model, output.usage);
 			const httpMatch = /HTTP (\d{3})/.exec(output.errorMessage);
 			if (httpMatch && output.errorStatus === undefined) {
 				output.errorStatus = Number(httpMatch[1]);

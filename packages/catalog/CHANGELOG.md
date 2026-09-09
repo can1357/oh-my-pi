@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Grok Bot live AvailableModels rows always stamp an empty thinking ladder when non-reasoning; synthetic sand routers stay on the separate `buildSandRouterSpec` path so KDL `reasoning` fills are not gated by a TypeScript router-id list.
 - Grok Bot Gemini/OpenAI native tool-schema projection is owned by KDL `sand-native-tool-schema` (`google` / `strict`) so rows can override without TypeScript class branches.
 - Grok Bot Anthropic+tools auto wire defaults to catalog `sand-tools-wire` (KDL class anthropic → keep-model); TypeScript no longer forces keep-model from taxonomy class.
 - Grok Bot / Devin gen:models exclusions derive from KDL `credential-scoped-catalog` (no TypeScript provider-name table).

@@ -224,16 +224,19 @@ describe("anthropic sand tool wire", () => {
 		expect(applyAnthropicSandToolWire(input, "keep-model")).toEqual(input);
 	});
 
-	test("catalog keep-model on non-anthropic strips parameters but keeps routing flags", () => {
+	test("catalog keep-model on non-anthropic strips retry params but keeps context and routing flags", () => {
 		const requestedModel = resolveGrokbotRequestedModel("gemini-3-flash", {
-			sandParameterIds: ["effort", "fast"],
+			sandParameterIds: ["effort", "fast", "context", "thinking"],
 			sandMaxMode: true,
 			sandVariantStringRepresentation: true,
 			effort: "high",
+			context: "1m",
+			thinking: true,
 		});
 		expect(requestedModel.maxMode).toBe(true);
 		expect(requestedModel.isVariantStringRepresentation).toBe(true);
-		expect(requestedModel.parameters?.length).toBeGreaterThan(0);
+		expect(requestedModel.parameters?.some(p => p.id === "context" && p.value === "1m")).toBe(true);
+		expect(requestedModel.parameters?.some(p => p.id === "effort")).toBe(true);
 		const tools = [
 			{
 				name: "bash",
@@ -252,12 +255,10 @@ describe("anthropic sand tool wire", () => {
 			"keep-model",
 		);
 		expect(wired.wireMode).toBe("keep-model");
-		expect(wired.requestedModel).toEqual({
-			modelId: "gemini-3-flash",
-			maxMode: true,
-			isVariantStringRepresentation: true,
-		});
-		expect(wired.requestedModel.parameters).toBeUndefined();
+		expect(wired.requestedModel.modelId).toBe("gemini-3-flash");
+		expect(wired.requestedModel.maxMode).toBe(true);
+		expect(wired.requestedModel.isVariantStringRepresentation).toBe(true);
+		expect(wired.requestedModel.parameters).toEqual([{ id: "context", value: "1m" }]);
 		const names = (wired.tools as Array<{ name: string }>).map(t => t.name);
 		expect(names).toContain("Shell");
 	});

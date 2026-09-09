@@ -473,6 +473,116 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		expect(result.usage.totalTokens).toBe(43);
 	});
 
+	test("merges abandoned attempt usage into the error when the empty-tool retry fails", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const thinkingOnly = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					thinkingPart: { text: "planning", isFinal: true },
+				}),
+			),
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					usage: { promptTokens: 11, completionTokens: 7, totalTokens: 18 },
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		const err = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					error: { errorType: 7 },
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		let calls = 0;
+		const fetchImpl = (async () => {
+			calls += 1;
+			return connectBody(...(calls === 1 ? [thinkingOnly] : [err]));
+		}) as FetchImpl;
+		const gemini = buildModel({
+			id: "gemini-3-flash",
+			name: "gemini-3-flash",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 512,
+			sandEmptyToolsRetryWire: "keep-model",
+		});
+		const context: Context = {
+			messages: [{ role: "user", content: "Use bash", timestamp: 1 }],
+			tools: [bashTool],
+		};
+
+		const result = await streamGrokBot(gemini as Model<"grokbot-sand">, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+			maxTokens: 512,
+		}).result();
+		expect(calls).toBe(2);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/errorType=7/);
+		// Abandoned first-attempt usage must survive onto the error message after retry reset.
+		expect(result.usage.input).toBe(11);
+		expect(result.usage.output).toBe(7);
+		expect(result.usage.totalTokens).toBe(18);
+	});
+
+	test("buffers a later promotable JSON block after ordinary prose already went live", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const prose = frameConnectProto(
+			encodeInferenceStreamResponse({ textPart: { text: "Looking into it.", isFinal: true } }),
+		);
+		const fenced =
+			'```json\n{"name":"Shell","arguments":{"command":"echo tools-pong-after-prose"}}\n```';
+		const dump = frameConnectProto(
+			encodeInferenceStreamResponse({ textPart: { text: fenced, isFinal: true } }),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(prose, dump, trailer)) as FetchImpl;
+		const context: Context = {
+			messages: [{ role: "user", content: "Use the Shell tool", timestamp: 1 }],
+			tools: [bashTool],
+		};
+
+		const stream = streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl });
+		const textDeltas: string[] = [];
+		for await (const event of stream) {
+			if (event.type === "text_delta") textDeltas.push(event.delta);
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "toolCall",
+				name: "bash",
+				arguments: { command: "echo tools-pong-after-prose" },
+			}),
+		]);
+		// Prose may stream live; the later JSON dump must not — promotion cannot retract it.
+		expect(textDeltas.join("")).toBe("Looking into it.");
+		expect(textDeltas.join("")).not.toContain("tools-pong-after-prose");
+	});
+
 	test("toolChoice none omits tools even when context.tools is retained", async () => {
 		// Handoff keeps live tools for prompt-cache reuse while forcing toolChoice none.
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({

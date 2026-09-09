@@ -290,13 +290,13 @@ function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string, id: str
 	const reasoning = row.supportsThinking === true || efforts.length > 0 || unrecognizedEffortOnly;
 	// Empty ladder marks authored non-reasoning (and unrecognized-only effort
 	// vocabularies) so preserve-authored-thinking can block KDL reasoning
-	// upgrades on live rows. Synthetic sand routers omit thinking and still
-	// receive reviewed KDL `reasoning` fills.
-	const isSandRouter = (GROKBOT_SAND_ROUTER_IDS as readonly string[]).includes(id);
+	// upgrades on live rows. Synthetic sand routers are built separately via
+	// `buildSandRouterSpec` (no empty ladder) so reviewed KDL `reasoning`
+	// fills still apply — do not special-case router ids here.
 	const thinking =
 		efforts.length > 0
 			? ({ mode: "effort", efforts } satisfies ThinkingConfig)
-			: unrecognizedEffortOnly || (!reasoning && !isSandRouter)
+			: unrecognizedEffortOnly || !reasoning
 				? ({ mode: "effort", efforts: [] } satisfies ThinkingConfig)
 				: undefined;
 	const variantLegacySlugs = (row.variants ?? [])
