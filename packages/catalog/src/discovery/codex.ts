@@ -1,13 +1,14 @@
 import { type } from "arktype";
 import { Effort, THINKING_EFFORTS } from "../effort";
-import type { ModelSpec, ThinkingConfig } from "../types";
+import type { FetchImpl, ModelSpec, ThinkingConfig } from "../types";
 import { isRecord } from "../utils";
 import { CODEX_BASE_URL, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
 
 const DEFAULT_MODEL_LIST_PATHS = ["/codex/models", "/models"] as const;
 const DEFAULT_CONTEXT_WINDOW = 272_000;
 const DEFAULT_MAX_TOKENS = 128_000;
-const DEFAULT_CODEX_CLIENT_VERSION = "0.99.0";
+// Verified against the Codex model-list contract; old versions hide modern models.
+const DEFAULT_CODEX_CLIENT_VERSION = "0.153.4";
 const NPM_CODEX_LATEST_URL = "https://registry.npmjs.org/@openai%2Fcodex/latest";
 
 const codexReasoningPresetSchema = type({
@@ -58,9 +59,9 @@ export interface CodexModelDiscoveryOptions {
 	/** Abort signal for network request cancellation. */
 	signal?: AbortSignal;
 	/** Optional fetch implementation override for tests. */
-	fetchFn?: typeof fetch;
+	fetchFn?: FetchImpl;
 	/** Optional registry fetch implementation override for client version lookup. */
-	registryFetchFn?: typeof fetch;
+	registryFetchFn?: FetchImpl;
 }
 
 /**
@@ -165,7 +166,7 @@ function buildCodexHeaders(options: CodexModelDiscoveryOptions): Headers {
 
 async function resolveCodexClientVersion(
 	clientVersion: string | undefined,
-	fetchFn: typeof fetch,
+	fetchFn: FetchImpl,
 	signal: AbortSignal | undefined,
 ): Promise<string> {
 	const normalizedClientVersion = normalizeClientVersion(clientVersion);

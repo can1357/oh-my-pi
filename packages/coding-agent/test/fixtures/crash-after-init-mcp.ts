@@ -35,6 +35,10 @@ rl.on("line", line => {
 		return;
 	}
 
+	if (message.method === "notifications/test/exit") {
+		process.exit(0);
+	}
+
 	if (message.method === "server/discover" && message.id !== undefined) {
 		send({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } });
 		return;
@@ -55,7 +59,7 @@ rl.on("line", line => {
 	if (message.method === "tools/list" && message.id !== undefined) {
 		send({ jsonrpc: "2.0", id: message.id, result: { tools: [] } });
 		// Exit on the next tick so the response is fully flushed before EOF.
-		setImmediate(() => process.exit(0));
+		if (Bun.env.OMP_TEST_EXIT_ON_NOTIFICATION !== "1") setImmediate(() => process.exit(0));
 		return;
 	}
 });

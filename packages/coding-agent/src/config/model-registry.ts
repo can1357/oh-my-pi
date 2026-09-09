@@ -172,11 +172,12 @@ export function mergeDiscoveredModel<TApi extends Api>(
 	return model;
 }
 
-const AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS = new Set<string>(
-	PROVIDER_DESCRIPTORS.filter(descriptor => descriptor.dynamicModelsAuthoritative).map(
+const AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS = new Set<string>([
+	"openai-codex",
+	...PROVIDER_DESCRIPTORS.filter(descriptor => descriptor.dynamicModelsAuthoritative).map(
 		descriptor => descriptor.providerId,
 	),
-);
+]);
 
 function isAuthoritativeProjectCatalogModel(model: Model<Api>): boolean {
 	return (
@@ -759,6 +760,7 @@ export class ModelRegistry {
 				: fetch);
 		this.#modelsConfigFile = ModelsConfigFile.relocate(modelsPath);
 		this.#cacheDbPath = modelsPath ? path.join(path.dirname(modelsPath), "models.db") : undefined;
+		this.authStorage.configureCodexModelDiscovery({ cacheDbPath: this.#cacheDbPath, fetch: this.#fetch });
 		// Set up fallback resolver for custom provider API keys
 		this.authStorage.setFallbackResolver(provider => {
 			const keyConfig = this.#customProviderApiKeys.get(provider);
@@ -1060,16 +1062,26 @@ export class ModelRegistry {
 			if (configuredDiscoveryProviders.has(providerId)) {
 				continue;
 			}
-			const cacheProviderId = this.#resolveStartupModelCacheProviderId(providerId);
-			const cache = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
-			if (!cache) {
-				continue;
-			}
-			if (cache.fresh && cache.authoritative) {
+			const cacheProviderIds =
+				providerId === "openai-codex"
+					? this.authStorage.getCodexModelManagerOptions().map(options => options.cacheProviderId!)
+					: [this.#resolveStartupModelCacheProviderId(providerId)];
+			const caches = cacheProviderIds.map(cacheProviderId =>
+				readModelCache<Api>(
+					cacheProviderId,
+					(providerId === "openai-codex" ? 2 : 24) * 60 * 60 * 1000,
+					Date.now,
+					this.#cacheDbPath,
+				),
+			);
+			if (caches.length === 0) continue;
+			if (caches.every(cache => cache?.fresh && cache.authoritative)) {
 				authoritativeFreshProviders.add(providerId);
 			}
-			const models = cache.models.map(model =>
-				model.provider === providerId ? model : { ...model, provider: providerId },
+			const models = caches.flatMap(cache =>
+				(cache?.models ?? []).map(model =>
+					model.provider === providerId ? model : { ...model, provider: providerId },
+				),
 			);
 			const providerOverride = this.#providerOverrides.get(providerId);
 			const withTransport = providerOverride
@@ -1592,17 +1604,6 @@ export class ModelRegistry {
 						fetch: this.#fetch,
 					}),
 			},
-			{
-				providerId: "openai-codex",
-				resolveKey: value => value,
-				createOptions: accessToken => {
-					const accountId = resolveOAuthAccountIdForAccessToken(this.authStorage, "openai-codex", accessToken);
-					return openaiCodexModelManagerOptions({
-						accessToken,
-						accountId,
-					});
-				},
-			},
 		];
 		const disabledProviders = getDisabledProviderIdsFromSettings();
 		const standardProviderDescriptors = PROVIDER_DESCRIPTORS.filter(
@@ -1620,6 +1621,17 @@ export class ModelRegistry {
 			Promise.all(enabledSpecialProviderDescriptors.map(peekKey)),
 		]);
 		const options: ModelManagerOptions<Api>[] = [];
+		if (!disabledProviders.has("openai-codex")) {
+			const codexAccounts = this.authStorage.getCodexModelManagerOptions();
+			options.push(...codexAccounts);
+			if (codexAccounts.length === 0) {
+				const accessToken = await this.#peekApiKeyForProvider("openai-codex");
+				if (isAuthenticated(accessToken)) {
+					const accountId = resolveOAuthAccountIdForAccessToken(this.authStorage, "openai-codex", accessToken);
+					options.push(openaiCodexModelManagerOptions({ accessToken, accountId, fetch: this.#fetch }));
+				}
+			}
+		}
 		for (let i = 0; i < standardProviderDescriptors.length; i++) {
 			const descriptor = standardProviderDescriptors[i];
 			const apiKey = standardProviderKeys[i];

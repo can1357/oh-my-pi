@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- Fixed an MCP reconnect race that could leave a closed server reported as connected when it exited during tool-cache persistence; close events now resume after the in-flight reconnect settles, keeping the crash circuit breaker effective on hosted runners.
+- Codex model discovery now combines independently cached catalogs from every enabled OAuth account, ignores legacy provider-wide cache rows, and shares account capabilities with request routing so Astra appears and uses a compatible login.
 - Unavailable model-role preferences no longer block unrelated session startup; diagnostics remain visible in logs, while required spawn policies and runtime model-selection checks remain enforced.
 - Fixed token-savings restoration leaving a stale automatic-model marker: subsequent user prompts now enforce the default-model call limit again, while genuine manual model choices still disable automatic routing.
 - Fixed Windows `vault://` CLI operations failing with exit code 255 by selecting Obsidian's console launcher and normalizing its executable path for Bun.

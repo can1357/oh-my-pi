@@ -135,6 +135,7 @@ describe("AuthStorage codex oauth ranking", () => {
 	let tempDir = "";
 	let store: AuthCredentialStore | null = null;
 	let authStorage: AuthStorage | null = null;
+	let modelServer: Bun.Server<undefined>;
 	const usageByAccount = new Map<string, UsageReport>();
 
 	const usageProvider: UsageProvider = {
@@ -149,8 +150,25 @@ describe("AuthStorage codex oauth ranking", () => {
 	beforeEach(async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-auth-codex-selection-"));
 		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		modelServer = Bun.serve({
+			port: 0,
+			fetch: request =>
+				new URL(request.url).pathname === "/version"
+					? Response.json({ version: "0.153.4" })
+					: Response.json({ models: [{ slug: "gpt-5.3-codex-spark", supported_in_api: true }] }),
+		});
 		authStorage = new AuthStorage(store, {
 			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			codexModelDiscovery: {
+				cacheDbPath: path.join(tempDir, "models.db"),
+				fetch: (input, init) => {
+					const url = new URL(input instanceof Request ? input.url : input.toString());
+					return fetch(
+						new URL(url.hostname === "registry.npmjs.org" ? "/version" : "/models", modelServer.url),
+						init,
+					);
+				},
+			},
 		});
 		usageByAccount.clear();
 		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
@@ -165,6 +183,7 @@ describe("AuthStorage codex oauth ranking", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		await modelServer.stop(true);
 		store?.close();
 		store = null;
 		authStorage = null;

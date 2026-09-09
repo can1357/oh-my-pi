@@ -14,18 +14,32 @@ export interface OpenAICodexModelManagerConfig {
 	accessToken?: string;
 	accountId?: string;
 	clientVersion?: string;
+	fetch?: FetchImpl;
 }
 
 export function openaiCodexModelManagerOptions(
 	config: OpenAICodexModelManagerConfig = {},
 ): ModelManagerOptions<"openai-codex-responses"> {
-	const { accessToken, accountId, clientVersion } = config;
+	const { accessToken, accountId, clientVersion, fetch } = config;
 	return {
 		providerId: "openai-codex",
 		...(accessToken
 			? {
+					cacheProviderId: `openai-codex:bearer-v1:${new Bun.CryptoHasher("sha256").update(JSON.stringify([accountId, accessToken])).digest("hex")}`,
+					staticModels: [],
+					dynamicModelsAuthoritative: true,
+				}
+			: {}),
+		...(accessToken
+			? {
 					fetchDynamicModels: async () => {
-						const result = await fetchCodexModels({ accessToken, accountId, clientVersion });
+						const result = await fetchCodexModels({
+							accessToken,
+							accountId,
+							clientVersion,
+							fetchFn: fetch,
+							signal: AbortSignal.timeout(10_000),
+						});
 						return result?.models ?? null;
 					},
 				}

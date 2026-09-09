@@ -61,13 +61,9 @@ describe("MCP reconnect storm (issue #1592)", () => {
 			// stale connection, and detaches `onClose` so no further spawns fire.
 			// That makes the terminal state a race-free signal: poll for it and
 			// return the instant the storm is capped instead of waiting out a fixed
-			// delay. Deadline margin below is CI-tuned:
-			// Local baseline is ~150-180ms/cycle (6 cycles ~1s); a loaded/throttled
-			// CI runner's real subprocess spawn+stdio-handshake+exit latency can push
-			// well past that. Root-caused: no application bug, just insufficient
-			// margin between this poll deadline and CI-observed per-cycle latency
-			// (reproduced failure at ~1.7s/cycle -> ~10.3s total, exceeding a 10s
-			// budget). 25s keeps comfortably under the breaker's own 30s window.
+			// delay. Keep enough margin for real subprocess scheduling while staying
+			// within the breaker's 30s window. The deterministic test below also
+			// covers close events racing with asynchronous cache persistence.
 			const deadline = Date.now() + 25_000;
 			while (manager.getConnectionStatus("crashy") !== "disconnected" && Date.now() < deadline) {
 				await Bun.sleep(5);
@@ -95,4 +91,31 @@ describe("MCP reconnect storm (issue #1592)", () => {
 			await manager.disconnectAll();
 		}
 	}, 30_000);
+
+	it("replays real server exits that arrive during reconnect cache persistence", async () => {
+		const child = Bun.spawn(
+			[BUN_EXEC, path.join(import.meta.dir, "fixtures", "reconnect-during-cache-write.ts"), workDir, spawnLog],
+			{ stdout: "pipe", stderr: "pipe" },
+		);
+		const killTimer = setTimeout(() => child.kill(), 40_000);
+		try {
+			const [stdout, stderr, exitCode] = await Promise.all([
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+				child.exited,
+			]);
+			expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+			const result: { status: string; spawnCount: number; observedCloses: number; hasConnection: boolean } =
+				JSON.parse(stdout);
+			expect(result.status).toBe("disconnected");
+			expect(result.hasConnection).toBe(false);
+			expect(result.observedCloses).toBeGreaterThan(1);
+			expect(result.spawnCount).toBe(result.observedCloses);
+			expect(result.spawnCount).toBeLessThanOrEqual(7);
+		} finally {
+			clearTimeout(killTimer);
+			child.kill();
+			await child.exited;
+		}
+	}, 45_000);
 });

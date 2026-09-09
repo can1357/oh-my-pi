@@ -10,6 +10,14 @@
 import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { codexAccountModelManagerOptions } from "@pk-nerdsaver-ai/pi-catalog/discovery/codex-account-models";
+import {
+	createModelManager,
+	type ModelManagerOptions,
+	type ModelRefreshStrategy,
+	type ModelResolutionResult,
+} from "@pk-nerdsaver-ai/pi-catalog/model-manager";
+import type { FetchImpl } from "@pk-nerdsaver-ai/pi-catalog/types";
 import { parseAlibabaTokenPlanCredential } from "@pk-nerdsaver-ai/pi-catalog/wire/alibaba-token-plan";
 import { getAgentDbPath, logger } from "@pk-nerdsaver-ai/pi-utils";
 import type { ApiKeyResolver } from "./auth-retry";
@@ -420,7 +428,13 @@ export interface CredentialDisabledEvent {
 	disabledCause: string;
 }
 
+export interface CodexModelDiscoveryConfig {
+	cacheDbPath?: string;
+	fetch?: FetchImpl;
+}
+
 export type AuthStorageOptions = {
+	codexModelDiscovery?: CodexModelDiscoveryConfig;
 	usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
 	rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
 	usageFetch?: typeof fetch;
@@ -962,9 +976,12 @@ export class AuthStorage {
 	#oauthRefreshInFlight: Map<number, Promise<AuthCredentialSnapshotEntry>> = new Map();
 	#oauthCredentialRefreshInFlight: Map<number, Promise<OAuthCredentials>> = new Map();
 	#closed = false;
+	#codexModelDiscovery: CodexModelDiscoveryConfig = {};
+	#codexModelsInFlight = new Map<string, Promise<ModelResolutionResult<"openai-codex-responses">>>();
 
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
 		this.#store = store;
+		this.#codexModelDiscovery = options.codexModelDiscovery ?? {};
 		this.#configValueResolver = options.configValueResolver ?? defaultConfigValueResolver;
 		this.#usageProviderResolver = options.usageProviderResolver ?? resolveDefaultUsageProvider;
 		this.#rankingStrategyResolver = options.rankingStrategyResolver ?? resolveDefaultRankingStrategy;
@@ -3245,11 +3262,23 @@ export class AuthStorage {
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthResolutionResult | undefined> {
-		const credentials = this.#getCredentialsForProvider(provider)
+		let credentials = this.#getCredentialsForProvider(provider)
 			.map((credential, index) => ({ credential, index }))
 			.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth");
 
 		if (credentials.length === 0) return undefined;
+		if (provider === "openai-codex" && options?.modelId) {
+			const supported = await this.#codexAccountsSupportingModel(options.modelId, options.signal);
+			// Resolve positions again: refreshing discovery credentials can remove siblings.
+			credentials = this.#getStoredOAuthSelections(provider).filter(selection =>
+				supported.has(selection.credentialId),
+			);
+			if (credentials.length === 0) {
+				throw new Error(
+					`No available OpenAI Codex account advertises model "${options.modelId}"; refresh models or check account access.`,
+				);
+			}
+		}
 
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
@@ -3266,6 +3295,7 @@ export class AuthStorage {
 		// with the most headroom proactively and fall back intelligently when rate-limited.
 		const sessionPreferredIsAvailable =
 			sessionPreferredIndex !== undefined &&
+			credentials.some(selection => selection.index === sessionPreferredIndex) &&
 			!this.#isCredentialBlocked(providerKey, sessionPreferredIndex, blockScope);
 		const shouldRank = checkUsage && (!sessionPreferredIsAvailable || requiresProModel);
 		const rankingOrder = shouldRank && sessionId ? credentials.map((_credential, index) => index) : order;
@@ -3302,7 +3332,8 @@ export class AuthStorage {
 		// session preference exists yet) even if its cached token still looks
 		// valid — a peer/broker may have rotated it out from under us.
 		const forceRefreshIndex = options?.forceRefresh
-			? (sessionPreferredIndex ?? candidates[0]?.selection.index)
+			? (candidates.find(candidate => candidate.selection.index === sessionPreferredIndex)?.selection.index ??
+				candidates[0]?.selection.index)
 			: undefined;
 		await Promise.all(
 			candidates.map(async candidate => {
@@ -3679,6 +3710,10 @@ export class AuthStorage {
 					}
 				}
 			}
+			if (provider === "openai-codex" && options?.modelId) {
+				const supported = await this.#codexAccountsSupportingModel(options.modelId, options.signal);
+				if (credentialId === undefined || !supported.has(credentialId)) return undefined;
+			}
 			this.#recordSessionCredential(provider, sessionId, "oauth", selection.index);
 			return { apiKey: result.apiKey, credential: updated };
 		} catch (error) {
@@ -3941,6 +3976,71 @@ export class AuthStorage {
 				error: error instanceof Error ? error.message : String(error),
 			};
 		}
+	}
+
+	/** Share discovery transport/cache with the registry and request-time account checks. */
+	configureCodexModelDiscovery(config: CodexModelDiscoveryConfig): void {
+		this.#codexModelDiscovery = config;
+	}
+
+	getCodexModelManagerOptions(): ModelManagerOptions<"openai-codex-responses">[] {
+		return this.listOAuthAccounts("openai-codex").map(account =>
+			codexAccountModelManagerOptions({
+				...this.#codexModelDiscovery,
+				account,
+				resolveAccess: async () => {
+					// Stable row identity survives sibling removal and positional reordering.
+					const selection = this.#getStoredOAuthSelections("openai-codex").find(
+						entry => entry.credentialId === account.credentialId,
+					);
+					if (!selection) return undefined;
+					const result = await this.#resolveStoredOAuthAccess(
+						"openai-codex",
+						selection,
+						this.#getProviderTypeKey("openai-codex", "oauth"),
+						{ signal: AbortSignal.timeout(10_000) },
+					);
+					if (!result.ok || result.accountId !== account.accountId || result.email !== account.email)
+						return undefined;
+					return result;
+				},
+			}),
+		);
+	}
+
+	async #resolveCodexAccountModels(
+		options: ModelManagerOptions<"openai-codex-responses">,
+		strategy: ModelRefreshStrategy = "online-if-uncached",
+	): Promise<ModelResolutionResult<"openai-codex-responses">> {
+		const key = `${options.cacheDbPath ?? ""}:${options.cacheProviderId}:${strategy}`;
+		const pending = this.#codexModelsInFlight.get(key);
+		if (pending) return pending;
+		const request = createModelManager(options).refresh(strategy);
+		this.#codexModelsInFlight.set(key, request);
+		try {
+			return await request;
+		} finally {
+			this.#codexModelsInFlight.delete(key);
+		}
+	}
+
+	async #codexAccountsSupportingModel(modelId: string, signal?: AbortSignal): Promise<Set<number>> {
+		const accounts = this.listOAuthAccounts("openai-codex");
+		const managers = this.getCodexModelManagerOptions();
+		const results = await raceCredentialRefreshWithSignal(
+			Promise.all(managers.map(options => this.#resolveCodexAccountModels(options))),
+			signal,
+			"Codex model discovery aborted",
+		);
+		return new Set(
+			accounts
+				.filter((_account, index) => {
+					const result = results[index];
+					// Unknown/stale capabilities must never authorize an incompatible fallback.
+					return result && !result.stale && result.models.some(model => model.id === modelId);
+				})
+				.map(account => account.credentialId),
+		);
 	}
 
 	/**

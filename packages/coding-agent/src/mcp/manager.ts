@@ -752,12 +752,7 @@ export class MCPManager {
 
 					// Re-establish connection if the transport closes (server restart,
 					// network interruption).
-					connection.transport.onClose = () => {
-						if (this.#connections.get(name) !== connection) return;
-						this.#cancelModernSubscription(name);
-						logger.debug("MCP transport lost, triggering reconnect", { path: `mcp:${name}` });
-						void this.reconnectServer(name);
-					};
+					connection.transport.onClose = () => this.#handleConnectionClosed(name, connection);
 
 					return connection;
 				},
@@ -1164,6 +1159,31 @@ export class MCPManager {
 	}
 
 	/**
+	 * Reconnection completion can still be persisting tools when the new server
+	 * exits. Drop the dead connection immediately, then replay its close only
+	 * after the in-flight reconnect releases its single-flight slot.
+	 */
+	#handleConnectionClosed(name: string, connection: MCPServerConnection): void {
+		if (this.#connections.get(name) !== connection) return;
+		this.#cancelModernSubscription(name);
+		this.#knownResourceUris.delete(name);
+		this.#connections.delete(name);
+		this.#extensionRuntimes.delete(name);
+		logger.debug("MCP transport lost, triggering reconnect", { path: `mcp:${name}` });
+		const epoch = this.#epoch;
+		const reconnect = () => {
+			if (this.#epoch !== epoch || !this.#serverConfigs.has(name) || this.#connections.has(name)) return;
+			void this.reconnectServer(name);
+		};
+		const pending = this.#pendingReconnections.get(name);
+		if (pending) {
+			void pending.then(reconnect, reconnect);
+		} else {
+			reconnect();
+		}
+	}
+
+	/**
 	 * Reconnect to a server after a connection failure.
 	 *
 	 * Tears down the stale connection, re-resolves auth, establishes a new
@@ -1189,9 +1209,13 @@ export class MCPManager {
 			return null;
 		}
 
-		const attempt = this.#doReconnect(name);
+		const attempt = this.#doReconnect(name)
+			.then(connection => (connection && this.#connections.get(name) === connection ? connection : null))
+			.finally(() => {
+				if (this.#pendingReconnections.get(name) === attempt) this.#pendingReconnections.delete(name);
+			});
 		this.#pendingReconnections.set(name, attempt);
-		return attempt.finally(() => this.#pendingReconnections.delete(name));
+		return attempt;
 	}
 
 	/**
@@ -1275,6 +1299,7 @@ export class MCPManager {
 			}
 			try {
 				const connection = await this.#connectAndWireServer(name, config, source, reconnectEpoch);
+				if (this.#connections.get(name) !== connection) return null;
 				logger.debug("MCP reconnected", { path: `mcp:${name}`, tools: connection.tools?.length ?? 0 });
 				return connection;
 			} catch (error) {
@@ -1355,17 +1380,13 @@ export class MCPManager {
 				return null;
 			};
 		}
-		connection.transport.onClose = () => {
-			if (this.#connections.get(name) !== connection) return;
-			this.#cancelModernSubscription(name);
-			logger.debug("MCP transport lost, triggering reconnect", { path: `mcp:${name}` });
-			void this.reconnectServer(name);
-		};
+		connection.transport.onClose = () => this.#handleConnectionClosed(name, connection);
 		try {
 			const serverTools = await listTools(connection);
 			const reconnect = () => this.reconnectServer(name);
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.options.hostInteraction);
 			await this.#persistToolCache(name, config, serverTools, connection);
+			if (this.#connections.get(name) !== connection) return connection;
 			this.#replaceServerTools(name, customTools);
 			this.#onToolsChanged?.(this.#tools);
 			void this.#loadServerResourcesAndPrompts(name, connection);

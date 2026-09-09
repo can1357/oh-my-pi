@@ -51,7 +51,7 @@ export function createApiKeyResolver(
 	const { sessionId, baseUrl, modelId } = options;
 	return async ({ lastChance, error, signal }) => {
 		if (error === undefined) {
-			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
+			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, signal });
 		}
 		if (lastChance) {
 			// Account constraint (401 / usage / account-rate-limit): rotate to a
@@ -60,7 +60,7 @@ export function createApiKeyResolver(
 			// is owned by `markUsageLimitReached` (default + server usage-report
 			// reset) and the outer whole-turn retry layer.
 			await registry.authStorage.rotateSessionCredential(provider, sessionId, { error, modelId, signal });
-			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
+			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, signal });
 		}
 		return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh: true, signal });
 	};
