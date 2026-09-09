@@ -52,7 +52,7 @@ export async function resolvePluginSource(
 export async function validatePluginSource(
 	entry: MarketplacePluginEntry,
 	context: Pick<ResolveContext, "marketplaceClonePath" | "catalogMetadata">,
-): Promise<void> {
+): Promise<string | undefined> {
 	const { source } = entry;
 	if (typeof source === "string") {
 		if (!source.startsWith("./")) {
@@ -70,20 +70,20 @@ export async function validatePluginSource(
 			);
 		}
 		await verifyDirExists(resolved, `Plugin source directory does not exist: "${resolved}"`);
-		return;
+		return resolved;
 	}
 
 	switch (source.source) {
 		case "url":
 		case "github":
-			return;
+			return undefined;
 		case "git-subdir": {
 			const syntheticRoot = path.join(path.parse(process.cwd()).root, "omp-marketplace-validation");
 			const resolved = path.resolve(syntheticRoot, source.path);
 			if (!pathIsWithin(syntheticRoot, resolved)) {
 				throw new Error(`git-subdir path "${source.path}" escapes the cloned repository`);
 			}
-			return;
+			return undefined;
 		}
 		case "npm":
 			throw new Error("npm plugin sources are not yet supported. Use git-based sources instead.");

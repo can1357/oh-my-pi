@@ -15,7 +15,7 @@ import { expandTilde } from "../../../tools/path-utils";
 import { normalizePluginRuntimeConfig } from "../runtime-config";
 import type { PluginRuntimeConfig } from "../types";
 
-import { cachePlugin } from "./cache";
+import { cachePlugin, isValidVersionForCache } from "./cache";
 import { classifySource, fetchMarketplace, parseMarketplaceCatalog, promoteCloneToCache } from "./fetcher";
 import {
 	addInstalledPlugin,
@@ -269,6 +269,9 @@ export class MarketplaceManager {
 		if (!pluginEntry) {
 			throw new Error(`Plugin "${name}" not found in marketplace "${marketplace}"`);
 		}
+		if (pluginEntry.version !== undefined && !isValidVersionForCache(pluginEntry.version)) {
+			throw new Error(`Invalid version for cache: "${pluginEntry.version}"`);
+		}
 
 		const marketplaceClonePath = this.#resolveMarketplaceRoot(mktEntry);
 		if (mktEntry.sourceType === "url" && typeof pluginEntry.source === "string") {
@@ -277,23 +280,11 @@ export class MarketplaceManager {
 					`Relative sources require a git or local marketplace. Re-add the marketplace using its git URL.`,
 			);
 		}
-		await validatePluginSource(pluginEntry, {
+		const sourcePath = await validatePluginSource(pluginEntry, {
 			marketplaceClonePath,
 			catalogMetadata: catalog.metadata,
 		});
-		const validationCachePath = path.join(os.tmpdir(), "omp-marketplace-validation");
-		if (
-			typeof pluginEntry.lspServers === "string" &&
-			!pathIsWithin(validationCachePath, path.resolve(validationCachePath, pluginEntry.lspServers))
-		) {
-			throw new Error(`Plugin "${pluginEntry.name}" lspServers path escapes the plugin directory`);
-		}
-		if (
-			typeof pluginEntry.dapAdapters === "string" &&
-			!pathIsWithin(validationCachePath, path.resolve(validationCachePath, pluginEntry.dapAdapters))
-		) {
-			throw new Error(`Plugin "${pluginEntry.name}" dapAdapters path escapes the plugin directory`);
-		}
+		await this.#validateEmbeddedConfigPaths(pluginEntry, sourcePath);
 
 		const pluginId = buildPluginId(name, marketplace);
 		const instReg = await readInstalledPluginsRegistry(registryPath);
@@ -397,6 +388,31 @@ export class MarketplaceManager {
 
 		logger.debug("Plugin installed", { pluginId, version, cachePath });
 		return installedEntry;
+	}
+
+	async #validateEmbeddedConfigPaths(entry: MarketplacePluginEntry, sourcePath: string | undefined): Promise<void> {
+		if (!sourcePath) return;
+		await this.#validateEmbeddedConfigPath(entry, sourcePath, "lspServers", entry.lspServers);
+		await this.#validateEmbeddedConfigPath(entry, sourcePath, "dapAdapters", entry.dapAdapters);
+	}
+
+	async #validateEmbeddedConfigPath(
+		entry: MarketplacePluginEntry,
+		sourcePath: string,
+		field: "lspServers" | "dapAdapters",
+		value: unknown,
+	): Promise<void> {
+		if (typeof value !== "string") return;
+		const resolved = path.resolve(sourcePath, value);
+		if (!pathIsWithin(sourcePath, resolved)) {
+			throw new Error(`Plugin "${entry.name}" ${field} path escapes the plugin directory`);
+		}
+		try {
+			const stat = await fs.stat(resolved);
+			if (!stat.isFile()) throw new Error("not a file");
+		} catch {
+			throw new Error(`Plugin "${entry.name}" ${field} file does not exist`);
+		}
 	}
 
 	async #writeEmbeddedLspConfig(entry: MarketplacePluginEntry, cachePath: string): Promise<void> {

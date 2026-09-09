@@ -38,7 +38,7 @@ describe("resolvePluginSource", () => {
 	it("validates relative sources without mutating or cloning", async () => {
 		await expect(
 			validatePluginSource(makeEntry("./plugins/hello-plugin"), { marketplaceClonePath: FIXTURE_DIR }),
-		).resolves.toBeUndefined();
+		).resolves.toBe(path.resolve(FIXTURE_DIR, "plugins/hello-plugin"));
 	});
 
 	it("rejects unsupported npm sources during validation", async () => {
