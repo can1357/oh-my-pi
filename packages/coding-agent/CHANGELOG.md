@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `AgentLifecycleManager.global()` now rebinds to the current global registry after a lone `AgentRegistry` reset, so a test that resets only the registry can no longer strand the lifecycle manager on a dead instance and hang the collab kill path ([#11432](https://github.com/can1357/oh-my-pi/issues/11432)).
+
 ## [18.1.16] - 2026-09-09
 
 ### Added
