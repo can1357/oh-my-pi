@@ -5,9 +5,15 @@
 //! (GBK) on Simplified Chinese — and treating those bytes as UTF-8 replaces
 //! them with U+FFFD (乱码).
 //!
-//! Decode as UTF-8 until a complete invalid sequence; on Windows, switch the
-//! remainder to the process ANSI code page (`GetACP`) unless that page is
-//! already UTF-8.
+//! Policy: decode as UTF-8 until a complete invalid sequence; on Windows,
+//! switch the remainder of that stream to the process ANSI code page
+//! (`GetACP`) unless that page is already UTF-8.
+//!
+//! Valid UTF-8 always wins, including bytes that are also valid ACP (GBK 一 is
+//! `D2 BB`, which is U+04BB in UTF-8). Overlap is ambiguous; this prefers the
+//! modern-tool default over guessing language. The ACP switch is permanent
+//! for the stream: command output is one encoding, not mixed. A single
+//! invalid byte therefore ACP-decodes everything after it.
 
 use std::str;
 
@@ -104,10 +110,14 @@ impl OutputDecoder {
 					if let Some(invalid_len) = err.error_len() {
 						#[cfg(windows)]
 						if self.can_fallback_to_acp() {
+							// One encoding per command. Do not resume UTF-8 after
+							// a bad byte: later UTF-8 would be ACP-mojibake, but
+							// cmd/chcp emit ACP for the whole stream.
 							self.mode = Mode::Acp;
 							out.push_str(&self.drain_acp(eof));
 							return out;
 						}
+
 						out.push_str(REPLACEMENT);
 						self.pending.drain(..invalid_len);
 					} else {

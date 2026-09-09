@@ -7,7 +7,6 @@
 use std::{
 	collections::HashMap,
 	io::{Read, Write},
-	str,
 	sync::{
 		Arc,
 		atomic::{AtomicBool, Ordering},
