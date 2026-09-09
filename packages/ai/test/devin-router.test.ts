@@ -156,7 +156,7 @@ describe("streamDevin router assignment", () => {
 			ideName: "devin-cli",
 			ideType: "chisel",
 			extensionName: "chisel",
-			extensionVersion: "3000.6.2",
+			extensionVersion: "3000.6.14",
 			apiKey: "devin-session-token$token",
 			userJwt: "",
 		});
@@ -165,6 +165,10 @@ describe("streamDevin router assignment", () => {
 		expect(recorded.chat?.modelAssignmentJwt).toBe("assign-jwt");
 		expect(recorded.chat?.cascadeId).toBe("cascade-42");
 		expect(recorded.chat?.metadata).toMatchObject({ ideType: "chisel", userJwt: "" });
+		expect(recorded.chat?.configuration?.topP).toBe(Math.fround(0.95));
+		const replayedAssistant = recorded.chat?.chatMessagePrompts[1];
+		expect(replayedAssistant?.messageId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+		expect(replayedAssistant?.messageId).not.toMatch(/^bot-/);
 		expect(result.upstreamModel).toBe("claude-sonnet-4-5");
 		expect(result.stopReason).toBe("stop");
 	});
