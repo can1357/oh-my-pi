@@ -1391,6 +1391,7 @@ export class TUI extends Container {
 				this.#parkedViewportOffset = 0;
 			}
 			this.#noteAltBufferToggle();
+			this.#imageBudget.beginAltScreenLifecycle();
 			this.terminal.write(`\x1b[?1049h${this.#keyboardEnhancementEnter()}`);
 		}
 		this.#resizeSettleTimer?.cancel();
@@ -1590,7 +1591,7 @@ export class TUI extends Container {
 		const provider = this.#frameProvider;
 		let rendered: readonly string[];
 		do {
-			this.#imageBudget.beginPass();
+			this.#imageBudget.beginPass(false, true);
 			rendered =
 				provider?.renderResizeFrame?.({ columns: width, rows: height }) ??
 				(provider ? provider.renderFrame({ columns: width, rows: height }).viewport : this.render(width));
@@ -1760,6 +1761,18 @@ export class TUI extends Container {
 		this.#paintEndSequence = enabled ? PAINT_END : PAINT_END_NO_SYNC;
 	}
 
+	/**
+	 * Retire every eligible history batch into native scrollback before quitting.
+	 *
+	 * The only frame path that deliberately does not composite overlays. Its
+	 * output is the transcript the shell prompt lands under, and it forces
+	 * commits that {@link #compositeOverlaysIntoWindow} otherwise relies on being
+	 * frozen while an overlay is up — so a modal painted here would leave debris
+	 * above the prompt and could reach native scrollback. `stop()` drops the
+	 * alternate buffer without unstacking the overlay, so leaving it in would also
+	 * charge a no-longer-painted modal's images against the cap and delete the
+	 * transcript's visible graphics on the way out.
+	 */
 	#flushHistoryBeforeStop(): void {
 		const provider = this.#frameProvider;
 		if (provider?.beginHistoryFlush === undefined) return;
@@ -1769,13 +1782,14 @@ export class TUI extends Container {
 		provider.beginHistoryFlush();
 		while (true) {
 			let plan: TerminalFramePlan;
+			let viewport: string[];
 			do {
 				this.#imageBudget.beginPass();
 				plan = provider.renderFrame({ columns: width, rows: height });
+				viewport = Array.from(plan.viewport);
+				if (viewport.length > height) viewport = viewport.slice(0, height);
 			} while (this.#imageBudget.endPass());
 			if (plan.history === undefined) return;
-			let viewport = Array.from(plan.viewport);
-			if (viewport.length > height) viewport = viewport.slice(0, height);
 			const acceptedBefore = this.#acceptedHistoryBatchId;
 			this.#emitPlanFrame(width, height, viewport, plan.history, provider);
 			if (plan.history.id > acceptedBefore && this.#acceptedHistoryBatchId === acceptedBefore) {
@@ -1957,7 +1971,6 @@ export class TUI extends Container {
 	#prepareForcedRender(clearScrollback: boolean): void {
 		if (clearScrollback && !this.#clearScrollbackOnNextRender) {
 			this.#frameProvider?.beginHistoryReplay?.();
-			if (TERMINAL.imageProtocol === ImageProtocol.Kitty) this.#imageBudget.forgetTransmitted();
 		}
 		this.#clearScrollbackOnNextRender ||= clearScrollback;
 		this.#forceViewportRepaintOnNextRender = true;
@@ -2294,6 +2307,19 @@ export class TUI extends Container {
 	 * frozen while an overlay is visible, so overlay pixels can never enter
 	 * native scrollback.
 	 */
+	/**
+	 * Composite the visible overlays onto a full-height copy of `viewport`, or
+	 * hand it back untouched when nothing is stacked. Callers run this inside
+	 * their image-budget pass so the frame's whole image set — transcript plus
+	 * modal — reaches one reconcile, instead of leaving the overlay's graphics
+	 * outside the cap for as long as it stays up.
+	 */
+	#compositeVisibleOverlays(viewport: string[], width: number, height: number): string[] {
+		if (this.#getTopmostVisibleOverlay() === undefined) return viewport;
+		while (viewport.length < height) viewport.push("");
+		return this.#compositeOverlaysIntoWindow(viewport, width, height);
+	}
+
 	#compositeOverlaysIntoWindow(window: string[], termWidth: number, termHeight: number): string[] {
 		const result = [...window];
 		for (const entry of this.overlayStack) {
@@ -2445,17 +2471,19 @@ export class TUI extends Container {
 		if (!provider || width <= 0 || height <= 0) return;
 		this.#debugNextWindowTop = 0;
 		let plan: TerminalFramePlan;
+		let viewport: string[];
 		do {
 			this.#imageBudget.beginPass();
 			plan = provider.renderFrame({ columns: width, rows: height });
+			viewport = Array.from(plan.viewport);
+			if (viewport.length > height) {
+				const message = `Frame provider returned ${viewport.length} rows for a ${height}-row viewport`;
+				if (Bun.env.NODE_ENV === "test" || Bun.env.NODE_ENV === "development") throw new Error(message);
+				logger.error("TUI layout contract violated", { rows: viewport.length, height });
+				viewport = viewport.slice(0, height);
+			}
+			viewport = this.#compositeVisibleOverlays(viewport, width, height);
 		} while (this.#imageBudget.endPass());
-		let viewport = Array.from(plan.viewport);
-		if (viewport.length > height) {
-			const message = `Frame provider returned ${viewport.length} rows for a ${height}-row viewport`;
-			if (Bun.env.NODE_ENV === "test" || Bun.env.NODE_ENV === "development") throw new Error(message);
-			logger.error("TUI layout contract violated", { rows: viewport.length, height });
-			viewport = viewport.slice(0, height);
-		}
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
 		this.#emitPlanFrame(width, height, viewport, plan.history, provider);
 	}
@@ -2557,11 +2585,12 @@ export class TUI extends Container {
 		offered: HistoryBatch | undefined,
 		provider: TerminalFrameProvider | undefined,
 	): void {
+		// Callers composite their overlays inside the budget pass, so `viewportRows`
+		// is already the complete frame. Bound the store here rather than at
+		// endPass(): this is the last point before the purge and transmit bytes go
+		// out, and it runs once per emitted frame instead of once per retry.
 		let viewport = viewportRows;
-		if (this.#getTopmostVisibleOverlay() !== undefined) {
-			while (viewport.length < height) viewport.push("");
-			viewport = this.#compositeOverlaysIntoWindow(viewport, width, height);
-		}
+		this.#imageBudget.limitResidentImages();
 		const history = offered !== undefined && offered.id > this.#acceptedHistoryBatchId ? offered : undefined;
 		if (offered !== undefined && offered.id <= this.#acceptedHistoryBatchId) provider?.acknowledgeHistory(offered.id);
 
@@ -2608,14 +2637,19 @@ export class TUI extends Container {
 			// explicitly destructive, so remove every placement—not only the ones
 			// this TUI tracked—then resend images composed for the clean replay.
 			buffer += encodeKittyDeleteAllImages();
+			// `d=A` spares virtual placements, and erasing the placeholder text it
+			// leaves behind does not remove the prototype either. The ids this
+			// reset forgot are named explicitly here — their tracking is gone, so
+			// nothing downstream could find them again.
+			for (const id of this.#imageBudget.takeResetPurgeIds()) buffer += encodeKittyDeleteImage(id);
 			this.#imageBudget.resetPlacementEpochs();
 		}
-		for (const sequence of this.#imageBudget.takeTransmits()) buffer += sequence;
 		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
 			for (const id of this.#imageBudget.takePurgeIds()) buffer += encodeKittyDeleteImage(id);
 		} else {
 			this.#imageBudget.takePurgeIds();
 		}
+		for (const sequence of this.#imageBudget.takeTransmits()) buffer += sequence;
 		// ED2 MUST precede ED3: tmux implements ED2 by scrolling the live screen
 		// into pane history (so cleared content stays reachable), so erasing
 		// history first would let ED2 refill it with a copy of the old screen —
@@ -2773,6 +2807,7 @@ export class TUI extends Container {
 			// fullscreen overlays (Ghostty/kitty/iTerm2).
 			this.#noteAltBufferToggle();
 			const mouseEnter = wantMouseTracking ? MOUSE_TRACKING_ON : "";
+			this.#imageBudget.beginAltScreenLifecycle();
 			this.terminal.write(`\x1b[?1049h${this.#keyboardEnhancementEnter()}${mouseEnter}`);
 			setAltScreenActive(true);
 			this.terminal.hideCursor();
@@ -2821,12 +2856,35 @@ export class TUI extends Container {
 			this.#renderAltFrame(width, height);
 			return;
 		}
+		// #prepareResizeReplay can latch this frame's reset itself (a settled
+		// rebuild-mode resize does), so it runs before the gate; the gate then runs
+		// before either arm composes anything.
+		if (this.#frameProvider !== undefined) this.#prepareResizeReplay(width, height);
+		this.#forgetTransmittedForPendingReset();
 		if (this.#frameProvider !== undefined) {
-			this.#prepareResizeReplay(width, height);
 			this.#renderProviderFrame(width, height);
 			return;
 		}
 		this.#renderChildrenFrame(width, height);
+	}
+
+	/**
+	 * Drop transmit tracking when a destructive repaint is about to compose the
+	 * normal screen, so the pass re-sends every image's data alongside its
+	 * placement. That repaint opens with `d=A`, which is what removes the store —
+	 * queueing per-id deletes when the reset was merely *latched* lets them ride
+	 * out on an unrelated frame instead, and a frame painted on the alternate
+	 * buffer carries them off without the repaint that restores them. A latch that
+	 * never reaches a repaint — `stop()` drops it — then deletes nothing.
+	 *
+	 * Must run after everything that can latch the reset for this frame and before
+	 * anything composes it — one call on the normal-screen dispatch path, ahead of
+	 * the arm split, so a new arm cannot be added without it.
+	 */
+	#forgetTransmittedForPendingReset(): void {
+		if (!this.#clearScrollbackOnNextRender) return;
+		if (TERMINAL.imageProtocol !== ImageProtocol.Kitty) return;
+		this.#imageBudget.forgetTransmitted();
 	}
 
 	/**
@@ -2835,14 +2893,15 @@ export class TUI extends Container {
 	 * mutable viewport. Nothing is ever appended to terminal history.
 	 */
 	#renderChildrenFrame(width: number, height: number): void {
-		let composed: readonly string[];
+		let viewport: string[];
 		do {
 			this.#imageBudget.beginPass();
-			composed = this.render(width);
+			const composed = this.render(width);
+			this.#debugNextWindowTop = Math.max(0, composed.length - height);
+			viewport = composed.length > height ? composed.slice(composed.length - height) : Array.from(composed);
+			viewport = this.#compositeVisibleOverlays(viewport, width, height);
 		} while (this.#imageBudget.endPass());
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
-		this.#debugNextWindowTop = Math.max(0, composed.length - height);
-		const viewport = composed.length > height ? composed.slice(composed.length - height) : Array.from(composed);
 		this.#emitPlanFrame(width, height, viewport, undefined, undefined);
 	}
 
@@ -3139,7 +3198,11 @@ export class TUI extends Container {
 	#renderAltFrame(width: number, height: number): void {
 		// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation
 		const base: string[] = new Array(Math.max(0, height)).fill("");
-		let lines = this.#compositeOverlaysIntoWindow(base, width, height);
+		let lines: string[];
+		do {
+			this.#imageBudget.beginPass(false, true);
+			lines = this.#compositeOverlaysIntoWindow(base, width, height);
+		} while (this.#imageBudget.endPass());
 		this.#extractCursorMarkers(lines);
 		lines = this.#prepareLinesArray(lines, width);
 		this.#emitAltFrame(lines, width, height);
@@ -3154,12 +3217,19 @@ export class TUI extends Container {
 		// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation
 		const fitted: string[] = new Array(height);
 		for (let r = 0; r < height; r++) fitted[r] = lines[r] ?? "";
+		// The pass that composed this frame ran with `altScreen`, so the normal
+		// screen's own placements behind it are not treated as retired.
+		this.#imageBudget.limitResidentImages();
 		// Flush queued image-data transmits (`a=t`, no visible output) before the
 		// paint so id-keyed placements and placeholder cells composed into this
 		// frame resolve against loaded data. The normal-screen path flushes these
 		// ahead of its paint; without this, an image first shown inside a
 		// fullscreen overlay (e.g. the settings shape preview) would render as
 		// blank placeholder cells until the overlay closed.
+		const purgeIds = this.#imageBudget.takePurgeIds();
+		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
+			for (const id of purgeIds) this.terminal.write(encodeKittyDeleteImage(id));
+		}
 		const imageTransmits = this.#imageBudget.takeTransmits();
 		if (imageTransmits.length > 0) {
 			let transmitBuffer = "";
