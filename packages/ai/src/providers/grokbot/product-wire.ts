@@ -163,7 +163,9 @@ type Tool = NonNullable<Context["tools"]>[number];
 /**
  * When advertising a property alias (e.g. `contents` for `content`), keep the
  * rest of `required` and express the alias pair as `anyOf` so strict schema
- * consumers accept either key.
+ * consumers accept either key. If the schema already carries an `anyOf` (e.g.
+ * alternative required argument groups), AND that union with the alias pair via
+ * `allOf` instead of replacing it.
  */
 function withRequiredPropertyAlias(
 	schema: Record<string, unknown>,
@@ -174,10 +176,22 @@ function withRequiredPropertyAlias(
 		? (schema.required as unknown[]).filter((key): key is string => typeof key === "string")
 		: [];
 	if (!required.includes(canonical)) return schema;
-	return {
-		...schema,
-		required: required.filter(key => key !== canonical),
+	const aliasConstraint = {
 		anyOf: [{ required: [canonical] }, { required: [alias] }],
+	};
+	const { anyOf: existingAnyOf, ...rest } = schema;
+	const remainingRequired = required.filter(key => key !== canonical);
+	if (Array.isArray(existingAnyOf) && existingAnyOf.length > 0) {
+		return {
+			...rest,
+			required: remainingRequired,
+			allOf: [{ anyOf: existingAnyOf }, aliasConstraint],
+		};
+	}
+	return {
+		...rest,
+		required: remainingRequired,
+		...aliasConstraint,
 	};
 }
 

@@ -9,6 +9,7 @@ import {
 	evaluateToolFollowupText,
 	idSafe,
 	matchesToolSmokeCall,
+	matrixOmpThinkingArgs,
 	matrixProbeEffort,
 	matrixRowFlag,
 	ompToolsExecutionEvidence,
@@ -207,6 +208,27 @@ describe("matrixProbeEffort", () => {
 			),
 		).toBe("adaptive");
 		expect(matrixProbeEffort(probeModel({ id: "no-effort" }))).toBeUndefined();
+	});
+
+	test("matrixOmpThinkingArgs mirrors probe effort or omits --thinking when unknown", () => {
+		expect(
+			matrixOmpThinkingArgs(
+				probeModel({
+					id: "max-only",
+					reasoning: true,
+					thinking: { efforts: [Effort.Max] },
+				}),
+			),
+		).toEqual(["--thinking", Effort.Max]);
+		expect(
+			matrixOmpThinkingArgs(
+				probeModel({
+					id: "adaptive-default",
+					sandParameterDefaults: { effort: "adaptive" },
+				}),
+			),
+		).toEqual(["--thinking", "adaptive"]);
+		expect(matrixOmpThinkingArgs(probeModel({ id: "no-effort" }))).toEqual([]);
 	});
 });
 

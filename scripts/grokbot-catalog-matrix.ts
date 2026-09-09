@@ -36,6 +36,7 @@ import {
 	idSafe,
 	evaluateToolFollowupText,
 	matchesToolSmokeCall,
+	matrixOmpThinkingArgs,
 	matrixProbeEffort,
 	matrixRowFlag,
 	ompToolsExecutionEvidence,
@@ -378,8 +379,8 @@ function ompCommand(args: string[]): string[] {
 	return ["bun", path.join(ROOT, "packages/coding-agent/src/cli.ts"), ...args];
 }
 
-function runOmp(model: string, { tools }: { tools: boolean }): { pass: boolean; status: number; out: string } {
-	const token = tools ? `omp-echo-${idSafe(model)}` : TEXT_TOKEN;
+function runOmp(model: Model<Api>, { tools }: { tools: boolean }): { pass: boolean; status: number; out: string } {
+	const token = tools ? `omp-echo-${idSafe(model.id)}` : TEXT_TOKEN;
 	const promptText = tools
 		? prompt.render(ompToolsUserPrompt, { token }).trim()
 		: prompt.render(ompTextUserPrompt, { token: TEXT_TOKEN }).trim();
@@ -393,9 +394,8 @@ function runOmp(model: string, { tools }: { tools: boolean }): { pass: boolean; 
 		"--no-rules",
 		...(tools ? ["--auto-approve"] : ["--no-tools"]),
 		"--model",
-		`grokbot/${model}`,
-		"--thinking",
-		"low",
+		`grokbot/${model.id}`,
+		...matrixOmpThinkingArgs(model),
 		promptText,
 	];
 	const r = Bun.spawnSync(ompCommand(args), {
@@ -539,18 +539,20 @@ async function main() {
 		console.log("=== OMP -p SLICE ===");
 		const ompIds = selected.slice(0, Math.min(selected.length, 12));
 		for (const id of ompIds) {
+			const spec = byId.get(id);
+			if (!spec) continue;
+			const model = buildModel(spec);
 			if (args.mode !== "tools") {
-				const r = runOmp(id, { tools: false });
+				const r = runOmp(model, { tools: false });
 				console.log(`${r.pass ? "PASS" : "FAIL"}  omp-text   ${id}  exit=${r.status}`);
 				if (!r.pass) {
 					ompFails.push(`omp-text:${id}`);
 					console.log(r.out);
 				}
 			}
-			const spec = byId.get(id);
-			const skip = spec ? grokbotToolsSkipReason(buildModel(spec)) : undefined;
+			const skip = grokbotToolsSkipReason(model);
 			if (args.mode !== "text" && !skip) {
-				const r = runOmp(id, { tools: true });
+				const r = runOmp(model, { tools: true });
 				console.log(`${r.pass ? "PASS" : "FAIL"}  omp-tools  ${id}  exit=${r.status}`);
 				if (!r.pass) {
 					ompFails.push(`omp-tools:${id}`);

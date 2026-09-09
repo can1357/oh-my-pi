@@ -31,6 +31,12 @@ export function matrixProbeEffort(model: Model<Api>): Effort | string | undefine
 	return fromDefaults || undefined;
 }
 
+/** CLI `--thinking` args for the omp `-p` slice; omit when no supported tier is known. */
+export function matrixOmpThinkingArgs(model: Model<Api>): string[] {
+	const effort = matrixProbeEffort(model);
+	return effort !== undefined ? ["--thinking", String(effort)] : [];
+}
+
 export type MatrixArgs = {
 	mode: Mode;
 	slice: Slice;

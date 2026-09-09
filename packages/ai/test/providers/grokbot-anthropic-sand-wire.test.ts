@@ -355,6 +355,45 @@ describe("product wire helpers", () => {
 		expect(schema?.anyOf).toEqual([{ required: ["content"] }, { required: ["contents"] }]);
 	});
 
+	test("Read alias preserves preexisting anyOf required groups via allOf", () => {
+		const tools = toProductField2Tools(
+			[
+				{
+					name: "read",
+					description: "read file",
+					parameters: {
+						type: "object",
+						properties: {
+							path: { type: "string" },
+							offset: { type: "number" },
+							start_line: { type: "number" },
+						},
+						required: ["path"],
+						anyOf: [{ required: ["offset"] }, { required: ["start_line"] }],
+					},
+				},
+			],
+			"automation",
+		);
+		const schema = (
+			tools[0]?.parameters as {
+				jsonSchema?: {
+					properties?: Record<string, unknown>;
+					required?: string[];
+					anyOf?: unknown;
+					allOf?: Array<{ anyOf?: Array<{ required?: string[] }> }>;
+				};
+			}
+		).jsonSchema;
+		expect(schema?.properties).toHaveProperty("target_file");
+		expect(schema?.required ?? []).not.toContain("path");
+		expect(schema?.anyOf).toBeUndefined();
+		expect(schema?.allOf).toEqual([
+			{ anyOf: [{ required: ["offset"] }, { required: ["start_line"] }] },
+			{ anyOf: [{ required: ["path"] }, { required: ["target_file"] }] },
+		]);
+	});
+
 	test("parent profile injects SendToUser", () => {
 		const tools = toProductField2Tools([], "parent-chat");
 		expect(tools[0]?.name).toBe("SendToUser");
