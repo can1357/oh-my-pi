@@ -277,19 +277,24 @@ export class LspMuxServer {
 		this.#sessions.add(session);
 		this.#disarmMuxIdle();
 		socket.on("data", chunk => {
-			session.framer.push(Buffer.from(chunk));
-			for (const text of session.framer.drain(header => {
-				logger.warn("LSP mux client framing resync", { header: header.slice(0, 200) });
-			})) {
-				try {
-					const parsed: unknown = JSON.parse(text);
-					if (!isRecord(parsed) || parsed.jsonrpc !== "2.0") throw new Error("invalid JSON-RPC message");
-					void this.#fromSession(session, parsed as unknown as RpcMessage).catch(error => {
-						logger.warn("LSP mux client message handling failed", { error: String(error) });
-					});
-				} catch (error) {
-					logger.warn("LSP mux client sent malformed JSON", { error: String(error) });
+			try {
+				session.framer.push(Buffer.from(chunk));
+				for (const text of session.framer.drain(header => {
+					logger.warn("LSP mux client framing resync", { header: header.slice(0, 200) });
+				})) {
+					try {
+						const parsed: unknown = JSON.parse(text);
+						if (!isRecord(parsed) || parsed.jsonrpc !== "2.0") throw new Error("invalid JSON-RPC message");
+						void this.#fromSession(session, parsed as unknown as RpcMessage).catch(error => {
+							logger.warn("LSP mux client message handling failed", { error: String(error) });
+						});
+					} catch (error) {
+						logger.warn("LSP mux client sent malformed JSON", { error: String(error) });
+					}
 				}
+			} catch (error) {
+				logger.warn("LSP mux client framing failed", { error: String(error) });
+				socket.destroy();
 			}
 		});
 		socket.on("error", error => logger.warn("LSP mux session socket error", { error: error.message }));
@@ -472,6 +477,7 @@ export class LspMuxServer {
 			}
 		} catch (error) {
 			logger.warn("LSP mux server reader failed", { server: server.key, error: String(error) });
+			this.#killServer(server);
 		} finally {
 			reader.releaseLock();
 		}

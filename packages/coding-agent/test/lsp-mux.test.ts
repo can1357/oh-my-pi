@@ -90,6 +90,10 @@ class MuxTestClient {
 		this.#write({ jsonrpc: "2.0", method, params });
 	}
 
+	sendRaw(bytes: Buffer): void {
+		this.#socket.write(bytes);
+	}
+
 	async nextNotification<T>(method: string): Promise<T> {
 		const queued = this.#notifications.get(method);
 		const message = queued?.shift();
@@ -211,6 +215,33 @@ describe("LspMuxServer", () => {
 		const connected = await client.request<MuxConnectResult>(MUX_CONNECT_METHOD, connectParams);
 		return { client, connected };
 	}
+
+	it.skipIf(process.platform === "win32")(
+		"disconnects a malformed link without terminating other sessions",
+		async () => {
+			const healthy = await link();
+			await initialize(healthy.client);
+			const malformed = await MuxTestClient.connect(socketPath);
+			clients.push(malformed);
+			const closed = malformed.waitForClose();
+			malformed.sendRaw(Buffer.alloc(16 * 1024, 97));
+			await closed;
+			expect(await healthy.client.request<{ alive: boolean }>("test/echo", { alive: true })).toEqual({
+				alive: true,
+			});
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"terminates a language server that declares an oversized response",
+		async () => {
+			connectParams.args = ["run", path.join(import.meta.dir, "fixtures", "malformed-jsonrpc-peer.ts")];
+			const { client } = await link();
+			await expect(withTimeout(initialize(client), "invalid server frame")).rejects.toThrow("Mux socket closed");
+			await pollUntil(() => Promise.resolve(server.serverKeys.length === 0), "malformed server exit");
+			expect(server.sessionCount).toBe(0);
+		},
+	);
 
 	it.skipIf(process.platform === "win32")(
 		"spawns one server per concurrent link",
