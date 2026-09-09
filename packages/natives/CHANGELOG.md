@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Process.killTreeAndWait()` and `Process.killOwnGroupAndWait()` to await hard termination of descendants, including after the root exits. `killOwnGroupAndWait()` rejects when the leader's pid has since been reused, so a recycled group is never signalled.
+
 ## [18.1.15] - 2026-09-08
 
 ### Fixed

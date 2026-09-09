@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Process } from "@oh-my-pi/pi-natives";
 import { MessageFramer } from "../src/jsonrpc/message-framing";
 import {
 	MUX_CONNECT_METHOD,
@@ -12,6 +13,7 @@ import {
 	type MuxConnectResult,
 } from "../src/lsp/mux/protocol";
 import { LspMuxServer } from "../src/lsp/mux/server";
+import { ChildProcess } from "@oh-my-pi/pi-utils/ptree";
 
 interface RpcMessage {
 	jsonrpc: "2.0";
@@ -175,8 +177,8 @@ async function state(client: MuxTestClient): Promise<FakeState> {
 	return client.request<FakeState>("test/state");
 }
 
-async function pollUntil(check: () => Promise<boolean>, description: string): Promise<void> {
-	const deadline = Date.now() + 5_000;
+async function pollUntil(check: () => Promise<boolean>, description: string, timeoutMs = 5_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
 		if (await check()) return;
 		await Bun.sleep(25);
@@ -211,6 +213,252 @@ describe("LspMuxServer", () => {
 		const connected = await client.request<MuxConnectResult>(MUX_CONNECT_METHOD, connectParams);
 		return { client, connected };
 	}
+
+	it.skipIf(process.platform === "win32")("lets healthy language servers finish the shutdown handshake", async () => {
+		const shutdownFile = path.join(tmpDir, "shutdown.json");
+		connectParams.env = { TEST_LSP_SHUTDOWN_FILE: shutdownFile };
+		const { client } = await link();
+		await initialize(client);
+		await server.shutdown();
+		expect(await Bun.file(shutdownFile).json()).toEqual({ shutdownReceived: true, exitReceived: true });
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"terminates a helper the language server leaves behind",
+		async () => {
+			// The server honours `exit`, so the mux waits for its root to be gone
+			// before terminating; the helper is only reachable through references
+			// pinned while the root was still alive.
+			const helperFile = path.join(tmpDir, "helper.pid");
+			connectParams.env = { TEST_LSP_HELPER_PID_FILE: helperFile };
+			const { client } = await link();
+			await initialize(client);
+			let helperPid = 0;
+			await pollUntil(async () => {
+				helperPid =
+					Number.parseInt(
+						(
+							await Bun.file(helperFile)
+								.text()
+								.catch(() => "")
+						).trim(),
+						10,
+					) || 0;
+				return helperPid > 0;
+			}, "helper pid");
+			const helperAlive = () => {
+				try {
+					process.kill(helperPid, 0);
+					return true;
+				} catch (error) {
+					return (error as NodeJS.ErrnoException).code !== "ESRCH";
+				}
+			};
+			try {
+				expect(helperAlive()).toBe(true);
+				await server.shutdown();
+				expect(server.serverKeys).toEqual([]);
+				await pollUntil(() => Promise.resolve(!helperAlive()), "helper termination", 6_000);
+			} finally {
+				try {
+					process.kill(helperPid, "SIGKILL");
+				} catch {}
+			}
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")("bounds shutdown when a language server ignores exit", async () => {
+		connectParams.env = { TEST_LSP_IGNORE_EXIT: "1" };
+		const { client } = await link();
+		await initialize(client);
+		await withTimeout(server.shutdown(), "server ignoring exit", 4_000);
+		expect(server.serverKeys).toEqual([]);
+		expect(server.sessionCount).toBe(0);
+	});
+
+	for (const expire of [false, true]) {
+		it.skipIf(process.platform === "win32")(
+			expire
+				? "reports incomplete shutdown and retains tracking until native termination finishes"
+				: "waits for native tree termination after the language-server root exits",
+			async () => {
+				connectParams.env = { TEST_LSP_IGNORE_EXIT: "1" };
+				const { client, connected } = await link();
+				await initialize(client);
+				const entered = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				const terminate = Process.prototype.terminate;
+				const spy = spyOn(Process.prototype, "terminate").mockImplementation(
+					async function (this: Process, options) {
+						const result = await terminate.call(this, options);
+						if (this.pid === connected.pid) {
+							entered.resolve();
+							await release.promise;
+						}
+						return result;
+					},
+				);
+				const shutdown = server.shutdown();
+				void shutdown.catch(() => {});
+				try {
+					expect(
+						await withTimeout(
+							Promise.race([entered.promise.then(() => "terminating"), shutdown.then(() => "completed")]),
+							"native termination",
+						),
+					).toBe("terminating");
+					if (expire) {
+						await expect(shutdown).rejects.toThrow("LSP mux shutdown incomplete");
+						expect(server.serverKeys).toEqual([connected.key]);
+					} else {
+						const outcome = await Promise.race([
+							shutdown.then(() => "completed"),
+							Bun.sleep(25).then(() => "pending"),
+						]);
+						expect(outcome).toBe("pending");
+						expect(server.serverKeys).toEqual([connected.key]);
+					}
+				} finally {
+					release.resolve();
+					spy.mockRestore();
+					await shutdown.catch(() => {});
+					await pollUntil(() => Promise.resolve(server.serverKeys.length === 0), "termination cleanup");
+					if (expire) {
+						server = new LspMuxServer();
+					}
+				}
+			},
+			6_000,
+		);
+	}
+
+	it.skipIf(process.platform === "win32")(
+		"retires a server that exits after its termination failed",
+		async () => {
+			const { client, connected } = await link();
+			const pid = connected.pid;
+			if (pid === undefined) throw new Error("Mux did not report the language-server pid");
+			await initialize(client);
+			const rejected = Promise.withResolvers<void>();
+			// Fail termination without touching the process, so the failure lands
+			// while the server is still alive and only its later exit can clean up.
+			const spy = spyOn(ChildProcess.prototype, "killAndWait").mockImplementation(
+				async function (this: ChildProcess) {
+					if (this.pid !== pid) return;
+					rejected.resolve();
+					throw new Error(`Process tree termination timed out: ${pid}`);
+				},
+			);
+			try {
+				client.notify(MUX_RESTART_METHOD);
+				await withTimeout(rejected.promise, "failed termination", 4_000);
+				expect(server.serverKeys).toEqual([connected.key]);
+				expect(server.sessionCount).toBe(1);
+				process.kill(pid, "SIGKILL");
+				await pollUntil(() => Promise.resolve(server.serverKeys.length === 0), "late-exit cleanup", 4_000);
+				await pollUntil(() => Promise.resolve(server.sessionCount === 0), "session close", 4_000);
+			} finally {
+				spy.mockRestore();
+				try {
+					process.kill(pid, "SIGKILL");
+				} catch {}
+			}
+		},
+		10_000,
+	);
+
+	for (const disconnectFirst of [false, true]) {
+		it.skipIf(process.platform === "win32")(
+			disconnectFirst
+				? "terminates a nonreading server when disconnected-session cleanup stalls"
+				: "bounds mux shutdown when a language server stops reading stdin",
+			async () => {
+				const { client, connected } = await link();
+				const pid = connected.pid;
+				if (pid === undefined) throw new Error("Mux did not report the language-server pid");
+				try {
+					await initialize(client);
+					client.notify("textDocument/didOpen", {
+						textDocument: { uri: "file:///blocked.ts", version: 1, text: "x" },
+					});
+					await client.request("test/stopReading");
+					// Bun 1.3.14 keeps reading stdin while the JavaScript consumer is paused.
+					process.kill(pid, "SIGSTOP");
+					client.notify("test/fillPipe", { text: "x".repeat(8 * 1024 * 1024) });
+					await client.request(MUX_PING_METHOD);
+					if (disconnectFirst) {
+						client.destroy();
+						await pollUntil(
+							() => Promise.resolve(server.serverKeys.length === 0),
+							"disconnected-session cleanup",
+							4_000,
+						);
+					} else {
+						await withTimeout(server.shutdown(), "blocked mux shutdown", 4_000);
+					}
+					expect(server.sessionCount).toBe(0);
+					expect(server.serverKeys).toEqual([]);
+					await pollUntil(() => {
+						try {
+							process.kill(pid, 0);
+							return Promise.resolve(false);
+						} catch (error) {
+							return Promise.resolve((error as NodeJS.ErrnoException).code === "ESRCH");
+						}
+					}, "blocked process exit");
+				} finally {
+					try {
+						process.kill(pid, "SIGKILL");
+					} catch {}
+				}
+			},
+			10_000,
+		);
+	}
+
+	it.skipIf(process.platform === "win32")(
+		"becomes idle after disconnected-server termination times out",
+		async () => {
+			const { client, connected } = await link();
+			const pid = connected.pid;
+			if (pid === undefined) throw new Error("Mux did not report the language-server pid");
+			await initialize(client);
+			await client.request("test/stopReading");
+			process.kill(pid, "SIGSTOP");
+			client.notify("test/fillPipe", { text: "x".repeat(8 * 1024 * 1024) });
+			await client.request(MUX_PING_METHOD);
+			const release = Promise.withResolvers<void>();
+			const idle = Promise.withResolvers<void>();
+			server.onIdle = idle.resolve;
+			const terminate = Process.prototype.terminate;
+			const terminationSpy = spyOn(Process.prototype, "terminate").mockImplementation(
+				async function (this: Process, options) {
+					const result = await terminate.call(this, options);
+					if (this.pid === pid) await release.promise;
+					return result;
+				},
+			);
+			const schedule = globalThis.setTimeout;
+			const timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((
+				handler: () => void,
+				delay?: number,
+				...args: unknown[]
+			) => schedule(handler, delay === 15 * 60 * 1_000 ? 1 : delay, ...args)) as typeof setTimeout);
+			try {
+				client.destroy();
+				await withTimeout(idle.promise, "mux idle after termination timeout", 4_000);
+				expect(server.sessionCount).toBe(0);
+				expect(server.serverKeys).toEqual([connected.key]);
+			} finally {
+				release.resolve();
+				terminationSpy.mockRestore();
+				timerSpy.mockRestore();
+				await pollUntil(() => Promise.resolve(server.serverKeys.length === 0), "termination cleanup");
+			}
+		},
+		6_000,
+	);
 
 	it.skipIf(process.platform === "win32")(
 		"spawns one server per concurrent link",

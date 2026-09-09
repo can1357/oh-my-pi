@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
-import { isRecord, logger, postmortem, ptree, setProcessName } from "@oh-my-pi/pi-utils";
+import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
+import { isRecord, logger, postmortem, ptree, setProcessName, withTimeout } from "@oh-my-pi/pi-utils";
 import { MessageFramer } from "../../jsonrpc/message-framing";
 import type { LspJsonRpcId, LspJsonRpcNotification, LspJsonRpcRequest, LspJsonRpcResponse } from "../types";
 import {
@@ -19,6 +20,7 @@ import {
 const SERVER_LINGER_MS = 5 * 60 * 1_000;
 const MUX_IDLE_MS = 15 * 60 * 1_000;
 const SHUTDOWN_BUDGET_MS = 2_000;
+const TERMINATION_BUDGET_MS = 1_000;
 
 type RpcMessage = LspJsonRpcRequest | LspJsonRpcResponse | LspJsonRpcNotification;
 
@@ -97,6 +99,13 @@ class ServerInstance {
 	nextClientId = 1;
 	lingerTimer?: NodeJS.Timeout;
 	stopping = false;
+	stopPromise?: Promise<void>;
+	terminationPromise?: Promise<void>;
+	// True only while a termination attempt is still running and can therefore
+	// retire the server itself. `terminationPromise` is not a substitute: its
+	// deadline can expire while the attempt underneath is still going, and the
+	// attempt can fail outright and retire nothing.
+	terminating = false;
 
 	constructor(key: string, params: MuxConnectParams) {
 		this.key = key;
@@ -225,7 +234,7 @@ export class LspMuxServer {
 		this.#shuttingDown = true;
 		clearTimeout(this.#idleTimer);
 		for (const session of Array.from(this.#sessions)) session.socket.destroy();
-		await Promise.all([...this.#servers].map(server => this.#stopServer(server)));
+		const results = await Promise.allSettled([...this.#servers].map(server => this.#stopServer(server)));
 		const listener = this.#netServer;
 		this.#netServer = undefined;
 		if (listener) {
@@ -240,6 +249,12 @@ export class LspMuxServer {
 				// The socket may already have been removed by process cleanup.
 			}
 		}
+		const failures = results.filter(result => result.status === "rejected");
+		if (failures.length > 0)
+			throw new AggregateError(
+				failures.map(result => result.reason),
+				"LSP mux shutdown incomplete",
+			);
 	}
 
 	async #clearStaleSocket(endpoint: string): Promise<void> {
@@ -293,7 +308,11 @@ export class LspMuxServer {
 			}
 		});
 		socket.on("error", error => logger.warn("LSP mux session socket error", { error: error.message }));
-		socket.on("close", () => void this.#closeSession(session));
+		socket.on("close", () => {
+			void this.#closeSession(session).catch(error => {
+				logger.warn("LSP mux session close failed", { error: String(error) });
+			});
+		});
 	}
 
 	async #fromSession(session: Session, message: RpcMessage): Promise<void> {
@@ -321,7 +340,7 @@ export class LspMuxServer {
 			}
 			const key = muxServerKey(params);
 			let server = [...this.#servers].find(candidate => candidate.key === key && candidate.sessions.size === 0);
-			if (server && server.proc.exitCode !== null) {
+			if (server && server.proc.exitCode !== null && !server.terminating) {
 				this.#serverExited(server);
 				server = undefined;
 			}
@@ -345,7 +364,7 @@ export class LspMuxServer {
 			return;
 		}
 		if (message.method === MUX_RESTART_METHOD && !request) {
-			this.#killServer(server);
+			await this.#killServer(server);
 			return;
 		}
 		if (message.method === "initialize" && request) {
@@ -444,8 +463,8 @@ export class LspMuxServer {
 		this.#servers.add(server);
 		void this.#readServer(server);
 		server.proc.exited.then(
-			() => this.#serverExited(server),
-			() => this.#serverExited(server),
+			() => this.#serverExitedUnlessTerminating(server),
+			() => this.#serverExitedUnlessTerminating(server),
 		);
 		return server;
 	}
@@ -479,7 +498,7 @@ export class LspMuxServer {
 
 	async #fromServer(server: ServerInstance, message: RpcMessage): Promise<void> {
 		if (!hasMethod(message)) {
-			this.#handleServerResponse(server, message);
+			await this.#handleServerResponse(server, message);
 			return;
 		}
 		if (hasRequestId(message)) {
@@ -503,7 +522,7 @@ export class LspMuxServer {
 		for (const session of server.sessions) if (session.initialized) this.#sendSession(session, message);
 	}
 
-	#handleServerResponse(server: ServerInstance, message: LspJsonRpcResponse): void {
+	async #handleServerResponse(server: ServerInstance, message: LspJsonRpcResponse): Promise<void> {
 		if (message.id === undefined) return;
 		const pending = server.pending.get(message.id);
 		if (!pending) return;
@@ -517,7 +536,7 @@ export class LspMuxServer {
 			if (message.error) {
 				for (const [session, id] of server.initializeWaiters) this.#sendSession(session, { ...message, id });
 				server.initializeWaiters.clear();
-				this.#killServer(server);
+				await this.#killServer(server);
 				return;
 			}
 			server.initializeResult = message.result;
@@ -626,6 +645,7 @@ export class LspMuxServer {
 		const write = server.writeQueue
 			.catch(() => {})
 			.then(async () => {
+				if (!this.#servers.has(server)) return;
 				const data = frame(message);
 				const pendingWrite = Promise.resolve(server.proc.stdin.write(data));
 				void pendingWrite.catch(() => {});
@@ -642,31 +662,72 @@ export class LspMuxServer {
 		session.closed = true;
 		this.#sessions.delete(session);
 		const server = session.server;
-		if (server) {
-			let cleanup: Promise<void> | undefined;
-			for (const uri of session.openUris) {
-				server.documents.delete(uri);
-				cleanup = this.#writeServer(server, {
-					jsonrpc: "2.0",
-					method: "textDocument/didClose",
-					params: { textDocument: { uri } },
-				});
+		try {
+			if (server) {
+				const cleanup: Promise<void>[] = [];
+				for (const uri of session.openUris) {
+					server.documents.delete(uri);
+					if (server.stopping) continue;
+					cleanup.push(
+						this.#writeServer(server, {
+							jsonrpc: "2.0",
+							method: "textDocument/didClose",
+							params: { textDocument: { uri } },
+						}),
+					);
+				}
+				for (const [muxId, pending] of server.pending) {
+					if (pending.session !== session) continue;
+					pending.drop = true;
+					if (server.stopping) continue;
+					cleanup.push(
+						this.#writeServer(server, { jsonrpc: "2.0", method: "$/cancelRequest", params: { id: muxId } }),
+					);
+				}
+				try {
+					if (!server.stopping) {
+						await withTimeout(
+							Promise.all([...cleanup, server.writeQueue]),
+							SHUTDOWN_BUDGET_MS,
+							"LSP mux session cleanup timed out",
+						);
+					}
+				} catch (error) {
+					logger.warn("LSP mux session cleanup failed", { server: server.key, error: String(error) });
+					await this.#killServer(server);
+				} finally {
+					server.initializeWaiters.delete(session);
+					server.sessions.delete(session);
+					if (server.sessions.size === 0 && !server.stopping) {
+						server.lingerTimer = setTimeout(() => {
+							if (server.sessions.size === 0)
+								void this.#stopServer(server).catch(error => {
+									logger.warn("LSP mux idle server shutdown failed", {
+										server: server.key,
+										error: String(error),
+									});
+								});
+						}, SERVER_LINGER_MS);
+					}
+				}
 			}
-			await cleanup;
-			for (const [muxId, pending] of server.pending) {
-				if (pending.session !== session) continue;
-				pending.drop = true;
-				await this.#writeServer(server, { jsonrpc: "2.0", method: "$/cancelRequest", params: { id: muxId } });
-			}
-			server.initializeWaiters.delete(session);
-			server.sessions.delete(session);
-			if (server.sessions.size === 0 && !server.stopping) {
-				server.lingerTimer = setTimeout(() => {
-					if (server.sessions.size === 0) void this.#stopServer(server);
-				}, SERVER_LINGER_MS);
-			}
+		} finally {
+			if (this.#sessions.size === 0) this.#armMuxIdle();
 		}
-		if (this.#sessions.size === 0) this.#armMuxIdle();
+	}
+
+	/**
+	 * Retire a server whose OS process is gone, unless a termination attempt is
+	 * still running and will retire it itself.
+	 *
+	 * Deferring to a *settled* termination is what strands the server: a failed
+	 * attempt retires nothing, so ignoring the later exit would leave the server
+	 * in `#servers` with its sessions attached and every subsequent shutdown
+	 * replaying the same rejection.
+	 */
+	#serverExitedUnlessTerminating(server: ServerInstance): void {
+		if (server.terminating) return;
+		this.#serverExited(server);
 	}
 
 	#serverExited(server: ServerInstance): void {
@@ -674,41 +735,93 @@ export class LspMuxServer {
 		this.#servers.delete(server);
 		if (server.lingerTimer) clearTimeout(server.lingerTimer);
 		server.pending.clear();
+		server.initializeWaiters.clear();
 		for (const session of Array.from(server.sessions)) session.socket.destroy();
 		server.sessions.clear();
 	}
 
-	async #stopServer(server: ServerInstance): Promise<void> {
+	#stopServer(server: ServerInstance): Promise<void> {
+		if (server.terminationPromise) return server.terminationPromise;
+		server.stopPromise ??= this.#performStopServer(server);
+		return server.stopPromise;
+	}
+
+	async #performStopServer(server: ServerInstance): Promise<void> {
 		if (server.stopping) return;
 		server.stopping = true;
 		if (server.lingerTimer) clearTimeout(server.lingerTimer);
 		const id = server.muxId();
 		const { promise, resolve } = Promise.withResolvers<void>();
 		server.pending.set(id, { resolveInternal: resolve });
+		// Pinned before the handshake, because this method waits for the root to
+		// exit: a walk rooted at an exited pid finds nothing, so a helper the
+		// server leaves running would be unreachable by the time it is killed.
+		const helpers = Process.fromPid(server.proc.pid)?.children() ?? [];
 		try {
-			await this.#writeServer(server, { jsonrpc: "2.0", id, method: "shutdown", params: null });
-			const timeout = Promise.withResolvers<void>();
-			const timer = setTimeout(timeout.resolve, SHUTDOWN_BUDGET_MS);
-			try {
-				await Promise.race([promise, timeout.promise]);
-			} finally {
-				clearTimeout(timer);
-			}
-			await this.#writeServer(server, { jsonrpc: "2.0", method: "exit" });
+			await withTimeout(
+				(async () => {
+					await this.#writeServer(server, { jsonrpc: "2.0", id, method: "shutdown", params: null });
+					await promise;
+					await this.#writeServer(server, { jsonrpc: "2.0", method: "exit" });
+					await server.proc.exited;
+				})(),
+				SHUTDOWN_BUDGET_MS,
+				"LSP mux server shutdown timed out",
+			);
 		} catch (error) {
 			logger.warn("LSP mux graceful server shutdown failed", { server: server.key, error: String(error) });
 		} finally {
-			this.#killServer(server);
+			resolve();
+			server.pending.delete(id);
+			const [termination] = await Promise.allSettled([this.#killServer(server), this.#killHelpers(server, helpers)]);
+			if (termination.status === "rejected") throw termination.reason;
 		}
 	}
 
-	#killServer(server: ServerInstance): void {
-		server.stopping = true;
-		try {
-			server.proc.kill();
-		} catch {
-			this.#serverExited(server);
+	/**
+	 * Hard-kill helpers pinned before the root exited.
+	 *
+	 * `killAndWait()` captures the tree when it runs, and by then the root is
+	 * gone, so these pinned references are the only remaining handle on anything
+	 * the server left behind. Each is identity-checked natively, so a pid that
+	 * has since been recycled is not signalled.
+	 */
+	async #killHelpers(server: ServerInstance, helpers: Process[]): Promise<void> {
+		const survivors = helpers.filter(helper => helper.status() === ProcessStatus.Running);
+		if (survivors.length === 0) return;
+		const results = await Promise.allSettled(survivors.map(helper => helper.killTreeAndWait()));
+		for (const result of results) {
+			if (result.status === "rejected")
+				logger.warn("LSP mux helper termination failed", { server: server.key, error: String(result.reason) });
+			else if (result.value === false) logger.warn("LSP mux helper termination timed out", { server: server.key });
 		}
+	}
+
+	#killServer(server: ServerInstance): Promise<void> {
+		if (server.terminationPromise) return server.terminationPromise;
+		server.stopping = true;
+		server.terminating = true;
+		if (server.lingerTimer) clearTimeout(server.lingerTimer);
+		const terminated = server.proc.killAndWait(undefined, -1).then(
+			() => {
+				server.terminating = false;
+				this.#serverExited(server);
+			},
+			error => {
+				// Termination failed, so nothing here will retire the server. Do it now
+				// if the process is already gone; otherwise the exit callback owns it,
+				// which the cleared flag now allows.
+				server.terminating = false;
+				if (server.proc.exitCode !== null) this.#serverExited(server);
+				throw error;
+			},
+		);
+		server.terminationPromise = withTimeout(
+			terminated,
+			TERMINATION_BUDGET_MS,
+			`LSP mux server termination timed out: ${server.key}`,
+		);
+		return server.terminationPromise;
 	}
 
 	#disarmMuxIdle(): void {
@@ -736,10 +849,17 @@ export async function startLspMuxFromEnvironment(): Promise<void> {
 	const server = new LspMuxServer();
 	const stopped = Promise.withResolvers<void>();
 	server.onIdle = () => {
-		void server.shutdown().finally(() => {
-			stopped.resolve();
-			process.exit(0);
-		});
+		void server.shutdown().then(
+			() => {
+				stopped.resolve();
+				process.exit(0);
+			},
+			error => {
+				logger.error("LSP mux shutdown failed", { error: String(error) });
+				stopped.resolve();
+				process.exit(1);
+			},
+		);
 	};
 	const cancelCleanup = postmortem.register("lsp-mux", () => server.shutdown());
 	try {

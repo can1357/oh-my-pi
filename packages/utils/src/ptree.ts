@@ -7,7 +7,7 @@
  * - Convenience helpers: captureText / execText, AbortSignal, timeouts.
  */
 
-import { Process } from "@oh-my-pi/pi-natives";
+import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Spawn, Subprocess } from "bun";
 
 type InMask = "pipe" | "ignore" | Buffer | Uint8Array | null;
@@ -180,7 +180,6 @@ export class ChildProcess<In extends InMask = InMask> {
 	#exitReasonPending?: Exception;
 	#stderrDone: Promise<void>;
 	#exited: Promise<number>;
-	#openPipeReaders = 1;
 	// Pipe reads race this cutoff only when attachTimeout() configures a
 	// command deadline. Untimed commands preserve complete EOF-based capture.
 	#drainCutoff: Promise<void>;
@@ -194,6 +193,11 @@ export class ChildProcess<In extends InMask = InMask> {
 	// Windows has no process groups. Retaining the root's native handle pins
 	// its PID after exit so killTree() can still enumerate its original children.
 	#windowsRootProcess?: Process;
+	// A detached POSIX child leads its own group, and after it exits the pgid is
+	// just its old pid — a number the kernel hands out again once the group has
+	// emptied. Pinning the leader while it is alive is the only evidence that
+	// later separates our group from whoever inherited that number.
+	#groupLeader?: Process;
 	constructor(
 		readonly proc: PipedSubprocess<In>,
 		readonly exposeStderr: boolean,
@@ -204,6 +208,8 @@ export class ChildProcess<In extends InMask = InMask> {
 		this.#terminateGroup = terminateGroup;
 		this.#hardKillTree = hardKillTree;
 		this.#windowsRootProcess = process.platform === "win32" ? (Process.fromPid(proc.pid) ?? undefined) : undefined;
+		this.#groupLeader =
+			terminateGroup && process.platform !== "win32" ? (Process.fromPid(proc.pid) ?? undefined) : undefined;
 		if (retainFullStderr) this.#stderrChunks = [];
 		// Eagerly drain stderr into a truncated tail, retaining raw chunks only for explicit full capture.
 		const dec = new TextDecoder();
@@ -245,7 +251,6 @@ export class ChildProcess<In extends InMask = InMask> {
 					trim();
 				}
 			} catch {}
-			this.#openPipeReaders--;
 			this.#stderrTail += dec.decode();
 			trim();
 		})();
@@ -333,6 +338,21 @@ export class ChildProcess<In extends InMask = InMask> {
 		return this;
 	}
 
+	/**
+	 * Whether the root is still running, as the kernel reports it.
+	 *
+	 * `proc.exitCode` only turns non-null once Bun's reaper has observed the
+	 * exit, at least one loop turn after the process is gone. Routing the
+	 * dead-leader fallbacks on that lag leaves the native handle to discover the
+	 * exit instead, and a handle for a dead root can no longer reach the group
+	 * or the descendants that outlived it.
+	 */
+	#rootIsLive(): boolean {
+		if (this.proc.exitCode !== null) return false;
+		const root = this.#windowsRootProcess ?? Process.fromPid(this.proc.pid);
+		return root?.status() === ProcessStatus.Running;
+	}
+
 	kill(reason?: Exception, gracefulMs?: number) {
 		if (reason && !this.#exitReasonPending) {
 			this.#exitReasonPending = reason;
@@ -346,31 +366,30 @@ export class ChildProcess<In extends InMask = InMask> {
 			// adopted descendants, so snapshot and hard-kill the live tree first.
 			const root = Process.fromPid(this.proc.pid);
 			if (root) {
-				root.killTree(9);
-				this.#terminating = Promise.resolve();
+				this.#terminating = Promise.try(() => root.killTreeAndWait());
+				void this.#terminating.catch(() => {});
 				return;
 			}
 		}
-		if (
-			this.proc.exitCode !== null &&
-			this.#terminateGroup &&
-			this.#openPipeReaders > 0 &&
-			process.platform !== "win32"
-		) {
-			// Bun detached children are POSIX session/process-group leaders. If
-			// the leader has exited, the native Process handle cannot rediscover
-			// its PGID, but a pipe-holding descendant keeps that exact group alive.
-			try {
-				process.kill(-this.proc.pid, "SIGKILL");
-			} catch {}
-			this.#terminating = Promise.resolve();
+		const groupLeader = this.#groupLeader;
+		if (groupLeader && !this.#rootIsLive()) {
+			// Bun detached children are POSIX session/process-group leaders. If the
+			// leader has exited, the native Process handle cannot rediscover its
+			// PGID, so the group is reached through the pinned leader, which refuses
+			// once that pid belongs to someone else. That identity check is what
+			// makes the attempt safe, so it is unconditional: gating it on a live
+			// stdout reader only meant survivors of a caller that never read — or
+			// finished reading — were never signalled at all.
+			this.#terminating = Promise.try(() => groupLeader.killOwnGroupAndWait());
+			void this.#terminating.catch(() => {});
 			return;
 		}
-		if (this.proc.exitCode !== null && this.#windowsRootProcess && this.#openPipeReaders > 0) {
+		if (this.#windowsRootProcess && !this.#rootIsLive()) {
 			// The retained handle keeps the dead root PID reserved, making the
 			// Windows Toolhelp descendant walk identity-safe after root exit.
-			this.#windowsRootProcess.killTree();
-			this.#terminating = Promise.resolve();
+			const root = this.#windowsRootProcess;
+			this.#terminating = Promise.try(() => root.killTreeAndWait());
+			void this.#terminating.catch(() => {});
 			return;
 		}
 		if (!this.proc.killed) {
@@ -380,10 +399,15 @@ export class ChildProcess<In extends InMask = InMask> {
 						? { group: true }
 						: undefined
 					: { gracefulMs, group: this.#terminateGroup };
-			this.#terminating = (this.#windowsRootProcess ?? Process.fromPid(this.proc.pid))
-				?.terminate(options)
-				?.catch(e => void e);
+			this.#terminating = (this.#windowsRootProcess ?? Process.fromPid(this.proc.pid))?.terminate(options);
+			void this.#terminating?.catch(() => {});
 		}
+	}
+
+	async killAndWait(reason?: Exception, gracefulMs?: number): Promise<void> {
+		this.kill(reason, gracefulMs);
+		if ((await this.#terminating) === false) throw new Error(`Process tree termination timed out: ${this.pid}`);
+		await this.proc.exited;
 	}
 
 	// ── Output helpers ───────────────────────────────────────────────────
@@ -391,12 +415,12 @@ export class ChildProcess<In extends InMask = InMask> {
 	async #throwIfAborted(): Promise<void> {
 		const exitReason = this.exitReason;
 		if (!exitReason?.aborted) return;
-		if (this.#terminating) await this.#terminating;
+		if (this.#terminating) await this.#terminating.catch(() => {});
 		throw exitReason;
 	}
 
 	async text(): Promise<string> {
-		const p = this.#readStream(this.proc.stdout);
+		const p = this.#readStream(this.stdout);
 		if (this.#nothrow) return p;
 		const [text] = await Promise.all([p, this.exitedCleanly]);
 		await this.#throwIfAborted();
@@ -407,7 +431,6 @@ export class ChildProcess<In extends InMask = InMask> {
 	 * Read a pipe fully, stopping early only at an explicit command deadline.
 	 */
 	async #readStream(stream: ReadableStream<Uint8Array>): Promise<string> {
-		this.#openPipeReaders++;
 		const reader = stream.getReader();
 		const dec = new TextDecoder();
 		let out = "";
@@ -427,13 +450,11 @@ export class ChildProcess<In extends InMask = InMask> {
 		} catch {
 			// A cancelled or failed read keeps whatever was already collected.
 		}
-		this.#openPipeReaders--;
 		return out + dec.decode();
 	}
 
 	async #readBytes(): Promise<Uint8Array> {
-		const reader = this.proc.stdout.getReader();
-		this.#openPipeReaders++;
+		const reader = this.stdout.getReader();
 		const chunks: Uint8Array[] = [];
 		let length = 0;
 		try {
@@ -453,7 +474,6 @@ export class ChildProcess<In extends InMask = InMask> {
 		} catch {
 			// A cancelled or failed read keeps whatever was already collected.
 		} finally {
-			this.#openPipeReaders--;
 			reader.releaseLock();
 		}
 
@@ -499,7 +519,7 @@ export class ChildProcess<In extends InMask = InMask> {
 			throw new Error('Full stderr capture must be requested when spawning the process (pass stderr: "full")');
 		}
 
-		const stdoutP = this.#readStream(this.proc.stdout);
+		const stdoutP = this.#readStream(this.stdout);
 		const stderrP =
 			stderrMode === "full" && stderrChunks
 				? this.#stderrDone.then(() => new TextDecoder().decode(Buffer.concat(stderrChunks)))
@@ -523,7 +543,7 @@ export class ChildProcess<In extends InMask = InMask> {
 		// On abort/timeout, hold the result until the tree is actually gone: the
 		// native terminate() is graceful-first, and reporting before it finishes
 		// would leave timed-out descendants alive past the caller's budget.
-		if (exitError?.aborted && this.#terminating) await this.#terminating;
+		if (exitError?.aborted && this.#terminating) await this.#terminating.catch(() => {});
 
 		const exitCode = this.exitCode ?? (exitError && !exitError.aborted ? exitError.exitCode : null);
 		const ok = exitCode === 0;
@@ -557,13 +577,11 @@ export class ChildProcess<In extends InMask = InMask> {
 		// A clean command clears it in wait(), so fast invocations do not hold
 		// the event loop for the unused remainder.
 		const timer = setTimeout(() => {
-			// A detached group can remain alive after its leader exits. Only use
-			// the dead-leader fallback while an inherited pipe proves that exact
-			// group still has a live member; this avoids stale-PGID reuse.
-			if (
-				this.proc.exitCode === null ||
-				(this.#openPipeReaders > 0 && (this.#terminateGroup || this.#windowsRootProcess))
-			) {
+			// A detached group can remain alive after its leader exits, so the
+			// deadline still has work to do once the root is gone: reach that group
+			// through the pinned leader (or the retained Windows handle), both of
+			// which refuse a pid that is no longer ours.
+			if (this.proc.exitCode === null || this.#terminateGroup || this.#windowsRootProcess) {
 				this.kill(new TimeoutError(ms, this.#stderrTail), -1);
 			}
 			this.#resolveDrainCutoff();

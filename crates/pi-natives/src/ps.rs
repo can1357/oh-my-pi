@@ -117,6 +117,52 @@ impl Process {
 		self.inner.kill_tree(signal)
 	}
 
+	/// Hard-kill the captured tree and wait up to 5000ms for every process to
+	/// exit.
+	#[napi]
+	pub fn kill_tree_and_wait<'env>(
+		&self,
+		env: &'env Env,
+		options: Option<ProcessWaitOptions<'env>>,
+	) -> Result<PromiseRaw<'env, bool>> {
+		let options = options.unwrap_or_default();
+		let timeout = Duration::from_millis(u64::from(options.timeout_ms.unwrap_or(5000)));
+		let ct = task::CancelToken::new(None, options.signal);
+		let waiter = self.inner.hard_kill_tree();
+		task::future(env, "process.kill_tree_and_wait", async move {
+			waiter
+				.wait(timeout, ct.into_core())
+				.await
+				.map_err(|err| napi::Error::from_reason(err.to_string()))
+		})
+	}
+
+	/// Hard-kill the process group this process leads and wait up to 5000ms for
+	/// its captured members.
+	///
+	/// Rejects when the pid has since been handed to a different process,
+	/// because the group would then be someone else's.
+	#[napi]
+	pub fn kill_own_group_and_wait<'env>(
+		&self,
+		env: &'env Env,
+		options: Option<ProcessWaitOptions<'env>>,
+	) -> Result<PromiseRaw<'env, bool>> {
+		let options = options.unwrap_or_default();
+		let timeout = Duration::from_millis(u64::from(options.timeout_ms.unwrap_or(5000)));
+		let ct = task::CancelToken::new(None, options.signal);
+		let waiter = self
+			.inner
+			.hard_kill_own_group()
+			.map_err(|err| napi::Error::from_reason(err.to_string()))?;
+		task::future(env, "process.kill_own_group_and_wait", async move {
+			waiter
+				.wait(timeout, ct.into_core())
+				.await
+				.map_err(|err| napi::Error::from_reason(err.to_string()))
+		})
+	}
+
 	/// Gracefully terminate this process and its descendants.
 	///
 	/// By default this waits 1000ms after polite termination before
@@ -132,10 +178,13 @@ impl Process {
 		let graceful_ms = options.graceful_ms.unwrap_or(1000);
 		let timeout_ms = options.timeout_ms.unwrap_or(5000);
 		let ct = task::CancelToken::new(None, options.signal);
-		let process = self.inner.clone();
+		// Pin the group and descendants here, not inside the task: the root can
+		// exit during the hop onto the executor, and neither is observable once
+		// it has.
+		let plan = self.inner.capture_termination(group);
 		task::future(env, "process.terminate", async move {
-			process
-				.terminate_tree(group, graceful_ms, timeout_ms, ct.into_core())
+			plan
+				.terminate(graceful_ms, timeout_ms, ct.into_core())
 				.await
 				.map_err(|err| napi::Error::from_reason(err.to_string()))
 		})

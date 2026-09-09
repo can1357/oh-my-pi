@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ChildProcess.killAndWait()` to await process-tree termination and report termination failures.
+
+### Fixed
+
+- Fixed dead-root cleanup skipping descendants that keep stdout open for direct stream readers after stderr closes.
+
 ## [18.1.13] - 2026-09-07
 
 ### Fixed

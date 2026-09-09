@@ -22,6 +22,16 @@ interface CloseDocumentParams {
 }
 
 let initializeCount = 0;
+let stopReading = false;
+// A helper subprocess that outlives this server, for the mux's tree-termination
+// coverage: it is reparented away when this process exits, so a descendant walk
+// rooted at the dead server can no longer find it.
+if (Bun.env.TEST_LSP_HELPER_PID_FILE) {
+	const helper = Bun.spawn(["sleep", "60"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+	helper.unref();
+	await Bun.write(Bun.env.TEST_LSP_HELPER_PID_FILE, String(helper.pid));
+}
+let shutdownReceived = false;
 let processId: number | null = null;
 const didOpen: Record<string, number> = {};
 const didChange: Record<string, number[]> = {};
@@ -110,6 +120,10 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 		case "test/echo":
 			respond(id, message.params);
 			break;
+		case "test/stopReading":
+			stopReading = true;
+			respond(id, null);
+			break;
 		case "test/serverRequest": {
 			const params = message.params as { method: string; params: unknown };
 			const response = await requestClient(params.method, params.params);
@@ -117,6 +131,7 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 			break;
 		}
 		case "shutdown":
+			shutdownReceived = true;
 			respond(id, null);
 			break;
 		default:
@@ -124,7 +139,7 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 	}
 }
 
-function handleNotification(message: JsonRpcMessage): void {
+async function handleNotification(message: JsonRpcMessage): Promise<void> {
 	if (message.method === undefined) return;
 	notifications.push(message.method);
 
@@ -155,6 +170,10 @@ function handleNotification(message: JsonRpcMessage): void {
 			break;
 		}
 		case "exit":
+			if (Bun.env.TEST_LSP_IGNORE_EXIT === "1") break;
+			if (Bun.env.TEST_LSP_SHUTDOWN_FILE) {
+				await Bun.write(Bun.env.TEST_LSP_SHUTDOWN_FILE, JSON.stringify({ shutdownReceived, exitReceived: true }));
+			}
 			process.exit(0);
 	}
 }
@@ -162,7 +181,7 @@ function handleNotification(message: JsonRpcMessage): void {
 function handleMessage(message: JsonRpcMessage): void {
 	if (message.method !== undefined) {
 		if (message.id !== undefined) void handleRequest(message);
-		else handleNotification(message);
+		else void handleNotification(message);
 		return;
 	}
 	if (message.id === undefined) return;
@@ -178,4 +197,5 @@ for await (const chunk of Bun.stdin.stream()) {
 	for (const text of framer.drain(() => {})) {
 		handleMessage(JSON.parse(text) as JsonRpcMessage);
 	}
+	if (stopReading) await Bun.sleep(60_000);
 }
