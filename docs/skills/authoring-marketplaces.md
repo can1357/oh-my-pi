@@ -180,17 +180,18 @@ The `path` must resolve inside the cloned repository — directory escape is rej
 
 ### 5. NPM package
 
-Declares the plugin as an npm package. `version` is optional:
+Declares the plugin as an npm package. `version` is optional and may be an exact version, a semver range, or omitted (defaults to `dist-tags.latest`):
 
 ```json
 "source": {
   "source": "npm",
   "package": "@acme/omp-plugin",
-  "version": "1.2.0"
+  "version": "^1.2.0",
+  "registry": "https://registry.npmjs.org"
 }
 ```
 
-> Note: npm plugin sources are accepted by catalog parsing but installation rejects them with `npm plugin sources are not yet supported`. Use relative or Git-based sources today.
+`registry` is optional (defaults to the public npm registry) and must be a public HTTPS URL without credentials, query, or fragment. The tarball is downloaded over HTTPS, integrity-verified via its SHA-512 SRI digest, and extracted into the plugin cache. The archive must contain a single top-level `package/` directory whose `package.json` name matches the requested package.
 
 ## Plugin structure
 

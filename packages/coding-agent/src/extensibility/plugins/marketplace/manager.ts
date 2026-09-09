@@ -7,7 +7,6 @@
  */
 
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 
 import { isEnoent, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
@@ -30,7 +29,8 @@ import {
 	writeInstalledPluginsRegistry,
 	writeMarketplacesRegistry,
 } from "./registry";
-import { resolvePluginSource } from "./source-resolver";
+import { resolveNpmVersion, resolvePluginSource } from "./source-resolver";
+import { mapWithConcurrencyLimit } from "../../../task/parallel";
 import type {
 	InstalledPluginEntry,
 	InstalledPluginSummary,
@@ -38,18 +38,9 @@ import type {
 	MarketplaceCatalog,
 	MarketplacePluginEntry,
 	MarketplaceRegistryEntry,
+	PluginSourceNpm,
 } from "./types";
-import { buildPluginId, parsePluginId } from "./types";
-
-const RUNTIME_PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
-const MAX_RUNTIME_PACKAGE_NAME_LENGTH = 214;
-
-function assertRuntimePackageName(name: string): string {
-	if (name.length > MAX_RUNTIME_PACKAGE_NAME_LENGTH || !RUNTIME_PACKAGE_NAME_RE.test(name)) {
-		throw new Error(`Invalid marketplace plugin package name: ${JSON.stringify(name)}`);
-	}
-	return name;
-}
+import { assertRuntimePackageName, buildPluginId, parsePluginId } from "./types";
 
 // ── Options ──────────────────────────────────────────────────────────────────
 
@@ -292,17 +283,25 @@ export class MarketplaceManager {
 			);
 		}
 
-		const { dir: sourcePath, tempCloneRoot } = await resolvePluginSource(pluginEntry, {
+		const {
+			dir: sourcePath,
+			tempCloneRoot,
+			resolvedVersion,
+		} = await resolvePluginSource(pluginEntry, {
 			marketplaceClonePath,
 			catalogMetadata: catalog.metadata,
-			tmpDir: os.tmpdir(),
+			// Extract directly under the plugin cache staging area so the extracted
+			// tree lands on the same filesystem as the cache and cachePlugin's staged
+			// rename stays cheap. A sibling `.staging-tmp` dir keeps it out of the
+			// cache's own namespace; the resolver cleans up its temp root in finally.
+			tmpDir: path.join(this.#opts.pluginsCacheDir, ".staging-tmp"),
 		});
 
-		// 5. Determine version: catalog entry > plugin manifest > git SHA > fallback
+		// 5. Determine version: npm resolved version > catalog entry > plugin manifest > git SHA > fallback
 		let version!: string;
 		let cachePath!: string;
 		try {
-			version = await this.#resolvePluginVersion(pluginEntry, sourcePath);
+			version = resolvedVersion ?? (await this.#resolvePluginVersion(pluginEntry, sourcePath));
 			cachePath = await cachePlugin(sourcePath, this.#opts.pluginsCacheDir, marketplace, name, version);
 			await this.#writeEmbeddedLspConfig(pluginEntry, cachePath);
 			await this.#writeEmbeddedDapConfig(pluginEntry, cachePath);
@@ -624,9 +623,10 @@ export class MarketplaceManager {
 		}
 	}
 
-	// Compare installed plugin versions against their catalog entries.
-	// Returns one entry per (pluginId, scope) pair where the catalog declares a newer version.
-	// Catalog entries without a version field are skipped.
+	// Compare installed plugin versions against the version their catalog entry
+	// currently resolves to. Returns one entry per (pluginId, scope) pair that is
+	// behind. Entries with neither a catalog version nor a resolvable npm selector
+	// are skipped.
 	async checkForUpdates(): Promise<Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }>> {
 		const mktReg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
 		const updates: Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }> = [];
@@ -638,6 +638,15 @@ export class MarketplaceManager {
 			registryEntries.push([this.#opts.projectInstalledRegistryPath, "project"]);
 		}
 
+		interface Candidate {
+			scope: "user" | "project";
+			pluginId: string;
+			installed: InstalledPluginEntry;
+			catalogVersion: string | undefined;
+			npmSource: PluginSourceNpm | undefined;
+		}
+
+		const candidates: Candidate[] = [];
 		for (const [regPath, scope] of registryEntries) {
 			const instReg = await readInstalledPluginsRegistry(regPath);
 			for (const [pluginId, entries] of Object.entries(instReg.plugins)) {
@@ -650,26 +659,75 @@ export class MarketplaceManager {
 				if (!mktEntry) continue;
 
 				let catalogVersion: string | undefined;
+				let npmSource: PluginSourceNpm | undefined;
 				try {
 					const catalog = await this.#readCatalog(mktEntry);
-					catalogVersion = catalog.plugins.find(p => p.name === parsed.name)?.version;
+					const pluginEntry = catalog.plugins.find(p => p.name === parsed.name);
+					catalogVersion = pluginEntry?.version;
+					if (pluginEntry && typeof pluginEntry.source === "object" && pluginEntry.source.source === "npm") {
+						npmSource = pluginEntry.source;
+					}
 				} catch {
 					continue;
 				}
 
-				if (!catalogVersion || catalogVersion === installed.version) continue;
+				candidates.push({ scope, pluginId, installed, catalogVersion, npmSource });
+			}
+		}
 
-				// Treat newer semver as an update; fall back to inequality for non-semver tags.
-				let isNewer: boolean;
-				try {
-					isNewer = Bun.semver.order(catalogVersion, installed.version) > 0;
-				} catch {
-					isNewer = catalogVersion !== installed.version;
-				}
+		const npmTasks = candidates
+			.map((candidate, index) => ({ index, candidate, source: candidate.npmSource }))
+			.filter(
+				(item): item is { index: number; candidate: Candidate; source: PluginSourceNpm } =>
+					item.source !== undefined,
+			);
 
-				if (isNewer) {
-					updates.push({ pluginId, scope, from: installed.version, to: catalogVersion });
-				}
+		// Shared in-flight promise cache keyed by [package, version, registry].
+		// Deduplicates identical npm selectors across user/project scopes without
+		// suppressing different packages or caching a registry-wide failure.
+		const npmPromiseCache = new Map<string, Promise<string>>();
+
+		const concurrency = Math.min(8, npmTasks.length || 1);
+		const { results } = await mapWithConcurrencyLimit(npmTasks, concurrency, async ({ source }) => {
+			const key = JSON.stringify([source.package, source.version, source.registry]);
+			let p = npmPromiseCache.get(key);
+			if (!p) {
+				p = resolveNpmVersion(source);
+				npmPromiseCache.set(key, p);
+			}
+			try {
+				return { ok: true, version: await p } as const;
+			} catch {
+				return { ok: false } as const;
+			}
+		});
+
+		const resolvedVersions = new Map<number, string>();
+		for (const [i, result] of results.entries()) {
+			if (result?.ok) {
+				resolvedVersions.set(npmTasks[i].index, result.version);
+			}
+		}
+
+		for (const [i, candidate] of candidates.entries()) {
+			const comparisonVersion = candidate.npmSource ? resolvedVersions.get(i) : candidate.catalogVersion;
+			if (!comparisonVersion || comparisonVersion === candidate.installed.version) continue;
+
+			// Treat newer semver as an update; fall back to inequality for non-semver tags.
+			let isNewer: boolean;
+			try {
+				isNewer = Bun.semver.order(comparisonVersion, candidate.installed.version) > 0;
+			} catch {
+				isNewer = comparisonVersion !== candidate.installed.version;
+			}
+
+			if (isNewer) {
+				updates.push({
+					pluginId: candidate.pluginId,
+					scope: candidate.scope,
+					from: candidate.installed.version,
+					to: comparisonVersion,
+				});
 			}
 		}
 
