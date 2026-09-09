@@ -99,12 +99,27 @@ describe("parseJsonTextToolCall", () => {
 		).toBe('{"name":"bash","arguments":{"command":"echo hi"}}');
 	});
 
-	test("advertisedNamesForJsonTextToolCall unions wire + omp aliases", () => {
-		const names = advertisedNamesForJsonTextToolCall([{ name: "Shell" }], [{ name: "bash" }, { name: "read" }]);
+	test("advertisedNamesForJsonTextToolCall aliases only from advertised wire tools", () => {
+		const names = advertisedNamesForJsonTextToolCall(
+			[{ name: "Shell" }, { name: "Write" }],
+			[{ name: "bash" }, { name: "read" }, { name: "write" }, { name: "edit" }],
+		);
 		expect(names.has("Shell")).toBe(true);
 		expect(names.has("bash")).toBe(true);
-		expect(names.has("Read")).toBe(true);
-		expect(names.has("read")).toBe(true);
+		expect(names.has("Write")).toBe(true);
+		expect(names.has("write")).toBe(true);
+		// Collision loser `edit` and unadvertised `read` must not promote.
+		expect(names.has("edit")).toBe(false);
+		expect(names.has("read")).toBe(false);
+		expect(names.has("Read")).toBe(false);
+	});
+
+	test("advertisedNamesForJsonTextToolCall falls back to omp tools when wire tools absent", () => {
+		const names = advertisedNamesForJsonTextToolCall(undefined, [{ name: "bash" }, { name: "edit" }]);
+		expect(names.has("bash")).toBe(true);
+		expect(names.has("Shell")).toBe(true);
+		expect(names.has("edit")).toBe(true);
+		expect(names.has("Write")).toBe(true);
 	});
 
 	test("shouldPromoteJsonTextToolCall requires catalog fact or product wire profiles", () => {

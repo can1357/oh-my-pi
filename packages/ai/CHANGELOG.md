@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Grok Bot JSON-as-text promotion aliases only tools that survived product wire-name collision resolution (e.g. drops unadvertised `edit` when `Write` came from `write`).
 - Grok Bot product Read/Write alias schemas preserve preexisting `anyOf` required groups via `allOf` instead of replacing them.
 - Grok Bot `register-builtins` loads `streamGrokBot` via a top-level import (AGENTS.md; no `import("./grokbot")` dynamic path).
 - Grok Bot `sand-wire-model-id` rewrites are tools-scoped (`sand-wire-model-id-when=tools`) so text-only requests keep the selected model.
@@ -14,6 +15,8 @@
 - Grok Bot stream and AvailableModels pass the configured base URL unmodified into `joinGrokbotBackendUrl` (preserves trailing `/` inside query values).
 - Grok Bot parent-chat `SendToUser` tool/schema descriptions load from static `.md` prompt assets.
 - Catalog matrix omp `-p` slice derives `--thinking` from each selected model's probe effort (omits the flag when none is known).
+- Catalog matrix bash smoke rejects pipelines that can suppress the probe token (not only redirects/`tee`).
+- Keep-model Anthropic probe validates and replays returned Shell arguments (no fabricated echo).
 
 ## [18.1.15] - 2026-09-08
 

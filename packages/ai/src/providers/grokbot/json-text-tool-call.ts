@@ -98,20 +98,30 @@ function asArgsObject(value: unknown): Record<string, unknown> | undefined {
 	return undefined;
 }
 
-/** Collect advertised field-2 names plus omp aliases (bash↔Shell). */
+/** Collect advertised field-2 names plus preferred omp aliases (bash↔Shell). */
 export function advertisedNamesForJsonTextToolCall(
 	wireTools: unknown,
 	ompTools?: Array<{ name?: string }> | readonly { name?: string }[] | undefined,
 ): Set<string> {
 	const names = new Set<string>();
+	let hasWire = false;
 	if (Array.isArray(wireTools)) {
 		for (const tool of wireTools) {
 			if (!tool || typeof tool !== "object") continue;
 			const name = (tool as { name?: unknown }).name;
-			if (typeof name === "string" && name.trim()) names.add(name.trim());
+			if (typeof name !== "string" || !name.trim()) continue;
+			hasWire = true;
+			const trimmed = name.trim();
+			// Aliases come from tools that survived wire-name collision resolution
+			// (Write→write, not the dropped edit owner). Do not re-expand the full
+			// omp catalog — collision losers must not promote.
+			names.add(trimmed);
+			names.add(toOmpToolName(trimmed));
+			names.add(toSandField2Name(trimmed));
 		}
 	}
-	if (Array.isArray(ompTools)) {
+	// Native / no field-2 rewrite: wire tools absent → alias from omp tools alone.
+	if (!hasWire && Array.isArray(ompTools)) {
 		for (const tool of ompTools) {
 			const name = typeof tool?.name === "string" ? tool.name.trim() : "";
 			if (!name) continue;
