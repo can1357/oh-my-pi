@@ -54,6 +54,76 @@ afterEach(() => {
 // the same message — at every step. If they ever diverge, the optimization
 // silently corrupts the transcript.
 describe("AssistantMessageComponent streaming fast path", () => {
+	it("replays retired thinking prefixes after cache eviction, reflow, and finalization", () => {
+		const component = new AssistantMessageComponent();
+		const widths = [36, W];
+		const prefixes: Array<{ count: number; rows: readonly string[][] }> = [];
+		let thinking = "";
+		for (let step = 0; step < 80; step++) {
+			thinking += `Paragraph ${step} has **emphasis** and enough words to wrap at narrow widths.\n\n`;
+			component.updateContent(msg([{ type: "thinking", thinking: `${thinking}Pending paragraph` }]), {
+				transient: true,
+			});
+			component.render(W);
+			const count = component.getTranscriptStableRows().length;
+			if (count > (prefixes.at(-1)?.count ?? 0)) {
+				prefixes.push({
+					count,
+					rows: widths.map(width => [...component.renderTranscriptStableRows(count, width)]),
+				});
+			}
+		}
+		expect(prefixes.length).toBeGreaterThan(64);
+		const keys = component.getTranscriptStableRows().map(row => row.key);
+		expect(keys.reduce((length, key) => length + key.length, 0)).toBeLessThan(keys.length * 32);
+		component.updateContent(
+			msg([
+				{ type: "thinking", thinking },
+				{ type: "text", text: "Final answer" },
+			]),
+		);
+		component.markTranscriptBlockFinalized();
+		for (const prefix of prefixes) {
+			for (const [index, width] of widths.entries()) {
+				expect(component.renderTranscriptStableRows(prefix.count, width)).toEqual(prefix.rows[index]);
+			}
+		}
+		expect(component.getTranscriptStableRows().map(row => row.key)).toEqual(keys);
+	});
+
+	it("keeps earlier block boundaries immutable when later thinking blocks grow or revise", () => {
+		const component = new AssistantMessageComponent();
+		const first = "First reasoning paragraph.\n\nSecond paragraph.\n\nStill thinking";
+		component.updateContent(msg([{ type: "thinking", thinking: first }]), { transient: true });
+		component.render(W);
+		const firstCount = component.getTranscriptStableRows().length;
+		expect(firstCount).toBeGreaterThan(0);
+		const firstRows = [...component.renderTranscriptStableRows(firstCount, 40)];
+		const content: AssistantMessage["content"] = [
+			{ type: "thinking", thinking: first },
+			{ type: "thinking", thinking: "Another block.\n\nMore reasoning.\n\nPending" },
+		];
+		component.updateContent(msg(content), { transient: true });
+		component.render(W);
+		const count = component.getTranscriptStableRows().length;
+		expect(count).toBeGreaterThan(firstCount);
+		const rows = [...component.renderTranscriptStableRows(count, 40)];
+		component.updateContent(msg([{ type: "thinking", thinking: `Rewritten ${first}` }]), { transient: true });
+		component.render(W);
+		expect(component.getTranscriptStableRows()).toHaveLength(count);
+		component.renderTranscriptStableRows(count, 60);
+		component.renderTranscriptStableRows(count, 80);
+		expect(component.renderTranscriptStableRows(firstCount, 40)).toEqual(firstRows);
+		expect(component.renderTranscriptStableRows(count, 40)).toEqual(rows);
+		component.setHideThinkingBlock(true);
+		component.resetTranscriptStableRows();
+		component.updateContent(msg(content), { transient: true });
+		component.render(W);
+		expect(component.getTranscriptStableRows()).toEqual([]);
+		expect(component.renderTranscriptStableRows(count, 40)).toEqual([]);
+		component.markTranscriptBlockFinalized();
+	});
+
 	it("matches teardown output across a growing thinking + text stream", () => {
 		const reused = new AssistantMessageComponent();
 		const thinking = "Reasoning about the **problem** with `code` and a list:\n- a\n- b";
