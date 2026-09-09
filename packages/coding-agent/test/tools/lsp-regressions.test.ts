@@ -3451,6 +3451,135 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("waits for reconciled diagnostics before building the code-action context", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-codeaction-reconcile-");
+		const filePath = path.join(tempDir.path(), "target.py");
+		const original = "def target():\n    return 1\n";
+		let overlay = "";
+		let openVersion = 1;
+		// context.diagnostics length seen by the most recent codeAction request.
+		let contextDiagnosticsCount = -1;
+		try {
+			await Bun.write(filePath, original);
+			const serverConfig: ServerConfig = {
+				command: "fake-pyls",
+				fileTypes: ["py"],
+				rootMarkers: [],
+				isLinter: true,
+			};
+			installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					// Pull-model diagnostics: the server answers textDocument/diagnostic.
+					// Only waitForDiagnostics issues that pull, so an unguarded read of
+					// the (reconcile-cleared) map would see nothing.
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { capabilities: { codeActionProvider: true, diagnosticProvider: true } },
+					});
+				} else if (message.method === "textDocument/didOpen") {
+					const params = message.params;
+					if (
+						typeof params === "object" &&
+						params !== null &&
+						"textDocument" in params &&
+						typeof params.textDocument === "object" &&
+						params.textDocument !== null &&
+						"text" in params.textDocument &&
+						typeof params.textDocument.text === "string"
+					) {
+						overlay = params.textDocument.text;
+					}
+				} else if (message.method === "textDocument/didChange") {
+					const params = message.params;
+					if (
+						typeof params === "object" &&
+						params !== null &&
+						"textDocument" in params &&
+						typeof params.textDocument === "object" &&
+						params.textDocument !== null &&
+						"version" in params.textDocument &&
+						typeof params.textDocument.version === "number"
+					) {
+						openVersion = params.textDocument.version;
+					}
+					if (
+						typeof params === "object" &&
+						params !== null &&
+						"contentChanges" in params &&
+						Array.isArray(params.contentChanges) &&
+						typeof params.contentChanges[0] === "object" &&
+						params.contentChanges[0] !== null &&
+						"text" in params.contentChanges[0] &&
+						typeof params.contentChanges[0].text === "string"
+					) {
+						overlay = params.contentChanges[0].text;
+					}
+				} else if (message.method === "textDocument/diagnostic") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: {
+							kind: "full",
+							items: [
+								{
+									range: { start: { line: 0, character: 4 }, end: { line: 0, character: 10 } },
+									message: "stale-doc marker",
+									severity: 1,
+								},
+							],
+						},
+					});
+				} else if (message.method === "textDocument/codeAction") {
+					const params = message.params;
+					contextDiagnosticsCount =
+						typeof params === "object" &&
+						params !== null &&
+						"context" in params &&
+						typeof params.context === "object" &&
+						params.context !== null &&
+						"diagnostics" in params.context &&
+						Array.isArray(params.context.diagnostics)
+							? params.context.diagnostics.length
+							: -1;
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: [{ title: "Fix stale-doc marker", kind: "quickfix" }],
+					});
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "fake-pyls": serverConfig },
+				idleTimeoutMs: undefined,
+			});
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			// Warm the document (opens it; no reconcile, so no diagnostics wait).
+			await tool.execute("code-actions-warm", { action: "code_actions", file: filePath, line: 1 });
+
+			// External edit: change the file on disk so the next query reconciles.
+			await Bun.write(filePath, `${original}value = target()\n`);
+			contextDiagnosticsCount = -1;
+
+			await tool.execute("code-actions-after-edit", { action: "code_actions", file: filePath, line: 1 });
+
+			// The reconcile dropped the stale diagnostics; code_actions must pull the
+			// fresh set for the reconciled document rather than sending an empty context.
+			expect(openVersion).toBe(2);
+			expect(overlay).toBe(`${original}value = target()\n`);
+			expect(contextDiagnosticsCount).toBe(1);
+		} finally {
+			configCache.delete(tempDir.path());
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("flushes pending descendant text edits before a folder rename", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-folder-rename-");
 		try {

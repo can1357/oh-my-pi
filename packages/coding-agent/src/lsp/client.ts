@@ -1341,23 +1341,29 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
  * text last sent to the server, pushes a `didChange` so the server's copy matches
  * the disk text the position was derived from. Untracked files fall through to
  * {@link ensureFileOpen}; unchanged files send nothing.
+ * Returns `true` only when a `didChange` was pushed for a reconciled overlay — the
+ * caller can then wait for fresh diagnostics, since the stale ones were dropped.
  * A file with an in-flight OMP write ({@link beginPendingDiskWrite}) is skipped
  * entirely: its overlay leads disk, so reading disk back would revert the server
  * to pre-write content.
  */
-export async function reconcileFileFromDisk(client: LspClient, filePath: string, signal?: AbortSignal): Promise<void> {
+export async function reconcileFileFromDisk(
+	client: LspClient,
+	filePath: string,
+	signal?: AbortSignal,
+): Promise<boolean> {
 	throwIfAborted(signal);
 	const uri = fileToUri(filePath);
 	if (!client.openFiles.has(uri)) {
 		await ensureFileOpen(client, filePath, signal);
-		return;
+		return false;
 	}
 
 	// An in-flight OMP write has already synced newer (possibly formatted) text to
 	// the server ahead of committing it to disk; the on-disk file is the stale side,
 	// so reconciling from it would clobber the overlay. Leave it to the write.
 	if (pendingDiskWrites.has(uri)) {
-		return;
+		return false;
 	}
 
 	const lockKey = `${client.name}:${uri}`;
@@ -1366,6 +1372,7 @@ export async function reconcileFileFromDisk(client: LspClient, filePath: string,
 		await untilAborted(signal, () => existingLock);
 	}
 
+	let didChange = false;
 	const reconcilePromise = (async () => {
 		throwIfAborted(signal);
 		const info = client.openFiles.get(uri);
@@ -1405,6 +1412,7 @@ export async function reconcileFileFromDisk(client: LspClient, filePath: string,
 		);
 		info.syncedHash = signature;
 		client.lastActivity = Date.now();
+		didChange = true;
 	})();
 
 	fileOperationLocks.set(lockKey, reconcilePromise);
@@ -1413,6 +1421,7 @@ export async function reconcileFileFromDisk(client: LspClient, filePath: string,
 	} finally {
 		fileOperationLocks.delete(lockKey);
 	}
+	return didChange;
 }
 
 /**
