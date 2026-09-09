@@ -709,7 +709,24 @@ async function setBadge(connected: boolean): Promise<void> {
 let helloRefresh: {
 	socket: WebSocket;
 	done: Promise<void>;
-	dirty: boolean;
+	/**
+	 * The attachment set or tab set changed while this hello was in flight, so its
+	 * snapshot may misreport attach/detach state. A stale send here would make
+	 * `RelayBridge.#onHello()` detach or re-add a session incorrectly, so the send
+	 * is suppressed and rebuilt. These invalidations come from discrete events
+	 * (attach/detach, tab create/remove), so they cannot starve the handshake.
+	 */
+	structuralDirty: boolean;
+	/**
+	 * Only tab metadata (title, favicon, url) changed while this hello was in
+	 * flight. That never alters the advertised attachment set, so the hello is
+	 * still safe to send — suppressing it would let a page that churns its title
+	 * indefinitely starve the reconnect hello (and its orphan-sweep cancellation),
+	 * detaching otherwise-live sessions. Send anyway, then rebuild once more so the
+	 * follow-up hello carries the latest metadata; the ongoing `tabUpdated` stream
+	 * corrects any single racing update once the relay is initialized.
+	 */
+	metaDirty: boolean;
 	afterSend: (() => void) | null;
 } | null = null;
 
@@ -740,8 +757,9 @@ function refreshHello(onSent?: () => void): void {
 	if (!socket || socket.readyState !== WebSocket.OPEN) return;
 	if (helloRefresh?.socket === socket) {
 		// A refresh is already running for this socket; its snapshot may predate
-		// this change. Rebuild after it settles instead of discarding the refresh.
-		helloRefresh.dirty = true;
+		// this attachment/tab-set change. Rebuild after it settles instead of
+		// discarding the refresh.
+		helloRefresh.structuralDirty = true;
 		// Carry a caller's post-send callback onto the in-flight refresh so a
 		// coalesced hello (e.g. the reconnect's own refresh) still runs it once the
 		// authoritative hello is actually sent.
@@ -752,25 +770,32 @@ function refreshHello(onSent?: () => void): void {
 		const entry: {
 			socket: WebSocket;
 			done: Promise<void>;
-			dirty: boolean;
+			structuralDirty: boolean;
+			metaDirty: boolean;
 			afterSend: (() => void) | null;
 		} = {
 			socket,
-			dirty: false,
+			structuralDirty: false,
+			metaDirty: false,
 			done: Promise.resolve(),
 			afterSend,
 		};
 		entry.done = buildHello()
 			.then(async (hello) => {
-				// Suppress a hello whose snapshot was invalidated before it could be
-				// sent. A guard detach that marks this refresh `dirty` in flight means
-				// `getTargets()` may predate the detach, so this hello can report a
-				// just-detached tab as still attached; `RelayBridge.#onHello()` would
-				// then preserve the stale session and start recovery, while the rebuilt
-				// follow-up hello clears `tab.attaching` and launches a competing
-				// attach. Skip the stale send and let the dirty rebuild below emit the
-				// single authoritative hello.
-				if (entry.dirty) return;
+				// Suppress a hello whose attachment snapshot was invalidated before it
+				// could be sent. A guard detach that marks this refresh structurally
+				// dirty in flight means `getTargets()` may predate the detach, so this
+				// hello can report a just-detached tab as still attached;
+				// `RelayBridge.#onHello()` would then preserve the stale session and
+				// start recovery, while the rebuilt follow-up hello clears
+				// `tab.attaching` and launches a competing attach. Skip the stale send
+				// and let the dirty rebuild below emit the single authoritative hello.
+				// A metadata-only change (title/favicon/url via `onUpdated`) never
+				// alters the advertised attachment set, so it does NOT suppress the
+				// send: doing so would let a page that churns its title indefinitely
+				// starve the reconnect hello and its orphan-sweep cancellation. The
+				// live tab still carries the freshest metadata via the rebuild below.
+				if (entry.structuralDirty) return;
 				// Persist recovery markers only for the hello that is still current.
 				// A detach can invalidate this refresh after `buildHello()` snapshots
 				// targets but before the queued storage write runs; gating the write on
@@ -780,11 +805,11 @@ function refreshHello(onSent?: () => void): void {
 					hello.attachedTabIds,
 					() =>
 						helloRefresh === entry &&
-						!entry.dirty &&
+						!entry.structuralDirty &&
 						ws === socket &&
 						socket.readyState === WebSocket.OPEN,
 				);
-				if (entry.dirty) return;
+				if (entry.structuralDirty) return;
 				if (ws === socket && socket.readyState === WebSocket.OPEN) {
 					socket.send(JSON.stringify(hello));
 					// The relay has now received our attachment state, so it owns
@@ -814,13 +839,19 @@ function refreshHello(onSent?: () => void): void {
 			.finally(() => {
 				if (helloRefresh !== entry) return;
 				if (
-					entry.dirty &&
+					(entry.structuralDirty || entry.metaDirty) &&
 					ws === socket &&
 					socket.readyState === WebSocket.OPEN
 				) {
-					// A refresh arrived while this one was in flight; its snapshot may be
-					// stale, so rebuild to capture the change it observed. Carry any
-					// not-yet-run post-send callback onto the rebuild.
+					// A change arrived while this one was in flight; its snapshot may be
+					// stale, so rebuild to capture it. A structural change was suppressed
+					// above and needs the authoritative resend; a metadata-only change was
+					// already delivered but rebuilds once more so the follow-up hello
+					// carries the latest title/favicon. Either way the loop is bounded:
+					// each iteration delivers a hello (metadata) or is driven by a
+					// discrete attach/detach/tab event (structural), so it cannot spin
+					// without a corresponding browser event. Carry any not-yet-run
+					// post-send callback onto the rebuild.
 					startRefresh(entry.afterSend);
 				} else {
 					helloRefresh = null;
@@ -832,7 +863,18 @@ function refreshHello(onSent?: () => void): void {
 }
 
 function invalidateHelloRefresh(): void {
-	if (helloRefresh) helloRefresh.dirty = true;
+	if (helloRefresh) helloRefresh.structuralDirty = true;
+}
+
+/**
+ * Mark the in-flight hello as carrying stale tab metadata (title/favicon/url)
+ * without suppressing its delivery. Unlike {@link invalidateHelloRefresh}, this
+ * does not block the send: metadata never changes the advertised attachment
+ * set, so the hello is still authoritative for reconciliation, and blocking it
+ * would let a page that continuously updates its title starve the handshake.
+ */
+function invalidateHelloMeta(): void {
+	if (helloRefresh) helloRefresh.metaDirty = true;
 }
 
 async function buildHello(): Promise<
@@ -1345,11 +1387,17 @@ chrome.tabs.onCreated.addListener((tab) => {
 chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
 	const snap = snapshot(tab);
 	if (snap) {
-		// Same race as tabCreated: an in-flight refresh whose snapshot predates this
-		// update would send stale metadata that RelayBridge.#onHello() restores over
-		// the newer `tabUpdated`. Invalidate so the rebuilt hello reflects the live
-		// tab state.
-		invalidateHelloRefresh();
+		// An in-flight refresh whose snapshot predates this update carries stale
+		// tab metadata (title/favicon/url) that RelayBridge.#onHello() would restore
+		// over the newer `tabUpdated`. Mark the refresh meta-dirty so it rebuilds
+		// once more with the live metadata — but, unlike tab create/remove, an
+		// update never changes the advertised attachment set, so it must NOT
+		// suppress the in-flight hello: a page that continuously updates its title
+		// or favicon would otherwise mark every reconnect hello dirty and starve the
+		// handshake, leaving the relay uninitialized until the orphan deadline
+		// detaches live sessions. Delivering the current hello and rebuilding keeps
+		// the loop bounded to one hello per settled build.
+		invalidateHelloMeta();
 		post({ t: "tabUpdated", tab: snap });
 	}
 });
