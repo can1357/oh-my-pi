@@ -16,7 +16,7 @@ repository = "https://github.com/stencil-hq/omp"
 anyhow = "1"
 ctor = "0.2"
 arc-swap = "1.7"
-anydoc = "0.1.9"
+anydoc = "0.2.4"
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 ast-grep-core = { version = "0.39", default-features = false, features = ["tree-sitter"] }
 argmax = "0.3"
