@@ -1,59 +1,39 @@
 /**
- * Symbol-keyed lazy memoization stamped directly onto the host object.
+ * Lazy memoization keyed by host object identity, held in a module-level
+ * weak side table.
  *
- * Faster than a module-level `WeakMap` in V8/JSC because the symbol slot is
- * resolved through the object's hidden class instead of a side-table hash
- * lookup. The slot is defined as a non-enumerable property so the stamp
- * does not leak through `{...spread}`, `Object.keys`, `JSON.stringify`, or
- * `toEqual`-style deep equality.
+ * The bookkeeping deliberately lives outside the host rather than in a
+ * non-enumerable symbol property: schema objects are caller-owned and may be
+ * sealed, frozen, or deep-frozen after their first traversal. A recursive
+ * freeze that enumerates with `Reflect.ownKeys` reaches symbol slots, so an
+ * on-host slot would be frozen along with the schema and every later write
+ * would throw. A side table is also invisible to `{...spread}`,
+ * `Object.keys`, `JSON.stringify`, and `toEqual`-style deep equality.
  *
- * Caveats: the stamp lives as long as the host object, even after callers
+ * Caveats: an entry lives as long as the host object, even after callers
  * release their references to the cached value — only use this for caches
- * whose lifetime should match the host. Nonextensible hosts use a weak
- * side table. Mutable cells keep traversal state writable when a host is
- * frozen after its first traversal.
+ * whose lifetime should match the host.
  */
-interface Cell<V> {
-	value: V | undefined;
-}
-
-const fallback = new WeakMap<object, Map<symbol, Cell<unknown>>>();
-
-function cell<V>(target: object, key: symbol): Cell<V> {
-	const existing = Object.hasOwn(target, key) ? (target as Record<symbol, Cell<V>>)[key] : undefined;
-	if (existing) return existing;
-	if (Object.isExtensible(target)) {
-		const created: Cell<V> = { value: undefined };
-		Object.defineProperty(target, key, { value: created });
-		return created;
-	}
-	let slots = fallback.get(target);
-	if (!slots) {
-		slots = new Map();
-		fallback.set(target, slots);
-	}
-	let stored = slots.get(key);
-	if (!stored) {
-		stored = { value: undefined };
-		slots.set(key, stored);
-	}
-	return stored as Cell<V>;
-}
+const memos = new WeakMap<object, Map<symbol, unknown>>();
 
 export function stamp<T extends object, V>(target: T, key: symbol, compute: (target: T) => V): V {
-	const slot = cell<V>(target, key);
-	const existing = slot.value;
+	let slots = memos.get(target);
+	if (!slots) {
+		slots = new Map();
+		memos.set(target, slots);
+	}
+	const existing = slots.get(key) as V | undefined;
 	if (existing !== undefined) return existing;
 	const value = compute(target);
-	slot.value = value;
+	slots.set(key, value);
 	return value;
 }
 
 /**
- * Epoch-keyed cycle guard. Cheaper than `WeakSet` for recursive traversal
- * because the marker is a single property slot on the host object, written
- * once and overwritten in place on every subsequent traversal — the hidden
- * class transitions once per object lifetime, not per traversal.
+ * Epoch-keyed cycle guard. Cheaper than a per-call `WeakSet` for recursive
+ * traversal because the marker is a single side-table entry per host object,
+ * written once and overwritten in place on every subsequent traversal — no
+ * per-walk allocation.
  *
  * Usage:
  *   function walk(node, epoch = epochNext()) {
@@ -61,7 +41,7 @@ export function stamp<T extends object, V>(target: T, key: symbol, compute: (tar
  *     for (const child of node.children) walk(child, epoch);
  *   }
  */
-const kEpoch = Symbol("pi.schema.epoch");
+const epochs = new WeakMap<object, number>();
 let __epoch = 0;
 
 export function epochNext(): number {
@@ -74,10 +54,9 @@ export function epochNext(): number {
  * subsequent call within the same epoch.
  */
 export function once<T extends object>(target: T, epoch: number): boolean {
-	const slot = cell<number>(target, kEpoch);
-	const cur = slot.value;
+	const cur = epochs.get(target);
 	if (cur !== undefined && cur >= epoch) return false;
-	slot.value = epoch;
+	epochs.set(target, epoch);
 	return true;
 }
 
@@ -85,12 +64,8 @@ export function once<T extends object>(target: T, epoch: number): boolean {
  * Counter-based path tracker. Use when a traversal needs to distinguish
  * "currently on the recursion path" from "previously visited" — i.e. cycle
  * detection that throws while still allowing DAG sharing. Increment on
- * entry, decrement on exit; the slot returns to 0 after a balanced walk so
+ * entry, decrement on exit; the counter returns to 0 after a balanced walk so
  * subsequent top-level calls see a fresh state without any reset.
- *
- * Unlike a `WeakSet` with `seen.delete(...)`, the property is never deleted
- * — only incremented and decremented — so the host object's hidden class
- * is never invalidated.
  *
  * Usage:
  *   function walk(node) {
@@ -99,7 +74,7 @@ export function once<T extends object>(target: T, epoch: number): boolean {
  *     finally { exit(node); }
  *   }
  */
-const kDepth = Symbol("pi.schema.depth");
+const depths = new WeakMap<object, number>();
 
 /**
  * Returns `true` on first entry, `false` if `target` is already on the
@@ -109,16 +84,14 @@ const kDepth = Symbol("pi.schema.depth");
  * make every later top-level walk of the same object misreport a cycle.
  */
 export function enter<T extends object>(target: T): boolean {
-	const slot = cell<number>(target, kDepth);
-	const cur = slot.value;
+	const cur = depths.get(target);
 	if (cur !== undefined && cur !== 0) return false;
-	slot.value = 1;
+	depths.set(target, 1);
 	return true;
 }
 
 export function exit<T extends object>(target: T): void {
-	const slot = cell<number>(target, kDepth);
-	const cur = slot.value;
+	const cur = depths.get(target);
 	if (cur === undefined) return;
-	slot.value = cur - 1;
+	depths.set(target, cur - 1);
 }

@@ -74,3 +74,37 @@ it("rejects frozen cycles consistently without confusing subsequent shared nodes
 		additionalProperties: false,
 	});
 });
+
+it("sends schemas carrying non-cloneable metadata to the wire without the metadata", () => {
+	const parameters: Record<string, unknown> = {
+		type: "object",
+		properties: { path: { type: "string" } },
+		required: ["path"],
+		"x-omp-coerce": (value: unknown) => value,
+	};
+	const wire = toolWireSchema({ name: "t", description: "", parameters });
+	expect(wire).toEqual({
+		type: "object",
+		properties: { path: { type: "string" } },
+		required: ["path"],
+	});
+	expect(Object.hasOwn(wire, "x-omp-coerce")).toBe(false);
+	expect(typeof parameters["x-omp-coerce"]).toBe("function");
+});
+
+function deepFreeze(value: unknown, seen = new WeakSet<object>()): void {
+	if (!value || typeof value !== "object" || seen.has(value)) return;
+	seen.add(value);
+	for (const key of Reflect.ownKeys(value)) deepFreeze((value as Record<PropertyKey, unknown>)[key], seen);
+	Object.freeze(value);
+}
+
+it("keeps traversal state off caller graphs that are deep-frozen after a first visit", () => {
+	const schema: Record<string, unknown> = { type: "object", properties: { a: { type: "string" } }, required: ["a"] };
+	const expected = { ...schema, additionalProperties: false };
+	expect(schemaNeedsDraft202012Upgrade(schema)).toBe(false);
+	expect(enforceStrictSchema(schema)).toEqual(expected);
+	deepFreeze(schema);
+	expect(schemaNeedsDraft202012Upgrade(schema)).toBe(false);
+	expect(enforceStrictSchema(schema)).toEqual(expected);
+});
