@@ -3267,6 +3267,125 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("reconciles an open document from disk before a semantic query after an external edit", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-external-edit-sync-");
+		const filePath = path.join(tempDir.path(), "target.py");
+		const uri = fileToUri(filePath);
+		const original = "def target():\n    return 1\ndef wrong():\n    return 2\nvalue = target()\n";
+		let overlay = "";
+		let sawDidChange = false;
+		let referencedSymbol = "";
+		try {
+			await Bun.write(filePath, original);
+			const serverConfig: ServerConfig = {
+				command: "fake-pyls",
+				fileTypes: ["py"],
+				rootMarkers: [],
+				isLinter: true,
+			};
+			installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { capabilities: { referencesProvider: true } },
+					});
+				} else if (message.method === "textDocument/didOpen") {
+					const params = message.params;
+					if (
+						typeof params === "object" &&
+						params !== null &&
+						"textDocument" in params &&
+						typeof params.textDocument === "object" &&
+						params.textDocument !== null &&
+						"text" in params.textDocument &&
+						typeof params.textDocument.text === "string"
+					) {
+						overlay = params.textDocument.text;
+					}
+				} else if (message.method === "textDocument/didChange") {
+					sawDidChange = true;
+					const params = message.params;
+					if (
+						typeof params === "object" &&
+						params !== null &&
+						"contentChanges" in params &&
+						Array.isArray(params.contentChanges) &&
+						typeof params.contentChanges[0] === "object" &&
+						params.contentChanges[0] !== null &&
+						"text" in params.contentChanges[0] &&
+						typeof params.contentChanges[0].text === "string"
+					) {
+						overlay = params.contentChanges[0].text;
+					}
+				} else if (message.method === "textDocument/references") {
+					const params = message.params;
+					if (
+						typeof params === "object" &&
+						params !== null &&
+						"position" in params &&
+						typeof params.position === "object" &&
+						params.position !== null &&
+						"line" in params.position &&
+						typeof params.position.line === "number" &&
+						"character" in params.position &&
+						typeof params.position.character === "number"
+					) {
+						// Resolve the identifier the server sees at the queried
+						// coordinates *in its own document*. A stale overlay would
+						// surface `wrong` at the post-edit line.
+						const targetLine = overlay.split("\n")[params.position.line] ?? "";
+						referencedSymbol = /^\w+/.exec(targetLine.slice(params.position.character))?.[0] ?? "";
+					}
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: [{ uri, range: { start: { line: 0, character: 4 }, end: { line: 0, character: 10 } } }],
+					});
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "fake-pyls": serverConfig },
+				idleTimeoutMs: undefined,
+			});
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+
+			// Warm the server document at the original position.
+			await tool.execute("references-before-edit", {
+				action: "references",
+				file: filePath,
+				line: 1,
+				symbol: "target",
+			});
+			expect(referencedSymbol).toBe("target");
+
+			// External edit (not via OMP's write/edit tools): prepend two blank
+			// lines so `target` now lives on line 3 while `wrong` sits where the
+			// server's stale document still has it.
+			await Bun.write(filePath, `\n\n${original}`);
+
+			await tool.execute("references-after-edit", {
+				action: "references",
+				file: filePath,
+				line: 3,
+				symbol: "target",
+			});
+
+			expect(sawDidChange).toBe(true);
+			expect(overlay).toBe(`\n\n${original}`);
+			expect(referencedSymbol).toBe("target");
+		} finally {
+			configCache.delete(tempDir.path());
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("flushes pending descendant text edits before a folder rename", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-folder-rename-");
 		try {

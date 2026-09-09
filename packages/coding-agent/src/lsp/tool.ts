@@ -19,11 +19,11 @@ import { clampTimeout } from "../tools/tool-timeouts";
 import {
 	applyWorkspaceEditWithLsp,
 	clearInitializationFailure,
-	ensureFileOpen,
 	getActiveClients,
 	getOrCreateClient,
 	isRustAnalyzerClient,
 	type LspServerStatus,
+	reconcileFileFromDisk,
 	reconcileIdleChecker,
 	refreshFile,
 	sendNotification,
@@ -931,7 +931,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			try {
 				const client = await getOrCreateClient(chosenConfig, this.session.cwd, undefined, signal);
 				if (resolvedTarget) {
-					await ensureFileOpen(client, resolvedTarget, signal);
+					await reconcileFileFromDisk(client, resolvedTarget, signal);
 				}
 				const result = await sendRequest(client, method, requestParams, signal);
 				const formatted =
@@ -1161,7 +1161,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				needsProjectIndex && isRustAnalyzerServer && targetFile !== null && hasRustWorkspaceAncestor(targetFile);
 
 			if (targetFile) {
-				await ensureFileOpen(client, targetFile, signal);
+				await reconcileFileFromDisk(client, targetFile, signal);
 			}
 			if (rustWorkspaceWait) {
 				await waitForProjectLoaded(client, signal);

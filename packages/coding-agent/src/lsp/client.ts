@@ -1225,6 +1225,14 @@ export async function getActiveOrPendingClient(
 }
 
 /**
+ * Signature of the document text last handed to the server, used to detect when
+ * disk contents have diverged (e.g. an external edit) from the server's copy.
+ */
+function documentSignature(content: string): number | bigint {
+	return Bun.hash(content);
+}
+
+/**
  * Ensure a file is opened in the LSP client.
  * Sends didOpen notification if the file is not already tracked.
  */
@@ -1278,13 +1286,85 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 			signal,
 		);
 
-		client.openFiles.set(uri, { version: 1, languageId });
+		client.openFiles.set(uri, { version: 1, languageId, syncedHash: documentSignature(content) });
 		client.lastActivity = Date.now();
 	})();
 
 	fileOperationLocks.set(lockKey, openPromise);
 	try {
 		await openPromise;
+	} finally {
+		fileOperationLocks.delete(lockKey);
+	}
+}
+
+/**
+ * Reconcile an already-open document with current disk contents before a semantic query.
+ *
+ * {@link ensureFileOpen} opens an untracked file but no-ops when the URI is already
+ * open, so an external edit — one not routed through OMP's write/edit tools, which
+ * announce their changes via {@link notifyWorkspaceWatchedFiles}/{@link refreshFile} —
+ * leaves the server holding the pre-edit document while callers compute query
+ * positions from disk. This reads the file and, when its contents diverge from the
+ * text last sent to the server, pushes a `didChange` so the server's copy matches
+ * the disk text the position was derived from. Untracked files fall through to
+ * {@link ensureFileOpen}; unchanged files send nothing.
+ */
+export async function reconcileFileFromDisk(client: LspClient, filePath: string, signal?: AbortSignal): Promise<void> {
+	throwIfAborted(signal);
+	const uri = fileToUri(filePath);
+	if (!client.openFiles.has(uri)) {
+		await ensureFileOpen(client, filePath, signal);
+		return;
+	}
+
+	const lockKey = `${client.name}:${uri}`;
+	const existingLock = fileOperationLocks.get(lockKey);
+	if (existingLock) {
+		await untilAborted(signal, () => existingLock);
+	}
+
+	const reconcilePromise = (async () => {
+		throwIfAborted(signal);
+		const info = client.openFiles.get(uri);
+		if (!info) {
+			await ensureFileOpen(client, filePath, signal);
+			return;
+		}
+
+		let content: string;
+		try {
+			content = await Bun.file(filePath).text();
+			throwIfAborted(signal);
+		} catch (err) {
+			if (isEnoent(err)) return;
+			throw err;
+		}
+
+		const signature = documentSignature(content);
+		if (signature === info.syncedHash) return;
+
+		// Drop cached diagnostics computed against the stale document before the
+		// server recomputes them for the reconciled content.
+		client.diagnostics.delete(uri);
+		const version = ++info.version;
+		throwIfAborted(signal);
+		await sendNotification(
+			client,
+			"textDocument/didChange",
+			{
+				textDocument: { uri, version },
+				contentChanges: [{ text: content }],
+			},
+			signal,
+		);
+		info.syncedHash = signature;
+		client.lastActivity = Date.now();
+	})();
+
+	fileOperationLocks.set(lockKey, reconcilePromise);
+	try {
+		await reconcilePromise;
 	} finally {
 		fileOperationLocks.delete(lockKey);
 	}
@@ -1350,7 +1430,7 @@ export async function syncContent(
 				},
 				signal,
 			);
-			client.openFiles.set(uri, { version: 1, languageId });
+			client.openFiles.set(uri, { version: 1, languageId, syncedHash: documentSignature(content) });
 			client.lastActivity = Date.now();
 			return;
 		}
@@ -1366,6 +1446,7 @@ export async function syncContent(
 			},
 			signal,
 		);
+		info.syncedHash = documentSignature(content);
 		client.lastActivity = Date.now();
 	})();
 
@@ -1514,6 +1595,7 @@ export async function refreshFile(client: LspClient, filePath: string, signal?: 
 			signal,
 		);
 
+		info.syncedHash = documentSignature(content);
 		client.lastActivity = Date.now();
 	})();
 
