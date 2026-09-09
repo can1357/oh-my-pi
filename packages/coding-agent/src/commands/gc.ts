@@ -2,15 +2,17 @@
  * Run on-disk storage maintenance.
  */
 
-import { Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { gcHelp as commandHelp } from "../cli/command-help";
 import { collectGcErrors, type GcCommandArgs, runGcCommand } from "../cli/gc-cli";
+import { collectStorageReport, formatStorageReport } from "../cli/gc-report";
 
 export default class Gc extends Command {
 	static description = commandHelp.description;
 	static flags = {
 		apply: Flags.boolean({ description: "Apply changes (default is dry-run)" }),
 		json: Flags.boolean({ description: "Output JSON" }),
+		report: Flags.boolean({ description: "Report storage sizes without changing files or running GC" }),
 		"agent-dir": Flags.string({ description: "Agent directory to maintain" }),
 		blobs: Flags.boolean({ description: "Sweep unreferenced blobs" }),
 		archive: Flags.boolean({ description: "Archive cold sessions" }),
@@ -22,6 +24,24 @@ export default class Gc extends Command {
 
 	async run(): Promise<void> {
 		const { flags } = await this.parse(Gc);
+		if (flags.report) {
+			const conflicts = [
+				"apply",
+				"blobs",
+				"archive",
+				"wal",
+				"cold-archive-after-days",
+				"retain-newest-global",
+				"retain-newest-per-cwd",
+			] as const;
+			for (const flag of conflicts) {
+				if (flags[flag] !== undefined) throw new CliUsageError(`--report cannot be combined with --${flag}`);
+			}
+			const report = await collectStorageReport(flags["agent-dir"]);
+			process.stdout.write(flags.json ? `${JSON.stringify(report, null, 2)}\n` : formatStorageReport(report));
+			if (report.errors.length > 0) process.exitCode = 1;
+			return;
+		}
 		const cmd: GcCommandArgs = {
 			flags: {
 				apply: flags.apply,

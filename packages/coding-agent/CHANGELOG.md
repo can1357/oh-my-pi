@@ -7,6 +7,7 @@
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 ### Added
 
+- Added `omp gc --report` to inspect storage sizes and large files without running maintenance or changing files.
 - Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
 
 ## [18.1.15] - 2026-09-08

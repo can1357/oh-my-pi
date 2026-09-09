@@ -219,7 +219,7 @@ Run `omp <command> --help` for each command's own flags and examples.
 | `compress` | Rewrite a text file into the dense prompt register, reporting what it drops. | |
 | `config` | Manage configuration settings. | [config usage](./config-usage.md), [settings](./settings.md) |
 | `dry-balance` | Dry-run OAuth account balancing across random session ids. | |
-| `gc` | Run storage garbage collection. | |
+| `gc` | Run storage garbage collection or a read-only storage report. | [Storage report](#storage-report) |
 | `grep` | Test the grep tool from the CLI. (The [`grep` tool](./tools/grep.md) is a separate agent tool.) | |
 | `gallery` | Preview tool renderers across streaming, in-progress, success, and failure states. | |
 | `git` | Interactive fullscreen git UI: split diff viewer, staging sidebar, and commit composer. | |
@@ -251,3 +251,16 @@ Run `omp <command> --help` for each command's own flags and examples.
 > reachable through related mechanisms (the `plugin` command, the `/join` slash
 > command, and so on). The table lists each as it is registered in
 > `packages/coding-agent/src/cli-commands.ts`.
+
+## Storage report
+
+`omp gc --report` inventories session journals, output logs, other session artifacts, archived journals and artifacts, blob-store files, and database/WAL/SHM files. It also lists the ten largest files in that scope. It does not report every cache or configuration file under the agent directory.
+
+```sh
+omp gc --report
+omp gc --report --json --agent-dir /path/to/agent
+```
+
+This mode only reads filesystem metadata: it does not open journals or databases, initialize settings, acquire a GC lock, repair backups, or run maintenance. It is mutually exclusive with `--apply`, maintenance selectors (`--blobs`, `--archive`, `--wal`), and retention options.
+
+Sizes are logical file bytes summed by path, not allocated blocks or reclaimable disk space. Hard links and filesystem clones may share storage while each path contributes its full logical size. Symbolic links and special files are skipped; scan errors are included and cause a nonzero exit status. Missing managed directories count as empty without being created. Because other processes may write during the scan, JSON reports explicitly set `consistentSnapshot: false`.
