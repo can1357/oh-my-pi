@@ -37,6 +37,7 @@ realtime = [
 	"dep:audiopus_sys",
 	"dep:opus",
 	"dep:webrtc",
+	"dep:rtc",
 	"device-attestation",
 ]
 
@@ -100,6 +101,7 @@ zstd.workspace = true
 audiopus_sys = { workspace = true, optional = true }
 opus = { workspace = true, optional = true }
 webrtc = { workspace = true, optional = true }
+rtc = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { workspace = true, optional = true }
