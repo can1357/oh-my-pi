@@ -203,8 +203,9 @@ export interface SessionAdvisorsOptions {
 	 * The execute-time context the bridge's tools resolve approval from.
 	 *
 	 * `ExtensionToolWrapper` reads the approval mode, per-tool policies and
-	 * `autoApprove` only from here; with none it falls back to `yolo` and empty
-	 * policies, so a native frame would run past a configured `ask` or `deny`.
+	 * `autoApprove` only from here; with none it fails closed to `always-ask`
+	 * with empty policies (no user grant), so a native frame that needs a
+	 * prompt cannot run unattended.
 	 */
 	getToolContext?: () => AgentToolContext | undefined;
 	/**
@@ -954,7 +955,8 @@ export class SessionAdvisors {
 				getCwd: () => this.#host.sessionManager.getCwd(),
 				tools: bridgeToolMap(advisorToolMap, this.#advisorCreateEditTool),
 				// Approval mode, per-tool policies and `autoApprove` live only on
-				// this context; without it every bridge tool resolves as `yolo`.
+				// this context; without it every bridge tool fails closed to
+				// `always-ask`.
 				getToolContext: this.#advisorGetToolContext,
 				allowDirectFileMutation: advisorCanMutateFiles,
 				// Gated on the advisor's own grant: the factory builds a fresh

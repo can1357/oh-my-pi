@@ -96,6 +96,12 @@ describe("tools.approvalMode setting", () => {
 		expect(textOf(result)).toContain("ok");
 	});
 
+	it("missing execute-time context fails closed for an exec-tier tool", async () => {
+		await expect(
+			bashTool().execute("no-context", { command: "echo leaked" }, undefined, undefined, undefined),
+		).rejects.toThrow(/requires approval but no interactive UI available/);
+	});
+
 	it("always-ask mode rejects exec tools when no UI is available", async () => {
 		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
 		await expect(

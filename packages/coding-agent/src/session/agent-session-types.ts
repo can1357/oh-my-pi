@@ -295,8 +295,8 @@ export interface AgentSessionConfig {
 	 *
 	 * `ExtensionToolWrapper` reads `tools.approvalMode`, per-tool
 	 * `tools.approval.<tool>` policies and `autoApprove` only from this context;
-	 * with none it defaults to `yolo` with empty policies, so a bridge tool would
-	 * run a native frame the user configured `ask` or `deny` for.
+	 * with none it fails closed to `always-ask` with empty policies (no user
+	 * grant), so a bridge tool that needs a prompt cannot run unattended.
 	 */
 	advisorGetToolContext?: () => AgentToolContext | undefined;
 	/**
