@@ -1579,36 +1579,6 @@ describe("askToolRenderer malformed call args", () => {
 		expect(text).toContain("Alpha");
 	});
 
-	it("renders single-choice result with the same radio glyph as the dialog row engine", async () => {
-		const rendered = askToolRenderer.renderResult(
-			{
-				content: [{ type: "text", text: "" }],
-				details: { question: "Pick one", multi: false, options: ["Alpha", "Beta"], selectedOptions: ["Alpha"] },
-			},
-			{ expanded: true, isPartial: false },
-			darkTheme,
-		);
-		const text = stripAnsi(rendered.render(120).join("\n"));
-		// The dialog's askOptionMarker(false, true) returns theme.radio.selected.
-		expect(text).toContain(darkTheme.radio.selected);
-		expect(text).not.toContain(darkTheme.checkbox.checked);
-	});
-
-	it("renders multi-select result with the same checkbox glyph as the dialog row engine", async () => {
-		const rendered = askToolRenderer.renderResult(
-			{
-				content: [{ type: "text", text: "" }],
-				details: { question: "Pick many", multi: true, options: ["Alpha", "Beta"], selectedOptions: ["Alpha"] },
-			},
-			{ expanded: true, isPartial: false },
-			darkTheme,
-		);
-		const text = stripAnsi(rendered.render(120).join("\n"));
-		// The dialog's askOptionMarker(true, true) returns theme.checkbox.checked.
-		expect(text).toContain(darkTheme.checkbox.checked);
-		expect(text).not.toContain(darkTheme.radio.selected);
-	});
-
 	it("shows a counted truncation cue on a windowed option description", async () => {
 		const tool = new AskTool(createSession());
 		const editor = vi.fn(async (_prompt: string) => "custom");

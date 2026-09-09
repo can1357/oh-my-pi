@@ -294,10 +294,20 @@ export function snapshotThemeState(): () => Promise<void> {
 	const priorWatcher = themeWatcher !== undefined || themeReloadTimer !== undefined;
 	const priorSigwinch = sigwinchHandler !== undefined;
 	const priorTerminalAppearance = terminalReportedAppearance;
+	// Capture configuration fields that configureTheme/setSymbolPreset/setColorBlindMode
+	// mutate, so a temporary theme swap cannot leak its settings to later tests.
+	const priorSymbolPresetOverride = currentSymbolPresetOverride;
+	const priorColorBlindMode = currentColorBlindMode;
+	const priorAutoDarkTheme = autoDarkTheme;
+	const priorAutoLightTheme = autoLightTheme;
 	return async () => {
 		theme = priorTheme;
 		currentThemeName = priorName;
 		autoDetectedTheme = priorAuto;
+		currentSymbolPresetOverride = priorSymbolPresetOverride;
+		currentColorBlindMode = priorColorBlindMode;
+		autoDarkTheme = priorAutoDarkTheme;
+		autoLightTheme = priorAutoLightTheme;
 		if (priorWatcher) await startThemeWatcher();
 		else stopThemeWatcher();
 		// Both watcher paths above drop the OSC 11 report via stopThemeWatcher;

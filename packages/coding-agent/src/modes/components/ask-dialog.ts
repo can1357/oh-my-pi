@@ -325,17 +325,24 @@ function previewFacetWidths(
 function countedMoreCue(hidden: number, width: number): string {
 	const glyph = theme.nav.expand || "▾";
 	const noun = hidden === 1 ? "line" : "lines";
+	const reveal = `${askActionKey("app.ask.expand")} expand`;
 	// Name the key that reveals the rest: the facet cannot scroll, so a bare
 	// count would advertise unread lines with no way to reach them. The full
 	// form outgrows the narrowest split facet (29 columns), so shed count
-	// wording — never the reveal — as the facet narrows. The key sits ahead
-	// of the verb so even an over-long custom binding clips its tail first.
-	const reveal = `${askActionKey("app.ask.expand")} expand`;
+	// wording — then the decorative glyph — before touching the action cue.
+	// The final branch is still bounded so later fit() never has to right-truncate
+	// away the "expand" instruction.
 	const full = `${glyph} ${hidden} more ${noun} · ${reveal}`;
 	if (visibleWidth(full) <= width) return theme.fg("dim", full);
 	const counted = `${glyph} ${hidden} more · ${reveal}`;
 	if (visibleWidth(counted) <= width) return theme.fg("dim", counted);
-	return theme.fg("dim", `${glyph} ${reveal}`);
+	const bare = `${glyph} ${reveal}`;
+	if (visibleWidth(bare) <= width) return theme.fg("dim", bare);
+	// Preserve the action cue without the glyph while it fits; when even the
+	// action cue cannot fit, bound it with the existing width-aware truncation
+	// helper so fit() never has to right-truncate it away.
+	if (visibleWidth(reveal) <= width) return theme.fg("dim", reveal);
+	return theme.fg("dim", truncateToWidth(reveal, Math.max(1, width), Ellipsis.Unicode));
 }
 
 function truncateFooter(parts: string[], maxWidth: number): string {
@@ -515,7 +522,12 @@ export class AskDialogComponent implements Component, Focusable {
 		this.#countdown?.reset();
 		if (matchesSelectCancel(keyData)) {
 			if (this.#filterOpen || this.#filterQuery.length > 0) {
+				const active = this.#activeQuestionState();
+				const prevFocusedKey = active
+					? this.#visibleRows(active.question)[active.state.cursorIndex]?.key
+					: undefined;
 				this.#clearFilter();
+				if (active) this.#reanchorCursor(active.question, active.state, prevFocusedKey);
 				this.#requestRender();
 				return;
 			}

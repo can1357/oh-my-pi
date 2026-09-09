@@ -4,14 +4,19 @@ import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AskDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
 import {
+	getColorBlindMode,
 	getCurrentThemeName,
+	getSymbolPresetOverride,
 	getThemeByName,
 	initTheme,
 	onTerminalAppearanceChange,
+	setAutoThemeMapping,
+	setColorBlindMode,
+	setSymbolPreset,
 	setThemeInstance,
 	snapshotThemeState,
 } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { CURSOR_MARKER, setKeybindings } from "@oh-my-pi/pi-tui";
+import { CURSOR_MARKER, setKeybindings, visibleWidth } from "@oh-my-pi/pi-tui";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
@@ -2764,6 +2769,103 @@ describe("AskDialogComponent", () => {
 			// One scheduler turn drains the in-flight auto-theme load (its
 			// completion is module-private) so its callback cannot overwrite
 			// the restored dark instance after this test yields.
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setImmediate(resolve);
+			await promise;
+			setThemeInstance(darkTheme);
+		}
+	});
+
+	it("drops the glyph to keep a long custom expand cue within the preview facet", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const preview = Array.from({ length: 40 }, (_, index) => `PREVIEW-LINE-${index + 1}`).join("\n");
+			const component = new AskDialogComponent(
+				[{ id: "q1", question: "Pick?", options: [{ label: "Alpha", preview }, { label: "Bravo" }] }],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			);
+			setKeybindings(
+				KeybindingsManager.inMemory({
+					"tui.select.cancel": "ctrl+g",
+					"app.ask.expand": "ctrl+shift+alt+super+f12",
+				}),
+			);
+			const frame = component.render(64);
+			const stripped = frame.map(line => stripVTControlCharacters(line));
+			const cueLine = stripped.find(line => line.includes("Ctrl+Shift+Alt+Super+F12") && !line.includes("note"));
+			if (!cueLine) throw new Error("long-key preview overflow cue is missing");
+			const parts = cueLine.split("│");
+			const previewPart = (parts[parts.length - 2] ?? "").trimEnd();
+			expect(previewPart).toContain("Ctrl+Shift+Alt+Super+F12".slice(0, 20));
+			expect(visibleWidth(previewPart)).toBeLessThanOrEqual(29);
+			expect(previewPart).not.toMatch(/\d+ more/);
+			expect(previewPart.endsWith("…")).toBe(true);
+			expect(previewPart.startsWith("Ctrl")).toBe(true);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("Escape after filtering preserves the focused row so Enter submits it, not the unfiltered index", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onSubmit = vi.fn();
+			const options = Array.from({ length: 12 }, (_, index) => ({
+				label: String.fromCharCode(65 + index),
+			}));
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit,
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			component.handleInput("/");
+			component.handleInput("d");
+			component.handleInput(CANCEL);
+			component.handleInput(ENTER);
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["D"]);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("snapshot restores symbol preset, color-blind mode, and auto-theme mappings", async () => {
+		if (!darkTheme) throw new Error("Failed to load dark theme");
+		const savedColorFgbg = Bun.env.COLORFGBG;
+		Bun.env.COLORFGBG = "0;15";
+		try {
+			await initTheme(false, "nerd", true, "light", "dark");
+			expect(getCurrentThemeName()).toBe("dark");
+			expect(getSymbolPresetOverride()).toBe("nerd");
+			expect(getColorBlindMode()).toBe(true);
+
+			const restore = snapshotThemeState();
+
+			// Mutate all four configuration fields and replace the theme instance.
+			await setSymbolPreset("unicode");
+			await setColorBlindMode(false);
+			setAutoThemeMapping("dark", "dark");
+			setAutoThemeMapping("light", "light");
+			setThemeInstance(darkTheme);
+
+			await restore();
+
+			expect(getSymbolPresetOverride()).toBe("nerd");
+			expect(getColorBlindMode()).toBe(true);
+			expect(getCurrentThemeName()).toBe("dark");
+
+			// The restored auto-theme mappings must take effect without a manual reload.
+			onTerminalAppearanceChange("dark");
+			expect(getCurrentThemeName()).toBe("light");
+			onTerminalAppearanceChange("light");
+			expect(getCurrentThemeName()).toBe("dark");
+		} finally {
+			Bun.env.COLORFGBG = savedColorFgbg;
 			const { promise, resolve } = Promise.withResolvers<void>();
 			setImmediate(resolve);
 			await promise;
