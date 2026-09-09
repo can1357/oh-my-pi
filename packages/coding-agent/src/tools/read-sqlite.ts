@@ -5,7 +5,7 @@ import { DEFAULT_MAX_LINES, truncateHead } from "../session/streaming-output";
 import { applyListLimit } from "./list-limit";
 import { resolveReadPath } from "./path-utils";
 import type { ReadToolDetails } from "./read";
-import { prependSuffixResolutionNotice } from "./read-format";
+import { prependSuffixResolutionNotice, toReadTruncationStats } from "./read-format";
 import {
 	findSuffixMatchCached,
 	isNotFoundError,
@@ -119,7 +119,7 @@ export async function readSqlite(
 					resolvedSqlitePath.suffixResolution,
 				);
 				const truncation = truncateHead(output, { maxLines: Number.MAX_SAFE_INTEGER });
-				details.truncation = truncation.truncated ? truncation : undefined;
+				details.truncation = truncation.truncated ? toReadTruncationStats(truncation) : undefined;
 				const resultBuilder = toolResult<ReadToolDetails>(details)
 					.text(truncation.content)
 					.sourcePath(resolvedSqlitePath.absolutePath)
