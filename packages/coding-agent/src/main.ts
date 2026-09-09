@@ -9,6 +9,7 @@ import * as os from "node:os";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import { getCatalogProviderEntry } from "@oh-my-pi/pi-catalog/provider-models";
 import {
 	$env,
 	directoryIsMissing,
@@ -852,6 +853,11 @@ export async function resolveScopedModels(
  * {@link buildSessionOptions} exits on miss. Credentials may come from
  * `--api-key`, env, secrets file, or `models.yml` — not specifically a CLI key.
  * `--models` scopes already refresh via {@link resolveScopedModels}.
+ *
+ * Built-in descriptor providers (e.g. Grok Bot) are not listed by
+ * {@link ModelRegistry.getDiscoverableProviders} — that API only covers
+ * models.yml / runtime discovery / implicit local providers — so the gate also
+ * accepts catalog entries with `createModelManagerOptions`.
  */
 export async function refreshCredentialScopedModelIfMissing(
 	parsed: Pick<Args, "model">,
@@ -860,7 +866,7 @@ export async function refreshCredentialScopedModelIfMissing(
 ): Promise<boolean> {
 	if (!parsed.model || !providerId) return false;
 	if (!modelRegistry.hasProvider(providerId)) return false;
-	if (!modelRegistry.getDiscoverableProviders().includes(providerId)) return false;
+	if (!providerSupportsCredentialScopedRefresh(providerId, modelRegistry)) return false;
 	const raw = parsed.model.trim();
 	const withoutThinking = raw.includes(":") ? raw.slice(0, raw.indexOf(":")) : raw;
 	const slash = withoutThinking.indexOf("/");
@@ -875,6 +881,15 @@ export async function refreshCredentialScopedModelIfMissing(
 	if (present) return false;
 	await modelRegistry.refreshProvider(providerId, "online-if-uncached");
 	return true;
+}
+
+/** models.yml/runtime discovery OR a built-in catalog model-manager descriptor. */
+function providerSupportsCredentialScopedRefresh(
+	providerId: string,
+	modelRegistry: Pick<ModelRegistry, "getDiscoverableProviders">,
+): boolean {
+	if (modelRegistry.getDiscoverableProviders().includes(providerId)) return true;
+	return Boolean(getCatalogProviderEntry(providerId)?.createModelManagerOptions);
 }
 
 /**

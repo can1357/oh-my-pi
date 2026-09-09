@@ -4,11 +4,13 @@
 
 ### Fixed
 
+- Cold `--provider`/`--model` refresh also gates on built-in catalog model-manager descriptors (e.g. Grok Bot), not only `getDiscoverableProviders()` (models.yml / runtime / implicit local).
 - Task descriptions containing tabs no longer misalign or overflow task rows; tabs are expanded before measuring and rendering.
 - GitHub Copilot model-policy 403s (plan, model policy, org restriction) no longer delete stored credentials, so the provider stays listed in `/model` after a per-model access denial instead of disappearing until the next `/login` ([#11280](https://github.com/can1357/oh-my-pi/pull/11280) by [@H4vC](https://github.com/H4vC)).
 - `--provider`/`--model` with `--api-key` refreshes a cold credential-scoped catalog before model resolve so live-only ids are not missing on a fresh profile.
 - `--provider`/`--model` refreshes a cold credential-scoped catalog before model resolve for env, secrets-file, and `models.yml` credentials (not only `--api-key`).
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
+
 ### Added
 
 - Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
