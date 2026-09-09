@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Limited newest-file searches use less memory on large directory trees when scan caching is disabled.
+
 ## [18.1.15] - 2026-09-08
 
 ### Fixed

@@ -16,6 +16,7 @@ use std::{
 	borrow::Cow,
 	cell::{Cell, RefCell},
 	cmp::Ordering,
+	collections::BinaryHeap,
 	convert::Infallible,
 	ffi::OsStr,
 	fmt,
@@ -1089,6 +1090,15 @@ impl WalkRequest {
 		let mut options = self.effective_options();
 		if matches!(rank, Some(WalkRank::MtimeDescPathAsc)) {
 			options.detail = WalkDetail::Full;
+		}
+		if !options.cache
+			&& let (Some(rank), Some(limit)) = (rank, limit)
+		{
+			let mut collector = RankedCollectVisitor::new(&self.filter, rank, limit);
+			walk_entries(&self.root, options, &mut collector, || {
+				heartbeat().map_err(|err| err.to_string())
+			})?;
+			return Ok(collector.into_outcome());
 		}
 		let mut scan = self.collect_entries_with_options(options, &heartbeat)?;
 		let mut backend = if scan.cache_age_ms == 0 {
@@ -2195,6 +2205,96 @@ where
 struct CollectVisitor<E> {
 	entries: Vec<CollectedEntry>,
 	_error:  std::marker::PhantomData<fn() -> E>,
+}
+
+struct RankedEntry {
+	entry: CollectedEntry,
+	rank:  WalkRank,
+}
+
+impl Ord for RankedEntry {
+	fn cmp(&self, other: &Self) -> Ordering {
+		match (self.rank, other.rank) {
+			(WalkRank::PathAsc, WalkRank::PathAsc) => self.entry.path.cmp(&other.entry.path),
+			(WalkRank::MtimeDescPathAsc, WalkRank::MtimeDescPathAsc) => {
+				WalkRequest::compare_mtime_desc_path_asc(&self.entry, &other.entry)
+			},
+			(WalkRank::PathAsc, WalkRank::MtimeDescPathAsc) => Ordering::Less,
+			(WalkRank::MtimeDescPathAsc, WalkRank::PathAsc) => Ordering::Greater,
+		}
+	}
+}
+
+impl PartialOrd for RankedEntry {
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+impl PartialEq for RankedEntry {
+	fn eq(&self, other: &Self) -> bool {
+		self.cmp(other) == Ordering::Equal
+	}
+}
+
+impl Eq for RankedEntry {}
+
+struct RankedCollectVisitor<'a> {
+	filter:   &'a WalkFilter,
+	rank:     WalkRank,
+	limit:    usize,
+	entries:  BinaryHeap<RankedEntry>,
+	scanned:  usize,
+	filtered: usize,
+}
+
+impl<'a> RankedCollectVisitor<'a> {
+	const fn new(filter: &'a WalkFilter, rank: WalkRank, limit: usize) -> Self {
+		Self { filter, rank, limit, entries: BinaryHeap::new(), scanned: 0, filtered: 0 }
+	}
+
+	fn into_outcome(self) -> WalkOutcome {
+		let stats = WalkStats {
+			cache_age_ms:     0,
+			scanned_entries:  self.scanned,
+			filtered_entries: self.filtered,
+			limited_entries:  self.scanned - self.filtered - self.entries.len(),
+		};
+		let entries = self
+			.entries
+			.into_sorted_vec()
+			.into_iter()
+			.map(|entry| entry.entry)
+			.collect();
+		WalkOutcome { entries, backend: WalkBackend::Fresh, stats }
+	}
+}
+
+impl EntryVisitor for RankedCollectVisitor<'_> {
+	type Error = String;
+
+	fn visit(&mut self, entry: Entry<'_>) -> std::result::Result<WalkControl, Self::Error> {
+		self.scanned += 1;
+		let entry = CollectedEntry {
+			path:      entry.relative.to_string(),
+			file_type: entry.file_type,
+			mtime:     entry.mtime,
+			size:      entry.size,
+		};
+		if !self.filter.accepts_collected(&entry) {
+			self.filtered += 1;
+			return Ok(WalkControl::Continue);
+		}
+		let candidate = RankedEntry { entry, rank: self.rank };
+		if self.entries.len() < self.limit {
+			self.entries.push(candidate);
+		} else if let Some(mut worst) = self.entries.peek_mut()
+			&& candidate < *worst
+		{
+			*worst = candidate;
+		}
+		Ok(WalkControl::Continue)
+	}
 }
 
 impl<E> CollectVisitor<E> {
@@ -4386,6 +4486,116 @@ mod tests {
 		let paths = collect_file_paths(&project, true);
 
 		assert_eq!(paths, vec!["keep.ts", "nested/.gitignore", "nested/keep.ts"]);
+	}
+
+	#[test]
+	fn ranked_collection_matches_full_sort_after_filtering_at_every_limit() {
+		let tree = temp_tree("ranked-limits");
+		fs::create_dir(tree.path().join("nested")).expect("create nested directory");
+		for index in 0..24 {
+			let relative = format!("nested/{index:02}.txt");
+			let file = fs::File::create(tree.path().join(relative)).expect("create ranked file");
+			file.set_len(index).expect("set size");
+			file
+				.set_modified(UNIX_EPOCH + Duration::from_secs(100 + index / 3))
+				.expect("set modification time");
+		}
+		let request = WalkRequest::from_options(tree.path(), WalkOptions {
+			detail: WalkDetail::Full,
+			..test_options()
+		})
+		.filter(WalkFilter::files_only().max_file_size(20))
+		.limit(1);
+		for rank in [WalkRank::PathAsc, WalkRank::MtimeDescPathAsc] {
+			for limit in [0, 1, 4, 21, 100, usize::MAX] {
+				let reference = request
+					.clone()
+					.cache(true)
+					.collect_ranked(rank, limit)
+					.expect("full-sort cached collector");
+				let actual = request
+					.collect_ranked(rank, limit)
+					.expect("streaming ranked collector");
+				assert_eq!(actual.entries, reference.entries);
+				assert_eq!(actual.stats.scanned_entries, 25);
+				assert_eq!(actual.stats.filtered_entries, 4);
+				assert_eq!(actual.stats.limited_entries, 21usize.saturating_sub(limit));
+				assert_eq!(actual.backend, WalkBackend::Fresh);
+			}
+		}
+	}
+
+	#[test]
+	fn ranked_collection_keeps_heartbeat_cancellation_after_limit_is_filled() {
+		let tree = temp_tree("ranked-cancel");
+		for index in 0..300 {
+			fs::write(tree.path().join(format!("{index}.txt")), "x").expect("create file");
+		}
+		for limit in [0, 1] {
+			let beats = std::sync::atomic::AtomicUsize::new(0);
+			let result = WalkRequest::from_options(tree.path(), test_options())
+				.collect_ranked_with_heartbeat(WalkRank::PathAsc, limit, || {
+					if beats.fetch_add(1, AtomicOrdering::Relaxed) == 0 {
+						Ok(())
+					} else {
+						Err("cancelled")
+					}
+				});
+			assert!(matches!(result, Err(WalkError::Interrupted(message)) if message == "cancelled"));
+		}
+	}
+
+	#[test]
+	fn ranked_heap_preserves_total_float_order_and_path_ties() {
+		let filter = WalkFilter::default();
+		let inputs = [
+			("missing", None),
+			("negative-nan", Some(-f64::NAN)),
+			("negative-zero", Some(-0.0)),
+			("tie-z", Some(2.0)),
+			("positive-zero", Some(0.0)),
+			("positive-nan", Some(f64::NAN)),
+			("infinity", Some(f64::INFINITY)),
+			("tie-a", Some(2.0)),
+		];
+		let expected = [
+			"positive-nan",
+			"infinity",
+			"tie-a",
+			"tie-z",
+			"positive-zero",
+			"negative-zero",
+			"negative-nan",
+			"missing",
+		];
+		for limit in [0, 1, 4, 8, 100] {
+			let mut collector = RankedCollectVisitor::new(&filter, WalkRank::MtimeDescPathAsc, limit);
+			for (relative, mtime) in inputs {
+				collector
+					.visit(Entry {
+						path: Path::new(relative),
+						relative,
+						name: OsStr::new(relative),
+						file_type: FileType::File,
+						mtime,
+						size: None,
+						depth: 1,
+					})
+					.expect("collect synthetic metadata");
+				assert!(collector.entries.len() <= limit);
+			}
+			let outcome = collector.into_outcome();
+			assert_eq!(
+				outcome
+					.entries
+					.iter()
+					.map(|entry| entry.path.as_str())
+					.collect::<Vec<_>>(),
+				expected[..limit.min(expected.len())]
+			);
+			assert_eq!(outcome.stats.scanned_entries, inputs.len());
+			assert_eq!(outcome.stats.limited_entries, inputs.len().saturating_sub(limit));
+		}
 	}
 
 	#[test]
