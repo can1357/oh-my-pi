@@ -138,7 +138,7 @@ export function parsePluginArgs(args: string[]): PluginCommandArgs | undefined {
 	return result;
 }
 
-import { classifyInstallTarget, previewMarketplaceInstall } from "./classify-install-target";
+import { classifyInstallTarget, handleMarketplaceInstall } from "./classify-install-target";
 
 export { classifyInstallTarget } from "./classify-install-target";
 
@@ -369,22 +369,23 @@ async function handleInstall(
 		const target = classifyInstallTarget(spec, knownMarketplaces);
 
 		if (target.type === "marketplace") {
-			if (flags.dryRun) {
-				try {
-					const preview = await previewMarketplaceInstall(mktMgr, target, {
-						force: flags.force,
-						scope: flags.scope,
-					});
-					if (flags.json) {
-						console.log(JSON.stringify(preview, null, 2));
-					} else {
-						console.log(chalk.dim(`[dry-run] Would install ${spec}`));
-					}
-				} catch (err) {
-					console.error(chalk.red(`${theme.status.error} Failed to install ${spec}: ${err}`));
-					process.exit(1);
-				}
-				continue;
+			try {
+				const handled = await handleMarketplaceInstall(
+					mktMgr,
+					target,
+					{ dryRun: flags.dryRun ?? false, force: flags.force, scope: flags.scope },
+					preview => {
+						if (flags.json) {
+							console.log(JSON.stringify(preview, null, 2));
+						} else {
+							console.log(chalk.dim(`[dry-run] Would install ${spec}`));
+						}
+					},
+				);
+				if (handled) continue;
+			} catch (err) {
+				console.error(chalk.red(`${theme.status.error} Failed to install ${spec}: ${err}`));
+				process.exit(1);
 			}
 			try {
 				const entry = await mktMgr.installPlugin(target.name, target.marketplace, {

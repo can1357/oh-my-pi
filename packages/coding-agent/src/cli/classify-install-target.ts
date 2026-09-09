@@ -52,11 +52,7 @@ export type ClassifiedInstallTarget =
 	| { type: "marketplace"; name: string; marketplace: string }
 	| { type: "npm"; spec: string };
 
-export type MarketplaceInstallOptions = { force?: boolean; scope?: "user" | "project" };
-
-export interface MarketplacePreviewReader {
-	validateInstallPlugin(name: string, marketplace: string, options?: MarketplaceInstallOptions): Promise<void>;
-}
+export type MarketplaceInstallOptions = { dryRun: boolean; force?: boolean; scope?: "user" | "project" };
 
 export type MarketplaceInstallPreview = {
 	dryRun: true;
@@ -65,18 +61,32 @@ export type MarketplaceInstallPreview = {
 	marketplace: string;
 };
 
-export async function previewMarketplaceInstall(
+export interface MarketplacePreviewReader {
+	validateInstallPlugin(
+		name: string,
+		marketplace: string,
+		options?: Omit<MarketplaceInstallOptions, "dryRun">,
+	): Promise<void>;
+}
+
+export async function handleMarketplaceInstall(
 	manager: MarketplacePreviewReader,
 	target: Extract<ClassifiedInstallTarget, { type: "marketplace" }>,
-	options?: MarketplaceInstallOptions,
-): Promise<MarketplaceInstallPreview> {
-	await manager.validateInstallPlugin(target.name, target.marketplace, options);
-	return {
+	options: MarketplaceInstallOptions,
+	emitPreview: (preview: MarketplaceInstallPreview) => void,
+): Promise<boolean> {
+	if (!options.dryRun) return false;
+	await manager.validateInstallPlugin(target.name, target.marketplace, {
+		force: options.force,
+		scope: options.scope,
+	});
+	emitPreview({
 		dryRun: true,
 		action: "install",
 		plugin: target.name,
 		marketplace: target.marketplace,
-	};
+	});
+	return true;
 }
 
 export function classifyInstallTarget(spec: string, knownMarketplaces: Set<string>): ClassifiedInstallTarget {

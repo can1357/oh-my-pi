@@ -46,6 +46,61 @@ export async function resolvePluginSource(
 	return resolveObjectSource(source, context);
 }
 
+/**
+ * Validate source constraints that can be checked without cloning or mutating files.
+ */
+export async function validatePluginSource(
+	entry: MarketplacePluginEntry,
+	context: Pick<ResolveContext, "marketplaceClonePath" | "catalogMetadata">,
+): Promise<void> {
+	const { source } = entry;
+	if (typeof source === "string") {
+		if (!source.startsWith("./")) {
+			throw new Error(`Relative plugin source paths must start with "./" — got: "${source}"`);
+		}
+		if (!context.marketplaceClonePath) {
+			throw new Error(`Cannot resolve relative source "${source}": marketplaceClonePath is required`);
+		}
+		const pluginRoot = context.catalogMetadata?.pluginRoot;
+		const relativePath = pluginRoot ? `./${path.join(pluginRoot, source.slice(2))}` : source;
+		const resolved = path.resolve(context.marketplaceClonePath, relativePath);
+		if (!pathIsWithin(context.marketplaceClonePath, resolved)) {
+			throw new Error(
+				`Plugin source "${source}" resolves outside marketplace root ("${context.marketplaceClonePath}")`,
+			);
+		}
+		await verifyDirExists(resolved, `Plugin source directory does not exist: "${resolved}"`);
+		return;
+	}
+
+	switch (source.source) {
+		case "url":
+		case "github":
+			return;
+		case "git-subdir": {
+			const normalizedPath = source.path.replaceAll("\\", "/");
+			if (path.posix.isAbsolute(normalizedPath) || normalizedPath.split("/").includes("..")) {
+				throw new Error(`git-subdir path "${source.path}" escapes the cloned repository`);
+			}
+			return;
+		}
+		case "npm":
+			throw new Error("npm plugin sources are not yet supported. Use git-based sources instead.");
+		default: {
+			const unknownSource: unknown = source;
+			if (
+				unknownSource &&
+				typeof unknownSource === "object" &&
+				"source" in unknownSource &&
+				typeof unknownSource.source === "string"
+			) {
+				throw new Error(`Unknown plugin source type: "${unknownSource.source}"`);
+			}
+			throw new Error("Unknown plugin source type");
+		}
+	}
+}
+
 // ── Relative string source ("./plugins/foo") ────────────────────────
 
 async function resolveRelativeSource(

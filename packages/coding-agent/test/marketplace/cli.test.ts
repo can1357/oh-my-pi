@@ -1,9 +1,6 @@
 import { describe, expect, it, spyOn } from "bun:test";
 
-import {
-	classifyInstallTarget,
-	previewMarketplaceInstall,
-} from "@oh-my-pi/pi-coding-agent/cli/classify-install-target";
+import { classifyInstallTarget, handleMarketplaceInstall } from "@oh-my-pi/pi-coding-agent/cli/classify-install-target";
 
 const KNOWN = new Set(["my-marketplace"]);
 
@@ -84,29 +81,34 @@ describe("classifyInstallTarget", () => {
 	});
 });
 
-it("marketplace dry-run validates preconditions without invoking installPlugin", async () => {
+it("marketplace dry-run validates preconditions and emits a preview without invoking installPlugin", async () => {
 	const manager = {
 		validateInstallPlugin: async () => undefined,
 		installPlugin: async () => undefined,
 	};
 	const validationSpy = spyOn(manager, "validateInstallPlugin");
 	const installSpy = spyOn(manager, "installPlugin");
-	const preview = await previewMarketplaceInstall(
+	const previews: unknown[] = [];
+	const handled = await handleMarketplaceInstall(
 		manager,
 		{
 			type: "marketplace",
 			name: "hello",
 			marketplace: "my-marketplace",
 		},
-		{ force: true, scope: "project" },
+		{ dryRun: true, force: true, scope: "project" },
+		preview => previews.push(preview),
 	);
 
+	expect(handled).toBe(true);
 	expect(validationSpy).toHaveBeenCalledWith("hello", "my-marketplace", { force: true, scope: "project" });
 	expect(installSpy).not.toHaveBeenCalled();
-	expect(preview).toEqual({
-		dryRun: true,
-		action: "install",
-		plugin: "hello",
-		marketplace: "my-marketplace",
-	});
+	expect(previews).toEqual([
+		{
+			dryRun: true,
+			action: "install",
+			plugin: "hello",
+			marketplace: "my-marketplace",
+		},
+	]);
 });

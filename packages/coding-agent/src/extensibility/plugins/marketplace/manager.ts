@@ -30,7 +30,7 @@ import {
 	writeInstalledPluginsRegistry,
 	writeMarketplacesRegistry,
 } from "./registry";
-import { resolvePluginSource } from "./source-resolver";
+import { resolvePluginSource, validatePluginSource } from "./source-resolver";
 import type {
 	InstalledPluginEntry,
 	InstalledPluginSummary,
@@ -76,7 +76,7 @@ type InstallValidation = {
 	force: boolean;
 	scope: "user" | "project";
 	registryPath: string;
-	mktEntry: MarketplaceRegistryEntry;
+	marketplaceClonePath: string;
 	catalog: MarketplaceCatalog;
 	pluginEntry: MarketplacePluginEntry;
 	pluginId: string;
@@ -270,6 +270,18 @@ export class MarketplaceManager {
 			throw new Error(`Plugin "${name}" not found in marketplace "${marketplace}"`);
 		}
 
+		const marketplaceClonePath = this.#resolveMarketplaceRoot(mktEntry);
+		if (mktEntry.sourceType === "url" && typeof pluginEntry.source === "string") {
+			throw new Error(
+				`Plugin "${name}" uses a relative source path but marketplace "${marketplace}" was added via URL. ` +
+					`Relative sources require a git or local marketplace. Re-add the marketplace using its git URL.`,
+			);
+		}
+		await validatePluginSource(pluginEntry, {
+			marketplaceClonePath,
+			catalogMetadata: catalog.metadata,
+		});
+
 		const pluginId = buildPluginId(name, marketplace);
 		const instReg = await readInstalledPluginsRegistry(registryPath);
 		const existing = getInstalledPlugin(instReg, pluginId);
@@ -277,7 +289,7 @@ export class MarketplaceManager {
 			throw new Error(`Plugin "${pluginId}" is already installed. Use force option to reinstall.`);
 		}
 
-		return { force, scope, registryPath, mktEntry, catalog, pluginEntry, pluginId, existing };
+		return { force, scope, registryPath, catalog, marketplaceClonePath, pluginEntry, pluginId, existing };
 	}
 
 	async validateInstallPlugin(
@@ -293,33 +305,10 @@ export class MarketplaceManager {
 		marketplace: string,
 		options?: { force?: boolean; scope?: "user" | "project" },
 	): Promise<InstalledPluginEntry> {
-		const { scope, registryPath, mktEntry, catalog, pluginEntry, pluginId, existing } = await this.#validateInstall(
-			name,
-			marketplace,
-			options,
-		);
+		const { scope, registryPath, catalog, marketplaceClonePath, pluginEntry, pluginId, existing } =
+			await this.#validateInstall(name, marketplace, options);
 
 		// 4. Resolve source path.
-		// marketplaceClonePath is the marketplace root — the directory containing .claude-plugin/
-		// catalogPath is <marketplacesCacheDir>/<name>/marketplace.json, so the root is two levels up.
-		// For local sources the content was fetched from a local path; the stored catalog is a copy
-		// under marketplacesCacheDir. We need the original source root for resolving relative paths.
-		// Use: path.dirname(catalogPath) is <cacheDir>/<name>/, and that IS the stored copy root,
-		// so `path.resolve(mktEntry.catalogPath, "../..")` = parent of <name>/ inside cacheDir
-		// which is wrong for local sources. Instead, derive from the stored catalog directory:
-		// stored at: <marketplacesCacheDir>/<catalogName>/marketplace.json
-		// The marketplace root for local sources should be the actual local path, but we only have
-		// sourceUri. For local sources, use path.resolve of sourceUri; for others use the cache dir.
-		const marketplaceClonePath = this.#resolveMarketplaceRoot(mktEntry);
-
-		// URL-sourced marketplaces only cache marketplace.json, not the full plugin tree.
-		// Relative string sources ("./plugins/foo") cannot be resolved against the cache dir.
-		if (mktEntry.sourceType === "url" && typeof pluginEntry.source === "string") {
-			throw new Error(
-				`Plugin "${name}" uses a relative source path but marketplace "${marketplace}" was added via URL. ` +
-					`Relative sources require a git or local marketplace. Re-add the marketplace using its git URL.`,
-			);
-		}
 
 		const { dir: sourcePath, tempCloneRoot } = await resolvePluginSource(pluginEntry, {
 			marketplaceClonePath,
