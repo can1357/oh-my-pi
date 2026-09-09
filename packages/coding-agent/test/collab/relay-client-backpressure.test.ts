@@ -1339,6 +1339,42 @@ describe("CollabSocket send backpressure", () => {
 		}
 	});
 
+	it("bounds the budget against a declaration that is not a size at all", async () => {
+		// NaN loses every comparison, so an accounting that believes it never reports
+		// a full queue; a negative one subtracts from what every other entry is
+		// charged. Both are caller bugs rather than measurements, and both have to
+		// leave the bound standing.
+		for (const declared of [Number.NaN, -64 * 1024 * 1024]) {
+			BackpressuredWebSocket.instances = [];
+			BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+			globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+			const socket = new CollabSocket({
+				wsUrl: "ws://localhost:8788/r/domain",
+				role: "host",
+				key: {} as CryptoKey,
+			});
+			try {
+				socket.connect();
+				BackpressuredWebSocket.instances[0]!.open();
+				socket.sendBatch(welcomeBatch("unmeasured snapshot"), GREEDY, declared);
+				const frame: CollabFrame = { t: "error", message: "y".repeat(512 * 1024) };
+				const frameBytes = Buffer.byteLength(JSON.stringify(frame));
+				let admitted = 0;
+				for (let i = 0; i < 64; i++) {
+					if (!socket.send(frame)) break;
+					admitted++;
+				}
+				// The same bound the valid domain gets, stated the same way: what was
+				// admitted fits the budget and one more would not.
+				expect(admitted).toBeGreaterThan(0);
+				expect(admitted * frameBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+				expect((admitted + 1) * frameBytes).toBeGreaterThan(16 * 1024 * 1024);
+			} finally {
+				socket.close();
+			}
+		}
+	});
+
 	it("keeps admitting live traffic behind an oversized snapshot, and still sheds its peer for a flood", async () => {
 		BackpressuredWebSocket.instances = [];
 		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;

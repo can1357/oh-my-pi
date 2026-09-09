@@ -280,14 +280,34 @@ export class CollabSocket {
 	 * Keeps a lazy snapshot contiguous with its welcome and ahead of subsequent live traffic.
 	 *
 	 * @param retainedBytes size of the data {@link frames} keeps reachable until the
-	 * batch drains. Charged against the send budget at admission, since a lazy batch
-	 * is one queue entry that can hold a whole snapshot. A serialized size is the
-	 * expected measure; it is a proxy for the object graph, within a small factor in
-	 * either direction, so pass an upper bound where one is cheap.
+	 * batch drains, as a finite non-negative number. Charged against the send budget
+	 * at admission, since a lazy batch is one queue entry that can hold a whole
+	 * snapshot. A serialized size is the expected measure; it is a proxy for the
+	 * object graph, within a small factor in either direction, so pass an upper bound
+	 * where one is cheap. Anything outside that domain is treated as oversized rather
+	 * than trusted — see below.
 	 */
 	sendBatch(frames: Iterable<CollabFrame>, targetPeer: number, retainedBytes: number): void {
 		if (this.#closed) return;
-		this.#enqueueSend(frames[Symbol.iterator](), targetPeer, retainedBytes, true, false);
+		// The budget is a sum of declarations, so the domain has to hold at the one
+		// place a declaration enters. `NaN` fails every comparison, which makes the
+		// queue read as never full and bounds nothing at all; a negative one
+		// subtracts from the charge of every other entry. Neither is a legitimate
+		// measurement, so neither is trusted with a number of its own: they take the
+		// oversized path instead, which is the one case the policy already bounds
+		// without believing a figure — one entry, admitted by the empty-queue floor,
+		// excluded from the sum. Deliberately not zero, which is the under-charge the
+		// charge exists to prevent, and deliberately not a refusal, because a caller
+		// bug should not silently cost a guest its only route to a replica.
+		const declared =
+			Number.isFinite(retainedBytes) && retainedBytes >= 0 ? retainedBytes : MAX_PENDING_SEND_BYTES + 1;
+		if (declared !== retainedBytes) {
+			logger.warn("collab: batch declared a size outside the budget's domain; charging it as oversized", {
+				targetPeer,
+				retainedBytes,
+			});
+		}
+		this.#enqueueSend(frames[Symbol.iterator](), targetPeer, declared, true, false);
 	}
 
 	/**
