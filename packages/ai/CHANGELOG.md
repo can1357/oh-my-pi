@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed tool schema normalization and cycle detection for frozen, sealed, and nonextensible schemas.
+
 ## [18.1.15] - 2026-09-08
 
 ### Fixed
