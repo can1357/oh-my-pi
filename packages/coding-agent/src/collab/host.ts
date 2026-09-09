@@ -387,10 +387,8 @@ export class CollabHost {
 		const canWrite = this.#verifyWriteToken(writeToken);
 		this.#peers.set(fromPeer, { name: cleanName, canWrite });
 
-		// Snapshot and send synchronously: no awaits between snapshot, welcome,
-		// and chunk sends, so subsequent broadcast frames (entry/event/state/bus)
-		// queue behind the snapshot on the same socket and the guest can't
-		// observe a gap between the snapshot fragment and live traffic.
+		// Enqueue the snapshot synchronously so live traffic cannot overtake it;
+		// materialize its chunks only as the transport drains.
 		const snapshot = this.#ctx.sessionManager.snapshotForReplication();
 		if (JSON.stringify(snapshot).length > WELCOME_IMAGE_STRIP_THRESHOLD) {
 			let stripped = 0;
@@ -414,7 +412,7 @@ export class CollabHost {
 			},
 			fromPeer,
 		);
-		this.#sendSnapshotChunks(entries, fromPeer);
+		socket.sendBatch(this.#snapshotChunks(entries), fromPeer);
 		if (canWrite) {
 			for (const pending of this.#pendingUi.values()) {
 				socket.send({ t: "ui-request", request: pending.request }, fromPeer);
@@ -430,8 +428,8 @@ export class CollabHost {
 	}
 
 	/**
-	 * Slice {@link entries} into byte-bounded `snapshot-chunk` frames targeted
-	 * at {@link fromPeer}. Each entry is first run through
+	 * Slice {@link entries} into byte-bounded `snapshot-chunk` frames.
+	 * Each entry is first run through
 	 * {@link shrinkForReplication} so a single oversized tool-result entry
 	 * cannot ship as an oversized chunk that trips the relay's per-frame
 	 * `maxPayloadLength` (issue #3739). Every batch carries at least one
@@ -439,11 +437,9 @@ export class CollabHost {
 	 * finalize the replica. An empty snapshot still emits one `final` chunk
 	 * so the guest never blocks on a missing terminator.
 	 */
-	#sendSnapshotChunks(entries: (StoredSessionEntry & WireSessionEntry)[], fromPeer: number): void {
-		const socket = this.#socket;
-		if (!socket) return;
+	*#snapshotChunks(entries: (StoredSessionEntry & WireSessionEntry)[]): Generator<CollabFrame> {
 		if (entries.length === 0) {
-			socket.send({ t: "snapshot-chunk", entries: [], final: true }, fromPeer);
+			yield { t: "snapshot-chunk", entries: [], final: true };
 			return;
 		}
 		let i = 0;
@@ -460,7 +456,7 @@ export class CollabHost {
 				batchBytes += entryBytes;
 				i++;
 			}
-			socket.send({ t: "snapshot-chunk", entries: batch, final: i >= entries.length }, fromPeer);
+			yield { t: "snapshot-chunk", entries: batch, final: i >= entries.length };
 		}
 	}
 

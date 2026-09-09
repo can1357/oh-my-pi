@@ -6,7 +6,7 @@
  * host conflict, room full) and decryption failures never reconnect.
  */
 import { logger } from "@oh-my-pi/pi-utils";
-import { open, seal } from "./crypto";
+import { open, sealSerialized } from "./crypto";
 import type { CollabFrame, RelayControlMessage } from "./protocol";
 import { packEnvelope, unpackEnvelope } from "./protocol";
 
@@ -19,11 +19,17 @@ const FATAL_CLOSE_REASONS: Record<number, string> = {
 
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
-/** Max enveloped frames buffered while a reconnect is pending; overflow is dropped. */
 const MAX_PENDING_SENDS = 256;
+const MAX_PENDING_SEND_BYTES = 16 * 1024 * 1024;
 const WS_BACKPRESSURE_THRESHOLD = 64 * 1024;
 const WS_BACKPRESSURE_DRAIN_THRESHOLD = 32 * 1024;
 const WS_BACKPRESSURE_DRAIN_RETRY_MS = 25;
+
+interface PendingSend {
+	frames: Iterator<CollabFrame | string>;
+	targetPeer: number;
+	bytes: number;
+}
 
 export interface CollabSocketOptions {
 	/** wss://host[:port]/r/<roomId> — no query string. */
@@ -47,12 +53,13 @@ export class CollabSocket {
 	#attempt = 0;
 	/** Terminal state: intentional close or fatal failure. Cleared by connect(). */
 	#closed = false;
-	/** Serializes seal() so frames hit the wire in send() order. */
-	#sendChain: Promise<void> = Promise.resolve();
+	#sending = false;
+	#sendGeneration = 0;
+	#wakeSender: (() => void) | undefined;
 	/** Serializes open() so frames are delivered in arrival order. */
 	#recvChain: Promise<void> = Promise.resolve();
-	/** Envelopes sealed while disconnected, flushed on the next open. */
-	#pendingSends: Uint8Array[] = [];
+	#pendingSends: PendingSend[] = [];
+	#pendingSendBytes = 0;
 
 	constructor(opts: CollabSocketOptions) {
 		this.#opts = opts;
@@ -70,76 +77,118 @@ export class CollabSocket {
 	}
 
 	send(frame: CollabFrame, targetPeer = 0): void {
-		this.#sendChain = this.#sendChain
-			.then(async () => {
-				if (this.#closed) {
-					logger.debug("collab: dropping frame, socket closed", { t: frame.t });
-					return;
-				}
-				const openWs = this.#ws;
-				if (openWs && openWs.readyState === WebSocket.OPEN) this.#drainPendingSends(openWs);
-				const sealed = await seal(this.#opts.key, frame);
-				const envelope = packEnvelope(targetPeer, sealed);
-				const ws = this.#ws;
-				if (ws && ws.readyState === WebSocket.OPEN) {
-					if (this.#pendingSends.length > 0) {
-						this.#enqueuePendingSend(envelope, frame.t);
-						if (ws.bufferedAmount < WS_BACKPRESSURE_DRAIN_THRESHOLD) {
-							this.#drainPendingSends(ws);
-						} else {
-							this.#scheduleBackpressureDrain(ws);
-						}
-						return;
-					}
-					if (ws.bufferedAmount >= WS_BACKPRESSURE_THRESHOLD) {
-						this.#enqueuePendingSend(envelope, frame.t);
-						this.#scheduleBackpressureDrain(ws);
-						return;
-					}
-					ws.send(envelope);
-					return;
-				}
-				this.#enqueuePendingSend(envelope, frame.t);
-			})
+		if (this.#closed) return;
+		try {
+			const serialized = JSON.stringify(frame);
+			this.#enqueueSend([serialized].values(), targetPeer, Buffer.byteLength(serialized));
+		} catch (err) {
+			this.#failFatal(`could not serialize collab frame: ${String(err)}; rejoin to resync`);
+		}
+	}
+
+	/** Keeps a lazy snapshot contiguous with its welcome and ahead of subsequent live traffic. */
+	sendBatch(frames: Iterable<CollabFrame>, targetPeer = 0): void {
+		if (this.#closed) return;
+		this.#enqueueSend(frames[Symbol.iterator](), targetPeer, 0);
+	}
+
+	#enqueueSend(frames: Iterator<CollabFrame | string>, targetPeer: number, bytes: number): void {
+		if (this.#pendingSends.length >= MAX_PENDING_SENDS || this.#pendingSendBytes + bytes > MAX_PENDING_SEND_BYTES) {
+			this.#failOverload();
+			return;
+		}
+		this.#pendingSends.push({ frames, targetPeer, bytes });
+		this.#pendingSendBytes += bytes;
+		this.#pumpSends();
+	}
+
+	#failOverload(): void {
+		const recovery = this.#opts.role === "host" ? "restart sharing and rejoin" : "rejoin";
+		this.#failFatal(
+			`collab send backlog exceeded its limit; ${recovery} to resync and check whether pending commands ran before retrying`,
+		);
+	}
+
+	#pumpSends(): void {
+		if (this.#sending || this.#closed) return;
+		this.#sending = true;
+		const generation = this.#sendGeneration;
+		void this.#sendPending(generation)
 			.catch((err: unknown) => {
-				logger.debug("collab: send failed", { error: String(err) });
+				if (generation === this.#sendGeneration) {
+					this.#failFatal(`collab send failed: ${String(err)}; rejoin to resync`);
+				}
+			})
+			.finally(() => {
+				if (generation !== this.#sendGeneration) return;
+				this.#sending = false;
+				if (this.#pendingSends.length > 0) this.#pumpSends();
 			});
 	}
 
-	#enqueuePendingSend(envelope: Uint8Array, frameType: CollabFrame["t"]): void {
-		if (this.#pendingSends.length >= MAX_PENDING_SENDS) {
-			logger.debug("collab: dropping frame, reconnect buffer full", { t: frameType });
-			return;
+	async #sendPending(generation: number): Promise<void> {
+		while (!this.#closed && generation === this.#sendGeneration) {
+			const pending = this.#pendingSends[0];
+			if (!pending || !(await this.#waitForWritable(generation))) return;
+			if (this.#closed || generation !== this.#sendGeneration) return;
+			const next = pending.frames.next();
+			if (next.done) {
+				this.#pendingSends.shift();
+				this.#pendingSendBytes -= pending.bytes;
+				continue;
+			}
+			const serialized = typeof next.value === "string" ? next.value : JSON.stringify(next.value);
+			const bytes = pending.bytes === 0 ? Buffer.byteLength(serialized) : 0;
+			if (this.#pendingSendBytes + bytes > MAX_PENDING_SEND_BYTES) {
+				this.#failOverload();
+				return;
+			}
+			this.#pendingSendBytes += bytes;
+			const sealed = await sealSerialized(this.#opts.key, serialized);
+			if (!(await this.#sendEnvelope(packEnvelope(pending.targetPeer, sealed), generation))) return;
+			if (this.#closed || generation !== this.#sendGeneration) return;
+			this.#pendingSendBytes -= bytes;
 		}
-		this.#pendingSends.push(envelope);
 	}
 
-	#drainPendingSends(ws: WebSocket): void {
-		while (
-			this.#pendingSends.length > 0 &&
-			ws.readyState === WebSocket.OPEN &&
-			ws.bufferedAmount < WS_BACKPRESSURE_DRAIN_THRESHOLD
-		) {
-			const envelope = this.#pendingSends.shift();
-			if (!envelope) return;
+	async #sendEnvelope(envelope: Uint8Array, generation: number): Promise<boolean> {
+		while (!this.#closed && generation === this.#sendGeneration) {
+			const ws = await this.#waitForWritable(generation);
+			if (!ws || this.#closed || generation !== this.#sendGeneration) return false;
+			if (ws !== this.#ws || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount >= WS_BACKPRESSURE_THRESHOLD)
+				continue;
 			ws.send(envelope);
+			return true;
 		}
+		return false;
 	}
 
-	#scheduleBackpressureDrain(ws: WebSocket): void {
-		if (this.#backpressureDrainTimer !== undefined) return;
-		this.#backpressureDrainTimer = setTimeout(() => {
-			this.#backpressureDrainTimer = undefined;
-			this.#sendChain = this.#sendChain
-				.then(async () => {
-					if (this.#closed || this.#ws !== ws || ws.readyState !== WebSocket.OPEN) return;
-					this.#drainPendingSends(ws);
-					if (this.#pendingSends.length > 0) this.#scheduleBackpressureDrain(ws);
-				})
-				.catch((err: unknown) => {
-					logger.debug("collab: backpressure drain failed", { error: String(err) });
-				});
-		}, WS_BACKPRESSURE_DRAIN_RETRY_MS);
+	async #waitForWritable(generation: number): Promise<WebSocket | undefined> {
+		let threshold = WS_BACKPRESSURE_THRESHOLD;
+		while (!this.#closed && generation === this.#sendGeneration) {
+			const ws = this.#ws;
+			if (ws?.readyState === WebSocket.OPEN && !(ws.bufferedAmount >= threshold)) return ws;
+			const wake = Promise.withResolvers<void>();
+			this.#wakeSender = wake.resolve;
+			let timer: NodeJS.Timeout | undefined;
+			if (ws?.readyState === WebSocket.OPEN) {
+				threshold = WS_BACKPRESSURE_DRAIN_THRESHOLD;
+				timer = setTimeout(wake.resolve, WS_BACKPRESSURE_DRAIN_RETRY_MS);
+				this.#backpressureDrainTimer = timer;
+			}
+			await wake.promise;
+			if (this.#backpressureDrainTimer === timer) this.#clearBackpressureDrain();
+			if (this.#wakeSender === wake.resolve) this.#wakeSender = undefined;
+		}
+		return undefined;
+	}
+
+	#discardPendingSends(): void {
+		this.#sendGeneration++;
+		this.#pendingSends.length = 0;
+		this.#pendingSendBytes = 0;
+		this.#sending = false;
+		this.#wakeSender?.();
 	}
 
 	#clearBackpressureDrain(): void {
@@ -156,7 +205,7 @@ export class CollabSocket {
 		this.#clearBackpressureDrain();
 		const wasClosed = this.#closed;
 		this.#closed = true;
-		this.#pendingSends.length = 0;
+		this.#discardPendingSends();
 		const ws = this.#ws;
 		this.#ws = null;
 		if (ws) {
@@ -177,10 +226,7 @@ export class CollabSocket {
 		ws.onopen = () => {
 			if (this.#ws !== ws) return;
 			this.#attempt = 0;
-			if (this.#pendingSends.length > 0) {
-				this.#drainPendingSends(ws);
-				if (this.#pendingSends.length > 0) this.#scheduleBackpressureDrain(ws);
-			}
+			this.#wakeSender?.();
 			this.onOpen?.();
 		};
 		ws.onmessage = (event: MessageEvent) => {
@@ -235,7 +281,7 @@ export class CollabSocket {
 		const fatalReason = FATAL_CLOSE_REASONS[code];
 		if (fatalReason !== undefined) {
 			this.#closed = true;
-			this.#pendingSends.length = 0;
+			this.#discardPendingSends();
 			this.onClose?.(fatalReason, false);
 			return;
 		}
@@ -248,7 +294,7 @@ export class CollabSocket {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#clearRetry();
-		this.#pendingSends.length = 0;
+		this.#discardPendingSends();
 		const ws = this.#ws;
 		this.#ws = null;
 		this.#clearBackpressureDrain();
