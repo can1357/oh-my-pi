@@ -17,6 +17,7 @@
 - Fixed releasing turn reservations on post-getApiKey aborts, settling foreign-format probing successes, and gating pi-native probe settlement on stream stopReason.
 - Fixed quota-probe settlement ignoring failed terminals, and reacquiring turn reservations after prepare/broker identity bumps.
 - Fixed OpenAI Responses strict-tool retries reapplying explicit `store` / continuation requirements, and forwarded successful terminal-only Responses SSE preambles.
+- Fixed auth-gateway dispatch through compiled route targets, preserved upstream Responses IDs for continuation, and classified bare model-unavailable errors as model failover.
 ## [18.1.14] - 2026-09-07
 
 ### Fixed

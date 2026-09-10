@@ -74,7 +74,8 @@ const PROVIDER_WIDE_PATTERN =
 const TIMEOUT_OR_CONNECTION_PATTERN =
 	/\b(?:operation\s+)?timed?\s*out\b|\btimeout\b|\bconnection(?:\s+error|\s+refused)?\b|\bsocket hang up\b|\bfetch failed\b/i;
 const POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
-const MODEL_UNAVAILABLE_PATTERN = /\bmodel[_ ]?(?:not[_ ]found|not[_ ]available|unavailable|not[_ ]supported)(?:[_ ]\w+)*\b|\bthe model does not exist\b/i;
+const MODEL_UNAVAILABLE_PATTERN =
+	/\bmodel[_ -]?(?:not[_ -]found|not[_ -]available|unavailable|not[_ -]supported)(?:[_ -]\w+)*\b|\bthe model does not exist\b/i;
 const INVALID_REQUEST_PATTERN =
 	/\b(?:unsupported|invalid_request|invalid request|bad request|malformed|GenerateContentRequest)\b/i;
 const GATEWAY_INVARIANT_PATTERN = /\bgateway_terminal\b|\binternal invariant\b/i;
@@ -150,6 +151,9 @@ export function classifyGatewayError(err: unknown): GatewayErrorClassification {
 	// upstream outage — classifying it 502 would make it retryable.
 	if (matchesOverflowText(message)) {
 		return withOwnerDisposition(err, { status: 400, type: "invalid_request_error", message });
+	}
+	if (MODEL_UNAVAILABLE_PATTERN.test(message)) {
+		return withOwnerDisposition(err, { status: 404, type: "invalid_request_error", message });
 	}
 	return withOwnerDisposition(err, { status: 502, type: "upstream_error", message });
 }
