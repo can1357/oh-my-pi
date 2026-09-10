@@ -2332,6 +2332,7 @@ export class StatusLineComponent implements Component {
 		let percentLabel = "";
 		let windowLabel = "";
 		let percentStart = -1;
+		let percentPlacementWidth = 0;
 		let windowStart = -1;
 		let renderWindowLabel = false;
 		let scaleWidth = gapWidth;
@@ -2357,8 +2358,9 @@ export class StatusLineComponent implements Component {
 				: livePercent.length;
 			if (gapWidth >= minimumLabelWidth) {
 				percentLabel = candidatePercent;
+				percentPlacementWidth = livePercent.length;
 				if (!showEmbeddedContextWindow) {
-					if (percentOverflow) percentStart = gapWidth - percentLabel.length;
+					if (percentOverflow) percentStart = gapWidth - percentPlacementWidth;
 				} else {
 					renderWindowLabel = true;
 					windowLabel = candidateWindow;
@@ -2374,7 +2376,8 @@ export class StatusLineComponent implements Component {
 				// The compact percentage is the primary readout. Keep it when an
 				// explicitly configured context total cannot share the narrow gauge.
 				percentLabel = candidatePercent;
-				if (percentOverflow) percentStart = gapWidth - percentLabel.length;
+				percentPlacementWidth = livePercent.length;
+				if (percentOverflow) percentStart = gapWidth - percentPlacementWidth;
 			}
 		}
 
@@ -2402,10 +2405,12 @@ export class StatusLineComponent implements Component {
 
 		if (percentLabel && percentStart < 0) {
 			const minStart = renderWindowLabel ? 1 : 0;
-			const maxStart = renderWindowLabel ? scaleWidth - percentLabel.length - 1 : scaleWidth - percentLabel.length;
+			const maxStart = renderWindowLabel
+				? scaleWidth - percentPlacementWidth - 1
+				: scaleWidth - percentPlacementWidth;
 			const preferredStart = Math.min(maxStart, Math.max(minStart, usedCount));
 			const overlapsBoundary = (start: number): boolean => {
-				const end = start + percentLabel.length;
+				const end = start + percentPlacementWidth;
 				return (speculationIdx >= start && speculationIdx < end) || (thresholdIdx >= start && thresholdIdx < end);
 			};
 			for (let distance = 0; distance <= maxStart; distance++) {

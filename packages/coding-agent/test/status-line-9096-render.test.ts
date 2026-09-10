@@ -293,9 +293,11 @@ test("renders compact embedded context in an exact-width six-cell gauge gap", ()
 		},
 	});
 
+	const startup = stripVTControlCharacters(component.renderStartupPlaceholder(20, "box"));
 	const rendered = stripVTControlCharacters(component.getTopBorder(20).content);
 	expect(rendered).toContain("ctx:8%");
 	expect(rendered).toContain("25K");
+	expect(startup.indexOf("ctx:")).toBe(rendered.indexOf("ctx:"));
 });
 
 test("keeps compact context when it only fits after dropping the last status segment", () => {
