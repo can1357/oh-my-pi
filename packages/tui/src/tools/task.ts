@@ -1324,7 +1324,7 @@ export function renderResult(
 	const aborted = abortedCount > 0;
 	const failed = failCount > 0;
 	const mergeFailed = mergeFailedCount > 0;
-	const isError = aborted || failed;
+	const isError = result.isError === true || aborted || failed;
 	const agentCount = hasResults ? details.results.length : (details.progress?.length ?? 0);
 	const icon: ToolUIStatus = options.isPartial ? "running" : isError ? "error" : mergeFailed ? "warning" : "success";
 	// Header meta is the spawn count only; each row carries its own ⟨agent⟩
@@ -1448,7 +1448,7 @@ export function renderResult(
 		const borderColor = isError ? "error" : "borderMuted";
 
 		if (lines.length === 0) {
-			const text = fallbackText.trim() ? fallbackText : "No results";
+			const text = fallbackText.trim() ? replaceTabs(sanitizeText(fallbackText)) : "No results";
 			return {
 				header,
 				sections: [
@@ -1473,7 +1473,7 @@ export function renderResult(
 				const extra = summaryLines.slice(markerIndex);
 				for (const line of extra) {
 					if (!line.trim()) continue;
-					lines.push(theme.fg("dim", line));
+					lines.push(theme.fg("dim", truncateToWidth(replaceTabs(sanitizeText(line)), contentWidth)));
 				}
 			}
 		}
@@ -1734,6 +1734,8 @@ export interface TaskItem {
 	schemaMode?: "permissive" | "strict";
 	/** Eval-defined tool names exposed to this child. */
 	tools?: string[];
+	/** Caller-owned model selector or ordered candidate selectors for this spawn. */
+	model?: string | string[];
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
 }
@@ -1759,6 +1761,8 @@ export interface TaskParams {
 	schemaMode?: "permissive" | "strict";
 	/** Eval-defined tool names exposed to the flat-form child. */
 	tools?: string[];
+	/** Caller-owned model selector or ordered candidate selectors for the flat-form child. */
+	model?: string | string[];
 	/** Batch form (`task.batch`): one subagent per item. */
 	tasks?: TaskItem[];
 	/** Batch form: shared background prepended to every assignment; required by the batch schema. */

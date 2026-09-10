@@ -13,6 +13,17 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 // test/task/task-batch.test.ts).
 
 describe("task schema (single-spawn)", () => {
+	it.each(["provider/model", ["provider/first", "provider/second"]])("accepts a non-empty model selector %j", model => {
+		const parsed = taskSchema({ agent: "scout", task: "Map the auth module.", model: model as string | string[] });
+		expect(parsed instanceof type.errors).toBe(false);
+		if (!(parsed instanceof type.errors)) expect((parsed as { model?: unknown }).model).toEqual(model);
+	});
+
+	it.each(["", "   "]) ("rejects an empty model selector %j", model => {
+		const parsed = taskSchema({ agent: "scout", task: "Map the auth module.", model });
+		expect(parsed instanceof type.errors).toBe(true);
+	});
+
 	it("accepts {agent, task}", () => {
 		const parsed = taskSchema({ agent: "scout", task: "Map the auth module." });
 		expect(parsed instanceof type.errors).toBe(false);
@@ -66,6 +77,15 @@ describe("task schema (single-spawn)", () => {
 			expect("schema" in parsed).toBe(false);
 		}
 	});
+
+	it("dynamic flat schemas retain string and ordered array model selectors", () => {
+		for (const model of ["provider/model", ["provider/first", "provider/second"]]) {
+			const schema = getTaskSchema({ isolationEnabled: false, batchEnabled: false, evalToolsEnabled: false });
+			const parsed = schema({ task: "work", model });
+			expect(parsed instanceof type.errors).toBe(false);
+			if (!(parsed instanceof type.errors)) expect((parsed as { model?: unknown }).model).toEqual(model);
+		}
+	});
 });
 
 describe("task spawn validation", () => {
@@ -100,5 +120,10 @@ describe("task spawn validation", () => {
 	it("rejects a missing task", async () => {
 		const text = await executeText({ agent: "scout" });
 		expect(text).toContain("Missing `task`");
+	});
+
+	it.each(["", "  ", []])("runtime rejects empty model values %j", async model => {
+		const text = await executeText({ agent: "scout", task: "work", model });
+		expect(text).toMatch(/non-empty model selector|model registry unavailable/);
 	});
 });
