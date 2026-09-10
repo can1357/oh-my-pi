@@ -177,6 +177,11 @@ const PROVIDER_FILE_PROVIDERS = new Set(["openai", "anthropic", "google"]);
  * walk to `RangeError`, measured. Copying the known fields makes the shape the
  * host stores a property of this function rather than of what arrived. A newer
  * field is dropped instead of honoured, which is the safe direction to be wrong.
+ *
+ * Takes `unknown` and reads properties off it directly, which is only total for
+ * the input it actually gets: this runs on `JSON.parse` output, which is plain
+ * data. A `Proxy` with a throwing `get` would throw out of the destructuring, and
+ * nothing on this path can produce one.
  */
 function toImageContent(value: unknown): ImageContent | null {
 	if (typeof value !== "object" || value === null) return null;
@@ -1173,8 +1178,9 @@ export class CollabHost {
 			}
 			reply(slice.toString("utf-8"), reachedEof ? stat.size : fromByte + slice.byteLength);
 		} catch (err) {
-			logger.debug("collab transcript read failed", { agentId: this.#label(agentId), error: this.#reason(err) });
-			reply("", fromByte, this.#reason(err));
+			const reason = this.#reason(err);
+			logger.debug("collab transcript read failed", { agentId: this.#label(agentId), error: reason });
+			reply("", fromByte, reason);
 		}
 	}
 

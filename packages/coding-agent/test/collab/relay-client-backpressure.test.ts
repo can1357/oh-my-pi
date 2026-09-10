@@ -1271,6 +1271,117 @@ describe("CollabSocket send backpressure", () => {
 		}
 	});
 
+	it("survives a thrown value that cannot be converted, on every path that quotes one", async () => {
+		// Four sites in this file render a thrown value, and the reason they all need
+		// the same treatment is that `String` is what throws, not the sender: a value
+		// whose `toString` throws does it wherever it is quoted. Two of these sites
+		// are a `catch` and an async rejection, where an unrendered throw stops being
+		// a diagnostic and becomes an unhandled rejection.
+		const hostile = {
+			toString() {
+				throw new Error("cannot render me");
+			},
+		};
+		// Serialization runs `toJSON`, so this is how a hostile value becomes the
+		// error a send has to describe.
+		const poison = {
+			toJSON() {
+				throw hostile;
+			},
+		};
+
+		for (const drive of ["send", "broadcastAdvisory"] as const) {
+			BackpressuredWebSocket.instances = [];
+			BackpressuredWebSocket.initialBufferedAmount = 0;
+			globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+			const key = await importRoomKey(generateRoomKey());
+			const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/hostile", role: "host", key });
+			let reason: string | undefined;
+			socket.onClose = message => {
+				reason = message;
+			};
+			try {
+				socket.connect();
+				BackpressuredWebSocket.instances[0]!.open();
+				const frame = { t: "bye", reason: poison } as unknown as CollabFrame;
+				// The call itself must not throw: an owner calling send gets a verdict,
+				// not an exception raised while composing the error about its frame.
+				expect(() => (drive === "send" ? socket.send(frame) : socket.broadcastAdvisory(frame))).not.toThrow();
+				expect(reason).toContain("could not serialize collab frame");
+				expect(reason).toContain("(unprintable error)");
+			} finally {
+				socket.close();
+			}
+		}
+	});
+
+	it("survives a batch whose iterator throws a value that cannot be converted", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const key = await importRoomKey(generateRoomKey());
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/hostile-batch", role: "host", key });
+		let reason: string | undefined;
+		socket.onClose = message => {
+			reason = message;
+		};
+		// eslint-disable-next-line require-yield -- the throw before the first yield is the case under test
+		function* boom(): Generator<CollabFrame> {
+			throw {
+				toString() {
+					throw new Error("cannot render me");
+				},
+			};
+		}
+		try {
+			socket.connect();
+			BackpressuredWebSocket.instances[0]!.open();
+			// The drain rejects, and its catch is what closes the socket. Rendering the
+			// rejection unsafely there raises inside the catch, which is an unhandled
+			// rejection rather than a close reason anybody sees.
+			socket.sendBatch(boom(), 7, 0);
+			await waitUntil(() => reason !== undefined, "the drain never reported the failure");
+			expect(reason).toContain("collab send failed");
+			expect(reason).toContain("(unprintable error)");
+		} finally {
+			socket.close();
+		}
+	});
+
+	it("survives a frame handler that throws a value that cannot be converted", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const key = await importRoomKey(generateRoomKey());
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/hostile-frame", role: "host", key });
+		let closed: string | undefined;
+		socket.onClose = message => {
+			closed = message;
+		};
+		socket.onFrame = () => {
+			throw {
+				toString() {
+					throw new Error("cannot render me");
+				},
+			};
+		};
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			const sealed = await seal(key, { t: "abort" } as CollabFrame);
+			ws.onmessage?.({ data: packEnvelope(3, sealed).buffer } as MessageEvent);
+			// Only observable as an absence: the log line is a side channel, so what
+			// this pins is that rendering the throw does not itself throw — the socket
+			// stays open and nothing escapes the receive chain.
+			await Bun.sleep(20);
+			expect(closed).toBeUndefined();
+			expect(ws.readyState).toBe(BackpressuredWebSocket.OPEN);
+		} finally {
+			socket.close();
+		}
+	});
+
 	it("does not shed a peer over an entry whose last frame is already in the socket buffer", async () => {
 		BackpressuredWebSocket.instances = [];
 		BackpressuredWebSocket.initialBufferedAmount = 0;

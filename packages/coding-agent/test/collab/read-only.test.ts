@@ -9,16 +9,21 @@
  * in-memory transport, so the suite stays fast and time-independent.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
-import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
+import { importRoomKey, sealSerialized } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
-import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import {
+	COLLAB_PROTO,
+	type CollabFrame,
+	packEnvelope,
+	parseCollabLink,
+} from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { logger } from "@oh-my-pi/pi-utils";
 import { shrinkForReplication } from "@oh-my-pi/pi-coding-agent/collab/replication-shrink";
-import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
+import { type FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 // In-memory transport: FakeWebSocket + InMemoryRelay (see ./helpers/in-memory-relay)
 // replace the real Bun.serve relay and loopback WebSocket with a zero-latency
@@ -178,6 +183,28 @@ async function joinWithRawHello(link: string, hello: Record<string, unknown>): P
 	return { socket, nextFrame };
 }
 
+/** Guest transports the relay has seen, newest last, so a test can send raw bytes. */
+const guestTransports: FakeWebSocket[] = [];
+
+/**
+ * Deliver a frame to the host as bytes, skipping `CollabSocket.send`.
+ *
+ * `send` serializes with `JSON.stringify`, so anything routed through it can only
+ * carry what this library is able to produce. The host reads `JSON.parse` output,
+ * which is a strictly larger set — that gap is the reachability argument behind
+ * the image rebuild, and this is what lets a test stand on it instead of a
+ * comment.
+ */
+async function sendRawFrame(rawFrame: string): Promise<void> {
+	const parsed = parseCollabLink(host.link);
+	if ("error" in parsed) throw new Error(parsed.error);
+	const key = await importRoomKey(parsed.key);
+	const transport = guestTransports.at(-1);
+	if (!transport) throw new Error("no guest transport connected");
+	const sealed = await sealSerialized(key, rawFrame);
+	transport.send(packEnvelope(0, sealed));
+}
+
 // ── Shared host/relay, booted once ──────────────────────────────────────────
 // Booting the relay + host and connecting the host socket is the only heavy
 // step; it is identical across all three tests (none mutate host config), so it
@@ -191,7 +218,12 @@ let harness: HostHarness;
 let host: CollabHost;
 
 beforeAll(async () => {
-	installInMemoryRelay();
+	const relay = installInMemoryRelay();
+	const connect = relay.connect.bind(relay);
+	relay.connect = ws => {
+		connect(ws);
+		if (ws.role === "guest") guestTransports.push(ws);
+	};
 	harness = makeHostContext();
 	host = new CollabHost(harness.ctx);
 	// Port is irrelevant: the fake transport routes by the `role` query param.
@@ -552,8 +584,10 @@ describe("collab frames a guest can send that the host must still answer", () =>
 			expect(reply.message).toContain("every image must carry string data and mimeType");
 		}
 
-		// The well-formed optional fields still pass, and so does an unknown one: a
-		// newer guest may carry fields this host has no opinion about.
+		// Every optional field this host knows, well-formed, survives the rebuild —
+		// the guard rejects a wrong type, not the presence of an optional field. What
+		// happens to a field it does not know is a separate contract, asserted by the
+		// stripping test below.
 		const delivered = harness.nextPrompt();
 		guest.socket.send({
 			t: "prompt",
@@ -589,37 +623,31 @@ describe("collab frames a guest can send that the host must still answer", () =>
 
 		// Tolerating an unknown property was reasoned as safe because such a field is
 		// read and dropped. It is not: the image goes into a session message, is
-		// persisted, and is walked by shrinkForReplication, which recurses to
-		// RangeError past ~40,000 levels.
+		// persisted, and is walked by shrinkForReplication, which recurses.
 		//
-		// The depth here is well under that on purpose. `CollabSocket.send` serializes
-		// with JSON.stringify, which is itself recursive and fails at about the same
-		// depth, so a cooperative client cannot reach the break — but JSON.parse is
-		// iterative and accepts any depth from hand-built text, verified at 500,000,
-		// and the host parses exactly that off the wire. So the reachable actor is a
-		// client that does not use this library, which this harness cannot be. What
-		// is asserted is therefore the contract that makes depth irrelevant: only
-		// declared fields are stored.
-		let nested: unknown[] = [];
-		const root = nested;
-		for (let i = 0; i < 20_000; i++) {
-			const next: unknown[] = [];
-			nested.push(next);
-			nested = next;
-		}
+		// Sent past `CollabSocket.send` deliberately. That path serializes with
+		// JSON.stringify, which is recursive and fails near the same depth the walk
+		// does, so a cooperative client cannot carry the payload that motivates this
+		// fix. JSON.parse is iterative and accepts any depth from hand-built text —
+		// verified at 500,000 — and the host parses exactly that off the wire, so the
+		// reachable actor is a protocol-compatible client that is not this library.
+		// This builds the frame the way that client would.
+		const depth = 100_000;
+		const nested = `${"[".repeat(depth)}${"]".repeat(depth)}`;
+		const raw = `{"t":"prompt","text":"carry me","images":[{"type":"image","data":"AAAA","mimeType":"image/png","somethingNewer":${nested}}]}`;
 		const delivered = harness.nextPrompt();
-		guest.socket.send({
-			t: "prompt",
-			text: "carry me",
-			images: [{ type: "image", data: "AAAA", mimeType: "image/png", somethingNewer: root }],
-		} as unknown as CollabFrame);
-		await Promise.race([delivered, Bun.sleep(1_000)]);
+		await sendRawFrame(raw);
+		await Promise.race([delivered, Bun.sleep(2_000)]);
 
-		// Delivered — the image is still the guest's — and carrying only the fields
-		// ImageContent declares, so what the session stores cannot recurse.
+		// Delivered — the image is still the guest's — carrying only the fields
+		// ImageContent declares. Exact keys, not a shape check: a rebuild that spread
+		// the original would still satisfy `toEqual` on the declared ones.
 		expect(harness.prompts).toHaveLength(1);
 		const stored = harness.prompts[0]?.content as Record<string, unknown>[];
+		expect(Object.keys(stored?.[1] ?? {}).sort()).toEqual(["data", "mimeType", "type"]);
 		expect(stored?.[1]).toEqual({ type: "image", data: "AAAA", mimeType: "image/png" });
+		// And what the host stored is walkable, which is the property the depth
+		// threatened: unstripped, this recursion is what takes the walk down.
 		expect(() => shrinkForReplication(harness.prompts[0]?.content)).not.toThrow();
 	});
 
@@ -661,9 +689,19 @@ describe("collab read-only links", () => {
 		expect(abortReply.t).toBe("error");
 		expect(aborts.count).toBe(0);
 
+		// The message, not merely that one arrived: an unregistered id errors on the
+		// unknown-agent branch whether or not admission rejected it first, so
+		// `t === "error"` alone proves nothing about the guard under test.
 		guest.socket.send({ t: "agent-cmd", cmd: "kill", agentId: "nope" });
 		const cmdReply = await guest.nextFrame();
-		expect(cmdReply.t).toBe("error");
+		if (cmdReply.t !== "error") throw new Error(`expected error, got ${cmdReply.t}`);
+		expect(cmdReply.message).toContain("agent control is disabled on a read-only link");
+
+		// Answering an ask is the fourth mutating frame and had no control at all.
+		guest.socket.send({ t: "ui-response", reqId: 1, value: "yes" });
+		const uiReply = await guest.nextFrame();
+		if (uiReply.t !== "error") throw new Error(`expected error, got ${uiReply.t}`);
+		expect(uiReply.message).toContain("responding to ask is disabled on a read-only link");
 
 		expect(host.participants.find(p => p.name === "viewer")?.readOnly).toBe(true);
 	});

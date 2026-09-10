@@ -128,6 +128,12 @@ export type CollabFrame =
  * The bound is on the result, not on the work: a `toString` returning 100,000
  * characters still builds them before this cuts them. Bounding that would mean
  * not converting at all, which leaves nothing to report.
+ *
+ * Totality is claimed for {@link value} and not for {@link maxUnits}. The first
+ * is the untrusted one and is handled whatever it is; the second is a caller's
+ * constant — every call site passes a literal 512 — and is assumed finite and
+ * non-negative. `Infinity` would return unbounded output and a `Symbol` would
+ * throw out of the comparison, neither of which anything can reach from the wire.
  */
 export function describeThrown(value: unknown, maxUnits: number): string {
 	let text: unknown;

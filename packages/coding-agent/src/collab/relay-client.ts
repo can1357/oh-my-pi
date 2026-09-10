@@ -71,8 +71,18 @@ const MAX_RETIRED_PEERS = 256;
 const WS_BACKPRESSURE_THRESHOLD = 64 * 1024;
 const WS_BACKPRESSURE_DRAIN_THRESHOLD = 32 * 1024;
 const WS_BACKPRESSURE_DRAIN_RETRY_MS = 25;
-/** Ceiling on a frame-handler failure quoted into a log line, in UTF-16 code units. */
-const FRAME_ERROR_LOG_MAX = 512;
+/**
+ * Ceiling on a thrown value quoted into a close reason or a log line here, in
+ * UTF-16 code units.
+ *
+ * Every conversion in this file goes through {@link describeThrown} at this
+ * bound, not only the ones whose value looks guest-derived. The argument is about
+ * the conversion and not the sender: `String` throws on a hostile `toString`, on
+ * a `toString` returning an object over a hostile `valueOf`, and on a deeply
+ * nested value — and two of these sites are inside a `catch` or an async
+ * rejection path, where that turns a diagnostic into an unhandled rejection.
+ */
+const THROWN_VALUE_MAX = 512;
 
 interface PendingSend {
 	frames: Iterator<CollabFrame | string>;
@@ -273,7 +283,9 @@ export class CollabSocket {
 			const serialized = JSON.stringify(frame);
 			return this.#enqueueSend([serialized].values(), targetPeer, Buffer.byteLength(serialized), false, false);
 		} catch (err) {
-			this.#failFatal(`could not serialize collab frame: ${String(err)}; rejoin to resync`);
+			this.#failFatal(
+				`could not serialize collab frame: ${describeThrown(err, THROWN_VALUE_MAX)}; rejoin to resync`,
+			);
 			return false;
 		}
 	}
@@ -333,7 +345,9 @@ export class CollabSocket {
 			const serialized = JSON.stringify(frame);
 			return this.#enqueueSend([serialized].values(), 0, Buffer.byteLength(serialized), false, true);
 		} catch (err) {
-			this.#failFatal(`could not serialize collab frame: ${String(err)}; rejoin to resync`);
+			this.#failFatal(
+				`could not serialize collab frame: ${describeThrown(err, THROWN_VALUE_MAX)}; rejoin to resync`,
+			);
 			return false;
 		}
 	}
@@ -650,7 +664,7 @@ export class CollabSocket {
 		void this.#sendPending(generation)
 			.catch((err: unknown) => {
 				if (generation === this.#sendGeneration) {
-					this.#failFatal(`collab send failed: ${String(err)}; rejoin to resync`);
+					this.#failFatal(`collab send failed: ${describeThrown(err, THROWN_VALUE_MAX)}; rejoin to resync`);
 				}
 			})
 			.finally(() => {
@@ -856,7 +870,7 @@ export class CollabSocket {
 				// not worth deciding: Bun's own parse failures quote fixed prose and no
 				// input, and the handlers upstream bound what they raise, but neither of
 				// those is a property this catch can enforce.
-				logger.debug("collab: frame handler failed", { error: describeThrown(err, FRAME_ERROR_LOG_MAX) });
+				logger.debug("collab: frame handler failed", { error: describeThrown(err, THROWN_VALUE_MAX) });
 			});
 	}
 
