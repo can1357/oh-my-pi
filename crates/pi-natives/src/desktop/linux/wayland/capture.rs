@@ -13,7 +13,8 @@ use crate::desktop::error::{CoreResult, DesktopError};
 
 const SCREENCAST_TOKEN: &str = "screencast-token";
 
-async fn open_screencast() -> Result<(u32, OwnedFd), String> {
+async fn open_screencast() -> Result<(u32, OwnedFd, Option<(i32, i32)>, Option<(i32, i32)>), String>
+{
 	let portal = Screencast::new()
 		.await
 		.map_err(|err| format!("ScreenCast portal: {err}"))?;
@@ -45,11 +46,13 @@ async fn open_screencast() -> Result<(u32, OwnedFd), String> {
 		.first()
 		.ok_or_else(|| "ScreenCast returned no monitor stream".to_string())?;
 	let node = stream.pipe_wire_node_id();
+	let position = stream.position();
+	let size = stream.size();
 	let fd = portal
 		.open_pipe_wire_remote(&session)
 		.await
 		.map_err(|err| format!("ScreenCast OpenPipeWireRemote: {err}"))?;
-	Ok((node, fd))
+	Ok((node, fd, position, size))
 }
 
 struct UserData {
@@ -244,11 +247,13 @@ fn grab_pipewire_frame(node: u32, fd: OwnedFd) -> Result<RgbaImage, String> {
 		.unwrap_or_else(|| Err("PipeWire stream ended before producing a frame".to_string()))
 }
 
-pub(super) fn capture() -> CoreResult<RgbaImage> {
+pub(super) fn capture() -> CoreResult<(RgbaImage, super::PortalGeometry)> {
 	let runtime = super::portal::portal_runtime()?;
-	let (node, fd) = runtime.block_on(open_screencast()).map_err(|err| {
+	let (node, fd, position, size) = runtime.block_on(open_screencast()).map_err(|err| {
 		DesktopError::capture_failed(format!("wayland screencast unavailable: {err}"))
 	})?;
-	grab_pipewire_frame(node, fd)
-		.map_err(|err| DesktopError::capture_failed(format!("wayland screencast failed: {err}")))
+	let image = grab_pipewire_frame(node, fd)
+		.map_err(|err| DesktopError::capture_failed(format!("wayland screencast failed: {err}")))?;
+	let geometry = super::PortalGeometry::new(position, size, image.width(), image.height());
+	Ok((image, geometry))
 }

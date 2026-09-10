@@ -169,6 +169,127 @@ afterAll(async () => {
 });
 
 describe("collab read-only links", () => {
+	it("retains host UI through a writer disconnect and replays it only to writable guests", async () => {
+		const abort = new AbortController();
+		const pending = host.requestGuestUi(
+			{ kind: "select", title: "Retained before join?", options: ["Yes"] },
+			abort.signal,
+		);
+		if (!pending) throw new Error("expected retained UI request");
+		try {
+			const viewer = await joinAsGuest(host.viewLink, "retained-viewer");
+			guestCleanups.push(() => viewer.socket.close());
+			const viewerWelcome = await viewer.nextFrame();
+			if (viewerWelcome.t !== "welcome") throw new Error(`expected welcome, got ${viewerWelcome.t}`);
+			expect(viewerWelcome.readOnly).toBe(true);
+			// This reply is ordered after every frame emitted during hello. If the
+			// retained ask leaked to the viewer, it would arrive before the error.
+			viewer.socket.send({ t: "prompt", text: "read-only barrier" });
+			const viewerReply = await viewer.nextFrame();
+			if (viewerReply.t !== "error") throw new Error(`expected error, got ${viewerReply.t}`);
+
+			const writer = await joinAsGuest(host.link, "retained-writer-first");
+			guestCleanups.push(() => writer.socket.close());
+			const writerWelcome = await writer.nextFrame();
+			if (writerWelcome.t !== "welcome") throw new Error(`expected welcome, got ${writerWelcome.t}`);
+			writer.socket.send({ t: "agent-cmd", cmd: "chat", agentId: "barrier", text: "" });
+			const request = await writer.nextFrame();
+			if (request.t !== "ui-request") throw new Error(`expected ui-request, got ${request.t}`);
+			expect(request.request).toMatchObject({ title: "Retained before join?", options: ["Yes"] });
+			const writerBarrier = await writer.nextFrame();
+			if (writerBarrier.t !== "error") throw new Error(`expected error, got ${writerBarrier.t}`);
+			writer.socket.close();
+
+			const replacement = await joinAsGuest(host.link, "retained-writer-replacement");
+			guestCleanups.push(() => replacement.socket.close());
+			const replacementWelcome = await replacement.nextFrame();
+			if (replacementWelcome.t !== "welcome") {
+				throw new Error(`expected welcome, got ${replacementWelcome.t}`);
+			}
+			replacement.socket.send({ t: "agent-cmd", cmd: "chat", agentId: "barrier", text: "" });
+			expect(await replacement.nextFrame()).toEqual(request);
+			const replacementBarrier = await replacement.nextFrame();
+			if (replacementBarrier.t !== "error") {
+				throw new Error(`expected error, got ${replacementBarrier.t}`);
+			}
+
+			replacement.socket.send({ t: "ui-response", reqId: request.request.reqId, value: "Yes" });
+			expect(await pending).toEqual({ kind: "answered", value: "Yes" });
+			expect(await replacement.nextFrame()).toEqual({ t: "ui-request-end", reqId: request.request.reqId });
+		} finally {
+			abort.abort();
+		}
+	});
+
+	it("rejects a pre-aborted request without consuming a request ID", async () => {
+		const firstAbort = new AbortController();
+		const secondAbort = new AbortController();
+		const first = host.requestGuestUi({ kind: "editor", title: "First" }, firstAbort.signal);
+		if (!first) throw new Error("expected first retained request");
+		const preAborted = new AbortController();
+		preAborted.abort();
+		expect(host.requestGuestUi({ kind: "editor", title: "Rejected" }, preAborted.signal)).toBeNull();
+		const second = host.requestGuestUi({ kind: "editor", title: "Second" }, secondAbort.signal);
+		if (!second) throw new Error("expected second retained request");
+		try {
+			const writer = await joinAsGuest(host.link, "pre-abort-writer");
+			guestCleanups.push(() => writer.socket.close());
+			const welcome = await writer.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+			writer.socket.send({ t: "agent-cmd", cmd: "chat", agentId: "barrier", text: "" });
+			const firstFrame = await writer.nextFrame();
+			const secondFrame = await writer.nextFrame();
+			if (firstFrame.t !== "ui-request" || secondFrame.t !== "ui-request") {
+				throw new Error("expected retained ui-request frames");
+			}
+			expect(secondFrame.request.reqId).toBe(firstFrame.request.reqId + 1);
+		} finally {
+			firstAbort.abort();
+			secondAbort.abort();
+			await Promise.all([first, second]);
+		}
+	});
+
+	it("caps retained host UI at 64 and reuses an aborted slot without consuming an ID", async () => {
+		const aborts = Array.from({ length: 64 }, () => new AbortController());
+		const pending = aborts.map((abort, index) => {
+			const request = host.requestGuestUi({ kind: "editor", title: `Pending ${index}` }, abort.signal);
+			if (!request) throw new Error(`request ${index} was rejected before the cap`);
+			return request;
+		});
+		const replacementAbort = new AbortController();
+		let replacement: Promise<unknown> | null = null;
+		try {
+			expect(host.requestGuestUi({ kind: "editor", title: "Overflow" })).toBeNull();
+			aborts[0]?.abort();
+			expect(await pending[0]).toEqual({ kind: "unavailable" });
+			replacement = host.requestGuestUi({ kind: "editor", title: "Replacement" }, replacementAbort.signal);
+			if (!replacement) throw new Error("expected replacement after releasing one request");
+
+			const writer = await joinAsGuest(host.link, "cap-writer");
+			guestCleanups.push(() => writer.socket.close());
+			const welcome = await writer.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+			writer.socket.send({ t: "agent-cmd", cmd: "chat", agentId: "barrier", text: "" });
+			const requestIds: number[] = [];
+			for (let index = 0; index < 64; index += 1) {
+				const frame = await writer.nextFrame();
+				if (frame.t !== "ui-request") throw new Error(`expected ui-request, got ${frame.t}`);
+				requestIds.push(frame.request.reqId);
+			}
+			const firstRequestId = requestIds[0];
+			if (firstRequestId === undefined) throw new Error("expected retained request IDs");
+			expect(requestIds).toEqual(Array.from({ length: 64 }, (_, index) => firstRequestId + index));
+			const barrier = await writer.nextFrame();
+			if (barrier.t !== "error") throw new Error(`expected error, got ${barrier.t}`);
+		} finally {
+			for (const abort of aborts) abort.abort();
+			replacementAbort.abort();
+			await Promise.all(pending);
+			if (replacement) await replacement;
+		}
+	});
+
 	it("welcomes view-link guests read-only and refuses their mutating frames", async () => {
 		const { prompts, aborts } = harness;
 		expect(host.viewLink).not.toBe(host.link);
@@ -267,28 +388,6 @@ describe("collab read-only links", () => {
 		expect(await pending).toEqual({ kind: "answered", value: "Yes" });
 		const end = await guest.nextFrame();
 		expect(end).toEqual({ t: "ui-request-end", reqId: request.request.reqId });
-	});
-
-	it("replays pending host UI requests to writable guests that join later", async () => {
-		const firstGuest = await joinAsGuest(host.link, "writer-ui-first");
-		guestCleanups.push(() => firstGuest.socket.close());
-		const firstWelcome = await firstGuest.nextFrame();
-		if (firstWelcome.t !== "welcome") throw new Error(`expected welcome, got ${firstWelcome.t}`);
-
-		const pending = host.requestGuestUi({ kind: "editor", title: "Pending?", prefill: "draft" });
-		if (!pending) throw new Error("expected writable guest UI request");
-		const firstRequest = await firstGuest.nextFrame();
-		if (firstRequest.t !== "ui-request") throw new Error(`expected ui-request, got ${firstRequest.t}`);
-
-		const secondGuest = await joinAsGuest(host.link, "writer-ui-second");
-		guestCleanups.push(() => secondGuest.socket.close());
-		const secondWelcome = await secondGuest.nextFrame();
-		if (secondWelcome.t !== "welcome") throw new Error(`expected welcome, got ${secondWelcome.t}`);
-		const replayed = await secondGuest.nextFrame();
-		expect(replayed).toEqual(firstRequest);
-
-		secondGuest.socket.send({ t: "ui-response", reqId: firstRequest.request.reqId, value: "late" });
-		expect(await pending).toEqual({ kind: "answered", value: "late" });
 	});
 
 	it("treats a forged write token as read-only", async () => {
