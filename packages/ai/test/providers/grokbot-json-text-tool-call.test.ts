@@ -1970,13 +1970,21 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 			tools: [bashTool],
 		};
 
-		const result = await streamGrokBot(parent as Model<"grokbot-sand">, context, {
+		const stream = streamGrokBot(parent as Model<"grokbot-sand">, context, {
 			apiKey: "renew",
 			fetch: fetchImpl,
-		}).result();
+		});
+		let textDeltas = "";
+		for await (const event of stream) {
+			if (event.type === "text_delta") textDeltas += event.delta;
+		}
+		const result = await stream.result();
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "answer" })]);
 		expect(result.content).not.toEqual([expect.objectContaining({ type: "text", text: "draftanswer" })]);
+		// Delta consumers must not see a published draft followed by an additive answer.
+		expect(textDeltas).toBe("answer");
+		expect(textDeltas).not.toContain("draft");
 	});
 
 	test("sequential SendToUser calls each emit full text independently", async () => {

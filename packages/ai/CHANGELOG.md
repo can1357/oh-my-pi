@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Catalog matrix shell/write smoke expands `echo -e` escapes (`\\c` suppresses output) before accepting a fabricated ping.
+- Grok Bot rewrites buffered `toolcall_delta`s to one canonical snapshot when cumulative complete JSON args revise (`{"cmd":"ls"}` → `{"cmd":"ls","n":1}`), so proxy concat stays parseable.
+- Grok Bot keeps provisional SendToUser text buffered until the call completes so draft→answer revisions do not publish additive `draftanswer` deltas.
 - Catalog matrix read smoke rejects `head -c` / `tail -c` byte ranges that can truncate the fixture token while `runOneTool` fabricates the ping.
 - Catalog matrix read smoke rejects GNU `head -n -1` and `tail -n +2` ranges that suppress the one-line fixture token.
 - Catalog matrix shell smoke validates reachable `&&` / `||` suffixes (`echo ping && false`, write-then-`rm`) instead of keeping only the first conjunct.

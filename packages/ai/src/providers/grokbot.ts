@@ -1180,6 +1180,19 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							for (const buffered of held) pushConsumerEvent(buffered);
 						}
 					}
+					// Hold provisional SendToUser text while any call is still open so
+					// cumulative draft→answer revisions can rewrite unpublished deltas.
+					const contentIndexLive = "contentIndex" in event ? event.contentIndex : undefined;
+					if (
+						typeof contentIndexLive === "number" &&
+						sendToUserTextIndexes.has(contentIndexLive) &&
+						openSendToUserByKey.size > 0 &&
+						(event.type === "text_start" || event.type === "text_delta" || event.type === "text_end")
+					) {
+						attemptStreamingLive = false;
+						attemptEventBuffer.push(event);
+						return;
+					}
 					pushConsumerEvent(event);
 					return;
 				}
@@ -1188,6 +1201,11 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					(event.type === "text_delta" || event.type === "text_end") &&
 					!hasEarlierIncompleteTool(event.contentIndex)
 				) {
+					// Hold provisional SendToUser text until every open SendToUser call
+					// completes — early flush cannot retract a published draft.
+					if (sendToUserTextIndexes.has(event.contentIndex) && openSendToUserByKey.size > 0) {
+						return;
+					}
 					// Hold JSON / tool_code fallback text until end-of-stream
 					// promotion — early flush cannot retract published deltas.
 					const mayPromote = shouldPromoteJsonTextToolCall({
@@ -1496,7 +1514,12 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						part.args == null ? "" : typeof part.args === "string" ? part.args : JSON.stringify(part.args);
 					if (argsText) state.argsText = mergeStreamedArgsText(state.argsText, argsText).argsText;
 					const parsed = parseSendToUserContent(state.argsText);
+					const isComplete = Boolean(part.isComplete ?? part.is_complete);
 					if (parsed !== undefined && parsed !== state.lastContent) {
+						// Mark the text index before ensureText so text_start is held with
+						// provisional SendToUser deltas (draft→answer must stay unpublished).
+						const idxHint = openKind === "text" ? openIndex : output.content.length;
+						sendToUserTextIndexes.add(idxHint);
 						const idx = ensureText();
 						sendToUserTextIndexes.add(idx);
 						const block = output.content[idx] as TextContent;
@@ -1547,11 +1570,17 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							}
 						}
 					}
-					if (part.isComplete ?? part.is_complete) {
+					if (isComplete) {
 						closeOpen();
 						// Drop only this call's correlation keys — concurrent SendToUser
 						// streams keep their own reconstruction state.
 						for (const key of state.keys) openSendToUserByKey.delete(key);
+						// Provisional SendToUser text stays buffered while any call is open
+						// so draft→answer revisions can rewrite unpublished deltas. Publish
+						// once every SendToUser call on this attempt has completed.
+						if (openSendToUserByKey.size === 0 && !attemptStreamingLive) {
+							flushAttemptEvents();
+						}
 					}
 				};
 
@@ -1617,7 +1646,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					if (id && state.block.id.startsWith("call_")) state.block.id = id;
 
 					if (argsText) {
-						const merged = mergeStreamedArgsText(state.argsText, argsText);
+						const previousArgs = state.argsText;
+						const merged = mergeStreamedArgsText(previousArgs, argsText);
 						if (merged.argsText !== state.argsText) {
 							state.argsText = merged.argsText;
 							// Keep ToolCall.arguments + streamed buffer current so live
@@ -1627,12 +1657,64 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 								? { input: merged.argsText }
 								: parseToolArgs(merged.argsText, false);
 							if (merged.delta) {
-								emitAttemptEvent({
-									type: "toolcall_delta",
-									contentIndex: state.index,
-									delta: merged.delta,
-									partial: output,
-								});
+								// Cumulative complete-object revisions emit a full snapshot as
+								// `delta` (not an appendable suffix). Rewrite unpublished
+								// toolcall_deltas to one canonical snapshot so proxy concat
+								// (`previous + delta`) still parses.
+								const cumulativeReplace =
+									Boolean(previousArgs) &&
+									isCompleteJsonObjectText(previousArgs) &&
+									isCompleteJsonObjectText(merged.argsText) &&
+									!merged.argsText.startsWith(previousArgs);
+								if (cumulativeReplace) {
+									const buffered = pendingToolEventBuffers.get(state.index);
+									if (buffered) {
+										const rewritten: AssistantMessageEvent[] = [];
+										let replacedDelta = false;
+										for (const event of buffered) {
+											if (event.type === "toolcall_delta") {
+												if (!replacedDelta) {
+													rewritten.push({
+														type: "toolcall_delta",
+														contentIndex: state.index,
+														delta: merged.argsText,
+														partial: output,
+													});
+													replacedDelta = true;
+												}
+												continue;
+											}
+											rewritten.push(event);
+										}
+										if (!replacedDelta) {
+											rewritten.push({
+												type: "toolcall_delta",
+												contentIndex: state.index,
+												delta: merged.argsText,
+												partial: output,
+											});
+										}
+										pendingToolEventBuffers.set(state.index, rewritten);
+									} else {
+										// Live / unbuffered path: emit the canonical snapshot only
+										// once (no prior delta to retract). Callers that already
+										// saw an earlier snapshot cannot concat-repair — rare when
+										// tool events stay buffered until toolcall_end.
+										emitAttemptEvent({
+											type: "toolcall_delta",
+											contentIndex: state.index,
+											delta: merged.argsText,
+											partial: output,
+										});
+									}
+								} else {
+									emitAttemptEvent({
+										type: "toolcall_delta",
+										contentIndex: state.index,
+										delta: merged.delta,
+										partial: output,
+									});
+								}
 							}
 						}
 					}

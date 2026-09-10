@@ -539,8 +539,19 @@ function redirectBeforeEmitsPing(before: string, ping: string): boolean {
 	if (!cmd) return false;
 	if (cmd === "echo") {
 		let i = 1;
-		while (i < words.length && /^-[neE]+$/.test(words[i]!)) i++;
-		return words.slice(i).join(" ").includes(ping);
+		let escapes = false;
+		while (i < words.length && /^-[neE]+$/.test(words[i]!)) {
+			for (const ch of words[i]!.slice(1)) {
+				if (ch === "e") escapes = true;
+				if (ch === "E") escapes = false;
+			}
+			i++;
+		}
+		const rest = words.slice(i).join(" ");
+		// With -e, bash interprets escapes (`\c` suppresses further output) while
+		// runOneTool fabricates the ping from the literal argv — expand before match.
+		const emitted = escapes ? expandEchoEscapes(rest) : rest;
+		return emitted.includes(ping);
 	}
 	if (cmd === "printf" || cmd === "/bin/printf" || cmd === "/usr/bin/printf") {
 		const emitted = printfEmittedText(before);
@@ -548,6 +559,29 @@ function redirectBeforeEmitsPing(before: string, ping: string): boolean {
 	}
 	// `cat … > path` does not invent the ping from argv; reject for write smoke.
 	return false;
+}
+
+/** Expand bash `echo -e` escapes; `\c` suppresses the rest of the string. */
+function expandEchoEscapes(text: string): string {
+	let out = "";
+	for (let i = 0; i < text.length; i++) {
+		if (text[i] !== "\\" || i + 1 >= text.length) {
+			out += text[i]!;
+			continue;
+		}
+		const next = text[i + 1]!;
+		i++;
+		if (next === "c") return out;
+		if (next === "n") out += "\n";
+		else if (next === "t") out += "\t";
+		else if (next === "r") out += "\r";
+		else if (next === "\\") out += "\\";
+		else {
+			// Unknown escape: bash keeps the character after the slash.
+			out += next;
+		}
+	}
+	return out;
 }
 
 /** True when echo/printf would emit `ping` (shared by bash smoke and write smoke). */

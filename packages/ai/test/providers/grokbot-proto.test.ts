@@ -2480,16 +2480,23 @@ describe("grokbot incomplete tool calls", () => {
 
 		const stream = streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl });
 		let sawPartialArgs = false;
+		let accumulatedDeltas = "";
 		for await (const event of stream) {
-			if (event.type === "toolcall_delta" && event.partial) {
-				const block = event.partial.content.find(b => b.type === "toolCall");
-				if (block && block.type === "toolCall" && block.arguments.cmd === "ls") {
-					sawPartialArgs = true;
+			if (event.type === "toolcall_delta") {
+				accumulatedDeltas += event.delta;
+				if (event.partial) {
+					const block = event.partial.content.find(b => b.type === "toolCall");
+					if (block && block.type === "toolCall" && block.arguments.cmd === "ls") {
+						sawPartialArgs = true;
+					}
 				}
 			}
 		}
 		const result = await stream.result();
 		expect(sawPartialArgs).toBe(true);
+		// Proxy-style concat of toolcall_deltas must parse to the merged args — not
+		// `{"cmd":"ls"}{"cmd":"ls","n":1}` from cumulative full-snapshot deltas.
+		expect(JSON.parse(accumulatedDeltas)).toEqual({ cmd: "ls", n: 1 });
 		expect(result.stopReason).toBe("toolUse");
 		expect(result.content).toEqual([
 			expect.objectContaining({
