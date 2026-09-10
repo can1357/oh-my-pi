@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Long-running requests retain credential reservations, and stream health updates wait for the final outcome.
 - Fixed weighted target dispatch, deployment affinity, tool capability checks, and concurrent API-key reservations.
 
 - Fixed auth-gateway SSE streams leaking turn reservations when `reader.read()` rejects.

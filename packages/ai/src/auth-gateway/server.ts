@@ -39,7 +39,7 @@
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { extractHttpStatusFromError, extractRetryHint, isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "../auth-retry";
-import type { AuthStorage } from "../auth-storage";
+import { type AuthStorage, DEFAULT_TURN_RESERVATION_TTL_MS } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
 import { isUsageLimitOutcome } from "../error/rate-limit";
@@ -622,20 +622,28 @@ function mirrorRequestAbort(req: Request): AbortController {
 // (handlePassthrough removed — see note above.)
 
 /** Wrap an SSE body so turn reservations release on close, cancel, or read failure. */
+export function renewReservationUntilSettled<T>(
+	storage: AuthStorage,
+	requestId: string,
+	pending: Promise<T>,
+): Promise<T> {
+	const timer = setInterval(() => storage.renewTurnReservation(requestId), DEFAULT_TURN_RESERVATION_TTL_MS / 2);
+	timer.unref?.();
+	return pending.finally(() => clearInterval(timer));
+}
+
 export function releaseTurnOnStreamEnd(
 	stream: ReadableStream<Uint8Array>,
 	storage: AuthStorage,
 	requestId: string,
-	commitGate?: StreamCommitGate,
+	_commitGate?: StreamCommitGate,
+	settled?: Promise<void>,
 ): ReadableStream<Uint8Array> {
 	const reader = stream.getReader();
 	let released = false;
 	const release = (): void => {
 		if (released) return;
 		released = true;
-		if (commitGate && (commitGate.state === "committed" || commitGate.state === "terminated")) {
-			storage.settleQuotaProbeSuccess(requestId);
-		}
 		storage.releaseTurnReservation(requestId);
 	};
 	return new ReadableStream({
@@ -643,6 +651,7 @@ export function releaseTurnOnStreamEnd(
 			try {
 				const { done, value } = await reader.read();
 				if (done) {
+					await settled;
 					release();
 					controller.close();
 					return;
@@ -700,6 +709,39 @@ function recordProviderHealthFailure(
 	} else if (classified.owner === "model") {
 		health.recordFailure(model.provider, model.id, "model");
 	}
+}
+
+function classifyAssistantFailure(message: AssistantMessage): GatewayErrorClassification {
+	return classifyGatewayError(
+		Object.assign(
+			new Error(message.errorClassificationMessage ?? message.errorMessage ?? "Upstream request failed"),
+			{ status: message.errorStatus, errorId: message.errorId },
+		),
+	);
+}
+
+async function settleGatewayStream(
+	settled: Promise<AssistantMessage>,
+	boot: AuthGatewayBootOptions,
+	health: ProviderHealthBook,
+	model: Model<Api>,
+	requestId: string,
+	onSuccess: () => void,
+	afterOutcome: (ok: boolean) => Promise<void>,
+): Promise<void> {
+	let ok = false;
+	try {
+		const message = await settled;
+		ok = message.stopReason !== "error" && message.stopReason !== "aborted";
+		if (ok) {
+			boot.storage.settleQuotaProbeSuccess(requestId);
+			health.recordSuccess(model.provider, model.id);
+			onSuccess();
+		} else recordProviderHealthFailure(health, model, classifyAssistantFailure(message));
+	} catch (error) {
+		recordProviderHealthFailure(health, model, classifyGatewayError(error));
+	}
+	await afterOutcome(ok);
 }
 
 function rememberPromptCacheHit(
@@ -1091,7 +1133,11 @@ async function handleFormatEndpoint(
 					peer,
 				});
 				try {
-					const message = await completeSimple(model, parsed.context, streamOpts);
+					const message = await renewReservationUntilSettled(
+						bootOpts.storage,
+						requestId,
+						completeSimple(model, parsed.context, streamOpts),
+					);
 					recordGatewayUsage(bootOpts.storage, model, client, message);
 					if (message.stopReason === "aborted" || message.stopReason === "error") {
 						const errorMessage =
@@ -1198,7 +1244,7 @@ async function handleFormatEndpoint(
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return classifiedError(classified);
 		}
-		const settled = events.result();
+		const settled = renewReservationUntilSettled(bootOpts.storage, requestId, events.result());
 		void settled.then(message => recordGatewayUsage(bootOpts.storage, model, client, message)).catch(() => {});
 		let sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
 			signal: controller.signal,
@@ -1245,15 +1291,23 @@ async function handleFormatEndpoint(
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return clientClosedResponse(route);
 		}
-		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
-		health.recordSuccess(model.provider, model.id);
-		rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
-		await runHook(bootOpts.hooks?.afterRequest, {
+		const outcome = settleGatewayStream(
+			settled,
+			bootOpts,
+			health,
+			model,
 			requestId,
-			routeId: compiled.id,
-			generation: compiled.generation,
-			ok: true,
-		});
+			() => rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId),
+			async ok => {
+				await runHook(bootOpts.hooks?.afterRequest, {
+					requestId,
+					routeId: compiled.id,
+					generation: compiled.generation,
+					ok,
+				});
+			},
+		);
+		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, undefined, outcome);
 		return new Response(sseStream, {
 			status: 200,
 			headers: {
@@ -1627,7 +1681,11 @@ async function handlePiNative(
 					peer,
 				});
 				try {
-					const message = await completeSimple(model, parsed.context, streamOpts);
+					const message = await renewReservationUntilSettled(
+						bootOpts.storage,
+						requestId,
+						completeSimple(model, parsed.context, streamOpts),
+					);
 					recordGatewayUsage(bootOpts.storage, model, client, message);
 					if (message.stopReason === "aborted" || message.stopReason === "error") {
 						const errorMessage =
@@ -1724,7 +1782,7 @@ async function handlePiNative(
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return classifiedError(classified);
 		}
-		const settled = events.result();
+		const settled = renewReservationUntilSettled(bootOpts.storage, requestId, events.result());
 		void settled.then(message => recordGatewayUsage(bootOpts.storage, model, client, message)).catch(() => {});
 		let sseStream = piNative.encodeStream(events, parsed.modelId, parsed.options, {
 			signal: controller.signal,
@@ -1768,9 +1826,23 @@ async function handlePiNative(
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return aborted();
 		}
-		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
-		health.recordSuccess(model.provider, model.id);
-		rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
+		const outcome = settleGatewayStream(
+			settled,
+			bootOpts,
+			health,
+			model,
+			requestId,
+			() => rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId),
+			async ok => {
+				await runHook(bootOpts.hooks?.afterRequest, {
+					requestId,
+					routeId: compiled.id,
+					generation: compiled.generation,
+					ok,
+				});
+			},
+		);
+		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, undefined, outcome);
 		return new Response(sseStream, {
 			status: 200,
 			headers: {
