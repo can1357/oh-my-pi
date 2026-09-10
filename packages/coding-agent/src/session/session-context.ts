@@ -412,10 +412,23 @@ export function buildSessionContext(
 		// Display transcript: every entry in chronological order. Compactions do
 		// not erase prior history here — each renders inline (as a divider in the
 		// TUI) at the point it fired, with any snapcompact frames re-attached so
-		// the component can report them.
-		for (const entry of path) {
+		// the component can report them. An immediate frame-rescue replacement is
+		// the same compaction point and supersedes its source entry below.
+		for (let index = 0; index < path.length; index++) {
+			const entry = path[index];
 			handleEntryResetTracking(entry);
 			if (entry.type === "compaction") {
+				const replacement = path[index + 1];
+				if (
+					replacement?.type === "compaction" &&
+					entry.method === "snapcompact" &&
+					replacement.method === "snapcompact" &&
+					replacement.parentId === entry.id &&
+					replacement.firstKeptEntryId === entry.firstKeptEntryId &&
+					replacement.tokensBefore === entry.tokensBefore
+				) {
+					continue;
+				}
 				const active = entry.id === compaction?.id;
 				const snapcompactArchive = active ? snapcompact.getPreservedArchive(entry.preserveData) : undefined;
 				pushMessage(
