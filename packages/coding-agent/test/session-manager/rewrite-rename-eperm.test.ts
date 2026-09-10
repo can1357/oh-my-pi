@@ -228,7 +228,7 @@ describe("recoverOrphanedBackups", () => {
 		const storage = new MemorySessionStorage();
 		const dir = "/sessions/proj";
 		const primary = `${dir}/session-abc.jsonl`;
-		const backup = `${primary}.1700000000000.bak`;
+		const backup = `${primary}.019cae2f40000000.bak`;
 		storage.writeTextSync(backup, '{"type":"session","id":"abc"}\n');
 
 		await recoverOrphanedBackups(dir, storage);
@@ -242,7 +242,7 @@ describe("recoverOrphanedBackups", () => {
 		const storage = new MemorySessionStorage();
 		const dir = "/sessions/proj";
 		const primary = `${dir}/session-xyz.jsonl`;
-		const backup = `${primary}.1700000000000.bak`;
+		const backup = `${primary}.019cae2f40000000.bak`;
 		storage.writeTextSync(primary, '{"type":"session","id":"xyz","keep":true}\n');
 		storage.writeTextSync(backup, '{"type":"session","id":"xyz","stale":true}\n');
 
@@ -256,8 +256,8 @@ describe("recoverOrphanedBackups", () => {
 		const storage = new MemorySessionStorage();
 		const dir = "/sessions/proj";
 		const primary = `${dir}/session-multi.jsonl`;
-		const older = `${primary}.100.bak`;
-		const newer = `${primary}.200.bak`;
+		const older = `${primary}.019cae2f40000000.bak`;
+		const newer = `${primary}.019cae2f40000001.bak`;
 		storage.writeTextSync(older, "older");
 		// Force the newer backup to have a strictly higher mtime so recovery is deterministic.
 		await Bun.sleep(5);

@@ -25,7 +25,7 @@ describe("deleteSessionWithArtifacts cleans stale .bak siblings", () => {
 		const primary = path.join(sessionDir, "session-gone.jsonl");
 		await storage.writeText(primary, '{"type":"session","id":"gone"}\n');
 		// Stale backup left behind by a failed EPERM-rewrite unlink, as in #11499.
-		await storage.writeText(`${primary}.1700000000000.bak`, '{"type":"session","id":"gone","stale":true}\n');
+		await storage.writeText(`${primary}.019cae2f40000000.bak`, '{"type":"session","id":"gone","stale":true}\n');
 
 		await storage.deleteSessionWithArtifacts(primary);
 
@@ -50,9 +50,9 @@ describe("deleteSessionWithArtifacts cleans stale .bak siblings", () => {
 
 	it("leaves longer-named sessions' backups alone (prefix collision)", async () => {
 		const primary = path.join(sessionDir, "foo.jsonl");
-		const ownBackup = `${primary}.1700000000000.bak`;
+		const ownBackup = `${primary}.019cae2f40000000.bak`;
 		const longerPrimary = path.join(sessionDir, "foo.jsonl.copy.jsonl");
-		const longerBackup = `${longerPrimary}.1700000000001.bak`;
+		const longerBackup = `${longerPrimary}.019cae2f40000001.bak`;
 		await storage.writeText(primary, '{"type":"session","id":"foo"}\n');
 		await storage.writeText(ownBackup, '{"type":"session","id":"foo","stale":true}\n');
 		await storage.writeText(longerPrimary, '{"type":"session","id":"copy"}\n');
@@ -79,7 +79,7 @@ describe("deleteSessionWithArtifacts cleans stale .bak siblings", () => {
 
 	it("settles the end state when a racing scan promotes the backup mid-delete", async () => {
 		const primary = path.join(sessionDir, "session-raced.jsonl");
-		const backup = `${primary}.1700000000000.bak`;
+		const backup = `${primary}.019cae2f40000000.bak`;
 		await storage.writeText(primary, '{"type":"session","id":"raced"}\n');
 		await storage.writeText(backup, '{"type":"session","id":"raced","stale":true}\n');
 
@@ -108,6 +108,21 @@ describe("deleteSessionWithArtifacts cleans stale .bak siblings", () => {
 		expect(storage.existsSync(backup)).toBe(false);
 
 		// Nothing remains for a later scan to promote: the session stays gone.
+		await recoverOrphanedBackups(sessionDir, storage);
+		expect(storage.existsSync(primary)).toBe(false);
+		expect(await listSessions(sessionDir, storage).then(s => s.map(i => i.path))).not.toContain(primary);
+	});
+	it("ignores .bak names without a Snowflake suffix (never OMP artifacts)", async () => {
+		const primary = path.join(sessionDir, "session-manual.jsonl");
+		const manual = `${primary}.manual.bak`;
+		await storage.writeText(primary, '{"type":"session","id":"manual"}\n');
+		await storage.writeText(manual, '{"type":"session","id":"manual","note":true}\n');
+
+		await storage.deleteSessionWithArtifacts(primary);
+
+		// Not a writer-minted backup: left alone by the delete...
+		expect(storage.existsSync(manual)).toBe(true);
+		// ...and never promoted by recovery, so the session stays gone.
 		await recoverOrphanedBackups(sessionDir, storage);
 		expect(storage.existsSync(primary)).toBe(false);
 		expect(await listSessions(sessionDir, storage).then(s => s.map(i => i.path))).not.toContain(primary);

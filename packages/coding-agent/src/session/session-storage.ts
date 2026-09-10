@@ -493,7 +493,8 @@ export class FileSessionStorage implements SessionStorage {
  * Map a `<primary>.<snowflake>.bak` file name to its primary basename, or
  * undefined when the name is not a session backup. Single grammar shared by
  * recovery (session-listing) and deletion so both sides recognize exactly
- * the same files.
+ * the same files. The suffix must be a real Snowflake id (the only form the
+ * writer mints) so foreign `.bak` files are never claimed by either side.
  */
 export function primaryNameForSessionBackup(name: string): string | undefined {
 	if (!name.endsWith(".bak")) return undefined;
@@ -502,6 +503,7 @@ export function primaryNameForSessionBackup(name: string): string | undefined {
 	if (dotIdx <= 0) return undefined;
 	const primaryName = trimmed.slice(0, dotIdx);
 	if (!primaryName.endsWith(".jsonl")) return undefined;
+	if (!Snowflake.valid(trimmed.slice(dotIdx + 1))) return undefined;
 	return primaryName;
 }
 
