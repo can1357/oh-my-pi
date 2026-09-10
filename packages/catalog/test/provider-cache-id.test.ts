@@ -51,3 +51,43 @@ test("ollama cache scope preserves reverse-proxy path prefixes", () => {
 	expect(teamA).toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-a/" }));
 	expect(teamA).not.toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-b/v1" }));
 });
+
+test("GitHub Copilot cache scope uses accountId when present and falls back to token", () => {
+	const key1 = JSON.stringify({ token: "ghu_token1", accountId: "user-42" });
+	const key2 = JSON.stringify({ token: "ghu_token2", accountId: "user-42" });
+	expect(resolveModelCacheProviderId("github-copilot", { apiKey: key1 })).toBe(
+		resolveModelCacheProviderId("github-copilot", { apiKey: key2 }),
+	);
+
+	const anonymous1 = JSON.stringify({ token: "ghu_token1" });
+	const anonymous2 = JSON.stringify({ token: "ghu_token2" });
+	expect(resolveModelCacheProviderId("github-copilot", { apiKey: anonymous1 })).not.toBe(
+		resolveModelCacheProviderId("github-copilot", { apiKey: anonymous2 }),
+	);
+
+	const singleAccount = resolveModelCacheProviderId("github-copilot", { accountIdentities: ["user-42"] });
+	expect(singleAccount).toBe(resolveModelCacheProviderId("github-copilot", { apiKey: key1 }));
+
+	const multiAccount = resolveModelCacheProviderId("github-copilot", { accountIdentities: ["user-42", "user-99"] });
+	expect(multiAccount).not.toBe(singleAccount);
+
+	const multiAccountReordered = resolveModelCacheProviderId("github-copilot", {
+		accountIdentities: ["user-99", "user-42"],
+	});
+	expect(multiAccountReordered).toBe(multiAccount);
+});
+
+test("GitHub Copilot cache scope uses credential-neutral baseUrl regardless of apiEndpoint in token", () => {
+	const personalKey = JSON.stringify({ token: "ghu_token1", accountId: "user-42" });
+	const businessKey = JSON.stringify({
+		token: "ghu_token1",
+		accountId: "user-42",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+	});
+	expect(resolveModelCacheProviderId("github-copilot", { apiKey: businessKey })).toBe(
+		resolveModelCacheProviderId("github-copilot", { apiKey: personalKey }),
+	);
+	expect(resolveModelCacheProviderId("github-copilot", { accountIdentities: ["user-42"] })).toBe(
+		resolveModelCacheProviderId("github-copilot", { apiKey: businessKey }),
+	);
+});

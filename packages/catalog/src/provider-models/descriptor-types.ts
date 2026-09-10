@@ -1,6 +1,16 @@
 import type { ModelManagerOptions } from "../model-manager";
 import type { Api, FetchImpl } from "../types";
 
+/** One configured GitHub Copilot OAuth account used for catalog discovery. */
+export interface GithubCopilotDiscoveryAccount {
+	/** Raw Copilot OAuth API key (bare prefix token or JSON envelope). */
+	apiKey: string;
+	/** Stable account identity, used only for diagnostics. */
+	accountId?: string;
+	/** Durable auth-store row ID used to retain model eligibility through refresh. */
+	credentialId?: number;
+}
+
 /** Config passed to a provider's runtime model-manager factory. */
 export type ModelManagerConfig = {
 	apiKey?: string;
@@ -8,6 +18,19 @@ export type ModelManagerConfig = {
 	fetch?: FetchImpl;
 	/** The supplied fetch already applies provider-specific authentication. */
 	authenticated?: boolean;
+	/**
+	 * Account identities contributing to discovery for credential-scoped providers
+	 * with multi-account support (e.g. github-copilot).
+	 */
+	accountIdentities?: readonly string[];
+	/**
+	 * github-copilot: resolve every configured Copilot OAuth account so
+	 * discovery can union each account's granted models before the authoritative
+	 * prune. Copilot inference round-robins across sibling accounts, so the
+	 * authoritative catalog must include every account's grants, not just the
+	 * peeked one.
+	 */
+	resolveAccounts?: () => Promise<readonly GithubCopilotDiscoveryAccount[] | null>;
 };
 
 /** Catalog discovery configuration for providers that support endpoint-based model listing. */
@@ -35,6 +58,8 @@ export interface ProviderDescriptor {
 	allowUnauthenticated?: boolean;
 	/** When true, successful runtime discovery replaces bundled provider models instead of merging fallback-only IDs. */
 	dynamicModelsAuthoritative?: boolean;
+	/** When true, a successful dynamic fetch that returns zero models is still cached as authoritative. */
+	emptyDynamicModelsAuthoritative?: boolean;
 	/** Catalog discovery configuration. Only providers with this field participate in generate-models.ts. */
 	catalogDiscovery?: CatalogDiscoveryConfig;
 }
@@ -75,6 +100,8 @@ export interface ProviderCatalogEntry {
 	readonly allowUnauthenticated?: boolean;
 	/** When true, successful runtime discovery replaces bundled provider models. */
 	readonly dynamicModelsAuthoritative?: boolean;
+	/** When true, a successful dynamic fetch that returns zero models is still cached as authoritative. */
+	readonly emptyDynamicModelsAuthoritative?: boolean;
 	/** Catalog discovery configuration for generate-models.ts. */
 	readonly catalogDiscovery?: CatalogDiscoveryConfig;
 	/**

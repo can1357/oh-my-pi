@@ -1237,6 +1237,139 @@ describe("model cache spec round trip", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+	it("persists a successful empty discovery result as authoritative when emptyDynamicModelsAuthoritative is enabled", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-empty-authoritative-"));
+		const dbPath = path.join(tempDir, "models.db");
+		let fetches = 0;
+		let currentTime = 1_000_000;
+		const options = {
+			providerId: "empty-authoritative-test",
+			staticModels: [],
+			dynamicModelsAuthoritative: true,
+			emptyDynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			now: () => currentTime,
+			fetchDynamicModels: async () => {
+				fetches++;
+				return [];
+			},
+		};
+		try {
+			const empty = await resolveProviderModels(options, "online");
+			expect(empty.models).toEqual([]);
+			expect(empty.stale).toBe(false);
+			expect(fetches).toBe(1);
+
+			const db = new Database(dbPath, { readonly: true });
+			const row = db
+				.query<{ authoritative: number }, [string]>("SELECT authoritative FROM model_cache WHERE provider_id = ?")
+				.get(options.providerId);
+			db.close();
+			expect(row?.authoritative).toBe(1);
+
+			// A subsequent online-if-uncached reuse uses the authoritative cache without refetching even past the short retry interval
+			currentTime += 10 * 60 * 1_000;
+			const cached = await resolveProviderModels(options, "online-if-uncached");
+			expect(cached.models).toEqual([]);
+			expect(cached.stale).toBe(false);
+			expect(fetches).toBe(1);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves the previous authoritative cache when an online refresh fails on an authoritative provider", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-preserve-authoritative-"));
+		const dbPath = path.join(tempDir, "models.db");
+		let failFetch = false;
+		const staticA = completionsSpec({ id: "model-a", name: "Model A", provider: "auth-test" });
+		const staticB = completionsSpec({ id: "model-b", name: "Model B", provider: "auth-test" });
+		const options = {
+			providerId: "auth-test",
+			staticModels: [staticA, staticB],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			fetchDynamicModels: async () => {
+				if (failFetch) return null;
+				return [completionsSpec({ id: "model-a", name: "Model A Granted", provider: "auth-test" })];
+			},
+		};
+		try {
+			// First fetch: authoritative discovery returns only model-a, pruning static model-b
+			const initial = await resolveProviderModels(options, "online");
+			expect(initial.models.map(m => m.id)).toEqual(["model-a"]);
+			expect(initial.authoritative).toBe(true);
+
+			const db = new Database(dbPath, { readonly: true });
+			const rowInitial = db
+				.query<{ authoritative: number }, [string]>("SELECT authoritative FROM model_cache WHERE provider_id = ?")
+				.get(options.providerId);
+			expect(rowInitial?.authoritative).toBe(1);
+
+			// Online refresh fails: must retain model-a and NOT re-inject static model-b
+			failFetch = true;
+			const failedRefresh = await resolveProviderModels(options, "online");
+			expect(failedRefresh.models.map(m => m.id)).toEqual(["model-a"]);
+			expect(failedRefresh.authoritative).toBe(true);
+
+			const rowAfterFailure = db
+				.query<{ authoritative: number }, [string]>("SELECT authoritative FROM model_cache WHERE provider_id = ?")
+				.get(options.providerId);
+			db.close();
+			expect(rowAfterFailure?.authoritative).toBe(1);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("honors modelsDev.additiveOnly on authoritative managers when provider fetch fails", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-additive-authoritative-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const staticA = completionsSpec({
+			id: "model-a",
+			name: "Bundled Static A",
+			provider: "auth-test",
+			contextWindow: 128_000,
+		});
+		const options = {
+			providerId: "auth-test",
+			staticModels: [staticA],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			fetchDynamicModels: async () => null,
+			modelsDev: {
+				additiveOnly: true,
+				fetch: async () => [
+					completionsSpec({
+						id: "model-a",
+						name: "Overwritten by models.dev",
+						provider: "auth-test",
+						contextWindow: 64_000,
+					}),
+					completionsSpec({
+						id: "new-model",
+						name: "New from models.dev",
+						provider: "auth-test",
+					}),
+				],
+				map: (payload: unknown) => payload as ModelSpec<"openai-completions">[],
+			},
+		};
+		try {
+			const resolved = await resolveProviderModels(options, "online");
+			const byId = new Map(resolved.models.map(m => [m.id, m]));
+
+			// Same-id model-a must retain bundled metadata because additiveOnly forbids overwriting it
+			expect(byId.get("model-a")?.name).toBe("Bundled Static A");
+			expect(byId.get("model-a")?.contextWindow).toBe(128_000);
+
+			// New model from models.dev is introduced
+			expect(byId.has("new-model")).toBe(true);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("restores static model headers on fresh cache reads", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-static-headers-"));
 		const dbPath = path.join(tempDir, "models.db");

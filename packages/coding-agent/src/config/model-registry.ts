@@ -108,6 +108,8 @@ import {
 	type ProviderDiscoveryState,
 	RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS,
 	resolveCodexDiscoveryAccounts,
+	resolveGitHubCopilotAccountIdentities,
+	resolveGitHubCopilotDiscoveryAccounts,
 	SPECIAL_MODEL_MANAGER_PROVIDER_IDS,
 	STARTUP_MODEL_CACHE_PROVIDER_IDS,
 	withModelDiscoveryTimeout,
@@ -149,6 +151,7 @@ const ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP: Readonly<Record<string, tr
 		).map(providerId => [providerId, true as const]),
 	),
 );
+const EMPTY_CREDENTIAL_IDS: readonly number[] = Object.freeze([]);
 
 /**
  * Bedrock provider-scoped fields to spread onto a model spec, dropping keys
@@ -389,6 +392,12 @@ export class ModelRegistry {
 			const keyConfig = this.#customProviderApiKeys.get(provider);
 			if (!keyConfig) return undefined;
 			return resolveConfigValue(keyConfig);
+		});
+		this.authStorage.setOAuthModelCredentialResolver((provider, modelId) => {
+			const model = this.find(provider, modelId);
+			if (model) return model.oauthCredentialIds;
+			if (this.isAuthoritativeProvider(provider)) return EMPTY_CREDENTIAL_IDS;
+			return undefined;
 		});
 		// Load config and cache-backed layers synchronously in the constructor.
 		this.#loadModels();
@@ -964,7 +973,9 @@ export class ModelRegistry {
 			this.#runtimeProviderOverrides.get(providerId)?.baseUrl ??
 			this.#providerOverrides.get(providerId)?.baseUrl ??
 			(this.#hasFullSnapshot ? this.getProviderBaseUrl(providerId) : undefined);
-		return resolveModelCacheProviderId(providerId, { baseUrl });
+		const accountIdentities =
+			providerId === "github-copilot" ? resolveGitHubCopilotAccountIdentities(this.authStorage) : undefined;
+		return resolveModelCacheProviderId(providerId, { baseUrl, accountIdentities });
 	}
 
 	#loadCachedStandardProviderModels(providerIds: readonly string[]): {
@@ -1887,6 +1898,22 @@ export class ModelRegistry {
 					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
 					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
 					fetch: this.#fetch,
+					// github-copilot inference round-robins across sibling accounts, so
+					// the authoritative catalog must union every account's grants, not
+					// just the peeked one (see resolveGitHubCopilotDiscoveryAccounts).
+					...(descriptor.providerId === "github-copilot"
+						? {
+								accountIdentities: resolveGitHubCopilotAccountIdentities(this.authStorage, apiKey),
+								resolveAccounts: () =>
+									resolveGitHubCopilotDiscoveryAccounts(
+										this.authStorage,
+										// github-copilot is dynamicModelsAuthoritative with no
+										// allowUnauthenticated arm, so this branch only runs
+										// for an authenticated (resolved) apiKey.
+										apiKey!,
+									),
+							}
+						: {}),
 				};
 				const preparedConfig =
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??
@@ -1975,7 +2002,7 @@ export class ModelRegistry {
 				});
 			}
 			const authoritativeProviders = new Set<string>();
-			if (options.dynamicModelsAuthoritative && !result.stale) {
+			if (options.dynamicModelsAuthoritative && (result.authoritative ?? !result.stale)) {
 				authoritativeProviders.add(options.providerId);
 			}
 			return { models, authoritativeProviders };
@@ -2397,6 +2424,14 @@ export class ModelRegistry {
 	 */
 	isProviderDiscoveryPending(provider: string): boolean {
 		return this.#providerDiscoveryStates.get(provider)?.status === "idle";
+	}
+
+	/**
+	 * Returns whether the provider has a successfully resolved authoritative catalog
+	 * (either fresh from cache or completed runtime discovery).
+	 */
+	isAuthoritativeProvider(provider: string): boolean {
+		return this.#runtimeAuthoritativeProviders.has(provider) || this.#cachedAuthoritativeProviders.has(provider);
 	}
 
 	/**

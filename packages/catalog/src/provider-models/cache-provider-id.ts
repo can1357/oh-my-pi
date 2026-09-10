@@ -1,8 +1,9 @@
-import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
+import { parseGitHubCopilotApiKey, PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
 
 export interface ModelCacheProviderIdOptions {
 	apiKey?: string;
 	baseUrl?: string;
+	accountIdentities?: readonly string[];
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
@@ -98,9 +99,19 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// so they refetch instead of serving the poisoned rows. Listing ids
 			// cannot cover this class — any enterprise-only sibling can carry
 			// another provider's routing — so version the namespace instead.
+			// v3: unioned models must not retain the first account's Enterprise
+			// endpoint, which misroutes sibling credentials during inference.
+			// v4: refetch catalogs without per-model OAuth grants before allowing
+			// account rotation to use them.
+			const parsed = options.apiKey ? parseGitHubCopilotApiKey(options.apiKey) : undefined;
+			const defaultIdentity = parsed?.accountId || parsed?.accessToken || options.apiKey || "";
+			const identity =
+				options.accountIdentities && options.accountIdentities.length > 0
+					? Array.from(new Set(options.accountIdentities)).sort().join(",")
+					: defaultIdentity;
 			const baseUrl = options.baseUrl ?? PERSONAL_GITHUB_COPILOT_BASE_URL;
-			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
-			return `github-copilot:models-v2:${Bun.hash(scope).toString(36)}`;
+			const scope = `${identity}\u0000${baseUrl}`;
+			return `github-copilot:models-v4:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":
 			return "openrouter:pseudo-api";

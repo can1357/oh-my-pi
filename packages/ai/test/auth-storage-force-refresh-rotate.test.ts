@@ -892,4 +892,49 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(shortWindow.blockedUntilMs!).toBeGreaterThan(Date.now() + 7_100_000);
 		expect(shortWindow.blockedUntilMs!).toBeLessThanOrEqual(Date.now() + 7_200_000);
 	});
+
+	test("rotateSessionCredential and markUsageLimitReached apply model grants to restrict sibling availability", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		registerProvider();
+		await authStorage.set(PROVIDER, [
+			{ type: "oauth", access: "acc-A", refresh: "ref-A", expires: farExpiry() },
+			{ type: "oauth", access: "acc-B", refresh: "ref-B", expires: farExpiry() },
+		]);
+		const stored = store!.listAuthCredentials(PROVIDER);
+		const idA = stored[0]!.id;
+
+		// Model grant: model-exclusive is granted ONLY to account A.
+		authStorage.setOAuthModelCredentialResolver((provider, modelId) => {
+			if (provider === PROVIDER && modelId === "model-exclusive") return [idA];
+			return undefined;
+		});
+
+		// Resolve key for session using model-exclusive -> selects account A
+		const keyA = await authStorage.getApiKey(PROVIDER, "sess", { modelId: "model-exclusive" });
+		expect(keyA).toBe("acc-A");
+
+		// Account A hits a usage limit for model-exclusive. Account B exists but does not grant model-exclusive.
+		// Sibling availability must NOT treat account B as a sibling for this model.
+		const usageOutcome = await authStorage.markUsageLimitReached(PROVIDER, "sess", {
+			modelId: "model-exclusive",
+			retryAfterMs: 60_000,
+		});
+		expect(usageOutcome.switched).toBe(false);
+
+		// Similarly, auth error rotation must report no sibling.
+		const rotated = await authStorage.rotateSessionCredential(PROVIDER, "sess", {
+			error: authError(),
+			modelId: "model-exclusive",
+		});
+		expect(rotated).toBe(false);
+
+		// And resolving key resolver should back off (return undefined) rather than reselecting account A.
+		const keyResolver = authStorage.resolver(PROVIDER, { sessionId: "sess", modelId: "model-exclusive" });
+		const resolvedKey = await keyResolver({
+			lastChance: true,
+			error: usageLimitError(),
+			previousKey: "acc-A",
+		});
+		expect(resolvedKey).toBeUndefined();
+	});
 });

@@ -1390,6 +1390,7 @@ export class AuthStorage {
 	#usageRequestTimeoutMs: number;
 	#usageLogger?: UsageLogger;
 	#fallbackResolver?: (provider: string) => string | undefined;
+	#oauthModelCredentialResolver?: (provider: string, modelId: string) => readonly number[] | undefined;
 	#store: AuthCredentialStore;
 	#configValueResolver: (config: string) => Promise<string | undefined>;
 	#refreshOAuthCredentialOverride?: AuthStorageOptions["refreshOAuthCredential"];
@@ -1620,6 +1621,17 @@ export class AuthStorage {
 	 */
 	setFallbackResolver(resolver: (provider: string) => string | undefined): void {
 		this.#fallbackResolver = resolver;
+	}
+
+	/** Resolve authoritative model grants. Undefined preserves normal account selection. */
+	setOAuthModelCredentialResolver(
+		resolver: (provider: string, modelId: string) => readonly number[] | undefined,
+	): void {
+		this.#oauthModelCredentialResolver = resolver;
+	}
+
+	#modelOAuthCredentialIds(provider: string, modelId: string | undefined): readonly number[] | undefined {
+		return modelId === undefined ? undefined : this.#oauthModelCredentialResolver?.(provider, modelId);
 	}
 
 	/**
@@ -4733,11 +4745,18 @@ export class AuthStorage {
 					blockedUntil)
 				: blockedUntil;
 
-		const remainingCredentials = this.#getCredentialsForProvider(provider)
-			.map((credential, index) => ({ credential, index }))
+		const allowedIds =
+			credentialType === "oauth"
+				? this.#modelOAuthCredentialIds(provider, routing.rankingContext.modelId)
+				: undefined;
+		const stored = this.#getStoredCredentials(provider);
+		const remainingCredentials = stored
+			.map((entry, index) => ({ credential: entry.credential, index, id: entry.id }))
 			.filter(
-				(entry): entry is { credential: AuthCredential; index: number } =>
-					entry.credential.type === credentialType && entry.index !== targetIndex,
+				(entry): entry is { credential: AuthCredential; index: number; id: number } =>
+					entry.credential.type === credentialType &&
+					entry.index !== targetIndex &&
+					(allowedIds === undefined || allowedIds.includes(entry.id)),
 			);
 
 		let retryAtMs: number | undefined;
@@ -5134,9 +5153,15 @@ export class AuthStorage {
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthResolutionResult | undefined> {
-		const credentials = this.#getCredentialsForProvider(provider)
-			.map((credential, index) => ({ credential, index }))
-			.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth");
+		const allowedIds = this.#modelOAuthCredentialIds(provider, options?.modelId);
+		const stored = this.#getStoredCredentials(provider);
+		const credentials = stored
+			.map((entry, index) => ({ credential: entry.credential, index }))
+			.filter(
+				(entry): entry is OAuthSelection =>
+					entry.credential.type === "oauth" &&
+					(allowedIds === undefined || allowedIds.includes(stored[entry.index].id)),
+			);
 
 		if (credentials.length === 0) return undefined;
 
@@ -5871,6 +5896,60 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Synchronously peek at API key for a provider without refreshing OAuth tokens
+	 * or awaiting external config resolvers. Follows the same credential precedence
+	 * as peekApiKey: runtime override → config override → unexpired OAuth →
+	 * login-persisted API key → environment variable → stored static API key → fallback resolver.
+	 */
+	peekApiKeySync(provider: string): string | undefined {
+		const runtimeKey = this.#runtimeOverrides.get(provider);
+		if (runtimeKey) {
+			return runtimeKey;
+		}
+
+		const configKey = this.#configOverrides.get(provider);
+		if (configKey) {
+			return configKey;
+		}
+
+		const oauthSelection = this.#selectCredentialByType(provider, "oauth");
+		if (oauthSelection) {
+			const expiresAt = oauthSelection.credential.expires;
+			if (Number.isFinite(expiresAt) && expiresAt > Date.now()) {
+				if (provider === "github-copilot") {
+					return JSON.stringify({
+						token: oauthSelection.credential.access,
+						enterpriseUrl: oauthSelection.credential.enterpriseUrl,
+						apiEndpoint: oauthSelection.credential.apiEndpoint,
+						accountId: oauthSelection.credential.accountId,
+					});
+				}
+				return oauthSelection.credential.access;
+			}
+		}
+
+		const loginApiKeySelection = this.#selectCredentialByType(
+			provider,
+			"api_key",
+			undefined,
+			credential => credential.type === "api_key" && credential.source === "login",
+		);
+		if (loginApiKeySelection) {
+			return $envExact(loginApiKeySelection.credential.key) || loginApiKeySelection.credential.key;
+		}
+
+		const envKey = getEnvApiKey(provider);
+		if (envKey) return envKey;
+
+		const apiKeySelection = this.#selectCredentialByType(provider, "api_key");
+		if (apiKeySelection) {
+			return $envExact(apiKeySelection.credential.key) || apiKeySelection.credential.key;
+		}
+
+		return this.#fallbackResolver?.(provider) ?? undefined;
+	}
+
+	/**
 	 * Peek at API key for a provider without refreshing OAuth tokens.
 	 * Used for model discovery where we only need to know if credentials exist
 	 * and get a best-effort token. For GitHub Copilot we preserve enterprise
@@ -5898,6 +5977,7 @@ export class AuthStorage {
 						token: oauthSelection.credential.access,
 						enterpriseUrl: oauthSelection.credential.enterpriseUrl,
 						apiEndpoint: oauthSelection.credential.apiEndpoint,
+						accountId: oauthSelection.credential.accountId,
 					});
 				}
 				return oauthSelection.credential.access;
@@ -5959,6 +6039,9 @@ export class AuthStorage {
 		if (oauthResolved) {
 			return oauthResolved.apiKey;
 		}
+		// An authoritative grant list is a hard boundary, not a ranking hint:
+		// never escape it through env keys or unrelated stored API-key fallbacks.
+		if (this.#modelOAuthCredentialIds(provider, options?.modelId) !== undefined) return undefined;
 		const loginApiKeySelection = await this.#selectApiKeyCredential(
 			provider,
 			sessionId,
@@ -6069,6 +6152,7 @@ export class AuthStorage {
 					email: selection.credential.email,
 					projectId: selection.credential.projectId,
 					enterpriseUrl: selection.credential.enterpriseUrl,
+					apiEndpoint: selection.credential.apiEndpoint,
 					orgId: selection.credential.orgId,
 					orgName: selection.credential.orgName,
 					error: "OAuth access unavailable",
@@ -6083,6 +6167,7 @@ export class AuthStorage {
 				email: credential.email,
 				projectId: credential.projectId,
 				enterpriseUrl: credential.enterpriseUrl,
+				apiEndpoint: credential.apiEndpoint,
 				orgId: credential.orgId,
 				orgName: credential.orgName,
 			};
@@ -6094,6 +6179,7 @@ export class AuthStorage {
 				email: selection.credential.email,
 				projectId: selection.credential.projectId,
 				enterpriseUrl: selection.credential.enterpriseUrl,
+				apiEndpoint: selection.credential.apiEndpoint,
 				orgId: selection.credential.orgId,
 				orgName: selection.credential.orgName,
 				error: error instanceof Error ? error.message : String(error),
@@ -6919,10 +7005,14 @@ export class AuthStorage {
 		const providerKey = this.#getProviderTypeKey(provider, sessionCredential.type);
 		// Snapshot sibling availability before mutating so a soft-deleting
 		// suspect hook can't reindex the answer out from under us.
-		const hasSibling = this.#getCredentialsForProvider(provider).some(
-			(credential, index) =>
-				credential.type === sessionCredential.type &&
+		const allowedIds =
+			sessionCredential.type === "oauth" ? this.#modelOAuthCredentialIds(provider, options?.modelId) : undefined;
+		const stored = this.#getStoredCredentials(provider);
+		const hasSibling = stored.some(
+			(entry, index) =>
+				entry.credential.type === sessionCredential.type &&
 				index !== sessionCredential.index &&
+				(allowedIds === undefined || allowedIds.includes(entry.id)) &&
 				!this.#isCredentialBlocked(provider, providerKey, index),
 		);
 		const target = this.#getStoredCredentials(provider)[sessionCredential.index];

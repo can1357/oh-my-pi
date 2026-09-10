@@ -1,10 +1,13 @@
+import { getEnvApiKey } from "@oh-my-pi/pi-ai";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import type { ModelResolutionSource } from "@oh-my-pi/pi-catalog/model-manager";
 import {
 	MODELS_DEV_CATALOG_PROVIDER_IDS,
+	type GithubCopilotDiscoveryAccount,
 	type OpenAICodexAccount,
 	PROVIDER_DESCRIPTORS,
 } from "@oh-my-pi/pi-catalog/provider-models";
+import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
 
 /**
@@ -166,4 +169,95 @@ export async function resolveCodexDiscoveryAccounts(
 		accounts.push({ accessToken: resolvedAccessToken, accountId: matchingCredential?.accountId });
 	}
 	return accounts;
+}
+
+/**
+ * Resolve every configured GitHub Copilot OAuth account for catalog discovery,
+ * refreshing each credential exactly once. Copilot `/models` is account-scoped
+ * and inference round-robins across sibling accounts, so discovery must fetch
+ * per account and union the results; resolving only the peeked token (as before)
+ * hid models available only through a sibling account.
+ *
+ * Returns `null` when any stored account fails to resolve (e.g. a transient
+ * refresh failure): the github-copilot manager is authoritative, so unioning
+ * only the accounts that resolved would cache a partial catalog and hide the
+ * failed account's models for the cache TTL. Aborting keeps the previous /
+ * bundled catalog instead.
+ */
+export async function resolveGitHubCopilotDiscoveryAccounts(
+	authStorage: AuthStorage,
+	resolvedApiKey: string,
+): Promise<GithubCopilotDiscoveryAccount[] | null> {
+	// Remember whether the peeked key belongs to a stored account before refresh
+	// rotates its token; the old token must not become an extra discovery account.
+	const resolvedToken = parseGitHubCopilotApiKey(resolvedApiKey).accessToken;
+	const matchingCredential = getOAuthCredentialsForProvider(authStorage, "github-copilot").find(
+		credential => credential.access === resolvedToken,
+	);
+	const accesses = await authStorage.getOAuthAccesses("github-copilot");
+	const accounts: GithubCopilotDiscoveryAccount[] = [];
+	for (const access of accesses) {
+		if (!access.ok) return null;
+		accounts.push({
+			apiKey: JSON.stringify({
+				token: access.accessToken,
+				enterpriseUrl: access.enterpriseUrl,
+				apiEndpoint: access.apiEndpoint,
+				accountId: access.accountId,
+			}),
+			accountId: access.accountId,
+			credentialId: access.credentialId,
+		});
+	}
+	if (accounts.length === 0) {
+		accounts.push({ apiKey: resolvedApiKey, accountId: matchingCredential?.accountId });
+	}
+	return accounts;
+}
+
+/**
+ * Resolve stable account identities for every configured GitHub Copilot OAuth
+ * account and fallback API key. Used to scope the Copilot cache namespace so
+ * adding or removing accounts—or re-adding an account with a new durable
+ * credential ID—invalidates the cache instead of reusing a stale snapshot with
+ * obsolete model grants.
+ *
+ * When OAuth accounts exist, non-OAuth API keys are excluded from the cache
+ * identity because discovery intentionally queries only OAuth accounts; adding
+ * ignored keys would mismatch cache keys across startup hydration and discovery.
+ *
+ * When no OAuth accounts exist, the identity is derived from the same effective
+ * credential precedence used by discovery (runtime override → config override →
+ * login API key → environment variable → stored static API key).
+ */
+export function resolveGitHubCopilotAccountIdentities(authStorage: AuthStorage, resolvedApiKey?: string): string[] {
+	const oauthAccounts = authStorage.listOAuthAccounts("github-copilot");
+	if (oauthAccounts.length > 0) {
+		const identities = new Set<string>();
+		for (const account of oauthAccounts) {
+			identities.add(`${account.accountId ?? "oauth"}:${account.credentialId}`);
+		}
+		return Array.from(identities).sort();
+	}
+
+	const effectiveApiKey =
+		resolvedApiKey ??
+		(typeof authStorage.peekApiKeySync === "function" ? authStorage.peekApiKeySync("github-copilot") : undefined) ??
+		getEnvApiKey("github-copilot");
+	if (effectiveApiKey) {
+		const parsed = parseGitHubCopilotApiKey(effectiveApiKey);
+		const id = parsed.accountId || parsed.accessToken || effectiveApiKey;
+		return id ? [id] : [];
+	}
+
+	const stored = authStorage.listStoredCredentials("github-copilot");
+	for (const entry of stored) {
+		if (entry.credential.type === "api_key") {
+			const parsed = parseGitHubCopilotApiKey(entry.credential.key);
+			const id = parsed.accountId || parsed.accessToken || entry.credential.key;
+			if (id) return [id];
+		}
+	}
+
+	return [];
 }

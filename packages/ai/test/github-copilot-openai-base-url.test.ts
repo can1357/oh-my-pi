@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { githubCopilotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 afterEach(() => {
@@ -62,6 +64,34 @@ const businessApiKey = JSON.stringify({
 });
 
 describe("GitHub Copilot OpenAI transport base URL", () => {
+	it("routes an Enterprise-first union model using each selected account's credential", async () => {
+		const accounts = [{ apiKey: enterpriseApiKey }, { apiKey: testToken }, { apiKey: businessApiKey }];
+		const options = githubCopilotModelManagerOptions({
+			apiKey: enterpriseApiKey,
+			resolveAccounts: async () => accounts,
+			fetch: async () => Response.json({ data: [{ id: "gpt-4.1" }] }),
+		});
+		const specs = await options.fetchDynamicModels!();
+		const spec = specs?.find(model => model.id === "gpt-4.1");
+		if (!spec || spec.api !== "openai-completions") throw new Error("Shared chat model missing from discovery");
+		const model = buildModel(spec) as Model<"openai-completions">;
+		const requests: string[] = [];
+		for (const account of accounts) {
+			await streamOpenAICompletions(model, testContext, {
+				apiKey: account.apiKey,
+				fetch: async (input, init) => {
+					requests.push(`${getRequestHeader(input, init, "Authorization")} ${getRequestUrl(input)}`);
+					return createUnauthorizedResponse();
+				},
+			}).result();
+		}
+		expect(requests).toEqual([
+			`Bearer ${testToken} https://copilot-api.ghe.example.com/chat/completions`,
+			`Bearer ${testToken} https://api.githubcopilot.com/chat/completions`,
+			`Bearer ${testToken} https://api.business.githubcopilot.com/chat/completions`,
+		]);
+	});
+
 	it("uses model baseUrl for chat completions", async () => {
 		const requestedUrls: string[] = [];
 		const fetchMock = vi.fn(async (input: string | URL | Request) => {
