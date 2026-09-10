@@ -623,6 +623,91 @@ describe("CollabSocket send backpressure", () => {
 		}
 	}, 15_000);
 
+	it("admits an oversized welcome over a queued advisory instead of refusing the join", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/join", role: "host", key: {} as CryptoKey });
+		const shed: number[] = [];
+		socket.onPeerOverload = peer => shed.push(peer);
+		let closeReason: string | undefined;
+		socket.onClose = reason => {
+			closeReason = reason;
+		};
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			// One notice, which is what an accepted hello already broadcasts, so this
+			// is the ordinary state of the queue during a join rather than a pile-up.
+			socket.broadcastAdvisory({
+				t: "event",
+				event: { type: "notice", level: "info", message: "someone joined" },
+			} as CollabFrame);
+
+			// Larger than the whole budget, so only the empty-queue floor can take it —
+			// and the floor cannot be reached while anything is queued ahead of it. The
+			// preflight counted the notice as a survivor, so `charged + bytes` decided
+			// the join, and no oversized batch can pass that test however small the
+			// notice is. Nothing was shed and nothing was over its share: the join was
+			// simply refused, and the host then unregisters the peer it had just added.
+			expect(socket.sendBatch(welcomeBatch("welcome for the newcomer"), 5, 17 * 1024 * 1024)).toBe(true);
+
+			const deadline = Date.now() + 3_000;
+			while (Date.now() < deadline && !ws.sent.some(bytes => unpackEnvelope(bytes)?.peerId === 5)) {
+				ws.bufferedAmount = 0;
+				await Bun.sleep(20);
+			}
+			// Admitted is not enough — the preflight has to be answered by something
+			// that removes what it discounted. Skipping the advisory in the count and
+			// leaving it in the queue passes the preflight, sheds nobody, and refuses
+			// the welcome anyway on the `#overCapacity` re-test below the loop.
+			expect(ws.sent.some(bytes => unpackEnvelope(bytes)?.peerId === 5)).toBe(true);
+			expect(ws.sent.some(bytes => unpackEnvelope(bytes)?.peerId === 0)).toBe(false);
+			// The notice is what paid for the join, not a guest's replica.
+			expect(shed).toEqual([]);
+			expect(closeReason).toBeUndefined();
+			expect(socket.isOpen).toBe(true);
+		} finally {
+			socket.close();
+		}
+	}, 15_000);
+
+	it("still refuses an oversized welcome behind a broadcast that carries replica state", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/replica", role: "host", key: {} as CryptoKey });
+		const shed: number[] = [];
+		socket.onPeerOverload = peer => shed.push(peer);
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			// The other half of the rule the test above pins: what makes room for a
+			// join is the advisory classification, not being a broadcast. A `bye`
+			// carries replica state, no shed can reach a broadcast, and the floor is
+			// out of reach while it is queued — so the join is refused, and the caller
+			// undoing its registration is the whole contract of the `false`.
+			socket.send({ t: "bye", reason: "the turn ended" });
+			expect(socket.sendBatch(welcomeBatch("welcome for the newcomer"), 5, 17 * 1024 * 1024)).toBe(false);
+
+			const deadline = Date.now() + 3_000;
+			while (Date.now() < deadline && !ws.sent.some(bytes => unpackEnvelope(bytes)?.peerId === 0)) {
+				ws.bufferedAmount = 0;
+				await Bun.sleep(20);
+			}
+			expect(ws.sent.some(bytes => unpackEnvelope(bytes)?.peerId === 0)).toBe(true);
+			expect(ws.sent.some(bytes => unpackEnvelope(bytes)?.peerId === 5)).toBe(false);
+			expect(shed).toEqual([]);
+			expect(socket.isOpen).toBe(true);
+		} finally {
+			socket.close();
+		}
+	}, 15_000);
+
 	it("keeps a retirement whose queued decryption has not settled", async () => {
 		BackpressuredWebSocket.instances = [];
 		BackpressuredWebSocket.initialBufferedAmount = 0;

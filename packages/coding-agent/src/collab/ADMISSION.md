@@ -77,11 +77,11 @@ The two axes are independent, and the policy currently keys on the first.
    - **Broadcast** — see the shed order below.
    - **Targeted, at or over the peer's share** — shed that peer and report it.
    - **Targeted, within its share but over capacity** — if it is a welcome batch,
-     and only if shedding every _other_ holder would actually admit it, shed the
-     heaviest of them and retry; otherwise drop without shedding anyone. The
-     reservation is for a join, not for every response a peer can ask for — and
-     not for a join that fails anyway, which would cost a viable guest its
-     snapshot to admit nothing.
+     and only if discarding every queued advisory and shedding every _other_
+     holder would actually admit it, do both, advisories first; otherwise drop
+     without touching anything. The reservation is for a join, not for every
+     response a peer can ask for — and not for a join that fails anyway, which
+     would cost a viable guest its snapshot to admit nothing.
 
 "Over capacity" in step 4 is `#overCapacity`: three tests in order — the entry
 cap, then the floor that admits an entry with nothing ahead of it whatever it
@@ -119,6 +119,30 @@ deliberately. A speculative shed is only wasteful if the admission it was for fa
 and the room survives to notice; here the only way past the last peer is
 `#failOverload`, which discards the whole queue and suppresses the pending reports
 with it. There is nothing left to have spent.
+
+## Shed order for a welcome batch, and why
+
+```
+existing advisory backlog  ->  heaviest peer but the requester  ->  drop
+```
+
+The same advisory-first order as a broadcast, for the same reason, and reached
+only when the preflight says the whole sequence ends in an admission.
+
+The preflight and the sequence are one thing in two places, so they have to be
+read together. `#shedCouldAdmit` counts what would survive; the caller then has to
+remove everything it did not count. Discounting an entry that no later step
+removes is not a partial improvement, it is a no-op that looks like a fix: the
+preflight passes, the shed loop cannot reach a broadcast, `#overCapacity` is still
+true at the re-test below the loop, and the welcome is refused exactly as before.
+That was the shape of the omission this order corrects — an advisory counted as
+immovable, so one queued join notice was enough to refuse the next oversized join
+outright, and the host unregistered a newcomer that then waited out its
+first-welcome timer.
+
+Advisories only. A broadcast carrying replica state is not discarded to make room
+for a join, and no shed can reach one, so an oversized welcome behind one is
+refused — the outcome the `false` from `sendBatch` exists to let the caller undo.
 
 ## What a guest observes
 

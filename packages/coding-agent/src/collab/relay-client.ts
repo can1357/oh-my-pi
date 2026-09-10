@@ -492,6 +492,22 @@ export class CollabSocket {
 			// evicted on the way out is a second casualty of a join that never
 			// happened.
 			if (lazy && this.#shedCouldAdmit(bytes, targetPeer)) {
+				// Advisory first, the same order the broadcast branch above uses and for
+				// the same reason: a transcript line is the cheapest thing in the system
+				// to lose, so nothing else should be given up while one is still queued.
+				// Only broadcasts are ever advisory — {@link broadcastAdvisory} is the
+				// single caller that sets the flag — so this cannot reach a peer's own
+				// work, and it does not have to exclude anyone the way a shed does.
+				//
+				// Without it the cost is the join itself, not the join's fairness: the
+				// host broadcasts a notice for every accepted hello, so an ordinary join
+				// sequence leaves one queued, and one queued advisory used to be enough
+				// to refuse the next oversized welcome outright. Discounting it in the
+				// preflight without removing it here would change nothing — the loop
+				// below cannot reach a broadcast, so `#overCapacity` would still be true
+				// at the re-test and the batch refused. Whatever the preflight discounts
+				// has to be removed by the sequence the preflight is predicting.
+				this.#discardWhere(pending => pending.advisory);
 				while (this.#overCapacity(bytes)) {
 					if (!this.#shedHeaviestPeer(targetPeer)) break;
 				}
@@ -557,16 +573,24 @@ export class CollabSocket {
 	 * room for {@link bytes} — the fixed point of the shed loop, evaluated before it
 	 * takes anything.
 	 *
-	 * Modelled on exactly what {@link #shedHeaviestPeer} can reach, so the two
-	 * cannot disagree: it skips broadcasts and the requester, and a shed takes a
-	 * peer's entries whole. What survives is therefore what this counts, including
-	 * the empty-queue floor when nothing survives at all.
+	 * Modelled on exactly what its caller goes on to do, so the two cannot
+	 * disagree: the caller discards every advisory entry, then sheds peers other
+	 * than {@link exclude} until there is room — at most all of them, which is the
+	 * bound this predicts — and a shed takes a peer's entries whole. What survives
+	 * in that worst case is what this counts: non-advisory broadcasts and the
+	 * requester's own work, or the empty-queue floor when nothing survives at all.
+	 *
+	 * Advisories are skipped rather than counted as survivors because a single
+	 * queued one is otherwise decisive: it is a broadcast, so it is counted, and
+	 * once the count is non-zero the test becomes `charged + bytes`, which an
+	 * oversized welcome can never pass however little the advisory itself weighs.
 	 */
 	#shedCouldAdmit(bytes: number, exclude: number): boolean {
 		let count = 0;
 		let charged = 0;
 		for (const pending of this.#pendingSends) {
 			if (pending.targetPeer !== 0 && pending.targetPeer !== exclude) continue;
+			if (pending.advisory) continue;
 			count++;
 			if (!pending.exempt) charged += pending.bytes;
 		}
