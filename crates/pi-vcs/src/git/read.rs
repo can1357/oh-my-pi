@@ -473,7 +473,9 @@ impl GitRepo {
 	/// `branch.<name>.remote` + `branch.<name>.merge`. A `.` remote tracks a
 	/// local branch; anything else maps through the remote's fetch refspecs,
 	/// so custom destinations (e.g. `+refs/heads/*:refs/custom/origin/*`)
-	/// resolve to the remote-tracking ref that actually exists.
+	/// resolve to the remote-tracking ref that actually exists. When no fetch
+	/// refspec maps the merge ref, git reports no upstream — `None`, even if a
+	/// stale `refs/remotes/<remote>/*` still exists.
 	fn upstream_ref(&self, branch: &str) -> Result<Option<String>> {
 		if self.is_reftable() {
 			// One spawn: `%(upstream)` applies the fetch refspecs (and `.`
@@ -514,8 +516,11 @@ impl GitRepo {
 		match repo.branch_remote_tracking_ref_name(name, gix::remote::Direction::Fetch) {
 			Some(Ok(tracked)) => Ok(Some(tracked.to_string())),
 			Some(Err(err)) => Err(Error::backend("git config", err)),
-			// No fetch refspecs configured: git's default mapping applies.
-			None => Ok(Some(format!("refs/remotes/{remote}/{short}"))),
+			// No fetch refspec maps the merge ref (none configured, or none that
+			// match). git then reports no upstream — `%(upstream)` is empty and
+			// `@{upstream}` fails — even when a stale `refs/remotes/<remote>/*`
+			// still exists. Don't invent one.
+			None => Ok(None),
 		}
 	}
 
@@ -1541,6 +1546,31 @@ mod tests {
 
 		commit(root, "a1", "a1\n", "a1")?;
 		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_absent_without_fetch_refspec() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+
+		let remote = tempfile::tempdir()?;
+		git(remote.path(), &["init", "--bare", "-b", "main"])?;
+		git(root, &["remote", "add", "origin", remote.path().to_str().unwrap()])?;
+		git(root, &["push", "-u", "origin", "main"])?;
+		assert_eq!(repo.ahead_behind()?, Some((0, 0)));
+
+		// Drop the fetch refspec but keep branch.<name>.remote/.merge and the
+		// tracking ref: git reports no upstream in this state, so the stale
+		// refs/remotes/origin/main must not be counted as one.
+		git(root, &["config", "--unset", "remote.origin.fetch"])?;
+		assert_eq!(
+			git(root, &["for-each-ref", "--format=%(upstream)", "refs/heads/main"])?.trim(),
+			""
+		);
+		assert_eq!(repo.ahead_behind()?, None);
+		assert_eq!(repo.status_summary()?.ahead, None);
 		Ok(())
 	}
 
