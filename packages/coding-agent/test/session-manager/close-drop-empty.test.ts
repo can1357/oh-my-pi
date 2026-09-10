@@ -76,6 +76,31 @@ describe("SessionManager close() drops empty metadata-only sessions", () => {
 		expect(await fileExists(sessionFile)).toBe(false);
 	});
 
+	// Issue #11497: terminal A materializes a draft-only file and arms the GC,
+	// terminal B resumes it, consumes the draft (removing the sidecar the GC
+	// keys off of), and persists a real conversation. Terminal A then closes
+	// with a stale draft-only in-memory view. The close-time GC must re-read the
+	// file it is about to delete and keep B's transcript intact.
+	it("keeps the session file when another process consumed the draft and appended real messages", async () => {
+		using tempDir = TempDir.createSync("@pi-session-close-keep-cross-writer-");
+		const termA = SessionManager.create(tempDir.path(), tempDir.path());
+		termA.appendModelChange("hai-proxy/anthropic--claude-4.6-opus");
+		await termA.saveDraft("draft in terminal A");
+
+		const sessionFile = termA.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persistent session file");
+
+		const termB = SessionManager.create(tempDir.path(), tempDir.path());
+		await termB.setSessionFile(sessionFile);
+		expect(await termB.consumeDraft()).toBe("draft in terminal A");
+		termB.appendMessage({ role: "user", content: "real question", timestamp: 1 });
+		await termB.close();
+
+		await termA.close();
+
+		expect(await fileExists(sessionFile)).toBe(true);
+	});
+
 	// A draft still on disk at close time is the whole reason the session
 	// file was materialized in the first place (`--resume` needs to find
 	// this session's file to reattach the draft). Never drop it.

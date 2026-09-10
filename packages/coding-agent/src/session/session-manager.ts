@@ -1853,6 +1853,18 @@ export class SessionManager {
 			this.#draftOnlySessionCleanupArmed = false;
 			return;
 		}
+		// The in-memory view can be stale: another process may have resumed this
+		// session, consumed the draft (the very interlock this GC relies on), and
+		// appended a real conversation since this manager last read the file. Its
+		// absence is ambiguous by design, so re-read the file we are about to
+		// destroy and keep it whenever the on-disk entries are no longer draft-only
+		// metadata — a clean close must never delete another writer's transcript.
+		const onDisk = await loadSessionFile(sessionFile, this.#storage);
+		if (onDisk.invalidHeader || !(onDisk.entries.slice(1) as SessionEntry[]).every(isDraftOnlyMetadataEntry)) {
+			await this.#clearDraftOnlySessionMarker();
+			this.#draftOnlySessionCleanupArmed = false;
+			return;
+		}
 		try {
 			await this.#storage.deleteSessionWithArtifacts(sessionFile);
 			this.#fileIsCurrent = false;
