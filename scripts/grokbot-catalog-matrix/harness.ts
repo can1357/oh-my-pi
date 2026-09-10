@@ -560,12 +560,12 @@ function commandEmitsPing(segment: string, ping: string): boolean {
  * Rejects zero counts, GNU `head -n -N` (drop last N lines), and `tail -n +N`
  * for N>=2 (skip the first line).
  */
-function headTailCountKeepsFixtureLine(cmd: string, raw: string): boolean {
+function headTailLineCountKeepsFixture(cmd: string, raw: string): boolean {
 	const trimmed = raw.trim();
 	if (trimmed.startsWith("+")) {
 		const n = Number(trimmed.slice(1));
 		if (!Number.isFinite(n) || n === 0) return false;
-		// `tail -n +2` / `tail -c +2` skips the fixture line/byte.
+		// `tail -n +2` skips the fixture line.
 		if (cmd === "tail" && n >= 2) return false;
 		return true;
 	}
@@ -578,9 +578,10 @@ function headTailCountKeepsFixtureLine(cmd: string, raw: string): boolean {
 
 /**
  * Read smoke readers must be configured to emit file contents. `head -n 0`,
- * GNU `head -n -1` (all but last line), and `tail -n +2` (from line 2) produce
- * nothing for the one-line fixture, but `runOneTool` fabricates the token
- * without executing. `sed -n` without a print command is the same class.
+ * GNU `head -n -1` (all but last line), `tail -n +2` (from line 2), and byte
+ * ranges like `head -c 1` / `tail -c -1` do not yield the fixture token, but
+ * `runOneTool` fabricates it without executing. `sed -n` without a print
+ * command is the same class.
  */
 function readerEmitsContent(segment: string, filePath: string): boolean {
 	if (!smokeCommandTargetsFixturePath(segment, filePath)) return false;
@@ -590,14 +591,18 @@ function readerEmitsContent(segment: string, filePath: string): boolean {
 	if (cmd === "head" || cmd === "tail") {
 		for (let i = 1; i < words.length; i++) {
 			const w = words[i]!;
-			if (w === "-n" || w === "-c" || w === "--lines" || w === "--bytes") {
+			// Byte counts can emit a prefix/suffix that is not the fixture token
+			// (`head -c 1`, `tail -c -1`) while runOneTool fabricates the full ping.
+			if (w === "-c" || w === "--bytes") return false;
+			if (w === "-n" || w === "--lines") {
 				const v = words[i + 1];
-				if (v !== undefined && !headTailCountKeepsFixtureLine(cmd, v)) return false;
+				if (v !== undefined && !headTailLineCountKeepsFixture(cmd, v)) return false;
 				i++;
 				continue;
 			}
-			const eq = /^(?:-n|--lines=|-c|--bytes=)(.*)$/.exec(w);
-			if (eq && eq[1] !== "" && !headTailCountKeepsFixtureLine(cmd, eq[1])) return false;
+			if (/^(?:-c|--bytes=)/.test(w)) return false;
+			const eq = /^(?:-n|--lines=)(.*)$/.exec(w);
+			if (eq && eq[1] !== "" && !headTailLineCountKeepsFixture(cmd, eq[1])) return false;
 			// `head -0 path` (traditional non-negative line count form)
 			if (/^-[0-9]+$/.test(w) && Number(w.slice(1)) === 0) return false;
 		}

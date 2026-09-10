@@ -388,6 +388,24 @@ describe("toolSmokePrompt", () => {
 				id,
 			),
 		).toBe(false);
+		// Byte ranges can emit a truncated prefix/suffix while runOneTool
+		// fabricates the full fixture token.
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `head -c 1 ${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `head -c -1 ${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
 		expect(
 			matchesToolSmokeCall(
 				"read",
