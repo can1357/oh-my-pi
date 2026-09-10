@@ -590,4 +590,40 @@ describe("shareSession", () => {
 			server.stop(true);
 		}
 	});
+
+	test("gist fallback names the transport actually used (#11494)", async () => {
+		const entries = [messageEntry("e1", null, "share me")];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "e1",
+		} as unknown as SessionManager;
+
+		const server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				if (req.method !== "POST") return new Response("nope", { status: 405 });
+				return Response.json({ id: "blobshareid02" });
+			},
+		});
+		// Hide gh deterministically: without it the gist path is unreachable
+		// and the share-server fallback must say so.
+		const savedPath = process.env.PATH;
+		try {
+			process.env.PATH = "";
+			const result = await shareSession(sm, { serverUrl: `http://localhost:${server.port}`, store: "gist" });
+
+			expect(result.method).toBe("server");
+			expect(result.gistUrl).toBeUndefined();
+			expect(result.notice).toMatch(/gist/i);
+			expect(result.notice).toMatch(/share server/);
+		} finally {
+			if (savedPath === undefined) {
+				delete process.env.PATH;
+			} else {
+				process.env.PATH = savedPath;
+			}
+			server.stop(true);
+		}
+	});
 });

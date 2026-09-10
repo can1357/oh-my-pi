@@ -29,6 +29,7 @@
 - Fixed the ask dialog splattering option descriptions and previews one word per row when a model injects `\r` runs into tool-call string values (observed with GLM via OpenRouter); stray carriage returns are now sanitized in ask params, the live dialog, and ask transcript rendering ([#11167](https://github.com/can1357/oh-my-pi/pull/11167) by [@Giardi77](https://github.com/Giardi77)).
 - `omp models` now reports whether a model's images actually reach the provider, so an id stripped by a text-only catalog rule no longer shows `images: yes` ([#9697](https://github.com/can1357/oh-my-pi/issues/9697)).
 - Explicit per-model price overrides retain their configured flat rates instead of inheriting time-based pricing.
+- `omp share --gist` now says where the blob went when the gist path is unavailable, instead of silently publishing to the share server ([#11494](https://github.com/can1357/oh-my-pi/issues/11494)).
 
 ## [18.1.16] - 2026-09-09
 

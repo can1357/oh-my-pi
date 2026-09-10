@@ -266,6 +266,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				});
 				const lines = [`Share URL: ${result.url}`];
 				if (result.gistUrl) lines.push(`Gist: ${result.gistUrl}`);
+				if (result.notice) lines.push(result.notice);
 				if (result.truncated) lines.push("Note: large content was trimmed to fit the share size limit.");
 				await runtime.output(lines.join("\n"));
 				return commandConsumed();

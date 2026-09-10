@@ -84,6 +84,8 @@ export interface ShareSessionResult {
 	method: "gist" | "server";
 	/** Underlying gist URL (gist method only). */
 	gistUrl?: string;
+	/** User-facing notice when the requested store was unavailable (gist fallback only). */
+	notice?: string;
 	/** True when content was trimmed to fit the upload budget. */
 	truncated: boolean;
 	sealedBytes: number;
@@ -494,7 +496,7 @@ export async function shareSession(sm: SessionManager, options?: ShareSessionOpt
 	if (options?.store === "gist") {
 		const forGist = await sealToFit(key, data, GIST_MAX_SEALED_BYTES);
 		const gist = await tryCreateGist(forGist.sealed);
-		if (gist) {
+		if ("id" in gist) {
 			return {
 				url: `${base}/${gist.id}#${keyText}`,
 				method: "gist",
@@ -503,8 +505,13 @@ export async function shareSession(sm: SessionManager, options?: ShareSessionOpt
 				sealedBytes: forGist.sealed.byteLength,
 			};
 		}
-		// gh unusable or gist creation failed — fall back to the share server.
-		return shareViaServer(key, data, base, keyText, forGist);
+		// gh unusable or gist creation failed — fall back to the share server,
+		// but say so: custody of the ciphertext moves and the user asked for a gist.
+		const viaServer = await shareViaServer(key, data, base, keyText, forGist);
+		return {
+			...viaServer,
+			notice: `Note: gist upload unavailable (${gist.error}); shared via the share server instead.`,
+		};
 	}
 
 	return shareViaServer(key, data, base, keyText);
@@ -609,13 +616,13 @@ function capLongStrings(value: unknown, cap: number): void {
 	}
 }
 
-/** Create a secret gist holding base64 of the sealed blob; null when `gh` is unusable. */
-async function tryCreateGist(sealed: Uint8Array): Promise<{ id: string; url: string } | null> {
-	if (!$which("gh")) return null;
+/** Create a secret gist holding base64 of the sealed blob, or the reason it was unavailable. */
+async function tryCreateGist(sealed: Uint8Array): Promise<{ id: string; url: string } | { error: string }> {
+	if (!$which("gh")) return { error: "gh CLI not found" };
 	const auth = await $`gh auth status`.quiet().nothrow();
 	if (auth.exitCode !== 0) {
 		logger.debug("share: gh present but not authenticated; falling back to share server");
-		return null;
+		return { error: "gh is not authenticated" };
 	}
 
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-share-"));
@@ -627,13 +634,13 @@ async function tryCreateGist(sealed: Uint8Array): Promise<{ id: string; url: str
 			logger.warn("share: gist creation failed; falling back to share server", {
 				stderr: result.stderr.toString("utf-8").trim().slice(0, 500),
 			});
-			return null;
+			return { error: "gist creation failed" };
 		}
 		const url = result.text().trim().split("\n").pop()?.trim() ?? "";
 		const id = url.split("/").pop() ?? "";
 		if (!GIST_ID_RE.test(id)) {
 			logger.warn("share: could not parse gist id from gh output", { url });
-			return null;
+			return { error: "could not parse the gist id" };
 		}
 		return { id, url };
 	} finally {
