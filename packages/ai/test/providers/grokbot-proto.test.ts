@@ -2976,4 +2976,61 @@ describe("grokbot disableReasoning effort floor", () => {
 		expect(capturedThinking).toBe("true");
 		expect(capturedEffort).toBe("high");
 	});
+
+	test("disableReasoning omits effort when thinking is an allowed sand parameter", async () => {
+		// Flooring effort while also sending thinking:false is contradictory; the
+		// keep-model retry path already deletes effort when forcing thinking off.
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		let capturedEffort: string | undefined;
+		let capturedThinking: string | undefined;
+		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "ok", isFinal: true } }));
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () =>
+			new Response(Buffer.concat([text, trailer]), {
+				status: 200,
+				headers: { "content-type": "application/connect+proto" },
+			})) as FetchImpl;
+
+		const model: Model<"grokbot-sand"> = buildModel({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh] },
+			sandParameterIds: ["thinking", "context", "effort", "fast"],
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+
+		await streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: "renew",
+				disableReasoning: true,
+				fetch: fetchImpl,
+				onPayload: body => {
+					const params = (body as { requestedModel?: { parameters?: Array<{ id: string; value: string }> } })
+						.requestedModel?.parameters;
+					capturedEffort = params?.find(p => p.id === "effort")?.value;
+					capturedThinking = params?.find(p => p.id === "thinking")?.value;
+					return body;
+				},
+			},
+		).result();
+
+		expect(capturedThinking).toBe("false");
+		expect(capturedEffort).toBeUndefined();
+	});
 });

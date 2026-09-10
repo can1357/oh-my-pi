@@ -287,6 +287,14 @@ function smokeFixturePathMatches(filePath: string, expectedRelative: string): bo
 	return filePath.endsWith(`/${expectedRelative}`);
 }
 
+/** True when a shell statement targets the smoke fixture via an allowed path word. */
+function smokeCommandTargetsFixturePath(segment: string, expectedRelative: string): boolean {
+	for (const word of shellWords(segment)) {
+		if (smokeFixturePathMatches(word, expectedRelative)) return true;
+	}
+	return false;
+}
+
 /**
  * Split on the first unquoted `>`, `>>`, or `| tee` so quoted redirect
  * characters (`echo 'ping > path'`) do not count as writes.
@@ -494,7 +502,7 @@ function commandEmitsPing(segment: string, ping: string): boolean {
  * fabricates the expected token without executing.
  */
 function readerEmitsContent(segment: string, filePath: string): boolean {
-	if (!commandMentionsPath(segment, filePath)) return false;
+	if (!smokeCommandTargetsFixturePath(segment, filePath)) return false;
 	const words = shellWords(segment);
 	const cmd = words[0];
 	if (cmd === "cat") return true;
@@ -532,7 +540,7 @@ function readerEmitsContent(segment: string, filePath: string): boolean {
 				continue;
 			}
 			if (w.startsWith("-")) continue;
-			if (commandMentionsPath(w, filePath)) continue;
+			if (smokeFixturePathMatches(w, filePath)) continue;
 			if (scripts.length === 0) scripts.push(w);
 		}
 		if (!quiet) return true;
@@ -584,6 +592,9 @@ export function echoLikeShellCommand(command: string, ping: string): boolean {
 			if (emitted) return !failingExitShellSegment(segment);
 			return false;
 		}
+		// Trailing non-exit commands after a successful echo (`echo ping; false`)
+		// can fail while runOneTool fabricates success from the echo prefix alone.
+		if (emitted) return false;
 		if (!/^(?:echo|printf)\b/.test(segment)) continue;
 		// Redirects / any pipeline can discard or transform stdout.
 		if (/(?:>>?|\|)/.test(segment)) continue;
@@ -603,6 +614,7 @@ export function readPathInShellCommand(command: string, filePath: string): boole
 			if (matched) return !failingExitShellSegment(segment);
 			return false;
 		}
+		if (matched) return false;
 		if (!/^(?:cat|head|sed)\b/.test(segment)) continue;
 		// Redirects / any pipeline can discard or transform stdout — `runOneTool`
 		// fabricates the expected token without executing, so `cat path | grep -v`
@@ -641,7 +653,7 @@ export function writePathPingInShellCommand(command: string, filePath: string, p
 		const dest = redirectDestination(redirect.after, redirect.op);
 		if (!dest) continue;
 		// Destination must be exactly the expected path (not a sibling token).
-		if (dest === filePath || commandMentionsPath(dest, filePath)) matched = true;
+		if (smokeFixturePathMatches(dest, filePath)) matched = true;
 	}
 	return matched;
 }

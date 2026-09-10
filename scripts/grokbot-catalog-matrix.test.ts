@@ -289,6 +289,10 @@ describe("toolSmokePrompt", () => {
 		// Later non-zero exit fails the overall command; runOneTool fabricates isError:false.
 		expect(echoLikeShellCommand(`echo ${ping}; exit 1`, ping)).toBe(false);
 		expect(echoLikeShellCommand(`echo ${ping}; exit 0`, ping)).toBe(true);
+		// Trailing non-exit commands after a successful echo can fail while runOneTool
+		// fabricates success from the echo prefix alone.
+		expect(echoLikeShellCommand(`echo ${ping}; false`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`echo ${ping}; true`, ping)).toBe(false);
 	});
 
 	test("binds read/write shell smoke evidence to the operation statement", () => {
@@ -493,6 +497,49 @@ describe("toolSmokePrompt", () => {
 				id,
 			),
 		).toBe(true);
+		// Relative suffix paths invent a different file (`backup/notes/...`).
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `cat backup/${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Shell", arguments: { command: `printf '%s\\n' ${ping} > backup/${writePath}` } },
+				ping,
+				id,
+			),
+		).toBe(false);
+		// Absolute paths ending in /${expectedRelative} are allowed (same as direct tools).
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `cat /tmp/${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(true);
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Shell", arguments: { command: `printf '%s\\n' ${ping} > /tmp/${writePath}` } },
+				ping,
+				id,
+			),
+		).toBe(true);
+		// Trailing non-exit after a matching read must not pass fabricated gates.
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `cat ${readPath}; false` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
 	});
 
 	test("rejects tool calls that only match by name", () => {

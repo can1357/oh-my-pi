@@ -2440,8 +2440,12 @@ function mapOptionsForApi<TApi extends Api>(
 			let effort: Effort | undefined;
 			if (acceptsEffort && grokbotModel.reasoning && grokbotModel.thinking) {
 				if (disableThinking) {
-					// Omission would leave the server default (often high); floor instead.
-					effort = minimumSupportedEffort(grokbotModel) ?? defaultSupportedEffort(grokbotModel);
+					// Models with a thinking boolean: omit effort and send thinking:false
+					// below (same as the keep-model retry path). Flooring effort while
+					// also disabling thinking is contradictory and may be rejected.
+					if (!allowed.includes("thinking")) {
+						effort = minimumSupportedEffort(grokbotModel) ?? defaultSupportedEffort(grokbotModel);
+					}
 				} else if (options?.reasoning) {
 					effort = requireSupportedEffort(grokbotModel, options.reasoning);
 				}

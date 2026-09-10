@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Catalog matrix shell smoke requires exact fixture paths (or absolute `…/fixture` suffixes) and rejects trailing non-exit statements after a successful echo/read (`echo ping; false`).
 - SDK cold-cache default-model discovery refresh is limited to KDL credential-scoped catalog providers (same gate as CLI startup).
 - `--no-tools` keeps deferred MCP manager tools off the active wire set after late discovery refresh.
 

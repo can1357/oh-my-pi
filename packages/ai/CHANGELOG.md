@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Fixed
+- Catalog matrix shell smoke requires exact fixture paths (or absolute `…/fixture` suffixes) and rejects trailing non-exit statements after a successful echo/read (`echo ping; false`).
+- Grok Bot Write ownership honors extension `customWireName: "Write"` aliases for empty Write follow-up acceptance.
+- Grok Bot `--thinking off` omits effort when the model allows an explicit `thinking` parameter (avoids flooring effort while sending `thinking: false`).
 - Grok Bot JSON-as-text promotion no longer invents product aliases (Shell/Read/Write) for native bash/read/write wire names.
 - Grok Bot accumulates non-prefix streamed tool-argument deltas (and SendToUser args) instead of replacing the buffer with the final fragment.
 

@@ -745,7 +745,11 @@ function writeOwnerFromContextTools(tools: Context["tools"]): string | undefined
 	for (const tool of tools) {
 		const ompName = typeof tool?.name === "string" ? tool.name.trim() : "";
 		if (!ompName) continue;
-		const sandName = toSandField2Name(ompName);
+		const custom =
+			typeof tool.customWireName === "string" && tool.customWireName.trim()
+				? tool.customWireName.trim()
+				: "";
+		const sandName = custom || toSandField2Name(ompName);
 		if (sandName !== "Write") continue;
 		if (!shouldClaimSandWireName("Write", ompName, owner)) continue;
 		owner = ompName;
