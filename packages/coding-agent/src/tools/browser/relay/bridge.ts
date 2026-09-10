@@ -372,6 +372,8 @@ class TabState {
 	/** Whether targets for this tab were announced to discovering connections. */
 	announced = false;
 	attaching: Promise<boolean> | null = null;
+	/** Extension socket that owns the current attach RPC. */
+	attachingExt: RelaySocket | null = null;
 	/** Relay-initiated detach in flight; reattach serializes behind it. */
 	detaching: Promise<void> | null = null;
 	/** A successful attach completed after the most recently requested relay detach. */
@@ -628,6 +630,7 @@ export class RelayBridge {
 			if (tab.rootRuntimeEnabled) tab.restoreRootRuntime = true;
 			tab.attached = false;
 			tab.attaching = null;
+			tab.attachingExt = null;
 			tab.restoring = null;
 			tab.restoringExt = null;
 			tab.subscriptionReconciling = null;
@@ -721,7 +724,17 @@ export class RelayBridge {
 		}
 		for (const tab of this.#tabs.values()) {
 			tab.attached = attachedNow.has(tab.tabId);
-			tab.attaching = null;
+			// A refresh hello can snapshot Chrome before an attach RPC that was
+			// already dispatched on this same socket commits. Keep that in-flight
+			// operation as the authority: clearing it here lets another holder issue
+			// a duplicate attach whose "already attached" failure bans the tab. A
+			// real socket replacement rejects the old RPC in extConnected(), so only
+			// an attach owned by the current socket can survive reconciliation.
+			const sameSocketAttach = tab.attaching !== null && tab.attachingExt === this.#ext;
+			if (!sameSocketAttach) {
+				tab.attaching = null;
+				tab.attachingExt = null;
+			}
 			// A same-socket hello (another tab's delayed guard detach triggering a
 			// refresh) can land while this tab's replay is still in flight. A real
 			// socket replacement rejects the in-flight RPCs (ExtensionReplacedError),
@@ -2812,6 +2825,7 @@ export class RelayBridge {
 		this.#log("tab detached", { tabId, reason });
 		tab.attached = false;
 		tab.attaching = null;
+		tab.attachingExt = null;
 		tab.forceFreshRootBeforeReplay = false;
 		tab.refreshDetachInFlight = false;
 		this.#resetRuntime(tab);
@@ -3705,6 +3719,7 @@ export class RelayBridge {
 		if (tab.attached) return true;
 		if (tab.banned || !this.#ext) return false;
 		if (tab.attaching) return await tab.attaching;
+		const attachExt = this.#ext;
 		const attempt = this.#rpc({ op: "attach", tabId: tab.tabId })
 			.then(() => {
 				tab.attached = true;
@@ -3721,9 +3736,13 @@ export class RelayBridge {
 				return false;
 			})
 			.finally(() => {
-				tab.attaching = null;
+				if (tab.attaching === attempt) {
+					tab.attaching = null;
+					tab.attachingExt = null;
+				}
 			});
 		tab.attaching = attempt;
+		tab.attachingExt = attachExt;
 		return await attempt;
 	}
 

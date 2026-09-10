@@ -633,6 +633,55 @@ describe("RelayBridge tab grouping", () => {
 		expect(cdp.messages.filter(m => m.method === "Target.attachedToTarget").length).toBeGreaterThan(0);
 	});
 
+	it("preserves a same-socket manual attach across a stale hello", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				method: "Target.attachToTarget",
+				params: { targetId: "PAGE1", flatten: true },
+			}),
+		);
+		await flush();
+		expect(ext.rpcs("attach")).toHaveLength(1);
+
+		// Another tab's detach refresh captured its attachment snapshot before the
+		// first attach committed, then delivered that stale hello first. The pending
+		// operation belongs to this same socket and must remain the single authority.
+		bridge.extMessage(
+			ext,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				tabs: [tab({ tabId: 1 })],
+				attachedTabIds: [],
+				recoverableTabIds: [],
+			}),
+		);
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				method: "Target.attachToTarget",
+				params: { targetId: "PAGE1", flatten: true },
+			}),
+		);
+		await flush();
+		expect(ext.rpcs("attach")).toHaveLength(1);
+
+		ack(bridge, ext, "attach");
+		await flush();
+		expect(ext.rpcs("attach")).toHaveLength(1);
+		expect(cdp.attachedSessions()).toHaveLength(2);
+	});
+
 	it("reattaches a recoverable tab for a session holder that never enabled auto-attach", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
