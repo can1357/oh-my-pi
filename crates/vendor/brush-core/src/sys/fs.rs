@@ -118,17 +118,38 @@ fn translate_unix_drive_path(path: &Path) -> Option<PathBuf> {
 /// here — the single boundary every shell path passes through — keeps the
 /// in-process builtins, `ls`, and redirections agreeing with those external
 /// tools instead of scattering files across a drive-root `tmp`.
+///
+/// `.`/`..` are collapsed against the logical POSIX path first, clamping at the
+/// root, so `/tmp/../tmp/f` resolves like `/tmp/f` instead of appending the raw
+/// remainder onto the nested `%TEMP%` (which would escape into a sibling dir).
+/// A `..` that climbs out of `/tmp` yields a non-`/tmp` path, i.e. no rewrite.
 #[cfg(any(windows, test))]
 fn translate_unix_tmp_path(path: &Path, temp_dir: impl FnOnce() -> PathBuf) -> Option<PathBuf> {
 	let mut components = path.components();
-	if components.next() != Some(Component::RootDir)
-		|| components.next() != Some(Component::Normal(OsStr::new("tmp")))
-	{
+	if components.next() != Some(Component::RootDir) {
+		return None;
+	}
+
+	let mut logical: Vec<&OsStr> = Vec::new();
+	for component in components {
+		match component {
+			Component::CurDir => {}
+			Component::ParentDir => {
+				logical.pop();
+			},
+			Component::Normal(part) => logical.push(part),
+			// A second root or a drive prefix cannot appear in a POSIX operand.
+			Component::RootDir | Component::Prefix(_) => return None,
+		}
+	}
+
+	let mut tail = logical.into_iter();
+	if tail.next() != Some(OsStr::new("tmp")) {
 		return None;
 	}
 
 	let mut native = temp_dir();
-	native.push(components.as_path());
+	native.extend(tail);
 	Some(native)
 }
 
@@ -248,6 +269,18 @@ mod tests {
 		// Only the `/tmp` component aliases; `/tmpfile` and `/var/tmp` do not.
 		assert_eq!(translate_unix_tmp_path(Path::new("/tmpfile"), || temp.clone()), None);
 		assert_eq!(translate_unix_tmp_path(Path::new("/var/tmp"), || temp.clone()), None);
+		// `.`/`..` collapse against the logical root before substitution.
+		assert_eq!(
+			translate_unix_tmp_path(Path::new("/tmp/../tmp/f"), || temp.clone()).as_deref(),
+			Some(temp.join("f").as_path()),
+		);
+		assert_eq!(
+			translate_unix_tmp_path(Path::new("/tmp/probe/../sub"), || temp.clone()).as_deref(),
+			Some(temp.join("sub").as_path()),
+		);
+		// A `..` that climbs out of `/tmp` is no longer a tmp path.
+		assert_eq!(translate_unix_tmp_path(Path::new("/tmp/.."), || temp.clone()), None);
+		assert_eq!(translate_unix_tmp_path(Path::new("/tmp/../var/f"), || temp.clone()), None);
 	}
 
 	#[test]
