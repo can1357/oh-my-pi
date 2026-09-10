@@ -109,6 +109,8 @@ const factory: CustomToolFactory = (pi) => ({
 export default factory;
 ```
 
+> **Import `@oh-my-pi/pi-coding-agent` with `import type` only.** The example above is deliberate, not stylistic. The package maps its `"."` export to the agent's own entry module, so a *value* import from a tool module re-enters the agent module graph while custom tools are still being loaded. That can recurse until the call stack is exhausted, and the failure is fatal to the session rather than isolated to the tool. Type imports are erased at runtime and are always safe; for runtime values use the injected `pi` argument the factory already receives (`pi.zod`, `pi.arktype`, `pi.exec`, `pi.pi`, ...). See [#8900](https://github.com/can1357/oh-my-pi/issues/8900).
+
 Parameter schemas may use the Zod-compatible omptype builder (`pi.zod`), native omptype builder (`pi.arktype`), or legacy-compatible TypeBox shim (`pi.typebox`) and flow through the shared validation/wire pipeline.
 
 Factory return type:
@@ -186,6 +188,12 @@ Use `ctx.sessionManager` to reconstruct state from history when branch/session c
 
 ## Failures and cancellation semantics
 
+### Load-time failures
+
+- A module that throws while being imported is skipped; the rest of the tools still load.
+- The reported error names the offending file (and its resolved absolute path when the configured path was relative or `~`-prefixed), so a broken tool can be identified without reading `~/.omp/logs/omp*.log`.
+- `.md`/`.json` paths are rejected as executable modules.
+
 ### Synchronous/async failures
 
 - Throwing (or rejected promises) in `execute` is treated as tool failure.
@@ -205,6 +213,7 @@ Use `ctx.sessionManager` to reconstruct state from history when branch/session c
 ## Real constraints to design for
 
 - Tool names must be globally unique in the active registry.
+- Import `@oh-my-pi/pi-coding-agent` with `import type` only; take runtime values from the injected `pi` argument.
 - Prefer deterministic, schema-shaped outputs in `details` for renderer/state reconstruction.
 - Guard UI usage with `pi.hasUI`.
 - Treat `.md`/`.json` in tool directories as metadata, not executable modules.
