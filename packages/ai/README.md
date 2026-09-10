@@ -10,38 +10,38 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Tools](#tools)
-  - [Defining Tools](#defining-tools)
-  - [Handling Tool Calls](#handling-tool-calls)
-  - [Streaming Tool Calls with Partial JSON](#streaming-tool-calls-with-partial-json)
-  - [Validating Tool Arguments](#validating-tool-arguments)
-  - [Complete Event Reference](#complete-event-reference)
+   - [Defining Tools](#defining-tools)
+   - [Handling Tool Calls](#handling-tool-calls)
+   - [Streaming Tool Calls with Partial JSON](#streaming-tool-calls-with-partial-json)
+   - [Validating Tool Arguments](#validating-tool-arguments)
+   - [Complete Event Reference](#complete-event-reference)
 - [Image Input](#image-input)
 - [Thinking/Reasoning](#thinkingreasoning)
-  - [Unified Interface](#unified-interface-streamsimplecompletesimple)
-  - [Provider-Specific Options](#provider-specific-options-streamcomplete)
-  - [Streaming Thinking Content](#streaming-thinking-content)
+   - [Unified Interface](#unified-interface-streamsimplecompletesimple)
+   - [Provider-Specific Options](#provider-specific-options-streamcomplete)
+   - [Streaming Thinking Content](#streaming-thinking-content)
 - [Stop Reasons](#stop-reasons)
 - [Error Handling](#error-handling)
-  - [Aborting Requests](#aborting-requests)
-  - [Continuing After Abort](#continuing-after-abort)
+   - [Aborting Requests](#aborting-requests)
+   - [Continuing After Abort](#continuing-after-abort)
 - [APIs, Models, and Providers](#apis-models-and-providers)
-  - [Providers and Models](#providers-and-models)
-  - [Querying Providers and Models](#querying-providers-and-models)
-  - [Custom Models](#custom-models)
-  - [OpenAI Compatibility Settings](#openai-compatibility-settings)
-  - [Type Safety](#type-safety)
+   - [Providers and Models](#providers-and-models)
+   - [Querying Providers and Models](#querying-providers-and-models)
+   - [Custom Models](#custom-models)
+   - [OpenAI Compatibility Settings](#openai-compatibility-settings)
+   - [Type Safety](#type-safety)
 - [Cross-Provider Handoffs](#cross-provider-handoffs)
 - [Context Serialization](#context-serialization)
 - [Browser Usage](#browser-usage)
-  - [Environment Variables](#environment-variables-nodejs-only)
-  - [Checking Environment Variables](#checking-environment-variables)
+   - [Environment Variables](#environment-variables-nodejs-only)
+   - [Checking Environment Variables](#checking-environment-variables)
 - [OAuth Providers](#oauth-providers)
-  - [Vertex AI (ADC)](#vertex-ai-adc)
-  - [CLI Login](#cli-login)
-  - [Programmatic OAuth](#programmatic-oauth)
-  - [Login Flow Example](#login-flow-example)
-  - [Using OAuth Tokens](#using-oauth-tokens)
-  - [Provider Notes](#provider-notes)
+   - [Vertex AI (ADC)](#vertex-ai-adc)
+   - [CLI Login](#cli-login)
+   - [Programmatic OAuth](#programmatic-oauth)
+   - [Login Flow Example](#login-flow-example)
+   - [Using OAuth Tokens](#using-oauth-tokens)
+   - [Provider Notes](#provider-notes)
 - [License](#license)
 
 ## Supported Providers
@@ -172,7 +172,7 @@ const finalMessage = await s.result();
 context.messages.push(finalMessage);
 
 // Handle tool calls if any
-const toolCalls = finalMessage.content.filter((b) => b.type === "toolCall");
+const toolCalls = finalMessage.content.filter(b => b.type === "toolCall");
 for (const call of toolCalls) {
 	// Execute the tool
 	const result =
@@ -464,7 +464,7 @@ const response = await completeSimple(
 	},
 	{
 		reasoning: "medium", // 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' (xhigh maps to high on non-OpenAI providers)
-	}
+	},
 );
 
 // Access thinking and text blocks
@@ -583,7 +583,7 @@ const s = stream(
 	},
 	{
 		signal,
-	}
+	},
 );
 
 for await (const event of s) {
@@ -643,7 +643,7 @@ Example:
 const response = await complete(model, context, {
 	apiKey: "sk-live",
 	headers: { "X-Debug-Trace": "true" },
-	onPayload: (payload) => {
+	onPayload: payload => {
 		console.log("request payload", payload);
 	},
 });
@@ -918,7 +918,7 @@ const response = await complete(
 	},
 	{
 		apiKey: "your-api-key",
-	}
+	},
 );
 ```
 
@@ -928,40 +928,40 @@ const response = await complete(
 
 In Node.js environments, you can set environment variables to avoid passing API keys:
 
-| Provider       | Environment Variable(s)                                                      |
-| -------------- | ---------------------------------------------------------------------------- |
-| OpenAI         | `OPENAI_API_KEY`                                                             |
-| Anthropic      | `ANTHROPIC_API_KEY` or `ANTHROPIC_OAUTH_TOKEN` (or `ANTHROPIC_FOUNDRY_API_KEY` when `CLAUDE_CODE_USE_FOUNDRY=true`) |
-| Google         | `GEMINI_API_KEY`                                                             |
-| Vertex AI      | `GOOGLE_CLOUD_PROJECT` (or `GCLOUD_PROJECT`) + `GOOGLE_CLOUD_LOCATION` + ADC |
-| Mistral        | `MISTRAL_API_KEY`                                                            |
-| Groq           | `GROQ_API_KEY`                                                               |
-| Cerebras       | `CEREBRAS_API_KEY`                                                           |
-| Together       | `TOGETHER_API_KEY`                                                           |
-| Qianfan        | `QIANFAN_API_KEY`                                                            |
-| Hugging Face   | `HUGGINGFACE_HUB_TOKEN` or `HF_TOKEN`                                        |
-| Synthetic      | `SYNTHETIC_API_KEY`                                                          |
-| NVIDIA         | `NVIDIA_API_KEY`                                                             |
-| NanoGPT        | `NANO_GPT_API_KEY`                                                          |
-| Novita         | `NOVITA_API_KEY`                                                           |
-| DeepInfra      | `DEEPINFRA_API_KEY`                                                          |
-| Venice         | `VENICE_API_KEY`                                                             |
-| Moonshot       | `MOONSHOT_API_KEY`                                                           |
-| xAI            | `XAI_API_KEY`                                                                |
-| OpenRouter     | `OPENROUTER_API_KEY`                                                         |
-| LiteLLM        | `LITELLM_API_KEY`                                                            |
-| Ollama         | `OLLAMA_API_KEY` (optional for local deployments)                            |
-| Ollama Cloud   | `OLLAMA_CLOUD_API_KEY`                                                     |
-| Qwen Portal    | `QWEN_OAUTH_TOKEN` or `QWEN_PORTAL_API_KEY`                                  |
-| QwenCloud Token Plan | `ALIBABA_TOKEN_PLAN_API_KEY` or `BAILIAN_TOKEN_PLAN_API_KEY`                   |
-| zAI            | `ZAI_API_KEY`                                                                |
-| Umans AI Coding Plan | `UMANS_AI_CODING_PLAN_API_KEY`                                           |
-| MiniMax Code   | `MINIMAX_CODE_API_KEY` (international) or `MINIMAX_CODE_CN_API_KEY` (China) |
-| Xiaomi MiMo    | `XIAOMI_API_KEY`                                                             |
-| ZenMux         | `ZENMUX_API_KEY`                                                             |
-| vLLM           | `VLLM_API_KEY`                                                               |
-| Cloudflare AI Gateway | `CLOUDFLARE_AI_GATEWAY_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
-| GitHub Copilot | `COPILOT_GITHUB_TOKEN` or `GH_TOKEN` or `GITHUB_TOKEN`                      |
+| Provider              | Environment Variable(s)                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| OpenAI                | `OPENAI_API_KEY`                                                                                                    |
+| Anthropic             | `ANTHROPIC_API_KEY` or `ANTHROPIC_OAUTH_TOKEN` (or `ANTHROPIC_FOUNDRY_API_KEY` when `CLAUDE_CODE_USE_FOUNDRY=true`) |
+| Google                | `GEMINI_API_KEY`                                                                                                    |
+| Vertex AI             | `GOOGLE_CLOUD_PROJECT` (or `GCLOUD_PROJECT`) + `GOOGLE_CLOUD_LOCATION` + ADC                                        |
+| Mistral               | `MISTRAL_API_KEY`                                                                                                   |
+| Groq                  | `GROQ_API_KEY`                                                                                                      |
+| Cerebras              | `CEREBRAS_API_KEY`                                                                                                  |
+| Together              | `TOGETHER_API_KEY`                                                                                                  |
+| Qianfan               | `QIANFAN_API_KEY`                                                                                                   |
+| Hugging Face          | `HUGGINGFACE_HUB_TOKEN` or `HF_TOKEN`                                                                               |
+| Synthetic             | `SYNTHETIC_API_KEY`                                                                                                 |
+| NVIDIA                | `NVIDIA_API_KEY`                                                                                                    |
+| NanoGPT               | `NANO_GPT_API_KEY`                                                                                                  |
+| Novita                | `NOVITA_API_KEY`                                                                                                    |
+| DeepInfra             | `DEEPINFRA_API_KEY`                                                                                                 |
+| Venice                | `VENICE_API_KEY`                                                                                                    |
+| Moonshot              | `MOONSHOT_API_KEY`                                                                                                  |
+| xAI                   | `XAI_API_KEY`                                                                                                       |
+| OpenRouter            | `OPENROUTER_API_KEY`                                                                                                |
+| LiteLLM               | `LITELLM_API_KEY`                                                                                                   |
+| Ollama                | `OLLAMA_API_KEY` (optional for local deployments)                                                                   |
+| Ollama Cloud          | `OLLAMA_CLOUD_API_KEY`                                                                                              |
+| Qwen Portal           | `QWEN_OAUTH_TOKEN` or `QWEN_PORTAL_API_KEY`                                                                         |
+| QwenCloud Token Plan  | `ALIBABA_TOKEN_PLAN_API_KEY` or `BAILIAN_TOKEN_PLAN_API_KEY`                                                        |
+| zAI                   | `ZAI_API_KEY`                                                                                                       |
+| Umans AI Coding Plan  | `UMANS_AI_CODING_PLAN_API_KEY`                                                                                      |
+| MiniMax Code          | `MINIMAX_CODE_API_KEY` (international) or `MINIMAX_CODE_CN_API_KEY` (China)                                         |
+| Xiaomi MiMo           | `XIAOMI_API_KEY`                                                                                                    |
+| ZenMux                | `ZENMUX_API_KEY`                                                                                                    |
+| vLLM                  | `VLLM_API_KEY`                                                                                                      |
+| Cloudflare AI Gateway | `CLOUDFLARE_AI_GATEWAY_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID`                                 |
+| GitHub Copilot        | `COPILOT_GITHUB_TOKEN` or `GH_TOKEN` or `GITHUB_TOKEN`                                                              |
 
 `/login cloudflare-ai-gateway` collects and stores the gateway token, account ID, and gateway ID. For environment configuration, set all three Cloudflare values above. OMP derives provider endpoints from the account and gateway IDs.
 
@@ -997,7 +997,7 @@ Provider endpoint defaults for the current OpenAI-compatible integrations:
 - LiteLLM: `http://localhost:4000/v1`
 - Cloudflare AI Gateway: native Anthropic, OpenAI, and Workers AI routes under `https://gateway.ai.cloudflare.com/v1/<account>/<gateway>`
 - Qwen Portal: `https://portal.qwen.ai/v1`
-When set, the library automatically uses these keys:
+  When set, the library automatically uses these keys:
 
 ```typescript
 // Uses OPENAI_API_KEY from environment
@@ -1118,10 +1118,10 @@ const credentials = await getProviderDefinition("github-copilot")?.login?.({
 		console.log(`Open: ${url}`);
 		if (instructions) console.log(instructions);
 	},
-	onPrompt: async (prompt) => {
+	onPrompt: async prompt => {
 		return await getUserInput(prompt.message);
 	},
-	onProgress: (message) => console.log(message),
+	onProgress: message => console.log(message),
 });
 
 // Store credentials yourself
@@ -1155,7 +1155,7 @@ const response = await complete(
 	{
 		messages: [{ role: "user", content: "Hello!" }],
 	},
-	{ apiKey: result.apiKey }
+	{ apiKey: result.apiKey },
 );
 ```
 

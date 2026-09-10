@@ -15,7 +15,14 @@ import { isUserSourceEnabled } from "../capability";
 import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
-import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
+import {
+	MAIN_AGENT_RULE_NAME,
+	parseRuleAgents,
+	parseRuleConditionAndScope,
+	type Rule,
+	type RuleFrontmatter,
+	SUB_AGENT_RULE_NAME,
+} from "../capability/rule";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
@@ -137,12 +144,18 @@ export function resolveCopilotHome(home: string): string {
 /**
  * Create source metadata for an item.
  */
-export function createSourceMeta(provider: string, filePath: string, level: "user" | "project"): SourceMeta {
+export function createSourceMeta(
+	provider: string,
+	filePath: string,
+	level: "user" | "project",
+	origin?: string,
+): SourceMeta {
 	return {
 		provider,
 		providerName: "", // Filled in by registry
 		path: path.resolve(filePath),
 		level,
+		...(origin !== undefined && { origin }),
 	};
 }
 
@@ -191,21 +204,20 @@ export function parseArrayOrCSV(value: unknown): string[] | undefined {
 	return undefined;
 }
 
-/**
- * Build a canonical rule item from a markdown/markdown-frontmatter document.
- */
-export function buildRuleFromMarkdown(
+interface RuleMarkdownOptions {
+	ruleName?: string;
+	stripNamePattern?: RegExp;
+}
+
+function buildRule(
 	name: string,
-	content: string,
+	body: string,
+	frontmatter: RuleFrontmatter,
 	filePath: string,
 	source: SourceMeta,
-	options?: {
-		ruleName?: string;
-		stripNamePattern?: RegExp;
-	},
+	options?: RuleMarkdownOptions,
 ): Rule {
-	const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
-	const { condition, astCondition, scope } = parseRuleConditionAndScope(frontmatter as RuleFrontmatter);
+	const { condition, astCondition, scope } = parseRuleConditionAndScope(frontmatter);
 
 	let globs: string[] | undefined;
 	if (Array.isArray(frontmatter.globs)) {
@@ -230,9 +242,35 @@ export function buildRuleFromMarkdown(
 		condition,
 		astCondition,
 		scope,
+		agents: parseRuleAgents(frontmatter.agents),
 		interruptMode,
 		_source: source,
 	};
+}
+
+/** Build a canonical rule from Markdown, including explicitly loaded disabled files. */
+export function buildRuleFromMarkdown(
+	name: string,
+	content: string,
+	filePath: string,
+	source: SourceMeta,
+	options?: RuleMarkdownOptions,
+): Rule {
+	const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
+	return buildRule(name, body, frontmatter as RuleFrontmatter, filePath, source, options);
+}
+
+/** Build a discovered rule from Markdown, returning null when its frontmatter disables it. */
+export function discoverRuleFromMarkdown(
+	name: string,
+	content: string,
+	filePath: string,
+	source: SourceMeta,
+	options?: RuleMarkdownOptions,
+): Rule | null {
+	const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
+	if (frontmatter.enabled === false) return null;
+	return buildRule(name, body, frontmatter as RuleFrontmatter, filePath, source, options);
 }
 
 /**
@@ -272,6 +310,16 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const description = typeof frontmatter.description === "string" ? frontmatter.description : undefined;
 
 	if (!name || !description) {
+		return null;
+	}
+	// "main" is the sentinel `agentName` for the top-level session (see
+	// MAIN_AGENT_RULE_NAME); "sub" is the fallback `agentName` for a subagent
+	// session with no explicit name (see SUB_AGENT_RULE_NAME / sdk.ts). A
+	// custom agent definition sharing either name would resolve to the same
+	// sentinel value, letting it load rules scoped `agents: [main]` or
+	// `agents: [sub]` that are documented to target only that session kind.
+	const normalizedName = name.trim().toLowerCase();
+	if (normalizedName === MAIN_AGENT_RULE_NAME || normalizedName === SUB_AGENT_RULE_NAME) {
 		return null;
 	}
 
@@ -375,6 +423,12 @@ export interface ScanSkillsFromDirOptions {
 	 * semantic every non-Claude provider relies on.
 	 */
 	includeSelf?: boolean;
+	/**
+	 * Registry/CLI origin of the plugin root supplying these skills, forwarded
+	 * to {@link SourceMeta.origin} so user-scope gating can tell omp's own
+	 * installs (`omp`, `plugin-dir`) from the foreign Claude tree (`claude`).
+	 */
+	origin?: string;
 }
 
 // Stable ordering used for skill lists in prompts: name (case-insensitive), then name, then path.
@@ -424,7 +478,7 @@ export async function scanSkillsFromDir(
 				content: body,
 				frontmatter: frontmatter as SkillFrontmatter,
 				level,
-				_source: createSourceMeta(providerId, skillPath, level),
+				_source: createSourceMeta(providerId, skillPath, level, options.origin),
 			});
 		} catch {
 			warnings.push(`Failed to read skill file: ${skillPath}`);
@@ -932,6 +986,8 @@ export interface ClaudePluginRoot {
 	path: string;
 	/** Whether this is a user or project scope plugin */
 	scope: "user" | "project";
+	/** Registry or explicit CLI source that supplied this root. */
+	origin: "claude" | "omp" | "plugin-dir";
 }
 
 /**
@@ -1151,6 +1207,7 @@ export async function listClaudePluginRoots(
 						version: entry.version || "unknown",
 						path: entry.installPath,
 						scope: entry.scope === "local" ? "project" : entry.scope || "user",
+						origin: "claude",
 					});
 				}
 			}
@@ -1199,6 +1256,7 @@ export async function listClaudePluginRoots(
 						version: entry.version || "unknown",
 						path: entry.installPath,
 						scope: entry.scope === "local" ? "project" : entry.scope || "user",
+						origin: "omp",
 					});
 				}
 			}
@@ -1237,6 +1295,7 @@ export async function listClaudePluginRoots(
 							version: entry.version || "unknown",
 							path: entry.installPath,
 							scope: "project",
+							origin: "omp",
 						});
 					}
 				}

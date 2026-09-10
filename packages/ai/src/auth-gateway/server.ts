@@ -251,6 +251,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 		const retryAfterMs = extractRetryHint(undefined, message);
 		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
 			retryAfterMs,
+			providerTimed: retryAfterMs !== undefined,
 			baseUrl: model.baseUrl,
 			modelId: model.id,
 			apiKey: oldKey,

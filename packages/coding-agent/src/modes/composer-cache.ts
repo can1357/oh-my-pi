@@ -7,6 +7,7 @@ import type { ComposerPreferences, ComposerStatusSnapshot } from "./composer";
 import type { SymbolPreset } from "./theme/theme";
 
 const CACHE_VERSION = 1;
+const STATUS_CACHE_VERSION = 3;
 /** Theme inputs cached from the last resolved settings load for stable prepaint colors. */
 export interface ComposerThemePreferences {
 	readonly symbolPreset?: SymbolPreset;
@@ -128,6 +129,7 @@ function readStatus(file: string): ComposerStatusSnapshot | undefined {
 	}
 	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
 	if (field(parsed, "version") !== CACHE_VERSION) return undefined;
+	if (field(parsed, "statusVersion") !== STATUS_CACHE_VERSION) return undefined;
 	const shape = field(parsed, "shape");
 	const rawBorderColor = field(parsed, "borderColor");
 	const rawTopBorder = field(parsed, "topBorder");
@@ -276,11 +278,11 @@ export async function writeComposerWelcomeCache(cwd: string, welcome: ComposerWe
 	);
 }
 
-/** Persist the last real status-line chrome for speculative first-frame rendering. */
+/** Persist placeholder-only status chrome for speculative first-frame rendering. */
 export async function writeComposerStatusCache(cwd: string, status: ComposerStatusSnapshot): Promise<void> {
 	await Bun.write(
 		path.join(projectCacheDir(cwd), "status.json"),
-		JSON.stringify({ version: CACHE_VERSION, ...status }),
+		JSON.stringify({ version: CACHE_VERSION, statusVersion: STATUS_CACHE_VERSION, ...status }),
 	);
 }
 

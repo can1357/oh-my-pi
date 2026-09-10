@@ -45,6 +45,7 @@ import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-stora
 import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
 import {
+	cleanSourceCheckoutIfConfigured,
 	createSessionWorktree,
 	defaultSessionWorktreeBranch,
 	formatSessionWorktreeSummary,
@@ -1033,6 +1034,12 @@ export class CommandController {
 			}
 		}
 		if (!(await this.ctx.session.newSession(options))) return;
+		// A focused subagent view keeps its own history: return to the main session
+		// first so the transcript below cannot rebuild from the subagent's surviving
+		// conversation, then drop any turn-scoped anchors (coalescing timers,
+		// in-flight dispatches) the session boundary orphaned.
+		if (this.ctx.focusedAgentId) await this.ctx.unfocusSession();
+		this.ctx.eventController.resetTranscriptAnchors();
 		this.ctx.resetObserverRegistry();
 		setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 
@@ -1242,10 +1249,14 @@ export class CommandController {
 			logger.warn("worktree clone fell back to plain checkout", { path: worktree.path, error: worktree.cloneError });
 		}
 		if (await this.#relocateSession(worktree.path)) {
+			const cleanup = await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings);
+			if (cleanup.errorMessage !== undefined) {
+				this.ctx.showWarning(`Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`);
+			}
 			this.ctx.present([
 				new Spacer(1),
 				new Text(
-					`${theme.fg("accent", `${theme.status.success} ${formatSessionWorktreeSummary(worktree)}`)}`,
+					`${theme.fg("accent", `${theme.status.success} ${formatSessionWorktreeSummary(worktree, cleanup.cleaned)}`)}`,
 					1,
 					1,
 				),
@@ -1291,15 +1302,30 @@ export class CommandController {
 	}
 
 	async handleRenameCommand(title: string): Promise<void> {
+		const session = this.ctx.session;
+		const sessionManager = this.ctx.sessionManager;
+		const sessionId = sessionManager.getSessionId();
+		const signal = session.titleGenerationSignal;
+		let titleRevision = sessionManager.titleRevision;
+		const isCurrent = () =>
+			this.ctx.session === session &&
+			this.ctx.sessionManager === sessionManager &&
+			!signal.aborted &&
+			sessionManager.getSessionId() === sessionId &&
+			sessionManager.titleRevision === titleRevision;
 		try {
-			const stored = await this.ctx.sessionManager.setSessionName(title, "user");
+			const persistence = sessionManager.setSessionName(title, "user");
+			titleRevision = sessionManager.titleRevision;
+			const stored = await persistence;
+			if (!isCurrent()) return;
 			if (!stored) {
 				this.ctx.showError("Session name cannot be empty.");
 				return;
 			}
-			const name = this.ctx.sessionManager.getSessionName()!;
+			const name = sessionManager.getSessionName()!;
 			this.ctx.showStatus(`Session renamed to "${name}".`);
 		} catch (err) {
+			if (!isCurrent()) return;
 			this.ctx.showError(`Rename failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	}
@@ -1346,6 +1372,8 @@ export class CommandController {
 				this.ctx.bashComponent.setComplete(result.exitCode, result.cancelled, {
 					output: result.output,
 					truncation: meta?.truncation,
+					images: result.images,
+					showImages: this.ctx.settings.get("terminal.showImages"),
 				});
 			}
 			try {
@@ -1581,6 +1609,10 @@ export class CommandController {
 			this.ctx.showWarning("Wait for the current response to finish or abort it before handing off.");
 			return;
 		}
+		if (this.ctx.session.isCompacting) {
+			this.ctx.showWarning("Wait for context compaction to finish or cancel it before handing off.");
+			return;
+		}
 
 		const entries = this.ctx.sessionManager.getEntries();
 		const messageCount = entries.filter(e => e.type === "message").length;
@@ -1648,10 +1680,33 @@ export class CommandController {
 				this.ctx.showError(`Handoff failed: ${message}`);
 			}
 		} finally {
-			handoffLoader.stop();
-			this.ctx.statusContainer.disposeChildren();
+			this.#finishHandoffUi(handoffLoader);
 		}
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
+	}
+
+	#finishHandoffUi(handoffLoader: Loader): void {
+		handoffLoader.stop();
+		// A retry/compaction event may replace the handoff overlay while transcript
+		// replay yields. Preserve it only while it still owns the status row; a
+		// reference to a loader disposed earlier must not retain the handoff overlay.
+		const maintenanceLoader = this.ctx.autoCompactionLoader ?? this.ctx.retryLoader;
+		if (maintenanceLoader && this.ctx.statusContainer.children.includes(maintenanceLoader)) return;
+		this.ctx.statusContainer.disposeChildren();
+		// `disposeChildren()` disposed any working loader mounted by a delayed
+		// `agent_start` during transcript replay, which stops its animation timer.
+		// Drop the now-frozen reference so the reconciler below never reattaches it
+		// (`ensureLoadingAnimation()` only re-adds an existing instance, never
+		// restarts it).
+		if (this.ctx.loadingAnimation) {
+			this.ctx.loadingAnimation.stop();
+			this.ctx.loadingAnimation = undefined;
+		}
+		if (this.ctx.session.isStreaming) {
+			// A new turn won the race with handoff cleanup; mount a fresh, running
+			// loader for it now that the stale reference is cleared.
+			this.ctx.ensureLoadingAnimation();
+		}
 	}
 }
 

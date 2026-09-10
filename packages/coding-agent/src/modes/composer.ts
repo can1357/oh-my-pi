@@ -61,7 +61,7 @@ export interface ComposerWelcomeUpdate {
 }
 
 /**
- * Last resolved status-line chrome, replayed on the next first frame so the
+ * Placeholder-only status chrome replayed on the next first frame so the
  * status band/border exists before the session-aware status line attaches.
  * Bound to the composer shape it was rendered for; a different shape drops it.
  */
@@ -108,8 +108,7 @@ export interface ComposerStartOptions {
 
 /**
  * Mount slot for the session-aware status component below the editor. Shows
- * the speculative bottom-bar rows from the last run until the real component
- * mounts.
+ * placeholder rows during startup until the real component mounts.
  */
 class StatusHost implements Component {
 	#lines: readonly string[] = [];
@@ -615,7 +614,7 @@ export class Composer implements TerminalFrameProvider {
 		this.editor.setTopBorderProvider(undefined);
 	}
 
-	/** Cached top-border content fitted to the current editor width. */
+	/** Cached placeholder top-border content fitted to the current editor width. */
 	#speculativeTopBorder(availableWidth: number): EditorTopBorder | undefined {
 		const border = this.#statusSnapshot?.topBorder;
 		if (!border) return undefined;

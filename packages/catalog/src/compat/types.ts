@@ -198,6 +198,8 @@ export interface CompiledRule {
 	source: string;
 	class?: string;
 	providers?: string[];
+	/** Request adapter identifiers matched by an `on-api` selector. */
+	apis?: string[];
 	family?: string;
 	revision?: CompiledRevisionTerm[];
 	models?: CompiledSelector[];
@@ -382,7 +384,7 @@ export interface CompiledCredentialField {
 
 /** Expiry derivation for a token response. */
 export type CompiledCredentialExpiry =
-	| { mode: "seconds"; path: string; fromPath?: string; skewMs: number }
+	| { mode: "seconds"; path: string; fromPath?: string; skewMs: number; fallbackMs?: number }
 	| { mode: "jwt"; skewMs: number; fallbackMs?: number }
 	| { mode: "never" };
 
@@ -422,7 +424,7 @@ export interface CompiledOAuthRequest {
 	timeoutMs?: number;
 }
 
-/** Loopback callback configuration for authorization-code logins. */
+/** Callback transport configuration for authorization-code logins. */
 export interface CompiledCallback {
 	port: number;
 	path: string;
@@ -430,9 +432,11 @@ export interface CompiledCallback {
 	redirectUri?: CompiledAuthValue;
 	portFallback: boolean;
 	manualOnly: boolean;
+	/** Temporarily receive a custom-scheme redirect through the native OS handler. */
+	nativeScheme: boolean;
 }
 
-/** Authorization-code login through the loopback callback server. */
+/** Authorization-code login through a loopback, native-scheme, or manual callback. */
 export interface CompiledOAuthCodeLogin {
 	kind: "oauth-code";
 	clientId?: CompiledAuthValue;
@@ -566,6 +570,8 @@ export interface ModelIdentity {
 export interface ResolveTarget {
 	/** Deployment provider hosting the model. */
 	provider: string;
+	/** Request adapter used to serialize the model. */
+	api: string;
 	/** Centrally classified vendor lineage. */
 	class: string;
 	/** Classified product family within the class, when known. */

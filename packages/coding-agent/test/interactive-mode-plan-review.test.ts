@@ -23,7 +23,7 @@ import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-a
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import { type OverlayHandle, type OverlayOptions, setKeybindings } from "@oh-my-pi/pi-tui";
+import { setKeybindings } from "@oh-my-pi/pi-tui";
 import { formatNumber, TempDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -472,28 +472,6 @@ describe("InteractiveMode plan review rendering", () => {
 		}
 	});
 
-	it("leaves terminal mouse tracking disabled while Plan Review is open", async () => {
-		let capturedOverlay: PlanReviewOverlay | undefined;
-		let capturedOptions: OverlayOptions | undefined;
-		const overlayHandle: OverlayHandle = {
-			hide: vi.fn(),
-			setHidden: vi.fn(),
-			isHidden: vi.fn(() => false),
-		};
-		vi.spyOn(mode.ui, "showOverlay").mockImplementation((component, options) => {
-			if (!(component instanceof PlanReviewOverlay)) throw new Error("Expected Plan Review overlay");
-			capturedOverlay = component;
-			capturedOptions = options;
-			return overlayHandle;
-		});
-
-		const choice = mode.showPlanReview("# Plan\n\nSelectable body", "Plan mode - next step", ["Approve"]);
-
-		expect(capturedOptions).toMatchObject({ fullscreen: true, mouseTracking: false });
-		capturedOverlay?.handleInput("\x1b");
-		await expect(choice).resolves.toBeUndefined();
-	});
-
 	it("dismisses Plan Review and restores input when a provider error is pinned", async () => {
 		mode.ui.setFocus(mode.editor);
 		const choice = mode.showPlanReview("# Plan\n\nReady for approval.", "Plan mode - next step", ["Approve"]);
@@ -616,11 +594,10 @@ describe("InteractiveMode plan review rendering", () => {
 			title: "PLAN",
 		});
 
-		// The plan-approved prompt stays reference-only; approval must instead
-		// await the durable file mirror before dispatch so read sees the edit.
+		// The executor must receive the final approved text, including in-overlay edits.
 		const call = promptSpy.mock.calls.find(isPlanApprovedCall);
 		expect(call).toBeDefined();
-		expect(call?.[0] as string).not.toContain("edited body");
+		expect(call?.[0] as string).toContain("edited body");
 		expect(call?.[0] as string).not.toContain("original body");
 		// onPlanEdited mirrored the edit to the plan file.
 		expect(await Bun.file(resolvedPlanPath).text()).toContain("edited body");

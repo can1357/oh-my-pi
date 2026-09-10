@@ -13,7 +13,7 @@ import type {
 	UsageStatus,
 	UsageWindow,
 } from "../usage";
-import { DAY_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
+import { DAY_MS, HOUR_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
 
 // (Refresh is the sole responsibility of AuthStorage; no provider-direct refresh here.)
 
@@ -46,8 +46,45 @@ interface AntigravityUsageResponse {
 	models: Record<string, AntigravityModelInfo>;
 }
 
+interface AntigravityQuotaSummaryBucket {
+	bucketId?: string;
+	displayName?: string;
+	description?: string;
+	window?: string;
+	remainingFraction?: number;
+	remainingAmount?: number | string;
+	disabled?: boolean;
+	resetTime?: string;
+}
+
+interface AntigravityQuotaSummaryGroup {
+	displayName?: string;
+	description?: string;
+	buckets?: AntigravityQuotaSummaryBucket[];
+}
+
+interface AntigravityQuotaSummaryResponse {
+	buckets?: AntigravityQuotaSummaryBucket[];
+	groups?: AntigravityQuotaSummaryGroup[];
+	description?: string;
+}
+
+interface AntigravityEndpointRequest {
+	endpoints: readonly string[];
+	path: string;
+	projectId: string;
+	accessToken: string;
+	signal?: AbortSignal;
+}
+
+interface AntigravityEndpointResult {
+	response?: Response;
+	endpoint: string;
+}
+
 const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const FETCH_AVAILABLE_MODELS_PATH = "/v1internal:fetchAvailableModels";
+const RETRIEVE_USER_QUOTA_SUMMARY_PATH = "/v1internal:retrieveUserQuotaSummary";
 
 interface AntigravityWindowDescriptor {
 	id: string;
@@ -59,6 +96,9 @@ function classifyWindow(id: string | undefined, label: string | undefined): Anti
 	const source = `${id ?? ""} ${label ?? ""}`.toLowerCase();
 	if (source.includes("week") || source.includes("7d") || /7[\s_-]*day/.test(source)) {
 		return { id: "weekly", label: "Weekly", durationMs: WEEK_MS };
+	}
+	if (source.includes("5h") || source.includes("five hour") || /5[\s_-]*hour/.test(source)) {
+		return { id: "5h", label: "5 Hour", durationMs: 5 * HOUR_MS };
 	}
 	if (source.includes("day") || source.includes("daily") || source.includes("24h")) {
 		return { id: "daily", label: "Daily", durationMs: DAY_MS };
@@ -154,13 +194,7 @@ function parseWindow(
 	};
 }
 
-function buildAmount(info: AntigravityQuotaInfo): UsageAmount {
-	const apiRemainingFraction = clampFraction(info.remainingFraction);
-	// Observed Antigravity responses omit remainingFraction for exhausted
-	// Google/Gemini counters and keep only resetTime. Treat that shape as
-	// "blocked until reset" rather than unknown so a healthy sibling backend
-	// counter cannot mask it during dedupe.
-	const remainingFraction = apiRemainingFraction ?? (info.resetTime ? 0 : undefined);
+function buildPercentAmount(remainingFraction: number | undefined): UsageAmount {
 	const amount: UsageAmount = { unit: "percent" };
 	if (remainingFraction === undefined) return amount;
 	const usedFraction = 1 - remainingFraction;
@@ -170,6 +204,15 @@ function buildAmount(info: AntigravityQuotaInfo): UsageAmount {
 	amount.used = usedFraction * 100;
 	amount.limit = 100;
 	return amount;
+}
+
+function buildAmount(info: AntigravityQuotaInfo): UsageAmount {
+	const apiRemainingFraction = clampFraction(info.remainingFraction);
+	// Observed legacy Antigravity responses omit remainingFraction for exhausted
+	// Google/Gemini counters and keep only resetTime. Treat that shape as
+	// "blocked until reset" rather than unknown so a healthy sibling backend
+	// counter cannot mask it during dedupe.
+	return buildPercentAmount(apiRemainingFraction ?? (info.resetTime ? 0 : undefined));
 }
 
 function formatCounterName(info: AntigravityQuotaInfo): string | undefined {
@@ -239,6 +282,165 @@ function normalizeQuotaInfos(info: AntigravityModelInfo): AntigravityQuotaInfo[]
 	return results;
 }
 
+function getQuotaSummaryCounterKeys(
+	group: AntigravityQuotaSummaryGroup | undefined,
+	bucket: AntigravityQuotaSummaryBucket,
+): string[] {
+	const bucketId = bucket.bucketId?.toLowerCase() ?? "";
+	const groupName = group?.displayName?.toLowerCase() ?? "";
+	if (bucketId.startsWith("gemini-") || groupName.includes("gemini")) return ["google"];
+	if (
+		bucketId.startsWith("3p-") ||
+		groupName.includes("claude") ||
+		groupName.includes("gpt") ||
+		groupName.includes("third party")
+	) {
+		// Antigravity exposes one shared third-party group. Duplicate its limits
+		// into the existing model-family scopes so Claude and GPT requests both
+		// participate in credential ranking without inventing a second quota.
+		return ["anthropic", "openai"];
+	}
+	return ["default"];
+}
+
+function getQuotaSummaryCounterName(counterKey: string): string | undefined {
+	switch (counterKey) {
+		case "google":
+			return "Google";
+		case "anthropic":
+			return "Anthropic";
+		case "openai":
+			return "OpenAI";
+		default:
+			return undefined;
+	}
+}
+
+function buildQuotaSummaryAmount(bucket: AntigravityQuotaSummaryBucket): UsageAmount {
+	const remainingFraction = clampFraction(bucket.remainingFraction);
+	if (remainingFraction !== undefined) return buildPercentAmount(remainingFraction);
+
+	const remainingAmount =
+		typeof bucket.remainingAmount === "number"
+			? bucket.remainingAmount
+			: typeof bucket.remainingAmount === "string"
+				? Number(bucket.remainingAmount)
+				: undefined;
+	if (remainingAmount === undefined || !Number.isFinite(remainingAmount)) return { unit: "unknown" };
+	return { unit: "unknown", remaining: remainingAmount };
+}
+
+function buildQuotaSummaryReport(
+	data: AntigravityQuotaSummaryResponse,
+	params: UsageFetchParams,
+	endpoint: string,
+	nowMs: number,
+): UsageReport | null {
+	const groups = Array.isArray(data.groups) ? data.groups : [];
+	const topLevelBuckets = Array.isArray(data.buckets) ? data.buckets : [];
+	const hasGroupedBuckets = groups.some(group => Array.isArray(group.buckets) && group.buckets.length > 0);
+	if (!hasGroupedBuckets && topLevelBuckets.length === 0) return null;
+
+	const limits: UsageLimit[] = [];
+	const addBucket = (bucket: AntigravityQuotaSummaryBucket, group?: AntigravityQuotaSummaryGroup) => {
+		if (bucket.disabled === true) return;
+		const descriptor = classifyWindow(bucket.window, bucket.displayName);
+		const window = parseWindow(
+			{
+				resetTime: bucket.resetTime,
+				windowId: bucket.window,
+				windowLabel: descriptor?.label,
+			},
+			descriptor,
+		);
+		const amount = buildQuotaSummaryAmount(bucket);
+		const counterKeys = getQuotaSummaryCounterKeys(group, bucket);
+		for (const counterKey of counterKeys) {
+			const counterName = getQuotaSummaryCounterName(counterKey);
+			const windowId = window?.id ?? bucket.window ?? bucket.bucketId ?? "default";
+			limits.push({
+				id: `${params.provider}:${counterKey}:default:${bucket.bucketId ?? windowId}`,
+				label: counterName ? `Usage (${counterName})` : (group?.displayName ?? bucket.displayName ?? "Usage"),
+				scope: {
+					provider: params.provider,
+					accountId: params.credential.accountId,
+					projectId: params.credential.projectId,
+					windowId,
+					...(counterKeys.length > 1 ? { shared: true } : {}),
+				},
+				window,
+				amount,
+				status:
+					amount.remainingFraction !== undefined
+						? getUsageStatus(amount.remainingFraction)
+						: amount.remaining === 0
+							? "exhausted"
+							: "unknown",
+			});
+		}
+	};
+
+	if (hasGroupedBuckets) {
+		for (const group of groups) {
+			for (const bucket of group.buckets ?? []) addBucket(bucket, group);
+		}
+	} else {
+		for (const bucket of topLevelBuckets) addBucket(bucket);
+	}
+
+	limits.sort((a, b) => {
+		const aFraction = a.amount.remainingFraction ?? 1;
+		const bFraction = b.amount.remainingFraction ?? 1;
+		return aFraction - bFraction;
+	});
+
+	const metadata: UsageReport["metadata"] = {
+		endpoint,
+		projectId: params.credential.projectId,
+	};
+	if (params.credential.email) metadata.email = params.credential.email;
+	if (params.credential.accountId) metadata.accountId = params.credential.accountId;
+
+	return {
+		provider: params.provider,
+		fetchedAt: nowMs,
+		limits,
+		metadata,
+		raw: data,
+	};
+}
+
+async function fetchAntigravityEndpoint(
+	request: AntigravityEndpointRequest,
+	ctx: UsageFetchContext,
+): Promise<AntigravityEndpointResult> {
+	let response: Response | undefined;
+	let attemptedEndpoint = request.endpoints[0] ?? DEFAULT_ENDPOINT;
+	for (const endpoint of request.endpoints) {
+		attemptedEndpoint = endpoint;
+		try {
+			response = await ctx.fetch(`${endpoint}${request.path}`, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${request.accessToken}`,
+					"Content-Type": "application/json",
+					"User-Agent": getAntigravityUserAgent(),
+				},
+				body: JSON.stringify({ project: request.projectId }),
+				signal: request.signal,
+			});
+		} catch (error) {
+			if (endpoint === request.endpoints.at(-1)) throw error;
+			continue;
+		}
+
+		if (response.ok || !AIError.isTransientStatus(response.status)) {
+			return { response, endpoint };
+		}
+	}
+	return { response, endpoint: attemptedEndpoint };
+}
+
 /**
  * Return the OAuth access token to use against `/v1internal:*`. AuthStorage is
  * the sole refresh authority (broker-aware, single-flighted, rotation-safe);
@@ -265,47 +467,39 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 
 	const baseUrl = params.baseUrl?.replace(/\/+$/, "");
 	const endpoints = baseUrl ? [baseUrl] : [DEFAULT_ENDPOINT, "https://daily-cloudcode-pa.sandbox.googleapis.com"];
+	const endpointRequest = {
+		endpoints,
+		projectId: credential.projectId,
+		accessToken,
+		signal: params.signal,
+	};
 
-	let response: Response | undefined;
-	let successfulEndpoint = DEFAULT_ENDPOINT;
-	for (const endpoint of endpoints) {
-		try {
-			const url = `${endpoint}${FETCH_AVAILABLE_MODELS_PATH}`;
-			response = await ctx.fetch(url, {
-				method: "POST",
-				headers: {
-					Authorization: `Bearer ${accessToken}`,
-					"Content-Type": "application/json",
-					"User-Agent": getAntigravityUserAgent(),
-				},
-				body: JSON.stringify({ project: credential.projectId }),
-				signal: params.signal,
-			});
-
-			if (response.ok) {
-				successfulEndpoint = endpoint;
-				break;
-			}
-
-			if (AIError.isTransientStatus(response.status)) {
-				continue;
-			}
-			break;
-		} catch (error) {
-			if (endpoint === endpoints[endpoints.length - 1]) {
-				throw error;
-			}
-		}
+	// This is the endpoint Antigravity's own quota UI uses. Unlike the legacy
+	// model catalog response, it reports both the rolling five-hour and weekly
+	// buckets even when neither is exhausted.
+	const summaryResult = await fetchAntigravityEndpoint(
+		{ ...endpointRequest, path: RETRIEVE_USER_QUOTA_SUMMARY_PATH },
+		ctx,
+	);
+	if (summaryResult.response?.ok) {
+		const summaryData = (await summaryResult.response.json()) as AntigravityQuotaSummaryResponse;
+		const summaryReport = buildQuotaSummaryReport(summaryData, params, summaryResult.endpoint, nowMs);
+		if (summaryReport) return summaryReport;
 	}
 
-	if (!response?.ok) {
+	// Older Cloud Code Assist deployments and compatible proxies may not expose
+	// retrieveUserQuotaSummary. Preserve the model-level quota parser as a
+	// fallback rather than dropping usage reporting for those endpoints.
+	const legacyResult = await fetchAntigravityEndpoint({ ...endpointRequest, path: FETCH_AVAILABLE_MODELS_PATH }, ctx);
+	if (!legacyResult.response?.ok) {
 		ctx.logger?.warn("Antigravity usage fetch failed", {
-			status: response?.status ?? 0,
-			statusText: response?.statusText ?? "unknown",
+			status: legacyResult.response?.status ?? summaryResult.response?.status ?? 0,
+			statusText: legacyResult.response?.statusText ?? summaryResult.response?.statusText ?? "unknown",
 		});
 		return null;
 	}
-	const data = (await response.json()) as AntigravityUsageResponse;
+	const data = (await legacyResult.response.json()) as AntigravityUsageResponse;
+	const successfulEndpoint = legacyResult.endpoint;
 
 	// The API returns per-model quota entries, but quota is shared across
 	// models within the same backend counter, tier, and reset window. Keep

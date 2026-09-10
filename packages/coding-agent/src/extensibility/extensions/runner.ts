@@ -1259,15 +1259,15 @@ export class ExtensionRunner {
 	#isSessionShutdownEvent(event: RunnerEmitEvent): event is Extract<RunnerEmitEvent, { type: "session_shutdown" }> {
 		return event.type === "session_shutdown";
 	}
-	async #runHandlerWithTimeout<TEvent extends { type: string }, TResult>(
-		handler: (event: TEvent, ctx: ExtensionContext) => Promise<TResult | undefined> | TResult | undefined,
+	async #runHandlerWithTimeout<TEvent extends { type: string }, R>(
+		handler: (event: TEvent, ctx: ExtensionContext) => Promise<R | undefined> | R | undefined,
 		event: TEvent,
 		ctx: ExtensionContext,
 		ext: Extension,
 		timeoutMs: number,
-		onFailure?: (kind: "timeout" | "error", message: string) => TResult,
+		onFailure?: (kind: "timeout" | "error", message: string) => R,
 		outerSignal?: AbortSignal,
-	): Promise<TResult | undefined> {
+	): Promise<R | undefined> {
 		// `session_stop` carries its own signal on the event; `tool_call` receives
 		// the outer dispatch signal (loop request or wrapper execute) so an abort
 		// while a handler awaits a human dialog cancels the dialog and settles the
@@ -1280,14 +1280,14 @@ export class ExtensionRunner {
 		const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 		if (signal?.aborted) return undefined;
 		const registrationScope: ToolRegistrationScope = { pending: new Set(), closed: false };
-		let handlerResult: TResult | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED | undefined;
+		let handlerResult: R | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED | undefined;
 		let handlerFailure: { error: unknown } | undefined;
 		try {
 			handlerResult = await withActiveSettings(this.settings, () =>
 				raceHandlerWithTimeout(
 					async (handlerSignal, budget) => {
 						registrationScope.signal = handlerSignal;
-						let result: TResult | undefined;
+						let result: R | undefined;
 						try {
 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
 								handler(
@@ -1343,7 +1343,7 @@ export class ExtensionRunner {
 			});
 			return onFailure?.("error", message);
 		}
-		return handlerResult as TResult | undefined;
+		return handlerResult as R | undefined;
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {

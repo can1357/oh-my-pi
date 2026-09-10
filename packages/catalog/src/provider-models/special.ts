@@ -1,4 +1,4 @@
-import { once } from "@oh-my-pi/pi-utils";
+import { logger, once } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../build";
 import { apiRouteFor } from "../compat/behavior";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
@@ -55,14 +55,15 @@ export function openaiCodexModelManagerOptions(
 						const accounts = await resolveAccounts();
 						if (!accounts || accounts.length === 0) return null;
 						const results = await Promise.all(
-							accounts.map(account =>
-								fetchCodexModels({
+							accounts.map(async account => ({
+								accountId: account.accountId,
+								result: await fetchCodexModels({
 									accessToken: account.accessToken,
 									accountId: account.accountId,
 									clientVersion,
 									fetchFn: fetch,
 								}),
-							),
+							})),
 						);
 						return unionCodexModels(results);
 					},
@@ -73,21 +74,35 @@ export function openaiCodexModelManagerOptions(
 
 /**
  * Merge complete per-account Codex catalogs into one authoritative list,
- * deduped by model id (first account to expose an id wins). Returns `null` when
- * any account's fetch failed, so a partial list cannot replace the previous or
- * bundled authoritative catalog.
+ * deduped by model id (first account to expose an id wins).
+ *
+ * Returns `null` when any account's fetch failed transiently, so a partial list
+ * cannot replace the previous or bundled authoritative catalog. An account
+ * whose credential the backend rejected outright (401/403 — revoked or
+ * deauthorized) contributes nothing and is skipped instead: it would otherwise
+ * veto every sibling account's models until the user removes it. If no account
+ * produced a catalog, discovery aborts the same way.
  */
 function unionCodexModels(
-	results: readonly (CodexModelDiscoveryResult | null)[],
+	results: readonly { accountId: string | undefined; result: CodexModelDiscoveryResult | null }[],
 ): ModelSpec<"openai-codex-responses">[] | null {
 	const byId = new Map<string, ModelSpec<"openai-codex-responses">>();
-	for (const result of results) {
+	let catalogs = 0;
+	for (const { accountId, result } of results) {
 		if (!result) return null;
+		if (result.rejectedStatus !== undefined) {
+			logger.warn("Codex model discovery skipped an account whose credential was rejected", {
+				accountId,
+				status: result.rejectedStatus,
+			});
+			continue;
+		}
+		catalogs++;
 		for (const model of result.models) {
 			if (!byId.has(model.id)) byId.set(model.id, model);
 		}
 	}
-	return [...byId.values()];
+	return catalogs > 0 ? [...byId.values()] : null;
 }
 
 // ---------------------------------------------------------------------------

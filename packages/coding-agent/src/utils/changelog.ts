@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { getLastChangelogVersionPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { Lexer } from "@oh-my-pi/pi-utils/marked";
 import type { BunFile } from "bun";
 import bundledChangelogPath from "../../CHANGELOG.md" with { type: "file" };
 import type { SettingValue } from "../config/settings";
@@ -59,6 +60,9 @@ function emptyStartupSelection(persistCurrentVersion: boolean): StartupChangelog
 	};
 }
 
+/** Bucket for release bullets written above any `###` category heading, so the breakdown never loses them. */
+const UNCATEGORIZED_CHANGELOG_CATEGORY = "Other";
+
 function summarizeChangelogEntries(entries: readonly ChangelogEntry[]): {
 	changeCount: number;
 	categoryCounts: Record<string, number>;
@@ -67,16 +71,22 @@ function summarizeChangelogEntries(entries: readonly ChangelogEntry[]): {
 	let changeCount = 0;
 
 	for (const entry of entries) {
-		let category: string | undefined;
-		for (const line of entry.content.split("\n")) {
-			const heading = line.match(/^###\s+(.+?)\s*$/);
-			if (heading) {
-				category = heading[1];
+		let category = UNCATEGORIZED_CHANGELOG_CATEGORY;
+		// Count what the renderer shows: top-level list items per `###` section, straight
+		// from the shared lexer. There is no parallel list grammar left here to drift.
+		for (const token of Lexer.lex(entry.content)) {
+			if (token.type === "heading" && token.depth === 3) {
+				const name = token.text.trim();
+				category = name === "" ? UNCATEGORIZED_CHANGELOG_CATEGORY : name;
 				continue;
 			}
-			if (!category || !/^-\s+\S/.test(line)) continue;
-			categoryCounts[category] = (categoryCounts[category] ?? 0) + 1;
-			changeCount++;
+			if (token.type !== "list") continue;
+			for (const item of token.items) {
+				// A bare marker renders an empty item; it announces no change.
+				if (!item.task && item.text.trim() === "") continue;
+				categoryCounts[category] = (categoryCounts[category] ?? 0) + 1;
+				changeCount++;
+			}
 		}
 	}
 

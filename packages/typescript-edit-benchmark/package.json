@@ -34,7 +34,6 @@
     "@babel/parser": "catalog:",
     "@babel/traverse": "catalog:",
     "@babel/types": "catalog:",
-    "@oh-my-pi/hashline": "catalog:",
     "@oh-my-pi/pi-agent-core": "catalog:",
     "@oh-my-pi/pi-coding-agent": "catalog:",
     "@oh-my-pi/pi-utils": "catalog:",

@@ -29,7 +29,7 @@ import {
 	streamSimple,
 } from "@oh-my-pi/pi-ai";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
+import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import {
 	calculateCost,
 	getBundledModel,
@@ -86,6 +86,20 @@ export function StringEnum<T extends string | number>(
 export function clampThinkingLevel<TApi extends Api>(model: Model<TApi>, level: Effort | "off"): Effort | "off" {
 	if (level === "off") return "off";
 	return clampThinkingLevelForModel(model, level) ?? "off";
+}
+
+/**
+ * Enumerate the thinking levels a model supports, mirroring historical pi-ai's
+ * `getSupportedThinkingLevels` (`@earendil-works/pi-ai` `models.ts`). Upstream
+ * returns `["off"]` for non-reasoning models and, for reasoning models, `off`
+ * followed by each selectable effort in canonical order; OMP's baked
+ * `getSupportedEfforts` supplies that effort ladder directly. Legacy `/thinking`
+ * menus (e.g. `@companion-ai/feynman`) call this to list the levels a user may
+ * pick for the active model.
+ */
+export function getSupportedThinkingLevels<TApi extends Api>(model: Model<TApi>): (Effort | "off")[] {
+	if (!model.reasoning) return ["off"];
+	return ["off", ...getSupportedEfforts(model)];
 }
 
 /**

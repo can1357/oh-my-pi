@@ -162,7 +162,7 @@ function makeRenderCtx(
 		statusLine: { invalidate: vi.fn() },
 		updateEditorBorderColor: vi.fn(),
 		updateEditorTopBorder: vi.fn(),
-		ui: { requestRender: vi.fn(), imageBudget: undefined },
+		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn(), imageBudget: undefined },
 		resetTranscript: () => {
 			ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 			ctx.chatContainer.disposeChildren();
@@ -408,6 +408,29 @@ describe("UiHelpers.renderInitialMessages — image replay", () => {
 
 		expect(hasImageComponent(chatContainer)).toBe(true);
 		expect(Bun.stripANSI(chatContainer.render(100).join("\n"))).toContain("display image 1: 1x1");
+	});
+
+	it("restores manual Bash image blocks from persisted message content", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		const transcript = transcriptWith([
+			{
+				role: "bashExecution",
+				command: "emit-image",
+				output: "generated",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				images: [pngImage],
+				timestamp: 1,
+			},
+		]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript);
+
+		await new UiHelpers(ctx).renderInitialMessages();
+
+		expect(countImageComponents(chatContainer)).toBe(1);
+		expect(Bun.stripANSI(chatContainer.render(100).join("\n"))).toContain("$ emit-image");
 	});
 
 	it("preserves hidden read images so enabling them later can replay the image", async () => {
