@@ -2673,6 +2673,7 @@ export class Settings {
 				await handle.close();
 			}
 			await replaceFileAtomically(tempPath, filePath);
+			logger.debug("Settings: saved", { path: filePath });
 			removeTemp = false;
 		} finally {
 			if (removeTemp) {
