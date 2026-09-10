@@ -10,6 +10,7 @@
 import { resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
+import { materializeTimeBasedCost } from "./pricing";
 import type { Api, Model, ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
 
@@ -125,6 +126,9 @@ export function applyCatalogCorrections(
 		if (cacheRead !== undefined) model.cost.cacheRead = cacheRead;
 		const cacheWrite = numberField(patch, "cacheWrite");
 		if (cacheWrite !== undefined) model.cost.cacheWrite = cacheWrite;
+	}
+	if (catalog.timeBased !== undefined) {
+		model.cost = { ...model.cost, timeBased: materializeTimeBasedCost(catalog.timeBased) };
 	}
 	const limitsPatch = objectPayload(catalog.limitsPatch);
 	if (limitsPatch !== undefined) {

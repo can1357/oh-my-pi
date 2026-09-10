@@ -5,6 +5,9 @@
 ### Added
 
 - Added ahead/behind upstream commit counts to `VcsStatusSummary` (`statusSummary`); absent for jj workspaces and branches without an upstream.
+### Fixed
+
+- Fixed Wayland computer-use clicks landing in the wrong place on scaled monitors by mapping captures through the portal's logical monitor geometry ([#11540](https://github.com/can1357/oh-my-pi/issues/11540)).
 
 ## [18.1.15] - 2026-09-08
 

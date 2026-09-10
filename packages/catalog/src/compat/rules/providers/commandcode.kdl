@@ -1,0 +1,578 @@
+// Command Code Provider API deployment contract. Model capabilities and effort
+// ladders follow command-code@1.44.0: the thinking-efforts below reproduce the
+// bundle's 36-id effort registry 1:1 (verified against its effort map), plus
+// the 5 Muse Spark lineage ids whose ladder OMP's classes/meta.kdl carries.
+// Every other served id exposes no effort dial upstream (`modelSupports-
+// ReasoningEffort` is false for them in the CLI), so a missing ladder here
+// is a deliberate absence, not a gap.
+provider "commandcode" {
+	supports-developer-role #false
+	supports-store #false
+	// No effort dial by default: only the exact ids below expose one
+	// upstream (command-code@1.44.0 effort registry + Muse Spark lineage).
+	// Every other served id must omit the effort control on the wire.
+	supports-reasoning-effort #false
+	max-tokens-field "max_tokens"
+	thinking-mode "effort"
+	// Default output cap: the Provider API exposes no per-model maximum and
+	// the CLI requests 64K by default, so 64K (2^16); the two registry caps
+	// below are the only per-model maxOutputTokens in command-code@1.44.0.
+	limits-patch {
+		max-tokens 65536
+	}
+	class "anthropic" {
+		thinking-mode "anthropic-adaptive"
+		supports-eager-tool-input-streaming #false
+		supports-long-cache-retention #false
+	}
+	models "claude-fable-5" "claude-fable-5-1" "claude-opus-4-7" "claude-opus-4-8" \
+		"claude-opus-5" "claude-sonnet-4-6" "claude-sonnet-5" {
+		supports-reasoning-effort #true
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+	}
+	models "deepseek/deepseek-v4-flash" "deepseek/deepseek-v4-flash-vision-exp" \
+		"deepseek/deepseek-v4-pro" "zai-org/GLM-5.2" {
+		supports-reasoning-effort #true
+		thinking-efforts "high" "max"
+	}
+	models "deepseek/deepseek-v4-flash-fast" "moonshotai/Kimi-K3" "z-ai/glm-5.3-flash" \
+		"zai-org/GLM-5.3" {
+		supports-reasoning-effort #true
+		thinking-efforts "low" "high" "max"
+	}
+	models "google/gemini-3.1-flash-lite" "google/gemini-3.5-flash" \
+		"google/gemini-3.5-flash-lite" "google/gemini-3.6-flash" "google/gemini-3.7-flash" \
+		"google/gemini-3.8-flash" "gpt-5.4-mini" "xai/grok-4.5" {
+		supports-reasoning-effort #true
+		thinking-efforts "low" "medium" "high"
+	}
+	models "gpt-5.3-codex" "gpt-5.4" "gpt-5.5" "xai/grok-4.6" {
+		supports-reasoning-effort #true
+		thinking-efforts "low" "medium" "high" "xhigh"
+	}
+	models "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra" {
+		supports-reasoning-effort #true
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+	}
+	models "meta/muse-spark-1.1" "meta/muse-spark-1.2" "meta/muse-spark-1.2-contributor" \
+		"meta/muse-spark-1.3" "meta/muse-spark-1.3-contributor" {
+		supports-reasoning-effort #true
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	models "Qwen/Qwen3.8-27B" "Qwen/Qwen3.8-Flash" "Qwen/Qwen3.8-Max" "Qwen/Qwen3.8-Max-0902" {
+		supports-reasoning-effort #true
+		thinking-efforts "low" "medium" "xhigh"
+	}
+	models "sakana/fugu-ultra" {
+		supports-reasoning-effort #true
+		thinking-efforts "high" "xhigh"
+	}
+	models "tencent/hy4-preview" {
+		supports-reasoning-effort #true
+		thinking-efforts "low" "medium" "high"
+	}
+	models "Qwen/Qwen3.8-27B" {
+		limits-patch {
+			max-tokens 32768
+		}
+	}
+	models "z-ai/glm-5.3-flash" {
+		limits-patch {
+			max-tokens 131072
+		}
+	}
+	// ---------------------------------------------------------------------------
+	// Provider pricing. Every model id served by GET /provider/v1/models is
+	// priced here; discovery defaults each model to zero cost and the mapper
+	// never inherits another provider's rates, so this table is the sole
+	// pricing source. Base rates are Command Code's per-1M-token USD list
+	// prices, cross-checked 1:1 against the rate card bundled in
+	// command-code@1.44.0 (67 rows, zero mismatches) and the live catalog on
+	// 2026-09-09 (68 rows: the bundle plus `inclusionai/ling-3.0-flash-sante:free`).
+	// The page's Sonnet 4.5 / Opus 4.6 / GPT-6 Astra rows are not served by
+	// the Provider API and stay absent. A "—" Cache Write column on the page
+	// means 0. Standing deals (MiniMax M3 50% off, MiMo V2.5 discounts) are
+	// priced at their current effective rates. Free models
+	// (`poolside/laguna-s-2.1-free`, `meituan/LongCat-2.0:free`,
+	// `inclusionai/ling-3.0-flash-sante:free`) keep the zero discovery default.
+	// ---------------------------------------------------------------------------
+	models "claude-sonnet-5" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.2
+			cache-write 2.5
+		}
+	}
+	models "claude-sonnet-4-6" {
+		cost-patch {
+			input 3.0
+			output 15.0
+			cache-read 0.3
+			cache-write 3.75
+		}
+	}
+	// Fable 5.1 cut cache reads to 0.25; Fable 5 stays at 1.0.
+	models "claude-fable-5-1" {
+		cost-patch {
+			input 10.0
+			output 50.0
+			cache-read 0.25
+			cache-write 12.5
+		}
+	}
+	models "claude-fable-5" {
+		cost-patch {
+			input 10.0
+			output 50.0
+			cache-read 1.0
+			cache-write 12.5
+		}
+	}
+	models "claude-opus-5" "claude-opus-4-8" "claude-opus-4-7" {
+		cost-patch {
+			input 5.0
+			output 25.0
+			cache-read 0.5
+			cache-write 6.25
+		}
+	}
+	models "claude-haiku-4-5-20251001" {
+		cost-patch {
+			input 1.0
+			output 5.0
+			cache-read 0.1
+			cache-write 1.25
+		}
+	}
+	models "gpt-5.6-sol" {
+		cost-patch {
+			input 5.0
+			output 30.0
+			cache-read 0.5
+			cache-write 6.25
+		}
+	}
+	models "gpt-5.6-terra" {
+		cost-patch {
+			input 2.0
+			output 12.0
+			cache-read 0.2
+			cache-write 2.5
+		}
+	}
+	models "gpt-5.6-luna" {
+		cost-patch {
+			input 0.2
+			output 1.2
+			cache-read 0.02
+			cache-write 0.25
+		}
+	}
+	models "gpt-5.5" {
+		cost-patch {
+			input 5.0
+			output 30.0
+			cache-read 0.5
+			cache-write 0.0
+		}
+	}
+	models "gpt-5.4" {
+		cost-patch {
+			input 2.5
+			output 15.0
+			cache-read 0.25
+			cache-write 0.0
+		}
+	}
+	models "gpt-5.3-codex" {
+		cost-patch {
+			input 2.0
+			output 8.0
+			cache-read 0.5
+			cache-write 0.0
+		}
+	}
+	models "gpt-5.4-mini" {
+		cost-patch {
+			input 0.75
+			output 4.5
+			cache-read 0.075
+			cache-write 0.0
+		}
+	}
+	// DeepSeek V4 bills time-dependent rates; the page displays the off-peak
+	// rates that apply 17h/day (peak doubles input/output). Off-peak is the
+	// documented display convention; the Usage page stays authoritative.
+	models "deepseek/deepseek-v4-pro" {
+		cost-patch {
+			input 0.66
+			output 1.98
+			cache-read 0.022
+			cache-write 0.0
+		}
+	}
+	models "deepseek/deepseek-v4-flash" "deepseek/deepseek-v4-flash-vision-exp" {
+		cost-patch {
+			input 0.22
+			output 0.66
+			cache-read 0.007
+			cache-write 0.0
+		}
+	}
+	models "deepseek/deepseek-v4-flash-fast" {
+		cost-patch {
+			input 0.28
+			output 0.56
+			cache-read 0.07
+			cache-write 0.0
+		}
+	}
+	models "moonshotai/Kimi-K3" {
+		cost-patch {
+			input 3.0
+			output 15.0
+			cache-read 0.3
+			cache-write 0.0
+		}
+	}
+	models "moonshotai/Kimi-K2.7-Code" {
+		cost-patch {
+			input 0.95
+			output 4.0
+			cache-read 0.19
+			cache-write 0.0
+		}
+	}
+	models "moonshotai/Kimi-K2.7-Code-Highspeed" {
+		cost-patch {
+			input 1.9
+			output 8.0
+			cache-read 0.38
+			cache-write 0.0
+		}
+	}
+	models "moonshotai/Kimi-K2.6" {
+		cost-patch {
+			input 0.95
+			output 4.0
+			cache-read 0.16
+			cache-write 0.0
+		}
+	}
+	models "moonshotai/Kimi-K2.5" {
+		cost-patch {
+			input 0.6
+			output 3.0
+			cache-read 0.1
+			cache-write 0.0
+		}
+	}
+	// Permanent documented list price, matching the zai-host correction in
+	// classes/glm.kdl (stencil.so's launch promotion expired 2026-09-09).
+	models "z-ai/glm-5.3-flash" {
+		cost-patch {
+			input 0.15
+			output 0.5
+			cache-read 0.03
+			cache-write 0.0
+		}
+	}
+	models "zai-org/GLM-5.3" "zai-org/GLM-5.2" "zai-org/GLM-5.1" {
+		cost-patch {
+			input 1.4
+			output 4.4
+			cache-read 0.26
+			cache-write 0.0
+		}
+	}
+	models "zai-org/GLM-5.2-Fast" {
+		cost-patch {
+			input 3.0
+			output 10.25
+			cache-read 0.5
+			cache-write 0.0
+		}
+	}
+	models "zai-org/GLM-5" {
+		cost-patch {
+			input 1.0
+			output 3.2
+			cache-read 0.2
+			cache-write 0.0
+		}
+	}
+	// MiniMax M3 carries a standing 50%-off deal; priced at the effective rate.
+	models "MiniMaxAI/MiniMax-M3" "MiniMaxAI/MiniMax-M2.7" {
+		cost-patch {
+			input 0.3
+			output 1.2
+			cache-read 0.06
+			cache-write 0.0
+		}
+	}
+	models "MiniMaxAI/MiniMax-M2.5" {
+		cost-patch {
+			input 0.3
+			output 1.2
+			cache-read 0.03
+			cache-write 0.0
+		}
+	}
+	// MiMo V2.5 carries standing Xiaomi discounts; priced at the current
+	// unified-context effective rates.
+	models "xiaomi/mimo-v2.5-pro" {
+		cost-patch {
+			input 0.435
+			output 0.87
+			cache-read 0.0036
+			cache-write 0.0
+		}
+	}
+	models "xiaomi/mimo-v2.5" {
+		cost-patch {
+			input 0.14
+			output 0.28
+			cache-read 0.0028
+			cache-write 0.0
+		}
+	}
+	models "Qwen/Qwen3.8-Max-0902" {
+		cost-patch {
+			input 2.0
+			output 6.0
+			cache-read 0.25
+			cache-write 0.0
+		}
+	}
+	models "Qwen/Qwen3.8-Max" {
+		cost-patch {
+			input 2.0
+			output 6.0
+			cache-read 0.25
+			cache-write 2.5
+		}
+	}
+	models "Qwen/Qwen3.8-27B" {
+		cost-patch {
+			input 0.4
+			output 3.0
+			cache-read 0.04
+			cache-write 0.0
+		}
+	}
+	models "Qwen/Qwen3.8-Flash" {
+		cost-patch {
+			input 0.16
+			output 0.47
+			cache-read 0.016
+			cache-write 0.0
+		}
+	}
+	models "Qwen/Qwen3.7-Max" {
+		cost-patch {
+			input 2.5
+			output 7.5
+			cache-read 0.5
+			cache-write 3.13
+		}
+	}
+	models "Qwen/Qwen3.7-Plus" {
+		cost-patch {
+			input 0.4
+			output 1.6
+			cache-read 0.08
+			cache-write 0.5
+		}
+		long-context-cost {
+			input-threshold 256000
+			input 1.2
+			output 4.8
+			cache-read 0.24
+			cache-write 1.5
+		}
+	}
+	// Two upstream tiers (>32K at 0.10/0.40 and >256K at 0.20/0.80); the
+	// catalog carries a single long-context slot, so the highest tier is
+	// encoded from the first crossing — 32K-256K over-reports rather than
+	// under-reporting spend above 256K.
+	models "Qwen/Qwen3.7-Flash" {
+		cost-patch {
+			input 0.03
+			output 0.13
+			cache-read 0.006
+			cache-write 0.038
+		}
+		long-context-cost {
+			input-threshold 32000
+			input 0.2
+			output 0.8
+			cache-read 0.04
+			cache-write 0.25
+		}
+	}
+	models "Qwen/Qwen3.6-Max-Preview" {
+		cost-patch {
+			input 1.3
+			output 7.8
+			cache-read 0.26
+			cache-write 1.63
+		}
+	}
+	models "Qwen/Qwen3.6-Plus" {
+		cost-patch {
+			input 0.5
+			output 3.0
+			cache-read 0.1
+			cache-write 0.0
+		}
+	}
+	models "stepfun/Step-3.7-Flash" {
+		cost-patch {
+			input 0.2
+			output 1.15
+			cache-read 0.04
+			cache-write 0.0
+		}
+	}
+	models "stepfun/Step-3.5-Flash" {
+		cost-patch {
+			input 0.1
+			output 0.3
+			cache-read 0.02
+			cache-write 0.0
+		}
+	}
+	models "tencent/hy4-preview" {
+		cost-patch {
+			input 0.834
+			output 2.501
+			cache-read 0.042
+			cache-write 0.0
+		}
+	}
+	models "tencent/hy3-paid" {
+		cost-patch {
+			input 0.14
+			output 0.58
+			cache-read 0.035
+			cache-write 0.0
+		}
+	}
+	models "google/gemini-3.8-flash" "google/gemini-3.6-flash" {
+		cost-patch {
+			input 1.5
+			output 7.5
+			cache-read 0.15
+			cache-write 0.0
+		}
+	}
+	// Gemini 3.7 Flash is the only Gemini row with a Cache Write column.
+	models "google/gemini-3.7-flash" {
+		cost-patch {
+			input 1.5
+			output 7.5
+			cache-read 0.15
+			cache-write 0.08334
+		}
+	}
+	models "google/gemini-3.5-flash" {
+		cost-patch {
+			input 1.5
+			output 9.0
+			cache-read 0.15
+			cache-write 0.0
+		}
+	}
+	models "google/gemini-3.5-flash-lite" {
+		cost-patch {
+			input 0.3
+			output 2.5
+			cache-read 0.03
+			cache-write 0.0
+		}
+	}
+	models "google/gemini-3.1-flash-lite" {
+		cost-patch {
+			input 0.25
+			output 1.5
+			cache-read 0.03
+			cache-write 0.0
+		}
+	}
+	models "sakana/fugu-ultra" {
+		cost-patch {
+			input 5.0
+			output 30.0
+			cache-read 0.5
+			cache-write 0.0
+		}
+	}
+	models "nvidia/nemotron-3-ultra-550b-a55b" {
+		cost-patch {
+			input 0.6
+			output 2.4
+			cache-read 0.12
+			cache-write 0.0
+		}
+	}
+	models "thinkingmachines/inkling" {
+		cost-patch {
+			input 1.0
+			output 4.05
+			cache-read 0.17
+			cache-write 0.0
+		}
+	}
+	models "thinkingmachines/inkling-small" {
+		cost-patch {
+			input 0.5
+			output 1.2
+			cache-read 0.1
+			cache-write 0.0
+		}
+	}
+	models "meta/muse-spark-1.1" "meta/muse-spark-1.2" "meta/muse-spark-1.3" {
+		cost-patch {
+			input 1.25
+			output 4.25
+			cache-read 0.15
+			cache-write 0.0
+		}
+	}
+	models "meta/muse-spark-1.2-contributor" "meta/muse-spark-1.3-contributor" {
+		cost-patch {
+			input 0.1
+			output 0.2
+			cache-read 0.002
+			cache-write 0.0
+		}
+	}
+	models "xai/grok-4.5" {
+		cost-patch {
+			input 2.0
+			output 6.0
+			cache-read 0.5
+			cache-write 0.0
+		}
+	}
+	// Grok 4.6 bills a whole-request 2x tier above 200K input. Absolute rates
+	// (not the classes/xai.kdl multiplier form, which is scoped to providers
+	// "xai"/"xai-oauth" and never matches here): discovery specs carry zero
+	// base cost, so a multiplier derives nothing.
+	models "xai/grok-4.6" {
+		cost-patch {
+			input 2.0
+			output 6.0
+			cache-read 0.5
+			cache-write 0.0
+		}
+		long-context-cost {
+			input-threshold 200000
+			input 4.0
+			output 12.0
+			cache-read 1.0
+			cache-write 0.0
+		}
+	}
+}

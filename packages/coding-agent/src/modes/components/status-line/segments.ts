@@ -1,9 +1,10 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { getTimeBasedPricingPeriod } from "@oh-my-pi/pi-catalog/models";
 import { SPINNER_ADVANCE_MS, TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
-import { type Theme, type ThemeColor, theme } from "../../../modes/theme/theme";
+import { type SymbolKey, type Theme, type ThemeColor, theme } from "../../../modes/theme/theme";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
 import { fileHyperlink } from "../../../tui/hyperlink";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
@@ -574,14 +575,17 @@ const costSegment: StatusLineSegment = {
 		const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
 		const normalizedPremiumRequests = normalizePremiumRequests(premiumRequests);
 		const state = ctx.session.state;
+		const pricingPeriod = state.model?.cost
+			? getTimeBasedPricingPeriod(state.model.cost, ctx.now?.getTime())
+			: undefined;
 		const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
 
-		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests) {
+		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests && !pricingPeriod) {
 			return { content: "", visible: false };
 		}
 
 		const billingParts: string[] = [];
-		if (cost) {
+		if (cost || pricingPeriod) {
 			billingParts.push(
 				ctx.startupPlaceholder
 					? formatSpendPlaceholder(usingSubscription, theme)
@@ -592,6 +596,7 @@ const costSegment: StatusLineSegment = {
 				theme.getSymbolPreset() === "nerd" && theme.icon.subscription ? theme.icon.subscription : "(sub)",
 			);
 		}
+		if (pricingPeriod) billingParts.push(pricingPeriod === "peak" ? "↑" : "↓");
 		if (normalizedPremiumRequests) {
 			billingParts.push(`★ ${statusValue(ctx, formatNumber(normalizedPremiumRequests))}`);
 		}
@@ -787,6 +792,53 @@ const collabSegment: StatusLineSegment = {
 	},
 };
 
+/**
+ * Vim modal state, in the shape Vim itself uses: the mode, the half-typed command echoed beside it
+ * (`showcmd`), and the Visual selection size. Hidden entirely when `tui.vimMode` is off, so it
+ * costs nothing for everyone else. `tui.vimModeDisplay` picks the mode's presentation.
+ */
+const VIM_MODE_LABELS: Record<NonNullable<SegmentContext["vim"]>["mode"], string> = {
+	insert: "INSERT",
+	normal: "NORMAL",
+	visual: "VISUAL",
+	"visual-line": "V-LINE",
+};
+
+/**
+ * The `icon` display resolves through the theme's symbol map, so each mode picks up the active
+ * symbol preset (nerd / unicode / ascii) and honours per-theme `symbols` overrides — same mechanism
+ * as every other status-line icon. Glyph choices live in `SYMBOL_PRESETS`.
+ */
+const VIM_MODE_ICON_KEYS: Record<NonNullable<SegmentContext["vim"]>["mode"], SymbolKey> = {
+	insert: "icon.vimInsert",
+	normal: "icon.vimNormal",
+	visual: "icon.vimVisual",
+	"visual-line": "icon.vimVisualLine",
+};
+
+const VIM_MODE_COLORS: Record<NonNullable<SegmentContext["vim"]>["mode"], ThemeColor> = {
+	insert: "success",
+	normal: "accent",
+	visual: "warning",
+	"visual-line": "warning",
+};
+
+const vimSegment: StatusLineSegment = {
+	id: "vim",
+	render(ctx) {
+		const vim = ctx.vim;
+		if (!vim || vim.display === "none") return { content: "", visible: false };
+		let label = vim.display === "icon" ? theme.symbol(VIM_MODE_ICON_KEYS[vim.mode]) : VIM_MODE_LABELS[vim.mode];
+		// The selection height rides along in both presentations — it is the one part of the
+		// indicator with no other on-screen source.
+		if (vim.selectedLines > 1) label += ` ${vim.selectedLines}L`;
+		const content = theme.fg(VIM_MODE_COLORS[vim.mode], label);
+		// Pending echoes to the right of the mode, dimmed, exactly like Vim's showcmd.
+		const pending = vim.pending ? theme.fg("muted", ` ${vim.pending}`) : "";
+		return { content: `${content}${pending}`, visible: true };
+	},
+};
+
 function pickUsageColor(percent: number): "muted" | "warning" | "error" {
 	if (percent >= 80) return "error";
 	if (percent >= 50) return "warning";
@@ -908,6 +960,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	session_name: sessionNameSegment,
 	usage: usageSegment,
 	collab: collabSegment,
+	vim: vimSegment,
 };
 
 export function renderSegment(id: StatusLineSegmentId, ctx: SegmentContext): RenderedSegment {

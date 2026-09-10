@@ -5,6 +5,8 @@ import {
 	getAntigravityCounterKeyForModel,
 	scopeAntigravityLimitsForModel,
 } from "@oh-my-pi/pi-ai/usage/google-antigravity";
+import { getNextTimeBasedPricingTransition } from "@oh-my-pi/pi-catalog/models";
+import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
 import type { VcsRepo, VcsStatusSummary } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
@@ -407,6 +409,10 @@ export class StatusLineComponent implements Component {
 	#brandWorking = false;
 	/** Frame timer driving repaints while the brand fade is unsettled. */
 	#brandFadeTimer: NodeJS.Timeout | undefined;
+	/** One wall-clock wakeup for the active model's next tariff change, including while idle. */
+	#pricingTimer: NodeJS.Timeout | undefined;
+	#pricingTimerCost: ModelCost | undefined;
+	#pricingTransition: number | undefined;
 	#hookStatuses: Map<string, string> = new Map();
 	#sortedHookStatuses: readonly string[] = [];
 	#subagentCount: number = 0;
@@ -434,6 +440,7 @@ export class StatusLineComponent implements Component {
 	#loopModeStatus: SegmentContext["loopMode"] = null;
 	#goalModeStatus: { enabled: boolean; paused: boolean } | null = null;
 	#vibeModeStatus: { enabled: boolean } | null = null;
+	#vimStatus: SegmentContext["vim"] = null;
 	/**
 	 * Injected aggregator that returns the aggregate tok/s of this session's
 	 * live vibe worker sessions, or null when no workers are streaming. Kept as
@@ -594,6 +601,7 @@ export class StatusLineComponent implements Component {
 		this.#settings = settings;
 		this.#effectiveSettings = undefined;
 		if (this.#onBranchChange) this.#setupGitWatcher();
+		this.#syncPricingTimer();
 	}
 
 	getEffectiveSettingsForTest(): EffectiveStatusLineSettings {
@@ -724,6 +732,11 @@ export class StatusLineComponent implements Component {
 		this.#vibeModeStatus = status ?? null;
 	}
 
+	/** Mirror of the editor's modal state; `undefined` clears it (Vim mode off). */
+	setVimStatus(status: NonNullable<SegmentContext["vim"]> | undefined): void {
+		this.#vimStatus = status ?? null;
+	}
+
 	/**
 	 * Inject the aggregator that returns the aggregate tok/s of this session's
 	 * live vibe worker sessions (null when no workers are streaming). Wired by
@@ -759,6 +772,7 @@ export class StatusLineComponent implements Component {
 	watchBranch(onBranchChange: () => void): void {
 		this.#onBranchChange = onBranchChange;
 		this.#setupGitWatcher();
+		this.#syncPricingTimer();
 	}
 
 	#setupGitWatcher(): void {
@@ -808,6 +822,7 @@ export class StatusLineComponent implements Component {
 		this.#onBranchChange = null;
 		this.#stopSpeculationBlink();
 		this.#stopBrandFadeTimer();
+		this.#stopPricingTimer();
 		this.#clearUsageStartTimer();
 		this.#onCodexResetFireworks = undefined;
 		this.#codexResetSnapshots.clear();
@@ -909,6 +924,46 @@ export class StatusLineComponent implements Component {
 		this.#brandFadeTimer = undefined;
 	}
 
+	#stopPricingTimer(): void {
+		clearTimeout(this.#pricingTimer);
+		this.#pricingTimer = undefined;
+		this.#pricingTimerCost = undefined;
+		this.#pricingTransition = undefined;
+	}
+
+	#syncPricingTimer(): void {
+		const cost = this.session.state.model?.cost;
+		const effectiveSettings = this.#resolveSettings();
+		const costVisible =
+			(effectiveSettings.leftSegments.includes("cost") &&
+				(this.#standalone !== false ||
+					this.#topAttachment === "top-border" ||
+					this.#topAttachment === "top-band")) ||
+			(effectiveSettings.rightSegments.includes("cost") &&
+				(this.#standalone === "full" || this.#topAttachment !== "none"));
+		if (this.#disposed || !this.#onBranchChange || !cost?.timeBased || !costVisible) {
+			this.#stopPricingTimer();
+			return;
+		}
+		const now = Date.now();
+		if (this.#pricingTimerCost === cost && this.#pricingTransition !== undefined && this.#pricingTransition > now) {
+			return;
+		}
+		this.#stopPricingTimer();
+		const transition = getNextTimeBasedPricingTransition(cost, now);
+		if (transition === undefined) return;
+		this.#pricingTimerCost = cost;
+		this.#pricingTransition = transition;
+		const timer = setTimeout(() => {
+			if (this.#disposed || this.#pricingTimer !== timer) return;
+			this.#stopPricingTimer();
+			this.invalidate();
+			this.#onBranchChange?.();
+		}, transition - now);
+		this.#pricingTimer = timer;
+		timer.unref();
+	}
+
 	#clearUsageStartTimer(): void {
 		if (!this.#usageStartTimer) return;
 		clearTimeout(this.#usageStartTimer);
@@ -917,6 +972,7 @@ export class StatusLineComponent implements Component {
 
 	invalidate(): void {
 		this.#renderRevision++;
+		this.#syncPricingTimer();
 		// Generic repaint invalidation (theme change, message event, model
 		// switch, …). Must NOT abort or restart a live reftable HEAD/PR resolve:
 		// the render path self-invalidates via cwd/context cache-miss checks, so
@@ -1861,6 +1917,7 @@ export class StatusLineComponent implements Component {
 					: null,
 			goalMode: this.#goalModeStatus,
 			vibeMode: this.#vibeModeStatus,
+			vim: this.#vimStatus,
 			collab: this.#collabStatus,
 			usageStats,
 			contextPercent,
@@ -1952,6 +2009,7 @@ export class StatusLineComponent implements Component {
 		options?: { readonly placeholders?: boolean },
 	): string {
 		const effectiveSettings = this.#resolveSettings();
+		this.#syncPricingTimer();
 		const placeholders = options?.placeholders === true;
 		const plain = layout !== "box" && layout !== "band";
 		const includePath =
@@ -2407,6 +2465,7 @@ export class StatusLineComponent implements Component {
 		this.#standalone = style.bottomBar === "none" ? false : style.bottomBar === "left" ? "left-only" : "full";
 		this.#topAttachment = style.statusAttachment;
 		this.#standaloneGap = style.bottomBarGap;
+		this.#syncPricingTimer();
 	}
 
 	/** While true, the standalone bar yields its row to the editor's autocomplete menu. */

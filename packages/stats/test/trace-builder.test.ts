@@ -425,6 +425,37 @@ describe("buildSessionTrace", () => {
 		expect(summary.idleMs).toBe(10_000);
 	});
 
+	it("marks dateless scheduled usage as unpriced instead of free", async () => {
+		const projectDir = path.join(getSessionsDir(), PROJECT);
+		await fs.mkdir(projectDir, { recursive: true });
+		const file = path.join(projectDir, "1700000000001_unpriced.jsonl");
+		const entries: unknown[] = [
+			{ type: "title", v: 1, title: "Unpriced" },
+			{ type: "session", version: 3, id: "s", timestamp: iso(T), cwd: "/tmp/proj" },
+			{
+				type: "message",
+				id: "a1",
+				parentId: null,
+				message: {
+					role: "assistant",
+					model: "deepseek-v4-flash",
+					provider: "deepseek",
+					api: "openai-completions",
+					timestamp: 0,
+					stopReason: "stop",
+					content: [],
+					usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100 },
+				},
+			},
+		];
+		await Bun.write(file, entries.map(entry => JSON.stringify(entry)).join("\n"));
+		const { summary } = await buildSessionTrace(file);
+		expect(summary.requests).toBe(1);
+		expect(summary.totalTokens).toBe(100);
+		expect(summary.costTotal).toBe(0);
+		expect(summary.unpricedRequests).toBe(1);
+	});
+
 	it("rejects paths outside the sessions root", async () => {
 		await writeFixture();
 		expect(buildSessionTrace("/etc/passwd.jsonl")).rejects.toThrow(TracePathError);
