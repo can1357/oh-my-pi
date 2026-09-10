@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use crate::{error::EditError, files::FileSource, store::EditStore, stream_json::ArgSnapshot};
 
 /// The edit variants the tool exposes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::IntoStaticStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumString, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case", const_into_str)]
 pub enum EditMode {
 	/// Replace.
@@ -35,14 +35,7 @@ impl EditMode {
 
 	/// Parse a wire/settings name.
 	pub fn parse(name: &str) -> Option<Self> {
-		Some(match name {
-			"replace" => Self::Replace,
-			"patch" => Self::Patch,
-			"apply_patch" => Self::ApplyPatch,
-			"hashline" => Self::Hashline,
-			"sloppy" => Self::Sloppy,
-			_ => return None,
-		})
+		name.parse().ok()
 	}
 }
 
