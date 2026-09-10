@@ -3385,6 +3385,7 @@ fn push_relative_name(relative: &mut String, name: &str) {
 	relative.push_str(name);
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn mtime_millis(seconds: i64, nanos: i64) -> Option<f64> {
 	if seconds < 0 {
 		return None;

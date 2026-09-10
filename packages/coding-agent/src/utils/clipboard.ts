@@ -91,7 +91,7 @@ export async function readMacFileUrlsFromClipboard(): Promise<string[]> {
  *
  * Emits OSC 52 first when running in a real terminal (works over SSH/mosh),
  * then attempts native clipboard copy as best-effort for local sessions.
- * On Termux, tries `termux-clipboard-set` before native.
+ * On Termux, only the bounded asynchronous `termux-clipboard-set` path runs.
  *
  * @param text - UTF-8 text to place on the clipboard.
  */
@@ -127,12 +127,8 @@ export async function copyToClipboard(text: string): Promise<void> {
 	// Also try native tools (best effort for local sessions)
 	try {
 		if (process.env.TERMUX_VERSION) {
-			try {
-				await spawnCapture(["termux-clipboard-set"], { input: text, timeoutMs: 5000 });
-				return;
-			} catch {
-				// Fall through to native
-			}
+			await spawnCapture(["termux-clipboard-set"], { input: text, timeoutMs: 5000 });
+			return;
 		}
 
 		await nativeCopyToClipboard(text);

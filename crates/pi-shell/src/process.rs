@@ -16,7 +16,7 @@ pub use pi_builtins::ProcessStatus;
 
 use crate::cancel::CancelToken;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod platform {
 	use std::{
 		collections::HashSet,
@@ -29,12 +29,15 @@ mod platform {
 
 	use super::ProcessStatus;
 
-	/// Stable Linux process reference backed by a pidfd.
+	/// Stable Linux/Android process reference. Linux requires a pidfd; Android
+	/// uses one when available and falls back to `/proc` start-time identity.
+	/// `start_time` is recorded only for the fallback and is never paired with
+	/// a pidfd.
 	#[derive(Clone)]
 	pub struct Process {
 		pid:        i32,
-		pidfd:      Arc<OwnedFd>,
-		start_time: u64,
+		pidfd:      Option<Arc<OwnedFd>>,
+		start_time: Option<u64>,
 	}
 
 	impl Process {
@@ -42,8 +45,14 @@ mod platform {
 			if pid <= 0 {
 				return None;
 			}
-			let pidfd = open_pidfd(pid)?;
-			let start_time = read_start_time(pid)?;
+			let pidfd = open_pidfd(pid);
+			#[cfg(target_os = "linux")]
+			let pidfd = Some(pidfd?);
+			let start_time = if pidfd.is_some() {
+				None
+			} else {
+				Some(read_live_start_time(pid)?)
+			};
 			Some(Self { pid, pidfd, start_time })
 		}
 
@@ -155,21 +164,31 @@ mod platform {
 		}
 
 		pub fn kill(&self, signal: i32) -> bool {
-			// SAFETY: `self.pidfd` is an owned file descriptor returned by a successful
-			// `pidfd_open` call and remains open for the duration of this syscall. A null
-			// `siginfo_t` pointer is explicitly accepted by `pidfd_send_signal` and makes
-			// the kernel synthesize the same signal metadata as `kill(2)`. Flags are zero,
-			// which is the documented default behavior.
-			let ret = unsafe {
-				libc::syscall(
-					libc::SYS_pidfd_send_signal,
-					self.pidfd.as_raw_fd(),
-					signal,
-					ptr::null::<libc::siginfo_t>(),
-					0,
-				)
-			};
-			ret == 0
+			if let Some(pidfd) = &self.pidfd {
+				// SAFETY: `pidfd` is an owned file descriptor returned by a successful
+				// `pidfd_open` call and remains open for the duration of this syscall. A
+				// null `siginfo_t` pointer is explicitly accepted by
+				// `pidfd_send_signal`. Flags are zero, the documented default behavior.
+				let ret = unsafe {
+					libc::syscall(
+						libc::SYS_pidfd_send_signal,
+						pidfd.as_raw_fd(),
+						signal,
+						ptr::null::<libc::siginfo_t>(),
+						0,
+					)
+				};
+				return ret == 0;
+			}
+
+			// Android kernels without pidfd support use the recorded `/proc` start time.
+			// `live_identity` revalidates it immediately before the raw signal.
+			if !self.live_identity() {
+				return false;
+			}
+			// SAFETY: `kill` takes integer identifiers by value and does not access
+			// caller-owned memory.
+			unsafe { libc::kill(self.pid, signal) == 0 }
 		}
 
 		pub fn group_id(&self) -> Option<i32> {
@@ -177,17 +196,28 @@ mod platform {
 				return None;
 			}
 
-			// SAFETY: `self.pid` names the process currently referenced by `self.pidfd`
-			// unless it exits concurrently. If it exits, `getpgid` reports failure rather
-			// than dereferencing caller-owned memory.
+			// SAFETY: `status` just confirmed that `self.pid` still has the recorded
+			// identity. If it exits concurrently, `getpgid` reports failure rather than
+			// dereferencing caller-owned memory.
 			let pgid = unsafe { libc::getpgid(self.pid) };
 			if pgid > 0 { Some(pgid) } else { None }
 		}
 
 		pub fn status(&self) -> ProcessStatus {
+			let Some(pidfd) = &self.pidfd else {
+				let Some(start_time) = self.start_time else {
+					return ProcessStatus::Exited;
+				};
+				return if read_live_start_time(self.pid) == Some(start_time) {
+					ProcessStatus::Running
+				} else {
+					ProcessStatus::Exited
+				};
+			};
+
 			loop {
 				let mut pollfd =
-					libc::pollfd { fd: self.pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+					libc::pollfd { fd: pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
 				// SAFETY: `pollfd` points to one initialized `pollfd` element, and the pidfd
 				// remains open for the duration of the call. Timeout zero makes this a
 				// non-blocking readiness probe.
@@ -235,7 +265,6 @@ mod platform {
 
 		fn live_identity(&self) -> bool {
 			self.status() == ProcessStatus::Running
-				&& read_start_time(self.pid) == Some(self.start_time)
 		}
 	}
 
@@ -257,15 +286,18 @@ mod platform {
 		})
 	}
 
-	fn read_start_time(pid: i32) -> Option<u64> {
+	fn read_live_start_time(pid: i32) -> Option<u64> {
 		// `/proc/[pid]/stat` field 22 is the process start time in clock ticks since
 		// boot. The comm field (between parens) may itself contain spaces and parens,
 		// so locate the *last* `)` and split the trailing whitespace-separated fields.
 		let stat_path = format!("/proc/{pid}/stat");
 		let content = fs::read_to_string(stat_path).ok()?;
 		let last_paren = content.rfind(')')?;
-		let rest = &content[last_paren + 1..];
-		rest.split_whitespace().nth(19)?.parse().ok()
+		let mut fields = content[last_paren + 1..].split_whitespace();
+		if fields.next()? == "Z" {
+			return None;
+		}
+		fields.nth(18)?.parse().ok()
 	}
 
 	fn open_pidfd(pid: i32) -> Option<Arc<OwnedFd>> {

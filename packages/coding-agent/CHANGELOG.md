@@ -98,6 +98,10 @@
 - Fixed frame skips while streaming long markdown Write previews ([#10955](https://github.com/can1357/oh-my-pi/issues/10955)).
 
 ## [18.1.11] - 2026-09-05
+### Fixed
+
+- Fixed failed Termux clipboard copies falling through to a synchronous native helper that could freeze the TUI.
+- Android/Termux builds now produce a runnable bundled launcher instead of a Bun-compiled executable that crashes on startup.
 
 ### Added
 
