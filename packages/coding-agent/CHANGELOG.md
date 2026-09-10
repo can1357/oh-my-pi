@@ -5,6 +5,7 @@
 ### Fixed
 
 - Repeated soft compaction now includes messages retained by the previous pass instead of silently dropping them from model context.
+- Advisors that repeatedly emit unsafe tool calls now pause their optional review until reset or their model/tool capability basis changes.
 
 ## [18.1.16] - 2026-09-09
 
