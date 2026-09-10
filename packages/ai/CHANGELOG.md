@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.16] - 2026-09-09
+
 ### Fixed
 
 - Model-specific OAuth grants now constrain account selection, including pinned sessions, fallback attempts, and credential rotation.
