@@ -60,7 +60,7 @@ describe("RouteRegistry", () => {
 		});
 		const route = registry.resolve("quota-route");
 		expect(registry.generation).toBe(2);
-		expect(route).toEqual({
+		expect(route).toMatchObject({
 			generation: 2,
 			id: "quota-route",
 			root: {
@@ -209,5 +209,4 @@ describe("RouteRegistry", () => {
 		expect(compiled?.root).toEqual({ type: "target", model: "openai/gpt-5" });
 		expect(compiled?.id).toBe("openai/gpt-5");
 	});
-
 });

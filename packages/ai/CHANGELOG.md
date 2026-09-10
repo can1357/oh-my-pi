@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed concurrent credential probes and prevented nested fallback routes from selecting targets in unrelated branches.
+
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed

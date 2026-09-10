@@ -20,7 +20,7 @@
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { extractHttpStatusFromError, extractRetryHint, logger } from "@oh-my-pi/pi-utils";
+import { extractHttpStatusFromError, extractRetryHint, isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "../auth-retry";
 import type { AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
@@ -632,13 +632,28 @@ function targetRejectsOpenAIImageFileReferences(
 		model.api === "azure-openai-responses" ||
 		model.api === "openai-codex-responses";
 	if (supports) return false;
-	return messages.some(
-		message =>
+	return messages.some(message => {
+		if (
 			message.role === "toolResult" &&
 			message.content.some(
 				block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
-			),
-	);
+			)
+		)
+			return true;
+		const payload = "providerPayload" in message ? message.providerPayload : undefined;
+		if (payload?.type !== "openaiResponsesHistory") return false;
+		return payload.items.some(
+			item =>
+				Array.isArray(item.content) &&
+				item.content.some(
+					(part: unknown) =>
+						isRecord(part) &&
+						(part.type === "input_image" || part.type === "input_file") &&
+						typeof part.file_id === "string" &&
+						part.file_id.length > 0,
+				),
+		);
+	});
 }
 
 async function handleFormatEndpoint(
@@ -710,30 +725,6 @@ async function handleFormatEndpoint(
 		parsed.options.headers = { ...captured, ...parsed.options.headers };
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
-
-
-
-	const supportsOpenAIImageFileReferences =
-		model.api === "openai-responses" ||
-		model.api === "azure-openai-responses" ||
-		model.api === "openai-codex-responses";
-	if (
-		route.label === "openai-responses" &&
-		!supportsOpenAIImageFileReferences &&
-		parsed.context.messages.some(
-			message =>
-				message.role === "toolResult" &&
-				message.content.some(
-					block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
-				),
-		)
-	) {
-		return route.module.formatError(
-			400,
-			"invalid_request_error",
-			"OpenAI image file IDs in tool outputs require a Responses-compatible upstream model",
-		);
-	}
 
 	// Sticky credential id: honour the client's `prompt_cache_key` when
 	// supplied (so external session ids align), otherwise derive from

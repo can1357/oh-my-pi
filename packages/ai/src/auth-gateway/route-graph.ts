@@ -25,12 +25,15 @@ export interface CompiledRoute {
 	targets: readonly string[];
 	/** Next unused target ids for this disposition; empty if none. */
 	fallbacks: Readonly<Partial<Record<GatewayErrorDisposition, readonly string[]>>>;
+	fallbackByTarget?: Readonly<Record<string, Readonly<Partial<Record<GatewayErrorDisposition, readonly string[]>>>>>;
 }
 
 type ResolveModel = (modelId: string) => Model<Api> | undefined;
 
 type NodeCompile = {
 	targets: string[];
+	entries: string[];
+	byTarget: Map<string, Partial<Record<GatewayErrorDisposition, string[]>>>;
 	fallbacks: Partial<Record<GatewayErrorDisposition, string[]>>;
 };
 
@@ -61,6 +64,9 @@ export class RouteRegistry {
 			root: copyNode(definition.root),
 			targets: Object.freeze([...compiled.targets]),
 			fallbacks: freezeFallbacks(compiled.fallbacks),
+			fallbackByTarget: Object.freeze(
+				Object.fromEntries([...compiled.byTarget].map(([id, edges]) => [id, freezeFallbacks(edges)])),
+			),
 		});
 	}
 
@@ -90,7 +96,7 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 		if (seenOnPath.has(node.model)) {
 			throw new AIError.ValidationError(`Route cycle: model "${node.model}" repeats on one path`);
 		}
-		return { targets: [node.model], fallbacks: {} };
+		return { targets: [node.model], entries: [node.model], byTarget: new Map([[node.model, {}]]), fallbacks: {} };
 	}
 	if (node.children.length === 0) {
 		throw new AIError.ValidationError("Fallback node has empty children");
@@ -99,6 +105,8 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 	const targets: string[] = [];
 	const fallbacks: Partial<Record<GatewayErrorDisposition, string[]>> = {};
 	const afterPrimary: string[] = [];
+	const parts: NodeCompile[] = [];
+	const byTarget: NodeCompile["byTarget"] = new Map();
 	const sequential = new Set(seenOnPath);
 	let primary = true;
 	for (const child of node.children) {
@@ -106,6 +114,8 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 		// inherit sequential sibling targets — those are other leaves.
 		const childSeen = new Set(child.type === "target" ? sequential : seenOnPath);
 		const part = compileNode(child, childSeen);
+		parts.push(part);
+		for (const [id, edges] of part.byTarget) if (!byTarget.has(id)) byTarget.set(id, { ...edges });
 		targets.push(...part.targets);
 		if (!primary) afterPrimary.push(...part.targets);
 		mergeFallbacks(fallbacks, part.fallbacks);
@@ -117,7 +127,21 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 		const existing = fallbacks[disposition];
 		fallbacks[disposition] = existing ? [...existing, ...afterPrimary] : [...afterPrimary];
 	}
-	return { targets, fallbacks };
+	for (let index = 0; index < parts.length; index++) {
+		const nextEntries = parts.slice(index + 1).flatMap(part => part.entries);
+		for (const from of parts[index]!.targets) {
+			const edges = byTarget.get(from)!;
+			for (const disposition of node.on)
+				edges[disposition] = [...new Set([...(edges[disposition] ?? []), ...nextEntries])].filter(
+					id => id !== from,
+				);
+		}
+	}
+	for (const disposition of Object.keys(fallbacks) as GatewayErrorDisposition[]) {
+		const included = new Set(fallbacks[disposition]);
+		fallbacks[disposition] = [...new Set(targets.filter(id => included.has(id)))];
+	}
+	return { targets, entries: parts[0]!.entries, byTarget, fallbacks };
 }
 
 function copyNode(node: RouteNode): RouteNode {
