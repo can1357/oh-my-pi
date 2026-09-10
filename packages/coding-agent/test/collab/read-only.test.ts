@@ -206,7 +206,7 @@ afterAll(async () => {
 	await host.stop("test done");
 });
 
-describe("collab frame fields a guest can lie about", () => {
+describe("collab frames a guest can send that the host must still answer", () => {
 	it("treats a write token that is not a string as one that does not match", async () => {
 		// `Buffer.from({}, "base64url")` throws ERR_INVALID_ARG_TYPE, and the frame
 		// handler's catch would swallow it: no welcome, no error, nothing the guest
@@ -282,6 +282,37 @@ describe("collab frame fields a guest can lie about", () => {
 		expect(harness.prompts).toHaveLength(1);
 		expect(harness.prompts[0]?.from).toBe("bad-images");
 		expect(harness.prompts[0]?.content).toBe("still a prompt");
+	});
+
+	it("answers an agent command it does not recognize", async () => {
+		const guest = await joinAsGuest(host.link, "bad-cmd");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// The switch had no default, so a `cmd` matching none of the three fell out
+		// of it and the handler returned: nothing run, nothing sent, and nothing the
+		// guest can tell apart from a frame the send queue refused.
+		guest.socket.send({ t: "agent-cmd", cmd: 42, agentId: "nope" } as unknown as CollabFrame);
+		const reply = await guest.nextFrame();
+		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+		expect(reply.message).toContain("unknown agent command");
+	});
+
+	it("answers a kill for an agent it does not have", async () => {
+		const guest = await joinAsGuest(host.link, "kill-nobody");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// `chat` and `revive` both answer an unknown id, because `ensureLive` rejects
+		// and `fail` replies. `kill` looked the id up itself and returned on a miss,
+		// which is not a rejection, so nothing answered. A writable guest is required
+		// to reach this at all — the read-only suite's refusal happens first.
+		guest.socket.send({ t: "agent-cmd", cmd: "kill", agentId: "no-such-agent" } as unknown as CollabFrame);
+		const reply = await guest.nextFrame();
+		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+		expect(reply.message).toContain("no-such-agent");
 	});
 
 	it("answers an agent chat whose message is not a string instead of dropping it", async () => {

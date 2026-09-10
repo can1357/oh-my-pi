@@ -626,10 +626,17 @@ export class CollabHost {
 
 	/**
 	 * `images` is `unknown` for the reason given on {@link #verifyWriteToken}: the
-	 * declared type is the sender's claim. `text` stays typed because it reaches no
-	 * operation here that a non-string can throw out of — it is only placed into the
-	 * content — where `images` was spread, which a truthy non-iterable does throw
-	 * out of.
+	 * declared type is the sender's claim, and this one was spread, which a truthy
+	 * non-iterable throws out of.
+	 *
+	 * `text` stays typed because nothing here throws on it, which is not the same as
+	 * it being checked. Where a non-string actually goes: with no usable images it
+	 * becomes the content whole, and `promptCustomMessage` reads that content in its
+	 * first statement and rejects — before any session insertion — so the guest gets
+	 * the `prompt failed` reply the catch below sends. With images it is placed in a
+	 * `TextContent` instead, where that same statement stringifies it through `join`
+	 * and it is stored as sent. Neither loses the frame; the second trusts the value
+	 * exactly as much as the array's own elements are trusted, which is not at all.
 	 */
 	#handlePrompt(text: string, images: unknown, fromPeer: number): void {
 		const peer = this.#peers.get(fromPeer);
@@ -818,13 +825,13 @@ export class CollabHost {
 	}
 
 	/**
-	 * `text` is `unknown` for the reason given on {@link #verifyWriteToken}. `cmd`
-	 * and `agentId` need no narrowing and are left typed: `cmd` only ever reaches a
-	 * `switch`, which matches nothing and falls through for any other value, and
-	 * `agentId` only ever reaches a `Map` lookup and a template — total for anything
-	 * JSON can carry, and an id that matches no agent is already an answered case.
+	 * `cmd` and `text` are `unknown` for the reason given on {@link #verifyWriteToken}.
+	 * `agentId` stays typed: it only reaches a `Map` lookup and a template, both total
+	 * for anything JSON can carry. Neither that nor the `switch` throws — the hazard
+	 * here is the opposite one, a value that matches nothing and is answered by
+	 * nothing, which a guest cannot tell apart from a frame the queue refused.
 	 */
-	#handleAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text: unknown, fromPeer: number): void {
+	#handleAgentCmd(cmd: unknown, agentId: string, text: unknown, fromPeer: number): void {
 		if (!this.#peers.get(fromPeer)?.canWrite) {
 			this.#rejectReadOnly("agent control", fromPeer);
 			return;
@@ -864,7 +871,10 @@ export class CollabHost {
 			case "kill": {
 				const kill = async () => {
 					const ref = AgentRegistry.global().get(agentId);
-					if (!ref) return;
+					// Throw, not return: `fail` runs off the rejection below, so returning
+					// left an unknown id with no reply at all — alone among the three,
+					// since `chat` and `revive` both get one out of `ensureLive`.
+					if (!ref) throw new Error(`unknown agent "${agentId}"`);
 					if (ref.status === "running" && ref.session) {
 						await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 					}
@@ -875,6 +885,14 @@ export class CollabHost {
 			}
 			case "revive":
 				AgentLifecycleManager.global().ensureLive(agentId).catch(fail);
+				break;
+			default:
+				// Without this a `cmd` matching no case fell out of the switch and
+				// returned: nothing run, nothing said. Answered like a command this host
+				// knows but cannot carry out. The value is not echoed back — the guest
+				// sent it, and it is unvalidated enough that repeating it is the sender
+				// choosing what the host emits.
+				this.#socket?.send({ t: "error", message: `agent ${agentId}: unknown agent command` }, fromPeer);
 				break;
 		}
 	}
