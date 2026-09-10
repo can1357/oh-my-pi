@@ -451,6 +451,19 @@ export class SessionPersistenceIndeterminateError extends AggregateError {
 }
 
 /**
+ * Thrown by {@link SessionManager.forkFrom} when the fork source disappears
+ * between the caller's existence check and the load. The CLI maps this to a
+ * clean session-resolution failure at its own boundary (this module must not
+ * import `main.ts`, where `SessionResolutionError` lives).
+ */
+export class ForkSourceNotFoundError extends Error {
+	constructor(sourcePath: string) {
+		super(`Session "${sourcePath}" not found.`);
+		this.name = "ForkSourceNotFoundError";
+	}
+}
+
+/**
  * Stores and navigates an append-only conversation journal.
  *
  * A session is a JSONL file: one header line followed by entries. Entries form a
@@ -2877,7 +2890,7 @@ export class SessionManager {
 				await loadEntriesFromFile(sourcePath, storage, { throwIfMissing: true }),
 			) as FileEntry[];
 		} catch (err) {
-			if (isEnoent(err)) throw new Error(`Session "${sourcePath}" not found.`);
+			if (isEnoent(err)) throw new ForkSourceNotFoundError(sourcePath);
 			throw err;
 		}
 		migrateToCurrentVersion(sourceEntries);

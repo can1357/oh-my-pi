@@ -98,7 +98,7 @@ import {
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
-import { SessionManager } from "./session/session-manager";
+import { ForkSourceNotFoundError, SessionManager } from "./session/session-manager";
 import { FileSessionStorage } from "./session/session-storage";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
@@ -951,6 +951,9 @@ export function normalizeContinueSessionArgs(parsed: Args, rawArgs?: readonly st
 	parsed.messages.splice(messageIndex, 1);
 }
 
+const FORK_NOT_FOUND_HINT =
+	"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.";
+
 /** Resolves CLI session flags into an existing, forked, in-memory, or cancelled session manager. */
 export async function createSessionManager(
 	parsed: Args,
@@ -965,21 +968,29 @@ export async function createSessionManager(
 		const forkSource = parsed.fork;
 		if (forkSource.includes("/") || forkSource.includes("\\") || forkSource.endsWith(".jsonl")) {
 			if (!(await new FileSessionStorage().exists(forkSource))) {
-				throw new SessionResolutionError(
-					`Session "${forkSource}" not found.`,
-					"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.",
-				);
+				throw new SessionResolutionError(`Session "${forkSource}" not found.`, FORK_NOT_FOUND_HINT);
 			}
-			return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir);
+			try {
+				return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir);
+			} catch (err) {
+				if (err instanceof ForkSourceNotFoundError) {
+					throw new SessionResolutionError(err.message, FORK_NOT_FOUND_HINT);
+				}
+				throw err;
+			}
 		}
 		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir);
 		if (!match) {
-			throw new SessionResolutionError(
-				`Session "${forkSource}" not found.`,
-				"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.",
-			);
+			throw new SessionResolutionError(`Session "${forkSource}" not found.`, FORK_NOT_FOUND_HINT);
 		}
-		return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
+		try {
+			return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
+		} catch (err) {
+			if (err instanceof ForkSourceNotFoundError) {
+				throw new SessionResolutionError(err.message, FORK_NOT_FOUND_HINT);
+			}
+			throw err;
+		}
 	}
 
 	if (parsed.noSession) {

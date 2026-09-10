@@ -13,7 +13,8 @@ import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSessionManager, SessionResolutionError, writeStartupNotice } from "@oh-my-pi/pi-coding-agent/main";
 import * as sessionListingModule from "@oh-my-pi/pi-coding-agent/session/session-listing";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { ForkSourceNotFoundError, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 function buildResumeArgs(resume: string, sessionDir?: string): Args {
 	return {
@@ -225,8 +226,31 @@ describe("createSessionManager — missing session (#2084)", () => {
 			await expect(SessionManager.forkFrom(missingPath, cwd, sessionDir)).rejects.toThrow(
 				`Session "${missingPath}" not found.`,
 			);
+			// Typed so the CLI boundary can map it to the clean stderr failure.
+			const caught = await SessionManager.forkFrom(missingPath, cwd, sessionDir).catch((err: unknown) => err);
+			expect(caught).toBeInstanceOf(ForkSourceNotFoundError);
 			expect(await fsp.readdir(sessionDir)).toEqual([]);
 		} finally {
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
+	it("maps a source that vanishes after the preflight to SessionResolutionError (#11491)", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-fork-vanished-cli-"));
+		const sessionDir = path.join(cwd, "sessions");
+		await fsp.mkdir(sessionDir, { recursive: true });
+		const missingPath = path.join(cwd, "ghost-zz9q.jsonl");
+		vi.spyOn(FileSessionStorage.prototype, "exists").mockResolvedValue(true);
+		try {
+			await expect(
+				createSessionManager(buildForkArgs(missingPath, false, sessionDir), cwd, stubSettings),
+			).rejects.toMatchObject({
+				name: "SessionResolutionError",
+				message: `Session "${missingPath}" not found.`,
+				hint: expect.stringContaining("omp --resume"),
+			});
+			expect(await fsp.readdir(sessionDir)).toEqual([]);
+		} finally {
+			vi.restoreAllMocks();
 			await fsp.rm(cwd, { recursive: true, force: true });
 		}
 	});
