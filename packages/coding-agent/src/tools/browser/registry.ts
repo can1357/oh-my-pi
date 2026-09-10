@@ -320,15 +320,39 @@ export function holdBrowser(handle: BrowserHandle): void {
 	handle.refCount++;
 }
 
+/**
+ * A broker-owned headless handle is a pooled *attachment*, not an owned
+ * process: `disposeBrowserHandle` only drops our CDP link, because the shared
+ * daemon owns the Chromium. Evicting such a handle at refCount 0 therefore
+ * throws away a live, reusable attachment — the next `acquireBrowser` finds an
+ * empty pool and re-attaches, and each `newPage()` on the new attachment costs
+ * another renderer tree that the previous `disconnect()` never reclaimed. That
+ * is the per-call process growth in issue #7900.
+ *
+ * Returns the handle when it is a live broker attachment that should stay
+ * pooled for reuse, otherwise null.
+ */
+function livePooledAttachment(handle: BrowserHandle): PuppeteerBrowserHandle | null {
+	if ("client" in handle) return null;
+	if (handle.kind.kind !== "headless") return null;
+	if (!handle.sharedDaemon) return null;
+	return handle.browser.connected ? handle : null;
+}
+
 export async function releaseBrowser(handle: BrowserHandle, opts: ReleaseBrowserOptions): Promise<void> {
 	handle.refCount = Math.max(0, handle.refCount - 1);
-	if (handle.refCount === 0) {
-		// Only evict if the registry still points at THIS handle. After a disconnect,
-		// `acquireBrowser` may have already replaced the entry with a fresh live handle
-		// under the same key; deleting blindly would orphan that new browser.
-		if (browsers.get(handle.key) === handle) browsers.delete(handle.key);
-		await disposeBrowserHandle(handle, opts);
-	}
+	if (handle.refCount !== 0) return;
+	// Keep live broker-owned attachments pooled so the next acquisition reuses
+	// the Chromium the daemon already has running instead of re-attaching (and
+	// stranding the previous renderer tree). `acquireBrowser` still evicts and
+	// disposes this entry the moment `browser.connected` goes false, and an
+	// explicit `kill` still tears down here. (Issue #7900.)
+	if (!opts.kill && livePooledAttachment(handle) !== null) return;
+	// Only evict if the registry still points at THIS handle. After a disconnect,
+	// `acquireBrowser` may have already replaced the entry with a fresh live handle
+	// under the same key; deleting blindly would orphan that new browser.
+	if (browsers.get(handle.key) === handle) browsers.delete(handle.key);
+	await disposeBrowserHandle(handle, opts);
 }
 
 async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserOptions): Promise<void> {
