@@ -213,6 +213,7 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 		requiresGlyphTokenization: policy.identity.class === "anthropic",
 		tokenizer: spec.tokenizer ?? resolveModelTokenizer(spec.requestModelId ?? spec.id),
 		thinking: policy.thinking,
+		thinkingConfig: spec.thinking,
 		supportsComputerUse: supportsOpenAIGAComputerUse(spec, policy.identity, supportsComputerUseConfig),
 		supportsComputerUseConfig,
 		compat: policy.compat,

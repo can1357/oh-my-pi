@@ -273,7 +273,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		? await Promise.all([fetchModelsDev(options), dynamicFetcher ? fetchDynamicModels(dynamicFetcher) : null])
 		: [null, null];
 	const modelsDevFetchSucceeded = fetchedModelsDevModels !== null;
-	const normalizedModelsDevModels = normalizeModelList<TApi>(fetchedModelsDevModels ?? []);
+	const normalizedModelsDevModels = fetchedModelsDevModels ?? [];
 	const modelsDevModels = additiveStaticModelIds
 		? normalizedModelsDevModels.filter(model => !additiveStaticModelIds.has(model.id))
 		: normalizedModelsDevModels;
@@ -573,6 +573,12 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		? dynamicModel.reasoning
 		: existingModel.reasoning || dynamicModel.reasoning;
 	const longContextCost = dynamicModel.cost.longContext ?? existingModel.cost.longContext;
+	const dynamicThinkingConfig = Object.hasOwn(dynamicModel, "thinkingConfig")
+		? dynamicModel.thinkingConfig
+		: dynamicModel.thinking;
+	const existingThinkingConfig = Object.hasOwn(existingModel, "thinkingConfig")
+		? existingModel.thinkingConfig
+		: existingModel.thinking;
 	// Re-build from spec stage: sparse compat comes from `compatConfig` (the
 	// verbatim override vocabulary), never the resolved `compat` record.
 	return buildModel({
@@ -580,6 +586,14 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		...dynamicModel,
 		name: preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning,
+		// Discovery controls win when explicitly advertised. Otherwise retain
+		// catalog controls only when their endpoint/API is still the wire route;
+		// never mistake buildModel-derived metadata for upstream controls.
+		thinking:
+			dynamicThinkingConfig ??
+			(!endpointChanged && existingModel.api === dynamicModel.api && !dynamicReasoningAuthoritative
+				? existingThinkingConfig
+				: undefined),
 		input: supportsImage ? ["text", "image"] : ["text"],
 		cost: {
 			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input),

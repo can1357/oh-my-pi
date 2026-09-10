@@ -10,7 +10,9 @@ import type { Api, Model, ModelSpec } from "./types";
 // Rows persist ModelSpec JSON (sparse `compat`, never the resolved record);
 // the model manager rebuilds via `buildModel` on load. Request headers are
 // intentionally omitted: arbitrary provider-defined header names can carry
-// credentials. v12 invalidates Kimi Code rows carrying the blanket
+// credentials. v13 invalidates rows that can persist `buildModel`-derived
+// thinking controls without provenance; new rows project only authored
+// `thinkingConfig`. v12 invalidates Kimi Code rows carrying the blanket
 // maxTokens: 32000 that predate per-family output caps (k3/k3-256k -> 131072,
 // kimi-for-coding[-highspeed] -> 32768, #6711); v11 invalidates rows that may
 // persist derived computer-use
@@ -23,7 +25,7 @@ import type { Api, Model, ModelSpec } from "./types";
 // retired unknown-limit sentinels (222222/8888); v5 invalidated rows predating
 // effort-tier variant collapsing (raw `-low`/`-high`/`-thinking` member ids);
 // v4 dropped the pre-efforts ThinkingConfig shape.
-const CACHE_SCHEMA_VERSION = 12;
+const CACHE_SCHEMA_VERSION = 13;
 const HEADER_RESTORE_VERSION = 1;
 
 interface CacheRow {
@@ -259,16 +261,31 @@ function hasModelHeaders(model: Model<Api>): boolean {
 }
 
 /**
- * Project a live model to cache-safe metadata.
+ * Project a live model to cache-safe authored metadata.
  *
  * Headers are never persisted: custom/runtime providers may use arbitrary
  * credential header names, so no name-based filter can be complete. The
  * separately persisted model-id list lets the manager restore matching static
  * headers and reject/refetch dynamic-only cached models that need live headers.
+ * `thinkingConfig` distinguishes builder-derived controls from authored ones;
+ * generated bundled rows without that field retain their direct thinking data.
  */
 function toCachedModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TApi> {
-	const { headers: _headers, compatConfig, supportsComputerUseConfig, ...rest } = model;
-	return { ...rest, supportsComputerUse: supportsComputerUseConfig, compat: compatConfig };
+	const {
+		headers: _headers,
+		compatConfig,
+		supportsComputerUseConfig,
+		thinking: _derivedThinking,
+		thinkingConfig,
+		...rest
+	} = model;
+	const thinking = Object.hasOwn(model, "thinkingConfig") ? thinkingConfig : _derivedThinking;
+	return {
+		...rest,
+		supportsComputerUse: supportsComputerUseConfig,
+		...(thinking !== undefined ? { thinking } : {}),
+		compat: compatConfig,
+	};
 }
 
 /** Whether two in-memory header records are byte-for-byte equivalent. */
