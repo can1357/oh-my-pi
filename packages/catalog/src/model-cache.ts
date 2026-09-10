@@ -6,6 +6,7 @@ import { Database } from "bun:sqlite";
 import { renameSync } from "node:fs";
 import { getModelDbPath, isEnoent, isSqliteCorruptionError, logger } from "@oh-my-pi/pi-utils";
 import type { Api, Model, ModelSpec } from "./types";
+import { mergeCopilotApiHeaders } from "./wire/github-copilot";
 
 // Rows persist ModelSpec JSON (sparse `compat`, never the resolved record);
 // the model manager rebuilds via `buildModel` on load. Request headers are
@@ -313,8 +314,15 @@ export function writeModelCache<TApi extends Api>(
 					// re-derive without persisting it. This keeps reference-less models
 					// with constant or configured headers alive offline.
 					const matchesStatic = staticHeaderSource
-						? headersEqual(model.headers, staticHeaderSource.headers)
-						: headersEqual(model.headers, restorableHeaderFallback);
+						? headersEqual(model.headers, staticHeaderSource.headers) ||
+							(providerId === "github-copilot" &&
+								headersEqual(
+									model.headers,
+									mergeCopilotApiHeaders(staticHeaderSource.headers, { cliDisabled: true }),
+								))
+						: headersEqual(model.headers, restorableHeaderFallback) ||
+							(providerId === "github-copilot" &&
+								headersEqual(model.headers, mergeCopilotApiHeaders(undefined, { cliDisabled: true })));
 					if (!matchesStatic) {
 						unrestorableHeaderModelIds.push(model.id);
 					}

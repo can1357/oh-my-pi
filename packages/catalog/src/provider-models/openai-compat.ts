@@ -6306,7 +6306,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 					"X-GitHub-Api-Version": COPILOT_API_VERSION,
 					"X-Initiator": "user",
 				};
-				const fetchCopilotCatalog = (headers: Record<string, string>, useChatIdentity: boolean) =>
+				const fetchCopilotCatalog = (headers: Record<string, string>) =>
 					fetchOpenAICompatibleModels<Api>({
 						api: "openai-completions",
 						provider: "github-copilot",
@@ -6386,9 +6386,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 										input,
 										contextWindow: defaultTierWindow,
 										maxTokens,
-										headers: mergeCopilotApiHeaders(getProviderReferences().get(defaults.id)?.headers, {
-											cliDisabled: useChatIdentity,
-										}),
+										headers: mergeCopilotApiHeaders(getProviderReferences().get(defaults.id)?.headers),
 										...(api === "openai-completions"
 											? {
 													compat: {
@@ -6407,7 +6405,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 										input,
 										contextWindow: defaultTierWindow,
 										maxTokens,
-										headers: mergeCopilotApiHeaders(undefined, { cliDisabled: useChatIdentity }),
+										headers: mergeCopilotApiHeaders(),
 										// Copilot's `/models` advertises no reasoning bit, so a
 										// thinking-capable Claude with no bundled reference would
 										// fall back to `reasoning: false` and lose its effort dial.
@@ -6467,7 +6465,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 						},
 						fetch: trackedFetch,
 					});
-				let models = await fetchCopilotCatalog(discoveryHeaders, cliDisabled);
+				let models = await fetchCopilotCatalog(discoveryHeaders);
 				if (models === null && lastDiscoveryStatus === 403 && !cliDisabled) {
 					longContextVariants.length = 0;
 					const fallbackHeaders = {
@@ -6475,7 +6473,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 						"X-GitHub-Api-Version": COPILOT_API_VERSION,
 						"X-Initiator": "user",
 					};
-					const retryModels = await fetchCopilotCatalog(fallbackHeaders, true);
+					const retryModels = await fetchCopilotCatalog(fallbackHeaders);
 					if (retryModels) {
 						markCopilotCliDisabled(parsedKey.accessToken);
 						models = retryModels;
