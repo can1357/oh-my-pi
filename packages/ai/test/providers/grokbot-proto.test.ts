@@ -561,6 +561,18 @@ describe("grokbot requested model mapping", () => {
 			{ id: "context", value: "300k" },
 			{ id: "effort", value: "low" },
 		]);
+		// `--thinking off` without explicit effort must not restore discovered effort.
+		expect(
+			resolveGrokbotRequestedModel("claude-opus-5", {
+				thinking: false,
+				sandParameterIds: ["thinking", "context", "effort", "fast"],
+				sandParameterDefaults: { thinking: "true", effort: "high", context: "300k", fast: "false" },
+			}).parameters,
+		).toEqual([
+			{ id: "thinking", value: "false" },
+			{ id: "context", value: "300k" },
+			{ id: "fast", value: "false" },
+		]);
 		// Without discovered/explicit fast, omit it (do not invent from thinking).
 		expect(
 			resolveGrokbotRequestedModel("claude-opus-5", {

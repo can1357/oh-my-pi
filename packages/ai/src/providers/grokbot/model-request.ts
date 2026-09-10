@@ -89,6 +89,9 @@ function resolveSandEffortWireValue(
 ): string | undefined {
 	const explicit = toSandEffortValue(options?.effort, options?.effortMap);
 	if (explicit) return explicit;
+	// `--thinking off` must not restore discovered effort/reasoning defaults
+	// (e.g. effort=high with thinking=false is contradictory on the wire).
+	if (options?.thinking === false) return undefined;
 	const defaults = options?.sandParameterDefaults;
 	if (allowed.has("effort")) {
 		const value = defaults?.effort?.trim();

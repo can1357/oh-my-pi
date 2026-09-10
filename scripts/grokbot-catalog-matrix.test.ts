@@ -297,6 +297,10 @@ describe("toolSmokePrompt", () => {
 		expect(echoLikeShellCommand(`printf '%b%s' '\\c' '${ping}'`, ping)).toBe(false);
 		expect(echoLikeShellCommand(`printf '%b' 'pre${ping}'`, ping)).toBe(true);
 		expect(echoLikeShellCommand(`printf '%s' '\\c${ping}'`, ping)).toBe(true);
+		// Numeric printf converts args — nonnumeric ping must not pass as literal.
+		expect(echoLikeShellCommand(`printf '%d' '${ping}'`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`printf '%f' '${ping}'`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`printf '%d' '42'`, "42")).toBe(true);
 		// Later non-zero exit fails the overall command; runOneTool fabricates isError:false.
 		expect(echoLikeShellCommand(`echo ${ping}; exit 1`, ping)).toBe(false);
 		expect(echoLikeShellCommand(`echo ${ping}; exit 0`, ping)).toBe(true);

@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Grok Bot omits discovered effort/reasoning defaults when `thinking` is explicitly off.
+- Grok Bot JSON-as-text dedupe keeps native custom-wire tools (e.g. `Shell` via `customWireName`) distinct from preferred omp owners like `bash`.
+- Catalog matrix shell/write smoke rejects nonnumeric `printf` `%d`/`%f`/… arguments that bash would convert (literal ping no longer passes).
 - Grok Bot emits the remaining tool-arg suffix when an unbuffered complete JSON snapshot prefix-extends a partial accumulator (`{"path":` → `{"path":"/tmp/x"}`).
 - Catalog matrix shell/write smoke expands printf `%b` backslash escapes (`\\c` suppresses further output) before accepting a fabricated ping.
 - Grok Bot emits only the remaining tool-arg suffix when unbuffered appendable fragments complete a JSON object (avoids re-emitting the full snapshot for proxy concat).

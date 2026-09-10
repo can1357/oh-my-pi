@@ -78,4 +78,19 @@ describe("resolveCliRuntimeApiKeyProvider", () => {
 		expect(expanded).toBe("grokbot/sand-default");
 		expect(resolveCliRuntimeApiKeyProvider({ model: expanded })).toBe("grokbot");
 	});
+
+	test("expands @smol and chained @default→@smol before provider bind", () => {
+		const settings = {
+			getModelRole: (role: string) => {
+				if (role === "smol") return "grokbot/sand-smol";
+				if (role === "default") return "@smol";
+				return undefined;
+			},
+		};
+		expect(expandDefaultRoleModelSelector("@smol", settings)).toBe("grokbot/sand-smol");
+		expect(expandDefaultRoleModelSelector("@default", settings)).toBe("grokbot/sand-smol");
+		expect(resolveCliRuntimeApiKeyProvider({ model: expandDefaultRoleModelSelector("@smol", settings) })).toBe(
+			"grokbot",
+		);
+	});
 });

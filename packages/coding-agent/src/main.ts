@@ -886,26 +886,54 @@ export async function resolveScopedModels(
  * is a live-only Grok Bot id still warms AvailableModels before session build.
  */
 /**
- * Expand `--model @default` / `*` / `pi/default` (and `:thinking` variants) to the
- * configured `modelRoles.default` provider/model so cold AvailableModels refresh
- * still warms a live-only default. Other role aliases stay unbound here.
+ * Expand `--model` role aliases (`@default`, `@smol`, `@slow`, custom roles, and
+ * chained defaults such as `modelRoles.default = "@smol"`) to a concrete
+ * provider/model so `--api-key` bind and cold AvailableModels refresh can target
+ * a live-only credential-scoped id. Non-role selectors are left unbound.
  */
 export function expandDefaultRoleModelSelector(
 	selector: string | undefined,
-	configuredDefault: string | undefined,
+	settingsOrDefault: { getModelRole: (role: string) => string | undefined } | string | undefined,
 ): string | undefined {
 	const trimmed = selector?.trim();
-	const defaultRole = configuredDefault?.trim();
-	if (!trimmed || !defaultRole) return undefined;
-	if (resolveExplicitModelRole(trimmed) !== "default") return undefined;
-	return defaultRole;
+	if (!trimmed) return undefined;
+	// Back-compat: tests may pass the configured default string directly.
+	const settings =
+		typeof settingsOrDefault === "string" || settingsOrDefault === undefined
+			? {
+					getModelRole: (role: string) =>
+						role === "default" && typeof settingsOrDefault === "string" ? settingsOrDefault : undefined,
+				}
+			: settingsOrDefault;
+	if (!resolveExplicitModelRole(trimmed, settings)) return undefined;
+	// Walk cross-role chains (`@default` → `@smol` → `provider/id`) until concrete.
+	let expanded = trimmed;
+	const seen = new Set<string>();
+	while (resolveExplicitModelRole(expanded, settings)) {
+		if (seen.has(expanded)) return undefined;
+		seen.add(expanded);
+		const next = expandRoleAlias(expanded, settings).trim();
+		if (!next || next === expanded) break;
+		expanded = next;
+	}
+	if (!expanded || expanded === trimmed) return undefined;
+	const parsed = parseModelString(expanded);
+	if (!parsed?.provider?.trim()) return undefined;
+	return expanded;
 }
 
 export function resolveCredentialScopedRefreshTarget(
 	parsed: Pick<Args, "provider" | "model" | "models">,
-	configuredDefault?: string,
+	settingsOrDefault?: { getModelRole: (role: string) => string | undefined } | string,
 ): { providerId: string; selectors: Pick<Args, "model" | "models"> } | undefined {
-	const expandedModel = expandDefaultRoleModelSelector(parsed.model, configuredDefault);
+	const settings =
+		typeof settingsOrDefault === "string" || settingsOrDefault === undefined
+			? {
+					getModelRole: (role: string) =>
+						role === "default" && typeof settingsOrDefault === "string" ? settingsOrDefault : undefined,
+				}
+			: settingsOrDefault;
+	const expandedModel = expandDefaultRoleModelSelector(parsed.model, settings);
 	const effectiveParsed =
 		expandedModel && expandedModel !== parsed.model?.trim() ? { ...parsed, model: expandedModel } : parsed;
 	const cliProvider = resolveCliRuntimeApiKeyProvider(effectiveParsed);
@@ -918,12 +946,11 @@ export function resolveCredentialScopedRefreshTarget(
 	// Bare `--model` / unbound `--models` leave API-key ownership undefined but
 	// still take precedence over the configured default role — do not warm the
 	// default provider (and its discovery timeout) in that case.
-	// Recognized default-role aliases already expanded above; remaining selectors
-	// are unrelated bare ids (or non-default role aliases).
+	// Role aliases already expanded above; remaining selectors are unrelated bare ids.
 	if (effectiveParsed.model?.trim() || (effectiveParsed.models ?? []).some(pattern => pattern.trim().length > 0)) {
 		return undefined;
 	}
-	const defaultRole = configuredDefault?.trim();
+	const defaultRole = settings.getModelRole("default")?.trim();
 	if (!defaultRole) return undefined;
 	const parsedDefault = parseModelString(defaultRole);
 	if (!parsedDefault?.provider) return undefined;
@@ -1738,10 +1765,7 @@ export async function runRootCommand(
 		// Expand `@default` / role aliases first — the same selector widening
 		// resolveCredentialScopedRefreshTarget uses — so CLI-only credentials bind
 		// to the credential-scoped provider before refresh/session resolve.
-		const expandedApiKeyModel = expandDefaultRoleModelSelector(
-			parsedArgs.model,
-			settingsInstance.getModelRole("default"),
-		);
+		const expandedApiKeyModel = expandDefaultRoleModelSelector(parsedArgs.model, settingsInstance);
 		const apiKeyArgs =
 			expandedApiKeyModel && expandedApiKeyModel !== parsedArgs.model?.trim()
 				? { ...parsedArgs, model: expandedApiKeyModel }
@@ -1763,7 +1787,7 @@ export async function runRootCommand(
 		// (or a provider-qualified modelRoles.default) resolve so buildSessionOptions
 		// does not exit on a cold miss — for env, secrets-file, models.yml, and
 		// --api-key credentials alike.
-		const refreshTarget = resolveCredentialScopedRefreshTarget(parsedArgs, settingsInstance.getModelRole("default"));
+		const refreshTarget = resolveCredentialScopedRefreshTarget(parsedArgs, settingsInstance);
 		if (refreshTarget) {
 			await logger.time(
 				"refreshCredentialScopedModel",

@@ -85,6 +85,23 @@ function canonicalizeAdvertisedAlias(
 	ompTools?: ReadonlyArray<OmpToolNameSource>,
 ): string {
 	const owner = preferredOmpOwnerForWireName(name, ompTools);
+	// Native wire may advertise Shell (extension customWireName) alongside bash as
+	// two distinct tools. Only skip product-owner collapse when both the wire name
+	// and a *different* preferred omp owner are advertised.
+	if (owner && advertised.has(name) && advertised.has(owner) && Array.isArray(ompTools)) {
+		const customOmp = ompTools
+			.find(
+				t =>
+					typeof t.customWireName === "string" &&
+					t.customWireName.trim() === name &&
+					typeof t.name === "string" &&
+					t.name.trim().length > 0,
+			)
+			?.name?.trim();
+		if (customOmp && customOmp !== owner) {
+			return name;
+		}
+	}
 	if (owner && advertised.has(owner)) return owner;
 	const omp = toOmpToolName(name);
 	if (omp !== name && advertised.has(omp)) return omp;

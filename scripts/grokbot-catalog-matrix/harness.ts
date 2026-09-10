@@ -529,6 +529,13 @@ function printfEmittedText(before: string): string | undefined {
 		} else if (spec === "c") {
 			out += precision === 0 ? "" : arg.slice(0, 1);
 		} else if (/[diouxXeEfFgGaA]/.test(spec)) {
+			// Numeric conversions: bash converts the argument first. Nonnumeric
+			// tokens emit `0` (and a nonzero status) — never the literal ping.
+			const numeric = Number(arg);
+			if (!Number.isFinite(numeric) || String(numeric) !== arg.trim()) {
+				// Reject: fabricated ping must not match a converted `0`.
+				return undefined;
+			}
 			out += arg;
 		} else {
 			// Unknown / incomplete conversion: stop consuming (reject via empty emit).

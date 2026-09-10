@@ -247,6 +247,26 @@ describe("parseJsonTextToolCall", () => {
 		expect(promoted.sourceIndexes).toEqual([0, 1]);
 	});
 
+	test("promoteJsonTextToolCallsFromContent keeps native custom-wire Shell distinct from bash", () => {
+		// Native wire advertises Shell (extension customWireName) and bash as two tools.
+		// Product-style Shell→bash collapse would suppress one of two real invocations.
+		const ompTools = [{ name: "extension_shell", customWireName: "Shell" }, { name: "bash" }];
+		const advertised = advertisedNamesForJsonTextToolCall([{ name: "Shell" }, { name: "bash" }], ompTools);
+		const promoted = promoteJsonTextToolCallsFromContent(
+			[
+				{ type: "thinking", thinking: '{"name":"Shell","arguments":{"command":"echo ext"}}' },
+				{ type: "text", text: '{"name":"bash","arguments":{"command":"echo ext"}}' },
+			],
+			advertised,
+			undefined,
+			ompTools,
+		);
+		expect(promoted.calls).toEqual([
+			{ name: "Shell", arguments: { command: "echo ext" } },
+			{ name: "bash", arguments: { command: "echo ext" } },
+		]);
+	});
+
 	test("promoteJsonTextToolCallsFromContent keeps distinct thinking calls alongside text", () => {
 		const advertised = new Set(["Shell", "Write"]);
 		const promoted = promoteJsonTextToolCallsFromContent(
