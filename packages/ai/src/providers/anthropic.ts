@@ -2300,29 +2300,27 @@ const streamAnthropicOnce = (
 							...requestOptions,
 							headers: fallbackChatHeaders,
 						};
-						const retryClient = !options?.client
-							? createClient(model, {
-									model,
-									apiKey,
-									cliDisabled: true,
-									extraBetas,
-									stream: false,
-									interleavedThinking: options?.interleavedThinking ?? true,
-									headers: options?.headers,
-									dynamicHeaders: copilotDynamicHeaders?.headers,
-									isOAuth: options?.isOAuth,
-									hasTools: !!context.tools?.length,
-									thinkingEnabled: options?.thinkingEnabled,
-									thinkingDisplay: options?.thinkingDisplay,
-									fetch: options?.fetch,
-									maxRetryDelayMs: options?.maxRetryDelayMs,
-									sessionId:
-										options?.sessionId ??
-										extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
-										options?.promptCacheKey,
-									disableStrictTools,
-								}).client
-							: client;
+						const retryClient = createClient(model, {
+							model,
+							apiKey,
+							cliDisabled: true,
+							extraBetas,
+							stream: false,
+							interleavedThinking: options?.interleavedThinking ?? true,
+							headers: options?.headers,
+							dynamicHeaders: copilotDynamicHeaders?.headers,
+							isOAuth: options?.isOAuth,
+							hasTools: !!context.tools?.length,
+							thinkingEnabled: options?.thinkingEnabled,
+							thinkingDisplay: options?.thinkingDisplay,
+							fetch: options?.fetch,
+							maxRetryDelayMs: options?.maxRetryDelayMs,
+							sessionId:
+								options?.sessionId ??
+								extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
+								options?.promptCacheKey,
+							disableStrictTools,
+						}).client;
 						response = await sendRefreshRequest(retryClient, fallbackOptions);
 						if (copilotApiKey) {
 							markCopilotCliDisabled(copilotApiKey);
@@ -3137,6 +3135,7 @@ const streamAnthropicOnce = (
 					}
 					if (
 						model.provider === "github-copilot" &&
+						!cliDisabled &&
 						!hasFallenBackToCopilotChat &&
 						firstTokenTime === undefined &&
 						AIError.status(streamFailure) === 403
@@ -3151,31 +3150,29 @@ const streamAnthropicOnce = (
 							initiatorOverride: options?.initiatorOverride,
 							cliDisabled: true,
 						});
-						if (!options?.client || model.provider === "github-copilot") {
-							const created = createClient(model, {
-								model,
-								apiKey,
-								cliDisabled: true,
-								extraBetas,
-								stream: true,
-								interleavedThinking: options?.interleavedThinking ?? true,
-								headers: options?.headers,
-								dynamicHeaders: copilotDynamicHeaders?.headers,
-								isOAuth: options?.isOAuth,
-								hasTools: !!context.tools?.length,
-								thinkingEnabled: options?.thinkingEnabled,
-								thinkingDisplay: options?.thinkingDisplay,
-								fetch: options?.fetch,
-								maxRetryDelayMs: options?.maxRetryDelayMs,
-								sessionId:
-									options?.sessionId ??
-									extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
-									options?.promptCacheKey,
-								disableStrictTools,
-							});
-							client = created.client;
-							isOAuthToken = created.isOAuthToken;
-						}
+						const created = createClient(model, {
+							model,
+							apiKey,
+							cliDisabled: true,
+							extraBetas,
+							stream: true,
+							interleavedThinking: options?.interleavedThinking ?? true,
+							headers: options?.headers,
+							dynamicHeaders: copilotDynamicHeaders?.headers,
+							isOAuth: options?.isOAuth,
+							hasTools: !!context.tools?.length,
+							thinkingEnabled: options?.thinkingEnabled,
+							thinkingDisplay: options?.thinkingDisplay,
+							fetch: options?.fetch,
+							maxRetryDelayMs: options?.maxRetryDelayMs,
+							sessionId:
+								options?.sessionId ??
+								extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
+								options?.promptCacheKey,
+							disableStrictTools,
+						});
+						client = created.client;
+						isOAuthToken = created.isOAuthToken;
 						params = await prepareParams();
 						providerRetryAttempt = 0;
 						output.content.length = 0;
