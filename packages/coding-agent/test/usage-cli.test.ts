@@ -67,11 +67,11 @@ describe("runUsageCommand", () => {
 			makeLimit({ id: "Unused tier", provider, tier: "unused-tier", usedFraction: 0 }),
 		]);
 		const authStorage = await AuthStorage.create(":memory:");
-		vi.spyOn(authStorage, "fetchUsageReports").mockResolvedValue([report]);
+		vi.spyOn(authStorage.usage, "reports").mockResolvedValue([report]);
 		const discover = vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
-		const loadSettings = vi.spyOn(Settings, "loadReadOnly").mockResolvedValue({
-			get: (key: string) => (key === "display.showZeroUsageMeters" ? false : undefined),
-		} as unknown as Settings);
+		const loadSettings = vi
+			.spyOn(Settings, "loadReadOnly")
+			.mockResolvedValue(Settings.isolated({ display: { showZeroUsageMeters: false } }));
 		let output = "";
 		const write = vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
 			output += String(chunk);
