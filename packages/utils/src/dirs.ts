@@ -914,14 +914,13 @@ export function getTerminalSessionsDir(agentDir?: string): string {
 }
 
 /**
- * Get the persistent registry of custom (non-default) session-storage roots
- * (~/.omp/agent/custom-session-roots). Each `--session-dir`/`--session`
- * transcript directory is recorded here as one marker file so storage GC can
- * reach blobs a relocated transcript still references even after its terminal
- * breadcrumb is overwritten by a later session.
+ * Get the persistent registry of custom session files
+ * (~/.omp/agent/custom-session-files). Each `--session-dir`/`--session`
+ * transcript is recorded here as one marker file so storage GC can scan its
+ * exact path after its terminal breadcrumb is overwritten by a later session.
  */
-export function getCustomSessionRootsDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "custom-session-roots", "state");
+export function getCustomSessionFilesDir(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "custom-session-files", "state");
 }
 
 /** Get the crash log path (~/.omp/agent/omp-crash.log). */

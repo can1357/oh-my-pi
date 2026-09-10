@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
 import {
-	getCustomSessionRootsDir,
+	getCustomSessionFilesDir,
 	getSessionsDir,
 	getTerminalSessionsDir,
 	hashPath,
@@ -210,23 +210,24 @@ export function computeDefaultSessionDir(
 // =============================================================================
 
 /**
- * Record a session's storage directory in the persistent custom-roots registry
- * when it lives outside the managed sessions root. Idempotent: the marker file
- * is keyed by a hash of the resolved directory, its content is the absolute
- * path. Best-effort — a failure here must never break session creation.
+ * Record a session's exact file in the persistent custom-files registry when
+ * the managed-root glob scan cannot fully account for it. Idempotent: the
+ * marker is keyed by a hash of the resolved file, and its content is the
+ * absolute path. Best-effort — a failure here must never break session
+ * creation.
  *
- * `sessionFile` may be relative (e.g. `--session-dir .omp-sessions`); it is
+ * `sessionFile` may be relative (e.g. `--session .omp-sessions/work`); it is
  * resolved against the recorded `cwd`, matching how the breadcrumb stores it.
  */
-function recordCustomSessionRoot(cwd: string, sessionFile: string): void {
+function recordCustomSessionFile(cwd: string, sessionFile: string): void {
 	try {
-		const sessionRoot = path.dirname(path.resolve(cwd, sessionFile));
-		if (pathIsWithin(getSessionsDir(), sessionRoot)) return;
-		const registryDir = getCustomSessionRootsDir();
+		const resolvedSessionFile = path.resolve(cwd, sessionFile);
+		if (pathIsWithin(getSessionsDir(), resolvedSessionFile) && resolvedSessionFile.endsWith(".jsonl")) return;
+		const registryDir = getCustomSessionFilesDir();
 		fs.mkdirSync(registryDir, { recursive: true });
-		fs.writeFileSync(path.join(registryDir, hashPath(sessionRoot)), sessionRoot);
+		fs.writeFileSync(path.join(registryDir, hashPath(resolvedSessionFile)), resolvedSessionFile);
 	} catch (err) {
-		if (!isEnoent(err)) logger.debug("Custom session root record failed", { err });
+		if (!isEnoent(err)) logger.debug("Custom session file record failed", { err });
 	}
 }
 /**
@@ -244,11 +245,10 @@ function recordCustomSessionRoot(cwd: string, sessionFile: string): void {
  * external delete is still treated as a genuinely stale crumb.
  */
 export function writeTerminalBreadcrumb(cwd: string, sessionFile: string, fresh = false): void {
-	// Persist non-default session roots regardless of terminal identity: a
-	// `--session-dir`/`--session` transcript stores blob references outside the
-	// managed sessions root, and storage GC needs this registry to reach them
-	// after the per-terminal breadcrumb is overwritten by a later session.
-	recordCustomSessionRoot(cwd, sessionFile);
+	// Persist session files the managed-root glob scan cannot fully account for,
+	// regardless of terminal identity. Storage GC needs the exact path after the
+	// per-terminal breadcrumb is overwritten by a later session.
+	recordCustomSessionFile(cwd, sessionFile);
 
 	const terminalId = getTerminalId();
 	if (!terminalId) return;

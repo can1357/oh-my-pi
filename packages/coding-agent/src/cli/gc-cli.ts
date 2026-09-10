@@ -6,14 +6,13 @@ import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import {
 	getAgentDir,
 	getBlobsDir,
-	getCustomSessionRootsDir,
+	getCustomSessionFilesDir,
 	getHistoryDbPath,
 	getModelDbPath,
 	getSessionsDir,
 	getStatsDbPath,
 	getTerminalSessionsDir,
 	normalizePathForComparison,
-	pathIsWithin,
 	readLines,
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
@@ -280,37 +279,40 @@ async function collectBackupJsonlFiles(root: string): Promise<string[]> {
 	}
 }
 
-async function collectReferencedBlobHashes(sessionRoots: string[]): Promise<Set<string>> {
-	const hashes = new Set<string>();
+async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionFiles: string[]): Promise<Set<string>> {
+	const files = new Map<string, string>();
 	for (const root of sessionRoots) {
-		const files = [
+		for (const file of [
 			...(await collectJsonlFiles(root)),
 			...(await collectCompressedJsonlFiles(root)),
 			...(await collectBackupJsonlFiles(root)),
-		];
-		for (const file of files) {
-			const text = await readTextIfPresent(file);
-			for (const match of text.matchAll(BLOB_REF_RE)) {
-				const hash = match[1]?.toLowerCase();
-				if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
-			}
+		]) {
+			files.set(normalizePathForComparison(file), file);
+		}
+	}
+	for (const file of exactSessionFiles) {
+		files.set(normalizePathForComparison(file), file);
+	}
+
+	const hashes = new Set<string>();
+	for (const file of files.values()) {
+		const text = await readTextIfPresent(file);
+		for (const match of text.matchAll(BLOB_REF_RE)) {
+			const hash = match[1]?.toLowerCase();
+			if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
 		}
 	}
 	return hashes;
 }
 
 /**
- * Custom session-storage roots recorded in the persistent registry
- * (`<agentDir>/custom-session-roots/*`, one marker file per relocated
- * directory whose content is its absolute path). A `--session-dir`/`--session`
- * transcript stores its `blob:sha256:` references outside `<agentDir>/sessions`
- * yet externalizes images into the shared agent-global blob store, so the mark
- * phase must widen its reachability roots here or the sweep unlinks blobs a
- * live transcript still references (issue #11551). The registry retains every
- * relocated root across sessions and terminals; vanished directories are
- * skipped since blobs they uniquely referenced are already unreachable.
+ * Exact session files recorded in the persistent registry
+ * (`<agentDir>/custom-session-files/*`, one marker per transcript whose
+ * content is its absolute path). Recording files rather than parent
+ * directories preserves `--session` paths outside the root-scan globs,
+ * including names without a `.jsonl` suffix.
  */
-async function collectRegisteredSessionRoots(registryDir: string, defaultRoots: string[]): Promise<string[]> {
+async function collectRegisteredSessionFiles(registryDir: string): Promise<string[]> {
 	let entries: string[];
 	try {
 		entries = await fs.readdir(registryDir);
@@ -318,26 +320,25 @@ async function collectRegisteredSessionRoots(registryDir: string, defaultRoots: 
 		if (codeOf(error) === "ENOENT") return [];
 		throw error;
 	}
-	const roots = new Map<string, string>();
+	const files = new Map<string, string>();
 	for (const entry of entries) {
 		const recorded = (await readTextIfPresent(path.join(registryDir, entry))).trim();
 		if (!recorded) continue;
-		const sessionRoot = path.resolve(recorded);
-		if (!(await pathExists(sessionRoot))) continue;
-		if (defaultRoots.some(root => pathIsWithin(root, sessionRoot))) continue;
-		roots.set(normalizePathForComparison(sessionRoot), sessionRoot);
+		const sessionFile = path.resolve(recorded);
+		const stat = await statIfPresent(sessionFile);
+		if (!stat?.isFile()) continue;
+		files.set(normalizePathForComparison(sessionFile), sessionFile);
 	}
-	return [...roots.values()];
+	return [...files.values()];
 }
 
 /**
- * Session directories recorded in terminal breadcrumbs that live outside the
- * default scan roots. Supplements {@link collectRegisteredSessionRoots}: a
- * breadcrumb (`<agentDir>/terminal-sessions/*`, `cwd\nsessionFile` per
- * terminal) holds only that terminal's last session, but still catches a
- * current relocated transcript even if its registry marker write failed.
+ * Exact session files recorded in terminal breadcrumbs. Supplements
+ * {@link collectRegisteredSessionFiles}: a breadcrumb holds only that
+ * terminal's last session, but catches the current transcript even if its
+ * persistent marker write failed.
  */
-async function collectBreadcrumbSessionRoots(breadcrumbDir: string, defaultRoots: string[]): Promise<string[]> {
+async function collectBreadcrumbSessionFiles(breadcrumbDir: string): Promise<string[]> {
 	let entries: string[];
 	try {
 		entries = await fs.readdir(breadcrumbDir);
@@ -345,7 +346,7 @@ async function collectBreadcrumbSessionRoots(breadcrumbDir: string, defaultRoots
 		if (codeOf(error) === "ENOENT") return [];
 		throw error;
 	}
-	const roots = new Map<string, string>();
+	const files = new Map<string, string>();
 	for (const entry of entries) {
 		const text = await readTextIfPresent(path.join(breadcrumbDir, entry));
 		const lines = text.split("\n");
@@ -353,11 +354,9 @@ async function collectBreadcrumbSessionRoots(breadcrumbDir: string, defaultRoots
 		const recordedSessionFile = lines[1]?.trim();
 		if (!breadcrumbCwd || !recordedSessionFile) continue;
 		const sessionFile = path.resolve(breadcrumbCwd, recordedSessionFile);
-		const sessionRoot = path.dirname(sessionFile);
-		if (defaultRoots.some(root => pathIsWithin(root, sessionRoot))) continue;
-		roots.set(normalizePathForComparison(sessionRoot), sessionRoot);
+		files.set(normalizePathForComparison(sessionFile), sessionFile);
 	}
-	return [...roots.values()];
+	return [...files.values()];
 }
 
 async function collectBlobCandidates(blobDir: string): Promise<BlobCandidate[]> {
@@ -391,14 +390,14 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	const blobDir = getBlobsDir(options.agentDir);
 	const sessionsRoot = getSessionsDir(options.agentDir);
 	const defaultRoots = [sessionsRoot, archiveSessionsRoot];
-	const extraRoots = new Map<string, string>();
-	for (const root of await collectRegisteredSessionRoots(getCustomSessionRootsDir(options.agentDir), defaultRoots)) {
-		extraRoots.set(normalizePathForComparison(root), root);
+	const exactSessionFiles = new Map<string, string>();
+	for (const file of await collectRegisteredSessionFiles(getCustomSessionFilesDir(options.agentDir))) {
+		exactSessionFiles.set(normalizePathForComparison(file), file);
 	}
-	for (const root of await collectBreadcrumbSessionRoots(getTerminalSessionsDir(options.agentDir), defaultRoots)) {
-		extraRoots.set(normalizePathForComparison(root), root);
+	for (const file of await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))) {
+		exactSessionFiles.set(normalizePathForComparison(file), file);
 	}
-	const referenced = await collectReferencedBlobHashes([...defaultRoots, ...extraRoots.values()]);
+	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()]);
 	const candidates = await collectBlobCandidates(blobDir);
 	const result: BlobGcResult = {
 		referenced: referenced.size,

@@ -10,7 +10,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	getAgentDir,
 	getBlobsDir,
-	getCustomSessionRootsDir,
+	getCustomSessionFilesDir,
 	getHistoryDbPath,
 	getSessionsDir,
 	getTerminalSessionsDir,
@@ -233,7 +233,7 @@ describe("runGcCommand blob sweep", () => {
 		expect(await Bun.file(orphan).exists()).toBe(false);
 	});
 
-	test("--apply scans the persistent custom-session-root registry without a breadcrumb", async () => {
+	test("--apply scans an exact extensionless session file after its breadcrumb is overwritten", async () => {
 		const referencedHash = hashFor("registry-reference");
 		const orphanHash = hashFor("registry-orphan");
 		const referenced = await writeBlob(root, referencedHash, "referenced");
@@ -241,21 +241,23 @@ describe("runGcCommand blob sweep", () => {
 		await agePath(referenced);
 		await agePath(orphan);
 
-		// A relocated transcript whose terminal breadcrumb was overwritten by a later session.
+		// An extensionless --session transcript whose terminal breadcrumb was
+		// overwritten by a later session is invisible to the root-scan globs.
 		const externalDir = path.join(root, "external-sessions");
 		await fs.mkdir(externalDir, { recursive: true });
+		const externalFile = path.join(externalDir, "work");
 		await Bun.write(
-			path.join(externalDir, "work.jsonl"),
+			externalFile,
 			[
 				JSON.stringify({ type: "session", version: 3, id: "work", timestamp: "2026-01-01T00:00:00.000Z" }),
 				JSON.stringify({ type: "message", message: { role: "user", content: `blob:sha256:${referencedHash}` } }),
 				"",
 			].join("\n"),
 		);
-		// Only the persistent registry records the root — no terminal breadcrumb exists.
-		const registryDir = getCustomSessionRootsDir(root);
+		// Only the persistent registry records the exact file — no terminal breadcrumb exists.
+		const registryDir = getCustomSessionFilesDir(root);
 		await fs.mkdir(registryDir, { recursive: true });
-		await Bun.write(path.join(registryDir, "root-1"), externalDir);
+		await Bun.write(path.join(registryDir, "session-1"), externalFile);
 
 		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
 
