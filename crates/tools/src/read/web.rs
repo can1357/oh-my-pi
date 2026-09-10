@@ -1045,43 +1045,40 @@ fn render_feed(content: &str) -> String {
 	loop {
 		match reader.read_event() {
 			Ok(Event::Start(start)) => match start.local_name().as_ref() {
-				b"item" | b"entry" => item = Some(FeedItem::default()),
-				b"title" => field = Some(FeedField::Title),
-				b"link" => {
+				"item" | "entry" => item = Some(FeedItem::default()),
+				"title" => field = Some(FeedField::Title),
+				"link" => {
 					if let Some(item) = item.as_mut()
 						&& let Some(href) = start
 							.attributes()
 							.flatten()
-							.find(|attribute| attribute.key.local_name().as_ref() == b"href")
+							.find(|attribute| attribute.key.local_name().as_ref() == "href")
 					{
-						item.link = String::from_utf8_lossy(&href.value).into_owned();
+						item.link = href.value.into_owned();
 					}
 					field = Some(FeedField::Link);
 				},
-				b"pubDate" | b"updated" => field = Some(FeedField::Date),
-				b"description" | b"summary" | b"content" => field = Some(FeedField::Description),
+				"pubDate" | "updated" => field = Some(FeedField::Date),
+				"description" | "summary" | "content" => field = Some(FeedField::Description),
 				_ => {},
 			},
 			Ok(Event::Text(text)) => {
-				if let Ok(value) = text.decode() {
-					apply_feed_value(clean_feed_text(&value), field, item.as_mut(), &mut feed_title);
-				}
+				apply_feed_value(clean_feed_text(&text), field, item.as_mut(), &mut feed_title);
 			},
 			Ok(Event::CData(text)) => {
-				if let Ok(value) = text.decode() {
-					apply_feed_value(clean_feed_text(&value), field, item.as_mut(), &mut feed_title);
-				}
+				apply_feed_value(clean_feed_text(&text), field, item.as_mut(), &mut feed_title);
 			},
 			Ok(Event::End(end)) => match end.local_name().as_ref() {
-				b"item" | b"entry" => {
+				"item" | "entry" => {
 					if let Some(item) = item.take()
 						&& items.len() < 10
 					{
 						items.push(item);
 					}
 				},
-				b"title" | b"link" | b"pubDate" | b"updated" | b"description" | b"summary"
-				| b"content" => field = None,
+				"title" | "link" | "pubDate" | "updated" | "description" | "summary" | "content" => {
+					field = None;
+				},
 				_ => {},
 			},
 			Ok(Event::Eof) | Err(_) => break,

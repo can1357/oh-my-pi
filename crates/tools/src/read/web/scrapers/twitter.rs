@@ -109,7 +109,7 @@ struct TweetContent {
 
 #[derive(Default)]
 struct Frame {
-	name: Vec<u8>,
+	name: String,
 	classes: SmallVec<String, 3>,
 	text: String,
 	first_descendant_username: Option<String>,
@@ -135,27 +135,24 @@ fn parse_nitter(html: &str) -> Option<TweetPage> {
 			},
 			Ok(Event::Start(_) | Event::Empty(_)) => {},
 			Ok(Event::Text(text)) => {
-				if let Ok(decoded) = text.decode() {
-					let decoded = decode_html_text(&decoded);
-					for frame in &mut stack {
-						frame.text.push_str(&decoded);
-					}
+				let decoded = text.xml_content(XmlVersion::Implicit1_0);
+				let decoded = decode_html_text(&decoded);
+				for frame in &mut stack {
+					frame.text.push_str(&decoded);
 				}
 			},
 			Ok(Event::GeneralRef(reference)) => {
-				if let Ok(entity) = reference.decode() {
-					let decoded = decode_entity(&entity)
-						.map_or_else(|| format!("&{entity};"), |character| character.to_string());
-					for frame in &mut stack {
-						frame.text.push_str(&decoded);
-					}
+				let entity = reference.xml_content(XmlVersion::Implicit1_0);
+				let decoded = decode_entity(&entity)
+					.map_or_else(|| format!("&{entity};"), |character| character.to_string());
+				for frame in &mut stack {
+					frame.text.push_str(&decoded);
 				}
 			},
 			Ok(Event::CData(text)) => {
-				if let Ok(decoded) = text.decode() {
-					for frame in &mut stack {
-						frame.text.push_str(&decoded);
-					}
+				let decoded = text.xml_content(XmlVersion::Implicit1_0);
+				for frame in &mut stack {
+					frame.text.push_str(&decoded);
 				}
 			},
 			Ok(Event::End(end)) => {
@@ -186,7 +183,7 @@ fn parse_nitter(html: &str) -> Option<TweetPage> {
 }
 
 fn push_frame(
-	reader: &Reader<&[u8]>,
+	_reader: &Reader<&[u8]>,
 	stack: &mut Vec<Frame>,
 	start: &BytesStart<'_>,
 	page: &mut TweetPage,
@@ -195,12 +192,8 @@ fn push_frame(
 		.attributes()
 		.with_checks(false)
 		.filter_map(Result::ok)
-		.find(|attribute| attribute.key.as_ref().eq_ignore_ascii_case(b"class"))
-		.and_then(|attribute| {
-			attribute
-				.decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
-				.ok()
-		})
+		.find(|attribute| attribute.key.as_ref().eq_ignore_ascii_case("class"))
+		.and_then(|attribute| attribute.normalized_value(XmlVersion::Implicit1_0).ok())
 		.map(|value| value.split_ascii_whitespace().map(str::to_owned).collect())
 		.unwrap_or_default();
 	let has_class = |class: &str| classes.iter().any(|value| value == class);
@@ -211,7 +204,7 @@ fn push_frame(
 	let inside_timeline_item = stack
 		.iter()
 		.any(|frame| has_frame_class(frame, "timeline-item"));
-	let capture_date = inside_tweet_date && name.eq_ignore_ascii_case(b"a") && !page.date_seen;
+	let capture_date = inside_tweet_date && name.eq_ignore_ascii_case("a") && !page.date_seen;
 	if capture_date {
 		page.date_seen = true;
 	}
@@ -258,22 +251,10 @@ fn push_frame(
 	});
 }
 
-fn is_void_element(name: &[u8]) -> bool {
+fn is_void_element(name: &str) -> bool {
 	[
-		b"area".as_slice(),
-		b"base",
-		b"br",
-		b"col",
-		b"embed",
-		b"hr",
-		b"img",
-		b"input",
-		b"link",
-		b"meta",
-		b"param",
-		b"source",
-		b"track",
-		b"wbr",
+		"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+		"source", "track", "wbr",
 	]
 	.iter()
 	.any(|element| name.eq_ignore_ascii_case(element))

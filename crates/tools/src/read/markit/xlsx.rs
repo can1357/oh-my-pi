@@ -137,7 +137,7 @@ fn parse_workbook(xml: &[u8]) -> Result<(Vec<Sheet>, DateSystem), String> {
 	loop {
 		match reader.read_event_into(&mut buffer).map_err(xml_error)? {
 			Event::Start(start) | Event::Empty(start)
-				if local_name(start.name().as_ref()) == b"workbookPr" =>
+				if local_name(start.name().as_ref()) == "workbookPr" =>
 			{
 				if attribute(&reader, &start, b"date1904")?
 					.is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE"))
@@ -146,7 +146,7 @@ fn parse_workbook(xml: &[u8]) -> Result<(Vec<Sheet>, DateSystem), String> {
 				}
 			},
 			Event::Start(start) | Event::Empty(start)
-				if local_name(start.name().as_ref()) == b"sheet" =>
+				if local_name(start.name().as_ref()) == "sheet" =>
 			{
 				if let Some(state) = attribute(&reader, &start, b"state")?
 					&& !matches!(state.as_str(), "visible" | "hidden" | "veryHidden")
@@ -174,7 +174,7 @@ fn parse_relationships(xml: &[u8]) -> Result<HashMap<String, String>, String> {
 	loop {
 		match reader.read_event_into(&mut buffer).map_err(xml_error)? {
 			Event::Start(start) | Event::Empty(start)
-				if local_name(start.name().as_ref()) == b"Relationship" =>
+				if local_name(start.name().as_ref()) == "Relationship" =>
 			{
 				let external = attribute(&reader, &start, b"TargetMode")?
 					.is_some_and(|mode| mode.eq_ignore_ascii_case("external"));
@@ -221,26 +221,26 @@ fn parse_shared_strings(xml: &[u8]) -> Result<Vec<String>, String> {
 	let mut phonetic_depth = 0usize;
 	loop {
 		match reader.read_event_into(&mut buffer).map_err(xml_error)? {
-			Event::Start(start) if local_name(start.name().as_ref()) == b"si" => {
+			Event::Start(start) if local_name(start.name().as_ref()) == "si" => {
 				item = Some(String::new());
 			},
-			Event::End(end) if local_name(end.name().as_ref()) == b"si" => {
+			Event::End(end) if local_name(end.name().as_ref()) == "si" => {
 				strings.push(item.take().unwrap_or_default());
 			},
-			Event::Start(start) if local_name(start.name().as_ref()) == b"rPh" && item.is_some() => {
+			Event::Start(start) if local_name(start.name().as_ref()) == "rPh" && item.is_some() => {
 				phonetic_depth += 1;
 			},
-			Event::End(end) if local_name(end.name().as_ref()) == b"rPh" => {
+			Event::End(end) if local_name(end.name().as_ref()) == "rPh" => {
 				phonetic_depth = phonetic_depth.saturating_sub(1);
 			},
 			Event::Start(start)
-				if local_name(start.name().as_ref()) == b"t"
+				if local_name(start.name().as_ref()) == "t"
 					&& item.is_some()
 					&& phonetic_depth == 0 =>
 			{
 				in_text = true;
 			},
-			Event::End(end) if local_name(end.name().as_ref()) == b"t" => in_text = false,
+			Event::End(end) if local_name(end.name().as_ref()) == "t" => in_text = false,
 			Event::Text(text) if in_text => {
 				if let Some(item) = item.as_mut() {
 					item.push_str(&decode_text(&text)?);
@@ -253,7 +253,7 @@ fn parse_shared_strings(xml: &[u8]) -> Result<Vec<String>, String> {
 			},
 			Event::CData(text) if in_text => {
 				if let Some(item) = item.as_mut() {
-					item.push_str(&text.decode().map_err(xml_error)?);
+					item.push_str(text.as_ref());
 				}
 			},
 			Event::Eof => break,
@@ -272,14 +272,14 @@ fn parse_styles(xml: &[u8]) -> Result<Styles, String> {
 	let mut in_cell_xfs = false;
 	loop {
 		match reader.read_event_into(&mut buffer).map_err(xml_error)? {
-			Event::Start(start) if local_name(start.name().as_ref()) == b"cellXfs" => {
+			Event::Start(start) if local_name(start.name().as_ref()) == "cellXfs" => {
 				in_cell_xfs = true;
 			},
-			Event::End(end) if local_name(end.name().as_ref()) == b"cellXfs" => {
+			Event::End(end) if local_name(end.name().as_ref()) == "cellXfs" => {
 				in_cell_xfs = false;
 			},
 			Event::Start(start) | Event::Empty(start)
-				if local_name(start.name().as_ref()) == b"numFmt" =>
+				if local_name(start.name().as_ref()) == "numFmt" =>
 			{
 				if let (Some(id), Some(code)) = (
 					attribute(&reader, &start, b"numFmtId")?.and_then(|id| id.parse::<u32>().ok()),
@@ -289,7 +289,7 @@ fn parse_styles(xml: &[u8]) -> Result<Styles, String> {
 				}
 			},
 			Event::Start(start) | Event::Empty(start)
-				if in_cell_xfs && local_name(start.name().as_ref()) == b"xf" =>
+				if in_cell_xfs && local_name(start.name().as_ref()) == "xf" =>
 			{
 				let id = attribute(&reader, &start, b"numFmtId")?
 					.and_then(|id| id.parse::<u32>().ok())
@@ -384,29 +384,29 @@ fn parse_worksheet(
 
 	loop {
 		match reader.read_event_into(&mut buffer).map_err(xml_error)? {
-			Event::Start(start) if local_name(start.name().as_ref()) == b"sheetData" => {
+			Event::Start(start) if local_name(start.name().as_ref()) == "sheetData" => {
 				saw_sheet_data = true;
 			},
-			Event::Empty(start) if local_name(start.name().as_ref()) == b"sheetData" => {
+			Event::Empty(start) if local_name(start.name().as_ref()) == "sheetData" => {
 				saw_sheet_data = true;
 				sheet_data_complete = true;
 			},
-			Event::End(end) if local_name(end.name().as_ref()) == b"sheetData" => {
+			Event::End(end) if local_name(end.name().as_ref()) == "sheetData" => {
 				sheet_data_complete = true;
 			},
-			Event::Start(start) if local_name(start.name().as_ref()) == b"row" => {
+			Event::Start(start) if local_name(start.name().as_ref()) == "row" => {
 				current_row =
 					parse_one_based_attribute(&reader, &start, b"r", "row")?.unwrap_or(next_row);
 				check_row(current_row)?;
 				next_row = current_row.saturating_add(1);
 				next_column = 0;
 			},
-			Event::Empty(start) if local_name(start.name().as_ref()) == b"row" => {
+			Event::Empty(start) if local_name(start.name().as_ref()) == "row" => {
 				let row = parse_one_based_attribute(&reader, &start, b"r", "row")?.unwrap_or(next_row);
 				check_row(row)?;
 				next_row = row.saturating_add(1);
 			},
-			Event::Start(start) if local_name(start.name().as_ref()) == b"c" => {
+			Event::Start(start) if local_name(start.name().as_ref()) == "c" => {
 				let (row, column) = cell_position(&reader, &start, current_row, next_column)?;
 				next_column = column.saturating_add(1);
 				cell = Some(Cell {
@@ -417,7 +417,7 @@ fn parse_worksheet(
 					..Cell::default()
 				});
 			},
-			Event::Empty(start) if local_name(start.name().as_ref()) == b"c" => {
+			Event::Empty(start) if local_name(start.name().as_ref()) == "c" => {
 				let (row, column) = cell_position(&reader, &start, current_row, next_column)?;
 				next_column = column.saturating_add(1);
 				let cell = Cell {
@@ -433,7 +433,7 @@ fn parse_worksheet(
 					cell_value(&cell, shared, styles, date_system)?,
 				)?;
 			},
-			Event::End(end) if local_name(end.name().as_ref()) == b"c" => {
+			Event::End(end) if local_name(end.name().as_ref()) == "c" => {
 				if let Some(cell) = cell.take() {
 					let value = cell_value(&cell, shared, styles, date_system)?;
 					insert_cell(&mut cells, (cell.row, cell.column), value)?;
@@ -441,18 +441,18 @@ fn parse_worksheet(
 				cell_text = CellText::None;
 				phonetic_depth = 0;
 			},
-			Event::Start(start) if local_name(start.name().as_ref()) == b"v" && cell.is_some() => {
+			Event::Start(start) if local_name(start.name().as_ref()) == "v" && cell.is_some() => {
 				cell_text = CellText::Value;
 			},
-			Event::End(end) if local_name(end.name().as_ref()) == b"v" => cell_text = CellText::None,
-			Event::Start(start) if local_name(start.name().as_ref()) == b"rPh" && cell.is_some() => {
+			Event::End(end) if local_name(end.name().as_ref()) == "v" => cell_text = CellText::None,
+			Event::Start(start) if local_name(start.name().as_ref()) == "rPh" && cell.is_some() => {
 				phonetic_depth += 1;
 			},
-			Event::End(end) if local_name(end.name().as_ref()) == b"rPh" => {
+			Event::End(end) if local_name(end.name().as_ref()) == "rPh" => {
 				phonetic_depth = phonetic_depth.saturating_sub(1);
 			},
 			Event::Start(start)
-				if local_name(start.name().as_ref()) == b"t"
+				if local_name(start.name().as_ref()) == "t"
 					&& cell
 						.as_ref()
 						.and_then(|cell| cell.kind.as_deref())
@@ -461,7 +461,7 @@ fn parse_worksheet(
 			{
 				cell_text = CellText::Inline;
 			},
-			Event::End(end) if local_name(end.name().as_ref()) == b"t" => cell_text = CellText::None,
+			Event::End(end) if local_name(end.name().as_ref()) == "t" => cell_text = CellText::None,
 			Event::Text(text) if cell_text != CellText::None => {
 				push_cell_text(cell.as_mut(), cell_text, &decode_text(&text)?);
 			},
@@ -469,10 +469,10 @@ fn parse_worksheet(
 				push_cell_text(cell.as_mut(), cell_text, &decode_reference(&reference)?);
 			},
 			Event::CData(text) if cell_text != CellText::None => {
-				push_cell_text(cell.as_mut(), cell_text, &text.decode().map_err(xml_error)?);
+				push_cell_text(cell.as_mut(), cell_text, text.as_ref());
 			},
 			Event::Start(start) | Event::Empty(start)
-				if local_name(start.name().as_ref()) == b"mergeCell" =>
+				if local_name(start.name().as_ref()) == "mergeCell" =>
 			{
 				if let Some(reference) = attribute(&reader, &start, b"ref")? {
 					merges.push(parse_cell_range(&reference)?);

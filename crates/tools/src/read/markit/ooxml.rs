@@ -200,15 +200,16 @@ pub(super) fn xml_reader(xml: &[u8]) -> Reader<&[u8]> {
 }
 
 pub(super) fn attribute(
-	reader: &Reader<&[u8]>,
+	_reader: &Reader<&[u8]>,
 	start: &BytesStart<'_>,
 	wanted: &[u8],
 ) -> Result<Option<String>, String> {
 	for attribute in start.attributes().with_checks(false) {
 		let attribute = attribute.map_err(|error| format!("invalid XML: {error}"))?;
-		if local_name(attribute.key.as_ref()) == local_name(wanted) {
+		let wanted = wanted.rsplit(|byte| *byte == b':').next().unwrap_or(wanted);
+		if local_name(attribute.key.as_ref()).as_bytes() == wanted {
 			return attribute
-				.decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+				.normalized_value(XmlVersion::Implicit1_0)
 				.map(|value| Some(value.into_owned()))
 				.map_err(|error| format!("invalid XML: {error}"));
 		}
@@ -217,9 +218,7 @@ pub(super) fn attribute(
 }
 
 pub(super) fn decode_text(text: &BytesText<'_>) -> Result<String, String> {
-	let decoded = text
-		.decode()
-		.map_err(|error| format!("invalid XML: {error}"))?;
+	let decoded = text.xml_content(XmlVersion::Implicit1_0);
 	unescape(&decoded)
 		.map(|text| text.into_owned())
 		.map_err(|error| format!("invalid XML: {error}"))
@@ -232,16 +231,14 @@ pub(super) fn decode_reference(reference: &BytesRef<'_>) -> Result<String, Strin
 	{
 		return Ok(character.to_string());
 	}
-	let name = reference
-		.decode()
-		.map_err(|error| format!("invalid XML: {error}"))?;
+	let name = reference.xml_content(XmlVersion::Implicit1_0);
 	resolve_predefined_entity(&name)
 		.map(str::to_owned)
 		.ok_or_else(|| format!("invalid XML: unknown entity '&{name};'"))
 }
 
-pub(super) fn local_name(name: &[u8]) -> &[u8] {
-	name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
+pub(super) fn local_name(name: &str) -> &str {
+	name.rsplit(':').next().unwrap_or(name)
 }
 
 /// Formats a Markdown link destination without allowing structural injection.

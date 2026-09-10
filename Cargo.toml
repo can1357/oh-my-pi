@@ -190,7 +190,7 @@ prost-types = "0.14.4"
 protox = "0.9.1"
 pyo3 = "0.29.2"
 pyo3-introspection = "0.29.2"
-quick-xml = "0.41"
+quick-xml = "0.42"
 quote = "1"
 rand = { version = "0.10", features = ["std_rng"] }
 raw-window-handle = "0.6"
