@@ -7,7 +7,11 @@ import {
 	defaultConvertToLlm,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import type { ResponseInput } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
+import type {
+	ResponseFileSearchToolCall,
+	ResponseFunctionWebSearch,
+	ResponseInput,
+} from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -2677,6 +2681,57 @@ describe("advisor", () => {
 				await runtime.waitForCatchup(1000, 1);
 				const retainedPrompt = promptText(promptInputs[0]!);
 				expect(retainedPrompt).toContain("TOKABC123_");
+				const staleToken = obfuscator.obfuscate("OTHERSECRET");
+				const searchItemsFor = (
+					secret: string,
+				): Array<Omit<ResponseFileSearchToolCall, "id"> | Omit<ResponseFunctionWebSearch, "id">> => [
+					{
+						type: "file_search_call",
+						status: "completed",
+						queries: [`file query ${secret}`, "public query"],
+						results: [
+							{
+								file_id: staleToken,
+								filename: `${secret}.txt`,
+								text: `retrieved ${secret}`,
+								attributes: { label: secret, count: 3, enabled: true },
+								score: 0.75,
+							},
+							{
+								file_id: "file-public",
+								filename: "public.txt",
+								text: "public result",
+								attributes: null,
+								score: 0,
+							},
+						],
+					},
+					{
+						type: "web_search_call",
+						status: "completed",
+						action: {
+							type: "search",
+							queries: [`web query ${secret}`, "public query"],
+							query: `legacy ${secret}`,
+							sources: [{ type: "url", url: `https://example.test/${secret}` }],
+						},
+					},
+					{
+						type: "web_search_call",
+						status: "completed",
+						action: { type: "open_page", url: `https://example.test/${secret}` },
+					},
+					{
+						type: "web_search_call",
+						status: "completed",
+						action: { type: "find_in_page", url: `https://example.test/${secret}`, pattern: `find ${secret}` },
+					},
+				];
+				const searchItems = searchItemsFor(staleToken).map((item, index) => ({
+					...item,
+					id: `native-search-${index}`,
+				}));
+				const searchSnapshot = structuredClone(searchItems);
 				const compactionItem = {
 					type: "compaction",
 					id: "opaque-native-state",
@@ -2686,7 +2741,7 @@ describe("advisor", () => {
 					[{ role: "user", content: retainedPrompt, timestamp: 1 }],
 					replayModel,
 				);
-				replacementHistory.push(compactionItem);
+				replacementHistory.push(...searchItems, compactionItem);
 				const preserveData = {
 					openaiRemoteCompaction: {
 						provider: replayModel.provider,
@@ -2714,6 +2769,11 @@ describe("advisor", () => {
 					supportsImageDetailOriginal: false,
 					nativeHistory: { replay: true, filterReasoning: false },
 				});
+				const redactedToken = obfuscator.obfuscate(
+					staleToken,
+					obfuscator.collectRegexSecretValuesForObfuscation("tok_abc123"),
+				);
+				expect(redactedToken).not.toContain("TOKABC123_");
 				for (const history of [encoded, ...maintenanceInputs]) {
 					const retained = history.filter(item => item.type === "message");
 					const plaintext = JSON.stringify(retained);
@@ -2721,13 +2781,129 @@ describe("advisor", () => {
 					expect(plaintext).not.toContain("TOKABC123_");
 					expect(plaintext).not.toContain("OTHERSECRET");
 					expect(obfuscator.deobfuscate(plaintext)).toContain("OTHERSECRET");
+					const searches = history.filter(
+						item => item.type === "file_search_call" || item.type === "web_search_call",
+					);
+					expect(searches).toHaveLength(searchItems.length);
+					// Assert every schema-defined search plaintext slot, without pinning output IDs stripped by encoders.
+					expect(searches).toMatchObject(searchItemsFor(redactedToken));
 					expect(history.find(item => item.type === "compaction")).toMatchObject({
 						encrypted_content: compactionItem.encrypted_content,
 					});
 				}
 				expect(maintenanceInputs).toHaveLength(1);
 				expect(JSON.stringify(replacementHistory[0])).toContain("TOKABC123_");
+				expect(searchItems).toEqual(searchSnapshot);
 				expect(agent.state.messages[0]).not.toBe(originalSummary);
+			},
+		);
+
+		it.each(["retained", "maintenance"])(
+			"collects search-only collisions from %s native history before replay and pending compaction input",
+			async source => {
+				const obfuscator = new SecretObfuscator([
+					{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+					{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace", replacement: "[hidden]" },
+				]);
+				const model = getBundledModel("openai", "gpt-5.4");
+				if (!model) throw new Error("Expected bundled OpenAI replay model");
+				const stalePrompt = obfuscator.obfuscate("remember OTHERSECRET");
+				expect(stalePrompt).toContain("TOKABC123_");
+				const compactionItem = { type: "compaction", encrypted_content: "opaque TOKABC123_" };
+				const searchItem = {
+					type: "file_search_call",
+					id: "search-only-collision",
+					status: "completed",
+					queries: ["tok_abc123"],
+				} satisfies ResponseFileSearchToolCall;
+				const replacementHistory = buildOpenAiNativeHistory(
+					[{ role: "user", content: stalePrompt, timestamp: 1 }],
+					model,
+				);
+				replacementHistory.push(searchItem, compactionItem);
+				const preserveData = {
+					openaiRemoteCompaction: { provider: model.provider, replacementHistory, compactionItem },
+				};
+				const summary = {
+					...createCompactionSummaryMessage("Native compaction", 100, new Date(1).toISOString(), {
+						providerPayload: getOpenAiRemoteCompactionPayload({ preserveData }),
+					}),
+					preserveData: structuredClone(preserveData),
+				};
+				const originalSummary = structuredClone(summary);
+				const promptInputs: Array<string | AgentMessage[]> = [];
+				const encodedPrompts: ResponseInput[] = [];
+				const maintenanceInputs: Array<Array<Record<string, unknown>>> = [];
+				const maintenancePreviews: string[] = [];
+				const agent = makeAgent(promptInputs);
+				if (source === "retained") agent.state.messages.push(summary);
+				agent.prompt = async input => {
+					promptInputs.push(input);
+					const incoming: AgentMessage[] =
+						typeof input === "string" ? [{ role: "user", content: input, timestamp: 2 }] : input;
+					encodedPrompts.push(
+						buildResponsesInput({
+							model,
+							context: {
+								messages: obfuscateMessages(
+									obfuscator,
+									defaultConvertToLlm([...agent.state.messages, ...incoming]),
+								),
+							},
+							strictResponsesPairing: false,
+							supportsImageDetailOriginal: false,
+							nativeHistory: { replay: true, filterReasoning: false },
+						}),
+					);
+				};
+				const { promise: maintenanceStarted, resolve: startMaintenance } = Promise.withResolvers<void>();
+				const { promise: maintenanceReleased, resolve: releaseMaintenance } = Promise.withResolvers<void>();
+				const messages: AgentMessage[] = [{ role: "user", content: "review OTHERSECRET", timestamp: 2 }];
+				const runtime = new AdvisorRuntime(agent, {
+					snapshotMessages: () => messages,
+					enqueueAdvice: () => {},
+					obfuscator,
+					maintainContext: async incoming => {
+						maintenancePreviews.push(promptText([incoming]));
+						if (maintenancePreviews.length === 1) {
+							startMaintenance();
+							await maintenanceReleased;
+							if (source === "maintenance") agent.state.messages.push(summary);
+						} else {
+							maintenanceInputs.push(buildOpenAiNativeHistory(defaultConvertToLlm(agent.state.messages), model));
+							const retained = agent.state.messages[0] as typeof summary;
+							maintenanceInputs.push(
+								buildOpenAiNativeHistory([], model, getOpenAiRemoteCompactionPayload(retained)?.items),
+							);
+						}
+						return false;
+					},
+				});
+				runtime.onTurnEnd();
+				await maintenanceStarted;
+				messages.push({ role: "user", content: "queued OTHERSECRET", timestamp: 3 });
+				runtime.onTurnEnd();
+				releaseMaintenance();
+				await runtime.waitForCatchup(1000, 1);
+
+				expect(maintenancePreviews).toHaveLength(2);
+				expect(maintenancePreviews[1]).not.toContain("TOKABC123_");
+				expect(obfuscator.deobfuscate(maintenancePreviews[1]!)).toContain("queued OTHERSECRET");
+				expect(promptInputs).toHaveLength(1);
+				expect(promptText(promptInputs[0])).not.toContain("TOKABC123_");
+				expect(maintenanceInputs).toHaveLength(2);
+				for (const history of [encodedPrompts[0]!, ...maintenanceInputs]) {
+					const plaintext = JSON.stringify(history.filter(item => item.type !== "compaction"));
+					expect(plaintext).not.toContain("TOKABC123_");
+					expect(plaintext).not.toContain("tok_abc123");
+					expect(plaintext).not.toContain("OTHERSECRET");
+					expect(obfuscator.deobfuscate(plaintext)).toContain("remember OTHERSECRET");
+					expect(history.filter(item => item.type === "file_search_call")).toMatchObject([
+						{ type: "file_search_call", status: "completed", queries: ["[hidden]"] },
+					]);
+					expect(history.filter(item => item.type === "compaction")).toEqual([compactionItem]);
+				}
+				expect(summary).toEqual(originalSummary);
 			},
 		);
 

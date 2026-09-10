@@ -6,6 +6,7 @@ import { buildOpenAiNativeHistory } from "@oh-my-pi/pi-agent-core/compaction/ope
 import type { AssistantMessage, Model, OpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai";
 import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { createMockModel, type MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -155,6 +156,7 @@ describe("AgentSession advisor context maintenance", () => {
 	function createAdvisorFallbackHarness(options?: {
 		sameProviderNativeEnabled?: boolean;
 		contextPromotionEnabled?: boolean;
+		remoteEnabled?: boolean;
 	}) {
 		const primaryMock = createMockModel({
 			provider: "anthropic",
@@ -180,7 +182,7 @@ describe("AgentSession advisor context maintenance", () => {
 		const settings = Settings.isolated({
 			"advisor.syncBacklog": "1",
 			"compaction.enabled": true,
-			"compaction.methodOrder": ["soft"],
+			"compaction.methodOrder": options?.remoteEnabled === false ? ["soft"] : ["remote", "soft"],
 			"contextPromotion.enabled": options?.contextPromotionEnabled ?? false,
 		});
 		settings.setModelRole("advisor", `${nativeModel.provider}/${nativeModel.id}`);
@@ -279,7 +281,7 @@ describe("AgentSession advisor context maintenance", () => {
 		await credentialReturned.promise;
 		await prompt;
 		expect(credentialSignal?.aborted).toBe(true);
-		expect(session.getAdvisorAgent()?.state.model).toBe(advisorMock);
+		expect(session.getAdvisorAgent()?.state.model.id).toBe(advisorMock.id);
 	});
 
 	it("includes advisor system prompt and tool schemas in the local maintenance floor", async () => {
@@ -454,59 +456,87 @@ describe("AgentSession advisor context maintenance", () => {
 		}
 	});
 
-	it("replays native advisor history exactly once through consecutive compactions", async () => {
-		const { advisor, advisorMock, primaryMock, nativeModel, settings } = createAdvisorFallbackHarness();
-		advisor.setModel({
-			...nativeModel,
-			remoteCompaction: { ...nativeModel.remoteCompaction, v2StreamingEnabled: false },
-		});
-		settings.set("compaction.keepRecentTokens", 1);
-		const retained = advisor.state.messages.at(-1);
-		if (retained?.role !== "assistant") throw new Error("Expected retained advisor output");
-		retained.content = [{ type: "text", text: "retained-advisor-boundary" }];
-		const requests: Array<{ input: Array<Record<string, unknown>> }> = [];
-		const fetchFixture = asGlobalFetch(async (_url, init) => {
-			requests.push(JSON.parse(String(init?.body)) as (typeof requests)[number]);
-			const output =
-				requests.length === 1
-					? [
-							{
-								type: "message",
-								role: "user",
-								content: [{ type: "input_text", text: "archived-advisor-decision" }],
-							},
-							{
-								type: "message",
-								role: "assistant",
-								content: [{ type: "output_text", text: "retained-advisor-boundary" }],
-							},
-							{ type: "compaction", encrypted_content: "advisor-replay-1" },
-						]
-					: [{ type: "compaction", encrypted_content: "advisor-replay-2" }];
-			return new Response(JSON.stringify({ output }));
-		});
-		vi.spyOn(globalThis, "fetch").mockImplementation(fetchFixture);
+	it.each([true, false])(
+		"replays consecutive native compactions when the reader's native endpoint is enabled=%s",
+		async readerNativeEnabled => {
+			const { advisor, advisorMock, primaryMock, nativeModel, sameProviderModel, settings } =
+				createAdvisorFallbackHarness();
+			const writer = {
+				...sameProviderModel,
+				remoteCompaction: { ...sameProviderModel.remoteCompaction, v2StreamingEnabled: false },
+			};
+			advisor.setModel({
+				...nativeModel,
+				remoteCompaction: {
+					...nativeModel.remoteCompaction,
+					enabled: readerNativeEnabled,
+					v2StreamingEnabled: false,
+				},
+				compactionModel: `${writer.provider}/${writer.id}`,
+			});
+			vi.spyOn(session.modelRegistry, "getAvailable").mockReturnValue([advisor.state.model, writer]);
+			settings.set("compaction.keepRecentTokens", 1);
+			const retained = advisor.state.messages.at(-1);
+			if (retained?.role !== "assistant") throw new Error("Expected retained advisor output");
+			retained.content = [{ type: "text", text: "retained-advisor-boundary" }];
+			const requests: Array<{ input: Array<Record<string, unknown>> }> = [];
+			const fetchFixture = asGlobalFetch(async (_url, init) => {
+				requests.push(JSON.parse(String(init?.body)) as (typeof requests)[number]);
+				const output =
+					requests.length === 1
+						? [
+								{
+									type: "message",
+									role: "user",
+									content: [{ type: "input_text", text: "archived-advisor-decision" }],
+								},
+								{
+									type: "message",
+									role: "assistant",
+									content: [{ type: "output_text", text: "retained-advisor-boundary" }],
+								},
+								{ type: "compaction", encrypted_content: "advisor-replay-1" },
+							]
+						: [{ type: "compaction", encrypted_content: "advisor-replay-2" }];
+				return new Response(JSON.stringify({ output }));
+			});
+			vi.spyOn(globalThis, "fetch").mockImplementation(fetchFixture);
 
-		await session.prompt("first update after native maintenance");
-		const firstInput = JSON.stringify(buildOpenAiNativeHistory(advisorMock.calls[0].context.messages, nativeModel));
-		expect(firstInput).toContain("archived-advisor-decision");
-		expect(firstInput.match(/retained-advisor-boundary/g)).toHaveLength(1);
-		expect(firstInput.match(/advisor-replay-1/g)).toHaveLength(1);
+			await session.prompt("first update after native maintenance");
+			const firstInput = JSON.stringify(
+				buildParams(
+					advisor.state.model as Model<"openai-responses">,
+					advisorMock.calls[0].context,
+					undefined,
+					undefined,
+				).params.input,
+			);
+			expect(firstInput).toContain("archived-advisor-decision");
+			expect(firstInput.match(/retained-advisor-boundary/g)).toHaveLength(1);
+			expect(firstInput.match(/advisor-replay-1/g)).toHaveLength(1);
 
-		primaryMock.push({ content: ["second primary update complete"] });
-		advisorMock.push({ content: ["second advisor review complete"] });
-		advisor.state.messages.push(usageAnchor(advisorMock, Date.now()));
-		await session.prompt("second update after native maintenance");
-		expect(requests).toHaveLength(2);
-		const secondCompactionInput = JSON.stringify(requests[1].input);
-		expect(secondCompactionInput).toContain("archived-advisor-decision");
-		expect(secondCompactionInput.match(/retained-advisor-boundary/g)).toHaveLength(1);
-		expect(secondCompactionInput.match(/advisor-replay-1/g)).toHaveLength(1);
-		const secondInput = JSON.stringify(buildOpenAiNativeHistory(advisorMock.calls[1].context.messages, nativeModel));
-		expect(secondInput.match(/advisor-replay-2/g)).toHaveLength(1);
-		expect(secondInput).not.toContain("advisor-replay-1");
-		expect(secondInput).not.toContain("prior advisor output");
-	});
+			primaryMock.push({ content: ["second primary update complete"] });
+			advisorMock.push({ content: ["second advisor review complete"] });
+			advisor.state.messages.push(usageAnchor(advisorMock, Date.now()));
+			await session.prompt("second update after native maintenance");
+			expect(requests).toHaveLength(2);
+			const secondCompactionInput = JSON.stringify(requests[1].input);
+			expect(secondCompactionInput).toContain("archived-advisor-decision");
+			expect(secondCompactionInput.match(/retained-advisor-boundary/g)).toHaveLength(1);
+			expect(secondCompactionInput.match(/advisor-replay-1/g)).toHaveLength(1);
+			const secondInput = JSON.stringify(
+				buildParams(
+					advisor.state.model as Model<"openai-responses">,
+					advisorMock.calls[1].context,
+					undefined,
+					undefined,
+				).params.input,
+			);
+			expect(secondInput.match(/advisor-replay-2/g)).toHaveLength(1);
+			expect(secondInput).not.toContain("advisor-replay-1");
+			expect(secondInput).not.toContain("prior advisor output");
+		},
+	);
 
 	it.each(["anthropic", "openai"])(
 		"uses a portable summary when an %s Anthropic-API advisor targets native OpenAI compaction",
@@ -555,7 +585,7 @@ describe("AgentSession advisor context maintenance", () => {
 			expect(wire).toContain("portable archived decision");
 			expect(wire.match(/retained-readable-tail/g)).toHaveLength(1);
 			expect(JSON.stringify(summarizer.calls[0].context.messages)).toContain("archived readable decision");
-			expect(advisor.state.model).toBe(active);
+			expect(advisor.state.model.id).toBe(active.id);
 		},
 	);
 
@@ -593,49 +623,65 @@ describe("AgentSession advisor context maintenance", () => {
 
 		await session.prompt("promote and compact the advisor");
 
-		expect(advisor.state.model).toBe(promoted);
+		expect(advisor.state.model.id).toBe(promoted.id);
 		const wire = JSON.stringify(convertAnthropicMessages(advisorMock.calls[0].context.messages, promoted, false));
 		expect(wire).toContain("portable promoted-model summary");
 		expect(wire.match(/post-promotion-retained-tail/g)).toHaveLength(1);
 	});
 
-	it.each([false, true])("preserves native replay across a context promotion (compatible=%s)", async compatible => {
-		const { advisor, advisorMock, nativeModel, crossProviderModel, sameProviderModel } = createAdvisorFallbackHarness(
-			{ contextPromotionEnabled: true },
-		);
-		const target = { ...(compatible ? sameProviderModel : crossProviderModel), contextWindow: 1_000_000 };
-		const active = {
-			...nativeModel,
-			contextPromotionTarget: `${target.provider}/${target.id}`,
-			remoteCompaction: { ...nativeModel.remoteCompaction, v2StreamingEnabled: false },
-			compactionModel: `${target.provider}/${target.id}`,
-		};
-		advisor.setModel(active);
-		advisor.replaceMessages([
-			nativeSummary(nativeModel.provider),
-			usageAnchor(advisorMock, Date.now() - 1_000),
-			usageAnchor(advisorMock, Date.now()),
-		]);
-		vi.spyOn(session.modelRegistry, "getAvailable").mockReturnValue([active, target]);
-		const compactionRequests: string[] = [];
-		vi.spyOn(globalThis, "fetch").mockImplementation(
-			asGlobalFetch(async (_url, init) => {
-				compactionRequests.push(String(init?.body));
-				return Response.json({ output: nativeSummary(nativeModel.provider).providerPayload.items });
-			}),
-		);
+	it.each(["foreign", "enabled", "remote-disabled", "model-disabled"])(
+		"preserves native replay across a context promotion with %s compaction",
+		async policy => {
+			const compatible = policy !== "foreign";
+			const { advisor, advisorMock, nativeModel, crossProviderModel, sameProviderModel } =
+				createAdvisorFallbackHarness({
+					contextPromotionEnabled: true,
+					remoteEnabled: policy !== "remote-disabled",
+					sameProviderNativeEnabled: policy !== "model-disabled",
+				});
+			const target = { ...(compatible ? sameProviderModel : crossProviderModel), contextWindow: 1_000_000 };
+			const active = {
+				...nativeModel,
+				contextPromotionTarget: `${target.provider}/${target.id}`,
+				remoteCompaction: { ...nativeModel.remoteCompaction, v2StreamingEnabled: false },
+				compactionModel: `${target.provider}/${target.id}`,
+			};
+			advisor.setModel(active);
+			advisor.replaceMessages([
+				nativeSummary(nativeModel.provider),
+				usageAnchor(advisorMock, Date.now() - 1_000),
+				usageAnchor(advisorMock, Date.now()),
+			]);
+			vi.spyOn(session.modelRegistry, "getAvailable").mockReturnValue([active, target]);
+			const compactionRequests: string[] = [];
+			vi.spyOn(globalThis, "fetch").mockImplementation(
+				asGlobalFetch(async (_url, init) => {
+					compactionRequests.push(String(init?.body));
+					return Response.json({ output: nativeSummary(nativeModel.provider).providerPayload.items });
+				}),
+			);
 
-		await session.prompt("review after native context promotion");
+			await session.prompt("review after native context promotion");
 
-		expect(advisor.state.model).toBe(compatible ? target : active);
-		const wire = JSON.stringify(buildOpenAiNativeHistory(advisorMock.calls[0].context.messages, advisor.state.model));
-		expect(wire.match(/native-retained-decision/g)).toHaveLength(1);
-		expect(wire.match(/advisor-native-state/g)).toHaveLength(1);
-		if (!compatible) {
-			expect(compactionRequests).toHaveLength(1);
-			expect(compactionRequests[0].match(/advisor-native-state/g)).toHaveLength(1);
-		}
-	});
+			expect(advisor.state.model.id).toBe(compatible ? target.id : active.id);
+			const wire = JSON.stringify(
+				buildParams(
+					advisor.state.model as Model<"openai-responses">,
+					advisorMock.calls[0].context,
+					undefined,
+					undefined,
+				).params.input,
+			);
+			expect(wire.match(/native-retained-decision/g)).toHaveLength(1);
+			expect(wire.match(/advisor-native-state/g)).toHaveLength(1);
+			if (!compatible) {
+				expect(compactionRequests).toHaveLength(1);
+				expect(compactionRequests[0].match(/advisor-native-state/g)).toHaveLength(1);
+			} else {
+				expect(compactionRequests).toHaveLength(0);
+			}
+		},
+	);
 
 	it("keeps native history when only an incompatible summarizer has credentials", async () => {
 		const { advisor, advisorMock, nativeModel, crossProviderModel, settings, apiKeySpy } =
@@ -662,6 +708,49 @@ describe("AgentSession advisor context maintenance", () => {
 		expect(wire.match(/advisor-native-state/g)).toHaveLength(1);
 		expect(compactSpy).not.toHaveBeenCalled();
 	});
+
+	it.each(["remote-disabled", "model-disabled", "missing-native-result"])(
+		"retains opaque history when native maintenance is %s",
+		async policy => {
+			const { advisor, advisorMock, nativeModel, sameProviderModel } = createAdvisorFallbackHarness({
+				remoteEnabled: policy !== "remote-disabled",
+				sameProviderNativeEnabled: false,
+			});
+			const active = {
+				...nativeModel,
+				remoteCompaction: { ...nativeModel.remoteCompaction, enabled: policy !== "model-disabled" },
+			};
+			advisor.setModel(active);
+			vi.spyOn(session.modelRegistry, "getAvailable").mockReturnValue([active, sameProviderModel]);
+			advisor.replaceMessages([
+				nativeSummary(active.provider),
+				usageAnchor(advisorMock, Date.now() - 1_000),
+				usageAnchor(advisorMock, Date.now()),
+			]);
+			const originalMessages = [...advisor.state.messages];
+			const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+				summary: "placeholder-only summary discarded the native history",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+			}));
+
+			await session.prompt("review despite unavailable native maintenance");
+
+			if (policy === "missing-native-result") {
+				expect(compactSpy).toHaveBeenCalledTimes(1);
+			} else {
+				expect(compactSpy).not.toHaveBeenCalled();
+			}
+			expect(advisor.state.messages.slice(0, originalMessages.length)).toEqual(originalMessages);
+			const wire = JSON.stringify(
+				buildParams(active as Model<"openai-responses">, advisorMock.calls[0].context, undefined, undefined).params
+					.input,
+			);
+			expect(wire.match(/native-retained-decision/g)).toHaveLength(1);
+			expect(wire.match(/advisor-native-state/g)).toHaveLength(1);
+			expect(wire).not.toContain("placeholder-only summary");
+		},
+	);
 
 	it("rejects an unreadable compaction result without replacing readable advisor history", async () => {
 		const { advisor, advisorMock, modelRegistry } = createHarness();

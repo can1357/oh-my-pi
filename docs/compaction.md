@@ -57,6 +57,8 @@ while `custom` messages pass through as developer messages with their raw conten
 
 Native replay also requires a matching provider and a Responses-family API on the active model. A separate native compaction endpoint does not give a Chat Completions or Anthropic encoder the ability to consume its output.
 
+Disabling future native compaction does not disable normal replay of an existing payload. Compaction preparation has a separate, stricter reuse policy: local summarization must re-expand the original messages rather than treat an opaque placeholder as a readable summary.
+
 ## Compaction pipeline
 
 ### Triggers

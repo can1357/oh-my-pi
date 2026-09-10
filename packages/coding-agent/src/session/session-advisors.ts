@@ -11,6 +11,7 @@ import {
 	type Tokenizer,
 } from "@oh-my-pi/pi-agent-core";
 import {
+	canReplayRemoteCompaction,
 	type CompactionResult,
 	compact,
 	compactionContextTokens,
@@ -19,7 +20,6 @@ import {
 	isOpenAiRemoteCompactionApi,
 	NativeCompactionError,
 	prepareCompaction,
-	remotePreserveReusable,
 	type SessionMessageEntry,
 	shouldCompact,
 	shouldUseProviderNativeCompaction,
@@ -89,7 +89,7 @@ import {
 } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ClientBridge } from "./client-bridge";
-import { resolveCompactionMethodOrder } from "./compaction-methods";
+import { resolveCompactionMethodOrder, resolveMethodSettings } from "./compaction-methods";
 import type { CustomMessage, CustomMessagePayload } from "./messages";
 import { isAdvisorCard, isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
@@ -1380,11 +1380,10 @@ export class SessionAdvisors {
 	}
 
 	#canReplayAdvisorHistory(advisor: ActiveAdvisor, model: Model): boolean {
-		const settings = this.#host.settings.getGroup("compaction");
 		return advisor.agent.state.messages.every(
 			message =>
 				message.role !== "compactionSummary" ||
-				remotePreserveReusable((message as AdvisorCompactionSummaryMessage).preserveData, model, settings),
+				canReplayRemoteCompaction((message as AdvisorCompactionSummaryMessage).preserveData, model),
 		);
 	}
 
@@ -1601,10 +1600,15 @@ export class SessionAdvisors {
 		const agent = advisor.agent;
 		const incomingTokens = agent.tokenizer.countMessage(incoming);
 
-		const compactionSettings = this.#host.settings.getGroup("compaction");
-		if (!compactionSettings.enabled || resolveCompactionMethodOrder(compactionSettings.methodOrder).length === 0) {
+		const configuredCompaction = this.#host.settings.getGroup("compaction");
+		const methods = resolveCompactionMethodOrder(configuredCompaction.methodOrder);
+		if (!configuredCompaction.enabled || methods.length === 0) {
 			return false;
 		}
+		const compactionSettings = resolveMethodSettings(
+			configuredCompaction,
+			methods.includes("remote") ? "remote" : "soft",
+		);
 
 		let advisorModel = agent.state.model;
 		const contextWindow = advisorModel.contextWindow ?? 0;
@@ -1679,7 +1683,14 @@ export class SessionAdvisors {
 		});
 
 		const availableModels = this.#host.modelRegistry.getAvailable();
-		const candidates = this.#host.resolveCompactionModelCandidates(advisorModel, availableModels);
+		let candidates = this.#host.resolveCompactionModelCandidates(advisorModel, availableModels);
+		if (hasNativeHistory) {
+			candidates = candidates.filter(
+				candidate =>
+					this.#canReplayAdvisorHistory(advisor, candidate) &&
+					shouldUseProviderNativeCompaction(candidate, compactionSettings),
+			);
+		}
 		if (candidates.length === 0) {
 			if (hasNativeHistory) {
 				throw new NativeCompactionError(new Error("No compaction model can preserve advisor native history"));
@@ -1692,7 +1703,16 @@ export class SessionAdvisors {
 			this.#host.sessionId(),
 			advisor.slug,
 		);
-		const preparation = prepareCompaction(pathEntries, compactionSettings, advisorModel, agent.tokenizer);
+		// Advisors no longer retain the pre-compaction originals. Prepare opaque
+		// history only for an eligible native writer, independently of whether the
+		// advisor reader itself can create a new compaction. Without such a writer,
+		// the empty-candidate failure above preserves the existing history.
+		const preparation = prepareCompaction(
+			pathEntries,
+			compactionSettings,
+			hasNativeHistory ? candidates[0] : advisorModel,
+			agent.tokenizer,
+		);
 		if (!preparation) {
 			if (hasNativeHistory) {
 				throw new NativeCompactionError(new Error("Cannot prepare advisor native history for compaction"));
@@ -1706,7 +1726,7 @@ export class SessionAdvisors {
 			: agent.state.thinkingLevel;
 
 		// Advisor maintenance uses LLM/native compaction rather than snapcompact's
-		// image renderer, regardless of the primary session's method order.
+		// image renderer, but native creation still requires the remote method.
 
 		let compactResult: CompactionResult | undefined;
 		let lastError: unknown;
@@ -1722,7 +1742,6 @@ export class SessionAdvisors {
 		});
 
 		for (const candidate of candidates) {
-			if (hasNativeHistory && !this.#canReplayAdvisorHistory(advisor, candidate)) continue;
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisorProviderSessionId, { signal });
 			if (!apiKey) continue;
 			if (
@@ -1735,9 +1754,7 @@ export class SessionAdvisors {
 			// A foreign native target can summarize readable history, but its opaque
 			// output cannot replace history consumed by this advisor's active model.
 			const candidatePreparation =
-				candidate.provider === advisorModel.provider &&
-				isOpenAiRemoteCompactionApi(advisorModel.api) &&
-				shouldUseProviderNativeCompaction(advisorModel, compactionSettings)
+				candidate.provider === advisorModel.provider && isOpenAiRemoteCompactionApi(advisorModel.api)
 					? preparation
 					: { ...preparation, settings: { ...compactionSettings, remoteEnabled: false } };
 
@@ -1800,7 +1817,10 @@ export class SessionAdvisors {
 		const firstKeptEntryId = compactResult.firstKeptEntryId;
 		const tokensBefore = compactResult.tokensBefore;
 		const providerPayload = getOpenAiRemoteCompactionPayload(compactResult);
-		if (!remotePreserveReusable(compactResult.preserveData, advisorModel, compactionSettings)) {
+		if (hasNativeHistory && !providerPayload) {
+			throw new NativeCompactionError(new Error("Compaction result did not preserve advisor native history"));
+		}
+		if (!canReplayRemoteCompaction(compactResult.preserveData, advisorModel)) {
 			throw new NativeCompactionError(new Error("Compaction result cannot be replayed by the advisor model"));
 		}
 		// Native replacement history already contains the retained tail. Replaying

@@ -10,6 +10,10 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Context, Message, TextContent } from "@oh-my-pi/pi-ai";
+import type {
+	ResponseFileSearchToolCall,
+	ResponseFunctionWebSearch,
+} from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
 import {
 	builtinCredentialSecretEntries,
 	getExistingSecretPlaceholderKey,
@@ -3668,6 +3672,126 @@ describe("native replay secret obfuscation", () => {
 		expect(detachedScrubbed.preserveData.openaiRemoteCompaction.replacementHistory).toEqual(
 			scrubbed.providerPayload.items,
 		);
+	});
+
+	const fileSearch = { type: "file_search_call" as const, id: "fs-search", status: "completed" as const, queries: [] };
+	const webSearch = { type: "web_search_call" as const, id: "ws-search", status: "completed" as const };
+	const searchCollisionCases: Array<{
+		name: string;
+		item: ResponseFileSearchToolCall | ResponseFunctionWebSearch;
+	}> = [
+		{ name: "file queries", item: { ...fileSearch, queries: ["tok_abc123"] } },
+		{ name: "file result text", item: { ...fileSearch, results: [{ text: "tok_abc123" }] } },
+		{ name: "file result filename", item: { ...fileSearch, results: [{ filename: "tok_abc123.txt" }] } },
+		{
+			name: "file result attributes",
+			item: { ...fileSearch, results: [{ attributes: { label: "tok_abc123", count: 3, enabled: true } }] },
+		},
+		{ name: "web queries", item: { ...webSearch, action: { type: "search", queries: ["tok_abc123"] } } },
+		{ name: "web legacy query", item: { ...webSearch, action: { type: "search", query: "tok_abc123" } } },
+		{
+			name: "web source URL",
+			item: {
+				...webSearch,
+				action: { type: "search", sources: [{ type: "url", url: "https://example.test/tok_abc123" }] },
+			},
+		},
+		{
+			name: "web opened URL",
+			item: { ...webSearch, action: { type: "open_page", url: "https://example.test/tok_abc123" } },
+		},
+		{
+			name: "web find pattern",
+			item: {
+				...webSearch,
+				action: { type: "find_in_page", url: "https://example.test", pattern: "tok_abc123" },
+			},
+		},
+		{
+			name: "web find URL",
+			item: {
+				...webSearch,
+				action: { type: "find_in_page", url: "https://example.test/tok_abc123", pattern: "public text" },
+			},
+		},
+	];
+	it.each(searchCollisionCases)(
+		"collects a collision appearing only in $name before rewriting earlier history",
+		({ item }) => {
+			const obfuscator = new SecretObfuscator([
+				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+				{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace", replacement: "[hidden]" },
+			]);
+			const stale = obfuscator.obfuscate("remember OTHERSECRET");
+			expect(stale).toContain("TOKABC123_");
+			const opaque = { type: "compaction", encrypted_content: "tok_abc123 TOKABC123_" };
+			const messages: Message[] = [
+				{ role: "user", content: stale, timestamp: 1 },
+				{
+					role: "developer",
+					attribution: "agent",
+					content: "native replay",
+					timestamp: 2,
+					providerPayload: { type: "openaiResponsesHistory", provider: "openai", items: [{ ...item }, opaque] },
+				},
+			];
+			const snapshot = structuredClone(messages);
+			const scrubbed = obfuscateMessages(obfuscator, messages);
+			const prompt = scrubbed[0]!;
+			if (prompt.role !== "user" || typeof prompt.content !== "string") throw new Error("Missing earlier prompt");
+			expect(prompt.content).not.toContain("TOKABC123_");
+			expect(obfuscator.deobfuscate(prompt.content)).toBe("remember OTHERSECRET");
+			const replay = scrubbed[1]!;
+			if (replay.role !== "developer" || replay.providerPayload?.type !== "openaiResponsesHistory")
+				throw new Error("Missing native search replay");
+			expect(JSON.stringify(replay.providerPayload.items[0])).not.toContain("tok_abc123");
+			expect(JSON.stringify(replay.providerPayload.items[0])).toContain("[hidden]");
+			expect(replay.providerPayload.items[1]).toBe(opaque);
+			expect(messages).toEqual(snapshot);
+			expect(obfuscateMessages(obfuscator, scrubbed)).toBe(scrubbed);
+		},
+	);
+
+	it("collects native collisions present only in the detached next-compaction source", () => {
+		const obfuscator = new SecretObfuscator([
+			{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+			{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace", replacement: "[hidden]" },
+		]);
+		const stale = obfuscator.obfuscate("remember OTHERSECRET");
+		const opaque = { type: "compaction", encrypted_content: "opaque TOKABC123_" };
+		const replay = {
+			role: "developer" as const,
+			attribution: "agent" as const,
+			content: "native replay",
+			timestamp: 2,
+			providerPayload: { type: "openaiResponsesHistory" as const, provider: "openai", items: [opaque] },
+			preserveData: {
+				openaiRemoteCompaction: {
+					provider: "openai",
+					replacementHistory: [
+						{
+							...webSearch,
+							action: { type: "find_in_page", pattern: "tok_abc123", url: "https://example.test" },
+						},
+						opaque,
+					],
+					compactionItem: opaque,
+				},
+			},
+		};
+		const messages: Message[] = [{ role: "user", content: stale, timestamp: 1 }, replay];
+		const snapshot = structuredClone(messages);
+		const scrubbed = obfuscateMessages(obfuscator, messages);
+		expect(JSON.stringify(scrubbed[0])).not.toContain("TOKABC123_");
+		expect(obfuscator.deobfuscate(JSON.stringify(scrubbed[0]))).toContain("remember OTHERSECRET");
+		const scrubbedReplay = scrubbed[1] as typeof replay;
+		expect(scrubbedReplay.providerPayload).toBe(replay.providerPayload);
+		expect(scrubbedReplay.preserveData.openaiRemoteCompaction.replacementHistory[0]).toMatchObject({
+			action: { type: "find_in_page", pattern: "[hidden]", url: "https://example.test" },
+		});
+		expect(scrubbedReplay.preserveData.openaiRemoteCompaction.compactionItem).toBe(opaque);
+		expect(messages).toEqual(snapshot);
+		expect(obfuscateMessages(obfuscator, scrubbed)).toBe(scrubbed);
 	});
 
 	it("collects collisions from decoded native arguments but never from opaque replay bytes", () => {

@@ -4,7 +4,6 @@ import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createCompactionSummaryMessage } from "@oh-my-pi/pi-agent-core/compaction";
-import { buildOpenAiNativeHistory } from "@oh-my-pi/pi-agent-core/compaction/openai";
 import {
 	type Api,
 	type AssistantMessage,
@@ -17,6 +16,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -1755,68 +1755,101 @@ describe("AgentSession retry fallback", () => {
 		});
 	});
 
-	it("skips foreign and same-provider incompatible APIs when retrying an advisor with native history", async () => {
-		const primary = getBundledModel("openai", "gpt-5")!;
-		const compatible = getBundledModel("openai", "gpt-5-mini")!;
-		const foreign = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-		const wrongApi: Model = { ...getBundledModel("openai", "gpt-4o")!, api: "openai-completions" };
-		const selector = (model: Model) => `${model.provider}/${model.id}`;
-		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
-		const advisorMock = createMockModel();
-		const requestedModels: Model[] = [];
-		const recovered = Promise.withResolvers<void>();
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.fallbackChains": { advisor: [selector(foreign), selector(wrongApi), selector(compatible)] },
-			"advisor.syncBacklog": "1",
-		});
-		settings.setModelRole("advisor", selector(primary));
-		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([primary, foreign, wrongApi, compatible]);
-		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
-		session = new AgentSession({
-			agent: new Agent({
-				getApiKey: () => "test-key",
-				initialState: { model: primary, systemPrompt: [], tools: [] },
-				streamFn: mainMock.stream,
-			}),
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-			advisorTools: [],
-			advisorStreamFn: (model, context, options) => {
-				requestedModels.push(model);
-				advisorMock.push(
-					model.id === primary.id
-						? { throw: "rate limit exceeded retry-after-ms=60000" }
-						: { content: ["Advisor recovered"] },
-				);
-				return advisorMock.stream(model, context, options);
-			},
-		});
-		session.subscribe(event => {
-			if (event.type === "retry_fallback_succeeded") recovered.resolve();
-		});
-		session.setAdvisorEnabled(true);
-		const advisor = session.getAdvisorAgent()!;
-		advisor.replaceMessages([advisorNativeSummary(primary.provider)]);
+	it.each(["enabled", "remote-disabled", "model-disabled"])(
+		"skips incompatible advisor retries and replays compatible history with %s compaction",
+		async policy => {
+			const primary = getBundledModel("openai", "gpt-5")!;
+			const compatibleBase = getBundledModel("openai", "gpt-5-mini")!;
+			const compatible =
+				policy === "model-disabled"
+					? { ...compatibleBase, remoteCompaction: { ...compatibleBase.remoteCompaction, enabled: false } }
+					: compatibleBase;
+			const foreign = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const wrongApi: Model = { ...getBundledModel("openai", "gpt-4o")!, api: "openai-completions" };
+			const wrongAnthropicApi: Model = {
+				...getBundledModel("openai", "gpt-4o-mini")!,
+				api: "anthropic-messages",
+				remoteCompaction: { enabled: true, api: "openai-responses" },
+			};
+			const selector = (model: Model) => `${model.provider}/${model.id}`;
+			const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+			const advisorMock = createMockModel();
+			const requestedModels: Model[] = [];
+			const recovered = Promise.withResolvers<void>();
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"compaction.methodOrder": policy === "remote-disabled" ? ["soft"] : ["remote", "soft"],
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": {
+					advisor: [selector(foreign), selector(wrongApi), selector(wrongAnthropicApi), selector(compatible)],
+				},
+				"advisor.syncBacklog": "1",
+			});
+			settings.setModelRole("advisor", selector(primary));
+			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([
+				primary,
+				foreign,
+				wrongApi,
+				wrongAnthropicApi,
+				compatible,
+			]);
+			vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+			session = new AgentSession({
+				agent: new Agent({
+					getApiKey: () => "test-key",
+					initialState: { model: primary, systemPrompt: [], tools: [] },
+					streamFn: mainMock.stream,
+				}),
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				advisorTools: [],
+				advisorStreamFn: (model, context, options) => {
+					requestedModels.push(model);
+					advisorMock.push(
+						model.id === primary.id
+							? { throw: "rate limit exceeded retry-after-ms=60000" }
+							: { content: ["Advisor recovered"] },
+					);
+					return advisorMock.stream(model, context, options);
+				},
+			});
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_succeeded") recovered.resolve();
+			});
+			session.setAdvisorEnabled(true);
+			const advisor = session.getAdvisorAgent()!;
+			advisor.replaceMessages([advisorNativeSummary(primary.provider)]);
 
-		await session.prompt("review with native history through a provider outage");
-		await recovered.promise;
+			await session.prompt("review with native history through a provider outage");
+			await recovered.promise;
 
-		expect(requestedModels.map(selector)).toEqual([selector(primary), selector(compatible)]);
-		expect(advisor.state.model.api).toBe(compatible.api);
-		const wire = JSON.stringify(buildOpenAiNativeHistory(advisorMock.calls.at(-1)!.context.messages, compatible));
-		expect(wire.match(/retained-advisor-transition-decision/g)).toHaveLength(1);
-		expect(wire.match(/native-advisor-transition-state/g)).toHaveLength(1);
-	});
+			expect(requestedModels.map(selector)).toEqual([selector(primary), selector(compatible)]);
+			expect(advisor.state.model.api).toBe(compatible.api);
+			const wire = JSON.stringify(
+				buildParams(
+					advisor.state.model as Model<"openai-responses">,
+					advisorMock.calls.at(-1)!.context,
+					undefined,
+					undefined,
+				).params.input,
+			);
+			expect(wire.match(/retained-advisor-transition-decision/g)).toHaveLength(1);
+			expect(wire.match(/native-advisor-transition-state/g)).toHaveLength(1);
+		},
+	);
 
-	it.each([false, true])(
-		"restores an advisor primary with native history only when compatible=%s",
-		async compatible => {
-			const primary = compatible
+	it.each(["foreign", "enabled", "remote-disabled", "model-disabled"])(
+		"restores an advisor primary without losing native replay with %s compaction",
+		async policy => {
+			const compatible = policy !== "foreign";
+			const primaryBase = compatible
 				? getBundledModel("openai", "gpt-5-mini")!
 				: getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const primary =
+				policy === "model-disabled"
+					? { ...primaryBase, remoteCompaction: { ...primaryBase.remoteCompaction, enabled: false } }
+					: primaryBase;
 			const fallback = getBundledModel("openai", "gpt-5")!;
 			const primarySelector = `${primary.provider}/${primary.id}`;
 			const fallbackSelector = `${fallback.provider}/${fallback.id}`;
@@ -1828,11 +1861,13 @@ describe("AgentSession retry fallback", () => {
 			const recovered = Promise.withResolvers<void>();
 			const settings = Settings.isolated({
 				"compaction.enabled": false,
+				"compaction.methodOrder": policy === "remote-disabled" ? ["soft"] : ["remote", "soft"],
 				"retry.baseDelayMs": 5,
 				"retry.fallbackChains": { advisor: [fallbackSelector] },
 				"advisor.syncBacklog": "1",
 			});
 			settings.setModelRole("advisor", primarySelector);
+			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([primary, fallback]);
 			vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
 			session = new AgentSession({
 				agent: new Agent({
@@ -1876,7 +1911,12 @@ describe("AgentSession retry fallback", () => {
 			]);
 			expect(advisor.state.model.id).toBe(compatible ? primary.id : fallback.id);
 			const wire = JSON.stringify(
-				buildOpenAiNativeHistory(advisorMock.calls.at(-1)!.context.messages, advisor.state.model),
+				buildParams(
+					advisor.state.model as Model<"openai-responses">,
+					advisorMock.calls.at(-1)!.context,
+					undefined,
+					undefined,
+				).params.input,
 			);
 			expect(wire.match(/retained-advisor-transition-decision/g)).toHaveLength(1);
 			expect(wire.match(/native-advisor-transition-state/g)).toHaveLength(1);

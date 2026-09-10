@@ -190,6 +190,57 @@ function mapNativeReplayItem(value: unknown, transform: (text: string) => string
 			// Nonempty encrypted argument metadata denotes opaque collaboration data.
 			if (Array.isArray(value.encrypted_function_args) && value.encrypted_function_args.length > 0) return value;
 			return mapNativeField(value, "arguments", args);
+		case "file_search_call":
+			return mapNativeField(
+				mapNativeField(value, "queries", queries => mapNativeArray(queries, text)),
+				"results",
+				results =>
+					mapNativeArray(results, result => {
+						if (!isRecord(result)) return result;
+						return mapNativeField(
+							mapNativeField(mapNativeField(result, "text", text), "filename", text),
+							"attributes",
+							attributes => {
+								if (!isRecord(attributes)) return attributes;
+								// File-search attributes are a flat string/number/boolean map, not arbitrary JSON.
+								let mapped: Record<string, unknown> | undefined;
+								for (const key of Object.keys(attributes)) {
+									const next = text(attributes[key]);
+									if (next !== attributes[key]) {
+										mapped ??= { ...attributes };
+										mapped[key] = next;
+									}
+								}
+								return mapped ?? attributes;
+							},
+						);
+					}),
+			);
+		case "web_search_call":
+			return mapNativeField(value, "action", action => {
+				if (!isRecord(action)) return action;
+				switch (action.type) {
+					case "search":
+						return mapNativeField(
+							mapNativeField(
+								mapNativeField(action, "queries", queries => mapNativeArray(queries, text)),
+								"query",
+								text,
+							),
+							"sources",
+							sources =>
+								mapNativeArray(sources, source =>
+									isRecord(source) && source.type === "url" ? mapNativeField(source, "url", text) : source,
+								),
+						);
+					case "open_page":
+						return mapNativeField(action, "url", text);
+					case "find_in_page":
+						return mapNativeField(mapNativeField(action, "pattern", text), "url", text);
+					default:
+						return action;
+				}
+			});
 		case "tool_search_call":
 		case "mcp_approval_request":
 			return mapNativeField(value, "arguments", args);
@@ -239,6 +290,30 @@ function mapNativeReplayItem(value: unknown, transform: (text: string) => string
 			return mapNativeField(value, "reason", text);
 		default:
 			return value;
+	}
+}
+
+/** Collect native plaintext before any replay fields lose regex values through redaction. */
+export function collectNativeReplayRegexSecretValues(
+	obfuscator: SecretObfuscator,
+	message: { providerPayload?: ProviderPayload; preserveData?: Record<string, unknown> },
+	values: Set<string>,
+): void {
+	if (!obfuscator.hasSecrets()) return;
+	const payload = message.providerPayload;
+	const remote = message.preserveData?.openaiRemoteCompaction;
+	if (payload?.type !== "openaiResponsesHistory" && !isRecord(remote)) return;
+	const collectItem = (item: unknown): unknown =>
+		mapNativeReplayItem(item, text => {
+			for (const value of obfuscator.collectRegexSecretValuesForObfuscation(text)) values.add(value);
+			return text;
+		});
+	if (payload?.type === "openaiResponsesHistory") mapNativeArray(payload.items, collectItem);
+	if (isRecord(remote)) {
+		if (payload?.type !== "openaiResponsesHistory" || remote.replacementHistory !== payload.items) {
+			mapNativeArray(remote.replacementHistory, collectItem);
+		}
+		collectItem(remote.compactionItem);
 	}
 }
 
@@ -374,13 +449,8 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
 		}
 	};
 	for (const message of messages) {
-		if ("providerPayload" in message && message.providerPayload?.type === "openaiResponsesHistory") {
-			for (const item of message.providerPayload.items) {
-				mapNativeReplayItem(item, text => {
-					addText(text);
-					return text;
-				});
-			}
+		if (message.role === "user" || message.role === "developer" || message.role === "assistant") {
+			collectNativeReplayRegexSecretValues(obfuscator, message, values);
 		}
 		if (message.role === "assistant") {
 			for (const block of message.content) {

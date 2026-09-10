@@ -2173,8 +2173,10 @@ describe("compact() remote compaction failure handling", () => {
 		expect(requestInput.at(-1)).toEqual({ type: "compaction_trigger" });
 	});
 
-	test("re-expands a prior V2 compaction's originals when no candidate can reuse the replay", async () => {
-		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("re-expanded local summary"));
+	test("re-expands native history for local preparation when new native compaction is disabled", async () => {
+		const localComplete = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(localSummaryMessage("re-expanded local summary"));
 		const compactionItem = { type: "compaction", encrypted_content: "enc_v2" };
 		const v2Model = makeOpenAiModel({
 			remoteCompaction: {
@@ -2198,8 +2200,6 @@ describe("compact() remote compaction failure handling", () => {
 					},
 				]),
 		});
-		// V2 success persists only the opaque placeholder — no second local summarization round.
-		expect(v2Result.summary).toContain("Remote compaction preserved provider-native history");
 
 		// Session branch after that V2 compaction: originals + compaction boundary + new turns.
 		const ts = (n: number) => new Date(n).toISOString();
@@ -2238,11 +2238,23 @@ describe("compact() remote compaction failure handling", () => {
 		];
 		const baseSettings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 };
 
-		// Remote disabled → the V2 replay is unusable → re-expand the pre-V2 original.
-		const reexpanded = prepareCompaction(entries, { ...baseSettings, remoteEnabled: false }, v2Model);
-		expect(reexpanded).toBeDefined();
-		const reexpandedText = JSON.stringify(reexpanded?.messagesToSummarize ?? []);
-		expect(reexpandedText).toContain("ORIGINAL ALPHA port 4242");
+		// Normal replay still works, but local preparation must re-expand the
+		// originals rather than send an opaque placeholder to its summarizer.
+		for (const { model, settings } of [
+			{ model: v2Model, settings: { ...baseSettings, remoteEnabled: false } },
+			{
+				model: { ...v2Model, remoteCompaction: { ...v2Model.remoteCompaction, enabled: false } },
+				settings: baseSettings,
+			},
+		]) {
+			const reexpanded = prepareCompaction(entries, settings, model);
+			if (!reexpanded) throw new Error("Expected local compaction preparation");
+			localComplete.mockClear();
+			await compact(reexpanded, model, "k");
+			expect(JSON.stringify(localComplete.mock.calls.map(([, context]) => context.messages))).toContain(
+				"ORIGINAL ALPHA port 4242",
+			);
+		}
 
 		// Remote + V2 still enabled, same provider → reuse the replay, don't re-summarize originals.
 		const reused = prepareCompaction(entries, { ...baseSettings, remoteStreamingV2Enabled: true }, v2Model);

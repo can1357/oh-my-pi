@@ -1268,19 +1268,27 @@ export interface CompactionPreparation {
 }
 
 /**
- * Whether a prior remote compaction's provider-native replay can still be read
- * by the active model — the model that assembles the request context on every
- * turn. A local compaction (no remote preserve) always can: it holds a real
- * textual summary. A remote compaction (V2 or V1) only can when the active model
- * shares the blob's provider, speaks the Responses API, and remote replay is
- * still enabled; otherwise the active model's encoder drops the payload
- * and only the opaque placeholder summary survives, so the caller must re-expand
- * the originals into a portable local summary rather than strand that history.
+ * Whether the active model's normal encoder can consume stored native history.
+ * Creating future compactions is a separate policy: disabling it does not disable
+ * Responses-family replay. Local summaries have no provider restriction.
+ */
+export function canReplayRemoteCompaction(
+	preserveData: Record<string, unknown> | undefined,
+	activeModel: Model,
+): boolean {
+	const remote = getCompactionV2PreserveData(preserveData) ?? getPreservedOpenAiRemoteCompactionData(preserveData);
+	return !remote || (remote.provider === activeModel.provider && isOpenAiRemoteCompactionApi(activeModel.api));
+}
+
+/**
+ * Whether compaction preparation may reuse a native boundary instead of
+ * re-expanding its original messages. This is deliberately stricter than normal
+ * replay: the active model must both read the payload and remain eligible for
+ * native compaction under the current settings. Otherwise local summarization
+ * needs the originals, not an opaque placeholder.
  *
- * Judged against the ACTIVE model, not the compaction candidate set: a role
- * model (e.g. `modelRoles.smol`) that still maps to the blob's provider does not
- * let the active model replay it, so keying reuse on "any candidate shares the
- * provider" left a provider-switched session permanently context-less (#6343).
+ * Main-session preparation is judged against the active model, not any role
+ * candidate, so a provider switch cannot strand the original history (#6343).
  */
 export function remotePreserveReusable(
 	preserveData: Record<string, unknown> | undefined,
@@ -1289,18 +1297,16 @@ export function remotePreserveReusable(
 ): boolean {
 	const remote = getCompactionV2PreserveData(preserveData) ?? getPreservedOpenAiRemoteCompactionData(preserveData);
 	if (!remote) return true;
-	if (settings.remoteEnabled === false) return false;
-	if (remote.provider !== activeModel.provider) return false;
-	// A separate native compaction endpoint does not give the active encoder
-	// support for replaying its output (e.g. Chat Completions on OpenAI).
-	if (!isOpenAiRemoteCompactionApi(activeModel.api)) return false;
-	const v2Ok = settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(activeModel);
-	return v2Ok || shouldUseOpenAiRemoteCompaction(activeModel);
+	return (
+		remote.provider === activeModel.provider &&
+		isOpenAiRemoteCompactionApi(activeModel.api) &&
+		shouldUseProviderNativeCompaction(activeModel, settings)
+	);
 }
 
 /**
- * Index of the newest compaction entry the active model can actually read, or
- * `-1` when none can.
+ * Index of the newest compaction boundary reusable under preparation policy,
+ * or `-1` when none can be reused (see {@link remotePreserveReusable}).
  *
  * A provider-native remote compaction (V2 or V1) stores an opaque replay payload
  * and only a placeholder summary, so for any OTHER provider that entry

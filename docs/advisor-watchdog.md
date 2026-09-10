@@ -315,6 +315,8 @@ The advisor has its own append-only context. Before each advisor prompt, `AgentS
 
 Native compaction replaces advisor history only when the active model can replay its provider and Responses API format. A foreign native-enabled summarizer uses portable text summarization for readable history instead. Once the advisor holds native history, incompatible summarizers, retry fallbacks, cooldown restorations, and context promotions are skipped. Maintenance failure preserves that history rather than re-priming it away; normal advisor request-failure handling still applies.
 
+Replay compatibility does not require new native compaction to be enabled. Same-provider Responses models can receive existing native history during fallback, cooldown restoration, or promotion even when their own compaction endpoint is disabled. Creating a new native result still requires `remote` in `compaction.methodOrder` and an eligible writer; a separate compatible writer can maintain a reader whose native endpoint is disabled.
+
 The advisor's live context is in-memory and append-only; it is retained while the session runs so `/advisor dump` can inspect it, and is independently promoted/compacted/re-primed (above). It is not a replacement for the primary persisted transcript.
 
 ## Transcript persistence and observability
