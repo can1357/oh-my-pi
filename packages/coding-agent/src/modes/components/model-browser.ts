@@ -355,14 +355,15 @@ export function formatRoleChip(role: string, assignment: RoleAssignment, setting
 	return theme.fg(info.color ?? "muted", `${theme.status.enabled} ${label}`) + suffix;
 }
 
-/** `$in/out` per-million cost pair; `free` when both legs are zero. */
+/** Catalog `$in/out` per-million metadata; unavailable prices remain explicit. */
 function formatCostPair(model: Model): string {
 	const cost = model.cost;
-	if (!cost || (cost.input <= 0 && cost.output <= 0)) return "free";
+	if (!cost) return "n/a";
 	const fmt = (n: number): string => {
-		if (n <= 0) return "0";
+		if (!Number.isFinite(n) || n < 0) return "?";
+		if (n > 0 && n < 0.01) return String(n);
 		const s = n >= 100 ? String(Math.round(n)) : n >= 10 ? n.toFixed(1) : n.toFixed(2);
-		return s.replace(/\.?0+$/, "");
+		return s.includes(".") ? s.replace(/\.?0+$/, "") : s;
 	};
 	return `$${fmt(cost.input)}/${fmt(cost.output)}`;
 }

@@ -249,12 +249,44 @@ describe("ModelBrowser native model metadata", () => {
 			}),
 		);
 
-		expect(detail).toContain("swe-2 · new · beta · recommended · 128k ctx · 1k out · free per M");
+		expect(detail).toContain("swe-2 · new · beta · recommended · 128k ctx · 1k out · $0/0 per M");
 		// Tabs and newlines are flattened so the blurb stays one detail row.
-		expect(detail).toMatch(/free per M · Fast {2,}agentic coder$/);
+		expect(detail).toMatch(/\$0\/0 per M · Fast {2,}agentic coder$/);
 	});
 
 	test("models without upstream metadata render the plain detail line", () => {
-		expect(renderDetail(makeModel("openai", "gpt-5"))).toContain("gpt-5 · 128k ctx · 1k out · free per M");
+		expect(renderDetail(makeModel("openai", "gpt-5"))).toContain("gpt-5 · 128k ctx · 1k out · $0/0 per M");
+	});
+
+	test("price rows distinguish zero metadata, missing prices and invalid rates", () => {
+		const zero = makeModel("fixture", "zero");
+		const missing = makeModel("fixture", "missing");
+		Object.assign(missing, { cost: undefined });
+		const partial = makeModel("fixture", "partial");
+		partial.cost.input = Number.NaN;
+		partial.cost.output = 2;
+		const invalid = makeModel("fixture", "invalid");
+		invalid.cost.input = -1;
+		invalid.cost.output = Number.POSITIVE_INFINITY;
+		const browser = makeBrowser([zero, missing, partial, invalid], []);
+		const rows = browser.render(100).map(line => Bun.stripANSI(line));
+		expect(rows.find(line => line.includes("fixture/zero"))).toContain("$0/0");
+		expect(rows.find(line => line.includes("fixture/missing"))).toContain("n/a");
+		expect(rows.find(line => line.includes("fixture/partial"))).toContain("$?/2");
+		expect(rows.find(line => line.includes("fixture/invalid"))).toContain("$?/?");
+		expect(rows.join("\n")).not.toContain("free");
+		browser.setQuery("zero");
+		expect(browser.getSelected()?.model).toBe(zero);
+	});
+
+	test("price formatting preserves integer zeros and positive sub-cent rates", () => {
+		const model = makeModel("fixture", "priced");
+		model.cost.input = 100;
+		model.cost.output = 0.001;
+		const browser = makeBrowser([model], []);
+		const rows = browser.render(100).map(line => Bun.stripANSI(line));
+		expect(rows[2]).toContain("$100/0.001");
+		expect(rows[rows.length - 2]).toContain("$100/0.001 per M");
+		expect(rows.every(line => Bun.stringWidth(line) <= 100)).toBe(true);
 	});
 });
