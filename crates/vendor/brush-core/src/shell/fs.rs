@@ -33,7 +33,15 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		}
 
 		// Normalize the path (but don't canonicalize it).
-		let cleaned_path = abs_path.normalize();
+		let normalized = abs_path.normalize();
+		// Expand 8.3 short-name components (e.g. ADMINI~1) to long form so the
+		// stored working_dir has one canonical spelling regardless of which
+		// spelling the host/host process handed us. GetLongPathNameW does NOT
+		// resolve symlinks, preserving the shell's existing cd semantics.
+		#[cfg(windows)]
+		let cleaned_path = crate::sys::fs::expand_to_long_path(&normalized);
+		#[cfg(not(windows))]
+		let cleaned_path = normalized;
 
 		let pwd = cleaned_path.to_string_lossy().to_string();
 

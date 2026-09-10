@@ -440,4 +440,36 @@ describe("VaultProtocolHandler", () => {
 		vi.spyOn(vaultProtocol, "resolveObsidianBinary").mockReturnValue(null);
 		expect(vaultProtocol.hasObsidian()).toBe(false);
 	});
+
+	it("resolves the same vault root file to a consistent spelling across the sync and async paths", async () => {
+		// On Windows hosts whose TEMP/profile is an 8.3 short-name alias, the
+		// sync path (fs.realpathSync) and the async read path
+		// (fs.promises.realpath) used to resolve a single vault root to two
+		// different absolute-path spellings of the same physical file. The
+		// sync path now uses the long-form native realpath, so both must agree.
+		await withTempDir(async tempDir => {
+			const root = path.join(tempDir, "vault");
+			const note = path.join(root, "Folder", "note.md");
+			await fs.mkdir(path.dirname(note), { recursive: true });
+			await fs.writeFile(note, "# Note\nbody");
+			VaultProtocolHandler.setVaultDirectoryForTests({ Work: root });
+
+			const handler = new VaultProtocolHandler({ resolveObsidianBinary: () => null });
+			const resource = await handler.resolve(resourceUrl("vault://Work/Folder/note.md"));
+
+			// The vault directory may or may not be under an 8.3-spelled
+			// ancestor (os.tmpdir() is short-name on some Windows setups).
+			// Whatever the spelling of `root`, both paths must return the
+			// same spelling for the same physical file.
+			const asyncSource = resource.sourcePath;
+			if (asyncSource === undefined) {
+				throw new Error("Resolved vault resource is missing its source path");
+			}
+			const syncPath = resolveVaultUrlToPath("vault://Work/Folder/note.md");
+
+			// The sync bash path and the async read path must yield the same
+			// spelling for the same physical file (no short/long split).
+			expect(syncPath).toEqual(await fs.realpath(asyncSource));
+		});
+	});
 });
