@@ -639,3 +639,15 @@ it("expands selected builtin, custom, and chained roles before credential-scoped
 		});
 	}
 });
+
+it("expands chained modelRoles.default without a CLI model selector before credential-scoped refresh", () => {
+	const roles: Record<string, string> = {
+		default: "@smol",
+		smol: "grokbot/live-only",
+	};
+	const lookup = { getModelRole: (role: string) => roles[role] };
+	expect(resolveCredentialScopedRefreshTarget({}, lookup)).toEqual({
+		providerId: "grokbot",
+		selectors: { model: "grokbot/live-only" },
+	});
+});

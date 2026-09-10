@@ -301,6 +301,13 @@ describe("toolSmokePrompt", () => {
 		// Numeric printf converts args — nonnumeric ping must not pass as literal.
 		expect(echoLikeShellCommand(`printf '%d' '${ping}'`, ping)).toBe(false);
 		expect(echoLikeShellCommand(`printf '%f' '${ping}'`, ping)).toBe(false);
+
+		// Command substitutions expand at runtime — lexical includes(ping) must not pass.
+		expect(echoLikeShellCommand(`echo "$(${ping})"`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`echo "$(echo ${ping})"`, ping)).toBe(false);
+		expect(echoLikeShellCommand('echo "`' + ping + '`"', ping)).toBe(false);
+		expect(echoLikeShellCommand(`echo '$(${ping})'`, ping)).toBe(true);
+
 		expect(echoLikeShellCommand(`printf '%d' '42'`, "42")).toBe(true);
 		// Later non-zero exit fails the overall command; runOneTool fabricates isError:false.
 		expect(echoLikeShellCommand(`echo ${ping}; exit 1`, ping)).toBe(false);
@@ -569,6 +576,18 @@ describe("toolSmokePrompt", () => {
 				id,
 			),
 		).toBe(true);
+		// Command substitution must not count as write evidence (runOneTool fabricates the ping).
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{
+					name: "Shell",
+					arguments: { command: `echo "$(${ping})" > "${writePath}"` },
+				},
+				ping,
+				id,
+			),
+		).toBe(false);
 		// Relative suffix paths invent a different file (`backup/notes/...`).
 		expect(
 			matchesToolSmokeCall(
