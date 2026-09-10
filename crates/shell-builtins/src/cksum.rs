@@ -514,7 +514,7 @@ fn sanitize_cksum_length(
 		// For any other provided algorithm, check if length is 0.
 		// Otherwise, this is an error.
 		(_, Some(len)) if len.parse::<u32>() == Ok(0) => Ok(None),
-		(_, Some(_)) => Err(failure(ChecksumError::LengthOnlyForBlake2bSha2Sha3)),
+		(_, Some(_)) => Err(failure(ChecksumError::LengthOnlyForVariableAlgorithm)),
 	}
 }
 
@@ -1543,7 +1543,7 @@ fn identify_algo_name_and_length(
 			// Either
 			//  the algo based line is provided with a bit length with an
 			//  algorithm that does not support it (only Blake2b, Blake3, sha2,
-			//  and sha3 do).
+			//  sha3, shake128, and shake256 do).
 			//
 			//  eg: MD5-128 (foo.txt) = fffffffff
 			//          ^ This is illegal
@@ -2201,6 +2201,19 @@ mod tests {
 			assert_eq!(capture.out(), "BLAKE2b-8 (-) = 6b\n");
 		}
 
+		/// Failure mode: `-a shake128 -l 128` must preserve the SHAKE XOF
+		/// output length in its tagged algorithm manifest.
+		#[test]
+		fn shake128_length_is_honored() {
+			let (code, capture) =
+				run_util::<Cksum>(&["-a", "shake128", "-l", "128"], "", "/");
+			assert_eq!(code, 0);
+			assert_eq!(
+				capture.out(),
+				"SHAKE128-128 (-) = 7f9c2ba4e88f827d616045507605853e\n"
+			);
+		}
+
 		/// Failure mode: GNU rejects `--length` for non-length algorithms;
 		/// silently ignoring it would hide user error.
 		#[test]
@@ -2238,6 +2251,22 @@ mod tests {
 			)
 			.unwrap();
 			let (code, capture) = run_util::<Cksum>(&["-c", "list"], "", dir.path());
+			assert_eq!(code, 0, "stderr: {}", capture.err());
+			assert_eq!(capture.out(), "data: OK\n");
+		}
+
+		/// Failure mode: SHAKE tagged manifests must parse their bit length and
+		/// verify against the corresponding XOF output.
+		#[test]
+		fn check_verifies_tagged_shake_manifest() {
+			let dir = tempfile::tempdir().unwrap();
+			fs::write(dir.path().join("data"), b"").unwrap();
+			fs::write(
+				dir.path().join("list"),
+				b"SHAKE128-128 (data) = 7f9c2ba4e88f827d616045507605853e\n",
+			)
+			.unwrap();
+			let (code, capture) = run_util::<Cksum>(&["-a", "shake128", "-c", "list"], "", dir.path());
 			assert_eq!(code, 0, "stderr: {}", capture.err());
 			assert_eq!(capture.out(), "data: OK\n");
 		}

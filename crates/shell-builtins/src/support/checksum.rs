@@ -526,7 +526,7 @@ impl SizedAlgoKind {
 					| A::Sha384
 					| A::Sha512
 			) {
-			return Err(ChecksumError::LengthOnlyForBlake2bSha2Sha3);
+			return Err(ChecksumError::LengthOnlyForVariableAlgorithm);
 		}
 		Ok(match (kind, length) {
 			(A::Sysv, _) => Self::Sysv,
@@ -641,8 +641,8 @@ pub(crate) enum ChecksumError {
 	InvalidLengthForSha(String),
 	#[error("--algorithm={0} requires specifying --length 224, 256, 384, or 512")]
 	LengthRequiredForSha(String),
-	#[error("--length is only supported with --algorithm blake2b, sha2, or sha3")]
-	LengthOnlyForBlake2bSha2Sha3,
+	#[error("--length is only supported with --algorithm blake2b, blake3, sha2, sha3, shake128, or shake256")]
+	LengthOnlyForVariableAlgorithm,
 	#[error("the --binary and --text options are meaningless when verifying checksums")]
 	BinaryTextConflict,
 	#[error("--text mode is only supported with --untagged")]
