@@ -4,6 +4,7 @@ export interface OrphanSweepState {
 	disconnected: boolean;
 	hasTrackedAttachments: boolean;
 	existingDeadlineMs: number | null;
+	recoveryStateLoading?: boolean;
 	attachmentReconciliationPending?: boolean;
 }
 
@@ -31,7 +32,13 @@ export function orphanSweepSeesRelayDisconnected(
  */
 export function nextOrphanSweepDeadline(
 	state: OrphanSweepState,
-): number | null {
+): number | null | undefined {
+	// A fresh MV3 worker does not know whether the persisted recovery state owns
+	// an orphan deadline until storage.session.get settles. Returning undefined
+	// tells onSuspend to leave both the alarm and storage untouched; treating the
+	// empty in-memory state as authoritative here would erase the only wake-up
+	// capable of reclaiming a surviving debugger attachment.
+	if (state.recoveryStateLoading === true) return undefined;
 	// A startup getTargets failure leaves the in-memory guard empty even though
 	// persisted ownership may still correspond to a live Chrome attachment. Do
 	// not let a later onSuspend interpret that temporary absence as authoritative

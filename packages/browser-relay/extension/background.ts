@@ -106,6 +106,10 @@ const recoveryLoaderGenerations = new Map<number, number>();
 let recoverableUpdateGeneration = 0;
 const recoverableStartupMutations = new Set<number>();
 let orphanSweepDeadlineMs: number | null = null;
+// A fresh worker must not interpret the empty in-memory deadline/guard as an
+// authoritative absence while the initial storage.session read is unresolved.
+// onSuspend uses this to preserve the persisted alarm until the read succeeds.
+let orphanRecoveryStateLoading = true;
 // True after persisted ownership has loaded but before getTargets has
 // authoritatively reconciled it into the in-memory attachment guard. A failed
 // startup discovery must not let onSuspend clear the persisted sweep deadline
@@ -171,6 +175,7 @@ const loadRecoverableState = createRetryableLoader(() => {
 				orphanSweepDeadlineGeneration === 0,
 			);
 			if (deadline !== undefined) orphanSweepDeadlineMs = deadline;
+			orphanRecoveryStateLoading = false;
 			return true;
 		});
 });
@@ -384,6 +389,7 @@ async function maybeScheduleOrphanSweep(
 	requireRecoveryStateLoaded(await loadRecoverableState());
 	await flushRecoverableUpdates();
 	const nextDeadlineMs = computeNextOrphanSweepDeadline(forceDisconnected);
+	if (nextDeadlineMs === undefined) return;
 	await setOrphanSweepDeadline(nextDeadlineMs);
 }
 
@@ -400,7 +406,7 @@ function relayInitializedReadyState(): number | null | undefined {
 
 function computeNextOrphanSweepDeadline(
 	forceDisconnected: boolean,
-): number | null {
+): number | null | undefined {
 	const disconnected = orphanSweepSeesRelayDisconnected({
 		socketReadyState: relayInitializedReadyState(),
 		openReadyState: WebSocket.OPEN,
@@ -412,6 +418,7 @@ function computeNextOrphanSweepDeadline(
 		disconnected,
 		hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
 		existingDeadlineMs: orphanSweepDeadlineMs,
+		recoveryStateLoading: orphanRecoveryStateLoading,
 		attachmentReconciliationPending: orphanAttachmentReconciliationPending,
 	});
 }
@@ -431,6 +438,7 @@ function computeNextOrphanSweepDeadline(
  */
 function scheduleOrphanSweepBeforeSuspend(): void {
 	const nextDeadlineMs = computeNextOrphanSweepDeadline(true);
+	if (nextDeadlineMs === undefined) return;
 	void setOrphanSweepDeadline(nextDeadlineMs);
 }
 

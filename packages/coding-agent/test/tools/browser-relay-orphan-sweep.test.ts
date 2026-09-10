@@ -18,6 +18,19 @@ function deferred<T>() {
 }
 
 describe("browser relay orphan sweep scheduling", () => {
+	it("leaves the persisted deadline untouched while recovery state is loading", () => {
+		expect(
+			nextOrphanSweepDeadline({
+				nowMs: 1_000,
+				graceMs: 30_000,
+				disconnected: true,
+				hasTrackedAttachments: false,
+				existingDeadlineMs: null,
+				recoveryStateLoading: true,
+			}),
+		).toBeUndefined();
+	});
+
 	it("starts the grace deadline when tracked attachments first become orphaned", () => {
 		expect(
 			nextOrphanSweepDeadline({
