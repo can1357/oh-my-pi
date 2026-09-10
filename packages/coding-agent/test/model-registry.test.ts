@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Effort, type FetchImpl, type Model, type OpenAICompat, type ThinkingConfig } from "@oh-my-pi/pi-ai";
+import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
@@ -848,6 +849,60 @@ describe("ModelRegistry", () => {
 				api: "anthropic-messages",
 				baseUrl: "https://api.z.ai/api/anthropic",
 			});
+		});
+
+		test("preserves Z.AI streamed content through the final assistant message", async () => {
+			const flash = registry.find("zai", "glm-5.3-flash");
+			if (!flash || flash.api !== "openai-completions") {
+				throw new Error("expected the bundled Z.AI flash model to use OpenAI Completions");
+			}
+			const openAIFlash = flash as Model<"openai-completions">;
+			let requestUrl: string | undefined;
+			const fetchMock: FetchImpl = input => {
+				requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+				if (requestUrl !== "https://api.z.ai/api/coding/paas/v4/chat/completions") {
+					return Promise.resolve(
+						new Response(JSON.stringify({ code: 500, msg: "404_NOT_FOUND", success: false }), {
+							status: 200,
+							headers: { "content-type": "application/json" },
+						}),
+					);
+				}
+				const events = [
+					{
+						id: "chatcmpl-zai-fixture",
+						choices: [{ index: 0, delta: { role: "assistant", reasoning_content: "thinking..." } }],
+					},
+					{
+						id: "chatcmpl-zai-fixture",
+						choices: [{ index: 0, delta: { role: "assistant", content: "OK" } }],
+					},
+					{
+						id: "chatcmpl-zai-fixture",
+						choices: [{ index: 0, finish_reason: "stop", delta: { role: "assistant", content: "" } }],
+						usage: { prompt_tokens: 1, completion_tokens: 3, total_tokens: 4 },
+					},
+				];
+				const payload = `${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\ndata: [DONE]\n\n`;
+				return Promise.resolve(
+					new Response(payload, {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					}),
+				);
+			};
+
+			const result = await streamOpenAICompletions(
+				openAIFlash,
+				{
+					messages: [{ role: "user", content: "Reply with exactly OK.", timestamp: Date.now() }],
+				},
+				{ apiKey: "TEST_KEY", fetch: fetchMock },
+			).result();
+
+			expect(requestUrl).toBe("https://api.z.ai/api/coding/paas/v4/chat/completions");
+			expect(result.content).toEqual(expect.arrayContaining([{ type: "text", text: "OK" }]));
+			expect(result.stopReason).toBe("stop");
 		});
 
 		test("keeps a discovered model route when the provider override uses another API", () => {
