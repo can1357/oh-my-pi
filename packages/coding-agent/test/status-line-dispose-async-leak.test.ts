@@ -101,7 +101,7 @@ function makeSession() {
 	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
 }
 
-let fakeRefHead: VcsHeadState = {
+const fakeRefHead: VcsHeadState = {
 	kind: "ref",
 	branch: "main",
 	refName: "refs/heads/main",
