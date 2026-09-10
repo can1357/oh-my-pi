@@ -14,10 +14,10 @@ function normalize(lines: readonly string[]): string {
 	return stripVTControlCharacters(lines.join("\n")).replace(/\s+/g, " ").trim();
 }
 
-function makeModel(provider: string, id: string, contextWindow = 128_000): Model {
+function makeModel(provider: string, id: string, contextWindow = 128_000, name = id): Model {
 	return buildModel({
 		id,
-		name: id,
+		name,
 		api: "ollama-chat",
 		provider,
 		baseUrl: "https://example.com",
@@ -164,6 +164,39 @@ describe("ModelPicker", () => {
 		await Bun.sleep(0);
 		picker.handleInput("\n");
 		expect(onPick.mock.calls[0]?.[0]?.id).toBe("cc-model");
+	});
+
+	test("background refresh cannot reintroduce models outside enabledModels", async () => {
+		const allowed = makeModel("test", "allowed-model");
+		const broadOnly = makeModel("test", "broad-only-model");
+		const settings = Settings.isolated({ enabledModels: ["test/allowed-model"] });
+		let available = [allowed];
+		const refreshGate = Promise.withResolvers<void>();
+		const { picker } = createPicker({
+			models: () => available,
+			settings,
+			registry: { refresh: () => refreshGate.promise },
+		});
+
+		expect(normalize(picker.render(220))).toContain("allowed-model");
+		available = [allowed, broadOnly];
+		refreshGate.resolve();
+		await Bun.sleep(0);
+
+		const rendered = normalize(picker.render(220));
+		expect(rendered).toContain("allowed-model");
+		expect(rendered).not.toContain("broad-only-model");
+	});
+
+	test("compact picker renders the human model/provider labels without a duplicate model-name footer", () => {
+		const model = makeModel("OpenCode GO", "opencode-go/deepseek-v4-pro", 128_000, "DeepSeek V4 Pro");
+		const { picker } = createPicker({ models: [model], scoped: true });
+
+		const rendered = normalize(picker.render(220));
+		expect(rendered).toContain("DeepSeek V4 Pro");
+		expect(rendered).toContain("OpenCode GO");
+		expect(rendered).not.toContain("opencode-go/deepseek-v4-pro");
+		expect(rendered).not.toContain("Model Name:");
 	});
 
 	test("highlights and preselects the session's current model", () => {

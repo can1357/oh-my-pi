@@ -6,6 +6,7 @@
  */
 import type { Model } from "@oh-my-pi/pi-ai";
 import { addKeyAliases, type Component, canonicalKeyId, type KeyId, parseKey, type TUI } from "@oh-my-pi/pi-tui";
+import { filterAvailableModelsByEnabledPatterns } from "../../config/model-resolver";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
 import type { ResolvedRoleModel } from "../../session/agent-session";
@@ -175,7 +176,11 @@ export class ModelPickerComponent implements Component {
 			const loadError = this.#registry.getError();
 			this.#configError = loadError ? String(loadError) : undefined;
 			try {
-				models = this.#registry.getAvailable();
+				models = filterAvailableModelsByEnabledPatterns(
+					this.#registry.getAvailable(),
+					this.#settings.get("enabledModels"),
+					this.#settings,
+				);
 			} catch (error) {
 				this.#configError = error instanceof Error ? error.message : String(error);
 				models = [];

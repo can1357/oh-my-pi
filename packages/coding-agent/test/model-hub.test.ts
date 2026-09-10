@@ -321,8 +321,8 @@ describe("ModelHub", () => {
 
 			const rendered = normalize(hub.render(220));
 			expect(rendered).toContain("All models 1");
-			expect(rendered).toContain("nvidia 1");
-			expect(rendered).toContain("anthropic 0");
+			expect(rendered).toContain("NVIDIA 1");
+			expect(rendered).toContain("Anthropic 0");
 		});
 	});
 
@@ -420,7 +420,7 @@ describe("ModelHub", () => {
 			installTestTheme();
 
 			hub.handleInput(DOWN); // All models → locked anthropic
-			expect(normalize(hub.render(220))).toContain("anthropic has no credentials configured");
+			expect(normalize(hub.render(220))).toContain("Anthropic has no credentials configured");
 			expect(footerLine(hub.render(220))).toContain("Enter log in");
 
 			// Typing a search character switches to All models and focuses list
@@ -1241,7 +1241,7 @@ describe("ModelHub", () => {
 			// Scope-hop: All models → custom-provider → openrouter.
 			hub.handleInput(DOWN);
 			hub.handleInput(DOWN);
-			expect(normalize(hub.render(220))).toContain("openrouter ·");
+			expect(normalize(hub.render(220))).toContain("OpenRouter ·");
 
 			for (const ch of "glm-5.2") hub.handleInput(ch);
 			hub.handleInput("\n");
@@ -1259,8 +1259,12 @@ describe("ModelHub", () => {
 
 			for (const ch of "glm") hub.handleInput(ch);
 			const rendered = normalize(hub.render(220));
-			expect(rendered).toContain("openrouter/z-ai/glm-5.2");
-			expect(rendered).toContain("custom-provider/glm-5.2");
+			expect(rendered).toContain("z-ai/glm-5.2");
+			expect(rendered).toContain("OpenRouter");
+			expect(rendered).toContain("glm-5.2");
+			expect(rendered).toContain("custom-provider");
+			expect(rendered).not.toContain("openrouter/z-ai/glm-5.2");
+			expect(rendered).not.toContain("custom-provider/glm-5.2");
 		});
 
 		test("a provider scope that loses every match falls back to All models", () => {
@@ -1287,7 +1291,7 @@ describe("ModelHub", () => {
 			for (const ch of "z-ai") hub.handleInput(ch);
 			hub.handleInput(LEFT); // switch focus to sidebar
 			hub.handleInput(DOWN); // skips custom-provider (0 matches), lands on openrouter
-			expect(normalize(hub.render(220))).toContain("openrouter ·");
+			expect(normalize(hub.render(220))).toContain("OpenRouter ·");
 		});
 		test("providers with matches float to the top of the sidebar while searching", () => {
 			const noMatch = makeModel("aaa-provider", "different-model");
@@ -1345,6 +1349,28 @@ describe("ModelHub", () => {
 	});
 
 	describe("provider refresh lifecycle", () => {
+		test("registry refresh cannot reintroduce models outside enabledModels", async () => {
+			const allowed = makeModel("prov-a", "allowed-model");
+			const broadOnly = makeModel("prov-b", "broad-only-model");
+			const settings = Settings.isolated({ enabledModels: ["prov-a/allowed-model"] });
+			let available = [allowed];
+			const refreshGate = Promise.withResolvers<void>();
+			const { hub } = createHub({
+				models: () => available,
+				settings,
+				registry: { refresh: () => refreshGate.promise },
+			});
+
+			expect(normalize(hub.render(220))).toContain("allowed-model");
+			available = [allowed, broadOnly];
+			refreshGate.resolve();
+			await Bun.sleep(0);
+
+			const rendered = normalize(hub.render(220));
+			expect(rendered).toContain("allowed-model");
+			expect(rendered).not.toContain("broad-only-model");
+		});
+
 		test("auto-refreshes a provider once per process; F5 forces a re-fetch", async () => {
 			const model = makeModel("prov-a", "model-a");
 			const refreshProvider = vi.fn(async () => {});
@@ -1403,7 +1429,7 @@ describe("ModelHub", () => {
 
 			hub.handleInput(DOWN); // All models → locked anthropic (separator skipped)
 			const rendered = normalize(hub.render(220));
-			expect(rendered).toContain("anthropic has no credentials configured");
+			expect(rendered).toContain("Anthropic has no credentials configured");
 			expect(rendered).toContain("claude-locked-test");
 
 			hub.handleInput("\n");

@@ -6,6 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildBrowserItems,
 	ModelBrowser,
+	modelProviderDisplayName,
 	type RoleAssignments,
 	resolveRoleAssignments,
 	sortModelItems,
@@ -29,6 +30,21 @@ function makeModel(provider: string, id: string, metadata?: NativeMetadata): Mod
 		contextWindow: 128_000,
 		maxTokens: 1024,
 		...metadata,
+	});
+}
+
+function makeNamedModel(provider: string, id: string, name: string): Model {
+	return buildModel({
+		id,
+		name,
+		api: "ollama-chat",
+		provider,
+		baseUrl: "https://example.com",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 1024,
 	});
 }
 
@@ -83,6 +99,16 @@ describe("ModelBrowser search ranking", () => {
 		browser.setQuery("gpt-5.5");
 
 		expect(browser.getSelected()?.selector).toBe("openai-codex/gpt-5.5");
+	});
+
+	test("an exact model-name match outranks models that only match by provider", () => {
+		const exact = makeNamedModel("other", "some-model", "Groq");
+		const providerPeer = makeNamedModel("groq", "some-other-model", "Other Model");
+		const browser = makeBrowser([exact, providerPeer], ["groq/some-other-model"]);
+
+		browser.setQuery("Groq");
+
+		expect(browser.getSelected()?.selector).toBe("other/some-model");
 	});
 
 	test("MRU breaks ties between equally good matches", () => {
@@ -217,6 +243,15 @@ describe("ModelBrowser search ranking", () => {
 		expect(browser.visibleCount).toBe(1);
 		expect(browser.getSelected()?.selector).toBe("nvidia/moonshotai/kimi-k3");
 	});
+
+	test("matches the human model name without exposing it as wire identity", () => {
+		const human = makeNamedModel("OpenCode GO", "opencode-go/deepseek-v4-pro", "Reasoning Flagship");
+		const browser = makeBrowser([makeModel("Other", "deepseek-v4-preview"), human], []);
+
+		browser.setQuery("Reasoning Flagship");
+
+		expect(browser.getSelected()?.selector).toBe("OpenCode GO/opencode-go/deepseek-v4-pro");
+	});
 });
 
 describe("ModelBrowser perf display", () => {
@@ -304,12 +339,100 @@ describe("ModelBrowser native model metadata", () => {
 			}),
 		);
 
-		expect(detail).toContain("swe-2 · new · beta · recommended · 128k ctx · 1k out · free per M");
+		expect(detail).toContain("new · beta · recommended · 128k ctx · 1k out · free per M");
+		expect(detail).not.toContain("swe-2 ·");
 		// Tabs and newlines are flattened so the blurb stays one detail row.
 		expect(detail).toMatch(/free per M · Fast {2,}agentic coder$/);
 	});
 
 	test("models without upstream metadata render the plain detail line", () => {
-		expect(renderDetail(makeModel("openai", "gpt-5"))).toContain("gpt-5 · 128k ctx · 1k out · free per M");
+		const detail = renderDetail(makeModel("openai", "gpt-5"));
+		expect(detail).toContain("128k ctx · 1k out · free per M");
+		expect(detail).not.toContain("gpt-5 ·");
+	});
+});
+
+describe("ModelBrowser row label", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	test("renders human-friendly model.name rather than raw model.id in row", () => {
+		const model = buildModel({
+			id: "deepseek-v4-pro",
+			name: "DeepSeek V4 Pro",
+			api: "ollama-chat",
+			provider: "deepseek",
+			baseUrl: "https://example.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 1024,
+		});
+		const browser = new ModelBrowser(Settings.isolated({}));
+		browser.setItems(buildBrowserItems([model]));
+
+		const row = Bun.stripANSI(browser.render(120)[2]);
+		expect(row).toContain("DeepSeek V4 Pro");
+		expect(row).not.toContain("deepseek-v4-pro");
+	});
+
+	test("uses canonical auth metadata when a built-in provider has no discovery label", () => {
+		expect(modelProviderDisplayName("groq")).toBe("Groq");
+		expect(modelProviderDisplayName("opencode-go")).toBe("OpenCode Go");
+	});
+
+	test("renders provider as a separate display column instead of a selector prefix", () => {
+		const browser = new ModelBrowser(Settings.isolated({}));
+		browser.setItems(
+			buildBrowserItems([makeNamedModel("OpenCode GO", "opencode-go/deepseek-v4-pro", "DeepSeek V4 Pro")]),
+		);
+
+		const row = Bun.stripANSI(browser.render(120)[2]);
+		expect(row).toContain("DeepSeek V4 Pro");
+		expect(row).toContain("OpenCode GO");
+		expect(row).not.toContain("OpenCode GO/DeepSeek");
+		expect(row).not.toContain("opencode-go/deepseek-v4-pro");
+	});
+
+	test("cross-provider name collisions stay distinguishable without wire ids", () => {
+		const browser = new ModelBrowser(Settings.isolated({}));
+		browser.setItems(
+			buildBrowserItems([
+				makeNamedModel("Moonshot", "moonshot/kimi-k2.6", "Kimi K2.6"),
+				makeNamedModel("OpenCode GO", "opencode-go/kimi-k2.6", "Kimi K2.6"),
+			]),
+		);
+
+		const rows = browser
+			.render(120)
+			.slice(2, 4)
+			.map(line => Bun.stripANSI(line));
+		expect(rows.some(row => row.includes("Kimi K2.6") && row.includes("Moonshot"))).toBe(true);
+		expect(rows.some(row => row.includes("Kimi K2.6") && row.includes("OpenCode GO"))).toBe(true);
+		expect(rows.join("\n")).not.toContain("moonshot/kimi-k2.6");
+		expect(rows.join("\n")).not.toContain("opencode-go/kimi-k2.6");
+	});
+
+	test("long provider labels cannot crowd model names out of narrow rows", () => {
+		const browser = new ModelBrowser(Settings.isolated({}));
+		browser.setItems(
+			buildBrowserItems([
+				makeNamedModel("An Extremely Long Custom Provider Display Name", "route/model-id", "Readable Model"),
+			]),
+		);
+
+		const row = Bun.stripANSI(browser.render(60)[2]);
+		expect(row).toContain("Readable Model");
+		expect(Bun.stringWidth(row)).toBeLessThanOrEqual(60);
+	});
+
+	test("visibleCount excludes the non-selectable recent separator", () => {
+		const recent = makeModel("a", "recent");
+		const other = makeModel("b", "other");
+		const browser = makeBrowser([recent, other], ["a/recent"]);
+
+		expect(browser.visibleCount).toBe(2);
 	});
 });
