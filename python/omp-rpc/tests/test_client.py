@@ -259,6 +259,7 @@ FAKE_SERVER = textwrap.dedent(
     auto_retry_enabled = True
     session_name = "Scratchpad"
     last_assistant_text = None
+    last_widget_layout = None
 
     for raw_line in sys.stdin:
         raw_line = raw_line.strip()
@@ -271,6 +272,22 @@ FAKE_SERVER = textwrap.dedent(
 
         if command_type == "extension_ui_response":
             emit_prompt_turn("ui acknowledged")
+            continue
+
+        if command_type == "widget_layout":
+            nonlocal_last = {
+                "widgetKey": command["widgetKey"],
+                "visible": command["visible"],
+                "availableWidth": command["availableWidth"],
+                "visibleRows": command["visibleRows"],
+            }
+            if "hiddenBlocks" in command:
+                nonlocal_last["hiddenBlocks"] = command["hiddenBlocks"]
+            last_widget_layout = nonlocal_last
+            continue
+
+        if command_type == "get_widget_layout":
+            respond(request_id, "get_widget_layout", {"layout": last_widget_layout})
             continue
 
         if command_type == "get_state":
@@ -1101,6 +1118,27 @@ class RpcClientTests(unittest.TestCase):
             client.send_ui_value(request.id, "approved")
             client.wait_for_idle(timeout=2.0)
 
+
+    def test_send_widget_layout_reports_public_feedback_frame(self) -> None:
+        with self.make_client() as client:
+            client.send_widget_layout(
+                "right",
+                visible=False,
+                available_width=42,
+                visible_rows=3,
+                hidden_blocks=["block-a", "block-b"],
+            )
+
+            self.assertEqual(
+                client.request_raw("get_widget_layout")["layout"],
+                {
+                    "widgetKey": "right",
+                    "visible": False,
+                    "availableWidth": 42,
+                    "visibleRows": 3,
+                    "hiddenBlocks": ["block-a", "block-b"],
+                },
+            )
     def test_install_headless_ui_cancels_interactive_requests(self) -> None:
         seen_methods: list[str] = []
 

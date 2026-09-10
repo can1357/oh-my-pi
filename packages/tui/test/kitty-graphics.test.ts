@@ -8,6 +8,7 @@ import {
 	KITTY_PLACEHOLDER,
 	KITTY_PLACEHOLDER_MAX_CELLS,
 	kittyPlaceholdersFit,
+	parseKittyVirtualPlacementImageId,
 	renderKittyPlaceholderLines,
 	setKittyGraphics,
 } from "@oh-my-pi/pi-tui/kitty-graphics";
@@ -34,6 +35,13 @@ describe("kitty Unicode placeholder encoding", () => {
 		expect(encodeKittyVirtualPlacement({ imageId: 7, columns: 4, rows: 2 })).toBe(
 			"\x1b_Ga=p,U=1,q=2,i=7,c=4,r=2\x1b\\",
 		);
+	});
+
+	it("parses virtual-placement image ids from placeholder rows", () => {
+		const line =
+			encodeKittyVirtualPlacement({ imageId: 42, placementId: 7, columns: 4, rows: 2 }) + KITTY_PLACEHOLDER;
+		expect(parseKittyVirtualPlacementImageId(line)).toBe(42);
+		expect(parseKittyVirtualPlacementImageId("\x1b_Ga=p,q=2,C=1,i=42\x1b\\")).toBeUndefined();
 	});
 
 	it("encodeKittyPlaceholderGrid returns one row per line with explicit row+column cells", () => {
