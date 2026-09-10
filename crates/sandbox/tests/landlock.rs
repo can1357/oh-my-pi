@@ -1,6 +1,6 @@
 //! Landlock fallback plan and honest-degradation contracts.
 
-use std::path::Path;
+use std::{fs, path::Path};
 
 use omp_sandbox::{
 	Backend, Capability, DegradationPolicy, NetworkMode, Runner, SandboxError, SandboxSpec,
@@ -22,7 +22,9 @@ fn helper_argv_contract_carries_owned_policy_artifacts() {
 	assert_eq!(argv[3], "--landlock");
 	assert_eq!(argv[4], "@omp-sandbox-landlock-policy@");
 	assert_eq!(argv[5], "--");
-	assert_eq!(Path::new(&argv[6]), target);
+	// The plan carries the resolved program, so compare against the canonical form
+	// of the input rather than the literal path the spec was built from.
+	assert_eq!(Path::new(&argv[6]), fs::canonicalize(target).expect("canonical target program"),);
 	assert!(plan.enforced().contains(Capability::NetDisable));
 	assert!(plan.enforced().contains(Capability::FsWriteDeny));
 	assert!(!plan.enforced().contains(Capability::IpcRestrict));

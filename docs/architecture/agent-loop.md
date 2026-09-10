@@ -30,7 +30,7 @@ The driver supplies application policy rather than adding it to the loop. `sessi
 4. appends caller and interrupt items with `Journal::append_turn_input`;
 5. publishes current live history and emits the `agent_start` observation.
 
-The journal is the authority. `Journal` owns an `omp_storage::transcript::Writer`, cached reader/live projection, turn starts and receipts, pending inputs, invocation transitions, tool-batch authorizations, regime facts, jobs, and session-index integration (`crates/agent/src/journal.rs`). `Journal::create` creates transcript v4 lazily; `Journal::open` rebuilds all live indexes from durable events.
+The journal is the authority. The loop's `omp_session::Session` owns the sole `omp_journal::Journal` writer — exclusive sidecar lock, durable append, recovery that truncates only the uncommitted tail (`crates/journal/src/lib.rs:37-57`) — plus the loaded entries and their identity index, and records turn starts, user and assistant items, streams, tool calls and settlements, receipts, patches, compactions, and rewinds through it (`crates/session/src/session.rs:143-150`). `Session::create` creates a new `.oms` journal and commits its genesis entry; `Session::open` replays every file-prefix operation and historical prior jump to rebuild live state (`crates/session/src/session.rs:195-252`).
 
 ### 2. Projection and prompt
 
@@ -40,7 +40,7 @@ The journal is the authority. `Journal` owns an `omp_storage::transcript::Writer
 
 `TurnClient` and `TurnSession` are the transport seam (`crates/agent/src/turn.rs`). `TurnClient::turn` opens one logical turn from either `TurnInput::Full(Thread)` or `TurnInput::Delta(ContextRef, ThreadDelta)`. `TurnSession::events` yields canonical protobuf `TurnEvent` values; `TurnSession::submit` sends responses to server-initiated invocations. Dropping a session structurally cancels both sides.
 
-Inside inference, provider codecs normalize vendor frames to `ChatEvent` (`crates/inference/src/event.rs`). Its important variants are block starts, text/thinking deltas, tool-call start and argument deltas, the sole executable `ToolCallReady`, usage, workflow control, and completion. `AnswerLayer` and the remaining Tower layers preserve this canonical stream (`crates/inference/src/layer/answer.rs`, `crates/inference/src/lib.rs`). `InferenceRpc::turn_events` converts `ChatEvent` into protocol `TurnEvent::{Accepted, PartStart, PartDelta, PartEnd, Invoke, Outcome, Error}` and constructs the terminal canonical output (`crates/serve/src/inference.rs`). The agent therefore does not consume provider-specific events.
+Inside inference, provider codecs normalize vendor frames to `ChatEvent` (`crates/ai/src/event.rs`). Its important variants are block starts, text/thinking deltas, tool-call start and argument deltas, the sole executable `ToolCallReady`, usage, workflow control, and completion. `AnswerLayer` and the remaining Tower layers preserve this canonical stream (`crates/ai/src/layer/answer.rs`, `crates/ai/src/lib.rs`). `InferenceRpc::turn_events` converts `ChatEvent` into protocol `TurnEvent::{Accepted, PartStart, PartDelta, PartEnd, Invoke, Outcome, Error}` and constructs the terminal canonical output (`crates/serve/src/inference.rs`). The agent therefore does not consume provider-specific events.
 
 `drive_session` publishes every visible protocol event as `AgentEvent::Turn` before interpreting it (`crates/agent/src/loop.rs`). It also services host control and duplex provider invocations while the stream is live. Text and thinking parts become presentation deltas. A tool `PartStart` resolves the exact live `ToolIdentity`, checks it against the frozen enabled-tool list, resolves the ADMISSION regime point, opens a speculative environment invocation, and records `InvocationPhase::Open`. Each tool `PartDelta` is relayed as raw argument text and is also offered to STREAM regimes.
 
@@ -106,7 +106,7 @@ There are two independent channels because they have different semantics.
 
 ### Ordered input mailbox
 
-`Mailbox` is a single-consumer, unbounded flume channel plus a receiver-owned `VecDeque` backlog (`crates/agent/src/mailbox.rs`). `MailboxSender::try_enqueue` never blocks a producer. An `Interrupt` contains a canonical item, typed `InterruptSource`, and earliest eligible `InterruptClass`:
+`Mailbox` is a single-consumer, unbounded flume channel plus a receiver-owned `VecDeque` backlog. The `Mailbox`/`MailboxSender`/`Interrupt`/`InterruptClass` vocabulary documented here is a design target with no surviving implementation in the tree: no mailbox implementation exists under `crates/` today. `MailboxSender::try_enqueue` never blocks a producer. An `Interrupt` contains a canonical item, typed `InterruptSource`, and earliest eligible `InterruptClass`:
 
 - `Immediate`: between tool completions during a batch;
 - `TurnBoundary`: after a committed outcome;
@@ -153,11 +153,11 @@ Hooks also attach at submission, prompt, stream, item-commit, tool-result, agent
 
 ### Durable regimes and the arbiter
 
-`Arbiter` folds durable `RegimeSet` activations with always-on core lanes at a closed set of `Point` values (`crates/agent/src/arbiter.rs`). `run_turn` resolves CONTEXT, TOOL_CHOICE, PRE_MODEL, STREAM, ADMISSION, BATCH, TURN_END, SETTLE, and IDLE at their actual loop boundaries. `PointCx` provides immutable event facts; each regime writes an isolated `RegimeDraft`. Resolution facts and lifecycle records are flushed through `Journal::append_regime_fact` and `append_regime_record` (`crates/agent/src/journal.rs`).
+`Arbiter` folds durable `RegimeSet` activations with always-on core lanes at a closed set of `Point` values. `run_turn` resolves CONTEXT, TOOL_CHOICE, PRE_MODEL, STREAM, ADMISSION, BATCH, TURN_END, SETTLE, and IDLE at their actual loop boundaries. `PointCx` provides immutable event facts; each regime writes an isolated `RegimeDraft`. Resolution facts and lifecycle records: the `Journal::append_regime_fact` / `append_regime_record` flush has no surviving implementation in the tree (no matching symbol anywhere under `crates/`); the only durable channel is the closed revision-1 journal vocabulary (`crates/journal/src/kind.rs:49-98`).
 
 Extension regimes cross the envd control plane as `RegimeStart`, `RegimeApply`, `RegimeStop`, and `RegimeDraft` frames. `ExtensionRegimeResolver` constructs an `omp_agent::Regime` only from exact-generation sealed registry evidence (`crates/envd/src/worker.rs`), and `AgentRegimeControlBackend` delegates mutations to the sole live loop (`crates/driver/src/chat.rs`). This keeps extension code outside the mutable agent owner while allowing durable middleware at fixed points.
 
-The repository's owner guidance still uses “campaign arbiter” and `omp.Decision` as architectural shorthand (`AGENTS.md`), but those are not current public/runtime symbols. The current Python contract explicitly has no public decision object: regime handlers stage effects through `ctx` and choose at most one control through `next_` (`docs/py/15-regimes.md`). The frozen-surface test asserts that `omp.campaign` and `omp.CampaignScope` do not exist (`crates/py/tests/frozen_surface.rs`). The implemented Rust vocabulary is `Arbiter`, `Regime`, `RegimeContext`, `Next`, and internal `RegimeDraft` (`crates/agent/src/arbiter.rs`, `crates/agent/src/regime.rs`).
+The repository's owner guidance still uses “campaign arbiter” and `omp.Decision` as architectural shorthand (`AGENTS.md`), but those are not current public/runtime symbols. The current Python contract explicitly has no public decision object: regime handlers stage effects through `ctx` and choose at most one control through `next_` (`docs/py/15-regimes.md`). The frozen-surface test asserts that `omp.campaign` and `omp.CampaignScope` do not exist (`crates/py/tests/frozen_surface.rs`). The Rust-side `Regime`/`Arbiter`/`RegimeContext`/`Next` vocabulary documented here is a design target with no surviving implementation in the tree: no Rust `Regime` trait, arbiter, or `RegimeDraft` type exists under `crates/` today.
 
 ```mermaid
 flowchart LR
@@ -185,12 +185,12 @@ flowchart LR
 
 The interactive chat adapter deliberately uses a lossless subscription through `subscribe_chat_events` (`crates/app/src/chat_ui.rs`). `handle_agent_event` maps `AgentEvent::Turn` part events to assistant begin/delta/end operations, speculative tool events to live argument views, `ToolUpdate` to folded progress, and `ToolFinished` to a terminal tool card. Its `BridgeState` retains active part ids, markdown buffers, streaming tool argument bytes, `ToolDisplay` state, jobs, usage, and extension renderer routes.
 
-Durability is not delegated to a UI subscriber. The loop commits `TurnStart`, terminal inference outcomes, tool-batch authorization, invocation transitions, regime facts, and follow-up items directly through its sole mutable `Journal` before or at their authority boundary (`crates/agent/src/loop.rs`, `crates/agent/src/journal.rs`). It then publishes immutable presentation events. On resume, `project_journal` rebuilds canonical items from `omp_storage::transcript`; the UI can replay those items without treating ephemeral `ToolUpdate` events as history.
+Durability is not delegated to a UI subscriber. The loop commits turn starts, terminal inference outcomes, tool-call settlements, and follow-up items directly through its sole mutable `omp_session::Session` before or at their authority boundary (`crates/agent/src/loop.rs`, `crates/session/src/session.rs`). It then publishes immutable presentation events. On resume, the session projection rebuilds canonical thread items from the journal-derived DOM (`crates/session/src/projection.rs:303`); the UI can replay those items without treating ephemeral `ToolUpdate` events as history.
 
 ```mermaid
 flowchart TD
     L[Agent loop authority] --> J[Journal append APIs]
-    J --> W[omp_storage transcript Writer]
+    J --> W[omp_journal single writer]
     W --> S[Durable session log and index]
     S --> P[project_journal on resume]
     L --> E[EventBus publish AgentEvent]
@@ -210,7 +210,7 @@ This produces one final ANSI materialization boundary: streamed inference and to
 
 ## Failure and recovery invariants
 
-- A `TurnStart` is durable before an inference attempt is driven; `append_arbiter_outcome` is idempotent only for a field-exact replay (`crates/agent/src/journal.rs`).
+- A `TurnStart` is durable before an inference attempt is driven (`crates/agent/src/loop.rs:927` commits through `Session::begin_turn`, `crates/session/src/session.rs:537-542`); `append_arbiter_outcome` has no surviving implementation in the tree, so the field-exact-replay idempotence rule has no code to point at.
 - A tool batch is durably authorized only after its terminal inference receipt exists and every call id appears in that receipt (`Journal::authorize_tool_batch`).
 - A speculative call that never commits is cancellation-safe and cannot be invented as a settled result (`SpeculativeCall` in `crates/agent/src/batch.rs`).
 - Every committed tool call returns a canonical result, including environment failures after authorization; uncertainty is data in `CallOutcome`, not a missing event.
@@ -222,17 +222,17 @@ This produces one final ANSI materialization boundary: streamed inference and to
 | Component | Path |
 |---|---|
 | Durable N-turn loop | `crates/agent/src/loop.rs` |
-| Ordered interrupt mailbox | `crates/agent/src/mailbox.rs` |
+| Ordered interrupt mailbox (design target, no surviving implementation) | — |
 | Immutable turn configuration | `crates/agent/src/state.rs` |
 | Agent event bus | `crates/agent/src/events.rs` |
-| Append-only journal owner | `crates/agent/src/journal.rs` |
+| Append-only journal owner | `crates/journal/src/lib.rs` |
 | Turn transport seam | `crates/agent/src/turn.rs` |
 | Speculative calls and tool batches | `crates/agent/src/batch.rs` |
 | Hook subscription and decision procedure | `crates/agent/src/hooks.rs` |
-| Regime arbiter | `crates/agent/src/arbiter.rs` |
-| Regime state and draft semantics | `crates/agent/src/regime.rs` |
-| Canonical inference events | `crates/inference/src/event.rs` |
-| Tower inference surface | `crates/inference/src/lib.rs` |
+| Regime arbiter (design target, no surviving implementation) | — |
+| Regime vocabulary (design target, no surviving implementation) | `docs/py/15-regimes.md` |
+| Canonical inference events | `crates/ai/src/event.rs` |
+| Tower inference surface | `crates/ai/src/lib.rs` |
 | ChatEvent to TurnEvent service projection | `crates/serve/src/inference.rs` |
 | Tool argument feed | `crates/tool/src/incoming.rs` |
 | Typed tool outcomes | `crates/tool/src/lib.rs` |

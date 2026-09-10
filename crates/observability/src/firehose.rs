@@ -308,6 +308,11 @@ pub struct ProviderError {
 	pub detail:   Option<Str>,
 }
 
+const _: () = assert!(
+	std::mem::size_of::<ProviderError>() <= 144,
+	"ProviderError must stay compact so it rides inline in Event"
+);
+
 /// One charitable argument repair.
 #[derive(Clone, Debug)]
 pub struct Repair {
@@ -445,8 +450,12 @@ pub enum Event {
 	/// A retryable model attempt is abandoned.
 	ModelAttempt(ModelAttempt),
 	/// A model request fails terminally.
-	ProviderError(Box<ProviderError>),
+	ProviderError(ProviderError),
 	/// A tool invocation settles.
+	///
+	/// Boxed (measured): the payload is 512 bytes — inline `SmallVec<Repair, 2>`
+	/// alone is 120 and `Option<PolicyDenied>` 96 — so boxing keeps `Event`
+	/// compact at 152.
 	ToolCall(Box<ToolCall>),
 	/// A capability is degraded.
 	CapabilityDegraded(CapabilityDegraded),
@@ -461,6 +470,10 @@ pub enum Event {
 	/// A non-fatal telemetry failure occurs.
 	HostWarning(HostWarning),
 }
+const _: () = assert!(
+	std::mem::size_of::<Event>() <= 152,
+	"Event must stay compact; box genuinely fat payloads instead"
+);
 
 impl Event {
 	/// Returns this event's subscription kind.

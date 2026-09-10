@@ -34,7 +34,6 @@ local-tts = [
 ]
 device-attestation = ["dep:block2", "dep:objc2", "dep:objc2-foundation"]
 realtime = [
-	"dep:audiopus_sys",
 	"dep:opus",
 	"dep:webrtc",
 	"device-attestation",
@@ -97,7 +96,6 @@ zeroize.workspace = true
 zstd.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
-audiopus_sys = { workspace = true, optional = true }
 opus = { workspace = true, optional = true }
 webrtc = { workspace = true, optional = true }
 

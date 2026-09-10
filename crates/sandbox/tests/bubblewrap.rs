@@ -49,7 +49,12 @@ fn disabled_network_uses_hidden_seccomp_child_contract() {
 		.expect("hidden sandbox child");
 	assert_eq!(argv[child + 1], "@omp-sandbox-bpf@");
 	assert_eq!(argv[child + 2], "--");
-	assert_eq!(Path::new(&argv[child + 3]), target);
+	// The plan carries the resolved program, so compare against the canonical form
+	// of the input rather than the literal path the spec was built from.
+	assert_eq!(
+		Path::new(&argv[child + 3]),
+		fs::canonicalize(target).expect("canonical target program"),
+	);
 	assert!(has_mount(
 		argv,
 		"--ro-bind",

@@ -14,22 +14,21 @@ repository = "https://github.com/stencil-hq/omp"
 # `dep.workspace = true` and never select dependency features locally.
 [workspace.dependencies]
 anyhow = "1"
-ctor = "0.2"
-arc-swap = "1.7"
+ctor = "1.0"
+arc-swap = "1.9"
 anydoc = "0.1.9"
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 ast-grep-core = { version = "0.39", default-features = false, features = ["tree-sitter"] }
-argmax = "0.3"
+argmax = "0.4"
 async-recursion = "1.1"
 async-stream = "0.3"
 async-trait = "0.1"
 ashpd = { version = "=0.11.1", default-features = false, features = ["tokio"] }
 atspi = { version = "=0.30.0", features = ["tokio", "zbus"] }
-audiopus_sys = { version = "0.2.2", features = ["static"] }
 bigdecimal = "0.4"
 blake2 = "0.10"
 blake3 = { version = "1.8" }
-brotli = { version = "8", default-features = false, features = ["std"] }
+brotli = { version = "9", default-features = false, features = ["std"] }
 block2 = "0.6.2"
 bon = "3"
 bstr = "1"
@@ -57,9 +56,9 @@ encoding_rs = "0.8"
 enigo = { version = "=0.6.1", default-features = false }
 etagere = "0.3"
 fancy-regex = "0.17"
-fastembed = { version = "5.17.4", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
+fastembed = { version = "6.0.3", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend", "zlib-rs"] }
-flume = "0.11"
+flume = "0.12"
 foldhash = "0.2"
 foreign-types = "=0.5.0"
 fontdb = "0.24"
@@ -78,7 +77,7 @@ hayro = "0.7.1"
 heapless = { version = "0.9.3", features = ["serde"] }
 hmac = "0.12"
 hifijson = "0.2"
-html-to-markdown-rs = { version = "3.9.2", default-features = false }
+html-to-markdown-rs = { version = "3.12.2", default-features = false }
 http = "1.5"
 http-body-util = "0.1"
 hyper = { version = "1.11", features = ["client", "http1", "http2", "server"] }
@@ -88,14 +87,14 @@ ignore = "0.4"
 im = { version = "15.1", features = ["serde"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "png", "jpeg", "gif", "webp"] }
 indicatif = "0.18"
-insta = { version = "1.47", features = ["glob", "ron", "redactions"] }
-itertools = "0.14"
+insta = { version = "1.48", features = ["glob", "ron", "redactions"] }
+itertools = "0.15"
 jaq-core = "2.1"
 jaq-json = "1.1"
 jaq-std = "2.1"
 jiff = { version = "0.2", features = ["tzdb-bundle-platform"] }
 jj-lib = { version = "0.44", default-features = false, features = ["git"] }
-kdl = "6.3"
+kdl = "6.7"
 layout-rs = "0.1.3"
 landlock = "0.4.7"
 libc = "0.2"
@@ -169,7 +168,7 @@ opentelemetry = "0.32.0"
 opentelemetry-appender-tracing = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "logs", "metrics", "reqwest-blocking-client", "trace"] }
 opentelemetry_sdk = { version = "0.32.1", features = ["logs", "metrics", "rt-tokio", "trace"] }
-opus = "0.3.1"
+opus = "0.4.0"
 parking_lot = "0.12"
 parking_lot_core = "0.9.12"
 parse_datetime = "0.14"
@@ -194,15 +193,15 @@ quick-xml = "0.41"
 quote = "1"
 rand = { version = "0.10", features = ["std_rng"] }
 raw-window-handle = "0.6"
-rayon = "1.10"
+rayon = "1.12"
 reis = { version = "=0.5.0", features = ["tokio"] }
-regex = "1.11"
-resvg = "0.45.1"
+regex = "1.13"
+resvg = "0.48.1"
 rustc-demangle = "0.1"
 rustix = { version = "1.1", features = ["fs", "pipe", "process", "time"] }
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint", "hooks", "serialize"] }
 russh = { version = "0.63", default-features = false, features = ["ring", "rsa"] }
-russh-sftp = "2.4"
+russh-sftp = "3.0"
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 schemars = "1.2.2"
@@ -220,7 +219,7 @@ similar = "3"
 smallvec = { version = "2.0.0-alpha.12", features = ["serde"] }
 smol_bitmap = { version = "0.3.2", features = ["serde"] }
 strum = { version = "0.28", features = ["derive"] }
-syn = { version = "2", features = ["full"] }
+syn = { version = "3", features = ["full"] }
 syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "regex-fancy", "yaml-load"] }
 swash = "0.2"
 tempfile = "3"
@@ -230,7 +229,7 @@ thiserror = "2.0.20"
 tinyvec = "=1.12.0"
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 tokio-util = "0.7"
 toml = "1.1"
 tonic = { version = "0.14.6", features = ["tls-ring"] }
@@ -246,18 +245,18 @@ tree-sitter-bash = "0.25"
 tree-sitter-c = "0.24"
 tree-sitter-c-sharp = "0.23"
 tree-sitter-clojure = "0.1"
-tree-sitter-cmake = "0.7.1"
+tree-sitter-cmake = "0.7.4"
 tree-sitter-cpp = "0.23"
 tree-sitter-css = "0.25"
 tree-sitter-dart = "0.2"
 tree-sitter-diff = "0.1"
 tree-sitter-dockerfile = { version = "0.2.0", package = "tree-sitter-dockerfile-updated" }
 tree-sitter-elixir = "0.3"
-tree-sitter-elisp = "1.6.1"
-tree-sitter-erlang = "0.16.0"
+tree-sitter-elisp = "1.7.2"
+tree-sitter-erlang = "0.20.0"
 tree-sitter-fortran = "0.6.0"
 tree-sitter-go = "0.25"
-tree-sitter-graphql = "0.1.0"
+tree-sitter-graphql = "0.2.1"
 tree-sitter-haskell = "0.23"
 tree-sitter-hcl = "1.1"
 tree-sitter-html = "0.23"
@@ -273,13 +272,13 @@ tree-sitter-make = "1.1"
 tree-sitter-md = "0.5"
 tree-sitter-nix = "0.3"
 tree-sitter-objc = "3.0"
-tree-sitter-ocaml = "0.24.2"
+tree-sitter-ocaml = "0.25.0"
 tree-sitter-odin = "1.3"
 tree-sitter-php = "0.24"
 tree-sitter-powershell = "0.26.4"
-tree-sitter-proto = "0.4.0"
+tree-sitter-proto = "0.6.0"
 tree-sitter-python = "0.25"
-tree-sitter-r = "1.2.0"
+tree-sitter-r = "1.3.0"
 tree-sitter-regex = "0.25"
 tree-sitter-ruby = "0.23"
 tree-sitter-rust = "0.24"
@@ -297,7 +296,7 @@ tree-sitter-vue = { version = "0.1.0", package = "tree-sitter-vue-next" }
 tree-sitter-xml = "0.7"
 tree-sitter-yaml = "0.7"
 tree-sitter-zig = "1.1"
-tokenizers = { version = "0.22", default-features = false, features = ["unstable_wasm"] }
+tokenizers = { version = "0.23", default-features = false, features = ["unstable_wasm"] }
 uiautomation = "=0.25.0"
 url = "2.5"
 voice-g2p = "0.2.2"
@@ -312,8 +311,8 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 zerocopy = { version = "0.8", features = ["derive"] }
 zune-jpeg = "0.5"
 zeroize = { version = "1.9", features = ["derive"] }
-zstd = "0.13"
-xutf = "1.4"
+zstd = "0.14"
+xutf = "1.5"
 xxhash-rust = { version = "0.8", features = ["xxh32", "xxh64"] }
 
 [workspace.metadata.omp.dependency-lints.omp-agent]
@@ -328,6 +327,17 @@ denied-direct = ["omp-envd", "omp-shell", "omp-walker"]
 # ──────────────────────────────────────────────────────────────────────────────
 mismatched_lifetime_syntaxes = "allow"
 missing_docs = "warn"                  # Every public symbol documented
+unfulfilled_lint_expectations = "deny" # Verified 0 on the clippy surface only (cargo clippy -D per lint, exit 0); a stale #[expect] must fail the build
+trivial_numeric_casts = "warn"         # 9 retained cross-platform conversion sites (measured 2026-09-07); rustc lint — clippy's nursery lint of the same name is deliberately not used
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rustdoc Lint Levels
+# ──────────────────────────────────────────────────────────────────────────────
+[workspace.lints.rustdoc]
+bare_urls = "warn"
+broken_intra_doc_links = "warn" # PROVISIONAL: deny lands only after cargo doc --workspace --no-deps exits 0 (SC-07)
+missing_crate_level_docs = "warn"
+private_intra_doc_links = "warn"
 
 [workspace.lints.clippy]
 # ──────────────────────────────────────────────────────────────────────────────
@@ -340,6 +350,23 @@ pedantic = { level = "warn", priority = -1 }
 perf = { level = "warn", priority = -1 }
 style = { level = "warn", priority = -1 }
 suspicious = { level = "deny", priority = -1 }
+# ext/doctor.rs and ext/index.rs compare publisher keys, not similarly named fields.
+suspicious_operation_groupings = "allow"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Panics, Todo & Failure Paths
+#
+# All "deny" entries were verified zero by the full-workspace promotion run
+# (nightly-2026-08-08, `cargo clippy --workspace --locked -D <lint>` per lint,
+# exit 0).
+# ──────────────────────────────────────────────────────────────────────────────
+dbg_macro = "deny"          # verified 0
+mem_forget = "warn"         # 5 retained sites (measured 2026-09-07); deny once typed wrappers land
+missing_safety_doc = "deny" # verified 0
+panic = "warn"              # 17 sites retained by owner contract (measured 2026-09-07); deny once they are removed
+todo = "deny"               # verified 0
+unimplemented = "deny"      # verified 0
+unwrap_used = "deny"        # verified 0 (10 pre-fix sites removed in ENG-10)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Synchronization Policy
@@ -350,16 +377,18 @@ disallowed_types = "deny"
 # ──────────────────────────────────────────────────────────────────────────────
 # Meta: Lint Attributes
 # ──────────────────────────────────────────────────────────────────────────────
-allow_attributes_without_reason = "warn" # Enforce reason for all #[allow]
+allow_attributes = "warn"                # #[expect] is the default; warn keeps new #[allow] visible — remaining deliberate carve-outs stay warn
+allow_attributes_without_reason = "deny" # Enforce reason for all #[allow] — verified 0 on the promotion run
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Safety & Unsafe Code
 # ──────────────────────────────────────────────────────────────────────────────
 borrow_as_ptr = "allow"
 cast_ptr_alignment = "allow"
+multiple_unsafe_ops_per_block = "deny" # verified 0 (2 pre-fix sites split in ENG-13)
 ptr_as_ptr = "allow"
 ref_as_ptr = "allow"
-undocumented_unsafe_blocks = "warn"
+undocumented_unsafe_blocks = "deny" # verified 0 (1 pre-fix site fixed in ENG-13); promoted from warn
 unsafe_derive_deserialize = "allow"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -438,6 +467,14 @@ missing_panics_doc = "allow" # Not every panic needs docs, especially assert!
 # ──────────────────────────────────────────────────────────────────────────────
 too_many_arguments = "allow" # Argument count is rarely the real complexity signal
 too_many_lines = "allow"     # Arbitrary limits don't account for necessary complexity
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Measured but not adopted — historical baseline from the 2026-09-07 hardening
+# pass (production code, nightly-2026-08-08). This is a record, not a fresh
+# measurement; re-measure before raising any of these.
+#   arithmetic_side_effects 4786 · indexing_slicing 2737 · expect_used 504
+#   unreachable_pub 412 · let_underscore_drop 206 · unwrap_in_result 71
+# ──────────────────────────────────────────────────────────────────────────────
 
 # No debuginfo in dev builds. With Mach-O split debug maps, file:line
 # backtraces require retaining every .rcgu.o — ~1 GB per linked test binary

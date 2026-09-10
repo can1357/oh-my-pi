@@ -16,11 +16,11 @@ use std::{
 };
 
 use omp_core::{CowBytes, Str, fs::replace_file_atomically};
+use parking_lot::RwLock;
 use serde::Deserialize;
 use tokio::{
 	io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _},
 	process::{Child, Command},
-	sync::RwLock,
 	time,
 };
 use toml::de;
@@ -204,7 +204,7 @@ impl VaultService {
 	}
 
 	async fn discover_obsidian_vaults(&self) -> Result<Arc<BTreeMap<Str, PathBuf>>, VaultError> {
-		if let Some(cached) = self.discovered.read().await.as_ref() {
+		if let Some(cached) = self.discovered.read().as_ref() {
 			return Ok(Arc::clone(cached));
 		}
 		if self.obsidian.binary.is_none() {
@@ -214,7 +214,7 @@ impl VaultService {
 			.run_obsidian(ObsidianOperation::Discover, None, ["vaults", "verbose"])
 			.await?;
 		let parsed = Arc::new(parse_vault_directory(output.stdout.as_ref())?);
-		let mut cached = self.discovered.write().await;
+		let mut cached = self.discovered.write();
 		if let Some(existing) = cached.as_ref() {
 			return Ok(Arc::clone(existing));
 		}
@@ -237,14 +237,14 @@ impl VaultService {
 	}
 
 	async fn active_obsidian_root(&self) -> Result<PathBuf, VaultError> {
-		if let Some(root) = self.active.read().await.as_ref() {
+		if let Some(root) = self.active.read().as_ref() {
 			return Ok(root.clone());
 		}
 		let output = self
 			.run_obsidian(ObsidianOperation::Discover, None, ["vault", "info", "path"])
 			.await?;
 		let resolved = parse_active_vault_path(output.stdout.as_ref()).await?;
-		let mut active = self.active.write().await;
+		let mut active = self.active.write();
 		if let Some(root) = active.as_ref() {
 			return Ok(root.clone());
 		}

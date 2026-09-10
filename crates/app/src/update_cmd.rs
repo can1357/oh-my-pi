@@ -15,7 +15,7 @@ use futures::StreamExt as _;
 use miette::{IntoDiagnostic as _, miette};
 use omp_core::{Str, encoding::hex};
 use omp_ext::{
-	index::{IndexArtifact, IndexExtension, IndexRelease, SignedIndex},
+	index::{IndexArtifact, IndexExtension, IndexRelease, SignedIndex, VerifiedIndex},
 	trust::{KeysFile, verify_artifact_signature},
 };
 use serde::{Deserialize, Serialize};
@@ -723,7 +723,7 @@ pub fn registry(args: RegistryArgs) -> miette::Result<()> {
 	Ok(())
 }
 
-fn load_index(index: Option<&Path>, key: Option<&Path>) -> miette::Result<(SignedIndex, String)> {
+fn load_index(index: Option<&Path>, key: Option<&Path>) -> miette::Result<(VerifiedIndex, String)> {
 	let index = configured_path(index, "OMP_RELEASE_INDEX", "signed release index")?;
 	let key = configured_path(key, "OMP_RELEASE_INDEX_KEY", "release index key")?;
 	let key = fs::read_to_string(key).into_diagnostic()?;
