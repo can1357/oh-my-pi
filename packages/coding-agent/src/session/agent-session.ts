@@ -102,7 +102,7 @@ import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
-import type { ResolvedModelRoleValue } from "../config/model-resolver";
+import { preserveUpstreamRouting, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -10681,8 +10681,9 @@ export class AgentSession {
 		if (!current || !modelsAreEqual(current, boundAtStartup)) return;
 		const refreshed = this.#modelRegistry.find(current.provider, current.id);
 		if (!refreshed || refreshed.contextWindow === current.contextWindow) return;
-		this.agent.setModel(refreshed);
-		await this.#reconcileModelDependentState(current, refreshed);
+		const rebound = preserveUpstreamRouting(current, refreshed);
+		this.agent.setModel(rebound);
+		await this.#reconcileModelDependentState(current, rebound);
 		if (this.#isDisposed) return;
 		this.#emit({ type: "model_changed" });
 	}

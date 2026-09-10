@@ -412,6 +412,12 @@ function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
 	} as ModelSpec<Api>);
 }
 
+/** Preserve an explicit single-upstream pin while refreshing an aggregator model's metadata. */
+export function preserveUpstreamRouting(source: Model<Api>, refreshed: Model<Api>): Model<Api> {
+	const upstream = getSingleUpstreamRoute(source);
+	return upstream && supportsUpstreamRouting(refreshed) ? applyUpstreamRouting(refreshed, upstream) : refreshed;
+}
+
 const kProviderModelIndex = Symbol("model-resolver.providerIndex");
 const kProviderSpellingIndex = Symbol("model-resolver.providerSpellingIndex");
 type ModelsWithProviderIndex = readonly Model<Api>[] & {
@@ -2106,8 +2112,18 @@ export function resolveCliModel(options: {
 		}
 	}
 
-	const candidates = provider ? allModels.filter(model => model.provider === provider) : availableModels;
-	let parsed = parseModelPattern(pattern, candidates, preferences, {
+	const providerCandidates = provider ? allModels.filter(model => model.provider === provider) : undefined;
+	// Aggregator model ids can themselves be provider-shaped (for example OpenRouter's
+	// `google/gemini-3.8-flash`). Once an explicit outer provider is stripped,
+	// parsing `...@upstream` would let the inner `google/` hit the provider-lock
+	// guard before routing is applied. Preserve the outer provider for routed
+	// aggregator selectors so the parser resolves the aggregator model first.
+	const routedProviderPattern =
+		provider && providerCandidates?.some(supportsUpstreamRouting) && splitUpstreamRouting(pattern)
+			? `${provider}/${pattern}`
+			: undefined;
+	const candidates = providerCandidates ?? availableModels;
+	let parsed = parseModelPattern(routedProviderPattern ?? pattern, candidates, preferences, {
 		allowInvalidThinkingSelectorFallback: false,
 	});
 	if (!parsed.model && !provider) {
