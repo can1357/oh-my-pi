@@ -912,10 +912,10 @@ export function resolveCredentialScopedRefreshTarget(
 }
 
 /**
- * When `--provider`/`--model` (or `provider/model`) selects a discoverable
- * provider and the model is missing from the cold/startup catalog (fresh
- * profile, no credential-scoped cache), refresh that provider before
- * {@link buildSessionOptions} exits on miss. Credentials may come from
+ * When `--provider`/`--model` (or `provider/model`) selects a KDL
+ * credential-scoped provider and the model is missing from the cold/startup
+ * catalog (fresh profile, no credential-scoped cache), refresh that provider
+ * before {@link buildSessionOptions} exits on miss. Credentials may come from
  * `--api-key`, env, secrets file, or `models.yml` — not specifically a CLI key.
  * A single-provider `--models grokbot/<id>` scope is accepted the same way
  * (no `parsed.model`); multi-provider / bare scopes stay unbound.
@@ -925,7 +925,10 @@ export function resolveCredentialScopedRefreshTarget(
  * Built-in descriptor providers (e.g. Grok Bot) are not listed by
  * {@link ModelRegistry.getDiscoverableProviders} — that API only covers
  * models.yml / runtime discovery / implicit local providers — so the gate also
- * accepts catalog entries with `createModelManagerOptions`.
+ * accepts catalog entries with `createModelManagerOptions`. Ordinary built-ins
+ * that only have a manager descriptor (e.g. openai) still require the KDL
+ * `credential-scoped-catalog` flag — otherwise a cold typo blocks startup on a
+ * pointless discovery pass.
  */
 export async function refreshCredentialScopedModelIfMissing(
 	parsed: Pick<Args, "model" | "models">,
@@ -935,6 +938,9 @@ export async function refreshCredentialScopedModelIfMissing(
 	if (!providerId) return false;
 	if (!modelRegistry.hasProvider(providerId)) return false;
 	if (!providerSupportsCredentialScopedRefresh(providerId, modelRegistry)) return false;
+	// Same KDL gate as the scoped-model refresh path — descriptor-backed
+	// providers without credential-scoped-catalog must not eager-refresh.
+	if (!isCredentialScopedCatalogProvider(providerId)) return false;
 	const selectors = credentialScopedRefreshSelectors(parsed, providerId);
 	if (selectors.length === 0) return false;
 	const available = modelRegistry.getAvailable();

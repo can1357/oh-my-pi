@@ -317,14 +317,9 @@ describe("refreshCredentialScopedModelIfMissing", () => {
 		});
 		// Bare / unbound CLI selectors must not fall through to the default role.
 		expect(resolveCredentialScopedRefreshTarget({ model: "composer-2.5" }, "grokbot/live-only")).toBeUndefined();
+		expect(resolveCredentialScopedRefreshTarget({ models: ["composer-2.5"] }, "grokbot/live-only")).toBeUndefined();
 		expect(
-			resolveCredentialScopedRefreshTarget({ models: ["composer-2.5"] }, "grokbot/live-only"),
-		).toBeUndefined();
-		expect(
-			resolveCredentialScopedRefreshTarget(
-				{ models: ["openai/gpt-4o", "anthropic/claude"] },
-				"grokbot/live-only",
-			),
+			resolveCredentialScopedRefreshTarget({ models: ["openai/gpt-4o", "anthropic/claude"] }, "grokbot/live-only"),
 		).toBeUndefined();
 	});
 
@@ -500,9 +495,9 @@ describe("refreshCredentialScopedModelIfMissing", () => {
 			buildModel({
 				id: "deepseek/deepseek-v4-flash",
 				name: "deepseek-v4-flash",
-				api: "openai-completions",
-				provider: "kilo",
-				baseUrl: "https://example.com",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				baseUrl: "https://api2.cursor.sh",
 				reasoning: false,
 				input: ["text"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -510,16 +505,31 @@ describe("refreshCredentialScopedModelIfMissing", () => {
 				maxTokens: 8_192,
 			}),
 		]);
-		registry.discoverableProviders = ["kilo"];
+		registry.discoverableProviders = ["grokbot"];
 
 		const refreshed = await refreshCredentialScopedModelIfMissing(
-			{ model: "kilo/deepseek/deepseek-v4-flash:free" },
+			{ model: "grokbot/deepseek/deepseek-v4-flash:free" },
 			registry,
-			"kilo",
+			"grokbot",
 		);
 
 		expect(refreshed).toBe(true);
-		expect(registry.refreshProviderCalls).toEqual([{ providerId: "kilo", strategy: "online-if-uncached" }]);
+		expect(registry.refreshProviderCalls).toEqual([{ providerId: "grokbot", strategy: "online-if-uncached" }]);
+	});
+
+	it("skips cold refresh for ordinary descriptor providers without credential-scoped-catalog", async () => {
+		// openai has createModelManagerOptions but is not KDL credential-scoped —
+		// a typo must not block startup on an eager discovery pass.
+		const registry = new ModelRegistry(authStorage, tempDir.join("models-openai-cold.yml"));
+		expect(registry.hasProvider("openai")).toBe(true);
+		const spy = vi.spyOn(registry, "refreshProvider").mockResolvedValue();
+		const refreshed = await refreshCredentialScopedModelIfMissing(
+			{ model: "openai/definitely-not-a-real-model-xyz" },
+			registry,
+			"openai",
+		);
+		expect(refreshed).toBe(false);
+		expect(spy).not.toHaveBeenCalled();
 	});
 
 	it("still treats a recognized :high thinking suffix as present when the base id is cold-cached", async () => {
