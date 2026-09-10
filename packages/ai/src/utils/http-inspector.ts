@@ -164,16 +164,22 @@ function redactHeaders(headers: Record<string, string> | undefined): Record<stri
 	if (!headers) {
 		return undefined;
 	}
+	return redactSensitiveHeaderValues(headers);
+}
 
-	const redacted: Record<string, string> = {};
-	for (const [key, value] of Object.entries(headers)) {
+/**
+ * Replace the values of sensitive headers with a fixed marker, matching header
+ * names case-insensitively. Header names are preserved so dumps still show
+ * what was sent. Single shared implementation for every dump path
+ * (http-inspector error dumps and request-debug session logs alike).
+ */
+export function redactSensitiveHeaderValues<T>(headers: Record<string, T>): Record<string, T> {
+	for (const key in headers) {
 		if (SENSITIVE_HEADERS.includes(key.toLowerCase())) {
-			redacted[key] = "[redacted]";
-			continue;
+			headers[key] = "[redacted]" as T;
 		}
-		redacted[key] = value;
 	}
-	return redacted;
+	return headers;
 }
 
 function formatCapturedHttpError(captured: CapturedHttpErrorResponse | undefined): string | undefined {

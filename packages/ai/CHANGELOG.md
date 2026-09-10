@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed auth credential store file permissions: the SQLite database and its WAL/SHM sidecars are chmod'ed owner-only (0600) independently, so a missing sidecar no longer leaves another one world-readable from an earlier run.
+- Fixed `PI_REQ_DEBUG` session logs leaking sensitive response headers: the `.res.log` header block now redacts `authorization`, `proxy-authorization`, `x-api-key`, `api-key`, `cookie`, and `set-cookie` values, matching the redaction already applied to request dumps.
+
 ## [18.1.16] - 2026-09-09
 
 ### Fixed
