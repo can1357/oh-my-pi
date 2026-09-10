@@ -41,6 +41,32 @@ describe("openai-responses gateway passthrough fields", () => {
 		expect("logit_bias" in params).toBe(false);
 	});
 
+	it("flattens Chat JSON Schema response formats and preserves their description", () => {
+		const { params } = buildParams(
+			model(),
+			context,
+			{
+				responseFormat: {
+					type: "json_schema",
+					json_schema: {
+						name: "answer",
+						description: "The structured answer returned to the caller.",
+						schema: { type: "object", properties: { answer: { type: "string" } } },
+						strict: true,
+					},
+				},
+			},
+			undefined,
+		);
+		expect(params.text?.format).toEqual({
+			type: "json_schema",
+			name: "answer",
+			description: "The structured answer returned to the caller.",
+			schema: { type: "object", properties: { answer: { type: "string" } } },
+			strict: true,
+		});
+	});
+
 	it("does not invent logit_bias on the Responses wire (negative)", () => {
 		const { params } = buildParams(
 			model(),

@@ -680,7 +680,7 @@ const streamOpenAIResponsesOnce = (
 							// Preserve caller storage intent (e.g. via onPayload): a
 							// stored first attempt whose retry is not retained breaks
 							// subsequent previous_response_id continuations.
-							else if (activeParams.store === true) fallbackParams.store = true;
+							else if (chained.params.store === true) fallbackParams.store = true;
 							const fallbackClientPreviousResponseId = options?.previousResponseId;
 							let fallbackChained: OpenAIResponsesChainedParams = fallbackClientPreviousResponseId
 								? {
@@ -1248,7 +1248,7 @@ export function buildParams(
 	if (responseFormat !== undefined && typeof responseFormat === "object" && responseFormat !== null) {
 		const format = responseFormat as {
 			type?: string;
-			json_schema?: { name?: string; schema?: unknown; strict?: boolean };
+			json_schema?: { name?: string; schema?: unknown; strict?: boolean; description?: string };
 		};
 		if (
 			format.type === "json_schema" &&
@@ -1264,6 +1264,7 @@ export function buildParams(
 					name: format.json_schema.name ?? "response",
 					schema: format.json_schema.schema,
 					...(format.json_schema.strict !== undefined ? { strict: format.json_schema.strict } : {}),
+					...(format.json_schema.description !== undefined ? { description: format.json_schema.description } : {}),
 				} as never,
 			};
 		} else {

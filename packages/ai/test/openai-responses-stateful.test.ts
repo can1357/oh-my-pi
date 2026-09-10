@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Context, FetchImpl, Model, ModelSpec, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -116,6 +117,49 @@ describe("openai-responses stateful chaining", () => {
 		expect(deltaInput[0]?.role).toBe("user");
 		expect(JSON.stringify(deltaInput)).toContain("Second question");
 		expect(JSON.stringify(deltaInput)).not.toContain("Answer 1");
+	});
+
+	it("preserves store from the first onPayload replacement on a strict-tools retry", async () => {
+		const sentRequests: Array<Record<string, unknown>> = [];
+		let payloadCalls = 0;
+		let fetchCalls = 0;
+		const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			fetchCalls += 1;
+			const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			sentRequests.push(request);
+			if (fetchCalls === 1) {
+				return new Response(JSON.stringify({ error: { message: "Invalid tool parameters schema" } }), {
+					status: 400,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return createStatefulSse("Recovered", "resp_retry");
+		}) as FetchImpl;
+		const context: Context = {
+			messages: [{ role: "user", content: "Use the tool", timestamp: 1000 }],
+			tools: [
+				{
+					name: "echo",
+					description: "Echo input",
+					parameters: type({ text: "string" }),
+				},
+			],
+		};
+
+		const result = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			onPayload: payload => {
+				payloadCalls += 1;
+				return payloadCalls === 1 ? { ...(payload as Record<string, unknown>), store: true } : payload;
+			},
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(payloadCalls).toBe(2);
+		expect(sentRequests).toHaveLength(2);
+		expect(sentRequests[0]?.store).toBe(true);
+		expect(sentRequests[1]?.store).toBe(true);
 	});
 
 	it("keeps the automatic explicit cache breakpoint stable across chained turns", async () => {

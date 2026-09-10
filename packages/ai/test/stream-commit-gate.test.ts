@@ -57,6 +57,13 @@ describe("StreamCommitGate", () => {
 		expect(gate.state).not.toBe("committed");
 	});
 
+	it("terminates when the Responses SSE stream emits the top-level error event", () => {
+		const gate = new StreamCommitGate();
+		expect(gate.classifyAndObserve("response.created", 20)).toBe("probing");
+		expect(gate.classifyAndObserve("error", 20)).toBe("terminated");
+		expect(gate.state).toBe("terminated");
+	});
+
 	it("uses downstream SSE only for openai-responses (negative: chat is upstream-fed)", () => {
 		expect(commitGateObservesDownstreamSse("openai-responses")).toBe(true);
 		expect(commitGateObservesDownstreamSse("openai-chat")).toBe(false);
@@ -97,16 +104,15 @@ describe("StreamCommitGate", () => {
 	});
 });
 
-
-	it("reset returns a terminated gate to probing and clears buffered prelude", () => {
-		const gate = new StreamCommitGate();
-		expect(gate.bufferPrelude(new Uint8Array([1, 2, 3]))).toBe(true);
-		expect(gate.classifyAndObserve("response.failed", 8)).toBe("terminated");
-		gate.reset();
-		expect(gate.state).toBe("probing");
-		expect(gate.preludeByteLength).toBe(0);
-		expect(gate.classifyAndObserve("response.created", 4)).toBe("probing");
-	});
+it("reset returns a terminated gate to probing and clears buffered prelude", () => {
+	const gate = new StreamCommitGate();
+	expect(gate.bufferPrelude(new Uint8Array([1, 2, 3]))).toBe(true);
+	expect(gate.classifyAndObserve("response.failed", 8)).toBe("terminated");
+	gate.reset();
+	expect(gate.state).toBe("probing");
+	expect(gate.preludeByteLength).toBe(0);
+	expect(gate.classifyAndObserve("response.created", 4)).toBe("probing");
+});
 
 describe("holdSseUntilCommit (prelude replay buffer)", () => {
 	function sse(frames: string[]): ReadableStream<Uint8Array> {
