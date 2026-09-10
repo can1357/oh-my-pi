@@ -12,19 +12,18 @@ afterEach(() => {
 });
 
 describe("auth-gateway RouteRegistry wiring", () => {
-	it("resolves the client model id through RouteRegistry before dispatch", async () => {
+	it("dispatches the compiled target through both gateway formats", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-route-wire-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 		storage.setRuntimeApiKey("openrouter", "test-key");
-		const mock = createMockModel({ provider: "openrouter", id: "mock/route-wire" });
-		mock.push({ content: ["ok"] });
-		const resolve = spyOn(RouteRegistry.prototype, "resolve");
+		const mock = createMockModel({ provider: "openrouter", id: "actual-target", handler: { content: ["ok"] } });
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
 			bearerTokens: ["t"],
 			storage,
-			resolveModel: () => mock.model,
+			resolveModel: id => (id === "actual-target" ? mock.model : undefined),
+			routeRegistry: new RouteRegistry(id => (id === "virtual" ? mock.model : undefined)),
 			version: "test",
 		});
 		try {
@@ -32,15 +31,24 @@ describe("auth-gateway RouteRegistry wiring", () => {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
 				body: JSON.stringify({
-					model: "mock/route-wire",
+					model: "virtual",
 					messages: [{ role: "user", content: "hi" }],
 					stream: false,
 				}),
 			});
 			expect(res.status).toBe(200);
-			expect(resolve.mock.calls.some(call => call[0] === "mock/route-wire")).toBe(true);
+			const native = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					modelId: "virtual",
+					context: { messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+					stream: false,
+				}),
+			});
+			expect(native.status).toBe(200);
+			expect(mock.calls).toHaveLength(2);
 		} finally {
-			resolve.mockRestore();
 			await handle.close();
 			storage.close();
 			await fs.rm(dir, { recursive: true, force: true });

@@ -401,8 +401,7 @@ export function releaseProbeOnStreamEnd(
 		if (
 			settleProbe &&
 			commitGate !== undefined &&
-			(commitGate.state === "committed" ||
-				(commitGate.state === "terminated" && commitGate.sawSuccessfulTerminal))
+			(commitGate.state === "committed" || (commitGate.state === "terminated" && commitGate.sawSuccessfulTerminal))
 		) {
 			storage.settleQuotaProbeSuccess(requestId);
 		}
@@ -429,7 +428,6 @@ export function releaseProbeOnStreamEnd(
 		},
 	});
 }
-
 
 async function handleFormatEndpoint(
 	route: { module: FormatModule; label: string },
@@ -465,7 +463,7 @@ async function handleFormatEndpoint(
 	if (!compiled) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 	}
-	const model = bootOpts.resolveModel(modelId);
+	const model = bootOpts.resolveModel(compiled.root.model);
 	if (!model) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 	}
@@ -768,7 +766,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	if (!compiled) {
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
-	const model = bootOpts.resolveModel(parsed.modelId);
+	const model = bootOpts.resolveModel(compiled.root.model);
 	if (!model) {
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}

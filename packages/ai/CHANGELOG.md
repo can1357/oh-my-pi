@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Preserve older broker client compatibility by negotiating Retry-After snapshot fields, dispatch compiled gateway targets, and keep heartbeat-only streams eligible for failover.
+
 - Prefer healthy API-key siblings before leasing a cooldown probe, and acquire API-key probes under the ranking block scope that caused the cooldown.
 - Preserve Retry-After provenance across broker snapshots, retain in-memory reconciliation deadlines for new backoff maps, and commit when prelude buffering hits the cap.
 - Require probe leases for blocked API-key selections, avoid double-forwarding the commit chunk, and skip settlement waits on failed stream release.

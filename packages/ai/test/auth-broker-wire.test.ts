@@ -32,11 +32,12 @@ function mintOAuthCredential(suffix: string, expires: number) {
 	};
 }
 
-function fetchWithoutAuthBrokerCapabilities(): typeof fetch {
+function fetchWithoutAuthBrokerCapabilities(capability?: string): typeof fetch {
 	return Object.assign(
 		async (input: string | URL | Request, init?: RequestInit) => {
 			const headers = new Headers(init?.headers);
-			headers.delete(AUTH_BROKER_CAPABILITIES_HEADER);
+			if (capability) headers.set(AUTH_BROKER_CAPABILITIES_HEADER, capability);
+			else headers.delete(AUTH_BROKER_CAPABILITIES_HEADER);
 			return fetch(input, { ...init, headers });
 		},
 		{ preconnect: fetch.preconnect },
@@ -98,6 +99,60 @@ describe("auth-broker wire surface", () => {
 		for (const key of ANTHROPIC_ENV) {
 			if (savedEnv[key] === undefined) delete process.env[key];
 			else process.env[key] = savedEnv[key];
+		}
+	});
+
+	test("negotiates Retry-After snapshot fields independently of Codex meter scopes", async () => {
+		const credentialId = storage!.exportSnapshot().credentials[0]!.id;
+		storage!.upsertCredentialBlock({
+			credentialId,
+			providerKey: "anthropic:oauth",
+			blockScope: "shared",
+			blockedUntilMs: Date.now() + 60_000,
+			retryAfter: true,
+		});
+		const current = await new AuthBrokerClient({ url: handle!.url, token }).fetchSnapshot();
+		const legacy = await new AuthBrokerClient({
+			url: handle!.url,
+			token,
+			fetchImpl: fetchWithoutAuthBrokerCapabilities(AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES),
+		}).fetchSnapshot();
+		if (current.status !== 200 || legacy.status !== 200) throw new Error("expected snapshots");
+		expect(credentialBlocks(current.snapshot, credentialId)[0]?.retryAfter).toBe(true);
+		expect(credentialBlocks(legacy.snapshot, credentialId)[0]).not.toHaveProperty("retryAfter");
+	});
+
+	test("negotiates Retry-After fields on streaming snapshots", async () => {
+		const credentialId = storage!.exportSnapshot().credentials[0]!.id;
+		storage!.upsertCredentialBlock({
+			credentialId,
+			providerKey: "anthropic:oauth",
+			blockScope: "shared",
+			blockedUntilMs: Date.now() + 60_000,
+			retryAfter: true,
+		});
+		const currentAbort = new AbortController();
+		const legacyAbort = new AbortController();
+		const current = new AuthBrokerClient({ url: handle!.url, token }).openSnapshotStream({
+			signal: currentAbort.signal,
+		});
+		const legacy = new AuthBrokerClient({
+			url: handle!.url,
+			token,
+			fetchImpl: fetchWithoutAuthBrokerCapabilities(AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES),
+		}).openSnapshotStream({ signal: legacyAbort.signal });
+		try {
+			const a = await current.next();
+			const b = await legacy.next();
+			if (a.done || b.done || a.value.kind !== "snapshot" || b.value.kind !== "snapshot")
+				throw new Error("expected snapshot frames");
+			expect(credentialBlocks(a.value, credentialId)[0]?.retryAfter).toBe(true);
+			expect(credentialBlocks(b.value, credentialId)[0]).not.toHaveProperty("retryAfter");
+		} finally {
+			currentAbort.abort();
+			legacyAbort.abort();
+			await current.return(undefined);
+			await legacy.return(undefined);
 		}
 	});
 
@@ -214,7 +269,7 @@ describe("auth-broker wire surface", () => {
 		const unchanged = await client.fetchSnapshot({ ifGenerationGt: body.generation, waitMs: 10 });
 		expect(unchanged.status).toBe(304);
 		expect(unchanged.generation).toBe(body.generation);
-		expect(observedCapabilities).toEqual([AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES]);
+		expect(observedCapabilities).toEqual(["codex-meter-block-scopes,retry-after-blocks"]);
 
 		const rawUnchanged = await fetch(`${handle!.url}/v1/snapshot?wait=10`, {
 			headers: {
