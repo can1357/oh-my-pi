@@ -12,6 +12,7 @@ import {
 	getBlobsDir,
 	getHistoryDbPath,
 	getSessionsDir,
+	getTerminalSessionsDir,
 	setAgentDir,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
@@ -194,6 +195,39 @@ describe("runGcCommand blob sweep", () => {
 		expect(result.blobs?.wouldDelete).toBe(0);
 		expect(result.blobs?.deleted).toBe(0);
 		expect(await Bun.file(referenced).exists()).toBe(true);
+	});
+
+	test("--apply keeps blobs referenced by a breadcrumbed session outside the scan roots", async () => {
+		const referencedHash = hashFor("custom-dir-reference");
+		const orphanHash = hashFor("custom-dir-orphan");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		const orphan = await writeBlob(root, orphanHash, "orphan");
+		await agePath(referenced);
+		await agePath(orphan);
+
+		// A --session-dir transcript stored outside <agentDir>/sessions and archive.
+		const externalDir = path.join(root, "external-sessions");
+		await fs.mkdir(externalDir, { recursive: true });
+		const externalFile = path.join(externalDir, "work.jsonl");
+		await Bun.write(
+			externalFile,
+			[
+				JSON.stringify({ type: "session", version: 3, id: "work", timestamp: "2026-01-01T00:00:00.000Z" }),
+				JSON.stringify({ type: "message", message: { role: "user", content: `blob:sha256:${referencedHash}` } }),
+				"",
+			].join("\n"),
+		);
+		// The session's terminal breadcrumb records the relocated transcript.
+		const crumbDir = getTerminalSessionsDir(root);
+		await fs.mkdir(crumbDir, { recursive: true });
+		await Bun.write(path.join(crumbDir, "tty-1"), `/tmp/project\n${externalFile}\n`);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.referenced).toBe(1);
+		expect(result.blobs?.deleted).toBe(1);
+		expect(await Bun.file(referenced).exists()).toBe(true);
+		expect(await Bun.file(orphan).exists()).toBe(false);
 	});
 
 	test("uses configured gc selectors and retention defaults", async () => {

@@ -10,6 +10,9 @@ import {
 	getModelDbPath,
 	getSessionsDir,
 	getStatsDbPath,
+	getTerminalSessionsDir,
+	normalizePathForComparison,
+	pathIsWithin,
 	readLines,
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
@@ -295,6 +298,36 @@ async function collectReferencedBlobHashes(sessionRoots: string[]): Promise<Set<
 	return hashes;
 }
 
+/**
+ * Session directories recorded in terminal breadcrumbs that live outside the
+ * default scan roots. A `--session-dir`/`--session` transcript stores its
+ * `blob:sha256:` references outside `<agentDir>/sessions`, yet externalizes
+ * images into the shared agent-global blob store, so the mark phase must widen
+ * its reachability roots to these locations or the sweep unlinks blobs a live
+ * transcript still references (issue #11551). Breadcrumbs
+ * (`<agentDir>/terminal-sessions/*`, `cwd\nsessionFile` per terminal) are the
+ * durable record of relocated transcripts GC cannot otherwise enumerate.
+ */
+async function collectBreadcrumbSessionRoots(breadcrumbDir: string, defaultRoots: string[]): Promise<string[]> {
+	let entries: string[];
+	try {
+		entries = await fs.readdir(breadcrumbDir);
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return [];
+		throw error;
+	}
+	const roots = new Map<string, string>();
+	for (const entry of entries) {
+		const text = await readTextIfPresent(path.join(breadcrumbDir, entry));
+		const sessionFile = text.split("\n")[1]?.trim();
+		if (!sessionFile) continue;
+		const sessionRoot = path.dirname(path.resolve(sessionFile));
+		if (defaultRoots.some(root => pathIsWithin(root, sessionRoot))) continue;
+		roots.set(normalizePathForComparison(sessionRoot), sessionRoot);
+	}
+	return [...roots.values()];
+}
+
 async function collectBlobCandidates(blobDir: string): Promise<BlobCandidate[]> {
 	let entries: string[];
 	try {
@@ -325,7 +358,9 @@ async function collectBlobCandidates(blobDir: string): Promise<BlobCandidate[]> 
 async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string): Promise<BlobGcResult> {
 	const blobDir = getBlobsDir(options.agentDir);
 	const sessionsRoot = getSessionsDir(options.agentDir);
-	const referenced = await collectReferencedBlobHashes([sessionsRoot, archiveSessionsRoot]);
+	const defaultRoots = [sessionsRoot, archiveSessionsRoot];
+	const breadcrumbRoots = await collectBreadcrumbSessionRoots(getTerminalSessionsDir(options.agentDir), defaultRoots);
+	const referenced = await collectReferencedBlobHashes([...defaultRoots, ...breadcrumbRoots]);
 	const candidates = await collectBlobCandidates(blobDir);
 	const result: BlobGcResult = {
 		referenced: referenced.size,
