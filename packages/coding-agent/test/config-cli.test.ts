@@ -272,14 +272,17 @@ describe("config CLI schema coverage", () => {
 		expect(JSON.parse(output)).toEqual({ key: "compaction.enabled", value: true });
 	});
 
-	it("reports a stale guarded default write as preserved", async () => {
+	it.each([
+		["a different value", false],
+		["the requested value", true],
+	])("preserves a competitor write of %s made before the locked save", async (_description, competitorValue) => {
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
 		const configPath = path.join(testAgentDir.path(), "config.yml");
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		await Settings.init();
 		const flush = Settings.instance.flush.bind(Settings.instance);
 		vi.spyOn(Settings.instance, "flush").mockImplementationOnce(async () => {
-			await Bun.write(configPath, "compaction:\n  enabled: false\n");
+			await Bun.write(configPath, `compaction:\n  enabled: ${competitorValue}\n`);
 			await flush();
 		});
 
@@ -292,10 +295,12 @@ describe("config CLI schema coverage", () => {
 
 		expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]))).toEqual({
 			key: "compaction.enabled",
-			value: false,
+			value: competitorValue,
 			applied: false,
 		});
-		expect(YAML.parse(await Bun.file(configPath).text())).toMatchObject({ compaction: { enabled: false } });
+		expect(YAML.parse(await Bun.file(configPath).text())).toMatchObject({
+			compaction: { enabled: competitorValue },
+		});
 	});
 	it("fully flushes JSON larger than a pipe buffer", async () => {
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");

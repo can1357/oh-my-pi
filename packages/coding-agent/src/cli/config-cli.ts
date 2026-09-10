@@ -195,7 +195,7 @@ function getTypeDisplay(def: CliSettingDef): string {
 // Schema-Driven Value Parsing
 // =============================================================================
 
-function parseAndSetValue(path: SettingPath, rawValue: string): void {
+function parseSettingValue<P extends SettingPath>(path: P, rawValue: string): SettingValue<P> {
 	const schemaType = getType(path);
 	let parsedValue: unknown;
 
@@ -253,7 +253,7 @@ function parseAndSetValue(path: SettingPath, rawValue: string): void {
 			parsedValue = trimmed;
 	}
 
-	settings.set(path, parsedValue as SettingValue<typeof path>);
+	return parsedValue as SettingValue<P>;
 }
 
 // =============================================================================
@@ -397,30 +397,22 @@ async function handleSet(
 		process.exit(1);
 	}
 
-	const existing = flags.ifAbsent ? getRawGlobalSetting(def.path) : undefined;
-	if (existing?.present) {
-		printSetResult(def.path, existing.value, flags, false);
-		return;
-	}
-
-	let requestedValue: unknown;
+	let applied = true;
 	try {
-		parseAndSetValue(def.path, value);
-		requestedValue = getRawGlobalSetting(def.path).value;
-		await settings.flush();
-		if (flags.ifAbsent) await settings.reloadFromDisk();
+		const requestedValue = parseSettingValue(def.path, value);
+		if (flags.ifAbsent) {
+			applied = await settings.setIfAbsent(def.path, requestedValue);
+		} else {
+			settings.set(def.path, requestedValue);
+			await settings.flush();
+		}
 	} catch (err) {
 		console.error(chalk.red(String(err)));
 		process.exit(1);
 	}
 
 	const persisted = flags.ifAbsent ? getRawGlobalSetting(def.path) : undefined;
-	printSetResult(
-		def.path,
-		persisted?.present ? persisted.value : settings.get(def.path),
-		flags,
-		!flags.ifAbsent || (persisted?.present === true && Bun.deepEquals(persisted.value, requestedValue)),
-	);
+	printSetResult(def.path, persisted?.present ? persisted.value : settings.get(def.path), flags, applied);
 }
 
 function printSetResult(
