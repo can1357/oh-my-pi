@@ -54,6 +54,12 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	restorableHeaderFallback?: Record<string, string>;
 	/** Optional dynamic endpoint fetcher. */
 	fetchDynamicModels?: () => Promise<readonly ModelSpec<TApi>[] | null>;
+	/**
+	 * Total inner discovery budget (rich phase + fallback) the runtime outer
+	 * timeout must accommodate. Omit when the provider fits the default outer
+	 * guard; the registry then applies its unchanged default timeout.
+	 */
+	discoveryBudgetMs?: number;
 	/** Optional stencil.so fallback hook. */
 	modelsDev?: ModelsDevFallback<TApi, TModelsDevPayload>;
 	/** Clock override for deterministic tests. */

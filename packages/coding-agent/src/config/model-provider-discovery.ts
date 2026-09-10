@@ -73,6 +73,19 @@ export async function withModelDiscoveryTimeout<T>(timeoutMs: number, run: () =>
 	}
 }
 
+/**
+ * Outer budget for one provider's `manager.refresh()`: the default guard,
+ * stretched only when the provider declares a larger inner
+ * (`ModelManagerOptions.discoveryBudgetMs`) budget. Providers that omit the
+ * key keep the byte-identical default timeout; non-finite values fall back
+ * to it rather than arming a degenerate timer.
+ */
+export function resolveModelDiscoveryTimeoutMs(options: { discoveryBudgetMs?: number }): number {
+	const budget = options.discoveryBudgetMs;
+	if (typeof budget !== "number" || !Number.isFinite(budget)) return RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS;
+	return Math.max(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, budget);
+}
+
 export interface BuiltInDiscoveryResult {
 	models: Model<Api>[];
 	authoritativeProviders: Set<string>;

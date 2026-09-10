@@ -5956,6 +5956,13 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 	);
 	return {
 		providerId: "litellm",
+		// Stretch the runtime outer guard past its default only when the
+		// configured rich budget exceeds the default it was sized for; the
+		// /v1/models fallback is bounded by the shared default, so budget both.
+		discoveryBudgetMs:
+			discoveryTimeoutMs > DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS
+				? discoveryTimeoutMs + DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS
+				: undefined,
 		// rich-v8 invalidates rows whose `compatConfig` retained a colliding
 		// bundled model's provider-specific transport (e.g. Fireworks
 		// `wireModelIdMode`) before that leak was fixed. Earlier versions added
