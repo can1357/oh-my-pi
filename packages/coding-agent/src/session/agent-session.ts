@@ -7421,6 +7421,35 @@ export class AgentSession {
 	}
 
 	/**
+	 * Move the first matching user follow-up into steering without preprocessing it again.
+	 * Matches queue-chip text or its prompt-template expansion. Repeated calls may
+	 * promote further occurrences of the same text; a missing target changes nothing.
+	 */
+	promoteQueuedMessage(text: string): boolean {
+		const followUp = this.agent.peekFollowUpQueue();
+		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
+		const index = followUp.findIndex(message => {
+			if (!isUserQueuedMessage(message)) return false;
+			const chipText = queueChipText(message);
+			return chipText === text || chipText === expandedText;
+		});
+		if (index < 0) return false;
+
+		let start = index;
+		while (start > 0 && isHiddenUserCompanion(followUp[start - 1])) start--;
+		const remaining = followUp.slice();
+		const promoted = remaining.splice(start, index - start + 1);
+		const message = promoted[promoted.length - 1];
+		if (message.role === "user") message.steering = true;
+		// Await-free removal and insertion preserves the original payload and companion
+		// order. replaceQueues also wakes the agent's in-flight steering watchers.
+		this.agent.replaceQueues([...this.agent.peekSteeringQueue(), ...promoted], remaining);
+		this.#allowQueuedMessageDrainRetry();
+		this.#scheduleIdleQueueDrain();
+		return true;
+	}
+
+	/**
 	 * Pop the last queued message (steering first, then follow-up).
 	 * Used by dequeue keybinding to restore messages to editor one at a time.
 	 * Steps over agent-authored queued messages (advisor cards, hidden/internal steers).

@@ -15,16 +15,18 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import type { PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-templates";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
 
 const COLLAB_PROMPT_TYPE = "collab-prompt";
 
@@ -64,7 +66,10 @@ describe("AgentSession queued steer delivery", () => {
 		removeSyncWithRetries(fixtureDir);
 	});
 
-	async function createSession(responses: MockResponse[]): Promise<SteerHarness> {
+	async function createSession(
+		responses: MockResponse[],
+		promptTemplates: PromptTemplate[] = [],
+	): Promise<SteerHarness> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ responses });
 		const agent = new Agent({
@@ -75,7 +80,7 @@ describe("AgentSession queued steer delivery", () => {
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.enabled": false });
 
-		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, promptTemplates });
 		return { session, sessionManager, mock };
 	}
 
@@ -304,5 +309,284 @@ describe("AgentSession queued steer delivery", () => {
 		await session.waitForIdle();
 
 		expect(session.agent.peekSteeringQueue()).toEqual([]);
+	});
+
+	describe("promoteQueuedMessage", () => {
+		it("moves the first duplicate behind existing steering and delivers every queued occurrence once", async () => {
+			const { session } = await createSession([
+				{ content: ["initial"] },
+				{ content: ["steered"] },
+				{ content: ["followed up"] },
+			]);
+			session.setSteeringMode("all");
+			session.setFollowUpMode("all");
+			let promoted: boolean | undefined;
+			let queued: object | undefined;
+			let injected = false;
+			let first: AgentMessage | undefined;
+			let second: AgentMessage | undefined;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await session.steer("existing");
+				await session.followUp("duplicate");
+				await session.followUp("unrelated");
+				await session.followUp("duplicate");
+				[first, , second] = session.agent.peekFollowUpQueue();
+				first!.timestamp = 1_000;
+				second!.timestamp = 2_000;
+				promoted = session.promoteQueuedMessage("duplicate");
+				queued = session.getQueuedMessages();
+			});
+
+			await session.prompt("start");
+			await session.waitForIdle();
+
+			expect(promoted).toBe(true);
+			expect(queued).toEqual({ steering: ["existing", "duplicate"], followUp: ["unrelated", "duplicate"] });
+			const delivered = session.messages.filter(message => message.role === "user");
+			expect(delivered.map(message => message.content)).toEqual(
+				["start", "existing", "duplicate", "unrelated", "duplicate"].map(text => [{ type: "text", text }]),
+			);
+			expect(delivered[2]).toMatchObject({ timestamp: first!.timestamp, steering: true });
+			expect<AgentMessage | undefined>(delivered[4]).toEqual(second);
+			expect(delivered[4]).not.toHaveProperty("steering");
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+		});
+
+		it("leaves both queues untouched when only agent-authored or hidden messages match", async () => {
+			const { session } = await createSession([]);
+			session.agent.steer({ role: "user", content: "existing", timestamp: 1 });
+			session.agent.followUp({
+				role: "custom",
+				customType: "advisor",
+				content: "target",
+				attribution: "agent",
+				display: true,
+				timestamp: 2,
+			});
+			session.agent.followUp({
+				role: "custom",
+				customType: "ultrathink-notice",
+				content: "target",
+				attribution: "user",
+				display: false,
+				timestamp: 3,
+			});
+			const steering = structuredClone(session.agent.peekSteeringQueue());
+			const followUp = structuredClone(session.agent.peekFollowUpQueue());
+
+			expect(session.promoteQueuedMessage("target")).toBe(false);
+			expect(session.promoteQueuedMessage("absent")).toBe(false);
+			expect(session.agent.peekSteeringQueue()).toEqual(steering);
+			expect(session.agent.peekFollowUpQueue()).toEqual(followUp);
+		});
+
+		it("matches raw and expanded template chips without expanding a queued prompt again", async () => {
+			const { session } = await createSession(
+				[{ content: ["initial"] }, { content: ["steered"] }],
+				[{ name: "review", description: "Review", content: "Review $1", source: "(test)" }],
+			);
+			session.setSteeringMode("all");
+			let promoted: boolean[] = [];
+			let injected = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await session.followUp("/review raw", undefined, { expandPromptTemplates: false });
+				await session.followUp("/review expanded");
+				await session.followUp("/review chip");
+				promoted = [
+					session.promoteQueuedMessage("/review raw"),
+					session.promoteQueuedMessage("/review expanded"),
+					session.promoteQueuedMessage("Review chip"),
+				];
+			});
+
+			await session.prompt("start");
+			await session.waitForIdle();
+
+			expect(promoted).toEqual([true, true, true]);
+			expect(session.messages.filter(message => message.role === "user").map(message => message.content)).toEqual(
+				["start", "/review raw", "Review expanded", "Review chip"].map(text => [{ type: "text", text }]),
+			);
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+		});
+
+		it("delivers image and custom prompts with their own hidden companions and original metadata", async () => {
+			const { session, sessionManager, mock } = await createSession([
+				{ content: ["initial"] },
+				{ content: ["steered"] },
+				{ content: ["followed up"] },
+			]);
+			session.setSteeringMode("all");
+			session.setFollowUpMode("all");
+			const companion: AgentMessage = {
+				role: "custom",
+				customType: "image-attachment-description",
+				content: "The attached image contains a diagram.",
+				attribution: "user",
+				display: false,
+				timestamp: 10,
+			};
+			const keywordNotice: AgentMessage = {
+				...companion,
+				customType: "ultrathink-notice",
+				content: "Use extended reasoning for this request.",
+				timestamp: 9,
+			};
+			const videoNotice: AgentMessage = {
+				...companion,
+				customType: "video-attachment",
+				content: "Video source: /tmp/clip.mp4",
+				timestamp: 8,
+			};
+			const image = {
+				type: "image" as const,
+				mimeType: "image/png",
+				data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+			};
+			const imagePrompt: AgentMessage = {
+				role: "user",
+				content: [image],
+				attribution: "user",
+				timestamp: 11,
+			};
+			const customPrompt: AgentMessage = {
+				role: "custom",
+				customType: COLLAB_PROMPT_TYPE,
+				content: "Expanded guest request",
+				attribution: "user",
+				display: true,
+				details: { from: "guest", __queueChipText: "/guest request", nested: { preserve: true } },
+				timestamp: 12,
+			};
+			const otherCompanion: AgentMessage = { ...companion, content: "Other image description", timestamp: 13 };
+			const otherPrompt: AgentMessage = { role: "user", content: "Other request", timestamp: 14 };
+			let promoted: boolean[] = [];
+			let injected = false;
+			session.agent.setOnBeforeYield(() => {
+				if (injected) return;
+				injected = true;
+				session.agent.replaceQueues(
+					[],
+					[videoNotice, keywordNotice, companion, imagePrompt, customPrompt, otherCompanion, otherPrompt],
+				);
+				promoted = [session.promoteQueuedMessage("[Image]"), session.promoteQueuedMessage("/guest request")];
+			});
+
+			await session.prompt("start");
+			await session.waitForIdle();
+
+			expect(promoted).toEqual([true, true]);
+			const delivered = session.messages.filter(message => message.role === "custom" || message.role === "user");
+			expect(delivered.slice(1)).toEqual([
+				videoNotice,
+				keywordNotice,
+				companion,
+				{ ...imagePrompt, steering: true },
+				customPrompt,
+				otherCompanion,
+				otherPrompt,
+			]);
+			expect(
+				mock.calls[1].context.messages.some(
+					message =>
+						message.role === "user" &&
+						Array.isArray(message.content) &&
+						message.content.some(part => part.type === "image" && part.data === image.data),
+				),
+			).toBe(true);
+			expect(
+				sessionManager
+					.getEntries()
+					.filter(entry => entry.type === "custom_message" && entry.customType === COLLAB_PROMPT_TYPE),
+			).toMatchObject([
+				{ content: customPrompt.content, details: { from: "guest", nested: { preserve: true } }, display: true },
+			]);
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+		});
+
+		it("wakes an idle follow-up and rejects a stale promotion without replaying it", async () => {
+			const { session, mock } = await createSession([{ content: ["delivered"] }]);
+			await session.followUp("wake me");
+			expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: ["wake me"] });
+			const delivered = nextUserMessage(session, "wake me");
+
+			expect(session.promoteQueuedMessage("wake me")).toBe(true);
+			await delivered;
+			await session.waitForIdle();
+
+			expect(session.promoteQueuedMessage("wake me")).toBe(false);
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+			expect(mock.calls).toHaveLength(1);
+			expect(session.messages.filter(message => message.role === "user")).toHaveLength(1);
+		});
+
+		for (const mode of ["immediate", "wait"] as const) {
+			it(`honors ${mode} interruption when promoting during an interruptible tool`, async () => {
+				const { session } = await createSession([
+					{
+						content: [
+							{ type: "toolCall", id: "first", name: "pause", arguments: { value: "first" } },
+							{ type: "toolCall", id: "second", name: "pause", arguments: { value: "second" } },
+						],
+					},
+					{ content: ["steered"] },
+				]);
+				const started = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				const interrupted = Promise.withResolvers<void>();
+				const executed: string[] = [];
+				const schema = type({ value: "string" });
+				const tool: AgentTool<typeof schema> = {
+					name: "pause",
+					label: "Pause",
+					description: "Wait for release",
+					parameters: schema,
+					concurrency: "exclusive",
+					interruptible: true,
+					async execute(_id, params, signal) {
+						executed.push(params.value);
+						if (params.value === "first") {
+							const onAbort = () => interrupted.resolve();
+							signal?.addEventListener("abort", onAbort, { once: true });
+							started.resolve();
+							try {
+								await Promise.race([release.promise, interrupted.promise]);
+							} finally {
+								signal?.removeEventListener("abort", onAbort);
+							}
+						}
+						return { content: [{ type: "text", text: params.value }], details: {} };
+					},
+				};
+				session.agent.setTools([tool]);
+				session.setInterruptMode(mode);
+				session.setSteeringMode("one-at-a-time");
+				session.setFollowUpMode("one-at-a-time");
+				const prompt = session.prompt("start");
+				try {
+					await withTimeout(started.promise, 2_000, "The first tool did not start");
+					await session.followUp("change direction");
+					expect(session.promoteQueuedMessage("change direction")).toBe(true);
+					if (mode === "immediate")
+						await withTimeout(interrupted.promise, 2_000, "Promotion did not wake the tool interrupt");
+				} finally {
+					release.resolve();
+					await prompt;
+				}
+				await session.waitForIdle();
+
+				expect(executed).toEqual(mode === "immediate" ? ["first"] : ["first", "second"]);
+				expect(session.interruptMode).toBe(mode);
+				expect(session.steeringMode).toBe("one-at-a-time");
+				expect(session.followUpMode).toBe("one-at-a-time");
+				expect(session.messages.filter(message => message.role === "user").map(message => message.content)).toEqual(
+					["start", "change direction"].map(text => [{ type: "text", text }]),
+				);
+				expect(session.agent.hasQueuedMessages()).toBe(false);
+			});
+		}
 	});
 });

@@ -1164,6 +1164,13 @@ export async function runRpcMode(
 				return success(id, "follow_up");
 			}
 
+			case "promote_queued_message": {
+				if (typeof command.message !== "string") {
+					return error(id, "promote_queued_message", "message must be a string");
+				}
+				return success(id, "promote_queued_message", { promoted: session.promoteQueuedMessage(command.message) });
+			}
+
 			case "abort": {
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				return success(id, "abort");

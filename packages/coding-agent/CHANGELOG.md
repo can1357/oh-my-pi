@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `promote_queued_message` to RPC and `promoteQueuedMessage()` to the session and TypeScript RPC client APIs, allowing queued follow-ups to become steering messages without duplicating their text or losing attachments.
+
 ## [18.1.17] - 2026-09-10
 
 ### Added
