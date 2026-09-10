@@ -449,6 +449,32 @@ export class FileSessionStorage implements SessionStorage {
 		// Delete the session file itself
 		await this.unlink(sessionPath);
 
+		// Remove stale `<basename>.jsonl.<snowflake>.bak` siblings left behind by
+		// failed EPERM-rewrite unlinks. Without this the next listing scan runs
+		// recoverOrphanedBackups and resurrects the deleted session (#11499).
+		// Missing files are fine, but surface real cleanup failures because the
+		// session file is already gone.
+		const base = path.basename(sessionPath);
+		let backups: string[];
+		try {
+			backups = this.listFilesSync(path.dirname(sessionPath), "*.bak").filter(
+				candidate => path.basename(candidate).startsWith(`${base}.`),
+			);
+		} catch {
+			backups = [];
+		}
+		for (const backup of backups) {
+			try {
+				await this.unlink(backup);
+			} catch (err) {
+				if (isEnoent(err)) continue;
+				const error = toError(err);
+				throw new Error(`Session file deleted but failed to remove session backup ${backup}: ${error.message}`, {
+					cause: error,
+				});
+			}
+		}
+
 		// Compute artifacts directory: /path/to/session.jsonl -> /path/to/session
 		const artifactsDir = sessionPath.slice(0, -6);
 
