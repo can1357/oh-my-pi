@@ -9,6 +9,8 @@ import type { ModelOverride } from "./models-config-schema";
 /** Provider override config (baseUrl, headers, apiKey, compat, transport) without custom models */
 export interface ProviderOverride {
 	baseUrl?: string;
+	/** Restricts a provider baseUrl inferred from a single custom model API. */
+	api?: Api;
 	headers?: Record<string, string>;
 	apiKey?: string;
 	authHeader?: boolean;
@@ -62,14 +64,18 @@ export function mergeDiscoveredModel<TApi extends Api>(
 	existing: Model<Api> | undefined,
 	providerOverride?: Pick<
 		ProviderOverride,
-		"baseUrl" | "compat" | "headers" | "remoteCompaction" | "transport" | "authHeader" | "apiKey"
+		"baseUrl" | "api" | "compat" | "headers" | "remoteCompaction" | "transport" | "authHeader" | "apiKey"
 	>,
 ): Model<TApi> {
+	const matchesConfiguredApi = providerOverride?.api === undefined || providerOverride.api === model.api;
 	if (existing) {
 		const supportsTools = model.supportsTools ?? existing.supportsTools;
 		return buildModel({
 			...toModelSpec(model),
-			baseUrl: providerOverride?.baseUrl ?? model.baseUrl ?? existing.baseUrl,
+			baseUrl:
+				providerOverride?.baseUrl !== undefined && matchesConfiguredApi
+					? providerOverride.baseUrl
+					: (model.baseUrl ?? existing.baseUrl),
 			// providerOverride.headers (raw `!command`) must be the last live
 			// source: `model.headers` is a discovery-time resolved snapshot, so
 			// without this a rotated credential (401 → cache invalidation) would
@@ -90,7 +96,8 @@ export function mergeDiscoveredModel<TApi extends Api>(
 	if (providerOverride) {
 		return buildModel({
 			...toModelSpec(model),
-			baseUrl: providerOverride.baseUrl ?? model.baseUrl,
+			baseUrl:
+				providerOverride.baseUrl !== undefined && matchesConfiguredApi ? providerOverride.baseUrl : model.baseUrl,
 			headers: createLiveConfigHeaders([model.headers, providerOverride.headers], {
 				authHeader: providerOverride.authHeader,
 				apiKeyConfig: providerOverride.apiKey,

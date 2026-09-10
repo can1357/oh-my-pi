@@ -9,7 +9,7 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { calculateUsageCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { finalizeCustomModel } from "@oh-my-pi/pi-coding-agent/config/custom-models";
-import { applyModelPatch } from "@oh-my-pi/pi-coding-agent/config/model-patch";
+import { applyModelPatch, mergeDiscoveredModel } from "@oh-my-pi/pi-coding-agent/config/model-patch";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -808,6 +808,69 @@ describe("ModelRegistry", () => {
 			const compat = getOpenAICompat(model);
 			expect(compat?.supportsUsageInStreaming).toBe(true);
 			expect(compat?.maxTokensField).toBe("max_completion_tokens");
+		});
+	});
+
+	describe("mixed provider routes", () => {
+		let registry: ModelRegistry;
+
+		beforeAll(() => {
+			registry = readonlyRegistry({
+				providers: {
+					zai: {
+						baseUrl: "https://api.z.ai/api/anthropic",
+						apiKey: "TEST_KEY",
+						models: [
+							{
+								id: "glm-5.3",
+								api: "anthropic-messages",
+								name: "GLM-5.3",
+								reasoning: true,
+								input: ["text"],
+								cost: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+								contextWindow: 1_000_000,
+								maxTokens: 131_072,
+							},
+						],
+					},
+				},
+			});
+		});
+
+		test("keeps a built-in model route when a custom model uses another API", () => {
+			const flash = registry.find("zai", "glm-5.3-flash");
+			const glm53 = registry.find("zai", "glm-5.3");
+			expect(flash).toMatchObject({
+				api: "openai-completions",
+				baseUrl: "https://api.z.ai/api/coding/paas/v4",
+			});
+			expect(glm53).toMatchObject({
+				api: "anthropic-messages",
+				baseUrl: "https://api.z.ai/api/anthropic",
+			});
+		});
+
+		test("keeps a discovered model route when the provider override uses another API", () => {
+			const model = buildModel({
+				id: "glm-5.3-flash",
+				name: "GLM-5.3 Flash",
+				api: "openai-completions",
+				provider: "zai",
+				baseUrl: "https://api.z.ai/api/coding/paas/v4",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 1_000_000,
+				maxTokens: 131_072,
+			});
+			const merged = mergeDiscoveredModel(model, model, {
+				api: "anthropic-messages",
+				baseUrl: "https://api.z.ai/api/anthropic",
+			});
+			expect(merged).toMatchObject({
+				api: "openai-completions",
+				baseUrl: "https://api.z.ai/api/coding/paas/v4",
+			});
 		});
 	});
 
