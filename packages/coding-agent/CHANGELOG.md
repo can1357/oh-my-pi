@@ -20,6 +20,7 @@
 
 ### Fixed
 - Cold catalog / `--api-key` bind expands every selected model role (`@smol`, `@slow`, custom, chained `@default`→`@smol`), not only `@default`.
+- Catalog matrix shell smoke rejects command substitutions (`echo "$(ping)"`, backticks) that would pass a lexical includes check while bash emits no ping.
 
 - Fixed credential-scoped model startup when a selected role points to another configured role.
 - Cold catalog refresh expands `--model @default` / `*` to the configured `modelRoles.default` so a live-only default still warms AvailableModels.

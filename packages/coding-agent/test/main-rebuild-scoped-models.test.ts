@@ -633,7 +633,8 @@ describe("refreshCredentialScopedModelIfMissing", () => {
 
 		expect(refreshed).toBe(false);
 		expect(registry.refreshProviderCalls).toEqual([]);
-	});});
+	});
+});
 
 describe("buildSessionOptions --models scope selection", () => {
 	let tempDir: TempDir;
@@ -692,7 +693,6 @@ describe("buildSessionOptions --models scope selection", () => {
 		expect(options.model?.id).toBe("b");
 		expect(options.modelPattern).toBeUndefined();
 	});
-
 });
 
 it("expands selected builtin, custom, and chained roles before credential-scoped refresh", () => {
@@ -714,4 +714,16 @@ it("expands selected builtin, custom, and chained roles before credential-scoped
 			selectors: { model: expected, models: undefined },
 		});
 	}
+});
+
+it("expands chained modelRoles.default without a CLI model selector before credential-scoped refresh", () => {
+	const roles: Record<string, string> = {
+		default: "@smol",
+		smol: "grokbot/live-only",
+	};
+	const lookup = { getModelRole: (role: string) => roles[role] };
+	expect(resolveCredentialScopedRefreshTarget({}, lookup)).toEqual({
+		providerId: "grokbot",
+		selectors: { model: "grokbot/live-only" },
+	});
 });

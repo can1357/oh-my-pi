@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fetchGrokbotAvailableModels } from "../src/discovery/grokbot";
+import * as grokbotAuth from "../src/discovery/grokbot-auth";
 import {
 	clearGrokbotTokenCache,
 	GROKBOT_RENEWAL_PATH,
@@ -627,6 +628,7 @@ describe("grokbot AvailableModels headers", () => {
 		// Direct callers may pass namespace: "lab" without clientVersion — identity
 		// must recompute 0.30.0-lab rather than keep the ambient production version.
 		const seen: Array<Record<string, string>> = [];
+		const syncIdentitySpy = spyOn(grokbotAuth, "resolveGrokbotDiscoveryIdentity");
 		const fetchImpl = Object.assign(
 			async (url: string | URL | Request, init?: RequestInit) => {
 				seen.push((init?.headers ?? {}) as Record<string, string>);
@@ -643,31 +645,37 @@ describe("grokbot AvailableModels headers", () => {
 			},
 			{ preconnect: fetch.preconnect },
 		) as typeof fetch;
-		const models = await runWithGrokbotAuthSourceAsync(
-			{
-				secretsPath: path.join(os.tmpdir(), crypto.randomUUID(), "grokbot.env"),
-				env: {
-					...CLEAR_GROKBOT_ENV,
-					GROKBOT_MACHINE_ID: "machine",
-					// Ambient production namespace with no explicit clientVersion so
-					// loadGrokbotConfig derives 0.30.0 — the namespace-only override
-					// must recompute 0.30.0-lab rather than keep that derived value.
-					GROKBOT_NAMESPACE: "prod",
+		try {
+			const models = await runWithGrokbotAuthSourceAsync(
+				{
+					secretsPath: path.join(os.tmpdir(), crypto.randomUUID(), "grokbot.env"),
+					env: {
+						...CLEAR_GROKBOT_ENV,
+						GROKBOT_MACHINE_ID: "machine",
+						// Ambient production namespace with no explicit clientVersion so
+						// loadGrokbotConfig derives 0.30.0 — the namespace-only override
+						// must recompute 0.30.0-lab rather than keep that derived value.
+						GROKBOT_NAMESPACE: "prod",
+					},
 				},
-			},
-			() =>
-				fetchGrokbotAvailableModels({
-					apiKey: "renewer",
-					baseUrl: "https://api2.cursor.sh",
-					fetch: fetchImpl,
-					namespace: "lab",
-				}),
-		);
-		expect(models).not.toBeNull();
-		// AvailableModels is the second call (after mint); both carry identity.
-		const modelsHeaders = seen[1] ?? seen[0];
-		expect(modelsHeaders?.["x-sand-box-namespace"]).toBe("lab");
-		expect(modelsHeaders?.["x-cursor-client-version"]).toBe("0.30.0-lab");
+				() =>
+					fetchGrokbotAvailableModels({
+						apiKey: "renewer",
+						baseUrl: "https://api2.cursor.sh",
+						fetch: fetchImpl,
+						namespace: "lab",
+					}),
+			);
+			expect(models).not.toBeNull();
+			// AvailableModels is the second call (after mint); both carry identity.
+			const modelsHeaders = seen[1] ?? seen[0];
+			expect(modelsHeaders?.["x-sand-box-namespace"]).toBe("lab");
+			expect(modelsHeaders?.["x-cursor-client-version"]).toBe("0.30.0-lab");
+			// Derive overrides from the async-loaded config — no sync identity helper.
+			expect(syncIdentitySpy).not.toHaveBeenCalled();
+		} finally {
+			syncIdentitySpy.mockRestore();
+		}
 	});
 
 	test("AvailableModels preserves trailing slash inside proxy query values", async () => {

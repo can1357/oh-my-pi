@@ -81,6 +81,8 @@ export type GrokbotConfig = {
 	machineId: string;
 	namespace: string;
 	clientVersion: string;
+	/** Raw `GROKBOT_CLIENT_VERSION` from env/file when set (not stamp-derived). */
+	explicitClientVersion?: string;
 };
 
 type CachedToken = {
@@ -306,6 +308,7 @@ export async function loadGrokbotConfig(renewalOverride?: string): Promise<Grokb
 		machineId: grokbotEnv("GROKBOT_MACHINE_ID") || file.GROKBOT_MACHINE_ID || "",
 		namespace,
 		clientVersion: resolveGrokbotClientVersion(namespace, GROKBOT_STAMPED_CLIENT_VERSION, explicitVersion),
+		...(explicitVersion ? { explicitClientVersion: explicitVersion } : {}),
 	};
 }
 
