@@ -53,7 +53,7 @@ import type { AssistantMessage, CodexCompactionContext, Message, Model, Provider
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { ModelRegistry } from "../config/model-registry";
 import { MODEL_ROLE_IDS } from "../config/model-roles";
@@ -66,6 +66,7 @@ import type { MemoryBackendOperationContext } from "../memory-backend/types";
 import type { NonMessageTokenSource } from "../modes/utils/context-usage";
 import { computeNonMessageTokens } from "../modes/utils/context-usage";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
+import incompleteTodosSnapshotTemplate from "../prompts/system/incomplete-todos-snapshot.md" with { type: "text" };
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
@@ -2431,7 +2432,7 @@ export class SessionMaintenance {
 		const snapshot: AgentMessage = {
 			role: "custom",
 			customType: "incomplete-todos-snapshot",
-			content: `<incomplete-todos>\n${todoContext.join("\n")}\n</incomplete-todos>`,
+			content: prompt.render(incompleteTodosSnapshotTemplate, { rows: todoContext }).trim(),
 			display: false,
 			attribution: "agent",
 			timestamp: Date.now(),

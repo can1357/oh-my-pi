@@ -4,6 +4,7 @@ import {
 	collectIncompleteTodoRows,
 	formatIncompleteTodoSnapshotLines,
 	formatIncompleteTodosSection,
+	hasIncompleteTodosSection,
 	INCOMPLETE_TODOS_SNAPSHOT_CAP,
 	parseIncompleteTodosFromSummary,
 	upsertIncompleteTodosSection,
@@ -261,6 +262,53 @@ describe("getLatestTodoPhasesFromEntries reconstructs leftover todos after compa
 		]);
 	});
 
+	it("ignores prose Incomplete Todos headings without rows or a marker", () => {
+		const prose = [
+			"## Goal",
+			"Ship the parser",
+			"",
+			"## Incomplete Todos: later",
+			"We should revisit the remaining work after lunch.",
+			"",
+			"## Next Steps",
+			"1. Keep going",
+			"",
+		].join("\n");
+		expect(hasIncompleteTodosSection(prose)).toBe(false);
+		expect(parseIncompleteTodosFromSummary(prose)).toEqual([]);
+	});
+
+	it("recovers older todo toolResults when the latest compact only mentions todos in prose", () => {
+		const entries = [
+			{
+				type: "message",
+				id: "todo",
+				parentId: null,
+				timestamp: TIMESTAMP,
+				message: {
+					role: "toolResult",
+					toolName: "todo",
+					toolCallId: "call-1",
+					content: [{ type: "text", text: "ok" }],
+					isError: false,
+					details: {
+						phases: [{ name: "Work", tasks: [{ content: "legacy plan", status: "pending" }] }],
+					},
+					timestamp: 1,
+				},
+			},
+			compaction(
+				"c1",
+				"todo",
+				"## Goal\nPre-feature compact.\n\n## Incomplete Todos: later\nWe should revisit this.\n",
+			),
+		] as SessionEntry[];
+
+		expect(getLatestTodoPhasesFromEntries(entries)).toEqual([
+			{ name: "Work", tasks: [{ content: "legacy plan", status: "pending" }] },
+		]);
+	});
+
 	it("treats a standing (none) latest compaction as authoritative over older todo toolResults", () => {
 		const entries = [
 			{
@@ -280,7 +328,11 @@ describe("getLatestTodoPhasesFromEntries reconstructs leftover todos after compa
 					timestamp: 1,
 				},
 			},
-			compaction("c1", "todo", `## Goal\nHost cleared todos before compact.\n\n${formatIncompleteTodosSection([])}\n`),
+			compaction(
+				"c1",
+				"todo",
+				`## Goal\nHost cleared todos before compact.\n\n${formatIncompleteTodosSection([])}\n`,
+			),
 		] as SessionEntry[];
 
 		expect(getLatestTodoPhasesFromEntries(entries)).toEqual([]);
@@ -339,9 +391,7 @@ describe("getLatestTodoPhasesFromEntries reconstructs leftover todos after compa
 	});
 
 	it("round-trips CRLF and CR distinctly from LF in durable titles", () => {
-		const rows = [
-			{ phase: "Work", status: "pending" as const, title: "a\r\nb\rc\nd" },
-		];
+		const rows = [{ phase: "Work", status: "pending" as const, title: "a\r\nb\rc\nd" }];
 		const section = formatIncompleteTodosSection(rows);
 		expect(section).toContain("\\r\\n");
 		expect(section).toContain("\\r");
