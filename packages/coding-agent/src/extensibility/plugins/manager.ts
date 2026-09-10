@@ -496,7 +496,17 @@ export class PluginManager {
 			}
 
 			// Step 1: write the spec into plugins/package.json + node_modules.
-			const installProc = Bun.spawn(["bun", "install", packageInstallSpec], {
+			// npm specs resolve through bun's manifest (packument) cache, which honors
+			// the registry's Cache-Control TTL and so keeps serving a stale version
+			// after a new one is published — an uninstall/reinstall or an explicit
+			// `pkg@newVersion` then resolves the old version or fails outright (#11634).
+			// `--no-cache` re-fetches the manifest while leaving the tarball cache
+			// intact. Git specs don't use the manifest cache; their cache staleness is
+			// handled by refreshBunGitCache + `bun update` below.
+			const installArgs = gitSource
+				? ["bun", "install", packageInstallSpec]
+				: ["bun", "install", "--no-cache", packageInstallSpec];
+			const installProc = Bun.spawn(installArgs, {
 				cwd: getPluginsDir(),
 				stdin: "ignore",
 				stdout: "pipe",
