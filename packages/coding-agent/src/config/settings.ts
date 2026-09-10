@@ -1228,13 +1228,7 @@ export class Settings {
 		}
 	}
 
-	/**
-	 * Independent instance scoped to `cwd`: same global, `--config` overlay, and runtime layers, the
-	 * project layer re-read for `cwd` (persisted instances). An {@link overlay} clones its parent for
-	 * `cwd` and re-applies its own layers on top, so inherited values carry over.
-	 *
-	 * @throws Error when a configured value fails its definition's `validate` check.
-	 */
+	/** Serialize change-detection checks until their reload has fully committed. */
 	async #serializeConfigReload<T>(operation: () => Promise<T>): Promise<T> {
 		const previous = this.#configReloadInFlight;
 		const run = (async () => {
@@ -1270,7 +1264,7 @@ export class Settings {
 	 * `PI_CONFIG_FILES` overlay.
 	 *
 	 * Every candidate is stamped rather than just the currently selected
-	 * `#configPath`, because `#stageMainYaml` picks the first that exists: creating a
+	 * `#configPath`, because `#readExistingMainYaml` picks the first that exists: creating a
 	 * higher-priority filename changes which file wins, and watching only the old
 	 * selection would miss that entirely. Overlays are included because they are
 	 * re-staged in the same transaction and outrank global in the merge. Absent files
@@ -1303,17 +1297,10 @@ export class Settings {
 	}
 
 	/**
-	 * Read the main config file without touching live state.
+	 * Independent instance scoped to `cwd`: copy global, overlay, and runtime layers,
+	 * then read the project layer for the new directory.
 	 *
-	 * Builds on `#loadYamlIfPresent`, whose `YamlLoadResult` already separates a
-	 * missing file from an invalid one; a reload must distinguish them because
-	 * adopting a parse failure as an empty layer would reset every global setting to
-	 * its schema default and re-fire every hook with that default.
-	 *
-	 * Returns the selected path rather than assigning `#configPath`, because staging
-	 * runs before the overlays are staged: mutating it here would leave the instance
-	 * pointing at a newly discovered file after an overlay parse failure aborted the
-	 * reload, which is exactly the "previous state intact" promise being made.
+	 * @throws Error when a configured value fails its definition's validate check.
 	 */
 	async cloneForCwd(cwd: string): Promise<Settings> {
 		let cloned: Settings;
@@ -1365,7 +1352,10 @@ export class Settings {
 	/** Refresh the global config and explicit overlays without re-reading the project layer. */
 	async reloadGlobal(): Promise<SettingsReloadReport> {
 		const unchanged = (): SettingsReloadReport => ({
-			status: "unchanged", changed: [], restartRequired: [], partiallyApplied: [],
+			status: "unchanged",
+			changed: [],
+			restartRequired: [],
+			partiallyApplied: [],
 		});
 		if (!this.#persist) return unchanged();
 		let result = unchanged();
@@ -1374,7 +1364,7 @@ export class Settings {
 			// A save may adopt external edits before the refresh starts. Capture values first
 			// so their listeners and the command report still account for those edits.
 			const previous = this.#snapshot();
-			for (;;) {
+			for (let attempt = 0; attempt < 3; attempt++) {
 				try {
 					await this.flush();
 					if (this.#modified.size || this.#modifiedGlobalModelRoles.size) {
@@ -1382,11 +1372,14 @@ export class Settings {
 					}
 					const generation = this.#persistedMutationGeneration;
 					const [global, overlay] = await Promise.all([
-						this.#readExistingMainYaml(false), this.#readConfigOverlays(false),
+						this.#readExistingMainYaml(false),
+						this.#readConfigOverlays(false),
 					]);
 					if (generation !== this.#persistedMutationGeneration) continue;
 					const layers: OwnLayers = {
-						...this.#ownLayers(), global: global.settings ?? {}, configOverlay: overlay.settings,
+						...this.#ownLayers(),
+						global: global.settings ?? {},
+						configOverlay: overlay.settings,
 					};
 					const settled = this.#settlePins(layers);
 					this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(layers)), this.#cwd);
@@ -1397,27 +1390,31 @@ export class Settings {
 					this.#overlayShellPathSource = overlay.shellPathSource;
 					for (const setting of settled) this.#softPins.delete(setting);
 					this.#rebuildMerged();
-					const changed = settings.filter((setting, i) =>
-						!settingValuesEqual(setting.get(this), previous[i])).map(setting => setting.id);
+					const changed = settings
+						.filter((setting, i) => !settingValuesEqual(setting.get(this), previous[i]))
+						.map(setting => setting.id);
 					this.#fireChangesSince(previous);
-					result = changed.length ? {
-						status: "applied", changed,
-						restartRequired: changed.filter(key => RESTART_REQUIRED_SETTINGS.has(key)),
-						partiallyApplied: changed.flatMap(key => {
-							const reason = PARTIAL_RELOAD_SETTINGS.get(key);
-							return reason ? [{ key, reason }] : [];
-						}),
-					} : unchanged();
+					result = changed.length
+						? {
+								status: "applied",
+								changed,
+								restartRequired: changed.filter(key => RESTART_REQUIRED_SETTINGS.has(key)),
+								partiallyApplied: changed.flatMap(key => {
+									const reason = PARTIAL_RELOAD_SETTINGS.get(key);
+									return reason ? [{ key, reason }] : [];
+								}),
+							}
+						: unchanged();
 					return;
 				} catch (error) {
 					result = { ...unchanged(), status: "failed", error: String(error) };
 					return;
 				}
 			}
+			result = { ...unchanged(), status: "failed", error: "global settings changed during each reload attempt" };
 		});
 		return result;
 	}
-
 
 	/**
 	 * Run one disk reload at a time, also serialized with {@link reloadForCwd}

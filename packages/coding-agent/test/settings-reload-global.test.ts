@@ -4,7 +4,11 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { Effort } from "@oh-my-pi/pi-ai";
-import { onModelRolesChanged, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgDefaultThinkingLevel, cfgHideThinkingBlock } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgToolsApprovalMode } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { cfgSymbolPreset } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -58,14 +62,14 @@ describe("Settings.reloadGlobal", () => {
 	it("adopts an external edit and names the changed keys", async () => {
 		await writeConfig({ defaultThinkingLevel: "low" });
 		const s = await openSettings();
-		expect(s.get("defaultThinkingLevel")).toBe(Effort.Low);
+		expect(cfgDefaultThinkingLevel.get(s)).toBe(Effort.Low);
 
 		await writeConfig({ defaultThinkingLevel: "high" });
 		const report = await s.reloadGlobal();
 
 		expect(report.status).toBe("applied");
 		expect(report.changed).toContain("defaultThinkingLevel");
-		expect(s.get("defaultThinkingLevel")).toBe(Effort.High);
+		expect(cfgDefaultThinkingLevel.get(s)).toBe(Effort.High);
 	});
 
 	it("reports unchanged when the file matches live state", async () => {
@@ -89,8 +93,8 @@ describe("Settings.reloadGlobal", () => {
 
 		expect(report.status).toBe("failed");
 		expect(report.error).toBeTruthy();
-		expect(s.get("defaultThinkingLevel")).toBe(Effort.High);
-		expect(s.get("hideThinkingBlock")).toBe(true);
+		expect(cfgDefaultThinkingLevel.get(s)).toBe(Effort.High);
+		expect(cfgHideThinkingBlock.get(s)).toBe(true);
 	});
 
 	it("refreshes direct and mounted approval policy before dispatch", async () => {
@@ -101,7 +105,7 @@ describe("Settings.reloadGlobal", () => {
 			},
 		});
 		const s = await openSettings();
-		s.override("tools.approvalMode", "yolo");
+		cfgToolsApprovalMode.override(s, "yolo");
 		const context = { settings: s } as AgentToolContext;
 		const runner = {
 			sessionId: "approval-reload-test",
@@ -145,7 +149,7 @@ describe("Settings.reloadGlobal", () => {
 		await mounted.execute("mounted-before", mountedArgs, undefined, undefined, context);
 		expect([directExecutions, mountedExecutions]).toEqual([1, 1]);
 
-		s.set("hideThinkingBlock", true);
+		cfgHideThinkingBlock.set(s, true);
 		await rewriteConfigWithNewMtime({
 			tools: {
 				approvalMode: "always-ask",
@@ -160,8 +164,8 @@ describe("Settings.reloadGlobal", () => {
 			/blocked by user policy/i,
 		);
 		expect([directExecutions, mountedExecutions]).toEqual([1, 1]);
-		expect(s.get("tools.approvalMode")).toBe("yolo");
-		expect(s.get("hideThinkingBlock")).toBe(true);
+		expect(cfgToolsApprovalMode.get(s)).toBe("yolo");
+		expect(cfgHideThinkingBlock.get(s)).toBe(true);
 
 		await Bun.write(configPath, "tools: [unclosed\n");
 		await expect(direct.execute("direct-malformed", {}, undefined, undefined, context)).rejects.toThrow(
@@ -178,7 +182,7 @@ describe("Settings.reloadGlobal", () => {
 		const report = await s.reloadGlobal();
 
 		expect(report.status).toBe("failed");
-		expect(s.get("defaultThinkingLevel")).toBe(Effort.High);
+		expect(cfgDefaultThinkingLevel.get(s)).toBe(Effort.High);
 	});
 
 	it("does not lose an in-session write that has not been persisted yet", async () => {
@@ -189,11 +193,11 @@ describe("Settings.reloadGlobal", () => {
 		// simply replaced the layer would revert this to the on-disk value, and
 		// because `#saveNow` clears its modified sets before taking the file lock,
 		// preserving those sets is not sufficient on its own.
-		s.set("hideThinkingBlock", true);
+		cfgHideThinkingBlock.set(s, true);
 		const report = await s.reloadGlobal();
 
 		expect(report.status).not.toBe("failed");
-		expect(s.get("hideThinkingBlock")).toBe(true);
+		expect(cfgHideThinkingBlock.get(s)).toBe(true);
 		// The flush inside the reload persisted it, so it survives a fresh read too.
 		const onDisk = YAML.parse(await Bun.file(configPath).text()) as Record<string, unknown>;
 		expect(onDisk.hideThinkingBlock).toBe(true);
@@ -203,27 +207,27 @@ describe("Settings.reloadGlobal", () => {
 		await writeConfig({ defaultThinkingLevel: "low" });
 		const s = await openSettings();
 
-		s.set("hideThinkingBlock", true);
+		cfgHideThinkingBlock.set(s, true);
 		// Another process edits a different key while our write is still pending.
 		await writeConfig({ defaultThinkingLevel: "xhigh" });
 		const report = await s.reloadGlobal();
 
 		expect(report.status).toBe("applied");
-		expect(s.get("defaultThinkingLevel")).toBe(Effort.XHigh);
-		expect(s.get("hideThinkingBlock")).toBe(true);
+		expect(cfgDefaultThinkingLevel.get(s)).toBe(Effort.XHigh);
+		expect(cfgHideThinkingBlock.get(s)).toBe(true);
 	});
 
 	it("treats an absent config file as an empty layer rather than a failure", async () => {
 		// "low" is not the schema default ("high"), so the fallback is observable.
 		await writeConfig({ defaultThinkingLevel: "low" });
 		const s = await openSettings();
-		expect(s.get("defaultThinkingLevel")).toBe(Effort.Low);
+		expect(cfgDefaultThinkingLevel.get(s)).toBe(Effort.Low);
 
 		await Bun.file(configPath).delete();
 		const report = await s.reloadGlobal();
 
 		expect(report.status).not.toBe("failed");
-		expect(s.get("defaultThinkingLevel")).toBe(Effort.High);
+		expect(cfgDefaultThinkingLevel.get(s)).toBe(Effort.High);
 	});
 
 	it("does not lose settings when a pending write meets a malformed config", async () => {
@@ -235,14 +239,14 @@ describe("Settings.reloadGlobal", () => {
 		// to `{}`, merge only the modified key onto it, and write that back, destroying
 		// every other setting in memory and on disk. The save path quarantines the
 		// invalid file and recovers from live state instead.
-		s.set("hideThinkingBlock", true);
+		cfgHideThinkingBlock.set(s, true);
 		await Bun.write(configPath, "defaultThinkingLevel: [unclosed\nhideThinkingBlock: fal\n");
 
 		await s.reloadGlobal();
 
 		// Both the pre-existing value and the pending edit survive.
-		expect(s.get("defaultThinkingLevel")).toBe(Effort.Low);
-		expect(s.get("hideThinkingBlock")).toBe(true);
+		expect(cfgDefaultThinkingLevel.get(s)).toBe(Effort.Low);
+		expect(cfgHideThinkingBlock.get(s)).toBe(true);
 		// The malformed content is not left in place as the live config.
 		const onDisk = await Bun.file(configPath)
 			.text()
@@ -255,7 +259,7 @@ describe("Settings.reloadGlobal", () => {
 		const s = await openSettings();
 
 		let roleChanges = 0;
-		const unsubscribe = onModelRolesChanged(() => {
+		const unsubscribe = cfgModelRoles.listen(s, () => {
 			roleChanges += 1;
 		});
 		try {
@@ -287,7 +291,7 @@ describe("Settings.reloadGlobal", () => {
 
 		// The load-bearing assertion: whatever the second caller reported, by the time it
 		// resolved the new value must already be live, because a prompt starts here.
-		expect(s.get("defaultThinkingLevel")).toBe(Effort.XHigh);
+		expect(cfgDefaultThinkingLevel.get(s)).toBe(Effort.XHigh);
 
 		const boundaryReport = await boundaryPickup;
 		// Exactly one of them did the work; the other saw committed state.
@@ -307,7 +311,7 @@ describe("Settings.reloadGlobal", () => {
 
 		expect(direct.status).not.toBe("failed");
 		expect(checked?.status).not.toBe("failed");
-		expect(s.get("defaultThinkingLevel")).toBe(Effort.XHigh);
+		expect(cfgDefaultThinkingLevel.get(s)).toBe(Effort.XHigh);
 	});
 
 	it("classifies a changed restart-only setting instead of claiming it applied", async () => {
@@ -380,7 +384,7 @@ describe("Settings.reloadGlobalIfChangedOnDisk overlay coverage", () => {
 			agentDir,
 			configFiles: [overlayPath],
 		});
-		expect(settings.get("hideThinkingBlock")).toBe(false);
+		expect(cfgHideThinkingBlock.get(settings)).toBe(false);
 
 		// Take the change-detection baseline first. The very first call always reloads
 		// while it establishes that baseline, so without this the assertion below would
@@ -399,7 +403,7 @@ describe("Settings.reloadGlobalIfChangedOnDisk overlay coverage", () => {
 
 		expect(report?.status).toBe("applied");
 		expect(report?.changed).toContain("hideThinkingBlock");
-		expect(settings.get("hideThinkingBlock")).toBe(true);
+		expect(cfgHideThinkingBlock.get(settings)).toBe(true);
 	});
 
 	it("keeps the selected config path when an overlay fails to parse", async () => {
@@ -417,8 +421,8 @@ describe("Settings.reloadGlobalIfChangedOnDisk overlay coverage", () => {
 		const report = await settings.reloadGlobal();
 
 		expect(report.status).toBe("failed");
-		expect(settings.get("defaultThinkingLevel")).toBe(Effort.Low);
-		expect(settings.get("hideThinkingBlock")).toBe(true);
+		expect(cfgDefaultThinkingLevel.get(settings)).toBe(Effort.Low);
+		expect(cfgHideThinkingBlock.get(settings)).toBe(true);
 	});
 	it("does not repoint the save target when a later stage aborts the reload", async () => {
 		// Only the legacy filename exists, so it becomes this session's save target.
@@ -441,7 +445,7 @@ describe("Settings.reloadGlobalIfChangedOnDisk overlay coverage", () => {
 
 		// Main-config staging runs before overlay staging. Assigning the selected path
 		// there would leave this session saving into the file it never actually adopted.
-		settings.set("symbolPreset", "nerd");
+		cfgSymbolPreset.set(settings, "nerd");
 		await settings.flush();
 
 		const legacy = YAML.parse(await Bun.file(legacyPath).text()) as Record<string, unknown>;
@@ -474,6 +478,6 @@ describe("Settings.reloadGlobalIfChangedOnDisk overlay coverage", () => {
 		const report = await settings.reloadGlobalIfChangedOnDisk();
 
 		expect(report?.status).toBe("applied");
-		expect(settings.get("defaultThinkingLevel")).toBe(Effort.XHigh);
+		expect(cfgDefaultThinkingLevel.get(settings)).toBe(Effort.XHigh);
 	});
 });

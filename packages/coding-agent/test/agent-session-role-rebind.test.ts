@@ -58,7 +58,7 @@ describe("AgentSession default-role rebind", () => {
 		await initTheme();
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		for (const provider of ["anthropic", "openai"]) {
-			authStorage.setRuntimeApiKey(provider, `${provider}-test-key`);
+			authStorage.keys.setRuntime(provider, `${provider}-test-key`);
 		}
 		modelRegistry = new ModelRegistry(authStorage);
 
