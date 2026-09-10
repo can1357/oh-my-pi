@@ -4,9 +4,13 @@
 //! cargo run -p omp-webview --example child -- https://example.com
 //! ```
 
-use std::{env, error};
+#[cfg(target_os = "macos")]
+use std::env;
+use std::error;
 
+#[cfg(target_os = "macos")]
 use omp_webview::{Engine, Rect, WebView, WebViewBuilder};
+#[cfg(target_os = "macos")]
 use winit::{
 	application::ApplicationHandler,
 	event::WindowEvent,
@@ -14,9 +18,11 @@ use winit::{
 	window::{Window, WindowId},
 };
 
+#[cfg(target_os = "macos")]
 /// Margin around the webview, in logical points.
 const INSET: f64 = 10.0;
 
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct App {
 	window: Option<Window>,
@@ -24,6 +30,7 @@ struct App {
 	url:    String,
 }
 
+#[cfg(target_os = "macos")]
 impl App {
 	fn bounds(window: &Window) -> Rect {
 		let size = window.inner_size().to_logical::<f64>(window.scale_factor());
@@ -36,6 +43,7 @@ impl App {
 	}
 }
 
+#[cfg(target_os = "macos")]
 impl ApplicationHandler for App {
 	fn resumed(&mut self, event_loop: &ActiveEventLoop) {
 		let window = event_loop
@@ -81,6 +89,7 @@ impl ApplicationHandler for App {
 	}
 }
 
+#[cfg(target_os = "macos")]
 fn main() -> Result<(), Box<dyn error::Error>> {
 	let url = env::args()
 		.nth(1)
@@ -89,4 +98,9 @@ fn main() -> Result<(), Box<dyn error::Error>> {
 	let mut app = App { url, ..App::default() };
 	event_loop.run_app(&mut app)?;
 	Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() -> Result<(), Box<dyn error::Error>> {
+	Err(std::io::Error::other("the `child` example requires macOS").into())
 }

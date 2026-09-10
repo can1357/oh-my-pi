@@ -36,28 +36,10 @@ impl Default for ProtocolVersion {
 	}
 }
 
-/// A request identifier used to correlate an RPC response.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct RequestId(pub String);
-
-impl RequestId {
-	/// Creates a request identifier.
-	pub fn new(id: impl Into<String>) -> Self {
-		Self(id.into())
-	}
-
-	/// Returns the identifier as text.
-	pub fn as_str(&self) -> &str {
-		&self.0
-	}
-}
-
-impl Display for RequestId {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		formatter.write_str(&self.0)
-	}
-}
+omp_core::string_id!(
+	/// A request identifier used to correlate an RPC response.
+	RequestId
+);
 
 /// Server startup handshake emitted before any request is accepted.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

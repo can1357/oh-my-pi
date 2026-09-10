@@ -1732,8 +1732,7 @@ process; `@galvinsan/pi-mentis` (`catalog.md:96`), `pi-mentis-memory`
 same way. In pi these are the extensions most likely to take the agent down,
 because a native destructor running in the parent address space is a segfault in
 the parent address space — which is why pi eventually grew a whole subprocess worker
-layer for exactly ONNX, transformers, embeddings, STT, and TTS
-(`.plan/feature-map/FEATURES.md:1727-1731`).
+layer for exactly ONNX, transformers, embeddings, STT, and TTS.
 
 Under placement this is a `WorkerSpec` and nothing else:
 
@@ -1864,13 +1863,14 @@ need to inspect `route` before granting an execution capability." `advertise` si
 does not use it. One `filter` on `entry.route() == ToolRoute::Native` closes it.
 
 A second, related caution for anyone building on registry identity:
-`live_hash` (`registry.rs:458-467`) is one blake3 digest over *all* live identities,
-so it cannot serve as prompt-cache identity once devices exist — adding a device
-would change it and falsify the availability-as-notification property. The split
-into a slot-facing hash and a device-facing hash belongs to `docs/py/01-devices.md`.
-Placement's own requirement — that moving a device between `place=` values change the
-*device-facing* identity, because it changes where effects happen — attaches to that
-split, not to `live_hash` as it stands.
+the slot-facing and device-facing digests are shipped: `slot_hash`
+(`registry.rs:2623-2650`) hashes the policy-resolved model-visible slots, so
+prompt-cache identity is structurally immune to a device appearing, and
+`device_hash` (`registry.rs:2654-2686`) hashes mounted availability plus
+claimant-qualified reachability. Placement's own requirement — that moving a
+device between `place=` values change the *device-facing* identity, because it
+changes where effects happen — attaches to `device_hash`, not to anything
+slot-facing.
 
 ### What already exists to build on
 
@@ -1881,7 +1881,7 @@ split, not to `live_hash` as it stands.
 | Same-binary child re-exec | `crates/app/src/envd/eval/process.rs:40` (`EVAL_CHILD_ARG`), spawn at `:228-231` | The pattern for spawning a worker: `Command::new(executable).arg(ARG)`, piped stdio, `kill_on_drop(true)` |
 | A Python tool worker with a protobuf stdio protocol | `crates/app/src/envd/worker.rs:379-433`; `crates/proto/proto/omp/toolhost/v1/toolhost.proto` | `WorkerHello`/`RegisterTools` handshake with `schema_rev` + `python_rev` validation (`worker.rs:435-463`), process-group isolation (`:401-410`), `OMP_PY_SITE`/`OMP_PY_MODULES` injection (`:387-400`) |
 | Named-process supervision in `env/v1` | `crates/proto/proto/omp/env/v1/env.proto:230-362` | `RestartSpec` + `RestartPolicy`, `ReadyProbe` (`ReadyLog` regex, `ReadyTcp`), `ProcessState`, `ProcessInfo`, `StartProcess`/`StopProcess`/`SignalProcess`/`AttachOutput`/`SendInput`, `generation` counters |
-| Content-addressed blob store | `crates/proto/proto/omp/blob/v1/blob.proto` | BLAKE3-256 digests, streaming `Put`/`Get` with first-chunk hash+size, idempotent puts. Client surface at `crates/env/src/client.rs:381-416` |
+| Content-addressed blob store | `crates/proto/proto/omp/blob/v1/blob.proto` | SHA-256 digests, streaming `Put`/`Get` with first-chunk hash+size, idempotent puts. Client surface at `crates/env/src/client.rs:381-416` |
 | Verdict spill contracts | `crates/tool/src/lib.rs:146` (`BlobRef`), `:417-433` (`VerdictDetails::{Inline,Spilled}`, discriminated by `#[serde(tag = "storage")]`), `:435-442` (`trait VerdictSpill`), `:444-453` (`VerdictDetailsError`), `:455-476` (`verdict_details`) | The durable half of spilling already exists as a contract: a serialized verdict above `inline_limit` becomes `Spilled { blob, byte_len }`. `omp.BlobRef` is this `BlobRef` |
 | Request-scoped structural cancellation | `crates/env/src/guard.rs` | `RunGuard`: armed-on-create, `Drop` queues cancellation for exactly one `request_id` over an unbounded flume control channel (`:69-79`), `relinquish()` to transfer ownership |
 | Correlated multiplexed client | `crates/env/src/client.rs:175-482` | `EnvClient` with request-id allocation, `open_guarded`, `RequestStream` correlation, an in-process transport for colocated deployment (`:208-215`) |
@@ -2014,7 +2014,7 @@ Design consequences of (c) that must be built, not assumed:
 - **The supervisor sits in the data path, and that is a feature.** It is the only
   party positioned to perform the `omp.Spill` frame surgery: read the header's
   spill index list, stream those frames into `blob_put`, rewrite the header with
-  BLAKE3 digests, forward the rest. It never unpickles. Implement this as a framing
+  SHA-256 digests, forward the rest. It never unpickles. Implement this as a framing
   codec over `CowBytes` slices, not as a parse-and-rebuild.
 - **`omp.Spill` is not redundant with `verdict_details`, and the reason is the
   order of operations.** `verdict_details` (`crates/tool/src/lib.rs:455-476`)
@@ -2153,14 +2153,15 @@ already enforced.
 What is missing is *resolution*, not the axis. `ToolRoute::Worker` is one bit: it
 says "somebody else executes this" and cannot say *which* somebody. The work is to
 carry the resolved target — kind plus, for `PlaceKind.WORKER`, the name — alongside
-that variant, and to thread it through `live_hash()` (`registry.rs:450-458`) so that
+that variant, and to thread it through `Registry::device_hash()` (`registry.rs:2654-2686`), the
+shipped digest that hashes each mounted device's tool route, so that
 moving a device from `place="host"` to `place="env"` changes the live registry
 identity. It must, because it changes where effects happen; a placement change that
-left `live_hash()` byte-identical would be an invisible authority change. This stays
+left `device_hash()` byte-identical would be an invisible authority change. This stays
 within the crate's remit — `omp-tool` "contains contracts and deterministic lowering
 only" (`crates/tool/README.md`) and placement resolution is lowering.
 
-**`crates/telemetry`** — event kinds `placement.spawn`, `placement.ship`,
+**`crates/observability`** — event kinds `placement.spawn`, `placement.ship`,
 `placement.oversize_result`, `placement.worker_state`. Attribution uses the existing
 carrier rather than a parallel one: `TOOL_REV_PROP` (`crates/tool/src/lib.rs:46`,
 the `"omp/tool-rev"` thread-item property) is already stamped by
@@ -2258,8 +2259,6 @@ serializer ahead of the gate; that belongs to `docs/py/02-verdicts.md`.
 
 ### Feature-map entries this satisfies
 
-`.plan/feature-map/FEATURES.md` is a compact port-planning tree, two to three levels
-deep, one section per subsystem, with full detail in the sibling `<key>.md` files.
 `ROADMAP.md` assigns every entry to a milestone and marks 94 of them
 `⚠ redesign:` where they conflict with omp's locked decisions.
 
@@ -2283,7 +2282,7 @@ deep, one section per subsystem, with full detail in the sibling `<key>.md` file
   rather than ported: `env/v1` already carries `RestartSpec`, `ReadyProbe`,
   `ProcessState`, and `generation` (`env.proto:230-362`), so `WorkerSpec` maps onto
   the existing supervisor instead of standing up a second broker in Python.
-- **`.plan/feature-map/eval-sdk.md:46-53` — kernel session registry.** Registry
+- **Kernel session registry.** Registry
   keyed by session + cwd + interpreter, coalesced concurrent startup, dead-kernel
   detection with transparent replacement, ownership tracking, `disposeByOwner`.
   These are the `omp.workers` registry semantics one-for-one; the port target is
@@ -2296,7 +2295,7 @@ deep, one section per subsystem, with full detail in the sibling `<key>.md` file
   then escalation, graceful exit then `SIGTERM`/`SIGKILL`. Preserved as
   `evict(grace=…)` and the lease's drop path, but driven by guard drop rather
   than by an extension-declared flag.
-- **`.plan/feature-map/task.md:120-126` — concurrency and parallel batch.**
+- **Concurrency and parallel batch.**
   Session-scoped semaphore, `mapWithConcurrencyLimit`. Becomes
   `WorkerSpec.max_concurrency` plus `WorkerHandle.map(concurrency=…)`, with the
   ceiling enforced by connection count instead of by a counting semaphore around
@@ -2307,7 +2306,7 @@ deep, one section per subsystem, with full detail in the sibling `<key>.md` file
   `WorkerInfo.generation` is the tombstone in monotonic-integer form — cheaper and
   race-free by construction, since a stale handle is detected by comparison rather
   than by a filesystem probe.
-- **`.plan/feature-map/collab.md:204-214` — subprocess worker client scaffolding.**
+- **Subprocess worker client scaffolding.**
   Spawn-command resolution, parent-env snapshotting, stderr capture with a 16 KB
   crash tail, intentional-exit tracking, refcounted unref'd handles, unavailable
   stub fallback, ping smoke probe. All supervisor properties.
@@ -2501,7 +2500,7 @@ host interpreter never survives to v1. The topology is final — one process and
 one site tree per extension, host key `(layer, tier, extension)` — and with it
 the granularity question is resolved, not deferred.
 
-The locked decision is `PLAN.md` §D5, **D5 — Cancellation is
+The locked decision is **D5 — Cancellation is
 resource-owned**, amended 2026-08-19 to say for this case exactly:
 
 > 3. Py/extension tools: supervised worker processes, one per active
@@ -2543,7 +2542,7 @@ What changes is what shares that process group. Under the final topology:
   what an author would expect, and what `WorkerSpec.max_concurrency` documents:
   concurrent calls on one generation die together, by declaration.
 - **Different extensions proceed concurrently and die separately.** D6
-  (`PLAN.md` §D6, amended 2026-08-19) requires that "a tool batch
+  (amended 2026-08-19) requires that "a tool batch
   runs concurrently exactly as the model issued it: no batch-level admission
   scheduler, no parallelism detection, no reordering" — and that batch
   concurrency is now safe against
@@ -2568,7 +2567,7 @@ What this asked of D5 was one wording change, and an earlier revision of this
 document flagged it rather than silently contradicting the decision: **"warm
 pool of one" should be amended to a warm process per active extension, with
 `SIGKILL` granularity per extension's process group.** That amendment was
-ratified 2026-08-19: D5's third clause (`PLAN.md` §D5) now prescribes
+ratified 2026-08-19: D5's third clause now prescribes
 per-extension worker processes keyed `(layer, tier, extension)`, with pooling
 as explicit opt-in fate-sharing and approval as a durable Core-owned ticket.
 Every other clause survived unchanged — `SIGKILL` + respawn, interrupts as
@@ -2687,7 +2686,7 @@ Changes this file made in response to the external review, by review point:
   resolved by per-extension processes plus durable approval tickets, the
   failure-table row and `WorkerHandle.call` prose now state the blast radius
   exactly, and the recommended amendment to D5's "warm pool of one"
-  (`PLAN.md` §D5) is flagged explicitly rather than silently
+   is flagged explicitly rather than silently
   contradicted. Pooling is described as explicit fate-sharing everywhere it
   appears, including the ephemeral-worker pooling recommendation.
 - **P0#4 linkage.** Worker bodies never touch DATA before authorization: the
@@ -2710,14 +2709,14 @@ Changes this file made in response to the external review, by review point:
   under `WorkerHandle`) now parse: the decorator gained its stub signature and
   the snippets are wrapped in minimal `async def` context.
 
-**Revision 2.1** — the PLAN.md amendment:
+**Revision 2.1** — the D5/D6 amendment:
 
-- **D5/D6 ratified.** `PLAN.md` §D5/§D6 was amended 2026-08-19. *Cancellation
+- **D5/D6 ratified.** Locked decisions D5 and D6 were amended 2026-08-19. *Cancellation
   granularity and the D5 amendment* now quotes D5's amended third clause — supervised
   worker processes, one per active extension, keyed `(layer, tier, extension)`; pooling
   as explicit opt-in fate-sharing; approval as a durable Core-owned ticket — where Rev 2
   quoted the pre-amendment "warm pool of one" and flagged the amendment as recommended.
-  The failure-table deadline row and the D6 bullet were aligned: D6 (`PLAN.md` §D6)
+  The failure-table deadline row and the D6 bullet were aligned: D6 
   now says "no batch-level admission scheduler, no parallelism detection, no reordering"
   in its own text, explicitly permitting the per-invocation decision procedure. The Rev 2
   flag prose is kept as the historical record of why the amendment was needed.

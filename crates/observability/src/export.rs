@@ -574,7 +574,8 @@ fn shutdown_sync() {
 }
 
 /// Severity accepted by the `omp.log` logger forwarder.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
+#[strum(serialize_all = "UPPERCASE", const_into_str)]
 pub enum ForwardedLogLevel {
 	/// Debug (OpenTelemetry severity number 5).
 	Debug,
@@ -597,12 +598,7 @@ impl ForwardedLogLevel {
 	}
 
 	const fn text(self) -> &'static str {
-		match self {
-			Self::Debug => "DEBUG",
-			Self::Info => "INFO",
-			Self::Warn => "WARN",
-			Self::Error => "ERROR",
-		}
+		self.into_str()
 	}
 
 	const fn threshold(self) -> LogLevel {

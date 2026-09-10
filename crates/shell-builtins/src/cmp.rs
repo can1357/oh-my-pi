@@ -189,7 +189,9 @@ fn command() -> Command {
 }
 
 fn compare(matches: &ArgMatches, host: &mut Host) -> Result<i32, String> {
-	let name1 = matches.get_one::<OsString>(ARG_FILE1).unwrap();
+	let name1 = matches
+		.get_one::<OsString>(ARG_FILE1)
+		.ok_or_else(|| "missing file operand".to_owned())?;
 	let default_stdin = OsString::from("-");
 	let name2 = matches
 		.get_one::<OsString>(ARG_FILE2)
@@ -219,7 +221,13 @@ fn compare(matches: &ArgMatches, host: &mut Host) -> Result<i32, String> {
 
 	if name1 == OsStr::new("-") {
 		let input1 = stdin_input(&mut host.stdin);
-		let input2 = open_input(name2, path2.as_deref().unwrap(), options.no_follow)?;
+		let input2 = open_input(
+			name2,
+			path2
+				.as_deref()
+				.ok_or_else(|| "missing file operand".to_owned())?,
+			options.no_follow,
+		)?;
 		compare_inputs(
 			input1,
 			input2,
@@ -231,7 +239,13 @@ fn compare(matches: &ArgMatches, host: &mut Host) -> Result<i32, String> {
 			&cancel,
 		)
 	} else if name2 == OsStr::new("-") {
-		let input1 = open_input(name1, path1.as_deref().unwrap(), options.no_follow)?;
+		let input1 = open_input(
+			name1,
+			path1
+				.as_deref()
+				.ok_or_else(|| "missing file operand".to_owned())?,
+			options.no_follow,
+		)?;
 		let input2 = stdin_input(&mut host.stdin);
 		compare_inputs(
 			input1,
@@ -244,8 +258,20 @@ fn compare(matches: &ArgMatches, host: &mut Host) -> Result<i32, String> {
 			&cancel,
 		)
 	} else {
-		let input1 = open_input(name1, path1.as_deref().unwrap(), options.no_follow)?;
-		let input2 = open_input(name2, path2.as_deref().unwrap(), options.no_follow)?;
+		let input1 = open_input(
+			name1,
+			path1
+				.as_deref()
+				.ok_or_else(|| "missing file operand".to_owned())?,
+			options.no_follow,
+		)?;
+		let input2 = open_input(
+			name2,
+			path2
+				.as_deref()
+				.ok_or_else(|| "missing file operand".to_owned())?,
+			options.no_follow,
+		)?;
 		compare_inputs(
 			input1,
 			input2,

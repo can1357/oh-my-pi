@@ -125,33 +125,11 @@ pub(crate) async fn run(
 	prepared: AppContainerPrepared,
 	options: RunOptions,
 ) -> Result<RunOutput, SandboxError> {
-	#[cfg(windows)]
-	{
-		return windows::run(prepared, options).await;
-	}
-	#[cfg(not(windows))]
-	{
-		let _ = (prepared, options);
-		Err(SandboxError::BackendIo {
-			backend:   Backend::AppContainer,
-			operation: SandboxOperation::Launch,
-			source:    io::Error::new(io::ErrorKind::Unsupported, "AppContainer requires Windows"),
-		})
-	}
+	windows::run(prepared, options).await
 }
 
 pub(crate) fn probe_appcontainer() -> BackendStatus {
-	#[cfg(windows)]
-	{
-		return windows::probe();
-	}
-	#[cfg(not(windows))]
-	{
-		BackendStatus::unavailable(Backend::AppContainer, ProbeFailure::WrongHost {
-			backend: Backend::AppContainer,
-			os:      std::env::consts::OS,
-		})
-	}
+	windows::probe()
 }
 
 pub(crate) fn environment_block(
@@ -202,15 +180,8 @@ fn environment_key(entry: &OsStr) -> String {
 }
 
 fn encode_wide(value: &OsStr) -> Vec<u16> {
-	#[cfg(windows)]
-	{
-		use std::os::windows::ffi::OsStrExt as _;
-		value.encode_wide().collect()
-	}
-	#[cfg(not(windows))]
-	{
-		value.to_string_lossy().encode_utf16().collect()
-	}
+	use std::os::windows::ffi::OsStrExt as _;
+	value.encode_wide().collect()
 }
 
 pub(crate) fn compose_command_line(program: &OsStr, args: &[OsString]) -> Vec<u16> {
@@ -321,25 +292,12 @@ fn copy_workspace(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 fn copy_symlink(source: &Path, destination: &Path, _metadata: &fs::Metadata) -> io::Result<()> {
+	use std::os::windows::fs::{symlink_dir, symlink_file};
 	let target = fs::read_link(source)?;
-	#[cfg(unix)]
-	{
-		let _ = _metadata;
-		std::os::unix::fs::symlink(target, destination)
-	}
-	#[cfg(windows)]
-	{
-		use std::os::windows::fs::{symlink_dir, symlink_file};
-		if fs::metadata(source).is_ok_and(|target| target.is_dir()) {
-			symlink_dir(target, destination)
-		} else {
-			symlink_file(target, destination)
-		}
-	}
-	#[cfg(not(any(unix, windows)))]
-	{
-		let _ = (target, destination, _metadata);
-		Err(io::Error::new(io::ErrorKind::Unsupported, "symbolic links are unsupported"))
+	if fs::metadata(source).is_ok_and(|target| target.is_dir()) {
+		symlink_dir(target, destination)
+	} else {
+		symlink_file(target, destination)
 	}
 }
 

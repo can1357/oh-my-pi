@@ -1,3 +1,4 @@
+#![expect(missing_docs, reason = "strum IntoStaticStr emits undocumented inherent methods")]
 //! Transport-neutral LSP-compatible value types shared across crate boundaries.
 //!
 //! The document authority, LSP tools, and envd wire projections consume these
@@ -101,14 +102,18 @@ pub struct Diagnostic {
 }
 
 /// Position encodings supported by LSP 3.18.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, strum::IntoStaticStr)]
+#[strum(const_into_str)]
 pub enum PositionEncoding {
 	/// Characters are counted as UTF-8 code units (bytes).
+	#[strum(serialize = "utf-8")]
 	Utf8,
 	/// Characters are counted as UTF-16 code units.
 	#[default]
+	#[strum(serialize = "utf-16")]
 	Utf16,
 	/// Characters are counted as Unicode scalar values.
+	#[strum(serialize = "utf-32")]
 	Utf32,
 }
 
@@ -125,11 +130,7 @@ impl PositionEncoding {
 
 	/// Returns the canonical LSP spelling of this encoding.
 	pub const fn as_lsp_name(self) -> &'static str {
-		match self {
-			Self::Utf8 => "utf-8",
-			Self::Utf16 => "utf-16",
-			Self::Utf32 => "utf-32",
-		}
+		self.into_str()
 	}
 }
 

@@ -20,7 +20,7 @@
 use std::{
 	collections::BTreeSet,
 	env,
-	fmt::Write,
+	fmt::{self, Write},
 	fs,
 	path::{Path, PathBuf},
 	process::Command,
@@ -29,8 +29,22 @@ use std::{
 /// System libraries only `_tkinter` needs; it is not in the static inittab
 /// (pbs ships it as a shared module), so its archive member is never pulled.
 const TCL_LIBS: [&str; 2] = ["tcl9.0", "tcl9tk9.0"];
+#[derive(Debug)]
+struct BuildError(String);
 
-fn main() {
+impl fmt::Display for BuildError {
+	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+		formatter.write_str(&self.0)
+	}
+}
+
+impl std::error::Error for BuildError {}
+
+fn contextual_error(context: impl fmt::Display, error: impl fmt::Display) -> BuildError {
+	BuildError(format!("{context}: {error}"))
+}
+
+fn main() -> Result<(), BuildError> {
 	let manifest = PathBuf::from(std::env!("CARGO_MANIFEST_DIR"));
 	let target = env::var("TARGET").expect("Cargo must provide TARGET to omp-py/build.rs");
 
@@ -68,8 +82,11 @@ fn main() {
 	println!("cargo::rerun-if-changed={}", vendor.join("PYTHON.json").display());
 	println!("cargo::rerun-if-changed={}", vendor.join("stdlib.bin").display());
 
-	let json: serde_json::Value =
-		serde_json::from_str(&fs::read_to_string(vendor.join("PYTHON.json")).unwrap()).unwrap();
+	let python_json = vendor.join("PYTHON.json");
+	let json_text = fs::read_to_string(&python_json)
+		.map_err(|error| contextual_error(format!("read {}", python_json.display()), error))?;
+	let json: serde_json::Value = serde_json::from_str(&json_text)
+		.map_err(|error| contextual_error(format!("parse {}", python_json.display()), error))?;
 
 	// macOS's `@available` checks require compiler-rt because rustc links with
 	// `-nodefaultlibs`; Linux archives do not ship or reference this Darwin
@@ -80,16 +97,54 @@ fn main() {
 	}
 	let mut frameworks = BTreeSet::new();
 	let mut system_libs = BTreeSet::new();
-	let extensions = json["build_info"]["extensions"].as_object().unwrap();
-	for variant in extensions.values().flat_map(|v| v.as_array().unwrap()) {
-		for link in variant["links"].as_array().unwrap() {
-			let name = link["name"].as_str().unwrap();
-			if link["path_static"].is_string() {
-				static_libs.insert(name.to_owned());
-			} else if link["framework"].as_bool() == Some(true) {
-				frameworks.insert(name);
-			} else if !TCL_LIBS.contains(&name) {
-				system_libs.insert(name);
+	let extensions = json
+		.get("build_info")
+		.and_then(|build_info| build_info.get("extensions"))
+		.and_then(serde_json::Value::as_object)
+		.ok_or_else(|| {
+			contextual_error(python_json.display(), "build_info.extensions must be an object")
+		})?;
+	for (extension_name, variants) in extensions {
+		let variants = variants.as_array().ok_or_else(|| {
+			contextual_error(
+				format!("{}: build_info.extensions.{extension_name}", python_json.display()),
+				"must be an array",
+			)
+		})?;
+		for (variant_index, variant) in variants.iter().enumerate() {
+			let links = variant
+				.get("links")
+				.and_then(serde_json::Value::as_array)
+				.ok_or_else(|| {
+					contextual_error(
+						format!(
+							"{}: build_info.extensions.{extension_name}[{variant_index}].links",
+							python_json.display()
+						),
+						"must be an array",
+					)
+				})?;
+			for (link_index, link) in links.iter().enumerate() {
+				let name = link
+					.get("name")
+					.and_then(serde_json::Value::as_str)
+					.ok_or_else(|| {
+						contextual_error(
+							format!(
+								"{}: build_info.extensions.{extension_name}[{variant_index}].\
+								 links[{link_index}].name",
+								python_json.display()
+							),
+							"must be a string",
+						)
+					})?;
+				if link["path_static"].is_string() {
+					static_libs.insert(name.to_owned());
+				} else if link["framework"].as_bool() == Some(true) {
+					frameworks.insert(name);
+				} else if !TCL_LIBS.contains(&name) {
+					system_libs.insert(name);
+				}
 			}
 		}
 	}
@@ -161,14 +216,16 @@ fn main() {
 	println!("cargo::rerun-if-changed={}", py_src.display());
 	println!("cargo::rerun-if-changed={}", requirements.display());
 	println!("cargo::rerun-if-changed={}", packer.display());
-	let frozen_metadata =
-		PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("frozen_distributions.rs");
+	let out_dir = env::var_os("OUT_DIR")
+		.map(PathBuf::from)
+		.ok_or_else(|| BuildError("Cargo did not provide OUT_DIR to omp-py/build.rs".to_owned()))?;
+	let frozen_metadata = out_dir.join("frozen_distributions.rs");
 	write_frozen_distributions(&requirements, &frozen_metadata);
 	println!("cargo::rustc-env=OMP_PY_FROZEN_DISTRIBUTIONS={}", frozen_metadata.display());
 
 	let url_vocab = manifest.join("../tools/url-vocab.json");
 	println!("cargo::rerun-if-changed={}", url_vocab.display());
-	let frozen_generated = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("frozen-python");
+	let frozen_generated = out_dir.join("frozen-python");
 	fs::create_dir_all(&frozen_generated).expect("create generated frozen-module directory");
 	let vocabulary: serde_json::Value =
 		serde_json::from_str(&fs::read_to_string(&url_vocab).expect("read canonical URL vocabulary"))
@@ -223,7 +280,7 @@ fn main() {
 		.find(|p| p.is_file())
 		.expect("vendored interpreter missing — run omp-py's scripts/fetch-python.sh first");
 	let bundled = bundled_packages(&requirements, &vendor);
-	let modules_blob = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("omp_modules.bin");
+	let modules_blob = out_dir.join("omp_modules.bin");
 	let mut pack = Command::new(interpreter);
 	pack.arg(&packer).arg(&py_src);
 	pack.arg(&frozen_generated);
@@ -241,6 +298,7 @@ fn main() {
 	// Baked into the library by lib.rs.
 	println!("cargo::rustc-env=OMP_STDLIB_BLOB={}", vendor.join("stdlib.bin").display());
 	println!("cargo::rustc-env=OMP_PY_MODULES_BLOB={}", modules_blob.display());
+	Ok(())
 }
 
 /// Locates the bundled third-party packages (pinned in `requirements.txt`,

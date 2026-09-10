@@ -166,7 +166,7 @@ shadow VCS.
 ```mermaid
 flowchart LR
     subgraph thread["Thread (Agent Core, exists today)"]
-        J[("journal<br/>append-only")] -->|"Kind::Rewind { to }"| L["live chain<br/>truncated by one fold"]
+        J[("journal<br/>append-only")] -->|"Session::rewind: next entry prior"| L["live chain<br/>truncated by one fold"]
     end
     subgraph ws["Workspace (Environment, NEW)"]
         G[("generation store<br/>content-addressed")] -->|"restore(generation)"| W["working tree"]
@@ -175,11 +175,14 @@ flowchart LR
     R --> ws
 ```
 
-The thread half is *already real*: `Journal::rewind` appends a `Kind::Rewind`
-event and `Log::live()` folds it forward by truncating the working chain
-(`crates/storage/src/transcript/reader.rs:108`). Nothing is deleted; a rewind is
-a fact appended to an append-only log, which is why redo is free and why two
-agents rewinding the same session do not corrupt each other.
+The thread half is *already real*: `Session::rewind(target)`
+(`crates/session/src/session.rs:937-961`) selects the target by canonical prefix replay
+and stages it as the next entry's `prior`; `live_chain`
+(`crates/journal/src/chain.rs:12-15`) folds the tail-selected chain and `abandoned`
+(`crates/journal/src/chain.rs:17-27`) keeps unreachable entries inspectable. Nothing is
+deleted — the rewind lands as the next entry's `prior` link in an append-only log, which
+is why redo is free and why two agents rewinding the same session do not corrupt each
+other.
 
 The workspace half is new environment capability, stated plainly:
 `crates/env/` has no snapshot or restore operation today, and neither does
@@ -642,8 +645,7 @@ exactly the reason a subagent does: it spends the user's tokens.
   depends entirely on `default`, below.
 - One stateless, non-streaming, tool-less model call. No thread, no history, no
   journal item. Use it for classification, extraction, and titling — the
-  `ctx.model.call` / `ctx.model.stream` shape from
-  `.plan/feature-map/discovery.md:190`.
+  `ctx.model.call` / `ctx.model.stream` shape.
 - **`context="thread"` trades statelessness for the live conversation.** The
   call becomes one non-persisted side-channel turn over the caller's projected
   thread — the same mechanism behind the interactive `/btw` command and the
@@ -1226,7 +1228,7 @@ broadcast to a session that just exited is normal, not an error.
 | `DeliveryMode.NEXT_TURN` | `"next_turn"` | Queued behind the current turn; observed at the turn boundary. |
 
 These map onto the Core's three interrupt classes (`Immediate`,
-`TurnBoundary`, `Idle` — `crates/agent/src/mailbox.rs:10`). An idle recipient
+`TurnBoundary`, `Idle` — `crates/py/python/omp/events.py:162`). An idle recipient
 is woken by any of the three.
 
 #### `class omp.agents.Receipt(enum.StrEnum)`
@@ -1317,7 +1319,9 @@ its `/rewind` selector and had to implement the workspace arm itself.
 - **Raises** `RewindPending` while a durable turn lacks its terminal receipt —
   the Core's own precondition (`JournalError::RewindWhilePending`). Cancel or
   await the turn first.
-- Rewinding is an *append*: a `Kind::Rewind` event. Nothing is deleted, redo is
+- Rewinding is an *append*: the target becomes the next entry's `prior` link
+  (`Session::rewind`, `crates/session/src/session.rs:937-961`) — the journal's
+  closed kind vocabulary has no rewind kind. Nothing is deleted, redo is
   another rewind forward, and a rewind is visible to every observer of the
   journal.
 - Detached job facts survive a rewind; a background child that was already
@@ -1950,12 +1954,13 @@ nothing below reads as a confident fiction.
   that callers must inspect `route` before granting execution
   (`registry.rs:439-440`). `advertise` simply needs the same check.
   This document depends on the fix but does not own it — see
-  `docs/py/01-devices.md`. Related: `live_hash` (`registry.rs:458-467`) is one
-  digest over *all* live identities, so it cannot serve as prompt-cache identity
-  once devices exist; the slot-versus-device hash split is
-  `docs/py/01-devices.md`'s correction, and my earlier note that `live_hash`
-  answers "did the reachable capability set change" holds only for the
-  model-advertised subset once that split lands.
+  `docs/py/01-devices.md`. Related: the registry's identity surface is the split
+  already — `slot_hash()` (`registry.rs:2623`) digests the policy-resolved
+  model-visible slots, `device_hash()` (`registry.rs:2654`) the mounted device
+  availability and claimant-qualified reachability, and `projection_hash()`
+  (`registry.rs:2690`) every registered revision plus its projection code. No
+  single live-identity digest is left to misuse as prompt-cache identity, and
+  "did the reachable capability set change" is `device_hash()`'s question.
 
 ### What already exists to build on
 
@@ -1971,19 +1976,26 @@ More than the assignment implies, which changes the shape of the work from
   interrupts (which continue the loop) from job settlements (which do not) by
   matching `InterruptSource::Producer(_)`.
 - **The mailbox is exactly the right primitive.**
-  `crates/agent/src/mailbox.rs` gives us `InterruptClass::{Immediate,
+  No surviving mailbox implementation in the tree supplies `InterruptClass::{Immediate,
   TurnBoundary, Idle}` and `DrainPoint` with a nonblocking cloneable
   `MailboxSender` over a `flume::unbounded`. `DeliveryMode` in this document is
   a one-to-one renaming of `InterruptClass` for the Python surface; no new
   transport is needed for messaging, steering, injection, or schedule delivery.
-- **Journal rewind is done.** `Journal::rewind`
-  (`crates/agent/src/journal.rs:576`) appends `Kind::Rewind { to }`;
-  `Log::live()` (`crates/storage/src/transcript/reader.rs:108-118`) folds it by
-  truncating the working chain; `Agent::rewind` and `Agent::rewind_targets`
-  (`crates/agent/src/loop.rs:235,251`) are public today, and `RewindTarget`
-  already carries `{ event, keep, text }`. `RewindWhilePending`
-  (`journal.rs:114`) is the precondition this document surfaces as
-  `RewindPending`.
+- **Journal rewind is done.** `Session::rewind(target)`
+  (`crates/session/src/session.rs:937-961`) selects the target by canonical prefix replay and
+  stages it as the next entry's `prior`; `live_chain` (`crates/journal/src/chain.rs:12-15`) folds
+  the tail-selected chain and `abandoned` (`crates/journal/src/chain.rs:17-27`) keeps unreachable
+  entries inspectable, so rewinding never destroys abandoned history. The Python surface is
+  already wired: `rewind_targets()` (`crates/py/python/omp/agents.py:1342`) returns
+  `RewindTarget { event, keep, text, ts_ms, snapshot_id }`
+  (`crates/py/python/omp/agents.py:1236-1244`), `rewind(...)`
+  (`crates/py/python/omp/agents.py:1363`) drives the same journal selection, and `RewindPending`
+  (`crates/py/python/omp/agents.py:98-103`) is the pending-turn precondition this document
+  surfaces. The `Agent::rewind` / `Agent::rewind_targets` methods
+  and the `RewindWhilePending` precondition have no
+  surviving Rust implementation; the loop's Rust rewinds run through `session.rewind(target)` in
+  `retry_tool_tail` (`crates/agent/src/loop.rs:1062`) and the checkpoint path
+  (`crates/agent/src/dispatch.rs:673`).
 - **Detached jobs are the `background=True` machinery.** `JobBoard`
   (`crates/agent/src/jobs.rs:31`) registers work, watches for terminal
   settlement, uploads the artifact as a blob, and posts a settlement item into
@@ -2038,15 +2050,17 @@ More than the assignment implies, which changes the shape of the work from
 - **Per-rev attribution already has a carrier.** `TOOL_REV_PROP`
   (`crates/tool/src/lib.rs:46`, `"omp/tool-rev"`) is the namespaced thread-item
   property holding a committed revision, stamped in
-  `crates/agent/src/project.rs:165,171,258` and `crates/agent/src/loop.rs:1368-1370`
-  and read back at `loop.rs:1129-1131`. `Firing` records, continuation
+  `crates/session/src/projection.rs:167-176` and read back at
+  `projection.rs:188-203`. `Firing` records, continuation
   refusals, and rewind reports use it rather than a parallel stamp; likewise
-  `Registry::live_hash()` (`registry.rs:458`, blake3) is the existing stable
-  identity for the ordered live registry, so nothing new is needed to answer
-  "did the reachable capability set change" — with the caveat recorded above
-  that it currently digests *all* live identities, so it becomes a
-  model-advertised-subset identity only once the device split in
-  `docs/py/01-devices.md` lands.
+  `Registry::projection_hash()` (`crates/tool/src/registry.rs:2690-2711`, SHA-256) is the
+  existing stable identity for the registered revisions and their projections,
+  and it ships alongside the split the identity paragraph above records —
+  `slot_hash()` (`registry.rs:2623-2650`) is the model-advertised-subset
+  identity, and "did the reachable capability set change" is `device_hash()`'s
+  (`registry.rs:2654-2686`) question. The earlier caveat that one digest
+  covered *all* live identities until the device split in
+  `docs/py/01-devices.md` lands is already paid; nothing new is needed.
 - **The host protocol already exists.** `omp/toolhost/v1`
   (`crates/proto/proto/omp/toolhost/v1/toolhost.proto`) is a
   varint-length-delimited `HostFrame`/`WorkerFrame` pair with `request_id`
@@ -2090,7 +2104,7 @@ More than the assignment implies, which changes the shape of the work from
   `env/v1`. `crates/app/src/envd/workspace.rs` is walker traversal and byte
   search only.
 - **No scheduler.** No cron, no durable timer, no persistent trigger anywhere
-  in `crates/agent`, `crates/app`, or `crates/storage`. The only clocks are
+  in `crates/agent`, `crates/app`, or `crates/journal`. The only clocks are
   `AgentSnapshot.deadline`, `RetryPolicy` backoff, and the envd worker's ping
   interval.
 - **No inter-agent broker.** `Mailbox` is single-consumer and in-crate. There
@@ -2363,7 +2377,7 @@ allocation-free. `SpawnPermit` is RAII: dropping it releases the concurrency
 permit, so a spawn that fails between admission and start cannot leak a slot.
 
 One clarification, because the word "admission" is loaded here.
-`PLAN.md` §D6 (**D6 — One mailbox, no gate chain**, amended 2026-08-19)
+Locked decision **D6 — One mailbox, no gate chain** (amended 2026-08-19)
 forbids exactly this word applied to tool calls: "A tool batch runs concurrently
 exactly as the model issued it: no batch-level admission scheduler, no
 parallelism detection, no reordering." `AgentTree::admit` is not that. It
@@ -2485,10 +2499,11 @@ selected against the wait future — no polling.
 
 **`src/schedule.rs`** — the durable clock.
 
-New journal `Kind::Schedule { id, spec }` and
-`Kind::Firing { id, key, at, outcome }` in
-`crates/storage/src/transcript/event.rs`, with codec arms in `codec.rs`
-alongside the existing `payload!(RewindPayload { … })` macro (`codec.rs:402`).
+New journal kinds — a `schedule` intent carrying `id` and `spec`, and a `firing` outcome
+carrying `id`, `key`, `at`, and `outcome`. Neither exists in the journal's closed
+revision-1 vocabulary (`crates/journal/src/kind.rs:11-33`); landing them is a journal
+schema-revision change with typed payloads beside the existing ones
+(`crates/journal/src/data.rs`).
 The firing `key` is the idempotency key: the scheduler journals intent before
 delivery and outcome after, and recovery replays any intent without an
 outcome — at-least-once by construction, deduplicated by `key` at the
@@ -2725,12 +2740,13 @@ worktree capability.
   matters, the answer is the `paths` filter or design 3's CoW capture, not a
   cheaper hash.
 - **A rewind pays one projection, and must not add a second.**
-  `Log::live()` (`crates/storage/src/transcript/reader.rs:81`) returns
-  `Vec<u64>` and is already called per projection — it is the shipped patch
-  protocol, splicing `Reset`/`Compact`/`Rewind` over the live event-index list.
-  (`crates/storage/src/transcript/patch.rs` is *not* that: it defines
-  `Patch<T>`, a tri-state field patch for partial record updates. Do not cite it
-  as precedent here.) `omp.agents.rewind` appends one event and lets the
+  `live_chain` (`crates/journal/src/chain.rs:12-15`) walks the live chain as an iterator
+  over `&Entry`; its real consumers each take it once per pass — journal GC
+  (`crates/journal/src/gc.rs:275`), the app's session ops
+  (`crates/app/src/chat_services/session_ops.rs:175`) and transcript renderer
+  (`crates/app/src/render_cmd.rs:345`), and envd's blob scanner
+  (`crates/envd/src/blobs.rs:548`). No field-patch module exists in the
+  journal to cite as precedent (reported gap). `omp.agents.rewind` appends one event and lets the
   existing fold do the work; it must not build a parallel index or re-walk the
   chain to compute `RewindReport.dropped_items`, which is a length difference
   over the fold the projection already produced. If the rewind path ever needs
@@ -2887,7 +2903,7 @@ worktree capability.
    that wording, and this document described a warm process **per active
    extension** — so Rev 2 recorded **a D5 wording amendment as recommended**
    rather than silently contradicting a locked decision. That amendment was
-   ratified 2026-08-19: D5's third clause (`PLAN.md` §D5) now reads
+   ratified 2026-08-19: D5's third clause now reads
    "supervised worker processes, one per active extension, keyed `(layer,
    tier, extension)`; pooling is explicit opt-in fate-sharing", with SIGKILL
    blast radius one extension and approval "a durable Core-owned ticket". The
@@ -2969,7 +2985,7 @@ Changes this file made for Revision 2, and the review point that drove each:
   §"Principal identity"): open question 1 rewritten as resolved-for-semantics
   with the residual daemon-token work owned by `docs/py/13-inference.md`.
 
-**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the PLAN.md amendment:
+**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the D5/D6 amendment:
 
 - **Dispatch surface.** The two load-bearing sibling facts, the `pi-subagent-scheduler`
   pattern, the `allowed_devices` row, and the `task.md` conflict entry were rewritten from
@@ -2979,13 +2995,13 @@ Changes this file made for Revision 2, and the review point that drove each:
   `target=DeviceCall(...)`. Declarations carry soft/hard intent and the surface is decided
   by the dynamic tool policy; the `do_` grammar, `@omp.tool`, and `omp.ToolPath` are owned
   by `docs/py/01-devices.md`.
-- **D5/D6 ratified.** `PLAN.md` §D5/§D6 was amended 2026-08-19. The `AgentTree::admit`
+- **D5/D6 ratified.** Locked decisions D5 and D6 were amended 2026-08-19. The `AgentTree::admit`
   clarification and the `subagent_spawn` paragraph now quote D6's amended text ("no
   batch-level admission scheduler, no parallelism detection, no reordering"; per-invocation
   procedure explicitly permitted) instead of flagging a recommended wording amendment, and
   open question 7's user-facing flag records the D5 amendment as ratified — per-extension
   worker processes keyed `(layer, tier, extension)`, pooling as opt-in fate-sharing,
-  durable approval tickets (`PLAN.md` §D5). Rev 2's flags and Revision 1's "not
+  durable approval tickets (locked decision D5). Rev 2's flags and Revision 1's "not
   mine to make" quote are kept as historical records.
 
 **Revision 2.2** — the `dyn` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `dyn` builtin of the embedded shell, inside the core `shell` tool: `dyn` lists the catalog (`dyn --q <text>` searches), `dyn <device> --help` returns docs plus schema-derived CLI usage, and `dyn <device> [args…]` (or `dyn <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `dyn resolve "<reason>"` / `dyn reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `dyn` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.

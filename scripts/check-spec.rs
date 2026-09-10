@@ -140,12 +140,12 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 		}
 	}
 
-	let server = fs::read_to_string(root.join("crates/app/src/envd/server.rs"))
+	let server = fs::read_to_string(root.join("crates/envd/src/server.rs"))
 		.expect("environment dispatch source is unreadable");
 	for operation in server.split('"').filter(|token| {
 		token.starts_with("omp.env.")
 			&& !token.ends_with('.')
-			&& token.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_'))
+			&& token.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'_')
 	}) {
 		if operation_spec(operation).is_none() {
 			failures.push(format!("DATA dispatch operation {operation} is missing from the runtime spec"));
@@ -175,7 +175,7 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 	{
 		failures.push("interrupt-grace configuration or telemetry metadata drifted".into());
 	}
-	let settings = fs::read_to_string(root.join("crates/app/src/settings.rs"))
+	let settings = fs::read_to_string(root.join("crates/envd/src/host_settings.rs"))
 		.expect("runtime settings source is unreadable");
 	if !settings.contains("omp_tool::DEFAULT_INTERRUPT_GRACE")
 		|| !settings.contains("pub runtime:")
@@ -183,7 +183,7 @@ fn check_symbols(root: &Path, failures: &mut Vec<String>) {
 	{
 		failures.push("runtime.interrupt_grace setting default, key, or type drifted".into());
 	}
-	let telemetry = fs::read_to_string(root.join("crates/telemetry/src/attrs.rs"))
+	let telemetry = fs::read_to_string(root.join("crates/observability/src/attrs.rs"))
 		.expect("telemetry attribute vocabulary is unreadable");
 	if !telemetry.contains(interrupt_metadata.telemetry_ns)
 		|| !telemetry.contains(interrupt_metadata.telemetry_unit)
@@ -361,8 +361,7 @@ fn check_policy_list(
 fn parse_toml(path: &Path) -> TomlValue {
 	let text = fs::read_to_string(path)
 		.unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-	text.parse()
-		.unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()))
+	text.parse::<toml::Table>().map(TomlValue::Table).unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()))
 }
 
 fn generated_spec_json() -> String {

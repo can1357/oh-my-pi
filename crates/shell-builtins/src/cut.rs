@@ -686,7 +686,9 @@ fn cut_fields<R: Read, W: Write>(
 	opts: &Options,
 ) -> io::Result<()> {
 	let newline_char = opts.line_ending.into();
-	let field_opts = opts.field_opts.as_ref().unwrap(); // it is safe to unwrap() here - field_opts will always be Some() for cut_fields() call
+	let field_opts = opts.field_opts.as_ref().ok_or_else(|| {
+		io::Error::new(io::ErrorKind::InvalidInput, "missing field selection options")
+	})?;
 	match field_opts.delimiter {
 		Delimiter::Slice(delim) if delim == [newline_char] => {
 			let out_delim = opts.out_delimiter.unwrap_or(delim);

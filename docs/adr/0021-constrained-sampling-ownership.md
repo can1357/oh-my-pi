@@ -66,12 +66,12 @@ the wire.
 
 ## Status in omp
 
-**Partial.** Primary implementation: `crates/inference/src/codec`. Inference owns grammar/strict-schema translation. Gap: strict-schema token/time budgets and all grammar-dialect fallbacks are not proved end to end.
+**Partial.** Primary implementation: `crates/ai/src/codec`. Inference owns grammar/strict-schema translation. Gap: strict-schema token/time budgets and all grammar-dialect fallbacks are not proved end to end.
 
 ## References
 
 - The Harness Playbook, "The inference" — "Strict sampling needs budgets and dialects"
 - pi `packages/ai/src/utils/schema/CONSTRAINTS.md` (the pass-through approach)
 - 0016, 0017, 0018, 0020, 0022
-- `crates/inference/src/plan.rs`, `crates/inference/src/call.rs`, `crates/tool/src/registry.rs`,
+- `crates/ai/src/plan.rs`, `crates/ai/src/call.rs`, `crates/tool/src/registry.rs`,
   `docs/py/13-inference.md`

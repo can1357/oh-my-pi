@@ -333,7 +333,9 @@ fn touch_main(matches: &ArgMatches, host: &mut Host) -> Result<(), TouchError> {
 		&filenames,
 		host.var("_POSIX2_VERSION"),
 	) {
-		let first_file = filenames[0].to_str().unwrap();
+		let Some(first_file) = filenames.first().and_then(|filename| filename.to_str()) else {
+			return Err(TouchError::Message("invalid timestamp file operand".into()));
+		};
 		timestamp = if first_file.len() == 10 {
 			Some(shr2(first_file))
 		} else {

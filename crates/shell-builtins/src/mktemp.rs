@@ -458,7 +458,8 @@ fn dry_exec(tmpdir: &Path, prefix: &str, rand: usize, suffix: &str) -> PathBuf {
 		};
 	}
 	// Every byte was mapped into the ASCII alphanumeric range.
-	let buf = String::from_utf8(buf).unwrap();
+	let buf = String::from_utf8(buf)
+		.expect("mktemp template bytes are restricted to ASCII alphanumeric characters");
 	tmpdir.join(buf)
 }
 

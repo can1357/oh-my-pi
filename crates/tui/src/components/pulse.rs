@@ -211,8 +211,10 @@ impl Default for Pulse {
 /// Compact number examples: `999`, `1.5K`, `25K`, `1.5M`, `25M`, `1.5B`.
 pub fn write_compact(out: &mut String, value: u64) {
 	let trimmed = |out: &mut String, scaled: f64, suffix: char| {
-		let text = format!("{scaled:.1}");
-		out.push_str(text.strip_suffix(".0").unwrap_or(&text));
+		let _ = write!(out, "{scaled:.1}");
+		if out.ends_with(".0") {
+			out.truncate(out.len() - 2);
+		}
 		out.push(suffix);
 	};
 	match value {
