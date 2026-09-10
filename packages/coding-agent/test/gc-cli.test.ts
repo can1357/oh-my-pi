@@ -10,8 +10,10 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	getAgentDir,
 	getBlobsDir,
+	getCustomSessionFilesDir,
 	getHistoryDbPath,
 	getSessionsDir,
+	getTerminalSessionsDir,
 	setAgentDir,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
@@ -194,6 +196,75 @@ describe("runGcCommand blob sweep", () => {
 		expect(result.blobs?.wouldDelete).toBe(0);
 		expect(result.blobs?.deleted).toBe(0);
 		expect(await Bun.file(referenced).exists()).toBe(true);
+	});
+
+	test("--apply resolves breadcrumbed relative session paths from their recorded cwd", async () => {
+		const referencedHash = hashFor("custom-dir-reference");
+		const orphanHash = hashFor("custom-dir-orphan");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		const orphan = await writeBlob(root, orphanHash, "orphan");
+		await agePath(referenced);
+		await agePath(orphan);
+
+		// A relative --session-dir transcript stored outside the managed roots.
+		const projectDir = path.join(root, "project");
+		const externalDir = path.join(projectDir, ".omp-sessions");
+		await fs.mkdir(externalDir, { recursive: true });
+		const externalFile = path.join(externalDir, "work.jsonl");
+		await Bun.write(
+			externalFile,
+			[
+				JSON.stringify({ type: "session", version: 3, id: "work", timestamp: "2026-01-01T00:00:00.000Z" }),
+				JSON.stringify({ type: "message", message: { role: "user", content: `blob:sha256:${referencedHash}` } }),
+				"",
+			].join("\n"),
+		);
+		// GC runs from another cwd, so resolving the relative path from process.cwd()
+		// would miss this transcript and delete its blob.
+		const crumbDir = getTerminalSessionsDir(root);
+		await fs.mkdir(crumbDir, { recursive: true });
+		await Bun.write(path.join(crumbDir, "tty-1"), `${projectDir}\n.omp-sessions/work.jsonl\n`);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.referenced).toBe(1);
+		expect(result.blobs?.deleted).toBe(1);
+		expect(await Bun.file(referenced).exists()).toBe(true);
+		expect(await Bun.file(orphan).exists()).toBe(false);
+	});
+
+	test("--apply scans an exact extensionless session file after its breadcrumb is overwritten", async () => {
+		const referencedHash = hashFor("registry-reference");
+		const orphanHash = hashFor("registry-orphan");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		const orphan = await writeBlob(root, orphanHash, "orphan");
+		await agePath(referenced);
+		await agePath(orphan);
+
+		// An extensionless --session transcript whose terminal breadcrumb was
+		// overwritten by a later session is invisible to the root-scan globs.
+		const externalDir = path.join(root, "external-sessions");
+		await fs.mkdir(externalDir, { recursive: true });
+		const externalFile = path.join(externalDir, "work");
+		await Bun.write(
+			externalFile,
+			[
+				JSON.stringify({ type: "session", version: 3, id: "work", timestamp: "2026-01-01T00:00:00.000Z" }),
+				JSON.stringify({ type: "message", message: { role: "user", content: `blob:sha256:${referencedHash}` } }),
+				"",
+			].join("\n"),
+		);
+		// Only the persistent registry records the exact file — no terminal breadcrumb exists.
+		const registryDir = getCustomSessionFilesDir(root);
+		await fs.mkdir(registryDir, { recursive: true });
+		await Bun.write(path.join(registryDir, "session-1"), externalFile);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.referenced).toBe(1);
+		expect(result.blobs?.deleted).toBe(1);
+		expect(await Bun.file(referenced).exists()).toBe(true);
+		expect(await Bun.file(orphan).exists()).toBe(false);
 	});
 
 	test("uses configured gc selectors and retention defaults", async () => {
