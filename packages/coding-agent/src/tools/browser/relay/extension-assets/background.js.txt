@@ -210,6 +210,8 @@ function orphanSweepSeesRelayDisconnected(state) {
   return state.forceDisconnected === true || state.socketReadyState !== state.openReadyState;
 }
 function nextOrphanSweepDeadline(state) {
+  if (state.disconnected && state.attachmentReconciliationPending === true && state.existingDeadlineMs !== null)
+    return state.existingDeadlineMs;
   if (!state.disconnected || !state.hasTrackedAttachments)
     return null;
   if (state.existingDeadlineMs !== null)
@@ -335,6 +337,7 @@ var recoveryLoaderGenerations = new Map;
 var recoverableUpdateGeneration = 0;
 var recoverableStartupMutations = new Set;
 var orphanSweepDeadlineMs = null;
+var orphanAttachmentReconciliationPending = false;
 var connectionGeneration = 0;
 var orphanSweepDeadlineGeneration = 0;
 var loadRecoverableState = createRetryableLoader(() => {
@@ -514,7 +517,8 @@ function computeNextOrphanSweepDeadline(forceDisconnected) {
     graceMs: ORPHAN_GRACE_MS,
     disconnected,
     hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
-    existingDeadlineMs: orphanSweepDeadlineMs
+    existingDeadlineMs: orphanSweepDeadlineMs,
+    attachmentReconciliationPending: orphanAttachmentReconciliationPending
   });
 }
 function scheduleOrphanSweepBeforeSuspend() {
@@ -919,12 +923,14 @@ function scheduleReconnect() {
 }
 async function reconcileOrphans() {
   await loadRecoverableState();
+  orphanAttachmentReconciliationPending = true;
   const attachmentState = snapshotAttachmentState(attachmentStateEpochs, [
     ...attachmentStateEpochs.keys()
   ]);
   const targets = await chrome.debugger.getTargets();
   const attachedTabIds = extensionOwnedAttachedTabIds(targets, liveOwnedTabIds);
   await trackAttachments(attachedTabIds, () => true, attachmentState, true);
+  orphanAttachmentReconciliationPending = false;
   if (attachedTabIds.length > 0 && orphanSweepSeesRelayDisconnected({
     socketReadyState: relayInitializedReadyState(),
     openReadyState: WebSocket.OPEN
