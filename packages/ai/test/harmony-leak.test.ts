@@ -105,7 +105,9 @@ describe("detectHarmonyLeak — negative cases (must NOT trip)", () => {
 		// Documentation, bug reports and this suite all quote the marker, and all
 		// of them put it in a code span or a fence.
 		expect(detectHarmonyLeak("I read about `to=functions.edit` in the docs.", "assistant_text")).toBeUndefined();
-		expect(detectHarmonyLeak("Shape:\n```\nto=functions.edit code\n```\nThat is the bug.", "assistant_text")).toBeUndefined();
+		expect(
+			detectHarmonyLeak("Shape:\n```\nto=functions.edit code\n```\nThat is the bug.", "assistant_text"),
+		).toBeUndefined();
 	});
 
 	it("streaming chunk-boundary split does not trip on partial marker", () => {
@@ -121,7 +123,8 @@ describe("detectHarmonyLeak — visible-answer marker (`V`)", () => {
 		// followed by the bare routing marker and reasoning residue. Nothing else
 		// in the block co-signals, so before `V` this committed silently and
 		// re-seeded the collapse on every later turn.
-		const onset = "All input remains scoped to the isolated X display. \n check to=functions.hub  ... stop one correction. no. Need wait auto.";
+		const onset =
+			"All input remains scoped to the isolated X display. \n check to=functions.hub  ... stop one correction. no. Need wait auto.";
 		const detection = detectHarmonyLeak(onset, "assistant_text");
 		expect(detection?.signals[0]?.classes).toEqual(["M", "V"]);
 	});

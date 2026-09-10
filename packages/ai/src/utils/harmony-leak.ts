@@ -110,7 +110,8 @@ const RESIDUE_MIN_ASCII_RATIO = 0.9;
 // input; a model has no legitimate reason to emit one outside code. Observed at
 // scale in 2026-09-09T16-02-08Z, where a single answer block fabricated 824
 // `<system-notice>` wakes with a self-incrementing `elapsed` up to `33d23h`.
-const HARNESS_ENVELOPE_RE = /<\/?(?:system-notice|job-progress|system-reminder|system-directive|async-result|job-summary)\b/g;
+const HARNESS_ENVELOPE_RE =
+	/<\/?(?:system-notice|job-progress|system-reminder|system-directive|async-result|job-summary)\b/g;
 
 // Fence open/close. CommonMark: a closer repeats the opener's character at
 // least as many times and carries no info string, so ```` ```xml ```` nested in
@@ -476,7 +477,8 @@ function computeCodeRanges(text: string): Array<[number, number]> {
 		if (match) {
 			const run = match[1];
 			const info = match[2].trim();
-			const closes = fence !== undefined && run[0] === fence.marker[0] && run.length >= fence.marker.length && info.length === 0;
+			const closes =
+				fence !== undefined && run[0] === fence.marker[0] && run.length >= fence.marker.length && info.length === 0;
 			if (closes) {
 				ranges.push([fence!.start, lineEnd]);
 				fence = undefined;
