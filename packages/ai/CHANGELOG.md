@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Catalog matrix shell smoke validates reachable `&&` / `||` suffixes (`echo ping && false`, write-then-`rm`) instead of keeping only the first conjunct.
+- Grok Bot product-wire history rewrite honors `customWireName` ownership (e.g. `save`→Write) so collision losers like `edit` are not rewritten onto the owner's schema.
 - Grok Bot skips JSON-as-text tool promotion when `toolChoice: "none"` so handoff cannot dispatch fenced Shell/Write from retained `context.tools`.
 - Grok Bot does not finalize provisional `isComplete: false` JSON tool calls after an output-token limit (keeps `length` instead of executing truncated Shell/Write).
 - Grok Bot replaces revised SendToUser content snapshots (`draft` → `answer`) instead of appending them into `draftanswer`.

@@ -869,6 +869,40 @@ describe("product wire helpers", () => {
 			},
 		});
 	});
+	test("keeps historical edit when customWireName Write owns the sand slot", () => {
+		// save advertises Write via customWireName while edit remains; ownership must
+		// match toProductField2Tools so replay does not rewrite edit → Write.
+		const tools = [
+			{
+				name: "save",
+				description: "create",
+				parameters: { type: "object", properties: {} },
+				customWireName: "Write",
+			},
+			{ name: "edit", description: "patch", parameters: { type: "object", properties: {} } },
+		];
+		const product = toProductField2Tools(tools as never, "automation");
+		expect(product.filter(t => t.name === "Write").map(t => t.description)).toEqual(["create"]);
+		const rewritten = rewriteInferenceMessagesForProductWire(
+			[
+				{
+					role: 2,
+					toolCalls: [
+						{ toolCallId: "c1", toolName: "edit", args: { path: "c.ts" } },
+						{ toolCallId: "c2", toolName: "save", args: { path: "b.ts", content: "x" } },
+					],
+				},
+			],
+			tools as never,
+		);
+		expect(rewritten[0]).toEqual({
+			role: 2,
+			toolCalls: [
+				{ toolCallId: "c1", toolName: "edit", args: { path: "c.ts" } },
+				{ toolCallId: "c2", toolName: "Write", args: { path: "b.ts", content: "x" } },
+			],
+		});
+	});
 });
 
 describe("grokbot proto harness fields", () => {

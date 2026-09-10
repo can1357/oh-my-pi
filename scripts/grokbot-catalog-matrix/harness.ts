@@ -174,12 +174,11 @@ export function readLikeShellCommand(command: string): boolean {
 	return shellStatementSegments(cmd).some(segment => /^(?:cat|head|sed)\b/.test(segment));
 }
 
-/** Strip `#` comments, then split into unconditionally reachable statements.
- * Sequential separators: `\n`, `;` (unquoted only). Within a unit, only the first
- * conjunct of `&&` / `||` / `&` counts — later arms are conditional, so
- * `false && echo ping` cannot pass a fabricated smoke gate via the unreachable
- * echo. Quoted separators (`echo 'a; b > path'`) stay inside one segment.
- * Pipes stay together.
+/** Strip `#` comments, then split into reachable statements.
+ * Sequential separators: `\n`, `;` (unquoted only). Within a unit, reachable
+ * arms of `&&` / `||` / `&` are kept so `echo ping && false` still fails the
+ * suffix gate while `false && echo ping` drops the unreachable echo. Quoted
+ * separators (`echo 'a; b > path'`) stay inside one segment. Pipes stay together.
  */
 function shellStatementSegments(command: string): string[] {
 	const withoutComments = command
@@ -223,16 +222,55 @@ function shellStatementSegments(command: string): string[] {
 
 	const out: string[] = [];
 	for (const unit of sequential) {
-		const first = firstUnquotedConjunct(unit);
-		if (first) out.push(first);
+		for (const arm of reachableUnquotedConjuncts(unit)) out.push(arm);
 	}
 	return out;
 }
 
-/** First arm of an unquoted `&&` / `||` / `&` chain (quote-aware). */
-function firstUnquotedConjunct(unit: string): string {
+/**
+ * Arms of an unquoted `&&` / `||` / `&` chain that can still run (quote-aware).
+ * Keeps failing suffixes of `&&` chains (`echo ping && false`) so smoke gates
+ * do not accept a fabricated success from the probe prefix alone, while still
+ * dropping unreachable `false && echo ping` / `true || echo ping` arms.
+ */
+function reachableUnquotedConjuncts(unit: string): string[] {
+	const parts = splitUnquotedConjuncts(unit);
+	if (parts.length === 0) return [];
+	const out: string[] = [];
+	let status: "success" | "failure" | "unknown" = "success";
+	for (const part of parts) {
+		if (part.opBefore === "&&" && status !== "success") continue;
+		if (part.opBefore === "||" && status !== "failure") continue;
+		out.push(part.text);
+		if (knownFailingShellArm(part.text)) status = "failure";
+		else if (knownSucceedingShellArm(part.text)) status = "success";
+		else status = "unknown";
+	}
+	return out;
+}
+
+function knownFailingShellArm(segment: string): boolean {
+	return failingExitShellSegment(segment) || /^(?:false)\b/.test(segment.trim());
+}
+
+function knownSucceedingShellArm(segment: string): boolean {
+	if (successfulExitShellSegment(segment) || /^(?:true|:)\s*$/.test(segment.trim())) return true;
+	// Probe-like commands: treat as success for && reachability so a trailing
+	// `&& false` / `&& rm` stays in the segment list for suffix validation.
+	const trimmed = segment.trim();
+	if (/^(?:echo|printf)\b/.test(trimmed)) return true;
+	if (/^(?:cat|head|sed)\b/.test(trimmed)) return true;
+	if (shellWriteRedirect(trimmed)) return true;
+	return false;
+}
+
+/** Split on unquoted `&&` / `||` / `&`; `opBefore` is the joiner before this arm. */
+function splitUnquotedConjuncts(unit: string): { text: string; opBefore: "&&" | "||" | "&" | null }[] {
+	const parts: { text: string; opBefore: "&&" | "||" | "&" | null }[] = [];
 	let quote: "'" | '"' | "`" | null = null;
 	let escaped = false;
+	let start = 0;
+	let opBefore: "&&" | "||" | "&" | null = null;
 	for (let i = 0; i < unit.length; i++) {
 		const ch = unit[i]!;
 		if (escaped) {
@@ -256,12 +294,25 @@ function firstUnquotedConjunct(unit: string): string {
 			continue;
 		}
 		if (ch === "&") {
-			if (unit[i + 1] === "&") return unit.slice(0, i).trim();
-			return unit.slice(0, i).trim();
+			const text = unit.slice(start, i).trim();
+			const join: "&&" | "&" = unit[i + 1] === "&" ? "&&" : "&";
+			if (text) parts.push({ text, opBefore });
+			opBefore = join;
+			i += join === "&&" ? 1 : 0;
+			start = i + 1;
+			continue;
 		}
-		if (ch === "|" && unit[i + 1] === "|") return unit.slice(0, i).trim();
+		if (ch === "|" && unit[i + 1] === "|") {
+			const text = unit.slice(start, i).trim();
+			if (text) parts.push({ text, opBefore });
+			opBefore = "||";
+			i += 1;
+			start = i + 1;
+		}
 	}
-	return unit.trim();
+	const tail = unit.slice(start).trim();
+	if (tail) parts.push({ text: tail, opBefore });
+	return parts;
 }
 
 /** True when a statement would prevent later statements from running. */

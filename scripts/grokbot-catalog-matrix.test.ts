@@ -298,6 +298,10 @@ describe("toolSmokePrompt", () => {
 		// fabricates success from the echo prefix alone.
 		expect(echoLikeShellCommand(`echo ${ping}; false`, ping)).toBe(false);
 		expect(echoLikeShellCommand(`echo ${ping}; true`, ping)).toBe(false);
+		// Conditional suffixes must stay reachable for validation — first-arm-only
+		// splitting previously dropped `&& false` / `&& rm` and fabricated success.
+		expect(echoLikeShellCommand(`echo ${ping} && false`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`echo ${ping} && true`, ping)).toBe(false);
 	});
 
 	test("binds read/write shell smoke evidence to the operation statement", () => {
@@ -463,6 +467,16 @@ describe("toolSmokePrompt", () => {
 			matchesToolSmokeCall(
 				"write",
 				{ name: "Shell", arguments: { command: `false && echo ${ping} > ${writePath}` } },
+				ping,
+				id,
+			),
+		).toBe(false);
+		// Successful write followed by a destructive `&&` suffix must not pass —
+		// runOneTool fabricates success from the write prefix alone.
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Shell", arguments: { command: `printf '%s\\n' ${ping} > ${writePath} && rm ${writePath}` } },
 				ping,
 				id,
 			),

@@ -420,7 +420,14 @@ export function rewriteInferenceMessagesForProductWire(
 		for (const tool of tools) {
 			const ompName = typeof tool?.name === "string" ? tool.name : "";
 			if (!ompName) continue;
-			const sandName = toSandField2Name(ompName);
+			// Same advertised name as mapOmpToolToProduct / toProductField2Tools —
+			// customWireName: "Write" on `save` claims Write even when built-in
+			// `write` is absent (edit must not inherit the slot on replay).
+			const customWire =
+				typeof tool.customWireName === "string" && tool.customWireName.trim()
+					? tool.customWireName.trim()
+					: undefined;
+			const sandName = customWire ?? toSandField2Name(ompName);
 			if (sandName === ompName) continue;
 			const previous = sandOwner.get(sandName);
 			if (!shouldClaimSandWireName(sandName, ompName, previous)) continue;
@@ -429,11 +436,15 @@ export function rewriteInferenceMessagesForProductWire(
 	}
 
 	const rewriteToolName = (name: string): string => {
+		// Omp owner of an advertised sand slot → sand name (save→Write).
+		for (const [sandName, owner] of sandOwner) {
+			if (owner === name) return sandName;
+		}
 		const sandName = toSandField2Name(name);
 		if (sandName === name) return name;
 		const owner = sandOwner.get(sandName);
 		// When tools are known and another omp owns this sand slot, keep the
-		// historical identity (e.g. edit stays edit while write owns Write).
+		// historical identity (e.g. edit stays edit while write/save owns Write).
 		if (owner !== undefined && owner !== name) return name;
 		return sandName;
 	};

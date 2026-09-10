@@ -890,7 +890,7 @@ export async function resolveScopedModels(
  * configured `modelRoles.default` provider/model so cold AvailableModels refresh
  * still warms a live-only default. Other role aliases stay unbound here.
  */
-function expandDefaultRoleModelSelector(
+export function expandDefaultRoleModelSelector(
 	selector: string | undefined,
 	configuredDefault: string | undefined,
 ): string | undefined {
@@ -1735,7 +1735,18 @@ export async function runRootCommand(
 
 		// Install --api-key before ModelRegistry so credential-scoped startup cache
 		// ids (grokbot renewer hash, etc.) match discovery and warm live rows.
-		const selectedProvider = resolveCliRuntimeApiKeyProvider(parsedArgs);
+		// Expand `@default` / role aliases first — the same selector widening
+		// resolveCredentialScopedRefreshTarget uses — so CLI-only credentials bind
+		// to the credential-scoped provider before refresh/session resolve.
+		const expandedApiKeyModel = expandDefaultRoleModelSelector(
+			parsedArgs.model,
+			settingsInstance.getModelRole("default"),
+		);
+		const apiKeyArgs =
+			expandedApiKeyModel && expandedApiKeyModel !== parsedArgs.model?.trim()
+				? { ...parsedArgs, model: expandedApiKeyModel }
+				: parsedArgs;
+		const selectedProvider = resolveCliRuntimeApiKeyProvider(apiKeyArgs);
 		const cliApiKeyProvider = parsedArgs.apiKey ? selectedProvider : undefined;
 		if (parsedArgs.apiKey && cliApiKeyProvider) {
 			authStorage.setRuntimeApiKey(cliApiKeyProvider, parsedArgs.apiKey);
