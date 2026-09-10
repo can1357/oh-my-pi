@@ -4,7 +4,8 @@
 
 ### Fixed
 
-- Fixed atomic config writes (`mcp.json`, `ssh.json`, legacy `settings.json` migration) replacing a user-managed symlink with a regular file; writes now land on the link's target (physically resolving dangling relative targets), serialize on the resolved path, recreate a dangling referent, and clamp the published file mode to the referent's owner bits ([#10644](https://github.com/can1357/oh-my-pi/pull/10644) by [@chuzui](https://github.com/chuzui)).
+- Fixed atomic config writes (`mcp.json`, `ssh.json`, `config.yml` saves and legacy `settings.json` migration) replacing a user-managed symlink with a regular file; writes now land on the link's target (physically resolving dangling relative targets), serialize on the resolved path, recreate a dangling referent, and clamp the published file mode to the referent's owner bits ([#10644](https://github.com/can1357/oh-my-pi/pull/10644) by [@chuzui](https://github.com/chuzui)).
+
 ## [18.1.16] - 2026-09-09
 
 ### Added
@@ -15,7 +16,6 @@
 
 ### Fixed
 
-- Fixed atomic config writes (`mcp.json`, `ssh.json`, `config.yml` saves and legacy `settings.json` migration) replacing a user-managed symlink with a regular file; writes now land on the link's target (physically resolving dangling relative targets), serialize on the resolved path, recreate a dangling referent, and clamp the published file mode to the referent's owner bits ([#10644](https://github.com/can1357/oh-my-pi/pull/10644) by [@chuzui](https://github.com/chuzui)).
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 - Unset `tiny` model roles now honor the configured `@smol` fallback in direct execution and the `/models` Roles view ([#11311](https://github.com/can1357/oh-my-pi/issues/11311)).
 - Extension Control Center (`/extensions`) search now accepts `j` and `k`, so extensions like `jira`/`json` are searchable; bare `j`/`k` no longer move the list selection (use arrow keys or the configured `tui.select.up`/`down`) ([#11350](https://github.com/can1357/oh-my-pi/issues/11350)).

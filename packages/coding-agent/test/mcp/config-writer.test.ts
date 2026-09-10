@@ -1,8 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
+import { $ } from "bun";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { addMCPServer, readDisabledServers, readMCPConfigFile, setServerDisabled } from "../../src/mcp/config-writer";
+import {
+	addMCPServer,
+	readDisabledServers,
+	readMCPConfigFile,
+	setServerDisabled,
+	writeMCPConfigFile,
+} from "../../src/mcp/config-writer";
 import { publishSerializedConfig, withConfigFileLock } from "../../src/utils/atomic-file";
 
 describe("config-writer concurrent mutations", () => {
@@ -10,12 +17,12 @@ describe("config-writer concurrent mutations", () => {
 	let filePath: string;
 
 	beforeEach(async () => {
-		dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-config-"));
+		dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-mcp-config-"));
 		filePath = path.join(dir, "mcp.json");
 	});
 
 	afterEach(async () => {
-		await fs.rm(dir, { recursive: true, force: true });
+		await fs.promises.rm(dir, { recursive: true, force: true });
 	});
 
 	it("preserves both servers when two adds race the same file", async () => {
@@ -51,22 +58,23 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 	let dir: string;
 
 	beforeEach(async () => {
-		dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-symlink-"));
+		dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-mcp-symlink-"));
 	});
 
 	afterEach(async () => {
-		await fs.rm(dir, { recursive: true, force: true });
+		vi.restoreAllMocks();
+		await fs.promises.rm(dir, { recursive: true, force: true });
 	});
 
 	it("writes to the referent and keeps the mcp.json symlink intact", async () => {
 		const target = path.join(dir, "real-mcp.json");
-		await fs.writeFile(target, JSON.stringify({ mcpServers: {} }));
+		await fs.promises.writeFile(target, JSON.stringify({ mcpServers: {} }));
 		const link = path.join(dir, "mcp.json");
-		await fs.symlink(target, link);
+		await fs.promises.symlink(target, link);
 
 		await addMCPServer(link, "alpha", { type: "stdio", command: "a" });
 
-		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+		expect((await fs.promises.lstat(link)).isSymbolicLink()).toBe(true);
 		const config = await readMCPConfigFile(link);
 		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
 	});
@@ -74,11 +82,11 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 	it("recreates the referent of a dangling mcp.json symlink", async () => {
 		const target = path.join(dir, "shared", "real-mcp.json");
 		const link = path.join(dir, "mcp.json");
-		await fs.symlink(target, link);
+		await fs.promises.symlink(target, link);
 
 		await addMCPServer(link, "alpha", { type: "stdio", command: "a" });
 
-		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+		expect((await fs.promises.lstat(link)).isSymbolicLink()).toBe(true);
 		const config = await readMCPConfigFile(link);
 		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
 	});
@@ -88,22 +96,22 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		// edit must not leave group/world bits in place; but a mode stricter
 		// than owner-rw must not be loosened either.
 		const groupReadable = path.join(dir, "group-readable.json");
-		await fs.writeFile(groupReadable, JSON.stringify({ mcpServers: {} }));
-		await fs.chmod(groupReadable, 0o640);
+		await fs.promises.writeFile(groupReadable, JSON.stringify({ mcpServers: {} }));
+		await fs.promises.chmod(groupReadable, 0o640);
 		const linkA = path.join(dir, "mcp-a.json");
-		await fs.symlink(groupReadable, linkA);
+		await fs.promises.symlink(groupReadable, linkA);
 
 		await setServerDisabled(linkA, "alpha", true);
-		expect((await fs.stat(groupReadable)).mode & 0o777).toBe(0o600);
+		expect((await fs.promises.stat(groupReadable)).mode & 0o777).toBe(0o600);
 
 		const ownerReadOnly = path.join(dir, "owner-read-only.json");
-		await fs.writeFile(ownerReadOnly, JSON.stringify({ mcpServers: {} }));
-		await fs.chmod(ownerReadOnly, 0o400);
+		await fs.promises.writeFile(ownerReadOnly, JSON.stringify({ mcpServers: {} }));
+		await fs.promises.chmod(ownerReadOnly, 0o400);
 		const linkB = path.join(dir, "mcp-b.json");
-		await fs.symlink(ownerReadOnly, linkB);
+		await fs.promises.symlink(ownerReadOnly, linkB);
 
 		await setServerDisabled(linkB, "alpha", true);
-		expect((await fs.stat(ownerReadOnly)).mode & 0o777).toBe(0o400);
+		expect((await fs.promises.stat(ownerReadOnly)).mode & 0o777).toBe(0o400);
 	});
 
 	it("falls back to owner-only mode when the referent has no owner bits", async () => {
@@ -114,13 +122,18 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		// referent fails with EACCES before the publisher runs), so the
 		// shared publisher's own contract is asserted directly.
 		const target = path.join(dir, "group-only.json");
-		await fs.writeFile(target, JSON.stringify({ mcpServers: {} }));
-		await fs.chmod(target, 0o060);
+		await fs.promises.writeFile(target, JSON.stringify({ mcpServers: {} }));
+		await fs.promises.chmod(target, 0o060);
 
-		await publishSerializedConfig(target, JSON.stringify({ mcpServers: { alpha: { type: "stdio", command: "a" } } }));
+		await publishSerializedConfig(
+			target,
+			JSON.stringify({
+				mcpServers: { alpha: { type: "stdio", command: "a" } },
+			}),
+		);
 
-		expect((await fs.stat(target)).mode & 0o777).toBe(0o600);
-		expect(JSON.parse(await fs.readFile(target, "utf8")).mcpServers?.alpha).toBeDefined();
+		expect((await fs.promises.stat(target)).mode & 0o777).toBe(0o600);
+		expect(JSON.parse(await fs.promises.readFile(target, "utf8")).mcpServers?.alpha).toBeDefined();
 	});
 
 	it("follows a directory symlink inside a dangling relative target before applying ..", async () => {
@@ -131,20 +144,22 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		// path.resolve() would collapse `alias/..` to the link's own directory
 		// and clobber an unrelated sibling there.
 		const deepDir = path.join(dir, "elsewhere", "deep");
-		await fs.mkdir(deepDir, { recursive: true });
-		await fs.symlink(deepDir, path.join(dir, "alias"));
+		await fs.promises.mkdir(deepDir, { recursive: true });
+		await fs.promises.symlink(deepDir, path.join(dir, "alias"));
 		const link = path.join(dir, "mcp.json");
-		await fs.symlink("alias/../config.json", link);
+		await fs.promises.symlink("alias/../config.json", link);
 		const lexicalSibling = path.join(dir, "config.json");
 
 		await addMCPServer(link, "alpha", { type: "stdio", command: "a" });
 
-		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+		expect((await fs.promises.lstat(link)).isSymbolicLink()).toBe(true);
 		// The write landed on the PHYSICAL parent (`alias` followed, then `..`
 		// popped its real parent), never on the lexical sibling.
 		const physicalTarget = path.join(dir, "elsewhere", "config.json");
-		expect((await fs.stat(physicalTarget)).isFile()).toBe(true);
-		await expect(fs.stat(lexicalSibling)).rejects.toMatchObject({ code: "ENOENT" });
+		expect((await fs.promises.stat(physicalTarget)).isFile()).toBe(true);
+		await expect(fs.promises.stat(lexicalSibling)).rejects.toMatchObject({
+			code: "ENOENT",
+		});
 		const config = await readMCPConfigFile(link);
 		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
 	});
@@ -155,11 +170,11 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		// logical path separately lets both read the same old JSON and the
 		// last rename drop the other's server.
 		const target = path.join(dir, "real-mcp.json");
-		await fs.writeFile(target, JSON.stringify({ mcpServers: {} }));
+		await fs.promises.writeFile(target, JSON.stringify({ mcpServers: {} }));
 		const linkA = path.join(dir, "mcp-a.json");
 		const linkB = path.join(dir, "mcp-b.json");
-		await fs.symlink(target, linkA);
-		await fs.symlink(target, linkB);
+		await fs.promises.symlink(target, linkA);
+		await fs.promises.symlink(target, linkB);
 
 		await Promise.all([
 			addMCPServer(linkA, "alpha", { type: "stdio", command: "a" }),
@@ -176,14 +191,14 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		// recreate its referent (missing-dir/config.json); freezing on the
 		// link path would leave the writer unable to create anything through
 		// the link.
-		await fs.symlink("missing-dir", path.join(dir, "alias"));
+		await fs.promises.symlink("missing-dir", path.join(dir, "alias"));
 		const link = path.join(dir, "mcp.json");
-		await fs.symlink("alias/config.json", link);
+		await fs.promises.symlink("alias/config.json", link);
 
 		await addMCPServer(link, "alpha", { type: "stdio", command: "a" });
 
-		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
-		expect((await fs.lstat(path.join(dir, "alias"))).isSymbolicLink()).toBe(true);
+		expect((await fs.promises.lstat(link)).isSymbolicLink()).toBe(true);
+		expect((await fs.promises.lstat(path.join(dir, "alias"))).isSymbolicLink()).toBe(true);
 		const config = await readMCPConfigFile(link);
 		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
 	});
@@ -194,13 +209,19 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		// parent, or the two first-time adds race on different lexical paths
 		// and one mutation is lost.
 		const realDir = path.join(dir, "real");
-		await fs.mkdir(realDir);
-		await fs.symlink(realDir, path.join(dir, "alias-a"));
-		await fs.symlink(realDir, path.join(dir, "alias-b"));
+		await fs.promises.mkdir(realDir);
+		await fs.promises.symlink(realDir, path.join(dir, "alias-a"));
+		await fs.promises.symlink(realDir, path.join(dir, "alias-b"));
 
 		await Promise.all([
-			addMCPServer(path.join(dir, "alias-a", "mcp.json"), "alpha", { type: "stdio", command: "a" }),
-			addMCPServer(path.join(dir, "alias-b", "mcp.json"), "bravo", { type: "stdio", command: "b" }),
+			addMCPServer(path.join(dir, "alias-a", "mcp.json"), "alpha", {
+				type: "stdio",
+				command: "a",
+			}),
+			addMCPServer(path.join(dir, "alias-b", "mcp.json"), "bravo", {
+				type: "stdio",
+				command: "b",
+			}),
 		]);
 
 		const config = await readMCPConfigFile(path.join(realDir, "mcp.json"));
@@ -213,14 +234,14 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		// the frozen component be a directory. Both links must write
 		// successfully into the created `managed/` directory.
 		const doubleSlash = path.join(dir, "mcp-a.json");
-		await fs.symlink("managed//mcp.json", doubleSlash);
+		await fs.promises.symlink("managed//mcp.json", doubleSlash);
 		await addMCPServer(doubleSlash, "alpha", { type: "stdio", command: "a" });
-		expect((await fs.lstat(doubleSlash)).isSymbolicLink()).toBe(true);
+		expect((await fs.promises.lstat(doubleSlash)).isSymbolicLink()).toBe(true);
 
 		const dotSegment = path.join(dir, "mcp-b.json");
-		await fs.symlink("managed/./mcp.json", dotSegment);
+		await fs.promises.symlink("managed/./mcp.json", dotSegment);
 		await addMCPServer(dotSegment, "bravo", { type: "stdio", command: "b" });
-		expect((await fs.lstat(dotSegment)).isSymbolicLink()).toBe(true);
+		expect((await fs.promises.lstat(dotSegment)).isSymbolicLink()).toBe(true);
 
 		const config = await readMCPConfigFile(path.join(dir, "managed", "mcp.json"));
 		expect(Object.keys(config.mcpServers ?? {}).sort()).toEqual(["alpha", "bravo"]);
@@ -229,23 +250,28 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 	it("pins the lock callback to the resolved target even if the link is retargeted mid-callback", async () => {
 		const original = path.join(dir, "original.json");
 		const retarget = path.join(dir, "retarget.json");
-		await fs.writeFile(original, JSON.stringify({ mcpServers: {} }));
+		await fs.promises.writeFile(original, JSON.stringify({ mcpServers: {} }));
 		const link = path.join(dir, "mcp.json");
-		await fs.symlink(original, link);
+		await fs.promises.symlink(original, link);
 
 		let pinned: string | undefined;
 		await withConfigFileLock(link, async writePath => {
 			pinned = writePath;
 			// Retarget the link while the lock is held: the callback must
 			// still see and use the locked referent.
-			await fs.unlink(link);
-			await fs.symlink(retarget, link);
-			await fs.writeFile(writePath, JSON.stringify({ mcpServers: { pinned: { type: "stdio", command: "x" } } }));
+			await fs.promises.unlink(link);
+			await fs.promises.symlink(retarget, link);
+			await fs.promises.writeFile(
+				writePath,
+				JSON.stringify({
+					mcpServers: { pinned: { type: "stdio", command: "x" } },
+				}),
+			);
 		});
 
 		expect(pinned).toBe(original);
-		expect(Object.keys(JSON.parse(await fs.readFile(original, "utf-8")).mcpServers)).toEqual(["pinned"]);
-		expect(await fs.readFile(link, "utf-8").catch(() => "")).toBe("");
+		expect(Object.keys(JSON.parse(await fs.promises.readFile(original, "utf-8")).mcpServers)).toEqual(["pinned"]);
+		expect(await fs.promises.readFile(link, "utf-8").catch(() => "")).toBe("");
 	});
 
 	it("recreates the referent of a dangling ancestor directory link", async () => {
@@ -255,11 +281,14 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		// walk the full path, follow the ancestor link, and recreate
 		// missing/dotfiles/mcp.json instead of failing mkdir through the link.
 		const linkDir = path.join(dir, "dotfiles-link");
-		await fs.symlink(path.join(dir, "missing", "dotfiles"), linkDir);
+		await fs.promises.symlink(path.join(dir, "missing", "dotfiles"), linkDir);
 
-		await addMCPServer(path.join(linkDir, "mcp.json"), "alpha", { type: "stdio", command: "a" });
+		await addMCPServer(path.join(linkDir, "mcp.json"), "alpha", {
+			type: "stdio",
+			command: "a",
+		});
 
-		expect((await fs.lstat(linkDir)).isSymbolicLink()).toBe(true);
+		expect((await fs.promises.lstat(linkDir)).isSymbolicLink()).toBe(true);
 		const config = await readMCPConfigFile(path.join(dir, "missing", "dotfiles", "mcp.json"));
 		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
 	});
@@ -274,21 +303,27 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 				// a0 -> a1 -> …; the last link names the missing directory
 				// the write must recreate through the chain.
 				const target = i + 1 < links ? `a${i + 1}` : "missing-dir";
-				await fs.symlink(target, path.join(base, `a${i}`));
+				await fs.promises.symlink(target, path.join(base, `a${i}`));
 			}
 			return path.join(base, "a0", "mcp.json");
 		};
 
 		const forty = path.join(dir, "forty");
-		await fs.mkdir(forty);
-		await addMCPServer(await hopChain(forty, 40), "alpha", { type: "stdio", command: "a" });
+		await fs.promises.mkdir(forty);
+		await addMCPServer(await hopChain(forty, 40), "alpha", {
+			type: "stdio",
+			command: "a",
+		});
 		const config = await readMCPConfigFile(path.join(forty, "a0", "mcp.json"));
 		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
 
 		const fortyOne = path.join(dir, "forty-one");
-		await fs.mkdir(fortyOne);
+		await fs.promises.mkdir(fortyOne);
 		await expect(
-			addMCPServer(await hopChain(fortyOne, 41), "alpha", { type: "stdio", command: "a" }),
+			addMCPServer(await hopChain(fortyOne, 41), "alpha", {
+				type: "stdio",
+				command: "a",
+			}),
 		).rejects.toMatchObject({
 			code: "ELOOP",
 		});
@@ -301,9 +336,9 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		// spelling onto the unrelated /base/mcp.json sibling and clobber it.
 		const baseDir = path.join(dir, "base");
 		const deepDir = path.join(dir, "other", "deep");
-		await fs.mkdir(baseDir, { recursive: true });
-		await fs.mkdir(deepDir, { recursive: true });
-		await fs.symlink(deepDir, path.join(baseDir, "alias"));
+		await fs.promises.mkdir(baseDir, { recursive: true });
+		await fs.promises.mkdir(deepDir, { recursive: true });
+		await fs.promises.symlink(deepDir, path.join(baseDir, "alias"));
 		const configPath = `${baseDir}${path.sep}alias${path.sep}..${path.sep}mcp.json`;
 
 		await addMCPServer(configPath, "alpha", { type: "stdio", command: "a" });
@@ -312,6 +347,80 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		const lexicalSibling = path.join(baseDir, "mcp.json");
 		const config = await readMCPConfigFile(physical);
 		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
-		await expect(fs.stat(lexicalSibling)).rejects.toMatchObject({ code: "ENOENT" });
+		await expect(fs.promises.stat(lexicalSibling)).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+	});
+
+	it("refuses to publish over a FIFO referent and leaves it intact", async () => {
+		// rename() over a FIFO destroys the special object. A config symlink
+		// resolving to one must be refused up front, not written through.
+		const fifo = path.join(dir, "pipe");
+		await $`mkfifo ${fifo}`;
+		const link = path.join(dir, "mcp.json");
+		await fs.promises.symlink(fifo, link);
+
+		await expect(writeMCPConfigFile(link, { mcpServers: {} })).rejects.toThrow(/not a regular file/);
+
+		expect((await fs.promises.lstat(fifo)).isFIFO()).toBe(true);
+		expect((await fs.promises.lstat(link)).isSymbolicLink()).toBe(true);
+	});
+
+	it("follows a component that appears as a directory symlink during the repair", async () => {
+		// mcp.json -> managed/../config.json with `managed` missing. Between
+		// the resolver's failed lstat and its repair mkdir, another process
+		// creates `managed` as a symlink to an existing directory: the
+		// recursive mkdir succeeds through the link, and the original
+		// spelling now resolves THROUGH it — `..` must pop the referent's
+		// REAL parent, or the write lands on the lexical sibling while
+		// reporting success.
+		const deep = path.join(dir, "elsewhere", "deep");
+		await fs.promises.mkdir(deep, { recursive: true });
+		const managed = path.join(dir, "managed");
+		const link = path.join(dir, "mcp.json");
+		await fs.promises.symlink("managed/../config.json", link);
+
+		const realMkdir = fs.promises.mkdir.bind(fs.promises);
+		let injected = false;
+		// Spy on the fs.promises seam the resolver actually calls;
+		// node:fs/promises is a separate namespace object in Bun. The cast
+		// collapses mkdir's three overloads onto the mock's single signature.
+		const racingMkdir = (async (target: string, options: unknown) => {
+			if (!injected && String(target) === managed) {
+				injected = true;
+				await fs.promises.symlink(deep, managed);
+				return;
+			}
+			return realMkdir(target, options as Parameters<typeof realMkdir>[1]);
+		}) as unknown as typeof fs.promises.mkdir;
+		vi.spyOn(fs.promises, "mkdir").mockImplementation(racingMkdir);
+
+		await addMCPServer(link, "alpha", { type: "stdio", command: "a" });
+
+		expect(injected).toBe(true);
+		// Through the link: managed -> elsewhere/deep, `..` pops elsewhere.
+		const physicalTarget = path.join(dir, "elsewhere", "config.json");
+		expect((await fs.promises.stat(physicalTarget)).isFile()).toBe(true);
+		await expect(fs.promises.stat(path.join(dir, "config.json"))).rejects.toMatchObject({ code: "ENOENT" });
+		expect((await fs.promises.lstat(managed)).isSymbolicLink()).toBe(true);
+		expect((await fs.promises.lstat(link)).isSymbolicLink()).toBe(true);
+	});
+
+	it("repairs a missing component reached through a dangling link before ..", async () => {
+		// mcp.json -> inner/../config.json with `inner -> missing` (dangling).
+		// Materializing `missing` as a directory makes the original spelling
+		// resolve normally — the same repair as a plainly-missing
+		// `managed/../config.json`, just reached through a dangling link.
+		const link = path.join(dir, "mcp.json");
+		await fs.promises.symlink("inner/../config.json", link);
+		await fs.promises.symlink("missing", path.join(dir, "inner"));
+
+		await addMCPServer(link, "alpha", { type: "stdio", command: "a" });
+
+		expect((await fs.promises.lstat(link)).isSymbolicLink()).toBe(true);
+		expect((await fs.promises.lstat(path.join(dir, "inner"))).isSymbolicLink()).toBe(true);
+		expect((await fs.promises.lstat(path.join(dir, "missing"))).isDirectory()).toBe(true);
+		const config = await readMCPConfigFile(path.join(dir, "config.json"));
+		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
 	});
 });

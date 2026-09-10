@@ -1038,7 +1038,7 @@ describe("Settings", () => {
 			const overlayPath = tempDir.join("reload-overlay.yml");
 			await Bun.write(overlayPath, YAML.stringify({ task: { enableEffort: false } }, null, 2));
 			const reloadProjectDir = tempDir.join("reload-project");
-			await fsp.mkdir(reloadProjectDir, { recursive: true });
+			await fs.promises.mkdir(reloadProjectDir, { recursive: true });
 			const projectConfigPath = path.join(getProjectAgentDir(reloadProjectDir), "config.yml");
 			const settings = await Settings.loadIsolated({
 				cwd: reloadProjectDir,
@@ -1103,7 +1103,7 @@ describe("Settings", () => {
 			expect(settings.get("task.agentModelOverrides")).toEqual({});
 			expect(settings.get("retry.modelFallback")).toBe(true);
 
-			await fsp.rm(projectConfigPath);
+			await fs.promises.rm(projectConfigPath);
 			await settings.reloadFromDisk();
 
 			expect(settings.get("task.agentModelOverrides")).toEqual({});
