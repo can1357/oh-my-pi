@@ -588,6 +588,11 @@ export class SelectorController {
 				this.ctx.ui.requestRender();
 				break;
 
+			case "tui.vimMode":
+			case "tui.vimModeDisplay":
+				this.ctx.applyVimModeSetting();
+				break;
+
 			// Settings with UI side effects
 			case "display.hideToolActivity": {
 				const hidden = value as boolean;
