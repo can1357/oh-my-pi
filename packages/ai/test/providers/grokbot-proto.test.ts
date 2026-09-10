@@ -1754,6 +1754,44 @@ describe("grokbot incomplete tool calls", () => {
 		]);
 	});
 
+	test("does not finalize incomplete grammar tool calls from non-empty raw text", async () => {
+		// Grammar args are free-form; a truncated patch after isComplete:false must not
+		// become an executable toolCall (stopReason would prefer toolUse over length).
+		mockAuth();
+		const truncated = "*** Begin Patch\n*** Update File: a.ts\n@@\n-old\n+new";
+		const incomplete = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "apply_patch",
+					args: truncated,
+					isComplete: false,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(incomplete, trailer)) as FetchImpl;
+		const grammarContext: Context = {
+			messages: [{ role: "user", content: "edit", timestamp: 1 }],
+			tools: [
+				{
+					name: "edit",
+					description: "edit files",
+					parameters: { type: "object" as const },
+					customWireName: "apply_patch",
+					customFormat: { syntax: "lark", definition: "start: ANY" },
+				},
+			],
+		};
+
+		const result = await streamGrokBot(model, grammarContext, { apiKey: "renew", fetch: fetchImpl }).result();
+		// Live previews may fill `{ input: truncated }`, but the turn must error — not
+		// toolUse — so the agent does not execute a partial patch.
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/incomplete tool call/i);
+		expect(result.content.some(b => b.type === "toolCall" && b.id === "c1")).toBe(true);
+	});
+
 	test("keeps sequential empty and incomplete retries buffered until accepted", async () => {
 		// After an incomplete retry, empty-tool retry must still buffer — otherwise
 		// abandoned start/thinking from the second attempt leak before the third.

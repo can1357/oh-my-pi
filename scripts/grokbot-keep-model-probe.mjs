@@ -9,7 +9,8 @@
  *  1. keep-model on claude-fable-5, claude-opus-5, claude-sonnet-5, claude-haiku-4-5
  *     with full 6-tool set (bash/read/write/edit/grep/glob → Shell/Read/Write/Grep/Glob)
  *     2-turn round-trip: ask model to call Shell, feed result back, get final text.
- *  2. auto mode resolves to keep-model for Anthropic+tools.
+ *  2. auto mode resolves to keep-model when catalog sandToolsWire says so;
+ *     bare auto without catalog wire stays native.
  *  3. Explicit automation still rewrites to sand-automation + generalPurpose.
  *  4. Non-Anthropic (grok-4.6) + keep-model is a no-op.
  *
@@ -284,20 +285,26 @@ async function testKeepModelRoundTrip(token, cfg, modelId) {
 }
 
 async function testAutoResolvesKeepModel() {
-	console.log(`\n=== auto resolves to keep-model for Anthropic+tools ===`);
-	const resolved = resolveAnthropicSandToolsWire(undefined, undefined, { modelId: "claude-fable-5", toolCount: 6 });
-	console.log(`  auto(fable, 6 tools) → ${resolved}`);
+	console.log(`\n=== auto resolves to keep-model when catalog sandToolsWire says so ===`);
+	// Catalog KDL owns Anthropic keep-model — pass the reviewed fact, matching
+	// resolveAnthropicSandToolsWire's catalog-first auto contract (no TS class invent).
+	const resolved = resolveAnthropicSandToolsWire(undefined, undefined, {
+		modelId: "claude-fable-5",
+		toolCount: 6,
+		sandToolsWire: "keep-model",
+	});
+	console.log(`  auto(fable, 6 tools, sandToolsWire=keep-model) → ${resolved}`);
 	const pass = resolved === "keep-model";
 	console.log(`  ${pass ? "PASS" : "FAIL"} auto→keep-model`);
 	return { pass, resolved };
 }
 
-async function testAutoNonAnthropicError() {
-	console.log(`\n=== auto for non-Anthropic+tools → error ===`);
+async function testAutoNonAnthropicNative() {
+	console.log(`\n=== auto for non-Anthropic+tools without catalog wire → native ===`);
 	const resolved = resolveAnthropicSandToolsWire(undefined, undefined, { modelId: "grok-4.6", toolCount: 2 });
 	console.log(`  auto(grok-4.6, 2 tools) → ${resolved}`);
-	const pass = resolved === "error";
-	console.log(`  ${pass ? "PASS" : "FAIL"} auto→error for non-Anthropic`);
+	const pass = resolved === "native";
+	console.log(`  ${pass ? "PASS" : "FAIL"} auto→native for non-Anthropic`);
 	return { pass, resolved };
 }
 
@@ -384,7 +391,7 @@ async function main() {
 		results.push(await testKeepModelRoundTrip(token, cfg, modelId));
 	}
 	results.push(await testAutoResolvesKeepModel());
-	results.push(await testAutoNonAnthropicError());
+	results.push(await testAutoNonAnthropicNative());
 	results.push(await testAutomationStillGrok(token, cfg));
 	results.push(await testKeepModelNoopOnGrok());
 

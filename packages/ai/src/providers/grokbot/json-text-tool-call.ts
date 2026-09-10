@@ -6,6 +6,7 @@
  * a protobuf `toolCallPart`. The agent (and the catalog matrix) only execute
  * `type: "toolCall"` blocks — so a text dump is a failed tool turn.
  */
+import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { GeminiInbandScanner } from "../../dialect/gemini";
 import { shouldClaimSandWireName, toOmpToolName, toSandField2Name } from "./product-wire";
 
@@ -356,7 +357,9 @@ export type JsonTextToolCallPromotion = {
 
 /** Stable identity for cross-block duplicate suppression (name + args). */
 function jsonTextToolCallFingerprint(call: JsonTextToolCall): string {
-	return `${call.name}\0${JSON.stringify(call.arguments)}`;
+	// Key-order-insensitive: thinking `{"path":"a","content":"x"}` and text
+	// `{"content":"x","path":"a"}` are the same Write and must not both promote.
+	return `${call.name}\0${stableStringifyJson(call.arguments)}`;
 }
 
 export function promoteJsonTextToolCallsFromContent(

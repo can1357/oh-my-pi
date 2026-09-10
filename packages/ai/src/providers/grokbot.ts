@@ -718,7 +718,10 @@ function mergeStreamedArgsText(previous: string, incoming: string): { argsText: 
 }
 
 function canFinalizeIncompleteToolArgs(argsText: string, isGrammar: boolean): boolean {
-	if (isGrammar) return argsText.trim().length > 0;
+	// Grammar/customFormat args are free-form text — any non-empty fragment looks
+	// "complete" to a JSON check. Without an explicit isComplete frame, a truncated
+	// patch (e.g. after an output-token limit) must not become an executable toolCall.
+	if (isGrammar) return false;
 	const trimmed = argsText.trim();
 	if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return false;
 	try {
@@ -746,9 +749,7 @@ function writeOwnerFromContextTools(tools: Context["tools"]): string | undefined
 		const ompName = typeof tool?.name === "string" ? tool.name.trim() : "";
 		if (!ompName) continue;
 		const custom =
-			typeof tool.customWireName === "string" && tool.customWireName.trim()
-				? tool.customWireName.trim()
-				: "";
+			typeof tool.customWireName === "string" && tool.customWireName.trim() ? tool.customWireName.trim() : "";
 		const sandName = custom || toSandField2Name(ompName);
 		if (sandName !== "Write") continue;
 		if (!shouldClaimSandWireName("Write", ompName, owner)) continue;

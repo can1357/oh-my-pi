@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Fixed
+
+- Grok Bot does not finalize grammar/customFormat tool calls that end with `isComplete: false` (truncated patches stay incomplete instead of executing).
+- Grok Bot JSON-as-text duplicate suppression fingerprints arguments with key-order-stable serialization so mirrored thinking/text dumps promote once.
+- Grok Bot keep-model probe passes catalog `sandToolsWire: "keep-model"` into auto resolution (and expects bare auto → `native`).
 - Catalog matrix shell smoke requires exact fixture paths (or absolute `…/fixture` suffixes) and rejects trailing non-exit statements after a successful echo/read (`echo ping; false`).
 - Grok Bot Write ownership honors extension `customWireName: "Write"` aliases for empty Write follow-up acceptance.
 - Grok Bot `--thinking off` omits effort when the model allows an explicit `thinking` parameter (avoids flooring effort while sending `thinking: false`).

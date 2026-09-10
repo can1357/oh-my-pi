@@ -197,6 +197,21 @@ describe("parseJsonTextToolCall", () => {
 		expect(promoted.sourceIndexes).toEqual([0, 1]);
 	});
 
+	test("promoteJsonTextToolCallsFromContent dedupes thinking/text when argument key order differs", () => {
+		const advertised = new Set(["Write"]);
+		const thinking = '{"name":"Write","arguments":{"path":"a","content":"x"}}';
+		const textDump = '{"name":"Write","arguments":{"content":"x","path":"a"}}';
+		const promoted = promoteJsonTextToolCallsFromContent(
+			[
+				{ type: "thinking", thinking },
+				{ type: "text", text: textDump },
+			],
+			advertised,
+		);
+		expect(promoted.calls).toEqual([{ name: "Write", arguments: { content: "x", path: "a" } }]);
+		expect(promoted.sourceIndexes).toEqual([0, 1]);
+	});
+
 	test("promoteJsonTextToolCallsFromContent keeps distinct thinking calls alongside text", () => {
 		const advertised = new Set(["Shell", "Write"]);
 		const promoted = promoteJsonTextToolCallsFromContent(
