@@ -172,14 +172,15 @@ function redactHeaders(headers: Record<string, string> | undefined): Record<stri
  * names case-insensitively. Header names are preserved so dumps still show
  * what was sent. Single shared implementation for every dump path
  * (http-inspector error dumps and request-debug session logs alike).
+ * Returns a new record; the input is never mutated (callers may pass shared
+ * header state, e.g. provider request contexts).
  */
 export function redactSensitiveHeaderValues<T>(headers: Record<string, T>): Record<string, T> {
+	const redacted: Record<string, T> = {};
 	for (const key in headers) {
-		if (SENSITIVE_HEADERS.includes(key.toLowerCase())) {
-			headers[key] = "[redacted]" as T;
-		}
+		redacted[key] = SENSITIVE_HEADERS.includes(key.toLowerCase()) ? ("[redacted]" as T) : headers[key];
 	}
-	return headers;
+	return redacted;
 }
 
 function formatCapturedHttpError(captured: CapturedHttpErrorResponse | undefined): string | undefined {
