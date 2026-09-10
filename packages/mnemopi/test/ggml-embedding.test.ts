@@ -79,6 +79,44 @@ describe("ggmlLocalModelInitializer", () => {
 		});
 	});
 
+	test("maps MNEMOPI_EMBED_GPU onto getLlama's gpu option", async () => {
+		const requested: unknown[] = [];
+		const recordingLoader = (async () => ({
+			getLlama: async (options: { gpu?: unknown }) => {
+				requested.push(options.gpu);
+				return {
+					gpu: "vulkan",
+					dispose: async () => {},
+					loadModel: async () => ({
+						embeddingVectorSize: 3,
+						createEmbeddingContext: async () => ({
+							getEmbeddingFor: async () => ({ vector: [1, 2, 3] }),
+							dispose: async () => {},
+						}),
+					}),
+				};
+			},
+		})) as never;
+		const before = process.env.MNEMOPI_EMBED_GPU;
+		try {
+			await withFakeGgufPath(async () => {
+				for (const value of ["vulkan", "cpu", undefined] as const) {
+					resetGgmlForTests();
+					setGgmlModuleLoaderForTests(recordingLoader);
+					if (value === undefined) delete process.env.MNEMOPI_EMBED_GPU;
+					else process.env.MNEMOPI_EMBED_GPU = value;
+					await ggmlLocalModelInitializer({ model: "fast-bge-base-en-v1.5" as never });
+				}
+			});
+		} finally {
+			resetGgmlForTests();
+			if (before !== undefined) process.env.MNEMOPI_EMBED_GPU = before;
+			else delete process.env.MNEMOPI_EMBED_GPU;
+		}
+		// "cpu" is node-llama-cpp's `false`; the default stays "auto".
+		expect(requested).toEqual(["vulkan", false, "auto"]);
+	});
+
 	test("rejects when no GGUF model path can be resolved", async () => {
 		resetGgmlForTests();
 		const before = process.env.MNEMOPI_EMBED_GGUF_PATH;

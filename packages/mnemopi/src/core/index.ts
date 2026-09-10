@@ -1,4 +1,11 @@
-export { configureRecallFeatures, type EmbeddingBackend, embeddingBackend, type RecallFeatureFlags } from "../config";
+export {
+	configureRecallFeatures,
+	type EmbeddingBackend,
+	type EmbeddingGpu,
+	embeddingBackend,
+	embeddingGpu,
+	type RecallFeatureFlags,
+} from "../config";
 export * from "./banks";
 export * from "./beam/index";
 export {

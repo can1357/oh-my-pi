@@ -9,7 +9,7 @@
 - Fixed working-memory recall returning too few or no results after matching memories were invalidated.
 ### Added
 
-- Added a ggml (llama.cpp) local-embedding backend that runs embedding models on the GPU via node-llama-cpp (Vulkan/Metal/CUDA). Select with `MNEMOPI_EMBED_BACKEND=ggml` and point `MNEMOPI_EMBED_GGUF_PATH` at a GGUF embedding model; same model id keeps the existing memory corpus valid.
+- Added a ggml (llama.cpp) local-embedding backend that runs embedding models on the GPU via node-llama-cpp (Vulkan/Metal/CUDA). Select with `MNEMOPI_EMBED_BACKEND=ggml` and point `MNEMOPI_EMBED_GGUF_PATH` at a GGUF embedding model; same model id keeps the existing memory corpus valid. `MNEMOPI_EMBED_GPU` pins the GPU backend (`auto`, `cuda`, `vulkan`, `cpu`); on a GTX 1650 Ti, CUDA embeds ~1.5x faster than Vulkan at ~285 MB more resident memory, and `build: "never"` keeps a missing prebuilt from turning into a source build.
 
 ## [18.0.9] - 2026-08-28
 

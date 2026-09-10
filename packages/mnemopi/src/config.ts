@@ -101,6 +101,20 @@ export function embeddingBackend(env: Env = process.env): EmbeddingBackend {
 	return envOneOf("MNEMOPI_EMBED_BACKEND", ["fastembed", "ggml"] as const, "fastembed", env);
 }
 
+/**
+ * GPU backend for the ggml embedding runtime (`MNEMOPI_EMBED_GPU`): `"auto"`
+ * (let node-llama-cpp pick), `"cuda"`, `"vulkan"`, or `"cpu"`. Measured on a
+ * GTX 1650 Ti with bge-base-en-v1.5-Q4_K_M: CUDA embeds ~1.5x faster than
+ * Vulkan (7.7 vs 10.8 ms/text) but holds ~285 MB more resident memory
+ * (647 vs 362 MB RSS, 330 vs 155 MB anonymous), so Vulkan is the leaner
+ * choice on a memory-bound machine.
+ */
+export type EmbeddingGpu = "auto" | "cuda" | "vulkan" | "cpu";
+
+export function embeddingGpu(env: Env = process.env): EmbeddingGpu {
+	return envOneOf("MNEMOPI_EMBED_GPU", ["auto", "cuda", "vulkan", "cpu"] as const, "auto", env);
+}
+
 /** Explicit GGUF model path for the ggml backend (`MNEMOPI_EMBED_GGUF_PATH`). */
 export function embeddingGgufPath(env: Env = process.env): string {
 	return envOptionalString("MNEMOPI_EMBED_GGUF_PATH", env) ?? "";

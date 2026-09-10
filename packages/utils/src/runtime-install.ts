@@ -140,6 +140,29 @@ export function resolveRuntimeModule(runtimeNodeModules: string, specifier: stri
 	return resolveFileTarget(pkgDir, "index.js");
 }
 
+/**
+ * Locate an installed package's real directory by walking `node_modules` up
+ * from the running executable. A compiled binary resolves bare specifiers
+ * against its embedded module graph (oven-sh/bun#1763), so native packages
+ * deliberately kept outside the bundle must be found on disk this way.
+ */
+export function resolvePackageDirFromExecutable(packageName: string): string | null {
+	let dir = path.dirname(process.execPath);
+	for (;;) {
+		const candidate = path.join(dir, "node_modules", ...packageName.split("/"));
+		if (fs.existsSync(path.join(candidate, "package.json"))) return candidate;
+		const parent = path.dirname(dir);
+		if (parent === dir) return null;
+		dir = parent;
+	}
+}
+
+/** Read a package's `version` field; `null` when the manifest is missing or odd. */
+export function readPackageVersion(packageDir: string): string | null {
+	const manifest = readManifest(packageDir);
+	return manifest !== null && typeof manifest.version === "string" ? manifest.version : null;
+}
+
 function readManifest(pkgDir: string): Record<string, unknown> | null {
 	try {
 		const parsed: unknown = JSON.parse(fs.readFileSync(path.join(pkgDir, "package.json"), "utf8"));

@@ -30,7 +30,7 @@ import { existsSync } from "node:fs";
 import * as nodePath from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import type * as LlamaCpp from "node-llama-cpp";
-import { MODEL_CACHE_DIR } from "../config";
+import { embeddingGpu, MODEL_CACHE_DIR } from "../config";
 import type { LocalEmbeddingModel, LocalModelInitializer, LocalModelInitOptions } from "./embeddings";
 
 /** Minimal loaded-llama embedding surface the initializer depends on. */
@@ -66,6 +66,13 @@ type LlamaCppModule = typeof LlamaCpp;
  * supports for an ESM-only async native-addon module. Kept behind an injected
  * loader so tests stub it and the native addon still never loads in the main
  * agent process.
+ *
+ * Compiled binaries bundle the package's JS: its per-platform prebuilt
+ * libraries stay on disk and are reached through the build-time stand-ins in
+ * `compile-binary.ts`, because a compiled binary cannot resolve the platform
+ * packages at runtime (oven-sh/bun#1763, and runtime plugins never fire for
+ * them). That also means the specifier cannot be a static import: the addon
+ * must load only inside the worker subprocess.
  */
 async function loadNodeLlamaCpp(): Promise<LlamaCppModule> {
 	return await import("node-llama-cpp");
@@ -120,15 +127,20 @@ function defaultGgufCacheRoot(): string {
 
 /**
  * Lazily load node-llama-cpp (a heavy native addon) once. Uses `gpu: "auto"`
- * which resolves the best available backend (Vulkan here). Kept behind an
- * injected loader so tests can stub it without pulling the native addon.
+ * which resolves the best available backend (Vulkan here) and `build: "never"`
+ * so a missing or mismatched prebuilt fails immediately instead of compiling
+ * llama.cpp from source inside an embedding worker. Kept behind an injected
+ * loader so tests can stub it without pulling the native addon.
  */
 async function loadRuntime(modelPath: string): Promise<LlamaEmbeddingRuntime> {
 	const { getLlama } = await moduleLoader();
-	const llama = await getLlama({ gpu: "auto" });
+	const requested = embeddingGpu();
+	// node-llama-cpp spells CPU-only as `false`; a "cpu" string is not a
+	// recognized GPU type and silently degrades to `"auto"`.
+	const llama = await getLlama({ gpu: requested === "cpu" ? false : requested, build: "never" });
 	const model = await llama.loadModel({ modelPath });
 	const context = await model.createEmbeddingContext({ contextSize: CONTEXT_SIZE });
-	logger.debug("mnemopi: ggml embedding loaded", { gpu: llama.gpu, modelPath });
+	logger.debug("mnemopi: ggml embedding loaded", { gpu: llama.gpu, requested, modelPath });
 	return { llama, context, truncate: buildTruncate(model) };
 }
 
