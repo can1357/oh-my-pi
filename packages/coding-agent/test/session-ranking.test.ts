@@ -167,6 +167,22 @@ describe("rankSessionSearchMatches", () => {
 
 		expect(rankSessionSearchMatches(sessions, "   ")).toBe(sessions);
 	});
+
+	it("keeps pinned matches ahead of better-ranked unpinned matches", () => {
+		const recent = makeSession("recent", {
+			title: "Pinned search",
+			modified: new Date("2024-01-03T00:00:00Z"),
+		});
+		const pinned = makeSession("pinned", {
+			title: "Pinned search",
+			modified: new Date("2024-01-01T00:00:00Z"),
+		});
+
+		expect(ids(rankSessionSearchMatches([recent, pinned], "pinned", new Set(["pinned"])))).toEqual([
+			"pinned",
+			"recent",
+		]);
+	});
 });
 
 describe("mergeSessionRanking", () => {

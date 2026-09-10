@@ -30,6 +30,20 @@ export async function toggleSessionPin(sessionId: string, agentDir: string = get
 	return pinned.has(sessionId);
 }
 
+/** Persist an explicit pin state, leaving an already-matching state unchanged. */
+export async function setSessionPinned(
+	sessionId: string,
+	isPinned: boolean,
+	agentDir: string = getAgentDir(),
+): Promise<void> {
+	const pinned = await loadPinnedSessionIds(agentDir);
+	const changed = isPinned ? !pinned.has(sessionId) : pinned.has(sessionId);
+	if (!changed) return;
+	if (isPinned) pinned.add(sessionId);
+	else pinned.delete(sessionId);
+	await Bun.write(path.join(agentDir, PINS_FILENAME), JSON.stringify([...pinned], null, "\t"));
+}
+
 /**
  * Stable partition putting pinned sessions on top: within each group the
  * caller's order (recency) is preserved. Unknown ids are a no-op so stale
