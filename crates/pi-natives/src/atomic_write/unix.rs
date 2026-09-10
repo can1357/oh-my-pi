@@ -515,6 +515,7 @@ fn tmpfile_is_unavailable(error: &io::Error) -> bool {
 #[cfg(target_os = "linux")]
 fn tmpfile_link_is_unavailable(error: &io::Error) -> bool {
 	is_errno(error, libc::EPERM)
+		|| is_errno(error, libc::ENOENT)
 		|| is_errno(error, libc::EOPNOTSUPP)
 		|| is_errno(error, libc::EINVAL)
 		|| is_errno(error, libc::ENOSYS)
@@ -836,5 +837,12 @@ mod tests {
 			assert_eq!(error.code, AtomicWriteErrorCode::InvalidInput);
 			assert_eq!(error.commit_state, AtomicWriteCommitState::NotCommitted);
 		}
+	}
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn treats_enoent_tmpfile_link_failure_as_unavailable() {
+		let error = std::io::Error::from_raw_os_error(libc::ENOENT);
+
+		assert!(super::tmpfile_link_is_unavailable(&error));
 	}
 }
