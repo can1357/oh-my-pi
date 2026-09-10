@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Grok Bot treats complete JSON tool-arg frames as cumulative snapshots when they revise a prior object (`{"cmd":"ls"}` → `{"cmd":"ls","n":1}`) instead of concatenating malformed JSON.
+- Grok Bot JSON-as-text duplicate suppression canonicalizes custom wire owners (e.g. `save`↔`Write`) before fingerprinting so mirrored thinking/text dumps promote once.
+
 - Grok Bot JSON-as-text duplicate suppression canonicalizes Shell↔bash (and other advertised omp aliases) before fingerprinting so mirrored thinking/text dumps promote once.
 
 - Grok Bot does not finalize grammar/customFormat tool calls that end with `isComplete: false` (truncated patches stay incomplete instead of executing).

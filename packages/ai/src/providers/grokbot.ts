@@ -709,10 +709,31 @@ function usageHasTokens(usage: AssistantMessage["usage"]): boolean {
  * Cumulative snapshots replace the buffer; non-prefix frames append (delta wire),
  * matching probe reconstruction in `scripts/grokbot-probes/parse-connect-stream.mjs`.
  */
+function isCompleteJsonObjectText(text: string): boolean {
+	const trimmed = text.trim();
+	if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return false;
+	try {
+		const parsed = JSON.parse(trimmed) as unknown;
+		return Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed));
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Merge a streamed tool-args frame into the accumulated buffer.
+ * Cumulative snapshots replace the buffer; non-prefix frames append (delta wire).
+ * Complete JSON object revisions that are not literal prefixes
+ * (`{"cmd":"ls"}` → `{"cmd":"ls","n":1}`) must replace, not concatenate —
+ * otherwise finishTool parses malformed args and SendToUser revisions break.
+ */
 function mergeStreamedArgsText(previous: string, incoming: string): { argsText: string; delta: string } {
 	if (!incoming || incoming === previous) return { argsText: previous, delta: "" };
 	if (!previous || incoming.startsWith(previous)) {
 		return { argsText: incoming, delta: incoming.slice(previous.length) };
+	}
+	if (isCompleteJsonObjectText(previous) && isCompleteJsonObjectText(incoming)) {
+		return { argsText: incoming, delta: incoming };
 	}
 	return { argsText: previous + incoming, delta: incoming };
 }
@@ -1895,7 +1916,12 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					!output.content.some(b => b.type === "toolCall")
 				) {
 					const advertised = advertisedNamesForJsonTextToolCall(body.tools, context.tools);
-					const promotion = promoteJsonTextToolCallsFromContent(output.content, advertised, sendToUserTextIndexes);
+					const promotion = promoteJsonTextToolCallsFromContent(
+						output.content,
+						advertised,
+						sendToUserTextIndexes,
+						context.tools,
+					);
 					const promotedList = promotion.calls;
 					if (promotedList.length > 0) {
 						// Drop only blocks that produced promoted calls — ordinary prose

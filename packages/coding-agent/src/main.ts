@@ -42,6 +42,7 @@ import {
 	formatModelSelectorValue,
 	getModelMatchPreferences,
 	parseModelString,
+	resolveExplicitModelRole,
 	resolveCliModel,
 	resolveModelRoleValue,
 	resolveModelScope,
@@ -884,21 +885,42 @@ export async function resolveScopedModels(
  * to a provider-qualified `modelRoles.default` so a fresh profile whose default
  * is a live-only Grok Bot id still warms AvailableModels before session build.
  */
+/**
+ * Expand `--model @default` / `*` / `pi/default` (and `:thinking` variants) to the
+ * configured `modelRoles.default` provider/model so cold AvailableModels refresh
+ * still warms a live-only default. Other role aliases stay unbound here.
+ */
+function expandDefaultRoleModelSelector(
+	selector: string | undefined,
+	configuredDefault: string | undefined,
+): string | undefined {
+	const trimmed = selector?.trim();
+	const defaultRole = configuredDefault?.trim();
+	if (!trimmed || !defaultRole) return undefined;
+	if (resolveExplicitModelRole(trimmed) !== "default") return undefined;
+	return defaultRole;
+}
+
 export function resolveCredentialScopedRefreshTarget(
 	parsed: Pick<Args, "provider" | "model" | "models">,
 	configuredDefault?: string,
 ): { providerId: string; selectors: Pick<Args, "model" | "models"> } | undefined {
-	const cliProvider = resolveCliRuntimeApiKeyProvider(parsed);
+	const expandedModel = expandDefaultRoleModelSelector(parsed.model, configuredDefault);
+	const effectiveParsed =
+		expandedModel && expandedModel !== parsed.model?.trim() ? { ...parsed, model: expandedModel } : parsed;
+	const cliProvider = resolveCliRuntimeApiKeyProvider(effectiveParsed);
 	if (cliProvider) {
 		return {
 			providerId: cliProvider,
-			selectors: { model: parsed.model, models: parsed.models },
+			selectors: { model: effectiveParsed.model, models: effectiveParsed.models },
 		};
 	}
 	// Bare `--model` / unbound `--models` leave API-key ownership undefined but
 	// still take precedence over the configured default role — do not warm the
 	// default provider (and its discovery timeout) in that case.
-	if (parsed.model?.trim() || (parsed.models ?? []).some(pattern => pattern.trim().length > 0)) {
+	// Recognized default-role aliases already expanded above; remaining selectors
+	// are unrelated bare ids (or non-default role aliases).
+	if (effectiveParsed.model?.trim() || (effectiveParsed.models ?? []).some(pattern => pattern.trim().length > 0)) {
 		return undefined;
 	}
 	const defaultRole = configuredDefault?.trim();

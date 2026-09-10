@@ -74,8 +74,18 @@ function resolveAdvertisedName(raw: string, advertised: ReadonlySet<string>): st
 	return undefined;
 }
 
-/** Map Shell→bash (etc.) only when the omp owner is itself advertised. */
-function canonicalizeAdvertisedAlias(name: string, advertised: ReadonlySet<string>): string {
+/**
+ * Map product-wire / custom aliases to the surviving omp owner when that owner
+ * is advertised (Shell→bash, Write→save). Built-in toOmpToolName alone misses
+ * extension owners (`{ name: "save", customWireName: "Write" }`).
+ */
+function canonicalizeAdvertisedAlias(
+	name: string,
+	advertised: ReadonlySet<string>,
+	ompTools?: ReadonlyArray<OmpToolNameSource>,
+): string {
+	const owner = preferredOmpOwnerForWireName(name, ompTools);
+	if (owner && advertised.has(owner)) return owner;
 	const omp = toOmpToolName(name);
 	if (omp !== name && advertised.has(omp)) return omp;
 	return name;
@@ -363,10 +373,14 @@ export type JsonTextToolCallPromotion = {
 };
 
 /** Stable identity for cross-block duplicate suppression (name + args). */
-function jsonTextToolCallFingerprint(call: JsonTextToolCall, advertised: ReadonlySet<string>): string {
-	// Alias-insensitive (Shell↔bash) and key-order-insensitive so mirrored
-	// thinking/text dumps of the same Write/Shell promote once.
-	const name = canonicalizeAdvertisedAlias(call.name, advertised);
+function jsonTextToolCallFingerprint(
+	call: JsonTextToolCall,
+	advertised: ReadonlySet<string>,
+	ompTools?: ReadonlyArray<OmpToolNameSource>,
+): string {
+	// Alias-insensitive (Shell↔bash, Write↔save) and key-order-insensitive so
+	// mirrored thinking/text dumps of the same tool promote once.
+	const name = canonicalizeAdvertisedAlias(call.name, advertised, ompTools);
 	return `${name}\0${stableStringifyJson(call.arguments)}`;
 }
 
@@ -374,6 +388,7 @@ export function promoteJsonTextToolCallsFromContent(
 	content: ReadonlyArray<{ type: string; text?: string; thinking?: string }>,
 	advertisedNames: Iterable<string>,
 	excludeIndexes?: ReadonlySet<number>,
+	ompTools?: ReadonlyArray<OmpToolNameSource>,
 ): JsonTextToolCallPromotion {
 	type BlockPromotion = {
 		index: number;
@@ -399,14 +414,16 @@ export function promoteJsonTextToolCallsFromContent(
 		const textFingerprints = new Set<string>();
 		for (const entry of blocks) {
 			if (entry.type !== "text") continue;
-			for (const call of entry.calls) textFingerprints.add(jsonTextToolCallFingerprint(call, advertised));
+			for (const call of entry.calls) textFingerprints.add(jsonTextToolCallFingerprint(call, advertised, ompTools));
 		}
 		const collected: JsonTextToolCall[] = [];
 		const sourceIndexes: number[] = [];
 		for (const entry of blocks) {
 			let kept = entry.calls;
 			if (entry.type === "thinking" && textFingerprints.size > 0) {
-				kept = entry.calls.filter(call => !textFingerprints.has(jsonTextToolCallFingerprint(call, advertised)));
+				kept = entry.calls.filter(
+					call => !textFingerprints.has(jsonTextToolCallFingerprint(call, advertised, ompTools)),
+				);
 			}
 			if (kept.length > 0) collected.push(...kept);
 			// Always drop the source block when it produced promotable JSON, even if

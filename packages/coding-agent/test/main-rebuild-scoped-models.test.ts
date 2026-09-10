@@ -317,6 +317,16 @@ describe("refreshCredentialScopedModelIfMissing", () => {
 		});
 		// Bare / unbound CLI selectors must not fall through to the default role.
 		expect(resolveCredentialScopedRefreshTarget({ model: "composer-2.5" }, "grokbot/live-only")).toBeUndefined();
+		// `--model @default` / `*` must expand to the configured live-only default so
+		// AvailableModels still warms (unlike an unrelated bare selector).
+		expect(resolveCredentialScopedRefreshTarget({ model: "@default" }, "grokbot/live-only")).toEqual({
+			providerId: "grokbot",
+			selectors: { model: "grokbot/live-only", models: undefined },
+		});
+		expect(resolveCredentialScopedRefreshTarget({ model: "*" }, "grokbot/live-only")).toEqual({
+			providerId: "grokbot",
+			selectors: { model: "grokbot/live-only", models: undefined },
+		});
 		expect(resolveCredentialScopedRefreshTarget({ models: ["composer-2.5"] }, "grokbot/live-only")).toBeUndefined();
 		expect(
 			resolveCredentialScopedRefreshTarget({ models: ["openai/gpt-4o", "anthropic/claude"] }, "grokbot/live-only"),

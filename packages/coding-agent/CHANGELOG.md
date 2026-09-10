@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Cold catalog refresh expands `--model @default` / `*` to the configured `modelRoles.default` so a live-only default still warms AvailableModels.
 - Catalog matrix shell smoke rejects unrecognized trailing `exit`/`return` forms (`exit -1`, `exit foo`) after a successful echo/read/write probe.
 - Catalog matrix shell smoke requires exact fixture paths (or absolute `…/fixture` suffixes) and rejects trailing non-exit statements after a successful echo/read (`echo ping; false`).
 - SDK cold-cache default-model discovery refresh is limited to KDL credential-scoped catalog providers (same gate as CLI startup).

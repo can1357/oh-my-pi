@@ -228,6 +228,25 @@ describe("parseJsonTextToolCall", () => {
 		expect(promoted.sourceIndexes).toEqual([0, 1]);
 	});
 
+	test("promoteJsonTextToolCallsFromContent dedupes custom Write owner aliases across thinking and text", () => {
+		const ompTools = [{ name: "save", customWireName: "Write" }];
+		const advertised = advertisedNamesForJsonTextToolCall([{ name: "Write" }], ompTools);
+		expect(advertised.has("Write")).toBe(true);
+		expect(advertised.has("save")).toBe(true);
+		expect(advertised.has("write")).toBe(false);
+		const promoted = promoteJsonTextToolCallsFromContent(
+			[
+				{ type: "thinking", thinking: 'default_api.save(path="a.ts", content="x")' },
+				{ type: "text", text: '{"name":"Write","arguments":{"path":"a.ts","content":"x"}}' },
+			],
+			advertised,
+			undefined,
+			ompTools,
+		);
+		expect(promoted.calls).toEqual([{ name: "Write", arguments: { path: "a.ts", content: "x" } }]);
+		expect(promoted.sourceIndexes).toEqual([0, 1]);
+	});
+
 	test("promoteJsonTextToolCallsFromContent keeps distinct thinking calls alongside text", () => {
 		const advertised = new Set(["Shell", "Write"]);
 		const promoted = promoteJsonTextToolCallsFromContent(
