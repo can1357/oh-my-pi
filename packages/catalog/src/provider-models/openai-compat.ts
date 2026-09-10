@@ -5365,7 +5365,7 @@ export function xiaomiModelManagerOptions(
 // 21. LiteLLM
 // ---------------------------------------------------------------------------
 
-const LITELLM_DISCOVERY_TIMEOUT_MS = 10_000;
+const LITELLM_DISCOVERY_TIMEOUT_MS = DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS;
 
 export interface LiteLLMModelManagerConfig {
 	apiKey?: string;
