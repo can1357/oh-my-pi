@@ -170,6 +170,23 @@ describe("StatusLineComponent usage refresh", () => {
 		expect(calls).toBe(1);
 	});
 
+	it("does not poll provider usage when background refresh is disabled", async () => {
+		Settings.instance.set("usage.backgroundRefresh", false);
+		let calls = 0;
+		const component = new StatusLineComponent(
+			makeSession(async () => {
+				calls++;
+				return [];
+			}),
+		);
+
+		component.refreshUsageInBackground();
+		vi.advanceTimersByTime(0);
+		await flushMicrotasks();
+
+		expect(calls).toBe(0);
+	});
+
 	it("passes a startup timeout signal to the background usage fetch", async () => {
 		let signal: AbortSignal | undefined;
 		const component = new StatusLineComponent(

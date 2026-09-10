@@ -1441,6 +1441,7 @@ export class StatusLineComponent implements Component {
 	 * cadence while a late successful fetch can still refresh the cached segment.
 	 */
 	refreshUsageInBackground(): void {
+		if (!settings.get("usage.backgroundRefresh")) return;
 		const now = Date.now();
 		const session = this.session;
 		const usageContextKey = this.#getUsageContextKey(session);
