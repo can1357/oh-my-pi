@@ -243,6 +243,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			const update: SessionUpdate = {
 				sessionUpdate: "tool_call_update",
 				toolCallId: event.toolCallId,
+				toolName: event.toolName,
 				status: "in_progress",
 				rawOutput: event.partialResult,
 			};
@@ -266,6 +267,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			const update: SessionUpdate = {
 				sessionUpdate: "tool_call_update",
 				toolCallId: event.toolCallId,
+				toolName: event.toolName,
 				status: event.isError ? "failed" : "completed",
 				rawOutput: event.result,
 			};
@@ -492,6 +494,7 @@ export function buildToolCallStartUpdate(input: {
 		sessionUpdate: "tool_call",
 		toolCallId: input.toolCallId,
 		title: buildToolTitle(input.toolName, input.args, input.intent),
+		toolName: input.toolName,
 		kind: mapToolKind(input.toolName, input.args),
 		status: input.status ?? "pending",
 		rawInput: input.args,

@@ -102,6 +102,8 @@ export interface ToolCallLocation extends Meta {
 export interface ToolCall extends Meta {
 	toolCallId: ToolCallId;
 	title: string;
+	/** Extension field: the harness tool name behind the call (e.g. `task`), so clients can classify beyond the spec `kind`. */
+	toolName?: string | null;
 	kind?: ToolKind | null;
 	status?: ToolCallStatus | null;
 	content?: ToolCallContent[] | null;
@@ -113,6 +115,8 @@ export interface ToolCall extends Meta {
 export interface ToolCallUpdate extends Meta {
 	toolCallId: ToolCallId;
 	title?: string | null;
+	/** Extension field: the harness tool name behind the call (e.g. `task`), so clients can classify beyond the spec `kind`. */
+	toolName?: string | null;
 	kind?: ToolKind | null;
 	status?: ToolCallStatus | null;
 	content?: ToolCallContent[] | null;
@@ -148,6 +152,8 @@ export interface ClientCapabilities {
 	terminal?: boolean;
 	auth?: { terminal?: boolean };
 	elicitation?: { form?: Record<string, unknown>; url?: Record<string, unknown> };
+	/** Optional `_omp/*` extension surfaces the client opts into during `initialize`. */
+	extensions?: { agents?: boolean };
 	_meta?: Record<string, unknown>;
 }
 /** Implementation identity sent during initialization. */
