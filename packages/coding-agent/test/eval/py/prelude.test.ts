@@ -36,6 +36,42 @@ async function runPrelude(
 }
 
 describe("python prelude", () => {
+	it("forwards keyword-only model selectors without changing their type or order", async () => {
+		const requests: Array<{ name?: string; args?: Record<string, unknown> }> = [];
+		const bridge = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async request => {
+				const body = (await request.json()) as { name?: string; args?: Record<string, unknown> };
+				requests.push(body);
+				return Response.json({ ok: true, value: { id: `agent-${requests.length}`, agent: "task" } });
+			},
+		});
+		try {
+			const result = await runPrelude(
+				[
+					"import json",
+					'one = agent("work", model="provider/one")',
+					'few = agent("work", model=["provider/two", "provider/three"])',
+					'print(json.dumps({"one": one.id, "few": few.id}))',
+				].join("\n"),
+				{
+					PI_TOOL_BRIDGE_URL: bridge.url.toString(),
+					PI_TOOL_BRIDGE_TOKEN: "test-token",
+					PI_TOOL_BRIDGE_SESSION: "test-session",
+				},
+			);
+			expect(result.exitCode).toBe(0);
+			expect(JSON.parse(result.stdout.trim())).toEqual({ one: "agent-1", few: "agent-2" });
+			expect(requests.map(request => request.args?.model)).toEqual([
+				"provider/one",
+				["provider/two", "provider/three"],
+			]);
+		} finally {
+			bridge.stop(true);
+		}
+	});
+
 	it("infers eval tool schemas and replaces definitions by name", async () => {
 		const result = await runPrelude(
 			[
