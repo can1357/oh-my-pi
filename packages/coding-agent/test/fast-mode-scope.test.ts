@@ -163,6 +163,20 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.serviceTierByFamily.anthropic).toBeUndefined();
 	});
 
+	it("toggle clears configured priority when the provider cannot realize it", async () => {
+		const model = getBundledModel("openrouter", "anthropic/claude-opus-4.6");
+		if (!model) throw new Error("Expected bundled OpenRouter Claude model");
+		const session = await createSessionForModel(model);
+
+		expect(session.setFastMode(true)).toBe(true);
+		expect(session.isFastModeEnabled()).toBe(true);
+		expect(session.isFastModeActive()).toBe(false);
+
+		expect(session.toggleFastMode()).toBe(false);
+		expect(session.isFastModeEnabled()).toBe(false);
+		expect(session.serviceTierByFamily.anthropic).toBeUndefined();
+	});
+
 	describe("automatic user-activity priority", () => {
 		function createAutoFastSession(
 			agentKind?: "main" | "sub",
