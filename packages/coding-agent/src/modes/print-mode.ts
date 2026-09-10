@@ -88,9 +88,11 @@ export function printableEvent(event: AgentSessionEvent): unknown {
 
 /**
  * Run in print (single-shot) mode.
- * Sends prompts to the agent and outputs the result.
+ *
+ * Sends prompts, writes the selected output format, and returns the process
+ * exit code the CLI must use for the completed turn.
  */
-export async function runPrintMode(session: AgentSession, options: PrintModeOptions): Promise<void> {
+export async function runPrintMode(session: AgentSession, options: PrintModeOptions): Promise<number> {
 	const { mode, messages = [], initialMessage, initialImages, printThoughts, planYolo = false } = options;
 
 	// process.stdout.write is fire-and-forget: a large final record (e.g. a
@@ -184,39 +186,20 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	// primary turn whose response print mode would never emit.
 	session.prepareForHeadlessAdvisorDrain();
 
-	// In text mode, output final response
-	if (mode === "text") {
-		// Read via the session accessor, not the raw state tail: a classifier
-		// refusal is pruned from active context at settle, and an aborted turn
-		// can trail synthetic tool results — both would hide the terminal
-		// assistant message (and its error) from a last-element read.
-		const assistantMsg = session.getLastAssistantMessage();
+	// Read via the session accessor, not the raw state tail: a classifier
+	// refusal is pruned from active context at settle, and an aborted turn
+	// can trail synthetic tool results — both would hide the terminal
+	// assistant message (and its error) from a last-element read.
+	const assistantMsg = session.getLastAssistantMessage();
+	const terminalFailure =
+		assistantMsg !== undefined &&
+		(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
+		!isSilentAbort(assistantMsg);
 
+	// In text mode, output the final response. JSON mode already emitted the
+	// assistant message and stop reason through the event subscription.
+	if (mode === "text" && !terminalFailure) {
 		if (assistantMsg) {
-			// Check for error/aborted — skip silent-abort (plan-mode compaction transition)
-			if (
-				(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
-				!isSilentAbort(assistantMsg)
-			) {
-				const errorLine = sanitizeText(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
-				// This branch hard-exits, bypassing the `await session.dispose()` at
-				// the end of runPrintMode. Flush telemetry and dispose the session
-				// HERE so error spans reach the exporter (the postmortem `exit`
-				// handler can't await) and the browser reaper installed in
-				// `dispose()` (releaseTabsForOwner) actually runs — otherwise an
-				// OMP-owned Chromium survives this exit (issue #5643). `dispose()`
-				// is idempotent, so the unreachable call below is a harmless no-op.
-				await session.waitForAdvisorCatchup(PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS);
-				await flushTelemetryExport();
-				await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
-				const flushed = process.stderr.write(`${errorLine}\n`);
-				if (flushed) {
-					process.exit(1);
-				} else {
-					process.stderr.once("drain", () => process.exit(1));
-				}
-			}
-
 			if (
 				assistantMsg.errorMessage &&
 				assistantMsg.stopReason !== "error" &&
@@ -225,7 +208,6 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 				process.stderr.write(`${sanitizeText(assistantMsg.errorMessage)}\n`);
 			}
 
-			// Output text content
 			for (const content of assistantMsg.content) {
 				if (content.type === "text") {
 					writeStdoutLine(`${sanitizeText(content.text)}\n`);
@@ -237,11 +219,25 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		session.setTextOutputCommitted(true);
 	}
 
-	await session.waitForAdvisorCatchup(PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS);
+	await session.waitForAdvisorCatchup(
+		terminalFailure ? PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS : PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS,
+	);
+	if (terminalFailure) await flushTelemetryExport();
 
 	// Block shutdown until every serialized stdout write (including the final
 	// agent_end and late JSON advisor events) has drained; process.exit would
 	// otherwise discard the buffered tail and truncate the last record.
 	await stdoutTail;
 	await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+
+	if (mode === "text" && terminalFailure && assistantMsg) {
+		const errorLine = sanitizeText(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
+		if (!process.stderr.write(`${errorLine}\n`)) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			process.stderr.once("drain", resolve);
+			await promise;
+		}
+	}
+
+	return terminalFailure ? 1 : 0;
 }

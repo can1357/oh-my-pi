@@ -38,6 +38,7 @@ function createFlushHarness(): FlushHarness {
 			getEntries: () => [],
 		},
 		settings: { get: () => false },
+		getLastAssistantMessage: () => undefined,
 		extensionRunner: undefined,
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			subscriber = listener;

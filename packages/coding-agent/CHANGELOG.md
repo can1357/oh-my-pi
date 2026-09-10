@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- JSON print mode now exits non-zero when the provider turn ends in an error or non-silent abort, matching text mode ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).
+
 ## [18.1.16] - 2026-09-09
 
 ### Added

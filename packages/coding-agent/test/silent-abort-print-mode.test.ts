@@ -96,12 +96,10 @@ describe("Print-mode silent-abort regression", () => {
 		});
 
 		const session = createMockSession([silentAbortMsg]);
-		await runPrintMode(session, { mode: "text" });
+		const status = await runPrintMode(session, { mode: "text" });
 
-		// The silent-abort marker MUST NOT appear in stderr
-		const stderrText = stderrOutput.join("");
-		expect(stderrText).not.toContain(SILENT_ABORT_MARKER);
-		// process.exit MUST NOT have been called (clean termination)
+		expect(status).toBe(0);
+		expect(stderrOutput.join("")).not.toContain(SILENT_ABORT_MARKER);
 		expect(exitSpy).not.toHaveBeenCalled();
 	});
 
@@ -125,13 +123,14 @@ describe("Print-mode silent-abort regression", () => {
 		});
 
 		const session = createMockSession([silentAbortMsg]);
-		await runPrintMode(session, { mode: "text" });
+		const status = await runPrintMode(session, { mode: "text" });
 
+		expect(status).toBe(0);
 		expect(stderrOutput.join("")).toBe("");
 		expect(exitSpy).not.toHaveBeenCalled();
 	});
 
-	it("writes real error messages to stderr and exits non-zero", async () => {
+	it("writes real text-mode errors to stderr and returns a failing status", async () => {
 		const errorMsg = makeAssistantMessage({
 			stopReason: "error",
 			errorMessage: "Rate limit exceeded",
@@ -142,14 +141,25 @@ describe("Print-mode silent-abort regression", () => {
 		const session = createMockSession([errorMsg], async options => {
 			disposeOptions = options;
 		});
-		await runPrintMode(session, { mode: "text" });
+		const status = await runPrintMode(session, { mode: "text" });
 
-		// A real error SHOULD be written to stderr
-		const stderrText = stderrOutput.join("");
-		expect(stderrText).toContain("Rate limit exceeded");
-		// process.exit(1) SHOULD have been called
-		expect(exitSpy).toHaveBeenCalledWith(1);
+		expect(status).toBe(1);
+		expect(stderrOutput.join("")).toContain("Rate limit exceeded");
+		expect(exitSpy).not.toHaveBeenCalled();
 		expect(disposeOptions?.mnemopiConsolidateTimeoutMs).toBe(SHUTDOWN_CONSOLIDATE_BUDGET_MS);
+	});
+
+	it("returns a failing status for terminal errors in JSON mode", async () => {
+		const errorMsg = makeAssistantMessage({
+			stopReason: "error",
+			errorMessage: "Unable to connect",
+			content: [],
+		});
+
+		const status = await runPrintMode(createMockSession([errorMsg]), { mode: "json" });
+
+		expect(status).toBe(1);
+		expect(stderrOutput.join("")).toBe("");
 	});
 
 	it("prints thinking blocks only when printThoughts is enabled", async () => {
