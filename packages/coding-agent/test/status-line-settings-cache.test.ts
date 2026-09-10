@@ -164,6 +164,24 @@ describe("StatusLineComponent effective settings cache", () => {
 		expect(customComponent.getTopBorder(120)).toEqual({ content: "", width: 0, revision: 0 });
 	});
 
+	it("renders custom preset defaults when segment arrays are unconfigured", () => {
+		Settings.instance.override("statusLine.preset", "custom");
+		const component = makeComponent({
+			preset: Settings.instance.get("statusLine.preset"),
+			leftSegments: Settings.instance.get("statusLine.leftSegments"),
+			rightSegments: Settings.instance.get("statusLine.rightSegments"),
+			sessionAccent: false,
+		});
+
+		const effective = component.getEffectiveSettingsForTest();
+		expect(effective.leftSegments).toEqual(STATUS_LINE_PRESETS.custom.leftSegments);
+		expect(effective.rightSegments).toEqual(STATUS_LINE_PRESETS.custom.rightSegments);
+
+		const content = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(content).toContain("Test Model");
+		expect(content).toContain("Cache Session");
+	});
+
 	it("surfaces active subagents even when custom segments omit subagents", () => {
 		const component = makeComponent({ preset: "custom", leftSegments: [], rightSegments: [] });
 
