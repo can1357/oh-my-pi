@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `settings.autoRestartOnUpdate` so persisted interactive sessions resume after a stable executable replacement, retaining unsaved editor text ([#7748](https://github.com/can1357/oh-my-pi/pull/7748) by [@mvid](https://github.com/mvid)).
+
+### Fixed
+
+- Auto-restart now waits while the executable is missing or mid-build instead of relaunching an absent path, and binary builds land via an atomic rename ([#7748](https://github.com/can1357/oh-my-pi/pull/7748) by [@mvid](https://github.com/mvid)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added
@@ -133,7 +141,6 @@
 
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 - Added opt-in `bash.allowCompoundCommands` approval for conservative literal `&&` chains, with ordered per-segment rules and normal bash policy fallback for unmatched segments. The opt-in requires a positively classified POSIX-quoting shell; incompatible and unknown shells retain legacy approval. Whole-chain denies take precedence over earlier prompts.
-- Added opt-in `settings.autoRestartOnUpdate` (default `false`). A persisted interactive session detects a stable replacement of its running executable, waits for the active turn to settle, then resumes through the normal session path with unsaved editor text retained.
 
 ### Fixed
 
@@ -142,7 +149,6 @@
 - Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).
 - Approved plan content is now inlined into approve-and-execute prompts instead of forcing the executor to re-read the durable plan file ([#10923](https://github.com/can1357/oh-my-pi/issues/10923)).
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
-- Auto-restart no longer fires while the executable is moved aside or mid-build, so sessions wait for the replacement to land instead of failing with `ENOENT` on relaunch.
 - Commit summaries written in Vietnamese, Korean, and other accented scripts are no longer rejected for exceeding the length limit, and keep their accents as typed.
 - Tool-scoped TTSR rules now match finalized arguments reliably when providers stream short or throttled tool calls ([#10910](https://github.com/can1357/oh-my-pi/issues/10910)).
 - Restored `getSupportedThinkingLevels` in the legacy `pi-ai` shim so extensions importing it from `@earendil-works/pi-ai` (e.g. `@companion-ai/feynman`) pass Bun's named-export check and load ([#10800](https://github.com/can1357/oh-my-pi/issues/10800)).
