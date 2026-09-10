@@ -12,7 +12,8 @@
 //! non-interactive env (`GIT_TERMINAL_PROMPT=0`, askpass rejection, `LC_ALL`
 //! handling), `--no-optional-locks` for reads, fsmonitor/untracked-cache
 //! disabled, ambient `GIT_DIR`-family vars stripped, bounded output capture,
-//! and deadline + SIGTERM→SIGKILL termination via tokio.
+//! and deadline + SIGTERM→SIGKILL termination on both the async and sync
+//! runners (git releases its lock files from its SIGTERM handler only).
 
 use std::{path::Path, process::Stdio, time::Duration};
 
@@ -370,8 +371,7 @@ fn run_sync_with(
 		match child.try_wait()? {
 			Some(status) => break Some(status),
 			None if std::time::Instant::now() >= deadline => {
-				let _ = child.kill();
-				let _ = child.wait();
+				terminate_sync(&mut child, TERMINATE_GRACE);
 				break None;
 			},
 			None => std::thread::sleep(Duration::from_millis(10)),
@@ -385,6 +385,31 @@ fn run_sync_with(
 		return Err(Error::CliTimeout { command: format!("git {}", argv.join(" ")) });
 	};
 	Ok(CliOutput { exit_code: status.code().unwrap_or(-1), stdout, stderr })
+}
+
+/// SIGTERM, grace period, then SIGKILL — the synchronous twin of [`terminate`].
+///
+/// git unlinks its lock files (`index.lock`, ref locks) from its SIGTERM
+/// handler and cannot on SIGKILL. A deadline that only SIGKILLs leaves a stale
+/// lock behind, and every later write in that worktree fails until someone
+/// deletes it by hand.
+fn terminate_sync(child: &mut std::process::Child, grace: Duration) {
+	#[cfg(unix)]
+	{
+		// SAFETY: plain kill(2) on a pid we own; no memory is touched.
+		unsafe {
+			libc::kill(child.id() as i32, libc::SIGTERM);
+		}
+		let deadline = std::time::Instant::now() + grace;
+		while std::time::Instant::now() < deadline {
+			if matches!(child.try_wait(), Ok(Some(_))) {
+				return;
+			}
+			std::thread::sleep(Duration::from_millis(10));
+		}
+	}
+	let _ = child.kill();
+	let _ = child.wait();
 }
 
 /// Drain a child stream on a helper thread, mirroring [`read_capped`].
@@ -693,5 +718,68 @@ mod tests {
 			String::from_utf8_lossy(&child.stdout),
 			String::from_utf8_lossy(&child.stderr)
 		);
+	}
+
+	/// A deadline-killed git must receive SIGTERM before SIGKILL. git unlinks
+	/// its lock files (`index.lock`, ref locks) from its SIGTERM handler and
+	/// cannot on SIGKILL, so a SIGKILL-only deadline leaves a stale lock that
+	/// fails every later write in that worktree until a human deletes it.
+	///
+	/// A `!` alias stands in for git holding `index.lock`: git runs the alias
+	/// shell with `clean_on_exit`, forwarding the SIGTERM it receives to the
+	/// shell and waiting for it — the same handler that unlinks its own locks.
+	#[cfg(unix)]
+	#[test]
+	fn run_sync_deadline_lets_git_release_its_locks()
+	-> std::result::Result<(), Box<dyn std::error::Error>> {
+		use std::os::unix::fs::PermissionsExt;
+		let dir = tempfile::tempdir()?;
+		let lock = dir.path().join("index.lock");
+		let script = dir.path().join("hold-lock.sh");
+		const HOLD_LOCK: &str = "#!/bin/sh
+touch \"$1\"
+trap 'rm -f \"$1\"; kill $sleeper; exit 143' TERM
+sleep 60 & sleeper=$!
+wait $sleeper
+";
+		std::fs::write(&script, HOLD_LOCK)?;
+		std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
+		let args = [
+			"-c".to_owned(),
+			format!("alias.hold-lock=!{}", script.display()),
+			"hold-lock".to_owned(),
+			lock.display().to_string(),
+		];
+		let started = std::time::Instant::now();
+		let err = run_sync(dir.path(), &args, Duration::from_millis(300)).unwrap_err();
+		assert!(matches!(err, Error::CliTimeout { .. }), "{err:?}");
+		assert!(
+			!lock.exists(),
+			"git never got to run its SIGTERM handler: the lock it held survived the deadline"
+		);
+		assert!(
+			started.elapsed() < TERMINATE_GRACE,
+			"child honoured SIGTERM but the runner still waited out the grace period"
+		);
+		Ok(())
+	}
+
+	/// A child that ignores SIGTERM is still killed once the grace period
+	/// elapses; the deadline stays a bound, not a request.
+	#[cfg(unix)]
+	#[test]
+	fn terminate_sync_kills_a_child_that_ignores_sigterm()
+	-> std::result::Result<(), Box<dyn std::error::Error>> {
+		let mut child = std::process::Command::new("sh")
+			.args(["-c", "trap '' TERM; sleep 60"])
+			.stdin(Stdio::null())
+			.stdout(Stdio::null())
+			.stderr(Stdio::null())
+			.spawn()?;
+		let started = std::time::Instant::now();
+		terminate_sync(&mut child, Duration::from_millis(200));
+		assert!(child.try_wait()?.is_some(), "child outlived the grace period");
+		assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+		Ok(())
 	}
 }
