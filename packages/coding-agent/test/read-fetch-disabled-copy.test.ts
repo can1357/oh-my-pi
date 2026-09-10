@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { WebSearchTool } from "@oh-my-pi/pi-coding-agent/web/search";
+import { WebSearchTool, webSearchCustomTool } from "@oh-my-pi/pi-coding-agent/web/search";
 
 function createSession(fetchEnabled: boolean): ToolSession {
 	return {
@@ -45,5 +45,14 @@ describe("web_search read-URL handoff follows fetch.enabled", () => {
 	test("enabled: description keeps the read-URL handoff", () => {
 		const tool = new WebSearchTool(createSession(true));
 		expect(tool.description).toContain("`read` URL directly");
+	});
+});
+
+describe("web_search custom-tool copy without a global store", () => {
+	test("renders without throwing when Settings.init() never ran", () => {
+		// The global settings proxy throws outside a session; the singleton
+		// copy must fall back instead of breaking embedder session creation.
+		const description: string = webSearchCustomTool.description;
+		expect(description).toContain("Web search");
 	});
 });

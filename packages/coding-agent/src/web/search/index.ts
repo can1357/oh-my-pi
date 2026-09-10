@@ -359,7 +359,14 @@ export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchRende
 	name: "web_search",
 	label: "Web Search",
 	get description() {
-		return prompt.render(webSearchDescription, { FETCH_ENABLED: settings.get("fetch.enabled") });
+		let fetchEnabled = true;
+		try {
+			fetchEnabled = settings.get("fetch.enabled");
+		} catch {
+			// No global store (isolated SDK embedder without Settings.init):
+			// keep the historical advertising instead of breaking creation.
+		}
+		return prompt.render(webSearchDescription, { FETCH_ENABLED: fetchEnabled });
 	},
 	parameters: webSearchSchema,
 
