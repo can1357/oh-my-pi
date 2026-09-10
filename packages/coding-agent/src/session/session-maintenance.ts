@@ -2334,14 +2334,24 @@ export class SessionMaintenance {
 		// Provider-reported usage above a known window is authoritative proof of a
 		// genuine token overflow (not a byte/media-only rejection), computed once
 		// up front so both the media-exclusion decision below and the terminal
-		// notice selection further down agree with each other.
+		// dead-end check further down agree with each other.
 		const usageBackedOverflow = AIError.isUsageBackedContextOverflow(assistantMessage, contextWindow);
+		// Concrete media-limit wording (e.g. "image count exceeds the limit of 20")
+		// in the error text — computed up front (independent of window or
+		// compaction availability) so both the media-exclusion decision below and
+		// the terminal dead-end check further down agree with each other.
+		const explicitMediaRejection =
+			payloadRejection && hasExplicitMediaRejectionEvidence(assistantMessage.errorMessage);
 		// `payloadRejection` alone is not sufficient reason to exclude media
 		// compaction methods (snapcompact): a *usage-backed* overflow proves the
 		// rejection is a genuine token-context problem, not a byte/media budget
 		// one, so a user configured with e.g. `methodOrder: ["snapcompact"]` must
-		// still be able to use it instead of being told no recovery exists (#11482).
-		const excludeMediaForPayloadRejection = payloadRejection && !usageBackedOverflow;
+		// still be able to use it instead of being told no recovery exists.
+		// Explicit media-limit evidence overrides that exception, though: usage
+		// proving a token overflow doesn't negate a provider *simultaneously*
+		// reporting an image-count limit, and snapcompact adds image frames before
+		// retrying — guaranteeing the retry stays over that limit (#11482).
+		const excludeMediaForPayloadRejection = payloadRejection && (!usageBackedOverflow || explicitMediaRejection);
 		// Whether a compaction method actually exists to attempt shrinking the
 		// history. Computed up front so the unknown-context-window branch below
 		// can fall through to a real attempt instead of always assuming defeat.
@@ -2370,24 +2380,30 @@ export class SessionMaintenance {
 		// registry has no metadata for) used to be treated the same as a
 		// confirmed media/byte-budget rejection and blocked outright — even
 		// when the payload bloat is plain message-count growth that ordinary
-		// compaction would shrink just fine (#11479). Only skip straight to
-		// the honest "can't help" notice here when there is genuinely no
-		// compaction method configured to try, or the error text itself
-		// already names media/images as the cause (#11482) — that's positive
-		// evidence compaction can't fix, not just an absence of proof.
-		const explicitMediaRejection =
-			payloadRejection && hasExplicitMediaRejectionEvidence(assistantMessage.errorMessage);
-		// Explicit media evidence overrides the ambiguity guard: a message like
-		// "image count exceeds the limit of 20" also trips the generic numeric
-		// pattern and gets dual-flagged ContextOverflow (ambiguousPayloadRejection
-		// = true), but the text itself already proves the byte budget is
-		// media-driven — that certainty shouldn't be discarded just because the
-		// classifier's separate numeric-limit heuristic also fired (#11482).
+		// compaction would shrink just fine (#11479). Only skip straight to the
+		// honest "can't help" notice here when there is genuinely no compaction
+		// method configured to try — an absence of proof, gated to the
+		// unknown-window case since a known window's own evidence (below) already
+		// covers it.
 		const unknownWindowDeadEnd =
-			payloadRejection &&
-			contextWindow <= 0 &&
-			(explicitMediaRejection || (!ambiguousPayloadRejection && !compactionAvailable));
-		if (unknownWindowDeadEnd || trustedPayloadRejection) {
+			payloadRejection && contextWindow <= 0 && !ambiguousPayloadRejection && !compactionAvailable;
+		// Explicit media evidence is a terminal signal independent of whether the
+		// context window is known: a known window's `trustedPayloadRejection` only
+		// requires local headroom, so a message like "too many images" can still
+		// fail that check (e.g. the local estimate is near the occupancy ceiling)
+		// and fall through to promotion/compaction despite proving an image-count
+		// limit neither can raise. Gated to `!usageBackedOverflow` though: when
+		// provider-reported usage *also* proves a genuine token overflow, that's a
+		// real, separately fixable problem — compaction should still get a shot at
+		// it (with media methods excluded per `excludeMediaForPayloadRejection`
+		// above), not be discarded just because the same response also named a
+		// media limit (#11482).
+		if (unknownWindowDeadEnd || trustedPayloadRejection || (explicitMediaRejection && !usageBackedOverflow)) {
+			// Every disjunct above implies `!usageBackedOverflow` (unknown window ⇒
+			// `isUsageBackedContextOverflow` is false by definition; trusted requires
+			// `reportedInputTokens <= contextWindow`; the third is explicit), so this
+			// is always the honest "NOT a token-context problem" notice — the sibling
+			// usage-backed selection lives further down, where that case is reachable.
 			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
 			this.#host.emitNotice("warning", payloadRejectionNotice(storedTokens, contextWindow), "compaction");
 			logger.debug("Payload-shaped 413 withheld from token compaction", {
@@ -2427,19 +2443,20 @@ export class SessionMaintenance {
 				);
 				// A statically usable method (per `hasUsableCompactionMethod`) can still
 				// reclaim nothing at runtime — e.g. `methodOrder: ["shake"]` with no
-				// heavy/droppable content on a plain text history. When that happens for
-				// a payload rejection, `runRecoveryCompactionWithRollback` has already
-				// restored the failed turn, but an unconverted no-op result here has
-				// neither a scheduled continuation nor a block: the caller would treat
-				// it as an ordinary turn end and could resubmit the same oversized
-				// history on the next auto-continue, looping the same 413 silently with
-				// no notice ever shown (#11482). Convert that specific no-progress
-				// outcome into the same honest dead end used when no method was
-				// available at all.
+				// heavy/droppable content on a plain text history — or `runAutoCompaction`
+				// itself can already return `automaticContinuationBlocked` without a
+				// rewrite (e.g. a single oversized latest turn `prepareCompaction` can't
+				// shrink). Either way, when a payload rejection sees no history rewrite
+				// and no scheduled continuation, `runRecoveryCompactionWithRollback` has
+				// already restored the failed turn into active context (and, unless
+				// already blocked, an unconverted no-op result here has neither a
+				// scheduled continuation nor a block: the caller would treat it as an
+				// ordinary turn end and could resubmit the same oversized history on the
+				// next auto-continue, looping the same 413 silently with no notice ever
+				// shown) (#11482).
 				if (
 					payloadRejection &&
 					!compactionResult.continuationScheduled &&
-					compactionResult.automaticContinuationBlocked !== true &&
 					compactionResult.historyRewritten !== true
 				) {
 					// `runRecoveryCompactionWithRollback`'s no-rewrite path re-appends the
@@ -2453,6 +2470,12 @@ export class SessionMaintenance {
 					// persisted session history (separate from this active-context view)
 					// still keeps the turn visible.
 					this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
+					if (compactionResult.automaticContinuationBlocked === true) {
+						// `runAutoCompaction` already blocked and emitted its own notice for
+						// this outcome (e.g. its own compaction dead end) — only the cleanup
+						// above was missing; forward its result unchanged (#11482).
+						return compactionResult;
+					}
 					// Same usage-backed/byte-shaped notice selection as the sibling
 					// "no compaction available" dead end below: a payload rejection
 					// with provider-reported usage above the window IS a genuine

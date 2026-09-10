@@ -663,6 +663,68 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
 	});
 
+	it("removes the restored turn when runAutoCompaction itself blocks without rewriting history (#11482)", async () => {
+		// Reproduces `prepareCompaction` finding nothing to summarize (a single
+		// oversized latest turn) with nothing seeded for the tiered rescue to elide
+		// either — `runAutoCompaction` returns `automaticContinuationBlocked: true`
+		// directly (its own compaction-dead-end notice), with no history rewrite.
+		// `runRecoveryCompactionWithRollback` still restores the failed turn into
+		// active context before returning that result; the immediate/no-method
+		// dead ends clean that restoration up, but this already-blocked shape
+		// used to skip the cleanup entirely.
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(undefined);
+		await createSession(200_000, undefined, { extraSettings: { "compaction.methodOrder": ["soft"] } });
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+
+		// Usage-backed overflow (not local-headroom-driven) so the top dead-end
+		// check doesn't intercept it before a compaction attempt is even made.
+		const assistantMsg = usageBackedPlainPayloadAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+		expect(notices.some(n => n.message.includes("Compaction freed too little context to make progress"))).toBe(true);
+
+		const lastActiveMessage = session.agent.state.messages.at(-1);
+		expect(lastActiveMessage?.role === "assistant" && lastActiveMessage.stopReason === "error").toBe(false);
+	});
+
+	it("keeps snapcompact excluded when usage-backed overflow and explicit media evidence co-occur (#11482)", async () => {
+		// `usageBackedMediaBudgetAssistant` reports usage above the window AND
+		// explicit media wording ("image count exceeds the limit of 20") in the
+		// same response. Usage proving a token overflow doesn't negate the
+		// provider's simultaneous image-count rejection — snapcompact must stay
+		// excluded (it would only add more image frames before retrying), even
+		// though the usage-backed exception alone would otherwise re-admit it.
+		await createSession(200_000, undefined, {
+			extraSettings: { "compaction.methodOrder": ["snapcompact"] },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+
+		const assistantMsg = usageBackedMediaBudgetAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		// `snapcompact` is the only configured method; excluded, there is nothing
+		// left to attempt, so no compaction ever starts.
+		expect(startCount()).toBe(0);
+		const deadEndNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.level === "warning");
+		expect(deadEndNotices.length).toBe(1);
+		expect(deadEndNotices[0].message).toContain("IS a token-context problem");
+	});
+
 	it("does not exclude snapcompact from a usage-backed payload rejection with a known context window (#11482)", async () => {
 		// Plain (non-media) payload rejection, but reported usage (250k) exceeds
 		// the known 200k context window: `isUsageBackedContextOverflow` proves
@@ -801,6 +863,37 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		expect(notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413")).length).toBe(0);
 		expect(promptSpy).not.toHaveBeenCalled();
 		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
+	it("keeps an explicit media rejection terminal on a known context window with no local headroom (#11482)", async () => {
+		// A known context window's `trustedPayloadRejection` only proves *local*
+		// headroom (`storedTokens < 90% of contextWindow`) — a low reported-usage,
+		// digit-free media rejection ("too many images") can still fail that check
+		// when the local estimate is near the ceiling, same as any other payload
+		// rejection. Before gating the terminal dead end to `contextWindow <= 0`,
+		// this fell through to a real promotion/compaction attempt despite the
+		// text already proving an image-count limit neither can raise.
+		await createSession(8_000, { toolText: "y".repeat(60_000) });
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+
+		const assistantMsg = explicitMediaNoDigitPayloadAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(startCount()).toBe(0);
+		expect(prepareSpy).not.toHaveBeenCalled();
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
 	});
 
 	function activateOngoingGoal(id: string): void {
