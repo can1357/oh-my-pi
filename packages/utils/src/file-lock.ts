@@ -42,6 +42,19 @@ async function acquireLock(filePath: string, options: FileLockOptions = {}): Pro
 	throw new Error(`Failed to acquire lock for ${filePath} after ${opts.retries} attempts`);
 }
 
+function acquireLockSync(filePath: string, options: FileLockOptions = {}): NativeFileLock {
+	const opts = { ...DEFAULT_OPTIONS, ...options };
+	const lockPath = getLockPath(filePath);
+
+	for (let attempt = 0; attempt < opts.retries; attempt++) {
+		const lock = tryAcquireLock(lockPath);
+		if (lock) return lock;
+		if (attempt + 1 < opts.retries && opts.retryDelayMs > 0) Bun.sleepSync(opts.retryDelayMs);
+	}
+
+	throw new Error(`Failed to acquire lock for ${filePath} after ${opts.retries} attempts`);
+}
+
 /** Run `fn` while holding an OS-backed exclusive lock for `filePath`. */
 export async function withFileLock<T>(
 	filePath: string,
@@ -51,6 +64,16 @@ export async function withFileLock<T>(
 	const lock = await acquireLock(filePath, options);
 	try {
 		return await fn();
+	} finally {
+		lock.release();
+	}
+}
+
+/** Run synchronous `fn` while holding an OS-backed exclusive lock for `filePath`. */
+export function withFileLockSync<T>(filePath: string, fn: () => T, options: FileLockOptions = {}): T {
+	const lock = acquireLockSync(filePath, options);
+	try {
+		return fn();
 	} finally {
 		lock.release();
 	}

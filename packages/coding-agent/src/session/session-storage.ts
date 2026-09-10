@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { hasFsCode, isEnoent, logger, peekFileEnds, Snowflake, toError } from "@oh-my-pi/pi-utils";
+import { hasFsCode, isEnoent, logger, peekFileEnds, Snowflake, toError, withFileLockSync } from "@oh-my-pi/pi-utils";
 import { overlayTitleSlotContent, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 
 const utf8Decoder = new TextDecoder("utf-8");
@@ -79,6 +79,18 @@ export interface SessionStorage {
 	rename(path: string, nextPath: string): Promise<void>;
 	unlink(path: string): Promise<void>;
 	deleteSessionWithArtifacts(sessionPath: string): Promise<void>;
+	/**
+	 * Run a synchronous session mutation under the backend's cross-process
+	 * lock. Optional because only backends with a process-shared lock can
+	 * participate in close-time draft GC.
+	 */
+	withSessionFileLockSync?<T>(sessionPath: string, operation: () => T): T;
+	/**
+	 * Atomically delete a session and its artifacts only when `shouldDelete`
+	 * accepts the current session content. Optional because backends without a
+	 * cross-process conditional-delete primitive must skip opportunistic GC.
+	 */
+	deleteSessionWithArtifactsIf?(sessionPath: string, shouldDelete: (content: string) => boolean): Promise<boolean>;
 	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter;
 	/**
 	 * Wait for every backing write scheduled by this storage to become durably
@@ -439,6 +451,36 @@ export class FileSessionStorage implements SessionStorage {
 
 	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {
 		return new FileSessionStorageWriter(path, options);
+	}
+
+	/** Run a synchronous session mutation under its cross-process lock. */
+	withSessionFileLockSync<T>(sessionPath: string, operation: () => T): T {
+		return withFileLockSync(sessionPath, operation);
+	}
+
+	/**
+	 * Conditionally delete under the same cross-process lock used by the first
+	 * durable append to a draft-only session.
+	 */
+	deleteSessionWithArtifactsIf(sessionPath: string, shouldDelete: (content: string) => boolean): Promise<boolean> {
+		const deleted = this.withSessionFileLockSync(sessionPath, () => {
+			const content = fs.readFileSync(sessionPath, "utf-8");
+			if (!shouldDelete(content)) return false;
+
+			fs.unlinkSync(sessionPath);
+			const artifactsDir = sessionPath.slice(0, -6);
+			try {
+				fs.rmSync(artifactsDir, { recursive: true, force: true });
+			} catch (err) {
+				const error = toError(err);
+				throw new Error(
+					`Session file deleted but failed to remove artifacts directory ${artifactsDir}: ${error.message}`,
+					{ cause: error },
+				);
+			}
+			return true;
+		});
+		return Promise.resolve(deleted);
 	}
 
 	/**
