@@ -449,6 +449,40 @@ describe("generated model policies", () => {
 		}
 	});
 
+	it("restores native image input for DeepSeek V4.1 Flash SKUs on first-party and OpenCode hosts", () => {
+		// V4.1 Flash (served as `deepseek-flash`, with the retired
+		// `deepseek-v4-flash*` ids routed to it) is natively multimodal; upstream
+		// discovery still reports these SKUs as text-only, and the DeepSeek class
+		// otherwise strips image input class-wide. Rule-owned
+		// (`classes/deepseek.kdl` input-modalities + strip-image-input).
+		const visionModels = (
+			[
+				["deepseek", "deepseek-flash"],
+				["deepseek", "deepseek-v4-flash"],
+				["opencode-go", "deepseek-v4-flash"],
+				["opencode-zen", "deepseek-v4-flash"],
+				["opencode-zen", "deepseek-v4-flash-free"],
+			] as const
+		).map(([provider, id]) => buildGenerated(createSpec({ id, api: "openai-completions", provider })));
+		for (const model of visionModels) {
+			expect(model.input).toEqual(["text", "image"]);
+			expect(model.compat.stripImageInput).toBe(false);
+		}
+
+		// Non-flash DeepSeek SKUs (and flash on unlisted resellers) keep the
+		// class-wide text-only strip.
+		const textOnlyModels = (
+			[
+				["deepseek", "deepseek-v4-pro"],
+				["fireworks", "deepseek-v4-flash"],
+			] as const
+		).map(([provider, id]) => buildGenerated(createSpec({ id, api: "openai-completions", provider })));
+		for (const model of textOnlyModels) {
+			expect(model.input).toEqual(["text"]);
+			expect(model.compat.stripImageInput).toBe(true);
+		}
+	});
+
 	it("pins MiniMax-M3 long-context providers to 1M context", () => {
 		const models = [
 			createSpec({

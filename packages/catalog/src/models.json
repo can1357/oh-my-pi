@@ -70164,7 +70164,8 @@
 			"baseUrl": "https://api.deepseek.com",
 			"reasoning": false,
 			"input": [
-				"text"
+				"text",
+				"image"
 			],
 			"cost": {
 				"input": 0.3,
@@ -70260,7 +70261,7 @@
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
-				"stripImageInput": true,
+				"stripImageInput": false,
 				"thinkingLoopGuard": "deepseek",
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
@@ -70276,7 +70277,8 @@
 			"baseUrl": "https://api.deepseek.com",
 			"reasoning": true,
 			"input": [
-				"text"
+				"text",
+				"image"
 			],
 			"cost": {
 				"input": 0.3,
@@ -70365,7 +70367,7 @@
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
-				"stripImageInput": true,
+				"stripImageInput": false,
 				"thinkingLoopGuard": "deepseek",
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
@@ -261875,7 +261877,8 @@
 			"baseUrl": "https://opencode.ai/zen/go/v1",
 			"reasoning": true,
 			"input": [
-				"text"
+				"text",
+				"image"
 			],
 			"cost": {
 				"input": 0.22,
@@ -261914,7 +261917,7 @@
 				"supportsAllTurnsReasoningContext": false,
 				"supportsConfigurationUpdate": false,
 				"requiresReasoningOffJuiceInstruction": false,
-				"stripImageInput": true,
+				"stripImageInput": false,
 				"thinkingLoopGuard": "deepseek",
 				"reasoningEffortMap": {},
 				"supportsReasoningParams": true,
@@ -267410,7 +267413,8 @@
 			"baseUrl": "https://opencode.ai/zen/v1",
 			"reasoning": true,
 			"input": [
-				"text"
+				"text",
+				"image"
 			],
 			"cost": {
 				"input": 0.14,
@@ -267486,7 +267490,7 @@
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
-				"stripImageInput": true,
+				"stripImageInput": false,
 				"thinkingLoopGuard": "deepseek",
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
@@ -267556,7 +267560,8 @@
 			"baseUrl": "https://opencode.ai/zen/v1",
 			"reasoning": true,
 			"input": [
-				"text"
+				"text",
+				"image"
 			],
 			"cost": {
 				"input": 0,
@@ -267629,7 +267634,7 @@
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
-				"stripImageInput": true,
+				"stripImageInput": false,
 				"thinkingLoopGuard": "deepseek",
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,

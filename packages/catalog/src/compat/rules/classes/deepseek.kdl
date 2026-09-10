@@ -73,6 +73,21 @@ class "deepseek" {
 	models token="vision" {
 		strip-image-input #false
 	}
+	// DeepSeek V4.1 Flash (2026-09-10) is natively multimodal. It serves as
+	// `deepseek-flash`, and the retired `deepseek-v4-flash*` ids are routed to
+	// it on the first-party API and the OpenCode partner gateways. Upstream
+	// discovery still reports these SKUs as text-only, so opt image input back
+	// in and clear the class-wide text-only strip for those hosts.
+	on "deepseek" "opencode-go" "opencode-zen" {
+		family "flash" {
+			input-modalities "text" "image"
+			strip-image-input #false
+		}
+		models "deepseek-flash" {
+			input-modalities "text" "image"
+			strip-image-input #false
+		}
+	}
 	on "ollama-cloud" "nvidia" "deepseek" "fireworks" "nanogpt" "opencode-go" "openrouter" {
 		stream-markup-healing-pattern "dsml"
 	}

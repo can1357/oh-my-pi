@@ -4575,7 +4575,50 @@
 				}
 			},
 			{
-				"source": "classes/deepseek.kdl:76",
+				"source": "classes/deepseek.kdl:82",
+				"class": "deepseek",
+				"providers": [
+					"deepseek",
+					"opencode-go",
+					"opencode-zen"
+				],
+				"family": "flash",
+				"wire": {
+					"stripImageInput": false
+				},
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
+				}
+			},
+			{
+				"source": "classes/deepseek.kdl:86",
+				"class": "deepseek",
+				"providers": [
+					"deepseek",
+					"opencode-go",
+					"opencode-zen"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek-flash"
+					}
+				],
+				"wire": {
+					"stripImageInput": false
+				},
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
+				}
+			},
+			{
+				"source": "classes/deepseek.kdl:91",
 				"class": "deepseek",
 				"providers": [
 					"ollama-cloud",
