@@ -61,6 +61,7 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 
 	const ctx = {
 		session,
+		viewSession: session,
 		compactionQueuedMessages: [...initialQueue],
 		pendingMessagesContainer: { clear: () => {}, addChild: () => {}, removeChild: () => {} },
 		editor: {
@@ -222,6 +223,7 @@ describe("restoreQueuedMessagesToEditor image marker alignment", () => {
 		};
 		const ctx = {
 			session,
+			viewSession: session,
 			editor,
 			compactionQueuedMessages: [],
 			locallySubmittedUserSignatures: new Set<string>(),

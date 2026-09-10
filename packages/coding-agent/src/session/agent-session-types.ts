@@ -337,6 +337,8 @@ export interface PromptOptions {
 	 *  an in-flight tool batch, injecting at the next step boundary instead (see
 	 *  AgentSession.sendUserMessage's `deliverAs: "aside"`). */
 	streamingBehavior?: "steer" | "followUp" | "aside";
+	/** Called when a streaming prompt is queued or coalesced. */
+	onQueued?: (text: string, imageCount: number, replacedText?: string) => void;
 	/** Optional tool choice override for the next LLM call. */
 	toolChoice?: ToolChoice;
 	/** Send as a developer/system message instead of user. */

@@ -104,6 +104,7 @@ function createContext(sessionOverride?: InteractiveModeContext["session"]) {
 		ui: { requestRender } as unknown as InteractiveModeContext["ui"],
 		session,
 		settings: session.settings,
+		viewSession: session,
 		sessionManager: { getSessionName: () => "named-session" } as InteractiveModeContext["sessionManager"],
 		compactionQueuedMessages: [] as InteractiveModeContext["compactionQueuedMessages"],
 		skillCommands: new Map(),
