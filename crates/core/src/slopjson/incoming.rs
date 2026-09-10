@@ -934,9 +934,11 @@ struct Located {
 	matched_key: Option<Str>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, strum::IntoStaticStr)]
+#[strum(serialize_all = "lowercase", const_into_str)]
 enum Kind {
 	Null,
+	#[strum(to_string = "boolean")]
 	Bool(bool),
 	Number(Number),
 	String { value: Str, stable_len: usize },
@@ -946,14 +948,7 @@ enum Kind {
 
 impl Kind {
 	const fn name(&self) -> &'static str {
-		match self {
-			Self::Null => "null",
-			Self::Bool(_) => "boolean",
-			Self::Number(_) => "number",
-			Self::String { .. } => "string",
-			Self::Array => "array",
-			Self::Object => "object",
-		}
+		self.into_str()
 	}
 
 	const fn value_kind(&self) -> PulledValueKind {

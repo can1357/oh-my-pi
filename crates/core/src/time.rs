@@ -2,7 +2,6 @@
 
 use std::{
 	cmp::Ordering,
-	error,
 	fmt::{self, Display},
 	hash::{Hash, Hasher},
 	str::FromStr,
@@ -190,27 +189,18 @@ impl DurationUnit {
 }
 
 /// An error converting or parsing a [`Duration`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum DurationError {
 	/// The text is not an unsigned integer followed by a supported unit.
+	#[error("duration must be an integer followed by ns, us, ms, s, m, or h")]
 	InvalidSyntax,
 	/// The value cannot be represented by the destination duration type.
+	#[error("duration is too large")]
 	Overflow,
 	/// The requested unit cannot represent the standard duration exactly.
+	#[error("duration is not an exact multiple of the requested unit")]
 	PrecisionLoss,
 }
-
-impl Display for DurationError {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		formatter.write_str(match self {
-			Self::InvalidSyntax => "duration must be an integer followed by ns, us, ms, s, m, or h",
-			Self::Overflow => "duration is too large",
-			Self::PrecisionLoss => "duration is not an exact multiple of the requested unit",
-		})
-	}
-}
-
-impl error::Error for DurationError {}
 
 /// A non-negative time span that retains the unit in which it was specified.
 ///

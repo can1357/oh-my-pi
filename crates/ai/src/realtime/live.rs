@@ -5,11 +5,13 @@
 //! sideband socket are composed by [`crate::realtime::transport`].
 
 use std::{
+	future::Future,
+	pin::Pin,
 	sync::{
-		Arc, Weak,
+		Arc, LazyLock, Weak,
 		atomic::{AtomicBool, AtomicUsize, Ordering},
 	},
-	time::Duration,
+	time::{Duration, Instant},
 };
 
 use bytes::Bytes;
@@ -21,39 +23,44 @@ use omp_audio::{
 };
 use opus::{Application, Channels, Decoder, Encoder};
 use parking_lot::Mutex;
+use rtc::{
+	media::Sample,
+	media_stream::MediaStreamTrack,
+	peer_connection::{
+		configuration::media_engine::MIME_TYPE_OPUS,
+		transport::RTCIceCandidateType,
+	},
+	rtp_transceiver::{
+		PayloadType, SSRC,
+		rtp_sender::{
+			RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+			RtpCodecKind,
+		},
+	},
+};
 use strum::{Display, IntoStaticStr};
 use thiserror::Error;
 use tokio::{sync::watch, task::JoinHandle, time, time::MissedTickBehavior};
 use webrtc::{
-	api::{
-		APIBuilder,
-		interceptor_registry::register_default_interceptors,
-		media_engine::{MIME_TYPE_OPUS, MediaEngine},
+	data_channel::{DataChannel, DataChannelEvent},
+	media_stream::{
+		Track,
+		track_local::{
+			TrackLocalEvent, static_sample::TrackLocalStaticSample,
+		},
+		track_remote::{TrackRemote, TrackRemoteEvent},
 	},
-	data_channel::{RTCDataChannel, data_channel_message::DataChannelMessage},
-	ice_transport::{
-		ice_candidate_pair::RTCIceCandidatePair, ice_candidate_type::RTCIceCandidateType,
-		ice_connection_state::RTCIceConnectionState,
-	},
-	interceptor::registry::Registry,
-	media::Sample,
 	peer_connection::{
-		RTCPeerConnection, configuration::RTCConfiguration,
-		peer_connection_state::RTCPeerConnectionState,
-		sdp::session_description::RTCSessionDescription,
+		MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
+		RTCConfiguration, RTCIceConnectionState, RTCPeerConnectionState, RTCSessionDescription,
+		Registry, RTCStatsReport, RTCStatsReportEntry, StatsSelector,
+		register_default_interceptors,
 	},
-	rtp_transceiver::{
-		rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType},
-		rtp_sender::RTCRtpSender,
-	},
-	track::{
-		track_local::{TrackLocal, track_local_static_sample::TrackLocalStaticSample},
-		track_remote::TrackRemote,
-	},
+	rtp_transceiver::RtpSender,
 };
 
 /// Errors returned by the native live media session.
-#[derive(Clone, Debug, Error)]
+#[derive(Debug, Error)]
 pub enum LiveMediaError {
 	/// Audio ownership could not be acquired.
 	#[error(transparent)]
@@ -61,9 +68,79 @@ pub enum LiveMediaError {
 	/// Native audio playback or capture failed.
 	#[error(transparent)]
 	Audio(#[from] AudioError),
-	/// Realtime voice transport failure.
+	/// A runtime or usage error from the native live media session.
 	#[error("realtime voice transport failed: {0}")]
 	RealtimeTransport(String),
+	/// Failed to register the live Opus codec.
+	#[error("Failed to register the live Opus codec: {source}")]
+	RegisterCodec {
+		/// Source error.
+	#[source]
+		source: rtc::shared::error::Error,
+	},
+	/// Failed to configure live WebRTC interceptors.
+	#[error("Failed to configure live WebRTC interceptors: {source}")]
+	RegisterInterceptors {
+		/// Source error.
+	#[source]
+		source: rtc::shared::error::Error,
+	},
+	/// Failed to create the live WebRTC peer.
+	#[error("Failed to create the live WebRTC peer: {source}")]
+	PeerCreation {
+		/// Source error.
+	#[source]
+		source: rtc::shared::error::Error,
+	},
+	/// Failed to create the live audio track.
+	#[error("Failed to create the live audio track: {source}")]
+	TrackCreation {
+		/// Source error.
+	#[source]
+		source: rtc::shared::error::Error,
+	},
+	/// Failed to add the live audio track to the peer.
+	#[error("Failed to add the live audio track: {source}")]
+	AddTrack {
+		/// Source error.
+	#[source]
+		source: rtc::shared::error::Error,
+	},
+	/// Failed to create the live data channel.
+	#[error("Failed to create the live data channel: {source}")]
+	DataChannelCreation {
+		/// Source error.
+	#[source]
+		source: rtc::shared::error::Error,
+	},
+	/// Failed to create the live SDP offer.
+	#[error("Failed to create the live SDP offer: {source}")]
+	CreateOffer {
+		/// Source error.
+	#[source]
+		source: rtc::shared::error::Error,
+	},
+	/// Failed to install the live SDP offer.
+	#[error("Failed to install the live SDP offer: {source}")]
+	SetLocalDescription {
+		/// Source error.
+	#[source]
+		source: rtc::shared::error::Error,
+	},
+	/// Codex returned an invalid live SDP answer.
+	#[error("Codex returned an invalid live SDP answer: {source}")]
+	InvalidAnswer {
+		/// Source error.
+	#[source]
+		source: rtc::shared::error::Error,
+	},
+	/// Failed to install the live SDP answer.
+	#[error("Failed to install the live SDP answer: {source}")]
+	SetRemoteDescription {
+		/// Source error.
+	#[source]
+		source: rtc::shared::error::Error,
+	},
 	/// An established native media peer reported a classified terminal failure.
 	#[error("realtime media failed: {source}")]
 	LiveMedia {
@@ -71,12 +148,6 @@ pub enum LiveMediaError {
 		#[source]
 		source: LiveMediaFailure,
 	},
-}
-
-impl From<String> for LiveMediaError {
-	fn from(message: String) -> Self {
-		Self::RealtimeTransport(message)
-	}
 }
 
 /// Backward-compatible alias for [`LiveMediaError`].
@@ -88,6 +159,11 @@ pub type LiveMediaResult<T> = Result<T, LiveMediaError>;
 /// Backward-compatible alias for [`LiveMediaResult`].
 pub type VoiceResult<T> = LiveMediaResult<T>;
 
+impl From<String> for LiveMediaError {
+	fn from(message: String) -> Self {
+		Self::RealtimeTransport(message)
+	}
+}
 const DATA_CHANNEL_LABEL: &str = "oai-events";
 const INPUT_SAMPLE_RATE: u32 = 16_000;
 const INPUT_FRAME_SAMPLES: usize = 320;
@@ -97,20 +173,15 @@ const MAX_QUEUED_INPUT_SAMPLES: usize = 32_000;
 const OUTPUT_SAMPLE_RATE: u32 = 48_000;
 const MAX_DECODED_OPUS_SAMPLES: usize = 5_760;
 const OUTPUT_LEVEL_SAMPLES: usize = 2_400;
+const OPUS_CHANNELS: u16 = 2;
+const OPUS_SSRC: SSRC = 0x1234_5678;
+const OPUS_PAYLOAD_TYPE: PayloadType = 111;
 const OUTPUT_FRAME_SAMPLES: usize = 960;
 /// Default `wait_for_open` timeout, exposed so the N-API adapter can apply it
 /// when TypeScript passes no override.
 pub const DEFAULT_OPEN_TIMEOUT_MS: u32 = 20_000;
 const DISCONNECT_GRACE: Duration = Duration::from_secs(2);
 const CLOSE_TASK_TIMEOUT: Duration = Duration::from_secs(1);
-
-const OPUS_CAPABILITY: RTCRtpCodecCapability = RTCRtpCodecCapability {
-	mime_type:     String::new(),
-	clock_rate:    OUTPUT_SAMPLE_RATE,
-	channels:      2,
-	sdp_fmtp_line: String::new(),
-	rtcp_feedback: Vec::new(),
-};
 
 /// Privacy-safe ICE candidate class for a selected media path.
 ///
@@ -202,13 +273,160 @@ pub struct LiveCallbacks {
 	pub failure:      Box<dyn Fn(LiveMediaFailure) + Send + Sync>,
 }
 
+/// WebRTC peer connection event handler used to receive remote tracks, state
+/// changes, and incoming data channels.
+#[derive(Clone)]
+struct PeerEventHandler {
+	core:              Weak<LivePeerCore>,
+	playback:          Arc<Mutex<Option<PlaybackWriter>>>,
+	peer_state:        Arc<Mutex<RTCPeerConnectionState>>,
+	ice_state:         Arc<Mutex<RTCIceConnectionState>>,
+	/// Bumped by every peer-connection state change; lets the peer grace
+	/// timer detect a peer state that changed while it slept. Independent of
+	/// `ice_generation` so ICE events cannot invalidate a pending peer grace
+	/// timer (or vice versa): without the split, ICE firing after the peer
+	/// handler suppressed both reports and a sustained disconnect went
+	/// unreported.
+	peer_generation:   Arc<AtomicUsize>,
+	/// Bumped by every ICE connection state change; see `peer_generation`.
+	ice_generation:    Arc<AtomicUsize>,
+}
+
+impl PeerConnectionEventHandler for PeerEventHandler {
+	fn on_track<'life0, 'async_trait>(
+		&'life0 self,
+		track: Arc<dyn TrackRemote>,
+	) -> Pin<Box<dyn Future<Output = ()> + Send + 'async_trait>>
+	where
+		'life0: 'async_trait,
+		Self: 'async_trait,
+	{
+		Box::pin(async move {
+			if track.kind().await != RtpCodecKind::Audio {
+				return;
+			}
+			let output = self.playback.lock().take();
+			let Some(output) = output else {
+				if let Some(core) = self.core.upgrade() {
+					core.report_failure(LiveMediaFailure::Audio);
+				}
+				return;
+			};
+			tokio::spawn(receive_output_audio(track, output, self.core.clone()));
+		})
+	}
+
+	fn on_connection_state_change<'life0, 'async_trait>(
+		&'life0 self,
+		state: RTCPeerConnectionState,
+	) -> Pin<Box<dyn Future<Output = ()> + Send + 'async_trait>>
+	where
+		'life0: 'async_trait,
+		Self: 'async_trait,
+	{
+		Box::pin(async move {
+			*self.peer_state.lock() = state;
+			let start_gen = self.peer_generation.fetch_add(1, Ordering::SeqCst) + 1;
+			let Some(core) = self.core.upgrade() else {
+				return;
+			};
+			match state {
+				RTCPeerConnectionState::Failed => {
+					let ice_failed = *self.ice_state.lock() == RTCIceConnectionState::Failed;
+					core.report_failure(if ice_failed {
+						LiveMediaFailure::Ice
+					} else {
+						LiveMediaFailure::WebRtc
+					});
+				},
+				RTCPeerConnectionState::Closed if !core.closing.load(Ordering::Acquire) => {
+					core.report_failure(LiveMediaFailure::WebRtc);
+				},
+				RTCPeerConnectionState::Disconnected => {
+					let peer_state = Arc::clone(&self.peer_state);
+					let ice_state = Arc::clone(&self.ice_state);
+					let peer_generation = Arc::clone(&self.peer_generation);
+					let core = Arc::downgrade(&core);
+					tokio::spawn(async move {
+						time::sleep(DISCONNECT_GRACE).await;
+						if peer_generation.load(Ordering::SeqCst) == start_gen
+							&& *peer_state.lock() == RTCPeerConnectionState::Disconnected
+							&& *ice_state.lock() != RTCIceConnectionState::Disconnected
+						{
+							if let Some(core) = core.upgrade() {
+								core.report_failure(LiveMediaFailure::WebRtc);
+							}
+						}
+					});
+				},
+				_ => {},
+			}
+		})
+	}
+
+	fn on_ice_connection_state_change<'life0, 'async_trait>(
+		&'life0 self,
+		state: RTCIceConnectionState,
+	) -> Pin<Box<dyn Future<Output = ()> + Send + 'async_trait>>
+	where
+		'life0: 'async_trait,
+		Self: 'async_trait,
+	{
+		Box::pin(async move {
+			*self.ice_state.lock() = state;
+			let start_gen = self.ice_generation.fetch_add(1, Ordering::SeqCst) + 1;
+			let Some(core) = self.core.upgrade() else {
+				return;
+			};
+			match state {
+				RTCIceConnectionState::Failed => core.report_failure(LiveMediaFailure::Ice),
+				RTCIceConnectionState::Connected | RTCIceConnectionState::Completed => {
+					let core = Arc::downgrade(&core);
+					tokio::spawn(async move {
+						let Some(core) = core.upgrade() else {
+							return;
+						};
+						if core.closing.load(Ordering::Acquire) {
+							return;
+						}
+						let Some(peer) = core.peer() else {
+							return;
+						};
+						let report = peer.get_stats(Instant::now(), StatsSelector::None).await;
+						if let Some(path) = parse_ice_path(&report) {
+							core.report_ice_path(path);
+						}
+					});
+				},
+				RTCIceConnectionState::Disconnected => {
+					let ice_state = Arc::clone(&self.ice_state);
+					let ice_generation = Arc::clone(&self.ice_generation);
+					let core = Arc::downgrade(&core);
+					tokio::spawn(async move {
+						time::sleep(DISCONNECT_GRACE).await;
+						if ice_generation.load(Ordering::SeqCst) == start_gen
+							&& *ice_state.lock() == RTCIceConnectionState::Disconnected
+						{
+							if let Some(core) = core.upgrade() {
+								core.report_failure(LiveMediaFailure::Ice);
+							}
+						}
+					});
+				},
+				_ => {},
+			}
+		})
+	}
+}
+
 struct LiveResources {
-	peer:         Arc<RTCPeerConnection>,
-	data_channel: Arc<RTCDataChannel>,
-	input_tx:     flume::Sender<InputCommand>,
-	input_task:   JoinHandle<()>,
-	rtcp_task:    JoinHandle<()>,
-	playback:     PlaybackStream,
+	peer:              Arc<dyn PeerConnection>,
+	data_channel:      Arc<dyn DataChannel>,
+	data_channel_task: JoinHandle<()>,
+	input_tx:          flume::Sender<InputCommand>,
+	input_task:        JoinHandle<()>,
+	track_task:        JoinHandle<()>,
+	playback:          PlaybackStream,
 }
 /// An owned live-media session bound to the shared audio coordinator.
 ///
@@ -369,66 +587,67 @@ impl LivePeerCore {
 		let playback = PlaybackStream::start_on(OUTPUT_SAMPLE_RATE, output_device_id)?;
 		let playback_tx = playback.writer()?;
 		let mut media_engine = MediaEngine::default();
-		let capability = opus_capability();
 		media_engine
-			.register_codec(
-				RTCRtpCodecParameters {
-					capability: capability.clone(),
-					payload_type: 111,
-					..Default::default()
-				},
-				RTPCodecType::Audio,
-			)
-			.map_err(|error| format!("Failed to register the live Opus codec: {error}"))?;
+			.register_codec(opus_codec_params(), RtpCodecKind::Audio)
+			.map_err(|error| LiveMediaError::RegisterCodec { source: error })?;
 		let registry = register_default_interceptors(Registry::new(), &mut media_engine)
-			.map_err(|error| format!("Failed to configure live WebRTC interceptors: {error}"))?;
-		let api = APIBuilder::new()
+			.map_err(|error| LiveMediaError::RegisterInterceptors { source: error })?;
+		let handler = PeerEventHandler {
+			core:              Arc::downgrade(self),
+			playback:          Arc::new(Mutex::new(Some(playback_tx))),
+			peer_state:        Arc::new(Mutex::new(RTCPeerConnectionState::New)),
+			ice_state:         Arc::new(Mutex::new(RTCIceConnectionState::New)),
+			peer_generation:   Arc::new(AtomicUsize::new(0)),
+			ice_generation:    Arc::new(AtomicUsize::new(0)),
+		};
+		let mut udp_addrs = vec!["0.0.0.0:0".to_owned()];
+		if ipv6_bind_available() {
+			udp_addrs.push("[::]:0".to_owned());
+		}
+		let peer = PeerConnectionBuilder::new()
+			.with_configuration(RTCConfiguration::default())
 			.with_media_engine(media_engine)
 			.with_interceptor_registry(registry)
-			.build();
-		let peer = Arc::new(
-			api.new_peer_connection(RTCConfiguration::default())
-				.await
-				.map_err(|error| format!("Failed to create the live WebRTC peer: {error}"))?,
-		);
-
-		let track = Arc::new(TrackLocalStaticSample::new(
-			capability,
-			"audio".to_owned(),
-			"omp-live".to_owned(),
-		));
-		let sender = match peer
-			.add_track(Arc::clone(&track) as Arc<dyn TrackLocal + Send + Sync>)
+			.with_handler(Arc::new(handler))
+			.with_udp_addrs(udp_addrs)
+			.build()
 			.await
-		{
+			.map_err(|error| LiveMediaError::PeerCreation { source: error })?;
+		let peer: Arc<dyn PeerConnection> = Arc::new(peer);
+
+		let track = Arc::new(
+			TrackLocalStaticSample::new(opus_track())
+				.map_err(|error| LiveMediaError::TrackCreation { source: error })?,
+		);
+		let sender = match peer.add_track(track.clone()).await {
 			Ok(sender) => sender,
 			Err(error) => {
 				let _ = peer.close().await;
-				return Err(format!("Failed to add the live audio track: {error}").into());
+				return Err(LiveMediaError::AddTrack { source: error });
 			},
 		};
 
-		install_peer_callbacks(&peer, Arc::downgrade(self), playback_tx);
-		install_ice_path_callback(&peer, Arc::downgrade(self));
 		let data_channel = match peer.create_data_channel(DATA_CHANNEL_LABEL, None).await {
 			Ok(channel) => channel,
 			Err(error) => {
 				let _ = peer.close().await;
-				return Err(format!("Failed to create the live data channel: {error}").into());
+				return Err(LiveMediaError::DataChannelCreation { source: error });
 			},
 		};
-		install_data_channel_callbacks(&data_channel, Arc::downgrade(self));
+		let data_channel_task =
+			tokio::spawn(poll_data_channel(data_channel.clone(), Arc::downgrade(self)));
+		let track_task = tokio::spawn(poll_track_local(sender, Arc::downgrade(self)));
 
 		let offer = match peer.create_offer(None).await {
 			Ok(offer) => offer,
 			Err(error) => {
 				let _ = peer.close().await;
-				return Err(format!("Failed to create the live SDP offer: {error}").into());
+				return Err(LiveMediaError::CreateOffer { source: error });
 			},
 		};
 		if let Err(error) = peer.set_local_description(offer.clone()).await {
 			let _ = peer.close().await;
-			return Err(format!("Failed to install the live SDP offer: {error}").into());
+			return Err(LiveMediaError::SetLocalDescription { source: error });
 		}
 		let mut resources_slot = self.resources.lock();
 		if self.closing.load(Ordering::Acquire) {
@@ -443,9 +662,15 @@ impl LivePeerCore {
 
 		let (input_tx, input_rx) = flume::unbounded();
 		let input_task = tokio::spawn(run_input_audio(track, input_rx, Arc::downgrade(self)));
-		let rtcp_task = tokio::spawn(drain_rtcp(sender));
-		let resources =
-			LiveResources { peer, data_channel, input_tx, input_task, rtcp_task, playback };
+		let resources = LiveResources {
+			peer,
+			data_channel,
+			data_channel_task,
+			input_tx,
+			input_task,
+			track_task,
+			playback,
+		};
 		*resources_slot = Some(resources);
 		Ok(offer.sdp)
 	}
@@ -459,14 +684,13 @@ impl LivePeerCore {
 			.map(|resources| Arc::clone(&resources.peer))
 			.ok_or_else(|| "Native live WebRTC peer has not started".to_owned())?;
 		let answer = RTCSessionDescription::answer(sdp)
-			.map_err(|error| format!("Codex returned an invalid live SDP answer: {error}"))?;
+			.map_err(|error| LiveMediaError::InvalidAnswer { source: error })?;
 		peer
 			.set_remote_description(answer)
 			.await
-			.map_err(|error| format!("Failed to install the live SDP answer: {error}"))?;
+			.map_err(|error| LiveMediaError::SetRemoteDescription { source: error })?;
 		Ok(())
 	}
-
 	/// Wait until the `oai-events` data channel is open, failing on peer
 	/// failure, close, or timeout.
 	pub async fn wait_for_open(&self, timeout_ms: u32) -> VoiceResult<()> {
@@ -569,6 +793,10 @@ impl LivePeerCore {
 		}
 	}
 
+	fn peer(&self) -> Option<Arc<dyn PeerConnection>> {
+		self.resources.lock().as_ref().map(|resources| Arc::clone(&resources.peer))
+	}
+
 	fn mark_open(&self) {
 		if !self.closing.load(Ordering::Acquire) {
 			self.signal_tx.send_replace(PeerSignal::Open);
@@ -584,6 +812,8 @@ impl LivePeerCore {
 		(self.callbacks.failure)(failure);
 	}
 
+	/// Close media, the data channel, the peer connection, and speaker
+	/// playback. Concurrent calls wait for the first closer to finish.
 	/// Close media, the data channel, the peer connection, and speaker
 	/// playback. Concurrent calls wait for the first closer to finish.
 	pub async fn close(&self) {
@@ -603,13 +833,24 @@ impl LivePeerCore {
 			let _ = resources.peer.close().await;
 			let _ = resources.playback.stop();
 			let _ = time::timeout(CLOSE_TASK_TIMEOUT, resources.input_task).await;
-			resources.rtcp_task.abort();
-			let _ = resources.rtcp_task.await;
+			let _ = time::timeout(CLOSE_TASK_TIMEOUT, resources.track_task).await;
+			resources.data_channel_task.abort();
+			let _ = resources.data_channel_task.await;
 			drop(resources.data_channel);
 		}
 		self.queued_samples.store(0, Ordering::Release);
 		self.signal_tx.send_replace(PeerSignal::Closed);
 	}
+}
+
+/// Returns whether this host can bind an IPv6 UDP socket.
+///
+/// The result is cached because address-family support does not change during
+/// the session, and the probe socket is dropped immediately.
+fn ipv6_bind_available() -> bool {
+	static AVAILABLE: LazyLock<bool> =
+		LazyLock::new(|| std::net::UdpSocket::bind("[::]:0").is_ok());
+	*AVAILABLE
 }
 
 fn rms(samples: &[f32]) -> f64 {
@@ -626,182 +867,36 @@ fn rms(samples: &[f32]) -> f64 {
 	(sum / samples.len() as f64).sqrt().clamp(0.0, 1.0)
 }
 
-fn opus_capability() -> RTCRtpCodecCapability {
-	RTCRtpCodecCapability {
+fn opus_codec() -> RTCRtpCodec {
+	RTCRtpCodec {
 		mime_type:     MIME_TYPE_OPUS.to_owned(),
-		clock_rate:    OPUS_CAPABILITY.clock_rate,
-		channels:      OPUS_CAPABILITY.channels,
+		clock_rate:    OUTPUT_SAMPLE_RATE,
+		channels:      OPUS_CHANNELS,
 		sdp_fmtp_line: "minptime=10;useinbandfec=1".to_owned(),
 		rtcp_feedback: Vec::new(),
 	}
 }
 
-const fn candidate_class(candidate: RTCIceCandidateType) -> Option<LiveIceCandidateClass> {
-	match candidate {
-		RTCIceCandidateType::Host => Some(LiveIceCandidateClass::Host),
-		RTCIceCandidateType::Srflx => Some(LiveIceCandidateClass::ServerReflexive),
-		RTCIceCandidateType::Prflx => Some(LiveIceCandidateClass::PeerReflexive),
-		RTCIceCandidateType::Relay => Some(LiveIceCandidateClass::Relay),
-		RTCIceCandidateType::Unspecified => None,
-	}
+fn opus_codec_params() -> RTCRtpCodecParameters {
+	RTCRtpCodecParameters { rtp_codec: opus_codec(), payload_type: OPUS_PAYLOAD_TYPE }
 }
 
-fn redact_ice_pair(pair: &RTCIceCandidatePair) -> Option<LiveIcePath> {
-	let local = candidate_class(pair.local.typ)?;
-	let remote = candidate_class(pair.remote.typ)?;
-	let kind = if local == LiveIceCandidateClass::Relay || remote == LiveIceCandidateClass::Relay {
-		LiveIcePathKind::Relay
-	} else {
-		LiveIcePathKind::Direct
-	};
-	Some(LiveIcePath { local, remote, kind })
-}
-
-fn install_ice_path_callback(peer: &Arc<RTCPeerConnection>, core: Weak<LivePeerCore>) {
-	peer
-		.dtls_transport()
-		.ice_transport()
-		.on_selected_candidate_pair_change(Box::new(move |pair| {
-			let core = core.clone();
-			let path = redact_ice_pair(&pair);
-			Box::pin(async move {
-				if let (Some(core), Some(path)) = (core.upgrade(), path) {
-					core.report_ice_path(path);
-				}
-			})
-		}));
-}
-
-fn install_peer_callbacks(
-	peer: &Arc<RTCPeerConnection>,
-	core: Weak<LivePeerCore>,
-	playback_tx: PlaybackWriter,
-) {
-	let output_sender = Arc::new(Mutex::new(Some(playback_tx)));
-	let output_sender_for_track = Arc::clone(&output_sender);
-	let core_for_track = core.clone();
-	peer.on_track(Box::new(move |track, _receiver, _transceiver| {
-		let output_sender = output_sender_for_track.lock().take();
-		let core = core_for_track.clone();
-		Box::pin(async move {
-			if track.kind() != RTPCodecType::Audio {
-				return;
-			}
-			let Some(output_sender) = output_sender else {
-				if let Some(core) = core.upgrade() {
-					core.report_failure(LiveMediaFailure::Audio);
-				}
-				return;
-			};
-			tokio::spawn(receive_output_audio(track, output_sender, core));
-		})
-	}));
-
-	let peer_for_state = Arc::downgrade(peer);
-	let core_for_state = core.clone();
-	peer.on_peer_connection_state_change(Box::new(move |state| {
-		let core = core_for_state.clone();
-		let peer = peer_for_state.clone();
-		Box::pin(async move {
-			let Some(core) = core.upgrade() else {
-				return;
-			};
-			match state {
-				RTCPeerConnectionState::Failed => {
-					let failure = if peer
-						.upgrade()
-						.is_some_and(|peer| peer.ice_connection_state() == RTCIceConnectionState::Failed)
-					{
-						LiveMediaFailure::Ice
-					} else {
-						LiveMediaFailure::WebRtc
-					};
-					core.report_failure(failure);
-				},
-				RTCPeerConnectionState::Closed if !core.closing.load(Ordering::Acquire) => {
-					core.report_failure(LiveMediaFailure::WebRtc);
-				},
-				RTCPeerConnectionState::Disconnected => {
-					time::sleep(DISCONNECT_GRACE).await;
-					if peer.upgrade().is_some_and(|peer| {
-						peer.connection_state() == RTCPeerConnectionState::Disconnected
-							&& peer.ice_connection_state() != RTCIceConnectionState::Disconnected
-					}) {
-						core.report_failure(LiveMediaFailure::WebRtc);
-					}
-				},
-				_ => {},
-			}
-		})
-	}));
-
-	let peer_for_ice = Arc::downgrade(peer);
-	peer.on_ice_connection_state_change(Box::new(move |state| {
-		let core = core.clone();
-		let peer = peer_for_ice.clone();
-		Box::pin(async move {
-			let Some(core) = core.upgrade() else {
-				return;
-			};
-			match state {
-				RTCIceConnectionState::Failed => core.report_failure(LiveMediaFailure::Ice),
-				RTCIceConnectionState::Disconnected => {
-					time::sleep(DISCONNECT_GRACE).await;
-					if peer.upgrade().is_some_and(|peer| {
-						peer.ice_connection_state() == RTCIceConnectionState::Disconnected
-					}) {
-						core.report_failure(LiveMediaFailure::Ice);
-					}
-				},
-				_ => {},
-			}
-		})
-	}));
-}
-
-fn install_data_channel_callbacks(data_channel: &Arc<RTCDataChannel>, core: Weak<LivePeerCore>) {
-	let core_for_open = core.clone();
-	data_channel.on_open(Box::new(move || {
-		Box::pin(async move {
-			if let Some(core) = core_for_open.upgrade() {
-				core.mark_open();
-			}
-		})
-	}));
-
-	let core_for_message = core.clone();
-	data_channel.on_message(Box::new(move |message: DataChannelMessage| {
-		let core = core_for_message.clone();
-		Box::pin(async move {
-			if !message.is_string {
-				return;
-			}
-			if let (Some(core), Ok(payload)) =
-				(core.upgrade(), String::from_utf8(message.data.to_vec()))
-			{
-				core.report_event(payload);
-			}
-		})
-	}));
-
-	let core_for_close = core.clone();
-	data_channel.on_close(Box::new(move || {
-		let core = core_for_close.clone();
-		Box::pin(async move {
-			if let Some(core) = core.upgrade() {
-				core.report_failure(LiveMediaFailure::DataChannel);
-			}
-		})
-	}));
-
-	data_channel.on_error(Box::new(move |_error| {
-		let core = core.clone();
-		Box::pin(async move {
-			if let Some(core) = core.upgrade() {
-				core.report_failure(LiveMediaFailure::DataChannel);
-			}
-		})
-	}));
+fn opus_track() -> MediaStreamTrack {
+	MediaStreamTrack::new(
+		"live".to_owned(),
+		"live-audio".to_owned(),
+		"live microphone".to_owned(),
+		RtpCodecKind::Audio,
+		vec![RTCRtpEncodingParameters {
+			rtp_coding_parameters: RTCRtpCodingParameters {
+				ssrc: Some(OPUS_SSRC),
+				..Default::default()
+			},
+			active: true,
+			codec: opus_codec(),
+			..Default::default()
+		}],
+	)
 }
 
 async fn run_input_audio(
@@ -826,6 +921,8 @@ async fn run_input_audio(
 		}
 		return;
 	}
+
+	let ssrc = track.ssrcs().await.first().copied().unwrap_or(OPUS_SSRC);
 
 	let mut muted = false;
 	let mut pending = Vec::with_capacity(INPUT_FRAME_SAMPLES * 2);
@@ -894,7 +991,7 @@ async fn run_input_audio(
 					duration: INPUT_FRAME_DURATION,
 					..Default::default()
 				};
-				if track.write_sample(&sample).await.is_err() {
+				if track.write_sample(ssrc, OPUS_PAYLOAD_TYPE, &sample, &[]).await.is_err() {
 					if let Some(core) = core.upgrade() {
 						core.report_failure(LiveMediaFailure::Audio);
 					}
@@ -905,20 +1002,23 @@ async fn run_input_audio(
 	}
 }
 
-async fn drain_rtcp(sender: Arc<RTCRtpSender>) {
-	while sender.read_rtcp().await.is_ok() {}
-}
-
 async fn receive_output_audio(
-	track: Arc<TrackRemote>,
+	track: Arc<dyn TrackRemote>,
 	playback_tx: PlaybackWriter,
 	core: Weak<LivePeerCore>,
 ) {
+	let ssrcs = track.ssrcs().await;
+	let Some(&ssrc) = ssrcs.first() else {
+		if let Some(core) = core.upgrade() {
+			core.report_failure(LiveMediaFailure::Codec);
+		}
+		return;
+	};
+
 	if !track
-		.codec()
-		.capability
-		.mime_type
-		.eq_ignore_ascii_case(MIME_TYPE_OPUS)
+		.codec(ssrc)
+		.await
+		.is_some_and(|codec| codec.mime_type.eq_ignore_ascii_case(MIME_TYPE_OPUS))
 	{
 		if let Some(core) = core.upgrade() {
 			core.report_failure(LiveMediaFailure::Codec);
@@ -939,58 +1039,162 @@ async fn receive_output_audio(
 	let mut expected_sequence: Option<u16> = None;
 	let mut level = OutputLevel::default();
 
-	loop {
-		let packet = if let Ok((packet, _attributes)) = track.read_rtp().await {
-			packet
-		} else {
-			if let Some(core) = core.upgrade()
-				&& !core.closing.load(Ordering::Acquire)
-			{
-				core.report_failure(LiveMediaFailure::Audio);
-			}
-			return;
-		};
-		let sequence = packet.header.sequence_number;
-		if let Some(expected) = expected_sequence {
-			let gap = sequence.wrapping_sub(expected);
-			if gap >= u16::MAX / 2 {
-				continue;
-			}
-			if gap > 0 {
-				for _ in 1..gap.min(5) {
-					if let Ok(samples) =
-						decoder.decode_float(&[], &mut decoded[..OUTPUT_FRAME_SAMPLES], false)
-					{
+	while let Some(event) = track.poll().await {
+		match event {
+			TrackRemoteEvent::OnRtpPacket(packet) => {
+				let sequence = packet.header.sequence_number;
+				if let Some(expected) = expected_sequence {
+					let gap = sequence.wrapping_sub(expected);
+					if gap >= u16::MAX / 2 {
+						continue;
+					}
+					if gap > 0 {
+						for _ in 1..gap.min(5) {
+							if let Ok(samples) =
+								decoder.decode_float(&[], &mut decoded[..OUTPUT_FRAME_SAMPLES], false)
+							{
+								if !write_output(&playback_tx, &decoded[..samples], &core) {
+									return;
+								}
+								level.observe(&decoded[..samples], &core);
+							}
+						}
+						if let Ok(samples) = decoder.decode_float(&packet.payload, &mut decoded, true) {
+							if !write_output(&playback_tx, &decoded[..samples], &core) {
+								return;
+							}
+							level.observe(&decoded[..samples], &core);
+						}
+					}
+				}
+				expected_sequence = Some(sequence.wrapping_add(1));
+				match decoder.decode_float(&packet.payload, &mut decoded, false) {
+					Ok(samples) => {
 						if !write_output(&playback_tx, &decoded[..samples], &core) {
 							return;
 						}
 						level.observe(&decoded[..samples], &core);
-					}
-				}
-				if let Ok(samples) = decoder.decode_float(&packet.payload, &mut decoded, true) {
-					if !write_output(&playback_tx, &decoded[..samples], &core) {
+					},
+					Err(error) => {
+						tracing::warn!(error = %error, "failed to decode live speaker audio");
+						if let Some(core) = core.upgrade() {
+							core.report_failure(LiveMediaFailure::Codec);
+						}
 						return;
-					}
-					level.observe(&decoded[..samples], &core);
+					},
 				}
-			}
-		}
-		expected_sequence = Some(sequence.wrapping_add(1));
-		match decoder.decode_float(&packet.payload, &mut decoded, false) {
-			Ok(samples) => {
-				if !write_output(&playback_tx, &decoded[..samples], &core) {
-					return;
-				}
-				level.observe(&decoded[..samples], &core);
 			},
-			Err(error) => {
-				tracing::warn!(error = %error, "failed to decode live speaker audio");
-				if let Some(core) = core.upgrade() {
-					core.report_failure(LiveMediaFailure::Codec);
+			TrackRemoteEvent::OnEnded | TrackRemoteEvent::OnError => {
+				if let Some(core) = core.upgrade()
+					&& !core.closing.load(Ordering::Acquire)
+				{
+					core.report_failure(LiveMediaFailure::Audio);
 				}
 				return;
 			},
+			_ => {},
 		}
+	}
+}
+
+async fn poll_data_channel(dc: Arc<dyn DataChannel>, core: Weak<LivePeerCore>) {
+	loop {
+		match dc.poll().await {
+			Some(DataChannelEvent::OnOpen) => {
+				if let Some(core) = core.upgrade() {
+					core.mark_open();
+				}
+			},
+			Some(DataChannelEvent::OnMessage(msg)) => {
+				if !msg.is_string {
+					continue;
+				}
+				if let (Some(core), Ok(payload)) =
+					(core.upgrade(), String::from_utf8(msg.data.to_vec()))
+				{
+					core.report_event(payload);
+				}
+			},
+			Some(
+				DataChannelEvent::OnError | DataChannelEvent::OnClosing | DataChannelEvent::OnClose,
+			) => {
+				if let Some(core) = core.upgrade()
+					&& !core.closing.load(Ordering::Acquire)
+				{
+					core.report_failure(LiveMediaFailure::DataChannel);
+				}
+				break;
+			},
+			Some(_) => {},
+			None => break,
+		}
+	}
+}
+
+async fn poll_track_local(sender: Arc<dyn RtpSender>, core: Weak<LivePeerCore>) {
+	let track = Arc::clone(sender.track());
+	loop {
+		match track.poll().await {
+			Some(TrackLocalEvent::OnRtcpPacket(_)) => {},
+			None if core.upgrade().is_some_and(|c| !c.closing.load(Ordering::Acquire)) => {
+				time::sleep(Duration::from_millis(100)).await;
+			},
+			None => break,
+		}
+	}
+}
+
+fn parse_ice_path(report: &RTCStatsReport) -> Option<LiveIcePath> {
+	let transport = report.iter().find_map(|entry| match entry {
+		RTCStatsReportEntry::Transport(t) => Some(t),
+		_ => None,
+	})?;
+	let pair_id = if transport.selected_candidate_pair_id.is_empty() {
+		report
+			.iter()
+			.filter_map(|entry| match entry {
+				RTCStatsReportEntry::IceCandidatePair(p) if p.nominated => Some(entry.id()),
+				_ => None,
+			})
+			.next()?
+	} else {
+		&transport.selected_candidate_pair_id
+	};
+	let pair = report.get(pair_id).and_then(|entry| match entry {
+		RTCStatsReportEntry::IceCandidatePair(p) => Some(p),
+		_ => None,
+	})?;
+	let local = report.get(&pair.local_candidate_id).and_then(|entry| match entry {
+		RTCStatsReportEntry::LocalCandidate(c) => Some(c),
+		_ => None,
+	})?;
+	let remote = report.get(&pair.remote_candidate_id).and_then(|entry| match entry {
+		RTCStatsReportEntry::RemoteCandidate(c) => Some(c),
+		_ => None,
+	})?;
+	let local_class = candidate_class(local.candidate_type)?;
+	let remote_class = candidate_class(remote.candidate_type)?;
+	let kind = if local_class == LiveIceCandidateClass::Relay
+		|| remote_class == LiveIceCandidateClass::Relay
+	{
+		LiveIcePathKind::Relay
+	} else {
+		LiveIcePathKind::Direct
+	};
+	Some(LiveIcePath {
+		local:  local_class,
+		remote: remote_class,
+		kind,
+	})
+}
+
+fn candidate_class(t: RTCIceCandidateType) -> Option<LiveIceCandidateClass> {
+	match t {
+		RTCIceCandidateType::Host => Some(LiveIceCandidateClass::Host),
+		RTCIceCandidateType::Srflx => Some(LiveIceCandidateClass::ServerReflexive),
+		RTCIceCandidateType::Prflx => Some(LiveIceCandidateClass::PeerReflexive),
+		RTCIceCandidateType::Relay => Some(LiveIceCandidateClass::Relay),
+		_ => None,
 	}
 }
 
@@ -1036,58 +1240,82 @@ impl OutputLevel {
 		}
 	}
 }
-
-#[cfg(test)]
+#[cfg(all(test, feature = "realtime"))]
 mod tests {
-	use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
-
 	use super::*;
+	use std::time::Duration;
+	use tokio::{sync::oneshot, time};
 
-	fn candidate(typ: RTCIceCandidateType, address: &str, port: u16) -> RTCIceCandidate {
-		RTCIceCandidate {
-			address: address.to_owned(),
-			port,
-			related_address: "198.51.100.9".to_owned(),
-			related_port: 65_000,
-			typ,
-			..Default::default()
-		}
-	}
-
-	#[test]
-	fn selected_ice_pair_is_redacted_before_leaving_the_native_peer() {
-		let pair = RTCIceCandidatePair::new(
-			candidate(RTCIceCandidateType::Relay, "203.0.113.4", 34_789),
-			candidate(RTCIceCandidateType::Host, "10.0.0.8", 5_555),
-		);
-		let redacted = redact_ice_pair(&pair).expect("known candidate classes");
-
-		assert_eq!(redacted, LiveIcePath {
-			local:  LiveIceCandidateClass::Relay,
-			remote: LiveIceCandidateClass::Host,
-			kind:   LiveIcePathKind::Relay,
+	#[tokio::test]
+	async fn transient_disconnect_does_not_report_failure() {
+		let (failure_tx, mut failure_rx) = oneshot::channel();
+		let failure_tx = Arc::new(Mutex::new(Some(failure_tx)));
+		let callbacks = LiveCallbacks {
+			event:        Box::new(|_| {}),
+			input_level:  Box::new(|_| {}),
+			output_level: Box::new(|_| {}),
+			ice_path:     Box::new(|_| {}),
+			failure:      Box::new(move |f| {
+				if let Some(tx) = failure_tx.lock().take() {
+					let _ = tx.send(f);
+				}
+			}),
+		};
+		let core = Arc::new(LivePeerCore::new(callbacks));
+		let handler = PeerEventHandler {
+			core:            Arc::downgrade(&core),
+			playback:        Arc::new(Mutex::new(None)),
+			peer_state:      Arc::new(Mutex::new(RTCPeerConnectionState::New)),
+			ice_state:       Arc::new(Mutex::new(RTCIceConnectionState::New)),
+			peer_generation: Arc::new(AtomicUsize::new(0)),
+			ice_generation:  Arc::new(AtomicUsize::new(0)),
+		};
+		let h = handler.clone();
+		tokio::spawn(async move {
+			h.on_connection_state_change(RTCPeerConnectionState::Disconnected).await;
+			h.on_connection_state_change(RTCPeerConnectionState::Connected).await;
 		});
-		let debug = format!("{redacted:?}");
-		for secret in ["203.0.113.4", "10.0.0.8", "198.51.100.9", "34789", "5555", "65000"] {
-			assert!(!debug.contains(secret), "redacted event leaked {secret}: {debug}");
-		}
+		time::sleep(DISCONNECT_GRACE + Duration::from_millis(100)).await;
+		assert!(failure_rx.try_recv().is_err());
 	}
+	#[tokio::test]
+	async fn sustained_dual_disconnect_reports_ice_failure() {
+		let (failure_tx, mut failure_rx) = oneshot::channel();
+		let failure_tx = Arc::new(Mutex::new(Some(failure_tx)));
+		let failure_count = Arc::new(AtomicUsize::new(0));
+		let failure_count_for_callback = Arc::clone(&failure_count);
+		let callbacks = LiveCallbacks {
+			event:        Box::new(|_| {}),
+			input_level:  Box::new(|_| {}),
+			output_level: Box::new(|_| {}),
+			ice_path:     Box::new(|_| {}),
+			failure:      Box::new(move |f| {
+				failure_count_for_callback.fetch_add(1, Ordering::SeqCst);
+				if let Some(tx) = failure_tx.lock().take() {
+					let _ = tx.send(f);
+				}
+			}),
+		};
+		let core = Arc::new(LivePeerCore::new(callbacks));
+		let handler = PeerEventHandler {
+			core:            Arc::downgrade(&core),
+			playback:        Arc::new(Mutex::new(None)),
+			peer_state:      Arc::new(Mutex::new(RTCPeerConnectionState::New)),
+			ice_state:       Arc::new(Mutex::new(RTCIceConnectionState::New)),
+			peer_generation: Arc::new(AtomicUsize::new(0)),
+			ice_generation:  Arc::new(AtomicUsize::new(0)),
+		};
 
-	#[test]
-	fn relay_aggregate_depends_only_on_candidate_classes() {
-		let direct = RTCIceCandidatePair::new(
-			candidate(RTCIceCandidateType::Host, "private", 1),
-			candidate(RTCIceCandidateType::Srflx, "public", 2),
-		);
-		assert_eq!(
-			redact_ice_pair(&direct).expect("known direct pair").kind,
-			LiveIcePathKind::Direct
-		);
+		handler
+			.on_ice_connection_state_change(RTCIceConnectionState::Disconnected)
+			.await;
+		handler
+			.on_connection_state_change(RTCPeerConnectionState::Disconnected)
+			.await;
+		time::sleep(DISCONNECT_GRACE + Duration::from_millis(100)).await;
 
-		let unspecified = RTCIceCandidatePair::new(
-			candidate(RTCIceCandidateType::Unspecified, "secret", 3),
-			candidate(RTCIceCandidateType::Host, "secret", 4),
-		);
-		assert_eq!(redact_ice_pair(&unspecified), None);
+		let failure = failure_rx.try_recv().expect("sustained disconnect must report");
+		assert_eq!(failure, LiveMediaFailure::Ice);
+		assert_eq!(failure_count.load(Ordering::SeqCst), 1);
 	}
 }

@@ -20,7 +20,6 @@ pub mod tls;
 pub mod uds;
 
 use std::{
-	error,
 	fmt::{self, Display},
 	io,
 };
@@ -32,6 +31,7 @@ use tonic::transport;
 pub use uds::{Incoming, connect, listen};
 
 /// An RPC transport or protocol-negotiation failure.
+#[derive(thiserror::Error)]
 pub enum Error {
 	/// A filesystem, socket, or stream operation failed.
 	Io(io::Error),
@@ -84,8 +84,6 @@ impl Display for Error {
 		}
 	}
 }
-
-impl error::Error for Error {}
 
 impl From<io::Error> for Error {
 	fn from(error: io::Error) -> Self {

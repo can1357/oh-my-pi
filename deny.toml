@@ -32,7 +32,7 @@ exceptions = [
     { allow = ["MPL-2.0"], crate = "im@15.1.0" },
     { allow = ["MPL-2.0"], crate = "option-ext@0.2.0" },
     { allow = ["MPL-2.0"], crate = "sized-chunks@0.6.5" },
-    { allow = ["WTFPL"], crate = "terminfo@0.9.0" },
+    { allow = ["MPL-2.0"], crate = "uluru@3.1.0" },
 ]
 
 # tree-sitter-graphql 0.1.0 omits a manifest expression; cargo-deny identifies

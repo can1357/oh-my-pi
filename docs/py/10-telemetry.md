@@ -42,7 +42,7 @@ plus 4 000 Python frames. Second, cancellation: a Python sink in the token path 
 can hang the token path, which is Lesson #2 with extra steps.
 
 Mid-stream interception is a real feature, and it is deliberately **not** here. pi's TTSR engine
-(`.plan/feature-map/observability.md:150`) matches partial model output and time-travels the request;
+matches partial model output and time-travels the request;
 that stays a Rust-side facility on the inference path. If you want to react to output as it forms,
 the honest answer is that you cannot from Python, and this document says so rather than shipping a
 hook that quietly costs a millisecond a token.
@@ -159,7 +159,7 @@ journal-side storage aspects in `docs/py/09-journal.md`.
 
 ### Semconv is a compatibility contract
 
-`crates/telemetry/src/attrs.rs` opens by stating that its literal attribute strings are a contract:
+`crates/observability/src/attrs.rs` opens by stating that its literal attribute strings are a contract:
 "changing even one breaks downstream dashboards, collectors, and alerts." That authority is *not*
 duplicated into Python. `omp.telemetry.semconv` maps event field paths onto those exact keys, and
 extension-defined instruments are forced under the `omp.ext.` prefix so no extension can shadow
@@ -324,7 +324,7 @@ The complete event vocabulary. Every member is also accepted as its bare string.
 
 ### `class Accuracy(StrEnum)`
 
-Mirrors `omp.inference.v1.Usage.Accuracy` and `omp_telemetry::config::UsageAccuracy`.
+Mirrors `omp.inference.v1.Usage.Accuracy` and `omp_observability::config::UsageAccuracy`.
 
 - `Accuracy.EXACT` = `"exact"` — every bucket came from the provider.
 - `Accuracy.ESTIMATED` = `"estimated"` — every bucket was counted locally, because the provider
@@ -345,7 +345,7 @@ Mirrors `omp.inference.v1.StopReason`.
 ### `class FinishReason(StrEnum)`
 
 The normalized value emitted in `gen_ai.response.finish_reasons`, derived from `StopReason` exactly
-as `omp_telemetry::semconv::StopReason::finish_reason` does. Present so a Python sink emitting OTLP
+as `omp_observability::semconv::StopReason::finish_reason` does. Present so a Python sink emitting OTLP
 attributes produces byte-identical series to the Rust exporter.
 
 - `FinishReason.STOP` = `"stop"`
@@ -355,7 +355,7 @@ attributes produces byte-identical series to the Rust exporter.
 
 ### `class CallStatus(StrEnum)`
 
-Terminal status of an invocation, wire-identical to `omp_telemetry::semconv::ToolStatus`. This is the
+Terminal status of an invocation, wire-identical to `omp_observability::semconv::ToolStatus`. This is the
 **metrics-facing** vocabulary, kept byte-exact so `omp.tool.status` series survive; it is *not* the
 durable truth, which is `ToolCall.outcome` plus `abort`. Every status derives **structurally** from
 the settled `omp.CallOutcome` (`docs/py/02-verdicts.md`) — never from the prose of a fault or a
@@ -466,10 +466,10 @@ devices both carry one; MCP endpoints do not.
 
 The rev a call actually settled under is not reconstructed by this namespace. It is read from
 `omp_tool::TOOL_REV_PROP` — the namespaced thread-item property `"omp/tool-rev"`
-(`crates/tool/src/lib.rs:46`) — which the agent loop already stamps and reads
-(`crates/agent/src/loop.rs:1368-1370` and `:1129-1131`, `crates/agent/src/journal.rs:1300-1302`,
-`crates/agent/src/project.rs:165,171,258`). Telemetry is a consumer of that stamp, never a second
-source of it.
+(`crates/tool/src/lib.rs:46`) — which the session projection already stamps and reads
+(`crates/session/src/projection.rs:165-180` stamps it onto projected call and result items, and
+`:188-196` reads it back; `crates/serve/src/inference.rs:2518-2526` stamps the outbound device
+request). Telemetry is a consumer of that stamp, never a second source of it.
 
 ```python
 rev = omp.telemetry.Rev.parse("edit@hl.47")
@@ -525,7 +525,7 @@ buckets are `0`, never `None`, so arithmetic never needs a guard.
 
 `@dataclass(frozen=True, slots=True)`. One assembler-owned prompt-slot contribution.
 
-- `digest: str` — the slot's BLAKE3-128 content digest.
+- `digest: str` — the slot's truncated SHA-256 (128-bit) content digest.
 - `size_bytes: int` — encoded size contributed to the assembled prompt.
 - `band: SlotClass` — the assembler band that placed the contribution.
 
@@ -534,7 +534,7 @@ buckets are `0`, never `None`, so arithmetic never needs a guard.
 `@dataclass(frozen=True, slots=True)`. The prompt-cache truth, computed by the assembler that built
 the prompt rather than reconstructed by an extension hashing whatever it could reach.
 
-- `digest: str` — BLAKE3-128 hex over the assembled cacheable prefix.
+- `digest: str` — truncated SHA-256 (128-bit) hex over the assembled cacheable prefix.
 - `slots: Mapping[str, PromptSlotFingerprint]` — per-slot facts keyed by prompt-slot key
   (`docs/py/08-context.md`). Each value carries `digest: str`, `size_bytes: int`, and
   `band: SlotClass`; the band uses the frozen stability vocabulary from that page. Covers every
@@ -752,16 +752,18 @@ digest, layer, trust tier, and host generation ride every durable record per the
 - `schema_rev: str` — the wire schema revision (`omp_proto::SCHEMA_REV`).
 - `prompt: PromptFingerprint` — the initial prompt fingerprint. `changed` is empty here by
   definition.
-- `registry_hash: str` — hex of `omp_tool::Registry::live_hash()`
-  (`crates/tool/src/registry.rs:458-467`): a BLAKE3 digest over the ordered live `(name, family, n)`
-  identities, domain-separated by `b"omp-tool/live/v1\0"` and registration-order independent because
-  the live map is a `BTreeMap`. Its scope must be stated carefully: it covers **every** live identity,
-  worker declarations included, so it is *not* a prompt-cache identity and enabling a device changes
-  it even when the advertised array should be byte-identical. Availability-as-notification needs the
-  narrower advertised-slot digest that `docs/py/01-devices.md` specifies; this field is the wider one.
-  What it is good for is exactly one thing: two sessions with equal `registry_hash` ran against
-  byte-identical tool identities, which makes a cross-session `rev_metrics` comparison sound rather
-  than approximate.
+- `registry_hash: str` — registry identity at session start. The field is wired
+  end to end (`telemetry.proto:53`, the Rust firehose envelope, this binding),
+  but nothing computes it yet, and its old definition — hex of
+  a digest over ordered live identities — has
+  no referent: `crates/tool` has no `live_hash`. The registry's identity
+  primitives are `slot_hash()` (`crates/tool/src/registry.rs:2623`), the
+  policy-resolved model-visible slots; `device_hash()` (`registry.rs:2654`),
+  mounted device availability and claimant-qualified reachability; and
+  `projection_hash()` (`registry.rs:2690`), every registered revision plus its
+  projection code. Until the exporter picks one, two sessions with equal
+  `registry_hash` assert nothing, and the cross-session `rev_metrics` comparison
+  this field was to make sound is a gap, not a shipped guarantee.
 
 ### `class SessionEnd(Envelope)`
 
@@ -1021,8 +1023,8 @@ discriminant, because conflating them is easy and produces nonsense byte counts.
   sliceable through `read` like a file.
 - `origin: str` — what produced the payload: a tool or device wire name such as `"read"` or `"grep"`.
 - `rev: Rev | None` — the producing tool's rev, `None` for non-tool origins.
-- `blob: str` — BLAKE3 digest of the stored payload. Identical bytes from two sessions share it, which
-  is what makes `crates/storage`'s blob writes idempotent.
+- `blob: str` — SHA-256 digest of the stored payload. Identical bytes from two sessions share it, which
+  is what makes `crates/journal`'s blob writes idempotent.
 - `bytes_total: int` — stored size. For `"verdict"` this is `VerdictDetails::Spilled.byte_len`, the
   original serialized length.
 - `bytes_shown: int` — projected size. Always `0` for `"verdict"`: a spilled verdict is not shown at
@@ -1103,7 +1105,7 @@ Creates or returns an extension-owned monotonic counter.
 `name` is forced under `METRIC_PREFIX` (`"omp.ext."`) and namespaced by extension id, so
 `counter("cache.regressions", …)` becomes `omp.ext.supi-cache.cache.regressions`. A `name` that
 already starts with `omp.`, `gen_ai.`, or `openai.` raises `SubscriptionError`: those namespaces are
-a wire contract owned by `crates/telemetry/src/attrs.rs`, and an extension may not shadow them.
+a wire contract owned by `crates/observability/src/attrs.rs`, and an extension may not shadow them.
 
 **Channel** CONTROL at creation only; `add` is a host-side accumulation flushed with the exporter.
 **Latency class** creation once per activation; `add` is lock-free and allocation-free.
@@ -1503,7 +1505,7 @@ producing its own attributes produces byte-identical series to the Rust exporter
 `semconv["tokens.cache_read"] == "gen_ai.usage.cache_read.input_tokens"`,
 `semconv["compaction.reason"] == "omp.compaction.reason"`.
 
-The keys themselves are **not** redefined here. `crates/telemetry/src/attrs.rs` is the single
+The keys themselves are **not** redefined here. `crates/observability/src/attrs.rs` is the single
 authority and its own doc comment explains why: these literals are a compatibility contract, and
 changing one breaks live dashboards. Look up, never hardcode.
 
@@ -1611,7 +1613,7 @@ watermark rather than inheriting the old one.
 - `QUEUE_MAX: int = 65_536` — upper bound on `queue`.
 - `BATCH_MAX: int = 1024` — upper bound on `batch`.
 - `FLUSH_INTERVAL: omp.Duration = omp.Duration("30s")` — export flush period and batch timeout.
-  Matches `omp_telemetry::export::FLUSH_INTERVAL_MS` (the Rust constant keeps its millisecond
+  Matches `omp_observability::export::FLUSH_INTERVAL_MS` (the Rust constant keeps its millisecond
   spelling; the Python surface exposes the one duration type per the `omp.Duration` rule): the two
   are one value, not two that agree.
 - `QUERY_LIMIT_MAX: int = 10_000` — hard cap on `Query.limit`.
@@ -1983,13 +1985,13 @@ sorts the pile. Nobody maintains a spreadsheet.
 
 ## What this requires us to build
 
-The firehose does not exist. Nothing in `crates/agent` references `omp_telemetry` today — a grep for
-`telemetry|span|metric` across `crates/agent/src` returns zero matches — so `crates/telemetry` is a
+The firehose does not exist. Nothing in `crates/agent` references `omp_observability` today — a grep for
+`telemetry|span|metric` across `crates/agent/src` returns zero matches — so `crates/observability` is a
 complete, wire-compatible instrumentation library with **no callers**. That is the actual state, and
 it is good news: the emit sites are greenfield, so they can be designed around the firehose from the
 start instead of retrofitted around an existing span-only API.
 
-### `crates/telemetry` — a new `firehose` module
+### `crates/observability` — a new `firehose` module
 
 The existing modules stay exactly as they are and remain the vocabulary authority. `firehose` is
 additive.
@@ -2045,9 +2047,9 @@ impl Firehose {
 
 `publish` is a plain `fn`, not `async` and not returning a future, so no `BoxFuture` and no
 `.await` appears at an emit site. `Subscription::offer` is `flume::bounded(queue).try_send` plus an
-`AtomicU64` drop counter — copying `crates/agent/src/mailbox.rs`'s `MailboxSender::try_enqueue`
+`AtomicU64` drop counter — copying the mailbox's nonblocking enqueue
 pattern but **bounded**, because that mailbox is deliberately unbounded (`flume::unbounded`,
-`mailbox.rs:114`) and an unbounded firehose behind a wedged Python host is a heap leak with a
+`crates/agent/src/loop.rs:424`) and an unbounded firehose behind a wedged Python host is a heap leak with a
 timestamp on it.
 
 New bounded vocabularies go through the existing `vocab!` macro (`semconv.rs:19-58`). That macro
@@ -2080,7 +2082,7 @@ verbatim; the `AbortKind` restructuring changed that, and the change is stated r
   it never appears on the toolhost wire.
 
 **The `Usage` divergence must be settled first.** There are two token structs today:
-`omp_telemetry::collector::Usage` (six `u64` buckets, `collector.rs:115`) and
+`omp_observability::collector::Usage` (six `u64` buckets, `collector.rs:115`) and
 `omp.inference.v1.Usage` (thirteen fields including `orchestration`, `cache_ttl`, `server_tools`,
 `premium_requests`, and a `detail` `ValueMap`, `common.proto:66`). The firehose cannot pick one
 without either losing provider truth or contradicting the metrics path.
@@ -2182,15 +2184,19 @@ already are `<family>.<number>`, and `Rev.parse` has a real grammar to parse. `R
 registry key to that `Display` with `@` purely for presentation; the `@` form never rides a wire.
 
 The committed rev is likewise already carried and already stamped. `omp_tool::TOOL_REV_PROP`
-(`lib.rs:46`) is the namespaced thread-item property `"omp/tool-rev"`; `crates/agent/src/loop.rs`
-stamps it at `:1368-1370` and reads it at `:1129-1131`, `crates/agent/src/journal.rs` at
-`:1300-1302`, and `crates/agent/src/project.rs` at `:165`, `:171`, `:258`. Telemetry reads that
-property. Proposing a second stamp would have created exactly the divergence Lesson #8 warns about.
+(`lib.rs:46`) is the namespaced thread-item property `"omp/tool-rev"`; the session projection
+stamps it onto projected call and result items (`crates/session/src/projection.rs:165-180`) and
+reads it back (`crates/session/src/projection.rs:188-196`); `crates/serve/src/inference.rs:2518-2526`
+stamps it onto the outbound device request. Telemetry reads that property. Proposing a second
+stamp would have created exactly the divergence Lesson #8 warns about.
 
-`Registry::live_hash()` (`crates/tool/src/registry.rs:458-467`) similarly already answers "did the
-reachable identity set change": BLAKE3 over the ordered live `(name, family, n)` triples with
-`b"omp-tool/live/v1\0"` domain separation and length-delimited fields, registration-order independent
-via `BTreeMap`. `SessionStart.registry_hash` is that digest in hex, not a new identity scheme.
+`Registry::projection_hash()` (`crates/tool/src/registry.rs:2688-2711`) similarly already answers "did the
+reachable identity set change": SHA-256 with the `b"omp-tool/projections/v1\0"` domain separator over
+every registered `(name, rev)` identity plus its `projection_code` — the schema and description
+digest — registration-order independent via `BTreeMap`. `SessionStart.registry_hash`
+(`crates/observability/src/firehose.rs:227`, `telemetry.proto:53`) is the reserved hex slot —
+its doc comment still names `Registry::live_hash()`, and no in-tree producer computes the value
+yet (reported gap) — not a new identity scheme.
 
 **Verdicts, lift, and verdict spill are implemented too.** `omp_tool::Verdict<P, F>`
 (`lib.rs:251-260`) is the four-branch durable truth; `ArgIssue` (`lib.rs:292-303`) already carries
@@ -2313,7 +2319,8 @@ boundary limitation rather than a device that declined to use the pull cursor.
 source for `HostWarning` events whose `subject` is a worker: map the code into `HostWarning.code`
 rather than adding a second error vocabulary.
 
-`crates/agent/src/journal.rs` (1970 lines) owns durable session events; the firehose must **not**
+`crates/journal` owns durable session events (one flat raw-SSE `.oms` file per session; a blank
+line commits an entry, `crates/journal/src/lib.rs:3-4`); the firehose must **not**
 duplicate it. Journal entries are ordered and durable; firehose events are droppable projections. A
 firehose event referencing a journal entry does so by index, and `Branch.from_entry`/`to_entry` are
 exactly that.
@@ -2337,18 +2344,20 @@ dataclass construction to one allocation per event plus the tuple/map fields.
 `Tokens`, `Cost`, `Rev`, `PromptFingerprint`, and the enums become `#[pyclass(frozen, eq, hash)]`
 value types, with the enums generated from the same `vocab!` tables as their Rust counterparts.
 
-### `crates/storage` — the query substrate, and the real work
+### `crates/journal` — the query substrate, and the real work
 
-`query`, `rev_metrics`, and `issues` need an index. Nothing suitable exists: `transcript` is an
-append-only event log with a `reader` (`crates/storage/src/transcript/reader.rs`) built for replay,
-not for `WHERE payload.rebase.fuzzy = true GROUP BY rev`.
+`query`, `rev_metrics`, and `issues` need an index. Nothing suitable exists: the journal is an
+append-only raw-SSE event log whose read paths are replay — `Journal::scan`
+(`crates/journal/src/lib.rs:142-156`) for lock-free consumers and the live-chain walk
+(`crates/journal/src/chain.rs:12-15`) — built for projection, not for
+`WHERE payload.rebase.fuzzy = true GROUP BY rev`.
 
 - *Option A — replay-only.* Answer every query by streaming transcripts through `reader`. No new
   store, correct by construction, and O(total bytes) per query. A ninety-day cross-project query
   over thousands of sessions is seconds to minutes.
 - *Option B — a side index.* Append a per-session varint-framed `telemetry.bin` next to the
   transcript using the same `codec`, plus an incremental indexer maintaining byte-offset watermarks —
-  precisely pi's `file_offsets` design (`.plan/feature-map/observability.md:196`), which
+  precisely pi's `file_offsets` design, which
   `ROADMAP.md:1247` already schedules for M3 as `~/.omp/stats.db`.
 - *Option C — index only, no raw file.* Smaller, but unindexed fields become unqueryable forever,
   which is the write-only-data failure again.
@@ -2364,19 +2373,19 @@ The issue store is a table in the same database. `FEATURES.md:643` describes `re
 late if AutoQA is meant to drive device revisions, because the loop is worth most while devices are
 still churning. Pulling it forward is a sequencing recommendation, not a design one.
 
-### `crates/tools`, `crates/tool`, `crates/inference`, `crates/env`
+### `crates/tools`, `crates/tool`, `crates/ai`, `crates/env`
 
 - `crates/tools/src/render/truncate.rs` already computes every `ArtifactSpill` field for
   `layer="render"`: `DEFAULT_MAX_BYTES` (51 200), `DEFAULT_MAX_LINES` (3 000), `DEFAULT_MAX_COLUMN`
   (512), `TruncationResult`, `SpilledText`, and `append_blob_truncation_notice`. It needs one
-  `publish` call and the BLAKE3 digest it already has from the blob store.
+  `publish` call and the SHA-256 digest it already has from the blob store.
 - `crates/tool` already retains revision and lift behaviour and "advertises only the live revision"
-  (`crates/tool/README.md`). `Registry::live_hash()`, `Registry::project`, `project_verdict`, and
+  (`crates/tool/README.md`). `Registry::projection_hash()`, `Registry::project`, `project_verdict`, and
   `Tool::lift` all exist, so telemetry needs **no** new rev plumbing here — correcting an earlier
   claim in this document that the loop needed a `rev()` accessor added. It already stamps
   `TOOL_REV_PROP`. What `layer="verdict"` needs is an environment implementation of the existing
   `VerdictSpill` trait, plus the defect below.
-- `crates/inference` emits `ModelRequest` where it already holds `Outcome`. Field mapping is
+- `crates/ai` emits `ModelRequest` where it already holds `Outcome`. Field mapping is
   direct: `Outcome.usage`→`Tokens`, `Outcome.cost`→`Cost`, `Outcome.unsupported`→`Degradation`
   (`Unsupported.Action` maps 1:1 onto `DegradeAction`), `Outcome.diagnostics`→`Diagnostic`,
   `Outcome.duration_ms`/`ttft_ms`, `Outcome.provider`/`model`/`upstream_provider`. `Accepted.replay`
@@ -2452,9 +2461,8 @@ threat model belongs in `docs/py/06-policy.md`; the observability gap belongs he
 ### Prompt fingerprint
 
 `PromptFingerprint` requires the prompt assembler to hash per slot. Given slots already render into
-owned strings (`docs/py/08-context.md`), this is one BLAKE3 per slot plus one over the concatenation
-— BLAKE3 runs at gigabytes per second, so a 100 KB prompt with thirty slots costs well under 100 µs,
-once per request, on a path that already spent milliseconds assembling the text.
+owned strings (`docs/py/08-context.md`), this is one SHA-256 per slot plus one over the concatenation
+— sub-millisecond even without SHA extensions, once per request, on a path that already spent milliseconds assembling the text.
 
 `changed` is a digest comparison against the previous request's map: thirty `Str` comparisons, no
 allocation if the map is a `SparseMap` reused across requests. `prefix_stable_bytes` is a single
@@ -2464,7 +2472,7 @@ needs anyway.
 
 ### Redaction
 
-`crates/telemetry/src/redact.rs:27-28` says credential redaction is "deliberately off until the host
+`crates/observability/src/redact.rs:27-28` says credential redaction is "deliberately off until the host
 opts in", and `TelemetryConfig::redact_sensitive_credentials` mirrors a process-global switch. That
 default is defensible for a Rust-internal exporter under the operator's control. It is **not**
 defensible for `ToolCall.args_raw` and `Usage.detail` delivered into third-party extension code,
@@ -2520,7 +2528,7 @@ Satisfied by this design:
 
 - `observability.md:90-106` / `FEATURES.md:1827-1833` — OTLP export over `http/protobuf`, OTEL env
   configuration, the nine agent metric instruments, run-coverage attributes, run-summary and warning
-  events, and periodic/turn-boundary/shutdown flush. `crates/telemetry` already implements all of it;
+  events, and periodic/turn-boundary/shutdown flush. `crates/observability` already implements all of it;
   the firehose supplies the callers it lacks, and `OtlpTarget` exposes it to extensions.
 - `observability.md:107-115` / `FEATURES.md:1834-1837` — session statistics, context breakdown, and
   compaction-aware anchoring. `ContextSnapshot` (with `history_rewrite_tokens_removed`) plus
@@ -2666,7 +2674,7 @@ Changes this file made in the post-review revision, and the review point that dr
   deletes that scheme entirely — discovery, docs, and dispatch are `dyn` ops, declarations
   carry soft/hard intent, and the surface is decided by the dynamic tool policy
   (`docs/py/01-devices.md`).
-- **D5/D6.** `PLAN.md` §D5/§D6 was amended 2026-08-19 (D5: per-extension worker
+- **D5/D6.** Locked decisions D5 and D6 were amended 2026-08-19 (D5: per-extension worker
   processes; D6: per-invocation decision procedure permitted). This file carried no
   flagged-amendment passages, so no claims changed.
 

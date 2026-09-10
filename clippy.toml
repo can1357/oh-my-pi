@@ -48,3 +48,8 @@ disallowed-types = [
 	{ path = "smol_str::SmolStr", reason = "use `omp_core::Str` instead", allow-invalid = true },
 	{ path = "ulid::Ulid", reason = "use `omp_core::Ulid` instead", allow-invalid = true },
 ]
+
+# The promoted lint levels must not reach test code.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

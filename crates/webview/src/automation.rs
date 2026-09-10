@@ -414,9 +414,12 @@ impl<'view> TabHandle<'view> {
 			None => None,
 		};
 		let data = if matches!(self.view.engine(), EngineKind::Chromium) {
+			#[cfg(target_os = "macos")]
 			let Inner::Remote(remote) = &self.view.inner else {
 				return Err(Error::Unsupported("direct screenshot requires remote Chromium"));
 			};
+			#[cfg(not(target_os = "macos"))]
+			let Inner::Remote(remote) = &self.view.inner;
 			let (tx, rx) = flume::bounded(1);
 			remote
 				.send(Command::Screenshot { clip, full_page, reply: tx })
@@ -481,9 +484,12 @@ impl<'view> TabHandle<'view> {
 		if !self.capabilities().native_accessibility {
 			return Ok(Value::String(self.document().aria_snapshot(None)?.to_string()));
 		}
+		#[cfg(target_os = "macos")]
 		let Inner::Remote(remote) = &self.view.inner else {
 			return Err(Error::Unsupported("native accessibility requires remote Chromium"));
 		};
+		#[cfg(not(target_os = "macos"))]
+		let Inner::Remote(remote) = &self.view.inner;
 		let (tx, rx) = flume::bounded(1);
 		remote.send(Command::AccessibilityTree { reply: tx })?;
 		let snapshot = rx
@@ -505,9 +511,12 @@ impl<'view> TabHandle<'view> {
 		if !self.capabilities().file_upload {
 			return Err(Error::Unsupported("file upload requires Chromium CDP"));
 		}
+		#[cfg(target_os = "macos")]
 		let Inner::Remote(remote) = &self.view.inner else {
 			return Err(Error::Unsupported("file upload requires remote Chromium"));
 		};
+		#[cfg(not(target_os = "macos"))]
+		let Inner::Remote(remote) = &self.view.inner;
 		let spec = serde_json::to_string(&selector.wire())?;
 		let element = sf!("(() => {{ {HELPERS} return window.__ompResolve({spec}); }})()");
 		let paths = paths

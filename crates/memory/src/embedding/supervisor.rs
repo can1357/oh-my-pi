@@ -112,7 +112,7 @@ impl EmbeddingSupervisor {
 		let frame = InboundFrame::Embed { id: id.clone(), model, cache_dir, texts, batch_size };
 		frame.validate()?;
 		let mut guard = self.process.lock().await;
-		self.ensure_process(&mut guard).await?;
+		self.ensure_process(&mut guard)?;
 		let process = guard.as_mut().ok_or(Error::EmbeddingWorker)?;
 		let generation = process.generation;
 		let future = async {
@@ -171,7 +171,7 @@ impl EmbeddingSupervisor {
 	async fn exchange_one(&self, frame: InboundFrame, timeout: Duration) -> Result<OutboundFrame> {
 		frame.validate()?;
 		let mut guard = self.process.lock().await;
-		self.ensure_process(&mut guard).await?;
+		self.ensure_process(&mut guard)?;
 		let process = guard.as_mut().ok_or(Error::EmbeddingWorker)?;
 		let generation = process.generation;
 		let future = async {
@@ -206,12 +206,12 @@ impl EmbeddingSupervisor {
 		}
 	}
 
-	async fn ensure_process(&self, slot: &mut Option<WorkerProcess>) -> Result<()> {
+	fn ensure_process(&self, slot: &mut Option<WorkerProcess>) -> Result<()> {
 		if slot.is_some() {
 			return Ok(());
 		}
 		let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-		*slot = Some(WorkerProcess::spawn(&self.config, generation).await?);
+		*slot = Some(WorkerProcess::spawn(&self.config, generation)?);
 		Ok(())
 	}
 
@@ -228,7 +228,7 @@ struct WorkerProcess {
 }
 
 impl WorkerProcess {
-	async fn spawn(config: &SupervisorConfig, generation: u64) -> Result<Self> {
+	fn spawn(config: &SupervisorConfig, generation: u64) -> Result<Self> {
 		let mut command = Command::new(&config.executable);
 		command
 			.args(&config.args)

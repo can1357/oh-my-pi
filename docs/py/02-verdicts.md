@@ -175,7 +175,7 @@ def loads(data: bytes, shape: type[T]) -> T: ...
 
 The canonical codec for verdict values. `dumps` produces deterministic UTF-8 bytes — object keys in sorted order, no insignificant
 whitespace, no non-finite floats, and integers never widened to floats — which is what
-makes `blake3(verdict)` a usable cache key and a rebuilt transcript byte-stable.
+makes `sha256(verdict)` a usable cache key and a rebuilt transcript byte-stable.
 `loads` decodes against an explicit `shape`, which is required rather than inferred because
 a `lift()` step must decode a *previous* revision's types (see `omp.RecordedCall`).
 
@@ -847,7 +847,7 @@ decode compatibility (which registered types decode a recorded call) and the `li
 chain (which steps re-express it). It bumps when the argument schema or the verdict shape
 changes *meaning*, and for nothing else.
 
-The **artifact digest** is the second identity: a BLAKE3-256 content digest over the exact
+The **artifact digest** is the second identity: a SHA-256 content digest over the exact
 build that produced a projection — device docs wording, `prompt()` code, renderer code,
 and the package build they shipped in. It is the projection half of the provenance septet
 (`docs/py/14-deploy.md` owns package identity); the Rust-side computation is
@@ -870,7 +870,7 @@ replaces it.
 4. the `artifact_digest` that produced projections 2 and 3.
 
 The journal already has the shape: `Msg::ToolResult { content, details, … }`
-(`crates/storage/src/transcript/msg.rs:60-76`) stores parts beside verdict, and the split
+(`crates/journal/src/data.rs:538-564`) stores parts beside verdict, and the split
 blesses that pairing instead of fighting it. Ordinary replay — same model, same dialect —
 reuses the materialized original byte-for-byte, with no Python in the loop. Reprojection
 runs only on an **explicit model or dialect transition**, which is exactly when `lift()`
@@ -1160,7 +1160,7 @@ the gate writes when it spills a whole verdict.
 | `byte_len` | Exact stored length. Present so a projection can say "12.4 MB" without fetching anything. |
 | `url` | The typed `omp.ArtifactUrl` (`docs/py/09-journal.md`), rendering as `artifact://<id>`. The form to put in a projection; raw URL strings left every public signature with the typed-location ruling (UX#2). |
 
-On the wire this is `omp.thread.v1.Blob { hash (BLAKE3-256), mime, size, inline }`
+On the wire this is `omp.thread.v1.Blob { hash (SHA-256), mime, size, inline }`
 (`crates/proto/proto/omp/thread/v1/thread.proto:110-119`), whose own contract already states
 the rule this section exists to enforce: "inline/thumbnail/stub treatment is projection
 policy, never part shape." `hash` and `byte_len` are that message's `hash` and `size`;
@@ -1205,14 +1205,16 @@ Three rules govern it:
    information was gone. Its own `prunedAt` field marks the moment.
 
 **What the transcript can express today, honestly.** The live chain is reconstructed by one
-forward fold, `Log::live() -> Vec<u64>` (`crates/storage/src/transcript/reader.rs:69-177`),
-which splices `Reset`, `Rewind`, and `Compact` over the physical event-index list —
-`Kind::Compact { first_kept, … }` rotates the chain so the summary stands in for the
-discarded prefix (`reader.rs:123-133`). That is the patch protocol, and it operates at
-**whole-event granularity**. Field-level correction is `Kind::Amend { target, patch }`
-carrying `AmendPatch::{Prune { keep_blocks }, RetryRecovery { … }, Seq { seq }}`
-(`transcript/types.rs:203-228`), and `Prune` prunes an *assistant* message to a prefix of its
-blocks. **No existing amendment drops a tool result's `content` while retaining its
+forward walk, `live_chain(&[Entry]) -> impl Iterator<Item = &Entry>`
+(`crates/journal/src/chain.rs:12-15`): an absent `prior` selects the preceding entry in file
+order, an explicit `prior` walks to that identity, and a missing target or cycle terminates
+the walk rather than inventing ancestry. It operates at
+**whole-event granularity**. Field-level correction is the `patch@1` entry — `KindName::Patch`
+(`crates/journal/src/kind.rs:93`) carrying a serialized DOM operation list in `data::Patch`
+(`crates/journal/src/data.rs:742-747`); `omp-dom` owns the operation types. The earlier
+`AmendPatch::{Prune { keep_blocks }, RetryRecovery { … }, Seq { seq }}` vocabulary has no
+surviving implementation in the tree, and no journal type expresses pruning an *assistant*
+message to a prefix of its blocks. **No existing amendment drops a tool result's `content` while retaining its
 `details`.** So rule 1 above is a property of this design, not yet a capability of the
 journal; build item 6 specifies the missing amendment and why adding one is less trivial
 than it looks.
@@ -1482,7 +1484,7 @@ What changed:
   per-invocation decision procedure Core runs, with the Environment owning the gate
   (`docs/py/06-policy.md`) — where "redact `p.output`" is a field operation with an
   `ArtifactRef` swap, not a regex over prose that also has to avoid corrupting the
-  renderer's ability to parse it back. `PLAN.md` §D6 (D6, amended 2026-08-19)
+  renderer's ability to parse it back. Locked decision D6 (amended 2026-08-19)
   now says this in its own text — "no batch-level admission scheduler, no parallelism
   detection, no reordering", with each invocation gated independently by the
   per-invocation admission query Core answers — so the scope reading this document once
@@ -1528,42 +1530,46 @@ following are load-bearing and shipped:
   walk documented above is `registry.rs:558-575` verbatim.
 - Harness-owned `Args`/`Aborted` projection, with `useless` forced false for both
   (`registry.rs:339-348`, `render_arg_issue` at `:603-632`, `render_abort` at `:634-646`).
-- `live_hash()` — a BLAKE3 digest over ordered live `(name, family, n)` identities, order
-  independent of registration (`registry.rs:458-467`). This is already the right primitive
-  for detecting when the advertised set changed.
+- `slot_hash()` — a SHA-256 digest over the policy-resolved model-visible slots
+  (`registry.rs:2623-2650`), hashing only `Presentation::Slot` entries with
+  model-callable routes. This is already the right primitive for detecting when
+  the advertised set changed; `projection_hash()` (`registry.rs:2690-2711`) is the
+  registered-revision identity behind the projection cache.
 
-**`crates/agent`** — the loop-side wiring.
+**`crates/session`** — the projection-side wiring.
 
 - `TOOL_REV_PROP = "omp/tool-rev"` stamped onto both the tool-call and tool-result thread
-  items (`crates/agent/src/project.rs:257-261`, `:164-173`) and parsed back by
-  `tool_revision()` (`:278-299`).
+  items (`crates/session/src/projection.rs:167-169`, `:174-176`) and parsed back by
+  `tool_revision()` (`projection.rs:188-203`).
 - `project_thread_history(thread, registry, caps)` — the exact "call `lift()` once per turn
   for calls whose rev differs, skip already-live calls without decoding them" pass
-  (`project.rs:87-186`).
-- `batch.rs:811-818` — harness branches projected first, then `registry.prompt`, with
-  canonical wire parts as the fallback.
+  (`projection.rs:92-186`), driven through the serve seed and turn paths
+  (`crates/serve/src/inference.rs:503`, `:576-581`, `:2279`).
 
-**`crates/storage`** — the durable shape.
+**`crates/journal`** — the durable shape.
 
-- `Msg::ToolResult { call, tool, content, details: Option<Box<RawValue>>, error, useless,
-  provider_meta }` (`crates/storage/src/transcript/msg.rs:60-76`). `details` is already the
-  verdict slot and already holds verbatim JSON; `PartialEq` on `Msg` is byte equality of
-  stored JSON text specifically to preserve verbatim round trips (`msg.rs:78-80`).
-- `Kind::Compact { summary, short, first_kept, tokens_before, warning }`
-  (`event.rs:243-255`), `Kind::Amend { target, patch }` (`:298-304`),
-  `Kind::ToolBatchAuthorized` (`:317-318`), and content-addressed `BlobRef` throughout.
-- **The transcript patch protocol already ships**, and it is `Log::live() -> Vec<u64>`
-  (`transcript/reader.rs:69-177`) — one forward fold splicing `Reset` / `Rewind` / `Compact`
-  over the physical event-index list, replacing what the doc comment records as 6.1 million
-  explicit parent pointers across 5,257 rewinds in the measured corpus. Note for anyone
-  building on this: it is *not* `transcript/patch.rs`, which is `Patch<T>` — a tri-state
-  unchanged/set/clear **field** patch for partial record updates, unrelated to rewriting a
-  message list.
-- `AmendPatch::{Prune { keep_blocks }, RetryRecovery { … }, Seq { seq }}`
-  (`transcript/types.rs:203-228`) is the append-only field-level correction vocabulary, and
-  `Entry::{Ok, Tombstone}` (`reader.rs:15-19`) plus `Kind::Unknown(Box<RawValue>)`
-  (`event.rs:344-345`) are how unrecognized and malformed journal data stay addressable
-  instead of failing a load.
+- `ToolResult` — the `tool.result@1` terminal payload (`crates/journal/src/data.rs:538-564`) —
+  is an untagged `Outcome { outcome, prompt_parts, source_blob }` / `Fault { fault,
+  prompt_parts, source_blob }` pair. Its `outcome`/`fault` JSON is already the verdict slot
+  and already holds verbatim JSON; entries store payloads as single-line JSON text
+  (`crates/journal/src/entry.rs:81-82`), and derived `PartialEq` on `Entry` is byte equality
+  of that stored text specifically to preserve verbatim round trips
+  (`crates/journal/src/entry.rs:68-83`).
+- `compaction@1` — `KindName::Compaction` (`crates/journal/src/kind.rs:97`) with payload
+  `data::Compaction` (`crates/journal/src/data.rs:757-781`: content-addressed `summary`,
+  `boundary`, `method`, token estimates, `warning`, retained `frames`); field-level correction is
+  `patch@1` (`crates/journal/src/kind.rs:93`, `crates/journal/src/data.rs:742-747`); and
+  content-addressed `BlobRef` throughout (`crates/journal/src/blob.rs:47`).
+  `Kind::ToolBatchAuthorized` has no surviving implementation in the tree.
+- **The transcript branch protocol already ships.** `live_chain` / `abandoned`
+  (`crates/journal/src/chain.rs:12-27`) fold the tail-selected chain forward from `prior`
+  links — an absent `prior` selects the preceding entry, an explicit one walks to that
+  identity, and a missing target or cycle ends the walk rather than inventing ancestry.
+  Field-level correction is the `patch@1` entry — `KindName::Patch`
+  (`crates/journal/src/kind.rs:93`) carrying serialized DOM operations in `data::Patch`
+  (`crates/journal/src/data.rs:742-747`). Unrecognized kinds are rejected at frame parse
+  and at open (`crates/journal/src/sse.rs:276-279`, `crates/journal/src/lib.rs:423-425`)
+  rather than preserved as addressable tombstones.
 
 **`crates/tools`** — the reference implementations. `edit@hl.1` is the worked case:
 `SectionPayload` carries `old_revision`, `new_revision`, `applied_ops`, `rebased`, exact
@@ -1607,7 +1613,7 @@ Rust-side survey suggests.
   (`toolhost.proto:89-97`). The split this document describes exists on the wire; what is
   missing is laziness and branch fidelity (see build item 1).
 - `omp/thread/v1/thread.proto` supplies the blob shape a spilled verdict needs:
-  `Blob { hash (BLAKE3-256), mime, size, inline }` with the explicit rule that
+  `Blob { hash (SHA-256), mime, size, inline }` with the explicit rule that
   "inline/thumbnail/stub treatment is projection policy, never part shape"
   (`thread.proto:110-119`), and `Part`'s oneof of `text | thinking | blob | fallback`
   (`:67-75`). The design's "results reference, they do not embed" rule is already the
@@ -1680,7 +1686,7 @@ is the whole design decision:
 |---|---|---|---|
 | **A. One frame per projection** | reuse the existing per-`request_id` pattern, one round trip each | 1 RTT × items; `project_thread_history` walks every item, so ~400 items at ~30 µs is ~12 ms serialized behind request assembly, every turn | Rejected. A visible stall on long sessions, and it forces `ErasedTool::project_verdict` to become async on a path that is synchronous for every native tool. |
 | **B. Ship the projection to Rust** | compile a declarative projection DSL at `RegisterTools` time, evaluate in-process | 0 RTT | Rejected. `prompt()` is where a device expresses judgement. A DSL expressive enough to replace it is a language; one that is not pushes authors back to formatting inside `call()` — the exact disease. |
-| **C. Batched frames + content-addressed cache** | one `ProjectVerdicts` carrying every `(name, rev, details, caps)` still needed; reply carries parts in request order. Cache by `blake3(verdict ‖ caps ‖ rev ‖ projection_hash)` | 1 RTT per turn, amortized ~0 once warm | **Recommended.** |
+| **C. Batched frames + content-addressed cache** | one `ProjectVerdicts` carrying every `(name, rev, details, caps)` still needed; reply carries parts in request order. Cache by `sha256(verdict ‖ caps ‖ rev ‖ projection_hash)` | 1 RTT per turn, amortized ~0 once warm | **Recommended.** |
 
 Option C keeps `ErasedTool::project_verdict` synchronous by splitting it: a synchronous cache
 probe (`fn project_cached(&self, key: &ProjectionKey) -> Option<&ProjectedVerdict>`) plus one
@@ -1719,12 +1725,13 @@ execution capability" (`:439-443`). `advertise` simply does not follow the conve
 neighbours do. Filter it to `ToolRoute::Native`, and correct the doc comment to say what the
 body does.
 
-One consequence for this document's own claims: `live_hash` (`registry.rs:458-467`) is a single
-digest over *all* live identities, so it cannot serve as the prompt-cache identity while worker
-entries share that map — a device toggling would change the hash even though the advertised
-array should be byte-identical. Build item 6 keys the projection cache on
-`projection_hash`, which is a separate digest and unaffected; the advertised-slot identity
-needs the split `docs/py/01-devices.md` specifies. Do not reuse `live_hash` for both.
+One consequence for this document's own claims: the prompt-cache identity is the slot
+digest — `slot_hash` (`registry.rs:2623-2650`), SHA-256 over the policy-resolved
+model-visible slots — so a device toggling moves `device_hash` (`registry.rs:2654-2686`)
+and cannot touch it, while the slot-presented worker declarations the defect above
+describes do move it until its route filter lands. Build item 6 keys the projection
+cache on `projection_hash` (`registry.rs:2690-2711`), a separate digest over every
+registered `(name, rev)` plus its projection code. Do not reuse one hash for both.
 
 Cache sizing: bound by total cached part bytes, not entry count — a `SparseMap` keyed by a
 dense worker-local device id at the outer level, an LRU of
@@ -1878,23 +1885,22 @@ Design points:
 - Ownership: `docs/py/07-ui.md` owns `Tml`, `RenderCtx`, and the effect channel; this
   document owns the `(name, rev)` keying and the fold semantics.
 
-#### 5. An amendment that drops a projection and keeps the verdict (`crates/storage`)
+#### 5. An amendment that drops a projection and keeps the verdict (`crates/journal`)
 
 This design's central compaction claim has no mechanism behind it yet, and the reason is
 worth stating precisely rather than working around.
 
-The live chain fold is `Log::live() -> Vec<u64>`
-(`crates/storage/src/transcript/reader.rs:69-177`). It is the real patch protocol —
-`Kind::Rewind` truncates the working chain (`reader.rs:108-118`), `Kind::Reset` starts a new
-boundary (`:119-122`), `Kind::Compact { first_kept }` rotates the summary in front of the
-retained suffix (`:123-133`), and tombstones stay addressable as opaque ordinary events
-(`:173`). Every one of those operations removes or replaces **whole events**.
+The live chain walk is `live_chain(&[Entry]) -> impl Iterator<Item = &Entry>`
+(`crates/journal/src/chain.rs:12-15`), one forward pass over `prior` links from the file tail;
+the entries it does not reach are what `abandoned` returns
+(`crates/journal/src/chain.rs:17-27`), and the file stays append-only — no stored byte is
+rewritten. The projection it feeds replaces **whole events**, never fields.
 
-Field-level correction is `Kind::Amend { target, patch }` with
-`AmendPatch::{Prune { keep_blocks }, RetryRecovery { … }, Seq { seq }}`
-(`crates/storage/src/transcript/types.rs:203-228`). `Prune` truncates an *assistant* message
-to a prefix of its blocks. Nothing drops a `Msg::ToolResult`'s `content` while retaining its
-`details`. Until that exists, "compaction drops projections and keeps verdicts" is a design
+Field-level correction does not exist: the journal's only patch payload is `patch@1`'s
+`Patch { ops }` (`crates/journal/src/data.rs:742-747`) — a serialized array of DOM operations
+whose Rust types `omp-dom` owns. Nothing drops a tool result's model-facing `prompt_parts`
+while retaining its `outcome` (`crates/journal/src/data.rs:543-552`). Until that kind of
+amendment exists, "compaction drops projections and keeps verdicts" is a design
 property, not a shipped one — the only available move is to discard the whole tool-result
 event, which takes the verdict with it and defeats the entire point.
 
@@ -1917,38 +1923,42 @@ Two non-obvious constraints:
   variant.** An amendment nobody understands should be inert, not fatal — that is already the
   rule everywhere else in this file, and the asymmetry looks like an oversight rather than a
   decision.
-- **Do not add a second allocation to the `live()` path.** `live()` returns a freshly
-  allocated `Vec<u64>` per call and is invoked per projection. Amendment application must not
-  add another pass over it. Plan the amendments once into a `SparseMap` keyed by target event
-  index plus a bitvec of dropped-projection targets, then have the single existing fold
-  consult it — treating an untouched event as a move, not a copy. Anything that walks
-  `live()` a second time to apply patches is the wrong shape under the workspace allocation
-  discipline.
+- **Do not add a second pass over the live chain.** Live membership is not a
+  materialized identity list: `live_chain(entries)` (`crates/journal/src/chain.rs:12-15`)
+  is a lazily-computed iterator over the tail-selected chain, so there is no
+  `Vec<u64>` allocation to amortize — and no excuse to walk the chain twice.
+  Plan the amendments once into a `SparseMap` keyed by target event index plus
+  a bitvec of dropped-projection targets, then have the single existing fold
+  consult it — treating an untouched event as a move, not a copy. Anything that
+  replays `live_chain` a second time to apply patches is the wrong shape under
+  the workspace allocation discipline.
 
-#### 6. Byte-stable replay (`crates/storage`, `crates/tool`)
+#### 6. Byte-stable replay (`crates/journal`, `crates/tool`)
 
 "Replaying a transcript at the same rev gives byte-identical output" is the invariant that
 makes provider prefix caches survive a session reload. It is *asserted* by this design and
 not currently *enforced* anywhere. Enforcing it is discrete work.
 
-What already holds: `Msg` and `Kind` implement `PartialEq` as byte equality over stored JSON
-text specifically to preserve verbatim round trips
-(`crates/storage/src/transcript/msg.rs:78-80`, `event.rs:347-349`), and
-`Kind::Unknown(Box<RawValue>)` preserves foreign journal objects verbatim
-(`event.rs:344-345`). `project_thread_history` deliberately does not decode calls already at
+What already holds: `Kind` derives `PartialEq` (`crates/journal/src/kind.rs:100-107`), and
+entries store payloads as single-line JSON text with derived `PartialEq`, so entry equality
+is byte equality over the stored JSON specifically to preserve verbatim round trips
+(`crates/journal/src/entry.rs:68-83`), and
+`Kind::Unknown(Box<RawValue>)` has no surviving implementation: the journal accepts only the
+closed revision-1 vocabulary and rejects unknown kinds (`crates/journal/src/sse.rs:276-279`,
+`crates/journal/src/lib.rs:423-425`); payload bytes survive verbatim as single-line JSON text
+inside known kinds. `project_thread_history` deliberately does not decode calls already at
 the live rev, so their bytes and field presence pass through untouched
-(`crates/agent/src/project.rs:88-91,111-113`).
-
+(`crates/session/src/projection.rs:110-112`).
 What does not hold yet, in dependency order:
 
 1. **Canonical verdict serialization is not pinned.** `verdict_details` uses
    `serde_json::to_vec` (`crates/tool/src/lib.rs:466`), which is deterministic for a given
    Rust type but not for a Python-authored value where field order comes from a dict.
    `omp.dumps` must emit declaration order, and the host must reject a device whose codec is
-   not order-stable. Without this, `blake3(verdict)` is not a valid cache key and re-running
+   not order-stable. Without this, `sha256(verdict)` is not a valid cache key and re-running
    a lift produces different bytes for the same input.
 2. **Projection is not fingerprinted.** Add `Registry::projection_hash(&self) -> [u8; 32]`
-   alongside `live_hash` (`registry.rs:458-467`), digesting `(name, rev, projection code
+   — shipped as `projection_hash() -> Hash32` (`registry.rs:2690-2711`) — digesting `(name, rev, projection code
    identity)` for every registered revision. For native tools the code identity is the crate
    build id; for Python devices it is the content hash of the module the projection came
    from, which `crates/py`'s frozen-module machinery already computes. Store the hash in the
@@ -1966,7 +1976,7 @@ What does not hold yet, in dependency order:
    rev to `hl.3`, project twice, assert byte equality of both the lifted args and the lifted
    verdict, then assert the projected `Vec<Part>` is byte-identical across the two passes.
 4. **The projection cache must be keyed on everything that can change it.** From item 1 and
-   2: `blake3(verdict ‖ caps ‖ rev ‖ projection_hash)`. Omitting `projection_hash` is the
+   2: `sha256(verdict ‖ caps ‖ rev ‖ projection_hash)`. Omitting `projection_hash` is the
    subtle bug — a hot-reloaded extension would serve stale parts from cache while claiming
    determinism.
 
@@ -1975,7 +1985,7 @@ per registry mutation, and it turns "projections changed" from an invisible cach
 event into a loud one. That is the right trade; the alternative is a class of bug that
 manifests as unexplained cache misses and subtly different history weeks later.
 
-#### 7. Per-rev metrics and AutoQA attribution (`crates/telemetry`)
+#### 7. Per-rev metrics and AutoQA attribution (`crates/observability`)
 
 Feature-map `observability.md:101` records `pi.omp.agent.tool.calls` partitioned by *tool
 name and status* and `observability.md:193` records a `tool_calls` table keyed on tool name.
@@ -2051,10 +2061,11 @@ verdict is retained. Structured verdicts make reports *diffable*; the rev makes 
   `flume::Sender` (`crates/tool/src/incoming.rs:5,54`); batched projection/lift frames ride
   the same mailbox discipline. Renderer output is a coalesced state push, so the TUI's frame
   loop never awaits Python.
-- **Cache-key hashing is BLAKE3 over `verdict ‖ caps ‖ rev ‖ projection_hash`**, matching
-  `live_hash`'s length-delimited style (`registry.rs:597-601`) so the digest is
-  unambiguous; build item 6 explains why omitting `projection_hash` (the
-  `artifact_digest`) is the subtle bug.
+- **Cache-key hashing is SHA-256 over `verdict ‖ caps ‖ rev ‖ projection_hash`**, matching
+  the shipped registry digests: `slot_hash()` and `projection_hash()`
+  (`registry.rs:2623-2711`) open a versioned domain string and feed
+  length-delimited fields, so the digest is unambiguous; build item 6 explains
+  why omitting `projection_hash` (the `artifact_digest`) is the subtle bug.
 - **The gate's cost is one comparison on the common path — but its peak memory is not
   bounded today.** `verdict_details` compares `json.len() <= inline_limit` and returns without
   touching the network (`lib.rs:467-469`), so the *inline* path is I/O-free as designed. What
@@ -2086,7 +2097,7 @@ resource owner is the cleanup, and the verdict records which of the two honest o
 occurred. `docs/py/00-overview.md` owns the mechanism.
 
 That holds for Rust built-ins and for exec, whose `RunGuard` drop kills one command's process
-tree while the session survives (`PLAN.md` §D5, D5). For Python devices the unit is
+tree while the session survives (locked decision D5). For Python devices the unit is
 coarser: the topology ruling (one process and one site tree per extension, keyed
 `(layer, tier, extension)` — `docs/py/00-overview.md`) makes SIGKILL granularity one
 *extension's* process group, so cancelling one call takes down that extension's concurrent
@@ -2188,7 +2199,7 @@ what the ruling resolved, what it did not, and does not claim the residue is saf
    consequence: "Dropping a live handle requests cancellation. The supervisor then kills
    only the worker process group, reports effects-unknown, and replaces the worker"
    (`:169-172`). The kill is `killpg(…, SIGKILL)` against a process group the worker leads
-   (`:404`, `:513-517`), followed by `respawn` (`:806`). `PLAN.md` §D5 (D5)
+   (`:404`, `:513-517`), followed by `respawn` (`:806`). Locked decision D5
    fixes that mechanism — "Cancel = SIGKILL of that extension's process group +
    respawn"; "Interpreter interrupts are courtesy, never the mechanism" — and it stands.
    The wording mismatch this question used to carry is gone: D5 was amended 2026-08-19,
@@ -2270,11 +2281,11 @@ type collided with `docs/py/05-hooks.md`'s decision type of the same name; renam
   open question 8 were rewritten: per-extension processes bound collateral loss to one
   extension's process group, reversing Rev 1's "cancelling one device call takes every
   concurrently running device with it"; the recommended D5 amendment is stated and flagged
-  against `PLAN.md`, never silently contradicted; the residual open items (a
+  against the locked decision, never silently contradicted; the residual open items (a
   distinct collateral-loss abort reason, per-invocation isolation opt-in) stay in open
   question 8.
 
-**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the PLAN.md amendment:
+**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the D5/D6 amendment:
 
 - **Dispatch surface.** The `Faulted` hint in the `prompt()` example now retries via the
   `dyn` core tool (`{"do_": "invoke/lsp/restart"}`) where it previously named the retired
@@ -2283,7 +2294,7 @@ type collided with `docs/py/05-hooks.md`'s decision type of the same name; renam
   (`search`/`docs`/`invoke`), defined in `docs/py/01-devices.md` — which also defines
   `@omp.tool`, the ergonomic soft default alongside the path-aware `@omp.device`, and
   `omp.ToolPath`, the typed tool-tree path that replaces the retired device URL type.
-- **D5/D6 ratified.** `PLAN.md` §D5/§D6 was amended 2026-08-19: D5's third clause is
+- **D5/D6 ratified.** Locked decisions D5 and D6 were amended 2026-08-19: D5's third clause is
   now per-extension worker processes keyed `(layer, tier, extension)`, with pooling as
   explicit opt-in fate-sharing and approval as a durable Core-owned ticket; D6 explicitly
   permits the per-invocation decision procedure while prohibiting batch-level scheduling.
