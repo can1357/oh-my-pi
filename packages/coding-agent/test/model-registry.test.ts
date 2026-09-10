@@ -838,25 +838,13 @@ describe("ModelRegistry", () => {
 			});
 		});
 
-		test("keeps a built-in model route when a custom model uses another API", () => {
-			const flash = registry.find("zai", "glm-5.3-flash");
-			const glm53 = registry.find("zai", "glm-5.3");
-			expect(flash).toMatchObject({
-				api: "openai-completions",
-				baseUrl: "https://api.z.ai/api/coding/paas/v4",
-			});
-			expect(glm53).toMatchObject({
-				api: "anthropic-messages",
-				baseUrl: "https://api.z.ai/api/anthropic",
-			});
-		});
-
 		test("preserves Z.AI streamed content through the final assistant message", async () => {
 			const flash = registry.find("zai", "glm-5.3-flash");
 			if (!flash || flash.api !== "openai-completions") {
 				throw new Error("expected the bundled Z.AI flash model to use OpenAI Completions");
 			}
 			const openAIFlash = flash as Model<"openai-completions">;
+			expect(openAIFlash.baseUrl).toBe("https://api.z.ai/api/coding/paas/v4");
 			let requestUrl: string | undefined;
 			const fetchMock: FetchImpl = input => {
 				requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -903,6 +891,10 @@ describe("ModelRegistry", () => {
 			expect(requestUrl).toBe("https://api.z.ai/api/coding/paas/v4/chat/completions");
 			expect(result.content).toEqual(expect.arrayContaining([{ type: "text", text: "OK" }]));
 			expect(result.stopReason).toBe("stop");
+			expect(registry.find("zai", "glm-5.3")).toMatchObject({
+				api: "anthropic-messages",
+				baseUrl: "https://api.z.ai/api/anthropic",
+			});
 		});
 
 		test("keeps a discovered model route when the provider override uses another API", () => {
@@ -919,7 +911,7 @@ describe("ModelRegistry", () => {
 				maxTokens: 131_072,
 			});
 			const merged = mergeDiscoveredModel(model, model, {
-				api: "anthropic-messages",
+				baseUrlApis: ["anthropic-messages"],
 				baseUrl: "https://api.z.ai/api/anthropic",
 			});
 			expect(merged).toMatchObject({
@@ -928,7 +920,7 @@ describe("ModelRegistry", () => {
 			});
 		});
 
-		test("does not apply an ambiguous provider route to built-in models", () => {
+		test("scopes multiple custom APIs sharing the provider baseUrl", () => {
 			const multiApiRegistry = readonlyRegistry({
 				providers: {
 					zai: {
@@ -960,9 +952,92 @@ describe("ModelRegistry", () => {
 				},
 			});
 			const flash = multiApiRegistry.find("zai", "glm-5.3-flash");
+			const glmAnthropic = multiApiRegistry.find("zai", "glm-anthropic");
+			const glmOpenai = multiApiRegistry.find("zai", "glm-openai");
+			expect(flash).toMatchObject({ api: "openai-completions", baseUrl: "https://api.z.ai/api/anthropic" });
+			expect(glmAnthropic).toMatchObject({ baseUrl: "https://api.z.ai/api/anthropic" });
+			expect(glmOpenai).toMatchObject({ baseUrl: "https://api.z.ai/api/anthropic" });
+		});
+
+		test("override-only provider api keeps a bundled model on its catalog route", () => {
+			const apiOnlyRegistry = readonlyRegistry({
+				providers: {
+					zai: {
+						baseUrl: "https://api.z.ai/api/anthropic",
+						apiKey: "TEST_KEY",
+						api: "anthropic-messages",
+					},
+				},
+			});
+			const flash = apiOnlyRegistry.find("zai", "glm-5.3-flash");
 			expect(flash).toMatchObject({
 				api: "openai-completions",
 				baseUrl: "https://api.z.ai/api/coding/paas/v4",
+			});
+		});
+
+		test("a custom model baseUrl keeps its own host and does not scope the provider", () => {
+			const directHostRegistry = readonlyRegistry({
+				providers: {
+					zai: {
+						baseUrl: "https://api.z.ai/api/anthropic",
+						apiKey: "TEST_KEY",
+						models: [
+							{
+								id: "glm-direct",
+								api: "anthropic-messages",
+								name: "GLM Direct",
+								baseUrl: "https://direct.example.com",
+								reasoning: true,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 1_000_000,
+								maxTokens: 131_072,
+							},
+						],
+					},
+				},
+			});
+			const direct = directHostRegistry.find("zai", "glm-direct");
+			const flash = directHostRegistry.find("zai", "glm-5.3-flash");
+			expect(direct).toMatchObject({ baseUrl: "https://direct.example.com" });
+			expect(flash).toMatchObject({ baseUrl: "https://api.z.ai/api/anthropic" });
+		});
+
+		test("refresh keeps pi-native gateway baseUrl across APIs", async () => {
+			writeRawModelsJson({
+				zai: {
+					baseUrl: "http://localhost:4000",
+					apiKey: "gateway-token",
+					api: "anthropic-messages",
+					transport: "pi-native",
+					models: [
+						{
+							id: "glm-anthropic",
+							api: "anthropic-messages",
+							name: "GLM Anthropic",
+							reasoning: true,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 1_000_000,
+							maxTokens: 131_072,
+						},
+					],
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			await registry.refreshProvider("zai", "offline");
+
+			const flash = registry.find("zai", "glm-5.3-flash");
+			expect(flash).toMatchObject({
+				api: "openai-completions",
+				baseUrl: "http://localhost:4000",
+				transport: "pi-native",
+			});
+			const glmAnthropic = registry.find("zai", "glm-anthropic");
+			expect(glmAnthropic).toMatchObject({
+				api: "anthropic-messages",
+				baseUrl: "http://localhost:4000",
 			});
 		});
 	});

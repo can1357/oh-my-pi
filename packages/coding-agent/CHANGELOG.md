@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Built-in models now retain their catalog endpoint when a custom model under the same provider uses another API, preventing provider-level URLs from routing mixed models incorrectly ([#11608](https://github.com/can1357/oh-my-pi/pull/11608) by [@danilouchoa](https://github.com/danilouchoa)).
+- Provider `baseUrl` overrides now scope by API: custom models inheriting the provider URL define which APIs it covers (a provider-level `api` covers override-only providers), `transport: pi-native` keeps its gateway `baseUrl` provider-wide, and a bundled model no longer routes to another API's endpoint ([#11608](https://github.com/can1357/oh-my-pi/pull/11608) by [@danilouchoa](https://github.com/danilouchoa)).
 
 ## [18.1.17] - 2026-09-10
 
