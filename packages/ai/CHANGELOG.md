@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Azure Responses continuations retain prior response IDs, and invalid gateway requests return HTTP 400.
 - Treat deterministic request-validation failures as terminal instead of retrying another provider.
 
 - Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, and context-overflow detection reuses the central classifier.

@@ -114,6 +114,9 @@ export function classifyGatewayError(err: unknown): GatewayErrorClassification {
 	// don't trip on incidental three-digit numbers ("took 200ms").
 	const embedded = extractEmbeddedStatus(message);
 	if (embedded !== undefined) return withOwnerDisposition(err, bucketStatus(embedded, message));
+	if (err instanceof Error && err.name === "ValidationError") {
+		return withOwnerDisposition(err, { status: 400, type: "invalid_request_error", message });
+	}
 
 	// Free-text abort wording sits below authoritative statuses on purpose: a
 	// provider-reported `HTTP 503: upstream request aborted` is a retryable
