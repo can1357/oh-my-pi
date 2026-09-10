@@ -70,8 +70,7 @@ async function approvePreludeInvocation(
 ): Promise<void> {
 	context.signal?.throwIfAborted();
 	const { approvalMode: mode, userPolicies: policies } = resolveApprovalFromContext(
-		context.context ??
-			(context.session.settings ? { settings: context.session.settings } : undefined),
+		context.context ?? (context.session.settings ? { settings: context.session.settings } : undefined),
 	);
 	const subject: { name: string; approval?: ToolApproval } = { name: definition.name };
 	if (definition.approval !== undefined) subject.approval = definition.approval;
