@@ -60,9 +60,12 @@ function wireCellFields(tool: EvalTool): {
 }
 
 describe("eval tool description", () => {
-	it("links the agents topic and documents agent() there when spawns are allowed", () => {
+	it("links the agents topic and documents agent() model selection there when spawns are allowed", () => {
 		expect(getEvalToolDescription({ py: true, js: true, spawns: true })).toContain("xd://eval/agents");
-		expect(getEvalDocTopics({ py: true, js: true, spawns: true }).agents).toContain("agent(prompt");
+		const agents = getEvalDocTopics({ py: true, js: true, spawns: true }).agents;
+		expect(agents).toContain("agent(prompt");
+		expect(agents).toContain("ordered list of candidates");
+		expect(agents).toContain("no outside fallback");
 	});
 
 	it("routes model calls, setup, budget, and defined tools to discoverable topics", () => {
