@@ -59,6 +59,9 @@ interface RegistryOverrides {
 	getAll?: () => Model[];
 	getDiscoverableProviders?: () => string[];
 	getProviderDiscoveryState?: (providerId: string) => unknown;
+	cycleProviderKeys?: (
+		providerId: string,
+	) => Promise<{ source: "config" | "stored"; index?: number; total: number } | undefined>;
 }
 
 function makeRegistry(models: () => Model[], overrides: RegistryOverrides = {}): ModelRegistry {
@@ -71,6 +74,7 @@ function makeRegistry(models: () => Model[], overrides: RegistryOverrides = {}):
 		getDiscoverableProviders: overrides.getDiscoverableProviders ?? (() => []),
 		getProviderDiscoveryState: overrides.getProviderDiscoveryState ?? (() => undefined),
 		authStorage: { hasAuth: () => false },
+		cycleProviderKeys: overrides.cycleProviderKeys ?? (async () => undefined),
 	} as unknown as ModelRegistry;
 }
 
@@ -1226,6 +1230,65 @@ describe("ModelHub", () => {
 
 			hub.handleInput("\n");
 			expect(onLoginRequest).toHaveBeenCalledWith("anthropic");
+		});
+	});
+
+	describe("provider API key cycling", () => {
+		const ALT_Z = `${String.fromCharCode(27)}z`; // ESC+z: what terminals send for Alt+Z
+
+		test("Alt+Z cycles the focused provider keys and shows the new position", async () => {
+			const cycleProviderKeys = vi.fn(async (_providerId: string) => ({
+				source: "config" as const,
+				index: 1,
+				total: 3,
+			}));
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: { cycleProviderKeys },
+			});
+			installTestTheme();
+
+			hub.handleInput(DOWN); // All models → prov-a
+			expect(footerLine(hub.render(220))).toContain("Alt+Z cycle keys");
+
+			hub.handleInput(ALT_Z);
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(cycleProviderKeys).toHaveBeenCalledWith("prov-a");
+			expect(footerLine(hub.render(220))).toContain("key 2/3");
+		});
+
+		test("Alt+Z reports a single key when there is nothing to cycle", async () => {
+			const cycleProviderKeys = vi.fn(async (_providerId: string) => undefined);
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: { cycleProviderKeys },
+			});
+			installTestTheme();
+
+			hub.handleInput(DOWN); // All models → prov-a
+			hub.handleInput(ALT_Z);
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(cycleProviderKeys).toHaveBeenCalledWith("prov-a");
+			expect(footerLine(hub.render(220))).toContain("single API key");
+		});
+
+		test("Alt+Z off a provider does nothing", async () => {
+			const cycleProviderKeys = vi.fn(async (_providerId: string) => ({ source: "stored" as const, total: 2 }));
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: { cycleProviderKeys },
+			});
+			installTestTheme();
+
+			hub.handleInput(ALT_Z); // still on All models
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(cycleProviderKeys).not.toHaveBeenCalled();
 		});
 	});
 });

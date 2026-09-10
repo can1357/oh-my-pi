@@ -20,7 +20,7 @@ export interface ProviderValidationModel {
 export interface ProviderValidationConfig {
 	baseUrl?: string;
 	headers?: Record<string, string>;
-	apiKey?: string;
+	apiKey?: string | string[];
 	api?: Api;
 	auth?: ProviderAuthMode;
 	oauthConfigured?: boolean;
@@ -33,6 +33,15 @@ export interface ProviderValidationConfig {
 	modelOverrides?: Record<string, unknown>;
 	models: ProviderValidationModel[];
 }
+/**
+ * Whether a provider validation config carries any API key material. An empty
+ * list counts as absent (the schema narrow rejects it, but validation must
+ * still fail closed if one slips through).
+ */
+function hasProviderApiKeyValue(value: string | string[] | undefined): boolean {
+	return Array.isArray(value) ? value.length > 0 : value !== undefined && value !== "";
+}
+
 
 export function validateProviderConfiguration(
 	providerName: string,
@@ -49,7 +58,7 @@ export function validateProviderConfiguration(
 				!config.baseUrl &&
 				!config.headers &&
 				!config.compat &&
-				!config.apiKey &&
+				!hasProviderApiKeyValue(config.apiKey) &&
 				config.auth !== "none" &&
 				!config.disableStrictTools &&
 				!config.guardrailIdentifier &&
@@ -69,8 +78,8 @@ export function validateProviderConfiguration(
 		}
 		const requiresAuth =
 			mode === "runtime-register"
-				? !config.apiKey && !config.oauthConfigured
-				: !config.apiKey && (config.auth ?? "apiKey") !== "none" && (config.auth ?? "apiKey") !== "oauth";
+				? !hasProviderApiKeyValue(config.apiKey) && !config.oauthConfigured
+				: !hasProviderApiKeyValue(config.apiKey) && (config.auth ?? "apiKey") !== "none" && (config.auth ?? "apiKey") !== "oauth";
 		if (requiresAuth) {
 			throw new Error(
 				mode === "runtime-register"

@@ -193,6 +193,8 @@ export class ModelHubComponent implements Component {
 	#availableItems: ModelBrowserItem[] = [];
 	#recentItems: ModelBrowserItem[] = [];
 	#configError: string | undefined;
+	/** Transient result of the last Alt+Z key cycle; cleared on the next input. Never holds key material. */
+	#keyCycleNotice: string | undefined;
 
 	#entries: SidebarEntry[] = [];
 	// Sidebar sections from the last registry sync; #composeEntries assembles
@@ -769,6 +771,21 @@ export class ModelHubComponent implements Component {
 		}
 	}
 
+	async #cycleProviderKeys(providerId: string): Promise<void> {
+		try {
+			const result = await this.#registry.cycleProviderKeys(providerId);
+			this.#keyCycleNotice = result
+				? result.source === "config"
+					? `Cycled ${providerId} to key ${(result.index ?? 0) + 1}/${result.total}`
+					: `Cycled ${providerId} stored keys (${result.total} keys)`
+				: `${providerId} has a single API key`;
+		} catch (error) {
+			this.#keyCycleNotice = `Could not cycle ${providerId} keys: ${error instanceof Error ? error.message : String(error)}`;
+		} finally {
+			this.#tui.requestRender();
+		}
+	}
+
 	#formatDiscoveryAge(fetchedAt: number | undefined): string | undefined {
 		if (!fetchedAt) return undefined;
 		const ageMs = Math.max(0, Date.now() - fetchedAt);
@@ -1238,6 +1255,9 @@ export class ModelHubComponent implements Component {
 			return;
 		}
 
+		// A previous Alt+Z result yields to the next keypress.
+		this.#keyCycleNotice = undefined;
+
 		const entry = this.#activeEntry();
 		const rolesView = entry.kind === "roles" && this.#assigning === null;
 		const lockedView = entry.kind === "provider" && entry.locked && this.#assigning === null;
@@ -1249,6 +1269,12 @@ export class ModelHubComponent implements Component {
 		if (matchesKey(data, "f5")) {
 			if (entry.kind === "provider" && !entry.locked) {
 				this.#scheduleProviderRefresh(entry.providerId ?? "", { force: true });
+			}
+			return;
+		}
+		if (matchesKey(data, "alt+z")) {
+			if (entry.kind === "provider" && !entry.locked && this.#assigning === null) {
+				void this.#cycleProviderKeys(entry.providerId ?? "");
 			}
 			return;
 		}
@@ -2002,6 +2028,7 @@ export class ModelHubComponent implements Component {
 					return "Enter assign · ↑/↓ providers · type to search · Esc cancel";
 			}
 		}
+		if (this.#keyCycleNotice) return this.#keyCycleNotice;
 		const entry = this.#activeEntry();
 		if (entry.kind === "roles") {
 			if (this.#focus !== "list") {
@@ -2024,7 +2051,8 @@ export class ModelHubComponent implements Component {
 		}
 		const arrows = this.#focus === "scope" ? "↑/↓ providers · → models" : "↑/↓ models · ← providers";
 		const refresh = entry.kind === "provider" ? " · F5 refresh" : "";
-		return `Enter assign roles · ${arrows} · type to search${refresh} · Esc close`;
+		const cycle = entry.kind === "provider" ? " · Alt+Z cycle keys" : "";
+		return `Enter assign roles · ${arrows} · type to search${refresh}${cycle} · Esc close`;
 	}
 
 	/** Footer row: active strip (chips) or the contextual hint line. */

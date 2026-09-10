@@ -365,6 +365,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#getCacheIncludingExpiredStmt: Statement;
 	#upsertCacheStmt: Statement;
 	#deleteCachePrefixStmt: Statement;
+	#getConfigApiKeyIndexStmt: Statement;
+	#setConfigApiKeyIndexStmt: Statement;
 	#deleteExpiredCacheStmt: Statement;
 	#updateIfMatchesWithLeaseStmt: Statement;
 	#deleteIfMatchesWithLeaseStmt: Statement;
@@ -452,6 +454,12 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			"INSERT INTO cache (key, value, expires_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at",
 		);
 		this.#deleteCachePrefixStmt = this.#db.prepare("DELETE FROM cache WHERE substr(key, 1, ?) = ?");
+		this.#getConfigApiKeyIndexStmt = this.#db.prepare(
+			"SELECT cycle_index FROM config_api_key_cycle WHERE provider = ?",
+		);
+		this.#setConfigApiKeyIndexStmt = this.#db.prepare(
+			"INSERT INTO config_api_key_cycle (provider, cycle_index) VALUES (?, ?) ON CONFLICT(provider) DO UPDATE SET cycle_index = excluded.cycle_index",
+		);
 		this.#deleteExpiredCacheStmt = this.#db.prepare(`DELETE FROM cache WHERE expires_at <= ${SQLITE_NOW_EPOCH}`);
 		this.#getCredentialBlockStmt = this.#db.prepare(
 			"SELECT blocked_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ? AND blocked_until_ms > ?",
@@ -649,6 +657,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			this.#createAuthCredentialsTable();
 			this.#createAuthCredentialBlocksTable();
 			this.#createAuthCredentialRefreshLeasesTable();
+			this.#createConfigApiKeyCycleTable();
 			this.#createAuthCredentialBlockCompatibilityObjects();
 			this.#createAuthChangeTrackingObjects();
 			this.#writeAuthSchemaVersion(AUTH_SCHEMA_VERSION);
@@ -668,10 +677,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 		this.#createAuthCredentialIndexes();
 		this.#createAuthCredentialBlocksTable();
-		this.#createAuthCredentialRefreshLeasesTable();
 		if (schemaVersion <= AUTH_SCHEMA_VERSION) {
 			this.#createAuthCredentialBlockCompatibilityObjects();
 		}
+		this.#createAuthCredentialRefreshLeasesTable();
+		this.#createConfigApiKeyCycleTable();
 		this.#createAuthChangeTrackingObjects();
 		this.#backfillCredentialIdentityKeys();
 		// Rewriting an already-current version row is a no-op write transaction
@@ -974,6 +984,21 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 	#createAuthCredentialRefreshLeasesTable(): void {
 		SqliteAuthCredentialStore.#ensureAuthCredentialRefreshLeasesTable(this.#db);
+	}
+
+	/**
+	 * Cursor for list-form config apiKeys (`providers.<name>.apiKey`): which
+	 * element `omp key-cycle` activated last. Purely additive
+	 * (`IF NOT EXISTS`, no schema-version bump): the row holds an integer
+	 * index only, never key material.
+	 */
+	#createConfigApiKeyCycleTable(): void {
+		this.#db.run(`
+			CREATE TABLE IF NOT EXISTS config_api_key_cycle (
+				provider TEXT PRIMARY KEY,
+				cycle_index INTEGER NOT NULL
+			);
+		`);
 	}
 
 	#migrateAuthSchema(fromVersion: number): void {
@@ -1535,6 +1560,23 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		}
 	}
 
+	getConfigApiKeyIndex(provider: string): number | undefined {
+		try {
+			const row = this.#getConfigApiKeyIndexStmt.get(provider) as { cycle_index?: number } | undefined;
+			return typeof row?.cycle_index === "number" ? row.cycle_index : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	setConfigApiKeyIndex(provider: string, index: number): void {
+		try {
+			this.#setConfigApiKeyIndexStmt.run(provider, index);
+		} catch {
+			// Ignore cursor write failures: cycling still works process-locally.
+		}
+	}
+
 	getCredentialBlock(credentialId: number, providerKey: string, blockScope: string): number | undefined {
 		const nowMs = Date.now();
 		const isCodexBlock = providerKey === LEGACY_CODEX_BLOCK_PROVIDER_KEY;
@@ -2000,6 +2042,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#getCacheIncludingExpiredStmt.finalize();
 		this.#upsertCacheStmt.finalize();
 		this.#deleteExpiredCacheStmt.finalize();
+		this.#getConfigApiKeyIndexStmt.finalize();
+		this.#setConfigApiKeyIndexStmt.finalize();
 		this.#getCredentialBlockStmt.finalize();
 		this.#listCredentialBlocksByCredentialStmt.finalize();
 		this.#upsertCredentialBlockStmt.finalize();

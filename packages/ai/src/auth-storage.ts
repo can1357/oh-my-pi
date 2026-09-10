@@ -457,6 +457,14 @@ export interface AuthCredentialStore {
 	/** Read recorded usage-limit snapshots, oldest first. */
 	listUsageHistory?(query?: UsageHistoryQuery): UsageHistoryEntry[];
 	/**
+	 * Persisted cursor for a list-form config apiKey (`providers.<name>.apiKey`):
+	 * which element is active. Only the integer index is stored — never key
+	 * material. Optional: stores without durable local storage (e.g. the
+	 * broker remote store) omit these and the cursor stays process-local.
+	 */
+	getConfigApiKeyIndex?(provider: string): number | undefined;
+	setConfigApiKeyIndex?(provider: string, index: number): void;
+	/**
 	 * Client hook: forward locally observed request usage. Remote broker stores
 	 * batch these to the broker so it can attribute token burn per install;
 	 * local stores omit it and observation is skipped.
@@ -1346,8 +1354,16 @@ export class AuthStorage {
 	#data: Map<string, StoredCredential[]> = new Map();
 	#runtimeOverrides: Map<string, string> = new Map();
 	#configOverrides: Map<string, string> = new Map();
+	/**
+	 * Active element position per list-form config apiKey, for masked
+	 * operator display (`key i/N`). Carries no key material; the registry
+	 * publishes it on install/cycle and it drops with the override.
+	 */
+	#configKeyPositions: Map<string, { index: number; total: number }> = new Map();
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
 	#providerRoundRobinIndex: Map<string, number> = new Map();
+	/** Manual per-provider rotation offset for stored api_key rows (user-initiated key cycling). */
+	#manualApiKeyOffset = new Map<string, number>();
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
 	#sessionLastCredential: Map<
 		string,
@@ -1604,6 +1620,39 @@ export class AuthStorage {
 	 */
 	removeConfigApiKey(provider: string): void {
 		this.#configOverrides.delete(provider);
+		this.#configKeyPositions.delete(provider);
+	}
+
+	/**
+	 * Record which element of a list-form config apiKey is active, for masked
+	 * operator display. Pass undefined for single-string keys (no suffix).
+	 *
+	 * The index is also written through to the credential store so `omp
+	 * key-cycle` advances across processes: each CLI invocation builds a fresh
+	 * registry, which re-seeds its in-memory cursor from the persisted index
+	 * (see `getConfigApiKeyIndex`). Only the integer index persists — never
+	 * key material. Clearing is in-memory only: reload drops and repopulates
+	 * these maps, and the persisted cursor is what restores the position.
+	 * Stores without durable storage (broker remote) skip persistence and the
+	 * cursor stays process-local.
+	 */
+	setConfigApiKeyPosition(provider: string, position: { index: number; total: number } | undefined): void {
+		if (position === undefined) {
+			this.#configKeyPositions.delete(provider);
+		} else {
+			this.#configKeyPositions.set(provider, position);
+			this.#store.setConfigApiKeyIndex?.(provider, position.index);
+		}
+	}
+
+	/**
+	 * Active list-form config apiKey index for `provider`: the in-memory
+	 * position first, else the persisted cycle cursor (if any). Callers clamp
+	 * to the live list length — a persisted index may outlive the list edit
+	 * that shrank it.
+	 */
+	getConfigApiKeyIndex(provider: string): number | undefined {
+		return this.#configKeyPositions.get(provider)?.index ?? this.#store.getConfigApiKeyIndex?.(provider);
 	}
 
 	/**
@@ -1612,6 +1661,7 @@ export class AuthStorage {
 	 */
 	clearConfigApiKeys(): void {
 		this.#configOverrides.clear();
+		this.#configKeyPositions.clear();
 	}
 
 	/**
@@ -1815,14 +1865,31 @@ export class AuthStorage {
 	 */
 	#getCredentialOrder(providerKey: string, sessionId: string | undefined, total: number): number[] {
 		if (total <= 1) return [0];
+		const manual = this.#manualApiKeyOffset.get(providerKey) ?? 0;
 		const start = sessionId
-			? this.#getHashedIndex(sessionId, total)
-			: this.#getNextRoundRobinIndex(providerKey, total);
+			? (this.#getHashedIndex(sessionId, total) + manual) % total
+			: (this.#getNextRoundRobinIndex(providerKey, total) + manual) % total;
 		const order: number[] = [];
 		for (let i = 0; i < total; i++) {
 			order.push((start + i) % total);
 		}
 		return order;
+	}
+
+	/**
+	 * Manually advance to the next stored api_key row for a provider
+	 * (user-initiated key cycling, e.g. Alt+Z in the model hub). Unlike
+	 * failure-driven rotation this marks nothing suspect, blocks nothing,
+	 * and clears nothing: it only shifts where the next resolution starts.
+	 * Scoped to api_key rows; OAuth and other types are untouched. Returns
+	 * the stored total, or undefined when fewer than two api_key rows exist.
+	 */
+	cycleStoredApiKey(provider: string): { total: number } | undefined {
+		const total = this.#getStoredCredentials(provider).filter(entry => entry.credential.type === "api_key").length;
+		if (total < 2) return undefined;
+		const key = this.#getProviderTypeKey(provider, "api_key");
+		this.#manualApiKeyOffset.set(key, (((this.#manualApiKeyOffset.get(key) ?? 0) % total) + 1) % total);
+		return { total };
 	}
 
 	#toScopedBackoffKey(providerKey: string, blockScope: string | undefined): string {
@@ -2391,6 +2458,11 @@ export class AuthStorage {
 		for (const key of this.#providerRoundRobinIndex.keys()) {
 			if (key.startsWith(`${provider}:`)) {
 				this.#providerRoundRobinIndex.delete(key);
+			}
+		}
+		for (const key of this.#manualApiKeyOffset.keys()) {
+			if (key.startsWith(`${provider}:`)) {
+				this.#manualApiKeyOffset.delete(key);
 			}
 		}
 		this.#sessionLastCredential.delete(provider);
@@ -7315,7 +7387,9 @@ export class AuthStorage {
 			return "runtime override (--api-key)";
 		}
 		if (this.#configOverrides.has(provider)) {
-			return "config override (models.yml)";
+			const position = this.#configKeyPositions.get(provider);
+			// Masked position only (`key i/N`) — never key material.
+			return position ? `config override (models.yml) key ${position.index + 1}/${position.total}` : "config override (models.yml)";
 		}
 
 		const baseLabel = this.#sourceLabel ?? "local store";
