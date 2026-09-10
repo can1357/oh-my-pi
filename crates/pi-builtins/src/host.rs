@@ -40,6 +40,10 @@ use std::{
 		atomic::{AtomicBool, Ordering},
 	},
 };
+#[cfg(windows)]
+use std::env;
+#[cfg(any(windows, test))]
+use std::{ffi::OsStr, path::Component};
 
 use parking_lot::Mutex;
 
@@ -224,6 +228,20 @@ impl Drop for CancelOnDrop {
 	}
 }
 
+#[cfg(any(windows, test))]
+fn resolve_windows_tmp_alias(path: &Path, temp_dir: impl FnOnce() -> PathBuf) -> Option<PathBuf> {
+	let mut components = path.components();
+	if components.next() != Some(Component::RootDir)
+		|| components.next() != Some(Component::Normal(OsStr::new("tmp")))
+	{
+		return None;
+	}
+
+	let mut native = temp_dir();
+	native.push(components.as_path());
+	Some(native)
+}
+
 impl Host {
 	/// The name the utility was invoked as. Differs from [`Utility::NAME`] when
 	/// one implementation backs several builtins (`grep` and `rg`).
@@ -236,7 +254,9 @@ impl Host {
 		&self.cwd
 	}
 
-	/// Resolves `path` against [`Host::cwd`]; absolute paths pass through.
+	/// Resolves `path` against [`Host::cwd`]; absolute paths pass through except
+	/// for the POSIX `/tmp` alias, which maps to the system temporary directory
+	/// on Windows.
 	///
 	/// Every path argument must go through this before touching the
 	/// filesystem: the host process's current directory is unrelated to the
@@ -244,6 +264,10 @@ impl Host {
 	pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
 		let normalized_path = brush_core::sys::fs::normalize_shell_path(path.as_ref());
 		let path = normalized_path.as_ref();
+		#[cfg(windows)]
+		if let Some(temp_path) = resolve_windows_tmp_alias(path, env::temp_dir) {
+			return temp_path;
+		}
 		if path.is_absolute() {
 			path.to_path_buf()
 		} else {
@@ -1140,9 +1164,12 @@ mod testing {
 	use parking_lot::Mutex;
 
 	use super::{
-		Arc, AtomicBool, GuardedStream, HashMap, Host, OpenFile, OsString, PathBuf, Read, Sigpipe,
-		SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles, run_caught,
+		Arc, AtomicBool, GuardedStream, HashMap, Host, OpenFile, OsString, Path, PathBuf, Read, Sigpipe,
+		SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles, resolve_windows_tmp_alias,
+		run_caught,
 	};
+	#[cfg(windows)]
+	use super::env;
 
 	/// Captured in-memory output from [`Host::for_test`].
 	pub(crate) struct Capture {
@@ -1251,12 +1278,32 @@ mod testing {
 		}
 	}
 
+	#[test]
+	fn windows_tmp_alias_preserves_suffix_under_system_temp() {
+		let temp = PathBuf::from(r"C:\Users\Adam\AppData\Local\Temp");
+		let probe = temp.join("probe");
+
+		assert_eq!(
+			resolve_windows_tmp_alias(Path::new("/tmp"), || temp.clone()).as_deref(),
+			Some(temp.as_path()),
+		);
+		assert_eq!(
+			resolve_windows_tmp_alias(Path::new("/tmp/probe"), || temp.clone()).as_deref(),
+			Some(probe.as_path()),
+		);
+		assert_eq!(
+			resolve_windows_tmp_alias(Path::new("/tmpfile"), || temp.clone()),
+			None,
+		);
+	}
+
 	#[cfg(windows)]
 	#[test]
-	fn resolves_msys_drive_aliases_to_native_drive() {
+	fn resolves_msys_aliases_to_native_locations() {
 		let (host, _) = Host::for_test("test", "", r"C:\workspace");
 
 		assert_eq!(host.resolve("/c/Users/Adam/file.txt"), PathBuf::from(r"C:\Users\Adam\file.txt"));
+		assert_eq!(host.resolve("/tmp/probe"), env::temp_dir().join("probe"));
 	}
 
 	/// Parses `argv` and runs `U` against an in-memory host, mirroring what the
