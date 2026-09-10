@@ -2,8 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { computeDefaultSessionDir } from "@oh-my-pi/pi-coding-agent/session/session-paths";
+import { computeDefaultSessionDir, writeTerminalBreadcrumb } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { getAgentDir, getCustomSessionRootsDir, getSessionsDir, hashPath, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const cleanup: string[] = [];
 
@@ -63,5 +64,29 @@ describe("legacy session directory migration", () => {
 
 		expect(fs.readFileSync(recreated, "utf8")).toBe("older-process-write\n");
 		expect(fs.readFileSync(destination, "utf8")).toBe("canonical\n");
+	});
+});
+
+describe("custom session-root registry", () => {
+	test("records a relocated session root and skips managed ones", () => {
+		const agentDir = makeTempDir("omp-agent-");
+		const cwd = makeTempDir("omp-cwd-");
+		const originalAgentDir = getAgentDir();
+		setAgentDir(agentDir);
+		try {
+			// A relative --session-dir resolves against cwd and lands in the registry.
+			writeTerminalBreadcrumb(cwd, path.join(".omp-sessions", "work.jsonl"));
+			const expectedRoot = path.join(cwd, ".omp-sessions");
+			const marker = path.join(getCustomSessionRootsDir(agentDir), hashPath(expectedRoot));
+			expect(fs.readFileSync(marker, "utf8")).toBe(expectedRoot);
+
+			// A transcript under the managed sessions root is never registered.
+			const managedFile = path.join(getSessionsDir(agentDir), "project", "s.jsonl");
+			writeTerminalBreadcrumb(cwd, managedFile);
+			const managedMarker = path.join(getCustomSessionRootsDir(agentDir), hashPath(path.dirname(managedFile)));
+			expect(fs.existsSync(managedMarker)).toBe(false);
+		} finally {
+			setAgentDir(originalAgentDir);
+		}
 	});
 });

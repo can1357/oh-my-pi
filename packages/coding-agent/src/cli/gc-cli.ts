@@ -6,6 +6,7 @@ import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import {
 	getAgentDir,
 	getBlobsDir,
+	getCustomSessionRootsDir,
 	getHistoryDbPath,
 	getModelDbPath,
 	getSessionsDir,
@@ -299,14 +300,42 @@ async function collectReferencedBlobHashes(sessionRoots: string[]): Promise<Set<
 }
 
 /**
+ * Custom session-storage roots recorded in the persistent registry
+ * (`<agentDir>/custom-session-roots/*`, one marker file per relocated
+ * directory whose content is its absolute path). A `--session-dir`/`--session`
+ * transcript stores its `blob:sha256:` references outside `<agentDir>/sessions`
+ * yet externalizes images into the shared agent-global blob store, so the mark
+ * phase must widen its reachability roots here or the sweep unlinks blobs a
+ * live transcript still references (issue #11551). The registry retains every
+ * relocated root across sessions and terminals; vanished directories are
+ * skipped since blobs they uniquely referenced are already unreachable.
+ */
+async function collectRegisteredSessionRoots(registryDir: string, defaultRoots: string[]): Promise<string[]> {
+	let entries: string[];
+	try {
+		entries = await fs.readdir(registryDir);
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return [];
+		throw error;
+	}
+	const roots = new Map<string, string>();
+	for (const entry of entries) {
+		const recorded = (await readTextIfPresent(path.join(registryDir, entry))).trim();
+		if (!recorded) continue;
+		const sessionRoot = path.resolve(recorded);
+		if (!(await pathExists(sessionRoot))) continue;
+		if (defaultRoots.some(root => pathIsWithin(root, sessionRoot))) continue;
+		roots.set(normalizePathForComparison(sessionRoot), sessionRoot);
+	}
+	return [...roots.values()];
+}
+
+/**
  * Session directories recorded in terminal breadcrumbs that live outside the
- * default scan roots. A `--session-dir`/`--session` transcript stores its
- * `blob:sha256:` references outside `<agentDir>/sessions`, yet externalizes
- * images into the shared agent-global blob store, so the mark phase must widen
- * its reachability roots to these locations or the sweep unlinks blobs a live
- * transcript still references (issue #11551). Breadcrumbs
- * (`<agentDir>/terminal-sessions/*`, `cwd\nsessionFile` per terminal) are the
- * durable record of relocated transcripts GC cannot otherwise enumerate.
+ * default scan roots. Supplements {@link collectRegisteredSessionRoots}: a
+ * breadcrumb (`<agentDir>/terminal-sessions/*`, `cwd\nsessionFile` per
+ * terminal) holds only that terminal's last session, but still catches a
+ * current relocated transcript even if its registry marker write failed.
  */
 async function collectBreadcrumbSessionRoots(breadcrumbDir: string, defaultRoots: string[]): Promise<string[]> {
 	let entries: string[];
@@ -362,8 +391,14 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	const blobDir = getBlobsDir(options.agentDir);
 	const sessionsRoot = getSessionsDir(options.agentDir);
 	const defaultRoots = [sessionsRoot, archiveSessionsRoot];
-	const breadcrumbRoots = await collectBreadcrumbSessionRoots(getTerminalSessionsDir(options.agentDir), defaultRoots);
-	const referenced = await collectReferencedBlobHashes([...defaultRoots, ...breadcrumbRoots]);
+	const extraRoots = new Map<string, string>();
+	for (const root of await collectRegisteredSessionRoots(getCustomSessionRootsDir(options.agentDir), defaultRoots)) {
+		extraRoots.set(normalizePathForComparison(root), root);
+	}
+	for (const root of await collectBreadcrumbSessionRoots(getTerminalSessionsDir(options.agentDir), defaultRoots)) {
+		extraRoots.set(normalizePathForComparison(root), root);
+	}
+	const referenced = await collectReferencedBlobHashes([...defaultRoots, ...extraRoots.values()]);
 	const candidates = await collectBlobCandidates(blobDir);
 	const result: BlobGcResult = {
 		referenced: referenced.size,

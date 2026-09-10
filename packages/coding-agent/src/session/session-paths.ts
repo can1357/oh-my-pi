@@ -2,7 +2,16 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
-import { getSessionsDir, getTerminalSessionsDir, isEnoent, logger, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
+import {
+	getCustomSessionRootsDir,
+	getSessionsDir,
+	getTerminalSessionsDir,
+	hashPath,
+	isEnoent,
+	logger,
+	pathIsWithin,
+	resolveEquivalentPath,
+} from "@oh-my-pi/pi-utils";
 import type { SessionStorage } from "./session-storage";
 
 const migratedSessionRoots = new Set<string>();
@@ -201,6 +210,26 @@ export function computeDefaultSessionDir(
 // =============================================================================
 
 /**
+ * Record a session's storage directory in the persistent custom-roots registry
+ * when it lives outside the managed sessions root. Idempotent: the marker file
+ * is keyed by a hash of the resolved directory, its content is the absolute
+ * path. Best-effort — a failure here must never break session creation.
+ *
+ * `sessionFile` may be relative (e.g. `--session-dir .omp-sessions`); it is
+ * resolved against the recorded `cwd`, matching how the breadcrumb stores it.
+ */
+function recordCustomSessionRoot(cwd: string, sessionFile: string): void {
+	try {
+		const sessionRoot = path.dirname(path.resolve(cwd, sessionFile));
+		if (pathIsWithin(getSessionsDir(), sessionRoot)) return;
+		const registryDir = getCustomSessionRootsDir();
+		fs.mkdirSync(registryDir, { recursive: true });
+		fs.writeFileSync(path.join(registryDir, hashPath(sessionRoot)), sessionRoot);
+	} catch (err) {
+		if (!isEnoent(err)) logger.debug("Custom session root record failed", { err });
+	}
+}
+/**
  * Write a breadcrumb linking the current terminal to a session file.
  * The breadcrumb contains the cwd and session path so --continue can
  * find "this terminal's last session" even when running concurrent instances.
@@ -215,6 +244,12 @@ export function computeDefaultSessionDir(
  * external delete is still treated as a genuinely stale crumb.
  */
 export function writeTerminalBreadcrumb(cwd: string, sessionFile: string, fresh = false): void {
+	// Persist non-default session roots regardless of terminal identity: a
+	// `--session-dir`/`--session` transcript stores blob references outside the
+	// managed sessions root, and storage GC needs this registry to reach them
+	// after the per-terminal breadcrumb is overwritten by a later session.
+	recordCustomSessionRoot(cwd, sessionFile);
+
 	const terminalId = getTerminalId();
 	if (!terminalId) return;
 

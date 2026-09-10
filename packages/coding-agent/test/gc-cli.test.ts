@@ -10,6 +10,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	getAgentDir,
 	getBlobsDir,
+	getCustomSessionRootsDir,
 	getHistoryDbPath,
 	getSessionsDir,
 	getTerminalSessionsDir,
@@ -223,6 +224,38 @@ describe("runGcCommand blob sweep", () => {
 		const crumbDir = getTerminalSessionsDir(root);
 		await fs.mkdir(crumbDir, { recursive: true });
 		await Bun.write(path.join(crumbDir, "tty-1"), `${projectDir}\n.omp-sessions/work.jsonl\n`);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.referenced).toBe(1);
+		expect(result.blobs?.deleted).toBe(1);
+		expect(await Bun.file(referenced).exists()).toBe(true);
+		expect(await Bun.file(orphan).exists()).toBe(false);
+	});
+
+	test("--apply scans the persistent custom-session-root registry without a breadcrumb", async () => {
+		const referencedHash = hashFor("registry-reference");
+		const orphanHash = hashFor("registry-orphan");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		const orphan = await writeBlob(root, orphanHash, "orphan");
+		await agePath(referenced);
+		await agePath(orphan);
+
+		// A relocated transcript whose terminal breadcrumb was overwritten by a later session.
+		const externalDir = path.join(root, "external-sessions");
+		await fs.mkdir(externalDir, { recursive: true });
+		await Bun.write(
+			path.join(externalDir, "work.jsonl"),
+			[
+				JSON.stringify({ type: "session", version: 3, id: "work", timestamp: "2026-01-01T00:00:00.000Z" }),
+				JSON.stringify({ type: "message", message: { role: "user", content: `blob:sha256:${referencedHash}` } }),
+				"",
+			].join("\n"),
+		);
+		// Only the persistent registry records the root — no terminal breadcrumb exists.
+		const registryDir = getCustomSessionRootsDir(root);
+		await fs.mkdir(registryDir, { recursive: true });
+		await Bun.write(path.join(registryDir, "root-1"), externalDir);
 
 		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
 
