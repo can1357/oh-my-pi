@@ -87,6 +87,15 @@ export interface CustomToolContext {
 	sessionManager: ReadonlySessionManager;
 	/** Model registry - use for API key resolution and model retrieval */
 	modelRegistry: ModelRegistry;
+	/**
+	 * Per-provider request metadata (`metadata.user_id`) for side model requests
+	 * a tool makes on the session's behalf, so they are attributed to the same
+	 * provider session and OAuth account as the conversation. Called at request
+	 * time — after credential selection — because the payload depends on the
+	 * provider and on live auth state. Undefined when the context was built
+	 * without an agent handle.
+	 */
+	metadataForProvider?: (provider: string) => Record<string, unknown> | undefined;
 	/** Current model (may be undefined if no model is selected yet) */
 	model: Model | undefined;
 	/** Whether the agent is idle (not streaming) */

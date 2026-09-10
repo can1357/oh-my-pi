@@ -89,16 +89,23 @@ export interface HookSelectorOptions {
 export interface HookSelectorOption {
 	label: string;
 	description?: string;
+	/** Exact substring of `label` painted in the success color by the TUI
+	 *  renderer (e.g. the tool name in the session-approval menu). */
+	labelHighlight?: string;
 }
 
 export type HookSelectorOptionInput = string | HookSelectorOption;
 
 function normalizeHookSelectorOption(option: HookSelectorOptionInput): HookSelectorOption {
 	if (typeof option === "string") return { label: option };
-	if (option.description?.trim()) {
-		return { label: option.label, description: option.description.trim() };
+	const normalized: HookSelectorOption = option.description?.trim()
+		? { label: option.label, description: option.description.trim() }
+		: { label: option.label };
+	const highlight = option.labelHighlight?.trim();
+	if (highlight && option.label.includes(highlight)) {
+		normalized.labelHighlight = highlight;
 	}
-	return { label: option.label };
+	return normalized;
 }
 
 function splitLeadingSpacesForWrap(line: string, width: number): { indent: string; body: string } {
@@ -319,7 +326,7 @@ export class HookSelectorComponent extends OverlayPanel {
 	): string[] {
 		const textColor = isDisabled ? "dim" : isSelected ? "accent" : "text";
 		const prefixColor = isDisabled ? "dim" : "accent";
-		const label = renderInlineMarkdown(option.label, mdTheme, t => theme.fg(textColor, t));
+		const label = this.#renderLabel(option, textColor, isDisabled, mdTheme);
 		const marker = index !== undefined ? this.#renderMarkerPrefix(index, isSelected, isDisabled) : undefined;
 		const prefix = marker ?? (isSelected ? theme.fg(prefixColor, `${theme.nav.cursor} `) : "  ");
 		const lines = [prefix + label];
@@ -335,6 +342,25 @@ export class HookSelectorComponent extends OverlayPanel {
 			}
 		}
 		return lines;
+	}
+
+	/** Render an option label, painting `labelHighlight` (validated at
+	 *  normalization: non-empty exact substring of the label) in the success
+	 *  color — e.g. the tool name in the session-approval menu — while the rest
+	 *  keeps `base`. Disabled rows stay uniformly dim, like the marker prefix. */
+	#renderLabel(option: HookSelectorOption, base: ThemeColor, isDisabled: boolean, mdTheme: MarkdownTheme): string {
+		const highlight = option.labelHighlight;
+		if (!highlight) {
+			return renderInlineMarkdown(option.label, mdTheme, t => theme.fg(base, t));
+		}
+		const highlightColor: ThemeColor = isDisabled ? "dim" : "success";
+		const parts = option.label.split(highlight);
+		let rendered = renderInlineMarkdown(parts[0] ?? "", mdTheme, t => theme.fg(base, t));
+		for (let i = 1; i < parts.length; i++) {
+			rendered += renderInlineMarkdown(highlight, mdTheme, t => theme.fg(highlightColor, t));
+			rendered += renderInlineMarkdown(parts[i] ?? "", mdTheme, t => theme.fg(base, t));
+		}
+		return rendered;
 	}
 
 	/** Styled leading marker (`"<glyph> "`) for a markable option row, or

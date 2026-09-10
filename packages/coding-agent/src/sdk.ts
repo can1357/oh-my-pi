@@ -2820,6 +2820,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const getSessionContext = () => ({
 			sessionManager,
 			modelRegistry,
+			metadataForProvider: (provider: string) => agent.metadataForProvider(provider),
 			model: agent.state.model,
 			isIdle: () => !session.isStreaming,
 			hasQueuedMessages: () => session.queuedMessageCount > 0,

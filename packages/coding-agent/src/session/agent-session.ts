@@ -220,6 +220,7 @@ import {
 	PROPOSE_DEVICE_NAME,
 	writeDeviceDispatch,
 } from "../tools/resolve";
+import { clearSessionApprovals } from "../tools/session-approvals";
 import { supportsExternalThinking } from "../tools/think";
 import type { TodoPhase } from "../tools/todo";
 import { ToolError } from "../tools/tool-errors";
@@ -4412,6 +4413,12 @@ export class AgentSession {
 		if (this.#observedSessionId === undefined) {
 			this.#observedSessionId = currentSessionId;
 		} else if (this.#observedSessionId !== currentSessionId) {
+			// Only this branch still knows the id we are leaving: `tools/session-approvals`
+			// keys "Approve … for Session" grants by session id in a module-global map, so
+			// the abandoned entry is released here — both the fail-safe answer for a
+			// session that is no longer live and the only thing that stops a process
+			// hopping sessions from retaining one entry per id forever.
+			clearSessionApprovals(this.#observedSessionId);
 			this.#observedSessionId = currentSessionId;
 			if (notifyChange) this.#notifySessionChangeCallbacks();
 		}
@@ -4826,12 +4833,21 @@ export class AgentSession {
 		}
 	}
 
-	/** Drop the in-memory conversation state after the terminal dispose flush. */
+	/**
+	 * Drop the in-memory conversation state and the session-scoped approval
+	 * grants after the terminal dispose flush.
+	 */
 	#releaseRetainedSessionMemory(): void {
 		this.agent.reset();
 		this.agent.setAppendOnlyContext(undefined);
 		this.rawSseDebugBuffer.clear();
 		this.sessionManager.releaseRetainedEntries();
+		// A grant lasts one session id, so a disposed session must not leave one
+		// behind for a revival of the same id to inherit. getSessionId() is a plain
+		// field read, valid after seal()/close(). The deferred dispose pass re-runs
+		// this method, so a late approval resolved by a parked handler is dropped
+		// too.
+		clearSessionApprovals(this.sessionManager.getSessionId());
 	}
 
 	#closeAllProviderSessions(reason: string): void {
@@ -5683,6 +5699,11 @@ export class AgentSession {
 		this.#toolChoiceQueue.clear();
 		this.#tools.clearAcpPermissionDecisions();
 		this.#tools.resetAnnouncedMounts();
+		// The in-memory approval grants are the same class of state as the ACP
+		// `allow_always` decisions above. `#syncAgentSessionId` already released the
+		// id we left; this covers the boundaries that keep the id — `/reset` and a
+		// switch that reloads the current session with a changed conversation.
+		clearSessionApprovals(this.sessionManager.getSessionId());
 		// A `/new`, session switch, or tree navigation reuses tool-call ids, so a
 		// still-cached background-task snapshot from the old conversation must not
 		// survive to be replayed by a focus rebuild in the reset session (#10447).
@@ -9985,6 +10006,7 @@ export class AgentSession {
 		return {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
+			metadataForProvider: (provider: string) => this.agent.metadataForProvider(provider),
 			model: this.model,
 			isIdle: () => !this.isStreaming,
 			hasQueuedMessages: () => this.queuedMessageCount > 0,
