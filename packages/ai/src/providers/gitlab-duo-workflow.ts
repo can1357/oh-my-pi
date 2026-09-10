@@ -28,8 +28,10 @@ import { redactSensitiveCredentials } from "./transform-messages";
 
 export const GITLAB_DUO_WORKFLOW_PROVIDER_ID = "gitlab-duo-agent";
 export const GITLAB_DUO_WORKFLOW_API = "gitlab-duo-agent";
+// Use the ambient workflow route supported by existing GitLab Duo entitlements.
+// The flow payload below also defines an isolated ambient AgentComponent.
 export const GITLAB_DUO_WORKFLOW_DEFINITION = "ambient";
-export type GitLabDuoWorkflowDefinition = "ambient" | (string & {});
+export type GitLabDuoWorkflowDefinition = "chat" | "ambient" | (string & {});
 
 const DEFAULT_GITLAB_BASE_URL = "https://gitlab.com";
 const GITLAB_DUO_WORKFLOW_TRACE_ENV = "GITLAB_DUO_WORKFLOW_TRACE";
@@ -40,14 +42,15 @@ const DEFAULT_GITLAB_DUO_WORKFLOW_TRACE_FILE = path.resolve(
 );
 const GITLAB_DUO_WORKFLOW_CLIENT_TYPE = "node-websocket";
 /**
- * Idle deadline for the workflow WebSocket. The socket has no server-side
- * keepalive contract OMP can rely on, so a connection silently going half-open
- * (proxy/LB drops the TCP link without delivering FIN/RST) would otherwise leave
- * `runGitLabDuoWorkflowSocket` waiting forever. If no frame arrives within this
- * window — before open or between checkpoints — the socket is aborted and the
- * run reconnects once on the same `workflowID` (server-side resume).
+ * Time allowed for the WebSocket handshake / first frame before the provider
+ * gives up on this connection attempt. Once the socket is open we rely on the
+ * official GitLab keepalive pattern (proactive WS ping + app heartbeat), not a
+ * read-silence deadline, because DWS can legitimately spend many minutes
+ * generating a single large tool-call payload with zero outbound frames.
  */
-const GITLAB_DUO_WORKFLOW_IDLE_TIMEOUT_MS = 90_000;
+const GITLAB_DUO_WORKFLOW_CONNECT_TIMEOUT_MS = 90_000;
+const GITLAB_DUO_WORKFLOW_KEEPALIVE_PING_INTERVAL_MS = 45_000;
+const GITLAB_DUO_WORKFLOW_HEARTBEAT_INTERVAL_MS = 60_000;
 /**
  * Absolute deadline (ms) for each REST setup fetch (`ensureGitLabDuoWorkflowSettings`,
  * `discoverGitLabDuoWorkflowProject`, `resolveGitLabDuoWorkflowNumericProjectId`,
@@ -180,6 +183,21 @@ export interface GitLabPlainTextResponse {
 	error?: string;
 }
 
+/**
+ * Scheduler seam for the WebSocket keepalive intervals (WS ping + app heartbeat).
+ * Defaults to the global `setInterval`/`clearInterval`. Tests inject a manual
+ * scheduler so the cadence is driven deterministically: Bun's fake timers cannot
+ * retroactively control intervals that `socket.onopen` already created, so a real
+ * scheduler would force a wall-clock wait. `set` returns an opaque handle that
+ * `clear` later cancels.
+ */
+export interface GitLabDuoWorkflowIntervalScheduler {
+	set(callback: () => void, intervalMs: number): GitLabDuoWorkflowIntervalHandle;
+	clear(handle: GitLabDuoWorkflowIntervalHandle): void;
+}
+
+export type GitLabDuoWorkflowIntervalHandle = unknown;
+
 export type PlainTextResponse = GitLabPlainTextResponse;
 export interface GitLabDuoWorkflowOptions extends StreamOptions {
 	rootNamespaceId?: string;
@@ -191,8 +209,19 @@ export interface GitLabDuoWorkflowOptions extends StreamOptions {
 	workflowToken?: string;
 	cwd?: string;
 	webSocketFactory?: GitLabDuoWorkflowWebSocketFactory;
-	/** Idle WebSocket deadline (ms) before aborting and resuming; defaults to {@link GITLAB_DUO_WORKFLOW_IDLE_TIMEOUT_MS}. */
+	/** WebSocket connect timeout (ms) before aborting this connection attempt; defaults to {@link GITLAB_DUO_WORKFLOW_CONNECT_TIMEOUT_MS}. */
 	idleTimeoutMs?: number;
+	/** WS keepalive ping interval (ms); defaults to {@link GITLAB_DUO_WORKFLOW_KEEPALIVE_PING_INTERVAL_MS}. Test seam. */
+	keepalivePingIntervalMs?: number;
+	/** App-level heartbeat interval (ms); defaults to {@link GITLAB_DUO_WORKFLOW_HEARTBEAT_INTERVAL_MS}. Test seam. */
+	heartbeatIntervalMs?: number;
+	/**
+	 * Keepalive interval scheduler seam. Defaults to the global
+	 * `setInterval`/`clearInterval`. Tests inject a manual scheduler so the WS
+	 * ping/heartbeat cadence is driven deterministically without real timers
+	 * (Bun fake timers cannot retroactively control intervals already created).
+	 */
+	keepaliveScheduler?: GitLabDuoWorkflowIntervalScheduler;
 	/**
 	 * Tool-choice override forwarded from the stream layer. Only `"none"` is
 	 * acted on: a side-request (e.g. handoff) keeps tool definitions in the cache
@@ -209,6 +238,7 @@ export interface GitLabDuoWorkflowWebSocketLike {
 	onerror: ((event: Event) => void) | null;
 	onclose: ((event: CloseEvent) => void) | null;
 	send(data: string): void;
+	ping?(data?: string | ArrayBufferLike | ArrayBufferView): void;
 	close(code?: number, reason?: string): void;
 }
 
@@ -354,6 +384,15 @@ export interface GitLabDuoWorkflowActiveSession {
 	pendingActions?: GitLabDuoWorkflowActionDescriptor[];
 	checkpointAgentContentByKey?: Record<string, string>;
 	checkpointAgentContentSignatures?: Record<string, true>;
+	// Accumulated full `ui_chat_log` for THIS workflow run. With the
+	// `incremental_streaming` client capability, DWS sends only the changed slice
+	// of `ui_chat_log` per checkpoint (from the last in-progress message onward),
+	// not the full history. The provider merges each slice into this accumulator by
+	// `message_id` (see mergeGitLabDuoWorkflowIncrementalChatLog) so the rest of the
+	// pipeline (entry extraction, stall detection, dedup) keeps seeing a full
+	// snapshot. Persisted on the session so it survives the resume that reuses this
+	// socket; a fresh workflow starts with no accumulator (full first slice).
+	accumulatedChatLog?: unknown[];
 	paused?: boolean;
 	pauseBuffer?: unknown[];
 	// Byte length of the server's last checkpoint observed at this workflow's tool-call
@@ -378,6 +417,10 @@ export interface GitLabDuoWorkflowStreamState {
 	started: boolean;
 	checkpointAgentContentByKey?: Record<string, string>;
 	checkpointAgentContentSignatures?: Record<string, true>;
+	// Mirror of the active session's incremental-streaming accumulator (see
+	// GitLabDuoWorkflowActiveSession.accumulatedChatLog). Hydrated from the session
+	// on a resume and synced back after every merge so it survives socket reuse.
+	accumulatedChatLog?: unknown[];
 	pauseRequested?: boolean;
 	stepLimitRequested?: boolean;
 	retryableErrorRequested?: boolean;
@@ -385,6 +428,11 @@ export interface GitLabDuoWorkflowStreamState {
 	// handler compares it against the previous tool-call boundary's length to detect a
 	// stall (a byte-identical checkpoint means the server-side turn did not advance).
 	lastCheckpointContentLength?: number;
+	// Tracks whether the CURRENT server workflow attempt produced visible output.
+	// The cumulative output message spans fresh-workflow restarts, so terminal empty
+	// detection must not read it; otherwise a retry that emits an empty terminal after
+	// a previous attempt streamed text would falsely finish with stale partial output.
+	currentWorkflowHasVisibleOutput?: boolean;
 	// Set when a tool-call boundary's checkpoint byte length did not change from the
 	// previous boundary — the socket settles "stalled" so the run restarts fresh.
 	stalledRequested?: boolean;
@@ -486,6 +534,8 @@ export function buildGitLabDuoWorkflowWebSocketUrl(
 		rootNamespaceId?: string;
 		selectedModelIdentifier?: string;
 		workflowDefinition?: GitLabDuoWorkflowDefinition;
+		workflowId?: string;
+		clientType?: string;
 		serviceEndpoint?: boolean;
 	} = {},
 ): string {
@@ -503,6 +553,8 @@ export function buildGitLabDuoWorkflowWebSocketUrl(
 	if (options.selectedModelIdentifier)
 		wsUrl.searchParams.set("user_selected_model_identifier", options.selectedModelIdentifier);
 	if (options.workflowDefinition) wsUrl.searchParams.set("workflow_definition", options.workflowDefinition);
+	if (options.workflowId && !options.serviceEndpoint) wsUrl.searchParams.set("workflow_id", options.workflowId);
+	if (options.clientType && !options.serviceEndpoint) wsUrl.searchParams.set("client_type", options.clientType);
 	return wsUrl.toString();
 }
 
@@ -554,13 +606,15 @@ export function buildGitLabDuoWorkflowStartRequest(
 	};
 }
 
-// Build the inline ambient flow sent over the wire (Path B / `flowConfig`). The
-// server constructs the whole flow from this struct: a single agent component
-// whose system slot carries OMP's own authoritative system prompt (no GitLab jinja
-// wrapper / project metadata) and `on_agent_reasoning` so pre-tool-call commentary
-// streams back as reasoning. `toolset: []` because MCP tools auto-attach from
-// `startRequest.mcpTools` when the workflow's `mcp_enabled` is true. The user slot
-// is `{{goal}}`, which the provider fills with the flat conversation transcript.
+// Build the isolated inline ambient flow sent over the wire (Path B / `flowConfig`).
+// The surrounding workflow route is `chat` because GitLab.com binds MCP tools on that
+// route, but flow resolution uses this inline struct instead of the server-side chat
+// registry prompt. The server constructs a single AgentComponent whose system slot
+// carries OMP's own authoritative system prompt (no GitLab role / project metadata)
+// and `on_agent_reasoning` so pre-tool-call commentary streams back as reasoning.
+// `toolset: []` because MCP tools auto-attach from `startRequest.mcpTools` when the
+// workflow's `mcp_enabled` is true. The user slot is `{{goal}}`, which the provider
+// fills with the flat conversation transcript.
 export function buildGitLabDuoWorkflowInlineFlowConfig(systemPrompt: string): GitLabDuoWorkflowInlineFlowConfig {
 	return {
 		version: "v1",
@@ -1066,6 +1120,14 @@ async function runGitLabDuoWorkflow(
 		if (providerSessionState) providerSessionState.active = undefined;
 		await stopGitLabDuoWorkflow(fetchImpl, baseUrl, apiKey, pendingSession.workflowId);
 	}
+	// Every path below seeds a BRAND-NEW workflow with its own server-side `ui_chat_log`.
+	// Any resume attempt above either returned (live socket reused) or fell through here
+	// after stopping the old workflow (stalled resume, or an abandoned steer/unmatched
+	// batch). The pending session was hydrated into `state.accumulatedChatLog` at the top,
+	// so clear it now — the in-loop restart branches reset on their own re-seed, but these
+	// pre-loop fresh seeds would otherwise merge the new workflow's first slice onto the
+	// previous workflow's stale log (replaying entries / skewing the stall byte compare).
+	resetGitLabDuoWorkflowAccumulatedChatLog(state);
 	const workflowDefinition = resolveGitLabDuoWorkflowDefinition(options.workflowDefinition);
 	const explicitNamespace = hasGitLabDuoWorkflowExplicitNamespace(options);
 	const configuredProjectPath = nonEmptyString(options.projectPath) ?? nonEmptyString(Bun.env.GITLAB_DUO_PROJECT_PATH);
@@ -1310,6 +1372,8 @@ async function runGitLabDuoWorkflow(
 				rootNamespaceId: restNamespaceId,
 				selectedModelIdentifier,
 				workflowDefinition,
+				workflowId,
+				clientType: "ide",
 				serviceEndpoint: workflowConnection.serviceEndpoint,
 				extraHeaders: workflowConnection.headers,
 				originBaseUrl: baseUrl,
@@ -1358,6 +1422,7 @@ async function runGitLabDuoWorkflow(
 					options.signal,
 				);
 				startPayload = { ...startPayload, workflowID: workflowId };
+				resetGitLabDuoWorkflowAccumulatedChatLog(state);
 				continue;
 			}
 			// The server caps each workflow at a fixed step (graph-recursion) limit.
@@ -1386,6 +1451,7 @@ async function runGitLabDuoWorkflow(
 					options.signal,
 				);
 				startPayload = { ...startPayload, workflowID: workflowId };
+				resetGitLabDuoWorkflowAccumulatedChatLog(state);
 				continue;
 			}
 			// The server emitted a fresh tool-call boundary whose `ui_chat_log` total did
@@ -1413,6 +1479,7 @@ async function runGitLabDuoWorkflow(
 					options.signal,
 				);
 				startPayload = { ...startPayload, workflowID: workflowId };
+				resetGitLabDuoWorkflowAccumulatedChatLog(state);
 				continue;
 			}
 			// The server returned its de-identified catch-all FAILED — a wrapper over a
@@ -1441,6 +1508,7 @@ async function runGitLabDuoWorkflow(
 					options.signal,
 				);
 				startPayload = { ...startPayload, workflowID: workflowId };
+				resetGitLabDuoWorkflowAccumulatedChatLog(state);
 				continue;
 			}
 			// A retryable error that exhausted its retries must surface as a real error;
@@ -1828,6 +1896,8 @@ function openGitLabDuoWorkflowSocket(
 		selectedModelIdentifier?: string;
 		originBaseUrl?: string;
 		workflowDefinition?: GitLabDuoWorkflowDefinition;
+		workflowId?: string;
+		clientType?: string;
 		serviceEndpoint?: boolean;
 		extraHeaders?: Record<string, string>;
 		webSocketFactory?: GitLabDuoWorkflowWebSocketFactory;
@@ -1862,32 +1932,105 @@ export function runGitLabDuoWorkflowSocket(
 ): Promise<GitLabDuoWorkflowSocketResult> {
 	const { promise, resolve, reject } = Promise.withResolvers<GitLabDuoWorkflowSocketResult>();
 	let settled = false;
-	let idleTimer: NodeJS.Timeout | undefined;
-	const clearIdleTimer = (): void => {
-		if (idleTimer !== undefined) {
-			clearTimeout(idleTimer);
-			idleTimer = undefined;
+	// Resume/replay calls operate on an already-open socket (`ws.onopen` is nulled
+	// below). Such calls must NOT arm the handshake connect timer and instead rely on
+	// keepalives, so a long healthy post-tool generation is never read as a timeout.
+	const resumeIsLiveSocket =
+		(replayMessages !== undefined && replayMessages.length > 0) ||
+		(resumeResponse !== undefined && (!Array.isArray(resumeResponse) || resumeResponse.length > 0));
+	let connectTimer: NodeJS.Timeout | undefined;
+	const keepaliveScheduler: GitLabDuoWorkflowIntervalScheduler = options.keepaliveScheduler ?? {
+		set: (callback, intervalMs) => setInterval(callback, intervalMs),
+		clear: handle => clearInterval(handle as NodeJS.Timeout),
+	};
+	let pingTimer: GitLabDuoWorkflowIntervalHandle | undefined;
+	let heartbeatTimer: GitLabDuoWorkflowIntervalHandle | undefined;
+	const clearConnectTimer = (): void => {
+		if (connectTimer !== undefined) {
+			clearTimeout(connectTimer);
+			connectTimer = undefined;
 		}
+	};
+	const clearPingTimer = (): void => {
+		if (pingTimer !== undefined) {
+			keepaliveScheduler.clear(pingTimer);
+			pingTimer = undefined;
+		}
+	};
+	const clearHeartbeatTimer = (): void => {
+		if (heartbeatTimer !== undefined) {
+			keepaliveScheduler.clear(heartbeatTimer);
+			heartbeatTimer = undefined;
+		}
+	};
+	const clearKeepaliveTimers = (): void => {
+		clearPingTimer();
+		clearHeartbeatTimer();
 	};
 	const settle = (result: GitLabDuoWorkflowSocketResult = "closed", error?: unknown): void => {
 		if (settled) return;
 		settled = true;
-		clearIdleTimer();
+		clearConnectTimer();
+		clearKeepaliveTimers();
 		if (error) reject(error);
 		else resolve(result);
 	};
-	const idleTimeoutMs =
+	const connectTimeoutMs =
 		options.idleTimeoutMs !== undefined && options.idleTimeoutMs > 0
 			? options.idleTimeoutMs
-			: GITLAB_DUO_WORKFLOW_IDLE_TIMEOUT_MS;
-	const resetIdleTimer = (): void => {
-		clearIdleTimer();
+			: GITLAB_DUO_WORKFLOW_CONNECT_TIMEOUT_MS;
+	const startConnectTimer = (): void => {
+		clearConnectTimer();
 		if (settled) return;
-		idleTimer = setTimeout(() => {
-			traceGitLabDuoWorkflow("websocket.idle_timeout", { timeoutMs: idleTimeoutMs });
+		connectTimer = setTimeout(() => {
+			traceGitLabDuoWorkflow("websocket.connect_timeout", { timeoutMs: connectTimeoutMs });
 			close();
 			settle("timeout");
-		}, idleTimeoutMs);
+		}, connectTimeoutMs);
+	};
+	const sendHeartbeat = (): void => {
+		if (settled) return;
+		try {
+			ws.send(JSON.stringify({ heartbeat: { timestamp: Date.now() } }));
+			traceGitLabDuoWorkflow("websocket.heartbeat", { intervalMs: GITLAB_DUO_WORKFLOW_HEARTBEAT_INTERVAL_MS });
+		} catch (error) {
+			traceGitLabDuoWorkflow("websocket.heartbeat_error", {
+				error: gitLabDuoWorkflowErrorText(error),
+			});
+			settle("closed", error);
+		}
+	};
+	const sendKeepalivePing = (): void => {
+		if (settled) return;
+		if (ws.readyState !== undefined && ws.readyState !== WebSocket.OPEN) {
+			settle("closed");
+			return;
+		}
+		if (!ws.ping) return;
+		try {
+			ws.ping(String(Date.now()));
+			traceGitLabDuoWorkflow("websocket.keepalive_ping", {
+				intervalMs: GITLAB_DUO_WORKFLOW_KEEPALIVE_PING_INTERVAL_MS,
+			});
+		} catch (error) {
+			traceGitLabDuoWorkflow("websocket.keepalive_ping_error", {
+				error: gitLabDuoWorkflowErrorText(error),
+			});
+			settle("closed", error);
+		}
+	};
+	const keepalivePingIntervalMs =
+		options.keepalivePingIntervalMs !== undefined && options.keepalivePingIntervalMs > 0
+			? options.keepalivePingIntervalMs
+			: GITLAB_DUO_WORKFLOW_KEEPALIVE_PING_INTERVAL_MS;
+	const heartbeatIntervalMs =
+		options.heartbeatIntervalMs !== undefined && options.heartbeatIntervalMs > 0
+			? options.heartbeatIntervalMs
+			: GITLAB_DUO_WORKFLOW_HEARTBEAT_INTERVAL_MS;
+	const startKeepalives = (): void => {
+		clearKeepaliveTimers();
+		pingTimer = keepaliveScheduler.set(sendKeepalivePing, keepalivePingIntervalMs);
+		heartbeatTimer = keepaliveScheduler.set(sendHeartbeat, heartbeatIntervalMs);
 	};
 	const close = (): void => {
 		try {
@@ -1952,7 +2095,6 @@ export function runGitLabDuoWorkflowSocket(
 		settle(state.lastApprovalStatus ? "approval" : "closed");
 	};
 	ws.onmessage = event => {
-		resetIdleTimer();
 		if (active?.paused) {
 			active.pauseBuffer ??= [];
 			active.pauseBuffer.push(event.data);
@@ -1967,6 +2109,11 @@ export function runGitLabDuoWorkflowSocket(
 	};
 	if (replayMessages && replayMessages.length > 0) {
 		ws.onopen = null;
+		// The socket is already open on a pause replay; start the official keepalives so
+		// the same socket — which keeps waiting for fresh server frames after the buffered
+		// checkpoints are replayed — is not dropped by an intermediary during a long
+		// post-replay generation. The connect timer is skipped for this branch (see below).
+		startKeepalives();
 		void (async () => {
 			if (active) active.paused = true;
 			const pending: unknown[] = [...replayMessages];
@@ -2005,16 +2152,31 @@ export function runGitLabDuoWorkflowSocket(
 		})();
 	} else if (resumeResponse && (!Array.isArray(resumeResponse) || resumeResponse.length > 0)) {
 		ws.onopen = null;
-		// Resume the live socket by returning the tool result for the single pending
-		// action of this turn. (Accepts an array for forward-compat, but the serial
-		// inline flow only ever has one.) DWS matches it by requestID to the awaiting
-		// outbox future and the workflow continues on the same connection.
+		// The socket is already open on a resume; there is no handshake to time out.
+		// Start the official keepalives immediately so a long post-tool generation
+		// (DWS streams zero frames while assembling a large tool-call payload) is not
+		// read as death — the unconditional connect timer below is skipped for this
+		// branch. Resume the live socket by returning the tool result for the single
+		// pending action of this turn. (Accepts an array for forward-compat, but the
+		// serial inline flow only ever has one.) DWS matches it by requestID to the
+		// awaiting outbox future and the workflow continues on the same connection.
+		startKeepalives();
 		const responses = Array.isArray(resumeResponse) ? resumeResponse : [resumeResponse];
-		for (const response of responses) {
-			ws.send(JSON.stringify(response));
+		try {
+			for (const response of responses) {
+				ws.send(JSON.stringify(response));
+			}
+		} catch (error) {
+			// The preserved socket can close while the local tool runs, so `ws.send` may
+			// throw synchronously. Settle through the promise (it stops the keepalive +
+			// connect timers in `finally`) instead of letting the throw escape before the
+			// cleanup below is attached, which would leak the just-started intervals.
+			settle("closed", error);
 		}
 	} else {
 		ws.onopen = () => {
+			clearConnectTimer();
+			startKeepalives();
 			traceGitLabDuoWorkflow("websocket.open", {
 				workflowId: startPayload.workflowID,
 				workflowDefinition: startPayload.workflowDefinition,
@@ -2024,12 +2186,25 @@ export function runGitLabDuoWorkflowSocket(
 				mcpTools: startPayload.mcpTools.length,
 				preapprovedTools: startPayload.preapproved_tools.length,
 			});
-			ws.send(JSON.stringify({ startRequest: startPayload }));
+			try {
+				ws.send(JSON.stringify({ startRequest: startPayload }));
+			} catch (error) {
+				// The socket can open and then close before this initial send completes; a
+				// synchronous `ws.send` failure would otherwise escape `onopen` after the
+				// connect timer was already cleared, leaving nothing to settle the stream
+				// (heartbeat errors are swallowed). Settle through the promise so its
+				// `finally` stops the keepalive timers instead of leaking them.
+				settle("closed", error);
+			}
 		};
 	}
-	resetIdleTimer();
+	// Only the fresh-open branch above arms the connect timer (cleared in `onopen`).
+	// Resume/replay branches already have an open socket and rely on keepalives, so a
+	// connect timer there would mis-fire as `timeout` during healthy long generation.
+	if (!resumeIsLiveSocket) startConnectTimer();
 	return promise.finally(() => {
-		clearIdleTimer();
+		clearConnectTimer();
+		clearKeepaliveTimers();
 		options.signal?.removeEventListener("abort", abort);
 	});
 }
@@ -2084,7 +2259,7 @@ async function handleGitLabDuoWorkflowSocketMessage(
 		getRecordString(event, "status") ??
 		getNestedRecordString(event, "workflowStatus", "status") ??
 		getNestedRecordString(event, "newCheckpoint", "status");
-	const checkpoint = extractGitLabDuoWorkflowCheckpoint(event);
+	const checkpoint = extractGitLabDuoWorkflowCheckpoint(state, event);
 	traceGitLabDuoWorkflow("websocket.message", {
 		keys: Object.keys(event),
 		status,
@@ -2105,6 +2280,14 @@ async function handleGitLabDuoWorkflowSocketMessage(
 	}
 	if (isGitLabWorkflowCompletionStatus(status)) {
 		traceGitLabDuoWorkflow("websocket.terminal", { status, checkpointLength: checkpoint?.contentLength ?? 0 });
+		if (!state.currentWorkflowHasVisibleOutput) {
+			traceGitLabDuoWorkflow("websocket.empty_terminal", {
+				status,
+				checkpointLength: checkpoint?.contentLength ?? 0,
+			});
+			state.stalledRequested = true;
+			return "stalled";
+		}
 		finishGitLabDuoWorkflowStream(state, "stop");
 		return "terminal";
 	}
@@ -2219,13 +2402,13 @@ function gitLabToolResultToText(toolResult: ToolResultMessage): string {
 
 function buildGitLabMcpToolDefinition(tool: Tool): GitLabMcpToolDefinition {
 	const schema = toolWireSchema(tool);
-	// Register the tool under its BARE name (no `mcp__omp__` prefix). The server does
-	// not strip prefixes — it registers `_executable_tools` and binds the model schema
-	// under exactly the wire `name` (sanitize_llm_name only replaces illegal chars), so
-	// the name the model sees, the toolset key it is matched against, and OMP's own
-	// tool docs must all be the same bare name. A prefixed wire name only forced the
-	// model to learn `mcp__omp__read` while OMP docs say `read`, with no upside.
-	// `originalToolName`/`serverName` stay as MCP metadata; they are not the match key.
+	// Register the tool under its BARE name (no `mcp__omp__` prefix). Live GitLab.com
+	// probes confirm `mcpTools[].name = "read"` binds and executes as
+	// `runMCPTool.name = "read"`; prefixed names are unnecessary and make the model
+	// learn names that differ from OMP's own tool docs. `sanitize_llm_name` preserves
+	// legal bare names, so the model-visible schema key, DWS toolset key, returned
+	// action name, and OMP tool name all stay aligned. `originalToolName`/`serverName`
+	// remain MCP metadata; they are not the match key.
 	return {
 		name: tool.name,
 		originalToolName: tool.name,
@@ -2264,6 +2447,7 @@ function hydrateGitLabDuoWorkflowCheckpointState(
 ): void {
 	state.checkpointAgentContentByKey = session.checkpointAgentContentByKey;
 	state.checkpointAgentContentSignatures = session.checkpointAgentContentSignatures;
+	state.accumulatedChatLog = session.accumulatedChatLog;
 }
 
 function syncGitLabDuoWorkflowCheckpointState(state: GitLabDuoWorkflowStreamState): void {
@@ -2271,6 +2455,21 @@ function syncGitLabDuoWorkflowCheckpointState(state: GitLabDuoWorkflowStreamStat
 	if (!active) return;
 	active.checkpointAgentContentByKey = state.checkpointAgentContentByKey;
 	active.checkpointAgentContentSignatures = state.checkpointAgentContentSignatures;
+	active.accumulatedChatLog = state.accumulatedChatLog;
+}
+
+// A fresh workflow seed (timeout / step_limit / stalled / retryable restart) reuses the
+// same `GitLabDuoWorkflowStreamState` but starts a brand-new server-side `ui_chat_log`.
+// Clear the incremental-streaming accumulator and its session mirror so the first slice
+// of the new workflow is not merged on top of the prior workflow's stale log.
+function resetGitLabDuoWorkflowAccumulatedChatLog(state: GitLabDuoWorkflowStreamState): void {
+	state.currentWorkflowHasVisibleOutput = false;
+	state.checkpointAgentContentByKey = undefined;
+	state.checkpointAgentContentSignatures = undefined;
+	state.activeCheckpointMessageKey = undefined;
+	state.accumulatedChatLog = undefined;
+	const active = state.providerSessionState?.active;
+	if (active) active.accumulatedChatLog = undefined;
 }
 
 function emitGitLabDuoWorkflowCheckpoint(
@@ -2285,8 +2484,9 @@ function emitGitLabDuoWorkflowCheckpoint(
 	// healthy turn emits checkpoints whose byte size varies and grows, while a stalled
 	// workflow re-emits a byte-identical checkpoint.
 	state.lastCheckpointContentLength = checkpoint.contentLength;
-	// GitLab checkpoints are full ui_chat_log snapshots, so a later frame replays
-	// earlier request/tool boundaries before the new agent delta. Pause only on a
+	// `checkpoint.entries` is built from the MERGED full ui_chat_log (incremental
+	// slices are reassembled in extractGitLabDuoWorkflowCheckpoint), so a later frame
+	// replays earlier request/tool boundaries before the new agent delta. Pause only on a
 	// boundary that follows a delta emitted in THIS checkpoint (`deltaThisCheckpoint`),
 	// not any delta emitted earlier in the socket call — otherwise a stale replayed
 	// boundary would fire one pause_turn per snapshot and hit the loop's continuation cap.
@@ -2393,6 +2593,7 @@ function emitGitLabDuoWorkflowText(state: GitLabDuoWorkflowStreamState, text: st
 	const block = state.output.content[activeTextIndex];
 	if (block?.type !== "text") return;
 	block.text += text;
+	state.currentWorkflowHasVisibleOutput = true;
 	state.stream.push({ type: "text_delta", contentIndex: activeTextIndex, delta: text, partial: state.output });
 }
 
@@ -2410,6 +2611,7 @@ function emitGitLabDuoWorkflowThinking(state: GitLabDuoWorkflowStreamState, thin
 	const block = state.output.content[activeThinkingIndex];
 	if (block?.type !== "thinking") return;
 	block.thinking += thinking;
+	state.currentWorkflowHasVisibleOutput = true;
 	state.stream.push({
 		type: "thinking_delta",
 		contentIndex: activeThinkingIndex,
@@ -2584,9 +2786,225 @@ function buildGitLabDuoWorkflowGoal(context: Context): string {
 	// credential redaction here — the same scrub the flow-config system slot
 	// already receives — before the payload leaves the process.
 	if (conversation.length <= 1) {
-		return redactSensitiveCredentials(extractLatestUserPrompt(context.messages));
+		const lone = redactSensitiveCredentials(extractLatestUserPrompt(context.messages));
+		// A compaction summarization request arrives as a single user turn whose body is
+		// the whole serialized history wrapped in `<conversation>…</conversation>` plus
+		// trailing summarization instructions. It is NOT an incremental task turn, so the
+		// ChatML transcript path never sees it; left untouched the lone body is emitted
+		// verbatim and is usually the largest goal the provider ever sends. Shake it down
+		// to the soft budget here so summarization stays under the byte ceiling.
+		return shakeGitLabDuoWorkflowSummarizationGoal(lone);
 	}
 	return redactSensitiveCredentials(renderGitLabDuoWorkflowChatMl(conversation));
+}
+
+// Target the shaken summarization body comfortably under the soft ceiling so the
+// envelope/instructions added back around it never push the whole goal past SOFT.
+const GITLAB_DUO_WORKFLOW_SUMMARIZATION_SHAKE_TARGET_BYTES = Math.floor(
+	GITLAB_DUO_WORKFLOW_GOAL_SOFT_OVERFLOW_BYTES * 0.95,
+);
+const GITLAB_DUO_WORKFLOW_CONVERSATION_OPEN = "<conversation>";
+const GITLAB_DUO_WORKFLOW_CONVERSATION_CLOSE = "</conversation>";
+const GITLAB_DUO_WORKFLOW_SHAKE_MARKER =
+	"[... tool I/O elided by GitLab Duo Agent to fit the compaction byte budget ...]";
+
+// The serialized history is rendered by the model's dialect. Every GitLab Duo model id
+// (`claude_*`, `gemini_*`, …) is GitLab-namespaced and resolves to the `xml` fallback
+// dialect, whose tool I/O is `<invoke name="…">…</invoke>` (assistant calls) and
+// `<tool_response>…</tool_response>` (tool results). The `anthropic`/`minimax` dialects'
+// `<function_calls>` / `<function_results>` blocks are also matched defensively in case
+// the catalog ever maps a Duo id to one of them. These tool-I/O regions are the only
+// shake-eligible bulk: they carry the verbose call args and tool output a summary rarely
+// needs verbatim, while user prompts and assistant reasoning/text carry the task intent
+// and must survive intact.
+//
+// Delimiters can appear inside raw tool output, so matching is segment-aware instead of
+// a blind body-wide regex. Assistant segments contribute only trailing rendered tool-call
+// suffixes; Human segments contribute rendered tool-result blocks only when immediately
+// preceded by an assistant segment that emitted a call. User-authored XML that merely
+// spells `<tool_response>`, `<invoke>`, or `<function_results>` is not shake-eligible.
+// Within an eligible Human segment, the close is anchored to the segment boundary:
+// embedded openers are swallowed by the lazy body, and embedded closes mid-content are
+// skipped.
+//
+// Residual (accepted): a tool payload that embeds the exact byte sequence
+// `\n\n</kind>\n\n` is indistinguishable from a real segment end on the flattened
+// string and truncates that one block early — leaving a BOUNDED tail, never the whole
+// transcript. The flat string's payload alphabet equals its delimiter alphabet, so no
+// matcher is exact; shaking only needs to elide the bulk, and the jitter/hard byte-zone
+// guards remain the real backstop.
+const GITLAB_DUO_WORKFLOW_RENDERED_FUNCTION_CALLS_OPEN = "<function_calls>";
+const GITLAB_DUO_WORKFLOW_RENDERED_FUNCTION_CALLS_CLOSE = "</function_calls>";
+const GITLAB_DUO_WORKFLOW_RENDERED_INVOKE_OPENER_RE = /<invoke name="[^"]+">/g;
+const GITLAB_DUO_WORKFLOW_RENDERED_INVOKE_BLOCK_RE =
+	/<invoke name="[^"]+">(?:<parameter name="[^"]+">[\s\S]*?<\/parameter>)*<\/invoke>/gy;
+
+interface GitLabDuoWorkflowToolBlockMatch {
+	block: string;
+	start: number;
+}
+
+function gitLabDuoWorkflowToolBlockContentEnd(content: string): number {
+	return content.endsWith("\n") ? content.length - 1 : content.length;
+}
+
+function findGitLabDuoWorkflowTrailingFunctionCallsStart(content: string, end: number): number {
+	if (!content.endsWith(GITLAB_DUO_WORKFLOW_RENDERED_FUNCTION_CALLS_CLOSE, end)) return -1;
+	return content.lastIndexOf(
+		GITLAB_DUO_WORKFLOW_RENDERED_FUNCTION_CALLS_OPEN,
+		end - GITLAB_DUO_WORKFLOW_RENDERED_FUNCTION_CALLS_CLOSE.length,
+	);
+}
+
+function isGitLabDuoWorkflowRenderedInvokeRun(content: string, start: number, end: number): boolean {
+	let cursor = start;
+	while (cursor < end) {
+		GITLAB_DUO_WORKFLOW_RENDERED_INVOKE_BLOCK_RE.lastIndex = cursor;
+		const match = GITLAB_DUO_WORKFLOW_RENDERED_INVOKE_BLOCK_RE.exec(content);
+		if (!match) {
+			GITLAB_DUO_WORKFLOW_RENDERED_INVOKE_BLOCK_RE.lastIndex = 0;
+			return false;
+		}
+		cursor = GITLAB_DUO_WORKFLOW_RENDERED_INVOKE_BLOCK_RE.lastIndex;
+		if (cursor === end) {
+			GITLAB_DUO_WORKFLOW_RENDERED_INVOKE_BLOCK_RE.lastIndex = 0;
+			return true;
+		}
+		if (content.charCodeAt(cursor) !== 10) {
+			GITLAB_DUO_WORKFLOW_RENDERED_INVOKE_BLOCK_RE.lastIndex = 0;
+			return false;
+		}
+		cursor++;
+	}
+	GITLAB_DUO_WORKFLOW_RENDERED_INVOKE_BLOCK_RE.lastIndex = 0;
+	return cursor === end;
+}
+
+function findGitLabDuoWorkflowTrailingInvokeRunStart(content: string, end: number): number {
+	const openers: number[] = [];
+	GITLAB_DUO_WORKFLOW_RENDERED_INVOKE_OPENER_RE.lastIndex = 0;
+	let match = GITLAB_DUO_WORKFLOW_RENDERED_INVOKE_OPENER_RE.exec(content);
+	while (match !== null) {
+		if (match.index >= end) break;
+		openers.push(match.index);
+		match = GITLAB_DUO_WORKFLOW_RENDERED_INVOKE_OPENER_RE.exec(content);
+	}
+	GITLAB_DUO_WORKFLOW_RENDERED_INVOKE_OPENER_RE.lastIndex = 0;
+
+	let start = -1;
+	for (let index = openers.length - 1; index >= 0; index--) {
+		const opener = openers[index]!;
+		if (isGitLabDuoWorkflowRenderedInvokeRun(content, opener, end)) start = opener;
+	}
+	return start;
+}
+
+function collectGitLabDuoWorkflowAssistantToolBlockMatches(
+	content: string,
+	contentStart: number,
+): GitLabDuoWorkflowToolBlockMatch[] {
+	const end = gitLabDuoWorkflowToolBlockContentEnd(content);
+	const functionCallsStart = findGitLabDuoWorkflowTrailingFunctionCallsStart(content, end);
+	if (functionCallsStart >= 0) {
+		return [{ block: content.slice(functionCallsStart, end), start: contentStart + functionCallsStart }];
+	}
+	const invokeStart = findGitLabDuoWorkflowTrailingInvokeRunStart(content, end);
+	if (invokeStart >= 0) {
+		return [{ block: content.slice(invokeStart, end), start: contentStart + invokeStart }];
+	}
+	return [];
+}
+
+function collectGitLabDuoWorkflowToolBlockMatches(body: string): GitLabDuoWorkflowToolBlockMatch[] {
+	const matches: GitLabDuoWorkflowToolBlockMatch[] = [];
+	let segmentStart = 0;
+	let previousAssistantHadToolCall = false;
+	while (segmentStart <= body.length) {
+		const nextAssistant = body.indexOf("\n\nAssistant: ", segmentStart);
+		const nextHuman = body.indexOf("\n\nHuman: ", segmentStart);
+		let segmentEnd = body.length;
+		if (nextAssistant !== -1) segmentEnd = Math.min(segmentEnd, nextAssistant);
+		if (nextHuman !== -1) segmentEnd = Math.min(segmentEnd, nextHuman);
+		const segment = body.slice(segmentStart, segmentEnd);
+		const leadingNewline = segment.startsWith("\n") ? 1 : 0;
+		const normalizedSegment = leadingNewline > 0 ? segment.slice(leadingNewline) : segment;
+		const absoluteSegmentStart = segmentStart + leadingNewline;
+		if (normalizedSegment.startsWith("Assistant: ")) {
+			const contentStart = absoluteSegmentStart + "Assistant: ".length;
+			const content = body.slice(contentStart, segmentEnd);
+			const segmentMatches = collectGitLabDuoWorkflowAssistantToolBlockMatches(content, contentStart);
+			matches.push(...segmentMatches);
+			previousAssistantHadToolCall = segmentMatches.length > 0;
+		} else if (normalizedSegment.startsWith("Human: ") && previousAssistantHadToolCall) {
+			const contentStart = absoluteSegmentStart + "Human: ".length;
+			// Tool output is raw and may itself contain transcript-looking role markers.
+			// Match through those markers to the wrapper close at a real segment boundary.
+			const result =
+				/(?:<function_results>[\s\S]*?<\/function_results>|<tool_response>[\s\S]*?<\/tool_response>)(?=\n?(?:\n\n(?:Assistant|Human): |$))/y;
+			result.lastIndex = contentStart;
+			const match = result.exec(body);
+			if (match) {
+				matches.push({ block: match[0], start: contentStart });
+				segmentStart = result.lastIndex;
+				previousAssistantHadToolCall = false;
+				continue;
+			}
+			previousAssistantHadToolCall = false;
+		} else if (normalizedSegment.length > 0) {
+			previousAssistantHadToolCall = false;
+		}
+		if (segmentEnd === body.length) break;
+		segmentStart = segmentEnd + 2;
+	}
+	return matches.sort((a, b) => a.start - b.start);
+}
+// Shrink an oversized compaction summarization goal by eliding ONLY the tool-I/O
+// blocks inside `<conversation>…</conversation>`, oldest-to-newest, one block at a
+// time, stopping as soon as the whole goal fits the soft byte budget. User turns,
+// assistant text/reasoning, trailing summarization instructions, and any
+// `<previous-summary>` block after `</conversation>` are preserved verbatim. A single
+// render — no per-step re-request. If eliding every tool block is still over budget,
+// the goal is returned with all tool blocks elided (the most this priority policy
+// permits) and the existing jitter/hard zone guards act as backstop.
+function shakeGitLabDuoWorkflowSummarizationGoal(goal: string): string {
+	if (Buffer.byteLength(goal, "utf8") < GITLAB_DUO_WORKFLOW_GOAL_SOFT_OVERFLOW_BYTES) return goal;
+	const open = goal.indexOf(GITLAB_DUO_WORKFLOW_CONVERSATION_OPEN);
+	// The wrapper's genuine close is the LAST `</conversation>`: tool output or file
+	// content inside the history can embed the literal `</conversation>`, and a forward
+	// `indexOf` would pick that embedded tag as the envelope end, pushing real tool I/O
+	// into `tail` where it is no longer shake-eligible. Trailing summarization
+	// instructions / `<previous-summary>` come after the wrapper close, so the last
+	// occurrence is the envelope boundary.
+	const close = goal.lastIndexOf(GITLAB_DUO_WORKFLOW_CONVERSATION_CLOSE);
+	if (open < 0 || close <= open) return goal;
+	const bodyStart = open + GITLAB_DUO_WORKFLOW_CONVERSATION_OPEN.length;
+	const head = goal.slice(0, bodyStart);
+	const body = goal.slice(bodyStart, close);
+	const tail = goal.slice(close);
+	const fixedBytes = Buffer.byteLength(head, "utf8") + Buffer.byteLength(tail, "utf8");
+	const bodyBudget = GITLAB_DUO_WORKFLOW_SUMMARIZATION_SHAKE_TARGET_BYTES - fixedBytes;
+	const shakenBody = shakeGitLabDuoWorkflowToolBlocks(body, Math.max(bodyBudget, 0));
+	return `${head}${shakenBody}${tail}`;
+}
+
+// Replace tool-I/O blocks with the elision marker from oldest to newest, one at a
+// time, until the body fits `bodyBudget` (or no shake-eligible block remains). Each
+// pass re-measures, so shaking stops at the first block whose removal brings the body
+// under budget — the minimum elision the priority policy needs.
+function shakeGitLabDuoWorkflowToolBlocks(body: string, bodyBudget: number): string {
+	if (Buffer.byteLength(body, "utf8") <= bodyBudget) return body;
+	const blocks = collectGitLabDuoWorkflowToolBlockMatches(body);
+	if (blocks.length === 0) return body;
+	let shaken = body;
+	let removedCharacters = 0;
+	for (const { block, start } of blocks) {
+		const at = start - removedCharacters;
+		if (shaken.slice(at, at + block.length) !== block) continue;
+		shaken = shaken.slice(0, at) + GITLAB_DUO_WORKFLOW_SHAKE_MARKER + shaken.slice(at + block.length);
+		removedCharacters += block.length - GITLAB_DUO_WORKFLOW_SHAKE_MARKER.length;
+		if (Buffer.byteLength(shaken, "utf8") <= bodyBudget) break;
+	}
+	return shaken;
 }
 
 const GITLAB_DUO_WORKFLOW_CHATML_START = "<|im_start|>";
@@ -2899,7 +3317,7 @@ function resolveGitLabDuoWorkflowDefinition(
 	return configured;
 }
 
-// Every workflow definition OMP ships is the inline ambient flow (Path B /
+// Every workflow route OMP ships is backed by the inline ambient flow (Path B /
 // `flowConfig`); the predicate is kept as a seam for future server-side flows.
 function isGitLabDuoWorkflowInlineFlow(workflowDefinition: GitLabDuoWorkflowDefinition): boolean {
 	void workflowDefinition;
@@ -2933,6 +3351,7 @@ function stringField(record: Record<string, unknown>, key: string): string | und
 }
 
 function extractGitLabDuoWorkflowCheckpoint(
+	state: GitLabDuoWorkflowStreamState,
 	event: Record<string, unknown>,
 ): GitLabDuoWorkflowCheckpointContent | undefined {
 	const action = getRecord(event, "action");
@@ -2954,8 +3373,19 @@ function extractGitLabDuoWorkflowCheckpoint(
 		};
 	}
 	const checkpointJson = getRecordString(checkpoint, "checkpoint");
-	const content = checkpointJson ? extractGitLabCheckpointEntries(checkpointJson) : undefined;
-	if (content) {
+	// With `incremental_streaming` enabled (see GITLAB_DUO_WORKFLOW_CLIENT_CAPABILITIES),
+	// DWS sends only the changed `ui_chat_log` slice per checkpoint — from the last
+	// in-progress message onward — not the full history. Merge each slice into the
+	// session accumulator by `message_id` so the rest of the pipeline (entry diffing,
+	// stall byte-length comparison, dedup) keeps operating on a full snapshot. The
+	// accumulator persists across the resume that reuses this socket and resets only
+	// when a fresh workflow seeds a new session.
+	const incomingChatLog = checkpointJson ? parseGitLabDuoWorkflowChatLog(checkpointJson) : undefined;
+	if (incomingChatLog) {
+		const merged = mergeGitLabDuoWorkflowIncrementalChatLog(state.accumulatedChatLog ?? [], incomingChatLog);
+		state.accumulatedChatLog = merged;
+		syncGitLabDuoWorkflowCheckpointState(state);
+		const content = buildGitLabDuoWorkflowCheckpointContent(merged);
 		if (contextUsage) content.contextUsage = contextUsage;
 		return content;
 	}
@@ -3007,11 +3437,48 @@ function readGitLabDuoWorkflowAgentUsage(value: unknown): GitLabDuoWorkflowConte
 	return { used, window };
 }
 
-function extractGitLabCheckpointEntries(checkpointJson: string): GitLabDuoWorkflowCheckpointContent | undefined {
+// Parse the raw `ui_chat_log` array out of a checkpoint JSON string. This is the
+// per-checkpoint slice as received on the wire — under `incremental_streaming` it is
+// only the changed tail, not the full history, so callers must merge it (see
+// mergeGitLabDuoWorkflowIncrementalChatLog) before building checkpoint content.
+function parseGitLabDuoWorkflowChatLog(checkpointJson: string): unknown[] | undefined {
 	const checkpoint = parseJsonRecord(checkpointJson);
 	const channelValues = getRecord(checkpoint, "channel_values");
 	const chatLog = channelValues?.ui_chat_log;
-	if (!Array.isArray(chatLog)) return undefined;
+	return Array.isArray(chatLog) ? chatLog : undefined;
+}
+
+// Merge an incremental `ui_chat_log` slice into the accumulated full log, ported from
+// the official GitLab LSP (`lib_workflow_executor/.../node_executor.ts`
+// `mergeIncrementalChatLog`). Empty slice → accumulated unchanged. Otherwise locate the
+// slice's first message by `message_id` in the accumulated log: found → replace from
+// that index onward (updates the in-progress message and appends new ones); not found
+// with a non-empty id → append the slice. Id-less snapshots cannot be overlapped
+// safely by identity; they use positional fallback keys later (`agent:${index}`), so
+// treat the incoming slice as the full current snapshot instead of appending it and
+// duplicating stale prior entries.
+function mergeGitLabDuoWorkflowIncrementalChatLog(accumulated: unknown[], incoming: unknown[]): unknown[] {
+	if (incoming.length === 0) return [...accumulated];
+	const firstMessageId = getGitLabDuoWorkflowChatLogMessageId(incoming[0]);
+	if (!firstMessageId) return [...incoming];
+	const overlapIndex = accumulated.findIndex(entry => getGitLabDuoWorkflowChatLogMessageId(entry) === firstMessageId);
+	if (overlapIndex !== -1) {
+		return [...accumulated.slice(0, overlapIndex), ...incoming];
+	}
+	return [...accumulated, ...incoming];
+}
+
+function getGitLabDuoWorkflowChatLogMessageId(entry: unknown): string | undefined {
+	if (!entry || typeof entry !== "object") return undefined;
+	return getRecordString(entry as Record<string, unknown>, "message_id");
+}
+
+// Build checkpoint content (stream entries + stall byte length + latest type) from a
+// FULL (already-merged) `ui_chat_log`. `contentLength` is the serialized length of the
+// merged log so the stall detector compares full-snapshot sizes across tool boundaries
+// — under incremental streaming the raw per-checkpoint slice length would shrink and
+// falsely read as a non-advancing (stalled) workflow.
+function buildGitLabDuoWorkflowCheckpointContent(chatLog: unknown[]): GitLabDuoWorkflowCheckpointContent {
 	const entries: GitLabDuoWorkflowCheckpointEntry[] = [];
 	for (let index = 0; index < chatLog.length; index++) {
 		const entry = chatLog[index];
@@ -3041,7 +3508,11 @@ function extractGitLabCheckpointEntries(checkpointJson: string): GitLabDuoWorkfl
 	}
 	return {
 		entries,
-		contentLength: checkpointJson.length,
+		// Byte length of the merged full log wrapped exactly as the server wraps a
+		// checkpoint (`channel_values.ui_chat_log`), so the stall detector compares the
+		// same unit a real checkpoint carries. Measuring the bare array would shift the
+		// basis and desync the cross-boundary comparison.
+		contentLength: JSON.stringify({ channel_values: { ui_chat_log: chatLog } }).length,
 		latestMessageType: getGitLabDuoWorkflowLatestMessageType(chatLog),
 	};
 }

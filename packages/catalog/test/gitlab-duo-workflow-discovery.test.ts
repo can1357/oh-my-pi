@@ -501,6 +501,9 @@ describe("GitLab Duo Workflow discovery", () => {
 		expect(buildGitLabDuoWorkflowModelSpec({ name: "Sonnet", ref: "claude_sonnet_4_6" }).contextWindow).toBe(
 			1_000_000,
 		);
+		expect(buildGitLabDuoWorkflowModelSpec({ name: "Fable", ref: "claude_fable_5" }).contextWindow).toBe(1_000_000);
+		expect(buildGitLabDuoWorkflowModelSpec({ name: "Fable", ref: "claude-fable-5" }).contextWindow).toBe(1_000_000);
+		expect(buildGitLabDuoWorkflowModelSpec({ name: "Mythos", ref: "claude_mythos_5" }).contextWindow).toBe(1_000_000);
 		expect(buildGitLabDuoWorkflowModelSpec({ name: "Gemini", ref: "gemini_2_5_pro" }).contextWindow).toBe(1_000_000);
 		expect(buildGitLabDuoWorkflowModelSpec({ name: "Mystery", ref: "some_unknown_model" }).contextWindow).toBe(
 			200_000,

@@ -25,6 +25,8 @@ const GITLAB_DUO_WORKFLOW_DEFAULT_CONTEXT_WINDOW = 200_000;
 const GITLAB_DUO_WORKFLOW_CONTEXT_WINDOW_RULES: readonly { pattern: RegExp; contextWindow: number }[] = [
 	{ pattern: /claude[_-]?opus/i, contextWindow: 1_000_000 },
 	{ pattern: /claude[_-]?sonnet/i, contextWindow: 1_000_000 },
+	{ pattern: /claude[_-]?fable/i, contextWindow: 1_000_000 },
+	{ pattern: /claude[_-]?mythos/i, contextWindow: 1_000_000 },
 	{ pattern: /claude[_-]?haiku/i, contextWindow: 200_000 },
 	{ pattern: /gemini/i, contextWindow: 1_000_000 },
 	{ pattern: /gpt[_-]?5/i, contextWindow: 400_000 },
