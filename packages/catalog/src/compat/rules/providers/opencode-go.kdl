@@ -29,6 +29,27 @@ provider "opencode-go" {
 		reasoning-content-field "reasoning_content"
 		requires-reasoning-content-for-tool-calls #true
 	}
+	// DeepSeek V4.1 Flash (deepseek-flash) on the hosted gateway speaks the
+	// numeric reasoning budget (1-100) via the vLLM serving stack:
+	// low=25, high=50, xhigh=75, max=100 (or integer 1-100 passthrough).
+	// Minimal/medium are rejected; none=off. Default high (50) when unset.
+	// Prompt-encoding aliases (low=50/high=75/max=100) apply to direct
+	// prompt prefix rendering, not this gateway wire.
+	models "deepseek-flash" {
+		thinking-mode "effort"
+		thinking-efforts "low" "high" "xhigh" "max"
+		thinking-default-level "high"
+		thinking-effort-map {
+			low "25"
+			high "50"
+			xhigh "75"
+			max "100"
+		}
+		supports-tool-choice #false
+		max-tokens-field "max_tokens"
+		reasoning-content-field "reasoning_content"
+		requires-reasoning-content-for-tool-calls #true
+	}
 	class "glm" {
 		thinking-mode "effort"
 	}
