@@ -647,11 +647,14 @@ describe("CollabSocket send backpressure", () => {
 			} as CollabFrame);
 
 			// Larger than the whole budget, so only the empty-queue floor can take it —
-			// and the floor cannot be reached while anything is queued ahead of it. The
-			// preflight counted the notice as a survivor, so `charged + bytes` decided
-			// the join, and no oversized batch can pass that test however small the
-			// notice is. Nothing was shed and nothing was over its share: the join was
-			// simply refused, and the host then unregisters the peer it had just added.
+			// and the floor cannot be reached while anything is queued ahead of it.
+			//
+			// What this refused before the fix: the preflight counted the notice as a
+			// survivor, so `charged + bytes` decided the join, and no oversized batch
+			// can pass that test however small the notice is. Nothing was shed and
+			// nothing was over its share — the join was simply refused, and the host
+			// then unregistered the peer it had just added. It is admitted now, and
+			// the notice is what pays for it.
 			expect(socket.sendBatch(welcomeBatch("welcome for the newcomer"), 5, 17 * 1024 * 1024)).toBe(true);
 
 			const deadline = Date.now() + 3_000;
