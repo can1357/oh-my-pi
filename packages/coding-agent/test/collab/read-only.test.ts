@@ -26,7 +26,7 @@ import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memor
 
 interface HostHarness {
 	ctx: InteractiveModeContext;
-	prompts: { from?: string }[];
+	prompts: { from?: string; content?: unknown }[];
 	aborts: { count: number };
 	/** Resolves on the next promptCustomMessage call — no polling. */
 	nextPrompt(): Promise<{ from?: string }>;
@@ -34,7 +34,7 @@ interface HostHarness {
 
 /** Minimal InteractiveModeContext double: only the members CollabHost touches. */
 function makeHostContext(): HostHarness {
-	const prompts: { from?: string }[] = [];
+	const prompts: { from?: string; content?: unknown }[] = [];
 	const aborts = { count: 0 };
 	const promptWaiters: ((details: { from?: string }) => void)[] = [];
 	const ctx = {
@@ -56,9 +56,9 @@ function makeHostContext(): HostHarness {
 			thinkingLevel: undefined,
 			subscribe: () => () => {},
 			emitNotice: () => {},
-			promptCustomMessage: (message: { details?: { from?: string } }) => {
+			promptCustomMessage: (message: { details?: { from?: string }; content?: unknown }) => {
 				const details = message.details ?? {};
-				prompts.push(details);
+				prompts.push({ ...details, content: message.content });
 				for (const waiter of promptWaiters.splice(0)) waiter(details);
 				return Promise.resolve();
 			},
@@ -206,7 +206,7 @@ afterAll(async () => {
 	await host.stop("test done");
 });
 
-describe("collab hello fields a guest can lie about", () => {
+describe("collab frame fields a guest can lie about", () => {
 	it("treats a write token that is not a string as one that does not match", async () => {
 		// `Buffer.from({}, "base64url")` throws ERR_INVALID_ARG_TYPE, and the frame
 		// handler's catch would swallow it: no welcome, no error, nothing the guest
@@ -260,6 +260,43 @@ describe("collab hello fields a guest can lie about", () => {
 		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
 		expect(reply.message).toContain("protocol mismatch");
 		expect(host.participants.find(p => p.name === "bad-proto")).toBeUndefined();
+	});
+
+	it("carries a prompt whose images are not an array, without the images", async () => {
+		// `{ length: 1 }` passes the length test the spread was guarded by and then
+		// throws "Spread syntax requires ...iterable", which the frame handler's catch
+		// swallows: the prompt disappears and the guest is told nothing.
+		const guest = await joinAsGuest(host.link, "bad-images");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// Registered before the send, and raced against a timer so a prompt that never
+		// arrives fails on the assertion below rather than on the suite's timeout.
+		const delivered = harness.nextPrompt();
+		guest.socket.send({ t: "prompt", text: "still a prompt", images: { length: 1 } } as unknown as CollabFrame);
+		await Promise.race([delivered, Bun.sleep(1_000)]);
+
+		// Delivered, and delivered down the no-images path: the text goes through as
+		// a bare string exactly as a prompt that carried no images would.
+		expect(harness.prompts).toHaveLength(1);
+		expect(harness.prompts[0]?.from).toBe("bad-images");
+		expect(harness.prompts[0]?.content).toBe("still a prompt");
+	});
+
+	it("answers an agent chat whose message is not a string instead of dropping it", async () => {
+		const guest = await joinAsGuest(host.link, "bad-chat");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// `text?.trim()` guards null and undefined but not a number, so this threw
+		// where an absent message is answered.
+		guest.socket.send({ t: "agent-cmd", cmd: "chat", agentId: "nope", text: 42 } as unknown as CollabFrame);
+		const reply = await guest.nextFrame();
+		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+		// The same answer an empty message gets.
+		expect(reply.message).toContain("empty chat message");
 	});
 });
 

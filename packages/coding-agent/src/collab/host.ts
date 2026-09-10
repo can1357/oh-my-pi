@@ -624,15 +624,27 @@ export class CollabHost {
 		this.#pendingUi.get(reqId)?.settle({ kind: "answered", value });
 	}
 
-	#handlePrompt(text: string, images: ImageContent[] | undefined, fromPeer: number): void {
+	/**
+	 * `images` is `unknown` for the reason given on {@link #verifyWriteToken}: the
+	 * declared type is the sender's claim. `text` stays typed because it reaches no
+	 * operation here that a non-string can throw out of — it is only placed into the
+	 * content — where `images` was spread, which a truthy non-iterable does throw
+	 * out of.
+	 */
+	#handlePrompt(text: string, images: unknown, fromPeer: number): void {
 		const peer = this.#peers.get(fromPeer);
 		if (!peer?.canWrite) {
 			this.#rejectReadOnly("prompting", fromPeer);
 			return;
 		}
 		const name = peer.name;
+		// `Array.isArray`, not a length test: `{ length: 1 }` passes a length test and
+		// then throws out of the spread, and that throw unwinds into `CollabSocket`'s
+		// frame-handler catch — losing the whole prompt for a debug line. Anything
+		// that is not an array carries no images, which is the path a prompt without
+		// any already takes, so the text still gets through.
 		const content: string | (TextContent | ImageContent)[] =
-			images && images.length > 0 ? [{ type: "text", text }, ...images] : text;
+			Array.isArray(images) && images.length > 0 ? [{ type: "text", text }, ...(images as ImageContent[])] : text;
 		const details: CollabPromptDetails = { from: name };
 		if (this.#ctx.session.isStreaming) {
 			this.#ctx.updatePendingMessagesDisplay();
@@ -805,7 +817,14 @@ export class CollabHost {
 		}, AGENTS_DEBOUNCE_MS);
 	}
 
-	#handleAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text: string | undefined, fromPeer: number): void {
+	/**
+	 * `text` is `unknown` for the reason given on {@link #verifyWriteToken}. `cmd`
+	 * and `agentId` need no narrowing and are left typed: `cmd` only ever reaches a
+	 * `switch`, which matches nothing and falls through for any other value, and
+	 * `agentId` only ever reaches a `Map` lookup and a template — total for anything
+	 * JSON can carry, and an id that matches no agent is already an answered case.
+	 */
+	#handleAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text: unknown, fromPeer: number): void {
 		if (!this.#peers.get(fromPeer)?.canWrite) {
 			this.#rejectReadOnly("agent control", fromPeer);
 			return;
@@ -826,7 +845,11 @@ export class CollabHost {
 		};
 		switch (cmd) {
 			case "chat": {
-				const trimmed = text?.trim();
+				// `.trim()` throws on a number, and the throw would be swallowed, so a
+				// malformed message would vanish rather than be answered. A message that
+				// is not a string is not a message, which is what an empty one already
+				// means: the guest gets the same reply either way.
+				const trimmed = typeof text === "string" ? text.trim() : "";
 				if (!trimmed) {
 					this.#socket?.send({ t: "error", message: `agent ${agentId}: empty chat message` }, fromPeer);
 					return;
