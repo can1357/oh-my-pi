@@ -154,11 +154,14 @@ const GUEST_LABEL_MAX = 64;
  * number. A split surrogate at the cut is not a corruption risk: `JSON.stringify`
  * escapes a lone surrogate, so the frame stays valid JSON.
  *
- * 512 because the longest message this host composes from its own text plus a
- * fully-sized {@link GUEST_LABEL_MAX} label measures 313 units. What gets cut is
- * therefore never this host's own wording — but it is not only guest padding
- * either: an error raised downstream can carry a guest value into the middle of
- * its own prose, and truncating that loses the tail of a real diagnostic.
+ * 512 because the longest error this file composes from its own literals plus a
+ * fully-sized {@link GUEST_LABEL_MAX} label measures 154 units — the `kill` reply
+ * for an unknown agent, which spends the label twice. What gets cut is therefore
+ * never this host's own wording. Prose from elsewhere has no such headroom and no
+ * ceiling to compute one from: the revive path `AgentLifecycleManager.ensureLive`
+ * runs into (`#resolveAndRevive`) interpolates the *untruncated* id twice, so the
+ * same reply reaches 586 units at a 200-unit id and grows from there. That is what
+ * the cap is for, and why it cannot be replaced by arithmetic over the ingredients.
  */
 const ERROR_MESSAGE_MAX = 512;
 
@@ -173,17 +176,37 @@ const ERROR_MESSAGE_MAX = 512;
  * providers would be handed verbatim.
  */
 const IMAGE_URL_PROTOCOLS = new Set(["http:", "https:"]);
-/**
- * Ceiling on a replicated image URL, in UTF-16 code units.
- *
- * The de-facto interoperable URL ceiling rather than a figure of this feature's
- * own — proxies, CDNs and older clients converge on it, and the broker's own
- * URLs are an order of magnitude shorter. It exists because this string is
- * copied verbatim into a provider request and a guest chooses its length.
- */
-const IMAGE_URL_MAX = 2048;
-
 const IMAGE_DETAIL_VALUES = new Set(["auto", "low", "high", "original"]);
+/**
+ * Image media types this codebase can actually carry.
+ *
+ * Not a list chosen here. `normalizeAnthropicImageMediaType`
+ * (`providers/anthropic.ts`), `createImageBlock` (`providers/amazon-bedrock.ts`)
+ * and `EXT_BY_MIME` (`blob-broker/store.ts`) each recognise jpeg, png, gif and
+ * webp; the first two also read `image/jpg` as a spelling of `image/jpeg`, and
+ * `EXT_BY_MIME` does not, so that spelling costs a `.bin` extension on a broker
+ * blob and nothing else.
+ *
+ * `image/svg+xml` is left out although `IMAGE_EXTENSION_BY_MIME`
+ * (`session/blob-store.ts`) maps it: no provider converter accepts SVG, and it is
+ * the one image type that carries script, which matters because of where this
+ * value lands.
+ *
+ * An allowlist rather than a media-type grammar check, because the values that do
+ * damage are well-formed media types. This string is not decoration in any of its
+ * sinks:
+ *
+ * - The blob broker serves the guest's own bytes back under it as a response
+ *   `content-type` (`blob-broker/store.ts`), on an origin this process operates.
+ * - `EXT_BY_MIME[mimeType]` is a plain object read, so `"__proto__"` resolves to
+ *   `Object.prototype` rather than `undefined`, the `?? "bin"` fallback never
+ *   fires, and the path the broker publishes stops matching the
+ *   `BLOB_PATH_PATTERN` its own request handler parses.
+ * - The OpenAI, Cursor and completions converters build
+ *   `data:${mimeType};base64,${data}`, where a `,` in the value ends the media
+ *   type early and hands the rest of the URL to the sender.
+ */
+const IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"]);
 const PROVIDER_FILE_PROVIDERS = new Set(["openai", "anthropic", "google"]);
 
 /**
@@ -212,7 +235,14 @@ function toImageContent(value: unknown): ImageContent | null {
 	const candidate = value as Record<string, unknown>;
 	if (candidate.type !== "image") return null;
 	const { data, mimeType, detail, url, providerFile } = candidate;
+	// `data` is deliberately not inspected beyond its type, unlike `mimeType`
+	// beside it. Every sink either carries it as a JSON string value, where
+	// `JSON.stringify` escapes it, or appends it after the `;base64,` of a data
+	// URL, where nothing following can re-open the media type. So a wrong value
+	// costs a rejected turn — the price of any wrong image — while the scan would
+	// run over what is routinely megabytes on the prompt path.
 	if (typeof data !== "string" || typeof mimeType !== "string") return null;
+	if (!IMAGE_MIME_TYPES.has(mimeType)) return null;
 	if (detail !== undefined && !IMAGE_DETAIL_VALUES.has(detail as string)) return null;
 	if (url !== undefined && !isReplicableImageUrl(url)) return null;
 	const image: ImageContent = { type: "image", data, mimeType };
@@ -229,15 +259,23 @@ function toImageContent(value: unknown): ImageContent | null {
 /**
  * Whether a replicated image URL is one this host will hand to a provider.
  *
- * Checked, not merely typed, because `ImageContent.url` is not decoration: the
- * OpenAI converter puts it straight into `image_url` and the Google one into
- * `fileUri`, so a guest that sends `"not-a-url"` buys a provider failure a turn
- * later, and one that sends a scheme of its choosing picks where the request
- * points. Parsing alone is not the check — `URL.canParse("javascript:alert(1)")`
- * is `true`.
+ * Checked, not merely typed, because neither `ImageContent.url` nor
+ * `ProviderFileReference.uri` is decoration: the OpenAI converter puts the former
+ * straight into `image_url`, and the Google one puts *either* into the same
+ * `fileUri` (`providers/google-shared.ts`), so a scheme of the sender's choosing
+ * decides where a fetch attributed to the operator's credential points. Both
+ * doors onto that sink take this predicate; checking only one leaves the other
+ * open. Parsing alone is not the check — `URL.canParse("javascript:alert(1)")` is
+ * `true`.
+ *
+ * Length is not bounded here, and the bound that used to be was removed rather
+ * than corrected: 2048 was this feature's own invention, no consumer between here
+ * and the provider states a ceiling to replace it with, and a long but well-formed
+ * `https:` URL costs a rejected turn and nothing worse. A number with no source is
+ * worse than no number, because it reads like a constraint that was looked up.
  */
 function isReplicableImageUrl(value: unknown): value is string {
-	if (typeof value !== "string" || value.length === 0 || value.length > IMAGE_URL_MAX) return false;
+	if (typeof value !== "string" || value.length === 0) return false;
 	let parsed: URL;
 	try {
 		parsed = new URL(value);
@@ -252,7 +290,12 @@ function toProviderFileReference(value: unknown): ProviderFileReference | null {
 	const { provider, id, uri, expiresAt } = value as Record<string, unknown>;
 	if (!PROVIDER_FILE_PROVIDERS.has(provider as string)) return null;
 	if (id !== undefined && typeof id !== "string") return null;
-	if (uri !== undefined && typeof uri !== "string") return null;
+	// Not merely a string, unlike `id`: `id` is handed to OpenAI and Anthropic as an
+	// opaque handle they look up, while `uri` is dereferenced — see
+	// {@link isReplicableImageUrl}. The only producer of this field is the Gemini
+	// Files API response (`blob-broker/provider-files-gemini.ts`), which returns an
+	// `https:` URL, so the allowlist costs no reachable capability.
+	if (uri !== undefined && !isReplicableImageUrl(uri)) return null;
 	// Finite, not merely a number: `JSON.parse("1e999")` is `Infinity`, which is
 	// `typeof "number"` and passes a bare check. It then serializes back out as
 	// `null`, so the entry this rebuild exists to keep well-formed would be
@@ -876,7 +919,7 @@ export class CollabHost {
 		const offered = Array.isArray(images) ? images : [];
 		const supplied = offered.map(toImageContent);
 		if (supplied.some(image => image === null)) {
-			this.#sendError("prompt failed: every image must carry string data and mimeType", fromPeer);
+			this.#sendError("prompt failed: every image must carry string data and a supported image type", fromPeer);
 			return;
 		}
 		const normalized = supplied as ImageContent[];

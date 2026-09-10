@@ -144,6 +144,29 @@ async function joinAsGuest(link: string, name: string, writeTokenOverride?: stri
 	return { socket, nextFrame };
 }
 
+type PromptOutcome = { kind: "error"; message: string } | { kind: "delivered" } | { kind: "other"; t: string };
+
+/**
+ * Send a prompt and settle on whichever of its two mutually exclusive outcomes
+ * happens: the host answers with an `error` frame and delivers nothing, or it
+ * delivers the prompt and answers nothing.
+ *
+ * Raced rather than awaited one at a time because there is no frame to wait for
+ * on the accepting path. Waiting on `nextFrame` alone turns "wrongly accepted"
+ * into a test timeout, which reports elapsed time rather than the behaviour that
+ * changed — and reports it five seconds late, per row.
+ */
+function promptOutcome(guest: TestGuest, harness: HostHarness, frame: unknown): Promise<PromptOutcome> {
+	const delivered = harness.nextPrompt().then((): PromptOutcome => ({ kind: "delivered" }));
+	const answered = guest
+		.nextFrame()
+		.then((reply): PromptOutcome =>
+			reply.t === "error" ? { kind: "error", message: reply.message } : { kind: "other", t: reply.t },
+		);
+	guest.socket.send(frame as CollabFrame);
+	return Promise.race([delivered, answered]);
+}
+
 /**
  * Guest that sends a `hello` this host's own types say is impossible. The frame is
  * `JSON.parse`d out of an encrypted envelope and cast, so a field's declared type
@@ -491,7 +514,7 @@ describe("collab frames a guest can send that the host must still answer", () =>
 			guest.socket.send({ t: "prompt", text: "carry me", images } as unknown as CollabFrame);
 			const reply = await guest.nextFrame();
 			if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
-			expect(reply.message).toContain("every image must carry string data and mimeType");
+			expect(reply.message).toContain("every image must carry string data and a supported image type");
 		}
 		// Well-formed images still go through, so the guard rejects shape and not use.
 		const delivered = harness.nextPrompt();
@@ -587,26 +610,34 @@ describe("collab frames a guest can send that the host must still answer", () =>
 			{ providerFile: null },
 			{ detail: "enormous" },
 			{ url: 7 },
-			// Parses, and points wherever the sender chose. `URL.canParse` says yes to
-			// all three; the scheme allowlist is what says no.
+			// Two different rejections, and it matters which is doing the work.
+			// `not-a-url` never parses, so `new URL` refuses it. The other two parse
+			// fine — `URL.canParse("javascript:alert(1)")` is `true` — and point
+			// wherever the sender chose; only the scheme allowlist says no to those.
 			{ url: "not-a-url" },
 			{ url: "javascript:alert(1)" },
 			{ url: "file:///etc/passwd" },
-			{ url: `https://example.invalid/${"a".repeat(2048)}` },
 			{ providerFile: 5 },
 			{ providerFile: { provider: "nope" } },
 			{ providerFile: { provider: "openai", id: 9 } },
 			{ providerFile: { provider: "openai", uri: 9 } },
 			{ providerFile: { provider: "openai", expiresAt: "soon" } },
+			// `uri` reaches Google's `fileUri` verbatim, the same sink `url` reaches,
+			// so it needs the same predicate — otherwise the row above it is a lock on
+			// one of two doors.
+			{ providerFile: { provider: "google", uri: "file:///etc/passwd" } },
+			{ providerFile: { provider: "google", uri: "javascript:alert(1)" } },
+			{ providerFile: { provider: "google", uri: "not-a-url" } },
 		]) {
-			guest.socket.send({
+			const outcome = await promptOutcome(guest, harness, {
 				t: "prompt",
 				text: "carry me",
 				images: [{ type: "image", data: "AAAA", mimeType: "image/png", ...extra }],
-			} as unknown as CollabFrame);
-			const reply = await guest.nextFrame();
-			if (reply.t !== "error") throw new Error(`expected error for ${JSON.stringify(extra)}, got ${reply.t}`);
-			expect(reply.message).toContain("every image must carry string data and mimeType");
+			});
+			if (outcome.kind !== "error") {
+				throw new Error(`expected an error reply for ${JSON.stringify(extra)}, got ${outcome.kind}`);
+			}
+			expect(outcome.message).toContain("every image must carry string data and a supported image type");
 		}
 
 		// Every optional field this host knows, well-formed, survives the rebuild —
@@ -623,21 +654,102 @@ describe("collab frames a guest can send that the host must still answer", () =>
 					data: "AAAA",
 					mimeType: "image/png",
 					detail: "high",
-					url: "https://example.invalid/a.png",
-					providerFile: { provider: "openai", id: "file-1", uri: "openai://file-1", expiresAt: 1 },
+					url: `https://example.invalid/${"a".repeat(4096)}.png`,
+					providerFile: {
+						provider: "google",
+						id: "files/file-1",
+						// The shape the only producer of this field emits: a Gemini Files
+						// API response URL (`blob-broker/provider-files-gemini.ts`).
+						uri: "https://generativelanguage.googleapis.com/v1beta/files/file-1",
+						expiresAt: 1,
+					},
 				},
 			],
 		} as unknown as CollabFrame);
 		await Promise.race([delivered, Bun.sleep(1_000)]);
 		expect(harness.prompts).toHaveLength(1);
 		const content = harness.prompts[0]?.content as { type: string; url?: string; providerFile?: unknown }[];
-		expect(content?.[1]?.url).toBe("https://example.invalid/a.png");
+		// Long on purpose: the URL carries no length bound, because a long but
+		// well-formed `https:` URL costs a rejected turn and nothing worse, and no
+		// consumer in this repo states a ceiling to hold it to.
+		expect(content?.[1]?.url).toBe(`https://example.invalid/${"a".repeat(4096)}.png`);
 		expect(content?.[1]?.providerFile).toEqual({
-			provider: "openai",
-			id: "file-1",
-			uri: "openai://file-1",
+			provider: "google",
+			id: "files/file-1",
+			uri: "https://generativelanguage.googleapis.com/v1beta/files/file-1",
 			expiresAt: 1,
 		});
+	});
+
+	it("refuses an image whose media type is not one this codebase can carry", async () => {
+		const guest = await joinAsGuest(host.link, "bad-mime");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// Every row is a string, so the `typeof` check that used to be the whole test
+		// passes all of them. Each one is here for a different reason:
+		//
+		// - `text/html` becomes the response `content-type` the blob broker serves
+		//   the guest's own bytes back under (`blob-broker/store.ts`), on an origin
+		//   this process operates.
+		// - `__proto__` and `constructor` are looked up in `EXT_BY_MIME`, a plain
+		//   object, so they resolve to `Object.prototype` and `Object` instead of
+		//   `undefined`; the `?? "bin"` fallback never fires and the path the broker
+		//   publishes stops matching the `BLOB_PATH_PATTERN` it parses requests with.
+		// - a `,` ends the media type early in `data:${mimeType};base64,${data}`,
+		//   which the OpenAI, Cursor and completions converters build.
+		// - CRLF separates the parts of the multipart bodies the blob uploaders
+		//   compose (`blob-broker/uploaders-object-storage.ts`).
+		// - `IMAGE/PNG` is a case `providers/anthropic.ts` folds and `EXT_BY_MIME`
+		//   does not, so accepting it means two sinks disagreeing about the same
+		//   image. Nothing in this repo emits it.
+		// - `image/svg+xml` is the one image type that carries script, and no
+		//   provider converter accepts it — only `session/blob-store.ts` maps it, for
+		//   a local file extension.
+		for (const mimeType of [
+			"text/html",
+			"__proto__",
+			"constructor",
+			"image/png,text/html",
+			"image/png\r\nX-Injected: 1",
+			"IMAGE/PNG",
+			"image/svg+xml",
+		]) {
+			const outcome = await promptOutcome(guest, harness, {
+				t: "prompt",
+				text: "carry me",
+				images: [{ type: "image", data: "AAAA", mimeType }],
+			});
+			if (outcome.kind !== "error") {
+				throw new Error(`expected an error reply for ${JSON.stringify(mimeType)}, got ${outcome.kind}`);
+			}
+			expect(outcome.message).toContain("every image must carry string data and a supported image type");
+		}
+		expect(harness.prompts).toHaveLength(0);
+
+		// The accept side, so the guard is pinned as an allowlist and not as a ban on
+		// the rows above. `image/jpg` is in it because `providers/anthropic.ts` reads
+		// it as a spelling of `image/jpeg` and `providers/amazon-bedrock.ts` takes it
+		// outright; `EXT_BY_MIME` does not have it, which costs a `.bin` extension on
+		// a broker blob and nothing else.
+		for (const mimeType of ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"]) {
+			const delivered = harness.nextPrompt();
+			guest.socket.send({
+				t: "prompt",
+				text: "carry me",
+				images: [{ type: "image", data: "AAAA", mimeType }],
+			} as unknown as CollabFrame);
+			await Promise.race([delivered, Bun.sleep(1_000)]);
+		}
+		expect(harness.prompts).toHaveLength(5);
+		expect(harness.prompts.map(prompt => (prompt.content as { mimeType?: string }[])[1]?.mimeType)).toEqual([
+			"image/jpeg",
+			"image/jpg",
+			"image/png",
+			"image/gif",
+			"image/webp",
+		]);
 	});
 
 	it("refuses an image whose expiry is a number the wire can produce but JSON cannot carry back", async () => {
@@ -660,7 +772,7 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		await sendRawFrame(raw);
 		const reply = await guest.nextFrame();
 		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
-		expect(reply.message).toContain("every image must carry string data and mimeType");
+		expect(reply.message).toContain("every image must carry string data and a supported image type");
 		expect(harness.prompts).toHaveLength(0);
 	});
 
