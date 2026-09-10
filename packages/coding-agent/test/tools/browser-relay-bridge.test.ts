@@ -3107,6 +3107,55 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")).toHaveLength(0);
 	});
 
+	it("preserves dispatch order when a full media reset reply arrives out of order", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Emulation.setEmulatedMedia",
+				params: {},
+			}),
+		);
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Emulation.setEmulatedMedia",
+				params: { media: "print" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 2, "overlapping media reset and setter");
+
+		const [reset, setter] = ext.pending("send");
+		if (!reset || !setter) throw new Error("expected both media commands");
+		ext.markAcked(setter.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: setter.id, ok: true, result: {} }));
+		await flush();
+		ext.markAcked(reset.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: reset.id, ok: true, result: {} }));
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.pending("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "latest media setter replay");
+		expect(ext2.rpcs("send")[0]).toMatchObject({
+			method: "Emulation.setEmulatedMedia",
+			params: { media: "print" },
+		});
+	});
+
 	it("retains an older live owner's setter as fallback when replies arrive out of order", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

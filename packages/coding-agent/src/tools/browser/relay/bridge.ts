@@ -1409,15 +1409,16 @@ export class RelayBridge {
 		// deterministically. A completed tab-wide clear suppresses older setters, and
 		// an older clear must not erase a newer setter. Successful setters from other
 		// owners are still retained below as fallback state if the current winner exits.
-		// The media setter is field-mergeable and resolves ordering per field.
-		if (trackingKey !== "Emulation.setEmulatedMedia") {
-			const clearSequence = tab.subscriptionClearSequences.get(trackingKey);
-			if (clearSequence !== undefined && clearSequence > sequence) return;
-			if (this.#interruptedClearKey(msg)) {
-				const current = this.#latestSubscriptionForKey(tab, trackingKey);
-				if (current && current.sequence > sequence) return;
-				tab.subscriptionClearSequences.set(trackingKey, sequence);
-			}
+		// The media setter is field-mergeable and resolves non-empty updates and
+		// partial clears per field. Its empty-params form still resets the whole
+		// object, so it needs the same sequence tombstone as every other tab-wide
+		// clear when replies settle out of dispatch order.
+		const clearSequence = tab.subscriptionClearSequences.get(trackingKey);
+		if (clearSequence !== undefined && clearSequence > sequence) return;
+		if (this.#interruptedClearKey(msg)) {
+			const current = this.#latestSubscriptionForKey(tab, trackingKey);
+			if (current && current.sequence > sequence) return;
+			tab.subscriptionClearSequences.set(trackingKey, sequence);
 		}
 		const separator = msg.method.indexOf(".");
 		const domain = separator > 0 ? msg.method.slice(0, separator) : "";
