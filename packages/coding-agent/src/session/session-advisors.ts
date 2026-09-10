@@ -43,11 +43,13 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { extractHttpStatusFromError, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import {
-	ADVISOR_DEFAULT_TOOL_NAMES,
 	ADVISOR_DEFAULT_BUDGET_PER_UPDATE,
+	ADVISOR_DEFAULT_TOOL_NAMES,
 	ADVISOR_MAX_BUDGET_PER_UPDATE,
+	ADVISOR_SYNC_BACKLOG_MODES,
 	AdviseTool,
 	type AdvisorAgent,
+	type AdvisorReviewMode,
 	AdvisorEmissionGuard,
 	AdvisorLoopGuard,
 	type AdvisorMessageDetails,
@@ -56,6 +58,7 @@ import {
 	AdvisorRuntime,
 	type AdvisorRuntimeStatus,
 	type AdvisorSeverity,
+	type AdvisorSyncBacklog,
 	AdvisorTranscriptRecorder,
 	advisorTranscriptFilename,
 	buildAdvisorQuarantineSourceText,
@@ -264,6 +267,12 @@ interface ActiveAdvisor {
 	model: Model;
 	thinkingLevel: ThinkingLevel;
 	providerSessionId: string | undefined;
+	reviewMode: AdvisorReviewMode;
+	reviewInterval: number;
+	/** Per-advisor catch-up policy override; `undefined` inherits the global
+	 *  `advisor.syncBacklog` setting dynamically at each boundary. */
+	syncBacklog: AdvisorSyncBacklog | undefined;
+	eligibleUpdates: number;
 	retryFallback?: AdvisorRetryFallbackState;
 	retryFallbackPendingSuccess: boolean;
 	/** Count of consecutive usage-limit block waits, bounded by retry.maxRetries; reset on turn success. */
@@ -289,6 +298,9 @@ interface AdvisorRuntimeDescriptor {
 	slug: string;
 	model: Model;
 	thinkingLevel: ThinkingLevel;
+	reviewMode: AdvisorReviewMode;
+	reviewInterval: number;
+	syncBacklog: AdvisorSyncBacklog | undefined;
 	signature: string;
 }
 
@@ -479,7 +491,7 @@ export class SessionAdvisors {
 		if (this.#advisorEnabled) this.#buildAdvisorRuntime();
 	}
 
-	/** Delivers one completed primary turn to every live advisor. */
+	/** Queues eligible primary updates for each live advisor. */
 	async onPrimaryTurnEnd(
 		messages: AgentMessage[],
 		willContinue: boolean | undefined,
@@ -489,22 +501,44 @@ export class SessionAdvisors {
 		if (terminalBoundary) this.#terminalUnwindActive = true;
 		try {
 			this.#advisorPrimaryTurnsCompleted++;
+			if (willContinue !== true) {
+				// The terminal primary boundary owns the deferred flush, ahead of any
+				// cadence gate: advice already produced against work the reviewers saw
+				// still reaches the primary when this boundary's reviews are
+				// cadence-skipped. The flush never resets the per-update budget — no new
+				// advisor update starts here.
+				for (const advisor of this.#advisors) advisor.adviseTool.flushDeferredNotes();
+			}
+			const scheduledAdvisors: ActiveAdvisor[] = [];
 			for (const advisor of this.#advisors) {
-				if (advisor.runtime.disposed) continue;
-				// Only the terminal primary boundary owns the deferred flush. Continuing
-				// tool turns must keep partial-work critiques withheld. The flush never
-				// resets the per-update budget — no new advisor update starts here.
-				if (willContinue !== true) advisor.adviseTool.flushDeferredNotes();
+				if (advisor.runtime.disposed || (advisor.reviewMode === "agent-end" && willContinue === true)) continue;
+				advisor.eligibleUpdates++;
+				if (advisor.eligibleUpdates % advisor.reviewInterval !== 0) continue;
+				scheduledAdvisors.push(advisor);
 				try {
 					advisor.runtime.onTurnEnd(messages, { willContinue });
 				} catch (error) {
 					logger.warn("advisor onTurnEnd threw; delta dropped", { advisor: advisor.name, err: String(error) });
 				}
 			}
-			const syncBacklog = this.#host.settings.get("advisor.syncBacklog");
-			if (this.#advisors.length === 0 || syncBacklog === "off") return;
-			const threshold = Number.parseInt(syncBacklog, 10);
-			await Promise.all(this.#advisors.map(advisor => advisor.runtime.waitForCatchup(30_000, threshold, signal)));
+			// Catch-up policy resolves per advisor at each boundary: a roster
+			// entry's `syncBacklog` override wins; omitted entries follow the
+			// global `advisor.syncBacklog` setting live (a settings change needs
+			// no rebuild). Only advisors whose review was scheduled this boundary
+			// are waited on, each under its own policy — a `strict` final reviewer
+			// blocks the boundary (no wall-clock cap; abort, failure, quota,
+			// transition, and disposal still release it) while an asynchronous
+			// turn reviewer never parks the primary.
+			const globalSyncBacklog = this.#host.settings.get("advisor.syncBacklog");
+			const waits: Promise<boolean>[] = [];
+			for (const scheduled of scheduledAdvisors) {
+				const syncBacklog = scheduled.syncBacklog ?? globalSyncBacklog;
+				if (syncBacklog === "off") continue;
+				const strict = syncBacklog === "strict";
+				const threshold = strict ? 1 : Number.parseInt(syncBacklog, 10);
+				waits.push(scheduled.runtime.waitForCatchup(strict ? undefined : 30_000, threshold, signal));
+			}
+			await Promise.all(waits);
 		} finally {
 			// With advisor.syncBacklog=off, the review drain can emit after this
 			// callback returns. Keep the terminal guard until the next real agent
@@ -841,6 +875,7 @@ export class SessionAdvisors {
 			a.usageLimitRetries = 0;
 			// Resets the emission guard and every tool-side note state together.
 			a.adviseTool.resetDeliveredNotes();
+			a.eligibleUpdates = 0;
 			this.#attachAdvisorRecorderFeed(a);
 		}
 		this.#advisorPrimaryTurnsCompleted = 0;
@@ -853,7 +888,18 @@ export class SessionAdvisors {
 
 	#resolveAdvisorRuntimeDescriptors(emitWarnings: boolean): AdvisorRuntimeDescriptor[] {
 		const legacy = !this.#advisorConfigs?.length;
-		const roster: AdvisorConfig[] = legacy ? [{ name: "default" }] : this.#advisorConfigs!;
+		const roster: AdvisorConfig[] = legacy
+			? [
+					{
+						name: "default",
+						reviewMode: this.#host.settings.get("advisor.reviewMode") === "agent-end" ? "agent-end" : "turn",
+						reviewInterval: (() => {
+							const v = this.#host.settings.get("advisor.reviewInterval") as number;
+							return Number.isFinite(v) && v >= 1 ? Math.trunc(v) : 1;
+						})(),
+					},
+				]
+			: this.#advisorConfigs!;
 		const descriptors: AdvisorRuntimeDescriptor[] = [];
 		const usedSlugs = new Set<string>();
 		for (const config of roster) {
@@ -871,6 +917,23 @@ export class SessionAdvisors {
 				this.#advisorStatuses.set(slug, { name: config.name, status: "paused" });
 				continue;
 			}
+			const reviewMode: AdvisorReviewMode = config.reviewMode === "agent-end" ? "agent-end" : "turn";
+			const configuredReviewInterval = config.reviewInterval;
+			const reviewInterval =
+				typeof configuredReviewInterval === "number" &&
+				Number.isSafeInteger(configuredReviewInterval) &&
+				configuredReviewInterval >= 1
+					? configuredReviewInterval
+					: 1;
+			// Catch-up override: schema-validated for WATCHDOG.yml entries, clamped
+			// defensively for editor-supplied configs. `undefined` inherits the
+			// global `advisor.syncBacklog` dynamically at each boundary; an explicit
+			// "off" wins over a global strict/numeric policy.
+			const syncBacklog: AdvisorSyncBacklog | undefined =
+				config.syncBacklog !== undefined &&
+				(ADVISOR_SYNC_BACKLOG_MODES as readonly string[]).includes(config.syncBacklog)
+					? config.syncBacklog
+					: undefined;
 
 			// Resolve the advisor's model: an explicit `model` override wins; else the
 			// `advisor` role chain. A model that fails to resolve skips just this advisor.
@@ -929,19 +992,50 @@ export class SessionAdvisors {
 				slug,
 				model,
 				thinkingLevel: advisorThinkingLevel,
-				signature: this.#advisorRuntimeSignature(config, slug, model, advisorThinkingLevel),
+				reviewMode,
+				reviewInterval,
+				syncBacklog,
+				signature: this.#advisorRuntimeSignature(
+					config,
+					slug,
+					model,
+					advisorThinkingLevel,
+					reviewMode,
+					reviewInterval,
+					syncBacklog,
+				),
 			});
 		}
 		return descriptors;
 	}
 
-	#advisorRuntimeSignature(config: AdvisorConfig, slug: string, model: Model, thinkingLevel: ThinkingLevel): string {
+	#advisorRuntimeSignature(
+		config: AdvisorConfig,
+		slug: string,
+		model: Model,
+		thinkingLevel: ThinkingLevel,
+		reviewMode: AdvisorReviewMode,
+		reviewInterval: number,
+		syncBacklog: AdvisorSyncBacklog | undefined,
+	): string {
 		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
 		const instructions = config.instructions?.trim() ?? "";
 		const budget = this.#advisorMaxNotesPerUpdate(config);
-		return [config.name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions, budget].join(
-			"\u001f",
-		);
+		// Only the per-advisor OVERRIDE enters the signature: the global
+		// `advisor.syncBacklog` setting resolves live at each boundary, so changing
+		// it must not tear down the runtime.
+		return [
+			config.name,
+			slug,
+			formatModelStringWithRouting(model),
+			thinkingLevel,
+			tools,
+			instructions,
+			reviewMode,
+			reviewInterval,
+			syncBacklog ?? "",
+			budget,
+		].join("\u001f");
 	}
 
 	#advisorRuntimeMatchesCurrentConfig(): boolean {
@@ -1304,6 +1398,10 @@ export class SessionAdvisors {
 				model: advisorModel,
 				thinkingLevel: advisorThinkingLevel,
 				providerSessionId: advisorProviderSessionId,
+				reviewMode: descriptor.reviewMode,
+				reviewInterval: descriptor.reviewInterval,
+				syncBacklog: descriptor.syncBacklog,
+				eligibleUpdates: 0,
 				retryFallbackPendingSuccess: false,
 				usageLimitRetries: 0,
 				signature,

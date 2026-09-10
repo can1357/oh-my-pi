@@ -420,6 +420,7 @@ export class SelectorController {
 				},
 				scopedModels: this.ctx.session.scopedModels,
 				availableToolNames: this.ctx.session.getAdvisorAvailableToolNames(),
+				syncBacklog: this.ctx.settings.get("advisor.syncBacklog"),
 				defaultModelLabel: defaultAdvisorModel
 					? `${defaultAdvisorModel.provider}/${defaultAdvisorModel.id}`
 					: undefined,
@@ -620,8 +621,11 @@ export class SelectorController {
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
 				break;
+			case "advisor.reviewMode":
+			case "advisor.reviewInterval":
 			case "advisor.maxNotesPerUpdate":
-				if (this.ctx.session.isAdvisorEnabled()) {
+				// These are read at advisor build time; re-enable to rebuild
+				if (this.ctx.session.isAdvisorEnabled?.()) {
 					this.ctx.session.setAdvisorEnabled(true);
 					this.ctx.ui.requestRender();
 				}
