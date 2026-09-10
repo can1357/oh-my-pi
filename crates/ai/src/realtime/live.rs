@@ -8,7 +8,7 @@ use std::{
 	future::Future,
 	pin::Pin,
 	sync::{
-		Arc, Weak,
+		Arc, LazyLock, Weak,
 		atomic::{AtomicBool, AtomicUsize, Ordering},
 	},
 	time::{Duration, Instant},
@@ -281,7 +281,15 @@ struct PeerEventHandler {
 	playback:          Arc<Mutex<Option<PlaybackWriter>>>,
 	peer_state:        Arc<Mutex<RTCPeerConnectionState>>,
 	ice_state:         Arc<Mutex<RTCIceConnectionState>>,
-	state_generation:  Arc<AtomicUsize>,
+	/// Bumped by every peer-connection state change; lets the peer grace
+	/// timer detect a peer state that changed while it slept. Independent of
+	/// `ice_generation` so ICE events cannot invalidate a pending peer grace
+	/// timer (or vice versa): without the split, ICE firing after the peer
+	/// handler suppressed both reports and a sustained disconnect went
+	/// unreported.
+	peer_generation:   Arc<AtomicUsize>,
+	/// Bumped by every ICE connection state change; see `peer_generation`.
+	ice_generation:    Arc<AtomicUsize>,
 }
 
 impl PeerConnectionEventHandler for PeerEventHandler {
@@ -318,7 +326,7 @@ impl PeerConnectionEventHandler for PeerEventHandler {
 	{
 		Box::pin(async move {
 			*self.peer_state.lock() = state;
-			let start_gen = self.state_generation.fetch_add(1, Ordering::SeqCst) + 1;
+			let start_gen = self.peer_generation.fetch_add(1, Ordering::SeqCst) + 1;
 			let Some(core) = self.core.upgrade() else {
 				return;
 			};
@@ -337,11 +345,11 @@ impl PeerConnectionEventHandler for PeerEventHandler {
 				RTCPeerConnectionState::Disconnected => {
 					let peer_state = Arc::clone(&self.peer_state);
 					let ice_state = Arc::clone(&self.ice_state);
-					let state_generation = Arc::clone(&self.state_generation);
+					let peer_generation = Arc::clone(&self.peer_generation);
 					let core = Arc::downgrade(&core);
 					tokio::spawn(async move {
 						time::sleep(DISCONNECT_GRACE).await;
-						if state_generation.load(Ordering::SeqCst) == start_gen
+						if peer_generation.load(Ordering::SeqCst) == start_gen
 							&& *peer_state.lock() == RTCPeerConnectionState::Disconnected
 							&& *ice_state.lock() != RTCIceConnectionState::Disconnected
 						{
@@ -366,7 +374,7 @@ impl PeerConnectionEventHandler for PeerEventHandler {
 	{
 		Box::pin(async move {
 			*self.ice_state.lock() = state;
-			let start_gen = self.state_generation.fetch_add(1, Ordering::SeqCst) + 1;
+			let start_gen = self.ice_generation.fetch_add(1, Ordering::SeqCst) + 1;
 			let Some(core) = self.core.upgrade() else {
 				return;
 			};
@@ -392,11 +400,11 @@ impl PeerConnectionEventHandler for PeerEventHandler {
 				},
 				RTCIceConnectionState::Disconnected => {
 					let ice_state = Arc::clone(&self.ice_state);
-					let state_generation = Arc::clone(&self.state_generation);
+					let ice_generation = Arc::clone(&self.ice_generation);
 					let core = Arc::downgrade(&core);
 					tokio::spawn(async move {
 						time::sleep(DISCONNECT_GRACE).await;
-						if state_generation.load(Ordering::SeqCst) == start_gen
+						if ice_generation.load(Ordering::SeqCst) == start_gen
 							&& *ice_state.lock() == RTCIceConnectionState::Disconnected
 						{
 							if let Some(core) = core.upgrade() {
@@ -589,15 +597,19 @@ impl LivePeerCore {
 			playback:          Arc::new(Mutex::new(Some(playback_tx))),
 			peer_state:        Arc::new(Mutex::new(RTCPeerConnectionState::New)),
 			ice_state:         Arc::new(Mutex::new(RTCIceConnectionState::New)),
-			state_generation:  Arc::new(AtomicUsize::new(0)),
+			peer_generation:   Arc::new(AtomicUsize::new(0)),
+			ice_generation:    Arc::new(AtomicUsize::new(0)),
 		};
-
+		let mut udp_addrs = vec!["0.0.0.0:0".to_owned()];
+		if ipv6_bind_available() {
+			udp_addrs.push("[::]:0".to_owned());
+		}
 		let peer = PeerConnectionBuilder::new()
 			.with_configuration(RTCConfiguration::default())
 			.with_media_engine(media_engine)
 			.with_interceptor_registry(registry)
 			.with_handler(Arc::new(handler))
-			.with_udp_addrs(vec!["0.0.0.0:0".to_owned()])
+			.with_udp_addrs(udp_addrs)
 			.build()
 			.await
 			.map_err(|error| LiveMediaError::PeerCreation { source: error })?;
@@ -829,6 +841,16 @@ impl LivePeerCore {
 		self.queued_samples.store(0, Ordering::Release);
 		self.signal_tx.send_replace(PeerSignal::Closed);
 	}
+}
+
+/// Returns whether this host can bind an IPv6 UDP socket.
+///
+/// The result is cached because address-family support does not change during
+/// the session, and the probe socket is dropped immediately.
+fn ipv6_bind_available() -> bool {
+	static AVAILABLE: LazyLock<bool> =
+		LazyLock::new(|| std::net::UdpSocket::bind("[::]:0").is_ok());
+	*AVAILABLE
 }
 
 fn rms(samples: &[f32]) -> f64 {
@@ -1241,11 +1263,12 @@ mod tests {
 		};
 		let core = Arc::new(LivePeerCore::new(callbacks));
 		let handler = PeerEventHandler {
-			core:              Arc::downgrade(&core),
-			playback:          Arc::new(Mutex::new(None)),
-			peer_state:        Arc::new(Mutex::new(RTCPeerConnectionState::New)),
-			ice_state:         Arc::new(Mutex::new(RTCIceConnectionState::New)),
-			state_generation:  Arc::new(AtomicUsize::new(0)),
+			core:            Arc::downgrade(&core),
+			playback:        Arc::new(Mutex::new(None)),
+			peer_state:      Arc::new(Mutex::new(RTCPeerConnectionState::New)),
+			ice_state:       Arc::new(Mutex::new(RTCIceConnectionState::New)),
+			peer_generation: Arc::new(AtomicUsize::new(0)),
+			ice_generation:  Arc::new(AtomicUsize::new(0)),
 		};
 		let h = handler.clone();
 		tokio::spawn(async move {
@@ -1254,5 +1277,45 @@ mod tests {
 		});
 		time::sleep(DISCONNECT_GRACE + Duration::from_millis(100)).await;
 		assert!(failure_rx.try_recv().is_err());
+	}
+	#[tokio::test]
+	async fn sustained_dual_disconnect_reports_ice_failure() {
+		let (failure_tx, mut failure_rx) = oneshot::channel();
+		let failure_tx = Arc::new(Mutex::new(Some(failure_tx)));
+		let failure_count = Arc::new(AtomicUsize::new(0));
+		let failure_count_for_callback = Arc::clone(&failure_count);
+		let callbacks = LiveCallbacks {
+			event:        Box::new(|_| {}),
+			input_level:  Box::new(|_| {}),
+			output_level: Box::new(|_| {}),
+			ice_path:     Box::new(|_| {}),
+			failure:      Box::new(move |f| {
+				failure_count_for_callback.fetch_add(1, Ordering::SeqCst);
+				if let Some(tx) = failure_tx.lock().take() {
+					let _ = tx.send(f);
+				}
+			}),
+		};
+		let core = Arc::new(LivePeerCore::new(callbacks));
+		let handler = PeerEventHandler {
+			core:            Arc::downgrade(&core),
+			playback:        Arc::new(Mutex::new(None)),
+			peer_state:      Arc::new(Mutex::new(RTCPeerConnectionState::New)),
+			ice_state:       Arc::new(Mutex::new(RTCIceConnectionState::New)),
+			peer_generation: Arc::new(AtomicUsize::new(0)),
+			ice_generation:  Arc::new(AtomicUsize::new(0)),
+		};
+
+		handler
+			.on_ice_connection_state_change(RTCIceConnectionState::Disconnected)
+			.await;
+		handler
+			.on_connection_state_change(RTCPeerConnectionState::Disconnected)
+			.await;
+		time::sleep(DISCONNECT_GRACE + Duration::from_millis(100)).await;
+
+		let failure = failure_rx.try_recv().expect("sustained disconnect must report");
+		assert_eq!(failure, LiveMediaFailure::Ice);
+		assert_eq!(failure_count.load(Ordering::SeqCst), 1);
 	}
 }
