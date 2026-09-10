@@ -298,18 +298,13 @@ fn is_strict_descendant(child: &Path, ancestor: &Path) -> bool {
 }
 #[cfg(test)]
 mod tests {
-	use std::{fs, path::Path, process::Command};
+	use std::{fs, path::Path};
 
 	use super::*;
+	use crate::git::oracle_git_stdout;
 
 	fn run_git(root: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.current_dir(root)
-			.args(args)
-			.output()
-			.unwrap();
-		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
-		String::from_utf8(output.stdout).unwrap()
+		oracle_git_stdout(root, args)
 	}
 
 	fn init_git(root: &Path) {

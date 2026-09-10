@@ -51,7 +51,7 @@ Five consequences follow and bind the rest of the records:
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/driver/src/headless/kernel.rs`. P0–P7 production modes share the journal-first composition; final P7 integration rerun is tracked in `PLAN.md`.
+**Implemented.** Primary implementation: `crates/driver/src/headless/kernel.rs`. P0–P7 production modes share the journal-first composition.
 
 ## References
 

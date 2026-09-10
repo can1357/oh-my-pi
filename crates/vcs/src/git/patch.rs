@@ -913,11 +913,11 @@ fn decode_binary_block(
 	}
 	let inflate_size = block.size;
 	let mut inflated = vec![0; inflate_size];
-	let mut decoder = gix::features::zlib::Inflate::default();
+	let mut decoder = gix::zlib::Inflate::default();
 	let (status, consumed, written) = decoder
 		.once(&compressed, &mut inflated)
 		.map_err(|err| ApplyFailure::Invalid(format!("invalid zlib stream: {err}")))?;
-	if status != gix::features::zlib::Status::StreamEnd || consumed != compressed.len() {
+	if status != gix::zlib::Status::StreamEnd || consumed != compressed.len() {
 		return Err(ApplyFailure::Invalid("incomplete zlib stream".into()));
 	}
 	inflated.truncate(written);
@@ -1572,31 +1572,20 @@ fn validate_repo_path(path: &str) -> std::result::Result<(), ApplyFailure> {
 }
 #[cfg(test)]
 mod tests {
-	use std::process::Command;
 
 	use tempfile::TempDir;
 
-	use super::*;
+	use super::{
+		super::{oracle_git, oracle_git_stdout},
+		*,
+	};
 
 	fn git(cwd: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.current_dir(cwd)
-			.args(args)
-			.output()
-			.expect("run git");
-		assert!(
-			output.status.success(),
-			"git {} failed: {}",
-			args.join(" "),
-			String::from_utf8_lossy(&output.stderr)
-		);
-		String::from_utf8(output.stdout).expect("git output is UTF-8")
+		oracle_git_stdout(cwd, args)
 	}
 	fn git_with_index(cwd: &Path, index: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.current_dir(cwd)
+		let output = oracle_git(cwd, args)
 			.env("GIT_INDEX_FILE", index)
-			.args(args)
 			.output()
 			.expect("run git with alternate index");
 		assert!(
@@ -1910,11 +1899,11 @@ mod tests {
 
 	#[test]
 	fn patch_three_way_check_merges_drift_and_rejects_conflict() {
-		let temp = init(&[("file.txt", b"one\ntwo\nthree\n")]);
-		fs::write(temp.path().join("file.txt"), b"one\nTWO\nthree\n").expect("patch edit");
+		let temp = init(&[("file.txt", b"one\ntwo\nthree\nfour\n")]);
+		fs::write(temp.path().join("file.txt"), b"one\ntwo\nTHREE\nfour\n").expect("patch edit");
 		let patch = git(temp.path(), &["diff", "--full-index"]);
 		reset(temp.path());
-		fs::write(temp.path().join("file.txt"), b"ONE\ntwo\nthree\n").expect("drift");
+		fs::write(temp.path().join("file.txt"), b"ONE\ntwo\nthree\nfour\n").expect("drift");
 		let repository = repo(temp.path());
 		assert!(
 			!repository
@@ -1933,15 +1922,40 @@ mod tests {
 			.expect("three-way apply");
 		assert_eq!(
 			fs::read(temp.path().join("file.txt")).expect("merged file"),
-			b"ONE\nTWO\nthree\n"
+			b"ONE\ntwo\nTHREE\nfour\n"
 		);
 
 		reset(temp.path());
-		fs::write(temp.path().join("file.txt"), b"one\nOTHER\nthree\n").expect("conflict");
+		fs::write(temp.path().join("file.txt"), b"one\ntwo\nOTHER\nfour\n").expect("conflict");
 		assert!(
 			!repository
 				.can_apply_patch(&patch, &three_way)
 				.expect("conflict check")
+		);
+	}
+
+	#[test]
+	fn patch_three_way_rejects_adjacent_drift_as_conflict() {
+		let temp = init(&[("file.txt", b"one\ntwo\nthree\n")]);
+		fs::write(temp.path().join("file.txt"), b"one\nTWO\nthree\n").expect("patch edit");
+		let patch = git(temp.path(), &["diff", "--full-index"]);
+		reset(temp.path());
+		fs::write(temp.path().join("file.txt"), b"ONE\ntwo\nthree\n").expect("drift");
+		let repository = repo(temp.path());
+		let three_way =
+			ApplyOptions { cached: false, index_path: None, reverse: false, three_way: true };
+		assert!(
+			!repository
+				.can_apply_patch(&patch, &three_way)
+				.expect("adjacent conflict check")
+		);
+		assert!(matches!(
+			repository.apply_patch(&patch, &three_way),
+			Err(Error::Conflict { .. })
+		));
+		assert_eq!(
+			fs::read(temp.path().join("file.txt")).expect("file after adjacent conflict"),
+			b"ONE\ntwo\nthree\n"
 		);
 	}
 

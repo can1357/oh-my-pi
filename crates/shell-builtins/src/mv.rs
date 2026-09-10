@@ -757,13 +757,12 @@ fn assert_not_same_file(
 }
 
 fn handle_multiple_paths(host: &mut Host, paths: &[PathBuf], opts: &Options) -> MvResult<()> {
+	let Some(target_dir) = paths.last() else {
+		return Err(MvFailure::Message("mv: missing file operand".to_owned()));
+	};
 	if opts.no_target_dir {
-		return Err(MvFailure::Message(format!(
-			"mv: extra operand {}",
-			paths.last().unwrap().quote()
-		)));
+		return Err(MvFailure::Message(format!("mv: extra operand {}", target_dir.quote())));
 	}
-	let target_dir = paths.last().unwrap();
 	let sources = &paths[..paths.len() - 1];
 
 	move_files_into_dir(host, sources, target_dir, opts)
@@ -818,25 +817,29 @@ fn move_files_into_dir(
 
 	let display_manager = progress_manager(host, options.progress_bar);
 
-	let count_progress = if let Some(display_manager) = &display_manager {
-		if files.len() > 1 {
-			Some(
-				display_manager.add(
-					ProgressBar::new(files.len().try_into().unwrap()).with_style(
-						ProgressStyle::with_template(&format!(
-							"{} {{msg}} {{wide_bar}} {{pos}}/{{len}}",
-							"moving"
-						))
-						.unwrap(),
+	let count_progress =
+		if let Some(display_manager) = &display_manager {
+			if files.len() > 1 {
+				Some(
+					display_manager.add(
+						ProgressBar::new(u64::try_from(files.len()).map_err(|_| {
+							MvFailure::Message("too many files for progress bar".to_owned())
+						})?)
+						.with_style(
+							ProgressStyle::with_template(&format!(
+								"{} {{msg}} {{wide_bar}} {{pos}}/{{len}}",
+								"moving"
+							))
+							.expect("mv progress template is valid"),
+						),
 					),
-				),
-			)
+				)
+			} else {
+				None
+			}
 		} else {
 			None
-		}
-	} else {
-		None
-	};
+		};
 
 	for sourcepath in files {
 		if host.resolve(sourcepath).symlink_metadata().is_err() {
@@ -1224,7 +1227,7 @@ fn rename_dir_fallback(
 	let progress_bar = match (display_manager, total_size) {
 		(Some(display_manager), Some(total_size)) => {
 			let template = "{msg}: [{elapsed_precise}] {wide_bar} {bytes:>7}/{total_bytes:7}";
-			let style = ProgressStyle::with_template(template).unwrap();
+			let style = ProgressStyle::with_template(template).expect("mv progress template is valid");
 			let bar = ProgressBar::new(total_size).with_style(style);
 			Some(display_manager.add(bar))
 		},

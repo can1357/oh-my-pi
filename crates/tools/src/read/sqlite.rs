@@ -458,8 +458,8 @@ pub fn validate_where_clause(value: Option<&str>) -> Result<Option<String>, Erro
 			index += 1;
 			continue;
 		}
-		if current.is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
-			token.push(current.unwrap() as char);
+		if let Some(byte) = current.filter(|byte| byte.is_ascii_alphanumeric() || *byte == b'_') {
+			token.push(char::from(byte));
 			index += 1;
 			continue;
 		}

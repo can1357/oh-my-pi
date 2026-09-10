@@ -284,8 +284,11 @@ pub enum LeaseOutcome {
 #[derive(Debug, Error)]
 pub enum StoreError {
 	/// SQLite rejected an operation.
+	///
+	/// Boxed (measured): `rusqlite::Error` is 64 bytes on its own; boxing it
+	/// keeps [`StoreError`] at 40 bytes.
 	#[error("credential metadata database operation failed")]
-	Database(#[source] rusqlite::Error),
+	Database(#[source] Box<rusqlite::Error>),
 	/// The database was created by a newer implementation.
 	#[error("credential store schema {found} is newer than supported schema {supported}")]
 	NewerSchema {
@@ -347,10 +350,14 @@ pub enum StoreError {
 	#[error("credential metadata backup destination could not be created")]
 	BackupIo(#[source] io::Error),
 }
+const _: () = assert!(
+	std::mem::size_of::<StoreError>() <= 40,
+	"StoreError must stay compact; box large foreign error payloads instead"
+);
 
 impl From<rusqlite::Error> for StoreError {
 	fn from(error: rusqlite::Error) -> Self {
-		Self::Database(error)
+		Self::Database(Box::new(error))
 	}
 }
 

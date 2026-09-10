@@ -14,6 +14,8 @@ mod mutate;
 mod open;
 mod patch;
 mod read;
+#[cfg(test)]
+use std::process::Command;
 use std::{
 	path::{Path, PathBuf},
 	sync::OnceLock,
@@ -394,9 +396,65 @@ fn strip_config_comment(line: &str) -> &str {
 	line
 }
 
+/// Canonical-patch oracle: git invoked so its output cannot depend on the
+/// user's diff presentation configuration.
+///
+/// Tests compare the in-process backend against the git binary. That
+/// comparison is only meaningful when the binary emits git's canonical patch
+/// text, but `diff.external`, `diff.*.textconv`, `diff.mnemonicPrefix`, `diff.context`, and
+/// colour settings all live in the user's global config and rewrite the
+/// output. These are presentation-only: they change how a diff is *shown*,
+/// not what changed. `GIT_CONFIG_GLOBAL=/dev/null` is deliberately not used,
+/// because the backend reads comparison-affecting keys from the same config
+/// (`core.autocrlf`, `diff.algorithm`, `diff.renames`) and dropping them
+/// would desynchronize the two sides and invalidate the comparison.
+///
+/// Configuration is scoped to the spawned process: `-c` overrides and
+/// `env_remove` never touch the user's files or this process's environment,
+/// so parallel tests stay independent.
+#[cfg(test)]
+pub(crate) fn oracle_git(dir: &Path, args: &[&str]) -> Command {
+	let mut command = Command::new("git");
+	command
+		.current_dir(dir)
+		.arg("-c")
+		.arg("diff.mnemonicPrefix=false")
+		.arg("-c")
+		.arg("diff.context=3")
+		.arg("-c")
+		.arg("diff.noprefix=false")
+		.arg("-c")
+		.arg("color.ui=never")
+		.arg("-c")
+		.arg("color.diff=never");
+	// Env overrides are presentation-only and inherited by children.
+	command
+		.env_remove("GIT_EXTERNAL_DIFF")
+		.env_remove("GIT_DIFF_OPTS");
+	if let Some((first, rest)) = args.split_first() {
+		command.arg(first);
+		if matches!(*first, "diff" | "show" | "diff-tree" | "log") {
+			command.arg("--no-ext-diff");
+			command.arg("--no-textconv");
+		}
+		command.args(rest);
+	}
+	command
+}
+
+/// Run [`oracle_git`] and return stdout, asserting the command succeeded.
+#[cfg(test)]
+pub(crate) fn oracle_git_stdout(dir: &Path, args: &[&str]) -> String {
+	let output = oracle_git(dir, args)
+		.output()
+		.unwrap_or_else(|err| panic!("run git {args:?}: {err}"));
+	assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+	String::from_utf8(output.stdout).expect("git output is UTF-8")
+}
+
 #[cfg(test)]
 mod tests {
-	use std::{fs, process::Command};
+	use std::fs;
 
 	use super::*;
 	use crate::PushOptions;
