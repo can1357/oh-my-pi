@@ -257,6 +257,122 @@ describe("advisor tool-call loop guard", () => {
 		expect(messages[0]?.role).toBe("user");
 	});
 
+	it("preserves terminal-boundary notes as cards instead of steering a new turn", async () => {
+		const { reviewStarts } = createAdvisor({ "advisor.syncBacklog": "1" }, 0, undefined, 0, "looks fine");
+		if (!session) throw new Error("Expected live session");
+
+		await session.prompt("only update");
+		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+		expect(reviewStarts).toHaveLength(1);
+
+		// The nit delivered while the terminal boundary was open is preserved as
+		// a visible card: it must not steer an advisor-triggered turn against
+		// completed work (stale "keep going" advice causes spurious tool calls).
+		const messages = session.agent.state.messages;
+		const completions = messages.filter(
+			message => message.role === "assistant" && JSON.stringify(message.content).includes("primary complete"),
+		);
+		expect(completions).toHaveLength(1);
+		const cards = messages.filter(
+			message => message.role === "custom" && JSON.stringify(message).includes("looks fine"),
+		);
+		expect(cards).toHaveLength(1);
+	});
+
+	it("lets a terminal blocker steer once but schedules no reviews while asleep", async () => {
+		const { reviewStarts } = createAdvisor(
+			{ "advisor.syncBacklog": "1" },
+			0,
+			undefined,
+			0,
+			"broken handoff",
+			"blocker",
+		);
+		if (!session) throw new Error("Expected live session");
+
+		await session.prompt("only update");
+		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+		// The blocker steered exactly one continuation turn; that turn's terminal
+		// boundary must not schedule another review, or advisor and primary keep
+		// waking each other up.
+		const completions = session.agent.state.messages.filter(
+			message => message.role === "assistant" && JSON.stringify(message.content).includes("primary complete"),
+		);
+		expect(completions).toHaveLength(2);
+		expect(reviewStarts).toHaveLength(1);
+
+		await session.prompt("second update");
+		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+		expect(reviewStarts).toHaveLength(2);
+		const delivered = JSON.stringify(reviewStarts[1]!.messages);
+		// The wake-up review receives the delta accumulated during the sleep:
+		// the blocker-triggered continuation turn and the fresh input.
+		expect(delivered).toContain("primary complete");
+		expect(delivered).toContain("second update");
+	});
+
+	it("merges simultaneous terminal blockers into one continuation turn", async () => {
+		createAdvisor(
+			{ "advisor.syncBacklog": "1" },
+			0,
+			[{ name: "Reviewer A" }, { name: "Reviewer B" }],
+			0,
+			undefined,
+			"nit",
+			[
+				{ note: "first broken handoff", severity: "blocker" },
+				{ note: "second broken handoff", severity: "blocker" },
+			],
+		);
+		if (!session) throw new Error("Expected live session");
+
+		await session.prompt("only update");
+		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+
+		// Two blockers at one terminal boundary steer ONE merged continuation,
+		// not one turn each (N blockers = N identical "Done" replies bug).
+		const completions = session.agent.state.messages.filter(
+			message => message.role === "assistant" && JSON.stringify(message.content).includes("primary complete"),
+		);
+		expect(completions).toHaveLength(2);
+		const advisorMessages = session.agent.state.messages.filter(
+			message => message.role === "custom" && JSON.stringify(message).includes("broken handoff"),
+		);
+		expect(advisorMessages).toHaveLength(1);
+		const merged = JSON.stringify(advisorMessages[0]);
+		expect(merged).toContain("first broken handoff");
+		expect(merged).toContain("second broken handoff");
+		expect(merged).toContain("Reviewer A");
+		expect(merged).toContain("Reviewer B");
+		expect(merged).toContain("aggregated review from other models");
+	});
+
+	it("steers one continuation turn when an agent-end advisor raises a concern at a terminal boundary", async () => {
+		// An agent-end advisor reviews the complete run at the final boundary.
+		// A concern means a material issue in finished work — it deserves one
+		// steering turn, not a silent preserved card. The sleep latch prevents
+		// cascade after that. A turn-mode concern at the same boundary preserves
+		// as a card instead (work was reviewed per-turn).
+		createAdvisor(
+			{ "advisor.syncBacklog": "1" },
+			0,
+			{ name: "Final reviewer", reviewMode: "agent-end", reviewInterval: 1 },
+			0,
+			"finished work has a null deref",
+			"concern",
+		);
+		if (!session) throw new Error("Expected live session");
+
+		await session.prompt("only update");
+		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+
+		// The agent-end concern steered exactly one continuation turn.
+		const completions = session.agent.state.messages.filter(
+			message => message.role === "assistant" && JSON.stringify(message.content).includes("primary complete"),
+		);
+		expect(completions).toHaveLength(2);
+	});
+
 	it("accumulates skipped final reviews until cadence interval", async () => {
 		const { contexts } = createAdvisor({ "advisor.syncBacklog": "1" }, 0, {
 			name: "Final reviewer",
@@ -355,6 +471,52 @@ describe("advisor tool-call loop guard", () => {
 		}
 	});
 
+	it("holds a final-review continuation during the post-interrupt cooldown", async () => {
+		// The boundary flush decides steering through the same delivery policy as
+		// live routing: inside the post-interrupt immune window a final-review
+		// concern must preserve as a visible card, not steer a second consecutive
+		// continuation turn.
+		const { advisor } = createAdvisor(
+			{ "advisor.syncBacklog": "1" },
+			0,
+			{ name: "Final reviewer", reviewMode: "agent-end" },
+			0,
+			"finished work drops the audit row",
+			"concern",
+		);
+		if (!session) throw new Error("Expected live session");
+		const advise = advisor.state.tools.find(tool => tool.name === "advise");
+		if (!advise) throw new Error("Expected advisor delivery tool");
+		// Arm the post-interrupt cooldown with a live steered concern first.
+		session.agent.state.isStreaming = true;
+		try {
+			await advise.execute("arm-immune", {
+				note: "The running step loses the selected file.",
+				severity: "concern",
+			});
+			await new Promise<void>(resolve => setImmediate(resolve));
+			expect(session.agent.peekSteeringQueue()).toHaveLength(1);
+			session.agent.clearSteeringQueue();
+		} finally {
+			session.agent.state.isStreaming = false;
+		}
+
+		await session.prompt("only update");
+		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+
+		// One turn completed, well inside the 3-turn immune window: the final
+		// reviewer's concern preserves as a card instead of forcing a
+		// continuation against work the primary already finished.
+		const completions = session.agent.state.messages.filter(
+			message => message.role === "assistant" && JSON.stringify(message.content).includes("primary complete"),
+		);
+		expect(completions).toHaveLength(1);
+		const cards = session.agent.state.messages.filter(
+			message => message.role === "custom" && JSON.stringify(message).includes("drops the audit row"),
+		);
+		expect(cards).toHaveLength(1);
+	});
+
 	it("releases deferred advice at a terminal boundary skipped by cadence", async () => {
 		const note = "The missing file still needs a fallback path before this change is safe.";
 		createAdvisor({ "advisor.syncBacklog": "strict" }, 0, { name: "Step reviewer", reviewInterval: 2 }, 2, note);
@@ -445,15 +607,36 @@ describe("advisor tool-call loop guard", () => {
 		// Both reviews were scheduled; only the strict one gated the boundary.
 		expect(parkedReviewStarted).toBe(true);
 		expect(finalMock.calls.length).toBeGreaterThanOrEqual(2);
-		const delivered = [...session.agent.state.messages, ...session.yieldQueue.drainLazy().map(build => build())];
-		expect(
-			delivered.some(
-				message =>
-					message?.role === "custom" &&
-					message.customType === "advisor" &&
-					JSON.stringify(message.content).includes("stale fixture"),
-			),
-		).toBe(true);
+		const cards = session.agent.state.messages.filter(
+			message => message.role === "custom" && JSON.stringify(message).includes("stale fixture"),
+		);
+		expect(cards).toHaveLength(1);
+		// A preserved nit never steers a continuation turn.
+		expect(primaryMock.calls).toHaveLength(1);
+	});
+
+	it("wakes review scheduling on a user-attributed custom turn initiator, not only plain user messages", async () => {
+		const { reviewStarts } = createAdvisor({ "advisor.syncBacklog": "1" }, 0, undefined, 0, "looks fine");
+		if (!session) throw new Error("Expected live session");
+
+		await session.prompt("first update");
+		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+		expect(reviewStarts).toHaveLength(1);
+		// Review scheduling is asleep now: advisor/agent-attributed deliveries
+		// (like the continuation above's own cards) never wake it.
+
+		const started = await session.promptCustomMessage({
+			customType: "collab-prompt",
+			content: "peer asks for a review pass",
+			display: false,
+			attribution: "user",
+		});
+		expect(started).toBe(true);
+		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+
+		// A user-attributed custom turn initiator is genuine user input: the
+		// sleep latch wakes and the reviewer sees the accumulated delta.
+		expect(reviewStarts).toHaveLength(2);
 	});
 
 	it("leaves the advisor unbounded when the shared loop guard is disabled", async () => {
