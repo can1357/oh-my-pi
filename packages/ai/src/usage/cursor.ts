@@ -1,3 +1,4 @@
+import { CURSOR_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/wire/cursor";
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import { extractCursorAccessTokenUserId } from "../registry/oauth/cursor";
 import type {
@@ -18,10 +19,8 @@ function parseTimestamp(value: unknown): number | undefined {
 	return parseIsoTimestamp(value);
 }
 
-const DEFAULT_CURSOR_BASE_URL = "https://api2.cursor.sh";
-
 function normalizeCursorBaseUrl(baseUrl?: string): string {
-	if (!baseUrl) return DEFAULT_CURSOR_BASE_URL;
+	if (!baseUrl) return CURSOR_DEFAULT_BASE_URL;
 	return baseUrl.replace(/\/+$/, "");
 }
 
@@ -391,7 +390,7 @@ export const cursorUsageProvider: UsageProvider = {
 
 		let summaryReportPromise = Promise.resolve<UsageReport | null>(null);
 		let profileEmailPromise = Promise.resolve<string | undefined>(undefined);
-		if (credential.type === "oauth" && baseUrl === DEFAULT_CURSOR_BASE_URL) {
+		if (credential.type === "oauth" && baseUrl === CURSOR_DEFAULT_BASE_URL) {
 			const userId = extractCursorAccessTokenUserId(token);
 			if (userId) {
 				const sessionHeaders: Record<string, string> = {

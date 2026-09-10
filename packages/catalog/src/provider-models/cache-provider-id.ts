@@ -1,3 +1,4 @@
+import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
 
 export interface ModelCacheProviderIdOptions {
@@ -10,6 +11,7 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	"opencode-zen": true,
 	"github-copilot": true,
 	"muse-code": true,
+	cursor: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -57,11 +59,16 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 	switch (providerId) {
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
-		case "cursor":
-			// v4: Grok 4.5/4.6 rows cached before the effort-less default-tier fix
-			// carry `requestModelId: *-low`, which the Start plan refuses; refetch
-			// so the collapsed default is re-pointed to `-medium` (issue #9478).
-			return "cursor:default-effort-v4";
+		case "cursor": {
+			// Cursor catalogs are entitlement-, admin-policy-, and privacy-mode
+			// scoped. A credential switch must never reuse another account's
+			// authoritative model rows.
+			// v3 invalidates zero-price rows written before discovery joined
+			// Cursor's first-party pricing document.
+			const baseUrl = (options.baseUrl ?? CURSOR_DEFAULT_BASE_URL).replace(/\/+$/, "");
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `cursor:rich-models-v3:${Bun.hash(scope).toString(36)}`;
+		}
 		case "muse-code": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
