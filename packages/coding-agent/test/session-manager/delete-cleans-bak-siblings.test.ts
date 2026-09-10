@@ -77,7 +77,7 @@ describe("deleteSessionWithArtifacts cleans stale .bak siblings", () => {
 		);
 	});
 
-	it("tolerates a backup that vanishes mid-delete (raced promotion)", async () => {
+	it("settles the end state when a racing scan promotes the backup mid-delete", async () => {
 		const primary = path.join(sessionDir, "session-raced.jsonl");
 		const backup = `${primary}.1700000000000.bak`;
 		await storage.writeText(primary, '{"type":"session","id":"raced"}\n');
@@ -88,6 +88,11 @@ describe("deleteSessionWithArtifacts cleans stale .bak siblings", () => {
 			override async unlink(target: string): Promise<void> {
 				if (target === backup) {
 					backupUnlinkCalls += 1;
+					// Simulate the racing scan promoting the backup back to
+					// the primary just before our unlink lands: the unlink
+					// then observes ENOENT, and the primary unlink below
+					// settles the end state.
+					await super.rename(backup, primary);
 					const err = new Error(`ENOENT: no such file or directory, unlink '${target}'`);
 					(err as NodeJS.ErrnoException).code = "ENOENT";
 					throw err;
@@ -100,5 +105,11 @@ describe("deleteSessionWithArtifacts cleans stale .bak siblings", () => {
 
 		expect(backupUnlinkCalls).toBe(1);
 		expect(storage.existsSync(primary)).toBe(false);
+		expect(storage.existsSync(backup)).toBe(false);
+
+		// Nothing remains for a later scan to promote: the session stays gone.
+		await recoverOrphanedBackups(sessionDir, storage);
+		expect(storage.existsSync(primary)).toBe(false);
+		expect(await listSessions(sessionDir, storage).then(s => s.map(i => i.path))).not.toContain(primary);
 	});
 });
