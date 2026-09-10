@@ -2015,12 +2015,7 @@ impl Process {
 					 number"
 				),
 				GroupScope::Unresolved => {
-					if self.leads_group(pgid) {
-						let _ = kill_process_group(pgid, KILL_SIGNAL);
-						let mut members = members;
-						self.recollect_after_signal(pgid, &mut members)?;
-						processes.extend(members);
-					}
+					self.extend_with_unattributable_group(pgid, members, complete, &mut processes)?;
 				},
 			}
 		}
@@ -2187,6 +2182,71 @@ impl Process {
 				},
 			}
 		}
+	}
+
+	/// Collect the members of a group whose ownership the kernel would not
+	/// settle, or refuse when they cannot be accounted for.
+	///
+	/// Split out because the scope this arm depends on is mostly a kernel
+	/// capability rather than a runtime choice: where `pidfd_send_signal`
+	/// carries a process-group scope the signal ordinarily resolves and this
+	/// arm does not run, so on such a host the refusal below is not reachable
+	/// by arranging processes. It is not strictly unreachable — a rejection
+	/// from seccomp or an LSM lands here too — but nothing a test can arrange
+	/// produces one. Same reason [`Self::hard_kill_walked_tree`] is split from
+	/// [`Self::hard_kill_tree`].
+	///
+	/// The distinction it exists for is the one the `Empty` arms make too:
+	/// unresolved means ownership could not be established, not that the group
+	/// is gone, and only the second of those may drop what the scan found.
+	fn extend_with_unattributable_group(
+		&self,
+		pgid: i32,
+		members: Vec<Self>,
+		complete: bool,
+		processes: &mut Vec<Self>,
+	) -> Result<()> {
+		anyhow::ensure!(
+			complete && (!members.is_empty() || !process_group_alive(pgid)),
+			"cannot observe members of process group {pgid}"
+		);
+		// Zombies carry the pgid but need no signal, so a scan in which none of
+		// the members found is still running is swept by the identity-pinned
+		// per-process kills and never by the numeric broadcast — a no-op on
+		// those, and a wrong-kill on whoever claims the number next. The scan is
+		// the whole of what this knows: "none of the scanned members" is not
+		// "nothing in the group".
+		//
+		// What that gives up: a process that joined this group after the scan is
+		// neither signalled nor waited on. Broadcasting anyway to cover it does
+		// not work here — `recollect_after_signal` requires the post-signal scan
+		// to find something, and a group that really had nothing left legitimately
+		// answers empty, so the broadcast turns an ordinary sweep into "cannot
+		// observe members". Closing it needs that function to tell an emptied
+		// group apart from an unreadable one, which is a change to a rule three
+		// other callers share.
+		if !members
+			.iter()
+			.any(|member| member.status() == ProcessStatus::Running)
+		{
+			processes.extend(members);
+			return Ok(());
+		}
+		// Proved after the scan, not before it: the scan walks the whole process
+		// table, and a group that empties during it releases the pgid for an
+		// unrelated session leader to claim. Skipping the members instead would
+		// drop a live one out of both the signal and the wait, and the group is
+		// not reachable from the descendant walk, so nothing downstream would
+		// pick it up — the tree would report itself gone over a running process.
+		anyhow::ensure!(
+			self.leads_group(pgid),
+			"process group {pgid} cannot be proven to still be ours"
+		);
+		let _ = kill_process_group(pgid, KILL_SIGNAL);
+		let mut members = members;
+		self.recollect_after_signal(pgid, &mut members)?;
+		processes.extend(members);
+		Ok(())
 	}
 
 	/// Whether `pgid` still names the group this reference leads.
@@ -3594,6 +3654,70 @@ mod tests {
 		assert!(accepted.is_ok(), "a walk that finished still builds its wave");
 	}
 
+	/// The tree sweep's own copy of the ownership proof. `hard_kill_own_group`
+	/// refuses an unattributable group with a live member in it; this path
+	/// scanned the same members and used to drop them on the floor, so a
+	/// same-group survivor outside the descendant walk was neither signalled
+	/// nor waited on and the tree reported itself gone over it.
+	///
+	/// Reached through the split rather than through `hard_kill_walked_tree`,
+	/// because the arm only runs where `pidfd_send_signal` carries no
+	/// process-group scope, which is a kernel capability cached process-wide
+	/// and not something a test on a scoped host can turn off. So this covers
+	/// the decision and not the one line that delegates to it; that line is
+	/// unexecutable here for the same reason the arm is.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn an_unattributable_group_cannot_drop_its_live_members() {
+		let (mut leader, leader_pin, survivor) = spawn_own_group_with_survivor();
+		let pgid = leader_pin.pid();
+		// Reaped, so the number is all that is left of the group: `leads_group`
+		// can no longer match an identity against it and ownership is unprovable.
+		leader.wait().expect("reap the leader");
+		assert!(
+			Process::from_pid(pgid).is_none(),
+			"the leader's pid must be unoccupied for ownership to be unprovable"
+		);
+		assert_eq!(
+			survivor.status(),
+			ProcessStatus::Running,
+			"the survivor must outlive its leader for this to test anything"
+		);
+
+		let mut processes = Vec::new();
+		let refused = leader_pin.extend_with_unattributable_group(
+			pgid,
+			vec![survivor.clone()],
+			true,
+			&mut processes,
+		);
+		// Checked after the call, not only before it: a refusal that killed the
+		// member on its way out would still satisfy an assertion made earlier.
+		let survivor_after = survivor.status();
+
+		let _ = survivor.inner.kill(KILL_SIGNAL);
+		let cleaned = wait_until_exited(&survivor, Duration::from_secs(5));
+
+		let refusal = match refused {
+			Ok(()) => panic!("an unprovable group with a live member must not be swept silently"),
+			Err(error) => error.to_string(),
+		};
+		assert!(
+			refusal.contains("cannot be proven to still be ours"),
+			"the refusal must name the missing ownership proof, got: {refusal}"
+		);
+		assert!(
+			processes.is_empty(),
+			"a refusal contributes no targets, so nothing can read it as a partial sweep"
+		);
+		assert_eq!(
+			survivor_after,
+			ProcessStatus::Running,
+			"a refusal reports that nothing was swept, so it must not have swept anything"
+		);
+		assert!(cleaned, "the survivor must not outlive the test");
+	}
+
 	/// A plan whose descendant walk stopped short cannot report a completed
 	/// termination, for the same reason an unattributable group cannot: the
 	/// process the walk left out is in neither the signalled set nor the wait,
@@ -3700,6 +3824,20 @@ mod tests {
 		assert!(!foreign, "a pid held by a different process is not ours");
 		assert!(!anchorless, "an occupied pid with no pinned anchor cannot be proved ours");
 		assert!(!unallocated, "an unoccupied pid proves nothing about who holds the group");
+	}
+
+	/// Poll until `target` is no longer running, so a test's own cleanup is
+	/// something it verified rather than something it asked for.
+	#[cfg(unix)]
+	fn wait_until_exited(target: &Process, within: Duration) -> bool {
+		let deadline = std::time::Instant::now() + within;
+		while target.status() == ProcessStatus::Running {
+			if std::time::Instant::now() > deadline {
+				return false;
+			}
+			std::thread::sleep(Duration::from_millis(5));
+		}
+		true
 	}
 
 	/// A leader whose group must outlive it, with one survivor that keeps the
