@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `--export` now reports missing input files instead of creating empty sessions and successful transcript-less exports ([#11481](https://github.com/can1357/oh-my-pi/issues/11481)).
+
 ## [18.1.16] - 2026-09-09
 
 ### Added
