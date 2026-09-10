@@ -10260,7 +10260,7 @@ export class AgentSession implements SettingsScope {
 		return true;
 	}
 
-	/** Toggles priority service for the active model family. */
+	/** Toggles priority based on configured and currently realized state. */
 	toggleFastMode(): boolean {
 		const shouldEnable = !this.isFastModeEnabled() && !this.isFastModeActive();
 		if (!this.setFastMode(shouldEnable)) return false;
