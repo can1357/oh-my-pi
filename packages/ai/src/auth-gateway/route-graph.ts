@@ -71,7 +71,7 @@ export class RouteRegistry {
 			id: definition.id,
 			root: copyNode(definition.root),
 			targets: Object.freeze([...compiled.targets]),
-			fallbacks: freezeFallbacksUnion(compiled.fallbacksByFrom),
+			fallbacks: freezeFallbacksUnion(compiled.fallbacksByFrom, compiled.targets),
 			fallbackByTarget: freezeFallbacksByTarget(compiled.fallbacksByFrom),
 		});
 	}
@@ -107,7 +107,7 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 	const targets: string[] = [];
 	const fallbacksByFrom: Partial<Record<GatewayErrorDisposition, Partial<Record<string, string[]>>>> = {};
 	const sequential = new Set(seenOnPath);
-	const childParts: Array<{ entryTargets: string[]; after: string[] }> = [];
+	const childParts: Array<{ fromTargets: string[]; after: string[] }> = [];
 	const entryTargetsPerChild: string[][] = [];
 	const allTargetsPerChild: string[][] = [];
 	for (const child of node.children) {
@@ -118,11 +118,7 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 		targets.push(...part.targets);
 		allTargetsPerChild.push([...part.targets]);
 		const entry =
-			child.type === "fallback"
-				? part.targets[0] !== undefined
-					? [part.targets[0]]
-					: []
-				: [...part.targets];
+			child.type === "fallback" ? (part.targets[0] !== undefined ? [part.targets[0]] : []) : [...part.targets];
 		entryTargetsPerChild.push(entry);
 		mergeFallbacksByFrom(fallbacksByFrom, part.fallbacksByFrom);
 		if (child.type === "target") sequential.add(child.model);
@@ -134,20 +130,18 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 		for (const id of allTargetsPerChild[i]!) {
 			const prev = owner.get(id);
 			if (prev !== undefined && prev !== i) {
-				throw new AIError.ValidationError(
-					`Ambiguous cross-branch reuse of model "${id}" under one fallback`,
-				);
+				throw new AIError.ValidationError(`Ambiguous cross-branch reuse of model "${id}" under one fallback`);
 			}
 			owner.set(id, i);
 		}
 	}
-	// From each sibling entry, edges go to the remaining suffix of entry targets.
+	// Every target in a child inherits outer edges to later subtree entry targets.
 	for (let i = 0; i < entryTargetsPerChild.length; i += 1) {
 		const suffix: string[] = [];
 		for (let j = i + 1; j < entryTargetsPerChild.length; j += 1) {
 			suffix.push(...entryTargetsPerChild[j]!);
 		}
-		childParts.push({ entryTargets: entryTargetsPerChild[i]!, after: suffix });
+		childParts.push({ fromTargets: allTargetsPerChild[i]!, after: suffix });
 	}
 	for (const disposition of node.on) {
 		let byFrom = fallbacksByFrom[disposition];
@@ -157,7 +151,7 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 		}
 		for (const part of childParts) {
 			if (part.after.length === 0) continue;
-			for (const from of part.entryTargets) {
+			for (const from of part.fromTargets) {
 				const existing = byFrom[from];
 				byFrom[from] = existing ? [...existing, ...part.after] : [...part.after];
 			}
@@ -199,6 +193,7 @@ function mergeFallbacksByFrom(
 
 function freezeFallbacksUnion(
 	fallbacksByFrom: Partial<Record<GatewayErrorDisposition, Partial<Record<string, string[]>>>>,
+	targets: readonly string[],
 ): Readonly<Partial<Record<GatewayErrorDisposition, readonly string[]>>> {
 	const out: Partial<Record<GatewayErrorDisposition, readonly string[]>> = {};
 	for (const key of Object.keys(fallbacksByFrom) as GatewayErrorDisposition[]) {
@@ -206,7 +201,8 @@ function freezeFallbacksUnion(
 		if (!fromMap) continue;
 		const seen = new Set<string>();
 		const list: string[] = [];
-		for (const tos of Object.values(fromMap)) {
+		for (const source of targets) {
+			const tos = fromMap[source];
 			if (!tos) continue;
 			for (const id of tos) {
 				if (seen.has(id)) continue;

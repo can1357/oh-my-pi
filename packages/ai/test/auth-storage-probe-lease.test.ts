@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, type OAuthCredential, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const PROVIDER = "unit-wave-a-probe";
@@ -30,6 +31,7 @@ describe("AuthStorage quota probe leases", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		store?.close();
 		store = null;
 		storage = null;
@@ -108,5 +110,62 @@ describe("AuthStorage quota probe leases", () => {
 		storage.noteTransientSoftAvoid(idA, "", Date.now() + 60_000);
 		expect(storage.tryAcquireQuotaProbeLease(idA, "")).toBeNull();
 		expect(storage.listStoredCredentials(PROVIDER).some(row => row.id === idA)).toBe(true);
+	});
+	it("recovers a fully blocked API-key pool with exclusive probes and clears only successful probes", async () => {
+		if (!storage) throw new Error("setup failed");
+		await storage.set(PROVIDER, [
+			{ type: "api_key", key: "key-a" },
+			{ type: "api_key", key: "key-b" },
+		]);
+		const ids = storage.listStoredCredentials(PROVIDER).map(row => row.id);
+		for (const credentialId of ids) await storage.markUsageLimitReached(PROVIDER, undefined, { credentialId });
+		const first = await storage.getApiKey(PROVIDER, "one", { requestId: "probe-one" });
+		expect(first === "key-a" || first === "key-b").toBe(true);
+		const second = await storage.getApiKey(PROVIDER, "two", { requestId: "probe-two" });
+		expect(second === "key-a" || second === "key-b").toBe(true);
+		expect(second).not.toBe(first);
+		expect(await storage.getApiKey(PROVIDER, "three", { requestId: "probe-three" })).toBeUndefined();
+		expect(storage.listCredentialBlocks(ids)).toHaveLength(2);
+		storage.settleQuotaProbeSuccess("probe-one");
+		expect(storage.listCredentialBlocks(ids)).toHaveLength(1);
+	});
+
+	it("does not probe a fully blocked API-key pool before Retry-After expires", async () => {
+		if (!storage) throw new Error("setup failed");
+		await storage.set(PROVIDER, [
+			{ type: "api_key", key: "key-a" },
+			{ type: "api_key", key: "key-b" },
+		]);
+		for (const row of storage.listStoredCredentials(PROVIDER))
+			await storage.markUsageLimitReached(PROVIDER, undefined, { credentialId: row.id, retryAfterMs: 60_000 });
+		expect(await storage.getApiKey(PROVIDER, "one", { requestId: "timed-probe" })).toBeUndefined();
+	});
+
+	it("leases the global OAuth block for a request with a narrower model scope", async () => {
+		if (!store) throw new Error("setup failed");
+		storage = new AuthStorage(store, {
+			usageProviderResolver: () => undefined,
+			rankingStrategyResolver: () => ({
+				findWindowLimits: () => ({}),
+				blockScope: context => (context?.modelId ? `model:${context.modelId}` : undefined),
+				windowDefaults: { primaryMs: 60_000, secondaryMs: 60_000 },
+			}),
+		});
+		vi.spyOn(oauthUtils, "getOAuthProvider").mockReturnValue({
+			id: PROVIDER,
+			name: "Fixture",
+			login: async () => oauth("a"),
+			refreshToken: async credential => credential,
+			getApiKey: credential => credential.access,
+		});
+		await storage.set(PROVIDER, [oauth("a")]);
+		const id = storage.listStoredCredentials(PROVIDER)[0]!.id;
+		await storage.markUsageLimitReached(PROVIDER, undefined, { credentialId: id });
+		expect(await storage.getApiKey(PROVIDER, "scoped", { modelId: "model", requestId: "global-probe" })).toBe(
+			"access-a",
+		);
+		expect(storage.listCredentialBlocks([id])).toHaveLength(1);
+		storage.settleQuotaProbeSuccess("global-probe");
+		expect(storage.listCredentialBlocks([id])).toEqual([]);
 	});
 });

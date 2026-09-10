@@ -2503,10 +2503,6 @@ export class AuthStorage {
 			});
 
 		if (credentials.length === 0) return undefined;
-		if (credentials.length === 1) {
-			const only = credentials[0]!;
-			return this.#tryReserveApiKeySelection(provider, only, options?.requestId) ? only : undefined;
-		}
 
 		const providerKey = this.#getProviderTypeKey(provider, "api_key");
 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
@@ -2517,6 +2513,10 @@ export class AuthStorage {
 				if (!this.#isCredentialBlocked(provider, providerKey, candidate.index, undefined, options?.requestId)) {
 					if (this.#tryReserveApiKeySelection(provider, candidate, options?.requestId)) return candidate;
 				}
+			}
+			for (const index of order) {
+				const candidate = credentials[index]!;
+				if (this.#tryProbeApiKeySelection(provider, candidate, options?.requestId)) return candidate;
 			}
 			return undefined;
 		}
@@ -2542,7 +2542,54 @@ export class AuthStorage {
 				return ranked.selection;
 			}
 		}
+		for (const index of order) {
+			const candidate = credentials[index]!;
+			if (this.#tryProbeApiKeySelection(provider, candidate, options?.requestId, blockScopes)) return candidate;
+		}
 		return undefined;
+	}
+
+	/** Actual quota block keys, excluding unrelated in-flight reservations. */
+	#activeQuotaBlockScopes(
+		providerKey: string,
+		credentialId: number,
+		index: number,
+		requestedScopes: readonly string[],
+	): string[] {
+		const now = Date.now();
+		return [...new Set(["", ...requestedScopes])].filter(
+			scope =>
+				this.#getCredentialBlockedUntilForKey(
+					scope ? this.#toScopedBackoffKey(providerKey, scope) : providerKey,
+					index,
+					now,
+				) !== undefined || this.#readPersistedCredentialBlock(credentialId, providerKey, scope) !== undefined,
+		);
+	}
+
+	/** Acquire a recovery probe only after ordinary API-key candidates are exhausted. */
+	#tryProbeApiKeySelection(
+		provider: string,
+		selection: ApiKeySelection,
+		requestId: string | undefined,
+		requestedScopes: readonly string[] = [],
+	): boolean {
+		if (!requestId) return false;
+		const credentialId = this.#getStoredCredentials(provider)[selection.index]?.id;
+		if (credentialId === undefined) return false;
+		const held = this.#activeTurnReservation(credentialId, this.getCredentialIncarnation(credentialId));
+		if (held && held.requestId !== requestId) return false;
+		const providerKey = this.#getProviderTypeKey(provider, "api_key");
+		const active = this.#activeQuotaBlockScopes(providerKey, credentialId, selection.index, requestedScopes);
+		if (active.length === 0 || active.some(scope => this.#probeLeases.isRetryAfterSourced(credentialId, scope)))
+			return false;
+		const scope = active[0]!;
+		const leaseId = this.tryAcquireQuotaProbeLease(credentialId, scope);
+		if (!leaseId) return false;
+		this.#inflightProbes.set(requestId, { credentialId, blockScope: scope, leaseId });
+		if (this.#tryReserveApiKeySelection(provider, selection, requestId)) return true;
+		this.clearQuotaProbe(requestId);
+		return false;
 	}
 
 	/** Resolve a reserved API-key selection; release the turn hold if the helper yields no secret. */
@@ -2567,11 +2614,7 @@ export class AuthStorage {
 	}
 
 	/** Acquire an exclusive turn reservation for a stored API-key row when requestId is set. */
-	#tryReserveApiKeySelection(
-		provider: string,
-		selection: ApiKeySelection,
-		requestId: string | undefined,
-	): boolean {
+	#tryReserveApiKeySelection(provider: string, selection: ApiKeySelection, requestId: string | undefined): boolean {
 		if (!requestId) return true;
 		const reserveId = this.#getStoredCredentials(provider)[selection.index]?.id;
 		if (reserveId === undefined) return true;
@@ -6015,7 +6058,14 @@ export class AuthStorage {
 			const entries = this.#getStoredCredentials(provider);
 			const blockedId = entries[selection.index]?.id;
 			if (blockedId === undefined) return undefined;
-			const probeScope = blockScope ?? "";
+			const scopes = blockScopes ?? (blockScope ? [blockScope] : []);
+			const activeScopes = this.#activeQuotaBlockScopes(providerKey, blockedId, selection.index, scopes);
+			if (
+				activeScopes.length === 0 ||
+				activeScopes.some(scope => this.#probeLeases.isRetryAfterSourced(blockedId, scope))
+			)
+				return undefined;
+			const probeScope = activeScopes[0]!;
 			if (!allowBlocked) {
 				// A live block must never hijack rotation: while any same-type sibling
 				// is still usable, fall through so the caller rotates to it. Probing a
@@ -6391,12 +6441,7 @@ export class AuthStorage {
 			credential => credential.source !== "login",
 		);
 		if (apiKeySelection) {
-			const resolved = await this.#resolveReservedApiKey(
-				provider,
-				sessionId,
-				apiKeySelection,
-				options?.requestId,
-			);
+			const resolved = await this.#resolveReservedApiKey(provider, sessionId, apiKeySelection, options?.requestId);
 			if (resolved !== undefined) return resolved;
 		}
 

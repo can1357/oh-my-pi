@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Recover fully blocked API-key pools with exclusive probes, clear the actual blocked scope after successful inference, and preserve nested fallback order.
+
 - Release failed/cancelled streams without awaiting pending settlement so turn and probe locks cannot stall.
 - Parse Responses text.format and store into gateway options, and reapply store on strict-tool retries.
 - Settle quota probes only after canonical success evidence, and release API-key turn reservations when credential helpers fail.

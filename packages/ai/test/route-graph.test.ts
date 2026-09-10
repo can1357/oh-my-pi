@@ -278,5 +278,27 @@ describe("RouteRegistry", () => {
 		expect(compiled?.root).toEqual({ type: "target", model: "openai/gpt-5" });
 		expect(compiled?.id).toBe("openai/gpt-5");
 	});
+});
 
+it("inherits parent fallback edges from the final target of a nested child", () => {
+	const registry = new RouteRegistry(() => undefined);
+	registry.register({
+		id: "nested-parent",
+		root: {
+			type: "fallback",
+			on: ["credential_quota"],
+			children: [
+				{
+					type: "fallback",
+					on: ["context_overflow"],
+					children: [
+						{ type: "target", model: "a" },
+						{ type: "target", model: "b" },
+					],
+				},
+				{ type: "target", model: "c" },
+			],
+		},
+	});
+	expect(registry.resolve("nested-parent")?.fallbackByTarget?.b?.credential_quota).toEqual(["c"]);
 });
