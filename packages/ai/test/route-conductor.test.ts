@@ -1,3 +1,4 @@
+import { RouteRegistry } from "../src/auth-gateway/route-graph";
 import { describe, expect, it } from "bun:test";
 import type { CompiledRoute } from "@oh-my-pi/pi-ai/auth-gateway";
 import { decideAttempt, type ExecutionState } from "@oh-my-pi/pi-ai/auth-gateway/route-conductor";
@@ -235,4 +236,47 @@ describe("decideAttempt", () => {
 		});
 		expect(action).toEqual({ type: "dispatch", targetModelId: "high" });
 	});
+});
+
+it("advances to the next domain after the final child target exhausts quota", () => {
+	const registry = new RouteRegistry(() => undefined);
+	registry.register({
+		id: "domains",
+		root: {
+			type: "domain",
+			name: "accounts",
+			children: [
+				{
+					type: "fallback",
+					on: ["credential_quota"],
+					children: [
+						{ type: "target", model: "a" },
+						{ type: "target", model: "b" },
+					],
+				},
+				{ type: "target", model: "c" },
+			],
+		},
+	});
+	const compiled = registry.resolve("domains")!;
+	expect(
+		decideAttempt({
+			route: compiled,
+			state: state({
+				routeId: compiled.id,
+				generation: compiled.generation,
+				currentTarget: "b",
+				attemptedTargets: new Set(["a", "b"]),
+				siblingsExhausted: true,
+			}),
+			classification: {
+				status: 429,
+				type: "rate_limit_error",
+				message: "quota",
+				owner: "quota",
+				disposition: "credential_quota",
+			},
+			commitState: "probing",
+		}),
+	).toEqual({ type: "fallback_target", targetModelId: "c" });
 });

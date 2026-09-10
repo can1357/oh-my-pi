@@ -1,5 +1,9 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { SafeDiscoveryError, safeDiscoverModels } from "@oh-my-pi/pi-ai/auth-gateway/safe-discovery";
+
+beforeEach(() => {
+	vi.spyOn(Bun.dns, "lookup").mockResolvedValue([{ address: "203.0.113.10", family: 4, ttl: 0 }]);
+});
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -66,7 +70,16 @@ describe("safeDiscoverModels", () => {
 
 	it("rejects 10/8, 172.16/12, 192.168/16, 169.254/16, 0.0.0.0, localhost, and ::1 (negative)", async () => {
 		const fetchSpy = forbidFetch();
-		const hosts = ["10.1.2.3", "172.20.0.1", "192.168.0.1", "169.254.1.1", "100.64.0.1", "0.0.0.0", "localhost", "[::1]"];
+		const hosts = [
+			"10.1.2.3",
+			"172.20.0.1",
+			"192.168.0.1",
+			"169.254.1.1",
+			"100.64.0.1",
+			"0.0.0.0",
+			"localhost",
+			"[::1]",
+		];
 		for (const host of hosts) {
 			await expect(safeDiscoverModels(`https://${host}/models`)).rejects.toBeInstanceOf(SafeDiscoveryError);
 		}
@@ -136,5 +149,28 @@ describe("safeDiscoverModels", () => {
 		await expect(safeDiscoverModels("https://example.com/v1/models", { maxModels: 2 })).rejects.toBeInstanceOf(
 			SafeDiscoveryError,
 		);
+	});
+});
+
+it("rejects hostnames whose DNS answers contain private addresses before fetching", async () => {
+	vi.spyOn(Bun.dns, "lookup").mockResolvedValue([{ address: "10.0.0.1", family: 4, ttl: 0 }]);
+	const fetched = forbidFetch();
+	await expect(safeDiscoverModels("https://catalog.example/models")).rejects.toThrow(/private/);
+	expect(fetched).not.toHaveBeenCalled();
+});
+
+it("blocks IPv4-mapped IPv6 loopback literals", async () => {
+	const fetched = forbidFetch();
+	await expect(safeDiscoverModels("https://[::ffff:127.0.0.1]/models")).rejects.toThrow(/private/);
+	expect(fetched).not.toHaveBeenCalled();
+});
+
+it("pins the checked DNS address while preserving virtual-host and TLS identity", async () => {
+	const fetched = stubFetch(jsonResponse([{ id: "model" }]));
+	await safeDiscoverModels("https://catalog.example:8443/models?q=1");
+	expect(fetched.mock.calls[0]?.[0]).toBe("https://203.0.113.10:8443/models?q=1");
+	expect(fetched.mock.calls[0]?.[1]).toMatchObject({
+		headers: { Host: "catalog.example:8443" },
+		tls: { serverName: "catalog.example" },
 	});
 });

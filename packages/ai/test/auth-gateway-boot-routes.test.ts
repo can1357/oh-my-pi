@@ -128,4 +128,67 @@ describe("auth-gateway boot routes", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
+	it("resolves forward route references from the complete boot definition set", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-boot-routes-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openrouter", "test-key");
+		const primary = createMockModel({
+			provider: "openrouter",
+			id: primaryId,
+			handler: () => {
+				throw new Error("service unavailable");
+			},
+		});
+		const backup = createMockModel({
+			provider: "openrouter",
+			id: backupId,
+			handler: { content: ["ok"] },
+		});
+		const resolveModel = (id: string) => {
+			if (id === primaryId) return primary.model;
+			if (id === backupId) return backup.model;
+			return undefined;
+		};
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routes: [
+				{ id: "alias", root: { type: "route-ref", route: "virtual-impl" } },
+				{
+					id: "virtual-impl",
+					root: {
+						type: "fallback",
+						on: ["provider_unavailable"],
+						children: [
+							{ type: "target", model: primaryId },
+							{ type: "target", model: backupId },
+						],
+					},
+				},
+			],
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "alias",
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
+			expect(res.status).toBe(200);
+			expect(backup.calls.length).toBe(1);
+			const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+			expect(body.choices?.[0]?.message?.content).toBe("ok");
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
 });

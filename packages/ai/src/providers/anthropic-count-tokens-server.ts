@@ -2,7 +2,7 @@
  * Anthropic Messages count_tokens handler for the auth-gateway.
  *
  * Token counts are a documented character estimate
- * (`ceil(JSON.stringify(messages).length / 4)`), not tiktoken or Anthropic's
+ * (the sum of `ceil(JSON.stringify(field).length / 4)` for input fields), not tiktoken or Anthropic's
  * tokenizer. Unknown models 404; invalid JSON 400.
  *
  * @see https://docs.anthropic.com/en/api/messages-count-tokens
@@ -11,7 +11,7 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import { json } from "../auth-gateway/http";
 
 /**
- * Estimate input tokens from the serialized `messages` payload.
+ * Estimate input tokens from one serialized input field.
  * Character/4 ceiling — not tiktoken.
  */
 function estimateInputTokens(messages: unknown): number {
@@ -39,5 +39,10 @@ export async function handleCountTokens(
 		return json(404, { error: `Unknown model: ${modelId}` });
 	}
 
-	return json(200, { input_tokens: estimateInputTokens(parsed.messages) });
+	if (!Array.isArray(parsed.messages)) return json(400, { error: "messages must be an array" });
+	const inputTokens = ["messages", "system", "tools", "tool_choice"].reduce(
+		(sum, key) => sum + estimateInputTokens(parsed[key]),
+		0,
+	);
+	return json(200, { input_tokens: inputTokens });
 }

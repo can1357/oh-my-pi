@@ -1,4 +1,4 @@
-import type { Api, Model } from "../types";
+import type { Api, Context, Model } from "../types";
 
 export interface ModelCapabilities {
 	text: boolean;
@@ -99,4 +99,13 @@ export function fitsRequest(caps: ModelCapabilities, need: RequestNeed): boolean
 	if (need.tools && !caps.tools) return false;
 	if (need.reasoning && !caps.reasoning) return false;
 	return true;
+}
+
+/** Request facts shared by conditional route selection. */
+export function requestNeeds(context: Context): RequestNeed {
+	return {
+		vision: context.messages.some(
+			message => Array.isArray(message.content) && message.content.some(block => block.type === "image"),
+		),
+	};
 }

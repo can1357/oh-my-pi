@@ -240,8 +240,8 @@ describe("RouteRegistry", () => {
 		registry.register({
 			id: "scoped",
 			root: {
-				type: "domain",
-				name: "outer",
+				type: "balance",
+				strategy: "rr",
 				children: [
 					{ type: "target", model: "A" },
 					{
@@ -328,7 +328,7 @@ describe("RouteRegistry", () => {
 		expect(registry.resolve("vision")?.targets).toEqual(["vision-model", "text-model"]);
 	});
 
-	it("treats domain as compile-time grouping", () => {
+	it("retains domain grouping metadata", () => {
 		const registry = new RouteRegistry(() => undefined);
 		registry.register({
 			id: "coding",
@@ -485,4 +485,22 @@ describe("RouteRegistry", () => {
 		expect(pickInitialRouteTarget(rr!, 1)).toBe("b");
 		expect(pickInitialRouteTarget(weighted!)).toBe("high");
 	});
+});
+
+it("selects conditional branches per request without mutating shared registry state", () => {
+	const registry = new RouteRegistry(() => undefined);
+	registry.register({
+		id: "conditional",
+		root: {
+			type: "conditional",
+			when: { vision: true },
+			children: [
+				{ type: "target", model: "vision" },
+				{ type: "target", model: "text" },
+			],
+		},
+	});
+	expect(registry.resolve("conditional", { vision: true })?.targets).toEqual(["vision"]);
+	expect(registry.resolve("conditional", { vision: false })?.targets).toEqual(["text"]);
+	expect(registry.get("conditional")?.targets).toEqual(["vision", "text"]);
 });

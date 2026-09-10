@@ -27,6 +27,7 @@
  *   POST /v1/responses                     → OpenAI Responses in/out
  */
 
+import { requestNeeds } from "./capabilities";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { extractHttpStatusFromError, extractRetryHint, isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "../auth-retry";
@@ -666,10 +667,17 @@ async function handleFormatEndpoint(
 	if (!modelId) {
 		return route.module.formatError(400, "invalid_request_error", "Missing top-level `model` field");
 	}
-	const compiled = (bootOpts.routeRegistry ?? new RouteRegistry(bootOpts.resolveModel)).resolve(modelId);
-	if (!compiled) {
-		return unknownModelResponse(route.module.formatError, modelId);
+	const registry = bootOpts.routeRegistry ?? new RouteRegistry(bootOpts.resolveModel);
+	if (!registry.resolve(modelId)) return unknownModelResponse(route.module.formatError, modelId);
+	let parsed: ParsedFormatRequest;
+	try {
+		parsed = route.module.parseRequest(body, req.headers);
+	} catch (error) {
+		if (controller.signal.aborted) return clientClosedResponse(route);
+		const message = error instanceof Error ? error.message : String(error);
+		return route.module.formatError(400, "invalid_request_error", message);
 	}
+	const compiled = registry.resolve(modelId, { vision: requestNeeds(parsed.context).vision === true })!;
 	const firstTarget = pickInitialRouteTarget(compiled, hashString(requestId));
 	if (firstTarget === undefined) {
 		return unknownModelResponse(route.module.formatError, modelId);
@@ -692,14 +700,7 @@ async function handleFormatEndpoint(
 	// this id; without it `getApiKey` would re-roundrobin every request
 	// and `markUsageLimitReached` would no-op (it can only mark the
 	// credential it last handed out to that session).
-	let parsed: ParsedFormatRequest;
-	try {
-		parsed = route.module.parseRequest(body, req.headers);
-	} catch (error) {
-		if (controller.signal.aborted) return clientClosedResponse(route);
-		const message = error instanceof Error ? error.message : String(error);
-		return route.module.formatError(400, "invalid_request_error", message);
-	}
+
 	// Merge gateway-captured passthrough headers under the parser's own
 	// captures. Parsers that set `options.headers` themselves win (they may
 	// have stripped or normalized values); the gateway's allow-list fills in
@@ -711,19 +712,25 @@ async function handleFormatEndpoint(
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
 	const requestHasOpenAIImageFileReferences = parsed.context.messages.some(message => {
-		if (message.role !== "toolResult" && message.role !== "user" && message.role !== "assistant") return false;
-		const blocks = message.content;
-		if (typeof blocks === "string") return false;
-		return blocks.some(
-			block =>
-				typeof block === "object" &&
-				block !== null &&
-				"type" in block &&
-				(block as { type?: string }).type === "image" &&
-				"providerFile" in block &&
-				(block as { providerFile?: { provider?: string; id?: string } }).providerFile?.provider ===
-					"openai" &&
-				Boolean((block as { providerFile?: { id?: string } }).providerFile?.id),
+		if (
+			message.role === "toolResult" &&
+			message.content.some(
+				block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
+			)
+		)
+			return true;
+		const payload = "providerPayload" in message ? message.providerPayload : undefined;
+		if (payload?.type !== "openaiResponsesHistory") return false;
+		return payload.items.some(
+			item =>
+				Array.isArray(item.content) &&
+				item.content.some(
+					(part: unknown) =>
+						isRecord(part) &&
+						(part.type === "input_image" || part.type === "input_file") &&
+						typeof part.file_id === "string" &&
+						part.file_id.length > 0,
+				),
 		);
 	});
 	const openaiImageFileCompatError = (candidate: Model<Api>): Response | undefined => {
@@ -782,7 +789,7 @@ async function handleFormatEndpoint(
 
 	const considerFallback = (classified: GatewayErrorClassification): boolean => {
 		lastClassified = classified;
-		if (commitGate.state === "committed") return false;
+		if (parsed.options.previousResponseId || commitGate.state === "committed") return false;
 		const action = decideAttempt({
 			route: compiled,
 			state: conductorExecutionState(
@@ -823,20 +830,20 @@ async function handleFormatEndpoint(
 			const classified = classifyGatewayError(
 				Object.assign(new Error(`Model not found: ${currentTarget}`), { status: 404 }),
 			);
+			const priorFailure = lastClassified;
 			lastClassified = classified;
 			// Stateful continuations must not cross providers when the original target's
 			// provider cannot be established (unresolved primary leaves providerOrigin unset).
 			if (parsed.options.previousResponseId && providerOrigin === undefined) {
 				return classifiedError(classified);
 			}
-			if (considerFallback(classified)) return "skipped";
-			return classifiedError(classified);
+			const canContinue = considerFallback(classified);
+			lastClassified = priorFailure ?? classified;
+			if (canContinue) return "skipped";
+			return classifiedError(priorFailure ?? classified);
 		}
 		if (parsed.options.previousResponseId) {
-			const originOk =
-				providerOrigin === undefined
-					? false
-					: resolved.provider === providerOrigin;
+			const originOk = providerOrigin === undefined ? false : resolved.provider === providerOrigin;
 			const apiOk =
 				resolved.api === "openai-responses" ||
 				resolved.api === "azure-openai-responses" ||
@@ -912,6 +919,16 @@ async function handleFormatEndpoint(
 	};
 
 	const resolveCredential = async (): Promise<AttemptPrep> => {
+		if (parsed.options.previousResponseId && bootOpts.storage.listStoredCredentials(model.provider).length > 1) {
+			return {
+				type: "respond",
+				response: formatError(
+					400,
+					"invalid_request_error",
+					"Responses continuations require an unambiguous single-credential provider; credential rotation is disabled",
+				),
+			};
+		}
 		let apiKey: string | undefined;
 		try {
 			apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
@@ -982,16 +999,18 @@ async function handleFormatEndpoint(
 
 	const buildAttemptStreamOpts = (apiKey: string): SimpleStreamOptions => {
 		const streamOpts = buildStreamOptions(parsed, model.api, controller.signal);
-		streamOpts.apiKey = buildGatewayApiKeyResolver(
-			bootOpts.storage,
-			model,
-			sessionId,
-			apiKey,
-			controller.signal,
-			route.label,
-			peer,
-			requestId,
-		);
+		streamOpts.apiKey = parsed.options.previousResponseId
+			? apiKey
+			: buildGatewayApiKeyResolver(
+					bootOpts.storage,
+					model,
+					sessionId,
+					apiKey,
+					controller.signal,
+					route.label,
+					peer,
+					requestId,
+				);
 		// openai-responses wraps the downstream body in observeSseCommit. Feeding
 		// onSseEvent as well double-counts prelude bytes and trips the 4 MiB cap at ~2 MiB.
 		if (!commitGateObservesDownstreamSse(route.label)) {
@@ -1231,7 +1250,9 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		return piNative.formatError(400, "invalid_request_error", message);
 	}
 
-	const compiled = (bootOpts.routeRegistry ?? new RouteRegistry(bootOpts.resolveModel)).resolve(parsed.modelId);
+	const compiled = (bootOpts.routeRegistry ?? new RouteRegistry(bootOpts.resolveModel)).resolve(parsed.modelId, {
+		vision: requestNeeds(parsed.context).vision === true,
+	});
 	if (!compiled) {
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
@@ -1293,7 +1314,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 
 	const considerFallback = (classified: GatewayErrorClassification): boolean => {
 		lastClassified = classified;
-		if (commitGate.state === "committed") return false;
+		if (parsed.options.previousResponseId || commitGate.state === "committed") return false;
 		const action = decideAttempt({
 			route: compiled,
 			state: conductorExecutionState(
@@ -1334,20 +1355,20 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			const classified = classifyGatewayError(
 				Object.assign(new Error(`Model not found: ${currentTarget}`), { status: 404 }),
 			);
+			const priorFailure = lastClassified;
 			lastClassified = classified;
 			// Stateful continuations must not cross providers when the original target's
 			// provider cannot be established (unresolved primary leaves providerOrigin unset).
 			if (parsed.options.previousResponseId && providerOrigin === undefined) {
 				return classifiedError(classified);
 			}
-			if (considerFallback(classified)) return "skipped";
-			return classifiedError(classified);
+			const canContinue = considerFallback(classified);
+			lastClassified = priorFailure ?? classified;
+			if (canContinue) return "skipped";
+			return classifiedError(priorFailure ?? classified);
 		}
 		if (parsed.options.previousResponseId) {
-			const originOk =
-				providerOrigin === undefined
-					? false
-					: resolved.provider === providerOrigin;
+			const originOk = providerOrigin === undefined ? false : resolved.provider === providerOrigin;
 			const apiOk =
 				resolved.api === "openai-responses" ||
 				resolved.api === "azure-openai-responses" ||
@@ -1421,6 +1442,16 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	};
 
 	const resolveCredential = async (): Promise<AttemptPrep> => {
+		if (parsed.options.previousResponseId && bootOpts.storage.listStoredCredentials(model.provider).length > 1) {
+			return {
+				type: "respond",
+				response: formatError(
+					400,
+					"invalid_request_error",
+					"Responses continuations require an unambiguous single-credential provider; credential rotation is disabled",
+				),
+			};
+		}
 		let apiKey: string | undefined;
 		try {
 			apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
@@ -1494,16 +1525,18 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		// only inject server-controlled fields. The codex sampling strip mirrors
 		// `buildStreamOptions` — Codex rejects every one with a 400 (#3117).
 		const streamOpts: SimpleStreamOptions = { ...parsed.options, apiKey, signal: controller.signal };
-		streamOpts.apiKey = buildGatewayApiKeyResolver(
-			bootOpts.storage,
-			model,
-			sessionId,
-			apiKey,
-			controller.signal,
-			"pi-native",
-			peer,
-			requestId,
-		);
+		streamOpts.apiKey = parsed.options.previousResponseId
+			? apiKey
+			: buildGatewayApiKeyResolver(
+					bootOpts.storage,
+					model,
+					sessionId,
+					apiKey,
+					controller.signal,
+					"pi-native",
+					peer,
+					requestId,
+				);
 		if (model.api === "openai-codex-responses") {
 			delete streamOpts.temperature;
 			delete streamOpts.topP;
@@ -1934,7 +1967,13 @@ async function handleCredentialPin(storage: AuthStorage, id: string, req: Reques
 
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
 	const registry = opts.routeRegistry ?? new RouteRegistry(opts.resolveModel);
-	for (const def of opts.routes ?? []) registry.register(def);
+	if (opts.routes?.length) {
+		const combined = new Map<string, RouteDefinition>(
+			registry.list().map(route => [route.id, { id: route.id, root: route.root }]),
+		);
+		for (const definition of opts.routes) combined.set(definition.id, definition);
+		registry.replaceAll([...combined.values()]);
+	}
 	const traces = opts.decisionTraces ?? new RouteDecisionTraceLog();
 	const boot: AuthGatewayBootOptions = {
 		...opts,
@@ -1999,7 +2038,7 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 						await handleCountTokens(req, (id: string) => {
 							const m = boot.resolveModel(id);
 							return m ? { contextWindow: m.contextWindow ?? undefined } : undefined;
-					}),
+						}),
 						req,
 					);
 				}
@@ -2018,7 +2057,7 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 						const streaming = geminiPath[2] !== undefined;
 						const module = {
 							...geminiV1beta,
-						parseRequest: (body: unknown, headers?: Headers) => {
+							parseRequest: (body: unknown, headers?: Headers) => {
 								if (!isRecord(body)) return geminiV1beta.parseRequest(body, headers);
 								let injected = body;
 								if (typeof injected.model !== "string") injected = { ...injected, model: pathModel };
@@ -2026,10 +2065,7 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 								return geminiV1beta.parseRequest(injected, headers);
 							},
 						};
-						return withCors(
-							await handleFormatEndpoint({ module, label: "gemini-v1beta" }, boot, req, peer),
-							req,
-						);
+						return withCors(await handleFormatEndpoint({ module, label: "gemini-v1beta" }, boot, req, peer), req);
 					}
 				}
 

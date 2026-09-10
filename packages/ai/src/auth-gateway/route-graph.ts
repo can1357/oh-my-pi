@@ -1,5 +1,5 @@
 import * as AIError from "../error";
-import type { GatewayErrorDisposition } from "../error/gateway";
+import { type GatewayErrorDisposition, RETRYABLE_GATEWAY_DISPOSITIONS } from "../error/gateway";
 import type { Api, Model } from "../types";
 
 export type TargetNode = { type: "target"; model: string; weight?: number };
@@ -132,9 +132,9 @@ export class RouteRegistry {
 		return true;
 	}
 
-	resolve(modelId: string): CompiledRoute | undefined {
+	resolve(modelId: string, facts?: RouteRequestFacts): CompiledRoute | undefined {
 		const virtual = this.#routes.get(modelId);
-		if (virtual) return virtual;
+		if (virtual) return facts ? selectRouteForRequest(virtual, facts) : virtual;
 		const model = this.#resolveModel(modelId);
 		if (!model) return undefined;
 		const id = modelId.includes("/") ? modelId : model.id;
@@ -149,6 +149,26 @@ export class RouteRegistry {
 	}
 }
 
+export interface RouteRequestFacts {
+	vision: boolean;
+}
+
+/** Conditional children are the matching branch and an optional alternative. */
+export function selectRouteForRequest(route: CompiledRoute, facts: RouteRequestFacts): CompiledRoute {
+	const choose = (node: RouteNode): RouteNode => {
+		if (node.type === "conditional") {
+			if (node.children.length > 2)
+				throw new AIError.ValidationError("Conditional routes accept a matching branch and optional alternative");
+			const matches = node.when.vision === undefined || node.when.vision === facts.vision;
+			const selected = node.children[matches ? 0 : 1];
+			return selected ? choose(selected) : { type: "balance", strategy: "rr", children: [] };
+		}
+		if (node.type === "target" || node.type === "route-ref") return node;
+		return { ...node, children: node.children.map(choose) };
+	};
+	return compileDefinition({ ...route, root: choose(route.root) }, () => undefined, route.generation);
+}
+
 function compileDefinition(
 	definition: RouteDefinition,
 	lookup: (id: string) => RouteNode | undefined,
@@ -161,7 +181,7 @@ function compileDefinition(
 		id: definition.id,
 		root: copyNode(root),
 		targets: Object.freeze([...compiled.targets]),
-		fallbacks: freezeFallbacksUnion(compiled.fallbacksByFrom),
+		fallbacks: freezeFallbacksUnion(compiled.fallbacksByFrom, compiled.targets),
 		fallbackByTarget: freezeFallbacksByTarget(compiled.fallbacksByFrom),
 	};
 }
@@ -229,8 +249,12 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 			return compileFallback(node, seenOnPath);
 		case "balance":
 		case "conditional":
-		case "domain":
 			return compileFlatten(node.children, seenOnPath);
+		case "domain":
+			return compileFallback(
+				{ type: "fallback", on: RETRYABLE_GATEWAY_DISPOSITIONS, children: node.children },
+				seenOnPath,
+			);
 	}
 }
 
@@ -260,9 +284,7 @@ function compileFallback(node: FallbackNode, seenOnPath: ReadonlySet<string>): N
 		for (const id of childTargetGroups[i]!) {
 			const prev = owner.get(id);
 			if (prev !== undefined && prev !== i) {
-				throw new AIError.ValidationError(
-					`Ambiguous cross-branch reuse of model "${id}" under one fallback`,
-				);
+				throw new AIError.ValidationError(`Ambiguous cross-branch reuse of model "${id}" under one fallback`);
 			}
 			owner.set(id, i);
 		}
@@ -308,9 +330,7 @@ function compileFlatten(children: readonly RouteNode[], seenOnPath: ReadonlySet<
 		for (const id of childTargetGroups[i]!) {
 			const prev = owner.get(id);
 			if (prev !== undefined && prev !== i) {
-				throw new AIError.ValidationError(
-					`Ambiguous cross-branch reuse of model "${id}" under one parent`,
-				);
+				throw new AIError.ValidationError(`Ambiguous cross-branch reuse of model "${id}" under one parent`);
 			}
 			owner.set(id, i);
 		}
@@ -401,6 +421,7 @@ function mergeFallbacksByFrom(
 
 function freezeFallbacksUnion(
 	fallbacksByFrom: Partial<Record<GatewayErrorDisposition, Partial<Record<string, string[]>>>>,
+	targets: readonly string[],
 ): Readonly<Partial<Record<GatewayErrorDisposition, readonly string[]>>> {
 	const out: Partial<Record<GatewayErrorDisposition, readonly string[]>> = {};
 	for (const key of Object.keys(fallbacksByFrom) as GatewayErrorDisposition[]) {
@@ -408,7 +429,8 @@ function freezeFallbacksUnion(
 		if (!fromMap) continue;
 		const seen = new Set<string>();
 		const list: string[] = [];
-		for (const tos of Object.values(fromMap)) {
+		for (const source of targets) {
+			const tos = fromMap[source];
 			if (!tos) continue;
 			for (const id of tos) {
 				if (seen.has(id)) continue;

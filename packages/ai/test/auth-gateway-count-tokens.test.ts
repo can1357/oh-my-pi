@@ -39,3 +39,17 @@ describe("handleCountTokens", () => {
 		expect(res.status).toBe(400);
 	});
 });
+
+it("counts system and tool content while excluding output-budget metadata", async () => {
+	const body = {
+		model: "claude-sonnet",
+		messages: [],
+		system: "s".repeat(4000),
+		tools: [{ name: "tool", description: "t".repeat(4000), input_schema: { type: "object" } }],
+	};
+	const response = await handleCountTokens(post(JSON.stringify(body)), resolveKnown);
+	const counted = (await response.json()) as { input_tokens: number };
+	expect(counted.input_tokens).toBeGreaterThanOrEqual(2000);
+	const metadata = await handleCountTokens(post(JSON.stringify({ ...body, max_tokens: 1000000 })), resolveKnown);
+	expect(await metadata.json()).toEqual(counted);
+});

@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed conditional and domain routing, forward route references, Gemini multimodal requests, and token estimates that omitted system prompts or tools.
+
 - Honour balance rr/weighted strategies on first dispatch, and resolve replaceAll route-refs against the complete incoming definition set.
 - Renew in-flight turn reservations for the lifetime of the SSE stream, defer OpenAI file_id compat until a catalog target binds, and route temporary credential unavailability through the conductor before 401.
 - Reject shared 100.64/10 discovery hosts, gate previous_response_id fallbacks by Responses-compatible APIs, and detect OpenAI file refs in user/assistant messages.
