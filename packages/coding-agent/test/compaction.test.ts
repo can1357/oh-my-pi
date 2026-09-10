@@ -1493,6 +1493,29 @@ describe("buildSessionContext", () => {
 		expect(llm.messages.map(m => m.role)).toEqual(["compactionSummary", "user", "user"]);
 	});
 
+	it("renders a snapcompact frame rescue as one replacement divider", () => {
+		const u1 = createMessageEntry(createUserMessage("1"));
+		const a1 = createMessageEntry(createAssistantMessage("a"));
+		const stale = createCompactionEntry("Oversized archive", u1.id);
+		stale.method = "snapcompact";
+		stale.tokensBefore = 188_789;
+		stale.tokensAfter = 168_131;
+		const rebuilt = createCompactionEntry("Rebuilt archive", u1.id);
+		rebuilt.method = "snapcompact";
+		rebuilt.tokensBefore = stale.tokensBefore;
+		rebuilt.tokensAfter = 163_107;
+
+		const transcript = buildSessionContext([u1, a1, stale, rebuilt], undefined, undefined, { transcript: true });
+		const dividers = transcript.messages.filter(message => message.role === "compactionSummary");
+
+		expect(dividers).toHaveLength(1);
+		expect(dividers[0]).toMatchObject({
+			summary: "Rebuilt archive",
+			tokensBefore: 188_789,
+			tokensAfter: 163_107,
+		});
+	});
+
 	it("transcript collapse option elides compacted display history", () => {
 		const u1 = createMessageEntry(createUserMessage("1"));
 		const a1 = createMessageEntry(createAssistantMessage("a"));
