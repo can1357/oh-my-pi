@@ -1427,11 +1427,16 @@ export class SessionManager {
 				`could not relocate the session back to ${snapshot.sessionDir} (${error instanceof Error ? error.message : String(error)}); the session file remains at ${movedFile}`,
 			);
 		}
+		// The inverse moveTo already rewrote the restored source file and left
+		// #expectedDiskSize describing that on-disk body. restoreState resets it
+		// to the pre-move snapshot size, so capture the post-relocation size and
+		// reapply it — otherwise the final rewrite would compare a stale size and
+		// reject an otherwise successful rollback.
+		const relocatedDiskSize = this.#expectedDiskSize;
 		this.restoreState(snapshot);
-		// The inverse moveTo already rewrote the source file with the
-		// target-filtered header. Persist the captured one so disk and memory
-		// agree after a fresh open.
+		// Persist the captured header so disk and memory agree after a fresh open.
 		if (this.#persist && this.#sessionFile) {
+			this.#expectedDiskSize = relocatedDiskSize;
 			this.#forceFileCreation = true;
 			this.#rewriteRequired = true;
 			await this.#rewriteAtomically();
@@ -1688,6 +1693,12 @@ export class SessionManager {
 				}
 
 				this.#sessionFile = newSessionFile;
+				// The freshness expectation must describe the NEW path. A successful
+				// rename carried this manager's tracked bytes to `newSessionFile`, so
+				// #expectedDiskSize still applies; without a rename the destination
+				// holds no bytes this manager wrote, so a recreate-from-memory must
+				// publish against an absent file rather than a stale size.
+				if (sessionPathChanged && !sessionMoved) this.#expectedDiskSize = null;
 				this.#artifactManager = null;
 				this.#artifactManagerSessionFile = null;
 				// Path is repointed; hot-path appends may use `#sessionFile` again.
