@@ -2714,7 +2714,7 @@ pub mod matchers {
 				file_info: &WalkEntry,
 				mut out: impl Write,
 				mut err: impl Write,
-			) -> io::Result<()> {
+			) -> Result<(), Box<dyn Error>> {
 				for component in &self.format.components {
 					match component {
 						FormatComponent::Literal(literal) => write!(out, "{literal}")?,
@@ -2738,7 +2738,7 @@ pub mod matchers {
 										file_info.path().to_string_lossy(),
 										error
 									);
-									break;
+									return Err(error);
 								},
 							}
 						},

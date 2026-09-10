@@ -179,16 +179,34 @@ pub(crate) fn retrieve_xattrs(path: impl AsRef<Path>) -> io::Result<FastHashMap<
 }
 
 /// Applies a map of extended attributes to a path.
+///
+/// Filesystems without extended-attribute support report `EOPNOTSUPP` for
+/// every set attempt; that is a best-effort no-op. Other failures do not
+/// prevent later attributes from being attempted, but the first one is
+/// returned after the loop.
 #[cfg(target_os = "linux")]
 pub(crate) fn apply_xattrs(
 	path: impl AsRef<Path>,
 	xattrs: FastHashMap<Vec<u8>, Vec<u8>>,
 ) -> io::Result<()> {
+	let mut first_error = None;
 	for (name, value) in xattrs {
-		lsetxattr(path.as_ref(), name.as_slice(), value.as_slice(), XattrFlags::empty())
-			.map_err(std::io::Error::from)?;
+		let result = lsetxattr(
+			path.as_ref(),
+			name.as_slice(),
+			value.as_slice(),
+			XattrFlags::empty(),
+		)
+		.map_err(io::Error::from);
+		let Some(error) = result.err() else {
+			continue;
+		};
+		if error.raw_os_error() == Some(libc::EOPNOTSUPP) || first_error.is_some() {
+			continue;
+		}
+		first_error = Some(error);
 	}
-	Ok(())
+	first_error.map_or(Ok(()), Err)
 }
 
 /// Copies all extended attributes from one path to another.
@@ -256,5 +274,28 @@ mod tests {
 		let found = retrieve_xattrs(dst.path())?;
 		assert_eq!(found.get(b"user.omp.test".as_slice()).map(Vec::as_slice), Some(b"value".as_slice()));
 		Ok(())
+	}
+	#[test]
+	fn continues_after_an_attribute_error() -> std::io::Result<()> {
+		let file = tempfile::NamedTempFile::new()?;
+		let mut xattrs: FastHashMap<Vec<u8>, Vec<u8>> = FastHashMap::default();
+		xattrs.insert(b"user.".to_vec(), b"invalid".to_vec());
+		xattrs.insert(b"user.omp.after_error".to_vec(), b"applied".to_vec());
+
+		let error = apply_xattrs(file.path(), xattrs).expect_err("invalid xattr name must fail");
+		assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+		let found = retrieve_xattrs(file.path())?;
+		assert_eq!(
+			found.get(b"user.omp.after_error".as_slice()).map(Vec::as_slice),
+			Some(b"applied".as_slice())
+		);
+		Ok(())
+	}
+
+	#[test]
+	fn ignores_unsupported_filesystems() -> std::io::Result<()> {
+		let mut xattrs: FastHashMap<Vec<u8>, Vec<u8>> = FastHashMap::default();
+		xattrs.insert(b"user.omp.unsupported".to_vec(), b"value".to_vec());
+		apply_xattrs("/proc/self/oom_score_adj", xattrs)
 	}
 }
