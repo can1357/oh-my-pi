@@ -452,7 +452,7 @@ export class FileSessionStorage implements SessionStorage {
 		// Safe end-states are primary-present-with-backups or all-gone.
 		const dir = path.dirname(sessionPath);
 		const base = path.basename(sessionPath);
-		for (const backup of listSessionBackupSiblings(dir, base)) {
+		for (const backup of await listSessionBackupSiblings(dir, base)) {
 			try {
 				await this.unlink(backup);
 			} catch (err) {
@@ -512,10 +512,10 @@ export function primaryNameForSessionBackup(name: string): string | undefined {
  * any other scan failure propagates so a delete never reports success with
  * stale backups left behind.
  */
-function listSessionBackupSiblings(dir: string, primaryBase: string): string[] {
+async function listSessionBackupSiblings(dir: string, primaryBase: string): Promise<string[]> {
 	let names: string[];
 	try {
-		names = fs.readdirSync(dir);
+		names = await fsp.readdir(dir);
 	} catch (err) {
 		if (isEnoent(err)) return [];
 		const error = toError(err);
