@@ -213,6 +213,34 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		return message;
 	}
 
+	/** Incidental "vision"/"media" wording with no count/limit evidence — a
+	 *  model name and an unrelated Content-Type, not proof the *request* was
+	 *  rejected for a media budget. Classifies non-ambiguous (PayloadRejected
+	 *  only, no ContextOverflow), same shape as `explicitMediaNoDigitPayloadAssistant`,
+	 *  but must NOT be treated as explicit media evidence (#11482). */
+	function incidentalMediaWordPayloadAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: `${PAYLOAD_ERROR_MESSAGE} for model llava-vision`,
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
 	/** Digit-free media wording: doesn't match GENERIC_LIMIT_OVERFLOW_PATTERN
 	 *  (no "exceeds the limit of N"), so unlike `mediaBudgetPayloadAssistant`
 	 *  this is classified non-ambiguous (PayloadRejected only, no ContextOverflow). */
@@ -740,6 +768,39 @@ describe("AgentSession payload-rejection 413 handling", () => {
 			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
 		);
 		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
+	it("attempts compaction for a payload-only 413 that merely names a vision model, not an actual media-limit rejection (#11482)", async () => {
+		// "for model llava-vision" contains "vision" but no count/limit evidence —
+		// the request wasn't rejected for exceeding an image/frame/pixel budget,
+		// it just happens to run a vision-capable model. Before narrowing the
+		// media-evidence pattern, bare "vision"/"media" occurrences anywhere in
+		// the text were enough to permanently dead-end the session even when
+		// ordinary text compaction could recover it.
+		await createSession(null);
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+
+		const assistantMsg = incidentalMediaWordPayloadAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await session.waitForIdle();
+
+		expect(startCount()).toBeGreaterThanOrEqual(1);
+		expect(prepareSpy).toHaveBeenCalled();
+		expect(notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413")).length).toBe(0);
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
 	});
 
 	function activateOngoingGoal(id: string): void {

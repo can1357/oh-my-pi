@@ -183,19 +183,29 @@ function hasUsableCompactionMethod(
 }
 
 /**
- * Explicit media/image wording in a payload-rejection error (e.g.
- * `request_too_large: too many images`). `ambiguousPayloadRejection` (dual
- * `ContextOverflow` + `PayloadRejected`) only catches text that *also* matches
- * a generic numeric-limit pattern — a digit-free media rejection like this one
- * sails through as non-ambiguous. That text is still definitive media-budget
- * evidence: token compaction can't raise a provider's image-count limit, and
- * some methods (snapcompact) *add* image frames, making it worse. Such
- * rejections must stay on the terminal payload-dead-end path regardless of
- * compaction availability (#11482).
+ * Concrete media-limit wording in a payload-rejection error (e.g.
+ * `request_too_large: too many images`, `image count exceeds the limit of
+ * 20`). `ambiguousPayloadRejection` (dual `ContextOverflow` + `PayloadRejected`)
+ * only catches text that *also* matches a generic numeric-limit pattern — a
+ * digit-free media rejection like the first example sails through as
+ * non-ambiguous. That text is still definitive media-budget evidence: token
+ * compaction can't raise a provider's image-count limit, and some methods
+ * (snapcompact) *add* image frames, making it worse. Such rejections must
+ * stay on the terminal payload-dead-end path regardless of compaction
+ * availability (#11482).
+ *
+ * Deliberately narrower than matching bare "images"/"media"/"vision"/"frames"/
+ * "pixels" anywhere in the text: a custom provider's error that merely names a
+ * vision model (`llava-vision`) or an unrelated `Content-Type` (`media type
+ * application/json`) is not evidence the *request* was rejected for a media
+ * budget — treating it as such would permanently dead-end an unknown-window
+ * session that ordinary compaction could actually recover (#11482). Require
+ * the noun to co-occur with a count/limit signal instead.
  */
-const PAYLOAD_MEDIA_EVIDENCE_PATTERN = /\b(?:images?|media|vision|frames?|pixels?)\b/i;
+const PAYLOAD_MEDIA_LIMIT_EVIDENCE_PATTERN =
+	/\btoo many (?:images?|frames?|pixels?)\b|\b(?:images?|frames?|pixels?)\s*(?:count|limit)\b|\blimit of \d+\s*(?:images?|frames?|pixels?)\b/i;
 function hasExplicitMediaRejectionEvidence(errorMessage: string | undefined): boolean {
-	return errorMessage !== undefined && PAYLOAD_MEDIA_EVIDENCE_PATTERN.test(errorMessage);
+	return errorMessage !== undefined && PAYLOAD_MEDIA_LIMIT_EVIDENCE_PATTERN.test(errorMessage);
 }
 
 /**
