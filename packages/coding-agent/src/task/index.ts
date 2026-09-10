@@ -206,7 +206,11 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 function validateModel(model: string | string[] | undefined, label: string): string | undefined {
 	if (model === undefined) return undefined;
 	if (typeof model === "string") return model.trim() ? undefined : `${label} must be a non-empty model selector.`;
-	if (!Array.isArray(model) || model.length === 0 || model.some(candidate => typeof candidate !== "string" || !candidate.trim())) {
+	if (
+		!Array.isArray(model) ||
+		model.length === 0 ||
+		model.some(candidate => typeof candidate !== "string" || !candidate.trim())
+	) {
 		return `${label} must be a non-empty model selector or ordered non-empty selector list.`;
 	}
 	return undefined;

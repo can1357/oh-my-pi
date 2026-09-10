@@ -96,7 +96,14 @@ function makeParentWithNestedResults(childCount: number): TaskToolDetails {
 	return { projectAgentsDir: null, results: [parent], totalDurationMs: 1 };
 }
 
-function renderResultText(details: TaskToolDetails, expanded: boolean, uiTheme: Theme, text = "Ran 1 agent", isError = false, width = 120): string {
+function renderResultText(
+	details: TaskToolDetails,
+	expanded: boolean,
+	uiTheme: Theme,
+	text = "Ran 1 agent",
+	isError = false,
+	width = 120,
+): string {
 	const component = renderResult(
 		{ content: [{ type: "text", text }], details, isError },
 		{ expanded, isPartial: false },

@@ -58,13 +58,16 @@ describe("task wire schema", () => {
 		}
 	});
 
-	it.each(["provider/model", ["provider/first", "provider/second"]])("accepts flat model %j and preserves its order", model => {
-		const parsed = taskSchema({ agent: "scout", task: "map the auth flow", model: model as string | string[] });
-		expect(parsed instanceof type.errors).toBe(false);
-		if (!(parsed instanceof type.errors)) expect((parsed as { model?: unknown }).model).toEqual(model);
-	});
+	it.each(["provider/model", ["provider/first", "provider/second"]])(
+		"accepts flat model %j and preserves its order",
+		model => {
+			const parsed = taskSchema({ agent: "scout", task: "map the auth flow", model: model as string | string[] });
+			expect(parsed instanceof type.errors).toBe(false);
+			if (!(parsed instanceof type.errors)) expect((parsed as { model?: unknown }).model).toEqual(model);
+		},
+	);
 
-	it.each(["", "  "]) ("rejects empty flat model %j", model => {
+	it.each(["", "  "])("rejects empty flat model %j", model => {
 		const parsed = taskSchema({ agent: "scout", task: "map the auth flow", model });
 		expect(parsed instanceof type.errors).toBe(true);
 	});

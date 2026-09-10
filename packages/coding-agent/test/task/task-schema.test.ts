@@ -13,13 +13,16 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 // test/task/task-batch.test.ts).
 
 describe("task schema (single-spawn)", () => {
-	it.each(["provider/model", ["provider/first", "provider/second"]])("accepts a non-empty model selector %j", model => {
-		const parsed = taskSchema({ agent: "scout", task: "Map the auth module.", model: model as string | string[] });
-		expect(parsed instanceof type.errors).toBe(false);
-		if (!(parsed instanceof type.errors)) expect((parsed as { model?: unknown }).model).toEqual(model);
-	});
+	it.each(["provider/model", ["provider/first", "provider/second"]])(
+		"accepts a non-empty model selector %j",
+		model => {
+			const parsed = taskSchema({ agent: "scout", task: "Map the auth module.", model: model as string | string[] });
+			expect(parsed instanceof type.errors).toBe(false);
+			if (!(parsed instanceof type.errors)) expect((parsed as { model?: unknown }).model).toEqual(model);
+		},
+	);
 
-	it.each(["", "   "]) ("rejects an empty model selector %j", model => {
+	it.each(["", "   "])("rejects an empty model selector %j", model => {
 		const parsed = taskSchema({ agent: "scout", task: "Map the auth module.", model });
 		expect(parsed instanceof type.errors).toBe(true);
 	});

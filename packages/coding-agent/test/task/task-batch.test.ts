@@ -73,10 +73,10 @@ function modelRegistryFor(selector: string): ModelRegistry {
 
 function modelRegistryForSelectors(selectors: string[]): ModelRegistry {
 	const models = selectors.map(selector => {
-	const [provider, id] = selector.split("/", 2);
-	const model = provider && id ? getBundledModel(provider as Parameters<typeof getBundledModel>[0], id) : undefined;
-	if (!model) throw new Error(`Expected bundled model ${selector}`);
-	return model;
+		const [provider, id] = selector.split("/", 2);
+		const model = provider && id ? getBundledModel(provider as Parameters<typeof getBundledModel>[0], id) : undefined;
+		if (!model) throw new Error(`Expected bundled model ${selector}`);
+		return model;
 	});
 	return {
 		getAvailable: () => models,
@@ -441,7 +441,11 @@ describe("task.batch spawning", () => {
 					"anthropic/claude-haiku-4-5",
 					"anthropic/claude-sonnet-4-6",
 				]),
-				settings: { "async.enabled": true, "task.batch": true, "task.agentModelOverrides": { task: "openai/gpt-4.1-mini" } },
+				settings: {
+					"async.enabled": true,
+					"task.batch": true,
+					"task.agentModelOverrides": { task: "openai/gpt-4.1-mini" },
+				},
 			}),
 		);
 		const alphaSchema = { type: "object", properties: { alpha: { type: "string" } } };
@@ -492,10 +496,7 @@ describe("task.batch spawning", () => {
 		expect(byId.get("Beta")?.outputSchema).toEqual(betaSchema);
 		expect(byId.get("Beta")?.outputSchemaMode).toBe("permissive");
 		expect(byId.get("Alpha")?.modelOverride).toEqual(["anthropic/claude-haiku-4-5"]);
-		expect(byId.get("Beta")?.modelOverride).toEqual([
-			"anthropic/claude-sonnet-4-6",
-			"anthropic/claude-haiku-4-5",
-		]);
+		expect(byId.get("Beta")?.modelOverride).toEqual(["anthropic/claude-sonnet-4-6", "anthropic/claude-haiku-4-5"]);
 		expect(seen.map(spawn => spawn.assignment).sort()).toEqual(["Do A.", "Do B."]);
 		for (const spawn of seen) expect(spawn.parentAgentId).toBe("ParentA");
 	});
