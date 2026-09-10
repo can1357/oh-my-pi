@@ -265,4 +265,50 @@ describe("AuthStorage exclusive session pins", () => {
 		).toBe(true);
 		expect(await serveEmail(restored, "session-x")).not.toBe("b@example.com");
 	});
+	test("revalidates a positive in-memory exclusive owner against the store", async () => {
+		const ids = await seedAccounts("a", "b");
+		const heldId = ids.get("b@example.com");
+		if (heldId === undefined) throw new Error("expected accounts");
+		expect(storage().pinSessionOAuthAccount(PROVIDER, "session-a", heldId, { exclusive: true })).toBe(true);
+		expect(storage().listOAuthAccounts(PROVIDER, "session-b").find(account => account.credentialId === heldId)?.exclusive).toBe(
+			true,
+		);
+
+		store!.setCache(`session:exclusive:${PROVIDER}:${heldId}`, "", 0);
+
+		expect(storage().listOAuthAccounts(PROVIDER, "session-b").find(account => account.credentialId === heldId)?.exclusive).toBeFalsy();
+		expect(storage().pinSessionOAuthAccount(PROVIDER, "session-b", heldId, { exclusive: true })).toBe(true);
+	});
+
+	test("removing one credential does not clear exclusive holds on siblings", async () => {
+		const ids = await seedAccounts("a", "b", "c");
+		const heldId = ids.get("b@example.com");
+		const removedId = ids.get("a@example.com");
+		if (heldId === undefined || removedId === undefined) throw new Error("expected accounts");
+		expect(storage().pinSessionOAuthAccount(PROVIDER, "session-a", heldId, { exclusive: true })).toBe(true);
+
+		expect(await storage().removeCredential(PROVIDER, removedId)).toBe(true);
+
+		expect(
+			storage().listOAuthAccounts(PROVIDER, "session-x").find(account => account.credentialId === heldId)?.exclusive,
+		).toBe(true);
+		expect(storage().pinSessionOAuthAccount(PROVIDER, "session-b", heldId, { exclusive: true })).toBe(false);
+	});
+
+	test("exclusive acquisition is atomic across auth storage instances", async () => {
+		const credentialStore = store;
+		if (!credentialStore) throw new Error("test setup failed");
+		const ids = await seedAccounts("a", "b");
+		const targetId = ids.get("b@example.com");
+		if (targetId === undefined) throw new Error("expected account b");
+
+		const peer = new AuthStorage(credentialStore);
+		await peer.reload();
+
+		expect(storage().pinSessionOAuthAccount(PROVIDER, "session-a", targetId, { exclusive: true })).toBe(true);
+		expect(peer.pinSessionOAuthAccount(PROVIDER, "session-b", targetId, { exclusive: true })).toBe(false);
+		expect(peer.hasExclusiveSessionPin(PROVIDER, "session-b")).toBe(false);
+		expect(storage().hasExclusiveSessionPin(PROVIDER, "session-a")).toBe(true);
+	});
+
 });

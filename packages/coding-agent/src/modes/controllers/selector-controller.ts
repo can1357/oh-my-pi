@@ -54,6 +54,7 @@ import {
 import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/foreign-session-store";
 import type { SessionEntry, SessionMessageEntry, SessionTreeNode } from "../../session/session-entries";
 import type { SessionInfo } from "../../session/session-listing";
+import { releaseSessionOAuthPins } from "../../session/credential-pin";
 import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
@@ -1976,6 +1977,8 @@ export class SelectorController {
 			this.ctx.showStatus("Delete cancelled");
 			return;
 		}
+
+		releaseSessionOAuthPins(this.ctx.session.modelRegistry.authStorage, this.ctx.session.sessionId);
 
 		// Delete the session file and artifacts directory
 		await storage.deleteSessionWithArtifacts(sessionFile);

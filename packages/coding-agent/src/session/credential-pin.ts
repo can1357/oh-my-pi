@@ -70,15 +70,27 @@ export function recordCredentialPin(
 	sessionId: string,
 	provider: string,
 ): void {
+	const existing = sessionManager.getCredentialPins().get(provider);
 	const identity = authStorage.getOAuthAccountIdentity(provider, sessionId);
-	if (!identity) return;
+	const exclusive = authStorage.hasExclusiveSessionPin(provider, sessionId);
+	if (!identity) {
+		if (existing?.exclusive) {
+			sessionManager.appendCredentialPin(provider, existing.hash);
+		}
+		return;
+	}
 	const hash = credentialPinHash(provider, identity);
 	if (!hash) return;
-	const existing = sessionManager.getCredentialPins().get(provider);
-	if (existing?.hash === hash && existing.exclusive !== true) return;
-	const exclusive = authStorage.hasExclusiveSessionPin(provider, sessionId);
+	if (existing?.hash === hash && existing.exclusive !== true && !exclusive) return;
 	if (existing?.hash === hash && existing.exclusive === exclusive) return;
 	sessionManager.appendCredentialPin(provider, hash, exclusive ? { exclusive: true } : undefined);
+}
+
+/** Release every OAuth pin this session owns in the auth store. */
+export function releaseSessionOAuthPins(authStorage: AuthStorage, sessionId: string): void {
+	for (const provider of authStorage.list()) {
+		authStorage.unpinSessionOAuthAccount(provider, sessionId);
+	}
 }
 
 /**

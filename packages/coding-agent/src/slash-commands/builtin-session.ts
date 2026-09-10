@@ -1,5 +1,6 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { AgentSession } from "../session/agent-session";
+import { releaseSessionOAuthPins } from "../session/credential-pin";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import {
 	getChangelogPath,
@@ -250,6 +251,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				// the active writer attached to the now-deleted path, so the next
 				// prompt would silently resurrect or corrupt the "deleted" file.
 				try {
+					releaseSessionOAuthPins(runtime.session.modelRegistry.authStorage, runtime.session.sessionId);
 					await runtime.sessionManager.dropSession(sessionFile);
 				} catch (err) {
 					return usage(`Failed to delete session: ${errorMessage(err)}`, runtime);

@@ -288,7 +288,7 @@ import {
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
-import { recordCredentialPin, recordExclusiveCredentialPin, seedCredentialPins } from "./credential-pin";
+import { recordCredentialPin, recordExclusiveCredentialPin, releaseSessionOAuthPins, seedCredentialPins } from "./credential-pin";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
 import {
 	collectPendingToolCalls,
@@ -10156,7 +10156,16 @@ export class AgentSession {
 	unpinCurrentProviderOAuthAccount(): boolean {
 		const provider = this.model?.provider;
 		if (!provider || this.isStreaming) return false;
-		return this.#modelRegistry.authStorage.unpinSessionOAuthAccount(provider, this.sessionId);
+		const unpinned = this.#modelRegistry.authStorage.unpinSessionOAuthAccount(provider, this.sessionId);
+		if (unpinned) {
+			recordCredentialPin(
+				this.#modelRegistry.authStorage,
+				this.sessionManager,
+				this.sessionId,
+				provider,
+			);
+		}
+		return unpinned;
 	}
 
 	/**

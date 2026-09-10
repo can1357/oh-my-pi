@@ -1518,6 +1518,44 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		}
 	}
 
+	trySetSessionExclusiveOwner(key: string, sessionId: string, expiresAtSec: number): boolean {
+		const value = JSON.stringify({ sessionId });
+		try {
+			this.#db.run("BEGIN IMMEDIATE");
+			try {
+				const row = this.#getCacheIncludingExpiredStmt.get(key) as { value?: string } | undefined;
+				const existing = row?.value ?? "";
+				if (existing.length > 0) {
+					try {
+						const parsed = JSON.parse(existing) as { sessionId?: unknown };
+						if (
+							typeof parsed.sessionId === "string" &&
+							parsed.sessionId.length > 0 &&
+							parsed.sessionId !== sessionId
+						) {
+							this.#db.run("ROLLBACK");
+							return false;
+						}
+					} catch {
+						// Reclaim corrupt rows for the caller.
+					}
+				}
+				this.#upsertCacheStmt.run(key, value, expiresAtSec);
+				this.#db.run("COMMIT");
+				return true;
+			} catch {
+				try {
+					this.#db.run("ROLLBACK");
+				} catch {
+					// Ignore rollback failures
+				}
+				return false;
+			}
+		} catch {
+			return false;
+		}
+	}
+
 	/** Drop all cache rows whose keys start with the supplied prefix. */
 	deleteCachePrefix(prefix: string): void {
 		try {
