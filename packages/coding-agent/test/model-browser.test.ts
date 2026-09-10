@@ -13,7 +13,9 @@ import {
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
 /** Optional presentation metadata a catalog or discovery source may attach. */
-type NativeMetadata = Pick<Model, "description" | "isNew" | "isBeta" | "isRecommended" | "int" | "tps">;
+type NativeMetadata = Partial<
+	Pick<Model, "description" | "isNew" | "isBeta" | "isRecommended" | "int" | "tps" | "cost" | "pricingStatus">
+>;
 
 function makeModel(provider: string, id: string, metadata?: NativeMetadata): Model {
 	return buildModel({
@@ -249,12 +251,34 @@ describe("ModelBrowser native model metadata", () => {
 			}),
 		);
 
-		expect(detail).toContain("swe-2 · new · beta · recommended · 128k ctx · 1k out · free per M");
+		expect(detail).toContain("swe-2 · new · beta · recommended · 128k ctx · 1k out · pricing unknown");
 		// Tabs and newlines are flattened so the blurb stays one detail row.
-		expect(detail).toMatch(/free per M · Fast {2,}agentic coder$/);
+		expect(detail).toMatch(/pricing unknown · Fast {2,}agentic coder$/);
 	});
 
-	test("models without upstream metadata render the plain detail line", () => {
-		expect(renderDetail(makeModel("openai", "gpt-5"))).toContain("gpt-5 · 128k ctx · 1k out · free per M");
+	test("models without upstream metadata label missing rates as unknown", () => {
+		expect(renderDetail(makeModel("openai", "gpt-5"))).toContain("gpt-5 · 128k ctx · 1k out · pricing unknown");
+	});
+
+	test("distinguishes fixed, free, included, and variable pricing", () => {
+		expect(
+			renderDetail(
+				makeModel("openai", "metered", {
+					cost: { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 },
+					pricingStatus: "unknown",
+				}),
+			),
+		).toContain("$1.25/10 per M");
+		expect(renderDetail(makeModel("local", "free", { pricingStatus: "free" }))).toContain(" · free");
+		expect(renderDetail(makeModel("subscription", "included", { pricingStatus: "included" }))).toContain(
+			" · included",
+		);
+
+		const variable = makeModel("cursor", "default", { pricingStatus: "variable" });
+		const browser = new ModelBrowser(Settings.isolated({}));
+		browser.setItems(buildBrowserItems([variable]));
+		const lines = browser.render(160).map(line => Bun.stripANSI(line));
+		expect(lines[2]).toContain("varies");
+		expect(lines[lines.length - 2]).toContain("price varies");
 	});
 });
