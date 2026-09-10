@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Persisting a model-role assignment (`/model`, `/models`) no longer rewrites the whole profile `config.yml`; comments, quoting, blank lines, and the trailing newline are preserved, and only the changed key is touched ([#11477](https://github.com/can1357/oh-my-pi/issues/11477)).
+
 ## [18.1.16] - 2026-09-09
 
 ### Added

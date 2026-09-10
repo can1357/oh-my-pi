@@ -3,12 +3,68 @@ import * as path from "node:path";
 import { OmpErrors, type Type } from "@oh-my-pi/omptype";
 import { getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { JSONC, YAML } from "bun";
+import { Document, parseDocument } from "yaml";
 
 const YAML_MAPPING_HEADER_TRAILING_SPACE = /: +$/gm;
 
 /** Serialize config YAML without Bun's trailing space on block mapping headers. */
 export function stringifyYamlConfig(value: unknown): string {
 	return YAML.stringify(value, null, 2).replace(YAML_MAPPING_HEADER_TRAILING_SPACE, ":");
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Reconcile the map at `path` toward `target`: delete keys that `target` no
+ * longer has, recurse into nested maps, and rewrite only the leaves whose
+ * value actually changed. Untouched nodes keep their original comments,
+ * quoting, and formatting because their YAML nodes are never replaced.
+ */
+function reconcileRecord(
+	doc: Document,
+	path: ReadonlyArray<string>,
+	current: Record<string, unknown>,
+	target: Record<string, unknown>,
+): void {
+	for (const key in current) {
+		if (!Object.hasOwn(target, key) || target[key] === undefined) {
+			doc.deleteIn([...path, key]);
+		}
+	}
+	for (const key in target) {
+		const targetValue = target[key];
+		if (targetValue === undefined) continue;
+		const childPath = [...path, key];
+		const currentValue = current[key];
+		if (isPlainRecord(targetValue) && isPlainRecord(currentValue)) {
+			reconcileRecord(doc, childPath, currentValue, targetValue);
+		} else if (!Bun.deepEquals(currentValue, targetValue)) {
+			doc.setIn(childPath, targetValue);
+		}
+	}
+}
+
+/**
+ * Serialize `target` into the shape of an existing config file, preserving
+ * comments, quoting, blank lines, and key order of every node whose value did
+ * not change. This is the comment-preserving counterpart to
+ * {@link stringifyYamlConfig}: a persisted role/setting change touches only its
+ * own key instead of rewriting the whole file (see #11477).
+ *
+ * Removals and migrations are honored — keys absent from `target` are deleted
+ * from the document. When `originalText` is absent or empty a fresh document is
+ * produced, matching a first-time file write.
+ */
+export function reconcileYamlPreservingComments(
+	originalText: string | null | undefined,
+	target: Record<string, unknown>,
+): string {
+	const doc = originalText && originalText.trim().length > 0 ? parseDocument(originalText) : new Document();
+	const current = doc.toJS() as unknown;
+	reconcileRecord(doc, [], isPlainRecord(current) ? current : {}, target);
+	return doc.toString({ indent: 2 });
 }
 
 /** Minimal subset of the AJV ConfigSchemaError shape this module actually relies on. */

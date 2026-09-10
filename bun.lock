@@ -105,6 +105,7 @@
         "@opentelemetry/sdk-trace-base": "catalog:",
         "@opentelemetry/sdk-trace-node": "catalog:",
         "puppeteer-core": "catalog:",
+        "yaml": "catalog:",
       },
       "devDependencies": {
         "@types/bun": "catalog:",
@@ -393,6 +394,7 @@
     "typescript": "^7.0.2",
     "vite": "^8.1.4",
     "vite-plugin-solid": "^2.11.12",
+    "yaml": "^2.9.0",
   },
   "packages": {
     "@anush008/tokenizers": ["@anush008/tokenizers@0.0.0", "", { "optionalDependencies": { "@anush008/tokenizers-darwin-universal": "0.0.0", "@anush008/tokenizers-linux-x64-gnu": "0.0.0", "@anush008/tokenizers-win32-x64-msvc": "0.0.0" } }, "sha512-IQD9wkVReKAhsEAbDjh/0KrBGTEXelqZLpOBRDaIRvlzZ9sjmUP+gKbpvzyJnei2JHQiE8JAgj7YcNloINbGBw=="],
