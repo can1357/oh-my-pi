@@ -12,7 +12,7 @@ use crate::{error::EditError, files::FileSource, store::EditStore, stream_json::
 
 /// The edit variants the tool exposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::IntoStaticStr)]
-#[strum(serialize_all = "snake_case")]
+#[strum(serialize_all = "snake_case", const_into_str)]
 pub enum EditMode {
 	/// Replace.
 	Replace,
@@ -29,8 +29,8 @@ pub enum EditMode {
 impl EditMode {
 	/// Wire/settings name (`replace`, `patch`, `apply_patch`, `hashline`,
 	/// `sloppy`).
-	pub fn as_str(self) -> &'static str {
-		self.into()
+	pub const fn as_str(self) -> &'static str {
+		self.into_str()
 	}
 
 	/// Parse a wire/settings name.
