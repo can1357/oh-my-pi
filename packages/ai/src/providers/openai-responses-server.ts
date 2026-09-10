@@ -614,6 +614,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	const cacheKey = resolvePromptCacheKey(body, headers);
 	if (cacheKey !== undefined) options.promptCacheKey = cacheKey;
 	if (data.previous_response_id !== undefined) options.previousResponseId = data.previous_response_id;
+	if (data.store !== undefined) options.store = data.store;
 	if (data.user !== undefined) options.user = data.user;
 	if (isObj(data.metadata)) options.metadata = data.metadata;
 	// `store` is a stateful-storage hint that omp's gateway doesn't honour;

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Stored Responses requests retain storage intent through gateway forwarding and strict-tool retries.
 - Fixed auth-gateway decision traces accepting `credential_lookup_failed` as a skipped reason when `getApiKey` throws.
 - Fixed caller-owned Responses continuations to store each response, and returned matching `x-request-id` trace headers for credential lookup failures.
 ## [18.1.14] - 2026-09-07

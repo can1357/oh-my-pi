@@ -504,6 +504,8 @@ export interface StreamOptions {
 	 * internal chain state (`statefulResponses` / lastResponseId) for this request.
 	 */
 	previousResponseId?: string;
+	/** Persist a Responses result for a later continuation. */
+	store?: boolean;
 	/** OpenAI `parallel_tool_calls`. */
 	parallelToolCalls?: boolean;
 	/** OpenAI deterministic-sampling `seed`. */

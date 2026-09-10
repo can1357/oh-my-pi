@@ -512,6 +512,7 @@ const streamOpenAIResponsesOnce = (
 				params.store = true;
 			}
 			applyReasoningEffortFallbackForRequest(params);
+			if (options?.store === true || options?.previousResponseId) params.store = true;
 			// A caller-supplied `previous_response_id` names the client's own stored
 			// response; internal chain deltas are computed against a DIFFERENT
 			// baseline (the provider session's last response), so pairing them with
@@ -676,7 +677,7 @@ const streamOpenAIResponsesOnce = (
 							// Preserve caller storage intent (e.g. via onPayload): a
 							// stored first attempt whose retry is not retained breaks
 							// subsequent previous_response_id continuations.
-							else if (activeParams.store === true) fallbackParams.store = true;
+							else if (activeRequestParams?.store === true) fallbackParams.store = true;
 							const fallbackClientPreviousResponseId = options?.previousResponseId;
 							let fallbackChained: OpenAIResponsesChainedParams = fallbackClientPreviousResponseId
 								? {
