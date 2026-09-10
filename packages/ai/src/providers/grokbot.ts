@@ -1587,6 +1587,12 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					pending = pending.subarray(offset);
 
 					for (const frame of frames) {
+						if (sawEndStream) {
+							throw new AIError.ProviderResponseError(
+								"Grok Bot stream continued after the connect end-stream trailer",
+								{ provider: model.provider, kind: "incomplete-stream" },
+							);
+						}
 						if (frame.flags & CONNECT_END_STREAM_FLAG) {
 							sawEndStream = true;
 							const jsonText = Buffer.from(frame.bytes).toString("utf8").trim();
@@ -1744,6 +1750,13 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							}
 						}
 					}
+					if (sawEndStream && pending.length > 0) {
+						throw new AIError.ProviderResponseError(
+							"Grok Bot stream retained bytes after the connect end-stream trailer",
+							{ provider: model.provider, kind: "incomplete-stream" },
+						);
+					}
+
 				}
 
 				closeOpen();

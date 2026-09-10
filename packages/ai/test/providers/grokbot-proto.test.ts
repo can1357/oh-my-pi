@@ -1603,6 +1603,32 @@ describe("grokbot incomplete tool calls", () => {
 		expect(result.content.some(b => b.type === "toolCall" && Object.keys(b.arguments).length === 0)).toBe(true);
 	});
 
+	test("rejects data frames after the connect end-stream trailer", async () => {
+		mockAuth();
+		const textFrame = frameConnectProto(
+			encodeInferenceStreamResponse({
+				textPart: { text: "before-trailer", isFinal: true },
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const after = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "late",
+					toolName: "Shell",
+					args: '{"command":"echo pwned"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const fetchImpl = (async () => connectBody(textFrame, trailer, after)) as FetchImpl;
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/after the connect end-stream trailer/i);
+		expect(result.content.some(b => b.type === "toolCall")).toBe(false);
+	});
+
 	test("normalizes Write contents alias to omp content", async () => {
 		mockAuth();
 		const complete = frameConnectProto(

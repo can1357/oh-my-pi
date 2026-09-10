@@ -10,7 +10,7 @@ import {
 } from "../src/discovery/grokbot-available-models";
 import { resolveProviderModels } from "../src/model-manager";
 import { getBundledModels } from "../src/models";
-import { buildGrokbotStaticSeed } from "../src/provider-models/grokbot";
+import { buildGrokbotStaticSeed, GROKBOT_SAND_ROUTER_IDS } from "../src/provider-models/grokbot";
 import type { ModelSpec } from "../src/types";
 
 const FIXTURE = {
@@ -193,6 +193,11 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(ids).toContain("sand-default");
 		expect(ids).toContain("sand-cua");
 		expect(ids).toContain("sand-automation");
+		// Live union roster must stay identical to the offline seed router list.
+		for (const routerId of GROKBOT_SAND_ROUTER_IDS) {
+			expect(ids).toContain(routerId);
+			expect(buildGrokbotStaticSeed().some(m => m.id === routerId)).toBe(true);
+		}
 		expect(ids).toContain("grok-4.6");
 		expect(ids).toContain("composer-2.5");
 

@@ -17,6 +17,15 @@ type GrokbotModelSeed = {
 };
 
 /**
+ * Synthetic sand routers always unioned into live AvailableModels catalogs and
+ * present in the offline seed list. Single roster — discovery must not keep a
+ * parallel hard-coded copy (stale add/remove drift).
+ */
+export const GROKBOT_SAND_ROUTER_IDS = ["sand-default", "sand-cua", "sand-automation"] as const;
+
+export type GrokbotSandRouterId = (typeof GROKBOT_SAND_ROUTER_IDS)[number];
+
+/**
  * Tiny offline fallback when AvailableModels is unreachable.
  * Live catalog comes from `fetchGrokbotAvailableModels` (authoritative).
  * Do not re-expand into alias forests — aliases resolve client-side from live rows.
@@ -29,9 +38,9 @@ type GrokbotModelSeed = {
  */
 export const GROKBOT_MODEL_SEEDS: readonly GrokbotModelSeed[] = [
 	// Reasoning for routers is reviewed via KDL (`reasoning`); seeds stay neutral.
-	{ id: "sand-default", name: "sand-default (routed)", reasoning: false },
-	{ id: "sand-cua", name: "sand-cua (routed)", reasoning: false },
-	{ id: "sand-automation", name: "sand-automation (routed)", reasoning: false },
+	...GROKBOT_SAND_ROUTER_IDS.map(
+		(id): GrokbotModelSeed => ({ id, name: `${id} (routed)`, reasoning: false }),
+	),
 	{ id: "default", name: "Auto", reasoning: false },
 	{ id: "auto", name: "auto", reasoning: false },
 	// Offline-only: live AvailableModels owns reasoning for this id. Seed stays

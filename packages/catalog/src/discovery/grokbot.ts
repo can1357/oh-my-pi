@@ -6,7 +6,12 @@
  * absent from the live list (`sand-default`, `sand-cua`, `sand-automation`).
  */
 import { Effort, THINKING_EFFORTS } from "../effort";
-import { GROKBOT_API, GROKBOT_BACKEND } from "../provider-models/grokbot";
+import {
+	GROKBOT_API,
+	GROKBOT_BACKEND,
+	GROKBOT_SAND_ROUTER_IDS,
+	type GrokbotSandRouterId,
+} from "../provider-models/grokbot";
 import type { FetchImpl, ModelSpec, ThinkingConfig } from "../types";
 import { discoveryFetch } from "../utils";
 import {
@@ -29,7 +34,7 @@ import {
 const COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
 
 /** Sand router slugs — not in AvailableModels; always unioned into the catalog. */
-export const GROKBOT_SAND_ROUTER_IDS = ["sand-default", "sand-cua", "sand-automation"] as const;
+export { GROKBOT_SAND_ROUTER_IDS };
 
 export interface GrokbotModelDiscoveryOptions {
 	/** Renewal credential (registry passes `GROKBOT_RENEWAL_CREDENTIAL`). */
@@ -158,7 +163,7 @@ export function normalizeGrokbotAvailableModels(
 	return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
-function buildSandRouterSpec(id: (typeof GROKBOT_SAND_ROUTER_IDS)[number], baseUrl: string): ModelSpec<"grokbot-sand"> {
+function buildSandRouterSpec(id: GrokbotSandRouterId, baseUrl: string): ModelSpec<"grokbot-sand"> {
 	return {
 		id,
 		name: `${id} (routed)`,

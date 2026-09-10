@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Grok Bot Connect streams reject data frames and leftover bytes after the end-stream trailer.
 - Catalog matrix tool smoke rejects `echo ping; exit 1` and relative suffix Read/Write paths that are not the fixture file.
 - Grok Bot native history keeps extension `Shell` customWireName aliases; product collision ownership applies only on product wire.
 - Grok Bot JSON-as-text promotion prefers final text dumps over the same call mirrored in thinking, so Shell/Write is not executed twice.

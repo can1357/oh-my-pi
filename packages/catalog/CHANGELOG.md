@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Grok Bot sand router union and offline seeds share one `GROKBOT_SAND_ROUTER_IDS` roster (no divergent discovery hard-code).
 - Grok Bot `buildModel` always reapplies KDL-owned Sand wire/retry/promote policy over stale cached values so offline rebuilds pick up rule changes.
 - Grok Bot live AvailableModels rows always stamp an empty thinking ladder when non-reasoning; synthetic sand routers stay on the separate `buildSandRouterSpec` path so KDL `reasoning` fills are not gated by a TypeScript router-id list.
 - Grok Bot Gemini/OpenAI native tool-schema projection is owned by KDL `sand-native-tool-schema` (`google` / `strict`) so rows can override without TypeScript class branches.
