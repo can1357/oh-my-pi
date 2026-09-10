@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Command Code `omp usage` reports 5-hour and weekly credit windows plus remaining credits via the alpha billing endpoints.
+
 ### Fixed
 
 - Fixed transient Python HTTP/2 stream resets and HTTP/1.1 chunked response interruptions being treated as terminal errors when forwarded by a proxy ([#11160](https://github.com/can1357/oh-my-pi/pull/11160) by [@cyriusweng](https://github.com/cyriusweng)).

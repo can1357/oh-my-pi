@@ -53,6 +53,7 @@ import { resolveUsedFraction } from "./usage";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./usage/alibaba-token-plan";
 import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
 import { clinePassUsageProvider } from "./usage/cline-pass";
+import { commandcodeRankingStrategy, commandcodeUsageProvider } from "./usage/commandcode";
 import { cursorUsageProvider } from "./usage/cursor";
 import { devinUsageProvider } from "./usage/devin";
 import { googleGeminiCliUsageProvider } from "./usage/gemini";
@@ -669,6 +670,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	ollamaCloudUsageProvider,
 	claudeUsageProvider,
 	clinePassUsageProvider,
+	commandcodeUsageProvider,
 	zaiUsageProvider,
 	umansUsageProvider,
 	opencodeGoUsageProvider,
@@ -1144,6 +1146,7 @@ const DEFAULT_RANKING_STRATEGIES = new Map<Provider, CredentialRankingStrategy>(
 	["alibaba-token-plan", alibabaTokenPlanRankingStrategy],
 	["openai-codex", codexRankingStrategy],
 	["anthropic", claudeRankingStrategy],
+	["commandcode", commandcodeRankingStrategy],
 	["google-antigravity", antigravityRankingStrategy],
 	["kimi-code", kimiRankingStrategy],
 	["zai", zaiRankingStrategy],
