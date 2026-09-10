@@ -9,6 +9,17 @@ use std::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+#[derive(Debug, thiserror::Error)]
+enum BuildError {
+	#[error("{op} {path}: {source}")]
+	Io {
+		op:     &'static str,
+		path:   PathBuf,
+		#[source]
+		source: io::Error,
+	},
+}
+
 const SCHEMA_VERSION: u32 = 2;
 const MAGIC: &[u8; 8] = b"OMPLLCAT";
 const HEADER_LEN: usize = 8 + 4 + 32 + 32 + 32;
@@ -79,12 +90,11 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 	io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-fn read_required(path: &Path) -> Result<Vec<u8>, io::Error> {
-	fs::read(path).map_err(|error| {
-		io::Error::new(
-			error.kind(),
-			format!("cannot read required catalog artifact {}: {error}", path.display()),
-		)
+fn read_required(path: &Path) -> Result<Vec<u8>, BuildError> {
+	fs::read(path).map_err(|source| BuildError::Io {
+		op:   "read",
+		path: path.to_owned(),
+		source,
 	})
 }
 
