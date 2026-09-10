@@ -315,6 +315,76 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		expect(reply.message).toContain("no-such-agent");
 	});
 
+	it("keeps a reply bounded when the agent id is not", async () => {
+		const guest = await joinAsGuest(host.link, "huge-id");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// Quoted into the reply unbounded, a 100,000-character id produced a
+		// 200,031-byte error frame — and the queue admits one oversized entry, so a
+		// large enough one closes the host socket on the relay's payload limit. An
+		// error path exists to be polite; it must not be a disconnect a guest sizes.
+		const huge = `long-agent-${"x".repeat(100_000)}`;
+		guest.socket.send({ t: "agent-cmd", cmd: "kill", agentId: huge } as unknown as CollabFrame);
+		const reply = await guest.nextFrame();
+		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+		expect(Buffer.byteLength(JSON.stringify(reply))).toBeLessThan(1024);
+		// Bounded, and still an answer about *this* agent: nothing caps a real agent
+		// id, so a long one is likelier to be one the guest typed than a short one,
+		// and a reply that disowned it would be both bounded and wrong.
+		expect(reply.message).toContain(`${huge.slice(0, 64)}…`);
+		expect(reply.message).not.toContain(huge);
+		expect(reply.message).not.toContain("unnamed agent");
+	});
+
+	it("answers rather than throwing when the agent id is a nested array", async () => {
+		const guest = await joinAsGuest(host.link, "nested-id");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// Reachable, unlike a value the wire itself rejects: 5,000 levels survive
+		// `JSON.stringify` and `JSON.parse` on the way here, and then throw
+		// `RangeError` out of the interpolation that quotes them, back into the
+		// silent-drop class. 60,000 does not survive, which is why the depth is this.
+		let nested: unknown[] = [];
+		const root = nested;
+		for (let i = 0; i < 5_000; i++) {
+			const next: unknown[] = [];
+			nested.push(next);
+			nested = next;
+		}
+		guest.socket.send({ t: "agent-cmd", cmd: "revive", agentId: root } as unknown as CollabFrame);
+		const reply = await guest.nextFrame();
+		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+		expect(reply.message).toContain("unnamed agent");
+	});
+
+	it("refuses a prompt whose text is not a string, with or without images", async () => {
+		const guest = await joinAsGuest(host.link, "bad-text");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// Without images this already failed, at `promptCustomMessage`'s first
+		// statement. With images nothing rejected it: the number went into a
+		// `TextContent`, was persisted as sent, and threw a turn later inside a
+		// provider serializer at `item.text.toWellFormed()`. Both refuse here now,
+		// identically, and neither reaches the session.
+		const images = [{ type: "image", data: "AAAA", mimeType: "image/png" }];
+		for (const frame of [
+			{ t: "prompt", text: 42 },
+			{ t: "prompt", text: 42, images },
+		]) {
+			guest.socket.send(frame as unknown as CollabFrame);
+			const reply = await guest.nextFrame();
+			if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+			expect(reply.message).toContain("text must be a string");
+		}
+		expect(harness.prompts).toHaveLength(0);
+	});
+
 	it("answers an agent chat whose message is not a string instead of dropping it", async () => {
 		const guest = await joinAsGuest(host.link, "bad-chat");
 		guestCleanups.push(() => guest.socket.close());

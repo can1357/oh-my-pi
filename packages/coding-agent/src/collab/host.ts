@@ -113,6 +113,26 @@ const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fe
  */
 const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
 /**
+ * Longest guest-supplied label this host will put into a frame it sends.
+ *
+ * Not a limit on what an id or a name may be — an agent lookup takes the id whole,
+ * so a longer real one still addresses its agent — only on how much of it a guest
+ * can make the host emit. Unbounded, a reply that quotes one is as large as the
+ * guest chose: 100,000 characters measured 200,031 bytes for an unknown-agent
+ * kill, and the queue admits one oversized entry on an empty queue, so a large
+ * enough label builds a frame past the relay's payload limit and closes the host
+ * socket — a guest-triggered disconnect out of an error path whose whole purpose
+ * is to be polite about a mistake.
+ *
+ * The number is the cap {@link CollabHost.#handleHello} already applied to a peer
+ * name, the other guest-supplied label that reaches a frame; it is shared rather
+ * than repeated so the two cannot drift. Both sites truncate to it rather than
+ * refusing past it: a label over the cap is still the one its sender chose, and a
+ * bound that replaced it with something else would make the reply that quotes it
+ * wrong about which agent or which guest it means.
+ */
+const GUEST_LABEL_MAX = 64;
+/**
  * Outcome of {@link CollabHost.requestGuestUi}. `answered` carries the guest's
  * response (an `undefined` value is a genuine guest cancel); `unavailable`
  * means the collab channel went away (teardown, relay drop) or the request was
@@ -478,7 +498,7 @@ export class CollabHost {
 		}
 		// A name that is not a string is a name this host cannot use, which is what
 		// a blank one already means: the guest gets the generated one either way.
-		const cleanName = (typeof name === "string" ? name.trim().slice(0, 64) : "") || `guest-${fromPeer}`;
+		const cleanName = (typeof name === "string" ? name.trim().slice(0, GUEST_LABEL_MAX) : "") || `guest-${fromPeer}`;
 		const canWrite = this.#verifyWriteToken(writeToken);
 		// Registered before the snapshot is built, because `#buildState` reads the
 		// roster and the welcome has to show the joiner itself. Held against the
@@ -629,19 +649,24 @@ export class CollabHost {
 	 * declared type is the sender's claim, and this one was spread, which a truthy
 	 * non-iterable throws out of.
 	 *
-	 * `text` stays typed because nothing here throws on it, which is not the same as
-	 * it being checked. Where a non-string actually goes: with no usable images it
-	 * becomes the content whole, and `promptCustomMessage` reads that content in its
-	 * first statement and rejects — before any session insertion — so the guest gets
-	 * the `prompt failed` reply the catch below sends. With images it is placed in a
-	 * `TextContent` instead, where that same statement stringifies it through `join`
-	 * and it is stored as sent. Neither loses the frame; the second trusts the value
-	 * exactly as much as the array's own elements are trusted, which is not at all.
+	 * `text` is checked rather than merely typed, because the two branches below
+	 * failed differently and one of them failed late. Without images a non-string
+	 * becomes the content whole, and `promptCustomMessage` rejects it in its first
+	 * statement, before any session insertion, so the catch below replies. With
+	 * images it goes into a `TextContent` instead, where nothing rejects it: `join`
+	 * stringifies a copy and the original is persisted as sent, so the entry is
+	 * invalid session state and a later turn throws on `item.text.toWellFormed()`
+	 * inside a provider serializer — a different subsystem, minutes away, with
+	 * nothing left to tell the guest. Refused here so neither branch can.
 	 */
-	#handlePrompt(text: string, images: unknown, fromPeer: number): void {
+	#handlePrompt(text: unknown, images: unknown, fromPeer: number): void {
 		const peer = this.#peers.get(fromPeer);
 		if (!peer?.canWrite) {
 			this.#rejectReadOnly("prompting", fromPeer);
+			return;
+		}
+		if (typeof text !== "string") {
+			this.#socket?.send({ t: "error", message: "prompt failed: message text must be a string" }, fromPeer);
 			return;
 		}
 		const name = peer.name;
@@ -825,30 +850,47 @@ export class CollabHost {
 	}
 
 	/**
-	 * `cmd` and `text` are `unknown` for the reason given on {@link #verifyWriteToken}.
-	 * `agentId` stays typed: it only reaches a `Map` lookup and a template, both total
-	 * for anything JSON can carry. Neither that nor the `switch` throws — the hazard
-	 * here is the opposite one, a value that matches nothing and is answered by
-	 * nothing, which a guest cannot tell apart from a frame the queue refused.
+	 * All three fields are `unknown` for the reason given on {@link #verifyWriteToken}.
+	 * Two hazards live here, and they pull in opposite directions: a value that
+	 * matches nothing and is answered by nothing, which a guest cannot tell apart
+	 * from a frame the queue refused; and a value quoted back into the answer, which
+	 * is how an error path polite enough to reply became one a guest can size.
 	 */
-	#handleAgentCmd(cmd: unknown, agentId: string, text: unknown, fromPeer: number): void {
+	#handleAgentCmd(cmd: unknown, agentId: unknown, text: unknown, fromPeer: number): void {
 		if (!this.#peers.get(fromPeer)?.canWrite) {
 			this.#rejectReadOnly("agent control", fromPeer);
 			return;
 		}
+		// Two different uses, so two different values. The lookup takes the id whole,
+		// because truncating it would let a long id address the agent that owns its
+		// prefix. The quoting is bounded by {@link GUEST_LABEL_MAX}, because every
+		// reply below embeds it and a guest chooses its length; and it is only ever a
+		// string, because interpolating a nested array throws `RangeError` out of the
+		// reply — measured reachable, since a 5,000-deep one survives `JSON.stringify`
+		// and `JSON.parse` on the way here while 60,000 does not.
+		//
+		// Bounded two ways, because the reasons differ and only one of them is
+		// anonymity. An id that is absent or not a string names nothing, and saying so
+		// is accurate. A long one names something — the lookup just used it — so it is
+		// truncated rather than disowned: nothing above the cap enforces that ids stay
+		// short, and a long id is likelier to be one a guest actually typed, which is
+		// exactly when a reply has to say which agent failed.
+		const id = typeof agentId === "string" ? agentId : "";
+		const quoted =
+			id.length === 0 ? "(unnamed agent)" : id.length <= GUEST_LABEL_MAX ? id : `${id.slice(0, GUEST_LABEL_MAX)}…`;
 		// Advisor refs are excluded from snapshots, but reject control by id defensively:
 		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
-		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
-			this.#socket?.send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
+		if (AgentRegistry.global().get(id)?.kind === "advisor") {
+			this.#socket?.send({ t: "error", message: `agent ${quoted}: advisor transcripts are read-only` }, fromPeer);
 			return;
 		}
 		// Best-effort and room-scoped for the same reason as a failed prompt: agent
 		// work has no bound, and past a reconnect this id is somebody else's.
 		const stillTheAsker = this.#socket?.bestEffortAddressee(fromPeer);
 		const fail = (err: unknown) => {
-			logger.warn("collab agent-cmd failed", { cmd, agentId, error: String(err) });
+			logger.warn("collab agent-cmd failed", { cmd, agentId: quoted, error: String(err) });
 			if (!stillTheAsker?.()) return;
-			this.#socket?.send({ t: "error", message: `agent ${agentId}: ${String(err)}` }, fromPeer);
+			this.#socket?.send({ t: "error", message: `agent ${quoted}: ${String(err)}` }, fromPeer);
 		};
 		switch (cmd) {
 			case "chat": {
@@ -858,33 +900,33 @@ export class CollabHost {
 				// means: the guest gets the same reply either way.
 				const trimmed = typeof text === "string" ? text.trim() : "";
 				if (!trimmed) {
-					this.#socket?.send({ t: "error", message: `agent ${agentId}: empty chat message` }, fromPeer);
+					this.#socket?.send({ t: "error", message: `agent ${quoted}: empty chat message` }, fromPeer);
 					return;
 				}
 				// Mirrors the hub's #submitChatMessage: revive if parked, steer if mid-turn.
 				AgentLifecycleManager.global()
-					.ensureLive(agentId)
+					.ensureLive(id)
 					.then(session => session.prompt(trimmed, { streamingBehavior: "steer" }))
 					.catch(fail);
 				break;
 			}
 			case "kill": {
 				const kill = async () => {
-					const ref = AgentRegistry.global().get(agentId);
+					const ref = AgentRegistry.global().get(id);
 					// Throw, not return: `fail` runs off the rejection below, so returning
 					// left an unknown id with no reply at all — alone among the three,
 					// since `chat` and `revive` both get one out of `ensureLive`.
-					if (!ref) throw new Error(`unknown agent "${agentId}"`);
+					if (!ref) throw new Error(`unknown agent "${quoted}"`);
 					if (ref.status === "running" && ref.session) {
 						await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 					}
-					await AgentLifecycleManager.global().release(agentId, ref, { tombstone: true });
+					await AgentLifecycleManager.global().release(id, ref, { tombstone: true });
 				};
 				kill().catch(fail);
 				break;
 			}
 			case "revive":
-				AgentLifecycleManager.global().ensureLive(agentId).catch(fail);
+				AgentLifecycleManager.global().ensureLive(id).catch(fail);
 				break;
 			default:
 				// Without this a `cmd` matching no case fell out of the switch and
@@ -892,7 +934,7 @@ export class CollabHost {
 				// knows but cannot carry out. The value is not echoed back — the guest
 				// sent it, and it is unvalidated enough that repeating it is the sender
 				// choosing what the host emits.
-				this.#socket?.send({ t: "error", message: `agent ${agentId}: unknown agent command` }, fromPeer);
+				this.#socket?.send({ t: "error", message: `agent ${quoted}: unknown agent command` }, fromPeer);
 				break;
 		}
 	}
