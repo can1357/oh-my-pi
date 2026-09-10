@@ -251,7 +251,9 @@ describe("config CLI schema coverage", () => {
 
 		expect(() => parseConfigArgs(["config", "get", "compaction.enabled", "--if-absent"])).toThrow("process.exit");
 		expect(exitSpy).toHaveBeenCalledWith(1);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("--if-absent is only valid for `omp config set`"));
+		expect(console.error).toHaveBeenCalledWith(
+			expect.stringContaining("--if-absent is only valid for `omp config set`"),
+		);
 	});
 
 	it("keeps ordinary config set unconditional with its existing JSON shape", async () => {
