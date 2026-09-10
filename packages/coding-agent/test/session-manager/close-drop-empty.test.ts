@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { isEnoent, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -10,6 +12,23 @@ async function fileExists(p: string): Promise<boolean> {
 	} catch (err) {
 		if (isEnoent(err)) return false;
 		throw err;
+	}
+}
+
+class SignalingDeleteStorage extends FileSessionStorage {
+	#attemptPath: string;
+
+	constructor(attemptPath: string) {
+		super();
+		this.#attemptPath = attemptPath;
+	}
+
+	override deleteSessionWithArtifactsIf(
+		sessionPath: string,
+		shouldDelete: (content: string) => boolean,
+	): Promise<boolean> {
+		fs.writeFileSync(this.#attemptPath, "");
+		return super.deleteSessionWithArtifactsIf(sessionPath, shouldDelete);
 	}
 }
 
@@ -99,6 +118,57 @@ describe("SessionManager close() drops empty metadata-only sessions", () => {
 		await termA.close();
 
 		expect(await fileExists(sessionFile)).toBe(true);
+	});
+
+	it("serializes a concurrent append before the close-time draft GC decision", async () => {
+		using tempDir = TempDir.createSync("@pi-session-close-lock-cross-writer-");
+		const deleteAttemptPath = path.join(tempDir.path(), "delete-attempted");
+		const termAStorage = new SignalingDeleteStorage(deleteAttemptPath);
+		const termA = SessionManager.create(tempDir.path(), tempDir.path(), termAStorage);
+		termA.appendModelChange("hai-proxy/anthropic--claude-4.6-opus");
+		await termA.saveDraft("draft in terminal A");
+
+		const sessionFile = termA.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persistent session file");
+
+		const termB = SessionManager.create(tempDir.path(), tempDir.path());
+		await termB.setSessionFile(sessionFile);
+		expect(await termB.consumeDraft()).toBe("draft in terminal A");
+
+		const appender = Bun.spawn(
+			[
+				process.execPath,
+				path.join(import.meta.dir, "fixtures/draft-gc-lock-appender.ts"),
+				sessionFile,
+				deleteAttemptPath,
+			],
+			{
+				cwd: path.resolve(import.meta.dir, "../../../.."),
+				env: { HOME: process.env.HOME ?? "", PATH: process.env.PATH ?? "" },
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "ignore",
+			},
+		);
+		try {
+			const readiness = appender.stdout.getReader();
+			const ready = await readiness.read();
+			readiness.releaseLock();
+			expect(new TextDecoder().decode(ready.value)).toContain("ready");
+
+			// The child owns the session lock until A reaches the competing
+			// inspect-and-delete operation, then appends before handing it over.
+			await termA.close();
+			expect(await appender.exited).toBe(0);
+			expect(await fileExists(sessionFile)).toBe(true);
+			expect(await Bun.file(sessionFile).text()).toContain("real question from terminal B");
+			await termB.close();
+		} finally {
+			if (appender.exitCode === null) {
+				appender.kill();
+				await appender.exited;
+			}
+		}
 	});
 
 	// A draft still on disk at close time is the whole reason the session

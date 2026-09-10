@@ -64,6 +64,7 @@ import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo 
 import {
 	loadEntriesFromFile,
 	loadSessionFile,
+	parseSessionContent,
 	resolveBlobRefsInEntries,
 	type SessionLoadResult,
 	visitEntriesFromFile,
@@ -986,6 +987,28 @@ export class SessionManager {
 			return;
 		}
 
+		// The first durable entry after draft consumption races the old manager's
+		// close-time GC. Serialize that one transition with the GC; once any
+		// durable entry exists, later appends cannot satisfy its delete predicate.
+		if (
+			this.#storage.withSessionFileLockSync &&
+			this.#draftOnlySessionCleanupArmed &&
+			!isDraftOnlyMetadataEntry(entry) &&
+			this.#entries.every(candidate => candidate === entry || isDraftOnlyMetadataEntry(candidate))
+		) {
+			try {
+				this.#storage.withSessionFileLockSync(this.#sessionFile, () => this.#appendToCurrentSessionFile(entry));
+			} catch (err) {
+				this.#fileIsCurrent = false;
+				this.#rewriteRequired = true;
+				this.#noteDiskFailure(err);
+			}
+			return;
+		}
+		this.#appendToCurrentSessionFile(entry);
+	}
+
+	#appendToCurrentSessionFile(entry: SessionEntry): void {
 		// Atomic replacement / move window: do not open a fresh append writer that
 		// a Windows EPERM replace could detach from the current JSONL path.
 		// - moveTo: write a full body to the live relocation path (source pre-
@@ -1853,20 +1876,21 @@ export class SessionManager {
 			this.#draftOnlySessionCleanupArmed = false;
 			return;
 		}
-		// The in-memory view can be stale: another process may have resumed this
-		// session, consumed the draft (the very interlock this GC relies on), and
-		// appended a real conversation since this manager last read the file. Its
-		// absence is ambiguous by design, so re-read the file we are about to
-		// destroy and keep it whenever the on-disk entries are no longer draft-only
-		// metadata — a clean close must never delete another writer's transcript.
-		const onDisk = await loadSessionFile(sessionFile, this.#storage);
-		if (onDisk.invalidHeader || !(onDisk.entries.slice(1) as SessionEntry[]).every(isDraftOnlyMetadataEntry)) {
-			await this.#clearDraftOnlySessionMarker();
-			this.#draftOnlySessionCleanupArmed = false;
-			return;
-		}
+		// Another process can consume the draft and append a real conversation
+		// while this manager still has a draft-only in-memory view. Backends that
+		// cannot make the final content check and deletion one atomic operation
+		// must skip this opportunistic cleanup rather than risk data loss.
+		if (!this.#storage.deleteSessionWithArtifactsIf) return;
 		try {
-			await this.#storage.deleteSessionWithArtifacts(sessionFile);
+			const deleted = await this.#storage.deleteSessionWithArtifactsIf(sessionFile, content => {
+				const onDisk = parseSessionContent(content);
+				return !onDisk.invalidHeader && (onDisk.entries.slice(1) as SessionEntry[]).every(isDraftOnlyMetadataEntry);
+			});
+			if (!deleted) {
+				await this.#clearDraftOnlySessionMarker();
+				this.#draftOnlySessionCleanupArmed = false;
+				return;
+			}
 			this.#fileIsCurrent = false;
 			this.#forceFileCreation = false;
 			this.#hasTitleSlot = false;
