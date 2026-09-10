@@ -44,6 +44,7 @@ omp config get theme.dark       # one value
 omp config get theme.dark --json
 omp config set compaction.enabled false
 omp config set defaultThinkingLevel medium
+omp config set defaultThinkingLevel medium --if-absent --json  # apply a global default only once
 omp config reset steeringMode   # restore a key to its schema default
 omp config path                 # print the active agent directory
 ```
@@ -62,12 +63,12 @@ This only controls the startup splash animation. It does not rerun setup or chan
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `omp config list`              | Print every setting grouped by tab, with its current value and type. `--json` emits an object keyed by setting path with `{ value, type, description }`. Configured credential fields are masked as `********` in human output; in JSON their `value` is omitted and `redacted: true` is emitted. |
 | `omp config get <key>`         | Print the effective value of one key. Unknown keys exit non-zero. `--json` emits `{ key, value, type, description }`. This is an explicit single-key request, so credential values are returned unmasked.                                                                                         |
-| `omp config set <key> <value>` | Parse `<value>` against the key's schema type and write it to the global main YAML file.                                                                                                                                                                                                          |
+| `omp config set <key> <value> [--if-absent]` | Parse `<value>` against the key's schema type and write it to the global main YAML file. With `--if-absent`, write only when the raw global key is absent: explicit `false`, `""`, and `null` values remain present, while project settings, CLI overlays, and runtime overrides are ignored. Guarded JSON output is `{ key, value, applied }`, where `value` is the final raw global value and `applied` reports whether this invocation wrote it. |
 | `omp config reset <key>`       | Write the key's schema **default** back to the global config (this persists the default, it does not delete the key).                                                                                                                                                                             |
 | `omp config path`              | Print the active agent directory (honors `PI_CODING_AGENT_DIR`).                                                                                                                                                                                                                                  |
 | `omp config init-xdg`          | On Linux and macOS, create the `omp` directories under the effective XDG data, state, and cache homes. It does not move existing files or set the XDG environment variables. Other platforms exit non-zero.                                                                                       |
 
-`omp config` with no subcommand, `--help`, or `-h` lists settings. The `--json` flag is accepted by `list`, `get`, `set`, and `reset`.
+`omp config` with no subcommand, `--help`, or `-h` lists settings. The `--json` flag is accepted by `list`, `get`, `set`, and `reset`; `--if-absent` is available only on `set`.
 
 ### Value parsing
 
