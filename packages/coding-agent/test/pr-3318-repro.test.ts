@@ -18,6 +18,7 @@ describe("PR 3318 repro", () => {
 			metadata: { email: "", accountId: "", projectId: "" },
 		};
 		const text = await buildUsageReportText({
+			settings: { get: () => undefined },
 			session: {
 				model: undefined,
 				fetchUsageReports: async () => [report],

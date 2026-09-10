@@ -1,6 +1,7 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
+import { resolveUsageModelSelectors } from "../../utils/usage-display";
 import type { SlashCommandRuntime } from "../types";
 import { reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatDuration, formatProviderName, renderAsciiBar } from "./format";
@@ -165,7 +166,11 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 						runtime.session.sessionId,
 					)
 				: undefined;
-			const usageModelSelectors = provider.getUsageReportingModelSelectors?.(reports) ?? [];
+			const usageModelSelectors = resolveUsageModelSelectors(
+				reports,
+				runtime.settings,
+				next => provider.getUsageReportingModelSelectors?.(next) ?? [],
+			);
 			return renderUsageReports(
 				reports,
 				Date.now(),
