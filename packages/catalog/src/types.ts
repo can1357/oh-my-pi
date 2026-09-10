@@ -1055,6 +1055,8 @@ export type ModelTokenizer =
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
 	id: string;
+	/** Optional version-explicit picker label; selectors and requests still use id. */
+	displayId?: string;
 	/**
 	 * Structured model identity resolved by the compat engine: vendor lineage
 	 * class, product family, and revision. Baked into models.json rows and

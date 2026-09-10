@@ -5,6 +5,8 @@ class "deepseek" {
     family "r1" glob="*deepseek-r1*"
     family "reasoner" glob="*deepseek-reasoner*"
     family "flash" glob="*deepseek*v4*flash*"
+    // V4.1 Flash's canonical API id omits the version segment.
+    family "flash" glob="deepseek-flash"
     family "pro" glob="*deepseek*v4*pro*"
     // Bare V4 chat/reasoner ids without a flash/pro segment.
     family "v4" glob="*deepseek-v4*"

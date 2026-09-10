@@ -41,6 +41,7 @@ import {
 /** One selectable row. `selector` is a canonical model key or host-specific virtual key. */
 export interface ModelBrowserItem {
 	provider: string;
+	/** Picker label, which can differ from the canonical model id in selector. */
 	id: string;
 	model: Model;
 	selector: string;
@@ -124,7 +125,7 @@ export function resolveRoleAssignments(
 export function buildBrowserItems(models: ReadonlyArray<Model>): ModelBrowserItem[] {
 	return models.map(model => ({
 		provider: model.provider,
-		id: model.id,
+		id: model.displayId ?? model.id,
 		model,
 		selector: `${model.provider}/${model.id}`,
 	}));

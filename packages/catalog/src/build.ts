@@ -37,6 +37,7 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * `context-promotion-target` fills only when the spec left it unset.
  */
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
+	if (typeof catalog.displayId === "string") model.displayId = catalog.displayId;
 	const serviceTierCost = objectPayload(catalog.serviceTierCost);
 	if (serviceTierCost !== undefined) {
 		const flex = numberField(serviceTierCost, "flex");

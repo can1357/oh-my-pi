@@ -200,11 +200,11 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
 			expect(assistant?.reasoning_content).toBe("");
 		});
 
-		it("recovers reasoning_content from non-empty thinking block with signature", () => {
+		it.each(["deepseek-v4-flash", "deepseek-flash"])("recovers reasoning_content for %s tool-call replay", id => {
 			const model = deepseekModel({
 				provider: "opencode-go",
 				baseUrl: "https://opencode.ai/zen/go/v1",
-				id: "deepseek-v4-flash",
+				id,
 			});
 			const compat = model.compat;
 			const msg: AssistantMessage = {
