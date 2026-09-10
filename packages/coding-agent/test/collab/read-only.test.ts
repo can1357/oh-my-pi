@@ -371,7 +371,7 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		const welcome = await guest.nextFrame();
 		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
 
-		// Quoted into the reply unbounded, a 100,000-character id produced a
+		// Quoted into the reply unbounded, the 100,011-character id below produced a
 		// 200,031-byte error frame — and the queue admits one oversized entry, so a
 		// large enough one closes the host socket on the relay's payload limit. An
 		// error path exists to be polite; it must not be a disconnect a guest sizes.
@@ -631,6 +631,30 @@ describe("collab frames a guest can send that the host must still answer", () =>
 			uri: "openai://file-1",
 			expiresAt: 1,
 		});
+	});
+
+	it("refuses an image whose expiry is a number the wire can produce but JSON cannot carry back", async () => {
+		const guest = await joinAsGuest(host.link, "infinite-expiry");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// `JSON.parse("1e999")` is `Infinity`, which is `typeof "number"` and passed
+		// the bare check this rebuild used for `expiresAt`. It then serializes back
+		// out as `null`, so the entry the rebuild exists to keep well-formed would be
+		// persisted with a null where the type declares a number.
+		//
+		// Sent as raw JSON because `CollabSocket.send` stringifies `Infinity` to
+		// `null` on the way out, so a frame built through it can only ever deliver a
+		// value the old check already caught. The wire is the only place this arrives
+		// as a number at all.
+		const raw =
+			'{"t":"prompt","text":"carry me","images":[{"type":"image","data":"AAAA","mimeType":"image/png","providerFile":{"provider":"openai","expiresAt":1e999}}]}';
+		await sendRawFrame(raw);
+		const reply = await guest.nextFrame();
+		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+		expect(reply.message).toContain("every image must carry string data and mimeType");
+		expect(harness.prompts).toHaveLength(0);
 	});
 
 	it("strips an image property it does not know instead of carrying it into the session", async () => {

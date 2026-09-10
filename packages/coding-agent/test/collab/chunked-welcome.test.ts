@@ -275,12 +275,12 @@ describe("collab chunked welcome (#3144)", () => {
 		// sit inside the one catch — so rendering it unsafely throws there instead and
 		// `firstWelcome` is never settled.
 		//
-		// The oracle is which reason settles the join, not how long it takes to. Every
-		// budget tried here was a race in disguise: a 500 ms timer against a ~317 ms
-		// path, then 500 event-loop turns, which still lost 2 runs in 6. Closing the
+		// The oracle is which reason settles the join, not how long it takes to. Any
+		// budget — wall clock or event-loop turns — is a race, because it has to
+		// out-wait the slowest legitimate run and nothing bounds that. Closing the
 		// socket rejects a still-pending join with the close reason, so the two
-		// outcomes are distinguishable by value — the write path settles it first, or
-		// the close does. No clock and no turn count decides it.
+		// outcomes are distinguishable by value: either the write path settled it
+		// first or the close did.
 		const failure = {
 			toString() {
 				throw new Error("cannot render me");

@@ -119,7 +119,7 @@ const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
  * Not a limit on what an id or a name may be — an agent lookup takes the id whole,
  * so a longer real one still addresses its agent — only on how much of it a guest
  * can make the host emit. Unbounded, a reply that quotes one is as large as the
- * guest chose: 100,000 characters measured 200,031 bytes for an unknown-agent
+ * guest chose: a 100,011-character one measured 200,031 bytes for an unknown-agent
  * kill, and the queue admits one oversized entry on an empty queue, so a large
  * enough label builds a frame past the relay's payload limit and closes the host
  * socket — a guest-triggered disconnect out of an error path whose whole purpose
@@ -210,7 +210,14 @@ function toProviderFileReference(value: unknown): ProviderFileReference | null {
 	if (!PROVIDER_FILE_PROVIDERS.has(provider as string)) return null;
 	if (id !== undefined && typeof id !== "string") return null;
 	if (uri !== undefined && typeof uri !== "string") return null;
-	if (expiresAt !== undefined && typeof expiresAt !== "number") return null;
+	// Finite, not merely a number: `JSON.parse("1e999")` is `Infinity`, which is
+	// `typeof "number"` and passes a bare check. It then serializes back out as
+	// `null`, so the entry this rebuild exists to keep well-formed would be
+	// persisted with a null where the type declares a number. `NaN` the same.
+	// Finiteness rather than a safe integer, unlike `fromByte`: nothing indexes with
+	// this and the declared contract is only `number`, so the property that matters
+	// is that it survives a round trip.
+	if (expiresAt !== undefined && (typeof expiresAt !== "number" || !Number.isFinite(expiresAt))) return null;
 	const reference: ProviderFileReference = { provider: provider as ProviderFileReference["provider"] };
 	if (id !== undefined) reference.id = id;
 	if (uri !== undefined) reference.uri = uri;
@@ -1129,8 +1136,8 @@ export class CollabHost {
 		// The read is asynchronous, so the peer can leave — or the whole room can be
 		// recreated — before there is anything to reply with.
 		const stillTheAsker = this.#socket?.addressee(fromPeer);
-		// The one place a `transcript` frame is built, so the rule #sendError applies
-		// to error replies applies here too: this frame carries an error string, and
+		// The one place a `transcript` frame is built, and the rule #sendError enforces
+		// for error replies holds here too: this frame carries an error string, and
 		// #sendError cannot reach it because it is not an error frame.
 		//
 		// No *unbounded* input reaches this bound today, and it is deliberately kept
