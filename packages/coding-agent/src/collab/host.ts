@@ -11,7 +11,7 @@
 
 import { timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, ProviderFileReference, TextContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
@@ -144,17 +144,52 @@ const GUEST_LABEL_MAX = 64;
  * composed in another module, for its own callers, so the only place that can
  * bound it is the last one that touches it.
  *
- * 512 because the longest message this host can compose from its own text plus a
- * fully-sized {@link GUEST_LABEL_MAX} label measures 317 bytes, so nothing the
- * host writes is ever cut and only guest-supplied padding is.
+ * 512 UTF-16 code units, which is what `slice` counts — not bytes. Astral text
+ * costs up to four bytes per two units, so the ceiling is nearer 2 KiB in UTF-8
+ * than 512; still three orders of magnitude inside the relay's payload limit,
+ * which is the property that matters, but the unit is worth stating because the
+ * budget elsewhere in this feature is named in bytes and these are not the same
+ * number. A split surrogate at the cut is not a corruption risk: `JSON.stringify`
+ * escapes a lone surrogate, so the frame stays valid JSON.
+ *
+ * 512 because the longest message this host composes from its own text plus a
+ * fully-sized {@link GUEST_LABEL_MAX} label measures 313 units. What gets cut is
+ * therefore never this host's own wording — but it is not only guest padding
+ * either: an error raised downstream can carry a guest value into the middle of
+ * its own prose, and truncating that loses the tail of a real diagnostic.
  */
 const ERROR_MESSAGE_MAX = 512;
 
-/** Whether a value off the wire is image content this host can put into a message. */
+const IMAGE_DETAIL_VALUES = new Set(["auto", "low", "high", "original"]);
+const PROVIDER_FILE_PROVIDERS = new Set(["openai", "anthropic", "google"]);
+
+/**
+ * Whether a value off the wire is image content this host can put into a message.
+ *
+ * Every field {@link ImageContent} declares, not only the required ones. Extra
+ * properties are tolerated deliberately — a newer guest may carry fields this host
+ * has no opinion about, and they do not reach a serializer — but a declared field
+ * present with the wrong type does reach one, which is the whole defect.
+ */
 function isImageContent(value: unknown): value is ImageContent {
 	if (typeof value !== "object" || value === null) return false;
-	const candidate = value as { type?: unknown; data?: unknown; mimeType?: unknown };
-	return candidate.type === "image" && typeof candidate.data === "string" && typeof candidate.mimeType === "string";
+	const candidate = value as Record<string, unknown>;
+	if (candidate.type !== "image") return false;
+	if (typeof candidate.data !== "string" || typeof candidate.mimeType !== "string") return false;
+	if (candidate.detail !== undefined && !IMAGE_DETAIL_VALUES.has(candidate.detail as string)) return false;
+	if (candidate.url !== undefined && typeof candidate.url !== "string") return false;
+	if (candidate.providerFile !== undefined && !isProviderFileReference(candidate.providerFile)) return false;
+	return true;
+}
+
+function isProviderFileReference(value: unknown): value is ProviderFileReference {
+	if (typeof value !== "object" || value === null) return false;
+	const candidate = value as Record<string, unknown>;
+	if (!PROVIDER_FILE_PROVIDERS.has(candidate.provider as string)) return false;
+	if (candidate.id !== undefined && typeof candidate.id !== "string") return false;
+	if (candidate.uri !== undefined && typeof candidate.uri !== "string") return false;
+	if (candidate.expiresAt !== undefined && typeof candidate.expiresAt !== "number") return false;
+	return true;
 }
 /**
  * Outcome of {@link CollabHost.requestGuestUi}. `answered` carries the guest's
@@ -519,6 +554,21 @@ export class CollabHost {
 	}
 
 	/**
+	 * An error someone else raised, rendered for quoting.
+	 *
+	 * The argument on {@link #sendError} is about the error text, not about the
+	 * error frame, so it holds for every consumer of that text and not just the
+	 * reply: `ensureLive` embeds the id it was handed, twice, and a log line takes
+	 * the same 200 KB a reply would. Bounded once, here, so a caller cannot bound
+	 * one consumer and forget the other — which is exactly what happened when only
+	 * the reply was fixed.
+	 */
+	#reason(err: unknown): string {
+		const text = String(err);
+		return text.length <= ERROR_MESSAGE_MAX ? text : `${text.slice(0, ERROR_MESSAGE_MAX)}…`;
+	}
+
+	/**
 	 * A value of unknown provenance, reduced to something safe to put in a frame or
 	 * a log line: bounded in length, and never one whose own stringification can
 	 * throw — a 5,000-deep array reaches this handler and `RangeError`s out of a
@@ -545,9 +595,11 @@ export class CollabHost {
 	 * Every field here is `unknown` for the reason given on {@link #verifyWriteToken}:
 	 * the declared protocol types describe what a well-behaved guest sends, and this
 	 * is the boundary where that stops being a guarantee. `proto` needs no narrowing
-	 * — a non-number is never equal to {@link COLLAB_PROTO}, so it takes the mismatch
-	 * path and is reported through `String`, which is total for anything JSON can
-	 * carry. `name` does: `.trim()` throws on a non-string, including `null`.
+	 * to reach the right branch — a non-number is never equal to {@link COLLAB_PROTO},
+	 * so it takes the mismatch path — but it does need one to be quoted back, which
+	 * is why the reply runs it through {@link #label} rather than `String`: the value
+	 * is guest-sized, and a nested array throws out of a template. `name` needs one
+	 * to be used at all: `.trim()` throws on a non-string, including `null`.
 	 */
 	#handleHello(name: unknown, proto: unknown, writeToken: unknown, fromPeer: number): void {
 		if (proto !== COLLAB_PROTO) {
@@ -775,9 +827,9 @@ export class CollabHost {
 				{ streamingBehavior: "steer", queueChipText: text },
 			)
 			.catch(err => {
-				logger.warn("collab guest prompt failed", { error: String(err) });
+				logger.warn("collab guest prompt failed", { error: this.#reason(err) });
 				if (stillTheAsker?.()) {
-					this.#sendError(`prompt failed: ${String(err)}`, fromPeer);
+					this.#sendError(`prompt failed: ${this.#reason(err)}`, fromPeer);
 				}
 			});
 	}
@@ -792,7 +844,7 @@ export class CollabHost {
 		void this.#ctx.session
 			.abort({ reason: USER_INTERRUPT_LABEL })
 			.then(() => this.#ctx.session.emitNotice("info", `${name} interrupted`, "collab"))
-			.catch(err => logger.warn("collab guest abort failed", { error: String(err) }));
+			.catch(err => logger.warn("collab guest abort failed", { error: this.#reason(err) }));
 	}
 
 	/**
@@ -961,9 +1013,9 @@ export class CollabHost {
 		// work has no bound, and past a reconnect this id is somebody else's.
 		const stillTheAsker = this.#socket?.bestEffortAddressee(fromPeer);
 		const fail = (err: unknown) => {
-			logger.warn("collab agent-cmd failed", { cmd, agentId: quoted, error: String(err) });
+			logger.warn("collab agent-cmd failed", { cmd, agentId: quoted, error: this.#reason(err) });
 			if (!stillTheAsker?.()) return;
-			this.#sendError(`agent ${quoted}: ${String(err)}`, fromPeer);
+			this.#sendError(`agent ${quoted}: ${this.#reason(err)}`, fromPeer);
 		};
 		switch (cmd) {
 			case "chat": {
@@ -1020,8 +1072,15 @@ export class CollabHost {
 		// character `reqId` measured a 100,051-byte reply. Narrowed rather than
 		// truncated: neither is a label, and a correlation id the host altered would
 		// match nothing at the other end.
-		if (!Number.isFinite(reqId) || !Number.isFinite(fromByte) || (fromByte as number) < 0) {
-			this.#sendError("fetch-transcript needs a numeric reqId and a non-negative fromByte", fromPeer);
+		// Safe integers, not merely finite: `fromByte` is a byte offset handed to
+		// `read`, and `reqId` is matched by identity at the other end. `Number.isFinite`
+		// admits -1, 0.5 and 2 ** 53, none of which is either of those things.
+		if (!Number.isSafeInteger(reqId) || (reqId as number) < 0) {
+			this.#sendError("fetch-transcript needs a non-negative integer reqId", fromPeer);
+			return;
+		}
+		if (!Number.isSafeInteger(fromByte) || (fromByte as number) < 0) {
+			this.#sendError("fetch-transcript needs a non-negative integer fromByte", fromPeer);
 			return;
 		}
 		return this.#fetchTranscript(reqId as number, agentId, fromByte as number, fromPeer);
@@ -1031,9 +1090,25 @@ export class CollabHost {
 		// The read is asynchronous, so the peer can leave — or the whole room can be
 		// recreated — before there is anything to reply with.
 		const stillTheAsker = this.#socket?.addressee(fromPeer);
+		// The one place a `transcript` frame is built, so the same rule #sendError
+		// applies to error replies applies here: this frame carries an error string
+		// too, and #sendError cannot reach it because it is not an error frame.
+		//
+		// No input reaches this bound today, and it is deliberately kept anyway. The
+		// only dynamic error here comes from `fs` and quotes a host-owned path, and
+		// #reason has already capped it by the time it arrives, so nothing a guest
+		// can send makes this slice fire — there is no test that can fail if it is
+		// deleted, and deleting it will therefore look correct. It is structural: the
+		// premise of this design is that whatever last touches a frame bounds it, so
+		// that a caller composing a new message somewhere else cannot reintroduce the
+		// defect. Dropping it because today's one error happens to be host-owned is
+		// the reasoning that cost this branch three rounds — bound the ingredients,
+		// trust the current callers, meet a new ingredient.
 		const reply = (text: string, newSize: number, error?: string) => {
 			if (!stillTheAsker?.()) return;
-			this.#socket?.send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
+			const bounded =
+				error === undefined || error.length <= ERROR_MESSAGE_MAX ? error : `${error.slice(0, ERROR_MESSAGE_MAX)}…`;
+			this.#socket?.send({ t: "transcript", reqId, text, newSize, error: bounded }, fromPeer);
 		};
 		const file = AgentRegistry.global().get(typeof agentId === "string" ? agentId : "")?.sessionFile;
 		if (!file) {
@@ -1068,8 +1143,8 @@ export class CollabHost {
 			}
 			reply(slice.toString("utf-8"), reachedEof ? stat.size : fromByte + slice.byteLength);
 		} catch (err) {
-			logger.debug("collab transcript read failed", { agentId: this.#label(agentId), error: String(err) });
-			reply("", fromByte, String(err));
+			logger.debug("collab transcript read failed", { agentId: this.#label(agentId), error: this.#reason(err) });
+			reply("", fromByte, this.#reason(err));
 		}
 	}
 
