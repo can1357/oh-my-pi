@@ -443,6 +443,39 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
 	});
 
+	it("blocks a payload-only 413 with no context window when a usable method is configured but reclaims nothing (#11482)", async () => {
+		// `shake` is statically usable for reason "overflow" (unlike `handoff`),
+		// so it passes `hasUsableCompactionMethod` and `runRecoveryCompactionWithRollback`
+		// is attempted. With no seeded heavy tool output there is nothing to elide,
+		// so shake reclaims 0 tokens, the method list is exhausted, and the
+		// underlying `runAutoCompaction` returns a plain no-op. Without converting
+		// that no-progress outcome back into the payload dead end, the failed turn
+		// would be silently restored with neither a notice nor a block, letting
+		// the next auto-continue resubmit the same oversized history.
+		await createSession(null, undefined, { extraSettings: { "compaction.methodOrder": ["shake"] } });
+		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+
+		const assistantMsg = payloadRejectionAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
+		const checkResults = await Promise.all(
+			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
+		);
+		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
 	it("reports a usage-backed payload-shaped dead end as a token-context problem", async () => {
 		await createSession(200_000, undefined, { extraSettings: { "compaction.enabled": false } });
 		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");

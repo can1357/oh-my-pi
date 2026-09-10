@@ -2353,9 +2353,40 @@ export class SessionMaintenance {
 
 			// No promotion target available fall through to compaction
 			if (compactionAvailable) {
-				return await this.#host.runRecoveryCompactionWithRollback("overflow", assistantMessage, allowDefer, {
-					autoContinue,
-				});
+				const compactionResult = await this.#host.runRecoveryCompactionWithRollback(
+					"overflow",
+					assistantMessage,
+					allowDefer,
+					{ autoContinue },
+				);
+				// A statically usable method (per `hasUsableCompactionMethod`) can still
+				// reclaim nothing at runtime — e.g. `methodOrder: ["shake"]` with no
+				// heavy/droppable content on a plain text history. When that happens for
+				// a payload rejection, `runRecoveryCompactionWithRollback` has already
+				// restored the failed turn, but an unconverted no-op result here has
+				// neither a scheduled continuation nor a block: the caller would treat
+				// it as an ordinary turn end and could resubmit the same oversized
+				// history on the next auto-continue, looping the same 413 silently with
+				// no notice ever shown (#11482). Convert that specific no-progress
+				// outcome into the same honest dead end used when no method was
+				// available at all.
+				if (
+					payloadRejection &&
+					!compactionResult.continuationScheduled &&
+					compactionResult.automaticContinuationBlocked !== true &&
+					compactionResult.historyRewritten !== true
+				) {
+					this.#host.emitNotice("warning", payloadRejectionNotice(storedTokens, contextWindow), "compaction");
+					logger.debug("Payload-shaped 413 compaction attempt made no progress; blocking automatic continuation", {
+						provider: assistantMessage.provider,
+						model: assistantMessage.model,
+						message: assistantMessage.errorMessage,
+						storedTokens,
+						contextWindow,
+					});
+					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+				}
+				return compactionResult;
 			}
 			if (payloadRejection) {
 				const usageBackedOverflow = AIError.isUsageBackedContextOverflow(assistantMessage, contextWindow);
