@@ -12,6 +12,7 @@ import { parseCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cl
 import {
 	getAgentDbPath,
 	getDbBusyTimeoutMs,
+	isEnoent,
 	isSqliteBusyError,
 	isSqliteCorruptionError,
 	logger,
@@ -528,6 +529,12 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		let lastBusyError: Error | undefined;
 		for (let attempt = 0; attempt < maxAttempts; attempt++) {
 			let db: Database | undefined;
+			// Pre-create the file with owner-only permissions: `new Database`
+			// would otherwise create it with default (world-readable) perms, and
+			// this DB holds provider credentials. Opening with "a" is a no-op
+			// when the file already exists.
+			const preCreated = await fs.open(dbPath, "a", 0o600);
+			await preCreated.close();
 			try {
 				db = new Database(dbPath);
 				// Install the busy handler BEFORE the first lock-taking statement
@@ -536,10 +543,21 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				// non-zero `busy_timeout` they fail immediately with SQLITE_BUSY.
 				// See issue #2421.
 				SqliteAuthCredentialStore.#installBusyTimeout(db);
-				try {
-					await fs.chmod(dbPath, 0o600);
-				} catch {
-					// Ignore chmod failures (e.g., Windows)
+				// Tighten permissions after open: the main file may predate the
+				// 0600 pre-create, and the WAL/SHM sidecars may survive from an
+				// earlier run. Sidecars are legitimately absent on a fresh DB
+				// (ENOENT); chmod itself is unsupported on some platforms
+				// (e.g. Windows) — log that instead of silently swallowing it.
+				// Each path is hardened independently so one expected absence
+				// (or one failure) cannot suppress hardening of the others.
+				for (const hardenPath of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+					try {
+						await fs.chmod(hardenPath, 0o600);
+					} catch (err) {
+						if (!isEnoent(err)) {
+							logger.debug("auth db chmod skipped", { path: hardenPath, error: String(err) });
+						}
+					}
 				}
 				SqliteAuthCredentialStore.#ensureAuthCredentialRefreshLeasesTable(db);
 				return new SqliteAuthCredentialStore(db);

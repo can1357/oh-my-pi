@@ -1,12 +1,12 @@
 import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
+import { redactSensitiveHeaderValues } from "./http-inspector";
 
 const REQUEST_DEBUG_ENV = "PI_REQ_DEBUG";
 const textEncoder = new TextEncoder();
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 let nextSessionId = 1;
-
 type RequestBodyInit = NonNullable<RequestInit["body"]>;
 
 type RequestDebugBody = { body: unknown } | { bodyText: string } | { bodyBase64: string } | { bodyUnavailable: string };
@@ -62,7 +62,7 @@ export async function createRequestDebugSession(payload: RequestDebugPayload): P
 		url: payload.url,
 	};
 	const headers = headersToRecord(payload.headers);
-	if (headers) requestDump.headers = headers;
+	if (headers) requestDump.headers = redactSensitiveHeaderValues(headers);
 	if (payload.body !== undefined) requestDump.body = payload.body;
 	if (payload.bodyText !== undefined) requestDump.bodyText = payload.bodyText;
 	if (payload.bodyBase64 !== undefined) requestDump.bodyBase64 = payload.bodyBase64;
@@ -289,7 +289,7 @@ function looksLikeJson(text: string): boolean {
 
 function formatResponseHeaderBlock(statusLine: string, headers?: RequestDebugHeaders): string {
 	const lines = [statusLine];
-	const record = headersToRecord(headers);
+	const record = redactSensitiveHeaderValues(headersToRecord(headers) ?? {});
 	if (record) {
 		for (const name in record) {
 			const value = record[name];
@@ -320,6 +320,7 @@ function headersToRecord(headers: RequestDebugHeaders): Record<string, string | 
 			record[key] = Array.isArray(value) ? value.map(String) : String(value);
 		}
 	}
+
 	return hasHeaders ? record : undefined;
 }
 
