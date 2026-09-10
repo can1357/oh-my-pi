@@ -50,7 +50,7 @@ pub enum NotebookError {
 }
 
 /// A cell type supported by the editable notebook projection.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumString, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum NotebookCellType {
 	/// An executable code cell.
@@ -63,12 +63,7 @@ pub enum NotebookCellType {
 
 impl NotebookCellType {
 	fn parse(value: &str) -> Option<Self> {
-		match value {
-			"code" => Some(Self::Code),
-			"markdown" => Some(Self::Markdown),
-			"raw" => Some(Self::Raw),
-			_ => None,
-		}
+		value.parse().ok()
 	}
 
 	fn as_str(self) -> &'static str {

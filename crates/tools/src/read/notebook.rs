@@ -6,7 +6,7 @@ use omp_core::{IntoStr, Str};
 use serde_json::Value;
 
 /// A supported Jupyter notebook cell kind.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumString, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum NotebookCellType {
 	/// An executable code cell.
@@ -23,12 +23,7 @@ impl NotebookCellType {
 	}
 
 	fn parse(value: &Value) -> Option<Self> {
-		match value.as_str()? {
-			"code" => Some(Self::Code),
-			"markdown" => Some(Self::Markdown),
-			"raw" => Some(Self::Raw),
-			_ => None,
-		}
+		value.as_str()?.parse().ok()
 	}
 }
 
@@ -324,12 +319,7 @@ fn parse_virtual_cells(
 fn parse_marker(line: &str) -> Option<(NotebookCellType, Option<usize>)> {
 	let suffix = line.strip_prefix("# %% [")?;
 	let (kind, suffix) = suffix.split_once(']')?;
-	let cell_type = match kind {
-		"code" => NotebookCellType::Code,
-		"markdown" => NotebookCellType::Markdown,
-		"raw" => NotebookCellType::Raw,
-		_ => return None,
-	};
+	let cell_type = kind.parse::<NotebookCellType>().ok()?;
 	let index = if suffix.is_empty() {
 		None
 	} else {
