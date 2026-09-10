@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Grok Bot AvailableModels namespace-only overrides recompute `clientVersion` (e.g. `lab` → `0.30.0-lab`) via the discovery identity helper.
 - Grok Bot sand router union and offline seeds share one `GROKBOT_SAND_ROUTER_IDS` roster (no divergent discovery hard-code).
 - Grok Bot `buildModel` always reapplies KDL-owned Sand wire/retry/promote policy over stale cached values so offline rebuilds pick up rule changes.
 - Grok Bot live AvailableModels rows always stamp an empty thinking ladder when non-reasoning; synthetic sand routers stay on the separate `buildSandRouterSpec` path so KDL `reasoning` fills are not gated by a TypeScript router-id list.

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Catalog matrix read smoke rejects GNU `head -n -1` and `tail -n +2` ranges that suppress the one-line fixture token.
 - Catalog matrix shell smoke validates reachable `&&` / `||` suffixes (`echo ping && false`, write-then-`rm`) instead of keeping only the first conjunct.
 - Grok Bot product-wire history rewrite honors `customWireName` ownership (e.g. `save`→Write) so collision losers like `edit` are not rewritten onto the owner's schema.
 - Grok Bot skips JSON-as-text tool promotion when `toolChoice: "none"` so handoff cannot dispatch fenced Shell/Write from retained `context.tools`.

@@ -556,9 +556,31 @@ function commandEmitsPing(segment: string, ping: string): boolean {
 }
 
 /**
- * Read smoke readers must be configured to emit file contents. `head -n 0`
- * and `sed -n` without a print command produce nothing, but `runOneTool`
- * fabricates the expected token without executing.
+ * Whether a head/tail -n/-c count still emits the one-line smoke fixture.
+ * Rejects zero counts, GNU `head -n -N` (drop last N lines), and `tail -n +N`
+ * for N>=2 (skip the first line).
+ */
+function headTailCountKeepsFixtureLine(cmd: string, raw: string): boolean {
+	const trimmed = raw.trim();
+	if (trimmed.startsWith("+")) {
+		const n = Number(trimmed.slice(1));
+		if (!Number.isFinite(n) || n === 0) return false;
+		// `tail -n +2` / `tail -c +2` skips the fixture line/byte.
+		if (cmd === "tail" && n >= 2) return false;
+		return true;
+	}
+	const n = Number(trimmed);
+	if (!Number.isFinite(n) || n === 0) return false;
+	// `head -n -1` prints all but the last line → empty for a one-line fixture.
+	if (cmd === "head" && n < 0) return false;
+	return true;
+}
+
+/**
+ * Read smoke readers must be configured to emit file contents. `head -n 0`,
+ * GNU `head -n -1` (all but last line), and `tail -n +2` (from line 2) produce
+ * nothing for the one-line fixture, but `runOneTool` fabricates the token
+ * without executing. `sed -n` without a print command is the same class.
  */
 function readerEmitsContent(segment: string, filePath: string): boolean {
 	if (!smokeCommandTargetsFixturePath(segment, filePath)) return false;
@@ -570,13 +592,13 @@ function readerEmitsContent(segment: string, filePath: string): boolean {
 			const w = words[i]!;
 			if (w === "-n" || w === "-c" || w === "--lines" || w === "--bytes") {
 				const v = words[i + 1];
-				if (v !== undefined && Number(v) === 0) return false;
+				if (v !== undefined && !headTailCountKeepsFixtureLine(cmd, v)) return false;
 				i++;
 				continue;
 			}
 			const eq = /^(?:-n|--lines=|-c|--bytes=)(.*)$/.exec(w);
-			if (eq && eq[1] !== "" && Number(eq[1]) === 0) return false;
-			// `head -0 path`
+			if (eq && eq[1] !== "" && !headTailCountKeepsFixtureLine(cmd, eq[1])) return false;
+			// `head -0 path` (traditional non-negative line count form)
 			if (/^-[0-9]+$/.test(w) && Number(w.slice(1)) === 0) return false;
 		}
 		return true;

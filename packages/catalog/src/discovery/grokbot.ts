@@ -22,6 +22,7 @@ import {
 	loadGrokbotConfig,
 	mergeGrokbotHeaders,
 	mintGrokbotAccessToken,
+	resolveGrokbotDiscoveryIdentity,
 } from "./grokbot-auth";
 import {
 	decodeGrokbotAvailableModelsResponse,
@@ -75,11 +76,21 @@ export async function fetchGrokbotAvailableModels(
 		const overrideVer = options.clientVersion?.trim();
 		// Prefer the same resolved identity used for model-cache scoping so a
 		// catalog fetched under one namespace/version is never stored under another.
-		const cfg = {
-			...loaded,
-			...(overrideNs ? { namespace: overrideNs } : {}),
-			...(overrideVer ? { clientVersion: overrideVer } : {}),
-		};
+		// Namespace-only overrides must recompute clientVersion (lab → 0.30.0-lab)
+		// via the identity helper — spreading namespace alone leaves the ambient
+		// production version and can hit the wrong discovery surface.
+		const cfg =
+			overrideNs || overrideVer
+				? {
+						...loaded,
+						...resolveGrokbotDiscoveryIdentity({
+							namespace: overrideNs || loaded.namespace,
+							// Omit ambient clientVersion so a namespace-only override
+							// recomputes; an explicit options.clientVersion is preserved.
+							clientVersion: overrideVer,
+						}),
+					}
+				: loaded;
 		const machineId = cfg.machineId;
 		if (!cfg.renewal || !machineId) {
 			return null;

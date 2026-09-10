@@ -369,6 +369,25 @@ describe("toolSmokePrompt", () => {
 				id,
 			),
 		).toBe(false);
+		// GNU head -n -1 drops the last line; tail -n +2 starts after line 1 —
+		// both yield empty stdout for the one-line fixture while runOneTool
+		// fabricates the ping.
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `head -n -1 ${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `tail -n +2 ${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
 		expect(
 			matchesToolSmokeCall(
 				"read",
