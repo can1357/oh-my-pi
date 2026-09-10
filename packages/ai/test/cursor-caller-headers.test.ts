@@ -129,6 +129,20 @@ afterEach(async () => {
 });
 
 describe("Cursor caller headers reach the wire", () => {
+	it("uses the final payload run ID for the transport request ID", async () => {
+		const baseUrl = await startServer();
+		const result = await streamCursor(makeModel(baseUrl), context, {
+			apiKey: "test-token",
+			cursorRunId: "initial-run",
+			onPayload: payload => {
+				if (!payload || typeof payload !== "object") throw new Error("Missing Cursor request payload");
+				return { ...payload, runId: "hook-replaced-run" };
+			},
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(received["x-request-id"]).toBe("hook-replaced-run");
+	});
+
 	it("delivers an ordinary caller header to the server", async () => {
 		const sent = await send({ "x-trace": "abc", "x-waygate-activity": "mode=plan" });
 		expect(sent["x-trace"]).toBe("abc");

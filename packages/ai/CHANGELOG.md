@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Cursor requests generate distinct run IDs, share them with the request header, and preserve conversation grouping.
 - Cursor requests preserve caller-supplied capability flags and session identifiers.
 - Cursor user messages use agent mode consistently with the native CLI.
 

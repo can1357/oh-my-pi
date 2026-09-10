@@ -383,6 +383,8 @@ interface CursorGrpcRequest {
 interface CursorTransportRequest extends CursorGrpcRequest {
 	/** Exact discovery id eligible for a retry because the normalized effort payload was serialized unchanged. */
 	fallbackWireModelId?: string;
+	/** Final run id serialized on the request, also used for x-request-id. */
+	runId: string;
 }
 
 const CONNECT_END_STREAM_FLAG = 0b00000010;
@@ -713,7 +715,7 @@ function streamCursorWithWireMode(
 				},
 				wireMode,
 			);
-			const { requestBytes, conversationState } = builtRequest;
+			const { requestBytes, conversationState, runId: requestRunId } = builtRequest;
 			serializedFallbackWireModelId = builtRequest.fallbackWireModelId;
 			conversationStateCache.set(conversationId, conversationState);
 			const requestContextTools = buildMcpToolDefinitions(
@@ -749,7 +751,7 @@ function streamCursorWithWireMode(
 				"x-ghost-mode": "true",
 				"x-cursor-client-version": CURSOR_CLIENT_VERSION,
 				"x-cursor-client-type": "cli",
-				"x-request-id": crypto.randomUUID(),
+				"x-request-id": requestRunId,
 			};
 			const debugSession = isRequestDebugEnabled()
 				? await createRequestDebugSession({
@@ -5444,8 +5446,9 @@ async function buildGrpcRequestForWireMode(
 	runRequest.clientSupportsInlineImages = options?.cursorClientSupportsInlineImages === true;
 	runRequest.clientSupportsRoutedModelUpdate = options?.cursorClientSupportsRoutedModelUpdate === true;
 	runRequest.clientSupportsPromptContextUsageRpc = options?.cursorClientSupportsPromptContextUsageRpc === true;
-	runRequest.runId = options?.cursorRunId ?? "";
+	runRequest.runId = options?.cursorRunId ?? crypto.randomUUID();
 	runRequest.agentSessionId = options?.cursorAgentSessionId ?? "";
+	runRequest.conversationGroupId = state.conversationId;
 
 	// Tools are sent later via requestContext (exec handshake)
 	const replacementRequest = await options?.onPayload?.(runRequest, model);
@@ -5484,7 +5487,7 @@ async function buildGrpcRequestForWireMode(
 		detail: detail || undefined,
 	});
 
-	return { requestBytes, blobStore, conversationState, fallbackWireModelId };
+	return { requestBytes, blobStore, conversationState, fallbackWireModelId, runId: runRequest.runId };
 }
 
 /** Builds the normalized Cursor Run request used by transport callers and request inspection hooks. */
