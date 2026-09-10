@@ -10,9 +10,11 @@
  * in the session), deterministic per `(date, cwd)`, so the bytes are stable
  * for the lifetime of a session/day and refresh automatically at midnight.
  */
-import type { Context, Message, UserMessage } from "@oh-my-pi/pi-ai";
+import type { Context, DeveloperMessage, Message, OpenAIResponsesHistoryPayload, UserMessage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import dateCwdReminderTemplate from "../prompts/system/date-cwd-reminder.md" with { type: "text" };
+import nowReminderTemplate from "../prompts/system/now-reminder.md" with { type: "text" };
+import { formatLocalClockAndOffset, formatLocalTimeZoneShortName } from "../utils/local-date";
 
 /** Renders the reminder text for the given local calendar date and cwd. */
 export function renderDateCwdReminder(date: string, cwd: string): string {
@@ -114,4 +116,170 @@ export class DateCwdReminderInjector {
 		}
 		return changed ? out : messages;
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Per-turn Now stamp
+// ---------------------------------------------------------------------------
+
+/** Renders the per-turn stamp payload, e.g. `2026-08-30T02:51:16Z (20:51 CST, UTC-06:00)`. */
+export function renderNowStamp(now: Date = new Date()): string {
+	const { clock, offset } = formatLocalClockAndOffset(now);
+	const zone = formatLocalTimeZoneShortName(now);
+	const zoneClock = [clock, zone].filter(part => part.length > 0).join(" ");
+	const local = [zoneClock, `UTC${offset}`].filter(part => part.length > 0).join(", ");
+	const iso = now.toISOString().replace(/\.\d{3}Z$/, "Z");
+	return prompt.render(nowReminderTemplate, { now: `${iso} (${local})` }).trim();
+}
+
+/**
+ * Appends each user message's own-turn `Now:` stamp to `messages`,
+ * returning a new array. The input is never mutated.
+ *
+ * User-initiated developer continuation turns (the `.`, `c` continue
+ * shortcuts) are stamped the same way — their timestamp is the fresh
+ * prompt time of the turn — while agent-initiated developer turns stay
+ * excluded.
+ *
+ * The stamp is a pure function of the message's persisted identity — its
+ * own `timestamp` — so re-stamps are byte-identical across requests and
+ * across session resumes: a resumed process rehydrates history as fresh
+ * objects with the persisted content and timestamp, and re-derives the
+ * exact wire bytes the original process sent, given the same host timezone
+ * and locale (the parenthesized local part of the stamp renders host-locally).
+ * Only the genuinely-new last turn adds bytes, at the tail, so the
+ * prompt-cache prefix stays stable.
+ * Idempotent per message: a trailing block that byte-matches the stamp
+ * derived from the message's own timestamp is that stamp and is kept as-is —
+ * a fresh stamp would duplicate and invalidate the prompt cache from message 0.
+ * A pasted or echoed `Now:` block carrying any other value does not suppress
+ * the stamp; the derived one is injected alongside it deterministically.
+ *
+ * Messages carrying an openaiResponsesHistory providerPayload (notably the
+ * compaction-summary message created after OpenAI remote compaction) are
+ * replayed by the Responses serializers from that payload's items, which
+ * skip the generic content; the stamp is appended to the payload as an
+ * ordinary user message item so the provider sees it, byte-stably, there
+ * as well.
+ *
+ * The stamp value is computed, never held in a process-global structure:
+ * two distinct turns in the same second share the correct instant rather
+ * than a value leaked from another turn's request. The only memo is the
+ * object-identity WeakMap (mirroring `DateCwdReminderInjector`'s
+ * injection memo), which keeps stamped objects stable within a live
+ * session and is collected with its key message objects when the session
+ * is discarded.
+ */
+const nowStampCache = new WeakMap<Message, Message>();
+
+/**
+ * The deterministic stamp for a stamped message: its own-turn instant
+ * rendered as a `Now:` system reminder. Messages without a finite
+ * timestamp are left unstamped rather than fabricated.
+ */
+function nowStampFor(message: Message): string | undefined {
+	if (!Number.isFinite(message.timestamp)) return undefined;
+	return renderNowStamp(new Date(message.timestamp));
+}
+
+/** Final text of a message: its string content, or the last text part. */
+function finalMessageText(content: Message["content"]): string | undefined {
+	if (typeof content === "string") return content;
+	for (let i = content.length - 1; i >= 0; i--) {
+		const part = content[i]!;
+		if (part.type === "text") return part.text;
+	}
+	return undefined;
+}
+
+/** The native Responses replay payload of a message, when it carries one. */
+function responsesHistoryPayload(message: UserMessage | DeveloperMessage): OpenAIResponsesHistoryPayload | undefined {
+	const payload = message.providerPayload;
+	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return undefined;
+	return payload;
+}
+
+/** A replay item carrying the stamp as an ordinary user message. */
+function responsesHistoryStampItem(stamp: string): Record<string, unknown> {
+	return { type: "message", role: "user", content: [{ type: "input_text", text: stamp }] };
+}
+
+/** True when the payload's final item already carries the stamp, byte for byte. */
+function responsesHistoryTailIsStamp(items: Array<Record<string, unknown>>, stamp: string): boolean {
+	const last = items[items.length - 1];
+	if (!last || last.type !== "message" || last.role !== "user") return false;
+	const content = last.content;
+	if (!Array.isArray(content) || content.length === 0) return false;
+	const part = content[content.length - 1];
+	return (
+		typeof part === "object" &&
+		part !== null &&
+		(part as Record<string, unknown>).type === "input_text" &&
+		(part as Record<string, unknown>).text === stamp
+	);
+}
+
+export function injectNowStamp(messages: Message[]): Message[] {
+	let out: Message[] | undefined;
+	for (let i = 0; i < messages.length; i++) {
+		const message = messages[i]!;
+		// User turns, plus user-initiated developer continuation turns (the
+		// `.`, `c` shortcuts), whose timestamp is the fresh prompt time of the
+		// turn; agent-initiated developer turns stay excluded.
+		if (message.role !== "user" && !(message.role === "developer" && message.userInitiated === true)) continue;
+		const cached = nowStampCache.get(message);
+		if (cached !== undefined) {
+			(out ??= messages.slice())[i] = cached;
+			continue;
+		}
+		const stamp = nowStampFor(message);
+		if (stamp === undefined) continue;
+		// Idempotent per message, value-sensitive: only a trailing block that
+		// byte-matches the stamp derived from this message's own timestamp is
+		// an already-applied stamp. A pasted or echoed Now block carrying any
+		// other value must not suppress it.
+		const tail = finalMessageText(message.content);
+		const contentStamped = tail !== undefined && tail.endsWith(stamp);
+		// The Responses serializers replay a user message's authoritative
+		// providerPayload.items and skip its generic content (notably the
+		// compaction-summary message after OpenAI remote compaction), so the
+		// stamp must reach the payload or the provider never sees it.
+		const history = responsesHistoryPayload(message);
+		const historyStamped = history !== undefined && responsesHistoryTailIsStamp(history.items, stamp);
+		if (contentStamped && (history === undefined || historyStamped)) continue;
+		const content = contentStamped
+			? message.content
+			: typeof message.content === "string"
+				? `${message.content}\n\n${stamp}`
+				: ([...message.content, { type: "text", text: stamp }] as Message["content"]);
+		const stamped = {
+			...message,
+			content,
+			...(history !== undefined && !historyStamped
+				? {
+						providerPayload: {
+							...history,
+							items: [...history.items, responsesHistoryStampItem(stamp)],
+						},
+					}
+				: {}),
+		} as Message;
+		nowStampCache.set(message, stamped);
+		(out ??= messages.slice())[i] = stamped;
+	}
+	return out ?? messages;
+}
+
+/**
+ * Appends the per-turn `Now:` stamp to a provider `Context`, keeping the
+ * system prompt byte-stable for prompt caching. Skips NULL_PROMPT-style
+ * contexts (empty system prompt) and no-message contexts so such requests
+ * stay byte-for-byte unchanged; mirrors the guards of
+ * {@link DateCwdReminderInjector.transform}.
+ */
+export function applyNowStamp(context: Context): Context {
+	if (!context.systemPrompt || context.systemPrompt.length === 0) return context;
+	if (context.messages.length === 0) return context;
+	const messages = injectNowStamp(context.messages);
+	return messages === context.messages ? context : { ...context, messages };
 }
