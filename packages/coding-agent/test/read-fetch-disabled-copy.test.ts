@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { WebSearchTool } from "@oh-my-pi/pi-coding-agent/web/search";
 
 function createSession(fetchEnabled: boolean): ToolSession {
 	return {
@@ -32,5 +33,17 @@ describe("read URL copy follows fetch.enabled", () => {
 	test("enabled: description still advertises web URL reads", () => {
 		const tool = new ReadTool(createSession(true));
 		expect(tool.description).toContain("web URLs");
+	});
+});
+
+describe("web_search read-URL handoff follows fetch.enabled", () => {
+	test("disabled: description does not steer into the blocked read-URL route", () => {
+		const tool = new WebSearchTool(createSession(false));
+		expect(tool.description).not.toContain("`read` URL directly");
+	});
+
+	test("enabled: description keeps the read-URL handoff", () => {
+		const tool = new WebSearchTool(createSession(true));
+		expect(tool.description).toContain("`read` URL directly");
 	});
 });

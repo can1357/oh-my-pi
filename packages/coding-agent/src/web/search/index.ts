@@ -319,7 +319,12 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 	readonly name = "web_search";
 	readonly approval = "read" as const;
 	readonly label = "Web Search";
-	readonly description: string;
+	/** Rendered live so a fetch.enabled flip is reflected at the next prompt rebuild (see ReadTool). */
+	get description(): string {
+		return prompt.render(webSearchDescription, {
+			FETCH_ENABLED: this.#session.settings.get("fetch.enabled"),
+		});
+	}
 	readonly parameters = webSearchSchema;
 	readonly strict = true;
 	readonly loadMode = "discoverable";
@@ -329,7 +334,6 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 
 	constructor(session: ToolSession) {
 		this.#session = session;
-		this.description = prompt.render(webSearchDescription);
 	}
 
 	async execute(
@@ -354,7 +358,9 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchRenderDetails> = {
 	name: "web_search",
 	label: "Web Search",
-	description: prompt.render(webSearchDescription),
+	get description() {
+		return prompt.render(webSearchDescription, { FETCH_ENABLED: settings.get("fetch.enabled") });
+	},
 	parameters: webSearchSchema,
 
 	approval: "read",
