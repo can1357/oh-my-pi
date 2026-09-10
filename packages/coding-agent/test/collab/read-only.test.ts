@@ -17,6 +17,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { logger } from "@oh-my-pi/pi-utils";
+import { shrinkForReplication } from "@oh-my-pi/pi-coding-agent/collab/replication-shrink";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 // In-memory transport: FakeWebSocket + InMemoryRelay (see ./helpers/in-memory-relay)
@@ -256,8 +257,10 @@ describe("collab frames a guest can send that the host must still answer", () =>
 	});
 
 	it("reports a protocol version that is not a number instead of dropping the hello", async () => {
-		// No narrowing needed for this one, and the test says so: a non-number is
-		// never equal to COLLAB_PROTO, and String() is total for anything JSON carries.
+		// A non-number is never equal to COLLAB_PROTO, so reaching the mismatch branch
+		// needs no narrowing. Quoting it back does: `String` is not total for
+		// everything JSON carries — a nested array throws out of it — which is why the
+		// reply runs the value through #label.
 		const guest = await joinWithRawHello(host.link, { proto: { evil: true }, name: "bad-proto" });
 		guestCleanups.push(() => guest.socket.close());
 		const reply = await guest.nextFrame();
@@ -536,6 +539,7 @@ describe("collab frames a guest can send that the host must still answer", () =>
 			{ providerFile: 5 },
 			{ providerFile: { provider: "nope" } },
 			{ providerFile: { provider: "openai", id: 9 } },
+			{ providerFile: { provider: "openai", uri: 9 } },
 			{ providerFile: { provider: "openai", expiresAt: "soon" } },
 		]) {
 			guest.socket.send({
@@ -561,13 +565,62 @@ describe("collab frames a guest can send that the host must still answer", () =>
 					mimeType: "image/png",
 					detail: "high",
 					url: "https://example.invalid/a.png",
-					providerFile: { provider: "openai", id: "file-1", expiresAt: 1 },
-					somethingNewer: true,
+					providerFile: { provider: "openai", id: "file-1", uri: "openai://file-1", expiresAt: 1 },
 				},
 			],
 		} as unknown as CollabFrame);
 		await Promise.race([delivered, Bun.sleep(1_000)]);
 		expect(harness.prompts).toHaveLength(1);
+		const content = harness.prompts[0]?.content as { type: string; url?: string; providerFile?: unknown }[];
+		expect(content?.[1]?.url).toBe("https://example.invalid/a.png");
+		expect(content?.[1]?.providerFile).toEqual({
+			provider: "openai",
+			id: "file-1",
+			uri: "openai://file-1",
+			expiresAt: 1,
+		});
+	});
+
+	it("strips an image property it does not know instead of carrying it into the session", async () => {
+		const guest = await joinAsGuest(host.link, "unknown-prop");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// Tolerating an unknown property was reasoned as safe because such a field is
+		// read and dropped. It is not: the image goes into a session message, is
+		// persisted, and is walked by shrinkForReplication, which recurses to
+		// RangeError past ~40,000 levels.
+		//
+		// The depth here is well under that on purpose. `CollabSocket.send` serializes
+		// with JSON.stringify, which is itself recursive and fails at about the same
+		// depth, so a cooperative client cannot reach the break — but JSON.parse is
+		// iterative and accepts any depth from hand-built text, verified at 500,000,
+		// and the host parses exactly that off the wire. So the reachable actor is a
+		// client that does not use this library, which this harness cannot be. What
+		// is asserted is therefore the contract that makes depth irrelevant: only
+		// declared fields are stored.
+		let nested: unknown[] = [];
+		const root = nested;
+		for (let i = 0; i < 20_000; i++) {
+			const next: unknown[] = [];
+			nested.push(next);
+			nested = next;
+		}
+		const delivered = harness.nextPrompt();
+		guest.socket.send({
+			t: "prompt",
+			text: "carry me",
+			images: [{ type: "image", data: "AAAA", mimeType: "image/png", somethingNewer: root }],
+		} as unknown as CollabFrame);
+		await Promise.race([delivered, Bun.sleep(1_000)]);
+
+		// Delivered — the image is still the guest's — and carrying only the fields
+		// ImageContent declares, so what the session stores cannot recurse.
+		expect(harness.prompts).toHaveLength(1);
+		const stored = harness.prompts[0]?.content as Record<string, unknown>[];
+		expect(stored?.[1]).toEqual({ type: "image", data: "AAAA", mimeType: "image/png" });
+		expect(() => shrinkForReplication(harness.prompts[0]?.content)).not.toThrow();
 	});
 
 	it("answers an agent chat whose message is not a string instead of dropping it", async () => {

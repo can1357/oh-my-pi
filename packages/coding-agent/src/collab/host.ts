@@ -38,6 +38,7 @@ import {
 	type CollabParticipant,
 	type CollabPromptDetails,
 	type CollabSessionState,
+	describeThrown,
 	formatCollabLink,
 	formatCollabWebLink,
 	generateRoomId,
@@ -145,8 +146,8 @@ const GUEST_LABEL_MAX = 64;
  * bound it is the last one that touches it.
  *
  * 512 UTF-16 code units, which is what `slice` counts — not bytes. Astral text
- * costs up to four bytes per two units, so the ceiling is nearer 2 KiB in UTF-8
- * than 512; still three orders of magnitude inside the relay's payload limit,
+ * costs four bytes per two units, so 512 units is 256 code points and about 1 KiB
+ * in UTF-8; still four orders of magnitude inside the relay's payload limit,
  * which is the property that matters, but the unit is worth stating because the
  * budget elsewhere in this feature is named in bytes and these are not the same
  * number. A split surrogate at the cut is not a corruption risk: `JSON.stringify`
@@ -164,32 +165,50 @@ const IMAGE_DETAIL_VALUES = new Set(["auto", "low", "high", "original"]);
 const PROVIDER_FILE_PROVIDERS = new Set(["openai", "anthropic", "google"]);
 
 /**
- * Whether a value off the wire is image content this host can put into a message.
+ * Image content off the wire, rebuilt from the fields {@link ImageContent}
+ * declares, or `null` if it is not image content at all.
  *
- * Every field {@link ImageContent} declares, not only the required ones. Extra
- * properties are tolerated deliberately — a newer guest may carry fields this host
- * has no opinion about, and they do not reach a serializer — but a declared field
- * present with the wrong type does reach one, which is the whole defect.
+ * Rebuilt rather than checked, because a check leaves whatever else the sender
+ * attached. An earlier version tolerated unknown properties on purpose, reasoning
+ * that a newer guest might carry fields this host has no opinion about — sound
+ * where such a field is read and dropped, and wrong here, because this object is
+ * put into a session message, persisted, and walked by
+ * {@link shrinkForReplication}: an unknown property nested 50,000 deep takes that
+ * walk to `RangeError`, measured. Copying the known fields makes the shape the
+ * host stores a property of this function rather than of what arrived. A newer
+ * field is dropped instead of honoured, which is the safe direction to be wrong.
  */
-function isImageContent(value: unknown): value is ImageContent {
-	if (typeof value !== "object" || value === null) return false;
+function toImageContent(value: unknown): ImageContent | null {
+	if (typeof value !== "object" || value === null) return null;
 	const candidate = value as Record<string, unknown>;
-	if (candidate.type !== "image") return false;
-	if (typeof candidate.data !== "string" || typeof candidate.mimeType !== "string") return false;
-	if (candidate.detail !== undefined && !IMAGE_DETAIL_VALUES.has(candidate.detail as string)) return false;
-	if (candidate.url !== undefined && typeof candidate.url !== "string") return false;
-	if (candidate.providerFile !== undefined && !isProviderFileReference(candidate.providerFile)) return false;
-	return true;
+	if (candidate.type !== "image") return null;
+	const { data, mimeType, detail, url, providerFile } = candidate;
+	if (typeof data !== "string" || typeof mimeType !== "string") return null;
+	if (detail !== undefined && !IMAGE_DETAIL_VALUES.has(detail as string)) return null;
+	if (url !== undefined && typeof url !== "string") return null;
+	const image: ImageContent = { type: "image", data, mimeType };
+	if (detail !== undefined) image.detail = detail as ImageContent["detail"];
+	if (url !== undefined) image.url = url;
+	if (providerFile !== undefined) {
+		const reference = toProviderFileReference(providerFile);
+		if (!reference) return null;
+		image.providerFile = reference;
+	}
+	return image;
 }
 
-function isProviderFileReference(value: unknown): value is ProviderFileReference {
-	if (typeof value !== "object" || value === null) return false;
-	const candidate = value as Record<string, unknown>;
-	if (!PROVIDER_FILE_PROVIDERS.has(candidate.provider as string)) return false;
-	if (candidate.id !== undefined && typeof candidate.id !== "string") return false;
-	if (candidate.uri !== undefined && typeof candidate.uri !== "string") return false;
-	if (candidate.expiresAt !== undefined && typeof candidate.expiresAt !== "number") return false;
-	return true;
+function toProviderFileReference(value: unknown): ProviderFileReference | null {
+	if (typeof value !== "object" || value === null) return null;
+	const { provider, id, uri, expiresAt } = value as Record<string, unknown>;
+	if (!PROVIDER_FILE_PROVIDERS.has(provider as string)) return null;
+	if (id !== undefined && typeof id !== "string") return null;
+	if (uri !== undefined && typeof uri !== "string") return null;
+	if (expiresAt !== undefined && typeof expiresAt !== "number") return null;
+	const reference: ProviderFileReference = { provider: provider as ProviderFileReference["provider"] };
+	if (id !== undefined) reference.id = id;
+	if (uri !== undefined) reference.uri = uri;
+	if (expiresAt !== undefined) reference.expiresAt = expiresAt;
+	return reference;
 }
 /**
  * Outcome of {@link CollabHost.requestGuestUi}. `answered` carries the guest's
@@ -536,7 +555,8 @@ export class CollabHost {
 
 	/**
 	 * Every `error` frame leaves through here, so no reply can exceed
-	 * {@link ERROR_MESSAGE_MAX} whatever composed it.
+	 * {@link ERROR_MESSAGE_MAX} code units of message, plus the one the ellipsis
+	 * costs when it fires — 513, not 512 — whatever composed it.
 	 *
 	 * A cap on the whole message rather than on its parts, because the parts are not
 	 * all chosen here: an error raised elsewhere arrives already carrying whatever a
@@ -562,10 +582,14 @@ export class CollabHost {
 	 * the same 200 KB a reply would. Bounded once, here, so a caller cannot bound
 	 * one consumer and forget the other — which is exactly what happened when only
 	 * the reply was fixed.
+	 *
+	 * Rendering is not safe by default either, and this helper originally assumed it
+	 * was, one function below the doc comment on {@link #label} that says a nested
+	 * value throws out of a template. {@link describeThrown} owns that; call this
+	 * once per handler and reuse the result rather than converting twice.
 	 */
 	#reason(err: unknown): string {
-		const text = String(err);
-		return text.length <= ERROR_MESSAGE_MAX ? text : `${text.slice(0, ERROR_MESSAGE_MAX)}…`;
+		return describeThrown(err, ERROR_MESSAGE_MAX);
 	}
 
 	/**
@@ -790,11 +814,13 @@ export class CollabHost {
 		// than dropped. It is the text defect one field over: `{type:"text",text:42}`
 		// is accepted into the content, persisted, and throws a turn later at
 		// `item.text.toWellFormed()` inside a provider serializer.
-		const supplied = Array.isArray(images) ? images : [];
-		if (supplied.some(image => !isImageContent(image))) {
+		const offered = Array.isArray(images) ? images : [];
+		const supplied = offered.map(toImageContent);
+		if (supplied.some(image => image === null)) {
 			this.#sendError("prompt failed: every image must carry string data and mimeType", fromPeer);
 			return;
 		}
+		const normalized = supplied as ImageContent[];
 		const name = peer.name;
 		// `Array.isArray`, not a length test: `{ length: 1 }` passes a length test and
 		// then throws out of the spread, and that throw unwinds into `CollabSocket`'s
@@ -802,7 +828,7 @@ export class CollabHost {
 		// that is not an array carries no images, which is the path a prompt without
 		// any already takes, so the text still gets through.
 		const content: string | (TextContent | ImageContent)[] =
-			supplied.length > 0 ? [{ type: "text", text }, ...supplied] : text;
+			normalized.length > 0 ? [{ type: "text", text }, ...normalized] : text;
 		const details: CollabPromptDetails = { from: name };
 		if (this.#ctx.session.isStreaming) {
 			this.#ctx.updatePendingMessagesDisplay();
@@ -827,9 +853,10 @@ export class CollabHost {
 				{ streamingBehavior: "steer", queueChipText: text },
 			)
 			.catch(err => {
-				logger.warn("collab guest prompt failed", { error: this.#reason(err) });
+				const reason = this.#reason(err);
+				logger.warn("collab guest prompt failed", { error: reason });
 				if (stillTheAsker?.()) {
-					this.#sendError(`prompt failed: ${this.#reason(err)}`, fromPeer);
+					this.#sendError(`prompt failed: ${reason}`, fromPeer);
 				}
 			});
 	}
@@ -1013,9 +1040,10 @@ export class CollabHost {
 		// work has no bound, and past a reconnect this id is somebody else's.
 		const stillTheAsker = this.#socket?.bestEffortAddressee(fromPeer);
 		const fail = (err: unknown) => {
-			logger.warn("collab agent-cmd failed", { cmd, agentId: quoted, error: this.#reason(err) });
+			const reason = this.#reason(err);
+			logger.warn("collab agent-cmd failed", { cmd, agentId: quoted, error: reason });
 			if (!stillTheAsker?.()) return;
-			this.#sendError(`agent ${quoted}: ${this.#reason(err)}`, fromPeer);
+			this.#sendError(`agent ${quoted}: ${reason}`, fromPeer);
 		};
 		switch (cmd) {
 			case "chat": {
@@ -1094,11 +1122,13 @@ export class CollabHost {
 		// applies to error replies applies here: this frame carries an error string
 		// too, and #sendError cannot reach it because it is not an error frame.
 		//
-		// No input reaches this bound today, and it is deliberately kept anyway. The
-		// only dynamic error here comes from `fs` and quotes a host-owned path, and
-		// #reason has already capped it by the time it arrives, so nothing a guest
-		// can send makes this slice fire — there is no test that can fail if it is
-		// deleted, and deleting it will therefore look correct. It is structural: the
+		// No *unbounded* input reaches this bound today, and it is deliberately kept
+		// anyway. The only dynamic error here comes from `fs` and quotes a host-owned
+		// path, and #reason has already capped it to 513 units by the time it arrives
+		// — so the slice can fire on that one extra unit but can never be what saves
+		// the frame. That is a property of the callers, not of this site, which is
+		// exactly why the guard belongs here: no test can fail if it is deleted, so
+		// deleting it will look correct. It is structural: the
 		// premise of this design is that whatever last touches a frame bounds it, so
 		// that a caller composing a new message somewhere else cannot reintroduce the
 		// defect. Dropping it because today's one error happens to be host-owned is

@@ -8,7 +8,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { open, sealSerialized } from "./crypto";
 import type { CollabFrame, RelayControlMessage } from "./protocol";
-import { packEnvelope, unpackEnvelope } from "./protocol";
+import { describeThrown, packEnvelope, unpackEnvelope } from "./protocol";
 
 const FATAL_CLOSE_REASONS: Record<number, string> = {
 	4001: "room closed",
@@ -71,6 +71,8 @@ const MAX_RETIRED_PEERS = 256;
 const WS_BACKPRESSURE_THRESHOLD = 64 * 1024;
 const WS_BACKPRESSURE_DRAIN_THRESHOLD = 32 * 1024;
 const WS_BACKPRESSURE_DRAIN_RETRY_MS = 25;
+/** Ceiling on a frame-handler failure quoted into a log line, in UTF-16 code units. */
+const FRAME_ERROR_LOG_MAX = 512;
 
 interface PendingSend {
 	frames: Iterator<CollabFrame | string>;
@@ -847,7 +849,14 @@ export class CollabSocket {
 				this.onFrame?.(frame, envelope.peerId);
 			})
 			.catch((err: unknown) => {
-				logger.debug("collab: frame handler failed", { error: String(err) });
+				// The only way in is an owner frame handler throwing, and `String` on a
+				// thrown value is not itself safe — a nested one `RangeError`s, inside a
+				// `catch`, which is an unhandled rejection rather than a log line. That
+				// holds whether or not the value carries anything a guest sent, so it is
+				// not worth deciding: Bun's own parse failures quote fixed prose and no
+				// input, and the handlers upstream bound what they raise, but neither of
+				// those is a property this catch can enforce.
+				logger.debug("collab: frame handler failed", { error: describeThrown(err, FRAME_ERROR_LOG_MAX) });
 			});
 	}
 
