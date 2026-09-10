@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.17] - 2026-09-10
+
 ### Added
 
 - Editor history can retain local draft snapshots with their paste expansions and host-owned attachment restoration, without writing them to persistent history ([#11524](https://github.com/can1357/oh-my-pi/pull/11524) by [@camjac251](https://github.com/camjac251)).

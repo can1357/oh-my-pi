@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.17] - 2026-09-10
+
 ### Fixed
 
 - Fixed historical cost estimates after a scheduled price change: usage is estimated at the request's own time, and charges recorded at the time are preserved.

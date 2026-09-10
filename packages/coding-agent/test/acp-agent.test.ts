@@ -760,6 +760,76 @@ describe("ACP agent", () => {
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
+	it("plan-proposal handler autosaves the approved plan without leaking the path", async () => {
+		const harness = await createHarness();
+		Settings.instance.set("plan.enabled", true);
+		Settings.instance.set("plan.autosave", true);
+
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "plan" });
+
+		const localOptions = {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		};
+		cleanupRoots.push(resolveLocalUrlToPath("local://", localOptions));
+		const planPath = resolveLocalUrlToPath("local://words-counter-plan.md", localOptions);
+		await Bun.write(planPath, "# Words Counter\n\nFile contents.");
+
+		const handler = session.planProposalHandler!;
+		const result = (await handler("words-counter")) as {
+			content: Array<{ type: string; text: string }>;
+			details: { planFilePath: string; title: string; planExists: boolean };
+		};
+
+		expect(result.details.planExists).toBe(true);
+		expect(result.content[0]?.text).toMatch(/Plan approved/);
+		expect(result.content[0]?.text).not.toContain(harness.cwdA);
+		expect(result.content[0]?.text).not.toContain("autosaved to");
+		const saved = path.join(harness.cwdA, ".omp", "plans", "WORDS_COUNTER_PLAN.md");
+		expect(await Bun.file(saved).text()).toBe("# Words Counter\n\nFile contents.");
+		expect(session.planModeState).toBeUndefined();
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("plan-proposal handler approves and notes autosave failure without the path", async () => {
+		const harness = await createHarness();
+		Settings.instance.set("plan.enabled", true);
+		const blocker = path.join(harness.cwdA, "blocker");
+		await Bun.write(blocker, "x");
+		Settings.instance.set("plan.autosave", true);
+		Settings.instance.set("plan.autosaveDir", path.join(blocker, "sub"));
+
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "plan" });
+
+		const localOptions = {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		};
+		cleanupRoots.push(resolveLocalUrlToPath("local://", localOptions));
+		const planPath = resolveLocalUrlToPath("local://words-counter-plan.md", localOptions);
+		await Bun.write(planPath, "# Words Counter\n\nFile contents.");
+
+		const handler = session.planProposalHandler!;
+		const result = (await handler("words-counter")) as {
+			content: Array<{ type: string; text: string }>;
+		};
+		const text = result.content[0]?.text ?? "";
+
+		expect(text).toMatch(/Plan approved/);
+		expect(text).toMatch(/autosave failed/);
+		expect(text).not.toContain(harness.cwdA);
+		expect(session.planModeState).toBeUndefined();
+		expect(session.planReferencePath).toBe("local://words-counter-plan.md");
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
 
 	it("plan-proposal handler treats dismissed elicitation as refine, never approves", async () => {
 		// Regression for the P1 review finding on #1870: when a form-capable
