@@ -1,3 +1,5 @@
+import type { AssistantMessageEventStream } from "../utils/event-stream";
+
 /** Classification of one Responses SSE event for commit / failover. */
 export type CommitClass = "metadata" | "output" | "terminal-success" | "terminal-retryable" | "terminal-failure";
 
@@ -246,4 +248,24 @@ export function observeSseCommit(
 			},
 		}),
 	);
+}
+
+export function observeAssistantCommit(
+	events: AssistantMessageEventStream,
+	gate: StreamCommitGate,
+): AssistantMessageEventStream {
+	const iterate = events[Symbol.asyncIterator].bind(events);
+	events[Symbol.asyncIterator] = async function* () {
+		for await (const event of { [Symbol.asyncIterator]: iterate }) {
+			if (
+				((event.type === "text_delta" || event.type === "thinking_delta" || event.type === "toolcall_delta") &&
+					event.delta.length > 0) ||
+				event.type === "toolcall_end"
+			) {
+				gate.classifyAndObserve("response.output_text.delta", 0);
+			}
+			yield event;
+		}
+	};
+	return events;
 }

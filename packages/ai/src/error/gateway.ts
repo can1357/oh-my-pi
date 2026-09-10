@@ -74,7 +74,8 @@ const PROVIDER_WIDE_PATTERN =
 const TIMEOUT_OR_CONNECTION_PATTERN =
 	/\b(?:operation\s+)?timed?\s*out\b|\btimeout\b|\bconnection(?:\s+error|\s+refused)?\b|\bsocket hang up\b|\bfetch failed\b/i;
 const POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
-const MODEL_UNAVAILABLE_PATTERN = /\bmodel[_ ]?(?:not[_ ]found|not[_ ]available|unavailable|not[_ ]supported)(?:[_ ]\w+)*\b|\bthe model does not exist\b/i;
+const MODEL_UNAVAILABLE_PATTERN =
+	/\bmodel[_ ]?(?:not[_ ]found|not[_ ]available|unavailable|not[_ ]supported)(?:[_ ]\w+)*\b|\bthe model does not exist\b/i;
 const INVALID_REQUEST_PATTERN =
 	/\b(?:unsupported|invalid_request|invalid request|bad request|malformed|GenerateContentRequest)\b/i;
 const GATEWAY_INVARIANT_PATTERN = /\bgateway_terminal\b|\binternal invariant\b/i;
@@ -112,6 +113,9 @@ export function classifyGatewayError(err: unknown): GatewayErrorClassification {
 	// don't trip on incidental three-digit numbers ("took 200ms").
 	const embedded = extractEmbeddedStatus(message);
 	if (embedded !== undefined) return withOwnerDisposition(err, bucketStatus(embedded, message));
+	if (modelUnavailableCode(err) || MODEL_UNAVAILABLE_PATTERN.test(message)) {
+		return withOwnerDisposition(err, { status: 404, type: "invalid_request_error", message });
+	}
 
 	// Free-text abort wording sits below authoritative statuses on purpose: a
 	// provider-reported `HTTP 503: upstream request aborted` is a retryable
