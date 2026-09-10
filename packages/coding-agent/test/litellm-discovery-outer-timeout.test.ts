@@ -35,6 +35,30 @@ function slowRichFetchMock(): FetchImpl {
 		return new Response("", { status: 404 });
 	}) as FetchImpl;
 }
+function pressuredFetchMock(): FetchImpl {
+	return (async (input: string | URL | Request, init?: RequestInit) => {
+		const url = String(input);
+		if (url.endsWith("models.json.zstd")) {
+			// A struggling catalog mirror: burns part of the outer budget
+			// before the transport deadline would fire.
+			await Bun.sleep(5_000);
+			return new Response("", { status: 404 });
+		}
+		if (url.endsWith("/model_group/info")) {
+			// Never answers: the inner rich budget aborts this at 30s, and
+			// discovery must still reach the fallback inside the outer.
+			const { promise, reject } = Promise.withResolvers<never>();
+			init?.signal?.addEventListener("abort", () => reject(new Error("rich fetch aborted")), { once: true });
+			await promise;
+		}
+		if (url.endsWith("/v1/models")) {
+			await Bun.sleep(9_000);
+			if (init?.signal?.aborted) throw new Error("fallback fetch aborted");
+			return Response.json({ data: [{ id: "openai/gpt-5" }] });
+		}
+		return new Response("", { status: 404 });
+	}) as FetchImpl;
+}
 
 describe("litellm discovery outer timeout (#11576)", () => {
 	let tempDir: string;
@@ -78,6 +102,14 @@ describe("litellm discovery outer timeout (#11576)", () => {
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: slowRichFetchMock() });
 		await registry.refreshDiscoverableProviders(["litellm"], "online");
 		expect(registry.find("litellm", "slow-reasoner")).toBeDefined();
+	}, 120_000);
+
+	test("a pressured prefetch plus rich abort still reaches the fallback", async () => {
+		// ~5s prefetch + 30s rich abort + ~9s fallback ≈ 44s: inside the
+		// 50s budget, past the 40s the old arithmetic allowed.
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: pressuredFetchMock() });
+		await registry.refreshDiscoverableProviders(["litellm"], "online");
+		expect(registry.find("litellm", "openai/gpt-5")).toBeDefined();
 	}, 120_000);
 });
 

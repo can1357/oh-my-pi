@@ -1331,3 +1331,20 @@ describe("LiteLLM discovery timeout (#11355)", () => {
 		expect(models?.[0]).toMatchObject({ id: "slow-reasoner" });
 	});
 });
+
+describe("litellm discoveryBudgetMs (#11576)", () => {
+	test("omits the key when the inner budget fits the default outer", () => {
+		const original = Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS;
+		delete Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS;
+		try {
+			expect(litellmModelManagerOptions({}).discoveryBudgetMs).toBeUndefined();
+			expect(litellmModelManagerOptions({ discoveryTimeoutMs: 10_000 }).discoveryBudgetMs).toBeUndefined();
+		} finally {
+			if (original === undefined) delete Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS;
+			else Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS = original;
+		}
+	});
+	test("budgets rich plus prefetch and fallback bounds when configured above default", () => {
+		expect(litellmModelManagerOptions({ discoveryTimeoutMs: 30_000 }).discoveryBudgetMs).toBe(50_000);
+	});
+});
