@@ -53,6 +53,8 @@ export const launchHelp = {
 		}),
 		print: Flags.boolean({ char: "p", description: "Non-interactive mode: process prompt and exit" }),
 		continue: Flags.boolean({ char: "c", description: "Continue previous session" }),
+		daemon: Flags.boolean({ description: "Host the interactive session in the shared daemon" }),
+		"no-daemon": Flags.boolean({ description: "Run the interactive session directly without the daemon" }),
 		resume: Flags.string({ char: "r", description: "Resume a session (by ID prefix, path, or picker if omitted)" }),
 		"from-claude": Flags.boolean({ description: "Import a Claude Code session into OMP" }),
 		"from-codex": Flags.boolean({ description: "Import a Codex session into OMP" }),

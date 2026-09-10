@@ -14,11 +14,15 @@ try {
  * CLI entry point — registers all commands explicitly and delegates to the
  * lightweight CLI runner from pi-utils.
  */
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { parentPort } from "node:worker_threads";
 import type { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { CliConfig, CommandMetadata } from "@oh-my-pi/pi-utils/cli";
 import {
 	APP_NAME,
+	CONFIG_DIR_NAME,
 	getActiveProfile,
 	MIN_BUN_VERSION,
 	resolveProfileEnv,
@@ -31,6 +35,8 @@ import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from
 import { BLOB_BROKER_WORKER_ARG } from "./blob-broker/protocol";
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
+import type { DaemonClient } from "./daemon/client";
+import { isDefaultInteractiveArgv } from "./daemon/interactive-route";
 import { startJsEvalProcess } from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
@@ -128,10 +134,130 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestTtsWorker();
 	await smokeTestMnemopiEmbedWorker();
 	await smokeTestDaemonBroker();
+	await smokeTestDaemonWorker();
 	await smokeTestLspMux();
 	await smokeTestBlobBroker();
 	await smokeTestTerminalOutputWorker();
 	process.stdout.write("smoke-test: ok\n");
+}
+async function smokeTestDaemonWorker(): Promise<void> {
+	const { createDaemonClient } = await import("./daemon/client");
+	const { resolveWorkerSpawnCmd, workerEnvFromParent } = await import("./subprocess/worker-client");
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-daemon-smoke-"));
+	const runtimeDir = path.join(root, "runtime");
+	const sessionId = "smoke-resume";
+	const spawn = resolveWorkerSpawnCmd(DAEMON_SERVER_WORKER_ARG);
+	const child = Bun.spawn(spawn.cmd, {
+		cwd: spawn.cwd,
+		env: workerEnvFromParent({
+			HOME: root,
+			OMP_PROFILE: "smoke",
+			OMP_DAEMON_RUNTIME_DIR: runtimeDir,
+		}),
+		stdin: "ignore",
+		stdout: "ignore",
+		stderr: "ignore",
+		detached: true,
+	});
+	child.unref();
+	const client = await createDaemonClient({ profile: "smoke", runtimeDir });
+	let resumedClient: DaemonClient | undefined;
+	const deadline = Date.now() + 15_000;
+	let lastError: Error | undefined;
+	try {
+		while (Date.now() < deadline) {
+			try {
+				await client.connect();
+				lastError = undefined;
+				break;
+			} catch (error) {
+				lastError = error instanceof Error ? error : new Error(String(error));
+				await Bun.sleep(50);
+			}
+		}
+		if (lastError) throw new Error(`daemon worker smoke failed: ${lastError.message}`);
+		const status = await client.serverStatus();
+		if (status.shard.profile !== "smoke") throw new Error("daemon worker smoke failed: shard mismatch");
+		await client.request("session_create", { sessionId, cwd: root, overrides: { argv: [] } });
+		const attachmentId = "smoke-terminal";
+		await client.request("attach", {
+			sessionId,
+			attachmentId,
+			mode: "interactive",
+			delivery: "terminal",
+		});
+		await client.request("session_command", {
+			sessionId,
+			attachmentId,
+			command: { type: "get_state" },
+		});
+		await client.request("session_command", {
+			sessionId,
+			attachmentId,
+			command: {
+				type: "terminal_start",
+				terminal: {
+					columns: 80,
+					rows: 24,
+					kittyProtocolActive: false,
+					kittyEnableSequence: null,
+				},
+			},
+		});
+		await client.request("session_command", {
+			sessionId,
+			attachmentId,
+			command: { type: "terminal_detach" },
+		});
+		await client.request("detach", { sessionId, attachmentId });
+		await client.request("session_close", { sessionId });
+
+		// Empty daemon sessions are intentionally draft-only and leave no transcript.
+		// Seed a production-format transcript without invoking a model so the smoke
+		// exercises daemon discovery and resume deterministically.
+		const { SessionManager } = await import("./session/session-manager");
+		const sessionDir = SessionManager.getDefaultSessionDir(
+			root,
+			path.join(root, CONFIG_DIR_NAME, "profiles", "smoke", "agent"),
+		);
+		const fixture = SessionManager.create(root, sessionDir, undefined, sessionId);
+		fixture.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "Daemon resume smoke" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "smoke",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		await fixture.close();
+		const transcriptFile = path.join(
+			sessionDir,
+			(await fs.readdir(sessionDir)).find(file => file.endsWith(`_${sessionId}.jsonl`)) ?? "",
+		);
+		await fs.access(transcriptFile);
+		client.close();
+
+		resumedClient = await createDaemonClient({ profile: "smoke", runtimeDir });
+		await resumedClient.connect();
+		const resumed = (await resumedClient.request("session_resume", { sessionId })) as { sessionId?: string };
+		if (resumed.sessionId !== sessionId) throw new Error("daemon worker smoke failed: resume mismatch");
+		await fs.access(transcriptFile);
+		await resumedClient.request("session_close", { sessionId });
+		await resumedClient.request("shutdown");
+	} finally {
+		client.close();
+		resumedClient?.close();
+		await fs.rm(root, { recursive: true, force: true });
+	}
 }
 
 const TINY_WORKER_ARG = "__omp_worker_tiny_inference";
@@ -142,6 +268,7 @@ const JS_EVAL_PROCESS_ARG = "__omp_worker_js_eval_process";
 const STT_WORKER_ARG = "__omp_worker_stt";
 const TTS_WORKER_ARG = "__omp_worker_tts";
 const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
+const DAEMON_SERVER_WORKER_ARG = "__omp_worker_daemon_server";
 
 async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === TINY_WORKER_ARG) {
@@ -235,12 +362,16 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		await startDaemonBrokerFromEnvironment();
 		return true;
 	}
-	if (arg === LSP_MUX_WORKER_ARG) {
+	if (arg === DAEMON_SERVER_WORKER_ARG) {
+		// Keep daemon startup lazy so normal CLI imports do not initialize SDK/model state.
+		const { startDaemonServerFromEnvironment } = await import("./daemon/server");
+		await startDaemonServerFromEnvironment();
+		return true;
+	} else if (arg === LSP_MUX_WORKER_ARG) {
 		const { startLspMuxFromEnvironment } = await import("./lsp/mux/server");
 		await startLspMuxFromEnvironment();
 		return true;
-	}
-	if (arg === BLOB_BROKER_WORKER_ARG) {
+	} else if (arg === BLOB_BROKER_WORKER_ARG) {
 		const { startBlobBrokerFromEnvironment } = await import("./blob-broker/server");
 		await startBlobBrokerFromEnvironment();
 		return true;
@@ -492,6 +623,25 @@ export async function runCli(argv: string[]): Promise<void> {
 	// (`--version`, worker selectors) that never touch the network.
 	const { installGlobalProxyFetch } = await import("@oh-my-pi/pi-ai/utils/proxy");
 	installGlobalProxyFetch();
+	// The default interactive route is intentionally decided before loading the
+	// command registry or main graph. The bootstrap itself loads InteractiveMode
+	// only after the authenticated daemon connection is established.
+	if (resolvedArgv[0] !== "--smoke-test" && isDefaultInteractiveArgv(resolvedArgv)) {
+		// Dynamic import is required here: this is the cold-start boundary that
+		// keeps command/main modules out of the process until daemon bootstrap.
+		const { isDaemonModeOptedIn, launchDaemonInteractive, readDaemonModeSetting } =
+			await import("./daemon/interactive-bootstrap");
+		if (isDaemonModeOptedIn(resolvedArgv, await readDaemonModeSetting())) {
+			try {
+				await launchDaemonInteractive({ argv: resolvedArgv });
+			} catch (error: unknown) {
+				const message = error instanceof Error ? error.message : String(error);
+				process.stderr.write(`Error: daemon interactive startup failed: ${message}\n`);
+				process.exitCode = 1;
+			}
+			return;
+		}
+	}
 
 	if (resolvedArgv[0] === "--smoke-test") {
 		await runSmokeTest();

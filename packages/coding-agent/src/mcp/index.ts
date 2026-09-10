@@ -16,6 +16,8 @@ export { callMCP, parseSSE } from "./json-rpc";
 export * from "./loader";
 // Manager
 export * from "./manager";
+// Shard-scoped manager pooling
+export * from "./manager-pool";
 // OAuth Discovery
 export * from "./oauth-discovery";
 // Tool bridge

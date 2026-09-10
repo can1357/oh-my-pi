@@ -1,12 +1,18 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import {
+	bindSettingsToProjectContext,
+	resetSettingsForTest,
+	Settings,
+	settings,
+} from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import * as sessionColor from "@oh-my-pi/pi-coding-agent/utils/session-color";
+import { createProjectDirScope } from "@oh-my-pi/pi-utils/dirs";
 import { adjustHsv, TempDir } from "@oh-my-pi/pi-utils";
 
 type Harness = {
@@ -101,6 +107,43 @@ afterAll(() => {
 });
 
 describe("InteractiveMode working-message session accent cache", () => {
+	it("constructs from session-owned settings without process-global settings", async () => {
+		const tempDir = TempDir.createSync("@pi-session-settings-");
+		await Settings.init({ inMemory: true, cwd: tempDir.path() });
+		await initTheme(false);
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const sessionSettings = Settings.isolated({ autocompleteMaxVisible: 12 });
+		resetSettingsForTest();
+		const session = {
+			sessionManager,
+			settings: sessionSettings,
+			agent: {
+				state: { tools: [] },
+				metadataForProvider: () => undefined,
+			},
+			customCommands: [],
+			skills: [],
+			autoCompactionEnabled: true,
+			messages: [],
+			systemPrompt: [],
+			state: { model: undefined },
+			model: undefined,
+			thinkingLevel: undefined,
+		} as unknown as AgentSession;
+
+		let mode!: InteractiveMode;
+		createProjectDirScope(tempDir.path()).run(() => {
+			bindSettingsToProjectContext(sessionSettings);
+			mode = new InteractiveMode(session, "test");
+		});
+		try {
+			expect(mode.editor.getAutocompleteMaxVisible()).toBe(12);
+		} finally {
+			mode.stop();
+			tempDir.removeSync();
+		}
+	});
+
 	it("reuses one computed accent across loader spinner and message colorizers", async () => {
 		const { mode } = await createHarness("Cached session");
 		const getHex = vi.spyOn(sessionColor, "getSessionAccentHex");

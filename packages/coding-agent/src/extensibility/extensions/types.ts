@@ -473,6 +473,11 @@ export interface ExtensionContext {
 	modelRegistry: ModelRegistry;
 	/** Calling session's `local://` root mapping for external tool bridges. */
 	localProtocolOptions?: LocalProtocolOptions;
+	/**
+	 * Terminal-identity environment captured from the attached daemon client.
+	 * The daemon process environment may belong to a different terminal.
+	 */
+	clientEnv?: Record<string, string>;
 	/** Current model (may be undefined) */
 	model: Model | undefined;
 	/** Read-only model query facade: list / current / resolve / family. */

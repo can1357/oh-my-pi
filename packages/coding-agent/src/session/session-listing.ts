@@ -739,6 +739,23 @@ function isSessionStorage(value: SessionStorage | ResolveResumableSessionOptions
 	return "listFilesSync" in value;
 }
 
+/**
+ * True when a `--resume`/`--fork` argument names a transcript file rather than
+ * a session id (or id prefix).
+ */
+export function isSessionFileArg(sessionArg: string): boolean {
+	return sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl");
+}
+
+/** Resolve an explicit transcript path to its session info, or undefined when unreadable. */
+export async function resolveSessionFileArg(
+	sessionArg: string,
+	storage: SessionStorage = new FileSessionStorage(),
+): Promise<SessionInfo | undefined> {
+	const [match] = await collectSessionsFromFiles([path.resolve(sessionArg)], storage, true);
+	return match;
+}
+
 export async function resolveResumableSession(
 	sessionArg: string,
 	cwd: string,
@@ -761,9 +778,57 @@ export async function resolveResumableSession(
 
 	const globalSessions = await listAllSessions(storage);
 	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
-	if (!globalMatch) {
-		return undefined;
+	if (globalMatch) {
+		return { session: globalMatch, scope: "global" };
 	}
 
-	return { session: globalMatch, scope: "global" };
+	const aliasFile = await resolveDaemonSessionAliasFile(sessionArg);
+	if (aliasFile) {
+		const [aliasMatch] = await collectSessionsFromFiles([aliasFile], storage, true);
+		if (aliasMatch) return { session: aliasMatch, scope: "global" };
+	}
+	return undefined;
+}
+
+const DAEMON_SESSION_ALIAS_FILE = "daemon-session-aliases.json";
+const DAEMON_SESSION_ALIAS_CAP = 500;
+
+function daemonSessionAliasPath(): string {
+	return path.join(getSessionsDir(), DAEMON_SESSION_ALIAS_FILE);
+}
+
+export async function recordDaemonSessionAlias(registryId: string, sessionFile: string): Promise<void> {
+	if (!registryId || !sessionFile) return;
+	try {
+		const aliasPath = daemonSessionAliasPath();
+		const existing = (await Bun.file(aliasPath)
+			.json()
+			.catch(() => ({}))) as Record<string, string>;
+		const key = registryId.trim().toLowerCase();
+		if (existing[key] === sessionFile) return;
+		delete existing[key];
+		existing[key] = sessionFile;
+		const entries = Object.entries(existing);
+		const capped =
+			entries.length > DAEMON_SESSION_ALIAS_CAP
+				? Object.fromEntries(entries.slice(-DAEMON_SESSION_ALIAS_CAP))
+				: existing;
+		await Bun.write(aliasPath, JSON.stringify(capped));
+	} catch (error) {
+		logger.debug("Failed to record daemon session alias", { registryId, error: String(error) });
+	}
+}
+
+async function resolveDaemonSessionAliasFile(sessionArg: string): Promise<string | undefined> {
+	try {
+		const map = (await Bun.file(daemonSessionAliasPath()).json()) as Record<string, string>;
+		const arg = sessionArg.trim().toLowerCase();
+		if (arg.length < 4) return undefined;
+		const exact = map[arg];
+		if (typeof exact === "string") return exact;
+		const prefixed = Object.entries(map).filter(([id]) => id.startsWith(arg));
+		return prefixed.length === 1 && typeof prefixed[0]?.[1] === "string" ? prefixed[0][1] : undefined;
+	} catch {
+		return undefined;
+	}
 }

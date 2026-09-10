@@ -17,6 +17,8 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { adjustHsv, formatNumber, getProjectDir, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils";
 import { settings } from "../../../config/settings";
+import type { DaemonConnectionSnapshot } from "../../../daemon/status";
+import { formatDaemonWelcomeStatus } from "../../../daemon/status";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
 import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
@@ -443,6 +445,7 @@ export class StatusLineComponent implements Component {
 	 */
 	#vibeWorkerTokenRate: (() => number | null) | null = null;
 	#collabStatus: CollabStatus | null = null;
+	#serverStatus: DaemonConnectionSnapshot = { state: "direct" };
 	#focusedAgentId: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
 
@@ -743,6 +746,10 @@ export class StatusLineComponent implements Component {
 
 	setCollabStatus(status: CollabStatus | null): void {
 		this.#collabStatus = status;
+	}
+	setServerStatus(snapshot: DaemonConnectionSnapshot): void {
+		this.#serverStatus = snapshot;
+		this.invalidate();
 	}
 
 	/** Set the callback that presents detected Codex reset celebrations, or clear it with `undefined`. */
@@ -2486,6 +2493,9 @@ export class StatusLineComponent implements Component {
 
 	render(width: number): readonly string[] {
 		const lines: string[] = [];
+		if (this.#serverStatus.state !== "direct" && this.#serverStatus.state !== "connected") {
+			lines.push(formatDaemonWelcomeStatus(this.#serverStatus, width)[0] ?? "");
+		}
 		if (this.#standalone && !this.#autocompleteActiveProbe?.()) {
 			const content = this.renderBottomBar(width, this.#standalone === "left-only" ? "left" : "full");
 			if (content) {

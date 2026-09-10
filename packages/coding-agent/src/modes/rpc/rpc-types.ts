@@ -7,6 +7,7 @@
 import type { AgentMessage, AgentToolResult, ThinkingLevel, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
+import type { HostedTerminalDescriptor, HostedTerminalSize } from "../../daemon/terminal-bridge";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
@@ -41,16 +42,22 @@ export type RpcCommand =
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
 	| { id?: string; type: "get_available_commands" }
+	| { id?: string; type: "execute_slash_command"; text: string }
 	| { id?: string; type: "set_todos"; phases: TodoPhase[] }
 	| { id?: string; type: "set_host_tools"; tools: RpcHostToolDefinition[] }
 	| { id?: string; type: "set_host_uri_schemes"; schemes: RpcHostUriSchemeDefinition[] }
 	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
 	| { id?: string; type: "get_subagents" }
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
+	| { id?: string; type: "terminal_start"; terminal: HostedTerminalDescriptor }
+	| { id?: string; type: "terminal_input"; data: string }
+	| { id?: string; type: "terminal_resize"; size: HostedTerminalSize }
+	| { id?: string; type: "terminal_appearance"; appearance: "dark" | "light" }
+	| { id?: string; type: "terminal_detach" }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
-	| { id?: string; type: "cycle_model" }
+	| { id?: string; type: "cycle_model"; direction?: "forward" | "backward" }
 	| { id?: string; type: "get_available_models" }
 
 	// Thinking
@@ -119,6 +126,16 @@ export interface RpcSessionState {
 	dumpTools?: Array<{ name: string; description: string; parameters: unknown; examples?: readonly ToolExample[] }>;
 	/** Current context window usage. */
 	contextUsage?: ContextUsage;
+	/** Daemon-owned project/runtime metadata projected to thin clients. */
+	cwd?: string;
+	lspServers?: Array<{
+		name: string;
+		status: "connecting" | "ready" | "error" | "available";
+		fileTypes: string[];
+		error?: string;
+	}>;
+	mcpServers?: Array<{ name: string; status: "connected" | "connecting" | "disconnected" }>;
+	availableToolNames?: string[];
 }
 
 export interface RpcAvailableSlashCommand {
@@ -128,6 +145,8 @@ export interface RpcAvailableSlashCommand {
 	input?: { hint?: string };
 	subcommands?: Array<{ name: string; description?: string; usage?: string }>;
 	source: AvailableSlashCommandSource;
+	/** Whether execution belongs to the daemon or the interactive client. */
+	owner?: "client" | "daemon";
 }
 
 export interface RpcAvailableCommandsUpdateFrame {

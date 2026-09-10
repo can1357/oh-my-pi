@@ -122,13 +122,12 @@ describe("Composer prepaint", () => {
 		const adoptedComposer = lease.composer;
 		const testSession = await createTestSession({
 			inMemory: true,
-			settingsOverrides: { symbolPreset: "ascii" },
+			settingsOverrides: { symbolPreset: "ascii", "composer.shape": "box" },
 		});
 		let mode: InteractiveMode | undefined;
 
 		try {
 			await initTheme(false, "ascii");
-			settings.set("composer.shape", "box");
 			vi.spyOn(KeybindingsManager, "create").mockReturnValue(KeybindingsManager.inMemory({ "app.clear": "ctrl+x" }));
 			mode = new InteractiveMode(
 				testSession.session,

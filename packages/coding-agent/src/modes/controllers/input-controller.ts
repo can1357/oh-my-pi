@@ -543,7 +543,6 @@ export class InputController {
 		this.ctx.editor.setActionKeys("app.retry", this.ctx.keybindings.getKeys("app.retry"));
 		this.ctx.editor.onRetry = () => void this.handleRetry();
 		this.ctx.editor.clearCustomKeyHandlers();
-		// Wire up extension shortcuts
 		this.registerExtensionShortcuts();
 		const planModeKeys = this.ctx.keybindings.getKeys("app.plan.toggle");
 		for (const key of planModeKeys) {
@@ -604,7 +603,6 @@ export class InputController {
 				this.ctx.showAgentHub({ requireContent: true, armCloseTap: true });
 			}
 		};
-
 		this.#setupEnhancedPaste();
 
 		this.ctx.editor.onChange = (text: string) => {

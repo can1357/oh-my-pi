@@ -455,6 +455,7 @@ export class ExtensionRunner {
 	#shutdownHandler: ShutdownHandler = () => {};
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
+	#clientEnv: Record<string, string> | undefined;
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
 	#initialized = false;
@@ -1189,6 +1190,7 @@ export class ExtensionRunner {
 			getSystemPrompt: () => this.#getSystemPromptFn(),
 			localProtocolOptions: this.localProtocolOptions,
 			memory: this.#getMemoryFn?.(),
+			clientEnv: this.#clientEnv,
 			setInterval: (callback, ms, ...args) => this.#managedTimers.setInterval(callback, ms, ...args),
 			setTimeout: (callback, ms, ...args) => this.#managedTimers.setTimeout(callback, ms, ...args),
 			clearTimer: timer => this.#managedTimers.clear(timer),
@@ -1205,6 +1207,13 @@ export class ExtensionRunner {
 							})
 					: undefined,
 		};
+	}
+
+	/**
+	 * Record terminal-identity environment from the client attached to a hosted session.
+	 */
+	setClientEnv(clientEnv: Record<string, string> | undefined): void {
+		this.#clientEnv = clientEnv;
 	}
 
 	/**

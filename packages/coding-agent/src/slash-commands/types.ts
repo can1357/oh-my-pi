@@ -12,9 +12,17 @@ export interface SubcommandDef {
 	usage?: string;
 }
 
+/** Which side owns a builtin command when the TUI is attached to a daemon. */
+export type BuiltinSlashCommandOwner = "client" | "daemon";
+
 /** Declarative builtin slash command metadata used by autocomplete and help UI. */
 export interface BuiltinSlashCommand {
 	name: string;
+	/**
+	 * Explicit remote ownership override. By default commands with a daemon
+	 * handler are daemon-owned; TUI-only commands are client-owned.
+	 */
+	owner?: BuiltinSlashCommandOwner;
 	aliases?: string[];
 	description: string;
 	/** Autocomplete type-indicator icon. Defaults to "action" (generic terminal glyph). */

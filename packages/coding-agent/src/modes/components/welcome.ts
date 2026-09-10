@@ -8,6 +8,7 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
+import { type DaemonConnectionSnapshot, formatDaemonWelcomeStatus } from "../../daemon/status";
 import { theme } from "../../modes/theme/theme";
 import tipsText from "./tips.txt" with { type: "text" };
 
@@ -141,6 +142,7 @@ export interface LspServerInfo {
 export class WelcomeComponent implements Component {
 	#animStart: number | null = null;
 	#animTimer: Timer | null = null;
+	#serverStatus: DaemonConnectionSnapshot = { state: "direct" };
 	#requestRender: (() => void) | null = null;
 	// Tip randomness is latched once so the tip is stable across renders, but
 	// the nerdfont-nag gate re-reads the live preset: the startup prepaint can
@@ -247,6 +249,10 @@ export class WelcomeComponent implements Component {
 		this.invalidate();
 	}
 
+	setServerStatus(snapshot: DaemonConnectionSnapshot): void {
+		this.#serverStatus = snapshot;
+		this.invalidate();
+	}
 	render(termWidth: number): readonly string[] {
 		const animating = this.#animStart != null;
 		if (!animating && this.#cachedLines && this.#cachedWidth === termWidth) {
@@ -303,6 +309,7 @@ export class WelcomeComponent implements Component {
 			"",
 			this.#centerText(theme.fg("muted", this.modelName), leftCol),
 			this.#centerText(theme.fg("borderMuted", this.providerName), leftCol),
+			...formatDaemonWelcomeStatus(this.#serverStatus, leftCol).map(line => this.#centerText(line, leftCol)),
 		];
 
 		// Right column separator

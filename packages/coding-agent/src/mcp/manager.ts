@@ -11,6 +11,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import { resolveConfigValue } from "../config/resolve-config-value";
 import type { CustomTool } from "../extensibility/custom-tools/types";
+import { AgentRegistry } from "../registry/agent-registry";
 import type { AuthStorage } from "../session/auth-storage";
 import {
 	MCPConnectionTimeoutError,
@@ -198,21 +199,27 @@ export type MCPAuthHandler = (serverName: string, challenge: MCPAuthChallenge) =
  * Manages connections to MCP servers and provides tools to the agent.
  */
 export class MCPManager {
-	static #instance: MCPManager | undefined;
+	/**
+	 * Manager instances are scoped to the ambient agent registry so daemon
+	 * sessions cannot observe each other's MCP capabilities.
+	 */
+	static #instances = new WeakMap<AgentRegistry, MCPManager>();
 
-	/** Process-global instance shared by internal URL protocol handlers and tools. */
+	/** Return the manager published by the current agent registry, if any. */
 	static instance(): MCPManager | undefined {
-		return MCPManager.#instance;
+		return MCPManager.#instances.get(AgentRegistry.global());
 	}
 
-	/** Install or clear the process-global instance. */
-	static setInstance(value: MCPManager | undefined): void {
-		MCPManager.#instance = value;
+	/** Publish a manager for the current agent registry. */
+	static setInstance(manager: MCPManager | undefined): void {
+		const registry = AgentRegistry.global();
+		if (manager) MCPManager.#instances.set(registry, manager);
+		else MCPManager.#instances.delete(registry);
 	}
 
-	/** Reset the process-global instance. Test-only. */
+	/** Clear all scoped manager mappings. Test-only. */
 	static resetForTests(): void {
-		MCPManager.#instance = undefined;
+		MCPManager.#instances = new WeakMap<AgentRegistry, MCPManager>();
 	}
 
 	#connections = new Map<string, MCPServerConnection>();
@@ -234,6 +241,9 @@ export class MCPManager {
 	#onToolsChanged?: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void | Promise<void>;
 	#onResourcesChanged?: (serverName: string, uri: string) => void;
 	#onPromptsChanged?: (serverName: string) => void;
+	readonly #toolsChangedSubscribers = new Set<(tools: CustomTool<TSchema, MCPToolDetails>[]) => void>();
+	readonly #resourcesChangedSubscribers = new Set<(serverName: string, uri: string) => void>();
+	readonly #promptsChangedSubscribers = new Set<(serverName: string) => void>();
 	#notificationsEnabled = false;
 	#notificationsEpoch = 0;
 	#subscribedResources = new Map<string, Set<string>>();
@@ -389,6 +399,39 @@ export class MCPManager {
 				handler(name);
 			}
 		}
+	}
+
+	subscribeToolsChanged(handler: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void): () => void {
+		this.#toolsChangedSubscribers.add(handler);
+		return () => this.#toolsChangedSubscribers.delete(handler);
+	}
+
+	subscribeResourcesChanged(handler: (serverName: string, uri: string) => void): () => void {
+		this.#resourcesChangedSubscribers.add(handler);
+		return () => this.#resourcesChangedSubscribers.delete(handler);
+	}
+
+	subscribePromptsChanged(handler: (serverName: string) => void): () => void {
+		this.#promptsChangedSubscribers.add(handler);
+		for (const [name, connection] of this.#connections) {
+			if (connection.prompts?.length) handler(name);
+		}
+		return () => this.#promptsChangedSubscribers.delete(handler);
+	}
+
+	async #emitToolsChanged(): Promise<void> {
+		await this.#onToolsChanged?.(this.#tools);
+		for (const handler of this.#toolsChangedSubscribers) handler(this.#tools);
+	}
+
+	#emitResourcesChanged(serverName: string, uri: string): void {
+		this.#onResourcesChanged?.(serverName, uri);
+		for (const handler of this.#resourcesChangedSubscribers) handler(serverName, uri);
+	}
+
+	#emitPromptsChanged(serverName: string): void {
+		this.#onPromptsChanged?.(serverName);
+		for (const handler of this.#promptsChangedSubscribers) handler(serverName);
 	}
 
 	#subscribeAndTrack(name: string, connection: MCPServerConnection, uris: string[], notificationEpoch: number): void {
@@ -700,7 +743,7 @@ export class MCPManager {
 						this.reconnectServer(name, options);
 					const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 					this.#replaceServerTools(name, customTools);
-					void this.#onToolsChanged?.(this.#tools);
+					await this.#emitToolsChanged();
 					void this.toolCache?.set(name, config, serverTools);
 
 					notify({ type: "connected", serverName: name });
@@ -858,7 +901,7 @@ export class MCPManager {
 						: undefined;
 				const subscribed = this.#subscribedResources.get(serverName);
 				if (uri && subscribed?.has(uri)) {
-					this.#onResourcesChanged?.(serverName, uri);
+					this.#emitResourcesChanged(serverName, uri);
 				}
 				break;
 			}
@@ -1065,10 +1108,10 @@ export class MCPManager {
 		// Remove tools from this server and notify consumers
 		const hadTools = this.#tools.some(t => t.mcpServerName === name);
 		this.#tools = this.#tools.filter(t => t.mcpServerName !== name);
-		if (hadTools) void this.#onToolsChanged?.(this.#tools);
+		if (hadTools) await this.#emitToolsChanged();
 
 		// Notify prompt consumers so stale commands are cleared
-		if (connection?.prompts?.length) this.#onPromptsChanged?.(name);
+		if (connection?.prompts?.length) this.#emitPromptsChanged(name);
 	}
 
 	/**
@@ -1309,7 +1352,7 @@ export class MCPManager {
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 			void this.toolCache?.set(name, config, serverTools);
 			this.#replaceServerTools(name, customTools);
-			void this.#onToolsChanged?.(this.#tools);
+			await this.#emitToolsChanged();
 			void this.#loadServerResourcesAndPrompts(name, connection);
 			return connection;
 		} catch (error) {
@@ -1361,7 +1404,7 @@ export class MCPManager {
 
 		// Replace tools from this server
 		this.#replaceServerTools(name, customTools);
-		await this.#onToolsChanged?.(this.#tools);
+		await this.#emitToolsChanged();
 	}
 
 	/**
@@ -1478,7 +1521,7 @@ export class MCPManager {
 		connection.prompts = undefined;
 		await listPrompts(connection);
 
-		this.#onPromptsChanged?.(name);
+		this.#emitPromptsChanged(name);
 		this.#emitCatalogChange({ serverName: name, kind: "prompts" });
 	}
 

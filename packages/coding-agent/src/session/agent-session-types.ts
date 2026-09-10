@@ -472,3 +472,11 @@ export interface ResetSessionContextResult {
 
 /** Queued user content restored to the editor. */
 export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
+
+/** Queue behavior while streaming. */
+export type QueueMode = "all" | "one-at-a-time" | "coalescing";
+
+/** Maps the queue mode to the agent core's supported modes. */
+export function coreQueueMode(mode: QueueMode): "all" | "one-at-a-time" {
+	return mode === "all" ? "all" : "one-at-a-time";
+}

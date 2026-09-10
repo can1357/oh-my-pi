@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Fixed non-interactive CLI paths loading the daemon bootstrap before command routing.
+- Fixed daemon-hosted startup preserving release-note marker behavior.
+- Fixed fresh daemon-backed sessions using their own settings during startup.
+
 - Marketplace plugins that share a repository root now load only their declared skills instead of every skill in the repository ([#11513](https://github.com/can1357/oh-my-pi/issues/11513)).
 ### Added
 

@@ -19,6 +19,7 @@ import * as path from "node:path";
 import { configureCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import {
+	createProjectDirContextKey,
 	getAgentDbPath,
 	getAgentDir,
 	getLastChangelogVersionPath,
@@ -27,7 +28,9 @@ import {
 	isEnoent,
 	logger,
 	MAIN_CONFIG_FILENAMES,
+	peekProjectDirContextValue,
 	procmgr,
+	setProjectDirContextValue,
 	setWorktreesDir,
 } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
@@ -3201,16 +3204,24 @@ export function withActiveSettings<T>(instance: Settings | undefined, fn: () => 
 
 let globalInstance: Settings | null = null;
 let globalInstancePromise: Promise<Settings> | null = null;
-let boundSettingsInstance: Settings | null = null;
-let boundSettingsMethods = new Map<PropertyKey, unknown>();
+let boundSettingsMethods = new WeakMap<Settings, Map<PropertyKey, unknown>>();
+
+const projectSettingsKey = createProjectDirContextKey<Settings>("settings");
+
+function currentSettingsInstance(): Settings | null {
+	return peekProjectDirContextValue(projectSettingsKey) ?? globalInstance;
+}
 
 function clearBoundSettingsMethods(): void {
-	boundSettingsInstance = null;
-	boundSettingsMethods = new Map<PropertyKey, unknown>();
+	boundSettingsMethods = new WeakMap();
+}
+
+export function bindSettingsToProjectContext(instance: Settings): void {
+	setProjectDirContextValue(projectSettingsKey, instance);
 }
 
 export function isSettingsInitialized(): boolean {
-	return globalInstance !== null;
+	return currentSettingsInstance() !== null;
 }
 
 /**
@@ -3278,19 +3289,21 @@ export const __physicalTargetSegmentsForTesting = physicalTargetSegments;
  */
 export const settings = new Proxy({} as Settings, {
 	get(_target, prop) {
-		if (!globalInstance) {
+		const instance = currentSettingsInstance();
+		if (!instance) {
 			throw new Error("Settings not initialized. Call Settings.init() first.");
 		}
-		if (boundSettingsInstance !== globalInstance) {
-			clearBoundSettingsMethods();
-			boundSettingsInstance = globalInstance;
+		let instanceMethods = boundSettingsMethods.get(instance);
+		if (!instanceMethods) {
+			instanceMethods = new Map();
+			boundSettingsMethods.set(instance, instanceMethods);
 		}
-		const value = (globalInstance as unknown as Record<PropertyKey, unknown>)[prop];
+		const value = (instance as unknown as Record<PropertyKey, unknown>)[prop];
 		if (typeof value === "function") {
-			const cached = boundSettingsMethods.get(prop);
+			const cached = instanceMethods.get(prop);
 			if (cached) return cached;
-			const bound = value.bind(globalInstance);
-			boundSettingsMethods.set(prop, bound);
+			const bound = value.bind(instance);
+			instanceMethods.set(prop, bound);
 			return bound;
 		}
 		return value;

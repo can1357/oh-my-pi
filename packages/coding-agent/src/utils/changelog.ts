@@ -1,9 +1,10 @@
 import * as path from "node:path";
-import { getLastChangelogVersionPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { getLastChangelogVersionPath, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import { Lexer } from "@oh-my-pi/pi-utils/marked";
 import type { BunFile } from "bun";
 import bundledChangelogPath from "../../CHANGELOG.md" with { type: "file" };
 import type { SettingValue } from "../config/settings";
+import { getChangelogPath } from "../config";
 
 export interface ChangelogEntry {
 	major: number;
@@ -441,8 +442,30 @@ export async function resolveStartupChangelogForDisplay(options: {
 	return startupChangelog.markdown ? startupChangelog : undefined;
 }
 
-// Re-export getChangelogPath from paths.ts for convenience
-export { getChangelogPath } from "../config";
+/**
+ * Resolve automatic startup release notes and advance the last-seen marker.
+ * Resume/continue sessions skip both display and marker mutation.
+ */
+export async function loadStartupChangelog(skip: boolean): Promise<string | undefined> {
+	if (skip) return undefined;
+
+	const lastVersion = await readLastChangelogVersion();
+	const parsedLastVersion = parseChangelogVersion(lastVersion);
+	if (!parsedLastVersion) {
+		await writeLastChangelogVersion(VERSION);
+		return undefined;
+	}
+	if (lastVersion === VERSION) return undefined;
+
+	const entries = await parseChangelog(getChangelogPath());
+	const startupChangelog = selectStartupChangelog(entries, lastVersion, VERSION);
+	if (startupChangelog.persistCurrentVersion) {
+		await writeLastChangelogVersion(VERSION);
+	}
+	return startupChangelog.markdown;
+}
+
+export { getChangelogPath };
 
 /**
  * Last omp version whose changelog the user has seen. Stored as a plain-text

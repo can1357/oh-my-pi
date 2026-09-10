@@ -14,8 +14,10 @@ import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
+import { CONFIG_DIR_NAME, removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
+import { daemonRuntimeDir, readDaemonOwnerPid } from "../../src/daemon/paths";
 import { SETTINGS_SCHEMA, Settings } from "../../src/config/settings";
+import { CURRENT_SETUP_VERSION } from "../../src/modes/setup-version";
 import {
 	type ChangelogEntry,
 	formatStartupChangelogSummary,
@@ -35,11 +37,31 @@ const CURRENT_VERSION = "2.0.0";
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..", "..");
 const cliEntry = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
 const packageDir = path.join(repoRoot, "packages", "coding-agent");
-const hasPtyHarness =
-	process.platform === "linux" &&
-	(await Bun.file("/usr/bin/script").exists()) &&
-	(await Bun.file("/usr/bin/timeout").exists());
+const hasPtyHarness = process.platform === "linux" && Bun.which("script") !== null && Bun.which("timeout") !== null;
 const PTY_STARTUP_OUTPUT_CEILING = 512 * 1024;
+
+async function stopTestDaemon(pid: number): Promise<void> {
+	try {
+		process.kill(pid, "SIGTERM");
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "ESRCH") return;
+		throw error;
+	}
+	for (let attempt = 0; attempt < 100; attempt++) {
+		try {
+			process.kill(pid, 0);
+		} catch {
+			return;
+		}
+		// This integration test waits for a detached OS process; fake timers cannot drive process exit.
+		await Bun.sleep(10);
+	}
+	try {
+		process.kill(pid, "SIGKILL");
+	} catch (error) {
+		if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+	}
+}
 
 function release(major: number, minor: number, patch: number, body: string): ChangelogEntry {
 	const heading = `## [${major}.${minor}.${patch}] - 2026-07-11`;
@@ -306,23 +328,38 @@ describe("last changelog marker", () => {
 });
 
 describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () => {
-	test("does not dump packaged changelog history on first install with uncollapsed notes", async () => {
-		await withTempAgentDir(async agentDir => {
-			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-changelog-pty-"));
-			try {
-				await fs.mkdir(path.join(root, "xdg-config"), { recursive: true });
-				await fs.mkdir(path.join(root, "xdg-state"), { recursive: true });
-				await fs.mkdir(path.join(root, "xdg-data"), { recursive: true });
-				await Bun.write(path.join(agentDir, "config.yml"), "setupVersion: 1\ncollapseChangelog: false\n");
+	test.each([
+		["daemon-hosted", ["--daemon"]],
+		["direct", ["--no-daemon"]],
+	])(
+		"%s startup does not dump packaged changelog history on first install with uncollapsed notes",
+		async (_route: string, argv: string[]) => {
+			await withTempAgentDir(async agentDir => {
+				const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-changelog-pty-"));
+				const runtimeDir = daemonRuntimeDir(path.join(root, CONFIG_DIR_NAME));
+				let daemonPid: number | undefined;
+				try {
+					await fs.mkdir(path.join(root, "xdg-config"), { recursive: true });
+					await fs.mkdir(path.join(root, "xdg-state"), { recursive: true });
+					await fs.mkdir(path.join(root, "xdg-data"), { recursive: true });
+					await Bun.write(
+						path.join(agentDir, "config.yml"),
+						`setupVersion: ${CURRENT_SETUP_VERSION}\nstartup:\n  changelogMode: expanded\n`,
+					);
 
-				const proc = Bun.spawn(
-					["timeout", "6s", "script", "-q", "-c", `bun ${JSON.stringify(cliEntry)}`, "/dev/null"],
-					{
+					const env = { ...process.env };
+					delete env.OMP_PROFILE;
+					delete env.PI_PROFILE;
+					delete env.PI_CONFIG_DIR;
+					const command = [process.execPath, cliEntry, ...argv].map(arg => JSON.stringify(arg)).join(" ");
+
+					const proc = Bun.spawn(["timeout", "20s", "script", "-e", "-q", "-c", command, "/dev/null"], {
 						cwd: repoRoot,
+						stdin: "pipe",
 						stdout: "pipe",
 						stderr: "pipe",
 						env: {
-							...process.env,
+							...env,
 							HOME: root,
 							XDG_CONFIG_HOME: path.join(root, "xdg-config"),
 							XDG_STATE_HOME: path.join(root, "xdg-state"),
@@ -333,25 +370,35 @@ describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () =>
 							NO_COLOR: "1",
 							TERM: "xterm-256color",
 						},
-					},
-				);
+					});
 
-				const [stdout, stderr, exitCode] = await Promise.all([
-					new Response(proc.stdout).arrayBuffer(),
-					new Response(proc.stderr).text(),
-					proc.exited,
-				]);
-				const output = Buffer.from(stdout).toString("utf8");
+					// Keep the pipe writer alive until the PTY exits; EOF ends `script`.
+					const input = proc.stdin;
+					const [stdout, stderr, exitCode] = await Promise.all([
+						new Response(proc.stdout).arrayBuffer(),
+						new Response(proc.stderr).text(),
+						proc.exited,
+					]);
+					input.end();
+					daemonPid = await readDaemonOwnerPid(runtimeDir);
+					if (argv.includes("--daemon")) expect(daemonPid).toBeDefined();
+					const output = Buffer.from(stdout).toString("utf8");
 
-				expect(exitCode).toBe(124);
-				expect(Buffer.byteLength(output)).toBeLessThan(PTY_STARTUP_OUTPUT_CEILING);
-				expect(output).not.toContain("## [");
-				expect(output).not.toContain(STARTUP_CHANGELOG_FULL_HINT);
-				expect(stderr).not.toContain("Cannot find module");
-				expect(await readLastChangelogVersion(agentDir)).toBe(VERSION);
-			} finally {
-				await removeWithRetries(root);
-			}
-		});
-	}, 15_000);
+					expect(exitCode, `${stderr}\n${output.slice(-4000)}`).toBe(124);
+					expect(Buffer.byteLength(output), output.slice(-4000)).toBeLessThan(PTY_STARTUP_OUTPUT_CEILING);
+					expect(output).not.toContain("## [");
+					expect(output).not.toContain(STARTUP_CHANGELOG_FULL_HINT);
+					expect(stderr).not.toContain("Cannot find module");
+					expect(await readLastChangelogVersion(agentDir)).toBe(VERSION);
+				} finally {
+					try {
+						if (daemonPid !== undefined) await stopTestDaemon(daemonPid);
+					} finally {
+						await removeWithRetries(root);
+					}
+				}
+			});
+		},
+		60_000,
+	);
 });

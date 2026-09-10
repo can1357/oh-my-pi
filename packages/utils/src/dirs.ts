@@ -11,6 +11,7 @@
  * — if the env var is set, omp trusts that the migration has been done.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -179,10 +180,33 @@ export function relativePathWithinRoot(root: string, candidate: string): string 
 	return relative || null;
 }
 
+export type ProjectDirScope = {
+	get(): string;
+	run<T>(action: () => T): T;
+};
+
+export type ProjectDirContextKey<T> = symbol & {
+	readonly __projectDirContextValue?: T;
+};
+
+type ProjectDirContext = {
+	dir: string;
+	values: Map<symbol, unknown>;
+};
+
+const projectDirContext = new AsyncLocalStorage<ProjectDirContext>();
+const globalProjectDirContextValues = new Map<symbol, unknown>();
+
+function resolveProjectDir(dir: string): string {
+	return standardizeMacOSPath(path.resolve(dir));
+}
+
 let projectDir: string | undefined;
 
 /** Get the project directory. */
 export function getProjectDir(): string {
+	const scoped = projectDirContext.getStore();
+	if (scoped) return scoped.dir;
 	if (projectDir === undefined) {
 		try {
 			projectDir = standardizeMacOSPath(process.cwd());
@@ -204,9 +228,55 @@ export function getProjectDir(): string {
 	return projectDir;
 }
 
+/** Create a typed key for state that follows one reusable project-directory scope. */
+export function createProjectDirContextKey<T>(description: string): ProjectDirContextKey<T> {
+	return Symbol(description) as ProjectDirContextKey<T>;
+}
+
+/** Read or initialize state owned by the active project-directory scope. */
+export function getProjectDirContextValue<T>(key: ProjectDirContextKey<T>, initialize: () => T): T {
+	const values = projectDirContext.getStore()?.values ?? globalProjectDirContextValues;
+	if (!values.has(key)) values.set(key, initialize());
+	return values.get(key) as T;
+}
+
+/** Read state already owned by the active project-directory scope. */
+export function peekProjectDirContextValue<T>(key: ProjectDirContextKey<T>): T | undefined {
+	const values = projectDirContext.getStore()?.values ?? globalProjectDirContextValues;
+	return values.get(key) as T | undefined;
+}
+
+/** Bind state to the active project-directory scope. */
+export function setProjectDirContextValue<T>(key: ProjectDirContextKey<T>, value: T): void {
+	const values = projectDirContext.getStore()?.values ?? globalProjectDirContextValues;
+	values.set(key, value);
+}
+
+/** Create a reusable async project-directory scope for one long-lived session. */
+export function createProjectDirScope(dir: string): ProjectDirScope {
+	const context: ProjectDirContext = { dir: resolveProjectDir(dir), values: new Map() };
+	return {
+		get: () => context.dir,
+		run: action => projectDirContext.run(context, action),
+	};
+}
+
+/**
+ * Run work with an async-scoped project directory. Scoped updates remain local
+ * to the current session and never change the daemon process working directory.
+ */
+export function withProjectDir<T>(dir: string, action: () => T): T {
+	return createProjectDirScope(dir).run(action);
+}
+
 /** Set the project directory. */
 export function setProjectDir(dir: string): void {
-	const resolved = standardizeMacOSPath(path.resolve(dir));
+	const resolved = resolveProjectDir(dir);
+	const scoped = projectDirContext.getStore();
+	if (scoped) {
+		scoped.dir = resolved;
+		return;
+	}
 	process.chdir(resolved);
 	projectDir = resolved;
 }

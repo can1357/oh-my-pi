@@ -928,7 +928,6 @@ async function getChangelogForDisplay(
 		changelogPath: getChangelogPath(),
 	});
 }
-
 const SESSION_ID_ARG_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function normalizeContinueSessionArgs(parsed: Args, rawArgs?: readonly string[]): void {

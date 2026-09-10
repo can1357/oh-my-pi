@@ -779,8 +779,9 @@ export class EventController {
 		// is awaiting, then the handler's own final requestRender schedules a
 		// second identical frame. Removing it lets the render cadence follow real
 		// state changes rather than event volume (issue #4353).
-		const run = this.#handlers[event.type] as (e: AgentSessionEvent) => Promise<void>;
-		await run(event);
+		const run = this.#handlers[event.type];
+		if (typeof run !== "function") return;
+		await run(event as never);
 	}
 
 	#setTerminalProgress(active: boolean): void {
