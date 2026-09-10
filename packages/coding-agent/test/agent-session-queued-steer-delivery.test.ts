@@ -24,7 +24,7 @@ import type { PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-tem
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
 
@@ -76,6 +76,7 @@ describe("AgentSession queued steer delivery", () => {
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [] },
 			streamFn: mock.stream,
+			convertToLlm,
 		});
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.enabled": false });
@@ -413,14 +414,15 @@ describe("AgentSession queued steer delivery", () => {
 			expect(session.agent.hasQueuedMessages()).toBe(false);
 		});
 
-		it("delivers image and custom prompts with their own hidden companions and original metadata", async () => {
+		it("delivers each promoted companion group in one model turn in one-at-a-time mode", async () => {
 			const { session, sessionManager, mock } = await createSession([
 				{ content: ["initial"] },
 				{ content: ["steered"] },
+				{ content: ["custom prompt"] },
 				{ content: ["followed up"] },
 			]);
-			session.setSteeringMode("all");
-			session.setFollowUpMode("all");
+			session.setSteeringMode("one-at-a-time");
+			session.setFollowUpMode("one-at-a-time");
 			const companion: AgentMessage = {
 				role: "custom",
 				customType: "image-attachment-description",
@@ -465,8 +467,8 @@ describe("AgentSession queued steer delivery", () => {
 			const otherPrompt: AgentMessage = { role: "user", content: "Other request", timestamp: 14 };
 			let promoted: boolean[] = [];
 			let injected = false;
-			session.agent.setOnBeforeYield(() => {
-				if (injected) return;
+			session.subscribe(event => {
+				if (event.type !== "turn_end" || injected) return;
 				injected = true;
 				session.agent.replaceQueues(
 					[],
@@ -497,6 +499,15 @@ describe("AgentSession queued steer delivery", () => {
 						message.content.some(part => part.type === "image" && part.data === image.data),
 				),
 			).toBe(true);
+			const firstSteeredContext = JSON.stringify(mock.calls[1].context.messages);
+			expect(firstSteeredContext).toContain(companion.content as string);
+			expect(firstSteeredContext).toContain(keywordNotice.content as string);
+			expect(firstSteeredContext).toContain(videoNotice.content as string);
+			expect(firstSteeredContext).not.toContain(customPrompt.content as string);
+			expect(firstSteeredContext).not.toContain(otherPrompt.content as string);
+			expect(JSON.stringify(mock.calls[2].context.messages)).toContain(customPrompt.content as string);
+			expect(JSON.stringify(mock.calls[2].context.messages)).not.toContain(otherCompanion.content as string);
+			expect(mock.calls).toHaveLength(4);
 			expect(
 				sessionManager
 					.getEntries()

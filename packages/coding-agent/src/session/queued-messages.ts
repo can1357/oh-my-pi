@@ -72,6 +72,9 @@ export const MAGIC_KEYWORD_NOTICE_TYPES: Record<string, true> = {
 /** Hidden companion carrying vision descriptions for a text-only model. */
 export const IMAGE_ATTACHMENT_DESCRIPTION_TYPE = "image-attachment-description";
 
+/** Hidden companion carrying the source path of a video contact sheet. */
+export const VIDEO_ATTACHMENT_TYPE = "video-attachment";
+
 /** Whether a hidden queued message is a companion of an adjacent user prompt. */
 export function isHiddenUserCompanion(message: AgentMessage): boolean {
 	return (
@@ -80,7 +83,7 @@ export function isHiddenUserCompanion(message: AgentMessage): boolean {
 		message.display === false &&
 		(MAGIC_KEYWORD_NOTICE_TYPES[message.customType] === true ||
 			message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE ||
-			message.customType === "video-attachment")
+			message.customType === VIDEO_ATTACHMENT_TYPE)
 	);
 }
 
