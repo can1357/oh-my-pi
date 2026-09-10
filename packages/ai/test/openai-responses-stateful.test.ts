@@ -118,6 +118,60 @@ describe("openai-responses stateful chaining", () => {
 		expect(JSON.stringify(deltaInput)).not.toContain("Answer 1");
 	});
 
+	it("preserves store from the first onPayload replacement on strict-tool retry", async () => {
+		const sentRequests: Array<Record<string, unknown>> = [];
+		let payloadCalls = 0;
+		const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			sentRequests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+			if (sentRequests.length === 1) {
+				return new Response(
+					JSON.stringify({
+						error: {
+							type: "invalid_request_error",
+							message: "tool parameters schema is unsupported",
+						},
+					}),
+					{ status: 400, headers: { "content-type": "application/json" } },
+				);
+			}
+			return createStatefulSse("Recovered", "resp_strict_retry");
+		}) as FetchImpl;
+
+		const response = await streamOpenAIResponses(
+			model,
+			{
+				messages: [{ role: "user", content: "Use the tool", timestamp: 1000 }],
+				tools: [
+					{
+						name: "lookup",
+						description: "Look up a value",
+						parameters: {
+							type: "object",
+							properties: { query: { type: "string" } },
+							required: ["query"],
+							additionalProperties: false,
+						},
+					},
+				],
+			},
+			{
+				apiKey: "test-key",
+				fetch: fetchMock,
+				statefulResponses: false,
+				onPayload: payload => {
+					payloadCalls += 1;
+					return payloadCalls === 1 ? { ...(payload as Record<string, unknown>), store: true } : undefined;
+				},
+			},
+		).result();
+
+		expect(response.stopReason).toBe("stop");
+		expect(payloadCalls).toBe(2);
+		expect(sentRequests).toHaveLength(2);
+		expect(sentRequests[0]?.store).toBe(true);
+		expect(sentRequests[1]?.store).toBe(true);
+	});
+
 	it("keeps the automatic explicit cache breakpoint stable across chained turns", async () => {
 		const sentRequests: Array<Record<string, unknown>> = [];
 		const fetchMock = createCapturingFetch(sentRequests);

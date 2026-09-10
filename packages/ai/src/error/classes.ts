@@ -1,5 +1,6 @@
 import type { CapturedHttpErrorResponse } from "../utils/http-inspector";
 import { AbortError } from "./abort";
+import { attach, create, Flag } from "./flags";
 
 /** Prefix on errors raised when an Anthropic SSE stream envelope is malformed. */
 export const STREAM_ENVELOPE_ERROR_PREFIX = "Anthropic stream envelope error:";
@@ -93,6 +94,8 @@ export class AnthropicApiError extends ProviderHttpError {
 	constructor(status: number, message: string, headers: Headers) {
 		super(message, status, { headers });
 		this.name = "AnthropicApiError";
+		// Match the Anthropic transport retry contract after its retry budget is exhausted.
+		if (status === 409) attach(this, create(Flag.Transient));
 		this.requestId = headers.get("request-id");
 	}
 
