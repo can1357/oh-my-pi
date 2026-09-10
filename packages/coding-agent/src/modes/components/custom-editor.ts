@@ -830,6 +830,9 @@ export class CustomEditor extends Editor {
 	}
 
 	#spaceHoldGestureEnabled(): boolean {
+		// Push-to-talk is a text-composition gesture, so it stays out of Vim's Normal/Visual modes
+		// where the space bar is the `l` motion.
+		if (this.vimMode !== "insert") return false;
 		return this.onSpaceHoldStart !== undefined && (this.sttHoldEnabled?.() ?? false) && !this.isShowingAutocomplete();
 	}
 
@@ -1101,7 +1104,15 @@ export class CustomEditor extends Editor {
 			// handler. This matches the standard TUI/IDE pattern and prevents a
 			// single ESC from both closing an @ completion and aborting an active
 			// agent run (#1655).
-			if (this.#matchesAction(canonical, "app.interrupt") && this.onEscape && !this.isShowingAutocomplete()) {
+			// Vim mode claims Escape ahead of the interrupt: it has to mean "leave Insert mode" and
+			// "cancel a half-typed operator" first. Only a quiet Normal mode gives it back here, so
+			// the familiar single-ESC-to-abort still works once the user is out of Insert mode.
+			if (
+				this.#matchesAction(canonical, "app.interrupt") &&
+				this.onEscape &&
+				!this.isShowingAutocomplete() &&
+				!this.vimConsumesEscape()
+			) {
 				this.onEscape();
 				return;
 			}

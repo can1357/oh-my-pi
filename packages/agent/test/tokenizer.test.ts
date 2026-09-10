@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as natives from "@oh-my-pi/pi-natives";
 import { Tokenizer, tokenizerEncodingForModel } from "../src/tokenizer";
+import type { AgentMessage } from "../src/types";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -108,3 +109,72 @@ describe("countTokens with modes", () => {
 		);
 	});
 });
+
+// Contract: countMessage charges for every part of a message the provider will
+// bill for. A role or block type the switch does not name reads as free, and the
+// transcript, pruning and compaction math built on these numbers then plans
+// against a context window larger than the real one.
+describe("countMessage", () => {
+	const TEXT = "x".repeat(4000);
+	const IMAGE = { type: "image", data: "A".repeat(40_000), mimeType: "image/png" };
+
+	test("counts a developer message like the user message it mirrors", () => {
+		const tokenizer = new Tokenizer();
+		const user = tokenizer.countMessage({ role: "user", content: TEXT, timestamp: 0 } as AgentMessage);
+		const developer = tokenizer.countMessage({ role: "developer", content: TEXT, timestamp: 0 } as AgentMessage);
+
+		expect(user).toBeGreaterThan(0);
+		// developer is a core role: convertMessageToLlm ships it to the provider next
+		// to user. It used to miss the switch and land on `default: return 0`.
+		expect(developer).toBe(user);
+	});
+
+	test("charges the image estimate on user and developer content, as tool results do", () => {
+		const tokenizer = new Tokenizer();
+		const inToolResult = tokenizer.countMessage({
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			content: [IMAGE],
+			isError: false,
+			timestamp: 0,
+		} as unknown as AgentMessage);
+
+		expect(inToolResult).toBeGreaterThan(0);
+		expect(tokenizer.countMessage({ role: "user", content: [IMAGE], timestamp: 0 } as unknown as AgentMessage)).toBe(
+			inToolResult,
+		);
+		expect(
+			tokenizer.countMessage({ role: "developer", content: [IMAGE], timestamp: 0 } as unknown as AgentMessage),
+		).toBe(inToolResult);
+	});
+
+	test("adds the image estimate on top of the text beside it", () => {
+		const tokenizer = new Tokenizer();
+		const textOnly = tokenizer.countMessage({
+			role: "user",
+			content: [{ type: "text", text: TEXT }],
+			timestamp: 0,
+		} as AgentMessage);
+		const withImage = tokenizer.countMessage({
+			role: "user",
+			content: [{ type: "text", text: TEXT }, IMAGE],
+			timestamp: 0,
+		} as unknown as AgentMessage);
+
+		expect(textOnly).toBeGreaterThan(0);
+		expect(withImage).toBe(textOnly + inToolResultImageEstimate(tokenizer));
+	});
+});
+
+/** The per-image charge, read back through the arm that already applied it. */
+function inToolResultImageEstimate(tokenizer: Tokenizer): number {
+	return tokenizer.countMessage({
+		role: "toolResult",
+		toolCallId: "call-probe",
+		toolName: "read",
+		content: [{ type: "image", data: "A".repeat(40_000), mimeType: "image/png" }],
+		isError: false,
+		timestamp: 0,
+	} as unknown as AgentMessage);
+}

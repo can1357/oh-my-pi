@@ -262,7 +262,8 @@ export type StatusLineSegmentId =
 	| "cache_hit"
 	| "session_name"
 	| "usage"
-	| "collab";
+	| "collab"
+	| "vim";
 
 /** Submenu choice metadata. */
 export type SubmenuOption<V extends string = string> = {
@@ -2018,6 +2019,36 @@ export const SETTINGS_SCHEMA = {
 			group: "Input",
 			label: "Interrupt Mode",
 			description: "When steering messages interrupt tool execution",
+		},
+	},
+
+	"tui.vimMode": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Vim Editing Mode",
+			description:
+				"Modal prompt editing. Escape leaves Insert mode; Normal mode has hjkl, 0, $, ^, w, b, e, gg, G, counts, x/D/C, dd/yy, p and u; operators take motions or text objects (diw, ca(, dap); v/V start a Visual selection that y copies and d deletes",
+		},
+	},
+
+	"tui.vimModeDisplay": {
+		type: "enum",
+		values: ["text", "icon", "none"] as const,
+		default: "text",
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Vim Mode Indicator",
+			description: "How the current Vim mode appears in the status line",
+			condition: "vimModeEnabled",
+			options: [
+				{ value: "text", label: "Text", description: "Full mode name — NORMAL, INSERT, VISUAL, V-LINE" },
+				{ value: "icon", label: "Icon", description: "Single compact glyph per mode" },
+				{ value: "none", label: "Hidden", description: "Do not show the mode in the status line" },
+			],
 		},
 	},
 
