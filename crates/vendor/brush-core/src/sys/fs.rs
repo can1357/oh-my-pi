@@ -4,13 +4,19 @@ use std::{
 	borrow::Cow,
 	path::{Path, PathBuf},
 };
+#[cfg(windows)]
+use std::env;
+#[cfg(any(windows, test))]
+use std::{ffi::OsStr, path::Component};
 
 /// Normalizes shell-facing path aliases before `std::fs` sees them.
 #[allow(clippy::missing_const_for_fn, reason = "Windows implementation allocates")]
 pub fn normalize_shell_path(path: &Path) -> Cow<'_, Path> {
 	#[cfg(windows)]
 	{
-		translate_unix_drive_path(path).map_or(Cow::Borrowed(path), Cow::Owned)
+		translate_unix_drive_path(path)
+			.or_else(|| translate_unix_tmp_path(path, env::temp_dir))
+			.map_or(Cow::Borrowed(path), Cow::Owned)
 	}
 	#[cfg(not(windows))]
 	{
@@ -96,6 +102,27 @@ fn translate_unix_drive_path(path: &Path) -> Option<PathBuf> {
 		native.push(if ch == '/' || ch == '\\' { '\\' } else { ch });
 	}
 	Some(PathBuf::from(native))
+}
+
+/// Maps the POSIX `/tmp` tree onto the Windows system temporary directory.
+///
+/// A bare `/tmp` under Win32 is drive-relative (`<cwd-drive>:\tmp`), not a
+/// scratch root; MSYS/Cygwin tools instead mount it at `%TEMP%`. Rewriting it
+/// here — the single boundary every shell path passes through — keeps the
+/// in-process builtins, `ls`, and redirections agreeing with those external
+/// tools instead of scattering files across a drive-root `tmp`.
+#[cfg(any(windows, test))]
+fn translate_unix_tmp_path(path: &Path, temp_dir: impl FnOnce() -> PathBuf) -> Option<PathBuf> {
+	let mut components = path.components();
+	if components.next() != Some(Component::RootDir)
+		|| components.next() != Some(Component::Normal(OsStr::new("tmp")))
+	{
+		return None;
+	}
+
+	let mut native = temp_dir();
+	native.push(components.as_path());
+	Some(native)
 }
 
 #[cfg(any(windows, test))]
@@ -198,6 +225,22 @@ mod tests {
 			translate_unix_drive_path(Path::new("/mnt/d/项目/データ")).as_deref(),
 			Some(Path::new("D:\\项目\\データ")),
 		);
+	}
+
+	#[test]
+	fn unix_tmp_alias_maps_onto_system_temp_dir() {
+		let temp = PathBuf::from(r"C:\Users\Adam\AppData\Local\Temp");
+		assert_eq!(
+			translate_unix_tmp_path(Path::new("/tmp"), || temp.clone()).as_deref(),
+			Some(temp.as_path()),
+		);
+		assert_eq!(
+			translate_unix_tmp_path(Path::new("/tmp/probe/sub"), || temp.clone()).as_deref(),
+			Some(temp.join("probe").join("sub").as_path()),
+		);
+		// Only the `/tmp` component aliases; `/tmpfile` and `/var/tmp` do not.
+		assert_eq!(translate_unix_tmp_path(Path::new("/tmpfile"), || temp.clone()), None);
+		assert_eq!(translate_unix_tmp_path(Path::new("/var/tmp"), || temp.clone()), None);
 	}
 
 	#[test]
