@@ -48,6 +48,7 @@ describe("PR 3318 repro", () => {
 			resetCredits: { availableCount: 1 },
 		};
 		const text = await buildUsageReportText({
+			settings: Settings.isolated(),
 			session: { model: undefined, fetchUsageReports: async () => [report] },
 		} as never);
 		expect(text).toContain("user@example.test · plan: prolite forged: 1 saved rate-limit reset");
