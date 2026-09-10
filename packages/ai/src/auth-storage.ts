@@ -75,11 +75,7 @@ import { umansUsageProvider } from "./usage/umans";
 import { xaiOauthUsageProvider } from "./usage/xai-oauth";
 import { zaiRankingStrategy, zaiUsageProvider } from "./usage/zai";
 
-export {
-	isSqliteBusyError,
-	isSqliteCorruptionError,
-	SqliteAuthCredentialStore,
-} from "./auth/sqlite-credential-store";
+export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
 
 const USAGE_RANKING_METRIC_EPSILON = 1e-9;
 /**
@@ -4882,7 +4878,6 @@ export class AuthStorage {
 		return this.settleQuotaProbeSuccess(key);
 	}
 
-
 	#resolveWindowResetAt(window: UsageLimit["window"]): number | undefined {
 		if (!window) return undefined;
 		if (typeof window.resetsAt === "number" && Number.isFinite(window.resetsAt)) {
@@ -5758,6 +5753,16 @@ export class AuthStorage {
 			// usage/refresh awaits below can shift positional indices, so every later
 			// refresh / persist / CAS-disable addresses the row by this stable id.
 			credentialId = this.#getStoredCredentials(provider)[selection.index]?.id;
+			if (
+				options?.requestId &&
+				credentialId !== undefined &&
+				!this.tryAcquireTurnReservation({
+					credentialId,
+					incarnation: this.getCredentialIncarnation(credentialId),
+					requestId: options.requestId,
+				}).ok
+			)
+				return undefined;
 
 			const planRequirement =
 				providedPlanRequirement ?? resolveOpenAICodexPlanRequirement(provider, options?.modelId);

@@ -71,6 +71,7 @@ import type {
 } from "./openai-responses-wire";
 import {
 	applyCommonResponsesSamplingParams,
+	applyResponsesFormatParams,
 	applyOpenAIExtraBody,
 	applyOpenAIGatewayRouting,
 	applyResponsesCompatPolicy,
@@ -196,9 +197,7 @@ function isRetryableOpenAIResponsesStreamFailure(error: unknown): boolean {
 }
 
 interface OpenAIResponsesProviderSessionState
-	extends ProviderSessionState,
-		OpenAIStrictToolsState,
-		OpenAIReasoningEffortFallbackState {
+	extends ProviderSessionState, OpenAIStrictToolsState, OpenAIReasoningEffortFallbackState {
 	nativeHistoryReplayWarmed: boolean;
 	/** Stateful `previous_response_id` chain baselines, keyed by baseUrl/model/session. */
 	chains: Map<string, OpenAIResponsesChainState>;
@@ -1246,35 +1245,7 @@ export function buildParams(
 	if (options?.user !== undefined) params.user = options.user;
 	// `seed` is a Chat Completions parameter — the Responses API has no such
 	// field and rejects it as an unknown parameter.
-	const responseFormat = options?.responseFormat;
-	if (responseFormat !== undefined && typeof responseFormat === "object" && responseFormat !== null) {
-		const format = responseFormat as {
-			type?: string;
-			json_schema?: { name?: string; schema?: unknown; strict?: boolean; description?: string };
-		};
-		if (
-			format.type === "json_schema" &&
-			format.json_schema &&
-			(format.json_schema.name !== undefined || format.json_schema.schema !== undefined)
-		) {
-			// Chat Completions nests `{ name, schema, strict }` under `json_schema`;
-			// Responses `text.format` requires those fields flat at the top level.
-			params.text = {
-				...params.text,
-				format: {
-					type: "json_schema",
-					name: format.json_schema.name ?? "response",
-					schema: format.json_schema.schema,
-					...(format.json_schema.description !== undefined
-						? { description: format.json_schema.description }
-						: {}),
-					...(format.json_schema.strict !== undefined ? { strict: format.json_schema.strict } : {}),
-				} as never,
-			};
-		} else {
-			params.text = { ...params.text, format: responseFormat as never };
-		}
-	}
+	applyResponsesFormatParams(params, options?.responseFormat);
 	if (options?.include?.length) params.include = Array.from(new Set(options.include));
 	maybeAddOpenRouterAnthropicCacheControl(params, model, cacheRetention);
 	const outputToken = resolveOpenAIOutputTokenParam({

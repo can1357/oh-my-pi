@@ -33,6 +33,7 @@ import {
 import type { ResponseCreateParamsStreaming, ResponseStreamEvent } from "./openai-responses-wire";
 import {
 	applyCommonResponsesSamplingParams,
+	applyResponsesFormatParams,
 	applyResponsesReasoningParams,
 	buildResponsesInput,
 	createInitialResponsesAssistantMessage,
@@ -395,6 +396,7 @@ function buildParams(
 	if (options?.parallelToolCalls !== undefined) params.parallel_tool_calls = options.parallelToolCalls;
 
 	applyCommonResponsesSamplingParams(params, options, model);
+	applyResponsesFormatParams(params, options?.responseFormat);
 	if (options?.include?.length) params.include = Array.from(new Set(options.include));
 	if (options?.previousResponseId) {
 		params.previous_response_id = options.previousResponseId;

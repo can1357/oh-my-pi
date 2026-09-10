@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Azure Responses requests preserve structured-output formats, and concurrent requests retain separate credential reservations.
 - Forward OpenRouter Responses `previous_response_id` / `parallel_tool_calls` and Chat Completions `parallel_tool_calls` through the API mapper.
 - Delay non-Responses stream commit until meaningful assistant events, and flush held SSE prelude frames when a probing stream ends without commit.
 - Keep the leased credential id for anonymous cooldown-probe cleanup when concurrent reorders shift selection indices.

@@ -102,6 +102,7 @@ import type {
 	ResponseComputerToolCall,
 	ResponseContentPartAddedEvent,
 	ResponseCreateParamsStreaming,
+	ResponseFormatTextConfig,
 	ResponseCustomToolCall,
 	ResponseFunctionToolCall,
 	ResponseInput,
@@ -3542,6 +3543,27 @@ export type ResponsesSamplingParamsExtras = {
 };
 
 type CommonResponsesParams = ResponseCreateParamsStreaming & ResponsesSamplingParamsExtras;
+
+export function applyResponsesFormatParams(params: ResponseCreateParamsStreaming, responseFormat: unknown): void {
+	if (!responseFormat || typeof responseFormat !== "object") return;
+	const format = responseFormat as {
+		type?: string;
+		json_schema?: { name?: string; schema?: Record<string, unknown>; strict?: boolean; description?: string };
+	};
+	if (format.type === "json_schema" && format.json_schema) {
+		const schema = format.json_schema;
+		params.text = {
+			...params.text,
+			format: {
+				type: "json_schema",
+				name: schema.name ?? "response",
+				schema: schema.schema ?? {},
+				...(schema.strict !== undefined ? { strict: schema.strict } : {}),
+				...(schema.description !== undefined ? { description: schema.description } : {}),
+			},
+		};
+	} else params.text = { ...params.text, format: responseFormat as ResponseFormatTextConfig };
+}
 
 type CommonSamplingOptions = Pick<
 	StreamOptions,
