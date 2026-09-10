@@ -326,5 +326,8 @@ Thresholds are measured against that corpus, not chosen:
   backtick in a heading must not pair with one paragraphs later and exempt
   everything between them. An indented block cannot interrupt a paragraph, so
   a four-space continuation line inside prose is still scanned.
+  A fence still opens inside a block quote, whose `>` prefix the renderer's
+  lexer strips, and an HTML pair straddling two blocks does not exempt: the
+  renderer pairs tags per block and drops the rest, so that marker is prose.
 
 Fixtures: `packages/ai/test/fixtures/harmony-visible-collapse-corpus.json`.

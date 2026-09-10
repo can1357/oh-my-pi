@@ -5,7 +5,7 @@
 ### Fixed
 
 - Harmony leak detection now catches visible-answer collapse that has lost its `to=functions.NAME` marker, the shape gpt-5.6-sol produces most often; five shapes abort and retry the turn on their own ([#11466](https://github.com/can1357/oh-my-pi/issues/11466), `docs/ERRATA-GPT5-HARMONY.md` §2.9).
-- Fenced blocks, inline code spans, indented code blocks and matched `<code>` pairs (which the TUI renders as inline code) are exempt; fences and spans are parsed per CommonMark and a span no longer leaves its leaf block, so a nested ` ```xml ` block no longer closes an outer ` ```text ` fence and an escaped or unbalanced backtick no longer exempts a rendered marker.
+- Fenced blocks, inline code spans, indented code blocks and matched `<code>` pairs (which the TUI renders as inline code, and which must stay inside one block) are exempt, as are fences inside block quotes; fences and spans are parsed per CommonMark and a span no longer leaves its leaf block, so a nested ` ```xml ` block no longer closes an outer ` ```text ` fence and an escaped or unbalanced backtick no longer exempts a rendered marker.
 
 ## [18.1.16] - 2026-09-09
 

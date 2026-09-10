@@ -136,6 +136,9 @@ const HARNESS_ENVELOPE_RE =
 // banned from a backtick-fence info string only; a tilde fence may carry them.
 const BACKTICK_FENCE_RE = /^ {0,3}(`{3,})([^\n`]*)$/;
 const TILDE_FENCE_RE = /^ {0,3}(~{3,})(.*)$/;
+// Block-quote container prefix. Marked strips it before parsing the quoted
+// content, so a fence written `> ```text` opens a real code block.
+const BLOCK_QUOTE_PREFIX_RE = /^ {0,3}(?:> ?)+/;
 
 // Inline spans live inside one leaf block. A span may run over a lazy
 // paragraph continuation, but not into a line that opens a new block (heading,
@@ -504,7 +507,10 @@ function computeCodeRanges(text: string): Array<[number, number]> {
 	while (lineStart <= text.length) {
 		const newline = text.indexOf("\n", lineStart);
 		const lineEnd = newline === -1 ? text.length : newline;
-		const line = text.slice(lineStart, lineEnd);
+		// A block-quote container prefixes every line with `>`; the renderer's
+		// lexer strips it before the fence is parsed, so strip it here too or a
+		// quoted example reads as top-level prose and its marker trips `V`.
+		const line = text.slice(lineStart, lineEnd).replace(BLOCK_QUOTE_PREFIX_RE, "");
 		const match = BACKTICK_FENCE_RE.exec(line) ?? TILDE_FENCE_RE.exec(line);
 		if (match) {
 			const run = match[1];
@@ -536,14 +542,30 @@ function pushUnfencedCode(text: string, from: number, to: number, ranges: Array<
 	pushHtmlCodeSpans(text, from, to, ranges);
 }
 
-/** Matched `<code>…</code>` pairs, which the TUI renders as inline code. */
+/**
+ * Matched `<code>…</code>` pairs, which the TUI renders as inline code. Like
+ * backtick spans these are inline constructs: `collapseInlineHtml` pairs tags
+ * within one block's token array and drops the rest, so a pair straddling a
+ * block boundary renders as prose and must stay scannable.
+ */
 function pushHtmlCodeSpans(text: string, from: number, to: number, ranges: Array<[number, number]>): void {
 	HTML_CODE_SPAN_RE.lastIndex = from;
 	for (let m = HTML_CODE_SPAN_RE.exec(text); m !== null; m = HTML_CODE_SPAN_RE.exec(text)) {
 		const end = m.index + m[0].length;
 		if (end > to) break;
-		ranges.push([m.index, end]);
+		if (staysInOneBlock(text, m.index, end, to)) ranges.push([m.index, end]);
 	}
+}
+
+/** Whether `[start, end)` stays inside the leaf block its first character opens. */
+function staysInOneBlock(text: string, start: number, end: number, to: number): boolean {
+	const singleLine = isSingleLineBlock(text, start);
+	for (let i = text.indexOf("\n", start); i !== -1 && i < end; i = text.indexOf("\n", i + 1)) {
+		if (singleLine) return false;
+		if (text.startsWith("\n", skipInlineSpace(text, i + 1, to))) return false;
+		if (LEAF_BLOCK_START_RE.test(lineAt(text, i + 1, to))) return false;
+	}
+	return true;
 }
 
 /**

@@ -84,6 +84,12 @@
 			"signal": "M+V",
 			"text": "# `Title\nanalysis to=functions.edit code\n`",
 			"_note": "A stray backtick in an ATX heading must not pair with one in a later block; the marker between them is rendered."
+		},
+		{
+			"id": "visible_marker_html_pair_across_blocks",
+			"signal": "M+V",
+			"text": "# <code>Title\nanalysis to=functions.edit code\n</code>",
+			"_note": "collapseInlineHtml pairs tags within one block's tokens and drops the rest, so this marker renders as prose."
 		}
 	],
 	"negatives": [
@@ -162,6 +168,11 @@
 			"id": "line_initial_foreign_term",
 			"text": "猫 means cat in Japanese, and the same glyph is used in Chinese with a different reading.",
 			"_note": "A cited term is whitespace-delimited; only a glued or alone-on-its-line run is stranded residue."
+		},
+		{
+			"id": "blockquoted_fence_quoting_marker",
+			"text": "> ```text\n> analysis to=functions.edit code\n> ```\n\nThat is the shape the errata documents.",
+			"_note": "Marked strips the block-quote prefix before parsing, so this is a real fenced code block."
 		}
 	]
 }
