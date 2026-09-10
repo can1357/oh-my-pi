@@ -19,7 +19,8 @@
 		{
 			"id": "fabricated_permission_prompt",
 			"signal": "N",
-			"text": "A third-party application wants to take over your screen. Continue? (y/n) \n\nYou have 1006 weighted tokens left"
+			"text": "A third-party application wants to take over your screen. Continue? (y/n) \n",
+			"_note": "Session 2026-09-09T15-58-05Z, 115 blocks. The whole answer is the dialog; no token-budget line to fall back on."
 		},
 		{
 			"id": "script_residue_cjk",
@@ -41,6 +42,30 @@
 			"signal": "E",
 			"text": "Rocker’s second strict review is running.\n\n<system-notice>\n<job-progress id=\"pr726-watch\" type=\"process\" elapsed=\"33d21h\">\n<output>\nstall: no new events for 1h — watcher still running\n</output>\n</job-progress>\n</system-notice> \nNo. \n",
 			"_note": "Session 2026-09-09T16-02-08Z row 3265. One 357,273-character answer block fabricated 824 <system-notice> wakes with a self-incrementing elapsed counter reaching 33d23h, answering each with 'No.' The harness injects those tags; the model wrote them."
+		},
+		{
+			"id": "script_residue_intra_word",
+			"signal": "S",
+			"text": "I compared `declauding-v0.2.1` with `blader/humanizer` main (`v2.9.1`).\n\n### Comparison\n\n- **Already covered by Humanizer:** most of declაუდing entries 24-36: copula avoidance, participle tails, forced triads.",
+			"_note": "Session 2026-08-17T00-24-47Z. Georgian glyphs substituted inside the ASCII word `declauding`, rendered 14 times against 117 correct spellings in one session."
+		},
+		{
+			"id": "visible_marker_escaped_backticks",
+			"signal": "M+V",
+			"text": "The failing turn ended with \\`to=functions.hub\\` and nothing after it.",
+			"_note": "Backslash-escaped backticks are literal text in CommonMark; they open no code span, so the marker is rendered."
+		},
+		{
+			"id": "visible_marker_unequal_backtick_runs",
+			"signal": "M+V",
+			"text": "Trailing junk: ``to=functions.edit` never closed.",
+			"_note": "A two-backtick opener is closed only by a two-backtick run; a single backtick leaves the span open."
+		},
+		{
+			"id": "fabricated_notice_after_code_span",
+			"signal": "N",
+			"text": "The harness never prints `You have 500 tokens left`. \n\nYou have 3862 weighted tokens left\n",
+			"_note": "First match is quoted; the scan must continue past it to the real fabrication."
 		}
 	],
 	"negatives": [
@@ -59,7 +84,7 @@
 		{
 			"id": "terse_answer_at_measured_margin",
 			"text": "Yes.\n\nDistinction:\n\nStop.\nWait.\n\nEverything else in the answer continues as ordinary prose, well past the short-line window.",
-			"_note": "Four staccato lines. The longest legitimate run measured across 6,178 assistant text blocks in 261 persisted sessions was 4; the threshold is 5."
+			"_note": "Four staccato lines. Measured over 6,127 assistant text blocks in 264 persisted sessions, the longest clean run that also carries the collapse shape (mean line ≤ 12 chars, ≥ half sentence-terminated) was 4; the threshold is 5."
 		},
 		{
 			"id": "fenced_cascade_quote",
@@ -77,6 +102,28 @@
 			"id": "nested_fence_documentation",
 			"text": "Implemented for `/dump`:\n\n```text\n## System Notice: Async Progress\n\n```xml\n<system-notice>\n...\n</system-notice>\n```\n```\n\nThe actual fence grows beyond three backticks when the notice contains its own fenced code.",
 			"_note": "Session 2026-08-22T15-14-02Z. A ```xml block nested inside a ```text block: the inner fence carries an info string, so CommonMark keeps it open. Naive fence toggling closed the outer block early and exposed the tags."
+		},
+		{
+			"id": "status_enumeration_unterminated",
+			"text": "Ran the sweep.\n\nplaten clip\ncrankshaft\ncrank pin/ring/eye\ntransgear stub\nwheel axle/nut\ndrive train\n\nAll six parts regenerated.",
+			"_note": "Six short lines, none sentence-terminated: an enumeration, not a collapse. Session 2026-09-03T00-42-56Z produced the longest clean short-line run in the corpus (8) in exactly this shape - mean length 12.2, terminated ratio 0."
+		},
+		{
+			"id": "quoted_foreign_term_in_sentence",
+			"text": "The Japanese word for cat is 猫, and the city is 北京 in Chinese."
+		},
+		{
+			"id": "indented_inline_code_run",
+			"text": "Compare the two forms:\n\n    `stop.`\n    `no.`\n    `end.`\n    `done.`\n    `final.`\n\nBoth render identically."
+		},
+		{
+			"id": "tilde_fence_with_backtick_info",
+			"text": "Rendered output:\n\n~~~`markdown`\nto=functions.hub\n~~~\n\nA tilde fence may carry backticks in its info string."
+		},
+		{
+			"id": "multiline_inline_code_span",
+			"text": "The token `to=functions.edit\ncode` is reserved and never appears in a rendered answer.",
+			"_note": "A CommonMark inline span may cross one line break; splitting per line would expose the marker."
 		}
 	]
 }

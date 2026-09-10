@@ -4,8 +4,8 @@
 
 ### Fixed
 
-- Harmony leak detection now catches visible-answer collapse that has lost its `to=functions.NAME` marker, the shape gpt-5.6-sol produces most often. Co-signals were only ever computed inside the marker loop, so a collapsed turn committed silently and then re-seeded itself on later turns. `/compact` does not clear it either, because remote compaction keeps provider-native history. Five shapes now abort and retry the turn on their own: staccato terminator runs (`D`), fabricated harness notices (`N`), stranded non-Latin script residue (`S`), fabricated `<system-notice>` / `<job-progress>` envelopes (`E`, seen once as a 357,273-character block with 824 self-authored wakes), and a bare marker in a rendered answer (`V`). Measured over 6,006 assistant text blocks in 261 sessions: 104 hits in 6 sessions, zero in the other 255 and zero in 52,033 thinking blocks. See `docs/ERRATA-GPT5-HARMONY.md` §2.9.
-- The fenced-code exemption follows CommonMark now: a closing fence repeats the opening character at least as many times and carries no info string. Naive toggling let a ` ```xml ` block inside a ` ```text ` block close the outer fence early, which produced the only false positive in the corpus.
+- Harmony leak detection now catches visible-answer collapse that has lost its `to=functions.NAME` marker, the shape gpt-5.6-sol produces most often; five shapes abort and retry the turn on their own ([#11466](https://github.com/can1357/oh-my-pi/issues/11466), `docs/ERRATA-GPT5-HARMONY.md` §2.9).
+- Fenced blocks and inline code spans are parsed per CommonMark, so a nested ` ```xml ` block no longer closes an outer ` ```text ` fence and an escaped or unbalanced backtick no longer exempts a rendered marker.
 
 ## [18.1.16] - 2026-09-09
 

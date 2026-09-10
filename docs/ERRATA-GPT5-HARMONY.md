@@ -249,8 +249,8 @@ becomes a structurally-invisible exfiltration channel.
 
 ### 2.9 Marker-free collapse in the visible channel (gpt-5.6)
 
-Source: 261 persisted omp sessions, 6,178 assistant text blocks and 75,159
-thinking blocks, 2026-08-13 .. 2026-09-09, scanned with the shipped detector.
+Source: 264 persisted omp sessions, 6,127 assistant text blocks and 52,431
+thinking blocks, 2026-08-13 .. 2026-09-10, scanned with the shipped detector.
 
 §2.8 steps 4–7 do not require the routing marker to survive. When the tool-name
 token is simply unavailable, the collapse still happens and lands in the *final
@@ -258,18 +258,19 @@ answer* with no marker at all. Every marker-anchored signal (`C`/`G`/`S`/`B`/`R`
 is therefore blind to it: the earlier detector needed `M` before it would
 evaluate any co-signal.
 
-Four shapes, all observed:
+Five shapes, all observed:
 
 | Signal | Shape | Blocks |
 | ------ | ----- | -----: |
-| `D` | Staccato run — one short clause per line, whitespace-only separators between them: `stop.` `no.` `end.` `done.` `final.` | 54 |
-| `N` | Fabricated harness notice — `You have 1431 weighted tokens left`, `a a`, `A third-party application wants to take over your screen. Continue? (y/n)` | 35 |
-| `S` | Script residue stranded in an ASCII answer, including substitution *inside* an ASCII word: `declauding` rendered as `declაუდing` 14 times in one session | 25 |
+| `N` | Fabricated harness notice — `You have 1431 weighted tokens left`, `a a`, or an interactive consent dialog as the entire answer | 150 |
+| `D` | Staccato run — one short clause per line, whitespace-only separators between them: `stop.` `no.` `end.` `done.` `final.` | 56 |
+| `S` | Script residue stranded in an ASCII answer, including substitution *inside* an ASCII word: `declauding` rendered as `declაუდing` 14 times in one session | 24 |
+| `V` | A bare `to=functions.NAME` marker rendered in the final answer, outside code | 3 |
 | `E` | Fabricated harness envelope — the model writing omp's own injected `<system-notice>` / `<job-progress>` wrapper tags into its answer | 2 |
 
-104 distinct blocks across 6 sessions and 4 projects, counting a block once per
-signal set. Zero hits on the other 255 sessions and zero on all 52,033 thinking
-blocks.
+219 distinct blocks across 5 sessions and 3 projects, counting a block once per
+signal set (so the per-signal column sums higher). Zero hits on the other 259
+sessions and zero on all 52,431 thinking blocks.
 
 Three observations that matter for the runtime contract:
 
@@ -297,15 +298,27 @@ Three observations that matter for the runtime contract:
 
 Thresholds are measured against that corpus, not chosen:
 
-- `D` requires 5 consecutive staccato lines. The longest run in a legitimate
-  block was 4.
-- `S` allows at most 8 non-Latin characters in a block that is ≥90% ASCII.
-  Genuinely multilingual answers blow the budget and stay clean.
-- `V` and `E` are exempt inside fenced blocks and inline code spans. Fence
-  tracking follows CommonMark: a closer repeats the opener's character at least
-  as many times and carries no info string. Naive toggling let a ```` ```xml ````
+- `D` requires 5 consecutive staccato lines that also *look* collapsed: mean
+  line length ≤ 12 characters and at least half the lines sentence-terminated.
+  Line count alone is not enough — the longest clean short-line run in the
+  corpus is 8, a parts enumeration (`platen clip` / `crankshaft` / …) with mean
+  length 12.2 and no terminators. The longest clean run carrying the collapse
+  shape is 4, against a threshold of 5.
+- `N`'s consent-dialog form matches only when the prompt is the *whole* answer
+  (≤200 characters). 115 corpus blocks are nothing but that dialog, while prose
+  discussing it — this document, the bug reports, the 4.7 KB answer that first
+  described the shape — stays clean.
+- `S` allows at most 8 non-Latin characters in a block that is ≥90% ASCII, and
+  additionally requires the run to be *stranded*: abutting an ASCII letter, or
+  opening its own line. A term quoted inside a sentence ("the Japanese word for
+  cat is 猫") is neither. Genuinely multilingual answers blow the budget anyway.
+- `V` and `E` are exempt inside fenced blocks and inline code spans, both parsed
+  per CommonMark. A fence closes only on a repeat of the opener's character, at
+  least as long, with no info string — naive toggling let a ```` ```xml ````
   block nested in a ```` ```text ```` block close the outer fence early, which
-  produced the only false positive measured across the corpus — a real answer
-  documenting how `/dump` renders system notices.
+  produced the only false positive measured across the corpus. An inline span
+  needs a closing run of *equal* length, ignores backslash-escaped backticks,
+  and may cross a single line break; per-line matching mis-read all three and
+  exempted markers that were in fact rendered.
 
 Fixtures: `packages/ai/test/fixtures/harmony-visible-collapse-corpus.json`.

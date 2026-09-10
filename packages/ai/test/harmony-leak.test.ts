@@ -164,7 +164,11 @@ describe("detectHarmonyLeak — visible-channel collapse corpus", () => {
 		const detection = detectHarmonyLeak(answer, "assistant_text");
 		const signal = detection?.signals[0];
 		expect(signal?.classes).toEqual(["D"]);
-		expect(answer.slice(0, signal?.start)).toBe("The export finished and the artifact is uploaded.\n");
+		// The span starts at the first collapsed *word*, not at the line's
+		// indentation, so an indented run is reported (and code-exempted) by its
+		// content offset.
+		expect(answer.slice(0, signal?.start)).toBe("The export finished and the artifact is uploaded.\n ");
+		expect(answer.slice(signal?.start)).toBe("stop. \n no. \n end. \n done. \n final.");
 	});
 });
 
