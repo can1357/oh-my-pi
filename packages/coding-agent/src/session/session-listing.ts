@@ -4,7 +4,12 @@ import type { Message } from "@oh-my-pi/pi-ai";
 import { getSessionsDir, logger, parseJsonlLenient, toError } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { computeDefaultSessionDir } from "./session-paths";
-import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
+import {
+	FileSessionStorage,
+	primaryNameForSessionBackup,
+	type SessionStorage,
+	type SessionStorageStat,
+} from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./title-index";
 
 /**
@@ -543,14 +548,8 @@ export async function recoverOrphanedBackups(sessionDir: string, storage: Sessio
 	// For each primary path, pick the newest backup (highest mtime) as the recovery source.
 	const candidates = new Map<string, { backup: string; mtimeMs: number }>();
 	for (const backup of backups) {
-		const name = path.basename(backup);
-		// Expect "<primary>.<snowflake>.bak" where <primary> ends in ".jsonl".
-		if (!name.endsWith(".bak")) continue;
-		const trimmed = name.slice(0, -".bak".length);
-		const dotIdx = trimmed.lastIndexOf(".");
-		if (dotIdx <= 0) continue;
-		const primaryName = trimmed.slice(0, dotIdx);
-		if (!primaryName.endsWith(".jsonl")) continue;
+		const primaryName = primaryNameForSessionBackup(path.basename(backup));
+		if (primaryName === undefined) continue;
 		const primaryPath = path.join(sessionDir, primaryName);
 		let mtimeMs = 0;
 		try {

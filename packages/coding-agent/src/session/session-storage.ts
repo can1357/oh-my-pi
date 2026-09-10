@@ -490,16 +490,19 @@ export class FileSessionStorage implements SessionStorage {
 }
 
 /**
- * True when `name` is a `<primary>.<snowflake>.bak` backup of the given
- * primary basename, using the same suffix parsing as recoverOrphanedBackups
- * so longer session names that merely share a prefix never match.
+ * Map a `<primary>.<snowflake>.bak` file name to its primary basename, or
+ * undefined when the name is not a session backup. Single grammar shared by
+ * recovery (session-listing) and deletion so both sides recognize exactly
+ * the same files.
  */
-function isSessionBackupSibling(name: string, primaryBase: string): boolean {
-	if (!name.endsWith(".bak")) return false;
+export function primaryNameForSessionBackup(name: string): string | undefined {
+	if (!name.endsWith(".bak")) return undefined;
 	const trimmed = name.slice(0, -".bak".length);
 	const dotIdx = trimmed.lastIndexOf(".");
-	if (dotIdx <= 0) return false;
-	return trimmed.slice(0, dotIdx) === primaryBase;
+	if (dotIdx <= 0) return undefined;
+	const primaryName = trimmed.slice(0, dotIdx);
+	if (!primaryName.endsWith(".jsonl")) return undefined;
+	return primaryName;
 }
 
 /**
@@ -516,7 +519,7 @@ function listSessionBackupSiblings(dir: string, primaryBase: string): string[] {
 		const error = toError(err);
 		throw new Error(`Failed to scan session backups in ${dir}: ${error.message}`, { cause: error });
 	}
-	return names.filter(name => isSessionBackupSibling(name, primaryBase)).map(name => path.join(dir, name));
+	return names.filter(name => primaryNameForSessionBackup(name) === primaryBase).map(name => path.join(dir, name));
 }
 
 function matchesPattern(name: string, pattern: string): boolean {
