@@ -34,7 +34,7 @@ pub fn pattern_drive_alias_root(
 ) -> Option<(PathBuf, usize)> {
 	#[cfg(windows)]
 	{
-		pattern_drive_alias_root_impl(starts_with_forward_slash, first, second, third)
+		pattern_drive_alias_root_impl(starts_with_forward_slash, first, second, third, env::temp_dir)
 	}
 	#[cfg(not(windows))]
 	{
@@ -49,9 +49,16 @@ fn pattern_drive_alias_root_impl(
 	first: &str,
 	second: Option<&str>,
 	third: Option<&str>,
+	temp_dir: impl FnOnce() -> PathBuf,
 ) -> Option<(PathBuf, usize)> {
 	if !starts_with_forward_slash || !first.is_empty() {
 		return None;
+	}
+
+	// A bare `/tmp` glob root maps to the system temp dir, matching the
+	// non-pattern rewrite in `normalize_shell_path`.
+	if second == Some("tmp") {
+		return Some((temp_dir(), 2));
 	}
 
 	if let Some(drive) = second
@@ -246,23 +253,41 @@ mod tests {
 	#[test]
 	fn pattern_drive_alias_roots_report_consumed_components() {
 		assert_eq!(
-			pattern_drive_alias_root_impl(true, "", Some("d"), Some("project")),
+			pattern_drive_alias_root_impl(true, "", Some("d"), Some("project"), || PathBuf::from(r"C:\Temp")),
 			Some((PathBuf::from("D:/"), 2)),
 		);
 		assert_eq!(
-			pattern_drive_alias_root_impl(true, "", Some("mnt"), Some("d")),
+			pattern_drive_alias_root_impl(true, "", Some("mnt"), Some("d"), || PathBuf::from(r"C:\Temp")),
 			Some((PathBuf::from("D:/"), 3)),
 		);
 	}
 
 	#[test]
 	fn pattern_drive_alias_roots_require_forward_slash_prefix() {
-		assert_eq!(pattern_drive_alias_root_impl(false, "", Some("d"), Some("logs")), None);
+		let tmp = || PathBuf::from(r"C:\Temp");
+		assert_eq!(pattern_drive_alias_root_impl(false, "", Some("d"), Some("logs"), tmp), None);
 		assert_eq!(
-			pattern_drive_alias_root_impl(false, "", Some("mnt"), Some("d")),
+			pattern_drive_alias_root_impl(false, "", Some("mnt"), Some("d"), || PathBuf::from(r"C:\Temp")),
 			None,
 		);
-		assert_eq!(pattern_drive_alias_root_impl(true, "", Some("mnt"), Some("data")), None);
+		assert_eq!(
+			pattern_drive_alias_root_impl(true, "", Some("mnt"), Some("data"), || PathBuf::from(r"C:\Temp")),
+			None,
+		);
+	}
+
+	#[test]
+	fn pattern_tmp_root_maps_to_system_temp() {
+		let temp = PathBuf::from(r"C:\Users\Adam\AppData\Local\Temp");
+		assert_eq!(
+			pattern_drive_alias_root_impl(true, "", Some("tmp"), Some("a"), || temp.clone()),
+			Some((temp.clone(), 2)),
+		);
+		// `/tmpfile` is not the tmp alias; it falls through to plain root handling.
+		assert_eq!(
+			pattern_drive_alias_root_impl(true, "", Some("tmpfile"), None, || temp.clone()),
+			None,
+		);
 	}
 
 	#[test]
