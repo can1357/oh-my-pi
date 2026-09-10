@@ -25,6 +25,7 @@ import {
 	setProfile,
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
+import { preloadProjectEnv } from "@oh-my-pi/pi-utils/env-preload";
 import { fatal, interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
@@ -482,6 +483,10 @@ export async function runCli(argv: string[]): Promise<void> {
 		}
 		return;
 	}
+	// Project files may live on high-latency mounts (notably WSL drvfs). Read the
+	// optional dotenv asynchronously before importing the environment-dependent
+	// command graph so a blocked filesystem operation cannot pin the JS thread.
+	await preloadProjectEnv();
 
 	// `PI_PROXY` must reach the bare global `fetch` before any provider call:
 	// OAuth refresh/login and usage probes never pass through

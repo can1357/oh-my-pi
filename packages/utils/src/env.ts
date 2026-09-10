@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv } from "./dirs";
+import { getPreloadedProjectEnv } from "./env-preload";
 
 export * from "./worker-host";
 
@@ -210,38 +211,40 @@ function parseEnvLine(line: string): { key: string; value: string } | undefined 
 	return { key, value: (commentIndex === -1 ? raw : raw.slice(0, commentIndex)).trimEnd() };
 }
 
-/**
- * Parses a .env file synchronously into key-value string pairs using
- * {@link parseEnvLine} for Bun-compatible line semantics, then mirrors valid
- * `OMP_` variables to their `PI_` aliases.
- */
-export function parseEnvFile(filePath: string): Record<string, string> {
+function parseEnvContent(content: string): Record<string, string> {
 	const result: Record<string, string> = {};
-	try {
-		const content = fs.readFileSync(filePath, "utf-8");
-		for (const line of content.split("\n")) {
-			const parsed = parseEnvLine(line);
-			if (parsed && isSafeEnvValue(parsed.value)) result[parsed.key] = parsed.value;
-		}
-	} catch {
-		// File doesn't exist or can't be read - return empty result
+	for (const line of content.split("\n")) {
+		const parsed = parseEnvLine(line);
+		if (parsed && isSafeEnvValue(parsed.value)) result[parsed.key] = parsed.value;
 	}
 
-	// OMP_ overrides PI_
-	for (const k in result) {
-		if (k.startsWith("OMP_")) {
-			result[`PI_${k.slice(4)}`] = result[k];
+	for (const key in result) {
+		if (key.startsWith("OMP_")) {
+			result[`PI_${key.slice(4)}`] = result[key];
 		}
 	}
-
 	return result;
 }
 
-// Eagerly parse the user's $HOME/.env and the current project's .env (from cwd)
+/** Parses a dotenv file synchronously with Bun-compatible semantics and OMP-to-PI aliases. */
+export function parseEnvFile(filePath: string): Record<string, string> {
+	try {
+		return parseEnvContent(fs.readFileSync(filePath, "utf-8"));
+	} catch {
+		return {};
+	}
+}
+
+// Home/profile files live outside the project filesystem. The CLI preloads the
+// launch project's file asynchronously; non-CLI consumers retain the sync fallback.
 const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));
 const piEnv = parseEnvFile(path.join(getConfigRootDir(), ".env"));
 const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
-const projectEnv = parseEnvFile(path.join(getProjectDir(), ".env"));
+const projectEnvPath = path.join(getProjectDir(), ".env");
+const preloadedProjectEnv = getPreloadedProjectEnv(projectEnvPath);
+const projectEnv = preloadedProjectEnv
+	? parseEnvContent(preloadedProjectEnv.content ?? "")
+	: parseEnvFile(projectEnvPath);
 
 for (const key of Object.keys(Bun.env)) {
 	const value = Bun.env[key];

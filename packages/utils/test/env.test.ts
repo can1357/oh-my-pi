@@ -9,6 +9,7 @@ import {
 	parseEnvFile,
 	setInteractiveHost,
 } from "@oh-my-pi/pi-utils/env";
+import { getPreloadedProjectEnv, preloadProjectEnv } from "@oh-my-pi/pi-utils/env-preload";
 
 const tempDirs: string[] = [];
 const runtimeProbePath = path.join(import.meta.dir, "fixtures", "test-runtime-probe.ts");
@@ -26,6 +27,25 @@ function writeTempEnv(content: string): string {
 	fs.writeFileSync(filePath, content);
 	return filePath;
 }
+
+describe("preloadProjectEnv", () => {
+	it("returns at its deadline when the project dotenv read stalls", async () => {
+		const stalled = Promise.withResolvers<string>();
+		const cwd = path.join(os.tmpdir(), "pi-utils-stalled-env");
+		const startedAt = performance.now();
+
+		await preloadProjectEnv({
+			cwd,
+			timeoutMs: 20,
+			readFile: () => stalled.promise,
+		});
+
+		expect(performance.now() - startedAt).toBeLessThan(500);
+		const preloaded = getPreloadedProjectEnv(path.join(cwd, ".env"));
+		expect(preloaded).toBeDefined();
+		expect(preloaded?.content).toBeUndefined();
+	});
+});
 
 describe("getDbBusyTimeoutMs", () => {
 	it("defaults to the bounded headless timeout", () => {
