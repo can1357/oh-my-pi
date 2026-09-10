@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed openai-responses replay wedging a repaired orphan tool-result note between another call's `function_call` and `function_call_output`, which broke round pairing on strict validators (e.g. DeepSeek) with `400 No tool output found for tool call …`: orphan-output/call repair now runs before the interleaved-message hoist, so any injected note is relocated out of the tool-call batch ([#11473](https://github.com/can1357/oh-my-pi/issues/11473)).
+
 ## [18.1.16] - 2026-09-09
 
 ### Fixed

@@ -2091,10 +2091,16 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 		msgIndex++;
 	}
 
-	const hoisted = hoistInterleavedResponsesToolBatchMessages(messages);
-	const withRepairedOutputs = options.repairOrphanOutputs ? repairOrphanResponsesToolOutputs(hoisted) : hoisted;
+	// Repair orphan outputs/calls first: both can inject an assistant `message`
+	// (an `[Orphan … result]` note, a `[Computer call interrupted …]` note) in
+	// place of, or beside, a tool item — wedging it between another call's
+	// `function_call` and `function_call_output`. Hoist runs last so it relocates
+	// any wedged message — model-streamed or repair-injected — out of the batch,
+	// preserving the Responses call→output pairing (#11473, extends #8789).
+	const withRepairedOutputs = options.repairOrphanOutputs ? repairOrphanResponsesToolOutputs(messages) : messages;
 	const withRepairedCalls = repairOrphanResponsesToolCalls(withRepairedOutputs);
-	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(withRepairedCalls);
+	const hoisted = hoistInterleavedResponsesToolBatchMessages(withRepairedCalls);
+	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(hoisted);
 }
 
 type ResponsesReplayAssistantMessage = Omit<ResponseOutputMessage, "id"> & { id?: string };
