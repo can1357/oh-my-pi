@@ -1,10 +1,11 @@
 // Contract: SimpleStreamOptions / CursorOptions capability and session fields
 // must populate AgentRunRequest protobuf members (not just be allowlisted).
 import { describe, expect, it } from "bun:test";
-import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
+import { buildGrpcRequest } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import type { AgentRunRequest } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
+import { AgentClientMessageSchema, type AgentRunRequest } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
+import { fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
 function cursorModel(): Model<"cursor-agent"> {
 	return buildModel({
@@ -21,7 +22,7 @@ function cursorModel(): Model<"cursor-agent"> {
 	});
 }
 
-function capture(options: {
+async function capture(options: {
 	cursorClientSupportsInlineImages?: boolean;
 	cursorClientSupportsRoutedModelUpdate?: boolean;
 	cursorClientSupportsPromptContextUsageRpc?: boolean;
@@ -29,20 +30,15 @@ function capture(options: {
 	cursorAgentSessionId?: string;
 	conversationId?: string;
 }): Promise<AgentRunRequest> {
-	const { promise, resolve, reject } = Promise.withResolvers<AgentRunRequest>();
-	streamCursor(cursorModel(), { messages: [{ role: "user", content: "pong", timestamp: 0 }] } satisfies Context, {
-		apiKey: "test-token",
-		...options,
-		onPayload: payload => {
-			if (payload && typeof payload === "object" && "conversationState" in payload) {
-				resolve(payload as AgentRunRequest);
-			} else {
-				reject(new Error("Cursor payload was not an AgentRunRequest"));
-			}
-			throw new Error("stop after capturing Cursor payload");
-		},
-	});
-	return promise;
+	const { requestBytes } = await buildGrpcRequest(
+		cursorModel(),
+		{ messages: [{ role: "user", content: "pong", timestamp: 0 }] } satisfies Context,
+		options,
+		{ conversationId: options.conversationId ?? "fixture-conversation", blobStore: new Map() },
+	);
+	const message = fromBinary(AgentClientMessageSchema, requestBytes).message;
+	if (message.case !== "runRequest") throw new Error("Expected serialized RunRequest");
+	return message.value;
 }
 
 describe("Cursor AgentRunRequest option wiring", () => {

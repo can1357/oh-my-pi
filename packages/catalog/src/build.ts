@@ -66,6 +66,10 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (typeof contextPromotionTarget === "string" && model.contextPromotionTarget === undefined) {
 		model.contextPromotionTarget = contextPromotionTarget;
 	}
+	const requestModelId = catalog.requestModelId;
+	if (typeof requestModelId === "string" && requestModelId.trim() && model.requestModelId === undefined) {
+		model.requestModelId = requestModelId.trim();
+	}
 }
 
 /**

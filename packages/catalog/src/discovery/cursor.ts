@@ -321,9 +321,7 @@ function normalizeCursorModel(
 		Boolean(details.thinkingDetails) ||
 		reference?.reasoning === true;
 
-	// Roster-echoed auto sentinel: record the verbatim roster id so the
-	// provider echoes it instead of the synthetic "default" wire id.
-	const rosterAutoRequestModelId = id === "auto" ? { requestModelId: id } : {};
+	// Discovery records the authoritative wire identity for every roster row.
 	if (reference) {
 		return {
 			...reference,
@@ -334,7 +332,7 @@ function normalizeCursorModel(
 			input: resolveCursorInput(id, reference.input),
 			contextWindow: resolveCursorContextWindow(details, id, reference.contextWindow),
 			cursorMaxMode: details.maxMode,
-			...rosterAutoRequestModelId,
+			requestModelId: id,
 		};
 	}
 	return {
@@ -349,7 +347,7 @@ function normalizeCursorModel(
 		contextWindow: resolveCursorContextWindow(details, id, DEFAULT_CONTEXT_WINDOW),
 		maxTokens: DEFAULT_MAX_TOKENS,
 		cursorMaxMode: details.maxMode,
-		...rosterAutoRequestModelId,
+		requestModelId: id,
 	};
 }
 

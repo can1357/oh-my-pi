@@ -1,6 +1,10 @@
 // Provider-wire compat for "cursor"; regenerated from the frozen census using deployment contract selectors.
 
 provider "cursor" {
+	// Synthetic auto uses default; authoritative discovery request ids take precedence.
+	models "auto" {
+		request-model-id "default"
+	}
 	thinking-mode "effort"
 	class "anthropic" {
 		family "fable" {

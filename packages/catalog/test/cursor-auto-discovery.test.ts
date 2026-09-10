@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import { fetchCursorUsableModels } from "../src/discovery/cursor";
+import { buildModel } from "../src/build";
 import { GetUsableModelsResponseSchema, ModelDetailsSchema } from "../src/discovery/cursor-proto";
 import { create, toBinary } from "../src/discovery/protobuf";
 import type { ModelSpec } from "../src/types";
@@ -56,8 +57,13 @@ describe("cursor discovery auto sentinel", () => {
 		expect(byId.get("auto")?.requestModelId).toBe("auto");
 	});
 
-	it("leaves requestModelId unset on concrete roster entries", async () => {
+	it("keeps live and cached roster wire identities ahead of the synthetic default policy", async () => {
 		const byId = await discover();
-		expect(byId.get("composer-2.5")?.requestModelId).toBeUndefined();
+		const auto = byId.get("auto")!;
+		const cached = JSON.parse(JSON.stringify(auto)) as ModelSpec<"cursor-agent">;
+		expect(buildModel(auto).requestModelId).toBe("auto");
+		expect(buildModel(cached).requestModelId).toBe("auto");
+		expect(buildModel({ ...auto, requestModelId: undefined }).requestModelId).toBe("default");
+		expect(buildModel(byId.get("composer-2.5")!).requestModelId).toBe("composer-2.5");
 	});
 });

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Cursor automatic routing retains the correct wire identity across live discovery and cached catalogs.
 - Cursor discovery preserves the roster model ID for automatic routing.
 - Updated Cursor protocol definitions for capability flags, session identifiers, and server updates.
 
