@@ -1,3 +1,4 @@
+import { CUSTOM_STATUS_LINE_DEFAULTS } from "../../../config/settings-schema";
 import type { PresetDef, StatusLinePreset } from "./types";
 
 export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
@@ -94,8 +95,8 @@ export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 
 	custom: {
 		// User-defined - these are just defaults that get overridden
-		leftSegments: ["vim", "model", "mode", "path", "git", "pr"],
-		rightSegments: ["session_name", "token_total", "cost", "context_pct"],
+		leftSegments: [...CUSTOM_STATUS_LINE_DEFAULTS.left],
+		rightSegments: [...CUSTOM_STATUS_LINE_DEFAULTS.right],
 		separator: "powerline-thin",
 		segmentOptions: {},
 	},
