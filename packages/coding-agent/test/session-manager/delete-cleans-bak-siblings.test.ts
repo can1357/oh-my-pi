@@ -47,4 +47,58 @@ describe("deleteSessionWithArtifacts cleans stale .bak siblings", () => {
 
 		expect(storage.existsSync(primary)).toBe(false);
 	});
+
+	it("leaves longer-named sessions' backups alone (prefix collision)", async () => {
+		const primary = path.join(sessionDir, "foo.jsonl");
+		const ownBackup = `${primary}.1700000000000.bak`;
+		const longerPrimary = path.join(sessionDir, "foo.jsonl.copy.jsonl");
+		const longerBackup = `${longerPrimary}.1700000000001.bak`;
+		await storage.writeText(primary, '{"type":"session","id":"foo"}\n');
+		await storage.writeText(ownBackup, '{"type":"session","id":"foo","stale":true}\n');
+		await storage.writeText(longerPrimary, '{"type":"session","id":"copy"}\n');
+		await storage.writeText(longerBackup, '{"type":"session","id":"copy","stale":true}\n');
+
+		await storage.deleteSessionWithArtifacts(primary);
+
+		expect(storage.existsSync(primary)).toBe(false);
+		expect(storage.existsSync(ownBackup)).toBe(false);
+		expect(storage.existsSync(longerBackup)).toBe(true);
+		expect(await storage.readText(longerPrimary)).toContain('"id":"copy"');
+	});
+
+	it("fails the delete when the backup scan fails instead of reporting success", async () => {
+		// A regular file in place of the directory: readdirSync raises ENOTDIR,
+		// which must propagate — only a missing directory reads as empty.
+		const blocker = path.join(sessionDir, "blocker");
+		await storage.writeText(blocker, "not a dir\n");
+
+		await expect(storage.deleteSessionWithArtifacts(path.join(blocker, "ghost.jsonl"))).rejects.toThrow(
+			/Failed to scan session backups/,
+		);
+	});
+
+	it("tolerates a backup that vanishes mid-delete (raced promotion)", async () => {
+		const primary = path.join(sessionDir, "session-raced.jsonl");
+		const backup = `${primary}.1700000000000.bak`;
+		await storage.writeText(primary, '{"type":"session","id":"raced"}\n');
+		await storage.writeText(backup, '{"type":"session","id":"raced","stale":true}\n');
+
+		let backupUnlinkCalls = 0;
+		class RacedStorage extends FileSessionStorage {
+			override async unlink(target: string): Promise<void> {
+				if (target === backup) {
+					backupUnlinkCalls += 1;
+					const err = new Error(`ENOENT: no such file or directory, unlink '${target}'`);
+					(err as NodeJS.ErrnoException).code = "ENOENT";
+					throw err;
+				}
+				return super.unlink(target);
+			}
+		}
+
+		await new RacedStorage().deleteSessionWithArtifacts(primary);
+
+		expect(backupUnlinkCalls).toBe(1);
+		expect(storage.existsSync(primary)).toBe(false);
+	});
 });

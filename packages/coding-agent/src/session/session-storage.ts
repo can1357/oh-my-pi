@@ -446,34 +446,29 @@ export class FileSessionStorage implements SessionStorage {
 	 * Artifacts are stored in a sibling directory with the same name minus .jsonl extension.
 	 */
 	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
-		// Delete the session file itself
-		await this.unlink(sessionPath);
-
-		// Remove stale `<basename>.jsonl.<snowflake>.bak` siblings left behind by
-		// failed EPERM-rewrite unlinks. Without this the next listing scan runs
-		// recoverOrphanedBackups and resurrects the deleted session (#11499).
-		// Missing files are fine, but surface real cleanup failures because the
-		// session file is already gone.
+		// Remove stale `<primary>.<snowflake>.bak` siblings FIRST, before the
+		// primary is unlinked: a concurrent listing scan (recoverOrphanedBackups)
+		// or a crash in between would otherwise resurrect the session (#11499).
+		// Safe end-states are primary-present-with-backups or all-gone.
+		const dir = path.dirname(sessionPath);
 		const base = path.basename(sessionPath);
-		let backups: string[];
-		try {
-			backups = this.listFilesSync(path.dirname(sessionPath), "*.bak").filter(
-				candidate => path.basename(candidate).startsWith(`${base}.`),
-			);
-		} catch {
-			backups = [];
-		}
-		for (const backup of backups) {
+		for (const backup of listSessionBackupSiblings(dir, base)) {
 			try {
 				await this.unlink(backup);
 			} catch (err) {
+				// A backup that vanished mid-delete was promoted or removed by a
+				// racing scan; the primary unlink below settles the end state.
 				if (isEnoent(err)) continue;
 				const error = toError(err);
-				throw new Error(`Session file deleted but failed to remove session backup ${backup}: ${error.message}`, {
-					cause: error,
-				});
+				throw new Error(
+					`Failed to remove session backup ${backup} while deleting ${sessionPath}: ${error.message}`,
+					{ cause: error },
+				);
 			}
 		}
+
+		// Delete the session file itself
+		await this.unlink(sessionPath);
 
 		// Compute artifacts directory: /path/to/session.jsonl -> /path/to/session
 		const artifactsDir = sessionPath.slice(0, -6);
@@ -492,6 +487,36 @@ export class FileSessionStorage implements SessionStorage {
 			);
 		}
 	}
+}
+
+/**
+ * True when `name` is a `<primary>.<snowflake>.bak` backup of the given
+ * primary basename, using the same suffix parsing as recoverOrphanedBackups
+ * so longer session names that merely share a prefix never match.
+ */
+function isSessionBackupSibling(name: string, primaryBase: string): boolean {
+	if (!name.endsWith(".bak")) return false;
+	const trimmed = name.slice(0, -".bak".length);
+	const dotIdx = trimmed.lastIndexOf(".");
+	if (dotIdx <= 0) return false;
+	return trimmed.slice(0, dotIdx) === primaryBase;
+}
+
+/**
+ * List a session file's backup siblings. A missing directory reads as empty;
+ * any other scan failure propagates so a delete never reports success with
+ * stale backups left behind.
+ */
+function listSessionBackupSiblings(dir: string, primaryBase: string): string[] {
+	let names: string[];
+	try {
+		names = fs.readdirSync(dir);
+	} catch (err) {
+		if (isEnoent(err)) return [];
+		const error = toError(err);
+		throw new Error(`Failed to scan session backups in ${dir}: ${error.message}`, { cause: error });
+	}
+	return names.filter(name => isSessionBackupSibling(name, primaryBase)).map(name => path.join(dir, name));
 }
 
 function matchesPattern(name: string, pattern: string): boolean {
