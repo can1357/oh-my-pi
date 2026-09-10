@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { streamSimple } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import {
 	buildTransformedCodexRequestBody,
 	createOpenAICodexCompatibilityMetadata,
 	getOpenAICodexTransportDetails,
 	getOpenAICodexWebSocketDebugStats,
+	openCodexCompactionEventStream,
 	prewarmOpenAICodexResponses,
 	resetOpenAICodexHistoryAfterCompaction,
 	streamOpenAICodexResponses,
@@ -2152,6 +2154,44 @@ describe("openai-codex streaming", () => {
 		}).result();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("terminal completion event");
+		expect(AIError.retriable(result.errorId)).toBe(true);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("retries a replay-safe SSE stream that ends before its terminal event", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const token = createCodexTestToken();
+		let requestCount = 0;
+		const truncatedSse = `data: ${JSON.stringify({
+			type: "response.created",
+			response: { id: "resp_truncated", status: "in_progress" },
+		})}\n\n`;
+		const successSse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_retry", role: "assistant", status: "in_progress", content: [] } })}`,
+			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "Hello after retry" })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_retry", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Hello after retry" }] } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock = vi.fn(async () => {
+			requestCount += 1;
+			return new Response(requestCount === 1 ? truncatedSse : successSse, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		});
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: token,
+			fetch: fetchMock,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find(block => block.type === "text")?.text).toBe("Hello after retry");
 	});
 
 	it("stops reading SSE responses after a terminal response event", async () => {
@@ -2941,6 +2981,113 @@ describe("openai-codex streaming", () => {
 		expect(fallbackDetails.lastTransport).toBe("sse");
 		expect(fallbackDetails.websocketDisabled).toBe(true);
 		expect(fallbackDetails.fallbackCount).toBe(1);
+	});
+
+	it.each(["during handshake", "before request", "during request"] as const)(
+		"preserves timeout classification when compaction is aborted %s",
+		async phase => {
+			const tempDir = TempDir.createSync("@pi-codex-stream-");
+			setAgentDir(tempDir.path());
+			const controller = new AbortController();
+			const timeout = new DOMException("The operation timed out.", "TimeoutError");
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const fetchMock = vi.fn<FetchImpl>(() => {
+				throw new Error("Aborted compaction must not fall back to SSE");
+			});
+			class TimeoutWebSocket extends MockWebSocket {
+				constructor(url: string, options?: WsOptions) {
+					super(url, options);
+					if (phase === "during handshake") {
+						queueMicrotask(() => controller.abort(timeout));
+					} else {
+						this.scheduleOpen();
+					}
+				}
+
+				override send(): void {
+					controller.abort(timeout);
+				}
+
+				override close(): void {
+					super.close();
+					this.emit("close", { code: 1000 } as CloseEvent);
+				}
+			}
+			global.WebSocket = TimeoutWebSocket as unknown as typeof WebSocket;
+			const model = createCodexTestModel();
+			try {
+				const error = await (async () => {
+					const events = await openCodexCompactionEventStream(
+						model,
+						{ model: model.id, input: [{ type: "compaction_trigger" }] },
+						{
+							apiKey: createCodexTestToken(),
+							signal: controller.signal,
+							fetch: fetchMock,
+							sessionId: `compaction-timeout-${phase}`,
+							providerSessionState,
+						},
+					);
+					if (phase === "before request") controller.abort(timeout);
+					return events.next();
+				})().then(
+					() => {
+						throw new Error("Compaction must reject when its deadline expires");
+					},
+					(error: unknown) => error,
+				);
+				expect(AIError.is(AIError.classify(error), AIError.Flag.Timeout)).toBe(true);
+				expect(fetchMock).not.toHaveBeenCalled();
+			} finally {
+				for (const state of providerSessionState.values()) state.close();
+			}
+		},
+	);
+
+	it("keeps caller cancellation distinct from a compaction timeout", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const controller = new AbortController();
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const fetchMock = vi.fn<FetchImpl>(() => {
+			throw new Error("Cancelled compaction must not fall back to SSE");
+		});
+		class CancelledWebSocket extends MockWebSocket {
+			constructor(url: string, options?: WsOptions) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			override send(): void {
+				controller.abort();
+			}
+		}
+		global.WebSocket = CancelledWebSocket as unknown as typeof WebSocket;
+		const model = createCodexTestModel();
+		try {
+			const events = await openCodexCompactionEventStream(
+				model,
+				{ model: model.id, input: [{ type: "compaction_trigger" }] },
+				{
+					apiKey: createCodexTestToken(),
+					signal: controller.signal,
+					fetch: fetchMock,
+					sessionId: "compaction-caller-cancel",
+					providerSessionState,
+				},
+			);
+			const error = await events.next().then(
+				() => {
+					throw new Error("Compaction must reject when cancelled");
+				},
+				(error: unknown) => error,
+			);
+			expect(error).toBeInstanceOf(Error);
+			expect(AIError.is(AIError.classify(error), AIError.Flag.Timeout)).toBe(false);
+			expect(fetchMock).not.toHaveBeenCalled();
+		} finally {
+			for (const state of providerSessionState.values()) state.close();
+		}
 	});
 
 	it("carries fatal websocket fallback into isolated compaction transport", async () => {

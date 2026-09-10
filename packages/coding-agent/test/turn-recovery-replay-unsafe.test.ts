@@ -783,6 +783,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 	describe("premature stream close after resolved tool calls", () => {
 		const completionsClose = "OpenAI completions stream closed before a finish_reason was received";
 		const responsesClose = "OpenAI responses stream closed before a terminal response event was received";
+		const codexClose = "Codex stream ended before terminal completion event";
 
 		function gatewayMessage(content: AssistantMessage["content"], errorMessage: string): AssistantMessage {
 			const message = makeMessage(content, model);
@@ -798,29 +799,14 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			return new TurnRecovery(createHost(model, modelRegistry, { messages: [message as AgentMessage, ...tail] }));
 		}
 
-		it("continues a premature completions close after a resolved tool call", () => {
+		it.each([
+			["completions", completionsClose],
+			["responses", responsesClose],
+			["Codex responses", codexClose],
+		])("continues a premature %s close after a resolved tool call", (_provider, errorMessage) => {
 			const message = gatewayMessage(
 				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
-				completionsClose,
-			);
-			const recovery = recoveryForClose(message, [
-				{
-					role: "toolResult",
-					toolCallId: "call-1",
-					toolName: "bash",
-					content: [{ type: "text", text: "Tool call was not executed." }],
-					isError: true,
-					details: { __synthetic: true, source: "assistant_stop_error", executed: false },
-					timestamp: Date.now(),
-				},
-			]);
-			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
-		});
-
-		it("continues a premature responses close after a resolved tool call", () => {
-			const message = gatewayMessage(
-				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
-				responsesClose,
+				errorMessage,
 			);
 			const recovery = recoveryForClose(message, [
 				{
