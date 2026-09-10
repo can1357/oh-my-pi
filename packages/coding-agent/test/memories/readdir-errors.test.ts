@@ -2,28 +2,29 @@
 // pruneEmptyDirectories must never remove a subtree it could not re-read:
 // a transient non-ENOENT failure (EMFILE, I/O error) must skip deletion.
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
-import * as fsSync from "node:fs";
+import type * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pruneEmptyDirectories } from "@oh-my-pi/pi-coding-agent/memories";
-import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 describe("pruneEmptyDirectories child-scan failure", () => {
 	let tempDir!: string;
 	let child!: string;
 
-	beforeEach(() => {
-		tempDir = fsSync.mkdtempSync(path.join(os.tmpdir(), "pi-prune-sentinel-"));
+	beforeEach(async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-prune-sentinel-"));
 		child = path.join(tempDir, "child");
-		fsSync.mkdirSync(child, { recursive: true });
-		fsSync.writeFileSync(path.join(child, "keep.txt"), "populated");
+		await fs.mkdir(child, { recursive: true });
+		await fs.writeFile(path.join(child, "keep.txt"), "populated");
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		vi.restoreAllMocks();
-		removeSyncWithRetries(tempDir);
+		await removeWithRetries(tempDir);
 	});
+
 
 	test("a failed child re-read keeps the populated subtree and never removes it", async () => {
 		const realReaddir = fs.readdir.bind(fs);
@@ -52,12 +53,12 @@ describe("pruneEmptyDirectories child-scan failure", () => {
 
 		expect(injected).toBe(true);
 		expect(removed).not.toContain(child);
-		expect(fsSync.existsSync(path.join(child, "keep.txt"))).toBe(true);
+		expect(await Bun.file(path.join(child, "keep.txt")).exists()).toBe(true);
 	});
 
 	test("a positively-empty child is still pruned", async () => {
-		fsSync.rmSync(path.join(child, "keep.txt"));
+		await fs.rm(path.join(child, "keep.txt"));
 		await pruneEmptyDirectories(tempDir);
-		expect(fsSync.existsSync(child)).toBe(false);
+		expect(await Bun.file(child).exists()).toBe(false);
 	});
 });

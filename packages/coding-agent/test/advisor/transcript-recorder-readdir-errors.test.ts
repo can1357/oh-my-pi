@@ -3,27 +3,27 @@
 // unreadable (e.g. ENOTDIR) transcript directory is reported as "no spend".
 // Real errors must warn; ENOENT (absent directory) stays silent.
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { logger, removeWithRetries } from "@oh-my-pi/pi-utils";
 import { loadAdvisorTranscriptCosts } from "../../src/advisor/transcript-recorder";
 
 describe("loadAdvisorTranscriptCosts readdir errors", () => {
 	let tempDir!: string;
 
-	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-transcript-readdir-"));
+	beforeEach(async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-transcript-readdir-"));
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		vi.restoreAllMocks();
-		removeSyncWithRetries(tempDir);
+		await removeWithRetries(tempDir);
 	});
 
 	test("warns when the transcript directory is not a directory (ENOTDIR), still returns empty", async () => {
 		const blocker = path.join(tempDir, "blocker");
-		fs.writeFileSync(blocker, "not a directory");
+		await fs.writeFile(blocker, "not a directory");
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
 		const costs = await loadAdvisorTranscriptCosts(`${blocker}.jsonl`);
