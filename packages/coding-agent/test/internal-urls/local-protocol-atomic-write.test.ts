@@ -124,7 +124,7 @@ describe("writeLocalUrlAtomically", () => {
 
 			const resource = await InternalUrlRouter.instance().resolve(url);
 			expect(resource.content).toBe("literal");
-			expect(resource.sourcePath).toBe(expectedPath);
+			expect(resource.sourcePath).toBe(await fs.realpath(expectedPath));
 		});
 	});
 
