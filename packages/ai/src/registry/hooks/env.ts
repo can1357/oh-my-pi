@@ -6,6 +6,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $env, $pickenv } from "@oh-my-pi/pi-utils";
+import { resolveGrokbotEnvApiKey } from "../../providers/grokbot/auth";
 import { isFoundryEnabled } from "../../utils/foundry";
 import { resolveAwsRegistryApiKey } from "../aws";
 import { AUTHENTICATED_SENTINEL } from "../types";
@@ -39,4 +40,6 @@ export const ENV_HOOKS: Record<string, EnvHook> = {
 		const hasLocation = !!($env.GOOGLE_VERTEX_LOCATION || $env.GOOGLE_CLOUD_LOCATION || $env.VERTEX_LOCATION);
 		return hasVertexAdcCredentials() && hasProject && hasLocation ? AUTHENTICATED_SENTINEL : undefined;
 	},
+	// Grok Bot host secrets (renewal credential + machine id) from env or secrets file.
+	grokbot: () => resolveGrokbotEnvApiKey(),
 };

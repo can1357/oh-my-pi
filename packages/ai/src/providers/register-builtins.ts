@@ -39,6 +39,7 @@ import type { DevinOptions } from "./devin";
 import type { GoogleOptions } from "./google";
 import type { GoogleGeminiCliOptions } from "./google-gemini-cli";
 import type { GoogleVertexOptions } from "./google-vertex";
+import { streamGrokBot as streamGrokBotImpl } from "./grokbot";
 import type { OllamaChatOptions } from "./ollama";
 import type { OpenAICodexResponsesOptions } from "./openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./openai-completions";
@@ -458,6 +459,12 @@ function loadDevinProviderModule(): Promise<LazyProviderModule<"devin-agent">> {
 	return devinProviderModulePromise;
 }
 
+function loadGrokbotProviderModule(): Promise<LazyProviderModule<"grokbot-sand">> {
+	// Top-level import (AGENTS.md): no `import("./grokbot")` dynamic path.
+	// Grok Bot still goes through createLazyStream for idle/first-event wrappers.
+	return Promise.resolve({ stream: streamGrokBotImpl });
+}
+
 function loadBedrockProviderModule(): Promise<LazyProviderModule<"bedrock-converse-stream">> {
 	if (bedrockProviderModuleOverride) {
 		return Promise.resolve(bedrockProviderModuleOverride);
@@ -502,6 +509,7 @@ export const streamOpenAIResponses = createLazyStream(
 );
 export const streamCursor = createLazyStream(loadCursorProviderModule);
 export const streamDevin = createLazyStream(loadDevinProviderModule);
+export const streamGrokBot = createLazyStream(loadGrokbotProviderModule);
 export const streamOllama = createLazyStream(loadOllamaProviderModule, OPENAI_IDLE_FLOORED_LAZY_STREAM_LIMITS);
 
 export const streamBedrock = createLazyStream(loadBedrockProviderModule);

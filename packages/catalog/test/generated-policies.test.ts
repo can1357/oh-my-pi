@@ -3,11 +3,16 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Api, Model, ModelSpec, Provider } from "@oh-my-pi/pi-catalog/types";
 import {
 	applyAntigravityPricingFallback,
+	applyCanonicalLimitFallback,
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
 	linkOpenAIPromotionTargets,
 } from "../scripts/generated-policies";
+import { mergePreviousSnapshotModels } from "../scripts/generate-models";
+import { isCredentialScopedCatalogProvider } from "../src/compat/resolve";
 import { buildModel } from "../src/build";
+import { resolveModelPolicy } from "../src/compat/resolve";
+import { buildGrokbotStaticSeed } from "../src/provider-models/grokbot";
 
 function createSpec<TApi extends Api>(overrides: {
 	id: string;
@@ -844,5 +849,296 @@ describe("applyAntigravityPricingFallback", () => {
 		expect(result[2]?.cost).toEqual(zeroCost);
 		// Already-billable antigravity rows keep their own pricing.
 		expect(result[3]?.cost).toEqual(pricedCost);
+	});
+});
+
+describe("Grok Bot generated thinking policy", () => {
+	it("preserves seed/live ladders and does not invent one for routers", () => {
+		const models = [
+			createSpec({
+				id: "sand-default",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				reasoning: true,
+				thinking: undefined,
+			}),
+			createSpec({
+				id: "grok-4.6",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				thinking: {
+					mode: "effort",
+					efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+				},
+			}),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		expect(models[0]?.thinking).toBeUndefined();
+		expect(models[1]?.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		});
+	});
+
+	it("derives grok-4.6 seed effort ladder and sand params from provider KDL via buildModel", () => {
+		const [seed] = buildGrokbotStaticSeed().filter(m => m.id === "grok-4.6");
+		expect(seed?.thinking).toBeUndefined();
+		expect(seed?.sandParameterIds).toBeUndefined();
+		const built = buildModel(seed!);
+		expect(built.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		});
+		expect(built.sandParameterIds).toEqual(["effort", "fast"]);
+		const router = buildModel(buildGrokbotStaticSeed().find(m => m.id === "sand-default")!);
+		expect(router.thinking).toBeUndefined();
+		expect(router.sandParameterIds).toBeUndefined();
+	});
+
+	it("does not overwrite live AvailableModels sandParameterIds with KDL", () => {
+		const live = buildModel({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: null,
+			sandParameterIds: ["effort"],
+		});
+		expect(live.sandParameterIds).toEqual(["effort"]);
+	});
+
+	it("does not backfill grok-4.6 KDL ladder when live discovery marked unrecognized efforts", () => {
+		const live = buildModel({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [] },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(live.thinking).toBeUndefined();
+	});
+
+	it("keeps grokbot offline seeds free of canonical maxTokens fallback before buildModel", () => {
+		const models = buildGrokbotStaticSeed().map(seed => ({ ...seed }));
+		applyCanonicalLimitFallback(models);
+		for (const model of models) {
+			expect(model.maxTokens).toBeNull();
+		}
+		const built = buildModel(models.find(m => m.id === "sand-default")!);
+		expect(built.maxTokens).toBeNull();
+		expect(built.contextWindow).toBe(200_000);
+	});
+
+	it("marks grokbot credential-scoped catalog via provider KDL", () => {
+		const [seed] = buildGrokbotStaticSeed();
+		expect(resolveModelPolicy(seed).catalog.credentialScopedCatalog).toBe(true);
+	});
+
+	it("assigns sand-tools-wire keep-model to Anthropic-class grokbot rows via provider KDL", () => {
+		const claude = buildModel({
+			id: "claude-opus-5",
+			name: "Claude Opus 5",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+		expect(claude.sandToolsWire).toBe("keep-model");
+		const grok = buildModel({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+		expect(grok.sandToolsWire).toBeUndefined();
+	});
+
+	it("assigns sand-empty-tools-retry-wire keep-model to gemini-* via provider KDL", () => {
+		const gemini = buildModel({
+			id: "gemini-3-flash",
+			name: "gemini-3-flash",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+		expect(gemini.sandEmptyToolsRetryWire).toBe("keep-model");
+		expect(gemini.sandAcceptEmptyWriteFollowup).toBe(true);
+		expect(gemini.sandNativeToolSchema).toBe("google");
+		const openai = buildModel({
+			id: "gpt-5.4-luna",
+			name: "gpt-5.4-luna",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+		expect(openai.sandNativeToolSchema).toBe("strict");
+		const grok = buildModel({
+			id: "grok-4.6",
+			name: "grok-4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+		expect(grok.sandEmptyToolsRetryWire).toBeUndefined();
+		expect(grok.sandAcceptEmptyWriteFollowup).toBeUndefined();
+		expect(grok.sandNativeToolSchema).toBeUndefined();
+	});
+
+	it("reapplies KDL Sand policy over stale cached sandEmptyToolsRetryWire values", () => {
+		// Cached live rows can retain a prior release's resolved Sand fields.
+		// buildModel must overwrite/clear them from the current KDL result rather
+		// than treating a cached value as authoritative forever.
+		const gemini = buildModel({
+			id: "gemini-3-flash",
+			name: "gemini-3-flash",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+			sandEmptyToolsRetryWire: "native",
+			sandToolsWire: "error",
+			sandAcceptEmptyWriteFollowup: undefined,
+		});
+		expect(gemini.sandEmptyToolsRetryWire).toBe("keep-model");
+		expect(gemini.sandToolsWire).toBeUndefined();
+		expect(gemini.sandAcceptEmptyWriteFollowup).toBe(true);
+		const grok = buildModel({
+			id: "grok-4.6",
+			name: "grok-4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+			sandEmptyToolsRetryWire: "keep-model",
+			sandAcceptEmptyWriteFollowup: true,
+		});
+		expect(grok.sandEmptyToolsRetryWire).toBeUndefined();
+		expect(grok.sandAcceptEmptyWriteFollowup).toBeUndefined();
+	});
+
+	it("excludes grokbot from gen:models catalog discovery like other credential-scoped providers", () => {
+		// A renewer in the generator environment must not bake AvailableModels into models.json,
+		// and prior private roster rows must not resurrect from the previous snapshot.
+		expect(isCredentialScopedCatalogProvider("grokbot")).toBe(true);
+		expect(isCredentialScopedCatalogProvider("devin")).toBe(true);
+		expect(isCredentialScopedCatalogProvider("openai")).toBe(false);
+		const stale = buildModel({
+			id: "account-private-model",
+			name: "private",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+		const merged = mergePreviousSnapshotModels([], { grokbot: { [stale.id]: stale } }, new Set());
+		expect(merged.map(m => `${m.provider}/${m.id}`)).toEqual([]);
+	});
+
+	it("forces supportsTools false for grok-4.5 via provider KDL", () => {
+		const live = buildModel({
+			id: "grok-4.5",
+			name: "Grok 4.5",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(live.supportsTools).toBe(false);
+		const grok46 = buildModel({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(grok46.supportsTools).toBeUndefined();
+	});
+
+	it("applies reviewed context-window-floor to known routers when discovery left limits unset", () => {
+		const router = buildModel({
+			id: "sand-default",
+			name: "sand-default (routed)",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(router.contextWindow).toBe(200_000);
+		const unknown = buildModel({
+			id: "some-live-model",
+			name: "Some Live Model",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(unknown.contextWindow).toBeNull();
 	});
 });

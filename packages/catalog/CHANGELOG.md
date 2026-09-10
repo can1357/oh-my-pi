@@ -2,6 +2,97 @@
 
 ## [Unreleased]
 
+### Added
+
+- Grok Bot (`grokbot`) catalog — model aliases (`sand-default`, `grok-4.5`, …) with image input and reasoning on `sand-default`; cost is $0 by design (renewer-billed). Distinct from `cursor` and `xai` / Grok CLI catalogs.
+- Grok Bot (`grokbot`) catalog — sand InferenceService model aliases (`sand-default`, `grok-4.5`, …) with image input; distinct from `cursor` and `xai` / Grok CLI catalogs. Catalog cost is intentionally $0 (sand usage meters on the renewer account). Reasoning seeds advertise sand effort including `xhigh`.
+- Grok Bot (`grokbot`) catalog — live models from sand `AiService/AvailableModels` (authoritative when renewer present), plus sand router slugs (`sand-default`, `sand-cua`, `sand-automation`). Aliases stay on the canonical row (`idAliases`); cost is $0 by design (renewer-billed). Distinct from `cursor` and `xai` / Grok CLI catalogs.
+- Grok Bot `sand-cua` now has catalog `sand-tools-wire=parent-chat` so router tools use the product field-2 wire.
+- Grok Bot Auto routers (`default`, `default[]`, `auto`) now use catalog `sand-tools-wire=parent-chat` so tools stay off the grok-4.5 native 422 path.
+- Grok Bot `gemini-3-flash` / `gemini-3-flash[]` now rewrite `requestedModel` to bare `gemini-3.8-flash` (`sand-wire-model-id`) so tools use the working peer while AvailableModels still lists the old slug.
+- Grok Bot `sand-wire-model-id` rewrites apply only when tools are present (`sand-wire-model-id-when=tools`); text-only requests keep the selected AvailableModels id.
+- Grok Bot JSON-as-text tool promotion is opt-in via `sand-promote-json-text-tools` (routers + gemini-3-flash) so native models keep example Shell JSON as text.
+
+### Fixed
+
+- Grok Bot AvailableModels namespace-only overrides recompute `clientVersion` (e.g. `lab` → `0.30.0-lab`) via the discovery identity helper.
+- Grok Bot AvailableModels applies namespace/clientVersion overrides from the already-loaded config without a second synchronous `secrets/grokbot.env` read.
+- Retain cached model catalogs when Grok Bot discovery returns malformed or empty results.
+
+- Grok Bot sand router union and offline seeds share one `GROKBOT_SAND_ROUTER_IDS` roster (no divergent discovery hard-code).
+- Grok Bot `buildModel` always reapplies KDL-owned Sand wire/retry/promote policy over stale cached values so offline rebuilds pick up rule changes.
+- Grok Bot live AvailableModels rows always stamp an empty thinking ladder when non-reasoning; synthetic sand routers stay on the separate `buildSandRouterSpec` path so KDL `reasoning` fills are not gated by a TypeScript router-id list.
+- Grok Bot Gemini/OpenAI native tool-schema projection is owned by KDL `sand-native-tool-schema` (`google` / `strict`) so rows can override without TypeScript class branches.
+- Grok Bot Anthropic+tools auto wire defaults to catalog `sand-tools-wire` (KDL class anthropic → keep-model); TypeScript no longer forces keep-model from taxonomy class.
+- Grok Bot / Devin gen:models exclusions derive from KDL `credential-scoped-catalog` (no TypeScript provider-name table).
+- Grok Bot is excluded from `gen:models` catalog discovery (credential-scoped like Devin) so a maintainer renewer cannot bake AvailableModels into the shared `models.json`.
+- Grok Bot `gemini-*` rows declare `sand-empty-tools-retry-wire keep-model` so empty first tool turns replay on product Shell/Read/Write without a TypeScript class branch.
+- Grok Bot `gemini-*` rows declare `sand-accept-empty-write-followup` so empty Write follow-ups are accepted via catalog policy, not a Gemini class check.
+- Grok Bot merge authority for live input/limits/reasoning uses KDL `credential-scoped-catalog` (no `provider === "grokbot"` TypeScript lists).
+- Grok Bot backend URL join appends endpoints onto the pathname while preserving reverse-proxy query strings, including trailing `/` inside query values (mint + AvailableModels).
+- Grok Bot AvailableModels discovery passes the configured base URL unmodified into `joinGrokbotBackendUrl` (no whole-URL trailing-slash strip before parse).
+- Opaque Grok Bot variant/legacy selectors resolve full model policy (identity, thinking, compat, catalog assignments/corrections) from `requestModelId` in `buildModel`.
+- Grok Bot model-manager discovery mints with the captured `cacheCredential` when `apiKey` is the `<authenticated>` sentinel (does not re-read ambient secrets mid-flight).
+- Grok Bot auth/discovery tests inject secrets path and env via `runWithGrokbotAuthSource` (no process-wide `setAgentDir` / `process.env` mutation).
+- Grok Bot AvailableModels no longer invents a low/medium/high/xhigh effort ladder when a param is advertised without values; reviewed ladders stay KDL-owned.
+- Grok Bot offline `grok-4.6` reasoning capability is owned by catalog KDL (neutral seeds); live non-reasoning rows keep an empty thinking ladder so buildModel/merge does not OR-upgrade them.
+- Grok Bot token renew failure logs only the HTTP status (never the response body, which may echo the renewer credential).
+- Grok Bot AvailableModels emits both `legacySlug` and `variantStringRepresentation` selectors when a variant advertises both.
+- Grok Bot model-manager discovery uses the same namespace/client-version identity as model-cache scoping.
+- Grok Bot AvailableModels remints and retries once after HTTP 401 instead of failing the current refresh on a revoked cached JWT.
+- Fixed Grok Bot `sand-default` reasoning capability to be owned by catalog KDL instead of discovery id compares, and excluded host-secret file credentials from env-only auth-broker migration.
+- Grok Bot AvailableModels discovery emits separate catalog rows for variant **`legacySlug`** values with `requestModelId` pointing at the canonical model and variant `sandParameterIds`.
+- Grok Bot AvailableModels lets a canonical live row replace an earlier variant alias that collided on the same selector id.
+- Grok Bot offline seeds stay neutral for image input and output caps so live AvailableModels rows are not enriched on merge.
+- Grok Bot bundled catalog no longer fabricates output caps from canonical or stencil.so fallbacks; reviewed limits stay KDL-owned.
+- Grok Bot synthetic sand routers stay text-only when unioned without an AvailableModels capability row.
+- Grok Bot AvailableModels trims whitespace from model ids before catalog storage and alias filtering.
+- Grok Bot AvailableModels preserves variant default sand parameter values (including `context` tiers) on catalog rows.
+- Grok Bot AvailableModels copies `sandParameterDefaults` only from variants marked `isDefaultMaxConfig` / `isDefaultNonMaxConfig` (no first-variant fallback).
+- Grok Bot catalog refresh expands the `<authenticated>` renewer asynchronously and threads `cacheCredential` into model-cache scoping (no sync secrets reread on the TUI loop).
+- Grok Bot AvailableModels leaves native tool support unset; KDL forces `supportsTools: false` for grok-4.5 (sand HTTP 422 with tools).
+- Grok Bot legacy max/non-max variant rows recompute `contextWindow` for their own sandMaxMode.
+- Grok Bot live discovery reasoning is authoritative on merge (static seed reasoning is not OR-upgraded).
+- Grok Bot live models with unrecognized-only effort vocabularies keep no thinking ladder after `buildModel` (KDL no longer backfills).
+- Grok Bot offline `sandParameterIds` for `grok-4.6` come from provider KDL (`sand-parameter-ids`) via `buildModel`, not TypeScript seed tables.
+- Grok Bot thinking fallback suppression uses KDL `preserve-authored-thinking` in `buildModel` (no provider/API TypeScript branch).
+- Grok Bot AvailableModels leaves context windows unset when omitted; reviewed floors come from KDL for known routers/seeds.
+- Grok Bot AvailableModels leaves output caps unset instead of inventing a 64K `maxTokens` (wire omits `modelConfig.maxTokens` until a reviewed limit exists).
+- Grok Bot offline `grok-4.6` effort ladder comes from provider KDL via `buildModel`, not a TypeScript per-id seed branch.
+- Grok Bot AvailableModels does not invent low/medium/high/xhigh when upstream effort values are all unrecognized.
+- Grok Bot AvailableModels aliases include `variants[].legacySlug` so saved legacy selectors still resolve.
+- Grok Bot prefers every environment renewal credential (`GROKBOT_*` / `SAND_INFERENCE_*`) over secrets-file fallbacks when minting.
+- Restored unrelated bundled catalog rows dropped during an earlier Grok Bot `models.json` regen (kept parent catalog; only added Grok Bot).
+- Grok Bot AvailableModels discovery sends `connect-protocol-version: 1` like other Connect unary clients.
+- Grok Bot AvailableModels requires explicit `supportsImages: true` before advertising image input (omitted proto3 false stays text-only).
+- Grok Bot AvailableModels treats omitted `supportsNonMaxMode` like `false` so max-only rows keep `sandMaxMode`.
+- Grok Bot JWT mint cache is scoped by caller/proxy headers so tenant header changes do not reuse another token.
+- Grok Bot AvailableModels discovery and token minting merge configured headers case-insensitively so reserved names are not comma-joined on the wire.
+- Grok Bot AvailableModels discovery clears the JWT mint cache on HTTP 401 so the next refresh can mint a replacement token.
+- Grok Bot AvailableModels discovery orders effort ladders least→most via shared `THINKING_EFFORTS` (so `minimal` precedes `low` when both are advertised).
+- Grok Bot AvailableModels discovery returns `null` (no cache write) when HTTP 200 bodies omit a `models` array, instead of caching a routers-only catalog from proxy error envelopes.
+- Grok Bot catalog refresh resolves namespace/client-version identity asynchronously once and passes it through cache scoping without synchronous secrets-file rereads.
+- Token minting for Grok Bot forwards caller/model proxy headers under provider-owned client headers so reverse-proxy gateways accept `/sand-box/inference-credential`.
+- Grok Bot AvailableModels discovery forwards the same configured provider headers used for inference/renewal.
+- Grok Bot model-cache identity includes configured discovery/proxy headers so tenant header changes do not reuse another catalog.
+- Grok Bot generator preserves seed/AvailableModels effort ladders (no invented router thinking; `grok-4.6` keeps `low`/`medium`/`high`/`xhigh`) and regenerates the bundled catalog to match.
+- Grok Bot renewal and stream URLs keep reverse-proxy path prefixes on the configured backend.
+- Grok Bot model-cache identity resolves namespace/client version from env and `secrets/grokbot.env` (same helpers as AvailableModels), not Bun.env alone.
+- Grok Bot max-only AvailableModels rows (`supportsMaxMode` without `supportsNonMaxMode`) keep `sandMaxMode` and use `contextTokenLimitForMaxMode` instead of being forced into non-max.
+- Grok Bot preserves live AvailableModels effort ladders through `buildModel` instead of expanding them to the static catalog scale; reasoning models without an effort parameter no longer invent a thinking control.
+- Grok Bot AvailableModels cache is scoped by renewer, backend, namespace, and client version so credential or `GROKBOT_NAMESPACE` / `GROKBOT_CLIENT_VERSION` switches do not reuse another catalog.
+- Grok Bot discovery stamps `sandMaxMode` for max-only AvailableModels rows, keeps live effort ladders through `buildModel`, and scopes the model cache by namespace/client version as well as renewer.
+- Grok Bot secrets loading uses async dotenv reads so login/discovery/stream no longer block the event loop on agent-directory I/O.
+- Grok Bot AvailableModels cache is scoped by renewer credential + backend so account switches do not reuse another catalog.
+- Grok Bot bundled catalog now includes `xhigh` on parameterized effort ladders (regenerated from seed/policy); AvailableModels discovery uses a static import.
+- Grok Bot `secrets/grokbot.env` loading now uses the shared dotenv parser so quoted values, `export` prefixes, and inline comments authenticate correctly. Async secret loads use `parseEnvFileAsync` so slow agent directories do not block the event loop.
+- Fixed Grok Bot file-backed model caches to scope by the real renewer instead of the shared `<authenticated>` sentinel.
+- Fixed Grok Bot file-only auth so the authenticated sentinel is never used as a renewal credential override, and added `sand-tools-wire` for router tool-wire policy.
+- Bundled Grok Bot router rows now include `sandToolsWire` from KDL so cold starts without AvailableModels still use product parent-chat/automation wires.
+- Grok Bot Auto routers bake catalog `sand-wire-model-id=sand-default` so parent-chat rewrite no longer special-cases `sand-cua` in TypeScript.
+- Grok Bot auth is only advertised when both the renewer and machine id are present, so models are not selectable before streaming can succeed.
+- Grok Bot exports `resolveGrokbotMachineId` so CLI credential overrides can require the same machine-id pair as env auth.
+
 ## [18.1.16] - 2026-09-09
 
 - Updated Fire Pass (`firepass`) login validation probe to `accounts/fireworks/routers/glm-5p2-fast` and bundled `glm-5.2-fast` and `kimi-k3-fast` models in place of decommissioned `kimi-k2.6-turbo` ([#10859](https://github.com/can1357/oh-my-pi/pull/10859) by [@olegpulatov](https://github.com/olegpulatov)).

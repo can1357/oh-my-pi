@@ -105,4 +105,21 @@ describe("applyCanonicalLimitFallback", () => {
 		expect(model.contextWindow).toBeNull();
 		expect(model.maxTokens).toBeNull();
 	});
+
+	it("does not fabricate grokbot limits from unrelated canonical references", () => {
+		const models: ModelSpec<Api>[] = [
+			spec({ id: "gpt-5.4-mini", provider: "openai", contextWindow: 400000, maxTokens: 64000 }),
+			{
+				...spec({ id: "sand-default", provider: "grokbot", contextWindow: null, maxTokens: null }),
+				api: "grokbot-sand",
+				reasoning: true,
+			},
+		];
+
+		applyCanonicalLimitFallback(models);
+
+		const grokbot = find(models, "grokbot", "sand-default");
+		expect(grokbot.contextWindow).toBeNull();
+		expect(grokbot.maxTokens).toBeNull();
+	});
 });

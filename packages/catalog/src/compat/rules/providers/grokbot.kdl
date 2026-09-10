@@ -1,0 +1,92 @@
+// Provider-wire compat for "grokbot" (sand InferenceService).
+// Offline seed effort ladders are rule-owned here so buildModel derives them
+// from neutral seeds instead of TypeScript per-id branches.
+
+provider "grokbot" {
+	// AvailableModels / seed-owned ladders must survive generate-models rebake,
+	// and buildModel must not invent fallback efforts when no thinking-efforts
+	// rule matched (routers, fast-only, unrecognized upstream-only values).
+	preserve-authored-thinking #true
+	// Live discovery owns limits/modality; gen:models must not backfill from
+	// canonical-family or stencil.so same-id references.
+	credential-scoped-catalog #true
+	// Anthropic-class sand rows with tools use product keep-model (Shell/Read/Write
+	// on the original Anthropic requestedModel). Reviewed in KDL so a row can
+	// override to native/error/parent-chat without a TypeScript class branch.
+	class "anthropic" {
+		sand-tools-wire "keep-model"
+	}
+	// Native field-2 schema projection: Gemini backends reject leftover JSON
+	// Schema keywords; OpenAI mini/strict backends require additionalProperties
+	// false. Declared per class so a reviewed row can override without TS.
+	class "gemini" {
+		sand-native-tool-schema "google"
+	}
+	class "openai" {
+		sand-native-tool-schema "strict"
+	}
+	// Synthetic routers + offline seeds: reviewed budgeting floor when live
+	// AvailableModels omits contextTokenLimit (proto3 zero/absent).
+	// Synthetic sand-default router: reviewed reasoning capability (discovery/seeds stay neutral).
+	models "sand-default" {
+		reasoning #true
+		sand-tools-wire "parent-chat"
+		sand-promote-json-text-tools #true
+	}
+	models "sand-cua" {
+		sand-tools-wire "parent-chat"
+		sand-promote-json-text-tools #true
+	}
+	models "sand-automation" {
+		sand-tools-wire "automation"
+		sand-promote-json-text-tools #true
+	}
+	// Auto / default sand routers land on cursor-grok-4.5-high with native omp
+	// tools (HTTP 422). Product parent-chat is the same wire as sand-default;
+	// rewrite requestedModel to bare sand-default so a Read/Write follow-up
+	// does not hang mid-tool on cursor-grok-4.5-high. sand-default / sand-cua
+	// omit sand-wire-model-id so the product wire keeps their router ids.
+	// sand-wire-model-id-when=tools keeps text-only turns on the selected Auto id.
+	models "default" "default[]" "auto" "auto[]" {
+		sand-tools-wire "parent-chat"
+		sand-wire-model-id "sand-default"
+		sand-wire-model-id-when "tools"
+		sand-promote-json-text-tools #true
+	}
+	// Live AvailableModels still lists gemini-3-flash / gemini-3-flash[], but
+	// that slug empty-bodies on tools. The working peer is gemini-3.8-flash
+	// (and its effort variants). Rewrite requestedModel to a bare 3.8-flash
+	// only when tools are present; text-only keeps the listed slug.
+	models "gemini-3-flash" "gemini-3-flash[]" {
+		sand-wire-model-id "gemini-3.8-flash"
+		sand-wire-model-id-when "tools"
+		sand-promote-json-text-tools #true
+	}
+	// Empty first tool turns on Gemini-class sand rows often spend the budget
+	// on thinking. One replay with product keep-model tools (Shell/Read/Write)
+	// recovers native toolCallPart — declared per row, not via class checks in TS.
+	// Empty Write follow-ups are a documented Sand Gemini quirk (same rows).
+	models "gemini-*" {
+		sand-empty-tools-retry-wire "keep-model"
+		sand-accept-empty-write-followup #true
+	}
+	models "sand-default" "sand-cua" "sand-automation" "default" "default[]" "auto" "auto[]" {
+		context-window-floor 200000
+	}
+	// Static offline seed for grok-4.6: exact selector so cascade upgrades
+	// target.reasoning (thinking axes are gated; globs do not unlock).
+	// Live AvailableModels may report reasoning:false; discovery marks that
+	// with an empty thinking ladder so preserve-authored-thinking keeps
+	// buildModel from OR-upgrading the capability surface.
+	models "grok-4.6" {
+		reasoning #true
+		thinking-mode "effort"
+		thinking-efforts "low" "medium" "high" "xhigh"
+		context-window-floor 200000
+		sand-parameter-ids "effort" "fast"
+	}
+	// Sand rejects any tools payload for grok-4.5 (HTTP 422); keep text-only.
+	models "grok-4.5*" {
+		supports-tools #false
+	}
+}

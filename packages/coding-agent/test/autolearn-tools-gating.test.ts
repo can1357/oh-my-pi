@@ -71,6 +71,15 @@ describe("autolearn tool gating", () => {
 		expect(noBackend).not.toContain("learn");
 	});
 
+	it("keeps an explicit empty --no-tools whitelist empty despite autolearn/memory", async () => {
+		// `--no-tools` assigns toolNames=[] without restrictToolNames. Feature
+		// auto-includes must not widen that empty list onto the provider wire.
+		const names = (
+			await createTools(makeSession({ "autolearn.enabled": true, "memory.backend": "mnemopi" }), [])
+		).map(t => t.name);
+		expect(names).toEqual([]);
+	});
+
 	it("excludes the tools from a subagent when not in the explicit list", async () => {
 		// taskDepth > 0: the controller never runs here, so a subagent's explicit
 		// whitelist must not be silently widened with write-capable tools.

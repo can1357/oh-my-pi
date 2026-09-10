@@ -1410,3 +1410,36 @@ describe("Qwen 3.8 local template effort ladder", () => {
 		expect(ollama.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
 	});
 });
+
+describe("Grok Bot discovered effort ladders", () => {
+	it("preserves restricted live ladders and skips inventing one", () => {
+		// Live AvailableModels may expose a restricted ladder (e.g. low/xhigh).
+		// buildModel must not expand it to the static catalog scale.
+		const restricted = createModel({
+			id: "grok-4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.XHigh] },
+		});
+		expect(restricted.thinking?.efforts).toEqual([Effort.Low, Effort.XHigh]);
+		expect(requireSupportedEffort(restricted, Effort.Low)).toBe(Effort.Low);
+		expect(requireSupportedEffort(restricted, Effort.XHigh)).toBe(Effort.XHigh);
+		// Invented catalog tiers must not be treated as supported.
+		expect(() => requireSupportedEffort(restricted, Effort.Medium)).toThrow(/Supported efforts: low, xhigh/);
+		expect(() => requireSupportedEffort(restricted, Effort.Minimal)).toThrow(/Supported efforts: low, xhigh/);
+		expect(clampThinkingLevelForModel(restricted, Effort.Medium)).toBe(Effort.Low);
+
+		// Reasoning without an effort parameter (routers / fast-only) must not
+		// grow a fabricated control surface.
+		const noEffort = createModel({
+			id: "composer-2.5",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			thinking: undefined,
+		});
+		expect(noEffort.thinking).toBeUndefined();
+		expect(getSupportedEfforts(noEffort)).toEqual([]);
+	});
+});

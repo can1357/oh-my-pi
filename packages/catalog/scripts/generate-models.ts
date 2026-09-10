@@ -19,8 +19,13 @@ import { $env } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../src/build";
 import { isRetiredProvider } from "../src/compat/behavior";
 import { collapseVariants } from "../src/compat/collapse";
+import { resolveModelPolicy, isCredentialScopedCatalogProvider } from "../src/compat/resolve";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
 import { buildGitLabDuoWorkflowFallbackModel } from "../src/discovery/gitlab-duo-workflow";
+import {
+	resolveGrokbotCacheCredentialAsync,
+	resolveGrokbotDiscoveryIdentityAsync,
+} from "../src/discovery/grokbot-auth";
 import { createModelManager } from "../src/model-manager";
 import prevModelsJson from "../src/models.json" with { type: "json" };
 import { toModelSpec } from "../src/provider-models/bundled-references";
@@ -31,6 +36,7 @@ import {
 	isCatalogDescriptor,
 } from "../src/provider-models/descriptor-types";
 import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
+import { buildGrokbotStaticSeed } from "../src/provider-models/grokbot";
 import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
 import {
 	ABLITERATION_STATIC_MODELS,
@@ -91,16 +97,16 @@ const packageRoot = path.join(import.meta.dir, "..");
 const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm"]);
 /**
  * Credential-scoped catalogs (Devin's Cascade roster is gated per account/team
- * via `allowed_model_uids`). Fetching them during generation would bake one
- * private account's entitlements into the shared bundle, and those rows then
- * survive forever as previous-snapshot zombies: a later regen without that
- * credential can never mark the provider authoritative to prune them. These
- * providers are never fetched at generation time and their previous-snapshot
- * rows are dropped — the curated static seed is the only bundled surface, and
- * runtime discovery is authoritative per credential (mirrors the GitLab Duo
- * fallback-only policy below).
+ * via `allowed_model_uids`; Grok Bot AvailableModels is renewer-account entitlements).
+ * Fetching them during generation would bake one private account's entitlements
+ * into the shared bundle, and those rows then survive forever as previous-snapshot
+ * zombies: a later regen without that credential can never mark the provider
+ * authoritative to prune them. These providers are never fetched at generation
+ * time and their previous-snapshot rows are dropped — the curated static seed is
+ * the only bundled surface, and runtime discovery is authoritative per credential
+ * (mirrors the GitLab Duo fallback-only policy below). Exclusion is derived from
+ * KDL `credential-scoped-catalog` via {@link isCredentialScopedCatalogProvider}.
  */
-const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin"]);
 
 /**
  * Restores unfetched rows from a previous generated catalog while pruning
@@ -120,9 +126,9 @@ export function mergePreviousSnapshotModels(
 			if (
 				!fetchedKeys.has(`${model.provider}/${model.id}`) &&
 				!DISCOVERY_ONLY_PROVIDERS.has(model.provider) &&
-				!CREDENTIAL_SCOPED_PROVIDERS.has(model.provider) &&
-				// Yolo-Auto's documented static seed is the complete fallback
-				// catalog; never resurrect retired ids from the previous snapshot.
+				resolveModelPolicy(model).catalog.credentialScopedCatalog !== true &&
+				// Yolo-Auto documented static seeds are the complete offline fallback;
+				// never resurrect retired ids from the previous snapshot.
 				model.provider !== "yolo-auto" &&
 				!isRetiredProvider(model.provider) &&
 				!excludedProviders.has(model.provider)
@@ -188,7 +194,17 @@ async function fetchProviderModelsFromCatalog(
 		const discoveryConfig = { apiKey };
 		const preparedConfig =
 			getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ?? discoveryConfig;
-		const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
+		const managerConfig =
+			descriptor.providerId === "grokbot"
+				? {
+						...preparedConfig,
+						...(await resolveGrokbotDiscoveryIdentityAsync()),
+						cacheCredential: await resolveGrokbotCacheCredentialAsync(
+							typeof preparedConfig.apiKey === "string" ? preparedConfig.apiKey : undefined,
+						),
+					}
+				: preparedConfig;
+		const managerOptions = descriptor.createModelManagerOptions(managerConfig);
 		const manager = createModelManager(managerOptions);
 		const result = await manager.refresh("online");
 		// `stale: true` means the dynamic fetch failed and the manager fell back
@@ -265,9 +281,8 @@ function applyGlobalModelsDevFallback(
 			providerScopedKeys.has(`${model.provider}/${model.id}`) ||
 			model.provider === "devin" ||
 			model.provider === "baseten" ||
-			// Meta's first-party rows come from the reviewed seed; a same-id
-			// gateway row would overwrite their display names.
-			model.provider === "meta"
+			model.provider === "meta" ||
+			resolveModelPolicy(model).catalog.credentialScopedCatalog === true
 		) {
 			return model;
 		}
@@ -534,7 +549,7 @@ async function generateModels() {
 		(descriptor): descriptor is CatalogProviderDescriptor =>
 			isCatalogDescriptor(descriptor) &&
 			!DISCOVERY_ONLY_PROVIDERS.has(descriptor.providerId) &&
-			!CREDENTIAL_SCOPED_PROVIDERS.has(descriptor.providerId),
+			!isCredentialScopedCatalogProvider(descriptor.providerId),
 	);
 	const catalogProviderModelBatches = await Promise.all(
 		catalogProviderDescriptors.map(async descriptor => ({
@@ -584,6 +599,12 @@ async function generateModels() {
 	// persisted `modelRoles.default = "xai-oauth/<id>"` is honored before the
 	// async refresh fires (interactive boot does not await refresh).
 	allModels.push(...buildXaiOAuthStaticSeed());
+	// Grok Bot — tiny offline seed (sand routers + Auto + grok-4.6). Live
+	// AvailableModels is authoritative when renewer is present; previous-snapshot
+	// grokbot rows are excluded below so retired alias forests do not resurrect.
+	if (!authoritativeCatalogProviders.has("grokbot")) {
+		allModels.push(...buildGrokbotStaticSeed());
+	}
 	// Daybreak is separately provisioned and absent from stencil.so. Keep its
 	// documented aliases and current Cyber snapshot in every generated bundle.
 	allModels.push(...OPENAI_DAYBREAK_CURATED_FALLBACK_MODELS);
@@ -683,7 +704,7 @@ async function generateModels() {
 		allModels.push(buildGitLabDuoWorkflowFallbackModel());
 	}
 	// Seed Devin's SWE-1.6 lanes. Cascade's catalog is credential-scoped, so it
-	// is never fetched during generation (CREDENTIAL_SCOPED_PROVIDERS) and the
+	// is never fetched during generation (`credential-scoped-catalog` KDL) and the
 	// seed is the entire bundled surface: the descriptor's `swe-1-6`
 	// default must resolve synchronously at boot, before credential-scoped
 	// runtime discovery replaces the seed with the account's live catalog.

@@ -119,6 +119,9 @@ export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	}
 	if (model.provider === "cline-pass" && model.thinking) return;
 	if (model.provider === "openrouter" && model.thinking?.requiresEffort === true) return;
+	// Resolved KDL catalog fact (`preserve-authored-thinking`): skip rebake so
+	// AvailableModels / seed-owned ladders are not cleared or re-invented.
+	if (resolveModelPolicy(model).catalog.preserveAuthoredThinking === true) return;
 	const requiresProviderAuthoredEffort =
 		model.provider === "umans" && (model.thinking?.requiresEffort === true || model.id === "umans-kimi-k2.7");
 	const thinking = resolveModelPolicy({ ...model, thinking: undefined }).thinking;
@@ -212,6 +215,11 @@ export function applyCanonicalLimitFallback(models: ModelSpec<Api>[]): void {
 	const referenceIndex = buildModelReferenceIndex(catalog);
 
 	for (const model of models) {
+		// Credential-scoped catalogs: live discovery owns limits; reviewed
+		// corrections arrive via KDL in `buildModel`, not canonical references.
+		if (resolveModelPolicy(model).catalog.credentialScopedCatalog === true) {
+			continue;
+		}
 		if (model.contextWindow !== null && model.maxTokens !== null) {
 			continue;
 		}

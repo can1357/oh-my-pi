@@ -1,5 +1,6 @@
 import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
+import { resolveModelPolicy } from "./compat/resolve";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
@@ -553,10 +554,14 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 	// the bundled reference's image support and the agent would go on sending
 	// images to a now text-only route.
 	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
+	const credentialScopedCatalog =
+		resolveModelPolicy(dynamicModel as unknown as ModelSpec<TApi>).catalog.credentialScopedCatalog === true;
 	const dynamicInputAuthoritative =
 		endpointChanged ||
 		(existingModel.provider === "github-copilot" && dynamicModel.provider === "github-copilot") ||
-		(existingModel.provider === "deepinfra" && dynamicModel.provider === "deepinfra");
+		(existingModel.provider === "deepinfra" && dynamicModel.provider === "deepinfra") ||
+		credentialScopedCatalog;
+	const dynamicLimitsAuthoritative = credentialScopedCatalog;
 	const supportsImage = dynamicInputAuthoritative
 		? dynamicModel.input.includes("image")
 		: existingModel.input.includes("image") || dynamicModel.input.includes("image");
@@ -565,21 +570,31 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 	// whole truth: when the wire advertises only the `none` off-state the
 	// mapper emits `reasoning: false`, and OR-ing the bundled reference's
 	// stale `reasoning: true` back would re-arm an effort dial the route
-	// doesn't expose. Other providers keep the OR so a bundled reasoning flag
+	// doesn't expose. Credential-scoped catalogs (KDL) are similarly
+	// authoritative — a live `reasoning: false` must not be OR-upgraded by
+	// offline seed reasoning (or KDL would re-attach effort ladders at
+	// buildModel). Other providers keep the OR so a bundled reasoning flag
 	// survives a discovery row that simply omits the capability.
 	const dynamicReasoningAuthoritative =
-		existingModel.provider === "synthetic" && dynamicModel.provider === "synthetic";
+		(existingModel.provider === "synthetic" && dynamicModel.provider === "synthetic") || credentialScopedCatalog;
 	const reasoning = dynamicReasoningAuthoritative
 		? dynamicModel.reasoning
 		: existingModel.reasoning || dynamicModel.reasoning;
 	const longContextCost = dynamicModel.cost.longContext ?? existingModel.cost.longContext;
 	// Re-build from spec stage: sparse compat comes from `compatConfig` (the
 	// verbatim override vocabulary), never the resolved `compat` record.
+	// When discovery owns reasoning and reports false, do not keep the offline
+	// seed thinking ladder via object spread. Pass an explicit empty ladder so
+	// preserve-authored-thinking blocks KDL reasoning/effort re-attachment
+	// (`thinking: undefined` would unlock catalog `reasoning` fills again).
 	return buildModel({
 		...existingModel,
 		...dynamicModel,
 		name: preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning,
+		...(dynamicReasoningAuthoritative && !dynamicModel.reasoning
+			? { thinking: { mode: "effort" as const, efforts: [] } }
+			: {}),
 		input: supportsImage ? ["text", "image"] : ["text"],
 		cost: {
 			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input),
@@ -588,8 +603,14 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 			cacheWrite: preferDiscoveryCost(dynamicModel.cost.cacheWrite, existingModel.cost.cacheWrite),
 			...(longContextCost ? { longContext: longContextCost } : {}),
 		},
-		contextWindow: preferDiscoveryLimit(dynamicModel.contextWindow, existingModel.contextWindow),
-		maxTokens: preferDiscoveryLimit(dynamicModel.maxTokens, existingModel.maxTokens),
+		contextWindow:
+			dynamicLimitsAuthoritative && dynamicModel.contextWindow === null
+				? null
+				: preferDiscoveryLimit(dynamicModel.contextWindow, existingModel.contextWindow),
+		maxTokens:
+			dynamicLimitsAuthoritative && dynamicModel.maxTokens === null
+				? null
+				: preferDiscoveryLimit(dynamicModel.maxTokens, existingModel.maxTokens),
 		headers: dynamicModel.headers ? { ...existingModel.headers, ...dynamicModel.headers } : existingModel.headers,
 		compat: dynamicModel.compatConfig ?? existingModel.compatConfig,
 		contextPromotionTarget: dynamicModel.contextPromotionTarget ?? existingModel.contextPromotionTarget,

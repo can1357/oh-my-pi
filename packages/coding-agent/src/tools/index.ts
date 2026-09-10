@@ -506,9 +506,12 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const enableLsp = session.enableLsp ?? true;
 	const requestedTools = restrictToolNames
 		? normalizeToolNames(toolNames ?? [])
-		: toolNames
+		: toolNames !== undefined
 			? normalizeToolNames(toolNames)
 			: undefined;
+	// Explicit empty whitelist (`--no-tools`) must stay empty — do not widen with
+	// feature-owned tools (autolearn, memory, goal, external thinking, yield).
+	const emptyExplicitWhitelist = Array.isArray(requestedTools) && requestedTools.length === 0;
 	// createTools may be called more than once for the same ToolSession. A later
 	// explicit (or full-set) write request is a real grant and must upgrade any
 	// device-only transport left by an earlier read-only call.
@@ -520,7 +523,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const goalModeActive = !restrictToolNames && goalEnabled && session.getGoalModeState?.()?.enabled === true;
 	const externalThinkingActive =
 		session.settings.get("externalThinking") && supportsExternalThinking(session.getActiveModel?.());
-	if (goalModeActive && requestedTools && !requestedTools.includes("goal")) {
+	if (goalModeActive && requestedTools && !emptyExplicitWhitelist && !requestedTools.includes("goal")) {
 		requestedTools.push("goal");
 	}
 	const backends = resolveEvalBackends(session);
@@ -566,7 +569,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	}
 	// Auto-include AST counterparts when their text-based sibling is present.
 	// Restricted callers own the active list and must not have it widened.
-	if (requestedTools && !restrictToolNames) {
+	// Explicit empty `--no-tools` whitelist must also stay empty.
+	if (requestedTools && !restrictToolNames && !emptyExplicitWhitelist) {
 		if (
 			session.settings.get("compaction.experimentalContextManagement") &&
 			requestedTools.includes("read") &&
@@ -677,7 +681,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		}
 		return true;
 	};
-	if (includeYield && requestedTools && !requestedTools.includes("yield")) {
+	if (includeYield && requestedTools && !emptyExplicitWhitelist && !requestedTools.includes("yield")) {
 		requestedTools.push("yield");
 	}
 

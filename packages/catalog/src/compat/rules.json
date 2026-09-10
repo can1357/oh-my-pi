@@ -31,6 +31,7 @@
 		"auth/google-gemini-cli.kdl",
 		"auth/google-vertex.kdl",
 		"auth/google.kdl",
+		"auth/grokbot.kdl",
 		"auth/groq.kdl",
 		"auth/huggingface.kdl",
 		"auth/kagi.kdl",
@@ -118,6 +119,7 @@
 		"providers/coreweave.kdl",
 		"providers/cursor.kdl",
 		"providers/deepseek.kdl",
+		"providers/devin.kdl",
 		"providers/firepass.kdl",
 		"providers/fireworks.kdl",
 		"providers/github-copilot.kdl",
@@ -127,6 +129,7 @@
 		"providers/google-gemini-cli.kdl",
 		"providers/google-vertex.kdl",
 		"providers/google.kdl",
+		"providers/grokbot.kdl",
 		"providers/groq.kdl",
 		"providers/huggingface.kdl",
 		"providers/kilo.kdl",
@@ -7996,6 +7999,15 @@
 				}
 			},
 			{
+				"source": "providers/devin.kdl:5",
+				"providers": [
+					"devin"
+				],
+				"catalog": {
+					"credentialScopedCatalog": true
+				}
+			},
+			{
 				"source": "providers/firepass.kdl:10",
 				"class": "glm",
 				"providers": [
@@ -8835,6 +8847,245 @@
 						"medium",
 						"high"
 					]
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:16",
+				"class": "anthropic",
+				"providers": [
+					"grokbot"
+				],
+				"catalog": {
+					"sandToolsWire": "keep-model"
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:22",
+				"class": "gemini",
+				"providers": [
+					"grokbot"
+				],
+				"catalog": {
+					"sandNativeToolSchema": "google"
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:25",
+				"class": "openai",
+				"providers": [
+					"grokbot"
+				],
+				"catalog": {
+					"sandNativeToolSchema": "strict"
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:31",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "sand-default"
+					}
+				],
+				"catalog": {
+					"reasoning": true,
+					"sandToolsWire": "parent-chat",
+					"sandPromoteJsonTextTools": true
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:36",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "sand-cua"
+					}
+				],
+				"catalog": {
+					"sandToolsWire": "parent-chat",
+					"sandPromoteJsonTextTools": true
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:40",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "sand-automation"
+					}
+				],
+				"catalog": {
+					"sandToolsWire": "automation",
+					"sandPromoteJsonTextTools": true
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:50",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "default"
+					},
+					{
+						"kind": "exact",
+						"value": "default[]"
+					},
+					{
+						"kind": "exact",
+						"value": "auto"
+					},
+					{
+						"kind": "exact",
+						"value": "auto[]"
+					}
+				],
+				"catalog": {
+					"sandToolsWire": "parent-chat",
+					"sandWireModelId": "sand-default",
+					"sandWireModelIdWhen": "tools",
+					"sandPromoteJsonTextTools": true
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:60",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gemini-3-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "gemini-3-flash[]"
+					}
+				],
+				"catalog": {
+					"sandWireModelId": "gemini-3.8-flash",
+					"sandWireModelIdWhen": "tools",
+					"sandPromoteJsonTextTools": true
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:69",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "glob",
+						"value": "gemini-*"
+					}
+				],
+				"catalog": {
+					"sandEmptyToolsRetryWire": "keep-model",
+					"sandAcceptEmptyWriteFollowup": true
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:73",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "sand-default"
+					},
+					{
+						"kind": "exact",
+						"value": "sand-cua"
+					},
+					{
+						"kind": "exact",
+						"value": "sand-automation"
+					},
+					{
+						"kind": "exact",
+						"value": "default"
+					},
+					{
+						"kind": "exact",
+						"value": "default[]"
+					},
+					{
+						"kind": "exact",
+						"value": "auto"
+					},
+					{
+						"kind": "exact",
+						"value": "auto[]"
+					}
+				],
+				"catalog": {
+					"contextWindowFloor": 200000
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:81",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "grok-4.6"
+					}
+				],
+				"thinking": {
+					"mode": "effort",
+					"efforts": [
+						"low",
+						"medium",
+						"high",
+						"xhigh"
+					]
+				},
+				"catalog": {
+					"reasoning": true,
+					"contextWindowFloor": 200000,
+					"sandParameterIds": [
+						"effort",
+						"fast"
+					]
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:89",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "glob",
+						"value": "grok-4.5*"
+					}
+				],
+				"catalog": {
+					"supportsTools": false
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:5",
+				"providers": [
+					"grokbot"
+				],
+				"catalog": {
+					"preserveAuthoredThinking": true,
+					"credentialScopedCatalog": true
 				}
 			},
 			{
@@ -15568,6 +15819,18 @@
 				"refresh": {
 					"kind": "hook",
 					"hook": "cursor"
+				}
+			},
+			{
+				"id": "grokbot",
+				"apiKeyFormat": "bearer",
+				"name": "Grok Bot (not Cursor, not xAI)",
+				"env": {
+					"hook": "grokbot"
+				},
+				"login": {
+					"kind": "custom",
+					"hook": "grokbot"
 				}
 			},
 			{

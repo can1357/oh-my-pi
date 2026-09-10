@@ -20,7 +20,8 @@ export type KnownApi =
 	| "ollama-chat"
 	| "cursor-agent"
 	| "gitlab-duo-agent"
-	| "devin-agent";
+	| "devin-agent"
+	| "grokbot-sand";
 export type Api = KnownApi | (string & {});
 
 /** Canonical thinking transport used by a model. */
@@ -1117,6 +1118,64 @@ export interface Model<TApi extends Api = Api> {
 	gitlabDuoWorkflowRootNamespaceId?: string;
 	/** Cursor `max_mode` request flag returned by `GetUsableModels` for premium models that require max mode. */
 	cursorMaxMode?: boolean;
+	/**
+	 * Client-side id aliases from Grok Bot `AvailableModels.idAliases` (and similar).
+	 * Not separate catalog rows — lookup resolves an alias to this canonical model.
+	 */
+	aliases?: readonly string[];
+	/**
+	 * Allowed Grok Bot `requestedModel.parameters` ids from live `parameterDefinitions`
+	 * (e.g. `effort`, `fast`, `reasoning`, `context`). Empty/absent ⇒ bare modelId only.
+	 */
+	sandParameterIds?: readonly string[];
+	/**
+	 * Reviewed Grok Bot Anthropic+tools auto wire profile (KDL `sand-tools-wire`).
+	 * Synthetic routers declare `parent-chat` / `automation`; unset for ordinary models.
+	 */
+	sandToolsWire?: "parent-chat" | "automation" | "keep-model" | "error" | "native" | "sand-default-fallback";
+	/**
+	 * On an empty first tool turn, replay once with this wire (KDL
+	 * `sand-empty-tools-retry-wire`). Typically `keep-model` for Gemini-class
+	 * sand rows that otherwise burn the budget on thinking.
+	 */
+	sandEmptyToolsRetryWire?: "parent-chat" | "automation" | "keep-model" | "error" | "native" | "sand-default-fallback";
+	/**
+	 * Reviewed Grok Bot `requestedModel.modelId` rewrite (KDL `sand-wire-model-id`).
+	 * Catalog id stays the AvailableModels slug; the stream sends this bare id.
+	 */
+	sandWireModelId?: string;
+	/**
+	 * When to apply `sandWireModelId` (KDL `sand-wire-model-id-when`).
+	 * `tools` ⇒ rewrite only when the request includes tools.
+	 */
+	sandWireModelIdWhen?: "tools";
+	/**
+	 * Promote JSON / Gemini in-band tool dumps into toolCallParts
+	 * (KDL `sand-promote-json-text-tools`). Opt-in for routes that emit Shell
+	 * JSON as text instead of toolCallPart.
+	 */
+	sandPromoteJsonTextTools?: boolean;
+	/**
+	 * Accept empty stop after Write tool results (KDL `sand-accept-empty-write-followup`).
+	 * Sand Gemini rows often empty-stop after Write; unset elsewhere.
+	 */
+	sandAcceptEmptyWriteFollowup?: boolean;
+	/**
+	 * Native omp field-2 JSON Schema projection (KDL `sand-native-tool-schema`).
+	 * `google` / `strict` adapt schemas for Gemini / OpenAI-class sand backends;
+	 * unset keeps the raw omp schema.
+	 */
+	sandNativeToolSchema?: "google" | "strict";
+	/**
+	 * Default Grok Bot `requestedModel.parameters` values from live AvailableModels
+	 * variants (e.g. default `context` tier). Wire mapping prefers explicit request
+	 * options, then these defaults, then reviewed fallbacks.
+	 */
+	sandParameterDefaults?: Readonly<Record<string, string>>;
+	/** When true, Grok Bot stream sets `requestedModel.maxMode`. Default false. */
+	sandMaxMode?: boolean;
+	/** When true, sand requests set `requestedModel.isVariantStringRepresentation`. */
+	sandVariantStringRepresentation?: boolean;
 	cost: ModelCost;
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;

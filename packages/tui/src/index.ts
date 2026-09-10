@@ -24,6 +24,8 @@ export * from "./debug-server";
 export * from "./deccara";
 // Desktop notifications via D-Bus (Linux freedesktop notifications)
 export * from "./desktop-notify";
+// Utilities
+export * from "./display-limits";
 // Editor component interface (for custom editors)
 export type * from "./editor-component";
 // Fuzzy matching
@@ -50,5 +52,4 @@ export * from "./terminal-capabilities";
 // TTY ID
 export * from "./ttyid";
 export * from "./tui";
-// Utilities
 export * from "./utils";

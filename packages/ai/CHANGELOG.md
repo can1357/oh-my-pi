@@ -2,6 +2,106 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Grok Bot omits discovered effort/reasoning defaults when `thinking` is explicitly off.
+- Grok Bot JSON-as-text dedupe keeps native custom-wire tools (e.g. `Shell` via `customWireName`) distinct from preferred omp owners like `bash`.
+- Catalog matrix shell/write smoke rejects nonnumeric `printf` `%d`/`%f`/… arguments that bash would convert (literal ping no longer passes).
+- Fixed native tool promotion dropping distinct custom tools and disabled thinking inheriting effort defaults.
+
+- Grok Bot emits the remaining tool-arg suffix when an unbuffered complete JSON snapshot prefix-extends a partial accumulator (`{"path":` → `{"path":"/tmp/x"}`).
+- Catalog matrix shell/write smoke expands printf `%b` backslash escapes (`\\c` suppresses further output) before accepting a fabricated ping.
+- Grok Bot emits only the remaining tool-arg suffix when unbuffered appendable fragments complete a JSON object (avoids re-emitting the full snapshot for proxy concat).
+- Catalog matrix shell/write smoke expands `echo -e` escapes (`\\c` suppresses output) before accepting a fabricated ping.
+- Grok Bot rewrites buffered `toolcall_delta`s to one canonical snapshot when cumulative complete JSON args revise (`{"cmd":"ls"}` → `{"cmd":"ls","n":1}`), so proxy concat stays parseable.
+- Grok Bot keeps provisional SendToUser text buffered until the call completes so draft→answer revisions do not publish additive `draftanswer` deltas.
+- Catalog matrix read smoke rejects `head -c` / `tail -c` byte ranges that can truncate the fixture token while `runOneTool` fabricates the ping.
+- Catalog matrix read smoke rejects GNU `head -n -1` and `tail -n +2` ranges that suppress the one-line fixture token.
+- Catalog matrix shell smoke validates reachable `&&` / `||` suffixes (`echo ping && false`, write-then-`rm`) instead of keeping only the first conjunct.
+- Grok Bot product-wire history rewrite honors `customWireName` ownership (e.g. `save`→Write) so collision losers like `edit` are not rewritten onto the owner's schema.
+- Grok Bot skips JSON-as-text tool promotion when `toolChoice: "none"` so handoff cannot dispatch fenced Shell/Write from retained `context.tools`.
+- Grok Bot does not finalize provisional `isComplete: false` JSON tool calls after an output-token limit (keeps `length` instead of executing truncated Shell/Write).
+- Grok Bot replaces revised SendToUser content snapshots (`draft` → `answer`) instead of appending them into `draftanswer`.
+- Grok Bot treats complete JSON tool-arg frames as cumulative snapshots when they revise a prior object (`{"cmd":"ls"}` → `{"cmd":"ls","n":1}`) instead of concatenating malformed JSON.
+- Grok Bot JSON-as-text duplicate suppression canonicalizes custom wire owners (e.g. `save`↔`Write`) before fingerprinting so mirrored thinking/text dumps promote once.
+
+- Grok Bot JSON-as-text duplicate suppression canonicalizes Shell↔bash (and other advertised omp aliases) before fingerprinting so mirrored thinking/text dumps promote once.
+
+- Grok Bot does not finalize grammar/customFormat tool calls that end with `isComplete: false` (truncated patches stay incomplete instead of executing).
+- Grok Bot JSON-as-text duplicate suppression fingerprints arguments with key-order-stable serialization so mirrored thinking/text dumps promote once.
+- Grok Bot keep-model probe passes catalog `sandToolsWire: "keep-model"` into auto resolution (and expects bare auto → `native`).
+- Catalog matrix shell smoke requires exact fixture paths (or absolute `…/fixture` suffixes) and rejects trailing non-exit statements after a successful echo/read (`echo ping; false`).
+- Grok Bot Write ownership honors extension `customWireName: "Write"` aliases for empty Write follow-up acceptance.
+- Grok Bot `--thinking off` omits effort when the model allows an explicit `thinking` parameter (avoids flooring effort while sending `thinking: false`).
+- Grok Bot JSON-as-text promotion no longer invents product aliases (Shell/Read/Write) for native bash/read/write wire names.
+- Grok Bot accumulates non-prefix streamed tool-argument deltas (and SendToUser args) instead of replacing the buffer with the final fragment.
+- Honor model tool support and keep advertised Grok Bot tool names aligned with executable tools.
+
+- Grok Bot Connect streams reject data frames and leftover bytes after the end-stream trailer.
+- Catalog matrix tool smoke rejects `echo ping; exit 1` and relative suffix Read/Write paths that are not the fixture file.
+- Grok Bot native history keeps extension `Shell` customWireName aliases; product collision ownership applies only on product wire.
+- Grok Bot JSON-as-text promotion prefers final text dumps over the same call mirrored in thinking, so Shell/Write is not executed twice.
+- Grok Bot live probes require a completed Shell tool call and a Connect end-stream trailer (incomplete `toolCallPart` or missing trailer no longer passes).
+- Grok Bot JSON-as-text promotion only accepts owner aliases from `advertisedNamesForJsonTextToolCall` (no `edit`→Write / `bash`→Shell fallback onto collision losers).
+- Grok Bot empty Write follow-up acceptance uses the product-wire Write owner from `context.tools`, so historical `edit` results are ignored when `write` owns Write.
+- Grok Bot JSON-as-text promotion keeps ordinary prose/thinking blocks on the final message and only drops the blocks that produced promoted tool calls.
+- Grok Bot empty/incomplete tool retries merge abandoned-attempt usage into error responses when the replay fails.
+- Grok Bot JSON-as-text promotion buffers later promotable text/thinking blocks even after earlier prose went live, so raw tool dumps are not published before end-of-stream promotion.
+- Grok Bot catalog keep-model on non-Anthropic retries keeps advertised `context` (and other non-retry) parameters while still stripping effort/reasoning/thinking/fast.
+- Grok Bot JSON-as-text promotion accumulates tool calls from every eligible text/thinking block so parallel one-call-per-block dumps are not dropped after the first.
+- Grok Bot native tool-schema projection (`google` / `strict`) comes from catalog KDL `sand-native-tool-schema`, not TypeScript model-class branches.
+- Grok Bot JSON-as-text promotion tries individual text/thinking blocks before joining them, so ordinary reasoning before a tool JSON dump still promotes.
+- Grok Bot product Read/Write alias schemas rewrite branch-local `required` under `anyOf`/`oneOf`/`allOf` so advertised `contents`/`target_file` calls validate.
+- Grok Bot catalog keep-model on non-Anthropic rows preserves `maxMode` / `isVariantStringRepresentation` while stripping retry-disabled parameters.
+- Grok Bot promotes every advertised Gemini `tool_code` call in a fence (not only the first).
+- Catalog matrix shell smoke treats only the first arm of `&&` / `||` / `&` as reachable so conditional echoes/writes cannot pass fabricated gates.
+- Catalog matrix shell smoke splits on `;` / `&&` / `||` / `&` with quote awareness so quoted separators cannot invent executable write/echo segments.
+- Catalog matrix write smoke matches only the redirect destination word (not trailing args after `> /dev/null path`).
+- Catalog matrix bash/read smoke stops after an earlier `exit`/`return` (same as write), so `exit; echo ping` cannot pass a fabricated gate.
+- Catalog matrix write smoke requires printf/echo to actually emit the ping (`printf '' ping > path` no longer passes).
+- Catalog matrix bash smoke validates printf emitted bytes (rejects `printf '' ping` / `%0.s`); read smoke rejects `head -n 0` and quiet sed without print.
+- Grok Bot empty/incomplete tool retries preserve abandoned-attempt usage and add it to the successful attempt.
+- Catalog matrix OMP tool descriptions load from static `.md` prompt assets.
+- Grok Bot keep-model pipeline/probe scripts load tool descriptions from static `.md` prompt assets.
+- Catalog matrix G1/G2 tool and automation OMP tool descriptions load from static `.md` prompt assets.
+- Catalog matrix probe rows carry live `sandParameterDefaults` / `sandMaxMode` into `resolveGrokbotRequestedModel`.
+- Grok Bot probe scripts reuse shipping catalog `grokbot-auth` (no divergent checksum/mint mirror).
+- Grok Bot Anthropic keep-model auto wire comes from catalog `sand-tools-wire` (KDL), so a reviewed row can opt into `native` / `error` without a TypeScript class branch.
+- Grok Bot parent-chat SendToUser ownership uses the advertised wire name (`customWireName` or name), so an internal `SendToUser` aliased to another wire still treats injected `SendToUser` as visible text.
+- Grok Bot history keeps collision-loser `customWireName` tools under their internal name when another tool owns the advertised slot (e.g. `extension_shell` vs `bash` → Shell).
+- Grok Bot honors `toolChoice: "none"` by advertising no tools (handoff keeps `context.tools` for prompt-cache reuse).
+- Grok Bot rejects `toolChoice` values other than `"auto"` / `"none"` (InferenceStreamRequest has no tool_choice field).
+- Grok Bot history replay treats grammar mode from the live tool index (`isGrammar`), not from `customWireName` alone.
+- Grok Bot product Write/Read arg normalization uses advertised wire aliases (`customWireName` / product wire) so extension-owned Write/Read map `contents`/`target_file`.
+- Grok Bot product Read/Write alias schemas clone canonical property constraints (enum/pattern/length) onto `contents` / `target_file`.
+- `streamSimple` forwards `toolChoice` into Grok Bot provider options so handoff `toolChoice: "none"` reaches the wire.
+- Grok Bot empty-tool replay product wire comes from catalog `sand-empty-tools-retry-wire` (gemini-* → keep-model), not a TypeScript Gemini class branch.
+- Grok Bot empty Write follow-up acceptance is gated by catalog `sand-accept-empty-write-followup` (gemini-*), not the entire Gemini taxonomy class.
+- Grok Bot JSON-as-text promotion aliases only tools that survived product wire-name collision resolution (e.g. drops unadvertised `edit` when `Write` came from `write`).
+- Grok Bot JSON-as-text promotion aliases the surviving custom `customWireName` owner (does not invent preferred omp names like `bash` for an extension-owned Shell slot).
+- Grok Bot product Read/Write alias schemas preserve preexisting `anyOf` required groups via `allOf` instead of replacing them.
+- Grok Bot `register-builtins` loads `streamGrokBot` via a top-level import (AGENTS.md; no `import("./grokbot")` dynamic path).
+- Grok Bot `sand-wire-model-id` rewrites are tools-scoped (`sand-wire-model-id-when=tools`) so text-only requests keep the selected model.
+- Grok Bot JSON-as-text tool promotion requires catalog `sand-promote-json-text-tools` or a product wire profile (native example JSON stays text).
+- Grok Bot remaps retained SendToUser content indexes after dropping incomplete leftover tools so JSON-shaped user text is not promoted into a tool call.
+- Grok Bot correlates name-less SendToUser continuation frames by call id/index so parent-chat replies stay synthetic text.
+- Grok Bot omits `fast` when discovery left no default (does not invent `true`/`false` from whether `thinking` is advertised).
+- Grok Bot stream and AvailableModels pass the configured base URL unmodified into `joinGrokbotBackendUrl` (preserves trailing `/` inside query values).
+- Grok Bot parent-chat `SendToUser` tool/schema descriptions load from static `.md` prompt assets.
+- Catalog matrix omp `-p` slice derives `--thinking` from each selected model's probe effort (omits the flag when none is known).
+- Catalog matrix bash smoke rejects pipelines that can suppress the probe token (not only redirects/`tee`).
+- Catalog matrix Shell read smoke rejects pipelines/redirects that can discard file contents (e.g. `cat path | grep -v …`).
+- Catalog matrix Shell read/write smoke requires a trailing path boundary so `path.bak` does not count as `path`.
+- Catalog matrix omp `--thinking` only passes efforts from `getSupportedEfforts()` (omits sand-only defaults like `adaptive`).
+- Catalog matrix Shell write smoke requires an unquoted redirect/`tee` of the ping into the expected path and rejects earlier `exit`/`return` statements (quoted `>` does not count).
+- Keep-model Anthropic probe validates and replays returned Shell arguments (no fabricated echo).
+- `/grokbot` Host status omits the entire URL query string (not only a credential-name allowlist) so proxy auth keys cannot leak.
+- `/grokbot` Host status also strips URL fragments (e.g. `#token=…`) from displayed backends.
+- `/grokbot` Host status also strips userinfo/query from malformed endpoints that fail `URL` parsing (e.g. scheme-less proxy URLs).
+- Grok Bot product Read/Write alias schemas retain preexisting `allOf` entries when combining with `anyOf` alias constraints.
+- Grok Bot product Read/Write property-alias descriptions load from static `.md` prompt assets.
+- Grok Bot parent-chat keeps concurrent SendToUser reconstruction state per call so interleaved name-less frames do not fall through to unknown tool calls.
+
 ## [18.1.16] - 2026-09-09
 
 ### Fixed

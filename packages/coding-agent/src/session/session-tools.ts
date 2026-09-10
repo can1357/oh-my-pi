@@ -76,6 +76,12 @@ interface SessionToolsOptions {
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** MCP tool names whose current registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
+	/**
+	 * When false, deferred MCP manager discovery registers tools but does not
+	 * force-activate them (used for an explicit empty `--no-tools` whitelist).
+	 * Defaults to true.
+	 */
+	autoActivateMcpManagerTools?: boolean;
 	ensureWriteRegistered?: () => Promise<boolean>;
 	isDeviceOnlyWrite?: () => boolean;
 	setDeviceOnlyWrite?: (enabled: boolean) => void;
@@ -196,6 +202,7 @@ export class SessionTools {
 	#builtInToolNames: Set<string>;
 	#rpcHostToolNames = new Set<string>();
 	#mcpManagerToolNames = new Set<string>();
+	#autoActivateMcpManagerTools = true;
 	#extensionMcpTools = new Map<string, AgentTool>();
 	#xdev: XdevState | undefined;
 	#pendingToolRosterDelta: { added: Set<string>; removed: Set<string> } | undefined;
@@ -267,6 +274,7 @@ export class SessionTools {
 		this.#createThinkTool = options.createThinkTool;
 		this.#builtInToolNames = new Set(options.builtInToolNames ?? []);
 		this.#mcpManagerToolNames = new Set(options.mcpManagerToolNames ?? []);
+		this.#autoActivateMcpManagerTools = options.autoActivateMcpManagerTools !== false;
 		if (options.mcpManagerToolNames === undefined) {
 			for (const name of this.#toolRegistry.keys()) {
 				if (isMCPToolName(name)) this.#mcpManagerToolNames.add(name);
@@ -1661,15 +1669,22 @@ export class SessionTools {
 			if (managerToolSet.has(tool)) this.#mcpManagerToolNames.add(tool.name);
 		}
 
-		// Connected manager tools become active immediately. Extension-owned MCP
+		// Connected manager tools become active immediately unless the session was
+		// opened with an explicit empty `--no-tools` whitelist. Extension-owned MCP
 		// tools retain their prior selection while both sets share one registry.
 		const retainedActiveExtensionToolNames = previousActiveMcpToolNames.filter(
 			name => this.#extensionMcpTools.has(name) && this.#toolRegistry.has(name),
 		);
+		const retainedActiveManagerToolNames = previousActiveMcpToolNames.filter(name =>
+			this.#mcpManagerToolNames.has(name),
+		);
+		const managerToolsToActivate = this.#autoActivateMcpManagerTools
+			? this.#mcpManagerToolNames
+			: retainedActiveManagerToolNames;
 		const nextActive = [
 			...new Set([
 				...this.#getActiveNonMCPToolNames(),
-				...this.#mcpManagerToolNames,
+				...managerToolsToActivate,
 				...retainedActiveExtensionToolNames,
 			]),
 		];

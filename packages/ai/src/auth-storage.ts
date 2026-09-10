@@ -5871,20 +5871,27 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Sync peek of runtime/config override credentials only.
+	 *
+	 * Mirrors the first two legs of {@link peekApiKey} / {@link getApiKey}
+	 * (CLI `--api-key`, then `models.yml` `providers.*.apiKey`) so synchronous
+	 * callers — e.g. credential-scoped startup cache hashing — share the same
+	 * precedence without inventing a second ordering.
+	 */
+	peekApiKeyOverrides(provider: string): string | undefined {
+		return this.#runtimeOverrides.get(provider) ?? this.#configOverrides.get(provider);
+	}
+
+	/**
 	 * Peek at API key for a provider without refreshing OAuth tokens.
 	 * Used for model discovery where we only need to know if credentials exist
 	 * and get a best-effort token. For GitHub Copilot we preserve enterprise
 	 * routing metadata so discovery can hit the correct host.
 	 */
 	async peekApiKey(provider: string): Promise<string | undefined> {
-		const runtimeKey = this.#runtimeOverrides.get(provider);
-		if (runtimeKey) {
-			return runtimeKey;
-		}
-
-		const configKey = this.#configOverrides.get(provider);
-		if (configKey) {
-			return configKey;
+		const overrideKey = this.peekApiKeyOverrides(provider);
+		if (overrideKey) {
+			return overrideKey;
 		}
 
 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,

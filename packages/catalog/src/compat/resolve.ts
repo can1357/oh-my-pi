@@ -1065,7 +1065,9 @@ function resolveThinkingPolicy<TApi extends Api>(
 	axes: ResolvedAxes,
 	compat: CompatOf<TApi>,
 ): ThinkingConfig | undefined {
-	if (!spec.reasoning) return undefined;
+	// Spec reasoning OR reviewed catalog `reasoning` (neutral seeds/routers).
+	// Authored empty ladders still short-circuit below via preserve-authored-thinking.
+	if (!spec.reasoning && axes.catalog.reasoning !== true) return undefined;
 	if (
 		spec.provider === "cline-pass" &&
 		compat !== undefined &&
@@ -1079,7 +1081,21 @@ function resolveThinkingPolicy<TApi extends Api>(
 	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
 		return fillExplicitThinking(spec, facts, compat, spec.thinking, rule);
 	}
+	// Grokbot AvailableModels marks unrecognized-only effort vocabularies with an
+	// explicit empty ladder; preserve-authored-thinking must not backfill KDL.
+	if (
+		axes.catalog.preserveAuthoredThinking === true &&
+		spec.thinking !== undefined &&
+		spec.thinking.efforts.length === 0
+	) {
+		return undefined;
+	}
 	if (compat !== undefined && "trustExplicitThinkingOnly" in compat && compat.trustExplicitThinkingOnly === true) {
+		return undefined;
+	}
+	// Catalog fact `preserve-authored-thinking`: do not invent a fallback ladder
+	// when no thinking-efforts rule matched (AvailableModels / seed-owned surface).
+	if (axes.catalog.preserveAuthoredThinking === true && (rule.efforts === undefined || rule.efforts.length === 0)) {
 		return undefined;
 	}
 	const config: ThinkingConfig = {
@@ -1230,4 +1246,28 @@ export function resolveModelPolicy(spec: ModelSpec<Api>): ResolvedModelPolicy<Ap
 		thinking: resolveThinkingPolicy(spec, facts, axes, compat),
 		catalog: axes.catalog,
 	};
+}
+
+/**
+ * Whether a provider's KDL policy marks catalogs as credential-scoped
+ * (`credential-scoped-catalog`). Used by gen:models exclusions and cold
+ * refresh gates so provider-name tables do not duplicate the rule tree.
+ */
+export function isCredentialScopedCatalogProvider(providerId: string): boolean {
+	const trimmed = providerId.trim();
+	if (!trimmed) return false;
+	return (
+		resolveModelPolicy({
+			id: "__omp_credential_scoped_probe__",
+			name: "__omp_credential_scoped_probe__",
+			api: "openai-completions",
+			provider: trimmed,
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		}).catalog.credentialScopedCatalog === true
+	);
 }

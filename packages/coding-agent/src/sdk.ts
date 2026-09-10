@@ -28,6 +28,8 @@ import {
 	prewarmOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import { isCredentialScopedCatalogProvider } from "@oh-my-pi/pi-catalog/compat/resolve";
+import { getCatalogProviderEntry } from "@oh-my-pi/pi-catalog/provider-models";
 import type { Component } from "@oh-my-pi/pi-tui";
 import {
 	$env,
@@ -1802,7 +1804,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			enableIrc: restrictToolNames ? false : options.enableIrc,
 			restrictToolNames,
 			get hasEditTool() {
-				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
+				// Keep `toolNames: []` (`--no-tools`) distinct from an omitted list —
+				// empty arrays are truthy, but callers must use an explicit undefined check.
+				const requestedToolNames =
+					options.toolNames !== undefined ? normalizeToolNames(options.toolNames) : undefined;
 				return restrictToolNames
 					? requestedToolNames?.includes("edit") === true
 					: !requestedToolNames || requestedToolNames.includes("edit");
@@ -2710,13 +2715,34 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// configured (must win over `pick`) or nothing resolved at all.
 				// The common path — role already resolved, or a `pick` with no
 				// configured default — never pays for it.
-				const defaultRoleConfigured = Boolean(settings.getModelRole("default"));
+				// Built-in credential-scoped catalogs (e.g. grokbot) are not listed
+				// by getDiscoverableProviders(); refresh that provider when the
+				// configured default is provider-qualified against a descriptor
+				// with createModelManagerOptions AND KDL credential-scoped policy
+				// (ordinary built-ins like openai must not block on discovery for a typo).
+				const defaultRoleSelector = settings.getModelRole("default")?.trim();
+				const defaultRoleConfigured = Boolean(defaultRoleSelector);
+				const defaultRoleProvider = defaultRoleSelector
+					? parseModelString(defaultRoleSelector)?.provider?.trim().toLowerCase()
+					: undefined;
+				const canRefreshDiscoverable = modelRegistry.getDiscoverableProviders().length > 0;
+				const canRefreshBuiltInDefault =
+					defaultRoleProvider !== undefined &&
+					modelRegistry.hasProvider(defaultRoleProvider) &&
+					Boolean(getCatalogProviderEntry(defaultRoleProvider)?.createModelManagerOptions) &&
+					isCredentialScopedCatalogProvider(defaultRoleProvider);
 				if (
 					!hasExplicitModel &&
 					(defaultRoleConfigured || !pick) &&
-					modelRegistry.getDiscoverableProviders().length > 0
+					(canRefreshDiscoverable || canRefreshBuiltInDefault)
 				) {
-					await logger.time("resolveModelDiscoveryFallback", () => modelRegistry.refresh("online-if-uncached"));
+					await logger.time("resolveModelDiscoveryFallback", async () => {
+						if (canRefreshDiscoverable) {
+							await modelRegistry.refresh("online-if-uncached");
+						} else if (defaultRoleProvider) {
+							await modelRegistry.refreshProvider(defaultRoleProvider, "online-if-uncached");
+						}
+					});
 					if (!(await tryResolveDefaultRole()) && !model) {
 						const refreshedCandidates = await resolveAllowedModels(
 							modelRegistry,
@@ -3229,7 +3255,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
-		const explicitlyRequestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
+		// Explicit `!== undefined` so `toolNames: []` (`--no-tools`) stays an empty
+		// whitelist instead of falling through to the full registry via `??`.
+		const explicitlyRequestedToolNames =
+			options.toolNames !== undefined ? normalizeToolNames(options.toolNames) : undefined;
+		const emptyToolWhitelist = Array.isArray(options.toolNames) && options.toolNames.length === 0;
 		// When `requireYieldTool` is set, the subagent's prompts and idle-reminders demand a
 		// `yield` call to terminate. The tool registry already includes `yield` (see
 		// `createTools`), but an explicit `toolNames` list would otherwise drop it from the
@@ -3238,6 +3268,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (
 			options.requireYieldTool === true &&
 			explicitlyRequestedToolNames &&
+			!emptyToolWhitelist &&
 			!explicitlyRequestedToolNames.includes("yield")
 		) {
 			explicitlyRequestedToolNames.push("yield");
@@ -3245,7 +3276,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Session-managed builtins may be force-included by createTools. Keep the
 		// active set consistent with that registry decision, using built-in
 		// provenance so same-named extension tools are never force-activated.
-		if (!restrictToolNames && explicitlyRequestedToolNames) {
+		// Do not widen an explicit empty `--no-tools` whitelist.
+		if (!restrictToolNames && explicitlyRequestedToolNames && !emptyToolWhitelist) {
 			for (const name of ["manage_skill", "learn", "context_notes", "new_context"]) {
 				if (builtInToolNames.includes(name) && !explicitlyRequestedToolNames.includes(name)) {
 					explicitlyRequestedToolNames.push(name);
@@ -3257,8 +3289,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// drop it from the ACTIVE set — leaving the agent able to checkpoint but
 		// unable to rewind (or vice versa). Mirror the pairing here. Unlike the
 		// manage_skill/learn mirror above, this is a safety pairing — it applies
-		// to restricted sessions too.
-		if (explicitlyRequestedToolNames) {
+		// to restricted sessions too. Still skip widening `--no-tools`.
+		if (explicitlyRequestedToolNames && !emptyToolWhitelist) {
 			if (builtInToolNames.includes("checkpoint") && !explicitlyRequestedToolNames.includes("rewind")) {
 				explicitlyRequestedToolNames.push("rewind");
 			} else if (builtInToolNames.includes("rewind") && !explicitlyRequestedToolNames.includes("checkpoint")) {
@@ -3274,9 +3306,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}),
 		);
 		const requestedActiveToolNames = normalizedRequested.filter(name => name !== "goal");
-		const explicitlyRequestedToolNameSet = explicitlyRequestedToolNames
-			? new Set(explicitlyRequestedToolNames)
-			: undefined;
+		const explicitlyRequestedToolNameSet =
+			explicitlyRequestedToolNames !== undefined ? new Set(explicitlyRequestedToolNames) : undefined;
 		const xdevReadAvailable =
 			builtInRegistryToolNames.has("read") &&
 			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("read"));
@@ -3285,18 +3316,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			(explicitlyRequestedToolNameSet === undefined ||
 				explicitlyRequestedToolNameSet.has("write") ||
 				toolSession.deviceOnlyWrite === true);
-		const initialRequestedActiveToolNames = options.toolNames
-			? requestedActiveToolNames
-			: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));
+		const initialRequestedActiveToolNames =
+			options.toolNames !== undefined
+				? requestedActiveToolNames
+				: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));
 		let initialToolNames = [...initialRequestedActiveToolNames];
 
 		// Custom tools and extension-registered tools are always included
 		// unless the effective registry winner is hidden / defaultInactive. Restricted callers own the list.
-		const alwaysInclude: string[] = restrictToolNames
-			? []
-			: [...sdkCustomTools.map(t => t.name), ...registeredTools.map(t => t.definition.name)].filter(
-					name => !defaultInactiveToolNames.has(name),
-				);
+		// An explicit empty `--no-tools` whitelist must also skip alwaysInclude so
+		// MCP/custom tools stay off the wire without the broader restrictToolNames lockdown.
+		const alwaysInclude: string[] =
+			restrictToolNames || emptyToolWhitelist
+				? []
+				: [...sdkCustomTools.map(t => t.name), ...registeredTools.map(t => t.definition.name)].filter(
+						name => !defaultInactiveToolNames.has(name),
+					);
 		for (const name of alwaysInclude) {
 			if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
 				initialToolNames.push(name);
@@ -3777,6 +3812,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					: undefined,
 			builtInToolNames: builtInRegistryToolNames,
 			mcpManagerToolNames: initialMcpManagerToolNames,
+			autoActivateMcpManagerTools: !emptyToolWhitelist,
 			transformContext,
 			transformProviderContext,
 			onPayload,

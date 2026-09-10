@@ -80,6 +80,7 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `ZENMUX_API_KEY`                | ZenMux auth                                      | Using `zenmux` provider                                        | Used for ZenMux OpenAI and Anthropic-compatible routes                                              |
 | `VLLM_API_KEY`                  | vLLM auth/discovery opt-in                       | Using `vllm` provider (local OpenAI-compatible servers)        | Any non-empty value works for no-auth local servers                                                 |
 | `CURSOR_ACCESS_TOKEN`           | Cursor provider auth                             | Using Cursor provider                                          | `CURSOR_API_KEY` is accepted as an alias                                                            |
+| `GROKBOT_RENEWAL_CREDENTIAL`    | Grok Bot sand renewer                            | Using `grokbot` / `grokbot-sand`                               | Alias `SAND_INFERENCE_RENEWAL_CREDENTIAL`. File-backed auth: `~/.omp/agent/secrets/grokbot.env`. See [Grok Bot](./grokbot.md). |
 | `AI_GATEWAY_API_KEY`            | Vercel AI Gateway auth                           | Using `vercel-ai-gateway` provider                             | `VERCEL_AI_GATEWAY_API_KEY` is accepted as an alias                                                 |
 | `CLOUDFLARE_AI_GATEWAY_API_KEY` | Cloudflare AI Gateway auth                       | Using `cloudflare-ai-gateway` provider                         | Gateway token with AI Gateway Run permission; `/login` stores it with the routing IDs               |
 | `CLOUDFLARE_ACCOUNT_ID`         | Cloudflare AI Gateway account routing            | Using an environment-supplied gateway token                    | Not required when the account ID was stored by `/login`                                             |
@@ -189,6 +190,18 @@ When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry 
 | `NODE_EXTRA_CA_CERTS`       | PEM path or inline PEM                         | Extra CA chain for server certificate validation                                                                                                              |
 | `CLAUDE_CODE_CLIENT_CERT`   | PEM path or inline PEM                         | mTLS client certificate                                                                                                                                       |
 | `CLAUDE_CODE_CLIENT_KEY`    | PEM path or inline PEM                         | mTLS client private key (must be paired with cert)                                                                                                            |
+
+### Grok Bot (`grokbot`)
+
+Sand InferenceService — not Cursor AgentService, not xAI. One-shot commands and the live catalog matrix: [Grok Bot](./grokbot.md).
+
+| Variable                         | Default / behavior                                                                                          |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `GROKBOT_RENEWAL_CREDENTIAL`     | Long-lived renewer. Alias `SAND_INFERENCE_RENEWAL_CREDENTIAL`. Process env beats `secrets/grokbot.env`.     |
+| `GROKBOT_MACHINE_ID`             | Required for `x-cursor-checksum` on discovery and stream.                                                   |
+| `GROKBOT_NAMESPACE`              | `prod` (default), `dev`, or `lab`. Selects the sand client-version suffix.                                  |
+| `GROKBOT_CLIENT_VERSION`         | Override for `x-cursor-client-version` (sent as-is).                                                        |
+| `GROKBOT_ANTHROPIC_TOOLS_WIRE`   | Anthropic+tools policy: `auto` (default, keep-model; native families report `native`), `keep-model`, `automation`, `parent-chat`, `native`, `sand-default-fallback`, `error`. |
 
 ### Amazon Bedrock
 

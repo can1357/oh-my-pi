@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+### Fixed
+- Cold catalog / `--api-key` bind expands every selected model role (`@smol`, `@slow`, custom, chained `@default`→`@smol`), not only `@default`.
+- Catalog matrix shell smoke rejects command substitutions (`echo "$(ping)"`, backticks) that would pass a lexical includes check while bash emits no ping.
+
+- Fixed credential-scoped model startup when a selected role points to another configured role.
+- Cold catalog refresh expands `--model @default` / `*` to the configured `modelRoles.default` so a live-only default still warms AvailableModels.
+- Catalog matrix shell smoke rejects unrecognized trailing `exit`/`return` forms (`exit -1`, `exit foo`) after a successful echo/read/write probe.
+- Catalog matrix shell smoke requires exact fixture paths (or absolute `…/fixture` suffixes) and rejects trailing non-exit statements after a successful echo/read (`echo ping; false`).
+- SDK cold-cache default-model discovery refresh is limited to KDL credential-scoped catalog providers (same gate as CLI startup).
+- `--no-tools` keeps deferred MCP manager tools off the active wire set after late discovery refresh.
+
+- Cold `--model` miss refresh runs only for KDL credential-scoped catalog providers (ordinary openai typos no longer block startup on discovery).
+- Skip credential-scoped default-role catalog refresh when a bare `--model` or unbound `--models` selector is present so startup does not wait on an unrelated live provider.
+- Bracket-only `enabledModels` / `--models` patterns (e.g. `openai/gpt-[!5]`) expand via Bun.Glob instead of fuzzy-matching a single wrong id; literal `default[]` selectors stay exact.
+- Grok Bot probe-config tests inject secrets path / env overlays instead of mutating process-wide credentials or the agent directory.
+- Catalog matrix shell smoke rejects conditional `&&` / `||` arms and loads OMP tool descriptions from static `.md` assets.
+- Catalog matrix shell smoke ignores quoted `;` / `&&` separators when validating write/echo evidence.
+- Catalog matrix write smoke requires the redirect destination itself (rejects `> /dev/null expected-path`).
+- Catalog matrix bash/read smoke rejects probes after an earlier `exit`/`return` (matching write).
+- Catalog matrix write smoke rejects `printf` commands that mention the ping only as an unused argument.
+- Catalog matrix bash/read smoke rejects no-op printf and zero-length readers (`head -n 0`, quiet sed without print).
+- Catalog matrix G1/G2 tool prompts and automation OMP tool descriptions load from static `.md` assets; probe rows forward live sand defaults/max-mode.
+- Grok Bot keep-model probes reuse catalog `grokbot-auth` instead of a forked checksum/mint helper.
+- `--models` / `enabledModels` exact matches on ordinary built-ins (e.g. `openai/…`) no longer force a synchronous credential-scoped discovery refresh when the cold catalog already satisfies the scope.
+- `--models` / `enabledModels` resolve bracketed Grok Bot variant selectors (e.g. `grokbot/default[]`) by exact id before glob matching so `[]` is not treated as an empty character class.
+- Cold catalog refresh also uses a provider-qualified `modelRoles.default` when no CLI model flags are set, and the SDK discovery fallback refreshes built-in descriptor providers (e.g. Grok Bot) the same way.
+- Cold `--models` / `enabledModels` credential-scoped wildcards (e.g. `grokbot/*`) refresh live catalogs even when offline seeds already match, so Ctrl+P includes AvailableModels rows.
+- Cold catalog refresh matches colon-bearing model ids literally before stripping a recognized thinking suffix (so OpenRouter-style `:free` tiers are not collapsed to a cold base row).
+- `--no-tools` (`toolNames: []`) active-set assembly uses an explicit undefined check so the empty whitelist cannot be mis-read as “omit tools” and fall through to the full registry.
+- Cold `--provider`/`--model` refresh also gates on built-in catalog model-manager descriptors (e.g. Grok Bot), not only `getDiscoverableProviders()` (models.yml / runtime / implicit local).
+- Cold catalog refresh also covers a single-provider `--models provider/id` scope (no `parsed.model`), and empty `--models` scopes refresh built-in descriptor providers when `getDiscoverableProviders()` is empty.
+- `--provider`/`--model` with `--api-key` refreshes a cold credential-scoped catalog before model resolve so live-only ids are not missing on a fresh profile.
+- `--provider`/`--model` refreshes a cold credential-scoped catalog before model resolve for env, secrets-file, and `models.yml` credentials (not only `--api-key`).
 ### Added
 
 - Added `tui.vimMode`, an opt-in modal editing layer for the prompt, off by default ([#3299](https://github.com/can1357/oh-my-pi/issues/3299)). Escape leaves Insert; Normal mode has `hjkl`, `0`, `^`, `$`, `w`, `b`, `e`, `gg`, `G`, count prefixes, `x`/`D`/`C`, `dd`/`yy`, `p`/`P` and `u`; `v`/`V` start a Visual selection that `y` copies and `d` deletes.
@@ -28,6 +61,7 @@
 
 ### Fixed
 
+- Expands `@default` / default role aliases before binding `--api-key` so credential-scoped providers receive the key on cold start.
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 - Unset `tiny` model roles now honor the configured `@smol` fallback in direct execution and the `/models` Roles view ([#11311](https://github.com/can1357/oh-my-pi/issues/11311)).
 - Extension Control Center (`/extensions`) search now accepts `j` and `k`, so extensions like `jira`/`json` are searchable; bare `j`/`k` no longer move the list selection (use arrow keys or the configured `tui.select.up`/`down`) ([#11350](https://github.com/can1357/oh-my-pi/issues/11350)).

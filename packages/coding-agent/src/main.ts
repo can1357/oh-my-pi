@@ -9,6 +9,8 @@ import * as os from "node:os";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import { getCatalogProviderEntry } from "@oh-my-pi/pi-catalog/provider-models";
+import { isCredentialScopedCatalogProvider } from "@oh-my-pi/pi-catalog/compat/resolve";
 import {
 	$env,
 	directoryIsMissing,
@@ -28,6 +30,7 @@ import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/arg
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
+import { resolveCliRuntimeApiKeyProvider } from "./cli/runtime-api-key";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
@@ -36,11 +39,16 @@ import { ModelRegistry } from "./config/model-registry";
 import {
 	DEFAULT_PREWALK_TARGET,
 	expandRoleAlias,
+	resolveConfiguredModelPatterns,
+	type ModelRoleLookup,
 	formatModelSelectorValue,
 	getModelMatchPreferences,
+	parseModelString,
+	resolveExplicitModelRole,
 	resolveCliModel,
 	resolveModelRoleValue,
 	resolveModelScope,
+	splitModelThinkingSuffix,
 	type ScopedModel,
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
@@ -828,7 +836,10 @@ function notifyResumeCwdFallback(parsedArgs: Args, resumedProject: ResumedProjec
  */
 export async function resolveScopedModels(
 	parsed: Args,
-	modelRegistry: Pick<ModelRegistry, "getAvailable" | "getDiscoverableProviders" | "refresh">,
+	modelRegistry: Pick<
+		ModelRegistry,
+		"getAvailable" | "getDiscoverableProviders" | "refresh" | "refreshProvider" | "hasProvider"
+	>,
 	activeSettings: Settings,
 ): Promise<ScopedModel[]> {
 	const modelPatterns = parsed.models ?? activeSettings.get("enabledModels");
@@ -837,11 +848,208 @@ export async function resolveScopedModels(
 	}
 	const preferences = getModelMatchPreferences(activeSettings);
 	const scopedModels = await resolveModelScope(modelPatterns, modelRegistry, preferences, activeSettings);
-	if (scopedModels.length > 0 || modelRegistry.getDiscoverableProviders().length === 0) {
+	const discoverable = modelRegistry.getDiscoverableProviders();
+	// Only force a partial-scope refresh for KDL credential-scoped providers
+	// (and wildcards that need live roster expansion). Ordinary built-ins with
+	// `createModelManagerOptions` (e.g. openai) already satisfied by the cold
+	// catalog must not block startup on a synchronous discovery pass.
+	const builtInProviders = credentialScopedProvidersFromPatterns(modelPatterns).filter(
+		providerId =>
+			modelRegistry.hasProvider(providerId) &&
+			providerSupportsCredentialScopedRefresh(providerId, modelRegistry) &&
+			isCredentialScopedCatalogProvider(providerId),
+	);
+	// Credential-scoped wildcards (`grokbot/*`) match offline seeds first; still
+	// refresh so live-only AvailableModels rows enter Ctrl+P scope before the
+	// session captures a partial seed match.
+	if (scopedModels.length > 0 && builtInProviders.length === 0) {
 		return scopedModels;
 	}
-	await modelRegistry.refresh("online-if-uncached");
+	if (discoverable.length === 0 && builtInProviders.length === 0) {
+		return scopedModels;
+	}
+	if (discoverable.length > 0) {
+		await modelRegistry.refresh("online-if-uncached");
+	} else {
+		for (const providerId of builtInProviders) {
+			await modelRegistry.refreshProvider(providerId, "online-if-uncached");
+		}
+	}
 	return await resolveModelScope(modelPatterns, modelRegistry, preferences, activeSettings);
+}
+
+/**
+ * Provider + selectors for the pre-session cold catalog refresh.
+ * Prefers CLI `--provider`/`--model`/`--models`. When those leave API-key
+ * ownership unbound but a model selector is still present (bare `--model` /
+ * multi-provider `--models`), returns undefined so startup does not warm the
+ * configured default role. Only with no CLI model selectors does it fall back
+ * to a provider-qualified `modelRoles.default` so a fresh profile whose default
+ * is a live-only Grok Bot id still warms AvailableModels before session build.
+ */
+/** Expand configured role selectors through the shared recursive role resolver. */
+export function expandDefaultRoleModelSelector(
+	selector: string | undefined,
+	configuredRoles: string | ModelRoleLookup | undefined,
+): string | undefined {
+	if (!selector?.trim() || !configuredRoles) return undefined;
+	const lookup: ModelRoleLookup =
+		typeof configuredRoles === "string"
+			? { getModelRole: role => (role === "default" ? configuredRoles : undefined) }
+			: configuredRoles;
+	if (resolveExplicitModelRole(selector, lookup) === undefined) return undefined;
+	return resolveConfiguredModelPatterns(selector, lookup)[0];
+}
+
+function expandCliRoleSelectors(
+	parsed: Pick<Args, "provider" | "model" | "models">,
+	configuredDefault: string | ModelRoleLookup | undefined,
+): Pick<Args, "provider" | "model" | "models"> {
+	const expandedModel = expandDefaultRoleModelSelector(parsed.model, configuredDefault);
+	return {
+		...parsed,
+		...(expandedModel ? { model: expandedModel } : {}),
+		...(parsed.models
+			? {
+					models: parsed.models.map(
+						selector => expandDefaultRoleModelSelector(selector, configuredDefault) ?? selector,
+					),
+				}
+			: {}),
+	};
+}
+
+export function resolveCredentialScopedRefreshTarget(
+	parsed: Pick<Args, "provider" | "model" | "models">,
+	configuredDefault?: string | ModelRoleLookup,
+): { providerId: string; selectors: Pick<Args, "model" | "models"> } | undefined {
+	const effectiveParsed = expandCliRoleSelectors(parsed, configuredDefault);
+	const cliProvider = resolveCliRuntimeApiKeyProvider(effectiveParsed);
+	if (cliProvider) {
+		return {
+			providerId: cliProvider,
+			selectors: { model: effectiveParsed.model, models: effectiveParsed.models },
+		};
+	}
+	// Bare `--model` / unbound `--models` leave API-key ownership undefined but
+	// still take precedence over the configured default role — do not warm the
+	// default provider (and its discovery timeout) in that case.
+	// Recognized default-role aliases already expanded above; remaining selectors
+	// are unrelated bare ids (or non-default role aliases).
+	if (effectiveParsed.model?.trim() || (effectiveParsed.models ?? []).some(pattern => pattern.trim().length > 0)) {
+		return undefined;
+	}
+	const defaultRole = expandDefaultRoleModelSelector("@default", configuredDefault);
+	if (!defaultRole) return undefined;
+	const parsedDefault = parseModelString(defaultRole);
+	if (!parsedDefault?.provider) return undefined;
+	return {
+		providerId: parsedDefault.provider.trim().toLowerCase(),
+		selectors: { model: defaultRole },
+	};
+}
+
+/**
+ * When `--provider`/`--model` (or `provider/model`) selects a KDL
+ * credential-scoped provider and the model is missing from the cold/startup
+ * catalog (fresh profile, no credential-scoped cache), refresh that provider
+ * before {@link buildSessionOptions} exits on miss. Credentials may come from
+ * `--api-key`, env, secrets file, or `models.yml` — not specifically a CLI key.
+ * A single-provider `--models grokbot/<id>` scope is accepted the same way
+ * (no `parsed.model`); multi-provider / bare scopes stay unbound.
+ * Callers without CLI selection may pass a provider-qualified
+ * `modelRoles.default` via {@link resolveCredentialScopedRefreshTarget}.
+ *
+ * Built-in descriptor providers (e.g. Grok Bot) are not listed by
+ * {@link ModelRegistry.getDiscoverableProviders} — that API only covers
+ * models.yml / runtime discovery / implicit local providers — so the gate also
+ * accepts catalog entries with `createModelManagerOptions`. Ordinary built-ins
+ * that only have a manager descriptor (e.g. openai) still require the KDL
+ * `credential-scoped-catalog` flag — otherwise a cold typo blocks startup on a
+ * pointless discovery pass.
+ */
+export async function refreshCredentialScopedModelIfMissing(
+	parsed: Pick<Args, "model" | "models">,
+	modelRegistry: Pick<ModelRegistry, "getAvailable" | "hasProvider" | "refreshProvider" | "getDiscoverableProviders">,
+	providerId: string | undefined,
+): Promise<boolean> {
+	if (!providerId) return false;
+	if (!modelRegistry.hasProvider(providerId)) return false;
+	if (!providerSupportsCredentialScopedRefresh(providerId, modelRegistry)) return false;
+	// Same KDL gate as the scoped-model refresh path — descriptor-backed
+	// providers without credential-scoped-catalog must not eager-refresh.
+	if (!isCredentialScopedCatalogProvider(providerId)) return false;
+	const selectors = credentialScopedRefreshSelectors(parsed, providerId);
+	if (selectors.length === 0) return false;
+	const available = modelRegistry.getAvailable();
+	const allPresent = selectors.every(raw => credentialScopedSelectorPresent(raw, providerId, available));
+	if (allPresent) return false;
+	await modelRegistry.refreshProvider(providerId, "online-if-uncached");
+	return true;
+}
+
+/** Exact id match first; only strip a recognized trailing thinking suffix. */
+function credentialScopedSelectorPresent(raw: string, providerId: string, available: readonly Model[]): boolean {
+	const trimmed = raw.trim();
+	if (!trimmed) return false;
+	const matches = (id: string) =>
+		available.some(
+			model => model.provider === providerId && (model.id === id || `${model.provider}/${model.id}` === id),
+		);
+	const slash = trimmed.indexOf("/");
+	const bare = slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
+	// Literal colon-bearing tiers (e.g. `deepseek-v4-flash:free`) must hit exactly
+	// before any suffix stripping — otherwise a cold base row skips refresh.
+	if (matches(trimmed) || matches(bare)) return true;
+	const { base, level } = splitModelThinkingSuffix(trimmed);
+	if (!level || base === trimmed) return false;
+	const baseSlash = base.indexOf("/");
+	const baseBare = baseSlash >= 0 ? base.slice(baseSlash + 1) : base;
+	return matches(base) || matches(baseBare);
+}
+
+/** models.yml/runtime discovery OR a built-in catalog model-manager descriptor. */
+function providerSupportsCredentialScopedRefresh(
+	providerId: string,
+	modelRegistry: Pick<ModelRegistry, "getDiscoverableProviders">,
+): boolean {
+	if (modelRegistry.getDiscoverableProviders().includes(providerId)) return true;
+	return Boolean(getCatalogProviderEntry(providerId)?.createModelManagerOptions);
+}
+
+/** `--model` or single-provider-qualified `--models` selectors for `providerId`. */
+function credentialScopedRefreshSelectors(parsed: Pick<Args, "model" | "models">, providerId: string): string[] {
+	if (parsed.model?.trim()) {
+		return [parsed.model.trim()];
+	}
+	const out: string[] = [];
+	const providers = new Set<string>();
+	for (const pattern of parsed.models ?? []) {
+		const trimmed = pattern.trim();
+		if (!trimmed) continue;
+		const parsedModel = parseModelString(trimmed);
+		if (!parsedModel?.provider) {
+			// Bare selector — ownership indeterminate (same as runtime api-key bind).
+			return [];
+		}
+		const normalized = parsedModel.provider.trim().toLowerCase();
+		providers.add(normalized);
+		if (normalized === providerId) out.push(trimmed);
+	}
+	if (providers.size !== 1) return [];
+	return out;
+}
+
+function credentialScopedProvidersFromPatterns(patterns: readonly string[]): string[] {
+	const providers = new Set<string>();
+	for (const pattern of patterns) {
+		const trimmed = pattern.trim();
+		if (!trimmed) continue;
+		const parsedModel = parseModelString(trimmed);
+		if (!parsedModel?.provider) continue;
+		providers.add(parsedModel.provider.trim().toLowerCase());
+	}
+	return [...providers];
 }
 
 /**
@@ -1342,6 +1550,11 @@ export async function buildSessionOptions(
 
 	// Tools
 	if (parsed.noTools) {
+		// Empty whitelist keeps ambient tools off the provider wire via
+		// alwaysInclude skipping in sdk.ts and blocks createTools feature
+		// auto-includes (autolearn/memory/goal). Do not set restrictToolNames —
+		// that also disables extension discovery/commands and defaults LSP off
+		// (use --no-extensions / --no-lsp for those).
 		options.toolNames = parsed.tools && parsed.tools.length > 0 ? parsed.tools : [];
 	} else if (parsed.tools) {
 		options.toolNames = parsed.tools;
@@ -1536,12 +1749,39 @@ export async function runRootCommand(
 			applyAcpDefaultSettingOverrides(settingsInstance);
 		}
 
+		// Install --api-key before ModelRegistry so credential-scoped startup cache
+		// ids (grokbot renewer hash, etc.) match discovery and warm live rows.
+		// Expand `@default` / role aliases first — the same selector widening
+		// resolveCredentialScopedRefreshTarget uses — so CLI-only credentials bind
+		// to the credential-scoped provider before refresh/session resolve.
+		const apiKeyArgs = expandCliRoleSelectors(parsedArgs, settingsInstance);
+		const selectedProvider = resolveCliRuntimeApiKeyProvider(apiKeyArgs);
+		const cliApiKeyProvider = parsedArgs.apiKey ? selectedProvider : undefined;
+		if (parsedArgs.apiKey && cliApiKeyProvider) {
+			authStorage.setRuntimeApiKey(cliApiKeyProvider, parsedArgs.apiKey);
+		}
+
 		// The registry composes policy-dependent metadata synchronously, including
 		// extended-context window caps, so it must receive the finalized settings.
 		const modelRegistry = logger.time(
 			"modelRegistry:init",
 			() => new ModelRegistry(authStorage, undefined, { settings: settingsInstance }),
 		);
+		// Credential-scoped live catalogs (e.g. grokbot AvailableModels) are absent
+		// on a fresh profile until discovery runs. Refresh before --provider/--model
+		// (or a provider-qualified modelRoles.default) resolve so buildSessionOptions
+		// does not exit on a cold miss — for env, secrets-file, models.yml, and
+		// --api-key credentials alike.
+		const refreshTarget = resolveCredentialScopedRefreshTarget(parsedArgs, settingsInstance);
+		if (refreshTarget) {
+			await logger.time(
+				"refreshCredentialScopedModel",
+				refreshCredentialScopedModelIfMissing,
+				refreshTarget.selectors,
+				modelRegistry,
+				refreshTarget.providerId,
+			);
+		}
 		if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
 			Bun.env.PI_NO_PTY = "1";
 		}
@@ -1853,9 +2093,11 @@ export async function runRootCommand(
 			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry);
 		}
 
-		// Handle CLI --api-key as runtime override (not persisted)
+		// Handle CLI --api-key as runtime override (not persisted). Prefer the
+		// early install above when the provider was known from --provider/--model;
+		// this path covers deferred model resolution (extensions / discovery).
 		if (parsedArgs.apiKey) {
-			if (!sessionOptions.model && !sessionOptions.modelPattern) {
+			if (!sessionOptions.model && !sessionOptions.modelPattern && !cliApiKeyProvider) {
 				process.stderr.write(
 					`${chalk.red("--api-key requires a model to be specified via --model, --provider/--model, or --models")}\n`,
 				);

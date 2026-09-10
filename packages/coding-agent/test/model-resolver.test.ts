@@ -1792,6 +1792,47 @@ describe("resolveModelScope", () => {
 		expect(scoped[0].model.id).toBe("gpt-5.5");
 	});
 
+	test("resolves bracketed Grok Bot variant selectors literally before glob", async () => {
+		// `default[]` contains `[` so a naive glob path treats `[]` as an empty
+		// character class and matches nothing — exact id/alias must win first.
+		const variant = {
+			...allModels[0]!,
+			id: "default[]",
+			provider: "grokbot" as const,
+			api: "grokbot-sand" as const,
+			name: "default[]",
+		};
+		const scoped = await resolveModelScope(["grokbot/default[]"], {
+			getAvailable: () => [variant as (typeof allModels)[number]],
+		});
+		expect(scoped).toHaveLength(1);
+		expect(scoped[0]!.model.id).toBe("default[]");
+		expect(scoped[0]!.model.provider).toBe("grokbot");
+	});
+
+	test("bracket character-class globs expand via Bun.Glob instead of fuzzy single-match", async () => {
+		const gpt5 = allModels.find(m => m.provider === "openai" && m.id === "gpt-5") ?? {
+			...allModels[0]!,
+			id: "gpt-5",
+			provider: "openai" as const,
+			name: "gpt-5",
+		};
+		const gpt4 = allModels.find(m => m.provider === "openai" && m.id === "gpt-4") ?? {
+			...allModels[0]!,
+			id: "gpt-4",
+			provider: "openai" as const,
+			name: "gpt-4",
+		};
+		const available = [gpt5, gpt4] as (typeof allModels)[number][];
+		// Fuzzy would pick gpt-5; Bun.Glob `gpt-[!5]` excludes that character.
+		const scoped = await resolveModelScope(["openai/gpt-[!5]"], {
+			getAvailable: () => available,
+		});
+		expect(scoped.map(s => s.model.id).sort()).toEqual(["gpt-4"]);
+		const filtered = filterAvailableModelsByEnabledPatterns(available, ["openai/gpt-[!5]"]);
+		expect(filtered.map(m => m.id).sort()).toEqual(["gpt-4"]);
+	});
+
 	test("resolves role aliases in --models scope to the role's model with its thinking level", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { fable: "anthropic/claude-sonnet-4-5:high" },
@@ -2279,6 +2320,23 @@ describe("filterAvailableModelsByEnabledPatterns", () => {
 		expect(result[0].provider).toBe("openai");
 		expect(result[0].id).toBe("gpt-5.5");
 	});
+
+	test("resolves bracketed Grok Bot variant selectors literally before glob", () => {
+		const variant = {
+			...allModels[0]!,
+			id: "default[]",
+			provider: "grokbot" as const,
+			api: "grokbot-sand" as const,
+			name: "default[]",
+		};
+		const result = filterAvailableModelsByEnabledPatterns(
+			[variant as (typeof allModels)[number]],
+			["grokbot/default[]"],
+		);
+		expect(result).toHaveLength(1);
+		expect(result[0]!.id).toBe("default[]");
+		expect(result[0]!.provider).toBe("grokbot");
+	});
 });
 
 describe("effort-tier variant aliases", () => {
@@ -2365,6 +2423,96 @@ describe("effort-tier variant aliases", () => {
 	test("consumed X-thinking twins resolve via the grammar fallback", () => {
 		expect(parseModelPattern("venice/kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
 		expect(parseModelPattern("kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
+	});
+});
+
+describe("resolveProviderModelReference Model.aliases", () => {
+	test("resolves Grok Bot idAliases to the canonical live row", () => {
+		const models: Model<"grokbot-sand">[] = [
+			buildModel({
+				id: "composer-2.5",
+				name: "Composer 2.5",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				baseUrl: "https://api2.cursor.sh",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 64_000,
+				aliases: ["composer", "composer-latest"],
+				sandParameterIds: ["fast"],
+			}),
+		];
+		expect(resolveProviderModelReference("grokbot", "composer", models)?.id).toBe("composer-2.5");
+		expect(resolveProviderModelReference("grokbot", "composer-latest", models)?.id).toBe("composer-2.5");
+		expect(resolveProviderModelReference("grokbot", "composer-2.5", models)?.id).toBe("composer-2.5");
+	});
+
+	test("keeps a canonical id resolvable when another row aliases the same id", () => {
+		const models: Model<"grokbot-sand">[] = [
+			buildModel({
+				id: "default",
+				name: "Auto",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				baseUrl: "https://api2.cursor.sh",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 64_000,
+				aliases: ["auto"],
+			}),
+			buildModel({
+				id: "auto",
+				name: "auto",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				baseUrl: "https://api2.cursor.sh",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 64_000,
+			}),
+		];
+		expect(resolveProviderModelReference("grokbot", "auto", models)?.id).toBe("auto");
+		expect(resolveProviderModelReference("grokbot", "default", models)?.id).toBe("default");
+	});
+});
+
+describe("bare Model.aliases selectors", () => {
+	const grokbot = (id: string, overrides: Partial<ModelSpec<"grokbot-sand">> = {}): Model<"grokbot-sand"> =>
+		buildModel({
+			id,
+			name: id,
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+			...overrides,
+		});
+
+	test("resolves an unqualified live alias the same as grokbot/<alias>", () => {
+		const models: Model<Api>[] = [
+			grokbot("composer-2.5", { aliases: ["composer-1.5", "composer"] }),
+			// Fuzzy decoy: bare "composer" must not land on a substring id.
+			grokbot("composer-2-fast"),
+		];
+		expect(parseModelPattern("composer-1.5", models).model?.id).toBe("composer-2.5");
+		expect(parseModelPattern("composer", models).model?.id).toBe("composer-2.5");
+		expect(parseModelPattern("grokbot/composer-1.5", models).model?.id).toBe("composer-2.5");
+	});
+
+	test("live canonical ids beat another row's alias for the same bare spelling", () => {
+		const models: Model<Api>[] = [grokbot("default", { aliases: ["auto"] }), grokbot("auto")];
+		expect(parseModelPattern("auto", models).model?.id).toBe("auto");
+		expect(parseModelPattern("default", models).model?.id).toBe("default");
 	});
 });
 

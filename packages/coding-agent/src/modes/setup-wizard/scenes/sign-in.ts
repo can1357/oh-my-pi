@@ -199,7 +199,7 @@ export class SignInTab implements SetupTab {
 		this.host.restoreFocus();
 		this.host.requestRender();
 		try {
-			await this.#authStorage.login(providerId as OAuthProvider, {
+			const identity = await this.#authStorage.login(providerId as OAuthProvider, {
 				signal: this.#loginAbort.signal,
 				onAuth: info => {
 					// Store the full authorization URL as the primary copy/display
@@ -238,7 +238,8 @@ export class SignInTab implements SetupTab {
 			if (this.#disposed) return;
 			this.#statusLines = [
 				theme.fg("success", `${theme.status.success} Signed in to ${providerId}`),
-				theme.fg("dim", `Credentials saved to ${getAgentDbPath()}`),
+				// Empty-string login flows store nothing in the agent DB.
+				...(identity ? [theme.fg("dim", `Credentials saved to ${getAgentDbPath()}`)] : []),
 			];
 			this.#authUrl = undefined;
 			this.#authLaunchUrl = undefined;

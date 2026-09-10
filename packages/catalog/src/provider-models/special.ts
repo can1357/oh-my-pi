@@ -4,12 +4,15 @@ import { apiRouteFor } from "../compat/behavior";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
+import { fetchGrokbotAvailableModels } from "../discovery/grokbot";
+import { GROKBOT_AUTHENTICATED_SENTINEL, resolveGrokbotDiscoveryIdentity } from "../discovery/grokbot-auth";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModel } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec } from "../types";
 import { DEVIN_DEFAULT_BASE_URL } from "../wire/devin";
 import { toModelSpec } from "./bundled-references";
 import { resolveModelCacheProviderId } from "./cache-provider-id";
+import { buildGrokbotStaticSeed } from "./grokbot";
 
 // ---------------------------------------------------------------------------
 // OpenAI Codex
@@ -335,8 +338,8 @@ export interface DevinModelManagerConfig {
  * Cascade catalog is credential-scoped (gated per account/team), so catalog
  * generation never fetches it: baking one account's roster into the shared
  * bundle would misstate every other account's entitlements and leave zombie
- * rows behind (see CREDENTIAL_SCOPED_PROVIDERS in generate-models.ts). Both
- * SWE-1.6 lanes are verified live against `GetCliModelConfigs`; the
+ * rows behind (see `credential-scoped-catalog` / `isCredentialScopedCatalogProvider`).
+ * Both SWE-1.6 lanes are verified live against `GetCliModelConfigs`; the
  * descriptor's `defaultModel` (`swe-1-6`) must resolve synchronously at
  * boot, before credential-scoped runtime discovery replaces the seed. Field
  * shape mirrors `devinModelSpec` so seeded and discovered rows are
@@ -398,6 +401,79 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 }
 
 const devinDiscovery = once(() => import("../discovery/devin"));
+
+// ---------------------------------------------------------------------------
+// Grok Bot provider (InferenceService Stream)
+// ---------------------------------------------------------------------------
+
+export interface GrokbotModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+	/** Override `x-sand-box-namespace` for cache scoping (defaults to GROKBOT_NAMESPACE). */
+	namespace?: string;
+	/** Override `x-cursor-client-version` for cache scoping (defaults to GROKBOT_CLIENT_VERSION). */
+	clientVersion?: string;
+	/** Caller/model headers forwarded to AvailableModels mint + request. */
+	headers?: Record<string, string>;
+	/**
+	 * Pre-expanded renewer for model-cache scoping. Catalog refresh should pass
+	 * the async-resolved value so construction never sync-reads secrets.
+	 */
+	cacheCredential?: string;
+}
+
+export function grokbotModelManagerOptions(
+	config: GrokbotModelManagerConfig = {},
+): ModelManagerOptions<"grokbot-sand"> {
+	const { apiKey, baseUrl, fetch, headers } = config;
+	// Prefer a fully resolved identity from async prep (catalog refresh) so
+	// construction never sync-reads secrets/grokbot.env on the TUI event loop.
+	const ns = config.namespace?.trim();
+	const ver = config.clientVersion?.trim();
+	const identity =
+		ns && ver
+			? { namespace: ns, clientVersion: ver }
+			: resolveGrokbotDiscoveryIdentity({
+					namespace: config.namespace,
+					clientVersion: config.clientVersion,
+				});
+	return {
+		providerId: "grokbot",
+		cacheProviderId: resolveModelCacheProviderId("grokbot", {
+			apiKey,
+			baseUrl,
+			namespace: identity.namespace,
+			clientVersion: identity.clientVersion,
+			headers,
+			...(config.cacheCredential !== undefined ? { cacheCredential: config.cacheCredential } : undefined),
+		}),
+		staticModels: buildGrokbotStaticSeed(baseUrl),
+		...(apiKey
+			? {
+					dynamicModelsAuthoritative: true,
+					fetchDynamicModels: async () => {
+						// When apiKey is the file-backed sentinel, mint/discovery must
+						// use the same expanded renewer that scoped cacheProviderId —
+						// never re-read ambient secrets (profile can change mid-flight).
+						const discoveryApiKey =
+							apiKey === GROKBOT_AUTHENTICATED_SENTINEL && config.cacheCredential?.trim()
+								? config.cacheCredential.trim()
+								: apiKey;
+						return fetchGrokbotAvailableModels({
+							apiKey: discoveryApiKey,
+							baseUrl,
+							fetch,
+							headers,
+							namespace: identity.namespace,
+							clientVersion: identity.clientVersion,
+						});
+					},
+				}
+			: undefined),
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Zai
 // ---------------------------------------------------------------------------
