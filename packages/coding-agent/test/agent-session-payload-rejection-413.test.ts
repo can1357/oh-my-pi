@@ -267,6 +267,57 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		return message;
 	}
 
+	/** "maximum of N images" phrasing — doesn't match "exceeds the limit of N"
+	 *  so classifies non-ambiguous (PayloadRejected only, no ContextOverflow),
+	 *  same shape as `explicitMediaNoDigitPayloadAssistant` (#11482). */
+	function mediaMaximumLimitPayloadAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: "request_too_large: maximum of 20 images allowed",
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
+	/** "number of images exceeds the maximum" phrasing — no digit, so classifies
+	 *  non-ambiguous (PayloadRejected only, no ContextOverflow) (#11482). */
+	function mediaNumberOfImagesPayloadAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: "request_too_large: the number of images exceeds the maximum",
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
 	function usageBackedMediaBudgetAssistant(): AssistantMessage {
 		const message = {
 			role: "assistant",
@@ -795,6 +846,42 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		);
 		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
 	});
+
+	it.each([
+		["maximum of N images", mediaMaximumLimitPayloadAssistant] as const,
+		["number of images exceeds the maximum", mediaNumberOfImagesPayloadAssistant] as const,
+	])(
+		"keeps a %s media rejection on the terminal path even with no context window and compaction available (#11482)",
+		async (_label, buildAssistant) => {
+			// "maximum of 20 images allowed" and "the number of images exceeds the
+			// maximum" are both definitive media-limit evidence but matched neither
+			// the original bare-word pattern's replacement nor "too many images" /
+			// "image count/limit" / "limit of N images" — the narrowed matcher
+			// needs explicit coverage for these common phrasings too, or they fall
+			// through to a compaction attempt that may drop or retry with images.
+			await createSession(null);
+			const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+			const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+			const notices = collectNotices();
+			const startCount = countCompactionEvents("auto_compaction_start");
+
+			const assistantMsg = buildAssistant();
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+			await session.waitForIdle();
+
+			expect(startCount()).toBe(0);
+			expect(prepareSpy).not.toHaveBeenCalled();
+			expect(promptSpy).not.toHaveBeenCalled();
+			expect(continueSpy).not.toHaveBeenCalled();
+
+			const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+			expect(payloadNotices.length).toBe(1);
+		},
+	);
 
 	it("keeps a dual-flagged media rejection ('image count exceeds the limit of 20') on the terminal path even with no context window (#11482)", async () => {
 		// Unlike the digit-free case above, "image count exceeds the limit of 20"
