@@ -982,7 +982,7 @@ mod tests {
 			&report,
 		)
 		.expect_err("workspace is always notify-only");
-		assert_eq!(error.code, ExtensionCode::EUpdatePolicy);
+		assert_eq!(error.code(), ExtensionCode::EUpdatePolicy);
 
 		let client = empty_generation(Layer::Client);
 		let error = commit_auto_generation(
@@ -994,7 +994,7 @@ mod tests {
 			&report,
 		)
 		.expect_err("typed refusal blocks commit");
-		assert_eq!(error.code, ExtensionCode::EUpdatePolicy);
+		assert_eq!(error.code(), ExtensionCode::EUpdatePolicy);
 		assert!(!temporary.path().join("omp.lock").exists());
 	}
 
@@ -1072,6 +1072,6 @@ mod tests {
 		symlink(&outside, root.join("escaped")).unwrap();
 
 		let error = load_generation(&root, "escaped", Layer::Client).unwrap_err();
-		assert_eq!(error.code, ExtensionCode::EIntegrity);
+		assert_eq!(error.code(), ExtensionCode::EIntegrity);
 	}
 }

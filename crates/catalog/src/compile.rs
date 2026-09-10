@@ -1137,6 +1137,12 @@ pub enum CompileError {
 	/// A computed pricing multiplier was not a finite JSON number.
 	#[error("computed pricing multiplier is not finite")]
 	InvalidPriceMultiplier,
+	/// Source model classification did not produce an entry for every row.
+	#[error("classification index is incomplete")]
+	ClassificationIndexIncomplete,
+	/// A collapsed reasoning family has no non-off route.
+	#[error("collapsed effort family has no non-off route")]
+	CollapsedEffortFamilyNoNonOffRoute,
 	/// Source data violated a catalog invariant.
 	#[error("catalog invariant failed: {0}")]
 	Invariant(Str),
@@ -3668,9 +3674,9 @@ fn compile_models(
 		let mut logical: BTreeMap<Str, Vec<(Str, SourceModelRecord, ModelClassification)>> =
 			BTreeMap::new();
 		for (wire, row) in rows {
-			let classified = identities.get(&wire).ok_or_else(|| {
-				CompileError::Invariant(sf!("classification index is incomplete"))
-			})?;
+			let classified = identities
+				.get(&wire)
+				.ok_or(CompileError::ClassificationIndexIncomplete)?;
 			let key = if collapsible.contains(classified.logical_model.as_str()) {
 				classified.logical_model.clone()
 			} else {
@@ -4710,9 +4716,7 @@ fn compile_thinking(
 				.iter()
 				.filter_map(|(_, _, classified)| classified.effort.map(translate_effort))
 				.find(|effort| *effort != ThinkingEffort::Off)
-				.ok_or_else(|| {
-					CompileError::Invariant(sf!("collapsed effort family has no non-off route"))
-				})?;
+				.ok_or(CompileError::CollapsedEffortFamilyNoNonOffRoute)?;
 			Some(default)
 		};
 		Some(ThinkingPolicy {

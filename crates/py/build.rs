@@ -20,7 +20,7 @@
 use std::{
 	collections::BTreeSet,
 	env,
-	fmt::{self, Write},
+	fmt::Write,
 	fs,
 	path::{Path, PathBuf},
 	process::Command,
@@ -29,19 +29,38 @@ use std::{
 /// System libraries only `_tkinter` needs; it is not in the static inittab
 /// (pbs ships it as a shared module), so its archive member is never pulled.
 const TCL_LIBS: [&str; 2] = ["tcl9.0", "tcl9tk9.0"];
-#[derive(Debug)]
-struct BuildError(String);
 
-impl fmt::Display for BuildError {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		formatter.write_str(&self.0)
-	}
-}
-
-impl std::error::Error for BuildError {}
-
-fn contextual_error(context: impl fmt::Display, error: impl fmt::Display) -> BuildError {
-	BuildError(format!("{context}: {error}"))
+#[derive(Debug, thiserror::Error)]
+enum BuildError {
+	/// The generated Python metadata could not be read.
+	#[error("read {path}: {source}")]
+	ReadMetadata {
+		/// Metadata file.
+		path: PathBuf,
+		/// Filesystem failure.
+		#[source]
+		source: std::io::Error,
+	},
+	/// The generated Python metadata was not valid JSON.
+	#[error("parse {path}: {source}")]
+	ParseMetadata {
+		/// Metadata file.
+		path: PathBuf,
+		/// JSON parser failure.
+		#[source]
+		source: serde_json::Error,
+	},
+	/// A required generated metadata field has the wrong shape.
+	#[error("{path}: {context}")]
+	InvalidMetadata {
+		/// Metadata file.
+		path: PathBuf,
+		/// JSON field path and shape requirement.
+		context: String,
+	},
+	/// Cargo did not provide the output directory.
+	#[error("Cargo did not provide OUT_DIR to omp-py/build.rs")]
+	MissingOutputDirectory,
 }
 
 fn main() -> Result<(), BuildError> {
@@ -84,9 +103,9 @@ fn main() -> Result<(), BuildError> {
 
 	let python_json = vendor.join("PYTHON.json");
 	let json_text = fs::read_to_string(&python_json)
-		.map_err(|error| contextual_error(format!("read {}", python_json.display()), error))?;
+		.map_err(|source| BuildError::ReadMetadata { path: python_json.clone(), source })?;
 	let json: serde_json::Value = serde_json::from_str(&json_text)
-		.map_err(|error| contextual_error(format!("parse {}", python_json.display()), error))?;
+		.map_err(|source| BuildError::ParseMetadata { path: python_json.clone(), source })?;
 
 	// macOS's `@available` checks require compiler-rt because rustc links with
 	// `-nodefaultlibs`; Linux archives do not ship or reference this Darwin
@@ -101,42 +120,35 @@ fn main() -> Result<(), BuildError> {
 		.get("build_info")
 		.and_then(|build_info| build_info.get("extensions"))
 		.and_then(serde_json::Value::as_object)
-		.ok_or_else(|| {
-			contextual_error(python_json.display(), "build_info.extensions must be an object")
+		.ok_or_else(|| BuildError::InvalidMetadata {
+			path:    python_json.clone(),
+			context: "build_info.extensions must be an object".to_owned(),
 		})?;
 	for (extension_name, variants) in extensions {
-		let variants = variants.as_array().ok_or_else(|| {
-			contextual_error(
-				format!("{}: build_info.extensions.{extension_name}", python_json.display()),
-				"must be an array",
-			)
+		let variants = variants.as_array().ok_or_else(|| BuildError::InvalidMetadata {
+			path: python_json.clone(),
+			context: format!("build_info.extensions.{extension_name}: must be an array"),
 		})?;
 		for (variant_index, variant) in variants.iter().enumerate() {
 			let links = variant
 				.get("links")
 				.and_then(serde_json::Value::as_array)
-				.ok_or_else(|| {
-					contextual_error(
-						format!(
-							"{}: build_info.extensions.{extension_name}[{variant_index}].links",
-							python_json.display()
-						),
-						"must be an array",
-					)
+				.ok_or_else(|| BuildError::InvalidMetadata {
+					path: python_json.clone(),
+					context: format!(
+						"build_info.extensions.{extension_name}[{variant_index}].links: must be an array"
+					),
 				})?;
 			for (link_index, link) in links.iter().enumerate() {
 				let name = link
 					.get("name")
 					.and_then(serde_json::Value::as_str)
-					.ok_or_else(|| {
-						contextual_error(
-							format!(
-								"{}: build_info.extensions.{extension_name}[{variant_index}].\
-								 links[{link_index}].name",
-								python_json.display()
-							),
-							"must be a string",
-						)
+					.ok_or_else(|| BuildError::InvalidMetadata {
+						path: python_json.clone(),
+						context: format!(
+							"build_info.extensions.{extension_name}[{variant_index}].\
+							 links[{link_index}].name: must be a string"
+						),
 					})?;
 				if link["path_static"].is_string() {
 					static_libs.insert(name.to_owned());
@@ -216,9 +228,8 @@ fn main() -> Result<(), BuildError> {
 	println!("cargo::rerun-if-changed={}", py_src.display());
 	println!("cargo::rerun-if-changed={}", requirements.display());
 	println!("cargo::rerun-if-changed={}", packer.display());
-	let out_dir = env::var_os("OUT_DIR")
-		.map(PathBuf::from)
-		.ok_or_else(|| BuildError("Cargo did not provide OUT_DIR to omp-py/build.rs".to_owned()))?;
+	let out_dir =
+		env::var_os("OUT_DIR").map(PathBuf::from).ok_or(BuildError::MissingOutputDirectory)?;
 	let frozen_metadata = out_dir.join("frozen_distributions.rs");
 	write_frozen_distributions(&requirements, &frozen_metadata);
 	println!("cargo::rustc-env=OMP_PY_FROZEN_DISTRIBUTIONS={}", frozen_metadata.display());

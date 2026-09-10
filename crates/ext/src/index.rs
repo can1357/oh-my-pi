@@ -442,12 +442,8 @@ impl std::ops::Deref for VerifiedIndex {
 
 /// Validates a single exact PEP 440 version string.
 pub fn validate_version(version: &str) -> Result<(), ExtensionError> {
-	Version::from_str(version).map_err(|error| {
-		ExtensionError::new(
-			ExtensionCode::EManifestParse,
-			format!("invalid PEP 440 version {version:?}: {error}"),
-		)
-	})?;
+	Version::from_str(version)
+		.map_err(|source| ExtensionError::invalid_version(version, source))?;
 	Ok(())
 }
 
@@ -534,6 +530,6 @@ mod tests {
 		};
 		let now = Timestamp::from_str("2026-01-01T00:00:00Z").unwrap();
 		let error = index.verify_at("invalid", now).unwrap_err();
-		assert_eq!(error.code, ExtensionCode::EIntegrity);
+		assert_eq!(error.code(), ExtensionCode::EIntegrity);
 	}
 }

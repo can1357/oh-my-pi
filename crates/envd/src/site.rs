@@ -550,7 +550,7 @@ mod tests {
 		let Err(SiteError::TrustedLoad(error)) = ownership.require_owned("other", "reviewer") else {
 			panic!("unowned module must produce E-TRUSTED-LOAD");
 		};
-		assert_eq!(error.code, super::ExtensionCode::ETrustedLoad);
+		assert_eq!(error.code(), super::ExtensionCode::ETrustedLoad);
 	}
 
 	#[test]

@@ -353,9 +353,46 @@ pub enum ParseRequestError {
 	/// The request object has no string `"op"` field.
 	#[error("missing \"op\"")]
 	MissingOp,
-	/// Any other rejection, carrying the message shown to the client.
-	#[error("{0}")]
-	Other(String),
+	/// The effect request has no effect object.
+	#[error("effect op needs an \"effect\" object")]
+	MissingEffect,
+	/// The keys request has no keys string.
+	#[error("keys op needs a \"keys\" string")]
+	MissingKeys,
+	/// The key specification is invalid.
+	#[error("{reason}")]
+	InvalidKeys {
+		/// The parser's diagnostic.
+		reason: Str,
+	},
+	/// The bytes request has no data string.
+	#[error("bytes op needs a \"data\" string")]
+	MissingBytes,
+	/// The paste request has no text string.
+	#[error("paste op needs a \"text\" string")]
+	MissingPaste,
+	/// The mouse request is invalid.
+	#[error("{reason}")]
+	InvalidMouse {
+		/// The parser's diagnostic.
+		reason: Str,
+	},
+	/// The event request has no event field.
+	#[error("event op needs an \"event\" (or \"events\") field")]
+	MissingEvent,
+	/// The event payload is not a valid terminal event.
+	#[error("malformed terminal event: {source}")]
+	MalformedEvent {
+		/// The serde failure raised by the event payload.
+		#[source]
+		source: serde_json::Error,
+	},
+	/// The operation name is not recognized.
+	#[error("unknown op {op:?}")]
+	UnknownOp {
+		/// The unrecognized operation name.
+		op: Str,
+	},
 }
 
 /// Parses one request line into a [`DebugRequest`].
@@ -376,52 +413,59 @@ pub fn parse_request(line: &[u8]) -> Result<DebugRequest, ParseRequestError> {
 			let effect = value
 				.get("effect")
 				.cloned()
-				.ok_or_else(|| ParseRequestError::Other("effect op needs an \"effect\" object".to_owned()))?;
+				.ok_or(ParseRequestError::MissingEffect)?;
 			Ok(DebugRequest::Effect(effect))
 		},
 		"keys" => {
 			let spec = value
 				.get("keys")
 				.and_then(serde_json::Value::as_str)
-				.ok_or_else(|| ParseRequestError::Other("keys op needs a \"keys\" string".to_owned()))?;
-			Ok(DebugRequest::Chords(parse_keys(spec).map_err(ParseRequestError::Other)?))
+				.ok_or(ParseRequestError::MissingKeys)?;
+			Ok(DebugRequest::Chords(
+				parse_keys(spec).map_err(|reason| ParseRequestError::InvalidKeys {
+					reason: Str::new(reason),
+				})?,
+			))
 		},
 		"bytes" => {
 			let data = value
 				.get("data")
 				.and_then(serde_json::Value::as_str)
-				.ok_or_else(|| ParseRequestError::Other("bytes op needs a \"data\" string".to_owned()))?;
+				.ok_or(ParseRequestError::MissingBytes)?;
 			Ok(DebugRequest::Bytes(data.as_bytes().to_vec()))
 		},
 		"paste" => {
 			let text = value
 				.get("text")
 				.and_then(serde_json::Value::as_str)
-				.ok_or_else(|| ParseRequestError::Other("paste op needs a \"text\" string".to_owned()))?;
+				.ok_or(ParseRequestError::MissingPaste)?;
 			Ok(DebugRequest::Inject(vec![InputEvent::Paste(Str::new(text))]))
 		},
 		"mouse" => {
-			let mouse = parse_mouse(&value).map_err(ParseRequestError::Other)?;
+			let mouse = parse_mouse(&value).map_err(|reason| ParseRequestError::InvalidMouse {
+				reason: Str::new(reason),
+			})?;
 			Ok(DebugRequest::Inject(vec![InputEvent::Mouse(mouse)]))
 		},
 		"event" | "events" => {
 			let payload = value
 				.get("event")
 				.or_else(|| value.get("events"))
-				.ok_or_else(|| ParseRequestError::Other("event op needs an \"event\" (or \"events\") field".to_owned()))?;
+				.ok_or(ParseRequestError::MissingEvent)?;
 			let events = if payload.is_array() {
 				serde_json::from_value::<Vec<TerminalEvent>>(payload.clone())
 			} else {
 				serde_json::from_value::<TerminalEvent>(payload.clone()).map(|event| vec![event])
 			}
-			.map_err(|error| ParseRequestError::Other(format!("malformed terminal event: {error}")))?;
+			.map_err(|source| ParseRequestError::MalformedEvent { source })?;
 			Ok(DebugRequest::Events(events))
 		},
 		"resize" => Ok(DebugRequest::Resize),
 		"quit" => Ok(DebugRequest::Quit),
-		other => Err(ParseRequestError::Other(format!("unknown op {other:?}"))),
+		other => Err(ParseRequestError::UnknownOp { op: Str::new(other) }),
 	}
 }
+
 
 /// Parses a whitespace-separated key spec into physical chords.
 ///
@@ -1025,7 +1069,7 @@ mod tests {
 		));
 		assert!(matches!(
 			parse_request(br#"{"op":"warp"}"#),
-			Err(ParseRequestError::Other(error)) if error == "unknown op \"warp\""
+			Err(ParseRequestError::UnknownOp { op }) if op.as_str() == "warp"
 		));
 		assert!(matches!(
 			parse_request(b""),

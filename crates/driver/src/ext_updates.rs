@@ -497,7 +497,7 @@ const fn storage_failure() -> UpdateFailure {
 }
 
 fn extension_failure(error: omp_ext::ExtensionError) -> UpdateFailure {
-	UpdateFailure { kind: UpdateFailureKind::Verification, code: Some(error.code) }
+	UpdateFailure { kind: UpdateFailureKind::Verification, code: Some(error.code()) }
 }
 
 #[cfg(unix)]

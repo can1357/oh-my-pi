@@ -167,19 +167,10 @@ pub enum ThinkingMode {
 	Deserialize,
 )]
 #[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
+#[strum(serialize_all = "lowercase", ascii_case_insensitive, const_into_str)]
 pub enum ReasoningMode {
 	/// Use the provider's pro reasoning path.
 	Pro,
-}
-
-impl ReasoningMode {
-	/// Returns the canonical static spelling for this serving path.
-	pub const fn into_str(&self) -> &'static str {
-		match self {
-			Self::Pro => "pro",
-		}
-	}
 }
 
 /// Structurally interned reasoning capability profile.

@@ -200,12 +200,25 @@ pub enum VAlign {
 
 /// Markup rejection with byte position context.
 #[derive(Debug, thiserror::Error)]
-#[error("markup error at byte {at}: {message}")]
-pub struct ParseError {
-	/// Human-readable failure description.
-	pub message: String,
-	/// Byte offset into the source.
-	pub at:      usize,
+pub enum ParseError {
+	/// A syntax or semantic markup failure.
+	#[error("markup error at byte {at}: {message}")]
+	Message {
+		/// Human-readable failure description.
+		message: String,
+		/// Byte offset into the source.
+		at:      usize,
+	},
+	/// A property assignment failed while applying markup defaults or
+	/// inherited properties.
+	#[error("markup error at byte {at}: {source}")]
+	Property {
+		/// Byte offset into the source.
+		at: usize,
+		/// The rejected property assignment.
+		#[source]
+		source: crate::props::PropError,
+	},
 }
 
 /// Origin of a TML document.
@@ -352,7 +365,7 @@ impl Parsed {
 }
 
 fn parent_error(tag: &str, parent: &str, at: usize) -> ParseError {
-	ParseError { message: format!("<{tag}> is not allowed directly inside <{parent}>"), at }
+	ParseError::Message { message: format!("<{tag}> is not allowed directly inside <{parent}>"), at }
 }
 
 fn cached_children(parts: Vec<Parsed>, parent: &str) -> Result<Vec<Cached>, ParseError> {
@@ -438,7 +451,7 @@ impl Parser<'_> {
 			}
 			if is_closing {
 				if closing != Some(name) && (restricted || self.fragment) {
-					return Err(ParseError {
+					return Err(ParseError::Message {
 						message: format!(
 							"closing </{name}> does not match open <{}>",
 							closing.unwrap_or("nothing")
@@ -466,7 +479,7 @@ impl Parser<'_> {
 			fence = FenceScan::segment(indent);
 		}
 		if closing.is_some() && (restricted || self.fragment) {
-			return Err(ParseError {
+			return Err(ParseError::Message {
 				message: format!("unclosed <{}> tag", closing.unwrap_or_default()),
 				at:      self.src.len(),
 			});
@@ -488,7 +501,7 @@ impl Parser<'_> {
 		let (name, attrs) = raw.split_once(char::is_whitespace).unwrap_or((raw, ""));
 		let indent = leading_spaces(line_of(self.src, at));
 		if restricted && is_interactive_tag(name) {
-			return Err(ParseError {
+			return Err(ParseError::Message {
 				message: format!("interactive tag <{name}> is not allowed inside <md>"),
 				at,
 			});
@@ -498,7 +511,7 @@ impl Parser<'_> {
 		let tag = self.source.slice_ref(name);
 		let name = tag.as_str();
 		if self.fragment && (props.contains(Prop::Id) || props.contains(Prop::When)) {
-			return Err(ParseError {
+			return Err(ParseError::Message {
 				message: "id= and when= are not allowed in dynamic Markdown".into(),
 				at,
 			});
@@ -507,17 +520,17 @@ impl Parser<'_> {
 			if !props.contains(Prop::Border) {
 				props
 					.try_set(Prop::Border, PropValue::Border(Border::Square))
-					.map_err(|error| ParseError { message: error.to_string(), at })?;
+					.map_err(|source| ParseError::Property { at, source })?;
 			}
 			if !props.contains(Prop::PadX) {
 				props
 					.try_set(Prop::PadX, PropValue::U16(1))
-					.map_err(|error| ParseError { message: error.to_string(), at })?;
+					.map_err(|source| ParseError::Property { at, source })?;
 			}
 		} else if name == "spacer" && !props.contains(Prop::Grow) {
 			props
 				.try_set(Prop::Grow, PropValue::F32(1.0))
-				.map_err(|error| ParseError { message: error.to_string(), at })?;
+				.map_err(|source| ParseError::Property { at, source })?;
 		}
 		let body_start = close + 1;
 		if self_closing {
@@ -566,7 +579,7 @@ impl Parser<'_> {
 				.find(closer)
 				.map(|offset| body_start + offset);
 			if end.is_none() && (restricted || self.fragment) {
-				return Err(ParseError {
+				return Err(ParseError::Message {
 					message: format!("unclosed <{name}> tag"),
 					at:      self.src.len(),
 				});
@@ -686,7 +699,7 @@ impl Parser<'_> {
 							return Ok(MdEvent::Element(tag_at, close));
 						}
 						if is_interactive_tag(name) {
-							return Err(ParseError {
+							return Err(ParseError::Message {
 								message: format!("interactive tag <{name}> is not allowed inside <md>"),
 								at:      tag_at,
 							});
@@ -1198,7 +1211,7 @@ fn is_custom_tag_at(src: &str, name: &str, at: usize, close: usize) -> bool {
 		&& (src[at..=close].trim_end().ends_with("/>") || has_matching_close(&src[close + 1..], name))
 }
 fn stray_md_close(at: usize) -> ParseError {
-	ParseError { message: "closing </md> does not match open <nothing>".into(), at }
+	ParseError::Message { message: "closing </md> does not match open <nothing>".into(), at }
 }
 
 /// True when a dynamic `<md>` body embeds a line-start markup element
@@ -1259,7 +1272,7 @@ fn child_props(parent: &Props, at: usize) -> Result<Props, ParseError> {
 		{
 			child
 				.try_set(prop, value)
-				.map_err(|error| ParseError { message: error.to_string(), at })?;
+				.map_err(|source| ParseError::Property { at, source })?;
 		}
 	}
 	Ok(child)
@@ -1445,7 +1458,7 @@ fn finish_element(
 			if let Some(status) = props.str_of(Prop::Status)
 				&& TaskStatus::parse(status).is_none()
 			{
-				return Err(ParseError {
+				return Err(ParseError::Message {
 					message: format!(
 						"unknown task status {status:?} (use pending|active|done|dropped|blocked)"
 					),
@@ -1541,20 +1554,20 @@ fn finish_element(
 			let mut has_status = false;
 			for part in parts {
 				let Parsed::Cached { cached, at: child_at, implicit, .. } = part else {
-					return Err(ParseError {
+					return Err(ParseError::Message {
 						message: "<editor> takes at most one input child and one <status>".into(),
 						at,
 					});
 				};
 				if implicit {
-					return Err(ParseError {
+					return Err(ParseError::Message {
 						message: "<editor> takes at most one input child and one <status>".into(),
 						at:      child_at,
 					});
 				}
 				if cached.comp().is::<Status>() {
 					if has_status {
-						return Err(ParseError {
+						return Err(ParseError::Message {
 							message: "<editor> takes at most one input child and one <status>".into(),
 							at:      child_at,
 						});
@@ -1563,7 +1576,7 @@ fn finish_element(
 					has_status = true;
 				} else {
 					if has_input {
-						return Err(ParseError {
+						return Err(ParseError::Message {
 							message: "<editor> takes at most one input child and one <status>".into(),
 							at:      child_at,
 						});
@@ -1731,7 +1744,7 @@ fn apply_attrs(
 			if recover {
 				continue;
 			}
-			return Err(ParseError {
+			return Err(ParseError::Message {
 				message: format!("{key} was replaced by fg=/bg= and angle="),
 				at,
 			});
@@ -1764,7 +1777,7 @@ fn apply_attrs(
 }
 
 fn bad(key: &str, value: &str, at: usize) -> ParseError {
-	ParseError { message: format!("bad value {value:?} for attribute {key}"), at }
+	ParseError::Message { message: format!("bad value {value:?} for attribute {key}"), at }
 }
 
 /// Zero-alloc attribute scanner: `key`, `key=value`, `key="quoted value"`.

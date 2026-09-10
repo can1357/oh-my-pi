@@ -1662,17 +1662,11 @@ mod follow {
 			}
 
 			fn watch(&mut self, path: &Path, mode: RecursiveMode) -> TailResult<()> {
-				self
-					.watcher
-					.watch(path, mode)
-					.map_err(|err| TailError::message(err.to_string()))
+				self.watcher.watch(path, mode).map_err(TailError::Notify)
 			}
 
 			fn unwatch(&mut self, path: &Path) -> TailResult<()> {
-				self
-					.watcher
-					.unwatch(path)
-					.map_err(|err| TailError::message(err.to_string()))
+				self.watcher.unwatch(path).map_err(TailError::Notify)
 			}
 		}
 
@@ -1819,8 +1813,7 @@ mod follow {
 				if self.use_polling || RecommendedWatcher::kind() == WatcherKind::PollWatcher {
 					self.use_polling = true; // We have to use polling because there's no supported backend
 					watcher = Box::new(
-						notify::PollWatcher::new(tx, watcher_config)
-							.map_err(|error| TailError::message(error.to_string()))?,
+						notify::PollWatcher::new(tx, watcher_config).map_err(TailError::Notify)?,
 					);
 				} else {
 					let tx_clone = tx.clone();
@@ -1841,11 +1834,10 @@ mod follow {
 							host.fail(1);
 							self.use_polling = true;
 							watcher = Box::new(
-								notify::PollWatcher::new(tx_clone, watcher_config)
-									.map_err(|error| TailError::message(error.to_string()))?,
+								notify::PollWatcher::new(tx_clone, watcher_config).map_err(TailError::Notify)?,
 							);
 						},
-						Err(e) => return Err(TailError::message(e.to_string())),
+						Err(error) => return Err(TailError::Notify(error)),
 					}
 				}
 
@@ -2269,9 +2261,7 @@ mod follow {
 					Ok(Err(notify::Error { kind: notify::ErrorKind::MaxFilesWatch, .. })) => {
 						return Err(TailError::message(format!("{} resources exhausted", text::BACKEND)));
 					},
-					Ok(Err(e)) => {
-						return Err(TailError::message(format!("NotifyError: {}", e)));
-					},
+					Ok(Err(error)) => return Err(TailError::NotifyEvent(error)),
 					Err(mpsc::RecvTimeoutError::Timeout) => {
 						timeout_counter += 1;
 						// Check if stdout pipe is still open
@@ -2929,6 +2919,10 @@ pub(crate) enum TailError {
 	Io(#[source] io::Error),
 	#[error("{0}")]
 	Message(String),
+	#[error("{0}")]
+	Notify(#[source] notify::Error),
+	#[error("NotifyError: {0}")]
+	NotifyEvent(#[source] notify::Error),
 	#[error("Broken pipe")]
 	BrokenPipe,
 }
