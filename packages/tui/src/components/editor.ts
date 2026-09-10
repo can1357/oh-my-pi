@@ -447,6 +447,16 @@ interface HistoryStorage {
 	getRecent(limit: number): HistoryEntry[];
 }
 
+interface LocalHistoryEntry {
+	text: string;
+	draft?: {
+		pastes: Map<number, string>;
+		atoms: Map<string, string>;
+		pasteCounter: number;
+		restore?: () => void;
+	};
+}
+
 /** A synchronous replacement immediately before the editor cursor. */
 export interface EditorInlineReplacement {
 	/** UTF-16 code units to remove immediately before the cursor. */
@@ -604,9 +614,11 @@ export class Editor implements Component, Focusable {
 	#pasteHandler = new BracketedPasteHandler();
 
 	// Prompt history for up/down navigation
-	#history: string[] = [];
+	#history: LocalHistoryEntry[] = [];
 	#historyIndex: number = -1; // -1 = not browsing, 0 = most recent, 1 = older, etc.
 	#historyStorage?: HistoryStorage;
+	// Recalled payloads outlive browsing when an edit resets #historyIndex.
+	#historyDraftActive = false;
 
 	// Undo stack for editor state changes
 	#undoStack: EditorState[] = [];
@@ -841,7 +853,7 @@ export class Editor implements Component, Focusable {
 	setHistoryStorage(storage: HistoryStorage): void {
 		this.#historyStorage = storage;
 		const recent = storage.getRecent(100);
-		this.#history = recent.map(entry => entry.prompt);
+		this.#history = recent.map(entry => ({ text: entry.prompt }));
 		this.#historyIndex = -1;
 	}
 
@@ -860,13 +872,49 @@ export class Editor implements Component, Focusable {
 			});
 		}
 
-		// Don't add consecutive duplicates
-		if (this.#history.length > 0 && this.#history[0] === trimmed) return;
-		this.#history.unshift(trimmed);
-		// Limit history size
-		if (this.#history.length > 100) {
-			this.#history.pop();
+		// Don't add consecutive submitted duplicates; a draft owns separate state.
+		const previous = this.#history[0];
+		if (previous?.text === trimmed && !previous.draft) return;
+		this.#pushHistory({ text: trimmed });
+	}
+
+	/** Retain the current draft for local recall only, never persistent history. */
+	rememberDraft(restore?: () => void): void {
+		const text = this.getText();
+		if (!text.trim()) return;
+		const pastes = new Map<number, string>();
+		for (const match of text.matchAll(/\[Paste #(\d+)(?:, (?:\+\d+ lines|\d+ chars))?\]/g)) {
+			const id = Number(match[1]);
+			const value = this.#pastes.get(id);
+			if (value !== undefined) pastes.set(id, value);
 		}
+		this.#pushHistory({
+			text,
+			draft: {
+				pastes,
+				atoms: new Map([...this.#atoms].filter(([label]) => text.includes(label))),
+				pasteCounter: this.#pasteCounter,
+				restore,
+			},
+		});
+	}
+
+	/** Release the current draft's expansion payloads without touching history. */
+	clearPasteState(): void {
+		this.#pastes.clear();
+		this.#pasteCounter = 0;
+		this.#atoms.clear();
+		this.#historyDraftActive = false;
+	}
+
+	/** Restore host-owned draft state before history text triggers onChange. */
+	restoreHistoryState(restore?: () => void): void {
+		restore?.();
+	}
+
+	#pushHistory(entry: LocalHistoryEntry): void {
+		this.#history.unshift(entry);
+		if (this.#history.length > 100) this.#history.pop();
 	}
 
 	#isEditorEmpty(): boolean {
@@ -891,13 +939,16 @@ export class Editor implements Component, Focusable {
 		const newIndex = this.#historyIndex - direction; // Up(-1) increases index, Down(1) decreases
 		if (newIndex < -1 || newIndex >= this.#history.length) return;
 		this.#historyIndex = newIndex;
-		if (this.#historyIndex === -1) {
-			// Returned to "current" state - clear editor
-			this.#setTextInternal("", "end");
-		} else {
-			const cursorAnchor: HistoryCursorAnchor = direction === -1 ? "start" : "end";
-			this.#setTextInternal(this.#history[this.#historyIndex] || "", cursorAnchor);
+		const entry = this.#history[this.#historyIndex];
+		if (entry?.draft || this.#historyDraftActive) {
+			this.#pastes = new Map(entry?.draft?.pastes);
+			this.#atoms = new Map(entry?.draft?.atoms);
+			this.#pasteCounter = entry?.draft?.pasteCounter ?? 0;
+			this.restoreHistoryState(entry?.draft?.restore);
+			this.#historyDraftActive = entry?.draft !== undefined;
 		}
+		const cursorAnchor: HistoryCursorAnchor = direction === -1 ? "start" : "end";
+		this.#setTextInternal(entry?.text ?? "", cursorAnchor);
 	}
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
 	#setTextInternal(text: string, cursorAnchor: HistoryCursorAnchor = "end"): void {
@@ -2870,9 +2921,7 @@ export class Editor implements Component, Focusable {
 		const result = this.#expandPasteMarkers(this.#state.lines.join("\n")).trim();
 
 		this.#state = { lines: [""], cursorLine: 0, cursorCol: 0 };
-		this.#pastes.clear();
-		this.#pasteCounter = 0;
-		this.#atoms.clear();
+		this.clearPasteState();
 		this.#historyIndex = -1;
 		this.#scrollOffset = 0;
 		this.#undoStack.length = 0;
