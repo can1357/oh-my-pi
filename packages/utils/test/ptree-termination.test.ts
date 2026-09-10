@@ -118,6 +118,114 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 		});
 	}
 
+	it.skipIf(process.platform === "win32")("reads the root's liveness from the pin, not from its number", async () => {
+		// `exitCode` stays null for a child killed by a signal — Bun reports
+		// `signalCode` instead — so the liveness predicate cannot lean on it and
+		// has to ask a handle. Asking by number is the bug: once the leader is
+		// reaped its pid is free, and whoever holds it next answers "running",
+		// which reads as a live root and skips the dead-leader group sweep
+		// entirely. The pinned handle keeps answering for the process it was
+		// opened on.
+		//
+		// Pid reuse cannot be arranged, so the reopen is what gets stubbed: the
+		// stand-in is this test process, which is unambiguously running and is
+		// never signalled on either path.
+		// The root has to be *signalled* dead, not allowed to exit: a normal exit
+		// sets `exitCode`, the predicate short-circuits on it, and the number is
+		// never consulted at all. Only a signal leaves `exitCode` null.
+		const child = spawn(["/bin/sh", "-c", "sleep 30 2>/dev/null & echo $!; exec sleep 30"], {
+			detached: true,
+		});
+		const reader = child.stdout.getReader();
+		let descendant: Process | null = null;
+		const fromPid = Process.fromPid;
+		let spy: ReturnType<typeof spyOn> | undefined;
+		try {
+			const output = await reader.read();
+			descendant = fromPid.call(Process, Number.parseInt(new TextDecoder().decode(output.value), 10));
+			if (!descendant) throw new Error("Descendant exited before termination");
+			expect(descendant.status()).toBe(ProcessStatus.Running);
+			process.kill(child.pid, "SIGKILL");
+			await child.proc.exited;
+			expect(child.proc.exitCode).toBeNull();
+
+			spy = spyOn(Process, "fromPid").mockImplementation((pid: number) =>
+				pid === child.pid ? fromPid.call(Process, process.pid) : fromPid.call(Process, pid),
+			);
+			expect(Process.fromPid(child.pid)?.status()).toBe(ProcessStatus.Running);
+
+			const outcome = await child.killAndWait(undefined, -1).then(
+				() => "swept",
+				(error: unknown) => String(error),
+			);
+
+			// Same two arms as the reaped-leader case below, for the same reason:
+			// which one runs is the kernel's pidfd group scope. What neither may do
+			// is report a completed sweep while the survivor is still running,
+			// which is what believing the recycled number produces.
+			if (outcome === "swept") {
+				expect(descendant.status()).toBe(ProcessStatus.Exited);
+			} else {
+				expect(outcome).toContain("cannot be proven to still be ours");
+				expect(descendant.status()).toBe(ProcessStatus.Running);
+			}
+		} finally {
+			spy?.mockRestore();
+			descendant?.killTree(9);
+			await reader.cancel();
+		}
+	});
+
+	it.skipIf(process.platform !== "linux")(
+		"aims the subreaper hard sweep by identity rather than by number",
+		async () => {
+			// The costliest version of the same defect: this path hard-kills a whole
+			// tree, so believing a recycled number sweeps a stranger's descendants
+			// rather than merely missing our own. A subreaper root leads no group,
+			// so the pin is the only identity available and the constructor has to
+			// have taken one.
+			//
+			// The stand-in is a sacrificial process, not this one: on the unfixed
+			// path the sweep lands on whatever the stub names.
+			const bystander = spawn(["/bin/sh", "-c", "exec sleep 30"]);
+			const child = spawn(["/bin/sh", "-c", "sleep 30 2>/dev/null & echo $!; exec sleep 30"], {
+				subreaper: true,
+			});
+			const reader = child.stdout.getReader();
+			let descendant: Process | null = null;
+			const fromPid = Process.fromPid;
+			let spy: ReturnType<typeof spyOn> | undefined;
+			try {
+				const output = await reader.read();
+				descendant = fromPid.call(Process, Number.parseInt(new TextDecoder().decode(output.value), 10));
+				if (!descendant) throw new Error("Descendant exited before termination");
+				expect(descendant.status()).toBe(ProcessStatus.Running);
+				process.kill(child.pid, "SIGKILL");
+				await child.proc.exited;
+				expect(child.proc.exitCode).toBeNull();
+
+				spy = spyOn(Process, "fromPid").mockImplementation((pid: number) =>
+					pid === child.pid ? fromPid.call(Process, bystander.pid) : fromPid.call(Process, pid),
+				);
+				const outcome = await child.killAndWait(undefined, -1).then(
+					() => "swept",
+					(error: unknown) => String(error),
+				);
+
+				// Refused, because a dead subreaper root's adopted descendants are
+				// reachable through nothing this object holds. Believing the number
+				// instead would have reported a sweep — of the stand-in's tree.
+				expect(outcome).toContain("Subreaper tree unreachable");
+			} finally {
+				spy?.mockRestore();
+				descendant?.killTree(9);
+				bystander.kill(undefined, -1);
+				await bystander.proc.exited;
+				await reader.cancel();
+			}
+		},
+	);
+
 	it.skipIf(process.platform === "win32")("never hides a reaped root's unswept group behind success", async () => {
 		// Which arm runs depends on the kernel: with a process-group scope for
 		// pidfds the retained leader reaches the group with no ownership proof at

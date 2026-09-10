@@ -190,18 +190,31 @@ export class ChildProcess<In extends InMask = InMask> {
 	#terminating?: Promise<boolean | void>;
 	#terminateGroup: boolean;
 	#hardKillTree: boolean;
-	// Windows has no process groups. Retaining the root's native handle pins
-	// its PID after exit so killTree() can still enumerate its original children.
-	#windowsRootProcess?: Process;
-	// A detached POSIX child leads its own group, and after it exits the pgid is
-	// just its old pid — a number the kernel hands out again once the group has
-	// emptied. Pinning the leader while it is alive is the only evidence that
-	// later separates our group from whoever inherited that number.
-	#groupLeader?: Process;
+	// The root's own native handle, retained from before it could exit. One
+	// field rather than a Windows one and a POSIX one, because they were always
+	// the same handle opened for the same reason — and holding it twice invited
+	// exactly one bug: a site that consulted one of them, missed the other, and
+	// fell back to reopening the pid, which after reuse names a stranger.
+	//
+	// Windows keeps it because it has no process groups, so the retained handle
+	// is what pins the pid after exit and keeps the Toolhelp walk enumerable.
+	// A detached POSIX child keeps it because it leads its own group. A
+	// hard-kill root keeps it because the sweep it is about to take is the most
+	// destructive thing here, and a recycled number would aim it at a stranger.
+	#pinnedRoot?: Process;
+	// Whether the retained handle is a Windows root, which is a different claim
+	// from `#terminateGroup`: `detached` is accepted on Windows, where there are
+	// no process groups to terminate.
+	#windowsRoot = false;
+	// Whether the retained handle is a POSIX group leader. A detached child's
+	// pgid is just its old pid — a number the kernel hands out again once the
+	// group has emptied — so the handle pinned while it was alive is the only
+	// evidence that later separates our group from whoever inherited it.
+	#groupLeader = false;
 	// Set when the constructor needed a pinned root and could not open one.
 	// Distinguishes "there was never anything to pin" from "the pin failed":
-	// only the second means a group or a retained-handle tree exists that
-	// nothing here can ever reach.
+	// only the second means a group, a retained-handle tree, or a subtree due a
+	// hard sweep exists that nothing here can ever reach by identity.
 	#unpinnedRoot = false;
 	constructor(
 		readonly proc: PipedSubprocess<In>,
@@ -212,14 +225,18 @@ export class ChildProcess<In extends InMask = InMask> {
 	) {
 		this.#terminateGroup = terminateGroup;
 		this.#hardKillTree = hardKillTree;
-		// One open for both, because they are the same handle for the same reason:
-		// a root that has to stay reachable after it exits, either because Windows
-		// has no other way to enumerate its tree or because a detached child leads
-		// a group that outlives it.
-		const needsPinnedRoot = process.platform === "win32" || terminateGroup;
+		// One open for all three, because they want the same handle for the same
+		// reason: a root that has to stay identifiable after it exits. Windows has
+		// no other way to enumerate its tree, a detached child leads a group that
+		// outlives it, and a hard-kill root is about to have a whole tree swept
+		// from under it — which is the one where reopening the number instead
+		// costs the most, since a recycled pid means sweeping a stranger's
+		// descendants rather than merely missing our own.
+		const needsPinnedRoot = process.platform === "win32" || terminateGroup || hardKillTree;
 		const pinnedRoot = needsPinnedRoot ? (Process.fromPid(proc.pid) ?? undefined) : undefined;
-		this.#windowsRootProcess = process.platform === "win32" ? pinnedRoot : undefined;
-		this.#groupLeader = terminateGroup && process.platform !== "win32" ? pinnedRoot : undefined;
+		this.#pinnedRoot = pinnedRoot;
+		this.#windowsRoot = process.platform === "win32" && pinnedRoot !== undefined;
+		this.#groupLeader = terminateGroup && process.platform !== "win32" && pinnedRoot !== undefined;
 		this.#unpinnedRoot = needsPinnedRoot && pinnedRoot === undefined;
 		if (retainFullStderr) this.#stderrChunks = [];
 		// Eagerly drain stderr into a truncated tail, retaining raw chunks only for explicit full capture.
@@ -360,7 +377,12 @@ export class ChildProcess<In extends InMask = InMask> {
 	 */
 	#rootIsLive(): boolean {
 		if (this.proc.exitCode !== null) return false;
-		const root = this.#windowsRootProcess ?? Process.fromPid(this.proc.pid);
+		// The pin, never a fresh open. `exitCode` stays null for a child killed by
+		// a signal — Bun reports `signalCode` instead — so this predicate cannot
+		// lean on it, and a reopened pid after reuse answers for whoever holds
+		// the number now. The pinned handle is pidfd- or HANDLE-backed, so it
+		// keeps answering for the process it was opened on.
+		const root = this.#pinnedRoot ?? Process.fromPid(this.proc.pid);
 		return root?.status() === ProcessStatus.Running;
 	}
 
@@ -379,14 +401,17 @@ export class ChildProcess<In extends InMask = InMask> {
 			// answers a root it finds already gone with an empty walk marked
 			// complete, so entering here on the strength of a lagging `exitCode`
 			// buys a hard-kill of nothing that reports the tree swept.
-			const root = Process.fromPid(this.proc.pid);
+			// The pin first, for the reason above and with more at stake here: this
+			// hard-kills a whole tree, so a reopened recycled pid would sweep a
+			// stranger's descendants and its group with them.
+			const root = this.#pinnedRoot ?? Process.fromPid(this.proc.pid);
 			if (root) {
 				this.#terminating = Promise.try(() => root.killTreeAndWait());
 				void this.#terminating.catch(() => {});
 				return;
 			}
 		}
-		const groupLeader = this.#groupLeader;
+		const groupLeader = this.#groupLeader ? this.#pinnedRoot : undefined;
 		if (groupLeader && !this.#rootIsLive()) {
 			// Bun detached children are POSIX session/process-group leaders. If the
 			// leader has exited, the native Process handle cannot rediscover its
@@ -401,10 +426,10 @@ export class ChildProcess<In extends InMask = InMask> {
 			void this.#terminating.catch(() => {});
 			return;
 		}
-		if (this.#windowsRootProcess && !this.#rootIsLive()) {
+		if (this.#windowsRoot && this.#pinnedRoot && !this.#rootIsLive()) {
 			// The retained handle keeps the dead root PID reserved, making the
 			// Windows Toolhelp descendant walk identity-safe after root exit.
-			const root = this.#windowsRootProcess;
+			const root = this.#pinnedRoot;
 			this.#terminating = Promise.try(() => root.killTreeAndWait());
 			void this.#terminating.catch(() => {});
 			return;
@@ -434,7 +459,7 @@ export class ChildProcess<In extends InMask = InMask> {
 						? { group: true }
 						: undefined
 					: { gracefulMs, group: this.#terminateGroup };
-			this.#terminating = (this.#windowsRootProcess ?? Process.fromPid(this.proc.pid))?.terminate(options);
+			this.#terminating = (this.#pinnedRoot ?? Process.fromPid(this.proc.pid))?.terminate(options);
 			void this.#terminating?.catch(() => {});
 		}
 	}
@@ -636,7 +661,7 @@ export class ChildProcess<In extends InMask = InMask> {
 			// and records a timeout over a command that finished. Telling the two
 			// apart needs the sweep to report what it found, and it reports only that
 			// it completed — an empty tree and a killed one both come back `true`.
-			if (this.proc.exitCode === null || this.#terminateGroup || this.#windowsRootProcess) {
+			if (this.proc.exitCode === null || this.#terminateGroup || this.#windowsRoot) {
 				this.kill(new TimeoutError(ms, this.#stderrTail), -1);
 			}
 			this.#resolveDrainCutoff();
