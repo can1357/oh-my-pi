@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Native compaction preserves prior local summaries and messages arriving while a speculative compaction is in flight.
+- Advisor maintenance preserves compaction summaries and native replay payloads in later requests without duplicating native-covered retained messages.
+- Advisor maintenance uses portable summaries for incompatible native targets and prevents automatic model switches or recovery re-primes from stranding native history.
+- Secret obfuscation covers native replay plaintext and preserved compaction history, including snapshots committed after a later secret is discovered.
+
 ## [18.1.16] - 2026-09-09
 
 ### Added

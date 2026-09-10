@@ -482,25 +482,28 @@ export function collectJsonRegexSecretValues(obfuscator: SecretObfuscator, value
 export function mapJsonStrings(value: JsonValue, fn: (s: string) => string): JsonValue {
 	if (typeof value === "string") return fn(value);
 	if (Array.isArray(value)) {
-		let changed = false;
-		const out = value.map(item => {
+		let out: JsonValue[] | undefined;
+		for (let index = 0; index < value.length; index++) {
+			const item = value[index]!;
 			const next = mapJsonStrings(item, fn);
-			if (next !== item) changed = true;
-			return next;
-		});
-		return changed ? out : value;
+			if (next === item) continue;
+			out ??= value.slice();
+			out[index] = next;
+		}
+		return out ?? value;
 	}
 	if (value !== null && typeof value === "object") {
-		let changed = false;
-		const out: JsonRecord = {};
-		for (const key of Object.keys(value)) {
+		let out: JsonRecord | undefined;
+		for (const key in value) {
+			if (!Object.hasOwn(value, key)) continue;
 			const item = value[key];
 			if (item === undefined) continue;
 			const next = mapJsonStrings(item, fn);
-			if (next !== item) changed = true;
+			if (next === item) continue;
+			out ??= { ...value };
 			out[key] = next;
 		}
-		return changed ? out : value;
+		return out ?? value;
 	}
 	return value;
 }

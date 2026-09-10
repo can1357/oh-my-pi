@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { createCompactionSummaryMessage } from "@oh-my-pi/pi-agent-core/compaction";
+import { buildOpenAiNativeHistory } from "@oh-my-pi/pi-agent-core/compaction/openai";
 import {
 	type Api,
 	type AssistantMessage,
@@ -104,6 +106,25 @@ function emptyUsage(): AssistantMessage["usage"] {
 		cacheWrite: 0,
 		totalTokens: 0,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
+function advisorNativeSummary(provider: string) {
+	const compactionItem = { type: "compaction", encrypted_content: "native-advisor-transition-state" };
+	const replacementHistory = [
+		{
+			type: "message",
+			role: "user",
+			content: [{ type: "input_text", text: "retained-advisor-transition-decision" }],
+		},
+		compactionItem,
+	];
+	return {
+		...createCompactionSummaryMessage("Native advisor history", 100_000, new Date().toISOString(), {
+			providerPayload: { type: "openaiResponsesHistory", provider, items: replacementHistory },
+		}),
+		preserveData: { openaiRemoteCompaction: { provider, replacementHistory, compactionItem } },
+		advisorUsageAnchorStartIndex: 1,
 	};
 }
 
@@ -1733,6 +1754,134 @@ describe("AgentSession retry fallback", () => {
 			id: advisorPrimary.id,
 		});
 	});
+
+	it("skips foreign and same-provider incompatible APIs when retrying an advisor with native history", async () => {
+		const primary = getBundledModel("openai", "gpt-5")!;
+		const compatible = getBundledModel("openai", "gpt-5-mini")!;
+		const foreign = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const wrongApi: Model = { ...getBundledModel("openai", "gpt-4o")!, api: "openai-completions" };
+		const selector = (model: Model) => `${model.provider}/${model.id}`;
+		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+		const advisorMock = createMockModel();
+		const requestedModels: Model[] = [];
+		const recovered = Promise.withResolvers<void>();
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { advisor: [selector(foreign), selector(wrongApi), selector(compatible)] },
+			"advisor.syncBacklog": "1",
+		});
+		settings.setModelRole("advisor", selector(primary));
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([primary, foreign, wrongApi, compatible]);
+		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: primary, systemPrompt: [], tools: [] },
+				streamFn: mainMock.stream,
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: (model, context, options) => {
+				requestedModels.push(model);
+				advisorMock.push(
+					model.id === primary.id
+						? { throw: "rate limit exceeded retry-after-ms=60000" }
+						: { content: ["Advisor recovered"] },
+				);
+				return advisorMock.stream(model, context, options);
+			},
+		});
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_succeeded") recovered.resolve();
+		});
+		session.setAdvisorEnabled(true);
+		const advisor = session.getAdvisorAgent()!;
+		advisor.replaceMessages([advisorNativeSummary(primary.provider)]);
+
+		await session.prompt("review with native history through a provider outage");
+		await recovered.promise;
+
+		expect(requestedModels.map(selector)).toEqual([selector(primary), selector(compatible)]);
+		expect(advisor.state.model.api).toBe(compatible.api);
+		const wire = JSON.stringify(buildOpenAiNativeHistory(advisorMock.calls.at(-1)!.context.messages, compatible));
+		expect(wire.match(/retained-advisor-transition-decision/g)).toHaveLength(1);
+		expect(wire.match(/native-advisor-transition-state/g)).toHaveLength(1);
+	});
+
+	it.each([false, true])(
+		"restores an advisor primary with native history only when compatible=%s",
+		async compatible => {
+			const primary = compatible
+				? getBundledModel("openai", "gpt-5-mini")!
+				: getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const fallback = getBundledModel("openai", "gpt-5")!;
+			const primarySelector = `${primary.provider}/${primary.id}`;
+			const fallbackSelector = `${fallback.provider}/${fallback.id}`;
+			const mainMock = createMockModel({
+				responses: [{ content: ["Primary complete"] }, { content: ["Primary complete again"] }],
+			});
+			const advisorMock = createMockModel();
+			const requestedModels: string[] = [];
+			const recovered = Promise.withResolvers<void>();
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { advisor: [fallbackSelector] },
+				"advisor.syncBacklog": "1",
+			});
+			settings.setModelRole("advisor", primarySelector);
+			vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+			session = new AgentSession({
+				agent: new Agent({
+					getApiKey: () => "test-key",
+					initialState: { model: primary, systemPrompt: [], tools: [] },
+					streamFn: mainMock.stream,
+				}),
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				advisorTools: [],
+				advisorStreamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					advisorMock.push(
+						requestedModels.length === 1
+							? { throw: "rate limit exceeded retry-after-ms=1000" }
+							: { content: ["Advisor reviewed"] },
+					);
+					return advisorMock.stream(model, context, options);
+				},
+			});
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_succeeded") recovered.resolve();
+			});
+			session.setAdvisorEnabled(true);
+
+			await session.prompt("cross providers while history is still portable");
+			await recovered.promise;
+			expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
+			const advisor = session.getAdvisorAgent()!;
+			advisor.replaceMessages([advisorNativeSummary(fallback.provider)]);
+			vi.spyOn(Date, "now").mockReturnValue(Date.now() + 2_000);
+
+			await session.prompt("review after primary cooldown expires");
+			await session.waitForIdle();
+
+			expect(requestedModels).toEqual([
+				primarySelector,
+				fallbackSelector,
+				compatible ? primarySelector : fallbackSelector,
+			]);
+			expect(advisor.state.model.id).toBe(compatible ? primary.id : fallback.id);
+			const wire = JSON.stringify(
+				buildOpenAiNativeHistory(advisorMock.calls.at(-1)!.context.messages, advisor.state.model),
+			);
+			expect(wire.match(/retained-advisor-transition-decision/g)).toHaveLength(1);
+			expect(wire.match(/native-advisor-transition-state/g)).toHaveLength(1);
+		},
+	);
 
 	it("switches an advisor off a dual-classified media-budget 413 with no token excess", async () => {
 		const mainModel = getBundledModel("openai", "gpt-4o-mini");

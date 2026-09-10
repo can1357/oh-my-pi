@@ -53,10 +53,17 @@ import {
 } from "./compaction-v2-streaming";
 import type { CompactionEntry, SessionEntry } from "./entries";
 import { NativeCompactionError } from "./errors";
-import { type ConvertToLlm, createBranchSummaryMessage, createCustomMessage, defaultConvertToLlm } from "./messages";
+import {
+	type ConvertToLlm,
+	createBranchSummaryMessage,
+	createCompactionSummaryMessage,
+	createCustomMessage,
+	defaultConvertToLlm,
+} from "./messages";
 import {
 	buildOpenAiNativeHistory,
 	getPreservedOpenAiRemoteCompactionData,
+	isOpenAiRemoteCompactionApi,
 	requestOpenAiRemoteCompaction,
 	requestRemoteCompaction,
 	shouldUseOpenAiRemoteCompaction,
@@ -1265,8 +1272,8 @@ export interface CompactionPreparation {
  * by the active model — the model that assembles the request context on every
  * turn. A local compaction (no remote preserve) always can: it holds a real
  * textual summary. A remote compaction (V2 or V1) only can when the active model
- * shares the blob's provider AND remote replay is still enabled; otherwise the
- * active model's encoder drops the payload (see `getOpenAIResponsesHistoryPayload`)
+ * shares the blob's provider, speaks the Responses API, and remote replay is
+ * still enabled; otherwise the active model's encoder drops the payload
  * and only the opaque placeholder summary survives, so the caller must re-expand
  * the originals into a portable local summary rather than strand that history.
  *
@@ -1284,6 +1291,9 @@ export function remotePreserveReusable(
 	if (!remote) return true;
 	if (settings.remoteEnabled === false) return false;
 	if (remote.provider !== activeModel.provider) return false;
+	// A separate native compaction endpoint does not give the active encoder
+	// support for replaying its output (e.g. Chat Completions on OpenAI).
+	if (!isOpenAiRemoteCompactionApi(activeModel.api)) return false;
 	const v2Ok = settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(activeModel);
 	return v2Ok || shouldUseOpenAiRemoteCompaction(activeModel);
 }
@@ -1325,7 +1335,9 @@ export function prepareCompaction(
 	activeModel?: Model,
 	tokenizer: Tokenizer = new Tokenizer(activeModel),
 ): CompactionPreparation | undefined {
-	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
+	const lastEntry = pathEntries[pathEntries.length - 1];
+	// A speculative native record may leave uncovered messages before the record.
+	if (lastEntry?.type === "compaction" && !lastEntry.providerReplayThroughEntryId) {
 		return undefined;
 	}
 
@@ -1335,12 +1347,10 @@ export function prepareCompaction(
 	// `reset_boundary` marker and reports the model context empty, so compaction
 	// must not resurrect the dropped pre-clear turns into its summary — matching
 	// how buildSessionContext starts the model-context rebuild after the boundary.
-	// A boundary after the last reusable compaction supersedes it: the pre-reset
-	// summary was cleared too, so drop the previous-compaction reuse and start
-	// fresh after the boundary. A boundary at or before that compaction is already
-	// superseded by it, so only scan newer entries.
+	// A newer reset clears the previous summary too. An older reset still bounds
+	// the native replay snapshot-to-commit interval.
 	let resetBoundaryIndex = -1;
-	for (let i = pathEntries.length - 1; i > prevCompactionIndex; i--) {
+	for (let i = pathEntries.length - 1; i >= 0; i--) {
 		if (pathEntries[i].type === "reset_boundary") {
 			resetBoundaryIndex = i;
 			break;
@@ -1349,7 +1359,24 @@ export function prepareCompaction(
 	if (resetBoundaryIndex > prevCompactionIndex) {
 		prevCompactionIndex = -1;
 	}
-	const boundaryStart = Math.max(prevCompactionIndex, resetBoundaryIndex) + 1;
+	let boundaryStart = Math.max(prevCompactionIndex, resetBoundaryIndex) + 1;
+	if (prevCompactionIndex >= 0) {
+		const previousCompaction = pathEntries[prevCompactionIndex] as CompactionEntry;
+		if (
+			previousCompaction.providerReplayThroughEntryId &&
+			(getCompactionV2PreserveData(previousCompaction.preserveData) ||
+				getPreservedOpenAiRemoteCompactionData(previousCompaction.preserveData))
+		) {
+			const replayThroughIndex = pathEntries.findIndex(
+				entry => entry.id === previousCompaction.providerReplayThroughEntryId,
+			);
+			if (replayThroughIndex >= 0 && replayThroughIndex < prevCompactionIndex) {
+				// Native replay covers the snapshot, not messages appended while the
+				// request was running. Include that interval in the next preparation.
+				boundaryStart = Math.max(replayThroughIndex, resetBoundaryIndex) + 1;
+			}
+		}
+	}
 	const boundaryEnd = pathEntries.length;
 
 	const lastUsage = getLastAssistantUsage(pathEntries);
@@ -1598,9 +1625,18 @@ export async function compact(
 	const snapcompactArchiveMigrationMessage = previousSnapcompactArchiveText
 		? createSnapcompactArchiveMigrationMessage(previousSnapcompactArchiveText)
 		: undefined;
+	const previousNativeHistory =
+		getCompactionV2PreserveData(previousPreserveData) ?? getPreservedOpenAiRemoteCompactionData(previousPreserveData);
+	// A local summary has no native payload to carry it into the first remote
+	// request. Encode it as history; do not resend opaque native placeholders.
+	const previousSummaryMigrationMessage =
+		settings.remoteEnabled !== false && previousSummary && !previousNativeHistory
+			? createCompactionSummaryMessage(previousSummary, tokensBefore, new Date().toISOString())
+			: undefined;
 
 	let preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, undefined);
 	const remoteMessages: AgentMessage[] = [
+		...(previousSummaryMigrationMessage ? [previousSummaryMigrationMessage] : []),
 		...(snapcompactArchiveMigrationMessage ? [snapcompactArchiveMigrationMessage] : []),
 		...messagesToSummarize,
 		...turnPrefixMessages,

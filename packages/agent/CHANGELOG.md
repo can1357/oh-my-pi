@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Native compaction now carries an existing local summary into the first provider-native request instead of losing the summarized history.
+- Subsequent native compactions preserve messages appended between a speculative snapshot and its commit, while honoring `/clear` boundaries.
+- Native replay compatibility checks the active model's Responses API, not just its provider and native compaction endpoint.
+
 ## [18.1.10] - 2026-09-04
 
 ### Fixed

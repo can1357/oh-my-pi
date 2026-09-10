@@ -1948,6 +1948,62 @@ describe("compact() remote compaction failure handling", () => {
 		};
 	}
 
+	test.each(["v1", "v2", "codex-v2"])(
+		"preserves local summary history when entering native replay (%s)",
+		async protocol => {
+			const streaming = protocol !== "v1";
+			const preparation = makePreparation();
+			preparation.previousSummary = "Archived decision: use port 4242.";
+			preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: streaming };
+			const baseModel = makeOpenAiModel({
+				remoteCompaction: { enabled: true, v2StreamingEnabled: streaming },
+			});
+			const model: Model =
+				protocol === "codex-v2"
+					? {
+							...baseModel,
+							api: "openai-codex-responses",
+							provider: "openai-codex",
+							baseUrl: "https://chatgpt.example/backend-api",
+							preferWebsockets: false,
+							remoteCompaction: { enabled: true, api: "openai-codex-responses", v2StreamingEnabled: true },
+						}
+					: baseModel;
+			const requests: Array<{ input: Array<Record<string, unknown>> }> = [];
+			const fetchMock: FetchImpl = async (_url, init) => {
+				requests.push(JSON.parse(String(init?.body)) as (typeof requests)[number]);
+				const item = { type: "compaction", encrypted_content: `history-${requests.length}` };
+				return streaming
+					? sseResponse([
+							{ type: "response.output_item.done", output_index: 0, item },
+							{
+								type: "response.completed",
+								response: { usage: { input_tokens: 100, output_tokens: 1, total_tokens: 101 } },
+							},
+						])
+					: new Response(JSON.stringify({ output: [item] }));
+			};
+			const first = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+			const firstInput = JSON.stringify(requests[0].input);
+			expect(firstInput.match(/Archived decision: use port 4242\./g)).toHaveLength(1);
+			expect(firstInput).toContain("long history");
+			expect(firstInput).toContain("recent");
+
+			await compact(
+				{ ...preparation, previousSummary: first.summary, previousPreserveData: first.preserveData },
+				model,
+				"test-key",
+				undefined,
+				undefined,
+				{ fetch: fetchMock },
+			);
+			const secondInput = JSON.stringify(requests[1].input);
+			expect(secondInput.match(/history-1/g)).toHaveLength(1);
+			expect(secondInput).not.toContain(first.summary);
+			expect(secondInput).not.toContain(preparation.previousSummary);
+		},
+	);
+
 	test("streams V2 compaction before V1 when both settings and model opt in", async () => {
 		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
 		const compactionItem = { type: "compaction", encrypted_content: "enc_v2" };

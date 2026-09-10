@@ -4,7 +4,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
 import { type CursorExecResolvedCarrier, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { logger } from "@oh-my-pi/pi-utils";
-import { obfuscateToolArguments } from "../secrets/message-transform";
+import { obfuscateNativeReplay, obfuscateToolArguments } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
 	formatExecutionSourcePreview,
@@ -980,6 +980,12 @@ export class AdvisorRuntime {
 				// Epoch guard — a reset/dispose during the maintainContext await
 				// invalidates this batch.
 				if (this.#epoch !== epoch) return null;
+				// A concurrent delta can discover collisions while maintenance still
+				// holds an older snapshot. Scrub its committed replay before another
+				// coalescing round can send that snapshot back for compaction.
+				if (this.host.obfuscator?.hasSecrets()) {
+					scrubAdvisorHistory(this.host.obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues);
+				}
 
 				if (shouldResetContext) {
 					// Once coalescing has begun (round > 0), deltas that arrived during
@@ -1671,7 +1677,14 @@ function scrubAdvisorHistory(
 ): void {
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index]!;
-		const next = obfuscateAdvisorMessage(obfuscator, message, sharedRegexSecretValues);
+		const replay =
+			message.role === "user" ||
+			message.role === "developer" ||
+			message.role === "assistant" ||
+			message.role === "compactionSummary"
+				? obfuscateNativeReplay(obfuscator, message, sharedRegexSecretValues)
+				: message;
+		const next = obfuscateAdvisorMessage(obfuscator, replay, sharedRegexSecretValues);
 		if (next !== message) messages[index] = next;
 	}
 }

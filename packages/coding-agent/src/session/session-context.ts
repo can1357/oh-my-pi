@@ -167,7 +167,7 @@ function snapcompactHistoryBlocksForContext(
 
 /** Reads validated OpenAI Responses replacement history from a compaction entry. */
 export function getOpenAiRemoteCompactionPayload(
-	compaction: CompactionEntry | null | undefined,
+	compaction: Pick<CompactionEntry, "preserveData"> | null | undefined,
 ): OpenAIResponsesHistoryPayload | undefined {
 	const candidate = compaction?.preserveData?.openaiRemoteCompaction;
 	if (!isRecord(candidate)) return undefined;

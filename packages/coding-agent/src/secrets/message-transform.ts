@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Context, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, ImageContent, Message, ProviderPayload, TextContent } from "@oh-my-pi/pi-ai";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { SessionContext } from "../session/session-context";
 import type { JsonValue, SecretObfuscator } from "./obfuscator";
 import { collectJsonRegexSecretValues, mapJsonStrings } from "./placeholder-scan";
@@ -115,6 +116,174 @@ export function obfuscateToolArguments(
 	return mapJsonStrings(args as JsonValue, s => obfuscator.obfuscate(s, regexSecretValues)) as Record<string, unknown>;
 }
 
+/** Copy native replay containers only when a provider-visible plaintext field changes. */
+function mapNativeArray(value: unknown, transform: (value: unknown) => unknown): unknown {
+	if (!Array.isArray(value)) return value;
+	let result: unknown[] | undefined;
+	for (let index = 0; index < value.length; index++) {
+		const next = transform(value[index]);
+		if (next !== value[index]) {
+			result ??= value.slice();
+			result![index] = next;
+		}
+	}
+	return result ?? value;
+}
+
+function mapNativeField(
+	item: Record<string, unknown>,
+	key: string,
+	transform: (value: unknown) => unknown,
+): Record<string, unknown> {
+	const next = transform(item[key]);
+	return next === item[key] ? item : { ...item, [key]: next };
+}
+
+/**
+ * Responses history is a protocol, not arbitrary JSON. Only its plaintext slots
+ * are walked; encrypted reasoning, IDs, tool names, images and file bytes stay
+ * opaque. The same walk collects collisions and rewrites replay/preserve data.
+ */
+function mapNativeReplayItem(value: unknown, transform: (text: string) => string): unknown {
+	if (!isRecord(value)) return value;
+	const text = (value: unknown): unknown => (typeof value === "string" ? transform(value) : value);
+	const content = (value: unknown): unknown =>
+		typeof value === "string"
+			? transform(value)
+			: mapNativeArray(value, part => mapNativeReplayItem(part, transform));
+	const args = (value: unknown): unknown => {
+		if (typeof value !== "string") return mapJsonStrings(value as JsonValue, transform);
+		let parsed: JsonValue;
+		try {
+			parsed = JSON.parse(value) as JsonValue;
+		} catch {
+			return transform(value);
+		}
+		const next = mapJsonStrings(parsed, transform);
+		return next === parsed ? value : JSON.stringify(next);
+	};
+	switch (value.type) {
+		case undefined:
+			if (
+				value.role !== "user" &&
+				value.role !== "assistant" &&
+				value.role !== "developer" &&
+				value.role !== "system"
+			)
+				return value;
+			return mapNativeField(value, "content", content);
+		case "message":
+			return mapNativeField(value, "content", content);
+		case "input_text":
+		case "output_text":
+		case "summary_text":
+		case "reasoning_text":
+			return mapNativeField(value, "text", text);
+		case "refusal":
+			return mapNativeField(value, "refusal", text);
+		case "reasoning":
+			return mapNativeField(mapNativeField(value, "summary", content), "content", content);
+		case "compaction":
+		case "compaction_summary":
+			return mapNativeField(value, "summary", content);
+		case "function_call":
+			// Nonempty encrypted argument metadata denotes opaque collaboration data.
+			if (Array.isArray(value.encrypted_function_args) && value.encrypted_function_args.length > 0) return value;
+			return mapNativeField(value, "arguments", args);
+		case "tool_search_call":
+		case "mcp_approval_request":
+			return mapNativeField(value, "arguments", args);
+		case "mcp_call":
+			return mapNativeField(mapNativeField(mapNativeField(value, "arguments", args), "output", text), "error", text);
+		case "custom_tool_call":
+			return mapNativeField(value, "input", text);
+		case "function_call_output":
+		case "custom_tool_call_output":
+		case "local_shell_call_output":
+		case "apply_patch_call_output":
+			return mapNativeField(value, "output", content);
+		case "code_interpreter_call":
+			return mapNativeField(mapNativeField(value, "code", text), "outputs", content);
+		case "logs":
+			return mapNativeField(value, "logs", text);
+		case "computer_call":
+			return mapNativeField(
+				mapNativeField(value, "action", action => mapNativeReplayItem(action, transform)),
+				"actions",
+				content,
+			);
+		case "type":
+			return mapNativeField(value, "text", text);
+		case "shell_call":
+		case "local_shell_call":
+			return mapNativeField(value, "action", action => {
+				if (!isRecord(action)) return action;
+				let result = mapNativeField(action, "commands", commands => mapNativeArray(commands, text));
+				result = mapNativeField(result, "command", command => mapNativeArray(command, text));
+				result = mapNativeField(result, "env", env => mapJsonStrings(env as JsonValue, transform));
+				return mapNativeField(result, "working_directory", text);
+			});
+		case "shell_call_output":
+			return mapNativeField(value, "output", output =>
+				mapNativeArray(output, part =>
+					isRecord(part) ? mapNativeField(mapNativeField(part, "stdout", text), "stderr", text) : part,
+				),
+			);
+		case "apply_patch_call":
+			return mapNativeField(value, "operation", operation =>
+				isRecord(operation) ? mapNativeField(mapNativeField(operation, "path", text), "diff", text) : operation,
+			);
+		case "mcp_list_tools":
+			return mapNativeField(value, "error", text);
+		case "mcp_approval_response":
+			return mapNativeField(value, "reason", text);
+		default:
+			return value;
+	}
+}
+
+/** Re-obfuscate native replay and its next-compaction source with one collision set. */
+export function obfuscateNativeReplay<
+	T extends { providerPayload?: ProviderPayload; preserveData?: Record<string, unknown> },
+>(obfuscator: SecretObfuscator, message: T, sharedRegexSecretValues: ReadonlySet<string>): T {
+	if (!obfuscator.hasSecrets()) return message;
+	const payload = message.providerPayload;
+	const remote = message.preserveData?.openaiRemoteCompaction;
+	if (payload?.type !== "openaiResponsesHistory" && !isRecord(remote)) return message;
+	const transform = (text: string): string => obfuscator.obfuscate(text, sharedRegexSecretValues);
+	const mapItem = (item: unknown): unknown => mapNativeReplayItem(item, transform);
+	const items = payload?.type === "openaiResponsesHistory" ? mapNativeArray(payload.items, mapItem) : undefined;
+	const providerPayload =
+		payload?.type === "openaiResponsesHistory" && items !== payload.items
+			? { ...payload, items: items as Array<Record<string, unknown>> }
+			: payload;
+	let preserveData = message.preserveData;
+	if (isRecord(remote)) {
+		const replacementHistory =
+			payload?.type === "openaiResponsesHistory" && remote.replacementHistory === payload.items
+				? items
+				: mapNativeArray(remote.replacementHistory, mapItem);
+		const compactionItem = mapItem(remote.compactionItem);
+		if (replacementHistory !== remote.replacementHistory || compactionItem !== remote.compactionItem) {
+			preserveData = {
+				...preserveData,
+				openaiRemoteCompaction: {
+					...remote,
+					replacementHistory,
+					...(compactionItem !== remote.compactionItem ? { compactionItem } : {}),
+				},
+			};
+		}
+	}
+	return providerPayload === payload && preserveData === message.preserveData
+		? message
+		: {
+				...message,
+				...(providerPayload !== payload ? { providerPayload } : {}),
+				...(preserveData !== message.preserveData ? { preserveData } : {}),
+			};
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Outbound obfuscation (local → provider)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -205,6 +374,14 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
 		}
 	};
 	for (const message of messages) {
+		if ("providerPayload" in message && message.providerPayload?.type === "openaiResponsesHistory") {
+			for (const item of message.providerPayload.items) {
+				mapNativeReplayItem(item, text => {
+					addText(text);
+					return text;
+				});
+			}
+		}
 		if (message.role === "assistant") {
 			for (const block of message.content) {
 				if (block.type === "text") addText(block.text);
@@ -250,6 +427,13 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 	const sharedRegexSecretValues = collectMessageRegexSecretValues(obfuscator, messages);
 	let changed = false;
 	const result = messages.map((message): Message => {
+		if (message.role === "user" || message.role === "developer" || message.role === "assistant") {
+			const replay = obfuscateNativeReplay(obfuscator, message, sharedRegexSecretValues);
+			if (replay !== message) {
+				changed = true;
+				message = replay;
+			}
+		}
 		if (
 			message.role !== "user" &&
 			message.role !== "toolResult" &&
