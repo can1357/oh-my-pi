@@ -478,6 +478,8 @@ export interface InteractiveModeContext {
 	handleImagePaste(): Promise<boolean>;
 	/** Queue a message for delivery only after the active agent turn would stop. */
 	handleQueueCommand(message: string): Promise<void>;
+	/** Submit the manual-continue directive (the `.` / `c` shortcut, exposed as `/continue`); false when the agent is busy. */
+	submitManualContinue(): boolean;
 	handleBtwCommand(question: string): Promise<void>;
 	handleTanCommand(work: string): Promise<void>;
 	hasActiveBtw(): boolean;

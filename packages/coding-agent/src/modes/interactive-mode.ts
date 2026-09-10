@@ -6168,6 +6168,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#inputController.handleQueueCommand(message);
 	}
 
+	/** Submit the manual-continue directive (the `.` / `c` shortcut, exposed as `/continue`). */
+	submitManualContinue(): boolean {
+		return this.#inputController.submitManualContinue();
+	}
+
 	handleBtwCommand(question: string): Promise<void> {
 		return this.#btwController.start(question);
 	}

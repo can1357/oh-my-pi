@@ -711,6 +711,22 @@ export class InputController {
 		return compacted.text.trim();
 	}
 
+	/** Submit the manual-continue developer directive (the `.` / `c` shortcuts, also `/continue`):
+	 *  resumes the agent toward its most recent intent without a visible user message.
+	 *  Returns false when the main loop has no input waiter (agent busy). */
+	submitManualContinue(): boolean {
+		if (!this.ctx.onInputCallback) return false;
+		this.ctx.editor.clearDraft();
+		this.ctx.onInputCallback({
+			text: manualContinuePrompt,
+			cancelled: false,
+			started: true,
+			synthetic: true,
+			userInitiated: true,
+		});
+		return true;
+	}
+
 	setupEditorSubmitHandler(): void {
 		this.ctx.editor.onSubmit = async (text: string) => {
 			text = this.#compactDraftImages(text.trim());
@@ -742,17 +758,9 @@ export class InputController {
 			// Continue shortcuts: "." or "c" resume the agent with a hidden agent-authored
 			// developer directive (no visible user message) instead of an empty turn, so the
 			// model continues the prior intent rather than second-guessing the interrupt.
+			// Also exposed as the /continue slash command.
 			if (text === "." || text === "c") {
-				if (this.ctx.onInputCallback) {
-					this.ctx.editor.clearDraft();
-					this.ctx.onInputCallback({
-						text: manualContinuePrompt,
-						cancelled: false,
-						started: true,
-						synthetic: true,
-						userInitiated: true,
-					});
-				}
+				this.submitManualContinue();
 				return;
 			}
 

@@ -515,6 +515,17 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 	{
+		name: "continue",
+		icon: "prompt",
+		description: "Continue the agent's most recent intent (same as typing . or c)",
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			if (!runtime.ctx.submitManualContinue()) {
+				runtime.ctx.showStatus("Agent is busy — wait for the current response to finish or abort it");
+			}
+		},
+	},
+	{
 		name: "retry",
 		icon: "redo",
 		description: "Retry the last failed agent turn",
