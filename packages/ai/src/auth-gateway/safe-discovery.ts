@@ -1,3 +1,5 @@
+import { BlockList, isIP } from "node:net";
+
 export interface SafeDiscoveryOptions {
 	allowPrivate?: boolean;
 	allowHttp?: boolean;
@@ -16,9 +18,28 @@ export class SafeDiscoveryError extends Error {
 const DEFAULT_MAX_BYTES = 1_000_000;
 const DEFAULT_MAX_MODELS = 10_000;
 
+const privateAddresses = new BlockList();
+for (const [address, prefix] of [
+	["0.0.0.0", 8],
+	["10.0.0.0", 8],
+	["100.64.0.0", 10],
+	["127.0.0.0", 8],
+	["169.254.0.0", 16],
+	["172.16.0.0", 12],
+	["192.168.0.0", 16],
+	["224.0.0.0", 4],
+	["240.0.0.0", 4],
+] as const)
+	privateAddresses.addSubnet(address, prefix, "ipv4");
+privateAddresses.addAddress("::", "ipv6");
+privateAddresses.addAddress("::1", "ipv6");
+privateAddresses.addSubnet("fc00::", 7, "ipv6");
+privateAddresses.addSubnet("fe80::", 10, "ipv6");
+privateAddresses.addSubnet("ff00::", 8, "ipv6");
+
 /**
- * Fetch a model-list URL with SSRF and size guards. Hostname private-range
- * checks only — no DNS pinning. The returned array is unvalidated.
+ * Fetch a model-list URL with address pinning and size guards.
+ * The returned array is unvalidated.
  */
 export async function safeDiscoverModels(url: string, opts?: SafeDiscoveryOptions): Promise<readonly unknown[]> {
 	const parsed = parseDiscoveryUrl(url);
@@ -27,12 +48,26 @@ export async function safeDiscoverModels(url: string, opts?: SafeDiscoveryOption
 	const maxBytes = opts?.maxBytes ?? DEFAULT_MAX_BYTES;
 	const maxModels = opts?.maxModels ?? DEFAULT_MAX_MODELS;
 
-	const init: RequestInit = {
+	const init: BunFetchRequestInit = {
 		method: "GET",
 		redirect: "error",
 	};
 	if (opts?.timeoutMs !== undefined) {
 		init.signal = AbortSignal.timeout(opts.timeoutMs);
+	}
+	if (opts?.allowPrivate !== true) {
+		const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+		if (isIP(hostname) === 0) {
+			const answers = await Bun.dns.lookup(hostname);
+			if (answers.length === 0) throw new SafeDiscoveryError("discovery hostname has no addresses");
+			if (answers.some(answer => isPrivateHostname(answer.address))) {
+				throw new SafeDiscoveryError("private discovery DNS address is not allowed");
+			}
+			const address = answers[0].address;
+			init.headers = { Host: parsed.host };
+			init.tls = { serverName: hostname };
+			parsed.hostname = isIP(address) === 6 ? `[${address}]` : address;
+		}
 	}
 
 	let response: Response;
@@ -42,6 +77,10 @@ export async function safeDiscoverModels(url: string, opts?: SafeDiscoveryOption
 		throw wrapDiscoveryError(err, "discovery fetch failed");
 	}
 
+	if (!response.ok) {
+		await cancelBody(response);
+		throw new SafeDiscoveryError(`discovery returned HTTP ${response.status}`);
+	}
 	const text = await readLimitedBody(response, maxBytes);
 
 	let parsedJson: unknown;
@@ -91,46 +130,9 @@ function isPrivateHostname(hostname: string): boolean {
 	while (host.endsWith(".")) {
 		host = host.slice(0, -1);
 	}
-	if (host === "localhost" || host === "::1" || host === "::" || host === "0.0.0.0") {
-		return true;
-	}
-	// IPv6 link-local (fe80::/10) and unique-local (fc00::/7, covers fd00::/8 ULA).
-	if (/^fe[89ab][0-9a-f]:/.test(host)) return true;
-	if (/^f[cd][0-9a-f]{2}:/.test(host)) return true;
-	const v4 = parseIPv4(host);
-	if (v4 === undefined) {
-		return false;
-	}
-	const a = v4[0];
-	const b = v4[1];
-	if (a === 127) return true;
-	if (a === 10) return true;
-	if (a === 172 && b >= 16 && b <= 31) return true;
-	if (a === 192 && b === 168) return true;
-	if (a === 169 && b === 254) return true;
-	// RFC6598 shared address space (100.64.0.0/10) — carrier/cloud CGNAT.
-	if (a === 100 && b >= 64 && b <= 127) return true;
-	return false;
-}
-
-function parseIPv4(hostname: string): readonly [number, number, number, number] | undefined {
-	const parts = hostname.split(".");
-	if (parts.length !== 4) return undefined;
-	const a = parseOctet(parts[0]);
-	const b = parseOctet(parts[1]);
-	const c = parseOctet(parts[2]);
-	const d = parseOctet(parts[3]);
-	if (a === undefined || b === undefined || c === undefined || d === undefined) {
-		return undefined;
-	}
-	return [a, b, c, d];
-}
-
-function parseOctet(part: string | undefined): number | undefined {
-	if (part === undefined || !/^(?:0|[1-9]\d{0,2})$/.test(part)) return undefined;
-	const n = Number(part);
-	if (n > 255) return undefined;
-	return n;
+	if (host === "localhost" || host.endsWith(".localhost")) return true;
+	const family = isIP(host);
+	return family !== 0 && privateAddresses.check(host, family === 6 ? "ipv6" : "ipv4");
 }
 
 async function readLimitedBody(response: Response, maxBytes: number): Promise<string> {

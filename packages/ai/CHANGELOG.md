@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Model discovery blocks private DNS and IPv6 addresses and rejects unsuccessful HTTP responses.
 - Fixed Gemini URL routing and tool calls, conditional routing, conversation affinity, and stream health updates after late failures.
 
 - Fixed auth-gateway streaming retries leaving StreamCommitGate terminated; the gate resets between attempts.
