@@ -4,6 +4,7 @@ export interface OrphanSweepState {
 	disconnected: boolean;
 	hasTrackedAttachments: boolean;
 	existingDeadlineMs: number | null;
+	attachmentReconciliationPending?: boolean;
 }
 
 export interface OrphanSweepConnectionState {
@@ -31,6 +32,16 @@ export function orphanSweepSeesRelayDisconnected(
 export function nextOrphanSweepDeadline(
 	state: OrphanSweepState,
 ): number | null {
+	// A startup getTargets failure leaves the in-memory guard empty even though
+	// persisted ownership may still correspond to a live Chrome attachment. Do
+	// not let a later onSuspend interpret that temporary absence as authoritative
+	// and clear the only deadline capable of waking us for another reconciliation.
+	if (
+		state.disconnected &&
+		state.attachmentReconciliationPending === true &&
+		state.existingDeadlineMs !== null
+	)
+		return state.existingDeadlineMs;
 	if (!state.disconnected || !state.hasTrackedAttachments) return null;
 	if (state.existingDeadlineMs !== null) return state.existingDeadlineMs;
 	return state.nowMs + state.graceMs;

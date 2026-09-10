@@ -106,6 +106,11 @@ const recoveryLoaderGenerations = new Map<number, number>();
 let recoverableUpdateGeneration = 0;
 const recoverableStartupMutations = new Set<number>();
 let orphanSweepDeadlineMs: number | null = null;
+// True after persisted ownership has loaded but before getTargets has
+// authoritatively reconciled it into the in-memory attachment guard. A failed
+// startup discovery must not let onSuspend clear the persisted sweep deadline
+// merely because the guard is still empty.
+let orphanAttachmentReconciliationPending = false;
 // Bumped on every relay disconnect. maybeRunOrphanSweep snapshots this before it
 // yields to the alarms/storage APIs so a reconnect+disconnect cycle that arms a
 // fresh grace deadline during the await can veto the stale sweep instead of
@@ -407,6 +412,7 @@ function computeNextOrphanSweepDeadline(
 		disconnected,
 		hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
 		existingDeadlineMs: orphanSweepDeadlineMs,
+		attachmentReconciliationPending: orphanAttachmentReconciliationPending,
 	});
 }
 
@@ -1151,6 +1157,7 @@ async function reconcileOrphans(): Promise<void> {
 	// Ownership is persisted across MV3 worker restarts. Load it before filtering
 	// getTargets so startup cannot discard a surviving extension attachment.
 	await loadRecoverableState();
+	orphanAttachmentReconciliationPending = true;
 	// Snapshot every known epoch before awaiting getTargets so a detach that
 	// lands during the await bumps the epoch past this baseline and is filtered
 	// out of the re-track. The attached tab set is only known after getTargets,
@@ -1171,6 +1178,7 @@ async function reconcileOrphans(): Promise<void> {
 	// takeover becomes relay-authorized again before buildHello can filter it.
 	const attachedTabIds = extensionOwnedAttachedTabIds(targets, liveOwnedTabIds);
 	await trackAttachments(attachedTabIds, () => true, attachmentState, true);
+	orphanAttachmentReconciliationPending = false;
 	// Only a socket that has actually delivered a hello owns reconciliation. A
 	// merely OPEN (or CONNECTING) socket may still stall/fail in `buildHello()`
 	// before any hello reaches the relay, so the persisted deadline must stay

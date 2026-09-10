@@ -42,6 +42,19 @@ describe("browser relay orphan sweep scheduling", () => {
 		).toBe(31_000);
 	});
 
+	it("preserves a restored deadline while startup attachment reconciliation is unresolved", () => {
+		expect(
+			nextOrphanSweepDeadline({
+				nowMs: 20_000,
+				graceMs: 30_000,
+				disconnected: true,
+				hasTrackedAttachments: false,
+				existingDeadlineMs: 31_000,
+				attachmentReconciliationPending: true,
+			}),
+		).toBe(31_000);
+	});
+
 	it("clears the deadline when the relay reconnects or no tracked attachments remain", () => {
 		expect(
 			nextOrphanSweepDeadline({
