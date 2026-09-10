@@ -1422,4 +1422,86 @@ mod tests {
 		// into kept content.
 		assert!(!kept_text.contains(".rule0 {"), "oversized style body must stay folded");
 	}
+
+	#[test]
+	fn summarizes_clojure_collection_literals() {
+		// Verifies that `tree-sitter-clojure-orchard` still emits the
+		// list_lit/map_lit/vec_lit/set_lit/str_lit node kinds the summarizer
+		// depends on (Cargo.toml:248 grammar swap).
+		let code = "(alpha_list\n beta_list\n gamma_list\n delta_list\n)\n{:a \
+		          alpha_map\n :b beta_map\n :c gamma_map\n :d delta_map\n}\n[alpha_vec\n \
+		          beta_vec\n gamma_vec\n delta_vec\n]\n#{alpha_set\n  beta_set\n  \
+		          gamma_set\n  delta_set\n}\n\"alpha_str\nbeta_str\ngamma_str\n\
+		          delta_str\"";
+		let result = summarize(code, "fixture.clj");
+
+		assert!(result.parsed);
+		assert!(result.elided);
+		assert_eq!(result.language.as_deref(), Some("clojure"));
+
+		// Each of the five top-level collection literals should fold, producing one
+		// elided span per literal plus kept boundary lines.
+		let elided_count = result.segments.iter().filter(|s| s.kind == "elided").count();
+		assert_eq!(elided_count, 5, "each collection literal should elide its inner lines");
+
+		let kept_text = result
+			.segments
+			.iter()
+			.filter(|s| s.kind == "kept")
+			.filter_map(|s| s.text.as_deref())
+			.collect::<Vec<_>>()
+			.join("\n");
+		assert!(kept_text.contains("alpha_list"), "list_lit opening stays visible");
+		assert!(kept_text.contains("alpha_map"), "map_lit opening stays visible");
+		assert!(kept_text.contains("alpha_vec"), "vec_lit opening stays visible");
+		assert!(kept_text.contains("alpha_set"), "set_lit opening stays visible");
+		assert!(kept_text.contains("alpha_str"), "str_lit opening stays visible");
+		// Distinctive middle tokens must stay inside the elided spans.
+		assert!(!kept_text.contains("beta_list"), "list_lit interior must be elided");
+		assert!(!kept_text.contains("gamma_list"), "list_lit interior must be elided");
+		assert!(!kept_text.contains("beta_map"), "map_lit interior must be elided");
+		assert!(!kept_text.contains("gamma_map"), "map_lit interior must be elided");
+		assert!(!kept_text.contains("delta_map"), "map_lit interior must be elided");
+		assert!(!kept_text.contains("beta_vec"), "vec_lit interior must be elided");
+		assert!(!kept_text.contains("gamma_vec"), "vec_lit interior must be elided");
+		assert!(!kept_text.contains("delta_vec"), "vec_lit interior must be elided");
+		assert!(!kept_text.contains("beta_set"), "set_lit interior must be elided");
+		assert!(!kept_text.contains("gamma_set"), "set_lit interior must be elided");
+		assert!(!kept_text.contains("delta_set"), "set_lit interior must be elided");
+		assert!(!kept_text.contains("beta_str"), "str_lit interior must be elided");
+		assert!(!kept_text.contains("gamma_str"), "str_lit interior must be elided");
+	}
+
+	#[test]
+	fn summarizes_just_recipe_body() {
+		// Verifies that `arborium-just` still emits the `recipe_body` node kind
+		// the summarizer depends on (Cargo.toml:269 grammar swap).
+		let code = "build:\n\techo one\n\techo two\n\techo three\n\techo four";
+		let result = summarize(code, "Justfile");
+
+		assert!(result.parsed);
+		assert!(result.elided);
+		assert_eq!(result.language.as_deref(), Some("just"));
+
+		let elided = result
+			.segments
+			.iter()
+			.find(|s| s.kind == "elided")
+			.expect("elided segment");
+		assert_eq!(elided.start_line, 3, "elision starts after first recipe line");
+		assert_eq!(elided.end_line, 4, "elision ends before last recipe line");
+
+		let kept_text = result
+			.segments
+			.iter()
+			.filter(|s| s.kind == "kept")
+			.filter_map(|s| s.text.as_deref())
+			.collect::<Vec<_>>()
+			.join("\n");
+		assert!(kept_text.contains("build:"), "recipe header stays visible");
+		assert!(kept_text.contains("echo one"), "first recipe line stays visible");
+		assert!(kept_text.contains("echo four"), "last recipe line stays visible");
+		assert!(!kept_text.contains("echo two"), "interior recipe lines must be elided");
+		assert!(!kept_text.contains("echo three"), "interior recipe lines must be elided");
+	}
 }

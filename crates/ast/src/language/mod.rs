@@ -823,4 +823,50 @@ mod tests {
 		assert_eq!(from_extension(Path::new("rules.bzl")), Some(SupportLang::Starlark));
 		assert_eq!(from_extension(Path::new("bridge.mm")), Some(SupportLang::ObjC));
 	}
+
+	#[test]
+	fn html_injections_group_by_language_and_source_order() {
+		use ast_grep_core::tree_sitter::LanguageExt;
+
+		let html = Html;
+		let source = "<!doctype html>\n<script>\n  a;\n</script>\n<script lang=\"ts\">\n  \
+		          c;\n</script>\n<style>\n  .x {}\n</style>\n<script>\n  d;\n</script>\n";
+		let ast = html.ast_grep(source);
+		let injections = html.extract_injections(ast.root());
+
+		// Scripts are collected before styles; ranges within each language group
+		// are appended in source order by `push_injection_range`.
+		let group = |name: &str| {
+			injections
+				.iter()
+				.find(|(lang, _)| lang == name)
+				.map(|(_, ranges)| ranges.as_slice())
+				.expect("injection group")
+		};
+
+		assert_eq!(injections.len(), 3, "expected js, ts, and css injection groups");
+
+		let js = group("js");
+		assert_eq!(js.len(), 2, "plain scripts are grouped under js");
+		assert!(js[0].start_byte < js[1].start_byte, "js ranges stay in source order");
+
+		let ts = group("ts");
+		assert_eq!(ts.len(), 1, "lang=ts overrides default js");
+
+		let css = group("css");
+		assert_eq!(css.len(), 1, "style defaults to css");
+
+		// All source ranges are ordered and non-overlapping; the style sits between the
+		// second (ts) and third (js) script in source order, so the css range is between
+		// them even though css appears last in the grouped result.
+		assert!(js[0].start_byte < ts[0].start_byte, "first js precedes ts");
+		assert!(ts[0].start_byte < css[0].start_byte, "ts precedes style");
+		assert!(css[0].start_byte < js[1].start_byte, "style precedes second js");
+
+		// Each raw_text slice contains the expected content.
+		assert!(source[js[0].start_byte..js[0].end_byte].contains("a;"));
+		assert!(source[js[1].start_byte..js[1].end_byte].contains("d;"));
+		assert!(source[ts[0].start_byte..ts[0].end_byte].contains("c;"));
+		assert!(source[css[0].start_byte..css[0].end_byte].contains(".x {}"));
+	}
 }
