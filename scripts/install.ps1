@@ -1,5 +1,5 @@
 # OMP Coding Agent Installer for Windows
-# Usage: irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1 | iex
+# Usage: powershell -c "https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1|iex"
 #
 # Or with options:
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1))) -Source
