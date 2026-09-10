@@ -114,6 +114,7 @@ static IMAGE_CACHE: LazyLock<Mutex<ImageCache>> =
 
 /// Supported image encoding discovered from file bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
+#[strum(const_into_str)]
 pub enum ImageKind {
 	/// Portable Network Graphics.
 	#[strum(serialize = "image/png")]
@@ -131,8 +132,8 @@ pub enum ImageKind {
 
 impl ImageKind {
 	/// Model-facing media type for this encoding.
-	pub fn media_type(self) -> &'static str {
-		self.into()
+	pub const fn media_type(self) -> &'static str {
+		self.into_str()
 	}
 
 	const fn format(self) -> ImageFormat {
