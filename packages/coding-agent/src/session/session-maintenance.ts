@@ -140,17 +140,24 @@ function hasConfiguredCompactionMethod(settings: ConfiguredCompactionSettings): 
  * Whether `candidate` is actually selectable for `reason` on `model` — mirrors the
  * per-candidate availability check in {@link SessionMaintenance.runAutoCompaction}'s
  * method-order loop so every caller agrees with what would really be selected.
+ *
+ * `excludeMedia` skips `snapcompact` regardless of model support: it archives
+ * history onto base64-encoded image frames (up to ~3 MB), which is the opposite
+ * of what a byte/payload-limit 413 recovery needs — a request already rejected
+ * for being too large in bytes should not be retried with an even larger,
+ * media-heavy one (#11482).
  */
 function isCompactionMethodUsable(
 	candidate: CompactionMethod,
 	reason: "overflow" | "threshold" | "idle" | "incomplete",
 	model: Model | undefined,
 	settings: ConfiguredCompactionSettings,
+	excludeMedia = false,
 ): boolean {
 	return candidate === "remote"
 		? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))
 		: candidate === "snapcompact"
-			? model?.input.includes("image") === true
+			? !excludeMedia && model?.input.includes("image") === true
 			: candidate === "handoff"
 				? reason !== "overflow"
 				: true;
@@ -168,9 +175,10 @@ function hasUsableCompactionMethod(
 	reason: "overflow" | "threshold" | "idle" | "incomplete",
 	model: Model | undefined,
 	settings: ConfiguredCompactionSettings,
+	excludeMedia = false,
 ): boolean {
 	return resolveCompactionMethodOrder(settings.methodOrder).some(candidate =>
-		isCompactionMethodUsable(candidate, reason, model, settings),
+		isCompactionMethodUsable(candidate, reason, model, settings, excludeMedia),
 	);
 }
 
@@ -398,7 +406,7 @@ export interface SessionMaintenanceHost {
 		reason: "overflow" | "incomplete",
 		message: AssistantMessage,
 		allowDefer: boolean,
-		options: { autoContinue: boolean; triggerContextTokens?: number },
+		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
 	): Promise<CompactionCheckResult>;
 	parseRetryAfterMsFromError(errorMessage: string): number | undefined;
 	setModelTemporary(
@@ -2321,13 +2329,17 @@ export class SessionMaintenance {
 		// configuration — e.g. `methodOrder: ["handoff"]`, or `snapcompact`-only
 		// on a text-only model — isn't reported as available and then silently
 		// no-ops instead of surfacing the payload-rejection notice (#11482).
+		// For a payload rejection specifically, `snapcompact` is excluded from
+		// this availability check too: it archives history onto base64 image
+		// frames, which only grows the byte size a payload/byte-limit 413 is
+		// already complaining about (#11482).
 		// (Named distinctly from the `compactionSettings` used further down in
 		// this function's later, unrelated threshold check.)
 		const payloadCompactionSettings = this.#host.settings.getGroup("compaction");
 		const compactionAvailable =
 			payloadCompactionSettings.enabled &&
 			(this.#usesExperimentalContextManagement() ||
-				hasUsableCompactionMethod("overflow", this.#model, payloadCompactionSettings));
+				hasUsableCompactionMethod("overflow", this.#model, payloadCompactionSettings, payloadRejection));
 		// Unknown context window (common for custom/self-hosted models the
 		// registry has no metadata for) used to be treated the same as a
 		// confirmed media/byte-budget rejection and blocked outright — even
@@ -2385,7 +2397,7 @@ export class SessionMaintenance {
 					"overflow",
 					assistantMessage,
 					allowDefer,
-					{ autoContinue },
+					{ autoContinue, excludeMediaMethods: payloadRejection },
 				);
 				// A statically usable method (per `hasUsableCompactionMethod`) can still
 				// reclaim nothing at runtime — e.g. `methodOrder: ["shake"]` with no
@@ -2404,6 +2416,17 @@ export class SessionMaintenance {
 					compactionResult.automaticContinuationBlocked !== true &&
 					compactionResult.historyRewritten !== true
 				) {
+					// `runRecoveryCompactionWithRollback`'s no-rewrite path re-appends the
+					// failed turn to active context (so it isn't silently lost) before
+					// returning here. Unlike the immediate and no-method dead ends above/
+					// below, this branch discovers the no-progress outcome only *after*
+					// that restoration, so it must re-remove the turn itself — otherwise
+					// the next prompt's pre-prompt maintenance finds the same error via
+					// `#findLastAssistantMessage()` and repeats this entire no-progress
+					// compaction + warning before accepting new input (#11482). The
+					// persisted session history (separate from this active-context view)
+					// still keeps the turn visible.
+					this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
 					// Same usage-backed/byte-shaped notice selection as the sibling
 					// "no compaction available" dead end below: a payload rejection
 					// with provider-reported usage above the window IS a genuine
@@ -3558,6 +3581,12 @@ export class SessionMaintenance {
 			 * capability is no longer present at dispatch time.
 			 */
 			explicitNewContextRequest?: boolean;
+			/**
+			 * Skip `snapcompact` regardless of model image support — a byte/payload-
+			 * limit 413 recovery must not retry with an even larger, media-heavy
+			 * request (#11482).
+			 */
+			excludeMediaMethods?: boolean;
 		} = {},
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = this.#host.settings.getGroup("compaction");
@@ -3589,7 +3618,16 @@ export class SessionMaintenance {
 		let method: CompactionMethod | undefined;
 		for (let index = startIndex; index < methods.length; index++) {
 			const candidate = methods[index];
-			if (!isCompactionMethodUsable(candidate, reason, this.#model, compactionSettings)) continue;
+			if (
+				!isCompactionMethodUsable(
+					candidate,
+					reason,
+					this.#model,
+					compactionSettings,
+					options.excludeMediaMethods === true,
+				)
+			)
+				continue;
 			method = candidate;
 			methodIndex = index;
 			break;

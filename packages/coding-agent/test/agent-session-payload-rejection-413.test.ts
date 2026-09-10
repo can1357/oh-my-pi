@@ -435,6 +435,37 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		expect(continueSpy).not.toHaveBeenCalled();
 	});
 
+	it("excludes snapcompact from the payload-rejection compaction attempt (#11482)", async () => {
+		// The `session_before_compact` hook mocked in `createSession` supplies a
+		// canned summary regardless of which method actually runs, so it can't
+		// distinguish snapcompact from soft/shake by observable side effects
+		// alone. Spy on `runAutoCompaction` directly to verify the wiring: a
+		// payload rejection must ask for `excludeMediaMethods: true` so
+		// `runAutoCompaction`'s own method-selection loop skips snapcompact —
+		// which archives history onto base64 image frames, growing the exact
+		// byte budget a payload/byte-limit 413 already exceeded.
+		await createSession(null);
+		const runAutoCompactionSpy = vi.spyOn(SessionMaintenance.prototype, "runAutoCompaction");
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+
+		const assistantMsg = payloadRejectionAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await session.waitForIdle();
+
+		expect(runAutoCompactionSpy).toHaveBeenCalled();
+		const overflowCall = runAutoCompactionSpy.mock.calls.find(call => call[0] === "overflow");
+		expect(overflowCall?.[4]?.excludeMediaMethods).toBe(true);
+	});
+
 	it("still blocks a payload-only 413 with no context window when the only configured method can't run for overflow (#11482)", async () => {
 		// `handoff` explicitly refuses reason === "overflow" (session-maintenance.ts
 		// `isCompactionMethodUsable`). A methodOrder of just `["handoff"]` must not
@@ -500,6 +531,13 @@ describe("AgentSession payload-rejection 413 handling", () => {
 			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
 		);
 		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+
+		// `runRecoveryCompactionWithRollback`'s no-rewrite path re-appends the
+		// failed turn to active context before the no-progress conversion runs;
+		// the block must remove it again so the next prompt's pre-prompt
+		// maintenance doesn't find the same error and repeat this whole cycle.
+		const lastActiveMessage = session.agent.state.messages.at(-1);
+		expect(lastActiveMessage?.role === "assistant" && lastActiveMessage.stopReason === "error").toBe(false);
 	});
 
 	it("reports a usage-backed payload-shaped dead end as a token-context problem", async () => {
