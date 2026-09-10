@@ -50,13 +50,46 @@ enum BuildError {
 		#[source]
 		source: serde_json::Error,
 	},
-	/// A required generated metadata field has the wrong shape.
-	#[error("{path}: {context}")]
-	InvalidMetadata {
+	/// The metadata extensions field had the wrong shape.
+	#[error("{path}: build_info.extensions must be an object")]
+	InvalidExtensionsShape {
 		/// Metadata file.
 		path: PathBuf,
-		/// JSON field path and shape requirement.
-		context: String,
+	},
+	/// One extension's variant list had the wrong shape.
+	#[error("{path}: build_info.extensions.{extension_name}: must be an array")]
+	InvalidVariantsShape {
+		/// Metadata file.
+		path:           PathBuf,
+		/// Extension name.
+		extension_name: String,
+	},
+	/// One extension variant's link list had the wrong shape.
+	#[error(
+		"{path}: build_info.extensions.{extension_name}[{variant_index}].links: must be an array"
+	)]
+	InvalidLinksShape {
+		/// Metadata file.
+		path:           PathBuf,
+		/// Extension name.
+		extension_name: String,
+		/// Variant index.
+		variant_index:  usize,
+	},
+	/// One link's name field had the wrong shape.
+	#[error(
+		"{path}: build_info.extensions.{extension_name}[{variant_index}].links[{link_index}].name: \
+		 must be a string"
+	)]
+	InvalidLinkNameShape {
+		/// Metadata file.
+		path:           PathBuf,
+		/// Extension name.
+		extension_name: String,
+		/// Variant index.
+		variant_index:  usize,
+		/// Link index.
+		link_index:     usize,
 	},
 	/// Cargo did not provide the output directory.
 	#[error("Cargo did not provide OUT_DIR to omp-py/build.rs")]
@@ -120,35 +153,30 @@ fn main() -> Result<(), BuildError> {
 		.get("build_info")
 		.and_then(|build_info| build_info.get("extensions"))
 		.and_then(serde_json::Value::as_object)
-		.ok_or_else(|| BuildError::InvalidMetadata {
-			path:    python_json.clone(),
-			context: "build_info.extensions must be an object".to_owned(),
-		})?;
+		.ok_or_else(|| BuildError::InvalidExtensionsShape { path: python_json.clone() })?;
 	for (extension_name, variants) in extensions {
-		let variants = variants.as_array().ok_or_else(|| BuildError::InvalidMetadata {
-			path: python_json.clone(),
-			context: format!("build_info.extensions.{extension_name}: must be an array"),
+		let variants = variants.as_array().ok_or_else(|| BuildError::InvalidVariantsShape {
+			path:           python_json.clone(),
+			extension_name: extension_name.to_owned(),
 		})?;
 		for (variant_index, variant) in variants.iter().enumerate() {
 			let links = variant
 				.get("links")
 				.and_then(serde_json::Value::as_array)
-				.ok_or_else(|| BuildError::InvalidMetadata {
-					path: python_json.clone(),
-					context: format!(
-						"build_info.extensions.{extension_name}[{variant_index}].links: must be an array"
-					),
+				.ok_or_else(|| BuildError::InvalidLinksShape {
+					path:           python_json.clone(),
+					extension_name: extension_name.to_owned(),
+					variant_index,
 				})?;
 			for (link_index, link) in links.iter().enumerate() {
 				let name = link
 					.get("name")
 					.and_then(serde_json::Value::as_str)
-					.ok_or_else(|| BuildError::InvalidMetadata {
-						path: python_json.clone(),
-						context: format!(
-							"build_info.extensions.{extension_name}[{variant_index}].\
-							 links[{link_index}].name: must be a string"
-						),
+					.ok_or_else(|| BuildError::InvalidLinkNameShape {
+						path:           python_json.clone(),
+						extension_name: extension_name.to_owned(),
+						variant_index,
+						link_index,
 					})?;
 				if link["path_static"].is_string() {
 					static_libs.insert(name.to_owned());

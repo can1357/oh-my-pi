@@ -1117,22 +1117,22 @@ impl CompiledCatalog {
 #[derive(Debug, thiserror::Error)]
 pub enum CompileError {
 	/// Provider TOML did not match the closed schema.
-	#[error("provider oracle is invalid: {0}")]
+	#[error("provider oracle is invalid")]
 	Provider(#[from] de::Error),
 	/// Model JSON did not match the closed schema.
-	#[error("model oracle is invalid: {0}")]
+	#[error("model oracle is invalid")]
 	Json(#[from] serde_json::Error),
 	/// Compressed model source could not be decoded.
-	#[error("model oracle compression is invalid: {0}")]
+	#[error("model oracle compression is invalid")]
 	Compression(#[from] io::Error),
 	/// Compatibility cascade parsing or resolution failed.
-	#[error("compatibility cascade is invalid: {0}")]
+	#[error("compatibility cascade is invalid")]
 	Cascade(#[from] CascadeError),
 	/// Checked-in taxonomy KDL could not be parsed.
-	#[error("catalog taxonomy source is invalid: {0}")]
+	#[error("catalog taxonomy source is invalid")]
 	TaxonomySource(#[source] CascadeError),
 	/// Taxonomy classification of checked-in model data failed.
-	#[error("catalog taxonomy classification is invalid: {0}")]
+	#[error("catalog taxonomy classification is invalid")]
 	Taxonomy(#[from] crate::taxonomy::TaxonomyError),
 	/// A computed pricing multiplier was not a finite JSON number.
 	#[error("computed pricing multiplier is not finite")]

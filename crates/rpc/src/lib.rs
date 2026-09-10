@@ -19,10 +19,7 @@ pub mod protocol;
 pub mod tls;
 pub mod uds;
 
-use std::{
-	fmt::{self, Display},
-	io,
-};
+use std::{fmt, io};
 
 pub use health::{HealthReporter, health_service};
 pub use hello::{HelloService, MIN_SCHEMA_REV, Peer, handshake};
@@ -34,14 +31,19 @@ pub use uds::{Incoming, connect, listen};
 #[derive(thiserror::Error)]
 pub enum Error {
 	/// A filesystem, socket, or stream operation failed.
-	Io(io::Error),
+	#[error("I/O error")]
+	Io(#[source] #[from] io::Error),
 	/// Tonic could not establish or configure a transport.
-	Transport(transport::Error),
+	#[error("transport error")]
+	Transport(#[source] #[from] transport::Error),
 	/// A gRPC request failed after the transport was established.
-	Rpc(tonic::Status),
+	#[error("RPC error")]
+	Rpc(#[source] #[from] tonic::Status),
 	/// TLS material was invalid or could not be configured.
+	#[error("TLS configuration error")]
 	Tls(Str),
 	/// The server schema is older than the client schema.
+	#[error("server schema revision {server} is older than client revision {client}")]
 	SchemaTooOld {
 		/// Revision advertised by the server.
 		server: u32,
@@ -49,6 +51,7 @@ pub enum Error {
 		client: u32,
 	},
 	/// The client does not implement the oldest schema accepted by the server.
+	#[error("client schema revision {client} is below server minimum {server_min}")]
 	SchemaUnsupported {
 		/// Minimum revision accepted by the server.
 		server_min: u32,
@@ -56,50 +59,13 @@ pub enum Error {
 		client:     u32,
 	},
 	/// The requested transport is unavailable on this operating system.
+	#[error("unsupported transport: {0}")]
 	Unsupported(&'static str),
 }
 
 impl fmt::Debug for Error {
 	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		Display::fmt(self, formatter)
-	}
-}
-
-impl Display for Error {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::Io(error) => write!(formatter, "I/O error ({:?})", error.kind()),
-			Self::Transport(_) => formatter.write_str("transport error"),
-			Self::Rpc(status) => write!(formatter, "RPC error ({:?})", status.code()),
-			Self::Tls(_) => formatter.write_str("TLS configuration error"),
-			Self::SchemaTooOld { server, client } => write!(
-				formatter,
-				"server schema revision {server} is older than client revision {client}"
-			),
-			Self::SchemaUnsupported { server_min, client } => write!(
-				formatter,
-				"client schema revision {client} is below server minimum {server_min}"
-			),
-			Self::Unsupported(kind) => write!(formatter, "unsupported transport: {kind}"),
-		}
-	}
-}
-
-impl From<io::Error> for Error {
-	fn from(error: io::Error) -> Self {
-		Self::Io(error)
-	}
-}
-
-impl From<transport::Error> for Error {
-	fn from(error: transport::Error) -> Self {
-		Self::Transport(error)
-	}
-}
-
-impl From<tonic::Status> for Error {
-	fn from(status: tonic::Status) -> Self {
-		Self::Rpc(status)
+		fmt::Display::fmt(self, formatter)
 	}
 }
 
@@ -118,10 +84,12 @@ mod tests {
 			Error::Tls(CANARY.into()),
 		];
 
-		for error in errors {
+		for error in &errors {
 			assert!(!error.to_string().contains(CANARY));
 			assert!(!format!("{error:?}").contains(CANARY));
-			assert!(error::Error::source(&error).is_none());
 		}
+		assert!(error::Error::source(&errors[0]).is_some());
+		assert!(error::Error::source(&errors[1]).is_some());
+		assert!(error::Error::source(&errors[2]).is_none());
 	}
 }

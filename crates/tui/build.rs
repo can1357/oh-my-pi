@@ -9,6 +9,23 @@ use std::{
 	path::PathBuf,
 };
 
+#[derive(Debug, thiserror::Error)]
+enum BuildError {
+	#[error("{op} {path}: {source}")]
+	Io {
+		op:     &'static str,
+		path:   PathBuf,
+		#[source]
+		source: io::Error,
+	},
+	#[error("Cargo did not set OUT_DIR")]
+	MissingOutputDirectory,
+	#[error("generated catalog formatting failed")]
+	Format(#[source] #[from] fmt::Error),
+	#[error("{reason}: {path}")]
+	InvalidLogoPath { path: PathBuf, reason: &'static str },
+}
+
 struct Row {
 	name:      String,
 	alias:     Option<String>,
@@ -18,44 +35,63 @@ struct Row {
 	variant:   String,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), BuildError> {
 	println!("cargo:rerun-if-changed=icons.tsv");
 	println!("cargo:rerun-if-changed=assets/login");
 	let out_dir = PathBuf::from(
-		env::var_os("OUT_DIR").ok_or_else(|| io::Error::other("Cargo did not set OUT_DIR"))?,
+		env::var_os("OUT_DIR").ok_or(BuildError::MissingOutputDirectory)?,
 	);
-	let input = fs::read_to_string("icons.tsv")
-		.map_err(|error| io::Error::new(error.kind(), format!("read icons.tsv: {error}")))?;
-	let rows = parse(&input);
-	fs::write(out_dir.join("icons.rs"), generate(&rows)?).map_err(|error| {
-		io::Error::new(error.kind(), format!("write generated icon catalog: {error}"))
+	let input_path = PathBuf::from("icons.tsv");
+	let input = fs::read_to_string(&input_path).map_err(|source| BuildError::Io {
+		op: "read",
+		path: input_path,
+		source,
 	})?;
-	fs::write(out_dir.join("provider_logos.rs"), generate_logos()?).map_err(|error| {
-		io::Error::new(error.kind(), format!("write generated logo catalog: {error}"))
+	let rows = parse(&input);
+	let icon_output = out_dir.join("icons.rs");
+	let icon_catalog = generate(&rows).map_err(BuildError::Format)?;
+	fs::write(&icon_output, icon_catalog).map_err(|source| BuildError::Io {
+		op: "write",
+		path: icon_output,
+		source,
+	})?;
+	let logo_output = out_dir.join("provider_logos.rs");
+	let logo_catalog = generate_logos()?;
+	fs::write(&logo_output, logo_catalog).map_err(|source| BuildError::Io {
+		op: "write",
+		path: logo_output,
+		source,
 	})?;
 	Ok(())
 }
 
 /// Emits `provider_logo` matching every `assets/login/<id>.png` to its
 /// embedded bytes, so dropping a PNG into the directory is the whole job.
-fn generate_logos() -> Result<String, Box<dyn std::error::Error>> {
+fn generate_logos() -> Result<String, BuildError> {
+	let asset_dir = PathBuf::from("assets/login");
 	let mut ids = Vec::new();
-	for entry in fs::read_dir("assets/login")
-		.map_err(|error| io::Error::new(error.kind(), format!("read assets/login: {error}")))?
-	{
+	for entry in fs::read_dir(&asset_dir).map_err(|source| BuildError::Io {
+		op: "read",
+		path: asset_dir.clone(),
+		source,
+	})? {
 		let path = entry
-			.map_err(|error| {
-				io::Error::new(error.kind(), format!("read assets/login entry: {error}"))
+			.map_err(|source| BuildError::Io {
+				op: "read",
+				path: asset_dir.clone(),
+				source,
 			})?
 			.path();
 		if !path.extension().is_some_and(|ext| ext == "png") {
 			continue;
 		}
-		let stem = path.file_stem().ok_or_else(|| {
-			io::Error::other(format!("logo path has no file stem: {}", path.display()))
+		let stem = path.file_stem().ok_or_else(|| BuildError::InvalidLogoPath {
+			path:   path.clone(),
+			reason: "logo path has no file stem",
 		})?;
-		let stem = stem.to_str().ok_or_else(|| {
-			io::Error::other(format!("logo file name is not UTF-8: {}", path.display()))
+		let stem = stem.to_str().ok_or_else(|| BuildError::InvalidLogoPath {
+			path:   path.clone(),
+			reason: "logo file name is not UTF-8",
 		})?;
 		ids.push(stem.to_owned());
 	}
