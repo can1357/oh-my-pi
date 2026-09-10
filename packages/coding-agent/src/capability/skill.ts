@@ -22,10 +22,10 @@ export interface SkillFrontmatter {
 	 */
 	hide?: boolean;
 	/**
-	 * Agent Skills standard equivalent of `hide`.
-	 * When `true`, the skill is excluded from the system prompt listing.
-	 * Normalized from kebab-case `disable-model-invocation` in YAML frontmatter.
-	 * @see https://agentskills.io/specification
+	 * Claude Code / Pi convention, not a field the agentskills.io specification
+	 * defines: when `true`, the skill is excluded from the system prompt
+	 * listing. Normalized from kebab-case `disable-model-invocation` in YAML
+	 * frontmatter, and accepted at top level on the Agent Plugins path.
 	 */
 	disableModelInvocation?: boolean;
 	[key: string]: unknown;
