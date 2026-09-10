@@ -580,6 +580,13 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		...dynamicModel,
 		name: preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning,
+		// ID-only discovery has no effort metadata. Retain the catalog controls
+		// only for the same transport and non-authoritative reasoning sources.
+		thinking:
+			dynamicModel.thinking ??
+			(!endpointChanged && existingModel.api === dynamicModel.api && !dynamicReasoningAuthoritative
+				? existingModel.thinking
+				: undefined),
 		input: supportsImage ? ["text", "image"] : ["text"],
 		cost: {
 			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input),

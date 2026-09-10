@@ -373,6 +373,8 @@ function mapWithBundledReference<TApi extends Api>(
 		return {
 			...defaults,
 			name,
+			contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+			maxTokens: toPositiveNumber(entry.max_completion_tokens, defaults.maxTokens),
 		};
 	}
 	return {

@@ -939,6 +939,80 @@ describe("model cache spec round trip", () => {
 		}
 	});
 
+	it.each(["bundled", "shared catalog"])(
+		"preserves %s thinking controls through ID-only discovery and offline restore",
+		async source => {
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-thinking-merge-"));
+			const catalogModel = completionsSpec({
+				provider: "thinking-merge-test",
+				reasoning: true,
+				thinking: { mode: "effort", efforts: [Effort.Low, Effort.High], defaultLevel: Effort.High },
+			});
+			const discoveredModel = completionsSpec({
+				provider: catalogModel.provider,
+				contextWindow: null,
+				maxTokens: null,
+			});
+			const options = {
+				providerId: catalogModel.provider,
+				staticModels: source === "bundled" ? [catalogModel] : [],
+				cacheDbPath: path.join(tempDir, "models.db"),
+				...(source === "shared catalog"
+					? { modelsDev: { fetch: async () => [catalogModel], map: () => [catalogModel] } }
+					: {}),
+			};
+			try {
+				const online = await resolveProviderModels(
+					{ ...options, fetchDynamicModels: async () => [discoveredModel] },
+					"online",
+				);
+				expect(online.models[0]?.thinking).toEqual(catalogModel.thinking);
+				const offline = await resolveProviderModels(options, "offline");
+				expect(offline.models[0]?.thinking).toEqual(catalogModel.thinking);
+
+				const updatedThinking = { mode: "effort", efforts: [Effort.Low], defaultLevel: Effort.Low } as const;
+				const refreshed = await resolveProviderModels(
+					{
+						...options,
+						fetchDynamicModels: async () => [{ ...discoveredModel, reasoning: true, thinking: updatedThinking }],
+					},
+					"online",
+				);
+				expect(refreshed.models[0]?.thinking).toEqual(updatedThinking);
+			} finally {
+				await fs.rm(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("does not copy thinking controls to a different discovery endpoint", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-thinking-endpoint-"));
+		const catalogModel = completionsSpec({
+			reasoning: true,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.High],
+				effortMap: { [Effort.High]: "endpoint-specific-high" },
+			},
+		});
+		const discoveredModel = completionsSpec({ baseUrl: "https://other.example.com/v1" });
+		try {
+			const result = await resolveProviderModels(
+				{
+					providerId: "thinking-endpoint-test",
+					staticModels: [catalogModel],
+					cacheDbPath: path.join(tempDir, "models.db"),
+					fetchDynamicModels: async () => [discoveredModel],
+				},
+				"online",
+			);
+			expect(result.models[0]?.baseUrl).toBe(discoveredModel.baseUrl);
+			expect(result.models[0]?.thinking?.effortMap).toBeUndefined();
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("preserves static long-context pricing through dynamic refresh and cache restore", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-tiered-cost-"));
 		const dbPath = path.join(tempDir, "models.db");
