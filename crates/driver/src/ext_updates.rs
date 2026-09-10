@@ -460,7 +460,7 @@ fn update_refusal_from_wire(value: i32) -> Option<omp_ext::upgrade::UpdateRefusa
 
 async fn fetch_update_metadata(url: &str) -> Result<Vec<u8>, UpdateFailure> {
 	const MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
-	let response = omp_http::no_redirect_client()
+	let response = omp_http::default_client()
 		.get(url)
 		.send()
 		.await
