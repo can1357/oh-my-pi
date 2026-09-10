@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed GitHub Copilot requests failing with HTTP 403 on subscriptions without Copilot CLI access.
+
 ## [18.1.16] - 2026-09-09
 
 ### Fixed

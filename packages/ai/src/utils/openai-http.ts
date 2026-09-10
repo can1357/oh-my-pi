@@ -14,6 +14,7 @@
  *   captured response body for the strict-tools fallback and the responses
  *   chain-state detectors, which regex over `error.message`.
  */
+import { markCopilotCliDisabled, mergeCopilotApiHeaders } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import { fetchWithRetry, readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { OpenAIHttpError } from "../error";
@@ -88,7 +89,7 @@ export interface OpenAIStreamHandle<TEvent> {
  * watchdog timers and abort-reason bookkeeping.
  */
 export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): Promise<OpenAIStreamHandle<TEvent>> {
-	const response = await fetchWithRetry(init.url, {
+	let response = await fetchWithRetry(init.url, {
 		method: "POST",
 		headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...init.headers },
 		body: JSON.stringify(init.body),
@@ -104,6 +105,29 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.
 		timeout: false,
 	});
+	if (response.status === 403 && init.headers) {
+		const isCopilotCli = Object.entries(init.headers).some(
+			([k, v]) => k.toLowerCase() === "copilot-integration-id" && v === "copilot-developer-cli",
+		);
+		if (isCopilotCli) {
+			const authHeader = Object.entries(init.headers).find(([k]) => k.toLowerCase() === "authorization")?.[1];
+			const token = authHeader?.replace(/^Bearer\s+/i, "");
+			const fallbackHeaders = mergeCopilotApiHeaders(init.headers, { cliDisabled: true });
+			const retryResponse = await fetchWithRetry(init.url, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...fallbackHeaders },
+				body: JSON.stringify(init.body),
+				signal: init.signal,
+				fetch: init.fetch,
+				maxAttempts: 1,
+				timeout: false,
+			});
+			if (retryResponse.ok) {
+				markCopilotCliDisabled(token);
+				response = retryResponse;
+			}
+		}
+	}
 	if (!response.ok) {
 		throw await captureOpenAIHttpError(response);
 	}

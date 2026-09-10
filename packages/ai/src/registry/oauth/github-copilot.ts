@@ -14,10 +14,12 @@
 import { scheduler } from "node:timers/promises";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
-	COPILOT_API_HEADERS,
 	discoverGitHubCopilotApiEndpoint,
 	getGitHubCopilotBaseUrl,
+	isCopilotCliDisabled,
 	isPublicGitHubHost,
+	markCopilotCliDisabled,
+	mergeCopilotApiHeaders,
 	normalizeDomain,
 	normalizeGitHubCopilotEnterpriseDomain,
 } from "@oh-my-pi/pi-catalog/wire/github-copilot";
@@ -235,6 +237,7 @@ export function refreshGitHubCopilotToken(
 	refreshToken: string,
 	enterpriseDomain?: string,
 	apiEndpoint?: string,
+	cliDisabled?: boolean,
 ): OAuthCredentials {
 	return {
 		refresh: refreshToken,
@@ -242,11 +245,17 @@ export function refreshGitHubCopilotToken(
 		expires: FAR_FUTURE_MS,
 		enterpriseUrl: enterpriseDomain,
 		apiEndpoint,
+		cliDisabled: cliDisabled ?? (isCopilotCliDisabled(refreshToken) ? true : undefined),
 	};
 }
 
 export async function refreshGitHubCopilotHook(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-	return refreshGitHubCopilotToken(credentials.refresh, credentials.enterpriseUrl, credentials.apiEndpoint);
+	return refreshGitHubCopilotToken(
+		credentials.refresh,
+		credentials.enterpriseUrl,
+		credentials.apiEndpoint,
+		credentials.cliDisabled,
+	);
 }
 
 /**
@@ -262,20 +271,41 @@ async function enableGitHubCopilotModel(
 ): Promise<boolean> {
 	const baseUrl = apiEndpoint ?? getGitHubCopilotBaseUrl(enterpriseDomain);
 	const url = `${baseUrl}/models/${modelId}/policy`;
+	const cliDisabled = isCopilotCliDisabled(token);
+	const identityHeaders = mergeCopilotApiHeaders(undefined, { cliDisabled });
 
 	try {
-		const response = await fetchImpl(url, {
+		let response = await fetchImpl(url, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
 				Authorization: `Bearer ${token}`,
-				...COPILOT_API_HEADERS,
+				...identityHeaders,
 				"Openai-Intent": "chat-policy",
 				"X-Initiator": "user",
 				"X-Interaction-Type": "chat-policy",
 			},
 			body: JSON.stringify({ state: "enabled" }),
 		});
+		if (response.status === 403 && !cliDisabled) {
+			const fallbackHeaders = mergeCopilotApiHeaders(undefined, { cliDisabled: true });
+			const retryResponse = await fetchImpl(url, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${token}`,
+					...fallbackHeaders,
+					"Openai-Intent": "chat-policy",
+					"X-Initiator": "user",
+					"X-Interaction-Type": "chat-policy",
+				},
+				body: JSON.stringify({ state: "enabled" }),
+			});
+			if (retryResponse.ok) {
+				markCopilotCliDisabled(token);
+				response = retryResponse;
+			}
+		}
 		return response.ok;
 	} catch {
 		return false;
@@ -356,6 +386,10 @@ export async function loginGitHubCopilot(options: GitHubCopilotLoginOptions): Pr
 
 	const apiEndpoint = await discoverGitHubCopilotApiEndpoint(githubAccessToken, fetchImpl);
 
+	// Enable all models after successful login
+	options.onProgress?.("Enabling models...");
+	await enableAllGitHubCopilotModels(githubAccessToken, enterpriseDomain ?? undefined, apiEndpoint, fetchImpl);
+
 	// Keep storing the GitHub token directly so credentials minted by the
 	// Copilot CLI OAuth app remain valid alongside new OpenCode app logins.
 	const credentials: OAuthCredentials = {
@@ -364,11 +398,8 @@ export async function loginGitHubCopilot(options: GitHubCopilotLoginOptions): Pr
 		expires: FAR_FUTURE_MS,
 		enterpriseUrl: enterpriseDomain ?? undefined,
 		apiEndpoint,
+		cliDisabled: isCopilotCliDisabled(githubAccessToken) ? true : undefined,
 	};
-
-	// Enable all models after successful login
-	options.onProgress?.("Enabling models...");
-	await enableAllGitHubCopilotModels(githubAccessToken, enterpriseDomain ?? undefined, apiEndpoint, fetchImpl);
 	return credentials;
 }
 

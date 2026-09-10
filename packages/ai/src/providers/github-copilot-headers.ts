@@ -1,5 +1,5 @@
 import {
-	COPILOT_CAPI_IDENTITY_HEADERS,
+	getCopilotCapiIdentityHeaders,
 	getGitHubCopilotBaseUrl,
 	parseGitHubCopilotApiKey,
 } from "@oh-my-pi/pi-catalog/wire/github-copilot";
@@ -121,11 +121,13 @@ export function buildCopilotDynamicHeaders(params: {
 	headers?: Record<string, string>;
 	initiatorOverride?: CopilotInitiator;
 	planTier?: string;
+	cliDisabled?: boolean;
 }): CopilotDynamicHeaders {
 	const initiator =
 		params.initiatorOverride ?? getCopilotInitiatorOverride(params.headers) ?? inferCopilotInitiator(params.messages);
+	const baseIdentity = getCopilotCapiIdentityHeaders({ cliDisabled: params.cliDisabled });
 	const headers: Record<string, string> = {
-		...COPILOT_CAPI_IDENTITY_HEADERS,
+		...baseIdentity,
 		"X-Initiator": initiator,
 		"X-Interaction-Type": `conversation-${initiator}`,
 	};
