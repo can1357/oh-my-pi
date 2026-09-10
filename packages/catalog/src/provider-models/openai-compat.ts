@@ -7295,3 +7295,84 @@ export function modelsDevCatalogFallback(
 		map: payload => (isRecord(payload) ? filterModelsDevCatalogRows(mapModelsDevToModels(payload, descriptors)) : []),
 	};
 }
+
+// ---------------------------------------------------------------------------
+// Command Code
+// ---------------------------------------------------------------------------
+
+/**
+ * Configuration for the Command Code Provider API model manager.
+ *
+ * `baseUrl` overrides the Provider API base path for testing; it is
+ * normalized to the shared `/provider` root (a trailing `/v1` is stripped)
+ * so Claude ids route to the Anthropic-compatible Messages endpoint at the
+ * root while every other id uses chat completions under `/v1`.
+ */
+export interface CommandCodeModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+const COMMAND_CODE_PROVIDER_BASE_PATH = "https://api.commandcode.ai/provider";
+
+function normalizeCommandCodeBasePath(baseUrl: string | undefined): string {
+	const normalized = (baseUrl ?? COMMAND_CODE_PROVIDER_BASE_PATH).trim().replace(/\/+$/, "");
+	return normalized.endsWith("/v1") ? normalized.slice(0, -3) : normalized;
+}
+
+/**
+ * Builds the Command Code model manager: a mixed-protocol OpenAI-compatible
+ * discovery client. The public `/v1/models` catalog is fetched once per
+ * options instance; `mapModel` pins each row's transport from the
+ * `api-routes` table (Claude ids to `anthropic-messages`, everything else to
+ * `openai-completions`) and seeds neutral capability defaults. Reviewed
+ * Command Code policy (effort ladders, pricing, limits, modalities) is
+ * applied later by `buildModel` from `providers/commandcode.kdl` — the
+ * mapper never inherits another provider's rates or image support.
+ */
+export function commandCodeModelManagerOptions(config?: CommandCodeModelManagerConfig): ModelManagerOptions<Api> {
+	const basePath = normalizeCommandCodeBasePath(config?.baseUrl);
+	const discoveryBaseUrl = `${basePath}/v1`;
+	return {
+		providerId: "commandcode",
+		cacheProviderId: resolveModelCacheProviderId("commandcode", {
+			apiKey: config?.apiKey,
+			baseUrl: discoveryBaseUrl,
+		}),
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () => {
+			const references = getBundledModelReferenceIndex();
+			return fetchOpenAICompatibleModels<Api>({
+				api: "openai-completions",
+				provider: "commandcode",
+				baseUrl: discoveryBaseUrl,
+				// The catalog endpoint is public, but forward the key when the
+				// caller has one so entitled rows resolve identically to
+				// inference. The helper only sends Authorization when set.
+				apiKey: config?.apiKey,
+				mapModel: (entry, defaults) => {
+					const route = apiRouteFor("commandcode", defaults.id);
+					const api = route?.api === "anthropic-messages" ? route.api : "openai-completions";
+					const reference = resolveModelReference(defaults.id, references);
+					return {
+						...defaults,
+						name: toModelName(entry.name, reference?.name ?? defaults.name),
+						api,
+						baseUrl: api === "anthropic-messages" ? basePath : discoveryBaseUrl,
+						reasoning: reference?.reasoning ?? defaults.reasoning,
+						// Keep the discovery default (`["text"]`): the catalog
+						// row carries no modality metadata and a bundled
+						// reference from another host must not advertise image
+						// support for this deployment. Verified image routes
+						// opt back in via `input-modalities` in KDL.
+						input: defaults.input,
+						contextWindow: toPositiveNumber(entry.context_length, reference?.contextWindow ?? null),
+						maxTokens: null,
+					};
+				},
+				fetch: config?.fetch,
+			});
+		},
+	};
+}
