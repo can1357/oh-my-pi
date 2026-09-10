@@ -49,6 +49,7 @@ import { decideAttempt, type ExecutionState } from "./route-conductor";
 import { type CompiledRoute, type RouteDefinition, RouteRegistry } from "./route-graph";
 import {
 	commitGateObservesDownstreamSse,
+	holdSseUntilCommitOutcome,
 	observeSseCommit,
 	StreamCommitGate,
 	type StreamCommitState,
@@ -358,10 +359,44 @@ function clientClosedResponse(route: { module: FormatModule }): Response {
 
 type FormatErrorFn = (status: number, type: string, message: string) => Response;
 
-type AttemptPrep = { type: "key"; apiKey: string } | { type: "retry" } | { type: "respond"; response: Response };
+type AttemptPrep =
+	| { type: "key"; apiKey: string }
+	| { type: "retry" }
+	| { type: "skip" }
+	| { type: "respond"; response: Response };
 
 function unknownModelResponse(formatError: FormatErrorFn, modelId: string): Response {
 	return formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
+}
+
+function unavailableModel(target: string): GatewayErrorClassification {
+	return {
+		status: 404,
+		type: "invalid_request_error",
+		message: `Unknown model: ${target}`,
+		owner: "model",
+		disposition: "model_unavailable",
+	};
+}
+
+function initialAvailableTarget(
+	compiled: CompiledRoute,
+	resolve: (id: string) => Model<Api> | undefined,
+	attempted: Set<string>,
+): { target: string; model: Model<Api> } | undefined {
+	let target: string | undefined = compiled.targets[0];
+	while (target !== undefined) {
+		const model = resolve(target);
+		if (model) return { target, model };
+		attempted.add(target);
+		target = fallbackTargetId(
+			compiled,
+			conductorExecutionState(compiled, attempted, 0, 0, target, "probing"),
+			unavailableModel(target),
+			"probing",
+		);
+	}
+	return undefined;
 }
 
 function conductorExecutionState(
@@ -432,14 +467,6 @@ function messageHasBillableUsage(message: AssistantMessage): boolean {
 	return usage.input + usage.output + usage.cacheRead + usage.cacheWrite > 0;
 }
 
-const STREAM_PRELUDE_MAX_BYTES = 4 * 1024 * 1024;
-
-type SseRead = { done: boolean; value?: Uint8Array };
-
-type HeldSse =
-	| { type: "forward"; stream: ReadableStream<Uint8Array> }
-	| { type: "failed"; error: unknown; message?: AssistantMessage };
-
 function attachCommitGateSseObserver(
 	streamOpts: SimpleStreamOptions,
 	commitGate: StreamCommitGate,
@@ -462,116 +489,6 @@ function attachCommitGateSseObserver(
 		}
 		previousSse?.(event, sseModel);
 	};
-}
-
-function concatSsePrelude(
-	prelude: Uint8Array[],
-	reader: { read(): Promise<SseRead>; cancel(reason?: unknown): Promise<void> },
-	pending: Promise<SseRead> | undefined,
-): ReadableStream<Uint8Array> {
-	let pendingRead = pending;
-	let preludeOffset = 0;
-	return new ReadableStream({
-		async pull(controller) {
-			if (preludeOffset < prelude.length) {
-				const chunk = prelude[preludeOffset];
-				preludeOffset += 1;
-				if (chunk) controller.enqueue(chunk);
-				return;
-			}
-			const read = pendingRead ?? reader.read();
-			pendingRead = undefined;
-			const { done, value } = await read;
-			if (done || value === undefined) {
-				controller.close();
-				return;
-			}
-			controller.enqueue(value);
-		},
-		cancel(reason) {
-			return reader.cancel(reason);
-		},
-	});
-}
-
-/**
- * Buffer encoded SSE until the commit gate leaves probing or the upstream
- * attempt settles. Callers must not return HTTP 200 while still probing.
- */
-async function holdSseUntilCommit(
-	sseStream: ReadableStream<Uint8Array>,
-	gate: StreamCommitGate,
-	settled: Promise<AssistantMessage>,
-	commitOnFirstEncodedByte = false,
-): Promise<HeldSse> {
-	const reader = sseStream.getReader();
-	const prelude: Uint8Array[] = [];
-	let preludeBytes = 0;
-	let pendingRead: Promise<SseRead> | undefined;
-	let settleOutcome: { ok: true; message: AssistantMessage } | { ok: false; error: unknown } | undefined;
-	const watchSettled = settled.then(
-		message => {
-			settleOutcome = { ok: true, message };
-		},
-		(error: unknown) => {
-			settleOutcome = { ok: false, error };
-		},
-	);
-
-	const forward = (): HeldSse => ({
-		type: "forward",
-		stream: concatSsePrelude(prelude, reader, pendingRead),
-	});
-
-	const failedFromOutcome = (): HeldSse => {
-		if (!settleOutcome) return { type: "failed", error: "Upstream request failed" };
-		if (!settleOutcome.ok) return { type: "failed", error: settleOutcome.error };
-		return {
-			type: "failed",
-			error: settleOutcome.message.errorMessage ?? settleOutcome.message,
-			message: settleOutcome.message,
-		};
-	};
-
-	try {
-		while (true) {
-			if (gate.state === "committed") return forward();
-			if (preludeBytes >= STREAM_PRELUDE_MAX_BYTES) {
-				if (gate.state === "probing") gate.classifyAndObserve("", STREAM_PRELUDE_MAX_BYTES);
-				return forward();
-			}
-			if (settleOutcome) {
-				if (!settleOutcome.ok) return failedFromOutcome();
-				const reason = settleOutcome.message.stopReason;
-				if (reason === "error" || reason === "aborted") return failedFromOutcome();
-				// Transports that never feed onSseEvent (Bedrock/Ollama/…) stay probing;
-				// mark committed so releaseTurnOnStreamEnd can settle the quota probe.
-				if (gate.state === "probing") gate.classifyAndObserve("", STREAM_PRELUDE_MAX_BYTES);
-				return forward();
-			}
-			pendingRead ??= reader.read();
-			const raced = await Promise.race([
-				pendingRead.then(r => ({ source: "read" as const, r })),
-				watchSettled.then(() => ({ source: "settled" as const })),
-			]);
-			if (raced.source === "settled") continue;
-			pendingRead = undefined;
-			const { done, value } = raced.r;
-			if (done || value === undefined) {
-				await watchSettled;
-				continue;
-			}
-			prelude.push(value);
-			preludeBytes += value.byteLength;
-			// Providers that never invoke onSseEvent leave the gate probing; commit on
-			// the first encoded body byte so clients stream instead of buffering to settle.
-			if (commitOnFirstEncodedByte && gate.state === "probing") {
-				gate.classifyAndObserve("response.output_text.delta", value.byteLength);
-			}
-		}
-	} catch (error) {
-		return { type: "failed", error };
-	}
 }
 
 function mirrorRequestAbort(req: Request): AbortController {
@@ -672,16 +589,13 @@ async function handleFormatEndpoint(
 	if (!compiled) {
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
-	const firstTarget = compiled.targets[0];
-	if (firstTarget === undefined) {
+	const attemptedTargets = new Set<string>();
+	const initial = initialAvailableTarget(compiled, bootOpts.resolveModel, attemptedTargets);
+	if (!initial) {
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
-	let currentTarget = firstTarget;
-	const initialModel = bootOpts.resolveModel(currentTarget);
-	if (!initialModel) {
-		return unknownModelResponse(route.module.formatError, currentTarget);
-	}
-	let model: Model<Api> = initialModel;
+	let currentTarget = initial.target;
+	let model: Model<Api> = initial.model;
 	const client = resolveClientIdentity(req.headers);
 
 	// Parse the wire-format request BEFORE resolving the credential so we
@@ -707,7 +621,6 @@ async function handleFormatEndpoint(
 		parsed.options.headers = { ...captured, ...parsed.options.headers };
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
-
 
 	const supportsOpenAIImageFileReferences =
 		model.api === "openai-responses" ||
@@ -741,11 +654,11 @@ async function handleFormatEndpoint(
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	const commitGate = new StreamCommitGate();
 	const formatError = route.module.formatError;
-	const attemptedTargets = new Set<string>();
 	let retryCount = 0;
 	let fallbackCount = 0;
 	let pendingFallback: string | undefined;
 	let lastClassified: GatewayErrorClassification | undefined;
+	let lastEligibilityResponse: Response | undefined;
 	const attemptCap = compiled.targets.length + 1;
 
 	const stateNow = (): ExecutionState =>
@@ -770,13 +683,18 @@ async function handleFormatEndpoint(
 		return true;
 	};
 
-	const bindCurrentTarget = (targetId: string): Response | undefined => {
+	const bindCurrentTarget = (targetId: string): Response | "skip" | undefined => {
 		currentTarget = targetId;
 		const resolved = bootOpts.resolveModel(currentTarget);
 		if (!resolved) {
-			return lastClassified
-				? classifiedError(lastClassified)
-				: formatError(502, "upstream_error", "Upstream request failed");
+			lastEligibilityResponse = unknownModelResponse(formatError, currentTarget);
+			attemptedTargets.add(currentTarget);
+			const unavailable = unavailableModel(currentTarget);
+			const priorFailure = lastClassified;
+			const canContinue = considerFallback(unavailable);
+			lastClassified = priorFailure ?? unavailable;
+			if (canContinue) return "skip";
+			return priorFailure ? classifiedError(priorFailure) : lastEligibilityResponse;
 		}
 		model = resolved;
 		if (targetRejectsOpenAIImageFileReferences(route.label, model, parsed.context.messages)) {
@@ -791,17 +709,23 @@ async function handleFormatEndpoint(
 	};
 
 	const pickTarget = (): Response | undefined => {
-		if (pendingFallback !== undefined) {
-			const targetId = pendingFallback;
-			pendingFallback = undefined;
-			return bindCurrentTarget(targetId);
+		for (;;) {
+			if (pendingFallback !== undefined) {
+				const targetId = pendingFallback;
+				pendingFallback = undefined;
+				const bound = bindCurrentTarget(targetId);
+				if (bound === "skip") continue;
+				return bound;
+			}
+			const targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
+			if (targetId === undefined) {
+				if (lastClassified) return classifiedError(lastClassified);
+				return lastEligibilityResponse ?? unknownModelResponse(formatError, modelId);
+			}
+			const bound = bindCurrentTarget(targetId);
+			if (bound === "skip") continue;
+			return bound;
 		}
-		const targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
-		if (targetId === undefined) {
-			if (lastClassified) return classifiedError(lastClassified);
-			return unknownModelResponse(formatError, modelId);
-		}
-		return bindCurrentTarget(targetId);
 	};
 
 	const resolveCredential = async (): Promise<AttemptPrep> => {
@@ -830,14 +754,20 @@ async function handleFormatEndpoint(
 				reason: "credential_unavailable",
 			});
 			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
-			return {
-				type: "respond",
-				response: formatError(
-					401,
-					"authentication_error",
-					`No credential available for provider ${model.provider}`,
-				),
+			lastEligibilityResponse = formatError(
+				401,
+				"authentication_error",
+				`No credential available for provider ${model.provider}`,
+			);
+			const unavailable: GatewayErrorClassification = {
+				status: 401,
+				type: "authentication_error",
+				message: `No credential available for provider ${model.provider}`,
+				owner: "credential",
+				disposition: "provider_unavailable",
 			};
+			if (considerFallback(unavailable)) return { type: "retry" };
+			return { type: "respond", response: lastEligibilityResponse };
 		}
 		const dispatched = traces.record({
 			requestId,
@@ -881,6 +811,10 @@ async function handleFormatEndpoint(
 				if (picked) return picked;
 				const cred = await resolveCredential();
 				if (cred.type === "retry") {
+					bootOpts.storage.releaseTurnReservation(requestId);
+					continue;
+				}
+				if (cred.type === "skip") {
 					bootOpts.storage.releaseTurnReservation(requestId);
 					continue;
 				}
@@ -943,7 +877,7 @@ async function handleFormatEndpoint(
 				}
 			}
 			if (lastClassified) return classifiedError(lastClassified);
-			return formatError(502, "upstream_error", "Upstream request failed");
+			return lastEligibilityResponse ?? formatError(502, "upstream_error", "Upstream request failed");
 		} finally {
 			bootOpts.storage.releaseTurnReservation(requestId);
 		}
@@ -962,6 +896,10 @@ async function handleFormatEndpoint(
 		}
 		const cred = await resolveCredential();
 		if (cred.type === "retry") {
+			bootOpts.storage.releaseTurnReservation(requestId);
+			continue;
+		}
+		if (cred.type === "skip") {
 			bootOpts.storage.releaseTurnReservation(requestId);
 			continue;
 		}
@@ -1005,7 +943,7 @@ async function handleFormatEndpoint(
 		if (route.label === "openai-responses") {
 			sseStream = observeSseCommit(sseStream, commitGate);
 		}
-		const held = await holdSseUntilCommit(sseStream, commitGate, settled, route.label !== "openai-responses");
+		const held = await holdSseUntilCommitOutcome(sseStream, commitGate, settled, route.label !== "openai-responses");
 		if (held.type === "failed") {
 			if (held.message && messageHasBillableUsage(held.message)) {
 				const errorMessage =
@@ -1055,7 +993,7 @@ async function handleFormatEndpoint(
 	}
 	bootOpts.storage.releaseTurnReservation(requestId);
 	if (lastClassified) return classifiedError(lastClassified);
-	return formatError(502, "upstream_error", "Upstream request failed");
+	return lastEligibilityResponse ?? formatError(502, "upstream_error", "Upstream request failed");
 }
 
 /**
@@ -1101,16 +1039,13 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	if (!compiled) {
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
-	const firstTarget = compiled.targets[0];
-	if (firstTarget === undefined) {
+	const attemptedTargets = new Set<string>();
+	const initial = initialAvailableTarget(compiled, bootOpts.resolveModel, attemptedTargets);
+	if (!initial) {
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
-	let currentTarget = firstTarget;
-	const initialModel = bootOpts.resolveModel(currentTarget);
-	if (!initialModel) {
-		return unknownModelResponse(piNative.formatError, currentTarget);
-	}
-	let model: Model<Api> = initialModel;
+	let currentTarget = initial.target;
+	let model: Model<Api> = initial.model;
 	const client = resolveClientIdentity(req.headers);
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
 	// client); fall back to the derived key so credential-stickiness lines
@@ -1123,11 +1058,11 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	const commitGate = new StreamCommitGate();
 	const formatError = piNative.formatError;
-	const attemptedTargets = new Set<string>();
 	let retryCount = 0;
 	let fallbackCount = 0;
 	let pendingFallback: string | undefined;
 	let lastClassified: GatewayErrorClassification | undefined;
+	let lastEligibilityResponse: Response | undefined;
 	const attemptCap = compiled.targets.length + 1;
 
 	const stateNow = (): ExecutionState =>
@@ -1152,13 +1087,18 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		return true;
 	};
 
-	const bindCurrentTarget = (targetId: string): Response | undefined => {
+	const bindCurrentTarget = (targetId: string): Response | "skip" | undefined => {
 		currentTarget = targetId;
 		const resolved = bootOpts.resolveModel(currentTarget);
 		if (!resolved) {
-			return lastClassified
-				? classifiedError(lastClassified)
-				: formatError(502, "upstream_error", "Upstream request failed");
+			lastEligibilityResponse = unknownModelResponse(formatError, currentTarget);
+			attemptedTargets.add(currentTarget);
+			const unavailable = unavailableModel(currentTarget);
+			const priorFailure = lastClassified;
+			const canContinue = considerFallback(unavailable);
+			lastClassified = priorFailure ?? unavailable;
+			if (canContinue) return "skip";
+			return priorFailure ? classifiedError(priorFailure) : lastEligibilityResponse;
 		}
 		model = resolved;
 		if (targetRejectsOpenAIImageFileReferences("pi-native", model, parsed.context.messages)) {
@@ -1173,17 +1113,23 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	};
 
 	const pickTarget = (): Response | undefined => {
-		if (pendingFallback !== undefined) {
-			const targetId = pendingFallback;
-			pendingFallback = undefined;
-			return bindCurrentTarget(targetId);
+		for (;;) {
+			if (pendingFallback !== undefined) {
+				const targetId = pendingFallback;
+				pendingFallback = undefined;
+				const bound = bindCurrentTarget(targetId);
+				if (bound === "skip") continue;
+				return bound;
+			}
+			const targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
+			if (targetId === undefined) {
+				if (lastClassified) return classifiedError(lastClassified);
+				return lastEligibilityResponse ?? unknownModelResponse(formatError, parsed.modelId);
+			}
+			const bound = bindCurrentTarget(targetId);
+			if (bound === "skip") continue;
+			return bound;
 		}
-		const targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
-		if (targetId === undefined) {
-			if (lastClassified) return classifiedError(lastClassified);
-			return unknownModelResponse(formatError, parsed.modelId);
-		}
-		return bindCurrentTarget(targetId);
 	};
 
 	const resolveCredential = async (): Promise<AttemptPrep> => {
@@ -1212,14 +1158,20 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				reason: "credential_unavailable",
 			});
 			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
-			return {
-				type: "respond",
-				response: formatError(
-					401,
-					"authentication_error",
-					`No credential available for provider ${model.provider}`,
-				),
+			lastEligibilityResponse = formatError(
+				401,
+				"authentication_error",
+				`No credential available for provider ${model.provider}`,
+			);
+			const unavailable: GatewayErrorClassification = {
+				status: 401,
+				type: "authentication_error",
+				message: `No credential available for provider ${model.provider}`,
+				owner: "credential",
+				disposition: "provider_unavailable",
 			};
+			if (considerFallback(unavailable)) return { type: "retry" };
+			return { type: "respond", response: lastEligibilityResponse };
 		}
 		const dispatched = traces.record({
 			requestId,
@@ -1281,6 +1233,10 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 					bootOpts.storage.releaseTurnReservation(requestId);
 					continue;
 				}
+				if (cred.type === "skip") {
+					bootOpts.storage.releaseTurnReservation(requestId);
+					continue;
+				}
 				if (cred.type === "respond") return cred.response;
 				const streamOpts = buildAttemptStreamOpts(cred.apiKey);
 				logger.info("auth-gateway request", {
@@ -1336,7 +1292,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				}
 			}
 			if (lastClassified) return classifiedError(lastClassified);
-			return formatError(502, "upstream_error", "Upstream request failed");
+			return lastEligibilityResponse ?? formatError(502, "upstream_error", "Upstream request failed");
 		} finally {
 			bootOpts.storage.releaseTurnReservation(requestId);
 		}
@@ -1355,6 +1311,10 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		}
 		const cred = await resolveCredential();
 		if (cred.type === "retry") {
+			bootOpts.storage.releaseTurnReservation(requestId);
+			continue;
+		}
+		if (cred.type === "skip") {
 			bootOpts.storage.releaseTurnReservation(requestId);
 			continue;
 		}
@@ -1395,7 +1355,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				}
 			},
 		});
-		const held = await holdSseUntilCommit(sseStream, commitGate, settled, true);
+		const held = await holdSseUntilCommitOutcome(sseStream, commitGate, settled, true);
 		if (held.type === "failed") {
 			if (held.message && messageHasBillableUsage(held.message)) {
 				const errorMessage =
@@ -1442,7 +1402,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	}
 	bootOpts.storage.releaseTurnReservation(requestId);
 	if (lastClassified) return classifiedError(lastClassified);
-	return formatError(502, "upstream_error", "Upstream request failed");
+	return lastEligibilityResponse ?? formatError(502, "upstream_error", "Upstream request failed");
 }
 
 /**
