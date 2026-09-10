@@ -52,7 +52,8 @@ function isKnownProvider(provider: string): provider is KnownProvider {
 }
 
 /**
- * Pick the first provider-default model in availability order.
+ * Pick the first per-provider default in availability order. Authenticated
+ * catalog defaults and static descriptor defaults share that ordering.
  *
  * When `hasConcreteCredential` is supplied and at least one available model
  * belongs to a provider with a concrete credential, the candidate pool is
@@ -85,10 +86,28 @@ export function pickDefaultAvailableModel(
 					});
 					return concrete.length > 0 ? concrete : availableModels;
 				})();
-	const firstDefault = models.find(
-		model => isKnownProvider(model.provider) && DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id,
-	);
+	const defaultByProvider = new Map<string, Model<Api> | undefined>();
+	for (const model of models) {
+		if (!defaultByProvider.has(model.provider)) defaultByProvider.set(model.provider, undefined);
+		const current = defaultByProvider.get(model.provider);
+		if (model.isProviderDefault === true) {
+			if (current?.isProviderDefault !== true) defaultByProvider.set(model.provider, model);
+		} else if (
+			current === undefined &&
+			isKnownProvider(model.provider) &&
+			DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id
+		) {
+			defaultByProvider.set(model.provider, model);
+		}
+	}
+	let firstDefault: Model<Api> | undefined;
+	for (const candidate of defaultByProvider.values()) {
+		if (!candidate) continue;
+		firstDefault = candidate;
+		break;
+	}
 	if (!firstDefault) return models[0];
+	if (firstDefault.isProviderDefault === true) return firstDefault;
 
 	const providerPriority = buildModelProviderPriorityRank();
 	const sharedDefaultMatches = models.filter(

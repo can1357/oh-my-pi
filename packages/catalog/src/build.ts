@@ -57,6 +57,15 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (editPromptVariant === "full" || editPromptVariant === "compact") {
 		model.editPromptVariant = editPromptVariant;
 	}
+	const pricingStatus = catalog.pricingStatus;
+	if (
+		pricingStatus === "free" ||
+		pricingStatus === "included" ||
+		pricingStatus === "variable" ||
+		pricingStatus === "unknown"
+	) {
+		model.pricingStatus = pricingStatus;
+	}
 	const requiresCursorToolSchemaProjection = catalog.requiresCursorToolSchemaProjection;
 	if (requiresCursorToolSchemaProjection === true) {
 		model.requiresCursorToolSchemaProjection = true;

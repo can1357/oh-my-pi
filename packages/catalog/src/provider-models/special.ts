@@ -109,6 +109,25 @@ function unionCodexModels(
 // Cursor
 // ---------------------------------------------------------------------------
 
+/**
+ * Minimal synchronous Cursor seed. Authenticated runtime discovery replaces
+ * this credential-agnostic fallback with the account's authoritative catalog.
+ */
+export const CURSOR_STATIC_MODELS: readonly ModelSpec<"cursor-agent">[] = [
+	{
+		id: "claude-4.6-opus-high",
+		name: "Claude Opus 4.6 1M",
+		api: "cursor-agent",
+		provider: "cursor",
+		baseUrl: "https://api2.cursor.sh",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 64_000,
+	},
+];
+
 export interface CursorModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
@@ -119,7 +138,8 @@ export function cursorModelManagerOptions(config: CursorModelManagerConfig = {})
 	const { apiKey, baseUrl, clientVersion } = config;
 	return {
 		providerId: "cursor",
-		cacheProviderId: resolveModelCacheProviderId("cursor"),
+		dynamicModelsAuthoritative: true,
+		cacheProviderId: resolveModelCacheProviderId("cursor", { apiKey, baseUrl }),
 		...(apiKey
 			? {
 					fetchDynamicModels: async () => {

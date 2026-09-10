@@ -845,6 +845,9 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 			contextWindow: maxOrNull(memberSpecs.map(spec => spec.contextWindow)),
 			maxTokens: maxOrNull(memberSpecs.map(spec => spec.maxTokens)),
 		};
+		if (memberSpecs.some(spec => spec.isProviderDefault === true)) {
+			collapsed.isProviderDefault = true;
+		}
 		// The default wire id is the family's declared `defaultMember` when live,
 		// else the highest-priority live member. Omitted when it equals the
 		// logical id (bare/thinking pairs) — `resolveWireModelId` falls back.

@@ -22,11 +22,80 @@ export enum ConversationSearchSource {
 	CLOUD_CACHE = 2,
 }
 
+/** Cursor agent enum CursorError. */
+export enum CursorError {
+	ERROR_UNSPECIFIED = 0,
+	ERROR_BAD_API_KEY = 1,
+	ERROR_NOT_LOGGED_IN = 2,
+	ERROR_INVALID_AUTH_ID = 3,
+	ERROR_NOT_HIGH_ENOUGH_PERMISSIONS = 4,
+	ERROR_BAD_MODEL_NAME = 5,
+	ERROR_USER_NOT_FOUND = 6,
+	ERROR_FREE_USER_RATE_LIMIT_EXCEEDED = 7,
+	ERROR_PRO_USER_RATE_LIMIT_EXCEEDED = 8,
+	ERROR_FREE_USER_USAGE_LIMIT = 9,
+	ERROR_PRO_USER_USAGE_LIMIT = 10,
+	ERROR_AUTH_TOKEN_NOT_FOUND = 11,
+	ERROR_AUTH_TOKEN_EXPIRED = 12,
+	ERROR_OPENAI = 13,
+	ERROR_OPENAI_RATE_LIMIT_EXCEEDED = 14,
+	ERROR_AGENT_REQUIRES_LOGIN = 18,
+	ERROR_MAX_TOKENS = 20,
+	ERROR_USER_ABORTED_REQUEST = 21,
+	ERROR_GENERIC_RATE_LIMIT_EXCEEDED = 22,
+	ERROR_PRO_USER_ONLY = 23,
+	ERROR_TIMEOUT = 25,
+	ERROR_GPT_4_VISION_PREVIEW_RATE_LIMIT = 28,
+	ERROR_CUSTOM_MESSAGE = 29,
+	ERROR_OUTDATED_CLIENT = 30,
+	ERROR_CLAUDE_IMAGE_TOO_LARGE = 31,
+	ERROR_FILE_NOT_FOUND = 33,
+	ERROR_API_KEY_RATE_LIMIT = 34,
+	ERROR_DEBOUNCED = 35,
+	ERROR_BAD_REQUEST = 36,
+	ERROR_REPOSITORY_SERVICE_REPOSITORY_IS_NOT_INITIALIZED = 37,
+	ERROR_UNAUTHORIZED = 38,
+	ERROR_NOT_FOUND = 39,
+	ERROR_DEPRECATED = 40,
+	ERROR_RESOURCE_EXHAUSTED = 41,
+	ERROR_BAD_USER_API_KEY = 42,
+	ERROR_CONVERSATION_TOO_LONG = 43,
+	ERROR_USAGE_PRICING_REQUIRED = 44,
+	ERROR_USAGE_PRICING_REQUIRED_CHANGEABLE = 45,
+	ERROR_GITHUB_NO_USER_CREDENTIALS = 46,
+	ERROR_GITHUB_USER_NO_ACCESS = 47,
+	ERROR_GITHUB_APP_NO_ACCESS = 48,
+	ERROR_GITHUB_MULTIPLE_OWNERS = 49,
+	ERROR_RATE_LIMITED = 50,
+	ERROR_RATE_LIMITED_CHANGEABLE = 51,
+	ERROR_CUSTOM = 52,
+	ERROR_HOOKS_BLOCKED = 53,
+	ERROR_SUSPICIOUS_USAGE_BLOCKED = 54,
+	ERROR_EXTENSION_HOST_TIMEOUT = 55,
+	ERROR_NETWORK_ERROR = 56,
+	ERROR_PROVIDER_ERROR = 57,
+	ERROR_MODEL_BLOCKED = 58,
+	ERROR_INTERNAL = 59,
+	ERROR_MAX_MODE_REQUIRED = 60,
+	ERROR_MODEL_NO_LONGER_SUPPORTED = 61,
+	ERROR_PRICING_WARNING = 62,
+	ERROR_SLOW_POOL = 63,
+	ERROR_UNSUPPORTED_REGION = 64,
+	ERROR_ACCOUNT_CLOSED = 65,
+}
+
 /** Cursor agent enum CursorRuleSource. */
 export enum CursorRuleSource {
 	UNSPECIFIED = 0,
 	TEAM = 1,
 	USER = 2,
+}
+
+/** Cursor agent enum DegradationStatus. */
+export enum DegradationStatus {
+	UNSPECIFIED = 0,
+	DEGRADED = 1,
+	DISABLED = 2,
 }
 
 /** Cursor agent enum DiagnosticSeverity. */
@@ -66,6 +135,20 @@ export enum GitDiff_DiffType {
 	UNSPECIFIED = 0,
 	DIFF_TO_HEAD = 1,
 	DIFF_FROM_BRANCH_TO_MAIN = 2,
+}
+
+/** Cursor agent enum ModelVendorId. */
+export enum ModelVendorId {
+	UNSPECIFIED = 0,
+	ANTHROPIC = 1,
+	OPENAI = 2,
+	GOOGLE = 3,
+	XAI = 4,
+	MOONSHOT = 5,
+	CURSOR = 6,
+	NVIDIA = 7,
+	ZAI = 8,
+	META = 9,
 }
 
 /** Cursor agent enum ShellBackgroundReason. */
@@ -567,6 +650,229 @@ export const AsyncAskQuestionCompletionActionSchema: MessageCodec<AsyncAskQuesti
 	{ no: 3, name: "result", kind: "message", T: () => AskQuestionResultSchema },
 ]);
 
+/** Cursor agent message aiserver.v1.AvailableModelsRequest. */
+export interface AvailableModelsRequest extends ProtoMessage {
+	isNightly: boolean;
+	includeLongContextModels: boolean;
+	excludeMaxNamedModels: boolean;
+	additionalModelNames: string[];
+	useModelParameters?: boolean;
+	includeHiddenModels?: boolean;
+	doNotUseMarkdown?: boolean;
+	variantsWillBeShownInExplodedList?: boolean;
+	forAutomations?: boolean;
+	scope?: number;
+	useReactModelPicker?: boolean;
+	useCloudAgentEffortModes?: boolean;
+	adminSettingsGroupPublicId?: string;
+	byokEnabled?: boolean;
+}
+
+export const AvailableModelsRequestSchema: MessageCodec<AvailableModelsRequest> = pb<AvailableModelsRequest>("aiserver.v1.AvailableModelsRequest", [
+	{ no: 1, name: "isNightly", kind: "bool" },
+	{ no: 2, name: "includeLongContextModels", kind: "bool" },
+	{ no: 3, name: "excludeMaxNamedModels", kind: "bool" },
+	{ no: 4, name: "additionalModelNames", kind: "string", repeat: true },
+	{ no: 5, name: "useModelParameters", kind: "bool", optional: true },
+	{ no: 6, name: "includeHiddenModels", kind: "bool", optional: true },
+	{ no: 7, name: "doNotUseMarkdown", kind: "bool", optional: true },
+	{ no: 8, name: "variantsWillBeShownInExplodedList", kind: "bool", optional: true },
+	{ no: 9, name: "forAutomations", kind: "bool", optional: true },
+	{ no: 10, name: "scope", kind: "int32", optional: true },
+	{ no: 11, name: "useReactModelPicker", kind: "bool", optional: true },
+	{ no: 12, name: "useCloudAgentEffortModes", kind: "bool", optional: true },
+	{ no: 13, name: "adminSettingsGroupPublicId", kind: "string", optional: true },
+	{ no: 14, name: "byokEnabled", kind: "bool", optional: true },
+]);
+
+/** Cursor agent message aiserver.v1.AvailableModelsResponse. */
+export interface AvailableModelsResponse extends ProtoMessage {
+	modelNames: string[];
+	models: AvailableModelsResponse_ModelDetails[];
+	useModelParameters: boolean;
+}
+
+export const AvailableModelsResponseSchema: MessageCodec<AvailableModelsResponse> = pb<AvailableModelsResponse>("aiserver.v1.AvailableModelsResponse", [
+	{ no: 1, name: "modelNames", kind: "string", repeat: true },
+	{ no: 2, name: "models", kind: "message", T: () => AvailableModelsResponse_ModelDetailsSchema, repeat: true },
+	{ no: 11, name: "useModelParameters", kind: "bool" },
+]);
+
+/** Cursor agent message aiserver.v1.AvailableModelsResponse_ConfirmationDialogue. */
+export interface AvailableModelsResponse_ConfirmationDialogue extends ProtoMessage {
+	title: string;
+	body: string;
+	key: string;
+	blocksSubmission: boolean;
+}
+
+export const AvailableModelsResponse_ConfirmationDialogueSchema: MessageCodec<AvailableModelsResponse_ConfirmationDialogue> = pb<AvailableModelsResponse_ConfirmationDialogue>("aiserver.v1.AvailableModelsResponse_ConfirmationDialogue", [
+	{ no: 1, name: "title", kind: "string" },
+	{ no: 2, name: "body", kind: "string" },
+	{ no: 3, name: "key", kind: "string" },
+	{ no: 4, name: "blocksSubmission", kind: "bool" },
+]);
+
+/** Cursor agent message aiserver.v1.AvailableModelsResponse_ModelDetails. */
+export interface AvailableModelsResponse_ModelDetails extends ProtoMessage {
+	name: string;
+	defaultOn: boolean;
+	isLongContextOnly?: boolean;
+	isChatOnly?: boolean;
+	supportsAgent?: boolean;
+	degradationStatus?: DegradationStatus;
+	price?: number;
+	tooltipData?: AvailableModelsResponse_TooltipData;
+	supportsThinking?: boolean;
+	supportsImages?: boolean;
+	supportsAutoContext?: boolean;
+	autoContextMaxTokens?: number;
+	autoContextExtendedMaxTokens?: number;
+	supportsMaxMode?: boolean;
+	contextTokenLimit?: number;
+	contextTokenLimitForMaxMode?: number;
+	clientDisplayName?: string;
+	serverModelName?: string;
+	supportsNonMaxMode?: boolean;
+	tooltipDataForMaxMode?: AvailableModelsResponse_TooltipData;
+	isRecommendedForBackgroundComposer?: boolean;
+	supportsPlanMode?: boolean;
+	isUserAdded?: boolean;
+	inputboxShortModelName?: string;
+	supportsSandboxing?: boolean;
+	supportsCmdK?: boolean;
+	onlySupportsCmdK?: boolean;
+	backgroundComposerSortOrder?: number;
+	parameterDefinitions: ModelParameterDefinition[];
+	variants: AvailableModelsResponse_ModelVariantConfig[];
+	cloudAgentEffortMode?: number;
+	cloudMigrateToModel?: string;
+	upgradeModelId?: string;
+	isHidden?: boolean;
+	legacySlugs: string[];
+	idAliases: string[];
+	namedModelSectionIndex?: number;
+	tagline?: string;
+	visibleInRoutedModelView?: boolean;
+	vendorName?: string;
+	vendor?: AvailableModelsResponse_ModelVendor;
+	defaultDisabledInAdminAllowlist?: boolean;
+	cloudAgentEffortModes: number[];
+	supportsSmartModeClassifier?: boolean;
+	requiresDataRetention?: boolean;
+	reasonForZdrConsentBlock?: string;
+}
+
+export const AvailableModelsResponse_ModelDetailsSchema: MessageCodec<AvailableModelsResponse_ModelDetails> = pb<AvailableModelsResponse_ModelDetails>("aiserver.v1.AvailableModelsResponse_ModelDetails", [
+	{ no: 1, name: "name", kind: "string" },
+	{ no: 2, name: "defaultOn", kind: "bool" },
+	{ no: 3, name: "isLongContextOnly", kind: "bool", optional: true },
+	{ no: 4, name: "isChatOnly", kind: "bool", optional: true },
+	{ no: 5, name: "supportsAgent", kind: "bool", optional: true },
+	{ no: 6, name: "degradationStatus", kind: "enum", optional: true },
+	{ no: 7, name: "price", kind: "double", optional: true },
+	{ no: 8, name: "tooltipData", kind: "message", T: () => AvailableModelsResponse_TooltipDataSchema },
+	{ no: 9, name: "supportsThinking", kind: "bool", optional: true },
+	{ no: 10, name: "supportsImages", kind: "bool", optional: true },
+	{ no: 11, name: "supportsAutoContext", kind: "bool", optional: true },
+	{ no: 12, name: "autoContextMaxTokens", kind: "uint32", optional: true },
+	{ no: 13, name: "autoContextExtendedMaxTokens", kind: "uint32", optional: true },
+	{ no: 14, name: "supportsMaxMode", kind: "bool", optional: true },
+	{ no: 15, name: "contextTokenLimit", kind: "uint32", optional: true },
+	{ no: 16, name: "contextTokenLimitForMaxMode", kind: "uint32", optional: true },
+	{ no: 17, name: "clientDisplayName", kind: "string", optional: true },
+	{ no: 18, name: "serverModelName", kind: "string", optional: true },
+	{ no: 19, name: "supportsNonMaxMode", kind: "bool", optional: true },
+	{ no: 20, name: "tooltipDataForMaxMode", kind: "message", T: () => AvailableModelsResponse_TooltipDataSchema },
+	{ no: 21, name: "isRecommendedForBackgroundComposer", kind: "bool", optional: true },
+	{ no: 22, name: "supportsPlanMode", kind: "bool", optional: true },
+	{ no: 23, name: "isUserAdded", kind: "bool", optional: true },
+	{ no: 24, name: "inputboxShortModelName", kind: "string", optional: true },
+	{ no: 25, name: "supportsSandboxing", kind: "bool", optional: true },
+	{ no: 26, name: "supportsCmdK", kind: "bool", optional: true },
+	{ no: 27, name: "onlySupportsCmdK", kind: "bool", optional: true },
+	{ no: 28, name: "backgroundComposerSortOrder", kind: "uint32", optional: true },
+	{ no: 29, name: "parameterDefinitions", kind: "message", T: () => ModelParameterDefinitionSchema, repeat: true },
+	{ no: 30, name: "variants", kind: "message", T: () => AvailableModelsResponse_ModelVariantConfigSchema, repeat: true },
+	{ no: 32, name: "cloudAgentEffortMode", kind: "int32", optional: true },
+	{ no: 33, name: "cloudMigrateToModel", kind: "string", optional: true },
+	{ no: 34, name: "upgradeModelId", kind: "string", optional: true },
+	{ no: 35, name: "isHidden", kind: "bool", optional: true },
+	{ no: 36, name: "legacySlugs", kind: "string", repeat: true },
+	{ no: 37, name: "idAliases", kind: "string", repeat: true },
+	{ no: 38, name: "namedModelSectionIndex", kind: "uint32", optional: true },
+	{ no: 39, name: "tagline", kind: "string", optional: true },
+	{ no: 40, name: "visibleInRoutedModelView", kind: "bool", optional: true },
+	{ no: 41, name: "vendorName", kind: "string", optional: true },
+	{ no: 42, name: "vendor", kind: "message", T: () => AvailableModelsResponse_ModelVendorSchema },
+	{ no: 43, name: "defaultDisabledInAdminAllowlist", kind: "bool", optional: true },
+	{ no: 44, name: "cloudAgentEffortModes", kind: "int32", repeat: true },
+	{ no: 45, name: "supportsSmartModeClassifier", kind: "bool", optional: true },
+	{ no: 46, name: "requiresDataRetention", kind: "bool", optional: true },
+	{ no: 47, name: "reasonForZdrConsentBlock", kind: "string", optional: true },
+]);
+
+/** Cursor agent message aiserver.v1.AvailableModelsResponse_ModelVariantConfig. */
+export interface AvailableModelsResponse_ModelVariantConfig extends ProtoMessage {
+	parameterValues: ModelParameterValue[];
+	displayName?: string;
+	isMaxMode?: boolean;
+	isDefaultMaxConfig?: boolean;
+	isDefaultNonMaxConfig?: boolean;
+	tooltipData?: AvailableModelsResponse_TooltipData;
+	tagline?: string;
+	displayNameOutsidePicker?: string;
+	variantStringRepresentation?: string;
+	confirmationDialogue?: AvailableModelsResponse_ConfirmationDialogue;
+	legacySlug?: string;
+}
+
+export const AvailableModelsResponse_ModelVariantConfigSchema: MessageCodec<AvailableModelsResponse_ModelVariantConfig> = pb<AvailableModelsResponse_ModelVariantConfig>("aiserver.v1.AvailableModelsResponse_ModelVariantConfig", [
+	{ no: 1, name: "parameterValues", kind: "message", T: () => ModelParameterValueSchema, repeat: true },
+	{ no: 2, name: "displayName", kind: "string", optional: true },
+	{ no: 3, name: "isMaxMode", kind: "bool", optional: true },
+	{ no: 4, name: "isDefaultMaxConfig", kind: "bool", optional: true },
+	{ no: 5, name: "isDefaultNonMaxConfig", kind: "bool", optional: true },
+	{ no: 6, name: "tooltipData", kind: "message", T: () => AvailableModelsResponse_TooltipDataSchema },
+	{ no: 7, name: "tagline", kind: "string", optional: true },
+	{ no: 8, name: "displayNameOutsidePicker", kind: "string", optional: true },
+	{ no: 9, name: "variantStringRepresentation", kind: "string", optional: true },
+	{ no: 10, name: "confirmationDialogue", kind: "message", T: () => AvailableModelsResponse_ConfirmationDialogueSchema },
+	{ no: 11, name: "legacySlug", kind: "string", optional: true },
+]);
+
+/** Cursor agent message aiserver.v1.AvailableModelsResponse_ModelVendor. */
+export interface AvailableModelsResponse_ModelVendor extends ProtoMessage {
+	id: ModelVendorId;
+	displayName: string;
+}
+
+export const AvailableModelsResponse_ModelVendorSchema: MessageCodec<AvailableModelsResponse_ModelVendor> = pb<AvailableModelsResponse_ModelVendor>("aiserver.v1.AvailableModelsResponse_ModelVendor", [
+	{ no: 1, name: "id", kind: "enum" },
+	{ no: 2, name: "displayName", kind: "string" },
+]);
+
+/** Cursor agent message aiserver.v1.AvailableModelsResponse_TooltipData. */
+export interface AvailableModelsResponse_TooltipData extends ProtoMessage {
+	primaryText: string;
+	secondaryText: string;
+	secondaryWarningText: string;
+	icon: string;
+	tertiaryText: string;
+	tertiaryTextUrl?: string;
+	markdownContent?: string;
+}
+
+export const AvailableModelsResponse_TooltipDataSchema: MessageCodec<AvailableModelsResponse_TooltipData> = pb<AvailableModelsResponse_TooltipData>("aiserver.v1.AvailableModelsResponse_TooltipData", [
+	{ no: 1, name: "primaryText", kind: "string" },
+	{ no: 2, name: "secondaryText", kind: "string" },
+	{ no: 3, name: "secondaryWarningText", kind: "string" },
+	{ no: 4, name: "icon", kind: "string" },
+	{ no: 5, name: "tertiaryText", kind: "string" },
+	{ no: 6, name: "tertiaryTextUrl", kind: "string", optional: true },
+	{ no: 7, name: "markdownContent", kind: "string", optional: true },
+]);
+
 /** Cursor agent message agent.v1.AzureCredentials. */
 export interface AzureCredentials extends ProtoMessage {
 	apiKey: string;
@@ -697,6 +1003,30 @@ export const BeforeSubmitPromptRequestResponseSchema: MessageCodec<BeforeSubmitP
 	{ no: 1, name: "continue", kind: "bool", optional: true },
 	{ no: 2, name: "userMessage", kind: "string", optional: true },
 	{ no: 3, name: "additionalContext", kind: "string", optional: true },
+]);
+
+/** Cursor agent message aiserver.v1.BidiAppendRequest. */
+export interface BidiAppendRequest extends ProtoMessage {
+	data: string;
+	requestId?: BidiRequestId;
+	appendSeqno: bigint;
+	dataBinary: Uint8Array;
+}
+
+export const BidiAppendRequestSchema: MessageCodec<BidiAppendRequest> = pb<BidiAppendRequest>("aiserver.v1.BidiAppendRequest", [
+	{ no: 1, name: "data", kind: "string" },
+	{ no: 2, name: "requestId", kind: "message", T: () => BidiRequestIdSchema },
+	{ no: 3, name: "appendSeqno", kind: "int64" },
+	{ no: 4, name: "dataBinary", kind: "bytes" },
+]);
+
+/** Cursor agent message agent.v1.BidiRequestId. */
+export interface BidiRequestId extends ProtoMessage {
+	requestId: string;
+}
+
+export const BidiRequestIdSchema: MessageCodec<BidiRequestId> = pb<BidiRequestId>("agent.v1.BidiRequestId", [
+	{ no: 1, name: "requestId", kind: "string" },
 ]);
 
 /** Cursor agent message agent.v1.CallFrame. */
@@ -1423,6 +1753,25 @@ export interface CursorRuleTypeManuallyAttached extends ProtoMessage {
 export const CursorRuleTypeManuallyAttachedSchema: MessageCodec<CursorRuleTypeManuallyAttached> = pb<CursorRuleTypeManuallyAttached>("agent.v1.CursorRuleTypeManuallyAttached", [
 ]);
 
+/** Cursor agent message aiserver.v1.CustomErrorDetails. */
+export interface CustomErrorDetails extends ProtoMessage {
+	title: string;
+	detail: string;
+	allowCommandLinksPotentiallyUnsafePleaseOnlyUseForHandwrittenTrustedMarkdown?: boolean;
+	isRetryable?: boolean;
+	showRequestId?: boolean;
+	shouldShowImmediateError?: boolean;
+}
+
+export const CustomErrorDetailsSchema: MessageCodec<CustomErrorDetails> = pb<CustomErrorDetails>("aiserver.v1.CustomErrorDetails", [
+	{ no: 1, name: "title", kind: "string" },
+	{ no: 2, name: "detail", kind: "string" },
+	{ no: 3, name: "allowCommandLinksPotentiallyUnsafePleaseOnlyUseForHandwrittenTrustedMarkdown", kind: "bool", optional: true },
+	{ no: 4, name: "isRetryable", kind: "bool", optional: true },
+	{ no: 5, name: "showRequestId", kind: "bool", optional: true },
+	{ no: 6, name: "shouldShowImmediateError", kind: "bool", optional: true },
+]);
+
 /** Cursor agent message agent.v1.CustomSubagent. */
 export interface CustomSubagent extends ProtoMessage {
 	fullPath: string;
@@ -1875,6 +2224,19 @@ export interface Error extends ProtoMessage {
 
 export const ErrorSchema: MessageCodec<Error> = pb<Error>("agent.v1.Error", [
 	{ no: 1, name: "message", kind: "string" },
+]);
+
+/** Cursor agent message aiserver.v1.ErrorDetails. */
+export interface ErrorDetails extends ProtoMessage {
+	error: CursorError;
+	details?: CustomErrorDetails;
+	isExpected?: boolean;
+}
+
+export const ErrorDetailsSchema: MessageCodec<ErrorDetails> = pb<ErrorDetails>("aiserver.v1.ErrorDetails", [
+	{ no: 1, name: "error", kind: "enum" },
+	{ no: 2, name: "details", kind: "message", T: () => CustomErrorDetailsSchema },
+	{ no: 3, name: "isExpected", kind: "bool", optional: true },
 ]);
 
 /** Cursor agent message agent.v1.ExaFetchArgs. */
@@ -2797,6 +3159,22 @@ export interface GetBlobResult extends ProtoMessage {
 
 export const GetBlobResultSchema: MessageCodec<GetBlobResult> = pb<GetBlobResult>("agent.v1.GetBlobResult", [
 	{ no: 1, name: "blobData", kind: "bytes", optional: true },
+]);
+
+/** Cursor agent message agent.v1.GetDefaultModelForCliRequest. */
+export interface GetDefaultModelForCliRequest extends ProtoMessage {
+}
+
+export const GetDefaultModelForCliRequestSchema: MessageCodec<GetDefaultModelForCliRequest> = pb<GetDefaultModelForCliRequest>("agent.v1.GetDefaultModelForCliRequest", [
+]);
+
+/** Cursor agent message agent.v1.GetDefaultModelForCliResponse. */
+export interface GetDefaultModelForCliResponse extends ProtoMessage {
+	model?: ModelDetails;
+}
+
+export const GetDefaultModelForCliResponseSchema: MessageCodec<GetDefaultModelForCliResponse> = pb<GetDefaultModelForCliResponse>("agent.v1.GetDefaultModelForCliResponse", [
+	{ no: 1, name: "model", kind: "message", T: () => ModelDetailsSchema },
 ]);
 
 /** Cursor agent message agent.v1.GetDiffRequest. */
@@ -4131,6 +4509,99 @@ export const ModelDetailsSchema: MessageCodec<ModelDetails> = pb<ModelDetails>("
 			{ no: 10, name: "bedrockCredentials", kind: "message", T: () => BedrockCredentialsSchema },
 		],
 	},
+]);
+
+/** Cursor agent message aiserver.v1.ModelParameterDefinition. */
+export interface ModelParameterDefinition extends ProtoMessage {
+	id: string;
+	name: string;
+	markdownTooltip?: string;
+	parameterType?: ModelParameterDefinition_ModelParameterType;
+	isCycleableByHotkey?: boolean;
+}
+
+export const ModelParameterDefinitionSchema: MessageCodec<ModelParameterDefinition> = pb<ModelParameterDefinition>("aiserver.v1.ModelParameterDefinition", [
+	{ no: 1, name: "id", kind: "string" },
+	{ no: 2, name: "name", kind: "string" },
+	{ no: 3, name: "markdownTooltip", kind: "string", optional: true },
+	{ no: 4, name: "parameterType", kind: "message", T: () => ModelParameterDefinition_ModelParameterTypeSchema },
+	{ no: 5, name: "isCycleableByHotkey", kind: "bool", optional: true },
+]);
+
+/** Cursor agent message aiserver.v1.ModelParameterDefinition_BooleanParameterDefinition. */
+export interface ModelParameterDefinition_BooleanParameterDefinition extends ProtoMessage {
+	values: ModelParameterDefinition_BooleanParameterDefinition_BooleanParameterValue[];
+}
+
+export const ModelParameterDefinition_BooleanParameterDefinitionSchema: MessageCodec<ModelParameterDefinition_BooleanParameterDefinition> = pb<ModelParameterDefinition_BooleanParameterDefinition>("aiserver.v1.ModelParameterDefinition_BooleanParameterDefinition", [
+	{ no: 1, name: "values", kind: "message", T: () => ModelParameterDefinition_BooleanParameterDefinition_BooleanParameterValueSchema, repeat: true },
+]);
+
+/** Cursor agent message aiserver.v1.ModelParameterDefinition_BooleanParameterDefinition_BooleanParameterValue. */
+export interface ModelParameterDefinition_BooleanParameterDefinition_BooleanParameterValue extends ProtoMessage {
+	value: string;
+	displayName?: string;
+	increasesModelCost?: boolean;
+	defaultBlockedInAdminAllowlist?: boolean;
+	hideFromUserPickerWhenAdminBlocked?: boolean;
+	blockedByAdminAllowlist?: boolean;
+}
+
+export const ModelParameterDefinition_BooleanParameterDefinition_BooleanParameterValueSchema: MessageCodec<ModelParameterDefinition_BooleanParameterDefinition_BooleanParameterValue> = pb<ModelParameterDefinition_BooleanParameterDefinition_BooleanParameterValue>("aiserver.v1.ModelParameterDefinition_BooleanParameterDefinition_BooleanParameterValue", [
+	{ no: 1, name: "value", kind: "string" },
+	{ no: 2, name: "displayName", kind: "string", optional: true },
+	{ no: 3, name: "increasesModelCost", kind: "bool", optional: true },
+	{ no: 4, name: "defaultBlockedInAdminAllowlist", kind: "bool", optional: true },
+	{ no: 5, name: "hideFromUserPickerWhenAdminBlocked", kind: "bool", optional: true },
+	{ no: 6, name: "blockedByAdminAllowlist", kind: "bool", optional: true },
+]);
+
+/** Cursor agent message aiserver.v1.ModelParameterDefinition_EnumParameterDefinition. */
+export interface ModelParameterDefinition_EnumParameterDefinition extends ProtoMessage {
+	values: ModelParameterDefinition_EnumParameterDefinition_EnumParameterValue[];
+}
+
+export const ModelParameterDefinition_EnumParameterDefinitionSchema: MessageCodec<ModelParameterDefinition_EnumParameterDefinition> = pb<ModelParameterDefinition_EnumParameterDefinition>("aiserver.v1.ModelParameterDefinition_EnumParameterDefinition", [
+	{ no: 1, name: "values", kind: "message", T: () => ModelParameterDefinition_EnumParameterDefinition_EnumParameterValueSchema, repeat: true },
+]);
+
+/** Cursor agent message aiserver.v1.ModelParameterDefinition_EnumParameterDefinition_EnumParameterValue. */
+export interface ModelParameterDefinition_EnumParameterDefinition_EnumParameterValue extends ProtoMessage {
+	value: string;
+	displayName?: string;
+	increasesModelCost?: boolean;
+	blockedByAdminAllowlist?: boolean;
+	markdownTooltip?: string;
+}
+
+export const ModelParameterDefinition_EnumParameterDefinition_EnumParameterValueSchema: MessageCodec<ModelParameterDefinition_EnumParameterDefinition_EnumParameterValue> = pb<ModelParameterDefinition_EnumParameterDefinition_EnumParameterValue>("aiserver.v1.ModelParameterDefinition_EnumParameterDefinition_EnumParameterValue", [
+	{ no: 1, name: "value", kind: "string" },
+	{ no: 2, name: "displayName", kind: "string", optional: true },
+	{ no: 3, name: "increasesModelCost", kind: "bool", optional: true },
+	{ no: 4, name: "blockedByAdminAllowlist", kind: "bool", optional: true },
+	{ no: 5, name: "markdownTooltip", kind: "string", optional: true },
+]);
+
+/** Cursor agent message aiserver.v1.ModelParameterDefinition_ModelParameterType. */
+export interface ModelParameterDefinition_ModelParameterType extends ProtoMessage {
+	booleanParameter?: ModelParameterDefinition_BooleanParameterDefinition;
+	enumParameter?: ModelParameterDefinition_EnumParameterDefinition;
+}
+
+export const ModelParameterDefinition_ModelParameterTypeSchema: MessageCodec<ModelParameterDefinition_ModelParameterType> = pb<ModelParameterDefinition_ModelParameterType>("aiserver.v1.ModelParameterDefinition_ModelParameterType", [
+	{ no: 1, name: "booleanParameter", kind: "message", T: () => ModelParameterDefinition_BooleanParameterDefinitionSchema },
+	{ no: 2, name: "enumParameter", kind: "message", T: () => ModelParameterDefinition_EnumParameterDefinitionSchema },
+]);
+
+/** Cursor agent message aiserver.v1.ModelParameterValue. */
+export interface ModelParameterValue extends ProtoMessage {
+	id: string;
+	value: string;
+}
+
+export const ModelParameterValueSchema: MessageCodec<ModelParameterValue> = pb<ModelParameterValue>("aiserver.v1.ModelParameterValue", [
+	{ no: 1, name: "id", kind: "string" },
+	{ no: 2, name: "value", kind: "string" },
 ]);
 
 /** Cursor agent message agent.v1.MouseDownAction. */
@@ -7837,9 +8308,19 @@ export const TruncatedToolCallSuccessSchema: MessageCodec<TruncatedToolCallSucce
 
 /** Cursor agent message agent.v1.TurnEndedUpdate. */
 export interface TurnEndedUpdate extends ProtoMessage {
+	inputTokens?: bigint;
+	outputTokens?: bigint;
+	cachedInputTokens?: bigint;
+	cacheWriteTokens?: bigint;
+	reasoningOutputTokens?: bigint;
 }
 
 export const TurnEndedUpdateSchema: MessageCodec<TurnEndedUpdate> = pb<TurnEndedUpdate>("agent.v1.TurnEndedUpdate", [
+	{ no: 1, name: "inputTokens", kind: "int64", optional: true },
+	{ no: 2, name: "outputTokens", kind: "int64", optional: true },
+	{ no: 3, name: "cachedInputTokens", kind: "int64", optional: true },
+	{ no: 4, name: "cacheWriteTokens", kind: "int64", optional: true },
+	{ no: 5, name: "reasoningOutputTokens", kind: "int64", optional: true },
 ]);
 
 /** Cursor agent message agent.v1.TypeAction. */

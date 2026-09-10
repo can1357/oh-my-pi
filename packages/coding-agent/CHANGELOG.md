@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Cursor sessions now start with the account-selected provider default model when the catalog advertises one ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
+
+### Fixed
+
+- Model browsing and JSON listings now distinguish fixed, variable, included, free, and unknown pricing instead of labeling every missing rate as free ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added

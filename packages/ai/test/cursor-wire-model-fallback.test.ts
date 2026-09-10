@@ -7,6 +7,9 @@ import {
 	AgentClientMessageSchema,
 	type AgentRunRequest,
 	AgentServerMessageSchema,
+	CustomErrorDetailsSchema,
+	CursorError,
+	ErrorDetailsSchema,
 	ExecServerMessageSchema,
 	HeartbeatUpdateSchema,
 	InteractionUpdateSchema,
@@ -20,7 +23,14 @@ import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 const CONNECT_END_STREAM_FLAG = 0b00000010;
 
 type Response = (
-	| { kind: "error"; code: string; message: string; partialText?: string; heartbeat?: boolean }
+	| {
+			kind: "error";
+			code: string;
+			message: string;
+			partialText?: string;
+			heartbeat?: boolean;
+			structuredError?: CursorError;
+	  }
 	| { kind: "success"; text: string }
 	| { kind: "exec-success" }
 ) & { delayMs?: number };
@@ -100,9 +110,27 @@ function execReadRequestFrame(): Buffer {
 	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
 }
 
-function connectErrorFrame(code: string, message: string): Buffer {
-	const payload = Buffer.from(JSON.stringify({ error: { code, message } }), "utf8");
+function connectErrorFrame(code: string, message: string, details?: unknown): Buffer {
+	const payload = Buffer.from(
+		JSON.stringify({ error: { code, message, ...(details === undefined ? {} : { details }) } }),
+		"utf8",
+	);
 	return frameConnectMessage(payload, CONNECT_END_STREAM_FLAG);
+}
+function structuredConnectErrorFrame(error: CursorError): Buffer {
+	const details = create(ErrorDetailsSchema, {
+		error,
+		details: create(CustomErrorDetailsSchema, {
+			title: "AI Model Not Found",
+			detail: "Model name is not valid",
+		}),
+	});
+	return connectErrorFrame("invalid_argument", "Error", [
+		{
+			type: "type.googleapis.com/aiserver.v1.ErrorDetails",
+			value: Buffer.from(toBinary(ErrorDetailsSchema, details)).toString("base64"),
+		},
+	]);
 }
 
 function decodeRunRequest(frame: Buffer): AgentRunRequest {
@@ -158,7 +186,11 @@ async function startServer(): Promise<string> {
 			}
 			const frames = response.heartbeat ? [heartbeatFrame()] : [];
 			if (response.partialText) frames.push(textDeltaFrame(response.partialText));
-			frames.push(connectErrorFrame(response.code, response.message));
+			frames.push(
+				response.structuredError === undefined
+					? connectErrorFrame(response.code, response.message)
+					: structuredConnectErrorFrame(response.structuredError),
+			);
 			stream.end(Buffer.concat(frames));
 		};
 		stream.on("data", onData);
@@ -245,6 +277,23 @@ describe("Cursor discovered effort wire fallback", () => {
 		expect(requests[1].requestedModel?.modelId).toBe("gpt-5.6-sol-medium");
 		expect(requests[1].requestedModel?.parameters).toEqual([]);
 		expect(requests[1].modelDetails?.modelId).toBe("gpt-5.6-sol-medium");
+	});
+	it("retries a structured BAD_MODEL_NAME with the exact discovered sibling id", async () => {
+		responses = [
+			{
+				kind: "error",
+				code: "invalid_argument",
+				message: "Error",
+				structuredError: CursorError.ERROR_BAD_MODEL_NAME,
+			},
+			{ kind: "success", text: "OK" },
+		];
+		const baseUrl = await startServer();
+		const { result } = await runStream(baseUrl);
+
+		expect(result.stopReason).toBe("stop");
+		expect(requests).toHaveLength(2);
+		expect(requests[1]?.requestedModel?.modelId).toBe("gpt-5.6-sol-medium");
 	});
 
 	it("still retries when a heartbeat precedes the not_found", async () => {

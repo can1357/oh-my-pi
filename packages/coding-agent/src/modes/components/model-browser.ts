@@ -10,7 +10,7 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { getModelPricingStatus, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import {
 	type Component,
 	fuzzyRank,
@@ -355,16 +355,44 @@ export function formatRoleChip(role: string, assignment: RoleAssignment, setting
 	return theme.fg(info.color ?? "muted", `${theme.status.enabled} ${label}`) + suffix;
 }
 
-/** `$in/out` per-million cost pair; `free` when both legs are zero. */
+/** Compact input/output pricing for the model list's right-hand column. */
 function formatCostPair(model: Model): string {
+	const status = getModelPricingStatus(model);
+	if (status !== "fixed") {
+		switch (status) {
+			case "free":
+				return "free";
+			case "included":
+				return "included";
+			case "variable":
+				return "varies";
+			case "unknown":
+				return "unknown";
+		}
+	}
 	const cost = model.cost;
-	if (!cost || (cost.input <= 0 && cost.output <= 0)) return "free";
 	const fmt = (n: number): string => {
 		if (n <= 0) return "0";
 		const s = n >= 100 ? String(Math.round(n)) : n >= 10 ? n.toFixed(1) : n.toFixed(2);
 		return s.replace(/\.?0+$/, "");
 	};
 	return `$${fmt(cost.input)}/${fmt(cost.output)}`;
+}
+
+function formatPricingDetail(model: Model): string {
+	const status = getModelPricingStatus(model);
+	switch (status) {
+		case "fixed":
+			return `${formatCostPair(model)} per M`;
+		case "free":
+			return "free";
+		case "included":
+			return "included";
+		case "variable":
+			return "price varies";
+		case "unknown":
+			return "pricing unknown";
+	}
 }
 
 /** Provider-supplied blurb, flattened to a single renderable detail-line cell. */
@@ -958,7 +986,7 @@ export class ModelBrowser implements Component {
 		if (model.isRecommended) facts.push("recommended");
 		if (model.contextWindow) facts.push(`${formatNumber(model.contextWindow).toLowerCase()} ctx`);
 		if (model.maxTokens) facts.push(`${formatNumber(model.maxTokens).toLowerCase()} out`);
-		facts.push(`${formatCostPair(model)} per M`);
+		facts.push(formatPricingDetail(model));
 		if (model.reasoning) facts.push("reasoning");
 		if (model.input.includes("image")) facts.push("vision");
 		const intelligence = formatIntelligence(model);

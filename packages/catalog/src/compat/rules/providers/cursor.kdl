@@ -2,6 +2,11 @@
 
 provider "cursor" {
 	thinking-mode "effort"
+	// Cursor's default route selects a differently priced backing model per request.
+	models "default" {
+		pricing-status "variable"
+	}
+
 	class "anthropic" {
 		family "fable" {
 			requires-cursor-tool-schema-projection #true

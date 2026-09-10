@@ -6,6 +6,7 @@ import type {
 	KnownProvider,
 	Model,
 	ModelCost,
+	ModelPricingStatus,
 	TimeBasedCost,
 	TokenCost,
 	Usage,
@@ -57,6 +58,13 @@ export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
 	const models = getProviderModels(provider);
 	return models ? (Array.from(models.values()) as Model<Api>[]) : [];
 }
+/** Resolve display semantics without mistaking an absent rate card for a free model. */
+export function getModelPricingStatus(model: Pick<Model<Api>, "cost" | "pricingStatus">): ModelPricingStatus {
+	const cost = model.cost;
+	if (cost.input !== 0 || cost.output !== 0 || cost.cacheRead !== 0 || cost.cacheWrite !== 0) return "fixed";
+	return model.pricingStatus ?? "unknown";
+}
+
 function resolveTokenCost(cost: ModelCost, promptInputTokens: number, timestamp: number | undefined): TokenCost {
 	let rates: ModelCost | EffectiveTokenCost = cost;
 	let effectiveFrom = -Infinity;

@@ -250,6 +250,11 @@ behavior {
 		alias "claude-sonnet-4-5" peer-id="claude-sonnet-4-5@20250929"
 		alias "claude-sonnet-4-6" peer-id="claude-sonnet-4-6@default"
 	}
+	// Cursor discovery joins first-party published rates. If that optional
+	// document is unavailable or lacks a row, use authoritative upstream list
+	// prices from the model vendor rather than treating the model as free.
+	pricing-peer provider="cursor" peers="anthropic" "openai" "google" "xai" "zai" "moonshot" {
+	}
 	// SuperGrok surfaces a few models under IDs that differ from their public
 	// xai equivalent, so the exact-id price mirror misses them.
 	pricing-peer provider="xai-oauth" peers="xai" {

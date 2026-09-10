@@ -454,6 +454,31 @@ describe("pickDefaultAvailableModel", () => {
 		expect(pickDefaultAvailableModel([paid])?.provider).toBe("xai");
 	});
 
+	test("uses an authenticated catalog model marked as the provider default", () => {
+		const cursorModel = (id: string, isProviderDefault = false) =>
+			buildModel({
+				id,
+				name: id,
+				api: "cursor-agent",
+				provider: "cursor",
+				baseUrl: "https://api2.cursor.sh",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200000,
+				maxTokens: 64000,
+				isProviderDefault,
+			});
+		const first = cursorModel("claude-4.6-opus-high");
+		const accountDefault = cursorModel("composer-2.5");
+
+		expect(pickDefaultAvailableModel([first, accountDefault])).toBe(first);
+		accountDefault.isProviderDefault = true;
+		const earlier = createOpusModel("anthropic", DEFAULT_MODEL_PER_PROVIDER.anthropic, "Claude Opus");
+		expect(pickDefaultAvailableModel([earlier, first, accountDefault])).toBe(earlier);
+		expect(pickDefaultAvailableModel([first, accountDefault])).toBe(accountDefault);
+	});
+
 	test("prefers a concretely-authed provider over a sentinel-only ambient provider (issue #9967)", () => {
 		const bedrockDefault = createBedrockDefaultModel();
 		const anthropicDefault = createOpusModel("anthropic", DEFAULT_MODEL_PER_PROVIDER.anthropic, "Claude Opus");
