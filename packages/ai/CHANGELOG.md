@@ -8,6 +8,7 @@
 - Delay non-Responses stream commit until meaningful assistant events, and flush held SSE prelude frames when a probing stream ends without commit.
 - Keep the leased credential id for anonymous cooldown-probe cleanup when concurrent reorders shift selection indices.
 - Delay pi-native stream commit until text/thinking/tool deltas; keep Responses structural item/part events pre-commit.
+- Preserve upstream Responses ids across all response envelopes, observe non-SSE assistant output before committing, and forward explicit Azure parallel-tool settings.
 - Forward `previous_response_id` onto Azure Responses wire params and Chat Completions seed/logit_bias/user/response_format through the API mapper.
 - Treat Anthropic message_start as stream metadata; restore Cloudflare and MCP OAuth notes to their released sections.
 
@@ -2072,4 +2073,3 @@
 ### Removed
 
 - Removed the dead `iterateUntilAbort` helper (superseded by `iterateWithIdleTimeout`); it leaked the upstream iterator when the consumer abandoned mid-yield and had no production call sites.
-

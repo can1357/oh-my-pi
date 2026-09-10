@@ -54,6 +54,7 @@ import { parseRouteDefinition } from "./route-definitions";
 import { type CompiledRoute, type RouteDefinition, RouteRegistry } from "./route-graph";
 import {
 	commitGateObservesDownstreamSse,
+	observeAssistantCommit,
 	observeSseCommit,
 	StreamCommitGate,
 	type StreamCommitState,
@@ -620,7 +621,6 @@ function releaseTurnOnStreamEnd(
 	});
 }
 
-
 function payloadContainsOpenAIFileId(value: unknown): boolean {
 	if (value === null || value === undefined) return false;
 	if (typeof value === "string") return false;
@@ -637,7 +637,7 @@ function targetRejectsOpenAIImageFileReferences(
 	routeLabel: string,
 	model: Model<Api>,
 	messages: Context["messages"],
-	options?: { providerPayload?: unknown },
+	options?: unknown,
 ): boolean {
 	if (routeLabel !== "openai-responses") return false;
 	const supports =
@@ -645,7 +645,11 @@ function targetRejectsOpenAIImageFileReferences(
 		model.api === "azure-openai-responses" ||
 		model.api === "openai-codex-responses";
 	if (supports) return false;
-	if (options?.providerPayload !== undefined && payloadContainsOpenAIFileId(options.providerPayload)) {
+	if (
+		isRecord(options) &&
+		options.providerPayload !== undefined &&
+		payloadContainsOpenAIFileId(options.providerPayload)
+	) {
 		return true;
 	}
 	return messages.some(message => {
@@ -993,6 +997,7 @@ async function handleFormatEndpoint(
 		let events: AssistantMessageEventStream;
 		try {
 			events = streamSimple(model, parsed.context, streamOpts);
+			if (!commitGateObservesDownstreamSse(route.label)) events = observeAssistantCommit(events, commitGate);
 		} catch (error) {
 			const classified = classifyGatewayError(error);
 			logger.warn("auth-gateway streamSimple threw", { format: route.label, error: classified.message, peer });
@@ -1172,7 +1177,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				: formatError(502, "upstream_error", "Upstream request failed");
 		}
 		model = resolved;
-		if (targetRejectsOpenAIImageFileReferences(route.label, model, parsed.context.messages)) {
+		if (targetRejectsOpenAIImageFileReferences("pi-native", model, parsed.context.messages)) {
 			return formatError(
 				400,
 				"invalid_request_error",
@@ -1386,6 +1391,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		let events: AssistantMessageEventStream;
 		try {
 			events = streamSimple(model, parsed.context, streamOpts);
+			events = observeAssistantCommit(events, commitGate);
 		} catch (error) {
 			const classified = classifyGatewayError(error);
 			logger.warn("auth-gateway streamSimple threw", { format: "pi-native", error: classified.message, peer });

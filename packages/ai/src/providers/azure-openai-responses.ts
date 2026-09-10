@@ -392,6 +392,7 @@ function buildParams(
 		// stateless responses, matching the openai provider.
 		store: false,
 	};
+	if (options?.parallelToolCalls !== undefined) params.parallel_tool_calls = options.parallelToolCalls;
 
 	applyCommonResponsesSamplingParams(params, options, model);
 	if (options?.include?.length) params.include = Array.from(new Set(options.include));
