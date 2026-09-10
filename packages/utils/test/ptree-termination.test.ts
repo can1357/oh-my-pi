@@ -226,6 +226,102 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 		},
 	);
 
+	it.skipIf(process.platform !== "linux")("refuses a hard sweep whose root could never be pinned", async () => {
+		// The pin is what makes the sweep safe, so its absence cannot fall back
+		// to the number: that is the same wrong-kill by a longer route. The
+		// constructor's pin is stubbed out to fail, which is what a host
+		// refusing `pidfd_open` looks like, and the pid is then answered by a
+		// sacrificial process standing in for a recycled number.
+		const bystander = spawn(["/bin/sh", "-c", "exec sleep 30"]);
+		const fromPid = Process.fromPid;
+		let child: ChildProcess | undefined;
+		let spy: Mock<typeof Process.fromPid> | undefined;
+		try {
+			// Refused for the whole lifetime of the child, constructor included,
+			// so nothing is ever pinned for it.
+			spy = spyOn(Process, "fromPid").mockImplementation((pid: number) =>
+				pid === bystander.pid ? fromPid.call(Process, pid) : null,
+			);
+			child = spawn(["/bin/sh", "-c", "exec sleep 30"], { subreaper: true });
+			const childPid = child.pid;
+			spy.mockImplementation((pid: number) =>
+				pid === childPid ? fromPid.call(Process, bystander.pid) : fromPid.call(Process, pid),
+			);
+
+			const outcome = await child.killAndWait(undefined, -1).then(
+				() => "swept",
+				(error: unknown) => String(error),
+			);
+
+			expect(outcome).toContain("could not be pinned");
+			// The point of the refusal: the stand-in is what a recycled number
+			// would have aimed the sweep at, and it is untouched.
+			expect(fromPid.call(Process, bystander.pid)?.status()).toBe(ProcessStatus.Running);
+		} finally {
+			spy?.mockRestore();
+			// Killed by number on purpose: the refusal under test signals nothing,
+			// so the wrapper cannot be asked to clean this up. The pid is this
+			// test's own child and the stub is already restored.
+			if (child) {
+				try {
+					process.kill(child.pid, "SIGKILL");
+				} catch {}
+				await child.proc.exited;
+			}
+			bystander.kill(undefined, -1);
+			await bystander.proc.exited;
+		}
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"never terminates by number a root whose pin was needed and missing",
+		async () => {
+			// A detached root leads a group, so `terminate({ group: true })` aimed at
+			// it signals that whole group. The pin is what proves the group is ours;
+			// without it the pid is a number the kernel may have handed on, and
+			// signalling by number would take a stranger's group with it. The
+			// constructor's pin is stubbed to fail, then the pid is answered by a
+			// sacrificial process standing in for the new occupant.
+			const bystander = spawn(["/bin/sh", "-c", "sleep 30 2>/dev/null & exec sleep 30"], {
+				detached: true,
+			});
+			const fromPid = Process.fromPid;
+			let child: ChildProcess | undefined;
+			let spy: Mock<typeof Process.fromPid> | undefined;
+			try {
+				spy = spyOn(Process, "fromPid").mockImplementation((pid: number) =>
+					pid === bystander.pid ? fromPid.call(Process, pid) : null,
+				);
+				child = spawn(["/bin/sh", "-c", "exec sleep 30"], { detached: true });
+				const childPid = child.pid;
+				spy.mockImplementation((pid: number) =>
+					pid === childPid ? fromPid.call(Process, bystander.pid) : fromPid.call(Process, pid),
+				);
+
+				const outcome = await Promise.race([
+					child.killAndWait().then(
+						() => "terminated",
+						(error: unknown) => String(error),
+					),
+					Bun.sleep(2_000).then(() => "never settled"),
+				]);
+
+				expect(outcome).toContain("termination unattempted");
+				expect(fromPid.call(Process, bystander.pid)?.status()).toBe(ProcessStatus.Running);
+			} finally {
+				spy?.mockRestore();
+				if (child) {
+					try {
+						process.kill(child.pid, "SIGKILL");
+					} catch {}
+					await child.proc.exited;
+				}
+				bystander.kill(undefined, -1);
+				await bystander.proc.exited;
+			}
+		},
+	);
+
 	it.skipIf(process.platform === "win32")("never hides a reaped root's unswept group behind success", async () => {
 		// Which arm runs depends on the kernel: with a process-group scope for
 		// pidfds the retained leader reaches the group with no ownership proof at

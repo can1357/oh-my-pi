@@ -377,11 +377,13 @@ export class ChildProcess<In extends InMask = InMask> {
 	 */
 	#rootIsLive(): boolean {
 		if (this.proc.exitCode !== null) return false;
-		// The pin, never a fresh open. `exitCode` stays null for a child killed by
-		// a signal — Bun reports `signalCode` instead — so this predicate cannot
-		// lean on it, and a reopened pid after reuse answers for whoever holds
-		// the number now. The pinned handle is pidfd- or HANDLE-backed, so it
-		// keeps answering for the process it was opened on.
+		// The pin wherever there is one. `exitCode` stays null for a child killed
+		// by a signal — Bun reports `signalCode` instead — so this predicate
+		// cannot lean on it, and a reopened pid after reuse answers for whoever
+		// holds the number now. The pinned handle keeps answering for the process
+		// it was opened on: a pidfd on Linux, a retained handle on Windows, a
+		// start-time identity check on macOS. A child with no pin never had a
+		// group or a tree claim to protect, so the number is all it ever had.
 		const root = this.#pinnedRoot ?? Process.fromPid(this.proc.pid);
 		return root?.status() === ProcessStatus.Running;
 	}
@@ -392,6 +394,27 @@ export class ChildProcess<In extends InMask = InMask> {
 			// The normalized exit promise may already have resolved from a dead
 			// group leader; wait() still needs to report the later deadline.
 			if (this.proc.exitCode !== null) this.#exitReason = reason;
+		}
+		if (this.#hardKillTree && this.#unpinnedRoot) {
+			// Refused before anything is probed or opened, because every answer
+			// available from here is about a number rather than about our child.
+			// A hard sweep is the most destructive thing this class does, and the
+			// constructor could not pin the root it would be aimed at — so the
+			// liveness probe below would be asking whoever holds the pid now, and
+			// the fallback beside it would hand that stranger's tree to
+			// `killTreeAndWait()`. Rejecting says the sweep did not happen, which
+			// is true and is the only safe thing left to say.
+			//
+			// Nothing is signalled on the way out, not even the root. The runtime's
+			// own `kill` is `kill(pid, signal)` — its pidfd only watches — so it is
+			// no safer than anything else here once the pid may have been reused.
+			// There is no identity-safe way to reach this child, which is what the
+			// rejection says.
+			this.#terminating = Promise.reject(
+				new Error(`Hard-kill tree unreachable: root ${this.pid} could not be pinned`),
+			);
+			void this.#terminating.catch(() => {});
+			return;
 		}
 		if (gracefulMs !== undefined && gracefulMs < 0 && this.#hardKillTree && this.#rootIsLive()) {
 			// terminate() sends its polite wave to the root before rebuilding the
@@ -404,7 +427,10 @@ export class ChildProcess<In extends InMask = InMask> {
 			// The pin first, for the reason above and with more at stake here: this
 			// hard-kills a whole tree, so a reopened recycled pid would sweep a
 			// stranger's descendants and its group with them.
-			const root = this.#pinnedRoot ?? Process.fromPid(this.proc.pid);
+			// The pin and nothing else: a hard-kill root that could not be pinned
+			// was already refused above, so there is no case left where reopening
+			// the number would be the right answer here.
+			const root = this.#pinnedRoot;
 			if (root) {
 				this.#terminating = Promise.try(() => root.killTreeAndWait());
 				void this.#terminating.catch(() => {});
@@ -459,7 +485,13 @@ export class ChildProcess<In extends InMask = InMask> {
 						? { group: true }
 						: undefined
 					: { gracefulMs, group: this.#terminateGroup };
-			this.#terminating = (this.#pinnedRoot ?? Process.fromPid(this.proc.pid))?.terminate(options);
+			// The pin, or a fresh open only where none was ever needed. A root whose
+			// pin was required and failed — detached, or Windows — must not be
+			// reached by number: it leads a group or owns a retained tree, and
+			// after reuse that number names a stranger's. Leaving the terminator
+			// unset there is what `killAndWait()` reports as unattempted.
+			const target = this.#pinnedRoot ?? (this.#unpinnedRoot ? undefined : Process.fromPid(this.proc.pid));
+			this.#terminating = target?.terminate(options);
 			void this.#terminating?.catch(() => {});
 		}
 	}
