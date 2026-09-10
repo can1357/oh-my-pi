@@ -992,6 +992,11 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			/** True once `start` was published live (text-only path is unbuffered). */
 			let consumerSawStart = false;
 			const pendingToolEventBuffers = new Map<number, AssistantMessageEvent[]>();
+			type SendToUserCallState = { argsText: string; lastContent: string; keys: Set<string> };
+			const sendToUserTextIndexes = new Set<number>();
+			const openSendToUserByKey = new Map<string, SendToUserCallState>();
+			/** Live (unbuffered) complete-object tool args held until toolcall_end. */
+			const pendingCanonicalToolDeltas = new Map<number, string>();
 			const pushConsumerEvent = (event: AssistantMessageEvent) => {
 				stream.push(event);
 				if (event.type === "start") consumerSawStart = true;
@@ -1048,6 +1053,9 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			const discardAttemptEvents = () => {
 				attemptEventBuffer = [];
 				pendingToolEventBuffers.clear();
+				sendToUserTextIndexes.clear();
+				openSendToUserByKey.clear();
+				pendingCanonicalToolDeltas.clear();
 				attemptStreamingLive = false;
 				firstTokenTime = undefined;
 				// Buffered `start` was never published — re-arm so the retry emits it.
@@ -1401,10 +1409,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				let openKind: "" | "text" | "thinking" = "";
 				let openIndex = -1;
 				/** Content indexes whose text came from synthetic SendToUser — never promote. */
-				const sendToUserTextIndexes = new Set<number>();
-				/** Per-call SendToUser reconstruction keyed by `id:…` / `idx:…` (concurrent-safe). */
-				type SendToUserCallState = { argsText: string; lastContent: string; keys: Set<string> };
-				const openSendToUserByKey = new Map<string, SendToUserCallState>();
+				// sendToUserTextIndexes / openSendToUserByKey live in the outer attempt
+				// scope so emitAttemptEvent can hold provisional drafts.
+				sendToUserTextIndexes.clear();
+				openSendToUserByKey.clear();
 				const toolStates = new Map<
 					string,
 					{ key: string; index: number; block: ToolCall; argsText: string; ended: boolean; isGrammar: boolean }
@@ -1500,6 +1508,16 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					);
 					clearStreamingPartialJson(state.block);
 					state.ended = true;
+					const heldDelta = pendingCanonicalToolDeltas.get(state.index);
+					if (heldDelta !== undefined) {
+						pendingCanonicalToolDeltas.delete(state.index);
+						emitAttemptEvent({
+							type: "toolcall_delta",
+							contentIndex: state.index,
+							delta: heldDelta,
+							partial: output,
+						});
+					}
 					emitAttemptEvent({
 						type: "toolcall_end",
 						contentIndex: state.index,
@@ -1575,12 +1593,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						// Drop only this call's correlation keys — concurrent SendToUser
 						// streams keep their own reconstruction state.
 						for (const key of state.keys) openSendToUserByKey.delete(key);
-						// Provisional SendToUser text stays buffered while any call is open
-						// so draft→answer revisions can rewrite unpublished deltas. Publish
-						// once every SendToUser call on this attempt has completed.
-						if (openSendToUserByKey.size === 0 && !attemptStreamingLive) {
-							flushAttemptEvents();
-						}
+						// Do not flush here: promotable thinking/text may still need to
+						// compact indexes before SendToUser text_* events publish. Hold
+						// remains active while openSendToUserByKey is non-empty; once
+						// cleared, end-of-stream (or ordinary) flush publishes remapped.
 					}
 				};
 
@@ -1696,17 +1712,15 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 										}
 										pendingToolEventBuffers.set(state.index, rewritten);
 									} else {
-										// Live / unbuffered path: emit the canonical snapshot only
-										// once (no prior delta to retract). Callers that already
-										// saw an earlier snapshot cannot concat-repair — rare when
-										// tool events stay buffered until toolcall_end.
-										emitAttemptEvent({
-											type: "toolcall_delta",
-											contentIndex: state.index,
-											delta: merged.argsText,
-											partial: output,
-										});
+										// Live / unbuffered path: prior complete snapshots may
+										// already have been published — hold the canonical
+										// args and emit one concat-safe delta in finishTool.
+										pendingCanonicalToolDeltas.set(state.index, merged.argsText);
 									}
+								} else if (isCompleteJsonObjectText(merged.argsText) && !shouldBufferAttemptEvents()) {
+									// Unbuffered complete-object frames: hold until finishTool so
+									// cumulative revisions stay concat-safe for proxy consumers.
+									pendingCanonicalToolDeltas.set(state.index, merged.argsText);
 								} else {
 									emitAttemptEvent({
 										type: "toolcall_delta",
