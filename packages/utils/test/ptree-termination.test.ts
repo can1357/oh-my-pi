@@ -274,6 +274,113 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 		},
 	);
 
+	it.skipIf(process.platform !== "linux")(
+		"never reports a dead subreaper root's adopted descendant as swept",
+		async () => {
+			// The hard-kill fast path used to enter on Bun's `exitCode`, which stays
+			// null for at least a loop turn after the root is gone. A walk rooted at
+			// a pid whose process has exited comes back empty and *complete* — the
+			// survivors were reparented away — so the sweep hard-killed nothing and
+			// reported the tree gone. Nothing pinned here can reach them once the
+			// root is dead, so the only honest answer is a refusal.
+			const child = spawn(["/bin/sh", "-c", "sleep 30 2>/dev/null & echo $!"], { subreaper: true });
+			const reader = child.stdout.getReader();
+			let descendant: Process | null = null;
+			try {
+				const output = await reader.read();
+				descendant = Process.fromPid(Number.parseInt(new TextDecoder().decode(output.value), 10));
+				if (!descendant) throw new Error("Descendant exited before termination");
+				expect(descendant.status()).toBe(ProcessStatus.Running);
+				// Killed rather than left to finish: the subreaper entrypoint waits on
+				// its adopted children, so a root allowed to exit on its own has no
+				// survivors to miss and cannot exercise this at all.
+				process.kill(child.pid, "SIGKILL");
+				spinUntilUnreapedExit(child);
+				expect(child.proc.exitCode).toBeNull();
+				const outcome = await child.killAndWait(undefined, -1).then(
+					() => "swept",
+					(error: unknown) => String(error),
+				);
+				expect(outcome).toContain("Subreaper tree unreachable");
+				expect(descendant.status()).toBe(ProcessStatus.Running);
+			} finally {
+				descendant?.killTree(9);
+				// The root is killed mid-test, but only once the reads above have
+				// succeeded; a parse or pin failure before that leaves the wrapper
+				// holding its 30s sleep.
+				child.kill(undefined, -1);
+				await child.proc.exited;
+				await reader.cancel();
+			}
+		},
+	);
+
+	it.skipIf(process.platform !== "linux")(
+		"refuses a dead subreaper root it cannot enumerate even with nothing left running",
+		async () => {
+			// The deliberate cost of the refusal above, pinned so it cannot be
+			// weakened by accident. This root leaves no survivors — the subreaper
+			// entrypoint waits on its adopted children before exiting — but that is
+			// not something the caller can establish after the fact: the walk that
+			// would show it empty is the same walk that answers empty for a tree
+			// full of reparented survivors. Reporting the difference would mean
+			// claiming knowledge the exited root took with it.
+			const child = spawn(["/bin/sh", "-c", "exit 0"], { subreaper: true });
+			try {
+				await child.proc.exited;
+				expect(child.proc.exitCode).toBe(0);
+				const outcome = await child.killAndWait(undefined, -1).then(
+					() => "swept",
+					(error: unknown) => String(error),
+				);
+				expect(outcome).toContain("Subreaper tree unreachable");
+			} finally {
+				await child.proc.exited;
+			}
+		},
+	);
+
+	it.skipIf(process.platform !== "linux")(
+		"sweeps a dead subreaper root's group instead of hard-killing its empty tree",
+		async () => {
+			// Same unreaped window, but this shape pinned a group leader. The fast
+			// path must yield to it: entering on a lagging `exitCode` preempted the
+			// group sweep with a walk that could no longer see anything.
+			const child = spawn(["/bin/sh", "-c", "sleep 30 2>/dev/null & echo $!"], {
+				detached: true,
+				subreaper: true,
+			});
+			const reader = child.stdout.getReader();
+			let descendant: Process | null = null;
+			try {
+				const output = await reader.read();
+				descendant = Process.fromPid(Number.parseInt(new TextDecoder().decode(output.value), 10));
+				if (!descendant) throw new Error("Descendant exited before termination");
+				process.kill(child.pid, "SIGKILL");
+				spinUntilUnreapedExit(child);
+				const outcome = await child.killAndWait(undefined, -1).then(
+					() => "swept",
+					(error: unknown) => String(error),
+				);
+				// Two arms for the same reason as the reaped-root group case above:
+				// which one runs is the kernel's pidfd group scope. Both are named,
+				// because "anything but the refusal" would also accept a group sweep
+				// that silently reached nothing.
+				if (outcome === "swept") {
+					expect(descendant.status()).toBe(ProcessStatus.Exited);
+				} else {
+					expect(outcome).toContain("cannot be proven to still be ours");
+					expect(descendant.status()).toBe(ProcessStatus.Running);
+				}
+			} finally {
+				descendant?.killTree(9);
+				child.kill(undefined, -1);
+				await child.proc.exited;
+				await reader.cancel();
+			}
+		},
+	);
+
 	it.skipIf(process.platform === "win32")("never reports a termination it had no reference to attempt", async () => {
 		// A host that refuses `pidfd_open`, or has no `/proc`, hands kill() nothing
 		// to signal through while the child is still running. Awaiting only the

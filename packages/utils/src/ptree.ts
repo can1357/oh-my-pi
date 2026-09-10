@@ -371,10 +371,14 @@ export class ChildProcess<In extends InMask = InMask> {
 			// group leader; wait() still needs to report the later deadline.
 			if (this.proc.exitCode !== null) this.#exitReason = reason;
 		}
-		if (gracefulMs !== undefined && gracefulMs < 0 && this.#hardKillTree && this.proc.exitCode === null) {
+		if (gracefulMs !== undefined && gracefulMs < 0 && this.#hardKillTree && this.#rootIsLive()) {
 			// terminate() sends its polite wave to the root before rebuilding the
 			// hard-kill tree. A subreaper root can die in that gap and release its
 			// adopted descendants, so snapshot and hard-kill the live tree first.
+			// Liveness is the kernel's answer, not Bun's: `children_checked`
+			// answers a root it finds already gone with an empty walk marked
+			// complete, so entering here on the strength of a lagging `exitCode`
+			// buys a hard-kill of nothing that reports the tree swept.
 			const root = Process.fromPid(this.proc.pid);
 			if (root) {
 				this.#terminating = Promise.try(() => root.killTreeAndWait());
@@ -402,6 +406,24 @@ export class ChildProcess<In extends InMask = InMask> {
 			// Windows Toolhelp descendant walk identity-safe after root exit.
 			const root = this.#windowsRootProcess;
 			this.#terminating = Promise.try(() => root.killTreeAndWait());
+			void this.#terminating.catch(() => {});
+			return;
+		}
+		if (this.#hardKillTree && !this.#rootIsLive()) {
+			// A subreaper root this cannot establish as running is the one shape
+			// nothing here can sweep. Once it is gone its adopted descendants have
+			// been reparented away, so no walk rooted at its pid names them, and it
+			// leads no group to reach them through — the two branches above are
+			// exactly the cases where a pin exists, and neither took this one.
+			// Falling through would call terminate(), whose capture answers a dead
+			// root with an empty plan and reports the tree gone; refusing says the
+			// sweep did not happen instead of claiming one that swept nothing. The
+			// unreferenceable case joins it rather than being separated out: a root
+			// that cannot be probed cannot be walked either, so the sweep is just as
+			// absent, and only the reason for it differs.
+			this.#terminating = Promise.reject(
+				new Error(`Subreaper tree unreachable: root ${this.pid} is gone or cannot be referenced`),
+			);
 			void this.#terminating.catch(() => {});
 			return;
 		}
