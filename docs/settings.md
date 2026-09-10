@@ -726,6 +726,8 @@ statusLine:
 - `segmentOptions.token_total.breakdown: true` renders labeled totals like `in:25K out:5`.
 - `segmentOptions.context_pct.compact: true` renders `ctx:9.1%` instead of the default `<percent>/<window>` form.
 
+The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
+
 ### Interaction
 
 | Key                    | Type    | Default         | Values                                                                                                  |
