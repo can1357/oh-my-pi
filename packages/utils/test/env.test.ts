@@ -13,6 +13,14 @@ import { getPreloadedProjectEnv, preloadProjectEnv } from "@oh-my-pi/pi-utils/en
 
 const tempDirs: string[] = [];
 const runtimeProbePath = path.join(import.meta.dir, "fixtures", "test-runtime-probe.ts");
+const preloadExitProbePath = path.join(import.meta.dir, "fixtures", "env-preload-exit-probe.ts");
+
+function mkfifo(dir: string): string {
+	const fifo = path.join(dir, ".env");
+	const result = Bun.spawnSync(["mkfifo", fifo]);
+	if (result.exitCode !== 0) throw new Error(`mkfifo failed: ${result.stderr.toString()}`);
+	return fifo;
+}
 
 afterEach(() => {
 	for (const dir of tempDirs.splice(0)) {
@@ -29,22 +37,45 @@ function writeTempEnv(content: string): string {
 }
 
 describe("preloadProjectEnv", () => {
-	it("returns at its deadline when the project dotenv read stalls", async () => {
-		const stalled = Promise.withResolvers<string>();
-		const cwd = path.join(os.tmpdir(), "pi-utils-stalled-env");
-		const startedAt = performance.now();
+	it("captures a present project dotenv and reports a missing one as unavailable", async () => {
+		const dir = path.dirname(writeTempEnv("FOO=bar\n"));
+		await preloadProjectEnv({ cwd: dir });
+		expect(getPreloadedProjectEnv(path.join(dir, ".env"))?.content).toBe("FOO=bar\n");
 
-		await preloadProjectEnv({
-			cwd,
-			timeoutMs: 20,
-			readFile: () => stalled.promise,
-		});
-
-		expect(performance.now() - startedAt).toBeLessThan(500);
-		const preloaded = getPreloadedProjectEnv(path.join(cwd, ".env"));
-		expect(preloaded).toBeDefined();
-		expect(preloaded?.content).toBeUndefined();
+		const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-"));
+		tempDirs.push(emptyDir);
+		await preloadProjectEnv({ cwd: emptyDir });
+		expect(getPreloadedProjectEnv(path.join(emptyDir, ".env"))?.content).toBeUndefined();
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"bounds a stalled project dotenv and leaves the process able to exit",
+		async () => {
+			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-"));
+			tempDirs.push(dir);
+			mkfifo(dir);
+
+			const proc = Bun.spawn([process.execPath, preloadExitProbePath, dir], {
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			// Integration guard: only a real child process exit proves the stalled
+			// read no longer keeps the event loop referenced. Fake timers cannot
+			// drive another process, so a genuine wall-clock ceiling is required;
+			// a regression makes `proc.exited` never resolve and the race reports it.
+			const outcome = await Promise.race([proc.exited, Bun.sleep(4000).then(() => "hang" as const)]);
+			if (outcome === "hang") {
+				proc.kill(9);
+				throw new Error("preload left the event loop referenced; the process could not exit");
+			}
+
+			const stdout = await new Response(proc.stdout).text();
+			const parsed = JSON.parse(stdout) as { elapsedMs: number; content: string | null };
+			expect(outcome).toBe(0);
+			expect(parsed.elapsedMs).toBeLessThan(2000);
+			expect(parsed.content).toBeNull();
+		},
+	);
 });
 
 describe("getDbBusyTimeoutMs", () => {
