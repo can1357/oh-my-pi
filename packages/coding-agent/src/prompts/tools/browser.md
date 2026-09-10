@@ -1,7 +1,7 @@
 Drive real Chromium tabs from JavaScript or Python Eval with the global `browser` object.
 
 <instruction>
-- Static content? Use `read`. Use `browser` for JavaScript execution, authenticated sessions, and interactive actions.
+- Use `browser` for JavaScript execution, authenticated sessions, and interactive actions.
 - JavaScript: `await browser.open(options)` returns a `BrowserTab`; `browser.tab(name)` returns an existing handle; `await browser.close(options)` releases tabs.
 - Python: `await browser.open(name=…, url=…)`, synchronous `browser.tab(name)`, and `await browser.close(name=…)`. Python methods accept keyword arguments.
 - `open` options: `name`, `url`, `app`, `viewport`, `wait_until`, `dialogs`, `timeout`, `persist`.

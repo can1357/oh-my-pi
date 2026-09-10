@@ -1,8 +1,8 @@
-Read files, directories, archives, SQLite, images, documents, internal resources, and web URLs via `path`.
+Read files, directories, archives, SQLite, images, documents, and internal resources{{#if FETCH_ENABLED}}, and web URLs{{/if}} via `path`.
 
 <instruction>
 - SHOULD parallelize independent reads.
-- SHOULD use `read` (not browser) for web content; browser only when `read` can't deliver.
+{{#if FETCH_ENABLED}}- SHOULD use `read` (not browser) for web content; browser only when `read` can't deliver.{{/if}}
 </instruction>
 
 ## Selectors — append `:<sel>` to `path` (e.g. `src/foo.ts:50-200`, `src/foo.ts:raw`, `db.sqlite:users:42`)
@@ -23,7 +23,7 @@ Read files, directories, archives, SQLite, images, documents, internal resources
 - SQLite (`.sqlite`, `.sqlite3`, `.db`, `.db3`): `file.db` (tables), `file.db:table` (schema+rows), `file.db:table:key` (by PK), `?limit=`/`?where=`/`?q=SELECT`.
 - Archives (`.zip` family incl. `.jar`/`.apk`/`.whl`, `.tar` incl. `.tar.{gz,bz2,xz,zst}`, `.rar`, `.7z`, `.iso`, `.cab`, `.deb`/`.rpm`/`.cpio`/`.ar`/`.a`, `.lzh`/`.arj`, `.asar`; single-stream `.gz`/`.bz2`/`.xz`/`.zst`): `archive.ext:path/inside/archive` reads a member.
 - Documents → extracted text. Notebooks → editable cells. Images → decoded inline for vision-capable models (prefer bare image path); `img.png?q=<question>` asks a vision model and returns text (spares context; works on any model). Videos → preview grid plus metadata. SVGs read as text unless `:img` is specified; `:raw` bypasses converters.
-- URLs → reader-mode clean text/markdown; `:raw` → untouched HTML. Bare `host:port` needs trailing slash.
+- {{#if FETCH_ENABLED}}URLs → reader-mode clean text/markdown; `:raw` → untouched HTML. {{/if}}Bare `host:port` needs trailing slash.
 - Internal URIs — all schemes take selectors. `artifact://<id>` recovers spilled output; page with `:N-M`/`:raw:N-M`.
 - `ssh://host/<path>` reads remote file/dir (UTF-8, ≤1 MiB); bare `ssh://` lists hosts; writable with `write` and searchable with `grep`.
   Literal `:`, `?`, `#` → percent-encode (`%3A`/`%3F`/`%23`). Requires a verified POSIX shell on the remote host. For Windows or other unsupported hosts, use `bash` with a remote SSH command or mount with `sshfs`.

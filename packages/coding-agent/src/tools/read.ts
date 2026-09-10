@@ -627,6 +627,16 @@ const readSchemaWithoutMemory = type({
 	path: type("string").describe("Local path, internal URI (e.g. skill://), or URL. Inline selectors are supported."),
 });
 
+const readSchemaWithoutUrl = type({
+	path: type("string").describe(
+		"Local path, internal URI (e.g. memory://, skill://). Inline selectors are supported.",
+	),
+});
+
+const readSchemaWithoutMemoryWithoutUrl = type({
+	path: type("string").describe("Local path, internal URI (e.g. skill://). Inline selectors are supported."),
+});
+
 export type ReadToolInput = typeof readSchema.infer;
 
 export interface ReadToolDetails {
@@ -717,9 +727,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	};
 	readonly label = "Read";
 	readonly loadMode = "essential";
-	description: string;
+	/** Rendered live so a fetch.enabled flip is reflected at the next prompt rebuild (see TaskTool). */
+	get description(): string {
+		return this.#renderDescription();
+	}
 	get parameters(): typeof readSchema {
-		return this.session.settings.get("memory.backend") === "off" ? readSchemaWithoutMemory : readSchema;
+		const memoryOff = this.session.settings.get("memory.backend") === "off";
+		if (!this.session.settings.get("fetch.enabled")) {
+			return memoryOff ? readSchemaWithoutMemoryWithoutUrl : readSchemaWithoutUrl;
+		}
+		return memoryOff ? readSchemaWithoutMemory : readSchema;
 	}
 	readonly strict = true;
 
@@ -735,7 +752,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			1,
 			Math.min(session.settings.get("read.defaultLimit") ?? DEFAULT_MAX_LINES, DEFAULT_MAX_LINES),
 		);
-		this.description = this.#renderDescription();
 	}
 
 	/** Render the description for the current file display mode. */
@@ -746,6 +762,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			DEFAULT_MAX_LINES: String(DEFAULT_MAX_LINES),
 			IS_HL_MODE: displayMode.hashLines,
 			IS_LINE_NUMBER_MODE: !displayMode.hashLines && displayMode.lineNumbers,
+			FETCH_ENABLED: this.session.settings.get("fetch.enabled"),
 		});
 	}
 
