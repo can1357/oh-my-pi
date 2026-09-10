@@ -9,7 +9,11 @@ import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { resolveAgentModelSelection, resolveConfiguredModelPatterns } from "../config/model-resolver";
+import {
+	resolveAgentModelSelection,
+	resolveConfiguredModelPatterns,
+	resolveStrictModelCandidates,
+} from "../config/model-resolver";
 import {
 	type CompactionThresholdPair,
 	validateAgentCompactionThresholdOverrides,
@@ -155,6 +159,8 @@ export interface EffectiveSubagentPolicy {
 	agent: AgentDefinition;
 	effectiveAgent: AgentDefinition;
 	modelOverride?: string[];
+	/** Caller supplied candidates form a closed selection boundary. */
+	modelSelectionClosed?: boolean;
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
 	/** Extension routing note explaining a `before_subagent_spawn` model replacement. */
@@ -357,7 +363,44 @@ export async function resolveEffectiveSubagentPolicy(
 	// Role identity and patterns come from one call so they cannot be derived
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role.
-	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
+	let modelOverride: string[] | undefined;
+	let modelRole: string | undefined;
+	let modelSelectionClosed = false;
+	if (request.model !== undefined) {
+		const candidates = typeof request.model === "string" ? [request.model] : request.model;
+		if (candidates.length === 0 || candidates.some(candidate => candidate.trim().length === 0)) {
+			throw new StructuredSubagentError(
+				"preflight",
+				"Caller model candidates must contain at least one non-empty selector.",
+			);
+		}
+		const modelRegistry = request.session.modelRegistry;
+		if (!modelRegistry) {
+			throw new StructuredSubagentError(
+				"preflight",
+				`Requested model candidates ${candidates.join(", ")} cannot be resolved: model registry unavailable.`,
+			);
+		}
+		const resolved = await resolveStrictModelCandidates(
+			candidates,
+			modelRegistry,
+			request.session.settings,
+			request.session.getSessionId?.() ?? undefined,
+		);
+		if (resolved.patterns.length === 0) {
+			const reasons = resolved.failures.map(failure => `${failure.pattern}: ${failure.reason}`).join("; ");
+			throw new StructuredSubagentError(
+				"preflight",
+				`Requested model candidates ${candidates.join(", ")} are unavailable (${reasons}).`,
+			);
+		}
+		modelOverride = resolved.patterns;
+		modelSelectionClosed = true;
+	} else {
+		const resolved = resolveAgentModelSelection(modelResolution);
+		modelOverride = resolved.patterns;
+		modelRole = resolved.role;
+	}
 	const isolationEnabled = cfgTaskIsolationEnabled.get(request.session.settings);
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && !isolationEnabled) {
@@ -373,6 +416,7 @@ export async function resolveEffectiveSubagentPolicy(
 		effectiveAgent,
 		modelOverride,
 		modelRole,
+		modelSelectionClosed,
 		serviceTierOverride,
 		compactionThresholdOverride,
 		parentActiveModelPattern,
@@ -506,6 +550,7 @@ function buildExecutorOptions(
 		invokedAt: request.invokedAt,
 		acquiredAt: request.acquiredAt,
 		modelOverride: policy.modelOverride,
+		modelSelectionClosed: policy.modelSelectionClosed,
 		modelRole: policy.modelRole,
 		modelRoute: policy.modelRoute,
 		serviceTierOverride: policy.serviceTierOverride,
