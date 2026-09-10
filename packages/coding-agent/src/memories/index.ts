@@ -1001,7 +1001,10 @@ async function applyConsolidation(
 		}
 		await pruneEmptyDirectories(dir);
 	}
-	const dirs = await fs.readdir(skillsDir, { withFileTypes: true }).catch(() => []);
+	const dirs = await fs.readdir(skillsDir, { withFileTypes: true }).catch(error => {
+		if (!isEnoent(error)) logger.warn("Failed to read consolidated skills directory", { skillsDir, error });
+		return [];
+	});
 	for (const dirent of dirs) {
 		if (!dirent.isDirectory()) continue;
 		if (keep.has(dirent.name)) continue;
@@ -1010,7 +1013,10 @@ async function applyConsolidation(
 }
 
 async function listRelativeFiles(rootDir: string, prefix = ""): Promise<string[]> {
-	const entries = await fs.readdir(rootDir, { withFileTypes: true }).catch(() => []);
+	const entries = await fs.readdir(rootDir, { withFileTypes: true }).catch(error => {
+		if (!isEnoent(error)) logger.warn("Failed to list memory files", { rootDir, error });
+		return [];
+	});
 	const files: string[] = [];
 	for (const entry of entries) {
 		const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
@@ -1024,12 +1030,18 @@ async function listRelativeFiles(rootDir: string, prefix = ""): Promise<string[]
 }
 
 async function pruneEmptyDirectories(rootDir: string): Promise<void> {
-	const entries = await fs.readdir(rootDir, { withFileTypes: true }).catch(() => []);
+	const entries = await fs.readdir(rootDir, { withFileTypes: true }).catch(error => {
+		if (!isEnoent(error)) logger.warn("Failed to prune memory directories", { rootDir, error });
+		return [];
+	});
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
 		const child = path.join(rootDir, entry.name);
 		await pruneEmptyDirectories(child);
-		const childEntries = await fs.readdir(child).catch(() => []);
+		const childEntries = await fs.readdir(child).catch((error: unknown) => {
+			if (!isEnoent(error)) logger.warn("Failed to read memory directory", { child, error });
+			return [] as string[];
+		});
 		if (childEntries.length === 0) {
 			await fs.rm(child, { recursive: true, force: true });
 		}

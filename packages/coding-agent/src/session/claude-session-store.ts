@@ -11,7 +11,7 @@ import type {
 	Usage,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, logger } from "@oh-my-pi/pi-utils";
 import { resolveClaudePaths } from "../config/claude-paths";
 import { collectForeignJsonRecords, type ForeignJsonRecord, readForeignJsonRecords } from "./foreign-session-jsonl";
 import type { ForeignSessionInfo, ForeignSessionStore } from "./foreign-session-store";
@@ -126,11 +126,17 @@ async function projectFiles(root: string): Promise<Array<{ file: string; cwd: st
 	const found: Array<{ file: string; cwd: string }> = [];
 	for (const containerName of ["projects", ".projects"]) {
 		const container = path.join(root, containerName);
-		const projects = await fs.readdir(container, { withFileTypes: true }).catch(() => []);
+		const projects = await fs.readdir(container, { withFileTypes: true }).catch(error => {
+			if (!isEnoent(error)) logger.warn("Failed to read Claude projects directory", { container, error });
+			return [];
+		});
 		for (const project of projects) {
 			if (!project.isDirectory()) continue;
 			const directory = path.join(container, project.name);
-			const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+			const entries = await fs.readdir(directory, { withFileTypes: true }).catch(error => {
+				if (!isEnoent(error)) logger.warn("Failed to read Claude project directory", { directory, error });
+				return [];
+			});
 			const cwd = projectCwd(project.name, registered);
 			for (const entry of entries) {
 				if (entry.isFile() && entry.name.endsWith(".jsonl")) {

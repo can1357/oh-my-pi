@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Message, UserMessage } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { visitEntriesFromFileStream } from "../session/session-loader";
 import { SessionManager } from "../session/session-manager";
 import { fingerprintMessage } from "./message-fingerprint";
@@ -82,7 +82,10 @@ export async function loadAdvisorTranscriptCosts(
 	const snapshots: AdvisorTranscriptCostFileSnapshot[] = [];
 	if (sessionFile?.endsWith(JSONL_SUFFIX)) {
 		const directory = sessionFile.slice(0, -JSONL_SUFFIX.length);
-		const dirents = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+		const dirents = await fs.readdir(directory, { withFileTypes: true }).catch(error => {
+			if (!isEnoent(error)) logger.warn("Failed to read advisor transcript directory", { directory, error });
+			return [];
+		});
 		for (const dirent of dirents) {
 			if (options.shouldContinue?.() === false) break;
 			if (!dirent.isFile() || !isAdvisorTranscriptName(dirent.name)) continue;

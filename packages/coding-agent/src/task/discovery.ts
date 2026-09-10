@@ -20,7 +20,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
@@ -47,7 +47,10 @@ interface AgentDirectory {
  * Load agents from a directory.
  */
 async function loadAgentsFromDir({ dir, source, ignoreModel }: AgentDirectory): Promise<AgentDefinition[]> {
-	const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+	const entries = await fs.readdir(dir, { withFileTypes: true }).catch(error => {
+		if (!isEnoent(error)) logger.warn("Failed to read agents directory", { dir, error });
+		return [];
+	});
 	const files = entries
 		.filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
 		.sort((a, b) => a.name.localeCompare(b.name))

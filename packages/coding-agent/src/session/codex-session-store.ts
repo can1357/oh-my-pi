@@ -11,7 +11,7 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, logger } from "@oh-my-pi/pi-utils";
 import { readForeignJsonRecords } from "./foreign-session-jsonl";
 import type { ForeignSessionInfo, ForeignSessionStore } from "./foreign-session-store";
 import type { CompactionEntry, ModelChangeEntry, SessionEntry, SessionMessageEntry } from "./session-entries";
@@ -188,7 +188,8 @@ async function rolloutFiles(directory: string): Promise<string[]> {
 	let entries: fs.Dirent[];
 	try {
 		entries = await fs.promises.readdir(directory, { withFileTypes: true });
-	} catch {
+	} catch (error) {
+		if (!isEnoent(error)) logger.warn("Failed to read Codex rollouts directory", { directory, error });
 		return [];
 	}
 	const files: string[] = [];
@@ -206,7 +207,10 @@ function rolloutId(filePath: string): string {
 }
 
 async function stateDatabasePath(root: string): Promise<string | undefined> {
-	const names = await fs.promises.readdir(root).catch(() => []);
+	const names = await fs.promises.readdir(root).catch(error => {
+		if (!isEnoent(error)) logger.warn("Failed to read Codex sessions directory", { root, error });
+		return [] as string[];
+	});
 	return names
 		.map(name => ({ name, version: /^state_(\d+)\.sqlite$/.exec(name) }))
 		.filter(item => item.version !== null)
