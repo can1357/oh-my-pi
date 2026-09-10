@@ -14,6 +14,7 @@ import {
 	DAEMON_IDLE_GRACE_ENV,
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_RUNTIME_DIR_ENV,
+	type DaemonCompletionNotification,
 	type DaemonSnapshot,
 } from "../../src/launch/protocol";
 
@@ -63,7 +64,49 @@ async function waitForState(
 	throw new Error(`daemon ${name} never reached state ${state}`);
 }
 
-describe("daemon broker restart settling", () => {
+async function waitForReplacement(
+	client: DaemonBrokerClient,
+	name: string,
+	initialStartedAt: number,
+	deadlineMs: number,
+): Promise<DaemonSnapshot> {
+	const deadline = Date.now() + deadlineMs;
+	while (Date.now() < deadline) {
+		const daemon = await snapshotOf(client, name);
+		if (daemon.restartCount > 0 && daemon.startedAt > initialStartedAt) return daemon;
+		await Bun.sleep(25);
+	}
+	throw new Error(`daemon ${name} never launched a replacement generation`);
+}
+
+async function waitForPendingCompletions(
+	runtimeDir: string,
+	name: string,
+	count: number,
+	deadlineMs: number,
+): Promise<void> {
+	const metaPath = path.join(runtimeDir, "daemons", name, "meta.json");
+	const deadline = Date.now() + deadlineMs;
+	while (Date.now() < deadline) {
+		const metadata = (await Bun.file(metaPath).json()) as { pendingCompletions?: unknown[] };
+		if (metadata.pendingCompletions?.length === count) return;
+		await Bun.sleep(25);
+	}
+	throw new Error(`daemon ${name} pending completion count never reached ${count}`);
+}
+
+function firstGenerationExitArgs(projectDir: string, name: string, exitCode = 0): string[] {
+	const marker = path.join(projectDir, `${name}.first-generation`);
+	const script = [
+		'const fs = require("node:fs");',
+		`const marker = ${JSON.stringify(marker)};`,
+		"if (fs.existsSync(marker)) setInterval(() => {}, 1000);",
+		`else { fs.writeFileSync(marker, "done"); setTimeout(() => process.exit(${JSON.stringify(exitCode)}), 100); }`,
+	].join(" ");
+	return ["-e", script];
+}
+
+describe.serial("daemon broker restart settling", () => {
 	it("does not re-settle a restarting detached daemon on ops, keeping stop authoritative", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-restart-");
 		const projectDir = path.join(tempDir.path(), "project");
@@ -195,6 +238,302 @@ describe("daemon broker restart settling", () => {
 			if (processRef?.status() === "running") {
 				await processRef.terminate({ group: true, gracefulMs: 0, timeoutMs: 2_000 });
 			}
+			process.title = previousTitle;
+		}
+	}, 20_000);
+	it("delivers completion for the exited generation before automatic restart", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-completion-restart-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+
+		const previousTitle = process.title;
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const broker = startBroker(projectDir, runtimeDir);
+		const name = "completion-restart";
+		const owner = "completion-owner";
+		const completions: DaemonCompletionNotification[] = [];
+		const firstCompletion = Promise.withResolvers<DaemonCompletionNotification>();
+		let unregister: (() => void) | undefined;
+		try {
+			unregister = client.onCompletion(owner, notification => {
+				completions.push(notification);
+				if (completions.length === 1) firstCompletion.resolve(notification);
+			});
+			await client.request({ op: "ping" });
+
+			const started = await client.request({
+				op: "start",
+				owner,
+				spec: {
+					name,
+					application: process.execPath,
+					args: firstGenerationExitArgs(projectDir, name),
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "always",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (started.op !== "start") throw new Error(`unexpected result: ${started.op}`);
+
+			const metadataBefore = (await Bun.file(path.join(runtimeDir, "daemons", name, "meta.json")).json()) as {
+				completionEvents?: boolean;
+				completionSubscriptionId?: string;
+			};
+			expect(metadataBefore.completionEvents).toBe(true);
+			expect(typeof metadataBefore.completionSubscriptionId).toBe("string");
+
+			const completion = await firstCompletion.promise;
+			expect(completion).toMatchObject({
+				event: "daemon-completed",
+				completionId: expect.any(String),
+				owner,
+				daemon: {
+					id: started.daemon.id,
+					state: "exited",
+					exitCode: 0,
+					restartCount: 0,
+				},
+			});
+			expect(completions).toHaveLength(1);
+
+			const replacement = await waitForReplacement(client, name, completion.daemon.startedAt, 5_000);
+			expect(replacement.id).toBe(completion.daemon.id);
+			expect(replacement.restartCount).toBe(1);
+			expect(replacement.startedAt).toBeGreaterThan(completion.daemon.startedAt);
+
+			const metadataAfter = (await Bun.file(path.join(runtimeDir, "daemons", name, "meta.json")).json()) as {
+				completionSubscriptionId?: string;
+			};
+			expect(metadataAfter.completionSubscriptionId).toBe(metadataBefore.completionSubscriptionId);
+			const stopped = await client.request({ op: "stop", name, timeoutMs: 2_000 });
+			if (stopped.op !== "stop") throw new Error(`unexpected result: ${stopped.op}`);
+			expect(stopped.daemon.state).toBe("exited");
+			expect(completions).toHaveLength(1);
+		} finally {
+			await client.request({ op: "stop", name, timeoutMs: 2_000 }).catch(() => undefined);
+			unregister?.();
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			process.title = previousTitle;
+		}
+	}, 20_000);
+
+	it("delivers failed completion before an on-failure restart", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-failed-completion-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+
+		const previousTitle = process.title;
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const broker = startBroker(projectDir, runtimeDir);
+		const name = "failed-completion";
+		const owner = "failed-completion-owner";
+		const completion = Promise.withResolvers<DaemonCompletionNotification>();
+		const completions: DaemonCompletionNotification[] = [];
+		let unregister: (() => void) | undefined;
+		try {
+			unregister = client.onCompletion(owner, notification => {
+				completions.push(notification);
+				if (completions.length === 1) completion.resolve(notification);
+			});
+			await client.request({ op: "ping" });
+
+			const started = await client.request({
+				op: "start",
+				owner,
+				spec: {
+					name,
+					application: process.execPath,
+					args: firstGenerationExitArgs(projectDir, name, 7),
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "on-failure",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (started.op !== "start") throw new Error(`unexpected result: ${started.op}`);
+
+			const notification = await completion.promise;
+			expect(notification).toMatchObject({
+				event: "daemon-completed",
+				completionId: expect.any(String),
+				owner,
+				daemon: {
+					id: started.daemon.id,
+					state: "failed",
+					exitCode: 7,
+					restartCount: 0,
+				},
+			});
+			const replacement = await waitForReplacement(client, name, notification.daemon.startedAt, 5_000);
+			expect(replacement.id).toBe(notification.daemon.id);
+			expect(replacement.restartCount).toBe(1);
+			expect(replacement.startedAt).toBeGreaterThan(notification.daemon.startedAt);
+			const stopped = await client.request({ op: "stop", name, timeoutMs: 2_000 });
+			if (stopped.op !== "stop") throw new Error(`unexpected result: ${stopped.op}`);
+			expect(stopped.daemon.state).toBe("exited");
+			expect(completions).toHaveLength(1);
+		} finally {
+			await client.request({ op: "stop", name, timeoutMs: 2_000 }).catch(() => undefined);
+			unregister?.();
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			process.title = previousTitle;
+		}
+	}, 20_000);
+
+	it("keeps a successful on-failure completion terminal", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-terminal-completion-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+
+		const previousTitle = process.title;
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const broker = startBroker(projectDir, runtimeDir);
+		const name = "terminal-completion";
+		const owner = "terminal-completion-owner";
+		const completion = Promise.withResolvers<DaemonCompletionNotification>();
+		const completions: DaemonCompletionNotification[] = [];
+		let unregister: (() => void) | undefined;
+		try {
+			unregister = client.onCompletion(owner, notification => {
+				completions.push(notification);
+				if (completions.length === 1) completion.resolve(notification);
+			});
+			await client.request({ op: "ping" });
+
+			const started = await client.request({
+				op: "start",
+				owner,
+				spec: {
+					name,
+					application: process.execPath,
+					args: firstGenerationExitArgs(projectDir, name),
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "on-failure",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (started.op !== "start") throw new Error(`unexpected result: ${started.op}`);
+
+			const notification = await completion.promise;
+			expect(notification).toMatchObject({
+				event: "daemon-completed",
+				completionId: expect.any(String),
+				owner,
+				daemon: {
+					id: started.daemon.id,
+					state: "exited",
+					exitCode: 0,
+					restartCount: 0,
+				},
+			});
+			const terminal = await snapshotOf(client, name);
+			expect(terminal.state).toBe("exited");
+			expect(terminal.restartCount).toBe(0);
+			expect(completions).toHaveLength(1);
+		} finally {
+			await client.request({ op: "stop", name, timeoutMs: 2_000 }).catch(() => undefined);
+			unregister?.();
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			process.title = previousTitle;
+		}
+	}, 20_000);
+
+	it("replays an unacknowledged restart completion to a reconnecting owner", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-completion-replay-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+
+		const previousTitle = process.title;
+		const firstClient = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const broker = startBroker(projectDir, runtimeDir);
+		const name = "completion-replay";
+		const owner = "reconnecting-owner";
+		const firstAck = Promise.withResolvers<void>();
+		const firstDelivered = Promise.withResolvers<DaemonCompletionNotification>();
+		const firstCompletions: DaemonCompletionNotification[] = [];
+		const replayedCompletions: DaemonCompletionNotification[] = [];
+		let unregisterFirst: (() => void) | undefined;
+		let secondClient: DaemonBrokerClient | undefined;
+		let unregisterSecond: (() => void) | undefined;
+		try {
+			unregisterFirst = firstClient.onCompletion(owner, notification => {
+				firstCompletions.push(notification);
+				firstDelivered.resolve(notification);
+				return firstAck.promise;
+			});
+			await firstClient.request({ op: "ping" });
+
+			const started = await firstClient.request({
+				op: "start",
+				owner,
+				spec: {
+					name,
+					application: process.execPath,
+					args: firstGenerationExitArgs(projectDir, name),
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "always",
+					persist: true,
+					detached: false,
+				},
+			});
+			if (started.op !== "start") throw new Error(`unexpected result: ${started.op}`);
+
+			const completion = await firstDelivered.promise;
+			await waitForPendingCompletions(runtimeDir, name, 1, 5_000);
+			const metadata = (await Bun.file(path.join(runtimeDir, "daemons", name, "meta.json")).json()) as {
+				pendingCompletions?: Array<{ completionId: string }>;
+			};
+			expect(metadata.pendingCompletions?.map(pending => pending.completionId)).toEqual([completion.completionId]);
+
+			firstClient.close();
+			secondClient = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+			const replayed = Promise.withResolvers<DaemonCompletionNotification>();
+			unregisterSecond = secondClient.onCompletion(owner, notification => {
+				replayedCompletions.push(notification);
+				replayed.resolve(notification);
+			});
+			await secondClient.request({ op: "ping" });
+
+			const replay = await replayed.promise;
+			expect(replay.completionId).toBe(completion.completionId);
+			expect(replay.daemon.id).toBe(started.daemon.id);
+			expect(firstCompletions).toHaveLength(1);
+			expect(replayedCompletions).toHaveLength(1);
+
+			firstAck.resolve();
+			await waitForPendingCompletions(runtimeDir, name, 0, 5_000);
+			await secondClient.request({ op: "ping" });
+			expect(replayedCompletions).toHaveLength(1);
+		} finally {
+			firstAck.resolve();
+			unregisterSecond?.();
+			unregisterFirst?.();
+			const controlClient = secondClient ?? firstClient;
+			await controlClient.request({ op: "stop", name, timeoutMs: 2_000 }).catch(() => undefined);
+			await controlClient.request({ op: "shutdown" }).catch(() => undefined);
+			secondClient?.close();
+			firstClient.close();
+			await broker;
 			process.title = previousTitle;
 		}
 	}, 20_000);

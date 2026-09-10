@@ -968,6 +968,22 @@ class DaemonBroker {
 		const shouldRestart =
 			!record.stopRequested &&
 			(record.spec.restart === "always" || (record.spec.restart === "on-failure" && failed));
+		const completionState: DaemonSnapshot["state"] = failed && !record.stopRequested ? "failed" : "exited";
+		const completion =
+			record.snapshot.owner !== undefined &&
+			!record.stopRequested &&
+			this.#completionSubscriptions.has(record.snapshot.owner)
+				? ({
+						event: "daemon-completed",
+						completionId: crypto.randomUUID(),
+						owner: record.snapshot.owner,
+						// Automatic restart still completes this child generation. Keep the
+						// notification terminal while the managed record transitions to
+						// `restarting` for the replacement generation.
+						daemon: { ...record.snapshot, state: completionState },
+					} satisfies DaemonCompletionNotification)
+				: undefined;
+		if (completion) record.pendingCompletions.push(completion);
 		if (shouldRestart && !this.#shuttingDown) {
 			const uptime = Date.now() - record.snapshot.startedAt;
 			record.consecutiveFailures = uptime >= 30_000 ? 0 : record.consecutiveFailures + 1;
@@ -990,21 +1006,17 @@ class DaemonBroker {
 				record.restartTimer = undefined;
 				void this.#launch(record);
 			}, delay);
+			if (
+				completion &&
+				!record.stopRequested &&
+				this.#completionSubscriptions.has(completion.owner) &&
+				record.pendingCompletions.some(pending => pending.completionId === completion.completionId)
+			) {
+				this.#notifyCompletion(completion);
+			}
 			return;
 		}
-		record.snapshot.state = failed && !record.stopRequested ? "failed" : "exited";
-		const completion =
-			record.snapshot.owner !== undefined &&
-			!record.stopRequested &&
-			this.#completionSubscriptions.has(record.snapshot.owner)
-				? ({
-						event: "daemon-completed",
-						completionId: crypto.randomUUID(),
-						owner: record.snapshot.owner,
-						daemon: { ...record.snapshot },
-					} satisfies DaemonCompletionNotification)
-				: undefined;
-		if (completion) record.pendingCompletions.push(completion);
+		record.snapshot.state = completionState;
 		this.#persist(record);
 		await record.log?.close();
 		record.log = undefined;
