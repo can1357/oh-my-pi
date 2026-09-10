@@ -634,9 +634,9 @@ export class CollabHost {
 	 */
 	#handleHello(name: unknown, proto: unknown, writeToken: unknown, fromPeer: number): void {
 		if (proto !== COLLAB_PROTO) {
-			// `proto` is guest-controlled, so the reply that quotes it back is too: a
-			// 100,000-character one measured 100,047 bytes. Labelled here for the
-			// reader, bounded by #sendError regardless.
+			// `proto` is guest-controlled, so the reply that quotes it back would be
+			// too — unbounded, it was as long as the guest chose. Labelled here for the
+			// reader, and bounded by #sendError regardless of what reaches it.
 			this.#sendError(
 				`protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${this.#label(proto)}`,
 				fromPeer,
@@ -1028,8 +1028,9 @@ export class CollabHost {
 		// reply below embeds it and a guest chooses its length; and it is only ever a
 		// string, because interpolating a nested array throws `RangeError` out of the
 		// reply — measured reachable, since a 5,000-deep one survives `JSON.stringify`
-		// and `JSON.parse` on the way here, which stop carrying it somewhere between
-		// 35,000 and 40,000.
+		// and `JSON.parse` on the way here. Where serialization stops carrying it is
+		// stack-bound and varies by runtime, so this depends on 5,000 working rather
+		// than on where the ceiling is.
 		//
 		// Bounded two ways, because the reasons differ and only one of them is
 		// anonymity. An id that is absent or not a string names nothing, and saying so
@@ -1105,10 +1106,10 @@ export class CollabHost {
 	async #handleFetchTranscript(reqId: unknown, agentId: unknown, fromByte: unknown, fromPeer: number): Promise<void> {
 		// The reply echoes both of these back — `reqId` so the guest can match it to
 		// its request, `fromByte` as the resume point — so this frame is a second
-		// carrier for a guest value, and #sendError cannot reach it. A 100,000-
-		// character `reqId` measured a 100,051-byte reply. Narrowed rather than
-		// truncated: neither is a label, and a correlation id the host altered would
-		// match nothing at the other end.
+		// carrier for a guest value, and #sendError cannot reach it: unnarrowed, a
+		// `reqId` came back at whatever length it arrived. Narrowed rather than
+		// truncated, because neither field is a label — a correlation id the host
+		// altered would match nothing at the other end.
 		// Safe integers, not merely finite: `fromByte` is a byte offset handed to
 		// `read`, and `reqId` is matched by identity at the other end. `Number.isFinite`
 		// admits -1, 0.5 and 2 ** 53, none of which is either of those things.

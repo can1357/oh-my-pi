@@ -272,15 +272,15 @@ describe("collab chunked welcome (#3144)", () => {
 	it("rejects the pending join when the resume failure cannot be converted to text", async () => {
 		// Same seam as the test above, with a rejection value that `String` throws on.
 		// Both the warning and the rejection that settles the join render it, and both
-		// sit inside the one catch — so rendering it unsafely throws there instead,
-		// `firstWelcome` is never settled, and `join()` neither resolves nor rejects.
+		// sit inside the one catch — so rendering it unsafely throws there instead and
+		// `firstWelcome` is never settled.
 		//
-		// Raced against a count of event-loop turns, not a clock. A wall-clock budget
-		// has to out-wait the slowest legitimate run, so it either flakes on a loaded
-		// runner or gets raised until it proves nothing; a turn count costs whatever
-		// the machine takes and still terminates. Simply awaiting the rejection is
-		// worse than either: measured, the unfixed code hangs the whole file rather
-		// than tripping the per-test timeout, so the oracle has to be here.
+		// The oracle is which reason settles the join, not how long it takes to. Every
+		// budget tried here was a race in disguise: a 500 ms timer against a ~317 ms
+		// path, then 500 event-loop turns, which still lost 2 runs in 6. Closing the
+		// socket rejects a still-pending join with the close reason, so the two
+		// outcomes are distinguishable by value — the write path settles it first, or
+		// the close does. No clock and no turn count decides it.
 		const failure = {
 			toString() {
 				throw new Error("cannot render me");
@@ -290,24 +290,23 @@ describe("collab chunked welcome (#3144)", () => {
 		const unregister = logger.registerLogSink(event => {
 			if (event.message.includes("frame apply failed")) records.push(event.context ?? {});
 		});
-		const writeSpy = spyOn(Bun, "write").mockRejectedValue(failure);
+		// Signals the instant the resume path starts failing, so the drain below has a
+		// defined starting point rather than a guessed one.
+		const wrote = Promise.withResolvers<void>();
+		const writeSpy = spyOn(Bun, "write").mockImplementation(() => {
+			wrote.resolve();
+			return Promise.reject(failure);
+		});
 		const guest = new CollabGuestLink(makeFailingGuestContext(failure));
 		const joinAttempt = guest.join(host.link);
 		try {
-			const stillPending = Symbol("still pending");
-			const settled = await Promise.race([
-				joinAttempt.then(
-					() => "resolved" as unknown,
-					(err: unknown) => err,
-				),
-				(async () => {
-					for (let turn = 0; turn < 500; turn++) await new Promise(resolve => setImmediate(resolve));
-					return stillPending;
-				})(),
-			]);
-			expect(settled).not.toBe(stillPending);
-			expect(settled).toBeInstanceOf(Error);
-			expect((settled as Error).message).toContain("(unprintable error)");
+			await wrote.promise;
+			// `mockImplementation` hands back an already-rejected promise, so everything
+			// between here and the catch is microtasks — ordered by specification, not
+			// by the scheduler — and a fixed drain reaches the end of them.
+			for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+			await guest.leave("closing to settle the join");
+			await expect(joinAttempt).rejects.toThrow("(unprintable error)");
 			expect(records[0]?.error).toBe("(unprintable error)");
 		} finally {
 			unregister();

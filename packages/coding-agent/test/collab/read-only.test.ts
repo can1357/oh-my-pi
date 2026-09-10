@@ -397,8 +397,9 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		// Reachable, unlike a value this client cannot even send: 5,000 levels survive
 		// `JSON.stringify` and `JSON.parse` on the way here, and then throw
 		// `RangeError` out of the interpolation that quotes them, back into the
-		// silent-drop class. `CollabSocket.send` stops carrying them somewhere between
-		// 35,000 and 40,000, so the depth here is well inside what it will serialize.
+		// silent-drop class. Where `CollabSocket.send` stops carrying them is
+		// stack-bound and varies by runtime; 5,000 is far enough inside it that the
+		// test does not depend on knowing the ceiling.
 		let nested: unknown[] = [];
 		const root = nested;
 		for (let i = 0; i < 5_000; i++) {
@@ -510,7 +511,7 @@ describe("collab frames a guest can send that the host must still answer", () =>
 
 		// A second carrier, and one #sendError cannot reach: the transcript reply
 		// echoes `reqId` so the guest can match it and `fromByte` as the resume
-		// point. A 100,000-character reqId measured a 100,051-byte reply.
+		// point — unnarrowed, one came back at whatever length it arrived at.
 		const huge = "r".repeat(100_000);
 		guest.socket.send({ t: "fetch-transcript", reqId: huge, agentId: "nope", fromByte: 0 } as unknown as CollabFrame);
 		const reply = await guest.nextFrame();
@@ -642,18 +643,18 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		// read and dropped. It is not: the image goes into a session message, is
 		// persisted, and is handed to shrinkForReplication, which measures it with
 		// `JSON.stringify` before walking it — both recurse, so a deep value can take
-		// either step down and which one goes first is not fixed.
+		// either step down, and which one it reaches first is a property of the
+		// runtime rather than of the payload.
 		//
 		// Sent past `CollabSocket.send` deliberately, and the reason is structural
-		// rather than a matter of thresholds. `JSON.stringify` and the walk both
-		// recurse, so both are bounded by the stack and both give out somewhere a
-		// runtime and its stack budget decide — measured together here between 35,000
-		// and 40,000, and separately on other hardware. `JSON.parse` is iterative and
-		// took 500,000 levels of hand-built text in a probe without complaint. That
-		// asymmetry is the durable part: a client that serializes with this library
-		// cannot build a payload the host's own walk will refuse, and one that emits
-		// bytes directly can. This builds the frame the way the second client would,
-		// at the 100,000 levels asserted below.
+		// rather than a matter of thresholds. `JSON.stringify` and `shrinkWalk` both
+		// recurse, so both are bounded by the stack; where each gives out, and which
+		// gives out first, depends on the runtime and its stack budget and has
+		// measured differently on different machines. `JSON.parse` does not recurse.
+		// That asymmetry is the durable part and the numbers are not: a client that
+		// serializes with this library cannot build a payload the host's own walk
+		// will refuse, and one that emits bytes directly can. This builds the frame
+		// the way the second client would.
 		const depth = 100_000;
 		const nested = `${"[".repeat(depth)}${"]".repeat(depth)}`;
 		const raw = `{"t":"prompt","text":"carry me","images":[{"type":"image","data":"AAAA","mimeType":"image/png","somethingNewer":${nested}}]}`;
