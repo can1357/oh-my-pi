@@ -296,12 +296,14 @@ function compileFallback(node: FallbackNode, seenOnPath: ReadonlySet<string>): N
 			byFrom = {};
 			fallbacksByFrom[disposition] = byFrom;
 		}
-		for (let i = 0; i < childTargetGroups.length - 1; i++) {
+		for (let i = 0; i < childTargetGroups.length; i++) {
 			const later = childTargetGroups.slice(i + 1).flat();
-			if (later.length === 0) continue;
+			const balanced = node.children[i]?.type === "balance";
+			if (later.length === 0 && !balanced) continue;
 			for (const from of childTargetGroups[i]!) {
 				const existing = byFrom[from];
-				byFrom[from] = existing ? [...existing, ...later] : [...later];
+				const siblings = balanced ? childTargetGroups[i]!.filter(target => target !== from) : [];
+				byFrom[from] = [...new Set([...(existing ?? []), ...siblings, ...later])];
 			}
 		}
 	}
@@ -380,23 +382,22 @@ function copyNode(node: RouteNode): RouteNode {
  * for runtime policy; targets stay the DFS union for failover listing.
  */
 export function pickInitialRouteTarget(compiled: CompiledRoute, salt = 0): string | undefined {
-	if (compiled.targets.length === 0) return undefined;
-	if (compiled.root.type !== "balance") return compiled.targets[0];
-	if (compiled.root.strategy === "weighted") {
-		let best: string | undefined;
-		let bestWeight = Number.NEGATIVE_INFINITY;
-		for (const child of compiled.root.children) {
-			if (child.type !== "target") continue;
-			const weight = child.weight ?? 1;
-			if (weight > bestWeight) {
-				bestWeight = weight;
-				best = child.model;
-			}
+	const choose = (node: RouteNode): string | undefined => {
+		if (node.type === "target") return node.model;
+		if (node.type === "route-ref" || node.children.length === 0) return undefined;
+		let selected = node.children[0]!;
+		if (node.type === "balance") {
+			if (node.strategy === "rr") selected = node.children[Math.abs(salt) % node.children.length]!;
+			else
+				for (const child of node.children) {
+					const weight = child.type === "target" ? (child.weight ?? 1) : 1;
+					const selectedWeight = selected.type === "target" ? (selected.weight ?? 1) : 1;
+					if (weight > selectedWeight) selected = child;
+				}
 		}
-		return best ?? compiled.targets[0];
-	}
-	const idx = Math.abs(salt) % compiled.targets.length;
-	return compiled.targets[idx];
+		return choose(selected);
+	};
+	return choose(compiled.root);
 }
 
 function mergeFallbacksByFrom(

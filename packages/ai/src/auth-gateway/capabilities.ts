@@ -58,8 +58,8 @@ export function capabilitiesFor(model: Model<Api>): ModelCapabilities {
 	return {
 		text: true,
 		vision: model.input.includes("image"),
-		tools: true,
-		parallelTools: true,
+		tools: model.supportsTools !== false,
+		parallelTools: model.supportsTools !== false,
 		reasoning: model.reasoning,
 		responsesApi:
 			model.api.includes("responses") || model.api === "openai-codex-responses" || model.api === "openai-responses",

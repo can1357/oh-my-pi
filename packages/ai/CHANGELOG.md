@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Route selection respects disabled tool support and nested balancing strategies.
 - Fixed conditional and domain routing, forward route references, Gemini multimodal requests, and token estimates that omitted system prompts or tools.
 
 - Honour balance rr/weighted strategies on first dispatch, and resolve replaceAll route-refs against the complete incoming definition set.
