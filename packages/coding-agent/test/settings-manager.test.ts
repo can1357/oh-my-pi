@@ -21,7 +21,7 @@ import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/tools/image-providers";
 import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
-import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -149,6 +149,29 @@ describe("Settings", () => {
 			const content = await Bun.file(getConfigPath()).text();
 			expect(content).not.toMatch(/: +$/m);
 			expect(YAML.parse(content)).toEqual({ custom, theme: { dark: "titanium" } });
+		});
+	});
+
+	describe("status line segment validation", () => {
+		it("logs each unknown configured segment once while preserving the config", async () => {
+			await writeSettings({
+				statusLine: {
+					preset: "custom",
+					leftSegments: ["modle", "git", "modle"],
+					rightSegments: ["usage", "sesion", "modle"],
+				},
+			});
+			const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(JSON.stringify(settings.get("statusLine.leftSegments"))).toBe('["modle","git","modle"]');
+			expect(
+				warn.mock.calls.filter(([message]) => String(message).startsWith("Settings: unknown status line segment")),
+			).toEqual([
+				['Settings: unknown status line segment "modle"', { setting: "statusLine.leftSegments" }],
+				['Settings: unknown status line segment "sesion"', { setting: "statusLine.rightSegments" }],
+			]);
 		});
 	});
 

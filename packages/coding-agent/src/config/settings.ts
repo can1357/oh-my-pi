@@ -51,6 +51,7 @@ import {
 	type GroupTypeMap,
 	getDefault,
 	SETTINGS_SCHEMA,
+	STATUS_LINE_SEGMENT_IDS,
 	type SettingPath,
 	type SettingValue,
 } from "./settings-schema";
@@ -58,6 +59,30 @@ import {
 // Re-export types that callers need
 export type * from "./settings-schema";
 export * from "./settings-schema";
+
+const STATUS_LINE_SEGMENT_PATHS = ["statusLine.leftSegments", "statusLine.rightSegments"] as const;
+const warnedUnknownStatusLineSegments = new Set<string>();
+
+function getUnknownStatusLineSegments(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	const unknown = new Set<string>();
+	for (const segment of value) {
+		if (!STATUS_LINE_SEGMENT_IDS.some(id => id === segment)) {
+			unknown.add(typeof segment === "string" ? JSON.stringify(segment) : String(segment));
+		}
+	}
+	return [...unknown];
+}
+
+function assertKnownStatusLineSegments(path: SettingPath, value: unknown): void {
+	if (path !== "statusLine.leftSegments" && path !== "statusLine.rightSegments") return;
+	const unknown = getUnknownStatusLineSegments(value);
+	if (unknown.length === 0) return;
+	const noun = unknown.length === 1 ? "segment" : "segments";
+	throw new Error(
+		`Unknown status line ${noun}: ${unknown.join(", ")}. Valid segments: ${STATUS_LINE_SEGMENT_IDS.join(", ")}`,
+	);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
@@ -661,6 +686,7 @@ export class Settings {
 	 * Triggers hooks for settings that have side effects.
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		assertKnownStatusLineSegments(path, value);
 		const prev = this.get(path);
 		const segments = path.split(".");
 		this.#captureGlobalMutation(path, this.#modifiedPathMutations, getByPath(this.#global, segments));
@@ -2959,12 +2985,24 @@ export class Settings {
 		return filteredRoles ? { ...this.#project, modelRoles: filteredRoles } : this.#project;
 	}
 
+	#warnUnknownStatusLineSegments(): void {
+		for (const path of STATUS_LINE_SEGMENT_PATHS) {
+			const value = getByPath(this.#merged, SETTING_PATH_SEGMENTS[path]);
+			for (const segment of getUnknownStatusLineSegments(value)) {
+				if (warnedUnknownStatusLineSegments.has(segment)) continue;
+				warnedUnknownStatusLineSegments.add(segment);
+				logger.warn(`Settings: unknown status line segment ${segment}`, { setting: path });
+			}
+		}
+	}
+
 	#rebuildMerged(): void {
 		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
 		this.#merged = this.#deepMerge(this.#merged, this.#configOverlay);
 		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
 		this.#resolvedCache.clear();
 		this.#editVariantCache = undefined;
+		this.#warnUnknownStatusLineSegments();
 	}
 
 	#fireAllHooks(): void {
@@ -3256,6 +3294,7 @@ export function resetSettingsForTest(): void {
 		ref.deref()?.cancelPendingSaves();
 	}
 	liveSettingsInstances.clear();
+	warnedUnknownStatusLineSegments.clear();
 	globalInstance = null;
 	globalInstancePromise = null;
 	clearBoundSettingsMethods();
