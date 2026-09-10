@@ -274,7 +274,9 @@ describe("AgentSession retry recovery", () => {
 		try {
 			await Promise.race([rewriteStarted.promise, completion]);
 			// Drain runnable work without releasing the recovery persistence gate.
-			await new Promise<void>(resolve => setImmediate(resolve));
+			const nextImmediate = Promise.withResolvers<void>();
+			setImmediate(nextImmediate.resolve);
+			await nextImmediate.promise;
 			expect(idleResolved).toBe(false);
 			expect(retryEndEvents).toEqual([]);
 		} finally {
