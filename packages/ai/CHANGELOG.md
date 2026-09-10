@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Gateway streaming fallback waits for meaningful output and preserves metadata-only completions.
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed

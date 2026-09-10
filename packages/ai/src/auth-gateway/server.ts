@@ -56,6 +56,7 @@ import {
 	observeSseCommit,
 	StreamCommitGate,
 	type StreamCommitState,
+	observeAssistantCommit,
 } from "./stream-commit-gate";
 import type {
 	AuthGatewayParsedRequestOptions,
@@ -997,6 +998,7 @@ async function handleFormatEndpoint(
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return classifiedError(classified);
 		}
+		if (!commitGateObservesDownstreamSse(route.label)) observeAssistantCommit(events, commitGate);
 		const settled = events.result();
 		void settled.then(message => recordGatewayUsage(bootOpts.storage, model, client, message)).catch(() => {});
 		let sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
@@ -1010,7 +1012,7 @@ async function handleFormatEndpoint(
 		if (route.label === "openai-responses") {
 			sseStream = observeSseCommit(sseStream, commitGate);
 		}
-		const held = await holdSseUntilCommit(sseStream, commitGate, settled, route.label !== "openai-responses");
+		const held = await holdSseUntilCommit(sseStream, commitGate, settled);
 		if (held.type === "failed") {
 			if (held.message && messageHasBillableUsage(held.message)) {
 				const errorMessage =
@@ -1390,6 +1392,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return classifiedError(classified);
 		}
+		if (!commitGateObservesDownstreamSse("pi-native")) observeAssistantCommit(events, commitGate);
 		const settled = events.result();
 		void settled.then(message => recordGatewayUsage(bootOpts.storage, model, client, message)).catch(() => {});
 		let sseStream = piNative.encodeStream(events, parsed.modelId, parsed.options, {
@@ -1400,7 +1403,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				}
 			},
 		});
-		const held = await holdSseUntilCommit(sseStream, commitGate, settled, true);
+		const held = await holdSseUntilCommit(sseStream, commitGate, settled);
 		if (held.type === "failed") {
 			if (held.message && messageHasBillableUsage(held.message)) {
 				const errorMessage =
