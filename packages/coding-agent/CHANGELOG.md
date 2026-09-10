@@ -31,6 +31,7 @@
 - Custom `Other` answers are now applied before the Ask dialog becomes interactive again, so the next Enter is no longer discarded ([#11558](https://github.com/can1357/oh-my-pi/pull/11558) by [@schickling-assistant](https://github.com/schickling-assistant)).
 - Explicit per-model price overrides retain their configured flat rates instead of inheriting time-based pricing.
 
+- Preserved `xd://` device mounting and device-only write restrictions when restoring active tools after temporary toolset restrictions or extension mode toggles ([#11543](https://github.com/can1357/oh-my-pi/pull/11543) by [@shivamklr](https://github.com/shivamklr)).
 ## [18.1.16] - 2026-09-09
 
 ### Added

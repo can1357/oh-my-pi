@@ -185,6 +185,12 @@ interface XdevMountNoticeDetails {
 	removed: string[];
 }
 
+export interface SetActiveToolPresentationOptions {
+	forcePromptRefresh?: boolean;
+	signal?: AbortSignal;
+	fullWrite?: boolean;
+}
+
 /** Owns tool registration, presentation, prompt rebuilding, skills, and permissions. */
 export class SessionTools {
 	readonly #host: SessionToolsHost;
@@ -252,6 +258,7 @@ export class SessionTools {
 	 * device-only flag, this survives temporary full-write upgrades.
 	 */
 	readonly #deviceOnlyWriteTransportAvailable: boolean;
+	#dormantFullWrite = false;
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
@@ -311,6 +318,11 @@ export class SessionTools {
 	/** Mutable registry shared with controller hosts that inspect available tools. */
 	get registry(): Map<string, AgentTool> {
 		return this.#toolRegistry;
+	}
+
+	/** Reports whether the active write tool is restricted to device-only transport. */
+	isDeviceOnlyWrite(): boolean {
+		return this.#isDeviceOnlyWrite?.() === true;
 	}
 
 	/** Current stable base system prompt. */
@@ -821,7 +833,45 @@ export class SessionTools {
 		);
 	}
 
-	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
+	#resolveMountCandidates(
+		toolNames: readonly string[],
+		options?: {
+			builtInWriteAvailable?: boolean;
+			runtimeSelectedToolNames?: ReadonlySet<string>;
+		},
+	): Set<string> {
+		const candidates = new Set<string>();
+		if (!this.#xdev) return candidates;
+
+		const selectedTools = toolNames.flatMap(name => {
+			const tool = this.#toolRegistry.get(name);
+			return tool ? [{ name, tool }] : [];
+		});
+		const xdevReadAvailable = this.#builtInToolNames.has("read") && selectedTools.some(({ name }) => name === "read");
+		const builtInWrite = options?.builtInWriteAvailable ?? this.#builtInToolNames.has("write");
+		const xdevWriteAvailable =
+			builtInWrite &&
+			(selectedTools.some(({ name }) => name === "write") ||
+				this.#deviceOnlyWriteTransportAvailable ||
+				this.#dormantFullWrite);
+		if (!xdevReadAvailable || !xdevWriteAvailable) return candidates;
+
+		const runtimeSelected = options?.runtimeSelectedToolNames ?? this.#runtimeSelectedToolNames;
+		for (const { name, tool } of selectedTools) {
+			const isPinned = this.#presentationPinnedToolNames?.has(name) === true || runtimeSelected?.has(name) === true;
+			if (!isPinned && isMountableUnderXdev(tool)) {
+				candidates.add(name);
+			}
+		}
+		return candidates;
+	}
+
+	async #applyActiveToolsByName(
+		toolNames: string[],
+		forcePromptRefresh = false,
+		signal?: AbortSignal,
+		options?: { fullWrite?: boolean },
+	): Promise<void> {
 		signal?.throwIfAborted();
 		toolNames = normalizeToolNames(toolNames);
 		const codeMode = resolveCodeMode({
@@ -835,8 +885,10 @@ export class SessionTools {
 		let builtInWriteAvailable = this.#builtInToolNames.has("write");
 		const fullWriteSelected =
 			toolNames.includes("write") &&
-			(this.#presentationPinnedToolNames?.has("write") === true ||
-				this.#runtimeSelectedToolNames?.has("write") === true);
+			(options?.fullWrite === true ||
+				(options?.fullWrite !== false &&
+					(this.#presentationPinnedToolNames?.has("write") === true ||
+						this.#runtimeSelectedToolNames?.has("write") === true)));
 		if (fullWriteSelected) {
 			const writeRegistration = this.#ensureWriteRegistered?.();
 			if (writeRegistration) {
@@ -862,21 +914,12 @@ export class SessionTools {
 			const tool = this.#toolRegistry.get(name);
 			return tool ? [{ name, tool }] : [];
 		});
-		const xdevReadAvailable = this.#builtInToolNames.has("read") && selectedTools.some(({ name }) => name === "read");
-		const xdevWriteAvailable =
-			builtInWriteAvailable &&
-			(selectedTools.some(({ name }) => name === "write") || this.#deviceOnlyWriteTransportAvailable);
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
-		const mountCandidates = selectedTools.filter(
-			({ name, tool }) =>
-				this.#xdev !== undefined &&
-				xdevReadAvailable &&
-				xdevWriteAvailable &&
-				!isPresentationPinned(name) &&
-				isMountableUnderXdev(tool),
-		);
-		const mountNames = new Set(mountCandidates.map(({ name }) => name));
+		const mountNames = this.#resolveMountCandidates(toolNames, {
+			builtInWriteAvailable,
+			runtimeSelectedToolNames: this.#runtimeSelectedToolNames,
+		});
 		// Demoted tools stay reachable through the eval bridge, so nothing is
 		// mounted under xd:// while code mode restricts the direct surface.
 		if (codeMode.active) mountNames.clear();
@@ -940,28 +983,35 @@ export class SessionTools {
 				directToolNames: codeMode.directToolNames,
 			});
 		}
-		const restrictDeviceOnlyWrite =
-			validToolNames.includes("write") &&
-			!fullWriteSelected &&
-			(this.#presentationPinnedToolNames !== undefined || this.#runtimeSelectedToolNames !== undefined) &&
-			builtInWriteAvailable &&
-			this.#isDeviceOnlyWrite?.() !== true &&
-			this.#setDeviceOnlyWrite !== undefined;
-		const restoreDormantDeviceOnlyWrite =
-			!validToolNames.includes("write") &&
-			this.#deviceOnlyWriteTransportAvailable &&
-			this.#isDeviceOnlyWrite?.() !== true &&
-			this.#setDeviceOnlyWrite !== undefined;
-		const deactivateDeviceOnlyWrite =
-			!validToolNames.includes("write") &&
-			!this.#deviceOnlyWriteTransportAvailable &&
-			this.#isDeviceOnlyWrite?.() === true &&
-			this.#setDeviceOnlyWrite !== undefined;
 		const previousMounted = new Set(this.#xdev?.mountedNames ?? []);
 		const previousActiveToolNames = this.getActiveToolNames();
 		const previousEnabledToolNames = this.#enabledToolNames;
 		const previousCodeModeDirectToolNames = this.#codeModeDirectToolNames;
 		const previousToolPredicateNames = this.#toolPredicateNames;
+		const previousDormantFullWrite = this.#dormantFullWrite;
+		const previousDeviceOnlyWrite = this.#isDeviceOnlyWrite?.() === true;
+		const writePreviouslyHadFullAccess =
+			options?.fullWrite === false
+				? false
+				: this.#dormantFullWrite || (previousEnabledToolNames.has("write") && !previousDeviceOnlyWrite);
+		const restrictDeviceOnlyWrite =
+			validToolNames.includes("write") &&
+			!fullWriteSelected &&
+			(this.#presentationPinnedToolNames !== undefined || this.#runtimeSelectedToolNames !== undefined) &&
+			builtInWriteAvailable &&
+			!previousDeviceOnlyWrite &&
+			this.#setDeviceOnlyWrite !== undefined;
+		const restoreDormantDeviceOnlyWrite =
+			!validToolNames.includes("write") &&
+			(this.#deviceOnlyWriteTransportAvailable || writePreviouslyHadFullAccess) &&
+			!previousDeviceOnlyWrite &&
+			this.#setDeviceOnlyWrite !== undefined;
+		const deactivateDeviceOnlyWrite =
+			!validToolNames.includes("write") &&
+			!this.#deviceOnlyWriteTransportAvailable &&
+			!writePreviouslyHadFullAccess &&
+			previousDeviceOnlyWrite &&
+			this.#setDeviceOnlyWrite !== undefined;
 		this.#enabledToolNames = new Set([...validToolNames, ...mountNames]);
 		this.#setMountedNames(mountNames);
 		this.#toolPredicateNames = codeMode.active ? [...this.#enabledToolNames] : appliedNames;
@@ -1013,7 +1063,9 @@ export class SessionTools {
 			}
 			signal?.throwIfAborted();
 		} catch (error) {
-			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(false);
+			this.#dormantFullWrite = previousDormantFullWrite;
+			if (restrictDeviceOnlyWrite || restoreDormantDeviceOnlyWrite)
+				this.#setDeviceOnlyWrite?.(previousDeviceOnlyWrite);
 			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
 			this.#setMountedNames(previousMounted);
 			this.#toolPredicateNames = previousToolPredicateNames;
@@ -1024,7 +1076,9 @@ export class SessionTools {
 		}
 
 		if (this.#host.isDisposed()) {
-			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(false);
+			this.#dormantFullWrite = previousDormantFullWrite;
+			if (restrictDeviceOnlyWrite || restoreDormantDeviceOnlyWrite)
+				this.#setDeviceOnlyWrite?.(previousDeviceOnlyWrite);
 			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
 			this.#setMountedNames(previousMounted);
 			this.#toolPredicateNames = previousToolPredicateNames;
@@ -1053,10 +1107,16 @@ export class SessionTools {
 				this.#notifyToolRosterDelta(previousActiveToolNames, appliedNames);
 				this.#lastAppliedToolSignature = frozenSignature;
 			}
-			if (restoreDormantDeviceOnlyWrite) {
-				this.#setDeviceOnlyWrite?.(true);
-			} else if (upgradeDeviceOnlyWrite || deactivateDeviceOnlyWrite) {
+			if (fullWriteSelected) {
+				this.#dormantFullWrite = false;
 				this.#setDeviceOnlyWrite?.(false);
+			} else {
+				this.#dormantFullWrite = writePreviouslyHadFullAccess;
+				if (restrictDeviceOnlyWrite || restoreDormantDeviceOnlyWrite) {
+					this.#setDeviceOnlyWrite?.(true);
+				} else if (deactivateDeviceOnlyWrite) {
+					this.#setDeviceOnlyWrite?.(false);
+				}
 			}
 		} finally {
 			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
@@ -1290,13 +1350,13 @@ export class SessionTools {
 	setActiveToolsByName(toolNames: string[]): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
 			const normalized = normalizeToolNames(toolNames);
-			// Transport-write eligibility keys off the *current* active set: an ordinary
-			// selection change should not demote `write` unless it is already active.
-			await this.#applyToolPresentation(
-				normalized,
-				this.#xdev?.mountedNames ?? new Set(),
-				this.getActiveToolNames().includes("write"),
-			);
+			const mountedCandidates = this.#resolveMountCandidates(normalized);
+			// Mounted candidates also retain dormant device-only write after a restriction;
+			// deferrable-only transport eligibility still follows the current active set.
+			await this.#applyToolPresentation(normalized, {
+				mounted: mountedCandidates,
+				writeSelected: this.getActiveToolNames().includes("write"),
+			});
 		});
 	}
 
@@ -1304,7 +1364,7 @@ export class SessionTools {
 	 * Restore an enabled tool set with its exact top-level versus `xd://` partition.
 	 *
 	 * Both inputs are required because {@link setActiveToolsByName} only receives the
-	 * enabled name list and classifies mounts from the current presentation set.
+	 * enabled name list and classifies mounts from transport availability and pins.
 	 * Rollback/restore callers must pass the snapshotted mounted subset so names that
 	 * were top-level stay pinned (`#runtimeSelectedToolNames`) and names that were under
 	 * `xd://` remain mount-eligible, even when the live mount set has drifted.
@@ -1320,31 +1380,38 @@ export class SessionTools {
 	setActiveToolPresentation(
 		toolNames: string[],
 		mountedToolNames: string[],
-		forcePromptRefresh = false,
+		options?: boolean | SetActiveToolPresentationOptions,
 		signal?: AbortSignal,
 	): Promise<void> {
+		const opts = typeof options === "boolean" ? { forcePromptRefresh: options, signal } : (options ?? {});
+		const { forcePromptRefresh = false, signal: effectiveSignal = signal, fullWrite } = opts;
 		return this.runToolRegistryMutation(async () => {
 			const normalized = normalizeToolNames(toolNames);
 			// Restoration targets a snapshot, so write eligibility comes from the
 			// *target* set rather than whatever happens to be active mid-rollback.
-			await this.#applyToolPresentation(
-				normalized,
-				new Set(normalizeToolNames(mountedToolNames)),
-				normalized.includes("write"),
+			await this.#applyToolPresentation(normalized, {
+				mounted: new Set(normalizeToolNames(mountedToolNames)),
+				writeSelected: normalized.includes("write"),
 				forcePromptRefresh,
-				signal,
-			);
-		}, signal);
+				signal: effectiveSignal,
+				fullWrite,
+			});
+		}, effectiveSignal);
 	}
 
 	/** Restores a non-MCP presentation snapshot while retaining the current MCP selection. */
-	restoreNonMCPToolPresentation(nonMCPToolNames: string[], nonMCPMountedToolNames: string[]): Promise<void> {
+	restoreNonMCPToolPresentation(
+		nonMCPToolNames: string[],
+		nonMCPMountedToolNames: string[],
+		options?: { fullWrite?: boolean },
+	): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
 			const currentMCPToolNames = this.getSelectedMCPToolNames();
 			const currentMountedMCPToolNames = this.getMountedXdevToolNames().filter(isMCPToolName);
 			await this.setActiveToolPresentation(
 				[...nonMCPToolNames, ...currentMCPToolNames],
 				[...nonMCPMountedToolNames, ...currentMountedMCPToolNames],
+				options,
 			);
 		});
 	}
@@ -1356,27 +1423,37 @@ export class SessionTools {
 	 */
 	async #applyToolPresentation(
 		normalized: string[],
-		mounted: ReadonlySet<string>,
-		writeSelected: boolean,
-		forcePromptRefresh = false,
-		signal?: AbortSignal,
+		options: {
+			mounted?: ReadonlySet<string>;
+			writeSelected?: boolean;
+			forcePromptRefresh?: boolean;
+			signal?: AbortSignal;
+			fullWrite?: boolean;
+		} = {},
 	): Promise<void> {
-		const retainedMountedDevice = [...mounted].some(name => normalized.includes(name));
+		const { mounted = new Set(), writeSelected = false, forcePromptRefresh = false, signal, fullWrite } = options;
+		const retainedMountedDevice = normalized.some(name => mounted.has(name));
 		const retainedDeferrableTool = normalized.some(name => this.#toolRegistry.get(name)?.deferrable === true);
 		const deviceOnlyWriteActive = this.#isDeviceOnlyWrite?.() === true;
 		const transportWriteActive =
 			normalized.includes("write") &&
 			this.#builtInToolNames.has("write") &&
-			this.#presentationPinnedToolNames?.has("write") !== true &&
-			this.#runtimeSelectedToolNames?.has("write") !== true &&
-			((this.#host.planModeEnabled() && (!writeSelected || deviceOnlyWriteActive)) ||
-				(writeSelected && deviceOnlyWriteActive && (retainedMountedDevice || retainedDeferrableTool)));
+			(fullWrite === true
+				? false
+				: fullWrite === false
+					? true
+					: this.#presentationPinnedToolNames?.has("write") !== true &&
+						this.#runtimeSelectedToolNames?.has("write") !== true &&
+						((this.#host.planModeEnabled() && (!writeSelected || deviceOnlyWriteActive)) ||
+							(!this.#dormantFullWrite &&
+								deviceOnlyWriteActive &&
+								(retainedMountedDevice || (writeSelected && retainedDeferrableTool)))));
 		const previousRuntimeSelectedToolNames = this.#runtimeSelectedToolNames;
 		this.#runtimeSelectedToolNames = new Set(
 			normalized.filter(name => !mounted.has(name) && !(name === "write" && transportWriteActive)),
 		);
 		try {
-			await this.#applyActiveToolsByName(normalized, forcePromptRefresh, signal);
+			await this.#applyActiveToolsByName(normalized, forcePromptRefresh, signal, { fullWrite });
 		} catch (error) {
 			this.#runtimeSelectedToolNames = previousRuntimeSelectedToolNames;
 			throw error;

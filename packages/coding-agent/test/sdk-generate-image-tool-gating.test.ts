@@ -267,6 +267,20 @@ describe("generate_image tool gating", () => {
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
 	});
 
+	it("restores mounted xd tools after a temporary tool restriction", async () => {
+		const session = await sessionWithCustomTools(["read"], [customTool("mcp__test__search", true)]);
+		expect(session.getActiveToolNames()).not.toContain("mcp__test__search");
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
+		const enabledBefore = session.getEnabledToolNames();
+
+		await session.setActiveToolsByName(["read"]);
+		expect(session.getXdevToolEntries()).toHaveLength(0);
+
+		await session.setActiveToolsByName(enabledBefore);
+		expect(session.getActiveToolNames()).not.toContain("mcp__test__search");
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
+	});
+
 	it("preserves explicitly requested write after MCP devices disconnect", async () => {
 		const session = await sessionWithCustomTools(["read", "write"], [customTool("mcp__test__search", true)]);
 

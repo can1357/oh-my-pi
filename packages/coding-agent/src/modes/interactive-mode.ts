@@ -776,7 +776,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #startupChangelog: StartupChangelogSelection | undefined;
 	/** Header components below the config warnings + welcome, retained so a live config-warning change can rebuild the header (#10048). */
 	#headerAfter: readonly Component[] = [];
-	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[] } | undefined;
+	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[]; fullWrite?: boolean } | undefined;
 	#goalModePreviousTools: string[] | undefined;
 	#vibeModePreviousTools: string[] | undefined;
 	#vibeModeOwnerScope: VibeOwnerScope | undefined;
@@ -3226,6 +3226,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					await this.session.restoreNonMCPToolPresentation(
 						previousPresentation.enabled,
 						previousPresentation.mounted,
+						{ fullWrite: previousPresentation.fullWrite },
 					);
 				}
 			} finally {
@@ -3402,6 +3403,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planModePreviousToolPresentation = {
 			enabled: previousTools.filter(name => !isMCPToolName(name)),
 			mounted: previousMountedTools.filter(name => !isMCPToolName(name)),
+			fullWrite: this.session.isDeviceOnlyWrite() === false && previousTools.includes("write"),
 		};
 		this.planModePlanFilePath = planFilePath;
 		this.planModeEnabled = true;
@@ -3517,6 +3519,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				await this.session.restoreNonMCPToolPresentation(
 					previousPresentation.enabled,
 					previousPresentation.mounted,
+					{ fullWrite: previousPresentation.fullWrite },
 				);
 			}
 			if (this.#planModePreviousModelState && !options?.deferModelRestore) {
@@ -3552,7 +3555,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				mountedTools.some((name, index) => name !== planModeMountedTools[index])
 			) {
 				try {
-					await this.session.setActiveToolPresentation(planModeTools, planModeMountedTools);
+					await this.session.setActiveToolPresentation(planModeTools, planModeMountedTools, {
+						fullWrite: false,
+					});
 				} catch (rollbackError) {
 					logger.warn("Failed to restore plan tools after plan exit failure", { error: String(rollbackError) });
 				}
@@ -4028,6 +4033,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const previousPresentation = this.#planModePreviousToolPresentation ?? {
 			enabled: this.session.getEnabledToolNames().filter(name => !isMCPToolName(name)),
 			mounted: this.session.getMountedXdevToolNames().filter(name => !isMCPToolName(name)),
+			fullWrite: false,
 		};
 
 		// Mark the pending abort caused by the plan-mode → compaction transition as
@@ -4101,7 +4107,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		const executionTools = previousPresentation.enabled.includes("read")
 			? previousPresentation.enabled
 			: [...previousPresentation.enabled, "read"];
-		await this.session.restoreNonMCPToolPresentation(executionTools, previousPresentation.mounted);
+		await this.session.restoreNonMCPToolPresentation(executionTools, previousPresentation.mounted, {
+			fullWrite: previousPresentation.fullWrite ?? false,
+		});
 		this.session.setPlanReferencePath(options.planFilePath);
 
 		// Resolve the deferred plan-approval model transition. On the compact path
