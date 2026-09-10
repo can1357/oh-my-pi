@@ -155,6 +155,37 @@ export function combineProjectDescriptions(projectTypes: readonly ProjectType[])
 }
 
 /**
+ * Coarse counts for workspace (`file: "*"`) diagnostics output.
+ * - empty / only "No issues found" → 0 errors, 0 failures
+ * - "Failed to run" / "Cannot detect" → failed checkers
+ * - otherwise → at least one diagnostic error
+ */
+export function summarizeWorkspaceDiagnosticsOutput(output: string): {
+	diagnosticErrorCount: number;
+	failedServerCount: number;
+} {
+	const trimmed = output.trim();
+	if (trimmed.length === 0) {
+		return { diagnosticErrorCount: 0, failedServerCount: 0 };
+	}
+	const failedMatches = trimmed.match(/Failed to run|Cannot detect/g);
+	const failedServerCount = failedMatches?.length ?? 0;
+	const withoutSections = trimmed.replace(/^=== .+ ===\s*/gm, "").trim();
+	const withoutFailures = withoutSections
+		.replace(/Failed to run[^\n]*/g, "")
+		.replace(/Cannot detect[^\n]*/g, "")
+		.replace(/No issues found/g, "")
+		.trim();
+	if (failedServerCount === 0 && withoutFailures.length === 0) {
+		return { diagnosticErrorCount: 0, failedServerCount: 0 };
+	}
+	return {
+		diagnosticErrorCount: withoutFailures.length > 0 ? 1 : 0,
+		failedServerCount,
+	};
+}
+
+/**
  * Label each section when more than one checker ran.
  *
  * A single detected language keeps the bare output it has always produced, so
@@ -188,11 +219,29 @@ async function mapWithConcurrency<T, R>(
 	return results;
 }
 
+/** Per-language workspace checker result for latch / tooling consumers. */
+export interface ProjectDiagnosticsResult {
+	output: string;
+	/** Error-severity issues (0 when clean). Non-zero exit with output counts as ≥1. */
+	errorCount: number;
+	/** False when the checker never verified the workspace (crash, missing tool, unknown type). */
+	verified: boolean;
+}
+
 /** Run one language's checker and render its output. */
-async function runProjectDiagnostics(cwd: string, projectType: ProjectType, signal?: AbortSignal): Promise<string> {
+async function runProjectDiagnostics(
+	cwd: string,
+	projectType: ProjectType,
+	signal?: AbortSignal,
+): Promise<ProjectDiagnosticsResult> {
 	const command = projectType.command;
 	if (!command) {
-		return "Cannot detect project type. Supported: Rust (Cargo.toml), TypeScript (tsconfig.json), Go (go.work/go.mod), Python (pyproject.toml)";
+		return {
+			output:
+				"Cannot detect project type. Supported: Rust (Cargo.toml), TypeScript (tsconfig.json), Go (go.work/go.mod), Python (pyproject.toml)",
+			errorCount: 0,
+			verified: false,
+		};
 	}
 	try {
 		const proc = Bun.spawn(command, {
@@ -225,15 +274,24 @@ async function runProjectDiagnostics(cwd: string, projectType: ProjectType, sign
 				// tsc/cargo/pyright report diagnostics and still falls through to
 				// the branch below. Mirrors the exit-status gate
 				// `resolveGoWorkspaceDiagnosticsCommand` already applies above.
-				return interpretEmptyDiagnosticsResult(exitCode, proc.signalCode, command);
+				const output = interpretEmptyDiagnosticsResult(exitCode, proc.signalCode, command);
+				return {
+					output,
+					errorCount: 0,
+					verified: exitCode === 0,
+				};
 			}
 			// Limit output length. The cap is per language so a noisy checker
 			// cannot crowd its siblings out of a polyglot report.
 			const lines = combined.split("\n");
-			if (lines.length > 50) {
-				return `${lines.slice(0, 50).join("\n")}\n[…${lines.length - 50}ln elided…]`;
-			}
-			return combined;
+			const output =
+				lines.length > 50 ? `${lines.slice(0, 50).join("\n")}\n[…${lines.length - 50}ln elided…]` : combined;
+			return {
+				output,
+				// Exit 0 with output is warnings-only for cargo/tsc/pyright; non-zero means errors.
+				errorCount: exitCode === 0 ? 0 : 1,
+				verified: true,
+			};
 		} finally {
 			signal?.removeEventListener("abort", abortHandler);
 		}
@@ -241,7 +299,11 @@ async function runProjectDiagnostics(cwd: string, projectType: ProjectType, sign
 		if (signal?.aborted) {
 			throw new ToolAbortError();
 		}
-		return `Failed to run ${command.join(" ")}: ${e}`;
+		return {
+			output: `Failed to run ${command.join(" ")}: ${e}`,
+			errorCount: 0,
+			verified: false,
+		};
 	}
 }
 
@@ -249,7 +311,17 @@ async function runProjectDiagnostics(cwd: string, projectType: ProjectType, sign
 export async function runWorkspaceDiagnostics(
 	cwd: string,
 	signal?: AbortSignal,
-): Promise<{ output: string; projectType: ProjectType; projectTypes: ProjectType[] }> {
+): Promise<{
+	output: string;
+	projectType: ProjectType;
+	projectTypes: ProjectType[];
+	/** Aggregate error-severity count across checkers (0 when clean). */
+	diagnosticErrorCount: number;
+	/** Checkers that never verified the workspace (crash / missing tool / unknown). */
+	failedCheckerCount: number;
+	/** False when no checker verified the workspace. */
+	success: boolean;
+}> {
 	throwIfAborted(signal);
 	const projectTypes = await detectProjectTypes(cwd, signal);
 	const primary = projectTypes[0] ?? { type: "unknown" as const, description: "Unknown project type" };
@@ -258,10 +330,33 @@ export async function runWorkspaceDiagnostics(
 	const projectType =
 		projectTypes.length > 1 ? { ...primary, description: combineProjectDescriptions(projectTypes) } : primary;
 
-	const outputs = await mapWithConcurrency(projectTypes, MAX_CONCURRENT_CHECKERS, async detectedType => ({
-		description: detectedType.description,
-		output: await runProjectDiagnostics(cwd, detectedType, signal),
-	}));
+	const sections = await mapWithConcurrency(projectTypes, MAX_CONCURRENT_CHECKERS, async detectedType => {
+		const result = await runProjectDiagnostics(cwd, detectedType, signal);
+		return {
+			description: detectedType.description,
+			output: result.output,
+			errorCount: result.errorCount,
+			verified: result.verified,
+		};
+	});
 
-	return { output: combineDiagnosticsOutputs(outputs), projectType, projectTypes };
+	let diagnosticErrorCount = 0;
+	let failedCheckerCount = 0;
+	let success = sections.length > 0;
+	for (const section of sections) {
+		diagnosticErrorCount += section.errorCount;
+		if (!section.verified) {
+			success = false;
+			failedCheckerCount++;
+		}
+	}
+
+	return {
+		output: combineDiagnosticsOutputs(sections),
+		projectType,
+		projectTypes,
+		diagnosticErrorCount,
+		failedCheckerCount,
+		success,
+	};
 }

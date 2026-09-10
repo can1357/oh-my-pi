@@ -7,6 +7,7 @@ import {
 	combineProjectDescriptions,
 	detectProjectTypes,
 	interpretEmptyDiagnosticsResult,
+	summarizeWorkspaceDiagnosticsOutput,
 } from "../src/lsp/workspace-diagnostics";
 
 const command = ["npx", "tsc", "--noEmit"];
@@ -44,6 +45,41 @@ describe("interpretEmptyDiagnosticsResult", () => {
 
 	test("preserves the clean-workspace result for a successful silent checker", () => {
 		expect(interpretEmptyDiagnosticsResult(0, null, command)).toBe("No issues found");
+	});
+});
+
+describe("summarizeWorkspaceDiagnosticsOutput", () => {
+	test("treats empty and clean output as zero errors and zero failures", () => {
+		expect(summarizeWorkspaceDiagnosticsOutput("")).toEqual({
+			diagnosticErrorCount: 0,
+			failedServerCount: 0,
+		});
+		expect(summarizeWorkspaceDiagnosticsOutput("No issues found")).toEqual({
+			diagnosticErrorCount: 0,
+			failedServerCount: 0,
+		});
+		expect(
+			summarizeWorkspaceDiagnosticsOutput("=== TypeScript ===\nNo issues found\n\n=== Rust ===\nNo issues found"),
+		).toEqual({ diagnosticErrorCount: 0, failedServerCount: 0 });
+	});
+
+	test("counts Failed to run / Cannot detect as failed checkers", () => {
+		expect(summarizeWorkspaceDiagnosticsOutput("Failed to run npx tsc --noEmit: boom")).toEqual({
+			diagnosticErrorCount: 0,
+			failedServerCount: 1,
+		});
+		expect(
+			summarizeWorkspaceDiagnosticsOutput(
+				"Cannot detect project type. Supported: Rust (Cargo.toml), TypeScript (tsconfig.json)",
+			),
+		).toEqual({ diagnosticErrorCount: 0, failedServerCount: 1 });
+	});
+
+	test("treats other checker output as at least one diagnostic error", () => {
+		expect(summarizeWorkspaceDiagnosticsOutput("src/foo.ts(1,1): error TS2304: Cannot find name 'x'.")).toEqual({
+			diagnosticErrorCount: 1,
+			failedServerCount: 0,
+		});
 	});
 });
 

@@ -15,6 +15,10 @@ Optional: `GROKBOT_NAMESPACE` (`prod` / `dev` / `lab`), `GROKBOT_CLIENT_VERSION`
 
 Process env beats the secrets file. Never print these values. `/login grokbot` only shows the host-install prompt; `/grokbot` reports status without secrets.
 
+The renewer is exchanged at `/sand-box/inference-credential` for `accessToken`, optional `grokBotToken`, and an expiry. Metadata RPCs such as `AvailableModels` use `accessToken`; `InferenceService/Stream` uses `grokBotToken` when supplied. Legacy single-token responses fall back to `accessToken`. The pair is cached together until 60 seconds before the earliest known expiry, scoped by renewer, backend, namespace, client version, and caller headers. Both inference attempts after an authentication remint select the inference token. Machine ID is used for request checksums, not the mint body.
+
+Successful renewal and catalog discovery do not prove inference authentication: sending `accessToken` to a server that supplied `grokBotToken` can return a Connect `unauthenticated` trailer inside HTTP 200.
+
 If `-p` exits with `No API key found for grokbot`, this checkout did not see a renewer (missing `secrets/grokbot.env` or env vars). Published global `omp` 18.0.1 will also fail here because it does not register the provider at all.
 
 ## Catalog (live AvailableModels)
@@ -45,6 +49,10 @@ omp tools are named `bash` / `read` / `write` (and `edit` / `grep` / `glob`). Sa
 Identity comes from `classifyModel()` (taxonomy class), not `id.includes("claude")`. Router product wire comes from KDL `sand-tools-wire`, not TypeScript id tables.
 
 `edit` shares the product `Write` slot with `write` (write wins). Stream decode maps `Shell`/`Read`/`Write` back to omp `bash`/`read`/`write` without storing those aliases on `customWireName`.
+
+Anthropic product tool schemas pass through the catalog-selected Cursor schema projection after aliases are added. This removes unsupported schema combiners from the advertised wire schema while preserving the original local schema for argument validation. Opus remains on its requested model and effort; this does not route through `sand-automation`.
+
+Sand has no developer-message role. Initial developer instructions join the system prefix; later developer/advisor notes use chronological user-role messages so the backend does not hoist a final note and leave an invalid assistant prefill.
 
 ### Env knobs
 

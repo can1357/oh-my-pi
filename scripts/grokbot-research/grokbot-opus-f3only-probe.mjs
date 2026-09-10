@@ -59,7 +59,7 @@ function decodeFields(buf) {
 }
 
 function retagField2AsField3(encoded) {
-	const encVarint = (v) => {
+	const encVarint = v => {
 		let n = BigInt(v);
 		const o = [];
 		while (n > 0x7fn) {
@@ -71,8 +71,7 @@ function retagField2AsField3(encoded) {
 	};
 	const out = [];
 	for (const f of decodeFields(encoded)) {
-		if (f.fn === 2)
-			out.push(Buffer.concat([encVarint((3 << 3) | 2), encVarint(f.bytes.length), f.bytes]));
+		if (f.fn === 2) out.push(Buffer.concat([encVarint((3 << 3) | 2), encVarint(f.bytes.length), f.bytes]));
 	}
 	return Buffer.concat(out);
 }
@@ -112,8 +111,16 @@ function parseStream(buf) {
 }
 
 const tools = [
-	{ name: "read", description: "Read", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
-	{ name: "Shell", description: "Shell", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
+	{
+		name: "read",
+		description: "Read",
+		parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+	},
+	{
+		name: "Shell",
+		description: "Shell",
+		parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+	},
 ];
 const rm = resolveGrokbotRequestedModel("claude-opus-5", {
 	effort: "low",
@@ -139,7 +146,7 @@ for (const [label, promptText] of [
 	const bytes = Buffer.concat([encodeInferenceStreamRequest(base), f3]);
 
 	const cfg = await loadGrokbotConfig();
-	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND);
+	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND, undefined, undefined, "inference");
 	const h = {
 		...grokbotClientHeaders(cfg),
 		authorization: `Bearer ${token}`,

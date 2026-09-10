@@ -69,7 +69,7 @@ function parseFrames(buf) {
 
 async function probe(label, body) {
 	const cfg = await loadGrokbotConfig();
-	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND);
+	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND, undefined, undefined, "inference");
 	const headers = {
 		...grokbotClientHeaders(cfg),
 		authorization: `Bearer ${token}`,

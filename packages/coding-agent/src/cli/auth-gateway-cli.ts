@@ -30,11 +30,13 @@ import {
 	RemoteAuthCredentialStore,
 	type SnapshotResponse,
 } from "@oh-my-pi/pi-ai/auth-broker";
-import { DEFAULT_AUTH_GATEWAY_BIND, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { DEFAULT_AUTH_GATEWAY_BIND, loadRouteDefinitionsFile, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { CURSOR_AUTO_MODEL } from "@oh-my-pi/pi-catalog/provider-models";
 import { getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
+import { isSettingsInitialized, Settings } from "../config/settings";
 import { type AuthBrokerClientConfig, resolveAuthBrokerConfig } from "../session/auth-broker-config";
 
 export type AuthGatewayAction = "serve" | "token" | "status" | "check";
@@ -51,6 +53,8 @@ export interface AuthGatewayCommandArgs {
 		 * to wire token-paste plumbing into every local client.
 		 */
 		noAuth?: boolean;
+		/** JSON/JSON5 RouteDefinition file for `serve`. */
+		routes?: string;
 		/**
 		 * Strict mode for `check` — additionally exercise every credential
 		 * against its provider's chat-completion endpoint. The usage probe (run
@@ -60,6 +64,31 @@ export interface AuthGatewayCommandArgs {
 		 */
 		strict?: boolean;
 	};
+}
+
+/**
+ * Resolve the RouteDefinition file path for `serve`.
+ * `--routes` wins over `auth.gateway.routesFile`. Neither → undefined.
+ */
+export function resolveAuthGatewayRoutesPath(
+	flagRoutes: string | undefined,
+	configRoutesFile: string | undefined,
+): string | undefined {
+	if (flagRoutes !== undefined) {
+		const routePath = flagRoutes.trim();
+		if (routePath.length === 0) {
+			throw new Error("`omp auth-gateway serve --routes` requires a file path");
+		}
+		return routePath;
+	}
+	if (configRoutesFile === undefined) {
+		return undefined;
+	}
+	const routePath = configRoutesFile.trim();
+	if (routePath.length === 0) {
+		throw new Error("`auth.gateway.routesFile` requires a file path");
+	}
+	return routePath;
 }
 
 const ACTIONS: readonly AuthGatewayAction[] = ["serve", "token", "status", "check"];
@@ -152,8 +181,17 @@ const CATALOG_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 /**
  * Index resolvable models by the request ids clients may send: the
  * provider-qualified `provider/id` (always) and the bare `id` (first-write-wins
- * fallback for legacy clients). Scoped to providers the gateway holds broker
+ * fallback for legacy clients, except bare `auto` which Cursor claims when
+ * Cursor credentials are held). Scoped to providers the gateway holds broker
  * credentials for, since only those are routable.
+ *
+ * Cursor's "auto" wire id is a valid per-turn router that `GetUsableModels`
+ * never enumerates, so it isn't part of the discovered/bundled catalog. Inject
+ * the synthetic {@link CURSOR_AUTO_MODEL} when the gateway holds Cursor
+ * credentials so a clean `{"model":"auto"}` request resolves instead of 404ing,
+ * and "auto" surfaces in `/v1/models` listings. When OpenRouter is also
+ * credentialed, Cursor still wins the bare `auto` id (use `openrouter/auto` for
+ * OpenRouter's router).
  */
 export function indexModelsByRequestId(
 	models: readonly Model<Api>[],
@@ -164,6 +202,13 @@ export function indexModelsByRequestId(
 		if (!providersWithCreds.has(model.provider)) continue;
 		modelById.set(`${model.provider}/${model.id}`, model);
 		if (!modelById.has(model.id)) modelById.set(model.id, model);
+	}
+	if (providersWithCreds.has("cursor")) {
+		// Cursor's synthetic router must claim bare `auto` even when OpenRouter
+		// (or another provider) already indexed a bundled model with that id —
+		// otherwise `{"model":"auto"}` silently routes away from Cursor.
+		modelById.set("cursor/auto", CURSOR_AUTO_MODEL);
+		modelById.set("auto", CURSOR_AUTO_MODEL);
 	}
 	return modelById;
 }
@@ -215,6 +260,14 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	await registry.refresh();
 	let modelById = indexModelsByRequestId(registry.getAll(), providersWithCreds);
 
+	let configRoutesFile: string | undefined;
+	if (flags.routes === undefined) {
+		const loaded = isSettingsInitialized() ? Settings.instance : await Settings.loadReadOnly();
+		configRoutesFile = loaded.get("auth.gateway.routesFile");
+	}
+	const routePath = resolveAuthGatewayRoutesPath(flags.routes, configRoutesFile);
+	const routes = routePath !== undefined ? await loadRouteDefinitionsFile(routePath) : undefined;
+
 	const handle = startAuthGateway({
 		storage,
 		bind,
@@ -222,6 +275,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		version: VERSION,
 		resolveModel: (id: string) => modelById.get(id),
 		listModels: () => modelById.values(),
+		...(routes !== undefined ? { routes } : {}),
 	});
 	process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
 	if (gatewayToken) {

@@ -96,4 +96,18 @@ describe("compaction summary output budget", () => {
 		await generateSummary(messages, getModel(), 10_000, "test-key");
 		expect(spy.mock.calls[0]?.[2]?.maxTokens).toBe(8_000);
 	});
+
+	test("includes extraContext in the summarizer prompt", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
+		await generateSummary(messages, getModel(), 10_000, "test-key", undefined, undefined, undefined, {
+			extraContext: [
+				"Incomplete todos that MUST survive compaction (pending/in_progress only; a text-only stop is not completion):",
+				"[Work] [pending] do the thing",
+			],
+		});
+		const promptText = JSON.stringify(spy.mock.calls[0]?.[1]);
+		expect(promptText).toContain("<additional-context>");
+		expect(promptText).toContain("[Work] [pending] do the thing");
+		expect(promptText).toContain("## Incomplete Todos");
+	});
 });

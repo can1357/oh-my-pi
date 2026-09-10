@@ -176,10 +176,9 @@ function parseValidatedShellArgs(call, token) {
 		return { ok: false, reason: "shell-redirect-or-tee" };
 	}
 	const echoesToken =
-		new RegExp(String.raw`(?:^|[\s;|&])(?:echo|printf)\b(?:\s+(?:-[nEe]+))*\s+(?:(['"])${token}\1|${token})(?:\s|$|[;&|])`).test(
-			command,
-		) ||
-		new RegExp(String.raw`(?:^|[\s;|&])(?:echo|printf)\b[^\n#]*\b${token}\b`).test(command);
+		new RegExp(
+			String.raw`(?:^|[\s;|&])(?:echo|printf)\b(?:\s+(?:-[nEe]+))*\s+(?:(['"])${token}\1|${token})(?:\s|$|[;&|])`,
+		).test(command) || new RegExp(String.raw`(?:^|[\s;|&])(?:echo|printf)\b[^\n#]*\b${token}\b`).test(command);
 	if (!echoesToken) return { ok: false, reason: "shell-command-missing-token" };
 	return { ok: true, args: { command }, result: `${token}\n` };
 }
@@ -321,7 +320,7 @@ async function main() {
 	console.log(
 		`config: machineId=${cfg.machineId.slice(0, 8)}… namespace=${cfg.namespace} client=${cfg.clientVersion}`,
 	);
-	const token = await mintGrokbotAccessToken(cfg);
+	const token = await mintGrokbotAccessToken(cfg, fetch, "inference");
 	console.log(`token minted ✓`);
 
 	// Fetch all available models

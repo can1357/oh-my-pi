@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { CURSOR_AUTO_MODEL } from "@oh-my-pi/pi-catalog/provider-models";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { indexModelsByRequestId } from "../../src/cli/auth-gateway-cli";
 import { ModelRegistry } from "../../src/config/model-registry";
@@ -107,5 +108,43 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 
 		expect(index.get(`anthropic/${anthropicModel.id}`)).toBeDefined();
 		expect(index.get(`${foreignModel.provider}/${foreignModel.id}`)).toBeUndefined();
+	});
+
+	test("synthesizes a Cursor 'auto' router when Cursor credentials are held", () => {
+		const registry = new ModelRegistry(stubAuthStorage());
+		const index = indexModelsByRequestId(registry.getAll(), new Set(["cursor"]));
+
+		// A clean {"model":"auto"} request resolves to a valid cursor-agent
+		// model instead of 404, under both the bare and provider-qualified ids.
+		const bare = index.get("auto");
+		const qualified = index.get("cursor/auto");
+		expect(bare).toBe(CURSOR_AUTO_MODEL);
+		expect(qualified).toBe(CURSOR_AUTO_MODEL);
+		expect(bare?.api).toBe("cursor-agent");
+		expect(bare?.provider).toBe("cursor");
+		expect(bare?.id).toBe("auto");
+	});
+
+	test("Cursor bare auto takes precedence over OpenRouter auto when both have credentials", () => {
+		const registry = new ModelRegistry(stubAuthStorage());
+		const openrouterAuto = registry.getAll().find(m => m.provider === "openrouter" && m.id === "auto");
+		if (!openrouterAuto) throw new Error("expected bundled OpenRouter auto model");
+
+		const index = indexModelsByRequestId(registry.getAll(), new Set(["cursor", "openrouter"]));
+
+		expect(index.get("openrouter/auto")).toBe(openrouterAuto);
+		expect(index.get("cursor/auto")).toBe(CURSOR_AUTO_MODEL);
+		// Documented {"model":"auto"} resolves to Cursor's synthetic router, not OpenRouter.
+		expect(index.get("auto")).toBe(CURSOR_AUTO_MODEL);
+	});
+
+	test("does not synthesize 'auto' when Cursor has no credentials", () => {
+		const registry = new ModelRegistry(stubAuthStorage());
+		const index = indexModelsByRequestId(registry.getAll(), new Set(["anthropic"]));
+
+		// "auto" is a Cursor-only router; without Cursor credentials it must
+		// stay unresolvable so the gateway 404s instead of 401ing upstream.
+		expect(index.get("auto")).toBeUndefined();
+		expect(index.get("cursor/auto")).toBeUndefined();
 	});
 });

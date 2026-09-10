@@ -25,10 +25,11 @@ export type OpenAIResponsesToolChoice =
 export type AnthropicToolChoice = "auto" | "none" | "any" | { type: "tool"; name: string } | undefined;
 
 /**
- * Extract function name from unified ToolChoice.
+ * Extract the forced tool/function name from unified ToolChoice, if any.
+ * String modes (`auto`/`none`/`any`/`required`) and `{ type: "computer" }` have none.
  */
-function extractFunctionName(choice: ToolChoice): string | undefined {
-	if (typeof choice === "string") return undefined;
+export function getNamedToolChoiceName(choice: ToolChoice | undefined): string | undefined {
+	if (!choice || typeof choice === "string") return undefined;
 	if (choice.type === "tool" && "name" in choice) return choice.name;
 	if (choice.type === "function") {
 		if ("function" in choice && choice.function && typeof choice.function === "object") {
@@ -51,7 +52,7 @@ export function mapToOpenAICompletionsToolChoice(choice?: ToolChoice): OpenAICom
 		if (choice === "auto" || choice === "none" || choice === "required") return choice;
 		return undefined;
 	}
-	const name = extractFunctionName(choice);
+	const name = getNamedToolChoiceName(choice);
 	return name ? { type: "function", function: { name } } : undefined;
 }
 
@@ -80,7 +81,7 @@ export function mapToOpenAIResponsesToolChoice(choice?: ToolChoice): OpenAIRespo
 		return undefined;
 	}
 	if (choice.type === "computer") return { type: "computer" };
-	const name = extractFunctionName(choice);
+	const name = getNamedToolChoiceName(choice);
 	return name ? { type: "function", name } : undefined;
 }
 
@@ -96,6 +97,6 @@ export function mapToAnthropicToolChoice(choice?: ToolChoice): AnthropicToolChoi
 		if (choice === "auto" || choice === "none" || choice === "any") return choice;
 		return undefined;
 	}
-	const name = extractFunctionName(choice);
+	const name = getNamedToolChoiceName(choice);
 	return name ? { type: "tool", name } : undefined;
 }

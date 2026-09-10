@@ -955,8 +955,11 @@ export function resolveCredentialScopedRefreshTarget(
  * catalog (fresh profile, no credential-scoped cache), refresh that provider
  * before {@link buildSessionOptions} exits on miss. Credentials may come from
  * `--api-key`, env, secrets file, or `models.yml` — not specifically a CLI key.
- * A single-provider `--models grokbot/<id>` scope is accepted the same way
- * (no `parsed.model`); multi-provider / bare scopes stay unbound.
+ * A single-provider `--models` scope is accepted the same way (no
+ * `parsed.model`); multi-provider / bare scopes stay unbound. Without
+ * `parsed.model` the scope path cannot refresh built-in descriptor
+ * providers (e.g. Grok Bot) that {@link ModelRegistry.getDiscoverableProviders}
+ * omits, so a cold `--models grokbot/<live-only-id>` would resolve empty.
  * Callers without CLI selection may pass a provider-qualified
  * `modelRoles.default` via {@link resolveCredentialScopedRefreshTarget}.
  *
@@ -983,8 +986,7 @@ export async function refreshCredentialScopedModelIfMissing(
 	if (selectors.length === 0) return false;
 	const available = modelRegistry.getAvailable();
 	const allPresent = selectors.every(raw => credentialScopedSelectorPresent(raw, providerId, available));
-	if (allPresent) return false;
-	await modelRegistry.refreshProvider(providerId, "online-if-uncached");
+	if (allPresent) return false;	await modelRegistry.refreshProvider(providerId, "online-if-uncached");
 	return true;
 }
 
@@ -1005,8 +1007,7 @@ function credentialScopedSelectorPresent(raw: string, providerId: string, availa
 	if (!level || base === trimmed) return false;
 	const baseSlash = base.indexOf("/");
 	const baseBare = baseSlash >= 0 ? base.slice(baseSlash + 1) : base;
-	return matches(base) || matches(baseBare);
-}
+	return matches(base) || matches(baseBare);}
 
 /** models.yml/runtime discovery OR a built-in catalog model-manager descriptor. */
 function providerSupportsCredentialScopedRefresh(

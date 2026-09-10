@@ -6,6 +6,7 @@
  */
 import type { Context } from "../../types";
 import { toolWireSchema } from "../../utils/schema/wire";
+import { sanitizeSchemaForCursor } from "../../utils/schema/normalize";
 import sendToUserContentDescription from "./send-to-user-content-description.md" with { type: "text" };
 import sendToUserDescription from "./send-to-user-description.md" with { type: "text" };
 import sendToUserTypeDescription from "./send-to-user-type-description.md" with { type: "text" };
@@ -250,7 +251,7 @@ function propertyAliasFromCanonical(canonical: unknown, aliasDescription: string
 	return { ...base, description: aliasDescription.trim() };
 }
 
-function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
+function mapOmpToolToProduct(tool: Tool, projectSchema = false): ProductWireTool | undefined {
 	if (!tool || typeof tool !== "object") return undefined;
 	const name = typeof tool.name === "string" ? tool.name : "";
 	if (!name) return undefined;
@@ -299,7 +300,7 @@ function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
 	const entry: ProductWireTool = {
 		name: wireName,
 		description: typeof tool.description === "string" ? tool.description : "",
-		parameters: wrapToolParameters(parametersSchema),
+		parameters: wrapToolParameters(projectSchema ? sanitizeSchemaForCursor(parametersSchema) : parametersSchema),
 	};
 	if (tool.customFormat && typeof tool.customFormat === "object") {
 		entry.customToolFormat = {
@@ -339,7 +340,11 @@ export function sendToUserProductTool(): ProductWireTool {
  * Parent profile injects SendToUser when absent.
  * Shared sand names (edit+write → Write) keep the preferred omp owner's schema.
  */
-export function toProductField2Tools(tools: Context["tools"], profile: ProductWireProfile): ProductWireTool[] {
+export function toProductField2Tools(
+	tools: Context["tools"],
+	profile: ProductWireProfile,
+	projectSchema = false,
+): ProductWireTool[] {
 	const out: ProductWireTool[] = [];
 	const seen = new Map<string, string>();
 	if (!Array.isArray(tools)) {
@@ -348,7 +353,7 @@ export function toProductField2Tools(tools: Context["tools"], profile: ProductWi
 	}
 	for (const tool of tools) {
 		const ompName = typeof tool?.name === "string" ? tool.name : "";
-		const mapped = mapOmpToolToProduct(tool);
+		const mapped = mapOmpToolToProduct(tool, projectSchema);
 		if (!mapped || !ompName) continue;
 		const previousOmp = seen.get(mapped.name);
 		if (!shouldClaimSandWireName(mapped.name, ompName, previousOmp)) continue;

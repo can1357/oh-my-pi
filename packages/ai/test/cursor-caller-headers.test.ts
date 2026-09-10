@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
-import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import type { Context, Model, StreamOptions, Tool } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	AgentServerMessageSchema,
@@ -113,15 +113,30 @@ function makeModel(baseUrl: string): Model<"cursor-agent"> {
 const context: Context = { messages: [{ role: "user", content: "headers", timestamp: 1 }] };
 
 /** Drive one request to completion and hand back the headers the server saw. */
-async function send(headers: Record<string, string>): Promise<http2.IncomingHttpHeaders> {
+async function send(
+	headers: Record<string, string> = {},
+	extras: {
+		context?: Context;
+		options?: Omit<StreamOptions, "apiKey" | "headers"> & Record<string, unknown>;
+	} = {},
+): Promise<http2.IncomingHttpHeaders> {
 	const baseUrl = await startServer();
-	const stream = streamCursor(makeModel(baseUrl), context, { apiKey: "test-token", headers });
+	const stream = streamCursor(makeModel(baseUrl), extras.context ?? context, {
+		apiKey: "test-token",
+		headers,
+		...extras.options,
+	});
 	for await (const _event of stream) {
 		// drain
 	}
 	await stream.result();
 	return received;
 }
+
+const passthroughTools = [
+	{ name: "bash", description: "run", parameters: { type: "object", properties: {} } },
+	{ name: "read", description: "read", parameters: { type: "object", properties: {} } },
+] as Tool[];
 
 afterEach(async () => {
 	received = {};
@@ -185,5 +200,122 @@ describe("Cursor caller headers reach the wire", () => {
 		expect(sent[":authority"]).toContain("127.0.0.1");
 		expect(sent.host).toBeUndefined();
 		expect(sent["x-trace"]).toBe("kept");
+	});
+});
+
+describe("Cursor passthrough allowed-tools header", () => {
+	it("lists caller-declared tools when toolChoice is unrestricted", async () => {
+		const sent = await send(
+			{},
+			{
+				context: { ...context, tools: passthroughTools },
+				options: { cursorToolPassthrough: true },
+			},
+		);
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("bash,read");
+	});
+
+	it("sends __none__ when toolChoice is none even if tools are declared", async () => {
+		const sent = await send(
+			{},
+			{
+				context: { ...context, tools: passthroughTools },
+				options: { cursorToolPassthrough: true, toolChoice: "none" },
+			},
+		);
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("__none__");
+	});
+
+	it("restricts allowlist to a named forced toolChoice", async () => {
+		const sent = await send(
+			{},
+			{
+				context: { ...context, tools: passthroughTools },
+				options: { cursorToolPassthrough: true, toolChoice: { type: "tool", name: "read" } },
+			},
+		);
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("read");
+	});
+
+	it("advertises a forced tool name even when it is absent from context.tools", async () => {
+		const sent = await send(
+			{},
+			{
+				context: { ...context, tools: passthroughTools },
+				options: {
+					cursorToolPassthrough: true,
+					toolChoice: { type: "function", name: "report_delivery" },
+				},
+			},
+		);
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("report_delivery");
+	});
+
+	it("rejects toolChoice required under passthrough instead of weakening to auto", async () => {
+		const baseUrl = await startServer();
+		const stream = streamCursor(
+			makeModel(baseUrl),
+			{ ...context, tools: passthroughTools },
+			{
+				apiKey: "test-token",
+				cursorToolPassthrough: true,
+				toolChoice: "required",
+			},
+		);
+		for await (const _event of stream) {
+			// drain
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage ?? "").toMatch(/toolChoice "required"/);
+		// Request must not go out with the weakened full allowlist.
+		expect(received["x-cursor-agent-allowed-tools"]).toBeUndefined();
+	});
+
+	it("sends __none__ for empty tools under passthrough", async () => {
+		const sent = await send(
+			{},
+			{
+				context: { ...context, tools: [] },
+				options: { cursorToolPassthrough: true },
+			},
+		);
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("__none__");
+	});
+
+	it("excludes server-only connect_scm from the passthrough allowlist", async () => {
+		const sent = await send(
+			{},
+			{
+				context: {
+					...context,
+					tools: [
+						...passthroughTools,
+						{ name: "connect_scm", description: "scm", parameters: { type: "object" as const } },
+					],
+				},
+				options: { cursorToolPassthrough: true },
+			},
+		);
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("bash,read");
+	});
+
+	it("excludes native todo tools from the passthrough allowlist", async () => {
+		const sent = await send(
+			{},
+			{
+				context: {
+					...context,
+					tools: [
+						...passthroughTools,
+						{ name: "todo", description: "todos", parameters: { type: "object" as const } },
+						{ name: "update_todos", description: "update", parameters: { type: "object" as const } },
+						{ name: "read_todos", description: "read", parameters: { type: "object" as const } },
+					],
+				},
+				options: { cursorToolPassthrough: true },
+			},
+		);
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("bash,read");
 	});
 });

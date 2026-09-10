@@ -79,7 +79,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 		session.settings.override("tasks.todoClearDelay", todoClearDelay);
 	}
 
-	it("clears closed todos from the panel instantly without mutating session history", () => {
+	it("keeps a completed-plus-abandoned plan visible (dropped ≠ done for auto-clear)", () => {
 		setTodoClearDelay(0);
 		const phases: TodoPhase[] = [
 			{
@@ -94,9 +94,30 @@ describe("InteractiveMode todo HUD persistence", () => {
 
 		mode.setTodos(session.getTodoPhases());
 
-		expect(renderTodos(mode)).not.toContain("done task");
-		expect(renderTodos(mode)).not.toContain("abandoned task");
+		const rendered = renderTodos(mode);
+		// Model abandoned is incomplete for settle: the list is not settled, so
+		// auto-clear must not wipe the HUD. Progress counts completed only → 1/2.
+		expect(rendered).toContain("1/2");
 		expect(session.getTodoPhases()).toEqual(phases);
+	});
+
+	it("clears a completed-plus-user-dropped plan once settled for HUD auto-clear", () => {
+		setTodoClearDelay(0);
+		const phases: TodoPhase[] = [
+			{
+				name: "Implementation",
+				tasks: [
+					{ content: "done task", status: "completed" },
+					{ content: "user cancel", status: "abandoned", droppedBy: "user" },
+				],
+			},
+		];
+		session.setTodoPhases(phases);
+
+		mode.setTodos(session.getTodoPhases());
+
+		expect(renderTodos(mode)).not.toContain("done task");
+		expect(renderTodos(mode)).not.toContain("user cancel");
 	});
 
 	/**
@@ -125,9 +146,8 @@ describe("InteractiveMode todo HUD persistence", () => {
 		vi.advanceTimersByTime(60_000);
 
 		const rendered = renderTodos(mode);
-		// Progress counts every closed task, abandoned included: the walking
-		// viewport hides both, so the counter is the only signal they existed.
-		expect(rendered).toContain("2/3");
+		// Progress counts completed only; abandoned is incomplete, not closed.
+		expect(rendered).toContain("1/3");
 		expect(rendered).toContain("current task");
 	});
 
@@ -137,7 +157,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 		mode.setTodos(unfinishedPlan());
 
 		const rendered = renderTodos(mode);
-		expect(rendered).toContain("2/3");
+		expect(rendered).toContain("1/3");
 		expect(rendered).toContain("current task");
 	});
 
@@ -639,6 +659,25 @@ describe("InteractiveMode todo HUD anchor", () => {
 			const lastLine = Bun.stripANSI(rendered[rendered.length - 1] ?? "");
 			expect(lastLine).toContain("TODO 2/2");
 			expect(lastLine).toContain("done");
+		});
+
+		it("shows dropped summary when every remaining todo is abandoned in compact mode", () => {
+			setTerminalRows(16);
+			mode.setTodos([
+				{
+					name: "Tasks",
+					tasks: [
+						{ content: "Dropped A", status: "abandoned" },
+						{ content: "Dropped B", status: "abandoned" },
+					],
+				},
+			]);
+
+			const rendered = mode.statusContainer.render(100);
+			const lastLine = Bun.stripANSI(rendered[rendered.length - 1] ?? "");
+			expect(lastLine).toContain("TODO 0/2");
+			expect(lastLine).toContain("dropped");
+			expect(lastLine).not.toContain("done");
 		});
 
 		it("switches dynamically between multi-line HUD and compact single line on resize", () => {

@@ -2020,6 +2020,14 @@ function mapOptionsForApi<TApi extends Api>(
 		acceptEmptyResponse: options?.acceptEmptyResponse,
 		anthropicCacheRefreshRequest: options?.anthropicCacheRefreshRequest,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
+		cursorExcludeTools: options?.cursorExcludeTools,
+		cursorLocalCliMode: options?.cursorLocalCliMode,
+		cursorDevExperimentOverrides: options?.cursorDevExperimentOverrides,
+		cursorClientSupportsInlineImages: options?.cursorClientSupportsInlineImages,
+		cursorClientSupportsRoutedModelUpdate: options?.cursorClientSupportsRoutedModelUpdate,
+		cursorClientSupportsPromptContextUsageRpc: options?.cursorClientSupportsPromptContextUsageRpc,
+		cursorRunId: options?.cursorRunId,
+		cursorAgentSessionId: options?.cursorAgentSessionId,
 		...simpleProviderOptions,
 	};
 
@@ -2171,6 +2179,12 @@ function mapOptionsForApi<TApi extends Api>(
 					textVerbosity: options?.textVerbosity,
 					promptCache: options?.promptCache,
 					statefulResponses: options?.statefulResponses,
+					previousResponseId: options?.previousResponseId,
+					parallelToolCalls: options?.parallelToolCalls,
+					seed: options?.seed,
+					logitBias: options?.logitBias,
+					user: options?.user,
+					responseFormat: options?.responseFormat,
 				});
 			}
 			return castApi<"openai-completions">({
@@ -2182,6 +2196,11 @@ function mapOptionsForApi<TApi extends Api>(
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 				promptCache: options?.promptCache,
+				parallelToolCalls: options?.parallelToolCalls,
+				seed: options?.seed,
+				logitBias: options?.logitBias,
+				user: options?.user,
+				responseFormat: options?.responseFormat,
 			});
 		}
 
@@ -2195,6 +2214,11 @@ function mapOptionsForApi<TApi extends Api>(
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 				promptCache: options?.promptCache,
+				parallelToolCalls: options?.parallelToolCalls,
+				seed: options?.seed,
+				logitBias: options?.logitBias,
+				user: options?.user,
+				responseFormat: options?.responseFormat,
 			});
 
 		case "openai-responses":
@@ -2211,6 +2235,12 @@ function mapOptionsForApi<TApi extends Api>(
 				textVerbosity: options?.textVerbosity,
 				promptCache: options?.promptCache,
 				statefulResponses: options?.statefulResponses,
+				previousResponseId: options?.previousResponseId,
+				parallelToolCalls: options?.parallelToolCalls,
+				seed: options?.seed,
+				logitBias: options?.logitBias,
+				user: options?.user,
+				responseFormat: options?.responseFormat,
 			});
 
 		case "azure-openai-responses":
@@ -2224,6 +2254,12 @@ function mapOptionsForApi<TApi extends Api>(
 				statefulResponses: options?.statefulResponses,
 				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
 				forceReasoningOff: options?.forceReasoningOff,
+				previousResponseId: options?.previousResponseId,
+				parallelToolCalls: options?.parallelToolCalls,
+				seed: options?.seed,
+				logitBias: options?.logitBias,
+				user: options?.user,
+				responseFormat: options?.responseFormat,
 			});
 
 		case "openai-codex-responses":
@@ -2411,7 +2447,28 @@ function mapOptionsForApi<TApi extends Api>(
 				execHandlers,
 				onToolResult,
 				externalToolExecutor: options?.cursorExternalToolExecutor,
-				wireModelId: resolveWireModelId(cursorModel, effort),
+				toolChoice: options?.toolChoice,
+				cursorToolPassthrough: options?.cursorToolPassthrough,
+				cursorExcludeTools: options?.cursorExcludeTools,
+				cursorLocalCliMode: options?.cursorLocalCliMode,
+				cursorDevExperimentOverrides: options?.cursorDevExperimentOverrides,
+				cursorClientSupportsInlineImages: options?.cursorClientSupportsInlineImages,
+				cursorClientSupportsRoutedModelUpdate: options?.cursorClientSupportsRoutedModelUpdate,
+				cursorClientSupportsPromptContextUsageRpc: options?.cursorClientSupportsPromptContextUsageRpc,
+				cursorRunId: options?.cursorRunId,
+				cursorAgentSessionId: options?.cursorAgentSessionId,
+				// A roster-resolved `requestModelId` of "auto" echoes the roster
+				// verbatim (what the CLI sends); otherwise auto mode sends the
+				// "default" wire id, and non-auto resolves from the model's own
+				// requestModelId. Also pin synthetic catalog `auto` so
+				// streamSimple without the gateway header still hits the Cursor
+				// router contract.
+				wireModelId:
+					model.requestModelId === "auto"
+						? "auto"
+						: options?.cursorAutoMode || model.id === "auto"
+							? "default"
+							: resolveWireModelId(cursorModel, effort),
 			});
 		}
 

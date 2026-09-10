@@ -88,22 +88,25 @@ describe("Print-mode silent-abort regression", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("does not write silent-abort marker to stderr or exit non-zero", async () => {
-		const silentAbortMsg = makeAssistantMessage({
-			stopReason: "aborted",
-			errorMessage: SILENT_ABORT_MARKER,
-			content: [],
-		});
+	it.each(["text", "json"] as const)(
+		"does not write silent-abort marker to stderr or exit non-zero in %s mode",
+		async mode => {
+			const silentAbortMsg = makeAssistantMessage({
+				stopReason: "aborted",
+				errorMessage: SILENT_ABORT_MARKER,
+				content: [],
+			});
 
-		const session = createMockSession([silentAbortMsg]);
-		await runPrintMode(session, { mode: "text" });
+			const session = createMockSession([silentAbortMsg]);
+			await runPrintMode(session, { mode });
 
-		// The silent-abort marker MUST NOT appear in stderr
-		const stderrText = stderrOutput.join("");
-		expect(stderrText).not.toContain(SILENT_ABORT_MARKER);
-		// process.exit MUST NOT have been called (clean termination)
-		expect(exitSpy).not.toHaveBeenCalled();
-	});
+			// The silent-abort marker MUST NOT appear in stderr
+			const stderrText = stderrOutput.join("");
+			expect(stderrText).not.toContain(SILENT_ABORT_MARKER);
+			// process.exit MUST NOT have been called (clean termination)
+			expect(exitSpy).not.toHaveBeenCalled();
+		},
+	);
 
 	it("bounds final memory consolidation so print mode can exit", async () => {
 		let disposeOptions: AgentSessionDisposeOptions | undefined;
