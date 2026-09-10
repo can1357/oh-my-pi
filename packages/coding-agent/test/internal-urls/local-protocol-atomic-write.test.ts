@@ -219,19 +219,27 @@ describe("writeLocalUrlAtomically", () => {
 		});
 	});
 
-	it("migrates inherited owner-controlled Windows local roots to the private DACL", async () => {
+	it("migrates Administrators-owned Windows local roots for the invoking administrator", async () => {
 		if (process.platform !== "win32") return;
 		await withTempDir(async tempDir => {
 			const artifactsDir = path.join(tempDir, "artifacts");
 			const localRoot = path.join(artifactsDir, "local");
 			const options = {
 				getArtifactsDir: () => artifactsDir,
-				getSessionId: () => "windows-inherited-root-migration",
+				getSessionId: () => "windows-administrators-root-migration",
 			};
 			await fs.mkdir(localRoot, { recursive: true });
+			const setOwner = Bun.spawn(["icacls.exe", localRoot, "/setowner", "*S-1-5-32-544"], {
+				stdin: "ignore",
+				stdout: "ignore",
+				stderr: "pipe",
+			});
+			const [exitCode, stderr] = await Promise.all([setOwner.exited, new Response(setOwner.stderr).text()]);
+			expect(exitCode, stderr).toBe(0);
 
-			await writeLocalUrlAtomically("local://migrated.txt", "content", options);
+			const outcome = await writeLocalUrlAtomically("local://migrated.txt", "content", options);
 
+			expect(outcome.commitState).toBe("COMMITTED");
 			expect(await Bun.file(path.join(localRoot, "migrated.txt")).text()).toBe("content");
 		});
 	});

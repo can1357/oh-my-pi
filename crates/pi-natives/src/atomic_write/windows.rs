@@ -43,13 +43,14 @@ use windows_sys::{
 			ACCESS_ALLOWED_ACE, ACCESS_DENIED_ACE, ACE_HEADER, ACL, ACL_REVISION,
 			AddAccessAllowedAceEx,
 			Authorization::{GetSecurityInfo, SetSecurityInfo},
-			CONTAINER_INHERIT_ACE, CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
-			GetLengthSid, GetSecurityDescriptorControl, GetTokenInformation, INHERITED_ACE,
-			InitializeAcl, InitializeSecurityDescriptor, IsValidAcl, IsValidSid, IsWellKnownSid,
-			OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-			PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_DESCRIPTOR,
-			SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
-			TOKEN_QUERY, TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+			CONTAINER_INHERIT_ACE, CheckTokenMembership, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
+			EqualSid, GetAce, GetLengthSid, GetSecurityDescriptorControl, GetTokenInformation,
+			INHERITED_ACE, InitializeAcl, InitializeSecurityDescriptor, IsValidAcl, IsValidSid,
+			IsWellKnownSid, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION,
+			PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+			SECURITY_DESCRIPTOR, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+			SetSecurityDescriptorOwner, TOKEN_QUERY, TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid,
+			WinLocalSystemSid,
 		},
 		Storage::FileSystem::{
 			DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL,
@@ -79,8 +80,11 @@ const DIRECTORY_TRAVERSE_ACCESS: u32 =
 	FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE;
 const DIRECTORY_CREATE_CHILD_ACCESS: u32 =
 	FILE_ADD_SUBDIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
-const DIRECTORY_MUTATE_ACCESS: u32 =
-	DIRECTORY_TRAVERSE_ACCESS | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | WRITE_DAC;
+const DIRECTORY_MUTATE_ACCESS: u32 = DIRECTORY_TRAVERSE_ACCESS
+		| FILE_ADD_FILE
+		| FILE_ADD_SUBDIRECTORY
+		| WRITE_DAC
+		| WRITE_OWNER;
 const DIRECTORY_OPEN_OPTIONS: u32 =
 	FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT;
 const FILE_OPEN_OPTIONS: u32 =
@@ -466,6 +470,26 @@ fn foreign_allow_grants_mutation(mask: u32) -> bool {
 	mask & FOREIGN_ALLOW_MUTATION_ACCESS != 0 || mask & FILE_ALL_ACCESS == FILE_ALL_ACCESS
 }
 
+fn owner_is_invoking_user_or_administrator(
+	owner: PSID,
+	private: &PrivateSecurityDescriptor,
+) -> Result<bool, AtomicWriteError> {
+	if unsafe { EqualSid(owner, private.owner.as_psid()) } != 0 {
+		return Ok(true);
+	}
+	if unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid) } == 0 {
+		return Ok(false);
+	}
+	let mut is_member = 0;
+	if unsafe { CheckTokenMembership(ptr::null_mut(), owner, &mut is_member) } == 0 {
+		let error = unsafe { GetLastError() };
+		return Err(unsafe_path(format!(
+			"cannot prove the invoking user is a member of Administrators (Win32 error {error})"
+		)));
+	}
+	Ok(is_member != 0)
+}
+
 fn trusted_legacy_principal(sid: PSID, private: &PrivateSecurityDescriptor) -> bool {
 	unsafe {
 		EqualSid(sid, private.owner.as_psid()) != 0
@@ -534,17 +558,24 @@ fn migrate_legacy_directory(
 	if unsafe { IsValidSid(owner) } == 0 {
 		return Err(unsafe_path("local root or parent has an invalid owner SID"));
 	}
-	if unsafe { EqualSid(owner, private.owner.as_psid()) } == 0 {
-		return Err(unsafe_path("local root or parent is not owned by the invoking user"));
+	let migrate_owner = unsafe { EqualSid(owner, private.owner.as_psid()) } == 0;
+	if !owner_is_invoking_user_or_administrator(owner, private)? {
+		return Err(unsafe_path(
+			"local root or parent is neither owned by the invoking user nor Administrators-owned for the invoking user",
+		));
 	}
 	legacy_dacl_is_safe(dacl, private)?;
 
+	let security_information = DACL_SECURITY_INFORMATION
+		| PROTECTED_DACL_SECURITY_INFORMATION
+		| (if migrate_owner { OWNER_SECURITY_INFORMATION } else { 0 });
+	let owner = if migrate_owner { private.owner.as_psid() } else { ptr::null_mut() };
 	let status = unsafe {
 		SetSecurityInfo(
 			handle,
 			windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT,
-			DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-			ptr::null_mut(),
+			security_information,
+			owner,
 			ptr::null_mut(),
 			private.acl.as_ptr().cast::<ACL>(),
 			ptr::null(),
