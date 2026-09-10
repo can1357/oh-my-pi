@@ -433,10 +433,21 @@ export class CollabHost {
 		}
 	}
 
-	/** Timing-safe write-token check; peers without a valid token are read-only. */
-	#verifyWriteToken(token: string | undefined): boolean {
+	/**
+	 * Timing-safe write-token check; peers without a valid token are read-only.
+	 *
+	 * Takes `unknown` because the protocol's field types are what a guest claims,
+	 * not what it sent: the frame is `JSON.parse`d and cast. `Buffer.from` throws
+	 * `ERR_INVALID_ARG_TYPE` on anything that is not a string, and the throw would
+	 * unwind into `CollabSocket`'s frame-handler catch — losing the whole `hello`
+	 * with nothing but a debug line, which a guest cannot tell apart from a welcome
+	 * the queue refused. A token that is not a string is a token that does not
+	 * match, so it answers the same `false` a wrong one does and the guest joins
+	 * read-only.
+	 */
+	#verifyWriteToken(token: unknown): boolean {
 		const expected = this.#writeToken;
-		if (!expected || !token) return false;
+		if (!expected || typeof token !== "string" || !token) return false;
 		const bytes = Buffer.from(token, "base64url");
 		return bytes.byteLength === expected.byteLength && timingSafeEqual(bytes, expected);
 	}
@@ -446,15 +457,28 @@ export class CollabHost {
 		this.#socket?.send({ t: "error", message: `${action} is disabled on a read-only link` }, fromPeer);
 	}
 
-	#handleHello(name: string, proto: number, writeToken: string | undefined, fromPeer: number): void {
+	/**
+	 * Every field here is `unknown` for the reason given on {@link #verifyWriteToken}:
+	 * the declared protocol types describe what a well-behaved guest sends, and this
+	 * is the boundary where that stops being a guarantee. `proto` needs no narrowing
+	 * — a non-number is never equal to {@link COLLAB_PROTO}, so it takes the mismatch
+	 * path and is reported through `String`, which is total for anything JSON can
+	 * carry. `name` does: `.trim()` throws on a non-string, including `null`.
+	 */
+	#handleHello(name: unknown, proto: unknown, writeToken: unknown, fromPeer: number): void {
 		if (proto !== COLLAB_PROTO) {
 			this.#socket?.send(
-				{ t: "error", message: `protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${proto}` },
+				{
+					t: "error",
+					message: `protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${String(proto)}`,
+				},
 				fromPeer,
 			);
 			return;
 		}
-		const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
+		// A name that is not a string is a name this host cannot use, which is what
+		// a blank one already means: the guest gets the generated one either way.
+		const cleanName = (typeof name === "string" ? name.trim().slice(0, 64) : "") || `guest-${fromPeer}`;
 		const canWrite = this.#verifyWriteToken(writeToken);
 		// Registered before the snapshot is built, because `#buildState` reads the
 		// roster and the welcome has to show the joiner itself. Held against the

@@ -138,6 +138,44 @@ async function joinAsGuest(link: string, name: string, writeTokenOverride?: stri
 	return { socket, nextFrame };
 }
 
+/**
+ * Guest that sends a `hello` this host's own types say is impossible. The frame is
+ * `JSON.parse`d out of an encrypted envelope and cast, so a field's declared type
+ * is a claim the sender makes, and these tests are about what happens when it is
+ * false.
+ */
+function parseWriteToken(link: string): Uint8Array {
+	const parsed = parseCollabLink(link);
+	if ("error" in parsed) throw new Error(parsed.error);
+	if (!parsed.writeToken) throw new Error("expected a write link");
+	return parsed.writeToken;
+}
+
+async function joinWithRawHello(link: string, hello: Record<string, unknown>): Promise<TestGuest> {
+	const parsed = parseCollabLink(link);
+	if ("error" in parsed) throw new Error(parsed.error);
+	const key = await importRoomKey(parsed.key);
+	const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+	const queue: CollabFrame[] = [];
+	const waiters: ((frame: CollabFrame) => void)[] = [];
+	socket.onFrame = frame => {
+		if (FILTERED_FRAME_TYPES[frame.t]) return;
+		const waiter = waiters.shift();
+		if (waiter) waiter(frame);
+		else queue.push(frame);
+	};
+	socket.onOpen = () => socket.send({ t: "hello", ...hello } as unknown as CollabFrame);
+	socket.connect();
+	const nextFrame = (): Promise<CollabFrame> => {
+		const queued = queue.shift();
+		if (queued) return Promise.resolve(queued);
+		const { promise, resolve } = Promise.withResolvers<CollabFrame>();
+		waiters.push(resolve);
+		return promise;
+	};
+	return { socket, nextFrame };
+}
+
 // ── Shared host/relay, booted once ──────────────────────────────────────────
 // Booting the relay + host and connecting the host socket is the only heavy
 // step; it is identical across all three tests (none mutate host config), so it
@@ -166,6 +204,63 @@ afterAll(async () => {
 	// the host's socket holds its own FakeWebSocket/relay refs, so teardown still works.
 	uninstallInMemoryRelay();
 	await host.stop("test done");
+});
+
+describe("collab hello fields a guest can lie about", () => {
+	it("treats a write token that is not a string as one that does not match", async () => {
+		// `Buffer.from({}, "base64url")` throws ERR_INVALID_ARG_TYPE, and the frame
+		// handler's catch would swallow it: no welcome, no error, nothing the guest
+		// can distinguish from a queue that refused the join.
+		const guest = await joinWithRawHello(host.link, {
+			proto: COLLAB_PROTO,
+			name: "malformed-token",
+			writeToken: {},
+		});
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+		// The same outcome a wrong token gets, and the same one the write-token
+		// tests above assert for a view link.
+		expect(welcome.readOnly).toBe(true);
+		expect(host.participants.find(p => p.name === "malformed-token")?.readOnly).toBe(true);
+
+		// And the permission it did not get is still enforced, not merely unset.
+		guest.socket.send({ t: "prompt", text: "do something" });
+		const reply = await guest.nextFrame();
+		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+		expect(reply.message).toContain("read-only");
+		expect(harness.prompts).toHaveLength(0);
+	});
+
+	it("treats a name that is not a string as one it cannot use", async () => {
+		// `.trim()` throws on a number, and on null, in the line before the token is
+		// even read. A hello that names nothing usable gets the generated name.
+		const guest = await joinWithRawHello(host.link, {
+			proto: COLLAB_PROTO,
+			name: 42,
+			writeToken: Buffer.from(parseWriteToken(host.link)).toString("base64url"),
+		});
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+		// Named, not dropped — and the valid token on the same frame was still read,
+		// which it could not have been if the name had thrown first.
+		expect(welcome.readOnly).toBeUndefined();
+		const named = host.participants.filter(p => /^guest-\d+$/.test(p.name));
+		expect(named).toHaveLength(1);
+		expect(named[0]?.readOnly).toBeFalsy();
+	});
+
+	it("reports a protocol version that is not a number instead of dropping the hello", async () => {
+		// No narrowing needed for this one, and the test says so: a non-number is
+		// never equal to COLLAB_PROTO, and String() is total for anything JSON carries.
+		const guest = await joinWithRawHello(host.link, { proto: { evil: true }, name: "bad-proto" });
+		guestCleanups.push(() => guest.socket.close());
+		const reply = await guest.nextFrame();
+		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+		expect(reply.message).toContain("protocol mismatch");
+		expect(host.participants.find(p => p.name === "bad-proto")).toBeUndefined();
+	});
 });
 
 describe("collab read-only links", () => {

@@ -412,12 +412,20 @@ is worth a transcript line.
   ~1.2x serialized size on an entry-heavy fixture.
 - **A superseded batch is discarded before the replacement is admitted.** Step 3
   runs ahead of the capacity checks, so a second `hello` whose batch is then
-  refused leaves the peer with neither: measured, one 4 MiB batch admitted, 30
-  replica-bearing broadcasts behind it, and a repeat batch refused — the peer
-  received nothing and the room stayed up. Ordering it the other way is not the
-  fix, because superseding is what frees the room the replacement needs, so the
-  replacement would start failing against its own predecessor. It needs the same
+  refused leaves the peer with neither — not the stale snapshot it had queued and
+  not the fresh one it asked for. What it costs, measured: a 4 MiB batch admitted
+  for peer 7, then 30 replica-bearing broadcasts admitted behind it, then a repeat
+  4 MiB batch for peer 7 refused. Peer 7 received **0** frames, the transport
+  carried **30** — the broadcasts, and nothing else — and the room stayed up
+  (`onClose` never fired), so this is a silent loss for one guest rather than an
+  overload anyone is told about. It is bounded by the guest's own first-welcome
+  timer, which fires and prompts another rejoin.
+
+  Ordering it the other way is not the fix, because superseding is what frees the
+  room the replacement needs: moved after the capacity checks, a repeat batch
+  would start failing against its own predecessor, and a guest that re-sends
+  `hello` on a busy room would never get past its first snapshot. It needs the same
   treatment the shed loop got — decide admissibility against the queue the
-  supersede would leave, before discarding anything — which is a change to what
-  step 3 means rather than to when it runs, so it is not done here.
+  supersede *would* leave, before discarding anything. That changes what step 3
+  means rather than when it runs, so it is not done here.
 - **Fairness is coarse.** `#shedHeaviestPeer` picks by raw entry count with no notion of fault, so a broadcast under pressure can evict a quota-abiding peer and hand it a "rejoin to resync" error. That is a deliberate trade, not an oversight: shedding one peer's backlog and asking it to rejoin is strictly better than ending the session for everyone, which is the only other way to admit that broadcast. A guest that is shed recovers by rejoining; a room that is ended does not recover at all. Attributing broadcast pressure to a cause would let the choice be fault-based instead.
