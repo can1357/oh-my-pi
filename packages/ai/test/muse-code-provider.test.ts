@@ -1,9 +1,12 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { mapOpenAIResponsesToolChoiceForTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry/registry";
+import type { Model, Tool } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { MUSE_CODE_STATIC_MODELS } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { META_MUSE_STATIC_MODELS, MUSE_CODE_STATIC_MODELS } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 
 const encodedMuseCredential = JSON.stringify({
 	oauthAccessToken: "meta-account-access",
@@ -76,6 +79,22 @@ describe("Muse Code provider", () => {
 			expect(await storage.getApiKey("muse-code", "stale-expiry-session")).toBe(encodedMuseCredential);
 		} finally {
 			storage.close();
+		}
+	});
+
+	test("omits tool_choice on api.meta.ai, which accepts only auto", () => {
+		// Verified 2026-09-10 against muse-spark-1.3: "none", "required" and named
+		// function choices all 400 with `only "auto" is supported for tool_choice`.
+		const tool = { name: "yield", description: "Finish.", parameters: { type: "object" } } as unknown as Tool;
+		const models = [
+			...(["meta", "muse-code"] as const).map(provider => getBundledModel(provider, "muse-spark-1.3")),
+			...[...META_MUSE_STATIC_MODELS, ...MUSE_CODE_STATIC_MODELS].map(spec => buildModel(spec)),
+		] as Model<"openai-responses">[];
+		for (const model of models) {
+			expect(model.compat.supportsToolChoice).toBe(false);
+			for (const choice of ["auto", "none", "required", { type: "tool", name: "yield" }] as const) {
+				expect(mapOpenAIResponsesToolChoiceForTools(choice, [tool], model)).toBeUndefined();
+			}
 		}
 	});
 
