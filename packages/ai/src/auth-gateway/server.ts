@@ -344,6 +344,19 @@ function buildGatewayApiKeyResolver(
 	};
 }
 
+function classifyAssistantFailure(message: AssistantMessage): GatewayErrorClassification {
+	return classifyGatewayError(
+		Object.assign(
+			new Error(message.errorClassificationMessage ?? message.errorMessage ?? "Upstream request failed"),
+			{
+				status: message.errorStatus,
+				errorId: message.errorId,
+				kind: "kind" in message ? message.kind : undefined,
+			},
+		),
+	);
+}
+
 function clientClosedResponse(route: { module: FormatModule }): Response {
 	return route.module.formatError(499, "request_aborted", "client closed request");
 }
@@ -767,7 +780,7 @@ async function handleFormatEndpoint(
 						if (message.stopReason === "aborted") {
 							return formatError(499, "request_aborted", errorMessage);
 						}
-						const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
+						const classified = classifyAssistantFailure(message);
 						if (considerFallback(classified)) continue;
 						return formatError(classified.status, classified.type, errorMessage);
 					}
@@ -1133,7 +1146,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 						if (message.stopReason === "aborted") {
 							return formatError(499, "request_aborted", errorMessage);
 						}
-						const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
+						const classified = classifyAssistantFailure(message);
 						if (considerFallback(classified)) continue;
 						return formatError(classified.status, classified.type, errorMessage);
 					}

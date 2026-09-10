@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Content-safety rejections retain their status and no longer trigger model failover.
 - Fixed gateway reservation cleanup after failed streams, credential identity changes, and availability-based fallback routing.
 
 - Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context.
