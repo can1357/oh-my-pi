@@ -470,7 +470,7 @@ export class CustomEditor extends Editor {
 	clearDraft(historyText?: string): void {
 		if (historyText !== undefined) this.addToHistory(historyText);
 		this.setText("");
-		this.clearAtoms();
+		this.clearPasteState();
 		this.imageLinks = undefined;
 		this.pendingImages = [];
 		this.pendingImageLinks = [];
@@ -478,12 +478,45 @@ export class CustomEditor extends Editor {
 		this.#textAttachmentCounter = 0;
 	}
 
+	/** Preserve a canceled draft in local navigation, then clear the composer. */
+	clearDraftForRecall(): void {
+		if (!this.getText().trim()) {
+			this.clearDraft();
+			return;
+		}
+		const images = [...this.pendingImages];
+		const links = [...this.pendingImageLinks];
+		const imageLinks = this.imageLinks;
+		const texts = [...this.pendingTexts];
+		const counter = this.#textAttachmentCounter;
+		this.rememberDraft(() => {
+			this.pendingImages = [...images];
+			this.pendingImageLinks = [...links];
+			this.imageLinks = imageLinks;
+			this.pendingTexts = [...texts];
+			this.#textAttachmentCounter = counter;
+			if (this.pendingImages.length > 0 && this.pendingImageLinks.some(link => link === undefined)) {
+				void this.#materializeDraftLinks();
+			}
+		});
+		this.clearDraft();
+	}
+
+	override restoreHistoryState(restore?: () => void): void {
+		this.imageLinks = undefined;
+		this.pendingImages = [];
+		this.pendingImageLinks = [];
+		this.pendingTexts = [];
+		this.#textAttachmentCounter = 0;
+		super.restoreHistoryState(restore);
+	}
+
 	/** Replace the composer draft with a restored historical prompt: re-attaches the message's
 	 *  images, collapses stored `[Image #N, WxH]` markers back into compact chip tokens (so the
 	 *  chips band and atomic deletion return), and re-materializes `file://` links so the tokens
 	 *  are clickable again instead of degrading to dead text (esc-esc branch, `/tree`). */
 	setDraft(text: string, images?: readonly ImageContent[]): void {
-		this.clearAtoms();
+		this.clearPasteState();
 		this.pendingTexts = [];
 		this.#textAttachmentCounter = 0;
 		this.imageLinks = undefined;
@@ -830,6 +863,9 @@ export class CustomEditor extends Editor {
 	}
 
 	#spaceHoldGestureEnabled(): boolean {
+		// Push-to-talk is a text-composition gesture, so it stays out of Vim's Normal/Visual modes
+		// where the space bar is the `l` motion.
+		if (this.vimMode !== "insert") return false;
 		return this.onSpaceHoldStart !== undefined && (this.sttHoldEnabled?.() ?? false) && !this.isShowingAutocomplete();
 	}
 
@@ -1101,7 +1137,15 @@ export class CustomEditor extends Editor {
 			// handler. This matches the standard TUI/IDE pattern and prevents a
 			// single ESC from both closing an @ completion and aborting an active
 			// agent run (#1655).
-			if (this.#matchesAction(canonical, "app.interrupt") && this.onEscape && !this.isShowingAutocomplete()) {
+			// Vim mode claims Escape ahead of the interrupt: it has to mean "leave Insert mode" and
+			// "cancel a half-typed operator" first. Only a quiet Normal mode gives it back here, so
+			// the familiar single-ESC-to-abort still works once the user is out of Insert mode.
+			if (
+				this.#matchesAction(canonical, "app.interrupt") &&
+				this.onEscape &&
+				!this.isShowingAutocomplete() &&
+				!this.vimConsumesEscape()
+			) {
 				this.onEscape();
 				return;
 			}

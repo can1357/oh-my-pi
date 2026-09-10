@@ -618,6 +618,10 @@ export class Theme {
 			extensionPrompt: this.#symbols["icon.extensionPrompt"],
 			extensionContextFile: this.#symbols["icon.extensionContextFile"],
 			extensionInstruction: this.#symbols["icon.extensionInstruction"],
+			vimNormal: this.#symbols["icon.vimNormal"],
+			vimInsert: this.#symbols["icon.vimInsert"],
+			vimVisual: this.#symbols["icon.vimVisual"],
+			vimVisualLine: this.#symbols["icon.vimVisualLine"],
 			mic: this.#symbols["icon.mic"],
 			camera: this.#symbols["icon.camera"],
 		};

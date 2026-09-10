@@ -1711,6 +1711,68 @@ describe("ModelRegistry", () => {
 		});
 	});
 	describe("extended context", () => {
+		const thinking: ThinkingConfig = {
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium],
+			defaultLevel: Effort.Low,
+		};
+
+		test.each(
+			[
+				["openai-codex", "gpt-6-astra"],
+				["openai-codex", "gpt-5.6-luna"],
+				["anthropic", "claude-opus-5"],
+				["anthropic", "claude-mythos-5"],
+				["amazon-bedrock", "anthropic.claude-opus-5"],
+				["amazon-bedrock", "au.anthropic.claude-opus-5"],
+				["amazon-bedrock", "eu.anthropic.claude-opus-5"],
+				["amazon-bedrock", "global.anthropic.claude-opus-5"],
+				["amazon-bedrock", "us-gov.anthropic.claude-opus-5"],
+				["amazon-bedrock", "us.anthropic.claude-opus-5"],
+				["amazon-bedrock", "global.openai.gpt-5.6-luna"],
+				["bedrock-mantle", "openai.gpt-5.6-luna"],
+			].flatMap(([provider, id]) => [false, true].map(extendedContext => [provider, id, extendedContext] as const)),
+		)("%s/%s extendedContext=%j preserves capacity across effort restrictions", (provider, id, extendedContext) => {
+			const testSettings = Settings.isolated({ extendedContext });
+			const baselineRegistry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			const baseline = baselineRegistry.find(provider, id);
+			expect(baseline).toBeDefined();
+			if (!baseline?.thinking) throw new Error(`Missing thinking-capable model: ${provider}/${id}`);
+			const overrideThinking: ThinkingConfig = {
+				...baseline.thinking,
+				efforts: [Effort.Low, Effort.Medium],
+				defaultLevel: Effort.Low,
+			};
+			writeRawModelsJson({
+				[provider]: { modelOverrides: { [id]: { thinking: overrideThinking } } },
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			const actual = registry.find(provider, id);
+			expect(actual?.thinking).toEqual(overrideThinking);
+			expect(actual?.contextWindow).toBe(baseline.contextWindow);
+			expect(actual?.maxTokens).toBe(baseline.maxTokens);
+		});
+
+		test("preserves Astra capacity with a thinking-only override across policy toggles", async () => {
+			writeRawModelsJson({
+				"openai-codex": { modelOverrides: { "gpt-6-astra": { thinking } } },
+			});
+			const testSettings = Settings.isolated();
+			testSettings.set("extendedContext", true);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			expect(registry.find("openai-codex", "gpt-6-astra")?.thinking).toEqual(thinking);
+			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
+
+			testSettings.set("extendedContext", false);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(272_000);
+
+			testSettings.set("extendedContext", true);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
+			expect(registry.find("openai-codex", "gpt-6-astra")?.thinking).toEqual(thinking);
+		});
+
 		test("toggles bundled Astra between its standard and documented extended windows", async () => {
 			const testSettings = Settings.isolated();
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
@@ -1736,7 +1798,7 @@ describe("ModelRegistry", () => {
 
 		test("preserves an explicit Astra context override across extended context toggles", async () => {
 			writeRawModelsJson({
-				"openai-codex": { modelOverrides: { "gpt-6-astra": { contextWindow: 400_000 } } },
+				"openai-codex": { modelOverrides: { "gpt-6-astra": { contextWindow: 400_000, thinking } } },
 			});
 			const testSettings = Settings.isolated();
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
@@ -1753,7 +1815,7 @@ describe("ModelRegistry", () => {
 
 		test("clamps an explicit Astra override to the Codex ceiling", async () => {
 			writeRawModelsJson({
-				"openai-codex": { modelOverrides: { "gpt-6-astra": { contextWindow: 2_000_000 } } },
+				"openai-codex": { modelOverrides: { "gpt-6-astra": { contextWindow: 2_000_000, thinking } } },
 			});
 			const testSettings = Settings.isolated({ extendedContext: true });
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
