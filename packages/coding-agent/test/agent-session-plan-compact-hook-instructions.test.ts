@@ -26,12 +26,14 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import type { SessionBeforeCompactEvent } from "../src/extensibility/shared-events";
 import { AgentSession } from "../src/session/agent-session";
 import { AuthStorage } from "../src/session/auth-storage";
+import type { CompactionMethod } from "../src/session/compaction-methods";
 import { convertToLlm } from "../src/session/messages";
 import { SessionManager } from "../src/session/session-manager";
 
@@ -40,6 +42,7 @@ type Harness = {
 	sessionManager: SessionManager;
 	beforeCompactEvents: SessionBeforeCompactEvent[];
 	summarizerCalls: Array<{ customInstructions: string | undefined }>;
+	snapcompactCalls: Array<{ firstKeptEntryId: string }>;
 };
 
 function createAssistantResponse(text: string) {
@@ -78,16 +81,20 @@ describe("AgentSession plan-mode compaction hook contract (issue #4359)", () => 
 		vi.restoreAllMocks();
 	});
 
-	async function createHarness(): Promise<Harness> {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+	async function createHarness(
+		methodOrder: CompactionMethod[] = ["soft"],
+		vision: "vision" | "text-only" = "vision",
+	): Promise<Harness> {
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!bundled) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const model = vision === "vision" ? bundled : { ...bundled, input: ["text" as const] };
 
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), `testauth-${cleanups.length}.db`));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), `models-${cleanups.length}.yml`));
 		const settings = Settings.isolated({
 			"compaction.enabled": true,
-			"compaction.methodOrder": ["soft"],
+			"compaction.methodOrder": methodOrder,
 			// Aggressive keep-recent budget so the small seeded conversation still
 			// yields a non-empty messagesToSummarize window (prepareCompaction
 			// otherwise short-circuits with "Nothing to compact").
@@ -129,6 +136,20 @@ describe("AgentSession plan-mode compaction hook contract (issue #4359)", () => 
 			},
 		);
 
+		// Snapcompact renders real bitmap frames; stub it so the test asserts
+		// method selection rather than the renderer.
+		const snapcompactCalls: Array<{ firstKeptEntryId: string }> = [];
+		vi.spyOn(snapcompact, "compact").mockImplementation(async preparation => {
+			snapcompactCalls.push({ firstKeptEntryId: preparation.firstKeptEntryId });
+			return {
+				summary: "archived onto frames",
+				shortSummary: "archived",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				preserveData: { snapcompact: { frames: [], totalChars: 0, truncatedChars: 0 } },
+			};
+		});
+
 		// Minimal ExtensionRunner shim: AgentSession only calls hasHandlers() +
 		// emit() on it. Casting keeps the test focused on the hook payload.
 		const beforeCompactEvents: SessionBeforeCompactEvent[] = [];
@@ -160,7 +181,7 @@ describe("AgentSession plan-mode compaction hook contract (issue #4359)", () => 
 			await session.dispose();
 			authStorage.close();
 		});
-		return { session, sessionManager, beforeCompactEvents, summarizerCalls };
+		return { session, sessionManager, beforeCompactEvents, summarizerCalls, snapcompactCalls };
 	}
 
 	it("routes internalGuidance to the summarizer without exposing it to session_before_compact", async () => {
@@ -203,5 +224,57 @@ describe("AgentSession plan-mode compaction hook contract (issue #4359)", () => 
 
 		expect(beforeCompactEvents[0]?.customInstructions).toBe(userFocus);
 		expect(summarizerCalls[0]?.customInstructions).toBe(planGuidance);
+	});
+
+	it("lets a vision model snapcompact the plan-mode transcript instead of summarizing it", async () => {
+		// Compact-before-execute rides the plan distillation prompt through
+		// `internalGuidance`. That is advice for a summary that may not run, not
+		// a demand that one run: on a model that reads frames back, snapcompact
+		// keeps the discussion verbatim and the approved plan is re-injected from
+		// its pinned reference path. Treating the guidance as focus disqualified
+		// snapcompact on every compact-and-execute, silently downgrading a
+		// vision-to-vision transition to a lossy soft summary.
+		const harness = await createHarness(["snapcompact", "soft"]);
+		const planGuidance = "Preparing to execute the approved plan. You MUST distill the plan-mode discussion.";
+
+		await harness.session.compact(undefined, { internalGuidance: planGuidance });
+
+		expect(harness.snapcompactCalls.length).toBe(1);
+		expect(harness.summarizerCalls.length).toBe(0);
+		// The #4359 contract holds on this path too: guidance stays off the hook.
+		expect(harness.beforeCompactEvents.length).toBe(1);
+		expect(harness.beforeCompactEvents[0]?.customInstructions).toBeUndefined();
+	});
+
+	it("still skips snapcompact when the user supplied a focus the archive cannot honor", async () => {
+		// The branch partner: user focus is a demand the operator would notice
+		// being dropped, so it must keep falling through to the summarizer even
+		// when snapcompact leads the order and the model could read frames.
+		const harness = await createHarness(["snapcompact", "soft"]);
+		const userFocus = "focus on the auth refactor";
+
+		await harness.session.compact(userFocus);
+
+		expect(harness.snapcompactCalls.length).toBe(0);
+		expect(harness.summarizerCalls.length).toBe(1);
+		expect(harness.summarizerCalls[0]?.customInstructions).toBe(userFocus);
+	});
+
+	it("still summarizes for a text-only model, which cannot read the archive back", async () => {
+		// End-to-end contract, not a guard on one term: dropping the guidance
+		// check must not leave a text-only model with an unreadable archive
+		// instead of a summary. Two mechanisms can enforce it — the vision term
+		// in the selection gate and the downstream renderability preflight — and
+		// this pins the observable result either way. A mutation that removes
+		// only the selection term stays green here, because the preflight then
+		// blocks snapcompact and the run falls through to the summarizer.
+		const harness = await createHarness(["snapcompact", "soft"], "text-only");
+		const planGuidance = "Preparing to execute the approved plan.";
+
+		await harness.session.compact(undefined, { internalGuidance: planGuidance });
+
+		expect(harness.snapcompactCalls.length).toBe(0);
+		expect(harness.summarizerCalls.length).toBe(1);
+		expect(harness.summarizerCalls[0]?.customInstructions).toBe(planGuidance);
 	});
 });
