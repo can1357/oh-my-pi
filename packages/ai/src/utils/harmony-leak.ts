@@ -99,14 +99,16 @@ const COLLAPSE_STRUCTURE_RE = /^[-*+>#|\d]/;
 
 // Fabricated harness notice (`N`): the model narrates a token budget that no
 // omp surface ever emits (the system prompt forbids narrating budgets at all),
-// emits a repeated single-token filler line, or renders an interactive consent
-// dialog as its entire answer. All three are pure fabrication in the visible
-// channel. The prompt form is whole-answer only: 115 corpus blocks are nothing
-// but that dialog, while prose *discussing* it (this repo's own docs, bug
-// reports, and the 4.7 KB answer that first described the shape) must stay
-// clean.
+// emits a repeated single-letter filler line, or renders an interactive
+// consent dialog as its entire answer. All three are pure fabrication in the
+// visible channel. The prompt form is whole-answer only: 115 corpus blocks are
+// nothing but that dialog, while prose *discussing* it (this repo's own docs,
+// bug reports, and the 4.7 KB answer that first described the shape) must stay
+// clean. The filler form is one repeated ASCII *letter* (`a a`, 33 corpus
+// blocks); widening it to any short token swallows legitimate separator lines
+// like `-- --` and duplicated words like `ok ok`.
 const FABRICATED_NOTICE_RE = /\bYou have [\d,]+ (?:weighted )?tokens left\b/g;
-const REPEATED_TOKEN_LINE_RE = /^[ \t]*(\S{1,2})[ \t]+\1[ \t]*$/gm;
+const REPEATED_TOKEN_LINE_RE = /^[ \t]*([A-Za-z])[ \t]+\1[ \t]*$/gm;
 const FABRICATED_PROMPT_MAX_LEN = 200;
 const FABRICATED_PROMPT_RE = /^[^\n]{0,180}?(?:Continue\?[ \t]*\(y\/n\)|\[Y\/n\]|\(yes\/no\))[.\s]*$/i;
 

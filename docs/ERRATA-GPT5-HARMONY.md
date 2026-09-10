@@ -262,7 +262,7 @@ Five shapes, all observed:
 
 | Signal | Shape | Blocks |
 | ------ | ----- | -----: |
-| `N` | Fabricated harness notice — `You have 1431 weighted tokens left`, `a a`, or an interactive consent dialog as the entire answer | 150 |
+| `N` | Fabricated harness notice — `You have 1431 weighted tokens left`, a repeated single letter (`a a`), or an interactive consent dialog as the entire answer | 150 |
 | `D` | Staccato run — one short clause per line, whitespace-only separators between them: `stop.` `no.` `end.` `done.` `final.` | 56 |
 | `S` | Script residue stranded in an ASCII answer, including substitution *inside* an ASCII word: `declauding` rendered as `declაუდing` 14 times in one session | 24 |
 | `V` | A bare `to=functions.NAME` marker rendered in the final answer, outside code | 3 |
