@@ -597,6 +597,7 @@ export function stripLeadingEnvAndSudo(command: string): string {
  * to the session/structured cwd.
  */
 export function hasHiddenCwdChangeInShellGroup(command: string): boolean {
+	if (hasChildShellCwdChange(command)) return true;
 	let inSingle = false;
 	let inDouble = false;
 	for (let i = 0; i < command.length; i++) {
@@ -647,6 +648,31 @@ export function hasHiddenCwdChangeInShellGroup(command: string): boolean {
 	return false;
 }
 
+/** Inspect quoted interpreter scripts without treating ordinary quoted arguments as commands. */
+function hasChildShellCwdChange(command: string): boolean {
+	const pending = [command];
+	let inspected = 0;
+	while (pending.length > 0) {
+		// Deeply nested interpreter input is not a trustworthy cwd assertion.
+		if (++inspected > 64) return true;
+		for (const argv of tokenizeShellSegments(pending.pop()!)) {
+			const executable = argv.find(word => !SHELL_ASSIGNMENT.test(word));
+			if (!executable || !Object.hasOwn(SHELL_INTERPRETER_COMMANDS, path.basename(executable))) continue;
+			for (let index = 1; index < argv.length; index++) {
+				const option = argv[index]!;
+				if (!SHELL_REINTERPRET_OPTION.test(option)) continue;
+				const equals = option.indexOf("=");
+				const script = equals >= 0 ? option.slice(equals + 1) : argv[index + 1];
+				if (!script) return true;
+				if (commandWordCdIn(script)) return true;
+				pending.push(script);
+				break;
+			}
+		}
+	}
+	return false;
+}
+
 function findMatchingClose(command: string, start: number, close: string): number {
 	const open = close === ")" ? "(" : "{";
 	let depth = 1;
@@ -689,7 +715,7 @@ function findMatchingClose(command: string, start: number, close: string): numbe
 
 /** True when `cd` appears as a shell command word (not inside a path/arg alone). */
 function commandWordCdIn(body: string): boolean {
-	return /(?:^|[\s;&|])cd(?:[\s;|&)]|$)/.test(body);
+	return /(?:^|[\s;&|({])cd(?:[\s;|&)]|$)/.test(body);
 }
 
 export function resolveLeadingCdChain(command: string): { path?: string; unresolvable?: boolean } {
