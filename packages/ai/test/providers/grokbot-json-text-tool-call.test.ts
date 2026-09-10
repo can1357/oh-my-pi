@@ -774,6 +774,49 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		expect(result.content.some(b => b.type === "toolCall")).toBe(false);
 	});
 
+	test("toolChoice none does not promote fenced Shell despite retained context.tools", async () => {
+		// body.tools is [] under toolChoice none, but advertisedNamesForJsonTextToolCall
+		// falls back to context.tools — promotion must still be skipped so handoff
+		// cannot dispatch Shell/Write.
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+		const fenced = '```json\n{"name":"Shell","arguments":{"command":"echo tools-pong-none"}}\n```';
+		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: fenced, isFinal: true } }));
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(text, trailer)) as FetchImpl;
+		const promoteModel = buildModel({
+			id: "sand-automation",
+			name: "sand-automation",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+			sandToolsWire: "automation",
+			sandParameterIds: [],
+			sandPromoteJsonTextTools: true,
+		});
+		const result = await streamGrokBot(
+			promoteModel as Model<"grokbot-sand">,
+			{
+				messages: [{ role: "user", content: "Summarize", timestamp: 1 }],
+				tools: [bashTool],
+			},
+			{ apiKey: "renew", fetch: fetchImpl, toolChoice: "none" },
+		).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.some(b => b.type === "toolCall")).toBe(false);
+		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: fenced })]);
+	});
+
 	test("streamSimple forwards toolChoice none into Grok Bot provider options", async () => {
 		// Handoff / generateHandoffFromContext go through streamSimple → mapOptionsForApi;
 		// dropping toolChoice there left the provider advertising live tools.
@@ -1756,6 +1799,46 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		expect(result.errorMessage).toBeUndefined();
 	});
 
+	test("does not finalize provisional JSON tool calls after an output-token limit", async () => {
+		// Cumulative revisions prove a complete-looking JSON snapshot can still be
+		// provisional — salvaging isComplete:false after length flips stop to toolUse
+		// and can execute a truncated Shell/Write.
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const provisional = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "bash",
+					args: '{"command":"echo truncated"}',
+					isComplete: false,
+				},
+			}),
+		);
+		const limit = frameConnectProto(
+			encodeInferenceStreamResponse({
+				error: { isOutputTokenLimitError: true },
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(provisional, limit, trailer)) as FetchImpl;
+		const context: Context = {
+			messages: [{ role: "user", content: "hi", timestamp: 1 }],
+			tools: [bashTool],
+		};
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("length");
+		expect(result.content.some(b => b.type === "toolCall")).toBe(false);
+		expect(result.errorMessage).toBeUndefined();
+	});
+
 	test("throws when a stream error frame has only errorType", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",
@@ -1833,6 +1916,67 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		}).result();
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "hello-visible" })]);
+	});
+
+	test("replaces revised SendToUser content snapshots instead of appending", async () => {
+		// Cumulative args may revise content ("draft" → "answer") rather than extend
+		// it — appending the non-prefix snapshot produced "draftanswer".
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const parent = buildModel({
+			id: "sand-default",
+			name: "sand-default",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+			sandToolsWire: "parent-chat",
+			sandParameterIds: [],
+		});
+		const draft = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "stu1",
+					toolName: "SendToUser",
+					args: '{"type":"text","content":"draft"}',
+					isComplete: false,
+				},
+			}),
+		);
+		const answer = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "stu1",
+					toolName: "SendToUser",
+					args: '{"type":"text","content":"answer"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(draft, answer, trailer)) as FetchImpl;
+		const context: Context = {
+			messages: [{ role: "user", content: "hi", timestamp: 1 }],
+			tools: [bashTool],
+		};
+
+		const result = await streamGrokBot(parent as Model<"grokbot-sand">, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "answer" })]);
+		expect(result.content).not.toEqual([expect.objectContaining({ type: "text", text: "draftanswer" })]);
 	});
 
 	test("sequential SendToUser calls each emit full text independently", async () => {

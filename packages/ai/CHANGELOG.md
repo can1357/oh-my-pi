@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Grok Bot skips JSON-as-text tool promotion when `toolChoice: "none"` so handoff cannot dispatch fenced Shell/Write from retained `context.tools`.
+- Grok Bot does not finalize provisional `isComplete: false` JSON tool calls after an output-token limit (keeps `length` instead of executing truncated Shell/Write).
+- Grok Bot replaces revised SendToUser content snapshots (`draft` → `answer`) instead of appending them into `draftanswer`.
 - Grok Bot treats complete JSON tool-arg frames as cumulative snapshots when they revise a prior object (`{"cmd":"ls"}` → `{"cmd":"ls","n":1}`) instead of concatenating malformed JSON.
 - Grok Bot JSON-as-text duplicate suppression canonicalizes custom wire owners (e.g. `save`↔`Write`) before fingerprinting so mirrored thinking/text dumps promote once.
 

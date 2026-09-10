@@ -1497,13 +1497,54 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					if (argsText) state.argsText = mergeStreamedArgsText(state.argsText, argsText).argsText;
 					const parsed = parseSendToUserContent(state.argsText);
 					if (parsed !== undefined && parsed !== state.lastContent) {
-						const delta = parsed.startsWith(state.lastContent) ? parsed.slice(state.lastContent.length) : parsed;
-						state.lastContent = parsed;
-						if (delta) {
-							const idx = ensureText();
-							sendToUserTextIndexes.add(idx);
-							(output.content[idx] as TextContent).text += delta;
-							emitAttemptEvent({ type: "text_delta", contentIndex: idx, delta, partial: output });
+						const idx = ensureText();
+						sendToUserTextIndexes.add(idx);
+						const block = output.content[idx] as TextContent;
+						if (parsed.startsWith(state.lastContent)) {
+							const delta = parsed.slice(state.lastContent.length);
+							state.lastContent = parsed;
+							if (delta) {
+								block.text += delta;
+								emitAttemptEvent({ type: "text_delta", contentIndex: idx, delta, partial: output });
+							}
+						} else {
+							// Cumulative revision (e.g. "draft" → "answer"): replace the prior
+							// snapshot instead of appending (which would yield "draftanswer").
+							const previous = state.lastContent;
+							state.lastContent = parsed;
+							if (previous && block.text.endsWith(previous)) {
+								block.text = block.text.slice(0, block.text.length - previous.length) + parsed;
+							} else {
+								block.text = parsed;
+							}
+							// Rewrite unpublished text_delta events for this index to one
+							// replacement delta so flush matches the final message.
+							let replacedBufferedDelta = false;
+							const rewritten: AssistantMessageEvent[] = [];
+							for (const event of attemptEventBuffer) {
+								if (event.type === "text_delta" && event.contentIndex === idx) {
+									if (!replacedBufferedDelta) {
+										rewritten.push({
+											type: "text_delta",
+											contentIndex: idx,
+											delta: parsed,
+											partial: output,
+										});
+										replacedBufferedDelta = true;
+									}
+									continue;
+								}
+								rewritten.push(event);
+							}
+							attemptEventBuffer = rewritten;
+							if (!replacedBufferedDelta) {
+								emitAttemptEvent({
+									type: "text_delta",
+									contentIndex: idx,
+									delta: parsed,
+									partial: output,
+								});
+							}
 						}
 					}
 					if (part.isComplete ?? part.is_complete) {
@@ -1803,13 +1844,18 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 
 				closeOpen();
 				// Finalize incomplete ToolCallParts that already have a complete JSON
-				// object (stream ended before isComplete). Drop leftover fragments
-				// when the turn already has a completed tool or visible text so a
-				// parent-chat Read/Write follow-up does not fail the whole id.
+				// object (stream ended before isComplete). Skip this salvage after an
+				// output-token limit — a syntactically complete snapshot may still be
+				// provisional (cumulative revisions prove complete-looking JSON can
+				// grow). Drop leftover fragments when the turn already has a completed
+				// tool, visible text, or a length stop so a truncated Shell/Write is
+				// not executed and parent-chat Read/Write follow-ups do not fail the id.
 				const states = uniqueToolStates(toolStates);
-				for (const state of states) {
-					if (!state.ended && canFinalizeIncompleteToolArgs(state.argsText, state.isGrammar)) {
-						finishTool(state);
+				if (output.stopReason !== "length") {
+					for (const state of states) {
+						if (!state.ended && canFinalizeIncompleteToolArgs(state.argsText, state.isGrammar)) {
+							finishTool(state);
+						}
 					}
 				}
 				const leftovers = states.filter(s => !s.ended);
@@ -1818,7 +1864,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					const hasText = output.content.some(
 						b => b.type === "text" && typeof b.text === "string" && b.text.trim().length > 0,
 					);
-					if (hasComplete || hasText) {
+					if (hasComplete || hasText || output.stopReason === "length") {
 						const drop = new Set(leftovers.map(s => s.index));
 						// Compacting content shifts later blocks left — remap retained
 						// event/tool indices so flush does not point at the wrong slot.
@@ -1908,7 +1954,11 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				// or emit ```tool_code / default_api.bash(...) instead.
 				// Catalog `sand-promote-json-text-tools` (or product wire profiles)
 				// opts into promotion — native models keep example JSON as text.
+				// Handoff `toolChoice: "none"` keeps context.tools for prompt-cache
+				// while body.tools is [] — advertisedNamesForJsonTextToolCall would
+				// fall back to context and promote fenced Shell/Write; skip entirely.
 				if (
+					options?.toolChoice !== "none" &&
 					shouldPromoteJsonTextToolCall({
 						sandPromoteJsonTextTools: model.sandPromoteJsonTextTools,
 						wireMode: anthropicWire.wireMode,
