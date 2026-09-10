@@ -952,9 +952,8 @@ async function handleFormatEndpoint(
 		currentTarget = targetId;
 		const resolved = bootOpts.resolveModel(currentTarget);
 		if (!resolved) {
-			return lastClassified
-				? classifiedError(lastClassified)
-				: formatError(502, "upstream_error", "Upstream request failed");
+			attemptedTargets.add(currentTarget);
+			return "skipped";
 		}
 		model = resolved;
 		const incompatible = openaiImageFileCompatError(model);
@@ -1487,9 +1486,8 @@ async function handlePiNative(
 		currentTarget = targetId;
 		const resolved = bootOpts.resolveModel(currentTarget);
 		if (!resolved) {
-			return lastClassified
-				? classifiedError(lastClassified)
-				: formatError(502, "upstream_error", "Upstream request failed");
+			attemptedTargets.add(currentTarget);
+			return "skipped";
 		}
 		model = resolved;
 		const skip = targetSkipReason(compiled, health, currentTarget, model);

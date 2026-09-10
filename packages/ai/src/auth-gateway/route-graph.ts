@@ -51,6 +51,7 @@ export interface CompiledRoute {
 	targets: readonly string[];
 	/** Next unused target ids for this disposition; empty if none. */
 	fallbacks: Readonly<Partial<Record<GatewayErrorDisposition, readonly string[]>>>;
+	fallbackByTarget?: Readonly<Record<string, Readonly<Partial<Record<GatewayErrorDisposition, readonly string[]>>>>>;
 	affinity?: AffinityLevel;
 	portability?: StatePortability;
 }
@@ -128,11 +129,9 @@ export class RouteRegistry {
 
 	/** Advance a per-route cursor, shared by all endpoint formats in this gateway. */
 	pickInitialTarget(compiled: CompiledRoute): string | undefined {
-		if (compiled.root.type !== "balance" || compiled.root.strategy !== "rr") return pickInitialRouteTarget(compiled);
 		const position = this.#roundRobinPositions.get(compiled.id) ?? 0;
 		const target = pickInitialRouteTarget(compiled, position);
-		if (compiled.targets.length > 0)
-			this.#roundRobinPositions.set(compiled.id, (position + 1) % compiled.targets.length);
+		if (compiled.targets.length > 0) this.#roundRobinPositions.set(compiled.id, position + 1);
 		return target;
 	}
 
@@ -187,9 +186,50 @@ function compileDefinition(
 		root: copyNode(root),
 		targets: Object.freeze([...compiled.targets]),
 		fallbacks: freezeFallbacks(compiled.fallbacks),
+		fallbackByTarget: compileScopedFallbacks(root),
 		...(definition.affinity !== undefined ? { affinity: definition.affinity } : {}),
 		...(definition.portability !== undefined ? { portability: { ...definition.portability } } : {}),
 	};
+}
+
+function compileScopedFallbacks(root: RouteNode): NonNullable<CompiledRoute["fallbackByTarget"]> {
+	type Edges = Partial<Record<GatewayErrorDisposition, string[]>>;
+	const byTarget = new Map<string, Edges>();
+	const entries = (node: RouteNode): string[] => {
+		if (node.type === "target") return [node.model];
+		if (node.type === "route-ref") return [];
+		if (node.type === "balance") return node.children.flatMap(entries);
+		return node.children[0] ? entries(node.children[0]) : [];
+	};
+	const walk = (node: RouteNode, inherited: Edges): void => {
+		if (node.type === "target") {
+			const edges: Edges = {};
+			for (const key of Object.keys(inherited) as GatewayErrorDisposition[]) {
+				const candidates = [...new Set(inherited[key])].filter(id => id !== node.model);
+				if (candidates.length) edges[key] = candidates;
+			}
+			const previous = byTarget.get(node.model);
+			if (previous && !Bun.deepEquals(previous, edges))
+				throw new AIError.ValidationError(`Ambiguous fallback contexts for model "${node.model}"`);
+			byTarget.set(node.model, edges);
+			return;
+		}
+		if (node.type === "route-ref") return;
+		for (let i = 0; i < node.children.length; i++) {
+			const next: Edges = { ...inherited };
+			if (node.type === "fallback") {
+				const later = node.children.slice(i + 1).flatMap(entries);
+				for (const key of node.on) next[key] = [...later, ...(inherited[key] ?? [])];
+			} else if (node.type === "balance") {
+				const siblings = node.children.filter((_, index) => index !== i).flatMap(entries);
+				for (const key of Object.keys(inherited) as GatewayErrorDisposition[])
+					next[key] = [...siblings, ...(inherited[key] ?? [])];
+			}
+			walk(node.children[i]!, next);
+		}
+	};
+	walk(root, {});
+	return Object.freeze(Object.fromEntries([...byTarget].map(([id, edges]) => [id, freezeFallbacks(edges)])));
 }
 
 function resolveRouteRefs(node: RouteNode, lookup: (id: string) => RouteNode | undefined): RouteNode {
@@ -268,6 +308,7 @@ function compileFallback(node: FallbackNode, seenOnPath: ReadonlySet<string>): N
 		const part = compileNode(child, childSeen);
 		targets.push(...part.targets);
 		if (!primary) afterPrimary.push(...part.targets);
+		else afterPrimary.push(...initialBalancedTargets(child));
 		mergeFallbacks(fallbacks, part.fallbacks);
 		if (child.type === "target") sequential.add(child.model);
 		primary = false;
@@ -275,7 +316,7 @@ function compileFallback(node: FallbackNode, seenOnPath: ReadonlySet<string>): N
 	for (const disposition of node.on) {
 		if (afterPrimary.length === 0) continue;
 		const existing = fallbacks[disposition];
-		fallbacks[disposition] = existing ? [...existing, ...afterPrimary] : [...afterPrimary];
+		fallbacks[disposition] = [...new Set([...afterPrimary, ...(existing ?? [])])];
 	}
 	return { targets, fallbacks };
 }
@@ -354,23 +395,27 @@ function freezeFallbacks(
 }
 
 /** Choose the first dispatch target, honouring a root balance strategy when present. */
+function initialBalancedTargets(node: RouteNode): string[] {
+	if (node.type === "target" || node.type === "route-ref") return [];
+	if (node.type === "balance") return compileNode(node, new Set()).targets;
+	return node.children[0] ? initialBalancedTargets(node.children[0]) : [];
+}
+
 export function pickInitialRouteTarget(compiled: CompiledRoute, salt = 0): string | undefined {
-	if (compiled.targets.length === 0) return undefined;
-	if (compiled.root.type !== "balance") return compiled.targets[0];
-	if (compiled.root.strategy === "weighted") {
-		let best: string | undefined;
-		let bestWeight = -Infinity;
-		for (const child of compiled.root.children) {
-			if (child.type !== "target") continue;
-			const weight = child.weight ?? 1;
-			if (weight > bestWeight) {
-				bestWeight = weight;
-				best = child.model;
-			}
+	const choose = (node: RouteNode): string | undefined => {
+		if (node.type === "target") return node.model;
+		if (node.type === "route-ref" || node.children.length === 0) return undefined;
+		let selected = node.children[0]!;
+		if (node.type === "balance") {
+			if (node.strategy === "rr") selected = node.children[Math.abs(salt) % node.children.length]!;
+			else
+				for (const child of node.children) {
+					const weight = child.type === "target" ? (child.weight ?? 1) : 1;
+					const selectedWeight = selected.type === "target" ? (selected.weight ?? 1) : 1;
+					if (weight > selectedWeight) selected = child;
+				}
 		}
-		return best ?? compiled.targets[0];
-	}
-	// Round-robin: rotate by salt so concurrent requests spread across children.
-	const idx = Math.abs(salt) % compiled.targets.length;
-	return compiled.targets[idx];
+		return choose(selected);
+	};
+	return choose(compiled.root);
 }

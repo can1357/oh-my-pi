@@ -190,8 +190,7 @@ function pushTurn(
 		if (text.length > 0) systemParts.push(text);
 		return;
 	}
-	const empty =
-		typeof content === "string" ? content.length === 0 : content.length === 0;
+	const empty = typeof content === "string" ? content.length === 0 : content.length === 0;
 	if (empty) return;
 	if (role === "user") messages.push({ role: "user", content, timestamp });
 	else messages.push(makeAssistantMessage(content, modelId, timestamp));
@@ -363,7 +362,10 @@ function mapFinishReason(reason: StopReason): string {
 	return "STOP";
 }
 
-function geminiCandidate(parts: Record<string, unknown>[] | string, finishReason: string | undefined): Record<string, unknown> {
+function geminiCandidate(
+	parts: Record<string, unknown>[] | string,
+	finishReason: string | undefined,
+): Record<string, unknown> {
 	const partList = typeof parts === "string" ? [{ text: parts }] : parts.length > 0 ? parts : [{ text: "" }];
 	const candidate: Record<string, unknown> = {
 		content: {
@@ -374,7 +376,6 @@ function geminiCandidate(parts: Record<string, unknown>[] | string, finishReason
 	if (finishReason !== undefined) candidate.finishReason = finishReason;
 	return { candidates: [candidate] };
 }
-
 
 function flattenAssistantParts(message: AssistantMessage): Record<string, unknown>[] {
 	const parts: Record<string, unknown>[] = [];
@@ -448,19 +449,9 @@ export function encodeStream(
 								);
 							}
 							break;
-						case "toolcall_start":
-						case "toolcall_delta":
 						case "toolcall_end": {
-							// Only toolcall_end carries the complete call; derive
-							// in-progress calls from the partial message like the
-							// OpenAI chat streamer does.
-							const call =
-								event.type === "toolcall_end"
-									? event.toolCall
-									: (() => {
-											const partial = event.partial.content[event.contentIndex];
-											return partial && partial.type === "toolCall" ? partial : undefined;
-										})();
+							// Gemini parts carry complete function calls rather than argument deltas.
+							const call = event.toolCall;
 							if (call === undefined) break;
 							writeSse(
 								controller,
@@ -505,7 +496,11 @@ export function encodeStream(
 					}
 				}
 				if (!cancelled) {
-					writeSse(controller, { ...geminiCandidate([{ text: "" }], "STOP"), modelVersion: requestedModelId }, cancelled);
+					writeSse(
+						controller,
+						{ ...geminiCandidate([{ text: "" }], "STOP"), modelVersion: requestedModelId },
+						cancelled,
+					);
 					controller.close();
 				}
 			} catch (err) {

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Gemini streamed tool calls are emitted once, and nested fallbacks preserve branch-specific failure rules.
 - Fixed fair-share ties, round-robin target selection, conditional vision routes, and recovery when a preferred fallback becomes unavailable.
 
 - Quota probes require a requestId; balance routes pick the initial target via rr/weighted strategy.

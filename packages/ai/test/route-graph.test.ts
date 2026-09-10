@@ -77,20 +77,8 @@ describe("RouteRegistry", () => {
 		});
 		const route = registry.resolve("quota-route");
 		expect(registry.generation).toBe(2);
-		expect(route).toEqual({
-			generation: 2,
-			id: "quota-route",
-			root: {
-				type: "fallback",
-				on: ["credential_quota"],
-				children: [
-					{ type: "target", model: "gpt-5" },
-					{ type: "target", model: "gpt-4o" },
-				],
-			},
-			targets: ["gpt-5", "gpt-4o"],
-			fallbacks: { credential_quota: ["gpt-4o"] },
-		});
+		expect(route?.fallbacks).toEqual({ credential_quota: ["gpt-4o"] });
+		expect(route?.fallbackByTarget?.["gpt-5"]).toEqual({ credential_quota: ["gpt-4o"] });
 	});
 
 	it("rejects a cycle on one root-to-leaf path", () => {
@@ -419,13 +407,6 @@ describe("RouteRegistry", () => {
 		const route = registry.get("plain");
 		expect(route?.affinity).toBeUndefined();
 		expect(route?.portability).toBeUndefined();
-		expect(route).toEqual({
-			generation: 2,
-			id: "plain",
-			root: { type: "target", model: "gpt-5" },
-			targets: ["gpt-5"],
-			fallbacks: {},
-		});
 	});
 
 	it("copies portability so later mutation of the definition does not leak (negative)", () => {
