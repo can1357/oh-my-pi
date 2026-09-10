@@ -56,8 +56,8 @@ impl Lint for ConstCfgSplit {
 			if !body
 				.syntax()
 				.descendants()
-				.filter_map(ast::BlockExpr::cast)
-				.any(|block| block.attrs().any(|attr| is_cfg_attribute(&attr)))
+				.filter_map(ast::AnyHasAttrs::cast)
+				.any(|node| node.attrs().any(|attr| is_cfg_attribute(&attr)))
 			{
 				continue;
 			}
@@ -101,6 +101,18 @@ mod tests {
 		let findings = findings(source);
 		assert_eq!(findings.len(), 1);
 		assert_eq!(findings[0].rule, "const-cfg-split");
+	}
+	#[test]
+	fn flags_const_fn_with_cfg_statement() {
+		let source = r#"
+        const fn current() -> u8 {
+            #[cfg(target_os = "linux")]
+            return 1;
+            0
+        }
+    "#;
+
+		assert_eq!(findings(source).len(), 1);
 	}
 
 	#[test]

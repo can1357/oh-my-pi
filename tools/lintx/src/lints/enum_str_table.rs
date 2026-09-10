@@ -101,7 +101,7 @@ fn is_string_table(match_expr: &ast::MatchExpr) -> bool {
 			return false;
 		}
 	}
-	arm_count >= 2
+	arm_count > 0
 }
 
 fn is_self_expr(expr: &ast::Expr) -> bool {
@@ -224,6 +224,22 @@ mod tests {
 		assert!(findings[0].span.start >= name_start);
 		assert!(findings[0].span.start <= match_start);
 		assert!(match_start < findings[0].span.end);
+	}
+
+	#[test]
+	fn flags_single_variant_string_table() {
+		let source = r#"
+        enum Kind { Only }
+        impl Kind {
+            fn name(&self) -> &'static str {
+                match self {
+                    Self::Only => "only",
+                }
+            }
+        }
+    "#;
+
+		assert_eq!(findings(source).len(), 1);
 	}
 
 	#[test]
