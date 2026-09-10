@@ -912,7 +912,26 @@ export class LspMuxServer {
 			// the helpers it may have left are past reach, not absent.
 			const root = Process.fromPid(server.proc.pid);
 			if (!root) throw new Error(`no reference to server root ${server.proc.pid}`);
+			// Bracketed by the root's own liveness, because the walk cannot do it.
+			// A walk rooted at a pid whose process has exited enumerates nothing
+			// and reports that as whole — correctly, since the native side cannot
+			// separate a root that died a syscall ago from one gone for an hour,
+			// and charging every exited node as a gap would make the hard wave's
+			// rescan of a dying tree unattributable. Only this side knows the root
+			// was expected alive when it was pinned, so only this side can read an
+			// empty subtree as "it went away before I could look" rather than "it
+			// had none" — and a root that goes away takes its helpers with it, out
+			// to init, where nothing rooted at its pid will ever name them.
+			//
+			// Read after the walk as well as before, so a root that dies partway
+			// through one is caught too. The cost is a stop failed over a root
+			// that exited in the instant after a walk that did see everything;
+			// that direction is the survivable one, and the pinned set is still
+			// swept either way.
+			const rootWasLive = root.status() === ProcessStatus.Running;
 			helpers = root.descendants();
+			if (rootWasLive && root.status() !== ProcessStatus.Running)
+				throw new Error(`server root ${server.proc.pid} exited before its subtree could be walked`);
 		} catch (error) {
 			helperPinFailure = error;
 			logger.warn("LSP mux could not pin the server's helper subtree", {

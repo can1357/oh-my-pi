@@ -179,6 +179,18 @@ function processRunning(pid: number): boolean {
 	return Process.fromPid(pid)?.status() === ProcessStatus.Running;
 }
 
+/**
+ * Every reason inside a shutdown failure, flattened.
+ *
+ * A stop's own `AggregateError` arrives nested inside the shutdown's, so a test
+ * that asserts on the outer message asserts on a string no defect can change.
+ */
+function reasonsOf(error: unknown): unknown[] {
+	if (error === undefined) return [];
+	if (error instanceof AggregateError) return error.errors.flatMap(reason => reasonsOf(reason));
+	return [error];
+}
+
 /** Every helper the fixture spawns is this, which makes it identifiable. */
 const FIXTURE_HELPER_ARGV = "sleep 60";
 
@@ -500,6 +512,55 @@ describe("LspMuxServer", () => {
 			if (failure !== undefined) throw failure;
 			expect(processRunning(startupPid)).toBe(false);
 			expect(processRunning(latePid)).toBe(true);
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"fails the stop when the server root exits before its subtree is walked",
+		async () => {
+			// The walk cannot report this and should not: rooted at a pid whose
+			// process has gone it enumerates nothing and answers whole, because it
+			// cannot separate a root that died a syscall ago from one that was never
+			// running, and charging every exited node would make the hard wave's
+			// rescan of a dying tree unattributable. The mux is the only side that
+			// knows the root was pinned alive, so refusing is its job.
+			//
+			// Driven by killing the root from inside the walk, which is the only way
+			// to reach a window that is otherwise two syscalls wide. The spin is
+			// synchronous on purpose: it holds the loop turn Bun's reaper needs, so
+			// the root stays an unreaped zombie and the status flip comes from the
+			// kernel rather than from the runtime noticing.
+			const helperFile = path.join(tmpDir, "orphaned-helper.pid");
+			connectParams.env = { TEST_LSP_HELPER_PID_FILE: helperFile };
+			const { client, connected } = await link();
+			const pid = connected.pid;
+			if (pid === undefined) throw new Error("Mux did not report the language-server pid");
+			await initialize(client);
+			const helperPid = await readPid(helperFile);
+			const descendants = Process.prototype.descendants;
+			const spy = spyOn(Process.prototype, "descendants").mockImplementation(function (this: Process) {
+				if (this.pid !== pid) return descendants.call(this);
+				process.kill(pid, "SIGKILL");
+				const deadline = Date.now() + 5_000;
+				while (this.status() === ProcessStatus.Running)
+					if (Date.now() > deadline) throw new Error("server root did not exit under the walk");
+				return descendants.call(this);
+			});
+			try {
+				const failure = await server.shutdown().then(
+					() => undefined,
+					(error: unknown) => error,
+				);
+				expect(reasonsOf(failure).map(String).join("\n")).toContain(
+					`server root ${pid} exited before its subtree could be walked`,
+				);
+			} finally {
+				spy.mockRestore();
+				killFixtureHelper(helperPid);
+				await server.shutdown().catch(() => {});
+				server = new LspMuxServer();
+			}
 		},
 		10_000,
 	);

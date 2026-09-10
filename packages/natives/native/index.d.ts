@@ -331,6 +331,12 @@ export declare class Process {
    * pins what it is handed and later reports that tree terminated, so a
    * short walk passed off as an ordinary one is a sweep that misses a
    * process and says nothing about it.
+   *
+   * Linux pins each reference at the point of listing. macOS and Windows
+   * build the underlying table from bare pids and reopen them when the walk
+   * collects, so a listed process that exits and has its number reused in
+   * between is replaced by whoever holds it now — closing that is part of the
+   * platform-enumeration follow-up, which can run on those hosts.
    */
   descendants(): Array<Process>
   /** Direct children of this process as stable process references. */

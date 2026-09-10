@@ -79,6 +79,32 @@ mod platform {
 		/// process that has exited has no reachable children, and a thread that
 		/// vanished between the directory listing and the read took its entry
 		/// with it. A path still present but unreadable is a gap.
+		///
+		/// A subject that exits under this call is churn too, and deliberately
+		/// so, even though its own children were reparented out of the subtree
+		/// at that moment and this reports the whole walk as sound without
+		/// them. Two reasons, and neither is that the loss does not matter.
+		///
+		/// For every node but the walk's root the two ways of noticing are the
+		/// same state. [`Self::push_validated_child`] rejects a child that is
+		/// not running, so a descendant was observed running one syscall before
+		/// the recursion reached it: whether the exit surfaces at the status
+		/// check below or at the `task` directory a few lines on is timing, not
+		/// a distinction. Charging either one makes the hard wave's rescan —
+		/// run immediately after `SIGTERM`, over a tree that is supposed to be
+		/// dying — report partial on the ordinary successful termination, and
+		/// `hard_kill_walked_tree` refuses on partial. That is the mirror of
+		/// the defect the completeness signal exists for: unattributable
+		/// everywhere is no more useful than whole everywhere.
+		///
+		/// At the root the two are genuinely different states, and the one that
+		/// matters is not reachable from here. A caller that pinned a live root
+		/// and lost it before this ran is exposed — its subtree was never
+		/// enumerated and the empty answer looks childless — but that exit
+		/// precedes this call's first syscall, so it arrives at the status
+		/// check indistinguishable from a root that had been gone for an hour.
+		/// Separating them needs to know when the pin was taken, which only the
+		/// caller holds; the caller therefore owns that check.
 		pub fn children_checked(&self) -> (Vec<Self>, bool) {
 			// Split, because these are different answers: a root that has exited has
 			// no reachable children and saying so is whole, while one still present
