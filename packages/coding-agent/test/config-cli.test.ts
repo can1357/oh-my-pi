@@ -233,6 +233,21 @@ describe("config CLI schema coverage", () => {
 		}
 	});
 
+	it("serializes concurrent absent-only writes for different keys", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const settings = await Settings.init();
+
+		expect(
+			await Promise.all([
+				settings.setIfAbsent("compaction.enabled", true),
+				settings.setIfAbsent("compaction.idleTimeoutSeconds", 600),
+			]),
+		).toEqual([true, true]);
+		expect(YAML.parse(await Bun.file(path.join(testAgentDir.path(), "config.yml")).text())).toMatchObject({
+			compaction: { enabled: true, idleTimeoutSeconds: 600 },
+		});
+	});
+
 	it("accepts --if-absent only for config set", async () => {
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
 		const { exitCode, error } = await runCliProcess(["config", "get", "compaction.enabled", "--if-absent"], {

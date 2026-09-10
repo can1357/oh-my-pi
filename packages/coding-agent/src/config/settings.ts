@@ -677,13 +677,29 @@ export class Settings {
 
 	/** Set a global setting only if it remains absent while the YAML write lock is held. */
 	async setIfAbsent<P extends SettingPath>(path: P, value: SettingValue<P>): Promise<boolean> {
-		const segments = path.split(".");
-		if (hasByPath(this.#global, segments)) return false;
+		const previousSave = this.#savePromise;
+		const saveIfAbsent = async (): Promise<boolean> => {
+			const segments = path.split(".");
+			if (hasByPath(this.#global, segments)) return false;
 
-		const mutation = this.#stageGlobalMutation(path, value, true);
-		if (!mutation?.ifAbsent) return true;
-		await this.flush();
-		return mutation.ifAbsent.applied;
+			const mutation = this.#stageGlobalMutation(path, value, true);
+			if (!mutation?.ifAbsent) return true;
+			await this.#saveNow();
+			return mutation.ifAbsent.applied;
+		};
+		const result = previousSave ? previousSave.then(saveIfAbsent) : saveIfAbsent();
+		const savePromise = result.then(() => undefined);
+		this.#savePromise = savePromise;
+		savePromise
+			.catch(err => {
+				logger.warn("Settings: guarded save failed", { error: String(err) });
+			})
+			.finally(() => {
+				if (this.#savePromise === savePromise) {
+					this.#savePromise = undefined;
+				}
+			});
+		return result;
 	}
 
 	#stageGlobalMutation<P extends SettingPath>(
