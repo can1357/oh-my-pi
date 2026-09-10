@@ -1,3 +1,4 @@
+import { type Context, context } from "@opentelemetry/api";
 import { logger, postmortem, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
@@ -55,6 +56,7 @@ interface PendingRun {
 	runId: string;
 	runState: VmRunState;
 	toolSession: ToolSession;
+	telemetryContext: Context;
 	resolve(value: { value: unknown }): void;
 	reject(error: Error): void;
 	toolCalls: Map<string, AbortController>;
@@ -223,6 +225,7 @@ export async function invokeJsTool(
 			},
 		},
 		toolSession: options.session,
+		telemetryContext: context.active(),
 		resolve,
 		reject,
 		toolCalls: new Map(),
@@ -391,6 +394,7 @@ async function runOnce(
 		runId,
 		runState: options.runState,
 		toolSession: options.session,
+		telemetryContext: context.active(),
 		resolve,
 		reject,
 		toolCalls: new Map(),
@@ -645,14 +649,16 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 	const ctrl = new AbortController();
 	pending.toolCalls.set(msg.id, ctrl);
 	try {
-		const value = await callSessionTool(msg.name, msg.args, {
-			session: pending.toolSession,
-			signal: ctrl.signal,
-			emitStatus: (event: JsStatusEvent) => {
-				trackDeferPhase(pending, event);
-				pending.runState.onDisplay?.({ type: "status", event });
-			},
-		});
+		const value = await context.with(pending.telemetryContext, () =>
+			callSessionTool(msg.name, msg.args, {
+				session: pending.toolSession,
+				signal: ctrl.signal,
+				emitStatus: (event: JsStatusEvent) => {
+					trackDeferPhase(pending, event);
+					pending.runState.onDisplay?.({ type: "status", event });
+				},
+			}),
+		);
 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });
 	} catch (error) {
 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: false, error: toErrorPayload(error) } });

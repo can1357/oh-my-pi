@@ -7,6 +7,7 @@
  * current execution and forwards to the same `callSessionTool` implementation
  * the JavaScript bridge uses.
  */
+import { type Context, context } from "@opentelemetry/api";
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import { callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
@@ -40,7 +41,11 @@ interface BridgeServer {
 	stop: () => Promise<void>;
 }
 
-const registrations = new Map<string, PyToolBridgeEntry>();
+interface RegisteredPyToolBridgeEntry extends PyToolBridgeEntry {
+	telemetryContext: Context;
+}
+
+const registrations = new Map<string, RegisteredPyToolBridgeEntry>();
 let serverPromise: Promise<BridgeServer> | null = null;
 
 function markExpectedBridgeShutdownError(error: unknown): error is Error {
@@ -73,16 +78,22 @@ function markExpectedBridgeShutdownError(error: unknown): error is Error {
  * matters for tools that ignore the signal, keeping the kernel unwinding
  * promptly instead of being hard-killed.
  */
-async function callSessionToolPromptOnAbort(name: string, args: unknown, entry: PyToolBridgeEntry): Promise<unknown> {
+async function callSessionToolPromptOnAbort(
+	name: string,
+	args: unknown,
+	entry: RegisteredPyToolBridgeEntry,
+): Promise<unknown> {
 	if (entry.abortRequested?.()) {
 		throw new Error(`bridge call ${JSON.stringify(name)} aborted: eval cell was interrupted`);
 	}
-	const call = callSessionTool(name, args, {
-		session: entry.toolSession,
-		signal: entry.signal,
-		emitStatus: entry.emitStatus,
-		defaultIntent: "py prelude",
-	});
+	const call = context.with(entry.telemetryContext, () =>
+		callSessionTool(name, args, {
+			session: entry.toolSession,
+			signal: entry.signal,
+			emitStatus: entry.emitStatus,
+			defaultIntent: "py prelude",
+		}),
+	);
 	const signal = entry.shieldedSignal ?? entry.signal;
 	if (!signal) return await call;
 	if (signal.aborted) {
@@ -204,9 +215,10 @@ function bridgeRegistrationKey(sessionId: string, runId: string): string {
 
 export function registerPyToolBridge(sessionId: string, runId: string, entry: PyToolBridgeEntry): () => void {
 	const key = bridgeRegistrationKey(sessionId, runId);
-	registrations.set(key, entry);
+	const registration = { ...entry, telemetryContext: context.active() };
+	registrations.set(key, registration);
 	return () => {
-		if (registrations.get(key) === entry) {
+		if (registrations.get(key) === registration) {
 			registrations.delete(key);
 		}
 	};
