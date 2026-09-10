@@ -614,7 +614,7 @@ export function resolveToCwd(filePath: string, cwd: string): string {
 		return cwd;
 	}
 	if (path.isAbsolute(expanded)) {
-		return path.resolve(expanded);
+		return expanded;
 	}
 	return path.resolve(cwd, expanded);
 }
@@ -1254,8 +1254,14 @@ async function resolveSearchPathItems(
 	// disjoint trees → `/`), a collapsed walk traverses every unrelated sibling
 	// under it — fan out into per-item targets so each scan stays bounded to a
 	// requested path.
+	// resolveToCwd returns absolute inputs verbatim (so the kernel, not a lexical
+	// pass, resolves `..` across symlinks for real filesystem operations), while
+	// findCommonBasePath and path.relative compare lexically via path.resolve. To
+	// decide overlap on the same footing, canonicalize both sides here — this key
+	// never reaches the filesystem, so lexical `..` collapse is safe. Case-fold on
+	// Windows so a drive-letter/component casing difference cannot force a fan-out.
 	const commonIsRequestedScope = parsedItems.some(
-		item => pathComparisonKey(item.absoluteBasePath) === pathComparisonKey(commonBasePath),
+		item => pathComparisonKey(path.resolve(item.absoluteBasePath)) === pathComparisonKey(commonBasePath),
 	);
 	// Walkers prune `.git` unconditionally and honor gitignore, so a plain-file
 	// item folded into a directory walk's glob union (`.` + `.git/config`) can
