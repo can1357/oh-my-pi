@@ -597,7 +597,11 @@ export function stripLeadingEnvAndSudo(command: string): string {
  * to the session/structured cwd.
  */
 export function hasHiddenCwdChangeInShellGroup(command: string): boolean {
-	if (hasChildShellCwdChange(command)) return true;
+	if (
+		hasCommandLocalCwdOption(command) ||
+		hasChildShellCondition(command, script => commandWordCdIn(script) || hasCommandLocalCwdOption(script))
+	)
+		return true;
 	let inSingle = false;
 	let inDouble = false;
 	for (let i = 0; i < command.length; i++) {
@@ -649,7 +653,7 @@ export function hasHiddenCwdChangeInShellGroup(command: string): boolean {
 }
 
 /** Inspect quoted interpreter scripts without treating ordinary quoted arguments as commands. */
-function hasChildShellCwdChange(command: string): boolean {
+export function hasChildShellCondition(command: string, condition: (script: string) => boolean): boolean {
 	const pending = [command];
 	let inspected = 0;
 	while (pending.length > 0) {
@@ -664,13 +668,20 @@ function hasChildShellCwdChange(command: string): boolean {
 				const equals = option.indexOf("=");
 				const script = equals >= 0 ? option.slice(equals + 1) : argv[index + 1];
 				if (!script) return true;
-				if (commandWordCdIn(script)) return true;
+				if (condition(script)) return true;
 				pending.push(script);
 				break;
 			}
 		}
 	}
 	return false;
+}
+
+/** Command-local cwd overrides cannot establish the parent repository's verification cwd. */
+function hasCommandLocalCwdOption(command: string): boolean {
+	return tokenizeShellSegments(command).some(argv =>
+		argv.some(word => /^(?:--(?:cwd|directory|dir|prefix)(?:=|$)|-C)/.test(word)),
+	);
 }
 
 function findMatchingClose(command: string, start: number, close: string): number {
@@ -808,6 +819,10 @@ export function hasTopLevelShellBackground(command: string): boolean {
  * the real check failed. `&&` is not masking — failure short-circuits.
  */
 export function hasTopLevelStatusMaskingOperator(command: string): boolean {
+	return hasDirectStatusMaskingOperator(command) || hasChildShellCondition(command, hasDirectStatusMaskingOperator);
+}
+
+function hasDirectStatusMaskingOperator(command: string): boolean {
 	let inSingle = false;
 	let inDouble = false;
 	for (let i = 0; i < command.length; i++) {

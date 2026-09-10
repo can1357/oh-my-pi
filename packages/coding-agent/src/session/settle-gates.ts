@@ -1,6 +1,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { extractLeadingCdTarget, hasTopLevelShellBackground, hasTopLevelStatusMaskingOperator } from "../tools/shell-tokenize";
+import {
+	extractLeadingCdTarget,
+	hasChildShellCondition,
+	hasTopLevelShellBackground,
+	hasTopLevelStatusMaskingOperator,
+} from "../tools/shell-tokenize";
 
 /** Isolated apply succeeded; parent must re-run acceptance on this tree. */
 export const MERGED_UNVERIFIED_MARKER = "MERGED — child yield is not evidence; re-run acceptance on this tree.";
@@ -105,6 +110,12 @@ function isCdOnlyCommandSegment(segment: string): boolean {
 
 /** `ls` / `pwd` / `echo ok` are not parent acceptance of merged work. */
 export function isTautologicalParentVerifyCommand(command: string): boolean {
+	return (
+		isTautologicalDirectVerifyCommand(command) || hasChildShellCondition(command, isTautologicalDirectVerifyCommand)
+	);
+}
+
+function isTautologicalDirectVerifyCommand(command: string): boolean {
 	let trimmed = command.trim();
 	if (trimmed.length === 0) return true;
 	// Backgrounded work (`bun test & true`) reports sync success before the check
