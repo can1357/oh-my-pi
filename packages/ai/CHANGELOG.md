@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Auth gateway retries a sibling credential on quota errors before falling over to another model.
 - Fixed nested fallback ordering, permanent-credential recovery, and provider-scoped file attachment checks; model discovery blocks private addresses.
 
 - Fixed auth-gateway model discovery treating non-2xx responses with array/`data` bodies as successful catalogs.
@@ -185,7 +186,6 @@
 - Auth gateway `GET /v1/routes/:id` returns a registered virtual route.
 - Auth gateway `PUT /v1/routes/:id` registers or replaces a virtual route.
 - Auth gateway `DELETE /v1/routes/:id` unregisters a virtual route.
-- Auth gateway retries a sibling credential on quota errors before falling over to another model.
 
 ## [18.0.8] - 2026-08-27
 
