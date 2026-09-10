@@ -269,15 +269,18 @@ impl PtySession {
 
 fn terminate_pty_processes(
 	child: &mut Box<dyn Child + Send + Sync>,
-	child_pid: Option<i32>,
+	child_process: Option<&ps::CoreProcess>,
 	process_group_id: Option<i32>,
 ) {
 	let mut targets = ps::TerminationTargets::new();
 	if let Some(pgid) = process_group_id {
 		targets.add_pgid(pgid);
 	}
-	if let Some(pid) = child_pid {
-		targets.add_pid(pid);
+	// The handle pinned at spawn, not the number it had then: this runs at
+	// cancellation, by which point re-opening a bare pid can hand the wave
+	// whichever process holds it now.
+	if let Some(process) = child_process {
+		targets.add_process(process.clone());
 	}
 
 	targets.signal(ps::TERM_SIGNAL);
@@ -371,6 +374,19 @@ fn run_pty_sync(
 	drop(pair.slave);
 	let child_process_id = child.process_id();
 	let child_pid = child_process_id.and_then(|value| i32::try_from(value).ok());
+	// Pinned here, immediately after the pid becomes visible and long before
+	// anything can recycle it, which is the whole reason the registry prefers a
+	// handle to a number.
+	//
+	// It can still fail — `pidfd_open` and `OpenProcess` are both refusable for
+	// a live child — and then this call has no handle on the subtree at all.
+	// The child itself is still reached, through the `Child` the PTY owns; what
+	// is lost is anything it went on to spawn. On Unix the process group below
+	// covers that; on Windows there is no group and nothing does.
+	let child_process = child_pid.and_then(ps::CoreProcess::from_pid);
+	if child_pid.is_some() && child_process.is_none() {
+		log::warn!("PTY child {child_pid:?} could not be pinned; its descendants are unreachable");
+	}
 	if let Some(callback) = on_start.as_ref() {
 		callback.call(Ok(child_process_id.unwrap_or(0)), ThreadsafeFunctionCallMode::NonBlocking);
 	}
@@ -523,7 +539,7 @@ fn run_pty_sync(
 	while exit_code.is_none() {
 		if js_gone.load(Ordering::Acquire) && !terminate_requested {
 			cancelled = true;
-			terminate_pty_processes(&mut child, child_pid, process_group_id);
+			terminate_pty_processes(&mut child, child_process.as_ref(), process_group_id);
 			terminate_requested = true;
 			reader_drain_deadline = Some(Instant::now() + POST_CANCEL_DRAIN_TIMEOUT);
 		}
@@ -531,7 +547,7 @@ fn run_pty_sync(
 			let message = err.to_string();
 			timed_out = message.contains("Timeout");
 			cancelled = !timed_out;
-			terminate_pty_processes(&mut child, child_pid, process_group_id);
+			terminate_pty_processes(&mut child, child_process.as_ref(), process_group_id);
 			terminate_requested = true;
 			reader_drain_deadline = Some(Instant::now() + POST_CANCEL_DRAIN_TIMEOUT);
 		}
@@ -548,7 +564,7 @@ fn run_pty_sync(
 				Ok(ControlMessage::Kill) => {
 					cancelled = true;
 					if !terminate_requested {
-						terminate_pty_processes(&mut child, child_pid, process_group_id);
+						terminate_pty_processes(&mut child, child_process.as_ref(), process_group_id);
 						terminate_requested = true;
 						reader_drain_deadline = Some(Instant::now() + POST_CANCEL_DRAIN_TIMEOUT);
 					}
@@ -586,7 +602,7 @@ fn run_pty_sync(
 			Ok(ControlMessage::Kill) => {
 				cancelled = true;
 				if !terminate_requested {
-					terminate_pty_processes(&mut child, child_pid, process_group_id);
+					terminate_pty_processes(&mut child, child_process.as_ref(), process_group_id);
 					terminate_requested = true;
 					reader_drain_deadline = Some(Instant::now() + POST_CANCEL_DRAIN_TIMEOUT);
 				}

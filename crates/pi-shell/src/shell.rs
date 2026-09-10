@@ -1413,8 +1413,14 @@ async fn terminate_run(registry: &process::SpawnRegistry) {
 	let mut saw_targets = false;
 	for wave in 0..WAVES {
 		let targets = registry.build_targets();
+		// A run with spawns that could never be pinned is not accounted for by an
+		// empty target set: those children were never in it and no wave can put
+		// them there. Finishing the waves rather than returning early at least
+		// gives a late pin its chance; nothing here can do more than that, and
+		// the count is on the set for a caller with somewhere to report it.
+		let accounted = targets.unpinned_spawns() == 0;
 		if targets.is_empty() {
-			if saw_targets || wave + 1 == WAVES {
+			if (saw_targets && accounted) || wave + 1 == WAVES {
 				return;
 			}
 		} else {

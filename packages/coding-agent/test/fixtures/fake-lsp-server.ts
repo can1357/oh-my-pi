@@ -108,6 +108,10 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 			initializeCount++;
 			const params = message.params as { processId?: number | null } | undefined;
 			processId = params?.processId ?? null;
+			if (Bun.env.TEST_LSP_INITIALIZE_ERROR === "1") {
+				respond(id, undefined, { code: -32603, message: "fake initialize failure" });
+				break;
+			}
 			respond(id, {
 				capabilities: {},
 				serverInfo: { name: "fake-lsp", version: String(process.pid) },

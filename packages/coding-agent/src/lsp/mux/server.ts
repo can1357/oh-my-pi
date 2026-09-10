@@ -41,6 +41,8 @@ const MUX_IDLE_MS = 15 * 60 * 1_000;
 const SHUTDOWN_BUDGET_MS = 2_000;
 /** Hard-termination budget for a server root and anything it left behind. */
 export const TERMINATION_BUDGET_MS = 1_000;
+/** Termination-failure reasons kept for the shutdown that has to report them. */
+export const RETAINED_STOP_FAILURES = 16;
 
 type RpcMessage = LspJsonRpcRequest | LspJsonRpcResponse | LspJsonRpcNotification;
 
@@ -242,11 +244,23 @@ export class LspMuxServer {
 	// the tracked servers alone would let shutdown skip — and never report — a
 	// sweep that is still going or about to fail.
 	readonly #stopsInFlight = new Set<Promise<void>>();
-	// Stops that already failed. A failure can land long before any shutdown —
-	// an idle server's stop is the usual case — and by then the server is retired
-	// and the stop settled, so neither set would carry it and the shutdown that
-	// follows would report success over whatever the failure left behind.
-	readonly #failedStops = new Set<Promise<void>>();
+	// Terminations already handed to `#track`, so a memoized promise offered
+	// twice neither attaches a second handler nor counts one failure twice.
+	// Weak, because this only answers a question about identity and must not be
+	// the reason a settled promise is still reachable.
+	readonly #trackedStops = new WeakSet<Promise<void>>();
+	// Why terminations already failed. A failure can land long before any
+	// shutdown — an idle server's stop is the usual case — and by then the server
+	// is retired and the stop settled, so nothing else would carry it and the
+	// shutdown that follows would report success over whatever it left behind.
+	//
+	// Reasons rather than the promises themselves, and capped: anything that can
+	// make one termination fail can make the next one fail too, and holding a
+	// settled promise per failure for the life of a mux that may never shut down
+	// is a leak. `#failedStopCount` keeps the total truthful past the cap, so a
+	// bound on what is retained never becomes a bound on what is reported.
+	readonly #failedStopReasons: unknown[] = [];
+	#failedStopCount = 0;
 
 	/** Number of currently connected mux links, including unbound ping links. */
 	get sessionCount(): number {
@@ -287,7 +301,12 @@ export class LspMuxServer {
 		clearTimeout(this.#idleTimer);
 		for (const session of Array.from(this.#sessions)) session.socket.destroy();
 		const stops = [...this.#servers].map(server => this.#stopServer(server));
-		const results = await Promise.allSettled(new Set([...stops, ...this.#stopsInFlight, ...this.#failedStops]));
+		// Awaited so their outcomes land, not so they can be read here: a tracked
+		// termination reports through the recorded reasons, which is also what
+		// carries the ones that settled before this shutdown began. Anything
+		// untracked is read straight off the result, rather than assumed covered.
+		const awaited = [...new Set([...stops, ...this.#stopsInFlight])];
+		const results = await Promise.allSettled(awaited);
 		const listener = this.#netServer;
 		this.#netServer = undefined;
 		if (listener) {
@@ -302,12 +321,13 @@ export class LspMuxServer {
 				// The socket may already have been removed by process cleanup.
 			}
 		}
-		const failures = results.filter(result => result.status === "rejected");
-		if (failures.length > 0)
-			throw new AggregateError(
-				failures.map(result => result.reason),
-				"LSP mux shutdown incomplete",
-			);
+		const failures: unknown[] = [...this.#failedStopReasons];
+		results.forEach((result, index) => {
+			if (result.status === "rejected" && !this.#trackedStops.has(awaited[index])) failures.push(result.reason);
+		});
+		const withheld = this.#failedStopCount - this.#failedStopReasons.length;
+		if (withheld > 0) failures.push(new Error(`LSP mux withheld ${withheld} further termination failures`));
+		if (failures.length > 0) throw new AggregateError(failures, "LSP mux shutdown incomplete");
 	}
 
 	async #clearStaleSocket(endpoint: string): Promise<void> {
@@ -432,7 +452,7 @@ export class LspMuxServer {
 			return;
 		}
 		if (message.method === MUX_RESTART_METHOD && !request) {
-			await this.#killServer(server);
+			await this.#killServerTracked(server);
 			return;
 		}
 		if (message.method === "initialize" && request) {
@@ -604,7 +624,7 @@ export class LspMuxServer {
 			if (message.error) {
 				for (const [session, id] of server.initializeWaiters) this.#sendSession(session, { ...message, id });
 				server.initializeWaiters.clear();
-				await this.#killServer(server);
+				await this.#killServerTracked(server);
 				return;
 			}
 			server.initializeResult = message.result;
@@ -762,7 +782,7 @@ export class LspMuxServer {
 					}
 				} catch (error) {
 					logger.warn("LSP mux session cleanup failed", { server: server.key, error: String(error) });
-					await this.#killServer(server);
+					await this.#killServerTracked(server);
 				} finally {
 					server.initializeWaiters.delete(session);
 					server.sessions.delete(session);
@@ -817,16 +837,46 @@ export class LspMuxServer {
 		if (server.stopPromise) return server.stopPromise;
 		if (server.terminationPromise) return server.terminationPromise;
 		const stop = this.#performStopServer(server);
-		this.#stopsInFlight.add(stop);
-		void stop.then(
-			() => this.#stopsInFlight.delete(stop),
-			() => {
-				this.#stopsInFlight.delete(stop);
-				this.#failedStops.add(stop);
-			},
-		);
+		this.#track(stop);
 		server.stopPromise = stop;
 		return stop;
+	}
+
+	/**
+	 * Carry a termination's outcome to whatever shutdown comes next.
+	 *
+	 * Idempotent because the promises handed here are memoized: `#killServer`
+	 * returns one termination per server however often it is asked, and
+	 * re-registering would attach a handler per call.
+	 */
+	#track(outcome: Promise<void>): void {
+		if (this.#trackedStops.has(outcome)) return;
+		this.#trackedStops.add(outcome);
+		this.#stopsInFlight.add(outcome);
+		void outcome.then(
+			() => this.#stopsInFlight.delete(outcome),
+			(reason: unknown) => {
+				this.#stopsInFlight.delete(outcome);
+				this.#failedStopCount++;
+				if (this.#failedStopReasons.length < RETAINED_STOP_FAILURES) this.#failedStopReasons.push(reason);
+			},
+		);
+	}
+
+	/**
+	 * Terminate a server outside a stop, keeping the outcome accountable.
+	 *
+	 * `#stopServer` records how its own attempt ended; a bare `#killServer` has
+	 * nothing around it that does, and each of its three callers — restart, a
+	 * failed `initialize`, and session cleanup — reaches it from a handler that
+	 * only logs. Root-exit cleanup then retires the server from `#servers`, so
+	 * an attempt that left a helper running is carried by nothing at all and the
+	 * next shutdown reports success over it.
+	 */
+	#killServerTracked(server: ServerInstance): Promise<void> {
+		const terminated = this.#killServer(server);
+		this.#track(terminated);
+		return terminated;
 	}
 
 	async #performStopServer(server: ServerInstance): Promise<void> {
@@ -847,7 +897,29 @@ export class LspMuxServer {
 		// pin cannot hold a helper the server spawns while answering `shutdown`.
 		// What it does hold is a helper that leaves the group afterwards, and
 		// everything at all on a host where the group is unattributable.
-		const helpers = Process.fromPid(server.proc.pid)?.descendants() ?? [];
+		//
+		// A walk that stopped short throws rather than handing back a short set as
+		// a whole one. Caught here so the handshake still runs — the server gets
+		// its chance to exit cleanly either way — but the stop is failed at the
+		// end, because a helper this never pinned is one nothing will sweep.
+		let helpers: Process[] = [];
+		let helperPinFailure: unknown;
+		try {
+			// No reference is the same outcome as a walk that stopped short, and it
+			// has to be read that way rather than as an empty subtree: the pin runs
+			// while the server is expected alive, so failing to open one means a
+			// refused `pidfd_open` or a root that died into the gap — and in both
+			// the helpers it may have left are past reach, not absent.
+			const root = Process.fromPid(server.proc.pid);
+			if (!root) throw new Error(`no reference to server root ${server.proc.pid}`);
+			helpers = root.descendants();
+		} catch (error) {
+			helperPinFailure = error;
+			logger.warn("LSP mux could not pin the server's helper subtree", {
+				server: server.key,
+				error: String(error),
+			});
+		}
 		try {
 			await withTimeout(
 				(async () => {
@@ -877,6 +949,10 @@ export class LspMuxServer {
 			const helperSweep = this.#killHelpers(server, helpers);
 			const outcomes = await Promise.allSettled([helperSweep, this.#killServer(server)]);
 			const failures = outcomes.flatMap(outcome => (outcome.status === "rejected" ? [outcome.reason] : []));
+			// An unpinnable subtree fails the stop for the same reason an unswept
+			// helper does: what it left behind is unaccounted for either way.
+			if (helperPinFailure !== undefined)
+				failures.push(new Error(`LSP mux helper subtree could not be pinned: ${String(helperPinFailure)}`));
 			// A helper left behind is an incomplete termination exactly like a root
 			// left behind, so it fails the shutdown rather than only warning.
 			if (failures.length === 1) throw failures[0];

@@ -19,7 +19,7 @@ use crate::cancel::CancelToken;
 #[cfg(target_os = "linux")]
 mod platform {
 	use std::{
-		collections::HashSet,
+		collections::HashMap,
 		ffi::OsStr,
 		fs,
 		os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
@@ -38,6 +38,23 @@ mod platform {
 	}
 
 	impl Process {
+		/// Identities this walk will follow under any one pid.
+		///
+		/// Keying on identity is what keeps a live replacement out of a corpse's
+		/// shadow, but on its own it bounds nothing: a numeric key admitted each
+		/// pid once and so could not recurse forever, while identities under one
+		/// number are unlimited. A walk that recursed into every one of them
+		/// would have no termination guarantee at all — reuse can mint a fresh
+		/// identity for a number already recorded, and that identity's children
+		/// can do the same, indefinitely.
+		///
+		/// A cap restores a bound of the numeric key's own order while leaving
+		/// the replacement case — two identities, the corpse and its successor —
+		/// far inside it. Reaching this many needs the pid allocator to come
+		/// back around to one number that many times inside a single walk, which
+		/// no live tree does.
+		pub(super) const IDENTITIES_PER_PID: usize = 8;
+
 		pub fn from_pid(pid: i32) -> Option<Self> {
 			if pid <= 0 {
 				return None;
@@ -52,8 +69,25 @@ mod platform {
 		}
 
 		pub fn children(&self) -> Vec<Self> {
-			if !self.live_identity() {
-				return Vec::new();
+			self.children_checked().0
+		}
+
+		/// The children, and whether the enumeration behind them happened.
+		///
+		/// An unreadable `/proc` directory yields no children, which reads the
+		/// same as a process that has none. Ordinary churn is not a gap: a
+		/// process that has exited has no reachable children, and a thread that
+		/// vanished between the directory listing and the read took its entry
+		/// with it. A path still present but unreadable is a gap.
+		pub fn children_checked(&self) -> (Vec<Self>, bool) {
+			// Split, because these are different answers: a root that has exited has
+			// no reachable children and saying so is whole, while one still present
+			// whose `/proc` will not read is a subtree this cannot look into at all.
+			if self.status() != ProcessStatus::Running {
+				return (Vec::new(), true);
+			}
+			if read_start_time(self.pid) != Some(self.start_time) {
+				return (Vec::new(), !pid_is_visible(self.pid));
 			}
 
 			// `/proc/{pid}/task/{tid}/children` is per-task: a child fork()ed from a
@@ -61,13 +95,18 @@ mod platform {
 			// every task subdir and union the lists, then re-validate parentage.
 			let task_dir = format!("/proc/{}/task", self.pid);
 			let Ok(entries) = fs::read_dir(&task_dir) else {
-				return Vec::new();
+				// Gone under the walk is churn; still there and unreadable is a gap.
+				return (Vec::new(), !path_is_visible(&task_dir));
 			};
 
-			let mut seen: HashSet<i32> = HashSet::new();
 			let mut out = Vec::new();
+			let mut complete = true;
 			let mut children_file_available = false;
-			for entry in entries.flatten() {
+			for entry in entries {
+				let Ok(entry) = entry else {
+					complete = false;
+					continue;
+				};
 				let name = entry.file_name();
 				let Some(tid_str) = name.to_str() else {
 					continue;
@@ -77,6 +116,12 @@ mod platform {
 				}
 				let children_path = format!("/proc/{}/task/{}/children", self.pid, tid_str);
 				let Ok(content) = fs::read_to_string(&children_path) else {
+					// A thread that exited took its children with it, to whichever
+					// thread of this group adopted them; one still listed and
+					// unreadable is a subtree this walk cannot see.
+					if path_is_visible(&children_path) {
+						complete = false;
+					}
 					continue;
 				};
 				// The file is readable -> this kernel has CONFIG_PROC_CHILDREN.
@@ -85,7 +130,7 @@ mod platform {
 					let Ok(child_pid) = part.parse::<i32>() else {
 						continue;
 					};
-					self.push_validated_child(child_pid, &mut seen, &mut out);
+					self.push_validated_child(child_pid, &mut out, &mut complete);
 				}
 			}
 
@@ -96,37 +141,82 @@ mod platform {
 			// by parent pid, the same primitive the macOS path uses. Only taken when no
 			// `children` file was readable, so kernels that support it keep the cheap
 			// per-task fast path.
-			if !children_file_available && let Ok(proc_entries) = fs::read_dir("/proc") {
-				for entry in proc_entries.flatten() {
-					let name = entry.file_name();
-					let Some(pid_str) = name.to_str() else {
-						continue;
-					};
-					let Ok(child_pid) = pid_str.parse::<i32>() else {
-						continue;
-					};
-					self.push_validated_child(child_pid, &mut seen, &mut out);
+			if !children_file_available {
+				match fs::read_dir("/proc") {
+					Ok(proc_entries) => {
+						for entry in proc_entries {
+							let Ok(entry) = entry else {
+								complete = false;
+								continue;
+							};
+							let name = entry.file_name();
+							let Some(pid_str) = name.to_str() else {
+								continue;
+							};
+							let Ok(child_pid) = pid_str.parse::<i32>() else {
+								continue;
+							};
+							self.push_validated_child(child_pid, &mut out, &mut complete);
+						}
+					},
+					// No per-task lists and no table to fall back on: this answers
+					// "no children" having been unable to look for any.
+					Err(_) => complete = false,
 				}
 			}
-			out
+			(out, complete)
 		}
 
-		/// Validate a candidate child pid — dedup, still running, and currently
-		/// parented to `self` — then push it onto `out`. Shared by the
-		/// `/proc/<pid>/task/<tid>/children` fast path and the `/proc`-scan
-		/// fallback for kernels without `CONFIG_PROC_CHILDREN`.
-		fn push_validated_child(&self, child_pid: i32, seen: &mut HashSet<i32>, out: &mut Vec<Self>) {
-			if child_pid == self.pid || !seen.insert(child_pid) {
+		/// Validate a candidate child pid — pinned, still running, currently
+		/// parented to `self`, and not already collected — then push it onto
+		/// `out`. Shared by the `/proc/<pid>/task/<tid>/children` fast path and
+		/// the `/proc`-scan fallback for kernels without `CONFIG_PROC_CHILDREN`.
+		///
+		/// Deduped after pinning and on identity, never before and on the
+		/// number. This walk has no process-table snapshot behind it — every
+		/// candidate list is read from `/proc` as it is needed — so a number
+		/// seen once is not a number that means the same thing later, and a
+		/// candidate that failed validation must not spend it.
+		fn push_validated_child(&self, child_pid: i32, out: &mut Vec<Self>, complete: &mut bool) {
+			if child_pid == self.pid {
 				return;
 			}
 			let Some(child) = Self::from_pid(child_pid) else {
+				// The kernel listed this child. Failing to pin it is churn only if it
+				// has since gone; still present and unpinnable is a `pidfd_open` the
+				// host refused or a `/proc` entry it will not show us, and the child
+				// is then dropped from a walk that answers as whole regardless.
+				if pid_is_visible(child_pid) {
+					*complete = false;
+				}
 				return;
 			};
-			if child.status() == ProcessStatus::Running
-				&& current_parent_pid(child.pid) == Some(self.pid)
-			{
-				out.push(child);
+			// A zombie or an exited child needs no signal and has already handed its
+			// own children on, so leaving it out costs the walk nothing.
+			if child.status() != ProcessStatus::Running {
+				return;
 			}
+			match current_parent_pid(child.pid) {
+				Some(parent) if parent == self.pid => {},
+				// Reparented out from under us between the listing and this read, so
+				// it is genuinely not ours any more.
+				Some(_) => return,
+				// Unreadable rather than absent: the same refusal as above, reached
+				// through `/proc/{pid}/status` instead of through the pidfd.
+				None => {
+					if pid_is_visible(child.pid) {
+						*complete = false;
+					}
+					return;
+				},
+			}
+			if out
+				.iter()
+				.any(|collected| collected.is_same_process(&child))
+			{
+				return;
+			}
+			out.push(child);
 		}
 
 		pub fn parent_pid(&self) -> Option<i32> {
@@ -156,6 +246,36 @@ mod platform {
 
 		pub const fn is_same_process(&self, other: &Self) -> bool {
 			self.pid == other.pid && self.start_time == other.start_time
+		}
+
+		/// This reference's descriptor presented under `pid`, carrying a start
+		/// time no live process can have.
+		///
+		/// Stands in for a reference pinned before its number was recycled,
+		/// which is the state every identity check here exists for and the one
+		/// state a test cannot ask the kernel for: reuse of a chosen pid waits
+		/// on the cyclic allocator to come back around to it.
+		///
+		/// `generation` separates successive stand-ins at one number, so a test
+		/// can build the several distinct identities that only repeated reuse
+		/// would otherwise produce.
+		/// [`Self::push_validated_child`] over one candidate.
+		///
+		/// The arms that separate a child which has gone from one the host will
+		/// not show us are otherwise reachable only through a whole `/proc` walk,
+		/// whose own enumeration fails first under the very conditions that
+		/// produce them.
+		#[cfg(test)]
+		pub fn validate_child(&self, child_pid: i32) -> (Vec<Self>, bool) {
+			let mut out = Vec::new();
+			let mut complete = true;
+			self.push_validated_child(child_pid, &mut out, &mut complete);
+			(out, complete)
+		}
+
+		#[cfg(test)]
+		pub fn stale_at(&self, pid: i32, generation: u64) -> Self {
+			Self { pid, pidfd: Arc::clone(&self.pidfd), start_time: u64::MAX - generation }
 		}
 
 		pub fn kill(&self, signal: i32) -> bool {
@@ -246,21 +366,84 @@ mod platform {
 		}
 
 		/// Walk the descendant tree in post-order (leaves first), de-duplicating
-		/// by PID so concurrent reparenting cannot trap us in a cycle.
-		pub fn descendants(&self) -> Vec<Self> {
+		/// by process identity, and bounded so that neither concurrent
+		/// reparenting nor pid reuse can keep the recursion going.
+		///
+		/// By identity rather than by pid, because unlike the macOS and Windows
+		/// walks this one holds no snapshot: it re-reads `/proc` at every level,
+		/// so a child that exits and is reaped part-way through can leave its
+		/// number to a descendant found later, and a numeric key would step over
+		/// the live one on the strength of the corpse it already passed.
+		/// Bucketed by pid so the identity check stays a comparison against the
+		/// few references that ever shared a number, not against the whole walk,
+		/// and so the bound the numeric key used to provide has somewhere to
+		/// live — see [`Self::IDENTITIES_PER_PID`].
+		/// The walk, and whether it followed everything it found.
+		///
+		/// The cap is reachable only by repeated reuse of one number, but a
+		/// caller cannot act on how unlikely that is: a walk that stopped short
+		/// returns a subtree that looks exactly like a complete one, and every
+		/// consumer here is about to terminate what it was handed and report the
+		/// tree gone. Same reason [`pi_builtins::ProcInfo::all_checked`] exists
+		/// one layer down.
+		pub fn descendants_checked(&self) -> (Vec<Self>, bool) {
 			let mut out = Vec::new();
-			let mut visited = HashSet::new();
-			visited.insert(self.pid);
-			self.descendants_into(&mut out, &mut visited);
-			out
+			let mut visited: HashMap<i32, Vec<Self>> = HashMap::new();
+			visited.insert(self.pid, vec![self.clone()]);
+			let mut complete = true;
+			self.descendants_into(&mut out, &mut visited, &mut complete);
+			(out, complete)
 		}
 
-		fn descendants_into(&self, out: &mut Vec<Self>, visited: &mut HashSet<i32>) {
-			for child in self.children() {
-				if visited.insert(child.pid) {
-					child.descendants_into(out, visited);
-					out.push(child);
+		/// [`Self::descendants`] with the walk's `visited` set pre-seeded.
+		///
+		/// A reference the walk recorded at one level, whose number a live
+		/// process holds by the time a later level offers it, is the state the
+		/// identity key exists for — and it needs a pid the kernel recycled
+		/// mid-walk, which no test can ask for. Seeding the set puts the walk in
+		/// that state directly.
+		#[cfg(test)]
+		pub fn descendants_after_seeing(&self, recorded: Vec<Self>) -> (Vec<Self>, bool) {
+			let mut out = Vec::new();
+			let mut visited: HashMap<i32, Vec<Self>> = HashMap::new();
+			visited.insert(self.pid, vec![self.clone()]);
+			for reference in recorded {
+				visited.entry(reference.pid).or_default().push(reference);
+			}
+			let mut complete = true;
+			self.descendants_into(&mut out, &mut visited, &mut complete);
+			(out, complete)
+		}
+
+		fn descendants_into(
+			&self,
+			out: &mut Vec<Self>,
+			visited: &mut HashMap<i32, Vec<Self>>,
+			complete: &mut bool,
+		) {
+			let (children, enumerated) = self.children_checked();
+			if !enumerated {
+				*complete = false;
+			}
+			for child in children {
+				let bucket = visited.entry(child.pid).or_default();
+				// Identity first, then the cap. A process already recorded is in
+				// `out` with its children walked from it, so it costs the number
+				// nothing and must not be charged for — reading a re-sighting as a
+				// dropped subtree is the mirror of the bug the identity key fixed,
+				// reporting partial over a walk that missed nothing.
+				if bucket.iter().any(|seen| seen.is_same_process(&child)) {
+					continue;
 				}
+				// Spending the cap does drop a subtree, so it is the one skip here
+				// that makes the answer partial.
+				if bucket.len() >= Self::IDENTITIES_PER_PID {
+					*complete = false;
+					continue;
+				}
+				bucket.push(child.clone());
+				child.descendants_into(out, visited, complete);
+				out.push(child);
 			}
 		}
 
@@ -268,6 +451,19 @@ mod platform {
 			self.status() == ProcessStatus::Running
 				&& read_start_time(self.pid) == Some(self.start_time)
 		}
+	}
+
+	/// Whether `path` is still there at all, which separates something that
+	/// vanished under the walk from something present but unreadable. Mirrors
+	/// `pi_builtins`'s `pid_is_visible` one layer down.
+	fn path_is_visible(path: &str) -> bool {
+		fs::metadata(path).is_ok()
+	}
+
+	/// Whether `/proc/{pid}` is still there at all, which separates a process
+	/// that exited under the walk from one present but unreadable.
+	fn pid_is_visible(pid: i32) -> bool {
+		path_is_visible(&format!("/proc/{pid}"))
 	}
 
 	fn split_nul_arguments(content: &[u8]) -> Vec<String> {
@@ -519,6 +715,17 @@ mod platform {
 
 		/// Walk the descendant tree in post-order (leaves first), de-duplicating
 		/// by PID so concurrent reparenting cannot trap us in a cycle.
+		/// The walk, and whether it saw everything it should have.
+		///
+		/// Always `true` here. This platform's enumeration is deferred to the
+		/// follow-up that can run it: reporting a gap needs the snapshot and
+		/// per-entry failures to be told apart from ordinary churn, and that
+		/// distinction cannot be verified from Linux. Reporting no gap keeps the
+		/// behaviour this platform already shipped rather than guessing at one.
+		pub fn descendants_checked(&self) -> (Vec<Self>, bool) {
+			(self.descendants(), true)
+		}
+
 		pub fn descendants(&self) -> Vec<Self> {
 			// One process-table snapshot per walk — building it inside the recursion
 			// would re-scan every pid for every visited node, producing an `O(N · D)`
@@ -1009,6 +1216,17 @@ mod platform {
 		/// `children()` recursing per-node would re-snapshot the whole process
 		/// table for every visited descendant, making tree termination
 		/// `O(N · D)` snapshots. One snapshot per termination wave is enough.
+		/// The walk, and whether it saw everything it should have.
+		///
+		/// Always `true` here. This platform's enumeration is deferred to the
+		/// follow-up that can run it: reporting a gap needs the snapshot and
+		/// per-entry failures to be told apart from ordinary churn, and that
+		/// distinction cannot be verified from Linux. Reporting no gap keeps the
+		/// behaviour this platform already shipped rather than guessing at one.
+		pub fn descendants_checked(&self) -> (Vec<Self>, bool) {
+			(self.descendants(), true)
+		}
+
 		pub fn descendants(&self) -> Vec<Self> {
 			let tree = build_process_tree();
 			let Ok(root) = u32::try_from(self.pid) else {
@@ -1409,13 +1627,17 @@ impl ProcessExitWait {
 /// Built by [`Process::capture_termination`]; see that method for why the
 /// capture cannot be deferred to the first wave.
 pub struct TerminationPlan {
-	root:            Process,
-	process_group:   Option<i32>,
+	root:                 Process,
+	process_group:        Option<i32>,
 	/// Pinned leader of `process_group`, revalidated before each group signal.
-	group_leader:    Option<Process>,
-	descendants:     Vec<Process>,
-	protected:       HashSet<i32>,
-	live_at_capture: bool,
+	group_leader:         Option<Process>,
+	descendants:          Vec<Process>,
+	/// Whether the walk that produced `descendants` followed everything it
+	/// found. A partial one cannot report a completed termination any more than
+	/// an unattributable group can.
+	descendants_complete: bool,
+	protected:            HashSet<i32>,
+	live_at_capture:      bool,
 }
 
 impl TerminationPlan {
@@ -1468,7 +1690,13 @@ impl TerminationPlan {
 			// root nor a walk rooted at it, so only the group can still see it. An
 			// unattributable group is not an empty one — reading it as complete here
 			// would report success over exactly the member this check exists for.
+			//
+			// The walk that produced the pinned set has to hold up for the same
+			// reason, and this return is the one path that never reaches the hard
+			// wave's own conjunction: a set that was short to begin with going quiet
+			// says nothing about what it left out, and nothing rescans here.
 			if exited
+				&& self.descendants_complete
 				&& matches!(self.group_survivors(), GroupSurvivors::Known(members) if members.is_empty())
 			{
 				return Ok(true);
@@ -1486,7 +1714,7 @@ impl TerminationPlan {
 		self.signal_group(KILL_SIGNAL);
 		// Group survivors join the captured set as targets in their own right, so
 		// the closing wait covers them instead of only the root's own subtree.
-		let rescan = self.root.signalable_descendants(&self.protected);
+		let (rescan, rescan_complete) = self.root.signalable_descendants_checked(&self.protected);
 		let survivors = self.group_survivors();
 		let group_accounted = survivors.is_known();
 		extend_by_identity(
@@ -1509,8 +1737,11 @@ impl TerminationPlan {
 		.await?;
 		// A group that could not be attributed contributes no targets, so a member
 		// reparented out of the root's subtree is in neither the wait set nor the
-		// signalled set. The pinned set going quiet says nothing about it.
-		Ok(exited && group_accounted)
+		// signalled set. The pinned set going quiet says nothing about it. A walk
+		// that stopped short is the same statement about the subtree: it left a
+		// process out of both sets, and the ones that did get signalled going
+		// quiet is not evidence about the one that never did.
+		Ok(exited && group_accounted && self.descendants_complete && rescan_complete)
 	}
 
 	/// Signal the captured process group, preferring the pinned leader's
@@ -1642,6 +1873,13 @@ impl Process {
 	/// signal abstraction, so the `signal` argument is ignored and the entire
 	/// tree is hard-killed via `TerminateProcess`. Defaults to the POSIX
 	/// hard-kill signal.
+	///
+	/// Carries no completeness verdict, and none can be derived from it. The
+	/// return is how many processes were signalled, which is already a partial
+	/// answer by construction — nothing is waited for, so it never means the
+	/// tree is gone. Callers that need that answer take
+	/// [`Self::hard_kill_tree`] or [`Self::capture_termination`], both of which
+	/// refuse a walk that stopped short.
 	#[must_use]
 	pub fn kill_tree(&self, signal: Option<i32>) -> u32 {
 		self.signal_tree(signal.unwrap_or(KILL_SIGNAL))
@@ -1652,9 +1890,15 @@ impl Process {
 	/// A snapshot for callers that must terminate a tree *later*: once the root
 	/// exits, its survivors are reparented and a walk rooted at its pid can no
 	/// longer see them, so the references have to be pinned while it is alive.
-	#[must_use]
-	pub fn descendants(&self) -> Vec<Self> {
-		self.signalable_descendants(&host_protected_pids())
+	///
+	/// Fails rather than returning a subtree it knows is partial. Every caller
+	/// of this pins what it is given and later reports that tree terminated, so
+	/// a short walk handed back as an ordinary one is a sweep that misses a
+	/// process and says nothing about it.
+	pub fn descendants(&self) -> Result<Vec<Self>> {
+		let (descendants, complete) = self.signalable_descendants_checked(&host_protected_pids());
+		anyhow::ensure!(complete, "descendant walk of {} could not be completed", self.pid());
+		Ok(descendants)
 	}
 
 	/// Collect the group again after signalling it, folding the arrivals into
@@ -1697,7 +1941,24 @@ impl Process {
 	/// the wait and let the tree report itself gone.
 	pub fn hard_kill_tree(&self) -> Result<ProcessExitWait> {
 		let protected = host_protected_pids();
-		let mut processes = self.signalable_descendants(&protected);
+		let (descendants, complete) = self.signalable_descendants_checked(&protected);
+		self.hard_kill_walked_tree(descendants, complete, &protected)
+	}
+
+	/// [`Self::hard_kill_tree`] over a walk already taken.
+	///
+	/// Split out so the refusal below can be reached with a walk chosen by the
+	/// caller: the walk stops short only under repeated reuse of one number,
+	/// which cannot be arranged, and this refusal is the whole of what stands
+	/// between a short walk and a waiter that reports the tree gone.
+	fn hard_kill_walked_tree(
+		&self,
+		descendants: Vec<Self>,
+		walk_complete: bool,
+		protected: &HashSet<i32>,
+	) -> Result<ProcessExitWait> {
+		anyhow::ensure!(walk_complete, "descendant walk of {} could not be completed", self.pid());
+		let mut processes = descendants;
 		if let Some(pgid) = self.group_id()
 			&& pgid == self.pid()
 		{
@@ -1740,7 +2001,7 @@ impl Process {
 		if !protected.contains(&self.pid()) {
 			processes.push(self.clone());
 		}
-		Ok(Self::hard_kill_processes(processes, &protected))
+		Ok(Self::hard_kill_processes(processes, protected))
 	}
 
 	/// Whether both references describe the same process instance rather than
@@ -1748,6 +2009,31 @@ impl Process {
 	#[must_use]
 	pub const fn is_same_process(&self, other: &Self) -> bool {
 		self.inner.is_same_process(&other.inner)
+	}
+
+	/// This reference under `pid`, standing in for the `generation`-th pinned
+	/// before that number was recycled. See [`platform::Process::stale_at`].
+	#[cfg(all(test, target_os = "linux"))]
+	fn stale_at(&self, pid: i32, generation: u64) -> Self {
+		Self::from_inner(self.inner.stale_at(pid, generation))
+	}
+
+	/// One candidate through the child validation. See
+	/// [`platform::Process::validate_child`].
+	#[cfg(all(test, target_os = "linux"))]
+	fn validate_child(&self, child_pid: i32) -> (Vec<Self>, bool) {
+		let (out, complete) = self.inner.validate_child(child_pid);
+		(out.into_iter().map(Self::from_inner).collect(), complete)
+	}
+
+	/// Descendants of this process with the walk's visited set pre-seeded. See
+	/// [`platform::Process::descendants_after_seeing`].
+	#[cfg(all(test, target_os = "linux"))]
+	fn descendants_after_seeing(&self, recorded: Vec<Self>) -> (Vec<Self>, bool) {
+		let (descendants, complete) = self
+			.inner
+			.descendants_after_seeing(recorded.into_iter().map(|process| process.inner).collect());
+		(descendants.into_iter().map(Self::from_inner).collect(), complete)
 	}
 
 	/// Signal the process group `pgid` through this reference's retained
@@ -1889,15 +2175,28 @@ impl Process {
 	/// an absence, and an enumeration that quietly lost entries produces exactly
 	/// the same answer as a group that really is empty.
 	fn group_members_checked(pgid: i32) -> (Vec<Self>, bool) {
-		let (all, complete) = pi_builtins::ProcInfo::all_checked();
-		let members = all
-			.into_iter()
-			.filter(|process| process.group_id() == Some(pgid))
-			.filter_map(|process| Self::from_pid(process.pid()))
-			.filter(|process| {
-				process.status() == ProcessStatus::Exited || process.group_id() == Some(pgid)
-			})
-			.collect();
+		let (all, scanned) = pi_builtins::ProcInfo::all_checked();
+		let mut complete = scanned;
+		let mut members = Vec::new();
+		for process in all {
+			if process.group_id() != Some(pgid) {
+				continue;
+			}
+			// A member the scan listed and this cannot pin is a member left out of
+			// the wait, which is the one thing an "empty group" answer must not be
+			// able to mean. Exiting between the scan and here is ordinary churn.
+			let Some(pinned) = Self::from_pid(process.pid()) else {
+				if process.status() == ProcessStatus::Running {
+					complete = false;
+				}
+				continue;
+			};
+			// Left the group in between, so it is not this group's to signal.
+			if pinned.status() != ProcessStatus::Exited && pinned.group_id() != Some(pgid) {
+				continue;
+			}
+			members.push(pinned);
+		}
 		(members, complete)
 	}
 
@@ -1912,13 +2211,18 @@ impl Process {
 					.map(|parent| (process.pid(), parent))
 			})
 			.collect();
-		let mut visited = HashSet::new();
-		let processes: Vec<Self> = processes
+		// Deduped by identity, never by number. A member that exits and is reaped
+		// during a wave frees its pid for a replacement that can join the group
+		// after the broadcast, and the recollection that finds it deliberately
+		// keeps both references. Keyed on the pid, the pinned corpse arrives first
+		// and wins, the live replacement is dropped from the signal and from the
+		// wait, and the waiter reports the tree gone on the strength of the one
+		// process it already knew had exited.
+		let mut deduped: Vec<Self> = Vec::new();
+		extend_by_identity(&mut deduped, processes);
+		let processes: Vec<Self> = deduped
 			.into_iter()
-			.filter(|process| {
-				visited.insert(process.pid())
-					&& !pid_in_protected_subtree(process.pid(), protected, &parents)
-			})
+			.filter(|process| !pid_in_protected_subtree(process.pid(), protected, &parents))
 			.collect();
 		for process in &processes {
 			let _ = process.inner.kill(KILL_SIGNAL);
@@ -1987,13 +2291,10 @@ impl Process {
 	/// Walk the live descendant tree from scratch. Cheap and idempotent — call
 	/// it again before each signal wave so grandchildren spawned during a grace
 	/// period are not missed.
-	fn live_descendants(&self) -> Vec<Self> {
-		self
-			.inner
-			.descendants()
-			.into_iter()
-			.map(Self::from_inner)
-			.collect()
+	/// The walk, and whether it followed everything it found.
+	fn live_descendants_checked(&self) -> (Vec<Self>, bool) {
+		let (descendants, complete) = self.inner.descendants_checked();
+		(descendants.into_iter().map(Self::from_inner).collect(), complete)
 	}
 
 	fn signal_tree(&self, signal: i32) -> u32 {
@@ -2042,15 +2343,25 @@ impl Process {
 	/// subprocesses, so drop every node whose recorded parent chain — within the
 	/// enumerated set — passes through a protected pid (#7452 review).
 	fn signalable_descendants(&self, protected: &HashSet<i32>) -> Vec<Self> {
-		let descendants = self.live_descendants();
+		self.signalable_descendants_checked(protected).0
+	}
+
+	/// [`Self::signalable_descendants`], and whether the walk behind it
+	/// followed everything it found.
+	///
+	/// Pruning a protected subtree is a deliberate exclusion and leaves the
+	/// answer complete; only the walk stopping short makes it partial.
+	fn signalable_descendants_checked(&self, protected: &HashSet<i32>) -> (Vec<Self>, bool) {
+		let (descendants, complete) = self.live_descendants_checked();
 		let parents: HashMap<i32, i32> = descendants
 			.iter()
 			.filter_map(|descendant| descendant.ppid().map(|parent| (descendant.pid(), parent)))
 			.collect();
-		descendants
+		let signalable = descendants
 			.into_iter()
 			.filter(|descendant| !pid_in_protected_subtree(descendant.pid(), protected, &parents))
-			.collect()
+			.collect();
+		(signalable, complete)
 	}
 
 	/// Pin everything a termination will need to signal, before any of it can
@@ -2074,17 +2385,20 @@ impl Process {
 				process_group: None,
 				group_leader: None,
 				descendants: Vec::new(),
+				descendants_complete: true,
 				protected,
 				live_at_capture: false,
 			};
 		}
 		let process_group = if group { self.group_id() } else { None };
+		let (descendants, descendants_complete) = self.signalable_descendants_checked(&protected);
 		TerminationPlan {
 			// Pinned while the group is certainly still ours, so each later signal
 			// can prove the number has not changed hands.
 			group_leader: process_group.and_then(Self::from_pid),
 			process_group,
-			descendants: self.signalable_descendants(&protected),
+			descendants,
+			descendants_complete,
 			root: self.clone(),
 			protected,
 			live_at_capture: true,
@@ -2337,9 +2651,14 @@ pub const KILL_SIGNAL: i32 = 9;
 /// on platforms that do not expose process groups.
 #[derive(Default)]
 pub struct TerminationTargets {
-	pgids:     Vec<i32>,
-	processes: Vec<Process>,
-	seen_pids: HashSet<i32>,
+	pgids:           Vec<i32>,
+	processes:       Vec<Process>,
+	seen_pids:       HashSet<i32>,
+	/// Spawns this set cannot account for, because no handle could be opened
+	/// when their pid was still unambiguous. Not targets — there is nothing
+	/// safe to signal for them — but a caller reading an empty or exhausted
+	/// set as "the run is gone" needs to know they were never in it.
+	unpinned_spawns: usize,
 }
 
 impl TerminationTargets {
@@ -2360,10 +2679,18 @@ impl TerminationTargets {
 	/// a stable [`Process`] reference so the descendant tree can be
 	/// killed even if the original pid is reused later.
 	///
-	/// Prefer [`add_process`](Self::add_process) when the caller already holds a
-	/// [`Process`] captured at spawn time: opening by pid here loses the
-	/// original identity if the pid was recycled between the child exiting
-	/// and this call.
+	/// Prefer [`add_process`](Self::add_process) whenever the caller can hold a
+	/// [`Process`] captured at spawn time. This entry point cannot close the
+	/// reuse window it names: it is called at termination, and a number whose
+	/// original owner has exited and been replaced resolves to the replacement,
+	/// which then joins the wave. Reaching it means no handle was pinned when
+	/// the pid was still unambiguous, and the fix belongs at that spawn rather
+	/// than here — nothing available at this point can tell the two apart.
+	///
+	/// One caller is left: background-job cleanup, whose pids come from the
+	/// shell's job records rather than from a spawn this crate observed. The
+	/// per-run cancellation path does not use this — its targets come from the
+	/// spawn registry, which pins each one in `on_spawn`.
 	pub fn add_pid(&mut self, pid: i32) {
 		if self.seen_pids.insert(pid)
 			&& let Some(process) = Process::from_pid(pid)
@@ -2372,21 +2699,46 @@ impl TerminationTargets {
 		}
 	}
 
-	/// Record a pre-pinned [`Process`] handle. Duplicates (by pid) are ignored.
+	/// Record a pre-pinned [`Process`] handle. Duplicates are ignored, by
+	/// identity rather than by pid.
 	///
 	/// This is the correct entry point when the caller captured the handle at
 	/// spawn time — the handle already pins OS-level identity, so no `from_pid`
 	/// re-open (and its PID-reuse race) is needed at cancellation time.
+	///
+	/// The distinction is the same one that made pinning worthwhile: a run whose
+	/// earlier child has exited and been reaped can spawn a later one onto that
+	/// number, and both handles are recorded. Keyed on the pid the live child is
+	/// the one dropped, because the corpse was recorded first.
 	pub fn add_process(&mut self, process: Process) {
 		if self.seen_pids.insert(process.pid()) {
 			self.processes.push(process);
+			return;
 		}
+		if self
+			.processes
+			.iter()
+			.any(|existing| existing.is_same_process(&process))
+		{
+			return;
+		}
+		self.processes.push(process);
 	}
 
 	/// True when no targets have been recorded.
+	///
+	/// Says nothing about [`Self::unpinned_spawns`]: those are not targets and
+	/// never become any, so a set can be empty and still not account for the
+	/// run. Callers deciding a run is gone have to ask both.
 	#[must_use]
 	pub const fn is_empty(&self) -> bool {
 		self.pgids.is_empty() && self.processes.is_empty()
+	}
+
+	/// How many spawns this set cannot account for.
+	#[must_use]
+	pub const fn unpinned_spawns(&self) -> usize {
+		self.unpinned_spawns
 	}
 
 	/// Send `signal` to every recorded target. Failures are swallowed:
@@ -2429,6 +2781,13 @@ struct SpawnedProcess {
 #[derive(Default)]
 struct RegistryState {
 	spawned:       Vec<SpawnedProcess>,
+	/// Spawns whose handle could not be opened at all. `pidfd_open` and
+	/// `OpenProcess` can both be refused for a live child, and a child that
+	/// was never pinned can never be safely signalled later — re-opening its
+	/// number at cancellation is the reuse hazard this registry exists to
+	/// close. Counted rather than dropped, because a target set that cannot
+	/// account for a child must not read as one that has nothing to do.
+	unpinned:      usize,
 	/// The next `spawned.len()` at which `record` runs a sweep. Bounds sweep
 	/// frequency when the live set stabilizes above the initial threshold:
 	/// without this watermark, every subsequent `record` would find
@@ -2483,6 +2842,9 @@ impl SpawnRegistry {
 	/// retaining one owned handle per historical spawn.
 	pub fn record(&self, pgid: Option<i32>, process: Option<Process>) {
 		let mut state = self.state.lock();
+		if process.is_none() {
+			state.unpinned += 1;
+		}
 		state.spawned.push(SpawnedProcess { process, pgid });
 		if state.spawned.len() >= state.next_sweep_at.max(Self::PRUNE_THRESHOLD) {
 			prune_exited(&mut state.spawned);
@@ -2511,6 +2873,7 @@ impl SpawnRegistry {
 		let mut targets = TerminationTargets::new();
 		let spawned = {
 			let mut state = self.state.lock();
+			targets.unpinned_spawns = state.unpinned;
 			prune_exited(&mut state.spawned);
 			// Reset the watermark to the current live-set size + threshold;
 			// leaving a stale pre-sweep value would misgate the next
@@ -2558,12 +2921,17 @@ fn prune_exited(spawned: &mut Vec<SpawnedProcess>) {
 				return true;
 			}
 			// Windows-only: root exited but the pinned handle still keeps its
-			// pid reserved, so `live_descendants` walks the *original* subtree
+			// pid reserved, so the descendant walk covers the *original* subtree
 			// via Toolhelp. If any child is still running we must keep the
 			// entry — closing the handle would both release the pid (racing
 			// pid reuse) and strand the surviving child.
+			// Retaining on an incomplete walk belongs here too — dropping the entry
+			// releases the pinned handle, frees the pid for reuse, and strands
+			// whatever the walk failed to see. It is not written yet because this
+			// platform's walk cannot yet report incompleteness; both halves land
+			// together in the platform-enumeration follow-up.
 			#[cfg(target_os = "windows")]
-			if !process.live_descendants().is_empty() {
+			if !process.live_descendants_checked().0.is_empty() {
 				return true;
 			}
 		}
@@ -2583,7 +2951,12 @@ fn prune_exited(spawned: &mut Vec<SpawnedProcess>) {
 	reason = "calls non-const platform_process_group_alive on unix"
 )]
 fn process_group_alive(pgid: i32) -> bool {
-	if pgid <= 0 {
+	// Group 1 is refused here and not only at the public entry points, because
+	// this predicate is what several of them consult before deciding a group is
+	// theirs: `kill(-1, …)` is the broadcast form, not group one, so it answers
+	// yes for essentially any caller and would license a sweep of every process
+	// the caller may signal.
+	if pgid <= 1 {
 		return false;
 	}
 	platform_process_group_alive(pgid)
@@ -2720,6 +3093,549 @@ mod tests {
 			ProcessStatus::Exited,
 			"a descendant orphaned by the polite wave must still be hard-killed"
 		);
+	}
+
+	/// Two references under one number, for the paths that have to tell a pinned
+	/// corpse from the process that took its pid. The kernel cannot be asked to
+	/// recycle a chosen pid, so the corpse is a real reaped reference presented
+	/// under the live child's number.
+	#[cfg(target_os = "linux")]
+	fn recycled_pid_pair() -> (Process, Process, std::process::Child) {
+		let mut first = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn the number's first holder");
+		let pinned =
+			Process::from_pid(i32::try_from(first.id()).expect("child pid")).expect("pin first");
+		first.kill().expect("kill the first holder");
+		first.wait().expect("reap the first holder");
+
+		let live = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn the number's new holder");
+		let live_pin = Process::from_pid(i32::try_from(live.id()).expect("child pid"))
+			.expect("pin the new holder");
+		(pinned.stale_at(live_pin.pid(), 0), live_pin, live)
+	}
+
+	/// `count` distinct stand-ins at `live`'s number, as repeated reuse of it
+	/// would leave behind in a walk that had recorded each in turn.
+	#[cfg(target_os = "linux")]
+	fn stale_generations(corpse: &Process, live: &Process, count: usize) -> Vec<Process> {
+		(0..count)
+			.map(|generation| corpse.stale_at(live.pid(), generation as u64))
+			.collect()
+	}
+
+	/// The hard wave's own dedup has to separate identity from number, because
+	/// the recollection feeding it deliberately keeps both the pinned corpse and
+	/// the live process that took its pid, corpse first. Dropping the live one
+	/// leaves it unsignalled *and* out of the wait, so the wave reports the tree
+	/// gone on the strength of the process it already knew had exited.
+	#[cfg(target_os = "linux")]
+	#[tokio::test]
+	async fn hard_kill_wave_keeps_the_live_holder_of_a_reused_pid() {
+		let (corpse, live_pin, mut live) = recycled_pid_pair();
+
+		let swept = Process::hard_kill_processes(vec![corpse, live_pin.clone()], &HashSet::new())
+			.wait(Duration::from_secs(5), CancelToken::default())
+			.await;
+		let status = live_pin.status();
+		let _ = live.kill();
+		let _ = live.wait();
+
+		assert!(swept.expect("wait after the hard wave"), "the wave must report its targets gone");
+		assert_eq!(
+			status,
+			ProcessStatus::Exited,
+			"the live holder of a reused pid must be signalled, not dropped for the corpse recorded \
+			 first"
+		);
+	}
+
+	/// Unlike the macOS and Windows walks, the Linux one holds no process-table
+	/// snapshot: every level re-reads `/proc`. So a number it recorded at one
+	/// level can be held by a different, live process by the time a later level
+	/// offers it, and keyed on the number the walk steps over the live one on
+	/// the strength of a reference it already passed.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn descendant_walk_keeps_a_child_that_reused_a_recorded_pid() {
+		let (corpse, live_pin, mut live) = recycled_pid_pair();
+		let self_pid = i32::try_from(std::process::id()).expect("self pid fits in i32");
+		let harness = Process::from_pid(self_pid).expect("pin the harness");
+
+		// Stands in for the corpse being already in `visited` when the walk
+		// reaches the live child, which is what a mid-walk recycle produces.
+		let (found, complete) = harness.descendants_after_seeing(vec![corpse]);
+		let covered = found
+			.iter()
+			.any(|descendant| descendant.is_same_process(&live_pin));
+		let _ = live.kill();
+		let _ = live.wait();
+
+		assert!(
+			covered,
+			"a live child must survive a reference the walk already recorded under its number"
+		);
+		assert!(complete, "stepping past a stale reference leaves nothing out of the walk");
+	}
+
+	/// Identity keying admits what a numeric key rejected, so on its own it
+	/// bounds nothing: reuse can mint a fresh identity for a number the walk
+	/// already recorded, that identity's children can do the same, and the
+	/// recursion never has to stop. The cap is what puts the numeric key's
+	/// bound back.
+	///
+	/// Pins the cap rather than the unbounded walk itself: the walk only fails
+	/// to terminate under repeated real pid reuse, which cannot be asked for.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn descendant_walk_bounds_the_identities_it_follows_per_pid() {
+		let (corpse, live_pin, mut live) = recycled_pid_pair();
+		let self_pid = i32::try_from(std::process::id()).expect("self pid fits in i32");
+		let harness = Process::from_pid(self_pid).expect("pin the harness");
+		let filled = stale_generations(&corpse, &live_pin, platform::Process::IDENTITIES_PER_PID);
+		let under = stale_generations(&corpse, &live_pin, platform::Process::IDENTITIES_PER_PID - 1);
+
+		let (at_cap, complete_at_cap) = harness.descendants_after_seeing(filled);
+		let (below_cap, complete_below_cap) = harness.descendants_after_seeing(under);
+		let followed_at_cap = at_cap
+			.iter()
+			.any(|descendant| descendant.is_same_process(&live_pin));
+		let followed_below_cap = below_cap
+			.iter()
+			.any(|descendant| descendant.is_same_process(&live_pin));
+		let _ = live.kill();
+		let _ = live.wait();
+
+		// The subtree the cap drops is the whole point of reporting it: a caller
+		// that pins this set is about to terminate it and call the tree gone.
+		assert!(!complete_at_cap, "a walk that spent the cap must not answer as a whole tree");
+		assert!(complete_below_cap, "a walk that stayed inside the cap left nothing out");
+
+		assert!(
+			!followed_at_cap,
+			"a number that has already spent its identities must stop the walk rather than extend it"
+		);
+		assert!(
+			followed_below_cap,
+			"the cap must not cost the live replacement the identity key exists to keep"
+		);
+	}
+
+	/// The graceful wave's own early return is a third reader of the walk's
+	/// report, and the only one that never reaches the hard wave's conjunction
+	/// or its rescan: a set that was short to begin with going quiet says
+	/// nothing about what it left out.
+	#[cfg(target_os = "linux")]
+	#[tokio::test]
+	async fn a_partial_walk_is_not_a_completed_graceful_termination() {
+		let mut child = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn sleep");
+		let root =
+			Process::from_pid(i32::try_from(child.id()).expect("child pid")).expect("pin child");
+		let plan = |descendants_complete: bool| TerminationPlan {
+			root: root.clone(),
+			process_group: None,
+			group_leader: None,
+			descendants: Vec::new(),
+			descendants_complete,
+			protected: host_protected_pids(),
+			live_at_capture: true,
+		};
+
+		// A graceful budget, so the wave can return before the hard one runs.
+		let truncated = plan(false)
+			.terminate(200, 5_000, CancelToken::default())
+			.await;
+		let whole = plan(true)
+			.terminate(200, 5_000, CancelToken::default())
+			.await;
+		let _ = child.kill();
+		let _ = child.wait();
+
+		assert!(
+			!truncated.expect("graceful terminate on a truncated walk"),
+			"a graceful wave over a partial walk must not report the tree gone"
+		);
+		assert!(
+			whole.expect("graceful terminate on a whole walk"),
+			"a complete walk over an exited tree is a completed termination"
+		);
+	}
+
+	/// A live child dropped by a failing validation must be a gap, and one that
+	/// merely exited must not. The second half is the one with a reachable
+	/// trigger, and it is the half that decides whether the signal is usable:
+	/// an ordinary tree churns constantly, so reading churn as a gap would make
+	/// every termination refuse.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_child_that_exited_under_the_walk_is_not_a_gap() {
+		use std::io::{BufRead, BufReader};
+
+		// A child that reports a grandchild and then exits, leaving the walk to
+		// meet a listed pid that has since gone.
+		let mut child = std::process::Command::new("/bin/sh")
+			.arg("-c")
+			.arg(r"sleep 30 & echo $!; exit 0")
+			.stdout(std::process::Stdio::piped())
+			.spawn()
+			.expect("spawn root");
+		let mut line = String::new();
+		BufReader::new(child.stdout.take().expect("root stdout"))
+			.read_line(&mut line)
+			.expect("read grandchild pid");
+		let grandchild =
+			Process::from_pid(line.trim().parse().expect("grandchild pid")).expect("pin grandchild");
+		child.wait().expect("reap the root");
+
+		let self_pid = i32::try_from(std::process::id()).expect("self pid fits in i32");
+		let harness = Process::from_pid(self_pid).expect("pin the harness");
+		let (_, complete) = harness.signalable_descendants_checked(&host_protected_pids());
+		let _ = grandchild.inner.kill(KILL_SIGNAL);
+
+		assert!(complete, "a walk over a tree whose members are exiting must still answer as whole");
+	}
+
+	/// A child the host will not let us pin is a subtree the walk drops, and
+	/// dropping it silently is what makes a short walk look whole.
+	///
+	/// Starves the descriptor table so `pidfd_open` fails while `/proc/{pid}`
+	/// stays visible — `stat(2)` needs no descriptor — which is the same shape
+	/// as the seccomp and LSM refusals this arm exists for and the only one a
+	/// test can ask for. What is pinned is the classification, not the errno:
+	/// `open_pidfd` discards it, so `EMFILE` is only the means of producing a
+	/// refusal. Runs the candidate through the validation directly, because a
+	/// whole walk reads `/proc/<pid>/stat` before it gets here and would report
+	/// its own arm first under the same starvation.
+	///
+	/// Process-wide state: safe under `cargo nextest`, which gives every test
+	/// its own process. Do not move this to a thread-per-test runner.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_child_the_host_will_not_let_us_pin_is_a_gap() {
+		let mut child = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn sleep");
+		let child_pid = i32::try_from(child.id()).expect("child pid fits in i32");
+		let self_pid = i32::try_from(std::process::id()).expect("self pid fits in i32");
+		let harness = Process::from_pid(self_pid).expect("pin the harness");
+
+		let (collected, whole) = harness.validate_child(child_pid);
+
+		let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+		// SAFETY: `getrlimit` writes one `rlimit` through the pointer given and
+		// reads nothing else.
+		let queried = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) };
+		let restore = limit;
+		limit.rlim_cur = 64;
+		// SAFETY: `setrlimit` reads one `rlimit` through the pointer given. Lowering
+		// the soft limit below the hard limit is always permitted.
+		let lowered = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) };
+		let mut held = Vec::new();
+		loop {
+			// SAFETY: `open` reads the NUL-terminated literal and returns a new
+			// descriptor this loop owns and closes below.
+			let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+			if fd < 0 {
+				break;
+			}
+			held.push(fd);
+		}
+		let starved = harness.validate_child(child_pid);
+		for fd in held {
+			// SAFETY: every descriptor here came from the `open` above and is closed
+			// exactly once.
+			unsafe { libc::close(fd) };
+		}
+		// SAFETY: restores the soft limit read at entry, which the hard limit admits.
+		unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const restore) };
+
+		let _ = child.kill();
+		let _ = child.wait();
+		// The same arm from the other side: unpinnable because it is gone, which
+		// is churn and must leave the walk whole.
+		let reaped = harness.validate_child(child_pid);
+
+		assert_eq!(queried, 0, "the descriptor limit must be readable");
+		assert_eq!(lowered, 0, "the descriptor limit must be lowerable");
+		assert!(whole, "a child that can be pinned leaves nothing out");
+		assert_eq!(collected.len(), 1, "and is collected");
+		assert!(
+			!starved.1,
+			"a live child the host refuses to pin is a subtree the walk cannot see, not an absence"
+		);
+		assert!(starved.0.is_empty(), "and it is not collected either");
+		assert!(
+			reaped.1,
+			"a child unpinnable because it has gone is churn, and leaves the walk whole"
+		);
+		assert!(reaped.0.is_empty(), "and is not a target");
+	}
+
+	/// A walk that could not read `/proc` at all has to say so, and every
+	/// consumer above it has to act on that.
+	///
+	/// The same descriptor starvation as above, but aimed one level up: a whole
+	/// walk reads `/proc/<pid>/stat` for its own root before it enumerates
+	/// anything, so a starved table stops it there, with `/proc/<pid>` still
+	/// visible. That reaches the producer's live-root arm, its propagation into
+	/// the recursion, and the public refusal built on both.
+	///
+	/// Process-wide state: safe under `cargo nextest`, which gives every test
+	/// its own process. Do not move this to a thread-per-test runner.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_walk_that_cannot_read_proc_refuses_rather_than_answering_short() {
+		let mut child = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn sleep");
+		let self_pid = i32::try_from(std::process::id()).expect("self pid fits in i32");
+		let harness = Process::from_pid(self_pid).expect("pin the harness");
+
+		let (_, whole) = harness.signalable_descendants_checked(&host_protected_pids());
+		let allowed = harness.descendants().is_ok();
+
+		let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+		// SAFETY: `getrlimit` writes one `rlimit` through the pointer given.
+		unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) };
+		let restore = limit;
+		limit.rlim_cur = 64;
+		// SAFETY: `setrlimit` reads one `rlimit` through the pointer given; lowering
+		// the soft limit below the hard limit is always permitted.
+		unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) };
+		let mut held = Vec::new();
+		loop {
+			// SAFETY: `open` reads the NUL-terminated literal and returns a new
+			// descriptor this loop owns and closes below.
+			let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+			if fd < 0 {
+				break;
+			}
+			held.push(fd);
+		}
+		let enumerated = harness.inner.children_checked().1;
+		let starved = harness.signalable_descendants_checked(&host_protected_pids());
+		let refused = harness.descendants().is_err();
+		for fd in held {
+			// SAFETY: every descriptor here came from the `open` above and is closed
+			// exactly once.
+			unsafe { libc::close(fd) };
+		}
+		// SAFETY: restores the soft limit read at entry, which the hard limit admits.
+		unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const restore) };
+
+		let _ = child.kill();
+		let _ = child.wait();
+
+		assert!(whole, "an unstarved walk of a live tree is whole");
+		assert!(allowed, "and is handed to the caller");
+		assert!(!enumerated, "a root whose own `/proc` will not read is a gap at the producer");
+		assert!(!starved.1, "which the walk above it carries rather than dropping");
+		assert!(refused, "and the public walk refuses rather than answering short");
+	}
+
+	/// The same boundary at the arm that fires constantly: an unreaped child is
+	/// listed, pinnable, and not running. It needs no signal and has already
+	/// handed its own children on, so leaving it out costs nothing — but
+	/// counting it as a gap would make a walk partial every time an ordinary
+	/// tree loses a member, which is always.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn an_unreaped_child_is_not_a_gap() {
+		let mut child = std::process::Command::new("/bin/sh")
+			.arg("-c")
+			.arg("exit 0")
+			.spawn()
+			.expect("spawn a child that exits at once");
+		let pinned =
+			Process::from_pid(i32::try_from(child.id()).expect("child pid")).expect("pin child");
+		// Deliberately not reaped: the zombie is still listed as our child.
+		let mut zombie = false;
+		for _ in 0..500 {
+			if pinned.status() == ProcessStatus::Exited {
+				zombie = true;
+				break;
+			}
+			std::thread::sleep(Duration::from_millis(10));
+		}
+
+		let self_pid = i32::try_from(std::process::id()).expect("self pid fits in i32");
+		let harness = Process::from_pid(self_pid).expect("pin the harness");
+		let (descendants, complete) = harness.signalable_descendants_checked(&host_protected_pids());
+		let listed = descendants
+			.iter()
+			.any(|descendant| descendant.pid() == pinned.pid());
+		child.wait().expect("reap the child");
+
+		assert!(zombie, "the child must have exited before the walk runs");
+		assert!(complete, "an unreaped child is churn, not a subtree the walk could not see");
+		assert!(!listed, "and it is not a signal target either");
+	}
+
+	/// The other half of the completeness signal, and the half with a reachable
+	/// trigger: a process that has exited has no reachable children, and saying
+	/// so is a whole answer rather than a gap. Reading ordinary churn as a gap
+	/// would make every termination of an already-exited root refuse, which
+	/// costs the signal all of its meaning.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_reaped_process_reports_no_children_and_no_gap() {
+		let mut child = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn sleep");
+		let pinned =
+			Process::from_pid(i32::try_from(child.id()).expect("child pid")).expect("pin child");
+		child.kill().expect("kill the child");
+		child.wait().expect("reap the child");
+
+		let (children, enumerated) = pinned.inner.children_checked();
+		let (descendants, complete) = pinned.signalable_descendants_checked(&host_protected_pids());
+
+		assert!(children.is_empty(), "a reaped process has no reachable children");
+		assert!(enumerated, "and having none is an answer, not a failure to look");
+		assert!(descendants.is_empty(), "nor any reachable descendants");
+		assert!(complete, "so a walk rooted at it is whole rather than partial");
+	}
+
+	/// The mirror of the defect the identity key fixed: charging the cap for a
+	/// process already recorded reports a walk partial that missed nothing.
+	/// A re-sighting costs the number nothing — that process is in `out` and
+	/// its children were walked from it.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_resighted_identity_does_not_spend_the_per_pid_budget() {
+		let (corpse, live_pin, mut live) = recycled_pid_pair();
+		let self_pid = i32::try_from(std::process::id()).expect("self pid fits in i32");
+		let harness = Process::from_pid(self_pid).expect("pin the harness");
+		// The number's budget is full, and the live child's own identity is one of
+		// the entries holding it — exactly what a walk that already recorded the
+		// child and meets it again looks like.
+		let mut recorded =
+			stale_generations(&corpse, &live_pin, platform::Process::IDENTITIES_PER_PID - 1);
+		recorded.push(live_pin.clone());
+
+		let (found, complete) = harness.descendants_after_seeing(recorded);
+		let followed = found
+			.iter()
+			.any(|descendant| descendant.is_same_process(&live_pin));
+		let _ = live.kill();
+		let _ = live.wait();
+
+		assert!(complete, "meeting a process the walk already recorded leaves nothing out");
+		assert!(!followed, "and it is not collected twice");
+	}
+
+	/// The refusal that stands between a short walk and a waiter reporting the
+	/// tree gone. Its two siblings — the walk saying so, and a plan conjoining
+	/// it — are covered separately, and this PR is a record of one reader of a
+	/// signal being fixed while its siblings were not.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_partial_walk_cannot_build_a_hard_kill_wave() {
+		let mut child = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn sleep");
+		let root =
+			Process::from_pid(i32::try_from(child.id()).expect("child pid")).expect("pin child");
+		let protected = host_protected_pids();
+
+		// Refused first: it bails before signalling anything, so the root is still
+		// there for the accepting call to prove the walk's own report is the only
+		// difference between the two.
+		let refused = root.hard_kill_walked_tree(Vec::new(), false, &protected);
+		let accepted = root.hard_kill_walked_tree(Vec::new(), true, &protected);
+		let _ = child.kill();
+		let _ = child.wait();
+
+		let refusal = match refused {
+			Ok(_) => panic!("a partial walk must not build a wave"),
+			Err(error) => error.to_string(),
+		};
+		assert!(
+			refusal.contains("could not be completed"),
+			"the refusal must name the incomplete walk, got: {refusal}"
+		);
+		assert!(accepted.is_ok(), "a walk that finished still builds its wave");
+	}
+
+	/// A plan whose descendant walk stopped short cannot report a completed
+	/// termination, for the same reason an unattributable group cannot: the
+	/// process the walk left out is in neither the signalled set nor the wait,
+	/// so the ones that did go quiet say nothing at all about it.
+	#[cfg(target_os = "linux")]
+	#[tokio::test]
+	async fn a_partial_descendant_walk_is_not_a_completed_termination() {
+		let mut child = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn sleep");
+		let root =
+			Process::from_pid(i32::try_from(child.id()).expect("child pid")).expect("pin child");
+		let plan = |descendants_complete: bool| TerminationPlan {
+			root: root.clone(),
+			process_group: None,
+			group_leader: None,
+			descendants: Vec::new(),
+			descendants_complete,
+			protected: host_protected_pids(),
+			live_at_capture: true,
+		};
+
+		let truncated = plan(false)
+			.terminate(-1, 5_000, CancelToken::default())
+			.await;
+		// The same plan over the same, now-dead root: whatever the walk reported is
+		// the only thing separating these two answers.
+		let whole = plan(true)
+			.terminate(-1, 5_000, CancelToken::default())
+			.await;
+		let _ = child.kill();
+		let _ = child.wait();
+
+		assert!(
+			!truncated.expect("terminate on a truncated walk"),
+			"a termination built on a partial walk must not report the tree gone"
+		);
+		assert!(
+			whole.expect("terminate on a whole walk"),
+			"a complete walk over an exited tree is a completed termination"
+		);
+	}
+
+	/// The spawn registry records one pinned handle per spawn, so a run that
+	/// outlives its own short-lived children records the corpse and, later, the
+	/// live process that took its number. Keyed on the pid the live one never
+	/// enters the target set, and no cancellation wave reaches it.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn termination_targets_keep_the_live_holder_of_a_reused_pid() {
+		let (corpse, live_pin, mut live) = recycled_pid_pair();
+
+		let mut targets = TerminationTargets::new();
+		targets.add_process(corpse.clone());
+		targets.add_process(live_pin.clone());
+		// The same reference twice is still one target: identity, not arrival.
+		targets.add_process(corpse);
+		let covered = targets
+			.processes
+			.iter()
+			.any(|target| target.is_same_process(&live_pin));
+		let recorded = targets.processes.len();
+		let _ = live.kill();
+		let _ = live.wait();
+
+		assert!(covered, "the live holder of a reused pid must be a termination target");
+		assert_eq!(recorded, 2, "one target per identity, and the corpse is not recorded twice");
 	}
 
 	/// The numeric group signals are guarded by this predicate, so it has to
@@ -3540,7 +4456,8 @@ mod tests {
 		// Waited for rather than assumed: it exits on its own schedule.
 		let mut reparented = false;
 		for _ in 0..200 {
-			if !root.descendants().iter().any(|d| d.pid() == survivor.pid()) {
+			let walked = root.descendants().expect("walk the leader's descendants");
+			if !walked.iter().any(|d| d.pid() == survivor.pid()) {
 				reparented = true;
 				break;
 			}
@@ -3755,7 +4672,8 @@ mod tests {
 		let mut found = false;
 		for _ in 0..40 {
 			if harness
-				.live_descendants()
+				.live_descendants_checked()
+				.0
 				.iter()
 				.any(|descendant| descendant.pid() == child_pid)
 			{
@@ -3770,7 +4688,7 @@ mod tests {
 
 		assert!(
 			found,
-			"freshly spawned child pid {child_pid} must appear in `live_descendants` so the \
+			"freshly spawned child pid {child_pid} must appear in the descendant walk so the \
 			 cancellation cleanup can reach it; this regressed on macOS when the walk relied on the \
 			 broken `proc_listchildpids`",
 		);

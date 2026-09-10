@@ -6,6 +6,25 @@
 
 - Added `Process.killTreeAndWait()` and `Process.killOwnGroupAndWait()` to await hard termination of descendants, including after the root exits. `killOwnGroupAndWait()` rejects when the leader's pid has since been reused, so a recycled group is never signalled.
 
+### Fixed
+
+- Fixed hard termination dropping the live holder of a reused pid. The kill wave and the cancellation set's pre-pinned targets deduplicated by pid, so a process reaped mid-wave whose number went to a replacement kept the pinned corpse and lost the replacement — which was then neither signalled nor waited for, while the wave reported the tree gone on the strength of the process it already knew had exited. Both key on process identity now. A target recorded as a bare pid is unchanged, since a number is all it ever carried.
+- Fixed the Linux descendant walk skipping a live descendant that had taken a reaped sibling's pid. That walk re-reads `/proc` at each level rather than working from one snapshot, so a number seen earlier need not still mean the same process; it now keys on process identity, bounded by a cap on how many identities it will follow under any one number so that the key change cannot cost the walk its termination guarantee.
+- A descendant walk now reports whether it saw everything it should have, and the consumers that reason about a whole tree act on it: `Process.descendants()` throws instead of returning a short walk that looks like a whole one, and process-tree termination reports incomplete rather than success, on the graceful wave as well as the hard one.
+- On Linux a walk counts as short whenever it could not look, not only when it ran out of budget: the per-number identity cap, a `/proc` directory, `children` file, `stat` or `status` that is present but unreadable, and a listed child that cannot be pinned. A process-group scan reports the same way when a listed member cannot be pinned. Anything that merely vanished mid-walk stays ordinary churn — an exited or unreaped child is not a gap — because reading churn as a gap would make every ordinary termination refuse.
+- Fixed process group 1 passing the liveness check that several ownership decisions consult. `kill(-1, …)` is the broadcast form rather than group one, so it answered yes for almost any caller.
+- A spawn whose handle could not be opened at all is counted rather than dropped, since a child that was never pinned cannot be safely signalled later and a target set that omits it must not read as one with nothing to do. The PTY child is now pinned when it is spawned and terminated through that handle rather than through its number.
+
+### Known gaps
+
+Completeness reporting is Linux-only. **macOS and Windows descendant walks and process-table scans still report every walk as whole**, exactly as they did before this change — they are not regressed, and they are also not fixed. Deferred to a follow-up that can run on those hosts, where the work is verifiable rather than inspected:
+
+- macOS and Windows walks cannot report a failed or truncated process-table snapshot, an entry that could not be read, or a process that could not be opened.
+- Both platforms build the table from bare pids and reopen them when the walk collects, so a listed process that exits and has its number reused is replaced by whoever holds it now.
+- `Process::from_path` matches a path and then opens the number, on all three platforms, with the same reuse window.
+- `killTree` reports a count and no completeness verdict, and the shell's background-job cleanup still records a bare pid because the job record it reads from carries only a number.
+- `kill` and `pkill` derive the ancestor chain they refuse to signal from an unchecked process-table snapshot, so a short snapshot can leave an ancestor unprotected; Windows `kill -0` answers process existence from the same snapshot.
+
 ## [18.1.15] - 2026-09-08
 
 ### Fixed

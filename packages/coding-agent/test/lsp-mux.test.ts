@@ -12,7 +12,7 @@ import {
 	type MuxConnectParams,
 	type MuxConnectResult,
 } from "../src/lsp/mux/protocol";
-import { groupOwnership, LspMuxServer, TERMINATION_BUDGET_MS } from "../src/lsp/mux/server";
+import { groupOwnership, LspMuxServer, RETAINED_STOP_FAILURES, TERMINATION_BUDGET_MS } from "../src/lsp/mux/server";
 import { ChildProcess } from "@oh-my-pi/pi-utils/ptree";
 
 interface RpcMessage {
@@ -526,7 +526,11 @@ describe("LspMuxServer", () => {
 				} finally {
 					spy.mockRestore();
 					killFixtureHelper(helperPid);
-					// The memoized rejection would resurface in afterEach's own shutdown.
+					// Unconditional, because a body that failed before its own shutdown
+					// would otherwise hand afterEach a fresh mux and leave this one
+					// listening into the tests that follow. Already settled when the
+					// body did get there, since shutdown memoizes.
+					await server.shutdown().catch(() => {});
 					server = new LspMuxServer();
 				}
 			},
@@ -630,14 +634,15 @@ describe("LspMuxServer", () => {
 				await withTimeout(sweeping.promise, "helper sweep", 6_000);
 				const socket = net.connect(socketPath);
 				late = socket;
-				const closed = new Promise<void>(resolve => socket.once("close", () => resolve()));
-				await new Promise<void>((resolve, reject) => {
-					socket.once("connect", () => resolve());
-					socket.once("error", reject);
-				});
+				const closed = Promise.withResolvers<void>();
+				socket.once("close", () => closed.resolve());
+				const connected = Promise.withResolvers<void>();
+				socket.once("connect", () => connected.resolve());
+				socket.once("error", error => connected.reject(error));
+				await connected.promise;
 				const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: MUX_CONNECT_METHOD, params: connectParams });
 				socket.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
-				await withTimeout(closed, "late connection refused", 4_000);
+				await withTimeout(closed.promise, "late connection refused", 4_000);
 				release.resolve();
 				await withTimeout(shutdown, "shutdown past a late connection", 6_000);
 				expect(server.sessionCount).toBe(0);
@@ -903,9 +908,190 @@ describe("LspMuxServer", () => {
 				try {
 					process.kill(pid, "SIGKILL");
 				} catch {}
+				// The restart's termination failed, so this shutdown owes a report on
+				// it. Asserted rather than swallowed, for the same reason.
+				await expect(server.shutdown()).rejects.toThrow("LSP mux shutdown incomplete");
+				server = new LspMuxServer();
 			}
 		},
 		10_000,
+	);
+
+	for (const trigger of ["restart", "initialize"] as const) {
+		it.skipIf(process.platform === "win32")(
+			trigger === "restart"
+				? "reports a restart's failed termination to a later shutdown"
+				: "reports a failed initialize's failed termination to a later shutdown",
+			async () => {
+				// Both of these kill a server outside any stop, and both reach it from
+				// a handler that only logs the rejection — the session message pump for
+				// one, the server reader loop for the other. The root's own exit then
+				// retires the server, so by the time anyone calls shutdown there is no
+				// tracked server and no in-flight stop, and unless the failure itself
+				// was kept nothing is left to say a helper outlived it.
+				const helperFile = path.join(tmpDir, "helper.pid");
+				connectParams.env =
+					trigger === "restart"
+						? { TEST_LSP_HELPER_PID_FILE: helperFile }
+						: { TEST_LSP_HELPER_PID_FILE: helperFile, TEST_LSP_INITIALIZE_ERROR: "1" };
+				const { client, connected } = await link();
+				const pid = connected.pid;
+				if (pid === undefined) throw new Error("Mux did not report the language-server pid");
+				const helperPid = await readPid(helperFile);
+				const rejected = Promise.withResolvers<void>();
+				// The root dies, so its exit is what retires the server, while the
+				// termination still reports that it did not finish — which is exactly
+				// the state that leaves the fixture's helper running past it.
+				const spy = spyOn(ChildProcess.prototype, "killAndWait").mockImplementation(
+					async function (this: ChildProcess) {
+						if (this.pid !== pid) return;
+						try {
+							process.kill(pid, "SIGKILL");
+						} catch {}
+						rejected.resolve();
+						throw new Error(`Process tree termination timed out: ${pid}`);
+					},
+				);
+				try {
+					if (trigger === "restart") {
+						await initialize(client);
+						client.notify(MUX_RESTART_METHOD);
+					} else {
+						await expect(client.request("initialize", initializeParams())).rejects.toThrow(
+							"fake initialize failure",
+						);
+					}
+					await withTimeout(rejected.promise, `failed ${trigger} termination`, 4_000);
+					await pollUntil(() => Promise.resolve(server.serverKeys.length === 0), "late-exit cleanup", 4_000);
+					expect(processRunning(helperPid)).toBe(true);
+					await expect(server.shutdown()).rejects.toThrow("LSP mux shutdown incomplete");
+				} finally {
+					spy.mockRestore();
+					killFixtureHelper(helperPid);
+					// Unconditional, because a body that failed before its own shutdown
+					// would otherwise hand afterEach a fresh mux and leave this one
+					// listening into the tests that follow. Already settled when the
+					// body did get there, since shutdown memoizes.
+					await server.shutdown().catch(() => {});
+					server = new LspMuxServer();
+				}
+			},
+			15_000,
+		);
+	}
+
+	it.skipIf(process.platform === "win32")(
+		"fails a stop that could not open a reference to the server root",
+		async () => {
+			// No reference is the same outcome as a walk that stopped short, and has
+			// to be read that way rather than as a subtree with nothing in it: the
+			// pin runs while the server is expected alive, so failing to open one
+			// means a refused `pidfd_open` or a root that died into the gap, and in
+			// both the helpers it may have left are past reach rather than absent.
+			const { client, connected } = await link();
+			const pid = connected.pid;
+			if (pid === undefined) throw new Error("Mux did not report the language-server pid");
+			await initialize(client);
+			const fromPid = Process.fromPid;
+			const spy = spyOn(Process, "fromPid").mockImplementation((target: number) =>
+				target === pid ? null : fromPid.call(Process, target),
+			);
+			try {
+				await expect(server.shutdown()).rejects.toThrow("LSP mux shutdown incomplete");
+			} finally {
+				spy.mockRestore();
+				try {
+					process.kill(pid, "SIGKILL");
+				} catch {}
+				await server.shutdown().catch(() => {});
+				server = new LspMuxServer();
+			}
+		},
+		15_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"fails a stop whose helper subtree could not be pinned",
+		async () => {
+			// The walk refuses to hand back a subtree it knows is short, because the
+			// caller pins what it is given and then reports that tree terminated. A
+			// stop that never pinned the subtree has to fail for the same reason one
+			// that failed to sweep it does — what it left behind is unaccounted for
+			// either way — while still giving the server its clean exit.
+			const { client, connected } = await link();
+			const pid = connected.pid;
+			if (pid === undefined) throw new Error("Mux did not report the language-server pid");
+			await initialize(client);
+			const descendants = Process.prototype.descendants;
+			const spy = spyOn(Process.prototype, "descendants").mockImplementation(function (this: Process) {
+				if (this.pid !== pid) return descendants.call(this);
+				throw new Error(`descendant walk of ${pid} could not be completed`);
+			});
+			try {
+				await expect(server.shutdown()).rejects.toThrow("LSP mux shutdown incomplete");
+				// The handshake still ran: refusing to pin must not cost the server
+				// the chance to exit on its own terms.
+				expect(processRunning(pid)).toBe(false);
+			} finally {
+				spy.mockRestore();
+				await server.shutdown().catch(() => {});
+				server = new LspMuxServer();
+			}
+		},
+		15_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"caps retained termination failures without understating how many there were",
+		async () => {
+			// Anything that can make one termination fail can make the next one fail
+			// too, and a mux that is never shut down would hold a settled promise per
+			// failure forever. Capping what is kept must not cap what is reported:
+			// the count past the cap still has to reach the shutdown.
+			const failures = RETAINED_STOP_FAILURES + 2;
+			const killAndWait = ChildProcess.prototype.killAndWait;
+			const doomed = new Set<number>();
+			const spy = spyOn(ChildProcess.prototype, "killAndWait").mockImplementation(
+				async function (this: ChildProcess, reason, gracefulMs) {
+					if (!doomed.has(this.pid)) return killAndWait.call(this, reason, gracefulMs);
+					try {
+						process.kill(this.pid, "SIGKILL");
+					} catch {}
+					throw new Error(`Process tree termination timed out: ${this.pid}`);
+				},
+			);
+			try {
+				for (let attempt = 0; attempt < failures; attempt++) {
+					// A fresh key per iteration, so each restart kills a server of its
+					// own: one memoized termination per server is one recorded failure.
+					connectParams.env = { TEST_LSP_ATTEMPT: String(attempt) };
+					const { client, connected } = await link();
+					if (connected.pid === undefined) throw new Error("Mux did not report the language-server pid");
+					doomed.add(connected.pid);
+					client.notify(MUX_RESTART_METHOD);
+					await pollUntil(
+						() => Promise.resolve(!server.serverKeys.includes(connected.key)),
+						`restart ${attempt} retirement`,
+						6_000,
+					);
+				}
+				const error = await server.shutdown().then(
+					() => undefined,
+					(thrown: unknown) => thrown,
+				);
+				expect(error).toBeInstanceOf(AggregateError);
+				const aggregate = error as AggregateError;
+				expect(aggregate.errors).toHaveLength(RETAINED_STOP_FAILURES + 1);
+				expect(String(aggregate.errors.at(-1))).toContain(
+					`withheld ${failures - RETAINED_STOP_FAILURES} further termination failures`,
+				);
+			} finally {
+				spy.mockRestore();
+				await server.shutdown().catch(() => {});
+				server = new LspMuxServer();
+			}
+		},
+		30_000,
 	);
 
 	for (const disconnectFirst of [false, true]) {
@@ -995,6 +1181,13 @@ describe("LspMuxServer", () => {
 				terminationSpy.mockRestore();
 				timerSpy.mockRestore();
 				await pollUntil(() => Promise.resolve(server.serverKeys.length === 0), "termination cleanup");
+				// The third caller that kills a server outside a stop, and the only
+				// coverage of it: session cleanup failed here, so the termination it
+				// ran has to reach this shutdown rather than be logged and forgotten.
+				// Asserted rather than swallowed — a teardown that accepts either
+				// answer passes just as well with the tracking removed.
+				await expect(server.shutdown()).rejects.toThrow("LSP mux shutdown incomplete");
+				server = new LspMuxServer();
 			}
 		},
 		6_000,

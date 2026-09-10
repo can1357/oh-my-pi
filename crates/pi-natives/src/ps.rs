@@ -13,7 +13,9 @@ use napi::{
 };
 use napi_derive::napi;
 use pi_shell::process::{self as core_process, ProcessStatus as CoreProcessStatus};
-pub use pi_shell::process::{KILL_SIGNAL, TERM_SIGNAL, TerminationTargets, kill_process_group};
+pub use pi_shell::process::{
+	KILL_SIGNAL, Process as CoreProcess, TERM_SIGNAL, TerminationTargets, kill_process_group,
+};
 
 use crate::{js::into_string, task};
 
@@ -233,14 +235,26 @@ impl Process {
 	/// Unlike [`Process::children`] this is the whole subtree, which is what a
 	/// caller pinning a tree for later termination needs: once the root exits
 	/// its survivors are reparented out of reach of a walk rooted at its pid.
+	///
+	/// Throws rather than returning a subtree it knows is partial: the caller
+	/// pins what it is handed and later reports that tree terminated, so a
+	/// short walk passed off as an ordinary one is a sweep that misses a
+	/// process and says nothing about it.
+	///
+	/// Linux pins each reference at the point of listing. macOS and Windows
+	/// build the underlying table from bare pids and reopen them when the walk
+	/// collects, so a listed process that exits and has its number reused in
+	/// between is replaced by whoever holds it now — closing that is part of the
+	/// platform-enumeration follow-up, which can run on those hosts.
 	#[napi]
-	pub fn descendants(&self) -> Vec<Process> {
-		self
+	pub fn descendants(&self) -> Result<Vec<Process>> {
+		Ok(self
 			.inner
 			.descendants()
+			.map_err(|err| napi::Error::from_reason(err.to_string()))?
 			.into_iter()
 			.map(Self::from_inner)
-			.collect()
+			.collect())
 	}
 
 	/// Direct children of this process as stable process references.

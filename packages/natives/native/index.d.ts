@@ -326,6 +326,11 @@ export declare class Process {
    * Unlike [`Process::children`] this is the whole subtree, which is what a
    * caller pinning a tree for later termination needs: once the root exits
    * its survivors are reparented out of reach of a walk rooted at its pid.
+   *
+   * Throws rather than returning a subtree it knows is partial: the caller
+   * pins what it is handed and later reports that tree terminated, so a
+   * short walk passed off as an ordinary one is a sweep that misses a
+   * process and says nothing about it.
    */
   descendants(): Array<Process>
   /** Direct children of this process as stable process references. */

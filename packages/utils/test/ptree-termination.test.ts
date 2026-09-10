@@ -1,9 +1,10 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
-import { spawn } from "@oh-my-pi/pi-utils/ptree";
+import { isEnoent } from "@oh-my-pi/pi-utils";
+import { ChildProcess, spawn } from "@oh-my-pi/pi-utils/ptree";
 
 /**
  * Spin until the pinned root has exited, without yielding to the loop.
@@ -13,7 +14,7 @@ import { spawn } from "@oh-my-pi/pi-utils/ptree";
  * handle rather than reopening the pid keeps the loop from allocating a pidfd
  * per iteration.
  */
-function spinUntilUnreapedExit(child: ReturnType<typeof spawn>): void {
+function spinUntilUnreapedExit(child: ChildProcess): void {
 	const root = Process.fromPid(child.pid);
 	if (!root) throw new Error(`Root ${child.pid} vanished before it could be pinned`);
 	const deadline = Date.now() + 5_000;
@@ -26,7 +27,16 @@ function spinUntilUnreapedExit(child: ReturnType<typeof spawn>): void {
 async function readReportedPid(file: string): Promise<number> {
 	const deadline = Date.now() + 5_000;
 	for (;;) {
-		const reported = fs.existsSync(file) ? Number.parseInt(fs.readFileSync(file, "utf8").trim() || "0", 10) : 0;
+		// One read, and a missing file is one of the outcomes it polls for: asking
+		// whether the file exists and then reading it lets the answer change in
+		// between, which throws out of a loop whose job is to keep waiting.
+		let text = "";
+		try {
+			text = await Bun.file(file).text();
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+		const reported = Number.parseInt(text.trim() || "0", 10);
 		if (reported > 0) return reported;
 		if (Date.now() > deadline) throw new Error(`Descendant never reported its pid to ${file}`);
 		await Bun.sleep(10);
@@ -88,7 +98,7 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 				}
 				expect(descendant.status()).toBe(ProcessStatus.Running);
 
-				fs.writeFileSync(goFile, "");
+				await Bun.write(goFile, "");
 				spinUntilUnreapedExit(child);
 				expect(child.proc.exitCode).toBeNull();
 				await child.killAndWait(undefined, -1);
@@ -102,8 +112,8 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 				descendant?.killTree(9);
 				child.kill(undefined, -1);
 				await reader?.cancel();
-				fs.rmSync(goFile, { force: true });
-				fs.rmSync(pidFile, { force: true });
+				await fs.rm(goFile, { force: true });
+				await fs.rm(pidFile, { force: true });
 			}
 		});
 	}
@@ -263,6 +273,82 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 			}
 		},
 	);
+
+	it.skipIf(process.platform === "win32")("never reports a termination it had no reference to attempt", async () => {
+		// A host that refuses `pidfd_open`, or has no `/proc`, hands kill() nothing
+		// to signal through while the child is still running. Awaiting only the
+		// root's own exit promise there reports whatever the child does next as the
+		// termination's own outcome: success if it happens to exit, and otherwise
+		// no answer at all.
+		const child = spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"]);
+		const fromPid = Process.fromPid;
+		const spy = spyOn(Process, "fromPid").mockImplementation((pid: number) =>
+			pid === child.pid ? null : fromPid.call(Process, pid),
+		);
+		try {
+			// Raced against a bound, because the failure this covers is as much "no
+			// answer" as "the wrong answer": with nothing signalled and nothing
+			// rejected, the call waits on an exit that is never coming.
+			const outcome = await Promise.race([
+				child.killAndWait(undefined, -1).then(
+					() => "reported success",
+					(error: unknown) => String(error),
+				),
+				Bun.sleep(2_000).then(() => "never settled"),
+			]);
+			expect(outcome).toContain("Process tree termination unattempted");
+			expect(child.proc.exitCode).toBeNull();
+		} finally {
+			spy.mockRestore();
+			child.kill(undefined, -1);
+			await child.proc.exited;
+		}
+	});
+
+	it.skipIf(process.platform === "win32")("never reports success for a detached group it could not pin", async () => {
+		// A detached child leads a group that outlives it, so its exit says
+		// nothing about the group. If the leader could not be pinned when it was
+		// spawned — a host that refuses `pidfd_open` — nothing can reach that
+		// group afterwards, and the root going away must not read as the tree
+		// going away.
+		const fromPid = Process.fromPid;
+		let child: ChildProcess | undefined;
+		const spy = spyOn(Process, "fromPid").mockImplementation((pid: number) =>
+			child === undefined ? null : fromPid.call(Process, pid),
+		);
+		let descendant: Process | null = null;
+		try {
+			// The spy answers null while the constructor runs, so the leader is
+			// never pinned; it answers normally afterwards so the test can watch.
+			child = spawn(["/bin/sh", "-c", "sleep 30 2>/dev/null & echo $!"], { detached: true });
+			const reader = child.stdout.getReader();
+			const first = new TextDecoder().decode((await reader.read()).value);
+			await reader.cancel();
+			descendant = fromPid.call(Process, Number.parseInt(first, 10));
+			if (!descendant) throw new Error("Descendant exited before termination");
+			await child.proc.exited;
+
+			const outcome = await child.killAndWait(undefined, -1).then(
+				() => "reported success",
+				(error: unknown) => String(error),
+			);
+			expect(outcome).toContain("Process tree termination unattempted");
+			expect(descendant.status()).toBe(ProcessStatus.Running);
+		} finally {
+			spy.mockRestore();
+			descendant?.killTree(9);
+		}
+	});
+
+	it.skipIf(process.platform === "win32")("reports a child Bun has already reaped as terminated", async () => {
+		// The complement, and the reason the refusal above is not simply "no
+		// terminator": a caller that kills after the root is gone has nothing left
+		// to reach, and every graceful stop in the mux arrives exactly there.
+		const child = spawn(["/bin/sh", "-c", "exit 0"]);
+		await child.proc.exited;
+		expect(Process.fromPid(child.pid)).toBeNull();
+		await child.killAndWait(undefined, -1);
+	});
 
 	for (const failure of ["timeout", "error"] as const) {
 		it(`surfaces native termination ${failure} even after the root exits`, async () => {

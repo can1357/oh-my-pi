@@ -198,6 +198,11 @@ export class ChildProcess<In extends InMask = InMask> {
 	// emptied. Pinning the leader while it is alive is the only evidence that
 	// later separates our group from whoever inherited that number.
 	#groupLeader?: Process;
+	// Set when the constructor needed a pinned root and could not open one.
+	// Distinguishes "there was never anything to pin" from "the pin failed":
+	// only the second means a group or a retained-handle tree exists that
+	// nothing here can ever reach.
+	#unpinnedRoot = false;
 	constructor(
 		readonly proc: PipedSubprocess<In>,
 		readonly exposeStderr: boolean,
@@ -207,9 +212,15 @@ export class ChildProcess<In extends InMask = InMask> {
 	) {
 		this.#terminateGroup = terminateGroup;
 		this.#hardKillTree = hardKillTree;
-		this.#windowsRootProcess = process.platform === "win32" ? (Process.fromPid(proc.pid) ?? undefined) : undefined;
-		this.#groupLeader =
-			terminateGroup && process.platform !== "win32" ? (Process.fromPid(proc.pid) ?? undefined) : undefined;
+		// One open for both, because they are the same handle for the same reason:
+		// a root that has to stay reachable after it exits, either because Windows
+		// has no other way to enumerate its tree or because a detached child leads
+		// a group that outlives it.
+		const needsPinnedRoot = process.platform === "win32" || terminateGroup;
+		const pinnedRoot = needsPinnedRoot ? (Process.fromPid(proc.pid) ?? undefined) : undefined;
+		this.#windowsRootProcess = process.platform === "win32" ? pinnedRoot : undefined;
+		this.#groupLeader = terminateGroup && process.platform !== "win32" ? pinnedRoot : undefined;
+		this.#unpinnedRoot = needsPinnedRoot && pinnedRoot === undefined;
 		if (retainFullStderr) this.#stderrChunks = [];
 		// Eagerly drain stderr into a truncated tail, retaining raw chunks only for explicit full capture.
 		const dec = new TextDecoder();
@@ -408,6 +419,21 @@ export class ChildProcess<In extends InMask = InMask> {
 
 	async killAndWait(reason?: Exception, gracefulMs?: number): Promise<void> {
 		this.kill(reason, gracefulMs);
+		// No terminator at all is not a completed sweep. kill() leaves this unset
+		// while the child is unexited only when no reference to the root could be
+		// opened — a host where `pidfd_open` is refused, or `/proc` is not there —
+		// and awaiting the root's own exit promise then either reports success over
+		// a tree nothing signalled or never settles at all. A child Bun has already
+		// seen exit is the other case and stays a success: its survivors, if any,
+		// were reparented before this call and no handle here can name them.
+		// `killed` alone is not enough to call an unattempted termination a
+		// success. It says the root is gone, and for an ordinary child that also
+		// says its survivors are past reach. A detached child leads a group that
+		// outlives it, and a Windows root's retained handle is what keeps its tree
+		// enumerable — so where the constructor needed that pin and did not get
+		// one, the exit says nothing about what the child left running.
+		if (this.#terminating === undefined && (!this.proc.killed || this.#unpinnedRoot))
+			throw new Error(`Process tree termination unattempted: ${this.pid}`);
 		if ((await this.#terminating) === false) throw new Error(`Process tree termination timed out: ${this.pid}`);
 		await this.proc.exited;
 	}
