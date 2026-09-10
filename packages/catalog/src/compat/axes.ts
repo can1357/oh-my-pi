@@ -233,6 +233,19 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-function-part-id": wire("supportsFunctionPartId", ["google"]),
 
 	// ── wire: shared across surfaces ──
+	/**
+	 * Whether this wire may revise text it has already streamed: bytes
+	 * reclassified out of the visible channel (a leaned-on thinking opener),
+	 * carved into a tool call, reordered by content-block index, or replaced
+	 * wholesale by an authoritative final payload. Unassigned means the wire
+	 * only appends, so the transcript may retire finished lines into native
+	 * scrollback while the turn is still streaming (see
+	 * `AssistantMessageComponent`). Declare `possible` only with a citable
+	 * mechanism: the renderer also verifies published rows every frame and stops
+	 * retiring the block on the first mismatch, so this axis decides where
+	 * mid-stream retirement is attempted, not whether it is safe.
+	 */
+	"stream-revision": wire("streamRevision", [...OAI, "bedrock"], "scalar", ["none", "possible"]),
 	"stream-first-event-timeout-ms": wire("streamFirstEventTimeoutMs", [...OAI, "google"]),
 	"stream-idle-timeout-ms": wire("streamIdleTimeoutMs", [...OAI, "anthropic", "bedrock", "google"]),
 	"strip-image-input": wire("stripImageInput", [...OAI, "anthropic", "google"]),

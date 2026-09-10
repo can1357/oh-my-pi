@@ -427,6 +427,8 @@ export interface OpenAICompat {
 	stripDeepseekSpecialTokens?: boolean;
 	/** Heal leaked chat-template/tool-call/thinking markup from visible content deltas. Default: auto-detected. */
 	streamMarkupHealingPattern?: OpenAIStreamMarkupHealingPattern;
+	/** Whether this wire may revise already-streamed text (`stream-revision` axis). Unassigned: append-only. */
+	streamRevision?: "none" | "possible";
 	/** Treat an empty length-finished stream as a context-window error. Default: auto-detected. */
 	emptyLengthFinishIsContextError?: boolean;
 	/** Normalize tool call ids to OpenAI's 40-character limit. Default: auto-detected. */
@@ -585,6 +587,8 @@ export interface AnthropicCompat {
 export interface BedrockCompat {
 	/** Whether this endpoint accepts no checkpoints, automatic caching, or explicit cachePoint blocks. */
 	promptCacheMode?: "none" | "automatic" | "explicit";
+	/** Whether this wire may revise already-streamed text (`stream-revision` axis). Unassigned: append-only. */
+	streamRevision?: "none" | "possible";
 	/** Whether explicit cachePoint blocks accept `ttl: "1h"`; omitted TTL means Bedrock's 5-minute default. */
 	supportsLongPromptCacheRetention?: boolean;
 	/**
@@ -609,6 +613,8 @@ export interface BedrockCompat {
 /** Fully-resolved Bedrock Converse prompt-cache capabilities, materialized once by `buildModel`. */
 export interface ResolvedBedrockCompat {
 	promptCacheMode: NonNullable<BedrockCompat["promptCacheMode"]>;
+	/** See {@link BedrockCompat.streamRevision}. */
+	streamRevision?: BedrockCompat["streamRevision"];
 	supportsLongPromptCacheRetention: boolean;
 	promptCacheMinimumTokens: number;
 	promptCacheMaximumCheckpoints: number;
@@ -691,6 +697,8 @@ export interface ResolvedOpenAISharedCompat {
 	requiresAssistantContentForToolCalls: boolean;
 	stripDeepseekSpecialTokens: boolean;
 	streamMarkupHealingPattern?: OpenAIStreamMarkupHealingPattern;
+	/** See {@link OpenAICompat.streamRevision}. */
+	streamRevision?: OpenAICompat["streamRevision"];
 	/** See {@link OpenAICompat.streamFirstEventTimeoutMs}. */
 	streamFirstEventTimeoutMs?: number;
 	reasoningDeltasMayBeCumulative: boolean;
@@ -787,6 +795,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "toolSchemaFlavor"
 			| "streamFirstEventTimeoutMs"
 			| "streamIdleTimeoutMs"
+			| "streamRevision"
 			| "cacheControlFormat"
 			| "thinkingKeep"
 			| "strictResponsesPairing"

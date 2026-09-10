@@ -441,21 +441,35 @@ export class TranscriptContainer extends Container {
 			head.state !== "committed" &&
 			head.emitted < head.stableRows.length
 		) {
-			const emittedEnd = head.emitted + 1;
+			// Emit as many finished rows as the overflow needs, in one batch. A
+			// fast stream adds finished rows quicker than one per pressure cycle,
+			// and the live region has to fall back under `room` to stay readable:
+			// rows left behind here are rows dropped from the top of the viewport.
+			const overflow = total - room;
 			const before = this.#renderStablePrefix(head, head.emitted, width);
-			const after = this.#renderStablePrefix(head, emittedEnd, width);
-			if (!isRowPrefix(before, after) || after.length === before.length) {
-				this.#freezeStableRows(head, EMPTY_ROWS, "semantic row render added no suffix");
-				return undefined;
+			let emittedEnd = head.emitted;
+			let rows: readonly string[] = EMPTY_ROWS;
+			while (emittedEnd < head.stableRows.length && rows.length < overflow) {
+				const after = this.#renderStablePrefix(head, emittedEnd + 1, width);
+				if (!isRowPrefix(before, after) || after.length === before.length) {
+					if (emittedEnd === head.emitted) {
+						this.#freezeStableRows(head, EMPTY_ROWS, "semantic row render added no suffix");
+					}
+					break;
+				}
+				rows = after.slice(before.length);
+				emittedEnd += 1;
 			}
-			const batch: HistoryBatch = {
-				id: this.#nextBatchId++,
-				rows: after.slice(before.length),
-				kind: "append",
-			};
-			this.#offered = { batch, kind: "append", entry: this.#frontier, emittedEnd };
-			this.#pinnedFrontier = undefined;
-			return batch;
+			if (emittedEnd > head.emitted) {
+				const batch: HistoryBatch = {
+					id: this.#nextBatchId++,
+					rows,
+					kind: "append",
+				};
+				this.#offered = { batch, kind: "append", entry: this.#frontier, emittedEnd };
+				this.#pinnedFrontier = undefined;
+				return batch;
+			}
 		}
 
 		let end = this.#frontier;
@@ -492,8 +506,10 @@ export class TranscriptContainer extends Container {
 		if (offered === undefined || offered.batch.id !== id) return;
 		if (offered.kind === "append") {
 			const entry = this.#entries[offered.entry];
-			if (entry === undefined || offered.entry !== this.#frontier || offered.emittedEnd !== entry.emitted + 1)
-				return;
+			// The offered end must still extend this entry's emitted prefix: a
+			// stale offer (already-advanced entry) or a retraction (entry reset to
+			// zero with the offer still live) must not move it backwards.
+			if (entry === undefined || offered.entry !== this.#frontier || offered.emittedEnd <= entry.emitted) return;
 			entry.emitted = offered.emittedEnd;
 		} else if (offered.kind === "commit") {
 			for (let index = this.#frontier; index < offered.end; index++) {

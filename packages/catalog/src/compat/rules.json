@@ -5316,7 +5316,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:8",
+				"source": "classes/kimi.kdl:14",
 				"class": "kimi",
 				"providers": [
 					"baseten",
@@ -5343,7 +5343,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:14",
+				"source": "classes/kimi.kdl:20",
 				"class": "kimi",
 				"providers": [
 					"kimi-code",
@@ -5355,7 +5355,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:17",
+				"source": "classes/kimi.kdl:23",
 				"class": "kimi",
 				"providers": [
 					"kimi-code",
@@ -5367,7 +5367,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:23",
+				"source": "classes/kimi.kdl:29",
 				"class": "kimi",
 				"providers": [
 					"aiand",
@@ -5396,7 +5396,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:27",
+				"source": "classes/kimi.kdl:33",
 				"class": "kimi",
 				"family": "k3",
 				"wire": {
@@ -5418,7 +5418,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:42",
+				"source": "classes/kimi.kdl:48",
 				"class": "kimi",
 				"providers": [
 					"alibaba-coding-plan",
@@ -5439,7 +5439,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:46",
+				"source": "classes/kimi.kdl:52",
 				"class": "kimi",
 				"providers": [
 					"alibaba-coding-plan",
@@ -5451,7 +5451,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:51",
+				"source": "classes/kimi.kdl:57",
 				"class": "kimi",
 				"providers": [
 					"baseten",
@@ -5481,7 +5481,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:58",
+				"source": "classes/kimi.kdl:64",
 				"class": "kimi",
 				"providers": [
 					"cloudflare-ai-gateway",
@@ -5510,7 +5510,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:63",
+				"source": "classes/kimi.kdl:69",
 				"class": "kimi",
 				"providers": [
 					"cursor",
@@ -5531,7 +5531,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:68",
+				"source": "classes/kimi.kdl:74",
 				"class": "kimi",
 				"providers": [
 					"huggingface",
@@ -5548,7 +5548,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:73",
+				"source": "classes/kimi.kdl:79",
 				"class": "kimi",
 				"providers": [
 					"huggingface",
@@ -5572,7 +5572,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:78",
+				"source": "classes/kimi.kdl:84",
 				"class": "kimi",
 				"providers": [
 					"kilo",
@@ -5587,7 +5587,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:83",
+				"source": "classes/kimi.kdl:89",
 				"class": "kimi",
 				"providers": [
 					"kilo",
@@ -5606,7 +5606,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:88",
+				"source": "classes/kimi.kdl:94",
 				"class": "kimi",
 				"providers": [
 					"moonshot",
@@ -5623,7 +5623,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:93",
+				"source": "classes/kimi.kdl:99",
 				"class": "kimi",
 				"providers": [
 					"moonshot",
@@ -5642,7 +5642,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:98",
+				"source": "classes/kimi.kdl:104",
 				"class": "kimi",
 				"providers": [
 					"moonshot",
@@ -5659,7 +5659,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:104",
+				"source": "classes/kimi.kdl:110",
 				"class": "kimi",
 				"models": [
 					{
@@ -5672,7 +5672,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:108",
+				"source": "classes/kimi.kdl:114",
 				"class": "kimi",
 				"providers": [
 					"kimi-code",
@@ -5682,6 +5682,13 @@
 				"wire": {
 					"nativeKimiK3Reasoning": true,
 					"clampOutputToModelMax": true
+				}
+			},
+			{
+				"source": "classes/kimi.kdl:3",
+				"class": "kimi",
+				"wire": {
+					"streamRevision": "possible"
 				}
 			},
 			{
@@ -7083,7 +7090,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:6",
+				"source": "providers/amazon-bedrock.kdl:9",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -7104,7 +7111,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:10",
+				"source": "providers/amazon-bedrock.kdl:13",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -7132,7 +7139,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:16",
+				"source": "providers/amazon-bedrock.kdl:19",
 				"class": "openai",
 				"providers": [
 					"amazon-bedrock"
@@ -7142,7 +7149,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:19",
+				"source": "providers/amazon-bedrock.kdl:22",
 				"class": "deepseek",
 				"providers": [
 					"amazon-bedrock"
@@ -7160,7 +7167,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:24",
+				"source": "providers/amazon-bedrock.kdl:27",
 				"class": "minimax",
 				"providers": [
 					"amazon-bedrock"
@@ -7171,7 +7178,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:28",
+				"source": "providers/amazon-bedrock.kdl:31",
 				"class": "unknown",
 				"providers": [
 					"amazon-bedrock"
@@ -7187,7 +7194,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:33",
+				"source": "providers/amazon-bedrock.kdl:36",
 				"providers": [
 					"amazon-bedrock"
 				],
@@ -7199,6 +7206,15 @@
 				],
 				"thinking": {
 					"requiresEffort": true
+				}
+			},
+			{
+				"source": "providers/amazon-bedrock.kdl:3",
+				"providers": [
+					"amazon-bedrock"
+				],
+				"wire": {
+					"streamRevision": "possible"
 				}
 			},
 			{

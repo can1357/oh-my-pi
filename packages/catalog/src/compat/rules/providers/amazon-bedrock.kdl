@@ -1,6 +1,9 @@
 // Provider-wire compat for "amazon-bedrock"; regenerated from the frozen census using deployment contract selectors.
 
 provider "amazon-bedrock" {
+	// The Converse assembler positions content blocks by wire index
+	// (`amazon-bedrock.ts`), so a block can land above text already rendered.
+	stream-revision "possible"
 	class "anthropic" {
 		family "opus" {
 			revision ">=4.6 <4.7" {

@@ -261,12 +261,10 @@ describe("TranscriptContainer", () => {
 		const block = new AppendBlock(["reasoning one", "reasoning two", "answer"], ["reasoning one", "reasoning two"]);
 		transcript.addChild(block);
 
+		// Under pressure the finished rows the overflow needs retire in one batch.
 		const first = transcript.peekFinalizedBatch(80, 1)!;
-		expect(first.rows).toEqual(["reasoning one"]);
+		expect(first.rows).toEqual(["reasoning one", "reasoning two"]);
 		transcript.acknowledgeFinalizedBatch(first.id);
-		const second = transcript.peekFinalizedBatch(80, 1)!;
-		expect(second.rows).toEqual(["reasoning two"]);
-		transcript.acknowledgeFinalizedBatch(second.id);
 		expect(transcript.emittedStableRows()).toEqual([2]);
 
 		// Ctrl+T hides thinking: the block now renders only its answer and drops

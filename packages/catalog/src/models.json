@@ -646,7 +646,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -748,7 +749,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -21278,7 +21280,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -21359,7 +21362,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -21440,7 +21444,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -21521,7 +21526,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -29796,7 +29802,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -31481,7 +31488,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 2048,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -31515,7 +31523,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -31549,7 +31558,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -31583,7 +31593,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -31617,7 +31628,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -31651,7 +31663,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -31696,7 +31709,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"anthropic.claude-opus-4-7": {
@@ -31741,7 +31755,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"anthropic.claude-opus-4-8": {
@@ -31786,7 +31801,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"anthropic.claude-opus-5": {
@@ -31831,7 +31847,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 512,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"anthropic.claude-sonnet-5": {
@@ -31876,7 +31893,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"au.anthropic.claude-haiku-4-5-20251001-v1:0": {
@@ -31920,7 +31938,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"au.anthropic.claude-opus-4-6-v1": {
@@ -31964,7 +31983,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"au.anthropic.claude-opus-4-8": {
@@ -32009,7 +32029,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"au.anthropic.claude-opus-5": {
@@ -32054,7 +32075,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 512,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"au.anthropic.claude-sonnet-4-5-20250929-v1:0": {
@@ -32098,7 +32120,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"au.anthropic.claude-sonnet-4-6": {
@@ -32142,7 +32165,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"au.anthropic.claude-sonnet-5": {
@@ -32187,7 +32211,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"cohere.command-r-plus-v1:0": {
@@ -32216,7 +32241,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -32246,7 +32272,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -32288,7 +32315,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"deepseek.v3.2": {
@@ -32330,7 +32358,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"deepseek.v3.2-v1:0": {
@@ -32370,7 +32399,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -32404,7 +32434,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 2048,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -32438,7 +32469,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -32472,7 +32504,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -32506,7 +32539,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -32540,7 +32574,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -32574,7 +32609,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -32608,7 +32644,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -32654,7 +32691,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"eu.anthropic.claude-fable-5-1": {
@@ -32700,7 +32738,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"eu.anthropic.claude-haiku-4-5-20251001-v1:0": {
@@ -32744,7 +32783,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"eu.anthropic.claude-opus-4-1-20250805-v1:0": {
@@ -32788,7 +32828,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"eu.anthropic.claude-opus-4-20250514-v1:0": {
@@ -32831,7 +32872,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -32876,7 +32918,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"eu.anthropic.claude-opus-4-6-v1": {
@@ -32920,7 +32963,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"eu.anthropic.claude-opus-4-7": {
@@ -32965,7 +33009,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"eu.anthropic.claude-opus-4-8": {
@@ -33010,7 +33055,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"eu.anthropic.claude-opus-5": {
@@ -33055,7 +33101,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 512,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"eu.anthropic.claude-sonnet-4-20250514-v1:0": {
@@ -33098,7 +33145,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -33143,7 +33191,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"eu.anthropic.claude-sonnet-4-6": {
@@ -33187,7 +33236,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"eu.anthropic.claude-sonnet-5": {
@@ -33232,7 +33282,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"global.amazon.nova-2-lite-v1:0": {
@@ -33274,7 +33325,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"global.anthropic.claude-fable-5": {
@@ -33319,7 +33371,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"global.anthropic.claude-fable-5-1": {
@@ -33365,7 +33418,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"global.anthropic.claude-haiku-4-5-20251001-v1:0": {
@@ -33409,7 +33463,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"global.anthropic.claude-opus-4-5-20251101-v1:0": {
@@ -33453,7 +33508,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"global.anthropic.claude-opus-4-6-v1": {
@@ -33497,7 +33553,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"global.anthropic.claude-opus-4-7": {
@@ -33542,7 +33599,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"global.anthropic.claude-opus-4-8": {
@@ -33587,7 +33645,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"global.anthropic.claude-opus-5": {
@@ -33632,7 +33691,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 512,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"global.anthropic.claude-sonnet-4-20250514-v1:0": {
@@ -33675,7 +33735,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -33720,7 +33781,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"global.anthropic.claude-sonnet-4-6": {
@@ -33764,7 +33826,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"global.anthropic.claude-sonnet-5": {
@@ -33809,7 +33872,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"global.openai.gpt-5.6-luna": {
@@ -33852,7 +33916,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"global.openai.gpt-5.6-sol": {
@@ -33895,7 +33960,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"global.openai.gpt-5.6-terra": {
@@ -33938,7 +34004,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"google.gemma-3-27b-it": {
@@ -33969,7 +34036,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"google.gemma-3-4b-it": {
@@ -34000,7 +34068,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"jp.anthropic.claude-haiku-4-5-20251001-v1:0": {
@@ -34044,7 +34113,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"jp.anthropic.claude-opus-4-7": {
@@ -34089,7 +34159,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"jp.anthropic.claude-opus-4-8": {
@@ -34134,7 +34205,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"jp.anthropic.claude-sonnet-4-5-20250929-v1:0": {
@@ -34178,7 +34250,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"jp.anthropic.claude-sonnet-4-6": {
@@ -34222,7 +34295,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"jp.anthropic.claude-sonnet-5": {
@@ -34267,7 +34341,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"meta.llama3-1-405b-instruct-v1:0": {
@@ -34296,7 +34371,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -34327,7 +34403,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"meta.llama3-1-8b-instruct-v1:0": {
@@ -34357,7 +34434,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"minimax.minimax-m2": {
@@ -34399,7 +34477,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"minimax.minimax-m2.1": {
@@ -34441,7 +34520,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"minimax.minimax-m2.5": {
@@ -34483,7 +34563,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"mistral.devstral-2-123b": {
@@ -34514,7 +34595,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"mistral.magistral-small-2509": {
@@ -34556,7 +34638,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"mistral.ministral-3-14b-instruct": {
@@ -34587,7 +34670,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"mistral.ministral-3-3b-instruct": {
@@ -34619,7 +34703,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"mistral.ministral-3-8b-instruct": {
@@ -34650,7 +34735,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"mistral.mistral-large-2402-v1:0": {
@@ -34680,7 +34766,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -34713,7 +34800,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"mistral.pixtral-large-2502-v1:0": {
@@ -34745,7 +34833,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"mistral.voxtral-mini-3b-2507": {
@@ -34776,7 +34865,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"mistral.voxtral-small-24b-2507": {
@@ -34807,7 +34897,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshot.kimi-k2-thinking": {
@@ -34850,7 +34941,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai.kimi-k2.5": {
@@ -34891,7 +34983,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"nvidia.nemotron-nano-12b-v2": {
@@ -34922,7 +35015,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"nvidia.nemotron-nano-3-30b": {
@@ -34962,7 +35056,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"nvidia.nemotron-nano-9b-v2": {
@@ -34994,7 +35089,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"nvidia.nemotron-super-3-120b": {
@@ -35034,7 +35130,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"openai.gpt-oss-120b": {
@@ -35075,7 +35172,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"openai.gpt-oss-120b-1:0": {
@@ -35116,7 +35214,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"openai.gpt-oss-20b": {
@@ -35157,7 +35256,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"openai.gpt-oss-20b-1:0": {
@@ -35198,7 +35298,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"openai.gpt-oss-safeguard-120b": {
@@ -35228,7 +35329,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"openai.gpt-oss-safeguard-20b": {
@@ -35258,7 +35360,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"qwen.qwen3-235b-a22b-2507-v1:0": {
@@ -35289,7 +35392,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"qwen.qwen3-32b-v1:0": {
@@ -35330,7 +35434,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"qwen.qwen3-coder-30b-a3b-v1:0": {
@@ -35362,7 +35467,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"qwen.qwen3-coder-480b-a35b-v1:0": {
@@ -35394,7 +35500,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"qwen.qwen3-coder-next": {
@@ -35436,7 +35543,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"qwen.qwen3-next-80b-a3b": {
@@ -35468,7 +35576,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"qwen.qwen3-vl-235b-a22b": {
@@ -35501,7 +35610,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"us-gov.anthropic.claude-fable-5": {
@@ -35546,7 +35656,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"us-gov.anthropic.claude-fable-5-1": {
@@ -35592,7 +35703,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"us-gov.anthropic.claude-haiku-4-5-20251001-v1:0": {
@@ -35636,7 +35748,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"us-gov.anthropic.claude-opus-4-1-20250805-v1:0": {
@@ -35680,7 +35793,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"us-gov.anthropic.claude-opus-4-5-20251101-v1:0": {
@@ -35724,7 +35838,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"us-gov.anthropic.claude-opus-4-6-v1": {
@@ -35768,7 +35883,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"us-gov.anthropic.claude-opus-4-7": {
@@ -35813,7 +35929,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"us-gov.anthropic.claude-opus-4-8": {
@@ -35858,7 +35975,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"us-gov.anthropic.claude-opus-5": {
@@ -35903,7 +36021,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 512,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0": {
@@ -35947,7 +36066,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"us-gov.anthropic.claude-sonnet-4-6": {
@@ -35991,7 +36111,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"us-gov.anthropic.claude-sonnet-5": {
@@ -36036,7 +36157,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"us.amazon.nova-lite-v1:0": {
@@ -36068,7 +36190,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"streamRevision": "possible"
 			}
 		},
 		"us.amazon.nova-micro-v1:0": {
@@ -36099,7 +36222,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"streamRevision": "possible"
 			}
 		},
 		"us.amazon.nova-premier-v1:0": {
@@ -36140,7 +36264,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -36173,7 +36298,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"streamRevision": "possible"
 			}
 		},
 		"us.anthropic.claude-3-7-sonnet-20250219-v1:0": {
@@ -36206,7 +36332,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -36252,7 +36379,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"us.anthropic.claude-fable-5-1": {
@@ -36298,7 +36426,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"us.anthropic.claude-haiku-4-5-20251001-v1:0": {
@@ -36342,7 +36471,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"us.anthropic.claude-opus-4-1-20250805-v1:0": {
@@ -36386,7 +36516,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"us.anthropic.claude-opus-4-20250514-v1:0": {
@@ -36429,7 +36560,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -36474,7 +36606,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"us.anthropic.claude-opus-4-6-v1": {
@@ -36518,7 +36651,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"us.anthropic.claude-opus-4-7": {
@@ -36563,7 +36697,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"us.anthropic.claude-opus-4-8": {
@@ -36608,7 +36743,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"us.anthropic.claude-opus-5": {
@@ -36653,7 +36789,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 512,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"us.anthropic.claude-sonnet-4-20250514-v1:0": {
@@ -36696,7 +36833,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -36741,7 +36879,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"us.anthropic.claude-sonnet-4-6": {
@@ -36785,7 +36924,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"us.anthropic.claude-sonnet-5": {
@@ -36830,7 +36970,8 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
-				"streamIdleTimeoutMs": 900000
+				"streamIdleTimeoutMs": 900000,
+				"streamRevision": "possible"
 			}
 		},
 		"us.deepseek.r1-v1:0": {
@@ -36871,7 +37012,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"us.meta.llama3-2-11b-instruct-v1:0": {
@@ -36901,7 +37043,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -36931,7 +37074,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -36961,7 +37105,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -36992,7 +37137,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -37023,7 +37169,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"us.meta.llama4-maverick-17b-instruct-v1:0": {
@@ -37054,7 +37201,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"us.meta.llama4-scout-17b-instruct-v1:0": {
@@ -37085,7 +37233,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"streamRevision": "possible"
 			}
 		},
 		"writer.palmyra-x4-v1:0": {
@@ -37125,7 +37274,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"writer.palmyra-x5-v1:0": {
@@ -37165,7 +37315,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"xai.grok-4.3": {
@@ -37206,7 +37357,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"xai.grok-4.6": {
@@ -37247,7 +37399,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"zai.glm-4.7": {
@@ -37287,7 +37440,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"zai.glm-4.7-flash": {
@@ -37327,7 +37481,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		},
 		"zai.glm-5": {
@@ -37367,7 +37522,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
-				"streamIdleTimeoutMs": 600000
+				"streamIdleTimeoutMs": 600000,
+				"streamRevision": "possible"
 			}
 		}
 	},
@@ -42664,7 +42820,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -42757,7 +42914,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -42858,7 +43016,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -45559,7 +45718,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -45644,7 +45804,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -45748,7 +45909,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"mimo-v2.5": {
@@ -51406,7 +51568,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"workers-ai/@cf/moonshotai/kimi-k2.7-code": {
@@ -51500,7 +51663,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"workers-ai/@cf/nvidia/nemotron-3-120b-a12b": {
@@ -54075,7 +54239,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -54171,7 +54336,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/Kimi-K2.7-Code": {
@@ -54265,7 +54431,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/Kimi-K3": {
@@ -54366,7 +54533,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -65724,7 +65892,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -65818,7 +65987,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -65920,7 +66090,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -70815,7 +70986,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		}
@@ -72391,7 +72563,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -72489,7 +72662,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -72588,7 +72762,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -72685,7 +72860,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -72783,7 +72959,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -72885,7 +73062,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -77708,7 +77886,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -77819,7 +77998,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -85618,7 +85798,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -85699,7 +85880,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -88234,7 +88416,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/Kimi-K2-Instruct-0905": {
@@ -88315,7 +88498,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/Kimi-K2-Thinking": {
@@ -88411,7 +88595,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/Kimi-K2.5": {
@@ -88504,7 +88689,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/Kimi-K2.6": {
@@ -88599,7 +88785,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/Kimi-K2.7-Code": {
@@ -88693,7 +88880,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/Kimi-K3": {
@@ -88795,7 +88983,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"openai/gpt-oss-120b": {
@@ -93457,7 +93646,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"~openai/gpt-latest": {
@@ -114609,7 +114799,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2-0905": {
@@ -114692,7 +114883,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2-0905:exacto": {
@@ -114773,7 +114965,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -114868,7 +115061,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2.5": {
@@ -114961,7 +115155,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2.5:free": {
@@ -115042,7 +115237,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -115138,7 +115334,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2.6:free": {
@@ -115219,7 +115416,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -115314,7 +115512,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k3": {
@@ -115416,7 +115615,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"morph-warp-grep-v2": {
@@ -139515,7 +139715,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": true
+				"supportsPromptCacheKey": true,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -139611,7 +139812,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": true
+				"supportsPromptCacheKey": true,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -139703,7 +139905,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": true
+				"supportsPromptCacheKey": true,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -139790,7 +139993,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": true
+				"supportsPromptCacheKey": true,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -139888,7 +140092,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": true
+				"supportsPromptCacheKey": true,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		}
@@ -145722,7 +145927,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"kimi-k2-0905-preview": {
@@ -145803,7 +146009,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"kimi-k2-thinking": {
@@ -145898,7 +146105,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"kimi-k2-thinking-turbo": {
@@ -145989,7 +146197,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"kimi-k2-turbo-preview": {
@@ -146070,7 +146279,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"kimi-k2.5": {
@@ -146162,7 +146372,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"kimi-k2.6": {
@@ -146257,7 +146468,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"kimi-k2.7-code": {
@@ -146351,7 +146563,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"kimi-k2.7-code-highspeed": {
@@ -146443,7 +146656,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"kimi-k3": {
@@ -146546,7 +146760,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshot-v1-128k": {
@@ -153364,7 +153579,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"brave": {
@@ -180107,7 +180323,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"kimi-thinking-preview": {
@@ -180187,7 +180404,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -190313,7 +190531,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -190395,7 +190614,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2-instruct-0711": {
@@ -190476,7 +190696,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/Kimi-K2-Instruct-0905": {
@@ -190557,7 +190778,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2-thinking": {
@@ -190653,7 +190875,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2-thinking-original": {
@@ -190734,7 +190957,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -190816,7 +191040,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -190900,7 +191125,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2.5:thinking": {
@@ -190992,7 +191218,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2.6": {
@@ -191076,7 +191303,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2.6:thinking": {
@@ -191169,7 +191397,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2.7-code": {
@@ -191263,7 +191492,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2.7-code-highspeed": {
@@ -191355,7 +191585,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k3": {
@@ -191457,7 +191688,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-latest": {
@@ -191548,7 +191780,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"nano-gpt-help": {
@@ -216688,7 +216921,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -216788,7 +217022,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -216873,7 +217108,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"TEE/kimi-k2.7-code": {
@@ -216967,7 +217203,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"TEE/kimi-k3": {
@@ -217069,7 +217306,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"TEE/llama3-3-70b": {
@@ -234533,7 +234771,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -234616,7 +234855,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -234714,7 +234954,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -234809,7 +235050,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -234906,7 +235148,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -235002,7 +235245,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -235106,7 +235350,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -247073,7 +247318,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -247155,7 +247401,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2-thinking": {
@@ -247250,7 +247497,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -247343,7 +247591,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -247439,7 +247688,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k3": {
@@ -247541,7 +247791,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"nv-mistralai/mistral-nemo-12b-instruct": {
@@ -263346,6 +263597,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"whenThinking": {
 					"supportsStore": false,
 					"supportsDeveloperRole": false,
@@ -263399,7 +263651,8 @@
 					"stripImageInput": false,
 					"rejectRootObjectUnion": false,
 					"retryWithoutStrictOnGrammarError": false,
-					"supportsPromptCacheKey": false
+					"supportsPromptCacheKey": false,
+					"streamRevision": "possible"
 				}
 			},
 			"supportsComputerUse": false
@@ -263497,6 +263750,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"whenThinking": {
 					"supportsStore": false,
 					"supportsDeveloperRole": false,
@@ -263551,7 +263805,8 @@
 					"stripImageInput": false,
 					"rejectRootObjectUnion": false,
 					"retryWithoutStrictOnGrammarError": false,
-					"supportsPromptCacheKey": false
+					"supportsPromptCacheKey": false,
+					"streamRevision": "possible"
 				}
 			}
 		},
@@ -263647,6 +263902,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"whenThinking": {
 					"supportsStore": false,
 					"supportsDeveloperRole": false,
@@ -263700,7 +263956,8 @@
 					"stripImageInput": false,
 					"rejectRootObjectUnion": false,
 					"retryWithoutStrictOnGrammarError": false,
-					"supportsPromptCacheKey": false
+					"supportsPromptCacheKey": false,
+					"streamRevision": "possible"
 				}
 			}
 		},
@@ -263804,6 +264061,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"whenThinking": {
 					"supportsStore": false,
 					"supportsDeveloperRole": false,
@@ -263862,7 +264120,8 @@
 					"stripImageInput": false,
 					"rejectRootObjectUnion": false,
 					"retryWithoutStrictOnGrammarError": false,
-					"supportsPromptCacheKey": false
+					"supportsPromptCacheKey": false,
+					"streamRevision": "possible"
 				}
 			}
 		},
@@ -271170,6 +271429,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"whenThinking": {
 					"supportsStore": false,
 					"supportsDeveloperRole": false,
@@ -271223,7 +271483,8 @@
 					"stripImageInput": false,
 					"rejectRootObjectUnion": false,
 					"retryWithoutStrictOnGrammarError": false,
-					"supportsPromptCacheKey": false
+					"supportsPromptCacheKey": false,
+					"streamRevision": "possible"
 				}
 			},
 			"supportsComputerUse": false
@@ -271319,6 +271580,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"whenThinking": {
 					"supportsStore": false,
 					"supportsDeveloperRole": false,
@@ -271372,7 +271634,8 @@
 					"stripImageInput": false,
 					"rejectRootObjectUnion": false,
 					"retryWithoutStrictOnGrammarError": false,
-					"supportsPromptCacheKey": false
+					"supportsPromptCacheKey": false,
+					"streamRevision": "possible"
 				}
 			}
 		},
@@ -271469,6 +271732,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"whenThinking": {
 					"supportsStore": false,
 					"supportsDeveloperRole": false,
@@ -271523,7 +271787,8 @@
 					"stripImageInput": false,
 					"rejectRootObjectUnion": false,
 					"retryWithoutStrictOnGrammarError": false,
-					"supportsPromptCacheKey": false
+					"supportsPromptCacheKey": false,
+					"streamRevision": "possible"
 				}
 			}
 		},
@@ -271619,6 +271884,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"whenThinking": {
 					"supportsStore": false,
 					"supportsDeveloperRole": false,
@@ -271672,7 +271938,8 @@
 					"stripImageInput": false,
 					"rejectRootObjectUnion": false,
 					"retryWithoutStrictOnGrammarError": false,
-					"supportsPromptCacheKey": false
+					"supportsPromptCacheKey": false,
+					"streamRevision": "possible"
 				}
 			}
 		},
@@ -271776,6 +272043,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"whenThinking": {
 					"supportsStore": false,
 					"supportsDeveloperRole": false,
@@ -271834,7 +272102,8 @@
 					"stripImageInput": false,
 					"rejectRootObjectUnion": false,
 					"retryWithoutStrictOnGrammarError": false,
-					"supportsPromptCacheKey": false
+					"supportsPromptCacheKey": false,
+					"streamRevision": "possible"
 				}
 			}
 		},
@@ -276279,6 +276548,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"supportsLongPromptCacheRetention": false,
 				"strictResponsesPairing": false,
 				"supportsImageDetailOriginal": true,
@@ -297104,6 +297374,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"supportsLongPromptCacheRetention": false,
 				"strictResponsesPairing": false,
 				"supportsImageDetailOriginal": true,
@@ -297198,6 +297469,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"supportsLongPromptCacheRetention": false,
 				"strictResponsesPairing": false,
 				"supportsImageDetailOriginal": true,
@@ -297290,6 +297562,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"supportsLongPromptCacheRetention": false,
 				"strictResponsesPairing": false,
 				"supportsImageDetailOriginal": true,
@@ -297394,6 +297667,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"supportsLongPromptCacheRetention": false,
 				"strictResponsesPairing": false,
 				"supportsImageDetailOriginal": true,
@@ -297497,6 +297771,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"supportsLongPromptCacheRetention": false,
 				"strictResponsesPairing": false,
 				"supportsImageDetailOriginal": true,
@@ -297602,6 +297877,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"supportsLongPromptCacheRetention": false,
 				"strictResponsesPairing": false,
 				"supportsImageDetailOriginal": true,
@@ -297705,6 +297981,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"supportsLongPromptCacheRetention": false,
 				"strictResponsesPairing": false,
 				"supportsImageDetailOriginal": true,
@@ -297809,6 +298086,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"supportsLongPromptCacheRetention": false,
 				"strictResponsesPairing": false,
 				"supportsImageDetailOriginal": true,
@@ -297911,6 +298189,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"supportsLongPromptCacheRetention": false,
 				"strictResponsesPairing": false,
 				"supportsImageDetailOriginal": true,
@@ -298024,6 +298303,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"supportsLongPromptCacheRetention": false,
 				"strictResponsesPairing": false,
 				"supportsImageDetailOriginal": true,
@@ -298134,6 +298414,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false,
+				"streamRevision": "possible",
 				"supportsLongPromptCacheRetention": false,
 				"strictResponsesPairing": false,
 				"supportsImageDetailOriginal": true,
@@ -325457,7 +325738,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -327725,7 +328007,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -327819,7 +328102,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/Kimi-K2.6": {
@@ -327914,7 +328198,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/Kimi-K2.7-Code": {
@@ -328007,7 +328292,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/Kimi-K3": {
@@ -328109,7 +328395,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"nvidia/nemotron-3-ultra-550b-a55b": {
@@ -336812,7 +337099,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"kimi-k2-6": {
@@ -336906,7 +337194,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"kimi-k2-7-code": {
@@ -337000,7 +337289,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"kimi-k2-thinking": {
@@ -337096,7 +337386,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -337199,7 +337490,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"kimi-k3-fast-api": {
@@ -337299,7 +337591,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"llama-3.2-3b": {
@@ -361708,7 +362001,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -361805,7 +362099,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false,
 			"compatConfig": {
@@ -361910,7 +362205,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -362016,7 +362312,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false,
 			"compatConfig": {
@@ -377869,7 +378166,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -377953,7 +378251,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -378050,7 +378349,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -378143,7 +378443,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUseConfig": false
 		},
@@ -378237,7 +378538,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2.6": {
@@ -378332,7 +378634,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2.7-code": {
@@ -378426,7 +378729,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2.7-code-free": {
@@ -378518,7 +378822,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k2.7-code-highspeed": {
@@ -378609,7 +378914,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			},
 			"supportsComputerUse": false
 		},
@@ -378712,7 +379018,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"moonshotai/kimi-k3-free": {
@@ -378812,7 +379119,8 @@
 				"stripImageInput": false,
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"streamRevision": "possible"
 			}
 		},
 		"nex-agi/nex-n2-pro": {

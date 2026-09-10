@@ -38,20 +38,20 @@ const EMPTY_LINK_TARGETS: ReadonlyMap<string, string> = new Map();
 
 type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
 type DisplayThinkingContentBlock = ThinkingContentBlock & { rawThinking?: string };
-type StableThinkingPart = { kind: "thinking"; text: string } | { kind: "spacer" };
+type StablePart = { kind: "thinking" | "text"; text: string } | { kind: "spacer" };
 
 /**
- * One published prefix of the leading visible-thinking run. Later snapshots
- * extend earlier ones part-wise (only the final thinking part may grow), so
- * rendered stable rows only ever gain a suffix — the append-only transcript
- * contract that lets them retire into native scrollback mid-stream.
+ * One published prefix of the block's finished content. Later snapshots extend
+ * earlier ones part-wise (only the final part may grow), so rendered stable
+ * rows only ever gain a suffix — the append-only transcript contract that lets
+ * them retire into native scrollback mid-stream.
  */
-interface ThinkingStableSnapshot {
+interface StableSnapshot {
 	readonly key: string;
-	readonly parts: readonly StableThinkingPart[];
+	readonly parts: readonly StablePart[];
 }
 
-function isSnapshotExtension(previous: ThinkingStableSnapshot, current: ThinkingStableSnapshot): boolean {
+function isSnapshotExtension(previous: StableSnapshot, current: StableSnapshot): boolean {
 	if (previous.parts.length > current.parts.length) return false;
 	for (let index = 0; index < previous.parts.length; index++) {
 		const before = previous.parts[index]!;
@@ -193,6 +193,8 @@ export class AssistantMessageComponent extends Container {
 	#showToolResultImages = true;
 	#kittyConversionsInFlight = new Set<string>();
 	#transcriptBlockFinalized: boolean;
+	/** See {@link setMidStreamPublication}; the wire's `stream-revision` axis decides it. */
+	#midStreamPublication = true;
 	/**
 	 * When true, the turn-ending `Error: …` line for `stopReason === "error"` is
 	 * suppressed because the same error is currently shown in the pinned banner
@@ -245,7 +247,7 @@ export class AssistantMessageComponent extends Container {
 	#lastTokenCount: number | undefined;
 	#lastTokenTime = 0;
 	/** Published width-independent thinking prefixes; grows only, never retracts. */
-	#stableSnapshots: ThinkingStableSnapshot[] = [];
+	#stableSnapshots: StableSnapshot[] = [];
 	#transcriptStableRows: TranscriptStableRow[] = [];
 	/** Rendered stable rows memoized by `${count}:${width}`, insertion-evicted. */
 	#stableRenderCache = new Map<string, readonly string[]>();
@@ -420,6 +422,18 @@ export class AssistantMessageComponent extends Container {
 		this.hideThinkingBlock = hide;
 	}
 
+	/**
+	 * Allow or withhold retiring finished lines into native scrollback while the
+	 * turn is still streaming. Wires the `stream-revision` axis marks as able to
+	 * revise already-streamed text must withhold it: published bytes go to
+	 * terminal history once and cannot be retracted, so a later revision would
+	 * leave the reader with a stale copy. Withholding costs only reachability —
+	 * the block still retires whole when the turn ends.
+	 */
+	setMidStreamPublication(allowed: boolean): void {
+		this.#midStreamPublication = allowed;
+	}
+
 	setProseOnlyThinking(proseOnly: boolean): void {
 		this.proseOnlyThinking = proseOnly;
 	}
@@ -588,14 +602,15 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	/**
-	 * Publish the frozen prefix of the leading visible-thinking run as stable
-	 * transcript rows so a long reasoning stream can retire into native
-	 * scrollback mid-turn. Only thinking publishes: streamed text deltas can
-	 * revise earlier Markdown, and published bytes must never change — they may
-	 * already sit in terminal history. Every guard skips publication; nothing
-	 * ever retracts it.
+	 * Publish the block's finished prefix as stable transcript rows so a long
+	 * stream can retire into native scrollback mid-turn instead of being clipped
+	 * to the live viewport until the turn ends. Finished means bytes that can no
+	 * longer change: closed child blocks, plus the streaming child's frozen
+	 * Markdown prefix. Published bytes may already sit in terminal history, so
+	 * every guard skips publication and nothing ever retracts it.
 	 */
 	#publishStableSnapshot(rendered: readonly string[], width: number): void {
+		if (!this.#midStreamPublication) return;
 		const snapshot = this.#currentStableSnapshot();
 		if (!snapshot) return;
 		const previous = this.#stableSnapshots.at(-1);
@@ -617,35 +632,36 @@ export class AssistantMessageComponent extends Container {
 
 	/**
 	 * Width-independent parts eligible for publication right now: the leading
-	 * run of visible thinking blocks, ending inside the streaming block at
-	 * Markdown's frozen boundary. Undefined whenever any prefix byte could
-	 * still change (finalized or non-transient renders, marker rows, extension
-	 * components, hidden thinking, or no frozen prefix yet).
+	 * run of finished blocks, ending inside the streaming block at Markdown's
+	 * frozen boundary. Undefined whenever any prefix byte could still change
+	 * (finalized or non-transient renders, marker rows, extension components,
+	 * hidden thinking, or no frozen prefix yet).
 	 */
-	#currentStableSnapshot(): ThinkingStableSnapshot | undefined {
+	#currentStableSnapshot(): StableSnapshot | undefined {
 		if (this.#transcriptBlockFinalized || !this.#lastUpdateTransient) return undefined;
 		if (this.#markerSlot.children.length > 0) return undefined;
 		const items = this.#fastPathItems;
 		if (!items || items.length === 0) return undefined;
-		const parts: StableThinkingPart[] = [];
+		const parts: StablePart[] = [];
 		let itemIndex = 0;
 		for (const child of this.#contentContainer.children) {
 			const item = items[itemIndex];
 			if (item?.md === child) {
-				// Text blocks never publish: their deltas can revise earlier rows.
-				if (item.blockType !== "thinking") break;
 				if (itemIndex === items.length - 1) {
-					// Streaming block: publish Markdown's frozen prefix, and only
-					// once non-blank content exists past it — the thinking fold may
-					// still rewrite the display text's last non-blank line (prose
-					// ellipsis), which must stay out of published bytes.
-					const frozen = item.md.getLastRenderStableText();
-					if (frozen.length > 0 && /\S/.test(item.lastText.slice(frozen.length))) {
-						parts.push({ kind: "thinking", text: frozen });
+					// Streaming child: publish Markdown's frozen prefix, and only
+					// once non-blank content exists past it — the block's last
+					// non-blank line is still being written (thinking's prose fold
+					// may rewrite it) and must stay out of published bytes.
+					const raw = item.md.getLastRenderStableText();
+					const frozen = raw.trim();
+					if (frozen.length > 0 && /\S/.test(item.lastText.slice(raw.length))) {
+						parts.push({ kind: item.blockType, text: frozen });
 					}
 					break;
 				}
-				parts.push({ kind: "thinking", text: item.lastText });
+				// Closed child: only the streaming tail may mutate in place, so
+				// everything before it is final.
+				parts.push({ kind: item.blockType, text: item.lastText });
 				itemIndex++;
 				continue;
 			}
@@ -657,23 +673,36 @@ export class AssistantMessageComponent extends Container {
 			break;
 		}
 		while (parts.at(-1)?.kind === "spacer") parts.pop();
-		if (!parts.some(part => part.kind === "thinking")) return undefined;
+		if (parts.length === 0) return undefined;
 		return { key: JSON.stringify(parts), parts };
 	}
 
-	#renderStableSnapshot(snapshot: ThinkingStableSnapshot, width: number): readonly string[] {
+	#renderStableSnapshot(snapshot: StableSnapshot, width: number): readonly string[] {
 		const rows: string[] = [];
 		for (const part of snapshot.parts) {
 			if (part.kind === "spacer") {
 				rows.push("");
 				continue;
 			}
-			// Constructor args mirror the live thinking Markdown exactly so these
-			// rows are byte-identical to the block render's prefix.
-			const markdown = new Markdown(part.text, 1, 0, getMarkdownTheme(), {
-				color: (text: string) => theme.fg("thinkingText", text),
-				italic: true,
-			});
+			// Constructor args mirror the live child Markdown exactly so these
+			// rows are byte-identical to the block render's prefix — including the
+			// trim the live children apply, which drops the trailing blank line a
+			// frozen prefix still carries.
+			const text = part.text.trim();
+			const markdown =
+				part.kind === "text"
+					? new Markdown(
+							text,
+							1,
+							0,
+							this.#getProseTheme(),
+							this.#textColorTransform ? { color: this.#textColorTransform } : undefined,
+							0,
+						)
+					: new Markdown(text, 1, 0, getMarkdownTheme(), {
+							color: (value: string) => theme.fg("thinkingText", value),
+							italic: true,
+						});
 			rows.push(...markdown.render(width));
 		}
 		return rows;
