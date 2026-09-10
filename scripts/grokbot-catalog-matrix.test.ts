@@ -286,6 +286,9 @@ describe("toolSmokePrompt", () => {
 		expect(echoLikeShellCommand(`printf '' ${ping}`, ping)).toBe(false);
 		expect(echoLikeShellCommand(`printf '%0.s' ${ping}`, ping)).toBe(false);
 		expect(echoLikeShellCommand(`printf '%s\\n' ${ping}`, ping)).toBe(true);
+		// Later non-zero exit fails the overall command; runOneTool fabricates isError:false.
+		expect(echoLikeShellCommand(`echo ${ping}; exit 1`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`echo ${ping}; exit 0`, ping)).toBe(true);
 	});
 
 	test("binds read/write shell smoke evidence to the operation statement", () => {
@@ -554,10 +557,27 @@ describe("toolSmokePrompt", () => {
 				id,
 			),
 		).toBe(false);
+		// Relative path with a matching suffix still targets a different file.
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Read", arguments: { path: `backup/${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
 		expect(
 			matchesToolSmokeCall(
 				"write",
 				{ name: "Write", arguments: { path: `backup-${writePath}`, content: ping } },
+				ping,
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Write", arguments: { path: `backup/${writePath}`, content: ping } },
 				ping,
 				id,
 			),

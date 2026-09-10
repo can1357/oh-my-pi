@@ -269,6 +269,24 @@ function earlyExitShellSegment(segment: string): boolean {
 	return /^(?:exit|return)\b/.test(segment);
 }
 
+/** Non-zero `exit`/`return` — overall command fails even after an earlier ping emit. */
+function failingExitShellSegment(segment: string): boolean {
+	const match = /^(?:exit|return)(?:\s+(\d+))?\s*$/.exec(segment.trim());
+	if (!match) return false;
+	// Bare `exit`/`return` reuses $?; after a successful echo that is 0.
+	if (match[1] === undefined) return false;
+	return Number(match[1]) !== 0;
+}
+
+/** Exact relative fixture path, or absolute path ending in /${expectedRelative}. */
+function smokeFixturePathMatches(filePath: string, expectedRelative: string): boolean {
+	if (!filePath || !expectedRelative) return false;
+	if (filePath === expectedRelative) return true;
+	// Relative suffix matches (`backup/notes/...`) would invent a different file.
+	if (!filePath.startsWith("/")) return false;
+	return filePath.endsWith(`/${expectedRelative}`);
+}
+
 /**
  * Split on the first unquoted `>`, `>>`, or `| tee` so quoted redirect
  * characters (`echo 'ping > path'`) do not count as writes.
@@ -559,14 +577,19 @@ export function echoLikeShellCommand(command: string, ping: string): boolean {
 	if (!ping) return false;
 	const cmd = command.trim();
 	if (!cmd) return false;
+	let emitted = false;
 	for (const segment of shellStatementSegments(cmd)) {
-		if (earlyExitShellSegment(segment)) return false;
+		if (earlyExitShellSegment(segment)) {
+			// `echo ping; exit 1` must not pass — runOneTool fabricates isError:false.
+			if (emitted) return !failingExitShellSegment(segment);
+			return false;
+		}
 		if (!/^(?:echo|printf)\b/.test(segment)) continue;
 		// Redirects / any pipeline can discard or transform stdout.
 		if (/(?:>>?|\|)/.test(segment)) continue;
-		if (commandEmitsPing(segment, ping)) return true;
+		if (commandEmitsPing(segment, ping)) emitted = true;
 	}
-	return false;
+	return emitted;
 }
 
 /** Read smoke: path must appear in the same cat/head/sed statement. */
@@ -574,16 +597,20 @@ export function readPathInShellCommand(command: string, filePath: string): boole
 	if (!filePath) return false;
 	const cmd = command.trim();
 	if (!cmd || writeLikeShellCommand(cmd)) return false;
+	let matched = false;
 	for (const segment of shellStatementSegments(cmd)) {
-		if (earlyExitShellSegment(segment)) return false;
+		if (earlyExitShellSegment(segment)) {
+			if (matched) return !failingExitShellSegment(segment);
+			return false;
+		}
 		if (!/^(?:cat|head|sed)\b/.test(segment)) continue;
 		// Redirects / any pipeline can discard or transform stdout — `runOneTool`
 		// fabricates the expected token without executing, so `cat path | grep -v`
 		// would otherwise pass the gate.
 		if (/(?:>>?|\|)/.test(segment)) continue;
-		if (readerEmitsContent(segment, filePath)) return true;
+		if (readerEmitsContent(segment, filePath)) matched = true;
 	}
-	return false;
+	return matched;
 }
 
 /**
@@ -598,17 +625,21 @@ export function writePathPingInShellCommand(command: string, filePath: string, p
 	if (!filePath || !ping) return false;
 	const cmd = command.trim();
 	if (!cmd) return false;
+	let matched = false;
 	for (const segment of shellStatementSegments(cmd)) {
-		if (earlyExitShellSegment(segment)) return false;
+		if (earlyExitShellSegment(segment)) {
+			if (matched) return !failingExitShellSegment(segment);
+			return false;
+		}
 		const redirect = shellWriteRedirect(segment);
 		if (!redirect) continue;
 		if (!redirectBeforeEmitsPing(redirect.before, ping)) continue;
 		const dest = redirectDestination(redirect.after, redirect.op);
 		if (!dest) continue;
 		// Destination must be exactly the expected path (not a sibling token).
-		if (dest === filePath || commandMentionsPath(dest, filePath)) return true;
+		if (dest === filePath || commandMentionsPath(dest, filePath)) matched = true;
 	}
-	return false;
+	return matched;
 }
 
 export function expectedReadPath(safeId: string): string {
@@ -659,9 +690,9 @@ export function matchesToolSmokeCall(kind: ToolSmokeKind, call: SmokeToolCall, p
 		const path = expectedReadPath(safe);
 		if (/^(read|Read)$/i.test(name)) {
 			const filePath = filePathOf(call);
-			// Exact relative path or absolute path ending in /${path} — never a bare
-			// endsWith(path) (wrongnotes/... would otherwise match notes/...).
-			return filePath === path || filePath.endsWith(`/${path}`);
+			// Exact relative path, or absolute path ending in /${path}. Relative
+			// suffix forms (`backup/notes/...`) target a different file.
+			return smokeFixturePathMatches(filePath, path);
 		}
 		if (/^(bash|Shell|shell)$/i.test(name)) {
 			const cmd = shellCommandOf(call);
@@ -673,8 +704,7 @@ export function matchesToolSmokeCall(kind: ToolSmokeKind, call: SmokeToolCall, p
 	if (/^(write|Write)$/i.test(name)) {
 		const filePath = filePathOf(call);
 		const content = fileContentOf(call);
-		const pathOk = filePath === path || filePath.endsWith(`/${path}`);
-		return pathOk && content.includes(ping);
+		return smokeFixturePathMatches(filePath, path) && content.includes(ping);
 	}
 	if (/^(bash|Shell|shell)$/i.test(name)) {
 		const cmd = shellCommandOf(call);

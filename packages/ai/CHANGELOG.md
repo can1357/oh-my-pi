@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Catalog matrix tool smoke rejects `echo ping; exit 1` and relative suffix Read/Write paths that are not the fixture file.
 - Grok Bot native history keeps extension `Shell` customWireName aliases; product collision ownership applies only on product wire.
 - Grok Bot JSON-as-text promotion prefers final text dumps over the same call mirrored in thinking, so Shell/Write is not executed twice.
 - Grok Bot live probes require a completed Shell tool call and a Connect end-stream trailer (incomplete `toolCallPart` or missing trailer no longer passes).
