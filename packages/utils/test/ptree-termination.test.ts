@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it, type Mock, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -139,7 +139,7 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 		const reader = child.stdout.getReader();
 		let descendant: Process | null = null;
 		const fromPid = Process.fromPid;
-		let spy: ReturnType<typeof spyOn> | undefined;
+		let spy: Mock<typeof Process.fromPid> | undefined;
 		try {
 			const output = await reader.read();
 			descendant = fromPid.call(Process, Number.parseInt(new TextDecoder().decode(output.value), 10));
@@ -194,7 +194,7 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 			const reader = child.stdout.getReader();
 			let descendant: Process | null = null;
 			const fromPid = Process.fromPid;
-			let spy: ReturnType<typeof spyOn> | undefined;
+			let spy: Mock<typeof Process.fromPid> | undefined;
 			try {
 				const output = await reader.read();
 				descendant = fromPid.call(Process, Number.parseInt(new TextDecoder().decode(output.value), 10));
