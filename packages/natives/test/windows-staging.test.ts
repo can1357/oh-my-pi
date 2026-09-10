@@ -7,7 +7,6 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
-import { pathToFileURL } from "node:url";
 import * as path from "node:path";
 import {
 	cleanupStaleNativeVersions,
@@ -179,9 +178,9 @@ describe("windows native addon staging", () => {
 	});
 
 	it.skipIf(process.platform !== "win32")(
-		"isolates updater loads and rejects switching after a direct load",
+		"exercises package exports map: updater stages via ./loader, normal loads via . entry, corrupt cache is fatal",
 		async () => {
-			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-installed-natives-"));
+			const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-installed-natives-")));
 			try {
 				const coreDir = path.join(root, "node_modules/@oh-my-pi/pi-natives");
 				const leafDir = path.join(root, `node_modules/@oh-my-pi/pi-natives-${process.platform}-${process.arch}`);
@@ -220,14 +219,23 @@ describe("windows native addon staging", () => {
 				const stagedAddon = path.join(cacheDir, packageJson.version, addonFilename);
 				await fs.mkdir(path.join(dataHome, "omp"), { recursive: true });
 				const probePath = path.join(root, "probe.mjs");
-				const probeUrl = pathToFileURL(path.join(coreDir, "native/loader-state.js")).href;
 				await Bun.write(
 					probePath,
 					[
-						`import { enableNativeAddonStaging, loadNative } from ${JSON.stringify(probeUrl)};`,
+						// Use bare specifiers, not file URLs, so the probe exercises the
+						// real package exports map: ./loader subpath + . entrypoint.
+						// This catches regressions where an early import loads the native
+						// addon before enableNativeAddonStaging runs, or where ./loader
+						// resolves a different module instance from the . entry.
+						// Dynamic import of the . entry is intentional: it delays the
+						// side-effectful loadNative() call until after staging is set.
+						'import { enableNativeAddonStaging } from "@oh-my-pi/pi-natives/loader";',
 						'import assert from "node:assert/strict";',
 						'if (process.argv[2] === "stage") enableNativeAddonStaging();',
-						"try { loadNative(); } catch (err) { process.stderr.write(String(err)); process.exit(1); }",
+						// The . entry calls loadNative() at module evaluation; the
+						// dynamic import triggers that side effect. If staging is on,
+						// it loads the cache copy; if off, it loads from node_modules.
+						'try { await import("@oh-my-pi/pi-natives"); } catch (err) { process.stderr.write(String(err)); process.exit(1); }',
 						'if (process.argv[2] === "direct") assert.throws(enableNativeAddonStaging, Error);',
 						'process.stdout.write("ok");',
 					].join("\n"),
