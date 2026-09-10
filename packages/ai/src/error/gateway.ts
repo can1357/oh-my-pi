@@ -1,5 +1,13 @@
 import { ConfigurationError, ValidationError } from "./validation";
-import { Flag, is, isAccountPolicyError, isOAuthExpiry, isUsageLimit, matchesOverflowText } from "./flags";
+import {
+	Flag,
+	is,
+	isAccountPolicyError,
+	isClinePassSurfaceGateMessage,
+	isOAuthExpiry,
+	isUsageLimit,
+	matchesOverflowText,
+} from "./flags";
 import {
 	is402BillingCapBody,
 	isConcurrencyCapExclusion,
@@ -233,6 +241,9 @@ function classifyOwnerDisposition(
 	}
 	if (is(errorId, Flag.ContentBlocked) || kind === "content-blocked") {
 		return { owner: "policy", disposition: "policy_terminal" };
+	}
+	if (status === 403 && isClinePassSurfaceGateMessage(message)) {
+		return { owner: "model", disposition: "model_unavailable" };
 	}
 	if (is(errorId, Flag.AuthFailed)) {
 		return { owner: "credential", disposition: "credential_transient" };

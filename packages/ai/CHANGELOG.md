@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Product-surface model restrictions no longer rotate otherwise valid credentials.
 - Fixed gateway error classification swallowing retryable failures: authoritative statuses now outrank abort wording, 403 account caps rotate as quota, Trusted-Access/cyber-policy denials rotate credentials instead of terminating, 400 model-missing responses fail over by model, dead OAuth grants (`invalid_token` et al) retire permanently, and concurrency-cap 429s stay in provider backoff.
 - Fixed gateway classification for structurally flagged authentication failures and transient provider errors, including exhausted Anthropic 409 conflicts; strict-tool fallback now preserves storage overrides from the actual first request payload.
 
