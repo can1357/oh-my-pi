@@ -1551,21 +1551,27 @@ mod tests {
 		);
 	}
 	/// The oracle must emit git's canonical patch text even when the
-	/// repository's own config sets a hostile external diff driver —
+	/// repository's own config sets a hostile external diff or textconv driver —
 	/// otherwise every parity assertion above silently compares the backend
 	/// against a third-party renderer instead of git.
 	#[test]
 	fn oracle_ignores_repo_local_external_diff_config() {
 		let dir = fixture();
 		git(dir.path(), &["config", "diff.external", "false"]);
+		git(dir.path(), &["config", "diff.hostile.textconv", "false"]);
 		git(dir.path(), &["config", "diff.mnemonicPrefix", "true"]);
 		git(dir.path(), &["config", "diff.context", "10"]);
 		git(dir.path(), &["config", "diff.noprefix", "true"]);
 		git(dir.path(), &["config", "color.diff", "always"]);
+		fs::write(dir.path().join(".gitattributes"), "*.txt diff=hostile\n")
+			.expect("write hostile attributes");
+		git(dir.path(), &["add", ".gitattributes"]);
+		git(dir.path(), &["commit", "-qm", "hostile textconv"]);
 		fs::write(dir.path().join("file.txt"), "one\nchanged\nthree\n").expect("write");
 		let expected = git(dir.path(), &["diff"]);
 		assert!(expected.starts_with("diff --git a/file.txt b/file.txt\n"), "{expected}");
 		assert!(expected.contains("--- a/file.txt\n+++ b/file.txt\n"), "{expected}");
+		assert!(expected.contains("-two\n+changed\n"), "{expected}");
 		assert!(!expected.contains('\u{1b}'), "no ANSI colour escapes: {expected}");
 		let repo = GitRepo::discover(dir.path())
 			.expect("discover")

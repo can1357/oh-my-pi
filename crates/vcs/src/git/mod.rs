@@ -435,6 +435,7 @@ pub(crate) fn oracle_git(dir: &Path, args: &[&str]) -> Command {
 		command.arg(first);
 		if matches!(*first, "diff" | "show" | "diff-tree" | "log") {
 			command.arg("--no-ext-diff");
+			command.arg("--no-textconv");
 		}
 		command.args(rest);
 	}
