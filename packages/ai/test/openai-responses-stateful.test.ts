@@ -118,6 +118,28 @@ describe("openai-responses stateful chaining", () => {
 		expect(JSON.stringify(deltaInput)).not.toContain("Answer 1");
 	});
 
+	it("stores responses for caller-owned previous_response_id continuations", async () => {
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const fetchMock = createCapturingFetch(sentRequests);
+		const firstUser = { role: "user" as const, content: "First question", timestamp: 1000 };
+		const firstResponse = await streamOpenAIResponses(
+			model,
+			{ messages: [firstUser] },
+			{ apiKey: "test-key", fetch: fetchMock, statefulResponses: false, previousResponseId: "resp_seed" },
+		).result();
+		await streamOpenAIResponses(
+			model,
+			{ messages: [firstUser, firstResponse, { role: "user", content: "Second question", timestamp: 1001 }] },
+			{ apiKey: "test-key", fetch: fetchMock, statefulResponses: false, previousResponseId: "resp_1" },
+		).result();
+
+		expect(sentRequests).toHaveLength(2);
+		expect(sentRequests[0]?.previous_response_id).toBe("resp_seed");
+		expect(sentRequests[0]?.store).toBe(true);
+		expect(sentRequests[1]?.previous_response_id).toBe("resp_1");
+		expect(sentRequests[1]?.store).toBe(true);
+	});
+
 	it("keeps the automatic explicit cache breakpoint stable across chained turns", async () => {
 		const sentRequests: Array<Record<string, unknown>> = [];
 		const fetchMock = createCapturingFetch(sentRequests);

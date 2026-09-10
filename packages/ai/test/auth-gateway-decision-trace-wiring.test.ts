@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -122,6 +122,11 @@ describe("auth-gateway decision-trace wiring", () => {
 			});
 			expect(res.status).toBe(401);
 			const recorded = traces.list().filter(t => t.routeId === "mock/trace-skip");
+			const requestId = res.headers.get("x-request-id");
+			expect(requestId).toBeTruthy();
+			expect(res.headers.get("request-id")).toBe(requestId);
+			expect(recorded).toHaveLength(1);
+			expect(requestId).toBe(recorded[0]!.requestId);
 			expect(recorded).toEqual([
 				expect.objectContaining({
 					disposition: "skipped",
@@ -129,6 +134,46 @@ describe("auth-gateway decision-trace wiring", () => {
 					selectedTarget: "mock/trace-skip",
 				}),
 			]);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("returns the traced request ID when pi-native credential lookup fails", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-trace-lookup-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const mock = createMockModel({ provider: "openrouter", id: "mock/trace-lookup" });
+		vi.spyOn(storage, "getApiKey").mockRejectedValue(new Error("credential broker unavailable"));
+		const traces = new RouteDecisionTraceLog();
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel: () => mock.model,
+			decisionTraces: traces,
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					modelId: "mock/trace-lookup",
+					context: { messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+					stream: false,
+				}),
+			});
+			expect(res.status).toBe(502);
+			const recorded = traces.list().filter(t => t.routeId === "mock/trace-lookup");
+			const requestId = res.headers.get("x-request-id");
+			expect(requestId).toBeTruthy();
+			expect(res.headers.get("request-id")).toBe(requestId);
+			expect(recorded).toHaveLength(1);
+			expect(requestId).toBe(recorded[0]!.requestId);
+			expect(recorded[0]?.reason).toBe("credential_lookup_failed");
 		} finally {
 			await handle.close();
 			storage.close();

@@ -90,4 +90,17 @@ describe("RouteDecisionTraceLog", () => {
 			}),
 		).toThrow(/reason/);
 	});
+
+	it("accepts credential lookup failures as retrievable skipped traces", () => {
+		const log = new RouteDecisionTraceLog();
+		const trace = log.record({
+			requestId: "lookup-failure",
+			routeId: "gpt-5",
+			generation: 1,
+			selectedTarget: "gpt-5",
+			disposition: "skipped",
+			reason: "credential_lookup_failed",
+		});
+		expect(log.list()).toContainEqual(trace);
+	});
 });

@@ -518,6 +518,7 @@ const streamOpenAIResponsesOnce = (
 			// the client's id would send the delta to the wrong conversation.
 			// Branch before any delta construction — the client id wins.
 			const clientPreviousResponseId = options?.previousResponseId;
+			if (clientPreviousResponseId !== undefined) params.store = true;
 			let chainedInternal = false;
 			let chained: OpenAIResponsesChainedParams = clientPreviousResponseId
 				? {

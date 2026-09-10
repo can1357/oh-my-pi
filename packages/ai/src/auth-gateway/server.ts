@@ -338,6 +338,26 @@ function clientClosedResponse(route: { module: FormatModule }): Response {
 	return route.module.formatError(499, "request_aborted", "client closed request");
 }
 
+interface GatewayErrorResponseModule {
+	formatError(status: number, type: string, message: string): Response;
+}
+
+function tracedGatewayErrorResponse(
+	module: GatewayErrorResponseModule,
+	model: Model<Api>,
+	requestId: string,
+	status: number,
+	type: string,
+	message: string,
+): Response {
+	const response = module.formatError(status, type, message);
+	const headers = new Headers(response.headers);
+	for (const [name, value] of Object.entries(gatewayResponseHeaders(model, { requestId }))) {
+		headers.set(name, value);
+	}
+	return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
 /**
  * Attribute one settled upstream request to the originating client via the
  * broker's observed-usage channel (`AuthStorage.recordObservedUsage`, batched
@@ -492,7 +512,14 @@ async function handleFormatEndpoint(
 		});
 		logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
-		return route.module.formatError(classified.status, classified.type, classified.message);
+		return tracedGatewayErrorResponse(
+			route.module,
+			model,
+			requestId,
+			classified.status,
+			classified.type,
+			classified.message,
+		);
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 	if (!apiKey) {
@@ -505,7 +532,10 @@ async function handleFormatEndpoint(
 			reason: "credential_unavailable",
 		});
 		logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
-		return route.module.formatError(
+		return tracedGatewayErrorResponse(
+			route.module,
+			model,
+			requestId,
 			401,
 			"authentication_error",
 			`No credential available for provider ${model.provider}`,
@@ -718,7 +748,14 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		});
 		logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
-		return piNative.formatError(classified.status, classified.type, classified.message);
+		return tracedGatewayErrorResponse(
+			piNative,
+			model,
+			requestId,
+			classified.status,
+			classified.type,
+			classified.message,
+		);
 	}
 	if (controller.signal.aborted) return aborted();
 	if (!apiKey) {
@@ -731,7 +768,10 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			reason: "credential_unavailable",
 		});
 		logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
-		return piNative.formatError(
+		return tracedGatewayErrorResponse(
+			piNative,
+			model,
+			requestId,
 			401,
 			"authentication_error",
 			`No credential available for provider ${model.provider}`,
