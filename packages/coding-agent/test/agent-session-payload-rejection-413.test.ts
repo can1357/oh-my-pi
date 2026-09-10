@@ -435,22 +435,27 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		expect(continueSpy).not.toHaveBeenCalled();
 	});
 
-	it("excludes snapcompact from the payload-rejection compaction attempt (#11482)", async () => {
+	it("skips snapcompact and lands on soft for a payload-rejection compaction attempt (#11482)", async () => {
 		// The `session_before_compact` hook mocked in `createSession` supplies a
 		// canned summary regardless of which method actually runs, so it can't
-		// distinguish snapcompact from soft/shake by observable side effects
-		// alone. Spy on `runAutoCompaction` directly to verify the wiring: a
-		// payload rejection must ask for `excludeMediaMethods: true` so
-		// `runAutoCompaction`'s own method-selection loop skips snapcompact —
-		// which archives history onto base64 image frames, growing the exact
-		// byte budget a payload/byte-limit 413 already exceeded.
-		await createSession(null);
-		const runAutoCompactionSpy = vi.spyOn(SessionMaintenance.prototype, "runAutoCompaction");
+		// distinguish methods by that side effect. Assert on the compaction
+		// lifecycle's own `action` field instead (session-maintenance.ts: the
+		// dispatched `action` is literally "snapcompact" for that method, and
+		// "context-full" for "soft"/"handoff"-summary methods) — a real,
+		// observable proof of which method ran, not just that an option was
+		// forwarded. The bundled test model supports image input
+		// (`input: ["text","image"]`), so with `methodOrder: ["snapcompact",
+		// "soft"]` an unfixed selection loop would pick snapcompact first.
+		await createSession(null, undefined, {
+			extraSettings: { "compaction.methodOrder": ["snapcompact", "soft"] },
+		});
 		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
 		vi.spyOn(session.agent, "continue").mockResolvedValue();
 
+		const startActions: unknown[] = [];
 		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
 		session.subscribe(event => {
+			if (event.type === "auto_compaction_start") startActions.push((event as { action?: unknown }).action);
 			if (event.type === "auto_compaction_end") onCompactionDone();
 		});
 
@@ -461,9 +466,9 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		await compactionDone;
 		await session.waitForIdle();
 
-		expect(runAutoCompactionSpy).toHaveBeenCalled();
-		const overflowCall = runAutoCompactionSpy.mock.calls.find(call => call[0] === "overflow");
-		expect(overflowCall?.[4]?.excludeMediaMethods).toBe(true);
+		expect(startActions.length).toBeGreaterThanOrEqual(1);
+		expect(startActions).not.toContain("snapcompact");
+		expect(startActions).toContain("context-full");
 	});
 
 	it("still blocks a payload-only 413 with no context window when the only configured method can't run for overflow (#11482)", async () => {
