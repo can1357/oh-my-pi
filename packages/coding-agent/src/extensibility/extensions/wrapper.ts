@@ -380,7 +380,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				),
 				content: result.content,
 				details: result.details,
-				isError: !!executionError,
+				isError: !!executionError || result.isError === true,
 			});
 
 			if (resultResult) {

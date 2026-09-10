@@ -5,7 +5,7 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts, invokeJsTool } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { executeJs, type JsResult } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
-import { describeEvalTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
+import { createEvalCustomTools, describeEvalTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -157,6 +157,14 @@ describe("executeJs", () => {
 			{ sessionKey: toolSessionId, session: evalSession },
 		);
 		expect(failed).toEqual({ ok: false, error: "kaboom" });
+		const [boomTool] = createEvalCustomTools(evalSession, await describeEvalTools(evalSession, ["boom"]));
+		if (!boomTool) throw new Error("Expected the defined eval tool");
+		const bridgedFailure = await Reflect.apply(boomTool.execute, boomTool, ["call-boom", {}, undefined, undefined]);
+		expect(bridgedFailure).toMatchObject({
+			content: [{ type: "text", text: "kaboom" }],
+			details: { evalTool: "boom", language: "js", isError: true },
+			isError: true,
+		});
 		const alive = await executeJs("return 'still here';", {
 			sessionId: toolSessionId,
 			session: evalSession,

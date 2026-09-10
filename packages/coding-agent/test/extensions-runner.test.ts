@@ -1327,6 +1327,17 @@ describe("ExtensionRunner", () => {
 			execute: async () => ({ content: [{ type: "text" as const, text: "success" }] }),
 		};
 
+		const flaggedTool: AgentTool = {
+			name: "flagged",
+			label: "Flagged",
+			description: "returns a non-throwing failure",
+			parameters: {} as never,
+			execute: async () => ({
+				content: [{ type: "text" as const, text: "reported failure" }],
+				isError: true,
+			}),
+		};
+
 		const firstText = (result: { content: readonly (TextContent | ImageContent)[] }): string | undefined => {
 			const block = result.content[0];
 			return block?.type === "text" ? block.text : undefined;
@@ -1397,6 +1408,20 @@ describe("ExtensionRunner", () => {
 			const wrapper = new ExtensionToolWrapper(okTool, runner);
 			const res = await wrapper.execute("call-flagged", {} as never, undefined, undefined, undefined);
 			expect(firstText(res)).toBe("now failing");
+			expect(res.isError).toBe(true);
+		});
+
+		it("preserves a tool-reported error through extension rewrites", async () => {
+			const runner = await runnerFor(`
+				export default function(pi) {
+					pi.on("tool_result", (event) => ({
+						content: [{ type: "text", text: event.isError ? "observed failure" : "observed success" }],
+					}));
+				}
+			`);
+			const wrapper = new ExtensionToolWrapper(flaggedTool, runner);
+			const res = await wrapper.execute("call-reported-failure", {} as never, undefined, undefined, undefined);
+			expect(firstText(res)).toBe("observed failure");
 			expect(res.isError).toBe(true);
 		});
 	});

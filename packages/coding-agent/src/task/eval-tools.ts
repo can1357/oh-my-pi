@@ -138,6 +138,7 @@ function errorResult(
 	return {
 		content: [{ type: "text", text: error }],
 		details: { evalTool: name, language, isError: true },
+		isError: true,
 	};
 }
 
