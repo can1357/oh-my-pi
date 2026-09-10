@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Claude-Code-style `mcp__<server>__<tool>` calls (double underscore) now resolve to the tool OMP registers as `mcp__<server>_<tool>`, instead of failing with `Tool <name> not found`. OMP presents a Claude Code identity to Anthropic endpoints, so models trained on that client emit its separator; the repair re-mints both segments through `createMCPToolName`, so lossy sanitization still applies (server `context7` resolves to `mcp__context_resolve_library_id`) and an unregistered result keeps the original failure rather than guessing a target ([#11516](https://github.com/can1357/oh-my-pi/issues/11516)).
+- Claude-Code-style `mcp__<server>__<tool>` calls (double underscore) are now rewritten to the key OMP registers, `mcp__<server>_<tool>`, instead of failing with `Tool <name> not found`. OMP presents a Claude Code identity to Anthropic endpoints, so models trained on that client emit its separator. The name is repaired on the assistant message before dispatch, so the exact-match path stays authoritative — active-set gating and execution wrappers still apply, and history, persistence, and provider replay all record an advertised name. Both segments are re-minted through `createMCPToolName`, so lossy sanitization applies (server `context7` resolves to `mcp__context_resolve_library_id`) and a name that is not an advertised tool keeps its original failure rather than binding to a substitute ([#11516](https://github.com/can1357/oh-my-pi/issues/11516) by [@oldschoola](https://github.com/oldschoola)).
 
 ## [18.1.16] - 2026-09-09
 

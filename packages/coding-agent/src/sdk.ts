@@ -3013,15 +3013,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (!state) return undefined;
 			return resolveMountedXdevExecutable(state, name);
 		};
-		// Last-resort name repair before the loop reports `Tool <name> not found`.
-		// Keeps `resolveDeviceTool` itself untouched so Cursor's `getExecutableTool`
-		// keeps resolving device mounts only.
-		const resolveFallbackTool = (name: string): AgentTool | undefined => {
-			const mounted = resolveDeviceTool(name);
-			if (mounted) return mounted;
-			const collapsed = collapseMCPToolNameSeparator(name, candidate => toolRegistry.has(candidate));
-			return collapsed === undefined ? undefined : toolRegistry.get(collapsed);
-		};
 		// Cursor's resource frames ask what THIS client's servers advertise; only
 		// live connections have any. Built once: the advisor bridges answer from
 		// the same connections the primary does.
@@ -3602,6 +3593,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// A stray sloppy payload in plain text becomes a real edit tool call so
 			// the normal pipeline (validation, approval, rendering) executes it.
 			transformAssistantMessage: message => {
+				// Repair a Claude-Code-shaped `mcp__<server>__<tool>` name into the key
+				// OMP mints (#11516). Rewriting the call itself — rather than resolving
+				// a substitute tool at dispatch — keeps the exact-match path authoritative,
+				// so active-set gating and execution wrappers still apply, and history,
+				// persistence, and provider replay all record an advertised name.
+				for (const block of message.content) {
+					if (block.type !== "toolCall") continue;
+					const canonical = collapseMCPToolNameSeparator(block.name, candidate =>
+						agent.state.tools.some(tool => tool.name === candidate),
+					);
+					if (canonical === undefined) continue;
+					logger.info("repaired Claude Code MCP tool name separator", { from: block.name, to: canonical });
+					block.name = canonical;
+				}
 				if (!settings.get("edit.recoverInlineEdits")) return;
 				// The live tool is an ExtensionToolWrapper whose proxy forwards the
 				// EditTool `mode` getter; a bridge/custom edit tool without a sloppy
@@ -3613,7 +3618,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					logger.info("recovered inline sloppy edit payload into edit tool call", { regions: recovered });
 				}
 			},
-			resolveFallbackTool,
+			resolveFallbackTool: resolveDeviceTool,
 			intentTracing: !!intentField,
 			pruneToolDescriptions: inlineToolDescriptors,
 			dialect: resolveDialect(settings.get("tools.format"), model),
@@ -4180,7 +4185,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
 					streamFn: settingsAwareStreamFn,
 					transformToolCallArguments,
-					resolveFallbackTool,
+					resolveFallbackTool: resolveDeviceTool,
 					intentTracing: !!intentField,
 					pruneToolDescriptions: inlineToolDescriptors,
 					dialect: resolveDialect(settings.get("tools.format"), captureModel),
