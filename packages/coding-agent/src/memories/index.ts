@@ -1029,7 +1029,7 @@ async function listRelativeFiles(rootDir: string, prefix = ""): Promise<string[]
 	return files;
 }
 
-async function pruneEmptyDirectories(rootDir: string): Promise<void> {
+export async function pruneEmptyDirectories(rootDir: string): Promise<void> {
 	const entries = await fs.readdir(rootDir, { withFileTypes: true }).catch(error => {
 		if (!isEnoent(error)) logger.warn("Failed to prune memory directories", { rootDir, error });
 		return [];
@@ -1038,11 +1038,14 @@ async function pruneEmptyDirectories(rootDir: string): Promise<void> {
 		if (!entry.isDirectory()) continue;
 		const child = path.join(rootDir, entry.name);
 		await pruneEmptyDirectories(child);
+		// A failed re-read is unknown, not empty: only a positively-empty
+		// listing may delete. Deleting on `[]`-by-failure would let a
+		// transient EMFILE/I/O error recursively remove a populated subtree.
 		const childEntries = await fs.readdir(child).catch((error: unknown) => {
 			if (!isEnoent(error)) logger.warn("Failed to read memory directory", { child, error });
-			return [] as string[];
+			return undefined;
 		});
-		if (childEntries.length === 0) {
+		if (childEntries !== undefined && childEntries.length === 0) {
 			await fs.rm(child, { recursive: true, force: true });
 		}
 	}
