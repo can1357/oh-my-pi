@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 //! Runtime-agnostic brush shell execution.
 
 #[cfg(windows)]
@@ -145,6 +146,7 @@ pub type ShellExecuteResult = ShellRunResult;
 pub struct Shell {
 	session:     Arc<TokioMutex<Option<ShellSessionCore>>>,
 	abort_state: ShellAbortState,
+	closed:      Arc<AtomicBool>,
 	config:      ShellConfig,
 }
 
@@ -168,6 +170,7 @@ impl Shell {
 		Self {
 			session: Arc::new(TokioMutex::new(None)),
 			abort_state: ShellAbortState::default(),
+			closed: Arc::new(AtomicBool::new(false)),
 			config,
 		}
 	}
@@ -178,6 +181,9 @@ impl Shell {
 		on_chunk: Option<Sender<String>>,
 		mut cancel_token: CancelToken,
 	) -> Result<ShellRunResult> {
+		if self.closed.load(Ordering::Acquire) {
+			return Err(Error::msg("Shell is closed"));
+		}
 		let run_config = ShellRunConfig {
 			command:   options.command,
 			cwd:       options.cwd,
@@ -193,6 +199,23 @@ impl Shell {
 			&mut cancel_token,
 		)
 		.await
+	}
+
+	/// Deterministically close this shell session.
+	///
+	/// Active execution is aborted, the persistent session is released, and
+	/// future run calls are rejected. Repeated calls are safe.
+	pub async fn close(&self) -> Result<()> {
+		if self.closed.swap(true, Ordering::AcqRel) {
+			return Ok(());
+		}
+
+		self.abort_state.abort().await;
+
+		let mut guard = self.session.lock().await;
+		guard.take();
+
+		Ok(())
 	}
 
 	pub async fn abort(&self) {
