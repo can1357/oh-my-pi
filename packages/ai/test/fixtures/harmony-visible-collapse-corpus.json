@@ -72,6 +72,12 @@
 			"signal": "N",
 			"text": "Rocker drawing export is active.\n\n a a \n\nWaiting on the verdict.",
 			"_note": "Session 2026-09-09T16-02-08Z, 33 blocks. A repeated single letter on its own line, between otherwise plausible status prose."
+		},
+		{
+			"id": "visible_marker_lazy_indent",
+			"signal": "M+V",
+			"text": "The failing turn ended with\n    to=functions.hub\nand nothing after it.",
+			"_note": "An indented line cannot interrupt a paragraph, so this is prose continuation, not a code block."
 		}
 	],
 	"negatives": [
@@ -135,6 +141,11 @@
 			"id": "duplicated_short_token_line",
 			"text": "Diff header:\n\n-- --\n\nAnd the reviewer said ok ok to the rename.",
 			"_note": "Separator lines and duplicated words are ordinary; only a repeated single ASCII letter is the observed filler shape."
+		},
+		{
+			"id": "indented_code_block_quoting_marker",
+			"text": "The leak shape is:\n\n    analysis to=functions.edit code\n\nThat is the whole signature.",
+			"_note": "CommonMark indented code block. Renders as code in the TUI, so the marker inside it is quoted evidence."
 		}
 	]
 }

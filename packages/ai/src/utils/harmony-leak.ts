@@ -502,7 +502,7 @@ function computeCodeRanges(text: string): Array<[number, number]> {
 				fence = undefined;
 				spanScanStart = lineEnd;
 			} else if (fence === undefined) {
-				pushInlineSpans(text, spanScanStart, lineStart, ranges);
+				pushUnfencedCode(text, spanScanStart, lineStart, ranges);
 				fence = { start: lineStart, marker: run };
 			}
 		}
@@ -510,9 +510,51 @@ function computeCodeRanges(text: string): Array<[number, number]> {
 		lineStart = newline + 1;
 	}
 	if (fence !== undefined) ranges.push([fence.start, text.length]);
-	else pushInlineSpans(text, spanScanStart, text.length, ranges);
+	else pushUnfencedCode(text, spanScanStart, text.length, ranges);
 	ranges.sort((a, b) => a[0] - b[0]);
 	return ranges;
+}
+
+/** Inline spans plus indented code blocks in the unfenced region `[from, to)`. */
+function pushUnfencedCode(text: string, from: number, to: number, ranges: Array<[number, number]>): void {
+	pushInlineSpans(text, from, to, ranges);
+	pushIndentedBlocks(text, from, to, ranges);
+}
+
+/**
+ * CommonMark indented code blocks: chunks of lines indented by four spaces or
+ * a tab. Such a block cannot interrupt a paragraph, so it must open after a
+ * blank line, and interior blank lines belong to it. Documentation quoting a
+ * marker this way renders as code and must not be scanned.
+ */
+function pushIndentedBlocks(text: string, from: number, to: number, ranges: Array<[number, number]>): void {
+	let blockStart: number | undefined;
+	let blockEnd = 0;
+	let prevBlank = true;
+	let lineStart = from;
+	while (lineStart < to) {
+		const newline = text.indexOf("\n", lineStart);
+		const lineEnd = newline === -1 || newline > to ? to : newline;
+		const line = text.slice(lineStart, lineEnd);
+		const blank = line.trim().length === 0;
+		if (!blank && isIndentedCodeLine(line)) {
+			if (blockStart === undefined && prevBlank) blockStart = lineStart;
+			if (blockStart !== undefined) blockEnd = lineEnd;
+		} else if (!blank && blockStart !== undefined) {
+			ranges.push([blockStart, blockEnd]);
+			blockStart = undefined;
+		}
+		if (!blank) prevBlank = false;
+		else prevBlank = true;
+		if (newline === -1 || newline >= to) break;
+		lineStart = newline + 1;
+	}
+	if (blockStart !== undefined) ranges.push([blockStart, blockEnd]);
+}
+
+function isIndentedCodeLine(line: string): boolean {
+	if (line.startsWith("\t")) return true;
+	return line.startsWith("    ");
 }
 
 /**
