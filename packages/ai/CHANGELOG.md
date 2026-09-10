@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Cursor streams now use the official RunSSE/BidiAppend HTTP/1 fallback, decode structured service errors, report final token usage, and resume from safe server checkpoints ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed

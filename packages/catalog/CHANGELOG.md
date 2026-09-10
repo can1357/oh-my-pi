@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Cursor model discovery now uses account-specific model metadata, variant routing, capabilities, context limits, retention eligibility, and provider defaults ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
+
+### Fixed
+
+- Cursor models now refresh token rates from Cursor's first-party pricing document during discovery instead of appearing free; missing rates remain unknown, while Cursor Router is explicitly marked as variably priced ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added
