@@ -4,6 +4,7 @@
  * `AgentSession`) can route through the client when it advertises the
  * relevant capabilities at `initialize` time.
  */
+import { logger } from "@oh-my-pi/pi-utils";
 import type {
 	PermissionOption as AcpPermissionOption,
 	TerminalHandle as AcpTerminalHandle,
@@ -14,6 +15,7 @@ import type {
 } from "@oh-my-pi/pi-utils/acp";
 import type {
 	ClientBridge,
+	ClientBridgeAgentWakeNotification,
 	ClientBridgeCapabilities,
 	ClientBridgeCreateTerminalParams,
 	ClientBridgePermissionOption,
@@ -22,10 +24,13 @@ import type {
 	ClientBridgeTerminalHandle,
 } from "../../session/client-bridge";
 
+const AGENT_WAKE_NOTIFICATION_METHOD = "_omp/session/wake";
+
 export function createAcpClientBridge(
 	connection: AgentSideConnection,
 	sessionId: string,
 	clientCapabilities: ClientCapabilities | undefined,
+	wakeAware = false,
 ): ClientBridge {
 	const capabilities: ClientBridgeCapabilities = {
 		readTextFile: clientCapabilities?.fs?.readTextFile === true,
@@ -37,6 +42,9 @@ export function createAcpClientBridge(
 	};
 
 	const bridge: ClientBridge = { capabilities, deferAgentInitiatedTurns: true };
+	if (wakeAware) {
+		bridge.notifyAgentWake = notification => sendAgentWakeNotification(connection, sessionId, notification);
+	}
 
 	if (capabilities.readTextFile) {
 		bridge.readTextFile = async params => {
@@ -109,6 +117,28 @@ function wrapTerminalHandle(handle: AcpTerminalHandle): ClientBridgeTerminalHand
 			await handle.release();
 		},
 	};
+}
+
+function sendAgentWakeNotification(
+	connection: AgentSideConnection,
+	sessionId: string,
+	notification: ClientBridgeAgentWakeNotification,
+): void {
+	connection
+		.notify(AGENT_WAKE_NOTIFICATION_METHOD, {
+			sessionId,
+			reason: notification.reason,
+			batchId: notification.batchId,
+		})
+		.catch(error => {
+			// Fire-and-forget by design: a dropped wake only delays the parked
+			// batch until the client's next prompt, which drains it regardless.
+			logger.warn("Failed to send _omp/session/wake notification", {
+				sessionId,
+				reason: notification.reason,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
 }
 
 async function requestPermission(
