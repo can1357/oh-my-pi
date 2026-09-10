@@ -112,6 +112,7 @@ const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fe
  * ship in a chunk of their own.
  */
 const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
+const MAX_PENDING_UI_REQUESTS = 64;
 /**
  * Outcome of {@link CollabHost.requestGuestUi}. `answered` carries the guest's
  * response (an `undefined` value is a genuine guest cancel); `unavailable`
@@ -173,7 +174,7 @@ export class CollabHost {
 	}
 
 	requestGuestUi(request: CollabUiRequestDraft, signal?: AbortSignal): Promise<CollabGuestUiResult> | null {
-		if (!this.#socket || !this.#hasWritablePeers()) return null;
+		if (!this.#socket || signal?.aborted || this.#pendingUi.size >= MAX_PENDING_UI_REQUESTS) return null;
 		const reqId = ++this.#uiReqSeq;
 		const fullRequest: CollabUiRequest = { ...request, reqId };
 		const { promise, resolve } = Promise.withResolvers<CollabGuestUiResult>();
@@ -187,18 +188,10 @@ export class CollabHost {
 			resolve(result);
 		};
 		const onAbort = (): void => settle({ kind: "unavailable" });
-		if (signal?.aborted) return Promise.resolve({ kind: "unavailable" });
 		signal?.addEventListener("abort", onAbort, { once: true });
 		this.#pendingUi.set(reqId, { request: fullRequest, settle });
 		this.#sendWritablePeers({ t: "ui-request", request: fullRequest });
 		return promise;
-	}
-
-	#hasWritablePeers(): boolean {
-		for (const peer of this.#peers.values()) {
-			if (peer.canWrite) return true;
-		}
-		return false;
 	}
 
 	#sendWritablePeers(frame: CollabFrame): void {

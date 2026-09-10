@@ -614,6 +614,66 @@ describe("listClaudePluginRoots", () => {
 		expect(skills.map(s => s.name)).not.toContain("claude-demo");
 	});
 
+	for (const catalogDir of [".claude-plugin", ".omp-plugin"]) {
+		test(`marketplace-root ${catalogDir} entry limits shared skills to declared paths`, async () => {
+			const pluginPath = path.join(tempDir, "plugins", "anthropic-skills");
+			const registryPath = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
+			await Promise.all([
+				fs.mkdir(path.join(pluginPath, "skills", "xlsx"), { recursive: true }),
+				fs.mkdir(path.join(pluginPath, "skills", "skill-creator"), { recursive: true }),
+				fs.mkdir(path.dirname(registryPath), { recursive: true }),
+				fs.mkdir(path.join(pluginPath, catalogDir), { recursive: true }),
+			]);
+			await Promise.all([
+				fs.writeFile(
+					path.join(pluginPath, "skills", "xlsx", "SKILL.md"),
+					"---\nname: xlsx\ndescription: Spreadsheet skill\n---\nBody\n",
+				),
+				fs.writeFile(
+					path.join(pluginPath, "skills", "skill-creator", "SKILL.md"),
+					"---\nname: skill-creator\ndescription: Skill creation skill\n---\nBody\n",
+				),
+				fs.writeFile(
+					path.join(pluginPath, catalogDir, "marketplace.json"),
+					JSON.stringify({
+						name: "anthropic-agent-skills",
+						owner: { name: "Anthropic" },
+						plugins: [
+							{
+								name: "document-skills",
+								source: "./",
+								strict: false,
+								skills: ["./skills/xlsx"],
+							},
+							{
+								name: "example-skills",
+								source: "./",
+								strict: false,
+								skills: ["./skills/skill-creator"],
+							},
+						],
+					}),
+				),
+				fs.writeFile(
+					registryPath,
+					JSON.stringify({
+						version: 2,
+						plugins: {
+							"document-skills@anthropic-agent-skills": [
+								{ scope: "user", installPath: pluginPath, version: "1.0.0" },
+							],
+						},
+					}),
+				),
+			]);
+
+			const result = await loadCapability<Skill>("skills", { cwd: tempDir });
+
+			expect(result.all.find(skill => skill.name === "xlsx")).toBeDefined();
+			expect(result.all.find(skill => skill.name === "skill-creator")).toBeUndefined();
+		});
+	}
+
 	test("defaults scope to user when not specified", async () => {
 		const pluginsDir = path.join(tempDir, ".claude", "plugins");
 		await fs.mkdir(pluginsDir, { recursive: true });

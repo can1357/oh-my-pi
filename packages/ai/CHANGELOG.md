@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed transient Python HTTP/2 stream resets and HTTP/1.1 chunked response interruptions being treated as terminal errors when forwarded by a proxy ([#11160](https://github.com/can1357/oh-my-pi/pull/11160) by [@cyriusweng](https://github.com/cyriusweng)).
+- Ollama cache hits now populate cached-token usage: `prompt_eval_cached_count` from the `/api/chat` done chunk maps to `cacheRead`, with `input` reduced to the uncached portion, so status-line `cache_turn`/`cache_hit` segments and cache-prefix audits report real hit rates instead of false misses.
+
 ## [18.1.16] - 2026-09-09
 
 ### Fixed

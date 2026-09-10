@@ -82,6 +82,7 @@ type OllamaChatChunk = {
 	done?: boolean;
 	done_reason?: string;
 	prompt_eval_count?: number;
+	prompt_eval_cached_count?: number;
 	eval_count?: number;
 };
 
@@ -698,9 +699,17 @@ const streamOllamaOnce = (
 					if (healedToolCallEmitted && output.stopReason === "stop") {
 						output.stopReason = "toolUse";
 					}
-					output.usage.input = chunk.prompt_eval_count ?? 0;
+					// Ollama reports prompt cache splits as prompt_eval_cached_count
+					// (cached) vs prompt_eval_count (total; cached + uncached =
+					// total). Map cached → cacheRead, uncached → input so
+					// cache_turn/cache_hit status segments and the cache-prefix
+					// audit see real hit rates. Local Ollama omits the cached
+					// field; the ?? 0 fallbacks keep local behavior
+					// byte-identical to before.
+					output.usage.cacheRead = chunk.prompt_eval_cached_count ?? 0;
+					output.usage.input = (chunk.prompt_eval_count ?? 0) - output.usage.cacheRead;
 					output.usage.output = chunk.eval_count ?? 0;
-					output.usage.totalTokens = output.usage.input + output.usage.output;
+					output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead;
 				}
 			}
 			if (streamMarkupHealing) {

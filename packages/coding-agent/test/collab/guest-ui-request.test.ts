@@ -529,10 +529,14 @@ describe("collab proto handshake (#4049)", () => {
 			expect(reply.message).toContain("protocol mismatch");
 			expect(reply.message).toContain(`host speaks v${COLLAB_PROTO}`);
 			expect(reply.message).toContain(`guest sent v${COLLAB_PROTO - 1}`);
-			// The rejected guest was never admitted: no participant entry, and a
-			// host ask finds no writable peer to route to.
+			// The rejected guest was never admitted. A host ask is retained for a
+			// later writer instead of being exposed to the stale peer.
 			expect(host.participants.filter(p => p.role !== "host")).toEqual([]);
-			expect(host.requestGuestUi({ kind: "select", title: "anyone?", options: ["Yes"] })).toBeNull();
+			const abort = new AbortController();
+			const pending = host.requestGuestUi({ kind: "select", title: "anyone?", options: ["Yes"] }, abort.signal);
+			if (!pending) throw new Error("expected retained UI request");
+			abort.abort();
+			expect(await pending).toEqual({ kind: "unavailable" });
 		} finally {
 			guest.socket.close();
 			await host.stop("test done");
@@ -674,6 +678,37 @@ describe("collab host dialog vs teardown (#4049 follow-up)", () => {
 			},
 		};
 	}
+
+	it("lets a later writer dismiss a host dialog that was opened with no peers", async () => {
+		const ctx = makeHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new StubDialogController(ctx);
+		let guest: { socket: CollabSocket; nextFrame(): Promise<CollabFrame> } | undefined;
+		try {
+			const result = controller.showCollabAwareSelector("Deploy later?", ["Yes", "No"]);
+			const dialog = controller.localDialogs[0];
+			if (!dialog) throw new Error("expected the local dialog before a writer joined");
+
+			guest = await joinRawGuest(host.link, COLLAB_PROTO);
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+			// Force a directed frame after hello so a missing replay fails without
+			// relying on a timeout: the pending ui-request must precede this error.
+			guest.socket.send({ t: "agent-cmd", cmd: "chat", agentId: "barrier", text: "" });
+			const request = await guest.nextFrame();
+			if (request.t !== "ui-request") throw new Error(`expected ui-request, got ${request.t}`);
+			expect(request.request.title).toBe("Deploy later?");
+
+			guest.socket.send({ t: "ui-response", reqId: request.request.reqId, value: undefined });
+			expect(await result).toBeUndefined();
+			expect(dialog.signal?.aborted).toBe(true);
+		} finally {
+			guest?.socket.close();
+			await host.stop("test done");
+		}
+	});
 
 	it("keeps the local dialog running through collab teardown and returns its eventual answer", async () => {
 		const race = await openRace();
