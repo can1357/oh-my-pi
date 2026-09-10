@@ -2253,16 +2253,84 @@ const streamAnthropicOnce = (
 					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
 					maxRetries: 0,
 				};
-				const request: unknown =
-					isOAuthToken && client.beta
-						? client.beta.messages.create(refreshParams, requestOptions)
-						: client.messages.create(refreshParams, requestOptions);
-				if (!hasAnthropicRawResponseRequest(request)) {
-					throw new AIError.AnthropicStreamEnvelopeError(
-						"Anthropic cache refresh request did not expose a raw response",
-					);
+				let response: Response;
+				const sendRefreshRequest = async (
+					clientToUse: AnthropicMessagesClientLike,
+					optionsToUse: Record<string, unknown>,
+				): Promise<Response> => {
+					const request: unknown =
+						isOAuthToken && clientToUse.beta
+							? clientToUse.beta.messages.create(refreshParams, optionsToUse)
+							: clientToUse.messages.create(refreshParams, optionsToUse);
+					if (!hasAnthropicRawResponseRequest(request)) {
+						throw new AIError.AnthropicStreamEnvelopeError(
+							"Anthropic cache refresh request did not expose a raw response",
+						);
+					}
+					return request.asResponse();
+				};
+
+				try {
+					response = await sendRefreshRequest(client, requestOptions);
+				} catch (error) {
+					if (
+						model.provider === "github-copilot" &&
+						!cliDisabled &&
+						!hasFallenBackToCopilotChat &&
+						AIError.status(error) === 403
+					) {
+						hasFallenBackToCopilotChat = true;
+						cliDisabled = true;
+						copilotDynamicHeaders = buildCopilotDynamicHeaders({
+							messages: context.messages,
+							hasImages: hasCopilotVisionInput(context.messages),
+							premiumMultiplier: model.premiumMultiplier,
+							headers: { ...model.headers, ...options?.headers },
+							initiatorOverride: options?.initiatorOverride,
+							cliDisabled: true,
+						});
+						const fallbackChatHeaders = {
+							...mergeCopilotApiHeaders(mergeHeaders(model.headers, options?.headers), { cliDisabled: true }),
+							"Copilot-Integration-Id": "",
+							"Copilot-Harness-Id": "",
+							"Editor-Version": "",
+							"Editor-Plugin-Version": "",
+						};
+						const fallbackOptions = {
+							...requestOptions,
+							headers: fallbackChatHeaders,
+						};
+						const retryClient = !options?.client
+							? createClient(model, {
+									model,
+									apiKey,
+									cliDisabled: true,
+									extraBetas,
+									stream: false,
+									interleavedThinking: options?.interleavedThinking ?? true,
+									headers: options?.headers,
+									dynamicHeaders: copilotDynamicHeaders?.headers,
+									isOAuth: options?.isOAuth,
+									hasTools: !!context.tools?.length,
+									thinkingEnabled: options?.thinkingEnabled,
+									thinkingDisplay: options?.thinkingDisplay,
+									fetch: options?.fetch,
+									maxRetryDelayMs: options?.maxRetryDelayMs,
+									sessionId:
+										options?.sessionId ??
+										extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
+										options?.promptCacheKey,
+									disableStrictTools,
+								}).client
+							: client;
+						response = await sendRefreshRequest(retryClient, fallbackOptions);
+						if (copilotApiKey) {
+							markCopilotCliDisabled(copilotApiKey);
+						}
+					} else {
+						throw error;
+					}
 				}
-				const response = await request.asResponse();
 				await notifyProviderResponse(options, response, model, response.headers.get("request-id"));
 				const body: unknown = await response.json();
 				if (!isRecord(body)) {
