@@ -390,6 +390,41 @@ describe("collab read-only links", () => {
 		expect(end).toEqual({ t: "ui-request-end", reqId: request.request.reqId });
 	});
 
+	it("acknowledges a late or duplicate writable response after the request settled", async () => {
+		const answerer = await joinAsGuest(host.link, "writer-answer");
+		guestCleanups.push(() => answerer.socket.close());
+		const answererWelcome = await answerer.nextFrame();
+		if (answererWelcome.t !== "welcome") throw new Error(`expected welcome, got ${answererWelcome.t}`);
+
+		const pending = host.requestGuestUi({ kind: "select", title: "Settle once?", options: ["Yes"] });
+		if (!pending) throw new Error("expected writable guest UI request");
+		const request = await answerer.nextFrame();
+		if (request.t !== "ui-request") throw new Error(`expected ui-request, got ${request.t}`);
+		const reqId = request.request.reqId;
+
+		answerer.socket.send({ t: "ui-response", reqId, value: "Yes" });
+		expect(await pending).toEqual({ kind: "answered", value: "Yes" });
+		expect(await answerer.nextFrame()).toEqual({ t: "ui-request-end", reqId });
+
+		// A writer that reconnects after settlement never saw the broadcast end frame
+		// and resends its answer. The barrier orders the reply: before the fix, the
+		// resend was dropped and the barrier error arrived first.
+		const late = await joinAsGuest(host.link, "writer-late");
+		guestCleanups.push(() => late.socket.close());
+		const lateWelcome = await late.nextFrame();
+		if (lateWelcome.t !== "welcome") throw new Error(`expected welcome, got ${lateWelcome.t}`);
+		late.socket.send({ t: "ui-response", reqId, value: "Yes" });
+		late.socket.send({ t: "agent-cmd", cmd: "chat", agentId: "barrier", text: "" });
+		expect(await late.nextFrame()).toEqual({ t: "ui-request-end", reqId });
+		const lateBarrier = await late.nextFrame();
+		if (lateBarrier.t !== "error") throw new Error(`expected error, got ${lateBarrier.t}`);
+
+		// The acknowledgement is targeted: the original writer sees only its own barrier reply.
+		answerer.socket.send({ t: "agent-cmd", cmd: "chat", agentId: "barrier", text: "" });
+		const answererBarrier = await answerer.nextFrame();
+		if (answererBarrier.t !== "error") throw new Error(`expected error, got ${answererBarrier.t}`);
+	});
+
 	it("treats a forged write token as read-only", async () => {
 		const { prompts } = harness;
 

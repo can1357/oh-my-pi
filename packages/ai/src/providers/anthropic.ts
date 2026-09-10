@@ -1805,6 +1805,7 @@ function calculateFallbackTurnCost(
 	requestModel: Model<"anthropic-messages">,
 	usage: Usage,
 	source: AnthropicWireUsage,
+	timestamp: number,
 ): boolean {
 	const iterations = source.iterations ?? [];
 	if (iterations.length === 0) return false;
@@ -1830,7 +1831,7 @@ function calculateFallbackTurnCost(
 		iterationUsage.cacheWrite = cacheWriteTokens;
 		iterationUsage.totalTokens =
 			iterationUsage.input + iterationUsage.output + iterationUsage.cacheRead + iterationUsage.cacheWrite;
-		calculateCost(resolveIterationModel(requestModel, iteration.model), iterationUsage);
+		calculateCost(resolveIterationModel(requestModel, iteration.model), iterationUsage, timestamp);
 		cost.input += iterationUsage.cost.input;
 		cost.output += iterationUsage.cost.output;
 		cost.cacheRead += iterationUsage.cost.cacheRead;
@@ -2274,7 +2275,7 @@ const streamAnthropicOnce = (
 				applyAnthropicUsageExtras(output.usage, wireUsage);
 				output.usage.totalTokens =
 					output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-				calculateCost(model, output.usage);
+				calculateCost(model, output.usage, output.timestamp);
 				output.duration = performance.now() - startTime;
 				stream.push({ type: "start", partial: output });
 				stream.push({ type: "done", reason: "stop", message: output });
@@ -2528,11 +2529,11 @@ const streamAnthropicOnce = (
 								if (serverSideFallback) {
 									const served = fallbackServedModelFromUsage(startUsage);
 									if (served) output.model = served;
-									if (!calculateFallbackTurnCost(model, output.usage, startUsage)) {
-										calculateCost(model, output.usage);
+									if (!calculateFallbackTurnCost(model, output.usage, startUsage, output.timestamp)) {
+										calculateCost(model, output.usage, output.timestamp);
 									}
 								} else {
-									calculateCost(model, output.usage);
+									calculateCost(model, output.usage, output.timestamp);
 								}
 							} else {
 								reportAnthropicEnvelopeAnomaly("message_start missing usage");
@@ -2860,11 +2861,11 @@ const streamAnthropicOnce = (
 								if (serverSideFallback) {
 									const served = fallbackServedModelFromUsage(deltaUsage);
 									if (served) output.model = served;
-									if (!calculateFallbackTurnCost(model, output.usage, deltaUsage)) {
-										calculateCost(model, output.usage);
+									if (!calculateFallbackTurnCost(model, output.usage, deltaUsage, output.timestamp)) {
+										calculateCost(model, output.usage, output.timestamp);
 									}
 								} else {
-									calculateCost(model, output.usage);
+									calculateCost(model, output.usage, output.timestamp);
 								}
 							}
 						} else if (event.type === "message_stop") {

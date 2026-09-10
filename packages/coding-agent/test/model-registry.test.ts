@@ -7,7 +7,9 @@ import { Effort, type FetchImpl, type Model, type OpenAICompat, type ThinkingCon
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { calculateUsageCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { finalizeCustomModel } from "@oh-my-pi/pi-coding-agent/config/custom-models";
+import { applyModelPatch } from "@oh-my-pi/pi-coding-agent/config/model-patch";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -1301,6 +1303,7 @@ describe("ModelRegistry", () => {
 		let addHeaders: ModelRegistry;
 		let omitOnBuiltin: ModelRegistry;
 		let omitOnCustom: ModelRegistry;
+		let scheduledPrices: ModelRegistry;
 		beforeAll(() => {
 			single = readonlyRegistry({
 				providers: {
@@ -1362,6 +1365,25 @@ describe("ModelRegistry", () => {
 			});
 			costPartial = readonlyRegistry({
 				providers: { openai: { modelOverrides: { "gpt-5.6": { cost: { input: 99 } } } } },
+			});
+			scheduledPrices = readonlyRegistry({
+				providers: {
+					deepseek: {
+						api: "openai-completions",
+						baseUrl: "https://api.deepseek.com",
+						auth: "none",
+						modelOverrides: {
+							"deepseek-v4-flash": { name: "Renamed Flash" },
+							"deepseek-v4-pro": { cost: { input: 8, output: 16, cacheRead: 2, cacheWrite: 0 } },
+						},
+						models: [
+							{
+								id: "deepseek-v4-flash-vision-exp",
+								cost: { input: 4, output: 8, cacheRead: 1, cacheWrite: 0 },
+							},
+						],
+					},
+				},
 			});
 			addHeaders = readonlyRegistry({
 				providers: {
@@ -1496,6 +1518,44 @@ describe("ModelRegistry", () => {
 				input: 10,
 				output: 45,
 			});
+		});
+
+		test("non-price overrides keep scheduled rates while user prices stay fixed across tariff changes", () => {
+			expect(scheduledPrices.getError()).toBeUndefined();
+			const renamed = scheduledPrices.find("deepseek", "deepseek-v4-flash");
+			const overridden = scheduledPrices.find("deepseek", "deepseek-v4-pro");
+			const custom = scheduledPrices.find("deepseek", "deepseek-v4-flash-vision-exp");
+			if (!renamed || !overridden || !custom) throw new Error("Expected configured DeepSeek models");
+			const standalone = finalizeCustomModel(
+				{
+					id: "deepseek-v4-pro",
+					provider: "deepseek",
+					api: overridden.api,
+					baseUrl: overridden.baseUrl,
+					cost: { input: 3, output: 6, cacheRead: 1, cacheWrite: 0 },
+				},
+				{ useDefaults: true },
+			);
+			const repatched = applyModelPatch(overridden, { contextWindow: 250_000 }, "merge");
+			const usage = {
+				input: 1_000_000,
+				output: 1_000_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2_000_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+			const peak = Date.parse("2026-09-10T03:00:00Z");
+			const offPeak = Date.parse("2026-09-10T04:00:00Z");
+			const afterRateChange = Date.parse("2026-09-14T04:00:00Z");
+			expect(calculateUsageCost(renamed.cost, usage, peak).total).toBeCloseTo(1.5, 8);
+			expect(calculateUsageCost(renamed.cost, usage, offPeak).total).toBeCloseTo(0.75, 8);
+			for (const timestamp of [peak, offPeak, afterRateChange]) {
+				expect(calculateUsageCost(overridden.cost, usage, timestamp).total).toBe(24);
+				expect(calculateUsageCost(custom.cost, usage, timestamp).total).toBe(12);
+				expect(calculateUsageCost(standalone.cost, usage, timestamp).total).toBe(9);
+				expect(calculateUsageCost(repatched.cost, usage, timestamp).total).toBe(24);
+			}
 		});
 
 		test("model override can add headers", () => {

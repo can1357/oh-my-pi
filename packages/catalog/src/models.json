@@ -70156,6 +70156,118 @@
 		}
 	},
 	"deepseek": {
+		"deepseek-flash": {
+			"id": "deepseek-flash",
+			"name": "deepseek-flash",
+			"api": "openai-completions",
+			"provider": "deepseek",
+			"baseUrl": "https://api.deepseek.com",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.3,
+				"output": 1.2,
+				"cacheRead": 0.006,
+				"cacheWrite": 0,
+				"timeBased": {
+					"offPeakMultiplier": 0.5,
+					"peakWindows": [
+						{
+							"weekdays": [
+								1,
+								2,
+								3,
+								4,
+								5
+							],
+							"startMinute": 60,
+							"endMinute": 240
+						},
+						{
+							"weekdays": [
+								1,
+								2,
+								3,
+								4,
+								5
+							],
+							"startMinute": 360,
+							"endMinute": 600
+						}
+					]
+				}
+			},
+			"contextWindow": null,
+			"maxTokens": null,
+			"identity": {
+				"class": "deepseek"
+			},
+			"requiresGlyphTokenization": false,
+			"tokenizer": "deepseek-v3",
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": true,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": true,
+				"extraBody": {
+					"thinking": {
+						"type": "enabled"
+					}
+				},
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": true,
+				"streamMarkupHealingPattern": "dsml",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false,
+				"nativeKimiK3Reasoning": false,
+				"zaiReasoningEffortDialect": false,
+				"clampOutputToModelMax": false,
+				"stripImageInput": true,
+				"thinkingLoopGuard": "deepseek",
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
+			},
+			"supportsComputerUse": false
+		},
 		"deepseek-v4-flash": {
 			"id": "deepseek-v4-flash",
 			"name": "DeepSeek V4 Flash",
@@ -70167,10 +70279,37 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.14,
-				"output": 0.28,
-				"cacheRead": 0.0028,
-				"cacheWrite": 0
+				"input": 0.3,
+				"output": 1.2,
+				"cacheRead": 0.006,
+				"cacheWrite": 0,
+				"timeBased": {
+					"offPeakMultiplier": 0.5,
+					"peakWindows": [
+						{
+							"weekdays": [
+								1,
+								2,
+								3,
+								4,
+								5
+							],
+							"startMinute": 60,
+							"endMinute": 240
+						},
+						{
+							"weekdays": [
+								1,
+								2,
+								3,
+								4,
+								5
+							],
+							"startMinute": 360,
+							"endMinute": 600
+						}
+					]
+				}
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 384000,
@@ -70335,10 +70474,37 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.14,
-				"output": 0.28,
-				"cacheRead": 0.0028,
-				"cacheWrite": 0
+				"input": 0.3,
+				"output": 1.2,
+				"cacheRead": 0.006,
+				"cacheWrite": 0,
+				"timeBased": {
+					"offPeakMultiplier": 0.5,
+					"peakWindows": [
+						{
+							"weekdays": [
+								1,
+								2,
+								3,
+								4,
+								5
+							],
+							"startMinute": 60,
+							"endMinute": 240
+						},
+						{
+							"weekdays": [
+								1,
+								2,
+								3,
+								4,
+								5
+							],
+							"startMinute": 360,
+							"endMinute": 600
+						}
+					]
+				}
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 384000,
@@ -70500,10 +70666,46 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.435,
-				"output": 0.87,
-				"cacheRead": 0.003625,
-				"cacheWrite": 0
+				"input": 1.32,
+				"output": 3.96,
+				"cacheRead": 0.044,
+				"cacheWrite": 0,
+				"timeBased": {
+					"offPeakMultiplier": 0.5,
+					"peakWindows": [
+						{
+							"weekdays": [
+								1,
+								2,
+								3,
+								4,
+								5
+							],
+							"startMinute": 60,
+							"endMinute": 240
+						},
+						{
+							"weekdays": [
+								1,
+								2,
+								3,
+								4,
+								5
+							],
+							"startMinute": 360,
+							"endMinute": 600
+						}
+					],
+					"effectiveRates": [
+						{
+							"effectiveFrom": 1789358400000,
+							"input": 0.3,
+							"output": 1.2,
+							"cacheRead": 0.006,
+							"cacheWrite": 0
+						}
+					]
+				}
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 384000,

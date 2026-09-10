@@ -19,6 +19,8 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	"lm-studio",
 	"vllm",
 	"openai-codex-device",
+	// Public Provider API discovery via commandCodeModelManagerOptions.
+	"commandcode",
 ]);
 
 function collectReferencedProviders(): Map<string, string> {
