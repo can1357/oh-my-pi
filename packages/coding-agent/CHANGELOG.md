@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- `--no-tools` keeps deferred MCP manager tools off the active wire set after late discovery refresh.
 
 - Cold `--model` miss refresh runs only for KDL credential-scoped catalog providers (ordinary openai typos no longer block startup on discovery).
 - Skip credential-scoped default-role catalog refresh when a bare `--model` or unbound `--models` selector is present so startup does not wait on an unrelated live provider.

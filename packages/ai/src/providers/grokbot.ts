@@ -704,6 +704,19 @@ function usageHasTokens(usage: AssistantMessage["usage"]): boolean {
 	return usage.input > 0 || usage.output > 0 || usage.cacheRead > 0 || usage.cacheWrite > 0 || usage.totalTokens > 0;
 }
 
+/**
+ * Merge a streamed tool-args frame into the accumulated buffer.
+ * Cumulative snapshots replace the buffer; non-prefix frames append (delta wire),
+ * matching probe reconstruction in `scripts/grokbot-probes/parse-connect-stream.mjs`.
+ */
+function mergeStreamedArgsText(previous: string, incoming: string): { argsText: string; delta: string } {
+	if (!incoming || incoming === previous) return { argsText: previous, delta: "" };
+	if (!previous || incoming.startsWith(previous)) {
+		return { argsText: incoming, delta: incoming.slice(previous.length) };
+	}
+	return { argsText: previous + incoming, delta: incoming };
+}
+
 function canFinalizeIncompleteToolArgs(argsText: string, isGrammar: boolean): boolean {
 	if (isGrammar) return argsText.trim().length > 0;
 	const trimmed = argsText.trim();
@@ -1455,7 +1468,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					const state = resolveSendToUserState(part);
 					const argsText =
 						part.args == null ? "" : typeof part.args === "string" ? part.args : JSON.stringify(part.args);
-					if (argsText) state.argsText = argsText;
+					if (argsText) state.argsText = mergeStreamedArgsText(state.argsText, argsText).argsText;
 					const parsed = parseSendToUserContent(state.argsText);
 					if (parsed !== undefined && parsed !== state.lastContent) {
 						const delta = parsed.startsWith(state.lastContent) ? parsed.slice(state.lastContent.length) : parsed;
@@ -1536,21 +1549,24 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					}
 					if (id && state.block.id.startsWith("call_")) state.block.id = id;
 
-					if (argsText && argsText !== state.argsText) {
-						let delta = argsText;
-						if (argsText.startsWith(state.argsText)) delta = argsText.slice(state.argsText.length);
-						state.argsText = argsText;
-						// Keep ToolCall.arguments + streamed buffer current so live
-						// message_update snapshots show bash/edit previews mid-stream.
-						setStreamingPartialJson(state.block, argsText);
-						state.block.arguments = state.isGrammar ? { input: argsText } : parseToolArgs(argsText, false);
-						if (delta) {
-							emitAttemptEvent({
-								type: "toolcall_delta",
-								contentIndex: state.index,
-								delta,
-								partial: output,
-							});
+					if (argsText) {
+						const merged = mergeStreamedArgsText(state.argsText, argsText);
+						if (merged.argsText !== state.argsText) {
+							state.argsText = merged.argsText;
+							// Keep ToolCall.arguments + streamed buffer current so live
+							// message_update snapshots show bash/edit previews mid-stream.
+							setStreamingPartialJson(state.block, merged.argsText);
+							state.block.arguments = state.isGrammar
+								? { input: merged.argsText }
+								: parseToolArgs(merged.argsText, false);
+							if (merged.delta) {
+								emitAttemptEvent({
+									type: "toolcall_delta",
+									contentIndex: state.index,
+									delta: merged.delta,
+									partial: output,
+								});
+							}
 						}
 					}
 					if (isComplete) finishTool(state);

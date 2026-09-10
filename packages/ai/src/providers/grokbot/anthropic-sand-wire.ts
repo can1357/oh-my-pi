@@ -120,10 +120,7 @@ function productProfileForWire(wire: AnthropicSandToolsWire): ProductWireProfile
  */
 const KEEP_MODEL_RETRY_STRIPPED_PARAMS = new Set(["effort", "reasoning", "thinking", "fast"]);
 
-function keepModelRequestedModel(
-	requested: GrokbotRequestedModel,
-	anthropic: boolean,
-): GrokbotRequestedModel {
+function keepModelRequestedModel(requested: GrokbotRequestedModel, anthropic: boolean): GrokbotRequestedModel {
 	if (anthropic) return requested;
 	const next: GrokbotRequestedModel = { modelId: requested.modelId };
 	if (requested.maxMode) next.maxMode = true;

@@ -627,11 +627,8 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		const prose = frameConnectProto(
 			encodeInferenceStreamResponse({ textPart: { text: "Looking into it.", isFinal: true } }),
 		);
-		const fenced =
-			'```json\n{"name":"Shell","arguments":{"command":"echo tools-pong-after-prose"}}\n```';
-		const dump = frameConnectProto(
-			encodeInferenceStreamResponse({ textPart: { text: fenced, isFinal: true } }),
-		);
+		const fenced = '```json\n{"name":"Shell","arguments":{"command":"echo tools-pong-after-prose"}}\n```';
+		const dump = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: fenced, isFinal: true } }));
 		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
 		const fetchImpl = (async () => connectBody(prose, dump, trailer)) as FetchImpl;
 		const context: Context = {
@@ -1295,7 +1292,6 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage ?? "").toMatch(/no text or tool call/i);
 	});
-
 
 	test("rejects empty follow-up after a non-Write tool result", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({

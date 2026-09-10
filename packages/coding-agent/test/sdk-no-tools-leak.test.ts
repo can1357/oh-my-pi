@@ -158,4 +158,44 @@ describe("--no-tools leak prevention", () => {
 		expect(session.getXdevToolEntries()).toEqual([]);
 		expect(session.getActiveToolNames()).toEqual([]);
 	});
+
+	it("keeps deferred MCP manager tools inactive under an empty whitelist", async () => {
+		// `--no-tools` skips alwaysInclude at startup; deferred MCP discovery must
+		// not reintroduce manager tools via refreshMCPTools auto-activation.
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "tools.xdev": true, "plan.enabled": false }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			enableMCP: false,
+			enableLsp: false,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			rules: [],
+			toolNames: [],
+		});
+		sessions.push(session);
+		expect(session.getActiveToolNames()).toEqual([]);
+
+		await session.refreshMCPTools([
+			{
+				name: "mcp__deferred_probe",
+				label: "Deferred probe",
+				description: "Manager tool discovered after session start",
+				parameters: { type: "object", properties: {} },
+				mcpServerName: "deferred",
+				mcpToolName: "probe",
+				execute: async () => ({ content: [] }),
+			} as CustomTool,
+		]);
+
+		expect(session.getToolByName("mcp__deferred_probe")).toBeDefined();
+		expect(session.getActiveToolNames()).toEqual([]);
+		expect(session.getEnabledToolNames()).not.toContain("mcp__deferred_probe");
+	});
 });

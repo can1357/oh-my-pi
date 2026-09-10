@@ -3809,6 +3809,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					: undefined,
 			builtInToolNames: builtInRegistryToolNames,
 			mcpManagerToolNames: initialMcpManagerToolNames,
+			autoActivateMcpManagerTools: !emptyToolWhitelist,
 			transformContext,
 			transformProviderContext,
 			onPayload,

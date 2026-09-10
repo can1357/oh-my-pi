@@ -333,10 +333,7 @@ function blockTextForJsonPromotion(block: { type: string; text?: string; thinkin
 	return undefined;
 }
 
-function parsePromotableToolCallsFromText(
-	text: string,
-	advertisedNames: Iterable<string>,
-): JsonTextToolCall[] {
+function parsePromotableToolCallsFromText(text: string, advertisedNames: Iterable<string>): JsonTextToolCall[] {
 	const promotedJson = parseJsonTextToolCall(text, advertisedNames);
 	if (promotedJson) return [promotedJson];
 	return parseGeminiInbandToolCalls(text, advertisedNames);

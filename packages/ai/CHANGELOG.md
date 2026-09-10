@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Grok Bot accumulates non-prefix streamed tool-argument deltas (and SendToUser args) instead of replacing the buffer with the final fragment.
 
 - Grok Bot Connect streams reject data frames and leftover bytes after the end-stream trailer.
 - Catalog matrix tool smoke rejects `echo ping; exit 1` and relative suffix Read/Write paths that are not the fixture file.

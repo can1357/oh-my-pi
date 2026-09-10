@@ -2235,6 +2235,54 @@ describe("grokbot incomplete tool calls", () => {
 		]);
 	});
 
+	test("accumulates non-prefix tool-arg deltas into valid JSON", async () => {
+		mockAuth();
+		const start = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "echo",
+					args: '{"command":"',
+					isComplete: false,
+				},
+			}),
+		);
+		const mid = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "echo",
+					args: "echo hi",
+					isComplete: false,
+				},
+			}),
+		);
+		const finish = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "echo",
+					args: '"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(start, mid, finish, trailer)) as FetchImpl;
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "toolCall",
+				id: "c1",
+				name: "echo",
+				arguments: { command: "echo hi" },
+			}),
+		]);
+	});
+
 	test("wraps grammar custom-tool raw args as { input } with customWireName", async () => {
 		mockAuth();
 		const patch = "*** Begin Patch\n*** Update File: a.ts\n@@\n-old\n+new\n*** End Patch";

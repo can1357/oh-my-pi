@@ -207,6 +207,11 @@ export interface AgentSessionConfig {
 	builtInToolNames?: Iterable<string>;
 	/** MCP names whose initial registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
+	/**
+	 * When false, deferred MCP manager discovery registers tools but does not
+	 * force-activate them (explicit empty `--no-tools` whitelist). Defaults to true.
+	 */
+	autoActivateMcpManagerTools?: boolean;
 	/** Reconcile browser MCP connections after browser prelude availability changes. */
 	reconcileBrowserMcpFilter?: (enabled: boolean) => Promise<CustomTool[]>;
 	/** Updates tool-session predicates from the live active tool set. */
