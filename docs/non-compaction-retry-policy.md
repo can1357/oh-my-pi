@@ -148,12 +148,20 @@ On `auto_retry_end` (`#handleAutoRetryEnd`), it stops and clears the `retryLoade
 
 `prompt()` ultimately waits on `#waitForPostPromptRecovery()` after `agent.prompt(...)` returns; that loop awaits the retry lifecycle promise alongside TTSR resume and deferred post-prompt tasks.
 
-Effect:
+The retry lifecycle promise belongs to the logical prompt execution, but its resolution is not a persistence or event-delivery barrier. Core event subscribers run asynchronously: successful retry recovery can still be rewriting persisted error annotations before it emits `auto_retry_end`, even after the retry promise resolves.
 
-- a prompt call does not fully resolve until any started retry chain finishes (success/failure/cancel)
-- retry lifecycle is part of one logical prompt execution boundary
+Headless callers that detach listeners or dispose the session after a prompt should wait for session settlement first:
 
-This prevents callers from treating a retrying turn as complete too early.
+```ts
+await session.prompt(input);
+await session.waitForIdle();
+unsubscribe();
+await session.dispose();
+```
+
+`AgentSession.waitForIdle()` drains core streaming, pending advisor card events, internal session event handlers, and deferred recovery. It rechecks for streaming and event handlers started during settlement. This keeps a successful retry's `auto_retry_end` observable before the caller unsubscribes, without changing retry policy or the ordering of `agent_end` relative to `auto_retry_end`.
+
+This barrier does not await arbitrary asynchronous work started by public subscribers. Call it outside callbacks whose completion the session itself awaits; otherwise the drain can wait on its own caller. The barrier has no timeout of its own, so hosts still need an external deadline for stalled work.
 
 ## Controls: settings and RPC
 
