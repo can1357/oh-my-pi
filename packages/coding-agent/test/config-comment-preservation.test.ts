@@ -140,6 +140,35 @@ bash:
 		expect(after).not.toContain("\n  default:");
 	});
 
+	it("detects 4-space step structurally despite a shallower-indented block scalar", async () => {
+		const configPath = path.join(agentDir, "config.yml");
+		// The block scalar's body is indented 2 spaces — less than the 4-space
+		// mapping step. A whitespace-minimum detector would pick 2 and reflow the
+		// maps; structural detection reads the step from the nested map node.
+		await Bun.write(
+			configPath,
+			`shellPath: |
+  echo hi
+  echo bye
+modelRoles:
+    default: anthropic/claude-fable-5-1
+`,
+		);
+
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		settings.setModelRole("smol", "anthropic/claude-haiku-4-5");
+		await settings.flush();
+
+		const after = await Bun.file(configPath).text();
+		expect(after).toContain("\n    default: anthropic/claude-fable-5-1");
+		expect(after).toContain("\n    smol: anthropic/claude-haiku-4-5");
+		expect(after).not.toContain("\n  default:");
+		expect(after).not.toContain("\n  smol:");
+		// Block scalar content is retained (its body reindents to the document step).
+		expect(after).toContain("echo hi");
+		expect(after).toContain("echo bye");
+	});
+
 	it("persists a role write against an aliased modelRoles mapping without throwing", async () => {
 		const configPath = path.join(agentDir, "config.yml");
 		await Bun.write(

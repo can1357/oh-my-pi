@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { OmpErrors, type Type } from "@oh-my-pi/omptype";
 import { getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { JSONC, YAML } from "bun";
-import { Document, isCollection, parseDocument } from "yaml";
+import { Document, isCollection, isMap, isSeq, type ParsedNode, parseDocument } from "yaml";
 
 const YAML_MAPPING_HEADER_TRAILING_SPACE = /: +$/gm;
 
@@ -52,20 +52,39 @@ function reconcileRecord(
 }
 
 /**
+ * Column of the first non-whitespace character on the line containing `offset`.
+ * For a block-mapping key or sequence dash this is the node's own indentation.
+ */
+function lineIndentAt(text: string, offset: number): number {
+	const lineStart = text.lastIndexOf("\n", offset - 1) + 1;
+	const rel = text.slice(lineStart, offset + 1).search(/\S/);
+	return rel < 0 ? 0 : rel;
+}
+
+/**
  * Infer the indentation step (in spaces) a hand-maintained YAML file uses, so
  * reserialization does not reflow untouched blocks from 4-space to 2-space
- * (see #11478). Returns the smallest positive leading-space count across all
- * content lines, clamped to a sane range; defaults to 2 when nothing is nested.
+ * (see #11478). Read it from the first top-level nested collection's own
+ * indentation via structural node ranges — never from raw line whitespace,
+ * which block-scalar content and freely-indented comments would mislead.
+ * Defaults to 2 when nothing is nested in block style.
  */
-function detectYamlIndent(text: string): number {
-	let min = 0;
-	for (const line of text.split("\n")) {
-		if (line.trim().length === 0) continue;
-		const spaces = line.length - line.trimStart().length;
-		if (spaces > 0 && (min === 0 || spaces < min)) min = spaces;
+function detectYamlIndent(doc: Document, text: string): number {
+	const contents = doc.contents;
+	if (!isMap(contents)) return 2;
+	for (const pair of contents.items) {
+		const value = pair.value;
+		const child: ParsedNode | undefined =
+			isMap(value) && value.items.length > 0
+				? (value.items[0].key as ParsedNode)
+				: isSeq(value) && value.items.length > 0
+					? (value.items[0] as ParsedNode)
+					: undefined;
+		if (!child?.range) continue;
+		const step = lineIndentAt(text, child.range[0]);
+		if (step >= 1) return Math.min(step, 8);
 	}
-	if (min < 1) return 2;
-	return Math.min(min, 8);
+	return 2;
 }
 
 /**
@@ -89,7 +108,7 @@ export function reconcileYamlPreservingComments(
 	reconcileRecord(doc, [], isPlainRecord(current) ? current : {}, target);
 	// Match the original indentation and never fold long scalars, so untouched
 	// blocks are emitted byte-for-byte as they were authored.
-	return doc.toString({ indent: hasOriginal ? detectYamlIndent(originalText as string) : 2, lineWidth: 0 });
+	return doc.toString({ indent: hasOriginal ? detectYamlIndent(doc, originalText as string) : 2, lineWidth: 0 });
 }
 
 /** Minimal subset of the AJV ConfigSchemaError shape this module actually relies on. */
