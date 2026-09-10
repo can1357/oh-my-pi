@@ -17,7 +17,7 @@ mod patch;
 mod read;
 use std::{
 	path::{Path, PathBuf},
-	sync::OnceLock,
+	sync::{Mutex, OnceLock},
 };
 
 pub use cli::{COMMAND_TIMEOUT, NETWORK_TIMEOUT, OUTPUT_LIMIT_BYTES, SYNC_TIMEOUT, clone};
@@ -39,6 +39,15 @@ pub struct GitRepo {
 	/// object database, index, or config access. Never populated for reftable
 	/// repositories (operations route through the CLI fallback instead).
 	pub(crate) gix: OnceLock<gix::ThreadSafeRepository>,
+	/// One ref-pair result per handle; concurrent refreshes share the same walk.
+	divergence:     Mutex<Option<DivergenceCache>>,
+}
+
+struct DivergenceCache {
+	head:     String,
+	upstream: String,
+	shallow:  Option<Vec<u8>>,
+	counts:   (u32, u32),
 }
 
 impl std::fmt::Debug for GitRepo {
@@ -60,7 +69,7 @@ impl GitRepo {
 		let Some(info) = discover_info(dir)? else {
 			return Ok(None);
 		};
-		Ok(Some(Self { info, gix: OnceLock::new() }))
+		Ok(Some(Self { info, gix: OnceLock::new(), divergence: Mutex::new(None) }))
 	}
 
 	/// Like [`GitRepo::discover`], but errors with [`Error::NotARepository`]

@@ -8,7 +8,7 @@ use std::{
 use gix::bstr::ByteSlice;
 
 use super::{
-	GitRepo,
+	DivergenceCache, GitRepo,
 	open::{load_index_or_empty, status_with_fresh_index},
 };
 use crate::{
@@ -412,6 +412,8 @@ impl GitRepo {
 	/// Count commits HEAD is ahead of and behind its upstream tracking branch.
 	/// `None` when HEAD is detached/unborn or no upstream is configured; the
 	/// counts are `(0, 0)` when HEAD and upstream point at the same commit.
+	/// Reuses counts while both tips and shallow boundaries are unchanged;
+	/// tracking configuration and refs are resolved afresh on every call.
 	pub fn ahead_behind(&self) -> Result<Option<(u32, u32)>> {
 		let HeadState::Ref { branch: Some(branch), commit: Some(head), .. } = self.head()? else {
 			return Ok(None);
@@ -425,6 +427,31 @@ impl GitRepo {
 		if upstream == head {
 			return Ok(Some((0, 0)));
 		}
+		// Deepening a shallow clone can change reachability without moving refs.
+		let shallow = match std::fs::read(self.info().common_dir.join("shallow")) {
+			Ok(bytes) => Some(bytes),
+			Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+			Err(err) => return Err(err.into()),
+		};
+		let mut cache = self
+			.divergence
+			.lock()
+			.map_err(|err| Error::backend("git ahead/behind cache", err))?;
+		if let Some(cached) = cache.as_ref()
+			&& cached.head == head
+			&& cached.upstream == upstream
+			&& cached.shallow == shallow
+		{
+			return Ok(Some(cached.counts));
+		}
+		let counts = self.count_ahead_behind(&head, &upstream)?;
+		if let Some(counts) = counts {
+			*cache = Some(DivergenceCache { head, upstream, shallow, counts });
+		}
+		Ok(counts)
+	}
+
+	fn count_ahead_behind(&self, head: &str, upstream: &str) -> Result<Option<(u32, u32)>> {
 		if self.is_reftable() {
 			let spec = format!("{head}...{upstream}");
 			let Some(counts) = cli_try(self.root(), &["rev-list", "--left-right", "--count", &spec])?
@@ -451,8 +478,8 @@ impl GitRepo {
 				.map(|id| id.detach())
 				.map_err(|err| Error::backend("git rev-list", err))
 		};
-		let head_id = parse(&head)?;
-		let upstream_id = parse(&upstream)?;
+		let head_id = parse(head)?;
+		let upstream_id = parse(upstream)?;
 		let count = |tips: gix::ObjectId, hidden: gix::ObjectId| -> Result<u32> {
 			let mut n = 0u32;
 			for item in repo
@@ -502,12 +529,9 @@ impl GitRepo {
 		let Some(merge) = get(&format!("branch.{branch}.merge")) else {
 			return Ok(None);
 		};
-		let Some(short) = merge.strip_prefix("refs/heads/") else {
-			return Ok(None);
-		};
-		// A `.` remote tracks a local branch directly, without fetch refspecs.
+		// A `.` remote tracks the local merge ref directly, without fetch refspecs.
 		if remote == "." {
-			return Ok(Some(format!("refs/heads/{short}")));
+			return Ok(Some(merge));
 		}
 		let full = format!("refs/heads/{branch}");
 		let Ok(name) = <&gix::refs::FullNameRef>::try_from(&full) else {
@@ -1546,6 +1570,72 @@ mod tests {
 
 		commit(root, "a1", "a1\n", "a1")?;
 		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_resolves_non_head_merge_refs() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+		git(root, &["update-ref", "refs/custom/origin/changes/1", "HEAD"])?;
+		git(root, &["remote", "add", "origin", "."])?;
+		git(root, &[
+			"config",
+			"remote.origin.fetch",
+			"+refs/changes/*:refs/custom/origin/changes/*",
+		])?;
+		git(root, &["config", "branch.main.remote", "origin"])?;
+		git(root, &["config", "branch.main.merge", "refs/changes/1"])?;
+		commit(root, "ahead", "ahead\n", "ahead")?;
+		assert_eq!(
+			git(root, &["for-each-ref", "--format=%(upstream)", "refs/heads/main"])?.trim(),
+			"refs/custom/origin/changes/1"
+		);
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+
+		// A dot remote uses the merge ref directly, including non-head refs.
+		git(root, &["config", "branch.main.remote", "."])?;
+		git(root, &["config", "branch.main.merge", "refs/custom/origin/changes/1"])?;
+		assert_eq!(
+			git(root, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])?.trim(),
+			"1\t0"
+		);
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+		// Changing tracking configuration must be observed even with unchanged HEAD.
+		git(root, &["config", "branch.main.merge", "refs/heads/main"])?;
+		assert_eq!(repo.ahead_behind()?, Some((0, 0)));
+		git(root, &["config", "branch.main.merge", "refs/custom/origin/changes/1"])?;
+		git(root, &["update-ref", "-d", "refs/custom/origin/changes/1"])?;
+		assert_eq!(repo.ahead_behind()?, None);
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_observes_deepened_history() -> TestResult {
+		let (source, _) = repo()?;
+		commit(source.path(), "base", "base\n", "base")?;
+		git(source.path(), &["branch", "upstream"])?;
+		commit(source.path(), "one", "one\n", "one")?;
+		commit(source.path(), "two", "two\n", "two")?;
+		let clone = tempfile::tempdir()?;
+		git(clone.path(), &[
+			"clone",
+			"--no-local",
+			"--depth=1",
+			"--no-single-branch",
+			source.path().to_str().unwrap(),
+			".",
+		])?;
+		git(clone.path(), &["config", "branch.main.merge", "refs/heads/upstream"])?;
+		let repo = GitRepo::require(clone.path())?;
+		assert_eq!(repo.ahead_behind()?, Some((1, 1)));
+		let head = repo.head_sha()?;
+		let upstream = repo.resolve_ref("refs/remotes/origin/upstream")?;
+		git(clone.path(), &["fetch", "--unshallow", "origin"])?;
+		assert_eq!(repo.head_sha()?, head);
+		assert_eq!(repo.resolve_ref("refs/remotes/origin/upstream")?, upstream);
+		assert_eq!(repo.ahead_behind()?, Some((2, 0)));
 		Ok(())
 	}
 
