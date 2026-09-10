@@ -708,6 +708,44 @@ tui:
 
 For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`. Include `status` in either segment list to render extension statuses registered through `ctx.ui.setStatus()`, ordered by key and joined inline. Set `statusLine.showHookStatus: false` to suppress the same statuses in the footer.
 
+#### Custom status line segments
+
+With `statusLine.preset: custom`, `leftSegments` and `rightSegments` are ordered lists of segment ids. Unknown ids render nothing and are skipped silently, so a typo produces an empty slot with no error — check spelling against this catalog:
+
+| Segment                                          | Renders                                                             | Hides when                                     |
+| ------------------------------------------------ | ------------------------------------------------------------------- | ---------------------------------------------- |
+| `pi`                                             | brand glyph at idle; spinner + turn timer during a turn; focused agent id | never (icon-only at idle)                |
+| `status`                                         | extension statuses registered via `ctx.ui.setStatus()`             | none set                                        |
+| `model`                                          | model name + thinking level + advisor eye                          | never (`no-model` fallback)                     |
+| `mode`                                           | active mode: Plan / Prewalk / Goal / Vibe / Loop                   | no special mode active                          |
+| `path`                                           | cwd (worktree/scratch-aware, abbreviated, hyperlinked)             | never                                           |
+| `git`                                            | branch + `*n` `+n` `?n` dirty counts                               | not a repo                                      |
+| `pr`                                             | linked PR `#n` (hyperlinked)                                        | no PR for the branch                            |
+| `subagents`                                      | running subagent count                                              | count is 0                                      |
+| `token_in` / `token_out`                         | input / output token counts                                         | that count is 0                                 |
+| `token_total`                                    | total tokens (excludes `cacheRead`)                                 | total is 0                                      |
+| `token_rate`                                     | throughput in tok/s                                                 | rate is 0                                       |
+| `cost`                                           | spend + premium requests + advisor cost                            | all are zero                                    |
+| `context_pct`                                    | context % + auto-compact icon                                       | never                                           |
+| `context_total`                                  | context window size                                                 | no context window                               |
+| `time_spent`                                     | cumulative active time (excludes idle)                              | under 1s of activity                            |
+| `time`                                           | wall clock                                                          | never                                           |
+| `session`                                        | session id prefix                                                   | never (`new` fallback)                          |
+| `hostname`                                       | hostname (session-accent tinted)                                    | never                                           |
+| `cache_read` / `cache_write`                     | cache read / write token counts                                     | that count is 0                                 |
+| `cache_hit`                                      | cache hit-rate %                                                    | no cache reads                                  |
+| `session_name`                                   | session title (accent colored)                                      | unnamed session; also relocated (not shown here) in the `band` layout |
+| `usage`                                          | provider quota windows `5h`/`1d`/`7d`/`mo` + reset timers          | no usage data                                   |
+| `collab`                                         | collab host/guest role + participant count                          | not in a collab session                         |
+| `vim`                                            | modal indicator (`NORMAL`/`INSERT`/`VISUAL`/`V-LINE`)              | `tui.vimMode` is off                            |
+
+`statusLine.segmentOptions` is a per-segment map. Only four segments read it; options for any other id are ignored:
+
+- `model`: `showThinkingLevel` (boolean) — show the thinking level after the model name.
+- `path`: `abbreviate` (boolean), `maxLength` (number, default 40), `stripWorkPrefix` (boolean, default true).
+- `git`: `showBranch`, `showStaged`, `showUnstaged`, `showUntracked` (all boolean, default true).
+- `time`: `format` (`12h` or `24h`), `showSeconds` (boolean).
+
 ### Interaction
 
 | Key                    | Type    | Default         | Values                                                                                                  |
