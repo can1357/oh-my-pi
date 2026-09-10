@@ -927,7 +927,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			// reuse while forcing `toolChoice: "none"` — do not advertise tools.
 			// Sharpshooter `required` / named choices have no sand wire field.
 			assertGrokbotToolChoiceSupported(options?.toolChoice);
-			const tools = options?.toolChoice === "none" ? [] : toInferenceTools(context.tools, model.sandNativeToolSchema);
+			const tools =
+				options?.toolChoice === "none" ? [] : toInferenceTools(context.tools, model.sandNativeToolSchema);
 			const grammarTools = buildGrammarToolIndex(context.tools);
 			const conversationId = options?.conversationId || options?.sessionId || crypto.randomUUID();
 			let emptyToolRetryUsed = false;
@@ -1756,7 +1757,6 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							{ provider: model.provider, kind: "incomplete-stream" },
 						);
 					}
-
 				}
 
 				closeOpen();
@@ -1874,11 +1874,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					!output.content.some(b => b.type === "toolCall")
 				) {
 					const advertised = advertisedNamesForJsonTextToolCall(body.tools, context.tools);
-					const promotion = promoteJsonTextToolCallsFromContent(
-						output.content,
-						advertised,
-						sendToUserTextIndexes,
-					);
+					const promotion = promoteJsonTextToolCallsFromContent(output.content, advertised, sendToUserTextIndexes);
 					const promotedList = promotion.calls;
 					if (promotedList.length > 0) {
 						// Drop only blocks that produced promoted calls — ordinary prose

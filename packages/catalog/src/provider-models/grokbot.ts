@@ -38,9 +38,7 @@ export type GrokbotSandRouterId = (typeof GROKBOT_SAND_ROUTER_IDS)[number];
  */
 export const GROKBOT_MODEL_SEEDS: readonly GrokbotModelSeed[] = [
 	// Reasoning for routers is reviewed via KDL (`reasoning`); seeds stay neutral.
-	...GROKBOT_SAND_ROUTER_IDS.map(
-		(id): GrokbotModelSeed => ({ id, name: `${id} (routed)`, reasoning: false }),
-	),
+	...GROKBOT_SAND_ROUTER_IDS.map((id): GrokbotModelSeed => ({ id, name: `${id} (routed)`, reasoning: false })),
 	{ id: "default", name: "Auto", reasoning: false },
 	{ id: "auto", name: "auto", reasoning: false },
 	// Offline-only: live AvailableModels owns reasoning for this id. Seed stays
