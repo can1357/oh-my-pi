@@ -181,11 +181,13 @@ const taskSchemaNoIsolation = type({
 const taskSchemaBatch = type({
 	context: "string",
 	tasks: taskItemSchemaIsolated.array(),
+	"model?": "never",
 	"+": "delete",
 });
 const taskSchemaBatchNoIsolation = type({
 	context: "string",
 	tasks: taskItemSchema.array(),
+	"model?": "never",
 	"+": "delete",
 });
 const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
@@ -226,12 +228,14 @@ function createTaskSchema(options: {
 				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
 				...toolsField,
+				"model?": modelInputSchema,
 				"isolated?": "boolean",
 				"+": "delete",
 			});
 			return type.raw({
 				context: "string",
 				tasks: item.array(),
+				"model?": "never",
 				"+": "delete",
 			});
 		}
@@ -243,11 +247,13 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			...toolsField,
+			"model?": modelInputSchema,
 			"+": "delete",
 		});
 		return type.raw({
 			context: "string",
 			tasks: item.array(),
+			"model?": "never",
 			"+": "delete",
 		});
 	}
@@ -260,6 +266,7 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			...toolsField,
+			"model?": modelInputSchema,
 			"isolated?": "boolean",
 			"+": "delete",
 		});
@@ -272,6 +279,7 @@ function createTaskSchema(options: {
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
 		...toolsField,
+		"model?": modelInputSchema,
 		"+": "delete",
 	});
 }
@@ -321,6 +329,8 @@ export interface TaskParams {
 	schemaMode?: "permissive" | "strict";
 	/** Eval-defined tool names exposed to the flat-form child. */
 	tools?: string[];
+	/** Caller-owned model selector or ordered candidate selectors for the flat-form child. */
+	model?: string | string[];
 	/** Batch form (`task.batch`): one subagent per item. */
 	tasks?: TaskItem[];
 	/** Batch form: shared background prepended to every assignment; required by the batch schema. */

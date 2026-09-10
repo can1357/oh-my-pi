@@ -177,6 +177,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
 	return {
 		content: [{ type: "text", text }],
+		isError: true,
 		details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
 	};
 }
@@ -195,6 +196,18 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 		if (disallowed.length > 0) {
 			return `task.batch is disabled, so the task tool does not accept ${disallowed.map(f => `\`${f}\``).join(" or ")}. Spawn one agent per call with \`task\`, or enable the task.batch setting.`;
 		}
+	}
+	if (batchEnabled && params.tasks !== undefined && Object.hasOwn(params, "model")) {
+		return "Top-level `model` cannot be used with batch `tasks[]`. Set `model` on each task item instead, or use the flat task shape.";
+	}
+	return undefined;
+}
+
+function validateModel(model: string | string[] | undefined, label: string): string | undefined {
+	if (model === undefined) return undefined;
+	if (typeof model === "string") return model.trim() ? undefined : `${label} must be a non-empty model selector.`;
+	if (!Array.isArray(model) || model.length === 0 || model.some(candidate => typeof candidate !== "string" || !candidate.trim())) {
+		return `${label} must be a non-empty model selector or ordered non-empty selector list.`;
 	}
 	return undefined;
 }
@@ -233,6 +246,8 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			}
 			const effortError = validateEffort(item.effort, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
 			if (effortError) return effortError;
+			const modelError = validateModel(item.model, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""} model`);
+			if (modelError) return modelError;
 		}
 		const seen = new Map<string, string>();
 		for (const item of tasks) {
@@ -255,7 +270,7 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			? "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`."
 			: "Missing `task`. Provide complete, self-contained instructions for the agent.";
 	}
-	return validateEffort(params.effort, "The call");
+	return validateEffort(params.effort, "The call") ?? validateModel(params.model, "The call model");
 }
 
 /**
@@ -272,6 +287,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("tools" in params) item.tools = params.tools;
+	if ("model" in params) item.model = params.model;
 	if ("effort" in params) item.effort = params.effort;
 	if ("isolated" in params) item.isolated = params.isolated;
 	return [item];
@@ -294,6 +310,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("tools" in item) spawn.tools = item.tools;
+	if ("model" in item) spawn.model = item.model;
 	if ("effort" in item) spawn.effort = item.effort;
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
@@ -660,6 +677,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
+			...(Object.hasOwn(params, "model") ? { model: params.model } : {}),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
@@ -1487,6 +1505,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
+				...(Object.hasOwn(params, "model") ? { model: params.model } : {}),
 				...(params.tools?.length
 					? {
 							customTools: createEvalCustomTools(
