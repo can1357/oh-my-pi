@@ -2,6 +2,7 @@ import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-a
 import {
 	type Component,
 	Container,
+	type DefaultTextStyle,
 	Image,
 	type ImageBudget,
 	ImageProtocol,
@@ -262,6 +263,9 @@ export class AssistantMessageComponent extends Container {
 	#textColorTransform?: (text: string) => string;
 	#linkTargets: ReadonlyMap<string, string> = EMPTY_LINK_TARGETS;
 	#decoratorUnsubscribers: Array<() => void> = [];
+	/** Streaming state the mounted Markdown children were built for; decorators
+	 *  read it through {@link AssistantTextDecoratorContext.transient}. */
+	#decoratedTransient = false;
 	#markdownTheme: MarkdownTheme | undefined;
 	/** Block this reply reacts to; undefined when the preceding block takes no reactions. */
 	#reactionTarget: ReactionTarget | undefined;
@@ -272,6 +276,11 @@ export class AssistantMessageComponent extends Container {
 		this.#textColorTransform = transform;
 	}
 
+	/**
+	 * Compose the registered decorators over one plain prose token. Called from
+	 * Markdown's text-token seam, so `text` is the author's prose: no SGR runs,
+	 * no style sentinel, never a code span or fenced block.
+	 */
 	#decorateText(text: string, contentIndex: number): string {
 		let decorated = text;
 		for (const decorator of this.textDecorators) {
@@ -383,18 +392,31 @@ export class AssistantMessageComponent extends Container {
 		private proseOnlyThinking = true,
 		linkTargets?: ReadonlyMap<string, string>,
 		private readonly textDecorators: readonly AssistantTextDecorator[] = [],
+		/**
+		 * Index in the *original* assistant message of this component's first
+		 * content block. Post-tool timeline segments carry a fresh content array,
+		 * so without this the decorator context would report a segment-local index.
+		 */
+		private readonly contentIndexOffset = 0,
 	) {
 		super();
 		this.#transcriptBlockFinalized = message !== undefined;
 		if (linkTargets?.size) this.#linkTargets = linkTargets;
 		for (const decorator of this.textDecorators) {
-			const unsubscribe = decorator.onDidChange?.(() => {
-				this.#fastPathKey = undefined;
-				this.#fastPathItems = undefined;
-				if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
-				this.onImageUpdate?.();
-			});
-			if (unsubscribe) this.#decoratorUnsubscribers.push(unsubscribe);
+			// Subscribing is extension code like decorate() is, and it runs during
+			// transcript construction: an unguarded throw here would take down every
+			// assistant message instead of just this decorator's repaint signal.
+			try {
+				const unsubscribe = decorator.onDidChange?.(() => {
+					this.#fastPathKey = undefined;
+					this.#fastPathItems = undefined;
+					if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+					this.onImageUpdate?.();
+				});
+				if (unsubscribe) this.#decoratorUnsubscribers.push(unsubscribe);
+			} catch {
+				// Decoration stays live; only this decorator loses runtime repaints.
+			}
 		}
 
 		// Container for text/thinking content.
@@ -449,7 +471,15 @@ export class AssistantMessageComponent extends Container {
 
 	override dispose(): void {
 		this.#stopThinkingAnimation();
-		for (const unsubscribe of this.#decoratorUnsubscribers) unsubscribe();
+		for (const unsubscribe of this.#decoratorUnsubscribers) {
+			// One throwing unsubscriber must not strand the rest, nor skip the
+			// base dispose that releases this component's render resources.
+			try {
+				unsubscribe();
+			} catch {
+				// Best-effort cleanup; the component is going away regardless.
+			}
+		}
 		this.#decoratorUnsubscribers = [];
 		super.dispose();
 	}
@@ -946,6 +976,15 @@ export class AssistantMessageComponent extends Container {
 			return false;
 		}
 		const transient = opts?.transient === true;
+		// Decorators may present streaming prose differently from settled prose
+		// (the documented `transient ? … : …` pattern). Reused Markdown children
+		// only repaint the block whose source text changed, so every earlier block
+		// would keep its streaming look once the turn settles. Rebuild instead.
+		if (this.textDecorators.length > 0 && transient !== this.#decoratedTransient) {
+			this.#fastPathKey = undefined;
+			this.#fastPathItems = undefined;
+			return false;
+		}
 		// Shape is identical — setText only on Markdown children whose source changed.
 		this.#applyItemTransience(transient);
 		for (let i = 0; i < this.#fastPathItems.length; i++) {
@@ -1034,6 +1073,9 @@ export class AssistantMessageComponent extends Container {
 		// Fast path: reuse Markdown children when shape is stable during streaming
 		if (this.#tryFastPathUpdate(message, opts)) return;
 
+		// Children rebuilt below decorate against the current streaming state.
+		this.#decoratedTransient = this.#lastUpdateTransient;
+
 		// Clear content container
 		this.#contentContainer.clear();
 		this.#emergencyText = undefined;
@@ -1063,12 +1105,20 @@ export class AssistantMessageComponent extends Container {
 			if (content.type === "text" && canonicalizeMessage(content.text)) {
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const trimmed = content.text.trim();
-				const decorate = (text: string) => {
-					const colored = this.#textColorTransform ? this.#textColorTransform(text) : text;
-					return this.#decorateText(colored, i);
-				};
-				const mdOptions =
-					this.#textColorTransform || this.textDecorators.length > 0 ? { color: decorate } : undefined;
+				// Decoration runs on Markdown's prose-token seam, ahead of the color
+				// hook: a decorator sees the author's words, and the live transcript's
+				// SGR transform paints whatever it returns.
+				const contentIndex = this.contentIndexOffset + i;
+				const mdOptions: DefaultTextStyle | undefined =
+					this.#textColorTransform || this.textDecorators.length > 0
+						? {
+								color: this.#textColorTransform,
+								transformText:
+									this.textDecorators.length > 0
+										? (text: string) => this.#decorateText(text, contentIndex)
+										: undefined,
+							}
+						: undefined;
 				const md = new Markdown(trimmed, 1, 0, this.#getProseTheme(), mdOptions, 0);
 				this.#contentContainer.addChild(md);
 				this.#emergencyText = md;

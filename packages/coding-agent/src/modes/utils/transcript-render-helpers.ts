@@ -186,6 +186,19 @@ export function assistantHasVisibleContent(message: AssistantAgentMessage): bool
 }
 
 /**
+ * A post-tool slice of an assistant turn, plus where it began in the original
+ * message. Extension-facing content indexes are reported against the original
+ * message, so a rebased segment must carry its offset rather than let consumers
+ * assume the segment-local loop index.
+ */
+export interface AssistantToolTimelineSegment {
+	/** Display-only message holding just this segment's content blocks. */
+	message: AssistantAgentMessage;
+	/** Index of this segment's first block in the original message's content. */
+	contentOffset: number;
+}
+
+/**
  * Split mixed assistant turns into visible text before tool execution and
  * visible text segments that must render immediately after the preceding tool.
  * Cursor can return intro text, tool calls, progress text, and the final answer
@@ -194,12 +207,13 @@ export function assistantHasVisibleContent(message: AssistantAgentMessage): bool
  */
 export function splitAssistantMessageToolTimeline(message: AssistantAgentMessage): {
 	beforeTools: AssistantAgentMessage;
-	afterToolCalls: ReadonlyMap<string, AssistantAgentMessage>;
+	afterToolCalls: ReadonlyMap<string, AssistantToolTimelineSegment>;
 	hasToolCalls: boolean;
 } {
 	const beforeTools: AssistantAgentMessage["content"] = [];
-	const afterToolCalls = new Map<string, AssistantAgentMessage>();
+	const afterToolCalls = new Map<string, AssistantToolTimelineSegment>();
 	let pendingAfterTool: AssistantAgentMessage["content"] = [];
+	let pendingContentOffset = 0;
 	let lastToolCallId: string | undefined;
 	let sawToolCall = false;
 
@@ -213,11 +227,15 @@ export function splitAssistantMessageToolTimeline(message: AssistantAgentMessage
 
 	const flushPendingAfterTool = () => {
 		if (!lastToolCallId || pendingAfterTool.length === 0) return;
-		afterToolCalls.set(lastToolCallId, displaySegment(pendingAfterTool));
+		afterToolCalls.set(lastToolCallId, {
+			message: displaySegment(pendingAfterTool),
+			contentOffset: pendingContentOffset,
+		});
 		pendingAfterTool = [];
 	};
 
-	for (const content of message.content) {
+	for (let index = 0; index < message.content.length; index++) {
+		const content = message.content[index]!;
 		if (content.type === "toolCall") {
 			flushPendingAfterTool();
 			sawToolCall = true;
@@ -225,6 +243,10 @@ export function splitAssistantMessageToolTimeline(message: AssistantAgentMessage
 			continue;
 		}
 		if (sawToolCall) {
+			// Segments are contiguous runs of the original array (only toolCall
+			// blocks are dropped, and one always ends the preceding run), so the
+			// first block's index rebases the whole segment.
+			if (pendingAfterTool.length === 0) pendingContentOffset = index;
 			pendingAfterTool.push(content);
 		} else {
 			beforeTools.push(content);

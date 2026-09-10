@@ -1175,7 +1175,12 @@ export type MessageRenderer<T = unknown> = (
 ) => Component | undefined;
 
 export interface AssistantTextDecoratorContext {
-	/** Index of the text content block in the assistant message. */
+	/**
+	 * Index of the text block in the assistant message's `content` array. Stable
+	 * across the turn: a turn whose text is split around tool calls still reports
+	 * each block's index in the original message, not its position within the
+	 * rendered segment.
+	 */
 	contentIndex: number;
 	/** Whether the message is still streaming. */
 	transient: boolean;
@@ -1187,8 +1192,21 @@ export interface AssistantTextDecoratorContext {
  * code blocks keep their original rendering.
  */
 export interface AssistantTextDecorator {
+	/**
+	 * Return the presentation form of one prose token.
+	 *
+	 * `text` is the author's text: never a code span or fenced block, and free of
+	 * escape sequences even when the transcript paints assistant prose in a color
+	 * — that paint is layered onto the returned string afterwards. Tabs in the
+	 * result are normalized to spaces before layout. A throwing decorator is
+	 * skipped and the original prose renders unchanged.
+	 */
 	decorate(text: string, context: AssistantTextDecoratorContext, theme: Theme): string;
-	/** Notify mounted transcript components when decorator state changes. */
+	/**
+	 * Notify mounted transcript components when decorator state changes.
+	 * Returns an unsubscribe function. Subscription failures are isolated: a
+	 * throwing implementation only forfeits repaints for its own decorator.
+	 */
 	onDidChange?(listener: () => void): () => void;
 }
 

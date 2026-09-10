@@ -731,13 +731,15 @@ Used by interactive rendering to add display-only supplemental UI below each vis
 
 ```ts
 pi.registerAssistantTextDecorator({
-  decorate(text, { transient }, theme) {
+  decorate(text, { contentIndex, transient }, theme) {
     return transient ? text : theme.bold(text);
   },
 });
 ```
 
-Decorators may expose `onDidChange(listener)` when their presentation state changes at runtime. Mounted assistant messages subscribe to that signal and repaint without rewriting session history.
+The `text` argument is always plain prose — no escape sequences, even in the live transcript where assistant text is painted in a session color; that color is applied to whatever the decorator returns. Tabs in the returned string are normalized to spaces before layout. `contentIndex` is the block's index in the assistant message's `content` array and stays stable when a turn's text is split around tool calls. A decorator that throws is skipped and its block renders as the model wrote it.
+
+Decorators may expose `onDidChange(listener)` when their presentation state changes at runtime. Mounted assistant messages subscribe to that signal and repaint without rewriting session history; a subscription that throws only costs that decorator its repaints.
 
 ## Tool call/result renderer
 

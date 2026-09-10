@@ -75,6 +75,83 @@ describe("extractMarkdownLinks", () => {
 });
 
 describe("Markdown component", () => {
+	describe("defaultTextStyle.transformText", () => {
+		/** Collect what the semantic seam is handed, passing prose through unchanged. */
+		function recorder(): { seen: string[]; transformText: (text: string) => string } {
+			const seen: string[] = [];
+			return { seen, transformText: (text: string) => (seen.push(text), text) };
+		}
+
+		it("sees author prose, never a styled run or the style sentinel", () => {
+			const { seen, transformText } = recorder();
+			const markdown = new Markdown("stay **bold** and plain", 0, 0, defaultMarkdownTheme, {
+				transformText,
+				color: text => chalk.magenta(text),
+				bold: true,
+			});
+
+			const rendered = markdown.render(80).join("\n");
+
+			expect(seen.length).toBeGreaterThan(0);
+			for (const text of seen) {
+				expect(text).not.toContain("\x1b");
+				expect(text).not.toContain("\u0000");
+			}
+			expect(seen.join("|")).toContain("stay ");
+			// Color still paints the transformed prose.
+			expect(rendered).toContain("\x1b[");
+		});
+
+		it("applies to prose in paragraphs, headings, lists, quotes and tables", () => {
+			const doc = [
+				"# Title",
+				"",
+				"para text",
+				"",
+				"- item text",
+				"",
+				"> quoted text",
+				"",
+				"| head |",
+				"| --- |",
+				"| cell |",
+			].join("\n");
+			const { seen, transformText } = recorder();
+			new Markdown(doc, 0, 0, defaultMarkdownTheme, { transformText }).render(60);
+
+			const joined = seen.join("|");
+			for (const fragment of ["Title", "para text", "item text", "quoted text", "head", "cell"]) {
+				expect(joined).toContain(fragment);
+			}
+		});
+
+		it("skips code spans, fenced code, and link targets", () => {
+			const doc = "run `inline code` here\n\n```ts\nconst fenced = 1;\n```\n\n[label](https://example.com/path)";
+			const { seen, transformText } = recorder();
+			const rendered = stripVTControlCharacters(
+				new Markdown(doc, 0, 0, defaultMarkdownTheme, { transformText }).render(80).join("\n"),
+			);
+
+			const joined = seen.join("|");
+			expect(joined).not.toContain("inline code");
+			expect(joined).not.toContain("const fenced = 1;");
+			expect(joined).not.toContain("https://example.com/path");
+			expect(joined).toContain("run ");
+			// Untouched content still renders.
+			expect(rendered).toContain("inline code");
+			expect(rendered).toContain("const fenced = 1;");
+		});
+
+		it("normalizes tabs the transform introduces", () => {
+			const rendered = new Markdown("before after", 0, 0, defaultMarkdownTheme, {
+				transformText: text => text.replace(" ", "\tgap\t"),
+			}).render(80);
+
+			expect(rendered.join("\n")).not.toContain("\t");
+			expect(stripVTControlCharacters(rendered.join("\n"))).toContain("gap");
+		});
+	});
+
 	describe("Nested lists", () => {
 		it("should render simple nested list", () => {
 			const markdown = new Markdown(

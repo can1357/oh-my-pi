@@ -95,12 +95,15 @@ export function assistantMessageLinkTargets(
 /**
  * Construct an {@link AssistantMessageComponent} wired to the live context's
  * thinking/image settings. `message` is omitted for the streaming placeholder
- * component and supplied when rendering a persisted turn.
+ * component and supplied when rendering a persisted turn. `contentIndexOffset`
+ * rebases extension-facing content indexes when `message` is a post-tool
+ * timeline segment rather than a whole turn.
  */
 export function createAssistantMessageComponent(
 	ctx: InteractiveModeContext,
 	message?: AssistantMessage,
 	linkTargets: ReadonlyMap<string, string> = getAssistantMessageLinkTargets(ctx),
+	contentIndexOffset = 0,
 ): AssistantMessageComponent {
 	const component = new AssistantMessageComponent(
 		message,
@@ -111,6 +114,7 @@ export function createAssistantMessageComponent(
 		ctx.proseOnlyThinking,
 		linkTargets,
 		ctx.viewSession.extensionRunner?.getAssistantTextDecorators(),
+		contentIndexOffset,
 	);
 	component.setImagesVisible(ctx.settings.get("terminal.showImages"));
 	component.setToolResultImagesVisible(!ctx.hideToolActivity);
