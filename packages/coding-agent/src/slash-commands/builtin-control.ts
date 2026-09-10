@@ -1,9 +1,33 @@
 import { runPauseScreen } from "../modes/components/pause-screen";
+import type { RenderTestOptions } from "../session/render-test";
 import { shutdownHandlerTui } from "./builtin-lifecycle";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
 
+function parseRenderTestArgs(args: string): RenderTestOptions {
+	const parts = args.trim() ? args.trim().split(/\s+/) : [];
+	if (parts.length > 2 || parts.some(part => !/^\d+$/.test(part))) {
+		throw new Error("Usage: /render [repeat=1] [chunk-delay-ms=25]");
+	}
+	return { repeat: Number(parts[0] ?? 1), delayMs: Number(parts[1] ?? 25) };
+}
+
 export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+	{
+		name: "render",
+		icon: "bug",
+		description: "Exercise thinking, long text, Markdown, real reads/edits and interactive questions without tokens",
+		allowArgs: true,
+		inlineHint: "[repeat=1] [chunk-delay-ms=25]",
+		handleTui: async (command, { ctx }) => {
+			ctx.editor.setText("");
+			try {
+				await ctx.session.runRenderTest(parseRenderTestArgs(command.args), ctx.getToolUIContext());
+			} catch (error) {
+				ctx.showError(errorMessage(error));
+			}
+		},
+	},
 	{
 		name: "force",
 		icon: "hammer",

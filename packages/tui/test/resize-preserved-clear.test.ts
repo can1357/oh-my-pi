@@ -112,10 +112,11 @@ const MUX_SIGNALS = [
 	"PI_TUI_RESIZE_IN_PLACE",
 ] as const;
 
-function startRig(markerRow?: number, columns = 40, rows = 12) {
+function startRig(markerRow?: number, columns = 40, rows = 12, liveRows?: number) {
 	const terminal = new PreservedClearTerminal(columns, rows);
 	const provider = new FullFrameProvider();
 	provider.markerRow = markerRow;
+	if (liveRows !== undefined) provider.liveRows = liveRows;
 	const renderScheduler = new ResizeScheduler();
 	const tui = new TUI(terminal, undefined, { renderScheduler });
 	tui.setFrameProvider(provider);
@@ -170,21 +171,22 @@ describe("resize pre-erase on a preserved-clear terminal", () => {
 		expect(terminal.archivedClears).toBe(0);
 		tui.stop();
 	});
-	it("keeps a short viewport anchored after a height shrink", () => {
-		const { terminal, tui, provider, renderScheduler } = startRig();
+	it.each([3, 12])("keeps a short viewport anchored after shrinking from %i initial rows", initialRows => {
+		const { terminal, tui, provider, renderScheduler } = startRig(undefined, 40, 12, initialRows);
 		provider.liveRows = 3;
 		tui.requestRender(true);
-		expect(terminal.getViewport()[0]?.trimEnd()).toBe("live-0");
+		const initialTop = initialRows === 12 ? 9 : 0;
+		expect(terminal.getViewport()[initialTop]?.trimEnd()).toBe("live-0");
 
 		terminal.resize(40, 6);
 		renderScheduler.settle();
 
-		// The split clear visits row 2 for ED0, but the subsequent CPR must still
-		// report the viewport's row-1 anchor rather than shifting the repaint down.
-		expect(terminal.getCursor().row).toBe(0);
-		terminal.sendInput("\x1b[1;17R");
+		// Erasing the old tail must preserve the physical origin used by CPR.
+		const resizedTop = initialRows === 12 ? 3 : 0;
+		expect(terminal.getCursor().row).toBe(resizedTop);
+		terminal.sendInput(`\x1b[${resizedTop + 1};17R`);
 		renderScheduler.settle();
-		expect(terminal.getViewport()[0]?.trimEnd()).toBe("live-0");
+		expect(terminal.getViewport()[resizedTop]?.trimEnd()).toBe("live-0");
 		tui.stop();
 	});
 

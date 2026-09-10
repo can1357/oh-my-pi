@@ -602,6 +602,7 @@ export class UiHelpers {
 						{
 							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
 							showImages: settings.get("terminal.showImages"),
+							liveRegion: this.ctx.chatContainer,
 						},
 						tool,
 						this.ctx.ui,
@@ -836,7 +837,13 @@ export class UiHelpers {
 	 * everything after it are no longer part of the view session's transcript.
 	 */
 	truncateTranscriptFromMessage(message: AgentMessage): boolean {
-		if (!this.ctx.initialChatRendered || this.ctx.focusedAgentId || this.ctx.viewSession.isStreaming) return false;
+		if (
+			!this.ctx.initialChatRendered ||
+			this.ctx.focusedAgentId ||
+			this.ctx.viewSession.isStreaming ||
+			this.ctx.ui.hasTransientProviderHistory()
+		)
+			return false;
 		// In-flight blocks route future events into their components; a rewind
 		// with any of them live takes the full-replay path instead.
 		if (
@@ -999,6 +1006,9 @@ export class UiHelpers {
 				for (const child of preservedChatChildren) {
 					visibleChatContainer.addChild(child);
 				}
+			}
+			for (const component of this.ctx.pendingTools.values()) {
+				component.setLiveRegion?.(visibleChatContainer);
 			}
 			committed = true;
 

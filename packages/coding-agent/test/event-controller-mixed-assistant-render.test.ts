@@ -91,6 +91,31 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		resetSettingsForTest();
 	});
 
+	it("appends a terminal task result without repainting its borrowed pending card", async () => {
+		const { controller, ctx, chatContainer } = createFixture();
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "borrowed-task",
+			toolName: "task",
+			args: { agent: "task", tasks: [{ id: "Child", task: "Inspect the source" }] },
+		});
+		const pending = ctx.pendingTools.get("borrowed-task")!;
+		chatContainer.renderViewport(120, 100, { tick: 0, now: 0 });
+		chatContainer.setBorrowedViewportRows(1);
+		const before = pending.render(120);
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "borrowed-task",
+			toolName: "task",
+			result: { content: [{ type: "text", text: "VISIBLE TERMINAL TASK RESULT" }] },
+			isError: false,
+		});
+		expect(pending.render(120)).toEqual(before);
+		const text = Bun.stripANSI(chatContainer.renderViewport(120, 100, { tick: 0, now: 0 }).join("\n"));
+		expect(text).toContain("VISIBLE TERMINAL TASK RESULT");
+		expect(ctx.pendingTools.has("borrowed-task")).toBe(false);
+	});
+
 	it("finalizes and removes an orphaned streaming component on the next message_start", async () => {
 		// Regression: a stream that died between message_start and message_end
 		// (transport drop, hook throw) left its component live in the transcript.

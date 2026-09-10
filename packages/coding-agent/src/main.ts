@@ -582,10 +582,8 @@ async function runInteractiveMode(
 	// Consume failures immediately, but defer any banner until the transcript is stable.
 	const checkedVersionPromise = versionCheckPromise.catch(() => undefined);
 
-	// `init` already cleared native history before painting the startup frame.
-	// Replaying resumed transcript rows and repainting the viewport is enough;
-	// another clear would only archive the startup frame. In-process session
-	// replacements still request `clearTerminalHistory` at their own callsites.
+	// Startup already cleared native history. Installing the restored transcript
+	// refreshes its ownership ledger without a second destructive terminal reset.
 	await logger.time("InteractiveMode.renderInitialMessages", () =>
 		mode.renderInitialMessages({ preserveExistingChat: true }),
 	);

@@ -342,6 +342,8 @@ import {
 	queueChipText,
 	toRestoredQueuedMessage,
 } from "./queued-messages";
+import { createRenderTestAgent, type RenderTestOptions, validateRenderTestOptions } from "./render-test";
+import { createRenderWorkflow } from "./render-workflow";
 import type { ServingModel } from "./retry-fallback-chains";
 import {
 	type AdvisorStats,
@@ -771,6 +773,9 @@ export class AgentSession {
 	readonly #loopGuards: LoopGuards;
 	#promptInFlightCount = 0;
 	#abortInProgress = false;
+	#renderTestRun: { agent: Agent; completion: Promise<void> } | undefined;
+	#renderTestEvents: WeakSet<AgentEvent> | undefined;
+	#renderTestPendingEvents: Promise<void>[] | undefined;
 	// Wire-level agent_end emission deferred until #promptInFlightCount drops to 0.
 	// Internal extension hooks and post-emit work (auto-retry, auto-compaction, todo
 	// checks in #handleAgentEvent) still fire on the original schedule — only the
@@ -2587,6 +2592,11 @@ export class AgentSession {
 	 * the recovery wait always sees the in-flight handler and blocks until it — and
 	 * everything it schedules — settles. */
 	#dispatchAgentEvent = async (event: AgentEvent): Promise<void> => {
+		if (this.#renderTestEvents?.delete(event)) {
+			const processing = this.#processAgentEvent(event, true);
+			this.#renderTestPendingEvents?.push(processing);
+			return processing;
+		}
 		if (event.type === "tool_execution_end" && this.#isTerminalYieldToolResult(event)) {
 			const alreadyTerminated = this.#synchronouslyTerminatedYieldToolCallIds.delete(event.toolCallId);
 			if (!alreadyTerminated) {
@@ -2912,7 +2922,7 @@ export class AgentSession {
 		return true;
 	}
 
-	#processAgentEvent = async (event: AgentEvent): Promise<void> => {
+	#processAgentEvent = async (event: AgentEvent, renderSimulation = false): Promise<void> => {
 		const eventPromptGeneration = this.#promptGeneration;
 		// A fresh run supersedes the previously settled (and pruned) refusal
 		// turn: state-based lookups take over again.
@@ -3047,7 +3057,7 @@ export class AgentSession {
 			}
 		}
 
-		if (event.type === "turn_start") {
+		if (event.type === "turn_start" && !renderSimulation) {
 			this.#advisors.onPrimaryTurnStart();
 			const usage = this.getSessionStats().tokens;
 			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, {
@@ -3083,6 +3093,16 @@ export class AgentSession {
 				}
 				throw error;
 			}
+		}
+		if (renderSimulation) {
+			if (event.type === "message_end") {
+				if (messageEndPersistence) {
+					await messageEndPersistence.persist(() => this.#persistMessageEnd(event.message, eventPromptGeneration));
+				} else {
+					this.#persistMessageEnd(event.message, eventPromptGeneration);
+				}
+			}
+			return;
 		}
 
 		if (event.type === "turn_start") this.#ttsr.onTurnStart();
@@ -4505,6 +4525,7 @@ export class AgentSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.#renderTestRun?.agent.abort();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
@@ -4666,6 +4687,7 @@ export class AgentSession {
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
+		await this.#renderTestRun?.completion;
 		this.#recordSessionExit(options.reason ?? "dispose");
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
@@ -5121,9 +5143,75 @@ export class AgentSession {
 		return this.#models.serviceTierByFamily;
 	}
 
+	/** Stream a local provider fixture through agent-core and the active session's normal event transport. */
+	async runRenderTest(
+		options: RenderTestOptions = { repeat: 1, delayMs: 25 },
+		uiContext?: ExtensionUIContext,
+	): Promise<void> {
+		if (this.#isDisposed) throw new Error("Session is disposed");
+		if (this.isStreaming) throw new AgentBusyError();
+		validateRenderTestOptions(options);
+		const model = this.model;
+		if (!model) throw new Error("No active model on session");
+		const previousTodo = this.getTodoPhases();
+		const workflow = createRenderWorkflow(
+			{
+				cwd: this.sessionManager.getCwd(),
+				hasUI: uiContext !== undefined,
+				settings: this.settings,
+				getSessionFile: () => null,
+				getSessionSpawns: () => null,
+				getTodoPhases: () => this.getTodoPhases(),
+				setTodoPhases: phases => this.setTodoPhases(phases),
+			},
+			{
+				...this.buildAskReanswerContext(uiContext ?? noOpUIContext),
+				abort: () => {
+					void this.abort();
+				},
+			},
+			options.repeat,
+		);
+		const producer = createRenderTestAgent(model, options, workflow);
+		const completion = Promise.withResolvers<void>();
+		this.#renderTestRun = { agent: producer, completion: completion.promise };
+		this.#renderTestEvents = new WeakSet<AgentEvent>();
+		this.#renderTestPendingEvents = [];
+		let endEvent: Extract<AgentEvent, { type: "agent_end" }> | undefined;
+		const unsubscribe = producer.subscribe(event => {
+			if (event.type === "agent_end") {
+				endEvent = event;
+				return;
+			}
+			this.#renderTestEvents?.add(event);
+			this.agent.emitExternalEvent(event);
+		});
+		try {
+			await producer.prompt(`/render ${options.repeat} ${options.delayMs}`);
+		} finally {
+			unsubscribe();
+			const pendingEvents = this.#renderTestPendingEvents ?? [];
+			await Promise.allSettled(pendingEvents);
+			try {
+				this.setTodoPhases(previousTodo);
+				await workflow.dispose();
+			} finally {
+				this.#renderTestRun = undefined;
+				this.#renderTestEvents = undefined;
+				this.#renderTestPendingEvents = undefined;
+				try {
+					this.#emitRunState("idle");
+					if (endEvent) await this.#emitSessionEvent({ ...endEvent, isTerminal: true });
+				} finally {
+					completion.resolve();
+				}
+			}
+		}
+	}
+
 	/** Whether agent is currently streaming a response */
 	get isStreaming(): boolean {
-		return this.agent.state.isStreaming || this.#promptInFlightCount > 0;
+		return this.agent.state.isStreaming || this.#promptInFlightCount > 0 || this.#renderTestRun !== undefined;
 	}
 
 	get isAborting(): boolean {
@@ -5132,6 +5220,7 @@ export class AgentSession {
 
 	/** Wait until streaming, event persistence, and deferred recovery work are fully settled. */
 	async waitForIdle(): Promise<void> {
+		await this.#renderTestRun?.completion;
 		await this.agent.waitForIdle();
 		await this.#advisors.waitForPendingCardEvents();
 		await this.#waitForPostPromptRecovery();
@@ -7752,6 +7841,8 @@ export class AgentSession {
 		/** Internal `/compact` startup keeps the manual-compaction marker alive while aborting the active turn. */
 		preserveCompaction?: boolean;
 	}): Promise<void> {
+		const renderTest = this.#renderTestRun;
+		renderTest?.agent.abort(options?.reason);
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
 		if (userInterrupt) this.#advisors.autoResumeSuppressed = true;
@@ -7792,6 +7883,7 @@ export class AgentSession {
 			this.agent.abort(options?.reason);
 			await postPromptDrain;
 			await this.agent.waitForIdle();
+			await renderTest?.completion;
 			// `/compact` disconnects the agent subscription until its finally block.
 			// Do not let abort-and-replace callers start a new prompt before that cleanup
 			// finishes, or the replacement turn's events are neither forwarded nor persisted.

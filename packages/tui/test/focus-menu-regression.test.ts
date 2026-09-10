@@ -70,15 +70,10 @@ describe("focus-changing menu teardown", () => {
 			tui.requestRender();
 			await term.waitForRender();
 
-			// The menu rows were committed to history while the menu was tall;
-			// closing it resyncs the commit index at the divergence (stale menu
-			// stays in scrollback). The focused cursor tail is shorter than the
-			// viewport, so the window re-anchors at the frame tail instead of
-			// pinning "prompt" at the top with blank rows underneath —
-			// "assistant" is re-shown on the grid (its committed copy stays in
-			// scrollback; duplication, never loss).
-			expect(term.getViewport().map(line => line.trimEnd())).toEqual(["assistant", "prompt", "", "", "", ""]);
-			expect(term.getCursor()).toEqual({ row: 1, col: 6 });
+			// Closing the menu must keep the focused tail at the terminal bottom,
+			// not move it to the top of a shorter logical frame.
+			expect(term.getViewport().map(line => line.trimEnd())).toEqual(["", "", "", "", "assistant", "prompt"]);
+			expect(term.getCursor()).toEqual({ row: 5, col: 6 });
 		} finally {
 			tui.stop();
 		}

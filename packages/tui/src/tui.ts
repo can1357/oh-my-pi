@@ -14,7 +14,7 @@
  */
 import * as fs from "node:fs";
 import { performance } from "node:perf_hooks";
-import { $flag, getDebugLogPath, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { $flag, getDebugLogPath, postmortem } from "@oh-my-pi/pi-utils";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { TuiDebugServer } from "./debug-server";
 import { isKeyRelease, matchesKey } from "./keys";
@@ -139,13 +139,26 @@ export interface HistoryBatch {
 /** One history append or complete replay plus the mutable viewport for a terminal frame. */
 export interface TerminalFramePlan {
 	readonly history?: HistoryBatch;
+	/** Complete logical live rows; the writer splits overflow at the physical terminal boundary. */
 	readonly viewport: readonly string[];
+	/**
+	 * Leading rows in this viewport that remain owned by native history after
+	 * applying `history`. Providers with semantic ownership tracking supply this
+	 * when a history batch changes the live boundary.
+	 */
+	readonly borrowedViewportRows?: number;
+	/** Only this leading portion may enter native history; trailing anchored UI remains mutable. */
+	readonly borrowableRows?: number;
+	/** Reversible producer growth that must not advance native history ownership. */
+	readonly viewportExpansionRows?: number;
 }
 
-/** Produces bounded terminal frames and retires acknowledged history batches. */
+/** Produces logical live frames and retires acknowledged history batches. */
 export interface TerminalFrameProvider {
 	renderFrame(viewport: ViewportSize): TerminalFramePlan;
 	acknowledgeHistory(id: number): void;
+	/** Leading logical viewport rows already owned by native history, reported after paint. */
+	onViewportBorrowed?(rows: number): void;
 	/** Full semantic viewport used only on the transient resize buffer. */
 	renderResizeFrame?(viewport: ViewportSize): readonly string[];
 	/** Re-offer finalized history after a display reset or resize replay. */
@@ -665,6 +678,17 @@ export class TUI extends Container {
 	// Screen row where the provider's mutable viewport begins (0-based); rows
 	// above it hold history still visible on the physical screen.
 	#providerViewportTop = 0;
+	/** Producer-declared reversible rows present in the last painted frame. */
+	#providerViewportExpansionRows = 0;
+	/** Physical origin to restore after reversible chrome closes without history advancing. */
+	#providerUnexpandedTop: number | undefined;
+	#providerLogicalCommitted = 0;
+	/** Whether physical scrollback currently contains inferred rows from a live, unfinalized frame. */
+	#providerHasTransientHistory = false;
+	/** Exact rows borrowed into native scrollback, in order. */
+	#providerTransientRows: string[] = [];
+	/** Exact on-screen history rows, retained while temporary UI covers them. */
+	#providerVisibleHistory: string[] = [];
 	// Viewport-relative row of the hardware cursor after the last normal paint
 	// (0 = parked at the viewport top). A resize reflows the normal buffer
 	// before the app hears about it; terminals keep the cursor attached to its
@@ -739,6 +763,7 @@ export class TUI extends Container {
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	onDebug?: () => void;
 	#renderRequested = false;
+	#pendingLiveRender = false;
 	#renderTimer: RenderTimer | undefined;
 	#renderScheduler: RenderScheduler;
 	#lastRenderAt = 0;
@@ -773,6 +798,8 @@ export class TUI extends Container {
 	 * watchdog armed across exactly the range where frames are deferred (#10434).
 	 */
 	static readonly #MAX_PENDING_OUTPUT_BYTES = STDOUT_BACKLOG_CLEAR_BYTES;
+	/** Live paints may exceed the ordinary threshold, but remain bounded. */
+	static readonly #MAX_LIVE_PENDING_OUTPUT_BYTES = 1024 * 1024;
 	/** Retry cadence while the output backlog gate is holding renders back. */
 	static readonly #OUTPUT_BACKLOG_RETRY_MS = 10;
 	/** Quiet window before restoring the normal buffer after resize. */
@@ -872,12 +899,22 @@ export class TUI extends Container {
 		return mode === "append" || mode === "rebuild" || mode === "preserve" ? mode : "preserve";
 	}
 
-	/** Install the product-owned bounded frame provider. */
+	/** Install the product-owned logical frame provider. */
 	setFrameProvider(provider: TerminalFrameProvider | undefined): void {
 		this.#frameProvider = provider;
 		this.#providerWindow = [];
+		this.#providerViewportExpansionRows = 0;
+		this.#providerLogicalCommitted = 0;
+		this.#providerHasTransientHistory = false;
+		this.#providerTransientRows = [];
+		this.#providerVisibleHistory = [];
 		this.#resizeReplaySize = undefined;
 		this.requestRender(true);
+	}
+
+	/** Whether native scrollback currently contains unfinalized provider rows. */
+	hasTransientProviderHistory(): boolean {
+		return this.#providerHasTransientHistory;
 	}
 
 	#syncTerminalCursorMode(component: Component | null): void {
@@ -1019,7 +1056,12 @@ export class TUI extends Container {
 	 */
 	showOverlay(component: Component, options?: OverlayOptions): OverlayHandle {
 		component.setIgnoreTight?.(true);
-		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false };
+		const entry = {
+			component,
+			options,
+			preFocus: this.#focusedComponent,
+			hidden: false,
+		};
 		this.overlayStack.push(entry);
 		// Only focus if overlay is actually visible
 		if (this.#isOverlayVisible(entry)) {
@@ -1215,7 +1257,9 @@ export class TUI extends Container {
 			this.#querySixelSupport();
 			this.#queryCellSize();
 		}
-		this.requestRender(true, { clearScrollback: options?.clearScrollback === true });
+		this.requestRender(true, {
+			clearScrollback: options?.clearScrollback === true,
+		});
 	}
 	/**
 	 * Whether a resize repaints the visible window in place — no alternate-screen
@@ -1767,20 +1811,8 @@ export class TUI extends Container {
 		const height = this.terminal.rows;
 		if (width <= 0 || height <= 0) return;
 		provider.beginHistoryFlush();
-		while (true) {
-			let plan: TerminalFramePlan;
-			do {
-				this.#imageBudget.beginPass();
-				plan = provider.renderFrame({ columns: width, rows: height });
-			} while (this.#imageBudget.endPass());
-			if (plan.history === undefined) return;
-			let viewport = Array.from(plan.viewport);
-			if (viewport.length > height) viewport = viewport.slice(0, height);
-			const acceptedBefore = this.#acceptedHistoryBatchId;
-			this.#emitPlanFrame(width, height, viewport, plan.history, provider);
-			if (plan.history.id > acceptedBefore && this.#acceptedHistoryBatchId === acceptedBefore) {
-				throw new Error("History flush did not accept the offered batch");
-			}
+		while (this.#renderProviderFrame(width, height, true)) {
+			// Drain acknowledged batches, then paint the final live suffix.
 		}
 	}
 
@@ -1898,6 +1930,19 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Schedule a full compose that contains live streaming state.
+	 *
+	 * Live frames may pass through a larger, still-bounded output backlog so
+	 * streaming progress remains visible. The intent stays pending when either
+	 * backlog gate defers the frame and is consumed only when rendering begins.
+	 */
+	requestLiveRender(): void {
+		if (this.#stopped) return;
+		this.#pendingLiveRender = true;
+		this.#requestOrdinaryRender();
+	}
+
+	/**
 	 * Paint a forced frame synchronously when startup must hand off an already
 	 * visible component tree before further async initialization. Same as
 	 * {@link requestRender} minus the `setImmediate` hop.
@@ -1955,6 +2000,7 @@ export class TUI extends Container {
 		return true;
 	}
 	#prepareForcedRender(clearScrollback: boolean): void {
+		this.#pendingLiveRender = false;
 		if (clearScrollback && !this.#clearScrollbackOnNextRender) {
 			this.#frameProvider?.beginHistoryReplay?.();
 			if (TERMINAL.imageProtocol === ImageProtocol.Kitty) this.#imageBudget.forgetTransmitted();
@@ -2019,7 +2065,9 @@ export class TUI extends Container {
 	 */
 	#deferRenderForOutputBacklog(): boolean {
 		const pending = this.terminal.pendingOutputBytes;
-		if (pending === undefined || pending <= TUI.#MAX_PENDING_OUTPUT_BYTES) return false;
+		const liveFrame = this.#pendingLiveRender && !this.#forceViewportRepaintOnNextRender;
+		const maximum = liveFrame ? TUI.#MAX_LIVE_PENDING_OUTPUT_BYTES : TUI.#MAX_PENDING_OUTPUT_BYTES;
+		if (pending === undefined || pending <= maximum) return false;
 		this.#renderRequested = true;
 		this.#renderTimer ??= this.#renderScheduler.scheduleRender(
 			this.#runScheduledRender,
@@ -2166,7 +2214,12 @@ export class TUI extends Container {
 		// Parse margin (clamp to non-negative)
 		const margin =
 			typeof opt.margin === "number"
-				? { top: opt.margin, right: opt.margin, bottom: opt.margin, left: opt.margin }
+				? {
+						top: opt.margin,
+						right: opt.margin,
+						bottom: opt.margin,
+						left: opt.margin,
+					}
 				: (opt.margin ?? {});
 		const marginTop = Math.max(0, margin.top ?? 0);
 		const marginRight = Math.max(0, margin.right ?? 0);
@@ -2440,24 +2493,142 @@ export class TUI extends Container {
 		const coalesced = coalesceAdjacentSgr(line);
 		return coalesced + (line.includes("\x1b]8;") ? LINE_TERMINATOR : SEGMENT_RESET);
 	}
-	#renderProviderFrame(width: number, height: number): void {
+	#renderProviderFrame(width: number, height: number, flushing = false): boolean {
 		const provider = this.#frameProvider;
-		if (!provider || width <= 0 || height <= 0) return;
-		this.#debugNextWindowTop = 0;
+		if (!provider || width <= 0 || height <= 0) return false;
+		if (this.#clearScrollbackOnNextRender) {
+			this.#providerLogicalCommitted = 0;
+			this.#providerHasTransientHistory = false;
+			this.#providerTransientRows = [];
+			provider.onViewportBorrowed?.(0);
+		}
 		let plan: TerminalFramePlan;
 		do {
 			this.#imageBudget.beginPass();
 			plan = provider.renderFrame({ columns: width, rows: height });
 		} while (this.#imageBudget.endPass());
-		let viewport = Array.from(plan.viewport);
-		if (viewport.length > height) {
-			const message = `Frame provider returned ${viewport.length} rows for a ${height}-row viewport`;
-			if (Bun.env.NODE_ENV === "test" || Bun.env.NODE_ENV === "development") throw new Error(message);
-			logger.error("TUI layout contract violated", { rows: viewport.length, height });
-			viewport = viewport.slice(0, height);
+		if (!flushing && this.#maybeDeferGhosttyInitialImagePaint()) return false;
+		const logicalViewport = Array.from(plan.viewport);
+		const overflow = Math.max(0, logicalViewport.length - height);
+		const borrowOverflow = Math.min(
+			Math.max(0, overflow - Math.max(0, plan.viewportExpansionRows ?? 0)),
+			Math.max(0, plan.borrowableRows ?? logicalViewport.length),
+		);
+		const borrowed = this.#providerTransientRows;
+		if (
+			plan.history === undefined &&
+			this.#providerLogicalCommitted > 0 &&
+			logicalViewport.length < this.#providerLogicalCommitted
+		) {
+			let survivingPrefix = 0;
+			const limit = Math.min(logicalViewport.length, this.#providerLogicalCommitted);
+			const nativeOffset = borrowed.length - this.#providerLogicalCommitted;
+			while (
+				survivingPrefix < limit &&
+				logicalViewport[survivingPrefix] === borrowed[nativeOffset + survivingPrefix]
+			) {
+				survivingPrefix++;
+			}
+			// Release logical screen positions, not the record of bytes already
+			// written to native history. Finalization must still reconcile those
+			// bytes against the authoritative batch.
+			this.#providerLogicalCommitted = survivingPrefix;
 		}
-		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
-		this.#emitPlanFrame(width, height, viewport, plan.history, provider);
+		// Borrowed ownership is separate from the current viewport geometry.
+		let history = plan.history;
+		const newHistory = history !== undefined && history.id > this.#acceptedHistoryBatchId;
+		let inferredHistory: string[] = [];
+		if (newHistory && history?.kind === "replay") {
+			history = {
+				...history,
+				rows: [...history.rows, ...logicalViewport.slice(0, borrowOverflow)],
+			};
+			this.#providerLogicalCommitted = borrowOverflow;
+			this.#providerTransientRows = logicalViewport.slice(0, borrowOverflow);
+		} else {
+			if (newHistory && history !== undefined) {
+				const prior = this.#providerTransientRows;
+				const retained =
+					plan.borrowedViewportRows === undefined
+						? undefined
+						: Math.max(0, Math.min(plan.borrowedViewportRows, logicalViewport.length, prior.length));
+				const consumed = retained === undefined ? prior.length : prior.length - retained;
+				const overlap = Math.min(history.rows.length, consumed);
+				let matches = true;
+				for (let index = 0; index < overlap; index++) {
+					if (prior[index] !== history.rows[index]) {
+						matches = false;
+						break;
+					}
+				}
+				if (!matches && prior.length > 0 && provider.beginHistoryReplay !== undefined) {
+					// Native transient bytes differ from the authoritative finalized
+					// render. Accept once, then replay the producer ledger exactly once.
+					provider.acknowledgeHistory(history.id);
+					this.#providerTransientRows = [];
+					this.#providerLogicalCommitted = 0;
+					this.#providerHasTransientHistory = false;
+					this.#prepareForcedRender(true);
+					this.requestRender(true);
+					return flushing;
+				}
+				if (matches) history = { ...history, rows: history.rows.slice(overlap) };
+				if (retained !== undefined) {
+					// Keep the original native bytes belonging to surviving owners,
+					// rather than attributing equal text from a new block to them.
+					this.#providerTransientRows = prior.slice(prior.length - retained);
+					this.#providerLogicalCommitted = retained;
+				} else if (matches) {
+					this.#providerTransientRows = prior.slice(overlap);
+					this.#providerLogicalCommitted = Math.max(0, this.#providerLogicalCommitted - overlap);
+				} else {
+					this.#providerTransientRows = [];
+					this.#providerLogicalCommitted = 0;
+				}
+			}
+			if (history === undefined && plan.borrowedViewportRows !== undefined) {
+				const retained = Math.max(
+					0,
+					Math.min(plan.borrowedViewportRows, this.#providerLogicalCommitted, logicalViewport.length),
+				);
+				this.#providerLogicalCommitted = retained;
+			}
+			if (history === undefined && borrowOverflow > this.#providerLogicalCommitted) {
+				inferredHistory = logicalViewport.slice(this.#providerLogicalCommitted, borrowOverflow);
+				this.#providerTransientRows.push(...inferredHistory);
+			}
+			if (history === undefined)
+				this.#providerLogicalCommitted = Math.max(this.#providerLogicalCommitted, borrowOverflow);
+		}
+		this.#providerHasTransientHistory = this.#providerTransientRows.length > 0;
+		const viewport = logicalViewport.slice(overflow);
+		if (logicalViewport.length > this.#providerLogicalCommitted) {
+			// Keep the live suffix at its logical screen rows without duplicating
+			// immutable native rows in the visible projection.
+			const reserved = Math.max(0, this.#providerLogicalCommitted - overflow);
+			for (let index = 0; index < reserved; index++) viewport[index] = "";
+		}
+		const acceptedBefore = this.#acceptedHistoryBatchId;
+		this.#emitPlanFrame(
+			width,
+			height,
+			viewport,
+			history,
+			provider,
+			inferredHistory,
+			plan.viewportExpansionRows,
+			Math.max(0, logicalViewport.length - (plan.viewportExpansionRows ?? 0)),
+			flushing,
+		);
+		if (
+			flushing &&
+			history !== undefined &&
+			history.id > acceptedBefore &&
+			this.#acceptedHistoryBatchId === acceptedBefore
+		) {
+			throw new Error("History flush did not accept the offered batch");
+		}
+		return plan.history !== undefined;
 	}
 	/**
 	 * Re-offer finalized history once after a settled resize.
@@ -2556,18 +2727,56 @@ export class TUI extends Container {
 		viewportRows: string[],
 		offered: HistoryBatch | undefined,
 		provider: TerminalFrameProvider | undefined,
+		inferredHistory: readonly string[] = [],
+		viewportExpansionRows = 0,
+		unexpandedViewportRows = viewportRows.length,
+		flushing = false,
 	): void {
+		if (this.#previousWidth !== width || this.#previousHeight !== height) this.#providerVisibleHistory = [];
 		let viewport = viewportRows;
-		if (this.#getTopmostVisibleOverlay() !== undefined) {
-			while (viewport.length < height) viewport.push("");
-			viewport = this.#compositeOverlaysIntoWindow(viewport, width, height);
+		let restoredPrefixRows = 0;
+		if (
+			!flushing &&
+			offered === undefined &&
+			inferredHistory.length === 0 &&
+			viewport.length < height &&
+			viewportExpansionRows > 0 &&
+			this.#providerVisibleHistory.length > 0 &&
+			this.#previousWidth === width &&
+			this.#previousHeight === height
+		) {
+			restoredPrefixRows = height - viewport.length;
+			if (restoredPrefixRows > 0) {
+				const retained = this.#providerVisibleHistory.slice(-restoredPrefixRows);
+				while (retained.length < restoredPrefixRows) retained.push("");
+				viewport = [...retained, ...viewport];
+			}
 		}
 		const history = offered !== undefined && offered.id > this.#acceptedHistoryBatchId ? offered : undefined;
 		if (offered !== undefined && offered.id <= this.#acceptedHistoryBatchId) provider?.acknowledgeHistory(offered.id);
 
-		let historyRows = history?.rows ?? [];
-		let replayViewportRows = 0;
-		if (history?.kind === "replay") {
+		let historyRows = [...(history?.rows ?? []), ...inferredHistory];
+		let replayViewportRows = restoredPrefixRows;
+		let retainedHistory: string[] | undefined;
+		if (
+			(flushing && this.#providerVisibleHistory.length > 0) ||
+			(history !== undefined && (viewportExpansionRows > 0 || this.#providerViewportExpansionRows > 0)) ||
+			(viewportExpansionRows === 0 &&
+				this.#providerViewportExpansionRows > 0 &&
+				this.#providerVisibleHistory.length > 0)
+		) {
+			// Temporary UI may cover accepted history, but must not push its
+			// otherwise-visible tail into native scrollback.
+			const combined = history?.kind === "replay" ? historyRows : [...this.#providerVisibleHistory, ...historyRows];
+			const retainedCount = flushing ? 0 : Math.min(combined.length, Math.max(0, height - unexpandedViewportRows));
+			retainedHistory = retainedCount > 0 ? combined.slice(-retainedCount) : [];
+			historyRows = combined.slice(0, combined.length - retainedCount);
+			replayViewportRows = Math.max(0, height - viewport.length);
+			const prefix = replayViewportRows > 0 ? retainedHistory.slice(-replayViewportRows) : [];
+			while (prefix.length < replayViewportRows) prefix.push("");
+			viewport = [...prefix, ...viewport];
+		}
+		if (history?.kind === "replay" && retainedHistory === undefined) {
 			// Providers may omit unused leading rows from a short viewport. Make
 			// that logical space explicit before the bottom-first replay split.
 			while (viewport.length < height) viewport.unshift("");
@@ -2582,6 +2791,11 @@ export class TUI extends Container {
 				replayViewportRows = moved;
 			}
 		}
+		const overlayVisible = this.#getTopmostVisibleOverlay() !== undefined;
+		if (overlayVisible) {
+			while (viewport.length < height) viewport.push("");
+			viewport = this.#compositeOverlaysIntoWindow(viewport, width, height);
+		}
 		const markers = this.#extractCursorMarkers(viewport);
 		const prepared = this.#prepareLinesArray(viewport, width);
 		const preparedHistory = this.#prepareLinesArray(historyRows, width);
@@ -2593,13 +2807,37 @@ export class TUI extends Container {
 		if (destructiveReset) {
 			this.#providerViewportTop = 0;
 			this.#providerWindow = [];
+			this.#providerVisibleHistory = [];
 		}
 		// The viewport stays anchored directly below whatever history remains on
 		// screen. Appending K history rows moves the anchor down by K; the write
 		// scrolls only when history + viewport overflow the physical screen, and
 		// the rows that scroll off the top are exactly the oldest history rows.
 		const geometryStable = this.#hasEverRendered && this.#previousWidth === width && this.#previousHeight === height;
-		const startTop = destructiveReset ? 0 : Math.min(this.#providerViewportTop, Math.max(0, height - 1));
+		const previousTop = this.#providerViewportTop;
+		const expansionRows = Math.max(0, viewportExpansionRows);
+		const releasedExpansionRows = Math.max(0, this.#providerViewportExpansionRows - expansionRows);
+		if (!geometryStable || destructiveReset || historyRows.length > 0) this.#providerUnexpandedTop = undefined;
+		if (geometryStable && expansionRows > 0 && this.#providerViewportExpansionRows === 0) {
+			this.#providerUnexpandedTop = previousTop;
+		}
+		const restoredTop = expansionRows === 0 ? this.#providerUnexpandedTop : undefined;
+		if (expansionRows === 0) this.#providerUnexpandedTop = undefined;
+		const startTop =
+			destructiveReset || retainedHistory !== undefined
+				? 0
+				: restoredTop !== undefined
+					? Math.min(restoredTop, Math.max(0, height - rows))
+					: geometryStable &&
+						  historyRows.length === 0 &&
+						  rows > 0 &&
+						  this.#providerWindow.length > 0 &&
+						  (rows <= this.#providerWindow.length || this.#providerVisibleHistory.length === 0) &&
+						  previousTop + this.#providerWindow.length === height
+						? Math.max(0, height - rows)
+						: geometryStable && (expansionRows > 0 || releasedExpansionRows > 0)
+							? Math.min(previousTop + releasedExpansionRows, Math.max(0, height - rows))
+							: Math.min(previousTop, Math.max(0, height - 1));
 		const newTop = Math.max(0, Math.min(startTop + historyRows.length, height - rows));
 		const pendingAltExit = this.#pendingAltExit;
 		let buffer = this.#paintBeginSequence + pendingAltExit;
@@ -2628,6 +2866,7 @@ export class TUI extends Container {
 			geometryStable &&
 			historyRows.length === 0 &&
 			startTop === newTop &&
+			previousTop === newTop &&
 			!this.#forceViewportRepaintOnNextRender &&
 			!destructiveReset &&
 			this.#providerWindow.length > 0;
@@ -2653,8 +2892,12 @@ export class TUI extends Container {
 			// viewport rows are not — erase them first so a scroll can only push
 			// committed rows and blanks, never an unfinished frame.
 			const pushed = Math.max(0, startTop + preparedHistory.length + rows - height);
-			if (pushed > this.#providerViewportTop && this.#providerWindow.length > 0) {
-				buffer += this.#eraseBelowRow(this.#providerViewportTop, height);
+			if (startTop > previousTop && this.#providerWindow.length > 0) {
+				// A reversible UI contraction pans the mutable frame back to the
+				// bottom. Erase its old cells without scrolling them into history.
+				buffer += this.#eraseBelowRow(previousTop, height);
+			} else if (pushed > previousTop && this.#providerWindow.length > 0) {
+				buffer += this.#eraseBelowRow(previousTop, height);
 			}
 			buffer += `\x1b[${startTop + 1};1H`;
 			let screenRow = startTop;
@@ -2707,7 +2950,11 @@ export class TUI extends Container {
 			lines: prepared,
 			windowTop: this.#debugNextWindowTop,
 			altScreen: false,
-			...(target === null ? {} : { cursor: { x: target.col, y: target.row, visible: target.visible } }),
+			...(target === null
+				? {}
+				: {
+						cursor: { x: target.col, y: target.row, visible: target.visible },
+					}),
 		};
 		if (pendingAltExit) {
 			this.#noteAltBufferToggle();
@@ -2716,8 +2963,21 @@ export class TUI extends Container {
 		}
 		if (target) this.#recordHardwareCursorState(target);
 		else this.#recordHardwareCursorHidden();
+		if (retainedHistory !== undefined) {
+			this.#providerVisibleHistory = retainedHistory;
+		} else if (historyRows.length > 0 || history?.kind === "replay") {
+			const visibleHistory = [
+				...this.#providerVisibleHistory.slice(0, previousTop),
+				...historyRows,
+				...viewport.slice(0, replayViewportRows),
+			];
+			this.#providerVisibleHistory = mutableTop > 0 ? visibleHistory.slice(-mutableTop) : [];
+		} else if (expansionRows === 0 && this.#providerViewportExpansionRows === 0) {
+			this.#providerVisibleHistory = this.#providerVisibleHistory.slice(0, mutableTop);
+		}
 		this.#providerWindow = mutablePrepared;
 		this.#providerViewportTop = mutableTop;
+		this.#providerViewportExpansionRows = expansionRows;
 		this.#previousWidth = width;
 		this.#previousHeight = height;
 		this.#resizeBurstGrew = false;
@@ -2728,6 +2988,7 @@ export class TUI extends Container {
 		this.#forceViewportRepaintOnNextRender = false;
 		this.#hasEverRendered = true;
 		this.#resizeReplaySize = undefined;
+		provider?.onViewportBorrowed?.(this.#providerLogicalCommitted);
 		if (history !== undefined) {
 			this.#acceptedHistoryBatchId = history.id;
 			provider?.acknowledgeHistory(history.id);
@@ -2740,6 +3001,7 @@ export class TUI extends Container {
 	/** Render one frame: alt-screen modal, provider plan, or children fallback. */
 	#doRender(): void {
 		if (this.#stopped) return;
+		this.#pendingLiveRender = false;
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
 		if (this.#resizeAltActive) {
@@ -3103,7 +3365,10 @@ export class TUI extends Container {
 
 	#recordHardwareCursorHidden(): void {
 		if (!this.#hardwareCursorState) return;
-		this.#hardwareCursorState = { ...this.#hardwareCursorState, visible: false };
+		this.#hardwareCursorState = {
+			...this.#hardwareCursorState,
+			visible: false,
+		};
 	}
 
 	#forgetHardwareCursorState(): void {

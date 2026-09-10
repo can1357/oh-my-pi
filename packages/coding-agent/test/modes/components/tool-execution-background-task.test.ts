@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { AgentProgress, SingleResult, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { TUI } from "@oh-my-pi/pi-tui";
@@ -70,12 +71,25 @@ function finalSnapshot(output: string): {
 	};
 }
 
-function makeComponent(): ToolExecutionComponent {
-	const ui = { requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI;
+function makeComponent(live = true): ToolExecutionComponent {
+	const ui = {
+		requestRender: vi.fn(),
+		requestComponentRender: vi.fn(),
+	} as unknown as TUI;
 	return new ToolExecutionComponent(
 		"task",
-		{ agent: "scout", id: "Anna", description: "scout auth", assignment: "investigate the auth flow" },
-		{},
+		{
+			agent: "scout",
+			id: "Anna",
+			description: "scout auth",
+			assignment: "investigate the auth flow",
+		},
+		{
+			liveRegion: {
+				isBlockInLiveRegion: () => live,
+				isBlockUncommitted: () => live,
+			},
+		},
 		undefined,
 		ui,
 	);
@@ -85,6 +99,150 @@ describe("ToolExecutionComponent detached task lifecycle", () => {
 	beforeAll(async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
 		await initTheme();
+	});
+
+	it("freezes progress and animation when any task rows are borrowed into history", () => {
+		vi.useFakeTimers();
+		const transcript = new TranscriptContainer();
+		const component = new ToolExecutionComponent(
+			"task",
+			{ agent: "scout", id: "Anna", description: "scout auth" },
+			{ liveRegion: transcript },
+			undefined,
+			{
+				requestRender: vi.fn(),
+				requestComponentRender: vi.fn(),
+			} as unknown as TUI,
+		);
+		try {
+			transcript.addChild(component);
+			component.updateResult(asyncSnapshot("initial progress"), true);
+			component.parkAsBackground();
+			transcript.renderViewport(100, 10, { now: 0, tick: 0 });
+			const before = component.render(100).join("\n");
+			transcript.setBorrowedViewportRows(1);
+			component.updateResult(asyncSnapshot("late shape-changing progress"), true);
+			vi.advanceTimersByTime(1000);
+			expect(component.render(100).join("\n")).toBe(before);
+			expect(transcript.canRemoveBlock(component)).toBe(false);
+		} finally {
+			component.seal();
+			vi.useRealTimers();
+		}
+	});
+	it("does not mutate a borrowed task on its first running snapshot", () => {
+		const transcript = new TranscriptContainer();
+		const component = new ToolExecutionComponent(
+			"task",
+			{ agent: "scout", id: "Anna", description: "scout auth" },
+			{ liveRegion: transcript },
+			undefined,
+			{
+				requestRender: vi.fn(),
+				requestComponentRender: vi.fn(),
+			} as unknown as TUI,
+		);
+		try {
+			transcript.addChild(component);
+			component.parkAsBackground();
+			transcript.renderViewport(100, 10, { now: 0, tick: 0 });
+			const before = component.render(100).join("\n");
+			transcript.setBorrowedViewportRows(1);
+			component.updateResult(asyncSnapshot("must not repaint"), true);
+			expect(component.render(100).join("\n")).toBe(before);
+			expect(transcript.canRemoveBlock(component)).toBe(false);
+		} finally {
+			component.seal();
+		}
+	});
+
+	it("does not apply a direct final result after running task rows are borrowed", () => {
+		const transcript = new TranscriptContainer();
+		const component = new ToolExecutionComponent(
+			"task",
+			{ agent: "scout", id: "Anna", description: "scout auth" },
+			{ liveRegion: transcript },
+			undefined,
+			{
+				requestRender: vi.fn(),
+				requestComponentRender: vi.fn(),
+			} as unknown as TUI,
+		);
+		try {
+			transcript.addChild(component);
+			component.updateResult(asyncSnapshot("immutable running progress"), true);
+			component.parkAsBackground();
+			transcript.renderViewport(100, 10, { now: 0, tick: 0 });
+			const before = component.render(100).join("\n");
+			transcript.setBorrowedViewportRows(1);
+			component.updateResult(finalSnapshot("must be delivered separately"), false);
+			expect(component.render(100).join("\n")).toBe(before);
+			expect(transcript.canRemoveBlock(component)).toBe(false);
+		} finally {
+			component.seal();
+		}
+	});
+
+	it("keeps borrowed partial arguments immutable through completion", () => {
+		const transcript = new TranscriptContainer();
+		const component = new ToolExecutionComponent(
+			"task",
+			{
+				agent: "scout",
+				id: "Anna",
+				description: "scout auth",
+				assignment: "partial",
+			},
+			{ liveRegion: transcript },
+			undefined,
+			{
+				requestRender: vi.fn(),
+				requestComponentRender: vi.fn(),
+			} as unknown as TUI,
+		);
+		try {
+			transcript.addChild(component);
+			transcript.renderViewport(100, 10, { now: 0, tick: 0 });
+			const before = component.render(100).join("\n");
+			transcript.setBorrowedViewportRows(1);
+			component.updateArgs({ assignment: "more" });
+			component.setArgsComplete();
+			component.setExecutionStarted();
+			component.invalidate();
+			expect(component.render(100).join("\n")).toBe(before);
+		} finally {
+			component.seal();
+		}
+	});
+
+	it("keeps borrowed synchronous task presentation while retaining final result", () => {
+		const transcript = new TranscriptContainer();
+		const component = new ToolExecutionComponent(
+			"task",
+			{
+				agent: "scout",
+				id: "Anna",
+				description: "scout auth",
+				assignment: "sync",
+			},
+			{ liveRegion: transcript },
+			undefined,
+			{
+				requestRender: vi.fn(),
+				requestComponentRender: vi.fn(),
+			} as unknown as TUI,
+		);
+		try {
+			transcript.addChild(component);
+			transcript.renderViewport(100, 10, { now: 0, tick: 0 });
+			const before = component.render(100).join("\n");
+			transcript.setBorrowedViewportRows(1);
+			component.updateResult(finalSnapshot("canonical final"), false);
+			expect(component.render(100).join("\n")).toBe(before);
+			expect(component.isTranscriptBlockFinalized()).toBe(true);
+		} finally {
+			component.seal();
+		}
 	});
 
 	it("keeps accepting live progress snapshots until settlement", () => {
@@ -104,5 +262,36 @@ describe("ToolExecutionComponent detached task lifecycle", () => {
 
 		const rendered = stripVTControlCharacters(component.render(100).join("\n"));
 		expect(rendered).toContain("found it in src/auth.ts");
+	});
+
+	it("freezes a parked task after its block leaves the live region", () => {
+		let live = true;
+		const component = new ToolExecutionComponent(
+			"task",
+			{
+				agent: "scout",
+				id: "Anna",
+				description: "scout auth",
+				assignment: "investigate the auth flow",
+			},
+			{
+				liveRegion: {
+					isBlockInLiveRegion: () => live,
+					isBlockUncommitted: () => live,
+				},
+			},
+			undefined,
+			{
+				requestRender: vi.fn(),
+				requestComponentRender: vi.fn(),
+			} as unknown as TUI,
+		);
+		component.updateResult(asyncSnapshot("initial progress"), true);
+		component.parkAsBackground();
+		live = false;
+		component.updateResult(asyncSnapshot("late progress"), true);
+		const rendered = stripVTControlCharacters(component.render(100).join("\n"));
+		expect(rendered).toContain("initial progress");
+		expect(rendered).not.toContain("late progress");
 	});
 });

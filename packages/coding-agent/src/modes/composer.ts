@@ -194,6 +194,11 @@ export class Composer implements TerminalFrameProvider {
 	#retiredHeaderStart = 0;
 	#resizeRetiredHeaderStart: number | undefined;
 	#lastNormalRows = 0;
+	/** Current non-dropdown chrome footprint, not a session-wide minimum. */
+	#chromeRowsWithoutAutocomplete: number | undefined;
+	#editorHost: Container | undefined;
+	#viewportTranscript?: TranscriptContainer;
+	#viewportTranscriptStart = 0;
 	#lastInterruptAt = 0;
 	#started = false;
 	#stopped = false;
@@ -247,7 +252,7 @@ export class Composer implements TerminalFrameProvider {
 		this.ui.addChild(this.#statusHost);
 		this.ui.setFocus(this.editor);
 	}
-	/** Compose the bounded mutable viewport and the next ordered history append. */
+	/** Compose the complete logical viewport and the next ordered history append. */
 	renderFrame(viewport: ViewportSize): TerminalFramePlan {
 		if (!this.#started || this.#stopped) return { viewport: [] };
 		const width = Math.max(1, viewport.columns);
@@ -262,6 +267,7 @@ export class Composer implements TerminalFrameProvider {
 			: [this.#header, this.#bootstrapInputGap, this.editor, this.#statusHost];
 		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
 		if (transcriptIndex < 0) {
+			this.#viewportTranscript = undefined;
 			return { viewport: this.#renderRoots(roots, width).slice(-rows) };
 		}
 		const transcript = roots[transcriptIndex] as TranscriptContainer;
@@ -271,22 +277,41 @@ export class Composer implements TerminalFrameProvider {
 		// reflowing to the current width) while the screen has room. A batch
 		// leaves the mutable viewport in the same frame it is appended, so its
 		// rows are never painted twice.
-		const history = this.#offerHistory(transcript, width, rows, preRoots.length + after.length);
+		const chromeRows = preRoots.length + after.length;
+		const temporaryEditorVisible =
+			(this.editor.focused && this.editor.isAutocompleteActive()) ||
+			(this.#editorHost !== undefined && !this.#editorHost.children.includes(this.editor));
+		if (!temporaryEditorVisible) this.#chromeRowsWithoutAutocomplete = chromeRows;
+		const viewportExpansionRows =
+			transcript.transientRowCount(width) +
+			(temporaryEditorVisible ? Math.max(0, chromeRows - (this.#chromeRowsWithoutAutocomplete ?? chromeRows)) : 0);
+		const history = this.#offerHistory(transcript, width, rows + viewportExpansionRows, chromeRows);
 		const headerVisible = !this.#headerRetired && this.#offeredHistory?.source !== "header";
 		const headerRows = headerVisible ? this.#header.render(width) : [];
 		const before = [...headerRows, ...preRoots];
+		this.#viewportTranscript = transcript;
+		this.#viewportTranscriptStart = before.length;
 		const now = performance.now();
 		const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
-		const active = transcript.renderViewport(width, Math.max(0, rows - before.length - after.length), frame);
+		const active = transcript.renderViewport(width, Number.MAX_SAFE_INTEGER, frame);
 		const composed = [...before, ...active, ...after];
 		if (history !== undefined && this.#offeredHistory?.source === "header") {
 			const visibleHeaderRows = Math.max(0, rows - composed.length);
 			this.#retiredHeaderStart = Math.max(0, history.rows.length - visibleHeaderRows);
 		}
+		const borrowableRows = headerVisible ? 0 : before.length + active.length;
+		const borrowedViewportRows = transcript.borrowedViewportRowCount();
 		return {
 			history,
-			viewport: composed.length <= rows ? composed : composed.slice(-rows),
+			borrowableRows,
+			viewportExpansionRows,
+			viewport: composed,
+			borrowedViewportRows: borrowedViewportRows > 0 ? before.length + borrowedViewportRows : 0,
 		};
+	}
+
+	onViewportBorrowed(rows: number): void {
+		this.#viewportTranscript?.setBorrowedViewportRows(Math.max(0, rows - this.#viewportTranscriptStart));
 	}
 
 	/** Acknowledges one accepted header, replay, or transcript batch. */
@@ -404,13 +429,20 @@ export class Composer implements TerminalFrameProvider {
 		}
 		if (!this.#headerRetired) {
 			const welcome = this.#welcome;
-			if (welcome !== undefined && !welcome.isTranscriptBlockFinalized()) return undefined;
-			// The header stays live viewport chrome until the screen fills; then it
-			// retires first so transcript prefixes can follow in order.
-			const renderedHeader = this.#header.render(width);
+			let renderedHeader = this.#header.render(width);
+			const liveRows = transcript.liveRowCount(width);
+			// Editor-only growth is reversible chrome, not transcript progression.
+			if (!this.#historyFlush && (liveRows === 0 || renderedHeader.length + chromeRows + liveRows <= rows)) {
+				return undefined;
+			}
+			if (welcome !== undefined && !welcome.isTranscriptBlockFinalized()) {
+				// Settle before preserving a header whose top would leave the viewport.
+				welcome.stopIntro();
+				renderedHeader = this.#header.render(width);
+			}
+			// Archive the complete header before any part is clipped. It is not a
+			// borrowable transcript prefix, so clipping alone would lose its top.
 			if (renderedHeader.length > 0) {
-				const liveRows = transcript.liveRowCount(width);
-				if (!this.#historyFlush && renderedHeader.length + chromeRows + liveRows <= rows) return undefined;
 				this.#offeredHistory = {
 					id: this.#nextHistoryId++,
 					rows: [...renderedHeader, ""],
@@ -654,9 +686,20 @@ export class Composer implements TerminalFrameProvider {
 			this.#runtimeMounted = true;
 		}
 		this.#runtimeChildren = children;
+		this.#editorHost = this.#findEditorHost(children);
 		for (const child of children) this.ui.addChild(child);
 		this.ui.addChild(this.#statusHost);
 		this.ui.requestRender();
+	}
+
+	#findEditorHost(children: readonly Component[]): Container | undefined {
+		for (const child of children) {
+			if (!(child instanceof Container) || child instanceof TranscriptContainer) continue;
+			if (child.children.includes(this.editor)) return child;
+			const host = this.#findEditorHost(child.children);
+			if (host) return host;
+		}
+		return undefined;
 	}
 
 	/** Play or replay the welcome intro against the stable header render target. */

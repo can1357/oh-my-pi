@@ -1,30 +1,50 @@
 import { describe, expect, it, vi } from "bun:test";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
 describe("InputController tool output expansion", () => {
-	it("expands children and forces a full repaint so every live block re-renders", () => {
-		const expandable = { setExpanded: vi.fn() };
-		const inert = { render: vi.fn(() => []) };
-		const requestRender = vi.fn();
-		const showStatus = vi.fn();
+	it("expands only unborrowed cards while preserving the ordered native-history prefix", () => {
+		const card = (label: string) => {
+			let expanded = false;
+			return {
+				render: () => (expanded ? [label, `${label} details`] : [label]),
+				setExpanded: (value: boolean) => {
+					expanded = value;
+				},
+				isTranscriptBlockFinalized: () => true,
+			};
+		};
+		const chatContainer = new TranscriptContainer();
+		const frontier = { render: () => ["frontier"], isTranscriptBlockFinalized: () => false };
+		chatContainer.addChild(frontier);
+		chatContainer.addChild(card("borrowed first"));
+		chatContainer.addChild(card("borrowed second"));
+		chatContainer.addChild(card("live"));
+		const viewport = chatContainer.renderViewport(80, 20, { tick: 0, now: 0 });
+		chatContainer.setBorrowedViewportRows(viewport.indexOf("live"));
 		const ctx = {
 			toolOutputExpanded: false,
-			chatContainer: { children: [expandable, inert] },
-			ui: { requestRender },
-			showStatus,
+			chatContainer,
+			ui: { requestRender: vi.fn() },
 		} as unknown as InteractiveModeContext;
-
-		new InputController(ctx).toggleToolOutputExpansion();
-
-		expect(ctx.toolOutputExpanded).toBe(true);
-		expect(expandable.setExpanded).toHaveBeenCalledWith(true);
-		// Expansion mutates every live block; the forced repaint re-renders them
-		// at their new heights in the same frame.
-		expect(requestRender).toHaveBeenCalledTimes(1);
-		expect(requestRender).toHaveBeenCalledWith(true);
-		expect(showStatus).toHaveBeenCalledWith("Tool output expansion: enabled");
+		const controller = new InputController(ctx);
+		controller.setToolsExpanded(true);
+		expect(chatContainer.render(80).filter(Boolean)).toEqual([
+			"frontier",
+			"borrowed first",
+			"borrowed second",
+			"live",
+			"live details",
+		]);
+		controller.setToolsExpanded(false);
+		expect(chatContainer.render(80).filter(Boolean)).toEqual([
+			"frontier",
+			"borrowed first",
+			"borrowed second",
+			"live",
+		]);
 	});
 
 	it("does not expand hidden tool activity and explains why", () => {

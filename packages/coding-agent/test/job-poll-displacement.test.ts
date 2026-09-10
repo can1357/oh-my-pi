@@ -168,7 +168,7 @@ describe("EventController displaces consecutive waiting polls", () => {
 		const pendingTools = new Map<string, ToolExecutionHandle>();
 		const ctx = createInteractiveModeContext({ pendingTools });
 		const children = ctx.chatContainer.children;
-		return { controller: new EventController(ctx), children, pendingTools };
+		return { controller: new EventController(ctx), children, pendingTools, ctx };
 	}
 
 	async function runPoll(controller: EventController, children: Component[], toolCallId: string) {
@@ -222,6 +222,15 @@ describe("EventController displaces consecutive waiting polls", () => {
 		expect(children).toContain(second);
 		// The displaced block is sealed so its spinner interval is stopped.
 		expect(first.isTranscriptBlockFinalized()).toBe(true);
+	});
+
+	it("still displaces an unborrowed poll despite unrelated provider history", async () => {
+		const { controller, children, ctx } = createFixture();
+		const first = await runPoll(controller, children, "borrowed-1");
+		(ctx.ui as unknown as { hasTransientProviderHistory: () => boolean }).hasTransientProviderHistory = () => true;
+		const second = await runPoll(controller, children, "borrowed-2");
+		expect(children).not.toContain(first);
+		expect(children).toContain(second);
 	});
 
 	it("seals the waiting poll in place when a different tool runs next", async () => {

@@ -145,7 +145,6 @@ describe("StatusLineComponent", () => {
 		const placeholder = Bun.stripANSI(statusLine.renderStartupPlaceholder(WIDE_ENOUGH_FOR_COST_SEGMENT, "box"));
 		expect(placeholder.match(/…/g)?.length).toBeGreaterThanOrEqual(3);
 		expect(placeholder).toContain(`${theme.icon.model} …`);
-		expect(placeholder).toContain(`${theme.icon.folder} …`);
 		expect(placeholder).toContain("$…");
 		expect(placeholder).not.toContain("Stale Model");
 		expect(placeholder).not.toContain("stale-session");

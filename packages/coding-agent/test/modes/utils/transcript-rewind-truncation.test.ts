@@ -78,6 +78,7 @@ function createHarness() {
 		buildTranscriptSessionContext: () => ({ messages: remainingMessages }),
 	};
 
+	const ui = { requestRender: vi.fn(), hasTransientProviderHistory: () => false };
 	const ctx = {
 		initialChatRendered: true,
 		focusedAgentId: undefined,
@@ -88,9 +89,7 @@ function createHarness() {
 		chatContainer: chat,
 		transcriptMessageComponents,
 		lastAssistantUsage: undefined,
-		statusLine: { invalidate: vi.fn() },
-		updateEditorBorderColor: vi.fn(),
-		ui: { requestRender: vi.fn() },
+		ui,
 	} as unknown as InteractiveModeContext;
 
 	return {
@@ -100,6 +99,7 @@ function createHarness() {
 		remainingMessages,
 		viewSession,
 		messages: { user1, assistant1, user2, assistant2 },
+		ui,
 		helpers: new UiHelpers(ctx),
 	};
 }
@@ -114,5 +114,12 @@ describe("UiHelpers.truncateTranscriptFromMessage", () => {
 		pending.ctx.pendingTools.set("call-1", {} as never);
 		expect(pending.helpers.truncateTranscriptFromMessage(pending.messages.user2)).toBe(false);
 		expect(pending.chat.children).toHaveLength(4);
+	});
+
+	it("falls back when provider history is borrowed", () => {
+		const harness = createHarness();
+		harness.ui.hasTransientProviderHistory = () => true;
+		expect(harness.helpers.truncateTranscriptFromMessage(harness.messages.user2)).toBe(false);
+		expect(harness.chat.children).toHaveLength(4);
 	});
 });

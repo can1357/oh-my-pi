@@ -87,11 +87,11 @@ describe("EventController message_update coalescing", () => {
 		emit(messageUpdate("tok1 tok2 tok3 tok4 tok5"));
 
 		vi.advanceTimersByTime(32);
-		expect(ui.requestRender).not.toHaveBeenCalled();
+		expect(ui.requestLiveRender).not.toHaveBeenCalled();
 		vi.advanceTimersByTime(1);
 		await flushMicrotasks();
 
-		expect(ui.requestRender).toHaveBeenCalledTimes(1);
+		expect(ui.requestLiveRender).toHaveBeenCalledTimes(1);
 		expect((ctx.streamingMessage as AssistantMessage | undefined)?.content).toEqual([
 			{ type: "text", text: "tok1 tok2 tok3 tok4 tok5" },
 		]);
@@ -101,7 +101,7 @@ describe("EventController message_update coalescing", () => {
 		vi.advanceTimersByTime(33);
 		await flushMicrotasks();
 
-		expect(ui.requestRender).toHaveBeenCalledTimes(2);
+		expect(ui.requestLiveRender).toHaveBeenCalledTimes(2);
 		expect((ctx.streamingMessage as AssistantMessage | undefined)?.content).toEqual([
 			{ type: "text", text: "tok1 tok2 tok3 tok4 tok5 tok6 tok7" },
 		]);

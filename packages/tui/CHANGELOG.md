@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reversible layout growth no longer advances native history or leaves blank viewport rows when it contracts.
+- Fixed lost or duplicated transcript rows across live viewport overflow, repeated command suggestions, and session replacement.
+- Fixed prepended live transcript rows appearing after previously displayed rows instead of in their original order.
+- Fixed deferred initial image paints losing overflowing provider rows.
 ### Added
 
 - Editor history can retain local draft snapshots with their paste expansions and host-owned attachment restoration, without writing them to persistent history ([#11524](https://github.com/can1357/oh-my-pi/pull/11524) by [@camjac251](https://github.com/camjac251)).

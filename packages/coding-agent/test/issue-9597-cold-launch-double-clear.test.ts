@@ -64,12 +64,15 @@ describe("issue #9597 — cold-launch welcome duplication", () => {
 
 	// `resuming` mirrors `main.ts` `runInteractiveMode`: `false` on a plain `omp`
 	// launch, `true` for --continue/--resume/--fork.
-	async function coldLaunch(resuming: boolean): Promise<{
+	async function coldLaunch(
+		resuming: boolean,
+		terminalRows = 30,
+	): Promise<{
 		resets: number;
 		welcomeRows: number;
 		scrollBuffer: string;
 	}> {
-		const terminal = new CapturingTerminal(100, 30);
+		const terminal = new CapturingTerminal(100, terminalRows);
 		beginStartupComposer({ preferences: config, terminal, version: "18.0.4", cache: false });
 		await terminal.waitForRender();
 		const lease = takeStartupComposerLease();
@@ -124,6 +127,13 @@ describe("issue #9597 — cold-launch welcome duplication", () => {
 
 	it("replays a resumed transcript without clearing native history again", async () => {
 		const { resets, scrollBuffer, welcomeRows } = await coldLaunch(true);
+		expect(resets).toBe(1);
+		expect(scrollBuffer).toContain("resume marker answer");
+		expect(welcomeRows).toBe(1);
+	});
+
+	it("retains the welcome when a resumed transcript partially overflows it", async () => {
+		const { resets, scrollBuffer, welcomeRows } = await coldLaunch(true, 20);
 		expect(resets).toBe(1);
 		expect(scrollBuffer).toContain("resume marker answer");
 		expect(welcomeRows).toBe(1);

@@ -87,7 +87,9 @@ The writer:
 5. Restores autowrap, synchronized-output state, and cursor state.
 6. Acknowledges the exact history id only after the write is accepted in-process.
 
-Viewport-only frames cannot create history. Theme changes leave native history terminal-owned; settled resizes may replay it according to `ResizeScrollbackMode`.
+Bounded viewport-only frames do not append history. An oversized logical frame can borrow its leading rows into native scrollback; after a normal paint, `onViewportBorrowed` reports that immutable prefix to the provider. `Composer` translates it into transcript coordinates, so `TranscriptContainer.canRemoveBlock` and `isBlockUncommitted` protect borrowed blocks without advancing the durable emission ledger or freezing unrelated live blocks. Partial finalized prefixes consume only the matching borrowed rows.
+
+When trailing chrome shrinks, native-owned row slots remain reserved so the live suffix does not jump to the top or print a second copy of history. An inline terminal cannot pull native scrollback back into the viewport without replaying it. Theme changes leave native history terminal-owned; settled resizes may replay it according to `ResizeScrollbackMode`.
 
 ## Resize
 

@@ -101,6 +101,7 @@ function startRetiredWelcome(modelName: string): { composer: Composer; terminal:
 		welcome: { version: "test", modelName, providerName: "test-provider" },
 	});
 	composer.setRuntimeChildren([new TranscriptContainer(), new MutableComposerTail()]);
+	composer.beginHistoryFlush();
 	composer.start({ playWelcomeIntro: false });
 	return { composer, terminal };
 }
@@ -113,6 +114,34 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
+it("keeps the visible header mutable when command suggestions grow the editor", () => {
+	const terminal = new VirtualTerminal(140, 36);
+	const scheduler = new ResizeScheduler();
+	const composer = new Composer({
+		terminal,
+		tuiOptions: { renderScheduler: scheduler },
+		preferences: { ...COMPOSER_DEFAULTS, quiet: false },
+		welcome: { version: "test", modelName: "test-model", providerName: "test-provider" },
+	});
+	let suggestionRows = 0;
+	const tail: Component = {
+		render: () => ["EDITOR", ...Array.from({ length: suggestionRows }, (_, i) => `suggestion-${i}`)],
+	};
+	composer.setRuntimeChildren([new TranscriptContainer(), tail]);
+	composer.start({ playWelcomeIntro: false });
+	try {
+		suggestionRows = 18;
+		const expanded = composer.renderFrame({ columns: 140, rows: 36 });
+		expect(expanded.history).toBeUndefined();
+		expect(expanded.viewport.slice(-36).some(row => row.includes("test-model"))).toBeTrue();
+		suggestionRows = 0;
+		const collapsed = composer.renderFrame({ columns: 140, rows: 36 });
+		expect(collapsed.history).toBeUndefined();
+		expect(collapsed.viewport.some(row => row.includes("Welcome back!"))).toBeTrue();
+	} finally {
+		composer.ui.stop();
+	}
+});
 describe("composer welcome native-history resize", () => {
 	it("keeps one exact editor rectangle and retired welcome through repeated thinking and resize frames", async () => {
 		// Select the long auth-broker tip: it retires as three hard rows at
@@ -149,6 +178,7 @@ describe("composer welcome native-history resize", () => {
 		const transcript = new TranscriptContainer();
 		const tail = new MutableComposerTail();
 		composer.setRuntimeChildren([transcript, tail]);
+		composer.beginHistoryFlush();
 		composer.start({ playWelcomeIntro: false });
 
 		expect(countRows(plainBuffer(terminal), "Welcome back!")).toBe(1);
@@ -270,6 +300,7 @@ describe("composer welcome native-history resize", () => {
 			welcome: { version: "test", modelName: "test-model", providerName: "test-provider" },
 		});
 		composer.setRuntimeChildren([new TranscriptContainer(), new MutableComposerTail()]);
+		composer.beginHistoryFlush();
 		composer.start({ playWelcomeIntro: false });
 		await scheduler.settle(terminal);
 
