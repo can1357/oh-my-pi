@@ -371,10 +371,11 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		const welcome = await guest.nextFrame();
 		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
 
-		// Quoted into the reply unbounded, the 100,011-character id below produced a
-		// 200,031-byte error frame — and the queue admits one oversized entry, so a
-		// large enough one closes the host socket on the relay's payload limit. An
-		// error path exists to be polite; it must not be a disconnect a guest sizes.
+		// Quoted into the reply unbounded, the id below came back twice — once in the
+		// prefix, once inside the error — so the frame ran to about twice its length.
+		// The queue admits one oversized entry, so a large enough one closes the host
+		// socket on the relay's payload limit. An error path exists to be polite; it
+		// must not be a disconnect a guest sizes.
 		const huge = `long-agent-${"x".repeat(100_000)}`;
 		guest.socket.send({ t: "agent-cmd", cmd: "kill", agentId: huge } as unknown as CollabFrame);
 		const reply = await guest.nextFrame();
@@ -445,9 +446,9 @@ describe("collab frames a guest can send that the host must still answer", () =>
 
 		// `chat` and `revive` reach `ensureLive`, which embeds the id it was handed
 		// twice, in prose of its own, in another module. Bounding the id at this
-		// handler left that untouched: 100,011 characters came back as a 200,211-byte
-		// reply, larger than the unbounded version the bound was added to fix. The cap
-		// has to sit on the finished message.
+		// handler left that untouched: the reply still carried the id twice through
+		// prose composed elsewhere, so it still scaled with what the guest sent. The
+		// cap has to sit on the finished message.
 		const huge = `long-agent-${"x".repeat(100_000)}`;
 		guest.socket.send({ t: "agent-cmd", cmd: "revive", agentId: huge } as unknown as CollabFrame);
 		const reply = await guest.nextFrame();
@@ -543,8 +544,8 @@ describe("collab frames a guest can send that the host must still answer", () =>
 
 	it("bounds the log line a foreign error composes, not only the reply", async () => {
 		// The reply and the log take the same text, and `ensureLive` embeds the id it
-		// was handed twice. Bounding one consumer and not the other leaves the same
-		// 200 KB on the other side of the same call.
+		// was handed twice. Bounding one consumer and not the other leaves the whole
+		// of it on the other side of the same call.
 		const records: { error?: unknown }[] = [];
 		const sink = (event: { message: string; context?: Record<string, unknown> }) => {
 			if (event.message.includes("agent-cmd failed")) records.push(event.context ?? {});
@@ -586,6 +587,12 @@ describe("collab frames a guest can send that the host must still answer", () =>
 			{ providerFile: null },
 			{ detail: "enormous" },
 			{ url: 7 },
+			// Parses, and points wherever the sender chose. `URL.canParse` says yes to
+			// all three; the scheme allowlist is what says no.
+			{ url: "not-a-url" },
+			{ url: "javascript:alert(1)" },
+			{ url: "file:///etc/passwd" },
+			{ url: `https://example.invalid/${"a".repeat(2048)}` },
 			{ providerFile: 5 },
 			{ providerFile: { provider: "nope" } },
 			{ providerFile: { provider: "openai", id: 9 } },
@@ -655,6 +662,27 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
 		expect(reply.message).toContain("every image must carry string data and mimeType");
 		expect(harness.prompts).toHaveLength(0);
+	});
+
+	it("carries an image whose url is the plain http the blob broker itself emits", async () => {
+		const guest = await joinAsGuest(host.link, "http-url");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// The scheme allowlist is not "https only". `blob-broker/exposure.ts` builds
+		// `http://127.0.0.1:<port>` for local exposure, so a rule that demanded TLS
+		// would reject URLs this codebase produces for itself.
+		const delivered = harness.nextPrompt();
+		guest.socket.send({
+			t: "prompt",
+			text: "carry me",
+			images: [{ type: "image", data: "AAAA", mimeType: "image/png", url: "http://127.0.0.1:8080/blob/abc.png" }],
+		} as unknown as CollabFrame);
+		await Promise.race([delivered, Bun.sleep(1_000)]);
+		expect(harness.prompts).toHaveLength(1);
+		const content = harness.prompts[0]?.content as { url?: string }[];
+		expect(content?.[1]?.url).toBe("http://127.0.0.1:8080/blob/abc.png");
 	});
 
 	it("strips an image property it does not know instead of carrying it into the session", async () => {

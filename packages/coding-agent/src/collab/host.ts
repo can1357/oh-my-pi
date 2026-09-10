@@ -119,11 +119,12 @@ const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
  * Not a limit on what an id or a name may be — an agent lookup takes the id whole,
  * so a longer real one still addresses its agent — only on how much of it a guest
  * can make the host emit. Unbounded, a reply that quotes one is as large as the
- * guest chose: a 100,011-character one measured 200,031 bytes for an unknown-agent
- * kill, and the queue admits one oversized entry on an empty queue, so a large
- * enough label builds a frame past the relay's payload limit and closes the host
- * socket — a guest-triggered disconnect out of an error path whose whole purpose
- * is to be polite about a mistake.
+ * guest chose — an unknown-agent kill quoted the id in the prefix and again
+ * inside the error, so the reply ran to about twice whatever arrived. The queue
+ * admits one oversized entry on an empty queue, so a large enough label builds a
+ * frame past the relay's payload limit and closes the host socket: a
+ * guest-triggered disconnect out of an error path whose whole purpose is to be
+ * polite about a mistake.
  *
  * The number is the cap {@link CollabHost.#handleHello} already applied to a peer
  * name, the other guest-supplied label that reaches a frame; it is shared rather
@@ -140,10 +141,10 @@ const GUEST_LABEL_MAX = 64;
  * Bounding the ingredients does not work, and this branch proved it twice: the
  * agent-command replies bound the id and then interpolated `String(err)`, and
  * `AgentLifecycleManager#ensureLive` embeds the id it was given, twice, in prose
- * of its own. A 100,011-character id came back out as a 200,211-byte reply —
- * larger than the unbounded version this was meant to fix. That message is
- * composed in another module, for its own callers, so the only place that can
- * bound it is the last one that touches it.
+ * of its own. Bounding the label bought almost nothing: the reply still carried
+ * the id twice through prose composed elsewhere, so it still scaled with what
+ * the guest sent. That message belongs to another module and its own callers, so
+ * the only place that can bound it is the last one that touches it.
  *
  * 512 UTF-16 code units, which is what `slice` counts — not bytes. Astral text
  * costs four bytes per two units, so 512 units is 256 code points and about 1 KiB
@@ -160,6 +161,27 @@ const GUEST_LABEL_MAX = 64;
  * its own prose, and truncating that loses the tail of a real diagnostic.
  */
 const ERROR_MESSAGE_MAX = 512;
+
+/**
+ * Schemes a replicated image URL may use.
+ *
+ * `http:` is here on purpose and not as an oversight: the blob broker's own
+ * exposure emits `http://127.0.0.1:<port>` and `http://<bindHost>:<port>`
+ * (`blob-broker/exposure.ts`), so requiring TLS would reject URLs this codebase
+ * produces for itself. What the allowlist is for is everything else — `file:`,
+ * `data:`, `javascript:` — which `URL.canParse` accepts happily and which
+ * providers would be handed verbatim.
+ */
+const IMAGE_URL_PROTOCOLS = new Set(["http:", "https:"]);
+/**
+ * Ceiling on a replicated image URL, in UTF-16 code units.
+ *
+ * The de-facto interoperable URL ceiling rather than a figure of this feature's
+ * own — proxies, CDNs and older clients converge on it, and the broker's own
+ * URLs are an order of magnitude shorter. It exists because this string is
+ * copied verbatim into a provider request and a guest chooses its length.
+ */
+const IMAGE_URL_MAX = 2048;
 
 const IMAGE_DETAIL_VALUES = new Set(["auto", "low", "high", "original"]);
 const PROVIDER_FILE_PROVIDERS = new Set(["openai", "anthropic", "google"]);
@@ -192,7 +214,7 @@ function toImageContent(value: unknown): ImageContent | null {
 	const { data, mimeType, detail, url, providerFile } = candidate;
 	if (typeof data !== "string" || typeof mimeType !== "string") return null;
 	if (detail !== undefined && !IMAGE_DETAIL_VALUES.has(detail as string)) return null;
-	if (url !== undefined && typeof url !== "string") return null;
+	if (url !== undefined && !isReplicableImageUrl(url)) return null;
 	const image: ImageContent = { type: "image", data, mimeType };
 	if (detail !== undefined) image.detail = detail as ImageContent["detail"];
 	if (url !== undefined) image.url = url;
@@ -202,6 +224,27 @@ function toImageContent(value: unknown): ImageContent | null {
 		image.providerFile = reference;
 	}
 	return image;
+}
+
+/**
+ * Whether a replicated image URL is one this host will hand to a provider.
+ *
+ * Checked, not merely typed, because `ImageContent.url` is not decoration: the
+ * OpenAI converter puts it straight into `image_url` and the Google one into
+ * `fileUri`, so a guest that sends `"not-a-url"` buys a provider failure a turn
+ * later, and one that sends a scheme of its choosing picks where the request
+ * points. Parsing alone is not the check — `URL.canParse("javascript:alert(1)")`
+ * is `true`.
+ */
+function isReplicableImageUrl(value: unknown): value is string {
+	if (typeof value !== "string" || value.length === 0 || value.length > IMAGE_URL_MAX) return false;
+	let parsed: URL;
+	try {
+		parsed = new URL(value);
+	} catch {
+		return false;
+	}
+	return IMAGE_URL_PROTOCOLS.has(parsed.protocol);
 }
 
 function toProviderFileReference(value: unknown): ProviderFileReference | null {
@@ -593,7 +636,7 @@ export class CollabHost {
 	 * The argument on {@link #sendError} is about the error text, not about the
 	 * error frame, so it holds for every consumer of that text and not just the
 	 * reply: `ensureLive` embeds the id it was handed, twice, and a log line takes
-	 * the same 200 KB a reply would. Bounded once, here, so a caller cannot bound
+	 * whatever volume a reply would. Bounded once, here, so a caller cannot bound
 	 * one consumer and forget the other — which is exactly what happened when only
 	 * the reply was fixed.
 	 *
