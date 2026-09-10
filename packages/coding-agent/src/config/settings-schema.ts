@@ -2096,6 +2096,18 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Input and startup
+	"composer.recallClearedDrafts": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Recall Cleared Drafts",
+			description:
+				"Keep drafts cleared with Ctrl+C in local Up/Down history until exit; disabling affects future clears",
+		},
+	},
+
 	doubleEscapeAction: {
 		type: "enum",
 		values: ["rewind", "tree", "none"] as const,
