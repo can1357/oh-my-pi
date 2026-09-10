@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 
 describe("config.yml comment preservation on model-role writes (#11477)", () => {
 	let tempDir: TempDir;
@@ -137,5 +138,29 @@ bash:
 		expect(after).toContain('\n        - match: "git push --force*"');
 		expect(after).toContain("# deny floor");
 		expect(after).not.toContain("\n  default:");
+	});
+
+	it("persists a role write against an aliased modelRoles mapping without throwing", async () => {
+		const configPath = path.join(agentDir, "config.yml");
+		await Bun.write(
+			configPath,
+			`roles: &roles
+  default: anthropic/claude-fable-5-1
+modelRoles: *roles
+defaultThinkingLevel: high
+`,
+		);
+
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		settings.setModelRole("smol", "anthropic/claude-haiku-4-5");
+		await settings.flush();
+
+		// The aliased branch is dereferenced to a concrete map so the write
+		// succeeds (the old alias node would make setIn throw).
+		const after = await Bun.file(configPath).text();
+		const parsed = YAML.parse(after) as { modelRoles: Record<string, string> };
+		expect(parsed.modelRoles.default).toBe("anthropic/claude-fable-5-1");
+		expect(parsed.modelRoles.smol).toBe("anthropic/claude-haiku-4-5");
+		expect(after).toContain("defaultThinkingLevel: high");
 	});
 });

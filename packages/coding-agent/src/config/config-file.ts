@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { OmpErrors, type Type } from "@oh-my-pi/omptype";
 import { getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { JSONC, YAML } from "bun";
-import { Document, parseDocument } from "yaml";
+import { Document, isCollection, parseDocument } from "yaml";
 
 const YAML_MAPPING_HEADER_TRAILING_SPACE = /: +$/gm;
 
@@ -38,7 +38,12 @@ function reconcileRecord(
 		if (targetValue === undefined) continue;
 		const childPath = [...path, key];
 		const currentValue = current[key];
-		if (isPlainRecord(targetValue) && isPlainRecord(currentValue)) {
+		// `toJS()` resolves aliases, so an aliased mapping (`modelRoles: *roles`)
+		// looks like a record here while its document node is an `Alias` that
+		// `setIn` cannot descend into. Only recurse when the node is a real
+		// collection; otherwise fall through and replace the whole branch (which
+		// dereferences the alias to a concrete map), matching the old serializer.
+		if (isPlainRecord(targetValue) && isPlainRecord(currentValue) && isCollection(doc.getIn(childPath, true))) {
 			reconcileRecord(doc, childPath, currentValue, targetValue);
 		} else if (!Bun.deepEquals(currentValue, targetValue)) {
 			doc.setIn(childPath, targetValue);
