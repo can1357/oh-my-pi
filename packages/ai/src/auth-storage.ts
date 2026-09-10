@@ -5149,7 +5149,6 @@ export class AuthStorage {
 		return this.settleQuotaProbeSuccess(key);
 	}
 
-
 	#resolveWindowResetAt(window: UsageLimit["window"]): number | undefined {
 		if (!window) return undefined;
 		if (typeof window.resetsAt === "number" && Number.isFinite(window.resetsAt)) {
@@ -6044,6 +6043,16 @@ export class AuthStorage {
 			// usage/refresh awaits below can shift positional indices, so every later
 			// refresh / persist / CAS-disable addresses the row by this stable id.
 			const credentialId = this.#getStoredCredentials(provider)[selection.index]?.id;
+			if (
+				options?.requestId &&
+				credentialId !== undefined &&
+				!this.tryAcquireTurnReservation({
+					credentialId,
+					incarnation: this.getCredentialIncarnation(credentialId),
+					requestId: options.requestId,
+				}).ok
+			)
+				return undefined;
 
 			const planRequirement =
 				providedPlanRequirement ?? resolveOpenAICodexPlanRequirement(provider, options?.modelId);

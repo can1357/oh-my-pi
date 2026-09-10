@@ -53,7 +53,7 @@ export class RouteRegistry {
 
 	/** Register/replace a virtual route. Bumps generation. Rejects cycles and empty fallback children. */
 	register(definition: RouteDefinition): void {
-		if (definition.id === "." || definition.id === "..")
+		if (definition.id === "" || definition.id === "." || definition.id === "..")
 			throw new AIError.ValidationError("Route ID cannot be a URL dot segment");
 		const compiled = compileNode(definition.root, new Set());
 		this.#generation += 1;
@@ -122,7 +122,7 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 	for (const disposition of node.on) {
 		if (afterPrimary.length === 0) continue;
 		const existing = fallbacks[disposition];
-		fallbacks[disposition] = existing ? [...existing, ...afterPrimary] : [...afterPrimary];
+		fallbacks[disposition] = [...new Set([...afterPrimary, ...(existing ?? [])])];
 	}
 	return { targets, fallbacks };
 }

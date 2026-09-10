@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Nested fallback routes preserve target order and reject empty route IDs.
 - Fixed stateful continuations changing targets or accounts, and rejected route IDs that URL normalization would erase.
 
 - Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, and context-overflow detection reuses the central classifier.
