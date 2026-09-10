@@ -30,7 +30,6 @@ import {
 	procmgr,
 	setWorktreesDir,
 } from "@oh-my-pi/pi-utils";
-import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { JSONC, YAML } from "bun";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
@@ -41,7 +40,7 @@ import { AgentStorage } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
 import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
 import { applyHyperlinkSetting } from "../tui/hyperlink";
-import { replaceFileAtomically, resolveSymlinkWriteTarget } from "../utils/atomic-file";
+import { publishSerializedConfig, resolveSymlinkWriteTarget, withResolvedConfigFileLock } from "../utils/atomic-file";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
 import { stringifyYamlConfig } from "./config-file";
@@ -1460,12 +1459,12 @@ export class Settings {
 	}
 
 	async #withYamlWriteLock<T>(filePath: string, fn: (writePath: string) => Promise<T>): Promise<T> {
-		const writePath = await this.#resolveYamlWritePath(filePath);
-		// A symlinked config can dangle into a directory that does not exist
-		// yet; both the lock directory and the atomic temp file live next to
-		// the referent, so materialize it before either is created.
-		await fs.promises.mkdir(path.dirname(writePath), { recursive: true });
-		return await withFileLock(writePath, async () => fn(writePath));
+		// A quarantined config keeps writing to its moved-aside target, so the
+		// quarantine lookup happens here — everything after that (materializing
+		// a referent parent dangling into a missing directory with the hardened
+		// creation mode, pinning the callback to the locked target) is shared
+		// with the JSON config writers through the central lock helper.
+		return withResolvedConfigFileLock(await this.#resolveYamlWritePath(filePath), fn);
 	}
 
 	async #loadYamlIfPresentForStartup(filePath: string): Promise<RawSettings | null> {
@@ -1685,7 +1684,7 @@ export class Settings {
 		if (migrated && Object.keys(settings).length > 0) {
 			try {
 				await this.#withYamlWriteLock(this.#configPath, writePath =>
-					this.#writeYamlAtomically(writePath, settings),
+					publishSerializedConfig(writePath, stringifyYamlConfig(settings)),
 				);
 				logger.debug("Settings: migrated to config.yml", { path: this.#configPath });
 			} catch {}
@@ -2418,27 +2417,6 @@ export class Settings {
 	// Saving
 	// ─────────────────────────────────────────────────────────────────────────
 
-	async #writeYamlAtomically(filePath: string, settings: RawSettings): Promise<void> {
-		const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-		let removeTemp = false;
-		try {
-			const handle = await fs.promises.open(tempPath, "wx", 0o600);
-			removeTemp = true;
-			try {
-				await handle.writeFile(stringifyYamlConfig(settings), "utf8");
-				await handle.sync();
-			} finally {
-				await handle.close();
-			}
-			await replaceFileAtomically(tempPath, filePath);
-			removeTemp = false;
-		} finally {
-			if (removeTemp) {
-				await fs.promises.rm(tempPath, { force: true }).catch(() => {});
-			}
-		}
-	}
-
 	#queueSave(): void {
 		if (!this.#persist || !this.#configPath) return;
 
@@ -2571,7 +2549,7 @@ export class Settings {
 				// Update our global with any external changes we preserved.
 				this.#global = current;
 				if (shouldWrite) {
-					await this.#writeYamlAtomically(writePath, this.#global);
+					await publishSerializedConfig(writePath, stringifyYamlConfig(this.#global));
 				}
 				this.#quarantinedYamlTargets.delete(configPath);
 				// These pending roles were included in this write. Remove each
@@ -2684,7 +2662,7 @@ export class Settings {
 					setByPath(projectSettings, ["modelRoles", role], value);
 				}
 
-				await this.#writeYamlAtomically(writePath, projectSettings);
+				await publishSerializedConfig(writePath, stringifyYamlConfig(projectSettings));
 				this.#projectFileSettings = structuredClone(projectSettings);
 				this.#quarantinedYamlTargets.delete(projectConfigPath);
 			});

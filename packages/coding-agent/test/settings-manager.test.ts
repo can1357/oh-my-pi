@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
-import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
@@ -333,6 +332,32 @@ describe("Settings", () => {
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 			expect(YAML.parse(await Bun.file(managedConfigPath).text())).toEqual({ setupVersion: 7 });
 			expect(settings.get("setupVersion")).toBe(7);
+			// The materialized referent directory takes the hardened 0700 creation
+			// mode shared with the JSON config writers, not the umask default.
+			if (process.platform !== "win32") {
+				expect(fs.statSync(managedDir).mode & 0o777).toBe(0o700);
+			}
+		});
+
+		it("keeps a read-only symlinked referent owner-read-only through a settings save", async () => {
+			// A dotfiles-managed config.yml can be checked out read-only (0400).
+			// Every YAML save previously staged its replacement as a blanket
+			// 0600, silently making the managed file owner-writable; the write
+			// must clamp to the referent's owner bits like the MCP/SSH writers.
+			const managedConfigPath = tempDir.join("managed-config.yml");
+			await Bun.write(managedConfigPath, YAML.stringify({ setupVersion: 1 }, null, 2));
+			await fs.promises.chmod(managedConfigPath, 0o400);
+			await fs.promises.symlink(managedConfigPath, getConfigPath(), "file");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("setupVersion", 9);
+			await settings.flush();
+
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+			if (process.platform !== "win32") {
+				expect(fs.statSync(managedConfigPath).mode & 0o777).toBe(0o400);
+			}
+			expect(YAML.parse(await Bun.file(managedConfigPath).text())).toEqual({ setupVersion: 9 });
 		});
 
 		it("writes through a dangling symlink chain to the final target, preserving every link", async () => {
@@ -526,24 +551,45 @@ describe("Settings", () => {
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 		});
 
-		it("does not write to an unrelated sibling when a non-final component is missing before ..", async () => {
-			// config.yml -> missing/../final.yml, where `missing` does not exist.
-			// Filesystem lookup fails at `missing`, so a following `..` must NOT
-			// pop a component that was never entered. Collapsing the target
-			// lexically instead pops `missing` and lands on <configdir>/final.yml,
-			// clobbering an unrelated sibling while the real (dangling) target is
-			// never written. The resolver must not escape to that sibling.
+		it("materializes a missing component named before .. in a dangling target", async () => {
+			// config.yml -> missing/../final-config.yml, where `missing` does
+			// not exist. The filesystem resolves `missing/..` to the config
+			// dir exactly when `missing` exists as a directory — which the
+			// write can create — so the resolver materializes `missing`, lands
+			// the write on final-config.yml beside it, and the link resolves
+			// through the recreated component afterwards. (Merely collapsing
+			// the `..` lexically would write the same file while the link
+			// stays dangling.)
 			await fs.promises.symlink("missing/../final-config.yml", getConfigPath(), "file");
-			const lexicalSibling = path.join(agentDir, "final-config.yml");
+			const finalPath = path.join(agentDir, "final-config.yml");
+			const repairedDir = path.join(agentDir, "missing");
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			settings.set("setupVersion", 10);
-			// The resolved path sits under the never-entered `missing` dir (fs
-			// semantics), whose parent does not exist, so the atomic write fails
-			// rather than clobbering the sibling.
+			await settings.flush();
+
+			expect(fs.statSync(repairedDir).isDirectory()).toBe(true);
+			// The link now LIVE-resolves to the file the write landed on.
+			expect(await fs.promises.realpath(getConfigPath())).toBe(finalPath);
+			expect(YAML.parse(await Bun.file(finalPath).text())).toEqual({ setupVersion: 10 });
+			// The user-managed chain head survives as a symlink.
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+		});
+
+		it("rejects a dangling target that resolves to a directory", async () => {
+			// config.yml -> managed/.. names the config DIRECTORY itself once
+			// `managed` exists. Publishing there would rename a file over the
+			// directory — EISDIR on POSIX, and on Windows the replacement
+			// fallback would move the whole config dir aside — so the write
+			// must reject without even creating `managed`.
+			await fs.promises.symlink("managed/..", getConfigPath(), "file");
+			const managed = path.join(agentDir, "managed");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("setupVersion", 11);
 			await expect(settings.flush()).rejects.toThrow();
 
-			expect(fs.existsSync(lexicalSibling)).toBe(false);
+			expect(fs.existsSync(managed)).toBe(false);
 			// The user-managed chain head survives as a symlink.
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 		});
@@ -857,9 +903,11 @@ describe("Settings", () => {
 			await writeSettings({ setupVersion: 1 });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			const canonicalConfigPath = await fs.promises.realpath(getConfigPath());
-			const rename = fsp.rename.bind(fsp);
+			const rename = fs.promises.rename.bind(fs.promises);
 			let injected = false;
-			vi.spyOn(fsp, "rename").mockImplementation(async (source, target) => {
+			// Spy on the fs.promises seam the atomic publisher actually calls;
+			// node:fs/promises is a separate namespace object in Bun.
+			vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
 				if (!injected && String(source).endsWith(".tmp") && String(target) === canonicalConfigPath) {
 					injected = true;
 					throw new FsCodeError("EPERM", "injected Windows replacement failure");

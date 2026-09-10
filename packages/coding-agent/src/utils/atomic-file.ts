@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { hasFsCode, isEexist, isEnoent, logger, toError } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
@@ -50,13 +49,52 @@ export function physicalTargetSegments(target: string, pathApi: typeof path = pa
  * (e.g. a dotfiles checkout) and leaving the real file stale. Writing to the
  * referent keeps both in sync.
  *
- * `realpath()` handles every chain whose referents all exist. A DANGLING link
- * needs a manual walk so the write recreates the target the user pointed at
- * instead of replacing the link; that walk resolves the target one physical
- * segment at a time (see the inline comments for the TOCTOU hardening) —
- * shared by the YAML settings flush and the JSON config writers.
+ * SUPPORTED-SPELLING SUBSET — the deliberate complexity ceiling. `realpath()`
+ * (the fast path) covers every real-world config; everything below it exists
+ * only for user-controlled dangling-link edges, and spellings outside the
+ * subset fail with a clear ENOTDIR/ELOOP instead of another special case — a
+ * write must never land on a path the link cannot resolve through:
+ *
+ *  1. any path that resolves today (realpath fast path);
+ *  2. a dangling final symlink, including a chain: the referent is recreated;
+ *  3. dangling intermediate/ancestor symlinks: followed, referents recreated;
+ *  4. plainly-missing components in the config's OWN spelling: lexical tail,
+ *     created by the writer's recursive mkdir (they are ancestors of the
+ *     result);
+ *  5. `X/../leaf` with a plainly-missing `X` in the config's own spelling:
+ *     `X` is materialized as a directory so the spelling resolves beside it;
+ *  6. inert interior `//`/`./` spellings of the above.
+ *
+ * Outside: `..` past a component that was never entered (other than case 5),
+ * `..` inside a followed link's target, trailing separators naming a
+ * directory, and symlink cycles. See `frozenTail` for the grammar.
+ *
+ * The result is always a file target: a resolution landing on an existing
+ * directory rejects instead of publishing into it.
  */
 export async function resolveSymlinkWriteTarget(filePath: string): Promise<string> {
+	return assertFileWriteTarget(filePath, await resolveSymlinkTargetPath(filePath));
+}
+
+/**
+ * A resolved target that exists as a DIRECTORY can never be published to:
+ * rename(file, dir) fails EISDIR on POSIX, and on Windows the `EPERM`
+ * replacement fallback would move the directory aside and drop the config
+ * file in its place. Reject the write up front; a missing leaf is the normal
+ * recreate case and passes through.
+ */
+async function assertFileWriteTarget(filePath: string, resolved: string): Promise<string> {
+	try {
+		if ((await fs.promises.stat(resolved)).isDirectory()) {
+			throw enotDir(`config write target is a directory (${resolved}) for ${filePath}`);
+		}
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
+	return resolved;
+}
+
+async function resolveSymlinkTargetPath(filePath: string): Promise<string> {
 	try {
 		return await fs.promises.realpath(filePath);
 	} catch (error) {
@@ -173,99 +211,83 @@ function walkOriginalSpelling(filePath: string): Promise<string> {
 }
 
 /**
- * Walk `segments` physically from a canonical `acc`, one component at a time,
- * following symlinked components (including dangling ones, whose referents the
- * write recreates) and popping only PHYSICAL parents for `..`. Returns the
- * resolved accumulator — canonical up to the deepest existing component, then
- * lexical once a component is missing (the freeze).
+ * Walk `segments` physically from a canonical `acc`, in two phases with
+ * disjoint state:
+ *
+ *  - LIVE (`walkLive`): every component exists on disk. `realpath()` follows
+ *    live symlinks, `..` pops the PHYSICAL parent (TOCTOU-checked), trailing
+ *    separators demand directories, and a DANGLING symlink component is
+ *    followed by recursing into its target segments — bounded by the shared
+ *    `linkHops` budget.
+ *  - FROZEN (`frozenTail`): a plainly-missing component stops physical
+ *    traversal. The remaining segments are checked against the frozen-tail
+ *    grammar — the explicit supported-subset contract — and either join
+ *    lexically (the writer's mkdir covers them), repair the one fixable
+ *    `X/../leaf` spelling, or reject with a clear ENOTDIR.
+ *
+ * A component may only be "entered" once it exists, so anything the live
+ * phase returns after a freeze is missing on disk by construction: the outer
+ * continuation's `..`/trailing-separator checks stat it and surface ENOTDIR,
+ * reproducing the frozen-tail refusals without carrying a frozen flag.
  */
 async function walkPhysicalSegments(filePath: string, acc: string, segments: readonly string[]): Promise<string> {
-	let frozen = false;
-	const remaining = [...segments];
+	// Shared budget for dangling-link follows inside ONE segment walk; the
+	// outer chain loop in resolveSymlinkTargetPath keeps its own counter for
+	// final-component chain hops. Both permit forty follows and reject the
+	// forty-first, matching Linux's MAXSYMLINKS.
 	let linkHops = 0;
-	while (remaining.length > 0) {
-		const segment = remaining.shift()!;
-		if (segment === "" || segment === ".") {
-			if (frozen) {
-				// An INTERIOR separator or `.` after the frozen component is
-				// inert — `managed//mcp.json` and `managed/./mcp.json` are
-				// equivalent spellings of `managed/mcp.json`, and the write
-				// below creates the missing parent. Only a TRAILING `/`
-				// (empty segment) or `/.` demands the preceding component be
-				// a directory: after the freeze that component is a
-				// nonexistent/dangling name that can never be a directory
-				// (`config.yml -> missing/`), so writing a regular file there
-				// mislocates and falsely reports success while the logical
-				// config path stays unusable with ENOTDIR. Surface it.
-				if (remaining.length > 0) continue;
-				throw enotDir(`symlink target requires an unresolved component to be a directory for ${filePath}`);
+
+	const walkLive = async (
+		liveAcc: string,
+		liveSegments: readonly string[],
+		repairAllowed: boolean,
+	): Promise<string> => {
+		let index = 0;
+		while (index < liveSegments.length) {
+			const segment = liveSegments[index++];
+			if (segment === "" || segment === ".") {
+				// An interior separator or `.` is inert. A TRAILING one
+				// demands `liveAcc` be a traversable directory — it was
+				// canonical moments ago, but a concurrent process can have
+				// replaced it with a regular file, and dropping the segment
+				// would then land the rename on top of that file while the
+				// logical config path is really ENOTDIR. Verify.
+				if (index < liveSegments.length) continue;
+				const accStat = await statTraversingDirectory(liveAcc, filePath, "trailing separator");
+				if (!accStat.isDirectory()) {
+					throw enotDir(`symlink target requires a directory but ${liveAcc} is not one for ${filePath}`);
+				}
+				continue;
 			}
-			// The walk is not frozen, so `acc` was resolved by realpath()
-			// and exists on disk — but existence is not enough. A trailing
-			// `/` or `/.` demands `acc` be a directory, and a concurrent
-			// process can win a TOCTOU race: the initial realpath(filePath)
-			// saw the target missing, then the target was created as a
-			// REGULAR FILE before this segment walk reached it, so
-			// realpath(candidate) succeeded and left `frozen` false. The
-			// preceding component is now a regular file, not a directory,
-			// and dropping the segment would land the atomic rename on top
-			// of it while the logical config path is really ENOTDIR. Verify
-			// the requirement holds instead of assuming it.
-			const accStat = await statTraversingDirectory(acc, filePath, "trailing separator");
-			if (!accStat.isDirectory()) {
-				throw enotDir(`symlink target requires a directory but ${acc} is not one for ${filePath}`);
+			if (segment === "..") {
+				// Pops only the PHYSICAL parent: `liveAcc` was canonicalized by
+				// realpath() moments ago, but a concurrent process can replace
+				// it with a regular file before this pop — lexically popping
+				// then would land the rename on a mislocated sibling
+				// (`config.yml -> racetarget/../victim.yml`). Verify first.
+				const accStat = await statTraversingDirectory(liveAcc, filePath, "'..'");
+				if (!accStat.isDirectory()) {
+					throw enotDir(`symlink target requires a directory but ${liveAcc} is not one for ${filePath}`);
+				}
+				liveAcc = path.dirname(liveAcc);
+				continue;
 			}
-			continue;
-		}
-		if (segment === "..") {
-			if (frozen) {
-				// `..` after a component that could not be physically
-				// traversed — a missing name or a dangling symlink — whether
-				// the `..` follows it immediately (`link/..`) or after further
-				// lexical names (`missing/child/..`). The kernel cannot take
-				// the parent of a path it never entered: `missing/child/..`
-				// fails because `missing` was never a directory to descend,
-				// so the lexically appended `child` is not a real component to
-				// pop. Popping and continuing would leave `acc` on a
-				// mislocated path and land a regular file there while
-				// reporting success. Surface the ENOTDIR the filesystem
-				// raises instead.
-				throw enotDir(`cannot resolve '..' past an unresolved component in symlink target for ${filePath}`);
+			const candidate = path.join(liveAcc, segment);
+			try {
+				liveAcc = await fs.promises.realpath(candidate);
+				continue;
+			} catch (error) {
+				if (!isEnoent(error)) throw error;
 			}
-			// `acc` was resolved by realpath() and exists on disk, but a
-			// `..` demands it be a traversable directory to pop its parent.
-			// A concurrent process can win a TOCTOU race: the initial
-			// realpath(filePath) saw the component missing, then it was
-			// created as a REGULAR FILE before realpath(candidate) reached
-			// it, so that call succeeded and left `frozen` false. The
-			// kernel cannot take the parent of `regularfile/..` — it fails
-			// with ENOTDIR — so lexically popping and continuing would let
-			// the atomic rename land on a mislocated sibling
-			// (`config.yml -> racetarget/../victim.yml`) while the logical
-			// config path is really ENOTDIR. Verify before popping.
-			const accStat = await statTraversingDirectory(acc, filePath, "'..'");
-			if (!accStat.isDirectory()) {
-				throw enotDir(`symlink target requires a directory but ${acc} is not one for ${filePath}`);
-			}
-			acc = path.dirname(acc);
-			continue;
-		}
-		if (frozen) {
-			acc = path.join(acc, segment);
-			continue;
-		}
-		const candidate = path.join(acc, segment);
-		try {
-			acc = await fs.promises.realpath(candidate);
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
 			// The component is missing — but it may itself be a DANGLING
 			// SYMLINK whose referent the write should recreate
 			// (`mcp.json -> alias/config.json` with `alias -> missing-dir`).
 			// Freezing on the link path would leave the writer unable to
-			// create anything THROUGH the link; follow it instead and splice
-			// its target's segments in front of the walk, so intermediate
-			// links survive exactly like final-component chains do.
+			// create anything THROUGH the link; follow it instead, so
+			// intermediate links survive exactly like final-component chains
+			// do. A cycle among dangling links (`a -> b`, `b -> a`) never
+			// reaches the outer chain check, so the budget is what surfaces
+			// it as a bounded ELOOP.
 			let linkTarget: string | undefined;
 			try {
 				if ((await fs.promises.lstat(candidate)).isSymbolicLink()) {
@@ -274,31 +296,73 @@ async function walkPhysicalSegments(filePath: string, acc: string, segments: rea
 			} catch (lstatError) {
 				if (!isEnoent(lstatError)) throw lstatError;
 			}
-			if (linkTarget === undefined) {
-				acc = candidate;
-				frozen = true;
+			if (linkTarget !== undefined) {
+				if (++linkHops > MAX_SYMLINK_HOPS) {
+					const cyclic = new Error(
+						`ELOOP: symlink chain for ${filePath} exceeds ${MAX_SYMLINK_HOPS} hops (possible cycle)`,
+					) as Error & { code?: string };
+					cyclic.code = "ELOOP";
+					throw cyclic;
+				}
+				// An absolute target re-anchors at its root; a relative one
+				// resolves against the canonical accumulator we stand on.
+				// The followed link's segments are the LINK author's spelling,
+				// so repairs stay disabled inside them.
+				const anchor = path.isAbsolute(linkTarget) ? path.parse(linkTarget).root : liveAcc;
+				liveAcc = await walkLive(anchor, physicalTargetSegments(linkTarget), false);
 				continue;
 			}
-			// A cycle among dangling links (`a -> b`, `b -> a`) never
-			// reaches the outer chain check, which only counts hops of
-			// the FINAL component. Bound this walk's follows and surface
-			// a bounded ELOOP instead of splicing forever. Forty follows
-			// are permitted and only the forty-first rejected, matching
-			// the outer chain loop and Linux's MAXSYMLINKS.
-			if (++linkHops > MAX_SYMLINK_HOPS) {
-				const cyclic = new Error(
-					`ELOOP: symlink chain for ${filePath} exceeds ${MAX_SYMLINK_HOPS} hops (possible cycle)`,
-				) as Error & { code?: string };
-				cyclic.code = "ELOOP";
-				throw cyclic;
-			}
-			if (path.isAbsolute(linkTarget)) acc = path.parse(linkTarget).root;
-			// A relative target resolves against the link's parent — the
-			// canonical `acc` we are standing on.
-			remaining.unshift(...physicalTargetSegments(linkTarget));
+			// Plainly missing: freeze here and interpret the remainder.
+			return await frozenTail(candidate, liveSegments.slice(index), repairAllowed);
 		}
-	}
-	return acc;
+		return liveAcc;
+	};
+
+	const frozenTail = async (frozenPath: string, tail: readonly string[], repairAllowed: boolean): Promise<string> => {
+		// The grammar of segments following a plainly-missing component —
+		// the SUPPORTED SUBSET of dangling-target spellings. Everything else
+		// rejects with a clear ENOTDIR: the kernel cannot take the parent of
+		// a path it never entered, and guessing where a `..` would land puts
+		// the write on an unrelated file while the link stays unusable.
+		//
+		//   lexical   `X a/b/…`      missing ancestors of the result; the
+		//                             writer's recursive mkdir creates them
+		//   repair    `X ../leaf…`   `X` materialized as a 0700 directory,
+		//                             `..` pops its parent, the all-plain leaf
+		//                             resolves beside it
+		//   inert     interior `//` and `./` fold into the two shapes above
+		//
+		// Rejected: `..` after lexically appended names (`X/a/..` — needs
+		// `X/a` entered), a bare or repeated `X/..`/`X/../..` (names a
+		// directory, and a config publish needs a file leaf), a trailing `X/`
+		// or `X/.` (directory demand), and any `..` inside a FOLLOWED LINK's
+		// target (the missing name belongs to the link author's world; only
+		// the config's own spelling is ours to repair).
+		const stripped: string[] = [];
+		for (const [i, seg] of tail.entries()) {
+			if ((seg === "" || seg === ".") && i < tail.length - 1) continue;
+			stripped.push(seg);
+		}
+		if (stripped.length === 0) return frozenPath;
+		const last = stripped[stripped.length - 1];
+		if (last === "" || last === ".") {
+			throw enotDir(`symlink target requires a directory for the missing component ${frozenPath} (${filePath})`);
+		}
+		const leaf = stripped[0] === ".." ? stripped.slice(1) : stripped;
+		if (leaf.some(seg => !isPlainName(seg)) || (stripped[0] === ".." && (leaf.length === 0 || !repairAllowed))) {
+			throw enotDir(`cannot resolve '..' past an unresolved component in symlink target for ${filePath}`);
+		}
+		if (stripped[0] !== "..") return path.join(frozenPath, ...stripped);
+		await fs.promises.mkdir(frozenPath, { recursive: true, mode: 0o700 });
+		return walkLive(path.dirname(frozenPath), leaf, repairAllowed);
+	};
+
+	return walkLive(acc, segments, true);
+}
+
+/** A plain path-name segment — not a separator, dot, or parent traversal. */
+function isPlainName(segment: string): boolean {
+	return segment !== "" && segment !== "." && segment !== "..";
 }
 
 /**
@@ -329,14 +393,16 @@ function enotDir(message: string): Error & { code?: string } {
  * Stage serialized content and publish it atomically against an ALREADY-RESOLVED
  * config target — the path pinned by {@link withConfigFileLock}. The temp file
  * is per-writer unique (pid + random, in the target's own directory so the
- * rename cannot EXDEV across mounts); its mode takes only the OWNER bits of
- * the referent's current mode — credential-bearing configs drop group/world
- * bits exactly like an unconditional 0o600 did, while stricter-than-600 owner
- * modes survive, and a new file, or a referent with no owner bits at all,
- * falls back to owner-only — and is chmod'd explicitly because creation modes
- * pass through umask. The rename itself goes through {@link
- * replaceFileAtomically}, so Windows `EPERM`/`EEXIST` replacement failures
- * recover instead of failing the write.
+ * rename cannot EXDEV across mounts) and is fsync'd before the rename — the
+ * durability the YAML settings flush always had, now shared by every config
+ * writer. Its mode takes only the OWNER bits of the referent's current mode —
+ * credential-bearing configs drop group/world bits exactly like an
+ * unconditional 0o600 did, while stricter-than-600 owner modes (e.g. a
+ * read-only 0o400 dotfiles checkout) survive, and a new file, or a referent
+ * with no owner bits at all, falls back to owner-only — and is chmod'd
+ * explicitly because creation modes pass through umask. The rename itself goes
+ * through {@link replaceFileAtomically}, so Windows `EPERM`/`EEXIST`
+ * replacement failures recover instead of failing the write.
  */
 export async function publishSerializedConfig(writePath: string, content: string): Promise<void> {
 	const dir = path.dirname(writePath);
@@ -356,7 +422,13 @@ export async function publishSerializedConfig(writePath: string, content: string
 
 	const tmpPath = `${writePath}.${process.pid}.${randomUUID()}.tmp`;
 	try {
-		await fs.promises.writeFile(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
+		const handle = await fs.promises.open(tmpPath, "wx", 0o600);
+		try {
+			await handle.writeFile(content, "utf8");
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
 		await fs.promises.chmod(tmpPath, mode);
 		await replaceFileAtomically(tmpPath, writePath);
 	} catch (error) {
@@ -364,7 +436,6 @@ export async function publishSerializedConfig(writePath: string, content: string
 		throw error;
 	}
 }
-
 /**
  * Serialize a read-modify-write against one config file on its symlink-RESOLVED
  * target: two configured paths that alias the same physical file must contend
@@ -375,7 +446,20 @@ export async function publishSerializedConfig(writePath: string, content: string
  * dangling into a directory that does not exist yet.
  */
 export async function withConfigFileLock<T>(filePath: string, fn: (writePath: string) => Promise<T>): Promise<T> {
-	const writePath = await resolveSymlinkWriteTarget(filePath);
+	return withResolvedConfigFileLock(await resolveSymlinkWriteTarget(filePath), fn);
+}
+
+/**
+ * {@link withConfigFileLock} for callers that resolve the write target
+ * THEMSELVES — e.g. the YAML settings flush, which honors its quarantine map
+ * before locking. Sharing this keeps the materialized parent's hardened 0700
+ * creation mode and the pinned-callback contract identical for every config
+ * writer instead of maintaining a parallel resolve/mkdir/lock path.
+ */
+export async function withResolvedConfigFileLock<T>(
+	writePath: string,
+	fn: (writePath: string) => Promise<T>,
+): Promise<T> {
 	await fs.promises.mkdir(path.dirname(writePath), { recursive: true, mode: 0o700 });
 	// The callback receives the LOCKED target and must do both its read and
 	// its write through it: if the link is retargeted mid-callback, resolving
@@ -391,7 +475,7 @@ export async function withConfigFileLock<T>(filePath: string, fn: (writePath: st
  */
 export async function replaceFileAtomically(tempPath: string, targetPath: string): Promise<void> {
 	try {
-		await fsp.rename(tempPath, targetPath);
+		await fs.promises.rename(tempPath, targetPath);
 		return;
 	} catch (error) {
 		if (!hasFsCode(error, "EPERM") && !isEexist(error)) throw error;
@@ -406,20 +490,20 @@ async function replaceAfterWindowsRenameFailure(
 ): Promise<void> {
 	const backupPath = `${targetPath}.${process.pid}.${crypto.randomUUID()}.bak`;
 	try {
-		await fsp.rename(targetPath, backupPath);
+		await fs.promises.rename(targetPath, backupPath);
 	} catch (error) {
 		if (isEnoent(error)) {
-			await fsp.rename(tempPath, targetPath);
+			await fs.promises.rename(tempPath, targetPath);
 			return;
 		}
 		throw renameError;
 	}
 
 	try {
-		await fsp.rename(tempPath, targetPath);
+		await fs.promises.rename(tempPath, targetPath);
 	} catch (replaceError) {
 		try {
-			await fsp.rename(backupPath, targetPath);
+			await fs.promises.rename(backupPath, targetPath);
 		} catch (rollbackError) {
 			throw new Error(
 				`Failed to replace file after ${toError(renameError).message} (retry: ${
@@ -432,7 +516,7 @@ async function replaceAfterWindowsRenameFailure(
 	}
 
 	try {
-		await fsp.rm(backupPath);
+		await fs.promises.rm(backupPath);
 	} catch (error) {
 		if (!isEnoent(error)) {
 			logger.warn("Failed to remove atomic replacement backup", {
