@@ -130,6 +130,7 @@ import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls
 import { setSharedLspEnabled } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
+	collapseMCPToolNameSeparator,
 	deduplicateMCPToolsByName,
 	discoverAndLoadMCPTools,
 	getMCPToolOriginKey,
@@ -3012,6 +3013,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (!state) return undefined;
 			return resolveMountedXdevExecutable(state, name);
 		};
+		// Last-resort name repair before the loop reports `Tool <name> not found`.
+		// Keeps `resolveDeviceTool` itself untouched so Cursor's `getExecutableTool`
+		// keeps resolving device mounts only.
+		const resolveFallbackTool = (name: string): AgentTool | undefined => {
+			const mounted = resolveDeviceTool(name);
+			if (mounted) return mounted;
+			const collapsed = collapseMCPToolNameSeparator(name, candidate => toolRegistry.has(candidate));
+			return collapsed === undefined ? undefined : toolRegistry.get(collapsed);
+		};
 		// Cursor's resource frames ask what THIS client's servers advertise; only
 		// live connections have any. Built once: the advisor bridges answer from
 		// the same connections the primary does.
@@ -3603,7 +3613,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					logger.info("recovered inline sloppy edit payload into edit tool call", { regions: recovered });
 				}
 			},
-			resolveFallbackTool: resolveDeviceTool,
+			resolveFallbackTool,
 			intentTracing: !!intentField,
 			pruneToolDescriptions: inlineToolDescriptors,
 			dialect: resolveDialect(settings.get("tools.format"), model),
@@ -4170,7 +4180,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
 					streamFn: settingsAwareStreamFn,
 					transformToolCallArguments,
-					resolveFallbackTool: resolveDeviceTool,
+					resolveFallbackTool,
 					intentTracing: !!intentField,
 					pruneToolDescriptions: inlineToolDescriptors,
 					dialect: resolveDialect(settings.get("tools.format"), captureModel),

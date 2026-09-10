@@ -532,6 +532,41 @@ export function parseMCPToolName(name: string): { serverName: string; toolName: 
 }
 
 /**
+ * Re-mint a Claude-Code-shaped `mcp__<server>__<tool>` name into the registry
+ * key OMP actually assigns ({@link createMCPToolName}).
+ *
+ * OMP presents a Claude Code identity to Anthropic endpoints, so a model
+ * trained on that client emits its double-underscore separator. Dispatch is
+ * strict exact-match, so the call fails with `Tool <name> not found` even
+ * though the server and tool both exist (#11516).
+ *
+ * Splitting on the first `__` is unambiguous: {@link sanitizeMCPToolNamePart}
+ * squashes runs of `_`, so a minted name carries no `__` after the `mcp__`
+ * prefix and a second `__` marks a name OMP never minted. The two halves go
+ * back through {@link createMCPToolName} rather than being spliced, so
+ * sanitization, redundant-server-prefix stripping, and length capping all
+ * apply — `context7` sanitizes to `context`, making the key
+ * `mcp__context_resolve_library_id`, which a literal collapse would miss.
+ * Re-minting is idempotent when the model already emitted sanitized segments.
+ *
+ * `isRegistered` gates the result: registry names are unique, so a hit is the
+ * intended tool and a miss preserves the original failure rather than guessing.
+ */
+export function collapseMCPToolNameSeparator(
+	name: string,
+	isRegistered: (candidate: string) => boolean,
+): string | undefined {
+	if (!name.startsWith("mcp__")) return undefined;
+
+	const rest = name.slice(5);
+	const separatorIdx = rest.indexOf("__");
+	if (separatorIdx <= 0) return undefined;
+
+	const candidate = createMCPToolName(rest.slice(0, separatorIdx), rest.slice(separatorIdx + 2));
+	return candidate !== name && isRegistered(candidate) ? candidate : undefined;
+}
+
+/**
  * CustomTool wrapping an MCP tool with an active connection.
  */
 export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
