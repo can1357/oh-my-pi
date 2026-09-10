@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Provider preludes remain eligible for fallback, and successful empty streams retain their response frames.
 - Fixed gateway error classification swallowing retryable failures: authoritative statuses now outrank abort wording, 403 account caps rotate as quota, Trusted-Access/cyber-policy denials rotate credentials instead of terminating, 400 model-missing responses fail over by model, dead OAuth grants (`invalid_token` et al) retire permanently, and concurrency-cap 429s stay in provider backoff.
 - Fixed OpenAI Responses gateway retries to preserve caller storage through strict-tool fallback, retain structured-output descriptions, and treat top-level `event: error` SSE frames as terminal failures.
 
