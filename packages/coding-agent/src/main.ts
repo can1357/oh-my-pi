@@ -99,6 +99,7 @@ import {
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { SessionManager } from "./session/session-manager";
+import { FileSessionStorage } from "./session/session-storage";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
@@ -963,6 +964,12 @@ export async function createSessionManager(
 		}
 		const forkSource = parsed.fork;
 		if (forkSource.includes("/") || forkSource.includes("\\") || forkSource.endsWith(".jsonl")) {
+			if (!(await new FileSessionStorage().exists(forkSource))) {
+				throw new SessionResolutionError(
+					`Session "${forkSource}" not found.`,
+					"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.",
+				);
+			}
 			return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir);
 		}
 		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir);

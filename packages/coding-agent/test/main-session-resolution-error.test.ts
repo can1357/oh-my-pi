@@ -196,4 +196,19 @@ describe("createSessionManager — missing session (#2084)", () => {
 			hint: undefined,
 		});
 	});
+
+	it("rejects --fork with a missing path before materializing anything (#11491)", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-fork-missing-path-"));
+		const missingPath = path.join(cwd, "ghost-zz9q.jsonl");
+		try {
+			await expect(createSessionManager(buildForkArgs(missingPath), cwd, stubSettings)).rejects.toMatchObject({
+				name: "SessionResolutionError",
+				message: `Session "${missingPath}" not found.`,
+			});
+			const entries = await fsp.readdir(cwd, { recursive: true });
+			expect(entries.filter(name => name.endsWith(".jsonl"))).toEqual([]);
+		} finally {
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
 });
