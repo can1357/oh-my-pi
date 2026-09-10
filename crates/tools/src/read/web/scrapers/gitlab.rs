@@ -442,6 +442,7 @@ mod tests {
 
 	use bytes::Bytes;
 	use omp_core::sf;
+	use omp_tool::{DiagKind, Severity};
 	use parking_lot::Mutex;
 	use smallvec::SmallVec;
 	use url::Url;

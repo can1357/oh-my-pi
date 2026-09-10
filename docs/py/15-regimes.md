@@ -366,7 +366,10 @@ classified reason.
 
 ## Rust ownership
 
-The target Rust boundary is `crates/agent/src/regime.rs`:
+The target Rust boundary (`Regime` trait, `RegimeContext` draft, `Next` controls) is a design
+target with no surviving implementation in the tree — there is no `Regime` type under
+`crates/` today, and agent-side control-plane variables live in `crates/agent/src/vars.rs`
+declared as convars (ADR 0012):
 
 ```rust
 pub trait Regime: Send + Sync + 'static {

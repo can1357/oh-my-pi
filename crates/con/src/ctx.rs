@@ -367,6 +367,13 @@ const DYNAMIC_VAR: u32 = 1 << 31;
 const DYNAMIC_CMD: u32 = 1 << 30;
 const DYNAMIC_INDEX: u32 = !(DYNAMIC_VAR | DYNAMIC_CMD);
 
+/// Resolved name-table entry: which table owns the name and its plain index.
+enum Resolved {
+	Static(usize),
+	DynamicVar(usize),
+	DynamicCmd(usize),
+}
+
 /// Builder for [`Ctx`].
 #[derive(Default)]
 pub struct CtxBuilder {
@@ -676,73 +683,78 @@ impl Ctx {
 	/// Resolves a static name to its registration.
 	#[must_use]
 	pub fn find(&self, name: &str) -> Option<RegItem> {
-		let idx = self.lookup(name)?;
-		if idx & (DYNAMIC_VAR | DYNAMIC_CMD) != 0 {
-			return None;
+		match self.lookup(name)? {
+			Resolved::Static(idx) => self.items.get(idx).map(|item| item.spec),
+			Resolved::DynamicVar(_) | Resolved::DynamicCmd(_) => None,
 		}
-		self.items.get(idx as usize).map(|item| item.spec)
 	}
 
 	/// Returns an owned snapshot of one dynamic variable declaration.
 	#[must_use]
 	pub fn dynamic_var_spec(&self, name: &str) -> Option<DynamicVarSpec> {
-		let idx = self.lookup(name)?;
-		if idx & DYNAMIC_VAR == 0 {
-			return None;
+		match self.lookup(name)? {
+			Resolved::DynamicVar(idx) => self.dynamic_vars.get(idx).map(|item| item.spec.clone()),
+			Resolved::Static(_) | Resolved::DynamicCmd(_) => None,
 		}
-		self
-			.dynamic_vars
-			.get((idx & DYNAMIC_INDEX) as usize)
-			.map(|item| item.spec.clone())
 	}
 
-	fn lookup(&self, name: &str) -> Option<u32> {
+	fn lookup(&self, name: &str) -> Option<Resolved> {
 		let names = self.names.read();
-		if let Some(&idx) = names.get(name) {
-			return Some(idx);
-		}
-		if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
-			return names.get(name.to_ascii_lowercase().as_str()).copied();
-		}
-		None
+		let idx = match names.get(name) {
+			Some(&idx) => idx,
+			None if name.bytes().any(|byte| byte.is_ascii_uppercase()) => {
+				names.get(name.to_ascii_lowercase().as_str()).copied()?
+			},
+			None => return None,
+		};
+		Some(match idx & (DYNAMIC_VAR | DYNAMIC_CMD) {
+			DYNAMIC_VAR => Resolved::DynamicVar((idx & DYNAMIC_INDEX) as usize),
+			DYNAMIC_CMD => Resolved::DynamicCmd((idx & DYNAMIC_INDEX) as usize),
+			_ => Resolved::Static(idx as usize),
+		})
 	}
 
 	fn var(&self, name: &str) -> ConResult<VarRef<'_>> {
-		let idx = self
+		match self
 			.lookup(name)
-			.ok_or_else(|| ConError::Unknown { name: name.to_str() })?;
-		if idx & DYNAMIC_VAR != 0 {
-			let item = self
-				.dynamic_vars
-				.get((idx & DYNAMIC_INDEX) as usize)
-				.expect("index from name table");
-			return Ok(VarRef {
-				name:      item.spec.name.as_str(),
-				ty:        item.spec.ty,
-				min:       None,
-				max:       None,
-				flags:     item.spec.flags,
-				on_change: None,
-				validate:  None,
-				state:     &item.state,
-			});
-		}
-		if idx & DYNAMIC_CMD != 0 {
-			return Err(ConError::NotAVar { name: name.to_str() });
-		}
-		let item = self.items.get(idx as usize).expect("index from name table");
-		match item.spec {
-			RegItem::Var(spec) => Ok(VarRef {
-				name:      spec.name,
-				ty:        spec.ty,
-				min:       spec.min,
-				max:       spec.max,
-				flags:     spec.flags,
-				on_change: spec.on_change,
-				validate:  spec.validate,
-				state:     &item.state,
-			}),
-			_ => Err(ConError::NotAVar { name: name.to_str() }),
+			.ok_or_else(|| ConError::Unknown { name: name.to_str() })?
+		{
+			Resolved::DynamicVar(idx) => {
+				let item = self
+					.dynamic_vars
+					.get(idx)
+					.ok_or_else(|| ConError::Unknown { name: name.to_str() })?;
+				Ok(VarRef {
+					name:      item.spec.name.as_str(),
+					ty:        item.spec.ty,
+					min:       None,
+					max:       None,
+					flags:     item.spec.flags,
+					on_change: None,
+					validate:  None,
+					state:     &item.state,
+				})
+			},
+			Resolved::DynamicCmd(_) => Err(ConError::NotAVar { name: name.to_str() }),
+			Resolved::Static(idx) => {
+				let item = self
+					.items
+					.get(idx)
+					.ok_or_else(|| ConError::Unknown { name: name.to_str() })?;
+				match item.spec {
+					RegItem::Var(spec) => Ok(VarRef {
+						name:      spec.name,
+						ty:        spec.ty,
+						min:       spec.min,
+						max:       spec.max,
+						flags:     spec.flags,
+						on_change: spec.on_change,
+						validate:  spec.validate,
+						state:     &item.state,
+					}),
+					_ => Err(ConError::NotAVar { name: name.to_str() }),
+				}
+			},
 		}
 	}
 
@@ -1291,43 +1303,52 @@ impl Ctx {
 			return self.dispatch_action(base, false);
 		}
 		if let Some(idx) = self.lookup(name.as_str()) {
-			if idx & DYNAMIC_VAR != 0 {
-				let item = self
-					.dynamic_vars
-					.get((idx & DYNAMIC_INDEX) as usize)
-					.expect("index from name table");
-				return self.dispatch_dynamic_var(item, &stmt.args[1..], origin);
-			}
-			if idx & DYNAMIC_CMD != 0 {
-				let item = self
-					.dynamic_cmds
-					.get((idx & DYNAMIC_INDEX) as usize)
-					.expect("index from name table");
-				return (item.handler)(self, item.name.as_str(), &stmt.args[1..]);
-			}
-			let item = self.items.get(idx as usize).expect("index from name table");
-			return match item.spec {
-				RegItem::Var(spec) => self.dispatch_var(spec, &item.state, &stmt.args[1..], origin),
-				RegItem::Cmd(spec) => {
-					let args = Args { cmd: spec.name, spec: spec.args, values: &stmt.args[1..] };
-					for (i, arg) in spec.args.iter().enumerate() {
-						if arg.required && i >= args.len() {
-							return Err(ConError::MissingArg {
-								cmd: Str::new_static(spec.name),
-								arg: Str::new_static(arg.name),
-							});
-						}
-					}
-					(spec.handler)(self, &args)
+			match idx {
+				Resolved::DynamicVar(idx) => {
+					let item = self
+						.dynamic_vars
+						.get(idx)
+						.ok_or_else(|| ConError::Unknown { name: name.clone() })?;
+					return self.dispatch_dynamic_var(item, &stmt.args[1..], origin);
 				},
-				RegItem::Action(spec) => {
-					self.reply_fmt(
-						Severity::Info,
-						format_args!("`{0}` is an action; use `+{0}` / `-{0}`", spec.name),
-					);
-					Ok(())
+				Resolved::DynamicCmd(idx) => {
+					let item = self
+						.dynamic_cmds
+						.get(idx)
+						.ok_or_else(|| ConError::Unknown { name: name.clone() })?;
+					return (item.handler)(self, item.name.as_str(), &stmt.args[1..]);
 				},
-			};
+				Resolved::Static(idx) => {
+					let item = self
+						.items
+						.get(idx)
+						.ok_or_else(|| ConError::Unknown { name: name.clone() })?;
+					return match item.spec {
+						RegItem::Var(spec) => {
+							self.dispatch_var(spec, &item.state, &stmt.args[1..], origin)
+						},
+						RegItem::Cmd(spec) => {
+							let args = Args { cmd: spec.name, spec: spec.args, values: &stmt.args[1..] };
+							for (i, arg) in spec.args.iter().enumerate() {
+								if arg.required && i >= args.len() {
+									return Err(ConError::MissingArg {
+										cmd: Str::new_static(spec.name),
+										arg: Str::new_static(arg.name),
+									});
+								}
+							}
+							(spec.handler)(self, &args)
+						},
+						RegItem::Action(spec) => {
+							self.reply_fmt(
+								Severity::Info,
+								format_args!("`{0}` is an action; use `+{0}` / `-{0}`", spec.name),
+							);
+							Ok(())
+						},
+					};
+				},
+			}
 		}
 		Err(ConError::Unknown { name: name.clone() })
 	}
@@ -1409,31 +1430,39 @@ impl Ctx {
 	}
 
 	fn dispatch_action(&self, base: &str, pressed: bool) -> ConResult<()> {
-		let idx = self
+		match self
 			.lookup(base)
-			.ok_or_else(|| ConError::Unknown { name: base.to_str() })?;
-		let item = self.items.get(idx as usize).expect("index from name table");
-		let RegItem::Action(spec) = item.spec else {
-			return Err(ConError::Unknown { name: base.to_str() });
-		};
-		let presses = &item.state.presses;
-		if pressed {
-			if presses.fetch_add(1, Ordering::AcqRel) == 0
-				&& let Some(hook) = spec.on_press
-			{
-				hook(self);
-			}
-		} else {
-			let prev = presses
-				.try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
-				.unwrap_or(0);
-			if prev == 1
-				&& let Some(hook) = spec.on_release
-			{
-				hook(self);
-			}
+			.ok_or_else(|| ConError::Unknown { name: base.to_str() })?
+		{
+			Resolved::Static(idx) => {
+				let item = self
+					.items
+					.get(idx)
+					.ok_or_else(|| ConError::Unknown { name: base.to_str() })?;
+				let RegItem::Action(spec) = item.spec else {
+					return Err(ConError::Unknown { name: base.to_str() });
+				};
+				let presses = &item.state.presses;
+				if pressed {
+					if presses.fetch_add(1, Ordering::AcqRel) == 0
+						&& let Some(hook) = spec.on_press
+					{
+						hook(self);
+					}
+				} else {
+					let prev = presses
+						.try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+						.unwrap_or(0);
+					if prev == 1
+						&& let Some(hook) = spec.on_release
+					{
+						hook(self);
+					}
+				}
+				Ok(())
+			},
+			_ => Err(ConError::Unknown { name: base.to_str() }),
 		}
-		Ok(())
 	}
 
 	fn with_depth<R>(&self, name: &Str, f: impl FnOnce(&Self) -> ConResult<R>) -> ConResult<R> {
@@ -1639,7 +1668,6 @@ impl Ctx {
 	}
 
 	// ── userdata ────────────────────────────────────────────────────────
-
 	/// Stores a typed host object, replacing any previous `T`.
 	pub fn insert_user<T: Send + Sync + 'static>(&self, value: T) {
 		self.user.write().insert(TypeId::of::<T>(), Arc::new(value));
@@ -1658,10 +1686,10 @@ impl Ctx {
 
 	/// Held-press count for an action (0 for unknown names).
 	pub(crate) fn action_presses(&self, name: &str) -> u32 {
-		self
-			.lookup(name)
-			.and_then(|idx| self.items.get(idx as usize))
-			.map_or(0, |item| item.state.presses())
+		match self.lookup(name) {
+			Some(Resolved::Static(idx)) => self.items.get(idx).map_or(0, |item| item.state.presses()),
+			_ => 0,
+		}
 	}
 
 	/// Emits a line through the reply sink.

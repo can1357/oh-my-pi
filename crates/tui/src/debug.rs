@@ -344,14 +344,27 @@ pub enum DebugRequest {
 	Resize,
 	Quit,
 }
+/// Why one debug request line failed to parse.
+#[derive(Debug, thiserror::Error)]
+pub enum ParseRequestError {
+	/// The line is not valid JSON.
+	#[error("malformed request: {0}")]
+	Malformed(#[from] serde_json::Error),
+	/// The request object has no string `"op"` field.
+	#[error("missing \"op\"")]
+	MissingOp,
+	/// Any other rejection, carrying the message shown to the client.
+	#[error("{0}")]
+	Other(String),
+}
+
 /// Parses one request line into a [`DebugRequest`].
-pub fn parse_request(line: &[u8]) -> Result<DebugRequest, String> {
-	let value: serde_json::Value =
-		serde_json::from_slice(line).map_err(|error| format!("malformed request: {error}"))?;
+pub fn parse_request(line: &[u8]) -> Result<DebugRequest, ParseRequestError> {
+	let value: serde_json::Value = serde_json::from_slice(line)?;
 	let op = value
 		.get("op")
 		.and_then(serde_json::Value::as_str)
-		.ok_or_else(|| "missing \"op\"".to_owned())?;
+		.ok_or(ParseRequestError::MissingOp)?;
 	match op {
 		"info" => Ok(DebugRequest::Info),
 		"text" => Ok(DebugRequest::Text),
@@ -363,47 +376,50 @@ pub fn parse_request(line: &[u8]) -> Result<DebugRequest, String> {
 			let effect = value
 				.get("effect")
 				.cloned()
-				.ok_or_else(|| "effect op needs an \"effect\" object".to_owned())?;
+				.ok_or_else(|| ParseRequestError::Other("effect op needs an \"effect\" object".to_owned()))?;
 			Ok(DebugRequest::Effect(effect))
 		},
 		"keys" => {
 			let spec = value
 				.get("keys")
 				.and_then(serde_json::Value::as_str)
-				.ok_or_else(|| "keys op needs a \"keys\" string".to_owned())?;
-			Ok(DebugRequest::Chords(parse_keys(spec)?))
+				.ok_or_else(|| ParseRequestError::Other("keys op needs a \"keys\" string".to_owned()))?;
+			Ok(DebugRequest::Chords(parse_keys(spec).map_err(ParseRequestError::Other)?))
 		},
 		"bytes" => {
 			let data = value
 				.get("data")
 				.and_then(serde_json::Value::as_str)
-				.ok_or_else(|| "bytes op needs a \"data\" string".to_owned())?;
+				.ok_or_else(|| ParseRequestError::Other("bytes op needs a \"data\" string".to_owned()))?;
 			Ok(DebugRequest::Bytes(data.as_bytes().to_vec()))
 		},
 		"paste" => {
 			let text = value
 				.get("text")
 				.and_then(serde_json::Value::as_str)
-				.ok_or_else(|| "paste op needs a \"text\" string".to_owned())?;
+				.ok_or_else(|| ParseRequestError::Other("paste op needs a \"text\" string".to_owned()))?;
 			Ok(DebugRequest::Inject(vec![InputEvent::Paste(Str::new(text))]))
 		},
-		"mouse" => Ok(DebugRequest::Inject(vec![InputEvent::Mouse(parse_mouse(&value)?)])),
+		"mouse" => {
+			let mouse = parse_mouse(&value).map_err(ParseRequestError::Other)?;
+			Ok(DebugRequest::Inject(vec![InputEvent::Mouse(mouse)]))
+		},
 		"event" | "events" => {
 			let payload = value
 				.get("event")
 				.or_else(|| value.get("events"))
-				.ok_or_else(|| "event op needs an \"event\" (or \"events\") field".to_owned())?;
+				.ok_or_else(|| ParseRequestError::Other("event op needs an \"event\" (or \"events\") field".to_owned()))?;
 			let events = if payload.is_array() {
 				serde_json::from_value::<Vec<TerminalEvent>>(payload.clone())
 			} else {
 				serde_json::from_value::<TerminalEvent>(payload.clone()).map(|event| vec![event])
 			}
-			.map_err(|error| format!("malformed terminal event: {error}"))?;
+			.map_err(|error| ParseRequestError::Other(format!("malformed terminal event: {error}")))?;
 			Ok(DebugRequest::Events(events))
 		},
 		"resize" => Ok(DebugRequest::Resize),
 		"quit" => Ok(DebugRequest::Quit),
-		other => Err(format!("unknown op {other:?}")),
+		other => Err(ParseRequestError::Other(format!("unknown op {other:?}"))),
 	}
 }
 
@@ -580,7 +596,7 @@ mod server {
 	use tokio::net::{UnixListener, UnixStream};
 
 	use super::{
-		DEBUG_ENV, DebugQuery, DebugRequest, RESPONSES, TerminalEvent, direct_response, parse_request,
+		DEBUG_ENV, DebugQuery, DebugRequest, ParseRequestError, RESPONSES, TerminalEvent, direct_response, parse_request,
 	};
 
 	/// How long a retained-state query may wait for a host answer; hosts
@@ -652,7 +668,7 @@ mod server {
 					let request = match request {
 						Err(error) => {
 							server
-								.respond(client, &serde_json::json!({ "ok": false, "error": error }));
+								.respond(client, &serde_json::json!({ "ok": false, "error": error.to_string() }));
 							continue;
 						},
 						Ok(request) => request,
@@ -792,7 +808,7 @@ mod server {
 		/// returned client id addresses the sender for
 		/// [`DebugServer::respond`] and stays stable for the connection's
 		/// lifetime, so pending queries may hold it across `recv` calls.
-		async fn recv(&mut self) -> (u64, Result<DebugRequest, String>) {
+		async fn recv(&mut self) -> (u64, Result<DebugRequest, ParseRequestError>) {
 			loop {
 				self.conns.retain(|conn| !conn.dead);
 				for conn in &mut self.conns {
@@ -1007,7 +1023,19 @@ mod tests {
 			parse_request(br#"{"op":"effect","effect":{"kind":"mount_slot"}}"#),
 			Ok(DebugRequest::Effect(_))
 		));
-		assert!(parse_request(br#"{"op":"warp"}"#).is_err());
+		assert!(matches!(
+			parse_request(br#"{"op":"warp"}"#),
+			Err(ParseRequestError::Other(error)) if error == "unknown op \"warp\""
+		));
+		assert!(matches!(
+			parse_request(b""),
+			Err(error @ ParseRequestError::Malformed(_))
+				if error.to_string().starts_with("malformed request: ")
+		));
+		assert!(matches!(
+			parse_request(br#"{}"#),
+			Err(error @ ParseRequestError::MissingOp) if error.to_string() == "missing \"op\""
+		));
 		let mouse = parse_request(br#"{"op":"mouse","x":3,"y":7,"action":"wheel-down"}"#);
 		assert!(matches!(
 			mouse,

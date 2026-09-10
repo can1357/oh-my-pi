@@ -15,8 +15,8 @@ use quick_xml::{
 use super::{
 	Attachment, Conversion, MarkitError,
 	ooxml::{
-		Archive, attachment_name, attribute, decode_reference, decode_text, format_url,
-		image_media_type, local_name, render_markdown_table, xml_reader,
+		Archive, attachment_name, attribute, decode_reference, decode_text, decode_xml_bytes,
+		format_url, image_media_type, local_name, render_markdown_table, xml_reader,
 	},
 };
 
@@ -34,9 +34,8 @@ pub(super) fn convert(bytes: &[u8], extract_media: bool) -> Result<Conversion, M
 
 fn convert_inner(bytes: &[u8], extract_media: bool) -> Result<(String, Vec<Attachment>), String> {
 	let mut archive = Archive::open(bytes)?;
-	let root_relationships = archive
-		.read_xml("_rels/.rels")?
-		.map(|xml| parse_relationships(&xml))
+	let root_relationships = read_member(&mut archive, "_rels/.rels")?
+		.map(|xml| parse_relationships(xml.as_bytes()))
 		.transpose()?
 		.unwrap_or_default();
 	let presentation_path = root_relationships
@@ -47,15 +46,16 @@ fn convert_inner(bytes: &[u8], extract_media: bool) -> Result<(String, Vec<Attac
 		.min_by(|(left, _), (right, _)| left.cmp(right))
 		.and_then(|(_, relationship)| resolve_part("", &relationship.target))
 		.unwrap_or_else(|| "ppt/presentation.xml".to_owned());
-	let presentation = archive
-		.read_xml(&presentation_path)?
+	let presentation = read_member(&mut archive, &presentation_path)?
 		.ok_or_else(|| "Invalid PPTX: missing presentation.xml".to_owned())?;
-	let slide_ids = presentation_slide_ids(&presentation)?;
-	let presentation_relationships = archive
-		.read_xml(&relationships_part(&presentation_path))?
-		.map(|xml| parse_relationships(&xml))
-		.transpose()?
-		.unwrap_or_default();
+	let slide_ids = presentation_slide_ids(presentation.as_bytes())?;
+	let presentation_relationships = read_member(
+		&mut archive,
+		&relationships_part(&presentation_path),
+	)?
+	.map(|xml| parse_relationships(xml.as_bytes()))
+	.transpose()?
+	.unwrap_or_default();
 
 	let mut slide_paths = slide_ids
 		.iter()
@@ -69,9 +69,8 @@ fn convert_inner(bytes: &[u8], extract_media: bool) -> Result<(String, Vec<Attac
 
 	let mut slide_relationships = Vec::with_capacity(slide_paths.len());
 	for slide_path in &slide_paths {
-		let relationships = archive
-			.read_xml(&relationships_part(slide_path))?
-			.map(|xml| parse_relationships(&xml))
+		let relationships = read_member(&mut archive, &relationships_part(slide_path))?
+			.map(|xml| parse_relationships(xml.as_bytes()))
 			.transpose()?
 			.unwrap_or_default();
 		slide_relationships.push(relationships);
@@ -102,10 +101,10 @@ fn convert_inner(bytes: &[u8], extract_media: bool) -> Result<(String, Vec<Attac
 	for (index, (slide_path, relationships)) in
 		slide_paths.iter().zip(&slide_relationships).enumerate()
 	{
-		let Some(slide_xml) = archive.read_xml(slide_path)? else {
+		let Some(slide_xml) = read_member(&mut archive, slide_path)? else {
 			continue;
 		};
-		let slide = parse_slide(&slide_xml)?;
+		let slide = parse_slide(slide_xml.as_bytes())?;
 		if !slide.has_shape_tree {
 			continue;
 		}
@@ -199,14 +198,14 @@ fn convert_inner(bytes: &[u8], extract_media: bool) -> Result<(String, Vec<Attac
 				archive.contains(&conventional).then_some(conventional)
 			});
 		if let Some(notes_path) = notes_path
-			&& let Some(notes_xml) = archive.read_xml(&notes_path)?
+			&& let Some(notes_xml) = read_member(&mut archive, &notes_path)?
 		{
-			let notes_relationships = archive
-				.read_xml(&relationships_part(&notes_path))?
-				.map(|xml| parse_relationships(&xml))
-				.transpose()?
-				.unwrap_or_default();
-			let notes = parse_notes(&notes_xml)?
+			let notes_relationships =
+				read_member(&mut archive, &relationships_part(&notes_path))?
+					.map(|xml| parse_relationships(xml.as_bytes()))
+					.transpose()?
+					.unwrap_or_default();
+			let notes = parse_notes(notes_xml.as_bytes())?
 				.into_iter()
 				.map(|shape| {
 					render_shape(&shape, &notes_relationships, &notes_path, &slide_numbers, false)
@@ -223,6 +222,14 @@ fn convert_inner(bytes: &[u8], extract_media: bool) -> Result<(String, Vec<Attac
 	}
 
 	Ok((sections.join("\n\n").trim().to_owned(), attachments))
+}
+fn read_member(archive: &mut Archive<'_>, path: &str) -> Result<Option<String>, String> {
+	let Some(bytes) = archive.read_xml(path)? else {
+		return Ok(None);
+	};
+	decode_xml_bytes(&bytes)
+		.map(Some)
+		.map_err(|error| format!("{path} is not valid UTF text: {error}"))
 }
 
 fn fallback_slide_paths(archive: &Archive<'_>) -> Vec<String> {
@@ -248,7 +255,7 @@ fn presentation_slide_ids(xml: &[u8]) -> Result<Vec<String>, String> {
 	loop {
 		match reader.read_event_into(&mut buffer).map_err(xml_error)? {
 			Event::Start(element) | Event::Empty(element)
-				if local_name(element.name().as_ref()) == b"sldId" =>
+				if local_name(element.name().as_ref()) == "sldId" =>
 			{
 				if let Some(id) = attribute(&reader, &element, b"id")? {
 					ids.push(id);
@@ -276,7 +283,7 @@ fn parse_relationships(xml: &[u8]) -> Result<HashMap<String, Relationship>, Stri
 	loop {
 		match reader.read_event_into(&mut buffer).map_err(xml_error)? {
 			Event::Start(element) | Event::Empty(element)
-				if local_name(element.name().as_ref()) == b"Relationship" =>
+				if local_name(element.name().as_ref()) == "Relationship" =>
 			{
 				if let (Some(id), Some(target)) =
 					(attribute(&reader, &element, b"Id")?, attribute(&reader, &element, b"Target")?)
@@ -432,31 +439,31 @@ fn parse_slide(xml: &[u8]) -> Result<ParsedSlide, String> {
 	let mut in_shape_tree = 0usize;
 	loop {
 		match reader.read_event_into(&mut buffer).map_err(xml_error)? {
-			Event::Start(element) if local_name(element.name().as_ref()) == b"spTree" => {
+			Event::Start(element) if local_name(element.name().as_ref()) == "spTree" => {
 				slide.has_shape_tree = true;
 				in_shape_tree += 1;
 			},
-			Event::End(element) if local_name(element.name().as_ref()) == b"spTree" => {
+			Event::End(element) if local_name(element.name().as_ref()) == "spTree" => {
 				in_shape_tree = in_shape_tree.saturating_sub(1);
 			},
 			Event::Start(element)
 				if in_shape_tree > 0
-					&& (local_name(element.name().as_ref()) == b"sp"
-						|| local_name(element.name().as_ref()) == b"cxnSp") =>
+					&& (local_name(element.name().as_ref()) == "sp"
+						|| local_name(element.name().as_ref()) == "cxnSp") =>
 			{
 				slide
 					.items
 					.push(SlideItem::Shape(parse_shape(&mut reader)?));
 			},
 			Event::Start(element)
-				if in_shape_tree > 0 && local_name(element.name().as_ref()) == b"pic" =>
+				if in_shape_tree > 0 && local_name(element.name().as_ref()) == "pic" =>
 			{
 				slide
 					.items
 					.push(SlideItem::Picture(parse_picture(&mut reader)?));
 			},
 			Event::Start(element)
-				if in_shape_tree > 0 && local_name(element.name().as_ref()) == b"graphicFrame" =>
+				if in_shape_tree > 0 && local_name(element.name().as_ref()) == "graphicFrame" =>
 			{
 				if let Some(table) = parse_graphic_frame(&mut reader)? {
 					slide.items.push(SlideItem::Table(table));
@@ -494,12 +501,12 @@ fn parse_shape(reader: &mut Reader<&[u8]>) -> Result<Shape, String> {
 				depth += 1;
 				let qualified_name = element.name();
 				let name = local_name(qualified_name.as_ref());
-				if name == b"ph" && shape.placeholder.is_none() {
+				if name == "ph" && shape.placeholder.is_none() {
 					shape.placeholder =
 						attribute(reader, &element, b"type")?.or_else(|| Some("body".to_owned()));
-				} else if name == b"txBody" {
+				} else if name == "txBody" {
 					in_text_body = true;
-				} else if in_text_body && name == b"lstStyle" {
+				} else if in_text_body && name == "lstStyle" {
 					in_list_style = true;
 				} else if in_list_style {
 					if let Some(level) = level_property_number(name) {
@@ -508,13 +515,13 @@ fn parse_shape(reader: &mut Reader<&[u8]>) -> Result<Shape, String> {
 							.insert(level, parse_para_properties(reader)?);
 						depth -= 1;
 					}
-				} else if in_text_body && name == b"p" {
+				} else if in_text_body && name == "p" {
 					shape.paragraphs.push(parse_paragraph(reader)?);
 					depth -= 1;
 				}
 			},
 			Event::Empty(element)
-				if local_name(element.name().as_ref()) == b"ph" && shape.placeholder.is_none() =>
+				if local_name(element.name().as_ref()) == "ph" && shape.placeholder.is_none() =>
 			{
 				shape.placeholder =
 					attribute(reader, &element, b"type")?.or_else(|| Some("body".to_owned()));
@@ -522,10 +529,10 @@ fn parse_shape(reader: &mut Reader<&[u8]>) -> Result<Shape, String> {
 			Event::End(element) => {
 				let qualified_name = element.name();
 				let name = local_name(qualified_name.as_ref());
-				if name == b"lstStyle" {
+				if name == "lstStyle" {
 					in_list_style = false;
 				}
-				if name == b"txBody" {
+				if name == "txBody" {
 					in_text_body = false;
 				}
 				if depth == 1 {
@@ -541,9 +548,9 @@ fn parse_shape(reader: &mut Reader<&[u8]>) -> Result<Shape, String> {
 	Ok(shape)
 }
 
-fn level_property_number(name: &[u8]) -> Option<usize> {
-	let middle = name.strip_prefix(b"lvl")?.strip_suffix(b"pPr")?;
-	let level = str::from_utf8(middle).ok()?.parse::<usize>().ok()?;
+fn level_property_number(name: &str) -> Option<usize> {
+	let middle = name.strip_prefix("lvl")?.strip_suffix("pPr")?;
+	let level = middle.parse::<usize>().ok()?;
 	(1..=9).contains(&level).then_some(level - 1)
 }
 
@@ -556,20 +563,20 @@ fn parse_paragraph(reader: &mut Reader<&[u8]>) -> Result<Paragraph, String> {
 			Event::Start(element) => {
 				depth += 1;
 				match local_name(element.name().as_ref()) {
-					b"pPr" => {
+					"pPr" => {
 						paragraph.level = attribute(reader, &element, b"lvl")?
 							.and_then(|value| value.parse().ok())
 							.unwrap_or(0);
 						paragraph.properties = parse_para_properties(reader)?;
 						depth -= 1;
 					},
-					b"r" | b"fld" => {
+					"r" | "fld" => {
 						paragraph
 							.fragments
 							.extend(parse_run(reader, paragraph.properties.style)?);
 						depth -= 1;
 					},
-					b"br" => {
+					"br" => {
 						paragraph.fragments.push(Fragment::Break);
 						skip_element(reader, "break")?;
 						depth -= 1;
@@ -577,7 +584,7 @@ fn parse_paragraph(reader: &mut Reader<&[u8]>) -> Result<Paragraph, String> {
 					_ => {},
 				}
 			},
-			Event::Empty(element) if local_name(element.name().as_ref()) == b"br" => {
+			Event::Empty(element) if local_name(element.name().as_ref()) == "br" => {
 				paragraph.fragments.push(Fragment::Break);
 			},
 			Event::End(_) => {
@@ -627,9 +634,9 @@ fn apply_para_property(
 	properties: &mut ParaProps,
 ) -> Result<(), String> {
 	match local_name(element.name().as_ref()) {
-		b"buNone" => properties.bullet = Bullet::None,
-		b"buChar" => properties.bullet = Bullet::Char,
-		b"buAutoNum" => {
+		"buNone" => properties.bullet = Bullet::None,
+		"buChar" => properties.bullet = Bullet::Char,
+		"buAutoNum" => {
 			let scheme = attribute(reader, element, b"type")?.unwrap_or_default();
 			let kind = if scheme.starts_with("alphaLc") {
 				NumberKind::LowerAlpha
@@ -656,7 +663,7 @@ fn apply_para_property(
 				.map_or(1, |value| value.clamp(1, 32767) as u64);
 			properties.bullet = Bullet::Auto { start, kind, wrap };
 		},
-		b"defRPr" => properties.style = properties.style.overlay(parse_style(reader, element)?),
+		"defRPr" => properties.style = properties.style.overlay(parse_style(reader, element)?),
 		_ => {},
 	}
 	Ok(())
@@ -673,9 +680,9 @@ fn parse_run(reader: &mut Reader<&[u8]>, base: StyleDelta) -> Result<Vec<Fragmen
 			Event::Start(element) => {
 				depth += 1;
 				match local_name(element.name().as_ref()) {
-					b"rPr" => delta = delta.overlay(parse_style(reader, &element)?),
-					b"hlinkClick" => hyperlink = attribute(reader, &element, b"id")?,
-					b"t" => {
+					"rPr" => delta = delta.overlay(parse_style(reader, &element)?),
+					"hlinkClick" => hyperlink = attribute(reader, &element, b"id")?,
+					"t" => {
 						let text = read_element_text(reader)?;
 						fragments.push(Fragment::Text {
 							text,
@@ -684,7 +691,7 @@ fn parse_run(reader: &mut Reader<&[u8]>, base: StyleDelta) -> Result<Vec<Fragmen
 						});
 						depth -= 1;
 					},
-					b"br" => {
+					"br" => {
 						fragments.push(Fragment::Break);
 						skip_element(reader, "break")?;
 						depth -= 1;
@@ -693,9 +700,9 @@ fn parse_run(reader: &mut Reader<&[u8]>, base: StyleDelta) -> Result<Vec<Fragmen
 				}
 			},
 			Event::Empty(element) => match local_name(element.name().as_ref()) {
-				b"rPr" => delta = delta.overlay(parse_style(reader, &element)?),
-				b"hlinkClick" => hyperlink = attribute(reader, &element, b"id")?,
-				b"br" => fragments.push(Fragment::Break),
+				"rPr" => delta = delta.overlay(parse_style(reader, &element)?),
+				"hlinkClick" => hyperlink = attribute(reader, &element, b"id")?,
+				"br" => fragments.push(Fragment::Break),
 				_ => {},
 			},
 			Event::End(_) => {
@@ -735,19 +742,19 @@ fn parse_picture(reader: &mut Reader<&[u8]>) -> Result<Picture, String> {
 		match reader.read_event_into(&mut buffer).map_err(xml_error)? {
 			Event::Start(element) => {
 				depth += 1;
-				if local_name(element.name().as_ref()) == b"blip" {
+				if local_name(element.name().as_ref()) == "blip" {
 					relationship_id =
 						attribute(reader, &element, b"embed")?.or(attribute(reader, &element, b"link")?);
-				} else if local_name(element.name().as_ref()) == b"cNvPr" {
+				} else if local_name(element.name().as_ref()) == "cNvPr" {
 					name = name.or(attribute(reader, &element, b"name")?);
 					description = description.or(attribute(reader, &element, b"descr")?);
 				}
 			},
 			Event::Empty(element) => {
-				if local_name(element.name().as_ref()) == b"blip" {
+				if local_name(element.name().as_ref()) == "blip" {
 					relationship_id =
 						attribute(reader, &element, b"embed")?.or(attribute(reader, &element, b"link")?);
-				} else if local_name(element.name().as_ref()) == b"cNvPr" {
+				} else if local_name(element.name().as_ref()) == "cNvPr" {
 					name = name.or(attribute(reader, &element, b"name")?);
 					description = description.or(attribute(reader, &element, b"descr")?);
 				}
@@ -774,7 +781,7 @@ fn parse_graphic_frame(reader: &mut Reader<&[u8]>) -> Result<Option<Vec<Vec<Stri
 		match reader.read_event_into(&mut buffer).map_err(xml_error)? {
 			Event::Start(element) => {
 				depth += 1;
-				if local_name(element.name().as_ref()) == b"tbl" {
+				if local_name(element.name().as_ref()) == "tbl" {
 					table = Some(parse_table(reader)?);
 					depth -= 1;
 				}
@@ -809,7 +816,7 @@ fn parse_table(reader: &mut Reader<&[u8]>) -> Result<Vec<Vec<String>>, String> {
 		match reader.read_event_into(&mut buffer).map_err(xml_error)? {
 			Event::Start(element) => {
 				depth += 1;
-				if local_name(element.name().as_ref()) == b"tr" {
+				if local_name(element.name().as_ref()) == "tr" {
 					source_rows.push(parse_table_row(reader)?);
 					depth -= 1;
 				}
@@ -836,7 +843,7 @@ fn parse_table_row(reader: &mut Reader<&[u8]>) -> Result<Vec<TableCell>, String>
 		match reader.read_event_into(&mut buffer).map_err(xml_error)? {
 			Event::Start(element) => {
 				depth += 1;
-				if local_name(element.name().as_ref()) == b"tc" {
+				if local_name(element.name().as_ref()) == "tc" {
 					cells.push(parse_table_cell(reader, &element)?);
 					depth -= 1;
 				}
@@ -876,7 +883,7 @@ fn parse_table_cell(
 		match reader.read_event_into(&mut buffer).map_err(xml_error)? {
 			Event::Start(element) => {
 				depth += 1;
-				if local_name(element.name().as_ref()) == b"p" {
+				if local_name(element.name().as_ref()) == "p" {
 					paragraphs.push(parse_paragraph(reader)?);
 					depth -= 1;
 				}
@@ -1179,7 +1186,7 @@ fn read_element_text(reader: &mut Reader<&[u8]>) -> Result<String, String> {
 		match reader.read_event_into(&mut buffer).map_err(xml_error)? {
 			Event::Text(part) => text.push_str(&decode_text(&part)?),
 			Event::GeneralRef(part) => text.push_str(&decode_reference(&part)?),
-			Event::CData(part) => text.push_str(&part.decode().map_err(xml_error)?),
+			Event::CData(part) => text.push_str(&part),
 			Event::End(_) => break,
 			Event::Eof => return Err("unexpected end of XML inside text element".to_owned()),
 			_ => {},
@@ -1235,6 +1242,22 @@ mod tests {
 			archive.add_file(name, contents.as_bytes()).unwrap();
 		}
 		archive.finish().unwrap()
+	}
+
+	fn pptx_bytes(parts: &[(&str, &[u8])]) -> Vec<u8> {
+		let mut archive = Writer::new(Vec::new());
+		for (name, contents) in parts {
+			archive.add_file(name, contents).unwrap();
+		}
+		archive.finish().unwrap()
+	}
+
+	fn utf16le(text: &str) -> Vec<u8> {
+		let mut bytes = vec![0xff, 0xfe];
+		for unit in text.encode_utf16() {
+			bytes.extend_from_slice(&unit.to_le_bytes());
+		}
+		bytes
 	}
 
 	fn base_parts<'a>(slide: &'a str, slide_rels: &'a str) -> [(&'a str, &'a str); 4] {
@@ -1320,5 +1343,27 @@ mod tests {
 		let slide = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:graphicFrame><a:tbl><a:tr><a:tc gridSpan="2000000000" rowSpan="2000000000"><a:txBody><a:p/></a:txBody></a:tc></a:tr></a:tbl></p:graphicFrame></p:spTree></p:cSld></p:sld>"#;
 		let error = convert(&pptx(&base_parts(slide, "<Relationships/>")), false).unwrap_err();
 		assert!(error.to_string().contains("table span exceeds"));
+	}
+
+	#[test]
+	fn converts_utf16_encoded_slide_member() {
+		let slide = utf16le(
+			r#"<?xml version="1.0" encoding="UTF-16"?><p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:nvPr/></p:nvSpPr><p:txBody><a:p><a:r><a:t>Héllo</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+		);
+		let bytes = pptx_bytes(&[
+			(
+				"ppt/presentation.xml",
+				br#"<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>"#,
+			),
+			(
+				"ppt/_rels/presentation.xml.rels",
+				br#"<Relationships><Relationship Id="rId1" Type="x/slide" Target="slides/slide1.xml"/></Relationships>"#,
+			),
+			("ppt/slides/slide1.xml", &slide),
+			("ppt/slides/_rels/slide1.xml.rels", br#"<Relationships/>"#),
+		]);
+
+		let markdown = convert(&bytes, false).expect("UTF-16 PPTX should convert");
+		assert_eq!(markdown.as_str(), "<!-- Slide 1 -->\n# Héllo");
 	}
 }

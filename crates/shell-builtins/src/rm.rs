@@ -800,8 +800,10 @@ fn run_matches(host: &mut Host, matches: &ArgMatches) -> i32 {
 				InteractiveMode::Always
 			} else if matches.get_flag(OPT_PROMPT_ONCE) {
 				InteractiveMode::Once
+			} else if let Some(value) = matches.get_one::<String>(OPT_INTERACTIVE) {
+				InteractiveMode::from(value.as_str())
 			} else if matches.contains_id(OPT_INTERACTIVE) {
-				InteractiveMode::from(matches.get_one::<String>(OPT_INTERACTIVE).unwrap().as_str())
+				InteractiveMode::Always
 			} else {
 				InteractiveMode::PromptProtected
 			}
@@ -1043,7 +1045,7 @@ fn create_progress_bar(host: &mut Host, files: &[&OsStr], recursive: bool) -> Op
 	)
 	.with_style(
 		ProgressStyle::with_template("{msg}: [{elapsed_precise}] {wide_bar} {pos:>7}/{len:7} files")
-			.unwrap(),
+			.expect("rm progress template is valid"),
 	)
 	.with_message("Removing");
 	Some(progress)

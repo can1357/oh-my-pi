@@ -332,6 +332,7 @@ impl JournalNamespaceLock {
 			.create(true)
 			.read(true)
 			.write(true)
+			.truncate(false)
 			.open(&path)?;
 		match File::try_lock_shared(&file) {
 			Ok(()) => Ok(Self { _file: file }),
@@ -346,6 +347,7 @@ impl JournalNamespaceLock {
 			.create(true)
 			.read(true)
 			.write(true)
+			.truncate(false)
 			.open(&path)?;
 		match file.try_lock() {
 			Ok(()) => Ok(Self { _file: file }),
@@ -370,6 +372,7 @@ impl WriterLock {
 			.create(true)
 			.read(true)
 			.write(true)
+			.truncate(false)
 			.open(path.with_file_name(name))?;
 		match file.try_lock() {
 			Ok(()) => Ok(Self { _file: file }),

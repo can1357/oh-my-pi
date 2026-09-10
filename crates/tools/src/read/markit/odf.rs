@@ -90,9 +90,9 @@ fn validate_mimetype(declared: &str, expected: &str) -> Result<(), String> {
 /// absent or stale because anydoc deliberately shares one ODF parser.
 fn validate_content_body(xml: &[u8], format: anydoc::Format) -> Result<(), String> {
 	let expected = match format {
-		anydoc::Format::Odt => b"text".as_slice(),
-		anydoc::Format::Ods => b"spreadsheet".as_slice(),
-		anydoc::Format::Odp => b"presentation".as_slice(),
+		anydoc::Format::Odt => "text",
+		anydoc::Format::Ods => "spreadsheet",
+		anydoc::Format::Odp => "presentation",
 		_ => return Err("unsupported OpenDocument format selector".into()),
 	};
 	let mut reader = xml_reader(xml);
@@ -107,12 +107,9 @@ fn validate_content_body(xml: &[u8], format: anydoc::Format) -> Result<(), Strin
 						return Ok(());
 					}
 					if is_odf_body(name) {
-						return Err(format!(
-							"unexpected OpenDocument body '{}'",
-							String::from_utf8_lossy(name)
-						));
+						return Err(format!("unexpected OpenDocument body '{name}'"));
 					}
-				} else if name == b"body" {
+				} else if name == "body" {
 					in_body = true;
 				}
 			},
@@ -123,13 +120,10 @@ fn validate_content_body(xml: &[u8], format: anydoc::Format) -> Result<(), Strin
 					return Ok(());
 				}
 				if is_odf_body(name) {
-					return Err(format!(
-						"unexpected OpenDocument body '{}'",
-						String::from_utf8_lossy(name)
-					));
+					return Err(format!("unexpected OpenDocument body '{name}'"));
 				}
 			},
-			Ok(Event::End(event)) if local_name(event.name().as_ref()) == b"body" => {
+			Ok(Event::End(event)) if local_name(event.name().as_ref()) == "body" => {
 				return Err("content.xml has no recognized OpenDocument body".into());
 			},
 			Ok(Event::Eof) => return Err("content.xml has no OpenDocument body".into()),
@@ -139,8 +133,8 @@ fn validate_content_body(xml: &[u8], format: anydoc::Format) -> Result<(), Strin
 	}
 }
 
-fn is_odf_body(name: &[u8]) -> bool {
-	name == b"text" || name == b"spreadsheet" || name == b"presentation"
+fn is_odf_body(name: &str) -> bool {
+	name == "text" || name == "spreadsheet" || name == "presentation"
 }
 
 /// Identity and encryption facts carried by an ODF package manifest.
@@ -161,9 +155,9 @@ fn parse_manifest(xml: &[u8]) -> Result<ManifestInfo, String> {
 			Ok(Event::Start(event) | Event::Empty(event)) => {
 				let qname = event.name();
 				let name = local_name(qname.as_ref());
-				if name == b"encryption-data" {
+				if name == "encryption-data" {
 					info.encrypted = true;
-				} else if name == b"file-entry"
+				} else if name == "file-entry"
 					&& attribute(&reader, &event, b"full-path")?.as_deref() == Some("/")
 				{
 					info.root_mimetype = attribute(&reader, &event, b"media-type")?;

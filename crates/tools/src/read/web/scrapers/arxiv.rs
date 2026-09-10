@@ -8,7 +8,7 @@ use omp_tool::{Diag, DiagKind};
 use quick_xml::{
 	Reader,
 	escape::{resolve_xml_entity, unescape},
-	events::{Event, attributes},
+	events::Event,
 };
 use url::Url;
 
@@ -213,62 +213,60 @@ fn parse_entry(xml: &[u8]) -> Option<Entry> {
 			Event::Start(element) => {
 				let name = element.local_name();
 				match name.as_ref() {
-					b"entry" if !in_entry => in_entry = true,
-					b"author" if in_entry => in_author = true,
-					b"title" if in_entry && !entry.title_seen => {
+					"entry" if !in_entry => in_entry = true,
+					"author" if in_entry => in_author = true,
+					"title" if in_entry && !entry.title_seen => {
 						entry.title_seen = true;
 						capture = Some(Capture::Title);
 					},
-					b"summary" if in_entry && !entry.summary_seen => {
+					"summary" if in_entry && !entry.summary_seen => {
 						entry.summary_seen = true;
 						capture = Some(Capture::Summary);
 					},
-					b"published" if in_entry && !entry.published_seen => {
+					"published" if in_entry && !entry.published_seen => {
 						entry.published_seen = true;
 						capture = Some(Capture::Published);
 					},
-					b"name" if in_entry && in_author => {
+					"name" if in_entry && in_author => {
 						author.clear();
 						capture = Some(Capture::Author);
 					},
-					b"category" if in_entry => append_category(&reader, &element, &mut entry),
-					b"link" if in_entry => append_pdf_link(&reader, &element, &mut entry),
+					"category" if in_entry => append_category(&element, &mut entry),
+					"link" if in_entry => append_pdf_link(&element, &mut entry),
 					_ => {},
 				}
 			},
 			Event::Empty(element) => match element.local_name().as_ref() {
-				b"entry" if !in_entry => return Some(entry),
-				b"title" if in_entry => entry.title_seen = true,
-				b"summary" if in_entry => entry.summary_seen = true,
-				b"published" if in_entry => entry.published_seen = true,
-				b"category" if in_entry => append_category(&reader, &element, &mut entry),
-				b"link" if in_entry => append_pdf_link(&reader, &element, &mut entry),
+				"entry" if !in_entry => return Some(entry),
+				"title" if in_entry => entry.title_seen = true,
+				"summary" if in_entry => entry.summary_seen = true,
+				"published" if in_entry => entry.published_seen = true,
+				"category" if in_entry => append_category(&element, &mut entry),
+				"link" if in_entry => append_pdf_link(&element, &mut entry),
 				_ => {},
 			},
 			Event::Text(text) => {
-				let decoded = text.decode().ok()?;
-				let decoded = unescape(&decoded).ok()?;
+				let decoded = unescape(text.as_ref()).ok()?;
 				append_capture(capture, &decoded, &mut entry, &mut author);
 			},
 			Event::GeneralRef(reference) => {
-				let name = reference.decode().ok()?;
-				let decoded = decode_reference(&name);
+				let decoded = decode_reference(reference.as_ref());
 				append_capture(capture, &decoded, &mut entry, &mut author);
 			},
 			Event::CData(text) => {
-				let decoded = text.decode().ok()?;
-				append_capture(capture, &decoded, &mut entry, &mut author);
+				let decoded = text.as_ref();
+				append_capture(capture, decoded, &mut entry, &mut author);
 			},
 			Event::End(element) if in_entry => match element.local_name().as_ref() {
-				b"name" if capture == Some(Capture::Author) => {
+				"name" if capture == Some(Capture::Author) => {
 					push_author(&mut entry, &author);
 					capture = None;
 				},
-				b"author" => in_author = false,
-				b"title" if capture == Some(Capture::Title) => capture = None,
-				b"summary" if capture == Some(Capture::Summary) => capture = None,
-				b"published" if capture == Some(Capture::Published) => capture = None,
-				b"entry" => return Some(finish_entry(entry, capture, &author)),
+				"author" => in_author = false,
+				"title" if capture == Some(Capture::Title) => capture = None,
+				"summary" if capture == Some(Capture::Summary) => capture = None,
+				"published" if capture == Some(Capture::Published) => capture = None,
+				"entry" => return Some(finish_entry(entry, capture, &author)),
 				_ => {},
 			},
 			Event::Eof => return in_entry.then(|| finish_entry(entry, capture, &author)),
@@ -479,46 +477,26 @@ fn is_reference_name(name: &str) -> bool {
 		&& bytes.all(|byte| byte.is_ascii_alphanumeric())
 }
 
-fn decode_attribute(
-	reader: &Reader<&[u8]>,
-	attribute: &attributes::Attribute<'_>,
-) -> Option<String> {
-	let value = reader.decoder().decode(attribute.value.as_ref()).ok()?;
-	Some(decode_entities(&value))
-}
-
-fn append_category(
-	reader: &Reader<&[u8]>,
-	element: &quick_xml::events::BytesStart<'_>,
-	entry: &mut Entry,
-) {
+fn append_category(element: &quick_xml::events::BytesStart<'_>, entry: &mut Entry) {
 	for attribute in element.attributes().flatten() {
-		if attribute.key.local_name().as_ref() != b"term" {
+		if attribute.key.local_name().as_ref() != "term" {
 			continue;
 		}
-		let Some(term) = decode_attribute(reader, &attribute) else {
-			continue;
-		};
+		let term = decode_entities(attribute.value.as_ref());
 		if !term.is_empty() {
 			entry.categories.push(term);
 		}
 	}
 }
 
-fn append_pdf_link(
-	reader: &Reader<&[u8]>,
-	element: &quick_xml::events::BytesStart<'_>,
-	entry: &mut Entry,
-) {
+fn append_pdf_link(element: &quick_xml::events::BytesStart<'_>, entry: &mut Entry) {
 	let mut is_pdf = false;
 	let mut href = None;
 	for attribute in element.attributes().flatten() {
-		let Some(value) = decode_attribute(reader, &attribute) else {
-			continue;
-		};
+		let value = decode_entities(attribute.value.as_ref());
 		match attribute.key.local_name().as_ref() {
-			b"title" => is_pdf = value == "pdf",
-			b"href" => href = Some(value),
+			"title" => is_pdf = value == "pdf",
+			"href" => href = Some(value),
 			_ => {},
 		}
 	}

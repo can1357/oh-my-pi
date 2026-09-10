@@ -22,7 +22,8 @@ const CHROME_ROWS: u16 = 5;
 const MAX_ROWS: u16 = 12;
 
 /// Side-panel status badge.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
+#[strum(serialize_all = "lowercase", const_into_str)]
 pub enum SideStatus {
 	/// The side kernel is still streaming.
 	Running,
@@ -36,12 +37,7 @@ pub enum SideStatus {
 
 impl SideStatus {
 	const fn label(self) -> &'static str {
-		match self {
-			Self::Running => "running",
-			Self::Complete => "complete",
-			Self::Error => "error",
-			Self::Aborted => "aborted",
-		}
+		self.into_str()
 	}
 }
 

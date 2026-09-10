@@ -1,5 +1,5 @@
 //! Model limits, context, provenance, and wire-target records.
-#![allow(missing_docs, reason = "strum IntoStaticStr emits undocumented inherent methods")]
+#![expect(missing_docs, reason = "strum IntoStaticStr emits undocumented inherent methods")]
 
 use omp_core::Str;
 use serde::{Deserialize, Serialize};

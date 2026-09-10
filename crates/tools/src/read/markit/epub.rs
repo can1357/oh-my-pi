@@ -450,11 +450,11 @@ fn parse_xml(xml: &str) -> Result<Node, MarkitError> {
 					return Err(failure(format!("XML element nesting exceeds {MAX_XML_DEPTH}")));
 				}
 				bump_xml_nodes(&mut nodes)?;
-				stack.push(event_node(&event, &reader)?);
+				stack.push(event_node(&event)?);
 			},
 			Ok(Event::Empty(event)) => {
 				bump_xml_nodes(&mut nodes)?;
-				let node = event_node(&event, &reader)?;
+				let node = event_node(&event)?;
 				stack
 					.last_mut()
 					.expect("XML root exists")
@@ -474,9 +474,7 @@ fn parse_xml(xml: &str) -> Result<Node, MarkitError> {
 			},
 			Ok(Event::Text(event)) => {
 				bump_xml_nodes(&mut nodes)?;
-				let decoded = event
-					.xml_content(XmlVersion::Implicit1_0)
-					.map_err(|error| failure(error.to_string()))?;
+				let decoded = event.xml_content(XmlVersion::Implicit1_0);
 				let text =
 					quick_xml::escape::unescape(&decoded).map_err(|error| failure(error.to_string()))?;
 				stack
@@ -493,8 +491,8 @@ fn parse_xml(xml: &str) -> Result<Node, MarkitError> {
 				{
 					character.to_string()
 				} else {
-					let name = event.decode().map_err(|error| failure(error.to_string()))?;
-					quick_xml::escape::resolve_predefined_entity(&name)
+					let name = event.as_ref();
+					quick_xml::escape::resolve_predefined_entity(name)
 						.map_or_else(|| format!("&{name};"), str::to_owned)
 				};
 				stack
@@ -505,12 +503,12 @@ fn parse_xml(xml: &str) -> Result<Node, MarkitError> {
 			},
 			Ok(Event::CData(event)) => {
 				bump_xml_nodes(&mut nodes)?;
-				let text = event.decode().map_err(|error| failure(error.to_string()))?;
+				let text = event.as_ref().to_owned();
 				stack
 					.last_mut()
 					.expect("XML root exists")
 					.children
-					.push(Content::Text(text.into_owned()));
+					.push(Content::Text(text));
 			},
 			Ok(Event::Eof) => break,
 			Ok(_) => {},
@@ -531,17 +529,14 @@ fn bump_xml_nodes(nodes: &mut usize) -> Result<(), MarkitError> {
 	Ok(())
 }
 
-fn event_node(
-	event: &quick_xml::events::BytesStart<'_>,
-	reader: &Reader<&[u8]>,
-) -> Result<Node, MarkitError> {
-	let name = String::from_utf8_lossy(event.name().as_ref()).into_owned();
+fn event_node(event: &quick_xml::events::BytesStart<'_>) -> Result<Node, MarkitError> {
+	let name = event.name().as_ref().to_owned();
 	let mut attrs = BTreeMap::new();
 	for attribute in event.attributes().with_checks(false) {
 		let attribute = attribute.map_err(|error| failure(error.to_string()))?;
-		let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+		let key = attribute.key.as_ref().to_owned();
 		let value = attribute
-			.decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+			.normalized_value(XmlVersion::Implicit1_0)
 			.map_err(|error| failure(error.to_string()))?
 			.into_owned();
 		attrs.insert(key.clone(), value.clone());

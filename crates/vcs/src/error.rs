@@ -1,3 +1,4 @@
+#![expect(missing_docs, reason = "strum IntoStaticStr emits undocumented inherent methods")]
 //! Error type shared by the git and jj backends.
 //!
 //! Failure modes historically detected by regexing subprocess stderr (e.g. an
@@ -10,7 +11,8 @@ use std::path::PathBuf;
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Unified error for all VCS operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, strum::IntoStaticStr, thiserror::Error)]
+#[strum(const_into_str)]
 pub enum Error {
 	/// The directory is not inside a git repository / jj workspace.
 	#[error("not a repository: {path}")]
@@ -121,20 +123,7 @@ impl Error {
 
 	/// Stable machine-readable discriminant for this failure.
 	pub const fn kind(&self) -> &'static str {
-		match self {
-			Self::NotARepository { .. } => "NotARepository",
-			Self::RefNotFound { .. } => "RefNotFound",
-			Self::ObjectNotFound { .. } => "ObjectNotFound",
-			Self::EmptyCherryPick { .. } => "EmptyCherryPick",
-			Self::Conflict { .. } => "Conflict",
-			Self::PatchFailed { .. } => "PatchFailed",
-			Self::Cli { .. } => "Cli",
-			Self::CliTimeout { .. } => "CliTimeout",
-			Self::Io(_) => "Io",
-			Self::Backend { .. } => "Backend",
-			Self::Canceled => "Canceled",
-			Self::Unsupported { .. } => "Unsupported",
-		}
+		self.into_str()
 	}
 }
 

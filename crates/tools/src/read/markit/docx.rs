@@ -458,10 +458,10 @@ fn parse_xml(xml: &str) -> Result<Node, MarkitError> {
 						format!("XML nesting exceeds {MAX_XML_DEPTH} levels"),
 					));
 				}
-				stack.push(event_node(&event, &reader)?);
+				stack.push(event_node(&event)?);
 			},
 			Ok(Event::Empty(event)) => {
-				let node = event_node(&event, &reader)?;
+				let node = event_node(&event)?;
 				count_xml_content_node(&mut content_nodes)?;
 				stack
 					.last_mut()
@@ -482,9 +482,7 @@ fn parse_xml(xml: &str) -> Result<Node, MarkitError> {
 					.push(Content::Element(node));
 			},
 			Ok(Event::Text(event)) => {
-				let decoded = event
-					.xml_content(XmlVersion::Implicit1_0)
-					.map_err(|error| MarkitError::conversion(FORMAT, error.to_string()))?;
+				let decoded = event.xml_content(XmlVersion::Implicit1_0);
 				let text = quick_xml::escape::unescape(&decoded)
 					.map_err(|error| MarkitError::conversion(FORMAT, error.to_string()))?;
 				count_xml_content_node(&mut content_nodes)?;
@@ -505,15 +503,13 @@ fn parse_xml(xml: &str) -> Result<Node, MarkitError> {
 					.push(Content::Text(text));
 			},
 			Ok(Event::CData(event)) => {
-				let text = event
-					.decode()
-					.map_err(|error| MarkitError::conversion(FORMAT, error.to_string()))?;
+				let text = event.as_ref().to_owned();
 				count_xml_content_node(&mut content_nodes)?;
 				stack
 					.last_mut()
 					.expect("root exists")
 					.children
-					.push(Content::Text(text.into_owned()));
+					.push(Content::Text(text));
 			},
 			Ok(Event::Eof) => break,
 			Ok(_) => {},
@@ -538,18 +534,15 @@ fn count_xml_content_node(count: &mut usize) -> Result<(), MarkitError> {
 	}
 }
 
-fn event_node(
-	event: &quick_xml::events::BytesStart<'_>,
-	reader: &Reader<&[u8]>,
-) -> Result<Node, MarkitError> {
-	let name = String::from_utf8_lossy(event.name().as_ref()).into_owned();
+fn event_node(event: &quick_xml::events::BytesStart<'_>) -> Result<Node, MarkitError> {
+	let name = event.name().as_ref().to_owned();
 	let mut attrs = HashMap::new();
 	for attribute in event.attributes().with_checks(false) {
 		let attribute =
 			attribute.map_err(|error| MarkitError::conversion(FORMAT, error.to_string()))?;
-		let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+		let key = attribute.key.as_ref().to_owned();
 		let value = attribute
-			.decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+			.normalized_value(XmlVersion::Implicit1_0)
 			.map_err(|error| MarkitError::conversion(FORMAT, error.to_string()))?
 			.into_owned();
 		attrs.insert(key.clone(), value.clone());

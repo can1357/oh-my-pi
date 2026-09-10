@@ -594,38 +594,37 @@ fn parse_escape(
 		return Ok((vec![b'\\'], cursor, false));
 	};
 	cursor += 1;
-	let byte = match code {
-		b'\\' => Some(b'\\'),
-		b'"' => Some(b'"'),
-		b'a' => Some(7),
-		b'b' => Some(8),
-		b'c' => return Ok((Vec::new(), cursor, true)),
-		b'e' => Some(27),
-		b'f' => Some(12),
-		b'n' => Some(b'\n'),
-		b'r' => Some(b'\r'),
-		b't' => Some(b'\t'),
-		b'v' => Some(11),
-		b'0' => Some(
-			parse_radix(input, &mut cursor, 8, if three_zero_digits { 3 } else { 2 }).unwrap_or(0)
-				as u8,
-		),
-		b'1'..=b'7' => {
-			cursor -= 1;
-			Some(parse_radix(input, &mut cursor, 8, 3).unwrap_or(0) as u8)
-		},
-		b'x' => Some(parse_radix(input, &mut cursor, 16, 2).ok_or(PrintfError::MissingHex)? as u8),
-		b'u' | b'U' => {
-			let digits = if code == b'u' { 4 } else { 8 };
-			let offset = cursor;
-			let value = parse_radix_exact(input, &mut cursor, 16, digits)
-				.ok_or(PrintfError::InvalidUnicode { offset })?;
-			let character = char::from_u32(value).ok_or(PrintfError::InvalidUnicode { offset })?;
-			return Ok((character.to_string().into_bytes(), cursor, false));
-		},
-		_ => return Ok((vec![b'\\', code], cursor, false)),
-	};
-	Ok((vec![byte.unwrap()], cursor, false))
+	let byte =
+		match code {
+			b'\\' => b'\\',
+			b'"' => b'"',
+			b'a' => 7,
+			b'b' => 8,
+			b'c' => return Ok((Vec::new(), cursor, true)),
+			b'e' => 27,
+			b'f' => 12,
+			b'n' => b'\n',
+			b'r' => b'\r',
+			b't' => b'\t',
+			b'v' => 11,
+			b'0' => parse_radix(input, &mut cursor, 8, if three_zero_digits { 3 } else { 2 })
+				.unwrap_or(0) as u8,
+			b'1'..=b'7' => {
+				cursor -= 1;
+				parse_radix(input, &mut cursor, 8, 3).unwrap_or(0) as u8
+			},
+			b'x' => parse_radix(input, &mut cursor, 16, 2).ok_or(PrintfError::MissingHex)? as u8,
+			b'u' | b'U' => {
+				let digits = if code == b'u' { 4 } else { 8 };
+				let offset = cursor;
+				let value = parse_radix_exact(input, &mut cursor, 16, digits)
+					.ok_or(PrintfError::InvalidUnicode { offset })?;
+				let character = char::from_u32(value).ok_or(PrintfError::InvalidUnicode { offset })?;
+				return Ok((character.to_string().into_bytes(), cursor, false));
+			},
+			_ => return Ok((vec![b'\\', code], cursor, false)),
+		};
+	Ok((vec![byte], cursor, false))
 }
 
 fn parse_radix(input: &[u8], cursor: &mut usize, radix: u32, limit: usize) -> Option<u32> {
