@@ -294,11 +294,7 @@ function mergeSubscriptionChanges(
 		if (change.key === "Emulation.setEmulatedMedia" && prior?.previous && change.previous) {
 			previous = {
 				...prior.previous,
-				params: mergeSubscriptionParams(
-					change.key,
-					prior.previous.params,
-					change.previous.params,
-				),
+				params: mergeSubscriptionParams(change.key, prior.previous.params, change.previous.params),
 			};
 		}
 		merged.set(change.key, {
