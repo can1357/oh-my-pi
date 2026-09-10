@@ -163,7 +163,9 @@ function mergeSubscriptionFieldSequences(
 ): Record<string, number> | undefined {
 	if (key !== "Emulation.setEmulatedMedia" || !nextParams) return previous;
 	const merged = { ...previous };
-	for (const field of Object.keys(nextParams)) merged[field] = sequence;
+	for (const field of Object.keys(nextParams)) {
+		if (merged[field] === undefined || merged[field] <= sequence) merged[field] = sequence;
+	}
 	return merged;
 }
 
@@ -433,6 +435,8 @@ class TabState {
 	readonly subscriptionClears = new Map<string, Record<string, number>>();
 	/** In-flight root-state commands by subscription key. */
 	readonly pendingSubscriptions = new Map<string, Set<Promise<void>>>();
+	/** Latest successful command completion recorded for each shared-root key. */
+	readonly subscriptionCompletionSequences = new Map<string, number>();
 	/** Preserved per-session preload scripts from Page.addScriptToEvaluateOnNewDocument. */
 	readonly preloadScripts = new Map<string, Map<string, PreservedPreloadScript>>();
 	/** Exact relay-private exceptions used to abort duplicate preload invocations. */
@@ -1259,8 +1263,14 @@ export class RelayBridge {
 				params: msg.params,
 			});
 			const forwardingSessionIsCurrent = this.#forwardingSessionIsCurrent(conn, msg, tabId, realSessionId, pageRef);
-			if (pageRef && msg.sessionId) {
-				this.#recordSubscription(tabId, msg, msg.sessionId, forwardingSessionIsCurrent);
+			if (pageRef && msg.sessionId && pendingSubscription) {
+				this.#recordSubscription(
+					tabId,
+					msg,
+					msg.sessionId,
+					forwardingSessionIsCurrent,
+					pendingSubscription.sequence,
+				);
 			}
 			pendingSubscription?.resolve();
 			if (pageRef && msg.sessionId && !forwardingSessionIsCurrent) {
@@ -1313,10 +1323,11 @@ export class RelayBridge {
 		}
 	}
 
-	#trackPendingSubscription(tabId: number, msg: CdpCommand): { resolve: () => void } | null {
+	#trackPendingSubscription(tabId: number, msg: CdpCommand): { resolve: () => void; sequence: number } | null {
 		const tab = this.#tabs.get(tabId);
 		const key = this.#subscriptionTrackingKey(msg);
 		if (!tab || !key) return null;
+		const sequence = ++this.#subscriptionSeq;
 		const { promise, resolve } = Promise.withResolvers<void>();
 		let pending = tab.pendingSubscriptions.get(key);
 		if (!pending) {
@@ -1325,6 +1336,7 @@ export class RelayBridge {
 		}
 		pending.add(promise);
 		return {
+			sequence,
 			resolve: () => {
 				resolve();
 				pending?.delete(promise);
@@ -1382,9 +1394,27 @@ export class RelayBridge {
 	 * Owner-bound enables/setters, however, should only be journaled while the
 	 * originating pseudo-session is still live.
 	 */
-	#recordSubscription(tabId: number, msg: CdpCommand, ownerSessionId: string, ownerIsCurrent: boolean): void {
+	#recordSubscription(
+		tabId: number,
+		msg: CdpCommand,
+		ownerSessionId: string,
+		ownerIsCurrent: boolean,
+		sequence: number,
+	): void {
 		const tab = this.#tabs.get(tabId);
 		if (!tab) return;
+		const trackingKey = this.#subscriptionTrackingKey(msg);
+		if (!trackingKey) return;
+		// CDP replies may settle out of order even though the commands were sent in
+		// a deterministic order. Keep the journal aligned with dispatch order: once
+		// a later successful command for this shared-root key has been recorded, a
+		// late reply from an older setter must not resurrect stale state. The media
+		// setter is field-mergeable and already resolves ordering per field below.
+		if (trackingKey !== "Emulation.setEmulatedMedia") {
+			const recordedSequence = tab.subscriptionCompletionSequences.get(trackingKey);
+			if (recordedSequence !== undefined && recordedSequence > sequence) return;
+			tab.subscriptionCompletionSequences.set(trackingKey, sequence);
+		}
 		const separator = msg.method.indexOf(".");
 		const domain = separator > 0 ? msg.method.slice(0, separator) : "";
 		const command = separator > 0 ? msg.method.slice(separator + 1) : "";
@@ -1397,7 +1427,7 @@ export class RelayBridge {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
+					sequence,
 				});
 			}
 			return;
@@ -1423,7 +1453,7 @@ export class RelayBridge {
 				method: msg.method,
 				params: msg.params,
 				ownerSessionId,
-				sequence: ++this.#subscriptionSeq,
+				sequence,
 			});
 			return;
 		}
@@ -1461,7 +1491,7 @@ export class RelayBridge {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
+					sequence,
 				});
 				return;
 			}
@@ -1480,7 +1510,7 @@ export class RelayBridge {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
+					sequence,
 				});
 				return;
 			}
@@ -1500,7 +1530,6 @@ export class RelayBridge {
 					return;
 				}
 				const key = subscriptionKey(msg.method);
-				const sequence = ++this.#subscriptionSeq;
 				if (msg.method === "Emulation.setEmulatedMedia") {
 					const clears = subscriptionClearedFields(key, msg.params);
 					if (clears) this.#rememberTabSubscriptionClear(tab, key, clears, sequence);
@@ -1524,7 +1553,7 @@ export class RelayBridge {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
+					sequence,
 				});
 				return;
 			case "Emulation.setCPUThrottlingRate":
@@ -1537,7 +1566,7 @@ export class RelayBridge {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
+					sequence,
 				});
 				return;
 			case "Emulation.setScriptExecutionDisabled":
@@ -1550,7 +1579,7 @@ export class RelayBridge {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
+					sequence,
 				});
 				return;
 			case "Emulation.clearDeviceMetricsOverride":
@@ -1573,7 +1602,7 @@ export class RelayBridge {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
+					sequence,
 				});
 				return;
 			case "Security.setIgnoreCertificateErrors":
@@ -1586,7 +1615,7 @@ export class RelayBridge {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
+					sequence,
 				});
 				return;
 			case "Emulation.setDeviceMetricsOverride":
@@ -1627,7 +1656,7 @@ export class RelayBridge {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
+					sequence,
 				});
 				return;
 			case "Network.clearAcceptedEncodings":
@@ -1648,7 +1677,7 @@ export class RelayBridge {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
+					sequence,
 				});
 				return;
 			default:
@@ -1679,7 +1708,7 @@ export class RelayBridge {
 			method: msg.method,
 			params: msg.params,
 			ownerSessionId,
-			sequence: ++this.#subscriptionSeq,
+			sequence,
 		});
 	}
 
@@ -1695,9 +1724,19 @@ export class RelayBridge {
 			tab.subscriptions.set(key, owners);
 		}
 		const previous = owners.get(ownerSessionId);
+		const params = mergeSubscriptionParams(key, previous?.params, subscription.params);
+		if (key === "Emulation.setEmulatedMedia" && previous?.params && subscription.params) {
+			for (const [field, value] of Object.entries(previous.params)) {
+				const previousSequence = previous.fieldSequences?.[field];
+				if (previousSequence !== undefined && previousSequence > subscription.sequence && params) {
+					params[field] = value;
+				}
+			}
+		}
 		owners.set(ownerSessionId, {
 			...subscription,
-			params: mergeSubscriptionParams(key, previous?.params, subscription.params),
+			sequence: Math.max(previous?.sequence ?? subscription.sequence, subscription.sequence),
+			params,
 			fieldSequences: mergeSubscriptionFieldSequences(
 				key,
 				previous?.fieldSequences,
@@ -1709,7 +1748,9 @@ export class RelayBridge {
 
 	#rememberTabSubscriptionClear(tab: TabState, key: string, clears: Record<string, number>, sequence: number): void {
 		const merged = { ...tab.subscriptionClears.get(key) };
-		for (const field of Object.keys(clears)) merged[field] = sequence;
+		for (const field of Object.keys(clears)) {
+			if (merged[field] === undefined || merged[field] <= sequence) merged[field] = sequence;
+		}
 		tab.subscriptionClears.set(key, merged);
 	}
 

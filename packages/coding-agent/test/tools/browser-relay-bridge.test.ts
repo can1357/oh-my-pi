@@ -3061,6 +3061,52 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")).toHaveLength(1);
 	});
 
+	it("does not replay an older shared-root setter whose reply arrives after a newer reset", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Emulation.setTimezoneOverride",
+				params: { timezoneId: "Asia/Shanghai" },
+			}),
+		);
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Emulation.setTimezoneOverride",
+				params: { timezoneId: "" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 2, "overlapping timezone commands");
+
+		const [setter, reset] = ext.pending("send");
+		ext.markAcked(reset!.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: reset!.id, ok: true, result: {} }));
+		await flush();
+		ext.markAcked(setter!.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: setter!.id, ok: true, result: {} }));
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.pending("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(0);
+	});
+
 	it("replays preserved preload scripts across recovery and remaps their identifiers", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
