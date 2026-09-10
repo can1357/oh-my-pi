@@ -213,6 +213,32 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		return message;
 	}
 
+	/** Digit-free media wording: doesn't match GENERIC_LIMIT_OVERFLOW_PATTERN
+	 *  (no "exceeds the limit of N"), so unlike `mediaBudgetPayloadAssistant`
+	 *  this is classified non-ambiguous (PayloadRejected only, no ContextOverflow). */
+	function explicitMediaNoDigitPayloadAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: "request_too_large: too many images",
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
 	function usageBackedMediaBudgetAssistant(): AssistantMessage {
 		const message = {
 			role: "assistant",
@@ -500,6 +526,75 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		expect(deadEndNotices[0].message).toContain("IS a token-context problem");
 		expect(deadEndNotices[0].message).not.toContain("NOT a token-context problem");
 
+		const checkResults = await Promise.all(
+			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
+		);
+		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
+	it("reports a usage-backed dead end (not 'not a token problem') when a configured method reclaims nothing (#11482)", async () => {
+		// Same usage-backed evidence as above, but this time compaction IS
+		// enabled with a method ("shake") that's statically usable yet reclaims
+		// nothing on this minimal session. The no-progress conversion path must
+		// select the same usage-backed notice the "no compaction available"
+		// path already does, not unconditionally claim "not a token problem".
+		await createSession(200_000, undefined, { extraSettings: { "compaction.methodOrder": ["shake"] } });
+		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+
+		const assistantMsg = usageBackedMediaBudgetAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+
+		const deadEndNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.level === "warning");
+		expect(deadEndNotices.length).toBe(1);
+		expect(deadEndNotices[0].message).toContain("IS a token-context problem");
+		expect(deadEndNotices[0].message).not.toContain("NOT a token-context problem");
+
+		const checkResults = await Promise.all(
+			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
+		);
+		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
+	it("keeps a digit-free explicit media rejection ('too many images') on the terminal path even with no context window and compaction available (#11482)", async () => {
+		// "request_too_large: too many images" matches PAYLOAD_REJECTION_PATTERNS
+		// but none of the token-context or generic-numeric-limit patterns, so it
+		// classifies as non-ambiguous PayloadRejected only. Without positive
+		// media evidence gating, the default (compaction-available) install
+		// would route this into a compaction attempt — including snapcompact,
+		// which can *add* image frames — even though the text already proves
+		// this is a media budget, not message-count bloat.
+		await createSession(null);
+		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+
+		const assistantMsg = explicitMediaNoDigitPayloadAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(startCount()).toBe(0);
+		expect(prepareSpy).not.toHaveBeenCalled();
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
 		const checkResults = await Promise.all(
 			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
 		);

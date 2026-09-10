@@ -175,6 +175,22 @@ function hasUsableCompactionMethod(
 }
 
 /**
+ * Explicit media/image wording in a payload-rejection error (e.g.
+ * `request_too_large: too many images`). `ambiguousPayloadRejection` (dual
+ * `ContextOverflow` + `PayloadRejected`) only catches text that *also* matches
+ * a generic numeric-limit pattern — a digit-free media rejection like this one
+ * sails through as non-ambiguous. That text is still definitive media-budget
+ * evidence: token compaction can't raise a provider's image-count limit, and
+ * some methods (snapcompact) *add* image frames, making it worse. Such
+ * rejections must stay on the terminal payload-dead-end path regardless of
+ * compaction availability (#11482).
+ */
+const PAYLOAD_MEDIA_EVIDENCE_PATTERN = /\b(?:images?|media|vision|frames?|pixels?)\b/i;
+function hasExplicitMediaRejectionEvidence(errorMessage: string | undefined): boolean {
+	return errorMessage !== undefined && PAYLOAD_MEDIA_EVIDENCE_PATTERN.test(errorMessage);
+}
+
+/**
  * User-facing notice for a compaction dead end: maintenance freed too little
  * to retry safely. `remedies` names the recovery actions left on the emitting
  * path — by the time the post-pass dead end fires, the tiered rescue has
@@ -2318,9 +2334,16 @@ export class SessionMaintenance {
 		// when the payload bloat is plain message-count growth that ordinary
 		// compaction would shrink just fine (#11479). Only skip straight to
 		// the honest "can't help" notice here when there is genuinely no
-		// compaction method configured to try.
+		// compaction method configured to try, or the error text itself
+		// already names media/images as the cause (#11482) — that's positive
+		// evidence compaction can't fix, not just an absence of proof.
+		const explicitMediaRejection =
+			payloadRejection && hasExplicitMediaRejectionEvidence(assistantMessage.errorMessage);
 		const unknownWindowDeadEnd =
-			payloadRejection && !ambiguousPayloadRejection && contextWindow <= 0 && !compactionAvailable;
+			payloadRejection &&
+			!ambiguousPayloadRejection &&
+			contextWindow <= 0 &&
+			(explicitMediaRejection || !compactionAvailable);
 		if (unknownWindowDeadEnd || trustedPayloadRejection) {
 			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
 			this.#host.emitNotice("warning", payloadRejectionNotice(storedTokens, contextWindow), "compaction");
@@ -2376,7 +2399,20 @@ export class SessionMaintenance {
 					compactionResult.automaticContinuationBlocked !== true &&
 					compactionResult.historyRewritten !== true
 				) {
-					this.#host.emitNotice("warning", payloadRejectionNotice(storedTokens, contextWindow), "compaction");
+					// Same usage-backed/byte-shaped notice selection as the sibling
+					// "no compaction available" dead end below: a payload rejection
+					// with provider-reported usage above the window IS a genuine
+					// token-context problem even though compaction (attempted here,
+					// unsuccessfully) couldn't resolve it — say so accurately instead
+					// of always claiming "not a token problem" (#11482).
+					const usageBackedOverflow = AIError.isUsageBackedContextOverflow(assistantMessage, contextWindow);
+					this.#host.emitNotice(
+						"warning",
+						usageBackedOverflow
+							? usageOverflowDeadEndNotice(reportedInputTokens, contextWindow)
+							: payloadRejectionNotice(storedTokens, contextWindow),
+						"compaction",
+					);
 					logger.debug("Payload-shaped 413 compaction attempt made no progress; blocking automatic continuation", {
 						provider: assistantMessage.provider,
 						model: assistantMessage.model,
