@@ -82,7 +82,7 @@ Flake consumers can use `packages.<system>.omp`, `overlays.default`, `nixosModul
 **Windows (PowerShell)**
 
 ```powershell
-irm https://omp.sh/install.ps1 | iex
+powershell -c "irm https://omp.sh/install.ps1|iex"
 ```
 
 **Pinned versions (mise)**
