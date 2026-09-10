@@ -822,7 +822,10 @@ async function syncPhase2Artifacts(memoryRoot: string, outputs: Stage1OutputRow[
 		await Bun.write(path.join(summariesDir, filename), `${body.trim()}\n`);
 	}
 
-	const currentFiles = await fs.readdir(summariesDir).catch(() => [] as string[]);
+	const currentFiles = await fs.readdir(summariesDir).catch(error => {
+		if (!isEnoent(error)) logger.warn("Failed to list rollout summaries", { summariesDir, error });
+		return [] as string[];
+	});
 	for (const file of currentFiles) {
 		if (!file.endsWith(".md")) continue;
 		if (keepFiles.has(file)) continue;
@@ -850,10 +853,12 @@ function buildRawMemoriesMarkdown(outputs: Stage1OutputRow[]): string {
 	});
 	return `# Raw Memories\n\n${blocks.join("\n")}`;
 }
-
 async function readRolloutSummaries(memoryRoot: string): Promise<string> {
 	const summariesDir = path.join(memoryRoot, "rollout_summaries");
-	const names = await fs.readdir(summariesDir).catch(() => [] as string[]);
+	const names = await fs.readdir(summariesDir).catch(error => {
+		if (!isEnoent(error)) logger.warn("Failed to read rollout summaries", { summariesDir, error });
+		return [] as string[];
+	});
 	const summaryNames = names.filter(name => name.endsWith(".md")).sort((a, b) => a.localeCompare(b));
 	if (summaryNames.length === 0) return "No rollout summaries yet.";
 

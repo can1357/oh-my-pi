@@ -25,23 +25,20 @@ describe("pruneEmptyDirectories child-scan failure", () => {
 		await removeWithRetries(tempDir);
 	});
 
-
 	test("a failed child re-read keeps the populated subtree and never removes it", async () => {
 		const realReaddir = fs.readdir.bind(fs);
 		let childReads = 0;
 		let injected = false;
-		vi.spyOn(fs, "readdir").mockImplementation(
-			(async (target: fsSync.PathLike, options?: object) => {
-				// Fail only the post-prune re-read (the second read of the child):
-				// the recursion's own entry read must succeed so the injected
-				// failure lands exactly where the deletion decision is made.
-				if (target === child && ++childReads === 2) {
-					injected = true;
-					throw Object.assign(new Error("injected child scan failure"), { code: "EMFILE" });
-				}
-				return realReaddir(target as string, options as { withFileTypes: true });
-			}) as typeof fs.readdir,
-		);
+		vi.spyOn(fs, "readdir").mockImplementation((async (target: fsSync.PathLike, options?: object) => {
+			// Fail only the post-prune re-read (the second read of the child):
+			// the recursion's own entry read must succeed so the injected
+			// failure lands exactly where the deletion decision is made.
+			if (target === child && ++childReads === 2) {
+				injected = true;
+				throw Object.assign(new Error("injected child scan failure"), { code: "EMFILE" });
+			}
+			return realReaddir(target as string, options as { withFileTypes: true });
+		}) as typeof fs.readdir);
 		const realRm = fs.rm.bind(fs);
 		const removed: string[] = [];
 		vi.spyOn(fs, "rm").mockImplementation(async (target, options) => {
