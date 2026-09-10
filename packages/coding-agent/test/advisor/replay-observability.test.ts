@@ -142,8 +142,7 @@ describe("advisor context reset observability", () => {
 			expect(
 				events.some(
 					event =>
-						event.message === "advisor context reset" &&
-						hasResetReason(event.details, "quarantine-latched"),
+						event.message === "advisor context reset" && hasResetReason(event.details, "quarantine-latched"),
 				),
 			).toBe(true);
 			expect(agentResetCalls).toBe(2);
