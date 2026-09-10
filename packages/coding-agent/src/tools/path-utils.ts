@@ -614,7 +614,7 @@ export function resolveToCwd(filePath: string, cwd: string): string {
 		return cwd;
 	}
 	if (path.isAbsolute(expanded)) {
-		return expanded;
+		return path.resolve(expanded);
 	}
 	return path.resolve(cwd, expanded);
 }

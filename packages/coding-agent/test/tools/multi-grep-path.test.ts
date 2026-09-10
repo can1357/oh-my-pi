@@ -171,6 +171,24 @@ describe.skipIf(isWindows)("resolveExplicitSearchPaths shared non-root ancestor"
 		expect(resolved.basePath).toBe(repo);
 	});
 
+	it("collapses the walk when the requested ancestor is a non-canonical absolute path", async () => {
+		// Regression for #11584: resolveToCwd returned absolute inputs verbatim
+		// while findCommonBasePath canonicalizes via path.resolve, so the
+		// commonIsRequestedScope identity check never held for an absolute
+		// ancestor — on Windows for every absolute spelling (`/` vs `\`), on
+		// POSIX for a non-canonical one (trailing separator or embedded `..`).
+		// The false fan-out made ast_edit double-apply the rewrite to the nested
+		// file. A trailing separator and an embedded `..` are distinct shapes a
+		// partial fix could normalize inconsistently, so both must collapse.
+		for (const ancestor of [`${repo}${path.sep}`, `${repo}${path.sep}src${path.sep}..`]) {
+			const resolved = await resolveExplicitSearchPaths([ancestor, "src/a.ts"], repo);
+			expect(resolved).toBeDefined();
+			if (!resolved) throw new Error("expected resolveExplicitSearchPaths to resolve");
+			expect(resolved.targets).toBeUndefined();
+			expect(resolved.basePath).toBe(repo);
+		}
+	});
+
 	it("fans out nested plain files when the caller opts in via fanOutFileItems", async () => {
 		const resolved = await resolveExplicitSearchPaths([".", "src/a.ts"], repo, undefined, true);
 		expect(resolved).toBeDefined();
