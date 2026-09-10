@@ -1175,6 +1175,15 @@ function buildBraceUnion(patterns: string[]): string | undefined {
 	return `{${uniquePatterns.join(",")}}`;
 }
 
+// Comparison key for deciding whether two absolute paths denote the same search
+// scope. A Windows drive letter is case-insensitive by OS guarantee, so `c:` and
+// `C:` unify; every other component is compared exactly. Blanket-lowercasing
+// would conflate distinct entries under a per-directory case-sensitive dir
+// (FILE_CASE_SENSITIVE_DIR / WSL), collapsing `C:\repo\src` with `C:\repo\Src`.
+function pathComparisonKey(component: string): string {
+	return process.platform === "win32" ? component.replace(/^[a-zA-Z]:/, drive => drive.toLowerCase()) : component;
+}
+
 function findCommonBasePath(paths: string[]): string {
 	if (paths.length === 0) return ".";
 	let commonParts = path.resolve(paths[0]).split(path.sep);
@@ -1182,7 +1191,10 @@ function findCommonBasePath(paths: string[]): string {
 		const candidateParts = path.resolve(candidatePath).split(path.sep);
 		let sharedCount = 0;
 		const maxShared = Math.min(commonParts.length, candidateParts.length);
-		while (sharedCount < maxShared && commonParts[sharedCount] === candidateParts[sharedCount]) {
+		while (
+			sharedCount < maxShared &&
+			pathComparisonKey(commonParts[sharedCount]!) === pathComparisonKey(candidateParts[sharedCount]!)
+		) {
 			sharedCount += 1;
 		}
 		commonParts = commonParts.slice(0, sharedCount);
@@ -1247,7 +1259,16 @@ async function resolveSearchPathItems(
 	// disjoint trees → `/`), a collapsed walk traverses every unrelated sibling
 	// under it — fan out into per-item targets so each scan stays bounded to a
 	// requested path.
-	const commonIsRequestedScope = parsedItems.some(item => item.absoluteBasePath === commonBasePath);
+	// resolveToCwd returns absolute inputs verbatim (so the kernel, not a lexical
+	// pass, resolves `..` across symlinks for real filesystem operations), while
+	// findCommonBasePath and path.relative compare lexically via path.resolve. To
+	// decide overlap on the same footing, canonicalize both sides here — this key
+	// never reaches the filesystem, so lexical `..`/separator collapse is safe.
+	// pathComparisonKey folds only the Windows drive letter, so a differently
+	// cased drive cannot force a fan-out while distinct components stay distinct.
+	const commonIsRequestedScope = parsedItems.some(
+		item => pathComparisonKey(path.resolve(item.absoluteBasePath)) === pathComparisonKey(commonBasePath),
+	);
 	// Walkers prune `.git` unconditionally and honor gitignore, so a plain-file
 	// item folded into a directory walk's glob union (`.` + `.git/config`) can
 	// silently never match. Callers that dedupe overlapping results opt in via
