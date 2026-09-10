@@ -242,9 +242,12 @@ function restoreOrphanSweepDeadline(storedDeadline, isCurrent) {
     return;
   return typeof storedDeadline === "number" && Number.isFinite(storedDeadline) ? storedDeadline : null;
 }
-function seedOrphanSweepDeadline(currentDeadlineMs, scheduledTime, generation) {
+function seedOrphanSweepDeadline(currentDeadlineMs, scheduledTime, generation, initializedRelayIntervened = false) {
   if (currentDeadlineMs !== null) {
     return { deadlineMs: currentDeadlineMs, generation };
+  }
+  if (initializedRelayIntervened) {
+    return { deadlineMs: null, generation };
   }
   return { deadlineMs: scheduledTime, generation: generation + 1 };
 }
@@ -316,6 +319,7 @@ var ORPHAN_SWEEP_ALARM = "omp-relay-orphan-sweep";
 var ORPHAN_SWEEP_DEADLINE_KEY = "ompOrphanSweepDeadlineMs";
 var ws = null;
 var helloDeliveredSocket = null;
+var initializedRelayClearedOrphanSweep = false;
 var reconnectDelay = RECONNECT_MIN_MS;
 var pingTimer = null;
 var pendingAttaches = new Set;
@@ -483,6 +487,7 @@ async function setOrphanSweepDeadline(deadlineMs) {
   if (deadlineMs === null) {
     alarmUpdate = chrome.alarms.clear(ORPHAN_SWEEP_ALARM);
   } else {
+    initializedRelayClearedOrphanSweep = false;
     chrome.alarms.create(ORPHAN_SWEEP_ALARM, {
       delayInMinutes: orphanSweepAlarmDelayMinutes(deadlineMs, Date.now())
     });
@@ -970,6 +975,7 @@ async function connect() {
     refreshHello(() => {
       helloDeliveredSocket = socket;
       attachmentGuard.onConnected();
+      initializedRelayClearedOrphanSweep = true;
       setOrphanSweepDeadline(null);
     });
     clearInterval(pingTimer ?? undefined);
@@ -1078,10 +1084,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     return;
   }
   if (alarm.name === ORPHAN_SWEEP_ALARM) {
-    const seeded = seedOrphanSweepDeadline(orphanSweepDeadlineMs, alarm.scheduledTime, orphanSweepDeadlineGeneration);
+    const seeded = seedOrphanSweepDeadline(orphanSweepDeadlineMs, alarm.scheduledTime, orphanSweepDeadlineGeneration, initializedRelayClearedOrphanSweep);
     orphanSweepDeadlineMs = seeded.deadlineMs;
     orphanSweepDeadlineGeneration = seeded.generation;
-    runAfterStartupReconciliation(ensureStartupReconciled, () => maybeRunOrphanSweep(alarm.scheduledTime)).catch(() => {});
+    runAfterStartupReconciliation(ensureStartupReconciled, () => maybeRunOrphanSweep(seeded.deadlineMs === null ? undefined : alarm.scheduledTime)).catch(() => {});
   }
 });
 chrome.storage.onChanged.addListener((_changes, areaName) => {
