@@ -1,3 +1,4 @@
+import { requestNeeds } from "./capabilities";
 /**
  * omp auth-gateway HTTP server.
  *
@@ -130,7 +131,7 @@ export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 // drift on accepted inputs (e.g. empty hostname, IPv6 brackets).
 
 /** Native Gemini paths carry the model in the URL (`/v1beta/models/{model}:generateContent`). */
-const GEMINI_MODEL_PATH = /^\/v1beta\/models\/([^/]+):(stream)?generateContent$/;
+const GEMINI_MODEL_PATH = /^\/v1beta\/models\/([^/]+):(streamGenerateContent|generateContent)$/;
 
 export const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 	"/v1/chat/completions": { module: openaiChat, label: "openai-chat" },
@@ -427,16 +428,7 @@ function resolveFirstAvailableTarget(
 		attemptedTargets.add(current);
 		const next = decideAttempt({
 			route: compiled,
-			state: conductorExecutionState(
-				compiled,
-				attemptedTargets,
-				new Set<number>(),
-				0,
-				0,
-				current,
-				false,
-				"probing",
-			),
+			state: conductorExecutionState(compiled, attemptedTargets, new Set<number>(), 0, 0, current, false, "probing"),
 			commitState: "probing",
 		});
 		if (next.type !== "dispatch") return { target: current, model: undefined };
@@ -663,35 +655,63 @@ function mirrorRequestAbort(req: Request): AbortController {
 
 // (handlePassthrough removed — see note above.)
 
-function releaseTurnOnStreamEnd(
+export interface GatewayStreamSettlement {
+	ok: boolean;
+	message?: AssistantMessage;
+	error?: unknown;
+}
+
+export function releaseTurnOnStreamEnd(
 	stream: ReadableStream<Uint8Array>,
 	storage: AuthStorage,
 	requestId: string,
 	commitGate?: StreamCommitGate,
+	settled?: Promise<AssistantMessage>,
+	onSettled?: (outcome: GatewayStreamSettlement) => void | Promise<void>,
 ): ReadableStream<Uint8Array> {
 	const reader = stream.getReader();
 	let released = false;
-	const release = (): void => {
+	const release = async (completed: boolean, error?: unknown): Promise<void> => {
 		if (released) return;
 		released = true;
-		if (commitGate && (commitGate.state === "committed" || commitGate.state === "terminated")) {
+		let outcome: GatewayStreamSettlement = { ok: completed, error };
+		if (completed && settled) {
+			try {
+				const message = await settled;
+				outcome = { ok: message.stopReason !== "error" && message.stopReason !== "aborted", message };
+			} catch (failure) {
+				outcome = { ok: false, error: failure };
+			}
+		}
+		if (outcome.ok && (settled !== undefined || commitGate?.state === "committed")) {
 			storage.settleQuotaProbeSuccess(requestId);
+		} else {
+			storage.clearQuotaProbe(requestId);
 		}
 		storage.releaseTurnReservation(requestId);
+		await onSettled?.(outcome);
 	};
 	return new ReadableStream({
 		async pull(controller) {
-			const { done, value } = await reader.read();
-			if (done) {
-				release();
-				controller.close();
-				return;
+			try {
+				const { done, value } = await reader.read();
+				if (done) {
+					await release(true);
+					controller.close();
+					return;
+				}
+				controller.enqueue(value);
+			} catch (error) {
+				await release(false, error);
+				controller.error(error);
 			}
-			controller.enqueue(value);
 		},
-		cancel(reason) {
-			release();
-			return reader.cancel(reason);
+		async cancel(reason) {
+			try {
+				await reader.cancel(reason);
+			} finally {
+				await release(false, reason);
+			}
 		},
 	});
 }
@@ -734,12 +754,11 @@ function rememberPromptCacheHit(
 	cacheStore: PromptCacheAffinityStore,
 	body: unknown,
 	headers: Headers,
-	requestId: string,
 	target: string,
 	model: Model<Api>,
 	sessionId: string,
 ): void {
-	cacheStore.remember(resolvePromptCacheKey(body, headers) ?? requestId, {
+	cacheStore.remember(resolvePromptCacheKey(body, headers) ?? sessionId, {
 		provider: model.provider,
 		// Route-scoped id (not the bare model id): the preference lookup
 		// feeds decideAttempt, which only accepts ids in route.targets.
@@ -749,7 +768,7 @@ function rememberPromptCacheHit(
 }
 
 async function handleFormatEndpoint(
-	route: { module: FormatModule; label: string },
+	route: { module: FormatModule; label: string; pathModel?: string; pathStream?: boolean },
 	bootOpts: AuthGatewayBootOptions,
 	req: Request,
 	peer: string,
@@ -773,6 +792,14 @@ async function handleFormatEndpoint(
 	// All three supported wire formats put the model id on a top-level `model`
 	// field. Read it without running the full strict schema so the route can
 	// produce a coherent error envelope when the model id is missing.
+	if (route.pathModel !== undefined && isRecord(body)) {
+		body = {
+			...body,
+			model: typeof body.model === "string" && body.model.length > 0 ? body.model : route.pathModel,
+			stream: typeof body.stream === "boolean" ? body.stream : route.pathStream,
+		};
+	}
+
 	const modelId =
 		typeof body === "object" && body !== null && typeof (body as { model?: unknown }).model === "string"
 			? (body as { model: string }).model
@@ -780,7 +807,17 @@ async function handleFormatEndpoint(
 	if (!modelId) {
 		return route.module.formatError(400, "invalid_request_error", "Missing top-level `model` field");
 	}
-	const compiled = (bootOpts.routeRegistry ?? new RouteRegistry(bootOpts.resolveModel)).resolve(modelId);
+	let parsed: ParsedFormatRequest;
+	try {
+		parsed = route.module.parseRequest(body, req.headers);
+	} catch (error) {
+		if (controller.signal.aborted) return clientClosedResponse(route);
+		const message = error instanceof Error ? error.message : String(error);
+		return route.module.formatError(400, "invalid_request_error", message);
+	}
+	const compiled = (bootOpts.routeRegistry ?? new RouteRegistry(bootOpts.resolveModel)).resolve(modelId, {
+		vision: requestNeeds(parsed.context).vision === true,
+	});
 	if (!compiled) {
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
@@ -789,7 +826,12 @@ async function handleFormatEndpoint(
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
 	const attemptedTargets = new Set<string>();
-	const initial = resolveFirstAvailableTarget(compiled, id => bootOpts.resolveModel(id), firstTarget, attemptedTargets);
+	const initial = resolveFirstAvailableTarget(
+		compiled,
+		id => bootOpts.resolveModel(id),
+		firstTarget,
+		attemptedTargets,
+	);
 	let currentTarget = initial.target;
 	if (initial.model === undefined) {
 		return unknownModelResponse(route.module.formatError, currentTarget);
@@ -803,14 +845,7 @@ async function handleFormatEndpoint(
 	// this id; without it `getApiKey` would re-roundrobin every request
 	// and `markUsageLimitReached` would no-op (it can only mark the
 	// credential it last handed out to that session).
-	let parsed: ParsedFormatRequest;
-	try {
-		parsed = route.module.parseRequest(body, req.headers);
-	} catch (error) {
-		if (controller.signal.aborted) return clientClosedResponse(route);
-		const message = error instanceof Error ? error.message : String(error);
-		return route.module.formatError(400, "invalid_request_error", message);
-	}
+
 	await runHook(bootOpts.hooks?.beforeRequest, {
 		requestId,
 		routeId: compiled.id,
@@ -858,7 +893,7 @@ async function handleFormatEndpoint(
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	const commitGate = new StreamCommitGate();
 	const formatError = route.module.formatError;
-	const fingerprint = resolvePromptCacheKey(body, req.headers) ?? requestId;
+	const fingerprint = resolvePromptCacheKey(body, req.headers) ?? sessionId;
 	const attemptedCredentials = new Set<number>();
 	let retryCount = 0;
 	let fallbackCount = 0;
@@ -1133,7 +1168,7 @@ async function handleFormatEndpoint(
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
 					health.recordSuccess(model.provider, model.id);
-					rememberPromptCacheHit(cacheStore, body, req.headers, requestId, currentTarget, model, sessionId);
+					rememberPromptCacheHit(cacheStore, body, req.headers, currentTarget, model, sessionId);
 					await runHook(bootOpts.hooks?.afterRequest, {
 						requestId,
 						routeId: compiled.id,
@@ -1257,24 +1292,34 @@ async function handleFormatEndpoint(
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return clientClosedResponse(route);
 		}
-		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
-		health.recordSuccess(model.provider, model.id);
-		// Remember affinity only once the settled message proves the stream
-		// completed: a commit followed by an upstream error must not make the
-		// failing model preferred on the next matching request.
-		void settled
-			.then(message => {
-				if (message.stopReason === "error" || message.stopReason === "aborted") return;
-				if (message.errorClassificationMessage ?? message.errorMessage) return;
-				rememberPromptCacheHit(cacheStore, body, req.headers, requestId, currentTarget, model, sessionId);
-			})
-			.catch(() => {});
-		await runHook(bootOpts.hooks?.afterRequest, {
+		sseStream = releaseTurnOnStreamEnd(
+			held.stream,
+			bootOpts.storage,
 			requestId,
-			routeId: compiled.id,
-			generation: compiled.generation,
-			ok: true,
-		});
+			commitGate,
+			settled,
+			async outcome => {
+				if (outcome.ok) {
+					health.recordSuccess(model.provider, model.id);
+					rememberPromptCacheHit(cacheStore, body, req.headers, currentTarget, model, sessionId);
+				} else if (!controller.signal.aborted && outcome.message?.stopReason !== "aborted") {
+					recordProviderHealthFailure(
+						health,
+						model,
+						classifyGatewayError(
+							outcome.message?.errorClassificationMessage ?? outcome.message?.errorMessage ?? outcome.error,
+						),
+					);
+				}
+
+				await runHook(bootOpts.hooks?.afterRequest, {
+					requestId,
+					routeId: compiled.id,
+					generation: compiled.generation,
+					ok: outcome.ok,
+				});
+			},
+		);
 		return new Response(sseStream, {
 			status: 200,
 			headers: {
@@ -1339,7 +1384,9 @@ async function handlePiNative(
 		return piNative.formatError(400, "invalid_request_error", message);
 	}
 
-	const compiled = (bootOpts.routeRegistry ?? new RouteRegistry(bootOpts.resolveModel)).resolve(parsed.modelId);
+	const compiled = (bootOpts.routeRegistry ?? new RouteRegistry(bootOpts.resolveModel)).resolve(parsed.modelId, {
+		vision: requestNeeds(parsed.context).vision === true,
+	});
 	if (!compiled) {
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
@@ -1348,7 +1395,12 @@ async function handlePiNative(
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
 	const attemptedTargets = new Set<string>();
-	const initial = resolveFirstAvailableTarget(compiled, id => bootOpts.resolveModel(id), firstTarget, attemptedTargets);
+	const initial = resolveFirstAvailableTarget(
+		compiled,
+		id => bootOpts.resolveModel(id),
+		firstTarget,
+		attemptedTargets,
+	);
 	let currentTarget = initial.target;
 	if (initial.model === undefined) {
 		return unknownModelResponse(piNative.formatError, currentTarget);
@@ -1366,7 +1418,7 @@ async function handlePiNative(
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	const commitGate = new StreamCommitGate();
 	const formatError = piNative.formatError;
-	const fingerprint = resolvePromptCacheKey(body, req.headers) ?? requestId;
+	const fingerprint = resolvePromptCacheKey(body, req.headers) ?? sessionId;
 	const attemptedCredentials = new Set<number>();
 	let retryCount = 0;
 	let fallbackCount = 0;
@@ -1658,7 +1710,7 @@ async function handlePiNative(
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
 					health.recordSuccess(model.provider, model.id);
-					rememberPromptCacheHit(cacheStore, body, req.headers, requestId, currentTarget, model, sessionId);
+					rememberPromptCacheHit(cacheStore, body, req.headers, currentTarget, model, sessionId);
 					return json(200, { message }, gatewayResponseHeaders(model, { requestId, message, startedAt }));
 				} catch (error) {
 					if (controller.signal.aborted) return aborted();
@@ -1769,18 +1821,27 @@ async function handlePiNative(
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return aborted();
 		}
-		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
-		health.recordSuccess(model.provider, model.id);
-		// Remember affinity only once the settled message proves the stream
-		// completed: a commit followed by an upstream error must not make the
-		// failing model preferred on the next matching request.
-		void settled
-			.then(message => {
-				if (message.stopReason === "error" || message.stopReason === "aborted") return;
-				if (message.errorClassificationMessage ?? message.errorMessage) return;
-				rememberPromptCacheHit(cacheStore, body, req.headers, requestId, currentTarget, model, sessionId);
-			})
-			.catch(() => {});
+		sseStream = releaseTurnOnStreamEnd(
+			held.stream,
+			bootOpts.storage,
+			requestId,
+			commitGate,
+			settled,
+			async outcome => {
+				if (outcome.ok) {
+					health.recordSuccess(model.provider, model.id);
+					rememberPromptCacheHit(cacheStore, body, req.headers, currentTarget, model, sessionId);
+				} else if (!controller.signal.aborted && outcome.message?.stopReason !== "aborted") {
+					recordProviderHealthFailure(
+						health,
+						model,
+						classifyGatewayError(
+							outcome.message?.errorClassificationMessage ?? outcome.message?.errorMessage ?? outcome.error,
+						),
+					);
+				}
+			},
+		);
 		return new Response(sseStream, {
 			status: 200,
 			headers: {
@@ -2110,7 +2171,7 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 						} catch {
 							return withCors(json(400, { error: "invalid model path encoding" }), req);
 						}
-						const streaming = geminiPath[2] !== undefined;
+						const streaming = geminiPath[2] === "streamGenerateContent";
 						const module = {
 							...geminiV1beta,
 							parseRequest: (body: unknown, headers?: Headers) => {
@@ -2122,7 +2183,14 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 							},
 						};
 						return withCors(
-							await handleFormatEndpoint({ module, label: "gemini-v1beta" }, boot, req, peer, health, cacheStore),
+							await handleFormatEndpoint(
+								{ module, label: "gemini-v1beta", pathModel, pathStream: streaming },
+								boot,
+								req,
+								peer,
+								health,
+								cacheStore,
+							),
 							req,
 						);
 					}

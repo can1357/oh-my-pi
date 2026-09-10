@@ -122,9 +122,9 @@ export class RouteRegistry {
 		return true;
 	}
 
-	resolve(modelId: string): CompiledRoute | undefined {
+	resolve(modelId: string, facts?: RouteRequestFacts): CompiledRoute | undefined {
 		const virtual = this.#routes.get(modelId);
-		if (virtual) return virtual;
+		if (virtual) return facts ? selectRouteForRequest(virtual, facts) : virtual;
 		const model = this.#resolveModel(modelId);
 		if (!model) return undefined;
 		const id = modelId.includes("/") ? modelId : model.id;
@@ -137,7 +137,6 @@ export class RouteRegistry {
 		};
 	}
 }
-
 
 /**
  * Choose the first dispatch target for a compiled route. Weighted-balance
@@ -163,6 +162,26 @@ export function pickInitialRouteTarget(compiled: CompiledRoute, salt = 0): strin
 	}
 	const idx = Math.abs(salt) % compiled.targets.length;
 	return compiled.targets[idx];
+}
+
+export interface RouteRequestFacts {
+	vision: boolean;
+}
+
+/** Conditional children are the matching branch and an optional alternative. */
+export function selectRouteForRequest(route: CompiledRoute, facts: RouteRequestFacts): CompiledRoute {
+	const choose = (node: RouteNode): RouteNode => {
+		if (node.type === "conditional") {
+			if (node.children.length > 2)
+				throw new AIError.ValidationError("Conditional routes accept a matching branch and optional alternative");
+			const matches = node.when.vision === undefined || node.when.vision === facts.vision;
+			const selected = node.children[matches ? 0 : 1];
+			return selected ? choose(selected) : { type: "balance", strategy: "rr", children: [] };
+		}
+		if (node.type === "target" || node.type === "route-ref") return node;
+		return { ...node, children: node.children.map(choose) };
+	};
+	return compileDefinition({ ...route, root: choose(route.root) }, () => undefined, route.generation);
 }
 
 function compileDefinition(

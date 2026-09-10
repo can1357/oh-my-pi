@@ -65,7 +65,9 @@ describe("auth-gateway gemini-v1beta: parseRequest", () => {
 		});
 		expect(parsed.modelId).toBe("gemini-2.0-flash");
 		expect(parsed.stream).toBe(true);
-		expect(parsed.context.messages).toEqual([expect.objectContaining({ role: "user", content: "hello gemini" })]);
+		expect(parsed.context.messages).toEqual([
+			expect.objectContaining({ role: "user", content: [{ type: "text", text: "hello gemini" }] }),
+		]);
 	});
 
 	it("throws on empty or non-object bodies", () => {
@@ -102,7 +104,9 @@ describe("auth-gateway gemini-v1beta: parseRequest", () => {
 			contents: [{ role: "user", parts: [{ text: "path model" }] }],
 		});
 		expect(parsed.modelId).toBe("");
-		expect(parsed.context.messages[0]).toEqual(expect.objectContaining({ content: "path model" }));
+		expect(parsed.context.messages[0]).toEqual(
+			expect.objectContaining({ content: [{ type: "text", text: "path model" }] }),
+		);
 	});
 
 	it("joins multiple text parts and maps model role to assistant", () => {
@@ -116,7 +120,9 @@ describe("auth-gateway gemini-v1beta: parseRequest", () => {
 			generationConfig: { temperature: 0.5, maxOutputTokens: 32, topK: 8 },
 		});
 		expect(parsed.context.systemPrompt).toEqual(["sys"]);
-		expect(parsed.context.messages[0]).toEqual(expect.objectContaining({ role: "user", content: "ab" }));
+		expect(parsed.context.messages[0]).toEqual(
+			expect.objectContaining({ role: "user", content: [{ type: "text", text: "ab" }] }),
+		);
 		expect(parsed.context.messages[1]?.role).toBe("assistant");
 		expect(parsed.options.temperature).toBe(0.5);
 		expect(parsed.options.maxOutputTokens).toBe(32);
@@ -169,4 +175,93 @@ describe("auth-gateway gemini-v1beta: formatError", () => {
 			error: { message: "bad request", status: "INVALID_ARGUMENT", code: 400 },
 		});
 	});
+});
+
+it("emits functionCall parts for toolCall content blocks", () => {
+	const message = {
+		role: "assistant",
+		content: [
+			{ type: "text", text: "calling" },
+			{ type: "toolCall", id: "call_1", name: "lookup", arguments: { q: "x" } },
+		],
+		api: "google-generative-ai",
+		provider: "google",
+		model: "gemini-2.5-flash",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "toolUse",
+		timestamp: 0,
+	} as AssistantMessage;
+	const encoded = encodeResponse(message, "gemini-2.5-flash");
+	const parts = (encoded.candidates as Array<{ content: { parts: unknown[] } }>)[0]!.content.parts;
+	expect(parts).toEqual([{ text: "calling" }, { functionCall: { name: "lookup", args: { q: "x" }, id: "call_1" } }]);
+});
+
+it("emits a streamed function call only once with complete arguments", async () => {
+	const call = { type: "toolCall" as const, id: "call", name: "lookup", arguments: { q: "complete" } };
+	const final: AssistantMessage = { ...emptyAssistant(), content: [call], stopReason: "toolUse" };
+	const partial: AssistantMessage = { ...emptyAssistant(), content: [{ ...call, arguments: {} }] };
+	const events: AssistantMessageEvent[] = [
+		{ type: "toolcall_start", contentIndex: 0, partial },
+		{ type: "toolcall_delta", contentIndex: 0, delta: '{"q":', partial },
+		{ type: "toolcall_end", contentIndex: 0, toolCall: call, partial: final },
+		{ type: "done", reason: "toolUse", message: final },
+	];
+	const frames = await collectStream(encodeStream(makeEventStream(events, final), "gemini-test"));
+	const calls = frames
+		.map(frame => JSON.parse(frame.slice(6)))
+		.flatMap(frame => frame.candidates ?? [])
+		.flatMap((candidate: { content: { parts: { functionCall?: unknown }[] } }) => candidate.content.parts)
+		.flatMap((part: { functionCall?: unknown }) => (part.functionCall ? [part.functionCall] : []));
+	expect(calls).toEqual([{ name: "lookup", id: "call", args: { q: "complete" } }]);
+});
+
+it("emits a completed function call when the provider sends only its terminal message", async () => {
+	const final: AssistantMessage = {
+		...emptyAssistant(),
+		content: [{ type: "toolCall", id: "terminal", name: "lookup", arguments: { q: "done" } }],
+		stopReason: "toolUse",
+	};
+	const frames = await collectStream(
+		encodeStream(makeEventStream([{ type: "done", reason: "toolUse", message: final }], final), "gemini-test"),
+	);
+	expect(frames.map(parseSseData)).toContainEqual(
+		expect.objectContaining({
+			candidates: [
+				expect.objectContaining({
+					content: {
+						role: "model",
+						parts: [{ functionCall: { name: "lookup", id: "terminal", args: { q: "done" } } }],
+					},
+				}),
+			],
+		}),
+	);
+});
+
+it("preserves image input and native function declaration schemas", () => {
+	const schema = { type: "object", properties: { query: { type: "string" } }, required: ["query"] };
+	const parsed = parseRequest({
+		model: "gemini-test",
+		contents: [
+			{ role: "user", parts: [{ text: "describe" }, { inlineData: { mimeType: "image/png", data: "aGVsbG8=" } }] },
+		],
+		tools: [{ functionDeclarations: [{ name: "lookup", parametersJsonSchema: schema }] }],
+	});
+	expect(parsed.context.messages[0]).toEqual(
+		expect.objectContaining({
+			role: "user",
+			content: [
+				{ type: "text", text: "describe" },
+				{ type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+			],
+		}),
+	);
+	expect(parsed.context.tools).toEqual([{ name: "lookup", description: "", parameters: schema }]);
 });

@@ -357,6 +357,29 @@ function applyOpenAiSampling(options: ParsedRequest["options"], body: Record<str
 // parseRequest
 // ---------------------------------------------------------------------------
 
+function buildToolsFromGeminiBody(tools: unknown): Context["tools"] | undefined {
+	if (!Array.isArray(tools) || tools.length === 0) return undefined;
+	const out: NonNullable<Context["tools"]> = [];
+	for (const entry of tools) {
+		if (!isRecord(entry)) continue;
+		const decls = entry.functionDeclarations ?? entry.function_declarations;
+		if (!Array.isArray(decls)) continue;
+		for (const decl of decls) {
+			if (!isRecord(decl) || typeof decl.name !== "string" || decl.name.length === 0) continue;
+			const parameters = (decl.parametersJsonSchema ??
+				decl.parameters_json_schema ??
+				decl.parameters ??
+				{}) as NonNullable<Context["tools"]>[number]["parameters"];
+			out.push({
+				name: decl.name,
+				description: typeof decl.description === "string" ? decl.description : "",
+				parameters,
+			});
+		}
+	}
+	return out.length > 0 ? out : undefined;
+}
+
 export function parseRequest(body: unknown, _headers?: Headers): ParsedRequest {
 	if (!isRecord(body)) {
 		throw new AIError.ValidationError("gemini-v1beta: request body must be a JSON object");
@@ -392,7 +415,9 @@ export function parseRequest(body: unknown, _headers?: Headers): ParsedRequest {
 	if (isRecord(generationConfig)) applyGenerationConfig(options, generationConfig);
 	applyOpenAiSampling(options, body);
 
+	const tools = buildToolsFromGeminiBody(body.tools);
 	const context: Context = {
+		...(tools ? { tools } : {}),
 		messages,
 		...(systemParts.length > 0 ? { systemPrompt: systemParts } : {}),
 	};
@@ -409,24 +434,37 @@ export function parseRequest(body: unknown, _headers?: Headers): ParsedRequest {
 // encodeResponse (non-streaming)
 // ---------------------------------------------------------------------------
 
-function flattenAssistantText(message: AssistantMessage): string {
-	let text = "";
+function flattenAssistantParts(message: AssistantMessage): Record<string, unknown>[] {
+	const parts: Record<string, unknown>[] = [];
 	for (const part of message.content) {
-		if (part.type === "text") text += part.text;
+		if (part.type === "text" && part.text.length > 0) {
+			parts.push({ text: part.text });
+			continue;
+		}
+		if (part.type === "toolCall") {
+			parts.push({
+				functionCall: {
+					name: part.name,
+					args: part.arguments ?? {},
+					id: part.id,
+				},
+			});
+		}
 	}
-	return text;
+	return parts;
 }
 
 function mapFinishReason(reason: StopReason): string {
 	if (reason === "length") return "MAX_TOKENS";
+	if (reason === "toolUse") return "STOP";
 	return "STOP";
 }
 
-function geminiCandidate(text: string, finishReason: string | undefined): Record<string, unknown> {
+function geminiCandidate(parts: Record<string, unknown>[], finishReason: string | undefined): Record<string, unknown> {
 	const candidate: Record<string, unknown> = {
 		content: {
 			role: "model",
-			parts: [{ text }],
+			parts: parts.length > 0 ? parts : [{ text: "" }],
 		},
 	};
 	if (finishReason !== undefined) candidate.finishReason = finishReason;
@@ -441,7 +479,7 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 		});
 	}
 	return {
-		...geminiCandidate(flattenAssistantText(message), mapFinishReason(message.stopReason)),
+		...geminiCandidate(flattenAssistantParts(message), mapFinishReason(message.stopReason)),
 		modelVersion: requestedModelId,
 	};
 }
@@ -468,6 +506,22 @@ export function encodeStream(
 
 	return new ReadableStream<Uint8Array>({
 		async start(controller) {
+			const emittedCalls = new Set<string>();
+			const emitCall = (call: ToolCall) => {
+				if (emittedCalls.has(call.id)) return;
+				emittedCalls.add(call.id);
+				writeSse(
+					controller,
+					{
+						...geminiCandidate(
+							[{ functionCall: { name: call.name, args: call.arguments, id: call.id } }],
+							undefined,
+						),
+						modelVersion: requestedModelId,
+					},
+					cancelled,
+				);
+			};
 			try {
 				if (cancelled) {
 					controller.close();
@@ -480,16 +534,22 @@ export function encodeStream(
 							if (event.delta.length > 0) {
 								writeSse(
 									controller,
-									{ ...geminiCandidate(event.delta, undefined), modelVersion: requestedModelId },
+									{ ...geminiCandidate([{ text: event.delta }], undefined), modelVersion: requestedModelId },
 									cancelled,
 								);
 							}
 							break;
+						case "toolcall_end":
+							emitCall(event.toolCall);
+							break;
 						case "done":
+							for (const part of event.message.content) {
+								if (part.type === "toolCall") emitCall(part);
+							}
 							writeSse(
 								controller,
 								{
-									...geminiCandidate("", mapFinishReason(event.reason)),
+									...geminiCandidate([], mapFinishReason(event.reason)),
 									modelVersion: requestedModelId,
 								},
 								cancelled,
@@ -507,7 +567,7 @@ export function encodeStream(
 					}
 				}
 				if (!cancelled) {
-					writeSse(controller, { ...geminiCandidate("", "STOP"), modelVersion: requestedModelId }, cancelled);
+					writeSse(controller, { ...geminiCandidate([], "STOP"), modelVersion: requestedModelId }, cancelled);
 					controller.close();
 				}
 			} catch (err) {

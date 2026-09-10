@@ -29,7 +29,6 @@ type ConductorRoute = CompiledRoute & {
 	fallbacks: Readonly<Partial<Record<GatewayErrorDisposition, readonly string[]>>>;
 };
 
-
 const balanceRrCursor = new Map<string, number>();
 
 function pickBalanceTarget(route: ConductorRoute, attempted: ReadonlySet<string>): string | undefined {
@@ -89,8 +88,8 @@ export function decideAttempt(args: {
 		case "request_terminal":
 		case "policy_terminal":
 		case "gateway_terminal":
-		case "credential_permanent":
 			return { type: "terminal" };
+		case "credential_permanent":
 		case "credential_quota":
 		case "credential_transient": {
 			if (!state.siblingsExhausted) {

@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed Gemini URL routing and tool calls, conditional routing, conversation affinity, and stream health updates after late failures.
+
 - Fixed auth-gateway streaming retries leaving StreamCommitGate terminated; the gate resets between attempts.
 - Fixed bare `balance` routes always dispatching the first child; initial pick now rotates across children.
 - Fixed Anthropic count-tokens ignoring `system`/`tools` and accepting non-array `messages`.
