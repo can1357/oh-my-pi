@@ -37,10 +37,11 @@ function buildContinueArgs(message: string, sessionDir?: string): Args {
 	};
 }
 
-function buildForkArgs(fork: string, noSession = false): Args {
+function buildForkArgs(fork: string, noSession = false, sessionDir?: string): Args {
 	return {
 		fork,
 		noSession: noSession || undefined,
+		sessionDir,
 		messages: [],
 		fileArgs: [],
 		unknownFlags: new Map(),
@@ -199,14 +200,32 @@ describe("createSessionManager — missing session (#2084)", () => {
 
 	it("rejects --fork with a missing path before materializing anything (#11491)", async () => {
 		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-fork-missing-path-"));
+		const sessionDir = path.join(cwd, "sessions");
+		await fsp.mkdir(sessionDir, { recursive: true });
 		const missingPath = path.join(cwd, "ghost-zz9q.jsonl");
 		try {
-			await expect(createSessionManager(buildForkArgs(missingPath), cwd, stubSettings)).rejects.toMatchObject({
+			await expect(
+				createSessionManager(buildForkArgs(missingPath, false, sessionDir), cwd, stubSettings),
+			).rejects.toMatchObject({
 				name: "SessionResolutionError",
 				message: `Session "${missingPath}" not found.`,
 			});
-			const entries = await fsp.readdir(cwd, { recursive: true });
-			expect(entries.filter(name => name.endsWith(".jsonl"))).toEqual([]);
+			expect(await fsp.readdir(sessionDir)).toEqual([]);
+		} finally {
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("forkFrom rejects a vanished source without materializing (race backstop, #11491)", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-fork-vanished-"));
+		const sessionDir = path.join(cwd, "sessions");
+		await fsp.mkdir(sessionDir, { recursive: true });
+		const missingPath = path.join(cwd, "ghost-zz9q.jsonl");
+		try {
+			await expect(SessionManager.forkFrom(missingPath, cwd, sessionDir)).rejects.toThrow(
+				`Session "${missingPath}" not found.`,
+			);
+			expect(await fsp.readdir(sessionDir)).toEqual([]);
 		} finally {
 			await fsp.rm(cwd, { recursive: true, force: true });
 		}

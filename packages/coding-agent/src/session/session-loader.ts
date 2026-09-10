@@ -279,11 +279,15 @@ async function loadWithKnownSize(filePath: string, storage: SessionStorage, size
 export async function loadSessionFile(
 	filePath: string,
 	storage: SessionStorage = new FileSessionStorage(),
+	options?: { throwIfMissing?: boolean },
 ): Promise<SessionLoadResult> {
 	try {
 		return await loadWithKnownSize(filePath, storage, storage.statSync(filePath).size);
 	} catch (err) {
-		if (isEnoent(err)) return { entries: [], titleSlot: undefined, malformedRecords: 0, invalidHeader: false };
+		if (isEnoent(err)) {
+			if (options?.throwIfMissing) throw err;
+			return { entries: [], titleSlot: undefined, malformedRecords: 0, invalidHeader: false };
+		}
 		throw err;
 	}
 }
@@ -292,8 +296,9 @@ export async function loadSessionFile(
 export async function loadEntriesFromFile(
 	filePath: string,
 	storage: SessionStorage = new FileSessionStorage(),
+	options?: { throwIfMissing?: boolean },
 ): Promise<FileEntry[]> {
-	return (await loadSessionFile(filePath, storage)).entries;
+	return (await loadSessionFile(filePath, storage, options)).entries;
 }
 
 /**
