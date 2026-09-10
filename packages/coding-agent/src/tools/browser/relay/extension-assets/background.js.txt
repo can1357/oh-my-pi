@@ -210,6 +210,8 @@ function orphanSweepSeesRelayDisconnected(state) {
   return state.forceDisconnected === true || state.socketReadyState !== state.openReadyState;
 }
 function nextOrphanSweepDeadline(state) {
+  if (state.recoveryStateLoading === true)
+    return;
   if (state.disconnected && state.attachmentReconciliationPending === true && state.existingDeadlineMs !== null)
     return state.existingDeadlineMs;
   if (!state.disconnected || !state.hasTrackedAttachments)
@@ -337,6 +339,7 @@ var recoveryLoaderGenerations = new Map;
 var recoverableUpdateGeneration = 0;
 var recoverableStartupMutations = new Set;
 var orphanSweepDeadlineMs = null;
+var orphanRecoveryStateLoading = true;
 var orphanAttachmentReconciliationPending = false;
 var connectionGeneration = 0;
 var orphanSweepDeadlineGeneration = 0;
@@ -367,6 +370,7 @@ var loadRecoverableState = createRetryableLoader(() => {
     const deadline = restoreOrphanSweepDeadline(stored[ORPHAN_SWEEP_DEADLINE_KEY], orphanSweepDeadlineGeneration === 0);
     if (deadline !== undefined)
       orphanSweepDeadlineMs = deadline;
+    orphanRecoveryStateLoading = false;
     return true;
   });
 });
@@ -499,6 +503,8 @@ async function maybeScheduleOrphanSweep(forceDisconnected = false) {
   requireRecoveryStateLoaded(await loadRecoverableState());
   await flushRecoverableUpdates();
   const nextDeadlineMs = computeNextOrphanSweepDeadline(forceDisconnected);
+  if (nextDeadlineMs === undefined)
+    return;
   await setOrphanSweepDeadline(nextDeadlineMs);
 }
 function relayInitializedReadyState() {
@@ -518,11 +524,14 @@ function computeNextOrphanSweepDeadline(forceDisconnected) {
     disconnected,
     hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
     existingDeadlineMs: orphanSweepDeadlineMs,
+    recoveryStateLoading: orphanRecoveryStateLoading,
     attachmentReconciliationPending: orphanAttachmentReconciliationPending
   });
 }
 function scheduleOrphanSweepBeforeSuspend() {
   const nextDeadlineMs = computeNextOrphanSweepDeadline(true);
+  if (nextDeadlineMs === undefined)
+    return;
   setOrphanSweepDeadline(nextDeadlineMs);
 }
 async function maybeRunOrphanSweep(alarmScheduledTime) {
