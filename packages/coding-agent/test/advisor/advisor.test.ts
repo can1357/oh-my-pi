@@ -26,6 +26,7 @@ import {
 	type AdvisorRuntimeHost,
 	advisorTranscriptFilename,
 	buildAdvisorQuarantineSourceText,
+	compareAdvisorNotes,
 	deriveAdvisorTelemetry,
 	formatAdvisorBatchContent,
 	formatAdvisorContextPrompt,
@@ -677,7 +678,7 @@ describe("advisor", () => {
 			await tool.execute("tc-2", { note, severity: "nit" });
 
 			expect(onAdvice).toHaveBeenCalledTimes(1);
-			expect(onAdvice).toHaveBeenCalledWith(note, "nit");
+			expect(onAdvice).toHaveBeenCalledWith(note, "nit", undefined);
 		});
 
 		it("allows the same advice after delivered-note memory resets", async () => {
@@ -690,8 +691,8 @@ describe("advisor", () => {
 			await tool.execute("tc-2", { note, severity: "nit" });
 
 			expect(onAdvice).toHaveBeenCalledTimes(2);
-			expect(onAdvice).toHaveBeenNthCalledWith(1, note, "nit");
-			expect(onAdvice).toHaveBeenNthCalledWith(2, note, "nit");
+			expect(onAdvice).toHaveBeenNthCalledWith(1, note, "nit", undefined);
+			expect(onAdvice).toHaveBeenNthCalledWith(2, note, "nit", undefined);
 		});
 
 		it("forwards escalations of an already-delivered note and suppresses downgrades", async () => {
@@ -707,9 +708,9 @@ describe("advisor", () => {
 			await tool.execute("tc-5", { note, severity: "nit" });
 
 			expect(onAdvice).toHaveBeenCalledTimes(3);
-			expect(onAdvice).toHaveBeenNthCalledWith(1, note, "nit");
-			expect(onAdvice).toHaveBeenNthCalledWith(2, note, "concern");
-			expect(onAdvice).toHaveBeenNthCalledWith(3, note, "blocker");
+			expect(onAdvice).toHaveBeenNthCalledWith(1, note, "nit", undefined);
+			expect(onAdvice).toHaveBeenNthCalledWith(2, note, "concern", undefined);
+			expect(onAdvice).toHaveBeenNthCalledWith(3, note, "blocker", undefined);
 		});
 
 		it("routes a same-text blocker escalation of an already-delivered note with the production guard", async () => {
@@ -754,7 +755,7 @@ describe("advisor", () => {
 
 			// Deferred notes are NOT delivered mid-turn; blocker still goes through.
 			expect(onAdvice).toHaveBeenCalledTimes(1);
-			expect(onAdvice).toHaveBeenCalledWith("A destructive command is running.", "blocker");
+			expect(onAdvice).toHaveBeenCalledWith("A destructive command is running.", "blocker", undefined);
 			// The tool tells the advisor the note is deferred, not silently "Recorded.".
 			expect(JSON.stringify(deferred.content)).toContain("Queued for the end of the turn");
 
@@ -766,8 +767,8 @@ describe("advisor", () => {
 			// oldest first — no reliance on the advisor model re-raising them.
 			tool.beginUpdate(false);
 			expect(onAdvice).toHaveBeenCalledTimes(3);
-			expect(onAdvice).toHaveBeenNthCalledWith(2, note, "concern");
-			expect(onAdvice).toHaveBeenNthCalledWith(3, "Minor naming cleanup.", "nit");
+			expect(onAdvice).toHaveBeenNthCalledWith(2, note, "concern", undefined);
+			expect(onAdvice).toHaveBeenNthCalledWith(3, "Minor naming cleanup.", "nit", undefined);
 
 			// A later explicit re-raise of the same note is deduped (already delivered).
 			await tool.execute("tc-4", { note, severity: "concern" });
@@ -787,7 +788,7 @@ describe("advisor", () => {
 			tool.beginUpdate(false);
 			// Identical note queued once, flushed once.
 			expect(onAdvice).toHaveBeenCalledTimes(1);
-			expect(onAdvice).toHaveBeenCalledWith(note, "concern");
+			expect(onAdvice).toHaveBeenCalledWith(note, "concern", undefined);
 		});
 
 		it("retains the highest severity when duplicate deferred advice escalates", async () => {
@@ -800,7 +801,7 @@ describe("advisor", () => {
 
 			tool.beginUpdate(false);
 			expect(onAdvice).toHaveBeenCalledTimes(1);
-			expect(onAdvice).toHaveBeenCalledWith("Same point raised repeatedly.", "concern");
+			expect(onAdvice).toHaveBeenCalledWith("Same point raised repeatedly.", "concern", undefined);
 		});
 
 		it("flushes one deferred concern per update past the per-update emission budget on a late catch-up", async () => {
@@ -1397,6 +1398,24 @@ describe("advisor", () => {
 			// A note with no source (the legacy/default advisor) carries no advisor attribute.
 			expect(content.split('advisor="').length - 1).toBe(1);
 			expect(content).toContain("default note");
+		});
+
+		it("orders merged notes newest-turn-first then severity, marking age", () => {
+			// Merged boundary batches surface the newest review first — it describes
+			// the current state of the work — with `turns_ago` marking how stale each
+			// older note is, so the primary can discount superseded ones.
+			const notes = [
+				{ note: "old blocker", severity: "blocker" as const, turn: 3 },
+				{ note: "new nit", severity: "nit" as const, turn: 5 },
+				{ note: "new blocker", severity: "blocker" as const, turn: 5 },
+			].sort(compareAdvisorNotes);
+			const content = formatAdvisorBatchContent(notes, { currentTurn: 6 });
+			expect(content.indexOf("new blocker")).toBeLessThan(content.indexOf("new nit"));
+			expect(content.indexOf("new nit")).toBeLessThan(content.indexOf("old blocker"));
+			expect(content).toContain('turns_ago="3"');
+			// Both current-turn-5 notes are one turn old at delivery turn 6.
+			expect(content.match(/turns_ago="1"/g)?.length).toBe(2);
+			expect(content.split("turns_ago=").length - 1).toBe(3);
 		});
 	});
 
@@ -6498,6 +6517,57 @@ describe("advisor", () => {
 					terminalAnswerNoQueuedWork: true,
 				}),
 			).toBe("steer");
+		});
+
+		it("opts a late concern into steering with allowTerminalConcernSteering, without bypassing other guards", () => {
+			// Final-review continuation policy: a concern against a terminal answer
+			// MAY steer one continuation when the caller opts in — but stop/abort
+			// suppression, preserveOnly, and the immune-turn cooldown still win.
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					terminalAnswerNoQueuedWork: true,
+					allowTerminalConcernSteering: true,
+				}),
+			).toBe("steer");
+			// Stop/abort suppression is not bypassed.
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: true,
+					streaming: false,
+					aborting: false,
+					terminalAnswerNoQueuedWork: true,
+					allowTerminalConcernSteering: true,
+				}),
+			).toBe("preserve");
+			// preserveOnly (headless/terminal-yield drain) is not bypassed.
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					terminalAnswerNoQueuedWork: true,
+					allowTerminalConcernSteering: true,
+					preserveOnly: true,
+				}),
+			).toBe("preserve");
+			// The immune-turn cooldown is not bypassed.
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					terminalAnswerNoQueuedWork: true,
+					interruptImmuneTurnActive: true,
+					allowTerminalConcernSteering: true,
+				}),
+			).toBe("aside");
 		});
 
 		it("downgrades concern to aside during immune turns, but still steers a blocker (#5628)", () => {
