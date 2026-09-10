@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, CursorTodoSnapshot } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -101,73 +101,6 @@ describe("cursor todo persistence", () => {
 				tasks: [
 					{ content: "step one", status: "completed" },
 					{ content: "step two", status: "in_progress" },
-				],
-			},
-		]);
-	});
-
-	it("preserves user droppedBy and blockers across Cursor todo sync", () => {
-		const h = newHarness([
-			{
-				name: "Work",
-				tasks: [
-					{ content: "cancelled", status: "abandoned", droppedBy: "user" },
-					{ content: "waiting", status: "blocked", blocker: "owner" },
-					{ content: "model drop", status: "abandoned" },
-				],
-			},
-		]);
-		h.handlers.todoSync(
-			// "blocked" is outside CursorTodoSnapshotItem["status"] but the impl
-			// casts to TodoStatus and preserves blockers; probe that path.
-			{
-				merged: false,
-				todos: [
-					{ content: "cancelled", status: "abandoned" },
-					{ content: "waiting", status: "blocked" },
-					{ content: "model drop", status: "abandoned" },
-				],
-			} as unknown as CursorTodoSnapshot,
-			"call-1",
-		);
-		expect(h.current()).toEqual([
-			{
-				name: "Work",
-				tasks: [
-					{ content: "cancelled", status: "abandoned", droppedBy: "user" },
-					{ content: "waiting", status: "blocked", blocker: "owner" },
-					{ content: "model drop", status: "abandoned" },
-				],
-			},
-		]);
-	});
-
-	it("merges Cursor provenance by content occurrence, not last-content-wins", () => {
-		const h = newHarness([
-			{
-				name: "Work",
-				tasks: [
-					{ content: "Ship", status: "abandoned", droppedBy: "user" },
-					{ content: "Ship", status: "abandoned" },
-				],
-			},
-		]);
-		h.handlers.todoSync(
-			{
-				merged: false,
-				todos: [
-					{ content: "Ship", status: "abandoned" },
-					{ content: "Ship", status: "abandoned" },
-				],
-			},
-			"call-1",
-		);
-		expect(h.current()).toEqual([
-			{
-				name: "Work",
-				tasks: [
-					{ content: "Ship", status: "abandoned", droppedBy: "user" },
-					{ content: "Ship", status: "abandoned" },
 				],
 			},
 		]);

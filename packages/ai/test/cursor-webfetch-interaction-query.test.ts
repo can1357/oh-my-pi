@@ -20,7 +20,7 @@ import {
 	WebSearchArgsSchema,
 	WebSearchRequestQuerySchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
-import { create, fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
+import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
 function cursorAssistantMessage(): AssistantMessage {
 	return {
@@ -253,6 +253,25 @@ describe("Cursor interaction queries", () => {
 		expect(response.result.case).toBe("webFetchRequestResponse");
 		if (response.result.case !== "webFetchRequestResponse") return;
 		expect(response.result.value.result.case).toBe("approved");
+	});
+
+	it("approves an unknown permission-shaped query variant with a decodable frame", async () => {
+		// Simulate a Cursor build newer than this proto: query variant on
+		// field 12 (LEN), which the schema does not name. The reply must carry
+		// `approved {}` on the same field number — and stay decodable: unknown
+		// LEN fields store raw wire bytes INCLUDING the length varint, so a
+		// missing prefix corrupts every byte after it in the frame.
+		const idOnly = toBinary(InteractionQuerySchema, create(InteractionQuerySchema, { id: 21 }));
+		const unknownVariant = new Uint8Array([0x62, 0x02, 0x0a, 0x00]); // field 12, LEN 2: approved {}
+		const raw = new Uint8Array(idOnly.length + unknownVariant.length);
+		raw.set(idOnly, 0);
+		raw.set(unknownVariant, idOnly.length);
+
+		const frames = await dispatchQuery(fromBinary(InteractionQuerySchema, raw));
+		const response = expectInteractionResponse(frames);
+		expect(response.id).toBe(21);
+		expect(response.result.case).toBeUndefined();
+		expect(response.$unknown).toEqual([{ no: 12, wireType: 2, data: new Uint8Array([0x02, 0x0a, 0x00]) }]);
 	});
 
 	it("does not invent a reply for an unknown query variant", async () => {

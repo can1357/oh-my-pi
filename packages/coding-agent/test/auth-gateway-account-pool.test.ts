@@ -62,15 +62,6 @@ describe("auth-gateway account pool", () => {
 	});
 
 	test("check probes only credentials selected by the environment pool", async () => {
-		const originalFetch = globalThis.fetch.bind(globalThis);
-		vi.spyOn(globalThis, "fetch").mockImplementation((async (
-			input: Parameters<typeof globalThis.fetch>[0],
-			init: Parameters<typeof globalThis.fetch>[1],
-		) => {
-			const url = String(typeof input === "object" && input !== null && "url" in input ? input.url : input);
-			if (url.includes("127.0.0.1") || url.includes("localhost")) return originalFetch(input, init);
-			return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
-		}) as unknown as typeof globalThis.fetch);
 		let output = "";
 		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
 			output += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);

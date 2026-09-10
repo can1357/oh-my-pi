@@ -6,7 +6,6 @@ import { resolvePromptCacheKey } from "../auth-gateway/http";
  * `stream(model, context, options)`.
  */
 import type { AuthGatewayStreamControl, AuthGatewayParsedRequest as ParsedRequest } from "../auth-gateway/types";
-import { resolveAuthGatewayWireModelId } from "../auth-gateway/types";
 import * as AIError from "../error";
 import type {
 	AssistantMessage,
@@ -408,11 +407,7 @@ function normalizeToolChoice(value: OpenAIChatToolChoice | undefined): ParsedReq
 // encodeResponse (non-streaming)
 // ---------------------------------------------------------------------------
 
-export function encodeResponse(
-	message: AssistantMessage,
-	requestedModelId: string,
-	options?: ParsedRequest["options"],
-): Record<string, unknown> {
+export function encodeResponse(message: AssistantMessage, requestedModelId: string): Record<string, unknown> {
 	const { text, reasoning, toolCalls } = flattenAssistant(message);
 
 	const responseMessage: Record<string, unknown> = {
@@ -438,7 +433,7 @@ export function encodeResponse(
 		id: makeId(),
 		object: "chat.completion",
 		created: Math.floor(Date.now() / 1000),
-		model: resolveAuthGatewayWireModelId(message, requestedModelId, options),
+		model: requestedModelId,
 		// Real OpenAI always emits this key, even when the value is null. Mirror
 		// the contract so probing SDKs do not throw on a missing field.
 		system_fingerprint: null,
@@ -540,22 +535,6 @@ export function encodeStream(
 	const id = makeId();
 	const created = Math.floor(Date.now() / 1000);
 	const includeUsage = options?.extra?.includeStreamingUsage === true;
-	let effectiveModelId = requestedModelId;
-	// Cursor auto may start as catalog `auto`, discovered `default`, or a concrete
-	// id with `x-cursor-auto-mode: true`. Defer the initial role chunk until an
-	// explicit `routed_model` event lands (or a terminal event forces emit).
-	let cursorAutoRoutingResolved = false;
-	const deferStartForCursorAuto = (modelId: string | undefined): boolean => {
-		// Cursor's discovered auto wire id is `default` (OpenRouter uses `auto`).
-		// Defer `default` even without the auto-mode header so gateway clients that
-		// select the bundled Cursor default still wait for routing.
-		if (modelId === "default") return true;
-		// Only Cursor auto intent buffers the literal `auto` id — otherwise OpenRouter
-		// (and similar) models named `auto` would non-stream until done.
-		if (options?.cursorAutoMode !== true) return false;
-		if (modelId === "auto") return true;
-		return !cursorAutoRoutingResolved;
-	};
 	let cancelled = control?.signal?.aborted === true;
 	const markCancelled = () => {
 		cancelled = true;
@@ -566,7 +545,7 @@ export function encodeStream(
 		id,
 		object: "chat.completion.chunk",
 		created,
-		model: effectiveModelId,
+		model: requestedModelId,
 		system_fingerprint: null,
 		choices: [{ index: 0, delta, finish_reason: finishReason, logprobs: null }],
 		...(includeUsage ? { usage: null } : {}),
@@ -581,7 +560,7 @@ export function encodeStream(
 			id,
 			object: "chat.completion.chunk",
 			created,
-			model: effectiveModelId,
+			model: requestedModelId,
 			system_fingerprint: null,
 			choices: [],
 			usage: buildUsage(message),
@@ -598,64 +577,21 @@ export function encodeStream(
 			let nextToolIndex = 0;
 			let hasToolCalls = false;
 			let finishReason: string = "stop";
-			let roleChunkSent = false;
-			const pendingChunks: Array<() => unknown> = [];
-
-			const noteRoutedModel = (model: string | undefined) => {
-				if (!model) return;
-				// Keep provider-qualified request ids (e.g. `cursor/gpt-5`) stable for
-				// non-auto streams. Only Cursor auto routing may rewrite the wire model.
-				const allowRewrite =
-					options?.cursorAutoMode === true || requestedModelId === "default" || requestedModelId === "auto";
-				if (allowRewrite && model !== effectiveModelId) effectiveModelId = model;
-			};
-
-			const markAutoRoutingResolved = (model: string | undefined) => {
-				noteRoutedModel(model);
-				cursorAutoRoutingResolved = true;
-			};
-
-			const ensureRoleChunk = () => {
-				if (roleChunkSent) return;
-				roleChunkSent = true;
-				writeSse(controller, baseChunk({ role: "assistant" }, null));
-				for (const build of pendingChunks.splice(0)) writeSse(controller, build());
-			};
-
-			const emitChunk = (build: () => unknown) => {
-				if (!roleChunkSent && deferStartForCursorAuto(effectiveModelId)) {
-					pendingChunks.push(build);
-					return;
-				}
-				ensureRoleChunk();
-				writeSse(controller, build());
-			};
 
 			try {
 				if (cancelled) {
 					controller.close();
 					return;
 				}
-				// Non-auto streams keep the historical role-first envelope. Cursor auto
-				// defers until routing resolves so clients do not lock onto a placeholder.
-				if (!deferStartForCursorAuto(effectiveModelId)) {
-					ensureRoleChunk();
-				}
+				// Initial role chunk.
+				writeSse(controller, baseChunk({ role: "assistant" }, null));
 
 				for await (const event of events) {
 					if (cancelled) return;
-					if (event.type === "routed_model") {
-						// Explicit InteractionUpdate.routedModel / checkpoint signal —
-						// never treat repeated partial.model observations as proof.
-						markAutoRoutingResolved(event.model);
-						continue;
-					}
-					if ("partial" in event) noteRoutedModel(event.partial.model);
-					if ("message" in event) noteRoutedModel(event.message.model);
 					switch (event.type) {
 						case "text_delta":
 							if (event.delta.length > 0) {
-								emitChunk(() => baseChunk({ content: event.delta }, null));
+								writeSse(controller, baseChunk({ content: event.delta }, null));
 							}
 							break;
 
@@ -663,7 +599,7 @@ export function encodeStream(
 							// DeepSeek-style / o-series reasoning channel. Clients that don't
 							// understand it ignore the unknown delta key.
 							if (event.delta.length > 0) {
-								emitChunk(() => baseChunk({ reasoning_content: event.delta }, null));
+								writeSse(controller, baseChunk({ reasoning_content: event.delta }, null));
 							}
 							break;
 
@@ -674,7 +610,8 @@ export function encodeStream(
 							const partial = event.partial.content[event.contentIndex];
 							const call = partial && partial.type === "toolCall" ? partial : undefined;
 							sentToolMeta.set(idx, { id: call?.id ?? "", name: call?.name ?? "", hasArgumentBytes: false });
-							emitChunk(() =>
+							writeSse(
+								controller,
 								baseChunk(
 									{
 										tool_calls: [
@@ -697,7 +634,8 @@ export function encodeStream(
 							if (idx === undefined) break;
 							const sent = sentToolMeta.get(idx);
 							if (sent && event.delta.length > 0) sent.hasArgumentBytes = true;
-							emitChunk(() =>
+							writeSse(
+								controller,
 								baseChunk({ tool_calls: [{ index: idx, function: { arguments: event.delta } }] }, null),
 							);
 							break;
@@ -719,7 +657,8 @@ export function encodeStream(
 								? undefined
 								: stringifyArgs(event.toolCall.arguments);
 							if (correctId !== undefined || correctName !== undefined || correctArguments !== undefined) {
-								emitChunk(() =>
+								writeSse(
+									controller,
 									baseChunk(
 										{
 											tool_calls: [
@@ -755,7 +694,6 @@ export function encodeStream(
 										: hasToolCalls
 											? "tool_calls"
 											: "stop";
-							ensureRoleChunk();
 							writeSse(controller, baseChunk({}, finishReason));
 							if (includeUsage) writeUsage(controller, event.message);
 							controller.enqueue(encoder.encode("data: [DONE]\n\n"));
@@ -764,7 +702,6 @@ export function encodeStream(
 
 						case "error": {
 							const msg = event.error.errorMessage ?? "stream error";
-							ensureRoleChunk();
 							writeSse(controller, { error: { message: msg, type: "upstream_error" } });
 							controller.close();
 							return;
@@ -779,7 +716,6 @@ export function encodeStream(
 
 				// Stream ended without a terminal `done` (defensive). Close gracefully.
 				if (!cancelled) {
-					ensureRoleChunk();
 					writeSse(controller, baseChunk({}, hasToolCalls ? "tool_calls" : "stop"));
 					controller.enqueue(encoder.encode("data: [DONE]\n\n"));
 					controller.close();

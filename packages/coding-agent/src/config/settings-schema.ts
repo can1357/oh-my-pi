@@ -484,9 +484,6 @@ export const SETTINGS_SCHEMA = {
 	// per-machine overrides remain trivial.
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined, credential: true },
-	// Auth gateway — optional RouteDefinition file used by `omp auth-gateway serve`
-	// when `--routes` is omitted. Hidden from the UI; populate via config.yml.
-	"auth.gateway.routesFile": { type: "string", default: undefined },
 
 	autoResume: {
 		type: "boolean",
@@ -5262,8 +5259,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Todos",
 			label: "Todo Auto-Clear Delay",
-			description:
-				"Delay before completed or user-canceled todos are removed from the todo widget (model-dropped items stay until finished or cleared)",
+			description: "Delay before completed or abandoned todos are removed from the todo widget",
 			options: [
 				{ value: "0", label: "Instant" },
 				{ value: "60", label: "1 minute", description: "Default" },

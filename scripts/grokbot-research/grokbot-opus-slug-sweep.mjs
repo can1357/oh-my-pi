@@ -95,7 +95,7 @@ let headersBase;
 
 async function initAuth() {
 	cfg = await loadGrokbotConfig();
-	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND, undefined, undefined, "inference");
+	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND);
 	headersBase = {
 		...grokbotClientHeaders(cfg),
 		authorization: `Bearer ${token}`,
@@ -195,12 +195,7 @@ function buildCases(opusRow) {
 	}
 
 	// Extra devin-compat slugs not in legacySlugs (xhigh/max without thinking prefix)
-	for (const extra of [
-		"claude-opus-5-xhigh",
-		"claude-opus-5-max",
-		"claude-opus-5-xhigh-fast",
-		"claude-opus-5-max-fast",
-	]) {
+	for (const extra of ["claude-opus-5-xhigh", "claude-opus-5-max", "claude-opus-5-xhigh-fast", "claude-opus-5-max-fast"]) {
 		add(extra, {}, "compat-only bare");
 	}
 

@@ -502,29 +502,6 @@ export interface StreamOptions {
 	 */
 	statefulResponses?: boolean;
 	/**
-	 * Client-supplied OpenAI Responses continuation id. When set, it wins over
-	 * internal chain state (`statefulResponses` / lastResponseId) for this request.
-	 */
-	previousResponseId?: string;
-	/** Persist Responses for later previous_response_id continuation. */
-	store?: boolean;
-	/** OpenAI `parallel_tool_calls`. */
-	parallelToolCalls?: boolean;
-	/** OpenAI deterministic-sampling `seed`. */
-	seed?: number;
-	/** OpenAI `logit_bias` map (token id → bias). */
-	logitBias?: Record<string, number>;
-	/** OpenAI / abuse-tracking `user` field. */
-	user?: string;
-	/** OpenAI `response_format` (text | json_object | json_schema). Opaque passthrough. */
-	responseFormat?: unknown;
-	/** Gemini structured-output mime type (`application/json`, …). */
-	responseMimeType?: string;
-	/** Gemini `responseSchema` (OpenAPI-ish schema object). */
-	responseSchema?: Record<string, unknown>;
-	/** Gemini `responseJsonSchema` (JSON Schema object). */
-	responseJsonSchema?: Record<string, unknown>;
-	/**
 	 * Disable native reasoning when the caller supplies an external scratchpad.
 	 * OpenAI Responses emits `reasoning: { effort: "none" }`; Anthropic and
 	 * Google transports use their native thinking-off controls.
@@ -662,35 +639,6 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	thinkingBudgets?: ThinkingBudgets;
 	/** Cursor exec handlers for local tool execution */
 	cursorExecHandlers?: CursorExecHandlers;
-	/**
-	 * Cursor auto mode: when true, passes `"auto"` as the model id to Cursor's
-	 * backend, letting Cursor select the model per-turn instead of omp's role
-	 * system. Ignored by non-Cursor providers.
-	 */
-	cursorAutoMode?: boolean;
-	/**
-	 * Cursor tool passthrough: when true, tool calls from Cursor's backend are
-	 * surfaced as OpenAI `tool_calls` in the response without local execution.
-	 * The caller executes tools and replays results as `role: "tool"` messages
-	 * on the next request. Ignored by non-Cursor providers.
-	 */
-	cursorToolPassthrough?: boolean;
-	/** Comma-separated tool names to exclude from the model's tool set (Cursor only). */
-	cursorExcludeTools?: string;
-	/** Signal local CLI mode to Cursor's backend (Cursor only). */
-	cursorLocalCliMode?: boolean;
-	/** Statsig experiment overrides for feature flag testing (Cursor only). */
-	cursorDevExperimentOverrides?: string;
-	/** Capability flag: client supports inline images (Cursor only). */
-	cursorClientSupportsInlineImages?: boolean;
-	/** Capability flag: client supports routed model updates (Cursor only). */
-	cursorClientSupportsRoutedModelUpdate?: boolean;
-	/** Capability flag: client supports prompt context usage RPC (Cursor only). */
-	cursorClientSupportsPromptContextUsageRpc?: boolean;
-	/** Unique run identifier for session tracking (Cursor only). */
-	cursorRunId?: string;
-	/** Agent session identifier for session tracking (Cursor only). */
-	cursorAgentSessionId?: string;
 	/**
 	 * Optional rewrite of Cursor exec-channel tool results. May return a Promise.
 	 *
@@ -1396,12 +1344,6 @@ export type AssistantMessageEvent =
 	| { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
 	| { type: "toolcall_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
 	| { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; partial: AssistantMessage }
-	/**
-	 * Explicit Cursor auto-routing checkpoint. Auth-gateway SSE encoders must
-	 * wait for this (not repeated `partial.model` observations) before flushing
-	 * `message_start` / OpenAI envelopes under `x-cursor-auto-mode`.
-	 */
-	| { type: "routed_model"; contentIndex?: undefined; model: string; partial: AssistantMessage }
 	| {
 			type: "done";
 			contentIndex?: undefined;

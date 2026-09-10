@@ -406,20 +406,6 @@ describe("grokbot backend URL join", () => {
 		clearGrokbotTokenCache();
 	});
 
-	test("legacy single-token servers still authenticate inference", async () => {
-		const cfg = { renewal: "legacy-renewer", machineId: "machine", namespace: "prod", clientVersion: "0.30.0" };
-		let calls = 0;
-		const fetchImpl = async () => {
-			calls++;
-			return Response.json({ accessToken: "legacy-token", expiresAtMs: Date.now() + 600_000 });
-		};
-		expect(await mintGrokbotAccessToken(cfg, fetchImpl, undefined, undefined, undefined, "inference")).toBe(
-			"legacy-token",
-		);
-		expect(await mintGrokbotAccessToken(cfg, fetchImpl)).toBe("legacy-token");
-		expect(calls).toBe(1);
-	});
-
 	test("refreshes a cached pair when the inference JWT expires before the metadata JWT", async () => {
 		const cfg = {
 			renewal: "early-inference-expiry",

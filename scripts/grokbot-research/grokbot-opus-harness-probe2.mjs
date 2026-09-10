@@ -22,8 +22,8 @@ const STREAM = "/aiserver.v1.InferenceService/Stream";
 const TOKEN = "pong42";
 const TEXT_SYSTEM = prompt.render(minimalSystemPrompt).trim();
 const TEXT_USER = prompt.render(replyExactlyTokenShortPrompt, { token: TOKEN }).trim();
-const concat = b => Buffer.concat(b.filter(x => x?.length));
-const encVarint = v => {
+const concat = (b) => Buffer.concat(b.filter((x) => x?.length));
+const encVarint = (v) => {
 	let n = BigInt(v);
 	const o = [];
 	while (n > 0x7fn) {
@@ -72,7 +72,7 @@ function parse(buf) {
 
 async function probe(label, body, extra = []) {
 	const cfg = await loadGrokbotConfig();
-	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND, undefined, undefined, "inference");
+	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND);
 	const h = {
 		...grokbotClientHeaders(cfg),
 		authorization: `Bearer ${token}`,
@@ -119,7 +119,7 @@ const base = {
 	conversationId: crypto.randomUUID(),
 };
 
-const f9 = ["read", "bash", "Shell"].flatMap(n => [encStr(9, n)]);
+const f9 = ["read", "bash", "Shell"].flatMap((n) => [encStr(9, n)]);
 
 await probe("baseline", base);
 await probe("field9 repeated names", base, f9);

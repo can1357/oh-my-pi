@@ -79,7 +79,6 @@ type CredentialBlockRow = {
 	provider_key: string;
 	block_scope: string;
 	blocked_until_ms: number;
-	retry_after: number;
 	updated_at: number;
 };
 
@@ -89,7 +88,7 @@ type SerializedCredentialRecord = {
 	identityKey: string | null;
 };
 
-const AUTH_SCHEMA_VERSION = 8;
+const AUTH_SCHEMA_VERSION = 7;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 const LEGACY_CODEX_BLOCK_PROVIDER_KEY = "openai-codex:oauth";
 const LEGACY_CODEX_BLOCK_SCOPE = "shared";
@@ -455,24 +454,20 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#deleteCachePrefixStmt = this.#db.prepare("DELETE FROM cache WHERE substr(key, 1, ?) = ?");
 		this.#deleteExpiredCacheStmt = this.#db.prepare(`DELETE FROM cache WHERE expires_at <= ${SQLITE_NOW_EPOCH}`);
 		this.#getCredentialBlockStmt = this.#db.prepare(
-			"SELECT blocked_until_ms, retry_after, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ? AND blocked_until_ms > ?",
+			"SELECT blocked_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ? AND blocked_until_ms > ?",
 		);
 		this.#listCredentialBlocksByCredentialStmt = this.#db.prepare(
-			`SELECT credential_id, provider_key, block_scope, blocked_until_ms, retry_after, updated_at
+			`SELECT credential_id, provider_key, block_scope, blocked_until_ms, updated_at
 			FROM auth_credential_blocks
 			WHERE credential_id = ? AND blocked_until_ms > ?
 				AND NOT (provider_key = ? AND block_scope = ?)
 			ORDER BY provider_key ASC, block_scope ASC`,
 		);
 		this.#upsertCredentialBlockStmt = this.#db.prepare(
-			`INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope, blocked_until_ms, retry_after, updated_at)
-			VALUES (?, ?, ?, ?, ?, ${SQLITE_NOW_EPOCH})
+			`INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope, blocked_until_ms, updated_at)
+			VALUES (?, ?, ?, ?, ${SQLITE_NOW_EPOCH})
 			ON CONFLICT(credential_id, provider_key, block_scope) DO UPDATE SET
 				blocked_until_ms = MAX(blocked_until_ms, excluded.blocked_until_ms),
-				retry_after = CASE
-					WHEN excluded.blocked_until_ms >= blocked_until_ms THEN excluded.retry_after
-					ELSE retry_after
-				END,
 				updated_at = excluded.updated_at`,
 		);
 		this.#deleteCredentialBlocksStmt = this.#db.prepare("DELETE FROM auth_credential_blocks WHERE credential_id = ?");
@@ -768,7 +763,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				provider_key TEXT NOT NULL,
 				block_scope TEXT NOT NULL DEFAULT '',
 				blocked_until_ms INTEGER NOT NULL,
-				retry_after INTEGER NOT NULL DEFAULT 0,
 				updated_at INTEGER NOT NULL,
 				PRIMARY KEY (credential_id, provider_key, block_scope)
 			);
@@ -1001,9 +995,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		if (fromVersion < 7) {
 			this.#migrateAuthSchemaV6ToV7();
 		}
-		if (fromVersion < 8) {
-			this.#migrateAuthSchemaV7ToV8();
-		}
 	}
 
 	#migrateAuthSchemaV0ToV1(): void {
@@ -1171,14 +1162,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			`);
 			this.#createAuthCredentialBlockCompatibilityTriggers();
 			this.#writeAuthSchemaVersion(7);
-		});
-		migrate.immediate();
-	}
-
-	#migrateAuthSchemaV7ToV8(): void {
-		const migrate = this.#db.transaction(() => {
-			this.#db.run("ALTER TABLE auth_credential_blocks ADD COLUMN retry_after INTEGER NOT NULL DEFAULT 0");
-			this.#writeAuthSchemaVersion(8);
 		});
 		migrate.immediate();
 	}
@@ -1597,7 +1580,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					block.providerKey,
 					blockScope,
 					block.blockedUntilMs,
-					block.retryAfter === true ? 1 : 0,
 				);
 			}
 		});
@@ -1657,7 +1639,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					providerKey: row.provider_key,
 					blockScope: row.block_scope,
 					blockedUntilMs: row.blocked_until_ms,
-					retryAfter: row.retry_after === 1,
 					updatedAtMs: row.updated_at * 1000,
 				});
 			}

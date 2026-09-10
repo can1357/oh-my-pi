@@ -183,30 +183,21 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	// From this point onward a late blocker must be recorded without starting a
 	// primary turn whose response print mode would never emit.
 	session.prepareForHeadlessAdvisorDrain();
-	// The accessor preserves terminal errors pruned from active context and
-	// aborts followed by synthetic tool results.
-	const assistantMsg = session.getLastAssistantMessage();
-	const failed =
-		assistantMsg &&
-		(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
-		!isSilentAbort(assistantMsg);
-
-	// JSON consumers need a nonzero exit as well as the error event. Drain the
-	// structured transcript before exiting so a failed request is still parseable.
-	if (mode === "json" && failed) {
-		await session.waitForAdvisorCatchup(PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS);
-		await stdoutTail;
-		await flushTelemetryExport();
-		await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
-		process.exit(1);
-		return;
-	}
 
 	// In text mode, output final response
 	if (mode === "text") {
+		// Read via the session accessor, not the raw state tail: a classifier
+		// refusal is pruned from active context at settle, and an aborted turn
+		// can trail synthetic tool results — both would hide the terminal
+		// assistant message (and its error) from a last-element read.
+		const assistantMsg = session.getLastAssistantMessage();
+
 		if (assistantMsg) {
 			// Check for error/aborted — skip silent-abort (plan-mode compaction transition)
-			if (failed) {
+			if (
+				(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
+				!isSilentAbort(assistantMsg)
+			) {
 				const errorLine = sanitizeText(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
 				// This branch hard-exits, bypassing the `await session.dispose()` at
 				// the end of runPrintMode. Flush telemetry and dispose the session

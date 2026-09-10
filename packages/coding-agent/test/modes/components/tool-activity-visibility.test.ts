@@ -31,14 +31,11 @@ describe("tool activity visibility", () => {
 		const transcript = new TranscriptContainer();
 		transcript.addChild(new TtsrNotificationComponent([rule]));
 		transcript.addChild(new TodoReminderComponent([{ content: "finish the task", status: "in_progress" }], 1, 3));
-		transcript.addChild(new TodoReminderComponent([], 1, 3, true));
 		transcript.addChild(new ToolActivityContainer(new Text("tool warning", 1, 0)));
 
 		const visible = stripVTControlCharacters(transcript.render(120).join("\n"));
 		expect(visible).toContain("ts-no-tiny-functions");
 		expect(visible).toContain("finish the task");
-		expect(visible).toContain("Unverified merge");
-		expect(visible).not.toContain("0 incomplete");
 		expect(visible).toContain("tool warning");
 
 		transcript.setToolActivityVisible(false);
@@ -50,7 +47,6 @@ describe("tool activity visibility", () => {
 		const restored = stripVTControlCharacters(transcript.render(120).join("\n"));
 		expect(restored).toContain("ts-no-tiny-functions");
 		expect(restored).toContain("finish the task");
-		expect(restored).toContain("Unverified merge");
 		expect(restored).toContain("tool warning");
 		expect(restored).toContain("late activity");
 	});

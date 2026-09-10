@@ -65,14 +65,7 @@ function encodeToolLike(msg) {
 	if (msg.parameters) chunks.push(encodeMessage(3, encodeStruct(msg.parameters)));
 	if (msg.type) {
 		chunks.push(
-			encodeMessage(
-				4,
-				concat([
-					encodeString(1, msg.type),
-					encodeString(2, msg.definition || ""),
-					encodeString(3, msg.syntax || ""),
-				]),
-			),
+			encodeMessage(4, concat([encodeString(1, msg.type), encodeString(2, msg.definition || ""), encodeString(3, msg.syntax || "")])),
 		);
 	}
 	if (msg.providerId) chunks.push(encodeString(5, msg.providerId));
@@ -119,7 +112,7 @@ function parseFrames(buf) {
 
 async function post(baseBody, harness = {}) {
 	const cfg = await loadGrokbotConfig();
-	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND, undefined, undefined, "inference");
+	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND);
 	const headers = {
 		...grokbotClientHeaders(cfg),
 		authorization: `Bearer ${token}`,
@@ -149,16 +142,8 @@ async function post(baseBody, harness = {}) {
 }
 
 const field2Tools = [
-	{
-		name: "read",
-		description: "Read file",
-		parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-	},
-	{
-		name: "Shell",
-		description: "Run shell",
-		parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
-	},
+	{ name: "read", description: "Read file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+	{ name: "Shell", description: "Run shell", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
 ];
 const requestedModel = resolveGrokbotRequestedModel("claude-opus-5", {
 	effort: "low",
@@ -241,9 +226,7 @@ for (const c of cases) {
 	const r = await post(c.body ?? baseBody, c.harness);
 	const pass = r.ok && r.texts.includes(TOKEN);
 	if (pass) anyPass = true;
-	console.log(
-		`${pass ? "PASS" : "FAIL"}  ${c.label.padEnd(40)} status=${r.status ?? "-"} model=${r.responseModel || "-"}`,
-	);
+	console.log(`${pass ? "PASS" : "FAIL"}  ${c.label.padEnd(40)} status=${r.status ?? "-"} model=${r.responseModel || "-"}`);
 	if (!pass) console.log(`       ${r.err || "?"}`);
 }
 console.log(anyPass ? "HARNESS_ANY_PASS" : "HARNESS_ALL_FAIL");

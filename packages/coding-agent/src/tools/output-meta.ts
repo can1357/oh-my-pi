@@ -921,11 +921,7 @@ async function wrappedExecute(
 		return result;
 	} catch (e) {
 		// Re-throw with formatted message so agent-loop sets isError flag
-		const message = renderError(e);
-		// Keep structured error details when rendering did not change the text.
-		// Cursor needs ENOENT to distinguish a new-file probe from a failed read.
-		if (e instanceof Error && e.message === message) throw e;
-		throw new Error(message, { cause: e });
+		throw new Error(renderError(e));
 	}
 }
 

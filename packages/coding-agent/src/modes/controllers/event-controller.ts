@@ -2276,12 +2276,7 @@ export class EventController {
 	}
 
 	async #handleTodoReminder(event: Extract<AgentSessionEvent, { type: "todo_reminder" }>): Promise<void> {
-		const component = new TodoReminderComponent(
-			event.todos,
-			event.attempt,
-			event.maxAttempts,
-			event.unverifiedMerge === true,
-		);
+		const component = new TodoReminderComponent(event.todos, event.attempt, event.maxAttempts);
 		this.ctx.present(component);
 	}
 	async #handleTodoAutoClear(_event: Extract<AgentSessionEvent, { type: "todo_auto_clear" }>): Promise<void> {

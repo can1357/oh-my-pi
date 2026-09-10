@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { COMPILED_BINARIES_WORK } from "./helpers/compiled-binaries";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -200,12 +199,9 @@ describe("HTML export template", () => {
 		});
 	});
 
-	test.skipIf(!COMPILED_BINARIES_WORK)(
-		"preserves exact bytes in a compiled bundle launched from an unrelated directory",
-		async () => {
-			expect(await runProbe([compiledPath])).toEqual(expectedTemplate);
-		},
-	);
+	test("preserves exact bytes in a compiled bundle launched from an unrelated directory", async () => {
+		expect(await runProbe([compiledPath])).toEqual(expectedTemplate);
+	});
 
 	test("does not retain source asset strings during a static import", async () => {
 		const proc = Bun.spawn([process.execPath, heapProbePath], {

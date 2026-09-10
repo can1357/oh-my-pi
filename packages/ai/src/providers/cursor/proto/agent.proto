@@ -764,37 +764,6 @@ message AgentRunRequest {
    optional SkillOptions skill_options = 7;
    // Custom system prompt override. Allowlisted for specific teams only.
    optional string custom_system_prompt = 8;
-   bool suggest_next_prompt = 10;
-   string subagent_type_name = 11;
-   bool exclude_workspace_context = 12;
-   string harness = 13;
-   repeated RequestedModel selected_subagent_models = 14;
-   repeated ModelDetails selected_subagent_model_details = 15;
-   string conversation_group_id = 16;
-   repeated PreFetchedBlob pre_fetched_blobs = 17;
-   string dev_raw_model_slug = 18;
-   bool client_supports_inline_images = 19;
-   repeated SubagentModelOverride subagent_model_overrides = 20;
-   bool can_create_cloud_subagents = 21;
-   bool suppress_subagent_progress_update_tool = 22;
-   bool client_supports_send_to_user = 23;
-   int32 computer_use_coordinate_mode = 24;
-   string run_id = 25;
-   string agent_session_id = 26;
-   bool client_supports_prompt_context_usage_rpc = 27;
-   bool client_supports_routed_model_update = 28;
-}
-
-message PreFetchedBlob {
-   string id = 1;
-   bytes data = 2;
-}
-
-message SubagentModelOverride {
-   string subagent_type = 1;
-   oneof selection {
-      RequestedModel requested_model = 2;
-   }
 }
 
 message TextDeltaUpdate {
@@ -902,43 +871,7 @@ message InteractionUpdate {
       TurnEndedUpdate turn_ended = 14;
       StepStartedUpdate step_started = 16;
       StepCompletedUpdate step_completed = 17;
-      PromptSuggestionUpdate prompt_suggestion = 18;
-      PostRequestPromptUpdate post_request_prompt = 19;
-      ActiveBranchChangeUpdate active_branch_change = 20;
-      FeedbackRequestUpdate feedback_request = 21;
-      ResponseComparisonUpdate response_comparison = 22;
-      ContextInjectionStateUpdate context_injection_state = 23;
-      RoutedModelUpdate routed_model = 24;
    }
-}
-
-message PromptSuggestionUpdate {
-   string suggestion = 1;
-}
-
-message PostRequestPromptUpdate {
-   string prompt = 1;
-}
-
-message ActiveBranchChangeUpdate {
-   string branch = 1;
-}
-
-message FeedbackRequestUpdate {
-   string question = 1;
-}
-
-message ResponseComparisonUpdate {
-   string comparison = 1;
-}
-
-message ContextInjectionStateUpdate {
-   string injection_id = 1;
-}
-
-message RoutedModelUpdate {
-   string model_id = 1;
-   string display_name = 2;
 }
 
 // Interaction query messages for bidirectional communication
@@ -1046,16 +979,7 @@ message AgentServerMessage {
       ConversationStateStructure conversation_checkpoint_update = 3;
       KvServerMessage kv_server_message = 4;
       InteractionQuery interaction_query = 7;
-      TtftBreakdown ttft_breakdown = 8;
    }
-}
-
-message TtftBreakdown {
-   int64 server_first_token_ms = 1;
-   int64 pre_stream_setup_ms = 2;
-   int64 wait_for_first_event_ms = 3;
-   optional int64 provider_ttft_ms = 4;
-   int64 slow_pool_wait_ms = 5;
 }
 
 // New unary API for naming an agent from a user message
@@ -1080,8 +1004,7 @@ message GetDefaultModelForCliRequest {
 }
 
 message GetDefaultModelForCliResponse {
-   string model_id = 1;
-   string display_name = 2;
+   ModelDetails model = 1;
 }
 
 // Internal endpoint: returns all allowed model intents for devs
@@ -1089,7 +1012,7 @@ message GetAllowedModelIntentsRequest {
 }
 
 message GetAllowedModelIntentsResponse {
-   repeated string allowed_intents = 1;
+   repeated string model_intents = 1;
 }
 
 // IDE state persistence for clients (CLI / VSCode integration) Mirrors a subset of aiserver.v1.ConversationMessage.IdeEditorsState, but only contains the recently viewed files and avoids any deprecated fields.
@@ -3705,36 +3628,13 @@ message BidiRequestId {
 // Agent Service with bidirectional streaming
 service AgentService {
    rpc Run(AgentClientMessage) returns (AgentServerMessage);
-   rpc RunSSE(RunSSERequest) returns (stream AgentServerMessage);
-   rpc RunPoll(RunPollRequest) returns (stream RunPollResponse);
+   rpc RunSSE(BidiRequestId) returns (AgentServerMessage);
    // Generate a very short, succinct agent name from the provided user message.
    rpc NameAgent(NameAgentRequest) returns (NameAgentResponse);
    rpc GetUsableModels(GetUsableModelsRequest) returns (GetUsableModelsResponse);
    rpc GetDefaultModelForCli(GetDefaultModelForCliRequest) returns (GetDefaultModelForCliResponse);
    // Internal endpoint: returns all allowed model intents for devs
    rpc GetAllowedModelIntents(GetAllowedModelIntentsRequest) returns (GetAllowedModelIntentsResponse);
-   rpc GetPromptContextUsage(GetPromptContextUsageRequest) returns (GetPromptContextUsageResponse);
-}
-
-message RunSSERequest {
-   AgentRunRequest run_request = 1;
-}
-
-message RunPollRequest {
-   AgentRunRequest run_request = 1;
-}
-
-message RunPollResponse {
-   repeated AgentServerMessage messages = 1;
-}
-
-message GetPromptContextUsageRequest {
-   string conversation_id = 1;
-}
-
-message GetPromptContextUsageResponse {
-   int64 total_tokens = 1;
-   int64 max_tokens = 2;
 }
 
 service ControlService {

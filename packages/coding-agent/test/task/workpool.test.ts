@@ -98,7 +98,6 @@ function execution(id: string, output?: string): StructuredSubagentResult {
 		policy: POLICY,
 		mergeSummary: "",
 		changesApplied: null,
-		hadAnyChanges: false,
 		artifactsDir: "/tmp",
 		temporaryArtifacts: true,
 	};

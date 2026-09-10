@@ -284,12 +284,10 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			return notifications;
 		}
 		case "todo_reminder": {
-			// Merge-only reminders have an empty todo list; skip the empty plan update.
-			if (event.todos.length === 0) return [];
 			const entries = event.todos.map(todo => ({
 				content: todo.content,
 				priority: "medium" as const,
-				status: mapTodoStatus(todo.status, todo.droppedBy),
+				status: mapTodoStatus(todo.status),
 			}));
 			return [toSessionNotification(sessionId, { sessionUpdate: "plan", entries })];
 		}
@@ -409,15 +407,11 @@ const todoStatusMap: Record<TodoStatus, "pending" | "in_progress" | "completed">
 	pending: "pending",
 	in_progress: "in_progress",
 	completed: "completed",
-	// Dropped work is incomplete for settle — ACP must not show it as completed.
-	abandoned: "pending",
+	abandoned: "completed",
 	blocked: "pending",
 };
 
-function mapTodoStatus(status: TodoStatus, droppedBy?: "user"): "pending" | "in_progress" | "completed" {
-	// User-authored cancels are settled cancels: plan updates must not resurrect
-	// them as pending. Reminder/model drops stay pending (incomplete).
-	if (status === "abandoned" && droppedBy === "user") return "completed";
+function mapTodoStatus(status: TodoStatus): "pending" | "in_progress" | "completed" {
 	return todoStatusMap[status];
 }
 
@@ -436,7 +430,7 @@ function mapTodoResultToPlanUpdate(
 		entries: extractTodoEntries(phases).map(todo => ({
 			content: todo.content,
 			priority: "medium" as const,
-			status: mapTodoStatus(todo.status, todo.droppedBy),
+			status: mapTodoStatus(todo.status),
 		})),
 	};
 }
@@ -452,8 +446,8 @@ function extractTodoPhases(result: unknown): unknown {
 	return (details as { phases?: unknown }).phases;
 }
 
-function extractTodoEntries(phases: unknown[]): Array<{ content: string; status: TodoStatus; droppedBy?: "user" }> {
-	const entries: Array<{ content: string; status: TodoStatus; droppedBy?: "user" }> = [];
+function extractTodoEntries(phases: unknown[]): Array<{ content: string; status: TodoStatus }> {
+	const entries: Array<{ content: string; status: TodoStatus }> = [];
 	for (const phase of phases) {
 		if (typeof phase !== "object" || phase === null || !("tasks" in phase)) {
 			continue;
@@ -471,12 +465,7 @@ function extractTodoEntries(phases: unknown[]): Array<{ content: string; status:
 				continue;
 			}
 			const status = (task as { status?: TodoStatus }).status;
-			const droppedBy = (task as { droppedBy?: unknown }).droppedBy;
-			entries.push({
-				content,
-				status: isTodoStatus(status) ? status : "pending",
-				...(droppedBy === "user" ? { droppedBy: "user" as const } : {}),
-			});
+			entries.push({ content, status: isTodoStatus(status) ? status : "pending" });
 		}
 	}
 	return entries;

@@ -16,7 +16,7 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { adjustHsv, formatNumber, getProjectDir, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils";
-import { isSettingsInitialized, settings } from "../../../config/settings";
+import { settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
 import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
@@ -515,7 +515,6 @@ export class StatusLineComponent implements Component {
 	}
 
 	#gitEnabled(): boolean {
-		if (!isSettingsInitialized()) return false;
 		return settings.get("git.enabled");
 	}
 	#hasGitBackedSegment(): boolean {
@@ -1241,7 +1240,6 @@ export class StatusLineComponent implements Component {
 		(async () => {
 			// Helper: only write cache if branch/repo context hasn't changed since launch
 			const setCachedPr = (value: { number: number; url: string } | null) => {
-				if (this.#disposed) return;
 				const latestActiveRepoCache = this.#resolveActiveRepoCache();
 				if (latestActiveRepoCache.effectiveGitCwd !== lookupCwd) return;
 				const latestBranch = this.#getBranchLabel(latestActiveRepoCache);

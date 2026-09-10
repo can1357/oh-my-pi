@@ -2,8 +2,6 @@ You MUST summarize the conversation above into a structured handoff summary for 
 
 IMPORTANT: If the conversation ends with an unanswered question or a request awaiting user response (e.g., "Please run command and paste output"), you MUST preserve that exact question/request.
 
-Preserve pending/in_progress items from additional-context and the conversation in Incomplete Todos; do not mark them done.
-
 You MUST use this format (sections can be omitted if not applicable):
 
 ## Goal
@@ -28,9 +26,6 @@ You MUST use this format (sections can be omitted if not applicable):
 
 ## Next Steps
 1. [Ordered list of next actions]
-
-## Incomplete Todos
-[pending/in_progress items only]
 
 ## Critical Context
 - [Important data, pending questions, references]

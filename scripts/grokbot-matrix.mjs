@@ -115,7 +115,7 @@ function parseFrames(buf) {
 
 async function sandProbe({ id, sandParameterIds, effort, sandParameterDefaults, sandMaxMode, tools }) {
 	const cfg = await loadGrokbotConfig();
-	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND, undefined, undefined, "inference");
+	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND);
 	const headers = {
 		...grokbotClientHeaders(cfg),
 		authorization: `Bearer ${token}`,
@@ -295,7 +295,7 @@ const AUTOMATION_OMP_TOOLS = [
 
 async function sandAutomationProbe(catalog) {
 	const cfg = await loadGrokbotConfig();
-	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND, undefined, undefined, "inference");
+	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND);
 	const headers = {
 		...grokbotClientHeaders(cfg),
 		authorization: `Bearer ${token}`,

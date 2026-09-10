@@ -82,7 +82,6 @@ function toCredentialBlockSnapshot(block: StoredCredentialBlock): CredentialBloc
 		blockScope: block.blockScope,
 		blockedUntilMs: block.blockedUntilMs,
 		...(block.updatedAtMs !== undefined ? { updatedAtMs: block.updatedAtMs } : {}),
-		...(block.retryAfter === true ? { retryAfter: true } : {}),
 	};
 }
 
@@ -100,8 +99,7 @@ function credentialBlockSnapshotsEqual(
 			leftBlock.providerKey !== rightBlock.providerKey ||
 			leftBlock.blockScope !== rightBlock.blockScope ||
 			leftBlock.blockedUntilMs !== rightBlock.blockedUntilMs ||
-			leftBlock.updatedAtMs !== rightBlock.updatedAtMs ||
-			leftBlock.retryAfter !== rightBlock.retryAfter
+			leftBlock.updatedAtMs !== rightBlock.updatedAtMs
 		) {
 			return false;
 		}
@@ -631,7 +629,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 					blockScope: block.blockScope,
 					blockedUntilMs: block.blockedUntilMs,
 					updatedAtMs: block.updatedAtMs,
-					...(block.retryAfter === true ? { retryAfter: true } : {}),
 				});
 			}
 		}
@@ -911,7 +908,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				blockScope: block.blockScope,
 				blockedUntilMs: block.blockedUntilMs,
 				...(block.updatedAtMs !== undefined ? { updatedAtMs: block.updatedAtMs } : {}),
-				...(block.retryAfter === true ? { retryAfter: true } : {}),
 			}))
 			.sort(compareCredentialBlockSnapshots);
 		if (blocks.length > 0) return { ...entry, blocks };
@@ -936,8 +932,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			blocks[blockIndex] = {
 				...existing,
 				blockedUntilMs: Math.max(existing.blockedUntilMs, incoming.blockedUntilMs),
-				...(incoming.updatedAtMs !== undefined ? { updatedAtMs: incoming.updatedAtMs } : {}),
-				...(incoming.retryAfter === true || existing.retryAfter === true ? { retryAfter: true } : {}),
 			};
 		}
 		blocks.sort(compareCredentialBlockSnapshots);

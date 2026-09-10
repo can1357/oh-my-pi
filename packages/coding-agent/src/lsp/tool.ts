@@ -166,14 +166,6 @@ function formatRenameStatError(error: unknown): string {
 /**
  * LSP tool for language server protocol operations.
  */
-function countDiagnosticErrors(diagnostics: readonly Diagnostic[]): number {
-	let count = 0;
-	for (const diagnostic of diagnostics) {
-		if (diagnostic.severity === undefined || diagnostic.severity === 1) count++;
-	}
-	return count;
-}
-
 export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Theme> {
 	readonly name = "lsp";
 	readonly approval = (args: unknown): ToolApprovalDecision => {
@@ -283,15 +275,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							text: `Workspace diagnostics (${result.projectType.description}):\n${result.output}`,
 						},
 					],
-					details: {
-						action,
-						success: result.success,
-						request: params,
-						file: "*",
-						// Propagate 0 when clean so the unverified-merge latch can clear.
-						diagnosticErrorCount: result.diagnosticErrorCount,
-						failedServerCount: result.failedCheckerCount,
-					},
+					details: { action, success: true, request: params },
 				};
 			}
 
@@ -303,13 +287,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							text: "Error: file parameter required. Use `*` for workspace-wide diagnostics or a path/glob for specific files.",
 						},
 					],
-					details: {
-						action,
-						success: false,
-						request: params,
-						diagnosticErrorCount: 0,
-						failedServerCount: 0,
-					},
+					details: { action, success: false, request: params },
 				};
 			}
 
@@ -321,15 +299,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			if (targets.length === 0) {
 				return {
 					content: [{ type: "text", text: `No files matched pattern: ${file}` }],
-					details: {
-						action,
-						// Not a successful verify — do not clear an unverified-merge latch.
-						success: false,
-						request: params,
-						file,
-						diagnosticErrorCount: 0,
-						failedServerCount: 0,
-					},
+					details: { action, success: true, request: params },
 				};
 			}
 
@@ -338,8 +308,6 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const allServerNames = new Set<string>();
 			let totalServerAttempts = 0;
 			let totalServerSuccesses = 0;
-			let diagnosticErrorCount = 0;
-			let noServerTargets = 0;
 			if (truncatedGlobTargets) {
 				results.push(
 					`${theme.status.warning} Pattern matched more than ${MAX_GLOB_DIAGNOSTIC_TARGETS} files; showing first ${MAX_GLOB_DIAGNOSTIC_TARGETS}. Narrow the glob or use workspace diagnostics.`,
@@ -351,10 +319,6 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				const resolved = resolveToCwd(target, this.session.cwd);
 				const servers = getServersForFile(config, resolved);
 				if (servers.length === 0) {
-					// Count as a failed attempt so an all-"no server" run cannot
-					// report success:true / failedServerCount:0 and clear the latch.
-					noServerTargets++;
-					totalServerAttempts++;
 					results.push(`${theme.status.error} ${target}: No language server found`);
 					continue;
 				}
@@ -396,22 +360,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							: isProjectAwareLspServer(serverConfig)
 								? PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS
 								: SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
-						const waited = await waitForDiagnostics(client, uri, {
+						const diagnostics = await waitForDiagnostics(client, uri, {
 							timeoutMs: Math.min(waitCapMs, timeoutSec * 1000),
 							signal,
 							minVersion,
 							expectedDocumentVersion,
 						});
-						if (waited.timedOut) {
-							// No publish/pull before the deadline — not a clean empty set.
-							failedServers.push(serverName);
-							logger.debug("LSP diagnostics wait timed out without a response", {
-								server: serverName,
-								file: relPath,
-							});
-							continue;
-						}
-						allDiagnostics.push(...waited.diagnostics);
+						allDiagnostics.push(...diagnostics);
 						succeededServers++;
 						totalServerSuccesses++;
 					} catch (err) {
@@ -440,7 +395,6 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				}
 
 				sortDiagnostics(uniqueDiagnostics);
-				diagnosticErrorCount += countDiagnosticErrors(uniqueDiagnostics);
 
 				if (!detailed && targets.length === 1) {
 					if (succeededServers === 0) {
@@ -451,14 +405,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 									text: `${theme.status.error} ${relPath}: all language servers failed (${failedServers.join(", ")})`,
 								},
 							],
-							details: {
-								action,
-								serverName: Array.from(allServerNames).join(", "),
-								success: false,
-								file,
-								diagnosticErrorCount: 0,
-								failedServerCount: Math.max(failedServers.length, 1),
-							},
+							details: { action, serverName: Array.from(allServerNames).join(", "), success: false },
 						};
 					}
 
@@ -469,14 +416,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 								: "OK";
 						return {
 							content: [{ type: "text", text }],
-							details: {
-								action,
-								serverName: Array.from(allServerNames).join(", "),
-								success: true,
-								file,
-								diagnosticErrorCount: 0,
-								failedServerCount: failedServers.length,
-							},
+							details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
 						};
 					}
 
@@ -488,14 +428,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					}
 					return {
 						content: [{ type: "text", text: output }],
-						details: {
-							action,
-							serverName: Array.from(allServerNames).join(", "),
-							success: true,
-							file,
-							diagnosticErrorCount: countDiagnosticErrors(uniqueDiagnostics),
-							failedServerCount: failedServers.length,
-						},
+						details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
 					};
 				}
 
@@ -524,25 +457,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			const allServersFailed = totalServerAttempts > 0 && totalServerSuccesses === 0;
-			const failedServerCount = Math.max(0, totalServerAttempts - totalServerSuccesses);
-			// Every target lacked a configured server — treat as verify failure.
-			const noServersAttempted = noServerTargets === targets.length && totalServerSuccesses === 0;
-			const reportedFailedServers = noServersAttempted
-				? Math.max(failedServerCount, noServerTargets)
-				: failedServerCount;
 			return {
 				content: [{ type: "text", text: results.join("\n") }],
-				details: {
-					action,
-					serverName: Array.from(allServerNames).join(", "),
-					// Truncated globs only inspected a subset — not full-tree verify.
-					success: !allServersFailed && !noServersAttempted && !truncatedGlobTargets,
-					file,
-					diagnosticErrorCount,
-					// Keep verify from clearing the latch even if a caller only
-					// inspects failedServerCount (truncated ⇒ incomplete scan).
-					failedServerCount: truncatedGlobTargets ? Math.max(reportedFailedServers, 1) : reportedFailedServers,
-				},
+				details: { action, serverName: Array.from(allServerNames).join(", "), success: !allServersFailed },
 			};
 		}
 

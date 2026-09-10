@@ -1,22 +1,6 @@
+# Changelog
+
 ## [Unreleased]
-### Fixed
-
-- JSON print mode exits nonzero on provider errors and aborts after flushing the complete event transcript.
-- Starting with a model scope and a remembered default model no longer crashes before the session opens.
-- Cursor new-file writes preserve missing-file errors through tool wrappers, allowing the write to proceed.
-
-- Zero-billed empty-stop promotion treats Devin-style `usage.credits` (`cost` / `committedCost` / `acuCost`) as billed usage so committed credit charges are not replayed as never-dispatched.
-- Zero-billed empty stops that exhaust the retry cap now consult `retry.modelFallback` / `retry.fallbackChains` instead of surfacing a retry-cap error. Turns that billed any usage bucket, including provider-side orchestration tokens, still settle terminal ([#9480](https://github.com/can1357/oh-my-pi/issues/9480)). Same-model effort-only chain entries no longer count as a model takeover.
-
-### Fixed
-
-- Durable incomplete-todo snapshots round-trip empty phase/title fields, keep overflow-shaped phase names, and reserve exact-phase provenance before rename fallback.
-- Incomplete-todo durable snapshots preserve blocked tasks, encode CRLF/CR/LF distinctly, and keep model-drop provenance across `/todo edit` phase renames.
-
-### Fixed
-
-- Unverified-merge latch treats read-only shell probes (`git status`, `cat`, `rg`, …) as non-acceptance, and LSP diagnostics regressions match the `waitForDiagnostics` result shape.
-- Parent-verify gating rejects status-negated (`! cmd`) and newline-masked commands, ignores redirection ampersands (`2>&1` / `&>`), and realpath-compares verifier cwd so symlink escapes cannot clear the merge latch.
 
 ### Fixed
 - Cold catalog / `--api-key` bind expands every selected model role (`@smol`, `@slow`, custom, chained `@default`→`@smol`), not only `@default`.
@@ -78,28 +62,6 @@
 
 ### Added
 
-- `omp auth-gateway serve --routes=<path>` loads virtual route definitions from a JSON/JSON5 file.
-- `omp auth-gateway serve` loads virtual routes from `auth.gateway.routesFile` in config.yml when `--routes` is omitted.
-
-- Added provider-reported credits and concrete routed-model counts to `/session` statistics ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
-- Added `CLINE_API_KEY` to the CLI environment help for native ClinePass subscription inference ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
-- Devin model selectors now accept the native CLI's short aliases (`devin/opus`, `devin/swe`), dotted upstream spellings (`devin/gemini-3.7-flash`), and raw effort-route wire uids for dynamically collapsed families ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
-- Added provider-supplied model metadata to the `/models` detail line: `new`, `beta`, and `recommended` badges beside the model name, and the upstream description after the context, cost, and perf facts ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
-- Standalone `CLAUDE.md` files in the project root (and ancestor directories) are now loaded as context, mirroring `AGENTS.md` discovery; config-directory context files still take precedence per scope.
-
-### Changed
-
-- Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
-## [18.1.14] - 2026-09-07
-### Added
-
-- Added `/grokbot` to show Grok Bot provider status (credentials/client; no secrets). Distinct from Cursor (`/login cursor`) and xAI / Grok CLI (`xai`, `xai-oauth`), with independent usage allowances. `/login grokbot` surfaces the host-install prompt for the Grok Bot system. Model lookup resolves Grok Bot `idAliases` (e.g. `grokbot/composer` → live `composer-2.5`) without separate catalog rows.
-- Documented Grok Bot one-shot text and tools probes from this checkout (`docs/grokbot.md`). Published `omp` 18.0.1 does not include this provider.
-- Documented Grok Bot one-shot text and tools probes, per-family tool wire, and the live AvailableModels matrix (`docs/grokbot.md`, `scripts/grokbot-catalog-matrix.ts`).
-- Grok Bot catalog matrix now smokes bash + read + write and retries HTTP 502/504 gateway flakes.
-
-### Fixed
-
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 - Added `advisor.maxNotesPerUpdate` setting and `WATCHDOG.yml` configuration (default `4`): allows reasoning verifiers to batch findings in a single review update without being rate-limited.
 - Headless browser tabs now freeze when a turn settles so idle animated/WebGL pages stop burning CPU/GPU, resuming automatically on next use; tabs idle past `browser.idleCloseSec` (default 30 minutes) are closed. `persist: true` on `browser.open` opts a tab out of both ([#8246](https://github.com/can1357/oh-my-pi/issues/8246) by [@H4vC](https://github.com/H4vC)).
@@ -121,20 +83,6 @@
 - Python cells are no longer replayed automatically after a kernel crash, preventing duplicate side effects; the next call starts a fresh kernel.
 - Session rewrites preserve open-reader snapshots and replacement identity when a rename needs an EPERM fallback.
 - Fixed WorkPool children retaining a stale Gemini-formatted `yield` declaration when pooled items were installed or cleared.
-
-### Added
-
-- Added `advisor.maxNotesPerUpdate` setting and `WATCHDOG.yml` configuration (default `4`): allows reasoning verifiers to batch findings in a single review update without being rate-limited.
-
-### Fixed
-
-- Fixed worker subprocesses failing to declare themselves as worker hosts before dispatching selectors, which prevented nested thread worker spawns during `/usage` stats sync on multi-core systems.
-- Fixed `/usage` displaying a misleading generic database read failure when activity loading fails; the error detail is now sanitized, collapsed to a single line with shortened paths, and surfaced in the dashboard.
-- Advisor notes now report rate limiting accurately, blockers always interrupt even after a lower-severity note in the same update, and deferred notes flush when the primary run completes, including after advisor quota exhaustion ([#11062](https://github.com/can1357/oh-my-pi/issues/11062)).
-### Fixed
-
-- Python cells are no longer replayed automatically after a kernel crash, preventing duplicate side effects; the next call starts a fresh kernel.
-- Session rewrites preserve open-reader snapshots and replacement identity when a rename needs an EPERM fallback.
 
 ## [18.1.14] - 2026-09-07
 
@@ -500,40 +448,11 @@
 - Fixed idle compaction discarding context while the session was still waiting on a backgrounded async job ([#10223](https://github.com/can1357/oh-my-pi/pull/10223) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - Fixed LSP idle timeout clobbering in multi-workspace sessions and unmanaged timer spawning on pure config reads ([#10237](https://github.com/can1357/oh-my-pi/pull/10237) by [@harshaygadekar](https://github.com/harshaygadekar)).
 
-### Fixed
-
-
-
-### Fixed
-
-- Fixed MCP OAuth discovery for shared API gateways and authorization servers with nested paths, including Keycloak realms, so authentication targets the correct resource issuer and supports endpoint and dynamic client-registration discovery.
-
-
-### Fixed
-
-- Fixed MCP OAuth discovery for shared API gateways and authorization servers with nested paths, including Keycloak realms, so authentication targets the correct resource issuer and supports endpoint and dynamic client-registration discovery.
-
-
-### Fixed
-
-- Fixed MCP OAuth discovery for shared API gateways and authorization servers with nested paths, including Keycloak realms, so authentication targets the correct resource issuer and supports endpoint and dynamic client-registration discovery.
-
-
-### Fixed
-
-- Auth-gateway bare `auto` resolves to Cursor's synthetic router when Cursor credentials are held, even if OpenRouter also exposes a bundled `auto` model.
-
-
 ## [18.0.11] - 2026-08-29
 
 ### Added
 
 - Added gallery previews for composer and status-line components, with CLI filters for browsing by surface, composer, or segment.
-- Git and Jujutsu operations now run in-process (gitoxide/jj-lib) instead of spawning `git`/`jj` subprocesses — faster status lines, diffs, staging, and worktree operations. The git binary is only used for credential-bound network transfers (push/fetch/clone) and reftable repositories.
-- Status lines, footers, reviews, project identity, cleanse, and autoresearch reads now work in pure Jujutsu workspaces as well as Git checkouts.
-- Include token usage statistics in inspect_image tool output
-- Pressing the session model shortcut (alt+p) again inside the picker toggles a red Task mode that switches the Task subagent's model for this session instead.
-- Git TUI: an AI staging wand next to "Stage All" asks "What should we stage?" and stages only the matching changes — the tiny/smol model picks the matching files from the whole change list, then filters their hunks in parallel; file-scoped requests ("git stuff") stage the picked files whole, content-scoped ones ("all comment changes") stage only the matching hunks.
 
 ### Changed
 
@@ -542,7 +461,6 @@
 ### Fixed
 
 - Fixed MCP OAuth discovery for shared API gateways and authorization servers with nested paths, including Keycloak realms, so authentication targets the correct resource issuer and supports endpoint and dynamic client-registration discovery.
-
 - Fixed credential rotation for HTTP 402 payment-required responses so sibling credentials are tried before model fallback without misclassifying informative non-quota errors.
 - Transport errors after a complete, non-executed tool call can now retry through configured retry budgets and fallback chains when it is safe to do so, instead of ending the turn prematurely.
 - Improved handling of truncated or otherwise undecodable images so they produce an actionable error and no longer permanently block subsequent requests or resumed sessions.
@@ -562,53 +480,6 @@
 - Fixed `lsp diagnostics` incorrectly reporting success for project-aware pull-diagnostic servers when diagnostics time out or fail.
 - Corrected labels under `Settings > Context > Compaction Token Limit`.
 - Fixed orphaned pages, iframes, and workers accumulating in the shared headless browser after abnormal OMP session termination.
-### Fixed
-
-- Compaction’s durable `## Incomplete Todos` section is uncapped and includes model-abandoned items (not user drops), with newline-safe titles, so reconstruction after compact cannot permanently drop overflow or model abandons; summarizer/nudge prompts stay capped. Compaction no longer reloads todos from the branch before writing leftovers, so a live RPC `set_todos` cache stays authoritative.
-- Compaction summaries keep a capped `## Incomplete Todos` section (and summarizer extra-context) so pending/in_progress items survive the cut and can be reconstructed after the latest todo tool result is summarized away (ported from [#8875](https://github.com/can1357/oh-my-pi/pull/8875) / [#8874](https://github.com/can1357/oh-my-pi/issues/8874)).
-
-- `/todo` slash and TUI mutations always use the live session todo cache (including an explicit empty list after RPC `set_todos([])`), so a host clear is not resurrected from a stale branch snapshot.
-- Model-facing `todo` docs state that model `rm` abandons in place (like `drop`); only user `/todo rm` deletes.
-- Dropped todos (`todo drop` / `abandoned`) no longer count as done for the stop-time reminder or the todo summary. Settle stays incomplete until those items are completed, blocked, or the user forces stop. User-issued `/todo drop` is stamped as user-authored and does not schedule a continue reminder. Newly abandoned checklist items from `/todo edit` or a fresh markdown import are stamped as user drops; a no-op edit of model-abandoned items stays incomplete for settle. Imports stamp every `[-]`/`[~]` as a user cancel even when replacing a list that already held a model drop with the same content. Later model broad drops no longer clear an existing user `droppedBy` stamp, and no longer reopen completed or blocked tasks; an explicit targeted `todo({ op: "drop", task })` can still abandon blocked or completed work. Model `todo rm` abandons open tasks in place (not completed/blocked/user-dropped), so it cannot silence the same gate; user `/todo rm` still deletes. User-authored drops also count as settled for HUD auto-clear. RPC `set_todos` stamps abandoned provenance against the prior list without stripping phase/task ids, notes, or details. Markdown export escapes literal `<!--`/`-->` in task text (ampersand-first so pre-escaped `&lt;!--`/`--&gt;` round-trip) so content cannot fake provenance comments; edit and Cursor sync match provenance by phase/occurrence FIFO for every status (not only abandoned lookups) so a leading non-abandoned duplicate cannot turn a later model drop into a user cancel on a no-op save. ACP plan updates from todo tool results map user-canceled abandons to completed while model drops stay pending.
-- `AgentStorage.close()` is idempotent: a second process-wide close no longer throws `Database has closed` when tests (or overlapping sessions) race the singleton map, and storage can be reopened for read/write afterward. A failed mid-close (e.g. real `SQLITE_IOERR_WRITE` from checkpoint) resets the closing guard so a retry can finish cleanup. Compile-backed tests skip only when `OMP_SKIP_COMPILED_BINARY_TESTS` marks the env unsupported; CI no longer auto-skips on a failed compile probe.
-- Model `todo({ op: "rm" })` abandons open work in place (like drop) so it cannot empty the settle ledger; user `/todo rm` still deletes.
-- RPC `set_todos` stamps abandoned rows as user-authored (`droppedBy: "user"`) so host cancels do not arm model-abandoned reminders.
-- Parent bash verify prefers a leading `cd` over a structured in-tree `cwd`, so `{ cwd: "/repo", command: "cd /tmp && bun test" }` no longer clears the latch.
-- Background bash re-key preserves the start-resolved cwd (does not overwrite with the running-ack structured cwd).
-- Leading `cd` prefixes that cannot be safely extracted (redirects, expansion) never clear the latch via session/structured cwd fallback.
-- Env/`sudo`/whitespace before `cd`, chained `cd … && cd …`, and `~` paths are resolved the same way as the bash tool for parent-verify cwd snaps.
-- Parent `eval` verify uses the session cwd when no explicit cwd is set (where the cell actually runs) and still rejects trivial expressions including `(1+1)` / `void 0`.
-- Duplicate background bash/eval terminals are not stashed after the verify snap clears, so a reused job id cannot clear a later latch from a stale early completion.
-- Early async terminals are stashed only while a bash/eval tool call still awaits its running-ack re-key; finished job ids are ignored so a hub redelivery cannot poison a later `bg_N` reuse.
-- `lsp` diagnostics waits that time out without a publish or pull report the server as failed (`failedServerCount`) instead of a clean `success: true` with zero errors.
-- Chained relative `cd` targets (`cd /tmp && cd project`) resolve cumulatively for parent-verify cwd snaps.
-- Relative leading `cd` targets resolve against the structured bash `cwd` (then session cwd), matching shell semantics for `{ cwd: "/tmp", command: "cd project && …" }`.
-- Shell-backgrounded verify commands (`bun test & true`) no longer clear the unverified-merge latch.
-- Status-masking verify chains (`bun test || true`, `bun test; true`, `bun test | cat`) no longer clear the unverified-merge latch.
-- Partial cherry-pick success before a later conflict still arms the parent verify latch (`hadAnyChanges`).
-- `/todo edit` and `/todo import` stamp Markdown `[-]`/`[~]` rows as user drops so settle does not treat them as model-abandoned work.
-- Parent `eval` no longer clears the unverified-merge latch on bare success: require an explicit cwd inside the merged tree and reject trivial expressions such as `1+1`.
-- Leading `cd <path>; …` (semicolon) is recognized for parent-verify cwd resolution, so `cd /tmp; bun test` no longer clears the latch as if it ran in-tree.
-- Isolated task merges now latch parent verification: child yield is not evidence. Each successful isolated apply adds one pending latch; one parent check cannot clear two overlapping merges. A successful parent `bash`/`eval` or clean `lsp` diagnostics result decrements the latch; `ls`/`pwd`/`echo` and error-bearing diagnostics do not. Stopping with an unverified merge continues the session like incomplete todos. Background bash/eval verification clears only when the async job completes successfully (including when hub consumes delivery). Session switches clear the latch and pending verify snapshots so a different cwd/transcript does not inherit them. Nested patch apply failures no longer report `applied: true` unless an earlier nested repo actually changed.
-- Armed the unverified-merge latch before temporary artifact cleanup so a cleanup failure cannot drop the settle gate after an isolated apply.
-- Merge-only todo reminders show an unverified-merge header instead of "0 incomplete todos", and ACP skips empty plan updates for those reminders.
-- `lsp` diagnostics now report `failedServerCount`; parent verify requires zero failed servers as well as zero error diagnostics. Workspace (`*`) diagnostics derive both counts from checker output. Targets with no configured language server count as failed attempts so they cannot falsely clear the latch.
-- Background bash/eval terminals that arrive before the running-ack re-key still clear the merge latch.
-- Env-prefixed tautologies (`FOO=1 pwd`) no longer clear the merge latch; bare assignment-only segments are also rejected.
-- The merge settle gate is skipped when no parent verify tools (`bash`/`eval`/`lsp`) are active.
-- Nested-only branch merges report `hadAnyChanges: false` until nested patches are actually applied.
-- Parent bash verify outside the session/repo tree (e.g. `cwd: /tmp`) no longer clears the unverified-merge latch. Model-abandoned todos stay incomplete for settle (user `droppedBy` cancels), so this gate does not revert the abandoned≠done contract.
-- Clean `lsp` diagnostics on a file outside the session/repo tree (e.g. `/tmp/clean.ts`) no longer clear the unverified-merge latch; workspace-wide `*` and in-tree targets still can.
-- Assistant questions or response cues no longer bypass an armed merge latch — settle still requires successful parent verify.
-- Parent bash verify also rejects relative escapes (`cwd: ../other-repo`) and leading `cd … &&` targets outside the merged tree when result details omit cwd.
-- `/todo drop` (TUI and ACP) stamps `droppedBy: "user"` so settle honors explicit user cancels; model `todo` drop ops remain unstamped. Restarting or model-dropping a previously user-canceled task clears the stale stamp.
-- Truncated LSP diagnostics globs (`success: false` when more than the target cap matched) no longer clear the unverified-merge latch.
-- Leading `cd <path> &&` / `;` wrappers are stripped before classifying bash verify tautologies (`cd packages/foo && pwd` is non-evidence).
-- Early async job terminals are stashed for merge-latch verify only when the job type is `bash` or `eval` (task/etc. are ignored).
-- `AgentStorage.close()` clears its in-flight guard when shutdown throws so a later retry can re-enter.
-- Dropped todos (`todo drop` / `abandoned`) no longer count as done for the stop-time reminder or the todo summary. Settle stays incomplete until those items are completed, blocked, or the user forces stop. User-issued `/todo drop` is stamped as user-authored and does not schedule a continue reminder. Newly abandoned checklist items from `/todo edit` or a fresh markdown import are stamped as user drops; a no-op edit of model-abandoned items stays incomplete for settle. Imports stamp every `[-]`/`[~]` as a user cancel even when replacing a list that already held a model drop with the same content. Later model broad drops no longer clear an existing user `droppedBy` stamp, and no longer reopen completed or blocked tasks; an explicit targeted `todo({ op: "drop", task })` can still abandon blocked or completed work. Model `todo rm` abandons open tasks in place (not completed/blocked/user-dropped), so it cannot silence the same gate; user `/todo rm` still deletes. User-authored drops also count as settled for HUD auto-clear. RPC `set_todos` stamps abandoned provenance against the prior list without stripping phase/task ids, notes, or details.
-- `AgentStorage.close()` is idempotent: a second process-wide close no longer throws `Database has closed` when tests (or overlapping sessions) race the singleton map.
-- Dropped todos (`todo drop` / `abandoned`) no longer count as done for the stop-time reminder or the todo summary. Settle stays incomplete until those items are completed, blocked, or the user forces stop. User-issued `/todo drop` is stamped as user-authored and does not schedule a continue reminder. Checklist `[-]`/`[~]` items from `/todo edit` or markdown import are also treated as user drops. Later model broad drops no longer clear an existing user `droppedBy` stamp. Model `todo rm` abandons in place instead of deleting, so it cannot silence the same gate; user `/todo rm` still deletes.
 
 ## [18.0.10] - 2026-08-28
 
@@ -1380,8 +1251,6 @@
 - Fixed Streamable HTTP MCP sessions being invalidated by opening the optional GET SSE stream before sending `notifications/initialized`, which prevented Figma Dev Mode MCP from connecting ([#8514](https://github.com/can1357/oh-my-pi/issues/8514)).
 - Fixed the `/hotkeys` table describing Ctrl+D (`app.exit`) as "Exit (when editor is empty)" when it actually exits unconditionally and saves the current prompt as a resumable draft ([#8530](https://github.com/can1357/oh-my-pi/issues/8530)).
 - Fixed Ctrl+G external editors failing to launch on Windows because Bun re-quoted the embedded `cmd.exe /c` command line ([#8544](https://github.com/can1357/oh-my-pi/issues/8544)).
-### Fixed
-
 
 ## [17.3.3] - 2026-08-14
 

@@ -359,9 +359,7 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 						? "\n\nNo root changes to apply; nested repository patches captured."
 						: "\n\nNo changes to apply.",
 					changesApplied: true,
-					// Nested patches are captured but not applied yet — `hadAnyChanges`
-					// stays false until `applyEligibleNestedPatches` reports `applied`.
-					hadAnyChanges: false,
+					hadAnyChanges: canApplyNestedOnly,
 					mergedBranchForNestedPatches: canApplyNestedOnly,
 				};
 			}
@@ -373,11 +371,9 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 					baseSha: result.branchBaseSha,
 				},
 			]);
-			const mergedBranchForNestedPatches = mergeResult.processed.includes(result.branchName);
+			const mergedBranchForNestedPatches = mergeResult.merged.includes(result.branchName);
 			const changesApplied = mergeResult.failed.length === 0;
-			// Partial cherry-picks leave commits on HEAD even when the branch is
-			// listed in `failed` — still arm the parent verify latch.
-			const hadAnyChanges = mergeResult.merged.length > 0 || mergeResult.partialCommitsLanded === true;
+			const hadAnyChanges = changesApplied && mergeResult.merged.length > 0;
 
 			let summary: string;
 			if (changesApplied) {
@@ -484,36 +480,25 @@ export interface NestedPatchApplyOptions {
  * branch-merged) and the non-fatal failure handling so `TaskTool` and the
  * eval `agent()` bridge use one implementation.
  *
- * `summary` is a system-notification suffix (possibly empty). `applied` is true
- * when at least one nested patch was written into the parent workspace.
+ * Returns a system-notification suffix to append to the parent merge summary,
+ * or an empty string when nothing was applied or the nested apply succeeded.
  */
-export async function applyEligibleNestedPatches(
-	opts: NestedPatchApplyOptions,
-): Promise<{ summary: string; applied: boolean }> {
+export async function applyEligibleNestedPatches(opts: NestedPatchApplyOptions): Promise<string> {
 	const { result, repoRoot, mergeMode, changesApplied, mergedBranchForNestedPatches, commitMessage } = opts;
-	if (mergeMode === "patch" && changesApplied === false) return { summary: "", applied: false };
+	if (mergeMode === "patch" && changesApplied === false) return "";
 	const nestedPatches = result.nestedPatches ?? [];
 	const eligible =
 		nestedPatches.length > 0 &&
 		result.exitCode === 0 &&
 		!result.aborted &&
 		(mergeMode !== "branch" || mergedBranchForNestedPatches);
-	if (!eligible) return { summary: "", applied: false };
+	if (!eligible) return "";
 	try {
-		const { warnings, applied } = await applyNestedPatches(repoRoot, nestedPatches, commitMessage);
-		if (warnings.length === 0) return { summary: "", applied };
-		return {
-			summary: `\n\n<system-notification>${warnings.join("\n")}</system-notification>`,
-			applied,
-		};
-	} catch (err) {
-		// Nested patch failures are non-fatal to the parent merge. Only treat as
-		// applied when an earlier nested repo actually changed before the throw.
-		const applied =
-			typeof err === "object" && err !== null && "nestedPatchesApplied" in err && err.nestedPatchesApplied === true;
-		return {
-			summary: "\n\n<system-notification>Some nested repository patches failed to apply.</system-notification>",
-			applied,
-		};
+		const warnings = await applyNestedPatches(repoRoot, nestedPatches, commitMessage);
+		if (warnings.length === 0) return "";
+		return `\n\n<system-notification>${warnings.join("\n")}</system-notification>`;
+	} catch {
+		// Nested patch failures are non-fatal to the parent merge.
+		return "\n\n<system-notification>Some nested repository patches failed to apply.</system-notification>";
 	}
 }

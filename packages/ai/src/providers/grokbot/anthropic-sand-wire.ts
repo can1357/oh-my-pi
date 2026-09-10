@@ -96,8 +96,6 @@ export type AnthropicSandToolWireInput = {
 	 * the wire keeps the router id.
 	 */
 	sandWireModelId?: string;
-	/** Catalog-owned projection for provider-rejected schema composition keywords. */
-	requiresCursorToolSchemaProjection?: boolean;
 };
 
 export type AnthropicSandToolWireResult = AnthropicSandToolWireInput & {
@@ -144,11 +142,7 @@ function applyProductWire(
 	},
 ): AnthropicSandToolWireResult {
 	const ompTools = (input.ompTools ?? input.tools) as Parameters<typeof toProductField2Tools>[0];
-	const productTools: ProductWireTool[] = toProductField2Tools(
-		ompTools,
-		profile,
-		input.requiresCursorToolSchemaProjection,
-	);
+	const productTools: ProductWireTool[] = toProductField2Tools(ompTools, profile);
 	return {
 		...input,
 		requestedModel: options.requestedModel,
