@@ -20,6 +20,7 @@
 - The prompt border now colors Insert mode too (green), instead of falling through to the session accent. Normal and Visual were already colored, so Insert was the one mode the border could not distinguish — on themes whose accent matches the session accent it was indistinguishable from Normal. Borders outside Vim mode are unchanged.
 ### Fixed
 
+- Disabling "Read URLs" (`fetch.enabled=false`) no longer advertises web URL reads the runtime gate would reject: the `read` description and `path` schema drop their URL copy (internal URIs, `ssh://`, and `host:port` are still advertised), and the `read` cross-reference is removed from the browser prompt ([#11573](https://github.com/can1357/oh-my-pi/pull/11573) by [@nikkoxgonzales](https://github.com/nikkoxgonzales)).
 - Fixed collab host UI requests raised before a writable guest joins being lost; up to 64 pending asks now replay only to writable guests, and already-aborted asks no longer consume request IDs ([#9031](https://github.com/can1357/oh-my-pi/pull/9031) by [@alphastorm](https://github.com/alphastorm)).
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 - Streaming edit guard (`edit.streamingAbort`) no longer aborts on no-op preview results when replacement content produces no file changes, and carries the native patch diagnostic through the abort reason on genuine preview failures.
