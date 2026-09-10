@@ -1174,6 +1174,24 @@ export type MessageRenderer<T = unknown> = (
 	theme: Theme,
 ) => Component | undefined;
 
+export interface AssistantTextDecoratorContext {
+	/** Index of the text content block in the assistant message. */
+	contentIndex: number;
+	/** Whether the message is still streaming. */
+	transient: boolean;
+}
+
+/**
+ * Decorates rendered assistant prose without modifying the stored message.
+ * The callback receives plain text tokens only; Markdown code spans and fenced
+ * code blocks keep their original rendering.
+ */
+export interface AssistantTextDecorator {
+	decorate(text: string, context: AssistantTextDecoratorContext, theme: Theme): string;
+	/** Notify mounted transcript components when decorator state changes. */
+	onDidChange?(listener: () => void): () => void;
+}
+
 export interface AssistantThinkingRenderContext {
 	contentIndex: number;
 	thinkingIndex: number;
@@ -1411,6 +1429,9 @@ export interface ExtensionAPI {
 
 	/** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
+
+	/** Register a presentation-only decorator for assistant prose text tokens. */
+	registerAssistantTextDecorator(decorator: AssistantTextDecorator): void;
 
 	/**
 	 * Register a composer shape for the interactive editor.
@@ -1762,6 +1783,7 @@ export interface Extension {
 	tools: Map<string, RegisteredTool<any, any>>;
 	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
+	assistantTextDecorators: AssistantTextDecorator[];
 	fileWriteFallbackHandlers: FileWriteFallbackHandler[];
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;

@@ -114,7 +114,7 @@ Core methods:
 
 - `on(event, handler)`
 - `registerTool`, `registerCommand`, `registerShortcut`, `registerFlag`
-- `registerMessageRenderer`, `registerAssistantThinkingRenderer`
+- `registerMessageRenderer`, `registerAssistantThinkingRenderer`, `registerAssistantTextDecorator`
 - `registerComposerShape`
 - `setLabel`, `getFlag`
 - `sendMessage`, `sendUserMessage`, `appendEntry`, `exec`
@@ -724,6 +724,20 @@ pi.registerAssistantThinkingRenderer((context, theme) => {
 ```
 
 Used by interactive rendering to add display-only supplemental UI below each visible assistant thinking block. The renderer receives the already-visible thinking text, content/thinking indexes, theme, and a `requestRender()` callback for async renderers. All registered renderers that return a component are appended in registration order. Renderers must not mutate messages; the original thinking block remains the provider/session source of truth.
+
+## Assistant prose decorator
+
+`registerAssistantTextDecorator` changes only how assistant prose is painted in the TUI. Stored messages and model context remain untouched. Decorators receive plain Markdown text tokens, so inline code and fenced code blocks retain their original rendering.
+
+```ts
+pi.registerAssistantTextDecorator({
+  decorate(text, { transient }, theme) {
+    return transient ? text : theme.bold(text);
+  },
+});
+```
+
+Decorators may expose `onDidChange(listener)` when their presentation state changes at runtime. Mounted assistant messages subscribe to that signal and repaint without rewriting session history.
 
 ## Tool call/result renderer
 

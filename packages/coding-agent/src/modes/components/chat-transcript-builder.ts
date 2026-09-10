@@ -17,7 +17,7 @@ import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
-import type { MessageRenderer } from "../../extensibility/extensions/types";
+import type { AssistantTextDecorator, MessageRenderer } from "../../extensibility/extensions/types";
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../../session/launch-completion";
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
@@ -67,6 +67,7 @@ export interface ChatTranscriptBuilderDeps {
 	/** Whether the active registry entry came from a built-in factory. */
 	isBuiltInTool?: (name: string) => boolean;
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
+	getAssistantTextDecorators?: () => readonly AssistantTextDecorator[];
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
@@ -385,6 +386,7 @@ export class ChatTranscriptBuilder {
 			this.deps.ui.imageBudget,
 			proseOnlyThinking,
 			this.deps.linkTargets,
+			this.deps.getAssistantTextDecorators?.(),
 		);
 		assistantComponent.setImagesVisible(settings.get("terminal.showImages"));
 		assistantComponent.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
@@ -420,6 +422,7 @@ export class ChatTranscriptBuilder {
 				undefined,
 				proseOnlyThinking,
 				this.deps.linkTargets,
+				this.deps.getAssistantTextDecorators?.(),
 			);
 			component.setImagesVisible(settings.get("terminal.showImages"));
 			component.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));

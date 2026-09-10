@@ -13,7 +13,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import type { AssistantThinkingRenderer } from "../../extensibility/extensions/types";
+import type { AssistantTextDecorator, AssistantThinkingRenderer } from "../../extensibility/extensions/types";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { resolveImageOptions } from "../../tools/render-utils";
 import { WidthAwareText } from "../../tui";
@@ -261,6 +261,7 @@ export class AssistantMessageComponent extends Container {
 
 	#textColorTransform?: (text: string) => string;
 	#linkTargets: ReadonlyMap<string, string> = EMPTY_LINK_TARGETS;
+	#decoratorUnsubscribers: Array<() => void> = [];
 	#markdownTheme: MarkdownTheme | undefined;
 	/** Block this reply reacts to; undefined when the preceding block takes no reactions. */
 	#reactionTarget: ReactionTarget | undefined;
@@ -269,6 +270,18 @@ export class AssistantMessageComponent extends Container {
 
 	setTextColorTransform(transform?: (text: string) => string): void {
 		this.#textColorTransform = transform;
+	}
+
+	#decorateText(text: string, contentIndex: number): string {
+		let decorated = text;
+		for (const decorator of this.textDecorators) {
+			try {
+				decorated = decorator.decorate(decorated, { contentIndex, transient: this.#lastUpdateTransient }, theme);
+			} catch {
+				// A presentation extension must never hide the original assistant prose.
+			}
+		}
+		return decorated;
 	}
 
 	#getProseTheme(): MarkdownTheme {
@@ -369,10 +382,20 @@ export class AssistantMessageComponent extends Container {
 		private readonly imageBudget?: ImageBudget,
 		private proseOnlyThinking = true,
 		linkTargets?: ReadonlyMap<string, string>,
+		private readonly textDecorators: readonly AssistantTextDecorator[] = [],
 	) {
 		super();
 		this.#transcriptBlockFinalized = message !== undefined;
 		if (linkTargets?.size) this.#linkTargets = linkTargets;
+		for (const decorator of this.textDecorators) {
+			const unsubscribe = decorator.onDidChange?.(() => {
+				this.#fastPathKey = undefined;
+				this.#fastPathItems = undefined;
+				if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+				this.onImageUpdate?.();
+			});
+			if (unsubscribe) this.#decoratorUnsubscribers.push(unsubscribe);
+		}
 
 		// Container for text/thinking content.
 		this.#contentContainer = new Container();
@@ -426,6 +449,8 @@ export class AssistantMessageComponent extends Container {
 
 	override dispose(): void {
 		this.#stopThinkingAnimation();
+		for (const unsubscribe of this.#decoratorUnsubscribers) unsubscribe();
+		this.#decoratorUnsubscribers = [];
 		super.dispose();
 	}
 
@@ -1038,7 +1063,12 @@ export class AssistantMessageComponent extends Container {
 			if (content.type === "text" && canonicalizeMessage(content.text)) {
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const trimmed = content.text.trim();
-				const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
+				const decorate = (text: string) => {
+					const colored = this.#textColorTransform ? this.#textColorTransform(text) : text;
+					return this.#decorateText(colored, i);
+				};
+				const mdOptions =
+					this.#textColorTransform || this.textDecorators.length > 0 ? { color: decorate } : undefined;
 				const md = new Markdown(trimmed, 1, 0, this.#getProseTheme(), mdOptions, 0);
 				this.#contentContainer.addChild(md);
 				this.#emergencyText = md;
