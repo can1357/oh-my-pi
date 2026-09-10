@@ -7,6 +7,7 @@ provider "deepseek" {
 		}
 	}
 	supports-reasoning-effort #true
+	supports-tool-choice #false
 	class "deepseek" {
 		thinking-mode "effort"
 	}
@@ -16,6 +17,5 @@ provider "deepseek" {
 		reasoning-content-field "reasoning_content"
 		requires-assistant-content-for-tool-calls #true
 		requires-reasoning-content-for-tool-calls #true
-		supports-tool-choice #false
 	}
 }
