@@ -236,34 +236,38 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	providers: ["Services", "Fireworks", "Tiny Model", "Protocol", "Timeouts", "Privacy"],
 };
 
-/** Status line segment identifiers */
-export type StatusLineSegmentId =
-	| "pi"
-	| "status"
-	| "model"
-	| "mode"
-	| "path"
-	| "git"
-	| "pr"
-	| "subagents"
-	| "token_in"
-	| "token_out"
-	| "token_total"
-	| "token_rate"
-	| "cost"
-	| "context_pct"
-	| "context_total"
-	| "time_spent"
-	| "time"
-	| "session"
-	| "hostname"
-	| "cache_read"
-	| "cache_write"
-	| "cache_hit"
-	| "session_name"
-	| "usage"
-	| "collab"
-	| "vim";
+/** Status line segment identifiers accepted by custom status-line settings. */
+export const STATUS_LINE_SEGMENT_IDS = [
+	"pi",
+	"status",
+	"model",
+	"mode",
+	"path",
+	"git",
+	"pr",
+	"subagents",
+	"token_in",
+	"token_out",
+	"token_total",
+	"token_rate",
+	"cost",
+	"context_pct",
+	"context_total",
+	"time_spent",
+	"time",
+	"session",
+	"hostname",
+	"cache_read",
+	"cache_write",
+	"cache_hit",
+	"session_name",
+	"usage",
+	"collab",
+	"vim",
+] as const;
+
+/** One identifier from the supported status-line segment catalog. */
+export type StatusLineSegmentId = (typeof STATUS_LINE_SEGMENT_IDS)[number];
 
 /** Submenu choice metadata. */
 export type SubmenuOption<V extends string = string> = {
