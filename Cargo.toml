@@ -215,7 +215,7 @@ serde_yaml = "0.9"
 seccompiler = "0.5"
 sha1 = "0.11"
 sha2 = "0.11"
-sha3 = "0.12"
+sha3 = "0.11"
 similar = "3"
 smallvec = { version = "2.0.0-alpha.12", features = ["serde"] }
 smol_bitmap = { version = "0.3.2", features = ["serde"] }
