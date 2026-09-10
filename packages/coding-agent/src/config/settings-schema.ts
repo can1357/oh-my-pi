@@ -472,6 +472,8 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 
 const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
 
+const DEFAULT_AGENT_PRESETS: Record<string, Record<string, string>> = {};
+
 export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
 	// General settings (no UI)
@@ -5210,6 +5212,10 @@ export const SETTINGS_SCHEMA = {
 	"task.agentAdvisor": {
 		type: "record",
 		default: {} as Record<string, string>,
+	},
+	"task.agentPresets": {
+		type: "record",
+		default: DEFAULT_AGENT_PRESETS,
 	},
 	"task.prewalk": {
 		type: "boolean",

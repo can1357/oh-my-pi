@@ -153,6 +153,7 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"task.agentModelOverrides",
 	"task.agentPrewalk",
 	"task.agentAdvisor",
+	"task.agentPresets",
 	// Memory subsystems are off-by-default for RPC/ACP hosts; embedders that want
 	// memory should opt in explicitly through their own settings layer.
 	"memory.backend",

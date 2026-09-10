@@ -208,6 +208,8 @@ For task dispatch, model precedence is:
 
 Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
 
+Named agent presets (`task.agentPresets`, managed from the `/agents` hub) are a UI-level convenience: applying one expands its `agent → model` map into `task.agentModelOverrides` — `apply` replaces the whole record, `merge` only overwrites the agents the preset names — so the precedence list above is unchanged at spawn time.
+
 Runtime output schema precedence is:
 
 1. the task item's explicit `outputSchema`

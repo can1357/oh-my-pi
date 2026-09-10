@@ -27,7 +27,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
-import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import type { EffectiveExtensionRoots } from "../../capability/types";
 import { getConfigDirs } from "../../config";
@@ -78,9 +78,10 @@ const SOURCE_ORDER: Record<AgentSource, number> = { project: 0, user: 1, bundled
 
 interface SidebarEntry {
 	id: string;
-	kind: "all" | "source" | "new" | "separator";
+	kind: "all" | "source" | "new" | "separator" | "preset" | "new-preset";
 	label: string;
 	source?: AgentSource;
+	presetName?: string;
 	annotation?: string;
 }
 
@@ -98,12 +99,20 @@ interface StripChip {
 		| { kind: "property"; property: PropertyKind }
 		| { kind: "set"; property: PropertyKind; value: string | undefined }
 		| { kind: "pick"; property: PropertyKind }
-		| { kind: "pattern"; property: PropertyKind };
+		| { kind: "pattern"; property: PropertyKind }
+		| { kind: "preset-apply"; preset: string; mode: "replace" | "merge" }
+		| { kind: "preset-rename"; preset: string }
+		| { kind: "preset-delete"; preset: string }
+		| { kind: "preset-cancel" };
 }
 
 type StripState =
 	| { kind: "chips"; agent: HubAgent; property?: PropertyKind; chips: StripChip[]; index: number }
+	| { kind: "preset"; preset: string; chips: StripChip[]; index: number }
 	| { kind: "pattern"; agent: HubAgent; property: PropertyKind; input: Input };
+
+/** `task.agentPresets`: preset name → (agent name → model selector). */
+type AgentPresets = Record<string, Record<string, string>>;
 
 /** Recorded chip hit-range on the footer row (columns relative to frame col 0). */
 interface ChipRange {
@@ -236,6 +245,14 @@ export class AgentsHubComponent implements Component {
 	#assigning: { agent: HubAgent; property: PropertyKind } | null = null;
 	#browser: ModelBrowser;
 
+	/** Non-null while the body shows one preset's agent→model table. */
+	#presetDetail: string | null = null;
+	/** Non-null while typing a new preset name or renaming an existing one. */
+	#presetInput: Input | null = null;
+	#presetInputMode: "create" | "rename" | null = null;
+	/** >0 while the apply confirmation strip shows this many droppable entries. */
+	#presetConfirmDrop = 0;
+
 	// Create flow (AI-generated agent definition).
 	#createInput: Editor | null = null;
 	#createDescription = "";
@@ -333,6 +350,12 @@ export class AgentsHubComponent implements Component {
 				});
 			this.#buildSidebar();
 			this.#buildRows();
+			const presets = this.#presets();
+			if (this.#presetDetail && !Object.hasOwn(presets, this.#presetDetail)) {
+				this.#presetDetail = null;
+				this.#presetConfirmDrop = 0;
+				if (this.#strip?.kind === "preset") this.#closeStrip();
+			}
 			if (selectedName) {
 				const index = this.#rows.findIndex(r => r.kind === "agent" && r.agent.name === selectedName);
 				if (index >= 0) this.#rowIndex = index;
@@ -366,6 +389,19 @@ export class AgentsHubComponent implements Component {
 				});
 			}
 		}
+		const presets = this.#presets();
+		const activePreset = this.#activePresetName();
+		entries.push({ id: "sep:presets", kind: "separator", label: "" });
+		for (const name of Object.keys(presets).sort((a, b) => a.localeCompare(b))) {
+			entries.push({
+				id: `preset:${name}`,
+				kind: "preset",
+				label: replaceTabs(name),
+				presetName: name,
+				annotation: name === activePreset ? "active" : String(Object.keys(presets[name] ?? {}).length),
+			});
+		}
+		entries.push({ id: "new-preset", kind: "new-preset", label: "New preset" });
 		entries.push({ id: "sep:actions", kind: "separator", label: "" });
 		entries.push({ id: "new", kind: "new", label: "New agent" });
 		this.#entries = entries;
@@ -511,6 +547,287 @@ export class AgentsHubComponent implements Component {
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
+	// Presets
+	// ═══════════════════════════════════════════════════════════════════════
+
+	/** `task.agentPresets` normalized: blank names and non-string entries dropped. */
+	#presets(): AgentPresets {
+		return this.#normalizePresets(this.#settings.get("task.agentPresets"));
+	}
+
+	/** The global layer's own `task.agentPresets`, without the project merge. */
+	#globalPresets(): AgentPresets {
+		const rawGlobal = this.#settings.getGlobalSettings();
+		const task = isRecord(rawGlobal) ? rawGlobal.task : undefined;
+		return this.#normalizePresets(isRecord(task) ? task.agentPresets : undefined);
+	}
+
+	/** Agent names owned by the project layer's overrides; the UI cannot change these. */
+	#projectOverrideNames(): Set<string> {
+		const rawProject = this.#settings.getProjectSettings();
+		const task = isRecord(rawProject) ? rawProject.task : undefined;
+		const overrides = isRecord(task) && isRecord(task.agentModelOverrides) ? task.agentModelOverrides : undefined;
+		return new Set(Object.keys(overrides ?? {}));
+	}
+
+	#normalizePresets(raw: unknown): AgentPresets {
+		const presets: AgentPresets = {};
+		if (!isRecord(raw)) return presets;
+		for (const [rawName, rawEntries] of Object.entries(raw)) {
+			const name = rawName.trim();
+			if (!name) continue;
+			if (!isRecord(rawEntries)) continue;
+			const entries: Record<string, string> = {};
+			for (const [agent, selector] of Object.entries(rawEntries)) {
+				if (typeof selector !== "string") continue;
+				const trimmed = selector.trim();
+				if (trimmed) entries[agent] = trimmed;
+			}
+			presets[name] = entries;
+		}
+		return presets;
+	}
+
+	#normalizeSelector(value: string | string[] | undefined): string {
+		return (Array.isArray(value) ? value.join(",") : (value ?? "")).trim();
+	}
+
+	/**
+	 * Preset currently in effect: every entry matches the effective override and no
+	 * UI-owned override sits outside the preset. Project-layer overrides are ignored —
+	 * they outrank anything a preset can write, so they must not mask "active".
+	 */
+	#activePresetName(): string | undefined {
+		const current = this.#settings.get("task.agentModelOverrides") ?? {};
+		const projectOwned = this.#projectOverrideNames();
+		const extras = Object.keys(current).filter(agent => !projectOwned.has(agent));
+		for (const [name, preset] of Object.entries(this.#presets())) {
+			const entries = Object.entries(preset);
+			if (entries.some(([agent, selector]) => this.#normalizeSelector(current[agent]) !== selector)) continue;
+			if (extras.some(agent => !Object.hasOwn(preset, agent))) continue;
+			return name;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Writes the preset record to the global layer. Project-owned names are read-only in
+	 * the UI, so an existing global entry under such a name is re-emitted rather than
+	 * dropped: a global preset colliding with a project one must survive edits elsewhere.
+	 */
+	#persistPresets(presets: AgentPresets): void {
+		const global = this.#globalPresets();
+		const next: AgentPresets = {};
+		for (const [name, entries] of Object.entries(presets)) {
+			if (this.#isProjectPreset(name)) {
+				if (Object.hasOwn(global, name)) next[name] = global[name];
+				continue;
+			}
+			next[name] = entries;
+		}
+		this.#settings.set("task.agentPresets", next);
+		this.#tui.requestRender();
+	}
+
+	/** Live override entries that `preset` does not mention and that are not owned by the project layer. */
+	#presetDropNames(name: string): string[] {
+		const preset = this.#presets()[name] ?? {};
+		const current = this.#settings.get("task.agentModelOverrides") ?? {};
+		const projectOwned = this.#projectOverrideNames();
+		return Object.keys(current).filter(agent => !Object.hasOwn(preset, agent) && !projectOwned.has(agent));
+	}
+
+	#isProjectPreset(name: string): boolean {
+		const rawProject = this.#settings.getProjectSettings();
+		const task = isRecord(rawProject) ? rawProject.task : undefined;
+		const projectPresets = isRecord(task) && isRecord(task.agentPresets) ? task.agentPresets : undefined;
+		return Boolean(projectPresets && Object.hasOwn(projectPresets, name));
+	}
+
+	#applyPreset(name: string, mode: "replace" | "merge"): void {
+		const preset = this.#presets()[name];
+		if (!preset) return;
+		const next: Record<string, string> = {};
+		if (mode === "merge") {
+			// Merge only the entries this layer owns: re-writing project-layer overrides
+			// would duplicate project config into the global file.
+			const projectOwned = this.#projectOverrideNames();
+			for (const [agent, value] of Object.entries(this.#settings.get("task.agentModelOverrides") ?? {})) {
+				if (projectOwned.has(agent)) continue;
+				const selector = this.#normalizeSelector(value);
+				if (selector) next[agent] = selector;
+			}
+		}
+		for (const [agent, selector] of Object.entries(preset)) next[agent] = selector;
+		this.#settings.set("task.agentModelOverrides", next);
+		this.#notice = `Applied preset ${name} (${mode}) · ${Object.keys(preset).length} agents`;
+		this.#presetConfirmDrop = 0;
+		this.#closeStrip();
+		void this.#reload();
+	}
+
+	/** Snapshot the live overrides under `name`. */
+	#createPreset(name: string): void {
+		const trimmed = name.trim();
+		if (!trimmed) {
+			this.#notice = "Preset name is required";
+			return;
+		}
+		if (trimmed.length > 32 || /\s/.test(trimmed)) {
+			this.#notice = "Preset name must be ≤32 chars without spaces";
+			return;
+		}
+		const presets = this.#presets();
+		if (Object.hasOwn(presets, trimmed)) {
+			this.#notice = `Preset ${trimmed} already exists`;
+			return;
+		}
+		const snapshot: Record<string, string> = {};
+		for (const [agent, value] of Object.entries(this.#settings.get("task.agentModelOverrides") ?? {})) {
+			const selector = this.#normalizeSelector(value);
+			if (selector) snapshot[agent] = selector;
+		}
+		presets[trimmed] = snapshot;
+		this.#persistPresets(presets);
+		this.#activeEntryId = `preset:${trimmed}`;
+		this.#presetDetail = trimmed;
+		this.#notice = `Created preset ${trimmed} (${Object.keys(snapshot).length} agents)`;
+		void this.#reload();
+	}
+
+	#renamePreset(from: string, to: string): void {
+		const trimmed = to.trim();
+		if (!trimmed || trimmed === from) return;
+		if (this.#isProjectPreset(from)) {
+			this.#notice = `Preset "${from}" is defined in project config and is read-only in the UI`;
+			return;
+		}
+		if (trimmed.length > 32 || /\s/.test(trimmed)) {
+			this.#notice = "Preset name must be ≤32 chars without spaces";
+			return;
+		}
+		const presets = this.#presets();
+		if (Object.hasOwn(presets, trimmed)) {
+			this.#notice = `Preset ${trimmed} already exists`;
+			return;
+		}
+		if (!Object.hasOwn(presets, from)) return;
+		const next: AgentPresets = {};
+		for (const [name, entries] of Object.entries(presets)) next[name === from ? trimmed : name] = entries;
+		this.#persistPresets(next);
+		this.#activeEntryId = `preset:${trimmed}`;
+		this.#presetDetail = trimmed;
+		this.#notice = `Renamed preset ${from} → ${trimmed}`;
+		void this.#reload();
+	}
+	#deletePreset(name: string): void {
+		if (this.#isProjectPreset(name)) {
+			this.#notice = `Preset "${name}" is defined in project config and is read-only in the UI`;
+			return;
+		}
+		const presets = this.#presets();
+		if (!Object.hasOwn(presets, name)) return;
+		delete presets[name];
+		this.#persistPresets(presets);
+		this.#presetDetail = null;
+		this.#presetConfirmDrop = 0;
+		this.#closeStrip();
+		this.#activeEntryId = "all";
+		this.#notice = `Deleted preset ${name}`;
+		void this.#reload();
+	}
+
+	#openPresetDetail(name: string): void {
+		this.#presetDetail = name;
+		this.#tui.requestRender();
+	}
+
+	#closePresetDetail(): void {
+		this.#presetDetail = null;
+		this.#presetConfirmDrop = 0;
+		this.#tui.requestRender();
+	}
+
+	#openPresetStrip(name: string): void {
+		if (!Object.hasOwn(this.#presets(), name)) return;
+		const chips: StripChip[] = [];
+		if (this.#presetConfirmDrop > 0) {
+			chips.push({
+				label: "replace",
+				styled: theme.fg("warning", `replace — drop ${this.#presetConfirmDrop}`),
+				action: { kind: "preset-apply", preset: name, mode: "replace" },
+			});
+			chips.push({
+				label: "merge",
+				styled: theme.fg("accent", "merge instead"),
+				action: { kind: "preset-apply", preset: name, mode: "merge" },
+			});
+			chips.push({ label: "cancel", styled: theme.fg("dim", "cancel"), action: { kind: "preset-cancel" } });
+		} else {
+			chips.push({
+				label: "apply",
+				styled: theme.fg("success", `${theme.status.enabled} apply`),
+				action: { kind: "preset-apply", preset: name, mode: "replace" },
+			});
+			chips.push({
+				label: "merge",
+				styled: theme.fg("muted", "merge"),
+				action: { kind: "preset-apply", preset: name, mode: "merge" },
+			});
+			chips.push({
+				label: "rename",
+				styled: theme.fg("muted", "rename…"),
+				action: { kind: "preset-rename", preset: name },
+			});
+			chips.push({
+				label: "delete",
+				styled: theme.fg("warning", "delete"),
+				action: { kind: "preset-delete", preset: name },
+			});
+		}
+		this.#strip = { kind: "preset", preset: name, chips, index: 0 };
+		this.#tui.requestRender();
+	}
+
+	#beginPresetInput(mode: "create" | "rename"): void {
+		const input = new Input();
+		if (mode === "rename" && this.#presetDetail) input.setValue(this.#presetDetail);
+		this.#presetInput = input;
+		this.#presetInputMode = mode;
+		this.#closeStrip();
+		this.#tui.requestRender();
+	}
+
+	#clearPresetInput(): void {
+		this.#presetInput = null;
+		this.#presetInputMode = null;
+		this.#tui.requestRender();
+	}
+
+	#submitPresetInput(): void {
+		const value = this.#presetInput?.getValue() ?? "";
+		const mode = this.#presetInputMode;
+		const renameFrom = this.#presetDetail;
+		this.#presetInput = null;
+		this.#presetInputMode = null;
+		if (mode === "create") this.#createPreset(value);
+		else if (mode === "rename" && renameFrom) this.#renamePreset(renameFrom, value);
+		this.#tui.requestRender();
+	}
+
+	#handlePresetInput(data: string): void {
+		if (matchesSelectCancel(data)) {
+			this.#clearPresetInput();
+			return;
+		}
+		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+			this.#submitPresetInput();
+			return;
+		}
+		this.#presetInput?.handleInput(data);
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════
 	// Strips
 	// ═══════════════════════════════════════════════════════════════════════
 
@@ -622,9 +939,36 @@ export class AgentsHubComponent implements Component {
 
 	#activateStripChip(): void {
 		const strip = this.#strip;
-		if (strip?.kind !== "chips") return;
+		if (!strip || strip.kind === "pattern") return;
 		const chip = strip.chips[strip.index];
 		if (!chip) return;
+		if (strip.kind === "preset") {
+			switch (chip.action.kind) {
+				case "preset-apply": {
+					const { preset, mode } = chip.action;
+					const drops = mode === "replace" ? this.#presetDropNames(preset) : [];
+					if (drops.length > 0 && this.#presetConfirmDrop === 0) {
+						this.#presetConfirmDrop = drops.length;
+						this.#openPresetStrip(preset);
+						return;
+					}
+					this.#applyPreset(preset, mode);
+					return;
+				}
+				case "preset-rename":
+					this.#beginPresetInput("rename");
+					return;
+				case "preset-delete":
+					this.#deletePreset(chip.action.preset);
+					return;
+				case "preset-cancel":
+					this.#presetConfirmDrop = 0;
+					this.#openPresetStrip(strip.preset);
+					return;
+				default:
+					return;
+			}
+		}
 		const action = chip.action;
 		switch (action.kind) {
 			case "toggle":
@@ -848,6 +1192,12 @@ export class AgentsHubComponent implements Component {
 			return;
 		}
 
+		if (this.#presetInputMode) {
+			this.#handlePresetInput(data);
+			this.#tui.requestRender();
+			return;
+		}
+
 		if (this.#createActive) {
 			this.#handleCreateInput(data);
 			this.#tui.requestRender();
@@ -857,6 +1207,10 @@ export class AgentsHubComponent implements Component {
 		if (matchesSelectCancel(data)) {
 			if (this.#assigning) {
 				this.#cancelAssign();
+				return;
+			}
+			if (this.#presetDetail) {
+				this.#closePresetDetail();
 				return;
 			}
 			if (this.#searchQuery.length > 0) {
@@ -882,8 +1236,10 @@ export class AgentsHubComponent implements Component {
 		}
 
 		if (matchesKey(data, "tab") || matchesKey(data, "shift+tab")) {
-			this.#focus = this.#focus === "scope" ? "list" : "scope";
-			this.#tui.requestRender();
+			if (!this.#presetDetail) {
+				this.#focus = this.#focus === "scope" ? "list" : "scope";
+				this.#tui.requestRender();
+			}
 			return;
 		}
 		if (matchesKey(data, "left")) {
@@ -892,8 +1248,10 @@ export class AgentsHubComponent implements Component {
 			return;
 		}
 		if (matchesKey(data, "right")) {
-			this.#focus = "list";
-			this.#tui.requestRender();
+			if (!this.#presetDetail) {
+				this.#focus = "list";
+				this.#tui.requestRender();
+			}
 			return;
 		}
 
@@ -909,14 +1267,27 @@ export class AgentsHubComponent implements Component {
 				return;
 			}
 			if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-				if (this.#activeEntry().kind === "new") {
+				const entry = this.#activeEntry();
+				if (entry.kind === "new") {
 					this.#beginCreateFlow();
+				} else if (entry.kind === "new-preset") {
+					this.#beginPresetInput("create");
+				} else if (entry.kind === "preset" && entry.presetName) {
+					this.#openPresetDetail(entry.presetName);
+					this.#openPresetStrip(entry.presetName);
 				} else {
 					this.#focus = "list";
 				}
 				this.#tui.requestRender();
 				return;
 			}
+		}
+		if (this.#presetDetail) {
+			if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+				this.#openPresetStrip(this.#presetDetail);
+				this.#tui.requestRender();
+			}
+			return;
 		}
 
 		if (matchesSelectUp(data)) {
@@ -972,6 +1343,15 @@ export class AgentsHubComponent implements Component {
 		const strip = this.#strip;
 		if (!strip) return;
 		if (matchesSelectCancel(data)) {
+			if (strip.kind === "preset") {
+				if (this.#presetConfirmDrop > 0) {
+					this.#presetConfirmDrop = 0;
+					this.#openPresetStrip(strip.preset);
+					return;
+				}
+				this.#closeStrip();
+				return;
+			}
 			// A property strip steps back up to the agent strip instead of closing.
 			if (strip.kind === "chips" && strip.property) {
 				this.#openAgentStrip(strip.agent);
@@ -1060,7 +1440,20 @@ export class AgentsHubComponent implements Component {
 			const entry = this.#entries[index];
 			if (entry && entry.kind !== "separator") {
 				this.#activeEntryId = entry.id;
-				if (entry.kind !== "new") {
+				if (entry.kind === "preset" && entry.presetName) {
+					this.#closeStrip();
+					this.#presetConfirmDrop = 0;
+					this.#openPresetDetail(entry.presetName);
+					if (this.#searchQuery.length > 0) {
+						this.#searchQuery = "";
+						this.#rowIndex = 0;
+						this.#listScroll = 0;
+					}
+					this.#buildRows();
+					return;
+				}
+				if (this.#presetDetail) this.#closePresetDetail();
+				if (entry.kind !== "new" && entry.kind !== "new-preset") {
 					this.#buildRows();
 					this.#rowIndex = 0;
 					this.#listScroll = 0;
@@ -1083,7 +1476,7 @@ export class AgentsHubComponent implements Component {
 		const overBody = overContent && event.col >= bodyColStart;
 		const bodyLine = contentLine - 1; // body row 0 is the status row
 
-		if (event.row === this.#footerRow && this.#strip?.kind === "chips") {
+		if (event.row === this.#footerRow && (this.#strip?.kind === "chips" || this.#strip?.kind === "preset")) {
 			const strip = this.#strip;
 			if (event.leftClick) {
 				for (const range of this.#chipRanges) {
@@ -1101,13 +1494,13 @@ export class AgentsHubComponent implements Component {
 			if (overBody) this.#browser.routeMouse(event, bodyLine);
 			return true;
 		}
-		if (this.#createActive || this.#strip) return true;
+		if (this.#createActive || this.#strip || this.#presetInputMode) return true;
 
 		if (event.wheel !== null) {
 			if (overSidebar) {
 				const maxScroll = Math.max(0, this.#entries.length - this.#contentRowCount);
 				this.#sidebarScroll = Math.max(0, Math.min(this.#sidebarScroll + event.wheel, maxScroll));
-			} else if (overBody) {
+			} else if (overBody && !this.#presetDetail) {
 				this.#rowIndex = Math.max(0, Math.min(this.#rows.length - 1, this.#rowIndex + event.wheel));
 			}
 			return true;
@@ -1116,7 +1509,8 @@ export class AgentsHubComponent implements Component {
 		if (event.motion) {
 			// Hover is stored as an absolute row index so paint and click agree.
 			const hoverRow = bodyLine - this.#listRowStart + this.#listScroll;
-			this.#rowHover = overBody && hoverRow >= 0 && hoverRow < this.#rows.length ? hoverRow : null;
+			this.#rowHover =
+				!this.#presetDetail && overBody && hoverRow >= 0 && hoverRow < this.#rows.length ? hoverRow : null;
 			return true;
 		}
 
@@ -1128,8 +1522,16 @@ export class AgentsHubComponent implements Component {
 			if (clicked && clicked.kind !== "separator") {
 				if (clicked.kind === "new") {
 					this.#beginCreateFlow();
+				} else if (clicked.kind === "new-preset") {
+					this.#beginPresetInput("create");
+				} else if (clicked.kind === "preset" && clicked.presetName) {
+					this.#activeEntryId = clicked.id;
+					this.#focus = "scope";
+					this.#openPresetDetail(clicked.presetName);
+					this.#openPresetStrip(clicked.presetName);
 				} else {
 					this.#activeEntryId = clicked.id;
+					if (this.#presetDetail) this.#closePresetDetail();
 					this.#buildRows();
 					this.#rowIndex = 0;
 					this.#focus = "scope";
@@ -1138,6 +1540,7 @@ export class AgentsHubComponent implements Component {
 			return true;
 		}
 		if (overBody) {
+			if (this.#presetDetail) return true;
 			this.#focus = "list";
 			const listLine = bodyLine - this.#listRowStart + this.#listScroll;
 			if (listLine >= 0 && listLine < this.#rows.length) {
@@ -1185,9 +1588,17 @@ export class AgentsHubComponent implements Component {
 			}
 			const active = entry.id === this.#activeEntryId;
 			const cursor = active && this.#focus === "scope" ? theme.fg("accent", theme.nav.cursor) : " ";
-			const icon = entry.kind === "all" ? theme.icon.model : entry.kind === "new" ? "+" : theme.status.enabled;
+			const isAction = entry.kind === "new" || entry.kind === "new-preset";
+			const icon =
+				entry.kind === "all"
+					? theme.icon.model
+					: entry.kind === "preset"
+						? theme.icon.loop
+						: isAction
+							? "+"
+							: theme.status.enabled;
 			const labelStyled = active ? theme.bold(theme.fg("accent", entry.label)) : entry.label;
-			const left = `${cursor} ${theme.fg(entry.kind === "new" ? "dim" : "accent", icon)} ${labelStyled}`;
+			const left = `${cursor} ${theme.fg(isAction ? "dim" : "accent", icon)} ${labelStyled}`;
 			const annotation = theme.fg("dim", entry.annotation ?? "");
 			const leftWidth = visibleWidth(left);
 			const annWidth = visibleWidth(annotation);
@@ -1215,7 +1626,16 @@ export class AgentsHubComponent implements Component {
 		if (this.#createActive) {
 			return truncateToWidth(theme.fg("accent", " New agent — describe it and let the architect draft it"), width);
 		}
-		if (this.#notice) return truncateToWidth(theme.fg("success", ` ${this.#notice}`), width);
+		if (this.#notice) return truncateToWidth(theme.fg("success", ` ${replaceTabs(this.#notice)}`), width);
+		if (this.#presetDetail) {
+			const preset = this.#presets()[this.#presetDetail];
+			const suffix = this.#activePresetName() === this.#presetDetail ? " · active" : "";
+			const count = preset ? Object.keys(preset).length : 0;
+			return truncateToWidth(
+				theme.fg("muted", ` Preset ${replaceTabs(this.#presetDetail)} · ${count} agents${suffix}`),
+				width,
+			);
+		}
 		const entry = this.#activeEntry();
 		const scopeLabel = entry.kind === "source" ? `${entry.label} agents` : "All agents";
 		const count = this.#rows.filter(rowDef => rowDef.kind === "agent").length;
@@ -1314,6 +1734,65 @@ export class AgentsHubComponent implements Component {
 		return lines.slice(0, rows);
 	}
 
+	#renderPreset(width: number, rows: number): string[] {
+		const name = this.#presetDetail;
+		const preset = name ? this.#presets()[name] : undefined;
+		const lines: string[] = [""];
+		if (!name || !preset) {
+			lines.push(truncateToWidth(theme.fg("dim", " Preset no longer exists — Esc to go back"), width));
+			while (lines.length < rows) lines.push("");
+			return lines.slice(0, rows);
+		}
+		const active = this.#activePresetName() === name;
+		const entries = Object.entries(preset).sort(([a], [b]) => a.localeCompare(b));
+		lines.push(
+			truncateToWidth(
+				` ${theme.bold(theme.fg("accent", `Preset ${replaceTabs(name)}`))}${active ? theme.fg("success", "  (active)") : ""}`,
+				width,
+			),
+		);
+		lines.push(
+			truncateToWidth(theme.fg("dim", ` ${entries.length} agents · apply writes task.agentModelOverrides`), width),
+		);
+		lines.push("");
+		const current = this.#settings.get("task.agentModelOverrides") ?? {};
+		const defined = new Set(this.#allAgents.map(a => a.name));
+		const projectOwned = this.#projectOverrideNames();
+		let nameWidth = 0;
+		for (const [agent] of entries) nameWidth = Math.max(nameWidth, visibleWidth(replaceTabs(agent)));
+		for (const [agent, selector] of entries) {
+			const liveRaw = this.#normalizeSelector(current[agent]);
+			const live = replaceTabs(liveRaw);
+			const matches = liveRaw === selector;
+			const marker = matches ? theme.fg("dim", "=") : liveRaw ? theme.fg("warning", "≠") : theme.fg("success", "+");
+			const label = replaceTabs(agent).padEnd(nameWidth);
+			const nameStyled = matches ? theme.fg("muted", label) : theme.fg("accent", label);
+			const missingSuffix = !defined.has(agent) ? theme.fg("error", "  (missing)") : "";
+			const liveSuffix =
+				!matches && liveRaw
+					? theme.fg("dim", projectOwned.has(agent) ? `  (project: ${live})` : `  (now ${live})`)
+					: "";
+			lines.push(
+				truncateToWidth(
+					`  ${marker} ${nameStyled}  ${theme.fg("muted", replaceTabs(selector))}${missingSuffix}${liveSuffix}`,
+					width,
+				),
+			);
+		}
+		const drops = this.#presetDropNames(name);
+		if (drops.length > 0) {
+			lines.push("");
+			lines.push(
+				truncateToWidth(
+					theme.fg("warning", ` apply(replace) would drop: ${drops.map(replaceTabs).join(", ")}`),
+					width,
+				),
+			);
+		}
+		while (lines.length < rows) lines.push("");
+		return lines.slice(0, rows);
+	}
+
 	#renderCreate(width: number, rows: number): string[] {
 		const lines: string[] = [];
 		lines.push("");
@@ -1380,7 +1859,17 @@ export class AgentsHubComponent implements Component {
 	}
 
 	#footerHint(): string {
+		if (this.#presetInputMode) {
+			return this.#presetInputMode === "create"
+				? "Enter create preset from current overrides · Esc cancel"
+				: "Enter rename preset · Esc cancel";
+		}
 		if (this.#strip) {
+			if (this.#strip.kind === "preset") {
+				return this.#presetConfirmDrop > 0
+					? "←/→ choose · Enter run · Esc cancel replace"
+					: "←/→ choose · Enter run · Esc back";
+			}
 			if (this.#strip.kind === "pattern") {
 				const property = this.#strip.property;
 				const values = property === "model" ? "a model pattern" : '"on", "off", or a model pattern';
@@ -1396,6 +1885,9 @@ export class AgentsHubComponent implements Component {
 			if (this.#createGenerating) return "Generating…";
 			return "Ctrl+Q/Ctrl+Enter generate · Enter newline · Tab scope · Esc cancel";
 		}
+		if (this.#presetDetail) {
+			return "Enter configure preset · Esc back";
+		}
 		if (this.#focus === "scope") {
 			return "↑/↓ scopes · →/Enter agents · Esc close";
 		}
@@ -1404,6 +1896,12 @@ export class AgentsHubComponent implements Component {
 
 	#renderFooter(width: number): string {
 		this.#chipRanges = [];
+		if (this.#presetInputMode) {
+			const labelText = this.#presetInputMode === "create" ? "New preset:" : `Rename ${this.#presetDetail}:`;
+			const inputWidth = Math.max(8, Math.min(40, width - visibleWidth(labelText) - 4));
+			const inputLine = this.#presetInput?.render(inputWidth)[0] ?? "";
+			return truncateToWidth(`${theme.fg("accent", labelText)} ${inputLine}`, width);
+		}
 		const strip = this.#strip;
 		if (!strip) {
 			return truncateToWidth(theme.fg("dim", this.#footerHint()), width);
@@ -1415,9 +1913,12 @@ export class AgentsHubComponent implements Component {
 			const inputLine = strip.input.render(inputWidth)[0] ?? "";
 			return truncateToWidth(`${label} ${inputLine}`, width);
 		}
-		const prefix = strip.property
-			? `${theme.fg("accent", strip.agent.name)}${theme.fg("dim", ` · ${strip.property} →`)} `
-			: `${theme.fg("accent", strip.agent.name)}${theme.fg("dim", " →")} `;
+		const prefix =
+			strip.kind === "preset"
+				? `${theme.fg("accent", `preset ${replaceTabs(strip.preset)}`)}${theme.fg("dim", " →")} `
+				: strip.property
+					? `${theme.fg("accent", strip.agent.name)}${theme.fg("dim", ` · ${strip.property} →`)} `
+					: `${theme.fg("accent", strip.agent.name)}${theme.fg("dim", " →")} `;
 		let line = prefix;
 		let col = 2 + visibleWidth(prefix);
 		for (let i = 0; i < strip.chips.length; i++) {
@@ -1449,6 +1950,8 @@ export class AgentsHubComponent implements Component {
 		const bodyLines: string[] = [this.#statusRow(bodyWidth)];
 		if (this.#createActive) {
 			bodyLines.push(...this.#renderCreate(bodyWidth, contentRows - 1));
+		} else if (this.#presetDetail) {
+			bodyLines.push(...this.#renderPreset(bodyWidth, contentRows - 1));
 		} else if (this.#assigning) {
 			this.#browser.setMaxVisible(contentRows - 1 - 5);
 			this.#browser.setFocused(true);
