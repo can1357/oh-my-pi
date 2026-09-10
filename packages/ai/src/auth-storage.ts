@@ -2526,10 +2526,6 @@ export class AuthStorage {
 			});
 
 		if (credentials.length === 0) return undefined;
-		if (credentials.length === 1) {
-			const only = credentials[0]!;
-			return this.#tryReserveApiKeySelection(provider, only, options?.requestId) ? only : undefined;
-		}
 
 		const providerKey = this.#getProviderTypeKey(provider, "api_key");
 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
@@ -2564,13 +2560,7 @@ export class AuthStorage {
 			// Recheck quota/usage blocks before reserving: ranking still returns blocked
 			// rows after healthy ones, and reservation conflicts must not promote them.
 			if (
-				this.#isCredentialBlocked(
-					provider,
-					providerKey,
-					ranked.selection.index,
-					blockScopes,
-					options?.requestId,
-				)
+				this.#isCredentialBlocked(provider, providerKey, ranked.selection.index, blockScopes, options?.requestId)
 			) {
 				continue;
 			}
@@ -2580,7 +2570,6 @@ export class AuthStorage {
 		}
 		return undefined;
 	}
-
 
 	/** Resolve a reserved API-key selection; release the turn hold if the helper yields no secret. */
 	async #resolveReservedApiKey(
@@ -2604,11 +2593,7 @@ export class AuthStorage {
 	}
 
 	/** Acquire an exclusive turn reservation for a stored API-key row when requestId is set. */
-	#tryReserveApiKeySelection(
-		provider: string,
-		selection: ApiKeySelection,
-		requestId: string | undefined,
-	): boolean {
+	#tryReserveApiKeySelection(provider: string, selection: ApiKeySelection, requestId: string | undefined): boolean {
 		if (!requestId) return true;
 		const reserveId = this.#getStoredCredentials(provider)[selection.index]?.id;
 		if (reserveId === undefined) return true;
@@ -5141,26 +5126,16 @@ export class AuthStorage {
 		for (const scope of candidates) {
 			if (
 				this.#probeLeases.isRetryAfterSourced(credentialId, scope) &&
-				this.#getCredentialBlockedUntil(
-					provider,
-					providerKey,
-					credentialIndex,
-					scope || undefined,
-					requestId,
-				) !== undefined
+				this.#getCredentialBlockedUntil(provider, providerKey, credentialIndex, scope || undefined, requestId) !==
+					undefined
 			) {
 				return scope;
 			}
 		}
 		for (const scope of candidates) {
 			if (
-				this.#getCredentialBlockedUntil(
-					provider,
-					providerKey,
-					credentialIndex,
-					scope || undefined,
-					requestId,
-				) !== undefined
+				this.#getCredentialBlockedUntil(provider, providerKey, credentialIndex, scope || undefined, requestId) !==
+				undefined
 			) {
 				return scope;
 			}
@@ -6501,12 +6476,7 @@ export class AuthStorage {
 			credential => credential.source !== "login",
 		);
 		if (apiKeySelection) {
-			const resolved = await this.#resolveReservedApiKey(
-				provider,
-				sessionId,
-				apiKeySelection,
-				options?.requestId,
-			);
+			const resolved = await this.#resolveReservedApiKey(provider, sessionId, apiKeySelection, options?.requestId);
 			if (resolved !== undefined) return resolved;
 		}
 
