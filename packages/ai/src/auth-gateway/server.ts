@@ -431,7 +431,7 @@ function mirrorRequestAbort(req: Request): AbortController {
 
 // (handlePassthrough removed — see note above.)
 
-function releaseTurnOnStreamEnd(
+export function releaseTurnOnStreamEnd(
 	stream: ReadableStream<Uint8Array>,
 	storage: AuthStorage,
 	requestId: string,
@@ -439,28 +439,32 @@ function releaseTurnOnStreamEnd(
 ): ReadableStream<Uint8Array> {
 	const reader = stream.getReader();
 	let released = false;
-	const release = (): void => {
+	const release = (successful: boolean): void => {
 		if (released) return;
 		released = true;
-		if (commitGate && (commitGate.state === "committed" || commitGate.state === "terminated")) {
+		if (successful && commitGate && (commitGate.state === "committed" || commitGate.state === "terminated")) {
 			storage.settleQuotaProbeSuccess(requestId);
 		}
 		storage.releaseTurnReservation(requestId);
 	};
 	return new ReadableStream({
 		async pull(controller) {
-			const { done, value } = await reader.read();
-			if (done) {
-				release();
-				controller.close();
-				return;
+			try {
+				const { done, value } = await reader.read();
+				if (done) {
+					release(true);
+					controller.close();
+					return;
+				}
+				storage.renewTurnReservation(requestId);
+				controller.enqueue(value);
+			} catch (error) {
+				release(false);
+				controller.error(error);
 			}
-			// Long turns outlive the reservation TTL: renew on activity.
-			storage.renewTurnReservation(requestId);
-			controller.enqueue(value);
 		},
 		cancel(reason) {
-			release();
+			release(false);
 			return reader.cancel(reason);
 		},
 	});
@@ -672,16 +676,6 @@ async function handleFormatEndpoint(
 				disposition: "provider_unavailable",
 			};
 			if (considerFallback(unavailable)) return { type: "retry" };
-			const next = decideAttempt({
-				route: compiled,
-				state: stateNow(),
-				commitState: commitGate.state,
-			});
-			if (next.type === "dispatch") {
-				pendingFallback = next.targetModelId;
-				retryCount += 1;
-				return { type: "retry" };
-			}
 			return {
 				type: "respond",
 				response: formatError(
@@ -1050,16 +1044,6 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				disposition: "provider_unavailable",
 			};
 			if (considerFallback(unavailable)) return { type: "retry" };
-			const next = decideAttempt({
-				route: compiled,
-				state: stateNow(),
-				commitState: commitGate.state,
-			});
-			if (next.type === "dispatch") {
-				pendingFallback = next.targetModelId;
-				retryCount += 1;
-				return { type: "retry" };
-			}
 			return {
 				type: "respond",
 				response: formatError(

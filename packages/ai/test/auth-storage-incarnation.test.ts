@@ -55,6 +55,17 @@ describe("AuthStorage credential incarnation and workspace fan-out", () => {
 		expect(storage.listCredentialBlocks([id])).toEqual([]);
 	});
 
+	it("invalidates project-only OAuth identity when the project changes", async () => {
+		if (!storage || !store) throw new Error("setup failed");
+		await storage.set(PROVIDER, [{ ...oauth({ suffix: "same" }), projectId: "project-a" }]);
+		const id = storage.listStoredCredentials(PROVIDER)[0]!.id;
+		await storage.markUsageLimitReached(PROVIDER, undefined, { credentialId: id });
+		store.updateAuthCredential(id, { ...oauth({ suffix: "same" }), projectId: "project-b" });
+		await storage.reload();
+		expect(storage.getCredentialIncarnation(id)).toBe(2);
+		expect(storage.listCredentialBlocks([id])).toEqual([]);
+	});
+
 	it("does not treat missing or malformed identity as a switch (negative)", async () => {
 		if (!storage || !store) throw new Error("setup failed");
 		await storage.set(PROVIDER, [oauth({ suffix: "a", accountId: "acc-old", email: "old@example.com" })]);

@@ -97,16 +97,15 @@ describe("StreamCommitGate", () => {
 	});
 });
 
-
-	it("reset returns a terminated gate to probing and clears buffered prelude", () => {
-		const gate = new StreamCommitGate();
-		expect(gate.bufferPrelude(new Uint8Array([1, 2, 3]))).toBe(true);
-		expect(gate.classifyAndObserve("response.failed", 8)).toBe("terminated");
-		gate.reset();
-		expect(gate.state).toBe("probing");
-		expect(gate.preludeByteLength).toBe(0);
-		expect(gate.classifyAndObserve("response.created", 4)).toBe("probing");
-	});
+it("reset returns a terminated gate to probing and clears buffered prelude", () => {
+	const gate = new StreamCommitGate();
+	expect(gate.bufferPrelude(new Uint8Array([1, 2, 3]))).toBe(true);
+	expect(gate.classifyAndObserve("response.failed", 8)).toBe("terminated");
+	gate.reset();
+	expect(gate.state).toBe("probing");
+	expect(gate.preludeByteLength).toBe(0);
+	expect(gate.classifyAndObserve("response.created", 4)).toBe("probing");
+});
 
 describe("holdSseUntilCommit (prelude replay buffer)", () => {
 	function sse(frames: string[]): ReadableStream<Uint8Array> {
@@ -162,7 +161,7 @@ describe("holdSseUntilCommit (prelude replay buffer)", () => {
 		const held = holdSseUntilCommit(
 			sse([
 				"event: response.created\ndata: {}\n\n",
-				"event: response.failed\ndata: {\"error\":{\"message\":\"upstream\"}}\n\n",
+				'event: response.failed\ndata: {"error":{"message":"upstream"}}\n\n',
 			]),
 			gate,
 		);
@@ -194,6 +193,11 @@ describe("holdSseUntilCommit (prelude replay buffer)", () => {
 			// expected abort
 		}
 		expect(sawCreated).toBe(false);
+	});
+
+	it("forwards a metadata-only stream at EOF instead of dropping its bytes", async () => {
+		const raw = "event: response.created\ndata: {}\n\n";
+		expect(await collect(holdSseUntilCommit(sse([raw]), new StreamCommitGate()))).toBe(raw);
 	});
 
 	it("stops buffering at commit and releases memory on drain (bounded)", () => {

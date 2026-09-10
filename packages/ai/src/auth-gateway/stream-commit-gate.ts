@@ -202,9 +202,10 @@ export function holdSseUntilCommit(
 					}
 				}
 			},
-			flush() {
-				// truncated tail without commit: treat as metadata-only commit so
-				// a holding consumer never stalls
+			flush(controller) {
+				if (committed) return;
+				gate.classifyAndObserve("response.output_text.delta", 0);
+				for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
 			},
 		}),
 	);

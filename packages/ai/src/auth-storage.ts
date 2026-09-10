@@ -100,9 +100,11 @@ function fingerprintOAuthPhysicalIdentity(credential: AuthCredential): string | 
 	const accountId = credential.accountId?.trim();
 	const email = credential.email?.trim().toLowerCase();
 	const orgId = credential.orgId?.trim();
+	const projectId = credential.projectId?.trim();
 	if (accountId) parts.push(`account:${accountId}`);
 	if (email) parts.push(`email:${email}`);
 	if (orgId) parts.push(`org:${orgId}`);
+	if (projectId) parts.push(`project:${projectId}`);
 	if (parts.length === 0) return null;
 	return parts.join("|");
 }
