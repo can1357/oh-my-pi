@@ -363,7 +363,6 @@ function requireInvokingLocalProtocolOptions(options: LocalProtocolOptions): Loc
 	return options;
 }
 
-
 function parseAtomicLocalTarget(input: string | InternalUrl, options: LocalProtocolOptions): ParsedAtomicLocalTarget {
 	const url = typeof input === "string" ? parseInternalUrl(input) : input;
 	if (url.protocol.toLowerCase() !== "local:") {
