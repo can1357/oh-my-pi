@@ -712,8 +712,6 @@ async function handleFormatEndpoint(
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
-
-
 	const supportsOpenAIImageFileReferences =
 		model.api === "openai-responses" ||
 		model.api === "azure-openai-responses" ||
@@ -761,7 +759,7 @@ async function handleFormatEndpoint(
 
 	const considerFallback = (classified: GatewayErrorClassification): boolean => {
 		lastClassified = classified;
-		if (commitGate.state === "committed") return false;
+		if (parsed.options.previousResponseId || commitGate.state === "committed") return false;
 		const next = fallbackTargetId(
 			compiled,
 			conductorExecutionState(compiled, attemptedTargets, retryCount, fallbackCount, currentTarget, "probing"),
@@ -810,6 +808,16 @@ async function handleFormatEndpoint(
 	};
 
 	const resolveCredential = async (): Promise<AttemptPrep> => {
+		if (parsed.options.previousResponseId && bootOpts.storage.listStoredCredentials(model.provider).length > 1) {
+			return {
+				type: "respond",
+				response: formatError(
+					400,
+					"invalid_request_error",
+					"Responses continuations require an unambiguous single-credential provider; credential rotation is disabled",
+				),
+			};
+		}
 		let apiKey: string | undefined;
 		try {
 			apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
@@ -857,16 +865,18 @@ async function handleFormatEndpoint(
 
 	const buildAttemptStreamOpts = (apiKey: string): SimpleStreamOptions => {
 		const streamOpts = buildStreamOptions(parsed, model.api, controller.signal);
-		streamOpts.apiKey = buildGatewayApiKeyResolver(
-			bootOpts.storage,
-			model,
-			sessionId,
-			apiKey,
-			controller.signal,
-			route.label,
-			peer,
-			requestId,
-		);
+		streamOpts.apiKey = parsed.options.previousResponseId
+			? apiKey
+			: buildGatewayApiKeyResolver(
+					bootOpts.storage,
+					model,
+					sessionId,
+					apiKey,
+					controller.signal,
+					route.label,
+					peer,
+					requestId,
+				);
 		// openai-responses wraps the downstream body in observeSseCommit. Feeding
 		// onSseEvent as well double-counts prelude bytes and trips the 4 MiB cap at ~2 MiB.
 		// Non-streaming completeSimple still surfaces raw SSE to onSseEvent; keeping
@@ -1143,7 +1153,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 
 	const considerFallback = (classified: GatewayErrorClassification): boolean => {
 		lastClassified = classified;
-		if (commitGate.state === "committed") return false;
+		if (parsed.options.previousResponseId || commitGate.state === "committed") return false;
 		const next = fallbackTargetId(
 			compiled,
 			conductorExecutionState(compiled, attemptedTargets, retryCount, fallbackCount, currentTarget, "probing"),
@@ -1192,6 +1202,16 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	};
 
 	const resolveCredential = async (): Promise<AttemptPrep> => {
+		if (parsed.options.previousResponseId && bootOpts.storage.listStoredCredentials(model.provider).length > 1) {
+			return {
+				type: "respond",
+				response: formatError(
+					400,
+					"invalid_request_error",
+					"Responses continuations require an unambiguous single-credential provider; credential rotation is disabled",
+				),
+			};
+		}
 		let apiKey: string | undefined;
 		try {
 			apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
@@ -1243,16 +1263,18 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		// only inject server-controlled fields. The codex sampling strip mirrors
 		// `buildStreamOptions` — Codex rejects every one with a 400 (#3117).
 		const streamOpts: SimpleStreamOptions = { ...parsed.options, apiKey, signal: controller.signal };
-		streamOpts.apiKey = buildGatewayApiKeyResolver(
-			bootOpts.storage,
-			model,
-			sessionId,
-			apiKey,
-			controller.signal,
-			"pi-native",
-			peer,
-			requestId,
-		);
+		streamOpts.apiKey = parsed.options.previousResponseId
+			? apiKey
+			: buildGatewayApiKeyResolver(
+					bootOpts.storage,
+					model,
+					sessionId,
+					apiKey,
+					controller.signal,
+					"pi-native",
+					peer,
+					requestId,
+				);
 		if (model.api === "openai-codex-responses") {
 			delete streamOpts.temperature;
 			delete streamOpts.topP;

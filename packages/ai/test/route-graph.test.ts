@@ -224,3 +224,10 @@ describe("RouteRegistry", () => {
 		expect(registry.resolve("gpt-5")?.id).toBe("gpt-5");
 	});
 });
+
+it("rejects route IDs erased by URL normalization", () => {
+	const registry = new RouteRegistry(() => undefined);
+	for (const id of [".", ".."])
+		expect(() => registry.register({ id, root: { type: "target", model: "target" } })).toThrow(/dot segment/);
+	expect(registry.list()).toEqual([]);
+});
