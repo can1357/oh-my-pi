@@ -339,6 +339,17 @@ const successfulRotatedConversationIds = new Set<string>();
 const freshRotatedConversationIds = new Set<string>();
 
 export interface CursorOptions extends StreamOptions {
+	/** Accept inline images in Cursor responses. */
+	cursorClientSupportsInlineImages?: boolean;
+	/** Accept routed-model updates from Cursor. */
+	cursorClientSupportsRoutedModelUpdate?: boolean;
+	/** Support Cursor prompt-context usage requests. */
+	cursorClientSupportsPromptContextUsageRpc?: boolean;
+	/** Caller-owned Cursor run identity. */
+	cursorRunId?: string;
+	/** Caller-owned Cursor agent session identity. */
+	cursorAgentSessionId?: string;
+
 	customSystemPrompt?: string;
 	conversationId?: string;
 	execHandlers?: CursorExecHandlers;
@@ -5203,6 +5214,7 @@ function createCursorUserMessage(
 	return create(UserMessageSchema, {
 		text,
 		messageId,
+		mode: 1,
 		...(images.length > 0
 			? {
 					selectedContext: create(SelectedContextSchema, {
@@ -5428,6 +5440,12 @@ async function buildGrpcRequestForWireMode(
 	if (options?.customSystemPrompt) {
 		runRequest.customSystemPrompt = options.customSystemPrompt;
 	}
+
+	runRequest.clientSupportsInlineImages = options?.cursorClientSupportsInlineImages === true;
+	runRequest.clientSupportsRoutedModelUpdate = options?.cursorClientSupportsRoutedModelUpdate === true;
+	runRequest.clientSupportsPromptContextUsageRpc = options?.cursorClientSupportsPromptContextUsageRpc === true;
+	runRequest.runId = options?.cursorRunId ?? "";
+	runRequest.agentSessionId = options?.cursorAgentSessionId ?? "";
 
 	// Tools are sent later via requestContext (exec handshake)
 	const replacementRequest = await options?.onPayload?.(runRequest, model);
