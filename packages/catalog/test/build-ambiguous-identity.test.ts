@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildModel } from "../src/build";
 import { rebakeModelThinking } from "../scripts/generated-policies";
+import { clampsContextOverride, resolveMaxContextWindow } from "../src/compat/context-window";
 import { resolveModelPolicy } from "../src/compat/resolve";
 import type { ModelSpec } from "../src/types";
 
@@ -31,6 +32,12 @@ describe("model identity strictness", () => {
 	test("policy resolution remains strict by default", () => {
 		expect(() => resolveModelPolicy(ambiguousSpec)).toThrow("ambiguous class");
 		expect(resolveModelPolicy(ambiguousSpec, { strict: false }).identity.class).toBe("unknown");
+	});
+
+	test("runtime context-window re-resolution stays lenient", () => {
+		const model = buildModel(ambiguousSpec);
+		expect(() => resolveMaxContextWindow(model)).not.toThrow();
+		expect(() => clampsContextOverride(model)).not.toThrow();
 	});
 
 	test("curated policy rebaking rejects ambiguous identities", () => {
