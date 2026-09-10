@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed duplicate Gemini tool calls, parallel result pairing, weighted routing, concurrent API-key reservations, and stream completion hooks; discovery validates resolved addresses.
+
 - Block private discovery hosts across RFC1918, CGNAT, link-local, and IPv6 ULA ranges when `allowPrivate` is unset.
 - Reset StreamCommitGate before each pre-commit retry so terminated gates do not hold fallback SSE.
 - Continue routing to backup targets when a virtual-route primary has no credential.

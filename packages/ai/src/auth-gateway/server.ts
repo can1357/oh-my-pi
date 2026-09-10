@@ -141,8 +141,7 @@ export const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string
 };
 
 /** Canonical Gemini SDK paths: `/v1beta/models/{model}:generateContent[|stream…]`. */
-const GEMINI_CANONICAL_PATH =
-	/^\/v1beta\/models\/([^/:]+):(generateContent|streamGenerateContent)$/;
+const GEMINI_CANONICAL_PATH = /^\/v1beta\/models\/([^/:]+):(generateContent|streamGenerateContent)$/;
 
 function matchFormatRoute(
 	pathname: string,
@@ -153,9 +152,7 @@ function matchFormatRoute(
 	if (!gemini) return undefined;
 	const op = gemini[2]!;
 	const staticPath =
-		op === "streamGenerateContent"
-			? "/v1beta/models/streamGenerateContent"
-			: "/v1beta/models/generateContent";
+		op === "streamGenerateContent" ? "/v1beta/models/streamGenerateContent" : "/v1beta/models/generateContent";
 	const route = FORMAT_ROUTES[staticPath];
 	if (!route) return undefined;
 	return { route, pathname: staticPath, pathModel: decodeURIComponent(gemini[1]!) };
@@ -473,13 +470,14 @@ function dispatchTargetId(
 	commitState: StreamCommitState,
 	cacheStore: PromptCacheAffinityStore,
 	fingerprint: string,
+	initialTarget: string,
 ): string | undefined {
 	const hit = cacheStore.lookup(fingerprint);
 	const action = decideAttempt({
 		route: compiled,
 		state,
 		commitState,
-		preferredTargetId: hit?.model,
+		preferredTargetId: hit?.model ?? initialTarget,
 	});
 	return action.type === "dispatch" ? action.targetModelId : undefined;
 }
@@ -659,34 +657,63 @@ function mirrorRequestAbort(req: Request): AbortController {
 
 // (handlePassthrough removed — see note above.)
 
-function releaseTurnOnStreamEnd(
+export interface GatewayStreamSettlement {
+	ok: boolean;
+	message?: AssistantMessage;
+	error?: unknown;
+}
+
+export function releaseTurnOnStreamEnd(
 	stream: ReadableStream<Uint8Array>,
 	storage: AuthStorage,
 	requestId: string,
+	commitGate?: StreamCommitGate,
+	settled?: Promise<AssistantMessage>,
+	onSettled?: (outcome: GatewayStreamSettlement) => void | Promise<void>,
 ): ReadableStream<Uint8Array> {
 	const reader = stream.getReader();
 	let released = false;
-	const release = (): void => {
+	const release = async (completed: boolean, error?: unknown): Promise<void> => {
 		if (released) return;
 		released = true;
-		// Quota probes settle only from a successfully resolved events.result()
-		// (see streaming call sites). Gate state alone is insufficient: post-commit
-		// failures and cancellations also end as terminated/released.
+		let outcome: GatewayStreamSettlement = { ok: completed, error };
+		if (completed && settled) {
+			try {
+				const message = await settled;
+				outcome = { ok: message.stopReason !== "error" && message.stopReason !== "aborted", message };
+			} catch (failure) {
+				outcome = { ok: false, error: failure };
+			}
+		}
+		if (outcome.ok && (settled !== undefined || commitGate?.state === "committed")) {
+			storage.settleQuotaProbeSuccess(requestId);
+		} else {
+			storage.clearQuotaProbe(requestId);
+		}
 		storage.releaseTurnReservation(requestId);
+		await onSettled?.(outcome);
 	};
 	return new ReadableStream({
 		async pull(controller) {
-			const { done, value } = await reader.read();
-			if (done) {
-				release();
-				controller.close();
-				return;
+			try {
+				const { done, value } = await reader.read();
+				if (done) {
+					await release(true);
+					controller.close();
+					return;
+				}
+				controller.enqueue(value);
+			} catch (error) {
+				await release(false, error);
+				controller.error(error);
 			}
-			controller.enqueue(value);
 		},
-		cancel(reason) {
-			release();
-			return reader.cancel(reason);
+		async cancel(reason) {
+			try {
+				await reader.cancel(reason);
+			} finally {
+				await release(false, reason);
+			}
 		},
 	});
 }
@@ -846,27 +873,41 @@ async function handleFormatEndpoint(
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
-	const supportsOpenAIImageFileReferences =
-		model.api === "openai-responses" ||
-		model.api === "azure-openai-responses" ||
-		model.api === "openai-codex-responses";
-	if (
-		route.label === "openai-responses" &&
-		!supportsOpenAIImageFileReferences &&
-		parsed.context.messages.some(
-			message =>
-				message.role === "toolResult" &&
-				message.content.some(
-					block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
-				),
+	const requestHasOpenAIImageFileReferences = parsed.context.messages.some(message => {
+		if (
+			message.role === "toolResult" &&
+			message.content.some(
+				block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
+			)
 		)
-	) {
+			return true;
+		const payload = "providerPayload" in message ? message.providerPayload : undefined;
+		if (payload?.type !== "openaiResponsesHistory") return false;
+		return payload.items.some(
+			item =>
+				Array.isArray(item.content) &&
+				item.content.some(
+					(part: unknown) =>
+						isRecord(part) &&
+						(part.type === "input_image" || part.type === "input_file") &&
+						typeof part.file_id === "string" &&
+						part.file_id.length > 0,
+				),
+		);
+	});
+	const openaiImageFileCompatError = (candidate: Model<Api>): Response | undefined => {
+		if (route.label !== "openai-responses" || !requestHasOpenAIImageFileReferences) return undefined;
+		const supportsOpenAIImageFileReferences =
+			candidate.api === "openai-responses" ||
+			candidate.api === "azure-openai-responses" ||
+			candidate.api === "openai-codex-responses";
+		if (supportsOpenAIImageFileReferences) return undefined;
 		return route.module.formatError(
 			400,
 			"invalid_request_error",
-			"OpenAI image file IDs in tool outputs require a Responses-compatible upstream model",
+			"OpenAI file IDs require a Responses-compatible upstream model",
 		);
-	}
+	};
 
 	// Sticky credential id: honour the client's `prompt_cache_key` when
 	// supplied (so external session ids align), otherwise derive from
@@ -960,6 +1001,8 @@ async function handleFormatEndpoint(
 				: formatError(502, "upstream_error", "Upstream request failed");
 		}
 		model = resolved;
+		const incompatible = openaiImageFileCompatError(model);
+		if (incompatible) return incompatible;
 		const skip = targetSkipReason(compiled, health, currentTarget, model);
 		if (skip !== undefined) {
 			attemptedTargets.add(currentTarget);
@@ -985,7 +1028,7 @@ async function handleFormatEndpoint(
 				targetId = pendingFallback;
 				pendingFallback = undefined;
 			} else {
-				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state, cacheStore, fingerprint);
+				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state, cacheStore, fingerprint, currentTarget);
 			}
 			if (targetId === undefined) {
 				if (lastClassified) return classifiedError(lastClassified);
@@ -1178,6 +1221,7 @@ async function handleFormatEndpoint(
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
 					health.recordSuccess(model.provider, model.id);
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: true });
 					rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId, currentTarget);
 					await runHook(bootOpts.hooks?.afterRequest, {
 						requestId,
@@ -1319,23 +1363,34 @@ async function handleFormatEndpoint(
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return clientClosedResponse(route);
 		}
-		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId);
-		health.recordSuccess(model.provider, model.id);
-		const affinityModel = model;
-		const affinityTarget = currentTarget;
-		void settled
-			.then(message => {
-				if (message.stopReason === "error" || message.stopReason === "aborted") return;
-				bootOpts.storage.settleQuotaProbeSuccess(requestId);
-				rememberPromptCacheHit(cacheStore, fingerprint, affinityModel, sessionId, affinityTarget);
-			})
-			.catch(() => {});
-		await runHook(bootOpts.hooks?.afterRequest, {
+		sseStream = releaseTurnOnStreamEnd(
+			held.stream,
+			bootOpts.storage,
 			requestId,
-			routeId: compiled.id,
-			generation: compiled.generation,
-			ok: true,
-		});
+			commitGate,
+			settled,
+			async outcome => {
+				if (outcome.ok) {
+					health.recordSuccess(model.provider, model.id);
+					rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId, currentTarget);
+				} else if (!controller.signal.aborted && outcome.message?.stopReason !== "aborted") {
+					recordProviderHealthFailure(
+						health,
+						model,
+						classifyGatewayError(
+							outcome.message?.errorClassificationMessage ?? outcome.message?.errorMessage ?? outcome.error,
+						),
+					);
+				}
+				await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: outcome.ok });
+				await runHook(bootOpts.hooks?.afterRequest, {
+					requestId,
+					routeId: compiled.id,
+					generation: compiled.generation,
+					ok: outcome.ok,
+				});
+			},
+		);
 		return new Response(sseStream, {
 			status: 200,
 			headers: {
@@ -1540,7 +1595,7 @@ async function handlePiNative(
 				targetId = pendingFallback;
 				pendingFallback = undefined;
 			} else {
-				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state, cacheStore, fingerprint);
+				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state, cacheStore, fingerprint, currentTarget);
 			}
 			if (targetId === undefined) {
 				if (lastClassified) return classifiedError(lastClassified);
@@ -1749,6 +1804,7 @@ async function handlePiNative(
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
 					health.recordSuccess(model.provider, model.id);
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: true });
 					rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId, currentTarget);
 					return json(200, { message }, gatewayResponseHeaders(model, { requestId, message, startedAt }));
 				} catch (error) {
@@ -1877,17 +1933,28 @@ async function handlePiNative(
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return aborted();
 		}
-		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId);
-		health.recordSuccess(model.provider, model.id);
-		const affinityModel = model;
-		const affinityTarget = currentTarget;
-		void settled
-			.then(message => {
-				if (message.stopReason === "error" || message.stopReason === "aborted") return;
-				bootOpts.storage.settleQuotaProbeSuccess(requestId);
-				rememberPromptCacheHit(cacheStore, fingerprint, affinityModel, sessionId, affinityTarget);
-			})
-			.catch(() => {});
+		sseStream = releaseTurnOnStreamEnd(
+			held.stream,
+			bootOpts.storage,
+			requestId,
+			commitGate,
+			settled,
+			async outcome => {
+				if (outcome.ok) {
+					health.recordSuccess(model.provider, model.id);
+					rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId, currentTarget);
+				} else if (!controller.signal.aborted && outcome.message?.stopReason !== "aborted") {
+					recordProviderHealthFailure(
+						health,
+						model,
+						classifyGatewayError(
+							outcome.message?.errorClassificationMessage ?? outcome.message?.errorMessage ?? outcome.error,
+						),
+					);
+				}
+				await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: outcome.ok });
+			},
+		);
 		return new Response(sseStream, {
 			status: 200,
 			headers: {
@@ -2194,11 +2261,11 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				if (req.method === "POST" && pathname === "/v1/messages/count_tokens") {
 					return withCors(
 						await handleCountTokens(req, modelId => {
-						const compiled = registry.resolve(modelId);
-						if (!compiled) return undefined;
-						const target = compiled.targets[0];
-						return target ? boot.resolveModel(target) : undefined;
-					}),
+							const compiled = registry.resolve(modelId);
+							if (!compiled) return undefined;
+							const target = compiled.targets[0];
+							return target ? boot.resolveModel(target) : undefined;
+						}),
 						req,
 					);
 				}

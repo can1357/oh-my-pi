@@ -108,7 +108,7 @@ function contentFromGeminiParts(parts: unknown): string | (TextContent | ImageCo
 
 function readFunctionCall(
 	part: Record<string, unknown>,
-	lastCallIdByName?: Map<string, string>,
+	lastCallIdByName?: Map<string, string[]>,
 ): ToolCall | undefined {
 	const call = part.functionCall ?? part.function_call;
 	if (!isRecord(call)) return undefined;
@@ -118,7 +118,11 @@ function readFunctionCall(
 		typeof call.id === "string" && call.id.length > 0
 			? call.id
 			: `gemini_call_${name}_${Math.random().toString(36).slice(2, 10)}`;
-	lastCallIdByName?.set(name, id);
+	if (lastCallIdByName) {
+		const pending = lastCallIdByName.get(name) ?? [];
+		pending.push(id);
+		lastCallIdByName.set(name, pending);
+	}
 	const args = call.args ?? call.arguments;
 	return {
 		type: "toolCall",
@@ -131,18 +135,21 @@ function readFunctionCall(
 function functionResponseToToolResult(
 	part: Record<string, unknown>,
 	timestamp: number,
-	lastCallIdByName?: Map<string, string>,
+	lastCallIdByName?: Map<string, string[]>,
 ): ToolResultMessage | undefined {
 	const resp = part.functionResponse ?? part.function_response;
 	if (!isRecord(resp)) return undefined;
 	const name = typeof resp.name === "string" ? resp.name : "unknown";
-	const correlated = lastCallIdByName?.get(name);
+	const pending = lastCallIdByName?.get(name);
+	const correlated = pending?.[0];
 	const id =
 		typeof resp.id === "string" && resp.id.length > 0
 			? resp.id
 			: (correlated ?? `gemini_resp_${name}_${Math.random().toString(36).slice(2, 10)}`);
-	if (correlated !== undefined && id === correlated) {
-		lastCallIdByName?.delete(name);
+	if (pending) {
+		const index = pending.indexOf(id);
+		if (index >= 0) pending.splice(index, 1);
+		if (pending.length === 0) lastCallIdByName?.delete(name);
 	}
 	const response = resp.response;
 	let isError = false;
@@ -288,7 +295,7 @@ function walkContents(
 	timestamp: number,
 ): void {
 	// Correlate id-less functionResponse parts with the preceding functionCall of the same name.
-	const lastCallIdByName = new Map<string, string>();
+	const lastCallIdByName = new Map<string, string[]>();
 	for (const item of contents) {
 		if (!isRecord(item)) continue;
 		const role = classifyRole(item.role) ?? "user";
@@ -523,7 +530,6 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 	};
 }
 
-
 // ---------------------------------------------------------------------------
 // encodeStream (SSE)
 // ---------------------------------------------------------------------------
@@ -546,6 +552,22 @@ export function encodeStream(
 
 	return new ReadableStream<Uint8Array>({
 		async start(controller) {
+			const emittedCalls = new Set<string>();
+			const emitCall = (call: ToolCall) => {
+				if (emittedCalls.has(call.id)) return;
+				emittedCalls.add(call.id);
+				writeSse(
+					controller,
+					{
+						...geminiCandidate(
+							[{ functionCall: { name: call.name, args: call.arguments, id: call.id } }],
+							undefined,
+						),
+						modelVersion: requestedModelId,
+					},
+					cancelled,
+				);
+			};
 			try {
 				if (cancelled) {
 					controller.close();
@@ -563,42 +585,13 @@ export function encodeStream(
 								);
 							}
 							break;
-						case "toolcall_start":
-						case "toolcall_delta":
-						case "toolcall_end": {
-							// Only toolcall_end carries the complete call; derive
-							// in-progress calls from the partial message like the
-							// OpenAI chat streamer does.
-							const call =
-								event.type === "toolcall_end"
-									? event.toolCall
-									: (() => {
-											const partial = event.partial.content[event.contentIndex];
-											return partial && partial.type === "toolCall" ? partial : undefined;
-										})();
-							if (call === undefined) break;
-							writeSse(
-								controller,
-								{
-									...geminiCandidate(
-										[
-											{
-												functionCall: {
-													name: call.name,
-													args: call.arguments ?? {},
-													id: call.id,
-												},
-											},
-										],
-										undefined,
-									),
-									modelVersion: requestedModelId,
-								},
-								cancelled,
-							);
+						case "toolcall_end":
+							emitCall(event.toolCall);
 							break;
-						}
 						case "done":
+							for (const part of event.message.content) {
+								if (part.type === "toolCall") emitCall(part);
+							}
 							writeSse(
 								controller,
 								{

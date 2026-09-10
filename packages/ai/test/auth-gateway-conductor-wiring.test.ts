@@ -531,3 +531,58 @@ describe("auth-gateway conductor wiring", () => {
 		}
 	});
 });
+
+for (const endpoint of ["/v1/chat/completions", "/v1/pi/stream"]) {
+	it(`dispatches the selected weighted target on ${endpoint}`, async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-weight-review-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openrouter", "test-key");
+		const first = createMockModel({ provider: "openrouter", id: "light", handler: { content: ["wrong"] } });
+		const selected = createMockModel({ provider: "openrouter", id: "heavy", handler: { content: ["selected"] } });
+		const resolveModel = (id: string) => (id === "light" ? first.model : id === "heavy" ? selected.model : undefined);
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "weighted",
+			root: {
+				type: "balance",
+				strategy: "weighted",
+				children: [
+					{ type: "target", model: "light", weight: 1 },
+					{ type: "target", model: "heavy", weight: 10 },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		try {
+			const body =
+				endpoint === "/v1/pi/stream"
+					? {
+							modelId: "weighted",
+							context: { messages: [{ role: "user", content: "hello", timestamp: 0 }] },
+							stream: false,
+						}
+					: { model: "weighted", messages: [{ role: "user", content: "hello" }], stream: false };
+			const response = await fetch(`${handle.url}${endpoint}`, {
+				method: "POST",
+				headers: { Authorization: "Bearer t", "Content-Type": "application/json" },
+				body: JSON.stringify(body),
+			});
+			expect(response.status).toBe(200);
+			await response.text();
+			expect(selected.calls.length).toBe(1);
+			expect(first.calls.length).toBe(0);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+}

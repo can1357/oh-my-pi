@@ -2490,11 +2490,7 @@ export class AuthStorage {
 	}
 
 	/** Acquire an exclusive turn reservation for a stored API-key row when requestId is set. */
-	#tryReserveApiKeySelection(
-		provider: string,
-		selection: ApiKeySelection,
-		requestId: string | undefined,
-	): boolean {
+	#tryReserveApiKeySelection(provider: string, selection: ApiKeySelection, requestId: string | undefined): boolean {
 		if (!requestId) return true;
 		const reserveId = this.#getStoredCredentials(provider)[selection.index]?.id;
 		if (reserveId === undefined) return true;
@@ -2559,8 +2555,18 @@ export class AuthStorage {
 			blockScope,
 			blockScopes,
 		});
-		const picked = candidates[0]?.selection ?? fallback;
-		if (picked && this.#tryReserveApiKeySelection(provider, picked, options?.requestId)) return picked;
+		for (const candidate of candidates) {
+			if (this.#tryReserveApiKeySelection(provider, candidate.selection, options?.requestId)) {
+				return candidate.selection;
+			}
+		}
+		if (
+			candidates.length === 0 &&
+			fallback &&
+			this.#tryReserveApiKeySelection(provider, fallback, options?.requestId)
+		) {
+			return fallback;
+		}
 		return undefined;
 	}
 
