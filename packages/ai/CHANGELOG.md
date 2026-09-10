@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Ambiguous duplicate route targets are rejected instead of creating unreachable fallback branches.
 - Fixed concurrent credential probes and prevented nested fallback routes from selecting targets in unrelated branches.
 
 

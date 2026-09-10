@@ -57,6 +57,11 @@ export class RouteRegistry {
 	/** Register/replace a virtual route. Bumps generation. Rejects cycles and empty fallback children. */
 	register(definition: RouteDefinition): void {
 		const compiled = compileNode(definition.root, new Set());
+		if (new Set(compiled.targets).size !== compiled.targets.length) {
+			throw new AIError.ValidationError(
+				"Duplicate route targets require distinct route positions and are not supported",
+			);
+		}
 		this.#generation += 1;
 		this.#routes.set(definition.id, {
 			generation: this.#generation,
