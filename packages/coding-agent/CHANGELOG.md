@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `omp share` now reports missing session paths instead of creating and publishing empty sessions ([#11483](https://github.com/can1357/oh-my-pi/issues/11483)).
+
 ## [18.1.16] - 2026-09-09
 
 ### Added
