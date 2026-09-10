@@ -9,7 +9,12 @@ import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
 const packageDir = path.join(import.meta.dir, "..");
 const outDir = path.join(packageDir, "dist");
 const cliPath = path.join(outDir, "cli.js");
-const shebang = "#!/usr/bin/env bun\n";
+// `-S … --no-env-file` disables Bun's built-in dotenv autoload for the npm
+// launcher, matching the compiled binary's `autoloadDotenv: false`. Without it
+// Bun reads `<cwd>/.env` in native code before this entry runs, so a project
+// dotenv on a slow mount (WSL drvfs/9p) stalls startup before the bounded
+// preload in `cli.ts` can bound it (#11519). `env.ts` then owns dotenv loading.
+const shebang = "#!/usr/bin/env -S bun --no-env-file\n";
 const legacyHtmlExportAssetPattern = /^(?:template-[^.]+\.(?:css|html|js)|tool-views\.generated-[^.]+\.js)$/;
 
 // Native / optional / platform-specific deps are loaded from installed files.
