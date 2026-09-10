@@ -132,6 +132,14 @@ describe("generated model policies", () => {
 		expect(rebuiltGrok.requiresCursorToolSchemaProjection).toBeUndefined();
 	});
 
+	it("marks Cursor's default router as variably priced", () => {
+		const routed = buildGenerated(createSpec({ id: "default", api: "cursor-agent", provider: "cursor" }));
+		const named = buildGenerated(createSpec({ id: "composer-2.5", api: "cursor-agent", provider: "cursor" }));
+
+		expect(routed.pricingStatus).toBe("variable");
+		expect(named.pricingStatus).toBeUndefined();
+	});
+
 	it("preserves OpenRouter's mandatory provider-authored effort ladder", () => {
 		const models: ModelSpec<Api>[] = [
 			createSpec({

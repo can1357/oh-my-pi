@@ -61,6 +61,7 @@ import {
 	YOLO_AUTO_STATIC_MODELS,
 } from "../src/provider-models/openai-compat";
 import {
+	CURSOR_STATIC_MODELS,
 	DEVIN_STATIC_MODELS,
 	type OpenAICodexAccount,
 	openaiCodexModelManagerOptions,
@@ -100,7 +101,7 @@ const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litell
  * runtime discovery is authoritative per credential (mirrors the GitLab Duo
  * fallback-only policy below).
  */
-const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin"]);
+const CREDENTIAL_SCOPED_PROVIDERS = new Set(["cursor", "devin"]);
 
 /**
  * Restores unfetched rows from a previous generated catalog while pruning
@@ -685,6 +686,9 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("gitlab-duo-agent")) {
 		allModels.push(buildGitLabDuoWorkflowFallbackModel());
 	}
+	// Cursor's catalog varies by account entitlements, admin allowlist, and
+	// privacy mode. Bundle only the synchronous descriptor-default seed.
+	allModels.push(...CURSOR_STATIC_MODELS);
 	// Seed Devin's SWE-1.6 lanes. Cascade's catalog is credential-scoped, so it
 	// is never fetched during generation (CREDENTIAL_SCOPED_PROVIDERS) and the
 	// seed is the entire bundled surface: the descriptor's `swe-1-6`

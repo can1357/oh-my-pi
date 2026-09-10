@@ -9318,6 +9318,21 @@
 			},
 			{
 				"source": "providers/cursor.kdl:6",
+				"providers": [
+					"cursor"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "default"
+					}
+				],
+				"catalog": {
+					"pricingStatus": "variable"
+				}
+			},
+			{
+				"source": "providers/cursor.kdl:11",
 				"class": "anthropic",
 				"providers": [
 					"cursor"
@@ -9328,7 +9343,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:14",
+				"source": "providers/cursor.kdl:19",
 				"class": "kimi",
 				"providers": [
 					"cursor"
@@ -9343,7 +9358,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:19",
+				"source": "providers/cursor.kdl:24",
 				"providers": [
 					"cursor"
 				],
@@ -9366,7 +9381,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:25",
+				"source": "providers/cursor.kdl:30",
 				"providers": [
 					"cursor"
 				],
@@ -9400,7 +9415,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:28",
+				"source": "providers/cursor.kdl:33",
 				"providers": [
 					"cursor"
 				],
@@ -9434,7 +9449,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:32",
+				"source": "providers/cursor.kdl:37",
 				"providers": [
 					"cursor"
 				],
@@ -9452,7 +9467,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:36",
+				"source": "providers/cursor.kdl:41",
 				"providers": [
 					"cursor"
 				],
@@ -9485,7 +9500,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:40",
+				"source": "providers/cursor.kdl:45",
 				"providers": [
 					"cursor"
 				],
@@ -9525,7 +9540,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:45",
+				"source": "providers/cursor.kdl:50",
 				"providers": [
 					"cursor"
 				],
@@ -9544,7 +9559,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:49",
+				"source": "providers/cursor.kdl:54",
 				"providers": [
 					"cursor"
 				],
@@ -16759,6 +16774,18 @@
 						"peerId": "claude-sonnet-4-6@default"
 					}
 				]
+			},
+			{
+				"provider": "cursor",
+				"peers": [
+					"anthropic",
+					"openai",
+					"google",
+					"xai",
+					"zai",
+					"moonshot"
+				],
+				"aliases": []
 			},
 			{
 				"provider": "xai-oauth",

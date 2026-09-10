@@ -51,3 +51,31 @@ test("ollama cache scope preserves reverse-proxy path prefixes", () => {
 	expect(teamA).toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-a/" }));
 	expect(teamA).not.toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-b/v1" }));
 });
+
+test("cursor cache scope isolates account catalogs without exposing credentials", () => {
+	const accountA = resolveModelCacheProviderId("cursor", {
+		apiKey: "cursor-account-a",
+		baseUrl: "https://api2.cursor.sh/",
+	});
+	expect(accountA).toStartWith("cursor:rich-models-v3:");
+	expect(accountA).toBe(
+		resolveModelCacheProviderId("cursor", {
+			apiKey: "cursor-account-a",
+			baseUrl: "https://api2.cursor.sh",
+		}),
+	);
+	expect(accountA).not.toBe(
+		resolveModelCacheProviderId("cursor", {
+			apiKey: "cursor-account-b",
+			baseUrl: "https://api2.cursor.sh",
+		}),
+	);
+	expect(accountA).not.toBe(
+		resolveModelCacheProviderId("cursor", {
+			apiKey: "cursor-account-a",
+			baseUrl: "https://cursor-proxy.example",
+		}),
+	);
+	expect(accountA).not.toContain("cursor-account-a");
+	expect(accountA).not.toContain("api2.cursor.sh");
+});
