@@ -1873,10 +1873,27 @@ export interface DeepSeekModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+// `deepseek-v4-flash-vision-exp` was retired upstream on 2026-09-10 (requests are
+// temporarily routed to V4.1 Flash) and is excluded by KDL. Caches written before
+// that exclusion still carry the id, so drop it explicitly: an offline or failed
+// refresh would otherwise resurrect a model the provider no longer serves.
+const DEEPSEEK_CACHE_MIGRATION_MODEL_IDS = ["deepseek-v4-flash-vision-exp"] as const;
+
 export function deepseekModelManagerOptions(
 	config?: DeepSeekModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
-	return createSimpleOpenAICompletionsOptions("deepseek", "https://api.deepseek.com", config);
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "deepseek",
+		defaultBaseUrl: "https://api.deepseek.com",
+		config,
+		requireApiKey: true,
+		dropCachedModelIdsOnStaticMismatch: DEEPSEEK_CACHE_MIGRATION_MODEL_IDS,
+		// The live roster keeps serving retired aliases during the routing window;
+		// keep KDL-excluded ids out of discovery instead of trusting `/models`.
+		filterModel: (_entry, model) => !isExcludedModel("deepseek", model.id),
+		mapModel: mapWithBundledReference,
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -6923,7 +6940,8 @@ function buildClinePassThinking(raw: ModelsDevModel, model: ModelSpec<Api>): Thi
 }
 
 /**
- * DeepSeek's V4-generation lineage (`v4`, `v4-flash`, `v4.1-pro`) by
+ * DeepSeek's V4-generation lineage (`v4`, `v4-flash`, `v4.1-pro`, and the
+ * bare `deepseek-flash` canonical id introduced for V4.1 Flash) by
  * structured family. The native roster serves only V4-era SKUs today; the
  * `tool_call` gate on the descriptor filters the rest.
  */

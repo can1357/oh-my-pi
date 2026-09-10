@@ -30,6 +30,20 @@ describe("classifyModel", () => {
 		});
 	});
 
+	test("deepseek bare V4.1 canonical ids classify alongside legacy V4 ids", () => {
+		expect(classifyModel("deepseek", "deepseek-flash")).toEqual({ class: "deepseek", family: "flash" });
+		expect(classifyModel("deepseek", "deepseek-v4-flash")).toEqual({ class: "deepseek", family: "flash" });
+		expect(classifyModel("deepseek", "deepseek-v4-pro")).toEqual({ class: "deepseek", family: "pro" });
+		expect(classifyModel("deepseek", "deepseek-v4-flash-vision-exp")).toEqual({
+			class: "deepseek",
+			family: "flash",
+		});
+		expect(classifyModel("deepseek-ai", "deepseek-ai/DeepSeek-V4-Flash")).toEqual({
+			class: "deepseek",
+			family: "flash",
+		});
+	});
+
 	test("bare o-series names carry no revision", () => {
 		expect(classifyModel("openai", "o3")).toEqual({ class: "openai", family: "o-series" });
 		expect(classifyModel("openai", "o3-mini")).toEqual({
