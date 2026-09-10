@@ -46,9 +46,10 @@ import { CollabSocket } from "./relay-client";
  * Same rule as the host and the socket: `String` is what throws — on a hostile
  * `toString`, on a `toString` returning an object over a hostile `valueOf`, and
  * on a deeply nested value — so the treatment follows the conversion rather than
- * the sender. Both sites below sit in a `catch`, where an unrendered throw stops
- * being a warning and becomes an unhandled rejection, and one of them is what
- * settles the join.
+ * the sender. All three uses below sit in a `catch` — two in the one that handles
+ * a failed frame apply, one in the ui-request presenter's — where an unrendered
+ * throw stops being a warning and becomes an unhandled rejection. One of the
+ * three is what settles the join, so throwing there hangs it instead.
  */
 const THROWN_VALUE_MAX = 512;
 

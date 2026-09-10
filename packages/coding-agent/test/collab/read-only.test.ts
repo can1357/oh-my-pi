@@ -287,6 +287,17 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		expect(named[0]?.readOnly).toBeFalsy();
 	});
 
+	it("reports a boolean protocol version as itself, not as unnamed", async () => {
+		// The numeric arm of #label is covered by the proto handshake contract; the
+		// boolean arm is reachable from the same field and was not. Both exist so a
+		// mismatch names what arrived rather than calling it unnamed.
+		const guest = await joinWithRawHello(host.link, { proto: true, name: "bool-proto" });
+		guestCleanups.push(() => guest.socket.close());
+		const reply = await guest.nextFrame();
+		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+		expect(reply.message).toContain("guest sent vtrue");
+	});
+
 	it("reports a protocol version that is not a number instead of dropping the hello", async () => {
 		// A non-number is never equal to COLLAB_PROTO, so reaching the mismatch branch
 		// needs no narrowing. Quoting it back does: `String` is not total for
@@ -301,9 +312,9 @@ describe("collab frames a guest can send that the host must still answer", () =>
 	});
 
 	it("carries a prompt whose images are not an array, without the images", async () => {
-		// `{ length: 1 }` passes the length test the spread was guarded by and then
-		// throws "Spread syntax requires ...iterable", which the frame handler's catch
-		// swallows: the prompt disappears and the guest is told nothing.
+		// `{ length: 1 }` passed the length test the spread was guarded by and then
+		// threw "Spread syntax requires ...iterable", which the frame handler's catch
+		// swallowed: the prompt disappeared and the guest was told nothing.
 		const guest = await joinAsGuest(host.link, "bad-images");
 		guestCleanups.push(() => guest.socket.close());
 		const welcome = await guest.nextFrame();
@@ -382,10 +393,11 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		const welcome = await guest.nextFrame();
 		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
 
-		// Reachable, unlike a value the wire itself rejects: 5,000 levels survive
+		// Reachable, unlike a value this client cannot even send: 5,000 levels survive
 		// `JSON.stringify` and `JSON.parse` on the way here, and then throw
 		// `RangeError` out of the interpolation that quotes them, back into the
-		// silent-drop class. 60,000 does not survive, which is why the depth is this.
+		// silent-drop class. `CollabSocket.send` stops carrying them somewhere between
+		// 35,000 and 40,000, so the depth here is well inside what it will serialize.
 		let nested: unknown[] = [];
 		const root = nested;
 		for (let i = 0; i < 5_000; i++) {
@@ -467,6 +479,8 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		// content the guest meant to send, so it is refused rather than dropped —
 		// accepted, it is persisted and throws a turn later inside a serializer.
 		for (const images of [
+			// The null arm of the element check, distinct from a non-object element.
+			[null],
 			[{ type: "text", text: 42 }],
 			[{ type: "image", data: 7, mimeType: "image/png" }],
 			[{ type: "image", data: "AAAA" }],
@@ -565,6 +579,9 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		// which is the same reach-a-serializer defect the required checks close.
 		for (const extra of [
 			{ detail: 42 },
+			// `typeof null === "object"`, so the null arm is a distinct branch from the
+			// non-object one and needs its own row.
+			{ providerFile: null },
 			{ detail: "enormous" },
 			{ url: 7 },
 			{ providerFile: 5 },
@@ -629,10 +646,11 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		// Sent past `CollabSocket.send` deliberately. That path serializes with
 		// JSON.stringify, which is recursive and fails near the same depth the walk
 		// does, so a cooperative client cannot carry the payload that motivates this
-		// fix. JSON.parse is iterative and accepts any depth from hand-built text —
-		// verified at 500,000 — and the host parses exactly that off the wire, so the
-		// reachable actor is a protocol-compatible client that is not this library.
-		// This builds the frame the way that client would.
+		// fix. JSON.parse is iterative and took 500,000 levels of hand-built text in a
+		// probe without complaint, and the host parses exactly that off the wire, so
+		// the reachable actor is a protocol-compatible client that is not this
+		// library. This builds the frame the way that client would, at the 100,000
+		// levels asserted below.
 		const depth = 100_000;
 		const nested = `${"[".repeat(depth)}${"]".repeat(depth)}`;
 		const raw = `{"t":"prompt","text":"carry me","images":[{"type":"image","data":"AAAA","mimeType":"image/png","somethingNewer":${nested}}]}`;

@@ -112,8 +112,7 @@ export type CollabFrame =
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * `String(value)`, for a value nobody vouched for, that cannot throw and cannot
- * run away.
+ * `String(value)`, for a value nobody vouched for, that cannot throw.
  *
  * Converting a thrown value is not safe by default, which is easy to miss because
  * it usually is: a hostile `toString`, a `toString` returning an object over a

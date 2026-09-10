@@ -172,9 +172,10 @@ const PROVIDER_FILE_PROVIDERS = new Set(["openai", "anthropic", "google"]);
  * attached. An earlier version tolerated unknown properties on purpose, reasoning
  * that a newer guest might carry fields this host has no opinion about — sound
  * where such a field is read and dropped, and wrong here, because this object is
- * put into a session message, persisted, and walked by
- * {@link shrinkForReplication}: an unknown property nested 50,000 deep takes that
- * walk to `RangeError`, measured. Copying the known fields makes the shape the
+ * put into a session message, persisted, and handed to
+ * {@link shrinkForReplication}, which measures it with `JSON.stringify` before
+ * walking it: an unknown property nested 50,000 deep takes it to `RangeError`,
+ * measured, and either step can be the one that goes down. Copying the known fields makes the shape the
  * host stores a property of this function rather than of what arrived. A newer
  * field is dropped instead of honoured, which is the safe direction to be wrong.
  *
@@ -794,15 +795,16 @@ export class CollabHost {
 	 * declared type is the sender's claim, and this one was spread, which a truthy
 	 * non-iterable throws out of.
 	 *
-	 * `text` is checked rather than merely typed, because the two branches below
-	 * failed differently and one of them failed late. Without images a non-string
-	 * becomes the content whole, and `promptCustomMessage` rejects it in its first
-	 * statement, before any session insertion, so the catch below replies. With
-	 * images it goes into a `TextContent` instead, where nothing rejects it: `join`
-	 * stringifies a copy and the original is persisted as sent, so the entry is
-	 * invalid session state and a later turn throws on `item.text.toWellFormed()`
-	 * inside a provider serializer — a different subsystem, minutes away, with
-	 * nothing left to tell the guest. Refused here so neither branch can.
+	 * `text` is refused below rather than merely typed, which is why nothing further
+	 * down has to cope with it. It is written here because the reason is not local:
+	 * the two paths it used to reach failed differently, and one failed late.
+	 * Without images a non-string became the content whole and `promptCustomMessage`
+	 * rejected it in its first statement, before any session insertion, so the catch
+	 * below replied. With images it went into a `TextContent`, where nothing
+	 * rejected it — `join` stringifies a copy and the original was persisted as
+	 * sent, so the entry was invalid session state and a later turn threw on
+	 * `item.text.toWellFormed()` inside a provider serializer, a different
+	 * subsystem, minutes away, with nothing left to tell the guest.
 	 */
 	#handlePrompt(text: unknown, images: unknown, fromPeer: number): void {
 		const peer = this.#peers.get(fromPeer);
@@ -816,9 +818,9 @@ export class CollabHost {
 		}
 		// An element is content the guest meant to send, which an `images` field that
 		// is not an array at all is not — so a malformed element is refused rather
-		// than dropped. It is the text defect one field over: `{type:"text",text:42}`
-		// is accepted into the content, persisted, and throws a turn later at
-		// `item.text.toWellFormed()` inside a provider serializer.
+		// than dropped. It is the text defect one field over: unchecked,
+		// `{type:"text",text:42}` is accepted into the content, persisted, and throws
+		// a turn later at `item.text.toWellFormed()` inside a provider serializer.
 		const offered = Array.isArray(images) ? images : [];
 		const supplied = offered.map(toImageContent);
 		if (supplied.some(image => image === null)) {
@@ -827,8 +829,8 @@ export class CollabHost {
 		}
 		const normalized = supplied as ImageContent[];
 		const name = peer.name;
-		// `Array.isArray`, not a length test: `{ length: 1 }` passes a length test and
-		// then throws out of the spread, and that throw unwinds into `CollabSocket`'s
+		// `Array.isArray`, not a length test: `{ length: 1 }` passed a length test and
+		// then threw out of the spread, and that throw unwound into `CollabSocket`'s
 		// frame-handler catch — losing the whole prompt for a debug line. Anything
 		// that is not an array carries no images, which is the path a prompt without
 		// any already takes, so the text still gets through.
@@ -1025,7 +1027,8 @@ export class CollabHost {
 		// reply below embeds it and a guest chooses its length; and it is only ever a
 		// string, because interpolating a nested array throws `RangeError` out of the
 		// reply — measured reachable, since a 5,000-deep one survives `JSON.stringify`
-		// and `JSON.parse` on the way here while 60,000 does not.
+		// and `JSON.parse` on the way here, which stop carrying it somewhere between
+		// 35,000 and 40,000.
 		//
 		// Bounded two ways, because the reasons differ and only one of them is
 		// anonymity. An id that is absent or not a string names nothing, and saying so
@@ -1133,8 +1136,8 @@ export class CollabHost {
 		// — so the slice can fire on that one extra unit but can never be what saves
 		// the frame. That is a property of the callers, not of this site, which is
 		// exactly why the guard belongs here: no test can fail if it is deleted, so
-		// deleting it will look correct. It is structural: the
-		// premise of this design is that whatever last touches a frame bounds it, so
+		// deleting it will look correct. It is structural: the premise of this design
+		// is that whatever last touches a frame bounds it, so
 		// that a caller composing a new message somewhere else cannot reintroduce the
 		// defect. Dropping it because today's one error happens to be host-owned is
 		// the reasoning that cost this branch three rounds — bound the ingredients,

@@ -11,6 +11,7 @@
  * are stubbed.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { logger } from "@oh-my-pi/pi-utils";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
@@ -87,7 +88,7 @@ function makeHostContext(snapshot: SizedSnapshot): InteractiveModeContext {
 	return ctx as unknown as InteractiveModeContext;
 }
 
-function makeFailingGuestContext(failure: Error): InteractiveModeContext {
+function makeFailingGuestContext(failure: unknown): InteractiveModeContext {
 	const ctx = {
 		settings: { get: () => "" },
 		sessionManager: {
@@ -268,6 +269,41 @@ describe("collab chunked welcome (#3144)", () => {
 			await guest.leave("test cleanup").catch(() => {});
 		}
 	});
+	it("rejects the pending join when the resume failure cannot be converted to text", async () => {
+		// Same seam as the test above, with a rejection value that `String` throws on.
+		// Both the warning and the rejection that settles the join render it, and both
+		// sit inside the one catch — so rendering it unsafely throws there instead,
+		// `firstWelcome` is never settled, and `join()` neither resolves nor rejects.
+		// A hung join is the observable difference, which is why this races a timer.
+		const failure = {
+			toString() {
+				throw new Error("cannot render me");
+			},
+		};
+		const records: { error?: unknown }[] = [];
+		const unregister = logger.registerLogSink(event => {
+			if (event.message.includes("frame apply failed")) records.push(event.context ?? {});
+		});
+		const writeSpy = spyOn(Bun, "write").mockRejectedValue(failure);
+		const guest = new CollabGuestLink(makeFailingGuestContext(failure));
+		const joinAttempt = guest.join(host.link);
+		try {
+			await expect(
+				Promise.race([
+					joinAttempt,
+					Bun.sleep(500).then(() => {
+						throw new Error("join neither resolved nor rejected");
+					}),
+				]),
+			).rejects.toThrow("(unprintable error)");
+			expect(records[0]?.error).toBe("(unprintable error)");
+		} finally {
+			unregister();
+			writeSpy.mockRestore();
+			await guest.leave("test cleanup").catch(() => {});
+		}
+	});
+
 	it("does not clear the old guest session when replica activation is cancelled", async () => {
 		const events: string[] = [];
 		const guest = new CollabGuestLink(makeCancelledSwitchGuestContext(async () => false, events));

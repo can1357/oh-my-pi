@@ -1371,11 +1371,13 @@ describe("CollabSocket send backpressure", () => {
 			ws.open();
 
 			// Reception is one promise chain, and the catch that renders the failure is
-			// a link in it. Rendering unsafely there rejects that link, and every later
-			// frame is `.then`ed onto a rejected promise and skipped — so the socket
-			// stops delivering anything at all, silently and permanently. That, not the
-			// readyState, is what the safe conversion buys: the previous version of this
-			// test only asserted the socket stayed open, which the unfixed code does too.
+			// a link in it. Rendering unsafely there rejects that link, so the next
+			// frame is `.then`ed onto a rejected promise and skipped. What this
+			// demonstrates is that one frame: the second never arrives. Whether the
+			// chain stays poisoned for every frame after it is not asserted here. That,
+			// not the readyState, is what the safe conversion buys — the previous
+			// version of this test only asserted the socket stayed open, which the
+			// unfixed code does too.
 			ws.onmessage?.({
 				data: packEnvelope(3, await seal(key, { t: "error", message: "boom" })).buffer,
 			} as MessageEvent);

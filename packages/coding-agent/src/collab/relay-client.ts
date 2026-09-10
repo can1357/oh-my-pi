@@ -79,8 +79,9 @@ const WS_BACKPRESSURE_DRAIN_RETRY_MS = 25;
  * bound, not only the ones whose value looks guest-derived. The argument is about
  * the conversion and not the sender: `String` throws on a hostile `toString`, on
  * a `toString` returning an object over a hostile `valueOf`, and on a deeply
- * nested value — and two of these sites are inside a `catch` or an async
- * rejection path, where that turns a diagnostic into an unhandled rejection.
+ * nested value. All four sites are `catch` handlers, and two of them — the drain
+ * and the receive chain — are asynchronous, where throwing while rendering turns
+ * a diagnostic into an unhandled rejection instead of a message anyone reads.
  */
 const THROWN_VALUE_MAX = 512;
 
