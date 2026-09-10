@@ -299,6 +299,8 @@ export class AdvisorRuntime {
 	#sessionTransitionPaused = false;
 	#promptInFlight: Promise<void> | undefined;
 	#iterationAbort: AbortController | undefined;
+	/** Cancels the non-review maintenance that can restore a quarantine-halted fallback. */
+	#haltedMaintenanceAbort: AbortController | undefined;
 	#backlog = 0;
 	#consecutiveFailures = 0;
 	#failureNotified = false;
@@ -406,7 +408,12 @@ export class AdvisorRuntime {
 		if (this.disposed || this.#quotaExhausted) return;
 		this.#syncModelIdentity();
 		this.#resumeQuarantineAfterBasisChange();
-		if (this.#halted) return;
+		if (this.#halted) {
+			if (this.#quarantineHalted) {
+				this.#maintainQuarantineHaltedFallback(messages ?? this.host.snapshotMessages());
+			}
+			return;
+		}
 		const all = messages ?? this.host.snapshotMessages();
 		this.#latestMessages = all;
 		const wip = opts?.willContinue ?? false;
@@ -483,6 +490,7 @@ export class AdvisorRuntime {
 
 	dispose(): void {
 		this.#iterationAbort?.abort("advisor disposed");
+		this.#haltedMaintenanceAbort?.abort("advisor disposed");
 		this.disposed = true;
 		this.#epoch++;
 		this.#pending = [];
@@ -560,6 +568,7 @@ export class AdvisorRuntime {
 			this.#sessionTransitionPaused = true;
 			this.#wakeAllWaiters();
 			this.#iterationAbort?.abort("advisor session transition");
+			this.#haltedMaintenanceAbort?.abort("advisor session transition");
 			try {
 				this.agent.abort("advisor session transition");
 			} catch {}
@@ -592,6 +601,7 @@ export class AdvisorRuntime {
 		// pinned at the instructions/tools boundary) to a concrete path instead of
 		// inferring it from payload markers after the fact.
 		this.#iterationAbort?.abort("advisor reset");
+		this.#haltedMaintenanceAbort?.abort("advisor reset");
 		this.#epoch++;
 		this.#sessionTransitionPaused = false;
 		this.#quotaExhausted = false;
@@ -651,6 +661,42 @@ export class AdvisorRuntime {
 		this.#halted = false;
 		this.#clearSeenContext();
 		logger.info("advisor quarantine latch cleared after capability basis changed");
+	}
+
+	/**
+	 * A quarantine latch blocks review dispatch, but a retry fallback still needs
+	 * its regular maintenance hook to notice an expired cooldown and restore the
+	 * primary. Deliberately never enqueue this update: a basis change resumes
+	 * review only on a later primary update.
+	 */
+	#maintainQuarantineHaltedFallback(messages: AgentMessage[]): void {
+		const incoming = messages.at(-1);
+		if (
+			!this.#quarantineHalted ||
+			this.#haltedMaintenanceAbort ||
+			this.#sessionTransitionPaused ||
+			!this.host.maintainContext ||
+			incoming === undefined
+		)
+			return;
+
+		const controller = new AbortController();
+		const epoch = this.#epoch;
+		this.#haltedMaintenanceAbort = controller;
+		void (async () => {
+			try {
+				await this.host.maintainContext?.(incoming, controller.signal);
+				if (this.disposed || this.#sessionTransitionPaused || this.#epoch !== epoch || !this.#quarantineHalted) return;
+				this.#syncModelIdentity();
+				this.#resumeQuarantineAfterBasisChange();
+			} catch (err) {
+				if (!controller.signal.aborted) {
+					logger.debug("advisor quarantine-halted fallback maintenance failed", { err: String(err) });
+				}
+			} finally {
+				if (this.#haltedMaintenanceAbort === controller) this.#haltedMaintenanceAbort = undefined;
+			}
+		})();
 	}
 
 	// Candidate 4 (multi-message split): render the Session update as MULTIPLE
