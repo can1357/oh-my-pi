@@ -110,4 +110,32 @@ defaultThinkingLevel: high
 		expect(after).toContain("smol: anthropic/claude-haiku-4-5");
 		expect(after.endsWith("\n")).toBe(true);
 	});
+
+	it("preserves four-space indentation on untouched blocks", async () => {
+		const configPath = path.join(agentDir, "config.yml");
+		await Bun.write(
+			configPath,
+			`modelRoles:
+    default: anthropic/claude-fable-5-1:xhigh
+# deny floor
+bash:
+    patterns:
+        - match: "git push --force*"
+          approval: deny
+`,
+		);
+
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		settings.setModelRole("smol", "anthropic/claude-haiku-4-5");
+		await settings.flush();
+
+		const after = await Bun.file(configPath).text();
+		// New key adopts the file's own 4-space step; untouched blocks keep theirs.
+		expect(after).toContain("\n    default: anthropic/claude-fable-5-1:xhigh");
+		expect(after).toContain("\n    smol: anthropic/claude-haiku-4-5");
+		expect(after).toContain("\n    patterns:");
+		expect(after).toContain('\n        - match: "git push --force*"');
+		expect(after).toContain("# deny floor");
+		expect(after).not.toContain("\n  default:");
+	});
 });

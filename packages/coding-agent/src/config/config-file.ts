@@ -47,9 +47,26 @@ function reconcileRecord(
 }
 
 /**
+ * Infer the indentation step (in spaces) a hand-maintained YAML file uses, so
+ * reserialization does not reflow untouched blocks from 4-space to 2-space
+ * (see #11478). Returns the smallest positive leading-space count across all
+ * content lines, clamped to a sane range; defaults to 2 when nothing is nested.
+ */
+function detectYamlIndent(text: string): number {
+	let min = 0;
+	for (const line of text.split("\n")) {
+		if (line.trim().length === 0) continue;
+		const spaces = line.length - line.trimStart().length;
+		if (spaces > 0 && (min === 0 || spaces < min)) min = spaces;
+	}
+	if (min < 1) return 2;
+	return Math.min(min, 8);
+}
+
+/**
  * Serialize `target` into the shape of an existing config file, preserving
- * comments, quoting, blank lines, and key order of every node whose value did
- * not change. This is the comment-preserving counterpart to
+ * comments, quoting, blank lines, indentation, and key order of every node
+ * whose value did not change. This is the comment-preserving counterpart to
  * {@link stringifyYamlConfig}: a persisted role/setting change touches only its
  * own key instead of rewriting the whole file (see #11477).
  *
@@ -61,10 +78,13 @@ export function reconcileYamlPreservingComments(
 	originalText: string | null | undefined,
 	target: Record<string, unknown>,
 ): string {
-	const doc = originalText && originalText.trim().length > 0 ? parseDocument(originalText) : new Document();
+	const hasOriginal = !!originalText && originalText.trim().length > 0;
+	const doc = hasOriginal ? parseDocument(originalText as string) : new Document();
 	const current = doc.toJS() as unknown;
 	reconcileRecord(doc, [], isPlainRecord(current) ? current : {}, target);
-	return doc.toString({ indent: 2 });
+	// Match the original indentation and never fold long scalars, so untouched
+	// blocks are emitted byte-for-byte as they were authored.
+	return doc.toString({ indent: hasOriginal ? detectYamlIndent(originalText as string) : 2, lineWidth: 0 });
 }
 
 /** Minimal subset of the AJV ConfigSchemaError shape this module actually relies on. */
