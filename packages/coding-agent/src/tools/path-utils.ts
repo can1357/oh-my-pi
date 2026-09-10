@@ -1175,8 +1175,13 @@ function buildBraceUnion(patterns: string[]): string | undefined {
 	return `{${uniquePatterns.join(",")}}`;
 }
 
-function pathComparisonKey(filePath: string): string {
-	return process.platform === "win32" ? filePath.toLowerCase() : filePath;
+// Comparison key for deciding whether two absolute paths denote the same search
+// scope. A Windows drive letter is case-insensitive by OS guarantee, so `c:` and
+// `C:` unify; every other component is compared exactly. Blanket-lowercasing
+// would conflate distinct entries under a per-directory case-sensitive dir
+// (FILE_CASE_SENSITIVE_DIR / WSL), collapsing `C:\repo\src` with `C:\repo\Src`.
+function pathComparisonKey(component: string): string {
+	return process.platform === "win32" ? component.replace(/^[a-zA-Z]:/, drive => drive.toLowerCase()) : component;
 }
 
 function findCommonBasePath(paths: string[]): string {
@@ -1258,8 +1263,9 @@ async function resolveSearchPathItems(
 	// pass, resolves `..` across symlinks for real filesystem operations), while
 	// findCommonBasePath and path.relative compare lexically via path.resolve. To
 	// decide overlap on the same footing, canonicalize both sides here — this key
-	// never reaches the filesystem, so lexical `..` collapse is safe. Case-fold on
-	// Windows so a drive-letter/component casing difference cannot force a fan-out.
+	// never reaches the filesystem, so lexical `..`/separator collapse is safe.
+	// pathComparisonKey folds only the Windows drive letter, so a differently
+	// cased drive cannot force a fan-out while distinct components stay distinct.
 	const commonIsRequestedScope = parsedItems.some(
 		item => pathComparisonKey(path.resolve(item.absoluteBasePath)) === pathComparisonKey(commonBasePath),
 	);
