@@ -2,7 +2,11 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildNonInteractiveEnv, NON_INTERACTIVE_ENV } from "@oh-my-pi/pi-coding-agent/exec/non-interactive-env";
+import {
+	buildNonInteractiveEnv,
+	NON_INTERACTIVE_ENV,
+	REJECT_PROMPT_COMMAND,
+} from "@oh-my-pi/pi-coding-agent/exec/non-interactive-env";
 
 describe("buildNonInteractiveEnv", () => {
 	it("defaults Windows child-process encoding to UTF-8 when inherited env is unset", () => {
@@ -83,6 +87,47 @@ describe("buildNonInteractiveEnv", () => {
 
 	it("lets a per-command CI override win over the opt-out", () => {
 		expect(buildNonInteractiveEnv({ CI: "0" }, { PI_BASH_NO_CI: "1" }, "linux").CI).toBe("0");
+	});
+
+	it("lets non-guard overrides win over defaults (TERM stays overridable)", () => {
+		const env = buildNonInteractiveEnv({ TERM: "xterm-256color" }, {}, "linux");
+
+		expect(env.TERM).toBe("xterm-256color");
+	});
+
+	it("forces credential and editor prompt guards over per-command overrides", () => {
+		const evil = "/evil/askpass";
+		const env = buildNonInteractiveEnv(
+			{
+				SSH_ASKPASS: evil,
+				GIT_ASKPASS: evil,
+				GIT_TERMINAL_PROMPT: "1",
+				GIT_EDITOR: evil,
+				EDITOR: evil,
+				VISUAL: evil,
+			},
+			{},
+			"linux",
+		);
+
+		expect(env.SSH_ASKPASS).toBe(REJECT_PROMPT_COMMAND);
+		expect(env.GIT_ASKPASS).toBe(REJECT_PROMPT_COMMAND);
+		expect(env.GIT_TERMINAL_PROMPT).toBe("0");
+		expect(env.GIT_EDITOR).toBe("true");
+		expect(env.EDITOR).toBe("true");
+		expect(env.VISUAL).toBe("true");
+	});
+
+	it("passes direnv-style overrides through for non-guard keys", () => {
+		const env = buildNonInteractiveEnv(
+			{ DIRENV_DIR: "-/project", DIRENV_DIFF: "abc123", MY_VAR: "hello" },
+			{},
+			"linux",
+		);
+
+		expect(env.DIRENV_DIR).toBe("-/project");
+		expect(env.DIRENV_DIFF).toBe("abc123");
+		expect(env.MY_VAR).toBe("hello");
 	});
 });
 

@@ -28,6 +28,7 @@ export const NON_INTERACTIVE_ENV: Readonly<Record<string, string>> = {
 	EDITOR: "true",
 	GIT_TERMINAL_PROMPT: "0",
 	SSH_ASKPASS: REJECT_PROMPT_COMMAND,
+	GIT_ASKPASS: REJECT_PROMPT_COMMAND,
 	CI: "true",
 	AGENT: "1",
 	// Package manager defaults for unattended execution.
@@ -51,6 +52,32 @@ export const NON_INTERACTIVE_ENV: Readonly<Record<string, string>> = {
 	COMPOSER_NO_INTERACTION: "1",
 	CLOUDSDK_CORE_DISABLE_PROMPTS: "1",
 };
+
+/**
+ * Keys forced over per-command override maps: they suppress credential and
+ * editor prompts, so override-provided env (e.g. direnv output, per-command
+ * assignments) must not weaken them. All other keys keep user precedence:
+ * overrides win over defaults.
+ */
+const GUARD_ENV_KEYS: ReadonlyArray<string> = [
+	"SSH_ASKPASS",
+	"GIT_ASKPASS",
+	"GIT_TERMINAL_PROMPT",
+	"GIT_EDITOR",
+	"EDITOR",
+	"VISUAL",
+	"CI",
+];
+
+/** Guard-key entries present in `env`, to be merged last over override maps. */
+function guardEntries(env: Readonly<Record<string, string>>): Record<string, string> {
+	const guards: Record<string, string> = {};
+	for (const key of GUARD_ENV_KEYS) {
+		const value = env[key];
+		if (value !== undefined) guards[key] = value;
+	}
+	return guards;
+}
 
 const WINDOWS_UTF8_ENV_DEFAULT_GROUPS: ReadonlyArray<ReadonlyArray<readonly [key: string, value: string]>> = [
 	[
@@ -119,7 +146,11 @@ export function buildNonInteractiveEnv(
 	const base =
 		baseEnv.PI_BASH_NO_CI || baseEnv.CLAUDE_BASH_NO_CI ? withoutCI(NON_INTERACTIVE_ENV) : NON_INTERACTIVE_ENV;
 	if (platform !== "win32") {
-		return overrides ? { ...base, ...overrides } : base;
+		if (!overrides) return base;
+		// Guard keys must beat overrides (e.g. direnv-provided env arrives here
+		// and must not re-enable credential or editor prompts); non-guard
+		// override keys still pass through over the defaults.
+		return { ...base, ...overrides, ...guardEntries(base) };
 	}
 
 	const env: Record<string, string> = { ...base };
@@ -131,5 +162,5 @@ export function buildNonInteractiveEnv(
 			env[key] = value;
 		}
 	}
-	return overrides ? { ...env, ...overrides } : env;
+	return overrides ? { ...env, ...overrides, ...guardEntries(env) } : env;
 }

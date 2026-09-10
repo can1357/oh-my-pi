@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `omp claude-trace` now requires `openssl` on PATH for its MITM debug proxy and reports a targeted prerequisite error naming the missing dependency instead of an opaque spawn failure.
+
+### Fixed
+
+- Critical bash patterns now prompt in auto-approve modes (yolo, CLI `--auto-approve`) when no explicit user policy matches; an explicit `tools.approval.bash` allow/deny/policy remains authoritative.
+- Direnv-loaded environment no longer overrides the non-interactive credential-prompt guards.
+
 ## [18.1.16] - 2026-09-09
 
 ### Added
