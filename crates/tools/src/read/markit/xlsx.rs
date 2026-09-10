@@ -11,8 +11,8 @@ use quick_xml::events::Event;
 use super::{
 	MarkitError,
 	ooxml::{
-		Archive, attribute, decode_reference, decode_text, local_name, render_markdown_table,
-		xml_reader,
+		Archive, attribute, decode_reference, decode_text, decode_xml_bytes, local_name,
+		render_markdown_table, xml_reader,
 	},
 };
 
@@ -82,23 +82,19 @@ pub(super) fn convert(bytes: &[u8]) -> Result<Str, MarkitError> {
 
 fn convert_inner(bytes: &[u8]) -> Result<String, String> {
 	let mut archive = Archive::open(bytes)?;
-	let workbook = archive
-		.read_xml("xl/workbook.xml")?
+	let workbook = read_member(&mut archive, "xl/workbook.xml")?
 		.ok_or_else(|| "Invalid XLSX: missing workbook.xml".to_owned())?;
-	let (sheets, date_system) = parse_workbook(&workbook)?;
-	let relationships = archive
-		.read_xml("xl/_rels/workbook.xml.rels")?
-		.map(|xml| parse_relationships(&xml))
+	let (sheets, date_system) = parse_workbook(workbook.as_bytes())?;
+	let relationships = read_member(&mut archive, "xl/_rels/workbook.xml.rels")?
+		.map(|xml| parse_relationships(xml.as_bytes()))
 		.transpose()?
 		.unwrap_or_default();
-	let shared = archive
-		.read_xml("xl/sharedStrings.xml")?
-		.map(|xml| parse_shared_strings(&xml))
+	let shared = read_member(&mut archive, "xl/sharedStrings.xml")?
+		.map(|xml| parse_shared_strings(xml.as_bytes()))
 		.transpose()?
 		.unwrap_or_default();
-	let styles = archive
-		.read_xml("xl/styles.xml")?
-		.map(|xml| parse_styles(&xml))
+	let styles = read_member(&mut archive, "xl/styles.xml")?
+		.map(|xml| parse_styles(xml.as_bytes()))
 		.transpose()?
 		.unwrap_or_default();
 
@@ -111,10 +107,10 @@ fn convert_inner(bytes: &[u8]) -> Result<String, String> {
 		let Some(path) = resolve_workbook_target(target) else {
 			continue;
 		};
-		let Some(xml) = archive.read_xml(&path)? else {
+		let Some(xml) = read_member(&mut archive, &path)? else {
 			continue;
 		};
-		let rows = parse_worksheet(&xml, &shared, &styles, date_system)?;
+		let rows = parse_worksheet(xml.as_bytes(), &shared, &styles, date_system)?;
 		readable_sheets += 1;
 		if rows.is_empty() {
 			continue;
@@ -127,6 +123,14 @@ fn convert_inner(bytes: &[u8]) -> Result<String, String> {
 	}
 
 	Ok(sections.join("\n\n"))
+}
+fn read_member(archive: &mut Archive<'_>, path: &str) -> Result<Option<String>, String> {
+	let Some(bytes) = archive.read_xml(path)? else {
+		return Ok(None);
+	};
+	decode_xml_bytes(&bytes)
+		.map(Some)
+		.map_err(|error| format!("{path} is not valid UTF text: {error}"))
 }
 
 fn parse_workbook(xml: &[u8]) -> Result<(Vec<Sheet>, DateSystem), String> {
@@ -913,4 +917,43 @@ mod tests {
 		assert_eq!(parse_cell_reference("$XFD$1048576"), Ok((1_048_575, 16_383)));
 		assert!(parse_cell_reference("A$$1").is_err());
 	}
+	#[test]
+	fn converts_utf16_encoded_workbook_member() {
+		use omp_ar::zip::Writer;
+
+		fn utf16le(text: &str) -> Vec<u8> {
+			let mut bytes = vec![0xff, 0xfe];
+			for unit in text.encode_utf16() {
+				bytes.extend_from_slice(&unit.to_le_bytes());
+			}
+			bytes
+		}
+
+		fn xlsx(parts: &[(&str, &[u8])]) -> Vec<u8> {
+			let mut archive = Writer::new(Vec::new());
+			for (name, contents) in parts {
+				archive.add_file(name, contents).unwrap();
+			}
+			archive.finish().unwrap()
+		}
+
+		let workbook = utf16le(
+			r#"<?xml version="1.0" encoding="UTF-16"?><workbook xmlns:r="r"><sheets><sheet name="Data" r:id="rId1"/></sheets></workbook>"#,
+		);
+		let bytes = xlsx(&[
+			("xl/workbook.xml", &workbook),
+			(
+				"xl/_rels/workbook.xml.rels",
+				br#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#,
+			),
+			(
+				"xl/worksheets/sheet1.xml",
+				r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Héllo</t></is></c></row></sheetData></worksheet>"#.as_bytes(),
+			),
+		]);
+
+		let markdown = convert(&bytes).expect("UTF-16 XLSX should convert");
+		assert_eq!(markdown.as_str(), "## Data\n\n| Héllo |\n| --- |");
+	}
 }
+

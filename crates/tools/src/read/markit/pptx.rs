@@ -15,8 +15,8 @@ use quick_xml::{
 use super::{
 	Attachment, Conversion, MarkitError,
 	ooxml::{
-		Archive, attachment_name, attribute, decode_reference, decode_text, format_url,
-		image_media_type, local_name, render_markdown_table, xml_reader,
+		Archive, attachment_name, attribute, decode_reference, decode_text, decode_xml_bytes,
+		format_url, image_media_type, local_name, render_markdown_table, xml_reader,
 	},
 };
 
@@ -34,9 +34,8 @@ pub(super) fn convert(bytes: &[u8], extract_media: bool) -> Result<Conversion, M
 
 fn convert_inner(bytes: &[u8], extract_media: bool) -> Result<(String, Vec<Attachment>), String> {
 	let mut archive = Archive::open(bytes)?;
-	let root_relationships = archive
-		.read_xml("_rels/.rels")?
-		.map(|xml| parse_relationships(&xml))
+	let root_relationships = read_member(&mut archive, "_rels/.rels")?
+		.map(|xml| parse_relationships(xml.as_bytes()))
 		.transpose()?
 		.unwrap_or_default();
 	let presentation_path = root_relationships
@@ -47,15 +46,16 @@ fn convert_inner(bytes: &[u8], extract_media: bool) -> Result<(String, Vec<Attac
 		.min_by(|(left, _), (right, _)| left.cmp(right))
 		.and_then(|(_, relationship)| resolve_part("", &relationship.target))
 		.unwrap_or_else(|| "ppt/presentation.xml".to_owned());
-	let presentation = archive
-		.read_xml(&presentation_path)?
+	let presentation = read_member(&mut archive, &presentation_path)?
 		.ok_or_else(|| "Invalid PPTX: missing presentation.xml".to_owned())?;
-	let slide_ids = presentation_slide_ids(&presentation)?;
-	let presentation_relationships = archive
-		.read_xml(&relationships_part(&presentation_path))?
-		.map(|xml| parse_relationships(&xml))
-		.transpose()?
-		.unwrap_or_default();
+	let slide_ids = presentation_slide_ids(presentation.as_bytes())?;
+	let presentation_relationships = read_member(
+		&mut archive,
+		&relationships_part(&presentation_path),
+	)?
+	.map(|xml| parse_relationships(xml.as_bytes()))
+	.transpose()?
+	.unwrap_or_default();
 
 	let mut slide_paths = slide_ids
 		.iter()
@@ -69,9 +69,8 @@ fn convert_inner(bytes: &[u8], extract_media: bool) -> Result<(String, Vec<Attac
 
 	let mut slide_relationships = Vec::with_capacity(slide_paths.len());
 	for slide_path in &slide_paths {
-		let relationships = archive
-			.read_xml(&relationships_part(slide_path))?
-			.map(|xml| parse_relationships(&xml))
+		let relationships = read_member(&mut archive, &relationships_part(slide_path))?
+			.map(|xml| parse_relationships(xml.as_bytes()))
 			.transpose()?
 			.unwrap_or_default();
 		slide_relationships.push(relationships);
@@ -102,10 +101,10 @@ fn convert_inner(bytes: &[u8], extract_media: bool) -> Result<(String, Vec<Attac
 	for (index, (slide_path, relationships)) in
 		slide_paths.iter().zip(&slide_relationships).enumerate()
 	{
-		let Some(slide_xml) = archive.read_xml(slide_path)? else {
+		let Some(slide_xml) = read_member(&mut archive, slide_path)? else {
 			continue;
 		};
-		let slide = parse_slide(&slide_xml)?;
+		let slide = parse_slide(slide_xml.as_bytes())?;
 		if !slide.has_shape_tree {
 			continue;
 		}
@@ -199,14 +198,14 @@ fn convert_inner(bytes: &[u8], extract_media: bool) -> Result<(String, Vec<Attac
 				archive.contains(&conventional).then_some(conventional)
 			});
 		if let Some(notes_path) = notes_path
-			&& let Some(notes_xml) = archive.read_xml(&notes_path)?
+			&& let Some(notes_xml) = read_member(&mut archive, &notes_path)?
 		{
-			let notes_relationships = archive
-				.read_xml(&relationships_part(&notes_path))?
-				.map(|xml| parse_relationships(&xml))
-				.transpose()?
-				.unwrap_or_default();
-			let notes = parse_notes(&notes_xml)?
+			let notes_relationships =
+				read_member(&mut archive, &relationships_part(&notes_path))?
+					.map(|xml| parse_relationships(xml.as_bytes()))
+					.transpose()?
+					.unwrap_or_default();
+			let notes = parse_notes(notes_xml.as_bytes())?
 				.into_iter()
 				.map(|shape| {
 					render_shape(&shape, &notes_relationships, &notes_path, &slide_numbers, false)
@@ -223,6 +222,14 @@ fn convert_inner(bytes: &[u8], extract_media: bool) -> Result<(String, Vec<Attac
 	}
 
 	Ok((sections.join("\n\n").trim().to_owned(), attachments))
+}
+fn read_member(archive: &mut Archive<'_>, path: &str) -> Result<Option<String>, String> {
+	let Some(bytes) = archive.read_xml(path)? else {
+		return Ok(None);
+	};
+	decode_xml_bytes(&bytes)
+		.map(Some)
+		.map_err(|error| format!("{path} is not valid UTF text: {error}"))
 }
 
 fn fallback_slide_paths(archive: &Archive<'_>) -> Vec<String> {
@@ -1237,6 +1244,22 @@ mod tests {
 		archive.finish().unwrap()
 	}
 
+	fn pptx_bytes(parts: &[(&str, &[u8])]) -> Vec<u8> {
+		let mut archive = Writer::new(Vec::new());
+		for (name, contents) in parts {
+			archive.add_file(name, contents).unwrap();
+		}
+		archive.finish().unwrap()
+	}
+
+	fn utf16le(text: &str) -> Vec<u8> {
+		let mut bytes = vec![0xff, 0xfe];
+		for unit in text.encode_utf16() {
+			bytes.extend_from_slice(&unit.to_le_bytes());
+		}
+		bytes
+	}
+
 	fn base_parts<'a>(slide: &'a str, slide_rels: &'a str) -> [(&'a str, &'a str); 4] {
 		[
 			(
@@ -1320,5 +1343,27 @@ mod tests {
 		let slide = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:graphicFrame><a:tbl><a:tr><a:tc gridSpan="2000000000" rowSpan="2000000000"><a:txBody><a:p/></a:txBody></a:tc></a:tr></a:tbl></p:graphicFrame></p:spTree></p:cSld></p:sld>"#;
 		let error = convert(&pptx(&base_parts(slide, "<Relationships/>")), false).unwrap_err();
 		assert!(error.to_string().contains("table span exceeds"));
+	}
+
+	#[test]
+	fn converts_utf16_encoded_slide_member() {
+		let slide = utf16le(
+			r#"<?xml version="1.0" encoding="UTF-16"?><p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:nvPr/></p:nvSpPr><p:txBody><a:p><a:r><a:t>Héllo</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+		);
+		let bytes = pptx_bytes(&[
+			(
+				"ppt/presentation.xml",
+				br#"<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>"#,
+			),
+			(
+				"ppt/_rels/presentation.xml.rels",
+				br#"<Relationships><Relationship Id="rId1" Type="x/slide" Target="slides/slide1.xml"/></Relationships>"#,
+			),
+			("ppt/slides/slide1.xml", &slide),
+			("ppt/slides/_rels/slide1.xml.rels", br#"<Relationships/>"#),
+		]);
+
+		let markdown = convert(&bytes, false).expect("UTF-16 PPTX should convert");
+		assert_eq!(markdown.as_str(), "<!-- Slide 1 -->\n# Héllo");
 	}
 }
