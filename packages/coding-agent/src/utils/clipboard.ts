@@ -1,6 +1,7 @@
 import {
 	type ClipboardImage,
 	copyToClipboard as nativeCopyToClipboard,
+	copyToClipboardPersistent as nativeCopyToClipboardPersistent,
 	readImageFromClipboard as nativeReadImageFromClipboard,
 } from "@oh-my-pi/pi-natives/clipboard";
 import { isWsl } from "@oh-my-pi/pi-utils";
@@ -139,6 +140,29 @@ export async function copyToClipboard(text: string): Promise<void> {
 	} catch {
 		// Ignore — clipboard copy is best-effort
 	}
+}
+
+/** Copy from the short-lived process launched by the omp-copy URL handler. */
+export async function copyTextPersistent(text: string): Promise<void> {
+	if (process.platform !== "linux") {
+		await copyToClipboard(text);
+		return;
+	}
+	const candidates = process.env.WAYLAND_DISPLAY
+		? [["wl-copy"]]
+		: [
+				["xclip", "-selection", "clipboard"],
+				["xsel", "-ib"],
+			];
+	for (const command of candidates) {
+		try {
+			await spawnCapture(command, { input: text, timeoutMs: 5000 });
+			return;
+		} catch {
+			// Try the next persistent clipboard owner.
+		}
+	}
+	nativeCopyToClipboardPersistent(text);
 }
 
 // PowerShell one-liner that emits the Windows clipboard image as base64-encoded

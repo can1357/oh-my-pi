@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { clearRenderCache, Markdown } from "@oh-my-pi/pi-tui/components/markdown";
+import { TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { defaultMarkdownTheme } from "./test-themes.js";
 
 // E2 contract: the streaming incremental lexer (lex(prefix) ++ lex(tail), reusing
@@ -117,6 +118,36 @@ const TABLE = (() => {
 })();
 
 describe("Markdown incremental streaming lex (E2)", () => {
+	it("renders a fenced JavaScript block and forwards its js language tag", () => {
+		let language: string | undefined;
+		const theme = {
+			...THEME,
+			highlightCode: (code: string, lang?: string) => {
+				language = lang;
+				return code.split("\n").map(line => `JS:${line}`);
+			},
+		};
+		const rendered = new Markdown("```js\nconst answer = 42;\n```", 0, 0, theme).render(80).join("\n");
+		expect(language).toBe("js");
+		expect(rendered).toContain("JS:const answer = 42;");
+		expect(rendered).toContain("js");
+		expect(rendered).not.toContain("```");
+	});
+
+	it("renders the semantic language icon instead of the raw fence language", () => {
+		const icon = "\u{E7A8}"; // Nerd Font Rust devicon
+		const theme = {
+			...THEME,
+			codeBlockLanguage: (lang: string) => `${icon} | ${lang}`,
+		};
+		const rendered = new Markdown("```rust\nfn main() {}\n```", 0, 0, theme).render(80).join("\n");
+		expect(rendered).toContain(icon);
+		expect(rendered).toContain("rust");
+		expect(rendered).toContain("| rust]");
+		expect(rendered).not.toContain("rust rust");
+		expect(rendered).not.toContain("```");
+	});
+
 	it("prose growth is byte-identical to full lex", () => {
 		assertIdenticalGrowth(PROSE);
 	});
@@ -151,6 +182,21 @@ describe("Markdown incremental streaming lex (E2)", () => {
 
 	it("transient render-prefix cache: table growing in the tail is byte-identical", () => {
 		assertIdenticalGrowthTransient(TABLE, 60, 7);
+	});
+
+	it("a transient width change mid-stream still matches cold renders", () => {
+		const streaming = new Markdown("", 0, 0, THEME);
+		streaming.transientRenderCache = true;
+		for (let len = 1; len <= MIXED.length; len += 41) {
+			clearRenderCache();
+			streaming.setText(MIXED.slice(0, len));
+			streaming.render(80);
+		}
+		clearRenderCache();
+		streaming.setText(MIXED);
+		expect(streaming.render(40)).toEqual(renderColdTransient(MIXED, 40));
+		clearRenderCache();
+		expect(streaming.render(100)).toEqual(renderColdTransient(MIXED, 100));
 	});
 
 	it("a width change mid-stream still matches a cold render at the new width", () => {
@@ -454,5 +500,99 @@ describe("Markdown OSC 8 tail normalization across streaming appends", () => {
 		clearRenderCache();
 		streaming.setText(`${truncated}|${ST}`);
 		expect(streaming.render(60)).toEqual(renderCold(`${truncated}|${ST}`, 60));
+	});
+
+	it("maps cached ST-normalized prefixes to the later nested fence copy body", () => {
+		const terminalState = TERMINAL as unknown as { hyperlinks: boolean };
+		const originalHyperlinks = terminalState.hyperlinks;
+		const targets: string[] = [];
+		try {
+			terminalState.hyperlinks = true;
+			const theme = {
+				...THEME,
+				copyChip: "copy",
+				copyChipTarget: (code: string) => {
+					targets.push(code);
+					return `omp-copy:${targets.length}`;
+				},
+			};
+			const st = "\x1b\\";
+			const prefix =
+				`${`${"\x1b]8;;https://example.com"}${st}`.repeat(8)}intro\x1b]8;;${st}\n\n` +
+				"```ts\nconst earlier = true;\n```\n\n";
+			const suffix = "```ts\nconst later = true;\n```\n";
+			const streaming = new Markdown("", 0, 0, theme);
+			streaming.transientRenderCache = true;
+			clearRenderCache();
+			streaming.setText(prefix);
+			streaming.render(80);
+			targets.length = 0;
+			clearRenderCache();
+			streaming.setText(prefix + suffix);
+			streaming.render(80);
+			expect(targets.at(-1)).toBe("const later = true;");
+		} finally {
+			terminalState.hyperlinks = originalHyperlinks;
+		}
+	});
+	it("keeps copy recovery after many frozen OSC contractions", () => {
+		const terminalState = TERMINAL as unknown as { hyperlinks: boolean };
+		const originalHyperlinks = terminalState.hyperlinks;
+		const targets: string[] = [];
+		try {
+			terminalState.hyperlinks = true;
+			const theme = { ...THEME, copyChip: "copy", copyChipTarget: (code: string) => (targets.push(code), "copy") };
+			const prefix = `${LINK}${ST}`.repeat(16) + "\n\n";
+			const suffix = "```ts\nconst newest = true;\n```\n";
+			const streaming = new Markdown("", 0, 0, theme);
+			streaming.transientRenderCache = true;
+			streaming.setText(prefix);
+			streaming.render(80);
+			clearRenderCache();
+			streaming.setText(prefix + suffix);
+			streaming.render(80);
+			expect(targets.at(-1)).toBe("const newest = true;");
+		} finally {
+			terminalState.hyperlinks = originalHyperlinks;
+		}
+	});
+	it("refreshes frozen copy payloads after a normalized-equal raw edit", () => {
+		const terminalState = TERMINAL as unknown as { hyperlinks: boolean };
+		const originalHyperlinks = terminalState.hyperlinks;
+		const targets: string[] = [];
+		try {
+			terminalState.hyperlinks = true;
+			const theme = {
+				...THEME,
+				copyChip: "copy",
+				copyChipTarget: (code: string) => {
+					targets.push(code);
+					return `omp-copy:${targets.length}`;
+				},
+			};
+			const st = "\x1b\\";
+			const rawSt = Array.from(
+				{ length: 16 },
+				(_, index) => `\x1b]8;;https://example.com/${index}${st}linked-${index}\x1b]8;;${st}`,
+			).join("");
+			const lastSt = rawSt.lastIndexOf(st);
+			const rawBel = `${rawSt.slice(0, lastSt)}\x07${rawSt.slice(lastSt + st.length)}`;
+			const initial = `\`\`\`text\n${rawSt}\n\`\`\`\n\ntail`;
+			const edited = `\`\`\`text\n${rawBel}\n\`\`\`\n\ntail`;
+			const streaming = new Markdown(initial, 0, 0, theme);
+			streaming.transientRenderCache = true;
+			clearRenderCache();
+			streaming.render(80);
+
+			targets.length = 0;
+			clearRenderCache();
+			streaming.setText(edited);
+			streaming.render(80);
+
+			expect(targets).toContain(rawBel);
+			expect(targets).not.toContain(rawSt);
+		} finally {
+			terminalState.hyperlinks = originalHyperlinks;
+		}
 	});
 });

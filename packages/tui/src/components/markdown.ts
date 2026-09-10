@@ -15,6 +15,7 @@ import { TERMINAL } from "../terminal-capabilities";
 import type { Component } from "../tui";
 import {
 	applyBackgroundToLine,
+	DEFAULT_TAB_WIDTH,
 	Ellipsis,
 	encodeTextSized,
 	getPaddingX,
@@ -27,6 +28,33 @@ import {
 	wrapTextWithAnsi,
 } from "../utils";
 
+/** Wrap a code row without treating ordinary spaces as break separators. */
+function wrapCodeLineWithAnsi(text: string, width: number): string[] {
+	const maxWidth = Math.max(1, Math.trunc(width));
+	let sentinel = "";
+	for (let codePoint = 0xe000; codePoint <= 0xf8ff; codePoint++) {
+		const candidate = String.fromCodePoint(codePoint);
+		if (!text.includes(candidate)) {
+			sentinel = candidate;
+			break;
+		}
+	}
+	if (!sentinel) sentinel = "\ufffc";
+	const protectedText = text.replaceAll("\u00a0", sentinel).replaceAll(" ", "\u00a0");
+	const rows = wrapTextWithAnsi(protectedText, maxWidth);
+	return rows.map(row => row.replaceAll("\u00a0", " ").replaceAll(sentinel, "\u00a0"));
+}
+
+/** Return the widest atomic grapheme in a code source, measured in terminal cells. */
+function widestGraphemeCells(text: string): number {
+	let widest = 1;
+	for (const { segment } of getSegmenter().segment(text)) {
+		if (segment === "\n" || segment === "\r") continue;
+		widest = Math.max(widest, visibleWidth(segment));
+	}
+	return widest;
+}
+
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
 // Marked treats the backslash in an ST-terminated OSC 8 sequence (`ESC \\`) as
@@ -37,6 +65,39 @@ const OSC8_ST_PREFIX_REGEX = /(\x1b\]8;[^\x07\x1b]*)\x1b\\/g;
 
 function normalizeOsc8Terminators(text: string): string {
 	return text.replace(OSC8_ST_PREFIX_REGEX, "$1\x07");
+}
+
+function findNormalizedOsc8Span(
+	source: string,
+	needle: string,
+	start: number,
+): { start: number; end: number } | undefined {
+	const normalizedNeedle = normalizeOsc8Terminators(needle);
+	const suffix = source.slice(start);
+	const normalizedParts: string[] = [];
+	const rawBoundaries: number[] = [start];
+	let rawCursor = 0;
+	OSC8_ST_PREFIX_REGEX.lastIndex = 0;
+	for (let match = OSC8_ST_PREFIX_REGEX.exec(suffix); match; match = OSC8_ST_PREFIX_REGEX.exec(suffix)) {
+		const unchanged = suffix.slice(rawCursor, match.index);
+		normalizedParts.push(unchanged);
+		for (let index = 0; index < unchanged.length; index++) rawBoundaries.push(start + rawCursor + index + 1);
+		const prefix = match[1]!;
+		normalizedParts.push(prefix, "\x07");
+		for (let index = 0; index < prefix.length; index++) rawBoundaries.push(start + match.index + index + 1);
+		rawBoundaries.push(start + match.index + match[0].length);
+		rawCursor = match.index + match[0].length;
+	}
+	const tail = suffix.slice(rawCursor);
+	normalizedParts.push(tail);
+	for (let index = 0; index < tail.length; index++) rawBoundaries.push(start + rawCursor + index + 1);
+	const normalizedSource = normalizedParts.join("");
+	const normalizedStart = normalizedSource.indexOf(normalizedNeedle);
+	if (normalizedStart < 0) return undefined;
+	return {
+		start: rawBoundaries[normalizedStart]!,
+		end: rawBoundaries[normalizedStart + normalizedNeedle.length]!,
+	};
 }
 
 /** The longest suffix of `text` a future append could still complete into a
@@ -63,6 +124,75 @@ function trailingOsc8Partial(text: string): string | undefined {
 const MARKDOWN_FENCE_LINE = /^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$/;
 const MARKDOWN_HEADING_LINE = /^ {0,3}#{1,6}[ \t]+\S/;
 const FENCED_SOURCE_INTRO = /\b(?:code|example|markdown|output|snippet|source)\s*:?\s*$/i;
+
+function isMarkdownFencePrefix(prefix: string): boolean {
+	let remaining = prefix;
+	while (remaining.length > 0) {
+		const indent = /^ {0,3}/.exec(remaining)?.[0] ?? "";
+		remaining = remaining.slice(indent.length);
+		if (remaining.length === 0) return true;
+		if (remaining.startsWith(">")) {
+			remaining = remaining.slice(1).replace(/^[ \t]/, "");
+			continue;
+		}
+		const listMarker = /^(?:[-+*]|\d+[.)])[ \t]+/.exec(remaining);
+		if (listMarker) {
+			remaining = remaining.slice(listMarker[0].length);
+			continue;
+		}
+		return false;
+	}
+	return true;
+}
+function markdownQuotePrefix(line: string): { length: number; depth: number } {
+	let length = 0;
+	let depth = 0;
+	for (;;) {
+		let cursor = length;
+		while (cursor < length + 3 && line[cursor] === " ") cursor++;
+		if (line[cursor] !== ">") return { length, depth };
+		cursor++;
+		if (line[cursor] === " ") cursor++;
+		length = cursor;
+		depth++;
+	}
+}
+
+function isListContinuationFencePrefix(source: string, lineStart: number, prefix: string): boolean {
+	const quote = markdownQuotePrefix(prefix);
+	const indent = prefix.length - quote.length;
+	if (!/^ *$/.test(prefix.slice(quote.length))) return false;
+	let cursor = lineStart;
+	let activeIndent = indent;
+	while (cursor > 0) {
+		const previousEnd = cursor - 1;
+		const previousStart = previousEnd > 0 ? source.lastIndexOf("\n", previousEnd - 1) + 1 : 0;
+		const line = source.slice(previousStart, previousEnd);
+		cursor = previousStart;
+		const enclosingQuote = markdownQuotePrefix(line);
+		if (line.trim().length === 0 || enclosingQuote.depth > quote.depth) continue;
+		if (enclosingQuote.depth < quote.depth) return false;
+		const content = line.slice(enclosingQuote.length);
+		if (content.trim().length === 0) continue;
+		const leadingIndent = /^ */.exec(content)![0].length;
+		const marker = /^( *)(?:[-+*]|\d+[.)])([ \t]+)/.exec(content);
+		if (marker && marker[0].length <= activeIndent) {
+			return indent - marker[0].length <= 3;
+		}
+		// A dedented continuation closes deeper child levels. Keep walking
+		// until a marker belongs to the remaining active ancestor.
+		activeIndent = Math.min(activeIndent, leadingIndent);
+	}
+	return false;
+}
+
+function isClosingFencePrefix(line: string, fenceAt: number, quoteDepth: number): boolean {
+	for (let index = 0; index < fenceAt; index++) {
+		if (line[index] === ">") quoteDepth--;
+		else if (line[index] !== " ") return false;
+	}
+	return quoteDepth === 0;
+}
 
 function isGfmTableDelimiter(line: string, headerLine: string | undefined): boolean {
 	if (!headerLine || !line.includes("|") || !headerLine.includes("|")) return false;
@@ -886,6 +1016,15 @@ const EMPTY_RENDER_LINES: readonly string[] = [];
 interface RenderedLine {
 	text: string;
 	literalCode?: true;
+	/** Optional structured code layout used when a fenced row must wrap inside a frame. */
+	codePrefix?: string;
+	/** Unstyled gutter text (digits + connector) so wrap can blank digits without touching ANSI. */
+	codePlainPrefix?: string;
+	codeBody?: string;
+	codeContinuationPrefix?: string;
+	codeOuterPadding?: number;
+	/** Keep a framed code row intact during the outer markdown wrap pass. */
+	noWrap?: true;
 }
 
 interface RenderedListItemLine extends RenderedLine {
@@ -903,8 +1042,8 @@ const renderCache = new LRUCache<string, readonly string[]>({
 	sizeCalculation: renderedLinesCacheSize,
 });
 
-function renderedLinesCacheSize(lines: readonly string[]): number {
-	let size = lines.length;
+function renderedLinesCacheSize(lines: readonly string[], key: string): number {
+	let size = key.length + lines.length;
 	for (let i = 0; i < lines.length; i++) size += lines[i]!.length;
 	return Math.max(1, size);
 }
@@ -1366,6 +1505,19 @@ export interface MarkdownTheme {
 	code: (text: string) => string;
 	codeBlock: (text: string) => string;
 	codeBlockBorder: (text: string) => string;
+	/** Render the ASCII language marker and label for a fenced code block header. */
+	codeBlockLanguage?: (lang: string) => string;
+	/** Steering-style ├─/└─/│ gutter inside fenced code blocks. Defaults to true. */
+	guidanceTrail?: boolean;
+	/** Bottom-right chip label (e.g. "copy") painted into the footer rule when set. */
+	copyChip?: string;
+	/**
+	 * Resolve the OSC 8 hyperlink target for a code block's copy chip from its
+	 * raw body. Returns a URL (e.g. `omp-copy:<id>`) to make the chip a real
+	 * click-to-copy link, or undefined to keep it a plain visual label. Only
+	 * used when {@link copyChip} is set and the terminal supports hyperlinks.
+	 */
+	copyChipTarget?: (code: string) => string | undefined;
 	quote: (text: string) => string;
 	quoteBorder: (text: string) => string;
 	hr: (text: string) => string;
@@ -1668,6 +1820,10 @@ interface RenderSignature {
 
 interface StreamPrefixLineCache extends RenderSignature {
 	text: string;
+	/** Raw source prefix backing `text`; normalized-equal edits must not reuse rows. */
+	sourceText: string;
+	/** Cursor in tab-expanded original source after the cached prefix. */
+	copySourceCursor: number;
 	tokenCount: number;
 	lines: readonly string[];
 }
@@ -1707,6 +1863,8 @@ interface TailRowCache extends RenderSignature {
 	rows: (readonly string[] | undefined)[];
 	// Raw snapshot per token (string value gate).
 	raws: (string | undefined)[];
+	// Raw input backing cached rows; append-only extensions retain valid token prefixes.
+	sourceText: string;
 	// type of token[i+1] when the rows were produced (blank/spacing gate).
 	nextTypes: (string | undefined)[];
 }
@@ -1729,6 +1887,48 @@ interface StreamingHighlightCache extends RenderSignature {
 	stream: HighlightStreamSession;
 }
 
+interface ExpandedSource {
+	text: string;
+	sourceOffsets: number[];
+}
+
+function expandSourceText(source: string): ExpandedSource {
+	const text: string[] = [];
+	const sourceOffsets: number[] = [0];
+	for (let sourceOffset = 0; sourceOffset < source.length; sourceOffset++) {
+		const char = source[sourceOffset]!;
+		const isCrLf = char === "\r" && source[sourceOffset + 1] === "\n";
+		const expanded = char === "\r" ? "\n" : char === "\t" ? " ".repeat(DEFAULT_TAB_WIDTH) : char;
+		if (isCrLf) sourceOffset++;
+		text.push(expanded);
+		for (let offset = 0; offset < expanded.length; offset++) sourceOffsets.push(sourceOffset + 1);
+	}
+	return { text: text.join(""), sourceOffsets };
+}
+
+/** Translate a normalized (tabs expanded, OSC ST collapsed) boundary to raw source. */
+function sourceOffsetAtExpandedBoundary(source: string, boundary: number): number {
+	if (boundary <= 0) return 0;
+	let normalizedOffset = 0;
+	let nextOscMatch: RegExpExecArray | null = null;
+	OSC8_ST_PREFIX_REGEX.lastIndex = 0;
+	nextOscMatch = OSC8_ST_PREFIX_REGEX.exec(source);
+	for (let sourceOffset = 0; sourceOffset < source.length;) {
+		if (nextOscMatch?.index === sourceOffset) {
+			normalizedOffset += replaceTabs(`${nextOscMatch[1]}\x07`).length;
+			sourceOffset += nextOscMatch[0].length;
+			if (normalizedOffset >= boundary) return sourceOffset;
+			nextOscMatch = OSC8_ST_PREFIX_REGEX.exec(source);
+			continue;
+		}
+		const isCrLf = source[sourceOffset] === "\r" && source[sourceOffset + 1] === "\n";
+		normalizedOffset += source[sourceOffset] === "\t" ? DEFAULT_TAB_WIDTH : 1;
+		sourceOffset += isCrLf ? 2 : 1;
+		if (normalizedOffset >= boundary) return sourceOffset;
+	}
+	return source.length;
+}
+
 /**
  * Split a highlight-stream push result (newline-terminated lines) into
  * per-line strings, dropping the empty tail produced by the final newline.
@@ -1741,6 +1941,14 @@ function splitPushedHighlightLines(pushed: string): string[] {
 
 export class Markdown implements Component {
 	#text: string;
+	/** Original input retained for copy-chip payloads (before display tab expansion). */
+	#sourceText: string;
+	/** Tab-expanded raw source, allocated only when fenced copy recovery runs. */
+	#expandedSourceText?: string;
+	/** Dense expanded-to-source offsets, allocated with the copy-recovery source. */
+	#expandedSourceOffsets?: number[];
+	/** Expanded-source cursor used to disambiguate repeated fenced blocks. */
+	#copySourceSearchCursor = 0;
 	// Suffix of #text a future append could still complete into a match
 	// (see trailingOsc8Partial); drives the append-only fast path.
 	#oscPartialEscape?: string;
@@ -1823,6 +2031,7 @@ export class Markdown implements Component {
 		defaultTextStyle?: DefaultTextStyle,
 		codeBlockIndent: number = 2,
 	) {
+		this.#sourceText = text;
 		this.#text = normalizeOsc8Terminators(text);
 		this.#oscPartialEscape = trailingOsc8Partial(this.#text);
 		this.#paddingX = paddingX;
@@ -1845,20 +2054,24 @@ export class Markdown implements Component {
 	}
 
 	setText(text: string): boolean {
-		// Identical re-emit (throttled tick): fully normalized already.
-		if (text === this.#text) return false;
+		// Source recovery must observe byte-exact caller input even when display
+		// normalization maps an OSC ST terminator to BEL.
+		if (text === this.#sourceText) return false;
+		const sourceText = text;
 		// Streaming path: append-only growth. Only the memoized pending escape
 		// suffix plus the delta can hold a not-yet-normalized match (a crossing
 		// match starts in the pending suffix; everything else is in the delta).
-		// Normalize that region alone and splice it onto the old prefix;
-		// String.replace returns the input unchanged when nothing matches, so
-		// the common clean-delta frame allocates nothing. Once a match is
-		// rewritten (ST → BEL), the caller's raw text no longer aligns with
-		// #text (2-byte ST vs 1-byte BEL), so later frames fall back to the
-		// cold full-document pass — still byte-correct, just not faster.
-		if (text.length > this.#text.length && text.startsWith(this.#text)) {
+		// Normalize that region alone and splice it onto the old prefix. The
+		// common clean-delta frame allocates nothing. After ST → BEL rewrites,
+		// normalized render text no longer aligns with the raw source, so later
+		// frames use the cold pass while source recovery remains byte-exact.
+		if (
+			this.#text === this.#sourceText &&
+			sourceText.length > this.#sourceText.length &&
+			sourceText.startsWith(this.#sourceText)
+		) {
 			const memoized = this.#oscPartialEscape;
-			const pending = (memoized ?? "") + text.slice(this.#text.length);
+			const pending = (memoized ?? "") + sourceText.slice(this.#sourceText.length);
 			const normalized = normalizeOsc8Terminators(pending);
 			if (normalized !== pending) {
 				// A stored byte was rewritten (ST → BEL on a crossing match): the
@@ -1867,24 +2080,50 @@ export class Markdown implements Component {
 				text = this.#text.slice(0, this.#text.length - (memoized?.length ?? 0)) + normalized;
 			}
 			this.#oscPartialEscape = trailingOsc8Partial(normalized);
+			if (
+				TERMINAL.hyperlinks &&
+				this.#theme.copyChipTarget !== undefined &&
+				this.#expandedSourceText !== undefined &&
+				this.#expandedSourceOffsets !== undefined
+			) {
+				const delta = sourceText.slice(this.#sourceText.length);
+				if (normalized === pending && !delta.includes("\r") && !this.#sourceText.endsWith("\r")) {
+					let expandedLength = this.#expandedSourceText.length;
+					for (let deltaOffset = 0; deltaOffset < delta.length; deltaOffset++) {
+						const sourceOffset = this.#sourceText.length + deltaOffset;
+						expandedLength += delta[deltaOffset] === "\t" ? DEFAULT_TAB_WIDTH : 1;
+						for (let offset = this.#expandedSourceOffsets.length; offset <= expandedLength; offset++) {
+							this.#expandedSourceOffsets.push(sourceOffset + 1);
+						}
+					}
+					this.#expandedSourceText += replaceTabs(delta);
+				} else {
+					const expandedSource = expandSourceText(sourceText);
+					this.#expandedSourceText = expandedSource.text;
+					this.#expandedSourceOffsets = expandedSource.sourceOffsets;
+				}
+			} else if (!TERMINAL.hyperlinks || this.#theme.copyChipTarget === undefined) {
+				this.#expandedSourceText = undefined;
+				this.#expandedSourceOffsets = undefined;
+			}
+			this.#sourceText = sourceText;
 			this.#text = text;
 			this.invalidate();
 			return true;
 		}
 		// Non-append edits / cold path: full-document pass.
-		text = normalizeOsc8Terminators(text);
+		text = normalizeOsc8Terminators(sourceText);
 		this.#oscPartialEscape = trailingOsc8Partial(text);
-		// Equality guard: streaming re-emits identical text on ticks that carried
-		// no delta (throttled provider frames, reconciled tool-execution updates).
-		// Without this, the caller-side `#cachedLines` gets thrown away and the
-		// full lex + wrap runs per re-emit — one of the top CPU hotspots during
-		// streaming (issue #4353). Mirrors `Text.setText`'s guard.
-		if (text === this.#text) return false;
+		// The raw-source equality guard above handles throttled re-emits before
+		// normalization; reaching this path therefore represents a real edit.
 		if (!text.startsWith(this.#text)) {
 			// Non-append edit: the previous frame's guard verdict cannot be
 			// reused — the checked region may have changed anywhere.
 			this.#appendOnlySinceLastScan = false;
 		}
+		this.#sourceText = sourceText;
+		this.#expandedSourceText = undefined;
+		this.#expandedSourceOffsets = undefined;
 		this.#text = text;
 		if (!text.trim()) {
 			// Blank replacement: render() early-returns before #lexTokens can see
@@ -2222,7 +2461,7 @@ export class Markdown implements Component {
 		// by MarkdownTheme and is one of the most styling-sensitive entries.
 		let cacheKey: string | undefined;
 		if (!this.transientRenderCache) {
-			cacheKey = this.#renderCacheKey(normalizedText, signature);
+			cacheKey = this.#renderCacheKey(normalizedText, this.#sourceText, signature);
 			const cached = renderCache.get(cacheKey);
 			if (cached !== undefined) {
 				// Populate L1 so subsequent calls from this instance are O(1) map lookup.
@@ -2235,6 +2474,7 @@ export class Markdown implements Component {
 
 		// Parse markdown to HTML-like tokens
 		const tokens = this.#lexTokens(normalizedText);
+		this.#copySourceSearchCursor = 0;
 		let contentLines: string[];
 		this.#activeRenderSignature = signature;
 		try {
@@ -2315,11 +2555,15 @@ export class Markdown implements Component {
 	}
 	// All-primitive signature — compare via the canonical render-cache encoding.
 	#signatureEquals(a: RenderSignature, b: RenderSignature): boolean {
-		return this.#renderCacheKey("", a) === this.#renderCacheKey("", b);
+		return this.#renderCacheKey("", "", a) === this.#renderCacheKey("", "", b);
 	}
 
-	#renderCacheKey(normalizedText: string, signature: RenderSignature): string {
-		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}`;
+	#renderCacheKey(normalizedText: string, sourceText: string, signature: RenderSignature): string {
+		// The display lexer expands tabs, but copy-chip targets must preserve the
+		// original source bytes. Keep the raw source in the cache identity so two
+		// documents that render identically can never reuse the other's target.
+		const sourceKey = sourceText === normalizedText ? "=" : `${sourceText.length}:${sourceText}`;
+		return `${normalizedText.length}:${normalizedText}\x00${sourceKey}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}`;
 	}
 
 	#renderStreamingContentLines(
@@ -2340,8 +2584,9 @@ export class Markdown implements Component {
 		if (reusablePrefix && reusablePrefix.tokenCount <= stableTokenCount) {
 			contentLines.push(...reusablePrefix.lines);
 			renderedUntil = reusablePrefix.tokenCount;
+			// Reuse the cursor captured with these rows, including raw OSC/tab offsets.
+			this.#copySourceSearchCursor = reusablePrefix.copySourceCursor;
 		}
-
 		if (renderedUntil < stableTokenCount) {
 			// Stable tokens render with full fidelity (syntax highlighting on)
 			// so these cached rows byte-match the finalized render.
@@ -2359,6 +2604,11 @@ export class Markdown implements Component {
 		this.#streamPrefixLineCache = {
 			...signature,
 			text: stableText,
+			sourceText:
+				reusablePrefix?.text === stableText
+					? reusablePrefix.sourceText
+					: this.#sourceText.slice(0, sourceOffsetAtExpandedBoundary(this.#sourceText, stableText.length)),
+			copySourceCursor: this.#copySourceSearchCursor,
 			tokenCount: stableTokenCount,
 			lines: contentLines.slice(),
 		};
@@ -2377,6 +2627,7 @@ export class Markdown implements Component {
 	): StreamPrefixLineCache | undefined {
 		const cache = this.#streamPrefixLineCache;
 		if (!cache) return undefined;
+		if (!this.#sourceText.startsWith(cache.sourceText)) return undefined;
 		if (!normalizedText.startsWith(cache.text) || !stableText.startsWith(cache.text)) return undefined;
 		if (cache.width !== signature.width) return undefined;
 		if (cache.paddingX !== signature.paddingX) return undefined;
@@ -2409,6 +2660,9 @@ export class Markdown implements Component {
 			spliceEnd = this.#tailSpliceEnd(cache, start, signature, tokens);
 			for (let i = start; i < spliceEnd; i++) {
 				out.push(...cache.rows[i - start]!);
+			}
+			for (let i = start; i < spliceEnd; i++) {
+				this.#advanceSplicedCopySourceCursor(tokens[i]!);
 			}
 		}
 
@@ -2456,6 +2710,7 @@ export class Markdown implements Component {
 			cachedThrough,
 			rows,
 			raws,
+			sourceText: this.#sourceText,
 			nextTypes,
 		};
 		return out;
@@ -2468,6 +2723,7 @@ export class Markdown implements Component {
 	// token), or a following-token type change.
 	#tailSpliceEnd(cache: TailRowCache, start: number, signature: RenderSignature, tokens: Token[]): number {
 		if (cache.tokenStart !== start) return start;
+		if (!this.#sourceText.startsWith(cache.sourceText)) return start;
 		if (cache.width !== signature.width) return start;
 		if (cache.paddingX !== signature.paddingX) return start;
 		if (cache.paddingY !== signature.paddingY) return start;
@@ -2515,7 +2771,12 @@ export class Markdown implements Component {
 				// Lists wrap while their structural prefixes are still available, so
 				// continuation rows retain the correct hanging indent. Re-wrapping the
 				// flattened rows here would discard that structure.
-				if (token.type === "list" || TERMINAL.isImageLine(renderedRow.text) || isOsc66Line(renderedRow.text)) {
+				if (
+					token.type === "list" ||
+					renderedRow.noWrap === true ||
+					TERMINAL.isImageLine(renderedRow.text) ||
+					isOsc66Line(renderedRow.text)
+				) {
 					wrappedLines.push(renderedRow);
 				} else {
 					const wrappedRows = wrapTextWithAnsi(renderedRow.text, contentWidth);
@@ -2637,23 +2898,446 @@ export class Markdown implements Component {
 		return contentLines;
 	}
 
-	#renderCodeBodyLines(token: Token, codeIndent: string): RenderedLine[] {
+	#isFencedCodeToken(token: Token): boolean {
+		const raw = "raw" in token && typeof token.raw === "string" ? token.raw : "";
+		const firstLine = raw.slice(0, raw.indexOf("\n") >= 0 ? raw.indexOf("\n") : raw.length);
+		return MARKDOWN_FENCE_LINE.test(firstLine);
+	}
+
+	#ensureExpandedSource(): ExpandedSource {
+		if (this.#expandedSourceText === undefined || this.#expandedSourceOffsets === undefined) {
+			const expandedSource = expandSourceText(this.#sourceText);
+			this.#expandedSourceText = expandedSource.text;
+			this.#expandedSourceOffsets = expandedSource.sourceOffsets;
+		}
+		return { text: this.#expandedSourceText, sourceOffsets: this.#expandedSourceOffsets };
+	}
+
+	#findCopySourceSpan(raw: string): { start: number; end: number } | undefined {
+		const expandedSourceText = this.#ensureExpandedSource().text;
+		const canonicalRaw = replaceTabs(raw.replace(/\r\n?/g, "\n"));
+		const start = this.#copySourceSearchCursor;
+		const exactStart = expandedSourceText.indexOf(canonicalRaw, start);
+		// Only normalization before an exact match can produce an earlier match.
+		const suffix = expandedSourceText.slice(start, exactStart < 0 ? undefined : exactStart);
+		OSC8_ST_PREFIX_REGEX.lastIndex = 0;
+		const hasStTerminatedOsc = OSC8_ST_PREFIX_REGEX.test(suffix);
+		OSC8_ST_PREFIX_REGEX.lastIndex = 0;
+		if (!hasStTerminatedOsc) {
+			return exactStart >= 0 ? { start: exactStart, end: exactStart + canonicalRaw.length } : undefined;
+		}
+		const normalizedSpan = findNormalizedOsc8Span(expandedSourceText, canonicalRaw, start);
+		if (normalizedSpan && (exactStart < 0 || normalizedSpan.start < exactStart)) return normalizedSpan;
+		return exactStart >= 0 ? { start: exactStart, end: exactStart + canonicalRaw.length } : normalizedSpan;
+	}
+
+	#findContainerSourceSpan(raw: string): { start: number; end: number } | undefined {
+		const expandedSourceText = this.#ensureExpandedSource().text;
+		const lines = raw.replace(/\r\n?/g, "\n").split("\n");
+		const first = lines[0];
+		if (!first) return undefined;
+		let lineStart = this.#copySourceSearchCursor;
+		while (lineStart <= expandedSourceText.length) {
+			const lineEnd = expandedSourceText.indexOf("\n", lineStart);
+			const sourceLine =
+				lineEnd >= 0 ? expandedSourceText.slice(lineStart, lineEnd) : expandedSourceText.slice(lineStart);
+			const contentAt = sourceLine.endsWith(first) ? sourceLine.length - first.length : -1;
+			if (contentAt >= 0 && isMarkdownFencePrefix(sourceLine.slice(0, contentAt))) {
+				let cursor = lineEnd >= 0 ? lineEnd + 1 : expandedSourceText.length;
+				let matched = true;
+				for (let index = 1; index < lines.length; index++) {
+					const nextEnd = expandedSourceText.indexOf("\n", cursor);
+					const nextLine =
+						nextEnd >= 0 ? expandedSourceText.slice(cursor, nextEnd) : expandedSourceText.slice(cursor);
+					if (!nextLine.endsWith(lines[index]!)) {
+						matched = false;
+						break;
+					}
+					cursor = nextEnd >= 0 ? nextEnd + 1 : expandedSourceText.length;
+				}
+				if (matched) return { start: lineStart + contentAt, end: cursor > 0 ? cursor - 1 : cursor };
+			}
+			if (lineEnd < 0) break;
+			lineStart = lineEnd + 1;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Advance the raw-source lookup past a rendered leaf token. Container tokens
+	 * recurse into their children, while code tokens advance from the exact span
+	 * resolved by #originalCodeBody().
+	 */
+	#advanceCopySourceCursor(token: Token): void {
+		if (!TERMINAL.hyperlinks || this.#theme.copyChipTarget === undefined) return;
+		if (token.type === "code" || token.type === "list" || token.type === "blockquote") return;
+		const raw = "raw" in token && typeof token.raw === "string" ? replaceTabs(token.raw) : "";
+		if (!raw) return;
+		const span = this.#findCopySourceSpan(raw) ?? this.#findContainerSourceSpan(raw);
+		if (span) this.#copySourceSearchCursor = span.end;
+	}
+
+	/** Advance across a cached top-level token whose nested rows were spliced. */
+	#advanceSplicedCopySourceCursor(token: Token): void {
+		if (!TERMINAL.hyperlinks || this.#theme.copyChipTarget === undefined) return;
+		const raw = "raw" in token && typeof token.raw === "string" ? replaceTabs(token.raw) : "";
+		if (!raw) return;
+		const span = this.#findCopySourceSpan(raw) ?? this.#findContainerSourceSpan(raw);
+		if (span) this.#copySourceSearchCursor = span.end;
+	}
+
+	/** Recover the source body for copy targets after display tab expansion. */
+	#originalCodeBody(token: Token): string {
+		const fallback = "text" in token && typeof token.text === "string" ? token.text : "";
+		if (!TERMINAL.hyperlinks || this.#theme.copyChipTarget === undefined) return fallback;
+		const raw = "raw" in token && typeof token.raw === "string" ? token.raw : "";
+		if (!raw) return fallback;
+		// Marked may include the newline after a closing fence in token.raw. It
+		// belongs to the following block, not to the copy payload; trim only
+		// delimiter-adjacent newlines used for locating this token.
+		const rawForSpan = raw.replace(/^(?:(?:\r\n?|\n))+|(?:(?:\r\n?|\n))+$/g, "");
+		if (!rawForSpan) return fallback;
+		const { text: expandedSource, sourceOffsets } = this.#ensureExpandedSource();
+		const searchStart = this.#copySourceSearchCursor;
+		const sourceSpan = this.#findCopySourceSpan(rawForSpan);
+		let expandedStart = sourceSpan?.start ?? -1;
+		let expandedEnd = sourceSpan?.end ?? -1;
+		if (expandedStart < 0) {
+			// Nested tokens lose their container prefixes, so `raw` is not a
+			// contiguous substring of the source. Locate the opening and actual
+			// closing fence lines instead, preserving the source span's tabs.
+			const rawLines = rawForSpan.split(/\r\n?|\n/);
+			const openLine = rawLines[0]?.trim() ?? "";
+			const openingFence = MARKDOWN_FENCE_LINE.exec(openLine)?.[1];
+			if (!openLine || !openingFence) return fallback;
+			let openingLineStart = expandedSource.lastIndexOf("\n", Math.max(0, searchStart - 1)) + 1;
+			let openAt = -1;
+			while (openingLineStart <= expandedSource.length) {
+				const openingLineEnd = expandedSource.indexOf("\n", openingLineStart);
+				const sourceLine =
+					openingLineEnd >= 0
+						? expandedSource.slice(openingLineStart, openingLineEnd)
+						: expandedSource.slice(openingLineStart);
+				const fenceAt = sourceLine.indexOf(openLine);
+				const prefix = fenceAt >= 0 ? sourceLine.slice(0, fenceAt) : "";
+				const validPrefix =
+					isMarkdownFencePrefix(prefix) ||
+					(fenceAt >= 0 && isListContinuationFencePrefix(expandedSource, openingLineStart, prefix));
+				if (fenceAt >= 0 && sourceLine.slice(fenceAt).trim() === openLine && validPrefix) {
+					openAt = openingLineStart + fenceAt;
+					break;
+				}
+				if (openingLineEnd < 0) break;
+				openingLineStart = openingLineEnd + 1;
+			}
+			if (openAt < 0) return fallback;
+			const openingFenceColumn = openAt - openingLineStart;
+			let openingQuoteDepth = 0;
+			for (let index = openingLineStart; index < openAt; index++) {
+				if (expandedSource[index] === ">") openingQuoteDepth++;
+			}
+			const fenceChar = openingFence.charAt(0);
+			const fenceLength = openingFence.length;
+			let lineStart = expandedSource.indexOf("\n", openAt + openLine.length);
+			if (lineStart < 0) return fallback;
+			lineStart++;
+			let closeAt = -1;
+			let closeLength = 0;
+			while (lineStart <= expandedSource.length) {
+				const lineEnd = expandedSource.indexOf("\n", lineStart);
+				const sourceLine =
+					lineEnd >= 0 ? expandedSource.slice(lineStart, lineEnd) : expandedSource.slice(lineStart);
+				const fenceAt = sourceLine.search(fenceChar === "`" ? /`{3,}/ : /~{3,}/);
+				if (fenceAt >= 0 && fenceAt <= openingFenceColumn + 3) {
+					let candidateLength = 0;
+					while (sourceLine.charAt(fenceAt + candidateLength) === fenceChar) candidateLength++;
+					const legalPrefix = isClosingFencePrefix(sourceLine, fenceAt, openingQuoteDepth);
+					if (
+						legalPrefix &&
+						candidateLength >= fenceLength &&
+						sourceLine.slice(fenceAt + candidateLength).trim().length === 0
+					) {
+						closeAt = lineStart + fenceAt;
+						closeLength = candidateLength;
+						break;
+					}
+				}
+				if (lineEnd < 0) break;
+				lineStart = lineEnd + 1;
+			}
+			if (closeAt < 0) return fallback;
+			// Include the container prefix on the opening line so it can be removed
+			// consistently from each recovered body line below.
+			expandedStart = openingLineStart;
+			expandedEnd = closeAt + closeLength;
+		}
+		this.#copySourceSearchCursor = Math.max(this.#copySourceSearchCursor, expandedEnd);
+		const sourceStart = sourceOffsets[expandedStart] ?? this.#sourceText.length;
+		const sourceEnd = sourceOffsets[expandedEnd] ?? this.#sourceText.length;
+		const sourceRaw = this.#sourceText.slice(sourceStart, sourceEnd);
+		const firstLineMatch = /\r\n|\r|\n/.exec(sourceRaw);
+		const firstLineEnd = firstLineMatch?.index ?? -1;
+		const firstLineBreakLength = firstLineMatch?.[0].length ?? 0;
+		const lastLineStart = Math.max(sourceRaw.lastIndexOf("\n"), sourceRaw.lastIndexOf("\r"));
+		if (firstLineEnd < 0 || lastLineStart <= firstLineEnd) return fallback;
+		const openingLine = sourceRaw.slice(0, firstLineEnd);
+		const closingLine = sourceRaw.slice(lastLineStart + 1);
+		const openingFenceAt = openingLine.search(/(`{3,}|~{3,})/);
+		const closingFenceAt = closingLine.search(/(`{3,}|~{3,})/);
+		const openingPrefix = openingFenceAt > 0 ? openingLine.slice(0, openingFenceAt) : "";
+		// A list item's opening line may contain `- `, while its body and closing
+		// fence use the continuation prefix (`  `). Prefer the actual closing-line
+		// prefix for body recovery and retain the opening prefix as a fallback for
+		// blockquote-shaped tokens.
+		const closingPrefix = closingFenceAt > 0 ? closingLine.slice(0, closingFenceAt) : "";
+		const prefixes = [closingPrefix, openingPrefix].filter(
+			(prefix, index, all) => prefix.length > 0 && all.indexOf(prefix) === index,
+		);
+		const hasStructuralContainer = prefixes.some(prefix => prefix.trim().length > 0);
+		const whitespaceBudget = prefixes.reduce(
+			(max, prefix) => (/^[ \t]+$/.test(prefix) ? Math.max(max, prefix.length) : max),
+			0,
+		);
+		const bodyEnd = sourceRaw[lastLineStart - 1] === "\r" ? lastLineStart - 1 : lastLineStart;
+		const body = sourceRaw.slice(firstLineEnd + firstLineBreakLength, bodyEnd);
+		if (prefixes.length === 0) return body;
+		const parsedLines = fallback.split(/\r\n?|\n/);
+		const bodyParts = body.split(/(\r\n?|\n)/);
+		return bodyParts
+			.map((line, partIndex) => {
+				if (partIndex % 2 === 1) return line;
+				const index = partIndex / 2;
+				// Match Marked's parsed row before accepting an exact recovered
+				// prefix: a shorter closing-fence prefix may also match the body
+				// while leaving container indentation behind.
+				const parsed = parsedLines[index];
+				if (parsed !== undefined && parsed.trim().length === 0) {
+					const structuralPrefix = prefixes.find(candidate => line.startsWith(candidate));
+					if (structuralPrefix) return line.slice(structuralPrefix.length);
+				}
+				if (parsed !== undefined && hasStructuralContainer) {
+					const structuralPrefix = prefixes
+						.map(prefix => prefix.replace(/[ \t]+$/, ""))
+						.find(prefix => prefix.length > 0 && line.startsWith(prefix));
+					if (structuralPrefix) {
+						const remainder = line.slice(structuralPrefix.length);
+						if (
+							remainder.startsWith("\t") &&
+							/^[ ]/.test(parsed) &&
+							replaceTabs(remainder).endsWith(replaceTabs(parsed))
+						) {
+							return parsed;
+						}
+					}
+				}
+				if (parsed !== undefined) {
+					if (
+						hasStructuralContainer &&
+						line.startsWith("\t") &&
+						/^[ ]/.test(parsed) &&
+						replaceTabs(line).endsWith(replaceTabs(parsed))
+					) {
+						return parsed;
+					}
+					for (let offset = 0; offset <= line.length; offset++) {
+						if (replaceTabs(line.slice(offset)) === replaceTabs(parsed)) return line.slice(offset);
+					}
+				}
+				const prefix = prefixes.find(candidate => line.startsWith(candidate));
+				if (prefix) return line.slice(prefix.length);
+				if (hasStructuralContainer) return line;
+				if (whitespaceBudget === 0) return line;
+				const leadingWhitespace = /^[ \t]*/.exec(line)?.[0].length ?? 0;
+				return line.slice(Math.min(leadingWhitespace, whitespaceBudget));
+			})
+			.join("");
+	}
+	/**
+	 * Frame fenced code in the same rounded-box language as the welcome screen.
+	 * The box hugs its content: width is the longest body row or the header,
+	 * never the full terminal row. The active symbol preset owns the glyphs:
+	 * unicode/nerd-font get ╭─╮│, the ascii preset degrades to +-| — one code
+	 * path, both terminals. Syntax colors come from the active Markdown theme.
+	 */
+	#boxFencedCodeLines(token: Token, bodyLines: readonly RenderedLine[], width: number): RenderedLine[] {
+		const box = this.#theme.symbols.boxRound;
+		const borderColor = this.#theme.codeBlockBorder;
+		const border = (text: string): string => borderColor(text);
+		const requestedWidth = Math.max(0, Math.trunc(width));
+		const lang = "lang" in token && typeof token.lang === "string" && token.lang.length > 0 ? token.lang : undefined;
+		const formattedLabel = lang ? this.#theme.codeBlockLanguage?.(lang)?.trim() : undefined;
+		const label = formattedLabel && visibleWidth(formattedLabel) > 0 ? formattedLabel : (lang ?? "");
+		const rawTitle = label ? ` [${label}] ` : "";
+
+		// A full box needs two borders, two breathing spaces, and one content cell.
+		// Use a compact borderless body when the caller has fewer than six cells.
+		if (requestedWidth < 6) {
+			const edge = box.vertical;
+			const sourceWidth = Math.max(1, requestedWidth - 2);
+			const narrow: RenderedLine[] = [];
+			for (const body of bodyLines) {
+				const source = body.codeBody ?? body.text;
+				for (const row of wrapCodeLineWithAnsi(source, sourceWidth)) {
+					// A single grapheme wider than sourceWidth arrives on its own
+					// over-width row; it must reach the terminal whole instead of
+					// being truncated out of existence.
+					const rowWidth = visibleWidth(row);
+					const canFrame = requestedWidth >= 3 && rowWidth + 2 <= requestedWidth;
+					const text = canFrame ? `${edge}${row}${edge}` : truncateToWidth(row, requestedWidth, Ellipsis.Omit);
+					narrow.push({ text, noWrap: true });
+				}
+			}
+			return narrow.length > 0 ? narrow : [{ text: "", noWrap: true }];
+		}
+
+		const bodyWidth = bodyLines.reduce((max, line) => Math.max(max, visibleWidth(line.text)), 0);
+		const outerPadding = bodyLines.some(line => (line.codeOuterPadding ?? 0) > 0) ? 1 : 0;
+		const maxInnerWidth = Math.max(3, requestedWidth - 2);
+		const innerWidth = Math.min(maxInnerWidth, Math.max(3, bodyWidth + outerPadding + 2, visibleWidth(rawTitle) + 1));
+		const contentWidth = innerWidth - 2;
+		// If even a single atomic grapheme cannot fit beside the frame chrome,
+		// drop the chrome rather than emitting an over-wide noWrap row. The
+		// borderless fallback still hard-wraps at the requested terminal width.
+		const needsCompactGraphemeLayout = bodyLines.some(body => {
+			const source = body.codeBody ?? body.text;
+			const leftPadding = padding(Math.min(body.codeOuterPadding ?? 0, contentWidth));
+			const available = Math.max(0, contentWidth - visibleWidth(leftPadding));
+			return available < widestGraphemeCells(source);
+		});
+		if (needsCompactGraphemeLayout) {
+			const compact: RenderedLine[] = [];
+			for (const body of bodyLines) {
+				const source = body.codeBody ?? body.text;
+				for (const row of wrapCodeLineWithAnsi(source, Math.max(1, requestedWidth))) {
+					// With no room even for borders, chrome is already omitted; when a
+					// single atomic grapheme still cannot fit, truncation is the only
+					// way to keep the noWrap row inside the container.
+					compact.push({
+						text: truncateToWidth(row, Math.max(1, requestedWidth), Ellipsis.Omit),
+						noWrap: true,
+					});
+				}
+			}
+			return compact.length > 0 ? compact : [{ text: "", noWrap: true }];
+		}
+		const title = truncateToWidth(rawTitle, Math.max(0, innerWidth - 1), Ellipsis.Omit);
+		const titleWidth = visibleWidth(title);
+		const headerFill = Math.max(0, innerWidth - titleWidth - 1);
+		const header =
+			`${border(`${box.topLeft}${box.horizontal}`)}` +
+			`${border(title)}` +
+			`${border(`${box.horizontal.repeat(headerFill)}${box.topRight}`)}`;
+		const framed: RenderedLine[] = [{ text: header, noWrap: true }];
+
+		for (const body of bodyLines) {
+			const prefix = body.codePrefix ?? "";
+			const plainPrefix = body.codePlainPrefix ?? prefix;
+			const leftPadding = padding(Math.min(body.codeOuterPadding ?? 0, contentWidth));
+			const available = Math.max(0, contentWidth - visibleWidth(leftPadding));
+			const source = body.codeBody ?? body.text;
+			const styled = body.codePlainPrefix !== undefined;
+			// Reserve the widest atomic grapheme so a narrow frame never drops the
+			// code row behind a full line-number/guidance prefix. Truncate the plain
+			// prefix before styling it so ANSI sequences cannot defeat the bound.
+			const prefixBudget = Math.max(0, available - widestGraphemeCells(source));
+			const basePlainPrefix = truncateToWidth(plainPrefix, prefixBudget, Ellipsis.Omit);
+			const sourceWidth = Math.max(1, available - visibleWidth(basePlainPrefix));
+			const firstPlainPrefix =
+				visibleWidth(source) > sourceWidth && basePlainPrefix
+					? basePlainPrefix.replace("└─", "├─")
+					: basePlainPrefix;
+			const continuationPlain = plainPrefix
+				? plainPrefix
+						.replace(/\d/g, " ")
+						.replace(/├─/, "│ ")
+						.replace(/└─/, "│ ")
+				: (body.codeContinuationPrefix ?? "");
+			const firstPrefixPlain = truncateToWidth(firstPlainPrefix, prefixBudget, Ellipsis.Omit);
+			const continuationPlainFitted = truncateToWidth(continuationPlain, prefixBudget, Ellipsis.Omit);
+			const firstPrefix = styled ? this.#theme.codeBlockBorder(firstPrefixPlain) : firstPrefixPlain;
+			const continuationPrefix = styled
+				? this.#theme.codeBlockBorder(continuationPlainFitted)
+				: continuationPlainFitted;
+			const wrapped = wrapCodeLineWithAnsi(source, sourceWidth);
+			const visualRows = wrapped.length > 0 ? wrapped : [""];
+
+			for (let rowIndex = 0; rowIndex < visualRows.length; rowIndex++) {
+				const rowPrefix = rowIndex === 0 ? firstPrefix : continuationPrefix;
+				const rawRow = leftPadding + rowPrefix + visualRows[rowIndex]!;
+				// Normal wrapping bounds rows to sourceWidth; only a single grapheme
+				// cluster wider than the content cell can exceed it, and that row
+				// must survive whole rather than lose its grapheme to a clamp.
+				const rowText = rawRow;
+				const pad = Math.max(0, contentWidth - visibleWidth(rowText));
+				framed.push({
+					text: `${border(box.vertical)} ${rowText}${padding(pad)} ${border(box.vertical)}`,
+					noWrap: true,
+				});
+			}
+		}
+
+		const rawCopyLabel = this.#theme.copyChip ? `[${this.#theme.copyChip}]` : "";
+		const copyLabel = truncateToWidth(rawCopyLabel, Math.max(0, innerWidth - 1), Ellipsis.Omit);
+		if (copyLabel && visibleWidth(copyLabel) > 0) {
+			const chipWidth = visibleWidth(copyLabel);
+			const fill = Math.max(0, innerWidth - chipWidth - 1);
+			const copyTarget = TERMINAL.hyperlinks ? this.#theme.copyChipTarget : undefined;
+			const code = copyTarget !== undefined ? this.#originalCodeBody(token) : "";
+			const target = copyTarget?.(code);
+			const chip = target
+				? `\x1b]8;;${target.replaceAll("\x1b", "").replaceAll("\x07", "")}\x07${border(copyLabel)}\x1b]8;;\x07`
+				: border(copyLabel);
+			framed.push({
+				text: `${border(`${box.bottomLeft}${box.horizontal.repeat(fill)}`)}${chip}${border(`${box.horizontal}${box.bottomRight}`)}`,
+				noWrap: true,
+			});
+		} else {
+			framed.push({
+				text: border(`${box.bottomLeft}${box.horizontal.repeat(innerWidth)}${box.bottomRight}`),
+				noWrap: true,
+			});
+		}
+		return framed;
+	}
+	#renderCodeBodyLines(token: Token, codeIndent: string, lineNumbers = false): RenderedLine[] {
 		const literalCode = this.#codeBlockIndent === 0;
 		const bodyLines: RenderedLine[] = [];
 		const tokenText = "text" in token && typeof token.text === "string" ? token.text : "";
+		const lineNumberWidth = String(tokenText.split("\n").length).length;
+		let lineNumber = 0;
 		const lang = "lang" in token && typeof token.lang === "string" ? token.lang : undefined;
-		const addBodyLine = (line: string): void => {
-			bodyLines.push(renderedLine(literalCode ? line : codeIndent + line, literalCode));
+		const addBodyLine = (line: string, isLastLogical: boolean): void => {
+			// Steering semantics (queued-message-box): `└─` only on the LAST logical
+			// line; the framer demotes it to `├─` when the line wraps. ASCII mode
+			// disables the Unicode-only trail; gutters remain `N | `.
+			const trail = this.#theme.guidanceTrail !== false && this.#theme.symbols.boxRound.horizontal !== "-";
+			const connector = !trail ? "" : isLastLogical ? "└─" : "├─";
+			const plainPrefix = lineNumbers
+				? trail
+					? `${String(++lineNumber).padStart(lineNumberWidth)} ${connector} `
+					: `${String(++lineNumber).padStart(lineNumberWidth)} ${this.#theme.symbols.boxRound.vertical} `
+				: codeIndent;
+			const styledPrefix = lineNumbers ? this.#theme.codeBlockBorder(plainPrefix) : codeIndent;
+			bodyLines.push({
+				text: styledPrefix + line,
+				literalCode: literalCode ? true : undefined,
+				codePrefix: styledPrefix,
+				codePlainPrefix: plainPrefix,
+				codeBody: line,
+				codeContinuationPrefix: padding(visibleWidth(plainPrefix)),
+				codeOuterPadding: literalCode ? 1 : 0,
+			});
 		};
 
+		const rawLines = tokenText.split("\n");
 		const streaming = this.transientRenderCache && !this.#renderingStablePrefix;
 		if (this.#theme.highlightCode && (!streaming || this.#codeTokenHasClosingFence(token))) {
 			// Finalized content — or a fence that closed mid-stream, which
 			// highlights through the same whole-block call the finalized render
 			// uses so cached stable rows byte-match it.
 			const highlightedLines = this.#theme.highlightCode(tokenText, lang);
-			for (const hlLine of highlightedLines) {
-				addBodyLine(hlLine);
+			for (let i = 0; i < highlightedLines.length; i++) {
+				addBodyLine(highlightedLines[i]!, i === highlightedLines.length - 1);
 			}
 			return bodyLines;
 		}
@@ -2666,17 +3350,17 @@ export class Markdown implements Component {
 			const completedLines = lineEnd >= 0 ? this.#highlightStreamingLines(tokenText.slice(0, lineEnd), lang) : null;
 			if (completedLines) {
 				for (const hlLine of completedLines) {
-					addBodyLine(hlLine);
+					addBodyLine(hlLine, false);
 				}
 				for (const codeLine of tokenText.slice(lineEnd + 1).split("\n")) {
-					addBodyLine(this.#theme.codeBlock(codeLine));
+					addBodyLine(this.#theme.codeBlock(codeLine), true);
 				}
 				return bodyLines;
 			}
 		}
 
-		for (const codeLine of tokenText.split("\n")) {
-			addBodyLine(this.#theme.codeBlock(codeLine));
+		for (let i = 0; i < rawLines.length; i++) {
+			addBodyLine(this.#theme.codeBlock(rawLines[i]!), i === rawLines.length - 1);
 		}
 		return bodyLines;
 	}
@@ -2894,6 +3578,8 @@ export class Markdown implements Component {
 		styleContext?: InlineStyleContext,
 	): RenderedLine[] {
 		const lines: RenderedLine[] = [];
+		const sourceCursorBefore = this.#copySourceSearchCursor;
+		this.#advanceCopySourceCursor(token);
 
 		// Display math block (own-line `$$…$$` / `\[…\]`): stack `\frac` vertically
 		// and keep `\\` row breaks, so fractions and matrices span multiple lines.
@@ -2981,11 +3667,25 @@ export class Markdown implements Component {
 				}
 
 				const codeIndent = padding(this.#codeBlockIndent);
-				lines.push(renderedLine(this.#theme.codeBlockBorder(`\`\`\`${token.lang || ""}`)));
-				for (const bodyLine of this.#renderCodeBodyLines(token, codeIndent)) {
-					lines.push(bodyLine);
+				const fenced = this.#isFencedCodeToken(token);
+				const closedFence = fenced && this.#codeTokenHasClosingFence(token);
+				const bodyLines = this.#renderCodeBodyLines(token, closedFence ? "" : codeIndent, closedFence);
+				if (closedFence) {
+					// Complete fenced blocks render as a portable ASCII box; raw ```
+					// delimiters never reach the terminal.
+					lines.push(...this.#boxFencedCodeLines(token, bodyLines, width));
+				} else if (fenced) {
+					// An open streamed fence must retain its delimiter rows until it
+					// closes; transcript scrollback depends on those stable rows.
+					const raw = "raw" in token && typeof token.raw === "string" ? token.raw : "";
+					const openingLine = raw.slice(0, raw.indexOf("\n") >= 0 ? raw.indexOf("\n") : raw.length);
+					const delimiter = MARKDOWN_FENCE_LINE.exec(openingLine)?.[1] ?? "```";
+					lines.push(renderedLine(this.#theme.codeBlockBorder(`${delimiter}${token.lang || ""}`)));
+					for (const bodyLine of bodyLines) lines.push(bodyLine);
+					lines.push(renderedLine(this.#theme.codeBlockBorder(delimiter)));
+				} else {
+					for (const bodyLine of bodyLines) lines.push(bodyLine);
 				}
-				lines.push(renderedLine(this.#theme.codeBlockBorder("```")));
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(renderedLine("")); // Add spacing after code blocks (unless space token follows)
 				}
@@ -3065,6 +3765,9 @@ export class Markdown implements Component {
 				}
 		}
 
+		if (token.type === "code" && this.#copySourceSearchCursor === sourceCursorBefore) {
+			this.#originalCodeBody(token);
+		}
 		return lines;
 	}
 
@@ -3295,6 +3998,20 @@ export class Markdown implements Component {
 		// Use the list's start property (defaults to 1 for ordered lists)
 		const startNumber = token.start ?? 1;
 		const pushWrapped = (line: RenderedLine, firstPrefix: string, continuationPrefix: string): void => {
+			if (line.noWrap) {
+				const available = Math.max(0, width - visibleWidth(firstPrefix));
+				const prefix = truncateToWidth(firstPrefix, width, Ellipsis.Omit);
+				if (available === 0 && line.text) {
+					lines.push(renderedLine(prefix));
+					for (const wrappedLine of wrapTextWithAnsi(line.text, Math.max(1, width))) {
+						lines.push({ ...line, text: wrappedLine });
+					}
+					return;
+				}
+				lines.push({ ...line, text: prefix + truncateToWidth(line.text, available, Ellipsis.Omit) });
+				return;
+			}
+
 			if (line.literalCode) {
 				const wrappedLiteralRows = wrapTextWithAnsi(line.text, Math.max(1, width));
 				if (wrappedLiteralRows.length === 0) {
@@ -3337,8 +4054,10 @@ export class Markdown implements Component {
 
 			// Process item tokens; nested-list lines arrive structurally tagged and
 			// already carry their own full indent.
-			const itemLines = this.#renderListItem(item.tokens || [], depth, width, styleContext);
-
+			// Framed code blocks must fit inside the hang, not the full list
+			// width, or the right border lands under the bullet rail.
+			const itemWidth = Math.max(1, width - visibleWidth(firstPrefix));
+			const itemLines = this.#renderListItem(item.tokens || [], depth, itemWidth, styleContext, itemWidth, width);
 			if (itemLines.length > 0) {
 				const firstLine = itemLines[0]!;
 				if (firstLine.nested) {
@@ -3374,14 +4093,20 @@ export class Markdown implements Component {
 		parentDepth: number,
 		width: number,
 		styleContext?: InlineStyleContext,
+		frameWidth: number = width,
+		nestedWidth: number = width,
 	): RenderedListItemLine[] {
 		const lines: RenderedListItemLine[] = [];
 
 		for (const token of tokens) {
+			this.#advanceCopySourceCursor(token);
 			if (token.type === "list") {
 				// Nested list - render with one additional indent level
 				// These lines carry their own indent, so tag them for pass-through
-				const nestedLines = this.#renderList(token as ListToken, parentDepth + 1, width, styleContext);
+				// `width` is already reduced for the current item's frame. Nested list
+				// recursion must start from the containing list's global width or each
+				// level subtracts its prefix a second time.
+				const nestedLines = this.#renderList(token as ListToken, parentDepth + 1, nestedWidth, styleContext);
 				for (const nestedLine of nestedLines) {
 					lines.push({ ...nestedLine, nested: true });
 				}
@@ -3410,13 +4135,58 @@ export class Markdown implements Component {
 					lines.push({ text: this.#renderInlineTokens(token.tokens || [], styleContext), nested: false });
 				}
 			} else if (token.type === "code") {
-				// Code block in list item
+				const sourceCursorBefore = this.#copySourceSearchCursor;
+				// Code block in list item — fenced blocks get the same themed box.
 				const codeIndent = padding(this.#codeBlockIndent);
-				lines.push({ text: this.#theme.codeBlockBorder(`\`\`\`${token.lang || ""}`), nested: false });
-				for (const bodyLine of this.#renderCodeBodyLines(token, codeIndent)) {
-					lines.push({ ...bodyLine, nested: false });
+				const fenced = this.#isFencedCodeToken(token);
+				const closedFence = fenced && this.#codeTokenHasClosingFence(token);
+				const bodyLines = this.#renderCodeBodyLines(token, closedFence ? "" : codeIndent, closedFence);
+				const raw = "raw" in token && typeof token.raw === "string" ? token.raw : "";
+				if (closedFence) {
+					const framed = this.#boxFencedCodeLines(token, bodyLines, frameWidth);
+					for (const line of framed) lines.push({ ...line, nested: false });
+				} else {
+					// An open fence inside a list keeps its delimiters as literal
+					// code rows (same contract as the top-level path) instead of
+					// being silently swallowed by the framed renderer.
+					const delimiter = raw.match(/(`{3,}|~{3,})/)?.[1] ?? "```";
+					const rawLines = raw.split("\n");
+					for (let index = 0; index < rawLines.length; index++) {
+						const text = replaceTabs(rawLines[index]!);
+						// Only the opening delimiter needs the list-aware noWrap path.
+						// Body rows must wrap inside the continuation width rather than
+						// losing their suffix to noWrap truncation.
+						lines.push({ text, noWrap: index === 0 ? true : undefined, nested: false });
+					}
+					lines.push({ text: replaceTabs(delimiter), noWrap: true, nested: false });
 				}
-				lines.push({ text: this.#theme.codeBlockBorder("```"), nested: false });
+				// Some render paths (too-narrow frames, Mermaid) do not need a
+				// copy target. They must still consume this token's source span
+				// before a later nested fence searches for its own source.
+				if (this.#copySourceSearchCursor === sourceCursorBefore) this.#originalCodeBody(token);
+			} else if (token.type === "blockquote") {
+				const quoteInlineStyleContext: InlineStyleContext = {
+					applyText: (text: string) => text,
+					stylePrefix: "",
+				};
+				const quoteContentWidth = Math.max(1, frameWidth - 2);
+				const renderedQuoteLines: RenderedLine[] = [];
+				const quoteTokens = token.tokens || [];
+				for (let index = 0; index < quoteTokens.length; index++) {
+					const quoteToken = quoteTokens[index]!;
+					renderedQuoteLines.push(
+						...this.#renderToken(
+							quoteToken,
+							quoteContentWidth,
+							quoteTokens[index + 1]?.type,
+							quoteInlineStyleContext,
+						),
+					);
+				}
+				while (renderedQuoteLines.length > 0 && renderedQuoteLines.at(-1)!.text === "") renderedQuoteLines.pop();
+				for (const line of this.#applyQuoteBorder(renderedQuoteLines, frameWidth)) {
+					lines.push({ ...line, nested: false });
+				}
 			} else if (isMathToken(token)) {
 				// Display math block inside a list item: stack fractions / matrix rows.
 				const apply = styleContext?.applyText ?? ((t: string) => this.#applyDefaultStyle(t));

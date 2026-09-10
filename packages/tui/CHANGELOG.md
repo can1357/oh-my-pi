@@ -4,6 +4,15 @@
 
 ### Added
 
+- Added compact framed rendering for completed fenced Markdown code blocks, with width-aware wrapping and language labels while preserving raw delimiters for still-streaming fences.
+
+### Changed
+
+- Improved incremental Markdown lexing to reuse append-only guard scans and stable block boundaries during streaming.
+
+### Fixed
+
+- Fixed narrow and nested framed Markdown code blocks so wide graphemes stay within the requested width and copy targets preserve raw source boundaries without cache collisions.
 - Editor history can retain local draft snapshots with their paste expansions and host-owned attachment restoration, without writing them to persistent history ([#11524](https://github.com/can1357/oh-my-pi/pull/11524) by [@camjac251](https://github.com/camjac251)).
 - Added an optional Vim-style modal editing layer to `Editor`, off unless `setVimMode(true)` is called: Insert, Normal, and Visual/Visual-Line with motions, count prefixes, and operators. `j`/`k` keep Vim's desired column, so passing over a shorter line does not collapse it, and `$` sticks to end-of-line. `p`/`P` paste from an internal register; yanks are surfaced to the host through `onYank` so it can route them to the system clipboard.
 - Vim mode now exposes its chrome to hosts: `Editor.vimEnabled`, `Editor.vimPending` (the half-typed command, e.g. `2d`), and `Editor.vimSelectedLines` (Visual selection height). `onVimModeChange` additionally fires when the pending command or selection size changes, not only on mode switches.

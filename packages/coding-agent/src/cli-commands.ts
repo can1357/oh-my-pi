@@ -77,6 +77,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.compressHelp,
 	},
 	{
+		name: "copy",
+		load: () => import("./commands/copy").then(m => m.default),
+		help: commandHelp.copyHelp,
+	},
+	{
 		name: "config",
 		load: () => import("./commands/config").then(m => m.default),
 		help: commandHelp.configHelp,

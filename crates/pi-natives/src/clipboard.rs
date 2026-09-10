@@ -139,6 +139,46 @@ pub fn copy_to_clipboard(text: JsString) -> Result<()> {
 	set_clipboard_text(&js::utf8(text)?)
 }
 
+/// Copy plain text and, on Linux, block until another process takes clipboard
+/// ownership.
+///
+/// The Linux wait is driven by X11/Wayland ownership events, so identical
+/// replacement text still releases the process without polling clipboard
+/// contents.
+#[napi]
+pub fn copy_to_clipboard_persistent(text: JsString) -> Result<()> {
+	let text = js::utf8(text)?.to_string();
+	#[cfg(target_os = "linux")]
+	{
+		use arboard::SetExtLinux;
+
+		let mut clipboard = Clipboard::new()
+			.map_err(|err| Error::from_reason(format!("Failed to access clipboard: {err}")))?;
+		clipboard
+			.set()
+			.wait()
+			.text(text)
+			.map_err(|err| Error::from_reason(format!("Failed to copy to clipboard: {err}")))
+	}
+	#[cfg(not(target_os = "linux"))]
+	{
+		set_clipboard_text(&text)
+	}
+}
+
+/// Read plain text from the system clipboard.
+///
+/// # Errors
+/// Returns an error if clipboard access fails or does not contain text.
+#[napi]
+pub fn read_text_from_clipboard() -> Result<String> {
+	let mut clipboard = Clipboard::new()
+		.map_err(|err| Error::from_reason(format!("Failed to access clipboard: {err}")))?;
+	clipboard
+		.get_text()
+		.map_err(|err| Error::from_reason(format!("Failed to read clipboard text: {err}")))
+}
+
 /// Linux: keep a single `arboard::Clipboard` alive for the whole process.
 ///
 /// X11 (and Wayland) clipboards are owner-based: the process that set the

@@ -185,8 +185,9 @@ describe("AssistantMessageComponent mermaid markdown", () => {
 		const rendered = renderAssistantMessage("```mermaid\nthis is not mermaid\n```");
 
 		expect(TERMINAL.imageProtocol).toBeNull();
-		expect(rendered).toContain("```mermaid");
+		expect(rendered).toContain("[mermaid]");
 		expect(rendered).toContain("this is not mermaid");
+		expect(rendered).not.toContain("```");
 	});
 });
 

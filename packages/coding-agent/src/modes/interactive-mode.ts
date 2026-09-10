@@ -151,6 +151,7 @@ import { applyHyperlinkSetting } from "../tui/hyperlink";
 import { renderTreeList } from "../tui/tree-list";
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
+import { ensureCopyUrlHandler } from "../utils/copy-store";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { resumeCommand } from "../utils/resume-command";
@@ -241,6 +242,7 @@ import {
 	getMarkdownTheme,
 	onTerminalAppearanceChange,
 	onThemeChange,
+	setCopyUrlHandlerReady,
 	setMarkdownMermaidRendering,
 	startMacOSAppearanceReprobeFallback,
 	theme,
@@ -1262,6 +1264,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		});
 		this.composer.setStatusComponent(this.statusLine);
+		void ensureCopyUrlHandler().then(ready => {
+			setCopyUrlHandlerReady(ready);
+			this.ui.invalidate();
+			this.ui.requestRender();
+		});
 
 		this.composer.setRuntimeChildren([
 			this.chatContainer,
