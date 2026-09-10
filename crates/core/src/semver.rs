@@ -13,6 +13,8 @@ pub struct SemVer {
 	pub patch: u8,
 }
 
+const _: () = assert!(size_of::<SemVer>() == 3, "SemVer must stay 3 bytes");
+
 impl SemVer {
 	/// Creates a semantic version from its three components.
 	pub const fn new(major: u8, minor: u8, patch: u8) -> Self {
@@ -108,6 +110,5 @@ mod tests {
 		assert_eq!(TWO_COMPONENTS, SemVer::new(5, 6, 0));
 		assert_eq!(THREE_COMPONENTS, SemVer::new(5, 6, 7));
 		assert_eq!(MAX_COMPONENTS, SemVer::new(u8::MAX, u8::MAX, u8::MAX));
-		assert_eq!(size_of::<SemVer>(), 3);
 	}
 }

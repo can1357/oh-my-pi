@@ -263,7 +263,7 @@ pub fn parse_md_fragment_inheriting(
 	if text.is_empty() {
 		return Ok(Vec::new());
 	}
-	let inherited = child_props(host);
+	let inherited = child_props(host, 0)?;
 	let mut parser =
 		Parser { source: text, src: text, ctx, fragment: true, origin: MarkupOrigin::Core };
 	let (first, mut children, _) = parser.scan_md(0, 0, &inherited, false)?;
@@ -507,13 +507,17 @@ impl Parser<'_> {
 			if !props.contains(Prop::Border) {
 				props
 					.try_set(Prop::Border, PropValue::Border(Border::Square))
-					.unwrap();
+					.map_err(|error| ParseError { message: error.to_string(), at })?;
 			}
 			if !props.contains(Prop::PadX) {
-				props.try_set(Prop::PadX, PropValue::U16(1)).unwrap();
+				props
+					.try_set(Prop::PadX, PropValue::U16(1))
+					.map_err(|error| ParseError { message: error.to_string(), at })?;
 			}
 		} else if name == "spacer" && !props.contains(Prop::Grow) {
-			props.try_set(Prop::Grow, PropValue::F32(1.0)).unwrap();
+			props
+				.try_set(Prop::Grow, PropValue::F32(1.0))
+				.map_err(|error| ParseError { message: error.to_string(), at })?;
 		}
 		let body_start = close + 1;
 		if self_closing {
@@ -580,7 +584,7 @@ impl Parser<'_> {
 			return finish_element(name, props, Vec::new(), Str::default(), at)
 				.map(|part| (part, body_start));
 		}
-		let child_props = child_props(&props);
+		let child_props = child_props(&props, at)?;
 		let (parts, end) =
 			self.parse_children(body_start, Some(name), restricted, indent, name, &child_props)?;
 		let part = finish_element(name, props, parts, Str::default(), at)?;
@@ -609,7 +613,7 @@ impl Parser<'_> {
 		let mut first = true;
 		let mut first_text = Str::default();
 		let mut embedded = Vec::new();
-		let child_props = child_props(props);
+		let child_props = child_props(props, body_start)?;
 		loop {
 			let event = self.next_md_event(segment_start, indent, require_close)?;
 			let end = match &event {
@@ -1238,7 +1242,7 @@ pub fn md_embeds_markup(text: &str) -> bool {
 	false
 }
 
-fn child_props(parent: &Props) -> Props {
+fn child_props(parent: &Props, at: usize) -> Result<Props, ParseError> {
 	let mut child = Props::new();
 	for prop in [
 		Prop::Fg,
@@ -1253,10 +1257,12 @@ fn child_props(parent: &Props) -> Props {
 		if let Some(value) = parent.get(prop)
 			&& !matches!(&value, PropValue::Gradient(_))
 		{
-			child.try_set(prop, value).unwrap();
+			child
+				.try_set(prop, value)
+				.map_err(|error| ParseError { message: error.to_string(), at })?;
 		}
 	}
-	child
+	Ok(child)
 }
 
 macro_rules! replay_props {

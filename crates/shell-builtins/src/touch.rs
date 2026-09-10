@@ -333,7 +333,9 @@ fn touch_main(matches: &ArgMatches, host: &mut Host) -> Result<(), TouchError> {
 		&filenames,
 		host.var("_POSIX2_VERSION"),
 	) {
-		let first_file = filenames[0].to_str().unwrap();
+		let Some(first_file) = filenames.first().and_then(|filename| filename.to_str()) else {
+			return Err(TouchError::Message("invalid timestamp file operand".into()));
+		};
 		timestamp = if first_file.len() == 10 {
 			Some(shr2(first_file))
 		} else {
@@ -917,7 +919,9 @@ fn parse_date(ref_zoned: Zoned, s: &str, time_zone: &TimeZone) -> Result<FileTim
 		return Ok(FileTime::from_unix_time(*ts, 0));
 	}
 
-	if let Ok(zoned) = parse_datetime::parse_datetime_at_date(ref_zoned, s) {
+	if let Ok(parsed) = parse_datetime::parse_datetime_at_date(ref_zoned, s)
+		&& let Some(zoned) = parsed.into_zoned()
+	{
 		return Ok(timestamp_to_filetime(zoned.timestamp()));
 	}
 

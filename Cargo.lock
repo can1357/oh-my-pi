@@ -8147,7 +8147,6 @@ name = "omp-e2e"
 version = "0.1.0"
 dependencies = [
  "async-stream",
- "async-trait",
  "bytes",
  "flume",
  "futures",
@@ -8224,6 +8223,7 @@ dependencies = [
  "omp-proto",
  "parking_lot",
  "serde",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -8407,7 +8407,6 @@ dependencies = [
  "omp-vocab",
  "proc-macro2",
  "quote",
- "strum",
  "syn 2.0.119",
 ]
 
@@ -8477,6 +8476,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec 2.0.0-alpha.13",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
@@ -8900,6 +8900,7 @@ dependencies = [
  "gix",
  "jj-lib",
  "libc",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -9308,13 +9309,13 @@ dependencies = [
 
 [[package]]
 name = "parse_datetime"
-version = "0.14.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413775a7eac2261d2211a79d10ef275e5b6f7b527eec42ad09adce2ffa92b6e5"
+checksum = "503fd4c8b0685e5eb32a8276533611f63e3b44768e9e8724e73f6852c2542f82"
 dependencies = [
  "jiff",
  "num-traits",
- "winnow 0.7.15",
+ "winnow 1.0.4",
 ]
 
 [[package]]

@@ -52,8 +52,7 @@ references to a device carry an [`omp.ToolPath`](#omptoolpath) plus provenance
 chrome, never a URL.
 
 This deletes the failure that made pi's tool slot the wrong unit of
-extensibility. In pi, 111 of 194 catalogued extensions call `registerTool`
-(`.plan/user-requests/2026-08-10-pi-extension-survey/catalog.md:8`), and every
+extensibility. In pi, 111 of 194 catalogued extensions call `registerTool`, and every
 one of those schemas is billed to every token of every turn — on Codex, TTFT
 scales close to 1:1 with registered tool count, because each schema feeds the
 grammar the sampler carries. Forty dormant MCP endpoints tax the turn where
@@ -224,18 +223,18 @@ Four properties of that diagram are load-bearing:
 
    An earlier revision of this passage called Agent
    Core "a pure courier"; that is retracted here rather than silently
-   edited, because it over-read D6. `PLAN.md` §D6 (D6, *One
+   edited, because it over-read D6. Locked decision D6 (*One
    mailbox, no gate chain*) is explicit that a tool batch "runs concurrently
    exactly as the model issued it: no batch-level admission scheduler, no
    parallelism detection, no reordering" — which prohibits batch-level
    admission *scheduling* in the mailbox loop, not the per-invocation
    decision procedure itself. The D6 wording amendment this document
-   previously flagged for the .plan owner has been made: D6 as amended
+   previously flagged has been made: D6 as amended
    2026-08-19 states that each invocation gates independently — "the
    environment asks a per-invocation admission query, and Core answers it by
    running the hook phase procedure" — and that the prohibition on approval
    prompts "binds the batch dispatch path, not the per-invocation decision
-   procedure" (`PLAN.md` §D6). This document now cites the
+   procedure". This document now cites the
    ratified text rather than recommending it. The invariant D6
    protects survives verbatim: each invocation gates independently, and one
    slow approval never serializes the batch. The still-earlier draft that
@@ -361,27 +360,27 @@ pi's dynamic tool control is `getActiveTools` / `setActiveTools` /
 (`catalog.md:13`). Every one of those calls mutates the array the model sees,
 and MCP made it worse: pi sorts MCP tools alphabetically purely so that
 background connections do not shift the array and shatter Anthropic's cache
-breakpoints (`.plan/feature-map/mcp.md:95`).
+breakpoints.
 
 omp has none of those calls. The request's tool array is byte-stable across
 every availability change, because devices were never in it. A device becoming
 available, unavailable, or shadowed appends exactly one system thread item
 naming the delta, built on the same mechanism that already delivers job
 settlements (`crates/agent/src/jobs.rs:341-350`,
-`crates/agent/src/mailbox.rs:64-71`). The model reads the notice, and runs
+mailbox half a reported gap: no surviving implementation in the tree). The model reads the notice, and runs
 `dyn` if it wants the new catalog.
 
 This is the ratified redesign in the port tree:
-`.plan/feature-map/ROADMAP.md:901` — "background connects with dynamic
+"background connects with dynamic
 tool-list updates, embedder change callback **⚠ redesign: device-tool listing,
-not live registry mutation**" — and `:905` — "stable alphabetical tool ordering
+not live registry mutation**" — and "stable alphabetical tool ordering
 for prompt-cache safety **⚠ redesign: moot under single device tool**".
 
 ### Namespacing and ordered precedence
 
 A device name is a flat token in one session-wide namespace shared with core
 tools. There is no `mcp__<server>_<tool>` mangling
-(`.plan/feature-map/mcp.md:149`) because there is no wire name to sanitize —
+because there is no wire name to sanitize —
 device names appear only in tool-tree paths and in docs.
 
 Collisions resolve by declared precedence, never by load order:
@@ -432,7 +431,7 @@ CORE (1000) → INTEGRATION (700) → ENHANCEMENT (500) → DEFAULT (0) → FALL
 
 **Resolved (2026-08-20 ruling):** cross-claimant live-winner, qualified-shadow, and
 hidden-catalog arbitration is core-registry-owned (`crates/tool`, `Claim` /
-`PrecedenceTie` per `PLAN.md:252`). The frozen Python registry holds one extension identity
+`PrecedenceTie` per the locked arbitration decision). The frozen Python registry holds one extension identity
 and enforces only intra-extension claims. Its public error spelling remains
 `PrecedenceConflict`, naming both claimant keys and the source package.
 
@@ -1146,7 +1145,7 @@ One disambiguation, because the vocabulary collides with a locked decision.
 `precedence` orders **claims on a name**, resolved once at load, and the shadow
 ordering it produces is a static registry fact. It is not a gate chain and not
 an admission order: nothing is evaluated per call, nothing short-circuits, and
-no claimant can veto another's invocation. D6 (`PLAN.md` §D6)
+no claimant can veto another's invocation. D6
 prohibits batch-level admission scheduling in the loop (the scope reading in
 the `dyn` path section above), and this mechanism is not scheduling of any
 kind — by the time a device is dispatched, precedence has already been spent and only
@@ -1308,8 +1307,7 @@ with core tools and is documented in [docs/py/03-params.md](03-params.md).
 
 MCP endpoints are devices. There is no MCP-specific tool, no proxy tool with
 sub-actions, and no promotion of "hot" endpoints to first-class tools —
-`MCP-as-device-tool` is a locked decision
-(`.plan/feature-map/ROADMAP.md:5`).
+`MCP-as-device-tool` is a locked decision.
 
 ```python
 omp.mcp.mount(
@@ -1374,12 +1372,11 @@ Concretely, env-side buys four things Python-side cannot have:
    (`crates/tool/src/lib.rs:349-357`) is already the authority that reports
    settlement for detached work. An MCP child is exactly that shape. pi
    hand-rolls the same machinery — reconnect-storm circuit breaker, exponential
-   backoff, epoch invalidation (`.plan/feature-map/mcp.md:88-96`) — inside the
+   backoff, epoch invalidation — inside the
    plugin, once per plugin.
 2. **Enforceable policy.** A Python-side network allowlist is a suggestion. The
    env enforces egress in Rust, identically for MCP and for everything else,
-   and `env-only world boundary` is a locked decision
-   (`.plan/feature-map/ROADMAP.md:5`).
+   and `env-only world boundary` is a locked decision.
 3. **Survival across host restarts.** The extension host restarts on crash and
    on hot-reload. A warm MCP connection with a negotiated session ID and a
    cached tool list must not die with it. Env-side, the connection outlives
@@ -1493,7 +1490,7 @@ real session transition and fires only for eager extensions
 
 The `mcp_tools_changed` hook is the only place the plugin still participates in
 a world change, and its entire body is one refresh. Compare
-`.plan/feature-map/mcp.md:99` — pi's `setOnToolsChanged` embedder callback
+pi's `setOnToolsChanged` embedder callback
 firing on background connects, list-changed refreshes, and server tool removal,
 each one mutating the live tool registry.
 
@@ -1735,9 +1732,11 @@ adjacent lift steps toward the live revision, falling back to
 constraint lowering with explicit `Adjustment` receipts is written
 (`:648-712`), against real catalog bitsets — `ToolFeatureBits::STRICT_SCHEMA`,
 `GrammarBits::{LARK, REGEX, EBNF}`, `ToolCapabilities::maximum_tools`
-(`crates/catalog/src/capability.rs`). `live_hash()` already produces a
-stable blake3 digest over the ordered live identities, registration-order
-independent (`registry.rs:458-467`).
+(`crates/catalog/src/capability.rs`). The registry already ships stable SHA-256
+identity digests: `slot_hash()` over the policy-resolved model-visible slots,
+`device_hash()` over mounted availability and claimant-qualified reachability,
+and `projection_hash()` over every registered `(name, rev)` and its projection
+code, registration-order independent (`crates/tool/src/registry.rs:2623-2711`).
 
 Three of those are contracts with nothing behind them yet, and one of the three
 has a defect underneath it. This document's claims depend on closing exactly
@@ -1769,11 +1768,15 @@ these gaps rather than on inventing replacements:
   of the host process, this one keeps oversized verdicts out of the
   environment's heap. Reported as a known defect; this document does not
   describe the current behaviour as correct.
-- `live_hash()` is one digest over every live identity, which is correct only
-  while everything live is also advertised. The moment devices exist, that
-  digest changes when a device mounts, and using it as the prompt-cache identity
-  would make this document's central claim false. Splitting it is not a new
-  mechanism; it is finishing this one. Detailed below.
+- The one of those three that has since closed in the code: the split is
+  shipped. `slot_hash()` (`registry.rs:2623-2650`) digests the policy-resolved
+  model-visible slots — the digest the request and the prompt cache care about
+  — and `device_hash()` (`registry.rs:2654-2686`) digests mounted device
+  availability and claimant-qualified reachability, so a device mounting moves
+  the availability digest and cannot move the prompt-cache identity. The
+  central claim is a checkable invariant today, and the test this document
+  wanted exists: `crates/tool/tests/contracts.rs:443-505` mounts and unmounts
+  a device and asserts `slot_hash()` is unchanged. Detailed below.
 
 The Python worker path exists end to end, over a real wire contract. `omp/toolhost/v1`
 defines `WorkerHello`, `RegisterTools`, `ToolDecl`, `ToolConstraint`,
@@ -1856,10 +1859,18 @@ declarations, MCP endpoints, and shadowed claimants are never advertised
 under `auto` or `device_only`, whatever their route; `tool_only` advertises
 every declaration and drops `dyn`.
 
-`live_hash` (`:458-467`) inherits the same conflation: one digest over every
-live identity, which is only correct while everything live is also advertised.
-Reused as prompt-cache identity once devices exist, it would falsify this
-document's central claim.
+The hash half of this conflation has already closed in shipped code: the
+undifferentiated `live_hash` this paragraph once warned about is gone from
+`crates/tool`, and the split exists as shipped SHA-256 methods — `slot_hash()`
+(`crates/tool/src/registry.rs:2623-2650`) digests the policy-resolved
+model-visible slots, the digest the request and the prompt cache care about,
+while `device_hash()` (`:2654-2686`) digests mounted availability and
+claimant-qualified reachability, and `projection_hash()` (`:2690-2711`) covers
+registered revisions and their projection code. A device mounting moves the
+availability digest and cannot move the prompt-cache identity —
+`crates/tool/tests/contracts.rs:443-505` mounts and unmounts a device and
+asserts `slot_hash()` is unchanged. The correction this section still owes is
+the advertise filter above, not a hash split.
 
 This is the single most important correction here, and it is a small diff in a
 load-bearing place.
@@ -1885,7 +1896,7 @@ non-blockingly sends a cancel for one request id
 (`crates/env/src/guard.rs:13-60`); speculative-then-committed invocation
 framing (`crates/agent/src/batch.rs:360-420`); and the system-item constructor
 plus interrupt mailbox that will carry availability notices
-(`crates/agent/src/jobs.rs:341-350`, `crates/agent/src/mailbox.rs:64-71`).
+(`crates/agent/src/jobs.rs:341-350`).
 
 ### `crates/tool` — presentation, precedence, and two hashes
 
@@ -1934,14 +1945,15 @@ order; equal precedence returns a new
 right here: shadowing is usually zero or one deep, and this map is read on
 every dispatch.
 
-**3. Two hashes, not one.** `live_hash` currently blake3s every live identity
-in `BTreeMap` order (`registry.rs:458-467`). Split it: `slot_hash()` over
-`Presentation::Slot` entries only — that is the digest the request and the
-prefix cache care about — and `device_hash()` over device entries, which feeds
-the availability notification and nothing else. Without this split, "device
-availability does not disturb the prompt cache" is an aspiration; with it, it
-is a checkable invariant, and worth a test that mounts and unmounts a device
-and asserts `slot_hash()` is unchanged.
+**3. Two hashes, not one — shipped.** `slot_hash()`
+(`crates/tool/src/registry.rs:2623-2650`) hashes the policy-resolved
+model-visible slots in `BTreeMap` order — that is the digest the request and
+the prefix cache care about — and `device_hash()` (`:2654-2686`) digests
+mounted device entries; the shipped consumer is the device catalog hash
+(`crates/envd/src/devices_host.rs:107`). "Device availability does not
+disturb the prompt cache" is a checkable invariant, and the test this item
+asked for exists: `crates/tool/tests/contracts.rs:443-505` mounts and
+unmounts a device and asserts `slot_hash()` is unchanged.
 
 **One thing Revision 1 could not resolve is now decided, ratified, and
 recorded here.** `ToolWorkerSupervisor` is documented as a "One-worker warm
@@ -1953,7 +1965,7 @@ amended (2026-08-19) and now specifies "supervised worker processes, one per
 active extension, keyed `(layer, tier, extension)`; pooling is explicit
 opt-in fate-sharing. Cancel = SIGKILL of that extension's process group +
 respawn; blast radius is one extension. Interpreter interrupts are courtesy,
-never the mechanism" (`PLAN.md` §D5) — so the shipped one-worker
+never the mechanism" — so the shipped one-worker
 supervisor is now the thing to change, not the thing to match.
 
 With one interpreter hosting every extension, the consequence is that
@@ -1993,13 +2005,13 @@ failure, dependency, and cancellation fate are shared, and every mention of
 pooling says so. The resident-memory bill Revision 1 flagged is real and is
 paid deliberately; the benchmark matrix that decides whether pooling stays a
 rare exception belongs to [docs/py/14-deploy.md](14-deploy.md). The flag this
-document previously carried for the .plan owner is discharged: the D5 wording
+document previously carried is discharged: the D5 wording
 amendment has been made. D5 as amended 2026-08-19 reads "supervised worker
 processes, one per active extension, keyed `(layer, tier, extension)`", with
 the amendment note recording why — "per-extension processes resolve the
 cancellation-vs-concurrency deadlock the docs/py review surfaced — policy
 approvals force concurrency, and SIGKILL against one shared interpreter
-destroys every extension's in-flight state" (`PLAN.md` §D5). This
+destroys every extension's in-flight state". This
 document cites the ratified text. D5's core sentence survives unmodified:
 interpreter interrupts are courtesy, never the mechanism; the mechanism is
 SIGKILL of the extension's own process group. This document therefore no
@@ -2130,17 +2142,22 @@ even though it is additive in encoding.
 
 The availability notice is a `thread::Item` with `Role::System`, which
 `system_item` already builds (`jobs.rs:341-350`), delivered as an `Interrupt`
-with `class: TurnBoundary` (`mailbox.rs:64-71`) — never `Immediate`, because a
+with turn-boundary delivery semantics — real vocabulary: `enum InterruptClass` with
+`INTERRUPT_CLASS_TURN_BOUNDARY` (`crates/proto/proto/omp/env/v1/env.proto:145-156`), Python
+`omp.events.InterruptClass` (`crates/py/python/omp/events.py:162-167`) — but no in-tree
+mailbox supplies the class-driven drain dispatch (`DrainPoint` survives only in Python,
+`events.py:170-175`); reported gap — never
+`Immediate`, because a
 device appearing mid-tool-call must not preempt the call. `Immediate |
-TurnBoundary | Idle` in one flume mailbox is D6's own vocabulary
-(`PLAN.md` §D6), so this needs no new mechanism. The item text names
+TurnBoundary | Idle` in one flume mailbox is D6's own vocabulary,
+so this needs no new mechanism. The item text names
 the delta and quotes each `reason`.
 
 **Retraction.** An earlier draft of this section asserted that the loop must
 recognise a device dispatch before firing `tool_call`, decode the arguments
 in a pre-gate path, and that this "has a real cost in `loop.rs` ordering".
 That is wrong against D6, which prohibits a batch-level admission scheduler
-in the loop outright (`PLAN.md` §D6). Recording the retraction
+in the loop outright. Recording the retraction
 rather than editing it away, because the wrong version is the intuitive one
 and a future reader will re-derive it.
 
@@ -2154,7 +2171,7 @@ environment emits between `InvokeTool` and `ArgsCommitted`, while the
 environment owns the gate and the enforcement. What Core never does is
 schedule: no batch-level admission scheduler, no approval prompts in the
 mailbox loop, no parallelism detection — the scope D6 actually protects,
-now in D6's own amended words (`PLAN.md` §D6; the amendment this
+now in D6's own amended words (the amendment this
 document once flagged is ratified — see the `dyn` path section). Agent Core
 opens the invocation, relays fragments, sends one commit frame, holds the
 RAII guard (`crates/agent/src/batch.rs:360-420`), and gates each invocation
@@ -2171,9 +2188,7 @@ smaller diff than working around it would have.
 
 ### Feature-map reconciliation
 
-**Satisfied.** The entire tool-devices block —
-`.plan/feature-map/tools-misc.md:43-59` and its ROADMAP M3 restatement at
-`.plan/feature-map/ROADMAP.md:821-826`: catalog listing, on-demand schema docs,
+**Satisfied.** The entire tool-devices block — catalog listing, on-demand schema docs,
 JSON dispatch, `?`/empty help, intent-field stripping, doc-inlining modes with
 character budgets, and the 200-byte external summary cap. Also
 `ROADMAP.md:729-731` (device docs with inlined schemas, dynamic-device
@@ -2323,7 +2338,7 @@ Under omp's allocation and async discipline:
 | malformed device arguments | structured fault whose projection is the schema echo plus examples; raw emission recorded with the repair flagged |
 | device body raises | a known `EnvError` is lowered to a `Faulted` outcome carrying its `fault` value; any other exception settles `Aborted`; ad-hoc error strings are not representable ([docs/py/02-verdicts.md](02-verdicts.md)) |
 | deadline exceeded | invocation guard drops; for a Python device that is SIGKILL of the owning extension's process group + respawn per D5, so **that extension's concurrent calls die with it** — other extensions are untouched, and `--pool` widens the fate-sharing only by explicit opt-in; the call settles `Aborted` |
-| steering interrupt | `CancelTool` is sent as a courtesy, never relied on (`PLAN.md` §D5); the guard drop after the grace window is the mechanism, with the same per-extension blast radius |
+| steering interrupt | `CancelTool` is sent as a courtesy, never relied on; the guard drop after the grace window is the mechanism, with the same per-extension blast radius |
 | worker crash or EOF mid-call | `Abort::EffectsUnknown`; supervisor respawns and re-registers with a new `generation`; in-flight call never silently succeeds |
 | host restart | devices re-declared under a new `generation`; `slot_hash()` unchanged; one notification describing the whole set |
 | MCP server unreachable at mount | mounts nothing, activation proceeds, one notification; a dead integration never fails a session |
@@ -2435,7 +2450,7 @@ the digest). What remains genuinely open:
    later, model switching will need an ordered mounted-set transition before
    the first turn on the new model.
 
-5. **Resolved (2026-08-20 ruling): cross-claimant live-winner, claimant-qualified shadow, and hidden-catalog arbitration is owned by the core registry in `crates/tool` (`Claim`/`PrecedenceTie`, `PLAN.md:252`); the frozen Python registry holds one extension identity and enforces intra-extension claims only. Python keeps the spelling `PrecedenceConflict`, whose message names both claimant keys and the source package.** **Precedence arbitration owner.** The public contract describes a session-wide winner, qualified shadows, and equal-precedence errors across claimants (`docs/py/01-devices.md:389-416`), while the frozen Python registry stores one configured extension identity and checks only its local claim table (`crates/py/python/omp/_registry.py:418-442,557-574,1136-1140`); the competing readings were Python-owned global arbitration versus core-owned cross-claimant arbitration with Python enforcing only local collisions.
+5. **Resolved (2026-08-20 ruling): cross-claimant live-winner, claimant-qualified shadow, and hidden-catalog arbitration is owned by the core registry in `crates/tool` (`Claim`/`PrecedenceTie`, the locked arbitration decision); the frozen Python registry holds one extension identity and enforces intra-extension claims only. Python keeps the spelling `PrecedenceConflict`, whose message names both claimant keys and the source package.** **Precedence arbitration owner.** The public contract describes a session-wide winner, qualified shadows, and equal-precedence errors across claimants (`docs/py/01-devices.md:389-416`), while the frozen Python registry stores one configured extension identity and checks only its local claim table (`crates/py/python/omp/_registry.py:418-442,557-574,1136-1140`); the competing readings were Python-owned global arbitration versus core-owned cross-claimant arbitration with Python enforcing only local collisions.
 
 ### Revision 2 (post-review)
 
@@ -2504,7 +2519,7 @@ each:
   and the `crates/agent` build section): Core runs the per-invocation
   decision procedure, the environment owns the gate, and D6 is read as
   prohibiting batch-level admission scheduling — with the wording amendment
-  flagged for the .plan owner rather than silently assumed. *(Ratified since;
+  flagged rather than silently assumed. *(Ratified since;
   see the Rev 2.1 list.)*
 - **Cancellation topology (P0#10).** Revision 1's top open question is
   closed: one process per extension is final, SIGKILL granularity is one
@@ -2559,11 +2574,11 @@ Changes this file made applying the Rev 2.1 rulings, each reversal in prose:
   policy-resolved: under `auto`, core tools + `dyn` + granted hard tools and
   nothing else. The shipped no-route-filter defect note stands, with this as
   the target.
-- **D5/D6 ratified.** The wording amendments Rev 2 flagged for the .plan
-  owner were made on 2026-08-19: D6 now states the per-invocation admission
+- **D5/D6 ratified.** The wording amendments Rev 2 flagged
+  were made on 2026-08-19: D6 now states the per-invocation admission
   query and scopes its prohibition to the batch dispatch path, and D5 now
-  specifies one supervised worker process per active extension
-  (`PLAN.md` §D5/§D6). Every "amendment recommended" passage in this
+  specifies one supervised worker process per active extension.
+  Every "amendment recommended" passage in this
   file now cites the amended text as ratified.
 
 **Revision 2.2** — the `dyn` shell-builtin transport ruling: the dedicated

@@ -9,7 +9,7 @@ use miette::{IntoDiagnostic as _, miette};
 use omp_core::Str;
 use omp_ext::{
 	Layer as BackendLayer,
-	index::SignedIndex,
+	index::{SignedIndex, VerifiedIndex},
 	lock::InstalledRecord,
 	marketplace::{
 		MarketplaceCatalog, MarketplacePlugin, PluginSource, contained_plugin_path, parse_catalog,
@@ -887,7 +887,7 @@ pub(super) fn catalog_packages(
 }
 
 fn project_catalog(
-	catalog: &SignedIndex,
+	catalog: &VerifiedIndex,
 	query: &str,
 	capability: Option<&str>,
 	attested: bool,
@@ -905,7 +905,7 @@ fn project_catalog(
 		.collect()
 }
 
-fn read_catalog(state: &StatePaths) -> miette::Result<SignedIndex> {
+fn read_catalog(state: &StatePaths) -> miette::Result<VerifiedIndex> {
 	let key = fs::read_to_string(&state.index_key).into_diagnostic()?;
 	SignedIndex::read(&state.index_snapshot, key.trim()).map_err(super::extension_failure)
 }

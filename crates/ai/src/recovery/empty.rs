@@ -37,7 +37,8 @@ pub fn unexpected_stop_guidance(retry: u32, maximum: u32) -> Str {
 }
 
 /// Why a successful provider completion carried no usable public answer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
+#[strum(serialize_all = "kebab-case", const_into_str)]
 pub enum EmptyCompletionKind {
 	/// No content-bearing event occurred.
 	NoContent,
@@ -216,12 +217,7 @@ impl Stage<EmptyInput, EmptyEvent> for EmptyCompletionStage {
 
 impl EmptyCompletionKind {
 	const fn as_str(self) -> &'static str {
-		match self {
-			Self::NoContent => "no-content",
-			Self::WhitespaceOnly => "whitespace-only",
-			Self::ThinkingOnly => "thinking-only",
-			Self::EmptyBlocks => "empty-blocks",
-		}
+		self.into_str()
 	}
 }
 

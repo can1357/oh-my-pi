@@ -675,7 +675,8 @@ impl App {
 					// `dispatch_input` already resolved `Unclaimed` fallbacks.
 					Routed::Continue | Routed::Unclaimed => continue,
 					Routed::Copy(text) => {
-						let _ = self.terminal.copy_to_clipboard(&text)?;
+						// No copy notice is surfaced on this host: retire the completion future.
+						drop(self.terminal.copy_to_clipboard(&text)?);
 						continue;
 					},
 					Routed::Event(event) => return Ok(Some(event)),
@@ -749,7 +750,8 @@ impl App {
 								// `dispatch_input` already resolved `Unclaimed` fallbacks.
 								Routed::Continue | Routed::Unclaimed => {},
 								Routed::Copy(text) => {
-									let _ = self.terminal.copy_to_clipboard(&text)?;
+									// No copy notice is surfaced on this host: retire the completion future.
+									drop(self.terminal.copy_to_clipboard(&text)?);
 								},
 								Routed::Event(event) => return Ok(Some(event)),
 								Routed::Stop => return Ok(None),

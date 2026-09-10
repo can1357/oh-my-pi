@@ -156,7 +156,7 @@ fn ln_main(matches: &ArgMatches, host: &mut Host) -> LnResult<()> {
 
 	let paths: Vec<PathBuf> = matches
 		.get_many::<OsString>(ARG_FILES)
-		.unwrap()
+		.ok_or_else(|| LnError::Message("missing file operand".into()))?
 		.map(PathBuf::from)
 		.collect();
 
@@ -340,11 +340,14 @@ fn exec(host: &mut Host, files: &[PathBuf], settings: &Settings) -> LnResult<()>
 			// 2nd form: the target directory is the current directory.
 			return link_files_in_dir(host, files, &PathBuf::from("."), settings);
 		}
-		let last_file = &PathBuf::from(files.last().unwrap());
+		let Some(last_file) = files.last() else {
+			return Err(LnError::Message("missing file operand".into()).into());
+		};
+		let last_file = PathBuf::from(last_file);
 
-		if files.len() > 2 || host.resolve(last_file).is_dir() {
+		if files.len() > 2 || host.resolve(&last_file).is_dir() {
 			// 3rd form: create links in the last argument.
-			return link_files_in_dir(host, &files[0..files.len() - 1], last_file, settings);
+			return link_files_in_dir(host, &files[0..files.len() - 1], &last_file, settings);
 		}
 	}
 
@@ -451,13 +454,14 @@ fn link_files_in_dir(
 
 fn relative_path<'a>(host: &Host, src: &'a Path, dst: &Path) -> Cow<'a, Path> {
 	// Resolve before canonicalizing so `-r` computes against the shell cwd.
+	let Some(dst_parent) = dst.parent() else {
+		return src.into();
+	};
 	if let Ok(src_abs) =
 		canonicalize(host.resolve(src), MissingHandling::Missing, ResolveMode::Physical)
-		&& let Ok(dst_abs) = canonicalize(
-			host.resolve(dst.parent().unwrap()),
-			MissingHandling::Missing,
-			ResolveMode::Physical,
-		) {
+		&& let Ok(dst_abs) =
+			canonicalize(host.resolve(dst_parent), MissingHandling::Missing, ResolveMode::Physical)
+	{
 		return make_path_relative_to(src_abs, dst_abs).into();
 	}
 	src.into()

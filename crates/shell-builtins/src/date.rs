@@ -85,8 +85,10 @@ mod format_modifiers {
 	/// Width: one or more digits
 	/// Specifier: any letter or special sequence like :z, ::z, :::z
 	// `LazyLock` avoids a function-local `OnceLock`.
-	static FORMAT_SPEC_REGEX: LazyLock<Regex> =
-		LazyLock::new(|| Regex::new(r"%([_0^#+-]*)(\d*)(:*[a-zA-Z])").unwrap());
+	static FORMAT_SPEC_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+		Regex::new(r"%([_0^#+-]*)(\d*)(:*[a-zA-Z])")
+			.expect("date format modifier regex is a valid static pattern")
+	});
 
 	/// Check if format string contains any GNU modifiers and format if present.
 	///
@@ -144,10 +146,15 @@ mod format_modifiers {
 		let broken_down = BrokenDownTime::from(date);
 
 		for cap in re.captures_iter(&temp_format) {
-			let whole_match = cap.get(0).unwrap();
+			let whole_match = cap
+				.get(0)
+				.expect("date format regex matches always contain the whole match");
 			let flags = cap.get(1).map_or("", |m| m.as_str());
 			let width_str = cap.get(2).map_or("", |m| m.as_str());
-			let spec = cap.get(3).unwrap().as_str();
+			let spec = cap
+				.get(3)
+				.expect("date format regex matches always contain the specifier capture")
+				.as_str();
 
 			// Add text before this match
 			result.push_str(&temp_format[last_end..whole_match.start()]);
@@ -402,7 +409,10 @@ mod format_modifiers {
 
 			if pad_char == '0' && has_sign {
 				// Zero padding: sign first, then zeros (e.g., "-0022")
-				let sign = result.chars().next().unwrap();
+				let sign = result
+					.chars()
+					.next()
+					.expect("has_sign proves the padded value starts with a sign");
 				let rest = &result[1..];
 				let mut padded = try_alloc_padded(result.len(), padding, effective_width, specifier)?;
 				padded.push(sign);
@@ -2077,9 +2087,10 @@ fn try_parse_with_abbreviation<S: AsRef<str>>(date_str: S, now: &Zoned) -> Optio
 				let date_part = s.trim_end_matches(last_word).trim();
 				// Parse in the target timezone so "10:30 EDT" means 10:30 in EDT
 				if let Ok(parsed) = parse_datetime::parse_datetime_at_date(now.clone(), date_part) {
-					let dt = parsed.datetime();
-					if let Ok(zoned) = dt.to_zoned(tz) {
-						return Some(zoned);
+					if let Some(dt) = parsed.as_zoned().map(|zoned| zoned.datetime()) {
+						if let Ok(zoned) = dt.to_zoned(tz) {
+							return Some(zoned);
+						}
 					}
 				}
 			}
@@ -2204,8 +2215,11 @@ fn parse_date<S: AsRef<str> + Clone>(
 
 	match parse_datetime::parse_datetime_at_date(now.clone(), input_str) {
 		// Convert to system timezone for display
-		// (parse_datetime returns Zoned in the input's timezone)
+		// (parse_datetime_at_date returns ParsedDateTime; into_zoned unwraps the InRange Zoned)
 		Ok(date) => {
+			let date = date.into_zoned().ok_or_else(|| {
+				(input_str.into(), parse_datetime::ParseDateTimeError::InvalidInput)
+			})?;
 			let result = date.timestamp().to_zoned(now.time_zone().clone());
 			if dbg_opts.debug {
 				// Show final parsed date and time

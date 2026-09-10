@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use omp_core::{Str, sf};
 #[cfg(test)]
-use omp_tool::Severity;
+use omp_tool::{Severity, Unit};
 use omp_tool::{Diag, DiagKind};
 use serde::Deserialize;
 use url::Url;
