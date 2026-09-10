@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Built-in models now retain their catalog endpoint when a custom model under the same provider uses another API, preventing provider-level URLs from routing mixed models incorrectly ([#11608](https://github.com/can1357/oh-my-pi/pull/11608) by [@danilouchoa](https://github.com/danilouchoa)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added
