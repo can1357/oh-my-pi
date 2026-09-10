@@ -5108,6 +5108,8 @@ export class AuthStorage {
 		if (held && held.requestId !== args.requestId) {
 			return { ok: false, heldByRequestId: held.requestId, expiresAtMs: held.expiresAtMs };
 		}
+		const probe = this.#inflightProbes.get(args.requestId);
+		if (probe && probe.credentialId !== args.credentialId) this.clearQuotaProbe(args.requestId);
 		const expiresAtMs = nowMs + ttlMs;
 		this.#turnReservationToken += 1;
 		const token = this.#turnReservationToken;

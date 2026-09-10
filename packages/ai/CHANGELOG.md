@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fallback respects deployment affinity, and successful sibling requests cannot clear another credential's cooldown.
 - Fixed duplicate Gemini tool calls, parallel result pairing, weighted routing, concurrent API-key reservations, and stream completion hooks; discovery validates resolved addresses.
 
 - Block private discovery hosts across RFC1918, CGNAT, link-local, and IPv6 ULA ranges when `allowPrivate` is unset.

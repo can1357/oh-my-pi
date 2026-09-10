@@ -1,5 +1,4 @@
-import * as net from "node:net";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { BlockList, isIP } from "node:net";
 
 export interface SafeDiscoveryOptions {
 	allowPrivate?: boolean;
@@ -19,9 +18,28 @@ export class SafeDiscoveryError extends Error {
 const DEFAULT_MAX_BYTES = 1_000_000;
 const DEFAULT_MAX_MODELS = 10_000;
 
+const privateAddresses = new BlockList();
+for (const [address, prefix] of [
+	["0.0.0.0", 8],
+	["10.0.0.0", 8],
+	["100.64.0.0", 10],
+	["127.0.0.0", 8],
+	["169.254.0.0", 16],
+	["172.16.0.0", 12],
+	["192.168.0.0", 16],
+	["224.0.0.0", 4],
+	["240.0.0.0", 4],
+] as const)
+	privateAddresses.addSubnet(address, prefix, "ipv4");
+privateAddresses.addAddress("::", "ipv6");
+privateAddresses.addAddress("::1", "ipv6");
+privateAddresses.addSubnet("fc00::", 7, "ipv6");
+privateAddresses.addSubnet("fe80::", 10, "ipv6");
+privateAddresses.addSubnet("ff00::", 8, "ipv6");
+
 /**
- * Fetch a model-list URL with SSRF and size guards. Hostname private-range
- * and resolved-address checks pin the request to a validated IP. The returned array is unvalidated.
+ * Fetch a model-list URL with address pinning and size guards.
+ * The returned array is unvalidated.
  */
 export async function safeDiscoverModels(url: string, opts?: SafeDiscoveryOptions): Promise<readonly unknown[]> {
 	const parsed = parseDiscoveryUrl(url);
@@ -37,42 +55,32 @@ export async function safeDiscoverModels(url: string, opts?: SafeDiscoveryOption
 	if (opts?.timeoutMs !== undefined) {
 		init.signal = AbortSignal.timeout(opts.timeoutMs);
 	}
-
-	const target = new URL(parsed.href);
 	if (opts?.allowPrivate !== true) {
-		const host = parsed.hostname.replace(/^\[|\]$/g, "");
-		if (net.isIP(host) === 0) {
-			let addresses: Bun.DNSLookup[];
-			try {
-				addresses = await untilAborted(init.signal, Bun.dns.lookup(host));
-			} catch (error) {
-				throw wrapDiscoveryError(error, "discovery DNS lookup failed");
+		const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+		if (isIP(hostname) === 0) {
+			const answers = await Bun.dns.lookup(hostname);
+			if (answers.length === 0) throw new SafeDiscoveryError("discovery hostname has no addresses");
+			if (answers.some(answer => isPrivateHostname(answer.address))) {
+				throw new SafeDiscoveryError("private discovery DNS address is not allowed");
 			}
-			if (
-				addresses.length === 0 ||
-				addresses.some(row => net.isIP(row.address) === 0 || isPrivateHostname(row.address))
-			) {
-				throw new SafeDiscoveryError("discovery hostname resolves to a private or invalid address");
-			}
-			const address = addresses[0]!.address;
-			target.hostname = net.isIP(address) === 6 ? `[${address}]` : address;
+			const address = answers[0].address;
 			init.headers = { Host: parsed.host };
-			if (parsed.protocol === "https:") init.tls = { serverName: host };
+			init.tls = { serverName: hostname };
+			parsed.hostname = isIP(address) === 6 ? `[${address}]` : address;
 		}
 	}
 
 	let response: Response;
 	try {
-		response = await fetch(target.href, init);
+		response = await fetch(parsed.href, init);
 	} catch (err) {
 		throw wrapDiscoveryError(err, "discovery fetch failed");
 	}
 
 	if (!response.ok) {
 		await cancelBody(response);
-		throw new SafeDiscoveryError(`discovery endpoint returned HTTP ${response.status}`);
+		throw new SafeDiscoveryError(`discovery returned HTTP ${response.status}`);
 	}
-
 	const text = await readLimitedBody(response, maxBytes);
 
 	let parsedJson: unknown;
@@ -114,37 +122,17 @@ function assertUrlAllowed(parsed: URL, opts: SafeDiscoveryOptions | undefined): 
 	}
 }
 
-const privateAddresses = new net.BlockList();
-for (const [address, prefix] of [
-	["0.0.0.0", 8],
-	["10.0.0.0", 8],
-	["100.64.0.0", 10],
-	["127.0.0.0", 8],
-	["169.254.0.0", 16],
-	["172.16.0.0", 12],
-	["192.168.0.0", 16],
-	["224.0.0.0", 4],
-	["240.0.0.0", 4],
-] as const)
-	privateAddresses.addSubnet(address, prefix, "ipv4");
-for (const [address, prefix] of [
-	["::", 128],
-	["::1", 128],
-	["fc00::", 7],
-	["fe80::", 10],
-	["ff00::", 8],
-] as const) {
-	privateAddresses.addSubnet(address, prefix, "ipv6");
-}
-
 function isPrivateHostname(hostname: string): boolean {
-	const host = hostname
-		.toLowerCase()
-		.replace(/^\[|\]$/g, "")
-		.replace(/\.+$/, "");
+	let host = hostname.toLowerCase();
+	if (host.startsWith("[") && host.endsWith("]")) {
+		host = host.slice(1, -1);
+	}
+	while (host.endsWith(".")) {
+		host = host.slice(0, -1);
+	}
 	if (host === "localhost" || host.endsWith(".localhost")) return true;
-	const family = net.isIP(host);
-	return family !== 0 && privateAddresses.check(host, family === 4 ? "ipv4" : "ipv6");
+	const family = isIP(host);
+	return family !== 0 && privateAddresses.check(host, family === 6 ? "ipv6" : "ipv4");
 }
 
 async function readLimitedBody(response: Response, maxBytes: number): Promise<string> {

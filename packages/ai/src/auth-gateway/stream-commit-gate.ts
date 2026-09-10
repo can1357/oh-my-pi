@@ -14,6 +14,12 @@ const METADATA_EVENTS: Record<string, true> = {
 	"response.created": true,
 	"response.in_progress": true,
 	"response.queued": true,
+	"response.output_item.added": true,
+	"response.content_part.added": true,
+	start: true,
+	text_start: true,
+	thinking_start: true,
+	toolcall_start: true,
 	message_start: true,
 	heartbeat: true,
 	ping: true,
@@ -190,32 +196,30 @@ export function holdSseUntilCommit(
 					const state = gate.classifyAndObserve(eventType, next.frame.length);
 					pending = next.rest;
 					next = nextSseFrame(pending);
-					if (state === "terminated") {
-						// Dead attempt: its held frames belong to it and are never
-						// forwarded. The failover loop catches PreludeAbortedError,
-						// discards them, and dispatches a replacement attempt.
+					if (state === "terminated" && !(classifyCommitEvent(eventType) === "terminal-success")) {
 						throw new PreludeAbortedError(gate.takePrelude() ?? [], eventType);
 					}
-					if (state === "committed") {
+					if (state === "committed" || classifyCommitEvent(eventType) === "terminal-success") {
 						committed = true;
 						for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
-						// Cap-crossing chunk was refused by bufferPrelude — still emit it.
 						if (!buffered) controller.enqueue(chunk);
 						return;
 					}
 				}
 				if (!buffered) {
-					// Cap crossed without a commit event in this chunk: force commit and
-					// keep the rejected chunk so the SSE stream is not corrupted.
-					gate.classifyAndObserve("response.output_item.added", chunk.byteLength);
+					// Cap crossed: force commit observation and keep the rejected chunk.
+					gate.classifyAndObserve("", chunk.byteLength);
 					committed = true;
 					for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
 					controller.enqueue(chunk);
 				}
 			},
-			flush() {
-				// truncated tail without commit: treat as metadata-only commit so
-				// a holding consumer never stalls
+			flush(controller) {
+				if (committed) return;
+				const held = gate.takePrelude() ?? [];
+				if (held.length === 0) return;
+				gate.classifyAndObserve("", 0);
+				for (const chunk of held) controller.enqueue(chunk);
 			},
 		}),
 	);

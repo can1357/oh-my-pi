@@ -728,7 +728,7 @@ function targetSkipReason(
 		compiled.portability !== undefined &&
 		!candidateAllowed(
 			compiled.portability,
-			{ id: targetId, provider: model.provider },
+			{ id: targetId, provider: model.provider, deployment: model.baseUrl },
 			compiled.affinity ?? "preferred",
 		)
 	) {
