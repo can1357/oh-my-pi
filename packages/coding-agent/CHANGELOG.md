@@ -820,6 +820,7 @@
 - `#readProjectSettings` now logs capability warnings when a project `.claude/settings.json` fails to parse, instead of silently dropping them ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
 - A malformed project `.claude/settings.json` now produces a warning instead of being silently ignored ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
 - Reduced memory usage during long responses while thinking is hidden ([#11632](https://github.com/can1357/oh-my-pi/pull/11632) by [@redsolver](https://github.com/redsolver)).
+- Added a `display.showUsageModels` setting (default `true`) that opts out of the "Models with usage data" list in `/usage`, for users who only want the quota bars ([#7852](https://github.com/can1357/oh-my-pi/pull/7852) by [@mvid](https://github.com/mvid)).
 
 ## [18.1.17] - 2026-09-10
 
@@ -961,7 +962,6 @@
 
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 - Added opt-in `bash.allowCompoundCommands` approval for conservative literal `&&` chains, with ordered per-segment rules and normal bash policy fallback for unmatched segments. The opt-in requires a positively classified POSIX-quoting shell; incompatible and unknown shells retain legacy approval. Whole-chain denies take precedence over earlier prompts.
-- Added a `display.showUsageModels` setting (default `true`) that opts out of the "Models with usage data" list in `/usage`, for users who only want the quota bars. Leaving it at the default keeps the existing `/usage` output unchanged.
 
 ### Fixed
 
