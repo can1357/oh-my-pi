@@ -179,14 +179,28 @@ function processRunning(pid: number): boolean {
 	return Process.fromPid(pid)?.status() === ProcessStatus.Running;
 }
 
-function killPid(pid: number): void {
-	try {
-		process.kill(pid, "SIGKILL");
-	} catch {}
-}
-
 /** Every helper the fixture spawns is this, which makes it identifiable. */
 const FIXTURE_HELPER_ARGV = "sleep 60";
+
+/**
+ * SIGKILL a fixture helper, checking and signalling on one reference.
+ *
+ * A pid is not an identity. Resolving one, confirming it is still the helper,
+ * and then signalling the bare number hands the decision back to the number
+ * between the two steps — which is the reuse race the confirmation was there
+ * to close, reintroduced by the handoff. The native reference signals the
+ * process it resolved, so the check and the kill travel together.
+ *
+ * Nothing to kill and nothing that matches are both no-ops: leaving a stray
+ * process is a worse outcome than the alternative only until the alternative
+ * is signalling somebody else's.
+ */
+function killFixtureHelper(pid: number): void {
+	if (!(pid > 0)) return;
+	const helper = Process.fromPid(pid);
+	if (helper?.args().join(" ") !== FIXTURE_HELPER_ARGV) return;
+	helper.killTree();
+}
 
 /**
  * SIGKILL every helper whose pid the fixture published under `dir`.
@@ -196,9 +210,6 @@ const FIXTURE_HELPER_ARGV = "sleep 60";
  * learn it. A test that fails between the spawn and the read has nothing to
  * clean up by hand, so registering cleanup inside the test is a pattern that
  * can only be got wrong — this reaches those helpers regardless.
- *
- * Identity is corroborated before signalling: a pid read from a file is only a
- * number, and a helper that has already exited may have had it reissued.
  */
 async function killStrayHelpers(dir: string): Promise<void> {
 	const entries = await fs.readdir(dir).catch(() => [] as string[]);
@@ -207,10 +218,7 @@ async function killStrayHelpers(dir: string): Promise<void> {
 		const text = await Bun.file(path.join(dir, entry))
 			.text()
 			.catch(() => "");
-		const pid = Number.parseInt(text.trim(), 10);
-		if (!(pid > 0)) continue;
-		if (Process.fromPid(pid)?.args().join(" ") !== FIXTURE_HELPER_ARGV) continue;
-		killPid(pid);
+		killFixtureHelper(Number.parseInt(text.trim(), 10));
 	}
 }
 
@@ -367,7 +375,7 @@ describe("LspMuxServer", () => {
 				await server.shutdown();
 				await pollUntil(() => Promise.resolve(!processAlive(grandchildPid)), "grandchild termination", 6_000);
 			} finally {
-				killPid(grandchildPid);
+				killFixtureHelper(grandchildPid);
 			}
 		},
 		10_000,
@@ -492,7 +500,7 @@ describe("LspMuxServer", () => {
 					await expect(server.shutdown()).rejects.toThrow("LSP mux shutdown incomplete");
 				} finally {
 					spy.mockRestore();
-					killPid(helperPid);
+					killFixtureHelper(helperPid);
 					// The memoized rejection would resurface in afterEach's own shutdown.
 					server = new LspMuxServer();
 				}
@@ -560,7 +568,7 @@ describe("LspMuxServer", () => {
 				helperSpy.mockRestore();
 				rootSpy.mockRestore();
 				timerSpy.mockRestore();
-				killPid(helperPid);
+				killFixtureHelper(helperPid);
 				// The memoized rejection would resurface in afterEach's own shutdown.
 				server = new LspMuxServer();
 			}
@@ -612,7 +620,7 @@ describe("LspMuxServer", () => {
 				release.resolve();
 				late?.destroy();
 				helperSpy.mockRestore();
-				killPid(helperPid);
+				killFixtureHelper(helperPid);
 				server = new LspMuxServer();
 			}
 		},
@@ -647,8 +655,8 @@ describe("LspMuxServer", () => {
 				expect(attempted).toContain(grandchildPid);
 			} finally {
 				spy.mockRestore();
-				killPid(helperPid);
-				killPid(grandchildPid);
+				killFixtureHelper(helperPid);
+				killFixtureHelper(grandchildPid);
 				server = new LspMuxServer();
 			}
 		},
@@ -690,7 +698,7 @@ describe("LspMuxServer", () => {
 			} finally {
 				helperSpy.mockRestore();
 				timerSpy.mockRestore();
-				killPid(helperPid);
+				killFixtureHelper(helperPid);
 				server = new LspMuxServer();
 			}
 		},
@@ -738,7 +746,7 @@ describe("LspMuxServer", () => {
 				release.resolve();
 				helperSpy.mockRestore();
 				timerSpy.mockRestore();
-				killPid(helperPid);
+				killFixtureHelper(helperPid);
 				// The memoized rejection would resurface in afterEach's own shutdown.
 				server = new LspMuxServer();
 			}
@@ -769,7 +777,7 @@ describe("LspMuxServer", () => {
 				expect(budgets).toEqual([TERMINATION_BUDGET_MS]);
 			} finally {
 				spy.mockRestore();
-				killPid(helperPid);
+				killFixtureHelper(helperPid);
 			}
 		},
 		10_000,
