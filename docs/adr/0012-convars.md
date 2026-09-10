@@ -77,4 +77,4 @@ aliases, remote administration, and journal replay all address these declared va
 - Valve Developer Community, ConVar (https://developer.valvesoftware.com/wiki/ConVar)
 - 0003 (session tree as authority), 0004 (lifecycle derives from the tree), 0013 (seeding and
   cfg), 0014 (command stream)
-- `crates/settings/src/schema.rs`, `crates/settings/src/snapshot.rs`, `crates/agent/src/regime.rs`
+- `crates/con/src/spec.rs`, `crates/con/src/dump.rs`, `crates/agent/src/vars.rs`

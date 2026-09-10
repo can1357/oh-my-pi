@@ -24,7 +24,7 @@ start from zero. Then the third one did too.
 than chat completions. In omp a provider declares which of fifteen typed `Operation`s it serves, and
 gets synchronized OAuth refresh, account rotation, rate reservation, retry classification, cost
 accounting, and cross-route failover for all of them, because those live in the Tower spine
-(`crates/inference/src/layer/stack.rs:194-221`) rather than in each provider's code.
+(`crates/ai/src/layer/stack.rs:194-221`) rather than in each provider's code.
 
 The measure of how much room `stream`/`streamSimple` left is that it left none. Grep
 `/work/pi/packages/ai/src` — the entire inference package — and the count of files mentioning
@@ -65,7 +65,7 @@ much Python survives the port:
 
 | Class | Meaning | Python in the port | Catalog examples |
 |---|---|---|---|
-| **(a)** | Pure catalog data. Endpoint, codec, auth mode, models, pricing. | none | `awto-pi-lot`, `@thebinaryguy/pi-fast-mode`, `pi-openai-fast`, `@jayteelabs/pi-nous-portal-provider`, every API-key search backend in `.plan/feature-map/web.md:45-56` |
+| **(a)** | Pure catalog data. Endpoint, codec, auth mode, models, pricing. | none | `awto-pi-lot`, `@thebinaryguy/pi-fast-mode`, `pi-openai-fast`, `@jayteelabs/pi-nous-portal-provider`, every API-key search backend |
 | **(b)** | Catalog data plus cold-path behavior. OAuth, discovery polling, body mutation, failover policy, usage projection. | one or more `@omp.hook` bodies, none on the token path | `@zgltyq/pi-provider-kimi-code`, `pi-lmstudio`, `pi-model-fallback`, `pi-provider-litellm`, `@openference/pi-provider`, `@benvargas/pi-synthetic-provider`, `pi-provider-bedrock` |
 | **(c)** | Genuinely foreign wire protocol. | a proxy process; zero Python bytes touch a token | `@rahularya01/pi-cursor` (Connect/protobuf over HTTP/2) |
 
@@ -104,15 +104,15 @@ the catalog and the request layer. Mirrored into Python as `omp.Operation`, it i
 
 A provider declares its operations per model and per route; the machinery is shared. `SPEAK` and
 `TRANSCRIBE` reach the same credential store as `CHAT`; `REALTIME` reaches the same one over WebRTC
-plus a sideband WebSocket (`.plan/feature-map/voice.md:111-127`); `SEARCH` is why web search is a
-provider entry rather than a bespoke subsystem (`.plan/feature-map/web.md:39-65`); `USAGE` is why a
+plus a sideband WebSocket; `SEARCH` is why web search is a
+provider entry rather than a bespoke subsystem; `USAGE` is why a
 quota badge is fourteen lines instead of a private HTTP client. `NATIVE` is the allowlisted
 lossless-bytes escape valve, and it is *not* an extension slot — see "Custom wire protocols" below.
 
 ### Codecs are selected, never implemented
 
 `api=` on a `RouteSpec` selects from a closed codec set that Rust owns
-(`crates/inference/src/codec/`). An extension picks `Api.OPENAI_CHAT` or `Api.ANTHROPIC_MESSAGES`;
+(`crates/ai/src/codec/`). An extension picks `Api.OPENAI_CHAT` or `Api.ANTHROPIC_MESSAGES`;
 it never writes a codec. This is the hard line that keeps Python out of the token path, and it is what
 makes class (c) a proxy rather than a plugin.
 
@@ -138,7 +138,7 @@ flowchart TD
 ```
 
 Two properties matter. First, degradation is never silent: a dropped preference produces an
-`Adjustment` in the execution receipt (`crates/inference/src/receipt.rs:42-79`), which reaches
+`Adjustment` in the execution receipt (`crates/ai/src/receipt.rs:42-79`), which reaches
 telemetry (`docs/py/10-telemetry.md`) and the journal (`docs/py/09-journal.md`). Second, `REQUIRE`
 fails loudly rather than degrading, so a tool that genuinely cannot work unconstrained says so once
 instead of emitting garbage forever.
@@ -207,8 +207,8 @@ class-count reversal on its side.
 `omp.creds` is bound to the providers the extension declares in its manifest. There is no
 cross-provider read, no enumeration of other providers' accounts, and no filesystem path to the
 store. The store itself is Rust: an encrypted SQLite table
-(`crates/inference/src/auth/store.rs`) whose master key comes from the OS keychain
-(`crates/inference/src/auth/key.rs`), reached over CONTROL through the daemon so refresh is
+(`crates/ai/src/auth/store.rs`) whose master key comes from the OS keychain
+(`crates/ai/src/auth/key.rs`), reached over CONTROL through the daemon so refresh is
 serialized across every omp process on the machine.
 
 The default is stronger than scoping: **`omp.creds` hands out metadata, not secrets.** A refresh hook
@@ -451,7 +451,7 @@ class ManagementSpec:
 `operations` are the *provider-level* operations — typically `{Operation.AUTH}`,
 `{Operation.USAGE}`, `{Operation.DISCOVER_MODELS}` — as distinct from a model's operations.
 `multiple_accounts` opts the provider into the account pool, so several stored principals may be
-selected and rotated (`crates/inference/src/account/pool.rs`). `refresh` declares that a
+selected and rotated (`crates/ai/src/account/pool.rs`). `refresh` declares that a
 credential can be renewed without changing principal, which is what makes `RetryAction::RefreshCredential`
 a legal failover. `principal_quota` declares that quota observations are per-principal rather than
 per-provider, which is what makes rotation on `QuotaExhausted` meaningful.
@@ -567,7 +567,7 @@ This is the field that deletes a whole category of extension code:
 `authorization: Bearer <token>`, because pi's Anthropic client hard-coded an `sk-ant-oat` prefix check
 before it would use a bearer. Here that is `AuthSpec(mode=AuthMode.BEARER, header="authorization",
 prefix="Bearer ")` — data, applied by `CredentialApplyService`
-(`crates/inference/src/layer/encode.rs:209`) with no extension in the path.
+(`crates/ai/src/layer/encode.rs:209`) with no extension in the path.
 
 `account_scope`: `PROVIDER` (one principal for everything), `ROUTE`, or `REGION`. Sets the boundary at
 which a principal and its quota are shared, and therefore what "rotate to a sibling account" means.
@@ -584,7 +584,7 @@ which a principal and its quota are shared, and therefore what "rotate to a sibl
 | `CredentialSource.session()` | Interactive provider session credential. |
 
 There is deliberately **no** `CredentialSource.command(...)`. pi supported `!command` substitution for
-keys and headers, resolved per request (`.plan/feature-map/FEATURES.md:157`), and
+keys and headers, resolved per request, and
 `pi-provider-litellm` used it to run `LITELLM_API_KEY_HELPER` on the turn path. Executing a shell
 helper synchronously before every request is a latency cliff, an unauditable credential source, and a
 policy hole. The replacement is a `@omp.hook("provider_refresh")` that runs a command through
@@ -1020,7 +1020,7 @@ Results are blob-backed so generated image and speech bytes never expand into Py
 generic response mapping; `cost_nanos_usd` is Core's settled per-call usage receipt, not an extension
 estimate.
 
-`.plan/feature-map/voice.md` names the concrete cases these serve: Kokoro-82M and xAI Grok voices for
+These serve three concrete cases: Kokoro-82M and xAI Grok voices for
 `SpeechCaps`, Whisper and Parakeet TDT for `TranscriptionCaps`, `gpt-live-1-codex` over
 WebRTC-plus-sideband-WebSocket for `RealtimeCaps`.
 
@@ -1202,7 +1202,7 @@ has not thought about it.
 
 On the Rust side this lowers onto two existing types rather than one: the value plus `Fallback.ERROR`
 becomes `Setting::Require`, the value plus `IGNORE`/`EMULATE` becomes `Setting::Prefer`
-(`crates/inference/src/call.rs:300-308`), and the ignore-versus-emulate distinction becomes
+(`crates/ai/src/call.rs:300-308`), and the ignore-versus-emulate distinction becomes
 `NegotiationPolicy.emulation` (`EmulationPolicy::Forbid | AllowLossless | AllowDeclaredLossy`,
 `call.rs:311-320`) — where `Emulation::PromptInstruction` is the one classified lossy, so
 `Fallback.IGNORE` maps to `Forbid` and `Fallback.EMULATE` to `AllowDeclaredLossy`.
@@ -1248,7 +1248,7 @@ Three consequences follow from the protocol rather than from taste:
 3. **The remaining intent kinds have no toolhost frame, because they are not tool properties.**
    `FORCE_CALL`, `SERVICE_TIER`, `VERBOSITY`, `CACHE_RETENTION`, `REASONING`, `SAFETY`,
    `DETERMINISM`, and `HOSTED_TOOL` all constrain the *turn*, and in Rust they are already
-   `Setting<T>` fields on `ChatRequest` (`crates/inference/src/call.rs:699-728`). They are what
+   `Setting<T>` fields on `ChatRequest` (`crates/ai/src/call.rs:699-728`). They are what
    `omp.intents.set` needs a new frame for; `STRICT` and `GRAMMAR` do not.
 4. **Degradation is already implemented, so the documented behavior is observed behavior.** Inside the
    environment, `ToolConstraint` becomes `omp_tool::Constraint`
@@ -1380,7 +1380,7 @@ class Adjustment:
 capability was reproduced by, and `Emulation.PROMPT_INSTRUCTION` is the one classified as lossy — so
 `EmulationPolicy.ALLOW_LOSSLESS` permits everything except prompt-level fakery.
 
-These mirror `Adjustment` in `crates/inference/src/receipt.rs:42-79`, which is the *receipt* form.
+These mirror `Adjustment` in `crates/ai/src/receipt.rs:42-79`, which is the *receipt* form.
 The *wire* form already exists too, as `omp.inference.v1.Unsupported`
 (`crates/proto/proto/omp/inference/v1/common.proto:120-132`), returned as
 `repeated Unsupported unsupported` on chat (`inference.proto:597`, `:644`), media (`media.proto:107`,
@@ -1568,8 +1568,7 @@ This hook is on the per-attempt path and is the one place in this namespace wher
 visible. It is hard-budgeted: exceed the budget and the attempt fails closed. Do not use it for SigV4
 (`auth/sigv4.rs`), Copilot session-token exchange (`auth/github_copilot.rs`), or ADC
 (`auth/adc.rs`) — those are Rust. Its real target is platform attestation: the macOS DeviceCheck CBOR
-envelope in `x-oai-attestation` that Live Voice requires (`.plan/feature-map/voice.md:118-122`,
-`.plan/feature-map/ROADMAP.md:989`).
+envelope in `x-oai-attestation` that Live Voice requires.
 
 #### `before_request`
 
@@ -1672,7 +1671,7 @@ class ProviderError:
 `ACCOUNT_DISABLED`, `PAYMENT_REQUIRED`, `CONTEXT_OVERFLOW`, `RESOURCE_EXHAUSTED`, `CONNECTIVITY`,
 `STREAM_CORRUPTION`, `MALFORMED_MODEL_OUTPUT`, `TOOL_NON_COMPLIANCE`, `EMPTY_COMPLETION`,
 `SESSION_EXPIRED`, `CONTENT_FILTER`, `SAFETY_REFUSAL`, `INVALID_REQUEST`, and the rest of
-`crates/inference/src/error.rs:11-96`. `retryability` is the typed retry lane
+`crates/ai/src/error.rs:11-96`. `retryability` is the typed retry lane
 (`docs/py/10-telemetry.md` §Retryability). `retry_after` is already parsed from the header into an
 `omp.Duration`, whether it arrived as a delta or an HTTP date.
 
@@ -1747,7 +1746,7 @@ class UsageWindow:
 policy, and any status widget — which is why `@ogulcancelik/pi-minimal-footer` and
 `@benvargas/pi-synthetic-provider`'s quota command become a declaration plus a TML slot instead of a
 private HTTP client and a cache file. Fourteen providers already have Rust usage projections
-(`crates/inference/src/operation/usage/`); this hook is for the fifteenth.
+(`crates/ai/src/operation/usage/`); this hook is for the fifteenth.
 
 #### `search_parse`
 
@@ -1912,7 +1911,7 @@ That is the whole extension. What went where:
   0600 file and shelling out to a platform binary for a fingerprint is not solving its own problem.
 - **Prompt caching** → `ContextSpec.prefix_cache` + `ChatCaps.prompt_caching`, so the harness places
   breakpoints instead of the extension guessing.
-- **>1 MB image auto-upload** → nothing. Large media staging is `crates/inference/src/staging.rs`
+- **>1 MB image auto-upload** → nothing. Large media staging is `crates/ai/src/staging.rs`
   and `MediaInput`, with `StagingReceipt` evidence. This was never an extension's job; it looked like
   one because pi's provider interface had no media concept.
 - **Token counting** → one member in `operations`. pi had no slot for Anthropic's endpoint at all;
@@ -2002,7 +2001,7 @@ per-turn round-trip, so turns do not pay for it; a raised exception retains the 
 of wiping them; `authoritative=True` is a declared property of a *successful* listing, so retirement
 happens for the right reason; and `TrustDomain.loopback()` is the only reason plaintext HTTP is
 permitted at all, checked once at declaration rather than trusted forever. `emit_max_tokens=False` is
-the Ollama-class quirk (`.plan/feature-map/FEATURES.md:148`) that pi carried as
+the Ollama-class quirk that pi carried as
 `omitMaxOutputTokens?: boolean` on the model — same fact, now on the axis that owns it.
 
 ### 3. `pi-model-fallback` — class (b), and the string is no longer the truth
@@ -2235,7 +2234,7 @@ Concretely:
    safe against a swap. This is the single strongest argument for the generation design over any
    locking scheme — the invalidation protocol is written and tested.
 
-2. **`crates/inference/src/registry.rs`** — the real friction. `RegistryBuilder` states that
+2. **`crates/ai/src/registry.rs`** — the real friction. `RegistryBuilder` states that
    "mutation ends permanently at `build`" (line 166) and `RouteBinding` services are preconstructed
    per route. An extension-declared route has no preconstructed stack.
 
@@ -2314,7 +2313,7 @@ Concretely:
    these messages already carries — which is what that field is for, and it means none of this work
    needs to land as a protocol change before it can be exercised.
 
-4. **`crates/inference/src/layer/`** — the cold-path hooks need dispatch points. `before_request`
+4. **`crates/ai/src/layer/`** — the cold-path hooks need dispatch points. `before_request`
    fits `EncodeService`. `provider_error` needs a classification interception in the
    `Error → RetryAction` path, before `fallback_is_safe` (`registry.rs:481-489`) consumes it.
    `provider_sign` sits inside `CredentialApplyService` (`layer/encode.rs:209`) and is the only new
@@ -2360,7 +2359,7 @@ route and a `Fallback.ERROR` must still fail honestly — but build it knowing t
 designed out rather than budgeted for, and build the filter first, because until it exists the budget
 would be arbitrating a set that should not be on the wire.
 
-New: `ConstraintBudget` in `crates/inference/src/plan.rs`, holding per-route ceilings
+New: `ConstraintBudget` in `crates/ai/src/plan.rs`, holding per-route ceilings
 (`maximum_tools`, provider strict-schema cap, grammar-tool cap) and an `assign(&[Intent]) -> Assignment`.
 
 The interesting design question is not the allocation rule; it is **stability**. A greedy
@@ -2368,20 +2367,16 @@ priority-ordered assignment recomputed per request is trivial and wrong: grammar
 request body, so an assignment that flips between turns invalidates the prompt prefix cache — the
 exact damage `pi-cache-optimizer` existed to undo. So: compute the assignment once per
 *registration-set epoch* and cache it on the plan, recomputing only when the live set changes or a
-route is reselected. `Registry::live_hash()` (`crates/tool/src/registry.rs:457-467`) is nearly the key:
-a blake3 digest over the ordered `(name, family, rev)` identities, length-delimited, `BTreeMap`-ordered
-so it is registration-order independent, and computed "without allocation or serialization" per its own
-doc comment.
+route is reselected. `Registry::projection_hash()` (`crates/tool/src/registry.rs:2690-2711`) is nearly the key:
+a SHA-256 digest (`Hash32`) over the ordered `(name, family, rev)` identities, length-delimited, `BTreeMap`-ordered
+so it is registration-order independent.
 
 **But it is the wrong digest for this, for the same reason `advertise` is currently wrong.**
-`live_hash` hashes all of `self.live`, which includes worker declarations. Key a prompt-cache-stable
-assignment on it and every device enable/disable changes the key — which would make availability behave
-like re-registration and falsify the notification-instead-of-re-registration property that
-`docs/py/01-devices.md` depends on. The two digests answer different questions: "what does the model
-see" must exclude workers, "what can the host dispatch" must include them. Key the assignment cache on
-`(slot_hash(), route_id)` — the core-slot-only digest that must exist alongside `live_hash` once the
-`advertise` route filter lands, and which `docs/py/01-devices.md` specifies. Reusing `live_hash` here
-would be a correctness bug, not a shortcut.
+`projection_hash` spans every registered revision and the live host-tool rosters rather than the
+policy-resolved model-visible slots, so a registration change moves the key even when the
+model-visible set is unchanged. Key the assignment cache on `(slot_hash(), route_id)` — the
+core-slot-only digest — as `docs/py/01-devices.md` specifies. Reusing a whole-registry digest
+here would be a correctness bug, not a shortcut.
 
 Cost of the epoch approach either way: an extension that arrives mid-session may wait a turn for its
 intent to be honored. That is the right trade — a stable prefix is worth more than one turn of
@@ -2423,7 +2418,8 @@ What remains is narrower and more precise than "build the lowering":
   advertised set rather than a per-entry `filter_map`; and — first, because it is a correctness
   prerequisite rather than an optimization — give `advertise` the `ToolRoute::Worker` filter it is
   missing, so the set being arbitrated is the set the model actually sees. Cache the result on the
-  core-slot digest described above, **not** on `live_hash()`, which includes worker identities.
+  core-slot digest described above — shipped as `Registry::slot_hash()` (`crates/tool/src/registry.rs:2623-2650`);
+  **not** on `device_hash` or `projection_hash`, which include device and worker identities.
 - **`Fallback::ERROR` is unrepresentable in `crates/tool` too, not just on the wire.** `Constraint` has
   a `priority` but no degradation policy, and `lower()` therefore *always* degrades — every
   unsatisfiable constraint becomes `Prefer`, never an error. So an extension declaring
@@ -2597,7 +2593,7 @@ Three ways out, none free:
 
 Rev 2's inclination here — (3) keyed by extension, "stated as an inclination rather than a ruling
 because the decision is not local to this doc" — was adopted and is now D5's own text. The
-2026-08-19 amendment (`PLAN.md` §D5) fixes exactly that: "supervised worker processes, one
+2026-08-19 amendment fixes exactly that: "supervised worker processes, one
 per active extension, keyed `(layer, tier, extension)`; pooling is explicit opt-in fate-sharing.
 Cancel = SIGKILL of that extension's process group + respawn; blast radius is one extension", with
 approval "a durable Core-owned ticket" so cancellation never has to reach across extensions. That
@@ -2608,7 +2604,7 @@ calls, exactly as stated above.
 
 ### Feature-map reconciliation
 
-**Satisfied.** `.plan/feature-map/FEATURES.md:140-146` "Custom models & providers" — provider fields
+**Satisfied.** "Custom models & providers" — provider fields
 (baseUrl, headers, auth mode, discovery, compat, overrides) map to `RouteSpec`/`AuthSpec`/
 `DiscoverySpec`/`CompatFlags`; model fields (context window, max tokens, reasoning, inputs, cost,
 premium multiplier, compaction model, context promotion target) map to `ModelSpec` field-for-field;
@@ -2620,16 +2616,16 @@ runtime providers are `@omp.provider`, model modifiers are `ModelPatch` overlays
 registration is `OAuthSpec`, and the attestation hook is `provider_sign`. Lines 161-164 "Wire
 optimization modes" — per-family service tiers become declared `ServiceTier` plus
 `omp.intent.service_tier`; "append-only context auto-detect" and "inline tool descriptor stripping for
-Gemini" are `CompatFlags` axes. `.plan/feature-map/discovery.md:170-172` (`registerProvider` /
-`unregisterProvider` / `fetchDynamicModels`) becomes `omp.provider` / `handle.retract` /
-`models_discover`, and lines 168-169 (`before_provider_request` / `after_provider_response`) become
-`before_request` / `provider_error`. `.plan/feature-map/voice.md` speech, STT, and realtime endpoints
+Gemini" are `CompatFlags` axes. `registerProvider` /
+`unregisterProvider` / `fetchDynamicModels` becomes `omp.provider` / `handle.retract` /
+`models_discover`; the provider lifecycle hooks are
+`before_request` / `provider_error`. The speech, STT, and realtime endpoints
 are `Operation.SPEAK`/`TRANSCRIBE`/`REALTIME` with their capability records.
-`.plan/feature-map/web.md:39-65` search providers are `Operation.SEARCH` plus a `SEARCH_*` codec — the
+The search providers are `Operation.SEARCH` plus a `SEARCH_*` codec — the
 API-key engines (Exa, Tavily, Kagi, Brave, Jina, Parallel) are class (a) declarations.
-`.plan/feature-map/secrets-security.md`'s reversible HMAC placeholders are orthogonal and unaffected:
+The reversible HMAC placeholders are orthogonal and unaffected:
 obfuscation runs on message content, and credentials never transit Python to be obfuscated.
-`.plan/feature-map/ROADMAP.md:709` places extension runtime providers in M3, which is consistent — the
+The roadmap places extension runtime providers in M3, which is consistent — the
 overlay wiring (item 1 above) is a prerequisite and belongs earlier.
 
 **Conflicts, named.**
@@ -2662,11 +2658,25 @@ overlay wiring (item 1 above) is a prerequisite and belongs earlier.
    point is a wrapper rather than new machinery: `ChatParentHost::completion`
    (`crates/app/src/chat.rs:511`), reached through `ParentSessionHost::completion`
    (`crates/app/src/envd/eval/bridge.rs:483`), is the same call the eval prelude's `completion()`
-   already exposes. `Operation.CHAT` against a `smol`/`tiny` role reaches
-   `crates/inference/src/local/text.rs`, which has `TextAdapter::generate`, `GenerationOptions`,
-   `TextCapabilities`, and idle unloading for on-device models;
-   `.plan/feature-map/voice.md:146-155` names the shipped Q4 models (`lfm2-350m`, `qwen3-0.6b`,
-   `gemma-270m`, `qwen2.5-0.5b`). The blogpost's "Extra: Use local models!" argues for exactly this,
+   already exposes.
+   omp's local-model stack is real and verifiable on disk, and it is the natural substrate:
+   the tiny-model catalog (`crates/ai/src/local/tiny_catalog.rs:103-160`) ships exactly the
+   weight class this argument needs — `lfm2-350m`, `qwen3-0.6b`, `gemma-270m`,
+   `qwen2.5-0.5b` — on top of a local runtime with admission control, memory pooling, and
+   idle unloading (`crates/ai/src/local/runtime.rs:235-330`). The shipped adapter seam is
+   speech — `SpeechToTextAdapter` (`crates/ai/src/local/stt.rs:168`) with typed
+   `TranscriptionOptions` (`stt.rs:116`) and its own idle unloading (`stt.rs:251`). A
+   text-side adapter exists where the platform provides one: Apple Foundation Models
+   generation (`crates/ai/src/local/applefm.rs:428-452`: `generate`, `complete`,
+   `stream`) plus the GGUF tiny-title artifacts — registry wired to the CLI
+   (`crates/ai/src/local/tiny_catalog.rs:100-101`, surfaced by
+   `crates/app/src/tiny_models_cmd.rs:41`) — and the validation-only title-output contract
+   (`crates/ai/src/local/title.rs:1`, no production callers). The reported gap this seam
+   names is therefore
+   narrower: a cross-platform GGUF `TextAdapter` — `TextAdapter::generate`,
+   `GenerationOptions`, `TextCapabilities` — under `crates/ai/src/local/`, not text
+   generation as such.
+   The blogpost's "Extra: Use local models!" argues for exactly this,
    and `FEATURES.md:356-360` shows omp already doing it in Rust for auto-thinking difficulty
    classification: "online backend: tiny model, allowMax variant, 5-level output, earliest-match
    parsing, transient retry", with "fallback to provisional or previous level on failure".
@@ -2783,7 +2793,7 @@ Changes in this file, and the review point that drove each:
   `InvocationPhase.ASSISTANT_ITEM_COMMITTED` (`docs/py/03-params.md`), the one reserved sense of
   "commit".
 
-**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the PLAN.md amendment:
+**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the D5/D6 amendment:
 
 - **Dispatch surface.** "Intents that cannot apply" now says a device's capability reaches
   the model through the `dyn` core tool — docs via `{"do_": "docs/<name>"}`, discovery via
@@ -2794,11 +2804,11 @@ Changes in this file, and the review point that drove each:
   2.1 ruling deletes both, and the drop reason is respelled `device.dyn-transport`.
   Declarations carry soft/hard intent; the surface is decided by the dynamic tool policy,
   owned with `@omp.tool`, the `do_` grammar, and `omp.ToolPath` by `docs/py/01-devices.md`.
-- **D5/D6 ratified.** `PLAN.md` §D5/§D6 was amended 2026-08-19. The cancellation
+- **D5/D6 ratified.** Locked decisions D5 and D6 were amended 2026-08-19. The cancellation
   section's former "Unresolved" heading is resolved in design: Rev 2's inclination —
   option (3), a worker keyed by extension — is now D5's own third clause (per-extension
   worker processes keyed `(layer, tier, extension)`, pooling as opt-in fate-sharing,
-  durable approval tickets, `PLAN.md` §D5). The three-ways-out analysis is kept
+  durable approval tickets). The three-ways-out analysis is kept
   as the historical record, and the shipped single-worker supervisor is described as
   not yet caught up.
 

@@ -56,12 +56,12 @@ Everything between the wire and that turn is inference's job.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/inference/src/recovery`. Recovery and codec stages normalize vendor behavior into canonical `ChatEvent` turns. Catalog-selected Harmony mitigation keeps the attempt behind the whole-attempt gate, repairs only exactly framed `analysis`/`final` channels, rejects provable unframed leakage with a bounded semantic retry, and carries typed recovery evidence through `turn.receipt@1` so replay observes the same audit record.
+**Implemented.** Primary implementation: `crates/ai/src/recovery`. Recovery and codec stages normalize vendor behavior into canonical `ChatEvent` turns. Catalog-selected Harmony mitigation keeps the attempt behind the whole-attempt gate, repairs only exactly framed `analysis`/`final` channels, rejects provable unframed leakage with a bounded semantic retry, and carries typed recovery evidence through `turn.receipt@1` so replay observes the same audit record.
 
 ## References
 
 - The Harness Playbook, "The inference" — "Corrective inference"
 - blog.can.ac, "The minutiae of tool calling" (2026-08-03)
 - 0008, 0017, 0020, 0021, 0034
-- `crates/inference/src/recovery/`, `crates/inference/src/event.rs`, `crates/core/src/slopjson/mod.rs`,
+- `crates/ai/src/recovery/`, `crates/ai/src/event.rs`, `crates/core/src/slopjson/mod.rs`,
   `docs/architecture/agent-loop.md`

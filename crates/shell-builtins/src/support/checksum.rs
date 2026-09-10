@@ -7,7 +7,10 @@ use std::{
 	iter, str,
 };
 
-use digest::{ExtendableOutput, Update, VariableOutput};
+use digest::{
+	ExtendableOutput, Output, Update,
+	block_api::{Buffer, UpdateCore, VariableOutputCore},
+};
 use omp_core::encoding::{base64, hex};
 use strum::{EnumProperty, EnumString, IntoStaticStr};
 use thiserror::Error;
@@ -90,14 +93,16 @@ pub(crate) mod sum {
 	}
 
 	pub(super) struct Blake2bDigest {
-		state: blake2::Blake2bVar,
-		bytes: usize,
+		state:  blake2::Blake2bVarCore,
+		buffer: Buffer<blake2::Blake2bVarCore>,
+		bytes:  usize,
 	}
 
 	impl Blake2bDigest {
 		pub(super) fn new(bytes: usize) -> Self {
 			Self {
-				state: blake2::Blake2bVar::new(bytes).expect("validated BLAKE2b output length"),
+				state: blake2::Blake2bVarCore::new(bytes).expect("validated BLAKE2b output length"),
+				buffer: Buffer::<blake2::Blake2bVarCore>::default(),
 				bytes,
 			}
 		}
@@ -109,17 +114,20 @@ pub(crate) mod sum {
 		}
 
 		fn update(&mut self, input: &[u8]) {
-			Update::update(&mut self.state, input);
+			let Self { state, buffer, .. } = self;
+			buffer.digest_blocks(input, |blocks| state.update_blocks(blocks));
 		}
 
 		fn result(&mut self) -> DigestOutput {
-			let mut output = vec![0; self.bytes];
-			self
-				.state
-				.clone()
-				.finalize_variable(&mut output)
-				.expect("output has the configured length");
-			DigestOutput::Vec(output)
+			// digest 0.11 dropped its runtime-output wrapper, so the removed
+			// `RtVariableCoreWrapper` buffering logic is inlined here on the
+			// `Blake2bVarCore` path; finalize on clones to stay reusable.
+			let mut state = self.state.clone();
+			let mut buffer = self.buffer.clone();
+			let mut full = Output::<blake2::Blake2bVarCore>::default();
+			state.finalize_variable_core(&mut buffer, &mut full);
+			// BLAKE2b truncates from the left (`TruncSide::Left`).
+			DigestOutput::Vec(full[..self.bytes].to_vec())
 		}
 	}
 
@@ -158,14 +166,6 @@ pub(crate) mod sum {
 			self.state.finalize_xof().fill(&mut output);
 			DigestOutput::Vec(output)
 		}
-	}
-
-	/// Variable-output BLAKE3 implementation.
-	pub(crate) struct Blake3;
-
-	impl Blake3 {
-		/// Default BLAKE3 output size in bytes.
-		pub(crate) const DEFAULT_BYTE_SIZE: usize = 32;
 	}
 
 	pub(super) struct Shake128Digest {
@@ -248,6 +248,14 @@ pub(crate) mod sum {
 	impl Shake256 {
 		/// Default SHAKE256 output size in bits.
 		pub(crate) const DEFAULT_BIT_SIZE: usize = 512;
+	}
+
+	/// Variable-output BLAKE3 implementation.
+	pub(crate) struct Blake3;
+
+	impl Blake3 {
+		/// Default BLAKE3 output size in bytes.
+		pub(crate) const DEFAULT_BYTE_SIZE: usize = 32;
 	}
 
 	#[derive(Default)]
@@ -518,7 +526,7 @@ impl SizedAlgoKind {
 					| A::Sha384
 					| A::Sha512
 			) {
-			return Err(ChecksumError::LengthOnlyForBlake2bSha2Sha3);
+			return Err(ChecksumError::LengthOnlyForVariableAlgorithm);
 		}
 		Ok(match (kind, length) {
 			(A::Sysv, _) => Self::Sysv,
@@ -633,8 +641,8 @@ pub(crate) enum ChecksumError {
 	InvalidLengthForSha(String),
 	#[error("--algorithm={0} requires specifying --length 224, 256, 384, or 512")]
 	LengthRequiredForSha(String),
-	#[error("--length is only supported with --algorithm blake2b, sha2, or sha3")]
-	LengthOnlyForBlake2bSha2Sha3,
+	#[error("--length is only supported with --algorithm blake2b, blake3, sha2, sha3, shake128, or shake256")]
+	LengthOnlyForVariableAlgorithm,
 	#[error("the --binary and --text options are meaningless when verifying checksums")]
 	BinaryTextConflict,
 	#[error("--text mode is only supported with --untagged")]
@@ -910,6 +918,19 @@ mod tests {
 			"bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319"
 		);
 		assert_eq!(parse_blake_length(AlgoKind::Blake2b, BlakeLength::String("256")).unwrap(), 32);
+	}
+
+	#[test]
+	fn blake2b_handles_uneven_multi_block_updates() {
+		let input: Vec<u8> = (0_u8..200).collect();
+		let mut digest = SizedAlgoKind::Blake2b(64).create_digest();
+		sum::Digest::update(&mut *digest, &input[..97]);
+		sum::Digest::update(&mut *digest, &input[97..110]);
+		sum::Digest::update(&mut *digest, &input[110..]);
+		assert_eq!(
+			digest.result().to_hex().unwrap(),
+			"fb3c1f0f56a56f8e316fdf5d853c8c872c39635d083634c3904fc3ac07d1b578e85ff0e480e92d44ade33b62e893ee32343e79ddf6ef292e89b582d312502314",
+		);
 	}
 
 	#[test]

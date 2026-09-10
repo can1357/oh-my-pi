@@ -28,7 +28,6 @@ test = false
 
 [dependencies]
 async-stream.workspace = true
-async-trait.workspace = true
 bytes.workspace = true
 flume.workspace = true
 futures.workspace = true

@@ -27,7 +27,7 @@ ashpd = { version = "=0.11.1", default-features = false, features = ["tokio"] }
 atspi = { version = "=0.30.0", features = ["tokio", "zbus"] }
 audiopus_sys = { version = "0.2.2", features = ["static"] }
 bigdecimal = "0.4"
-blake2 = "0.10"
+blake2 = "0.11"
 blake3 = { version = "1.8" }
 brotli = { version = "8", default-features = false, features = ["std"] }
 block2 = "0.6.2"
@@ -50,7 +50,7 @@ codesnake = "0.2"
 command-fds = "0.3"
 core-graphics = { version = "0.25", features = ["highsierra"] }
 crc32fast = "1.5"
-digest = "0.10"
+digest = "0.11"
 dashmap = "6"
 dispatch2 = "0.3"
 encoding_rs = "0.8"
@@ -76,7 +76,7 @@ grep-regex = "0.1"
 grep-searcher = "0.1"
 hayro = "0.7.1"
 heapless = { version = "0.9.3", features = ["serde"] }
-hmac = "0.12"
+hmac = "0.13"
 hifijson = "0.2"
 html-to-markdown-rs = { version = "3.9.2", default-features = false }
 http = "1.5"
@@ -102,7 +102,7 @@ libc = "0.2"
 linkme = "0.3"
 lscolors = { version = "0.21", default-features = false, features = ["gnu_legacy"] }
 memchr = "2"
-md-5 = "0.10"
+md-5 = "0.11"
 miette = { version = "7.6.0", features = ["fancy"] }
 memmap2 = "0.9"
 mermaid-text = "0.57"
@@ -213,9 +213,9 @@ serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.151", features = ["preserve_order", "raw_value"] }
 serde_yaml = "0.9"
 seccompiler = "0.5"
-sha1 = "0.10"
-sha2 = { version = "0.10", features = ["asm"] }
-sha3 = { version = "0.10", features = ["asm"] }
+sha1 = "0.11"
+sha2 = "0.11"
+sha3 = "0.11"
 similar = "3"
 smallvec = { version = "2.0.0-alpha.12", features = ["serde"] }
 smol_bitmap = { version = "0.3.2", features = ["serde"] }
@@ -328,6 +328,17 @@ denied-direct = ["omp-envd", "omp-shell", "omp-walker"]
 # ──────────────────────────────────────────────────────────────────────────────
 mismatched_lifetime_syntaxes = "allow"
 missing_docs = "warn"                  # Every public symbol documented
+unfulfilled_lint_expectations = "deny" # Verified 0 on the clippy surface only (cargo clippy -D per lint, exit 0); a stale #[expect] must fail the build
+trivial_numeric_casts = "warn"         # 9 retained cross-platform conversion sites (measured 2026-09-07); rustc lint — clippy's nursery lint of the same name is deliberately not used
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rustdoc Lint Levels
+# ──────────────────────────────────────────────────────────────────────────────
+[workspace.lints.rustdoc]
+bare_urls = "warn"
+broken_intra_doc_links = "warn" # PROVISIONAL: deny lands only after cargo doc --workspace --no-deps exits 0 (SC-07)
+missing_crate_level_docs = "warn"
+private_intra_doc_links = "warn"
 
 [workspace.lints.clippy]
 # ──────────────────────────────────────────────────────────────────────────────
@@ -340,6 +351,23 @@ pedantic = { level = "warn", priority = -1 }
 perf = { level = "warn", priority = -1 }
 style = { level = "warn", priority = -1 }
 suspicious = { level = "deny", priority = -1 }
+# ext/doctor.rs and ext/index.rs compare publisher keys, not similarly named fields.
+suspicious_operation_groupings = "allow"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Panics, Todo & Failure Paths
+#
+# All "deny" entries were verified zero by the full-workspace promotion run
+# (nightly-2026-08-08, `cargo clippy --workspace --locked -D <lint>` per lint,
+# exit 0).
+# ──────────────────────────────────────────────────────────────────────────────
+dbg_macro = "deny"          # verified 0
+mem_forget = "warn"         # 5 retained sites (measured 2026-09-07); deny once typed wrappers land
+missing_safety_doc = "deny" # verified 0
+panic = "warn"              # 17 sites retained by owner contract (measured 2026-09-07); deny once they are removed
+todo = "deny"               # verified 0
+unimplemented = "deny"      # verified 0
+unwrap_used = "deny"        # verified 0 (10 pre-fix sites removed in ENG-10)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Synchronization Policy
@@ -350,16 +378,18 @@ disallowed_types = "deny"
 # ──────────────────────────────────────────────────────────────────────────────
 # Meta: Lint Attributes
 # ──────────────────────────────────────────────────────────────────────────────
-allow_attributes_without_reason = "warn" # Enforce reason for all #[allow]
+allow_attributes = "warn"                # #[expect] is the default; warn keeps new #[allow] visible — remaining deliberate carve-outs stay warn
+allow_attributes_without_reason = "deny" # Enforce reason for all #[allow] — verified 0 on the promotion run
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Safety & Unsafe Code
 # ──────────────────────────────────────────────────────────────────────────────
 borrow_as_ptr = "allow"
 cast_ptr_alignment = "allow"
+multiple_unsafe_ops_per_block = "deny" # verified 0 (2 pre-fix sites split in ENG-13)
 ptr_as_ptr = "allow"
 ref_as_ptr = "allow"
-undocumented_unsafe_blocks = "warn"
+undocumented_unsafe_blocks = "deny" # verified 0 (1 pre-fix site fixed in ENG-13); promoted from warn
 unsafe_derive_deserialize = "allow"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -438,6 +468,14 @@ missing_panics_doc = "allow" # Not every panic needs docs, especially assert!
 # ──────────────────────────────────────────────────────────────────────────────
 too_many_arguments = "allow" # Argument count is rarely the real complexity signal
 too_many_lines = "allow"     # Arbitrary limits don't account for necessary complexity
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Measured but not adopted — historical baseline from the 2026-09-07 hardening
+# pass (production code, nightly-2026-08-08). This is a record, not a fresh
+# measurement; re-measure before raising any of these.
+#   arithmetic_side_effects 4786 · indexing_slicing 2737 · expect_used 504
+#   unreachable_pub 412 · let_underscore_drop 206 · unwrap_in_result 71
+# ──────────────────────────────────────────────────────────────────────────────
 
 # No debuginfo in dev builds. With Mach-O split debug maps, file:line
 # backtraces require retaining every .rcgu.o — ~1 GB per linked test binary

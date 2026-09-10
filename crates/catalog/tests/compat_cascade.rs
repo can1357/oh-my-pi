@@ -8,7 +8,7 @@ use omp_catalog::{
 	CompatCascade, EffortTier, ModelKey, ResolveTarget, ThinkingEffort, ThinkingFormat, WirePolicy,
 	classify,
 };
-use omp_core::SemVer;
+use omp_core::{SemVer, encoding::hex};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -195,7 +195,7 @@ fn axis_vocabulary_is_literal_pi_parity() {
 	// Pinned against pi `packages/catalog/src/compat/axes.ts` @ 7bfb41f243
 	// (adds `requires-skip-thought-signature-on-first-function-call`).
 	assert_eq!(
-		format!("{:x}", Sha256::digest(canonical)),
+		hex::encode(Sha256::digest(canonical).as_slice()).into_string(),
 		"2007f279a847e38f761ffefbc180da43f5139652e8cf548b1c088c13ea846e44",
 		"AXES must remain literal key/field/set/shape/records/values parity with pi axes.ts",
 	);

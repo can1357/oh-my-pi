@@ -12,6 +12,7 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use omp_shell::{ShellExtensions, builtins::Registration};
+use strum::IntoStaticStr;
 
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, util},
@@ -31,18 +32,18 @@ mod options {
 	pub const NO_CHECK_ORDER: &str = "nocheck-order";
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, IntoStaticStr)]
+#[strum(const_into_str)]
 enum FileNumber {
+	#[strum(to_string = "1")]
 	One,
+	#[strum(to_string = "2")]
 	Two,
 }
 
 impl FileNumber {
 	fn as_str(self) -> &'static str {
-		match self {
-			Self::One => "1",
-			Self::Two => "2",
-		}
+		self.into_str()
 	}
 }
 
@@ -258,27 +259,41 @@ impl Utility for Comm {
 	const NAME: &'static str = "comm";
 
 	fn run(self, host: &mut Host) -> i32 {
-		let name1 = self.matches.get_one::<OsString>(options::FILE_1).unwrap();
-		let name2 = self.matches.get_one::<OsString>(options::FILE_2).unwrap();
+		let Some(name1) = self.matches.get_one::<OsString>(options::FILE_1) else {
+			host.error("missing file operand", 1);
+			return 1;
+		};
+		let Some(name2) = self.matches.get_one::<OsString>(options::FILE_2) else {
+			host.error("missing file operand", 1);
+			return 1;
+		};
 		if name1 == "-" && name2 == "-" {
 			host.error("standard input is specified twice", 1);
 			return 1;
 		}
 		let path1 = host.resolve(name1);
 		let path2 = host.resolve(name2);
-		let delimiters: Vec<_> = self
-			.matches
-			.get_many::<String>(options::DELIMITER)
-			.unwrap()
-			.collect();
-		if delimiters[1..].iter().any(|d| *d != delimiters[0]) {
+		let Some(delimiter_values) = self.matches.get_many::<String>(options::DELIMITER) else {
+			host.error("missing output delimiter", 1);
+			return 1;
+		};
+		let delimiters: Vec<_> = delimiter_values.collect();
+		let Some(first_delimiter) = delimiters.first() else {
+			host.error("missing output delimiter", 1);
+			return 1;
+		};
+		if delimiters
+			.iter()
+			.skip(1)
+			.any(|delimiter| delimiter != first_delimiter)
+		{
 			host.error("multiple conflicting output delimiters specified", 1);
 			return 1;
 		}
-		let delim = if delimiters[0].is_empty() {
+		let delim = if first_delimiter.is_empty() {
 			"\0"
 		} else {
-			delimiters[0]
+			first_delimiter.as_str()
 		};
 		let identical = if name1 == "-" || name2 == "-" {
 			false

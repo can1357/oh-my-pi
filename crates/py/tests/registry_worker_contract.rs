@@ -14,8 +14,13 @@ fn decorated_tools_project_as_runnable_control_declarations() {
 import asyncio
 import dataclasses
 import enum
+import json
+import os
+import socket
+import struct
 
 import omp
+import omp._host as host_module
 import omp._registry as registry_module
 
 omp.packages._install_snapshot(
@@ -160,8 +165,12 @@ assert skill_evaluations == 1
     },
 )
 async def contract_device(args, ctx):
-    return {"details": {"value": args["value"], "has_context": ctx is marker}}
-
+    return {
+        "details": {
+            "value": args["value"],
+            "has_context": isinstance(ctx, omp.Context),
+        }
+    }
 
 @omp.tool(
     "contract_tool",
@@ -215,6 +224,108 @@ class Marker:
         self.updates.append(value)
 
 
+def read_exact(sock, size):
+    chunks = []
+    remaining = size
+    while remaining:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise AssertionError("CONTROL observer closed before a complete frame")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def read_frame(sock):
+    size = struct.unpack("!I", read_exact(sock, 4))[0]
+    return json.loads(read_exact(sock, size))
+
+
+def write_frame(sock, value):
+    raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+    sock.sendall(struct.pack("!I", len(raw)) + raw)
+
+
+async def invoke_control(correlation, invocation, path, family, rev, args):
+    authority = {
+        "host_generation": 1,
+        "session_generation": 1,
+        "invocation": invocation,
+        "principal": {"id": "registry-contract", "display": "Registry contract"},
+        "phase": "open",
+    }
+    control, observer = socket.socketpair()
+    control_fd = control.detach()
+    control.close()
+    host = host_module.Host(control_fd)
+    server = asyncio.create_task(host.serve())
+    try:
+        write_frame(
+            observer,
+            {
+                "kind": "Dispatch",
+                "correlation": correlation,
+                "body": {
+                    "operation": "omp.devices.call",
+                    "arguments": {
+                        "path": path,
+                        "family": family,
+                        "rev": rev,
+                        "args": args,
+                    },
+                    "authority": authority,
+                },
+            },
+        )
+        frames = []
+        while True:
+            frame = await asyncio.to_thread(read_frame, observer)
+            frames.append(frame)
+            if frame["kind"] == "DispatchResponse":
+                body = frame["body"]
+                assert "error" not in body, body
+                return body["result"], frames
+    finally:
+        observer.shutdown(socket.SHUT_WR)
+        await server
+        observer.close()
+        os.close(control_fd)
+
+
+async def exercise_worker_paths():
+    previous_host_generation = os.environ.get("OMP_EXT_HOST_GENERATION")
+    previous_session_generation = os.environ.get("OMP_EXT_SESSION_GENERATION")
+    os.environ["OMP_EXT_HOST_GENERATION"] = "1"
+    os.environ["OMP_EXT_SESSION_GENERATION"] = "1"
+    try:
+        device_result, device_frames = await invoke_control(
+            1,
+            "registry-device",
+            "contract_device",
+            "wire",
+            7,
+            {"value": 11},
+        )
+        tool_result, tool_frames = await invoke_control(
+            2,
+            "registry-tool",
+            "contract_tool",
+            "registry-contract",
+            3,
+            {"count": 4},
+        )
+        return device_result, device_frames, tool_result, tool_frames
+    finally:
+        if previous_host_generation is None:
+            os.environ.pop("OMP_EXT_HOST_GENERATION", None)
+        else:
+            os.environ["OMP_EXT_HOST_GENERATION"] = previous_host_generation
+        if previous_session_generation is None:
+            os.environ.pop("OMP_EXT_SESSION_GENERATION", None)
+        else:
+            os.environ["OMP_EXT_SESSION_GENERATION"] = previous_session_generation
+
+
 marker = Marker()
 snapshot = registry_module.freeze_declarations()
 tools = registry_module.registry.worker_tool_definitions()
@@ -262,14 +373,25 @@ assert tool_row.schema == {
     "additionalProperties": False,
     "required": ["count"],
 }
-assert asyncio.run(device_row.handler({"value": 11}, marker)) == {
+device_result, device_frames, tool_result, tool_frames = asyncio.run(
+    exercise_worker_paths()
+)
+assert [frame["kind"] for frame in device_frames] == ["DispatchResponse"]
+assert device_result == {
     "details": {"value": 11, "has_context": True}
 }
-assert asyncio.run(tool_row.handler({"count": 4}, marker)) == {
-    "updates": [{"streamed": 4}],
+assert [frame["kind"] for frame in tool_frames] == [
+    "DispatchProgress",
+    "DispatchProgress",
+    "DispatchResponse",
+]
+assert tool_result == {
     "details": {"count": 4}
 }
-assert marker.updates == [{"count": 4}]
+for frame in tool_frames:
+    if frame["kind"] == "DispatchProgress":
+        marker.update(frame["body"]["update"])
+assert marker.updates == [{"count": 4}, {"streamed": 4}]
 
 metadata = publication
 assert metadata["skills"] == [{

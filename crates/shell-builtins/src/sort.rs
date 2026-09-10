@@ -267,8 +267,14 @@ mod check {
 			if let Some(prev_chunk) = prev_chunk.take() {
 				// Check if the first element of the new chunk is greater than the last
 				// element from the previous chunk
-				let prev_last = prev_chunk.lines().last().unwrap();
-				let new_first = chunk.lines().first().unwrap();
+				let prev_last = prev_chunk
+					.lines()
+					.last()
+					.expect("chunks never contain zero lines");
+				let new_first = chunk
+					.lines()
+					.first()
+					.expect("chunks never contain zero lines");
 
 				if compare_by(prev_last, new_first, settings, prev_chunk.line_data(), chunk.line_data())
 					> max_allowed_cmp
@@ -934,7 +940,7 @@ mod ext_sort {
 		use std::{
 			cmp::Ordering,
 			fs::File,
-			io::{Read, Write},
+			io::{self, Read, Write},
 			path::PathBuf,
 			process, thread,
 		};
@@ -1163,7 +1169,9 @@ mod ext_sort {
 			receiver: &Receiver<Chunk>,
 			sender: Sender<Chunk>,
 		) -> SortResult<ReadResult<I>> {
-			let mut file = files.next().unwrap()?;
+			let mut file = files
+				.next()
+				.expect("sort supplies at least one input file")?;
 
 			let mut carry_over = vec![];
 			// kick things off with two reads
@@ -1236,16 +1244,19 @@ mod ext_sort {
 			compress: Option<&Compressor>,
 			separator: u8,
 		) -> SortResult<I::Closed> {
-			let mut tmp_file = I::create(file, compress)?;
-			write_lines(chunk.lines(), tmp_file.as_write(), separator);
+			let (file, path) = file;
+			let mut tmp_file = I::create((file, path.clone()), compress)?;
+			write_lines(chunk.lines(), tmp_file.as_write(), separator)
+				.map_err(|error| SortError::WriteFailed { path: path.into_os_string(), error })?;
 			tmp_file.finished_writing()
 		}
 
-		fn write_lines<T: Write>(lines: &[Line], writer: &mut T, separator: u8) {
+		fn write_lines<T: Write>(lines: &[Line], writer: &mut T, separator: u8) -> io::Result<()> {
 			for s in lines {
-				writer.write_all(s.line).unwrap();
-				writer.write_all(&[separator]).unwrap();
+				writer.write_all(s.line)?;
+				writer.write_all(&[separator])?;
 			}
+			Ok(())
 		}
 
 		#[cfg(test)]
@@ -1560,14 +1571,18 @@ mod merge {
 			// Send the initial chunk to trigger a read for each file
 			request_sender
 				.send((file_number, RecycledChunk::new(8 * 1024)))
-				.unwrap();
+				.map_err(|_| {
+					SortError::message("sort reader request channel closed before reader thread started")
+				})?;
 		}
 
 		// Send the second chunk for each file
 		for file_number in 0..reader_files.len() {
 			request_sender
 				.send((file_number, RecycledChunk::new(8 * 1024)))
-				.unwrap();
+				.map_err(|_| {
+					SortError::message("sort reader request channel closed before reader thread started")
+				})?;
 		}
 
 		let reader_join_handle = thread::spawn({
@@ -1620,23 +1635,23 @@ mod merge {
 			if settings.cancel.load(AtomicOrdering::Relaxed) {
 				break;
 			}
-			if let Some(ReaderFile { file, sender, carry_over }) = &mut files[file_idx] {
-				let should_continue = chunks::read(
-					sender,
-					recycled_chunk,
-					None,
-					carry_over,
-					file.as_read(),
-					&mut iter::empty(),
-					separator,
-					settings,
-				)?;
-				if !should_continue {
-					// Remove the file from the list by replacing it with `None`.
-					let ReaderFile { file, .. } = files[file_idx].take().unwrap();
-					// Depending on the kind of the `MergeInput`, this may delete the file:
-					file.finished_reading()?;
-				}
+			let Some(mut reader_file) = files[file_idx].take() else {
+				continue;
+			};
+			let should_continue = chunks::read(
+				&reader_file.sender,
+				recycled_chunk,
+				None,
+				&mut reader_file.carry_over,
+				reader_file.file.as_read(),
+				&mut iter::empty(),
+				separator,
+				settings,
+			)?;
+			if should_continue {
+				files[file_idx] = Some(reader_file);
+			} else {
+				reader_file.file.finished_reading()?;
 			}
 		}
 		Ok(())
@@ -1682,7 +1697,10 @@ mod merge {
 					error,
 				})? {}
 			drop(self.request_sender);
-			self.reader_join_handle.join().unwrap()
+			match self.reader_join_handle.join() {
+				Ok(result) => result,
+				Err(_) => Err(SortError::message("sort reader thread terminated unexpectedly")),
+			}
 		}
 
 		fn write_next(
@@ -1720,7 +1738,10 @@ mod merge {
 
 				if was_last_line_for_file {
 					if let Ok(next_chunk) = file.receiver.recv() {
-						let mut file = self.heap.peek_mut().unwrap();
+						let mut file = self
+							.heap
+							.peek_mut()
+							.expect("heap entry remains while replacing its completed chunk");
 						file.current_chunk = Rc::new(next_chunk);
 						file.line_idx = 0;
 					} else {
@@ -1729,7 +1750,11 @@ mod merge {
 				} else {
 					// This will cause the comparison to use a different line and the heap to
 					// readjust.
-					self.heap.peek_mut().unwrap().line_idx += 1;
+					self
+						.heap
+						.peek_mut()
+						.expect("heap entry remains while advancing its current line")
+						.line_idx += 1;
 				}
 
 				if let Some(prev) = prev
@@ -2457,7 +2482,12 @@ mod tmp_dir {
 
 			let file_name = self.size.to_string();
 			self.size += 1;
-			let path = self.temp_dir.as_ref().unwrap().path().join(file_name);
+			let path = self
+				.temp_dir
+				.as_ref()
+				.expect("temporary directory initialized above")
+				.path()
+				.join(file_name);
 			Ok((File::create(&path).map_err(|error| SortError::OpenTmpFileFailed { error })?, path))
 		}
 	}
@@ -3360,7 +3390,10 @@ fn tokenize_default(
 
 		if treat_as_separator {
 			if !previous_was_whitespace {
-				token_buffer.last_mut().unwrap().end = idx;
+				token_buffer
+					.last_mut()
+					.expect("token buffer starts with one field")
+					.end = idx;
 				token_buffer.push(idx..0);
 			}
 			previous_was_whitespace = true;
@@ -3368,7 +3401,10 @@ fn tokenize_default(
 			previous_was_whitespace = false;
 		}
 	}
-	token_buffer.last_mut().unwrap().end = line.len();
+	token_buffer
+		.last_mut()
+		.expect("token buffer starts with one field")
+		.end = line.len();
 }
 
 fn is_blank_thousands_sep(line: &[u8], idx: usize, allow_unit_after_blank: bool) -> bool {
@@ -3697,7 +3733,8 @@ impl FieldSelector {
 			if matches!(tokens, Some(tokens) if tokens.len() < position.field) {
 				Resolution::TooHigh
 			} else if position.char == 0 {
-				let end = tokens.unwrap()[position.field - 1].end;
+				let tokens = tokens.expect("field-end selection requires tokenized fields");
+				let end = tokens[position.field - 1].end;
 				if end == 0 {
 					Resolution::TooLow
 				} else {
@@ -3709,7 +3746,9 @@ impl FieldSelector {
 					// We don't need tokens for this case.
 					0
 				} else {
-					tokens.unwrap()[position.field - 1].start
+					tokens.expect("non-first field selection requires tokenized fields")
+						[position.field - 1]
+						.start
 				};
 				// strip blanks if needed
 				if position.ignore_blanks {
@@ -4067,7 +4106,7 @@ where
 					&& let Some(stripped) = next_str.strip_prefix('-')
 					&& stripped.starts_with(|c: char| c.is_ascii_digit())
 				{
-					let next_arg = iter.next().unwrap();
+					let next_arg = iter.next().expect("peeked legacy end position exists");
 					if let Some(parsed) = parse_legacy_part(stripped) {
 						to_part = Some(parsed);
 					} else {
@@ -4741,7 +4780,7 @@ fn uu_sort(
 				None,
 				key_settings,
 			)
-			.unwrap(),
+			.expect("default sort key has a valid one-based character position"),
 		);
 	}
 
@@ -5050,7 +5089,12 @@ fn exec(
 		if files.len() > 1 {
 			Err(SortError::message("only one file allowed with -c"))
 		} else {
-			check::check(files.first().unwrap(), settings)
+			check::check(
+				files
+					.first()
+					.expect("sort supplies at least one input file"),
+				settings,
+			)
 		}
 	} else {
 		let mut lines = files.iter().map(open);
@@ -5174,7 +5218,13 @@ fn compare_by<'a>(
 					Ordering::Equal
 				} else {
 					// Only if they are not equal compare by the hash
-					random_shuffle(a_str, b_str, &global_settings.salt.unwrap())
+					random_shuffle(
+						a_str,
+						b_str,
+						&global_settings
+							.salt
+							.expect("random sort initializes salt before comparison"),
+					)
 				}
 			},
 			SortMode::Numeric => {
@@ -5392,7 +5442,8 @@ fn general_numeric_compare(
 	a: &GeneralBigDecimalParseResult,
 	b: &GeneralBigDecimalParseResult,
 ) -> Ordering {
-	a.partial_cmp(b).unwrap()
+	a.partial_cmp(b)
+		.expect("general numeric parse results have a total ordering")
 }
 
 /// Generate a 128-bit salt from a uniform RNG distribution.

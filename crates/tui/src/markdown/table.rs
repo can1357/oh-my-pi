@@ -227,8 +227,8 @@ pub fn render_table(
 				.collect()
 		})
 		.collect();
-	let mut natural: ColumnWidths = smallvec::smallvec![0_u16; columns];
-	let mut minimum: ColumnWidths = smallvec::smallvec![1_u16; columns];
+	let mut natural: ColumnWidths = smallvec::from_elem(0_u16, columns);
+	let mut minimum: ColumnWidths = smallvec::from_elem(1_u16, columns);
 	for row in &parsed {
 		for (column, cell) in row.iter().enumerate() {
 			let (line, word) = measurements(cell);

@@ -451,16 +451,21 @@ mod take {
 			}
 
 			let excess_buffered_bytes = buffered_bytes - n;
-			// Since we have some data buffered, can assume we have >=1 buffer - i.e. safe
-			// to unwrap.
-			let front_buffer = buffers.front_mut().unwrap();
+			// Since we have some data buffered, a front buffer is guaranteed here.
+			let front_buffer = buffers
+				.front_mut()
+				.expect("buffered bytes guarantee a front buffer");
 			let bytes_written = front_buffer.write_bytes_limit(writer, excess_buffered_bytes)?;
 			buffered_bytes -= bytes_written;
 			total_bytes_copied += bytes_written;
 			// If the front buffer is empty (which it probably is), push it into the
 			// empty-buffer-pool.
 			if front_buffer.is_empty() {
-				empty_buffer_pool.push(buffers.pop_front().unwrap());
+				empty_buffer_pool.push(
+					buffers
+						.pop_front()
+						.expect("an empty front buffer remains in the queue"),
+				);
 			}
 		}
 		Ok(total_bytes_copied)
@@ -518,13 +523,9 @@ mod take {
 				};
 				self.terminated_lines = 0;
 			} else {
-				let index = memchr_iter(separator, self.inner.remaining_buffer()).nth(max_lines - 1);
-				assert!(
-					index.is_some(),
-					"Somehow we're being asked to write more lines than we have, that's a bug in \
-					 copy_all_but_lines."
-				);
-				let index = index.unwrap();
+				let index = memchr_iter(separator, self.inner.remaining_buffer())
+					.nth(max_lines - 1)
+					.expect("terminated line count guarantees a separator");
 				// index is the offset of the separator character, zero indexed. Need to add 1
 				// to get the number of bytes to write.
 				let bytes_to_write = index + 1;
@@ -608,27 +609,40 @@ mod take {
 
 			// If we've not buffered more lines than we need to hold back we must be done.
 			if buffered_terminated_lines < n
-				|| (buffered_terminated_lines == n && !buffers.back().unwrap().partial_line())
+				|| (buffered_terminated_lines == n
+					&& !buffers
+						.back()
+						.expect("buffered line count guarantees a back buffer")
+						.partial_line())
 			{
 				break;
 			}
 
 			let excess_buffered_terminated_lines = buffered_terminated_lines - n;
-			// Since we have some data buffered can assume we have at least 1 buffer, so
-			// safe to unwrap.
-			let lines_to_write = if buffers.back().unwrap().partial_line() {
+			// Since we have some data buffered, a back buffer is guaranteed here.
+			let lines_to_write = if buffers
+				.back()
+				.expect("buffered line count guarantees a back buffer")
+				.partial_line()
+			{
 				excess_buffered_terminated_lines + 1
 			} else {
 				excess_buffered_terminated_lines
 			};
-			let front_buffer = buffers.front_mut().unwrap();
+			let front_buffer = buffers
+				.front_mut()
+				.expect("buffered lines guarantee a front buffer");
 			let write_result = front_buffer.write_lines(writer, lines_to_write, separator)?;
 			buffered_terminated_lines -= write_result.terminated_lines;
 			total_bytes_copied += write_result.bytes;
 			// If the front buffer is empty (which it probably is), push it into the
 			// empty-buffer-pool.
 			if front_buffer.is_empty() {
-				empty_buffers.push(buffers.pop_front().unwrap());
+				empty_buffers.push(
+					buffers
+						.pop_front()
+						.expect("an empty front buffer remains in the queue"),
+				);
 			}
 		}
 		Ok(total_bytes_copied)
@@ -1177,10 +1191,9 @@ fn catch_too_large_numbers_in_backwards_bytes_or_lines(n: u64) -> Option<usize> 
 fn read_but_last_n_bytes(mut input: impl Read, output: &mut impl Write, n: u64) -> io::Result<u64> {
 	let mut bytes_written: u64 = 0;
 	if let Some(n) = catch_too_large_numbers_in_backwards_bytes_or_lines(n) {
-		bytes_written = copy_all_but_n_bytes(&mut input, output, n)
-			.map_err(wrap_in_stdout_error)?
-			.try_into()
-			.unwrap();
+		let copied = copy_all_but_n_bytes(&mut input, output, n).map_err(wrap_in_stdout_error)?;
+		bytes_written = u64::try_from(copied)
+			.map_err(|_| io::Error::other("number of bytes copied does not fit in u64"))?;
 
 		// Make sure we finish writing everything to the target before
 		// exiting. Otherwise, when Rust is implicitly flushing, any
@@ -1201,10 +1214,10 @@ fn read_but_last_n_lines(
 	}
 	let mut bytes_written: u64 = 0;
 	if let Some(n) = catch_too_large_numbers_in_backwards_bytes_or_lines(n) {
-		bytes_written = copy_all_but_n_lines(input, output, n, separator)
-			.map_err(wrap_in_stdout_error)?
-			.try_into()
-			.unwrap();
+		let copied =
+			copy_all_but_n_lines(input, output, n, separator).map_err(wrap_in_stdout_error)?;
+		bytes_written = u64::try_from(copied)
+			.map_err(|_| io::Error::other("number of bytes copied does not fit in u64"))?;
 		// Make sure we finish writing everything to the target before
 		// exiting. Otherwise, when Rust is implicitly flushing, any
 		// error will be silently ignored.
@@ -1260,9 +1273,14 @@ where
 
 	loop {
 		// the casts here are ok, `buffer.len()` should never be above a few k
-		let bytes_to_read_this_loop = bytes_remaining_to_search.min(buffer.len().try_into().unwrap());
+		let bytes_to_read_this_loop = bytes_remaining_to_search.min(
+			u64::try_from(buffer.len())
+				.map_err(|_| io::Error::other("search buffer length does not fit in u64"))?,
+		);
 		let read_start_offset = bytes_remaining_to_search - bytes_to_read_this_loop;
-		let buffer = &mut buffer[..bytes_to_read_this_loop.try_into().unwrap()];
+		let buffer_len = usize::try_from(bytes_to_read_this_loop)
+			.map_err(|_| io::Error::other("search chunk length does not fit in usize"))?;
+		let buffer = &mut buffer[..buffer_len];
 		bytes_remaining_to_search -= bytes_to_read_this_loop;
 
 		input.seek(SeekFrom::Start(read_start_offset))?;
@@ -1291,7 +1309,9 @@ where
 			lines += 1;
 			if lines == n + 1 {
 				input.rewind()?;
-				return Ok(read_start_offset + TryInto::<u64>::try_into(separator_offset).unwrap() + 1);
+				let separator_offset = u64::try_from(separator_offset)
+					.map_err(|_| io::Error::other("separator offset does not fit in u64"))?;
+				return Ok(read_start_offset + separator_offset + 1);
 			}
 		}
 		if read_start_offset == 0 {
@@ -1302,10 +1322,10 @@ where
 }
 
 fn is_seekable(input: &mut File) -> bool {
-	let current_pos = input.stream_position();
-	current_pos.is_ok()
-		&& input.seek(SeekFrom::End(0)).is_ok()
-		&& input.seek(SeekFrom::Start(current_pos.unwrap())).is_ok()
+	let Ok(current_pos) = input.stream_position() else {
+		return false;
+	};
+	input.seek(SeekFrom::End(0)).is_ok() && input.seek(SeekFrom::Start(current_pos)).is_ok()
 }
 
 fn head_backwards_file(

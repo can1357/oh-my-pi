@@ -966,10 +966,9 @@ fn html_attribute(tag: &str, wanted: &str) -> Option<String> {
 		{
 			cursor += 1;
 		}
-		let quote = tag.as_bytes().get(cursor).copied();
-		if matches!(quote, Some(b'\'' | b'"')) {
+		if let Some(quote @ (b'\'' | b'"')) = tag.as_bytes().get(cursor).copied() {
 			cursor += 1;
-			let end = tag[cursor..].find(char::from(quote.unwrap()))? + cursor;
+			let end = tag[cursor..].find(char::from(quote))? + cursor;
 			return Some(tag[cursor..end].to_owned());
 		}
 		let end = tag[cursor..]

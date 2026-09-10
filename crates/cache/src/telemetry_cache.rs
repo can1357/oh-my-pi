@@ -178,32 +178,32 @@ impl Drop for QueryGuard {
 	}
 }
 /// Operators accepted by the restricted telemetry `where` language.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
+#[strum(const_into_str)]
 pub enum WhereOp {
 	/// Exact equality.
+	#[strum(serialize = "=")]
 	Eq,
 	/// Exact inequality.
+	#[strum(serialize = "!=")]
 	Ne,
 	/// Greater-than comparison.
+	#[strum(serialize = ">")]
 	Gt,
 	/// Greater-than-or-equal comparison.
+	#[strum(serialize = ">=")]
 	Ge,
 	/// Less-than comparison.
+	#[strum(serialize = "<")]
 	Lt,
 	/// Less-than-or-equal comparison.
+	#[strum(serialize = "<=")]
 	Le,
 }
 
 impl WhereOp {
 	const fn sql(self) -> &'static str {
-		match self {
-			Self::Eq => "=",
-			Self::Ne => "!=",
-			Self::Gt => ">",
-			Self::Ge => ">=",
-			Self::Lt => "<",
-			Self::Le => "<=",
-		}
+		self.into_str()
 	}
 }
 

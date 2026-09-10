@@ -3,6 +3,7 @@
 mod support;
 
 use omp_ar::{Archive, Error, Format, Limits};
+use omp_core::encoding::hex;
 use sha2::{Digest, Sha256};
 use support::fixtures::fixture_bytes;
 
@@ -178,7 +179,7 @@ fn rejects_unsupported_parameters_and_resource_limit_overruns() {
 }
 
 fn sha256(bytes: &[u8]) -> String {
-	format!("{:x}", Sha256::digest(bytes))
+	hex::encode(Sha256::digest(bytes).as_slice()).into_string()
 }
 
 fn le_u32(bytes: &[u8], offset: usize) -> u32 {

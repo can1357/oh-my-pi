@@ -114,6 +114,7 @@ protox.workspace = true
 tokio.workspace = true
 
 [build-dependencies]
+omp-core.workspace = true
 prost.workspace = true
 prost-build.workspace = true
 protox.workspace = true
