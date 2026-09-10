@@ -1145,6 +1145,14 @@ export async function buildSessionOptions(
 	// scoped thinking-level seed below must be deferred along with the model.
 	let deferredDefaultRole = false;
 	if (parsed.model) {
+		const provider = (parsed.provider ?? (parsed.model.includes("/") ? parsed.model.split("/")[0] : undefined))
+			?.trim()
+			.toLowerCase();
+		if (provider && !modelRegistry.hasProvider(provider)) {
+			// Discover a cold live-only provider before fuzzy matching can bind
+			// its selector to an unrelated provider's model with a similar name.
+			await modelRegistry.refreshDiscoverableProviders([provider]);
+		}
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
 			cliModel: parsed.model,

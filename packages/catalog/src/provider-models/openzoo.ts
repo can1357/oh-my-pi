@@ -7,6 +7,7 @@
  * attention window, so the live endpoint is the whole catalog: nothing is
  * bundled, and a successful discovery is authoritative.
  */
+import { type EffortVariantFamily, reviewedCollapseTable } from "../compat/collapse";
 import { classifyModel } from "../compat/taxonomy";
 import { fetchOpenAICompatibleModels, type OpenAICompatibleModelRecord } from "../discovery/openai-compatible";
 import { getBundledModelReferenceIndex } from "../identity/bundled";
@@ -27,7 +28,6 @@ export const OPENZOO_DEFAULT_BASE_URL = "http://localhost:8402/v1";
  * the bare id so the selector reads `openzoo/auto`, not `openzoo/openzoo/auto`.
  */
 export const OPENZOO_AUTO_MODEL_ID = "auto";
-const OPENZOO_AUTO_ALIASES: ReadonlySet<string> = new Set(["openzoo/auto", "openzoo-auto", "auto"]);
 
 export interface OpenzooModelManagerConfig {
 	apiKey?: string;
@@ -48,8 +48,11 @@ export function resolveOpenzooBaseUrl(baseUrl?: string): string {
 	return raw.endsWith("/") ? raw.slice(0, -1) : raw;
 }
 
-function isOpenzooAutoAlias(id: string): boolean {
-	return OPENZOO_AUTO_ALIASES.has(id.trim().toLowerCase());
+function openzooVariantFamily(id: string): EffortVariantFamily | undefined {
+	const normalized = id.trim().toLowerCase();
+	return reviewedCollapseTable("openzoo")?.families.find(
+		family => family.id === normalized || family.members.includes(normalized),
+	);
 }
 
 /**
@@ -136,8 +139,8 @@ function liveOpenzooInput(entry: OpenAICompatibleModelRecord): ("text" | "image"
 
 /**
  * Map one proxy row. Limits come from the row where it carries the model's
- * real numbers, with the bundled upstream reference (matched by the
- * OpenRouter-style id) only filling a missing window or display name.
+ * real numbers; the bundled upstream reference (matched by the
+ * OpenRouter-style id) supplies only the display name.
  * Reasoning and image-input stay on the discovery defaults unless the row
  * reports them — a matching id from another provider is not a capability
  * signal. Reviewed corrections are rule-owned (`providers/openzoo.kdl`)
@@ -153,11 +156,12 @@ export function mapOpenzooModel(
 	defaults: ModelSpec<"openai-completions">,
 	references: ModelReferenceIndex,
 ): ModelSpec<"openai-completions"> | null {
-	if (isOpenzooAutoAlias(defaults.id)) {
+	const family = openzooVariantFamily(defaults.id);
+	if (family) {
 		return {
 			...defaults,
-			id: OPENZOO_AUTO_MODEL_ID,
-			name: "Auto",
+			id: family.id,
+			name: family.name,
 			cost: mapOpenzooCost(entry.pricing),
 			contextWindow: toPositiveNumber(entry.max_model_len, null),
 			maxTokens: toPositiveNumber(entry.max_output_tokens, null),
@@ -167,11 +171,11 @@ export function mapOpenzooModel(
 		return null;
 	}
 	const canonical = resolveModelReference(defaults.id, references);
-	const contextWindow = toPositiveNumber(entry.max_model_len, canonical?.contextWindow ?? null);
+	const contextWindow = toPositiveNumber(entry.max_model_len, null);
 	const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
 	const reportedMaxTokens = toPositiveNumber(
 		entry.max_output_tokens,
-		toPositiveNumber(topProvider?.max_completion_tokens, canonical?.maxTokens ?? null),
+		toPositiveNumber(topProvider?.max_completion_tokens, null),
 	);
 	const maxTokens =
 		reportedMaxTokens != null && contextWindow != null
@@ -202,26 +206,28 @@ export function createOpenzooModelMapper(
 	entry: OpenAICompatibleModelRecord,
 	defaults: ModelSpec<"openai-completions">,
 ) => ModelSpec<"openai-completions"> | null {
-	let auto: ModelSpec<"openai-completions"> | undefined;
+	const variants = new Map<string, ModelSpec<"openai-completions">>();
 	return (entry, defaults) => {
 		const row = mapOpenzooModel(entry, defaults, references);
-		if (row === null || !isOpenzooAutoAlias(defaults.id)) {
+		if (row === null || !openzooVariantFamily(defaults.id)) {
 			return row;
 		}
-		auto = auto
+		const previous = variants.get(row.id);
+		const merged = previous
 			? {
-					...auto,
+					...previous,
 					cost: {
-						input: auto.cost.input > 0 ? auto.cost.input : row.cost.input,
-						output: auto.cost.output > 0 ? auto.cost.output : row.cost.output,
-						cacheRead: auto.cost.cacheRead > 0 ? auto.cost.cacheRead : row.cost.cacheRead,
-						cacheWrite: auto.cost.cacheWrite > 0 ? auto.cost.cacheWrite : row.cost.cacheWrite,
+						input: previous.cost.input > 0 ? previous.cost.input : row.cost.input,
+						output: previous.cost.output > 0 ? previous.cost.output : row.cost.output,
+						cacheRead: previous.cost.cacheRead > 0 ? previous.cost.cacheRead : row.cost.cacheRead,
+						cacheWrite: previous.cost.cacheWrite > 0 ? previous.cost.cacheWrite : row.cost.cacheWrite,
 					},
-					contextWindow: auto.contextWindow ?? row.contextWindow,
-					maxTokens: auto.maxTokens ?? row.maxTokens,
+					contextWindow: previous.contextWindow ?? row.contextWindow,
+					maxTokens: previous.maxTokens ?? row.maxTokens,
 				}
 			: row;
-		return auto;
+		variants.set(row.id, merged);
+		return merged;
 	};
 }
 

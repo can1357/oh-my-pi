@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added keyless OpenZoo authentication, with optional credentials for protected proxy endpoints.
+
 ### Fixed
 
 - Anthropic and OpenRouter 402 credit-exhaustion errors ("would exceed your available credits", "Insufficient credits") now switch to a sibling account instead of stopping the turn with a retry hint.
@@ -25,11 +29,6 @@
 - Fixed Gemini 3 cross-model sessions in Cloud Code Assist when replaying tool calls without a thought signature.
 - Fixed Cursor models behind an authentication gateway incorrectly retrying valid client-declared tool calls.
 - Fixed reasoning from models that prefill `<think>` (including DeepSeek-R1 and hosted Qwen3-Thinking) being shown in the response instead of as a separate thinking block.
-
-## [18.1.3] - 2026-09-02
-### Added
-
-- Added keyless `openzoo` provider auth: the local proxy needs no key and counts as authenticated out of the box, while `OPENZOO_API_KEY` or `/login openzoo` supply the bearer for an openzoo public tunnel URL.
 
 ## [18.1.3] - 2026-09-02
 ### Fixed

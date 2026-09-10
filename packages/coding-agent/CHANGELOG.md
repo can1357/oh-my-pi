@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Explicit CLI model selection now discovers a requested live-only provider when its cache is empty.
 - Fixed protocol handler incorrectly escaping raw text content from agent responses
 - Fixed `<task-result>` previews of structured subagent yields collapsing to a lone `{` when the JSON's second line exceeded the preview budget
 - Fixed `/usage` freezing the TUI for several seconds while it loaded the activity heatmap on a large stats database; the dashboard now opens immediately and the heatmap plus session sync load from a background subprocess.

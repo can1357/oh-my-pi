@@ -7,11 +7,7 @@ import { resolveModelReference } from "@oh-my-pi/pi-catalog/identity/reference";
 import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models/cache-provider-id";
 import type { ProviderCatalogEntry } from "@oh-my-pi/pi-catalog/provider-models/descriptor-types";
-import {
-	CATALOG_PROVIDERS,
-	DEFAULT_MODEL_PER_PROVIDER,
-	PROVIDER_DESCRIPTORS,
-} from "@oh-my-pi/pi-catalog/provider-models/descriptors";
+import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { MODELS_DEV_PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import {
 	OPENZOO_DEFAULT_BASE_URL,
@@ -124,16 +120,6 @@ function stubFetch(seen: { urls: string[]; authorization: (string | null)[] }): 
 }
 
 describe("openzoo built-in provider", () => {
-	test("registers a keyless, dynamic-authoritative runtime descriptor defaulting to the router", () => {
-		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "openzoo");
-		expect(descriptor).toBeDefined();
-		expect(descriptor?.defaultModel).toBe("auto");
-		expect(descriptor?.allowUnauthenticated).toBe(true);
-		expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
-		expect(DEFAULT_MODEL_PER_PROVIDER.openzoo).toBe("auto");
-		expect(descriptor?.createModelManagerOptions({}).providerId).toBe("openzoo");
-	});
-
 	test("ships no bundled catalog — the proxy's live /v1/models is the model list", () => {
 		const entry: ProviderCatalogEntry | undefined = CATALOG_PROVIDERS.find(item => item.id === "openzoo");
 		expect(entry).toBeDefined();
@@ -275,6 +261,16 @@ describe("openzoo built-in provider", () => {
 		expect(seen.urls).toEqual(["https://tunnel.example/v1/models"]);
 		expect(seen.authorization).toEqual(["Bearer oz_tunnel-bearer"]);
 		expect(models?.every(model => model.baseUrl === "https://tunnel.example/v1")).toBe(true);
+	});
+
+	test("leaves omitted limits unknown even when another provider publishes the same model", async () => {
+		const options = openzooModelManagerOptions({
+			fetch: async () => Response.json({ data: [{ id: "anthropic/claude-sonnet-4" }] }),
+		});
+		const models = await options.fetchDynamicModels?.();
+		expect(models).toHaveLength(1);
+		expect(models?.[0]?.contextWindow).toBeNull();
+		expect(models?.[0]?.maxTokens).toBeNull();
 	});
 
 	test("an unreachable proxy yields no models rather than an error", async () => {

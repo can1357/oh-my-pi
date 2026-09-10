@@ -1447,6 +1447,17 @@
 			],
 			"variantFamilies": [
 				{
+					"provider": "openzoo",
+					"id": "auto",
+					"name": "Auto",
+					"members": [
+						"auto",
+						"openzoo/auto",
+						"openzoo-auto"
+					],
+					"routing": {}
+				},
+				{
 					"provider": "google-antigravity",
 					"id": "gemini-{rev}-flash",
 					"name": "Gemini {rev} Flash",
