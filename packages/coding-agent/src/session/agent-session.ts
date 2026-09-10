@@ -13382,7 +13382,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Toggles priority based on configured and currently realized state. */
 	toggleFastMode(): boolean {
-		if (!this.setFastMode(!this.isFastModeActive())) return false;
+		const shouldEnable = !this.isFastModeEnabled() && !this.isFastModeActive();
+		if (!this.setFastMode(shouldEnable)) return false;
 		return this.#models.isFastModeEnabled();
 	}
 
