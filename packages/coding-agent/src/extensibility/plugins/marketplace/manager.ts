@@ -317,13 +317,7 @@ export class MarketplaceManager {
 		const otherScope: "user" | "project" = scope === "user" ? "project" : "user";
 		const otherRegistryPath =
 			otherScope === "project" ? this.#opts.projectInstalledRegistryPath : this.#opts.installedRegistryPath;
-		const otherScopeEntries = otherRegistryPath
-			? (getInstalledPlugin(await readInstalledPluginsRegistry(otherRegistryPath), pluginId) ?? [])
-			: [];
 		const otherScopeOldNames = new Map<string, string>();
-		for (const entry of otherScopeEntries) {
-			otherScopeOldNames.set(entry.installPath, await this.#resolvePluginPackageName(entry.installPath, name));
-		}
 
 		// 5. Resolve registration identity before replacing an active cache. A
 		// forced reinstall can reuse the same cache key, so validation after
@@ -332,7 +326,18 @@ export class MarketplaceManager {
 		let cachePath!: string;
 		let packageName!: string;
 		let previousPackageNames!: Set<string>;
+		let otherScopeEntries: readonly InstalledPluginEntry[] = [];
 		try {
+			// Inspecting the other scope reads its manifest and can throw on a
+			// malformed package.json; keep it inside the cleanup guard so the temp
+			// clone created by resolvePluginSource is still removed on failure.
+			otherScopeEntries = otherRegistryPath
+				? (getInstalledPlugin(await readInstalledPluginsRegistry(otherRegistryPath), pluginId) ?? [])
+				: [];
+			for (const entry of otherScopeEntries) {
+				otherScopeOldNames.set(entry.installPath, await this.#resolvePluginPackageName(entry.installPath, name));
+			}
+
 			version = await this.#resolvePluginVersion(pluginEntry, sourcePath);
 			packageName = await this.#resolvePluginPackageName(sourcePath, name);
 			// Resolve the runtime names this plugin id currently owns BEFORE cachePlugin
