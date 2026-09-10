@@ -601,6 +601,42 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
 	});
 
+	it("keeps a dual-flagged media rejection ('image count exceeds the limit of 20') on the terminal path even with no context window (#11482)", async () => {
+		// Unlike the digit-free case above, "image count exceeds the limit of 20"
+		// also trips GENERIC_LIMIT_OVERFLOW_PATTERN, so AIError.classifyMessage
+		// dual-flags it (PayloadRejected + ContextOverflow) and
+		// ambiguousPayloadRejection is true. Explicit media evidence must win
+		// over that ambiguity guard — otherwise this falls into the same
+		// overflow-compaction attempt (including snapcompact, which can add
+		// image frames) despite the text proving a media/image-count budget.
+		await createSession(null);
+		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+
+		const assistantMsg = mediaBudgetPayloadAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(startCount()).toBe(0);
+		expect(prepareSpy).not.toHaveBeenCalled();
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
+		const checkResults = await Promise.all(
+			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
+		);
+		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
 	function activateOngoingGoal(id: string): void {
 		const now = Date.now();
 		session.setGoalModeState({

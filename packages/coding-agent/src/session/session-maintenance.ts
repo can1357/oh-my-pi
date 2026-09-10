@@ -2339,11 +2339,16 @@ export class SessionMaintenance {
 		// evidence compaction can't fix, not just an absence of proof.
 		const explicitMediaRejection =
 			payloadRejection && hasExplicitMediaRejectionEvidence(assistantMessage.errorMessage);
+		// Explicit media evidence overrides the ambiguity guard: a message like
+		// "image count exceeds the limit of 20" also trips the generic numeric
+		// pattern and gets dual-flagged ContextOverflow (ambiguousPayloadRejection
+		// = true), but the text itself already proves the byte budget is
+		// media-driven — that certainty shouldn't be discarded just because the
+		// classifier's separate numeric-limit heuristic also fired (#11482).
 		const unknownWindowDeadEnd =
 			payloadRejection &&
-			!ambiguousPayloadRejection &&
 			contextWindow <= 0 &&
-			(explicitMediaRejection || !compactionAvailable);
+			(explicitMediaRejection || (!ambiguousPayloadRejection && !compactionAvailable));
 		if (unknownWindowDeadEnd || trustedPayloadRejection) {
 			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
 			this.#host.emitNotice("warning", payloadRejectionNotice(storedTokens, contextWindow), "compaction");
