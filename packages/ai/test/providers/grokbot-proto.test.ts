@@ -2507,6 +2507,52 @@ describe("grokbot incomplete tool calls", () => {
 			}),
 		]);
 	});
+
+	test("emits appendable tool-arg suffixes when unbuffered accumulation completes", async () => {
+		// After retries are exhausted (no context.tools → unbuffered), `{"path":` +
+		// `"/tmp/x"}` must emit only the remaining suffix — not hold the full object
+		// for finishTool (which would concat to malformed JSON for proxy consumers).
+		mockAuth();
+		const partial = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "echo",
+					args: '{"path":',
+					isComplete: false,
+				},
+			}),
+		);
+		const finish = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "echo",
+					args: '"/tmp/x"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(partial, finish, trailer)) as FetchImpl;
+
+		const stream = streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl });
+		let accumulatedDeltas = "";
+		for await (const event of stream) {
+			if (event.type === "toolcall_delta") accumulatedDeltas += event.delta;
+		}
+		const result = await stream.result();
+		expect(JSON.parse(accumulatedDeltas)).toEqual({ path: "/tmp/x" });
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "toolCall",
+				id: "c1",
+				name: "echo",
+				arguments: { path: "/tmp/x" },
+			}),
+		]);
+	});
 });
 
 describe("grokbot request headers", () => {

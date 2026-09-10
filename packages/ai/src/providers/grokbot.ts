@@ -1717,9 +1717,16 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 										// args and emit one concat-safe delta in finishTool.
 										pendingCanonicalToolDeltas.set(state.index, merged.argsText);
 									}
-								} else if (isCompleteJsonObjectText(merged.argsText) && !shouldBufferAttemptEvents()) {
-									// Unbuffered complete-object frames: hold until finishTool so
-									// cumulative revisions stay concat-safe for proxy consumers.
+								} else if (
+									isCompleteJsonObjectText(argsText) &&
+									isCompleteJsonObjectText(merged.argsText) &&
+									!shouldBufferAttemptEvents()
+								) {
+									// Unbuffered complete-object *snapshots* (the frame itself is a
+									// full JSON object): hold until finishTool so a later cumulative
+									// revision can replace without double-emitting. Appendable
+									// fragments that merely complete the accumulator (`{"path":` +
+									// `"/tmp/x"}`) must emit only the remaining suffix.
 									pendingCanonicalToolDeltas.set(state.index, merged.argsText);
 								} else {
 									emitAttemptEvent({
