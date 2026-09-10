@@ -298,4 +298,44 @@ mod tests {
 		xattrs.insert(b"user.omp.unsupported".to_vec(), b"value".to_vec());
 		apply_xattrs("/proc/self/oom_score_adj", xattrs)
 	}
+
+	/// Guards the `spare_capacity` list path: rustix's `SpareCapacity`
+	/// wrapper extends the `Vec` itself after the syscall, so names must
+	/// arrive non-empty; a raw `&mut [MaybeUninit<u8>]` buffer would
+	/// silently return an empty list and drop every xattr.
+	#[test]
+	fn list_xattr_names_reports_user_xattr() -> std::io::Result<()> {
+		let file = tempfile::NamedTempFile::new()?;
+		let set = rustix::fs::lsetxattr(
+			file.path(),
+			b"user.omp.listed".as_slice(),
+			b"value".as_slice(),
+			XattrFlags::empty(),
+		);
+		if matches!(set, Err(rustix::io::Errno::OPNOTSUPP)) {
+			// Filesystems that reject user.* xattrs cannot exercise this
+			// path; emit the skip as a structured event so a mass-skip is
+			// noticeable in captured logs.
+			tracing::warn!(
+				name = "list_xattr_names_reports_user_xattr",
+				reason = "filesystem rejects user.* xattrs",
+				"skipping xattr list regression test"
+			);
+			return Ok(());
+		}
+		set?;
+
+		assert!(
+			list_xattr_names(file.path())?
+				.split(|byte| *byte == 0)
+				.any(|name| name == b"user.omp.listed"),
+			"list_xattr_names must report the set attribute"
+		);
+		let found = retrieve_xattrs(file.path())?;
+		assert_eq!(
+			found.get(b"user.omp.listed".as_slice()).map(Vec::as_slice),
+			Some(b"value".as_slice())
+		);
+		Ok(())
+	}
 }
