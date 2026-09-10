@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- LiteLLM model discovery no longer gives up after a hardcoded 10s on slow `/model/info` payloads: the budget is configurable via `discoveryTimeoutMs` or `LITELLM_DISCOVERY_TIMEOUT_MS` (default unchanged), so large proxies keep their reasoning metadata instead of silently falling back ([#11355](https://github.com/can1357/oh-my-pi/issues/11355)).
+
 ## [18.1.16] - 2026-09-09
 
 - Updated Fire Pass (`firepass`) login validation probe to `accounts/fireworks/routers/glm-5p2-fast` and bundled `glm-5.2-fast` and `kimi-k3-fast` models in place of decommissioned `kimi-k2.6-turbo` ([#10859](https://github.com/can1357/oh-my-pi/pull/10859) by [@olegpulatov](https://github.com/olegpulatov)).

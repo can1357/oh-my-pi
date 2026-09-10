@@ -5365,10 +5365,13 @@ export function xiaomiModelManagerOptions(
 // 21. LiteLLM
 // ---------------------------------------------------------------------------
 
+const LITELLM_DISCOVERY_TIMEOUT_MS = 10_000;
+
 export interface LiteLLMModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
+	discoveryTimeoutMs?: number;
 }
 
 export interface FetchLiteLLMRichModelsOptions<TApi extends Api> {
@@ -5947,6 +5950,10 @@ export async function fetchLiteLLMRichModels<TApi extends Api>(
 export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
+	const discoveryTimeoutMs = toPositiveNumber(
+		config?.discoveryTimeoutMs ?? Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS,
+		LITELLM_DISCOVERY_TIMEOUT_MS,
+	);
 	return {
 		providerId: "litellm",
 		// rich-v8 invalidates rows whose `compatConfig` retained a colliding
@@ -5973,7 +5980,7 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 				fetch: config?.fetch,
 				referenceResolver: resolveReference,
 				resolveApi: resolveLiteLLMApi,
-				timeoutMs: 10_000,
+				timeoutMs: discoveryTimeoutMs,
 			});
 			if (richModels && richModels.length > 0) {
 				return richModels;

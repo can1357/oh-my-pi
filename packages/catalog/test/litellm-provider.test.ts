@@ -1251,3 +1251,83 @@ describe("LiteLLM provider discovery", () => {
 		});
 	});
 });
+
+describe("LiteLLM discovery timeout (#11355)", () => {
+	const ORIGINAL_TIMEOUT = Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS;
+
+	afterEach(() => {
+		if (ORIGINAL_TIMEOUT === undefined) {
+			delete Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS;
+			return;
+		}
+		Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS = ORIGINAL_TIMEOUT;
+	});
+
+	function delayedRichFetchMock(richDelayMs: number): FetchImpl {
+		return (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) {
+				return new Response("{}", { status: 500 });
+			}
+			if (url === "http://slow-proxy:4000/v1/models") {
+				return Response.json({ data: [{ id: "openai/gpt-5" }] });
+			}
+			if (url === "http://slow-proxy:4000/model_group/info") {
+				// Real delays are load-bearing here: the discovery budget is a
+				// wall-clock AbortSignal timeout, so fake timers cannot drive it.
+				if (richDelayMs === Number.POSITIVE_INFINITY) {
+					const { promise, reject } = Promise.withResolvers<never>();
+					init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+					await promise;
+				} else {
+					await Bun.sleep(richDelayMs);
+				}
+				return Response.json({ data: [{ model_group: "slow-reasoner", supports_reasoning: true }] });
+			}
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+	}
+
+	test("honors discoveryTimeoutMs instead of the hardcoded budget", async () => {
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-litellm-test",
+			baseUrl: "http://slow-proxy:4000/v1",
+			fetch: delayedRichFetchMock(Number.POSITIVE_INFINITY),
+			discoveryTimeoutMs: 50,
+		});
+		const started = Date.now();
+		const models = await options.fetchDynamicModels?.();
+		// A hanging rich phase must abort on the configured budget and fall
+		// back to /v1/models instead of stalling for the 10s default.
+		expect(Date.now() - started).toBeLessThan(2000);
+		expect(models).toHaveLength(1);
+		expect(models?.[0]).toMatchObject({ id: "openai/gpt-5" });
+	}, 15_000);
+
+	test("honors LITELLM_DISCOVERY_TIMEOUT_MS when no option is set", async () => {
+		Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS = "50";
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-litellm-test",
+			baseUrl: "http://slow-proxy:4000/v1",
+			fetch: delayedRichFetchMock(Number.POSITIVE_INFINITY),
+		});
+		const started = Date.now();
+		const models = await options.fetchDynamicModels?.();
+		expect(Date.now() - started).toBeLessThan(2000);
+		expect(models?.[0]).toMatchObject({ id: "openai/gpt-5" });
+	}, 15_000);
+
+	test("keeps the 10s default when neither option nor env is set", async () => {
+		delete Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS;
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-litellm-test",
+			baseUrl: "http://slow-proxy:4000/v1",
+			fetch: delayedRichFetchMock(150),
+		});
+		const models = await options.fetchDynamicModels?.();
+		// A rich phase slower than any collapsed default still wins: the
+		// default budget must remain large enough to let it through.
+		expect(models).toHaveLength(1);
+		expect(models?.[0]).toMatchObject({ id: "slow-reasoner" });
+	});
+});
