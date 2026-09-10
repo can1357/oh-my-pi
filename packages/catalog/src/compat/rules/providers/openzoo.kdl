@@ -1,0 +1,28 @@
+// Provider-wire compat for "openzoo". The live /v1/models roster is
+// OpenRouter-shaped for pricing and windows but does not advertise
+// reasoning or input modalities; discovery leaves those fields
+// neutral unless the row reports them. This file owns reviewed
+// capability corrections applied at build time.
+
+provider "openzoo" {
+	// Modern Claude and Gemini are multimodal on the OpenAI-completions
+	// proxy; the roster carries no architecture.modality.
+	class "anthropic" {
+		input-modalities "text" "image"
+	}
+	class "gemini" {
+		input-modalities "text" "image"
+	}
+	class "glm" {
+		family "vision" {
+			input-modalities "text" "image"
+		}
+	}
+	// Bounded id tokens the roster uses for vision SKUs.
+	models token="vision" {
+		input-modalities "text" "image"
+	}
+	models token="vl" {
+		input-modalities "text" "image"
+	}
+}

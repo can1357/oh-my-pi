@@ -1,0 +1,14 @@
+auth "openzoo" {
+	name "openzoo (local x402 pay-per-call proxy)"
+	// Keyless by design: the hook yields a placeholder when no env var is set,
+	// so the provider counts as authenticated with no key and no login. The
+	// local proxy ignores Authorization; only a public tunnel URL checks the
+	// oz_… bearer it prints at startup.
+	env hook="openzoo-local"
+	login "api-key" {
+		auth-url "https://openzoo.fun"
+		instructions "Run `npx openzoo` (default base URL: http://localhost:8402/v1; set OPENZOO_BASE_URL to customize). The local proxy is keyless — leave this empty. Paste the oz_… bearer only when pointing OMP at an openzoo public tunnel URL."
+		prompt "Paste your openzoo tunnel bearer (optional; the local proxy is keyless)" placeholder="openzoo-local"
+		empty-fallback "openzoo-local"
+	}
+}

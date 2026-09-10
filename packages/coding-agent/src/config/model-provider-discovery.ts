@@ -29,9 +29,14 @@ for (const providerId of [
 export const STARTUP_MODEL_CACHE_PROVIDER_IDS: readonly string[] = Object.keys(STARTUP_MODEL_CACHE_PROVIDER_IDS_RECORD);
 
 // Sentinels for local-only OAuth tokens — declared inline to avoid loading
-// provider modules at startup. Must match the llama-cpp, lm-studio, and vllm
-// auth rules in packages/catalog/src/compat/rules/auth/.
-const LOCAL_PROVIDER_PLACEHOLDERS = new Set<string>(["llama-cpp-local", "lm-studio-local", "vllm-local"]);
+// provider modules at startup. Must match the llama-cpp, lm-studio, vllm and
+// openzoo auth rules in packages/catalog/src/compat/rules/auth/.
+const LOCAL_PROVIDER_PLACEHOLDERS = new Set<string>([
+	"llama-cpp-local",
+	"lm-studio-local",
+	"vllm-local",
+	"openzoo-local",
+]);
 
 /**
  * Hard bound for extension-provided fetchDynamicModels to prevent indefinite hangs
