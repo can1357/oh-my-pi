@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Session rewrites now refuse to replace a file changed by another process, preserving durable turns from concurrent terminals ([#11496](https://github.com/can1357/oh-my-pi/issues/11496)).
+
 ## [18.1.16] - 2026-09-09
 
 ### Added
