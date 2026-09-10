@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- LiteLLM model discovery no longer gives up after a hardcoded 10s on slow `/model/info` payloads: the budget is configurable via `discoveryTimeoutMs` or `LITELLM_DISCOVERY_TIMEOUT_MS` (default unchanged), so large proxies keep their reasoning metadata instead of silently falling back ([#11355](https://github.com/can1357/oh-my-pi/issues/11355)).
+- LiteLLM model discovery no longer gives up after a hardcoded 10s on slow `/model/info` payloads: the budget is configurable via `discoveryTimeoutMs` or `LITELLM_DISCOVERY_TIMEOUT_MS` (default unchanged), so large proxies keep their reasoning metadata instead of silently falling back ([#11576](https://github.com/can1357/oh-my-pi/pull/11576) by [@nikkoxgonzales](https://github.com/nikkoxgonzales)).
 
 ## [18.1.16] - 2026-09-09
 
