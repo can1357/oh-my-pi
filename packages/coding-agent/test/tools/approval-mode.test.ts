@@ -157,6 +157,42 @@ describe("tools.approvalMode setting", () => {
 		expect(textOf(result)).toContain("(no output)");
 	});
 
+	it("critical bash patterns prompt in yolo mode with no user policy", async () => {
+		const settings = approvalSettings({
+			"tools.approvalMode": "yolo",
+			"tools.approval": {},
+		});
+		await expect(
+			bashTool().execute(
+				"critical-no-policy",
+				{ command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
+				undefined,
+				undefined,
+				{
+					settings,
+				} as AgentToolContext,
+			),
+		).rejects.toThrow(/requires approval but no interactive UI available/);
+	});
+
+	it("critical bash patterns prompt in write mode", async () => {
+		const settings = approvalSettings({
+			"tools.approvalMode": "write",
+			"tools.approval": {},
+		});
+		await expect(
+			bashTool().execute(
+				"critical-write-mode",
+				{ command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
+				undefined,
+				undefined,
+				{
+					settings,
+				} as AgentToolContext,
+			),
+		).rejects.toThrow(/requires approval but no interactive UI available/);
+	});
+
 	it("attributes bash pattern denies to tool policy", async () => {
 		const settings = approvalSettings({
 			"tools.approvalMode": "yolo",
@@ -178,10 +214,31 @@ describe("tools.approvalMode setting", () => {
 		expect(textOf(result)).toContain("override");
 	});
 
-	it("CLI --auto-approve also bypasses safety-override patterns", async () => {
+	it("CLI --auto-approve still prompts critical patterns with no user policy", async () => {
+		// Critical-pattern safety prompts apply in auto-approve modes when no
+		// explicit user policy matched; see resolveApproval's yolo branch.
 		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		await expect(
+			bashTool().execute(
+				"cli-critical",
+				{ command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
+				undefined,
+				undefined,
+				{
+					settings,
+					autoApprove: true,
+				} as AgentToolContext,
+			),
+		).rejects.toThrow(/requires approval but no interactive UI available/);
+	});
+
+	it("CLI --auto-approve honors an explicit bash allow policy for critical patterns", async () => {
+		const settings = approvalSettings({
+			"tools.approvalMode": "always-ask",
+			"tools.approval": { bash: "allow" },
+		});
 		const result = await bashTool().execute(
-			"cli-critical",
+			"cli-critical-allowed",
 			{ command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
 			undefined,
 			undefined,

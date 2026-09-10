@@ -181,8 +181,8 @@ export async function loadSecrets(cwd: string, agentDir: string): Promise<Secret
 /** Minimum env var value length to consider as a secret. */
 const MIN_ENV_VALUE_LENGTH = 8;
 
-/** Env var name patterns that indicate secret values. */
-const SECRET_ENV_PATTERNS = /(?:KEY|SECRET|TOKEN|PASSWORD|PASS|AUTH|CREDENTIAL|PRIVATE|OAUTH)(?:_|$)/i;
+/** Env var name patterns that indicate secret values (incl. BEARER/JWT-shaped names). */
+const SECRET_ENV_PATTERNS = /(?:KEY|SECRET|TOKEN|PASSWORD|PASS|AUTH|CREDENTIAL|PRIVATE|OAUTH|BEARER|JWT)(?:_|$)/i;
 
 /** Collect environment variable values that look like secrets. */
 export function collectEnvSecrets(): SecretEntry[] {

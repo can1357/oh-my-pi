@@ -114,8 +114,9 @@ function modeApprovesTier(mode: ApprovalMode, tier: ToolTier): boolean {
  *  2. User per-tool override, if set and valid.
  *  3. Active mode tier comparison.
  *
- * In yolo mode, override-based tool prompts are ignored; user `tools.approval`
- * settings remain authoritative.
+ * In yolo mode, override-based tool prompts are ignored and user
+ * `tools.approval` settings remain authoritative; a tool-demanded safety
+ * prompt applies only when no explicit user policy matched.
  */
 export function resolveApproval(
 	tool: ApprovalSubject,
@@ -154,9 +155,9 @@ export function resolveApproval(
 	}
 
 	if (mode === "yolo") {
-		if (decision.policy) {
+		if (decision.policy === "allow") {
 			return {
-				policy: decision.policy,
+				policy: "allow",
 				tier: decision.tier,
 				override: false,
 				source: "tool",
@@ -164,13 +165,29 @@ export function resolveApproval(
 				...(decision.reason ? { reason: decision.reason } : {}),
 			};
 		}
-		return {
-			policy: effectiveUserPolicy ?? "allow",
-			tier: decision.tier,
-			override: false,
-			source: effectiveUserPolicy ? "user" : "mode",
-			...(effectiveUserPolicy ? { policyKey: userPolicyKey } : {}),
-		};
+		if (effectiveUserPolicy) {
+			return {
+				policy: effectiveUserPolicy,
+				tier: decision.tier,
+				override: false,
+				source: "user",
+				policyKey: userPolicyKey,
+			};
+		}
+		if (decision.policy === "prompt") {
+			// Tool-demanded safety prompts (e.g. critical bash patterns) force a
+			// prompt only when no explicit user policy matched — user
+			// `tools.approval` settings remain authoritative in yolo mode.
+			return {
+				policy: "prompt",
+				tier: decision.tier,
+				override: false,
+				source: "tool",
+				...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
+				...(decision.reason ? { reason: decision.reason } : {}),
+			};
+		}
+		return { policy: "allow", tier: decision.tier, override: false, source: "mode" };
 	}
 
 	if (decision.override) {
