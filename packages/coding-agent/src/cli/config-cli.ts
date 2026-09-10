@@ -35,6 +35,7 @@ export interface ConfigCommandArgs {
 	value?: string;
 	flags: {
 		json?: boolean;
+		ifAbsent?: boolean;
 	};
 }
 // =============================================================================
@@ -64,6 +65,19 @@ function findSettingDef(path: string): CliSettingDef | undefined {
 		description: ui?.description ?? "",
 		tab: ui?.tab ?? "internal",
 	};
+}
+
+type RawGlobalSetting = { present: boolean; value: unknown };
+
+function getRawGlobalSetting(path: SettingPath): RawGlobalSetting {
+	let value: unknown = settings.getGlobalSettings();
+	for (const segment of path.split(".")) {
+		if (value === null || typeof value !== "object" || !Object.hasOwn(value, segment)) {
+			return { present: false, value: undefined };
+		}
+		value = (value as Record<string, unknown>)[segment];
+	}
+	return { present: true, value };
 }
 
 /** Get available values for a setting */
@@ -110,6 +124,12 @@ export function parseConfigArgs(args: string[]): ConfigCommandArgs | undefined {
 		const arg = args[i];
 		if (arg === "--json") {
 			result.flags.json = true;
+		} else if (arg === "--if-absent") {
+			if (action !== "set") {
+				console.error(chalk.red("--if-absent is only valid for `omp config set`"));
+				process.exit(1);
+			}
+			result.flags.ifAbsent = true;
 		} else if (!arg.startsWith("-")) {
 			positionalArgs.push(arg);
 		}
@@ -175,7 +195,7 @@ function getTypeDisplay(def: CliSettingDef): string {
 // Schema-Driven Value Parsing
 // =============================================================================
 
-function parseAndSetValue(path: SettingPath, rawValue: string): void {
+function parseSettingValue<P extends SettingPath>(path: P, rawValue: string): SettingValue<P> {
 	const schemaType = getType(path);
 	let parsedValue: unknown;
 
@@ -233,7 +253,7 @@ function parseAndSetValue(path: SettingPath, rawValue: string): void {
 			parsedValue = trimmed;
 	}
 
-	settings.set(path, parsedValue as SettingValue<typeof path>);
+	return parsedValue as SettingValue<P>;
 }
 
 // =============================================================================
@@ -359,7 +379,11 @@ function handleGet(key: string | undefined, flags: { json?: boolean }): void {
 	console.log(formatValue(value));
 }
 
-async function handleSet(key: string | undefined, value: string | undefined, flags: { json?: boolean }): Promise<void> {
+async function handleSet(
+	key: string | undefined,
+	value: string | undefined,
+	flags: { json?: boolean; ifAbsent?: boolean },
+): Promise<void> {
 	if (!key || value === undefined) {
 		console.error(chalk.red(`Usage: ${APP_NAME} config set <key> <value>`));
 		console.error(chalk.dim(`\nRun '${APP_NAME} config list' to see available keys`));
@@ -373,21 +397,36 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 		process.exit(1);
 	}
 
+	let applied = true;
 	try {
-		parseAndSetValue(def.path, value);
-		await settings.flush();
+		const requestedValue = parseSettingValue(def.path, value);
+		if (flags.ifAbsent) {
+			applied = await settings.setIfAbsent(def.path, requestedValue);
+		} else {
+			settings.set(def.path, requestedValue);
+			await settings.flush();
+		}
 	} catch (err) {
 		console.error(chalk.red(String(err)));
 		process.exit(1);
 	}
 
-	const newValue = settings.get(def.path);
+	const persisted = flags.ifAbsent ? getRawGlobalSetting(def.path) : undefined;
+	printSetResult(def.path, persisted?.present ? persisted.value : settings.get(def.path), flags, applied);
+}
 
+function printSetResult(
+	path: SettingPath,
+	value: unknown,
+	flags: { json?: boolean; ifAbsent?: boolean },
+	applied: boolean,
+): void {
 	if (flags.json) {
-		console.log(JSON.stringify({ key: def.path, value: newValue }));
-	} else {
-		console.log(chalk.green(`${theme.status.success} Set ${def.path} = ${formatValue(newValue)}`));
+		console.log(JSON.stringify(flags.ifAbsent ? { key: path, value, applied } : { key: path, value }));
+		return;
 	}
+	const verb = flags.ifAbsent && !applied ? "Preserved" : "Set";
+	console.log(chalk.green(`${theme.status.success} ${verb} ${path} = ${formatValue(value)}`));
 }
 
 async function handleReset(key: string | undefined, flags: { json?: boolean }): Promise<void> {
@@ -435,12 +474,13 @@ export function printConfigHelp(): void {
 ${chalk.bold("Commands:")}
   list               List all settings with current values
   get <key>          Get a specific setting value
-  set <key> <value>  Set a setting value
+  set <key> <value> [--if-absent]  Set a setting value
   reset <key>        Reset a setting to its default value
   path               Print the config directory path
   init-xdg           Initialize XDG Base Directory structure
 
 ${chalk.bold("Options:")}
+  --if-absent        Set only when the raw global setting is absent
   --json             Output as JSON
 
 ${chalk.bold("Examples:")}

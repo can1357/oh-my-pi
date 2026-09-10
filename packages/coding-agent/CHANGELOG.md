@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `omp config set <key> <value> --if-absent` now applies global defaults without replacing explicitly configured values.
+
 ## [18.1.16] - 2026-09-09
 
 ### Added

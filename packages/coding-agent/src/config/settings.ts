@@ -82,6 +82,7 @@ type YamlGeneration = { kind: "missing" } | YamlContentGeneration | { kind: "unr
 type PendingYamlMutation = {
 	generation: YamlGeneration;
 	baseValue: unknown;
+	ifAbsent?: { applied: boolean };
 };
 
 type YamlLoadResult =
@@ -172,6 +173,16 @@ function getByPath(obj: RawSettings, segments: readonly string[]): unknown {
 		current = (current as Record<string, unknown>)[segment];
 	}
 	return current;
+}
+
+/** Whether every path segment is an own property in a nested settings object. */
+function hasByPath(obj: RawSettings, segments: readonly string[]): boolean {
+	let current: unknown = obj;
+	for (const segment of segments) {
+		if (!isRecord(current) || !Object.hasOwn(current, segment)) return false;
+		current = current[segment];
+	}
+	return true;
 }
 
 const SETTING_PATH_SEGMENTS: Record<SettingPath, readonly string[]> = Object.fromEntries(
@@ -661,9 +672,49 @@ export class Settings {
 	 * Triggers hooks for settings that have side effects.
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		this.#stageGlobalMutation(path, value);
+	}
+
+	/** Set a global setting only if it remains absent while the YAML write lock is held. */
+	async setIfAbsent<P extends SettingPath>(path: P, value: SettingValue<P>): Promise<boolean> {
+		const previousSave = this.#savePromise;
+		const saveIfAbsent = async (): Promise<boolean> => {
+			const segments = path.split(".");
+			if (hasByPath(this.#global, segments)) return false;
+
+			const mutation = this.#stageGlobalMutation(path, value, true);
+			if (!mutation?.ifAbsent) return true;
+			await this.#saveNow();
+			return mutation.ifAbsent.applied;
+		};
+		const result = previousSave ? previousSave.then(saveIfAbsent) : saveIfAbsent();
+		const savePromise = result.then(() => undefined);
+		this.#savePromise = savePromise;
+		savePromise
+			.catch(err => {
+				logger.warn("Settings: guarded save failed", { error: String(err) });
+			})
+			.finally(() => {
+				if (this.#savePromise === savePromise) {
+					this.#savePromise = undefined;
+				}
+			});
+		return result;
+	}
+
+	#stageGlobalMutation<P extends SettingPath>(
+		path: P,
+		value: SettingValue<P>,
+		ifAbsent = false,
+	): PendingYamlMutation | undefined {
 		const prev = this.get(path);
 		const segments = path.split(".");
-		this.#captureGlobalMutation(path, this.#modifiedPathMutations, getByPath(this.#global, segments));
+		const mutation = this.#captureGlobalMutation(
+			path,
+			this.#modifiedPathMutations,
+			getByPath(this.#global, segments),
+			ifAbsent,
+		);
 		setByPath(this.#global, segments, value);
 		this.#persistedMutationGeneration++;
 		this.#modified.add(path);
@@ -671,12 +722,12 @@ export class Settings {
 		const next = this.get(path);
 		this.#queueSave();
 
-		// Trigger hook if exists
 		const hook = SETTING_HOOKS[path];
 		if (hook) {
 			hook(next, prev);
 		}
 		this.#fireEffectiveSettingChanged(path, next, prev);
+		return mutation;
 	}
 
 	/**
@@ -1430,12 +1481,20 @@ export class Settings {
 		}
 	}
 
-	#captureGlobalMutation(key: string, mutations: Map<string, PendingYamlMutation>, baseValue: unknown): void {
-		if (!this.#persist || !this.#configPath) return;
-		mutations.set(key, {
+	#captureGlobalMutation(
+		key: string,
+		mutations: Map<string, PendingYamlMutation>,
+		baseValue: unknown,
+		ifAbsent = false,
+	): PendingYamlMutation | undefined {
+		if (!this.#persist || !this.#configPath) return undefined;
+		const mutation: PendingYamlMutation = {
 			generation: this.#readYamlGeneration(this.#configPath),
 			baseValue: structuredClone(baseValue),
-		});
+			...(ifAbsent ? { ifAbsent: { applied: false } } : {}),
+		};
+		mutations.set(key, mutation);
+		return mutation;
 	}
 
 	async #loadYaml(filePath: string): Promise<RawSettings> {
@@ -2742,6 +2801,16 @@ export class Settings {
 				for (const modPath of modifiedPaths) {
 					const segments = modPath.split(".");
 					const mutation = modifiedPathMutations.get(modPath);
+					if (mutation?.ifAbsent) {
+						if (hasByPath(current, segments)) {
+							mutation.ifAbsent.applied = false;
+							continue;
+						}
+						setByPath(current, segments, getByPath(this.#global, segments));
+						mutation.ifAbsent.applied = true;
+						shouldWrite = true;
+						continue;
+					}
 					const canApply =
 						mutation !== undefined &&
 						mutation.generation.kind !== "unreadable" &&
