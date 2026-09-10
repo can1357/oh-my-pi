@@ -218,7 +218,7 @@ describe("buildModel", () => {
 			requestModelId: "gemini-3-flash",
 		});
 		expect(opaqueGemini.id).toBe("opaque-gemini-flash");
-		expect(opaqueGemini.sandWireModelId).toBe("gemini-3.8-flash");
+		expect(opaqueGemini.sandWireModelId).toBeUndefined();
 	});
 
 	it("loads bundled OpenRouter models with resolved compat", () => {

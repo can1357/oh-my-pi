@@ -9,12 +9,13 @@
 - Grok Bot (`grokbot`) catalog — live models from sand `AiService/AvailableModels` (authoritative when renewer present), plus sand router slugs (`sand-default`, `sand-cua`, `sand-automation`). Aliases stay on the canonical row (`idAliases`); cost is $0 by design (renewer-billed). Distinct from `cursor` and `xai` / Grok CLI catalogs.
 - Grok Bot `sand-cua` now has catalog `sand-tools-wire=parent-chat` so router tools use the product field-2 wire.
 - Grok Bot Auto routers (`default`, `default[]`, `auto`) now use catalog `sand-tools-wire=parent-chat` so tools stay off the grok-4.5 native 422 path.
-- Grok Bot `gemini-3-flash` / `gemini-3-flash[]` now rewrite `requestedModel` to bare `gemini-3.8-flash` (`sand-wire-model-id`) so tools use the working peer while AvailableModels still lists the old slug.
+- Grok Bot `gemini-3-flash` / `gemini-3-flash[]` retain the selected model for tool requests and use the native schema envelope.
 - Grok Bot `sand-wire-model-id` rewrites apply only when tools are present (`sand-wire-model-id-when=tools`); text-only requests keep the selected AvailableModels id.
 - Grok Bot JSON-as-text tool promotion is opt-in via `sand-promote-json-text-tools` (routers + gemini-3-flash) so native models keep example Shell JSON as text.
 
 ### Fixed
 
+- Grok Bot Gemini 3 Flash tool requests stay on the selected model instead of switching to Gemini 3.8 Flash, which may be unavailable.
 - Grok Bot AvailableModels namespace-only overrides recompute `clientVersion` (e.g. `lab` → `0.30.0-lab`) via the discovery identity helper.
 - Grok Bot AvailableModels applies namespace/clientVersion overrides from the already-loaded config without a second synchronous `secrets/grokbot.env` read.
 - Retain cached model catalogs when Grok Bot discovery returns malformed or empty results.

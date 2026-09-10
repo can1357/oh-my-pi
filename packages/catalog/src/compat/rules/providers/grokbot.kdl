@@ -53,13 +53,9 @@ provider "grokbot" {
 		sand-wire-model-id-when "tools"
 		sand-promote-json-text-tools #true
 	}
-	// Live AvailableModels still lists gemini-3-flash / gemini-3-flash[], but
-	// that slug empty-bodies on tools. The working peer is gemini-3.8-flash
-	// (and its effort variants). Rewrite requestedModel to a bare 3.8-flash
-	// only when tools are present; text-only keeps the listed slug.
+	// Keep the selected model: native Gemini 3 Flash accepts tools, while
+	// substituting Gemini 3.8 Flash can fail the account's model permission check.
 	models "gemini-3-flash" "gemini-3-flash[]" {
-		sand-wire-model-id "gemini-3.8-flash"
-		sand-wire-model-id-when "tools"
 		sand-promote-json-text-tools #true
 	}
 	// Empty first tool turns on Gemini-class sand rows often spend the budget

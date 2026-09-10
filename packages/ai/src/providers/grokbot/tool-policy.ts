@@ -17,7 +17,7 @@ import {
 	type AnthropicSandToolWireResult,
 	type AnthropicSandWireResolveContext,
 } from "./anthropic-sand-wire";
-import { OMP_TO_SAND_FIELD2, toSandField2Name } from "./product-wire";
+import { OMP_TO_SAND_FIELD2, toSandField2Name, wrapToolParameters } from "./product-wire";
 
 export type GrokbotSandToolKind = "product" | "native" | "disabled";
 
@@ -115,10 +115,12 @@ export function nativeToolParametersForIdentity(
 ): Record<string, unknown> {
 	if (projection === "google") {
 		const normalized = normalizeSchemaForGoogle(schema);
+		// Sand's Gemini adapter reads the AI SDK schema envelope. Sending the
+		// bare schema hides its properties and produces calls with empty args.
 		if (normalized && typeof normalized === "object" && !Array.isArray(normalized)) {
-			return normalized as Record<string, unknown>;
+			return wrapToolParameters(normalized as Record<string, unknown>);
 		}
-		return schema;
+		return wrapToolParameters(schema);
 	}
 	if (projection === "strict") {
 		return adaptSchemaForStrict(schema, true).schema;

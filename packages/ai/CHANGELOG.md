@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Grok Bot parameterized model selectors no longer fail with an unknown-model error after resolving to a canonical model.
+- Grok Bot Gemini tool calls preserve their required arguments instead of returning empty objects.
 - Grok Bot omits discovered effort/reasoning defaults when `thinking` is explicitly off.
 - Grok Bot JSON-as-text dedupe keeps native custom-wire tools (e.g. `Shell` via `customWireName`) distinct from preferred omp owners like `bash`.
 - Catalog matrix shell/write smoke rejects nonnumeric `printf` `%d`/`%f`/… arguments that bash would convert (literal ping no longer passes).

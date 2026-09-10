@@ -154,7 +154,7 @@ describe("grokbot family tool mapping", () => {
 		}
 	});
 
-	test("gemini-3-flash catalog ids stay listed but rewrite requestedModel to bare gemini-3.8-flash", () => {
+	test("an explicit tools-scoped wire override retains native tool names", () => {
 		for (const id of ["gemini-3-flash", "gemini-3-flash[]"]) {
 			const { policy, names } = wireFor(id);
 			expect(policy.kind).toBe("native");
@@ -373,7 +373,7 @@ describe("grokbot family tool mapping", () => {
 		expect(classifyModel("grokbot", "claude-brand-new-9", { lenient: true }).class).toBe("anthropic");
 	});
 
-	test("gemini native schema strips Google-unsupported keywords (empty-body regression)", () => {
+	test("Gemini receives tool properties inside jsonSchema instead of emitting empty arguments", () => {
 		const raw = {
 			type: "object",
 			properties: { command: { type: "string", format: "uri" } },
@@ -381,10 +381,15 @@ describe("grokbot family tool mapping", () => {
 			additionalProperties: true,
 		};
 		const gemini = nativeToolParametersForIdentity(raw, "google");
-		expect(gemini).not.toHaveProperty("additionalProperties");
-		const command = gemini.properties as Record<string, Record<string, unknown>>;
-		expect(command.command).not.toHaveProperty("format");
-		expect(command.command?.type).toBe("string");
+		expect(gemini).toMatchObject({
+			jsonSchema: {
+				type: "object",
+				properties: { command: { type: "string" } },
+				required: ["command"],
+			},
+		});
+		expect(gemini).not.toHaveProperty("jsonSchema.additionalProperties");
+		expect(gemini).not.toHaveProperty("jsonSchema.properties.command.format");
 	});
 
 	test("openai native schema enforces additionalProperties false (gpt-5-mini wire)", () => {

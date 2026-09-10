@@ -184,7 +184,10 @@ export function resolveGrokbotRequestedModel(
 	}
 
 	const requested: GrokbotRequestedModel = { modelId: wireId };
-	if (options?.sandVariantStringRepresentation === true) {
+	// Discovery resolves selector strings to a canonical id plus parameters.
+	// The variant-string flag only applies when modelId still contains that
+	// opaque selector; setting it on the canonical id makes Sand reject the id.
+	if (options?.sandVariantStringRepresentation === true && !options.canonicalModelId?.trim()) {
 		requested.isVariantStringRepresentation = true;
 	}
 	if (options?.sandMaxMode === true) {

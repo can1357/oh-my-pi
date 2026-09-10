@@ -272,15 +272,15 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(geminiFlash?.sandToolsWire).toBeUndefined();
 		expect(geminiFlash?.sandWireModelId).toBeUndefined();
 		expect(buildModel(geminiFlash!).sandToolsWire).toBeUndefined();
-		expect(buildModel(geminiFlash!).sandWireModelId).toBe("gemini-3.8-flash");
-		expect(buildModel(geminiFlash!).sandWireModelIdWhen).toBe("tools");
+		expect(buildModel(geminiFlash!).sandWireModelId).toBeUndefined();
+		expect(buildModel(geminiFlash!).sandWireModelIdWhen).toBeUndefined();
 		expect(buildModel(geminiFlash!).sandPromoteJsonTextTools).toBe(true);
 		expect(buildModel(geminiFlash!).id).toBe("gemini-3-flash");
 		const geminiFlashVariant = models.find(m => m.id === "gemini-3-flash[]");
 		expect(geminiFlashVariant?.requestModelId).toBe("gemini-3-flash");
 		expect(geminiFlashVariant?.sandVariantStringRepresentation).toBe(true);
 		expect(buildModel(geminiFlashVariant!).sandToolsWire).toBeUndefined();
-		expect(buildModel(geminiFlashVariant!).sandWireModelId).toBe("gemini-3.8-flash");
+		expect(buildModel(geminiFlashVariant!).sandWireModelId).toBeUndefined();
 		expect(buildModel(geminiFlashVariant!).id).toBe("gemini-3-flash[]");
 		expect(buildModel(models.find(m => m.id === "sand-cua")!).reasoning).toBe(false);
 		expect(sandDefault?.input).toEqual(["text"]);
