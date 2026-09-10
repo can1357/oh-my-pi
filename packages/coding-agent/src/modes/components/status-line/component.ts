@@ -2365,10 +2365,10 @@ export class StatusLineComponent implements Component {
 					renderWindowLabel = true;
 					windowLabel = candidateWindow;
 					if (percentOverflow) {
-						percentStart = gapWidth - percentLabel.length;
-						windowStart = percentStart - 1 - windowLabel.length;
+						percentStart = gapWidth - percentPlacementWidth;
+						windowStart = percentStart - 1 - liveWindow.length;
 					} else {
-						windowStart = gapWidth - windowLabel.length - 1;
+						windowStart = gapWidth - liveWindow.length - 1;
 					}
 					scaleWidth = windowStart;
 				}

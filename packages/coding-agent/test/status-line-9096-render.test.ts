@@ -449,6 +449,8 @@ test("reserves the compact total width in startup placeholders", () => {
 	expect(startup).toContain("…");
 	expect(rendered).toContain("ctx:8%");
 	expect(rendered).toContain("100K");
+	expect(startup.indexOf("ctx:…")).toBe(rendered.indexOf("ctx:8%"));
+	expect(startup.lastIndexOf("…")).toBe(rendered.indexOf("100K"));
 	expect(startup).not.toContain("status demo");
 	expect(rendered).not.toContain("status demo");
 });
