@@ -71,21 +71,51 @@ impl WaylandBackend {
 	}
 
 	#[cfg(feature = "wayland-pipewire")]
-	fn synthetic_display(image: &RgbaImage) -> DesktopDisplay {
+	fn portal_display(pixels: (u32, u32), monitor: &capture::MonitorGeometry) -> DesktopDisplay {
 		DesktopDisplay {
 			id:           "wayland-portal-0".to_string(),
 			name:         "Wayland portal monitor".to_string(),
-			x:            0,
-			y:            0,
-			width:        image.width(),
-			height:       image.height(),
-			scale:        1.0,
+			x:            monitor.position.0,
+			y:            monitor.position.1,
+			width:        monitor.size.0,
+			height:       monitor.size.1,
+			scale:        f64::from(pixels.0) / f64::from(monitor.size.0),
 			pixel_x:      0,
 			pixel_y:      0,
-			pixel_width:  image.width(),
-			pixel_height: image.height(),
+			pixel_width:  pixels.0,
+			pixel_height: pixels.1,
 			is_primary:   true,
 		}
+	}
+
+	#[cfg(feature = "wayland-pipewire")]
+	fn window_crop(
+		display: &DesktopDisplay,
+		window: &DesktopWindow,
+	) -> CoreResult<(u32, u32, u32, u32)> {
+		let x = i64::from(window.x) - i64::from(display.x);
+		let y = i64::from(window.y) - i64::from(display.y);
+		if x < 0
+			|| y < 0
+			|| window.width == 0
+			|| window.height == 0
+			|| x + i64::from(window.width) > i64::from(display.width)
+			|| y + i64::from(window.height) > i64::from(display.height)
+		{
+			return Err(DesktopError::capture_failed(
+				"Wayland window is not fully inside the selected portal monitor",
+			));
+		}
+		let scale_x = f64::from(display.pixel_width) / f64::from(display.width);
+		let scale_y = f64::from(display.pixel_height) / f64::from(display.height);
+		let left = (x as f64 * scale_x).round() as u32;
+		let top = (y as f64 * scale_y).round() as u32;
+		let right = ((x as f64 + f64::from(window.width)) * scale_x).round() as u32;
+		let bottom = ((y as f64 + f64::from(window.height)) * scale_y).round() as u32;
+		if right <= left || bottom <= top {
+			return Err(DesktopError::capture_failed("Wayland window has no captured pixels"));
+		}
+		Ok((left, top, right - left, bottom - top))
 	}
 
 	#[cfg(feature = "wayland-pipewire")]
@@ -165,8 +195,8 @@ impl Backend for WaylandBackend {
 		#[cfg(feature = "wayland-pipewire")]
 		{
 			self.selected_display_allowed()?;
-			let image = capture::capture()?;
-			let display = Self::synthetic_display(&image);
+			let (image, monitor) = capture::capture()?;
+			let display = Self::portal_display(image.dimensions(), &monitor);
 			self.displays = vec![display.clone()];
 			match target {
 				Target::Desktop => {
@@ -181,21 +211,7 @@ impl Backend for WaylandBackend {
 						.ok_or_else(|| {
 							DesktopError::window_not_found(format!("Wayland window {id} not found"))
 						})?;
-					if window.x < 0 || window.y < 0 {
-						return Err(DesktopError::capture_failed(
-							"Wayland portal monitor stream cannot crop a window outside the selected \
-							 monitor",
-						));
-					}
-					let x = window.x as u32;
-					let y = window.y as u32;
-					let width = window.width.min(image.width().saturating_sub(x));
-					let height = window.height.min(image.height().saturating_sub(y));
-					if width == 0 || height == 0 {
-						return Err(DesktopError::capture_failed(format!(
-							"Wayland window {id} is outside the selected portal monitor"
-						)));
-					}
+					let (x, y, width, height) = Self::window_crop(&display, &window)?;
 					let cropped = image::imageops::crop_imm(&image, x, y, width, height).to_image();
 					let geometry = FrameGeometry::for_window(&window, cropped.width(), cropped.height());
 					Ok((cropped, geometry))
@@ -253,6 +269,47 @@ mod tests {
 	};
 
 	use super::*;
+
+	#[test]
+	#[cfg(feature = "wayland-pipewire")]
+	fn portal_geometry_maps_scaled_capture_with_monitor_offset() {
+		let monitor = capture::MonitorGeometry { position: (1920, -100), size: (1280, 1440) };
+		let display = WaylandBackend::portal_display((2560, 2880), &monitor);
+		let mut frame = FrameGeometry::for_displays(&[display]);
+		// Exercise the screenshot cap as well as the compositor's 2x scale.
+		let image = RgbaImage::new(2560, 2880);
+		let _ = crate::desktop::frame::apply_capture_caps(image, &mut frame, &CaptureCaps {
+			max_width:  Some(2133),
+			max_height: Some(2400),
+		})
+		.unwrap();
+		let (x, y) = frame.map_point(1066.5, 1867.0, None).unwrap();
+		assert!((x - 2560.0).abs() < 0.001);
+		assert!((y - 1020.2).abs() < 0.001);
+	}
+
+	#[test]
+	#[cfg(feature = "wayland-pipewire")]
+	fn portal_geometry_crops_window_in_logical_monitor_space() {
+		let monitor = capture::MonitorGeometry { position: (1920, -100), size: (1280, 1440) };
+		let display = WaylandBackend::portal_display((1600, 1800), &monitor);
+		let mut window = DesktopWindow {
+			id:      "test".into(),
+			title:   String::new(),
+			app:     String::new(),
+			pid:     None,
+			x:       2000,
+			y:       20,
+			width:   400,
+			height:  200,
+			focused: false,
+		};
+		assert_eq!(WaylandBackend::window_crop(&display, &window).unwrap(), (100, 150, 500, 250));
+		let frame = FrameGeometry::for_window(&window, 500, 250);
+		assert_eq!(frame.map_point(250.0, 125.0, Some(&window)).unwrap(), (2200.0, 120.0));
+		window.x = 1800;
+		assert!(WaylandBackend::window_crop(&display, &window).is_err());
+	}
 
 	static LIBEI_ENV_LOCK: Mutex<()> = Mutex::new(());
 
