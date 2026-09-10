@@ -30,6 +30,20 @@ describe("CustomEditor keybindings", () => {
 		expect(onToggleToolActivity).toHaveBeenCalledTimes(1);
 	});
 
+	it("lets an explicit vibe binding override an untouched paste default", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onToggleVibe = vi.fn();
+		const onPasteTextRaw = vi.fn();
+
+		editor.setActionKeys("app.vibe.toggle", ["alt+shift+v"]);
+		editor.onToggleVibe = onToggleVibe;
+		editor.onPasteTextRaw = onPasteTextRaw;
+		editor.handleInput("\x1bV");
+
+		expect(onToggleVibe).toHaveBeenCalledTimes(1);
+		expect(onPasteTextRaw).not.toHaveBeenCalled();
+	});
+
 	it("lets custom handlers keep precedence over the default retry chord", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onRetry = vi.fn();

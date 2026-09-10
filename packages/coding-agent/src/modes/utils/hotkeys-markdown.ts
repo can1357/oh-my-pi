@@ -48,6 +48,7 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		`| \`${appKey(bindings, "app.model.selectTemporary")}\` | Select model (temporary) |`,
 		`| \`${appKey(bindings, "app.model.select")}\` | Select model (set roles) |`,
 		`| \`${appKey(bindings, "app.plan.toggle")}\` | Toggle plan mode |`,
+		`| \`${appKey(bindings, "app.vibe.toggle")}\` | Toggle vibe mode |`,
 		`| \`${appKey(bindings, "app.history.search")}\` | Search prompt history |`,
 		`| \`${appKey(bindings, "app.tools.expand")}\` | Toggle tool output expansion |`,
 		`| \`${appKey(bindings, "app.tools.toggleVisibility")}\` | Toggle tool activity visibility |`,

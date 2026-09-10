@@ -25,6 +25,14 @@ describe("KeybindingsManager.getDisplayString", () => {
 		expect(keybindings.getDisplayString("app.retry")).toBe("F5/Alt+R");
 	});
 
+	it("leaves vibe mode unbound until configured", () => {
+		const defaults = KeybindingsManager.inMemory();
+		const configured = KeybindingsManager.inMemory({ "app.vibe.toggle": "alt+shift+v" });
+
+		expect(defaults.getKeys("app.vibe.toggle")).toEqual([]);
+		expect(configured.getKeys("app.vibe.toggle")).toEqual(["alt+shift+v"]);
+	});
+
 	it("formats multiple bindings with the existing separator", () => {
 		const keybindings = KeybindingsManager.inMemory({
 			"app.clipboard.copyPrompt": ["alt+shift+c", "ctrl+shift+c"],
