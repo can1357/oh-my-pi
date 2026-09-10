@@ -100,7 +100,7 @@ pub fn language_json() -> TSLanguage {
 }
 ///Returns the tree-sitter language for this parser.
 pub fn language_just() -> TSLanguage {
-	tree_sitter_just::LANGUAGE.into()
+	tree_sitter_just::language().into()
 }
 ///Returns the tree-sitter language for this parser.
 pub fn language_julia() -> TSLanguage {

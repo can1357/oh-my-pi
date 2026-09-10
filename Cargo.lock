@@ -295,6 +295,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "arborium-just"
+version = "2.18.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9a22e90530661891ef9d7185c81c21b5f17a89629780317ced810210fe873e1"
+dependencies = [
+ "arborium-sysroot",
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "arborium-sysroot"
+version = "2.18.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddd9d120dd5df8b918cd96676a88f1233a66f10687d415b69f70b3396acddddf"
+dependencies = [
+ "cc",
+ "dlmalloc",
+]
+
+[[package]]
 name = "arc-swap"
 version = "1.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -417,11 +438,11 @@ dependencies = [
 
 [[package]]
 name = "ast-grep-core"
-version = "0.39.9"
+version = "0.45.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "057ae90e7256ebf85f840b1638268df0142c9d19467d500b790631fd301acc27"
+checksum = "2af0513e0a025ce1ebbbdbf00e81ca84c29f26b33a6e1e0dd877945ceef75042"
 dependencies = [
- "bit-set 0.8.0",
+ "bit-set 0.11.1",
  "regex",
  "thiserror 2.0.20",
  "tree-sitter",
@@ -862,6 +883,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bit-set"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56d87354e4229f54a44f7bf2435906a4656dba36026ab6eaca629a2c436a691c"
+dependencies = [
+ "bit-vec 0.10.1",
+]
+
+[[package]]
 name = "bit-vec"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -872,6 +902,16 @@ name = "bit-vec"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b71798fca2c1fe1086445a7258a4bc81e6e49dcd24c8d0dd9a1e57395b603f51"
+
+[[package]]
+name = "bit-vec"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5727b15fa97d4f4fee0a3b7c3d550ed0269f54329207b86388de918604e31269"
+dependencies = [
+ "borsh",
+ "serde",
+]
 
 [[package]]
 name = "bitflags"
@@ -1030,6 +1070,30 @@ dependencies = [
  "darling 0.24.1",
  "ident_case",
  "prettyplease 0.3.0",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.4",
+]
+
+[[package]]
+name = "borsh"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "553c5d846a6ba5150c65e3b1b8ec073bcf1abc20f9b7220de384a4443ea4e20a"
+dependencies = [
+ "borsh-derive",
+ "bytes",
+ "cfg_aliases",
+]
+
+[[package]]
+name = "borsh-derive"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12cdfe656708a01f89b451a7d36466e6fe6c414de0aa18fc54f864f6f9ca9f56"
+dependencies = [
+ "once_cell",
+ "proc-macro-crate",
  "proc-macro2",
  "quote",
  "syn 3.0.4",
@@ -2439,6 +2503,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
  "libloading",
+]
+
+[[package]]
+name = "dlmalloc"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad5208a115eaba24916f7456929832e310a81518c641f93fee4f89aa93aa3675"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7783,6 +7858,7 @@ dependencies = [
 name = "omp-ast"
 version = "0.1.0"
 dependencies = [
+ "arborium-just",
  "ast-grep-core",
  "ignore",
  "omp-core",
@@ -7797,7 +7873,7 @@ dependencies = [
  "tree-sitter-bash",
  "tree-sitter-c",
  "tree-sitter-c-sharp",
- "tree-sitter-clojure",
+ "tree-sitter-clojure-orchard",
  "tree-sitter-cmake",
  "tree-sitter-cpp",
  "tree-sitter-css",
@@ -7818,7 +7894,6 @@ dependencies = [
  "tree-sitter-javascript",
  "tree-sitter-json",
  "tree-sitter-julia",
- "tree-sitter-just",
  "tree-sitter-kotlin-sg",
  "tree-sitter-lua",
  "tree-sitter-make",
@@ -8147,7 +8222,6 @@ name = "omp-e2e"
 version = "0.1.0"
 dependencies = [
  "async-stream",
- "async-trait",
  "bytes",
  "flume",
  "futures",
@@ -8224,6 +8298,7 @@ dependencies = [
  "omp-proto",
  "parking_lot",
  "serde",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -8407,7 +8482,6 @@ dependencies = [
  "omp-vocab",
  "proc-macro2",
  "quote",
- "strum",
  "syn 2.0.119",
 ]
 
@@ -8477,6 +8551,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec 2.0.0-alpha.13",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
@@ -8900,6 +8975,7 @@ dependencies = [
  "gix",
  "jj-lib",
  "libc",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -12983,13 +13059,12 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter"
-version = "0.25.10"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78f873475d258561b06f1c595d93308a7ed124d9977cb26b148c2084a4a3cc87"
+checksum = "2038684e0058edba0d17302619f62eabce4a8e11c6ac59506996a8d79848851d"
 dependencies = [
  "cc",
  "regex",
- "regex-syntax",
  "serde_json",
  "streaming-iterator",
  "tree-sitter-language",
@@ -13036,13 +13111,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "tree-sitter-clojure"
-version = "0.1.0"
+name = "tree-sitter-clojure-orchard"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4004884cc509449a1d78fa3e1f02b4e953d0a8065984445304795e72e885338c"
+checksum = "67b854ba5935d62a713280b867c09cae08c6ad2286895734b5550ed02122d8fd"
 dependencies = [
  "cc",
- "tree-sitter",
  "tree-sitter-language",
 ]
 
@@ -13247,17 +13321,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tree-sitter-just"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd46794f2c270f43d73b2f2c8c256992471f3493c903604da0886df984771920"
-dependencies = [
- "cc",
- "tree-sitter",
- "tree-sitter-language",
-]
-
-[[package]]
 name = "tree-sitter-kotlin-sg"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13269,9 +13332,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-language"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
+checksum = "ca0d1bf6fdd806e43ae5198f82f527056d359def39e54e67a0f478ac09dac081"
 
 [[package]]
 name = "tree-sitter-lua"

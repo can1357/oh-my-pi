@@ -3845,7 +3845,7 @@ fn fuzzy_match_spans(candidate: &str, query: &str) -> SmallVec<(u16, u16), 8> {
 		let Ok(end) = u16::try_from(usize::from(start) + query.len()) else {
 			return SmallVec::new();
 		};
-		return smallvec::smallvec![(start, end)];
+		return SmallVec::from([(start, end)]);
 	}
 	let mut spans = SmallVec::new();
 	let mut query = query.bytes();

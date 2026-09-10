@@ -91,6 +91,11 @@ lintx *paths='crates':
 lintx-fix *paths='crates':
     cargo run --quiet --release --locked --manifest-path tools/lintx/Cargo.toml -- --fix {{ paths }}
 
+# Validate runtime symbol and dependency contracts (the CI runtime_spec job; see scripts/check-spec.rs).
+[group('format & lint')]
+check-spec:
+    cargo -Zscript scripts/check-spec.rs
+
 # Run every formatter-check and linter this repo defines.
 [group('format & lint')]
 lint: fmt-check clippy proto-lint lint-locked-maps

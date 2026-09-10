@@ -24,7 +24,7 @@ mod seq_format {
 		iter,
 	};
 
-	use bigdecimal::{BigDecimal, num_bigint::ToBigInt};
+	use bigdecimal::{BigDecimal, num_bigint::BigInt};
 	use num_traits::{Signed, Zero};
 	use thiserror::Error;
 
@@ -425,13 +425,13 @@ mod seq_format {
 		let (fraction_10, scale) = decimal.as_bigint_and_exponent();
 		let exponent_10 = -scale;
 		let (mut fraction_2, mut exponent_2) = if exponent_10 >= 0 {
-			(fraction_10 * 5.to_bigint().unwrap().pow(exponent_10 as u32), exponent_10)
+			(fraction_10 * BigInt::from(5_u8).pow(exponent_10 as u32), exponent_10)
 		} else {
 			let margin = ((max_precision + 1) as i64 * 4 - fraction_10.bits() as i64).max(0)
 				+ -exponent_10 * 3
 				+ 1;
 			(
-				(fraction_10 << margin) / 5.to_bigint().unwrap().pow(-exponent_10 as u32),
+				(fraction_10 << margin) / BigInt::from(5_u8).pow(-exponent_10 as u32),
 				exponent_10 - margin,
 			)
 		};
@@ -1076,13 +1076,10 @@ impl Utility for Seq {
 }
 
 fn seq_main(matches: &ArgMatches, host: &mut Host) -> Result<(), Box<dyn Error>> {
-	let numbers_option = matches.get_many::<String>(ARG_NUMBERS);
-
-	if numbers_option.is_none() {
-		return Err(SeqError::NoArguments.into());
-	}
-
-	let numbers = numbers_option.unwrap().collect::<Vec<_>>();
+	let numbers = matches
+		.get_many::<String>(ARG_NUMBERS)
+		.ok_or(SeqError::NoArguments)?
+		.collect::<Vec<_>>();
 
 	let options = SeqOptions {
 		separator:   matches

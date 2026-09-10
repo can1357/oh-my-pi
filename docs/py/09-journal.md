@@ -52,7 +52,7 @@ flowchart TD
 ```
 
 This maps one-to-one onto the durable shape that already exists in
-`crates/storage/src/transcript/event.rs:334-343`:
+`crates/journal/src/entry.rs:68-83`:
 
 ```rust
 Kind::Custom {
@@ -93,7 +93,7 @@ flowchart LR
     CORE --> SCOPED[("Scoped store<br/>omp.state, cross-session")]
     CORE --> INDEX[("Sessions index<br/>write-time, cross-session")]
     EXT -->|DATA| ENV["Environment"]
-    ENV --> BLOBS[("Blob store<br/>BLAKE3, content-addressed")]
+    ENV --> BLOBS[("Blob store<br/>SHA-256, content-addressed")]
     ENV --> STATE[("State dir<br/>per-extension, rebuildable")]
     JOURNAL -.->|"reachability"| BLOBS
 ```
@@ -135,9 +135,10 @@ about. That is what `omp.state` exists to make unnecessary.
 These are enforced, not advisory.
 
 1. **Append-only.** There is no update and no delete. A later entry supersedes an
-   earlier one; the fold decides. The transcript never rewrites existing bytes —
-   malformed lines survive as tombstones so physical indexes stay stable
-   (`crates/storage/src/transcript/mod.rs:1-11`).
+   earlier one; the fold decides. The journal never rewrites committed bytes —
+   reopening truncates only the uncommitted tail after the last commit point, so
+   physical indexes stay stable (`crates/journal/src/lib.rs:95-119`,
+   `crates/journal/src/sse.rs:3-4`).
 2. **One writer.** Only the Agent Core writes the journal. The host *requests*
    appends over CONTROL and receives the assigned index. There is no path by
    which two processes append concurrently, which is the entire class of bug that
@@ -590,7 +591,7 @@ totally ordered within its scope instance, hashable, and `str()`-able.
 
 The content-addressed half, for immutable values too large or too cold for log
 entries: embedding shards, compiled rule sets, model-weight manifests. Same
-BLAKE3 addressing as the blob store (`omp.BlobRef`, `docs/py/11-env.md`);
+SHA-256 addressing as the blob store (`omp.BlobRef`, `docs/py/11-env.md`);
 retention is rooted in the scope rather than in a session journal, so a
 `PROJECT` value lives as long as the project retains it. The reachability
 discipline applies unchanged: a CAS value referenced by no scoped log entry is
@@ -857,7 +858,7 @@ able to see that it is wrong.
 
 Mirrors `omp.inference.v1.Usage` (`crates/proto/proto/omp/inference/v1/common.proto:66-90`),
 which is the authoritative accounting shape — not the narrower four-field
-`omp_storage::transcript::Usage` (`types.rs:40-51`) that the journal records per
+`omp_journal::transcript::Usage` (`types.rs:40-51`) that the journal records per
 turn. Aggregation must not flatten to the narrow form: `reasoning_tokens` and
 `premium_requests` are separately billed, and cache reads and cache writes price
 differently, so collapsing any of them is how cost dashboards start lying.
@@ -975,7 +976,7 @@ how long it lives.
 > it.**
 
 Content-addressing already makes writes idempotent and cross-session deduplicated
-(`crates/storage/src/blob.rs:1-12`). What it does not give is a reason to keep a
+(`crates/journal/src/blob.rs:1-12`). What it does not give is a reason to keep a
 blob, and that reason has to be a reference from durable truth. So:
 
 - `omp.artifacts.put` returns an `omp.ArtifactRef` that is **not yet durable**.
@@ -1666,19 +1667,20 @@ neither has a job.
 
 ## What this requires us to build
 
-### `crates/storage` — the durable layer
+### `crates/journal` — the durable layer
 
-**Exists and is directly reusable.** `Kind::Custom { kind, data, context, display }`
-(`src/transcript/event.rs:334-343`) is already the three-projection shape this
-document specifies, already stores `data` as `Box<RawValue>` for verbatim
-round-trip, and already encodes/decodes through `codec.rs:292-298` and
-`codec.rs:462-467`. `Writer` reuses one `BytesMut` line buffer and rolls back a
-partial append, distinguishing clean failure from indeterminate durability
-(`writer.rs:20`, `codec::Error::AppendRollback`). `Log::live()` folds the live
-chain in one forward pass with no parent map (`reader.rs:69-177`). `BlobStore`
-gives BLAKE3 addressing, idempotent writes, `put_reader` streaming, atomic
-placement, and `verify` (`blob.rs:128-332`). This is the majority of the work,
-already done.
+**Exists and is directly reusable.** The durable format is the closed revision-1 kind set
+over single-line JSON payloads (`crates/journal/src/entry.rs:68-83`), framed by the SSE
+line codec in `crates/journal/src/sse.rs` with unknown kinds rejected at parse
+(`crates/journal/src/sse.rs:276-279`) and at open (`crates/journal/src/lib.rs:423-425`).
+`Journal::open` (`crates/journal/src/lib.rs:95-119`) recovers committed entries and
+physically truncates bytes after the last committing blank line, exposing the removed
+count through the `recovered_tail_bytes` accessor — clean failure versus indeterminate
+durability is decided at open, not by a rollback buffer. `live_chain` / `abandoned`
+(`crates/journal/src/chain.rs:12-27`) fold the tail-selected chain in one forward pass.
+`BlobStore` (`crates/journal/src/blob.rs:367-371`) gives content-addressed storage with
+streaming `put_reader` writes (`crates/journal/src/blob.rs:562`) and `verify`
+(`crates/journal/src/blob.rs:680`). This is the majority of the work, already done.
 
 **Mostly exists: revision attribution.** Lesson #8's machinery is already
 implemented, and this document must not present it as novel. `omp_tool::Rev`
@@ -1686,10 +1688,10 @@ implemented, and this document must not present it as novel. `omp_tool::Rev`
 the types; `TOOL_REV_PROP = "omp/tool-rev"` (`:46`) is the durable carrier;
 `Tool::lift(&self, from: &Rev, call: RecordedCall) -> Option<LiftedCall>` (`:214`)
 is the upgrade path; `Registry::project` performs the adjacent-lift walk and
-`Registry::live_hash() -> [u8; 32]` gives the live registry a stable blake3
-identity (`registry.rs:544`, `:458`). The stamping is wired end to end:
-`crates/agent/src/project.rs:165,171,258`, `crates/agent/src/loop.rs:1368-1370`
-writing and `:1129-1131` reading.
+`Registry::projection_hash() -> Hash32` gives the live registry a stable SHA-256
+identity (`registry.rs` `project` at `:2988`, `projection_hash` at `:2690`). The stamping is
+wired end to end in the session projection:
+`crates/session/src/projection.rs:167-176` writing and `:188-203` reading.
 
 What is *not* wired is the migration itself. `Tool::lift` (`lib.rs:214`) and the
 erased default in `registry.rs:219` both return `None`, so today no tool actually
@@ -1738,14 +1740,15 @@ the largest, box it as `Custom(Box<CustomEntry>)`, matching the newer
 `TurnInput(TurnInputItem)` style. Every `Kind` move pays for the largest variant,
 and events move through the append path once per entry.
 
-**New: a kind-filtered reader, and a liveness primitive under it.** `Log` has no
-query surface at all — it exposes `get`, `len`, `is_empty`, and `live`. The naive
-addition is one `filter_map` over `self.live()`, and it is wrong for a reason
-worth stating rather than deferring: `Log::live` (`reader.rs:81`, contract at
-`:69-79`) returns a freshly allocated `Vec<u64>` and is called **once per
-projection**. A kind-filtered reader layered on top of it would allocate that
-index vector again on every read, and `omp.journal.fold` invites exactly that
-read pattern.
+**New: a kind-filtered reader, and a liveness primitive under it.** The journal has no
+query surface at all — `Journal` exposes `create`, `open`, `scan`, `append`, `path`, and
+a `recovered_tail_bytes` accessor; branch liveness is the free function `live_chain`
+(`crates/journal/src/chain.rs:12-15`), which yields `&Entry` through a lazily computed
+iterator — there is no `Vec<u64>` index to hand out or reuse. The naive kind-filtered
+reader is one `filter_map` over `live_chain(&entries)`, and its honest cost is not the
+yield but the recomputation: `chain_indices` rebuilds the id map and re-walks the chain
+on every call (`crates/journal/src/chain.rs:29-35`), and `omp.journal.fold` invites
+exactly that repeated walk.
 
 The observation that fixes it: a kind filter does not need the ordered index
 *list*, it needs the ordered *events* plus a liveness predicate. Physical order
@@ -1805,16 +1808,13 @@ This is the same shape `docs/py/08-context.md` arrives at for context patching �
 plan over a presence set, treat "keep" as a move rather than a copy — and the two
 should share the primitive rather than each growing one.
 
-One correction to note here, because this document could easily have inherited it:
-`crates/storage/src/transcript/patch.rs` is **not** a transcript patch protocol. It
-defines `pub enum Patch<T> { Unchanged, Set(T), Clear }`, a tri-state *field*
-update used by `Kind::Infer` to distinguish omission from explicit clearing. The
-real precedent for rewriting a projection is `Log::live` splicing `Kind::Reset`,
-`Kind::Compact { summary, short, first_kept, tokens_before, warning }`, and
-`Kind::Rewind { to }` (`event.rs:238-264`) over the index list — which is why the
-design above builds on `live` and not on `Patch<T>`.
-
-**New: `crates/storage/src/index.rs`, the sessions index.** `omp.sessions.list`
+**The sessions indexes exist: the list side is `omp_driver::sessions::SessionIndex`
+(`crates/driver/src/sessions.rs:316-330`), a disposable in-memory lookup rebuilt by scanning
+`.oms` genesis frames through `Journal::scan`; the usage side is `omp_cache::stats_cache`
+(`crates/cache/src/stats_cache.rs:1-8`), a rebuildable SQLite index behind `/stats`
+(`crates/app/src/chat_services/stats.rs:1-6`) holding one row per journaled turn receipt and
+tool call plus a per-file `file_offsets` sync cursor, with the journals staying
+authoritative.** `omp.sessions.list`
 and `omp.sessions.usage` need rows, and pi proves what happens without them: two
 independent re-parsers (`stats.db` with a `file_offsets` watermark table, and the
 extension's own `(size, mtime)` cache), both racing, both wrong on live files.
@@ -1839,7 +1839,7 @@ the right store: `omp.sessions.usage`'s `group_by` and `bucket` are exactly what
 dependency is the wrong trade. The index is a cache of the journals by
 construction, so a corrupt index is a rebuild, never data loss.
 
-**New: `crates/storage/src/gc.rs`.** No sweep, refcount, or retention logic exists
+**New: `crates/journal/src/gc.rs`.** No sweep, refcount, or retention logic exists
 anywhere in `blob.rs` — confirmed by search; the store only ever grows. Retention
 needs:
 
@@ -1965,12 +1965,13 @@ under `omp.Scheme` describes as costing "zero registered tool slots." That desig
 fix is clean because route-awareness already exists elsewhere: `invoke` checks
 route and refuses `ToolRoute::Worker` (`:476-478`), and `live_identities`
 (`:439-440`) documents that callers must inspect `route` before granting execution;
-`advertise` simply does not use it. Relatedly, `live_hash` (`:458-467`) is one
-digest over *all* live identities, so reusing it unchanged as prompt-cache identity
-would falsify the availability-as-notification property the moment devices exist —
-the `slot_hash`/`device_hash` split in `docs/py/01-devices.md` is the correction,
-and the `schemes()` invalidation note earlier in this section should be read
-against that split rather than against today's single digest.
+`advertise` simply does not use it. The hash caveat this paragraph once raised
+is already paid: the undifferentiated `live_hash` is gone from `crates/tool`,
+and the split exists as shipped SHA-256 methods — `slot_hash()`
+(`registry.rs:2623-2650`) for the prompt-cache identity, `device_hash()`
+(`registry.rs:2654-2686`) for availability. A device appearing moves
+`device_hash()` and never the prompt prefix, so the `schemes()` invalidation
+note earlier in this section reads against the shipped split directly.
 
 Three things this namespace needs already have a wire home.
 
@@ -2000,7 +2001,7 @@ the wrong default.
 `common.proto:66-90` and `:108-117` are the authoritative shapes, and
 `omp.UsageBucket` projects them verbatim rather than defining a parallel
 vocabulary. This is also where the narrow-vs-rich discrepancy has to be resolved
-in one direction: `omp_storage::transcript::Usage` records four fields per turn,
+in one direction: `omp_journal::transcript::Usage` records four fields per turn,
 while the inference layer reports thirteen. Aggregation that reads only the
 journal cannot report `reasoning`, `premium_requests`, or `accuracy` at all. So
 the sessions index must be fed from the *inference* `Usage` at receipt time — one
@@ -2260,21 +2261,20 @@ transcription is cheaper than a CONTROL round trip for a pure parse. `schemes()`
 must come from Rust, because which schemes resolve depends on the deployment.
 
 And `schemes()` needs no new change-detection mechanism, only the right one.
-`Registry::live_hash() -> [u8; 32]` (`crates/tool/src/registry.rs:458-467`) already
-gives the live registry a content-derived blake3 identity, which is the shape of
+`Registry::device_hash() -> Hash32` (`crates/tool/src/registry.rs:2654`) already
+gives the mounted device set a content-derived SHA-256 identity — mounted
+availability plus claimant-qualified reachability, exactly the shape of
 the "did the reachable capability set change" question — so a host that caches
 `schemes()` invalidates on that identity rather than growing a parallel version
 counter, and two hosts agreeing on the identity agree on the table, which is what
 makes the thin-client / remote-workspace split checkable instead of hopeful.
 
-The caveat matters, though: `live_hash` today is **one** digest over all live
-identities, so it changes when anything changes. Cache invalidation is the benign
-use — an over-eager invalidation costs a recompute. Prompt-cache identity is the
-use that would break, because a device appearing would move a digest the prompt
-prefix depends on and thereby falsify the availability-as-notification property.
-`schemes()` must therefore bind to the device-side digest of the `slot_hash` /
-`device_hash` split in `docs/py/01-devices.md`, not to the undifferentiated hash as
-it stands. Same primitive, correct half of it.
+The caveat the earlier revision carried is already paid: the undifferentiated
+`live_hash` it warned about is gone from `crates/tool`, and the split exists as
+shipped methods — `slot_hash()` (`registry.rs:2623`) for the prompt-cache
+identity, `device_hash()` (`registry.rs:2654`) for availability. `schemes()`
+binds to the device-side half directly; a device appearing moves
+`device_hash()` and never the prompt prefix. Same primitive, correct half of it.
 
 ### Feature-map reconciliation
 
@@ -2303,8 +2303,7 @@ Satisfied:
   standalone `omp-stats` server with cross-process file locking, port-conflict
   recovery, and a worker-thread parser pool.
 
-Roadmap sequencing, so the dependency order is explicit
-(`.plan/feature-map/ROADMAP.md`):
+Roadmap sequencing, so the dependency order is explicit:
 
 | Milestone | Already sequenced there | What this namespace adds to it |
 |---|---|---|
@@ -2413,7 +2412,7 @@ and `--pool` is explicit opt-in fate-sharing that shares exactly this failure.
 D5's "warm pool of one" wording predated that ruling; it was a locked decision,
 so this document did not silently contradict it and instead recorded the flagged
 recommendation. That recommendation was ratified 2026-08-19: D5's third clause
-(`PLAN.md` §D5) now reads "supervised worker processes, one per active
+now reads "supervised worker processes, one per active
 extension, keyed `(layer, tier, extension)`; pooling is explicit opt-in
 fate-sharing", with SIGKILL granularity one extension's process group and
 approval a durable Core-owned ticket (`docs/py/06-policy.md`), removing the
@@ -2448,7 +2447,7 @@ as the historical record.
    for the durable tier only. The second keeps the common case short and makes the
    long form exactly as long as it needs to be, but it means two syntaxes for one
    scheme.
-5. **Resolved (2026-08-19 user ruling): consumed means the referencing entry leaves the live chain — sweep is tied to Log::live membership, so a rewind that resurrects the reference finds the blob alive.** **Ephemeral sweep timing.** `ArtifactLifetime::Ephemeral` is "retain only long
+5. **Resolved (2026-08-19 user ruling): consumed means the referencing entry leaves the live chain — sweep is tied to live-chain membership, so a rewind that resurrects the reference finds the blob alive.** **Ephemeral sweep timing.** `ArtifactLifetime::Ephemeral` is "retain only long
    enough to consume the settlement," and nothing currently defines *consumed*. Is
    it when the model's turn including the reference completes, or when the
    referencing entry leaves the live chain? The two differ after a rewind, and a
@@ -2464,8 +2463,8 @@ as the historical record.
    the topology ruling is final — one process and one site tree per extension,
    host key `(layer, tier, extension)`, SIGKILL granularity one extension's
    process group, `--pool` as explicit opt-in fate-sharing. The D5 wording
-   amendment this document flagged was ratified 2026-08-19
-   (`PLAN.md` §D5), as the correction above records.
+   amendment this document flagged was ratified 2026-08-19,
+   as the correction above records.
 
    What remains is the *within-extension* residue, and its durable-state
    consequences are specific — they are why this item stays on the list:
@@ -2544,7 +2543,7 @@ Changes this file made in response to the external review, by review point:
   question 6 are rewritten: SIGKILL granularity is one extension's process
   group, the cross-extension blast radius Revision 1 left unresolved is
   resolved by the per-extension-process ruling, and the recommended D5
-  amendment is stated explicitly against `PLAN.md` §D5 rather than
+  amendment is stated explicitly against the locked decision rather than
   silently applied.
 - **§0 renames, file-wide.** `append_batch` → `append_many`; late-activation
   `session_start` → `extension_activate` (rebuild example, failure table);
@@ -2554,7 +2553,7 @@ Changes this file made in response to the external review, by review point:
   examples; `duration_ms` becomes `omp.Duration`; the durable call outcome is
   referred to as `omp.CallOutcome`.
 
-**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the PLAN.md amendment:
+**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the D5/D6 amendment:
 
 - **Device scheme deleted.** Rev 2's `omp.Scheme` table carried a mintable read/write
   device row and named a typed device URL value; the Rev 2.1 ruling deletes the device URL
@@ -2566,10 +2565,10 @@ Changes this file made in response to the external review, by review point:
   scheme is ever writable. Declarations carry soft/hard intent; the surface is decided by
   the dynamic tool policy (`docs/py/01-devices.md`). The Lesson #6 defect paragraph and
   the protocol-handler reconciliation entry were respelled accordingly.
-- **D5/D6 ratified.** `PLAN.md` §D5/§D6 was amended 2026-08-19. The cancellation
+- **D5/D6 ratified.** Locked decisions D5 and D6 were amended 2026-08-19. The cancellation
   correction and open question 6 now record the D5 amendment as ratified — per-extension
   worker processes keyed `(layer, tier, extension)`, pooling as opt-in fate-sharing,
-  durable approval tickets (`PLAN.md` §D5) — where Rev 2 flagged it as a
+  durable approval tickets — where Rev 2 flagged it as a
   recommendation. The Rev 2 flags are kept in prose as historical records.
 
 **Revision 2.2** — the `dyn` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `dyn` builtin of the embedded shell, inside the core `shell` tool: `dyn` lists the catalog (`dyn --q <text>` searches), `dyn <device> --help` returns docs plus schema-derived CLI usage, and `dyn <device> [args…]` (or `dyn <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `dyn resolve "<reason>"` / `dyn reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `dyn` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.

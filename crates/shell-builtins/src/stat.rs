@@ -2025,7 +2025,7 @@ for details about the options it supports.";
 		if let Some(time) = metadata_get_time(meta, md_time_field) {
 			let mut tmp = Vec::new();
 			if format_system_time(&mut tmp, time, fmt, FormatSystemTimeFallback::Float).is_ok() {
-				return String::from_utf8(tmp).unwrap();
+				return String::from_utf8(tmp).expect("system-time formatter writes valid UTF-8");
 			}
 		}
 		"-".to_string()

@@ -159,7 +159,12 @@ pub mod command {
 				.max()
 				.unwrap_or(0);
 
-			Self { parts, max_group_number: max_group_number.try_into().unwrap() }
+			Self {
+				parts,
+				max_group_number: max_group_number
+					.try_into()
+					.expect("capture group numbers fit in usize on supported targets"),
+			}
 		}
 
 		/// Apply the template to the given RE captures.
@@ -189,7 +194,9 @@ pub mod command {
 					},
 
 					ReplacementPart::Group(n) => {
-						let i: usize = (*n).try_into().unwrap();
+						let i: usize = (*n)
+							.try_into()
+							.expect("capture group numbers fit in usize on supported targets");
 						result.push_str(caps.get(i)?.map(|m| m.as_str()).unwrap_or_default());
 					},
 				}
@@ -1065,11 +1072,13 @@ pub mod compiler {
 			},
 			'+' => {
 				line.advance();
-				let number = parse_number(lines, line, true)?.unwrap();
+				let number = parse_number(lines, line, true)?
+					.expect("required context address number is present after validation");
 				Ok(Address::RelLine(number))
 			},
 			c if c.is_ascii_digit() => {
-				let number = parse_number(lines, line, true)?.unwrap();
+				let number = parse_number(lines, line, true)?
+					.expect("required context address number is present after validation");
 				Ok(Address::Line(number))
 			},
 			_ => panic!("invalid context address"),
@@ -1302,7 +1311,9 @@ pub mod compiler {
 						match line.current() {
 							// \0 - \9
 							c @ '0'..='9' => {
-								let ref_num = c.to_digit(10).unwrap();
+								let ref_num = c
+									.to_digit(10)
+									.expect("ASCII digit pattern guarantees a decimal digit");
 
 								if !literal.is_empty() {
 									parts.push(ReplacementPart::Literal(mem::take(&mut literal)));
@@ -1557,7 +1568,15 @@ pub mod compiler {
 					while !line.eol() && line.current().is_ascii_digit() {
 						number = number
 							.checked_mul(10)
-							.and_then(|n| n.checked_add(line.current().to_digit(10).unwrap() as usize))
+							.and_then(|n| {
+								n.checked_add(
+									line
+										.current()
+										.to_digit(10)
+										.expect("ASCII digit pattern guarantees a decimal digit")
+										as usize,
+								)
+							})
 							.ok_or_else(|| {
 								compilation_error::<()>(lines, line, "overflow in numeric substitute flag")
 									.unwrap_err()
@@ -6761,8 +6780,9 @@ pub mod fast_regex {
 	// For example, r"\\1" and r"[\1]" will match, whereas only a number
 	// after an odd number of backslashes and outside a character class
 	// should match.
-	static NEEDS_FANCY_RE: LazyLock<RustRegex> =
-		LazyLock::new(|| regex::Regex::new(r"\\[1-9]").unwrap());
+	static NEEDS_FANCY_RE: LazyLock<RustRegex> = LazyLock::new(|| {
+		regex::Regex::new(r"\\[1-9]").expect("static backreference detector regex is valid")
+	});
 
 	/// All characters signifying that the match must be handled by an RE
 	/// rather than by plain string pattern matching.
@@ -6790,7 +6810,7 @@ pub mod fast_regex {
            )
         ",
 		)
-		.unwrap()
+		.expect("static regex detector is valid")
 	});
 
 	#[derive(Clone, Debug)]
@@ -8100,7 +8120,10 @@ pub mod processor {
 			// First time we see this regex: clone it *once* into the context.
 			context.saved_regex = Some(re.clone());
 			// Return a reference into context.saved_regex.
-			Ok(context.saved_regex.as_ref().unwrap())
+			Ok(context
+				.saved_regex
+				.as_ref()
+				.expect("saved regex inserted above"))
 		} else if let Some(ref saved_re) = context.saved_regex {
 			// We already have one: just borrow it.
 			Ok(saved_re)
@@ -8136,8 +8159,9 @@ pub mod processor {
 				match regex.find(pattern) {
 					Err(e) => Err(e),
 					Ok(Some(m)) => {
-						text = Some(pattern.as_str()?);
-						result.push_str(&text.unwrap()[last_end..m.start()]);
+						let pattern_text = pattern.as_str()?;
+						text = Some(pattern_text);
+						result.push_str(&pattern_text[last_end..m.start()]);
 
 						let replacement = sub.replacement.apply_match(&m);
 						result.push_str(&replacement);
@@ -8154,9 +8178,12 @@ pub mod processor {
 				match regex.captures(pattern) {
 					Err(e) => Err(e),
 					Ok(Some(caps)) => {
-						let m = caps.get(0)?.unwrap();
-						text = Some(pattern.as_str()?);
-						result.push_str(&text.unwrap()[last_end..m.start()]);
+						let m = caps
+							.get(0)?
+							.expect("successful regex captures always include group 0");
+						let pattern_text = pattern.as_str()?;
+						text = Some(pattern_text);
+						result.push_str(&pattern_text[last_end..m.start()]);
 
 						let replacement = sub.replacement.apply_captures(command, &caps)?;
 						result.push_str(&replacement);
@@ -8179,13 +8206,19 @@ pub mod processor {
 						};
 						count += 1;
 
-						let m = caps.get(0)?.unwrap();
+						let m = caps
+							.get(0)?
+							.expect("successful regex captures always include group 0");
 
 						// Always write the unmatched text before this match.
-						if text.is_none() {
-							text = Some(pattern.as_str()?);
-						}
-						result.push_str(&text.unwrap()[last_end..m.start()]);
+						let pattern_text = if let Some(text) = text {
+							text
+						} else {
+							let pattern_text = pattern.as_str()?;
+							text = Some(pattern_text);
+							pattern_text
+						};
+						result.push_str(&pattern_text[last_end..m.start()]);
 
 						if sub.occurrence == 0 || count == sub.occurrence {
 							let replacement = sub.replacement.apply_captures(command, &caps)?;
@@ -8216,7 +8249,8 @@ pub mod processor {
 
 		// Handle substitution success.
 		if replaced {
-			result.push_str(&text.unwrap()[last_end..]);
+			let pattern_text = text.expect("pattern text is captured before applying a replacement");
+			result.push_str(&pattern_text[last_end..]);
 
 			pattern.set_to_string(result, pattern.is_newline_terminated());
 

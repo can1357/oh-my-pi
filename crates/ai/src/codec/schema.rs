@@ -2,6 +2,7 @@
 //! modes.
 
 use serde_json::{Map, Value};
+use strum::IntoStaticStr;
 
 /// JSON Schema dialect selected by the routed codec.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -13,20 +14,20 @@ pub enum SchemaDialect {
 }
 
 /// Typed reason why requested strict enforcement was not emitted.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
+#[strum(const_into_str)]
 pub enum StrictFallbackReason {
 	/// The compiled route capability was false or unknown.
+	#[strum(serialize = "catalog.strict-schema-unsupported")]
 	Unsupported,
 	/// Preserving the declared schema semantics is impossible in strict mode.
+	#[strum(serialize = "schema.strict-schema-unrepresentable")]
 	Unrepresentable,
 }
 
 impl StrictFallbackReason {
 	pub(crate) const fn reason_id(self) -> &'static str {
-		match self {
-			Self::Unsupported => "catalog.strict-schema-unsupported",
-			Self::Unrepresentable => "schema.strict-schema-unrepresentable",
-		}
+		self.into_str()
 	}
 }
 

@@ -11,7 +11,6 @@ mod parsers;
 
 use std::{
 	borrow::Cow,
-	collections::HashMap,
 	fmt::{self, Display},
 	iter,
 	path::Path,
@@ -231,27 +230,27 @@ impl LanguageExt for Html {
 	fn extract_injections<L: LanguageExt>(
 		&self,
 		root: Node<StrDoc<L>>,
-	) -> HashMap<String, Vec<TSRange>> {
+	) -> Vec<(String, Vec<TSRange>)> {
 		let lang = root.lang();
-		let mut map = HashMap::new();
+		let mut injections = Vec::new();
 		let matcher = KindMatcher::new("script_element", lang.clone());
 		for script in root.find_all(matcher) {
 			if let Some(content) = script.children().find(|child| child.kind() == "raw_text") {
-				push_html_injection(&mut map, &script, "js", node_to_range(&content));
+				push_html_injection(&mut injections, &script, "js", node_to_range(&content));
 			}
 		}
 		let matcher = KindMatcher::new("style_element", lang.clone());
 		for style in root.find_all(matcher) {
 			if let Some(content) = style.children().find(|child| child.kind() == "raw_text") {
-				push_html_injection(&mut map, &style, "css", node_to_range(&content));
+				push_html_injection(&mut injections, &style, "css", node_to_range(&content));
 			}
 		}
-		map
+		injections
 	}
 }
 
 fn push_html_injection<D: Doc>(
-	map: &mut HashMap<String, Vec<TSRange>>,
+	injections: &mut Vec<(String, Vec<TSRange>)>,
 	node: &Node<D>,
 	default_language: &'static str,
 	range: TSRange,
@@ -268,18 +267,22 @@ fn push_html_injection<D: Doc>(
 	});
 	if let Some(value) = value {
 		let language = value.text();
-		push_injection_range(map, language.as_ref(), range);
+		push_injection_range(injections, language.as_ref(), range);
 	} else {
-		push_injection_range(map, default_language, range);
+		push_injection_range(injections, default_language, range);
 	}
 }
 
-fn push_injection_range(map: &mut HashMap<String, Vec<TSRange>>, language: &str, range: TSRange) {
-	if let Some(ranges) = map.get_mut(language) {
+fn push_injection_range(
+	injections: &mut Vec<(String, Vec<TSRange>)>,
+	language: &str,
+	range: TSRange,
+) {
+	if let Some((_, ranges)) = injections.iter_mut().find(|(name, _)| name == language) {
 		ranges.push(range);
 		return;
 	}
-	map.insert(language.to_owned(), vec![range]);
+	injections.push((language.to_owned(), vec![range]));
 }
 
 fn node_to_range<D: Doc>(node: &Node<D>) -> TSRange {
@@ -663,10 +666,10 @@ impl LanguageExt for SupportLang {
 	fn extract_injections<L: LanguageExt>(
 		&self,
 		root: Node<StrDoc<L>>,
-	) -> HashMap<String, Vec<TSRange>> {
+	) -> Vec<(String, Vec<TSRange>)> {
 		match self {
 			Self::Html => Html.extract_injections(root),
-			_ => HashMap::new(),
+			_ => Vec::new(),
 		}
 	}
 }
@@ -819,5 +822,51 @@ mod tests {
 	fn extension_inference_selects_starlark_and_objective_cpp_grammars() {
 		assert_eq!(from_extension(Path::new("rules.bzl")), Some(SupportLang::Starlark));
 		assert_eq!(from_extension(Path::new("bridge.mm")), Some(SupportLang::ObjC));
+	}
+
+	#[test]
+	fn html_injections_group_by_language_and_source_order() {
+		use ast_grep_core::tree_sitter::LanguageExt;
+
+		let html = Html;
+		let source = "<!doctype html>\n<script>\n  a;\n</script>\n<script lang=\"ts\">\n  \
+		          c;\n</script>\n<style>\n  .x {}\n</style>\n<script>\n  d;\n</script>\n";
+		let ast = html.ast_grep(source);
+		let injections = html.extract_injections(ast.root());
+
+		// Scripts are collected before styles; ranges within each language group
+		// are appended in source order by `push_injection_range`.
+		let group = |name: &str| {
+			injections
+				.iter()
+				.find(|(lang, _)| lang == name)
+				.map(|(_, ranges)| ranges.as_slice())
+				.expect("injection group")
+		};
+
+		assert_eq!(injections.len(), 3, "expected js, ts, and css injection groups");
+
+		let js = group("js");
+		assert_eq!(js.len(), 2, "plain scripts are grouped under js");
+		assert!(js[0].start_byte < js[1].start_byte, "js ranges stay in source order");
+
+		let ts = group("ts");
+		assert_eq!(ts.len(), 1, "lang=ts overrides default js");
+
+		let css = group("css");
+		assert_eq!(css.len(), 1, "style defaults to css");
+
+		// All source ranges are ordered and non-overlapping; the style sits between the
+		// second (ts) and third (js) script in source order, so the css range is between
+		// them even though css appears last in the grouped result.
+		assert!(js[0].start_byte < ts[0].start_byte, "first js precedes ts");
+		assert!(ts[0].start_byte < css[0].start_byte, "ts precedes style");
+		assert!(css[0].start_byte < js[1].start_byte, "style precedes second js");
+
+		// Each raw_text slice contains the expected content.
+		assert!(source[js[0].start_byte..js[0].end_byte].contains("a;"));
+		assert!(source[js[1].start_byte..js[1].end_byte].contains("d;"));
+		assert!(source[ts[0].start_byte..ts[0].end_byte].contains("c;"));
+		assert!(source[css[0].start_byte..css[0].end_byte].contains(".x {}"));
 	}
 }

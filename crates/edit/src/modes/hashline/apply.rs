@@ -386,7 +386,12 @@ fn normalize_echoes(
 					.map(|&idx| with_index(&edits[idx], idx as u32)),
 			);
 		}
-		i = group.delete_indices.last().copied().unwrap() + 1;
+		let last = group
+			.delete_indices
+			.last()
+			.copied()
+			.expect("replacement group has at least one delete");
+		i = last + 1;
 	}
 	(out, warnings, ambiguities)
 }
@@ -626,7 +631,12 @@ fn splice_variants(
 					.map(|&idx| with_index(&edits[idx], idx as u32)),
 			);
 		}
-		i = group.delete_indices.last().copied().unwrap() + 1;
+		let last = group
+			.delete_indices
+			.last()
+			.copied()
+			.expect("replacement group has at least one delete");
+		i = last + 1;
 	}
 	out
 }
@@ -652,7 +662,12 @@ fn repair_boundaries(
 			if !variants.is_empty() {
 				groups.push((group.clone(), variants));
 			}
-			i = group.delete_indices.last().copied().unwrap() + 1;
+			let last = group
+				.delete_indices
+				.last()
+				.copied()
+				.expect("replacement group has at least one delete");
+			i = last + 1;
 		} else {
 			i += 1;
 		}

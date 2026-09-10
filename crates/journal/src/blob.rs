@@ -790,6 +790,7 @@ impl BlobStore {
 			.create(true)
 			.read(true)
 			.write(true)
+			.truncate(false)
 			.open(self.root.join(".blobs-gc.lock"))?;
 		File::lock_shared(&file)?;
 		Ok(GcLease { _file: file })
@@ -800,6 +801,7 @@ impl BlobStore {
 			.create(true)
 			.read(true)
 			.write(true)
+			.truncate(false)
 			.open(self.root.join(".blobs-gc.lock"))?;
 		match file.try_lock() {
 			Ok(()) => Ok(GcLease { _file: file }),
@@ -813,6 +815,7 @@ impl BlobStore {
 			.create(true)
 			.read(true)
 			.write(true)
+			.truncate(false)
 			.open(self.root.join(".blobs.lock"))?;
 		file.lock()?;
 		Ok(NamespaceLock { _file: file })
