@@ -290,9 +290,20 @@ function mergeSubscriptionChanges(
 	for (const change of existing) merged.set(change.key, change);
 	for (const change of incoming) {
 		const prior = merged.get(change.key);
+		let previous = prior?.previous ?? change.previous;
+		if (change.key === "Emulation.setEmulatedMedia" && prior?.previous && change.previous) {
+			previous = {
+				...prior.previous,
+				params: mergeSubscriptionParams(
+					change.key,
+					prior.previous.params,
+					change.previous.params,
+				),
+			};
+		}
 		merged.set(change.key, {
 			key: change.key,
-			previous: prior?.previous ?? change.previous,
+			previous,
 			next: change.next,
 		});
 	}

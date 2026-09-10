@@ -76,6 +76,7 @@ let ws: WebSocket | null = null;
 // gate on hello delivery, not mere readiness. Compared by identity, so a
 // replacement socket reads as uninitialized until it sends its own hello.
 let helloDeliveredSocket: WebSocket | null = null;
+let initializedRelayClearedOrphanSweep = false;
 let reconnectDelay = RECONNECT_MIN_MS;
 let pingTimer: NodeJS.Timeout | null = null;
 const pendingAttaches = new Set<Promise<void>>();
@@ -354,6 +355,7 @@ async function setOrphanSweepDeadline(
 		// clear from later persisting null over a newer deadline.
 		alarmUpdate = chrome.alarms.clear(ORPHAN_SWEEP_ALARM);
 	} else {
+		initializedRelayClearedOrphanSweep = false;
 		chrome.alarms.create(ORPHAN_SWEEP_ALARM, {
 			delayInMinutes: orphanSweepAlarmDelayMinutes(deadlineMs, Date.now()),
 		});
@@ -1240,6 +1242,7 @@ async function connect(): Promise<void> {
 		refreshHello(() => {
 			helloDeliveredSocket = socket;
 			attachmentGuard.onConnected();
+			initializedRelayClearedOrphanSweep = true;
 			void setOrphanSweepDeadline(null);
 		});
 		clearInterval(pingTimer ?? undefined);
@@ -1450,11 +1453,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 			orphanSweepDeadlineMs,
 			alarm.scheduledTime,
 			orphanSweepDeadlineGeneration,
+			initializedRelayClearedOrphanSweep,
 		);
 		orphanSweepDeadlineMs = seeded.deadlineMs;
 		orphanSweepDeadlineGeneration = seeded.generation;
 		void runAfterStartupReconciliation(ensureStartupReconciled, () =>
-			maybeRunOrphanSweep(alarm.scheduledTime),
+			maybeRunOrphanSweep(seeded.deadlineMs === null ? undefined : alarm.scheduledTime),
 		).catch(() => {});
 	}
 });

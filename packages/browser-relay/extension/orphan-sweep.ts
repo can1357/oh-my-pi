@@ -128,9 +128,13 @@ export function seedOrphanSweepDeadline(
 	currentDeadlineMs: number | null,
 	scheduledTime: number,
 	generation: number,
-): { deadlineMs: number; generation: number } {
+	initializedRelayIntervened = false,
+): { deadlineMs: number | null; generation: number } {
 	if (currentDeadlineMs !== null) {
 		return { deadlineMs: currentDeadlineMs, generation };
+	}
+	if (initializedRelayIntervened) {
+		return { deadlineMs: null, generation };
 	}
 	return { deadlineMs: scheduledTime, generation: generation + 1 };
 }

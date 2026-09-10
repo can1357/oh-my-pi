@@ -6915,6 +6915,46 @@ describe("RelayBridge tab grouping", () => {
 		});
 	});
 
+	it("clears every emulated-media field applied by an owner that disconnects with commands in flight", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		void (await attachPage(bridge, ext, holder, holderConn, 1));
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Emulation.setEmulatedMedia",
+				params: { media: "print" },
+			}),
+		);
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Emulation.setEmulatedMedia",
+				params: { features: [{ name: "prefers-color-scheme", value: "dark" }] },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 2, "in-flight emulated-media setters");
+		bridge.cdpClosed(ownerConn);
+		ack(bridge, ext, "send");
+
+		await waitFor(() => ext.rpcs("send").length === 3, "aggregated orphaned emulated-media cleanup");
+		expect(ext.rpcs("send")[2]).toMatchObject({
+			method: "Emulation.setEmulatedMedia",
+			params: { media: "", features: [] },
+		});
+	});
+
 	it("replays idle emulation after guard recovery and clears it when the owner disconnects", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

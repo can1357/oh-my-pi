@@ -113,6 +113,13 @@ describe("browser relay orphan sweep scheduling", () => {
 		expect(orphanSweepAlarmDelayMinutes(31_000, 31_500)).toBe(0.01);
 	});
 
+	it("does not restore an expired alarm after an initialized relay cleared it", () => {
+		expect(seedOrphanSweepDeadline(null, 31_000, 4, true)).toEqual({
+			deadlineMs: null,
+			generation: 4,
+		});
+	});
+
 	it("treats only an OPEN socket as owning orphan reconciliation", () => {
 		expect(
 			orphanSweepSeesRelayDisconnected({
