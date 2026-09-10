@@ -254,4 +254,28 @@ describe("createSessionManager — missing session (#2084)", () => {
 			await fsp.rm(cwd, { recursive: true, force: true });
 		}
 	});
+	it("forkFrom rejects a large vanished source taken by the streaming path (#11491)", async () => {
+		const cwd = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-fork-vanished-stream-"));
+		const sessionDir = path.join(cwd, "sessions");
+		await fsp.mkdir(sessionDir, { recursive: true });
+		const missingPath = path.join(cwd, "ghost-big-zz9q.jsonl");
+		const storage = new FileSessionStorage();
+		const realStatSync = storage.statSync.bind(storage);
+		// Report a stream-sized file that is already gone when the stream
+		// opens: statSync succeeds, Bun.file(...).stream() raises ENOENT.
+		vi.spyOn(storage, "statSync").mockImplementation((target: string) =>
+			target === missingPath
+				? { size: 8 * 1024 * 1024, mtimeMs: Date.now(), mtime: new Date() }
+				: realStatSync(target),
+		);
+		try {
+			await expect(SessionManager.forkFrom(missingPath, cwd, sessionDir, storage)).rejects.toThrowError(
+				ForkSourceNotFoundError,
+			);
+			expect(await fsp.readdir(sessionDir)).toEqual([]);
+		} finally {
+			vi.restoreAllMocks();
+			await fsp.rm(cwd, { recursive: true, force: true });
+		}
+	});
 });

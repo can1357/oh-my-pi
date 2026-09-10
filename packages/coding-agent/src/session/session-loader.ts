@@ -31,6 +31,8 @@ export interface VisitEntriesFromFileStreamOptions {
 	yieldEveryEntries?: number;
 	/** Called once for every malformed JSONL record skipped by the stream. */
 	onMalformedRecord?: () => void;
+	/** Rethrow a missing source instead of visiting nothing (fork backstop). */
+	throwIfMissing?: boolean;
 }
 
 /** Parsed session entries plus corruption metadata needed by writable loaders. */
@@ -229,7 +231,10 @@ export async function visitEntriesFromFileStream(
 		}
 	} catch (err) {
 		if (visitorThrew) throw err;
-		if (isEnoent(err)) return undefined;
+		if (isEnoent(err)) {
+			if (options.throwIfMissing) throw err;
+			return undefined;
+		}
 		throw err;
 	}
 
@@ -237,7 +242,10 @@ export async function visitEntriesFromFileStream(
 }
 
 /** Exported for testing — the ≥8MiB streaming path (works on any file size). */
-export async function loadEntriesFromFileStream(filePath: string): Promise<SessionLoadResult> {
+export async function loadEntriesFromFileStream(
+	filePath: string,
+	options?: Pick<VisitEntriesFromFileStreamOptions, "throwIfMissing">,
+): Promise<SessionLoadResult> {
 	const entries: FileEntry[] = [];
 	let malformedRecords = 0;
 	const titleSlot = await visitEntriesFromFileStream(
@@ -249,6 +257,7 @@ export async function loadEntriesFromFileStream(filePath: string): Promise<Sessi
 			onMalformedRecord: () => {
 				malformedRecords++;
 			},
+			throwIfMissing: options?.throwIfMissing,
 		},
 	);
 	return {
@@ -268,9 +277,14 @@ function shouldStreamEntries(storage: SessionStorage, size: number): boolean {
 	return storage instanceof FileSessionStorage && size >= STREAM_LOAD_THRESHOLD_BYTES;
 }
 
-async function loadWithKnownSize(filePath: string, storage: SessionStorage, size: number): Promise<SessionLoadResult> {
+async function loadWithKnownSize(
+	filePath: string,
+	storage: SessionStorage,
+	size: number,
+	options?: { throwIfMissing?: boolean },
+): Promise<SessionLoadResult> {
 	const loaded = shouldStreamEntries(storage, size)
-		? await loadEntriesFromFileStream(filePath)
+		? await loadEntriesFromFileStream(filePath, options)
 		: parseSessionContent(await storage.readText(filePath));
 	return loaded.invalidHeader ? { ...loaded, entries: [] } : loaded;
 }
@@ -282,7 +296,7 @@ export async function loadSessionFile(
 	options?: { throwIfMissing?: boolean },
 ): Promise<SessionLoadResult> {
 	try {
-		return await loadWithKnownSize(filePath, storage, storage.statSync(filePath).size);
+		return await loadWithKnownSize(filePath, storage, storage.statSync(filePath).size, options);
 	} catch (err) {
 		if (isEnoent(err)) {
 			if (options?.throwIfMissing) throw err;
