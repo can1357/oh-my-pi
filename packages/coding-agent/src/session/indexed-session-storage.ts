@@ -1,9 +1,11 @@
 import { toError } from "@oh-my-pi/pi-utils";
-import type {
-	SessionStorage,
-	SessionStorageStat,
-	SessionStorageWriter,
-	WriteTextAtomicOptions,
+import {
+	SessionWriteConflictError,
+	type SessionStorage,
+	type SessionStorageStat,
+	type SessionStorageWriter,
+	type SessionStorageWriteOptions,
+	type WriteTextAtomicOptions,
 } from "./session-storage";
 import {
 	overlayTitleSlotContent,
@@ -27,7 +29,17 @@ export interface SessionStorageBackend {
 	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>>;
 	readFull(path: string): Promise<string | null>;
 	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
-	writeFull(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void>;
+	/**
+	 * Replace content, atomically rejecting when the shared backend's current
+	 * UTF-8 byte length differs from `expectedSize`.
+	 */
+	writeFull(
+		path: string,
+		content: string,
+		mtimeMs: number,
+		title?: SessionTitleUpdate,
+		expectedSize?: number | null,
+	): Promise<void>;
 	append(path: string, line: string, mtimeMs: number): Promise<void>;
 	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void>;
 	truncate(path: string, mtimeMs: number): Promise<void>;
@@ -97,6 +109,13 @@ export class IndexedSessionStorage implements SessionStorage {
 	readonly #drainPending = new Set<Promise<void>>();
 	#nextMtimeMs = 0;
 	#firstDrainError: Error | undefined;
+	#assertExpectedSize(path: string, expectedSize: number | null | undefined): void {
+		if (expectedSize === undefined) return;
+		const actualSize = this.#index.get(path)?.size ?? null;
+		if (actualSize !== expectedSize) {
+			throw new SessionWriteConflictError(path, expectedSize, actualSize);
+		}
+	}
 
 	constructor(backend: SessionStorageBackend) {
 		this.#backend = backend;
@@ -141,11 +160,20 @@ export class IndexedSessionStorage implements SessionStorage {
 		return this.#index.has(path);
 	}
 
-	writeTextSync(path: string, content: string): void {
+	writeTextSync(path: string, content: string, options?: SessionStorageWriteOptions): void {
+		this.#assertExpectedSize(path, options?.expectedSize);
+		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
 		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
 		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
-		this.#enqueuePath(path, () => this.#backend.writeFull(path, content, mtimeMs, title), { trackDrain: true });
+		const write = this.#enqueuePath(
+			path,
+			() => this.#backend.writeFull(path, content, mtimeMs, title, options?.expectedSize),
+			{ trackDrain: true },
+		);
+		void write.catch(() => {
+			if (this.#index.get(path)?.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
+		});
 	}
 
 	async updateSessionTitle(path: string, title: SessionTitleUpdate): Promise<void> {
@@ -252,6 +280,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		// awaitPath yield and bumped the epoch. Re-check before touching the
 		// index or enqueueing the backend publish.
 		if (commitGuard && !commitGuard()) return;
+		this.#assertExpectedSize(path, options?.expectedSize);
 		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
 		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
@@ -270,7 +299,7 @@ export class IndexedSessionStorage implements SessionStorage {
 						if (current?.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
 						return;
 					}
-					await this.#backend.writeFull(path, content, mtimeMs, title);
+					await this.#backend.writeFull(path, content, mtimeMs, title, options?.expectedSize);
 				},
 				{ trackDrain: false },
 			);

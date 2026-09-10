@@ -43,22 +43,47 @@ export interface SessionStorageWriter {
 	getError(): Error | undefined;
 }
 
+/** Optimistic precondition for replacing a session file. */
+export interface SessionStorageWriteOptions {
+	/** Current UTF-8 byte length, or `null` when the target must not exist. */
+	expectedSize?: number | null;
+}
+
 /**
- * Optional guard applied by {@link SessionStorage.writeTextAtomic}. The
- * backend MUST call `commitGuard()` synchronously immediately before it makes
- * the staged content visible at `path`. If it returns `false`, the staged
- * write is discarded and the target is left untouched. Backends MUST NOT
- * yield between calling the guard and publishing the write, so a concurrent
- * synchronous rewrite that took over cannot be overwritten by a stale body.
+ * The session changed after a writer loaded it, so replacing it would discard
+ * another writer's durable entries.
  */
-export interface WriteTextAtomicOptions {
+export class SessionWriteConflictError extends Error {
+	readonly path: string;
+	readonly expectedSize: number | null;
+	readonly actualSize: number | null;
+
+	constructor(path: string, expectedSize: number | null, actualSize: number | null) {
+		const expected = expectedSize === null ? "missing" : `${expectedSize} bytes`;
+		const actual = actualSize === null ? "missing" : `${actualSize} bytes`;
+		super(`Session file changed before rewrite: ${path} (expected ${expected}, found ${actual}).`);
+		this.name = "SessionWriteConflictError";
+		this.path = path;
+		this.expectedSize = expectedSize;
+		this.actualSize = actualSize;
+	}
+}
+
+/**
+ * Optional guards applied by {@link SessionStorage.writeTextAtomic}. The
+ * backend MUST check `expectedSize` and call `commitGuard()` synchronously
+ * immediately before it makes the staged content visible at `path`. Failed
+ * preconditions leave the target untouched. Backends MUST NOT yield between
+ * the checks and publishing the write.
+ */
+export interface WriteTextAtomicOptions extends SessionStorageWriteOptions {
 	commitGuard?: () => boolean;
 }
 
 export interface SessionStorage {
 	ensureDirSync(dir: string): void;
 	existsSync(path: string): boolean;
-	writeTextSync(path: string, content: string): void;
+	writeTextSync(path: string, content: string, options?: SessionStorageWriteOptions): void;
 	/**
 	 * Update the current session title through the storage backend.
 	 *
@@ -201,6 +226,20 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 }
 
 export class FileSessionStorage implements SessionStorage {
+	#assertExpectedSize(fpath: string, expectedSize: number | null | undefined): void {
+		if (expectedSize === undefined) return;
+		let actualSize: number | null;
+		try {
+			actualSize = fs.statSync(fpath).size;
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			actualSize = null;
+		}
+		if (actualSize !== expectedSize) {
+			throw new SessionWriteConflictError(fpath, expectedSize, actualSize);
+		}
+	}
+
 	ensureDirSync(dir: string): void {
 		if (!fs.existsSync(dir)) {
 			fs.mkdirSync(dir, { recursive: true });
@@ -211,7 +250,7 @@ export class FileSessionStorage implements SessionStorage {
 		return fs.existsSync(path);
 	}
 
-	writeTextSync(fpath: string, content: string): void {
+	writeTextSync(fpath: string, content: string, options?: SessionStorageWriteOptions): void {
 		const dir = path.dirname(fpath);
 		this.ensureDirSync(dir);
 		const tempPath = path.join(dir, `.${path.basename(fpath)}.${Snowflake.next()}.tmp`);
@@ -222,6 +261,7 @@ export class FileSessionStorage implements SessionStorage {
 			throw toError(err);
 		}
 		try {
+			this.#assertExpectedSize(fpath, options?.expectedSize);
 			this.renameSync(tempPath, fpath);
 		} catch (err) {
 			if (!hasFsCode(err, "EPERM")) {
@@ -313,6 +353,7 @@ export class FileSessionStorage implements SessionStorage {
 			return;
 		}
 		try {
+			this.#assertExpectedSize(fpath, options?.expectedSize);
 			this.renameSync(tempPath, fpath);
 			return;
 		} catch (err) {
@@ -683,7 +724,11 @@ export class MemorySessionStorage implements SessionStorage {
 		return this.#files.has(path);
 	}
 
-	writeTextSync(path: string, content: string): void {
+	writeTextSync(path: string, content: string, options?: SessionStorageWriteOptions): void {
+		const actualSize = this.#files.get(path)?.size ?? null;
+		if (options?.expectedSize !== undefined && actualSize !== options.expectedSize) {
+			throw new SessionWriteConflictError(path, options.expectedSize, actualSize);
+		}
 		this.#files.set(path, createMemoryFileEntry(content, Date.now()));
 	}
 
@@ -756,7 +801,7 @@ export class MemorySessionStorage implements SessionStorage {
 
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
 		if (options?.commitGuard && !options.commitGuard()) return Promise.resolve();
-		this.writeTextSync(path, content);
+		this.writeTextSync(path, content, { expectedSize: options?.expectedSize });
 		return Promise.resolve();
 	}
 

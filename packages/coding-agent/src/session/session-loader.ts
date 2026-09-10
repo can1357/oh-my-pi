@@ -38,6 +38,8 @@ export interface SessionLoadResult {
 	entries: FileEntry[];
 	titleSlot: SessionTitleUpdate | undefined;
 	malformedRecords: number;
+	/** Byte length observed before loading, or `null` when the path did not exist. */
+	sourceSize?: number | null;
 	/** Whether non-empty session data was found without a valid leading session header. */
 	invalidHeader: boolean;
 }
@@ -281,9 +283,18 @@ export async function loadSessionFile(
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<SessionLoadResult> {
 	try {
-		return await loadWithKnownSize(filePath, storage, storage.statSync(filePath).size);
+		const sourceSize = storage.statSync(filePath).size;
+		return { ...(await loadWithKnownSize(filePath, storage, sourceSize)), sourceSize };
 	} catch (err) {
-		if (isEnoent(err)) return { entries: [], titleSlot: undefined, malformedRecords: 0, invalidHeader: false };
+		if (isEnoent(err)) {
+			return {
+				entries: [],
+				titleSlot: undefined,
+				malformedRecords: 0,
+				sourceSize: null,
+				invalidHeader: false,
+			};
+		}
 		throw err;
 	}
 }

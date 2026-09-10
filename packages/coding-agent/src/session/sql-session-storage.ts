@@ -3,6 +3,7 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "./indexed-session-storage";
+import { SessionWriteConflictError } from "./session-storage";
 import type { SessionTitleUpdate } from "./session-title-slot";
 
 /**
@@ -19,8 +20,13 @@ export type SqlSessionStorageAdapter = "postgres" | "mysql" | "sqlite";
  * the table identifier is validated and then inlined while values remain bound
  * parameters.
  */
+/** Array result returned by `Bun.SQL`, including MySQL mutation metadata. */
+export interface SqlSessionStorageResult extends Array<unknown> {
+	affectedRows?: number;
+}
+
 export interface SqlSessionStorageClient {
-	unsafe(query: string, values?: unknown[]): Promise<unknown[]>;
+	unsafe(query: string, values?: unknown[]): Promise<SqlSessionStorageResult>;
 	/**
 	 * `Bun.SQL` exposes the parsed connection options here. We only consult
 	 * `adapter` to pick the dialect; the field is typed as
@@ -60,6 +66,10 @@ interface DialectQueries {
 	addTitleColumns: readonly string[];
 	/** Insert or replace the full content for `path`. Used for `writeText`/`flags="w"` truncate. */
 	upsertReplace: string;
+	/** Insert a full body only when `path` does not exist. */
+	insertIfMissing: string;
+	/** Replace a full body only when its current UTF-8 byte length matches. */
+	replaceIfSize: string;
 	/** Insert if missing; otherwise append the new chunk to existing content. Used for `writeLine`. */
 	upsertAppend: string;
 	/** Update indexed title metadata without rewriting the JSONL body. */
@@ -140,6 +150,10 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 			upsertReplace:
 				`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at) VALUES (?, ?, ?, ?, ?, ?) ` +
 				`ON DUPLICATE KEY UPDATE content = VALUES(content), mtime_ms = VALUES(mtime_ms), title = VALUES(title), title_source = VALUES(title_source), title_updated_at = VALUES(title_updated_at)`,
+			insertIfMissing: `INSERT IGNORE INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			replaceIfSize:
+				`UPDATE ${table} SET content = ?, mtime_ms = ?, title = ?, title_source = ?, title_updated_at = ? ` +
+				`WHERE path = ? AND length(content) = ?`,
 			upsertAppend:
 				`INSERT INTO ${table} (path, content, mtime_ms) VALUES (?, ?, ?) ` +
 				`ON DUPLICATE KEY UPDATE content = CONCAT(content, VALUES(content)), mtime_ms = VALUES(mtime_ms)`,
@@ -188,6 +202,14 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 			`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at) ` +
 			`VALUES (${placeholder(1)}, ${placeholder(2)}, ${placeholder(3)}, ${placeholder(4)}, ${placeholder(5)}, ${placeholder(6)}) ` +
 			`ON CONFLICT (path) DO UPDATE SET content = excluded.content, mtime_ms = excluded.mtime_ms, title = excluded.title, title_source = excluded.title_source, title_updated_at = excluded.title_updated_at`,
+		insertIfMissing:
+			`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at) ` +
+			`VALUES (${placeholder(1)}, ${placeholder(2)}, ${placeholder(3)}, ${placeholder(4)}, ${placeholder(5)}, ${placeholder(6)}) ` +
+			`ON CONFLICT (path) DO NOTHING RETURNING path`,
+		replaceIfSize:
+			`UPDATE ${table} SET content = ${placeholder(1)}, mtime_ms = ${placeholder(2)}, title = ${placeholder(3)}, ` +
+			`title_source = ${placeholder(4)}, title_updated_at = ${placeholder(5)} ` +
+			`WHERE path = ${placeholder(6)} AND ${byteLengthExpr} = ${placeholder(7)} RETURNING path`,
 		upsertAppend:
 			`INSERT INTO ${table} (path, content, mtime_ms) ` +
 			`VALUES (${placeholder(1)}, ${placeholder(2)}, ${placeholder(3)}) ` +
@@ -332,15 +354,29 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		return [decodeSqlBytes(row.head), decodeSqlBytes(row.tail)];
 	}
 
-	async writeFull(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void> {
-		await this.#client.unsafe(this.#q.upsertReplace, [
-			path,
-			content,
-			mtimeMs,
-			title?.title ?? null,
-			title?.source ?? null,
-			title?.updatedAt ?? null,
-		]);
+	async writeFull(
+		path: string,
+		content: string,
+		mtimeMs: number,
+		title?: SessionTitleUpdate,
+		expectedSize?: number | null,
+	): Promise<void> {
+		const titleValues = [title?.title ?? null, title?.source ?? null, title?.updatedAt ?? null];
+		if (expectedSize === undefined) {
+			await this.#client.unsafe(this.#q.upsertReplace, [path, content, mtimeMs, ...titleValues]);
+			return;
+		}
+
+		const result =
+			expectedSize === null
+				? await this.#client.unsafe(this.#q.insertIfMissing, [path, content, mtimeMs, ...titleValues])
+				: await this.#client.unsafe(this.#q.replaceIfSize, [content, mtimeMs, ...titleValues, path, expectedSize]);
+		const written = this.#adapter === "mysql" ? result.affectedRows === 1 : result.length === 1;
+		if (written) return;
+
+		const current = await this.readFull(path);
+		const actualSize = current === null ? null : Buffer.byteLength(current, "utf8");
+		throw new SessionWriteConflictError(path, expectedSize, actualSize);
 	}
 
 	async updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void> {
