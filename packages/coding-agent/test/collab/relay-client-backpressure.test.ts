@@ -1201,28 +1201,38 @@ describe("CollabSocket send backpressure", () => {
 		};
 		const shed: number[] = [];
 		socket.onPeerOverload = peer => shed.push(peer);
-		let generated = 0;
-		function* chunks(): Generator<CollabFrame> {
-			generated++;
+		const generated = new Map<number, number>();
+		function* chunks(peer: number): Generator<CollabFrame> {
+			generated.set(peer, (generated.get(peer) ?? 0) + 1);
 			yield { t: "snapshot-chunk", entries: [], final: true };
 		}
 		try {
 			socket.connect();
-			BackpressuredWebSocket.instances[0]!.open();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
 			// Each batch declares 8 MB of snapshot held behind its iterator. Two fit
-			// the budget; the third cannot, and nothing has been serialized yet, so
-			// only what the queue is keeping alive can account for the shed that
-			// makes room for it.
-			socket.sendBatch(chunks(), 7, 8 * 1024 * 1024);
-			socket.sendBatch(chunks(), 8, 8 * 1024 * 1024);
+			// the budget; the third cannot, and nothing has reached the wire, so only
+			// what the queue is keeping alive can account for the shed that makes room
+			// for it.
+			socket.sendBatch(chunks(7), 7, 8 * 1024 * 1024);
+			socket.sendBatch(chunks(8), 8, 8 * 1024 * 1024);
 			expect(shed).toEqual([]);
-			socket.sendBatch(chunks(), 9, 8 * 1024 * 1024);
+			socket.sendBatch(chunks(9), 9, 8 * 1024 * 1024);
 			// The shed itself is synchronous; its report is deferred so the owner
 			// cannot refill the queue mid-shed.
 			for (let flush = 0; flush < 4; flush++) await Promise.resolve();
 			expect(shed).toEqual([7]);
 			expect(reason).toBeUndefined();
-			expect(generated).toBe(0);
+			// Nothing serialized reached the transport, so the declarations are the
+			// only thing the shed can have been decided on.
+			expect(ws.sent).toEqual([]);
+			// And a batch is resumed only as the head of the queue: the drain advances
+			// the one it is draining, by one frame, and never touches a batch queued
+			// behind it. That is what makes the charge a declaration about memory the
+			// iterator holds rather than about bytes anyone has built.
+			expect(generated.get(7)).toBe(1);
+			expect(generated.has(8)).toBe(false);
+			expect(generated.has(9)).toBe(false);
 		} finally {
 			socket.close();
 		}
@@ -1255,6 +1265,42 @@ describe("CollabSocket send backpressure", () => {
 				await Bun.sleep(10);
 			}
 			expect(ws.sent).toHaveLength(3);
+			expect(reason).toBeUndefined();
+		} finally {
+			socket.close();
+		}
+	});
+
+	it("does not shed a peer over an entry whose last frame is already in the socket buffer", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const key = await importRoomKey(generateRoomKey());
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/handed-off", role: "host", key });
+		let reason: string | undefined;
+		socket.onClose = message => {
+			reason = message;
+		};
+		const shed: number[] = [];
+		socket.onPeerOverload = peer => shed.push(peer);
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			// One frame, large enough that handing it to the socket puts the transport
+			// over its high-water mark, so the drain parks on the very next turn.
+			socket.sendBatch([{ t: "error", message: "z".repeat(128 * 1024) }] as CollabFrame[], GREEDY, 8 * 1024 * 1024);
+			await waitUntil(() => ws.sent.length >= 1, "the batch's only frame never reached the transport");
+			await Bun.sleep(10);
+			expect(ws.bufferedAmount).toBeGreaterThanOrEqual(HIGH_WATER_MARK);
+
+			// The batch is spent. Its bytes are in the socket buffer and cannot be
+			// retracted, and its generator has nothing left to hold. Keeping it queued
+			// and charged until the transport drains sheds a guest whose snapshot has
+			// already shipped, drops it from the roster, and tells it to rejoin.
+			expect(socket.send({ t: "error", message: "b".repeat(9 * 1024 * 1024) })).toBe(true);
+			for (let flush = 0; flush < 4; flush++) await Promise.resolve();
+			expect(shed).toEqual([]);
 			expect(reason).toBeUndefined();
 		} finally {
 			socket.close();
@@ -1448,7 +1494,10 @@ describe("CollabSocket send backpressure", () => {
 			socket.sendBatch(chunks(), 7, 0);
 			socket.send({ t: "bye", reason: "after snapshot" }, 7);
 			await Bun.sleep(30);
-			expect(generated).toBe(0);
+			// One of 300, and one is the bound: the drain advances the head entry by a
+			// single frame and then waits on the transport holding it, so a backpressured
+			// batch materializes exactly one chunk ahead of what it can send.
+			expect(generated).toBe(1);
 			const deadline = Date.now() + 3000;
 			while (ws.sent.length < 301 && Date.now() < deadline) {
 				ws.bufferedAmount = 0;

@@ -33,6 +33,7 @@ import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { type FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 import {
+	HIGH_WATER_MARK,
 	type HostObservations,
 	instrumentRelay,
 	makeHostContext,
@@ -110,12 +111,17 @@ async function startHost(snapshot: Snapshot, seen: HostObservations, throttle = 
 	return { host, context, probe, parsed, key: await importRoomKey(parsed.key) };
 }
 
-function joinGuest(wsUrl: string, key: CryptoKey, name: string): { frames: CollabFrame[]; close: () => void } {
+function joinGuest(
+	wsUrl: string,
+	key: CryptoKey,
+	name: string,
+	writeToken?: string,
+): { frames: CollabFrame[]; close: () => void } {
 	const guest = new CollabSocket({ wsUrl, role: "guest", key });
 	cleanups.push(() => guest.close());
 	const frames: CollabFrame[] = [];
 	guest.onFrame = frame => frames.push(frame);
-	guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name });
+	guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name, writeToken });
 	guest.connect();
 	return { frames, close: () => guest.close() };
 }
@@ -245,4 +251,62 @@ it("keeps an oversized snapshot when the turn it is joining keeps broadcasting",
 		expect(liveAt).toBeGreaterThan(finalAt);
 		joiner.close();
 	}
+}, 120_000);
+
+it("registers nothing for a join whose welcome the queue refused", async () => {
+	const snapshot = makeOversizedSnapshot();
+	const seen: HostObservations = { notices: [], participantCounts: [] };
+	const { host, context, probe, parsed, key } = await startHost(snapshot, seen, true);
+	const hostWs = probe.hostSocket();
+	const appended = context.sessionManager.onEntryAppended;
+	if (!appended) throw new Error("the host never tapped entry appends");
+	const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+	if (!writeToken) throw new Error("expected a write link");
+
+	// A guest that does join, so there is a writable peer to hold an ask.
+	const resident = joinGuest(parsed.wsUrl, key, "resident", writeToken);
+	await drainUntil(
+		hostWs,
+		() => resident.frames.some(frame => frame.t === "snapshot-chunk" && frame.final),
+		"the resident never received a complete snapshot",
+	);
+	await drainFor(hostWs, 200);
+
+	const ask = host.requestGuestUi({ kind: "select", title: "pick one", options: [{ label: "yes" }] });
+	if (!ask) throw new Error("the host had no writable peer to ask");
+	let settled: unknown;
+	void ask.then(result => {
+		settled = result;
+	});
+
+	// One replica-bearing broadcast, admitted while the transport is already past
+	// its high-water mark so it stays queued rather than being handed straight to
+	// the socket. It cannot be shed and it cannot be dropped, so it keeps the
+	// empty-queue floor out of reach and the next oversized welcome has nowhere to
+	// go.
+	hostWs.bufferedAmount = HIGH_WATER_MARK;
+	appended({
+		type: "message",
+		id: "live",
+		parentId: null,
+		timestamp: "2026-09-09T00:00:00Z",
+		message: { role: "user", content: "q".repeat(200 * 1024), timestamp: 0 },
+	} as never);
+	await Bun.sleep(50);
+
+	const refused = joinGuest(parsed.wsUrl, key, "refused", writeToken);
+	await Bun.sleep(200);
+
+	// No welcome, so no join: the guest applies nothing before one arrives.
+	expect(refused.frames.filter(frame => frame.t === "welcome")).toEqual([]);
+	expect(seen.notices.filter(notice => notice.includes("refused joined"))).toEqual([]);
+	expect(seen.participantCounts.filter(count => count > 2)).toEqual([]);
+
+	// And it was never handed the pending ask. Once the one guest that could answer
+	// leaves, the ask has no recipients left and settles, instead of waiting on a
+	// participant that never joined.
+	resident.close();
+	await waitFor(() => settled !== undefined, "the ask never settled after its only recipient left", 8_000);
+	expect(settled).toEqual({ kind: "unavailable" });
+	refused.close();
 }, 120_000);

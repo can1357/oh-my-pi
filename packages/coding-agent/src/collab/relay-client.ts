@@ -286,9 +286,14 @@ export class CollabSocket {
 	 * object graph, within a small factor in either direction, so pass an upper bound
 	 * where one is cheap. Anything outside that domain is treated as oversized rather
 	 * than trusted — see below.
+	 *
+	 * @returns whether the batch was admitted. A welcome lives inside its batch, so
+	 * a caller that registers the peer on the strength of sending one has to undo
+	 * that when it was not: the guest ignores everything until a welcome arrives, so
+	 * a host that counts it as joined is describing a participant that is not there.
 	 */
-	sendBatch(frames: Iterable<CollabFrame>, targetPeer: number, retainedBytes: number): void {
-		if (this.#closed) return;
+	sendBatch(frames: Iterable<CollabFrame>, targetPeer: number, retainedBytes: number): boolean {
+		if (this.#closed) return false;
 		// The budget is a sum of declarations, so the domain has to hold at the one
 		// place a declaration enters. `NaN` fails every comparison, which makes the
 		// queue read as never full and bounds nothing at all; a negative one
@@ -311,7 +316,7 @@ export class CollabSocket {
 				retainedBytes,
 			});
 		}
-		this.#enqueueSend(frames[Symbol.iterator](), targetPeer, declared, true, false);
+		return this.#enqueueSend(frames[Symbol.iterator](), targetPeer, declared, true, false);
 	}
 
 	/**
@@ -656,14 +661,26 @@ export class CollabSocket {
 	async #sendPending(generation: number): Promise<void> {
 		while (!this.#closed && generation === this.#sendGeneration) {
 			const pending = this.#pendingSends[0];
-			if (!pending || !(await this.#waitForWritable(generation))) return;
-			if (this.#closed || generation !== this.#sendGeneration) return;
-			if (pending.cancelled) continue;
+			if (!pending) return;
+			// Advance before the writability gate, never behind it. Advancing is what
+			// resumes a batch's generator, and resuming past the last frame is what
+			// lets go of the snapshot it held — so gating it on the transport keeps a
+			// whole session clone reachable, and keeps the entry queued, charged,
+			// inside its peer's share and out of the empty-queue floor's way, for as
+			// long as the socket buffer takes to drain. The next admission then sheds
+			// that peer over a snapshot whose bytes are already in the buffer and
+			// cannot be retracted, and tells a guest with a complete replica to rejoin.
+			//
+			// The head is never a cancelled entry: `#discardWhere` marks and removes in
+			// one synchronous pass, so anything still in the array is live.
 			const next = pending.frames.next();
 			if (next.done) {
 				this.#pendingSends.shift();
 				continue;
 			}
+			if (!(await this.#waitForWritable(generation))) return;
+			if (this.#closed || generation !== this.#sendGeneration) return;
+			if (pending.cancelled) continue;
 			const serialized = typeof next.value === "string" ? next.value : JSON.stringify(next.value);
 			const sealed = await sealSerialized(this.#opts.key, serialized);
 			if (this.#closed || generation !== this.#sendGeneration) return;

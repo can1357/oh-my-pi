@@ -456,6 +456,11 @@ export class CollabHost {
 		}
 		const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
 		const canWrite = this.#verifyWriteToken(writeToken);
+		// Registered before the snapshot is built, because `#buildState` reads the
+		// roster and the welcome has to show the joiner itself. Held against the
+		// batch's admission below, so a hello whose welcome the queue refused leaves
+		// the host's view of the room exactly as it found it.
+		const registered = this.#peers.get(fromPeer);
 		this.#peers.set(fromPeer, { name: cleanName, canWrite });
 
 		// Enqueue the welcome and its snapshot synchronously so live traffic cannot
@@ -499,7 +504,20 @@ export class CollabHost {
 		// drains, so the queue is told what it is keeping alive: the serialized byte
 		// length of what stripping left, before an entry filter that only shrinks it
 		// further.
-		socket.sendBatch(this.#welcomeWithSnapshot(welcome, entries), fromPeer, snapshotBytes);
+		if (!socket.sendBatch(this.#welcomeWithSnapshot(welcome, entries), fromPeer, snapshotBytes)) {
+			// No welcome reached the guest, and a guest applies nothing before one. So
+			// there is no participant to announce, nothing to add to the roster, and
+			// above all nobody to hand a pending ask to: an ask recorded against a peer
+			// that cannot answer it is the hang this policy already closed once, and a
+			// registered ghost reaches it by a different route. Undoing the
+			// registration is the whole remedy — never a promotion, since it only ever
+			// restores what this id already had, and a relay does not reissue an id
+			// inside a room.
+			if (registered) this.#peers.set(fromPeer, registered);
+			else this.#peers.delete(fromPeer);
+			logger.debug("collab: welcome batch was not admitted; leaving the peer unregistered", { fromPeer });
+			return;
+		}
 		if (canWrite) {
 			for (const pending of this.#pendingUi.values()) {
 				if (socket.send({ t: "ui-request", request: pending.request }, fromPeer)) {

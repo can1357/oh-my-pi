@@ -130,7 +130,7 @@ with it. There is nothing left to have spent.
 | Batch superseded                        | The older snapshot stops before its terminator; the newer welcome re-primes the accumulator                                                                                                              |
 | Peer shed for exceeding its share       | A targeted `error` telling it to rejoin, best-effort: under saturation that frame is itself droppable, and the guest's 30 s first-welcome timer and snapshot-progress timer are the client-side backstop |
 | Heaviest peer shed to admit a broadcast | Same as above                                                                                                                                                                                            |
-| Pair not admittable at all              | No welcome and no chunks; the first-welcome timer fires                                                                                                                                                  |
+| Pair not admittable at all              | No welcome and no chunks; the first-welcome timer fires. The host registers nothing for it either — no roster entry, no join notice, and no share of a pending ask — because a guest applies nothing before a welcome, so a peer recorded on the strength of one that was refused is a participant that is not there |
 | Live traffic during an oversized join   | Absent a cancellation or an overload of its own, the joiner's replica completes and then the deltas that arrived while it drained, in order. A departure, a second `hello` or a recreated room still ends the batch, and so does a full budget behind it — but only once a broadcast arrives that no advisory drop and no other peer's backlog can make room for. Each other guest sees those deltas late by the whole drain, since one FIFO serves the room |
 | A `ui-request` no writable peer took    | No dialog. The host's `requestGuestUi` resolves `unavailable` rather than awaiting an answer nobody was asked for                                                                                        |
 | An ask whose last recipient is gone     | A `ui-request-end` for anyone still in the room; `requestGuestUi` resolves `unavailable` rather than waiting on the peer that was shed or left                                                           |
@@ -253,7 +253,15 @@ until the last chunk drains. Charged as nothing, repeated joins stacked clone on
 clone — 321 MB of heap growth for a 3.8 MB session, measured over the in-memory
 relay — while the 16 MiB budget reported an empty queue. Bytes serialized as
 chunks pass through are _not_ charged again: one chunk is materialized at a time,
-so the retained charge is the larger and the longer-lived of the two.
+so the retained charge is the larger and the longer-lived of the two. Exactly one,
+including while the transport is backpressured — the drain advances the head entry
+before it waits, so a parked batch holds the chunk it is about to send. It does
+that because advancing is also what _releases_ a batch: resuming the generator past
+its last frame is what lets go of the clone. Waiting first kept the whole snapshot
+reachable, and the entry queued, charged and shedable, for as long as the socket
+buffer took to drain — so the room could shed a guest over a snapshot already in
+the buffer and tell it to rejoin. Trading a chunk held during a park for a whole
+session released at the end of one is the right way round.
 `SNAPSHOT_CHUNK_BYTES` is a _soft_ cap on a chunk — `#snapshotChunks` always puts
 at least one entry in a chunk, so an entry larger than the cap ships in a chunk of
 its own. Behind it there is **no enforced per-entry ceiling at all**, and this note
@@ -402,4 +410,14 @@ is worth a transcript line.
   directions: Bun shares immutable strings across a `structuredClone`, while every
   entry adds per-property overhead the serialized form does not show. Measured at
   ~1.2x serialized size on an entry-heavy fixture.
+- **A superseded batch is discarded before the replacement is admitted.** Step 3
+  runs ahead of the capacity checks, so a second `hello` whose batch is then
+  refused leaves the peer with neither: measured, one 4 MiB batch admitted, 30
+  replica-bearing broadcasts behind it, and a repeat batch refused — the peer
+  received nothing and the room stayed up. Ordering it the other way is not the
+  fix, because superseding is what frees the room the replacement needs, so the
+  replacement would start failing against its own predecessor. It needs the same
+  treatment the shed loop got — decide admissibility against the queue the
+  supersede would leave, before discarding anything — which is a change to what
+  step 3 means rather than to when it runs, so it is not done here.
 - **Fairness is coarse.** `#shedHeaviestPeer` picks by raw entry count with no notion of fault, so a broadcast under pressure can evict a quota-abiding peer and hand it a "rejoin to resync" error. That is a deliberate trade, not an oversight: shedding one peer's backlog and asking it to rejoin is strictly better than ending the session for everyone, which is the only other way to admit that broadcast. A guest that is shed recovers by rejoining; a room that is ended does not recover at all. Attributing broadcast pressure to a cause would let the choice be fault-based instead.
