@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Grok Bot JSON-as-text duplicate suppression canonicalizes Shell↔bash (and other advertised omp aliases) before fingerprinting so mirrored thinking/text dumps promote once.
+
 - Grok Bot does not finalize grammar/customFormat tool calls that end with `isComplete: false` (truncated patches stay incomplete instead of executing).
 - Grok Bot JSON-as-text duplicate suppression fingerprints arguments with key-order-stable serialization so mirrored thinking/text dumps promote once.
 - Grok Bot keep-model probe passes catalog `sandToolsWire: "keep-model"` into auto resolution (and expects bare auto → `native`).

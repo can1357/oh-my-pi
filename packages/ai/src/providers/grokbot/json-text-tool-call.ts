@@ -74,6 +74,13 @@ function resolveAdvertisedName(raw: string, advertised: ReadonlySet<string>): st
 	return undefined;
 }
 
+/** Map Shell→bash (etc.) only when the omp owner is itself advertised. */
+function canonicalizeAdvertisedAlias(name: string, advertised: ReadonlySet<string>): string {
+	const omp = toOmpToolName(name);
+	if (omp !== name && advertised.has(omp)) return omp;
+	return name;
+}
+
 function asArgsObject(value: unknown): Record<string, unknown> | undefined {
 	if (value == null) return {};
 	if (typeof value === "string") {
@@ -356,10 +363,11 @@ export type JsonTextToolCallPromotion = {
 };
 
 /** Stable identity for cross-block duplicate suppression (name + args). */
-function jsonTextToolCallFingerprint(call: JsonTextToolCall): string {
-	// Key-order-insensitive: thinking `{"path":"a","content":"x"}` and text
-	// `{"content":"x","path":"a"}` are the same Write and must not both promote.
-	return `${call.name}\0${stableStringifyJson(call.arguments)}`;
+function jsonTextToolCallFingerprint(call: JsonTextToolCall, advertised: ReadonlySet<string>): string {
+	// Alias-insensitive (Shell↔bash) and key-order-insensitive so mirrored
+	// thinking/text dumps of the same Write/Shell promote once.
+	const name = canonicalizeAdvertisedAlias(call.name, advertised);
+	return `${name}\0${stableStringifyJson(call.arguments)}`;
 }
 
 export function promoteJsonTextToolCallsFromContent(
@@ -387,17 +395,18 @@ export function promoteJsonTextToolCallsFromContent(
 	if (blocks.length > 0) {
 		// Prefer final text dumps over the same call mirrored in thinking — otherwise
 		// the caller mints two toolCall ids and Shell/Write can run twice.
+		const advertised = advertisedNames instanceof Set ? advertisedNames : new Set(advertisedNames);
 		const textFingerprints = new Set<string>();
 		for (const entry of blocks) {
 			if (entry.type !== "text") continue;
-			for (const call of entry.calls) textFingerprints.add(jsonTextToolCallFingerprint(call));
+			for (const call of entry.calls) textFingerprints.add(jsonTextToolCallFingerprint(call, advertised));
 		}
 		const collected: JsonTextToolCall[] = [];
 		const sourceIndexes: number[] = [];
 		for (const entry of blocks) {
 			let kept = entry.calls;
 			if (entry.type === "thinking" && textFingerprints.size > 0) {
-				kept = entry.calls.filter(call => !textFingerprints.has(jsonTextToolCallFingerprint(call)));
+				kept = entry.calls.filter(call => !textFingerprints.has(jsonTextToolCallFingerprint(call, advertised)));
 			}
 			if (kept.length > 0) collected.push(...kept);
 			// Always drop the source block when it produced promotable JSON, even if

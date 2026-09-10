@@ -269,13 +269,21 @@ function earlyExitShellSegment(segment: string): boolean {
 	return /^(?:exit|return)\b/.test(segment);
 }
 
-/** Non-zero `exit`/`return` — overall command fails even after an earlier ping emit. */
-function failingExitShellSegment(segment: string): boolean {
-	const match = /^(?:exit|return)(?:\s+(\d+))?\s*$/.exec(segment.trim());
+/**
+ * Successful `exit`/`return` after a probe emit: bare (reuses $? = 0 after echo)
+ * or an explicit unsigned decimal 0. Unrecognized forms (`exit -1`, `exit foo`)
+ * are failures — real bash exits non-zero / errors while runOneTool fabricates ok.
+ */
+function successfulExitShellSegment(segment: string): boolean {
+	const match = /^(?:exit|return)(?:\s+(\S+))?\s*$/.exec(segment.trim());
 	if (!match) return false;
-	// Bare `exit`/`return` reuses $?; after a successful echo that is 0.
-	if (match[1] === undefined) return false;
-	return Number(match[1]) !== 0;
+	if (match[1] === undefined) return true;
+	return /^(?:0+)$/.test(match[1]);
+}
+
+/** Non-success `exit`/`return` — overall command fails even after an earlier ping emit. */
+function failingExitShellSegment(segment: string): boolean {
+	return earlyExitShellSegment(segment) && !successfulExitShellSegment(segment);
 }
 
 /** Exact relative fixture path, or absolute path ending in /${expectedRelative}. */

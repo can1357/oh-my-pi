@@ -212,6 +212,22 @@ describe("parseJsonTextToolCall", () => {
 		expect(promoted.sourceIndexes).toEqual([0, 1]);
 	});
 
+	test("promoteJsonTextToolCallsFromContent dedupes Shell/bash aliases across thinking and text", () => {
+		// Product-wire text dump + Gemini in-band thinking alias must promote once.
+		const advertised = advertisedNamesForJsonTextToolCall([{ name: "Shell" }], [{ name: "bash" }]);
+		expect(advertised.has("Shell")).toBe(true);
+		expect(advertised.has("bash")).toBe(true);
+		const promoted = promoteJsonTextToolCallsFromContent(
+			[
+				{ type: "thinking", thinking: 'default_api.bash(command="echo once")' },
+				{ type: "text", text: '{"name":"Shell","arguments":{"command":"echo once"}}' },
+			],
+			advertised,
+		);
+		expect(promoted.calls).toEqual([{ name: "Shell", arguments: { command: "echo once" } }]);
+		expect(promoted.sourceIndexes).toEqual([0, 1]);
+	});
+
 	test("promoteJsonTextToolCallsFromContent keeps distinct thinking calls alongside text", () => {
 		const advertised = new Set(["Shell", "Write"]);
 		const promoted = promoteJsonTextToolCallsFromContent(

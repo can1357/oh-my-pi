@@ -289,6 +289,11 @@ describe("toolSmokePrompt", () => {
 		// Later non-zero exit fails the overall command; runOneTool fabricates isError:false.
 		expect(echoLikeShellCommand(`echo ${ping}; exit 1`, ping)).toBe(false);
 		expect(echoLikeShellCommand(`echo ${ping}; exit 0`, ping)).toBe(true);
+		// Unrecognized exit forms still fail the real shell (`exit -1` → 255, `exit foo` errors)
+		// while runOneTool fabricates success from the echo prefix — must not pass.
+		expect(echoLikeShellCommand(`echo ${ping}; exit -1`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`echo ${ping}; exit foo`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`echo ${ping}; return -1`, ping)).toBe(false);
 		// Trailing non-exit commands after a successful echo can fail while runOneTool
 		// fabricates success from the echo prefix alone.
 		expect(echoLikeShellCommand(`echo ${ping}; false`, ping)).toBe(false);
