@@ -4925,6 +4925,31 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"plan.autosave": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Autosave Plans",
+			description: "Automatically save approved plans to disk when plan mode completes",
+			condition: "planModeEnabled",
+		},
+	},
+
+	"plan.autosaveDir": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Autosave Directory",
+			description:
+				"Directory for autosaved plans. Supports ~, absolute, and cwd-relative paths. Empty uses <project>/.omp/plans/.",
+			condition: "planAutosaveEnabled",
+		},
+	},
+
 	"goal.enabled": {
 		type: "boolean",
 		default: true,
