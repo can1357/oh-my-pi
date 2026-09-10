@@ -598,6 +598,10 @@ export class SecurityCoordinator {
 				scanId: record.snapshot.scanId,
 				store,
 				startedAt,
+				// Findings must be grounded against the tree the scan session actually
+				// reads: for ref_diff scans that is the detached worktree, not the
+				// live repository root (#7118).
+				resolutionRoot: executionTarget.cwd,
 				sessionId: `security:${record.snapshot.scanId}`,
 				operationId: record.snapshot.operationId,
 				onPublished: async bundle => {
