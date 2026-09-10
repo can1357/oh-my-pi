@@ -1720,13 +1720,15 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 								} else if (
 									isCompleteJsonObjectText(argsText) &&
 									isCompleteJsonObjectText(merged.argsText) &&
-									!shouldBufferAttemptEvents()
+									!shouldBufferAttemptEvents() &&
+									// Prefix-completing snapshots (`{"path":` then `{"path":"/tmp/x"}`)
+									// already expose an appendable merged.delta — emit that suffix
+									// instead of holding the full object for finishTool.
+									!(previousArgs && merged.argsText.startsWith(previousArgs))
 								) {
-									// Unbuffered complete-object *snapshots* (the frame itself is a
-									// full JSON object): hold until finishTool so a later cumulative
-									// revision can replace without double-emitting. Appendable
-									// fragments that merely complete the accumulator (`{"path":` +
-									// `"/tmp/x"}`) must emit only the remaining suffix.
+									// Unbuffered complete-object *snapshots* that are not prefix
+									// extensions of the accumulator: hold until finishTool so a
+									// later cumulative revision can replace without double-emitting.
 									pendingCanonicalToolDeltas.set(state.index, merged.argsText);
 								} else {
 									emitAttemptEvent({

@@ -292,6 +292,11 @@ describe("toolSmokePrompt", () => {
 		expect(echoLikeShellCommand(`echo -e 'hi\\c${ping}'`, ping)).toBe(false);
 		expect(echoLikeShellCommand(`echo -E '\\c${ping}'`, ping)).toBe(true);
 		expect(echoLikeShellCommand(`echo -e 'pre${ping}'`, ping)).toBe(true);
+		// printf %b expands escapes; bash `\\c` suppresses further output.
+		expect(echoLikeShellCommand(`printf '%b' '\\c${ping}'`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`printf '%b%s' '\\c' '${ping}'`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`printf '%b' 'pre${ping}'`, ping)).toBe(true);
+		expect(echoLikeShellCommand(`printf '%s' '\\c${ping}'`, ping)).toBe(true);
 		// Later non-zero exit fails the overall command; runOneTool fabricates isError:false.
 		expect(echoLikeShellCommand(`echo ${ping}; exit 1`, ping)).toBe(false);
 		expect(echoLikeShellCommand(`echo ${ping}; exit 0`, ping)).toBe(true);

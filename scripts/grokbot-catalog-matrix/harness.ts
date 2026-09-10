@@ -518,8 +518,14 @@ function printfEmittedText(before: string): string | undefined {
 		const arg = args[argIdx++] ?? "";
 		// Smoke only needs whether `ping` lands in the written bytes.
 		// Precision truncates `%s`/`%b` (`%0.s` / `%.0s` emit nothing).
-		if (spec === "s" || spec === "b") {
+		if (spec === "s") {
 			out += precision === undefined ? arg : arg.slice(0, precision);
+		} else if (spec === "b") {
+			// `%b` expands backslash escapes; `\c` suppresses further printf output.
+			const expanded = expandBackslashEscapes(arg);
+			const piece = precision === undefined ? expanded.text : expanded.text.slice(0, precision);
+			out += piece;
+			if (expanded.stopped) return out;
 		} else if (spec === "c") {
 			out += precision === 0 ? "" : arg.slice(0, 1);
 		} else if (/[diouxXeEfFgGaA]/.test(spec)) {
@@ -561,8 +567,8 @@ function redirectBeforeEmitsPing(before: string, ping: string): boolean {
 	return false;
 }
 
-/** Expand bash `echo -e` escapes; `\c` suppresses the rest of the string. */
-function expandEchoEscapes(text: string): string {
+/** Expand bash backslash escapes; `\c` suppresses further output (`stopped`). */
+function expandBackslashEscapes(text: string): { text: string; stopped: boolean } {
 	let out = "";
 	for (let i = 0; i < text.length; i++) {
 		if (text[i] !== "\\" || i + 1 >= text.length) {
@@ -571,7 +577,7 @@ function expandEchoEscapes(text: string): string {
 		}
 		const next = text[i + 1]!;
 		i++;
-		if (next === "c") return out;
+		if (next === "c") return { text: out, stopped: true };
 		if (next === "n") out += "\n";
 		else if (next === "t") out += "\t";
 		else if (next === "r") out += "\r";
@@ -581,7 +587,12 @@ function expandEchoEscapes(text: string): string {
 			out += next;
 		}
 	}
-	return out;
+	return { text: out, stopped: false };
+}
+
+/** Expand bash `echo -e` escapes; `\c` suppresses the rest of the string. */
+function expandEchoEscapes(text: string): string {
+	return expandBackslashEscapes(text).text;
 }
 
 /** True when echo/printf would emit `ping` (shared by bash smoke and write smoke). */

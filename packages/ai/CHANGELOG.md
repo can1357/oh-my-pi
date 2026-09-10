@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Grok Bot emits the remaining tool-arg suffix when an unbuffered complete JSON snapshot prefix-extends a partial accumulator (`{"path":` → `{"path":"/tmp/x"}`).
+- Catalog matrix shell/write smoke expands printf `%b` backslash escapes (`\\c` suppresses further output) before accepting a fabricated ping.
 - Grok Bot emits only the remaining tool-arg suffix when unbuffered appendable fragments complete a JSON object (avoids re-emitting the full snapshot for proxy concat).
 - Catalog matrix shell/write smoke expands `echo -e` escapes (`\\c` suppresses output) before accepting a fabricated ping.
 - Grok Bot rewrites buffered `toolcall_delta`s to one canonical snapshot when cumulative complete JSON args revise (`{"cmd":"ls"}` → `{"cmd":"ls","n":1}`), so proxy concat stays parseable.
