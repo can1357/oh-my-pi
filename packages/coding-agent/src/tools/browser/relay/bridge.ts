@@ -435,8 +435,8 @@ class TabState {
 	readonly subscriptionClears = new Map<string, Record<string, number>>();
 	/** In-flight root-state commands by subscription key. */
 	readonly pendingSubscriptions = new Map<string, Set<Promise<void>>>();
-	/** Latest successful command completion recorded for each shared-root key. */
-	readonly subscriptionCompletionSequences = new Map<string, number>();
+	/** Latest successful tab-wide clear recorded for each shared-root key. */
+	readonly subscriptionClearSequences = new Map<string, number>();
 	/** Preserved per-session preload scripts from Page.addScriptToEvaluateOnNewDocument. */
 	readonly preloadScripts = new Map<string, Map<string, PreservedPreloadScript>>();
 	/** Exact relay-private exceptions used to abort duplicate preload invocations. */
@@ -1405,15 +1405,19 @@ export class RelayBridge {
 		if (!tab) return;
 		const trackingKey = this.#subscriptionTrackingKey(msg);
 		if (!trackingKey) return;
-		// CDP replies may settle out of order even though the commands were sent in
-		// a deterministic order. Keep the journal aligned with dispatch order: once
-		// a later successful command for this shared-root key has been recorded, a
-		// late reply from an older setter must not resurrect stale state. The media
-		// setter is field-mergeable and already resolves ordering per field below.
+		// CDP replies may settle out of order even though commands were dispatched
+		// deterministically. A completed tab-wide clear suppresses older setters, and
+		// an older clear must not erase a newer setter. Successful setters from other
+		// owners are still retained below as fallback state if the current winner exits.
+		// The media setter is field-mergeable and resolves ordering per field.
 		if (trackingKey !== "Emulation.setEmulatedMedia") {
-			const recordedSequence = tab.subscriptionCompletionSequences.get(trackingKey);
-			if (recordedSequence !== undefined && recordedSequence > sequence) return;
-			tab.subscriptionCompletionSequences.set(trackingKey, sequence);
+			const clearSequence = tab.subscriptionClearSequences.get(trackingKey);
+			if (clearSequence !== undefined && clearSequence > sequence) return;
+			if (this.#interruptedClearKey(msg)) {
+				const current = this.#latestSubscriptionForKey(tab, trackingKey);
+				if (current && current.sequence > sequence) return;
+				tab.subscriptionClearSequences.set(trackingKey, sequence);
+			}
 		}
 		const separator = msg.method.indexOf(".");
 		const domain = separator > 0 ? msg.method.slice(0, separator) : "";
@@ -1724,6 +1728,7 @@ export class RelayBridge {
 			tab.subscriptions.set(key, owners);
 		}
 		const previous = owners.get(ownerSessionId);
+		if (key !== "Emulation.setEmulatedMedia" && previous && previous.sequence > subscription.sequence) return;
 		const params = mergeSubscriptionParams(key, previous?.params, subscription.params);
 		if (key === "Emulation.setEmulatedMedia" && previous?.params && subscription.params) {
 			for (const [field, value] of Object.entries(previous.params)) {
@@ -1947,12 +1952,11 @@ export class RelayBridge {
 					if (!queued) continue;
 					const current = this.#latestSubscriptionForKey(tab, change.key);
 					if (!subscriptionEquals(current, queued.next)) {
-						if (subscriptionChangeEquals(queued, change)) {
-							tab.pendingSubscriptionReconcile = tab.pendingSubscriptionReconcile.filter(
-								candidate => candidate.key !== change.key,
-							);
-						}
-						continue;
+						// A tracked command may have completed while owner cleanup was
+						// waiting for this key's pending RPCs. Reconcile from the state that
+						// was live when cleanup began to the journal winner after all replies,
+						// including a retained fallback from a different live owner.
+						queued.next = current;
 					}
 					const command = this.#subscriptionReconcileCommand(queued.previous, current);
 					if (!command) {

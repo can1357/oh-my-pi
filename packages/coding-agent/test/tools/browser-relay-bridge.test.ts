@@ -3107,6 +3107,62 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")).toHaveLength(0);
 	});
 
+	it("retains an older live owner's setter as fallback when replies arrive out of order", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const olderOwner = new FakeCdpSocket();
+		const olderConn = bridge.cdpConnected(olderOwner);
+		const olderSession = await attachPage(bridge, ext, olderOwner, olderConn, 1);
+		const newerOwner = new FakeCdpSocket();
+		const newerConn = bridge.cdpConnected(newerOwner);
+		const newerSession = await attachPage(bridge, ext, newerOwner, newerConn, 1);
+
+		bridge.cdpMessage(
+			olderConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: olderSession,
+				method: "Emulation.setTimezoneOverride",
+				params: { timezoneId: "Asia/Shanghai" },
+			}),
+		);
+		bridge.cdpMessage(
+			newerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: newerSession,
+				method: "Emulation.setTimezoneOverride",
+				params: { timezoneId: "America/New_York" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 2, "overlapping owner setters");
+
+		const [olderSetter, newerSetter] = ext.pending("send");
+		if (!olderSetter || !newerSetter) throw new Error("expected both owner setters");
+		ext.markAcked(newerSetter.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: newerSetter.id, ok: true, result: {} }));
+		await flush();
+		bridge.cdpClosed(newerConn);
+		ext.markAcked(olderSetter.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: olderSetter.id, ok: true, result: {} }));
+
+		await waitFor(() => ext.rpcs("send").length === 3, "surviving owner fallback reconciliation");
+		expect(ext.rpcs("send")[2]?.method).toBe("Emulation.setTimezoneOverride");
+		expect(ext.rpcs("send")[2]?.params).toEqual({ timezoneId: "Asia/Shanghai" });
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.pending("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "surviving owner fallback replay");
+		expect(ext2.rpcs("send")[0]?.method).toBe("Emulation.setTimezoneOverride");
+		expect(ext2.rpcs("send")[0]?.params).toEqual({ timezoneId: "Asia/Shanghai" });
+	});
+
 	it("replays preserved preload scripts across recovery and remaps their identifiers", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
