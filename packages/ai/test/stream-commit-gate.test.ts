@@ -103,16 +103,15 @@ describe("StreamCommitGate", () => {
 	});
 });
 
-
-	it("reset returns a terminated gate to probing and clears buffered prelude", () => {
-		const gate = new StreamCommitGate();
-		expect(gate.bufferPrelude(new Uint8Array([1, 2, 3]))).toBe(true);
-		expect(gate.classifyAndObserve("response.failed", 8)).toBe("terminated");
-		gate.reset();
-		expect(gate.state).toBe("probing");
-		expect(gate.preludeByteLength).toBe(0);
-		expect(gate.classifyAndObserve("response.created", 4)).toBe("probing");
-	});
+it("reset returns a terminated gate to probing and clears buffered prelude", () => {
+	const gate = new StreamCommitGate();
+	expect(gate.bufferPrelude(new Uint8Array([1, 2, 3]))).toBe(true);
+	expect(gate.classifyAndObserve("response.failed", 8)).toBe("terminated");
+	gate.reset();
+	expect(gate.state).toBe("probing");
+	expect(gate.preludeByteLength).toBe(0);
+	expect(gate.classifyAndObserve("response.created", 4)).toBe("probing");
+});
 
 describe("holdSseUntilCommit (prelude replay buffer)", () => {
 	function sse(frames: string[]): ReadableStream<Uint8Array> {
@@ -144,6 +143,16 @@ describe("holdSseUntilCommit (prelude replay buffer)", () => {
 		expect(gate.state).toBe("committed");
 	});
 
+	it("forwards the chunk that crosses the prelude cap", async () => {
+		const gate = new StreamCommitGate(8);
+		const held = holdSseUntilCommit(
+			sse(["event: response.created\ndata: {}\n\n", "event: response.output_text.delta\ndata: {}\n\n"]),
+			gate,
+		);
+		const out = await collect(held);
+		expect(out).toContain("response.created");
+		expect(out).toContain("response.output_text.delta");
+	});
 
 	it("forwards successful terminal-only streams instead of aborting", async () => {
 		const gate = new StreamCommitGate();

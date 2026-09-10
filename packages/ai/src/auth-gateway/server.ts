@@ -714,8 +714,6 @@ async function handleFormatEndpoint(
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
-
-
 	const supportsOpenAIImageFileReferences =
 		model.api === "openai-responses" ||
 		model.api === "azure-openai-responses" ||
@@ -1560,6 +1558,14 @@ function handleRouteGet(registry: RouteRegistry, id: string): Response {
 	return json(200, row);
 }
 
+function decodeRoutePathId(pathname: string): { id?: string; error?: Response } {
+	try {
+		return { id: decodeURIComponent(pathname.slice("/v1/routes/".length)) };
+	} catch (error) {
+		return { error: json(400, { error: `Invalid encoded route id: ${String(error)}` }) };
+	}
+}
+
 async function handleRoutePut(registry: RouteRegistry, id: string, req: Request): Promise<Response> {
 	let body: unknown;
 	try {
@@ -1658,14 +1664,18 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 					return withCors(handleRoutesList(registry), req);
 				}
 				if (req.method === "GET" && pathname.startsWith("/v1/routes/")) {
-					const id = pathname.slice("/v1/routes/".length);
+					const decoded = decodeRoutePathId(pathname);
+					if (decoded.error) return withCors(decoded.error, req);
+					const id = decoded.id ?? "";
 					if (id.length === 0) {
 						return withCors(handleRoutesList(registry), req);
 					}
 					return withCors(handleRouteGet(registry, id), req);
 				}
 				if (req.method === "PUT" && pathname.startsWith("/v1/routes/")) {
-					const id = pathname.slice("/v1/routes/".length);
+					const decoded = decodeRoutePathId(pathname);
+					if (decoded.error) return withCors(decoded.error, req);
+					const id = decoded.id ?? "";
 					if (id.length === 0) {
 						return withCors(json(404, { error: `No route: PUT ${pathname}` }), req);
 					}

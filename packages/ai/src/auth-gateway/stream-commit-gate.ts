@@ -187,7 +187,14 @@ export function holdSseUntilCommit(
 					controller.enqueue(chunk);
 					return;
 				}
-				gate.bufferPrelude(chunk);
+				const buffered = gate.bufferPrelude(chunk);
+				if (!buffered && gate.state === "probing") {
+					gate.classifyAndObserve("", gate.preludeByteLength + chunk.byteLength);
+					committed = true;
+					for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+					controller.enqueue(chunk);
+					return;
+				}
 				pending += decoder.decode(chunk, { stream: true });
 				let next = nextSseFrame(pending);
 				while (next) {

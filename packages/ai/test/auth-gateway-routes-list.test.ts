@@ -333,6 +333,40 @@ describe("auth-gateway GET /v1/routes/:id", () => {
 });
 
 describe("auth-gateway PUT /v1/routes/:id", () => {
+	it("decodes encoded route ids exactly once for GET and PUT", async () => {
+		await withEmptyRoutesGateway(async url => {
+			for (const [id, encoded] of [
+				["team/foo", "team%2Ffoo"],
+				["team route", "team%20route"],
+			] as const) {
+				const putRes = await fetch(`${url}/v1/routes/${encoded}`, {
+					method: "PUT",
+					headers: { Authorization: "Bearer t", "Content-Type": "application/json" },
+					body: JSON.stringify({ root: { type: "target", model: primaryId } }),
+				});
+				expect(putRes.status).toBe(200);
+				const putBody = (await putRes.json()) as RouteRow;
+				expect(putBody.id).toBe(id);
+
+				const getRes = await fetch(`${url}/v1/routes/${encoded}`, {
+					headers: { Authorization: "Bearer t" },
+				});
+				expect(getRes.status).toBe(200);
+				const getBody = (await getRes.json()) as RouteRow;
+				expect(getBody.id).toBe(id);
+			}
+		});
+	});
+
+	it("returns 400 for malformed encoded route ids (negative)", async () => {
+		await withEmptyRoutesGateway(async url => {
+			const res = await fetch(`${url}/v1/routes/%E0%A4%A`, {
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(res.status).toBe(400);
+		});
+	});
+
 	it("registers a route so GET matches and list includes it", async () => {
 		await withEmptyRoutesGateway(async url => {
 			const missing = await fetch(`${url}/v1/routes/${hotRouteId}`, {
