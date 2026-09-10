@@ -185,21 +185,48 @@ const FIXTURE_HELPER_ARGV = "sleep 60";
 /**
  * SIGKILL a fixture helper, checking and signalling on one reference.
  *
- * A pid is not an identity. Resolving one, confirming it is still the helper,
- * and then signalling the bare number hands the decision back to the number
- * between the two steps — which is the reuse race the confirmation was there
- * to close, reintroduced by the handoff. The native reference signals the
- * process it resolved, so the check and the kill travel together.
+ * A pid is not an identity, so resolving one, confirming it is still the
+ * helper, and then signalling the bare number hands the decision back to the
+ * number in between — the reuse race the confirmation was there to close,
+ * reintroduced by the handoff. What signalling the reference buys is not
+ * uniform, and is worth stating rather than assuming:
  *
- * Nothing to kill and nothing that matches are both no-ops: leaving a stray
- * process is a worse outcome than the alternative only until the alternative
- * is signalling somebody else's.
+ * - Linux: the reference is a pidfd, which pins the pid against reuse for as
+ *   long as it is held, and the process itself is signalled through it with no
+ *   lookup.
+ * - macOS: no pidfd. The reference re-reads the `(pid, start time)` pair
+ *   immediately before a numeric kill, which needs pid reuse *and* a matching
+ *   start time to go wrong, but is not atomic.
+ * - Windows: a retained handle, which reserves the pid and is terminated
+ *   directly.
+ *
+ * On either POSIX platform a helper that leads its own group — the detached one
+ * does — additionally draws a numeric `kill(-pgid)` from the tree walk, so that
+ * part is only as safe as the pgid number.
+ *
+ * Limit worth knowing before extending this: pid plus argv cannot prove the
+ * process at that number is the one that wrote the pid file. A reused pid
+ * running another `sleep 60` matches. Realistically that is a concurrent run
+ * of this same suite, and the cost is another run's helper dying early.
  */
 function killFixtureHelper(pid: number): void {
 	if (!(pid > 0)) return;
 	const helper = Process.fromPid(pid);
-	if (helper?.args().join(" ") !== FIXTURE_HELPER_ARGV) return;
-	helper.killTree();
+	if (helper) {
+		// Unrecognised is left alone: a stray helper beats signalling a stranger.
+		if (helper.args().join(" ") !== FIXTURE_HELPER_ARGV) return;
+		helper.killTree();
+		return;
+	}
+	// No reference, which is two different situations. If references work here,
+	// the helper is simply gone and the number now belongs to nobody we may
+	// signal. If they do not — `pidfd_open` blocked by seccomp, or a kernel
+	// without it — then absence says nothing about the helper, and the numeric
+	// kill is the only mechanism this host has.
+	if (Process.fromPid(process.pid)) return;
+	try {
+		process.kill(pid, "SIGKILL");
+	} catch {}
 }
 
 /**
@@ -351,9 +378,7 @@ describe("LspMuxServer", () => {
 				expect(server.serverKeys).toEqual([]);
 				await pollUntil(() => Promise.resolve(!helperAlive()), "helper termination", 6_000);
 			} finally {
-				try {
-					process.kill(helperPid, "SIGKILL");
-				} catch {}
+				killFixtureHelper(helperPid);
 			}
 		},
 		10_000,
