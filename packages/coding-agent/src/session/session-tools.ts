@@ -838,6 +838,7 @@ export class SessionTools {
 		options?: {
 			builtInWriteAvailable?: boolean;
 			runtimeSelectedToolNames?: ReadonlySet<string>;
+			fullWrite?: boolean;
 		},
 	): Set<string> {
 		const candidates = new Set<string>();
@@ -849,11 +850,16 @@ export class SessionTools {
 		});
 		const xdevReadAvailable = this.#builtInToolNames.has("read") && selectedTools.some(({ name }) => name === "read");
 		const builtInWrite = options?.builtInWriteAvailable ?? this.#builtInToolNames.has("write");
+		const hasCurrentFullWrite =
+			options?.fullWrite === false
+				? false
+				: this.#enabledToolNames.has("write") && this.#isDeviceOnlyWrite?.() !== true;
 		const xdevWriteAvailable =
 			builtInWrite &&
 			(selectedTools.some(({ name }) => name === "write") ||
 				this.#deviceOnlyWriteTransportAvailable ||
-				this.#dormantFullWrite);
+				this.#dormantFullWrite ||
+				hasCurrentFullWrite);
 		if (!xdevReadAvailable || !xdevWriteAvailable) return candidates;
 
 		const runtimeSelected = options?.runtimeSelectedToolNames ?? this.#runtimeSelectedToolNames;
@@ -919,6 +925,7 @@ export class SessionTools {
 		const mountNames = this.#resolveMountCandidates(toolNames, {
 			builtInWriteAvailable,
 			runtimeSelectedToolNames: this.#runtimeSelectedToolNames,
+			fullWrite: options?.fullWrite,
 		});
 		// Demoted tools stay reachable through the eval bridge, so nothing is
 		// mounted under xd:// while code mode restricts the direct surface.
@@ -1003,6 +1010,7 @@ export class SessionTools {
 			this.#setDeviceOnlyWrite !== undefined;
 		const restoreDormantDeviceOnlyWrite =
 			!validToolNames.includes("write") &&
+			mountNames.size > 0 &&
 			(this.#deviceOnlyWriteTransportAvailable || writePreviouslyHadFullAccess) &&
 			!previousDeviceOnlyWrite &&
 			this.#setDeviceOnlyWrite !== undefined;

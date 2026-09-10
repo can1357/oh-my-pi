@@ -802,6 +802,111 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.dispose();
 		}
 	});
+
+	it("mounts discoverable tools under xd:// on immediate omission of write from full-write session", async () => {
+		const tempDir = makeTempDir();
+		const customAmbient: CustomTool = {
+			name: "custom_ambient",
+			label: "Custom Ambient",
+			description: "Ambient tool",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			loadMode: "discoverable",
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			toolNames: ["read", "write"],
+			customTools: [customAmbient],
+		});
+
+		try {
+			expect(session.getActiveToolNames()).toContain("read");
+			expect(session.getActiveToolNames()).toContain("write");
+			expect(session.getMountedXdevToolNames()).toContain("custom_ambient");
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+
+			await session.setActiveToolsByName(["read", "custom_ambient"]);
+
+			expect(session.getMountedXdevToolNames()).toContain("custom_ambient");
+			expect(session.getActiveToolNames()).toContain("read");
+			expect(session.getActiveToolNames()).not.toContain("custom_ambient");
+			expect(session.getActiveToolNames()).toContain("write");
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+
+			const blockedTarget = path.join(tempDir, "blocked.txt");
+			await expect(
+				session.getToolByName("write")!.execute("blocked", { path: blockedTarget, content: "fail" }),
+			).rejects.toThrow("limited to the xd:// device transport");
+
+			await session.setActiveToolsByName(["read", "custom_ambient"]);
+
+			expect(session.getMountedXdevToolNames()).toContain("custom_ambient");
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("does not activate device-only write when omitting write with zero mounted devices", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read", "write"],
+			settings: Settings.isolated({ "plan.enabled": false }),
+		});
+
+		try {
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+			expect(session.getXdevToolEntries()).toHaveLength(0);
+
+			// Restrict to read-only with no mounted devices:
+			await session.setActiveToolsByName(["read"]);
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+
+			// Restore full write:
+			await session.setActiveToolsByName(["read", "write"]);
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("does not demote full write to device-only when reapplying an active toolset that contains mounted devices", async () => {
+		const tempDir = makeTempDir();
+		const customAmbient: CustomTool = {
+			name: "custom_ambient",
+			label: "Custom Ambient",
+			description: "Ambient tool",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			loadMode: "discoverable",
+		};
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read", "write"],
+			customTools: [customAmbient],
+			settings: Settings.isolated({ "plan.enabled": false }),
+		});
+
+		try {
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+			expect(session.getMountedXdevToolNames()).toContain("custom_ambient");
+
+			// Reapplying the active tools via setActiveToolsByName must NOT demote write to device-only:
+			await session.setActiveToolsByName(["read", "write", "custom_ambient"]);
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+			expect(session.getMountedXdevToolNames()).toContain("custom_ambient");
+
+			// Filesystem writes must remain functional:
+			const fsTarget = path.join(tempDir, "filesystem-write.txt");
+			await session.getToolByName("write")!.execute("fs-write", { path: fsTarget, content: "ok" });
+			expect(await Bun.file(fsTarget).text()).toBe("ok");
+		} finally {
+			await session.dispose();
+		}
+	});
 	it("preserves a deferrable-only write transport across enabled-set reapplication", async () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession({

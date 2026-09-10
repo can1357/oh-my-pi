@@ -289,18 +289,6 @@ describe("generate_image tool gating", () => {
 		expect(session.getActiveToolNames()).toContain("write");
 	});
 
-	it("unmounts devices when write is removed at runtime", async () => {
-		const ambientTool = customTool("ambient_search");
-		const session = await sessionWithCustomTools(["read", "write"], [ambientTool]);
-		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(ambientTool.name);
-
-		await session.setActiveToolsByName(["read", ambientTool.name]);
-
-		expect(session.getActiveToolNames()).toContain(ambientTool.name);
-		expect(session.getActiveToolNames()).not.toContain("write");
-		expect(session.getXdevToolEntries()).toEqual([]);
-	});
-
 	it("keeps ambient tools mounted after MCP disconnect with a device-only write", async () => {
 		const ambientTool = customTool("ambient_search");
 		const session = await sessionWithCustomTools(["read"], [ambientTool, customTool("mcp__test__search", true)]);
