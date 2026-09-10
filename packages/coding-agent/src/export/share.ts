@@ -62,6 +62,8 @@ export interface ShareSessionOptions {
 	 * authenticated `gh`) and falls back to the server.
 	 */
 	store?: ShareStore;
+	/** Binary lookup override for tests; defaults to `$which`. */
+	which?: (command: string) => string | null;
 	/** Agent state for system prompt + tool descriptions in the snapshot. */
 	state?: AgentState;
 	/**
@@ -495,7 +497,7 @@ export async function shareSession(sm: SessionManager, options?: ShareSessionOpt
 
 	if (options?.store === "gist") {
 		const forGist = await sealToFit(key, data, GIST_MAX_SEALED_BYTES);
-		const gist = await tryCreateGist(forGist.sealed);
+		const gist = await tryCreateGist(forGist.sealed, options?.which);
 		if ("id" in gist) {
 			return {
 				url: `${base}/${gist.id}#${keyText}`,
@@ -617,8 +619,11 @@ function capLongStrings(value: unknown, cap: number): void {
 }
 
 /** Create a secret gist holding base64 of the sealed blob, or the reason it was unavailable. */
-async function tryCreateGist(sealed: Uint8Array): Promise<{ id: string; url: string } | { error: string }> {
-	if (!$which("gh")) return { error: "gh CLI not found" };
+async function tryCreateGist(
+	sealed: Uint8Array,
+	which: (command: string) => string | null = $which,
+): Promise<{ id: string; url: string } | { error: string }> {
+	if (!which("gh")) return { error: "gh CLI not found" };
 	const auth = await $`gh auth status`.quiet().nothrow();
 	if (auth.exitCode !== 0) {
 		logger.debug("share: gh present but not authenticated; falling back to share server");

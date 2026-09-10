@@ -606,23 +606,21 @@ describe("shareSession", () => {
 				return Response.json({ id: "blobshareid02" });
 			},
 		});
-		// Hide gh deterministically: without it the gist path is unreachable
-		// and the share-server fallback must say so.
-		const savedPath = process.env.PATH;
+		// Hide gh deterministically via the lookup seam: without it the gist
+		// path is unreachable and the share-server fallback must say so. No
+		// process-wide env mutation, so concurrent tests are unaffected.
 		try {
-			process.env.PATH = "";
-			const result = await shareSession(sm, { serverUrl: `http://localhost:${server.port}`, store: "gist" });
+			const result = await shareSession(sm, {
+				serverUrl: `http://localhost:${server.port}`,
+				store: "gist",
+				which: () => null,
+			});
 
 			expect(result.method).toBe("server");
 			expect(result.gistUrl).toBeUndefined();
 			expect(result.notice).toMatch(/gist/i);
 			expect(result.notice).toMatch(/share server/);
 		} finally {
-			if (savedPath === undefined) {
-				delete process.env.PATH;
-			} else {
-				process.env.PATH = savedPath;
-			}
 			server.stop(true);
 		}
 	});
