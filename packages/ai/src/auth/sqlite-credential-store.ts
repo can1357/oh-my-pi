@@ -548,13 +548,15 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				// earlier run. Sidecars are legitimately absent on a fresh DB
 				// (ENOENT); chmod itself is unsupported on some platforms
 				// (e.g. Windows) — log that instead of silently swallowing it.
-				try {
-					await fs.chmod(dbPath, 0o600);
-					await fs.chmod(`${dbPath}-wal`, 0o600);
-					await fs.chmod(`${dbPath}-shm`, 0o600);
-				} catch (err) {
-					if (!isEnoent(err)) {
-						logger.debug("auth db chmod skipped", { path: dbPath, error: String(err) });
+				// Each path is hardened independently so one expected absence
+				// (or one failure) cannot suppress hardening of the others.
+				for (const hardenPath of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+					try {
+						await fs.chmod(hardenPath, 0o600);
+					} catch (err) {
+						if (!isEnoent(err)) {
+							logger.debug("auth db chmod skipped", { path: hardenPath, error: String(err) });
+						}
 					}
 				}
 				SqliteAuthCredentialStore.#ensureAuthCredentialRefreshLeasesTable(db);

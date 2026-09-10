@@ -572,10 +572,10 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             raise HTTPException(401, "invalid replay token")
 
     def _require_read_token(cfg: Settings, token: str | None) -> None:
-        """Dashboard read endpoints. Without `ROBOMP_REPLAY_TOKEN` these stay
-        open (dev mode; the loopback bind is the mitigation); with a token
-        configured they are gated with the same constant-time compare as the
-        write endpoints."""
+        """Gate dashboard read endpoints. With no token configured (loopback
+        dev) reads stay open — there is no credential to protect. With a
+        token set, every read carries the same secret as the write paths.
+        """
         if cfg.replay_token is None:
             return
         if not hmac.compare_digest((token or "").encode(), cfg.replay_token.get_secret_value().encode()):
@@ -767,7 +767,8 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         limit: int = 50,
         x_robomp_token: str | None = Header(None, alias="X-Robomp-Replay-Token"),
     ) -> dict[str, Any]:
-        _require_read_token(request.app.state.bag["settings"], x_robomp_token)
+        cfg: Settings = request.app.state.bag["settings"]
+        _require_read_token(cfg, x_robomp_token)
         rows = request.app.state.bag["db"].list_events(limit=limit)
         return {
             "events": [
@@ -791,7 +792,8 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         limit: int = 100,
         x_robomp_token: str | None = Header(None, alias="X-Robomp-Replay-Token"),
     ) -> dict[str, Any]:
-        _require_read_token(request.app.state.bag["settings"], x_robomp_token)
+        cfg: Settings = request.app.state.bag["settings"]
+        _require_read_token(cfg, x_robomp_token)
         rows = request.app.state.bag["db"].list_issues(limit=limit)
         return {
             "issues": [
@@ -815,7 +817,8 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         limit: int = 50,
         x_robomp_token: str | None = Header(None, alias="X-Robomp-Replay-Token"),
     ) -> dict[str, Any]:
-        _require_read_token(request.app.state.bag["settings"], x_robomp_token)
+        cfg: Settings = request.app.state.bag["settings"]
+        _require_read_token(cfg, x_robomp_token)
         capped = max(1, min(int(limit), 500))
         rows = request.app.state.bag["db"].list_releases(limit=capped)
         return {"releases": [_release_payload(row) for row in rows]}
@@ -823,8 +826,27 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
         cfg: Settings = request.app.state.bag["settings"]
-        token = cfg.replay_token.get_secret_value() if cfg.replay_token else None
-        return HTMLResponse(render_index(token))
+        # `GET /` is unauthenticated, so the config blob carries the auth
+        # posture only — never the token itself (baking it there disclosed
+        # the credential to anyone who could load the dashboard). The SPA
+        # fetches `/api/config`, gated by the same check, when it needs it.
+        return HTMLResponse(render_index(cfg.replay_token is not None))
+
+    @app.get("/api/config")
+    async def api_config(
+        request: Request,
+        x_robomp_token: str | None = Header(None, alias="X-Robomp-Replay-Token"),
+    ) -> dict[str, Any]:
+        """The only route that hands out the replay token — and only to
+        callers who already present it (same constant-time check as the
+        write paths). With no token configured (open dev mode) it is
+        unauthenticated and reports replay as disabled.
+        """
+        cfg: Settings = request.app.state.bag["settings"]
+        if cfg.replay_token is None:
+            return {"replayEnabled": False, "replayToken": ""}
+        _require_trigger_token(cfg, x_robomp_token)
+        return {"replayEnabled": True, "replayToken": cfg.replay_token.get_secret_value()}
 
     @app.get("/api/status")
     async def api_status(
@@ -942,8 +964,9 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         return {"entries": entries, "count": len(entries), "limit": capped}
 
     # Mount the built dashboard bundle. The `index.html` itself is served by
-    # the `@app.get("/")` handler above so the per-instance replay-token can
-    # be substituted; `/static/*` carries the hashed JS/CSS produced by Vite.
+    # the `@app.get("/")` handler above so the per-request config blob (auth
+    # posture, never the token) can be substituted; `/static/*` carries the
+    # hashed JS/CSS produced by Vite.
     app.mount("/static", StaticFiles(directory=static_dir()), name="static")
 
     return app

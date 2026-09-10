@@ -12,6 +12,7 @@ import * as path from "node:path";
 import * as tls from "node:tls";
 import * as zlib from "node:zlib";
 import { PtySession } from "@oh-my-pi/pi-natives";
+import { $which } from "@oh-my-pi/pi-utils";
 import xterm from "@oh-my-pi/pi-utils/vterm";
 
 const DEFAULT_PROXY_HOST = "127.0.0.1";
@@ -35,15 +36,22 @@ interface ClaudeTraceTlsMaterial {
 	cert: string;
 	key: string;
 }
-
 async function generateClaudeTraceTlsMaterial(): Promise<ClaudeTraceTlsMaterial> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-claude-trace-"));
 	const certPath = path.join(dir, "cert.pem");
 	const keyPath = path.join(dir, "key.pem");
+	const opensslPath = $which("openssl");
+	if (!opensslPath) {
+		throw new Error(
+			"`omp claude-trace` requires the `openssl` executable, which was not found on PATH. " +
+				"openssl generates the temporary TLS key/certificate used by the local trace proxy; " +
+				"install it and retry.",
+		);
+	}
 	try {
 		const proc = Bun.spawn(
 			[
-				"openssl",
+				opensslPath,
 				"req",
 				"-x509",
 				"-newkey",

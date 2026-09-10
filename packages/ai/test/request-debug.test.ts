@@ -156,13 +156,64 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 			url: "https://provider.test/v1/messages",
 			body: { model: "debug-model", messages: [{ role: "user", content: "hi" }] },
 		});
-		expect(request.headers).toMatchObject({ authorization: "Bearer test-token", "content-type": "application/json" });
+		expect(request.headers).toMatchObject({ authorization: "[redacted]", "content-type": "application/json" });
 
 		const log = splitResponseLog(await fs.readFile(responsePath));
 		expect(log.headers).toContain("HTTP 201 Created");
 		expect(log.headers).toContain("content-type: text/plain");
 		expect(log.headers).toContain("x-request-id: resp-1");
 		expect(log.body).toEqual(responseBody);
+	});
+
+	it("redacts sensitive request headers regardless of header-name case", async () => {
+		Bun.env.PI_REQ_DEBUG = "1";
+		const fetchImpl: FetchImpl = async () => new Response("ok");
+		const response = await transportFetch(debugModel(), fetchImpl)("https://provider.test/case", {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				Authorization: "Bearer Mixed-Case-Token",
+				"X-API-KEY": "mixed-case-key",
+				Cookie: "session=mixed-case-secret",
+			},
+			body: JSON.stringify({ case: true }),
+		});
+		await response.text();
+
+		const { requestPath } = await findDebugFiles();
+		const request = JSON.parse(await fs.readFile(requestPath, "utf8")) as Record<string, unknown>;
+		expect(request.headers).toMatchObject({
+			// Headers normalizes names to lowercase; sending mixed-case names still
+			// proves the redaction list matches case-insensitively.
+			authorization: "[redacted]",
+			"x-api-key": "[redacted]",
+			cookie: "[redacted]",
+		});
+	});
+
+	it("redacts sensitive response headers in the response log", async () => {
+		Bun.env.PI_REQ_DEBUG = "1";
+		const fetchImpl: FetchImpl = async () =>
+			new Response("ok", {
+				status: 201,
+				statusText: "Created",
+				headers: {
+					"content-type": "text/plain",
+					"Set-Cookie": "session=response-secret",
+					Authorization: "Bearer response-secret",
+				},
+			});
+		const response = await transportFetch(debugModel(), fetchImpl)("https://provider.test/res-secret", {
+			method: "POST",
+		});
+		await response.text();
+
+		const { responsePath } = await findDebugFiles();
+		const log = splitResponseLog(await fs.readFile(responsePath));
+		expect(log.headers).toContain("HTTP 201 Created");
+		expect(log.headers).toContain("set-cookie: [redacted]");
+		expect(log.headers).toContain("authorization: [redacted]");
+		expect(log.headers).not.toContain("response-secret");
 	});
 
 	it("keeps the partial response log when the response body is cancelled", async () => {

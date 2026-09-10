@@ -108,9 +108,10 @@ class Settings(BaseSettings):
     log_dir: Path = Field(Path("./data/logs"), alias="ROBOMP_LOG_DIR")
 
     # Server
-    # Loopback by default; exposing beyond localhost is opt-in. The compose
-    # file pins the host port mapping to 127.0.0.1 too.
-    bind_host: str = Field("127.0.0.1", alias="ROBOMP_BIND_HOST")
+    # Accepts off-host traffic by default (documented behavior). The compose
+    # file pins the published port to 127.0.0.1 so host-side exposure stays
+    # local; a non-loopback bind elsewhere is the operator's opt-in.
+    bind_host: str = Field("0.0.0.0", alias="ROBOMP_BIND_HOST")
     bind_port: int = Field(8080, alias="ROBOMP_BIND_PORT")
     # Optional Host-header allowlist (comma-separated). DNS-rebinding
     # defense-in-depth: when set, TrustedHostMiddleware rejects requests whose
