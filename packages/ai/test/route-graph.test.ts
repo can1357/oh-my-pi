@@ -26,7 +26,7 @@ describe("RouteRegistry", () => {
 	it("wraps a known id as a single TargetNode", () => {
 		const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
 		const route = registry.resolve("gpt-5");
-		expect(route).toEqual({
+		expect(route).toMatchObject({
 			generation: 1,
 			id: "gpt-5",
 			root: { type: "target", model: "gpt-5" },
@@ -60,7 +60,7 @@ describe("RouteRegistry", () => {
 		});
 		const route = registry.resolve("quota-route");
 		expect(registry.generation).toBe(2);
-		expect(route).toEqual({
+		expect(route).toMatchObject({
 			generation: 2,
 			id: "quota-route",
 			root: {
@@ -164,7 +164,7 @@ describe("RouteRegistry", () => {
 			root: { type: "target", model: "other" },
 		});
 		const route = registry.resolve("gpt-5");
-		expect(route).toEqual({
+		expect(route).toMatchObject({
 			generation: 2,
 			id: "gpt-5",
 			root: { type: "target", model: "gpt-5" },

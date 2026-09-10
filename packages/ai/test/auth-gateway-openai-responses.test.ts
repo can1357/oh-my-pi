@@ -1406,6 +1406,43 @@ describe("auth-gateway OpenAI Responses multimodal tool outputs", () => {
 			clearCustomApis();
 		}
 	});
+	for (const role of ["user", "developer"]) {
+		it(`rejects ${role} image file IDs before dispatching to a non-Responses upstream`, async () => {
+			registerMockApi();
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-responses-file-id-"));
+			const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+			storage.setRuntimeApiKey("openai", "test-key");
+			const mock = createMockModel({ provider: "openai", id: "mock/file-id" });
+			mock.push({ content: ["unexpected provider call"] });
+			const gateway = startAuthGateway({
+				bind: "127.0.0.1:0",
+				bearerTokens: ["test-token"],
+				storage,
+				resolveModel: () => mock.model,
+				version: "test",
+			});
+
+			try {
+				const response = await fetch(`${gateway.url}/v1/responses`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+					body: JSON.stringify({
+						model: "mock/file-id",
+						input: [{ role, content: [{ type: "input_image", file_id: "file_normal_image" }] }],
+					}),
+				});
+				expect(response.status).toBe(400);
+				const body = (await response.json()) as { error: { message: string } };
+				expect(body.error.message).toContain("require a Responses-compatible upstream model");
+				expect(mock.calls).toHaveLength(0);
+			} finally {
+				await gateway.close();
+				storage.close();
+				await fs.rm(dir, { recursive: true, force: true });
+				clearCustomApis();
+			}
+		});
+	}
 });
 describe("auth-gateway OpenAI Responses computer option bridge", () => {
 	it("preserves the native tool, forced choice, and include in stream options", async () => {

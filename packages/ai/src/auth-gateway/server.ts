@@ -685,13 +685,28 @@ async function handleFormatEndpoint(
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
-	const requestHasOpenAIImageFileReferences = parsed.context.messages.some(
-		message =>
+	const requestHasOpenAIImageFileReferences = parsed.context.messages.some(message => {
+		if (
 			message.role === "toolResult" &&
 			message.content.some(
 				block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
-			),
-	);
+			)
+		)
+			return true;
+		const payload = "providerPayload" in message ? message.providerPayload : undefined;
+		if (payload?.type !== "openaiResponsesHistory") return false;
+		return payload.items.some(
+			item =>
+				Array.isArray(item.content) &&
+				item.content.some(
+					(part: unknown) =>
+						isRecord(part) &&
+						(part.type === "input_image" || part.type === "input_file") &&
+						typeof part.file_id === "string" &&
+						part.file_id.length > 0,
+				),
+		);
+	});
 	const openaiImageFileCompatError = (candidate: Model<Api>): Response | undefined => {
 		if (route.label !== "openai-responses" || !requestHasOpenAIImageFileReferences) return undefined;
 		const supportsOpenAIImageFileReferences =
@@ -702,7 +717,7 @@ async function handleFormatEndpoint(
 		return route.module.formatError(
 			400,
 			"invalid_request_error",
-			"OpenAI image file IDs in tool outputs require a Responses-compatible upstream model",
+			"OpenAI file IDs require a Responses-compatible upstream model",
 		);
 	};
 	{

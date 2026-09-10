@@ -1,3 +1,6 @@
+import * as net from "node:net";
+import { untilAborted } from "@oh-my-pi/pi-utils";
+
 export interface SafeDiscoveryOptions {
 	allowPrivate?: boolean;
 	allowHttp?: boolean;
@@ -18,7 +21,7 @@ const DEFAULT_MAX_MODELS = 10_000;
 
 /**
  * Fetch a model-list URL with SSRF and size guards. Hostname private-range
- * checks only — no DNS pinning. The returned array is unvalidated.
+ * and resolved-address checks pin the request to a validated IP. The returned array is unvalidated.
  */
 export async function safeDiscoverModels(url: string, opts?: SafeDiscoveryOptions): Promise<readonly unknown[]> {
 	const parsed = parseDiscoveryUrl(url);
@@ -27,7 +30,7 @@ export async function safeDiscoverModels(url: string, opts?: SafeDiscoveryOption
 	const maxBytes = opts?.maxBytes ?? DEFAULT_MAX_BYTES;
 	const maxModels = opts?.maxModels ?? DEFAULT_MAX_MODELS;
 
-	const init: RequestInit = {
+	const init: BunFetchRequestInit = {
 		method: "GET",
 		redirect: "error",
 	};
@@ -35,13 +38,38 @@ export async function safeDiscoverModels(url: string, opts?: SafeDiscoveryOption
 		init.signal = AbortSignal.timeout(opts.timeoutMs);
 	}
 
+	const target = new URL(parsed.href);
+	if (opts?.allowPrivate !== true) {
+		const host = parsed.hostname.replace(/^\[|\]$/g, "");
+		if (net.isIP(host) === 0) {
+			let addresses: Bun.DNSLookup[];
+			try {
+				addresses = await untilAborted(init.signal, Bun.dns.lookup(host));
+			} catch (error) {
+				throw wrapDiscoveryError(error, "discovery DNS lookup failed");
+			}
+			if (
+				addresses.length === 0 ||
+				addresses.some(row => net.isIP(row.address) === 0 || isPrivateHostname(row.address))
+			) {
+				throw new SafeDiscoveryError("discovery hostname resolves to a private or invalid address");
+			}
+			const address = addresses[0]!.address;
+			target.hostname = net.isIP(address) === 6 ? `[${address}]` : address;
+			init.headers = { Host: parsed.host };
+			if (parsed.protocol === "https:") init.tls = { serverName: host };
+		}
+	}
+
 	let response: Response;
 	try {
-		response = await fetch(parsed.href, init);
+		response = await fetch(target.href, init);
 	} catch (err) {
 		throw wrapDiscoveryError(err, "discovery fetch failed");
 	}
+
 	if (!response.ok) {
+		await cancelBody(response);
 		throw new SafeDiscoveryError(`discovery endpoint returned HTTP ${response.status}`);
 	}
 
@@ -86,55 +114,37 @@ function assertUrlAllowed(parsed: URL, opts: SafeDiscoveryOptions | undefined): 
 	}
 }
 
+const privateAddresses = new net.BlockList();
+for (const [address, prefix] of [
+	["0.0.0.0", 8],
+	["10.0.0.0", 8],
+	["100.64.0.0", 10],
+	["127.0.0.0", 8],
+	["169.254.0.0", 16],
+	["172.16.0.0", 12],
+	["192.168.0.0", 16],
+	["224.0.0.0", 4],
+	["240.0.0.0", 4],
+] as const)
+	privateAddresses.addSubnet(address, prefix, "ipv4");
+for (const [address, prefix] of [
+	["::", 128],
+	["::1", 128],
+	["fc00::", 7],
+	["fe80::", 10],
+	["ff00::", 8],
+] as const) {
+	privateAddresses.addSubnet(address, prefix, "ipv6");
+}
+
 function isPrivateHostname(hostname: string): boolean {
-	let host = hostname.toLowerCase();
-	if (host.startsWith("[") && host.endsWith("]")) {
-		host = host.slice(1, -1);
-	}
-	while (host.endsWith(".")) {
-		host = host.slice(0, -1);
-	}
-	if (host === "localhost" || host === "::1" || host === "0.0.0.0") {
-		return true;
-	}
-	const low = host.toLowerCase();
-	// IPv6 unique-local (fc00::/7) and link-local (fe80::/10); zone ids
-	// (`fe80::1%eth0`) trail the address and must not bypass the check.
-	const bare = low.split("%")[0] ?? low;
-	if (bare.startsWith("fc") || bare.startsWith("fd")) return true;
-	if (bare.startsWith("fe80") || bare.startsWith("fe90") || bare.startsWith("fea0") || bare.startsWith("feb0")) return true;
-	const v4 = parseIPv4(host);
-	if (v4 === undefined) {
-		return false;
-	}
-	const a = v4[0];
-	const b = v4[1];
-	if (a === 127) return true;
-	if (a === 10) return true;
-	if (a === 172 && b >= 16 && b <= 31) return true;
-	if (a === 192 && b === 168) return true;
-	if (a === 169 && b === 254) return true;
-	return false;
-}
-
-function parseIPv4(hostname: string): readonly [number, number, number, number] | undefined {
-	const parts = hostname.split(".");
-	if (parts.length !== 4) return undefined;
-	const a = parseOctet(parts[0]);
-	const b = parseOctet(parts[1]);
-	const c = parseOctet(parts[2]);
-	const d = parseOctet(parts[3]);
-	if (a === undefined || b === undefined || c === undefined || d === undefined) {
-		return undefined;
-	}
-	return [a, b, c, d];
-}
-
-function parseOctet(part: string | undefined): number | undefined {
-	if (part === undefined || !/^(?:0|[1-9]\d{0,2})$/.test(part)) return undefined;
-	const n = Number(part);
-	if (n > 255) return undefined;
-	return n;
+	const host = hostname
+		.toLowerCase()
+		.replace(/^\[|\]$/g, "")
+		.replace(/\.+$/, "");
+	if (host === "localhost" || host.endsWith(".localhost")) return true;
+	const family = net.isIP(host);
+	return family !== 0 && privateAddresses.check(host, family === 4 ? "ipv4" : "ipv6");
 }
 
 async function readLimitedBody(response: Response, maxBytes: number): Promise<string> {
