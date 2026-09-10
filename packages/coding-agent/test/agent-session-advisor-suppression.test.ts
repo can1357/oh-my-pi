@@ -24,7 +24,7 @@ import type { ToolCall } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -170,6 +170,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 	async function createCompletedAdvisorSession(
 		severity: "concern" | "blocker" = "concern",
 		extensionRunner?: AdvisorTestExtensionRunner,
+		settingsOverrides?: Partial<Record<SettingPath, unknown>>,
 	): Promise<CompletedAdvisorHarness> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({
@@ -198,7 +199,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			streamFn: mock.stream,
 		});
 		const sessionManager = SessionManager.inMemory();
-		const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false });
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false, ...settingsOverrides });
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
@@ -415,6 +416,27 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		await advisor.prompt("inspect the completed turn");
 		await session.waitForIdle();
 
+		expect(mock.calls.length).toBe(2);
+	});
+
+	it("steers a late advisor concern when advisor.lateConcern is 'steer' so the primary acts on it", async () => {
+		const { session, mock } = await createCompletedAdvisorSession("concern", undefined, {
+			"advisor.lateConcern": "steer",
+		});
+
+		await session.prompt("read five fixture files and answer with exactly one line");
+		await session.waitForIdle();
+		expect(mock.calls.length).toBe(1);
+
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+
+		await advisor.prompt("inspect the completed turn");
+		await session.waitForIdle();
+
+		// With lateConcern=steer, a concern arriving after the terminal answer wakes
+		// the primary (like a blocker) instead of being demoted to a passive card.
 		expect(mock.calls.length).toBe(2);
 	});
 

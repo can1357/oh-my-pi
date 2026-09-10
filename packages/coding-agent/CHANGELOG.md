@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `advisor.lateConcern` (`preserve` or `steer`) so late advisor concerns can wake the agent after a final answer ([#6456](https://github.com/can1357/oh-my-pi/pull/6456) by [@mvid](https://github.com/mvid)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added
