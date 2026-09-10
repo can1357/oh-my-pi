@@ -95,3 +95,14 @@ describe("pickQuotaShare DRR fairness", () => {
 		expect(pick.deficitUpdates).toEqual([]);
 	});
 });
+
+it("serves every equally idle candidate when deficits persist across requests", () => {
+	const pool: QuotaShareInput[] = ["a", "b", "c", "d"].map(id => ({ id, weight: 1, inFlight: 0, saturated: false }));
+	const picks: string[] = [];
+	for (let index = 0; index < pool.length * 2; index++) {
+		const chosen = pickQuotaShare(pool)!;
+		picks.push(chosen.id);
+		for (const item of pool) item.deficit = chosen.deficitUpdates.find(update => update.id === item.id)!.deficit;
+	}
+	for (const item of pool) expect(picks.filter(id => id === item.id)).toHaveLength(2);
+});

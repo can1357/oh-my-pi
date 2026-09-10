@@ -1,3 +1,4 @@
+import { requestNeeds } from "./capabilities";
 /**
  * omp auth-gateway HTTP server.
  *
@@ -402,12 +403,6 @@ type FormatErrorFn = (status: number, type: string, message: string) => Response
 
 type AttemptPrep = { type: "key"; apiKey: string } | { type: "retry" } | { type: "respond"; response: Response };
 
-function hashString(value: string): number {
-	let h = 0;
-	for (let i = 0; i < value.length; i++) h = (h * 31 + value.charCodeAt(i)) | 0;
-	return h;
-}
-
 /**
  * Resolve the first viable dispatch target for a compiled route. A primary
  * that is absent from the catalog (stale route, credential-scoped model
@@ -427,16 +422,7 @@ function resolveFirstAvailableTarget(
 		attemptedTargets.add(current);
 		const next = decideAttempt({
 			route: compiled,
-			state: conductorExecutionState(
-				compiled,
-				attemptedTargets,
-				new Set<number>(),
-				0,
-				0,
-				current,
-				false,
-				"probing",
-			),
+			state: conductorExecutionState(compiled, attemptedTargets, new Set<number>(), 0, 0, current, false, "probing"),
 			commitState: "probing",
 		});
 		if (next.type !== "dispatch") return { target: current, model: undefined };
@@ -477,13 +463,14 @@ function dispatchTargetId(
 	commitState: StreamCommitState,
 	cacheStore: PromptCacheAffinityStore,
 	fingerprint: string,
+	initialTarget: string,
 ): string | undefined {
 	const hit = cacheStore.lookup(fingerprint);
 	const action = decideAttempt({
 		route: compiled,
 		state,
 		commitState,
-		preferredTargetId: hit?.model,
+		preferredTargetId: hit?.model ?? initialTarget,
 	});
 	return action.type === "dispatch" ? action.targetModelId : undefined;
 }
@@ -781,7 +768,12 @@ async function handleFormatEndpoint(
 	}
 	// Native Gemini selects streaming via the endpoint, not a body flag: the
 	// module default (stream) must not turn generateContent into SSE.
-	if (route.label === "gemini-v1beta" && geminiStream !== undefined && isRecord(body) && typeof body.stream !== "boolean") {
+	if (
+		route.label === "gemini-v1beta" &&
+		geminiStream !== undefined &&
+		isRecord(body) &&
+		typeof body.stream !== "boolean"
+	) {
 		body = { ...body, stream: geminiStream };
 	}
 
@@ -795,16 +787,31 @@ async function handleFormatEndpoint(
 	if (!modelId) {
 		return route.module.formatError(400, "invalid_request_error", "Missing top-level `model` field");
 	}
-	const compiled = (bootOpts.routeRegistry ?? new RouteRegistry(bootOpts.resolveModel)).resolve(modelId);
+	let parsed: ParsedFormatRequest;
+	try {
+		parsed = route.module.parseRequest(body, req.headers);
+	} catch (error) {
+		if (controller.signal.aborted) return clientClosedResponse(route);
+		const message = error instanceof Error ? error.message : String(error);
+		return route.module.formatError(400, "invalid_request_error", message);
+	}
+	const compiled = (bootOpts.routeRegistry ?? new RouteRegistry(bootOpts.resolveModel)).resolve(modelId, {
+		vision: requestNeeds(parsed.context).vision === true,
+	});
 	if (!compiled) {
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
-	const firstTarget = pickInitialRouteTarget(compiled, hashString(requestId));
+	const firstTarget = bootOpts.routeRegistry?.pickInitialTarget(compiled) ?? pickInitialRouteTarget(compiled);
 	if (firstTarget === undefined) {
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
 	const attemptedTargets = new Set<string>();
-	const initial = resolveFirstAvailableTarget(compiled, id => bootOpts.resolveModel(id), firstTarget, attemptedTargets);
+	const initial = resolveFirstAvailableTarget(
+		compiled,
+		id => bootOpts.resolveModel(id),
+		firstTarget,
+		attemptedTargets,
+	);
 	let currentTarget = initial.target;
 	if (initial.model === undefined) {
 		return unknownModelResponse(route.module.formatError, currentTarget);
@@ -818,14 +825,7 @@ async function handleFormatEndpoint(
 	// this id; without it `getApiKey` would re-roundrobin every request
 	// and `markUsageLimitReached` would no-op (it can only mark the
 	// credential it last handed out to that session).
-	let parsed: ParsedFormatRequest;
-	try {
-		parsed = route.module.parseRequest(body, req.headers);
-	} catch (error) {
-		if (controller.signal.aborted) return clientClosedResponse(route);
-		const message = error instanceof Error ? error.message : String(error);
-		return route.module.formatError(400, "invalid_request_error", message);
-	}
+
 	await runHook(bootOpts.hooks?.beforeRequest, {
 		requestId,
 		routeId: compiled.id,
@@ -841,27 +841,41 @@ async function handleFormatEndpoint(
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
-	const supportsOpenAIImageFileReferences =
-		model.api === "openai-responses" ||
-		model.api === "azure-openai-responses" ||
-		model.api === "openai-codex-responses";
-	if (
-		route.label === "openai-responses" &&
-		!supportsOpenAIImageFileReferences &&
-		parsed.context.messages.some(
-			message =>
-				message.role === "toolResult" &&
-				message.content.some(
-					block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
-				),
+	const requestHasOpenAIImageFileReferences = parsed.context.messages.some(message => {
+		if (
+			message.role === "toolResult" &&
+			message.content.some(
+				block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
+			)
 		)
-	) {
+			return true;
+		const payload = "providerPayload" in message ? message.providerPayload : undefined;
+		if (payload?.type !== "openaiResponsesHistory") return false;
+		return payload.items.some(
+			item =>
+				Array.isArray(item.content) &&
+				item.content.some(
+					(part: unknown) =>
+						isRecord(part) &&
+						(part.type === "input_image" || part.type === "input_file") &&
+						typeof part.file_id === "string" &&
+						part.file_id.length > 0,
+				),
+		);
+	});
+	const openaiImageFileCompatError = (candidate: Model<Api>): Response | undefined => {
+		if (route.label !== "openai-responses" || !requestHasOpenAIImageFileReferences) return undefined;
+		const supportsOpenAIImageFileReferences =
+			candidate.api === "openai-responses" ||
+			candidate.api === "azure-openai-responses" ||
+			candidate.api === "openai-codex-responses";
+		if (supportsOpenAIImageFileReferences) return undefined;
 		return route.module.formatError(
 			400,
 			"invalid_request_error",
-			"OpenAI image file IDs in tool outputs require a Responses-compatible upstream model",
+			"OpenAI file IDs require a Responses-compatible upstream model",
 		);
-	}
+	};
 
 	// Sticky credential id: honour the client's `prompt_cache_key` when
 	// supplied (so external session ids align), otherwise derive from
@@ -943,6 +957,8 @@ async function handleFormatEndpoint(
 				: formatError(502, "upstream_error", "Upstream request failed");
 		}
 		model = resolved;
+		const incompatible = openaiImageFileCompatError(model);
+		if (incompatible) return incompatible;
 		const skip = targetSkipReason(compiled, health, currentTarget, model);
 		if (skip !== undefined) {
 			attemptedTargets.add(currentTarget);
@@ -968,7 +984,7 @@ async function handleFormatEndpoint(
 				targetId = pendingFallback;
 				pendingFallback = undefined;
 			} else {
-				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state, cacheStore, fingerprint);
+				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state, cacheStore, fingerprint, currentTarget);
 			}
 			if (targetId === undefined) {
 				if (lastClassified) return classifiedError(lastClassified);
@@ -1372,16 +1388,23 @@ async function handlePiNative(
 		return piNative.formatError(400, "invalid_request_error", message);
 	}
 
-	const compiled = (bootOpts.routeRegistry ?? new RouteRegistry(bootOpts.resolveModel)).resolve(parsed.modelId);
+	const compiled = (bootOpts.routeRegistry ?? new RouteRegistry(bootOpts.resolveModel)).resolve(parsed.modelId, {
+		vision: requestNeeds(parsed.context).vision === true,
+	});
 	if (!compiled) {
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
-	const firstTarget = pickInitialRouteTarget(compiled, hashString(requestId));
+	const firstTarget = bootOpts.routeRegistry?.pickInitialTarget(compiled) ?? pickInitialRouteTarget(compiled);
 	if (firstTarget === undefined) {
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
 	const attemptedTargets = new Set<string>();
-	const initial = resolveFirstAvailableTarget(compiled, id => bootOpts.resolveModel(id), firstTarget, attemptedTargets);
+	const initial = resolveFirstAvailableTarget(
+		compiled,
+		id => bootOpts.resolveModel(id),
+		firstTarget,
+		attemptedTargets,
+	);
 	let currentTarget = initial.target;
 	if (initial.model === undefined) {
 		return unknownModelResponse(piNative.formatError, currentTarget);
@@ -1494,7 +1517,7 @@ async function handlePiNative(
 				targetId = pendingFallback;
 				pendingFallback = undefined;
 			} else {
-				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state, cacheStore, fingerprint);
+				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state, cacheStore, fingerprint, currentTarget);
 			}
 			if (targetId === undefined) {
 				if (lastClassified) return classifiedError(lastClassified);

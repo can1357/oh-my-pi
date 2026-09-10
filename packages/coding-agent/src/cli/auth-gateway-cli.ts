@@ -196,6 +196,17 @@ export function indexModelsByRequestId(
 	return modelById;
 }
 
+/** Refresh routing against the credential snapshot that is current after discovery. */
+export async function refreshAuthGatewayModelIndex(
+	registry: Pick<ModelRegistry, "refresh" | "getAll">,
+	storage: Pick<AuthStorage, "listStoredCredentials" | "reload">,
+): Promise<Map<string, Model<Api>>> {
+	await storage.reload();
+	await registry.refresh();
+	const providers = new Set(storage.listStoredCredentials().map(entry => entry.provider));
+	return indexModelsByRequestId(registry.getAll(), providers);
+}
+
 async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	const brokerConfig = await resolveAuthBrokerConfig();
 	if (!brokerConfig) {
@@ -236,12 +247,8 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	// shadow broker credentials. Format handlers ask `resolveModel` to translate
 	// a client-requested `model` field into a pi-ai `Model<Api>` before dispatch;
 	// `listModels` powers `/v1/models`.
-	const snapshot = storage.exportSnapshot();
-	const providersWithCreds = new Set<string>();
-	for (const entry of snapshot.credentials) providersWithCreds.add(entry.provider);
 	const registry = new ModelRegistry(storage, undefined, { ignoreLocalModelConfig: true });
-	await registry.refresh();
-	let modelById = indexModelsByRequestId(registry.getAll(), providersWithCreds);
+	let modelById = await refreshAuthGatewayModelIndex(registry, storage);
 
 	let configRoutesFile: string | undefined;
 	if (flags.routes === undefined) {
@@ -273,10 +280,9 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	// keeps serving the previous catalog. `unref()` so the timer never keeps the
 	// process alive on its own.
 	const catalogRefresh = setInterval(() => {
-		void registry
-			.refresh()
-			.then(() => {
-				modelById = indexModelsByRequestId(registry.getAll(), providersWithCreds);
+		void refreshAuthGatewayModelIndex(registry, storage)
+			.then(index => {
+				modelById = index;
 			})
 			.catch(error => {
 				logger.warn("auth-gateway catalog refresh failed", {

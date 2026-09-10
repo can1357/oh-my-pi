@@ -440,3 +440,46 @@ describe("RouteRegistry", () => {
 		expect(registry.get("copied")?.portability).toEqual({ scope: "provider", origin: "openai" });
 	});
 });
+
+it("round-robins every target and resets its cursor after route replacement", () => {
+	const registry = new RouteRegistry(() => undefined);
+	const definition = {
+		id: "rr",
+		root: {
+			type: "balance" as const,
+			strategy: "rr" as const,
+			children: ["a", "b", "c"].map(model => ({ type: "target" as const, model })),
+		},
+	};
+	registry.register(definition);
+	const compiled = registry.get("rr")!;
+	expect(Array.from({ length: 6 }, () => registry.pickInitialTarget(compiled))).toEqual([
+		"a",
+		"b",
+		"c",
+		"a",
+		"b",
+		"c",
+	]);
+	registry.pickInitialTarget(compiled);
+	registry.register(definition);
+	expect(registry.pickInitialTarget(registry.get("rr")!)).toBe("a");
+});
+
+it("specializes conditional branches per request without changing the shared route", () => {
+	const registry = new RouteRegistry(() => undefined);
+	registry.register({
+		id: "conditional",
+		root: {
+			type: "conditional",
+			when: { vision: true },
+			children: [
+				{ type: "target", model: "vision" },
+				{ type: "target", model: "text" },
+			],
+		},
+	});
+	expect(registry.resolve("conditional", { vision: true })?.targets).toEqual(["vision"]);
+	expect(registry.resolve("conditional", { vision: false })?.targets).toEqual(["text"]);
+	expect(registry.get("conditional")?.targets).toEqual(["vision", "text"]);
+});

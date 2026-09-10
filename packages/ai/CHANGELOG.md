@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed fair-share ties, round-robin target selection, conditional vision routes, and recovery when a preferred fallback becomes unavailable.
+
 - Quota probes require a requestId; balance routes pick the initial target via rr/weighted strategy.
 - Fixed auth-gateway credential disable returning success before a remote broker disable completed; the handler now awaits the remote path when present.
 ## [18.1.14] - 2026-09-07

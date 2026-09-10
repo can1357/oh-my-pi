@@ -244,3 +244,14 @@ describe("decideAttempt", () => {
 		expect(action).toEqual({ type: "terminal" });
 	});
 });
+
+it("tries an unused primary when a remembered backup is unavailable", () => {
+	expect(
+		decideAttempt({
+			route: route({ targets: ["primary", "backup"], fallbacks: { provider_unavailable: ["backup"] } }),
+			state: state({ attemptedTargets: new Set(["backup"]), currentTarget: "backup" }),
+			classification: classification("provider_unavailable"),
+			commitState: "probing",
+		}),
+	).toEqual({ type: "fallback_target", targetModelId: "primary" });
+});

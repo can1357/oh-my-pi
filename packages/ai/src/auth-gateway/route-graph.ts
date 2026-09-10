@@ -70,6 +70,7 @@ export class RouteRegistry {
 	#generation = 1;
 	#resolveModel: ResolveModel;
 	#routes = new Map<string, CompiledRoute>();
+	#roundRobinPositions = new Map<string, number>();
 
 	constructor(resolveModel: ResolveModel) {
 		this.#resolveModel = resolveModel;
@@ -84,6 +85,7 @@ export class RouteRegistry {
 		const compiled = compileDefinition(definition, id => this.#routes.get(id)?.root, this.#generation + 1);
 		this.#generation += 1;
 		this.#routes.set(definition.id, compiled);
+		this.#roundRobinPositions.delete(definition.id);
 	}
 
 	/**
@@ -103,6 +105,7 @@ export class RouteRegistry {
 		}
 		this.#generation = nextGeneration;
 		this.#routes = pending;
+		this.#roundRobinPositions.clear();
 	}
 
 	/** Registered virtual routes in insertion order. Concrete catalog wraps are omitted. */
@@ -118,13 +121,24 @@ export class RouteRegistry {
 	/** Unregister a virtual route. Bumps generation on success. Returns false if not registered. */
 	unregister(id: string): boolean {
 		if (!this.#routes.delete(id)) return false;
+		this.#roundRobinPositions.delete(id);
 		this.#generation += 1;
 		return true;
 	}
 
-	resolve(modelId: string): CompiledRoute | undefined {
+	/** Advance a per-route cursor, shared by all endpoint formats in this gateway. */
+	pickInitialTarget(compiled: CompiledRoute): string | undefined {
+		if (compiled.root.type !== "balance" || compiled.root.strategy !== "rr") return pickInitialRouteTarget(compiled);
+		const position = this.#roundRobinPositions.get(compiled.id) ?? 0;
+		const target = pickInitialRouteTarget(compiled, position);
+		if (compiled.targets.length > 0)
+			this.#roundRobinPositions.set(compiled.id, (position + 1) % compiled.targets.length);
+		return target;
+	}
+
+	resolve(modelId: string, facts?: RouteRequestFacts): CompiledRoute | undefined {
 		const virtual = this.#routes.get(modelId);
-		if (virtual) return virtual;
+		if (virtual) return facts ? selectRouteForRequest(virtual, facts) : virtual;
 		const model = this.#resolveModel(modelId);
 		if (!model) return undefined;
 		// Preserve provider-qualified ids (`openai/gpt-5`) so affinity / fallback
@@ -138,6 +152,26 @@ export class RouteRegistry {
 			fallbacks: {},
 		};
 	}
+}
+
+export interface RouteRequestFacts {
+	vision: boolean;
+}
+
+/** Conditional children are the matching branch and an optional alternative. */
+export function selectRouteForRequest(route: CompiledRoute, facts: RouteRequestFacts): CompiledRoute {
+	const choose = (node: RouteNode): RouteNode => {
+		if (node.type === "conditional") {
+			if (node.children.length > 2)
+				throw new AIError.ValidationError("Conditional routes accept a matching branch and optional alternative");
+			const matches = node.when.vision === undefined || node.when.vision === facts.vision;
+			const selected = node.children[matches ? 0 : 1];
+			return selected ? choose(selected) : { type: "balance", strategy: "rr", children: [] };
+		}
+		if (node.type === "target" || node.type === "route-ref") return node;
+		return { ...node, children: node.children.map(choose) };
+	};
+	return compileDefinition({ ...route, root: choose(route.root) }, () => undefined, route.generation);
 }
 
 function compileDefinition(

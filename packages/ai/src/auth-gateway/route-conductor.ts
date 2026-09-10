@@ -89,7 +89,11 @@ export function decideAttempt(args: {
 			// to firstUnused(route.targets) would bypass the tree (e.g. retry a
 			// small model on context_overflow, or any unused leaf after a
 			// preferred-later failure).
-			const next = firstUnused(route.fallbacks[disposition], state.attemptedTargets);
+			const next =
+				firstUnused(route.fallbacks[disposition], state.attemptedTargets) ??
+				(disposition !== "context_overflow" && route.fallbacks[disposition]?.includes(state.currentTarget)
+					? firstUnused(route.targets, state.attemptedTargets)
+					: undefined);
 			return next === undefined ? { type: "terminal" } : { type: "fallback_target", targetModelId: next };
 		}
 		default: {

@@ -84,12 +84,12 @@ function pickTwoChoice(candidates: readonly QuotaShareInput[]): QuotaShareInput 
 	let second: QuotaShareInput | undefined;
 	for (let i = 1; i < candidates.length; i += 1) {
 		const candidate = candidates[i];
-		if (candidate.inFlight < lowest.inFlight) {
+		if (ranksBefore(candidate, lowest)) {
 			second = lowest;
 			lowest = candidate;
 			continue;
 		}
-		if (second === undefined || candidate.inFlight < second.inFlight) {
+		if (second === undefined || ranksBefore(candidate, second)) {
 			second = candidate;
 		}
 	}
@@ -99,8 +99,16 @@ function pickTwoChoice(candidates: readonly QuotaShareInput[]): QuotaShareInput 
 	if ((second.deficit ?? 0) > (lowest.deficit ?? 0)) {
 		return second;
 	}
-	if (second.weight > lowest.weight) {
+	if ((second.deficit ?? 0) === (lowest.deficit ?? 0) && second.weight > lowest.weight) {
 		return second;
 	}
 	return lowest;
+}
+
+/** Among equally idle candidates, accumulated debt prevents position starvation. */
+function ranksBefore(candidate: QuotaShareInput, incumbent: QuotaShareInput): boolean {
+	if (candidate.inFlight !== incumbent.inFlight) return candidate.inFlight < incumbent.inFlight;
+	if ((candidate.deficit ?? 0) !== (incumbent.deficit ?? 0))
+		return (candidate.deficit ?? 0) > (incumbent.deficit ?? 0);
+	return candidate.weight > incumbent.weight;
 }
