@@ -44,7 +44,7 @@ import { applyHyperlinkSetting } from "../tui/hyperlink";
 import { replaceFileAtomically } from "../utils/atomic-file";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
-import { stringifyYamlConfig } from "./config-file";
+import { reconcileYamlPreservingComments, stringifyYamlConfig } from "./config-file";
 import {
 	type BashInterceptorRule,
 	type GroupPrefix,
@@ -2660,14 +2660,15 @@ export class Settings {
 	// Saving
 	// ─────────────────────────────────────────────────────────────────────────
 
-	async #writeYamlAtomically(filePath: string, settings: RawSettings): Promise<void> {
+	/** Atomically replace `filePath` with `text` via a temp file + rename. */
+	async #writeYamlTextAtomically(filePath: string, text: string): Promise<void> {
 		const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 		let removeTemp = false;
 		try {
 			const handle = await fs.promises.open(tempPath, "wx", 0o600);
 			removeTemp = true;
 			try {
-				await handle.writeFile(stringifyYamlConfig(settings), "utf8");
+				await handle.writeFile(text, "utf8");
 				await handle.sync();
 			} finally {
 				await handle.close();
@@ -2679,6 +2680,36 @@ export class Settings {
 				await fs.promises.rm(tempPath, { force: true }).catch(() => {});
 			}
 		}
+	}
+
+	/** Reserialize the whole settings object and write it (comment-oblivious). */
+	async #writeYamlAtomically(filePath: string, settings: RawSettings): Promise<void> {
+		await this.#writeYamlTextAtomically(filePath, stringifyYamlConfig(settings));
+	}
+
+	/**
+	 * Persist `settings` while preserving the existing file's comments, quoting,
+	 * and formatting (see #11477): only the keys whose value changed are
+	 * rewritten. Falls back to a full reserialization when no readable original
+	 * exists (fresh file or a quarantined config recovered from in-memory state).
+	 */
+	async #writeYamlReconciledAtomically(
+		filePath: string,
+		settings: RawSettings,
+		hasReadableOriginal: boolean,
+	): Promise<void> {
+		if (!hasReadableOriginal) {
+			await this.#writeYamlAtomically(filePath, settings);
+			return;
+		}
+		let originalText: string | null;
+		try {
+			originalText = await Bun.file(filePath).text();
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			originalText = null;
+		}
+		await this.#writeYamlTextAtomically(filePath, reconcileYamlPreservingComments(originalText, settings));
 	}
 
 	#queueSave(): void {
@@ -2809,11 +2840,14 @@ export class Settings {
 					setByPath(current, ["modelRoles"], mergedRoles);
 					shouldWrite = true;
 				}
-
 				// Update our global with any external changes we preserved.
 				this.#global = current;
 				if (shouldWrite) {
-					await this.#writeYamlAtomically(writePath, this.#global);
+					await this.#writeYamlReconciledAtomically(
+						writePath,
+						this.#global,
+						!this.#quarantinedYamlTargets.has(configPath),
+					);
 				}
 				this.#quarantinedYamlTargets.delete(configPath);
 				// These pending roles were included in this write. Remove each
@@ -2926,7 +2960,11 @@ export class Settings {
 					setByPath(projectSettings, ["modelRoles", role], value);
 				}
 
-				await this.#writeYamlAtomically(writePath, projectSettings);
+				await this.#writeYamlReconciledAtomically(
+					writePath,
+					projectSettings,
+					!this.#quarantinedYamlTargets.has(projectConfigPath),
+				);
 				this.#projectFileSettings = structuredClone(projectSettings);
 				this.#quarantinedYamlTargets.delete(projectConfigPath);
 			});
