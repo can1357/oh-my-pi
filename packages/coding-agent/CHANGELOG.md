@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- SDK cold-cache default-model discovery refresh is limited to KDL credential-scoped catalog providers (same gate as CLI startup).
 - `--no-tools` keeps deferred MCP manager tools off the active wire set after late discovery refresh.
 
 - Cold `--model` miss refresh runs only for KDL credential-scoped catalog providers (ordinary openai typos no longer block startup on discovery).

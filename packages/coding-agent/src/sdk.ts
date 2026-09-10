@@ -28,6 +28,7 @@ import {
 	prewarmOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import { isCredentialScopedCatalogProvider } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { getCatalogProviderEntry } from "@oh-my-pi/pi-catalog/provider-models";
 import type { Component } from "@oh-my-pi/pi-tui";
 import {
@@ -2717,7 +2718,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// Built-in credential-scoped catalogs (e.g. grokbot) are not listed
 				// by getDiscoverableProviders(); refresh that provider when the
 				// configured default is provider-qualified against a descriptor
-				// with createModelManagerOptions.
+				// with createModelManagerOptions AND KDL credential-scoped policy
+				// (ordinary built-ins like openai must not block on discovery for a typo).
 				const defaultRoleSelector = settings.getModelRole("default")?.trim();
 				const defaultRoleConfigured = Boolean(defaultRoleSelector);
 				const defaultRoleProvider = defaultRoleSelector
@@ -2727,7 +2729,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const canRefreshBuiltInDefault =
 					defaultRoleProvider !== undefined &&
 					modelRegistry.hasProvider(defaultRoleProvider) &&
-					Boolean(getCatalogProviderEntry(defaultRoleProvider)?.createModelManagerOptions);
+					Boolean(getCatalogProviderEntry(defaultRoleProvider)?.createModelManagerOptions) &&
+					isCredentialScopedCatalogProvider(defaultRoleProvider);
 				if (
 					!hasExplicitModel &&
 					(defaultRoleConfigured || !pick) &&

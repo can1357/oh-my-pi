@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Grok Bot JSON-as-text promotion no longer invents product aliases (Shell/Read/Write) for native bash/read/write wire names.
 - Grok Bot accumulates non-prefix streamed tool-argument deltas (and SendToUser args) instead of replacing the buffer with the final fragment.
 
 - Grok Bot Connect streams reject data frames and leftover bytes after the end-stream trailer.

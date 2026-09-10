@@ -431,6 +431,16 @@ describe("toolSmokePrompt", () => {
 				id,
 			),
 		).toBe(false);
+		// Trailing destructive commands after a matching write must not pass —
+		// runOneTool fabricates success from the write prefix and never executes `rm`.
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Shell", arguments: { command: `printf '%s\\n' ${ping} > ${writePath}; rm ${writePath}` } },
+				ping,
+				id,
+			),
+		).toBe(false);
 		expect(
 			matchesToolSmokeCall(
 				"write",

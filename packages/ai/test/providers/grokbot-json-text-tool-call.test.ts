@@ -238,6 +238,26 @@ describe("parseJsonTextToolCall", () => {
 		expect(names.has("bash")).toBe(false);
 	});
 
+	test("advertisedNamesForJsonTextToolCall does not invent Shell for native bash wire", () => {
+		// Catalog-opted native rows advertise bash/read/write. Inventing Shell would
+		// let JSON promotion accept a name upsertTool cannot resolve on the native index.
+		const names = advertisedNamesForJsonTextToolCall(
+			[{ name: "bash" }, { name: "read" }, { name: "write" }],
+			[{ name: "bash" }, { name: "read" }, { name: "write" }],
+		);
+		expect(names.has("bash")).toBe(true);
+		expect(names.has("read")).toBe(true);
+		expect(names.has("write")).toBe(true);
+		expect(names.has("Shell")).toBe(false);
+		expect(names.has("Read")).toBe(false);
+		expect(names.has("Write")).toBe(false);
+		expect(parseJsonTextToolCall('{"name":"Shell","arguments":{"command":"echo hi"}}', names)).toBeUndefined();
+		expect(parseJsonTextToolCall('{"name":"bash","arguments":{"command":"echo hi"}}', names)).toEqual({
+			name: "bash",
+			arguments: { command: "echo hi" },
+		});
+	});
+
 	test("parseJsonTextToolCall rejects collision-loser edit/bash when write/custom owns the wire slot", () => {
 		const writeOwns = advertisedNamesForJsonTextToolCall(
 			[{ name: "Write" }, { name: "Shell" }],

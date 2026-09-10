@@ -631,6 +631,10 @@ export function writePathPingInShellCommand(command: string, filePath: string, p
 			if (matched) return !failingExitShellSegment(segment);
 			return false;
 		}
+		// Trailing statements after a successful write can destroy the fixture
+		// (`printf ping > path; rm path`) while runOneTool fabricates success from
+		// the matched prefix alone — require the write to be the final statement.
+		if (matched) return false;
 		const redirect = shellWriteRedirect(segment);
 		if (!redirect) continue;
 		if (!redirectBeforeEmitsPing(redirect.before, ping)) continue;

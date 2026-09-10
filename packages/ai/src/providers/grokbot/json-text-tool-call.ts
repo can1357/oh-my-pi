@@ -138,14 +138,17 @@ export function advertisedNamesForJsonTextToolCall(
 			hasWire = true;
 			const trimmed = name.trim();
 			names.add(trimmed);
-			names.add(toSandField2Name(trimmed));
-			// Alias only the omp/custom owner that survived wire-name collision —
-			// not an unconditional PascalCase→preferred-omp map (that invents bash
-			// when an extension owns Shell via customWireName).
+			const sand = toSandField2Name(trimmed);
+			// Native wire advertises omp names (bash/read/write). Do not invent the
+			// product PascalCase alias (Shell) — promotion would accept `Shell` while
+			// upsertTool only indexes `bash`, yielding "Tool Shell not found".
+			if (sand !== trimmed) continue;
+			// Product / sand-shaped wire name: alias only the omp/custom owner that
+			// survived wire-name collision — not an unconditional map (that invents
+			// bash when an extension owns Shell via customWireName).
 			const owner = preferredOmpOwnerForWireName(trimmed, ompTools);
 			if (owner) {
 				names.add(owner);
-				names.add(toSandField2Name(owner));
 			} else if (!Array.isArray(ompTools) || ompTools.length === 0) {
 				// No omp catalog provided (tests / wire-only): keep built-in alias.
 				names.add(toOmpToolName(trimmed));
