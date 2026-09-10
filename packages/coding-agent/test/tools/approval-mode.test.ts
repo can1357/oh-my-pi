@@ -96,9 +96,17 @@ describe("tools.approvalMode setting", () => {
 		expect(textOf(result)).toContain("ok");
 	});
 
+	it("omitted execute-time context inherits the session runner settings", async () => {
+		const result = await bashTool().execute("inherit-session", { command: "echo inherited" });
+		expect(textOf(result)).toContain("inherited");
+	});
+
 	it("missing execute-time context fails closed for an exec-tier tool", async () => {
+		// Explicit empty context: no settings and no --auto-approve. Omitting the
+		// argument inherits the session runner's settings (schema default yolo),
+		// which is the live-session path used by direct execute() callers.
 		await expect(
-			bashTool().execute("no-context", { command: "echo leaked" }, undefined, undefined, undefined),
+			bashTool().execute("no-context", { command: "echo leaked" }, undefined, undefined, {}),
 		).rejects.toThrow(/requires approval but no interactive UI available/);
 	});
 

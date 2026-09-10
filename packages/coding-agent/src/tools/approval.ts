@@ -52,8 +52,11 @@ function asPolicyMap(value: unknown): Record<string, unknown> {
  * settings are present, the configured `tools.approvalMode` is used (schema
  * default remains `yolo`). `--auto-approve` still forces `yolo`.
  *
- * Shared by `ExtensionToolWrapper.execute`, `refuseByWritePolicy`, and
- * `mcpApprovalPreflight` so the three sites cannot drift.
+ * Shared by `ExtensionToolWrapper.execute`, `refuseByWritePolicy`,
+ * `mcpApprovalPreflight`, and eval prelude host calls so those sites cannot
+ * drift. `ExtensionToolWrapper.execute` still inherits the runner's session
+ * settings when the caller omits context, so a live session keeps its
+ * configured (schema-default `yolo`) grant.
  */
 export function resolveApprovalFromContext(context?: ApprovalContextSource | null): ResolvedExecuteTimeApproval {
 	if (context?.autoApprove === true) {
