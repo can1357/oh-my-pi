@@ -1017,6 +1017,9 @@ export interface TokenCost {
 	cacheWrite: number;
 }
 
+/** User-facing interpretation of a model's token-rate card. */
+export type ModelPricingStatus = "fixed" | "free" | "included" | "variable" | "unknown";
+
 /**
  * Rates applied to the full request when its prompt exceeds `inputThreshold`,
  * or reaches it when `inputThresholdInclusive` is true. Prompt input is the
@@ -1072,6 +1075,19 @@ export type ModelTokenizer =
 	| "deepseek-v3"
 	| "kimi-k2"
 	| "glm5";
+
+/** One Cursor `RequestedModel.parameters` entry recovered from rich discovery. */
+export interface CursorModelParameter {
+	id: string;
+	value: string;
+}
+
+/** Cursor wire target selected after local effort/variant routing. */
+export interface CursorModelRoute {
+	modelId: string;
+	parameters: readonly CursorModelParameter[];
+	maxMode?: boolean;
+}
 
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
@@ -1138,7 +1154,27 @@ export interface Model<TApi extends Api = Api> {
 	gitlabDuoWorkflowRootNamespaceId?: string;
 	/** Cursor `max_mode` request flag returned by `GetUsableModels` for premium models that require max mode. */
 	cursorMaxMode?: boolean;
+	/** Cursor `RequestedModel.parameters` for this model's default variant. */
+	cursorModelParameters?: readonly CursorModelParameter[];
+	/**
+	 * Per-wire-id Cursor routes recovered from `AvailableModels`. Generic effort
+	 * collapse retains these while routing selects one key at request time.
+	 */
+	cursorModelRoutes?: Readonly<Record<string, CursorModelRoute>>;
+	/** Cursor's account-relative model price/multiplier; not a per-token USD rate. */
+	cursorPrice?: number;
+	/** Cursor requires data retention to invoke this model. */
+	cursorRequiresDataRetention?: boolean;
+	/** Cursor explicitly reports support for its Agent surface. */
+	cursorSupportsAgent?: boolean;
+	/** Cursor explicitly reports support for sandboxed execution. */
+	cursorSupportsSandboxing?: boolean;
 	cost: ModelCost;
+	/**
+	 * Interpretation of an all-zero token-rate card. Omitted zero-rate cards
+	 * are unknown; any non-zero rate is always treated as fixed pricing.
+	 */
+	pricingStatus?: Exclude<ModelPricingStatus, "fixed">;
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;
 	contextWindow: number | null;
@@ -1202,6 +1238,8 @@ export interface Model<TApi extends Api = Api> {
 	isNew?: boolean;
 	/** Upstream marks this model as beta / preview quality. */
 	isBeta?: boolean;
+	/** Authenticated provider catalog marks this as the account's default model. */
+	isProviderDefault?: boolean;
 	/** Upstream marks this model as one of its recommended picks. */
 	isRecommended?: boolean;
 	/** Canonical thinking capability metadata for this model. */
