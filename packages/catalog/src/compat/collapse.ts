@@ -1010,8 +1010,8 @@ export function collapseVariants<TSpec extends VariantSpecLike>(
  * Runtime entry point for already-built `Model` lists (the model-manager
  * merge point, coding-agent registry custom providers): collapses hand
  * tables plus derived pairs, then re-runs `buildModel` on freshly created
- * logical specs so thinking wire defaults stay resolved. Untouched entries
- * pass through by reference.
+ * logical specs. Ordinary projections retain only authored controls; a newly
+ * collapsed logical model promotes its calculated routing to authored metadata.
  */
 export function collapseBuiltVariants<TApi extends Api>(models: readonly Model<TApi>[]): Model<TApi>[] {
 	const collapsed = collapseVariants(models);
@@ -1026,9 +1026,15 @@ function projectModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TApi>
 		identity: _identity,
 		requiresGlyphTokenization: _requiresGlyphTokenization,
 		supportsComputerUseConfig: _supportsComputerUseConfig,
+		thinking: transformedThinking,
+		thinkingConfig: _thinkingConfig,
 		...spec
 	} = model;
-	return { ...spec, compat: compatConfig };
+	return {
+		...spec,
+		...(transformedThinking !== undefined ? { thinking: transformedThinking } : {}),
+		compat: compatConfig,
+	};
 }
 
 /**

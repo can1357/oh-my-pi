@@ -4,9 +4,10 @@ import type { Api, Model, ModelSpec } from "../types";
 
 /**
  * Project a built `Model` back to spec stage: `compat` becomes the verbatim
- * sparse override record (`compatConfig`), never the resolved view. Discovery
- * mappers spread these references into the specs they hand to the model
- * manager, which rebuilds via `buildModel`.
+ * sparse override record (`compatConfig`) and only authored
+ * `thinkingConfig` becomes `thinking`; resolved views never re-enter
+ * discovery. Generated bundled rows predate provenance, so their direct
+ * `thinking` remains authored.
  */
 export function toModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TApi> {
 	const {
@@ -14,11 +15,15 @@ export function toModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TAp
 		compatConfig,
 		supportsComputerUse: _derivedComputerUse,
 		supportsComputerUseConfig,
+		thinking: derivedThinking,
+		thinkingConfig,
 		...rest
 	} = model;
+	const thinking = Object.hasOwn(model, "thinkingConfig") ? thinkingConfig : derivedThinking;
 	return {
 		...rest,
 		...(supportsComputerUseConfig !== undefined ? { supportsComputerUse: supportsComputerUseConfig } : {}),
+		...(thinking !== undefined ? { thinking } : {}),
 		compat: compatConfig,
 	} as ModelSpec<TApi>;
 }

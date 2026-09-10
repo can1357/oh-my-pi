@@ -8,9 +8,10 @@ import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
-import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { fingerprintStaticModels, resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 function completionsSpec(overrides: Partial<ModelSpec<"openai-completions">> = {}): ModelSpec<"openai-completions"> {
@@ -84,6 +85,26 @@ describe("buildModel", () => {
 		}
 	});
 
+	it("records authored thinking controls separately from derived metadata", () => {
+		const authored = { mode: "effort", efforts: [Effort.Low], defaultLevel: Effort.Low } as const;
+		const inferred = buildModel(completionsSpec({ id: "gpt-5.6", reasoning: true }));
+		const configured = buildModel(completionsSpec({ reasoning: true, thinking: authored }));
+
+		expect(inferred.thinking).toBeDefined();
+		expect(inferred.thinkingConfig).toBeUndefined();
+		expect(configured.thinkingConfig).toBe(authored);
+		expect(configured.thinking).toEqual(authored);
+	});
+
+	it("projects only authored thinking from built models while retaining legacy bundled controls", () => {
+		const authored = { mode: "effort", efforts: [Effort.Low], defaultLevel: Effort.Low } as const;
+		const inferred = buildModel(completionsSpec({ id: "gpt-5.6", reasoning: true }));
+		const explicit = buildModel(completionsSpec({ reasoning: true, thinking: authored }));
+		const { thinkingConfig: _thinkingConfig, ...legacyBundledRow } = explicit;
+
+		expect(toModelSpec(inferred)).not.toHaveProperty("thinking");
+		expect(toModelSpec(legacyBundledRow).thinking).toEqual(authored);
+	});
 	it("lets sparse overrides win over detection and keeps the verbatim config", () => {
 		const sparse = { supportsDeveloperRole: true } as const;
 		const model = buildModel(
@@ -939,9 +960,14 @@ describe("model cache spec round trip", () => {
 		}
 	});
 
-	it.each(["bundled", "shared catalog"])(
-		"preserves %s thinking controls through ID-only discovery and offline restore",
-		async source => {
+	it.each([
+		["bundled", false],
+		["bundled", true],
+		["shared catalog", false],
+		["shared catalog", true],
+	])(
+		"preserves %s thinking controls through reasoning:%s ID-only discovery and offline restore",
+		async (source, discoveredReasoning) => {
 			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-thinking-merge-"));
 			const catalogModel = completionsSpec({
 				provider: "thinking-merge-test",
@@ -950,6 +976,7 @@ describe("model cache spec round trip", () => {
 			});
 			const discoveredModel = completionsSpec({
 				provider: catalogModel.provider,
+				reasoning: discoveredReasoning,
 				contextWindow: null,
 				maxTokens: null,
 			});
@@ -985,6 +1012,91 @@ describe("model cache spec round trip", () => {
 		},
 	);
 
+	it("does not persist derived discovery thinking over later static controls", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-thinking-provenance-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const dynamicModel = completionsSpec({
+			id: "gpt-5.6",
+			provider: "thinking-provenance-test",
+			reasoning: true,
+		});
+		const staticThinking = {
+			mode: "effort",
+			efforts: [Effort.Low],
+			defaultLevel: Effort.Low,
+			effortMap: { [Effort.Low]: "catalog-low" },
+		} as const;
+		const staticModel = completionsSpec({ ...dynamicModel, thinking: staticThinking });
+		try {
+			const online = await resolveProviderModels<"openai-completions">(
+				{
+					providerId: dynamicModel.provider,
+					staticModels: [],
+					cacheDbPath: dbPath,
+					fetchDynamicModels: async () => [dynamicModel],
+				},
+				"online",
+			);
+			expect(online.models[0]?.thinking).toBeDefined();
+			expect(online.models[0]?.thinkingConfig).toBeUndefined();
+
+			const db = new Database(dbPath, { readonly: true });
+			const row = db
+				.query<{ models: string }, [string]>("SELECT models FROM model_cache WHERE provider_id = ?")
+				.get(dynamicModel.provider);
+			db.close();
+			const persisted = JSON.parse(row?.models ?? "[]") as Array<Record<string, unknown>>;
+			expect(persisted[0]).not.toHaveProperty("thinking");
+			expect(persisted[0]).not.toHaveProperty("thinkingConfig");
+
+			const offline = await resolveProviderModels<"openai-completions">(
+				{
+					providerId: dynamicModel.provider,
+					staticModels: [staticModel],
+					cacheDbPath: dbPath,
+				},
+				"offline",
+			);
+			expect(offline.models[0]?.thinking).toEqual(staticThinking);
+			expect(offline.models[0]?.thinkingConfig).toEqual(staticThinking);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+	it("persists legacy bundled thinking controls through an offline cache restore", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-bundled-thinking-cache-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const thinking = { mode: "effort", efforts: [Effort.Low], defaultLevel: Effort.Low } as const;
+		const built = buildModel(
+			completionsSpec({
+				id: "legacy-bundled-thinking",
+				provider: "bundled-thinking-cache-test",
+				reasoning: true,
+				thinking,
+			}),
+		);
+		const { thinkingConfig: _thinkingConfig, ...legacyBundledRow } = built;
+		try {
+			writeModelCache(legacyBundledRow.provider, Date.now(), [legacyBundledRow], true, "", dbPath);
+			const db = new Database(dbPath, { readonly: true });
+			const row = db
+				.query<{ models: string }, [string]>("SELECT models FROM model_cache WHERE provider_id = ?")
+				.get(legacyBundledRow.provider);
+			db.close();
+			const persisted = JSON.parse(row?.models ?? "[]") as Array<Record<string, unknown>>;
+			expect(persisted[0]?.thinking).toEqual(legacyBundledRow.thinking);
+
+			const offline = await resolveProviderModels<"openai-completions">(
+				{ providerId: legacyBundledRow.provider, staticModels: [], cacheDbPath: dbPath },
+				"offline",
+			);
+			expect(offline.models[0]?.thinking).toEqual(legacyBundledRow.thinking);
+			expect(offline.models[0]?.thinkingConfig).toEqual(legacyBundledRow.thinking);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("does not copy thinking controls to a different discovery endpoint", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-thinking-endpoint-"));
 		const catalogModel = completionsSpec({
@@ -995,7 +1107,7 @@ describe("model cache spec round trip", () => {
 				effortMap: { [Effort.High]: "endpoint-specific-high" },
 			},
 		});
-		const discoveredModel = completionsSpec({ baseUrl: "https://other.example.com/v1" });
+		const discoveredModel = completionsSpec({ baseUrl: "https://other.example.com/v1", reasoning: true });
 		try {
 			const result = await resolveProviderModels(
 				{
@@ -1007,6 +1119,41 @@ describe("model cache spec round trip", () => {
 				"online",
 			);
 			expect(result.models[0]?.baseUrl).toBe(discoveredModel.baseUrl);
+			expect(result.models[0]?.thinking?.effortMap).toBeUndefined();
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not copy thinking controls across discovery API surfaces", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-thinking-api-"));
+		const catalogModel = completionsSpec({
+			id: "gpt-5.6",
+			provider: "thinking-api-test",
+			reasoning: true,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.High],
+				effortMap: { [Effort.High]: "completions-high" },
+			},
+		});
+		const discoveredModel = responsesSpec({
+			id: catalogModel.id,
+			provider: catalogModel.provider,
+			baseUrl: catalogModel.baseUrl,
+			reasoning: true,
+		});
+		try {
+			const result = await resolveProviderModels<Api>(
+				{
+					providerId: catalogModel.provider,
+					staticModels: [catalogModel],
+					cacheDbPath: path.join(tempDir, "models.db"),
+					fetchDynamicModels: async () => [discoveredModel],
+				},
+				"online",
+			);
+			expect(result.models[0]?.api).toBe("openai-responses");
 			expect(result.models[0]?.thinking?.effortMap).toBeUndefined();
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
@@ -1089,6 +1236,56 @@ describe("model cache spec round trip", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+
+	it.each(["offline", "online-if-uncached"] as const)(
+		"rejects schema-v12 cache rows before %s resolution can reuse matching authoritative metadata",
+		async strategy => {
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-legacy-thinking-cache-"));
+			const dbPath = path.join(tempDir, "models.db");
+			const discoveredModel = completionsSpec({
+				id: "gpt-5.6",
+				provider: "legacy-thinking-cache-test",
+				reasoning: true,
+			});
+			const staticThinking = {
+				mode: "effort",
+				efforts: [Effort.Low],
+				defaultLevel: Effort.Low,
+				effortMap: { [Effort.Low]: "catalog-low" },
+			} as const;
+			const staticModel = completionsSpec({ ...discoveredModel, thinking: staticThinking });
+			const legacyModel = buildModel(discoveredModel);
+			const staticFingerprint = fingerprintStaticModels([buildModel(staticModel)]);
+			let fetches = 0;
+			try {
+				writeModelCache(discoveredModel.provider, Date.now(), [legacyModel], true, staticFingerprint, dbPath);
+				const db = new Database(dbPath);
+				db.run("UPDATE model_cache SET version = ?, models = ? WHERE provider_id = ?", [
+					12,
+					JSON.stringify([legacyModel]),
+					discoveredModel.provider,
+				]);
+				db.close();
+
+				const result = await resolveProviderModels<"openai-completions">(
+					{
+						providerId: discoveredModel.provider,
+						staticModels: [staticModel],
+						cacheDbPath: dbPath,
+						fetchDynamicModels: async () => {
+							fetches++;
+							return [discoveredModel];
+						},
+					},
+					strategy,
+				);
+				expect(fetches).toBe(strategy === "offline" ? 0 : 1);
+				expect(result.models[0]?.thinking).toEqual(staticThinking);
+			} finally {
+				await fs.rm(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("preserves computer-use provenance across cache restarts and endpoint reroutes", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-computer-use-cache-"));

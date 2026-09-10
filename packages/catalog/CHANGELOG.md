@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed model discovery losing catalog thinking controls and ignoring provider-reported token limits for newly discovered models.
+- Fixed model discovery losing catalog thinking controls and ignoring provider-reported token limits for newly discovered models ([#11529](https://github.com/can1357/oh-my-pi/pull/11529) by [@wolfiesch](https://github.com/wolfiesch)).
 
 ## [18.1.16] - 2026-09-09
 

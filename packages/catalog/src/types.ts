@@ -1111,6 +1111,8 @@ export interface Model<TApi extends Api = Api> {
 	supportsTools?: boolean;
 	/** Whether this model accepts the GA OpenAI Responses `{ type: "computer" }` native tool. */
 	supportsComputerUse?: boolean;
+	/** Verbatim authored thinking controls; undefined when `buildModel` derived the runtime metadata. */
+	thinkingConfig?: ThinkingConfig;
 	/** Verbatim explicit computer-use support from the spec; undefined when `buildModel` inferred the runtime value. */
 	supportsComputerUseConfig?: boolean;
 	/** GitLab Duo Workflow root namespace selected during catalog discovery. */
@@ -1250,6 +1252,7 @@ export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	| "compatConfig"
 	| "requiresGlyphTokenization"
 	| "requiresCursorToolSchemaProjection"
+	| "thinkingConfig"
 	| "supportsComputerUseConfig"
 > {
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */
