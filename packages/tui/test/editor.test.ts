@@ -194,12 +194,12 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("second");
 		});
 
-		it("exits history mode at the history edit anchor before public insertText", () => {
+		it("keeps the history entry at its end before public insertText", () => {
 			const editor = new Editor(defaultEditorTheme);
 
 			editor.addToHistory("line1\nline2");
-			editor.handleInput("\x1b[A"); // Up - recalls at the top edit anchor
-			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+			editor.handleInput("\x1b[A"); // Up - recalls at the end edit anchor
+			expect(editor.getCursor()).toEqual({ line: 1, col: 5 });
 
 			editor.insertText("[Image #1] ");
 
@@ -305,25 +305,26 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("prompt 5");
 		});
 
-		it("anchors history entry at top when navigating with Up", () => {
+		it("anchors history entry at bottom when navigating with Up", () => {
 			const editor = new Editor(defaultEditorTheme);
 
 			editor.addToHistory("line1\nline2\nline3");
 			editor.handleInput("\x1b[A");
-
 			expect(editor.getText()).toBe("line1\nline2\nline3");
-			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+			expect(editor.getCursor()).toEqual({ line: 2, col: 5 });
 		});
 
-		it("anchors history entry at bottom when navigating with Down", () => {
+		it("anchors older history at the bottom when navigating with Down", () => {
 			const editor = new Editor(defaultEditorTheme);
 
 			editor.addToHistory("older");
 			editor.addToHistory("line1\nline2\nline3");
-
-			editor.handleInput("\x1b[A"); // latest, anchored at top
-			editor.handleInput("\x1b[A"); // older, anchored at top
-			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+			editor.handleInput("\x1b[A"); // latest, anchored at bottom
+			editor.handleInput("\x1b[A"); // move within latest entry
+			editor.handleInput("\x1b[A"); // first visual line of latest entry
+			editor.handleInput("\x1b[A"); // older, anchored at bottom
+			expect(editor.getText()).toBe("older");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 5 });
 
 			editor.handleInput("\x1b[B"); // newer, anchored at bottom
 			expect(editor.getText()).toBe("line1\nline2\nline3");
@@ -334,12 +335,12 @@ describe("Editor component", () => {
 			const editor = new Editor(defaultEditorTheme);
 
 			editor.addToHistory("line1\nline2\nline3");
-			editor.handleInput("\x1b[A"); // top anchor
+			editor.handleInput("\x1b[A"); // end anchor
 
-			editor.handleInput("\x1b[B"); // move within entry
-			expect(editor.getCursor()).toEqual({ line: 1, col: 0 });
+			editor.handleInput("\x1b[A"); // move within entry
+			expect(editor.getCursor()).toEqual({ line: 1, col: 5 });
 
-			editor.handleInput("\x1b[B");
+			editor.handleInput("\x1b[B"); // move back to the end
 			editor.handleInput("\x1b[B"); // at bottom, exit history
 			expect(editor.getText()).toBe("");
 		});

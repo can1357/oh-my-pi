@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Recalled prompt history now places the cursor at the end of the entry, so Up restores multiline prompts ready to edit; continue pressing Up to walk through the recalled lines before reaching older history.
+
 ## [18.1.15] - 2026-09-08
 
 ### Fixed
