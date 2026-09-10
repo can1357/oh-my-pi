@@ -1892,10 +1892,9 @@ fn editor_markup_rejects_extra_or_text_children() {
 		let Err(error) = Ui::from_markup(source, 60, UiContext::default()) else {
 			panic!("invalid editor children must be rejected");
 		};
-		let ParseError::Message { message, at } = error else {
+		let ParseError::EditorChildShape { at } = error else {
 			panic!("invalid editor children must produce a syntax error");
 		};
-		assert_eq!(message, "<editor> takes at most one input child and one <status>");
 		assert_eq!(at, error_at);
 	}
 }

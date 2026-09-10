@@ -209,7 +209,24 @@ pub enum ParseError {
 		/// Byte offset into the source.
 		at:      usize,
 	},
-	/// A property assignment failed while applying markup defaults or
+	/// `id=`/`when=` attributes in dynamic Markdown fragments.
+	#[error("markup error at byte {at}: id= and when= are not allowed in dynamic Markdown")]
+	IdWhenInFragment {
+		/// Byte offset into the source.
+		at: usize,
+	},
+	/// A stray `</md>` close with nothing open.
+	#[error("markup error at byte {at}: closing </md> does not match open <nothing>")]
+	StrayMdClose {
+		/// Byte offset into the source.
+		at: usize,
+	},
+	/// `<editor>` child shape violation.
+	#[error("markup error at byte {at}: <editor> takes at most one input child and one <status>")]
+	EditorChildShape {
+		/// Byte offset into the source.
+		at: usize,
+	},
 	/// inherited properties.
 	#[error("markup error at byte {at}: {source}")]
 	Property {
@@ -511,10 +528,7 @@ impl Parser<'_> {
 		let tag = self.source.slice_ref(name);
 		let name = tag.as_str();
 		if self.fragment && (props.contains(Prop::Id) || props.contains(Prop::When)) {
-			return Err(ParseError::Message {
-				message: "id= and when= are not allowed in dynamic Markdown".into(),
-				at,
-			});
+			return Err(ParseError::IdWhenInFragment { at });
 		}
 		if name == "box" {
 			if !props.contains(Prop::Border) {
@@ -1211,7 +1225,7 @@ fn is_custom_tag_at(src: &str, name: &str, at: usize, close: usize) -> bool {
 		&& (src[at..=close].trim_end().ends_with("/>") || has_matching_close(&src[close + 1..], name))
 }
 fn stray_md_close(at: usize) -> ParseError {
-	ParseError::Message { message: "closing </md> does not match open <nothing>".into(), at }
+	ParseError::StrayMdClose { at }
 }
 
 /// True when a dynamic `<md>` body embeds a line-start markup element
@@ -1554,32 +1568,20 @@ fn finish_element(
 			let mut has_status = false;
 			for part in parts {
 				let Parsed::Cached { cached, at: child_at, implicit, .. } = part else {
-					return Err(ParseError::Message {
-						message: "<editor> takes at most one input child and one <status>".into(),
-						at,
-					});
+					return Err(ParseError::EditorChildShape { at });
 				};
 				if implicit {
-					return Err(ParseError::Message {
-						message: "<editor> takes at most one input child and one <status>".into(),
-						at:      child_at,
-					});
+					return Err(ParseError::EditorChildShape { at: child_at });
 				}
 				if cached.comp().is::<Status>() {
 					if has_status {
-						return Err(ParseError::Message {
-							message: "<editor> takes at most one input child and one <status>".into(),
-							at:      child_at,
-						});
+						return Err(ParseError::EditorChildShape { at: child_at });
 					}
 					editor = editor.status(cached.into_comp());
 					has_status = true;
 				} else {
 					if has_input {
-						return Err(ParseError::Message {
-							message: "<editor> takes at most one input child and one <status>".into(),
-							at:      child_at,
-						});
+						return Err(ParseError::EditorChildShape { at: child_at });
 					}
 					editor = editor.input(cached.into_comp());
 					has_input = true;
