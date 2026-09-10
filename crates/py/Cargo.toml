@@ -39,3 +39,4 @@ tracing.workspace = true
 
 [build-dependencies]
 serde_json.workspace = true
+thiserror.workspace = true

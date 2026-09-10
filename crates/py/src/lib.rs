@@ -268,19 +268,35 @@ pub fn default_site_packages() -> PathBuf {
 fn install_frozen_modules() {
 	let mut table = Vec::new();
 	for blob in [STDLIB_BLOB, OMP_MODULES_BLOB] {
-		let count = u32::from_le_bytes(blob[..4].try_into().unwrap()) as usize;
+		// Both blobs are emitted by `pack-pymodules.py`, which writes complete
+		// fixed-width headers and code lengths accepted by CPython's `_frozen`
+		// ABI.
+		let count = u32::from_le_bytes(
+			blob[..4]
+				.try_into()
+				.expect("pack-pymodules.py writes a 4-byte frozen-blob entry count"),
+		) as usize;
 		table.reserve(count + 1);
 		let mut rest = &blob[4..];
 		for _ in 0..count {
-			let name_len = u16::from_le_bytes(rest[..2].try_into().unwrap()) as usize;
+			let name_len = u16::from_le_bytes(
+				rest[..2]
+					.try_into()
+					.expect("pack-pymodules.py writes a 2-byte frozen-record name length"),
+			) as usize;
 			let is_pkg = rest[2];
-			let code_len = u32::from_le_bytes(rest[3..7].try_into().unwrap()) as usize;
+			let code_len = u32::from_le_bytes(
+				rest[3..7]
+					.try_into()
+					.expect("pack-pymodules.py writes a 4-byte frozen-record code length"),
+			) as usize;
 			let (name, code) = (&rest[7..7 + name_len], &rest[7 + name_len..7 + name_len + code_len]);
 			assert_eq!(name[name_len - 1], 0, "blob names must be NUL-terminated");
 			table.push(ffi::_frozen {
 				name:       name.as_ptr().cast(),
 				code:       code.as_ptr(),
-				size:       i32::try_from(code_len).unwrap(),
+				size:       i32::try_from(code_len)
+					.expect("pack-pymodules.py code lengths fit CPython's i32 _frozen size"),
 				is_package: i32::from(is_pkg),
 			});
 			rest = &rest[7 + name_len + code_len..];

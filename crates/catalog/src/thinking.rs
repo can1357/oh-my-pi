@@ -1,6 +1,6 @@
 //! Typed reasoning effort, budget, display, and wire-routing policies.
 
-#![allow(missing_docs, reason = "strum IntoStaticStr emits undocumented inherent methods")]
+#![expect(missing_docs, reason = "strum IntoStaticStr emits undocumented inherent methods")]
 use std::collections::{BTreeMap, btree_map};
 
 use omp_core::Str;
@@ -136,7 +136,7 @@ pub enum ThinkingEffortSelector {
 	Deserialize,
 )]
 #[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case", ascii_case_insensitive)]
+#[strum(serialize_all = "kebab-case", ascii_case_insensitive, const_into_str)]
 pub enum ThinkingMode {
 	/// Send a named effort.
 	Effort,
@@ -148,19 +148,6 @@ pub enum ThinkingMode {
 	AnthropicAdaptive,
 	/// Use Anthropic budget thinking plus an effort.
 	AnthropicBudgetEffort,
-}
-
-impl ThinkingMode {
-	/// Returns the canonical static spelling for this control mode.
-	pub const fn into_str(&self) -> &'static str {
-		match self {
-			Self::Effort => "effort",
-			Self::Budget => "budget",
-			Self::GoogleLevel => "google-level",
-			Self::AnthropicAdaptive => "anthropic-adaptive",
-			Self::AnthropicBudgetEffort => "anthropic-budget-effort",
-		}
-	}
 }
 
 /// Additional serving path selected independently of effort.
@@ -180,19 +167,10 @@ impl ThinkingMode {
 	Deserialize,
 )]
 #[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
+#[strum(serialize_all = "lowercase", ascii_case_insensitive, const_into_str)]
 pub enum ReasoningMode {
 	/// Use the provider's pro reasoning path.
 	Pro,
-}
-
-impl ReasoningMode {
-	/// Returns the canonical static spelling for this serving path.
-	pub const fn into_str(&self) -> &'static str {
-		match self {
-			Self::Pro => "pro",
-		}
-	}
 }
 
 /// Structurally interned reasoning capability profile.

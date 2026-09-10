@@ -191,7 +191,7 @@ fn adjust_lines_indentation(
 			ratio = Some(next);
 		}
 		if consistent && ratio.is_some_and(|value| value > 0) {
-			let ratio = ratio.unwrap();
+			let ratio = ratio.expect("consistent indentation produced a ratio");
 			let valid = pattern.iter().zip(actual).all(|(old, found)| {
 				is_blank_line(old)
 					|| is_blank_line(found)
@@ -229,12 +229,18 @@ fn adjust_lines_indentation(
 		}
 		if consistent && !samples.is_empty() {
 			let (width, offset) = if samples.len() == 1 {
-				let (&tabs, &spaces) = samples.first_key_value().unwrap();
+				let (&tabs, &spaces) = samples
+					.first_key_value()
+					.expect("non-empty samples has one first entry");
 				(spaces.checked_div(tabs).filter(|_| spaces % tabs == 0), 0_isize)
 			} else {
 				let mut values = samples.iter();
-				let (&tabs_a, &spaces_a) = values.next().unwrap();
-				let (&tabs_b, &spaces_b) = values.next().unwrap();
+				let (&tabs_a, &spaces_a) = values
+					.next()
+					.expect("more than one sample has a first entry");
+				let (&tabs_b, &spaces_b) = values
+					.next()
+					.expect("more than one sample has a second entry");
 				let tabs_delta = tabs_b as isize - tabs_a as isize;
 				let spaces_delta = spaces_b as isize - spaces_a as isize;
 				if tabs_delta != 0 && spaces_delta > 0 && spaces_delta % tabs_delta == 0 {
@@ -576,7 +582,8 @@ fn find_sequence_with_hint(
 	if primary.match_count.is_some_and(|count| count > 1)
 		&& hint.is_some_and(|value| value != current)
 	{
-		let hinted = seek_sequence(lines, pattern, hint.unwrap(), eof, allow_fuzzy);
+		let hinted =
+			seek_sequence(lines, pattern, hint.expect("hint differs from current"), eof, allow_fuzzy);
 		if hinted.index.is_some() || hinted.match_count.is_some_and(|count| count > 1) {
 			return hinted;
 		}
@@ -834,7 +841,9 @@ fn character_match(
 		}
 	}
 	if outcome.occurrences.is_some_and(|count| count > 1) {
-		let count = outcome.occurrences.unwrap();
+		let count = outcome
+			.occurrences
+			.expect("occurrence count is greater than one");
 		let previews = outcome
 			.occurrence_previews
 			.as_deref()
@@ -854,7 +863,9 @@ fn character_match(
 		return Err(EditError::apply(format!(
 			"Found {} high-confidence matches in {path}. The text must be unique. Please provide \
 			 more context to make it unique.",
-			outcome.fuzzy_matches.unwrap()
+			outcome
+				.fuzzy_matches
+				.expect("fuzzy match count is greater than one")
 		)));
 	}
 	let Some(found) = outcome.matched else {
@@ -1153,7 +1164,7 @@ fn compute_replacements(
 		}
 		let Some(found) = result.index else {
 			if result.match_count.is_some_and(|count| count > 1) {
-				let count = result.match_count.unwrap();
+				let count = result.match_count.expect("match count is greater than one");
 				let strategy = result
 					.strategy
 					.map(sequence_strategy_label)
@@ -1380,7 +1391,12 @@ fn stage_from_parts(
 	};
 	let persisted = match after.as_deref() {
 		Some(text) if use_new_encoding || read.is_none() => Some(persist_new(&resolved, text)?),
-		Some(text) => Some(read.as_ref().unwrap().persist(text)?),
+		Some(text) => Some(
+			read
+				.as_ref()
+				.expect("existing file content is required when preserving its encoding")
+				.persist(text)?,
+		),
 		None => None,
 	};
 	let mut staged = StagedFile::new(resolved.display.clone(), resolved.absolute, op);

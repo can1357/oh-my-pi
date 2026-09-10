@@ -2705,7 +2705,7 @@ mod tests {
 		) else {
 			panic!("widget markup entered the markdown focus ring");
 		};
-		assert!(error.message.contains("<select>"), "{error}");
+		assert!(error.to_string().contains("<select>"), "{error}");
 	}
 
 	#[test]

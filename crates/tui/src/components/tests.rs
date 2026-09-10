@@ -6,7 +6,8 @@ use std::{env, fmt, fs, time};
 use serde_json::json;
 
 use crate::{
-	Charset, Color, Component, Elements, OverlayOptions, Prop, Props, Rect, Theme, Ui, UiContext,
+	Charset, Color, Component, Elements, OverlayOptions, ParseError, Prop, Props, Rect, Theme, Ui,
+	UiContext,
 	component::{Cached, HitTag, Slot},
 	components::{
 		Boxed, Button, CustomElement, EditInput, EditorPane, Form, Input, Radio, Select, Tabs,
@@ -1891,8 +1892,10 @@ fn editor_markup_rejects_extra_or_text_children() {
 		let Err(error) = Ui::from_markup(source, 60, UiContext::default()) else {
 			panic!("invalid editor children must be rejected");
 		};
-		assert_eq!(error.message, "<editor> takes at most one input child and one <status>");
-		assert_eq!(error.at, error_at);
+		let ParseError::EditorChildShape { at } = error else {
+			panic!("invalid editor children must produce a syntax error");
+		};
+		assert_eq!(at, error_at);
 	}
 }
 

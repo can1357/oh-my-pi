@@ -711,7 +711,7 @@ mod tests {
 			keys
 				.accept_operator_key(&id, &sf!("invalid"), &sf!("3.0.0"), &sf!("third"))
 				.unwrap_err()
-				.code,
+			.code(),
 			ExtensionCode::ESig
 		);
 	}

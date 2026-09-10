@@ -622,7 +622,8 @@ mod chunks {
 	///
 	/// Each chunk is a [`Vec`]<[`u8`]> of size [`BLOCK_SIZE`] (except
 	/// possibly the last chunk, which might be smaller). Each call to
-	/// [`ReverseChunks::next`] will seek backwards through the given file.
+	/// [`ReverseChunks::next`] will seek backwards through the given file and
+	/// return any seek or read failure to the caller.
 	pub struct ReverseChunks<'a> {
 		/// The file to iterate over, by blocks, from the end to the beginning.
 		file: &'a File,
@@ -638,21 +639,24 @@ mod chunks {
 	}
 
 	impl<'a> ReverseChunks<'a> {
-		pub fn new(file: &'a mut File) -> Self {
+		pub fn new(file: &'a mut File) -> io::Result<Self> {
 			let current = if cfg!(unix) {
-				file.stream_position().unwrap()
+				file.stream_position()?
 			} else {
 				0
 			};
-			let size = file.seek(SeekFrom::End(0)).unwrap() - current;
+			let end = file.seek(SeekFrom::End(0))?;
+			let size = end
+				.checked_sub(current)
+				.ok_or_else(|| io::Error::other("file position is past the end of the file"))?;
 			let max_blocks_to_read = (size as f64 / BLOCK_SIZE as f64).ceil() as usize;
 			let block_idx = 0;
-			ReverseChunks { file, size, max_blocks_to_read, block_idx }
+			Ok(ReverseChunks { file, size, max_blocks_to_read, block_idx })
 		}
 	}
 
 	impl Iterator for ReverseChunks<'_> {
-		type Item = Vec<u8>;
+		type Item = io::Result<Vec<u8>>;
 
 		fn next(&mut self) -> Option<Self::Item> {
 			// If there are no more chunks to read, terminate the iterator.
@@ -664,7 +668,12 @@ mod chunks {
 			// (that is, the chunk closest to the beginning of the file),
 			// which contains the remainder of the bytes.
 			let block_size = if self.block_idx == self.max_blocks_to_read - 1 {
-				self.size % BLOCK_SIZE
+				let remainder = self.size % BLOCK_SIZE;
+				if remainder == 0 {
+					BLOCK_SIZE
+				} else {
+					remainder
+				}
 			} else {
 				BLOCK_SIZE
 			};
@@ -672,23 +681,29 @@ mod chunks {
 			// Seek backwards by the next chunk, read the full chunk into
 			// `buf`, and then seek back to the start of the chunk again.
 			let mut buf = vec![0; BLOCK_SIZE as usize];
-			let pos = self
-				.file
-				.seek(SeekFrom::Current(-(block_size as i64)))
-				.unwrap();
-			self
-				.file
-				.read_exact(&mut buf[0..(block_size as usize)])
-				.unwrap();
-			let pos2 = self
-				.file
-				.seek(SeekFrom::Current(-(block_size as i64)))
-				.unwrap();
+			let pos = match self.file.seek(SeekFrom::Current(-(block_size as i64))) {
+				Ok(pos) => pos,
+				Err(error) => {
+					self.block_idx = self.max_blocks_to_read;
+					return Some(Err(error));
+				},
+			};
+			if let Err(error) = self.file.read_exact(&mut buf[0..(block_size as usize)]) {
+				self.block_idx = self.max_blocks_to_read;
+				return Some(Err(error));
+			}
+			let pos2 = match self.file.seek(SeekFrom::Current(-(block_size as i64))) {
+				Ok(pos) => pos,
+				Err(error) => {
+					self.block_idx = self.max_blocks_to_read;
+					return Some(Err(error));
+				},
+			};
 			assert_eq!(pos, pos2);
 
 			self.block_idx += 1;
 
-			Some(buf[0..(block_size as usize)].to_vec())
+			Some(Ok(buf[0..(block_size as usize)].to_vec()))
 		}
 	}
 
@@ -886,7 +901,10 @@ mod chunks {
 
 				let first = &self.chunks[0];
 				if self.bytes - first.bytes as u64 > self.num_print {
-					chunk = self.chunks.pop_front().unwrap();
+					chunk = self
+						.chunks
+						.pop_front()
+						.expect("stored byte chunks guarantee a removable front chunk");
 					self.bytes -= chunk.bytes as u64;
 				} else {
 					*chunk = BytesChunk::new();
@@ -898,7 +916,10 @@ mod chunks {
 				return Ok(());
 			}
 
-			let chunk = self.chunks.pop_front().unwrap();
+			let chunk = self
+				.chunks
+				.pop_front()
+				.expect("stored byte chunks guarantee a front chunk");
 
 			// calculate the offset in the first chunk and put the calculated chunk as first
 			// element in the self.chunks collection. The calculated offset must be in the
@@ -1163,7 +1184,10 @@ mod chunks {
 
 				let first = &self.chunks[0];
 				if self.lines - first.lines as u64 > self.num_print {
-					chunk = self.chunks.pop_front().unwrap();
+					chunk = self
+						.chunks
+						.pop_front()
+						.expect("stored line chunks guarantee a removable front chunk");
 
 					self.lines -= chunk.lines as u64;
 				} else {
@@ -1186,9 +1210,11 @@ mod chunks {
 			// skip unnecessary chunks and save the first chunk which may hold some lines we
 			// have to print
 			let chunk = loop {
-				// it's safe to call unwrap here because there is at least one chunk and sorting
-				// out more chunks than exist shouldn't be possible.
-				let chunk = self.chunks.pop_front().unwrap();
+				// At least one chunk is present because the empty-buffer case returned above.
+				let chunk = self
+					.chunks
+					.pop_front()
+					.expect("stored line chunks guarantee a front chunk");
 
 				// skip is true as long there are enough lines left in the other stored chunks.
 				let skip = self.lines - chunk.lines as u64 > self.num_print;
@@ -1293,6 +1319,23 @@ mod chunks {
 			let new_chunk = BytesChunk::from_chunk(&chunk, 1);
 			assert_eq!(0, new_chunk.bytes);
 		}
+
+		#[test]
+		fn test_reverse_chunks_exact_block_boundary_reads_full_block() {
+			use std::io::{Seek as _, Write as _};
+
+			use crate::tail::chunks::{BLOCK_SIZE, ReverseChunks};
+
+			let mut file = tempfile::tempfile().unwrap();
+			let expected = vec![0xab; BLOCK_SIZE as usize];
+			file.write_all(&expected).unwrap();
+			file.rewind().unwrap();
+
+			let mut chunks = ReverseChunks::new(&mut file).unwrap();
+			let chunk = chunks.next().unwrap().unwrap();
+			assert_eq!(chunk, expected);
+			assert!(chunks.next().is_none());
+		}
 	}
 }
 
@@ -1352,17 +1395,26 @@ mod follow {
 
 			/// Wrapper for [`HashMap::remove`] using [`Path::canonicalize`]
 			pub fn remove(&mut self, k: &Path) -> PathData {
-				self.map.remove(&Self::canonicalize_path(k)).unwrap()
+				self
+					.map
+					.remove(&Self::canonicalize_path(k))
+					.expect("follow path is registered before removal")
 			}
 
 			/// Wrapper for [`HashMap::get`] using [`Path::canonicalize`]
 			pub fn get(&self, k: &Path) -> &PathData {
-				self.map.get(&Self::canonicalize_path(k)).unwrap()
+				self
+					.map
+					.get(&Self::canonicalize_path(k))
+					.expect("follow path is registered before lookup")
 			}
 
 			/// Wrapper for [`HashMap::get_mut`] using [`Path::canonicalize`]
 			pub fn get_mut(&mut self, k: &Path) -> &mut PathData {
-				self.map.get_mut(&Self::canonicalize_path(k)).unwrap()
+				self
+					.map
+					.get_mut(&Self::canonicalize_path(k))
+					.expect("follow path is registered before mutable lookup")
 			}
 
 			/// Canonicalize `path` if it is not already an absolute path
@@ -1610,17 +1662,11 @@ mod follow {
 			}
 
 			fn watch(&mut self, path: &Path, mode: RecursiveMode) -> TailResult<()> {
-				self
-					.watcher
-					.watch(path, mode)
-					.map_err(|err| TailError::message(err.to_string()))
+				self.watcher.watch(path, mode).map_err(TailError::Notify)
 			}
 
 			fn unwatch(&mut self, path: &Path) -> TailResult<()> {
-				self
-					.watcher
-					.unwatch(path)
-					.map_err(|err| TailError::message(err.to_string()))
+				self.watcher.unwatch(path).map_err(TailError::Notify)
 			}
 		}
 
@@ -1766,7 +1812,9 @@ mod follow {
 					.with_compare_contents(true);
 				if self.use_polling || RecommendedWatcher::kind() == WatcherKind::PollWatcher {
 					self.use_polling = true; // We have to use polling because there's no supported backend
-					watcher = Box::new(notify::PollWatcher::new(tx, watcher_config).unwrap());
+					watcher = Box::new(
+						notify::PollWatcher::new(tx, watcher_config).map_err(TailError::Notify)?,
+					);
 				} else {
 					let tx_clone = tx.clone();
 					match RecommendedWatcher::new(tx, notify::Config::default()) {
@@ -1785,10 +1833,11 @@ mod follow {
 							);
 							host.fail(1);
 							self.use_polling = true;
-							watcher =
-								Box::new(notify::PollWatcher::new(tx_clone, watcher_config).unwrap());
+							watcher = Box::new(
+								notify::PollWatcher::new(tx_clone, watcher_config).map_err(TailError::Notify)?,
+							);
 						},
-						Err(e) => return Err(TailError::message(e.to_string())),
+						Err(error) => return Err(TailError::Notify(error)),
 					}
 				}
 
@@ -1834,7 +1883,10 @@ mod follow {
 									watcher_rx.watch_with_parent(&path)?;
 								} else if !path.is_orphan() {
 									// If `path` is not a tailable file, add its parent to `Watcher`.
-									watcher_rx.watch(path.parent().unwrap(), RecursiveMode::NonRecursive)?;
+									let parent = path
+										.parent()
+										.expect("non-orphan path has a parent directory");
+									watcher_rx.watch(parent, RecursiveMode::NonRecursive)?;
 									// Add symlinks to orphans for retry polling (target may not exist)
 									if path.is_symlink() {
 										self.orphans.push(path);
@@ -1863,7 +1915,9 @@ mod follow {
 					CreateKind, DataChange, EventKind, MetadataKind, ModifyKind, RemoveKind, RenameMode,
 				};
 
-				let event_path = event.paths.first().unwrap();
+				let Some(event_path) = event.paths.first() else {
+					return Ok(Vec::new());
+				};
 				let mut paths: Vec<PathBuf> = vec![];
 				let display_name = self.files.get(event_path).display_name.clone();
 
@@ -1935,7 +1989,11 @@ mod follow {
 		                                "tail: {} has been replaced with an untailable file; giving up on this name",
 		                                display_name.quote()
 		                            );
-		                            let _ = self.watcher_rx.as_mut().unwrap().watcher.unwatch(event_path);
+		                            let _ = self
+		                                .watcher_rx
+		                                .as_mut()
+		                                .expect("watcher initialized before event handling")
+		                                .unwatch(event_path);
 		                            self.files.remove(event_path);
 		                            if self.files.no_files_remaining(settings) {
 		                                return Err(TailError::message("no files remaining".to_string()));
@@ -1979,7 +2037,11 @@ mod follow {
 		                                text::BACKEND
 		                            );
 		                            self.orphans.push(event_path.clone());
-		                            let _ = self.watcher_rx.as_mut().unwrap().unwatch(event_path);
+		                            let _ = self
+		                                .watcher_rx
+		                                .as_mut()
+		                                .expect("watcher initialized before event handling")
+		                                .unwatch(event_path);
 		                        }
 		                    } else {
 		                        let _ = writeln!(
@@ -1995,7 +2057,11 @@ mod follow {
 		                    self.files.reset_reader(event_path);
 		                } else if self.follow_descriptor_retry() {
 		                    // --retry only effective for the initial open
-		                    let _ = self.watcher_rx.as_mut().unwrap().unwatch(event_path);
+		                    let _ = self
+		                        .watcher_rx
+		                        .as_mut()
+		                        .expect("watcher initialized before descriptor retry handling")
+		                        .unwatch(event_path);
 		                    self.files.remove(event_path);
 		                } else if self.use_polling && event.kind == EventKind::Remove(RemoveKind::Any) {
 		                    /*
@@ -2029,19 +2095,30 @@ mod follow {
 		                */
 
 		                if self.follow_descriptor() => {
-		                    let new_path = event.paths.last().unwrap();
+		                    let new_path = event
+		                        .paths
+		                        .last()
+		                        .expect("event paths is non-empty after the first path check");
 		                    paths.push(new_path.clone());
 
 		                    let new_data = PathData::from_other_with_path(self.files.remove(event_path), new_path);
 		                    self.files.insert(
 		                        new_path,
 		                        new_data,
-		                        self.files.get_last().unwrap() == event_path
+		                        self.files.get_last().is_some_and(|last| last == event_path)
 		                    );
 
 		                    // Unwatch old path and watch new path
-		                    let _ = self.watcher_rx.as_mut().unwrap().unwatch(event_path);
-		                    self.watcher_rx.as_mut().unwrap().watch_with_parent(new_path)?;
+		                    let _ = self
+		                        .watcher_rx
+		                        .as_mut()
+		                        .expect("watcher initialized before event handling")
+		                        .unwatch(event_path);
+		                    self
+		                        .watcher_rx
+		                        .as_mut()
+		                        .expect("watcher initialized before event handling")
+		                        .watch_with_parent(new_path)?;
 		                }
 		            _ => {}
 		        }
@@ -2081,7 +2158,11 @@ mod follow {
 					for new_path in &observer.orphans {
 						if new_path.exists() {
 							let pd = observer.files.get(new_path);
-							let md = new_path.metadata().unwrap();
+							let md = match new_path.metadata() {
+								Ok(md) => md,
+								Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+								Err(error) => return Err(error.into()),
+							};
 							if md.is_tailable() && pd.reader.is_none() {
 								let _ = writeln!(
 									observer.stderr,
@@ -2098,7 +2179,7 @@ mod follow {
 								observer
 									.watcher_rx
 									.as_mut()
-									.unwrap()
+									.expect("watcher initialized before follow polling")
 									.watch_with_parent(new_path)?;
 							}
 						}
@@ -2110,7 +2191,7 @@ mod follow {
 				let rx_result = observer
 					.watcher_rx
 					.as_mut()
-					.unwrap()
+					.expect("watcher initialized before follow receive")
 					.receiver
 					.recv_timeout(settings.sleep_sec.min(Duration::from_millis(100)));
 
@@ -2150,8 +2231,12 @@ mod follow {
 						// Multiple iterations with spin_loop hints give the notify
 						// background thread chances to deliver pending events.
 						for _ in 0..100 {
-							while let Ok(Ok(event)) =
-								observer.watcher_rx.as_mut().unwrap().receiver.try_recv()
+							while let Ok(Ok(event)) = observer
+								.watcher_rx
+								.as_mut()
+								.expect("watcher initialized before follow event drain")
+								.receiver
+								.try_recv()
 							{
 								process_event(&mut observer, event, settings, &mut paths)?;
 							}
@@ -2169,17 +2254,14 @@ mod follow {
 							let _ = observer
 								.watcher_rx
 								.as_mut()
-								.unwrap()
-								.watcher
+								.expect("watcher initialized before follow event handling")
 								.unwatch(event_path);
 						}
 					},
 					Ok(Err(notify::Error { kind: notify::ErrorKind::MaxFilesWatch, .. })) => {
 						return Err(TailError::message(format!("{} resources exhausted", text::BACKEND)));
 					},
-					Ok(Err(e)) => {
-						return Err(TailError::message(format!("NotifyError: {}", e)));
-					},
+					Ok(Err(error)) => return Err(TailError::NotifyEvent(error)),
 					Err(mpsc::RecvTimeoutError::Timeout) => {
 						timeout_counter += 1;
 						// Check if stdout pipe is still open
@@ -2711,7 +2793,9 @@ mod platform {
 
 		#[inline]
 		fn get_errno() -> i32 {
-			Error::last_os_error().raw_os_error().unwrap()
+			Error::last_os_error()
+				.raw_os_error()
+				.expect("Unix OS errors always carry a raw errno")
 		}
 
 		//pub fn stdin_is_bad_fd() -> bool {
@@ -2835,6 +2919,10 @@ pub(crate) enum TailError {
 	Io(#[source] io::Error),
 	#[error("{0}")]
 	Message(String),
+	#[error("{0}")]
+	Notify(#[source] notify::Error),
+	#[error("NotifyError: {0}")]
+	NotifyEvent(#[source] notify::Error),
 	#[error("Broken pipe")]
 	BrokenPipe,
 }
@@ -3464,16 +3552,21 @@ fn forwards_thru_file(
 /// Iterate over bytes in the file, in reverse, until we find the
 /// `num_delimiters` instance of `delimiter`. The `file` is left seek'd to the
 /// position just after that delimiter.
-fn backwards_thru_file(file: &mut File, num_delimiters: u64, delimiter: u8) {
+///
+/// # Errors
+///
+/// Returns an error when seeking or reading the file fails.
+fn backwards_thru_file(file: &mut File, num_delimiters: u64, delimiter: u8) -> io::Result<()> {
 	if num_delimiters == 0 {
-		file.seek(SeekFrom::End(0)).unwrap();
-		return;
+		file.seek(SeekFrom::End(0))?;
+		return Ok(());
 	}
 	// This variable counts the number of delimiters found in the file
 	// so far (reading from the end of the file toward the beginning).
 	let mut counter = 0;
 	let mut first_slice = true;
-	for slice in ReverseChunks::new(file) {
+	for slice in ReverseChunks::new(file)? {
+		let slice = slice?;
 		// Iterate over each byte in the slice in reverse order.
 		let mut iter = memrchr_iter(delimiter, &slice);
 
@@ -3500,11 +3593,12 @@ fn backwards_thru_file(file: &mut File, num_delimiters: u64, delimiter: u8) {
 				// cursor in the file is at the *beginning* of the
 				// block, so seeking forward by `i + 1` bytes puts
 				// us right after the found delimiter.
-				file.seek(SeekFrom::Current((i + 1) as i64)).unwrap();
-				return;
+				file.seek(SeekFrom::Current((i + 1) as i64))?;
+				return Ok(());
 			}
 		}
 	}
+	Ok(())
 }
 
 /// When tail'ing a file, we do not need to read the whole file from start to
@@ -3519,28 +3613,30 @@ fn bounded_tail(file: &mut File, settings: &Settings, writer: &mut impl Write) -
 	// Find the position in the file to start printing from.
 	match &settings.mode {
 		FilterMode::Lines(Signum::Negative(count), delimiter) => {
-			backwards_thru_file(file, *count, *delimiter);
+			backwards_thru_file(file, *count, *delimiter)?;
 		},
 		FilterMode::Lines(Signum::Positive(count), delimiter) if count > &1 => {
-			let i = forwards_thru_file(file, *count - 1, *delimiter).unwrap();
-			file.seek(SeekFrom::Start(i as u64)).unwrap();
+			let i = forwards_thru_file(file, *count - 1, *delimiter)?;
+			let offset =
+				u64::try_from(i).map_err(|_| io::Error::other("line offset does not fit in u64"))?;
+			file.seek(SeekFrom::Start(offset))?;
 		},
 		FilterMode::Lines(Signum::MinusZero, _) => {
-			file.seek(SeekFrom::End(0)).unwrap();
+			file.seek(SeekFrom::End(0))?;
 		},
 		FilterMode::Bytes(Signum::Negative(count)) => {
 			if file.seek(SeekFrom::End(-(*count as i64))).is_err() {
-				file.seek(SeekFrom::Start(0)).unwrap();
+				file.seek(SeekFrom::Start(0))?;
 			}
 			limit = Some(*count);
 		},
 		FilterMode::Bytes(Signum::Positive(count)) if count > &1 => {
 			// GNU `tail` seems to index bytes and lines starting at 1, not
 			// at 0. It seems to treat `+0` and `+1` as the same thing.
-			file.seek(SeekFrom::Start(*count - 1)).unwrap();
+			file.seek(SeekFrom::Start(*count - 1))?;
 		},
 		FilterMode::Bytes(Signum::MinusZero) => {
-			file.seek(SeekFrom::End(0)).unwrap();
+			file.seek(SeekFrom::End(0))?;
 		},
 		_ => {},
 	}

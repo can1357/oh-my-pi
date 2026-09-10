@@ -43,12 +43,12 @@ title generation, translation, sentiment, and local TTS/STT through it by defaul
 
 ## Status in omp
 
-**Partial.** Primary implementation: `crates/inference/src/lib.rs`. Gap: no embedded tiny local model is present for harness chores.
+**Partial.** Primary implementation: `crates/ai/src/lib.rs`. Gap: no embedded tiny local model is present for harness chores.
 
 ## References
 
 - The Harness Playbook, "The inference" — "Use small local models for harness work"
 - LiquidAI LFM2 (`huggingface.co/LiquidAI`)
 - 0001, 0018
-- `crates/inference/src/local/`, `crates/inference/Cargo.toml`, `AGENTS.md` (Runtime),
+- `crates/ai/src/local/`, `crates/ai/Cargo.toml`, `AGENTS.md` (Runtime),
   `docs/py/13-inference.md`

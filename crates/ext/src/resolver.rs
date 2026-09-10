@@ -697,7 +697,7 @@ mod tests {
 			request("cloudpickle~=3.1")
 				.reject_frozen_conflicts(&frozen)
 				.unwrap_err()
-				.code,
+				.code(),
 			ExtensionCode::EFrozenConflict
 		);
 		assert!(
@@ -709,7 +709,7 @@ mod tests {
 			request("cloudpickle @ https://example.invalid/cloudpickle.whl")
 				.reject_frozen_conflicts(&frozen)
 				.unwrap_err()
-				.code,
+				.code(),
 			ExtensionCode::EUrlRequire
 		);
 	}
@@ -746,7 +746,7 @@ mod tests {
 			)
 			.reject_frozen_conflicts(&frozen)
 			.unwrap_err()
-			.code,
+			.code(),
 			ExtensionCode::EFrozenConflict
 		);
 	}

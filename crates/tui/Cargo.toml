@@ -50,6 +50,9 @@ tokio-util.workspace = true
 tracing.workspace = true
 xutf.workspace = true
 
+[build-dependencies]
+thiserror.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true
 

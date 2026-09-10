@@ -2480,7 +2480,7 @@ mod tests {
 
 		let escalation = UpdateOverlay { mode: Some(UpdateMode::Auto), interval: None };
 		let error = effective_updates(None, Some(&escalation)).expect_err("workspace escalation");
-		assert_eq!(error.code, ExtensionCode::EUpdatePolicy);
+		assert_eq!(error.code(), ExtensionCode::EUpdatePolicy);
 	}
 
 	#[test]

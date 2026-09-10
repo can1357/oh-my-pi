@@ -401,6 +401,7 @@ impl WebViewBuilder {
 			},
 			_ => {
 				let _ = parent;
+				let _ = bounds;
 				Err(Error::Unsupported("child surfaces require the system engine"))
 			},
 		}
@@ -727,7 +728,10 @@ impl WebView {
 		match &self.inner {
 			#[cfg(target_os = "macos")]
 			Inner::Wk(view) => view.set_bounds(bounds),
-			_ => Err(Error::Unsupported("set_bounds applies to child surfaces")),
+			_ => {
+				let _ = bounds;
+				Err(Error::Unsupported("set_bounds applies to child surfaces"))
+			},
 		}
 	}
 
@@ -740,7 +744,10 @@ impl WebView {
 		match &self.inner {
 			#[cfg(target_os = "macos")]
 			Inner::Wk(view) => view.set_visible(visible),
-			_ => Err(Error::Unsupported("set_visible applies to child surfaces")),
+			_ => {
+				let _ = visible;
+				Err(Error::Unsupported("set_visible applies to child surfaces"))
+			},
 		}
 	}
 

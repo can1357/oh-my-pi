@@ -4085,8 +4085,8 @@ impl EnvServer {
 			if let Err(error) = refreshed_revocations.verify(key.trim()) {
 				return workspace_update_failure(
 					checked_at_ms,
-					error.code.to_string(),
-					error.detail.as_str(),
+					error.code().to_string(),
+					error.detail().as_str(),
 				);
 			}
 			if write_extension_metadata(&revocations_path, &revocation_bytes).is_err() {
@@ -4119,8 +4119,8 @@ impl EnvServer {
 			if let Err(error) = refreshed_index.verify(key.trim()) {
 				return workspace_update_failure(
 					checked_at_ms,
-					error.code.to_string(),
-					error.detail.as_str(),
+					error.code().to_string(),
+					error.detail().as_str(),
 				);
 			}
 			if write_extension_metadata(&index_path, &index_bytes).is_err() {
@@ -4136,8 +4136,8 @@ impl EnvServer {
 			Err(error) => {
 				return workspace_update_failure(
 					checked_at_ms,
-					error.code.to_string(),
-					error.detail.as_str(),
+					error.code().to_string(),
+					error.detail().as_str(),
 				);
 			},
 		};
@@ -4149,8 +4149,8 @@ impl EnvServer {
 			Err(error) => {
 				return workspace_update_failure(
 					checked_at_ms,
-					error.code.to_string(),
-					error.detail.as_str(),
+					error.code().to_string(),
+					error.detail().as_str(),
 				);
 			},
 		};
@@ -4164,8 +4164,8 @@ impl EnvServer {
 			Err(error) => {
 				return workspace_update_failure(
 					checked_at_ms,
-					error.code.to_string(),
-					error.detail.as_str(),
+					error.code().to_string(),
+					error.detail().as_str(),
 				);
 			},
 		};
@@ -4179,8 +4179,8 @@ impl EnvServer {
 			Err(error) => {
 				return workspace_update_failure(
 					checked_at_ms,
-					error.code.to_string(),
-					error.detail.as_str(),
+					error.code().to_string(),
+					error.detail().as_str(),
 				);
 			},
 		};
@@ -4189,8 +4189,8 @@ impl EnvServer {
 			Err(error) => {
 				return workspace_update_failure(
 					checked_at_ms,
-					error.code.to_string(),
-					error.detail.as_str(),
+					error.code().to_string(),
+					error.detail().as_str(),
 				);
 			},
 		};
@@ -4209,8 +4209,8 @@ impl EnvServer {
 			Err(error) => {
 				return workspace_update_failure(
 					checked_at_ms,
-					error.code.to_string(),
-					error.detail.as_str(),
+					error.code().to_string(),
+					error.detail().as_str(),
 				);
 			},
 		};

@@ -30,7 +30,73 @@ use std::{
 /// (pbs ships it as a shared module), so its archive member is never pulled.
 const TCL_LIBS: [&str; 2] = ["tcl9.0", "tcl9tk9.0"];
 
-fn main() {
+#[derive(Debug, thiserror::Error)]
+enum BuildError {
+	/// The generated Python metadata could not be read.
+	#[error("read {path}: {source}")]
+	ReadMetadata {
+		/// Metadata file.
+		path: PathBuf,
+		/// Filesystem failure.
+		#[source]
+		source: std::io::Error,
+	},
+	/// The generated Python metadata was not valid JSON.
+	#[error("parse {path}: {source}")]
+	ParseMetadata {
+		/// Metadata file.
+		path: PathBuf,
+		/// JSON parser failure.
+		#[source]
+		source: serde_json::Error,
+	},
+	/// The metadata extensions field had the wrong shape.
+	#[error("{path}: build_info.extensions must be an object")]
+	InvalidExtensionsShape {
+		/// Metadata file.
+		path: PathBuf,
+	},
+	/// One extension's variant list had the wrong shape.
+	#[error("{path}: build_info.extensions.{extension_name}: must be an array")]
+	InvalidVariantsShape {
+		/// Metadata file.
+		path:           PathBuf,
+		/// Extension name.
+		extension_name: String,
+	},
+	/// One extension variant's link list had the wrong shape.
+	#[error(
+		"{path}: build_info.extensions.{extension_name}[{variant_index}].links: must be an array"
+	)]
+	InvalidLinksShape {
+		/// Metadata file.
+		path:           PathBuf,
+		/// Extension name.
+		extension_name: String,
+		/// Variant index.
+		variant_index:  usize,
+	},
+	/// One link's name field had the wrong shape.
+	#[error(
+		"{path}: build_info.extensions.{extension_name}[{variant_index}].links[{link_index}].name: \
+		 must be a string"
+	)]
+	InvalidLinkNameShape {
+		/// Metadata file.
+		path:           PathBuf,
+		/// Extension name.
+		extension_name: String,
+		/// Variant index.
+		variant_index:  usize,
+		/// Link index.
+		link_index:     usize,
+	},
+	/// Cargo did not provide the output directory.
+	#[error("Cargo did not provide OUT_DIR to omp-py/build.rs")]
+	MissingOutputDirectory,
+}
+
+fn main() -> Result<(), BuildError> {
 	let manifest = PathBuf::from(std::env!("CARGO_MANIFEST_DIR"));
 	let target = env::var("TARGET").expect("Cargo must provide TARGET to omp-py/build.rs");
 
@@ -68,8 +134,11 @@ fn main() {
 	println!("cargo::rerun-if-changed={}", vendor.join("PYTHON.json").display());
 	println!("cargo::rerun-if-changed={}", vendor.join("stdlib.bin").display());
 
-	let json: serde_json::Value =
-		serde_json::from_str(&fs::read_to_string(vendor.join("PYTHON.json")).unwrap()).unwrap();
+	let python_json = vendor.join("PYTHON.json");
+	let json_text = fs::read_to_string(&python_json)
+		.map_err(|source| BuildError::ReadMetadata { path: python_json.clone(), source })?;
+	let json: serde_json::Value = serde_json::from_str(&json_text)
+		.map_err(|source| BuildError::ParseMetadata { path: python_json.clone(), source })?;
 
 	// macOS's `@available` checks require compiler-rt because rustc links with
 	// `-nodefaultlibs`; Linux archives do not ship or reference this Darwin
@@ -80,16 +149,42 @@ fn main() {
 	}
 	let mut frameworks = BTreeSet::new();
 	let mut system_libs = BTreeSet::new();
-	let extensions = json["build_info"]["extensions"].as_object().unwrap();
-	for variant in extensions.values().flat_map(|v| v.as_array().unwrap()) {
-		for link in variant["links"].as_array().unwrap() {
-			let name = link["name"].as_str().unwrap();
-			if link["path_static"].is_string() {
-				static_libs.insert(name.to_owned());
-			} else if link["framework"].as_bool() == Some(true) {
-				frameworks.insert(name);
-			} else if !TCL_LIBS.contains(&name) {
-				system_libs.insert(name);
+	let extensions = json
+		.get("build_info")
+		.and_then(|build_info| build_info.get("extensions"))
+		.and_then(serde_json::Value::as_object)
+		.ok_or_else(|| BuildError::InvalidExtensionsShape { path: python_json.clone() })?;
+	for (extension_name, variants) in extensions {
+		let variants = variants.as_array().ok_or_else(|| BuildError::InvalidVariantsShape {
+			path:           python_json.clone(),
+			extension_name: extension_name.to_owned(),
+		})?;
+		for (variant_index, variant) in variants.iter().enumerate() {
+			let links = variant
+				.get("links")
+				.and_then(serde_json::Value::as_array)
+				.ok_or_else(|| BuildError::InvalidLinksShape {
+					path:           python_json.clone(),
+					extension_name: extension_name.to_owned(),
+					variant_index,
+				})?;
+			for (link_index, link) in links.iter().enumerate() {
+				let name = link
+					.get("name")
+					.and_then(serde_json::Value::as_str)
+					.ok_or_else(|| BuildError::InvalidLinkNameShape {
+						path:           python_json.clone(),
+						extension_name: extension_name.to_owned(),
+						variant_index,
+						link_index,
+					})?;
+				if link["path_static"].is_string() {
+					static_libs.insert(name.to_owned());
+				} else if link["framework"].as_bool() == Some(true) {
+					frameworks.insert(name);
+				} else if !TCL_LIBS.contains(&name) {
+					system_libs.insert(name);
+				}
 			}
 		}
 	}
@@ -161,14 +256,15 @@ fn main() {
 	println!("cargo::rerun-if-changed={}", py_src.display());
 	println!("cargo::rerun-if-changed={}", requirements.display());
 	println!("cargo::rerun-if-changed={}", packer.display());
-	let frozen_metadata =
-		PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("frozen_distributions.rs");
+	let out_dir =
+		env::var_os("OUT_DIR").map(PathBuf::from).ok_or(BuildError::MissingOutputDirectory)?;
+	let frozen_metadata = out_dir.join("frozen_distributions.rs");
 	write_frozen_distributions(&requirements, &frozen_metadata);
 	println!("cargo::rustc-env=OMP_PY_FROZEN_DISTRIBUTIONS={}", frozen_metadata.display());
 
 	let url_vocab = manifest.join("../tools/url-vocab.json");
 	println!("cargo::rerun-if-changed={}", url_vocab.display());
-	let frozen_generated = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("frozen-python");
+	let frozen_generated = out_dir.join("frozen-python");
 	fs::create_dir_all(&frozen_generated).expect("create generated frozen-module directory");
 	let vocabulary: serde_json::Value =
 		serde_json::from_str(&fs::read_to_string(&url_vocab).expect("read canonical URL vocabulary"))
@@ -223,7 +319,7 @@ fn main() {
 		.find(|p| p.is_file())
 		.expect("vendored interpreter missing — run omp-py's scripts/fetch-python.sh first");
 	let bundled = bundled_packages(&requirements, &vendor);
-	let modules_blob = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("omp_modules.bin");
+	let modules_blob = out_dir.join("omp_modules.bin");
 	let mut pack = Command::new(interpreter);
 	pack.arg(&packer).arg(&py_src);
 	pack.arg(&frozen_generated);
@@ -241,6 +337,7 @@ fn main() {
 	// Baked into the library by lib.rs.
 	println!("cargo::rustc-env=OMP_STDLIB_BLOB={}", vendor.join("stdlib.bin").display());
 	println!("cargo::rustc-env=OMP_PY_MODULES_BLOB={}", modules_blob.display());
+	Ok(())
 }
 
 /// Locates the bundled third-party packages (pinned in `requirements.txt`,

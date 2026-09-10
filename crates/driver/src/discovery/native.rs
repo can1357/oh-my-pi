@@ -212,20 +212,20 @@ pub enum NativeExtensionError {
 	},
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, strum::IntoStaticStr)]
+#[strum(const_into_str)]
 enum RootOrigin {
+	#[strum(serialize = "invocation")]
 	Explicit,
+	#[strum(serialize = "user")]
 	User,
+	#[strum(serialize = "project")]
 	Workspace,
 }
 
 impl RootOrigin {
 	const fn layer(self) -> &'static str {
-		match self {
-			Self::Explicit => "invocation",
-			Self::User => "user",
-			Self::Workspace => "project",
-		}
+		self.into_str()
 	}
 }
 

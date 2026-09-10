@@ -48,11 +48,7 @@ rewrite of `pi`: port observable behavior, not TS shape.
   and native chat actor/projections; `crates/gui`: native window host.
   None owns agent/provider policy.
 - `crates/e2e/tests`: authoritative joined-system proofs P1-P8.
-- `PLAN.md`: authoritative plan — locked decisions D1-D8, defect ledger, 8
-  parts + checklists.
-- `fixtures`, `.plan/quirks`: conformance data, recorded incompatibilities.
-  Other `.plan` scratch (research, port, feature-map) NEVER outranks production
-  code/tests.
+- `fixtures`: conformance data.
 - `.omp/tools`, `scripts`, `crates/*/scripts`: agent tooling, release gen,
   subsystem setup.
 
@@ -457,8 +453,7 @@ heap-grooming. Non-negotiable:
 
 ### Locked Deviations from pi (owner decisions — NEVER port back)
 "pi does X" is NEVER an argument for any item below. Each was decided
-explicitly; regressing to pi shape = defect, not parity. Full audit ledger:
-`.plan/parity-regression-audit.md`.
+explicitly; regressing to pi shape = defect, not parity.
 - Extensions/eval: embedded free-threaded CPython only — no JS/TS plugin
   runtime, no multi-language eval; stdlib frozen in-binary.
 - Shell: in-process bash parser/interpreter + builtin coreutils; NEVER shell
@@ -493,7 +488,7 @@ explicitly; regressing to pi shape = defect, not parity. Full audit ledger:
 - Runtime: tokio + rayon only (custom executor crates prohibited); local
   audio/ML via candle, never C/C++ binding graphs (whisper-rs, llama-cpp).
 - Feature graphs earn their weight: a crate enabling a feature whose code it
-  never imports (e.g. app → `omp-inference/realtime` → WebRTC/DTLS/
+  never imports (e.g. app → `omp-ai/realtime` → WebRTC/DTLS/
   Opus) is a defect; cold `cargo run --bin omp` build time is a gate. No
   dual-committed catalog formats, no leftover port fixtures, no lockfiles
   nothing reads.

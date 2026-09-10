@@ -15,6 +15,7 @@ pub mod trust;
 pub mod upgrade;
 
 use omp_core::Str;
+use pep440_rs::VersionParseError;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr};
 
@@ -203,25 +204,66 @@ impl ExtensionCode {
 
 /// A structured extension failure or warning.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("{code}: {detail}")]
-pub struct ExtensionError {
-	/// Stable diagnostic code.
-	pub code:   ExtensionCode,
-	/// Human-actionable detail.
-	pub detail: Str,
+pub enum ExtensionError {
+	/// A diagnostic with a stable code and rendered detail.
+	#[error("{code}: {detail}")]
+	Diagnostic {
+		/// Stable diagnostic code.
+		code:   ExtensionCode,
+		/// Human-actionable detail.
+		detail: Str,
+	},
+	/// A PEP 440 version could not be parsed.
+	#[error("{code}: invalid PEP 440 version {version:?}: {source}")]
+	InvalidVersion {
+		/// Stable diagnostic code.
+		code: ExtensionCode,
+		/// Offending version spelling.
+		version: Str,
+		/// Parser failure.
+		#[source]
+		source: VersionParseError,
+	},
 }
 
 impl ExtensionError {
 	/// Creates a typed diagnostic.
 	pub fn new(code: ExtensionCode, detail: impl AsRef<str>) -> Self {
-		Self { code, detail: Str::new(detail) }
+		Self::Diagnostic { code, detail: Str::new(detail) }
+	}
+
+	/// Creates a diagnostic for an invalid PEP 440 version.
+	pub fn invalid_version(version: impl AsRef<str>, source: VersionParseError) -> Self {
+		Self::InvalidVersion {
+			code: ExtensionCode::EManifestParse,
+			version: Str::new(version),
+			source,
+		}
+	}
+
+	/// Returns the stable diagnostic code.
+	pub const fn code(&self) -> ExtensionCode {
+		match self {
+			Self::Diagnostic { code, .. } => *code,
+			Self::InvalidVersion { code, .. } => *code,
+		}
+	}
+
+	/// Returns the human-actionable detail.
+	pub fn detail(&self) -> Str {
+		match self {
+			Self::Diagnostic { detail, .. } => detail.clone(),
+			Self::InvalidVersion { version, source, .. } => {
+				Str::new(format!("invalid PEP 440 version {version:?}: {source}"))
+			},
+		}
 	}
 }
 
 impl ExtensionError {
 	/// Stable process status for the diagnostic class.
 	pub const fn exit_code(&self) -> u8 {
-		self.code.exit_code()
+		self.code().exit_code()
 	}
 }
 

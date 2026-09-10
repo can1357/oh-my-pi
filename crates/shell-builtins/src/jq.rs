@@ -501,7 +501,9 @@ mod filter {
 			let idx = codesnake::LineIndex::new(&file.code);
 			reports.iter().try_for_each(|e| {
 				writeln!(f, "Error: {}", e.message)?;
-				let block = e.to_block(&idx);
+				let Some(block) = e.to_block(&idx) else {
+					return Err(fmt::Error);
+				};
 				writeln!(f, "{}[{}]", block.prologue(), file.path.display())?;
 				writeln!(f, "{}{}", block, block.epilogue())
 			})
@@ -598,17 +600,19 @@ mod filter {
 	type CodeBlock = codesnake::Block<codesnake::CodeWidth<String>, String>;
 
 	impl Report {
-		fn to_block(&self, idx: &codesnake::LineIndex) -> CodeBlock {
+		fn to_block(&self, idx: &codesnake::LineIndex) -> Option<CodeBlock> {
 			use codesnake::{Block, CodeWidth, Label};
 			let labels = self
 				.labels
 				.iter()
 				.cloned()
 				.map(|(range, text)| Label::new(range).with_text(text));
-			Block::new(idx, labels).unwrap().map_code(|c| {
-				let c = c.replace('\t', "    ");
-				let w = xutf::width_str(&c);
-				CodeWidth::new(c, core::cmp::max(w, 1))
+			Block::new(idx, labels).map(|block| {
+				block.map_code(|c| {
+					let c = c.replace('\t', "    ");
+					let w = xutf::width_str(&c);
+					CodeWidth::new(c, core::cmp::max(w, 1))
+				})
 			})
 		}
 	}
@@ -1137,7 +1141,12 @@ fn real_main(cli: &Cli, host: &mut Host) -> Result<i32, Error> {
 				// create a temporary file where output is written to,
 				// in the resolved target's directory so the final rename
 				// stays on the same filesystem
-				let location = path.parent().unwrap();
+				let location = path.parent().ok_or_else(|| {
+					Error::Io(
+						Some(path.display().to_string()),
+						io::Error::new(io::ErrorKind::InvalidInput, "input path has no parent"),
+					)
+				})?;
 				let mut tmp = tempfile::Builder::new()
 					.prefix("jaq")
 					.tempfile_in(location)?;

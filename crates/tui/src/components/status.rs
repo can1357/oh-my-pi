@@ -798,11 +798,7 @@ mod tests {
 		let error = Ui::from_markup("<segment>alpha</segment>", 40, UiContext::default())
 			.err()
 			.expect("orphan segment must fail");
-		assert!(
-			error
-				.message
-				.contains("<segment> is not allowed directly inside")
-		);
+		assert!(error.to_string().contains("<segment> is not allowed directly inside"));
 	}
 
 	#[test]

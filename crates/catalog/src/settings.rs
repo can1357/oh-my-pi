@@ -1,6 +1,6 @@
 //! Runtime-owned model, thinking, provider, and wire settings projections.
 
-#![allow(missing_docs, reason = "strum IntoStaticStr emits undocumented inherent methods")]
+#![expect(missing_docs, reason = "strum IntoStaticStr emits undocumented inherent methods")]
 
 use std::{
 	collections::BTreeMap,

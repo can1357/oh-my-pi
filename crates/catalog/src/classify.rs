@@ -1,6 +1,5 @@
 //! Offline model identity classification for catalog compilation and discovery
 //! normalization.
-#![allow(missing_docs, reason = "strum IntoStaticStr emits undocumented inherent methods")]
 
 use std::borrow;
 
@@ -10,11 +9,10 @@ use strum::IntoStaticStr;
 
 use crate::{
 	id::{ClassId, FamilyId},
-	taxonomy::{Taxonomy, TaxonomyError, VariantFamily, taxonomy},
+	taxonomy::{Taxonomy, TaxonomyError, taxonomy},
 };
 
 /// Source phase allowed to invoke identity classification.
-#[allow(missing_docs, reason = "strum IntoStaticStr generates undocumented as_str")]
 #[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClassificationPhase {
@@ -109,12 +107,27 @@ pub struct ModelClassification {
 }
 
 /// Classifies one source identity without consulting process state.
+///
+/// Ambiguity never panics: the [`ClassificationPhase::DiscoveryNormalizer`]
+/// phase degrades tied ranks to the conservative defaults inside
+/// `classify_ranks`/`ranks_in_class`, and catalog compilation takes the
+/// checked `classify_for_compiler` path, so a tie in the checked-in bundled
+/// taxonomy fails compilation before any artifact ships.
 pub fn classify(input: ClassificationInput<'_>) -> ModelClassification {
-	classify_with_taxonomy(input, taxonomy())
+	match classify_with_taxonomy(input, taxonomy()) {
+		Ok(classification) => classification,
+		// Only a tie in the checked-in bundled taxonomy reaches here; see docs above.
+		Err(error) => unreachable!("DiscoveryNormalizer degrades ties and the compiler path returns errors, so a bundled taxonomy tie is unreachable: {error}"),
+	}
 }
-/// Returns the reviewed variant family matching a logical, member, or alias id.
-pub(crate) fn variant_family(provider: &str, id: &str) -> Option<VariantFamily> {
-	taxonomy().variant_family(provider, id)
+
+/// Classifies one checked-in source identity while preserving taxonomy
+/// validation errors for the catalog compiler.
+pub(crate) fn classify_for_compiler(
+	input: ClassificationInput<'_>,
+	taxonomy: &Taxonomy,
+) -> Result<ModelClassification, TaxonomyError> {
+	classify_with_taxonomy(input, taxonomy)
 }
 
 /// Whether a provider declares conservative dynamic effort-sibling grouping.
@@ -130,19 +143,19 @@ pub(crate) fn strip_effort_lane<'a>(provider: &str, model: &'a str) -> &'a str {
 fn classify_with_taxonomy(
 	input: ClassificationInput<'_>,
 	taxonomy: &Taxonomy,
-) -> ModelClassification {
+) -> Result<ModelClassification, TaxonomyError> {
 	let trimmed = input.model.trim();
 	let bare = trimmed.rsplit('/').next().unwrap_or(trimmed);
 	let override_ = taxonomy.identity_override(input.provider, bare, input.observed_at_ms);
 	if let Some(identity) = override_ {
 		let logical = identity.logical.as_deref().unwrap_or(trimmed);
-		let class = identity
-			.class
-			.clone()
-			.unwrap_or_else(|| classify_ranks(taxonomy, input.phase, logical).0);
+		let class = match identity.class.clone() {
+			Some(class) => class,
+			None => classify_ranks(taxonomy, input.phase, logical)?.0,
+		};
 		let (inferred_family, inferred_revision) =
-			ranks_in_class(taxonomy, input.phase, &class, logical);
-		return ModelClassification {
+			ranks_in_class(taxonomy, input.phase, &class, logical)?;
+		return Ok(ModelClassification {
 			logical_model: Str::new(logical),
 			class,
 			family: identity.family.clone().or(inferred_family),
@@ -156,7 +169,7 @@ fn classify_with_taxonomy(
 				provenance:    identity.provenance.clone(),
 				expires_at_ms: identity.expires_at_ms,
 			},
-		};
+		});
 	}
 
 	let (logical, collapsed_effort, collapsed_thinking) = if trimmed.len() == input.model.len() {
@@ -165,7 +178,7 @@ fn classify_with_taxonomy(
 		(borrow::Cow::Borrowed(trimmed), None, false)
 	};
 	let (inferred_class, inferred_family, inferred_revision) =
-		classify_ranks(taxonomy, input.phase, &logical);
+		classify_ranks(taxonomy, input.phase, &logical)?;
 
 	let family_alias =
 		logical.as_ref() != trimmed && collapsed_effort.is_none() && !collapsed_thinking;
@@ -177,7 +190,7 @@ fn classify_with_taxonomy(
 	} else {
 		ClassificationMethod::ClassRule
 	};
-	ModelClassification {
+	Ok(ModelClassification {
 		logical_model:    Str::new(logical.as_ref()),
 		class:            inferred_class,
 		family:           inferred_family,
@@ -203,27 +216,25 @@ fn classify_with_taxonomy(
 			provenance: sf!(<&'static str>::from(input.phase)),
 			expires_at_ms: None,
 		},
-	}
+	})
 }
 
 fn classify_ranks(
 	taxonomy: &Taxonomy,
 	phase: ClassificationPhase,
 	model: &str,
-) -> (ClassId, Option<FamilyId>, Option<SemVer>) {
+) -> Result<(ClassId, Option<FamilyId>, Option<SemVer>), TaxonomyError> {
 	match taxonomy.classify_id(model) {
-		Ok(ranks) => ranks,
+		Ok(ranks) => Ok(ranks),
 		Err(error) => match (phase, error) {
 			(ClassificationPhase::DiscoveryNormalizer, TaxonomyError::AmbiguousClass { .. }) => {
-				(ClassId::new("unknown"), None, None)
+				Ok((ClassId::new("unknown"), None, None))
 			},
 			(
 				ClassificationPhase::DiscoveryNormalizer,
 				TaxonomyError::AmbiguousFamily { class, .. },
-			) => (class, None, None),
-			(ClassificationPhase::CatalogCompiler, error) => {
-				panic!("bundled taxonomy classification is ambiguous: {error}")
-			},
+			) => Ok((class, None, None)),
+			(ClassificationPhase::CatalogCompiler, error) => Err(error),
 		},
 	}
 }
@@ -233,14 +244,12 @@ fn ranks_in_class(
 	phase: ClassificationPhase,
 	class: &ClassId<str>,
 	model: &str,
-) -> (Option<FamilyId>, Option<SemVer>) {
+) -> Result<(Option<FamilyId>, Option<SemVer>), TaxonomyError> {
 	match taxonomy.ranks_in_class(class, model) {
-		Ok(ranks) => ranks,
+		Ok(ranks) => Ok(ranks),
 		Err(error) => match phase {
-			ClassificationPhase::DiscoveryNormalizer => (None, None),
-			ClassificationPhase::CatalogCompiler => {
-				panic!("bundled taxonomy classification is ambiguous: {error}")
-			},
+			ClassificationPhase::DiscoveryNormalizer => Ok((None, None)),
+			ClassificationPhase::CatalogCompiler => Err(error),
 		},
 	}
 }
@@ -358,7 +367,8 @@ mod tests {
 				observed_at_ms: None,
 			},
 			&ambiguous_class,
-		);
+		)
+		.expect("discovery taxonomy classification");
 		assert_eq!(class_result.class.as_str(), "unknown");
 		assert_eq!(class_result.family, None);
 		assert_eq!(class_result.revision, None);
@@ -384,7 +394,8 @@ mod tests {
 				observed_at_ms: None,
 			},
 			&ambiguous_family,
-		);
+		)
+		.expect("discovery taxonomy classification");
 		assert_eq!(family_result.class.as_str(), "alpha");
 		assert_eq!(family_result.family, None);
 		assert_eq!(family_result.revision, None);

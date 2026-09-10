@@ -4,6 +4,7 @@ use std::{collections::BTreeSet, fs, path::Path, str::FromStr as _};
 
 use jiff::Timestamp;
 use omp_core::Str;
+use pep440_rs::Version;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -208,21 +209,20 @@ impl SignedIndex {
 		skip_all,
 		fields(path = %path.display())
 	)]
-	pub fn read(path: &Path, index_key: &str) -> Result<Self, ExtensionError> {
-		let result: Result<Self, ExtensionError> = (|| {
+	pub fn read(path: &Path, index_key: &str) -> Result<VerifiedIndex, ExtensionError> {
+		let result: Result<VerifiedIndex, ExtensionError> = (|| {
 			let bytes = fs::read(path)
 				.map_err(|error| ExtensionError::new(ExtensionCode::EIntegrity, error.to_string()))?;
 			let index: Self = serde_json::from_slice(&bytes).map_err(|error| {
 				ExtensionError::new(ExtensionCode::EManifestParse, error.to_string())
 			})?;
-			index.verify(index_key)?;
-			Ok(index)
+			index.verify(index_key)
 		})();
 		if let Ok(index) = &result {
 			tracing::debug!(
 				cache_hit = true,
-				index_name = %index.name,
-				extension_count = index.extensions.len(),
+				index_name = %index.0.name,
+				extension_count = index.0.extensions.len(),
 				"extension index cache loaded"
 			);
 		}
@@ -232,7 +232,7 @@ impl SignedIndex {
 	/// Verifies version, freshness, canonical ordering, uniqueness, and the
 	/// detached index signature. Signed bytes are canonical JSON of every field
 	/// except `signature`.
-	pub fn verify(&self, index_key: &str) -> Result<(), ExtensionError> {
+	pub fn verify(self, index_key: &str) -> Result<VerifiedIndex, ExtensionError> {
 		self.verify_at(index_key, Timestamp::now())
 	}
 
@@ -243,7 +243,11 @@ impl SignedIndex {
 		skip_all,
 		fields(index_name = %self.name, extension_count = self.extensions.len())
 	)]
-	pub fn verify_at(&self, index_key: &str, now: Timestamp) -> Result<(), ExtensionError> {
+	pub fn verify_at(
+		self,
+		index_key: &str,
+		now: Timestamp,
+	) -> Result<VerifiedIndex, ExtensionError> {
 		if self.version != INDEX_VERSION {
 			return Err(ExtensionError::new(
 				ExtensionCode::EManifestParse,
@@ -295,7 +299,7 @@ impl SignedIndex {
 			previous = Some(&extension.id);
 			let mut release_versions = BTreeSet::new();
 			for release in &extension.releases {
-				compare_versions(release.version.as_str(), release.version.as_str())?;
+				validate_version(release.version.as_str())?;
 				if !release_versions.insert(&release.version) {
 					return Err(ExtensionError::new(
 						ExtensionCode::EManifestParse,
@@ -345,23 +349,8 @@ impl SignedIndex {
 			extensions:  &self.extensions,
 		})
 		.map_err(|error| ExtensionError::new(ExtensionCode::ESig, error.to_string()))?;
-		verify_signed_payload(index_key, &payload, self.signature.as_str())
-	}
-
-	/// Returns the greatest eligible PEP 440 release.
-	pub fn latest_release<'a>(
-		&self,
-		extension: &'a IndexExtension,
-		attested_only: bool,
-	) -> Option<&'a IndexRelease> {
-		extension
-			.releases
-			.iter()
-			.filter(|release| !release.yanked && (!attested_only || release.attested))
-			.max_by(|left, right| {
-				compare_versions(left.version.as_str(), right.version.as_str())
-					.expect("release versions were validated with the signed index")
-			})
+		verify_signed_payload(index_key, &payload, self.signature.as_str())?;
+		Ok(VerifiedIndex::new_unchecked(self))
 	}
 
 	/// Looks up one non-yanked exact release.
@@ -376,6 +365,36 @@ impl SignedIndex {
 			.find(|release| release.version == version && !release.yanked)?;
 		Some((extension, release))
 	}
+}
+
+/// A [`SignedIndex`] that has passed verification. `latest_release` and
+/// `search` are only available on this type so unverified indexes cannot be
+/// queried.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedIndex(SignedIndex);
+
+impl VerifiedIndex {
+	/// Constructs a verified view without re-verifying. For tests and the
+	/// `verify` path only.
+	pub(crate) fn new_unchecked(index: SignedIndex) -> Self {
+		Self(index)
+	}
+
+	/// Returns the greatest eligible PEP 440 release.
+	pub fn latest_release<'a>(
+		&self,
+		extension: &'a IndexExtension,
+		attested_only: bool,
+	) -> Option<&'a IndexRelease> {
+		extension
+			.releases
+			.iter()
+			.filter(|release| !release.yanked && (!attested_only || release.attested))
+			.max_by(|left, right| {
+				compare_versions(left.version.as_str(), right.version.as_str())
+					.expect("validate_version")
+			})
+	}
 
 	/// Searches descriptions and identities in deterministic index order.
 	pub fn search<'a>(
@@ -385,7 +404,7 @@ impl SignedIndex {
 		attested_only: bool,
 	) -> impl Iterator<Item = (&'a IndexExtension, &'a IndexRelease)> + 'a {
 		let query = query.to_ascii_lowercase();
-		self.extensions.iter().filter_map(move |extension| {
+		self.0.extensions.iter().filter_map(move |extension| {
 			if !extension.id.as_str().to_ascii_lowercase().contains(&query)
 				&& !extension
 					.description
@@ -406,11 +425,26 @@ impl SignedIndex {
 				})
 				.max_by(|left, right| {
 					compare_versions(left.version.as_str(), right.version.as_str())
-						.expect("release versions were validated with the signed index")
+						.expect("validate_version")
 				})?;
 			Some((extension, release))
 		})
 	}
+}
+
+impl std::ops::Deref for VerifiedIndex {
+	type Target = SignedIndex;
+
+	fn deref(&self) -> &Self::Target {
+		&self.0
+	}
+}
+
+/// Validates a single exact PEP 440 version string.
+pub fn validate_version(version: &str) -> Result<(), ExtensionError> {
+	Version::from_str(version)
+		.map_err(|source| ExtensionError::invalid_version(version, source))?;
+	Ok(())
 }
 
 /// Requires every manifest shadow claim to have an exact user-configured
@@ -475,7 +509,13 @@ mod tests {
 			key_rotation:  None,
 			releases:      vec![release("2.0rc1"), release("1.9"), release("2.0")],
 		};
-		assert_eq!(index.latest_release(&extension, false).unwrap().version, "2.0");
+		assert_eq!(
+			VerifiedIndex::new_unchecked(index)
+				.latest_release(&extension, false)
+				.unwrap()
+				.version,
+			"2.0"
+		);
 	}
 
 	#[test]
@@ -490,6 +530,6 @@ mod tests {
 		};
 		let now = Timestamp::from_str("2026-01-01T00:00:00Z").unwrap();
 		let error = index.verify_at("invalid", now).unwrap_err();
-		assert_eq!(error.code, ExtensionCode::EIntegrity);
+		assert_eq!(error.code(), ExtensionCode::EIntegrity);
 	}
 }

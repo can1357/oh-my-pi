@@ -104,7 +104,7 @@ pub fn diagnose(request: &DoctorRequest<'_>, health: &impl RuntimeHealth) -> Vec
 	let installed = match InstalledRecord::read(request.installed_path) {
 		Ok(installed) => installed,
 		Err(error) => {
-			findings.push(finding(Some(error.code), DoctorSeverity::Error, None, error.detail, false));
+			findings.push(finding(Some(error.code()), DoctorSeverity::Error, None, error.detail(), false));
 			InstalledRecord::default()
 		},
 	};
@@ -115,19 +115,19 @@ pub fn diagnose(request: &DoctorRequest<'_>, health: &impl RuntimeHealth) -> Vec
 				.as_table()
 				.is_some_and(|source| source.contains_key("link") || source.contains_key("path"))
 		}) {
-		findings.push(finding(Some(error.code), DoctorSeverity::Error, None, error.detail, false));
+		findings.push(finding(Some(error.code()), DoctorSeverity::Error, None, error.detail(), false));
 	}
 	let keys = match KeysFile::read(request.keys_path) {
 		Ok(keys) => Some(keys),
 		Err(error) => {
-			findings.push(finding(Some(error.code), DoctorSeverity::Error, None, error.detail, false));
+			findings.push(finding(Some(error.code()), DoctorSeverity::Error, None, error.detail(), false));
 			None
 		},
 	};
 	let grants = match GrantsFile::read(request.grants_path) {
 		Ok(grants) => Some(grants),
 		Err(error) => {
-			findings.push(finding(Some(error.code), DoctorSeverity::Error, None, error.detail, false));
+			findings.push(finding(Some(error.code()), DoctorSeverity::Error, None, error.detail(), false));
 			None
 		},
 	};
@@ -333,7 +333,7 @@ fn verify_artifact(path: &Path, locked: &LockedExtension) -> Result<(), Str> {
 		locked.manifest_capability_digest.as_str(),
 		locked.signature.as_str(),
 	)
-	.map_err(|error| error.detail)
+	.map_err(|error| error.detail())
 }
 
 fn inspect_site(request: &DoctorRequest<'_>, findings: &mut Vec<DoctorFinding>) {

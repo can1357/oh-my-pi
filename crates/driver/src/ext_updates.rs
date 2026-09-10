@@ -460,7 +460,11 @@ fn update_refusal_from_wire(value: i32) -> Option<omp_ext::upgrade::UpdateRefusa
 
 async fn fetch_update_metadata(url: &str) -> Result<Vec<u8>, UpdateFailure> {
 	const MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
-	let response = reqwest::get(url).await.map_err(|_| network_failure())?;
+	let response = omp_http::default_client()
+		.get(url)
+		.send()
+		.await
+		.map_err(|_| network_failure())?;
 	if !response.status().is_success() {
 		return Err(network_failure());
 	}
@@ -493,7 +497,7 @@ const fn storage_failure() -> UpdateFailure {
 }
 
 fn extension_failure(error: omp_ext::ExtensionError) -> UpdateFailure {
-	UpdateFailure { kind: UpdateFailureKind::Verification, code: Some(error.code) }
+	UpdateFailure { kind: UpdateFailureKind::Verification, code: Some(error.code()) }
 }
 
 #[cfg(unix)]

@@ -2619,7 +2619,7 @@ impl Registry {
 		})
 	}
 
-	/// Returns the BLAKE3-256 digest of policy-resolved model-visible slots.
+	/// Returns the SHA-256 digest of policy-resolved model-visible slots.
 	pub fn slot_hash(&self) -> Hash32 {
 		let mut hasher = Hash32::hasher();
 		hasher.update(b"omp-tool/slots/v1\0");
@@ -2649,7 +2649,7 @@ impl Registry {
 		hasher.finalize()
 	}
 
-	/// Returns the BLAKE3-256 digest of mounted device availability and
+	/// Returns the SHA-256 digest of mounted device availability and
 	/// claimant-qualified reachability.
 	pub fn device_hash(&self) -> Hash32 {
 		let mut hasher = Hash32::hasher();
@@ -2685,7 +2685,7 @@ impl Registry {
 		hasher.finalize()
 	}
 
-	/// Returns the BLAKE3-256 digest of every registered revision and its
+	/// Returns the SHA-256 digest of every registered revision and its
 	/// projection implementation.
 	pub fn projection_hash(&self) -> Hash32 {
 		let mut hasher = Hash32::hasher();

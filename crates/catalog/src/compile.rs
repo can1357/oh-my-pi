@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 use toml::de;
 
+#[cfg(test)]
+use crate::classify::classify;
 use crate::{
 	capability::{
 		AudioFormatBits, Availability, CacheRetentionBits, ChatCapabilities, DimensionRange,
@@ -26,8 +28,8 @@ use crate::{
 	},
 	cascade::{AxisMap, CascadeError, CompatCascade, ResolveTarget},
 	classify::{
-		ClassificationInput, ClassificationPhase, EffortTier, ModelClassification, classify,
-		strip_effort_lane, supports_dynamic_effort_siblings, variant_family,
+		ClassificationInput, ClassificationPhase, EffortTier, ModelClassification,
+		classify_for_compiler,
 	},
 	discover::DiscoveryDefaults,
 	id::{
@@ -1115,25 +1117,36 @@ impl CompiledCatalog {
 #[derive(Debug, thiserror::Error)]
 pub enum CompileError {
 	/// Provider TOML did not match the closed schema.
-	#[error("provider oracle is invalid: {0}")]
+	#[error("provider oracle is invalid")]
 	Provider(#[from] de::Error),
 	/// Model JSON did not match the closed schema.
-	#[error("model oracle is invalid: {0}")]
+	#[error("model oracle is invalid")]
 	Json(#[from] serde_json::Error),
 	/// Compressed model source could not be decoded.
-	#[error("model oracle compression is invalid: {0}")]
+	#[error("model oracle compression is invalid")]
 	Compression(#[from] io::Error),
 	/// Compatibility cascade parsing or resolution failed.
-	#[error("compatibility cascade is invalid: {0}")]
+	#[error("compatibility cascade is invalid")]
 	Cascade(#[from] CascadeError),
+	/// Checked-in taxonomy KDL could not be parsed.
+	#[error("catalog taxonomy source is invalid")]
+	TaxonomySource(#[source] CascadeError),
+	/// Taxonomy classification of checked-in model data failed.
+	#[error("catalog taxonomy classification is invalid")]
+	Taxonomy(#[from] crate::taxonomy::TaxonomyError),
 	/// A computed pricing multiplier was not a finite JSON number.
 	#[error("computed pricing multiplier is not finite")]
 	InvalidPriceMultiplier,
+	/// Source model classification did not produce an entry for every row.
+	#[error("classification index is incomplete")]
+	ClassificationIndexIncomplete,
+	/// A collapsed reasoning family has no non-off route.
+	#[error("collapsed effort family has no non-off route")]
+	CollapsedEffortFamilyNoNonOffRoute,
 	/// Source data violated a catalog invariant.
 	#[error("catalog invariant failed: {0}")]
 	Invariant(Str),
 }
-
 /// Parses the two checked-in oracle source formats into typed records.
 #[tracing::instrument(
 	name = "catalog_oracle_parse",
@@ -1191,6 +1204,7 @@ fn compile_with_oauth(
 	source: CatalogSource,
 	oauth_toml: &str,
 ) -> Result<CompiledCatalog, CompileError> {
+	let taxonomy = crate::taxonomy::Taxonomy::bundled().map_err(CompileError::TaxonomySource)?;
 	let cascade = CompatCascade::bundled()?;
 	let CatalogSource { providers: provider_sources, models: mut model_sources } = source;
 	let provider_facets = provider_sources
@@ -1201,7 +1215,7 @@ fn compile_with_oauth(
 		.iter()
 		.map(|(provider, source)| (provider.clone(), source.transport))
 		.collect::<BTreeMap<_, _>>();
-	inherit_source_references(&mut model_sources);
+	inherit_source_references(&mut model_sources, &taxonomy)?;
 	let raw_models = model_sources.values().map(BTreeMap::len).sum();
 	let active_transports = provider_sources
 		.values()
@@ -1238,6 +1252,7 @@ fn compile_with_oauth(
 		&provider_facets,
 		&provider_transports,
 		&cascade,
+		&taxonomy,
 	)?;
 	enable_hosted_image_routes(&models, &mut routes);
 	let census = CompilerCensus {
@@ -2668,7 +2683,10 @@ const EXACT_INHERITANCE_POLICIES: &[ExactInheritancePolicy] = &[
 		"The reviewed route explicitly preserves zero cache-write pricing.",
 	),
 ];
-fn inherit_source_references(models: &mut BTreeMap<Str, BTreeMap<Str, SourceModelRecord>>) {
+fn inherit_source_references(
+	models: &mut BTreeMap<Str, BTreeMap<Str, SourceModelRecord>>,
+	taxonomy: &crate::taxonomy::Taxonomy,
+) -> Result<(), crate::taxonomy::TaxonomyError> {
 	let snapshot = models.clone();
 	let mut exact: BTreeMap<Str, (Str, Str)> = BTreeMap::new();
 	for (provider, rows) in &snapshot {
@@ -2749,18 +2767,29 @@ fn inherit_source_references(models: &mut BTreeMap<Str, BTreeMap<Str, SourceMode
 			});
 			let mut current = (provider.clone(), model.clone());
 			let mut visited = BTreeSet::new();
-			while let Some(reference) = exact_reference
-				.filter(|_| visited.is_empty())
-				.map(|reference| {
-					debug_assert!(review_metadata_is_valid(
-						reference.rationale,
-						reference.provenance,
-						reference.expires_at_ms,
-					));
-					(Str::new(reference.reference_provider), Str::new(reference.reference_model))
-				})
-				.or_else(|| select_reference(&current.1, &current.0, &current.1, &exact, &suffix))
-			{
+			let mut first_reference = true;
+			loop {
+				let reference = if first_reference {
+					first_reference = false;
+					if let Some(reference) = exact_reference {
+						debug_assert!(review_metadata_is_valid(
+							reference.rationale,
+							reference.provenance,
+							reference.expires_at_ms,
+						));
+						Some((
+							Str::new(reference.reference_provider),
+							Str::new(reference.reference_model),
+						))
+					} else {
+						select_reference(&current.1, &current.0, &current.1, &exact, &suffix, taxonomy)?
+					}
+				} else {
+					select_reference(&current.1, &current.0, &current.1, &exact, &suffix, taxonomy)?
+				};
+				let Some(reference) = reference else {
+					break;
+				};
 				if !visited.insert(reference.clone()) {
 					break;
 				}
@@ -2802,6 +2831,7 @@ fn inherit_source_references(models: &mut BTreeMap<Str, BTreeMap<Str, SourceMode
 			}
 		}
 	}
+	Ok(())
 }
 
 fn source_inheritance_override(
@@ -2827,7 +2857,8 @@ fn select_reference(
 	original_model: &str,
 	exact: &BTreeMap<Str, (Str, Str)>,
 	suffix: &BTreeMap<Str, (Str, Str)>,
-) -> Option<(Str, Str)> {
+	taxonomy: &crate::taxonomy::Taxonomy,
+) -> Result<Option<(Str, Str)>, crate::taxonomy::TaxonomyError> {
 	if let Some(override_) = EXACT_SOURCE_REFERENCES.iter().find(|override_| {
 		debug_assert!(review_metadata_is_valid(
 			override_.rationale,
@@ -2837,29 +2868,42 @@ fn select_reference(
 		(override_.provider == "*" || override_.provider == provider)
 			&& override_.model.eq_ignore_ascii_case(model)
 	}) {
-		return Some((Str::new(override_.reference_provider), Str::new(override_.reference_model)));
+		return Ok(Some((
+			Str::new(override_.reference_provider),
+			Str::new(override_.reference_model),
+		)));
 	}
 	let mut candidates = reference_keys(model);
-	let prefer_suffix = source_inheritance_override(provider, model)
+	let prefer_suffix = if source_inheritance_override(provider, model)
 		.is_some_and(|override_| override_.prefer_suffix)
-		|| model.split_once('/').is_some_and(|(namespace, bare)| {
-			let bare = classify(ClassificationInput {
+	{
+		true
+	} else if let Some((namespace, bare)) = model.split_once('/') {
+		let bare = classify_for_compiler(
+			ClassificationInput {
 				phase: ClassificationPhase::CatalogCompiler,
 				provider,
 				model: bare,
 				observed_at_ms: None,
-			});
-			bare.class.as_str() == "qwen" && namespace.eq_ignore_ascii_case("qwen")
-		});
+			},
+			taxonomy,
+		)?;
+		bare.class.as_str() == "qwen" && namespace.eq_ignore_ascii_case("qwen")
+	} else {
+		false
+	};
 	if prefer_suffix && candidates.len() > 1 {
 		candidates.swap(0, 1);
 	}
-	let classified = classify(ClassificationInput {
-		phase: ClassificationPhase::CatalogCompiler,
-		provider,
-		model,
-		observed_at_ms: None,
-	});
+	let classified = classify_for_compiler(
+		ClassificationInput {
+			phase: ClassificationPhase::CatalogCompiler,
+			provider,
+			model,
+			observed_at_ms: None,
+		},
+		taxonomy,
+	)?;
 	if classified.logical_model.as_str() != model {
 		candidates.push(classified.logical_model);
 	}
@@ -2869,10 +2913,10 @@ fn select_reference(
 			continue;
 		};
 		if reference.0.as_str() != provider || reference.1.as_str() != original_model {
-			return Some(reference.clone());
+			return Ok(Some(reference.clone()));
 		}
 	}
-	None
+	Ok(None)
 }
 
 fn reference_keys(model: &str) -> Vec<Str> {
@@ -3114,10 +3158,6 @@ fn facet_operations(facets: &[SourceFacet]) -> OperationBits {
 	operations
 }
 
-#[allow(
-	clippy::type_complexity,
-	reason = "compiler phase returns each independently interned table"
-)]
 fn canonical_provider_base(provider: &str, base_url: Str) -> Str {
 	if provider == "azure"
 		&& (base_url.as_str().contains("{region}") || base_url.as_str().contains("{deployment}"))
@@ -3128,6 +3168,10 @@ fn canonical_provider_base(provider: &str, base_url: Str) -> Str {
 	}
 }
 
+#[expect(
+	clippy::type_complexity,
+	reason = "compiler phase returns each independently interned table"
+)]
 fn compile_providers(
 	providers: BTreeMap<Str, SourceProviderRecord>,
 	oauth_ids: &BTreeMap<Str, OAuthSpecId>,
@@ -3555,7 +3599,6 @@ fn compile_model_routes(
 	header_profiles.sort_by(|left, right| left.id.cmp(&right.id));
 	Ok(output)
 }
-
 fn compile_models(
 	providers: BTreeMap<Str, BTreeMap<Str, SourceModelRecord>>,
 	model_routes: &BTreeMap<(Str, Str), Vec<RouteId>>,
@@ -3565,6 +3608,7 @@ fn compile_models(
 	provider_facets: &BTreeMap<Str, Vec<SourceFacet>>,
 	provider_transports: &BTreeMap<Str, SourceTransport>,
 	cascade: &CompatCascade,
+	taxonomy: &crate::taxonomy::Taxonomy,
 ) -> Result<(Vec<ModelSpec>, Vec<CatalogAlias>), CompileError> {
 	let mut output = Vec::new();
 	let mut aliases = Vec::new();
@@ -3589,13 +3633,16 @@ fn compile_models(
 			.ok_or_else(|| CompileError::Invariant(sf!("provider transport is missing")))?;
 		let identities: BTreeMap<Str, ModelClassification> = rows
 			.iter()
-			.map(|(model, row)| {
-				let mut classified = classify(ClassificationInput {
-					phase: ClassificationPhase::CatalogCompiler,
-					provider: &provider,
-					model,
-					observed_at_ms: None,
-				});
+			.map(|(model, row)| -> Result<(Str, ModelClassification), CompileError> {
+				let mut classified = classify_for_compiler(
+					ClassificationInput {
+						phase: ClassificationPhase::CatalogCompiler,
+						provider: &provider,
+						model,
+						observed_at_ms: None,
+					},
+					taxonomy,
+				)?;
 				if let Some(identity) = &row.identity {
 					if let Some(logical) = &identity.logical_id {
 						classified.logical_model = logical.clone();
@@ -3620,16 +3667,16 @@ fn compile_models(
 						classified.thinking_variant = thinking_variant;
 					}
 				}
-				(model.clone(), classified)
+				Ok((model.clone(), classified))
 			})
-			.collect();
-		let collapsible = collapsible_groups(provider.as_str(), &identities);
+			.collect::<Result<_, CompileError>>()?;
+		let collapsible = collapsible_groups(provider.as_str(), &identities, taxonomy);
 		let mut logical: BTreeMap<Str, Vec<(Str, SourceModelRecord, ModelClassification)>> =
 			BTreeMap::new();
 		for (wire, row) in rows {
 			let classified = identities
 				.get(&wire)
-				.expect("classification index is complete");
+				.ok_or(CompileError::ClassificationIndexIncomplete)?;
 			let key = if collapsible.contains(classified.logical_model.as_str()) {
 				classified.logical_model.clone()
 			} else {
@@ -3642,7 +3689,7 @@ fn compile_models(
 		}
 		for (logical_id, members) in logical {
 			let first = &members[0];
-			let reviewed_family = variant_family(provider.as_str(), logical_id.as_str());
+			let reviewed_family = taxonomy.variant_family(provider.as_str(), logical_id.as_str());
 			let mut merged_row = first.1.clone();
 			for (_, row, _) in members.iter().skip(1) {
 				for input in &row.input {
@@ -3737,7 +3784,7 @@ fn compile_models(
 				class:     class.as_str(),
 				family:    first.2.family.as_ref().map(|family| family.as_str()),
 				revision:  first.2.revision,
-				model:     strip_effort_lane(provider.as_str(), logical_id.as_str()),
+				model:     taxonomy.strip_effort_lane(provider.as_str(), logical_id.as_str()),
 				reasoning: tier_reasoning || members.iter().any(|(_, row, _)| row.thinking.is_some()),
 			})?;
 			let pricing = compile_pricing(
@@ -3854,6 +3901,7 @@ fn compile_models(
 					&members,
 					thinking_profile,
 					reviewed_family.as_ref(),
+					taxonomy,
 				)?
 			} else {
 				(None, ThinkingRouting::default())
@@ -4154,12 +4202,13 @@ fn retarget_collapsed_model_reference(
 fn collapsible_groups(
 	provider: &str,
 	classified: &BTreeMap<Str, ModelClassification>,
+	taxonomy: &crate::taxonomy::Taxonomy,
 ) -> BTreeSet<Str> {
 	let raw: BTreeSet<&str> = classified.keys().map(Str::as_str).collect();
 	let mut tiers: BTreeMap<&str, Vec<EffortTier>> = BTreeMap::new();
 	let mut result = classified
 		.keys()
-		.filter_map(|wire| variant_family(provider, wire.as_str()))
+		.filter_map(|wire| taxonomy.variant_family(provider, wire.as_str()))
 		.map(|family| family.logical)
 		.collect::<BTreeSet<_>>();
 	for value in classified.values() {
@@ -4605,6 +4654,7 @@ fn compile_thinking(
 	members: &[(Str, SourceModelRecord, ModelClassification)],
 	profile: Option<ThinkingPolicy>,
 	reviewed_family: Option<&crate::taxonomy::VariantFamily>,
+	taxonomy: &crate::taxonomy::Taxonomy,
 ) -> Result<(Option<ThinkingPolicy>, ThinkingRouting), CompileError> {
 	let source = members.iter().find_map(|(_, row, _)| row.thinking.as_ref());
 	let mut classified_efforts: SmallVec<ThinkingEffort, 6> = members
@@ -4615,7 +4665,7 @@ fn compile_thinking(
 	classified_efforts.dedup();
 	let tier_collapsed = classified_efforts.len() >= 2;
 	let synthesize_cursor = reviewed_family.is_none()
-		&& supports_dynamic_effort_siblings(provider)
+		&& taxonomy.supports_dynamic_effort_siblings(provider)
 		&& tier_collapsed
 		&& source.is_none();
 	let reviewed_profile = reviewed_family.and_then(|family| {
@@ -4659,13 +4709,16 @@ fn compile_thinking(
 			classified.effort == Some(EffortTier::Off)
 				|| (classified.effort.is_none() && !classified.thinking_variant)
 		});
-		let default_level = (!has_off_route).then(|| {
-			members
+		let default_level = if has_off_route {
+			None
+		} else {
+			let default = members
 				.iter()
 				.filter_map(|(_, _, classified)| classified.effort.map(translate_effort))
 				.find(|effort| *effort != ThinkingEffort::Off)
-				.expect("collapsed effort family has a non-off route")
-		});
+				.ok_or(CompileError::CollapsedEffortFamilyNoNonOffRoute)?;
+			Some(default)
+		};
 		Some(ThinkingPolicy {
 			mode: ThinkingMode::Effort,
 			efforts,
@@ -4694,7 +4747,7 @@ fn compile_thinking(
 	} else {
 		None
 	};
-	if supports_dynamic_effort_siblings(provider)
+	if taxonomy.supports_dynamic_effort_siblings(provider)
 		&& let Some(profile) = profile.as_mut()
 		&& profile.default_level.is_none()
 		&& let Some(default) = inferred_cursor_default(members[0].2.logical_model.as_str())
@@ -5519,7 +5572,7 @@ fn decimal_metric_millionths(number: &Number) -> Result<u32, CompileError> {
 	u32::try_from(decimal_millionths(number)?)
 		.map_err(|_| CompileError::Invariant(sf!("catalog metric is out of range")))
 }
-fn decimal_scaled(number: &Number, scale: usize) -> Result<u64, CompileError> {
+fn decimal_scaled(number: &Number, scale: i32) -> Result<u64, CompileError> {
 	let text = number.to_string();
 	if text.starts_with('-') {
 		return Err(CompileError::Invariant(Str::from(format!("negative decimal `{text}`"))));
@@ -5537,7 +5590,7 @@ fn decimal_scaled(number: &Number, scale: usize) -> Result<u64, CompileError> {
 	let coefficient: u128 = digits
 		.parse()
 		.map_err(|_| CompileError::Invariant(sf!("decimal is out of range")))?;
-	let shift = exponent + i32::try_from(scale).expect("small fixed decimal scale")
+	let shift = exponent + scale
 		- i32::try_from(fraction.len())
 			.map_err(|_| CompileError::Invariant(sf!("decimal is out of range")))?;
 	let scaled = if shift >= 0 {
@@ -6165,6 +6218,7 @@ mod tests {
 
 	#[test]
 	fn cursor_collapse_groups_extra_high_and_rejects_duplicate_efforts() {
+		let taxonomy = crate::taxonomy::Taxonomy::bundled().expect("bundled taxonomy parses");
 		let rows = ["low", "extra-high"]
 			.into_iter()
 			.map(|tier| {
@@ -6178,7 +6232,10 @@ mod tests {
 				)
 			})
 			.collect::<BTreeMap<_, _>>();
-		assert!(collapsible_groups("cursor", &classifications("cursor", &rows)).contains("review"));
+		assert!(
+			collapsible_groups("cursor", &classifications("cursor", &rows), &taxonomy)
+				.contains("review")
+		);
 
 		let duplicate = ["low", "xhigh", "extra-high"]
 			.into_iter()
@@ -6190,13 +6247,14 @@ mod tests {
 			})
 			.collect::<BTreeMap<_, _>>();
 		assert!(
-			!collapsible_groups("cursor", &classifications("cursor", &duplicate))
+			!collapsible_groups("cursor", &classifications("cursor", &duplicate), &taxonomy)
 				.contains("duplicate")
 		);
 	}
 
 	#[test]
 	fn matching_static_logical_row_dedupes_live_cursor_tiers() {
+		let taxonomy = crate::taxonomy::Taxonomy::bundled().expect("bundled taxonomy parses");
 		let rows = BTreeMap::from([
 			(
 				Str::from("review"),
@@ -6216,7 +6274,10 @@ mod tests {
 			(Str::from("review-low"), source_model(serde_json::json!({ "api": "cursor" }))),
 			(Str::from("review-high"), source_model(serde_json::json!({ "api": "cursor" }))),
 		]);
-		assert!(collapsible_groups("cursor", &classifications("cursor", &rows)).contains("review"));
+		assert!(
+			collapsible_groups("cursor", &classifications("cursor", &rows), &taxonomy)
+				.contains("review")
+		);
 	}
 
 	#[test]
@@ -6311,6 +6372,7 @@ mod tests {
 
 	#[test]
 	fn effort_collapse_requires_siblings() {
+		let taxonomy = crate::taxonomy::Taxonomy::bundled().expect("bundled taxonomy parses");
 		let single = BTreeMap::from([(
 			sf!("model-low"),
 			classify(ClassificationInput {
@@ -6320,7 +6382,7 @@ mod tests {
 				observed_at_ms: None,
 			}),
 		)]);
-		assert!(collapsible_groups("p", &single).is_empty());
+		assert!(collapsible_groups("p", &single, &taxonomy).is_empty());
 		let siblings = BTreeMap::from([
 			(
 				sf!("model-low"),
@@ -6341,7 +6403,7 @@ mod tests {
 				}),
 			),
 		]);
-		assert!(collapsible_groups("p", &siblings).contains("model"));
+		assert!(collapsible_groups("p", &siblings, &taxonomy).contains("model"));
 	}
 
 	#[test]

@@ -5,6 +5,7 @@
 //! The live `Run` endpoint is intentionally driven as a bidirectional Connect
 //! stream even though the pinned descriptor declares the method unary;
 //! descriptor tests make that observed drift explicit.
+#![expect(missing_docs, reason = "strum IntoStaticStr emits undocumented inherent methods")]
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
@@ -24,6 +25,7 @@ use prost_types::{
 	FileDescriptorSet, ListValue as ProtoList, Struct as ProtoStruct, Value as ProtoValue,
 	value::Kind as ProtoValueKind,
 };
+use strum::IntoStaticStr;
 
 use self::wire::{
 	agent_client_message, agent_server_message, ask_question_result, conversation_action,
@@ -213,7 +215,8 @@ pub struct CursorToolDefinition {
 }
 
 /// Instruction role retained inside Cursor's serialized root prompt messages.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
+#[strum(serialize_all = "lowercase", const_into_str)]
 pub enum CursorPromptRole {
 	/// System instruction.
 	System,
@@ -223,10 +226,7 @@ pub enum CursorPromptRole {
 
 impl CursorPromptRole {
 	const fn as_str(self) -> &'static str {
-		match self {
-			Self::System => "system",
-			Self::Developer => "developer",
-		}
+		self.into_str()
 	}
 }
 
