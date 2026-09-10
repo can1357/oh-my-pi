@@ -174,10 +174,11 @@ const PROVIDER_FILE_PROVIDERS = new Set(["openai", "anthropic", "google"]);
  * where such a field is read and dropped, and wrong here, because this object is
  * put into a session message, persisted, and handed to
  * {@link shrinkForReplication}, which measures it with `JSON.stringify` before
- * walking it: an unknown property nested 50,000 deep takes it to `RangeError`,
- * measured, and either step can be the one that goes down. Copying the known fields makes the shape the
- * host stores a property of this function rather than of what arrived. A newer
- * field is dropped instead of honoured, which is the safe direction to be wrong.
+ * walking it: both recurse, so a sufficiently nested unknown property takes one
+ * of them to `RangeError`, and which one it reaches first belongs to the runtime
+ * rather than to the payload. Copying the known fields makes the shape the host
+ * stores a property of this function rather than of what arrived. A newer field
+ * is dropped instead of honoured, which is the safe direction to be wrong.
  *
  * Takes `unknown` and reads properties off it directly, which is only total for
  * the input it actually gets: this runs on `JSON.parse` output, which is plain
@@ -601,8 +602,8 @@ export class CollabHost {
 	/**
 	 * A value of unknown provenance, reduced to something safe to put in a frame or
 	 * a log line: bounded in length, and never one whose own stringification can
-	 * throw. A 5,000-deep array reaches this handler and would `RangeError` out of a
-	 * template — it does not, because it lands in the object arm below and is
+	 * throw. A nested array reaches this handler at depths a template cannot survive
+	 * — it does not have to, because it lands in the object arm below and is
 	 * reported as unnamed without being converted at all.
 	 *
 	 * A number or a boolean is reported as itself, because for some of these fields
@@ -1128,9 +1129,9 @@ export class CollabHost {
 		// The read is asynchronous, so the peer can leave — or the whole room can be
 		// recreated — before there is anything to reply with.
 		const stillTheAsker = this.#socket?.addressee(fromPeer);
-		// The one place a `transcript` frame is built, so the same rule #sendError
-		// applies to error replies applies here: this frame carries an error string
-		// too, and #sendError cannot reach it because it is not an error frame.
+		// The one place a `transcript` frame is built, so the rule #sendError applies
+		// to error replies applies here too: this frame carries an error string, and
+		// #sendError cannot reach it because it is not an error frame.
 		//
 		// No *unbounded* input reaches this bound today, and it is deliberately kept
 		// anyway. The only dynamic error here comes from `fs` and quotes a host-owned

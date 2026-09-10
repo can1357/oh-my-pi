@@ -116,8 +116,8 @@ export type CollabFrame =
  *
  * Converting a thrown value is not safe by default, which is easy to miss because
  * it usually is: a hostile `toString`, a `toString` returning an object over a
- * hostile `valueOf`, and a 5,000-level nested array all throw out of `String`,
- * and the last one is reachable across the wire. Anything that renders an error
+ * hostile `valueOf`, and a nested array deep enough to exhaust the stack all
+ * throw out of `String`, and the last one is reachable across the wire. Anything that renders an error
  * for a log line or a frame needs this rather than the built-in.
  *
  * An `Error` is read through `message`, because converting the object runs
