@@ -912,25 +912,37 @@ export class LspMuxServer {
 			// the helpers it may have left are past reach, not absent.
 			const root = Process.fromPid(server.proc.pid);
 			if (!root) throw new Error(`no reference to server root ${server.proc.pid}`);
-			// Bracketed by the root's own liveness, because the walk cannot do it.
-			// A walk rooted at a pid whose process has exited enumerates nothing
+			// Liveness is required on both sides of the walk, not compared across
+			// it. A walk rooted at a pid whose process has gone enumerates nothing
 			// and reports that as whole — correctly, since the native side cannot
 			// separate a root that died a syscall ago from one gone for an hour,
 			// and charging every exited node as a gap would make the hard wave's
 			// rescan of a dying tree unattributable. Only this side knows the root
-			// was expected alive when it was pinned, so only this side can read an
-			// empty subtree as "it went away before I could look" rather than "it
-			// had none" — and a root that goes away takes its helpers with it, out
-			// to init, where nothing rooted at its pid will ever name them.
+			// was expected alive, so only this side can read an empty subtree as
+			// "it went away before I could look" rather than "it had none" — and a
+			// root that goes away takes its helpers with it, out to init, where
+			// nothing rooted at its pid will ever name them.
 			//
-			// Read after the walk as well as before, so a root that dies partway
-			// through one is caught too. The cost is a stop failed over a root
-			// that exited in the instant after a walk that did see everything;
-			// that direction is the survivable one, and the pinned set is still
-			// swept either way.
-			const rootWasLive = root.status() === ProcessStatus.Running;
+			// Both reads have to be a demand rather than a precondition for the
+			// other. Treating the first as a gate — only checking the second when
+			// the first said Running — accepts a root that was already a zombie
+			// when it was pinned, and that is the wider window of the two: it
+			// covers everything from the server's exit up to this line, where the
+			// second covers a single walk.
+			//
+			// A stop failed over a root that exited in the instant after a walk
+			// that did see everything is the cost, and it is the survivable
+			// direction; the pinned set is still swept either way.
+			//
+			// Not covered here: the pin resolves a bare pid, so where the runtime
+			// has reaped the root and no retained reference holds its number, a
+			// reused pid answers Running as somebody else. That is the
+			// constructor-side identity gap recorded in the natives changelog, not
+			// something a liveness read can close.
+			if (root.status() !== ProcessStatus.Running)
+				throw new Error(`server root ${server.proc.pid} was already gone when its subtree was pinned`);
 			helpers = root.descendants();
-			if (rootWasLive && root.status() !== ProcessStatus.Running)
+			if (root.status() !== ProcessStatus.Running)
 				throw new Error(`server root ${server.proc.pid} exited before its subtree could be walked`);
 		} catch (error) {
 			helperPinFailure = error;

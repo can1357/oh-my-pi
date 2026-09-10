@@ -191,6 +191,22 @@ function reasonsOf(error: unknown): unknown[] {
 	return [error];
 }
 
+/**
+ * Spin until `reference` reports the kernel's view of its subject's exit.
+ *
+ * Synchronous on purpose: it holds the loop turn Bun's reaper needs, so the
+ * subject stays an unreaped zombie and the status flip comes from the kernel
+ * rather than from the runtime noticing. The bound is only a hang-breaker —
+ * the oracle is the caller's assertion — and it reads a monotonic clock, since
+ * a backward wall-clock step would turn a hang-breaker into a hang and outlast
+ * the test timeout with it.
+ */
+function spinUntilExited(reference: Process, what: string): void {
+	const deadline = performance.now() + 5_000;
+	while (reference.status() === ProcessStatus.Running)
+		if (performance.now() > deadline) throw new Error(`${what} did not exit`);
+}
+
 /** Every helper the fixture spawns is this, which makes it identifiable. */
 const FIXTURE_HELPER_ARGV = "sleep 60";
 
@@ -527,10 +543,7 @@ describe("LspMuxServer", () => {
 			// knows the root was pinned alive, so refusing is its job.
 			//
 			// Driven by killing the root from inside the walk, which is the only way
-			// to reach a window that is otherwise two syscalls wide. The spin is
-			// synchronous on purpose: it holds the loop turn Bun's reaper needs, so
-			// the root stays an unreaped zombie and the status flip comes from the
-			// kernel rather than from the runtime noticing.
+			// to reach a window that is otherwise two syscalls wide.
 			const helperFile = path.join(tmpDir, "orphaned-helper.pid");
 			connectParams.env = { TEST_LSP_HELPER_PID_FILE: helperFile };
 			const { client, connected } = await link();
@@ -542,9 +555,7 @@ describe("LspMuxServer", () => {
 			const spy = spyOn(Process.prototype, "descendants").mockImplementation(function (this: Process) {
 				if (this.pid !== pid) return descendants.call(this);
 				process.kill(pid, "SIGKILL");
-				const deadline = Date.now() + 5_000;
-				while (this.status() === ProcessStatus.Running)
-					if (Date.now() > deadline) throw new Error("server root did not exit under the walk");
+				spinUntilExited(this, "server root under the walk");
 				return descendants.call(this);
 			});
 			try {
@@ -557,6 +568,47 @@ describe("LspMuxServer", () => {
 				);
 			} finally {
 				spy.mockRestore();
+				killFixtureHelper(helperPid);
+				await server.shutdown().catch(() => {});
+				server = new LspMuxServer();
+			}
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"fails the stop when the server root was already gone when its subtree was pinned",
+		async () => {
+			// The wider of the two windows, and the one a bracket that only compares
+			// across the walk lets through: everything from the server's own exit up
+			// to the pin, where the other covers a single walk. An already-dead root
+			// is pinnable — `pidfd_open` succeeds on a zombie — so the reference says
+			// nothing, and the walk it roots answers empty and whole.
+			//
+			// No spy needed. The mux pins synchronously, so `shutdown()` reaches the
+			// pin before it yields, and the spin below holds the one loop turn Bun's
+			// reaper and the mux's own exit callback both need: the server is still
+			// in the mux's set and still an unreaped zombie when the pin reads it.
+			const helperFile = path.join(tmpDir, "prepin-helper.pid");
+			connectParams.env = { TEST_LSP_HELPER_PID_FILE: helperFile };
+			const { client, connected } = await link();
+			const pid = connected.pid;
+			if (pid === undefined) throw new Error("Mux did not report the language-server pid");
+			await initialize(client);
+			const helperPid = await readPid(helperFile);
+			const root = Process.fromPid(pid);
+			if (!root) throw new Error("No reference to the language-server root");
+			try {
+				process.kill(pid, "SIGKILL");
+				spinUntilExited(root, "server root before the pin");
+				const failure = await server.shutdown().then(
+					() => undefined,
+					(error: unknown) => error,
+				);
+				expect(reasonsOf(failure).map(String).join("\n")).toContain(
+					`server root ${pid} was already gone when its subtree was pinned`,
+				);
+			} finally {
 				killFixtureHelper(helperPid);
 				await server.shutdown().catch(() => {});
 				server = new LspMuxServer();
