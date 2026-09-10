@@ -5,6 +5,7 @@ import { parseConfigArgs, runConfigCommand } from "@oh-my-pi/pi-coding-agent/cli
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getConfigRootDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 
 let testAgentDir: TempDir | undefined;
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -294,11 +295,10 @@ describe("config CLI schema coverage", () => {
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
 		const configPath = path.join(testAgentDir.path(), "config.yml");
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-		await Settings.init();
-		const flush = Settings.instance.flush.bind(Settings.instance);
-		vi.spyOn(Settings.instance, "flush").mockImplementationOnce(async () => {
-			await Bun.write(configPath, `compaction:\n  enabled: ${competitorValue}\n`);
-			await flush();
+		const withFileLock = fileLock.withFileLock;
+		vi.spyOn(fileLock, "withFileLock").mockImplementationOnce(async (filePath, fn, options) => {
+			await Bun.write(filePath, `compaction:\n  enabled: ${competitorValue}\n`);
+			return await withFileLock(filePath, fn, options);
 		});
 
 		await runConfigCommand({
