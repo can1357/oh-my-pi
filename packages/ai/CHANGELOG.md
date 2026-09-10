@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed concurrent credential probes and permanent-credential fallback; stateful continuations keep their target and reject ambiguous account selection.
+
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed
