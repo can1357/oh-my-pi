@@ -1,3 +1,4 @@
+import { ValidationError } from "./validation";
 import { Flag, is, isAccountPolicyError, isOAuthExpiry, isUsageLimit, matchesOverflowText } from "./flags";
 import {
 	is402BillingCapBody,
@@ -74,7 +75,8 @@ const PROVIDER_WIDE_PATTERN =
 const TIMEOUT_OR_CONNECTION_PATTERN =
 	/\b(?:operation\s+)?timed?\s*out\b|\btimeout\b|\bconnection(?:\s+error|\s+refused)?\b|\bsocket hang up\b|\bfetch failed\b/i;
 const POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
-const MODEL_UNAVAILABLE_PATTERN = /\bmodel[_ ]?(?:not[_ ]found|not[_ ]available|unavailable|not[_ ]supported)(?:[_ ]\w+)*\b|\bthe model does not exist\b/i;
+const MODEL_UNAVAILABLE_PATTERN =
+	/\bmodel[_ ]?(?:not[_ ]found|not[_ ]available|unavailable|not[_ ]supported)(?:[_ ]\w+)*\b|\bthe model does not exist\b/i;
 const INVALID_REQUEST_PATTERN =
 	/\b(?:unsupported|invalid_request|invalid request|bad request|malformed|GenerateContentRequest)\b/i;
 const GATEWAY_INVARIANT_PATTERN = /\bgateway_terminal\b|\binternal invariant\b/i;
@@ -199,7 +201,7 @@ function classifyOwnerDisposition(
 	}
 	// Local configuration failures are deterministic: retrying or failing over
 	// a missing base URL / unhandled API cannot succeed.
-	if (errName === "ConfigurationError") {
+	if (err instanceof ValidationError || errName === "ConfigurationError") {
 		return { owner: "request", disposition: "request_terminal" };
 	}
 

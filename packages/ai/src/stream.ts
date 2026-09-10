@@ -2014,6 +2014,12 @@ function mapOptionsForApi<TApi extends Api>(
 		acceptEmptyResponse: options?.acceptEmptyResponse,
 		anthropicCacheRefreshRequest: options?.anthropicCacheRefreshRequest,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
+		previousResponseId: options?.previousResponseId,
+		parallelToolCalls: options?.parallelToolCalls,
+		seed: options?.seed,
+		logitBias: options?.logitBias,
+		user: options?.user,
+		responseFormat: options?.responseFormat,
 		...simpleProviderOptions,
 	};
 
