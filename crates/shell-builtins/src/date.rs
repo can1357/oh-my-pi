@@ -2215,7 +2215,7 @@ fn parse_date<S: AsRef<str> + Clone>(
 
 	match parse_datetime::parse_datetime_at_date(now.clone(), input_str) {
 		// Convert to system timezone for display
-		// (parse_datetime returns Zoned in the input's timezone)
+		// (parse_datetime_at_date returns ParsedDateTime; into_zoned unwraps the InRange Zoned)
 		Ok(date) => {
 			let date = date.into_zoned().ok_or_else(|| {
 				(input_str.into(), parse_datetime::ParseDateTimeError::InvalidInput)
