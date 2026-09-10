@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { logger, removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -38,6 +39,7 @@ describe("settings persist logging", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		AgentStorage.close();
 		await removeWithRetries(agentDir).catch(() => {});
 	});
 
@@ -46,7 +48,10 @@ describe("settings persist logging", () => {
 		const settings = await Settings.loadIsolated({ agentDir, cwd: agentDir });
 		settings.set("fetch.enabled", false);
 		await waitForFile(path.join(agentDir, "config.yml"));
-		expect(debugSpy).toHaveBeenCalledWith("Settings: saved", expect.objectContaining({ path: expect.any(String) }));
+		expect(debugSpy).toHaveBeenCalledWith(
+			"Settings: saved",
+			expect.objectContaining({ path: path.join(agentDir, "config.yml") }),
+		);
 	});
 
 	test("a failed save emits no success line", async () => {
