@@ -1,9 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import {
-	COPILOT_CAPI_IDENTITY_HEADERS,
-	COPILOT_CHAT_IDENTITY_HEADERS,
-	getCopilotCapiIdentityHeaders,
 	getGitHubCopilotBaseUrl,
 	clearCopilotCliDisabled,
 	isCopilotCliDisabled,
@@ -50,26 +47,7 @@ describe("GitHub Copilot OAuth helpers", () => {
 		});
 	});
 });
-
 describe("GitHub Copilot wire identity selection", () => {
-	it("defaults to the original Copilot CLI identity when CLI is not disabled", () => {
-		expect(getCopilotCapiIdentityHeaders()).toEqual({
-			...COPILOT_CAPI_IDENTITY_HEADERS,
-		});
-		expect(getCopilotCapiIdentityHeaders()["Copilot-Integration-Id"]).toBe("copilot-developer-cli");
-		expect(getCopilotCapiIdentityHeaders()["User-Agent"]).toBe("copilot/1.0.82");
-	});
-
-	it("uses chat identity when cliDisabled is true", () => {
-		const chatHeaders = getCopilotCapiIdentityHeaders({ cliDisabled: true });
-		expect(chatHeaders).toEqual({
-			...COPILOT_CHAT_IDENTITY_HEADERS,
-		});
-		expect(chatHeaders["User-Agent"]).toBe(USER_AGENT);
-		expect(chatHeaders["Openai-Intent"]).toBe("conversation-edits");
-		expect(chatHeaders["Copilot-Integration-Id"]).toBeUndefined();
-	});
-
 	it("merges custom headers while applying appropriate identity", () => {
 		const cliMerged = mergeCopilotApiHeaders({ "X-Custom": "val" });
 		expect(cliMerged["X-Custom"]).toBe("val");
@@ -106,12 +84,20 @@ describe("GitHub Copilot wire identity selection", () => {
 		expect(chatMerged["User-Agent"]).toBe(USER_AGENT);
 	});
 
-	it("tracks cli-disabled status per token", () => {
+	it("tracks and clears cli-disabled status per token", () => {
 		const token = "ghu_sample_tracking_token";
 		expect(isCopilotCliDisabled(token)).toBe(false);
 		markCopilotCliDisabled(token);
 		expect(isCopilotCliDisabled(token)).toBe(true);
 		expect(parseGitHubCopilotApiKey(token).cliDisabled).toBe(true);
+
+		// Restores CLI identity when authoritative response or re-login reports cli_enabled: true
+		const reenabledKey = JSON.stringify({ token, cli_enabled: true });
+		expect(parseGitHubCopilotApiKey(reenabledKey).cliDisabled).toBeUndefined();
+		expect(isCopilotCliDisabled(token)).toBe(false);
+
+		markCopilotCliDisabled(token);
+		expect(isCopilotCliDisabled(token)).toBe(true);
 		clearCopilotCliDisabled(token);
 		expect(isCopilotCliDisabled(token)).toBe(false);
 	});

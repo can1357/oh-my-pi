@@ -206,6 +206,8 @@ export async function discoverGitHubCopilotApiEndpoint(
 		if (!isRecord(data)) return undefined;
 		if (data.cli_enabled === false) {
 			markCopilotCliDisabled(token);
+		} else if (data.cli_enabled === true) {
+			clearCopilotCliDisabled(token);
 		}
 		if (!isRecord(data.endpoints)) return undefined;
 		const endpoint = data.endpoints.api;
@@ -219,11 +221,16 @@ export function parseGitHubCopilotApiKey(apiKeyRaw: string): ParsedGitHubCopilot
 	try {
 		const parsed = JSON.parse(apiKeyRaw) as GitHubCopilotApiKeyPayload;
 		if (typeof parsed.token === "string") {
+			if (parsed.cli_enabled === true || parsed.cliEnabled === true) {
+				clearCopilotCliDisabled(parsed.token);
+			}
 			const cliDisabled =
-				parsed.cliDisabled === true ||
-				parsed.cli_enabled === false ||
-				parsed.cliEnabled === false ||
-				isCopilotCliDisabled(parsed.token);
+				parsed.cli_enabled === true || parsed.cliEnabled === true
+					? false
+					: parsed.cliDisabled === true ||
+						parsed.cli_enabled === false ||
+						parsed.cliEnabled === false ||
+						isCopilotCliDisabled(parsed.token);
 			if (cliDisabled) {
 				markCopilotCliDisabled(parsed.token);
 			}
