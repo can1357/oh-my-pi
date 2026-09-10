@@ -319,9 +319,12 @@ async function collectBreadcrumbSessionRoots(breadcrumbDir: string, defaultRoots
 	const roots = new Map<string, string>();
 	for (const entry of entries) {
 		const text = await readTextIfPresent(path.join(breadcrumbDir, entry));
-		const sessionFile = text.split("\n")[1]?.trim();
-		if (!sessionFile) continue;
-		const sessionRoot = path.dirname(path.resolve(sessionFile));
+		const lines = text.split("\n");
+		const breadcrumbCwd = lines[0]?.trim();
+		const recordedSessionFile = lines[1]?.trim();
+		if (!breadcrumbCwd || !recordedSessionFile) continue;
+		const sessionFile = path.resolve(breadcrumbCwd, recordedSessionFile);
+		const sessionRoot = path.dirname(sessionFile);
 		if (defaultRoots.some(root => pathIsWithin(root, sessionRoot))) continue;
 		roots.set(normalizePathForComparison(sessionRoot), sessionRoot);
 	}

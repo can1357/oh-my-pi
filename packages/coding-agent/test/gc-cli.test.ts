@@ -197,7 +197,7 @@ describe("runGcCommand blob sweep", () => {
 		expect(await Bun.file(referenced).exists()).toBe(true);
 	});
 
-	test("--apply keeps blobs referenced by a breadcrumbed session outside the scan roots", async () => {
+	test("--apply resolves breadcrumbed relative session paths from their recorded cwd", async () => {
 		const referencedHash = hashFor("custom-dir-reference");
 		const orphanHash = hashFor("custom-dir-orphan");
 		const referenced = await writeBlob(root, referencedHash, "referenced");
@@ -205,8 +205,9 @@ describe("runGcCommand blob sweep", () => {
 		await agePath(referenced);
 		await agePath(orphan);
 
-		// A --session-dir transcript stored outside <agentDir>/sessions and archive.
-		const externalDir = path.join(root, "external-sessions");
+		// A relative --session-dir transcript stored outside the managed roots.
+		const projectDir = path.join(root, "project");
+		const externalDir = path.join(projectDir, ".omp-sessions");
 		await fs.mkdir(externalDir, { recursive: true });
 		const externalFile = path.join(externalDir, "work.jsonl");
 		await Bun.write(
@@ -217,10 +218,11 @@ describe("runGcCommand blob sweep", () => {
 				"",
 			].join("\n"),
 		);
-		// The session's terminal breadcrumb records the relocated transcript.
+		// GC runs from another cwd, so resolving the relative path from process.cwd()
+		// would miss this transcript and delete its blob.
 		const crumbDir = getTerminalSessionsDir(root);
 		await fs.mkdir(crumbDir, { recursive: true });
-		await Bun.write(path.join(crumbDir, "tty-1"), `/tmp/project\n${externalFile}\n`);
+		await Bun.write(path.join(crumbDir, "tty-1"), `${projectDir}\n.omp-sessions/work.jsonl\n`);
 
 		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
 
