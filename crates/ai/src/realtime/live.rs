@@ -1221,11 +1221,11 @@ impl OutputLevel {
 #[cfg(all(test, feature = "realtime"))]
 mod tests {
 	use super::*;
-	use tokio::{sync::oneshot, task, time};
+	use std::time::Duration;
+	use tokio::{sync::oneshot, time};
 
 	#[tokio::test]
 	async fn transient_disconnect_does_not_report_failure() {
-		time::pause();
 		let (failure_tx, mut failure_rx) = oneshot::channel();
 		let failure_tx = Arc::new(Mutex::new(Some(failure_tx)));
 		let callbacks = LiveCallbacks {
@@ -1250,13 +1250,9 @@ mod tests {
 		let h = handler.clone();
 		tokio::spawn(async move {
 			h.on_connection_state_change(RTCPeerConnectionState::Disconnected).await;
+			h.on_connection_state_change(RTCPeerConnectionState::Connected).await;
 		});
-		task::yield_now().await;
-		handler
-			.on_connection_state_change(RTCPeerConnectionState::Connected)
-			.await;
-		time::advance(DISCONNECT_GRACE).await;
-		task::yield_now().await;
+		time::sleep(DISCONNECT_GRACE + Duration::from_millis(100)).await;
 		assert!(failure_rx.try_recv().is_err());
 	}
 }
