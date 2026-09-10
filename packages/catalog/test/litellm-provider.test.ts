@@ -218,7 +218,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v8:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
+			`litellm:rich-v8:${Bun.hash("http://litellm.example:4100/v1\u000010000").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -242,7 +242,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v8:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
+			`litellm:rich-v8:${Bun.hash("http://litellm-config.example:4200/v1/\u000010000").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -1358,6 +1358,12 @@ describe("LiteLLM provider discovery", () => {
 			maxTokens: 32_000,
 		});
 		expect(proxy.calls).not.toContain("http://slow-rich:4000/v1/models");
+		expect(options.cacheProviderId).not.toBe(
+			litellmModelManagerOptions({
+				apiKey: "sk-litellm-test",
+				baseUrl: "http://slow-rich:4000/v1",
+			}).cacheProviderId,
+		);
 	});
 
 	test("abandons the rich walk and falls back to /v1/models when /model/info exceeds discoveryTimeoutMs", async () => {

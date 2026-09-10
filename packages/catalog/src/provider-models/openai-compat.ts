@@ -5975,7 +5975,7 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 		// pricing, stripped reseller usage suffixes, filtered placeholder rows,
 		// and mapped rich pricing. Bump the version whenever these mappers change,
 		// or warm authoritative caches keep serving pre-change rows for the full TTL.
-		cacheProviderId: resolveModelCacheProviderId("litellm", { baseUrl }),
+		cacheProviderId: resolveModelCacheProviderId("litellm", { baseUrl, discoveryTimeoutMs: timeoutMs }),
 		// litellm is a local-only proxy and is never bundled in models.json (that
 		// would leak the machine's localhost catalog). Prefer the proxy's richer
 		// management metadata, then enrich ids against models.dev with the bundled

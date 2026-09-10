@@ -3,6 +3,8 @@ import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
 export interface ModelCacheProviderIdOptions {
 	apiKey?: string;
 	baseUrl?: string;
+	/** LiteLLM rich-discovery deadline; part of the cache namespace so a longer budget does not reuse a stale fallback. */
+	discoveryTimeoutMs?: number;
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
@@ -69,10 +71,18 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		}
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			const timeoutMs =
+				options.discoveryTimeoutMs !== undefined &&
+				Number.isFinite(options.discoveryTimeoutMs) &&
+				options.discoveryTimeoutMs > 0
+					? options.discoveryTimeoutMs
+					: 10_000;
 			// rich-v8 invalidates rows whose `compatConfig` retained a colliding
 			// bundled model's provider-specific transport (e.g. Fireworks
-			// `wireModelIdMode`) before that leak was fixed (issue #9938).
-			return `litellm:rich-v8:${Bun.hash(baseUrl).toString(36)}`;
+			// `wireModelIdMode`) before that leak was fixed (issue #9938). The
+			// timeout is in the hash so raising discoveryTimeoutMs cannot reuse a
+			// fresh `/v1/models` fallback cached under the 10 s default.
+			return `litellm:rich-v8:${Bun.hash(`${baseUrl}\u0000${timeoutMs}`).toString(36)}`;
 		}
 		case "opencode-go":
 		case "opencode-zen": {

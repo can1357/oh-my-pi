@@ -2,11 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Built-in LiteLLM model discovery now accepts a provider-level `discoveryTimeoutMs` in `models.yml` so a slow `/model/info` payload can keep rich reasoning metadata; the default remains 10 s ([#11355](https://github.com/can1357/oh-my-pi/issues/11355)).
+
 ## [18.1.16] - 2026-09-09
 
 ### Added
 
-- Built-in LiteLLM model discovery now accepts a provider-level `discoveryTimeoutMs` in `models.yml` so a slow `/model/info` payload can keep rich reasoning metadata; the default remains 10 s ([#11355](https://github.com/can1357/oh-my-pi/issues/11355)).
 - `/rename` without a title now generates a session name from recent conversation using the configured tiny model.
 - Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
 - `/loop` accepts `--until '<cmd>'` / `--while '<cmd>'` to gate each iteration on a shell command's exit status, so a loop can stop on real project state instead of only a count or duration. ([#10858](https://github.com/can1357/oh-my-pi/pull/10858) by [@andyhite](https://github.com/andyhite))
