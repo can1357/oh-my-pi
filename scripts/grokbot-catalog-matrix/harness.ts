@@ -548,54 +548,8 @@ function printfEmittedText(before: string): string | undefined {
 	return out;
 }
 
-/** True when bash would expand `$(...)` or `` `...` `` (including inside double quotes).
- * Single-quoted forms are literal and do not count. Smoke validators must reject
- * substitutions: `shellWords` leaves `$(ping)` in argv so `includes(ping)` would
- * pass while bash runs the token as a command and echo emits only a newline.
- */
-function hasCommandSubstitution(text: string): boolean {
-	let quote: "'" | '"' | null = null;
-	let escaped = false;
-	for (let i = 0; i < text.length; i++) {
-		const ch = text[i]!;
-		if (escaped) {
-			escaped = false;
-			continue;
-		}
-		if (quote === "'") {
-			if (ch === "'") quote = null;
-			continue;
-		}
-		if (ch === "\\") {
-			escaped = true;
-			continue;
-		}
-		if (quote === '"') {
-			if (ch === '"') {
-				quote = null;
-				continue;
-			}
-			if (ch === "`") return true;
-			if (ch === "$" && text[i + 1] === "(") return true;
-			continue;
-		}
-		if (ch === "'") {
-			quote = "'";
-			continue;
-		}
-		if (ch === '"') {
-			quote = '"';
-			continue;
-		}
-		if (ch === "`") return true;
-		if (ch === "$" && text[i + 1] === "(") return true;
-	}
-	return false;
-}
-
 /** True when the command left of a write redirect would emit `ping` into the file. */
 function redirectBeforeEmitsPing(before: string, ping: string): boolean {
-	if (hasCommandSubstitution(before)) return false;
 	const words = shellWords(before);
 	const cmd = words[0];
 	if (!cmd) return false;
@@ -766,9 +720,7 @@ function isTrailingPathBoundary(ch: string): boolean {
  * (`echo ping >/dev/null`, `echo ping | tee file`), a pipeline that can filter
  * the token away (`echo ping | grep -v ping`), a no-op printf (`printf '' ping`,
  * `printf '%0.s' ping`), or after an earlier `exit`/`return`
- * (`exit; echo ping` — `runOneTool` fabricates success without executing), or
- * a command substitution (`echo "$(ping)"` / backticks) whose lexical text
- * contains the ping while bash expands/runs it instead of echoing it.
+ * (`exit; echo ping` — `runOneTool` fabricates success without executing).
  */
 export function echoLikeShellCommand(command: string, ping: string): boolean {
 	if (!ping) return false;

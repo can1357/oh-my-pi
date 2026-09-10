@@ -986,8 +986,7 @@ export async function refreshCredentialScopedModelIfMissing(
 	if (selectors.length === 0) return false;
 	const available = modelRegistry.getAvailable();
 	const allPresent = selectors.every(raw => credentialScopedSelectorPresent(raw, providerId, available));
-	if (allPresent) return false;
-	await modelRegistry.refreshProvider(providerId, "online-if-uncached");
+	if (allPresent) return false;	await modelRegistry.refreshProvider(providerId, "online-if-uncached");
 	return true;
 }
 
@@ -1008,8 +1007,7 @@ function credentialScopedSelectorPresent(raw: string, providerId: string, availa
 	if (!level || base === trimmed) return false;
 	const baseSlash = base.indexOf("/");
 	const baseBare = baseSlash >= 0 ? base.slice(baseSlash + 1) : base;
-	return matches(base) || matches(baseBare);
-}
+	return matches(base) || matches(baseBare);}
 
 /** models.yml/runtime discovery OR a built-in catalog model-manager descriptor. */
 function providerSupportsCredentialScopedRefresh(

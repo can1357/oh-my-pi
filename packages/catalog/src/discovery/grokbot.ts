@@ -17,13 +17,12 @@ import { discoveryFetch } from "../utils";
 import {
 	clearGrokbotTokenCache,
 	createGrokbotChecksum,
-	GROKBOT_STAMPED_CLIENT_VERSION,
 	grokbotClientHeaders,
 	joinGrokbotBackendUrl,
 	loadGrokbotConfig,
 	mergeGrokbotHeaders,
 	mintGrokbotAccessToken,
-	resolveGrokbotClientVersion,
+	resolveGrokbotDiscoveryIdentity,
 } from "./grokbot-auth";
 import {
 	decodeGrokbotAvailableModelsResponse,
@@ -78,22 +77,19 @@ export async function fetchGrokbotAvailableModels(
 		// Prefer the same resolved identity used for model-cache scoping so a
 		// catalog fetched under one namespace/version is never stored under another.
 		// Namespace-only overrides must recompute clientVersion (lab → 0.30.0-lab)
-		// from the already-loaded config — do not call the sync identity helper
-		// (second secrets/grokbot.env read) after loadGrokbotConfig().
+		// via the identity helper — spreading namespace alone leaves the ambient
+		// production version and can hit the wrong discovery surface.
 		const cfg =
 			overrideNs || overrideVer
-				? (() => {
-						const namespace = overrideNs || loaded.namespace;
-						const clientVersion = resolveGrokbotClientVersion(
-							namespace,
-							GROKBOT_STAMPED_CLIENT_VERSION,
-							// Explicit request version wins; else keep a file/env
-							// explicitClientVersion from the async load; else recompute
-							// from the stamped base for the (possibly new) namespace.
-							overrideVer || loaded.explicitClientVersion,
-						);
-						return { ...loaded, namespace, clientVersion };
-					})()
+				? {
+						...loaded,
+						...resolveGrokbotDiscoveryIdentity({
+							namespace: overrideNs || loaded.namespace,
+							// Omit ambient clientVersion so a namespace-only override
+							// recomputes; an explicit options.clientVersion is preserved.
+							clientVersion: overrideVer,
+						}),
+					}
 				: loaded;
 		const machineId = cfg.machineId;
 		if (!cfg.renewal || !machineId) {

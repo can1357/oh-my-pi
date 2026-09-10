@@ -16,7 +16,6 @@
 ### Fixed
 
 - Grok Bot AvailableModels namespace-only overrides recompute `clientVersion` (e.g. `lab` → `0.30.0-lab`) via the discovery identity helper.
-- Grok Bot AvailableModels applies namespace/clientVersion overrides from the already-loaded config without a second synchronous `secrets/grokbot.env` read.
 - Retain cached model catalogs when Grok Bot discovery returns malformed or empty results.
 
 - Grok Bot sand router union and offline seeds share one `GROKBOT_SAND_ROUTER_IDS` roster (no divergent discovery hard-code).
