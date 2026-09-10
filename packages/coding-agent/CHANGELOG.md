@@ -17,6 +17,7 @@
 - The prompt border now colors Insert mode too (green), instead of falling through to the session accent. Normal and Visual were already colored, so Insert was the one mode the border could not distinguish — on themes whose accent matches the session accent it was indistinguishable from Normal. Borders outside Vim mode are unchanged.
 ### Fixed
 
+- Directory scans no longer report unreadable directories as empty: advisor transcript costs, memory consolidation, Claude/Codex session imports, and agent discovery now warn on real `readdir` failures (`EACCES`/`ENOTDIR`/…) while a missing directory stays silently absent ([#11554](https://github.com/can1357/oh-my-pi/pull/11554) by [@nikkoxgonzales](https://github.com/nikkoxgonzales)).
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 - Streaming edit guard (`edit.streamingAbort`) no longer aborts on no-op preview results when replacement content produces no file changes, and carries the native patch diagnostic through the abort reason on genuine preview failures.
 - Repeated soft compaction now includes messages retained by the previous pass instead of silently dropping them from model context.
