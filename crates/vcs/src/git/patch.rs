@@ -1935,6 +1935,27 @@ mod tests {
 	}
 
 	#[test]
+	fn patch_three_way_rejects_adjacent_drift_as_conflict() {
+		let temp = init(&[("file.txt", b"one\ntwo\nthree\n")]);
+		fs::write(temp.path().join("file.txt"), b"one\nTWO\nthree\n").expect("patch edit");
+		let patch = git(temp.path(), &["diff", "--full-index"]);
+		reset(temp.path());
+		fs::write(temp.path().join("file.txt"), b"ONE\ntwo\nthree\n").expect("drift");
+		let repository = repo(temp.path());
+		let three_way =
+			ApplyOptions { cached: false, index_path: None, reverse: false, three_way: true };
+		assert!(
+			!repository
+				.can_apply_patch(&patch, &three_way)
+				.expect("adjacent conflict check")
+		);
+		assert!(matches!(
+			repository.apply_patch(&patch, &three_way),
+			Err(Error::Conflict { .. })
+		));
+	}
+
+	#[test]
 	fn patch_cherry_pick_and_stash_are_fail_clean() {
 		let temp = init(&[("file.txt", b"base\n"), (".gitignore", b"ignored.txt\n")]);
 		let base_branch = git(temp.path(), &["branch", "--show-current"])
