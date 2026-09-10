@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { IncomingDoc, IncomingJsonError } from "@oh-my-pi/pi-utils/incoming-json";
+import { IncomingDoc, IncomingJsonError, rescannedMembers } from "@oh-my-pi/pi-utils/incoming-json";
 import { parseJsonWithRepair } from "@oh-my-pi/pi-utils/json-parse";
 
 /** Whether `promise` is still unsettled after the microtask queue and one macrotask drain. */
@@ -425,8 +425,11 @@ describe("incoming JSON cursors", () => {
 		const count = 20_000;
 		const items = doc.root().object().key("items").array();
 		feed.push('{"items":[');
+		// The property under test is the cost curve, not the clock: an absolute
+		// wall-clock budget here measures how loaded the runner is. Count the
+		// members the selecting scans actually re-lex instead.
+		const before = rescannedMembers;
 		let sum = 0;
-		const started = performance.now();
 		for (let i = 0; i < count; i++) {
 			feed.push(`{"n":${i}},`);
 			const element = await items.next();
@@ -436,12 +439,23 @@ describe("incoming JSON cursors", () => {
 		feed.finish();
 		expect(await items.next()).toBeUndefined();
 		expect(sum).toBe((count * (count - 1)) / 2);
-		// Wall-clock ceiling, not a performance target: a rescanning regression
-		// projects to 12.3-14.9 s (quadratic over 20_000 elements), while loaded
-		// runners measured 2.1-2.8 s here. 6 s gives ~2.1x headroom over the
-		// loaded flake range and ~2x margin under the regression floor.
-		expect(performance.now() - started).toBeLessThan(6_000);
-		// Bun's 5 s default test timeout is tighter than the ceiling above;
-		// give loaded runners an explicit budget (logger-contract precedent).
+		// Resuming from the container index re-lexes a bounded number of members
+		// per pull — currently one, the previous element being committed to the
+		// index — so the traversal stays linear. Restarting each scan at the
+		// opening bracket would re-lex ~count^2/2 members, 2e8 at this size.
+		expect(rescannedMembers - before).toBeLessThanOrEqual(2 * count);
+		// Retain upstream's explicit budget so loaded runners can finish the
+		// 20k-element behavioral traversal without making elapsed time the oracle.
 	}, 30_000);
+
+	it("counts every member a selecting scan walks past", async () => {
+		const { feed, doc } = IncomingDoc.channel();
+		feed.push('{"a":1,"b":2,"c":3}');
+		feed.finish();
+		const before = rescannedMembers;
+		expect(await doc.root().object().key("c").number()).toBe(3);
+		// "c" is unreachable without lexing "a" and "b", and neither is lexed
+		// twice — so the counter the traversal test relies on is live.
+		expect(rescannedMembers - before).toBe(2);
+	});
 });
