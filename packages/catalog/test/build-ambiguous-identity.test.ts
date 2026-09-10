@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildModel } from "../src/build";
 import { rebakeModelThinking } from "../scripts/generated-policies";
+import { collapseBuiltVariants } from "../src/compat/collapse";
 import { clampsContextOverride, resolveMaxContextWindow } from "../src/compat/context-window";
 import { resolveModelPolicy } from "../src/compat/resolve";
 import type { ModelSpec } from "../src/types";
@@ -62,5 +63,22 @@ describe("model identity strictness", () => {
 	test("strict and lenient materialization agree for known identities", () => {
 		const spec = { ...ambiguousSpec, id: "gpt-4.1" };
 		expect(buildModel(spec, { strict: true })).toEqual(buildModel(spec));
+	});
+
+	test("runtime pair collapsing stays lenient for ambiguous X/X-thinking twins", () => {
+		const baseId = ambiguousSpec.id;
+		const thinkingId = `${baseId}-thinking`;
+		const base = buildModel({ ...ambiguousSpec, id: baseId, name: baseId, reasoning: false });
+		const thinking = buildModel({
+			...ambiguousSpec,
+			id: thinkingId,
+			name: thinkingId,
+			reasoning: false,
+			thinking: undefined,
+		});
+		expect(() => resolveModelPolicy({ ...ambiguousSpec, id: thinkingId })).toThrow("ambiguous class");
+		const collapsed = collapseBuiltVariants([base, thinking]);
+		expect(collapsed.map(model => model.id)).toEqual([baseId]);
+		expect(collapsed[0]?.reasoning).toBe(true);
 	});
 });
