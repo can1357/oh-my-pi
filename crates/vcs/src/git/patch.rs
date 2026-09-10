@@ -1953,6 +1953,10 @@ mod tests {
 			repository.apply_patch(&patch, &three_way),
 			Err(Error::Conflict { .. })
 		));
+		assert_eq!(
+			fs::read(temp.path().join("file.txt")).expect("file after adjacent conflict"),
+			b"ONE\ntwo\nthree\n"
+		);
 	}
 
 	#[test]

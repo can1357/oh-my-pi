@@ -401,7 +401,7 @@ fn strip_config_comment(line: &str) -> &str {
 ///
 /// Tests compare the in-process backend against the git binary. That
 /// comparison is only meaningful when the binary emits git's canonical patch
-/// text, but `diff.external`, `diff.mnemonicPrefix`, `diff.context`, and
+/// text, but `diff.external`, `diff.*.textconv`, `diff.mnemonicPrefix`, `diff.context`, and
 /// colour settings all live in the user's global config and rewrite the
 /// output. These are presentation-only: they change how a diff is *shown*,
 /// not what changed. `GIT_CONFIG_GLOBAL=/dev/null` is deliberately not used,
