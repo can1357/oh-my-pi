@@ -2321,6 +2321,17 @@ export class SessionMaintenance {
 			contextWindow > 0 &&
 			reportedInputTokens <= contextWindow &&
 			storedTokens < contextWindow * PAYLOAD_REJECTION_OCCUPANCY_CEILING;
+		// Provider-reported usage above a known window is authoritative proof of a
+		// genuine token overflow (not a byte/media-only rejection), computed once
+		// up front so both the media-exclusion decision below and the terminal
+		// notice selection further down agree with each other.
+		const usageBackedOverflow = AIError.isUsageBackedContextOverflow(assistantMessage, contextWindow);
+		// `payloadRejection` alone is not sufficient reason to exclude media
+		// compaction methods (snapcompact): a *usage-backed* overflow proves the
+		// rejection is a genuine token-context problem, not a byte/media budget
+		// one, so a user configured with e.g. `methodOrder: ["snapcompact"]` must
+		// still be able to use it instead of being told no recovery exists (#11482).
+		const excludeMediaForPayloadRejection = payloadRejection && !usageBackedOverflow;
 		// Whether a compaction method actually exists to attempt shrinking the
 		// history. Computed up front so the unknown-context-window branch below
 		// can fall through to a real attempt instead of always assuming defeat.
@@ -2339,7 +2350,12 @@ export class SessionMaintenance {
 		const compactionAvailable =
 			payloadCompactionSettings.enabled &&
 			(this.#usesExperimentalContextManagement() ||
-				hasUsableCompactionMethod("overflow", this.#model, payloadCompactionSettings, payloadRejection));
+				hasUsableCompactionMethod(
+					"overflow",
+					this.#model,
+					payloadCompactionSettings,
+					excludeMediaForPayloadRejection,
+				));
 		// Unknown context window (common for custom/self-hosted models the
 		// registry has no metadata for) used to be treated the same as a
 		// confirmed media/byte-budget rejection and blocked outright — even
@@ -2397,7 +2413,7 @@ export class SessionMaintenance {
 					"overflow",
 					assistantMessage,
 					allowDefer,
-					{ autoContinue, excludeMediaMethods: payloadRejection },
+					{ autoContinue, excludeMediaMethods: excludeMediaForPayloadRejection },
 				);
 				// A statically usable method (per `hasUsableCompactionMethod`) can still
 				// reclaim nothing at runtime — e.g. `methodOrder: ["shake"]` with no
@@ -2433,7 +2449,6 @@ export class SessionMaintenance {
 					// token-context problem even though compaction (attempted here,
 					// unsuccessfully) couldn't resolve it — say so accurately instead
 					// of always claiming "not a token problem" (#11482).
-					const usageBackedOverflow = AIError.isUsageBackedContextOverflow(assistantMessage, contextWindow);
 					this.#host.emitNotice(
 						"warning",
 						usageBackedOverflow
@@ -2453,7 +2468,6 @@ export class SessionMaintenance {
 				return compactionResult;
 			}
 			if (payloadRejection) {
-				const usageBackedOverflow = AIError.isUsageBackedContextOverflow(assistantMessage, contextWindow);
 				this.#host.emitNotice(
 					"warning",
 					usageBackedOverflow

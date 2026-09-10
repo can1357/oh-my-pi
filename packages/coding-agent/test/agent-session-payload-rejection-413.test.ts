@@ -262,6 +262,33 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		return message;
 	}
 
+	/** Plain (non-media) payload rejection whose reported usage exceeds a known
+	 *  context window — `isUsageBackedContextOverflow` proves a genuine token
+	 *  overflow, unlike `usageBackedMediaBudgetAssistant` this carries no media
+	 *  wording, so it should not disqualify media compaction methods (#11482). */
+	function usageBackedPlainPayloadAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: PAYLOAD_ERROR_MESSAGE,
+			usage: {
+				input: 250_000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 250_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
 	it("honestly skips token compaction for a low-token payload-shaped 413", async () => {
 		await createSession(200_000);
 		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
@@ -606,6 +633,41 @@ describe("AgentSession payload-rejection 413 handling", () => {
 			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
 		);
 		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
+	it("does not exclude snapcompact from a usage-backed payload rejection with a known context window (#11482)", async () => {
+		// Plain (non-media) payload rejection, but reported usage (250k) exceeds
+		// the known 200k context window: `isUsageBackedContextOverflow` proves
+		// this is a genuine token overflow, not a byte/media-only rejection.
+		// A user configured with `methodOrder: ["snapcompact"]` must still be
+		// able to use their only configured method instead of being told no
+		// recovery exists just because the error is payload-shaped.
+		await createSession(200_000, undefined, {
+			extraSettings: { "compaction.methodOrder": ["snapcompact"] },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startActions: unknown[] = [];
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_start") startActions.push((event as { action?: unknown }).action);
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+
+		const assistantMsg = usageBackedPlainPayloadAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await session.waitForIdle();
+
+		expect(startActions).toContain("snapcompact");
+		const unavailableNotices = notices.filter(
+			n => n.source === NOTICE_SOURCE && n.message.includes("automatic compaction is unavailable"),
+		);
+		expect(unavailableNotices.length).toBe(0);
 	});
 
 	it("keeps a digit-free explicit media rejection ('too many images') on the terminal path even with no context window and compaction available (#11482)", async () => {
