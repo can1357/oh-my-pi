@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Jujutsu status and diffs now report renames and copies (`R`/`C`, `rename from`/`rename to`) the way `jj status` and `jj diff` do, instead of a delete plus an add.
+
 ## [18.3.2] - 2026-09-25
 
 ### Added
