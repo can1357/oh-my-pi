@@ -1,5 +1,6 @@
 import {
 	MAX_THINKING_SUFFIX_OPTIONS,
+	formatModelSelectorValue,
 	parseThinkingSuffix,
 	splitThinkingSuffix,
 	parseModelString,
@@ -506,6 +507,20 @@ export interface ModelMatchPreferences {
 }
 
 export type ModelLookupRegistry = Pick<ModelRegistry, "getAvailable">;
+export type StrictModelResolverRegistry = Pick<ModelRegistry, "getAvailable" | "getAll" | "getApiKey">;
+
+export type StrictModelFailureReason = "unknown" | "disabled-provider" | "missing-credentials";
+
+export interface StrictModelCandidateFailure {
+	pattern: string;
+	reason: StrictModelFailureReason;
+}
+
+export interface StrictModelCandidateResolution {
+	patterns: string[];
+	models: Model<Api>[];
+	failures: StrictModelCandidateFailure[];
+}
 type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable">;
 type InitialModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "hasConcreteAuth">;
 type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "getApiKey" | "hasConcreteAuth">;
@@ -1615,6 +1630,58 @@ export function resolveModelOverride(
  */
 export function disabledProviderIds(settings?: Settings): ReadonlySet<string> {
 	return new Set(settings ? cfgDisabledProviders.get(settings) : undefined);
+}
+
+/**
+ * Resolve caller-owned candidates without introducing any fallback source.
+ * Every input pattern is checked in order and must resolve to an available
+ * model with live credentials (or the keyless sentinel).
+ */
+export async function resolveStrictModelCandidates(
+	modelPatterns: readonly string[],
+	modelRegistry: StrictModelResolverRegistry,
+	settings?: Settings,
+	sessionId?: string,
+): Promise<StrictModelCandidateResolution> {
+	const disabledProviders = disabledProviderIds(settings);
+	const availableRegistry: ModelLookupRegistry = {
+		getAvailable: () => modelRegistry.getAvailable().filter(model => !disabledProviders.has(model.provider)),
+	};
+	const allRegistry: ModelLookupRegistry = { getAvailable: () => modelRegistry.getAll() };
+	const patterns: string[] = [];
+	const models: Model<Api>[] = [];
+	const failures: StrictModelCandidateFailure[] = [];
+	for (const pattern of modelPatterns) {
+		const resolved = resolveModelOverride([pattern], availableRegistry, settings);
+		const available = resolved.model;
+		if (!available) {
+			const known = resolveModelOverride([pattern], allRegistry, settings).model;
+			if (!known) {
+				failures.push({ pattern, reason: "unknown" });
+				continue;
+			}
+			if (disabledProviders.has(known.provider)) {
+				failures.push({ pattern, reason: "disabled-provider" });
+				continue;
+			}
+			const key = await modelRegistry.getApiKey(known, sessionId);
+			failures.push({
+				pattern,
+				reason: key === kNoAuth || isAuthenticated(key) ? "unknown" : "missing-credentials",
+			});
+			continue;
+		}
+		const key = await modelRegistry.getApiKey(available, sessionId);
+		if (key !== kNoAuth && !isAuthenticated(key)) {
+			failures.push({ pattern, reason: "missing-credentials" });
+			continue;
+		}
+		const concretePattern = formatModelSelectorValue(formatModelStringWithRouting(available), resolved.thinkingLevel);
+		if (patterns.includes(concretePattern)) continue;
+		patterns.push(concretePattern);
+		models.push(available);
+	}
+	return { patterns, models, failures };
 }
 
 /**
