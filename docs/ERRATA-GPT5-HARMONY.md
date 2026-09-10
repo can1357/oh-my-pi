@@ -310,17 +310,21 @@ Thresholds are measured against that corpus, not chosen:
   described the shape — stays clean.
 - `S` allows at most 8 non-Latin characters in a block that is ≥90% ASCII, and
   additionally requires the run to be *stranded*: abutting an ASCII letter, or
-  opening its own line. A term quoted inside a sentence ("the Japanese word for
-  cat is 猫") is neither. Genuinely multilingual answers blow the budget anyway.
-- `V` and `E` are exempt inside fenced blocks, inline code spans and indented
-  code blocks, all parsed per CommonMark. A fence closes only on a repeat of
-  the opener's character, at least as long, with no info string — naive
-  toggling let a ```` ```xml ```` block nested in a ```` ```text ```` block
-  close the outer fence early, which produced the only false positive measured
-  across the corpus. An inline span needs a closing run of *equal* length,
-  ignores backslash-escaped backticks, and may cross a single line break;
-  per-line matching mis-read all three and exempted markers that were in fact
-  rendered. An indented block cannot interrupt a paragraph, so a four-space
-  continuation line inside prose is still scanned.
+  opening its own line without being a cited word — alone on the line, or with
+  something glued to it (`ាន? Wait ...`). A whitespace-delimited term stays
+  clean wherever it sits in the sentence ("the Japanese word for cat is 猫",
+  "猫 means cat in Japanese"). Genuinely multilingual answers blow the budget.
+- `V` and `E` are exempt inside fenced blocks, inline code spans, indented code
+  blocks, and matched `<code>…</code>` pairs, which the TUI's
+  `collapseInlineHtml` renders as inline code. Fences and spans are parsed per
+  CommonMark. A fence closes only on a repeat of the opener's character, at
+  least as long, with no info string — naive toggling let a ```` ```xml ````
+  block nested in a ```` ```text ```` block close the outer fence early, which
+  produced the only false positive measured across the corpus. An inline span
+  needs a closing run of *equal* length, ignores backslash-escaped backticks,
+  may cross a single line break, and never leaves its leaf block: a stray
+  backtick in a heading must not pair with one paragraphs later and exempt
+  everything between them. An indented block cannot interrupt a paragraph, so
+  a four-space continuation line inside prose is still scanned.
 
 Fixtures: `packages/ai/test/fixtures/harmony-visible-collapse-corpus.json`.

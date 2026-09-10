@@ -137,6 +137,20 @@ const HARNESS_ENVELOPE_RE =
 const BACKTICK_FENCE_RE = /^ {0,3}(`{3,})([^\n`]*)$/;
 const TILDE_FENCE_RE = /^ {0,3}(~{3,})(.*)$/;
 
+// Inline spans live inside one leaf block. A span may run over a lazy
+// paragraph continuation, but not into a line that opens a new block (heading,
+// list item, quote, fence, thematic break) and not out of an ATX heading,
+// which is a single-line block. Without this a stray backtick in a heading
+// pairs with one further down the answer and exempts everything between them.
+const LEAF_BLOCK_START_RE =
+	/^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|[-*+](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|`{3,}|~{3,}|(?:[-_*][ \t]*){3,}$)/;
+const ATX_HEADING_RE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
+// `collapseInlineHtml` in packages/tui/src/components/markdown.ts turns a
+// matched `<code>…</code>` pair into a `codespan`, so documentation written
+// that way renders as code and must not be scanned. An unmatched tag is
+// dropped by the renderer and its content stays prose, so require the pair.
+const HTML_CODE_SPAN_RE = /<code(?:\s[^>]*)?>[\s\S]*?<\/code>/gi;
+
 // Non-Latin scripts seen in the corpora: CJK + ext, Cyrillic, Thai, Georgian,
 // Armenian, Kannada, Telugu, Devanagari, Arabic, Malayalam, plus Khmer,
 // Gujarati, Bengali, Tamil, Gurmukhi, Ethiopic and Syriac observed in the
@@ -515,10 +529,21 @@ function computeCodeRanges(text: string): Array<[number, number]> {
 	return ranges;
 }
 
-/** Inline spans plus indented code blocks in the unfenced region `[from, to)`. */
+/** Inline spans, HTML code spans and indented blocks in the unfenced region `[from, to)`. */
 function pushUnfencedCode(text: string, from: number, to: number, ranges: Array<[number, number]>): void {
 	pushInlineSpans(text, from, to, ranges);
 	pushIndentedBlocks(text, from, to, ranges);
+	pushHtmlCodeSpans(text, from, to, ranges);
+}
+
+/** Matched `<code>…</code>` pairs, which the TUI renders as inline code. */
+function pushHtmlCodeSpans(text: string, from: number, to: number, ranges: Array<[number, number]>): void {
+	HTML_CODE_SPAN_RE.lastIndex = from;
+	for (let m = HTML_CODE_SPAN_RE.exec(text); m !== null; m = HTML_CODE_SPAN_RE.exec(text)) {
+		const end = m.index + m[0].length;
+		if (end > to) break;
+		ranges.push([m.index, end]);
+	}
 }
 
 /**
@@ -561,8 +586,10 @@ function isIndentedCodeLine(line: string): boolean {
  * Inline code spans in `text[from, to)`, per CommonMark: a run of backticks is
  * closed by a run of *equal* length, a backslash-escaped backtick is literal
  * text and delimits nothing, and a span may cross a line break but not a blank
- * line. Per-line scanning would miss multiline spans and mis-read escapes,
- * both of which turn a legitimately quoted marker into a `V` detection.
+ * line, and never leaves its leaf block. Per-line scanning would miss
+ * multiline spans and mis-read escapes; scanning without block boundaries
+ * pairs a backtick in a heading with one several paragraphs down and exempts
+ * every marker between them. Both turn a `V` decision into the wrong answer.
  */
 function pushInlineSpans(text: string, from: number, to: number, ranges: Array<[number, number]>): void {
 	let i = from;
@@ -574,7 +601,7 @@ function pushInlineSpans(text: string, from: number, to: number, ranges: Array<[
 		const openStart = i;
 		while (i < to && text[i] === "`") i++;
 		const runLength = i - openStart;
-		const close = findClosingRun(text, i, to, runLength);
+		const close = findClosingRun(text, i, to, runLength, isSingleLineBlock(text, openStart));
 		if (close === undefined) continue;
 		ranges.push([openStart, close]);
 		i = close;
@@ -587,12 +614,26 @@ function isEscaped(text: string, position: number): boolean {
 	return slashes % 2 === 1;
 }
 
-/** End offset of the next backtick run of exactly `runLength`, or undefined. */
-function findClosingRun(text: string, from: number, to: number, runLength: number): number | undefined {
+/**
+ * End offset of the next backtick run of exactly `runLength`, or undefined.
+ * Stops at the end of the opener's leaf block: a blank line, a line that opens
+ * a new block, or the first newline when the opener sits in an ATX heading.
+ */
+function findClosingRun(
+	text: string,
+	from: number,
+	to: number,
+	runLength: number,
+	singleLineBlock: boolean,
+): number | undefined {
 	let i = from;
 	while (i < to) {
 		const c = text[i];
-		if (c === "\n" && text.startsWith("\n", skipInlineSpace(text, i + 1, to))) return undefined;
+		if (c === "\n") {
+			if (singleLineBlock) return undefined;
+			if (text.startsWith("\n", skipInlineSpace(text, i + 1, to))) return undefined;
+			if (LEAF_BLOCK_START_RE.test(lineAt(text, i + 1, to))) return undefined;
+		}
 		if (c !== "`" || isEscaped(text, i)) {
 			i++;
 			continue;
@@ -602,6 +643,17 @@ function findClosingRun(text: string, from: number, to: number, runLength: numbe
 		if (i - start === runLength) return i;
 	}
 	return undefined;
+}
+
+/** Whether `position` sits in a block that cannot span lines (an ATX heading). */
+function isSingleLineBlock(text: string, position: number): boolean {
+	const lineStart = text.lastIndexOf("\n", position - 1) + 1;
+	return ATX_HEADING_RE.test(lineAt(text, lineStart, text.length));
+}
+
+function lineAt(text: string, lineStart: number, to: number): string {
+	const newline = text.indexOf("\n", lineStart);
+	return text.slice(lineStart, newline === -1 || newline > to ? to : newline);
 }
 
 function skipInlineSpace(text: string, from: number, to: number): number {
@@ -745,17 +797,22 @@ function findScriptResidue(
 
 /**
  * A run of script characters is stranded when an ASCII letter abuts it
- * (substitution inside a word, `decl\u10D0\u10E3\u10D3ing`) or when it opens
- * its own line with no prose in front of it (`\n瓣\n`, `ាន? Wait ...`).
- * A quoted foreign term is cited *within* a sentence - "the Japanese word for
- * cat is 猫" - and has ASCII prose to its left, so it stays clean.
+ * (substitution inside a word, `decl\u10D0\u10E3\u10D3ing`), or when it opens
+ * its own line and is not a cited word: either it is alone on the line
+ * (`\n瓣\n`) or something is glued to it with no space (`ាន? Wait ...`).
+ * A quoted foreign term is a whitespace-delimited word inside a sentence -
+ * "the Japanese word for cat is 猫", and equally "猫 means cat in Japanese" -
+ * so a line-initial run followed by a space and prose stays clean.
  */
 function isStranded(text: string, start: number, end: number): boolean {
 	const before = start > 0 ? text[start - 1] : "";
 	const after = end < text.length ? text[end] : "";
 	if (/[A-Za-z]/.test(before) || /[A-Za-z]/.test(after)) return true;
 	const lineStart = text.lastIndexOf("\n", start - 1) + 1;
-	return text.slice(lineStart, start).trim().length === 0;
+	if (text.slice(lineStart, start).trim().length !== 0) return false;
+	const lineEnd = text.indexOf("\n", end);
+	const rest = text.slice(end, lineEnd === -1 ? text.length : lineEnd);
+	return rest.trim().length === 0 || !/^[ \t]/.test(rest);
 }
 
 function hasScriptMismatchNear(text: string, start: number, end: number): boolean {

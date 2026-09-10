@@ -78,6 +78,12 @@
 			"signal": "M+V",
 			"text": "The failing turn ended with\n    to=functions.hub\nand nothing after it.",
 			"_note": "An indented line cannot interrupt a paragraph, so this is prose continuation, not a code block."
+		},
+		{
+			"id": "visible_marker_after_heading_backtick",
+			"signal": "M+V",
+			"text": "# `Title\nanalysis to=functions.edit code\n`",
+			"_note": "A stray backtick in an ATX heading must not pair with one in a later block; the marker between them is rendered."
 		}
 	],
 	"negatives": [
@@ -146,6 +152,16 @@
 			"id": "indented_code_block_quoting_marker",
 			"text": "The leak shape is:\n\n    analysis to=functions.edit code\n\nThat is the whole signature.",
 			"_note": "CommonMark indented code block. Renders as code in the TUI, so the marker inside it is quoted evidence."
+		},
+		{
+			"id": "html_code_span_quoting_marker",
+			"text": "Use <code>to=functions.edit</code> when editing a file, and read the errata first.",
+			"_note": "collapseInlineHtml in packages/tui/src/components/markdown.ts renders a matched <code> pair as a codespan."
+		},
+		{
+			"id": "line_initial_foreign_term",
+			"text": "猫 means cat in Japanese, and the same glyph is used in Chinese with a different reading.",
+			"_note": "A cited term is whitespace-delimited; only a glued or alone-on-its-line run is stranded residue."
 		}
 	]
 }
