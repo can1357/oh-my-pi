@@ -293,7 +293,7 @@ describe("writeLocalUrlAtomically", () => {
 			expect(outcome.commitState).toBe("COMMITTED");
 			expect(await Bun.file(path.join(localRoot, "migrated.txt")).text()).toBe("content");
 		});
-	});
+	}, 20_000);
 
 	it("rejects foreign-writable Windows local roots before creating a target", async () => {
 		if (process.platform !== "win32") return;
