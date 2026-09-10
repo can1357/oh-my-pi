@@ -5149,7 +5149,6 @@ export class AuthStorage {
 		return this.settleQuotaProbeSuccess(key);
 	}
 
-
 	#resolveWindowResetAt(window: UsageLimit["window"]): number | undefined {
 		if (!window) return undefined;
 		if (typeof window.resetsAt === "number" && Number.isFinite(window.resetsAt)) {
@@ -5982,8 +5981,8 @@ export class AuthStorage {
 			blockScopes,
 			allowFallback = true,
 		} = usageOptions;
+		let anonymousProbe: { credentialId: number; blockScope: string; leaseId: string } | undefined;
 		if (
-			!allowBlocked &&
 			this.#isCredentialBlocked(
 				provider,
 				providerKey,
@@ -6005,30 +6004,32 @@ export class AuthStorage {
 					entry.credential.type === selection.credential.type &&
 					!this.#isCredentialBlocked(provider, providerKey, index, blockScopes ?? blockScope),
 			);
-			if (hasUsableSibling) return undefined;
+			if (!allowBlocked && hasUsableSibling) return undefined;
 			const held = this.#activeTurnReservation(blockedId, this.getCredentialIncarnation(blockedId));
 			if (held && held.requestId !== options?.requestId) return undefined;
 			const probeScope = blockScope ?? "";
 			const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
 			if (!lease) return undefined;
 			const probeRequestKey = options?.requestId ?? anonymousProbeRequestKey(blockedId, probeScope);
+			if (!options?.requestId) anonymousProbe = { credentialId: blockedId, blockScope: probeScope, leaseId: lease };
 			this.#inflightProbes.set(probeRequestKey, {
 				credentialId: blockedId,
 				blockScope: probeScope,
 				leaseId: lease,
 			});
-			// Exclusive turn reservation only for cooldown probes — normal OAuth
-			// selections must remain concurrently usable across request ids.
-			if (options?.requestId) {
-				const acquired = this.tryAcquireTurnReservation({
-					credentialId: blockedId,
-					incarnation: this.getCredentialIncarnation(blockedId),
+		}
+		if (options?.requestId) {
+			const reserveId = this.#getStoredCredentials(provider)[selection.index]?.id;
+			if (
+				reserveId !== undefined &&
+				!this.tryAcquireTurnReservation({
+					credentialId: reserveId,
+					incarnation: this.getCredentialIncarnation(reserveId),
 					requestId: options.requestId,
-				});
-				if (!acquired.ok) {
-					this.clearQuotaProbe(options.requestId);
-					return undefined;
-				}
+				}).ok
+			) {
+				this.clearQuotaProbe(options.requestId);
+				return undefined;
 			}
 		}
 
@@ -6044,6 +6045,17 @@ export class AuthStorage {
 			// usage/refresh awaits below can shift positional indices, so every later
 			// refresh / persist / CAS-disable addresses the row by this stable id.
 			const credentialId = this.#getStoredCredentials(provider)[selection.index]?.id;
+			// Preparation can replace the physical credential and invalidate the old hold.
+			if (
+				options?.requestId &&
+				credentialId !== undefined &&
+				!this.tryAcquireTurnReservation({
+					credentialId,
+					incarnation: this.getCredentialIncarnation(credentialId),
+					requestId: options.requestId,
+				}).ok
+			)
+				return undefined;
 
 			const planRequirement =
 				providedPlanRequirement ?? resolveOpenAICodexPlanRequirement(provider, options?.modelId);
@@ -6218,17 +6230,16 @@ export class AuthStorage {
 
 			return undefined;
 		} finally {
-			const finishId = this.#getStoredCredentials(provider)[selection.index]?.id;
-			const finishScope = blockScope ?? "";
+			// Credential resolution is not inference success. Keep a successfully
+			// handed-off anonymous probe pending for the explicit success callback.
 			if (!keepReservation) {
 				if (options?.requestId) {
 					this.releaseTurnReservation(options.requestId);
 					this.clearQuotaProbe(options.requestId);
-				} else if (finishId !== undefined) {
-					this.clearAnonymousQuotaProbe(finishId, finishScope);
+				} else if (anonymousProbe) {
+					const key = anonymousProbeRequestKey(anonymousProbe.credentialId, anonymousProbe.blockScope);
+					if (this.#inflightProbes.get(key)?.leaseId === anonymousProbe.leaseId) this.clearQuotaProbe(key);
 				}
-			} else if (!options?.requestId && finishId !== undefined) {
-				this.settleAnonymousQuotaProbe(finishId, finishScope);
 			}
 		}
 	}
