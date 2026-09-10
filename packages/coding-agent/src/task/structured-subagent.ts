@@ -8,7 +8,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import { resolveAgentModelSelection } from "../config/model-resolver";
+import { resolveAgentModelSelection, resolveStrictModelCandidates } from "../config/model-resolver";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -141,6 +141,8 @@ export interface EffectiveSubagentPolicy {
 	agent: AgentDefinition;
 	effectiveAgent: AgentDefinition;
 	modelOverride?: string | string[];
+	/** Caller supplied candidates form a closed selection boundary. */
+	modelSelectionClosed?: boolean;
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
 	/** Exact-name `task.agentServiceTierOverrides` entry for this agent, applied after model resolution. */
@@ -321,7 +323,44 @@ export async function resolveEffectiveSubagentPolicy(
 	// Role identity and patterns come from one call so they cannot be derived
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role.
-	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
+	let modelOverride: string | string[] | undefined;
+	let modelRole: string | undefined;
+	let modelSelectionClosed = false;
+	if (request.model !== undefined) {
+		const candidates = typeof request.model === "string" ? [request.model] : request.model;
+		if (candidates.length === 0 || candidates.some(candidate => candidate.trim().length === 0)) {
+			throw new StructuredSubagentError(
+				"preflight",
+				"Caller model candidates must contain at least one non-empty selector.",
+			);
+		}
+		const modelRegistry = request.session.modelRegistry;
+		if (!modelRegistry) {
+			throw new StructuredSubagentError(
+				"preflight",
+				`Requested model candidates ${candidates.join(", ")} cannot be resolved: model registry unavailable.`,
+			);
+		}
+		const resolved = await resolveStrictModelCandidates(
+			candidates,
+			modelRegistry,
+			request.session.settings,
+			request.session.getSessionId?.() ?? undefined,
+		);
+		if (resolved.patterns.length === 0) {
+			const reasons = resolved.failures.map(failure => `${failure.pattern}: ${failure.reason}`).join("; ");
+			throw new StructuredSubagentError(
+				"preflight",
+				`Requested model candidates ${candidates.join(", ")} are unavailable (${reasons}).`,
+			);
+		}
+		modelOverride = resolved.patterns;
+		modelSelectionClosed = true;
+	} else {
+		const resolved = resolveAgentModelSelection(modelResolution);
+		modelOverride = resolved.patterns;
+		modelRole = resolved.role;
+	}
 	const isolationEnabled = request.session.settings.get("task.isolation.enabled");
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && !isolationEnabled) {
@@ -337,6 +376,7 @@ export async function resolveEffectiveSubagentPolicy(
 		effectiveAgent,
 		modelOverride,
 		modelRole,
+		modelSelectionClosed,
 		serviceTierOverride,
 		parentActiveModelPattern,
 		schema,
@@ -435,6 +475,7 @@ function buildExecutorOptions(
 		invokedAt: request.invokedAt,
 		acquiredAt: request.acquiredAt,
 		modelOverride: policy.modelOverride,
+		modelSelectionClosed: policy.modelSelectionClosed,
 		modelRole: policy.modelRole,
 		serviceTierOverride: policy.serviceTierOverride,
 		parentActiveModelPattern: policy.parentActiveModelPattern,

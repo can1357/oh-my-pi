@@ -19,11 +19,13 @@ import {
 	resolveExplicitModelRole,
 	resolveModelFromString,
 	resolveModelOverride,
+	resolveStrictModelCandidates,
 	resolveModelRoleValue,
 	resolveModelScope,
 	resolveProviderModelReference,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
+import { kNoAuth } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
 // Mock models for testing
@@ -1233,6 +1235,46 @@ describe("resolveModelOverride", () => {
 		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
 		expect(result.thinkingLevel).toBe(Effort.High);
 		expect(result.explicitThinkingLevel).toBe(true);
+	});
+});
+
+describe("resolveStrictModelCandidates", () => {
+	test("keeps ordered usable candidates and classifies unknown, disabled, and missing credentials", async () => {
+		const unknown = "missing/provider-model";
+		const disabled = mockModels[0];
+		const missingCredentials = mockModels[1];
+		const usable = mockOpenRouterModels[0];
+		const registry = {
+			getAvailable: () => [missingCredentials, usable],
+			getAll: () => [disabled, missingCredentials, usable],
+			getApiKey: async (model: Model<Api>) => (model === usable ? "test-key" : undefined),
+		};
+		const settings = Settings.isolated({ disabledProviders: ["anthropic"] });
+
+		const result = await resolveStrictModelCandidates(
+			[unknown, "anthropic/claude-sonnet-4-5", "openai/gpt-4o", "openrouter/qwen/qwen3-coder:exacto"],
+			registry,
+			settings,
+		);
+
+		expect(result.patterns).toEqual(["openrouter/qwen/qwen3-coder:exacto"]);
+		expect(result.failures).toEqual([
+			{ pattern: unknown, reason: "unknown" },
+			{ pattern: "anthropic/claude-sonnet-4-5", reason: "disabled-provider" },
+			{ pattern: "openai/gpt-4o", reason: "missing-credentials" },
+		]);
+	});
+
+	test("accepts keyless providers through the kNoAuth sentinel", async () => {
+		const keyless = mockOpenRouterModels[0];
+		const result = await resolveStrictModelCandidates(["openrouter/qwen/qwen3-coder:exacto"], {
+			getAvailable: () => [keyless],
+			getAll: () => [keyless],
+			getApiKey: async () => kNoAuth,
+		});
+
+		expect(result.patterns).toEqual(["openrouter/qwen/qwen3-coder:exacto"]);
+		expect(result.failures).toEqual([]);
 	});
 });
 describe("resolveCliModel", () => {
