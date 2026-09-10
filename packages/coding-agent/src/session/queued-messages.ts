@@ -79,7 +79,8 @@ export function isHiddenUserCompanion(message: AgentMessage): boolean {
 		message.attribution === "user" &&
 		message.display === false &&
 		(MAGIC_KEYWORD_NOTICE_TYPES[message.customType] === true ||
-			message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE)
+			message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE ||
+			message.customType === "video-attachment")
 	);
 }
 

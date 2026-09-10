@@ -113,6 +113,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "prompt", message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp" }`
 - `{ id?, type: "steer", message: string, images?: ImageContent[] }`
 - `{ id?, type: "follow_up", message: string, images?: ImageContent[] }`
+- `{ id?, type: "promote_queued_message", message: string }`
 - `{ id?, type: "abort" }`
 - `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
 - `{ id?, type: "new_session", parentSession?: string }`
@@ -229,6 +230,21 @@ Data payloads are command-specific and defined in `rpc-types.ts`.
 ```
 
 Local-only slash commands may emit `command_output` frames before completing via `data.agentInvoked: false` or a later `prompt_result`. They do not emit `agent_end`.
+
+### `promote_queued_message` payload
+
+Move the first matching user-authored follow-up into the end of the steering queue:
+
+```json
+{"id":"req_2","type":"promote_queued_message","message":"Use the existing parser"}
+{"id":"req_2","type":"response","command":"promote_queued_message","success":true,"data":{"promoted":true}}
+```
+
+The command moves the existing queued message, including its attachments and hidden user companions, without reprocessing or duplicating it. `message` matches the queued chip text or its prompt-template expansion. With duplicate text, each invocation moves only the first matching follow-up; repeating a successful request can move another occurrence.
+
+`data.promoted: false` means no matching user follow-up remains queued (for example, it was already delivered). Non-string `message` values produce an error response. Existing steering, follow-up, and interrupt modes still apply; promotion does not abort the model stream or guarantee cancellation of running tools.
+
+Clients should update their queue display only after `promoted: true`, accounting for message delivery that can race with the acknowledgement. Older runtimes reject this command; clients must not fall back to `steer`, which would enqueue a duplicate.
 
 ### `get_state` payload
 
