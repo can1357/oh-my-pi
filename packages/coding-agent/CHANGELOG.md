@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Model browsers now distinguish unavailable price metadata from zero-valued rates and preserve integer trailing zeros and positive sub-cent rates ([#11624](https://github.com/can1357/oh-my-pi/pull/11624) by [@cyriusweng](https://github.com/cyriusweng)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added
