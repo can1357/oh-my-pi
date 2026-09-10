@@ -22,8 +22,10 @@ import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
+import { Settings } from "../config/settings";
 import { discoverAuthStorage } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
+import { filterUsageReportsForDisplay, type UsageDisplayOptions } from "../utils/usage-display";
 
 const BAR_WIDTH = 28;
 
@@ -633,12 +635,14 @@ function disabledIdentityLabel(summary: DisabledCredentialSummary, redaction?: M
  * each provider section as "no usage data" rows.
  */
 export function formatUsageBreakdown(
-	reports: UsageReport[],
+	inputReports: UsageReport[],
 	accounts: UsageAccountIdentity[],
 	nowMs: number,
 	redaction?: Map<string, string>,
 	disabled: DisabledCredentialSummary[] = [],
+	options: UsageDisplayOptions = {},
 ): string {
+	const reports = filterUsageReportsForDisplay(inputReports, options);
 	const reportsByProvider = new Map<string, UsageReport[]>();
 	for (const report of reports) {
 		const list = reportsByProvider.get(report.provider) ?? [];
@@ -1198,7 +1202,12 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			return;
 		}
 
-		process.stdout.write(`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled)}\n`);
+		const settings = await Settings.loadReadOnly();
+		process.stdout.write(
+			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, {
+				showZeroUsageMeters: settings.get("display.showZeroUsageMeters"),
+			})}\n`,
+		);
 	} finally {
 		authStorage.close();
 	}

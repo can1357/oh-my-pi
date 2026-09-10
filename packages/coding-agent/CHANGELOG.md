@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `display.showZeroUsageMeters` setting to hide untouched supplemental model and tier quota meters from live usage reports ([#10423](https://github.com/can1357/oh-my-pi/pull/10423) by [@mvid](https://github.com/mvid)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added
