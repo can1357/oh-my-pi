@@ -872,6 +872,44 @@ describe("ModelRegistry", () => {
 				baseUrl: "https://api.z.ai/api/coding/paas/v4",
 			});
 		});
+
+		test("does not apply an ambiguous provider route to built-in models", () => {
+			const multiApiRegistry = readonlyRegistry({
+				providers: {
+					zai: {
+						baseUrl: "https://api.z.ai/api/anthropic",
+						apiKey: "TEST_KEY",
+						models: [
+							{
+								id: "glm-anthropic",
+								api: "anthropic-messages",
+								name: "GLM Anthropic",
+								reasoning: true,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 1_000_000,
+								maxTokens: 131_072,
+							},
+							{
+								id: "glm-openai",
+								api: "openai-completions",
+								name: "GLM OpenAI",
+								reasoning: true,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 1_000_000,
+								maxTokens: 131_072,
+							},
+						],
+					},
+				},
+			});
+			const flash = multiApiRegistry.find("zai", "glm-5.3-flash");
+			expect(flash).toMatchObject({
+				api: "openai-completions",
+				baseUrl: "https://api.z.ai/api/coding/paas/v4",
+			});
+		});
 	});
 
 	describe("custom models merge behavior", () => {

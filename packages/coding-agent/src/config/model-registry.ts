@@ -1357,6 +1357,8 @@ export class ModelRegistry {
 				if (modelApi) configuredApis.add(modelApi);
 			}
 			const [configuredApi] = [...configuredApis];
+			const providerOverrideApi =
+				configuredApis.size === 1 ? configuredApi : configuredApis.size > 1 ? null : undefined;
 			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/guardrail*/transport are present
 			if (
 				providerConfig.baseUrl ||
@@ -1372,7 +1374,7 @@ export class ModelRegistry {
 			) {
 				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
 				overrides.set(providerName, {
-					api: configuredApis.size === 1 ? configuredApi : undefined,
+					api: providerOverrideApi,
 					baseUrl:
 						providerConfig.discovery?.type === "litellm"
 							? normalizeLiteLLMDiscoveryBaseUrl(providerConfig.baseUrl)
@@ -2037,7 +2039,7 @@ export class ModelRegistry {
 	#mergeProviderOverride(baseOverride: ProviderOverride | undefined, override: ProviderOverride): ProviderOverride {
 		return {
 			baseUrl: override.baseUrl ?? baseOverride?.baseUrl,
-			api: override.api ?? baseOverride?.api,
+			api: override.api !== undefined ? override.api : baseOverride?.api,
 			apiKey: override.apiKey ?? baseOverride?.apiKey,
 			authHeader: override.authHeader ?? baseOverride?.authHeader,
 			headers: override.headers

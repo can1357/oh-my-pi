@@ -6,11 +6,11 @@ import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-refere
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { createLiveConfigHeaders } from "./model-config-values";
 import type { ModelOverride } from "./models-config-schema";
-/** Provider override config (baseUrl, headers, apiKey, compat, transport) without custom models */
+/** Provider override config (baseUrl, headers, apiKey, compat, transport). */
 export interface ProviderOverride {
 	baseUrl?: string;
-	/** Restricts a provider baseUrl inferred from a single custom model API. */
-	api?: Api;
+	/** Restricts a provider baseUrl to one custom model API; null means multiple APIs are configured. */
+	api?: Api | null;
 	headers?: Record<string, string>;
 	apiKey?: string;
 	authHeader?: boolean;
