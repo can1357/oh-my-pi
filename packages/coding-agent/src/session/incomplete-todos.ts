@@ -221,20 +221,23 @@ export function upsertIncompleteTodosSection(summary: string, block: string | un
 }
 
 function splitIncompleteTodosSection(summary: string): { before: string; body: string; after: string } | undefined {
-	const match = INCOMPLETE_TODOS_HEADING_LINE_RE.exec(summary);
-	if (!match) return undefined;
-	const start = match.index;
-	const afterHeading = start + match[0].length;
-	const rest = summary.slice(afterHeading);
-	const nextHeading = /^## /m.exec(rest);
-	const end = nextHeading ? afterHeading + nextHeading.index : summary.length;
-	const body = summary.slice(start, end).trim();
-	if (!INCOMPLETE_TODOS_BODY_RE.test(body) && !hasIncompleteTodoTaskRow(body)) return undefined;
-	return {
-		before: summary.slice(0, start).trimEnd(),
-		body,
-		after: summary.slice(end).replace(/^\n+/, "").trimEnd(),
-	};
+	const headings = new RegExp(INCOMPLETE_TODOS_HEADING_LINE_RE.source, "gm");
+	let match: RegExpExecArray | null;
+	while ((match = headings.exec(summary)) !== null) {
+		const start = match.index;
+		const afterHeading = start + match[0].length;
+		const rest = summary.slice(afterHeading);
+		const nextHeading = /^## /m.exec(rest);
+		const end = nextHeading ? afterHeading + nextHeading.index : summary.length;
+		const body = summary.slice(start, end).trim();
+		if (!INCOMPLETE_TODOS_BODY_RE.test(body) && !hasIncompleteTodoTaskRow(body)) continue;
+		return {
+			before: summary.slice(0, start).trimEnd(),
+			body,
+			after: summary.slice(end).replace(/^\n+/, "").trimEnd(),
+		};
+	}
+	return undefined;
 }
 
 /** True when a section body carries at least one durable task row. */

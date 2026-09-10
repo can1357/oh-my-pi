@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Reintroduced TODOs remain completable after phase moves, and durable snapshots survive earlier prose headings.
 - Keep reintroduced dropped tasks completable and preserve user cancellations and task whitespace through compaction.
 
 - Durable incomplete-todo snapshots round-trip empty phase/title fields, keep overflow-shaped phase names, and reserve exact-phase provenance before rename fallback.

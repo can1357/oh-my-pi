@@ -14,6 +14,18 @@ it("lets a model finish a reintroduced drop without leaving an unreachable sibli
 	expect(completed.phases[0]?.tasks).toEqual([{ content: "ship", status: "completed" }]);
 });
 
+it("moves a reintroduced model drop without retaining a stranded old-phase duplicate", () => {
+	const prior: TodoPhase[] = [{ name: "Old", tasks: [{ content: "ship", status: "abandoned" }] }];
+	const initialized = applyOpsToPhases(prior, [{ op: "init", list: [{ phase: "New", items: ["ship"] }] }]);
+
+	expect(initialized.errors).toEqual([]);
+	expect(initialized.phases).toEqual([{ name: "New", tasks: [{ content: "ship", status: "in_progress" }] }]);
+
+	const completed = applyOpsToPhases(initialized.phases, [{ op: "done", task: "ship" }]);
+	expect(completed.errors).toEqual([]);
+	expect(completed.phases).toEqual([{ name: "New", tasks: [{ content: "ship", status: "completed" }] }]);
+});
+
 it("keeps a newly inserted cancellation user-authored before an unchanged model drop", () => {
 	const prior: TodoPhase[] = [{ name: "Work", tasks: [{ content: "old", status: "abandoned" }] }];
 	const parsed: TodoPhase[] = [

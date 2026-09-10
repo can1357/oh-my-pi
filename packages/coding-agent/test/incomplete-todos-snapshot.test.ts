@@ -278,6 +278,37 @@ describe("getLatestTodoPhasesFromEntries reconstructs leftover todos after compa
 		expect(parseIncompleteTodosFromSummary(prose)).toEqual([]);
 	});
 
+	it("finds a later durable section after an earlier prose heading for parse and upsert", () => {
+		const summary = [
+			"## Goal",
+			"Ship the parser",
+			"",
+			"## Incomplete Todos: discussion",
+			"We should revisit the remaining work after lunch.",
+			"",
+			formatIncompleteTodosSection([{ phase: "Work", status: "pending", title: "old leftover" }]),
+			"",
+			"## Next Steps",
+			"1. Keep going",
+			"",
+		].join("\n");
+
+		expect(hasIncompleteTodosSection(summary)).toBe(true);
+		expect(parseIncompleteTodosFromSummary(summary)).toEqual([
+			{ name: "Work", tasks: [{ content: "old leftover", status: "pending" }] },
+		]);
+
+		const replaced = upsertIncompleteTodosSection(
+			summary,
+			formatIncompleteTodosSection([{ phase: "Work", status: "in_progress", title: "new leftover" }]),
+		);
+		expect(replaced).toContain("## Incomplete Todos: discussion");
+		expect(replaced).toContain("We should revisit the remaining work after lunch.");
+		expect(replaced).toContain("[in_progress] new leftover");
+		expect(replaced).not.toContain("old leftover");
+		expect([...replaced.matchAll(/## Incomplete Todos/g)]).toHaveLength(2);
+	});
+
 	it("recovers older todo toolResults when the latest compact only mentions todos in prose", () => {
 		const entries = [
 			{

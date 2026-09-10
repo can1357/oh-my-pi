@@ -551,6 +551,7 @@ function applyEntry(
 			const next = initPhases(entry, errors);
 			if (options?.userAuthored) return next;
 			// Model init must not erase unresolved model drops the settle gate protects.
+			const replacementContents = new Set(next.flatMap(phase => phase.tasks.map(task => task.content)));
 			const retained: TodoPhase[] = [];
 			for (const phase of phases) {
 				const drops = phase.tasks.filter(t => t.status === "abandoned" && t.droppedBy !== "user");
@@ -558,12 +559,14 @@ function applyEntry(
 				const existing = next.find(p => p.name === phase.name);
 				if (existing) {
 					for (const drop of drops) {
+						if (replacementContents.has(drop.content)) continue;
 						if (!existing.tasks.some(t => t.content === drop.content)) {
 							existing.tasks.push(cloneTask(drop));
 						}
 					}
 				} else {
-					retained.push({ name: phase.name, tasks: drops.map(cloneTask) });
+					const unmatched = drops.filter(drop => !replacementContents.has(drop.content));
+					if (unmatched.length > 0) retained.push({ name: phase.name, tasks: unmatched.map(cloneTask) });
 				}
 			}
 			return retained.length === 0 ? next : [...next, ...retained];
