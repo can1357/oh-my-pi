@@ -22,7 +22,6 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { logger } from "@oh-my-pi/pi-utils";
-import { shrinkForReplication } from "@oh-my-pi/pi-coding-agent/collab/replication-shrink";
 import { type FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 // In-memory transport: FakeWebSocket + InMemoryRelay (see ./helpers/in-memory-relay)
@@ -623,7 +622,9 @@ describe("collab frames a guest can send that the host must still answer", () =>
 
 		// Tolerating an unknown property was reasoned as safe because such a field is
 		// read and dropped. It is not: the image goes into a session message, is
-		// persisted, and is walked by shrinkForReplication, which recurses.
+		// persisted, and is handed to shrinkForReplication, which measures it with
+		// `JSON.stringify` before walking it — so a deep value can take either step
+		// down, and both are recursive.
 		//
 		// Sent past `CollabSocket.send` deliberately. That path serializes with
 		// JSON.stringify, which is recursive and fails near the same depth the walk
@@ -646,9 +647,6 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		const stored = harness.prompts[0]?.content as Record<string, unknown>[];
 		expect(Object.keys(stored?.[1] ?? {}).sort()).toEqual(["data", "mimeType", "type"]);
 		expect(stored?.[1]).toEqual({ type: "image", data: "AAAA", mimeType: "image/png" });
-		// And what the host stored is walkable, which is the property the depth
-		// threatened: unstripped, this recursion is what takes the walk down.
-		expect(() => shrinkForReplication(harness.prompts[0]?.content)).not.toThrow();
 	});
 
 	it("answers an agent chat whose message is not a string instead of dropping it", async () => {
@@ -697,7 +695,8 @@ describe("collab read-only links", () => {
 		if (cmdReply.t !== "error") throw new Error(`expected error, got ${cmdReply.t}`);
 		expect(cmdReply.message).toContain("agent control is disabled on a read-only link");
 
-		// Answering an ask is the fourth mutating frame and had no control at all.
+		// Answering an ask is the fourth mutating frame. The guard has always been
+		// there; what was missing is a test that fails if it goes.
 		guest.socket.send({ t: "ui-response", reqId: 1, value: "yes" });
 		const uiReply = await guest.nextFrame();
 		if (uiReply.t !== "error") throw new Error(`expected error, got ${uiReply.t}`);

@@ -12,6 +12,7 @@
  * frame is observable.
  */
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { logger } from "@oh-my-pi/pi-utils";
 import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
@@ -86,7 +87,7 @@ function makeState(): CollabSessionState {
 	};
 }
 
-async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarness> {
+async function makeHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }): Promise<GuestUiHarness> {
 	const roomId = "ui-request-room";
 	const roomKey = generateRoomKey();
 	const cryptoKey = await importRoomKey(roomKey);
@@ -98,6 +99,9 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 	const presentStub = (
 		fields: Omit<DialogStub, "aborted" | "whenAborted" | "settle">,
 	): Promise<string | undefined> => {
+		// A presenter that rejects is app-supplied code, the same way the socket's
+		// frame handler is, so what it rejects with is not this library's to assume.
+		if (opts && "rejectWith" in opts) return Promise.reject(opts.rejectWith);
 		const { promise, resolve } = Promise.withResolvers<string | undefined>();
 		const abortGate = Promise.withResolvers<void>();
 		let settled = false;
@@ -290,7 +294,7 @@ afterEach(async () => {
 	uninstallInMemoryRelay();
 });
 
-async function openHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarness> {
+async function openHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }): Promise<GuestUiHarness> {
 	const harness = await makeHarness(opts);
 	harnessCleanups.push(harness.cleanup);
 	return harness;
@@ -299,6 +303,39 @@ async function openHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 describe("collab TUI guest ui-request handling (#4049)", () => {
+	it("reports a presenter that rejects with a value that cannot be converted", async () => {
+		// The presenter is supplied by the app, so what it rejects with is not this
+		// library's to assume — the same reasoning as the socket's frame handler, on
+		// the other side of the link. Rendering it with `String` throws inside the
+		// catch, which replaces the warning with an unhandled rejection: no state is
+		// corrupted, so the log is the only place the difference shows.
+		const records: { error?: unknown }[] = [];
+		const unregister = logger.registerLogSink(event => {
+			if (event.message.includes("ui-request presentation failed")) records.push(event.context ?? {});
+		});
+		try {
+			const h = await openHarness({
+				rejectWith: {
+					toString() {
+						throw new Error("cannot render me");
+					},
+				},
+			});
+			h.hostSocket.send({
+				t: "ui-request",
+				request: { reqId: 7, kind: "editor", title: "Edit", prefill: "" },
+			});
+			const deadline = Date.now() + 3_000;
+			while (records.length === 0) {
+				if (Date.now() > deadline) throw new Error("the guest never reported the failed presentation");
+				await Bun.sleep(5);
+			}
+			expect(records[0]?.error).toBe("(unprintable error)");
+		} finally {
+			unregister();
+		}
+	});
+
 	it("presents a select ui-request through the hook selector and round-trips the answer", async () => {
 		const h = await openHarness();
 		h.hostSocket.send({

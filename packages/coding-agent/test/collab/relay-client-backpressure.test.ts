@@ -1348,34 +1348,41 @@ describe("CollabSocket send backpressure", () => {
 		}
 	});
 
-	it("survives a frame handler that throws a value that cannot be converted", async () => {
+	it("keeps dispatching frames after a handler throws a value that cannot be converted", async () => {
 		BackpressuredWebSocket.instances = [];
 		BackpressuredWebSocket.initialBufferedAmount = 0;
 		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
 		const key = await importRoomKey(generateRoomKey());
 		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/hostile-frame", role: "host", key });
-		let closed: string | undefined;
-		socket.onClose = message => {
-			closed = message;
-		};
-		socket.onFrame = () => {
-			throw {
-				toString() {
-					throw new Error("cannot render me");
-				},
-			};
+		const dispatched: string[] = [];
+		socket.onFrame = frame => {
+			if (frame.t !== "abort") {
+				throw {
+					toString() {
+						throw new Error("cannot render me");
+					},
+				};
+			}
+			dispatched.push(frame.t);
 		};
 		try {
 			socket.connect();
 			const ws = BackpressuredWebSocket.instances[0]!;
 			ws.open();
-			const sealed = await seal(key, { t: "abort" } as CollabFrame);
-			ws.onmessage?.({ data: packEnvelope(3, sealed).buffer } as MessageEvent);
-			// Only observable as an absence: the log line is a side channel, so what
-			// this pins is that rendering the throw does not itself throw — the socket
-			// stays open and nothing escapes the receive chain.
-			await Bun.sleep(20);
-			expect(closed).toBeUndefined();
+
+			// Reception is one promise chain, and the catch that renders the failure is
+			// a link in it. Rendering unsafely there rejects that link, and every later
+			// frame is `.then`ed onto a rejected promise and skipped — so the socket
+			// stops delivering anything at all, silently and permanently. That, not the
+			// readyState, is what the safe conversion buys: the previous version of this
+			// test only asserted the socket stayed open, which the unfixed code does too.
+			ws.onmessage?.({
+				data: packEnvelope(3, await seal(key, { t: "error", message: "boom" })).buffer,
+			} as MessageEvent);
+			ws.onmessage?.({ data: packEnvelope(3, await seal(key, { t: "abort" })).buffer } as MessageEvent);
+
+			await waitUntil(() => dispatched.length > 0, "the chain stopped dispatching after the handler threw");
+			expect(dispatched).toEqual(["abort"]);
 			expect(ws.readyState).toBe(BackpressuredWebSocket.OPEN);
 		} finally {
 			socket.close();
