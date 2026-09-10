@@ -463,7 +463,15 @@ export class CollabHost {
 			this.#rejectReadOnly("responding to ask", fromPeer);
 			return;
 		}
-		this.#pendingUi.get(reqId)?.settle({ kind: "answered", value });
+		const pending = this.#pendingUi.get(reqId);
+		if (pending) {
+			pending.settle({ kind: "answered", value });
+			return;
+		}
+		// The request already settled (or never existed for this peer). A writer that
+		// reconnected after the broadcast `ui-request-end` resends its answer and would
+		// otherwise wait forever, so acknowledge it directly.
+		this.#socket?.send({ t: "ui-request-end", reqId }, fromPeer);
 	}
 
 	#handlePrompt(text: string, images: ImageContent[] | undefined, fromPeer: number): void {

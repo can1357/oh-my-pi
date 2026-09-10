@@ -207,6 +207,43 @@ The three value shapes are:
 A rule cannot assign the same resolved axis twice in one block.
 One object axis carries a computed form: `long-context-cost` accepts either the absolute rates (`input-threshold` + `input`/`output`/`cache-read`/`cache-write`) or `input-threshold` + `multiplier` (with optional `input-threshold-inclusive`), which derives the tier from the row's live base price at build time so the rule tracks upstream list-price updates (xAI's SuperGrok 200K tier). Rows without a token price carry no tier.
 
+### Time-based pricing
+
+The catalog object axis `time-based-cost` materializes into `ModelCost.timeBased`. It uses **named child objects**, not KDL arrays or repeated anonymous windows. For example, inside a matching provider/model scope:
+
+```kdl
+time-based-cost {
+    off-peak-multiplier 0.5
+    peak-windows {
+        morning {
+            weekdays "1,2,3,4,5"
+            start-minute 60
+            end-minute 240
+        }
+        afternoon {
+            weekdays "1,2,3,4,5"
+            start-minute 360
+            end-minute 600
+        }
+    }
+    effective-rates {
+        flash-pricing {
+            effective-from "2026-09-14T04:00:00Z"
+            input 0.30
+            output 1.20
+            cache-read 0.006
+            cache-write 0
+        }
+    }
+}
+```
+
+`morning`, `afternoon`, and `flash-pricing` are arbitrary unique object names, discarded when the payload is normalized into arrays. `weekdays` is a comma-separated string of distinct UTC weekday numbers (`0` = Sunday through `6` = Saturday), without spaces. Each window has integer minutes with `0 <= start-minute < end-minute <= 1440`; its start is inclusive and end exclusive. Split overnight windows across days. Outside the union of peak windows, the nonnegative `off-peak-multiplier` applies to token costs.
+
+`effective-rates` is optional. Each entry requires a distinct valid ISO UTC `effective-from` (`YYYY-MM-DDTHH:mm:ssZ` or with three fractional-second digits) and all four nonnegative per-million-token rates. The latest entry at or before the request timestamp replaces the entire base card; before the first entry, the base card applies. An entry may contain a `long-context` object with `input-threshold`, optional `input-threshold-inclusive`, and all four absolute rates. Effective rates do not inherit the base card's long-context tier. Selection order is effective card, context tier, then tariff multiplier.
+
+The recurring schedule and dated DeepSeek transition above come from [DeepSeek's official pricing](https://api-docs.deepseek.com/quick_start/pricing); see `providers/deepseek.kdl` for the complete rules and [the catalog API](../../../README.md#cost-calculation) for timestamp semantics. This is catalog policy metadata, not a supported schedule syntax for the coding agent's `models.yml`.
+
 ### Precedence and ambiguity
 
 Rules resolve independently per axis. A matching rule is ranked by:

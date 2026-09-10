@@ -282,9 +282,9 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	built.maxTokens = result.maxTokens;
 	// Explicit input and cost patches outrank catalog corrections.
 	if (patch.input !== undefined) built.input = patch.input;
-	if (patch.cost) {
-		built.cost = { ...result.cost };
-	}
+	// Patches never change model identity. Preserve already-resolved pricing,
+	// including earlier custom prices and the deliberate absence of a schedule.
+	built.cost = result.cost;
 	return built;
 }
 
