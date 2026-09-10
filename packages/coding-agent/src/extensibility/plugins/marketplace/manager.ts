@@ -15,7 +15,7 @@ import { expandTilde } from "../../../tools/path-utils";
 import { normalizePluginRuntimeConfig } from "../runtime-config";
 import type { PluginRuntimeConfig, PluginRuntimeState } from "../types";
 
-import { cachePlugin } from "./cache";
+import { cachePlugin, getCachedPluginPath } from "./cache";
 import { classifySource, fetchMarketplace, parseMarketplaceCatalog, promoteCloneToCache } from "./fetcher";
 import {
 	addInstalledPlugin,
@@ -345,13 +345,19 @@ export class MarketplaceManager {
 			// key, so reading afterward would see only the new name and strand the old
 			// runtime link and lockfile key (e.g. a case-only rename Foo → foo).
 			previousPackageNames = await this.#resolveInstalledPackageNames(existing ?? [], name);
-			await this.#assertRuntimePackageNameAvailable(
-				scope,
-				packageName,
-				await readInstalledPluginsRegistry(registryPath),
-				pluginId,
-				previousPackageNames,
-			);
+			const targetReg = await readInstalledPluginsRegistry(registryPath);
+			await this.#assertRuntimePackageNameAvailable(scope, packageName, targetReg, pluginId, previousPackageNames);
+			// The cache dir is keyed by marketplace/name/version. On case-insensitive
+			// filesystems a different plugin id whose cache path differs only by case
+			// (e.g. an old "Foo" still installed after a catalog rename to "foo")
+			// resolves to the same dir, so cachePlugin would clobber it. Reject before
+			// replacing the cache, checking both scopes' installed registries.
+			const prospectiveCachePath = getCachedPluginPath(this.#opts.pluginsCacheDir, marketplace, name, version);
+			const registriesToCheck =
+				otherRegistryPath && otherRegistryPath !== registryPath
+					? [targetReg, await readInstalledPluginsRegistry(otherRegistryPath)]
+					: [targetReg];
+			this.#assertCachePathAvailable(prospectiveCachePath, pluginId, registriesToCheck);
 			cachePath = await cachePlugin(sourcePath, this.#opts.pluginsCacheDir, marketplace, name, version);
 			await this.#writeEmbeddedLspConfig(pluginEntry, cachePath);
 			await this.#writeEmbeddedDapConfig(pluginEntry, cachePath);
@@ -886,6 +892,33 @@ export class MarketplaceManager {
 			throw new Error(`Marketplace plugin package path escapes node_modules: ${JSON.stringify(packageName)}`);
 		}
 		return linkPath;
+	}
+
+	/**
+	 * Reject when the prospective cache dir case-collides with a different plugin
+	 * id's installed cache path. On case-insensitive filesystems those paths are
+	 * the same directory, so cachePlugin would clobber the other plugin's cache
+	 * while its registry entry and runtime link keep pointing at it.
+	 */
+	#assertCachePathAvailable(
+		cachePath: string,
+		pluginId: string,
+		registries: readonly InstalledPluginsRegistry[],
+	): void {
+		const key = cachePath.toLowerCase();
+		for (const registry of registries) {
+			for (const installedPluginId in registry.plugins) {
+				if (installedPluginId === pluginId) continue;
+				for (const entry of registry.plugins[installedPluginId]) {
+					if (entry.installPath.toLowerCase() === key) {
+						throw new Error(
+							`Plugin cache path for "${pluginId}" case-collides with installed plugin "${installedPluginId}" ` +
+								`on case-insensitive filesystems. Uninstall "${installedPluginId}" first.`,
+						);
+					}
+				}
+			}
+		}
 	}
 	async #assertRuntimePackageNameAvailable(
 		scope: "user" | "project",

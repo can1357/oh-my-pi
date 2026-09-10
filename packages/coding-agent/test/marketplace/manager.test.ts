@@ -7,6 +7,7 @@ import { listOmpExtensionRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-e
 import { getEnabledPlugins } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/loader";
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/manager";
 import {
+	getCachedPluginPath,
 	MarketplaceManager,
 	readInstalledPluginsRegistry,
 	readMarketplacesRegistry,
@@ -534,6 +535,42 @@ describe("MarketplaceManager", () => {
 		expect(Object.keys(userConfig.plugins)).toEqual(["gadget"]);
 		const projectConfig = await Bun.file(path.join(projectRoot, "omp-plugins.lock.json")).json();
 		expect(Object.keys(projectConfig.plugins)).toEqual(["gadget"]);
+	});
+
+	it("rejects a catalog rename whose cache path case-collides with an installed plugin", async () => {
+		const marketplaceDir = buildNamedMarketplace(path.join(ctx.tmpDir, "case-marketplace"), "case-mkt", "Foo");
+		// Distinct runtime package names so the runtime-name guard does not fire —
+		// only the cache-path collision should reject the second install.
+		fs.writeFileSync(
+			path.join(marketplaceDir, "plugins", "Foo", "package.json"),
+			JSON.stringify({ name: "runtime-a", version: "1.0.0" }),
+		);
+		await ctx.manager.addMarketplace(marketplaceDir);
+		await ctx.manager.installPlugin("Foo", "case-mkt");
+		const fooCache = getCachedPluginPath(path.join(ctx.tmpDir, "cache", "plugins"), "case-mkt", "Foo", "1.0.0");
+		expect(fs.existsSync(fooCache)).toBe(true);
+
+		// The catalog renames the plugin Foo → foo (case-only) with a non-colliding runtime name.
+		fs.rmSync(path.join(marketplaceDir, "plugins", "Foo"), { recursive: true, force: true });
+		const fooDir = path.join(marketplaceDir, "plugins", "foo");
+		fs.mkdirSync(fooDir, { recursive: true });
+		fs.writeFileSync(path.join(fooDir, "package.json"), JSON.stringify({ name: "runtime-b", version: "1.0.0" }));
+		fs.writeFileSync(
+			path.join(marketplaceDir, ".claude-plugin", "marketplace.json"),
+			JSON.stringify({
+				name: "case-mkt",
+				owner: { name: "Test Author" },
+				plugins: [{ name: "foo", source: "./plugins/foo", version: "1.0.0" }],
+			}),
+		);
+		await ctx.manager.updateMarketplace("case-mkt");
+
+		await expect(ctx.manager.installPlugin("foo", "case-mkt")).rejects.toThrow(
+			/case-collides with installed plugin "Foo@case-mkt"/,
+		);
+		// The still-installed Foo cache is untouched (not clobbered by the rejected foo install).
+		const fooPkg = await Bun.file(path.join(fooCache, "package.json")).json();
+		expect(fooPkg.name).toBe("runtime-a");
 	});
 
 	it("preserves feature selection and settings across a case-only rename", async () => {
