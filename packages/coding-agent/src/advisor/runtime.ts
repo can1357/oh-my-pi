@@ -148,6 +148,11 @@ export function quarantineAdvisorUnsafeOutput(
 	const reasons: string[] = [];
 	const unavailableToolNames = new Set<string>();
 	const generatedParts: string[] = [];
+	// Whether this turn carries an `advise` call that will actually dispatch.
+	// Quarantine rewrites `message.content` before the agent loop dispatches
+	// tools, so discarding the turn also destroys that call — and the advice it
+	// would have enqueued is lost, not merely delayed.
+	let deliversAdvice = false;
 	for (const block of message.content) {
 		// Cursor exec-channel native blocks (bash/read/grep/...) are stamped
 		// kCursorExecResolved: they already ran server-side through the
@@ -165,10 +170,16 @@ export function quarantineAdvisorUnsafeOutput(
 		}
 		if (block.type === "toolCall" && block.name === "advise" && typeof block.arguments.note === "string") {
 			generatedParts.push(block.arguments.note);
+			if (availableToolNames.has("advise")) deliversAdvice = true;
 		}
 		if (block.type === "text") generatedParts.push(block.text);
 	}
-	if (unavailableToolNames.size > 0) {
+	// Same trade the `kCursorExecResolved` exemption above makes (issue #5900):
+	// when the turn produced real advice, throwing it away costs more than the
+	// hallucinated sibling call does. That call is not executed either way — it
+	// misses the advisor's scoped tool set and fails at dispatch on its own — so
+	// the only thing quarantining adds here is the loss of the good note.
+	if (unavailableToolNames.size > 0 && !deliversAdvice) {
 		const names = [...unavailableToolNames].sort();
 		const toolLabel = names.length === 1 ? "tool" : "tools";
 		reasons.push(`requested unavailable ${toolLabel} ${names.join(", ")}`);

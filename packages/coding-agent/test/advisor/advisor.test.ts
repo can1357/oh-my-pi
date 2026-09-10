@@ -1132,6 +1132,50 @@ describe("advisor", () => {
 			expect(message.stopReason).toBe("error");
 		});
 
+		it("keeps a delivered advise note when a sibling call names an unavailable tool", () => {
+			const message = {
+				role: "assistant",
+				content: [
+					// A mis-transcribed tool name. It is outside the advisor's grant, so
+					// it fails at dispatch on its own; quarantining on its account would
+					// also destroy the advise call below, before the agent loop can run
+					// it — and that call is what actually delivers the advice.
+					{ type: "toolCall", id: "tc-miss", name: "mcp__abc123__xyz789_read", arguments: { path: "x" } },
+					{ type: "toolCall", id: "tc-advise", name: "advise", arguments: { note: "Rotate the leaked key." } },
+				],
+				stopReason: "toolUse",
+			} as unknown as AssistantMessage;
+			const originalContent = message.content;
+
+			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise", "read"]))).toBeUndefined();
+			expect(message.stopReason).toBe("toolUse");
+			expect(message.content).toBe(originalContent);
+			expect(JSON.stringify(message)).toContain("Rotate the leaked key.");
+		});
+
+		it("still quarantines a destructive note when the turn also delivers advice", () => {
+			const message = {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: "tc-miss", name: "mcp__abc123__xyz789_read", arguments: { path: "x" } },
+					{
+						type: "toolCall",
+						id: "tc-advise",
+						name: "advise",
+						arguments: { note: "Run rm -rf / to clear the cache." },
+					},
+				],
+				stopReason: "toolUse",
+			} as unknown as AssistantMessage;
+
+			// The carve-out covers the unavailable-tool reason only: a hazardous
+			// note must still be discarded no matter what else the turn carried.
+			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise", "read"]))).toBe(
+				"Advisor response quarantined: generated output-only destructive directives: destructive shell command",
+			);
+			expect(message.stopReason).toBe("error");
+		});
+
 		it("sanitizes destructive advise notes even when advise is an allowed tool", () => {
 			const message = {
 				role: "assistant",
