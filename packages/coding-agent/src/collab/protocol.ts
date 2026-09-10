@@ -111,6 +111,43 @@ export type CollabFrame =
 // Guest→relay: always 0; the relay rewrites it to the sender's id.
 // ═══════════════════════════════════════════════════════════════════════════
 
+/**
+ * `String(value)`, for a value nobody vouched for, that cannot throw.
+ *
+ * Converting a thrown value is not safe by default, which is easy to miss because
+ * it usually is: a hostile `toString`, a `toString` returning an object over a
+ * hostile `valueOf`, and a nested array deep enough to exhaust the stack all
+ * throw out of `String`, and the last one is reachable across the wire. Anything that renders an error
+ * for a log line or a frame needs this rather than the built-in.
+ *
+ * An `Error` is read through `message`, because converting the object runs
+ * whatever `toString` it carries; a `message` that is not a string falls back
+ * with everything else.
+ *
+ * The bound is on the result, not on the work: a `toString` returning 100,000
+ * characters still builds them before this cuts them. Bounding that would mean
+ * not converting at all, which leaves nothing to report.
+ *
+ * Totality is claimed for {@link value} and not for {@link maxUnits}. The first
+ * is the untrusted one and is handled whatever it is; the second is a caller's
+ * own constant and is assumed finite and non-negative. `Infinity` would return
+ * unbounded output and a `Symbol` would throw out of the comparison, neither of
+ * which anything can reach from the wire. Callers pass their own named bound
+ * rather than a shared one — `ERROR_MESSAGE_MAX` on the host, `THROWN_VALUE_MAX`
+ * in the socket and the guest — because what each is protecting differs even
+ * where the numbers currently agree.
+ */
+export function describeThrown(value: unknown, maxUnits: number): string {
+	let text: unknown;
+	try {
+		text = value instanceof Error ? value.message : String(value);
+	} catch {
+		return "(unprintable error)";
+	}
+	if (typeof text !== "string" || text.length === 0) return "(unprintable error)";
+	return text.length <= maxUnits ? text : `${text.slice(0, maxUnits)}…`;
+}
+
 export function packEnvelope(peerId: number, sealed: Uint8Array): Uint8Array {
 	const out = new Uint8Array(ENVELOPE_HEADER_LENGTH + sealed.byteLength);
 	new DataView(out.buffer).setUint32(0, peerId, false);

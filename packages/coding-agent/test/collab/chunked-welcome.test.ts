@@ -11,6 +11,7 @@
  * are stubbed.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { logger } from "@oh-my-pi/pi-utils";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
@@ -87,7 +88,7 @@ function makeHostContext(snapshot: SizedSnapshot): InteractiveModeContext {
 	return ctx as unknown as InteractiveModeContext;
 }
 
-function makeFailingGuestContext(failure: Error): InteractiveModeContext {
+function makeFailingGuestContext(failure: unknown): InteractiveModeContext {
 	const ctx = {
 		settings: { get: () => "" },
 		sessionManager: {
@@ -268,6 +269,52 @@ describe("collab chunked welcome (#3144)", () => {
 			await guest.leave("test cleanup").catch(() => {});
 		}
 	});
+	it("rejects the pending join when the resume failure cannot be converted to text", async () => {
+		// Same seam as the test above, with a rejection value that `String` throws on.
+		// Both the warning and the rejection that settles the join render it, and both
+		// sit inside the one catch — so rendering it unsafely throws there instead and
+		// `firstWelcome` is never settled.
+		//
+		// The oracle is which reason settles the join, not how long it takes to. Any
+		// budget — wall clock or event-loop turns — is a race, because it has to
+		// out-wait the slowest legitimate run and nothing bounds that. Closing the
+		// socket rejects a still-pending join with the close reason, so the two
+		// outcomes are distinguishable by value: either the write path settled it
+		// first or the close did.
+		const failure = {
+			toString() {
+				throw new Error("cannot render me");
+			},
+		};
+		const records: { error?: unknown }[] = [];
+		const unregister = logger.registerLogSink(event => {
+			if (event.message.includes("frame apply failed")) records.push(event.context ?? {});
+		});
+		// Signals the instant the resume path starts failing, so the drain below has a
+		// defined starting point rather than a guessed one.
+		const wrote = Promise.withResolvers<void>();
+		const writeSpy = spyOn(Bun, "write").mockImplementation(() => {
+			wrote.resolve();
+			return Promise.reject(failure);
+		});
+		const guest = new CollabGuestLink(makeFailingGuestContext(failure));
+		const joinAttempt = guest.join(host.link);
+		try {
+			await wrote.promise;
+			// `mockImplementation` hands back an already-rejected promise, so everything
+			// between here and the catch is microtasks — ordered by specification, not
+			// by the scheduler — and a fixed drain reaches the end of them.
+			for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+			await guest.leave("closing to settle the join");
+			await expect(joinAttempt).rejects.toThrow("(unprintable error)");
+			expect(records[0]?.error).toBe("(unprintable error)");
+		} finally {
+			unregister();
+			writeSpy.mockRestore();
+			await guest.leave("test cleanup").catch(() => {});
+		}
+	});
+
 	it("does not clear the old guest session when replica activation is cancelled", async () => {
 		const events: string[] = [];
 		const guest = new CollabGuestLink(makeCancelledSwitchGuestContext(async () => false, events));

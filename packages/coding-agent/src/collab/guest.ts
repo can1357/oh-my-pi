@@ -35,9 +35,23 @@ import {
 	type CollabFrame,
 	type CollabSessionState,
 	type CollabUiRequest,
+	describeThrown,
 	parseCollabLink,
 } from "./protocol";
 import { CollabSocket } from "./relay-client";
+/**
+ * Ceiling on a thrown value quoted into a log line or a rejection here, in UTF-16
+ * code units.
+ *
+ * Same rule as the host and the socket: `String` is what throws — on a hostile
+ * `toString`, on a `toString` returning an object over a hostile `valueOf`, and
+ * on a deeply nested value — so the treatment follows the conversion rather than
+ * the sender. All three uses below sit in a `catch` — two in the one that handles
+ * a failed frame apply, one in the ui-request presenter's — where an unrendered
+ * throw stops being a warning and becomes an unhandled rejection. One of the
+ * three is what settles the join, so throwing there hangs it instead.
+ */
+const THROWN_VALUE_MAX = 512;
 
 /** Commands a guest may run locally; everything else is host-only. */
 export const COLLAB_GUEST_ALLOWED_COMMANDS: Record<string, true> = {
@@ -325,9 +339,12 @@ export class CollabGuestLink {
 					this.#applyFrame(frame);
 				})
 				.catch(err => {
-					logger.warn("collab guest frame apply failed", { type: frame.t, error: String(err) });
+					logger.warn("collab guest frame apply failed", {
+						type: frame.t,
+						error: describeThrown(err, THROWN_VALUE_MAX),
+					});
 					if (!joined && (frame.t === "welcome" || frame.t === "snapshot-chunk")) {
-						firstWelcome.reject(err instanceof Error ? err : new Error(String(err)));
+						firstWelcome.reject(err instanceof Error ? err : new Error(describeThrown(err, THROWN_VALUE_MAX)));
 					}
 				});
 		};
@@ -698,7 +715,7 @@ export class CollabGuestLink {
 				}
 				logger.warn("collab guest ui-request presentation failed", {
 					reqId: request.reqId,
-					error: String(err),
+					error: describeThrown(err, THROWN_VALUE_MAX),
 				});
 			});
 	}
