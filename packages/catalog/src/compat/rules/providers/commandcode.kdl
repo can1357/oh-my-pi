@@ -12,8 +12,12 @@ provider "commandcode" {
 	// upstream (command-code@1.44.0 effort registry + Muse Spark lineage).
 	// Every other served id must omit the effort control on the wire.
 	supports-reasoning-effort #false
-	max-tokens-field "max_tokens"
+	// Discovery rows carry no reasoning metadata and stay neutral, so exact
+	// ladders below opt into repairing the neutral default (the cascade
+	// upgrade for stale source capability data).
+	thinking-upgrade-neutral #true
 	thinking-mode "effort"
+	max-tokens-field "max_tokens"
 	// Default output cap: the Provider API exposes no per-model maximum and
 	// the CLI requests 64K by default, so 64K (2^16); the two registry caps
 	// below are the only per-model maxOutputTokens in command-code@1.44.0.
@@ -79,6 +83,15 @@ provider "commandcode" {
 	models "z-ai/glm-5.3-flash" {
 		limits-patch {
 			max-tokens 131072
+		}
+	}
+	// Codex SKUs report the output budget inside the advertised window, so
+	// the class lineage pins the 272K prompt window; restate it here or the
+	// class rule wins the whole limits axis and drops the 64K provider cap.
+	models "gpt-5.3-codex" {
+		limits-patch {
+			context-window 272000
+			max-tokens 65536
 		}
 	}
 	// ---------------------------------------------------------------------------
@@ -225,6 +238,16 @@ provider "commandcode" {
 			input 0.28
 			output 0.56
 			cache-read 0.07
+			cache-write 0.0
+		}
+	}
+	// Served by the live catalog but absent from command-code@1.44.0: models
+	// page off-peak rates as listed 2026-09-10 (cache-write "—" means 0).
+	models "deepseek/deepseek-v4.1-flash" {
+		cost-patch {
+			input 0.15
+			output 0.6
+			cache-read 0.003
 			cache-write 0.0
 		}
 	}

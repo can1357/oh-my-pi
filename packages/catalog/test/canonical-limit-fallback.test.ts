@@ -105,4 +105,23 @@ describe("applyCanonicalLimitFallback", () => {
 		expect(model.contextWindow).toBeNull();
 		expect(model.maxTokens).toBeNull();
 	});
+
+	it("keeps a Command Code null limit when a canonical peer reports one", () => {
+		// The Provider API omits the limit, so it stays unknown: a same-id
+		// peer on another host must not refill it. Verified corrections
+		// arrive through KDL, never this fallback.
+		const models: ModelSpec<Api>[] = [
+			spec({ id: "mystery-model", provider: "commandcode", contextWindow: null, maxTokens: null }),
+			spec({ id: "mystery-model", provider: "openai", contextWindow: 400000, maxTokens: 128000 }),
+		];
+
+		applyCanonicalLimitFallback(models);
+
+		const model = find(models, "commandcode", "mystery-model");
+		expect(model.contextWindow).toBeNull();
+		expect(model.maxTokens).toBeNull();
+		const peer = find(models, "openai", "mystery-model");
+		expect(peer.contextWindow).toBe(400000);
+		expect(peer.maxTokens).toBe(128000);
+	});
 });

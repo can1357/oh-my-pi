@@ -7329,7 +7329,8 @@ function normalizeCommandCodeBasePath(baseUrl: string | undefined): string {
  * `openai-completions`) and seeds neutral capability defaults. Reviewed
  * Command Code policy (effort ladders, pricing, limits, modalities) is
  * applied later by `buildModel` from `providers/commandcode.kdl` — the
- * mapper never inherits another provider's rates or image support.
+ * mapper never inherits another provider's reasoning, rates, image support,
+ * or context window.
  */
 export function commandCodeModelManagerOptions(config?: CommandCodeModelManagerConfig): ModelManagerOptions<Api> {
 	const basePath = normalizeCommandCodeBasePath(config?.baseUrl);
@@ -7342,7 +7343,6 @@ export function commandCodeModelManagerOptions(config?: CommandCodeModelManagerC
 		}),
 		dynamicModelsAuthoritative: true,
 		fetchDynamicModels: () => {
-			const references = getBundledModelReferenceIndex();
 			return fetchOpenAICompatibleModels<Api>({
 				api: "openai-completions",
 				provider: "commandcode",
@@ -7354,20 +7354,30 @@ export function commandCodeModelManagerOptions(config?: CommandCodeModelManagerC
 				mapModel: (entry, defaults) => {
 					const route = apiRouteFor("commandcode", defaults.id);
 					const api = route?.api === "anthropic-messages" ? route.api : "openai-completions";
-					const reference = resolveModelReference(defaults.id, references);
 					return {
 						...defaults,
-						name: toModelName(entry.name, reference?.name ?? defaults.name),
+						name: toModelName(entry.name, defaults.name),
 						api,
 						baseUrl: api === "anthropic-messages" ? basePath : discoveryBaseUrl,
-						reasoning: reference?.reasoning ?? defaults.reasoning,
+						// Neutral reasoning: the catalog row carries no
+						// reasoning metadata. Verified effort ids opt back in
+						// through exact `thinking-efforts` in KDL (the cascade
+						// upgrades the target and the engine materializes
+						// `reasoning: true` alongside the ladder); every other
+						// served id keeps no effort dial.
+						reasoning: defaults.reasoning,
 						// Keep the discovery default (`["text"]`): the catalog
 						// row carries no modality metadata and a bundled
 						// reference from another host must not advertise image
 						// support for this deployment. Verified image routes
 						// opt back in via `input-modalities` in KDL.
 						input: defaults.input,
-						contextWindow: toPositiveNumber(entry.context_length, reference?.contextWindow ?? null),
+						// Neutral context window: an omitted or invalid
+						// `context_length` retains an unknown limit (`null`)
+						// instead of copying another host's deployment limit.
+						// Verified corrections live in KDL (`limits-patch`,
+						// `model-limits`, `context-window-floor`).
+						contextWindow: toPositiveNumber(entry.context_length, null),
 						maxTokens: null,
 					};
 				},

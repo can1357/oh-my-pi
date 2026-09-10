@@ -30,7 +30,7 @@ import {
 	type CatalogProviderDescriptor,
 	isCatalogDescriptor,
 } from "../src/provider-models/descriptor-types";
-import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
+import { getCatalogProviderEntry, PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
 import {
 	ABLITERATION_STATIC_MODELS,
@@ -267,7 +267,10 @@ function applyGlobalModelsDevFallback(
 			model.provider === "baseten" ||
 			// Meta's first-party rows come from the reviewed seed; a same-id
 			// gateway row would overwrite their display names.
-			model.provider === "meta"
+			model.provider === "meta" ||
+			// Providers whose discovery is the deployment truth and whose
+			// corrections live in KDL opt out of same-id reference fills.
+			getCatalogProviderEntry(model.provider)?.skipCrossProviderReferenceFills === true
 		) {
 			return model;
 		}
