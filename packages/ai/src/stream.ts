@@ -2405,6 +2405,11 @@ function mapOptionsForApi<TApi extends Api>(
 				execHandlers,
 				onToolResult,
 				externalToolExecutor: options?.cursorExternalToolExecutor,
+				cursorClientSupportsInlineImages: options?.cursorClientSupportsInlineImages,
+				cursorClientSupportsRoutedModelUpdate: options?.cursorClientSupportsRoutedModelUpdate,
+				cursorClientSupportsPromptContextUsageRpc: options?.cursorClientSupportsPromptContextUsageRpc,
+				cursorRunId: options?.cursorRunId,
+				cursorAgentSessionId: options?.cursorAgentSessionId,
 				wireModelId: resolveWireModelId(cursorModel, effort),
 			});
 		}

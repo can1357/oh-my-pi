@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
+import { buildGrpcRequest, type CursorOptions } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import type { AgentRunRequest } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
+import { type AgentRunRequest, AgentClientMessageSchema } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
+import { fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
 function cursorModel(id: string): Model<"cursor-agent"> {
 	return buildModel({
@@ -19,20 +20,16 @@ function cursorModel(id: string): Model<"cursor-agent"> {
 	});
 }
 
-function capture(model: Model<"cursor-agent">): Promise<AgentRunRequest> {
-	const { promise, resolve, reject } = Promise.withResolvers<AgentRunRequest>();
-	streamCursor(model, { messages: [{ role: "user", content: "pong", timestamp: 0 }] } satisfies Context, {
-		apiKey: "test-token",
-		onPayload: payload => {
-			if (payload && typeof payload === "object" && "$typeName" in payload) {
-				resolve(payload as AgentRunRequest);
-			} else {
-				reject(new Error("Cursor payload was not an AgentRunRequest"));
-			}
-			throw new Error("stop after capturing Cursor payload");
-		},
-	});
-	return promise;
+async function capture(model: Model<"cursor-agent">, options?: CursorOptions): Promise<AgentRunRequest> {
+	const { requestBytes } = await buildGrpcRequest(
+		model,
+		{ messages: [{ role: "user", content: "pong", timestamp: 0 }] } satisfies Context,
+		options,
+		{ conversationId: "wire-test", blobStore: new Map() },
+	);
+	const message = fromBinary(AgentClientMessageSchema, requestBytes).message;
+	if (message.case !== "runRequest") throw new Error("Expected Cursor run request");
+	return message.value;
 }
 
 describe("Cursor requestedModel wire shape", () => {
@@ -96,5 +93,36 @@ describe("Cursor requestedModel wire shape", () => {
 		const payload = await capture(cursorModel("claude-fable-5-low"));
 		expect(payload.requestedModel?.modelId).toBe("claude-fable-5-low");
 		expect(payload.requestedModel?.parameters).toEqual([]);
+	});
+});
+
+describe("Cursor auto router wire id", () => {
+	function rosterAutoModel(): Model<"cursor-agent"> {
+		return buildModel({
+			id: "auto",
+			name: "auto",
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl: "",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 64000,
+			requestModelId: "auto",
+		});
+	}
+
+	it("echoes a roster-resolved requestModelId auto verbatim (what the CLI sends)", async () => {
+		const payload = await capture(rosterAutoModel());
+		expect(payload.requestedModel?.modelId).toBe("auto");
+		expect(payload.requestedModel?.parameters).toEqual([]);
+		expect(payload.modelDetails?.modelId).toBe("auto");
+	});
+
+	it("honors an explicit caller wireModelId auto override", async () => {
+		const payload = await capture(cursorModel("cursor-composer-2.5"), { wireModelId: "auto" });
+		expect(payload.requestedModel?.modelId).toBe("auto");
+		expect(payload.modelDetails?.modelId).toBe("auto");
 	});
 });

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Cursor requests preserve caller-supplied capability flags and session identifiers.
+- Cursor user messages use agent mode consistently with the native CLI.
+
 ## [18.1.16] - 2026-09-09
 
 ### Fixed
