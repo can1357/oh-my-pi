@@ -165,8 +165,8 @@ function readSelectorForEmptyWrite(target: string, content: string): string | un
 function throwReadSelectorMisfire(target: string, sel: string): never {
 	throw new ToolError(
 		`write target '${target}' ends with a read-tool selector ':${sel}' and no such file exists — refusing to create a literal file by that name. ` +
-		`If you meant to read it, use read({ path: "${target}" }). ` +
-		`If you truly intend to create this file, pass its contents in \`content\` (a non-empty write is never blocked).`,
+			`If you meant to read it, use read({ path: "${target}" }). ` +
+			`If you truly intend to create this file, pass its contents in \`content\` (a non-empty write is never blocked).`,
 	);
 }
 
@@ -197,7 +197,7 @@ function readSelectorListMisfire(target: string): number | undefined {
 function throwReadSelectorListMisfire(target: string, count: number): never {
 	throw new ToolError(
 		`write target '${target}' is a semicolon-joined list of ${count} read-tool selectors, not a filesystem path — refusing to create it. ` +
-		`write creates a single file; issue one read() per path to read these ranges (e.g. read({ path: "<one path>:<range>" })).`,
+			`write creates a single file; issue one read() per path to read these ranges (e.g. read({ path: "<one path>:<range>" })).`,
 	);
 }
 
@@ -266,9 +266,9 @@ function parseBulkDirectives(content: string): Map<number, string> | null {
 			: "";
 		throw new ToolError(
 			`Malformed \`conflict://*\` per-id block: ${stray.length} line(s) are not \`<id>: @side\` directives (first: \`${truncateDirectiveLine(sample)}\`). ` +
-			tokenHint +
-			`Literal or multi-line replacement content isn't supported in a per-id block — resolve those blocks with individual \`write({ path: "conflict://<N>", content })\` calls (you can issue several at once). ` +
-			`For a pure pick-a-side pass, make every non-empty line \`<id>: @ours\` (or @theirs/@base/@both).`,
+				tokenHint +
+				`Literal or multi-line replacement content isn't supported in a per-id block — resolve those blocks with individual \`write({ path: "conflict://<N>", content })\` calls (you can issue several at once). ` +
+				`For a pure pick-a-side pass, make every non-empty line \`<id>: @ours\` (or @theirs/@base/@both).`,
 		);
 	}
 	return map;
@@ -612,12 +612,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			enableDiagnostics && session.queueDeferredDiagnostics ? new DeferredDiagnostics(session, dedup) : undefined;
 		this.#writethrough = enableLsp
 			? createLspWritethrough(session.cwd, {
-				enableFormat,
-				enableDiagnostics,
-				transformDiagnostics: dedup
-					? (path, result) => getDiagnosticsLedger(session).reduce(path, result)
-					: undefined,
-			})
+					enableFormat,
+					enableDiagnostics,
+					transformDiagnostics: dedup
+						? (path, result) => getDiagnosticsLedger(session).reduce(path, result)
+						: undefined,
+				})
 			: writethroughNoop;
 	}
 
@@ -778,13 +778,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			await writeArchive(tmpPath, format, entries);
 			await fs.rename(tmpPath, finalPath);
 		} catch (error) {
-			await fs.rm(tmpPath, { force: true }).catch(() => { });
+			await fs.rm(tmpPath, { force: true }).catch(() => {});
 			throw new ToolError(error instanceof Error ? error.message : String(error));
 		}
 
 		invalidateFsScanAfterWrite(resolvedArchivePath.absolutePath);
-		const outputPath = `${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd)}:${resolvedArchivePath.archiveSubPath
-			}`;
+		const outputPath = `${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd)}:${
+			resolvedArchivePath.archiveSubPath
+		}`;
 		return {
 			content: [{ type: "text", text: `Successfully wrote ${content.length} bytes to ${outputPath}` }],
 			details: { resolvedPath: resolvedArchivePath.absolutePath },
@@ -1343,7 +1344,8 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					emitWriteProgress(
 						onUpdate,
 						cleanContent,
-						`${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd)}:${resolvedArchivePath.archiveSubPath
+						`${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd)}:${
+							resolvedArchivePath.archiveSubPath
 						}`,
 						resolvedArchivePath.absolutePath,
 					);
@@ -1815,19 +1817,19 @@ export const writeToolRenderer = {
 		return framedBlock(uiTheme, width => {
 			const body = content
 				? formatStreamingContent(
-					content,
-					Boolean(options?.expanded),
-					lang,
-					uiTheme,
-					options?.spinnerFrame,
-					streamingCache,
-					// `options` is the ToolExecutionComponent's persistent
-					// render-state object — a stable identity across reveal ticks
-					// that keys the incremental preview state. `argsComplete`
-					// flushes the trailing line through the highlighter once.
-					options,
-					options?.argsComplete,
-				)
+						content,
+						Boolean(options?.expanded),
+						lang,
+						uiTheme,
+						options?.spinnerFrame,
+						streamingCache,
+						// `options` is the ToolExecutionComponent's persistent
+						// render-state object — a stable identity across reveal ticks
+						// that keys the incremental preview state. `argsComplete`
+						// flushes the trailing line through the highlighter once.
+						options,
+						options?.argsComplete,
+					)
 				: "";
 			const bodyLines = body ? body.split("\n") : [];
 			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();

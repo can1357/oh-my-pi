@@ -175,7 +175,6 @@ describe("write tool atomic local routing", () => {
 			)
 			.map(block => block.text)
 			.join("\n");
-		const hash = computeFileHash(content);
 
 		expect(controller.signal.aborted).toBe(true);
 		expect(atomicWriteSpy).toHaveBeenCalledTimes(1);

