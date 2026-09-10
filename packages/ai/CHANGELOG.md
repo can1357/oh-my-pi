@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.16] - 2026-09-09
+
 ### Fixed
 
 - Codex SSE streams that end without a terminal completion event now retry when replay-safe and remain transient errors when partial output prevents replay ([#11349](https://github.com/can1357/oh-my-pi/issues/11349)).
