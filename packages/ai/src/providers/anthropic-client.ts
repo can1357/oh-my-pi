@@ -139,6 +139,14 @@ function hasHeaderCaseInsensitive(headers: Record<string, string>, lowerName: st
 	return false;
 }
 
+function deleteHeaderCaseInsensitive(headers: Record<string, string>, lowerName: string): void {
+	for (const key in headers) {
+		if (key.toLowerCase() === lowerName) {
+			delete headers[key];
+		}
+	}
+}
+
 /**
  * Lazy in-flight request handle. The HTTP request starts on the first
  * `asResponse()` call; subsequent calls return the same promise.
@@ -214,7 +222,16 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 			headers.Authorization = `Bearer ${opts.authToken}`;
 		}
 		Object.assign(headers, defaults);
-		Object.assign(headers, requestHeaders);
+		if (requestHeaders) {
+			for (const key in requestHeaders) {
+				const value = requestHeaders[key];
+				if (value === "") {
+					deleteHeaderCaseInsensitive(headers, key.toLowerCase());
+				} else if (value !== undefined) {
+					headers[key] = value;
+				}
+			}
+		}
 		return headers;
 	}
 

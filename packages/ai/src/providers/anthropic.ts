@@ -2404,7 +2404,13 @@ const streamAnthropicOnce = (
 				}
 				const fallbackChatHeaders =
 					hasFallenBackToCopilotChat && model.provider === "github-copilot"
-						? mergeCopilotApiHeaders(mergeHeaders(model.headers, options?.headers), { cliDisabled: true })
+						? {
+								...mergeCopilotApiHeaders(mergeHeaders(model.headers, options?.headers), { cliDisabled: true }),
+								"Copilot-Integration-Id": "",
+								"Copilot-Harness-Id": "",
+								"Editor-Version": "",
+								"Editor-Plugin-Version": "",
+							}
 						: undefined;
 				const perRequestHeaders =
 					umansGatewayWebSearchHeader || injectedClientBetaHeaders || fallbackChatHeaders
@@ -3077,7 +3083,7 @@ const streamAnthropicOnce = (
 							initiatorOverride: options?.initiatorOverride,
 							cliDisabled: true,
 						});
-						if (!options?.client) {
+						if (!options?.client || model.provider === "github-copilot") {
 							const created = createClient(model, {
 								model,
 								apiKey,
