@@ -189,7 +189,13 @@ export function holdSseUntilCommit(
 					controller.enqueue(chunk);
 					return;
 				}
-				gate.bufferPrelude(chunk);
+				if (!gate.bufferPrelude(chunk)) {
+					gate.classifyAndObserve("response.output_text.delta", chunk.byteLength);
+					committed = true;
+					for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+					controller.enqueue(chunk);
+					return;
+				}
 				pending += decoder.decode(chunk, { stream: true });
 				let next = nextSseFrame(pending);
 				while (next) {
@@ -198,6 +204,11 @@ export function holdSseUntilCommit(
 					pending = next.rest;
 					next = nextSseFrame(pending);
 					if (state === "terminated") {
+						if (gate.sawSuccessfulTerminal) {
+							committed = true;
+							for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+							return;
+						}
 						// Dead attempt: its held frames belong to it and are never
 						// forwarded. The failover loop catches PreludeAbortedError,
 						// discards them, and dispatches a replacement attempt.

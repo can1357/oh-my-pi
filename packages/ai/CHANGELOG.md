@@ -16,6 +16,7 @@
 
 - Fixed rejecting ambiguous cross-branch model reuse under a single fallback node.
 - Fixed pi-native virtual routes dispatching compiled.targets[0], suffix fallback edges per sibling, and a parse→wire Responses options contract test.
+- Fixed held Responses terminal-success streams forwarding their buffered frames, permanent credential failures rotating through siblings and fallbacks, and pi-native forwarding of caller-owned continuation IDs.
 - Fixed nested fallback edges scoped per source target, turn reservations for selected API-key rows, and rejection of unsupported Codex `previous_response_id` over the gateway.
 ## [18.1.14] - 2026-09-07
 

@@ -97,16 +97,15 @@ describe("StreamCommitGate", () => {
 	});
 });
 
-
-	it("reset returns a terminated gate to probing and clears buffered prelude", () => {
-		const gate = new StreamCommitGate();
-		expect(gate.bufferPrelude(new Uint8Array([1, 2, 3]))).toBe(true);
-		expect(gate.classifyAndObserve("response.failed", 8)).toBe("terminated");
-		gate.reset();
-		expect(gate.state).toBe("probing");
-		expect(gate.preludeByteLength).toBe(0);
-		expect(gate.classifyAndObserve("response.created", 4)).toBe("probing");
-	});
+it("reset returns a terminated gate to probing and clears buffered prelude", () => {
+	const gate = new StreamCommitGate();
+	expect(gate.bufferPrelude(new Uint8Array([1, 2, 3]))).toBe(true);
+	expect(gate.classifyAndObserve("response.failed", 8)).toBe("terminated");
+	gate.reset();
+	expect(gate.state).toBe("probing");
+	expect(gate.preludeByteLength).toBe(0);
+	expect(gate.classifyAndObserve("response.created", 4)).toBe("probing");
+});
 
 describe("holdSseUntilCommit (prelude replay buffer)", () => {
 	function sse(frames: string[]): ReadableStream<Uint8Array> {
@@ -136,6 +135,20 @@ describe("holdSseUntilCommit (prelude replay buffer)", () => {
 		expect(out).toContain("response.created");
 		expect(out).toContain("output_text.delta");
 		expect(gate.state).toBe("committed");
+	});
+
+	it("forwards held frames for a terminal-success-only Responses stream", async () => {
+		const gate = new StreamCommitGate();
+		const held = holdSseUntilCommit(
+			sse(["event: response.created\ndata: {}\n\n", "event: response.completed\ndata: {}\n\n"]),
+			gate,
+		);
+		const out = await collect(held);
+
+		expect(out).toContain("response.created");
+		expect(out).toContain("response.completed");
+		expect(gate.state).toBe("terminated");
+		expect(gate.sawSuccessfulTerminal).toBe(true);
 	});
 
 	it("records sawSuccessfulTerminal only for completed/incomplete terminals", () => {
@@ -186,6 +199,11 @@ describe("holdSseUntilCommit (prelude replay buffer)", () => {
 			// expected abort
 		}
 		expect(sawCreated).toBe(false);
+	});
+
+	it("preserves a terminal frame that exceeds the prelude cap", async () => {
+		const raw = "event: response.completed\ndata: {}\n\n";
+		expect(await collect(holdSseUntilCommit(sse([raw]), new StreamCommitGate(8)))).toBe(raw);
 	});
 
 	it("stops buffering at commit and releases memory on drain (bounded)", () => {

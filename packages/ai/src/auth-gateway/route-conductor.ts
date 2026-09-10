@@ -80,10 +80,10 @@ export function decideAttempt(args: {
 		case "request_terminal":
 		case "policy_terminal":
 		case "gateway_terminal":
-		case "credential_permanent":
 			return { type: "terminal" };
 		case "credential_quota":
-		case "credential_transient": {
+		case "credential_transient":
+		case "credential_permanent": {
 			if (!state.siblingsExhausted) {
 				return { type: "sibling_credential" };
 			}

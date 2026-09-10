@@ -87,6 +87,16 @@ describe("decideAttempt", () => {
 		expect(action).toEqual({ type: "sibling_credential" });
 	});
 
+	it("returns sibling_credential on credential_permanent before exhaustion", () => {
+		const action = decideAttempt({
+			route: route(),
+			state: state({ attemptedTargets: new Set(["primary"]) }),
+			classification: classification("credential_permanent"),
+			commitState: "probing",
+		});
+		expect(action).toEqual({ type: "sibling_credential" });
+	});
+
 	it("falls back to the first unused fallbacks-map id on provider_unavailable", () => {
 		const action = decideAttempt({
 			route: route({ fallbacks: { provider_unavailable: ["backup", "tertiary"] } }),
@@ -105,6 +115,16 @@ describe("decideAttempt", () => {
 			commitState: "probing",
 		});
 		expect(action).toEqual({ type: "fallback_target", targetModelId: "claude" });
+	});
+
+	it("falls back to configured targets after permanent credential failure exhausts siblings", () => {
+		const action = decideAttempt({
+			route: route({ fallbacks: { credential_permanent: ["foreign/provider-model"] } }),
+			state: state({ attemptedTargets: new Set(["primary"]), siblingsExhausted: true }),
+			classification: classification("credential_permanent"),
+			commitState: "probing",
+		});
+		expect(action).toEqual({ type: "fallback_target", targetModelId: "foreign/provider-model" });
 	});
 
 	it("returns terminal on request_terminal", () => {
