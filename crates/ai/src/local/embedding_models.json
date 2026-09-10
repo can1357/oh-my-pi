@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fastembed_version": "5.17.4",
+  "fastembed_version": "6.0.3",
   "models": [
     {
       "model": "AllMiniLML6V2",

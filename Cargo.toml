@@ -25,7 +25,6 @@ async-stream = "0.3"
 async-trait = "0.1"
 ashpd = { version = "=0.11.1", default-features = false, features = ["tokio"] }
 atspi = { version = "=0.30.0", features = ["tokio", "zbus"] }
-audiopus_sys = { version = "0.2.2", features = ["static"] }
 bigdecimal = "0.4"
 blake2 = "0.10"
 blake3 = { version = "1.8" }
