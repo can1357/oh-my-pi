@@ -1826,7 +1826,11 @@ describe("AgentSession retry fallback", () => {
 		await session.prompt("Complete a second primary turn");
 		await quarantineLatched.promise;
 
-		expect(requestedAdvisorModels).toEqual([advisorPrimarySelector, advisorFallbackSelector, advisorFallbackSelector]);
+		expect(requestedAdvisorModels).toEqual([
+			advisorPrimarySelector,
+			advisorFallbackSelector,
+			advisorFallbackSelector,
+		]);
 		expect(session.getAdvisorStatusOverview().advisors[0]?.yielded).toBe(true);
 
 		// The current update must only restore the expired fallback: it cannot buy
@@ -1843,7 +1847,11 @@ describe("AgentSession retry fallback", () => {
 			provider: advisorPrimary.provider,
 			id: advisorPrimary.id,
 		});
-		expect(requestedAdvisorModels).toEqual([advisorPrimarySelector, advisorFallbackSelector, advisorFallbackSelector]);
+		expect(requestedAdvisorModels).toEqual([
+			advisorPrimarySelector,
+			advisorFallbackSelector,
+			advisorFallbackSelector,
+		]);
 
 		await session.prompt("Resume advisor review after fallback restoration");
 		for (let attempt = 0; attempt < 20 && requestedAdvisorModels.length < 4; attempt++) {

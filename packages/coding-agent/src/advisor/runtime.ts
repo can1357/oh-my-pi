@@ -686,7 +686,8 @@ export class AdvisorRuntime {
 		void (async () => {
 			try {
 				await this.host.maintainContext?.(incoming, controller.signal);
-				if (this.disposed || this.#sessionTransitionPaused || this.#epoch !== epoch || !this.#quarantineHalted) return;
+				if (this.disposed || this.#sessionTransitionPaused || this.#epoch !== epoch || !this.#quarantineHalted)
+					return;
 				this.#syncModelIdentity();
 				this.#resumeQuarantineAfterBasisChange();
 			} catch (err) {
