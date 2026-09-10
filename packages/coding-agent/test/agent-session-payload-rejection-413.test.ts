@@ -340,8 +340,12 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		expect(continueSpy).not.toHaveBeenCalled();
 	});
 
-	it("treats a payload-only 413 as terminal without a local context window", async () => {
-		await createSession(null);
+	it("treats a payload-only 413 as terminal without a local context window when no compaction method is configured", async () => {
+		// Unknown context window used to always dead-end here regardless of
+		// compaction availability (#11479). With no compaction method configured
+		// there is genuinely nothing to attempt, so this case still blocks — see
+		// the sibling test below for the case where compaction *is* configured.
+		await createSession(null, undefined, { extraSettings: { "compaction.enabled": false } });
 		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
 		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
@@ -371,6 +375,38 @@ describe("AgentSession payload-rejection 413 handling", () => {
 			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
 		);
 		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
+	it("attempts compaction for a payload-only 413 with no local context window when a compaction method is configured (#11479)", async () => {
+		// Self-hosted/custom-provider models the registry has no metadata for
+		// report contextWindow: null. The 413 text here carries no media/image
+		// evidence, so byte bloat driven by plain message-count growth should
+		// get the same compaction chance a known-window overflow would, instead
+		// of being lumped in with a confirmed media/byte-budget rejection.
+		await createSession(null);
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+
+		const assistantMsg = payloadRejectionAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await session.waitForIdle();
+
+		expect(startCount()).toBeGreaterThanOrEqual(1);
+		expect(prepareSpy).toHaveBeenCalled();
+		expect(notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413")).length).toBe(0);
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
 	});
 
 	it("reports a usage-backed payload-shaped dead end as a token-context problem", async () => {
@@ -863,8 +899,11 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		const providerCtx = sessionManager.buildSessionContext().messages;
 		expect(providerCtx.some(m => m.role === "assistant" && m.stopReason === "error")).toBe(false);
 	});
-	it("blocks status-only Content Too Large rejections with no context window", async () => {
-		await createSession(null);
+	it("blocks status-only Content Too Large rejections with no context window and no compaction method configured", async () => {
+		// See the "attempts compaction ... (#11479)" test above: with unknown
+		// context window this now only dead-ends when there is genuinely no
+		// compaction method available to try.
+		await createSession(null, undefined, { extraSettings: { "compaction.enabled": false } });
 		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
 		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);

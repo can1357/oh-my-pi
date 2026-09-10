@@ -2259,7 +2259,25 @@ export class SessionMaintenance {
 			contextWindow > 0 &&
 			reportedInputTokens <= contextWindow &&
 			storedTokens < contextWindow * PAYLOAD_REJECTION_OCCUPANCY_CEILING;
-		if ((payloadRejection && !ambiguousPayloadRejection && contextWindow <= 0) || trustedPayloadRejection) {
+		// Whether a compaction method actually exists to attempt shrinking the
+		// history. Computed up front so the unknown-context-window branch below
+		// can fall through to a real attempt instead of always assuming defeat.
+		// (Named distinctly from the `compactionSettings` used further down in
+		// this function's later, unrelated threshold check.)
+		const payloadCompactionSettings = this.#host.settings.getGroup("compaction");
+		const compactionAvailable =
+			payloadCompactionSettings.enabled &&
+			(this.#usesExperimentalContextManagement() || hasConfiguredCompactionMethod(payloadCompactionSettings));
+		// Unknown context window (common for custom/self-hosted models the
+		// registry has no metadata for) used to be treated the same as a
+		// confirmed media/byte-budget rejection and blocked outright — even
+		// when the payload bloat is plain message-count growth that ordinary
+		// compaction would shrink just fine (#11479). Only skip straight to
+		// the honest "can't help" notice here when there is genuinely no
+		// compaction method configured to try.
+		const unknownWindowDeadEnd =
+			payloadRejection && !ambiguousPayloadRejection && contextWindow <= 0 && !compactionAvailable;
+		if (unknownWindowDeadEnd || trustedPayloadRejection) {
 			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
 			this.#host.emitNotice("warning", payloadRejectionNotice(storedTokens, contextWindow), "compaction");
 			logger.debug("Payload-shaped 413 withheld from token compaction", {
@@ -2290,11 +2308,7 @@ export class SessionMaintenance {
 			}
 
 			// No promotion target available fall through to compaction
-			const compactionSettings = this.#host.settings.getGroup("compaction");
-			if (
-				compactionSettings.enabled &&
-				(this.#usesExperimentalContextManagement() || hasConfiguredCompactionMethod(compactionSettings))
-			) {
+			if (compactionAvailable) {
 				return await this.#host.runRecoveryCompactionWithRollback("overflow", assistantMessage, allowDefer, {
 					autoContinue,
 				});
