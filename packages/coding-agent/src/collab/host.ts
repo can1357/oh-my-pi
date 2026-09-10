@@ -133,6 +133,30 @@ const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
  */
 const GUEST_LABEL_MAX = 64;
 /**
+ * Ceiling on the text of an `error` frame, applied where the frame is sent rather
+ * than where its parts are chosen.
+ *
+ * Bounding the ingredients does not work, and this branch proved it twice: the
+ * agent-command replies bound the id and then interpolated `String(err)`, and
+ * `AgentLifecycleManager#ensureLive` embeds the id it was given, twice, in prose
+ * of its own. A 100,011-character id came back out as a 200,211-byte reply —
+ * larger than the unbounded version this was meant to fix. That message is
+ * composed in another module, for its own callers, so the only place that can
+ * bound it is the last one that touches it.
+ *
+ * 512 because the longest message this host can compose from its own text plus a
+ * fully-sized {@link GUEST_LABEL_MAX} label measures 317 bytes, so nothing the
+ * host writes is ever cut and only guest-supplied padding is.
+ */
+const ERROR_MESSAGE_MAX = 512;
+
+/** Whether a value off the wire is image content this host can put into a message. */
+function isImageContent(value: unknown): value is ImageContent {
+	if (typeof value !== "object" || value === null) return false;
+	const candidate = value as { type?: unknown; data?: unknown; mimeType?: unknown };
+	return candidate.type === "image" && typeof candidate.data === "string" && typeof candidate.mimeType === "string";
+}
+/**
  * Outcome of {@link CollabHost.requestGuestUi}. `answered` carries the guest's
  * response (an `undefined` value is a genuine guest cancel); `unavailable`
  * means the collab channel went away (teardown, relay drop) or the request was
@@ -426,7 +450,10 @@ export class CollabHost {
 		// peer's lifetime at reception; re-read it here rather than acting on a
 		// sender that is already gone and registering a ghost participant.
 		if (!this.#socket?.isServing(fromPeer)) {
-			logger.debug("collab host ignoring frame from a peer it no longer serves", { type: frame.t, fromPeer });
+			logger.debug("collab host ignoring frame from a peer it no longer serves", {
+				type: this.#label(frame.t),
+				fromPeer,
+			});
 			return;
 		}
 		switch (frame.t) {
@@ -449,7 +476,7 @@ export class CollabHost {
 				void this.#handleFetchTranscript(frame.reqId, frame.agentId, frame.fromByte, fromPeer);
 				break;
 			default:
-				logger.debug("collab host ignoring unexpected frame", { type: frame.t, fromPeer });
+				logger.debug("collab host ignoring unexpected frame", { type: this.#label(frame.t), fromPeer });
 		}
 	}
 
@@ -472,9 +499,46 @@ export class CollabHost {
 		return bytes.byteLength === expected.byteLength && timingSafeEqual(bytes, expected);
 	}
 
+	/**
+	 * Every `error` frame leaves through here, so no reply can exceed
+	 * {@link ERROR_MESSAGE_MAX} whatever composed it.
+	 *
+	 * A cap on the whole message rather than on its parts, because the parts are not
+	 * all chosen here: an error raised elsewhere arrives already carrying whatever a
+	 * guest put into the request that produced it. Callers may still quote a bounded
+	 * label for readability — that is what {@link #label} is for — but nothing
+	 * downstream depends on their remembering to.
+	 *
+	 * This closes the `error` carrier, not the idea of echoing a guest value: a
+	 * frame of another type that embeds one is bounded at its own site, and
+	 * `#handleFetchTranscript`'s `reqId` is the one that needed it.
+	 */
+	#sendError(message: string, toPeer: number): boolean {
+		const bounded = message.length <= ERROR_MESSAGE_MAX ? message : `${message.slice(0, ERROR_MESSAGE_MAX)}…`;
+		return this.#socket?.send({ t: "error", message: bounded }, toPeer) ?? false;
+	}
+
+	/**
+	 * A value of unknown provenance, reduced to something safe to put in a frame or
+	 * a log line: bounded in length, and never one whose own stringification can
+	 * throw — a 5,000-deep array reaches this handler and `RangeError`s out of a
+	 * template.
+	 *
+	 * A number or a boolean is reported as itself, because for some of these fields
+	 * that is the well-formed case and the reply has to name what actually arrived —
+	 * a stale `proto` is a number, and saying it was unnamed would make the mismatch
+	 * unreadable. A string is truncated rather than replaced, because a long one is
+	 * still the name its sender chose. Nothing else has a name to give.
+	 */
+	#label(value: unknown): string {
+		if (typeof value === "number" || typeof value === "boolean") return String(value);
+		if (typeof value !== "string" || value.length === 0) return "(unnamed)";
+		return value.length <= GUEST_LABEL_MAX ? value : `${value.slice(0, GUEST_LABEL_MAX)}…`;
+	}
+
 	/** Reject a mutating frame from a read-only peer with a targeted error. */
 	#rejectReadOnly(action: string, fromPeer: number): void {
-		this.#socket?.send({ t: "error", message: `${action} is disabled on a read-only link` }, fromPeer);
+		this.#sendError(`${action} is disabled on a read-only link`, fromPeer);
 	}
 
 	/**
@@ -487,11 +551,11 @@ export class CollabHost {
 	 */
 	#handleHello(name: unknown, proto: unknown, writeToken: unknown, fromPeer: number): void {
 		if (proto !== COLLAB_PROTO) {
-			this.#socket?.send(
-				{
-					t: "error",
-					message: `protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${String(proto)}`,
-				},
+			// `proto` is guest-controlled, so the reply that quotes it back is too: a
+			// 100,000-character one measured 100,047 bytes. Labelled here for the
+			// reader, bounded by #sendError regardless.
+			this.#sendError(
+				`protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${this.#label(proto)}`,
 				fromPeer,
 			);
 			return;
@@ -666,7 +730,17 @@ export class CollabHost {
 			return;
 		}
 		if (typeof text !== "string") {
-			this.#socket?.send({ t: "error", message: "prompt failed: message text must be a string" }, fromPeer);
+			this.#sendError("prompt failed: message text must be a string", fromPeer);
+			return;
+		}
+		// An element is content the guest meant to send, which an `images` field that
+		// is not an array at all is not — so a malformed element is refused rather
+		// than dropped. It is the text defect one field over: `{type:"text",text:42}`
+		// is accepted into the content, persisted, and throws a turn later at
+		// `item.text.toWellFormed()` inside a provider serializer.
+		const supplied = Array.isArray(images) ? images : [];
+		if (supplied.some(image => !isImageContent(image))) {
+			this.#sendError("prompt failed: every image must carry string data and mimeType", fromPeer);
 			return;
 		}
 		const name = peer.name;
@@ -676,7 +750,7 @@ export class CollabHost {
 		// that is not an array carries no images, which is the path a prompt without
 		// any already takes, so the text still gets through.
 		const content: string | (TextContent | ImageContent)[] =
-			Array.isArray(images) && images.length > 0 ? [{ type: "text", text }, ...(images as ImageContent[])] : text;
+			supplied.length > 0 ? [{ type: "text", text }, ...supplied] : text;
 		const details: CollabPromptDetails = { from: name };
 		if (this.#ctx.session.isStreaming) {
 			this.#ctx.updatePendingMessagesDisplay();
@@ -703,7 +777,7 @@ export class CollabHost {
 			.catch(err => {
 				logger.warn("collab guest prompt failed", { error: String(err) });
 				if (stillTheAsker?.()) {
-					this.#socket?.send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
+					this.#sendError(`prompt failed: ${String(err)}`, fromPeer);
 				}
 			});
 	}
@@ -767,7 +841,7 @@ export class CollabHost {
 		// Before the resync error, so the `ui-request-end` frames a settle fans out
 		// are not addressed to the peer that just lost its backlog.
 		this.#dropAskRecipient(peer);
-		this.#socket?.send({ t: "error", message: "the host discarded your backlog; rejoin to resync" }, peer);
+		this.#sendError("the host discarded your backlog; rejoin to resync", peer);
 		if (name) {
 			this.#ctx.session.emitNotice(
 				"warning",
@@ -876,12 +950,11 @@ export class CollabHost {
 		// short, and a long id is likelier to be one a guest actually typed, which is
 		// exactly when a reply has to say which agent failed.
 		const id = typeof agentId === "string" ? agentId : "";
-		const quoted =
-			id.length === 0 ? "(unnamed agent)" : id.length <= GUEST_LABEL_MAX ? id : `${id.slice(0, GUEST_LABEL_MAX)}…`;
+		const quoted = this.#label(id);
 		// Advisor refs are excluded from snapshots, but reject control by id defensively:
 		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
 		if (AgentRegistry.global().get(id)?.kind === "advisor") {
-			this.#socket?.send({ t: "error", message: `agent ${quoted}: advisor transcripts are read-only` }, fromPeer);
+			this.#sendError(`agent ${quoted}: advisor transcripts are read-only`, fromPeer);
 			return;
 		}
 		// Best-effort and room-scoped for the same reason as a failed prompt: agent
@@ -890,7 +963,7 @@ export class CollabHost {
 		const fail = (err: unknown) => {
 			logger.warn("collab agent-cmd failed", { cmd, agentId: quoted, error: String(err) });
 			if (!stillTheAsker?.()) return;
-			this.#socket?.send({ t: "error", message: `agent ${quoted}: ${String(err)}` }, fromPeer);
+			this.#sendError(`agent ${quoted}: ${String(err)}`, fromPeer);
 		};
 		switch (cmd) {
 			case "chat": {
@@ -900,7 +973,7 @@ export class CollabHost {
 				// means: the guest gets the same reply either way.
 				const trimmed = typeof text === "string" ? text.trim() : "";
 				if (!trimmed) {
-					this.#socket?.send({ t: "error", message: `agent ${quoted}: empty chat message` }, fromPeer);
+					this.#sendError(`agent ${quoted}: empty chat message`, fromPeer);
 					return;
 				}
 				// Mirrors the hub's #submitChatMessage: revive if parked, steer if mid-turn.
@@ -934,13 +1007,27 @@ export class CollabHost {
 				// knows but cannot carry out. The value is not echoed back — the guest
 				// sent it, and it is unvalidated enough that repeating it is the sender
 				// choosing what the host emits.
-				this.#socket?.send({ t: "error", message: `agent ${quoted}: unknown agent command` }, fromPeer);
+				this.#sendError(`agent ${quoted}: unknown agent command`, fromPeer);
 				break;
 		}
 	}
 
 	/** Incremental transcript read mirroring the hub's readFileIncremental contract. */
-	async #handleFetchTranscript(reqId: number, agentId: string, fromByte: number, fromPeer: number): Promise<void> {
+	async #handleFetchTranscript(reqId: unknown, agentId: unknown, fromByte: unknown, fromPeer: number): Promise<void> {
+		// The reply echoes both of these back — `reqId` so the guest can match it to
+		// its request, `fromByte` as the resume point — so this frame is a second
+		// carrier for a guest value, and #sendError cannot reach it. A 100,000-
+		// character `reqId` measured a 100,051-byte reply. Narrowed rather than
+		// truncated: neither is a label, and a correlation id the host altered would
+		// match nothing at the other end.
+		if (!Number.isFinite(reqId) || !Number.isFinite(fromByte) || (fromByte as number) < 0) {
+			this.#sendError("fetch-transcript needs a numeric reqId and a non-negative fromByte", fromPeer);
+			return;
+		}
+		return this.#fetchTranscript(reqId as number, agentId, fromByte as number, fromPeer);
+	}
+
+	async #fetchTranscript(reqId: number, agentId: unknown, fromByte: number, fromPeer: number): Promise<void> {
 		// The read is asynchronous, so the peer can leave — or the whole room can be
 		// recreated — before there is anything to reply with.
 		const stillTheAsker = this.#socket?.addressee(fromPeer);
@@ -948,7 +1035,7 @@ export class CollabHost {
 			if (!stillTheAsker?.()) return;
 			this.#socket?.send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
 		};
-		const file = AgentRegistry.global().get(agentId)?.sessionFile;
+		const file = AgentRegistry.global().get(typeof agentId === "string" ? agentId : "")?.sessionFile;
 		if (!file) {
 			reply("", fromByte, "no transcript available");
 			return;
@@ -981,7 +1068,7 @@ export class CollabHost {
 			}
 			reply(slice.toString("utf-8"), reachedEof ? stat.size : fromByte + slice.byteLength);
 		} catch (err) {
-			logger.debug("collab transcript read failed", { agentId, error: String(err) });
+			logger.debug("collab transcript read failed", { agentId: this.#label(agentId), error: String(err) });
 			reply("", fromByte, String(err));
 		}
 	}

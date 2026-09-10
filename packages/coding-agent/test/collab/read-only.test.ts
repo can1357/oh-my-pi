@@ -335,7 +335,7 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		// and a reply that disowned it would be both bounded and wrong.
 		expect(reply.message).toContain(`${huge.slice(0, 64)}…`);
 		expect(reply.message).not.toContain(huge);
-		expect(reply.message).not.toContain("unnamed agent");
+		expect(reply.message).not.toContain("(unnamed)");
 	});
 
 	it("answers rather than throwing when the agent id is a nested array", async () => {
@@ -358,7 +358,7 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		guest.socket.send({ t: "agent-cmd", cmd: "revive", agentId: root } as unknown as CollabFrame);
 		const reply = await guest.nextFrame();
 		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
-		expect(reply.message).toContain("unnamed agent");
+		expect(reply.message).toContain("(unnamed)");
 	});
 
 	it("refuses a prompt whose text is not a string, with or without images", async () => {
@@ -383,6 +383,83 @@ describe("collab frames a guest can send that the host must still answer", () =>
 			expect(reply.message).toContain("text must be a string");
 		}
 		expect(harness.prompts).toHaveLength(0);
+	});
+
+	it("bounds a reply composed somewhere else, not just the parts it chooses", async () => {
+		const guest = await joinAsGuest(host.link, "composed-reply");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// `chat` and `revive` reach `ensureLive`, which embeds the id it was handed
+		// twice, in prose of its own, in another module. Bounding the id at this
+		// handler left that untouched: 100,011 characters came back as a 200,211-byte
+		// reply, larger than the unbounded version the bound was added to fix. The cap
+		// has to sit on the finished message.
+		const huge = `long-agent-${"x".repeat(100_000)}`;
+		guest.socket.send({ t: "agent-cmd", cmd: "revive", agentId: huge } as unknown as CollabFrame);
+		const reply = await guest.nextFrame();
+		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+		expect(Buffer.byteLength(JSON.stringify(reply))).toBeLessThan(1024);
+		expect(reply.message).not.toContain(huge);
+	});
+
+	it("bounds the protocol-mismatch reply it quotes the guest's version into", async () => {
+		const huge = "v".repeat(100_000);
+		const guest = await joinWithRawHello(host.link, { proto: huge, name: "huge-proto" });
+		guestCleanups.push(() => guest.socket.close());
+		const reply = await guest.nextFrame();
+		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+		expect(reply.message).toContain("protocol mismatch");
+		expect(Buffer.byteLength(JSON.stringify(reply))).toBeLessThan(1024);
+		expect(reply.message).not.toContain(huge);
+	});
+
+	it("refuses a prompt whose images are not image content", async () => {
+		const guest = await joinAsGuest(host.link, "bad-image-element");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// The text defect one field over. An element the host cannot represent is
+		// content the guest meant to send, so it is refused rather than dropped —
+		// accepted, it is persisted and throws a turn later inside a serializer.
+		for (const images of [
+			[{ type: "text", text: 42 }],
+			[{ type: "image", data: 7, mimeType: "image/png" }],
+			[{ type: "image", data: "AAAA" }],
+		]) {
+			guest.socket.send({ t: "prompt", text: "carry me", images } as unknown as CollabFrame);
+			const reply = await guest.nextFrame();
+			if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+			expect(reply.message).toContain("every image must carry string data and mimeType");
+		}
+		// Well-formed images still go through, so the guard rejects shape and not use.
+		const delivered = harness.nextPrompt();
+		guest.socket.send({
+			t: "prompt",
+			text: "carry me",
+			images: [{ type: "image", data: "AAAA", mimeType: "image/png" }],
+		} as unknown as CollabFrame);
+		await Promise.race([delivered, Bun.sleep(1_000)]);
+		expect(harness.prompts).toHaveLength(1);
+	});
+
+	it("narrows the transcript reply's echoed fields instead of quoting them back", async () => {
+		const guest = await joinAsGuest(host.link, "bad-reqid");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// A second carrier, and one #sendError cannot reach: the transcript reply
+		// echoes `reqId` so the guest can match it and `fromByte` as the resume
+		// point. A 100,000-character reqId measured a 100,051-byte reply.
+		const huge = "r".repeat(100_000);
+		guest.socket.send({ t: "fetch-transcript", reqId: huge, agentId: "nope", fromByte: 0 } as unknown as CollabFrame);
+		const reply = await guest.nextFrame();
+		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+		expect(Buffer.byteLength(JSON.stringify(reply))).toBeLessThan(1024);
+		expect(reply.message).toContain("numeric reqId");
 	});
 
 	it("answers an agent chat whose message is not a string instead of dropping it", async () => {
