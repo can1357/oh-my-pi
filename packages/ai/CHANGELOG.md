@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- OAuth project changes invalidate stale credential reservations and cooldown state.
 - Recover fully blocked API-key pools with exclusive probes, clear the actual blocked scope after successful inference, and preserve nested fallback order.
 
 - Release failed/cancelled streams without awaiting pending settlement so turn and probe locks cannot stall.
