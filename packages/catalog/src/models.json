@@ -75847,13 +75847,14 @@
 	"deepseek": {
 		"deepseek-flash": {
 			"id": "deepseek-flash",
-			"name": "deepseek-flash",
+			"name": "DeepSeek V4.1 Flash",
 			"api": "openai-completions",
 			"provider": "deepseek",
 			"baseUrl": "https://api.deepseek.com",
-			"reasoning": false,
+			"reasoning": true,
 			"input": [
-				"text"
+				"text",
+				"image"
 			],
 			"cost": {
 				"input": 0.3,
@@ -75890,11 +75891,6 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 384000,
-			"identity": {
-				"class": "deepseek"
-			},
-			"requiresGlyphTokenization": false,
-			"tokenizer": "deepseek-v3",
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -75907,8 +75903,8 @@
 				"supportsUsageInStreaming": true,
 				"alwaysSendMaxTokens": false,
 				"disableReasoningOnForcedToolChoice": false,
-				"disableReasoningOnToolChoice": false,
-				"supportsToolChoice": true,
+				"disableReasoningOnToolChoice": true,
+				"supportsToolChoice": false,
 				"supportsForcedToolChoice": true,
 				"supportsNamedToolChoice": true,
 				"maxTokensField": "max_tokens",
@@ -75917,29 +75913,25 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "zai-thinking-disabled",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
 				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": false,
-				"requiresReasoningContentForAllAssistantTurns": false,
-				"allowsSyntheticReasoningContentForToolCalls": true,
+				"requiresReasoningContentForToolCalls": true,
+				"requiresReasoningContentForAllAssistantTurns": true,
+				"allowsSyntheticReasoningContentForToolCalls": false,
 				"replayReasoningContent": false,
 				"qwenPreserveThinking": false,
 				"qwenTemplateReasoningEffort": false,
-				"requiresAssistantContentForToolCalls": false,
+				"requiresAssistantContentForToolCalls": true,
 				"supportsPromptCacheBreakpoints": false,
 				"isOpenRouterHost": false,
 				"wireModelIdMode": "raw",
 				"isVercelGatewayHost": false,
 				"supportsStrictMode": true,
-				"extraBody": {
-					"thinking": {
-						"type": "enabled"
-					}
-				},
 				"toolStrictMode": "mixed",
+				"streamIdleTimeoutMs": 300000,
 				"stripDeepseekSpecialTokens": true,
 				"streamMarkupHealingPattern": "dsml",
 				"reasoningDeltasMayBeCumulative": false,
@@ -75949,13 +75941,102 @@
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
-				"stripImageInput": true,
+				"stripImageInput": false,
 				"thinkingLoopGuard": "deepseek",
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
-				"supportsPromptCacheKey": false
+				"supportsPromptCacheKey": false,
+				"whenThinking": {
+					"supportsStore": false,
+					"supportsDeveloperRole": false,
+					"supportsMultipleSystemMessages": true,
+					"supportsReasoningEffort": true,
+					"supportsReasoningParams": true,
+					"supportsSamplingParams": true,
+					"supportsPenaltyAndStopParams": true,
+					"reasoningEffortMap": {},
+					"supportsUsageInStreaming": true,
+					"alwaysSendMaxTokens": false,
+					"disableReasoningOnForcedToolChoice": false,
+					"disableReasoningOnToolChoice": true,
+					"supportsToolChoice": false,
+					"supportsForcedToolChoice": true,
+					"supportsNamedToolChoice": true,
+					"maxTokensField": "max_tokens",
+					"requiresToolResultName": false,
+					"requiresAssistantAfterToolResult": false,
+					"requiresThinkingAsText": false,
+					"requiresMistralToolIds": false,
+					"thinkingFormat": "openai",
+					"reasoningDisableMode": "lowest-effort",
+					"omitReasoningEffort": false,
+					"includeEncryptedReasoning": true,
+					"filterReasoningHistory": false,
+					"reasoningContentField": "reasoning_content",
+					"requiresReasoningContentForToolCalls": true,
+					"requiresReasoningContentForAllAssistantTurns": true,
+					"allowsSyntheticReasoningContentForToolCalls": false,
+					"replayReasoningContent": false,
+					"qwenPreserveThinking": false,
+					"qwenTemplateReasoningEffort": false,
+					"requiresAssistantContentForToolCalls": true,
+					"supportsPromptCacheBreakpoints": false,
+					"isOpenRouterHost": false,
+					"wireModelIdMode": "raw",
+					"isVercelGatewayHost": false,
+					"supportsStrictMode": true,
+					"extraBody": {
+						"thinking": {
+							"type": "enabled"
+						}
+					},
+					"toolStrictMode": "mixed",
+					"streamIdleTimeoutMs": 300000,
+					"stripDeepseekSpecialTokens": true,
+					"streamMarkupHealingPattern": "dsml",
+					"reasoningDeltasMayBeCumulative": false,
+					"emptyLengthFinishIsContextError": false,
+					"usesOpenAIToolCallIdLimit": false,
+					"dropThinkingWhenReasoningEffort": false,
+					"nativeKimiK3Reasoning": false,
+					"zaiReasoningEffortDialect": false,
+					"clampOutputToModelMax": false,
+					"stripImageInput": false,
+					"thinkingLoopGuard": "deepseek",
+					"rejectRootObjectUnion": false,
+					"retryWithoutStrictOnGrammarError": false,
+					"supportsPromptCacheKey": false
+				}
 			},
-			"supportsComputerUse": false
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"high",
+					"max"
+				]
+			},
+			"identity": {
+				"class": "deepseek",
+				"family": "flash"
+			},
+			"requiresGlyphTokenization": false,
+			"tokenizer": "deepseek-v3",
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": true,
+				"maxTokensField": "max_tokens",
+				"supportsToolChoice": false,
+				"extraBody": {
+					"thinking": {
+						"type": "enabled"
+					}
+				},
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"requiresAssistantContentForToolCalls": true
+			}
 		},
 		"deepseek-v4-flash": {
 			"id": "deepseek-v4-flash",

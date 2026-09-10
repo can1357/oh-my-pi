@@ -429,6 +429,11 @@
 						"priority": 0
 					},
 					{
+						"id": "flash",
+						"glob": "*deepseek-flash",
+						"priority": 0
+					},
+					{
 						"id": "pro",
 						"glob": "*deepseek*v4*pro*",
 						"priority": 0
@@ -4575,7 +4580,20 @@
 				}
 			},
 			{
-				"source": "classes/deepseek.kdl:76",
+				"source": "classes/deepseek.kdl:78",
+				"class": "deepseek",
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek-flash"
+					}
+				],
+				"wire": {
+					"stripImageInput": false
+				}
+			},
+			{
+				"source": "classes/deepseek.kdl:81",
 				"class": "deepseek",
 				"providers": [
 					"ollama-cloud",
