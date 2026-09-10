@@ -274,7 +274,13 @@ describe("collab chunked welcome (#3144)", () => {
 		// Both the warning and the rejection that settles the join render it, and both
 		// sit inside the one catch — so rendering it unsafely throws there instead,
 		// `firstWelcome` is never settled, and `join()` neither resolves nor rejects.
-		// A hung join is the observable difference, which is why this races a timer.
+		//
+		// Raced against a count of event-loop turns, not a clock. A wall-clock budget
+		// has to out-wait the slowest legitimate run, so it either flakes on a loaded
+		// runner or gets raised until it proves nothing; a turn count costs whatever
+		// the machine takes and still terminates. Simply awaiting the rejection is
+		// worse than either: measured, the unfixed code hangs the whole file rather
+		// than tripping the per-test timeout, so the oracle has to be here.
 		const failure = {
 			toString() {
 				throw new Error("cannot render me");
@@ -288,14 +294,20 @@ describe("collab chunked welcome (#3144)", () => {
 		const guest = new CollabGuestLink(makeFailingGuestContext(failure));
 		const joinAttempt = guest.join(host.link);
 		try {
-			await expect(
-				Promise.race([
-					joinAttempt,
-					Bun.sleep(500).then(() => {
-						throw new Error("join neither resolved nor rejected");
-					}),
-				]),
-			).rejects.toThrow("(unprintable error)");
+			const stillPending = Symbol("still pending");
+			const settled = await Promise.race([
+				joinAttempt.then(
+					() => "resolved" as unknown,
+					(err: unknown) => err,
+				),
+				(async () => {
+					for (let turn = 0; turn < 500; turn++) await new Promise(resolve => setImmediate(resolve));
+					return stillPending;
+				})(),
+			]);
+			expect(settled).not.toBe(stillPending);
+			expect(settled).toBeInstanceOf(Error);
+			expect((settled as Error).message).toContain("(unprintable error)");
 			expect(records[0]?.error).toBe("(unprintable error)");
 		} finally {
 			unregister();

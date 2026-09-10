@@ -288,9 +288,10 @@ describe("collab frames a guest can send that the host must still answer", () =>
 	});
 
 	it("reports a boolean protocol version as itself, not as unnamed", async () => {
-		// The numeric arm of #label is covered by the proto handshake contract; the
-		// boolean arm is reachable from the same field and was not. Both exist so a
-		// mismatch names what arrived rather than calling it unnamed.
+		// #label's boolean arm. The numeric one is covered elsewhere — the proto
+		// handshake contract in guest-ui-request.test.ts sends COLLAB_PROTO - 1, and
+		// dropping only the number arm fails it — but nothing reached this one. Both
+		// exist so a mismatch names what arrived rather than calling it unnamed.
 		const guest = await joinWithRawHello(host.link, { proto: true, name: "bool-proto" });
 		guestCleanups.push(() => guest.socket.close());
 		const reply = await guest.nextFrame();
@@ -640,17 +641,19 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		// Tolerating an unknown property was reasoned as safe because such a field is
 		// read and dropped. It is not: the image goes into a session message, is
 		// persisted, and is handed to shrinkForReplication, which measures it with
-		// `JSON.stringify` before walking it — so a deep value can take either step
-		// down, and both are recursive.
+		// `JSON.stringify` before walking it — both recurse, so a deep value can take
+		// either step down and which one goes first is not fixed.
 		//
-		// Sent past `CollabSocket.send` deliberately. That path serializes with
-		// JSON.stringify, which is recursive and fails near the same depth the walk
-		// does, so a cooperative client cannot carry the payload that motivates this
-		// fix. JSON.parse is iterative and took 500,000 levels of hand-built text in a
-		// probe without complaint, and the host parses exactly that off the wire, so
-		// the reachable actor is a protocol-compatible client that is not this
-		// library. This builds the frame the way that client would, at the 100,000
-		// levels asserted below.
+		// Sent past `CollabSocket.send` deliberately, and the reason is structural
+		// rather than a matter of thresholds. `JSON.stringify` and the walk both
+		// recurse, so both are bounded by the stack and both give out somewhere a
+		// runtime and its stack budget decide — measured together here between 35,000
+		// and 40,000, and separately on other hardware. `JSON.parse` is iterative and
+		// took 500,000 levels of hand-built text in a probe without complaint. That
+		// asymmetry is the durable part: a client that serializes with this library
+		// cannot build a payload the host's own walk will refuse, and one that emits
+		// bytes directly can. This builds the frame the way the second client would,
+		// at the 100,000 levels asserted below.
 		const depth = 100_000;
 		const nested = `${"[".repeat(depth)}${"]".repeat(depth)}`;
 		const raw = `{"t":"prompt","text":"carry me","images":[{"type":"image","data":"AAAA","mimeType":"image/png","somethingNewer":${nested}}]}`;

@@ -601,8 +601,9 @@ export class CollabHost {
 	/**
 	 * A value of unknown provenance, reduced to something safe to put in a frame or
 	 * a log line: bounded in length, and never one whose own stringification can
-	 * throw — a 5,000-deep array reaches this handler and `RangeError`s out of a
-	 * template.
+	 * throw. A 5,000-deep array reaches this handler and would `RangeError` out of a
+	 * template — it does not, because it lands in the object arm below and is
+	 * reported as unnamed without being converted at all.
 	 *
 	 * A number or a boolean is reported as itself, because for some of these fields
 	 * that is the well-formed case and the reply has to name what actually arrived —
