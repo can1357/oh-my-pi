@@ -2477,7 +2477,24 @@ impl Process {
 			};
 		}
 		let process_group = if group { self.group_id() } else { None };
+		capture_walk_barrier();
 		let (descendants, descendants_complete) = self.signalable_descendants_checked(&protected);
+		// Demanded on both sides of the walk, not just before it. A root that
+		// exits while the walk is under way reparents its children out of the
+		// subtree, and the walk then answers empty *and whole* — indistinguishable
+		// from a root that had no children at all. Comparing liveness across the
+		// walk is not enough either: what makes the answer unusable is that the
+		// root stopped being able to hold it, whichever side of the walk that
+		// happened on.
+		//
+		// Demanded of a group capture too. The group answers for its own members,
+		// but a descendant that left it under `setsid(2)` is in neither the group
+		// nor a walk the root can no longer hold, so having a group is not
+		// evidence that the tree was seen whole. The cost is a root that exits
+		// just after a walk that did see everything: that capture is reported
+		// incomplete although nothing was missed, which is the direction this
+		// errs in everywhere else.
+		let descendants_complete = descendants_complete && self.status() == ProcessStatus::Running;
 		TerminationPlan {
 			// Pinned while the group is certainly still ours, so each later signal
 			// can prove the number has not changed hands.
@@ -2491,6 +2508,33 @@ impl Process {
 		}
 	}
 }
+
+// Test-only pause between a capture's liveness check and its descendant walk.
+// See `capture_walk_barrier`.
+#[cfg(test)]
+thread_local! {
+	static CAPTURE_WALK_BARRIER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+		const { std::cell::RefCell::new(None) };
+}
+
+/// Run the test-only barrier standing between a capture's liveness check and
+/// its descendant walk, if one is armed.
+///
+/// The window it exists for — the root alive when the plan starts and gone by
+/// the time the walk ends — is a race no arrangement of processes can be asked
+/// to produce. Holding the capture here lets a test end the root inside it, so
+/// what is covered is the lifecycle boundary rather than the shape of the
+/// expression that reads it.
+#[cfg(test)]
+fn capture_walk_barrier() {
+	let barrier = CAPTURE_WALK_BARRIER.with(|slot| slot.borrow_mut().take());
+	if let Some(barrier) = barrier {
+		barrier();
+	}
+}
+
+#[cfg(not(test))]
+const fn capture_walk_barrier() {}
 
 /// The harness pid — the one process a run-cancellation sweep must never
 /// signal.
@@ -3716,6 +3760,76 @@ mod tests {
 			"a refusal reports that nothing was swept, so it must not have swept anything"
 		);
 		assert!(cleaned, "the survivor must not outlive the test");
+	}
+
+	/// A root that dies once its liveness has been checked takes the walk's
+	/// meaning with it: its children are reparented out of the subtree, so the
+	/// walk answers empty *and whole*, which is exactly what a root with no
+	/// children answers. Checking liveness only before the walk lets that
+	/// through as a complete capture over survivors nothing will signal.
+	///
+	/// The root is ended inside the capture rather than around it, because the
+	/// window opens between two statements and no arrangement of processes can
+	/// be asked to land there. It is ended at the near edge of that window —
+	/// after the check, before the walk — which is the reachable end of it; a
+	/// root dying mid-walk differs only in how much the walk had already seen.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_root_that_dies_after_its_liveness_check_does_not_capture_a_whole_tree() {
+		use std::io::BufRead;
+
+		// The survivor reports its own pid, because reaping the root below
+		// reparents it away and no walk from here can name it afterwards — this
+		// test would otherwise strand a process on every run.
+		let mut child = std::process::Command::new("/bin/sh")
+			.arg("-c")
+			.arg("sleep 30 2>/dev/null & echo $!; exec sleep 30")
+			.stdout(std::process::Stdio::piped())
+			.spawn()
+			.expect("spawn root");
+		// One line, not to EOF: the root holds stdout open for its whole sleep.
+		let mut reported = String::new();
+		std::io::BufReader::new(child.stdout.take().expect("root stdout"))
+			.read_line(&mut reported)
+			.expect("read survivor pid");
+		let survivor: i32 = reported.trim().parse().expect("survivor pid");
+		let root = Process::from_pid(i32::try_from(child.id()).expect("root pid")).expect("pin root");
+		assert_eq!(
+			root.status(),
+			ProcessStatus::Running,
+			"the capture must start from a live root, or it takes the early exit instead"
+		);
+
+		let pid = root.pid();
+		CAPTURE_WALK_BARRIER.with(|slot| {
+			*slot.borrow_mut() = Some(Box::new(move || {
+				// SAFETY: `pid` is this test's own child, and reaping it here is what
+				// puts the walk that follows in front of a root that is gone.
+				unsafe {
+					libc::kill(pid, KILL_SIGNAL);
+					let mut status = 0;
+					libc::waitpid(pid, &raw mut status, 0);
+				}
+			}));
+		});
+		let plan = root.capture_termination(false);
+		CAPTURE_WALK_BARRIER.with(|slot| *slot.borrow_mut() = None);
+
+		let complete = plan.descendants_complete;
+		let live = plan.live_at_capture;
+		// Cleaned up before any assertion can fail, since a panic here would
+		// otherwise leave the survivor running for its full sleep.
+		// SAFETY: `survivor` is the pid this test's own child reported.
+		unsafe {
+			libc::kill(survivor, KILL_SIGNAL);
+		}
+		let _ = child.wait();
+
+		assert!(live, "the plan must have been built by the live path, not the early exit");
+		assert!(
+			!complete,
+			"a walk whose root died under it is not a whole one, whatever it happened to return"
+		);
 	}
 
 	/// A plan whose descendant walk stopped short cannot report a completed

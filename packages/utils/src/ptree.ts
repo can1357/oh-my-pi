@@ -631,6 +631,11 @@ export class ChildProcess<In extends InMask = InMask> {
 			// deadline still has work to do once the root is gone: reach that group
 			// through the pinned leader (or the retained Windows handle), both of
 			// which refuse a pid that is no longer ours.
+			//
+			// This fires for a root that already exited leaving nothing behind, too,
+			// and records a timeout over a command that finished. Telling the two
+			// apart needs the sweep to report what it found, and it reports only that
+			// it completed — an empty tree and a killed one both come back `true`.
 			if (this.proc.exitCode === null || this.#terminateGroup || this.#windowsRootProcess) {
 				this.kill(new TimeoutError(ms, this.#stderrTail), -1);
 			}
