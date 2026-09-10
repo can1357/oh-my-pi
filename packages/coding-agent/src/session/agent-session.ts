@@ -8206,9 +8206,10 @@ export class AgentSession {
 		return changed;
 	}
 
-	/** Toggles priority service based on the effective tier of the next request. */
+	/** Toggles priority based on configured and currently realized state. */
 	toggleFastMode(): boolean {
-		if (!this.setFastMode(!this.isFastModeActive())) return false;
+		const shouldEnable = !this.isFastModeEnabled() && !this.isFastModeActive();
+		if (!this.setFastMode(shouldEnable)) return false;
 		return this.#models.isFastModeEnabled();
 	}
 	#recordUserActivity(): void {
