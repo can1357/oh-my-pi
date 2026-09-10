@@ -198,6 +198,28 @@ describe.skipIf(isWindows)("resolveExplicitSearchPaths shared non-root ancestor"
 	});
 });
 
+describe.skipIf(!isWindows)("resolveExplicitSearchPaths Windows casing", () => {
+	it("collapses overlapping scopes whose drive letters differ in case", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "pi-search-case-"));
+		try {
+			await fs.mkdir(path.join(repo, "src"), { recursive: true });
+			await Bun.write(path.join(repo, "src", "a.ts"), "alpha\n");
+			const driveLetter = repo[0]!;
+			const differentlyCasedDrive =
+				driveLetter === driveLetter.toLowerCase() ? driveLetter.toUpperCase() : driveLetter.toLowerCase();
+			const absoluteAncestor = `${differentlyCasedDrive}${repo.slice(1)}`;
+
+			const resolved = await resolveExplicitSearchPaths([absoluteAncestor, "src/a.ts"], repo);
+			expect(resolved).toBeDefined();
+			if (!resolved) throw new Error("expected resolveExplicitSearchPaths to resolve");
+			expect(resolved.targets).toBeUndefined();
+			expect(resolved.basePath.toLowerCase()).toBe(repo.toLowerCase());
+		} finally {
+			await removeWithRetries(repo);
+		}
+	});
+});
+
 describe.skipIf(isWindows)("search with explicit walker-pruned file targets", () => {
 	let repo: string;
 

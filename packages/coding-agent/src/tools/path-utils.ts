@@ -1175,6 +1175,10 @@ function buildBraceUnion(patterns: string[]): string | undefined {
 	return `{${uniquePatterns.join(",")}}`;
 }
 
+function pathComparisonKey(filePath: string): string {
+	return process.platform === "win32" ? filePath.toLowerCase() : filePath;
+}
+
 function findCommonBasePath(paths: string[]): string {
 	if (paths.length === 0) return ".";
 	let commonParts = path.resolve(paths[0]).split(path.sep);
@@ -1182,7 +1186,10 @@ function findCommonBasePath(paths: string[]): string {
 		const candidateParts = path.resolve(candidatePath).split(path.sep);
 		let sharedCount = 0;
 		const maxShared = Math.min(commonParts.length, candidateParts.length);
-		while (sharedCount < maxShared && commonParts[sharedCount] === candidateParts[sharedCount]) {
+		while (
+			sharedCount < maxShared &&
+			pathComparisonKey(commonParts[sharedCount]!) === pathComparisonKey(candidateParts[sharedCount]!)
+		) {
 			sharedCount += 1;
 		}
 		commonParts = commonParts.slice(0, sharedCount);
@@ -1247,7 +1254,9 @@ async function resolveSearchPathItems(
 	// disjoint trees → `/`), a collapsed walk traverses every unrelated sibling
 	// under it — fan out into per-item targets so each scan stays bounded to a
 	// requested path.
-	const commonIsRequestedScope = parsedItems.some(item => item.absoluteBasePath === commonBasePath);
+	const commonIsRequestedScope = parsedItems.some(
+		item => pathComparisonKey(item.absoluteBasePath) === pathComparisonKey(commonBasePath),
+	);
 	// Walkers prune `.git` unconditionally and honor gitignore, so a plain-file
 	// item folded into a directory walk's glob union (`.` + `.git/config`) can
 	// silently never match. Callers that dedupe overlapping results opt in via
