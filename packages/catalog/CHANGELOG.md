@@ -18,6 +18,7 @@
 - Amazon Bedrock OpenAI models, plus unclassified profiles such as opaque application-inference-profile ARNs, now carry the compatibility policy required to preserve image-bearing tool results ([#11681](https://github.com/can1357/oh-my-pi/issues/11681)).
 - DeepSeek V4.1 Flash requests now honor the documented 384K output maximum instead of being capped at 64K ([#11769](https://github.com/can1357/oh-my-pi/issues/11769)).
 - Fixed the first-party `deepseek-flash` alias missing the V4.1 Flash wire contract: it now sends `max_tokens` with `reasoning_content` and replays reasoning and assistant content on tool calls with no tool choice ([#11799](https://github.com/can1357/oh-my-pi/pull/11799) by [@brit](https://github.com/brit)).
+- Fixed Meta Model API and Muse Code requests failing with 400 whenever omp forced a tool choice: `api.meta.ai/v1` accepts only `tool_choice: "auto"`, so `none`, `required`, and named choices (subagent final-retry `yield`, forced tools, structured output, compaction handoff) are now omitted instead of sent.
 
 ## [18.1.17] - 2026-09-10
 

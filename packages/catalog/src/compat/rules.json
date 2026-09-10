@@ -11214,7 +11214,7 @@
 				}
 			},
 			{
-				"source": "providers/meta.kdl:7",
+				"source": "providers/meta.kdl:10",
 				"class": "unknown",
 				"providers": [
 					"meta"
@@ -11238,7 +11238,8 @@
 				"wire": {
 					"includeEncryptedReasoning": true,
 					"supportsReasoningEffort": true,
-					"clampOutputToModelMax": true
+					"clampOutputToModelMax": true,
+					"supportsToolChoice": false
 				}
 			},
 			{
@@ -11473,7 +11474,7 @@
 				}
 			},
 			{
-				"source": "providers/muse-code.kdl:12",
+				"source": "providers/muse-code.kdl:15",
 				"class": "unknown",
 				"providers": [
 					"muse-code"
@@ -11497,7 +11498,8 @@
 				"wire": {
 					"includeEncryptedReasoning": true,
 					"supportsReasoningEffort": true,
-					"clampOutputToModelMax": true
+					"clampOutputToModelMax": true,
+					"supportsToolChoice": false
 				},
 				"catalog": {
 					"editPromptVariant": "compact"
