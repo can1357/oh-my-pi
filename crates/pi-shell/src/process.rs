@@ -1741,6 +1741,14 @@ impl TerminationPlan {
 		// Group survivors join the captured set as targets in their own right, so
 		// the closing wait covers them instead of only the root's own subtree.
 		let (rescan, rescan_complete) = self.root.signalable_descendants_checked(&self.protected);
+		// No liveness demand on this rescan, unlike the capture that preceded it.
+		// The polite wave above signals the root, so by here a dead root is the
+		// ordinary successful path rather than an anomaly — demanding liveness
+		// marks nearly every graceful termination incomplete. What that leaves
+		// open is a descendant spawned during the grace window and reparented by
+		// the root's own exit before this rescan: it is in neither the signal nor
+		// the wait. The captured set still covers everything that existed when
+		// the plan was built, which is what this wave mostly relies on.
 		let survivors = self.group_survivors();
 		let group_accounted = survivors.is_known();
 		extend_by_identity(
@@ -1967,7 +1975,18 @@ impl Process {
 	/// the wait and let the tree report itself gone.
 	pub fn hard_kill_tree(&self) -> Result<ProcessExitWait> {
 		let protected = host_protected_pids();
+		capture_walk_barrier();
 		let (descendants, complete) = self.signalable_descendants_checked(&protected);
+		// Separate from `complete`, and reported separately, because they are
+		// different failures: a walk stops short when it could not look, while
+		// this one looked at everything there was to see and the root took the
+		// answer's meaning with it on the way out. Folding the second into the
+		// first would report a whole enumeration as a truncated one.
+		anyhow::ensure!(
+			self.walk_outlived_its_root(),
+			"root {} exited while its descendants were being walked",
+			self.pid()
+		);
 		self.hard_kill_walked_tree(descendants, complete, &protected)
 	}
 
@@ -2249,6 +2268,21 @@ impl Process {
 		Ok(())
 	}
 
+	/// Whether a descendant walk just taken from this root still means what it
+	/// said — that is, whether the root was able to hold it throughout.
+	///
+	/// A root that exits mid-walk reparents its children out of the subtree, so
+	/// the walk answers empty *and whole*: the same answer a root with no
+	/// children gives, and the reason a liveness check before the walk is not
+	/// enough on its own.
+	///
+	/// Always true where [`WALK_SURVIVES_A_DEAD_ROOT`] holds, which is where
+	/// demanding liveness would reject the very capture the walk was built for.
+	#[must_use]
+	fn walk_outlived_its_root(&self) -> bool {
+		WALK_SURVIVES_A_DEAD_ROOT || self.status() == ProcessStatus::Running
+	}
+
 	/// Whether `pgid` still names the group this reference leads.
 	fn leads_group(&self, pgid: i32) -> bool {
 		pgid == self.pid() && group_still_led_by(pgid, Some(self))
@@ -2494,7 +2528,7 @@ impl Process {
 		// just after a walk that did see everything: that capture is reported
 		// incomplete although nothing was missed, which is the direction this
 		// errs in everywhere else.
-		let descendants_complete = descendants_complete && self.status() == ProcessStatus::Running;
+		let descendants_complete = descendants_complete && self.walk_outlived_its_root();
 		TerminationPlan {
 			// Pinned while the group is certainly still ours, so each later signal
 			// can prove the number has not changed hands.
@@ -2535,6 +2569,27 @@ fn capture_walk_barrier() {
 
 #[cfg(not(test))]
 const fn capture_walk_barrier() {}
+
+/// Whether a descendant walk keeps its meaning after the root it was taken
+/// from has exited.
+///
+/// True only on Windows, where the walk is one Toolhelp snapshot keyed on
+/// `th32ParentProcessID` and the kernel does not reparent: a dead root's
+/// children still name it, and the retained root handle keeps the process
+/// object alive so its pid cannot be reused underneath the snapshot. Sweeping
+/// a dead Windows root's tree is deliberate, not a race.
+///
+/// Elsewhere the walk is rooted at a pid the kernel reassigns children away
+/// from, so it answers empty once the root is gone. This is not the
+/// snapshot-versus-re-read distinction it resembles: the macOS walk is also a
+/// snapshot, but of *current* parentage, so it loses a reparented child just
+/// as the Linux walk does.
+#[cfg(target_os = "windows")]
+const WALK_SURVIVES_A_DEAD_ROOT: bool = true;
+
+/// See the Windows definition.
+#[cfg(not(target_os = "windows"))]
+const WALK_SURVIVES_A_DEAD_ROOT: bool = false;
 
 /// The harness pid — the one process a run-cancellation sweep must never
 /// signal.
@@ -3829,6 +3884,70 @@ mod tests {
 		assert!(
 			!complete,
 			"a walk whose root died under it is not a whole one, whatever it happened to return"
+		);
+	}
+
+	/// The hard-kill sweep's own copy of the same demand. `capture_termination`
+	/// grew the post-walk liveness check first; this path takes the identical
+	/// walk and had none, so a root that exited under it built a waiter holding
+	/// nothing but the corpse and `killTreeAndWait()` reported the tree gone
+	/// over children that had been reparented away.
+	///
+	/// Refused with its own error rather than through the walk's completeness:
+	/// the enumeration did not stop short here, so calling it truncated would
+	/// name the wrong failure.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_hard_kill_whose_root_dies_under_the_walk_is_refused() {
+		use std::io::BufRead;
+
+		let mut child = std::process::Command::new("/bin/sh")
+			.arg("-c")
+			.arg("sleep 30 2>/dev/null & echo $!; exec sleep 30")
+			.stdout(std::process::Stdio::piped())
+			.spawn()
+			.expect("spawn root");
+		let mut reported = String::new();
+		std::io::BufReader::new(child.stdout.take().expect("root stdout"))
+			.read_line(&mut reported)
+			.expect("read survivor pid");
+		let survivor: i32 = reported.trim().parse().expect("survivor pid");
+		let root = Process::from_pid(i32::try_from(child.id()).expect("root pid")).expect("pin root");
+
+		let pid = root.pid();
+		CAPTURE_WALK_BARRIER.with(|slot| {
+			*slot.borrow_mut() = Some(Box::new(move || {
+				// SAFETY: `pid` is this test's own child, and reaping it here is what
+				// puts the walk that follows in front of a root that is gone.
+				unsafe {
+					libc::kill(pid, KILL_SIGNAL);
+					let mut status = 0;
+					libc::waitpid(pid, &raw mut status, 0);
+				}
+			}));
+		});
+		let swept = root.hard_kill_tree();
+		CAPTURE_WALK_BARRIER.with(|slot| *slot.borrow_mut() = None);
+
+		let survivor_after = Process::from_pid(survivor).map(|found| found.status());
+		// SAFETY: `survivor` is the pid this test's own child reported.
+		unsafe {
+			libc::kill(survivor, KILL_SIGNAL);
+		}
+		let _ = child.wait();
+
+		let refusal = match swept {
+			Ok(_) => panic!("a sweep whose root died under its walk must not build a waiter"),
+			Err(error) => error.to_string(),
+		};
+		assert!(
+			refusal.contains("exited while its descendants were being walked"),
+			"the refusal must name the root's exit, not a short walk, got: {refusal}"
+		);
+		assert_eq!(
+			survivor_after,
+			Some(ProcessStatus::Running),
+			"the survivor the refusal is about must still have been running"
 		);
 	}
 
