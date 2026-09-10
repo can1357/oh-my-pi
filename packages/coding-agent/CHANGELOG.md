@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- OpenCode Go's new Flash model appears as `deepseek-v4.1-flash` in the model picker to distinguish it from V4 Flash.
+- OpenCode Go's new Flash model appears as `deepseek-v4.1-flash` in the model picker to distinguish it from V4 Flash ([#11586](https://github.com/can1357/oh-my-pi/pull/11586) by [@mazzanfar](https://github.com/mazzanfar)).
 
 - Marketplace plugins that share a repository root now load only their declared skills instead of every skill in the repository ([#11513](https://github.com/can1357/oh-my-pi/issues/11513)).
 ### Added

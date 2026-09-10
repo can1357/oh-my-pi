@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added DeepSeek V4.1 Flash on OpenCode Go with image input and low/high/max reasoning levels.
+- Added DeepSeek V4.1 Flash on OpenCode Go with image input and low/high/max reasoning levels ([#11586](https://github.com/can1357/oh-my-pi/pull/11586) by [@mazzanfar](https://github.com/mazzanfar)).
 
 ## [18.1.16] - 2026-09-09
 
