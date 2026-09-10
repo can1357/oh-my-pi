@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as envPreload from "@oh-my-pi/pi-utils/env-preload";
 import { isPidRunning } from "@oh-my-pi/pi-utils/procmgr";
 import { runCli } from "../src/cli";
 import * as computerWorkerEntry from "../src/tools/computer/worker-entry";
@@ -25,6 +26,20 @@ describe("worker selector dispatch", () => {
 
 		expect(process.exitCode).toBe(1);
 		expect(stderr).toHaveBeenCalledWith("Error: unknown worker selector: __omp_worker_does_not_exist\n");
+	});
+
+	it("preloads the project dotenv before importing a selected worker graph", async () => {
+		const gate = Promise.withResolvers<void>();
+		const preload = vi.spyOn(envPreload, "preloadProjectEnv").mockImplementation(() => gate.promise);
+		const startComputerWorker = vi.spyOn(computerWorkerEntry, "startComputerWorker").mockImplementation(() => {});
+
+		const dispatch = runCli(["__omp_worker_computer"]);
+		expect(preload).toHaveBeenCalledTimes(1);
+		expect(startComputerWorker).not.toHaveBeenCalled();
+
+		gate.resolve();
+		await dispatch;
+		expect(startComputerWorker).toHaveBeenCalledTimes(1);
 	});
 	it("declares workerHostEntry in process entry before dispatching worker selector", async () => {
 		const repoRoot = path.resolve(__dirname, "../../..");

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Project environment preloading now has a finite deadline, preventing slow filesystems from blocking application startup indefinitely.
+
 ## [18.1.16] - 2026-09-09
 
 ### Fixed

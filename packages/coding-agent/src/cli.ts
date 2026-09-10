@@ -25,6 +25,7 @@ import {
 	setProfile,
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
+import { preloadProjectEnv } from "@oh-my-pi/pi-utils/env-preload";
 import { fatal, interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
@@ -143,51 +144,61 @@ const STT_WORKER_ARG = "__omp_worker_stt";
 const TTS_WORKER_ARG = "__omp_worker_tts";
 const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
 
-async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
-	if (arg === TINY_WORKER_ARG) {
-		await runTinyWorker();
-		return true;
-	}
+type ReplayWorkerInbox = () => void;
+
+/**
+ * Installs the selected worker's buffering inbox before the first async
+ * boundary, then returns the stats-specific replay hook.
+ */
+function prepareWorkerInbox(arg: string | undefined): ReplayWorkerInbox | undefined {
 	if (arg === STATS_SYNC_WORKER_ARG) {
-		// The sync worker handles messages via `self.onmessage`, assigned during
-		// this *async* dynamic import. Bun flushes the worker's initial message
-		// buffer when the entry module's top-level evaluation finishes — before
-		// this dispatch completes — so anything the parent posted right after
-		// spawning (the smoke ping, the first parse request) would be dropped.
-		// Park early events and replay them once the module's handler is live.
-		// Worker-thread entries using `parentPort` need the same sync-prefix
-		// buffering; the computer/tab/eval cases install that inbox below.
 		const scope = globalThis as unknown as { onmessage: ((event: MessageEvent) => void) | null };
 		const pending: MessageEvent[] = [];
 		const buffer = (event: MessageEvent): void => {
 			pending.push(event);
 		};
 		scope.onmessage = buffer;
-		await import("@oh-my-pi/omp-stats/sync-worker");
-		const handler = scope.onmessage;
-		if (handler && handler !== buffer) {
+		return () => {
+			const handler = scope.onmessage;
+			if (!handler || handler === buffer) return;
 			for (const event of pending) handler.call(scope, event);
-		}
+		};
+	}
+	switch (arg) {
+		case TAB_WORKER_ARG:
+		case COMPUTER_WORKER_ARG:
+		case JS_EVAL_WORKER_ARG:
+		case TERMINAL_OUTPUT_WORKER_ARG:
+			if (parentPort) installWorkerInbox(parentPort);
+			return undefined;
+		default:
+			return undefined;
+	}
+}
+
+async function runWorkerEntrypoint(
+	arg: string | undefined,
+	replayPending: ReplayWorkerInbox | undefined,
+): Promise<boolean> {
+	if (arg === TINY_WORKER_ARG) {
+		await runTinyWorker();
 		return true;
 	}
-	// Bun flushes messages the parent posted before spawn once this entry's
-	// top-level evaluation completes. Install a buffering inbox synchronously
-	// before binding the selected worker's real handler so the parent's
-	// synchronous `init` survives. The dynamically imported tab/eval modules
-	// consume the same inbox after their module evaluation begins.
+	if (arg === STATS_SYNC_WORKER_ARG) {
+		await import("@oh-my-pi/omp-stats/sync-worker");
+		replayPending?.();
+		return true;
+	}
 	if (arg === TAB_WORKER_ARG) {
-		if (parentPort) installWorkerInbox(parentPort);
 		await import("./tools/browser/tab-worker-entry");
 		return true;
 	}
 	if (arg === COMPUTER_WORKER_ARG) {
-		if (parentPort) installWorkerInbox(parentPort);
 		const { startComputerWorker } = await import("./tools/computer/worker-entry");
 		startComputerWorker();
 		return true;
 	}
 	if (arg === JS_EVAL_WORKER_ARG) {
-		if (parentPort) installWorkerInbox(parentPort);
 		await import("./eval/js/worker-entry");
 		return true;
 	}
@@ -224,7 +235,6 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		return true;
 	}
 	if (arg === TERMINAL_OUTPUT_WORKER_ARG) {
-		if (parentPort) installWorkerInbox(parentPort);
 		// This selector is the isolation boundary; a static import would evaluate xterm in normal CLI startup.
 		await import("./launch/terminal-output-worker");
 		return true;
@@ -469,15 +479,17 @@ export async function runCli(argv: string[]): Promise<void> {
 	// (e.g. stats activity) are registered as hosts and can themselves spawn worker threads.
 	if (isProcessEntry) declareWorkerHostEntry();
 
-	// Worker-thread entry dispatch must run before the first `await`: the
-	// stats sync worker's buffering onmessage handler is installed in the
-	// synchronous prefix of `runWorkerEntrypoint`, and Bun flushes the
-	// worker's parked initial messages as soon as the entry module's
-	// top-level evaluation finishes.
-	if (isWorkerHostSelector(resolvedArgv[0])) {
-		const dispatched = await runWorkerEntrypoint(resolvedArgv[0]);
+	// Worker-thread entrypoints must install their buffering inbox before the
+	// first await: Bun flushes parked parent messages when top-level evaluation
+	// finishes. Once that synchronous prefix is safe, every entrypoint preloads
+	// the project dotenv before importing its environment-dependent graph.
+	const workerArg = isWorkerHostSelector(resolvedArgv[0]) ? resolvedArgv[0] : undefined;
+	const replayWorkerInbox = workerArg ? prepareWorkerInbox(workerArg) : undefined;
+	await preloadProjectEnv();
+	if (workerArg) {
+		const dispatched = await runWorkerEntrypoint(workerArg, replayWorkerInbox);
 		if (!dispatched) {
-			process.stderr.write(`Error: unknown worker selector: ${resolvedArgv[0]}\n`);
+			process.stderr.write(`Error: unknown worker selector: ${workerArg}\n`);
 			process.exitCode = 1;
 		}
 		return;
