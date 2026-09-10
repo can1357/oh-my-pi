@@ -1174,6 +1174,42 @@ export type MessageRenderer<T = unknown> = (
 	theme: Theme,
 ) => Component | undefined;
 
+export interface AssistantTextDecoratorContext {
+	/**
+	 * Index of the text block in the assistant message's `content` array. Stable
+	 * across the turn: a turn whose text is split around tool calls still reports
+	 * each block's index in the original message, not its position within the
+	 * rendered segment.
+	 */
+	contentIndex: number;
+	/** Whether the message is still streaming. */
+	transient: boolean;
+}
+
+/**
+ * Decorates rendered assistant prose without modifying the stored message.
+ * The callback receives plain text tokens only; Markdown code spans and fenced
+ * code blocks keep their original rendering.
+ */
+export interface AssistantTextDecorator {
+	/**
+	 * Return the presentation form of one prose token.
+	 *
+	 * `text` is the author's text: never a code span or fenced block, and free of
+	 * escape sequences even when the transcript paints assistant prose in a color
+	 * — that paint is layered onto the returned string afterwards. Tabs in the
+	 * result are normalized to spaces before layout. A throwing decorator is
+	 * skipped and the original prose renders unchanged.
+	 */
+	decorate(text: string, context: AssistantTextDecoratorContext, theme: Theme): string;
+	/**
+	 * Notify mounted transcript components when decorator state changes.
+	 * Returns an unsubscribe function. Subscription failures are isolated: a
+	 * throwing implementation only forfeits repaints for its own decorator.
+	 */
+	onDidChange?(listener: () => void): () => void;
+}
+
 export interface AssistantThinkingRenderContext {
 	contentIndex: number;
 	thinkingIndex: number;
@@ -1411,6 +1447,9 @@ export interface ExtensionAPI {
 
 	/** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
+
+	/** Register a presentation-only decorator for assistant prose text tokens. */
+	registerAssistantTextDecorator(decorator: AssistantTextDecorator): void;
 
 	/**
 	 * Register a composer shape for the interactive editor.
@@ -1762,6 +1801,7 @@ export interface Extension {
 	tools: Map<string, RegisteredTool<any, any>>;
 	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
+	assistantTextDecorators: AssistantTextDecorator[];
 	fileWriteFallbackHandlers: FileWriteFallbackHandler[];
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;

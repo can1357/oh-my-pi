@@ -1321,6 +1321,18 @@ function objectId(o: object): number {
  * Applied to all text unless overridden by markdown formatting.
  */
 export interface DefaultTextStyle {
+	/**
+	 * Rewrite plain prose runs before any styling is applied.
+	 *
+	 * Unlike {@link DefaultTextStyle.color}, which is a paint hook — it is probed
+	 * with a `\0` sentinel to derive an SGR prefix and receives already-assembled
+	 * runs — this is a *semantic* seam: it sees the raw text of a prose token with
+	 * no escape sequences or sentinels, and only for tokens the reader sees as
+	 * prose. Code spans, fenced code, and link targets never reach it. The result
+	 * is tab-normalized (a literal tab would punch a hole in the layout) and then
+	 * handed to the style hooks, so a caller can layer color on top of a rewrite.
+	 */
+	transformText?: (text: string) => string;
 	/** Foreground color function */
 	color?: (text: string) => string;
 	/** Background color function */
@@ -2267,6 +2279,10 @@ export class Markdown implements Component {
 			// Run-level default styling (color/bold/italic/strikethrough/
 			// underline) disarms: the splice yields two ANSI runs where a cold
 			// render yields one; bgColor is line-level and stays eligible.
+			// transformText disarms for the same reason and one more: it rewrites
+			// whole prose tokens, so a spliced tail can differ from a cold render
+			// wherever the transform's output depends on the surrounding word.
+			!this.#defaultTextStyle?.transformText &&
 			!this.#defaultTextStyle?.color &&
 			!this.#defaultTextStyle?.bold &&
 			!this.#defaultTextStyle?.italic &&
@@ -3159,6 +3175,14 @@ export class Markdown implements Component {
 			const segments: string[] = text.split("\n");
 			return segments.map((segment: string) => (segment === "" ? "" : applyText(segment))).join("\n");
 		};
+		// Prose runs pass through the semantic transform first, so its input is the
+		// author's text rather than a styled run, and `applyText` layers color over
+		// whatever it returns. replaceTabs re-runs here because the input pass ran
+		// before the transform existed.
+		const transformProse = this.#defaultTextStyle?.transformText;
+		const applyProseRun = transformProse
+			? (text: string): string => applyTextWithNewlines(replaceTabs(transformProse(text)))
+			: applyTextWithNewlines;
 		const swatchGlyph = this.#theme.symbols.colorSwatch || DEFAULT_COLOR_SWATCH_GLYPH;
 		let trimLeadingWhitespace = false;
 		const htmlState = createHtmlNormalizationState();
@@ -3183,7 +3207,7 @@ export class Markdown implements Component {
 					if (token.tokens && token.tokens.length > 0) {
 						result += this.#renderInlineTokens(token.tokens, resolvedStyleContext);
 					} else {
-						result += renderTextWithSwatches(text, applyTextWithNewlines, swatchGlyph);
+						result += renderTextWithSwatches(text, applyProseRun, swatchGlyph);
 					}
 					break;
 				}
@@ -3270,7 +3294,7 @@ export class Markdown implements Component {
 						const text = normalizeHtmlEntitiesForTerminal(rawText);
 						trimLeadingWhitespace = false;
 						markHtmlItemWhenContent(text);
-						result += applyTextWithNewlines(text);
+						result += applyProseRun(text);
 					}
 			}
 		}

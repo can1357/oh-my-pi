@@ -48,6 +48,7 @@ import {
 } from "../utils/interactive-context-helpers";
 import {
 	assistantHasVisibleContent,
+	type AssistantToolTimelineSegment,
 	assistantUsageIsBilled,
 	splitAssistantMessageToolTimeline,
 } from "../utils/transcript-render-helpers";
@@ -549,18 +550,18 @@ export class EventController {
 
 	#upsertPostToolAssistantSegment(
 		toolCallId: string,
-		segment: AssistantMessage | undefined,
+		segment: AssistantToolTimelineSegment | undefined,
 		linkTargets?: ReadonlyMap<string, string>,
 	): AssistantMessageComponent | undefined {
-		if (!segment || !assistantHasVisibleContent(segment)) return undefined;
+		if (!segment || !assistantHasVisibleContent(segment.message)) return undefined;
 		const existing = this.#postToolAssistantComponents.get(toolCallId);
 		if (existing) {
 			if (linkTargets) existing.setLinkTargets(linkTargets);
-			existing.updateContent(segment);
+			existing.updateContent(segment.message);
 			return existing;
 		}
-		const component = createAssistantMessageComponent(this.ctx, undefined, linkTargets);
-		component.updateContent(segment);
+		const component = createAssistantMessageComponent(this.ctx, undefined, linkTargets, segment.contentOffset);
+		component.updateContent(segment.message);
 		this.#postToolAssistantComponents.set(toolCallId, component);
 		if (!this.#insertAfterTranscriptComponent(this.#toolTimelineComponents.get(toolCallId), component)) {
 			this.ctx.chatContainer.addChild(component);
@@ -1476,7 +1477,7 @@ export class EventController {
 				const component = this.#upsertPostToolAssistantSegment(
 					toolCallId,
 					segment,
-					assistantMessageLinkTargets(segment, linkTargets),
+					assistantMessageLinkTargets(segment.message, linkTargets),
 				);
 				component?.markTranscriptBlockFinalized();
 				if (component) lastPostToolAssistantComponent = component;

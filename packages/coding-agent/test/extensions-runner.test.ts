@@ -535,6 +535,26 @@ describe("ExtensionRunner", () => {
 
 			expect(runner.getAssistantThinkingRenderers().length).toBe(1);
 		});
+
+		it("collects assistant text decorators", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.registerAssistantTextDecorator({ decorate: text => text });
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "text-decorator.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			expect(runner.getAssistantTextDecorators()).toHaveLength(1);
+		});
 	});
 
 	describe("composer shapes", () => {
@@ -3925,6 +3945,7 @@ describe("ExtensionRunner", () => {
 				handlers: new Map([["input", [async (...args: unknown[]) => handler(args[0] as InputEvent)]]]),
 				tools: new Map(),
 				assistantThinkingRenderers: [],
+				assistantTextDecorators: [],
 				fileWriteFallbackHandlers: [],
 				fileDeleteFallbackHandlers: [],
 				messageRenderers: new Map(),

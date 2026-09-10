@@ -65,6 +65,7 @@ import {
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
+	type AssistantToolTimelineSegment,
 	buildAsyncResultBlock,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
@@ -517,12 +518,13 @@ export class UiHelpers {
 				const errorPresentation = resolveAssistantErrorPresentation(message, this.ctx.viewSession.retryAttempt);
 				const hasErrorStop = errorPresentation.kind === "full";
 				const errorMessage = hasErrorStop ? errorPresentation.text : null;
-				const appendAssistantSegment = (segment: AssistantMessage | undefined) => {
-					if (!segment || !assistantHasVisibleContent(segment)) return;
+				const appendAssistantSegment = (segment: AssistantToolTimelineSegment | undefined) => {
+					if (!segment || !assistantHasVisibleContent(segment.message)) return;
 					const component = createAssistantMessageComponent(
 						this.ctx,
-						segment,
+						segment.message,
 						getAssistantMessageLinkTargets(this.ctx),
+						segment.contentOffset,
 					);
 					this.ctx.chatContainer.addChild(component);
 				};

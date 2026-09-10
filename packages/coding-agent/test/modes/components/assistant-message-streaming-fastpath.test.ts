@@ -97,6 +97,32 @@ describe("AssistantMessageComponent streaming fast path", () => {
 		}
 	});
 
+	it("decorates prose tokens without changing code spans or stored text", () => {
+		const listeners = new Set<() => void>();
+		let enabled = true;
+		const message = msg([{ type: "text", text: "read `const value = 1` safely" }]);
+		const component = new AssistantMessageComponent(message, false, undefined, [], undefined, true, undefined, [
+			{
+				decorate: (text, _context, theme) => (enabled ? theme.bold(text.toUpperCase()) : text),
+				onDidChange(listener) {
+					listeners.add(listener);
+					return () => listeners.delete(listener);
+				},
+			},
+		]);
+
+		const decorated = Bun.stripANSI(component.render(W).join("\n"));
+		expect(decorated).toContain("READ");
+		expect(decorated).toContain("const value = 1");
+		expect(message.content[0]).toEqual({ type: "text", text: "read `const value = 1` safely" });
+
+		enabled = false;
+		for (const listener of listeners) listener();
+		expect(Bun.stripANSI(component.render(W).join("\n"))).toContain("read");
+		component.dispose();
+		expect(listeners.size).toBe(0);
+	});
+
 	it("repairs Gemini's lone closing fence when the streamed turn becomes final", () => {
 		const text = `=== PACED IP ROTATION SOAK RESULTS ===
 Average Latency: 1,240 ms

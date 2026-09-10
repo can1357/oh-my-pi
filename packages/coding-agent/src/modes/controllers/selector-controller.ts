@@ -2371,6 +2371,7 @@ export class SelectorController {
 			getTool: name => this.ctx.session.getToolByName(name),
 			isBuiltInTool: name => this.ctx.session.hasBuiltInTool(name),
 			getMessageRenderer: type => this.ctx.session.extensionRunner?.getMessageRenderer(type),
+			getAssistantTextDecorators: () => this.ctx.session.extensionRunner?.getAssistantTextDecorators() ?? [],
 			cwd: this.ctx.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
