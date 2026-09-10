@@ -512,7 +512,7 @@ function printfEmittedText(before: string): string | undefined {
 				j++;
 			}
 		}
-		if (j >= format.length) break;
+		if (j >= format.length) return undefined;
 		const spec = format[j]!;
 		i = j;
 		const arg = args[argIdx++] ?? "";
@@ -529,17 +529,20 @@ function printfEmittedText(before: string): string | undefined {
 		} else if (spec === "c") {
 			out += precision === 0 ? "" : arg.slice(0, 1);
 		} else if (/[diouxXeEfFgGaA]/.test(spec)) {
-			// Numeric conversions: bash converts the argument first. Nonnumeric
-			// tokens emit `0` (and a nonzero status) — never the literal ping.
+			// Canonical decimal integers retain their bytes under plain d/i conversion.
+			// Other numeric formats, precision, and ambiguous inputs are not emulated.
 			const numeric = Number(arg);
-			if (!Number.isFinite(numeric) || String(numeric) !== arg.trim()) {
-				// Reject: fabricated ping must not match a converted `0`.
+			if (
+				(spec !== "d" && spec !== "i") ||
+				precision !== undefined ||
+				!Number.isSafeInteger(numeric) ||
+				String(numeric) !== arg.trim()
+			)
 				return undefined;
-			}
-			out += arg;
+			out += String(numeric);
 		} else {
-			// Unknown / incomplete conversion: stop consuming (reject via empty emit).
-			return out;
+			// Unknown conversions cannot establish successful execution evidence.
+			return undefined;
 		}
 	}
 	return out;

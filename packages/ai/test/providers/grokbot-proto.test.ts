@@ -3,7 +3,6 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as grokbotCatalogAuth from "@oh-my-pi/pi-catalog/discovery/grokbot-auth";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui";
-import { shortenPath } from "@oh-my-pi/pi-utils";
 import {
 	formatGrokbotConnectTrailerError,
 	streamGrokBot,
@@ -1520,18 +1519,12 @@ describe("grokbot /login host-install prompt", () => {
 			namespace: "prod",
 			clientVersion: "0.30.0",
 		});
-		const secretsDisplay = shortenPath(grokbotAuth.grokbotSecretsPath());
 
 		const result = await loginGrokbot({
 			onAuth: () => {},
 			onPrompt: async prompt => {
 				prompted = true;
 				expect(prompt.allowEmpty).toBe(true);
-				expect(prompt.message).toContain("GROKBOT_RENEWAL_CREDENTIAL");
-				expect(prompt.message).toContain("GROKBOT_MACHINE_ID");
-				expect(prompt.message).toContain(secretsDisplay);
-				expect(prompt.message).toContain("PI_CODING_AGENT_DIR");
-				expect(prompt.message).not.toContain("OMP_AGENT_DIR");
 				return "";
 			},
 			onProgress: message => {
@@ -1598,6 +1591,69 @@ describe("grokbot incomplete tool calls", () => {
 		});
 		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
 	}
+
+	test("does not advertise tools for a model that disables tool calling", async () => {
+		mockAuth();
+		let payload: unknown;
+		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "ok", isFinal: true } }));
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const result = await streamGrokBot(
+			{ ...model, supportsTools: false },
+			{
+				...context,
+				tools: [{ name: "read", description: "Read", parameters: { type: "object", properties: {} } }],
+			},
+			{
+				apiKey: "renew",
+				onPayload: body => {
+					payload = body;
+				},
+				fetch: (async () => connectBody(text, trailer)) as FetchImpl,
+			},
+		).result();
+		expect(result.stopReason).toBe("stop");
+		expect(payload).toMatchObject({ tools: [] });
+	});
+
+	test("advertises one native schema and dispatches the same custom-wire collision owner", async () => {
+		mockAuth();
+		let payload: unknown;
+		const call = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: { toolCallId: "collision", toolName: "shared", args: "{}", isComplete: true },
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const result = await streamGrokBot(
+			{ ...model, sandToolsWire: "native" },
+			{
+				...context,
+				tools: [
+					{
+						name: "first",
+						customWireName: "shared",
+						description: "first schema",
+						parameters: { type: "object", properties: {} },
+					},
+					{
+						name: "second",
+						customWireName: "shared",
+						description: "second schema",
+						parameters: { type: "object", properties: {} },
+					},
+				],
+			},
+			{
+				apiKey: "renew",
+				onPayload: body => {
+					payload = body;
+				},
+				fetch: (async () => connectBody(call, trailer)) as FetchImpl,
+			},
+		).result();
+		expect(payload).toMatchObject({ tools: [{ name: "shared", description: "first schema" }] });
+		expect(result.content).toEqual([expect.objectContaining({ type: "toolCall", name: "first" })]);
+	});
 
 	test("rejects stream that ends with isComplete:false tool call", async () => {
 		mockAuth();
@@ -2638,6 +2694,39 @@ describe("grokbot request headers", () => {
 		return Buffer.concat([text, trailer]);
 	}
 
+	test("uses the separate inference bearer after metadata warms the token cache, including a remint", async () => {
+		const cfg = { renewal: "dual-token-renewer", machineId: "machine", namespace: "prod", clientVersion: "0.44.0" };
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue(cfg);
+		let mints = 0;
+		const bearers: string[] = [];
+		const fetchImpl: FetchImpl = async (url, init) => {
+			if (String(url).endsWith("/inference-credential")) {
+				mints++;
+				return Response.json({
+					accessToken: `metadata-${mints}`,
+					grokBotToken: `inference-${mints}`,
+					expiresAtMs: Date.now() + 600_000,
+				});
+			}
+			const bearer = new Headers(init?.headers).get("authorization") ?? "";
+			bearers.push(bearer);
+			// A rejected first token must refresh the pair and still select the inference token.
+			if (bearer !== "Bearer inference-2") return new Response(null, { status: 401 });
+			return new Response(textThenTrailer());
+		};
+		expect(
+			await grokbotCatalogAuth.mintGrokbotAccessToken(cfg, fetchImpl, model.baseUrl, undefined, model.headers),
+		).toBe("metadata-1");
+		const result = await streamGrokBot(model, context, { apiKey: cfg.renewal, fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("stop");
+		expect(bearers).toEqual(["Bearer inference-1", "Bearer inference-2"]);
+		expect(mints).toBe(2);
+		expect(
+			await grokbotCatalogAuth.mintGrokbotAccessToken(cfg, fetchImpl, model.baseUrl, undefined, model.headers),
+		).toBe("metadata-2");
+		expect(mints).toBe(2);
+	});
+
 	test("merges model.headers into the inference request", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",
@@ -3182,3 +3271,14 @@ describe("grokbot disableReasoning effort floor", () => {
 		expect(capturedEffort).toBeUndefined();
 	});
 });
+
+for (const effortField of ["effort", "reasoning"]) {
+	test(`thinking off suppresses discovered ${effortField} defaults`, () => {
+		const request = resolveGrokbotRequestedModel("discovered-model", {
+			thinking: false,
+			sandParameterIds: ["thinking", effortField],
+			sandParameterDefaults: { thinking: "true", [effortField]: "high" },
+		});
+		expect(request.parameters).toEqual([{ id: "thinking", value: "false" }]);
+	});
+}

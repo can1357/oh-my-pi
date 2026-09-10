@@ -1,9 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as grokbotAuth from "../src/discovery/grokbot-auth";
 import { buildModel } from "../src/build";
-import { normalizeGrokbotAvailableModels } from "../src/discovery/grokbot";
+import { fetchGrokbotAvailableModels, normalizeGrokbotAvailableModels } from "../src/discovery/grokbot";
 import {
 	decodeGrokbotAvailableModelsResponse,
 	encodeGrokbotAvailableModelsRequest,
@@ -531,5 +532,28 @@ describe("grokbot AvailableModels normalize", () => {
 		} finally {
 			await fs.rm(cacheDir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("Grokbot authoritative catalog boundaries", () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	test("rejects a nonempty all-invalid catalog instead of manufacturing routers", () => {
+		expect(decodeGrokbotAvailableModelsResponse({ models: [{ name: " " }, null, 42] })).toBeNull();
+	});
+
+	test("returns an empty discovery result so model-cache retry logic remains active", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("test-jwt");
+		const models = await fetchGrokbotAvailableModels({
+			apiKey: "renew",
+			fetch: async () => Response.json({ models: [] }),
+		});
+		expect(models).toEqual([]);
 	});
 });

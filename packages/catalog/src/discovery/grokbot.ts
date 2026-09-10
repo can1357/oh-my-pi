@@ -131,6 +131,7 @@ export async function fetchGrokbotAvailableModels(
 		// Invalid envelopes (missing/non-array `models`) must not become a
 		// cached routers-only catalog — only a real `models: []` is empty-ok.
 		if (decoded === null) return null;
+		if (decoded.length === 0) return [];
 		return normalizeGrokbotAvailableModels(decoded, resolvedBaseUrl);
 	} catch {
 		return null;

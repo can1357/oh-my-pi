@@ -410,6 +410,46 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		});
 	}
 
+	test("native promoted custom-wire and builtin tools remain distinct across thinking and text", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+		const thinking = frameConnectProto(
+			encodeInferenceStreamResponse({
+				thinkingPart: { text: '{"name":"Shell","arguments":{"command":"echo both"}}', isFinal: true },
+			}),
+		);
+		const text = frameConnectProto(
+			encodeInferenceStreamResponse({
+				textPart: { text: '{"name":"bash","arguments":{"command":"echo both"}}', isFinal: true },
+			}),
+		);
+		const native: Model<"grokbot-sand"> = {
+			...model,
+			id: "native-promoted",
+			name: "Native promoted",
+			sandToolsWire: undefined,
+			sandPromoteJsonTextTools: true,
+		};
+		const context: Context = {
+			messages: [{ role: "user", content: "run both", timestamp: 0 }],
+			tools: [{ ...bashTool, name: "extension_shell", customWireName: "Shell" }, bashTool],
+		};
+		const result = await streamGrokBot(native, context, {
+			apiKey: "renew",
+			fetch: (async () =>
+				connectBody(thinking, text, frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG))) as FetchImpl,
+		}).result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content.filter(block => block.type === "toolCall").map(block => block.name)).toEqual([
+			"extension_shell",
+			"bash",
+		]);
+	});
 	test("automation wire fenced Shell JSON becomes a bash toolCall (matrix no-tool-call regression)", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",

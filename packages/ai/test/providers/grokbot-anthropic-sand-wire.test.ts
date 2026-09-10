@@ -83,7 +83,7 @@ describe("anthropic sand tool wire", () => {
 		expect(wired.requestedModel.modelId).toBe("sand-automation");
 		expect(wired.subagentType).toBe("generalPurpose");
 		expect(typeof wired.automationId).toBe("string");
-		expect(wired.acceptedUnadvertisedToolNames?.length).toBeGreaterThan(20);
+		expect(wired.acceptedUnadvertisedToolNames).toEqual([]);
 		const names = (wired.tools as Array<{ name: string }>).map(t => t.name);
 		expect(names).toContain("Shell");
 		expect(names).toContain("Read");
@@ -207,7 +207,7 @@ describe("anthropic sand tool wire", () => {
 		expect(wired.originalModelId).toBe("claude-fable-5");
 		expect(wired.subagentType).toBeUndefined();
 		expect(wired.automationId).toBeUndefined();
-		expect(wired.acceptedUnadvertisedToolNames?.length).toBeGreaterThan(20);
+		expect(wired.acceptedUnadvertisedToolNames).toEqual([]);
 		const names = (wired.tools as Array<{ name: string }>).map(t => t.name);
 		expect(names).toEqual(["Shell", "Read", "Write", "Grep", "Glob"]);
 		for (const tool of wired.tools as Array<{ parameters: Record<string, unknown> }>) {
@@ -955,4 +955,16 @@ describe("grokbot proto harness fields", () => {
 		expect(decoded.subagentType).toBe("generalPurpose");
 		expect(fieldNumbers(encoded).sort((a, b) => a - b)).toEqual([1, 7, 9, 9, 10, 16]);
 	});
+});
+
+test("field-9 admission includes only an active dispatchable tool", () => {
+	const wired = applyAnthropicSandToolWire(
+		{
+			requestedModel: { modelId: "claude-opus-5" },
+			modelId: "claude-opus-5",
+			tools: [{ name: "WebSearch", description: "active search", parameters: { type: "object", properties: {} } }],
+		},
+		"parent-chat",
+	);
+	expect(wired.acceptedUnadvertisedToolNames).toEqual(["WebSearch"]);
 });

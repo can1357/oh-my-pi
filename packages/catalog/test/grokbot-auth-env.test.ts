@@ -406,6 +406,31 @@ describe("grokbot backend URL join", () => {
 		clearGrokbotTokenCache();
 	});
 
+	test("refreshes a cached pair when the inference JWT expires before the metadata JWT", async () => {
+		const cfg = {
+			renewal: "early-inference-expiry",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.44.0",
+		};
+		const jwt = (expires: number) =>
+			`header.${Buffer.from(JSON.stringify({ exp: expires })).toString("base64url")}.signature`;
+		let mints = 0;
+		const fetchImpl = async () => {
+			mints++;
+			return Response.json({
+				accessToken: `metadata-${mints}`,
+				grokBotToken: jwt(Math.floor(Date.now() / 1000) + (mints === 1 ? 30 : 600)),
+				expiresAtMs: Date.now() + 600_000,
+			});
+		};
+		await mintGrokbotAccessToken(cfg, fetchImpl);
+		await mintGrokbotAccessToken(cfg, fetchImpl, undefined, undefined, undefined, "inference");
+		expect(mints).toBe(2);
+		expect(await mintGrokbotAccessToken(cfg, fetchImpl)).toBe("metadata-2");
+		expect(mints).toBe(2);
+	});
+
 	test("preserves reverse-proxy path prefixes for renewal", () => {
 		expect(joinGrokbotBackendUrl("https://proxy.example/grokbot", GROKBOT_RENEWAL_PATH).href).toBe(
 			"https://proxy.example/grokbot/sand-box/inference-credential",
@@ -606,6 +631,7 @@ describe("grokbot AvailableModels headers", () => {
 		) as typeof fetch;
 		const models = await runWithGrokbotAuthSourceAsync(
 			{
+				secretsPath: path.join(os.tmpdir(), crypto.randomUUID(), "grokbot.env"),
 				env: {
 					...CLEAR_GROKBOT_ENV,
 					GROKBOT_MACHINE_ID: "machine",

@@ -78,5 +78,5 @@ export function decodeGrokbotAvailableModelsResponse(raw: unknown): GrokbotAvail
 		if (!name) continue;
 		out.push(entry as GrokbotAvailableModel);
 	}
-	return out;
+	return models.length > 0 && out.length === 0 ? null : out;
 }

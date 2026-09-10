@@ -151,7 +151,9 @@ function applyProductWire(
 		originalModelId: options.originalModelId,
 		...(options.subagentType !== undefined ? { subagentType: options.subagentType } : {}),
 		...(options.automationId !== undefined ? { automationId: options.automationId } : {}),
-		acceptedUnadvertisedToolNames: [...field9AllowlistForProfile(profile)],
+		acceptedUnadvertisedToolNames: field9AllowlistForProfile(profile).filter(name =>
+			productTools.some(tool => tool.name === name),
+		),
 	};
 }
 

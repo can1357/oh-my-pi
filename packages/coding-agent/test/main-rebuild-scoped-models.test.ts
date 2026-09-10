@@ -618,3 +618,24 @@ describe("buildSessionOptions --models scope selection", () => {
 		expect(options.scopedModels?.map(entry => entry.model.id)).toEqual(["a"]);
 	});
 });
+
+it("expands selected builtin, custom, and chained roles before credential-scoped refresh", () => {
+	const roles: Record<string, string> = {
+		default: "@smol",
+		smol: "grokbot/live-small",
+		slow: "grokbot/live-large",
+		research: "grokbot/live-custom",
+	};
+	const lookup = { getModelRole: (role: string) => roles[role] };
+	for (const [selector, expected] of [
+		["@smol", "grokbot/live-small"],
+		["@slow", "grokbot/live-large"],
+		["@research", "grokbot/live-custom"],
+		["@default", "grokbot/live-small"],
+	]) {
+		expect(resolveCredentialScopedRefreshTarget({ model: selector }, lookup)).toEqual({
+			providerId: "grokbot",
+			selectors: { model: expected, models: undefined },
+		});
+	}
+});

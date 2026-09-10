@@ -1296,7 +1296,9 @@ function resolveConfiguredRolePattern(
 					return level ? roleDefaults.map(defaultPattern => `${defaultPattern}:${level}`) : [];
 				});
 	const resolved = configured
-		? normalizeModelPatternList(configured)
+		? normalizeModelPatternList(configured).flatMap(
+				pattern => resolveConfiguredRolePattern(pattern, settings, new Set(visited)) ?? [pattern],
+			)
 		: fallbackPatterns
 			? fallbackPatterns
 			: isModelRole(role)

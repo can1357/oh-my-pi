@@ -394,10 +394,11 @@ function jsonTextToolCallFingerprint(
 	call: JsonTextToolCall,
 	advertised: ReadonlySet<string>,
 	ompTools?: ReadonlyArray<OmpToolNameSource>,
+	resolveToolName?: (name: string) => string,
 ): string {
 	// Alias-insensitive (Shell↔bash, Write↔save) and key-order-insensitive so
 	// mirrored thinking/text dumps of the same tool promote once.
-	const name = canonicalizeAdvertisedAlias(call.name, advertised, ompTools);
+	const name = resolveToolName?.(call.name) ?? canonicalizeAdvertisedAlias(call.name, advertised, ompTools);
 	return `${name}\0${stableStringifyJson(call.arguments)}`;
 }
 
@@ -406,6 +407,7 @@ export function promoteJsonTextToolCallsFromContent(
 	advertisedNames: Iterable<string>,
 	excludeIndexes?: ReadonlySet<number>,
 	ompTools?: ReadonlyArray<OmpToolNameSource>,
+	resolveToolName?: (name: string) => string,
 ): JsonTextToolCallPromotion {
 	type BlockPromotion = {
 		index: number;
@@ -431,7 +433,8 @@ export function promoteJsonTextToolCallsFromContent(
 		const textFingerprints = new Set<string>();
 		for (const entry of blocks) {
 			if (entry.type !== "text") continue;
-			for (const call of entry.calls) textFingerprints.add(jsonTextToolCallFingerprint(call, advertised, ompTools));
+			for (const call of entry.calls)
+				textFingerprints.add(jsonTextToolCallFingerprint(call, advertised, ompTools, resolveToolName));
 		}
 		const collected: JsonTextToolCall[] = [];
 		const sourceIndexes: number[] = [];
@@ -439,7 +442,7 @@ export function promoteJsonTextToolCallsFromContent(
 			let kept = entry.calls;
 			if (entry.type === "thinking" && textFingerprints.size > 0) {
 				kept = entry.calls.filter(
-					call => !textFingerprints.has(jsonTextToolCallFingerprint(call, advertised, ompTools)),
+					call => !textFingerprints.has(jsonTextToolCallFingerprint(call, advertised, ompTools, resolveToolName)),
 				);
 			}
 			if (kept.length > 0) collected.push(...kept);

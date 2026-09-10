@@ -19,6 +19,7 @@ import {
 	splitMatrixIds,
 	toolSmokePrompt,
 	writeLikeShellCommand,
+	writePathPingInShellCommand,
 } from "./grokbot-catalog-matrix/harness";
 
 function probeModel(partial: Partial<Model<Api>> & Pick<Model<Api>, "id">): Model<Api> {
@@ -774,4 +775,18 @@ describe("ompToolsExecutionEvidence", () => {
 			),
 		).toBe(true);
 	});
+});
+
+test("numeric printf conversions cannot fabricate bash or write evidence", () => {
+	expect(echoLikeShellCommand("printf '%x' '42'", "42")).toBe(false);
+	expect(echoLikeShellCommand("printf '%d' '4.2'", "4.2")).toBe(false);
+	expect(echoLikeShellCommand("printf '%.0d' '0'", "0")).toBe(false);
+
+	const ping = "tools-pong-write-x";
+	expect(echoLikeShellCommand(`printf '%d' ${ping}`, ping)).toBe(false);
+	expect(echoLikeShellCommand(`printf '%s %d' ${ping} bad`, ping)).toBe(false);
+	expect(
+		writePathPingInShellCommand(`printf '%d' ${ping} > notes/grokbot-write-x.txt`, "notes/grokbot-write-x.txt", ping),
+	).toBe(false);
+	expect(echoLikeShellCommand(`printf '%s' ${ping}`, ping)).toBe(true);
 });

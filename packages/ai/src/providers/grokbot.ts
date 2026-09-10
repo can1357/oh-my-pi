@@ -213,12 +213,16 @@ function toInferenceTools(tools: Context["tools"], sandNativeToolSchema?: "googl
 		parameters: Record<string, unknown>;
 		customToolFormat?: { type: string; definition: string; syntax: string };
 	}> = [];
+	const owners = buildGrammarToolIndex(tools);
+	const advertised = new Set<string>();
 	for (const tool of tools) {
 		if (!tool || typeof tool !== "object") continue;
 		const name = typeof tool.name === "string" ? tool.name : "";
 		if (!name) continue;
 		const wireName =
 			typeof tool.customWireName === "string" && tool.customWireName.trim() ? tool.customWireName.trim() : name;
+		if (owners.get(wireName)?.name !== name || advertised.has(wireName)) continue;
+		advertised.add(wireName);
 		const parameters = sandNativeToolSchema
 			? nativeToolParametersForIdentity(toolParametersToJson(tool), sandNativeToolSchema)
 			: toolParametersToJson(tool);
@@ -952,6 +956,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				model.baseUrl || GROKBOT_BACKEND,
 				options?.signal,
 				{ ...(model.headers ?? {}), ...(options?.headers ?? {}) },
+				"inference",
 			);
 			let jwtRemintUsed = false;
 			const messages = toInferenceMessages(context, model);
@@ -967,7 +972,9 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			// Sharpshooter `required` / named choices have no sand wire field.
 			assertGrokbotToolChoiceSupported(options?.toolChoice);
 			const tools =
-				options?.toolChoice === "none" ? [] : toInferenceTools(context.tools, model.sandNativeToolSchema);
+				options?.toolChoice === "none" || model.supportsTools === false
+					? []
+					: toInferenceTools(context.tools, model.sandNativeToolSchema);
 			const grammarTools = buildGrammarToolIndex(context.tools);
 			const conversationId = options?.conversationId || options?.sessionId || crypto.randomUUID();
 			let emptyToolRetryUsed = false;
@@ -1073,6 +1080,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					model.baseUrl || GROKBOT_BACKEND,
 					options?.signal,
 					{ ...(model.headers ?? {}), ...(options?.headers ?? {}) },
+					"inference",
 				);
 				discardAttemptEvents();
 				// Retain a live-published start across remint so the consumer does not
@@ -1318,12 +1326,12 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					if (anthropicWire.acceptedUnadvertisedToolNames?.length) {
 						body.acceptedUnadvertisedToolNames = anthropicWire.acceptedUnadvertisedToolNames;
 					}
-					augmentToolIndexForProductWire(grammarTools, context.tools);
 					if (
 						anthropicWire.wireMode === "automation" ||
 						anthropicWire.wireMode === "parent-chat" ||
 						anthropicWire.wireMode === "keep-model"
 					) {
+						augmentToolIndexForProductWire(grammarTools, context.tools);
 						// Re-convert with product collision ownership so extension Shell
 						// losers keep internal names; then rewrite omp owners to Shell/Read/Write.
 						body.messages = rewriteInferenceMessagesForProductWire(
@@ -2076,6 +2084,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						advertised,
 						sendToUserTextIndexes,
 						context.tools,
+						name => grammarTools.get(name)?.name ?? name,
 					);
 					const promotedList = promotion.calls;
 					if (promotedList.length > 0) {

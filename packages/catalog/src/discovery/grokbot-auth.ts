@@ -7,7 +7,7 @@
  */
 import * as path from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { $env, getAgentDir, logger, parseEnvFile, parseEnvFileAsync } from "@oh-my-pi/pi-utils";
+import { $env, AUTHENTICATED_SENTINEL, getAgentDir, logger, parseEnvFile, parseEnvFileAsync } from "@oh-my-pi/pi-utils";
 import type { FetchImpl } from "../types";
 
 export const GROKBOT_BACKEND = "https://api2.cursor.sh";
@@ -40,7 +40,7 @@ export const GROKBOT_DEFAULT_NAMESPACE = "prod";
 export const GROKBOT_DEFAULT_TOKEN_TTL_MS = 10 * 60_000;
 
 /** Shared with Bedrock/Vertex env hooks — not a literal renewal credential. */
-export const GROKBOT_AUTHENTICATED_SENTINEL = "<authenticated>";
+export const GROKBOT_AUTHENTICATED_SENTINEL = AUTHENTICATED_SENTINEL;
 const STAMPED_VERSION_BASE = /^(\d+\.\d+\.\d+)(?:-.+)?$/;
 
 /**
@@ -85,8 +85,15 @@ export type GrokbotConfig = {
 
 type CachedToken = {
 	accessToken: string;
+	grokBotToken?: string;
 	expiresAtMs: number;
 };
+
+export type GrokbotTokenPurpose = "api" | "inference";
+
+function tokenForPurpose(token: CachedToken, purpose: GrokbotTokenPurpose): string {
+	return purpose === "inference" ? (token.grokBotToken ?? token.accessToken) : token.accessToken;
+}
 
 /** JWT cache keyed by minting configuration so concurrent accounts/backends do not bleed. */
 const tokenCache = new Map<string, CachedToken>();
@@ -367,6 +374,8 @@ export async function mintGrokbotAccessToken(
 	signal?: AbortSignal,
 	/** Caller/model headers (e.g. reverse-proxy API key); provider-owned headers win. */
 	requestHeaders?: Record<string, string>,
+	/** Inference uses grokBotToken when minted; metadata RPCs keep accessToken. */
+	purpose: GrokbotTokenPurpose = "api",
 ): Promise<string> {
 	if (!cfg.renewal) {
 		throw new Error(`Grok Bot renewer missing. Set GROKBOT_RENEWAL_CREDENTIAL or write ${grokbotSecretsPath()}`);
@@ -374,7 +383,7 @@ export async function mintGrokbotAccessToken(
 	const cacheKey = tokenCacheKey(cfg, backend, requestHeaders);
 	const cached = tokenCache.get(cacheKey);
 	if (cached?.accessToken && Date.now() < cached.expiresAtMs - 60_000) {
-		return cached.accessToken;
+		return tokenForPurpose(cached, purpose);
 	}
 	const response = await fetchImpl(joinGrokbotBackendUrl(backend, GROKBOT_RENEWAL_PATH), {
 		method: "POST",
@@ -389,15 +398,25 @@ export async function mintGrokbotAccessToken(
 		logger.warn("Grok Bot token renew failed", { status: response.status });
 		throw new Error(`Grok Bot token renew failed (HTTP ${response.status})`);
 	}
-	const parsed = (await response.json()) as { accessToken?: unknown; expiresAtMs?: unknown };
+	const parsed = (await response.json()) as { accessToken?: unknown; grokBotToken?: unknown; expiresAtMs?: unknown };
 	const accessToken = typeof parsed.accessToken === "string" ? parsed.accessToken : "";
 	if (!accessToken) throw new Error("Grok Bot token renew returned no accessToken");
-	const expiresAtMs =
+	const grokBotToken =
+		typeof parsed.grokBotToken === "string" && parsed.grokBotToken.trim() ? parsed.grokBotToken : undefined;
+	const responseExpiry =
 		typeof parsed.expiresAtMs === "number" && Number.isFinite(parsed.expiresAtMs)
 			? parsed.expiresAtMs
 			: (getAccessTokenExpiryMs(accessToken) ?? Date.now() + GROKBOT_DEFAULT_TOKEN_TTL_MS);
-	tokenCache.set(cacheKey, { accessToken, expiresAtMs });
-	return accessToken;
+	// The two tokens can have different lifetimes. Refresh the pair before
+	// either expires so switching from discovery to inference cannot use stale auth.
+	const expiresAtMs = Math.min(
+		responseExpiry,
+		getAccessTokenExpiryMs(accessToken) ?? Infinity,
+		grokBotToken ? (getAccessTokenExpiryMs(grokBotToken) ?? Infinity) : Infinity,
+	);
+	const token = { accessToken, grokBotToken, expiresAtMs };
+	tokenCache.set(cacheKey, token);
+	return tokenForPurpose(token, purpose);
 }
 
 /** Test-only: clear cached JWTs. Also used after HTTP 401 so auth-retry remints. */

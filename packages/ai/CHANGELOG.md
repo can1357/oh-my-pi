@@ -7,6 +7,8 @@
 - Grok Bot omits discovered effort/reasoning defaults when `thinking` is explicitly off.
 - Grok Bot JSON-as-text dedupe keeps native custom-wire tools (e.g. `Shell` via `customWireName`) distinct from preferred omp owners like `bash`.
 - Catalog matrix shell/write smoke rejects nonnumeric `printf` `%d`/`%f`/… arguments that bash would convert (literal ping no longer passes).
+- Fixed native tool promotion dropping distinct custom tools and disabled thinking inheriting effort defaults.
+
 - Grok Bot emits the remaining tool-arg suffix when an unbuffered complete JSON snapshot prefix-extends a partial accumulator (`{"path":` → `{"path":"/tmp/x"}`).
 - Catalog matrix shell/write smoke expands printf `%b` backslash escapes (`\\c` suppresses further output) before accepting a fabricated ping.
 - Grok Bot emits only the remaining tool-arg suffix when unbuffered appendable fragments complete a JSON object (avoids re-emitting the full snapshot for proxy concat).
@@ -33,6 +35,7 @@
 - Grok Bot `--thinking off` omits effort when the model allows an explicit `thinking` parameter (avoids flooring effort while sending `thinking: false`).
 - Grok Bot JSON-as-text promotion no longer invents product aliases (Shell/Read/Write) for native bash/read/write wire names.
 - Grok Bot accumulates non-prefix streamed tool-argument deltas (and SendToUser args) instead of replacing the buffer with the final fragment.
+- Honor model tool support and keep advertised Grok Bot tool names aligned with executable tools.
 
 - Grok Bot Connect streams reject data frames and leftover bytes after the end-stream trailer.
 - Catalog matrix tool smoke rejects `echo ping; exit 1` and relative suffix Read/Write paths that are not the fixture file.
