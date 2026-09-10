@@ -450,6 +450,25 @@ describe("openai-completions wire-quirk compat detection", () => {
 		).toBe(false);
 	});
 
+	it("omits tool_choice for direct DeepSeek models with provider-enabled thinking", () => {
+		const model = buildModel(
+			completionsSpec({
+				id: "deepseek-flash",
+				name: "DeepSeek Flash",
+				provider: "deepseek",
+				baseUrl: "https://api.deepseek.com",
+				reasoning: false,
+				contextWindow: null,
+				maxTokens: null,
+			}),
+		);
+
+		expect(model.compat).toMatchObject({
+			supportsToolChoice: false,
+			extraBody: { thinking: { type: "enabled" } },
+		});
+	});
+
 	it("downgrades forced tool choice only for DeepSeek reasoning models on OpenCode gateways", () => {
 		const deepseekReasoning = {
 			id: "deepseek-v4-flash",

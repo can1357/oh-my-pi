@@ -7953,7 +7953,7 @@
 				}
 			},
 			{
-				"source": "providers/deepseek.kdl:10",
+				"source": "providers/deepseek.kdl:11",
 				"class": "deepseek",
 				"providers": [
 					"deepseek"
@@ -7963,7 +7963,7 @@
 				}
 			},
 			{
-				"source": "providers/deepseek.kdl:14",
+				"source": "providers/deepseek.kdl:15",
 				"providers": [
 					"deepseek"
 				],
@@ -7977,8 +7977,7 @@
 					"maxTokensField": "max_tokens",
 					"reasoningContentField": "reasoning_content",
 					"requiresAssistantContentForToolCalls": true,
-					"requiresReasoningContentForToolCalls": true,
-					"supportsToolChoice": false
+					"requiresReasoningContentForToolCalls": true
 				}
 			},
 			{
@@ -7992,7 +7991,8 @@
 							"type": "enabled"
 						}
 					},
-					"supportsReasoningEffort": true
+					"supportsReasoningEffort": true,
+					"supportsToolChoice": false
 				}
 			},
 			{
