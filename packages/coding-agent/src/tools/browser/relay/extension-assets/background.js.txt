@@ -700,7 +700,7 @@ function refreshHello(onSent) {
   if (!socket || socket.readyState !== WebSocket.OPEN)
     return;
   if (helloRefresh?.socket === socket) {
-    helloRefresh.dirty = true;
+    helloRefresh.structuralDirty = true;
     if (onSent)
       helloRefresh.afterSend = onSent;
     return;
@@ -708,15 +708,16 @@ function refreshHello(onSent) {
   const startRefresh = (afterSend) => {
     const entry = {
       socket,
-      dirty: false,
+      structuralDirty: false,
+      metaDirty: false,
       done: Promise.resolve(),
       afterSend
     };
     entry.done = buildHello().then(async (hello) => {
-      if (entry.dirty)
+      if (entry.structuralDirty)
         return;
-      await trackAttachments(hello.attachedTabIds, () => helloRefresh === entry && !entry.dirty && ws === socket && socket.readyState === WebSocket.OPEN);
-      if (entry.dirty)
+      await trackAttachments(hello.attachedTabIds, () => helloRefresh === entry && !entry.structuralDirty && ws === socket && socket.readyState === WebSocket.OPEN);
+      if (entry.structuralDirty)
         return;
       if (ws === socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(hello));
@@ -731,7 +732,7 @@ function refreshHello(onSent) {
     }).finally(() => {
       if (helloRefresh !== entry)
         return;
-      if (entry.dirty && ws === socket && socket.readyState === WebSocket.OPEN) {
+      if ((entry.structuralDirty || entry.metaDirty) && ws === socket && socket.readyState === WebSocket.OPEN) {
         startRefresh(entry.afterSend);
       } else {
         helloRefresh = null;
@@ -743,7 +744,11 @@ function refreshHello(onSent) {
 }
 function invalidateHelloRefresh() {
   if (helloRefresh)
-    helloRefresh.dirty = true;
+    helloRefresh.structuralDirty = true;
+}
+function invalidateHelloMeta() {
+  if (helloRefresh)
+    helloRefresh.metaDirty = true;
 }
 async function buildHello() {
   requireRecoveryStateLoaded(await loadRecoverableState());
@@ -1041,7 +1046,7 @@ chrome.tabs.onCreated.addListener((tab) => {
 chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
   const snap = snapshot(tab);
   if (snap) {
-    invalidateHelloRefresh();
+    invalidateHelloMeta();
     post({ t: "tabUpdated", tab: snap });
   }
 });
