@@ -1,5 +1,6 @@
 import { type JSX, onCleanup, onMount } from "solid-js";
 
+import { ensureReplayToken } from "./api";
 import { Shell } from "./components/shell/Shell";
 import { startPolling, stopPolling } from "./state";
 
@@ -10,7 +11,9 @@ import { startPolling, stopPolling } from "./state";
 // buttons (Operations/Activity), reading the shared runTrigger passthrough.
 export function App(): JSX.Element {
   onMount(() => {
-    startPolling();
+    // Resolve the replay token (prompt + /api/config round-trip) before the
+    // first poll so authenticated reads don't race the handshake.
+    void ensureReplayToken().then(() => startPolling());
   });
   onCleanup(() => {
     stopPolling();
