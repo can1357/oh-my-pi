@@ -49,7 +49,23 @@ fn main() {
 			println!("cargo::rustc-link-arg=--ld-path={}", shim.display());
 		}
 	}
-	println!("cargo::rustc-link-arg=-Wl,-export_dynamic");
+	// ld64 and ELF linkers spell this flag differently. In particular, passing
+	// ld64's spelling to an ELF linker is parsed as `-e xport_dynamic`, which
+	// produces a binary with no valid entry point. Other object formats have no
+	// compatible flag.
+	let target_vendor = env::var("CARGO_CFG_TARGET_VENDOR").unwrap_or_default();
+	let target_family = env::var("CARGO_CFG_TARGET_FAMILY").unwrap_or_default();
+	let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+	let link_arg = if target_vendor == "apple" {
+		Some("-Wl,-export_dynamic")
+	} else if target_os != "aix" && target_family.split(',').any(|family| family == "unix") {
+		Some("-Wl,--export-dynamic")
+	} else {
+		None
+	};
+	if let Some(link_arg) = link_arg {
+		println!("cargo::rustc-link-arg={link_arg}");
+	}
 }
 
 fn generate_docs_manifest(manifest: &Path) -> io::Result<()> {

@@ -267,7 +267,7 @@ fn serve_debug_client(mut client: UnixStream, requests: &flume::Sender<GuiDebugR
 			None => match debug::parse_request(line.as_bytes()) {
 				Ok(request) => request.into(),
 				Err(error) => {
-					let _ = writeln!(client, "{}", serde_json::json!({"ok":false,"error":error}));
+					let _ = writeln!(client, "{}", serde_json::json!({"ok":false,"error":error.to_string()}));
 					continue;
 				},
 			},

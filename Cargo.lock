@@ -1608,9 +1608,9 @@ dependencies = [
 
 [[package]]
 name = "codesnake"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2205f7f6d3de68ecf4c291c789b3edf07b6569268abd0188819086f71ae42225"
+checksum = "56a42f52649afc3d3378670ccaaab507e48edd165c29a1591fa027745fffd743"
 
 [[package]]
 name = "codespan-reporting"
@@ -5045,9 +5045,9 @@ dependencies = [
 
 [[package]]
 name = "hifijson"
-version = "0.2.3"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a7763b98ba8a24f59e698bf9ab197e7676c640d6455d1580b4ce7dc560f0f0d"
+checksum = "242402749acf71e6f32f5857598b7002c4058a4e3c3b22b4c7d51cab9aea754e"
 
 [[package]]
 name = "hkdf"
@@ -5694,9 +5694,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jaq-core"
-version = "2.2.1"
+version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77526a72eb79412c29fd141767a6549bbfcb1cb40e00556fe16532d5e878e098"
+checksum = "f72ba7158fe9fc1bc4baace1b71e6d0d3d27c6839dd87dc1f233dd408f5dd85b"
 dependencies = [
  "dyn-clone",
  "once_cell",
@@ -5705,30 +5705,37 @@ dependencies = [
 
 [[package]]
 name = "jaq-json"
-version = "1.1.3"
+version = "2.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01dbdbd07b076e8403abac68ce7744d93e2ecd953bbc44bf77bf00e1e81172bc"
+checksum = "4be2f53207ffb1313a2d2ad819cfa8bfaa7936cb85a110eda10fd5da822cec94"
 dependencies = [
+ "bstr",
+ "bytes",
  "foldhash 0.1.5",
  "hifijson",
  "indexmap",
  "jaq-core",
  "jaq-std",
+ "num-bigint",
+ "num-traits",
+ "ryu",
+ "self_cell",
 ]
 
 [[package]]
 name = "jaq-std"
-version = "2.1.2"
+version = "3.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c264fe397c981705976c71f1bfe020382b9eda52ae950e57fe885e147bdd67d"
+checksum = "9f90e485abfd3189510c996e77be55056a51038b0fa5805e6c97b5dcf0d9ab55"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
- "chrono",
+ "bstr",
  "jaq-core",
+ "jiff",
  "libm",
  "log",
- "regex-lite",
+ "regex-bites",
  "urlencoding",
 ]
 
@@ -8147,7 +8154,6 @@ name = "omp-e2e"
 version = "0.1.0"
 dependencies = [
  "async-stream",
- "async-trait",
  "bytes",
  "flume",
  "futures",
@@ -8224,6 +8230,7 @@ dependencies = [
  "omp-proto",
  "parking_lot",
  "serde",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -8407,7 +8414,6 @@ dependencies = [
  "omp-vocab",
  "proc-macro2",
  "quote",
- "strum",
  "syn 2.0.119",
 ]
 
@@ -8477,6 +8483,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec 2.0.0-alpha.13",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
@@ -8900,6 +8907,7 @@ dependencies = [
  "gix",
  "jj-lib",
  "libc",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -10719,10 +10727,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "regex-lite"
-version = "0.1.9"
+name = "regex-bites"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
+checksum = "b6a15a2fa0bfda9361941c45550896ae87b15cc6c8c939ea350079670332e211"
 
 [[package]]
 name = "regex-syntax"

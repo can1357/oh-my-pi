@@ -2284,7 +2284,7 @@ mod tests {
 		assert_eq!(resolver.effective_region().await.expect("explicit region"), sf!("eu-west-2"),);
 	}
 
-	#[tokio::tes]
+	#[tokio::test]
 	async fn registry_availability_classifies_every_ambient_source_without_network() {
 		let environment = FakeEnvironment::default()
 			.with("AWS_ACCESS_KEY_ID", "AKIAENV")

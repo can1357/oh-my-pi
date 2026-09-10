@@ -23,7 +23,7 @@ Four incompatible parsers, four evasion surfaces, four sets of bugs, and none of
 what the shell will actually execute — because in pi the shell was `/bin/bash` and the
 extension was guessing.
 
-omp owns the parser and the coreutils. `crates/shell-engine` is a complete bash tokenizer,
+omp owns the parser and the coreutils. `crates/shell` is a complete bash tokenizer,
 PEG parser, expander and interpreter with 48 in-process builtins; when the agent runs
 `grep -rn foo src | head`, no `/bin/bash` resolves and no `grep` binary is found on `$PATH`.
 Because the thing that executes the script is the same thing that parsed it, a policy does not
@@ -113,7 +113,7 @@ rulebook.
 
 ### Where the gate sits
 
-`PLAN.md` §D6 (locked decision **D6**, amended 2026-08-19) forbids a gate chain in
+Locked decision **D6** (amended 2026-08-19) forbids a gate chain in
 the agent loop: "A tool batch runs concurrently exactly as the model issued it: no batch-level
 admission scheduler, no parallelism detection, no reordering. Each invocation gates
 independently: the environment asks a per-invocation admission query, and Core answers it by
@@ -253,12 +253,12 @@ silently stops consulting a gate.
 
 ### Parse, not regex
 
-`crates/shell-engine/src/parser/ast.rs` is the real thing: `Pipeline` with `bang` and `timed`
+`crates/shell/src/parser/ast.rs` is the real thing: `Pipeline` with `bang` and `timed`
 (`:275-290`), `AndOrList` with `first` and `additional` (`:94-103`), ten `CompoundCommand`
 variants (`:385-412`), `SimpleCommand` as `prefix`/`word_or_name`/`suffix` (`:1006-1019`),
 `CommandPrefixOrSuffixItem` carrying words, assignments, redirects and process substitutions
 (`:1155-1167`), seven `IoFileRedirectKind`s (`:1386-1404`), four `IoFileRedirectTarget`s
-(`:1420-1435`). Below the word level, `crates/shell-engine/src/parser/word.rs:31-57` gives
+(`:1420-1435`). Below the word level, `crates/shell/src/parser/word.rs:31-57` gives
 eleven `WordPiece` variants, which is exactly the information `pi-menshen` reconstructs by
 hand: `Text` and `SingleQuotedText` are static, `ParameterExpansion`, `CommandSubstitution`,
 `BackquotedCommandSubstitution`, `ArithmeticExpression` and `TildeExpansion` are not.
@@ -442,7 +442,7 @@ device might eventually do from its name and arbitrary JSON args.
 class BashIR:
     source: str                       # exact script text as submitted
     rev: str                          # IR schema revision, e.g. "bashir@3"
-    parser_rev: str                   # shell-engine parser revision that produced it
+    parser_rev: str                   # shell parser revision that produced it
     parse_ok: bool
     parse_error: ParseError | None
     truncated: bool                   # source exceeded BASH_IR_MAX_SOURCE
@@ -498,7 +498,7 @@ def touches(self, *patterns: str) -> tuple[PathRef, ...]: ...
 - `simple_commands()` is `iter(self.commands)`, kept as a method so the intent reads.
 - `segment(index)` returns the exact source slice of `commands[index]`, from its span. This is
   the string a deny message should quote — `cc-safety-net`'s `Segment:` field, and pi's
-  "segment-level deny/prompt vs full-command allow" (`.plan/feature-map/tools-exec.md:34`),
+  "segment-level deny/prompt vs full-command allow",
   without re-splitting on `;`/`&&`/`||`/`|`/`&`. The parser already knows where the boundaries
   are, so the `-c` / `--eval` bypass that pi's `hasBashApprovalShellControl` scans for cannot
   exist: `sh -c "rm -rf /"` is a `BashCommandIR` with `interpreter_code` set, not an opaque
@@ -567,7 +567,7 @@ type BashNode = BashCommandIR | BashCompound | BashFunctionDef | BashTestExpr
 ```
 
 `omp.AndOrOp` is a `StrEnum` with `AND` (`&&`) and `OR` (`||`), mirroring `ast::AndOr`
-(`crates/shell-engine/src/parser/ast.rs:204-215`). `omp.Separator` is a `StrEnum` with
+(`crates/shell/src/parser/ast.rs:204-215`). `omp.Separator` is a `StrEnum` with
 `SEQUENCE` (`;` or newline) and `ASYNC` (`&`), mirroring `ast::SeparatorOperator` (`:76-83`).
 `ASYNC` matters: a policy that permits a long command should know it was backgrounded.
 
@@ -593,7 +593,7 @@ class BashCommandIR:
     depth: int                            # 0 at program level
     container: CompoundKind | None        # innermost enclosing compound, if any
     subshell: bool                        # executes in a subshell (pipe stage, `(...)`, sub)
-    builtin: bool                         # resolves to a shell-engine builtin
+    builtin: bool                         # resolves to a shell builtin
     coreutil: bool                        # resolves to an in-process coreutil
     external: bool                        # would resolve a binary on $PATH
     read_only: bool                       # core classification for this argv
@@ -607,7 +607,7 @@ Field notes that carry weight:
   because it is the shape every ported rule already expects (`pi-menshen`'s
   `dynamicArgs: boolean[]`) and because a bitmask comparison is cheaper than a generator.
 - `env` covers `CommandPrefixOrSuffixItem::AssignmentWord`
-  (`crates/shell-engine/src/parser/ast.rs:1164`). This is the field that closes pi's
+  (`crates/shell/src/parser/ast.rs:1164`). This is the field that closes pi's
   `git -c alias.x='!…'` bypass class: the assignment is structured, not a mystery argv element.
 - `cwd` is the fold `@gotgenes/pi-permission-system` calls `EffectiveBase`. `cd /abs` sets it
   absolutely; `cd rel` joins onto the previous value; `cd "$DIR"`, `cd $(…)`, `cd -` and `cd ~`
@@ -641,7 +641,7 @@ class BashArg:
 ```
 
 `omp.Dynamism` is an `IntFlag`, one bit per non-literal `WordPiece`
-(`crates/shell-engine/src/parser/word.rs:34-57`):
+(`crates/shell/src/parser/word.rs:34-57`):
 
 | Member | Value | `WordPiece` |
 |---|---|---|
@@ -679,7 +679,7 @@ class BashAssignment:
 ```
 
 Mirrors `ast::Assignment` / `AssignmentName` / `AssignmentValue`
-(`crates/shell-engine/src/parser/ast.rs:1196-1259`), including the `append` flag and the
+(`crates/shell/src/parser/ast.rs:1196-1259`), including the `append` flag and the
 array-element form. `exported` distinguishes `FOO=1 cmd` (visible to `cmd` only) from a plain
 `FOO=1` statement. Assignments are the vector `pi-sandbox` exploits deliberately — it injects
 `ALL_PROXY`, `HTTP_PROXY`, `HTTPS_PROXY` — and therefore also the vector a policy must watch:
@@ -704,7 +704,7 @@ class BashRedirect:
 ```
 
 `omp.RedirectOp` is a `StrEnum` covering `ast::IoRedirect` and `IoFileRedirectKind`
-(`crates/shell-engine/src/parser/ast.rs:1325-1404`):
+(`crates/shell/src/parser/ast.rs:1325-1404`):
 
 | Member | Token | Implies |
 |---|---|---|
@@ -778,7 +778,7 @@ class BashTestExpr:
 ```
 
 `omp.CompoundKind` is a `StrEnum` with exactly the ten `ast::CompoundCommand` variants
-(`crates/shell-engine/src/parser/ast.rs:385-412`): `ARITHMETIC`, `ARITHMETIC_FOR`,
+(`crates/shell/src/parser/ast.rs:385-412`): `ARITHMETIC`, `ARITHMETIC_FOR`,
 `BRACE_GROUP`, `SUBSHELL`, `FOR`, `CASE`, `IF`, `WHILE`, `UNTIL`, `COPROCESS`.
 
 `COPROCESS` deserves a rule of its own in most policies: a coprocess is an asynchronous
@@ -879,7 +879,7 @@ class Span:
 ```
 
 Mirrors `parser::SourceSpan` / `SourcePosition`
-(`crates/shell-engine/src/parser/source.rs:3-62`), flattened from `Arc<SourcePosition>` to
+(`crates/shell/src/parser/source.rs:3-62`), flattened from `Arc<SourcePosition>` to
 plain integers because the IR crosses a socket.
 
 #### IR constants
@@ -1405,8 +1405,8 @@ class ApprovalSpec:
 `SPAWN`. It selects presentation and the configuration key that may pre-answer the request; it
 is not itself a decision.
 
-`scopes` are the buttons. `(ONCE, SESSION)` is pi's "allow once / allow always"
-(`.plan/feature-map/ROADMAP.md:278`); adding `PERSIST` offers to write the grant to project
+`scopes` are the buttons. `(ONCE, SESSION)` is pi's "allow once / allow always";
+adding `PERSIST` offers to write the grant to project
 configuration. `pattern` is what a `SESSION` or `PERSIST` grant would cover — an approval whose
 scope outlives the request must say what it is approving, or the user is consenting to
 something unstated.
@@ -2028,7 +2028,7 @@ caller either supplies `default=` or accepts `omp.agents.CompletionFailed`. A gu
 returned `Allow` because a 350M model timed out would be worse than no guardian, so the API
 makes that a caller bug rather than a default. `fell_back=True` says the deterministic path
 ran, which is a fact worth journaling — this mirrors the failure semantics of the auto-thinking
-classifier already shipping in Rust (`.plan/feature-map/FEATURES.md:356-360`: "online backend:
+classifier already shipping in Rust ("online backend:
 tiny model, allowMax variant, 5-level output, earliest-match parsing, transient retry" with
 "fallback to provisional or previous level on failure").
 
@@ -2098,9 +2098,9 @@ What is missing, specifically:
    device get denied" unanswerable. Widening it is `docs/py/02-verdicts.md`'s call; this
    document only records that policy attribution depends on it.
 
-### `crates/shell-engine` — the IR, and the analyzer that produces it
+### `crates/shell` — the IR, and the analyzer that produces it
 
-New module `crates/shell-engine/src/analysis.rs`, plus `analysis/` submodules for cwd folding,
+New module `crates/shell/src/analysis.rs`, plus `analysis/` submodules for cwd folding,
 path inference and command classification. It is a pure function over what the parser already
 produces:
 
@@ -2136,7 +2136,7 @@ tuple is materialised from it — a bitmask test is the hot operation every port
 Four pieces of real work:
 
 1. **Word dynamism.** `parser::word` already produces `WordPiece`
-   (`crates/shell-engine/src/parser/word.rs:34-57`), but `ast::Word` stores only raw text
+   (`crates/shell/src/parser/word.rs:34-57`), but `ast::Word` stores only raw text
    (`ast.rs:1766-1774`) and the expander evaluates straight to strings. The analyzer must call
    the word parser per word and fold the pieces into a `Dynamism` bitmask. Cost: one extra word
    parse per argument, on a path that already parses the whole script. Cheaper alternative:
@@ -2158,7 +2158,7 @@ Four pieces of real work:
    interpreters, and marking non-literal operands opaque.
 
 `SourceSpan` is only `serde`-derivable under `cfg(test)` today
-(`crates/shell-engine/src/parser/ast.rs:35`, `source.rs:55-56`). The IR's own types must derive
+(`crates/shell/src/parser/ast.rs:35`, `source.rs:55-56`). The IR's own types must derive
 `Serialize`/`Deserialize` unconditionally; the AST's test-only derives stay as they are, since
 the IR is a separate flattened type and not a serialization of the AST.
 
@@ -2201,7 +2201,7 @@ message SandboxEnforcement { … }   // the runtime enforcement receipt
 ```
 
 `Span` is four `uint32`s rather than a nested position pair, because the parser's
-`Arc<SourcePosition>` (`crates/shell-engine/src/parser/source.rs:57-62`) is a parse-time
+`Arc<SourcePosition>` (`crates/shell/src/parser/source.rs:57-62`) is a parse-time
 sharing optimization with no meaning on a wire.
 
 #### `env/v1` — enforcement and admission
@@ -2341,7 +2341,7 @@ pub trait Confinement: Send + Sync + 'static {
 ```
 
 `compile` runs once at `OpenSessionRequest`; `apply` runs in the pre-exec hook of every spawn
-under `crates/shell-engine/src/commands.rs`'s spawn path. Compilation being per-session and
+under `crates/shell/src/commands.rs`'s spawn path. Compilation being per-session and
 application being a no-allocation syscall sequence is what keeps confinement off the per-command
 cost curve — a Landlock ruleset fd is created once and `landlock_restrict_self` is three
 syscalls in the child.
@@ -2356,7 +2356,7 @@ SNI. Futures are unboxed RPITIT; no `BoxFuture` anywhere.
 `HostInner` (`:135-145`), `SessionHandle`, `RunControl` and `SpawnBook` tracking process groups
 (`:171-189`), `terminate()` walking those groups (`:591`), and
 `ProcessGroupPolicy::NewProcessGroup` already forcing each external command into its own group
-(`crates/shell-engine/src/interp.rs:305-313`). Work:
+(`crates/shell/src/interp.rs:305-313`). Work:
 
 - `SessionInner` gains a `Compiled` and the pre-exec hook that applies it.
 - `SpawnObserver` (`interp.rs:80-84`) gains a violation sink, so an audit event can be
@@ -2477,23 +2477,29 @@ granting an execution capability". `advertise` needs the same `route` predicate 
 already apply. Until it does, a policy extension cannot honestly claim it registers nothing
 with the model.
 
-**3. `live_hash` is one digest over every live identity** (`:450-467`, blake3 over the
-`BTreeMap` order). It is the right primitive for "did the live registry change" and the wrong
-one for "did the model-facing tool array change", and the difference matters to the
-`resources_discover` gate in this document: a policy that hides a device from discovery must not
-invalidate the prompt prefix cache, and with a single digest it would. The split — a slot hash
-over model-facing entries and a device hash over everything else — is `docs/py/01-devices.md`'s
-to specify; recorded here because the discovery gate's cost claim depends on it.
+**3. The registry's identity digests are split, not single.** `slot_hash()`
+(`registry.rs:2623`, SHA-256 over the policy-resolved model-visible slots),
+`device_hash()` (`registry.rs:2654`, mounted device availability and
+claimant-qualified reachability), and `projection_hash()` (`registry.rs:2690`,
+every registered revision plus its projection code) are the shipped surface. The
+one-digest-over-every-live-identity primitive this item described — right for
+"did the live registry change", wrong for "did the model-facing tool array
+change" — no longer exists, and that is what the `resources_discover` gate in
+this document needs: a policy that keeps a device out of the model-visible slot
+set cannot move the prompt-cache identity, because `slot_hash()` hashes only
+`Presentation::Slot` entries with model-callable routes. The split that
+`docs/py/01-devices.md` was to specify is in the registry; recorded here because
+the discovery gate's cost claim depends on it.
 
 **4. `Abort` has no `POLICY_DENIED` kind or `PolicyDenied` payload**, restated from the
 `crates/tool` subsection above because it is the one additive change that must land before a
 policy ships rather than after: journaled records written without it cannot be retrofitted
 with the rule that produced them.
 
-### `crates/telemetry`, `crates/storage`
+### `crates/observability`, `crates/journal`
 
 Telemetry: policy decision spans and violation counters, with the enum↔string vocabularies
-derived through strum or the `vocab!` macro in `crates/telemetry/src/semconv.rs` — hand-written
+derived through strum or the `vocab!` macro in `crates/observability/src/semconv.rs` — hand-written
 match tables are prohibited (`AGENTS.md`, Toolchain & Style).
 
 Storage: new journal entry kinds for `PolicyDecision`, `ApprovalTicketFiled`,
@@ -2504,7 +2510,7 @@ is what makes a 30-minute Slack round trip legitimate rather than a leak.
 
 ### Feature-map reconciliation
 
-**Satisfied, from `.plan/feature-map/tools-exec.md`:**
+**Satisfied.**
 
 - "Bash safety and approval policies … Hardcoded critical pattern detector
   (`CRITICAL_BASH_PATTERNS`)" (`:23-32`) — every one of the nine listed families becomes an IR
@@ -2524,7 +2530,7 @@ is what makes a 30-minute Slack round trip legitimate rather than a leak.
 - "Command line formatting in approval dialog: truncates long commands (`truncateForPrompt`)"
   (`:36`) — becomes `ApprovalSpec.body` rendered by the TUI (`docs/py/07-ui.md`).
 
-**Satisfied, from `.plan/feature-map/secrets-security.md`:**
+**Satisfied.**
 
 - `secrets.enabled`, `loadSecrets`, `loadSecretsFile`/`validateEntry`, `compileSecretRegex`,
   `collectEnvSecrets`, `builtinCredentialSecretEntries` (`:3`, `:7-11`) — become
@@ -2542,7 +2548,7 @@ Security cloud client, `security_publish`. That is a *tool*, not a policy: it be
 a `security` device exposed through the `dyn` shell builtin (`docs/py/01-devices.md`), with its
 store in the environment. Nothing in `omp.policy` should be read as covering it.
 
-**Conflicts, and how they resolve.** `.plan/feature-map/ROADMAP.md` marks thirteen approval
+**Conflicts, and how they resolve.** The roadmap marks thirteen approval
 features `⚠ redesign`, all with the same reason: lines 278 ("approvals move env-side, no loop
 gate chain"), 325, 341, 342 ("no approval gate chain in loop"), 438, 442, 443 ("env invariants
 replace prompt chain"), 462 ("env-side enforcement"), 463 ("no in-loop approval prompts"), 484,
@@ -2556,7 +2562,7 @@ procedure that produces it — off the mailbox, per invocation, never as a batch
   privileged write/unlink registries ⚠ redesign: env invariants replace prompt chain" —
   these become `omp.Violation` plus `omp.Amend`, which is an env invariant *with* a
   remediation channel. Neither needs a loop gate.
-- `.plan/feature-map/TREE.md:809` "ACP permission gate (`acp-permission-gate.ts`,
+- "ACP permission gate (`acp-permission-gate.ts`,
   `PERMISSION_REQUIRED_TOOLS`) intercepting destructive actions … with permission prompts
   (`allow_once`, `allow_always`, `reject_once`, `reject_always`)" — the four decisions become
   `ApprovalDecision.approved` × `PolicyScope`, and ACP becomes one `ApprovalRoute` rather than
@@ -2590,7 +2596,7 @@ mechanism (**D5**).
    later and explicitly deferred; neither (a), (b), nor recommended (c) proceeds — kernel
    confinement returns only with that deferred work. **The in-process shell is not confined by the
    kernel.** Landlock and Seatbelt confine
-   *processes*. `crates/shell-engine`'s 48 builtins and its coreutils run inside the
+   *processes*. `crates/shell`'s 48 builtins and its coreutils run inside the
    environment daemon, so a `SandboxProfile` cannot restrain them by kernel means — a
    `deny_write` on `.git` stops `/usr/bin/rm` and does not stop the in-process `rm`. Options:
    (a) fork a confined child per exec, which costs the persistent session's cwd, environment
@@ -2639,7 +2645,7 @@ mechanism (**D5**).
    raised to attribute; attribution returns with the deferred isolation work.** **Attributing a
    violation to a command index.** `Violation.command_index` requires
    correlating a kernel audit event to the `BashIR` command that was executing. `SpawnObserver`
-   gives `pid`/`pgid` (`crates/shell-engine/src/interp.rs:80-84`), which is sufficient for
+   gives `pid`/`pgid` (`crates/shell/src/interp.rs:80-84`), which is sufficient for
    external commands and insufficient for a violation raised by an in-process builtin. Under
    recommendation (c) in question 1 the engine raises those itself and can attribute them
    exactly, so the two questions resolve together — but if (a) or (b) is chosen,
@@ -2671,8 +2677,8 @@ mechanism (**D5**).
      durable ticket. There is no host coroutine to hold, so cancellation never has to choose
      between killing a pending human decision and waiting one out.
 
-   What remained open was not design but `.plan`, and it is closed: the **D5 amendment this
-   document flagged as recommended was ratified 2026-08-19** (`PLAN.md` §D5). D5's
+   What remained open was not design but planning, and it is closed: the **D5 amendment this
+   document flagged as recommended was ratified 2026-08-19**. D5's
    third clause now reads "supervised worker processes, one per active extension, keyed
    `(layer, tier, extension)`; pooling is explicit opt-in fate-sharing", with SIGKILL blast
    radius one extension and approval "a durable Core-owned ticket". The Rev 2 flag is kept
@@ -2704,7 +2710,7 @@ Changes this file made for Revision 2, and the review point that drove each:
 - **P0#6 — "pure courier" retracted.** "Where the gate sits" now states that Agent Core runs
   the per-invocation decision procedure and the environment owns the gate, records the
   reversal in prose, reads D6 as forbidding batch-level admission scheduling (not the
-  per-invocation procedure), flags the recommended D6 wording amendment for `PLAN.md`,
+  per-invocation procedure), flags the recommended D6 wording amendment,
   and keeps the invariant verbatim: one slow approval never serializes the batch. The build
   section's "courier, not gate" subsection is retitled and rewritten; the feature-map
   "relays rather than decides" prose is corrected to match.
@@ -2754,7 +2760,7 @@ Changes this file made for Revision 2, and the review point that drove each:
 - **P0#10 linkage — open question 7 resolved.** The cancellation-granularity question is
   rewritten: per-extension processes (the decided topology) plus durable approval tickets
   resolve the deadlock; the recommended D5 amendment ("warm pool of one" → warm process per
-  active extension) is stated explicitly and flagged for `PLAN.md`, never silently
+  active extension) is stated explicitly and flagged, never silently
   contradicted.
 - **§0 renames, file-wide.** Hook signatures return `omp.HookDecision` (never `Verdict`);
   `Priority` bands became `omp.HookPhase` with `phase=` in every decorator (pattern hooks
@@ -2769,7 +2775,7 @@ Changes this file made for Revision 2, and the review point that drove each:
   `journal.append` became a declared `@omp.entry_kind` instance (P0#17); profile composition
   is restated as order-independent rather than `Priority`-ordered.
 
-**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the PLAN.md amendment:
+**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the D5/D6 amendment:
 
 - **Dispatch surface.** "One event, one gate, one tagged target" was rewritten from the
   retired write-URL dispatch to the `dyn` core tool: `{"do_": "invoke/<path>"}` fires one
@@ -2780,7 +2786,7 @@ Changes this file made for Revision 2, and the review point that drove each:
   deletes that scheme entirely — discovery, docs, and dispatch are `dyn` ops, and the
   `do_` grammar, the ergonomic `@omp.tool` soft default, and the typed `omp.ToolPath` are
   owned by `docs/py/01-devices.md`. The one-gate rule transfers to `dyn` unchanged.
-- **D5/D6 ratified.** `PLAN.md` §D5/§D6 was amended 2026-08-19. "Where the gate sits"
+- **D5/D6 ratified.** Locked decisions D5 and D6 were amended 2026-08-19. "Where the gate sits"
   now quotes D6's amended text — batch-level scheduling prohibited, the per-invocation
   decision procedure explicitly permitted — instead of flagging a recommended wording
   amendment; open question 7 records the D5 amendment as ratified (per-extension worker

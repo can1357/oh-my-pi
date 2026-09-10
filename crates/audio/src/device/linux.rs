@@ -5,15 +5,16 @@ use std::{
 	ffi::{CStr, CString, c_char, c_int, c_long, c_uint, c_void},
 	mem, ptr,
 	sync::{
-		Arc, LazyLock, Mutex, OnceLock,
+		Arc, LazyLock, OnceLock,
 		atomic::{AtomicBool, Ordering},
-		mpsc::{self, Receiver},
 	},
 	thread::{self, JoinHandle},
 	time::Duration,
 };
 
+use flume::Receiver;
 use omp_core::Str;
+use parking_lot::Mutex;
 
 use super::{
 	AudioDevice, CaptureSink, DeviceConfig, DeviceSnapshot, MicrophonePermission, PlaybackFill,
@@ -420,7 +421,7 @@ impl AlsaStream {
 			let name =
 				CString::new(name).map_err(|_| "ALSA device ID contains an interior NUL".to_owned())?;
 			return Self::open_named(api, config, direction, latency, &name)
-				.map_err(|error| error.message().to_owned());
+				.map_err(|error| error.message().clone());
 		}
 		match Self::open_named(api, config, direction, latency, c"default") {
 			Ok(stream) => Ok(stream),
@@ -577,9 +578,7 @@ fn drain_periods_for_latency(period_ms: u32, latency_ms: u32) -> u32 {
 }
 
 fn remember_error(slot: &Mutex<Option<String>>, error: String) {
-	if let Ok(mut stored) = slot.lock() {
-		*stored = Some(error);
-	}
+	*slot.lock() = Some(error);
 }
 
 fn fill_if_armed(gate: &DeliveryGate, fill: &mut PlaybackFill, buffer: &mut [f32]) -> bool {
@@ -839,7 +838,7 @@ fn alsa_capture_loop(
 	Ok(())
 }
 
-struct ThreadDone(mpsc::Sender<()>);
+struct ThreadDone(flume::Sender<()>);
 
 impl Drop for ThreadDone {
 	fn drop(&mut self) {
@@ -876,8 +875,8 @@ fn finish(
 	if let Some(handle) = thread.take() {
 		let completed = done.take().is_none_or(|receiver| {
 			match receiver.recv_timeout(Duration::from_millis(500)) {
-				Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => true,
-				Err(mpsc::RecvTimeoutError::Timeout) => false,
+				Ok(()) | Err(flume::RecvTimeoutError::Disconnected) => true,
+				Err(flume::RecvTimeoutError::Timeout) => false,
 			}
 		});
 		if completed {
@@ -891,12 +890,7 @@ fn finish(
 			drop(handle);
 		}
 	}
-	device
-		.error
-		.lock()
-		.map_err(|_| "audio worker error state was poisoned".to_owned())?
-		.take()
-		.map_or(Ok(()), Err)
+	device.error.lock().take().map_or(Ok(()), Err)
 }
 
 /// Running `PulseAudio` or ALSA playback worker for a selected or default
@@ -925,8 +919,8 @@ impl PlaybackDevice {
 			worker_id: OnceLock::new(),
 		});
 		let worker_device = Arc::clone(&device);
-		let (opened_tx, opened_rx) = mpsc::sync_channel(1);
-		let (done_tx, done_rx) = mpsc::channel();
+		let (opened_tx, opened_rx) = flume::bounded(1);
+		let (done_tx, done_rx) = flume::unbounded();
 		let thread = thread::Builder::new()
 			.name("omp-audio-playback".to_owned())
 			.spawn(move || {
@@ -1034,8 +1028,8 @@ impl CaptureDevice {
 			worker_id: OnceLock::new(),
 		});
 		let worker_device = Arc::clone(&device);
-		let (opened_tx, opened_rx) = mpsc::sync_channel(1);
-		let (done_tx, done_rx) = mpsc::channel();
+		let (opened_tx, opened_rx) = flume::bounded(1);
+		let (done_tx, done_rx) = flume::unbounded();
 		let thread = thread::Builder::new()
 			.name("omp-audio-capture".to_owned())
 			.spawn(move || {
@@ -1174,5 +1168,112 @@ mod tests {
 	fn drain_periods_scale_with_widened_latency() {
 		assert_eq!(drain_periods_for_latency(20, 20), 3);
 		assert_eq!(drain_periods_for_latency(20, 200), 30);
+	}
+
+	#[test]
+	fn finish_returns_worker_error_joins_and_second_finish_succeeds() {
+		let delivery = Arc::new(delivery::armed());
+		let device = Arc::new(RunningDevice {
+			stop: AtomicBool::new(false),
+			delivery,
+			error: Mutex::new(None),
+			worker_id: OnceLock::new(),
+		});
+		let worker_device = Arc::clone(&device);
+		let (done_tx, done_rx) = flume::unbounded();
+		let mut thread = Some(thread::spawn(move || {
+			let _done = ThreadDone(done_tx);
+			let _ = worker_device.worker_id.set(thread::current().id());
+			remember_error(&worker_device.error, "synthetic worker failure".to_owned());
+		}));
+		let mut done = Some(done_rx);
+
+		let result = finish(&device, &mut thread, &mut done);
+		assert!(result.is_err());
+		assert_eq!(result.unwrap_err(), "synthetic worker failure");
+		assert!(thread.is_none());
+		assert!(done.is_none());
+
+		let mut no_thread: Option<JoinHandle<()>> = None;
+		let mut no_done: Option<Receiver<()>> = None;
+		assert!(finish(&device, &mut no_thread, &mut no_done).is_ok());
+	}
+
+	#[test]
+	fn finish_reports_panic_when_worker_unwinds() {
+		let delivery = Arc::new(delivery::armed());
+		let device = Arc::new(RunningDevice {
+			stop: AtomicBool::new(false),
+			delivery,
+			error: Mutex::new(None),
+			worker_id: OnceLock::new(),
+		});
+		let worker_device = Arc::clone(&device);
+		let (done_tx, done_rx) = flume::unbounded();
+		let mut thread = Some(thread::spawn(move || {
+			let _done = ThreadDone(done_tx);
+			let _ = worker_device.worker_id.set(thread::current().id());
+			panic!("synthetic worker panic");
+		}));
+		let mut done = Some(done_rx);
+
+		let result = finish(&device, &mut thread, &mut done);
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn finish_detaches_stalled_worker_and_releases_without_leak() {
+		let delivery = Arc::new(delivery::armed());
+		let device = Arc::new(RunningDevice {
+			stop: AtomicBool::new(false),
+			delivery,
+			error: Mutex::new(None),
+			worker_id: OnceLock::new(),
+		});
+		let worker_device = Arc::clone(&device);
+		let (done_tx, done_rx) = flume::unbounded();
+		let (release_tx, release_rx) = flume::unbounded();
+		let done_clone = done_rx.clone();
+		let mut thread = Some(thread::spawn(move || {
+			let _done = ThreadDone(done_tx);
+			let _ = worker_device.worker_id.set(thread::current().id());
+			// Block until the test explicitly releases us; never hold a delivery lock.
+			let _ = release_rx.recv();
+			drop(worker_device);
+		}));
+		let mut done = Some(done_rx);
+
+		let result = finish(&device, &mut thread, &mut done);
+		assert!(result.is_ok());
+		assert!(thread.is_none());
+		assert!(done.is_none());
+
+		release_tx.send(()).unwrap();
+		done_clone
+			.recv_timeout(Duration::from_secs(5))
+			.expect("worker should terminate after explicit release");
+		assert_eq!(Arc::strong_count(&device), 1, "worker should drop its device reference");
+	}
+
+	#[test]
+	fn playback_start_fails_with_invalid_device_id() {
+		let fill: PlaybackFill = Box::new(|_buf: &mut [f32]| {});
+		let config = DeviceConfig {
+			sample_rate: 48_000,
+			period_ms:   20,
+			device_id:   Some(Str::from("no-such-device-omp-test")),
+		};
+		assert!(PlaybackDevice::start(config, fill).is_err());
+	}
+
+	#[test]
+	fn capture_start_fails_with_invalid_device_id() {
+		let sink: CaptureSink = Box::new(|_buf: &[f32]| {});
+		let config = DeviceConfig {
+			sample_rate: 48_000,
+			period_ms:   20,
+			device_id:   Some(Str::from("no-such-device-omp-test")),
+		};
+		assert!(CaptureDevice::start(config, sink).is_err());
 	}
 }

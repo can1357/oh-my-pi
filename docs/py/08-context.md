@@ -31,13 +31,13 @@ do: its entire behaviour is the definition of `omp.SlotClass`.
 ```mermaid
 flowchart TB
     J[("transcript journal<br/>append-only, durable truth")]
-    J -->|Log::live splices Reset / Compact / Rewind| P["projection<br/>project_journal()"]
+    J -->|"live_chain folds prior links; compaction@1 bounds the tail"| P["projection<br/>project_journal()"]
     P --> T["canonical thread<br/>omp.thread.v1.Item[]"]
     T -->|"MessageRef[] metadata only"| H["extension host<br/>@omp.hook('thread_projection')"]
     H -->|ContextPatch| A["patch application<br/>agent-side, working copy"]
     T --> A
     A --> G["gateway context<br/>what the provider sees"]
-    S["@omp.prompt_slot contributions"] --> PH["prompt head<br/>render_prompt(), BLAKE3-hashed"]
+    S["@omp.prompt_slot contributions"] --> PH["prompt head<br/>render_prompt(), SHA-256-hashed"]
     PH --> G
 ```
 
@@ -47,9 +47,11 @@ turn from the same inputs, so it is a pure function of the thread, and a host cr
 means the unpatched thread goes out.
 
 Compaction is the exception, and deliberately so: a compaction verdict is durable. It
-appends `Kind::Compact { summary, short, first_kept, tokens_before, warning }`, which
-`Log::live` already honours by splicing the live event list — the summary event replaces
-everything before `first_kept`. A compaction survives restart; a context patch does not.
+appends a `compaction@1` entry — `KindName::Compaction` (`crates/journal/src/kind.rs:32-33`)
+— carrying the typed payload `data::Compaction` (`crates/journal/src/data.rs:757-781`):
+`{summary, boundary, method, tokens, warning, frames}`. The session fold
+(`crates/session/src/fold.rs:516-528`) turns it into a `Compaction` node that hides
+everything before `boundary`. A compaction survives restart; a context patch does not.
 That is the whole distinction between the two hooks.
 
 ### Why full-history re-serialization is banned
@@ -171,7 +173,7 @@ structural problems that cannot recur here:
    OpenAI `prompt_cache_key`, stripping `prompt_cache_retention` on models that 400 on it,
    and reordering Anthropic's mixed cache-control TTLs. This one is real work and it does
    not belong to an extension either — it is provider-dialect normalization, and it belongs
-   in `crates/inference` beside every other quirk (`docs/py/13-inference.md`).
+   in `crates/ai` beside every other quirk (`docs/py/13-inference.md`).
 
 So the useful reading of that package is not "a competing context extension." It is a bug
 report with four items, filed against the harness, three of which are answered by making
@@ -179,8 +181,7 @@ ordering a type and one by moving it behind the provider boundary.
 
 ### Compaction as a tiered negotiation
 
-omp does not have one compaction; it has a rescue ladder (`.plan/feature-map/FEATURES.md`
-"multi-tier rescue: prune, drop images, elide, local, remote/native, handoff"). The
+("multi-tier rescue: prune, drop images, elide, local, remote/native, handoff"). The
 `compaction` hook fires once per tier attempt, named, so an extension can take over the
 cheap tier and leave the expensive ones alone, or vice versa.
 
@@ -299,7 +300,7 @@ projection and shipped as a flat array; never constructed by extension code.
 | Field | Semantics |
 |---|---|
 | `id` | Stable opaque item identifier. The only value patch operations accept. Unique within a session for the item's lifetime, including across compaction. |
-| `event` | Physical transcript event index — the `u64` the live chain in `crates/storage/src/transcript/reader.rs` manipulates. Exposed because `omp.journal` and `omp.sessions` (`docs/py/09-journal.md`) key on it, and because ordering comparisons are integer comparisons. |
+| `event` | Journal entry identity — the `EntryId` (`crates/journal/src/entry.rs:13`) the live chain in `crates/journal/src/chain.rs:12-15` walks. Exposed because `omp.journal` and `omp.sessions` (`docs/py/09-journal.md`) key on it, and because ordering comparisons are integer comparisons. |
 | `seq` | Dense gateway thread sequence assigned when the item was accepted. `0` for items appended optimistically whose `amend_seq` correction has not landed. |
 | `kind` | See `omp.MessageKind`. |
 | `role` | Wire role: `"system"`, `"user"`, `"assistant"`, `"tool"`. Derived from `kind`; present because provider-shaped reasoning is more natural for some rules. |
@@ -383,7 +384,7 @@ class ContextView:
 
 The immutable argument to a `thread_projection` handler. `messages` is in projection order and includes
 prompt-head items so index arithmetic never lies about position. `prompt_hash` is the hex
-BLAKE3 of the canonical prompt head (`crates/agent/src/prompt.rs`), which is what a
+64-bit digest of the canonical prompt head (`crates/agent/src/loop.rs:3467-3480`), which is what a
 cache-health extension should key on instead of hashing prompt options the way
 `@mrclrchtr/supi-cache` does. `reset_event` is the transcript index of the live `Reset`
 boundary, or `None` if the chain reaches the session root.
@@ -613,8 +614,8 @@ application order `prune → drop_parts → replace → insert → reorder` and 
 define which op is earlier. The later op is dropped; both the drop and the winning op are
 journaled.
 
-**This is not a gate chain, and the distinction is load-bearing.** `PLAN.md` §D6
-locks **D6 — One mailbox, no gate chain**, amended 2026-08-19: a tool batch runs concurrently
+**This is not a gate chain, and the distinction is load-bearing.** Locked decision
+**D6 — One mailbox, no gate chain**, amended 2026-08-19, says: a tool batch runs concurrently
 exactly as the model issued it, with "no batch-level admission scheduler, no parallelism
 detection, no reordering," each invocation gating independently, and safety
 living in env invariants. Nothing in this document is an admission decision. A
@@ -1043,10 +1044,12 @@ refused — `omp.CompactionRefused` — because there is no next rung and the ex
 choosing a dead session. `reason` is journaled and shown in the TUI.
 
 **`CustomSummary`** — Replace the tier's work with a summary you computed. Exact effects: the
-agent appends `Kind::Compact { summary, short, first_kept, tokens_before, warning }` — the
-same event the built-in path writes — where `first_kept` resolves from `first_kept_id`.
-`Log::live` then splices: the summary event becomes the head of the live chain and everything
-before `first_kept` leaves it. The epoch increments. `details` is stored alongside for the
+agent appends `compaction@1` (`crates/journal/src/kind.rs:32-33`) with the typed payload
+`data::Compaction` (`crates/journal/src/data.rs:757-781`) — the same event the built-in
+path writes — where `boundary` resolves from `first_kept_id`. The session fold
+(`crates/session/src/fold.rs:516-528`) then installs the `Compaction` node: the summary
+becomes the head of the live projection and everything before `boundary` leaves it. The
+epoch increments. `details` is stored alongside for the
 extension's own later queries; `preserve` is returned verbatim as `previous_preserve` on the
 next compaction, which is how an extension keeps a running index across many compactions
 without a side file. No summarizer model call is made, so this is also the cheap path:
@@ -1892,14 +1895,15 @@ fix (`docs/py/02-verdicts.md`); until it lands, extensions should treat `is_erro
 
 ### Prompt-slot assembly
 
-**What exists.** `crates/agent/src/prompt.rs` is already most of the way there and is the
-strongest existing foundation in this document's scope. It has `PromptSource` (synchronous,
-`&WorkspaceInput` in, `Vec<Item>` out), `render_prompt` invoking the source **twice** and
-comparing byte-for-byte, `PromptHash` as a BLAKE3 over canonical items, and
-`PromptError::Volatile` for the mismatch case. `loop.rs:679-715` already re-renders on change
-and rewrites the durable head through `journal.rewrite_prompt_head`, and `Log::live` already
-resolves `PromptRewriteIntent` / `Stage` / `Commit` into a live head. The volatility check
-that makes `omp.VolatilePrompt` enforceable is *already shipped*.
+**What exists.** `crates/agent/src/prompt/` (`mod.rs`, `slots.rs`) is already most of the way
+there and is the strongest existing foundation in this document's scope. It has `PromptSource`
+— `system_items(&Dom) -> Result<Vec<Item>, PromptError>` (`crates/agent/src/loop.rs:74`) —
+`CanonicalPromptSource::banded_render` (`crates/agent/src/prompt/mod.rs:52`) over per-band
+`BandHash`es, and `PromptError::VolatileSource` for the mismatch case. The double-render
+volatility check that
+makes `omp.VolatilePrompt` enforceable is *already shipped*
+(`crates/agent/src/prompt/slots.rs:315-318`); the durable-head rewrite is not — no
+`rewrite_prompt_head` and no `Log::live` head-splice survives in the tree (reported gap).
 
 **What is missing.** `PromptSource` produces a whole head from one implementation. Slots need
 composition:
@@ -1931,7 +1935,7 @@ implements `PromptSource`, so `render_prompt`'s double-render and hashing apply 
 the volatility rejection becomes per-slot: render both passes into per-slot byte ranges and
 compare ranges, so one bad extension is dropped rather than the whole head failing.
 
-`BandHash` is the real new artifact: a BLAKE3 per stability band, computed during assembly. It
+`BandHash` is the real new artifact: a SHA-256 per stability band, computed during assembly. It
 gives us (a) per-band cache-breakpoint placement, (b) the ability to answer "which band
 changed" when a prefix cache misses, which today is guesswork, and (c) a cheap
 `PromptHash = H(band0 ‖ band1 ‖ band2 ‖ band3)` that stays compatible with the existing
@@ -1949,7 +1953,7 @@ the Python function's determinism is checked at *pull* time by calling it twice 
 and after that the agent renders from immutable bytes. A slot that is nondeterministic is
 caught in Python, where the traceback names the extension.
 
-**Cache breakpoint emission.** `crates/inference` needs a per-provider breakpoint budget
+**Cache breakpoint emission.** `crates/ai` needs a per-provider breakpoint budget
 and a placement pass consuming `[BandHash; 4]` plus the trailing message window — this pass
 *is* the semantic-groups-into-marker-budget packing `docs/py/13-inference.md` owns. Anthropic
 gets four `cache_control` markers, three at band transitions and one trailing; providers with
@@ -1974,10 +1978,12 @@ Three provider quirks belong in the same pass, and the argument for putting them
 
 ### Compaction
 
-Nothing exists agent-side. `Kind::Compact` exists in storage and `Log::live`
-(`crates/storage/src/transcript/reader.rs:123-133`) already splices it correctly, which is a
+Nothing exists agent-side. The `compaction@1` kind exists in the journal's closed vocabulary
+(`crates/journal/src/kind.rs:32-33`) with a typed payload (`crates/journal/src/data.rs:757-781`), and the
+session fold already records the compaction boundary into the projected DOM
+(`crates/session/src/fold.rs:517-528`), which is a
 much better starting position than it sounds — the *durable* half of compaction is done and
-tested (`crates/storage/tests/transcript_roundtrip.rs`). What is missing is the ladder:
+tested (`crates/journal/tests/gc.rs`). What is missing is the ladder:
 
 - `crates/agent/src/compact.rs`: tier definitions, threshold evaluation against
   `ContextUsage`, the hysteresis band that prevents compaction loops, and the hook dispatch
@@ -1995,16 +2001,16 @@ tested (`crates/storage/tests/transcript_roundtrip.rs`). What is missing is the 
   recorded by `project.rs` and `tool_result_item`. They also cover the majority of what the
   catalog's context extensions hand-roll, so shipping them shrinks the problem before any
   extension surface exists.
-- The `REMOTE` tier has an unusual amount of groundwork already: `Kind::NativeCheckpoint
-  { provider, model, items }` exists in storage for replacing accumulated provider-native
-  history with checkpoint items, and `crates/storage/src/transcript/capsule.rs` owns
-  provider-native replay residue. What is missing is the portability guard — pi's
+- The `REMOTE` tier's groundwork is a design slot, not code: no provider-native checkpoint
+  kind (`provider`, `model`, `items`) exists in the journal's closed vocabulary, and nothing
+  owns provider-native replay residue — reported gap. What is missing first is the
+  portability guard — pi's
   `remotePreserveReusable` judges reusability against the *active* model, and getting that
   wrong left provider-switched sessions permanently context-less (pi #6343). Any
   `CustomSummary` must therefore stay a real textual summary and never an opaque
   provider blob, which is why `CustomSummary.summary` is `str` and not bytes.
 
-There is no `crates/snapcompact`, and `.plan/feature-map/compact/` is a compacted copy of the
+There is no `crates/snapcompact`, and the retired port plan's `compact/` notes were a compacted copy of the
 feature map, not compaction code — worth stating because both names invite the wrong guess.
 The `snapcompact` tier (`FEATURES.md:238`: PNG frames, shape selection, image budget, savings
 journal) is a genuinely separate subsystem and is out of this document's scope beyond having
@@ -2179,7 +2185,7 @@ function call becomes `omp.services` (`docs/py/00-overview.md`) — and `docs/py
 benchmark matrix is what measures them. The one item Rev 2 left flagged rather than
 absorbed is now closed: D5's "warm pool of one" wording no longer matched the topology,
 the ruling recommended amending it, and the amendment was ratified 2026-08-19 — D5's
-third clause (`PLAN.md` §D5) now reads "supervised worker processes, one per
+third clause now reads "supervised worker processes, one per
 active extension, keyed `(layer, tier, extension)`; pooling is explicit opt-in
 fate-sharing", with approval a durable Core-owned ticket (`docs/py/06-policy.md`)
 removing the long-suspension pressure that motivated the pool. The Rev 2 flag is kept
@@ -2190,7 +2196,8 @@ The rest are genuine open questions.
 1. **Item identity across compaction.** `omp.thread.v1.Item` has no id field — only `seq`
    (tag 1) — so `MessageRef.id` must be derived, and it must stay stable across a compaction
    or a pin captured before it is worthless. The transcript event index is the obvious
-   source: append-only, never reused, and already what `Log::live` manipulates. Two cases
+   source: append-only, never reused, and already what `live_chain` walks
+   (`crates/journal/src/chain.rs:12-15`). Two cases
    resist it. A `Compact` event's summary item has no pre-existing item event to derive from
    (its own event index would work, but that makes summary ids a different shape from every
    other id, which invites bugs). And optimistically appended items sit at `seq = 0` until
@@ -2287,7 +2294,7 @@ Changes this file made in the post-review revision, and the review points that d
 - **P0#10 / D5** — the Rev 1 lead "defect" in *Open questions* (session-wide cancellation
   blast radius) is resolved by the per-extension-process topology this document had
   recommended; rewritten as a recorded resolution, with the D5 amendment recommendation
-  flagged against `PLAN.md` rather than silently contradicted. Handler-concurrency
+  flagged rather than silently contradicted. Handler-concurrency
   prose now states actor semantics: serialized within an extension, concurrent across
   extensions.
 - **P0#6 linkage** — chaining, dedupe, and `CustomSummary` winner selection replace
@@ -2306,7 +2313,7 @@ Changes this file made in the post-review revision, and the review points that d
   `@omp.entry_kind` instances instead of raw string + dict; session reads filter by declared
   entry type.
 
-**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the PLAN.md amendment:
+**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the D5/D6 amendment:
 
 - **Dispatch surface.** The memory-device paragraph now reaches `recall` through the `dyn`
   core tool (`{"do_": "docs/recall"}` for schema, `{"do_": "invoke/recall", …}` for the
@@ -2316,7 +2323,7 @@ Changes this file made in the post-review revision, and the review points that d
   device URL scheme; the Rev 2.1 ruling deletes that scheme entirely — discovery, docs,
   and dispatch are `dyn` ops (`search`/`docs`/`invoke`), owned by `docs/py/01-devices.md`
   along with the ergonomic `@omp.tool` soft default and the typed `omp.ToolPath`.
-- **D5/D6 ratified.** `PLAN.md` §D5/§D6 was amended 2026-08-19. The `thread_projection`
+- **D5/D6 ratified.** Locked decisions D5 and D6 were amended 2026-08-19. The `thread_projection`
   gate-chain paragraph now cites D6's amended text (batch-level scheduling prohibited, the
   per-invocation decision procedure explicitly permitted) instead of the recommended
   wording amendment, and the resolved cancellation item records the D5 amendment as

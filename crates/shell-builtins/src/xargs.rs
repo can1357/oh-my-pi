@@ -844,9 +844,15 @@ fn normalize_options<'a>(
 
 	let delimiter = match (options.delimiter, options.null) {
 		(Some(delimiter), true) => {
-			if matches.indices_of(options::NULL).unwrap().next_back()
-				> matches.indices_of(options::DELIMITER).unwrap().next_back()
-			{
+			let null_index = matches
+				.indices_of(options::NULL)
+				.and_then(|mut indices| indices.next_back())
+				.unwrap_or(0);
+			let delimiter_index = matches
+				.indices_of(options::DELIMITER)
+				.and_then(|mut indices| indices.next_back())
+				.unwrap_or(0);
+			if null_index > delimiter_index {
 				Some(b'\0')
 			} else {
 				Some(delimiter)

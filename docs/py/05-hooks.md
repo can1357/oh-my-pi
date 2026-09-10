@@ -135,7 +135,7 @@ sentence, and the catalog row lives in §3.11 family H.
 `omp.events.spec(event).returns` reports the return type, so this is discoverable rather than
 folklore. A domain return is not an escape hatch for new event families: adding one requires that
 the decision space already exists as a typed enumeration owned by a sibling document — `omp.Failover`
-mirrors `crates/inference/src/error.rs`, `ContextPatch`'s op set is closed and validated by
+mirrors `crates/ai/src/error.rs`, `ContextPatch`'s op set is closed and validated by
 [`08-context.md`](08-context.md) — not merely that five arms feel awkward.
 
 ### 2.3 Where hooks attach — and who decides
@@ -145,7 +145,7 @@ Hook sites are the seams the loop already has. omp's loop is a four-phase machin
 every hook attaches at a transition or at a durable journal write, never inside a stream.
 
 The single most important thing about this design is **where the `tool_call` decision is made and
-who runs it.** Locked decision D6 (`PLAN.md` §D6, amended 2026-08-19) states: "One
+who runs it.** Locked decision D6 (amended 2026-08-19) states: "One
 mailbox, no gate chain… A tool batch runs concurrently exactly as the model issued it: no
 batch-level admission scheduler, no parallelism detection, no reordering. Each invocation gates
 independently: the environment asks a per-invocation admission query, and Core answers it by
@@ -821,7 +821,7 @@ Python call.
 | `after_gap` | Fire only if this subscription has not fired within the window |
 
 `once` and `after_gap` are the declarative form of the ad-hoc repeat gating catalogued in
-`.plan/feature-map/FEATURES.md:1854` ("scoping: tool names, file path globs; repeat gating
+"scoping: tool names, file path globs; repeat gating
 once/after-gap"). There is no callback form of `When`, because the predicate must be evaluatable
 core-side to be worth anything; a hook that needs richer conditions returns `Defer()`.
 
@@ -1198,9 +1198,10 @@ journal-derived environment state (todo slot restore, background-job policy). `r
 background jobs still pending after the rewrite; `cancelled_jobs` lists jobs whose launch the
 rewrite dropped and which were therefore cancelled (checkpoint rewinds cancel nothing). State
 rehydration remains fold-on-hook: `omp.sessions.journal(live=True)` opens a fresh reader per
-request and is immediately consistent with the truncated view. `session_reset` corresponds to
-journal `Kind::Reset`; `session_branch*` to `Kind::Branch`; `forked_from` to `Kind::ForkedFrom`
-(`crates/storage/src/transcript/event.rs:256-283`). `restore_workspace=True` is served by env
+request and is immediately consistent with the truncated view. `session_branch*` corresponds
+to entries carrying an explicit `prior` branch parent (`crates/journal/src/entry.rs:77-78`);
+`session_reset` and `forked_from` have no counterpart in the journal's closed revision-1
+vocabulary (`crates/journal/src/kind.rs:11-33`) — reported gap. `restore_workspace=True` is served by env
 snapshot/restore ([`11-env.md`](11-env.md)), not by an extension's shadow git repository — the
 `@ayulab/pi-rewind` pattern of maintaining `.git_checkpoint` is a dead end.
 
@@ -1360,7 +1361,7 @@ class DeadlineScope(enum.StrEnum):
 ```
 
 `AgentPhase`, `InterruptClass`, `DrainPoint` and `InterruptSource` mirror the Rust enums exactly
-(`crates/agent/src/events.rs:19-29`, `crates/agent/src/mailbox.rs:10-60`), so an extension that
+(a reported gap: no surviving Rust implementation of these enums in the tree), so an extension that
 reasons about interrupt timing reasons about the same taxonomy the loop does rather than a
 reinvented one. A previous revision exported the loop mirror as bare `Phase`, colliding with
 two other "phase" meanings across the set; it is renamed `AgentPhase` (matching the Rust name),
@@ -1842,8 +1843,8 @@ Two catalog-level rules that are this document's, not `13-inference.md`'s:
 **`before_request` may not mutate the messages.** It is restricted to request parameters, headers
 and capability intents; attempting to write a message field raises `omp.HookContractError`. A
 previous revision went much further here, declaring "there is no client-side context hook in omp"
-and citing the roadmap markers (`.plan/feature-map/roadmap/session.md:67`,
-`roadmap/auto-loops.md:15`) as a locked prohibition. That prose is deleted, and the reversal is
+and citing the roadmap markers
+as a locked prohibition. That prose is deleted, and the reversal is
 recorded: the markers forbid pi's whole-message-array rewriting, and `before_request` still
 enforces exactly that — but bounded context projection now exists as the `thread_projection`
 domain-return hook, owned by [`08-context.md`](08-context.md) (family H), which returns validated
@@ -2228,7 +2229,7 @@ def ask_the_human(event: omp.ToolCallEvent, ctx: omp.Context) -> omp.HookDecisio
 ```
 
 What disappears: the AST walker (`event.bash` is produced once, in Rust, by
-`crates/shell-engine/src/parser/ast.rs`); the terminal-authorizer construct (the event's
+`crates/shell/src/parser/ast.rs`); the terminal-authorizer construct (the event's
 `default_decision` *is* the terminal authorizer, and it is data); the filesystem ask envelope
 (subagent approval requests ride the durable ticket, so a child cannot widen its own permissions
 by evaluating a local config); the fragile ordering (two prechecks that cannot conflict, one
@@ -2287,7 +2288,7 @@ Three things the omp shape gets for free. Resolution is first-`Continue`-wins in
 `(layer, publisher, extension_id)` order with an explicit `Settle()` veto — domain-return hooks
 take no `phase=` — so an autoresearch auto-resume hook and this goal loop
 compose deterministically instead of one silently losing. `event.reason is
-SettleReason.INTERRUPTED` is the loop's own taxonomy (`crates/agent/src/mailbox.rs:10-17`,
+SettleReason.INTERRUPTED` is the loop's own taxonomy (
 `loop.rs:386-411`), not a heuristic over message shapes — so "pause on SIGINT, preserve budget on
 internal aborts" is a two-line distinction rather than a guess. And `agent_settled` fires exactly
 once per submission at the `DrainPoint::Idle` boundary (`loop.rs:580-597`), never after a tool
@@ -2356,8 +2357,8 @@ per-transition re-registration was the reason `pi-cache-optimizer` had to exist.
 right seam for the model switch, since it fires after the journal `TurnStart` is fixed but before
 transport opens (`crates/agent/src/loop.rs:804-851`), making pi's "defer model switches if triggered
 while a turn is actively streaming" workaround unnecessary. And the `tool_call` gate here is
-advisory UX layered over an env-enforced read-only scope, per
-`.plan/feature-map/roadmap/auto-loops.md:6` — it gives the model an early, well-worded error; it is
+advisory UX layered over an env-enforced read-only scope:
+it gives the model an early, well-worded error; it is
 not the enforcement.
 
 ### 4.4 Guardian auto-review with a circuit breaker — `@shinynito/pi-menshen`
@@ -2464,7 +2465,7 @@ the protobuf files themselves.
   `AgentEvent` (`crates/agent/src/events.rs:19-119`) already enumerate the observations hooks need;
   `EventBus` already distinguishes a lossless journal subscription from a bounded lossy UI
   subscription with drop accounting (`events.rs:140-149`, `222-253`); `Mailbox` / `MailboxSender` /
-  `Interrupt` / `InterruptClass` / `DrainPoint` (`crates/agent/src/mailbox.rs:8-94`) are the exact
+  `Interrupt` / `InterruptClass` / `DrainPoint` (no surviving implementation in the tree) are the exact
   taxonomy `InterruptEvent` exposes; and the loop already carries a deadline (`wait_deadline`,
   `loop.rs:1177-1182`; `sleep_with_deadline`, `loop.rs:1184-1192`) and an out-of-band abort
   (`AbortHandle`, `loop.rs:101-114`).
@@ -2473,29 +2474,30 @@ the protobuf files themselves.
   `request_id` with an explicit `relinquish` for ownership transfer. A hook dispatch guard is the
   same type with a different sender; there is nothing to invent.
 - **`crates/tool`** already defines the vocabulary a denied or failed call lowers into: `Verdict`
-  (`crates/tool/src/lib.rs:251-260`), `Abort` (`308-328`, including the `Skipped`,
+  (`crates/tool/src/lib.rs:1697`), `Abort` (`crates/tool/src/lib.rs:1712`, including the `Skipped`,
   `Interrupted` and `EffectsUnknown` variants this document's failure table depends on),
-  `ArgIssue` / `ArgIssueKind` (`275-303`), `ArtifactLifetime` (`336-344`), `PromptCaps`
-  (`134-142`).
-- **`crates/storage`** already has a durable, verbatim-preserving journal: `Kind::Custom`
-  (`crates/storage/src/transcript/event.rs:334-343`) plus `Kind::ToolBatchAuthorized`,
-  `Kind::TurnStart`, `Kind::TurnReceipt`, `Kind::JobRegistered`, `Kind::JobSettled`,
-  `Kind::Rewind`, `Kind::Branch`, `Kind::Reset`, `Kind::ForkedFrom` — one journal event per hook
-  site in families A, B and I. (Not `transcript/patch.rs`: its `Patch<T>`
-  (`patch.rs:7`) is a tri-state *field* patch — unchanged / set / clear — for partial record
-  updates, and has nothing to do with rewriting a message list. The shipped projection patch
-  protocol is `Log::live` (`transcript/reader.rs:81`), which splices `Reset` / `Compact` / `Rewind`
-  over the live event-index list, with `AmendPatch::{Prune, RetryRecovery, Seq}`
-  (`transcript/types.rs:206-228`). Neither is on a hook path; they are named here only so this
-  document does not repeat a citation error other docs had to correct.)
+  `ArgIssue` / `ArgIssueKind` (`crates/tool/src/lib.rs:1674` / `:1655`), `ArtifactLifetime`
+  (`crates/tool/src/lib.rs:1856`), `PromptCaps` (`crates/tool/src/lib.rs:896`).
+- **`crates/journal`** already has a durable, verbatim-preserving journal: append-only
+  raw-SSE frames whose blank line commits an entry (`crates/journal/src/lib.rs:1-5`), one
+  writer under an exclusive sidecar lock (`crates/journal/src/lib.rs:37-57`), and a closed
+  revision-1 kind vocabulary (`crates/journal/src/kind.rs:11-33`) covering turn starts and
+  receipts, tool calls/updates/results, patches, and compaction. One journal event per hook
+  site in families A, B and I where a kind exists; hook-specific kinds beyond that
+  vocabulary are a reported gap, not existing entries. (The journal's patch surface is
+  `patch@1`'s DOM-operation batch (`crates/journal/src/data.rs:742-747`), not a message-list
+  rewrite; neither is on a hook path.)
 - **`crates/tool` already implements the revision and verdict architecture this design assumes.**
   It is not to be invented: `TOOL_REV_PROP = "omp/tool-rev"` (`crates/tool/src/lib.rs:46`) is the
   existing namespaced thread-item property carrying the committed rev, stamped by
-  `crates/agent/src/project.rs:165,171,258` and `crates/agent/src/loop.rs:1368-1370` and read at
-  `loop.rs:1129-1131`; `VerdictDetails` (`lib.rs:420`) already discriminates inline JSON from
-  spilled by `#[serde(tag = "storage")]`; `Registry::project_verdict`, `lift` and
-  `project(RecordedCallOwned) -> ProjectedCall` (`registry.rs:202`, `219`, `544`) already implement
-  the adjacent-lift walk. Anything in this document needing per-rev attribution — `HookOutcome`,
+  `crates/session/src/projection.rs:165-180` onto projected call and result items (and onto the
+  outbound device request by `crates/serve/src/inference.rs:2518-2526`) and read back by the
+  projection's `tool_revision` (`crates/session/src/projection.rs:188-196`); the inline-vs-spilled
+  details discriminator `CallOutcomeDetails` (`crates/tool/src/lib.rs:2045-2061`) separates inline
+  JSON from blob spill by `#[serde(tag = "storage")]`; `Registry::project_verdict`, `lift` and
+  `project(RecordedCallOwned) -> ProjectedCall` (`crates/tool/src/registry.rs:2942`, `:1288`,
+  `:2988`) already implement the adjacent-lift walk. Anything in this document needing per-rev
+  attribution — `HookOutcome`,
   telemetry, audit records — rides `TOOL_REV_PROP` rather than a parallel stamp. Note that
   `EventSpec.rev` / `HookOutcome.event_rev` are a *different* axis: the hook payload schema
   revision, not the tool dialect revision. Both are recorded; neither substitutes for the other.
@@ -2517,13 +2519,11 @@ routes through the extension's generation-fenced `ExtensionEnvClient`. The regis
 identities. `ToolComplete.kind` carries the four `OutcomeKind` branches at tag 16, and envd's
 `SpillDiverter` implements `VerdictSpill`.
 
-The emission ledger is
-[`.plan/ext-gaps/emit-coverage.md`](../../.plan/ext-gaps/emit-coverage.md). Every non-tombstoned
+Every non-tombstoned
 ordinal is wired except `provider_login`, `provider_refresh`, `provider_sign`, `models_discover`,
 `capability_budget`, and `worker_state`; those six await the owning provider-callback or worker
 lifecycle authority rather than a fabricated emit. Partial payload facts at otherwise real emit
-sites are recorded in
-[`.plan/ext-gaps/emit-remainder.md`](../../.plan/ext-gaps/emit-remainder.md).
+sites are recorded.
 
 **Defect 1 — `omp_remote.py` framing.** Two distinct exposures, and the first is the serious one.
 (a) *Authentication is opt-in and defaults to off.* `serve(sock, authkey=None)`
@@ -2689,7 +2689,7 @@ Attach sites, all at existing seams:
 
 Session-family hooks attach in the session manager around `Agent::rewind` (`loop.rs:235`),
 `rewind_targets` (`loop.rs:251`) and the switch/branch paths; provider-family hooks attach in
-`crates/inference` at request assembly and error classification; `compaction` attaches wherever
+`crates/ai` at request assembly and error classification; `compaction` attaches wherever
 `Kind::Compact` is written. The decision procedure for `tool_call` runs in `HookGate`, off the
 mailbox loop — the loop never awaits it, which is what keeps the batch invariant intact. A previous
 revision called this component "a small, self-contained courier task"; per §2.3 that framing is
@@ -2717,7 +2717,7 @@ over the generated descriptors), `hooks.py` (`@omp.hook`, the five decision data
 the two cannot drift), and the exceptions in §3.10. Generation from one source is not optional: 57
 events × ~10 fields hand-mirrored in two languages is a drift factory.
 
-**`crates/storage`** gains one typed journal variant. `Kind::Custom` works today and is the tempting
+**`crates/journal`** gains one typed journal variant. `Kind::Custom` works today and is the tempting
 shortcut, but Lesson #8 says otherwise: hook outcomes are exactly the data we will want to query per
 revision six months from now ("show me every `tool_call` denied by a timeout on `edit@hl.*`"), and
 `Kind::Custom { kind: "omp/hook", data: RawValue }` is write-only data by construction. Add:
@@ -2741,13 +2741,13 @@ pub struct HookOutcome {
 
 with `Kind::HookOutcome(HookOutcome)`.
 
-**`crates/telemetry`** gains a per-`(extension, event, subscription)` latency histogram and a denial
+**`crates/observability`** gains a per-`(extension, event, subscription)` latency histogram and a denial
 counter, plus the breaker state that trips `extension_unload(QUARANTINE)`. **`crates/tui`** needs
 nothing beyond the dialog surface [`07-ui.md`](07-ui.md) already requires.
 
 ### Feature-map reconciliation
 
-**Satisfied.** `.plan/feature-map/session.md`'s "Session lifecycle hooks (session_before_compact,
+**Satisfied.** "Session lifecycle hooks (session_before_compact,
 session_before_switch, session_before_branch, session_before_tree, session_shutdown) with extension
 runner integration" [M3] is satisfied by family A plus the `compaction` gate, with
 `session_before_tree` folded into `session_branch` because omp's journal models the tree as
@@ -2760,14 +2760,14 @@ timeouts, dialog-paused budgets, managed timer cleanup"), `:977-:980` (the Hooks
 cancellation"), `:991-:992` ("Lifecycle events … session, agent/turn, tool, compaction, retry,
 ttsr, todo events") and `:1179` ("turn ownership tracking, `session_start` event, error reporting")
 are covered by §3.11. `:1854` ("scoping: tool names, file path globs; repeat gating once/after-gap")
-is `omp.When`. `.plan/feature-map/auto-loops.md`'s goal runtime — the `goal_updated` /
+is `omp.When`. The goal runtime — the `goal_updated` /
 `goal_continuation_requested` events, the token-delta accounting that excludes reused `cacheRead`,
 the `budget-limited` transition, "pauses on user interrupt (SIGINT), resumes on session reload" — is
 satisfied by `agent_settled` + `turn_end` + `omp.journal`, and `SESSION_STOP_CONTINUATION_CAP = 8`
 becomes `omp.limits.SETTLE_CONTINUATION_CAP`.
 
 **Conflicts, resolved in favour of the locked decisions — with one reversal recorded.**
-`.plan/feature-map/roadmap/session.md:67` marks the lifecycle hooks `⚠ redesign: env-side, no
+The roadmap marks the lifecycle hooks `⚠ redesign: env-side, no
 context mutation`, and `roadmap/auto-loops.md:15` marks goal-mode prompt injection `⚠ redesign: no
 client-side context hooks; inject via turn seam`. A previous revision honoured both by prohibition:
 "there is no `context` event in this catalog", stated as locked. Rev 2 reverses the prohibition
@@ -2781,7 +2781,7 @@ message array. That is not the failure mode the markers name. Goal injection sti
 `compaction` gate ([`08-context.md`](08-context.md)).
 
 `roadmap/session.md:98` and `roadmap/auto-loops.md:11` mark the ACP permission gate and the plan
-approval popup `⚠ redesign: … no approval gate chain`, and D6 (`PLAN.md` §D6, amended
+approval popup `⚠ redesign: … no approval gate chain`, and D6 (amended
 2026-08-19) says "no batch-level admission scheduler, no parallelism detection, no reordering".
 The resolution — worked out with
 [`06-policy.md`](06-policy.md), under D6's amended text (§2.3) — is that
@@ -2904,7 +2904,7 @@ the decision was gating (turn interrupted, submission aborted via `AbortHandle`,
 when the extension is unloaded, or when the host disconnects. On `CancelDispatch` the host raises
 `asyncio.CancelledError` into the handler's task and, for a synchronous handler that ignores it,
 delivers `PyThreadState_SetAsyncExc` with `KeyboardInterrupt` after a grace window — the mechanism
-`crates/tools/src/eval/kernel.rs` already uses, and, per D5 (`PLAN.md` §D5), courtesy rather
+`crates/tools/src/eval/kernel.rs` already uses, and, per D5, courtesy rather
 than the mechanism: "Interpreter interrupts are courtesy, never the mechanism."
 
 **This is where a previous revision carried its largest unresolved problem, and the topology
@@ -2929,9 +2929,9 @@ question is now closed by the final topology: **one process per extension** (§2
 cancelled dispatch takes at most that extension's other in-flight handlers (which its actor
 serialization already bounds), never its neighbours'. Durable approval tickets (§2.6) remove the
 other half of the old deadlock — there is no minutes-long suspended coroutine for a SIGKILL to
-orphan, because approval state lives in Core. What remained for PLAN.md was the wording: this
+orphan, because approval state lives in Core. What remained was the wording: this
 document flagged a **D5 amendment as recommended**, and it was ratified 2026-08-19 — D5's third
-clause (`PLAN.md` §D5) now reads "supervised worker processes, one per active extension,
+clause now reads "supervised worker processes, one per active extension,
 keyed `(layer, tier, extension)`; pooling is explicit opt-in fate-sharing", with approval "a
 durable Core-owned ticket". The flag is kept here as the historical record of why the amendment
 was needed.
@@ -3042,7 +3042,7 @@ recorded in prose at the site of the change, per the verify-then-retract standar
   reversed: callbacks serialized per extension, `concurrency=N` / `threadsafe=True` opt-in (§2.1,
   §3.1); `crates/exthost` re-specified as one process per extension; the former top open question
   (cancellation blast radius vs D5) closed by the per-extension topology, with "D5 amendment
-  recommended" flagged for PLAN.md.
+  recommended" flagged.
 - **P0#11 (thread_projection).** The "no client-side context event" prohibition deleted with
   reversal prose (§2.2, family G, feature-map reconciliation); `thread_projection` added as the
   third domain-return family with the amended invariant stated verbatim (family H).
@@ -3058,7 +3058,7 @@ recorded in prose at the site of the change, per the verify-then-retract standar
   entry instances (P0#17); the proto sketch renames `HookVerdict` → `HookDecision` and
   `SubscriptionSpec.priority` → `phase`/`order`.
 
-**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the PLAN.md amendment:
+**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the D5/D6 amendment:
 
 - **Dispatch surface.** `TargetKind.DEVICE`'s comment, the `.args` row, the "One gate per
   action" rule and the privilege-escalation example were rewritten from the retired
@@ -3070,7 +3070,7 @@ recorded in prose at the site of the change, per the verify-then-retract standar
   dispatch are `dyn` ops, and the grammar, the ergonomic `@omp.tool` soft default beside
   `@omp.device`, and the typed `omp.ToolPath` are owned by
   [`01-devices.md`](01-devices.md). The one-gate rule transfers to `dyn` unchanged.
-- **D5/D6 ratified.** `PLAN.md` §D5/§D6 was amended 2026-08-19. §2.3 now quotes D6's
+- **D5/D6 ratified.** Locked decisions D5 and D6 were amended 2026-08-19. §2.3 now quotes D6's
   amended text — "no batch-level admission scheduler, no parallelism detection, no
   reordering", each invocation gated by the per-invocation admission query Core answers —
   instead of flagging a recommended wording amendment; the cancellation section quotes

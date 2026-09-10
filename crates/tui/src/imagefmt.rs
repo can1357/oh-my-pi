@@ -1,17 +1,25 @@
+#![expect(missing_docs, reason = "strum IntoStaticStr emits undocumented inherent methods")]
 //! Header-only image dimension probes.
 //!
 //! These probes inspect container headers only; they never decode pixel data.
 
+use strum::IntoStaticStr;
+
 /// An image container recognized from its magic bytes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
+#[strum(const_into_str)]
 pub enum ImageFormat {
 	/// Portable Network Graphics.
+	#[strum(serialize = "image/png")]
 	Png,
 	/// Joint Photographic Experts Group.
+	#[strum(serialize = "image/jpeg")]
 	Jpeg,
 	/// Graphics Interchange Format.
+	#[strum(serialize = "image/gif")]
 	Gif,
 	/// WebP.
+	#[strum(serialize = "image/webp")]
 	Webp,
 }
 
@@ -19,12 +27,7 @@ impl ImageFormat {
 	/// The container's IANA media type (`image/png`, …).
 	#[must_use]
 	pub const fn media_type(self) -> &'static str {
-		match self {
-			Self::Png => "image/png",
-			Self::Jpeg => "image/jpeg",
-			Self::Gif => "image/gif",
-			Self::Webp => "image/webp",
-		}
+		self.into_str()
 	}
 }
 

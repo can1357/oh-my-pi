@@ -266,7 +266,7 @@ impl<T> BucketArray<T> {
 					ptr.add(i).drop_in_place();
 				}
 
-				let layout = Layout::array::<T>(level_size).unwrap();
+				let layout = Self::level_layout(level as u32);
 				if layout.size() != 0 {
 					alloc::dealloc(ptr.cast::<u8>(), layout);
 				}
