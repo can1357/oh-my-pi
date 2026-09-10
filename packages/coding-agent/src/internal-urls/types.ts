@@ -7,7 +7,9 @@
 
 import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
+import type { AgentRegistry } from "../registry/agent-registry";
 import type { LocalProtocolOptions } from "./local-protocol";
+import type { SessionEntry } from "../session/session-entries";
 
 /**
  * Raw resource payload returned by protocol handlers. The `immutable` flag is
@@ -99,10 +101,31 @@ export interface ResolveContext {
 	 * file: those handlers keep their existing in-memory behavior.
 	 */
 	sessionFile?: string;
+	/**
+	 * Calling session's stable session-manager id. Sessions that have no
+	 * session file yet (SDK, embedded, `-p`) are only addressable by this id,
+	 * so handlers that must bind a URL to its caller (`memory://`) accept it
+	 * as a second exact identity alongside {@link sessionFile}.
+	 */
+	sessionId?: string;
+	/** Registry that owns the calling session; defaults to the process-wide registry. */
+	agentRegistry?: AgentRegistry;
 	/** Settings of the calling session (used by `issue://`/`pr://` for cache TTLs). */
 	settings?: unknown;
 	/** Caller's abort signal. */
 	signal?: AbortSignal;
+	/**
+	 * Whether experimental context-management resources are enabled for this
+	 * caller. This is passed explicitly so resource resolution cannot infer a
+	 * feature gate from process-global settings.
+	 */
+	experimentalContextManagement?: boolean;
+	/**
+	 * Current live branch owned by the caller's session. `history://current/full`
+	 * uses only this callback; it never falls back to a registry entry, session
+	 * file, or on-disk transcript.
+	 */
+	getSessionBranch?: () => readonly SessionEntry[];
 	/**
 	 * Calling session's `local://` root mapping. When present, the local-protocol
 	 * handler resolves the URL against THIS session's artifacts dir instead of

@@ -1,4 +1,4 @@
-import { USER_AGENT } from "@oh-my-pi/pi-utils";
+import { USER_AGENT, getInstallId } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { toClinePassPublicModelId } from "../cline-pass-model-id";
 import {
@@ -2432,8 +2432,39 @@ export function fireworksModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
-// 7.6 Fire Pass (Fireworks Kimi K2.6 Turbo subscription)
+// 7.6 Fire Pass (Fireworks subscription)
 // ---------------------------------------------------------------------------
+
+// Pricing and limits are the published Fire Pass router tariff
+// (https://docs.fireworks.ai/firepass), not upstream-discoverable: dedicated
+// `fpk_…` keys never authorize `/v1/models`, so this seed is the authoritative
+// source. cacheRead is 0.1x input; cacheWrite stays 0 (not billed separately).
+export const FIREPASS_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "glm-5.2-fast",
+		name: "GLM 5.2 Fast (Fire Pass)",
+		api: "openai-completions",
+		provider: "firepass",
+		baseUrl: "https://api.fireworks.ai/inference/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 2.1, output: 6.6, cacheRead: 0.21, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+	},
+	{
+		id: "kimi-k3-fast",
+		name: "Kimi K3 Fast (Fire Pass)",
+		api: "openai-completions",
+		provider: "firepass",
+		baseUrl: "https://api.fireworks.ai/inference/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 4.5, output: 22.5, cacheRead: 0.45, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+	},
+];
 
 export interface FirepassModelManagerConfig {
 	apiKey?: string;
@@ -2442,8 +2473,8 @@ export interface FirepassModelManagerConfig {
 }
 
 /**
- * Fire Pass is a Fireworks subscription product that exposes a single router
- * model (Kimi K2.6 Turbo) under `accounts/fireworks/routers/kimi-k2p6-turbo`.
+ * Fire Pass is a Fireworks subscription product that exposes router models
+ * (GLM 5.2 Fast, Kimi K3 Fast) under `accounts/fireworks/routers/<id>`.
  * The dedicated `fpk_…` keys do not authorize `/v1/models`, so this manager
  * never performs dynamic discovery — the bundled catalog entry is canonical.
  * See https://docs.fireworks.ai/firepass.
@@ -3056,6 +3087,11 @@ function openCodeModelManagerOptions(
 					provider: providerId,
 					baseUrl: discoveryBaseUrl,
 					apiKey,
+					// Live discovery hits the OpenCode gateway outside any
+					// conversation: attribute with the stable install id
+					// (x-opencode-session required from 09/06) and omp's UA
+					// instead of Bun's default.
+					headers: { "User-Agent": USER_AGENT, "x-opencode-session": getInstallId() },
 					mapModel: (entry, defaults) => {
 						const reference = references.get(defaults.id);
 						const name = toModelName(entry.name, reference?.name ?? defaults.name);
@@ -6375,6 +6411,22 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 											}
 										: {}),
 								};
+						// Cross-provider fallback references (e.g. a Cursor
+						// collapsed family for an enterprise-only sibling id)
+						// carry provider-specific wire routing that must not
+						// transfer: the off-tier `requestModelId` pin would send
+						// every Copilot request under the `-none` sibling id
+						// regardless of thinking level.
+						if (reference && reference.provider !== "github-copilot") {
+							delete base.requestModelId;
+							if (base.thinking) {
+								// `base` is a shallow copy of the shared global
+								// reference: clone before deleting or the bundled
+								// entry loses its routing process-wide.
+								base.thinking = { ...base.thinking };
+								delete base.thinking.effortRouting;
+							}
+						}
 						const defaultCost = copilotTierCost(tokenPrices.defaultTier);
 						if (defaultCost) {
 							// Cache writes are not reported per tier; retain the bundled provider rate.

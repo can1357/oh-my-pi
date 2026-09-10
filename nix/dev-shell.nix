@@ -1,5 +1,7 @@
 {
   pkgs,
+  bun,
+  bun2nix,
   rustToolchain,
 }:
 let
@@ -16,11 +18,8 @@ pkgs.mkShell (
     name = "omp-dev";
 
     packages =
-      (with pkgs; [
-        bun
-        bun2nix
-        lychee
-        rustToolchain
+      [ bun bun2nix lychee rustToolchain ]
+      ++ (with pkgs; [
         cargo-nextest
         rustPlatform.bindgenHook
         nixfmt

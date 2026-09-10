@@ -728,28 +728,31 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			};
 		}
 
-		// When the native minimizer rewrote the output, swap the sink's accumulated
-		// raw stream for the minimized text, persist the original as a session
-		// artifact, and splice an `artifact://<id>` footer into the visible text so
-		// the agent can retrieve the raw bytes losslessly.
+		// When the native minimizer rewrote the output, persist the original and
+		// swap the sink's accumulated raw stream for the minimized text with an
+		// `artifact://<id>` footer so the agent can retrieve the raw bytes
+		// losslessly. The minimized text is a lossy summary, so substitute it
+		// only once the original is addressable — a caller that returns no id
+		// (or an unavailable allocator) must keep the raw stream rather than
+		// silently dropping the diagnostics the summary elided.
 		const minimized = winner.result.minimized;
 		if (minimized && minimized.text !== minimized.originalText) {
-			// The decoder above already owns image extraction from the streamed
-			// lossless output. Scrub any graphics frames repeated by the native
-			// minimizer without feeding them back into that decoder.
-			const minimizedGraphics = new TerminalGraphicsDecoder();
-			const minimizedText = minimizedGraphics.push(minimized.text) + minimizedGraphics.finish();
-			sink.replace(minimizedText);
-			if (options?.onMinimizedSave) {
-				const artifactId = await options.onMinimizedSave(minimized.originalText, {
-					filter: minimized.filter,
-					inputBytes: minimized.inputBytes,
-					outputBytes: minimized.outputBytes,
-				});
-				if (artifactId) {
-					const sep = minimizedText.endsWith("\n") ? "" : "\n";
-					sink.push(`${sep}[raw output: artifact://${artifactId}]\n`);
-				}
+			const artifactId = options?.onMinimizedSave
+				? await options.onMinimizedSave(minimized.originalText, {
+						filter: minimized.filter,
+						inputBytes: minimized.inputBytes,
+						outputBytes: minimized.outputBytes,
+					})
+				: undefined;
+			if (artifactId) {
+				// The decoder above already owns image extraction from the streamed
+				// lossless output. Scrub any graphics frames repeated by the native
+				// minimizer without feeding them back into that decoder.
+				const minimizedGraphics = new TerminalGraphicsDecoder();
+				const minimizedText = minimizedGraphics.push(minimized.text) + minimizedGraphics.finish();
+				sink.replace(minimizedText);
+				const sep = minimizedText.endsWith("\n") ? "" : "\n";
+				sink.push(`${sep}[raw output: artifact://${artifactId}]\n`);
 			}
 		}
 

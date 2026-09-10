@@ -4822,11 +4822,10 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:94",
+				"source": "classes/gemini.kdl:96",
 				"class": "gemini",
-				"providers": [
-					"google",
-					"opencode-zen"
+				"apis": [
+					"google-generative-ai"
 				],
 				"revision": [
 					{
@@ -4840,7 +4839,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:100",
+				"source": "classes/gemini.kdl:102",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity",
@@ -7997,25 +7996,37 @@
 				}
 			},
 			{
-				"source": "providers/firepass.kdl:11",
+				"source": "providers/firepass.kdl:10",
+				"class": "glm",
 				"providers": [
 					"firepass"
 				],
-				"models": [
-					{
-						"kind": "exact",
-						"value": "kimi-k2.6-turbo"
-					}
-				],
+				"priority": 1,
 				"thinking": {
+					"mode": "effort",
 					"efforts": [
+						"minimal",
 						"low",
 						"medium",
 						"high",
-						"xhigh",
 						"max"
-					],
-					"mode": "effort"
+					]
+				}
+			},
+			{
+				"source": "providers/firepass.kdl:15",
+				"class": "kimi",
+				"providers": [
+					"firepass"
+				],
+				"priority": 1,
+				"thinking": {
+					"mode": "effort",
+					"efforts": [
+						"low",
+						"high",
+						"max"
+					]
 				}
 			},
 			{
@@ -10544,7 +10555,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:16",
+				"source": "providers/openai-codex.kdl:21",
 				"providers": [
 					"openai-codex"
 				],
@@ -10568,7 +10579,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:24",
+				"source": "providers/openai-codex.kdl:29",
 				"providers": [
 					"openai-codex"
 				],
@@ -10592,7 +10603,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:38",
+				"source": "providers/openai-codex.kdl:46",
 				"providers": [
 					"openai-codex"
 				],
@@ -10616,11 +10627,15 @@
 					"serviceTierCost": {
 						"flex": 0.5,
 						"priority": 2.5
-					}
+					},
+					"limitsPatch": {
+						"contextWindow": 272000
+					},
+					"maxContextWindow": 922000
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:51",
+				"source": "providers/openai-codex.kdl:63",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -10640,7 +10655,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:56",
+				"source": "providers/openai-codex.kdl:68",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -10656,7 +10671,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:59",
+				"source": "providers/openai-codex.kdl:71",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -10672,7 +10687,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:64",
+				"source": "providers/openai-codex.kdl:76",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -10691,7 +10706,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:76",
+				"source": "providers/openai-codex.kdl:88",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -10717,7 +10732,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:82",
+				"source": "providers/openai-codex.kdl:94",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -10743,7 +10758,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:74",
+				"source": "providers/openai-codex.kdl:86",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -10760,7 +10775,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:92",
+				"source": "providers/openai-codex.kdl:104",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -10780,7 +10795,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:98",
+				"source": "providers/openai-codex.kdl:110",
 				"class": "unknown",
 				"providers": [
 					"openai-codex"
@@ -10796,7 +10811,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:101",
+				"source": "providers/openai-codex.kdl:113",
 				"class": "unknown",
 				"providers": [
 					"openai-codex"
@@ -10812,7 +10827,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:107",
+				"source": "providers/openai-codex.kdl:119",
 				"providers": [
 					"openai-codex"
 				],
@@ -10833,7 +10848,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:116",
+				"source": "providers/openai-codex.kdl:128",
 				"providers": [
 					"openai-codex"
 				],
@@ -10858,7 +10873,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:125",
+				"source": "providers/openai-codex.kdl:137",
 				"providers": [
 					"openai-codex"
 				],
@@ -10879,7 +10894,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:136",
+				"source": "providers/openai-codex.kdl:148",
 				"providers": [
 					"openai-codex"
 				],
@@ -10902,25 +10917,6 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:145",
-				"providers": [
-					"openai-codex"
-				],
-				"models": [
-					{
-						"kind": "exact",
-						"value": "gpt-6-astra"
-					},
-					{
-						"kind": "exact",
-						"value": "gpt-6-astra-wm"
-					}
-				],
-				"catalog": {
-					"maxContextWindow": 872000
-				}
-			},
-			{
 				"source": "providers/openai-codex.kdl:3",
 				"providers": [
 					"openai-codex"
@@ -10932,7 +10928,8 @@
 					"serviceTierCost": {
 						"flex": 0.5,
 						"priority": 2
-					}
+					},
+					"clampContextOverride": true
 				}
 			},
 			{
@@ -11175,7 +11172,28 @@
 				}
 			},
 			{
-				"source": "providers/openai.kdl:77",
+				"source": "providers/openai.kdl:79",
+				"providers": [
+					"openai"
+				],
+				"models": [
+					{
+						"kind": "glob",
+						"value": "gpt-6-astra*"
+					}
+				],
+				"catalog": {
+					"longContext": {
+						"inputThreshold": 272000,
+						"input": 20,
+						"output": 75,
+						"cacheRead": 2,
+						"cacheWrite": 25
+					}
+				}
+			},
+			{
+				"source": "providers/openai.kdl:90",
 				"providers": [
 					"openai"
 				],
@@ -16399,7 +16417,7 @@
 			{
 				"id": "firepass",
 				"apiKeyFormat": "bearer",
-				"name": "Fire Pass (Fireworks Kimi K2.6 Turbo subscription)",
+				"name": "Fire Pass (Fireworks subscription)",
 				"login": {
 					"kind": "api-key",
 					"authUrl": "https://app.fireworks.ai/settings/users/api-keys",
@@ -16410,7 +16428,7 @@
 						"kind": "chat-completions",
 						"label": "Fire Pass",
 						"baseUrl": "https://api.fireworks.ai/inference/v1",
-						"model": "accounts/fireworks/routers/kimi-k2p6-turbo"
+						"model": "accounts/fireworks/routers/glm-5p2-fast"
 					}
 				}
 			},

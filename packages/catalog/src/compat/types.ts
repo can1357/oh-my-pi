@@ -198,6 +198,8 @@ export interface CompiledRule {
 	source: string;
 	class?: string;
 	providers?: string[];
+	/** Request adapter identifiers matched by an `on-api` selector. */
+	apis?: string[];
 	family?: string;
 	revision?: CompiledRevisionTerm[];
 	models?: CompiledSelector[];
@@ -568,6 +570,8 @@ export interface ModelIdentity {
 export interface ResolveTarget {
 	/** Deployment provider hosting the model. */
 	provider: string;
+	/** Request adapter used to serialize the model. */
+	api: string;
 	/** Centrally classified vendor lineage. */
 	class: string;
 	/** Classified product family within the class, when known. */

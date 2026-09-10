@@ -4,6 +4,7 @@
  * map each rendered turn to a selectable target, and compose gutter-prefixed
  * columns with a dotted outline around the selected target.
  */
+import type { Component } from "@oh-my-pi/pi-tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 import type { SessionMessageEntry } from "../../session/session-entries";
 import { type ThemeColor, theme } from "../theme/theme";
@@ -55,6 +56,36 @@ export function stripPromptZones(rows: readonly string[]): readonly string[] {
 		sanitized[index] = rows[index]!.replace(OSC133_SPAN_REGEX, "");
 	}
 	return sanitized ?? rows;
+}
+
+/**
+ * Prompt-zone-stripped rows for one selector column.
+ *
+ * The selectors recompose their whole column on every keystroke, and stripping
+ * every child's rows again per frame is pure waste on a long session. Per the
+ * {@link Component} render contract a child returns the same array while its
+ * rows are unchanged, so the stripped copy is keyed on that array: a child that
+ * repaints itself asynchronously (Kitty image conversion, todo strike frames)
+ * hands back a new array and is stripped again.
+ */
+export class OutlineRowCache {
+	#stripped = new WeakMap<Component, { rows: readonly string[]; stripped: readonly string[] }>();
+
+	rows(children: readonly Component[], width: number): Array<readonly string[]> {
+		const columns: Array<readonly string[]> = [];
+		for (const child of children) {
+			const rows = child.render(width);
+			const cached = this.#stripped.get(child);
+			if (cached && cached.rows === rows) {
+				columns.push(cached.stripped);
+				continue;
+			}
+			const stripped = stripPromptZones(rows);
+			this.#stripped.set(child, { rows, stripped });
+			columns.push(stripped);
+		}
+		return columns;
+	}
 }
 
 /**
