@@ -54,6 +54,7 @@ import {
 import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/foreign-session-store";
 import type { SessionEntry, SessionMessageEntry, SessionTreeNode } from "../../session/session-entries";
 import type { SessionInfo } from "../../session/session-listing";
+import { releaseSessionOAuthPins } from "../../session/credential-pin";
 import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
@@ -1977,6 +1978,8 @@ export class SelectorController {
 			return;
 		}
 
+		releaseSessionOAuthPins(this.ctx.session.modelRegistry.authStorage, this.ctx.session.sessionId);
+
 		// Delete the session file and artifacts directory
 		await storage.deleteSessionWithArtifacts(sessionFile);
 
@@ -2210,7 +2213,7 @@ export class SelectorController {
 		});
 	}
 
-	async showSessionPinSelector(): Promise<void> {
+	async showSessionPinSelector(options?: { exclusive?: boolean }): Promise<void> {
 		const session = this.ctx.session;
 		if (session.isStreaming) {
 			this.ctx.showStatus("Cannot pin an account while the session is streaming.");
@@ -2252,11 +2255,15 @@ export class SelectorController {
 				accounts,
 				account => {
 					done();
-					if (!session.pinCurrentProviderOAuthAccount(account.credentialId)) {
+					if (!session.pinCurrentProviderOAuthAccount(account.credentialId, options)) {
 						this.ctx.showWarning(`${account.label} is no longer available to pin.`);
 						return;
 					}
-					this.ctx.showStatus(`Pinned ${account.label} to this session for ${providerName}.`);
+					this.ctx.showStatus(
+						options?.exclusive
+							? `Pinned ${account.label} exclusively to this session for ${providerName}; other sessions will not use it. Release with \`/session unpin\`.`
+							: `Pinned ${account.label} to this session for ${providerName}.`,
+					);
 					this.ctx.statusLine.invalidate();
 					this.ctx.ui.requestRender();
 				},

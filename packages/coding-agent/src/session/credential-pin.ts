@@ -59,8 +59,46 @@ export function credentialPinHash(provider: string, identity: CredentialPinIdent
  * branch's latest pin, so steady-state sessions add a single entry; the
  * effective last-use time is derived from later assistant turns on read
  * (see `SessionManager.getCredentialPins`).
+ *
+ * An entry is also appended when the account is unchanged but the session's
+ * exclusive-hold state flipped (`/session pin --exclusive` or `/session unpin`
+ * between turns), so the file reflects the live hold on resume.
  */
 export function recordCredentialPin(
+	authStorage: AuthStorage,
+	sessionManager: SessionManager,
+	sessionId: string,
+	provider: string,
+): void {
+	const existing = sessionManager.getCredentialPins().get(provider);
+	const identity = authStorage.getOAuthAccountIdentity(provider, sessionId);
+	const exclusive = authStorage.hasExclusiveSessionPin(provider, sessionId);
+	if (!identity) {
+		if (existing?.exclusive) {
+			sessionManager.appendCredentialPin(provider, existing.hash);
+		}
+		return;
+	}
+	const hash = credentialPinHash(provider, identity);
+	if (!hash) return;
+	if (existing?.hash === hash && existing.exclusive !== true && !exclusive) return;
+	if (existing?.hash === hash && existing.exclusive === exclusive) return;
+	sessionManager.appendCredentialPin(provider, hash, exclusive ? { exclusive: true } : undefined);
+}
+
+/** Release every OAuth pin this session owns in the auth store. */
+export function releaseSessionOAuthPins(authStorage: AuthStorage, sessionId: string): void {
+	for (const provider of authStorage.list()) {
+		authStorage.unpinSessionOAuthAccount(provider, sessionId);
+	}
+}
+
+/**
+ * Persist an exclusive pin chosen interactively (e.g. `/session pin --exclusive`)
+ * without waiting for the next assistant turn's {@link recordCredentialPin}, so
+ * a resume before that turn still re-asserts the hold.
+ */
+export function recordExclusiveCredentialPin(
 	authStorage: AuthStorage,
 	sessionManager: SessionManager,
 	sessionId: string,
@@ -69,8 +107,10 @@ export function recordCredentialPin(
 	const identity = authStorage.getOAuthAccountIdentity(provider, sessionId);
 	if (!identity) return;
 	const hash = credentialPinHash(provider, identity);
-	if (!hash || sessionManager.getCredentialPins().get(provider)?.hash === hash) return;
-	sessionManager.appendCredentialPin(provider, hash);
+	if (!hash) return;
+	const existing = sessionManager.getCredentialPins().get(provider);
+	if (existing?.hash === hash && existing.exclusive === true) return;
+	sessionManager.appendCredentialPin(provider, hash, { exclusive: true });
 }
 
 /**
@@ -86,8 +126,12 @@ export function seedCredentialPins(authStorage: AuthStorage, sessionManager: Ses
 		if (accounts.length === 0 || accounts.some(account => account.active)) continue;
 		const match = accounts.find(account => credentialPinHash(provider, account) === pin.hash);
 		if (!match) continue;
+		// A resume loses the race to re-assert an exclusive hold when another
+		// live session pinned the account exclusive first; the pin then simply
+		// does not restore and the session rejoins the shared pool.
 		authStorage.pinSessionOAuthAccount(provider, sessionId, match.credentialId, {
 			lastUsedAtMs: pin.lastUsedAt,
+			exclusive: pin.exclusive,
 		});
 	}
 }

@@ -288,7 +288,7 @@ import {
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
-import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
+import { recordCredentialPin, recordExclusiveCredentialPin, releaseSessionOAuthPins, seedCredentialPins } from "./credential-pin";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
 import {
 	collectPendingToolCalls,
@@ -10126,12 +10126,46 @@ export class AgentSession {
 
 	/**
 	 * Pin a stored OAuth account to the current model provider for this session.
-	 * Returns false while streaming or when the credential is no longer available.
+	 * `options.exclusive` reserves the account for this session: other sessions
+	 * stop seeing it in rotation, and this session never silently migrates away.
+	 * Returns false while streaming, when the credential is no longer available,
+	 * or when an exclusive pin is held by another session.
 	 */
-	pinCurrentProviderOAuthAccount(credentialId: number): boolean {
+	pinCurrentProviderOAuthAccount(credentialId: number, options?: { exclusive?: boolean }): boolean {
 		const provider = this.model?.provider;
 		if (!provider || this.isStreaming) return false;
-		return this.#modelRegistry.authStorage.pinSessionOAuthAccount(provider, this.sessionId, credentialId);
+		const pinned = this.#modelRegistry.authStorage.pinSessionOAuthAccount(
+			provider,
+			this.sessionId,
+			credentialId,
+			options,
+		);
+		// Persist the hold now; the next turn's recordCredentialPin would be too
+		// late for a session resumed in between.
+		if (pinned && options?.exclusive) {
+			recordExclusiveCredentialPin(this.#modelRegistry.authStorage, this.sessionManager, this.sessionId, provider);
+		}
+		return pinned;
+	}
+
+	/**
+	 * Release this session's pinned OAuth account for the current provider,
+	 * including any exclusive hold. Returns false while streaming or when no
+	 * pin existed.
+	 */
+	unpinCurrentProviderOAuthAccount(): boolean {
+		const provider = this.model?.provider;
+		if (!provider || this.isStreaming) return false;
+		const unpinned = this.#modelRegistry.authStorage.unpinSessionOAuthAccount(provider, this.sessionId);
+		if (unpinned) {
+			recordCredentialPin(
+				this.#modelRegistry.authStorage,
+				this.sessionManager,
+				this.sessionId,
+				provider,
+			);
+		}
+		return unpinned;
 	}
 
 	/**

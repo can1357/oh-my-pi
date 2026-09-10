@@ -2,7 +2,12 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { AuthStorage, SqliteAuthCredentialStore } from "../src/session/auth-storage";
-import { credentialPinHash, recordCredentialPin, seedCredentialPins } from "../src/session/credential-pin";
+import {
+	credentialPinHash,
+	recordCredentialPin,
+	recordExclusiveCredentialPin,
+	seedCredentialPins,
+} from "../src/session/credential-pin";
 import { SessionManager } from "../src/session/session-manager";
 
 const ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
@@ -181,5 +186,75 @@ describe("credential pins", () => {
 		expect(entries).toHaveLength(1);
 		const identity = storage.getOAuthAccountIdentity("anthropic", sessionId);
 		expect(manager.getCredentialPins().get("anthropic")?.hash).toBe(credentialPinHash("anthropic", identity!));
+	});
+
+	test("exclusive pins persist through the session file and re-assert the hold on seeding", async () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		const accountA = storage.listOAuthAccounts("anthropic", sessionId).find(a => a.accountId === "account-a");
+		expect(storage.pinSessionOAuthAccount("anthropic", sessionId, accountA!.credentialId, { exclusive: true })).toBe(
+			true,
+		);
+
+		recordExclusiveCredentialPin(storage, manager, sessionId, "anthropic");
+		expect(manager.getCredentialPins().get("anthropic")?.exclusive).toBe(true);
+		// The session file materializes lazily once the session has output.
+		manager.appendMessage(assistantMessage("anthropic", Date.now()));
+		await manager.flush();
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("expected a persisted session file");
+
+		// Resume in a fresh process against a fresh store (broker mode: the
+		// exclusive KV row did not survive) — the session file re-asserts it.
+		const reopened = await SessionManager.open(file);
+		const freshStore = new SqliteAuthCredentialStore(new Database(":memory:"));
+		freshStore.saveOAuth("anthropic", mintOAuthCredential("a"));
+		freshStore.saveOAuth("anthropic", mintOAuthCredential("b"));
+		const freshStorage = new AuthStorage(freshStore);
+		await freshStorage.reload();
+
+		seedCredentialPins(freshStorage, reopened, sessionId);
+		expect(freshStorage.hasExclusiveSessionPin("anthropic", sessionId)).toBe(true);
+		expect(
+			freshStorage.listOAuthAccounts("anthropic", "other-session").find(account => account.accountId === "account-a")
+				?.exclusive,
+		).toBe(true);
+	});
+
+	test("seeding an exclusive pin loses to a live session already holding the account", async () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		const hash = credentialPinHash("anthropic", { accountId: "account-a", email: "a@example.com" });
+		manager.appendCredentialPin("anthropic", hash!, { exclusive: true });
+
+		const accountA = storage.listOAuthAccounts("anthropic", "live-session").find(a => a.accountId === "account-a");
+		expect(
+			storage.pinSessionOAuthAccount("anthropic", "live-session", accountA!.credentialId, { exclusive: true }),
+		).toBe(true);
+
+		seedCredentialPins(storage, manager, sessionId);
+		expect(storage.hasExclusiveSessionPin("anthropic", sessionId)).toBe(false);
+		expect(storage.hasExclusiveSessionPin("anthropic", "live-session")).toBe(true);
+	});
+
+	test("recording reconciles the exclusive flag when the hold is set or released between turns", () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		const accountA = storage.listOAuthAccounts("anthropic", sessionId).find(a => a.accountId === "account-a");
+		storage.pinSessionOAuthAccount("anthropic", sessionId, accountA!.credentialId, { exclusive: true });
+
+		recordCredentialPin(storage, manager, sessionId, "anthropic");
+		expect(manager.getCredentialPins().get("anthropic")?.exclusive).toBe(true);
+
+		// Repeats still dedupe while the hold is live.
+		recordCredentialPin(storage, manager, sessionId, "anthropic");
+		expect(manager.getBranch().filter(entry => entry.type === "credential_pin")).toHaveLength(1);
+
+		// Releasing the pin downgrades the recorded entry on the next turn.
+		storage.unpinSessionOAuthAccount("anthropic", sessionId);
+		recordCredentialPin(storage, manager, sessionId, "anthropic");
+		const pins = manager.getBranch().filter(entry => entry.type === "credential_pin");
+		expect(pins).toHaveLength(2);
+		expect(manager.getCredentialPins().get("anthropic")?.exclusive).toBeFalsy();
 	});
 });

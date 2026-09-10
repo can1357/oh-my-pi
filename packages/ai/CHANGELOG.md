@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added exclusive session pins for OAuth accounts: `AuthStorage.pinSessionOAuthAccount` accepts `exclusive: true`, reserving the account so other sessions never rank or rotate onto it, while the owning session resolves only that account and gets an explicit error (not a silent migration) when it is unavailable. `unpinSessionOAuthAccount` releases the pin and any exclusive hold, and `listOAuthAccounts` reports `exclusive` per account.
+
 ## [18.1.16] - 2026-09-09
 
 ### Fixed

@@ -995,6 +995,28 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#cache.set(key, { value, expiresAtSec });
 	}
 
+	trySetSessionExclusiveOwner(key: string, sessionId: string, expiresAtSec: number): boolean {
+		this.#noteActivity();
+		const value = JSON.stringify({ sessionId });
+		const existing = this.#cache.get(key);
+		if (existing && existing.value.length > 0) {
+			try {
+				const parsed = JSON.parse(existing.value) as { sessionId?: unknown };
+				if (
+					typeof parsed.sessionId === "string" &&
+					parsed.sessionId.length > 0 &&
+					parsed.sessionId !== sessionId
+				) {
+					return false;
+				}
+			} catch {
+				// Reclaim corrupt rows for the caller.
+			}
+		}
+		this.#cache.set(key, { value, expiresAtSec });
+		return true;
+	}
+
 	/** Drop all cache rows whose keys start with the supplied prefix. */
 	deleteCachePrefix(prefix: string): void {
 		for (const key of this.#cache.keys()) {

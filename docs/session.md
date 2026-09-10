@@ -327,6 +327,8 @@ Append-only audit entry for a session rename. It records `title`, `source` (`aut
 
 Records the provider and a pseudonymous SHA-256 account/scope hash used to re-pin resumed OAuth traffic to the serving account and preserve account-scoped prompt-cache reuse. It does not store the raw account identity; exported hashes remain linkable and are not anonymous.
 
+Entries may carry `exclusive: true` when the account was reserved via `/session pin --exclusive`; on resume the exclusive hold is re-asserted, losing gracefully if another live session holds the account first.
+
 ### `session_init`
 
 ```json
