@@ -106,7 +106,7 @@ describe("tools.approvalMode setting", () => {
 		// argument inherits the session runner's settings (schema default yolo),
 		// which is the live-session path used by direct execute() callers.
 		await expect(
-			bashTool().execute("no-context", { command: "echo leaked" }, undefined, undefined, {}),
+			bashTool().execute("no-context", { command: "echo leaked" }, undefined, undefined, {} as AgentToolContext),
 		).rejects.toThrow(/requires approval but no interactive UI available/);
 	});
 
