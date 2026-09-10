@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Exhausted credential pools support isolated anonymous recovery probes, and older brokers retain cooldown updates.
 - Preserve older broker client compatibility by negotiating Retry-After snapshot fields, dispatch compiled gateway targets, and keep heartbeat-only streams eligible for failover.
 
 - Prefer healthy API-key siblings before leasing a cooldown probe, and acquire API-key probes under the ranking block scope that caused the cooldown.

@@ -382,11 +382,30 @@ export class AuthBrokerClient {
 		signal?: AbortSignal,
 	): Promise<CredentialBlockResponse> {
 		const body: CredentialBlockRequest = block;
-		return this.#request<CredentialBlockResponse>("POST", `/v1/credential/${id}/block`, {
-			body,
-			schema: "credentialBlockResponseSchema",
-			signal,
-		});
+		try {
+			return await this.#request<CredentialBlockResponse>("POST", `/v1/credential/${id}/block`, {
+				body,
+				schema: "credentialBlockResponseSchema",
+				signal,
+			});
+		} catch (error) {
+			// Older strict brokers predate this optional hint. Preserve the actual
+			// cooldown while retrying only an explicit unknown-field rejection once.
+			if (
+				!(error instanceof AuthBrokerError) ||
+				error.status !== 400 ||
+				block.retryAfter === undefined ||
+				!/retryAfter/.test(error.body ?? "") ||
+				!/unknown|unexpected|unrecognized|must be removed|not allowed/i.test(error.body ?? "")
+			)
+				throw error;
+			const { retryAfter: _retryAfter, ...legacy } = block;
+			return this.#request<CredentialBlockResponse>("POST", `/v1/credential/${id}/block`, {
+				body: legacy,
+				schema: "credentialBlockResponseSchema",
+				signal,
+			});
+		}
 	}
 
 	async deleteCredentialBlocks(id: number, signal?: AbortSignal): Promise<CredentialBlocksDeleteResponse> {
