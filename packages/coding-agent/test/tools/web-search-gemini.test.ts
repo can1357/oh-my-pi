@@ -104,7 +104,7 @@ describe("searchGemini tools serialization", () => {
 
 		expect(capturedRequest).not.toBeNull();
 		expect(capturedRequest?.url).toBe(
-			"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+			"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:streamGenerateContent?alt=sse",
 		);
 		expect(capturedRequest?.headers["x-goog-api-key"]).toBe("test-gemini-api-key");
 		expect(capturedRequest?.body).toMatchObject({
@@ -146,7 +146,7 @@ describe("searchGemini tools serialization", () => {
 		});
 
 		expect(capturedRequest?.url).toBe(
-			"https://gateway.ai.cloudflare.com/v1/account/gateway/google-ai-studio/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+			"https://gateway.ai.cloudflare.com/v1/account/gateway/google-ai-studio/v1beta/models/gemini-flash-latest:streamGenerateContent?alt=sse",
 		);
 		expect(capturedRequest?.headers["cf-aig-authorization"]).toBe("Bearer test-cloudflare-key");
 		expect(capturedRequest?.headers["x-goog-api-key"]).toBeUndefined();
@@ -252,7 +252,7 @@ describe("searchGemini tools serialization", () => {
 			tools: [{ googleSearch: {} }],
 		});
 		expect(capturedRequest?.body).toMatchObject({
-			model: "gemini-2.5-flash",
+			model: "gemini-flash-latest",
 		});
 	});
 
