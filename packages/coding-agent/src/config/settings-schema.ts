@@ -5938,6 +5938,17 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	"usage.backgroundRefresh": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Background Usage Refresh",
+			description: "Fetch provider usage at startup and every five minutes for status and account automation",
+		},
+	},
+
 	// Codex saved rate-limit resets (auto-redeem)
 	"codexResets.autoRedeem": {
 		type: "enum",
