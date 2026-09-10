@@ -84,6 +84,11 @@ export type RpcCommand =
 	| { id?: string; type: "set_session_name"; name: string }
 	| { id?: string; type: "handoff"; customInstructions?: string }
 
+	// Git (read-only) — see #10162.
+	| { id?: string; type: "git_status"; untracked?: "all" | "normal" | "no"; pathspecs?: string[] }
+	| { id?: string; type: "git_changed_files"; staged?: boolean; pathspecs?: string[] }
+	| { id?: string; type: "git_diff"; staged?: boolean; pathspecs?: string[]; maxBytes?: number }
+
 	// Messages
 	| { id?: string; type: "get_messages" }
 	| { id?: string; type: "get_messages_page"; cursor?: string; limit?: number }
@@ -323,6 +328,17 @@ export type RpcResponse =
 	  }
 	| { id?: string; type: "response"; command: "set_session_name"; success: true }
 	| { id?: string; type: "response"; command: "handoff"; success: true; data: RpcHandoffResult | null }
+
+	// Git (read-only) — see #10162.
+	| { id?: string; type: "response"; command: "git_status"; success: true; data: { porcelain: string; summary: { staged: number; unstaged: number; untracked: number }; cwd: string } }
+	| { id?: string; type: "response"; command: "git_changed_files"; success: true; data: { files: string[]; cwd: string } }
+	| {
+			id?: string;
+			type: "response";
+			command: "git_diff";
+			success: true;
+			data: { diff: string; truncated: boolean; totalBytes?: number; cwd: string };
+	  }
 
 	// Messages
 	| { id?: string; type: "response"; command: "get_messages"; success: true; data: { messages: AgentMessage[] } }
