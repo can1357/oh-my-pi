@@ -31,7 +31,8 @@ static EMPTY_RECHECK_MS: LazyLock<u64> =
 	LazyLock::new(|| env_uint("FS_SCAN_EMPTY_RECHECK_MS", 200, 0, u64::MAX));
 static MAX_CACHE_ENTRIES: LazyLock<usize> =
 	LazyLock::new(|| env_uint("FS_SCAN_CACHE_MAX_ENTRIES", 16, 0, usize::MAX));
-const DEFAULT_WALK_WORKERS: usize = 4;
+/// 0 means auto-detect from `available_parallelism()`; see `normalize_worker_count`.
+const DEFAULT_WALK_WORKERS: usize = 0;
 
 static WALK_WORKERS: LazyLock<usize> = LazyLock::new(|| {
 	normalize_worker_count(env_uint("PI_WALK_WORKERS", DEFAULT_WALK_WORKERS, 0, usize::MAX))
