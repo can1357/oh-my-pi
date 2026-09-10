@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -185,6 +185,35 @@ function killPid(pid: number): void {
 	} catch {}
 }
 
+/** Every helper the fixture spawns is this, which makes it identifiable. */
+const FIXTURE_HELPER_ARGV = "sleep 60";
+
+/**
+ * SIGKILL every helper whose pid the fixture published under `dir`.
+ *
+ * Teardown belongs with whatever owns the spawn, and that is the fixture: it
+ * writes each helper's pid into the run's own directory before any test can
+ * learn it. A test that fails between the spawn and the read has nothing to
+ * clean up by hand, so registering cleanup inside the test is a pattern that
+ * can only be got wrong — this reaches those helpers regardless.
+ *
+ * Identity is corroborated before signalling: a pid read from a file is only a
+ * number, and a helper that has already exited may have had it reissued.
+ */
+async function killStrayHelpers(dir: string): Promise<void> {
+	const entries = await fs.readdir(dir).catch(() => [] as string[]);
+	for (const entry of entries) {
+		if (!entry.endsWith(".pid")) continue;
+		const text = await Bun.file(path.join(dir, entry))
+			.text()
+			.catch(() => "");
+		const pid = Number.parseInt(text.trim(), 10);
+		if (!(pid > 0)) continue;
+		if (Process.fromPid(pid)?.args().join(" ") !== FIXTURE_HELPER_ARGV) continue;
+		killPid(pid);
+	}
+}
+
 async function readPid(file: string): Promise<number> {
 	let pid = 0;
 	await pollUntil(
@@ -248,8 +277,17 @@ describe("LspMuxServer", () => {
 
 	afterEach(async () => {
 		for (const client of clients.splice(0)) client.destroy();
-		await server.shutdown();
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		try {
+			await server.shutdown();
+		} finally {
+			// Unconditional, and ahead of the directory it reads from. A shutdown
+			// that rejects must not strand a helper, and a spy that survives into
+			// the next test is a hazard for the whole file rather than for the one
+			// that installed it.
+			await killStrayHelpers(tmpDir);
+			mock.restore();
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
 	});
 
 	async function link(): Promise<{ client: MuxTestClient; connected: MuxConnectResult }> {
@@ -354,26 +392,22 @@ describe("LspMuxServer", () => {
 			};
 			const { client } = await link();
 			await initialize(client);
-			// Read while the handshake is still running. Afterwards is too late twice
-			// over: the contract is about the state when shutdown returns, and a pid
-			// read after a rejection can no longer be cleaned up.
+			// Read while the handshake is still running, because the contract is about
+			// the state when shutdown returns. Nothing here has to survive a failure
+			// to read it: the fixture published the pid, and teardown sweeps on that.
 			const settled = server.shutdown().then(
 				() => undefined,
 				(error: unknown) => error,
 			);
 			const helperPid = await readPid(handshakeFile);
-			try {
-				const failure = await settled;
-				if (failure !== undefined) throw failure;
-				// Not polled: reporting success while this is still running is the
-				// defect, so the deadline for it is the return itself.
-				expect(processRunning(helperPid)).toBe(false);
-				// And the root left on `exit` rather than being hard-killed at the
-				// budget, so the helper really was orphaned by a graceful exit.
-				expect(await Bun.file(shutdownFile).json()).toEqual({ shutdownReceived: true, exitReceived: true });
-			} finally {
-				killPid(helperPid);
-			}
+			const failure = await settled;
+			if (failure !== undefined) throw failure;
+			// Not polled: reporting success while this is still running is the defect,
+			// so the deadline for it is the return itself.
+			expect(processRunning(helperPid)).toBe(false);
+			// And the root left on `exit` rather than being hard-killed at the budget,
+			// so the helper really was orphaned by a graceful exit.
+			expect(await Bun.file(shutdownFile).json()).toEqual({ shutdownReceived: true, exitReceived: true });
 		},
 		10_000,
 	);
@@ -396,13 +430,9 @@ describe("LspMuxServer", () => {
 				(error: unknown) => error,
 			);
 			const helperPid = await readPid(escapeFile);
-			try {
-				const failure = await settled;
-				if (failure !== undefined) throw failure;
-				expect(processRunning(helperPid)).toBe(true);
-			} finally {
-				killPid(helperPid);
-			}
+			const failure = await settled;
+			if (failure !== undefined) throw failure;
+			expect(processRunning(helperPid)).toBe(true);
 		},
 		10_000,
 	);
@@ -415,6 +445,8 @@ describe("LspMuxServer", () => {
 			// gate — it dies either way. The one the gate decides is the late one: on
 			// a host that cannot attribute a reaped leader's group the mux never takes
 			// the group, and nothing then names a helper born after the pin.
+			// Restored by teardown, not here: a spy that outlives a failing test is a
+			// hazard for every test after it.
 			const gateSpy = spyOn(groupOwnership, "available").mockReturnValue(false);
 			const startupFile = path.join(tmpDir, "startup-helper.pid");
 			const handshakeFile = path.join(tmpDir, "late-helper.pid");
@@ -431,16 +463,10 @@ describe("LspMuxServer", () => {
 				(error: unknown) => error,
 			);
 			const latePid = await readPid(handshakeFile);
-			try {
-				const failure = await settled;
-				if (failure !== undefined) throw failure;
-				expect(processRunning(startupPid)).toBe(false);
-				expect(processRunning(latePid)).toBe(true);
-			} finally {
-				killPid(startupPid);
-				killPid(latePid);
-				gateSpy.mockRestore();
-			}
+			const failure = await settled;
+			if (failure !== undefined) throw failure;
+			expect(processRunning(startupPid)).toBe(false);
+			expect(processRunning(latePid)).toBe(true);
 		},
 		10_000,
 	);

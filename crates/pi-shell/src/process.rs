@@ -2930,6 +2930,12 @@ mod tests {
 	/// through its own leader's pidfd. Re-implementing the same rule would not
 	/// be independence — both copies would carry the same premise, and a
 	/// premise that is wrong would make them agree incorrectly.
+	///
+	/// Known and deliberate: a setup that fails answers `false` here rather than
+	/// failing, which its callers read as an uncapable kernel and hold the group
+	/// fallback to the weaker contract. That is the safe direction for them, but
+	/// it is not safe for a caller corroborating the capability itself — see
+	/// `kernel_reaches_a_reaped_leaders_group`, which asserts instead.
 	#[cfg(target_os = "linux")]
 	fn kernel_scopes_pidfd_signals_to_groups() -> bool {
 		use std::os::unix::process::CommandExt;
