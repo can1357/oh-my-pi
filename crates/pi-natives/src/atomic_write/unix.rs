@@ -178,6 +178,11 @@ fn absolute_root_components(root: &Path) -> std::result::Result<Vec<CString>, At
 	if !saw_root {
 		return Err(AtomicWriteError::invalid_input("absolute root must contain /"));
 	}
+	if components.is_empty() {
+		return Err(AtomicWriteError::invalid_input(
+			"absolute root must name a private directory below /",
+		));
+	}
 	Ok(components)
 }
 
@@ -815,4 +820,21 @@ fn is_unsafe_path_error(error: &io::Error) -> bool {
 
 fn is_errno(error: &io::Error, errno: libc::c_int) -> bool {
 	error.raw_os_error() == Some(errno)
+}
+
+#[cfg(test)]
+mod tests {
+	use std::path::Path;
+
+	use super::absolute_root_components;
+	use crate::atomic_write::{AtomicWriteCommitState, AtomicWriteErrorCode};
+
+	#[test]
+	fn rejects_root_only_absolute_roots_before_directory_traversal() {
+		for root in [Path::new("/"), Path::new("//")] {
+			let error = absolute_root_components(root).expect_err("root-only path must be rejected");
+			assert_eq!(error.code, AtomicWriteErrorCode::InvalidInput);
+			assert_eq!(error.commit_state, AtomicWriteCommitState::NotCommitted);
+		}
+	}
 }

@@ -238,24 +238,32 @@ async function buildListing(url: InternalUrl, localRoot: string): Promise<Intern
 }
 
 function extractRelativePath(url: InternalUrl): string {
-	const host = url.rawHost || url.hostname;
-	const pathname = url.rawPathname ?? url.pathname;
-
-	const combined = host
-		? pathname && pathname !== "/"
-			? `${host}${pathname}`
-			: host
-		: pathname && pathname !== "/"
-			? pathname.slice(1)
+	const rawHref = url.rawHref ?? url.href;
+	const schemeDelimiter = rawHref.indexOf("://");
+	if (schemeDelimiter === -1) {
+		throw new Error(`Invalid local:// URL: ${url.href}`);
+	}
+	const rawTargetAndSuffix = rawHref.slice(schemeDelimiter + 3);
+	const suffixStart = rawTargetAndSuffix.search(/[?#]/);
+	const rawHostAndPath = suffixStart === -1 ? rawTargetAndSuffix : rawTargetAndSuffix.slice(0, suffixStart);
+	const pathStart = rawHostAndPath.indexOf("/");
+	const rawHost = pathStart === -1 ? rawHostAndPath : rawHostAndPath.slice(0, pathStart);
+	const rawPathname = pathStart === -1 ? "" : rawHostAndPath.slice(pathStart);
+	const rawTarget = rawHost
+		? rawPathname && rawPathname !== "/"
+			? `${rawHost}${rawPathname}`
+			: rawHost
+		: rawPathname && rawPathname !== "/"
+			? rawPathname.slice(1)
 			: "";
 
-	if (!combined) {
+	if (!rawTarget) {
 		return "";
 	}
 
 	let decoded: string;
 	try {
-		decoded = decodeURIComponent(combined.replaceAll("\\", "/"));
+		decoded = decodeURIComponent(rawTarget.replaceAll("\\", "/"));
 	} catch {
 		throw new Error(`Invalid URL encoding in local:// path: ${url.href}`);
 	}
@@ -355,53 +363,6 @@ function requireInvokingLocalProtocolOptions(options: LocalProtocolOptions): Loc
 	return options;
 }
 
-/** Parse and decode the model-supplied local target exactly once before passing components to native code. */
-function decodeAtomicLocalRelativePath(url: InternalUrl): string {
-	const rawHref = url.rawHref ?? url.href;
-	const schemeDelimiter = rawHref.indexOf("://");
-	if (schemeDelimiter === -1) {
-		throw new AtomicLocalWriteError({
-			code: "INVALID_INPUT",
-			commitState: "NOT_COMMITTED",
-			message: "Atomic local writes require a local:// URL",
-		});
-	}
-	const rawTargetAndSuffix = rawHref.slice(schemeDelimiter + 3);
-	const suffixStart = rawTargetAndSuffix.search(/[?#]/);
-	const rawHostAndPath = suffixStart === -1 ? rawTargetAndSuffix : rawTargetAndSuffix.slice(0, suffixStart);
-	const pathStart = rawHostAndPath.indexOf("/");
-	const rawHost = pathStart === -1 ? rawHostAndPath : rawHostAndPath.slice(0, pathStart);
-	const rawPathname = pathStart === -1 ? "" : rawHostAndPath.slice(pathStart);
-	const rawTarget = rawHost
-		? rawPathname && rawPathname !== "/"
-			? `${rawHost}${rawPathname}`
-			: rawHost
-		: rawPathname && rawPathname !== "/"
-			? rawPathname.slice(1)
-			: "";
-
-	let decoded: string;
-	try {
-		decoded = decodeURIComponent(rawTarget.replaceAll("\\", "/"));
-	} catch {
-		throw new AtomicLocalWriteError({
-			code: "INVALID_INPUT",
-			commitState: "NOT_COMMITTED",
-			message: `Invalid URL encoding in local:// path: ${url.href}`,
-		});
-	}
-	try {
-		validateRelativePath(decoded);
-	} catch (error) {
-		const validationError = toLocalValidationError(error);
-		throw new AtomicLocalWriteError({
-			code: "INVALID_INPUT",
-			commitState: "NOT_COMMITTED",
-			message: validationError.message,
-		});
-	}
-	return decoded;
-}
 
 function parseAtomicLocalTarget(input: string | InternalUrl, options: LocalProtocolOptions): ParsedAtomicLocalTarget {
 	const url = typeof input === "string" ? parseInternalUrl(input) : input;
@@ -413,7 +374,17 @@ function parseAtomicLocalTarget(input: string | InternalUrl, options: LocalProto
 		});
 	}
 
-	const relativePath = decodeAtomicLocalRelativePath(url);
+	let relativePath: string;
+	try {
+		relativePath = extractRelativePath(url);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new AtomicLocalWriteError({
+			code: "INVALID_INPUT",
+			commitState: "NOT_COMMITTED",
+			message,
+		});
+	}
 	if (relativePath.length === 0) {
 		throw new AtomicLocalWriteError({
 			code: "INVALID_INPUT",

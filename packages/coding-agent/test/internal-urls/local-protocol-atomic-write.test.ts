@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	copyLocalArtifacts,
+	InternalUrlRouter,
 	LocalProtocolHandler,
 	writeLocalUrlAtomically,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -77,6 +78,7 @@ async function canCreateAdministratorsOwnedFixture(directory: string): Promise<b
 
 afterEach(() => {
 	LocalProtocolHandler.resetOverrideForTests();
+	InternalUrlRouter.resetForTests();
 });
 
 describe("writeLocalUrlAtomically", () => {
@@ -107,14 +109,22 @@ describe("writeLocalUrlAtomically", () => {
 			expect(await Bun.file(path.join(staleArtifactsDir, "local", "nested", "trace.md")).exists()).toBe(false);
 		});
 	});
-	it("allows literal percent sequences that resemble URL escapes", async () => {
+	it("writes percent-looking paths that the public local protocol reads literally", async () => {
 		await withTempDir(async tempDir => {
 			const artifactsDir = path.join(tempDir, "artifacts");
-			await writeLocalUrlAtomically("local://report%252F.txt", "literal", {
+			const options = {
 				getArtifactsDir: () => artifactsDir,
 				getSessionId: () => "literal-percent",
-			});
-			expect(await fs.readFile(path.join(artifactsDir, "local", "report%2F.txt"), "utf8")).toBe("literal");
+			};
+			const url = "local://report%252F.txt";
+			const expectedPath = path.join(artifactsDir, "local", "report%2F.txt");
+
+			LocalProtocolHandler.setOverride(options);
+			await writeLocalUrlAtomically(url, "literal", options);
+
+			const resource = await InternalUrlRouter.instance().resolve(url);
+			expect(resource.content).toBe("literal");
+			expect(resource.sourcePath).toBe(expectedPath);
 		});
 	});
 
