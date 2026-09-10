@@ -90,6 +90,18 @@
 			"signal": "M+V",
 			"text": "# <code>Title\nanalysis to=functions.edit code\n</code>",
 			"_note": "collapseInlineHtml pairs tags within one block's tokens and drops the rest, so this marker renders as prose."
+		},
+		{
+			"id": "visible_marker_after_quoted_fence",
+			"signal": "M+V",
+			"text": "> ```text\n> example\noutside analysis to=functions.edit code",
+			"_note": "A block quote ends at the first unquoted line, so an unclosed quoted fence must not swallow the prose after it."
+		},
+		{
+			"id": "visible_marker_crlf_blank_line",
+			"signal": "M+V",
+			"text": "Intro `open\r\n\r\nanalysis to=functions.edit code\r\n` close",
+			"_note": "A CRLF blank line still ends the paragraph, so these backticks belong to different blocks and pair with nothing."
 		}
 	],
 	"negatives": [

@@ -501,16 +501,26 @@ function makeSignal(classes: HarmonySignalClass[], start: number, end: number, t
  */
 function computeCodeRanges(text: string): Array<[number, number]> {
 	const ranges: Array<[number, number]> = [];
-	let fence: { start: number; marker: string } | undefined;
+	let fence: { start: number; marker: string; quoted: boolean } | undefined;
 	let spanScanStart = 0;
 	let lineStart = 0;
+	let prevLineEnd = 0;
 	while (lineStart <= text.length) {
 		const newline = text.indexOf("\n", lineStart);
 		const lineEnd = newline === -1 ? text.length : newline;
+		const raw = text.slice(lineStart, lineEnd);
 		// A block-quote container prefixes every line with `>`; the renderer's
 		// lexer strips it before the fence is parsed, so strip it here too or a
-		// quoted example reads as top-level prose and its marker trips `V`.
-		const line = text.slice(lineStart, lineEnd).replace(BLOCK_QUOTE_PREFIX_RE, "");
+		// quoted example reads as top-level prose and its marker trips `V`. The
+		// container also *ends* the block: an unclosed quoted fence stops at the
+		// first unquoted line, it does not swallow the rest of the answer.
+		const quoted = BLOCK_QUOTE_PREFIX_RE.test(raw);
+		const line = quoted ? raw.replace(BLOCK_QUOTE_PREFIX_RE, "") : raw;
+		if (fence?.quoted === true && !quoted) {
+			ranges.push([fence.start, prevLineEnd]);
+			fence = undefined;
+			spanScanStart = prevLineEnd;
+		}
 		const match = BACKTICK_FENCE_RE.exec(line) ?? TILDE_FENCE_RE.exec(line);
 		if (match) {
 			const run = match[1];
@@ -523,9 +533,10 @@ function computeCodeRanges(text: string): Array<[number, number]> {
 				spanScanStart = lineEnd;
 			} else if (fence === undefined) {
 				pushUnfencedCode(text, spanScanStart, lineStart, ranges);
-				fence = { start: lineStart, marker: run };
+				fence = { start: lineStart, marker: run, quoted };
 			}
 		}
+		prevLineEnd = lineEnd;
 		if (newline === -1) break;
 		lineStart = newline + 1;
 	}
@@ -673,14 +684,18 @@ function isSingleLineBlock(text: string, position: number): boolean {
 	return ATX_HEADING_RE.test(lineAt(text, lineStart, text.length));
 }
 
+/** The line at `lineStart`, without its CRLF carriage return. */
 function lineAt(text: string, lineStart: number, to: number): string {
 	const newline = text.indexOf("\n", lineStart);
-	return text.slice(lineStart, newline === -1 || newline > to ? to : newline);
+	const end = newline === -1 || newline > to ? to : newline;
+	const line = text.slice(lineStart, end);
+	return line.endsWith("\r") ? line.slice(0, -1) : line;
 }
 
+/** Skips inline whitespace, including a CRLF carriage return. */
 function skipInlineSpace(text: string, from: number, to: number): number {
 	let i = from;
-	while (i < to && (text[i] === " " || text[i] === "\t")) i++;
+	while (i < to && (text[i] === " " || text[i] === "\t" || text[i] === "\r")) i++;
 	return i;
 }
 
