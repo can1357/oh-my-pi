@@ -1711,6 +1711,163 @@ describe("ModelRegistry", () => {
 		});
 	});
 	describe("extended context", () => {
+		test("toggles bundled Astra between its standard and documented extended windows", async () => {
+			const testSettings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(272_000);
+
+			testSettings.set("extendedContext", true);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
+			expect(registry.find("openai-codex", "gpt-5.5")?.contextWindow).toBe(272_000);
+
+			testSettings.set("extendedContext", false);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(272_000);
+		});
+
+		test("keeps bundled Astra at its default window without a settings source", () => {
+			// `beforeEach` leaves global settings uninitialized, so this
+			// reaches the no-settings fallback: it must match the schema
+			// default (off), never silently elevated windows.
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(272_000);
+		});
+
+		test("preserves an explicit Astra context override across extended context toggles", async () => {
+			writeRawModelsJson({
+				"openai-codex": { modelOverrides: { "gpt-6-astra": { contextWindow: 400_000 } } },
+			});
+			const testSettings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(400_000);
+
+			testSettings.set("extendedContext", true);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(400_000);
+
+			testSettings.set("extendedContext", false);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(400_000);
+		});
+
+		test("clamps an explicit Astra override to the Codex ceiling", async () => {
+			writeRawModelsJson({
+				"openai-codex": { modelOverrides: { "gpt-6-astra": { contextWindow: 2_000_000 } } },
+			});
+			const testSettings = Settings.isolated({ extendedContext: true });
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			// Explicit intent wins over the toggle, but upstream never honors
+			// more than the server ceiling (curated 922K input cap here).
+			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
+		});
+
+		test("clamps a cached Astra row already carrying the applied override", async () => {
+			writeRawModelsJson({
+				"openai-codex": { modelOverrides: { "gpt-6-astra": { contextWindow: 2_000_000 } } },
+			});
+			const testSettings = Settings.isolated({ extendedContext: true });
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			const astra = registry.find("openai-codex", "gpt-6-astra");
+			if (!astra) throw new Error("Expected bundled Astra model");
+			// Wire-value row, as discovery persists it; the cache loader
+			// applies the models.yml override before composition sees it, so
+			// the clamp must hold on every override pass, not just the last.
+			writeModelCache(
+				"openai-codex",
+				Date.now(),
+				[{ ...astra, contextWindow: 272_000, maxContextWindow: 872_000 }],
+				true,
+				"",
+				path.join(tempDir, "models.db"),
+			);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
+		});
+
+		test("restores the opt-in for cached Astra and worker rows with stale or invalid maxima", async () => {
+			const testSettings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			const astra = registry.find("openai-codex", "gpt-6-astra");
+			if (!astra) throw new Error("Expected bundled Astra model");
+			writeModelCache(
+				"openai-codex",
+				Date.now(),
+				[
+					{ ...astra, contextWindow: 1_050_000, maxContextWindow: 872_000 },
+					{ ...astra, id: "gpt-6-astra-wm", contextWindow: 1_050_000, maxContextWindow: 0 },
+				],
+				true,
+				"",
+				path.join(tempDir, "models.db"),
+			);
+			await registry.reapplyModelPolicies();
+			for (const id of ["gpt-6-astra", "gpt-6-astra-wm"]) {
+				expect(registry.find("openai-codex", id)?.contextWindow).toBe(272_000);
+			}
+
+			testSettings.set("extendedContext", true);
+			await registry.reapplyModelPolicies();
+			for (const id of ["gpt-6-astra", "gpt-6-astra-wm"]) {
+				expect(registry.find("openai-codex", id)?.contextWindow).toBe(922_000);
+			}
+
+			testSettings.set("extendedContext", false);
+			await registry.reapplyModelPolicies();
+			for (const id of ["gpt-6-astra", "gpt-6-astra-wm"]) {
+				expect(registry.find("openai-codex", id)?.contextWindow).toBe(272_000);
+			}
+		});
+
+		test("uses higher discovered Astra maxima without retaining them across catalog rebuilds", async () => {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				settings: Settings.isolated({ extendedContext: true }),
+			});
+			const astra = registry.find("openai-codex", "gpt-6-astra");
+			if (!astra) throw new Error("Expected bundled Astra model");
+			const dbPath = path.join(tempDir, "models.db");
+			writeModelCache("openai-codex", Date.now(), [{ ...astra, maxContextWindow: 1_200_000 }], true, "", dbPath);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(1_200_000);
+
+			writeModelCache("openai-codex", Date.now(), [{ ...astra, maxContextWindow: 872_000 }], true, "", dbPath);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
+		});
+
+		test("restores a discovered maximum from cache ahead of the default on each toggle", async () => {
+			const testSettings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			const legacy = registry.find("openai-codex", "gpt-5.5");
+			const spark = registry.find("openai-codex", "gpt-5.3-codex-spark");
+			if (!legacy || !spark) throw new Error("Expected bundled Codex models");
+			writeModelCache(
+				"openai-codex",
+				Date.now(),
+				[
+					{ ...legacy, maxContextWindow: 640_000 },
+					{ ...spark, maxContextWindow: 64_000 },
+				],
+				true,
+				"",
+				path.join(tempDir, "models.db"),
+			);
+
+			testSettings.set("extendedContext", true);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openai-codex", "gpt-5.5")?.contextWindow).toBe(640_000);
+			// An advertised maximum smaller than the current window cannot shrink it.
+			expect(registry.find("openai-codex", "gpt-5.3-codex-spark")?.contextWindow).toBe(128_000);
+
+			testSettings.set("extendedContext", false);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openai-codex", "gpt-5.5")?.contextWindow).toBe(272_000);
+
+			testSettings.set("extendedContext", true);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openai-codex", "gpt-5.5")?.contextWindow).toBe(640_000);
+		});
+
 		test("off caps billable premium models without shrinking subscription estimates", async () => {
 			await Settings.init({ inMemory: true, overrides: { extendedContext: false } });
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);

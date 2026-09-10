@@ -45,6 +45,7 @@
 		"auth/minimax.kdl",
 		"auth/mistral.kdl",
 		"auth/moonshot.kdl",
+		"auth/muse-code.kdl",
 		"auth/nanogpt.kdl",
 		"auth/novita.kdl",
 		"auth/nvidia.kdl",
@@ -138,6 +139,7 @@
 		"providers/minimax.kdl",
 		"providers/mistral.kdl",
 		"providers/moonshot.kdl",
+		"providers/muse-code.kdl",
 		"providers/nanogpt.kdl",
 		"providers/novita.kdl",
 		"providers/nvidia.kdl",
@@ -4820,11 +4822,10 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:94",
+				"source": "classes/gemini.kdl:96",
 				"class": "gemini",
-				"providers": [
-					"google",
-					"opencode-zen"
+				"apis": [
+					"google-generative-ai"
 				],
 				"revision": [
 					{
@@ -4838,7 +4839,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:100",
+				"source": "classes/gemini.kdl:102",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity",
@@ -5683,9 +5684,34 @@
 				}
 			},
 			{
-				"source": "classes/meta.kdl:6",
+				"source": "classes/meta.kdl:8",
 				"class": "meta",
 				"models": [
+					{
+						"kind": "exact",
+						"value": "muse-spark-1.3"
+					}
+				],
+				"thinking": {
+					"efforts": [
+						"minimal",
+						"low",
+						"medium",
+						"high",
+						"xhigh",
+						"max"
+					],
+					"mode": "effort"
+				}
+			},
+			{
+				"source": "classes/meta.kdl:12",
+				"class": "meta",
+				"models": [
+					{
+						"kind": "exact",
+						"value": "muse-spark-1.1"
+					},
 					{
 						"kind": "exact",
 						"value": "muse-spark-1.2"
@@ -5693,10 +5719,6 @@
 					{
 						"kind": "exact",
 						"value": "muse-spark-1.2-contributor"
-					},
-					{
-						"kind": "exact",
-						"value": "muse-spark-1.3"
 					},
 					{
 						"kind": "exact",
@@ -5715,7 +5737,7 @@
 				}
 			},
 			{
-				"source": "classes/meta.kdl:11",
+				"source": "classes/meta.kdl:17",
 				"class": "meta",
 				"providers": [
 					"kilo",
@@ -7974,25 +7996,37 @@
 				}
 			},
 			{
-				"source": "providers/firepass.kdl:11",
+				"source": "providers/firepass.kdl:10",
+				"class": "glm",
 				"providers": [
 					"firepass"
 				],
-				"models": [
-					{
-						"kind": "exact",
-						"value": "kimi-k2.6-turbo"
-					}
-				],
+				"priority": 1,
 				"thinking": {
+					"mode": "effort",
 					"efforts": [
+						"minimal",
 						"low",
 						"medium",
 						"high",
-						"xhigh",
 						"max"
-					],
-					"mode": "effort"
+					]
+				}
+			},
+			{
+				"source": "providers/firepass.kdl:15",
+				"class": "kimi",
+				"providers": [
+					"firepass"
+				],
+				"priority": 1,
+				"thinking": {
+					"mode": "effort",
+					"efforts": [
+						"low",
+						"high",
+						"max"
+					]
 				}
 			},
 			{
@@ -9309,7 +9343,7 @@
 				}
 			},
 			{
-				"source": "providers/meta.kdl:6",
+				"source": "providers/meta.kdl:7",
 				"class": "unknown",
 				"providers": [
 					"meta"
@@ -9332,7 +9366,8 @@
 				],
 				"wire": {
 					"includeEncryptedReasoning": true,
-					"supportsReasoningEffort": true
+					"supportsReasoningEffort": true,
+					"clampOutputToModelMax": true
 				}
 			},
 			{
@@ -9564,6 +9599,37 @@
 						"text",
 						"image"
 					]
+				}
+			},
+			{
+				"source": "providers/muse-code.kdl:12",
+				"class": "unknown",
+				"providers": [
+					"muse-code"
+				],
+				"thinking": {
+					"efforts": [
+						"minimal",
+						"low",
+						"medium",
+						"high",
+						"xhigh"
+					],
+					"mode": "effort"
+				}
+			},
+			{
+				"source": "providers/muse-code.kdl:3",
+				"providers": [
+					"muse-code"
+				],
+				"wire": {
+					"includeEncryptedReasoning": true,
+					"supportsReasoningEffort": true,
+					"clampOutputToModelMax": true
+				},
+				"catalog": {
+					"editPromptVariant": "compact"
 				}
 			},
 			{
@@ -10489,7 +10555,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:16",
+				"source": "providers/openai-codex.kdl:21",
 				"providers": [
 					"openai-codex"
 				],
@@ -10513,7 +10579,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:24",
+				"source": "providers/openai-codex.kdl:29",
 				"providers": [
 					"openai-codex"
 				],
@@ -10537,7 +10603,39 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:33",
+				"source": "providers/openai-codex.kdl:46",
+				"providers": [
+					"openai-codex"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-6-astra"
+					},
+					{
+						"kind": "exact",
+						"value": "gpt-6-astra-wm"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 10,
+						"output": 50,
+						"cacheRead": 1,
+						"cacheWrite": 0
+					},
+					"serviceTierCost": {
+						"flex": 0.5,
+						"priority": 2.5
+					},
+					"limitsPatch": {
+						"contextWindow": 272000
+					},
+					"maxContextWindow": 922000
+				}
+			},
+			{
+				"source": "providers/openai-codex.kdl:63",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -10557,7 +10655,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:38",
+				"source": "providers/openai-codex.kdl:68",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -10573,7 +10671,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:41",
+				"source": "providers/openai-codex.kdl:71",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -10589,7 +10687,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:46",
+				"source": "providers/openai-codex.kdl:76",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -10608,7 +10706,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:58",
+				"source": "providers/openai-codex.kdl:88",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -10634,7 +10732,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:64",
+				"source": "providers/openai-codex.kdl:94",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -10660,7 +10758,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:56",
+				"source": "providers/openai-codex.kdl:86",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -10677,7 +10775,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:74",
+				"source": "providers/openai-codex.kdl:104",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -10697,7 +10795,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:80",
+				"source": "providers/openai-codex.kdl:110",
 				"class": "unknown",
 				"providers": [
 					"openai-codex"
@@ -10713,7 +10811,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:83",
+				"source": "providers/openai-codex.kdl:113",
 				"class": "unknown",
 				"providers": [
 					"openai-codex"
@@ -10729,7 +10827,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:89",
+				"source": "providers/openai-codex.kdl:119",
 				"providers": [
 					"openai-codex"
 				],
@@ -10750,7 +10848,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:98",
+				"source": "providers/openai-codex.kdl:128",
 				"providers": [
 					"openai-codex"
 				],
@@ -10775,7 +10873,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:107",
+				"source": "providers/openai-codex.kdl:137",
 				"providers": [
 					"openai-codex"
 				],
@@ -10796,7 +10894,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:118",
+				"source": "providers/openai-codex.kdl:148",
 				"providers": [
 					"openai-codex"
 				],
@@ -10830,7 +10928,8 @@
 					"serviceTierCost": {
 						"flex": 0.5,
 						"priority": 2
-					}
+					},
+					"clampContextOverride": true
 				}
 			},
 			{
@@ -11073,7 +11172,28 @@
 				}
 			},
 			{
-				"source": "providers/openai.kdl:77",
+				"source": "providers/openai.kdl:79",
+				"providers": [
+					"openai"
+				],
+				"models": [
+					{
+						"kind": "glob",
+						"value": "gpt-6-astra*"
+					}
+				],
+				"catalog": {
+					"longContext": {
+						"inputThreshold": 272000,
+						"input": 20,
+						"output": 75,
+						"cacheRead": 2,
+						"cacheWrite": 25
+					}
+				}
+			},
+			{
+				"source": "providers/openai.kdl:90",
 				"providers": [
 					"openai"
 				],
@@ -14386,6 +14506,7 @@
 							],
 							"prefix": [
 								"gpt-5",
+								"gpt-6",
 								"oswe",
 								"mai-"
 							]
@@ -14707,6 +14828,15 @@
 			},
 			{
 				"provider": "meta",
+				"match": {
+					"prefix": [
+						"muse-image-",
+						"muse-voice-"
+					]
+				}
+			},
+			{
+				"provider": "muse-code",
 				"match": {
 					"prefix": [
 						"muse-image-",
@@ -16287,7 +16417,7 @@
 			{
 				"id": "firepass",
 				"apiKeyFormat": "bearer",
-				"name": "Fire Pass (Fireworks Kimi K2.6 Turbo subscription)",
+				"name": "Fire Pass (Fireworks subscription)",
 				"login": {
 					"kind": "api-key",
 					"authUrl": "https://app.fireworks.ai/settings/users/api-keys",
@@ -16298,7 +16428,7 @@
 						"kind": "chat-completions",
 						"label": "Fire Pass",
 						"baseUrl": "https://api.fireworks.ai/inference/v1",
-						"model": "accounts/fireworks/routers/kimi-k2p6-turbo"
+						"model": "accounts/fireworks/routers/glm-5p2-fast"
 					}
 				}
 			},
@@ -16336,6 +16466,68 @@
 						"label": "deepseek",
 						"url": "https://api.deepseek.com/v1/models"
 					}
+				}
+			},
+			{
+				"id": "muse-code",
+				"apiKeyFormat": "bearer",
+				"name": "Muse Code (Subscription)",
+				"expiry": "jwt-or-never",
+				"login": {
+					"kind": "device-code",
+					"scopes": [],
+					"scopeSeparator": " ",
+					"clientId": {
+						"value": "1031625952748946"
+					},
+					"device": {
+						"url": {
+							"value": "https://auth.meta.com/oidc/device/authorization/"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {
+							"Accept": "application/json",
+							"x-api-version": "1.0.0"
+						}
+					},
+					"token": {
+						"url": {
+							"value": "https://auth.meta.com/oidc/device/token/"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {
+							"Accept": "application/json",
+							"x-api-version": "1.0.0"
+						}
+					},
+					"response": {
+						"userCode": "user_code",
+						"deviceCode": "device_code",
+						"verificationUri": "verification_uri",
+						"verificationUriComplete": "verification_uri_complete",
+						"interval": "interval",
+						"expiresIn": "expires_in"
+					},
+					"instructions": "Enter code: {user_code}",
+					"afterExchange": "muse-code-key",
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "never"
+						}
+					}
+				},
+				"refresh": {
+					"kind": "none"
 				}
 			},
 			{

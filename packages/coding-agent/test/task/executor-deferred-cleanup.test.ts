@@ -21,6 +21,7 @@ import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 const baseAgent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
 
@@ -61,6 +62,7 @@ function mockSession(opts: {
 		for (const l of [...listeners]) l(event);
 	};
 	return {
+		...createSessionDefaults(),
 		state,
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
@@ -68,7 +70,6 @@ function mockSession(opts: {
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
-		setActiveToolsByName: async () => {},
 		subscribe: (l: (event: AgentSessionEvent) => void) => {
 			listeners.push(l);
 			return () => {
@@ -82,17 +83,12 @@ function mockSession(opts: {
 			emit({ type: "message_end", message: msg } as AgentSessionEvent);
 			opts.onPrompt(emit);
 		},
-		waitForIdle: async () => {},
-		prepareForHeadlessAdvisorDrain: () => {},
-		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
 		hasPendingAsyncWork: () => false,
 		getAsyncJobSnapshot: () => ({ running: [], recent: [] }),
 		settleAsyncWork: async () => {},
 		abort: opts.abort ?? (async () => {}),
 		dispose: opts.dispose ?? (async () => {}),
-		setIrcWakeTurnObserver: () => {},
-		subscribeRunState: () => () => {},
 	} as unknown as AgentSession;
 }
 

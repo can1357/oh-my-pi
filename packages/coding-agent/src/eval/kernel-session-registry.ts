@@ -404,24 +404,6 @@ export function createKernelSessionRegistry<
 		}
 	}
 
-	async function acquireRetryKernel(
-		session: TSession,
-		kernel: TKernel,
-		cwd: string,
-		options: TOptions,
-	): Promise<TKernel> {
-		if (descriptor.acquireLiveSessionKernel) {
-			const retryKernel = await acquireLiveSessionKernel(session, cwd, options);
-			if (!isCurrent(session, retryKernel)) throw new descriptor.cancelledErrorClass(false);
-			return retryKernel;
-		}
-		const retryKernel = await acquireDefaultReplacementKernel(session, kernel, cwd, options);
-		if (!isCurrent(session) || session.kernel !== retryKernel) {
-			throw new descriptor.cancelledErrorClass(false);
-		}
-		return retryKernel;
-	}
-
 	function peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined {
 		const sessionId = options.sessionId ?? `session:${cwd}`;
 		const sessionKey = resolveOwnerScopedSessionKey({
@@ -483,33 +465,12 @@ export function createKernelSessionRegistry<
 			)
 				throw err;
 			if (kernel.isAlive()) throw err;
-			const retryKernel = await acquireRetryKernel(session, kernel, cwd, options);
-			throwIfCallerCancelled(options);
-			return await descriptor.executeWithKernel(retryKernel, code, runOptions);
+			throw new Error(
+				`${descriptor.languageLabel} kernel died during execution; completion is uncertain and the cell was not replayed. The next call will start a fresh kernel.`,
+				{ cause: err },
+			);
 		}
-		if (
-			!result.cancelled ||
-			options.signal?.aborted ||
-			(options.deadlineMs !== undefined && options.deadlineMs <= Date.now()) ||
-			kernel.isAlive()
-		) {
-			return result;
-		}
-		let retryKernel: TKernel;
-		try {
-			retryKernel = await acquireRetryKernel(session, kernel, cwd, options);
-		} catch (err) {
-			const deadlineExpired = options.deadlineMs !== undefined && options.deadlineMs <= Date.now();
-			const cancelled = descriptor.isCancellation?.(err) || isCancellationError(err, descriptor.cancelledErrorClass);
-			if (deadlineExpired && cancelled) return result;
-			throw err;
-		}
-		throwIfCallerCancelled(options);
-		const retryResult = await descriptor.executeWithKernel(retryKernel, code, runOptions);
-		if (retryResult.cancelled && options.deadlineMs !== undefined && options.deadlineMs <= Date.now()) {
-			return result;
-		}
-		return retryResult;
+		return result;
 	}
 
 	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel };

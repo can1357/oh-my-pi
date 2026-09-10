@@ -9,6 +9,11 @@ provider "openai-codex" {
 	// Harmony-protocol leak detection/mitigation applies to every Codex model,
 	// current and future; replaces the provider check in harmony-leak.ts.
 	harmony-leak-mitigation #true
+	// Every Codex SKU clamps explicit context-window overrides to the
+	// server-honored ceiling (`min(override, max)`, mirroring upstream
+	// `with_config_overrides`); models without a curated or live maximum
+	// pass through. Replaces the provider check in model-registry.ts.
+	clamp-context-override #true
 	// Subscription (Codex) discovery reports no pricing; the curated Daybreak
 	// aliases carry the standard GPT-5.6 Sol/Cyber API list price so cost
 	// display reads as API-equivalent spend. The `-wm` worker sibling bills
@@ -28,6 +33,31 @@ provider "openai-codex" {
 			cache-read 1.25
 			cache-write 15.625
 		}
+	}
+	// Codex reports a 272K default and a stale 872K maximum for Astra. Keep
+	// the default explicit so cached 1.05M rows from #11089 cannot bypass the
+	// opt-in; the curated maximum is applied only with extended context on.
+	// OpenAI documents 1.05M total context with at most 922K input and 128K
+	// output, so the input ceiling is 922K — not the total. A higher live
+	// maximum still wins as the ceiling.
+	// Subscription credit-equivalent pricing: no per-token billing, free cache
+	// writes, exempt from the API long-context multiplier. The first-party API
+	// route bills the documented >272K tier instead — see providers/openai.kdl.
+	models "gpt-6-astra" "gpt-6-astra-wm" {
+		cost-patch {
+			input 10.0
+			output 50.0
+			cache-read 1.0
+			cache-write 0
+		}
+		service-tier-cost {
+			flex 0.5
+			priority 2.5
+		}
+		limits-patch {
+			context-window 272000
+		}
+		max-context-window 922000
 	}
 	class "openai" {
 		revision ">=5.3 <5.7" {

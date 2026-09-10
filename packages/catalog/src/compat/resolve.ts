@@ -753,6 +753,7 @@ function resolveOpenAIResponsesPolicy(
 		wireModelIdMode: isOpenRouter ? "openrouter" : "raw",
 		toolSchemaFlavor: facts.is("kimi") ? "moonshot-mfjs" : undefined,
 		alwaysSendMaxTokens: facts.is("kimi"),
+		clampOutputToModelMax: false,
 		supportsObfuscationOptOut: isOpenAIUrl || provider === "openai",
 		officialEndpoint: isOfficialOpenAIEndpoint(provider, baseUrl),
 		harmonyLeakMitigation: false,
@@ -1172,6 +1173,7 @@ function fillExplicitThinking<TApi extends Api>(
 function buildResolveTarget<TApi extends Api>(spec: ModelSpec<TApi>, identity: ModelIdentity): ResolveTarget {
 	const target: ResolveTarget = {
 		provider: spec.provider,
+		api: spec.api,
 		class: identity.class,
 		model: spec.id,
 		reasoning: Boolean(spec.reasoning),

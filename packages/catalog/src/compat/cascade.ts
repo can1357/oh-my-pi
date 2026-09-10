@@ -3,7 +3,7 @@
  * for one structured model target from the compiled rule tree.
  *
  * Faithful port of the o2 reference resolver (`cascade.rs`): rules are
- * conjunctions over `(class, provider, family, revision, models)`; per axis
+ * conjunctions over `(class, provider, api, family, revision, models)`; per axis
  * the matching rule with the greatest `(model-selector exactness,
  * constrained-dimension count, priority)` tuple wins, and an equal-tuple
  * same-axis contest throws {@link AmbiguousOverlapError}. Declaration and
@@ -74,6 +74,7 @@ function buildRuleIndex(cascade: CompiledCascade): IndexedRule[] {
 		const dimensions =
 			Number(compiled.class !== undefined) +
 			Number(compiled.providers !== undefined) +
+			Number(compiled.apis !== undefined) +
 			Number(compiled.family !== undefined) +
 			Number(compiled.revision !== undefined) +
 			Number(compiled.models !== undefined);
@@ -117,6 +118,7 @@ function rankRule(
 	const { compiled } = rule;
 	if (compiled.class !== undefined && compiled.class !== target.class) return undefined;
 	if (compiled.providers !== undefined && !compiled.providers.includes(target.provider)) return undefined;
+	if (compiled.apis !== undefined && !compiled.apis.includes(target.api)) return undefined;
 	if (compiled.family !== undefined && compiled.family !== target.family) return undefined;
 	if (rule.revision !== undefined && (!revision || !revisionSatisfies(revision, rule.revision))) return undefined;
 	let exactness = 0;

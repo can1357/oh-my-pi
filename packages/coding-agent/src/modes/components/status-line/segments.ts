@@ -3,10 +3,11 @@ import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { SPINNER_ADVANCE_MS, TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
-import { type Theme, type ThemeColor, theme } from "../../../modes/theme/theme";
+import { type SymbolKey, type Theme, type ThemeColor, theme } from "../../../modes/theme/theme";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
 import { fileHyperlink } from "../../../tui/hyperlink";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
+import { summarizeLoopCondition } from "../../loop-condition";
 import { sanitizeStatusText } from "../../shared";
 import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } from "./context-thresholds";
 import type { RenderedSegment, SegmentContext, StatusLineSegment, StatusLineSegmentId } from "./types";
@@ -146,7 +147,7 @@ const piSegment: StatusLineSegment = {
 		if (ctx.focusedAgentId) {
 			const icon = theme.icon.ghost ? `${theme.icon.ghost} ` : "";
 			return {
-				content: theme.fg("warning", `${icon}${statusValue(ctx, ctx.focusedAgentId)} `),
+				content: theme.fg("warning", `${icon}${statusValue(ctx, ctx.focusedAgentId)}`),
 				visible: true,
 			};
 		}
@@ -155,11 +156,13 @@ const piSegment: StatusLineSegment = {
 		const fgAnsi = ctx.brandFgAnsi ?? theme.getFgAnsi("dim");
 		// While a turn runs the brand icon becomes a braille spinner plus a
 		// whole-unit turn timer (port of rust omp's status-band active brand).
+		// No trailing pad: the group renderer owns inter-segment spacing, so a
+		// trailing space here would double the gap at the first separator (#11103).
 		const content =
 			ctx.turnElapsedMs != null
-				? `${brandSpinnerFrame(ctx.now?.getTime())} ${statusValue(ctx, brandTimer(ctx.turnElapsedMs))} `
+				? `${brandSpinnerFrame(ctx.now?.getTime())} ${statusValue(ctx, brandTimer(ctx.turnElapsedMs))}`
 				: theme.icon.omp
-					? `${theme.icon.omp} `
+					? theme.icon.omp
 					: "";
 		return { content: `${fgAnsi}${content}\x1b[39m`, visible: true };
 	},
@@ -380,6 +383,9 @@ const modeSegment: StatusLineSegment = {
 			const parts = [withIcon(icon, `Loop ${statusValue(ctx, loop.state)}`)];
 			const limit = formatLoopLimit(loop.limit, ctx.now?.getTime());
 			if (limit) parts.push(statusValue(ctx, limit));
+			if (loop.condition) {
+				parts.push(statusValue(ctx, summarizeLoopCondition(loop.condition, TRUNCATE_LENGTHS.SHORT)));
+			}
 			return { content: theme.fg(color, parts.join(" ")), visible: true };
 		}
 
@@ -771,6 +777,53 @@ const collabSegment: StatusLineSegment = {
 	},
 };
 
+/**
+ * Vim modal state, in the shape Vim itself uses: the mode, the half-typed command echoed beside it
+ * (`showcmd`), and the Visual selection size. Hidden entirely when `tui.vimMode` is off, so it
+ * costs nothing for everyone else. `tui.vimModeDisplay` picks the mode's presentation.
+ */
+const VIM_MODE_LABELS: Record<NonNullable<SegmentContext["vim"]>["mode"], string> = {
+	insert: "INSERT",
+	normal: "NORMAL",
+	visual: "VISUAL",
+	"visual-line": "V-LINE",
+};
+
+/**
+ * The `icon` display resolves through the theme's symbol map, so each mode picks up the active
+ * symbol preset (nerd / unicode / ascii) and honours per-theme `symbols` overrides — same mechanism
+ * as every other status-line icon. Glyph choices live in `SYMBOL_PRESETS`.
+ */
+const VIM_MODE_ICON_KEYS: Record<NonNullable<SegmentContext["vim"]>["mode"], SymbolKey> = {
+	insert: "icon.vimInsert",
+	normal: "icon.vimNormal",
+	visual: "icon.vimVisual",
+	"visual-line": "icon.vimVisualLine",
+};
+
+const VIM_MODE_COLORS: Record<NonNullable<SegmentContext["vim"]>["mode"], ThemeColor> = {
+	insert: "success",
+	normal: "accent",
+	visual: "warning",
+	"visual-line": "warning",
+};
+
+const vimSegment: StatusLineSegment = {
+	id: "vim",
+	render(ctx) {
+		const vim = ctx.vim;
+		if (!vim || vim.display === "none") return { content: "", visible: false };
+		let label = vim.display === "icon" ? theme.symbol(VIM_MODE_ICON_KEYS[vim.mode]) : VIM_MODE_LABELS[vim.mode];
+		// The selection height rides along in both presentations — it is the one part of the
+		// indicator with no other on-screen source.
+		if (vim.selectedLines > 1) label += ` ${vim.selectedLines}L`;
+		const content = theme.fg(VIM_MODE_COLORS[vim.mode], label);
+		// Pending echoes to the right of the mode, dimmed, exactly like Vim's showcmd.
+		const pending = vim.pending ? theme.fg("muted", ` ${vim.pending}`) : "";
+		return { content: `${content}${pending}`, visible: true };
+	},
+};
+
 function pickUsageColor(percent: number): "muted" | "warning" | "error" {
 	if (percent >= 80) return "error";
 	if (percent >= 50) return "warning";
@@ -892,6 +945,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	session_name: sessionNameSegment,
 	usage: usageSegment,
 	collab: collabSegment,
+	vim: vimSegment,
 };
 
 export function renderSegment(id: StatusLineSegmentId, ctx: SegmentContext): RenderedSegment {

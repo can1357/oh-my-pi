@@ -395,22 +395,6 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
 // Cut point detection
 // ============================================================================
 
-function estimateEntriesTokens(
-	entries: SessionEntry[],
-	tokenizer: Tokenizer,
-	startIndex: number,
-	endIndex: number,
-): number {
-	let total = 0;
-	for (let i = startIndex; i < endIndex; i++) {
-		const msg = getMessageFromEntry(entries[i]);
-		if (msg) {
-			total += tokenizer.countMessage(msg);
-		}
-	}
-	return total;
-}
-
 /**
  * Find valid cut points: indices of user, assistant, custom, or bashExecution messages.
  * Never cut at tool results (they must follow their tool call).
@@ -1331,16 +1315,10 @@ export function prepareCompaction(
 
 	let prevCompactionIndex = findReadableCompactionIndex(pathEntries, settings, activeModel);
 
-	// Honor the latest `/clear` reset boundary. `/clear` records a
-	// `reset_boundary` marker and reports the model context empty, so compaction
-	// must not resurrect the dropped pre-clear turns into its summary — matching
-	// how buildSessionContext starts the model-context rebuild after the boundary.
-	// A boundary after the last reusable compaction supersedes it: the pre-reset
-	// summary was cleared too, so drop the previous-compaction reuse and start
-	// fresh after the boundary. A boundary at or before that compaction is already
-	// superseded by it, so only scan newer entries.
+	// A reset after the reusable compaction clears its summary too. An older
+	// reset still bounds how far we may recover that compaction's kept messages.
 	let resetBoundaryIndex = -1;
-	for (let i = pathEntries.length - 1; i > prevCompactionIndex; i--) {
+	for (let i = pathEntries.length - 1; i >= 0; i--) {
 		if (pathEntries[i].type === "reset_boundary") {
 			resetBoundaryIndex = i;
 			break;
@@ -1349,14 +1327,43 @@ export function prepareCompaction(
 	if (resetBoundaryIndex > prevCompactionIndex) {
 		prevCompactionIndex = -1;
 	}
-	const boundaryStart = Math.max(prevCompactionIndex, resetBoundaryIndex) + 1;
-	const boundaryEnd = pathEntries.length;
+	const previousCompaction =
+		prevCompactionIndex >= 0 ? (pathEntries[prevCompactionIndex] as CompactionEntry) : undefined;
+	let boundaryStart = Math.max(prevCompactionIndex, resetBoundaryIndex) + 1;
+	if (
+		previousCompaction &&
+		!getCompactionV2PreserveData(previousCompaction.preserveData) &&
+		!getPreservedOpenAiRemoteCompactionData(previousCompaction.preserveData)
+	) {
+		// Local summaries exclude the retained tail, whose original entries precede
+		// the compaction record. Native replay already carries that tail. Only look
+		// backwards: advisor snapshots put all retained messages after the summary
+		// and may carry a keep ID from their previous, differently indexed snapshot.
+		for (let i = resetBoundaryIndex + 1; i < prevCompactionIndex; i++) {
+			if (pathEntries[i].id === previousCompaction.firstKeptEntryId) {
+				boundaryStart = i;
+				break;
+			}
+		}
+	}
+
+	// Keep original IDs beside the converted messages so estimation, cutting,
+	// and all three output regions share one sequence without journal metadata.
+	const compactionEntries: SessionEntry[] = [];
+	const compactionMessages: AgentMessage[] = [];
+	for (let i = boundaryStart; i < pathEntries.length; i++) {
+		const entry = pathEntries[i];
+		const message = getMessageFromEntry(entry);
+		if (!message) continue;
+		compactionEntries.push(entry);
+		compactionMessages.push(message);
+	}
 
 	const lastUsage = getLastAssistantUsage(pathEntries);
 	const tokensBefore = lastUsage ? calculateContextTokens(lastUsage) : 0;
 	let keepRecentTokens = settings.keepRecentTokens;
 	if (lastUsage) {
-		const estimatedTokens = estimateEntriesTokens(pathEntries, tokenizer, boundaryStart, boundaryEnd);
+		const estimatedTokens = tokenizer.countMessages(compactionMessages);
 		const promptTokens = calculatePromptTokens(lastUsage);
 		const ratio = estimatedTokens > 0 ? promptTokens / estimatedTokens : 0;
 		if (Number.isFinite(ratio) && ratio > 1) {
@@ -1364,10 +1371,10 @@ export function prepareCompaction(
 		}
 	}
 
-	const cutPoint = findCutPoint(pathEntries, tokenizer, boundaryStart, boundaryEnd, keepRecentTokens);
+	const cutPoint = findCutPoint(compactionEntries, tokenizer, 0, compactionEntries.length, keepRecentTokens);
 
 	// Get ID of first kept entry
-	const firstKeptEntry = pathEntries[cutPoint.firstKeptEntryIndex];
+	const firstKeptEntry = compactionEntries[cutPoint.firstKeptEntryIndex];
 	if (!firstKeptEntry?.id) {
 		return undefined; // Session needs migration
 	}
@@ -1375,40 +1382,14 @@ export function prepareCompaction(
 
 	const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
 
-	// Messages to summarize (will be discarded after summary)
-	const messagesToSummarize: AgentMessage[] = [];
-	for (let i = boundaryStart; i < historyEnd; i++) {
-		const msg = getMessageFromEntry(pathEntries[i]);
-		if (msg) messagesToSummarize.push(msg);
-	}
-
-	// Messages for turn prefix summary (if splitting a turn)
-	const turnPrefixMessages: AgentMessage[] = [];
-	if (cutPoint.isSplitTurn) {
-		for (let i = cutPoint.turnStartIndex; i < cutPoint.firstKeptEntryIndex; i++) {
-			const msg = getMessageFromEntry(pathEntries[i]);
-			if (msg) turnPrefixMessages.push(msg);
-		}
-	}
-
-	// Messages kept after compaction (recent history)
-	const recentMessages: AgentMessage[] = [];
-	for (let i = cutPoint.firstKeptEntryIndex; i < boundaryEnd; i++) {
-		const msg = getMessageFromEntry(pathEntries[i]);
-		if (msg) recentMessages.push(msg);
-	}
+	const messagesToSummarize = compactionMessages.slice(0, historyEnd);
+	const turnPrefixMessages = cutPoint.isSplitTurn
+		? compactionMessages.slice(cutPoint.turnStartIndex, cutPoint.firstKeptEntryIndex)
+		: [];
+	const recentMessages = compactionMessages.slice(cutPoint.firstKeptEntryIndex);
 	// Nothing to summarize means compaction would be a no-op.
 	if (messagesToSummarize.length === 0 && turnPrefixMessages.length === 0) {
 		return undefined;
-	}
-
-	// Get previous summary and preserved data for iterative updates
-	let previousSummary: string | undefined;
-	let previousPreserveData: Record<string, unknown> | undefined;
-	if (prevCompactionIndex >= 0) {
-		const prevCompaction = pathEntries[prevCompactionIndex] as CompactionEntry;
-		previousSummary = prevCompaction.summary;
-		previousPreserveData = prevCompaction.preserveData;
 	}
 
 	// Extract file operations from messages and previous compaction
@@ -1428,8 +1409,8 @@ export function prepareCompaction(
 		recentMessages,
 		isSplitTurn: cutPoint.isSplitTurn,
 		tokensBefore,
-		previousSummary,
-		previousPreserveData,
+		previousSummary: previousCompaction?.summary,
+		previousPreserveData: previousCompaction?.preserveData,
 		fileOps,
 		settings,
 	};

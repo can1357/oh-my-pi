@@ -548,13 +548,15 @@ export class ExtensionList implements Component {
 	}
 
 	handleInput(data: string): void {
-		// Navigation
-		if (matchesSelectUp(data) || matchesKey(data, "k")) {
+		// Navigation (arrow keys / configurable tui.select.up/down). Bare j/k are
+		// intentionally NOT navigation here: the search filter is always active, so
+		// those letters must reach the query (e.g. searching for "jira"/"json").
+		if (matchesSelectUp(data)) {
 			this.#moveSelectionUp();
 			return;
 		}
 
-		if (matchesSelectDown(data) || matchesKey(data, "j")) {
+		if (matchesSelectDown(data)) {
 			this.#moveSelectionDown();
 			return;
 		}

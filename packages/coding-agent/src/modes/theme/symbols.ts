@@ -125,6 +125,11 @@ export type SymbolKey =
 	| "icon.extensionPrompt"
 	| "icon.extensionContextFile"
 	| "icon.extensionInstruction"
+	// Vim modes
+	| "icon.vimNormal"
+	| "icon.vimInsert"
+	| "icon.vimVisual"
+	| "icon.vimVisualLine"
 	// Slash-command type indicators (autocomplete); names without an existing
 	// icon.* equivalent — see SlashCommandIconName for the full vocabulary.
 	| "cmd.action"
@@ -478,6 +483,13 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.extensionPrompt": "✎",
 	"icon.extensionContextFile": "📎",
 	"icon.extensionInstruction": "📘",
+	// Vim modes — shape-distinct so Normal and Visual stay legible even when the
+	// theme's accent and warning colours sit in the same hue family. Insert and
+	// Normal echo the cursor each mode draws (a bar and a block).
+	"icon.vimNormal": "■",
+	"icon.vimInsert": "▎",
+	"icon.vimVisual": "◉",
+	"icon.vimVisualLine": "≡",
 	// Slash-command type indicators
 	"cmd.action": "❯",
 	"cmd.prompt": "✎",
@@ -854,6 +866,19 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.extensionContextFile": "\uf0f6",
 	// pick:  | alt:  
 	"icon.extensionInstruction": "\uf02d",
+	// Vim modes — fa-square / fa-pencil / fa-eye / fa-bars. Normal takes the filled
+	// block its cursor draws; Insert the pencil, Visual the eye, V-Line the stacked rules.
+	// Nerd Fonts scale the tall-and-narrow FA glyphs (fa-i-cursor, fa-caret-*) to the full
+	// ascender-to-descender box, so terminals with a tighter row shave their serifs (#3299);
+	// every glyph here stays inside the same normalised box the other icons use.
+	// pick:  (nf-fa-square) | alt:  (nf-fa-square_o)
+	"icon.vimNormal": "\uf0c8",
+	// pick:  (nf-fa-pencil) | alt:  (nf-fa-i_cursor, clipped by short rows)
+	"icon.vimInsert": "\uf040",
+	// pick:  (nf-fa-eye) | alt:  (nf-fa-dot_circle)
+	"icon.vimVisual": "\uf06e",
+	// pick:  (nf-fa-bars) | alt:  (nf-fa-align_left)
+	"icon.vimVisualLine": "\uf0c9",
 	// Slash-command type indicators
 	// pick:  (nf-cod-terminal) | alt:  (nf-fa-terminal)
 	"cmd.action": "\uea85",
@@ -1186,6 +1211,11 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.extensionPrompt": "PR",
 	"icon.extensionContextFile": "CF",
 	"icon.extensionInstruction": "IN",
+	// Vim modes
+	"icon.vimNormal": "N",
+	"icon.vimInsert": "I",
+	"icon.vimVisual": "V",
+	"icon.vimVisualLine": "L",
 	// Slash-command type indicators — unused; the icon column is disabled in ASCII mode
 	"cmd.action": "",
 	"cmd.prompt": "",
