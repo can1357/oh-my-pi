@@ -409,6 +409,40 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		expect(continueSpy).not.toHaveBeenCalled();
 	});
 
+	it("still blocks a payload-only 413 with no context window when the only configured method can't run for overflow (#11482)", async () => {
+		// `handoff` explicitly refuses reason === "overflow" (session-maintenance.ts
+		// `isCompactionMethodUsable`). A methodOrder of just `["handoff"]` must not
+		// be treated as "compaction available" for this dead end — otherwise
+		// `runAutoCompaction` finds no usable method, silently no-ops, and neither
+		// the payload notice nor the automatic-continuation block ever fires.
+		await createSession(null, undefined, { extraSettings: { "compaction.methodOrder": ["handoff"] } });
+		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const endCount = countCompactionEvents("auto_compaction_end");
+
+		const assistantMsg = payloadRejectionAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(endCount()).toBe(0);
+		expect(prepareSpy).not.toHaveBeenCalled();
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
+		const checkResults = await Promise.all(
+			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
+		);
+		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
 	it("reports a usage-backed payload-shaped dead end as a token-context problem", async () => {
 		await createSession(200_000, undefined, { extraSettings: { "compaction.enabled": false } });
 		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");

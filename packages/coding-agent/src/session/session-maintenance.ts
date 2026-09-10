@@ -137,6 +137,44 @@ function hasConfiguredCompactionMethod(settings: ConfiguredCompactionSettings): 
 }
 
 /**
+ * Whether `candidate` is actually selectable for `reason` on `model` — mirrors the
+ * per-candidate availability check in {@link SessionMaintenance.runAutoCompaction}'s
+ * method-order loop so every caller agrees with what would really be selected.
+ */
+function isCompactionMethodUsable(
+	candidate: CompactionMethod,
+	reason: "overflow" | "threshold" | "idle" | "incomplete",
+	model: Model | undefined,
+	settings: ConfiguredCompactionSettings,
+): boolean {
+	return candidate === "remote"
+		? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))
+		: candidate === "snapcompact"
+			? model?.input.includes("image") === true
+			: candidate === "handoff"
+				? reason !== "overflow"
+				: true;
+}
+
+/**
+ * Whether the configured method order contains at least one method that
+ * `runAutoCompaction` would actually select for `reason` on `model` — a non-empty
+ * `methodOrder` alone (see {@link hasConfiguredCompactionMethod}) is not enough: an
+ * unusable-for-this-reason configuration (e.g. `methodOrder: ["handoff"]` for an
+ * `"overflow"` reason, or `snapcompact`-only on a text-only model) would otherwise be
+ * reported as available and then silently no-op in `runAutoCompaction` (#11482).
+ */
+function hasUsableCompactionMethod(
+	reason: "overflow" | "threshold" | "idle" | "incomplete",
+	model: Model | undefined,
+	settings: ConfiguredCompactionSettings,
+): boolean {
+	return resolveCompactionMethodOrder(settings.methodOrder).some(candidate =>
+		isCompactionMethodUsable(candidate, reason, model, settings),
+	);
+}
+
+/**
  * User-facing notice for a compaction dead end: maintenance freed too little
  * to retry safely. `remedies` names the recovery actions left on the emitting
  * path — by the time the post-pass dead end fires, the tiered rescue has
@@ -2262,12 +2300,18 @@ export class SessionMaintenance {
 		// Whether a compaction method actually exists to attempt shrinking the
 		// history. Computed up front so the unknown-context-window branch below
 		// can fall through to a real attempt instead of always assuming defeat.
+		// Uses the same reason/model-specific selection as `runAutoCompaction`
+		// (not just a non-empty `methodOrder`) so an unusable-for-overflow
+		// configuration — e.g. `methodOrder: ["handoff"]`, or `snapcompact`-only
+		// on a text-only model — isn't reported as available and then silently
+		// no-ops instead of surfacing the payload-rejection notice (#11482).
 		// (Named distinctly from the `compactionSettings` used further down in
 		// this function's later, unrelated threshold check.)
 		const payloadCompactionSettings = this.#host.settings.getGroup("compaction");
 		const compactionAvailable =
 			payloadCompactionSettings.enabled &&
-			(this.#usesExperimentalContextManagement() || hasConfiguredCompactionMethod(payloadCompactionSettings));
+			(this.#usesExperimentalContextManagement() ||
+				hasUsableCompactionMethod("overflow", this.#model, payloadCompactionSettings));
 		// Unknown context window (common for custom/self-hosted models the
 		// registry has no metadata for) used to be treated the same as a
 		// confirmed media/byte-budget rejection and blocked outright — even
@@ -3473,15 +3517,7 @@ export class SessionMaintenance {
 		let method: CompactionMethod | undefined;
 		for (let index = startIndex; index < methods.length; index++) {
 			const candidate = methods[index];
-			const available =
-				candidate === "remote"
-					? canUseRemoteCompaction(this.#model, resolveMethodSettings(compactionSettings, candidate))
-					: candidate === "snapcompact"
-						? this.#model?.input.includes("image") === true
-						: candidate === "handoff"
-							? reason !== "overflow"
-							: true;
-			if (!available) continue;
+			if (!isCompactionMethodUsable(candidate, reason, this.#model, compactionSettings)) continue;
 			method = candidate;
 			methodIndex = index;
 			break;
