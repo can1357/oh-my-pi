@@ -40,8 +40,8 @@ describe("Cursor requestedModel wire shape", () => {
 		const payload = await capture(cursorModel("gpt-5.4-mini-low"));
 		expect(payload.requestedModel?.modelId).toBe("gpt-5.4-mini");
 		expect(payload.requestedModel?.parameters).toEqual([expect.objectContaining({ id: "reasoning", value: "low" })]);
-		// modelDetails is still read server-side, so it must carry the base id too.
-		expect(payload.modelDetails?.modelId).toBe("gpt-5.4-mini");
+		// Cursor still validates the legacy model_details field independently.
+		expect(payload.modelDetails?.modelId).toBe("gpt-5.4-mini-low");
 	});
 
 	it("handles multi-segment GPT bases and the xhigh tier", async () => {
@@ -64,14 +64,15 @@ describe("Cursor requestedModel wire shape", () => {
 		const payload = await capture(cursorModel("gpt-5.6-sol-none"));
 		expect(payload.requestedModel?.modelId).toBe("gpt-5.6-sol");
 		expect(payload.requestedModel?.parameters).toEqual([]);
-		expect(payload.modelDetails?.modelId).toBe("gpt-5.6-sol");
+		// modelDetails keeps the account-usable sibling; the base goes out raw.
+		expect(payload.modelDetails?.modelId).toBe("gpt-5.6-sol-none");
 	});
 
 	it("normalizes a fast-lane off-tier sibling preserving the lane", async () => {
 		const payload = await capture(cursorModel("gpt-5.6-sol-none-fast"));
 		expect(payload.requestedModel?.modelId).toBe("gpt-5.6-sol-fast");
 		expect(payload.requestedModel?.parameters).toEqual([]);
-		expect(payload.modelDetails?.modelId).toBe("gpt-5.6-sol-fast");
+		expect(payload.modelDetails?.modelId).toBe("gpt-5.6-sol-none-fast");
 	});
 
 	it("leaves Cursor-native ids untouched with no parameters", async () => {
@@ -96,5 +97,27 @@ describe("Cursor requestedModel wire shape", () => {
 		const payload = await capture(cursorModel("claude-fable-5-low"));
 		expect(payload.requestedModel?.modelId).toBe("claude-fable-5-low");
 		expect(payload.requestedModel?.parameters).toEqual([]);
+	});
+
+	it("uses authoritative rich-catalog routes after variant collapse", async () => {
+		const model = cursorModel("cursor-rich-low");
+		model.cursorModelRoutes = {
+			"cursor-rich-low": {
+				modelId: "cursor-rich",
+				parameters: [
+					{ id: "reasoning", value: "low" },
+					{ id: "context", value: "long" },
+				],
+				maxMode: true,
+			},
+		};
+		const payload = await capture(model);
+		expect(payload.requestedModel?.modelId).toBe("cursor-rich");
+		expect(payload.requestedModel?.parameters).toEqual([
+			expect.objectContaining({ id: "reasoning", value: "low" }),
+			expect.objectContaining({ id: "context", value: "long" }),
+		]);
+		expect(payload.requestedModel?.maxMode).toBe(true);
+		expect(payload.modelDetails?.modelId).toBe("cursor-rich-low");
 	});
 });

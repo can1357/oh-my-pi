@@ -7,6 +7,7 @@ import {
 	handleServerMessage,
 	processInteractionUpdate,
 	type ToolCallState,
+	type UsageState,
 } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { AssistantMessage, CursorExecHandlers, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { kCursorExecResolved, setStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -50,6 +51,7 @@ import {
 	PiEditExecArgsSchema,
 	PiEditReplacementSchema,
 	PiFindExecArgsSchema,
+	InteractionUpdateSchema,
 	PiGrepExecArgsSchema,
 	PiLsExecArgsSchema,
 	PiReadExecArgsSchema,
@@ -65,6 +67,7 @@ import {
 	SubagentArgsSchema,
 	SubagentAwaitArgsSchema,
 	ToolCallSchema,
+	TurnEndedUpdateSchema,
 	WebFetchAllowlistPrecheckArgsSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
@@ -208,7 +211,41 @@ function soleResult(frames: AgentClientMessage[]) {
 
 describe("Cursor modern exec protocol activation", () => {
 	it("advertises the client build whose schema includes modern exec frames", () => {
-		expect(CURSOR_CLIENT_VERSION).toBe("cli-2026.07.23-e383d2b");
+		expect(CURSOR_CLIENT_VERSION).toBe("cli-2026.09.02-c22c1a3");
+	});
+
+	it("uses TurnEnded totals as the authoritative usage snapshot", () => {
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const usageState: UsageState = { sawTokenDelta: true };
+		processInteractionUpdate(
+			create(InteractionUpdateSchema, {
+				message: {
+					case: "turnEnded",
+					value: create(TurnEndedUpdateSchema, {
+						inputTokens: 11n,
+						outputTokens: 7n,
+						cachedInputTokens: 5n,
+						cacheWriteTokens: 3n,
+						reasoningOutputTokens: 2n,
+					}),
+				},
+			}),
+			output,
+			stream,
+			newBlockState(),
+			usageState,
+		);
+
+		expect(output.usage).toMatchObject({
+			input: 11,
+			output: 7,
+			cacheRead: 5,
+			cacheWrite: 3,
+			reasoningTokens: 2,
+			totalTokens: 26,
+		});
+		expect(usageState.sawAuthoritativeUsage).toBe(true);
 	});
 });
 

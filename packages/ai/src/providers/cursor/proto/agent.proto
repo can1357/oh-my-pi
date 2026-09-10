@@ -836,6 +836,11 @@ message ShellOutputDeltaUpdate {
 }
 
 message TurnEndedUpdate {
+   optional int64 input_tokens = 1;
+   optional int64 output_tokens = 2;
+   optional int64 cached_input_tokens = 3;
+   optional int64 cache_write_tokens = 4;
+   optional int64 reasoning_output_tokens = 5;
 }
 
 // Only: user message appended update
