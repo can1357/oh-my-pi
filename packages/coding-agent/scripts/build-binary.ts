@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import * as fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { compileCodingAgent } from "./compile-binary";
@@ -91,11 +92,15 @@ async function main(): Promise<void> {
 			["bun", "--cwd=../natives", "run", "gen:native"],
 			crossBuild ? { ...Bun.env, TARGET_PLATFORM: crossBuild.platform, TARGET_ARCH: crossBuild.arch } : Bun.env,
 		);
+		// Compile and sign a sibling, then rename it over the target. The output
+		// path is never absent or partial, so a running session's update monitor
+		// sees one atomic replacement instead of a missing executable.
+		const stagePath = `${outputPath}.tmp`;
 		try {
 			await compileCodingAgent({
 				repoRoot,
 				entrypoint: path.join(packageDir, "src", "cli.ts"),
-				outfile: outputPath,
+				outfile: stagePath,
 				transformersVersion,
 				target: crossBuild?.target,
 				executablePath: Bun.env.BUN_COMPILE_EXECUTABLE_PATH || undefined,
@@ -103,8 +108,12 @@ async function main(): Promise<void> {
 			});
 
 			if (shouldAdhocSign) {
-				await runCommand(["codesign", "--force", "--sign", "-", outputPath]);
+				await runCommand(["codesign", "--force", "--sign", "-", stagePath]);
 			}
+			await fs.rename(stagePath, outputPath);
+		} catch (error) {
+			await fs.rm(stagePath, { force: true });
+			throw error;
 		} finally {
 			await runCommand(["bun", "--cwd=../natives", "run", "gen:native:reset"]);
 		}
