@@ -14590,6 +14590,130 @@
 				]
 			}
 		],
+		"gatewaySurfaces": [
+			{
+				"name": "openai-chat",
+				"allow": [
+					{
+						"any": false,
+						"match": {
+							"substring": [
+								"openai-completions"
+							]
+						},
+						"exclude": {
+							"substring": []
+						}
+					},
+					{
+						"any": false,
+						"match": {
+							"substring": [
+								"openai-chat"
+							]
+						},
+						"exclude": {
+							"substring": []
+						}
+					},
+					{
+						"any": false,
+						"match": {
+							"substring": [
+								"openai-compatible"
+							]
+						},
+						"exclude": {
+							"substring": []
+						}
+					},
+					{
+						"any": false,
+						"match": {
+							"substring": [
+								"grok"
+							]
+						},
+						"exclude": {
+							"substring": [
+								"responses"
+							]
+						}
+					}
+				]
+			},
+			{
+				"name": "openai-responses",
+				"allow": [
+					{
+						"any": false,
+						"match": {
+							"substring": [
+								"responses"
+							]
+						},
+						"exclude": {
+							"substring": []
+						}
+					}
+				]
+			},
+			{
+				"name": "anthropic-messages",
+				"allow": [
+					{
+						"any": false,
+						"match": {
+							"substring": [
+								"anthropic"
+							]
+						},
+						"exclude": {
+							"substring": []
+						}
+					}
+				]
+			},
+			{
+				"name": "gemini-v1beta",
+				"allow": [
+					{
+						"any": false,
+						"match": {
+							"substring": [
+								"google-generative-ai"
+							]
+						},
+						"exclude": {
+							"substring": []
+						}
+					},
+					{
+						"any": false,
+						"match": {
+							"substring": [
+								"google-vertex"
+							]
+						},
+						"exclude": {
+							"substring": []
+						}
+					}
+				]
+			},
+			{
+				"name": "pi-native",
+				"allow": [
+					{
+						"any": true,
+						"match": {},
+						"exclude": {
+							"substring": []
+						}
+					}
+				]
+			}
+		],
 		"modelLimits": [
 			{
 				"provider": "github-copilot",

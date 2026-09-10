@@ -439,7 +439,9 @@ function dispatchTargetId(
 	compiled: CompiledRoute,
 	state: ExecutionState,
 	commitState: StreamCommitState,
+	initialTarget: string,
 ): string | undefined {
+	if (state.attemptedTargets.size === 0 && commitState === "probing" && !state.committed) return initialTarget;
 	const action = decideAttempt({ route: compiled, state, commitState });
 	return action.type === "dispatch" ? action.targetModelId : undefined;
 }
@@ -673,7 +675,11 @@ function targetSkipReason(
 			(compiled.portability.scope === "account" || compiled.portability.scope === "deployment");
 		if (
 			!needsIdentity &&
-			!candidateAllowed(compiled.portability, { id: targetId, provider: model.provider }, compiled.affinity ?? "preferred")
+			!candidateAllowed(
+				compiled.portability,
+				{ id: targetId, provider: model.provider },
+				compiled.affinity ?? "preferred",
+			)
 		) {
 			return "state_incompatible";
 		}
@@ -911,7 +917,7 @@ async function handleFormatEndpoint(
 				targetId = pendingFallback;
 				pendingFallback = undefined;
 			} else {
-				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
+				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state, currentTarget);
 			}
 			if (targetId === undefined) {
 				if (lastClassified) return classifiedError(lastClassified);
@@ -1023,7 +1029,7 @@ async function handleFormatEndpoint(
 		if (
 			!candidateAllowed(
 				compiled.portability,
-				{ id: currentTarget, provider: model.provider, accountId: identity?.accountId },
+				{ id: currentTarget, provider: model.provider, accountId: identity?.accountId, deployment: model.baseUrl },
 				compiled.affinity ?? "preferred",
 			)
 		) {
@@ -1430,7 +1436,7 @@ async function handlePiNative(
 				targetId = pendingFallback;
 				pendingFallback = undefined;
 			} else {
-				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
+				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state, currentTarget);
 			}
 			if (targetId === undefined) {
 				if (lastClassified) return classifiedError(lastClassified);
@@ -1542,7 +1548,7 @@ async function handlePiNative(
 		if (
 			!candidateAllowed(
 				compiled.portability,
-				{ id: currentTarget, provider: model.provider, accountId: identity?.accountId },
+				{ id: currentTarget, provider: model.provider, accountId: identity?.accountId, deployment: model.baseUrl },
 				compiled.affinity ?? "preferred",
 			)
 		) {
@@ -2114,7 +2120,14 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 							},
 						};
 						return withCors(
-							await handleFormatEndpoint({ module, label: "gemini-v1beta" }, boot, req, peer, health, cacheStore),
+							await handleFormatEndpoint(
+								{ module, label: "gemini-v1beta" },
+								boot,
+								req,
+								peer,
+								health,
+								cacheStore,
+							),
 							req,
 						);
 					}

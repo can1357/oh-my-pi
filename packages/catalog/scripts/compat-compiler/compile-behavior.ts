@@ -11,6 +11,7 @@ import type {
 	CompiledApiRoutes,
 	CompiledBehavior,
 	CompiledExcludeModels,
+	CompiledGatewaySurface,
 	CompiledMatchList,
 	CompiledModelLimits,
 	CompiledModelOperations,
@@ -79,6 +80,30 @@ function matchListFromProps(node: KdlNodeView, skip: readonly string[]): Compile
 		}
 	}
 	return match;
+}
+
+function parseGatewaySurface(node: KdlNodeView): CompiledGatewaySurface {
+	const children = ensureContainer(node, ["name"]);
+	const name = requiredProp(node, "name");
+	if (!name || children.length === 0) malformed(node);
+	return {
+		name,
+		allow: children.map(child => {
+			if (child.name !== "allow") unexpected(child, "gateway-surface");
+			ensureLeaf(child, ["any", "exact", "prefix", "substring", "token", "glob", "exclude-substring"]);
+			if (child.args.length > 0) malformed(child);
+			const any = propBool(child, "any") ?? false;
+			const match = matchListFromProps(child, ["any", "exclude-substring"]);
+			if (!any && !hasMatchers(match)) malformed(child);
+			const excluded = child.props
+				.filter(prop => prop.name === "exclude-substring")
+				.map(prop => {
+					if (typeof prop.value !== "string" || !prop.value) malformed(child);
+					return prop.value;
+				});
+			return { any, match, exclude: { substring: excluded } };
+		}),
+	};
 }
 
 function hasMatchers(match: CompiledMatchList): boolean {
@@ -274,6 +299,7 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 		quotaTiers: [],
 		hostedDefaults: [],
 		apiRoutes: [],
+		gatewaySurfaces: [],
 		modelLimits: [],
 		excludeModels: [],
 		retiredProviders: [],
@@ -327,6 +353,12 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 				const model = requiredProp(node, "model");
 				if (!provider || !model || node.args.length > 0) malformed(node);
 				behavior.hostedDefaults.push({ provider, model });
+				break;
+			}
+			case "gateway-surface": {
+				const surface = parseGatewaySurface(node);
+				if (behavior.gatewaySurfaces!.some(existing => existing.name === surface.name)) malformed(node);
+				behavior.gatewaySurfaces!.push(surface);
 				break;
 			}
 			case "api-routes":

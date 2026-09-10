@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed weighted target dispatch, deployment affinity, tool capability checks, and concurrent API-key reservations.
+
 - Fixed auth-gateway SSE streams leaking turn reservations when `reader.read()` rejects.
 - Fixed `/v1/messages/count_tokens` resolving only concrete catalog models; virtual routes are registry-aware.
 - Fixed Anthropic count-tokens accepting missing/non-array `messages` and ignoring `system`/`tools` in the estimate.

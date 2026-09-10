@@ -205,3 +205,14 @@ export function pricingPeerFor(
 	const alias = rule.aliases.find(candidate => candidate.model === model);
 	return { peers: rule.peers, peerId: alias?.peerId ?? model };
 }
+
+/** Gateway protocol eligibility is owned by runtime KDL rules. */
+export function gatewaySurfaceAllowsApi(surface: string, api: string): boolean {
+	const rule = behavior.gatewaySurfaces?.find(candidate => candidate.name === surface);
+	const lower = api.toLowerCase();
+	return (
+		rule?.allow.some(
+			allow => (allow.any || matchesList(allow.match, api, lower)) && !matchesList(allow.exclude, api, lower),
+		) ?? false
+	);
+}

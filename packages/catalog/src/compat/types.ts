@@ -304,8 +304,14 @@ export interface CompiledPricingPeer {
 	aliases: { model: string; peerId: string }[];
 }
 
+export interface CompiledGatewaySurface {
+	name: string;
+	allow: { any: boolean; match: CompiledMatchList; exclude: CompiledMatchList }[];
+}
+
 /** Compiled runtime behavior vocabulary (`runtime/behavior.kdl`). */
 export interface CompiledBehavior {
+	gatewaySurfaces?: CompiledGatewaySurface[];
 	openaiResponsesHeuristic?: CompiledResponsesHeuristic;
 	modelOperations: CompiledModelOperations[];
 	cursorEffort?: CompiledCursorEffort;

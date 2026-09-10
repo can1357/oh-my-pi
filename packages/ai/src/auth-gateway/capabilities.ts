@@ -1,3 +1,4 @@
+import { surfaceAllowsApi } from "./route-surface";
 import type { Api, Model } from "../types";
 
 export interface ModelCapabilities {
@@ -58,12 +59,11 @@ export function capabilitiesFor(model: Model<Api>): ModelCapabilities {
 	return {
 		text: true,
 		vision: model.input.includes("image"),
-		tools: true,
-		parallelTools: true,
+		tools: model.supportsTools !== false,
+		parallelTools: model.supportsTools !== false,
 		reasoning: model.reasoning,
-		responsesApi:
-			model.api.includes("responses") || model.api === "openai-codex-responses" || model.api === "openai-responses",
-		messagesApi: model.api.includes("anthropic"),
+		responsesApi: surfaceAllowsApi("openai-responses", model.api),
+		messagesApi: surfaceAllowsApi("anthropic-messages", model.api),
 	};
 }
 

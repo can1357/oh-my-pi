@@ -138,7 +138,6 @@ export class RouteRegistry {
 	}
 }
 
-
 /**
  * Choose the first dispatch target for a compiled route. Weighted-balance
  * roots start on the highest-weight child; plain round-robin roots spread
@@ -193,7 +192,7 @@ function resolveRouteRefs(node: RouteNode, lookup: (id: string) => RouteNode | u
 			return copyNode(resolved);
 		}
 		case "target":
-			return { type: "target", model: node.model };
+			return { type: "target", model: node.model, ...(node.weight !== undefined ? { weight: node.weight } : {}) };
 		case "fallback":
 			return {
 				type: "fallback",
@@ -286,7 +285,7 @@ function compileFlatten(children: readonly RouteNode[], seenOnPath: ReadonlySet<
 function copyNode(node: RouteNode): RouteNode {
 	switch (node.type) {
 		case "target":
-			return { type: "target", model: node.model };
+			return { type: "target", model: node.model, ...(node.weight !== undefined ? { weight: node.weight } : {}) };
 		case "fallback":
 			return {
 				type: "fallback",

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Gateway surface API eligibility now comes from compiled runtime KDL policy, preserving custom identifiers and explicit exclusions.
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed
