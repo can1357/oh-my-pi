@@ -53,6 +53,30 @@ Resolution per tool call:
 
 Policy strings are trimmed and case-normalized. Invalid user values are ignored.
 
+### Tool granularity vs command granularity
+
+`tools.approval.<tool>` decides whether a tool may run at all. It cannot distinguish `git status` from `git push --force` on its own — with no `bash.patterns` rules configured, `bash: prompt` asks about every command line.
+
+For per-command policy, use `bash.patterns` — an ordered list of `match` globs, each with an `approval` of `allow`, `prompt`, or `deny`. A matching `allow`/`prompt` rule's outcome is used instead of the tool-level policy in every mode, not only `yolo`, so it can auto-approve routine commands while still prompting or refusing on the rest — including overriding a stricter `tools.approval.bash: prompt`. That holds for every command except one that also matches a built-in critical pattern: `BashTool.approval()` returns the critical [safety override](#safety-overrides) *before* it reads any matching `allow`/`prompt` rule, and that override carries no command-level policy, so in `yolo` the tool-level policy decides instead. A `shutdown *: prompt` rule is therefore not sufficient by itself to force a prompt on a critical command under `yolo`: if `tools.approval.bash` is also `allow`, the override carries nothing for `resolveApproval()` to read and the tool-level `allow` decides, so the command runs unattended despite the matching `bash.patterns` rule. Run a non-`yolo` `tools.approvalMode`, or set `tools.approval.bash: prompt`/`deny`, to make the override itself stop the command.
+
+`bash.patterns` on its own only decides commands it matches; anything else falls through to the tool-level policy, which defaults to auto-approve in `yolo`. Pair it with `tools.approval.bash: prompt` to make the fallback itself prompt instead of running unattended:
+
+```yaml
+tools:
+  approval:
+    bash: prompt
+bash:
+  patterns:
+    - match: "rm -rf *"
+      approval: deny
+    - match: "curl *"
+      approval: prompt
+    - match: "git status"
+      approval: allow
+```
+
+See [`bash.patterns`: permission policy](./tools/bash.md#bashpatterns-permission-policy) for the matching rules and [Preset policies](./tools/bash.md#preset-policies) for ready-made rule sets.
+
 ## Safety overrides
 
 A tool can force a prompt with object-form approval:
