@@ -17,7 +17,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { kNoAuth, type ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -45,6 +48,7 @@ function createSession(
 		agentId?: string;
 		planMode?: boolean;
 		spawns?: string;
+		modelRegistry?: ModelRegistry;
 	} = {},
 ): ToolSession {
 	return {
@@ -56,7 +60,26 @@ function createSession(
 		getAgentId: () => options.agentId ?? null,
 		getPlanModeState: options.planMode ? () => ({ enabled: true }) : undefined,
 		asyncJobManager: options.manager,
+		modelRegistry: options.modelRegistry,
 	} as unknown as ToolSession;
+}
+
+function modelRegistryFor(selector: string): ModelRegistry {
+	return modelRegistryForSelectors([selector]);
+}
+
+function modelRegistryForSelectors(selectors: string[]): ModelRegistry {
+	const models = selectors.map(selector => {
+	const [provider, id] = selector.split("/", 2);
+	const model = provider && id ? getBundledModel(provider as Parameters<typeof getBundledModel>[0], id) : undefined;
+	if (!model) throw new Error(`Expected bundled model ${selector}`);
+	return model;
+	});
+	return {
+		getAvailable: () => models,
+		getAll: () => models,
+		getApiKey: async () => kNoAuth,
+	} as unknown as ModelRegistry;
 }
 
 function getSchemaProperties(tool: TaskTool): Record<string, unknown> {
@@ -137,6 +160,7 @@ describe("task.batch schema gating", () => {
 		expect(typeof itemProperties.outputSchema).toBe("object");
 		expect(itemProperties.schemaMode).toBeDefined();
 	});
+
 
 	it("hides effort by default and exposes it when task.enableEffort is enabled", async () => {
 		mockDiscovery();
@@ -238,6 +262,22 @@ describe("task.batch validation", () => {
 		expect(text).toContain("not part of the batch shape");
 	});
 
+	it("rejects a top-level model in the raw batch runtime shape", async () => {
+		const text = await executeText(
+			{ context: "Shared.", model: "provider/model", tasks: [{ task: "Other." }] },
+			{ "task.batch": true },
+		);
+		expect(text).toContain("Top-level `model` cannot be used with batch `tasks[]`");
+	});
+
+	it.each(["", "  ", [], ["provider/first", " "]])("rejects empty batch item model %j", async model => {
+		const text = await executeText(
+			{ context: "Shared.", tasks: [{ name: "Bad", task: "Work.", model }] },
+			{ "task.batch": true },
+		);
+		expect(text).toMatch(/model must be a non-empty|Requested model candidates provider\/first/);
+	});
+
 	it("rejects empty task arrays and items without tasks", async () => {
 		const empty = await executeText({ tasks: [] }, { "task.batch": true });
 		expect(empty).toContain("Missing `tasks`");
@@ -325,6 +365,20 @@ describe("task.batch validation", () => {
 		const toolResult = agent.state.messages.find(message => message.role === "toolResult");
 		expect(toolResult?.role === "toolResult" && toolResult.isError).toBe(false);
 	});
+
+	it("fails wire validation for a shared model and does not dispatch the batch", async () => {
+		mockDiscovery();
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+		const args = { context: "Shared.", model: "provider/model", tasks: [{ task: "Work." }] };
+		const toolCall = { type: "toolCall" as const, id: "wire-batch-model", name: "task", arguments: args };
+
+		expect(() => validateToolArguments(tool, toolCall)).toThrow();
+
+		const runSubprocess = vi.spyOn(executorModule, "runSubprocess");
+		const result = await tool.execute(toolCall.id, args);
+		expect(getFirstText(result)).toContain("Top-level `model` cannot be used with batch `tasks[]`");
+		expect(runSubprocess).not.toHaveBeenCalled();
+	});
 });
 
 describe("task.batch spawning", () => {
@@ -353,6 +407,7 @@ describe("task.batch spawning", () => {
 	it("spawns one background job per task item and forwards independent models and schemas with shared context", async () => {
 		mockDiscovery({
 			...taskAgent,
+			model: ["anthropic/claude-sonnet-4-6"],
 			output: { type: "object", properties: { staleAgentOutput: { type: "boolean" } } },
 		});
 		const seen: Array<{
@@ -383,7 +438,16 @@ describe("task.batch spawning", () => {
 
 		const manager = createManager();
 		const tool = await TaskTool.create(
-			createSession({ manager, agentId: "ParentA", settings: { "async.enabled": true, "task.batch": true } }),
+			createSession({
+				manager,
+				agentId: "ParentA",
+				modelRegistry: modelRegistryForSelectors([
+					"openai/gpt-4.1-mini",
+					"anthropic/claude-haiku-4-5",
+					"anthropic/claude-sonnet-4-6",
+				]),
+				settings: { "async.enabled": true, "task.batch": true, "task.agentModelOverrides": { task: "openai/gpt-4.1-mini" } },
+			}),
 		);
 		const alphaSchema = { type: "object", properties: { alpha: { type: "string" } } };
 		const betaSchema = { type: "object", properties: { beta: { type: "number" } } };
@@ -393,12 +457,14 @@ describe("task.batch spawning", () => {
 				{
 					name: "Alpha",
 					task: "Do A.",
+					model: "anthropic/claude-haiku-4-5",
 					outputSchema: alphaSchema,
 					schemaMode: "strict",
 				},
 				{
 					name: "Beta",
 					task: "Do B.",
+					model: ["anthropic/claude-sonnet-4-6", "anthropic/claude-haiku-4-5"],
 					outputSchema: betaSchema,
 					schemaMode: "permissive",
 				},
@@ -430,6 +496,11 @@ describe("task.batch spawning", () => {
 		expect(byId.get("Alpha")?.outputSchemaMode).toBe("strict");
 		expect(byId.get("Beta")?.outputSchema).toEqual(betaSchema);
 		expect(byId.get("Beta")?.outputSchemaMode).toBe("permissive");
+		expect(byId.get("Alpha")?.modelOverride).toEqual(["anthropic/claude-haiku-4-5"]);
+		expect(byId.get("Beta")?.modelOverride).toEqual([
+			"anthropic/claude-sonnet-4-6",
+			"anthropic/claude-haiku-4-5",
+		]);
 		expect(seen.map(spawn => spawn.assignment).sort()).toEqual(["Do A.", "Do B."]);
 		for (const spawn of seen) expect(spawn.parentAgentId).toBe("ParentA");
 	});
@@ -572,6 +643,7 @@ describe("task.batch spawning", () => {
 		const tool = await TaskTool.create(
 			createSession({
 				manager,
+				modelRegistry: modelRegistryFor("openai/gpt-4.1-mini"),
 				settings: {
 					"async.enabled": true,
 					"task.batch": true,
@@ -587,6 +659,7 @@ describe("task.batch spawning", () => {
 			task: "Do the thing.",
 			outputSchema: callerSchema,
 			schemaMode: "strict",
+			model: "openai/gpt-4.1-mini",
 		} as TaskParams);
 
 		expect(getFirstText(result)).toContain("Spawned agent `Flat`");
