@@ -26,6 +26,9 @@
 ### Fixed
 
 - `compact()` now forwards the caller's `oneshotRetry` opt-out to every summarization oneshot; auto-compaction's outer retry loop no longer multiplies with the inner transient-failure retries.
+### Added
+
+- Added `Agent.setQueuedMessageGrouping()` so hosts can deliver adjacent companion records and their prompt together in `one-at-a-time` queue modes ([#11618](https://github.com/can1357/oh-my-pi/pull/11618) by [@andrebrait](https://github.com/andrebrait)).
 
 ## [18.1.17] - 2026-09-10
 
