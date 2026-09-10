@@ -29,7 +29,17 @@ export interface SessionStorageBackend {
 	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>>;
 	readFull(path: string): Promise<string | null>;
 	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
-	writeFull(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void>;
+	/**
+	 * Replace content, atomically rejecting when the shared backend's current
+	 * UTF-8 byte length differs from `expectedSize`.
+	 */
+	writeFull(
+		path: string,
+		content: string,
+		mtimeMs: number,
+		title?: SessionTitleUpdate,
+		expectedSize?: number | null,
+	): Promise<void>;
 	append(path: string, line: string, mtimeMs: number): Promise<void>;
 	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void>;
 	truncate(path: string, mtimeMs: number): Promise<void>;
@@ -152,10 +162,18 @@ export class IndexedSessionStorage implements SessionStorage {
 
 	writeTextSync(path: string, content: string, options?: SessionStorageWriteOptions): void {
 		this.#assertExpectedSize(path, options?.expectedSize);
+		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
 		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
 		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
-		this.#enqueuePath(path, () => this.#backend.writeFull(path, content, mtimeMs, title), { trackDrain: true });
+		const write = this.#enqueuePath(
+			path,
+			() => this.#backend.writeFull(path, content, mtimeMs, title, options?.expectedSize),
+			{ trackDrain: true },
+		);
+		void write.catch(() => {
+			if (this.#index.get(path)?.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
+		});
 	}
 
 	async updateSessionTitle(path: string, title: SessionTitleUpdate): Promise<void> {
@@ -281,7 +299,7 @@ export class IndexedSessionStorage implements SessionStorage {
 						if (current?.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
 						return;
 					}
-					await this.#backend.writeFull(path, content, mtimeMs, title);
+					await this.#backend.writeFull(path, content, mtimeMs, title, options?.expectedSize);
 				},
 				{ trackDrain: false },
 			);
