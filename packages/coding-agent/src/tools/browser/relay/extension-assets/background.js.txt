@@ -1093,10 +1093,13 @@ chrome.tabs.onCreated.addListener((tab) => {
     post({ t: "tabCreated", tab: snap });
   }
 });
-chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
   const snap = snapshot(tab);
   if (snap) {
-    invalidateHelloMeta();
+    if (changeInfo.groupId !== undefined)
+      invalidateHelloRefresh();
+    else
+      invalidateHelloMeta();
     post({ t: "tabUpdated", tab: snap });
   }
 });

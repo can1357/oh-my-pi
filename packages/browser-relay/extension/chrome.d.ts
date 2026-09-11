@@ -27,6 +27,7 @@ interface ChromeTabChangeInfo {
 	url?: string;
 	title?: string;
 	status?: string;
+	groupId?: number;
 }
 
 /** Debuggee with the Chrome 125+ flat-session extension. */

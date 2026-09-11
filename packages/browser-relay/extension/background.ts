@@ -1437,7 +1437,7 @@ chrome.tabs.onCreated.addListener((tab) => {
 	}
 });
 
-chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
 	const snap = snapshot(tab);
 	if (snap) {
 		// An in-flight refresh whose snapshot predates this update carries stale
@@ -1450,7 +1450,11 @@ chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
 		// handshake, leaving the relay uninitialized until the orphan deadline
 		// detaches live sessions. Delivering the current hello and rebuilding keeps
 		// the loop bounded to one hello per settled build.
-		invalidateHelloMeta();
+		// Group membership is reconciliation state, not cosmetic metadata. A
+		// stale hello can otherwise overwrite the grouping RPC's result and make
+		// the bridge interpret its own group move as a permanent user opt-out.
+		if (changeInfo.groupId !== undefined) invalidateHelloRefresh();
+		else invalidateHelloMeta();
 		post({ t: "tabUpdated", tab: snap });
 	}
 });

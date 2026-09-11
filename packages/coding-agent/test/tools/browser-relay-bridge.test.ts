@@ -4986,6 +4986,87 @@ describe("RelayBridge tab grouping", () => {
 		});
 	});
 
+	it("retires a replaced application marker after a second recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script", "loader-before");
+
+		const recover = async (socket: FakeExtSocket, rootPrefix: string): Promise<string> => {
+			connect(bridge, socket, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+			await waitFor(() => socket.pending("attach").length === 1);
+			ack(bridge, socket, "attach");
+			await waitFor(() => socket.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+			ack(bridge, socket, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+			await waitFor(() =>
+				socket.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+			);
+			const marked = socket.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+			const marker = (marked?.params as { source?: string } | undefined)?.source?.match(
+				/throw ("__ompRelayPreload[^"]+")/,
+			)?.[1];
+			expect(marker).toBeDefined();
+			ack(bridge, socket, "send", { identifier: `${rootPrefix}-marked` });
+			await waitFor(() => socket.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+			ack(bridge, socket, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+			await waitFor(() =>
+				socket.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+			);
+			ack(bridge, socket, "send", { identifier: `${rootPrefix}-cleanup` });
+			await waitFor(() => socket.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
+			ack(bridge, socket, "send", { result: { value: true } });
+			await waitFor(() => socket.pending("send").some(rpc => rpc.method === "Page.disable"));
+			ack(bridge, socket, "send");
+			await flush();
+			return JSON.parse(marker!);
+		};
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		const firstMarker = await recover(ext2, "first");
+		bridge.extClosed(ext2);
+		const ext3 = new FakeExtSocket();
+		const secondMarker = await recover(ext3, "second");
+
+		const messagesBeforeExceptions = cdp.messages.length;
+		bridge.extMessage(
+			ext3,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Runtime.exceptionThrown",
+				params: { exceptionDetails: { exception: { value: firstMarker } } },
+			}),
+		);
+		expect(cdp.messages).toHaveLength(messagesBeforeExceptions + 1);
+		bridge.extMessage(
+			ext3,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Runtime.exceptionThrown",
+				params: { exceptionDetails: { exception: { value: secondMarker } } },
+			}),
+		);
+		expect(cdp.messages).toHaveLength(messagesBeforeExceptions + 1);
+	});
+
 	it("forces a fresh root after an interrupted tracked shared-root setter", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

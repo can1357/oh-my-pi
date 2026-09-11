@@ -3405,9 +3405,16 @@ export class RelayBridge {
 				]);
 				continue;
 			}
+			const previousApplicationMarker = current.applicationMarker;
 			current.rootIdentifier = rootIdentifier;
 			current.cleanupRootIdentifier = cleanupRootIdentifier;
 			current.applicationMarker = applicationMarker;
+			// A successful replay replaces the prior root registration. Its private
+			// marker can no longer identify an internal exception, so retaining it
+			// would suppress a matching page exception forever across recoveries.
+			if (previousApplicationMarker && previousApplicationMarker !== applicationMarker) {
+				tab.preloadApplicationMarkers.delete(previousApplicationMarker);
+			}
 			if (navigationDuringRegistration && rootIdentifier !== identifier) {
 				const loaderAfterReplay = await this.#mainFrameLoaderId(tab.tabId).catch(err => {
 					if (isExtensionTransportInterrupted(err)) {
