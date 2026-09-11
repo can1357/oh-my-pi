@@ -2308,19 +2308,22 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		// reasoning dropped by compaction/archive budget) the carried text is
 		// empty — and DeepSeek-family targets reject an empty `reasoning_text`
 		// exactly like a missing item (#10690), so substitute a non-empty
-		// placeholder. The `id` still prefers a surviving upstream item id.
+		// placeholder. The `id` is only set when an upstream item id survived:
+		// providers that validate reasoning ids against their own store (Meta via
+		// OpenRouter) reject a fabricated `rs_…` with "Referenced reasoning item
+		// … was not found or has expired", and the targets that need the item
+		// (DeepSeek, Kimi, Meta) all accept it without an id.
 		const carriedReasoningText = carriedReasoningTexts.join("\n");
 		const reasoningText =
 			carriedReasoningText.length > 0 ? carriedReasoningText : SYNTHETIC_REASONING_REPLAY_PLACEHOLDER;
-		const reasoningId =
-			synthesizedReasoningItemId ?? `rs_${Bun.hash(`${model.id}:${msgIndex}:${reasoningText}`).toString(36)}`;
-		const reasoningItem: ResponseReasoningItem = {
+		const reasoningItem = {
 			type: "reasoning",
-			id: reasoningId,
+			...(synthesizedReasoningItemId ? { id: synthesizedReasoningItemId } : {}),
 			summary: [],
 			content: [{ type: "reasoning_text", text: reasoningText }],
-		};
-		outputItems.unshift(reasoningItem);
+		} satisfies Omit<ResponseReasoningItem, "id"> & Partial<Pick<ResponseReasoningItem, "id">>;
+		// The vendored SDK type marks `id` required; the wire accepts its absence.
+		outputItems.unshift(reasoningItem as ResponseReasoningItem);
 	}
 
 	return outputItems;
