@@ -80,7 +80,13 @@ import type {
 	UsageReport,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
+import {
+	type Effort,
+	isAnthropicFastModeFallbackDisabled,
+	realizesPriorityServiceTier,
+	serviceTierFamily,
+	streamSimple,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmAnthropicConnection } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
@@ -3971,6 +3977,13 @@ export class AgentSession implements SettingsScope {
 		if (event.type === "agent_end" && this.#activeAgentContinue) {
 			this.#activeAgentContinue.turnEnded = true;
 		}
+		// Agent listeners are fire-and-forget, so capture the origin before this
+		// handler reaches any await and a later request can overwrite the slot.
+		const requestPrioritySource =
+			event.type === "message_end" && event.message.role === "assistant" ? this.#requestPrioritySource : undefined;
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			this.#requestPrioritySource = undefined;
+		}
 		// A fresh run supersedes the previously settled (and pruned) refusal
 		// turn: state-based lookups take over again.
 		if (event.type === "agent_start") {
@@ -4260,8 +4273,6 @@ export class AgentSession implements SettingsScope {
 						assistantMsg.serviceTier,
 					);
 				}
-				const requestPrioritySource = this.#requestPrioritySource;
-				this.#requestPrioritySource = undefined;
 				if (assistantMsg.disabledFeatures?.includes("priority")) {
 					if (
 						requestPrioritySource === "manual" ||
@@ -7571,7 +7582,6 @@ export class AgentSession implements SettingsScope {
 			// a reminder continuation this prompt just preempted.
 			this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
 		}
-
 
 		// If streaming, queue via steer()/followUp()/aside based on option
 		if (this.isStreaming) {
