@@ -70,6 +70,22 @@ async function withEnv<T>(updates: Partial<Record<EnvKey, string | undefined>>, 
 	}
 }
 
+function withLocalEmbeddingEnv<T>(fn: () => Promise<T> | T): Promise<T> {
+	return withEnv(
+		{
+			NODE_ENV: undefined,
+			BUN_ENV: undefined,
+			MNEMOPI_NO_EMBEDDINGS: undefined,
+			MNEMOPI_EMBEDDING_MODEL: "BAAI/bge-small-en-v1.5",
+			MNEMOPI_EMBEDDING_API_URL: undefined,
+			OPENROUTER_BASE_URL: undefined,
+			OPENROUTER_API_KEY: undefined,
+			OPENAI_API_KEY: undefined,
+		},
+		fn,
+	);
+}
+
 afterEach(() => {
 	resetEmbeddingProviderForTests();
 });
@@ -215,36 +231,62 @@ describe("optional embeddings", () => {
 		}
 	});
 
-	it("retries local model initialization after a transient failure", async () => {
-		await withEnv(
-			{
-				NODE_ENV: undefined,
-				BUN_ENV: undefined,
-				MNEMOPI_NO_EMBEDDINGS: undefined,
-				MNEMOPI_EMBEDDING_MODEL: "BAAI/bge-small-en-v1.5",
-				MNEMOPI_EMBEDDING_API_URL: undefined,
-				OPENROUTER_BASE_URL: undefined,
-				OPENROUTER_API_KEY: undefined,
-				OPENAI_API_KEY: undefined,
-			},
-			async () => {
-				let initCalls = 0;
-				const observedCacheDirs: Array<string | undefined> = [];
-				setLocalModelInitializerForTests(async options => {
-					initCalls += 1;
-					observedCacheDirs.push(options.cacheDir);
-					if (initCalls === 1) throw new Error("transient init failure");
-					return {
-						embed: streamRows(texts => texts.map(text => [text.length, text.charCodeAt(0) || 0])),
-					};
-				});
+	it("returns null to every caller sharing a failed local model initialization, then retries", async () => {
+		await withLocalEmbeddingEnv(async () => {
+			let initCalls = 0;
+			const unavailable = Promise.withResolvers<never>();
+			const initializationStarted = Promise.withResolvers<void>();
+			const observedCacheDirs: Array<string | undefined> = [];
+			setLocalModelInitializerForTests(async options => {
+				initCalls += 1;
+				observedCacheDirs.push(options.cacheDir);
+				if (initCalls === 1) {
+					initializationStarted.resolve();
+					return unavailable.promise;
+				}
+				return {
+					embed: streamRows(texts => texts.map(text => [text.length, text.charCodeAt(0) || 0])),
+				};
+			});
 
-				expect(await embed(["first"])).toBeNull();
-				expect(await embed(["second"])).toEqual([new Float32Array([6, 115])]);
-				expect(initCalls).toBe(2);
-				expect(observedCacheDirs).toEqual([getFastembedCacheDir(), getFastembedCacheDir()]);
-				expect(observedCacheDirs.some(cacheDir => cacheDir?.includes(".hermes") ?? false)).toBe(false);
-			},
-		);
+			const first = embed(["first"]);
+			await initializationStarted.promise;
+			const waiter = embed(["same initialization"]);
+			unavailable.reject(new Error("mnemopi embed subprocess unavailable"));
+
+			expect(await Promise.all([first, waiter])).toEqual([null, null]);
+			expect(await embed(["second"])).toEqual([new Float32Array([6, 115])]);
+			expect(initCalls).toBe(2);
+			expect(observedCacheDirs).toEqual([getFastembedCacheDir(), getFastembedCacheDir()]);
+			expect(observedCacheDirs.some(cacheDir => cacheDir?.includes(".hermes") ?? false)).toBe(false);
+		});
+	});
+
+	it("keeps a replacement local model cached when a stale initialization fails", async () => {
+		await withLocalEmbeddingEnv(async () => {
+			const stale = Promise.withResolvers<never>();
+			const staleStarted = Promise.withResolvers<void>();
+			setLocalModelInitializerForTests(() => {
+				staleStarted.resolve();
+				return stale.promise;
+			});
+
+			const staleEmbed = embed(["stale"]);
+			await staleStarted.promise;
+
+			let replacementInitCalls = 0;
+			setLocalModelInitializerForTests(async () => {
+				replacementInitCalls += 1;
+				return {
+					embed: streamRows(texts => texts.map(text => [text.length])),
+				};
+			});
+			expect(await embed(["replacement"])).toEqual([new Float32Array([11])]);
+
+			stale.reject(new Error("stale initialization failed"));
+			expect(await staleEmbed).toBeNull();
+			expect(await embed(["cached"])).toEqual([new Float32Array([6])]);
+			expect(replacementInitCalls).toBe(1);
+		});
 	});
 });

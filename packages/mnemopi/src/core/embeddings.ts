@@ -51,7 +51,7 @@ export type LocalModelInitializer = (options: LocalModelInitOptions) => Promise<
 const QUERY_CACHE_MAX = 512;
 
 let providerOverride: EmbeddingProvider | null = null;
-let localModelPromise: Promise<LocalEmbeddingModel> | null = null;
+let localModelPromise: Promise<LocalEmbeddingModel | null> | null = null;
 let localModelInitializer: LocalModelInitializer = defaultLocalModelInitializer;
 let apiCallCount = 0;
 const queryCache = new LRUCache<string, Vector>({ max: QUERY_CACHE_MAX });
@@ -406,22 +406,21 @@ async function getLocalModel(): Promise<LocalEmbeddingModel | null> {
 	}
 	const cacheDir = getFastembedCacheDir();
 	mkdirSync(cacheDir, { recursive: true });
-	const loading = localModelInitializer({
+	let loading: Promise<LocalEmbeddingModel | null>;
+	loading = localModelInitializer({
 		model: modelName,
 		cacheDir,
 		showDownloadProgress: false,
-	});
-	localModelPromise = loading;
-	try {
-		return await loading;
-	} catch (error) {
+	}).catch(error => {
 		logger[mnemopiDebugEnabled() ? "warn" : "debug"]("mnemopi: local embedding model failed to load", {
 			model: modelName,
 			error: String(error),
 		});
 		if (localModelPromise === loading) localModelPromise = null;
 		return null;
-	}
+	});
+	localModelPromise = loading;
+	return loading;
 }
 
 async function embedApi(texts: readonly string[]): Promise<EmbeddingMatrix | null> {
