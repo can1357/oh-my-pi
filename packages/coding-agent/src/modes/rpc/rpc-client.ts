@@ -19,6 +19,7 @@ import {
 	type RpcMessagesPage,
 	type RpcMessagesPageOptions,
 } from "./rpc-messages";
+import { isRpcToolApprovalCancelRequest, isRpcToolApprovalRequest } from "./tool-approval";
 import type {
 	RpcAvailableCommandsUpdateFrame,
 	RpcAvailableSlashCommand,
@@ -41,6 +42,9 @@ import type {
 	RpcSubagentProgressFrame,
 	RpcSubagentSnapshot,
 	RpcSubagentSubscriptionLevel,
+	RpcToolApprovalCancelRequest,
+	RpcToolApprovalRequest,
+	RpcToolApprovalResponse,
 } from "./rpc-types";
 
 /** Distributive Omit that works with union types */
@@ -101,6 +105,9 @@ export type RpcSubagentLifecycleListener = (payload: RpcSubagentLifecycleFrame["
 export type RpcSubagentProgressListener = (payload: RpcSubagentProgressFrame["payload"]) => void;
 export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"]) => void;
 export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCommand[]) => void;
+export type RpcToolApprovalEvent = RpcToolApprovalRequest | RpcToolApprovalCancelRequest;
+export type RpcToolApprovalListener = (event: RpcToolApprovalEvent) => void;
+export type RpcToolApprovalDecision = { approved: boolean } | { cancelled: true; timedOut?: boolean };
 
 export interface RpcClientToolContext<TDetails = unknown> {
 	toolCallId: string;
@@ -286,6 +293,7 @@ export class RpcClient {
 	#requestId = 0;
 	#protocolVersion: RpcProtocolVersion = 1;
 	#extensionUiListeners: Set<(req: RpcExtensionUIRequest) => void> = new Set();
+	#toolApprovalListeners = new Set<RpcToolApprovalListener>();
 	#abortController = new AbortController();
 	#serverFeatures: RpcServerFeatures = {};
 
@@ -389,6 +397,7 @@ export class RpcClient {
 					if (isRecord(features)) {
 						if (features.activeTurnSteering === 1) serverFeatures.activeTurnSteering = 1;
 						if (features.promptResultVerdict === 1) serverFeatures.promptResultVerdict = 1;
+						if (features.typedToolApprovals === 1) serverFeatures.typedToolApprovals = 1;
 					}
 					this.#serverFeatures = serverFeatures;
 					readySettled = true;
@@ -587,6 +596,32 @@ export class RpcClient {
 	onAvailableCommandsUpdate(listener: RpcAvailableCommandsUpdateListener): () => void {
 		this.#availableCommandsUpdateListeners.add(listener);
 		return () => this.#availableCommandsUpdateListeners.delete(listener);
+	}
+
+	/** Subscribe to native tool approval requests and cancellation events. */
+	onToolApproval(listener: RpcToolApprovalListener): () => void {
+		this.#toolApprovalListeners.add(listener);
+		return () => this.#toolApprovalListeners.delete(listener);
+	}
+
+	/** Answer a native tool approval using the immutable IDs from the received request. */
+	respondToToolApproval(request: RpcToolApprovalRequest, decision: RpcToolApprovalDecision): void {
+		const frame: RpcToolApprovalResponse =
+			"approved" in decision
+				? {
+						type: "tool_approval_response",
+						id: request.id,
+						toolCallId: request.toolCallId,
+						approved: decision.approved,
+					}
+				: {
+						type: "tool_approval_response",
+						id: request.id,
+						toolCallId: request.toolCallId,
+						cancelled: true,
+						...(decision.timedOut === undefined ? {} : { timedOut: decision.timedOut }),
+					};
+		this.#writeFrame(frame);
 	}
 
 	/**
@@ -1151,6 +1186,12 @@ export class RpcClient {
 			return;
 		}
 
+		if (isRpcToolApprovalRequest(data) || isRpcToolApprovalCancelRequest(data)) {
+			const event = Object.freeze(data);
+			for (const listener of this.#toolApprovalListeners) listener(event);
+			return;
+		}
+
 		if (isRpcExtensionUiRequest(data)) {
 			for (const listener of this.#extensionUiListeners) {
 				listener(data);
@@ -1303,7 +1344,7 @@ export class RpcClient {
 	}
 
 	#writeFrame(
-		frame: RpcCommand | RpcExtensionUIResponse | RpcHostToolResult | RpcHostToolUpdate,
+		frame: RpcCommand | RpcExtensionUIResponse | RpcToolApprovalResponse | RpcHostToolResult | RpcHostToolUpdate,
 		onError?: (error: Error) => void,
 	): void {
 		if (!this.#process?.stdin) {

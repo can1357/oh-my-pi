@@ -36,6 +36,7 @@ import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/m
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
+import { registerNativeToolApprovalHandler } from "../../tools/approval";
 import type { EventBus } from "../../utils/event-bus";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { initializeExtensions } from "../runtime-init";
@@ -45,6 +46,7 @@ import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from 
 import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
+import { RpcToolApprovalBridge } from "./tool-approval";
 import type {
 	RpcClearQueueResult,
 	RpcCommand,
@@ -63,6 +65,8 @@ import type {
 	RpcResponse,
 	RpcSessionState,
 	RpcSubagentSubscriptionLevel,
+	RpcToolApprovalCancelRequest,
+	RpcToolApprovalRequest,
 } from "./rpc-types";
 
 // Re-export types for consumers
@@ -100,6 +104,8 @@ type RpcOutput = (
 	obj:
 		| RpcResponse
 		| RpcExtensionUIRequest
+		| RpcToolApprovalRequest
+		| RpcToolApprovalCancelRequest
 		| RpcHostToolCallRequest
 		| RpcHostToolCancelRequest
 		| RpcHostUriRequest
@@ -367,6 +373,7 @@ export interface RpcInputFrameDeps {
 	onHostToolResult: (frame: RpcHostToolResult) => void;
 	onHostToolUpdate: (frame: RpcHostToolUpdate) => void;
 	onHostUriResult: (frame: RpcHostUriResult) => void;
+	onToolApprovalResponse?: (frame: unknown) => void;
 }
 
 /**
@@ -385,6 +392,11 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
 	if (isRpcExtensionUIResponse(parsed)) {
 		const pending = deps.pendingExtensionRequests.get(parsed.id);
 		if (pending) pending.resolve(parsed);
+		return true;
+	}
+
+	if (isRecord(parsed) && parsed.type === "tool_approval_response") {
+		deps.onToolApprovalResponse?.(parsed);
 		return true;
 	}
 
@@ -837,7 +849,7 @@ export async function runRpcMode(
 		maxReassembledFrameBytes: MAX_RPC_REASSEMBLED_BYTES,
 		// Capability values are exact integers, not booleans: bumping one is how a
 		// semantic change to an already-shipped capability is announced.
-		features: { activeTurnSteering: 1, promptResultVerdict: 1 },
+		features: { activeTurnSteering: 1, promptResultVerdict: 1, typedToolApprovals: 1 },
 	};
 	writeFrames(frameEncoder.encodeFrames(readyFrame));
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
@@ -867,6 +879,7 @@ export async function runRpcMode(
 	const pendingExtensionRequests = new RpcPendingExtensionRequests();
 	const hostToolBridge = new RpcHostToolBridge(output);
 	const hostUriBridge = new RpcHostUriBridge(output);
+	const toolApprovalBridge = new RpcToolApprovalBridge(output);
 	const subagentRegistry = subagentEventBus ? new RpcSubagentRegistry(subagentEventBus, output) : undefined;
 
 	// Shutdown request flag (wrapped in object to allow mutation with const)
@@ -1061,6 +1074,9 @@ export async function runRpcMode(
 	// A single shared instance routes all responses received on stdin to the
 	// correct waiting promise regardless of which code path created the request.
 	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output);
+	registerNativeToolApprovalHandler(rpcUiContext, (request, dialogOptions) =>
+		toolApprovalBridge.request(request, dialogOptions),
+	);
 	setToolUIContext?.(rpcUiContext, true);
 
 	// Set up extensions with RPC-based UI context
@@ -1649,6 +1665,7 @@ export async function runRpcMode(
 		onHostToolResult: frame => hostToolBridge.handleResult(frame),
 		onHostToolUpdate: frame => hostToolBridge.handleUpdate(frame),
 		onHostUriResult: frame => hostUriBridge.handleResult(frame),
+		onToolApprovalResponse: frame => toolApprovalBridge.handleResponse(frame),
 	};
 
 	const inputDispatcher = new RpcInputDispatcher({
@@ -1671,6 +1688,7 @@ export async function runRpcMode(
 	// stdin closed — RPC client is gone. Fail pending side-channel requests
 	// first so active/queued commands can settle, then drain accepted work.
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
+	toolApprovalBridge.close("RPC client disconnected before tool approval response completed");
 	hostToolBridge.close("RPC client disconnected before host tool execution completed");
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");
 	await inputDispatcher.drain();

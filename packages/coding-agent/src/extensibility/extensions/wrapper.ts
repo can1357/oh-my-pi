@@ -16,6 +16,9 @@ import {
 	type ApprovalMode,
 	denyError,
 	formatApprovalPrompt,
+	getApprovalDetailLines,
+	getToolApprovalKind,
+	requestNativeToolApproval,
 	resolveApproval,
 	truncateForPrompt,
 } from "../../tools/approval";
@@ -323,19 +326,38 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 
 			const uiContext = this.runner.getUIContext();
-			const basePrompt = formatApprovalPrompt(this.tool, resolvedArgs, approvalCheck.reason);
-			const safetyPrompt =
-				pendingSafetyChecks.length > 0
-					? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
-					: basePrompt;
-			let choice: string | undefined;
+			const providerSafetyChecks = safetyCheckLines(pendingSafetyChecks);
+			const nativeApproval = requestNativeToolApproval(
+				uiContext,
+				{
+					toolCallId,
+					toolName: this.tool.name,
+					toolKind: getToolApprovalKind(this.tool.name),
+					tier: resolved.tier,
+					input: resolvedArgs,
+					...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
+					details: getApprovalDetailLines(this.tool, resolvedArgs),
+					...(providerSafetyChecks.length > 0 ? { providerSafetyChecks } : {}),
+				},
+				{ signal },
+			);
+			let approved: boolean;
 			try {
-				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+				if (nativeApproval) {
+					approved = await nativeApproval;
+				} else {
+					const basePrompt = formatApprovalPrompt(this.tool, resolvedArgs, approvalCheck.reason);
+					const prompt =
+						providerSafetyChecks.length > 0
+							? `${basePrompt}\nProvider safety checks:\n${providerSafetyChecks.join("\n")}`
+							: basePrompt;
+					const choice = await uiContext.select(prompt, ["Approve", "Deny"]);
+					approved = choice === "Approve";
+				}
 			} catch (err) {
 				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
 				throw err;
 			}
-			const approved = choice === "Approve";
 			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
 			if (!approved) {
 				throw new Error(`Tool call denied by user: ${this.tool.name}`);

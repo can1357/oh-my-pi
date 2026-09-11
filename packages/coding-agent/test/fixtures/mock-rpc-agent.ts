@@ -15,6 +15,8 @@ if (Bun.env.MOCK_RPC_IGNORE_SIGTERM === "1") {
 }
 
 const supportsProtocolV2 = Bun.env.MOCK_RPC_V2 === "1";
+const supportsToolApproval = Bun.env.MOCK_RPC_TOOL_APPROVAL === "1";
+let pendingApprovalCommandId: string | undefined;
 const legacyState = {
 	thinkingLevel: "off",
 	isStreaming: false,
@@ -42,19 +44,17 @@ if (Bun.env.MOCK_RPC_EXIT_BEFORE_READY) {
 }
 
 let protocolV2Enabled = false;
-process.stdout.write(
-	`${JSON.stringify(
-		supportsProtocolV2
-			? {
-					type: "ready",
-					protocolVersion: 1,
-					supportedProtocolVersions: [1, 2],
-					maxFrameBytes: 1024 * 1024,
-					maxReassembledFrameBytes: 64 * 1024 * 1024,
-				}
-			: { type: "ready" },
-	)}\n`,
-);
+const readyFrame = supportsProtocolV2
+	? {
+			type: "ready",
+			protocolVersion: 1,
+			supportedProtocolVersions: [1, 2],
+			maxFrameBytes: 1024 * 1024,
+			maxReassembledFrameBytes: 64 * 1024 * 1024,
+			...(supportsToolApproval ? { features: { typedToolApprovals: 1 } } : {}),
+		}
+	: { type: "ready", ...(supportsToolApproval ? { features: { typedToolApprovals: 1 } } : {}) };
+process.stdout.write(`${JSON.stringify(readyFrame)}\n`);
 
 function writeFrame(frame: Record<string, unknown>): void {
 	const logical = Buffer.from(JSON.stringify(frame), "utf8");
@@ -94,6 +94,34 @@ for await (const raw of console) {
 			}
 			if (Bun.env.MOCK_RPC_IGNORE_COMMANDS === "1") continue;
 			const id = typeof frame.id === "string" ? frame.id : undefined;
+			if (supportsToolApproval && frame.type === "get_state") {
+				pendingApprovalCommandId = id;
+				writeFrame({
+					type: "tool_approval_request",
+					id: "approval-1",
+					toolCallId: "toolu_fixture_1",
+					toolKind: "shell",
+					toolName: "bash",
+					tier: "exec",
+					input: { command: "echo fixture" },
+					detail: { lines: ["Command: echo fixture"], truncated: false, redacted: false },
+				});
+				continue;
+			}
+			if (supportsToolApproval && frame.type === "tool_approval_response") {
+				if (frame.id !== "approval-1" || frame.toolCallId !== "toolu_fixture_1" || frame.approved !== true) {
+					process.exit(24);
+				}
+				writeFrame({
+					id: pendingApprovalCommandId,
+					type: "response",
+					command: "get_state",
+					success: true,
+					data: legacyState,
+				});
+				pendingApprovalCommandId = undefined;
+				continue;
+			}
 			if (frame.type === "negotiate_protocol" && frame.protocolVersion === 2) {
 				writeFrame({
 					id,

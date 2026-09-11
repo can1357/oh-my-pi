@@ -1,7 +1,14 @@
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolApproval } from "@oh-my-pi/pi-agent-core";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
-import { type ApprovalMode, denyError, formatApprovalPrompt, resolveApproval } from "../tools/approval";
+import {
+	type ApprovalMode,
+	denyError,
+	formatApprovalPrompt,
+	getToolApprovalKind,
+	requestNativeToolApproval,
+	resolveApproval,
+} from "../tools/approval";
 
 /** Host context supplied when an eval prelude calls back out of its language VM. */
 export interface EvalPreludeContext {
@@ -96,10 +103,25 @@ async function approvePreludeInvocation(
 				`Set tools.approval.${definition.name}: allow or use an interactive UI to approve the call.`,
 		);
 	}
-	const choice = await untilAborted(context.signal, () =>
-		ui.select(formatApprovalPrompt(subject, parameters, resolved.reason), ["Approve", "Deny"]),
+	const nativeApproval = requestNativeToolApproval(
+		ui,
+		{
+			toolCallId: context.toolCallId,
+			toolName: definition.name,
+			toolKind: getToolApprovalKind(definition.name),
+			tier: resolved.tier,
+			input: parameters,
+			...(resolved.reason ? { reason: resolved.reason } : {}),
+			details: [],
+		},
+		{ signal: context.signal },
 	);
-	if (choice !== "Approve") throw new Error(`Eval prelude call denied by user: ${definition.name}`);
+	const approved = nativeApproval
+		? await nativeApproval
+		: (await untilAborted(context.signal, () =>
+				ui.select(formatApprovalPrompt(subject, parameters, resolved.reason), ["Approve", "Deny"]),
+			)) === "Approve";
+	if (!approved) throw new Error(`Eval prelude call denied by user: ${definition.name}`);
 }
 
 /**

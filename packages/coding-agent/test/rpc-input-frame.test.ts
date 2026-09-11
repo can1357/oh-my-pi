@@ -39,6 +39,7 @@ const makeDeps = (
 		onHostToolResult: () => {},
 		onHostToolUpdate: () => {},
 		onHostUriResult: () => {},
+		onToolApprovalResponse: () => {},
 	};
 	return { deps, outputs };
 };
@@ -130,6 +131,26 @@ describe("dispatchRpcInputFrame", () => {
 			expect(bashFrame.data.cancelled).toBe(true);
 			expect(bashFrame.data.exitCode).toBe(-1);
 		}
+	});
+	test("routes tool approval responses through the control path", () => {
+		const responses: unknown[] = [];
+		const { deps, outputs } = makeDeps(async command => ({
+			id: command.id,
+			type: "response",
+			command: "abort_retry",
+			success: true,
+		}));
+		deps.onToolApprovalResponse = frame => responses.push(frame);
+		const frame = {
+			type: "tool_approval_response",
+			id: "approval-1",
+			toolCallId: "toolu-1",
+			approved: true,
+		};
+
+		expect(dispatchRpcInputFrame(frame, deps)).toBeUndefined();
+		expect(responses).toEqual([frame]);
+		expect(outputs).toEqual([]);
 	});
 
 	test("non-bash commands are dispatched serially (ordering preserved)", async () => {

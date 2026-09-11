@@ -4,7 +4,7 @@
  * Commands are sent as JSON lines on stdin.
  * Responses and events are emitted as JSON lines on stdout.
  */
-import type { AgentMessage, AgentToolResult, ThinkingLevel, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentToolResult, ThinkingLevel, ToolLoadMode, ToolTier } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
 import type { BashResult } from "../../exec/bash-executor";
@@ -19,6 +19,7 @@ import type {
 	SubagentProgressPayload,
 } from "../../task";
 import type { TodoPhase } from "../../tools/todo";
+import type { ToolApprovalKind } from "../../tools/approval";
 import type { RpcMessagesPage } from "./rpc-messages";
 
 // ============================================================================
@@ -154,10 +155,13 @@ export interface RpcPromptResultFrame {
  *    `data.accepted`; `abort` accepts `clearQueue: true`; and `clear_queue` is
  *    available with `forInterrupt`.
  *  - `promptResultVerdict: 1` — asynchronously scheduled prompts emit a
- *    correlated `prompt_result` with their final `agentInvoked` verdict. */
+ *    correlated `prompt_result` with their final `agentInvoked` verdict.
+ *  - `typedToolApprovals: 1` — tool gates use bounded native approval frames
+ *    correlated by request and tool-call IDs. */
 export interface RpcServerFeatures {
 	activeTurnSteering?: 1;
 	promptResultVerdict?: 1;
+	typedToolApprovals?: 1;
 }
 
 export interface RpcReadyFrame {
@@ -473,6 +477,55 @@ export type RpcExtensionUIRequest =
 			launchUrl?: string;
 			instructions?: string;
 	  };
+
+// ============================================================================
+// Tool Approval Frames (bidirectional)
+// ============================================================================
+
+export type RpcToolApprovalValue =
+	| string
+	| number
+	| boolean
+	| null
+	| RpcToolApprovalValue[]
+	| { [key: string]: RpcToolApprovalValue };
+
+export interface RpcToolApprovalDetail {
+	/** Tool-provided presentation lines. Informational only; never used for response correlation. */
+	readonly lines: string[];
+	/** True when credential-shaped fields or environment values were replaced. */
+	readonly redacted: boolean;
+	/** True when any input or detail value was clipped to the protocol bounds. */
+	readonly truncated: boolean;
+	readonly reason?: string;
+	readonly providerSafetyChecks?: string[];
+}
+
+/** Native, provenance-bound request emitted only by the tool approval gate. */
+export interface RpcToolApprovalRequest {
+	readonly type: "tool_approval_request";
+	readonly id: string;
+	readonly toolCallId: string;
+	readonly toolKind: ToolApprovalKind;
+	readonly toolName: string;
+	readonly tier: ToolTier;
+	readonly input: { [key: string]: RpcToolApprovalValue };
+	readonly detail: RpcToolApprovalDetail;
+	readonly timeout?: number;
+}
+
+/** Tells the host to dismiss a native approval after local abort/timeout. */
+export interface RpcToolApprovalCancelRequest {
+	readonly type: "tool_approval_cancel";
+	readonly id: string;
+	readonly targetId: string;
+	readonly toolCallId: string;
+}
+
+/** Host response. Both IDs MUST match the outstanding request. */
+export type RpcToolApprovalResponse =
+	| { type: "tool_approval_response"; id: string; toolCallId: string; approved: boolean }
+	| { type: "tool_approval_response"; id: string; toolCallId: string; cancelled: true; timedOut?: boolean };
 
 // ============================================================================
 // Host Tool Frames (bidirectional)

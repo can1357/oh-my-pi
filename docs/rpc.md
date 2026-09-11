@@ -2,8 +2,8 @@
 
 RPC mode runs the coding agent as a newline-delimited JSON protocol over stdio.
 
-- **stdin**: commands (`RpcCommand`), extension UI responses, and host-tool updates/results
-- **stdout**: a ready frame, command responses (`RpcResponse`), session/agent events, extension UI requests, host-tool requests/cancellations
+- **stdin**: commands (`RpcCommand`), extension UI responses, tool approval responses, and host-tool updates/results
+- **stdout**: a ready frame, command responses (`RpcResponse`), session/agent events, extension UI requests, tool approval requests/cancellations, and host-tool requests/cancellations
 
 Primary implementation:
 
@@ -42,7 +42,7 @@ The initial ready frame uses protocol v1 and advertises the opt-in lossless tran
 	"supportedProtocolVersions": [1, 2],
 	"maxFrameBytes": 1048576,
 	"maxReassembledFrameBytes": 67108864,
-	"features": { "activeTurnSteering": 1, "promptResultVerdict": 1 }
+	"features": { "activeTurnSteering": 1, "promptResultVerdict": 1, "typedToolApprovals": 1 }
 }
 ```
 
@@ -54,6 +54,7 @@ Parse `features` leniently. Unknown keys, a bumped version, a non-integer value,
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `activeTurnSteering: 1`  | `steer` honors `activeTurnOnly` and answers `data.accepted`; `abort` accepts `clearQueue: true`; and `clear_queue` accepts `forInterrupt`. |
 | `promptResultVerdict: 1` | Asynchronously scheduled prompts emit a correlated `prompt_result` with their final `agentInvoked` verdict.                                |
+| `typedToolApprovals: 1`  | Tool gates use native `tool_approval_request`/`tool_approval_response` frames with structured bounded input and two-ID binding.            |
 
 Clients that support protocol v2 SHOULD immediately send:
 
@@ -83,21 +84,23 @@ Legacy clients may ignore the added ready fields and remain on v1. V1 retains it
 1. Ready frame (`{ type: "ready" }`)
 2. `RpcResponse` (`{ type: "response", ... }`)
 3. `AgentSessionEvent` objects (`agent_start`, `message_update`, etc.)
-4. `RpcExtensionUIRequest` (`{ type: "extension_ui_request", ... }`)
-5. Host tool requests/cancellations (`host_tool_call`, `host_tool_cancel`)
-6. Host URI requests/cancellations (`host_uri_request`, `host_uri_cancel`)
-7. Extension errors (`{ type: "extension_error", extensionPath, event, error }`)
-8. Available-commands updates (`{ type: "available_commands_update", commands }`), emitted at startup and whenever command metadata changes
-9. Prompt lifecycle results (`{ type: "prompt_result", id?, agentInvoked }`) for asynchronously scheduled prompts
-10.   Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
-11.   Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+4. `RpcExtensionUIRequest` (`{ type: "extension_ui_request", ... }`) for ordinary questions and extension UI
+5. Tool approval requests/cancellations (`tool_approval_request`, `tool_approval_cancel`)
+6. Host tool requests/cancellations (`host_tool_call`, `host_tool_cancel`)
+7. Host URI requests/cancellations (`host_uri_request`, `host_uri_cancel`)
+8. Extension errors (`{ type: "extension_error", extensionPath, event, error }`)
+9. Available-commands updates (`{ type: "available_commands_update", commands }`), emitted at startup and whenever command metadata changes
+10.   Prompt lifecycle results (`{ type: "prompt_result", id?, agentInvoked }`) for asynchronously scheduled prompts
+11.   Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
+12.   Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
 
 ### Inbound frame categories (stdin)
 
 1. `RpcCommand`
 2. `RpcExtensionUIResponse` (`{ type: "extension_ui_response", ... }`)
-3. Host tool updates/results (`host_tool_update`, `host_tool_result`)
-4. Host URI results (`host_uri_result`)
+3. `RpcToolApprovalResponse` (`{ type: "tool_approval_response", ... }`)
+4. Host tool updates/results (`host_tool_update`, `host_tool_result`)
+5. Host URI results (`host_uri_result`)
 
 ## Request/Response Correlation
 
@@ -655,7 +658,7 @@ response reports how many user-authored messages were dropped:
 
 ## Extension UI Sub-Protocol
 
-Extensions in RPC mode use request/response UI frames.
+Extensions and ordinary questions in RPC mode use request/response UI frames. Tool approvals do not: they use the native approval sub-protocol below, so consumers never infer authorization provenance from a title or option label.
 
 ### Outbound request
 
@@ -698,6 +701,46 @@ Example:
 - `{ type: "extension_ui_response", id: string, cancelled: true, timedOut?: boolean }`
 
 If a dialog has a timeout, RPC mode resolves to a default value when timeout/abort fires.
+
+## Tool Approval Sub-Protocol
+
+RPC servers advertising `typedToolApprovals: 1` emit a native approval frame when a tool gate needs a human decision:
+
+```json
+{
+	"type": "tool_approval_request",
+	"id": "approval_7",
+	"toolCallId": "toolu_123",
+	"toolKind": "shell",
+	"toolName": "bash",
+	"tier": "exec",
+	"input": { "command": "rm -rf build", "cwd": "/workspace" },
+	"detail": {
+		"reason": "Critical pattern detected",
+		"lines": ["Command: rm -rf build"],
+		"truncated": false,
+		"redacted": false
+	}
+}
+```
+
+`toolKind` is `shell`, `edit`, `write`, or `other`. `input` is a bounded, terminal-sanitized presentation copy derived from the exact post-extension input that will execute. Individual strings are capped at 8 KiB, collections at 32 items, nesting at four levels, and the complete frame at 64 KiB. Credential-shaped fields and all `env` values are replaced with `[redacted]`; `detail.redacted` reports replacement and `detail.truncated` reports clipping. `detail.lines` is presentation metadata only. Hosts MUST bind authorization to `id`, `toolCallId`, `toolName`, and the structured `input`, never parse the display lines.
+
+Approve or deny by echoing both immutable IDs:
+
+```json
+{ "type": "tool_approval_response", "id": "approval_7", "toolCallId": "toolu_123", "approved": true }
+```
+
+Cancellation uses the alternate response shape:
+
+```json
+{ "type": "tool_approval_response", "id": "approval_7", "toolCallId": "toolu_123", "cancelled": true }
+```
+
+Each matching response is consumed exactly once. Unknown IDs are ignored. A matching response with a mismatched `toolCallId`, conflicting decision fields, extra fields, or another malformed shape fails the approval closed. Local abort or timeout emits `tool_approval_cancel` with a fresh event `id`, `targetId` equal to the request `id`, and the original `toolCallId`; late responses are ignored.
+
+The bundled TypeScript `RpcClient` exposes `onToolApproval(listener)` and `respondToToolApproval(request, decision)`. Passing the received request object back to the response helper preserves both correlation IDs. `extension_ui_request` and `extension_ui_response` remain unchanged for ordinary extension questions.
 
 ## Host Tool Sub-Protocol
 

@@ -31,6 +31,7 @@ import type {
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { registerNativeToolApprovalHandler } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 
 describe("ExtensionRunner", () => {
@@ -2397,6 +2398,51 @@ describe("ExtensionRunner", () => {
 				"Deny",
 			]);
 			delete globalState.__approvalEvents;
+		});
+
+		it("uses the native approval surface without converting provenance to display text", async () => {
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const select = vi.fn(async () => "Deny");
+			const requestToolApproval = vi.fn(async () => true);
+			initializeRunner(runner, select);
+			registerNativeToolApprovalHandler(runner.getUIContext(), requestToolApproval);
+
+			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
+			await (wrapper as ExtensionToolWrapper<any>).execute(
+				"call-native-approval",
+				{ command: "echo safe" },
+				undefined,
+				undefined,
+				{
+					sessionManager,
+					modelRegistry,
+					model: undefined,
+					isIdle: () => true,
+					hasQueuedMessages: () => false,
+					abort: () => {},
+					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+				},
+			);
+
+			expect(select).not.toHaveBeenCalled();
+			expect(requestToolApproval).toHaveBeenCalledWith(
+				{
+					toolCallId: "call-native-approval",
+					toolName: "dangerous_tool",
+					toolKind: "other",
+					tier: "exec",
+					input: { command: "echo safe" },
+					details: [],
+				},
+				{ signal: undefined },
+			);
 		});
 
 		it("does not present approval before canonical or wire-aliased tool previews are ready", async () => {

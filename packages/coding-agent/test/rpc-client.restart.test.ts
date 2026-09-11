@@ -75,6 +75,27 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		]);
 	}, 20_000);
 
+	test("delivers typed approval events and binds responses to the received request", async () => {
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_TOOL_APPROVAL: "1" },
+		});
+		await client.start();
+		expect(client.serverFeatures.typedToolApprovals).toBe(1);
+
+		const received: string[] = [];
+		const unsubscribe = client.onToolApproval(event => {
+			if (event.type !== "tool_approval_request") return;
+			received.push(`${event.toolKind}:${event.toolName}:${event.input.command}`);
+			client.respondToToolApproval(event, { approved: true });
+		});
+
+		const state = await client.getState();
+		unsubscribe();
+		expect(state.sessionId).toBe("mock-session");
+		expect(received).toEqual(["shell:bash:echo fixture"]);
+	}, 20_000);
+
 	test("start() succeeds a second time after stop() on the same instance", async () => {
 		using client = new RpcClient({
 			cliPath: MOCK_AGENT,

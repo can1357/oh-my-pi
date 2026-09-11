@@ -14,6 +14,55 @@ export type ApprovalPolicy = "allow" | "deny" | "prompt";
 export type ApprovalMode = "always-ask" | "write" | "yolo";
 
 type ApprovalSubject = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails">;
+export type ToolApprovalKind = "shell" | "edit" | "write" | "other";
+
+/** Trusted in-process approval payload. RPC mode bounds and sanitizes it before transport. */
+export interface ToolApprovalRequest {
+	readonly toolCallId: string;
+	readonly toolName: string;
+	readonly toolKind: ToolApprovalKind;
+	readonly tier: ToolTier;
+	readonly input: unknown;
+	readonly reason?: string;
+	readonly details: readonly string[];
+	readonly providerSafetyChecks?: readonly string[];
+}
+export interface ToolApprovalDialogOptions {
+	signal?: AbortSignal;
+	timeout?: number;
+	onTimeout?: () => void;
+}
+
+type NativeToolApprovalHandler = (
+	request: ToolApprovalRequest,
+	dialogOptions?: ToolApprovalDialogOptions,
+) => Promise<boolean>;
+
+const nativeToolApprovalHandlers = new WeakMap<object, NativeToolApprovalHandler>();
+
+/** Attach a host-only approval channel without exposing it through the extension UI API. */
+export function registerNativeToolApprovalHandler(context: object, handler: NativeToolApprovalHandler): () => void {
+	nativeToolApprovalHandlers.set(context, handler);
+	return () => {
+		if (nativeToolApprovalHandlers.get(context) === handler) nativeToolApprovalHandlers.delete(context);
+	};
+}
+
+/** Request native approval when the current host registered a trusted channel. */
+export function requestNativeToolApproval(
+	context: object,
+	request: ToolApprovalRequest,
+	dialogOptions?: ToolApprovalDialogOptions,
+): Promise<boolean> | undefined {
+	return nativeToolApprovalHandlers.get(context)?.(request, dialogOptions);
+}
+
+export function getToolApprovalKind(toolName: string): ToolApprovalKind {
+	if (toolName === "bash") return "shell";
+	if (toolName === "edit" || toolName === "ast_edit") return "edit";
+	if (toolName === "write") return "write";
+	return "other";
+}
 
 export interface ResolvedApproval {
 	policy: ApprovalPolicy;
@@ -261,6 +310,14 @@ export function truncateForPrompt(value: string, maxChars = DEFAULT_PROMPT_TRUNC
 	return `${value.slice(0, maxChars)}[…${omitted}ch elided…]`;
 }
 
+/** Bounded-by-the-caller detail lines supplied by a tool for approval rendering. */
+export function getApprovalDetailLines(tool: ApprovalSubject, args: unknown): string[] {
+	const details = tool.formatApprovalDetails?.(args);
+	if (typeof details === "string") return details.length > 0 ? [details] : [];
+	if (!Array.isArray(details)) return [];
+	return details.filter(detail => detail.length > 0);
+}
+
 /**
  * Format the approval prompt body shown to the user.
  */
@@ -275,14 +332,7 @@ export function formatApprovalPrompt(tool: ApprovalSubject, args: unknown, reaso
 		lines.push(`Reason: ${reason}`);
 	}
 
-	const details = tool.formatApprovalDetails?.(args);
-	if (typeof details === "string") {
-		if (details.length > 0) lines.push(details);
-	} else if (Array.isArray(details)) {
-		for (const detail of details) {
-			if (detail.length > 0) lines.push(detail);
-		}
-	}
+	lines.push(...getApprovalDetailLines(tool, args));
 
 	return lines.join("\n");
 }
