@@ -538,6 +538,31 @@ describe("tool path arrays", () => {
 		]);
 	});
 
+	it("flattens nested mixed-delimiter read targets and links", async () => {
+		const tools = await createTools(createTestSession(tempDir, { hasEditTool: false }));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-mixed-delimited", {
+			path: "apps/grep.txt, packages/grep.txt; phases/grep.txt",
+		});
+		const text = getText(result);
+		const details = result.details as
+			| { displayReadTargets?: string[]; displayReadTargetLinks?: Array<string | null> }
+			| undefined;
+
+		expect(text).toContain("shared-needle apps");
+		expect(text).toContain("shared-needle packages");
+		expect(text).toContain("shared-needle phases");
+		expect(details?.displayReadTargets).toEqual(["apps/grep.txt", "packages/grep.txt", "phases/grep.txt"]);
+		expect(details?.displayReadTargetLinks).toEqual([
+			path.join(tempDir, "apps", "grep.txt"),
+			path.join(tempDir, "packages", "grep.txt"),
+			path.join(tempDir, "phases", "grep.txt"),
+		]);
+	});
+
 	it("read treats semicolon lists as explicit scope before fuzzy suffix recovery", async () => {
 		const decoyRoot = path.join(tempDir, "decoy");
 		const decoyPath = path.join(decoyRoot, "apps", "grep.txt; packages", "grep.txt");

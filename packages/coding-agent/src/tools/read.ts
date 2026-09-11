@@ -818,8 +818,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		for (const part of parts) {
 			try {
 				const result = await this.execute("read-delimited-part", { path: part }, signal);
-				displayReadTargets.push(result.details?.suffixResolution?.to ?? part);
-				displayReadTargetLinks.push(readDetailsLinkPath(result.details));
+				const nestedTargets = result.details?.displayReadTargets;
+				if (nestedTargets?.length) {
+					const nestedLinks = result.details?.displayReadTargetLinks;
+					for (const [index, target] of nestedTargets.entries()) {
+						displayReadTargets.push(target);
+						displayReadTargetLinks.push(nestedLinks?.[index] ?? null);
+					}
+				} else {
+					displayReadTargets.push(result.details?.suffixResolution?.to ?? part);
+					displayReadTargetLinks.push(readDetailsLinkPath(result.details));
+				}
 				for (const block of result.content) {
 					if (block.type === "text") {
 						appendText(block.text);
