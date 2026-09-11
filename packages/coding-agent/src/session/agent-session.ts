@@ -242,6 +242,8 @@ import type {
 	CommandMetadataChangedListener,
 	ContextUsageBreakdown,
 	DroppedPrompt,
+	EphemeralTurnOptions,
+	EphemeralTurnResult,
 	FollowUpOptions,
 	FreshSessionResult,
 	HandoffResult,
@@ -6730,6 +6732,7 @@ export class AgentSession {
 				await this.reload();
 			},
 			getSystemPrompt: () => this.systemPrompt,
+			runEphemeralTurn: args => this.runEphemeralTurn(args),
 			setInterval: (callback, ms, ...args) => this.#fallbackTimers().setInterval(callback, ms, ...args),
 			setTimeout: (callback, ms, ...args) => this.#fallbackTimers().setTimeout(callback, ms, ...args),
 			clearTimer: timer => this.#fallbackTimers().clear(timer),
@@ -8830,8 +8833,8 @@ export class AgentSession {
 	/**
 	 * Run a single ephemeral side-channel turn against this session's current
 	 * model + system prompt + history. The main turn's tool catalog is sent
-	 * to preserve the prompt cache, but the model is reminded not to call
-	 * tools and any tool calls are discarded. The side request
+	 * to preserve the prompt cache unless `tools: false` is requested. The
+	 * model is reminded not to call tools and any tool calls are discarded. The side request
 	 * does not block on, or interfere with, any in-flight main turn. The
 	 * session's history and persisted state are NOT modified by this call.
 	 *
@@ -8840,12 +8843,7 @@ export class AgentSession {
 	 * streaming assistant text so the model sees the half-finished response
 	 * rather than missing context.
 	 */
-	async runEphemeralTurn(args: {
-		promptText: string;
-		onTextDelta?: (delta: string) => void;
-		signal?: AbortSignal;
-		dedupeReply?: boolean;
-	}): Promise<{ replyText: string; assistantMessage: AssistantMessage }> {
+	async runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
 		const model = this.model;
 		if (!model) {
 			throw new Error("No active model on session");
@@ -8853,7 +8851,21 @@ export class AgentSession {
 		const cacheSessionId = this.sessionId;
 		const snapshot = this.#buildEphemeralSnapshot(args.promptText);
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
-		const context = await this.agent.buildSideRequestContext(llmMessages);
+		const sideContext = await this.agent.buildSideRequestContext(llmMessages);
+		// Apply after context transforms, without mutating a potentially shared context.
+		const context = args.tools === false ? { ...sideContext, tools: [] } : sideContext;
+		if (
+			args.maxContextBytes !== undefined &&
+			Buffer.byteLength(JSON.stringify(context), "utf8") > args.maxContextBytes
+		) {
+			throw new Error(`Ephemeral turn context exceeds the configured ${args.maxContextBytes}-byte limit.`);
+		}
+		// `AssistantMessageEventStream` has no iterator-return cancellation hook, so
+		// throwing out of the consumer loop below (a rejected `onTextDelta` delivery,
+		// an `error` event) would leave the transport streaming: still burning
+		// inference and queueing output nobody reads. Abort the request ourselves when
+		// we stop consuming it, without touching the caller's signal.
+		const streamAbort = new AbortController();
 		const options = this.prepareSimpleStreamOptions(
 			{
 				apiKey: this.#modelRegistry.resolver(model, cacheSessionId),
@@ -8871,45 +8883,53 @@ export class AgentSession {
 				disableReasoning: shouldDisableReasoning(this.thinkingLevel),
 				hideThinkingSummary: this.agent.hideThinkingSummary,
 				serviceTier: this.#models.effectiveServiceTier(model),
-				signal: args.signal,
+				maxTokens: args.maxTokens,
+				signal: args.signal ? AbortSignal.any([args.signal, streamAbort.signal]) : streamAbort.signal,
 			},
 			model.provider,
 		);
+
+		if (args.tools === false) options.toolChoice = "none";
 
 		let providerReplyText = "";
 		let emittedReplyText = "";
 		let assistantMessage: AssistantMessage | undefined;
 		const stream = await this.#sideStreamFn(model, obfuscateProviderContext(this.#obfuscator, context), options);
-		for await (const event of stream) {
-			if (event.type === "text_delta") {
-				providerReplyText += event.delta;
-				if (args.onTextDelta) {
-					const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
-					if (readyText.length > emittedReplyText.length) {
-						const delta = readyText.slice(emittedReplyText.length);
-						emittedReplyText = readyText;
-						args.onTextDelta(delta);
+		try {
+			for await (const event of stream) {
+				if (event.type === "text_delta") {
+					providerReplyText += event.delta;
+					if (args.onTextDelta) {
+						const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
+						if (readyText.length > emittedReplyText.length) {
+							const delta = readyText.slice(emittedReplyText.length);
+							emittedReplyText = readyText;
+							await args.onTextDelta(delta);
+						}
 					}
+					continue;
 				}
-				continue;
+				if (event.type === "done") {
+					// A well-formed provider "done" event carries `content: AssistantContentBlock[]`,
+					// but a proxy/wrapper (custom extension providers, gateway-wrapped OAuth streams,
+					// see #4323) can hand back a message whose `content` was dropped or replaced with
+					// `undefined`. Downstream `.content.filter` at the sanitize step below would then
+					// crash the recap turn with `TypeError: undefined is not an object (evaluating
+					// 'H.content.filter')`. Normalize to `[]` so the recap surfaces an empty reply
+					// instead of turning a malformed side-channel response into a session-mute crash.
+					const rawContent = Array.isArray(event.message.content) ? event.message.content : [];
+					assistantMessage = this.#obfuscator?.hasSecrets()
+						? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
+						: { ...event.message, content: rawContent };
+					break;
+				}
+				if (event.type === "error") {
+					throw new Error(event.error.errorMessage || "Ephemeral turn failed");
+				}
 			}
-			if (event.type === "done") {
-				// A well-formed provider "done" event carries `content: AssistantContentBlock[]`,
-				// but a proxy/wrapper (custom extension providers, gateway-wrapped OAuth streams,
-				// see #4323) can hand back a message whose `content` was dropped or replaced with
-				// `undefined`. Downstream `.content.filter` at the sanitize step below would then
-				// crash the recap turn with `TypeError: undefined is not an object (evaluating
-				// 'H.content.filter')`. Normalize to `[]` so the recap surfaces an empty reply
-				// instead of turning a malformed side-channel response into a session-mute crash.
-				const rawContent = Array.isArray(event.message.content) ? event.message.content : [];
-				assistantMessage = this.#obfuscator?.hasSecrets()
-					? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
-					: { ...event.message, content: rawContent };
-				break;
-			}
-			if (event.type === "error") {
-				throw new Error(event.error.errorMessage || "Ephemeral turn failed");
-			}
+		} catch (error) {
+			streamAbort.abort();
+			throw error;
 		}
 
 		if (!assistantMessage) {
@@ -8917,7 +8937,7 @@ export class AgentSession {
 		}
 		const replyText = this.#deobfuscateFromProvider(providerReplyText);
 		if (args.onTextDelta && replyText.length > emittedReplyText.length) {
-			args.onTextDelta(replyText.slice(emittedReplyText.length));
+			await args.onTextDelta(replyText.slice(emittedReplyText.length));
 		}
 		const sanitizedMessage: AssistantMessage = {
 			...assistantMessage,

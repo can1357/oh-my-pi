@@ -63,6 +63,7 @@ import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "../../modes/components/custom-editor";
 import type { Theme } from "../../modes/theme/theme";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
+import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessage, CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
@@ -495,6 +496,14 @@ export interface ExtensionContext {
 	isProjectTrusted(): boolean;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string[];
+
+	/** Run a /btw-style side turn without appending to history or executing tool calls.
+	 * Pass tools: false to omit tool definitions; existing context/provider hooks still run.
+	 * Inherits event-handler and registered-tool cancellation, combined with options.signal.
+	 * Rejects calls from context, before_provider_request, and after_provider_response hooks.
+	 * Optional for compatibility with hosts that do not provide side turns.
+	 */
+	runEphemeralTurn?(options: EphemeralTurnOptions): Promise<EphemeralTurnResult>;
 	/** Structured memory runtime for status/search/save across the configured backend. */
 	memory?: MemoryRuntimeContext;
 	/**
@@ -1730,6 +1739,7 @@ export interface ExtensionContextActions {
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	getSystemPrompt: () => string[];
+	runEphemeralTurn?: (options: EphemeralTurnOptions) => Promise<EphemeralTurnResult>;
 }
 
 /** Actions for ExtensionCommandContext (ctx.* in command handlers). */

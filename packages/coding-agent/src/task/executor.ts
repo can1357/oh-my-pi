@@ -3716,6 +3716,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						shutdown: () => {},
 						getContextUsage: () => session.getContextUsage(),
 						getSystemPrompt: () => session.systemPrompt,
+						runEphemeralTurn: args => session.runEphemeralTurn(args),
 						compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
 					},
 				);

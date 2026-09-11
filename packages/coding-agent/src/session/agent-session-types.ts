@@ -7,6 +7,7 @@ import type {
 	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
+	AssistantMessage,
 	Context,
 	Effort,
 	ImageContent,
@@ -472,3 +473,24 @@ export interface ResetSessionContextResult {
 
 /** Queued user content restored to the editor. */
 export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
+
+/** Options for the same ephemeral side turn used by /btw. */
+export interface EphemeralTurnOptions {
+	promptText: string;
+	/** Omit tool definitions and request no tool calls. Tool calls are never executed, even when this option is omitted. */
+	tools?: false;
+	/** Optional provider output-token cap for this side turn. */
+	maxTokens?: number;
+	/** Reject before inference when the post-transform provider context exceeds this serialized UTF-8 byte cap. */
+	maxContextBytes?: number;
+	/** Awaited in order; a delivery failure rejects the side turn and aborts the request. */
+	onTextDelta?: (delta: string) => void | Promise<void>;
+	signal?: AbortSignal;
+	dedupeReply?: boolean;
+}
+
+/** A side-turn response that is not appended to session history. */
+export interface EphemeralTurnResult {
+	replyText: string;
+	assistantMessage: AssistantMessage;
+}
