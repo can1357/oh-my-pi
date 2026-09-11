@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { DaemonBrokerClient } from "../../../src/launch/client";
 import * as daemonClient from "../../../src/launch/client";
-import type { DaemonCompletionNotification, DaemonRpcResult } from "../../../src/launch/protocol";
+import type { DaemonCompletionNotification, DaemonOperation, DaemonRpcResult } from "../../../src/launch/protocol";
 import type { ToolSession } from "../../../src/tools";
 import { executeLaunch } from "../../../src/tools/hub/launch";
 
@@ -34,6 +34,7 @@ describe("launch broker protocol compatibility", () => {
 			request: async () => legacyResult,
 			close() {},
 			onCompletion: () => () => {},
+			supportsInputKeys: async () => true,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -63,6 +64,7 @@ describe("launch broker protocol compatibility", () => {
 			request: async () => legacyResult,
 			onCompletion: () => () => {},
 			close() {},
+			supportsInputKeys: async () => true,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -86,6 +88,75 @@ describe("launch broker protocol compatibility", () => {
 			}
 		}
 		expect(Object.getOwnPropertyDescriptor(globalThis, "Worker")).toEqual(originalWorkerDescriptor);
+	});
+
+	it("pre-encodes Enter for a legacy broker that ignores send keys", async () => {
+		const projectDir = process.cwd();
+		const requests: DaemonOperation[] = [];
+		const daemon = {
+			name: "repl",
+			id: "d",
+			state: "running",
+			createdAt: 0,
+			startedAt: 0,
+			restartCount: 0,
+			outputBytes: 0,
+			persist: false,
+			detached: false,
+		} as const;
+		const client = {
+			projectDir,
+			request: async (operation: DaemonOperation): Promise<DaemonRpcResult> => {
+				requests.push(operation);
+				if (operation.op === "ping") throw new Error("capability is resolved through supportsInputKeys");
+				return { op: "send", daemon };
+			},
+			onCompletion: () => () => {},
+			close() {},
+			supportsInputKeys: async () => false,
+		} satisfies DaemonBrokerClient;
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+
+		await executeLaunch({ cwd: projectDir } as ToolSession, {
+			op: "send",
+			name: "repl",
+			text: "step",
+			keys: ["TAB"],
+		});
+
+		expect(requests.at(-1)).toEqual({ op: "send", name: "repl", data: "step\r\t", signal: undefined });
+	});
+
+	it("passes send keys through to a broker that advertises transport-aware input", async () => {
+		const projectDir = process.cwd();
+		const requests: DaemonOperation[] = [];
+		const daemon = {
+			name: "repl",
+			id: "d",
+			state: "running",
+			createdAt: 0,
+			startedAt: 0,
+			restartCount: 0,
+			outputBytes: 0,
+			persist: false,
+			detached: false,
+		} as const;
+		const client = {
+			projectDir,
+			request: async (operation: DaemonOperation): Promise<DaemonRpcResult> => {
+				requests.push(operation);
+				if (operation.op === "ping") throw new Error("a modern broker must not be re-pinged per send");
+				return { op: "send", daemon };
+			},
+			onCompletion: () => () => {},
+			close() {},
+			supportsInputKeys: async () => true,
+		} satisfies DaemonBrokerClient;
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+
+		await executeLaunch({ cwd: projectDir } as ToolSession, { op: "send", name: "repl", text: "step" });
+
+		expect(requests.at(-1)).toEqual({ op: "send", name: "repl", data: "step", keys: ["ENTER"], signal: undefined });
 	});
 
 	it("restores a completion sink when a resumed session lists its live daemon", async () => {
@@ -119,6 +190,7 @@ describe("launch broker protocol compatibility", () => {
 				} as const;
 			},
 			close() {},
+			supportsInputKeys: async () => true,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -156,6 +228,7 @@ describe("launch broker protocol compatibility", () => {
 					state: "running",
 				}) as const,
 			close() {},
+			supportsInputKeys: async () => true,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -204,6 +277,7 @@ describe("launch broker protocol compatibility", () => {
 				} as const;
 			},
 			close() {},
+			supportsInputKeys: async () => true,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -246,6 +320,7 @@ describe("launch broker protocol compatibility", () => {
 				return { op: "wait", daemon, timedOut: false } as const;
 			},
 			close() {},
+			supportsInputKeys: async () => true,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -272,6 +347,7 @@ describe("launch broker protocol compatibility", () => {
 			},
 			request: async () => ({ op: "list", daemons: [] }) as const,
 			close() {},
+			supportsInputKeys: async () => true,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -325,6 +401,7 @@ describe("launch broker protocol compatibility", () => {
 			},
 			request: async () => ({ op: "start", daemon: completion.daemon, readyTimedOut: false }) as const,
 			close() {},
+			supportsInputKeys: async () => true,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -361,6 +438,7 @@ describe("launch broker protocol compatibility", () => {
 				throw new Error("Daemon broker request aborted");
 			},
 			close() {},
+			supportsInputKeys: async () => true,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -393,6 +471,7 @@ describe("launch broker protocol compatibility", () => {
 				return { op: "list", daemons: [] };
 			},
 			close() {},
+			supportsInputKeys: async () => true,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 
@@ -443,6 +522,7 @@ describe("launch broker protocol compatibility", () => {
 				};
 			},
 			close() {},
+			supportsInputKeys: async () => true,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 		const session = {
@@ -471,6 +551,7 @@ describe("launch broker protocol compatibility", () => {
 				throw new daemonClient.DaemonBrokerRejectedError("daemon not found");
 			},
 			close() {},
+			supportsInputKeys: async () => true,
 		} satisfies DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 

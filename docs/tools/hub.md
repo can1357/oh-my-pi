@@ -65,7 +65,7 @@ Smart-ladder bookkeeping (`recordPollWaitEnd`) runs only when the smart window w
 
 ## Outputs
 - Messaging and job results: single text block plus `details: CoordinationDetails` — `{ op, from?, to?, receipts?, waited?, inbox?, peers?, jobs?, cancelled?, agents? }`. Shapes are unchanged from the former tools except that job-op details now carry `op` (`"wait" | "cancel" | "jobs"`).
-- Process results: `details: LaunchToolDetails` — `{ op, daemon?, daemons?, cursor?, timedOut?, state?, terminalRows?, matched?, spec? }`, unchanged from the former `launch` tool (internally `ps` stores the broker op `list`).
+- Process results: `details: LaunchToolDetails` — `{ op, daemon?, daemons?, cursor?, timedOut?, state?, terminalRows?, truncatedLogPaths?, matched?, spec? }` (internally `ps` stores the broker op `list`). `truncatedLogPaths` lists live retained logs, oldest first, when the byte window is incomplete.
 - Streaming: job-watching waits emit `onUpdate` every 500 ms with fresh snapshots; everything else is single-shot.
 
 ## Availability
@@ -101,10 +101,14 @@ Names are stable and unique within one project directory. A live name must be st
 {"op":"send","name":"debugger","text":"breakpoint set --name main"}
 {"op":"send","name":"debugger","keys":["CTRL_C"]}
 ```
-Each logs result returns a byte cursor; `follow: true` waits until output advances beyond it, the process exits, or the timeout elapses. The broker keeps a 25 MiB current log plus one rotated log. Keys: `ENTER`, `TAB`, `ESCAPE`, `CTRL_C`, `CTRL_D`, arrows. Signals: `SIGINT`, `SIGTERM`, `SIGHUP`, `SIGQUIT`, `SIGKILL`. Input is one shared stream across all project clients.
+Each logs result returns a byte cursor; `follow: true` waits until output advances beyond it, the process exits, or the timeout elapses. The broker keeps a 25 MiB current log plus one rotated log. Each read searches at most the first or last 2 MiB of retained output, then applies `grep` and the requested line limit. A byte-limited read reports that scope and exposes `truncatedLogPaths`; an empty match in that window does not prove absence from the retained logs. These raw files may rotate. Large returned lines reach the shared artifact mechanism intact within the byte window.
+
+`text` is sent unchanged. With `enter: true` (the default), an Enter key follows it. Enter is `\r` for PTYs and `\n` for pipe-backed workers; the same distinction applies to `keys: ["ENTER"]`. Other keys: `TAB`, `ESCAPE`, `CTRL_C`, `CTRL_D`, arrows. Signals: `SIGINT`, `SIGTERM`, `SIGHUP`, `SIGQUIT`, `SIGKILL`. Input is one shared stream across all project clients. The broker resolves key bytes against the target process; raw `data` in the broker protocol is not normalized.
 
 ## Cross-instance lifecycle (processes)
 Unchanged from the former `launch` tool: the first process op starts a detached broker over a private socket under `~/.omp/run/daemons/<project-hash>/`; every omp instance in the project shares names, logs, and state. After the last omp process exits, the broker stops non-persistent processes and exits. `persist: true` opts out of last-client teardown; restart policies (`no`/`on-failure`/`always`) use bounded exponential backoff up to 30 s.
+
+Brokers advertise `inputKeys` on `ping`. Against a broker that predates it, the tool pre-encodes `keys` into legacy bytes (`ENTER` = `\r`) so PTY input keeps working; pipe-backed daemons under such a broker keep the old CR behavior until that broker restarts. No manual cutover is required.
 
 ## Limits & Caps
 - Mailboxes: 100 messages per agent (`MAILBOX_CAP`); oldest dropped beyond the cap.
@@ -115,7 +119,7 @@ Unchanged from the former `launch` tool: the first process op starts a detached 
 
 ## Errors
 - Most validation/availability failures are text results with `isError: true`: messaging unavailable, missing `to`/`message`, self-send (`Cannot send a message to yourself.`), `await` with `to:"all"`, `to`+`name` on one send, missing `ids` on `cancel`, and launch disabled. The async-disabled `jobs`/`cancel` response is an exception: it returns `Async execution is disabled; no background jobs are available.` with an empty job list and no `isError` flag.
-- Launch validation (missing `name`/`application`, bad `ready.port`, unsupported key) throws `ToolError`, exactly as before.
+- Launch validation rejects missing `name`/`application`, bad `ready.port`, and unsupported keys. Unsupported keys are rejected by the broker before any bytes from that send are written.
 - A `wait` timeout is a normal result (`waited: null` or an all-running snapshot flagged `useless`), never an error.
 - Per-recipient delivery failures surface as `failed` receipts; `send` is `isError` only when nothing was delivered.
 

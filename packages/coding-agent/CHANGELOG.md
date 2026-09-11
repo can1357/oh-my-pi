@@ -54,6 +54,8 @@
 - Extensions loaded by the npm CLI now apply settings overrides to the active session, so generated agents and model choices remain isolated between sessions ([#11047](https://github.com/can1357/oh-my-pi/pull/11047) by [@mgpai22](https://github.com/mgpai22)).
 - Live task dispatch now reloads added, changed, removed, and deleted project task and retry settings before resolving subagents ([#11191](https://github.com/can1357/oh-my-pi/issues/11191)).
 - Reset `/loop` iterations combined with `--while` / `--until` no longer keep submitting without resetting when vibe mode is enabled while the condition command is still running; the loop now disables itself instead ([#10858](https://github.com/can1357/oh-my-pi/pull/10858)).
+- `hub send` now submits line-based non-PTY workers with a newline while preserving terminal Enter behavior and literal input bytes. Brokers advertise the capability on `ping`; against a running older broker the tool falls back to the legacy encoding ([#11378](https://github.com/can1357/oh-my-pi/pull/11378) by [@johnnyboygeek](https://github.com/johnnyboygeek)).
+- `hub logs` no longer silently drops or clips large structured result lines before artifact storage. Byte-limited searches disclose their scope and provide retained raw-log paths for recovery ([#11378](https://github.com/can1357/oh-my-pi/pull/11378) by [@johnnyboygeek](https://github.com/johnnyboygeek)).
 
 ## [18.1.15] - 2026-09-08
 

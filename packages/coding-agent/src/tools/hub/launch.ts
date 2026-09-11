@@ -11,7 +11,14 @@ import { Text } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { type DaemonBrokerClient, DaemonBrokerRejectedError, daemonClientForProject } from "../../launch/client";
-import type { DaemonOperation, DaemonRpcResult, DaemonSnapshot, DaemonSpec, DaemonState } from "../../launch/protocol";
+import {
+	DAEMON_KEY_INPUT,
+	type DaemonOperation,
+	type DaemonRpcResult,
+	type DaemonSnapshot,
+	type DaemonSpec,
+	type DaemonState,
+} from "../../launch/protocol";
 import { renderTerminalOutputIsolated } from "../../launch/terminal-output-worker-client";
 import type { Theme, ThemeColor } from "../../modes/theme/theme";
 import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../../tui";
@@ -139,18 +146,6 @@ export interface LaunchParams {
 	timeout?: number;
 }
 
-const KEY_INPUT: Record<string, string> = {
-	ENTER: "\r",
-	TAB: "\t",
-	ESCAPE: "\u001b",
-	CTRL_C: "\u0003",
-	CTRL_D: "\u0004",
-	UP: "\u001b[A",
-	DOWN: "\u001b[B",
-	RIGHT: "\u001b[C",
-	LEFT: "\u001b[D",
-};
-
 /** Terminal daemon lifecycle states — the process is no longer running. */
 const TERMINAL_STATES: Partial<Record<DaemonState, true>> = { exited: true, failed: true };
 
@@ -163,6 +158,8 @@ export interface LaunchToolDetails {
 	timedOut?: boolean;
 	/** logs: daemon lifecycle state at read time. */
 	state?: DaemonState;
+	/** logs: live retained files when the byte window, including grep, is incomplete. */
+	truncatedLogPaths?: string[];
 	/** logs: virtual terminal rows for display; model-facing content remains sanitized text. */
 	terminalRows?: string[];
 	/** wait: output line that satisfied the pattern. */
@@ -211,18 +208,6 @@ function commandSpec(params: LaunchParams, session: ToolSession): DaemonSpec {
 	};
 }
 
-function sendData(params: LaunchParams): string | undefined {
-	let data = params.text ?? "";
-	if (params.text && (params.enter ?? true)) data += KEY_INPUT.ENTER;
-	for (const rawKey of params.keys ?? []) {
-		const key = rawKey.trim().toUpperCase();
-		const input = KEY_INPUT[key];
-		if (input === undefined) throw new ToolError(`Unsupported launch key ${rawKey}`);
-		data += input;
-	}
-	return data || undefined;
-}
-
 function operationFor(params: LaunchParams, session: ToolSession): DaemonOperation {
 	switch (params.op) {
 		case "start":
@@ -253,7 +238,8 @@ function operationFor(params: LaunchParams, session: ToolSession): DaemonOperati
 			return {
 				op: "send",
 				name: requiredName(params),
-				data: sendData(params),
+				data: params.text || undefined,
+				keys: params.text && (params.enter ?? true) ? ["ENTER", ...(params.keys ?? [])] : params.keys,
 				signal: params.signal,
 			};
 		case "stop":
@@ -321,7 +307,11 @@ function toolContent(result: DaemonRpcResult, params: LaunchParams): string {
 				: "No daemons.";
 		case "logs": {
 			const text = sanitizeText(result.text);
-			return `${text}${text && !text.endsWith("\n") ? "\n" : ""}[${result.name}: ${result.state}; cursor=${result.cursor}${result.timedOut ? "; follow timed out" : ""}]`;
+			// `details.truncatedLogPaths` keeps the exact paths; the rendered copy must not leak $HOME.
+			const recovery = result.truncatedLogPaths
+				? `Log byte window is partial; grep searches only this window. Read retained raw logs (oldest first; files may rotate):\n${result.truncatedLogPaths.map(file => `- ${shortenPath(file)}`).join("\n")}\n`
+				: "";
+			return `${text}${text && !text.endsWith("\n") ? "\n" : ""}${recovery}[${result.name}: ${result.state}; cursor=${result.cursor}${result.timedOut ? "; follow timed out" : ""}]`;
 		}
 		case "wait": {
 			const lines = [daemonLabel(result.daemon)];
@@ -373,6 +363,7 @@ async function toolDetails(result: DaemonRpcResult, params: LaunchParams): Promi
 				cursor: result.cursor,
 				timedOut: result.timedOut,
 				state: result.state,
+				truncatedLogPaths: result.truncatedLogPaths,
 				terminalRows: await renderLaunchLogTerminalRows(result, params).catch(() => undefined),
 			};
 		case "wait":
@@ -398,7 +389,7 @@ export async function executeLaunch(
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<LaunchToolDetails>> {
 	const client = await daemonClientForProject(session.cwd);
-	const operation = operationFor(params, session);
+	let operation = operationFor(params, session);
 	const owner = operation.op === "start" ? operation.owner : undefined;
 	const resumedOwner = params.op !== "start" ? (session.getSessionId?.() ?? undefined) : undefined;
 	const completionLease = owner
@@ -407,6 +398,18 @@ export async function executeLaunch(
 			? registerCompletionSink(session, client, resumedOwner)
 			: undefined;
 	try {
+		if (operation.op === "send" && operation.keys?.length && !(await client.supportsInputKeys(signal))) {
+			// A broker that predates transport-aware keys ignores the field. Fall back
+			// to the legacy pre-encoded bytes so Enter still reaches it (PTY exact;
+			// pipes keep the old CR behavior until that broker restarts).
+			let data = operation.data ?? "";
+			for (const rawKey of operation.keys) {
+				const input = DAEMON_KEY_INPUT[rawKey.trim().toUpperCase()];
+				if (input === undefined) throw new ToolError(`Unsupported launch key ${rawKey}`);
+				data += input;
+			}
+			operation = { op: "send", name: operation.name, data, signal: operation.signal };
+		}
 		const result = await client.request(operation, signal);
 		const sessionOwner = session.getSessionId?.();
 		let resumedDaemonFound = false;

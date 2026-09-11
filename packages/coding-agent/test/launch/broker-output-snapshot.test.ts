@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { setProcessName, TempDir } from "@oh-my-pi/pi-utils";
 import { startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
+import * as daemonClient from "../../src/launch/client";
 import { createDaemonBrokerClient } from "../../src/launch/client";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -11,6 +12,9 @@ import {
 	type DaemonOperation,
 } from "../../src/launch/protocol";
 import * as terminalOutput from "../../src/launch/terminal-output";
+import type { ToolSession } from "../../src/tools";
+import { executeLaunch } from "../../src/tools/hub/launch";
+import { shortenPath } from "../../src/tools/render-utils";
 
 function restoreEnv(name: string, value: string | undefined): void {
 	if (value === undefined) delete process.env[name];
@@ -30,6 +34,39 @@ function startBroker(projectDir: string, runtimeDir: string): Promise<void> {
 	restoreEnv(DAEMON_RUNTIME_DIR_ENV, previousRuntimeDir);
 	restoreEnv(DAEMON_IDLE_GRACE_ENV, previousGrace);
 	return broker;
+}
+
+async function withWorker(source: string, pty: boolean, run: (session: ToolSession) => Promise<void>): Promise<void> {
+	using tempDir = TempDir.createSync("@omp-launch-delivery-");
+	const projectDir = path.join(tempDir.path(), "project");
+	const runtimeDir = path.join(tempDir.path(), "runtime");
+	await fs.mkdir(projectDir);
+	const scriptPath = path.join(projectDir, "worker.ts");
+	await Bun.write(scriptPath, `${source}\nprocess.stdout.write("READY\\n");\n`);
+	const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+	const previousTitle = process.title;
+	const broker = startBroker(projectDir, runtimeDir);
+	vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+	const session = { cwd: projectDir } as ToolSession;
+	try {
+		await executeLaunch(session, {
+			op: "start",
+			name: "worker",
+			application: process.execPath,
+			args: [scriptPath],
+			env: { BUN_BE_BUN: "1" },
+			pty,
+			ready: { log: "READY", timeout: 5 },
+		});
+		await run(session);
+	} finally {
+		await client.request({ op: "stop", name: "worker", timeoutMs: 2_000 }).catch(() => undefined);
+		await client.request({ op: "shutdown" }).catch(() => undefined);
+		client.close();
+		await broker;
+		setProcessName(previousTitle);
+		vi.restoreAllMocks();
+	}
 }
 
 describe("daemon broker log snapshots", () => {
@@ -204,5 +241,122 @@ process.stdout.write("READY\\x1b[6n");
 			await broker;
 			setProcessName(previousTitle);
 		}
+	}, 20_000);
+
+	it("delivers a large structured result intact in either log direction", async () => {
+		const response = { type: "response", payload: "x".repeat(300 * 1024), result: "RECOVERABLE-RESULT" };
+		await withWorker(
+			`process.stdout.write(${JSON.stringify(`${JSON.stringify(response)}\n`)});`,
+			false,
+			async session => {
+				await executeLaunch(session, { op: "wait", name: "worker", for: "exit", timeout: 5 });
+				for (const head of [true, false]) {
+					const logs = await executeLaunch(session, {
+						op: "logs",
+						name: "worker",
+						head,
+						grep: "RECOVERABLE-RESULT",
+					});
+					const text = logs.content.find(part => part.type === "text")?.text ?? "";
+					expect(JSON.parse(text.split("\n")[0])).toEqual(response);
+				}
+			},
+		);
+	}, 20_000);
+
+	it("makes a match outside the byte window recoverable instead of implying no match", async () => {
+		await withWorker(
+			`process.stdout.write("OUTSIDE-WINDOW\\n" + "x".repeat(3 * 1024 * 1024) + "\\n");`,
+			false,
+			async session => {
+				await executeLaunch(session, { op: "wait", name: "worker", for: "exit", timeout: 5 });
+				const logs = await executeLaunch(session, {
+					op: "logs",
+					name: "worker",
+					grep: "OUTSIDE-WINDOW",
+				});
+				const paths = logs.details?.truncatedLogPaths;
+				expect(paths).toBeDefined();
+				const recovered = await Promise.all(paths!.map(file => Bun.file(file).text()));
+				expect(recovered.join("")).toContain("OUTSIDE-WINDOW");
+				const text = logs.content.find(part => part.type === "text")?.text ?? "";
+				// Model-facing text shortens $HOME; details keep the exact paths for tooling.
+				expect(text).not.toContain(process.env.HOME ?? "\u0000");
+				expect(paths!.every(file => text.includes(shortenPath(file)))).toBeTrue();
+			},
+		);
+	}, 20_000);
+
+	it.each([false, true])(
+		"submits one command with the correct Enter for pty=%s",
+		async pty => {
+			await withWorker(
+				`if (process.stdin.isTTY) process.stdin.setRawMode(true);
+process.stdin.setEncoding("utf8");
+let input = "";
+process.stdin.on("data", chunk => {
+	input += chunk;
+	if (!input.endsWith(String.fromCharCode(${pty ? 13 : 10}))) return;
+	process.stdout.write("RECEIVED:" + JSON.stringify(input) + "\\n");
+	process.exit(0);
+});`,
+				pty,
+				async session => {
+					await executeLaunch(session, { op: "send", name: "worker", text: "command" });
+					const completed = await executeLaunch(session, { op: "wait", name: "worker", for: "exit", timeout: 1 });
+					expect(completed.details?.timedOut).toBeFalse();
+					expect(completed.details?.daemon?.exitCode).toBe(0);
+					const logs = await executeLaunch(session, { op: "logs", name: "worker", grep: "RECEIVED:" });
+					const text = logs.content.find(part => part.type === "text")?.text ?? "";
+					expect(text).toContain(`RECEIVED:${JSON.stringify(`command${pty ? "\r" : "\n"}`)}`);
+				},
+			);
+		},
+		20_000,
+	);
+
+	it("preserves raw carriage returns and submits a pipe with an explicit Enter key", async () => {
+		await withWorker(
+			`process.stdin.setEncoding("utf8");
+let input = "";
+process.stdin.on("data", chunk => {
+	input += chunk;
+	if (!input.endsWith("\\n")) return;
+	process.stdout.write("RECEIVED:" + JSON.stringify(input) + "\\n");
+	process.exit(0);
+});`,
+			false,
+			async session => {
+				await executeLaunch(session, { op: "send", name: "worker", text: "first\rsecond", enter: false });
+				await executeLaunch(session, { op: "send", name: "worker", keys: ["ENTER"] });
+				const completed = await executeLaunch(session, { op: "wait", name: "worker", for: "exit", timeout: 1 });
+				expect(completed.details?.timedOut).toBeFalse();
+				const logs = await executeLaunch(session, { op: "logs", name: "worker", grep: "RECEIVED:" });
+				const text = logs.content.find(part => part.type === "text")?.text ?? "";
+				expect(text).toContain(`RECEIVED:${JSON.stringify("first\rsecond\n")}`);
+			},
+		);
+	}, 20_000);
+
+	it("resolves the broker's key capability once per connection, not once per send", async () => {
+		await withWorker(
+			`process.stdin.setEncoding("utf8");
+let lines = 0;
+process.stdin.on("data", chunk => {
+	lines += chunk.split("\\n").length - 1;
+	if (lines >= 3) process.exit(0);
+});`,
+			false,
+			async session => {
+				const client = await daemonClient.daemonClientForProject(session.cwd);
+				const request = vi.spyOn(client, "request");
+				for (let i = 0; i < 3; i++) await executeLaunch(session, { op: "send", name: "worker", text: `line ${i}` });
+				const completed = await executeLaunch(session, { op: "wait", name: "worker", for: "exit", timeout: 1 });
+				expect(completed.details?.timedOut).toBeFalse();
+				const ops = request.mock.calls.map(([operation]) => operation.op);
+				expect(ops.filter(op => op === "ping")).toHaveLength(1);
+				expect(ops.filter(op => op === "send")).toHaveLength(3);
+			},
+		);
 	}, 20_000);
 });
