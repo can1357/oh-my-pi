@@ -10,7 +10,9 @@ import {
 	OPENAI_HEADERS,
 	URL_PATHS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
-import { logger } from "@oh-my-pi/pi-utils";
+import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { TRUNCATE_LENGTHS } from "../tools/render-utils";
 import type { SttStreamHandle, SttStreamOptions } from "./asr-client";
 
 /**
@@ -296,6 +298,19 @@ function sanitizeOverrideHeaders(headers: Record<string, string> | undefined): R
 	return entries.length === Object.keys(headers).length ? headers : Object.fromEntries(entries);
 }
 
+/**
+ * Make a provider/proxy error body safe to render: this message reaches the
+ * TUI through `showWarning`, so ANSI escapes and control characters are
+ * stripped, tabs become spaces, the body collapses to one line, and the result
+ * is truncated to display width rather than a raw character count.
+ */
+function displayableErrorDetail(body: string): string {
+	const flattened = replaceTabs(sanitizeText(body))
+		.replace(/\s*\n+\s*/g, " ")
+		.trim();
+	return truncateToWidth(flattened, TRUNCATE_LENGTHS.CONTENT);
+}
+
 async function postTranscription(
 	fetchImpl: typeof fetch,
 	url: string,
@@ -311,7 +326,7 @@ async function postTranscription(
 		signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
 	});
 	if (!response.ok) {
-		const detail = (await response.text().catch(() => "")).slice(0, 300);
+		const detail = displayableErrorDetail(await response.text().catch(() => ""));
 		// Typed status so `withOAuthAccess` can classify 401 (refresh) and
 		// 403/usage-limit (rotate) instead of seeing an opaque Error.
 		throw new ProviderHttpError(`Cloud transcription failed (${response.status}): ${detail}`, response.status, {
