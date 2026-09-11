@@ -122,6 +122,8 @@ export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle>
 	backend: "worker";
 	worker: WorkerHandle;
 	activateForScreenshot: boolean;
+	/** The tab was created for this session (`newTab`), so releasing it closes the tab. */
+	ownsPage: boolean;
 }
 
 export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
@@ -145,6 +147,15 @@ export interface AcquireTabOptions {
 	waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
 	target?: string;
+	/**
+	 * Open a new background tab instead of adopting one the user is already
+	 * using. Only supported for relay sessions (`app.relay: true`): headless
+	 * browsers always get their own page, and direct CDP connections
+	 * (`app.cdp_url`) cannot activate background tabs without raising the OS
+	 * window. The new tab is created in the background and closed again when the
+	 * tab is released.
+	 */
+	newTab?: boolean;
 	signal?: AbortSignal;
 	timeoutMs: number;
 	/**
@@ -368,6 +379,10 @@ async function acquireTabImpl(
 				holdBrowser(browser);
 				tempHold = true;
 				await releaseTab(name, { kill: false });
+			} else if (opts.newTab && (existing.backend !== "worker" || !existing.ownsPage)) {
+				holdBrowser(browser);
+				tempHold = true;
+				await releaseTab(name, { kill: false });
 			} else {
 				// Reuse counts as use: refresh the idle clock and resume a
 				// settle-frozen page before driving it again. A refused
@@ -439,105 +454,130 @@ async function acquireTabImpl(
 	}
 	let initPayload: WorkerInitPayload;
 	let worker: WorkerHandle;
+	let supervisorCreatedTargetId: string | undefined;
+	let published = false;
+	const cleanupSupervisorTarget = async () => {
+		if (supervisorCreatedTargetId) {
+			const tid = supervisorCreatedTargetId;
+			supervisorCreatedTargetId = undefined;
+			await closeTargetById(browser, tid).catch(() => undefined);
+		}
+	};
 	try {
-		initPayload = await buildInitPayload(browser, opts);
-		worker = await spawnTabWorker();
-	} catch (error) {
-		// Failing before the worker took its own hold must release the
-		// temporary one, or the browser's refCount never reaches 0 again.
-		if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
-		throw error;
-	}
-	// Init budget: the caller's timeout plus the supervisor grace — never a
-	// fixed floor. A floor larger than the caller's budget would keep a wedged
-	// worker (and its orphaned page on a shared browser) alive long after the
-	// caller gave up; the phase floors inside initializeTabWorker keep each
-	// phase positive for sub-second budgets, and the caller's abort signal is
-	// the hard backstop for floor overshoot.
-	const initBudgetMs = opts.timeoutMs + GRACE_MS;
-	let info: ReadyInfo;
-	try {
-		info = await initializeTabWorker(worker, initPayload, initBudgetMs, startedAt);
-	} catch (error) {
-		// `BuildMessage`-class failures arrive asynchronously via the worker's `error` event,
-		// after `spawnTabWorker`'s synchronous try/catch has already returned. Fall back to
-		// the inline worker here so module-resolution failures don't poison every tab open.
-		await worker.terminate().catch(() => undefined);
-		// A headless worker that died mid-init may have already created its page in the
-		// shared browser — a killed worker can't close it, so close the target the worker
-		// reported (no-op when it never got that far).
-		closeAbandonedWorkerPage(browser, worker);
-		if (worker.mode === "inline" || isReportedInitFailure(error)) {
+		try {
+			initPayload = await buildInitPayload(browser, opts);
+			if (initPayload.mode === "attach" && initPayload.ownsPage) {
+				supervisorCreatedTargetId = initPayload.targetId;
+			}
+			worker = await spawnTabWorker();
+		} catch (error) {
+			// Failing before the worker took its own hold must release the
+			// temporary one, or the browser's refCount never reaches 0 again.
+			await cleanupSupervisorTarget();
 			if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
 			throw error;
 		}
-		// Fail fast once the caller's init budget is exhausted: its timeout has already
-		// fired, so a retried result would only be discarded by the post-init abort check —
-		// don't spend the phase floors' excess on a cold start nobody is waiting for.
-		if (initBudgetExhausted(initBudgetMs, startedAt)) {
-			if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
-			throw error;
-		}
-		logger.warn("Tab worker init failed; retrying with inline tab worker (no sync-loop guard)", {
-			error: error instanceof Error ? error.message : String(error),
-		});
-		worker = await spawnInlineWorker();
+		// Init budget: the caller's timeout plus the supervisor grace — never a
+		// fixed floor. A floor larger than the caller's budget would keep a wedged
+		// worker (and its orphaned page on a shared browser) alive long after the
+		// caller gave up; the phase floors inside initializeTabWorker keep each
+		// phase positive for sub-second budgets, and the caller's abort signal is
+		// the hard backstop for floor overshoot.
+		const initBudgetMs = opts.timeoutMs + GRACE_MS;
+		let info: ReadyInfo;
 		try {
 			info = await initializeTabWorker(worker, initPayload, initBudgetMs, startedAt);
-		} catch (inlineError) {
+		} catch (error) {
+			// `BuildMessage`-class failures arrive asynchronously via the worker's `error` event,
+			// after `spawnTabWorker`'s synchronous try/catch has already returned. Fall back to
+			// the inline worker here so module-resolution failures don't poison every tab open.
+			await worker.terminate().catch(() => undefined);
+			// A headless worker that died mid-init may have already created its page in the
+			// shared browser — a killed worker can't close it, so close the target the worker
+			// reported (no-op when it never got that far).
+			closeAbandonedWorkerPage(browser, worker);
+			if (worker.mode === "inline" || isReportedInitFailure(error)) {
+				await cleanupSupervisorTarget();
+				if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
+				throw error;
+			}
+			// Fail fast once the caller's init budget is exhausted: its timeout has already
+			// fired, so a retried result would only be discarded by the post-init abort check —
+			// don't spend the phase floors' excess on a cold start nobody is waiting for.
+			if (initBudgetExhausted(initBudgetMs, startedAt)) {
+				await cleanupSupervisorTarget();
+				if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
+				throw error;
+			}
+			logger.warn("Tab worker init failed; retrying with inline tab worker (no sync-loop guard)", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			worker = await spawnInlineWorker();
+			try {
+				info = await initializeTabWorker(worker, initPayload, initBudgetMs, startedAt);
+			} catch (inlineError) {
+				await worker.terminate().catch(() => undefined);
+				closeAbandonedWorkerPage(browser, worker);
+				await cleanupSupervisorTarget();
+				if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
+				const finalError = new ToolError(
+					`Failed to start browser tab worker (inline fallback also failed): ${inlineError instanceof Error ? inlineError.message : String(inlineError)}`,
+				);
+				(finalError as { cause?: unknown }).cause = error;
+				throw finalError;
+			}
+		}
+
+		// If the caller aborted while we were spawning/initializing the worker, tear
+		// the freshly-built worker down before publishing the tab so the browser
+		// refCount (which `holdBrowser` below would take) never grows for a tab
+		// nobody is waiting for. Mirror the error paths' `refCount === 0` release so
+		// a fresh browser held by nothing but this aborted open is not orphaned in
+		// the registry; a browser still leased/held elsewhere (refCount > 0) is left
+		// for its owner to release.
+		if (opts.signal?.aborted) {
 			await worker.terminate().catch(() => undefined);
 			closeAbandonedWorkerPage(browser, worker);
-			if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
-			const finalError = new ToolError(
-				`Failed to start browser tab worker (inline fallback also failed): ${inlineError instanceof Error ? inlineError.message : String(inlineError)}`,
-			);
-			(finalError as { cause?: unknown }).cause = error;
-			throw finalError;
+			await cleanupSupervisorTarget();
+			if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false }).catch(() => undefined);
+			throw new ToolAbortError("Browser tab open aborted");
+		}
+
+		holdBrowser(browser);
+		if (tempHold) await releaseBrowser(browser, { kill: false });
+		const tab: WorkerTabSession = {
+			name,
+			browser,
+			targetId: info.targetId,
+			backend: "worker",
+			worker,
+			state: "alive",
+			info,
+			pending: new Map(),
+			dialogPolicy: opts.dialogs,
+			allowedDomains: opts.allowedDomains ? [...opts.allowedDomains] : undefined,
+			kindTag: browser.kind.kind,
+			activateForScreenshot: initPayload.mode === "headless" || initPayload.activateForScreenshot !== false,
+			ownsPage: initPayload.mode === "headless" || initPayload.ownsPage === true,
+			ownerSessionId: opts.ownerSessionId,
+			persist: opts.persist ?? false,
+			lastActivityAt: Date.now(),
+			frozen: false,
+		};
+		worker.onMessage(msg => handleTabMessage(tab, msg));
+		tabs.set(name, tab);
+		published = true;
+		// Durably record ownership so another live omp process can reap this page if
+		// this process dies abnormally before its own teardown closes the tab.
+		const scope = sharedScopeOf(browser);
+		if (scope) void recordSharedTarget(scope, info.targetId);
+		if (opts.url) await navigateOpenedTab(name, opts.url, opts, startedAt, tab);
+		return { tab, created: true };
+	} finally {
+		if (!published) {
+			await cleanupSupervisorTarget();
 		}
 	}
-
-	// If the caller aborted while we were spawning/initializing the worker, tear
-	// the freshly-built worker down before publishing the tab so the browser
-	// refCount (which `holdBrowser` below would take) never grows for a tab
-	// nobody is waiting for. Mirror the error paths' `refCount === 0` release so
-	// a fresh browser held by nothing but this aborted open is not orphaned in
-	// the registry; a browser still leased/held elsewhere (refCount > 0) is left
-	// for its owner to release.
-	if (opts.signal?.aborted) {
-		await worker.terminate().catch(() => undefined);
-		closeAbandonedWorkerPage(browser, worker);
-		if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false }).catch(() => undefined);
-		throw new ToolAbortError("Browser tab open aborted");
-	}
-
-	holdBrowser(browser);
-	if (tempHold) await releaseBrowser(browser, { kill: false });
-	const tab: WorkerTabSession = {
-		name,
-		browser,
-		targetId: info.targetId,
-		backend: "worker",
-		worker,
-		state: "alive",
-		info,
-		pending: new Map(),
-		dialogPolicy: opts.dialogs,
-		allowedDomains: opts.allowedDomains ? [...opts.allowedDomains] : undefined,
-		kindTag: browser.kind.kind,
-		activateForScreenshot: initPayload.mode === "headless" || initPayload.activateForScreenshot !== false,
-		ownerSessionId: opts.ownerSessionId,
-		persist: opts.persist ?? false,
-		lastActivityAt: Date.now(),
-		frozen: false,
-	};
-	worker.onMessage(msg => handleTabMessage(tab, msg));
-	tabs.set(name, tab);
-	// Durably record ownership so another live omp process can reap this page if
-	// this process dies abnormally before its own teardown closes the tab.
-	const scope = sharedScopeOf(browser);
-	if (scope) void recordSharedTarget(scope, info.targetId);
-	if (opts.url) await navigateOpenedTab(name, opts.url, opts, startedAt, tab);
-	return { tab, created: true };
 }
 
 /**
@@ -1095,7 +1135,10 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 		}
 	}
 	await tab.worker.terminate().catch(() => undefined);
-	if (forced && tab.kindTag === "headless") {
+	// A worker that died before acking the close cannot close its own page, so
+	// the supervisor closes any target we own (headless page, or a `newTab` we
+	// created in a user-driven browser). Adopted tabs are the user's; never.
+	if (forced && tab.ownsPage) {
 		try {
 			// `false` is "not confirmed closed" (the CDP session could not be
 			// created, or `Target.getTargets` failed) — the same unconfirmed
@@ -1106,6 +1149,7 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 				`orphan CDP target ${JSON.stringify(tab.targetId)} (Page.close)`,
 				closeOrphanTarget(tab),
 			));
+			if (!targetCloseFailed) cleanupError = undefined;
 		} catch (error) {
 			targetCloseFailed = true;
 			cleanupError = error;
@@ -1512,8 +1556,38 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			ignoreHttpsErrors: opts.ignoreHttpsErrors,
 		};
 	}
+	// `newTab` asks for a tab of our own instead of one the user is working in.
+	// The relay creates it in the background, so opening it moves nothing; it is
+	// then ours to activate for pixels and ours to close on release.
+	if (opts.newTab) {
+		if (browser.kind.kind !== "relay") {
+			throw new ToolError("new_tab: true is only supported for browser relay sessions (app.relay: true)");
+		}
+		const created = await browser.browser.newPage();
+		let targetId: string;
+		try {
+			targetId = await targetIdForPage(created);
+		} catch (error) {
+			await created.close().catch(() => undefined);
+			throw error;
+		}
+		return {
+			mode: "attach",
+			browserWSEndpoint,
+			safeDir,
+			targetId,
+			dialogs: opts.dialogs,
+			allowedDomains: opts.allowedDomains,
+			initScripts: opts.initScripts,
+			downloadsPath: opts.downloadsPath,
+			userAgent: opts.userAgent,
+			ignoreHttpsErrors: opts.ignoreHttpsErrors,
+			activateForScreenshot: true,
+			ownsPage: true,
+		};
+	}
 	// Connected and relay browsers are user-driven. When no target is requested,
-	// adopt the visible tab and avoid raising it before screenshots. An explicit
+	// adopt the visible tab and avoid activating it before screenshots. An explicit
 	// target may be backgrounded, so retain activation for target-correct pixels.
 	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
 	const activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
@@ -1630,6 +1704,7 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		recover: true,
 		emulateFocus: tab.kindTag === "headless",
 		activateForScreenshot: tab.activateForScreenshot,
+		ownsPage: tab.ownsPage,
 	};
 	let worker = await spawnTabWorker();
 	try {
@@ -1716,7 +1791,7 @@ async function forceKillSurfaceTab(tab: CmuxTabSession | TernTabSession, name: s
 async function forceKillTabTeardown(tab: WorkerTabSession): Promise<void> {
 	await tab.worker.terminate().catch(() => undefined);
 	let targetClosed = true;
-	if (tab.kindTag === "headless") {
+	if (tab.ownsPage) {
 		targetClosed = await waitForTabCleanup(
 			tab,
 			DEFAULT_TAB_CLOSE_TIMEOUT_MS,
@@ -1774,7 +1849,6 @@ function recheckSharedBrowser(scope: SharedTargetScope): void {
 /**
  * Best-effort cleanup for a forced-kill path: close the page the tab's worker
  * reported as created. A run caller is never a browser ref holder, so the
- * browser is still in the registry; the tab's browser is the only place that
  * page can be, so no targetId guesswork across multiple sessions.
  */
 async function closeOrphanTarget(tab: WorkerTabSession): Promise<boolean> {
@@ -1803,11 +1877,16 @@ function closeAbandonedWorkerPage(browser: PuppeteerBrowserHandle, worker: Worke
 		.catch(() => undefined)
 		.finally(() => void releaseBrowser(browser, { kill: false }).catch(() => undefined));
 }
-
 async function waitForClosed(tab: WorkerTabSession): Promise<void> {
-	const { promise, resolve } = Promise.withResolvers<void>();
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
 	const unsubscribe = tab.worker.onMessage(msg => {
-		if (msg.type === "closed") resolve();
+		if (msg.type === "closed") {
+			if (msg.ok === false) {
+				reject(new ToolError(`Tab page close failed: ${msg.error ?? "unknown error"}`));
+			} else {
+				resolve();
+			}
+		}
 	});
 	try {
 		await raceWithTimeout(promise, GRACE_MS, "Timed out closing browser tab worker");

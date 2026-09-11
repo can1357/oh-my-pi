@@ -2,9 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- `browser` now takes `new_tab: true` on `open`, which drives a dedicated background tab in relay sessions instead of adopting one the user is working in ([#11662](https://github.com/can1357/oh-my-pi/pull/11662) by [@jwaldrip](https://github.com/jwaldrip)).
+
 ### Changed
 
 - Inside a Tern pane, browser opens with `headed: false` now show as a Tern picture-in-picture too; only `app.tern: false` (or `browser.tern` / `PI_BROWSER_TERN=0`) opens Chromium instead
+
+### Fixed
+
+- The browser relay no longer steals window focus when activating driven tabs for screenshots ([#11662](https://github.com/can1357/oh-my-pi/pull/11662) by [@jwaldrip](https://github.com/jwaldrip)).
 
 ## [18.7.0] - 2026-10-06
 
