@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Google Antigravity / Cloud Code Assist requests failing with a bogus 30-minute quota wait when the account still had quota: the generic HTTP 429 `Resource has been exhausted (e.g. check quota).` throttle (which carries no structured quota details) is now classified as a transient rate limit that retries on a short backoff, while genuine daily exhaustion (`exhausted your capacity … quota will reset` or structured `google.rpc` details) still rotates credentials ([#11689](https://github.com/can1357/oh-my-pi/issues/11689)).
+- Fixed Google Antigravity / Cloud Code Assist requests failing with HTTP 429 while the account still had quota: chat requests no longer enter Google's constrained agent quota bucket, and detail-free `Resource has been exhausted (e.g. check quota).` responses now retry on a short backoff without suppressing genuine account-limit signals ([#11689](https://github.com/can1357/oh-my-pi/issues/11689)).
 
 ## [18.1.17] - 2026-09-10
 

@@ -246,7 +246,7 @@ describe("Google Gemini CLI alignment", () => {
 		expect(geminiParts.some(part => part.text?.includes(unsignedThinking))).toBe(true);
 	});
 
-	it("keeps antigravity metadata in antigravity request payloads", () => {
+	it("keeps supported antigravity metadata in request payloads", () => {
 		const model = createModel("google-antigravity");
 		const context: Context = { ...createContext(), systemPrompt: ["be terse"] };
 		const payload = buildRequest(model, context, "proj-123", {}, true) as {
@@ -261,7 +261,7 @@ describe("Google Gemini CLI alignment", () => {
 		};
 
 		expect(payload.request.sessionId).toMatch(/^-[0-9]+$/);
-		expect(payload.requestType).toBe("agent");
+		expect(payload.requestType).toBeUndefined();
 		expect(payload.userAgent).toBe("antigravity");
 		// Structured requestId: agent/<agentId>/<ts>/<trajectoryId>/<step>.
 		expect(payload.requestId).toMatch(/^agent\/[0-9a-f-]+\/\d+\/[0-9a-f-]+\/\d+$/);

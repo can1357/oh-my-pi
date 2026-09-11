@@ -115,13 +115,18 @@ describe("parseRateLimitReason", () => {
 				],
 			},
 		})}`;
-		const explicitText =
-			"Cloud Code Assist API error (429): Resource has been exhausted (e.g. check quota). Project quota exceeded.";
+		const explicitTexts = [
+			"Cloud Code Assist API error (429): Resource has been exhausted (e.g. check quota). Project quota exceeded.",
+			"Cloud Code Assist API error (429): Resource has been exhausted (e.g. check quota). Daily request limit reached.",
+			"Cloud Code Assist API error (429): Resource has been exhausted (e.g. check quota). Credits depleted.",
+		];
 
 		expect(parseRateLimitReason(quotaFailure, antigravityRateLimitPolicy)).toBe("QUOTA_EXHAUSTED");
 		expect(isUsageLimitOutcome(429, quotaFailure, antigravityRateLimitPolicy)).toBe(true);
-		expect(parseRateLimitReason(explicitText, antigravityRateLimitPolicy)).toBe("QUOTA_EXHAUSTED");
-		expect(isUsageLimitOutcome(429, explicitText, antigravityRateLimitPolicy)).toBe(true);
+		for (const explicitText of explicitTexts) {
+			expect(parseRateLimitReason(explicitText, antigravityRateLimitPolicy)).toBe("QUOTA_EXHAUSTED");
+			expect(isUsageLimitOutcome(429, explicitText, antigravityRateLimitPolicy)).toBe(true);
+		}
 	});
 
 	it("keeps genuine Antigravity daily-quota exhaustion as QUOTA_EXHAUSTED", () => {

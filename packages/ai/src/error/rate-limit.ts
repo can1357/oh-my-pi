@@ -47,6 +47,8 @@ const TRANSIENT_INTERVAL_RATE_LIMIT_PATTERN = /\bper\s+(?:second|minute)\b/i;
 function matchesSubscriptionCapText(errorMessage: string): boolean {
 	return SUBSCRIPTION_CAP_PATTERN.test(errorMessage) && !TRANSIENT_INTERVAL_RATE_LIMIT_PATTERN.test(errorMessage);
 }
+const DAILY_ACCOUNT_LIMIT_PATTERN =
+	/\bdaily\b[^\n]{0,40}\b(?:message |request )?(?:rate.?limit|limit)\b|\b(?:message |request )?(?:rate.?limit|limit)\b[^\n]{0,40}\bdaily\b/i;
 const OPENROUTER_DAILY_FREE_LIMIT_PATTERN = /\bfree[-_ ]models[-_ ]per[-_ ]day\b/i;
 // ClinePass subscription-window exhaustion ("clinepass limit …") and free-tier
 // model caps ("free limit reached on model … try again in …") are account-local
@@ -117,7 +119,6 @@ const ANTIGRAVITY_MODEL_QUOTA_PATTERN = /\bexhausted your capacity on this model
 // providers can pair the same sentence with quota evidence. Provider policy
 // decides whether a truly bare body enters the short-backoff lane.
 const GOOGLE_GENERIC_RESOURCE_EXHAUSTED_PATTERN = /\bresource has been exhausted\s*\(\s*e\.?g\.?\s*check quota\s*\)/i;
-const EXPLICIT_GOOGLE_QUOTA_EVIDENCE_PATTERN = /\b(?:quota|exhaust(?:ed|ion)|usage.?limit)\b/i;
 const LONG_RATE_LIMIT_DELAY_MS = 5 * 60 * 1000;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -202,7 +203,7 @@ function isGoogleGenericResourceExhaustedText(errorMessage: string, policy?: Rat
 	const residual = errorMessage
 		.replace(GOOGLE_GENERIC_RESOURCE_EXHAUSTED_PATTERN, "")
 		.replace(RESOURCE_EXHAUSTED_PATTERN, "");
-	return !EXPLICIT_GOOGLE_QUOTA_EVIDENCE_PATTERN.test(residual);
+	return !matchesAccountLimitText(residual);
 }
 
 /**
@@ -276,6 +277,9 @@ export function parseRateLimitReason(errorMessage: string, policy?: RateLimitPol
 	if (OPENROUTER_DAILY_FREE_LIMIT_PATTERN.test(errorMessage)) {
 		return "QUOTA_EXHAUSTED";
 	}
+	if (DAILY_ACCOUNT_LIMIT_PATTERN.test(errorMessage)) {
+		return "QUOTA_EXHAUSTED";
+	}
 
 	if (CLINE_PASS_QUOTA_PATTERN.test(errorMessage)) {
 		return "QUOTA_EXHAUSTED";
@@ -342,6 +346,19 @@ export function calculateRateLimitBackoffMs(reason: RateLimitReason): number {
 /** Detect usage/quota limit errors in error messages (persistent, requires credential switch). */
 const USAGE_LIMIT_PATTERN =
 	/usage.?limit|usage_limit_reached|usage_not_included|limit_reached|quota.?(?:exceeded|reached|insufficient)|额度不足|额度耗尽|resource.?exhausted|exhausted your capacity|quota will reset|insufficient.?(?:balance|quota)|balance.?exhausted|run out of credits|out of credits|spending[- _]?limit|personal-team-blocked|clinepass limit|free limit reached on model/i;
+
+function matchesAccountLimitText(errorMessage: string): boolean {
+	return (
+		USAGE_LIMIT_PATTERN.test(errorMessage) ||
+		CREDITS_EXHAUSTED_PATTERN.test(errorMessage) ||
+		(CN_QUOTA_EXHAUSTED_PATTERN.test(errorMessage) && !CN_TRANSIENT_CAP_PATTERN.test(errorMessage)) ||
+		SPEND_LIMIT_PATTERN.test(errorMessage) ||
+		ACCOUNT_RATE_LIMIT_PATTERN.test(errorMessage) ||
+		DAILY_ACCOUNT_LIMIT_PATTERN.test(errorMessage) ||
+		matchesSubscriptionCapText(errorMessage) ||
+		OPENROUTER_DAILY_FREE_LIMIT_PATTERN.test(errorMessage)
+	);
+}
 
 /**
  * HTTP status codes that, absent richer body classification, represent an
@@ -449,15 +466,7 @@ export function matchesUsageLimitText(errorMessage: string, policy?: RateLimitPo
 	// A provider policy can exclude only the detail-free boilerplate. Structured
 	// details and residual quota evidence remain credential-rotatable.
 	if (isGoogleGenericResourceExhaustedText(errorMessage, policy)) return false;
-	return (
-		USAGE_LIMIT_PATTERN.test(errorMessage) ||
-		CREDITS_EXHAUSTED_PATTERN.test(errorMessage) ||
-		(CN_QUOTA_EXHAUSTED_PATTERN.test(errorMessage) && !CN_TRANSIENT_CAP_PATTERN.test(errorMessage)) ||
-		SPEND_LIMIT_PATTERN.test(errorMessage) ||
-		ACCOUNT_RATE_LIMIT_PATTERN.test(errorMessage) ||
-		matchesSubscriptionCapText(errorMessage) ||
-		OPENROUTER_DAILY_FREE_LIMIT_PATTERN.test(errorMessage)
-	);
+	return matchesAccountLimitText(errorMessage);
 }
 
 /**

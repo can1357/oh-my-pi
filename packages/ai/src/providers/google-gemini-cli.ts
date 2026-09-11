@@ -1398,13 +1398,14 @@ export function buildRequest(
 			request.generationConfig = generationConfig;
 		}
 		request.sessionId = envelope.sessionId;
+		// The official client omits requestType. Sending "agent" routes consumer
+		// projects into a constrained quota bucket that can reject the first request.
 		return {
 			project: projectId,
 			requestId: envelope.requestId,
 			request,
 			model: wireModelId,
 			userAgent: "antigravity",
-			requestType: "agent",
 		};
 	}
 
