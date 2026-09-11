@@ -21,6 +21,7 @@ import {
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { logger, sanitizeText, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { TRUNCATE_LENGTHS } from "../tools/render-utils";
+import { encodeWav } from "../tts/wav";
 import type { SttStreamHandle, SttStreamOptions } from "./asr-client";
 import { resolveCloudSttModel } from "./cloud-models";
 
@@ -154,7 +155,7 @@ async function transcribeBuffer(
 	audio: Float32Array,
 ): Promise<string> {
 	// Encode once: a credential retry replays the upload, not the WAV encode.
-	const wav = new Blob([encodeWav16k(audio)], { type: "audio/wav" });
+	const wav = new Blob([encodeWav(audio, MIC_SAMPLE_RATE)], { type: "audio/wav" });
 	const credential = options.credential;
 	if (credential.kind === "openai") return await transcribeWithApiKey(fetchImpl, options, credential, wav);
 	return await withOAuthAccess(
@@ -292,35 +293,4 @@ async function postTranscription(
 	}
 	const body = (await response.json()) as { text?: string };
 	return (body.text ?? "").trim();
-}
-
-/** Encode 16 kHz mono float samples as a PCM16 WAV file. */
-export function encodeWav16k(audio: Float32Array): ArrayBuffer {
-	const buffer = new ArrayBuffer(44 + audio.length * 2);
-	const view = new DataView(buffer);
-	writeWavHeader(view, audio.length);
-	const pcm = new Int16Array(buffer, 44);
-	for (let i = 0; i < audio.length; i++) {
-		pcm[i] = Math.max(-32768, Math.min(32767, Math.round(audio[i]! * 32767)));
-	}
-	return buffer;
-}
-
-function writeWavHeader(view: DataView, samples: number): void {
-	const writeAscii = (offset: number, text: string): void => {
-		for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
-	};
-	writeAscii(0, "RIFF");
-	view.setUint32(4, 36 + samples * 2, true);
-	writeAscii(8, "WAVE");
-	writeAscii(12, "fmt ");
-	view.setUint32(16, 16, true);
-	view.setUint16(20, 1, true);
-	view.setUint16(22, 1, true);
-	view.setUint32(24, MIC_SAMPLE_RATE, true);
-	view.setUint32(28, MIC_SAMPLE_RATE * 2, true);
-	view.setUint16(32, 2, true);
-	view.setUint16(34, 16, true);
-	writeAscii(36, "data");
-	view.setUint32(40, samples * 2, true);
 }
