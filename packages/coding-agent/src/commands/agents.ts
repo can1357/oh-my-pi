@@ -1,5 +1,5 @@
 /**
- * Manage bundled task agents.
+ * List or unpack bundled task agents.
  */
 
 import { Args, Command, Flags, renderCommandHelp } from "@oh-my-pi/pi-utils/cli";
@@ -7,7 +7,7 @@ import { type AgentsAction, type AgentsCommandArgs, runAgentsCommand } from "../
 import { agentsHelp as commandHelp } from "../cli/command-help";
 import { initTheme } from "../modes/theme/theme";
 
-const ACTIONS: AgentsAction[] = ["unpack"];
+const ACTIONS: AgentsAction[] = ["list", "unpack"];
 
 export default class Agents extends Command {
 	static description = commandHelp.description;
@@ -28,6 +28,8 @@ export default class Agents extends Command {
 	};
 
 	static examples = [
+		"# List bundled task agents\n  omp agents list",
+		"# List bundled task agents as JSON\n  omp agents list --json",
 		"# Export bundled agents into user config (default)\n  omp agents unpack",
 		"# Export bundled agents into project config\n  omp agents unpack --project",
 		"# Overwrite existing local agent files\n  omp agents unpack --project --force",

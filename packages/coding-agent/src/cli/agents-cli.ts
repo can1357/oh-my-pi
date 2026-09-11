@@ -1,7 +1,8 @@
 /**
  * Agents CLI command handlers.
  *
- * Handles `omp agents unpack` for writing bundled agent definitions to disk.
+ * Handles `omp agents list` for listing bundled agent definitions and
+ * `omp agents unpack` for writing those definitions to disk.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -12,7 +13,7 @@ import { theme } from "../modes/theme/theme";
 import { loadBundledAgents } from "../task/agents";
 import type { AgentDefinition } from "../task/types";
 
-export type AgentsAction = "unpack";
+export type AgentsAction = "list" | "unpack";
 
 export interface AgentsCommandArgs {
 	action: AgentsAction;
@@ -34,6 +35,37 @@ interface UnpackResult {
 
 function writeStdout(line: string): void {
 	process.stdout.write(`${line}\n`);
+}
+
+function sortedBundledAgents(): AgentDefinition[] {
+	return [...loadBundledAgents()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function bundledAgentSummary(agent: AgentDefinition): Record<string, unknown> {
+	const summary: Record<string, unknown> = {
+		name: agent.name,
+		description: agent.description,
+		source: agent.source,
+	};
+	if (agent.tools && agent.tools.length > 0) summary.tools = agent.tools;
+	if (agent.model && agent.model.length > 0) summary.model = agent.model;
+	if (agent.thinkingLevel) summary.thinkingLevel = agent.thinkingLevel;
+	if (agent.spawns !== undefined) summary.spawns = agent.spawns;
+	return summary;
+}
+
+function listBundledAgents(json: boolean | undefined): void {
+	const bundledAgents = sortedBundledAgents();
+	if (json) {
+		writeStdout(JSON.stringify({ agents: bundledAgents.map(bundledAgentSummary) }, null, 2));
+		return;
+	}
+
+	writeStdout(chalk.bold(`Bundled agents: ${bundledAgents.length}`));
+	for (const agent of bundledAgents) {
+		writeStdout(`${chalk.cyan(agent.name)}`);
+		writeStdout(`  ${agent.description}`);
+	}
 }
 
 function resolveTargetDir(flags: AgentsCommandArgs["flags"]): string {
@@ -78,7 +110,7 @@ async function unpackBundledAgents(flags: AgentsCommandArgs["flags"]): Promise<U
 	const targetDir = resolveTargetDir(flags);
 	await fs.mkdir(targetDir, { recursive: true });
 
-	const bundledAgents = [...loadBundledAgents()].sort((a, b) => a.name.localeCompare(b.name));
+	const bundledAgents = sortedBundledAgents();
 	const written: string[] = [];
 	const skipped: string[] = [];
 
@@ -108,6 +140,10 @@ async function unpackBundledAgents(flags: AgentsCommandArgs["flags"]): Promise<U
 
 export async function runAgentsCommand(cmd: AgentsCommandArgs): Promise<void> {
 	switch (cmd.action) {
+		case "list": {
+			listBundledAgents(cmd.flags.json);
+			return;
+		}
 		case "unpack": {
 			const result = await unpackBundledAgents(cmd.flags);
 			if (cmd.flags.json) {

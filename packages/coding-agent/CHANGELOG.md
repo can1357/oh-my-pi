@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- `omp agents list` now prints the bundled task agents (name + description, or `--json` catalog). Help and the CLI reference no longer claim the command "manages" agents when only `unpack` existed.
 ## [18.1.17] - 2026-09-10
 
 ### Added
