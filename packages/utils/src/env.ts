@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as util from "node:util";
 import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv } from "./dirs";
 import { getPreloadedProjectEnv } from "./env-preload";
 
@@ -101,7 +102,7 @@ function expandDotenvValues(values: Record<string, string>, env: Record<string, 
 				if (escaped) return match.slice(1);
 				const name = braced ?? bare;
 				if (!name) return match;
-				return env[name] ?? expanded[name] ?? "";
+				return env[name] ?? expanded[name] ?? values[name] ?? "";
 			},
 		);
 	}
@@ -184,44 +185,15 @@ export function filterChildShellEnv(
 	return result;
 }
 
-/**
- * Parse one dotenv line with Bun-compatible semantics: an optional `export`
- * prefix, full-line `#` comments, inline `#` comments after whitespace on
- * unquoted values, and single/double/backtick quoting (a `#` inside quotes
- * stays literal). Returns undefined for blank lines, comments, and malformed
- * names.
- */
-function parseEnvLine(line: string): { key: string; value: string } | undefined {
-	const trimmed = line.trim();
-	if (!trimmed || trimmed.startsWith("#")) return undefined;
-	const eqIndex = trimmed.indexOf("=");
-	if (eqIndex === -1) return undefined;
-	let key = trimmed.slice(0, eqIndex).trim();
-	const exported = key.match(/^export[ \t]+(.*)$/);
-	if (exported) key = exported[1].trim();
-	if (!isValidEnvName(key)) return undefined;
-	const raw = trimmed.slice(eqIndex + 1).replace(/^[ \t]+/, "");
-	const quote = raw[0];
-	if (quote === '"' || quote === "'" || quote === "`") {
-		let close = raw.indexOf(quote, 1);
-		while (close !== -1 && raw[close - 1] === "\\") close = raw.indexOf(quote, close + 1);
-		return { key, value: close === -1 ? raw.slice(1) : raw.slice(1, close) };
-	}
-	const commentIndex = raw.search(/[ \t]#/);
-	return { key, value: (commentIndex === -1 ? raw : raw.slice(0, commentIndex)).trimEnd() };
-}
-
 function parseEnvContent(content: string): Record<string, string> {
+	const parsed = util.parseEnv(content);
 	const result: Record<string, string> = {};
-	for (const line of content.split("\n")) {
-		const parsed = parseEnvLine(line);
-		if (parsed && isSafeEnvValue(parsed.value)) result[parsed.key] = parsed.value;
+	for (const key in parsed) {
+		const value = parsed[key];
+		if (isValidEnvName(key) && value !== undefined && isSafeEnvValue(value)) result[key] = value;
 	}
-
 	for (const key in result) {
-		if (key.startsWith("OMP_")) {
-			result[`PI_${key.slice(4)}`] = result[key];
-		}
+		if (key.startsWith("OMP_")) result[`PI_${key.slice(4)}`] = result[key];
 	}
 	return result;
 }

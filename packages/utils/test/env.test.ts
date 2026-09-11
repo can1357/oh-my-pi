@@ -95,8 +95,21 @@ describe("project dotenv reuse and expansion", () => {
 		},
 	);
 
-	it("expands $VAR references env.ts owns when Bun autoload is disabled", async () => {
-		const dir = path.dirname(writeTempEnv("BASE=root\nAPI=$BASE/v1\n"));
+	it("preserves Bun parsing and expansion when native autoload is disabled", async () => {
+		const dir = path.dirname(
+			writeTempEnv(
+				[
+					"BASE=root",
+					"API=$BASE/v1",
+					"FORWARD=$LATER",
+					"LATER=resolved",
+					'CERTIFICATE="-----BEGIN CERTIFICATE-----',
+					"payload",
+					'-----END CERTIFICATE-----"',
+					'ESCAPED="first\\nsecond\\rthird"',
+				].join("\n"),
+			),
+		);
 		const proc = Bun.spawn([process.execPath, "--no-env-file", expandProbePath], {
 			cwd: dir,
 			stdout: "pipe",
@@ -108,7 +121,13 @@ describe("project dotenv reuse and expansion", () => {
 			proc.exited,
 		]);
 		expect(exitCode, stderr).toBe(0);
-		expect(JSON.parse(stdout)).toEqual({ api: "root/v1", base: "root" });
+		expect(JSON.parse(stdout)).toEqual({
+			api: "root/v1",
+			base: "root",
+			forward: "resolved",
+			certificate: "-----BEGIN CERTIFICATE-----\npayload\n-----END CERTIFICATE-----",
+			escaped: "first\nsecond\rthird",
+		});
 	});
 });
 
@@ -181,10 +200,11 @@ describe("parseEnvFile", () => {
 		});
 	});
 
-	it("matches Bun dotenv syntax for export prefixes and inline comments", () => {
+	it("matches Bun dotenv syntax for export prefixes, colons, and comments", () => {
 		const filePath = writeTempEnv(
 			[
 				"export EXPORTED=value",
+				"COLON: yaml-style",
 				"COMMENTED=secret # trailing comment",
 				'QUOTED_HASH="keep # this"',
 				"NO_SPACE=http://host/path#frag",
@@ -193,9 +213,10 @@ describe("parseEnvFile", () => {
 
 		expect(parseEnvFile(filePath)).toEqual({
 			EXPORTED: "value",
+			COLON: "yaml-style",
 			COMMENTED: "secret",
 			QUOTED_HASH: "keep # this",
-			NO_SPACE: "http://host/path#frag",
+			NO_SPACE: "http://host/path",
 		});
 	});
 
@@ -205,6 +226,25 @@ describe("parseEnvFile", () => {
 		expect(parseEnvFile(filePath)).toEqual({
 			JSON: '{\\"a\\":1}',
 			SINGLE: "it\\'s",
+		});
+	});
+
+	it("preserves multiline quotes and decodes double-quoted newline escapes", () => {
+		const filePath = writeTempEnv(
+			[
+				'MULTILINE="first',
+				'second"',
+				'DOUBLE="first\\nsecond\\rthird"',
+				"SINGLE='first\\nsecond'",
+				"BACKTICK=`first\\nsecond`",
+			].join("\n"),
+		);
+
+		expect(parseEnvFile(filePath)).toEqual({
+			MULTILINE: "first\nsecond",
+			DOUBLE: "first\nsecond\rthird",
+			SINGLE: "first\\nsecond",
+			BACKTICK: "first\\nsecond",
 		});
 	});
 });
