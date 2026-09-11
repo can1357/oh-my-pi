@@ -129,7 +129,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "set_todos", phases: TodoPhase[] }`
 - `{ id?, type: "set_host_tools", tools: RpcHostToolDefinition[] }`
 - `{ id?, type: "set_host_uri_schemes", schemes: RpcHostUriSchemeDefinition[] }`
-- `{ id?, type: "set_subagent_subscription", level: "off" | "progress" | "events" }`
+- `{ id?, type: "set_subagent_subscription", level: "off" | "progress" | "messages" | "events" }`
 - `{ id?, type: "get_subagents" }`
 - `{ id?, type: "get_subagent_messages", subagentId?: string, sessionFile?: string, fromByte?: number }`
 
@@ -527,7 +527,10 @@ Subagent forwarding defaults to `"off"`. `set_subagent_subscription` selects:
 
 - `"off"`: no forwarded subagent frames
 - `"progress"`: lifecycle and progress frames
+- `"messages"`: lifecycle, progress, and completed child messages (`subagent_event` with `payload.event.type: "message_end"`), including all message roles
 - `"events"`: lifecycle, progress, and full subagent event frames
+
+Use `"messages"` when a client needs completed child transcripts without partial-message updates, tool-stream updates, or repeated turn/agent message aggregates. These events are filtered before RPC encoding. Progress frames, parent-session events, and persisted child transcripts are unchanged. This reduces forwarded traffic; it does not bound completed-message size or total queued output.
 
 `get_subagents` returns the registry snapshot sorted by subagent index and id.
 `get_subagent_messages` selects a transcript by `subagentId` or `sessionFile`;

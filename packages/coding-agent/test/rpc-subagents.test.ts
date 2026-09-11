@@ -23,6 +23,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 const tempPaths: string[] = [];
 
@@ -171,6 +172,152 @@ describe("RPC subagent registry", () => {
 		]);
 
 		registry.dispose();
+	});
+
+	test("messages subscribers retain completed roles and progress without streaming or aggregate events", () => {
+		const frames: RpcSubagentFrame[] = [];
+		const eventBus = new EventBus();
+		const registry = new RpcSubagentRegistry(eventBus, frame => frames.push(frame));
+		registry.setSubscriptionLevel("messages");
+		const lifecycle: SubagentLifecyclePayload = {
+			id: "SubagentA",
+			index: 0,
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+		};
+		const progress: SubagentProgressPayload = {
+			index: 0,
+			agent: "task",
+			agentSource: "bundled",
+			task: "Do work",
+			assignment: "Implement work",
+			progress: createProgress(),
+		};
+		const assistant = createAssistantMessage("ABC");
+		const completed: SubagentEventPayload[] = [
+			{
+				id: "SubagentA",
+				event: { type: "message_end", message: { role: "user", content: "Request", timestamp: 1 } },
+			},
+			{ id: "SubagentA", event: { type: "message_end", message: assistant } },
+			{
+				id: "SubagentA",
+				event: {
+					type: "message_end",
+					message: {
+						role: "toolResult",
+						toolCallId: "call-1",
+						toolName: "read",
+						content: [{ type: "text", text: "Result" }],
+						isError: false,
+						timestamp: 2,
+					},
+				},
+			},
+		];
+		const discarded: SubagentEventPayload[] = [
+			{ id: "SubagentA", event: { type: "message_start", message: assistant } },
+			{
+				id: "SubagentA",
+				event: {
+					type: "tool_execution_update",
+					toolCallId: "call-1",
+					toolName: "read",
+					args: {},
+					partialResult: "partial",
+				},
+			},
+			{ id: "SubagentA", event: { type: "turn_end", message: assistant, toolResults: [] } },
+			{ id: "SubagentA", event: { type: "agent_end", messages: [assistant] } },
+		];
+		try {
+			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle);
+			eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, progress);
+			for (const payload of discarded) eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, payload);
+			for (const payload of completed) eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, payload);
+			const terminal = { ...lifecycle, status: "completed" } satisfies SubagentLifecyclePayload;
+			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, terminal);
+			expect(frames).toEqual([
+				{ type: "subagent_lifecycle", payload: lifecycle },
+				{ type: "subagent_progress", payload: progress },
+				...completed.map(payload => ({ type: "subagent_event" as const, payload })),
+				{ type: "subagent_lifecycle", payload: terminal },
+			]);
+		} finally {
+			registry.dispose();
+		}
+	});
+
+	test("messages subscribers never serialize growing partial snapshots while events subscribers still receive them", () => {
+		const frames: string[] = [];
+		const registry = new RpcSubagentRegistry(new EventBus(), frame => frames.push(JSON.stringify(frame)));
+		let serializedPartials = 0;
+		const updates: SubagentEventPayload[] = ["A", "AB", "ABC"].map((text, index) => {
+			const message = Object.assign(createAssistantMessage(text), {
+				toJSON() {
+					serializedPartials++;
+					return createAssistantMessage(text);
+				},
+			});
+			return {
+				id: "SubagentA",
+				event: {
+					type: "message_update",
+					message,
+					assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text[index], partial: message },
+				},
+			};
+		});
+		try {
+			registry.setSubscriptionLevel("messages");
+			for (const update of updates) registry.handleEvent(update);
+			expect(frames).toEqual([]);
+			expect(serializedPartials).toBe(0);
+			registry.setSubscriptionLevel("events");
+			for (const update of updates) registry.handleEvent(update);
+			expect(frames.map(frame => JSON.parse(frame).payload.event.message.content[0].text)).toEqual([
+				"A",
+				"AB",
+				"ABC",
+			]);
+			expect(serializedPartials).toBe(6);
+		} finally {
+			registry.dispose();
+		}
+	});
+
+	test("messages subscribers receive late completed messages until their RPC session is cleared", () => {
+		const frames: RpcSubagentFrame[] = [];
+		const registry = new RpcSubagentRegistry(new EventBus(), frame => frames.push(frame));
+		registry.setSubscriptionLevel("messages");
+		const lifecycle: SubagentLifecyclePayload = {
+			id: "SubagentA",
+			index: 0,
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			sessionFile: "/tmp/subagent.jsonl",
+		};
+		const completed: SubagentEventPayload = {
+			id: "SubagentA",
+			event: { type: "message_end", message: createAssistantMessage("Final") },
+		};
+		try {
+			registry.handleLifecycle(lifecycle);
+			registry.handleLifecycle({ ...lifecycle, status: "aborted" });
+			registry.handleEvent(completed);
+			expect(frames.at(-1)).toEqual({ type: "subagent_event", payload: completed });
+			frames.length = 0;
+			registry.clear();
+			registry.handleEvent(completed);
+			expect(frames).toEqual([]);
+			registry.handleLifecycle(lifecycle);
+			registry.handleEvent(completed);
+			expect(frames.map(frame => frame.type)).toEqual(["subagent_lifecycle", "subagent_event"]);
+		} finally {
+			registry.dispose();
+		}
 	});
 
 	test("clears stale snapshots when the active RPC session changes", () => {
@@ -362,6 +509,22 @@ describe("readRpcSubagentTranscript", () => {
 });
 
 describe("RpcClient subagent frames", () => {
+	test("the native RPC server accepts the completed-message subscription", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-rpc-messages-"));
+		tempPaths.push(dir);
+		using client = new RpcClient({
+			cliPath: path.join(import.meta.dir, "../src/cli.ts"),
+			cwd: dir,
+			env: { PI_CODING_AGENT_DIR: dir },
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			args: ["--no-extensions", "--no-skills", "--no-tools", "--no-session"],
+		});
+		await client.start();
+		await expect(client.setSubagentSubscription("messages")).resolves.toBe("messages");
+		await expect(client.setSubagentSubscription("events")).resolves.toBe("events");
+	});
+
 	test("dispatches subagent frames and session-specific events", async () => {
 		const scriptPath = path.join(os.tmpdir(), `omp-rpc-subagent-client-${Date.now()}.js`);
 		tempPaths.push(scriptPath);
