@@ -4,7 +4,6 @@
  * This file handles CLI argument parsing and translates them into
  * createAgentSession() options. The SDK does the heavy lifting.
  */
-import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -1506,18 +1505,17 @@ export async function buildSessionOptions(
 	// session's cwd — an ACP host invokes it per client workspace, and a
 	// relative `--extension ./pkg/index.ts` must resolve to project B's package
 	// directory for B's sessions, not the launch workspace's absolute root.
-	const derivePackageRoots = async (sessionCwd: string): Promise<string[]> => {
+	const derivePackageRoots = (sessionCwd: string): string[] => {
 		const roots: string[] = [];
 		for (const extensionPath of agentExtensionRoots) {
 			// Absolute spellings are workspace-independent; resolvePath is a
 			// no-op for them, so both forms derive through the same walk.
 			try {
 				const resolved = resolvePath(extensionPath, sessionCwd);
-				const stat = await fs.stat(resolved);
-				if (!stat.isFile()) continue;
+				if (!fsSync.statSync(resolved).isFile()) continue;
 				let dir = path.dirname(resolved);
 				while (true) {
-					if (await Bun.file(path.join(dir, "package.json")).exists()) {
+					if (fsSync.existsSync(path.join(dir, "package.json"))) {
 						roots.push(dir);
 						break;
 					}
@@ -1531,83 +1529,42 @@ export async function buildSessionOptions(
 		}
 		return roots;
 	};
+	// Cached per cwd: the walk only covers `--extension`/`--hooks` spellings
+	// (typically none), and a per-cwd result never changes on disk mid-session.
 	const packageRootsByCwd = new Map<string, string[]>();
-	const packageRootsInFlight = new Map<string, Promise<string[]>>();
-	const packageRootsFor = async (sessionCwd?: string): Promise<string[]> => {
+	const packageRootsFor = (sessionCwd?: string): string[] => {
 		const effectiveCwd = sessionCwd ?? options_cwd;
-		const roots = packageRootsByCwd.get(effectiveCwd);
-		if (roots) return roots;
-		// Memoize the in-flight walk: repeated sync provider calls during the
-		// derivation window must not each start a duplicate fs scan.
-		let pending = packageRootsInFlight.get(effectiveCwd);
-		if (!pending) {
-			pending = derivePackageRoots(effectiveCwd).then(
-				derived => {
-					packageRootsByCwd.set(effectiveCwd, derived);
-					packageRootsInFlight.delete(effectiveCwd);
-					return derived;
-				},
-				() => {
-					// The walk already swallows per-path fs errors, so this is a
-					// last-resort settle: cache "no extra package roots" for the
-					// cwd (the outcome the sync lane needs) instead of stranding
-					// callers on a rejected memo.
-					packageRootsByCwd.set(effectiveCwd, []);
-					packageRootsInFlight.delete(effectiveCwd);
-					return [] as string[];
-				},
-			);
-			packageRootsInFlight.set(effectiveCwd, pending);
-		}
-		return pending;
+		const cached = packageRootsByCwd.get(effectiveCwd);
+		if (cached !== undefined) return cached;
+		const derived = derivePackageRoots(effectiveCwd);
+		packageRootsByCwd.set(effectiveCwd, derived);
+		return derived;
 	};
 	const buildPersonaExtensionRoots = async (
 		sessionCwd?: string,
 		sessionSettings?: Settings,
-	): Promise<EffectiveExtensionRoots> => {
-		const sessionPackageRoots = await packageRootsFor(sessionCwd);
+	): Promise<EffectiveExtensionRoots> => buildRootsView(sessionCwd, sessionSettings);
+	const buildRootsView = (sessionCwd?: string, sessionSettings?: Settings): EffectiveExtensionRoots => {
 		const settingsFor = sessionSettings ?? activeSettings;
 		return buildEffectiveExtensionRoots({
-			additionalExtensionPaths: [...agentExtensionRoots, ...sessionPackageRoots],
+			additionalExtensionPaths: [...agentExtensionRoots, ...packageRootsFor(sessionCwd)],
 			disableExtensionDiscovery: trustedExtensionCount > 0 || parsed.noExtensions === true,
 			configured: settingsFor.get("extensions") ?? [],
 			configuredLevel: settingsFor.extensionsSourceLevel(),
 		});
 	};
-	const launchRootsView = await buildPersonaExtensionRoots();
+	const launchRootsView = buildRootsView();
 	// `options.extensionRoots` is a SYNC provider (subagent discovery reads it
-	// synchronously). The as-derivable parts recompute per call: settings
-	// reloads change `extensions`, and a TUI/RPC session switch changes the
-	// live cwd — recomputing keeps `/agent`, task-agent, and skill discovery
-	// tied to the CURRENT workspace. The package-root portion is the only
-	// async part; it is cached per cwd (fs walks are not callable sync).
-	// fw_sE: the cache must be the SAME map the async derivation populates
-	// (a snapshot copy would never see later cwds), and the default cwd must
-	// be the LIVE session cwd — after a TUI/RPC switchSession the session's
-	// manager cwd is authoritative, not the launch cwd.
-	options.extensionRoots = (sessionCwd?: string): EffectiveExtensionRoots => {
-		const liveCwd = sessionCwd ?? options_cwd;
-		const cachedRoots = packageRootsByCwd.get(liveCwd);
-		if (cachedRoots === undefined && agentExtensionRoots.length > 0) {
-			// First sync call for a workspace whose package roots the async
-			// derivation has not populated yet (a TUI/RPC session switch reaches
-			// here before any rederive call). `undefined` distinguishes that from
-			// a workspace that legitimately derives ZERO roots — serving the launch
-			// view for the latter would scan workspace A's packages after a switch
-			// to B. Kick the derivation so the next discovery call is correct, and
-			// serve the launch view only for this first, bounded window. The
-			// memoized walk always settles (see packageRootsFor), so firing it
-			// here can never surface an unhandled rejection.
-			void packageRootsFor(liveCwd);
-			return launchRootsView;
-		}
-		return buildEffectiveExtensionRoots({
-			additionalExtensionPaths: [...agentExtensionRoots, ...(cachedRoots ?? [])],
-			disableExtensionDiscovery: trustedExtensionCount > 0 || parsed.noExtensions === true,
-			configured: activeSettings.get("extensions") ?? [],
-			configuredLevel: activeSettings.extensionsSourceLevel(),
-		});
-	};
+	// synchronously) and is FULLY recomputed per call — settings reloads change
+	// `extensions`, and a TUI/RPC session switch changes the live cwd, so
+	// `/agent`, task-agent, and skill discovery always track the CURRENT
+	// workspace. Package roots derive synchronously against the REQUESTING cwd
+	// (cached per cwd, cheap): there is no derivation window in which a switched
+	// session could be served the launch workspace's roots, so the post-switch
+	// persona reconcile cannot resolve against stale roots.
+	// fw_sE: the default cwd stays the LIVE session cwd for hosts that invoke the
+	// provider without an argument; AgentSession passes the manager cwd explicitly.
+	options.extensionRoots = (sessionCwd?: string): EffectiveExtensionRoots => buildRootsView(sessionCwd);
 	const agentResolutionRoots = launchRootsView;
 
 	// `--agent <name>`: resolve the persona BEFORE the session is built so its
