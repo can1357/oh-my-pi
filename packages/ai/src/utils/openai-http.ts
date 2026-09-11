@@ -101,10 +101,11 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		// Session turn recovery owns rate limits: rotate the credential or fall
 		// back to another model rather than replaying a saturated route.
 		rateLimitBudget: true,
-		// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
-		// surfaces immediately instead of being slept-and-retried here; session
-		// recovery owns its backoff/fallback (issue #8854).
-		shouldRetryResponse: (response, bodyText) => !isConcurrencyAdmissionRejection(response, bodyText),
+		// Concurrency admission and account quota failures belong to session
+		// recovery even when the body also carries a short retry hint.
+		shouldRetryResponse: (response, bodyText) =>
+			!isConcurrencyAdmissionRejection(response, bodyText) &&
+			!AIError.isUsageLimitOutcome(response.status, bodyText),
 		// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
 		// Cold large-context streams legitimately exceed it; the caller's
 		// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.

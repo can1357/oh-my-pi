@@ -10,9 +10,10 @@
  * itself promises a short recovery window; transient 5xx/408 keep their full
  * transport budget.
  */
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { __anthropicApiErrorForTesting } from "@oh-my-pi/pi-ai/error";
 import { AnthropicApiError, AnthropicMessagesClient } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
@@ -90,6 +91,10 @@ async function countCompletionsRequests(respond: (request: number) => Response):
 		text: result.content.find(block => block.type === "text")?.text,
 	};
 }
+afterEach(() => {
+	vi.restoreAllMocks();
+	__anthropicApiErrorForTesting.setBodyReadTimeoutMs(undefined);
+});
 
 describe("transport rate-limit budget", () => {
 	it("spends one request on a persistent 429 that offers no recovery signal", async () => {
@@ -98,7 +103,6 @@ describe("transport rate-limit budget", () => {
 		expect(outcome.requests).toBe(1);
 		expect(outcome.stopReason).toBe("error");
 		expect(outcome.errorStatus).toBe(429);
-		vi.restoreAllMocks();
 	});
 
 	it("spends at most MAX_RATE_LIMIT_ATTEMPTS requests on a persistent 429 with a short retry hint", async () => {
@@ -108,7 +112,6 @@ describe("transport rate-limit budget", () => {
 		expect(outcome.requests).toBe(MAX_RATE_LIMIT_ATTEMPTS);
 		expect(outcome.stopReason).toBe("error");
 		expect(outcome.errorStatus).toBe(429);
-		vi.restoreAllMocks();
 	});
 
 	it("still recovers in-place when a short-hinted 429 clears on the next attempt", async () => {
@@ -119,7 +122,6 @@ describe("transport rate-limit budget", () => {
 		expect(outcome.requests).toBe(2);
 		expect(outcome.stopReason).toBe("stop");
 		expect(outcome.text).toBe("recovered");
-		vi.restoreAllMocks();
 	});
 
 	it("spends one request on a quota-exhaustion 429 so credential rotation runs immediately", async () => {
@@ -129,7 +131,17 @@ describe("transport rate-limit budget", () => {
 		);
 		expect(outcome.requests).toBe(1);
 		expect(outcome.stopReason).toBe("error");
-		vi.restoreAllMocks();
+	});
+	it("spends one request on a quota-exhaustion 429 even when it carries a short retry hint", async () => {
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const outcome = await countCompletionsRequests(() =>
+			rateLimited(
+				{ "retry-after-ms": "1" },
+				'{"error":{"message":"You have hit your usage limit","type":"insufficient_quota"}}',
+			),
+		);
+		expect(outcome.requests).toBe(1);
+		expect(outcome.stopReason).toBe("error");
 	});
 
 	it("spends one request on a 429 whose recovery window is too long to wait out", async () => {
@@ -137,7 +149,6 @@ describe("transport rate-limit budget", () => {
 		const outcome = await countCompletionsRequests(() => rateLimited({ "retry-after": "600" }));
 		expect(outcome.requests).toBe(1);
 		expect(outcome.stopReason).toBe("error");
-		vi.restoreAllMocks();
 	});
 
 	it("keeps the full transport budget for provider capacity failures", async () => {
@@ -145,7 +156,6 @@ describe("transport rate-limit budget", () => {
 		const outcome = await countCompletionsRequests(() => new Response("overloaded", { status: 503 }));
 		expect(outcome.requests).toBeGreaterThan(MAX_RATE_LIMIT_ATTEMPTS);
 		expect(outcome.stopReason).toBe("error");
-		vi.restoreAllMocks();
 	});
 
 	it("does not retry a 401 at the transport layer", async () => {
@@ -154,7 +164,6 @@ describe("transport rate-limit budget", () => {
 		expect(outcome.requests).toBe(1);
 		expect(outcome.stopReason).toBe("error");
 		expect(outcome.errorStatus).toBe(401);
-		vi.restoreAllMocks();
 	});
 
 	it("keeps N parallel callers at O(N) requests against a rate-limited route", async () => {
@@ -176,7 +185,6 @@ describe("transport rate-limit budget", () => {
 		);
 		expect(results.every(result => result.stopReason === "error")).toBe(true);
 		expect(requests).toBeLessThanOrEqual(callers * MAX_RATE_LIMIT_ATTEMPTS);
-		vi.restoreAllMocks();
 	});
 
 	it("bounds the anthropic transport the same way", async () => {
@@ -196,7 +204,6 @@ describe("transport rate-limit budget", () => {
 		}).result();
 		expect(result.stopReason).toBe("error");
 		expect(requests).toBeLessThanOrEqual(MAX_RATE_LIMIT_ATTEMPTS);
-		vi.restoreAllMocks();
 	});
 
 	// An in-band `rate_limit_error` frame arrives on a 200 stream, so it carries
@@ -221,7 +228,6 @@ describe("transport rate-limit budget", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(429);
 		expect(requests).toBe(1);
-		vi.restoreAllMocks();
 	});
 
 	// Anthropic states the recovery window in the error body as often as in a
@@ -248,7 +254,48 @@ describe("transport rate-limit budget", () => {
 
 		expect(response.status).toBe(200);
 		expect(requests).toBe(MAX_RATE_LIMIT_ATTEMPTS);
-		vi.restoreAllMocks();
+	});
+
+	it("applies the caller's retry-delay cap to an anthropic body-only hint", async () => {
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		let requests = 0;
+		const fetchMock: FetchImpl = async () => {
+			requests++;
+			return rateLimited(
+				{},
+				'{"type":"error","error":{"type":"rate_limit_error","message":"Too many requests. Please retry in 100ms"}}',
+			);
+		};
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 5, fetch: fetchMock });
+
+		const error = await client.messages
+			.create({ model: "claude-test", max_tokens: 16, messages: [] } as never, { maxRetryDelayMs: 1 })
+			.asResponse()
+			.catch((err: unknown) => err);
+
+		expect(error).toBeInstanceOf(AnthropicApiError);
+		expect(requests).toBe(1);
+	});
+
+	it("spends one request on an anthropic quota 429 even when it carries a short hint", async () => {
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		let requests = 0;
+		const fetchMock: FetchImpl = async () => {
+			requests++;
+			return rateLimited(
+				{ "retry-after-ms": "1" },
+				'{"type":"error","error":{"type":"insufficient_quota","message":"You have hit your usage limit"}}',
+			);
+		};
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 5, fetch: fetchMock });
+
+		const error = await client.messages
+			.create({ model: "claude-test", max_tokens: 16, messages: [] } as never)
+			.asResponse()
+			.catch((err: unknown) => err);
+
+		expect(error).toBeInstanceOf(AnthropicApiError);
+		expect(requests).toBe(1);
 	});
 
 	it("surfaces a body-only long retry hint on the anthropic transport immediately", async () => {
@@ -272,6 +319,27 @@ describe("transport rate-limit budget", () => {
 		if (!(error instanceof AnthropicApiError)) throw error;
 		expect(error.status).toBe(429);
 		expect(requests).toBe(1);
-		vi.restoreAllMocks();
+	});
+
+	it("uses the bounded anthropic error-body decoder before deciding whether to retry", async () => {
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		__anthropicApiErrorForTesting.setBodyReadTimeoutMs(0);
+		let requests = 0;
+		const fetchMock: FetchImpl = async () => {
+			requests++;
+			return rateLimited(
+				{},
+				'{"type":"error","error":{"type":"rate_limit_error","message":"Too many requests. Please retry in 20ms"}}',
+			);
+		};
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 5, fetch: fetchMock });
+
+		const error = await client.messages
+			.create({ model: "claude-test", max_tokens: 16, messages: [] } as never)
+			.asResponse()
+			.catch((err: unknown) => err);
+
+		expect(error).toBeInstanceOf(AnthropicApiError);
+		expect(requests).toBe(1);
 	});
 });
