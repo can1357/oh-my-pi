@@ -589,4 +589,12 @@ export interface ResolvedAxes {
 	wire: Record<string, unknown>;
 	thinking: Record<string, unknown>;
 	catalog: Record<string, unknown>;
+	/**
+	 * Reasoning capability after the exact-model effort upgrade: `true` when the
+	 * target reported reasoning or an exact rule declares a ladder for it (the
+	 * reviewed correction to metadata-less discovery rows). Compat resolvers
+	 * read this instead of the raw spec flag, or one id resolves two different
+	 * wire contracts depending on whether it came from discovery or the bake.
+	 */
+	reasoning: boolean;
 }

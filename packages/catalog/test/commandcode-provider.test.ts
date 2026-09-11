@@ -80,6 +80,40 @@ describe("Command Code provider support", () => {
 		});
 	});
 
+	test("resolves DeepSeek V4.1 Flash's rule-owned surface over neutral discovery metadata", async () => {
+		// The Provider API ships no capability metadata for this id, so the
+		// ladder, image input, and DeepSeek reasoning-content contract have to
+		// arrive through `buildModel`. Without them a regenerated catalog
+		// silently returns the model to an empty thinking control and stripped
+		// attachments, and compat resolves against the discovery row's missing
+		// reasoning instead of the capability the provider contract declares.
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			Response.json({
+				object: "list",
+				data: [{ id: "deepseek/deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", context_length: 1_000_000 }],
+			}),
+		);
+		const options = commandCodeModelManagerOptions({ apiKey: "user_test", fetch: fetchMock });
+		const specs = await options.fetchDynamicModels?.();
+		const models = (specs ?? []).map(spec => buildModel(spec));
+
+		expect(models.find(model => model.id === "deepseek/deepseek-v4.1-flash")).toMatchObject({
+			api: "openai-completions",
+			baseUrl: "https://api.commandcode.ai/provider/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			thinking: { mode: "effort", efforts: ["low", "high", "max"] },
+			compat: {
+				supportsReasoningEffort: true,
+				stripImageInput: false,
+				disableReasoningOnToolChoice: true,
+				requiresReasoningContentForToolCalls: true,
+				requiresReasoningContentForAllAssistantTurns: true,
+				allowsSyntheticReasoningContentForToolCalls: false,
+			},
+		});
+	});
+
 	test("discovers the public catalog without credentials", async () => {
 		let requestHeaders: RequestInit["headers"];
 		const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {

@@ -1,10 +1,13 @@
 // Command Code Provider API deployment contract. Model capabilities and effort
 // ladders follow command-code@1.44.0: the thinking-efforts below reproduce the
 // bundle's 36-id effort registry 1:1 (verified against its effort map), plus
-// the 5 Muse Spark lineage ids whose ladder OMP's classes/meta.kdl carries.
-// Every other served id exposes no effort dial upstream (`modelSupports-
-// ReasoningEffort` is false for them in the CLI), so a missing ladder here
-// is a deliberate absence, not a gap.
+// the 5 Muse Spark lineage ids whose ladder OMP's classes/meta.kdl carries and
+// `deepseek/deepseek-v4.1-flash`, which postdates that bundle (see its rule).
+// Every id the 1.44.0 census serves without an effort dial keeps a missing
+// ladder here as a deliberate absence, not a gap (`modelSupportsReasoning-
+// Effort` is false for those ids in that bundle). Later bundles (1.53.0) hand
+// dials to a few further ids — MiniMaxAI/MiniMax-M3 and meta/muse-spark-1.3's
+// `max` — which stay out of this change.
 provider "commandcode" {
 	supports-developer-role #false
 	supports-store #false
@@ -43,6 +46,19 @@ provider "commandcode" {
 		"zai-org/GLM-5.3" {
 		supports-reasoning-effort #true
 		thinking-efforts "low" "high" "max"
+	}
+	// `deepseek/deepseek-v4.1-flash` postdates command-code@1.44.0, so it is
+	// absent from that bundle's effort registry; command-code@1.53.0 lists it
+	// in the same low/high/max group as Kimi K3 and GLM-5.3, and the live docs
+	// model table carries the same scale plus image input.
+	models "deepseek/deepseek-v4.1-flash" {
+		supports-reasoning-effort #true
+		thinking-efforts "low" "high" "max"
+		// The class's `token="vision"` exemption misses this id (its name
+		// carries no `vision` token) even though the deployment serves it with
+		// image input, so the opt-out is explicit here.
+		strip-image-input #false
+		input-modalities "text" "image"
 	}
 	models "google/gemini-3.1-flash-lite" "google/gemini-3.5-flash" \
 		"google/gemini-3.5-flash-lite" "google/gemini-3.6-flash" "google/gemini-3.7-flash" \
