@@ -261,6 +261,27 @@ describe("cloud STT stream", () => {
 		await expect(stopped).resolves.toBe("");
 		expect((stub.calls[0]!.init.signal as AbortSignal).aborted).toBe(true);
 	});
+
+	it("sanitizes a hostile provider error body before it reaches the TUI", async () => {
+		const hostile = `\u001b[31mdenied\u001b[0m\tby\nproxy\u0007 ${"x".repeat(400)}`;
+		const stub = stubFetch(hostile, 400);
+		stub.impl = (async (url: string, init: RequestInit) => {
+			stub.calls.push({ url, init });
+			return new Response(hostile, { status: 400 });
+		}) as typeof fetch;
+		const handle = startCloudSttStream({ credential: { kind: "openai", apiKey: "sk-test" }, fetchImpl: stub.impl });
+		handle.pushAudio(sine16kHz(160));
+		const message = await handle.stop().then(
+			() => "resolved",
+			(err: Error) => err.message,
+		);
+		expect(message).toStartWith("Cloud transcription failed (400): ");
+		// No ANSI, control characters, tabs, or newlines survive into the warning.
+		expect(message).not.toMatch(/[\u0000-\u0008\u000a-\u001f\u007f]/);
+		// ANSI stripped, tab widened to spaces, newline collapsed, BEL dropped.
+		expect(message).toContain("denied   by proxy ");
+		expect(Bun.stringWidth(message)).toBeLessThanOrEqual("Cloud transcription failed (400): ".length + 80);
+	});
 });
 
 describe("encodeWav16k", () => {
