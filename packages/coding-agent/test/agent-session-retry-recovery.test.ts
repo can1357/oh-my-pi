@@ -221,6 +221,77 @@ describe("AgentSession retry recovery", () => {
 		return { session, sessionManager, retryEndEvents, requestedKeys };
 	}
 
+	it("waitForIdle waits for retry recovery event delivery", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const mock = createMockModel({
+			responses: [{ throw: RETRIABLE_SERVER_ERROR }, { content: ["Recovered after retry."], stopReason: "stop" }],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => modelRegistry.resolver(requestedModel, agent.sessionId),
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": true,
+				"retry.baseDelayMs": 5,
+				"retry.maxDelayMs": 100,
+				"retry.maxRetries": 1,
+				"retry.modelFallback": false,
+				"features.unexpectedStopDetection": "none",
+			}),
+			modelRegistry,
+		});
+		sessions.push(session);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		const rewriteStarted = Promise.withResolvers<void>();
+		const resumeRewrite = Promise.withResolvers<void>();
+		const rewriteEntries = sessionManager.rewriteEntries.bind(sessionManager);
+		vi.spyOn(sessionManager, "rewriteEntries").mockImplementation(async () => {
+			rewriteStarted.resolve();
+			await resumeRewrite.promise;
+			await rewriteEntries();
+		});
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+		let idleResolved = false;
+		const completion = (async () => {
+			await session.prompt("Recover from the transient failure.");
+			await session.waitForIdle();
+			idleResolved = true;
+			unsubscribe();
+		})();
+
+		try {
+			await Promise.race([rewriteStarted.promise, completion]);
+			// Drain runnable work without releasing the recovery persistence gate.
+			const nextImmediate = Promise.withResolvers<void>();
+			setImmediate(nextImmediate.resolve);
+			await nextImmediate.promise;
+			expect(idleResolved).toBe(false);
+			expect(retryEndEvents).toEqual([]);
+		} finally {
+			resumeRewrite.resolve();
+			try {
+				await completion;
+			} finally {
+				unsubscribe();
+			}
+		}
+
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
+	});
+
 	it("marks a recovered retry error, emits it, persists it, and excludes only model-context replay", async () => {
 		const { sessionManager, retryEndEvents, requestedKeys } = await runCredentialRecovery();
 

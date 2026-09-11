@@ -5131,11 +5131,20 @@ export class AgentSession {
 		return this.agent.isAborting;
 	}
 
-	/** Wait until streaming, event persistence, and deferred recovery work are fully settled. */
+	/**
+	 * Wait until streaming, event persistence, and deferred recovery work are fully settled.
+	 * Call outside callbacks whose completion the session awaits to avoid waiting on yourself.
+	 */
 	async waitForIdle(): Promise<void> {
-		await this.agent.waitForIdle();
-		await this.#advisors.waitForPendingCardEvents();
-		await this.#waitForPostPromptRecovery();
+		while (true) {
+			await this.agent.waitForIdle();
+			await this.#advisors.waitForPendingCardEvents();
+			// Core subscribers run asynchronously. Retry recovery can still be
+			// rewriting entries before it publishes auto_retry_end.
+			await this.#drainInFlightEventHandlers();
+			await this.#waitForPostPromptRecovery();
+			if (!this.agent.state.isStreaming && this.#inFlightEventHandlers.size === 0) return;
+		}
 	}
 	/**
 	 * Prevent advisor notes from starting hidden primary turns while a headless

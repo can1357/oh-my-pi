@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `AgentSession.waitForIdle()` returning before successful retry recovery events and persistence had settled.
+
 ## [18.1.17] - 2026-09-10
 
 ### Added
