@@ -65,17 +65,16 @@ function getExtensionFactory(module: LoadedExtensionModule): ExtensionFactory | 
 }
 
 /**
- * Upstream-shaped provenance for an extension-registered tool. Mirrors the
- * `SourceInfo` synthesized by `SessionTools.getAllToolInfos()`, so consumers that
- * read `sourceInfo` off `getAllRegisteredTools()` (e.g. pi-fabric) see the same
- * on-disk path — or the synthetic `<extension:name>` fallback for tools with no
- * filesystem origin.
+ * Upstream-shaped provenance for an extension-registered tool. Consumers that
+ * read `sourceInfo` off `getAllRegisteredTools()` (e.g. pi-fabric) receive the
+ * resolved on-disk extension path — or the synthetic `<extension:name>` fallback
+ * for tools with no filesystem origin.
  */
 export function extensionToolSourceInfo(
 	definition: Pick<ToolDefinition, "name" | "sourcePath">,
-	extensionPath: string,
+	fallbackPath: string,
 ): SourceInfo {
-	const candidate = definition.sourcePath ?? extensionPath;
+	const candidate = definition.sourcePath ?? fallbackPath;
 	const path = candidate && isFilesystemSourcePath(candidate) ? candidate : `<extension:${definition.name}>`;
 	return { path, source: "extension", scope: "temporary", origin: "top-level" };
 }
@@ -199,7 +198,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		const registered = {
 			definition: tool,
 			extensionPath: this.extension.path,
-			sourceInfo: extensionToolSourceInfo(tool, this.extension.path),
+			sourceInfo: extensionToolSourceInfo(tool, this.extension.resolvedPath),
 		};
 		this.extension.tools.set(tool.name, registered);
 		for (const listener of this.extension.toolRegistrationListeners ?? []) listener(tool.name);

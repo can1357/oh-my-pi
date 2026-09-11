@@ -86,7 +86,7 @@ describe("AgentSession.getAllToolInfos", () => {
 		}
 	});
 
-	it("reports the originating custom-tool file path instead of a synthetic stub", async () => {
+	it("uses stored registered provenance instead of re-deriving a relative extension path", async () => {
 		const tempDir = TempDir.createSync("@getalltools-sourcepath-");
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
@@ -122,8 +122,14 @@ describe("AgentSession.getAllToolInfos", () => {
 				getRegisteredTool: (name: string) =>
 					name === "git"
 						? {
-								extensionPath: "<inline-0>",
-								definition: { sourcePath },
+								extensionPath: "./extension.ts",
+								definition: { sourcePath: "./tools/git.ts" },
+								sourceInfo: {
+									path: sourcePath,
+									source: "extension",
+									scope: "temporary",
+									origin: "top-level",
+								},
 							}
 						: undefined,
 			} as never,

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { ExtensionRuntime, loadExtensionFromFactory } from "../src/extensibility/extensions/loader";
+import * as path from "node:path";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { ExtensionRuntime, loadExtensionFromFactory, loadExtensions } from "../src/extensibility/extensions/loader";
 import { ExtensionRunner } from "../src/extensibility/extensions/runner";
 import { EventBus } from "../src/utils/event-bus";
 
@@ -63,5 +65,38 @@ describe("RegisteredTool sourceInfo (upstream pi compat)", () => {
 
 		// extensionPath stays intact for existing host callers.
 		expect(runner.getRegisteredTool("fs_tool")?.extensionPath).toBe("pi-fabric@0.92.4");
+	});
+
+	test("relative extension entries expose their resolved on-disk source path", async () => {
+		const projectDir = TempDir.createSync("@registered-tool-source-info-");
+		const relativePath = "./plugin.ts";
+		const resolvedPath = path.join(projectDir.path(), "plugin.ts");
+		await Bun.write(
+			resolvedPath,
+			`
+				export default function(api) {
+					api.registerTool({
+						name: "relative_tool",
+						label: "Relative Tool",
+						description: "tool loaded from a relative extension entry",
+						parameters: api.arktype({}),
+						execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+					});
+				}
+			`,
+		);
+
+		try {
+			const loaded = await loadExtensions([relativePath], projectDir.path());
+			expect(loaded.errors).toEqual([]);
+			expect(loaded.extensions).toHaveLength(1);
+
+			const extension = loaded.extensions[0];
+			expect(extension?.path).toBe(relativePath);
+			expect(extension?.resolvedPath).toBe(resolvedPath);
+			expect(extension?.tools.get("relative_tool")?.sourceInfo.path).toBe(resolvedPath);
+		} finally {
+			projectDir.removeSync();
+		}
 	});
 });
