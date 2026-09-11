@@ -82,11 +82,25 @@ export function resolveAuthBrokerConfig(): Promise<AuthBrokerClientConfig | null
  *
  * Default `agentDir` is the current configured agent directory.
  */
+function resolveAccountPriority(provider: string): readonly string[] | undefined {
+	try {
+		const { settings } = require("../config/settings");
+		const map = settings.get("auth.accountPriority") as Record<string, string[]> | undefined;
+		if (map && Array.isArray(map[provider]) && map[provider].length > 0) {
+			return map[provider];
+		}
+	} catch {
+		// settings singleton not yet initialized
+	}
+	return undefined;
+}
+
 export function discoverAuthStorage(
 	agentDir: string = getAgentDir(),
 	options?: Omit<DiscoverAuthStorageOptions, "agentDir" | "configValueResolver">,
 ): Promise<AuthStorage> {
 	return discoverAuthStorageShared({
+		accountPriorityResolver: options?.accountPriorityResolver ?? resolveAccountPriority,
 		...options,
 		agentDir,
 		configValueResolver: resolveConfigValue,

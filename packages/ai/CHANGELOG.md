@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for configuring account priority order when multiple accounts exist for the same provider, with automatic failover to lower-priority accounts upon rate limits, blocks, or quota exhaustion.
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed

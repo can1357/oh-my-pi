@@ -17,6 +17,7 @@ import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
+import { handleAccountListCommand, handleAccountPriorityCommand } from "./helpers/account-priority";
 import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
 
 async function handleUsageResetCommand(
@@ -180,7 +181,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "session",
 		description: "Session management commands",
 		acpDescription: "Show or configure the current session",
-		acpInputHint: "[info|delete|pin [account]]",
+		acpInputHint: "[info|delete|pin|priority [account/order]]",
 		subcommands: [
 			{ name: "info", description: "Show session info and stats" },
 			{ name: "delete", description: "Delete current session and return to selector" },
@@ -188,6 +189,11 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				name: "pin",
 				description: "Pin the current provider to a stored OAuth account",
 				usage: "[account]",
+			},
+			{
+				name: "priority",
+				description: "View or set account priority order for current provider",
+				usage: "[order...]",
 			},
 		],
 		allowArgs: true,
@@ -226,7 +232,12 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				await handleSessionPinCommand(rest, runtime.session, runtime.output);
 				return commandConsumed();
 			}
-			return usage("Usage: /session [info|delete|pin [account]]", runtime);
+			if (verb === "priority") {
+				const result = await handleAccountPriorityCommand(rest, runtime.session);
+				await runtime.output(result);
+				return commandConsumed();
+			}
+			return usage("Usage: /session [info|delete|pin [account]|priority [order...]]", runtime);
 		},
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
@@ -245,11 +256,72 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.editor.setText("");
 				return;
 			}
+			if (verb === "priority") {
+				if (rest) {
+					const result = await handleAccountPriorityCommand(rest, runtime.ctx.session);
+					runtime.ctx.showStatus(result);
+				} else {
+					await runtime.ctx.showAccountPrioritySelector();
+				}
+				runtime.ctx.editor.setText("");
+				return;
+			}
 			if (!verb || (verb === "info" && !rest)) {
 				await runtime.ctx.handleSessionCommand();
 			} else {
-				runtime.ctx.showStatus("Usage: /session [info|delete|pin [account]]");
+				runtime.ctx.showStatus("Usage: /session [info|delete|pin [account]|priority [order...]]");
 			}
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "account",
+		icon: "signIn",
+		description: "Account management and priority order",
+		acpDescription: "Manage provider accounts and priority",
+		acpInputHint: "[list|priority [provider] [order...]]",
+		subcommands: [
+			{ name: "list", description: "List stored accounts for a provider", usage: "[provider]" },
+			{
+				name: "priority",
+				description: "View or set account priority order for a provider",
+				usage: "[provider] [order...]",
+			},
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			if (verb === "priority") {
+				const result = await handleAccountPriorityCommand(rest, runtime.session);
+				await runtime.output(result);
+				return commandConsumed();
+			}
+			if (verb === "list" || !verb) {
+				const result = await handleAccountListCommand(rest, runtime.session);
+				await runtime.output(result);
+				return commandConsumed();
+			}
+			return usage("Usage: /account [list|priority [provider] [order...]]", runtime);
+		},
+		handleTui: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			if (verb === "priority") {
+				if (rest) {
+					const result = await handleAccountPriorityCommand(rest, runtime.ctx.session);
+					runtime.ctx.showStatus(result);
+				} else {
+					await runtime.ctx.showAccountPrioritySelector();
+				}
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (verb === "list" || !verb) {
+				const result = await handleAccountListCommand(rest, runtime.ctx.session);
+				runtime.ctx.showStatus(result);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			runtime.ctx.showStatus("Usage: /account [list|priority [provider] [order...]]");
 			runtime.ctx.editor.setText("");
 		},
 	},

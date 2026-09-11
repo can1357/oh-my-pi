@@ -585,6 +585,7 @@ export interface CredentialDisabledEvent {
 export type AuthStorageOptions = {
 	usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
 	rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
+	accountPriorityResolver?: (provider: string) => readonly string[] | undefined;
 	usageFetch?: typeof fetch;
 	usageRequestTimeoutMs?: number;
 	usageLogger?: UsageLogger;
@@ -946,6 +947,8 @@ export interface OAuthAccountSummary {
 	orgName?: string;
 	/** True when this account is the session-sticky OAuth credential requested by `listOAuthAccounts`. */
 	active: boolean;
+	/** 1-based priority rank if configured in the provider's account priority list. */
+	priority?: number;
 }
 export interface InvalidateCredentialMatchingOptions {
 	signal?: AbortSignal;
@@ -1326,9 +1329,43 @@ type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> & {
 	primaryUsed: number;
 	primaryRequiredDrain: number;
 	orderPos: number;
+	priorityRank?: number;
 };
 type RankedOAuthCandidate = UsageRankedCandidate<OAuthCredential>;
 type RankedApiKeyCandidate = UsageRankedCandidate<ApiKeyCredential>;
+export function credentialMatchesAccountSelector(
+	credential: AuthCredential,
+	credentialId: number | undefined,
+	position: number,
+	selector: string,
+): boolean {
+	const wanted = selector.trim().toLowerCase();
+	if (!wanted) return false;
+	if (/^\d+$/.test(wanted) && Number(wanted) === position + 1) return true;
+	if (credentialId !== undefined) {
+		if (wanted === `id:${credentialId}` || wanted === String(credentialId)) return true;
+	}
+	if (credential.type === "oauth") {
+		const fields = [
+			credential.email,
+			credential.accountId,
+			credential.projectId,
+			credential.enterpriseUrl,
+			credential.orgId,
+			credential.orgName,
+		];
+		for (const field of fields) {
+			if (typeof field === "string" && field.trim().toLowerCase() === wanted) {
+				return true;
+			}
+		}
+	} else if (credential.type === "api_key") {
+		if (typeof credential.key === "string" && credential.key.trim().toLowerCase() === wanted) {
+			return true;
+		}
+	}
+	return false;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AuthStorage Class
@@ -1381,6 +1418,8 @@ export class AuthStorage {
 	#runtimeUsageProviderOverrides: Map<Provider, { provider: UsageProvider; apiKey?: string }> = new Map();
 	#usageReportCacheKeysByProvider: Map<Provider, Set<string>> = new Map();
 	#rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
+	#accountPriorityResolver?: (provider: string) => readonly string[] | undefined;
+	#accountPriorities: Map<string, readonly string[]> = new Map();
 	#usageCache: UsageCache;
 	#usageCacheEpoch = 0;
 	#usageRequestInFlight: Map<string, Promise<UsageReport | null>> = new Map();
@@ -1416,6 +1455,7 @@ export class AuthStorage {
 		this.#configValueResolver = options.configValueResolver ?? defaultConfigValueResolver;
 		this.#usageProviderResolver = options.usageProviderResolver ?? resolveDefaultUsageProvider;
 		this.#rankingStrategyResolver = options.rankingStrategyResolver ?? resolveDefaultRankingStrategy;
+		this.#accountPriorityResolver = options.accountPriorityResolver;
 		this.#usageCache = new AuthStorageUsageCache(this.#store);
 		// Opportunistic hygiene, once per AuthStorage lifetime: drop expired
 		// cache rows (24h last-good retention). A cheap indexed DELETE;
@@ -1623,6 +1663,31 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Set or clear the resolver for provider account priorities.
+	 */
+	setAccountPriorityResolver(resolver: ((provider: string) => readonly string[] | undefined) | undefined): void {
+		this.#accountPriorityResolver = resolver;
+	}
+
+	/**
+	 * Set explicit account priority order for a provider (e.g. list of emails or account IDs).
+	 */
+	setAccountPriority(provider: string, priority: readonly string[] | undefined): void {
+		if (!priority || priority.length === 0) {
+			this.#accountPriorities.delete(provider);
+		} else {
+			this.#accountPriorities.set(provider, priority);
+		}
+	}
+
+	/**
+	 * Get the account priority order for a provider.
+	 */
+	getAccountPriority(provider: string): readonly string[] | undefined {
+		return this.#accountPriorities.get(provider) ?? this.#accountPriorityResolver?.(provider);
+	}
+
+	/**
 	 * Reload credentials from storage.
 	 */
 	async reload(): Promise<void> {
@@ -1823,6 +1888,42 @@ export class AuthStorage {
 			order.push((start + i) % total);
 		}
 		return order;
+	}
+
+	/**
+	 * Returns credential indices ordered by configured priority (or round-robin / hash fallback).
+	 */
+	#getPrioritizedCredentialOrder(
+		provider: string,
+		credentials: Array<{ credential: AuthCredential; index: number }>,
+		providerKey: string,
+		sessionId: string | undefined,
+	): number[] {
+		if (credentials.length <= 1) return [0];
+		const priority = this.getAccountPriority(provider);
+		if (!priority || priority.length === 0) {
+			return this.#getCredentialOrder(providerKey, sessionId, credentials.length);
+		}
+		const storedList = this.#getStoredCredentials(provider);
+		const ranks = credentials.map((item, position) => {
+			const credentialId = storedList[item.index]?.id;
+			let matchedRank = -1;
+			for (let p = 0; p < priority.length; p++) {
+				if (credentialMatchesAccountSelector(item.credential, credentialId, position, priority[p]!)) {
+					matchedRank = p;
+					break;
+				}
+			}
+			return {
+				position,
+				rank: matchedRank === -1 ? Number.POSITIVE_INFINITY : matchedRank,
+			};
+		});
+		ranks.sort((a, b) => {
+			if (a.rank !== b.rank) return a.rank - b.rank;
+			return a.position - b.position;
+		});
+		return ranks.map(r => r.position);
 	}
 
 	#toScopedBackoffKey(providerKey: string, blockScope: string | undefined): string {
@@ -2205,7 +2306,7 @@ export class AuthStorage {
 		if (credentials.length === 1) return credentials[0];
 
 		const providerKey = this.#getProviderTypeKey(provider, type);
-		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
+		const order = this.#getPrioritizedCredentialOrder(provider, credentials, providerKey, sessionId);
 		const fallback = credentials[order[0]];
 
 		for (const idx of order) {
@@ -2303,6 +2404,21 @@ export class AuthStorage {
 			const secondary = windows?.secondary;
 			const usageMeasured = primary !== undefined || secondary !== undefined;
 			const primaryUncapped = primary === undefined && secondary !== undefined;
+			const priority = this.getAccountPriority(args.provider);
+			let priorityRank: number | undefined = undefined;
+			if (priority && priority.length > 0) {
+				const credentialId = this.#getStoredCredentials(args.provider)[selection.index]?.id;
+				const position = args.credentials.findIndex(c => c.index === selection.index);
+				for (let p = 0; p < priority.length; p++) {
+					if (credentialMatchesAccountSelector(selection.credential, credentialId, position, priority[p]!)) {
+						priorityRank = p;
+						break;
+					}
+				}
+				if (priorityRank === undefined) {
+					priorityRank = Number.POSITIVE_INFINITY;
+				}
+			}
 			ranked.push({
 				selection,
 				usage,
@@ -2321,6 +2437,7 @@ export class AuthStorage {
 				primaryUsed: this.#normalizeUsageFraction(primary),
 				primaryRequiredDrain: this.#computeWindowRequiredDrain(primary, nowMs, strategy.windowDefaults.primaryMs),
 				orderPos,
+				priorityRank,
 			});
 		}
 		return this.#orderUsageRankedCandidates(ranked, "none");
@@ -2343,7 +2460,7 @@ export class AuthStorage {
 		if (credentials.length === 1) return credentials[0];
 
 		const providerKey = this.#getProviderTypeKey(provider, "api_key");
-		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
+		const order = this.#getPrioritizedCredentialOrder(provider, credentials, providerKey, sessionId);
 		const fallback = credentials[order[0]];
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		if (!strategy) {
@@ -4921,7 +5038,17 @@ export class AuthStorage {
 			const leftBlockedUntil = left.blockedUntil ?? Number.POSITIVE_INFINITY;
 			const rightBlockedUntil = right.blockedUntil ?? Number.POSITIVE_INFINITY;
 			if (leftBlockedUntil !== rightBlockedUntil) return leftBlockedUntil - rightBlockedUntil;
+			if (left.priorityRank !== undefined || right.priorityRank !== undefined) {
+				const leftRank = left.priorityRank ?? Number.POSITIVE_INFINITY;
+				const rightRank = right.priorityRank ?? Number.POSITIVE_INFINITY;
+				if (leftRank !== rightRank) return leftRank - rightRank;
+			}
 			return 0;
+		}
+		if (left.priorityRank !== undefined || right.priorityRank !== undefined) {
+			const leftRank = left.priorityRank ?? Number.POSITIVE_INFINITY;
+			const rightRank = right.priorityRank ?? Number.POSITIVE_INFINITY;
+			if (leftRank !== rightRank) return leftRank - rightRank;
 		}
 		if (planRequirement !== "none" && left.planPriority !== right.planPriority) {
 			return left.planPriority - right.planPriority;
@@ -5088,6 +5215,21 @@ export class AuthStorage {
 			const secondary = windows?.secondary;
 			const usageMeasured = primary !== undefined || secondary !== undefined;
 			const primaryUncapped = primary === undefined && secondary !== undefined;
+			const priority = this.getAccountPriority(args.provider);
+			let priorityRank: number | undefined = undefined;
+			if (priority && priority.length > 0) {
+				const credentialId = this.#getStoredCredentials(args.provider)[selection.index]?.id;
+				const position = args.credentials.findIndex(c => c.index === selection.index);
+				for (let p = 0; p < priority.length; p++) {
+					if (credentialMatchesAccountSelector(selection.credential, credentialId, position, priority[p]!)) {
+						priorityRank = p;
+						break;
+					}
+				}
+				if (priorityRank === undefined) {
+					priorityRank = Number.POSITIVE_INFINITY;
+				}
+			}
 			ranked.push({
 				selection,
 				usage,
@@ -5106,6 +5248,7 @@ export class AuthStorage {
 				primaryUsed: this.#normalizeUsageFraction(primary),
 				primaryRequiredDrain: this.#computeWindowRequiredDrain(primary, nowMs, strategy.windowDefaults.primaryMs),
 				orderPos,
+				priorityRank,
 			});
 		}
 		return this.#orderUsageRankedCandidates(ranked, args.planRequirement);
@@ -5141,7 +5284,7 @@ export class AuthStorage {
 		if (credentials.length === 0) return undefined;
 
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
-		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
+		const order = this.#getPrioritizedCredentialOrder(provider, credentials, providerKey, sessionId);
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		const rankingContext: CredentialRankingContext = {
 			modelId: options?.modelId,
@@ -5183,8 +5326,9 @@ export class AuthStorage {
 		// ties (the ranked comparator falls back to `orderPos`) without overriding a strictly-better
 		// sibling — this respects the residual value of a same-account shared static prefix that other
 		// workspace traffic may have kept warm, while still rotating away from a clearly-worse account.
-		const baseRankingOrder = credentials.map((_credential, index) => index);
-		let rankingOrder = shouldRank && sessionId ? baseRankingOrder : order;
+		const priority = this.getAccountPriority(provider);
+		const baseRankingOrder = priority && priority.length > 0 ? order : credentials.map((_credential, index) => index);
+		let rankingOrder = shouldRank && sessionId ? (priority && priority.length > 0 ? order : baseRankingOrder) : order;
 		const sessionPreferredRankingPos =
 			shouldRank && sessionId && sessionPreferredIndex !== undefined && !hasPlanRequirement
 				? credentials.findIndex(entry => entry.index === sessionPreferredIndex)
@@ -6120,17 +6264,32 @@ export class AuthStorage {
 			sessionCredential?.type === "oauth"
 				? this.#getStoredCredentials(provider)[sessionCredential.index]?.id
 				: undefined;
-		return this.#getStoredOAuthSelections(provider).map((selection, position) => ({
-			position,
-			credentialId: selection.credentialId,
-			accountId: selection.credential.accountId,
-			email: selection.credential.email,
-			projectId: selection.credential.projectId,
-			enterpriseUrl: selection.credential.enterpriseUrl,
-			orgId: selection.credential.orgId,
-			orgName: selection.credential.orgName,
-			active: selection.credentialId === activeCredentialId,
-		}));
+		const priority = this.getAccountPriority(provider);
+		return this.#getStoredOAuthSelections(provider).map((selection, position) => {
+			let priorityNum: number | undefined;
+			if (priority && priority.length > 0) {
+				for (let p = 0; p < priority.length; p++) {
+					if (
+						credentialMatchesAccountSelector(selection.credential, selection.credentialId, position, priority[p]!)
+					) {
+						priorityNum = p + 1;
+						break;
+					}
+				}
+			}
+			return {
+				position,
+				credentialId: selection.credentialId,
+				accountId: selection.credential.accountId,
+				email: selection.credential.email,
+				projectId: selection.credential.projectId,
+				enterpriseUrl: selection.credential.enterpriseUrl,
+				orgId: selection.credential.orgId,
+				orgName: selection.credential.orgName,
+				active: selection.credentialId === activeCredentialId,
+				priority: priorityNum,
+			};
+		});
 	}
 
 	/**
