@@ -814,8 +814,11 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.advisorClosed": "\ueae7",
 	// pick:  | alt: ◷ ◴
 	"icon.time": "\uf017",
-	// pick: 󰏿 (nf-md-pi) | alt:  π ∏ ∑
-	"icon.omp": "\u{f03ff}",
+	// pick: 󰵗 (nf-md-pi) | alt:  π ∏ ∑
+	// INTENTIONAL: U+F0D57 is the chosen glyph here. It has been "fixed" to
+	// U+F03FF before (2ec52b8bdd) and reverted because it renders the wrong glyph;
+	// do not swap it again.
+	"icon.omp": "\u{f0d57}",
 	// pick: 󱊷 (nf-md-keyboard_esc) | alt: ⎋
 	"icon.esc": "\u{f12b7}",
 	// pick: 󰊠 (nf-md-ghost) | alt: 👻
