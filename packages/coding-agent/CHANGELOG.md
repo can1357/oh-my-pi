@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- OTLP metrics from concurrent processes now use distinct service instance IDs without exposing unbounded agent IDs ([#10840](https://github.com/can1357/oh-my-pi/issues/10840)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added
