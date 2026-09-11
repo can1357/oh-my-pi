@@ -16,7 +16,7 @@ import {
 	discoveryProbeTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
 import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
+import { ModelsConfigSchema, ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -131,6 +131,67 @@ describe("ModelRegistry runtime discovery", () => {
 					status: 200,
 					headers: { "Content-Type": "application/json" },
 				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+	}
+
+	/**
+	 * Built-in LiteLLM proxy whose only readable rich route, `/model/info`,
+	 * takes `modelInfoDelayMs` to answer; `/v1/models` is instant and carries no
+	 * reasoning metadata. Requests honour their `AbortSignal` like a real fetch.
+	 */
+	function mockSlowLiteLLMProxy(managementBaseUrl: string, modelInfoDelayMs: number): FetchImpl {
+		return async (input, init) => {
+			const url = String(input);
+			if (init?.signal?.aborted) {
+				throw init.signal.reason ?? new DOMException("Aborted", "AbortError");
+			}
+			if (url === "https://catalog.stencil.so/models.json.zstd") {
+				return new Response("{}", { status: 500 });
+			}
+			if (
+				url === `${managementBaseUrl}/model_group/info` ||
+				url === `${managementBaseUrl}/v2/model/info` ||
+				url === `${managementBaseUrl}/v1/model/info`
+			) {
+				return new Response("{}", { status: 404 });
+			}
+			if (url === `${managementBaseUrl}/model/info`) {
+				const { promise, resolve, reject } = Promise.withResolvers<Response>();
+				const timer = setTimeout(
+					() =>
+						resolve(
+							Response.json({
+								data: [
+									{
+										model_name: "internal/slow-reasoner",
+										model_info: {
+											max_input_tokens: 200_000,
+											max_output_tokens: 32_000,
+											supports_vision: false,
+											supports_reasoning: true,
+											supports_function_calling: true,
+											supported_openai_params: ["reasoning_effort"],
+										},
+									},
+								],
+							}),
+						),
+					modelInfoDelayMs,
+				);
+				init?.signal?.addEventListener(
+					"abort",
+					() => {
+						clearTimeout(timer);
+						reject(init.signal?.reason ?? new DOMException("Aborted", "AbortError"));
+					},
+					{ once: true },
+				);
+				return promise;
+			}
+			if (url === `${managementBaseUrl}/v1/models`) {
+				return Response.json({ data: [{ id: "internal/slow-reasoner" }] });
 			}
 			throw new Error(`Unexpected URL: ${url}`);
 		};
@@ -874,6 +935,34 @@ describe("ModelRegistry runtime discovery", () => {
 			registry.getAvailable().some(model => model.provider === "ollama-cloud" && model.id === "gpt-oss:120b"),
 		).toBe(true);
 	});
+	test("models.yml discoveryTimeoutMs bounds the built-in litellm rich metadata walk", async () => {
+		writeRawModelsJson({ litellm: { baseUrl: "http://127.0.0.1:4000/v1", discoveryTimeoutMs: 50 } });
+		authStorage.setRuntimeApiKey("litellm", "sk-litellm-test");
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: mockSlowLiteLLMProxy("http://127.0.0.1:4000", 200),
+		});
+
+		await registry.refreshProvider("litellm");
+
+		// The 200 ms /model/info exceeds the 50 ms budget, so only the /v1/models
+		// row (no reasoning metadata) can be discovered.
+		const model = registry.find("litellm", "internal/slow-reasoner");
+		expect(model?.provider).toBe("litellm");
+		expect(model?.reasoning).toBe(false);
+	});
+	test("models.yml discoveryTimeoutMs above the proxy latency keeps built-in litellm rich metadata", async () => {
+		writeRawModelsJson({ litellm: { baseUrl: "http://127.0.0.1:4000/v1", discoveryTimeoutMs: 1_000 } });
+		authStorage.setRuntimeApiKey("litellm", "sk-litellm-test");
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: mockSlowLiteLLMProxy("http://127.0.0.1:4000", 200),
+		});
+
+		await registry.refreshProvider("litellm");
+
+		const model = registry.find("litellm", "internal/slow-reasoner");
+		expect(model?.reasoning).toBe(true);
+		expect(model?.contextWindow).toBe(200_000);
+	});
 	test("discovers ollama models at runtime and treats auth:none providers as available", async () => {
 		writeRawModelsJson({
 			ollama: {
@@ -1552,6 +1641,13 @@ providers:
 		expect(ProviderDiscoverySchema.allows({ type: "llama.cpp", timeoutMs: 0 })).toBe(false);
 		expect(ProviderDiscoverySchema.allows({ type: "llama.cpp", timeoutMs: Number.NaN })).toBe(false);
 		expect(ProviderDiscoverySchema.allows({ type: "llama.cpp", timeoutMs: "30000" as any })).toBe(false);
+	});
+	test("ModelsConfigSchema validates provider-level discoveryTimeoutMs", () => {
+		expect(ModelsConfigSchema.allows({ providers: { litellm: { discoveryTimeoutMs: 30_000 } } })).toBe(true);
+		expect(ModelsConfigSchema.allows({ providers: { litellm: { discoveryTimeoutMs: 0 } } })).toBe(false);
+		expect(ModelsConfigSchema.allows({ providers: { litellm: { discoveryTimeoutMs: -500 } } })).toBe(false);
+		expect(ModelsConfigSchema.allows({ providers: { litellm: { discoveryTimeoutMs: Number.NaN } } })).toBe(false);
+		expect(ModelsConfigSchema.allows({ providers: { litellm: { discoveryTimeoutMs: "30000" } } })).toBe(false);
 	});
 	test("ProviderDiscoverySchema restricts injectV1 to openai-models-list", () => {
 		expect(ProviderDiscoverySchema.allows({ type: "openai-models-list", injectV1: false })).toBe(true);

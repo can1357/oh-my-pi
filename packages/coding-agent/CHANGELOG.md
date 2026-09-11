@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Built-in LiteLLM model discovery now accepts a provider-level `discoveryTimeoutMs` in `models.yml` so a slow `/model/info` payload can keep rich reasoning metadata; the default remains 10 s ([#11355](https://github.com/can1357/oh-my-pi/issues/11355)).
 ## [18.1.17] - 2026-09-10
 
 ### Added

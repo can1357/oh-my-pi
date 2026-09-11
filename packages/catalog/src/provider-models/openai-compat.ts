@@ -5369,6 +5369,14 @@ export interface LiteLLMModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
+	/**
+	 * Deadline in milliseconds for the rich metadata walk and the `/v1/models`
+	 * fallback. Large proxies stream `/model/info` for several seconds; when the
+	 * walk is abandoned, discovery degrades to `/v1/models` rows without
+	 * reasoning or context metadata. Non-positive or non-finite values fall back
+	 * to {@link LITELLM_DISCOVERY_TIMEOUT_MS}.
+	 */
+	discoveryTimeoutMs?: number;
 }
 
 export interface FetchLiteLLMRichModelsOptions<TApi extends Api> {
@@ -5944,9 +5952,19 @@ export async function fetchLiteLLMRichModels<TApi extends Api>(
 	return fetchLiteLLMRichModelsInternal(options);
 }
 
+const LITELLM_DISCOVERY_TIMEOUT_MS = 10_000;
+
+/** Configured deadline when it is a positive finite number, otherwise the built-in default. */
+function resolveLiteLLMDiscoveryTimeoutMs(configuredTimeoutMs: number | undefined): number {
+	return configuredTimeoutMs !== undefined && Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
+		? configuredTimeoutMs
+		: LITELLM_DISCOVERY_TIMEOUT_MS;
+}
+
 export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
+	const timeoutMs = resolveLiteLLMDiscoveryTimeoutMs(config?.discoveryTimeoutMs);
 	return {
 		providerId: "litellm",
 		// rich-v8 invalidates rows whose `compatConfig` retained a colliding
@@ -5957,7 +5975,7 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 		// pricing, stripped reseller usage suffixes, filtered placeholder rows,
 		// and mapped rich pricing. Bump the version whenever these mappers change,
 		// or warm authoritative caches keep serving pre-change rows for the full TTL.
-		cacheProviderId: resolveModelCacheProviderId("litellm", { baseUrl }),
+		cacheProviderId: resolveModelCacheProviderId("litellm", { baseUrl, discoveryTimeoutMs: timeoutMs }),
 		// litellm is a local-only proxy and is never bundled in models.json (that
 		// would leak the machine's localhost catalog). Prefer the proxy's richer
 		// management metadata, then enrich ids against models.dev with the bundled
@@ -5973,7 +5991,7 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 				fetch: config?.fetch,
 				referenceResolver: resolveReference,
 				resolveApi: resolveLiteLLMApi,
-				timeoutMs: 10_000,
+				timeoutMs,
 			});
 			if (richModels && richModels.length > 0) {
 				return richModels;
@@ -5986,6 +6004,7 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 				mapModel: (entry, defaults) =>
 					mapLiteLLMOpenAICompatibleModel(entry, defaults, resolveReference(defaults.id)),
 				fetch: config?.fetch,
+				timeoutMs,
 			});
 		},
 	};

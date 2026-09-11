@@ -114,6 +114,93 @@ function makeCollisionFetchMock(): FetchImpl {
 	}) as FetchImpl;
 }
 
+interface SlowProxyFetchMock {
+	fetch: FetchImpl;
+	/** Request URLs in call order. */
+	calls: string[];
+	/** The `AbortSignal` handed to each request, keyed by URL. */
+	signals: Map<string, AbortSignal | null | undefined>;
+}
+
+/** Resolve after `delayMs`, or reject with the request signal's reason as soon as it aborts (like a real fetch). */
+function delayedResponse(
+	response: () => Response,
+	delayMs: number,
+	signal: AbortSignal | null | undefined,
+): Promise<Response> {
+	const { promise, resolve, reject } = Promise.withResolvers<Response>();
+	const timer = setTimeout(() => resolve(response()), delayMs);
+	signal?.addEventListener(
+		"abort",
+		() => {
+			clearTimeout(timer);
+			reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+		},
+		{ once: true },
+	);
+	return promise;
+}
+
+/**
+ * Fake proxy shaped like a large LiteLLM deployment: the first two rich routes
+ * are absent, `/model/info` streams its payload for `modelInfoMs`, and
+ * `/v1/models` answers after `modelsMs` (instant by default). Every request
+ * honours its `AbortSignal` the way a real fetch does.
+ */
+function makeSlowProxyFetchMock(
+	baseUrl: string,
+	delays: { modelInfoMs: number; modelsMs?: number },
+): SlowProxyFetchMock {
+	const managementBaseUrl = baseUrl.replace(/\/v1$/, "");
+	const calls: string[] = [];
+	const signals = new Map<string, AbortSignal | null | undefined>();
+	const richPayload = () =>
+		Response.json({
+			data: [
+				{
+					model_name: "internal/slow-reasoner",
+					model_info: {
+						max_input_tokens: 200_000,
+						max_output_tokens: 32_000,
+						supports_vision: false,
+						supports_reasoning: true,
+						supports_function_calling: true,
+						supported_openai_params: ["reasoning_effort"],
+					},
+				},
+			],
+		});
+	const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+		const url = inputUrl(input);
+		calls.push(url);
+		signals.set(url, init?.signal);
+		if (init?.signal?.aborted) {
+			throw init.signal.reason ?? new DOMException("Aborted", "AbortError");
+		}
+		if (url === MODELS_DEV_URL) {
+			return new Response("{}", { status: 500 });
+		}
+		if (url === `${managementBaseUrl}/model_group/info` || url === `${managementBaseUrl}/v2/model/info`) {
+			return new Response("{}", { status: 404 });
+		}
+		if (url === `${managementBaseUrl}/model/info`) {
+			return delayedResponse(richPayload, delays.modelInfoMs, init?.signal);
+		}
+		if (url === `${managementBaseUrl}/v1/model/info`) {
+			return new Response("{}", { status: 404 });
+		}
+		if (url === `${baseUrl}/models`) {
+			return delayedResponse(
+				() => Response.json({ data: [{ id: "internal/slow-reasoner" }] }),
+				delays.modelsMs ?? 0,
+				init?.signal,
+			);
+		}
+		throw new Error(`Unexpected URL: ${url}`);
+	}) as FetchImpl;
+	return { fetch, calls, signals };
+}
+
 afterEach(() => {
 	restoreLiteLLMBaseUrl();
 	vi.restoreAllMocks();
@@ -131,7 +218,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v8:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
+			`litellm:rich-v8:${Bun.hash("http://litellm.example:4100/v1\u000010000").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -155,7 +242,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v8:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
+			`litellm:rich-v8:${Bun.hash("http://litellm-config.example:4200/v1/\u000010000").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -1249,5 +1336,99 @@ describe("LiteLLM provider discovery", () => {
 				},
 			},
 		});
+	});
+
+	test("keeps rich metadata from a slow /model/info when discoveryTimeoutMs covers it", async () => {
+		const proxy = makeSlowProxyFetchMock("http://slow-rich:4000/v1", { modelInfoMs: 200 });
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-litellm-test",
+			baseUrl: "http://slow-rich:4000/v1",
+			fetch: proxy.fetch,
+			discoveryTimeoutMs: 1_000,
+		});
+
+		const models = await options.fetchDynamicModels?.();
+
+		expect(models).toHaveLength(1);
+		expect(models?.[0]).toMatchObject({
+			id: "internal/slow-reasoner",
+			provider: "litellm",
+			reasoning: true,
+			contextWindow: 200_000,
+			maxTokens: 32_000,
+		});
+		expect(proxy.calls).not.toContain("http://slow-rich:4000/v1/models");
+		expect(options.cacheProviderId).not.toBe(
+			litellmModelManagerOptions({
+				apiKey: "sk-litellm-test",
+				baseUrl: "http://slow-rich:4000/v1",
+			}).cacheProviderId,
+		);
+	});
+
+	test("abandons the rich walk and falls back to /v1/models when /model/info exceeds discoveryTimeoutMs", async () => {
+		const proxy = makeSlowProxyFetchMock("http://slow-budget:4000/v1", { modelInfoMs: 200 });
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-litellm-test",
+			baseUrl: "http://slow-budget:4000/v1",
+			fetch: proxy.fetch,
+			discoveryTimeoutMs: 50,
+		});
+
+		const models = await options.fetchDynamicModels?.();
+
+		expect(proxy.signals.get("http://slow-budget:4000/model/info")?.aborted).toBe(true);
+		expect(proxy.calls).toContain("http://slow-budget:4000/v1/models");
+		expect(models).toHaveLength(1);
+		expect(models?.[0]).toMatchObject({
+			id: "internal/slow-reasoner",
+			reasoning: false,
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy).toHaveBeenCalledWith(
+			"LiteLLM rich model metadata unavailable; falling back to /v1/models",
+			expect.objectContaining({
+				endpoint: "http://slow-budget:4000/model/info",
+				reason: "network-error",
+			}),
+		);
+	});
+
+	test("bounds the /v1/models fallback with the same discoveryTimeoutMs", async () => {
+		const proxy = makeSlowProxyFetchMock("http://slow-fallback:4000/v1", { modelInfoMs: 200, modelsMs: 200 });
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-litellm-test",
+			baseUrl: "http://slow-fallback:4000/v1",
+			fetch: proxy.fetch,
+			discoveryTimeoutMs: 50,
+		});
+
+		const models = await options.fetchDynamicModels?.();
+
+		expect(proxy.signals.get("http://slow-fallback:4000/v1/models")?.aborted).toBe(true);
+		expect(models).toBeNull();
+	});
+
+	test("ignores a non-positive or non-finite discoveryTimeoutMs instead of aborting discovery immediately", async () => {
+		for (const [index, discoveryTimeoutMs] of [0, Number.NaN].entries()) {
+			const baseUrl = `http://invalid-budget-${index}:4000/v1`;
+			const proxy = makeSlowProxyFetchMock(baseUrl, { modelInfoMs: 20 });
+			const options = litellmModelManagerOptions({
+				apiKey: "sk-litellm-test",
+				baseUrl,
+				fetch: proxy.fetch,
+				discoveryTimeoutMs,
+			});
+
+			const models = await options.fetchDynamicModels?.();
+
+			expect(proxy.signals.get(`http://invalid-budget-${index}:4000/model/info`)).toBeInstanceOf(AbortSignal);
+			expect(models?.[0]).toMatchObject({ id: "internal/slow-reasoner", reasoning: true, contextWindow: 200_000 });
+			expect(proxy.calls).not.toContain(`${baseUrl}/models`);
+		}
 	});
 });

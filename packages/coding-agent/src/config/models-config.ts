@@ -25,6 +25,7 @@ export interface ProviderValidationConfig {
 	auth?: ProviderAuthMode;
 	oauthConfigured?: boolean;
 	discovery?: ProviderDiscovery;
+	discoveryTimeoutMs?: number;
 	compat?: ModelSpec<Api>["compat"];
 	remoteCompaction?: unknown;
 	disableStrictTools?: boolean;
@@ -56,10 +57,11 @@ export function validateProviderConfiguration(
 				!config.requestMetadata &&
 				!config.remoteCompaction &&
 				!hasModelOverrides &&
-				!config.discovery
+				!config.discovery &&
+				config.discoveryTimeoutMs === undefined
 			) {
 				throw new Error(
-					`Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "auth: none", "compat", "disableStrictTools", "guardrailIdentifier", "requestMetadata", "remoteCompaction", "modelOverrides", "discovery", or "models"`,
+					`Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "auth: none", "compat", "disableStrictTools", "guardrailIdentifier", "requestMetadata", "remoteCompaction", "modelOverrides", "discovery", "discoveryTimeoutMs", or "models"`,
 				);
 			}
 		}
@@ -122,6 +124,7 @@ export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", {
 				api: providerConfig.api as Api | undefined,
 				auth: (providerConfig.auth ?? "apiKey") as ProviderAuthMode,
 				discovery: providerConfig.discovery as ProviderDiscovery | undefined,
+				discoveryTimeoutMs: providerConfig.discoveryTimeoutMs,
 				compat: providerConfig.compat,
 				remoteCompaction: providerConfig.remoteCompaction,
 				disableStrictTools: providerConfig.disableStrictTools,

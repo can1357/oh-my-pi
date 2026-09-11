@@ -8,6 +8,12 @@ export type ModelManagerConfig = {
 	fetch?: FetchImpl;
 	/** The supplied fetch already applies provider-specific authentication. */
 	authenticated?: boolean;
+	/**
+	 * Per-installation deadline in milliseconds for managers whose endpoint
+	 * probe accepts one (currently `litellm`). Sourced from the provider's
+	 * `models.yml` entry; managers keep their built-in default when omitted.
+	 */
+	discoveryTimeoutMs?: number;
 };
 
 /** Catalog discovery configuration for providers that support endpoint-based model listing. */

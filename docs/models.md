@@ -52,6 +52,7 @@ providers:
     discovery:
       type: ollama
       timeoutMs: 10000 # optional per-provider HTTP probe timeout in milliseconds
+    discoveryTimeoutMs: 30000 # optional built-in manager deadline (litellm); default 10000
     modelOverrides:
       some-model-id:
         name: Renamed model
@@ -107,6 +108,7 @@ providers:
 - `auth`: `apiKey` (default), `none`, or `oauth`; for `models.yml` custom models, `oauth` is accepted by schema but does not waive the `apiKey` requirement
 - `discovery.type`: `ollama`, `llama.cpp`, `lm-studio`, `openai-models-list`, `proxy`, or `litellm`
 - `discovery.injectV1`: optional boolean, default `true`, for `openai-models-list`. Set `false` to fetch the model list from `{baseUrl}/models` without injecting `/v1` — for gateways that root their OpenAI-compatible surface at a versioned path (e.g. `https://api.opper.ai/v3/compat`) where the forced `/v1/models` returns a different, smaller model list. Query strings in `baseUrl` are ignored, matching the default mode.
+- `discoveryTimeoutMs`: optional positive finite number. Deadline in milliseconds for this provider's *built-in* runtime model manager (currently honoured by `litellm`). This is not `discovery.timeoutMs`: setting `discovery:` switches the provider onto the custom-discovery path. Omit it to keep the built-in 10 s default.
 - `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer.
 - `imageInputDecoder`: `stb` only. Set this on a custom model or `modelOverrides` entry when the serving backend uses an STB-compatible image decoder that cannot accept WebP; OMP converts attached and historical WebP images before provider dispatch.
 - `tokenizer`: opt into a specific embedded local tokenizer when a proxy's model id is ambiguous or noncanonical. Allowed values: `claude-v3`, `claude-v47`, `claude-v5`, `claude-v5-sonnet`, `qwen3`, `deepseek-v3`, `kimi-k2`, and `glm5`. Omit it to use catalog identity policy; unknown models retain the fast local estimate.
@@ -133,11 +135,13 @@ Must define at least one of:
 - `disableStrictTools`
 - `modelOverrides`
 - `discovery`
+- `discoveryTimeoutMs`
 - `remoteCompaction`
 
 ### Discovery
 
 - `discovery.timeoutMs` overrides that provider's runtime HTTP probe timeout in milliseconds. It must be a positive finite number.
+- `discoveryTimeoutMs` overrides the built-in manager deadline (currently `litellm`) in milliseconds. It must be a positive finite number. It does not apply to providers that set `discovery:`.
 - `discovery` requires provider-level `api`, except `discovery.type: proxy` (per-model wire auto-detected).
 
 ### Remote compaction
@@ -284,6 +288,15 @@ When `litellm` is active (for example through `LITELLM_API_KEY` or stored auth),
 Runtime discovery probes LiteLLM management metadata in order: `GET /model_group/info`, `GET /v2/model/info`, `GET /model/info`, and `GET /v1/model/info`. The configured key must be authorized to read at least one of these routes; on deployments that restrict management endpoints, grant the route through LiteLLM's `allowed_routes` access controls or use a master/admin key for discovery.
 
 If every metadata route is unavailable, discovery falls back to the OpenAI-compatible `GET /models` list. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Rich metadata maps per-model context, capability, and upstream-provider fields. OpenAI-backed models use LiteLLM's Responses route so reasoning summaries remain available; mixed-provider groups stay on Chat Completions. Bare fallback ids use the known OpenAI model families for routing and bundled reference metadata when available. Models absent from the bundled catalog can therefore have unknown context and pricing after fallback.
+
+The rich-metadata walk and the `/v1/models` fallback share a 10 s deadline by default. A large proxy that streams `/model/info` for several seconds can miss that budget and cache every model as `reasoning: false` for the catalog TTL. Raise the built-in deadline with provider-level `discoveryTimeoutMs` without switching onto `discovery.type: litellm`:
+
+```yaml
+providers:
+  litellm:
+    baseUrl: http://127.0.0.1:4000/v1
+    discoveryTimeoutMs: 30000
+```
 
 ### Explicit provider discovery
 
