@@ -18,6 +18,7 @@
 ### Fixed
 
 - OpenCode Go's DeepSeek Flash lanes (`deepseek-flash`, `deepseek-v4.1-flash`) now declare image input. The gateway serves them with vision despite the IDs carrying no vision suffix, so the class-wide `strip-image-input` rule was dropping attachments the endpoint reads; the modality is declared too, since live discovery seeds these lanes text-only ([#11774](https://github.com/can1357/oh-my-pi/pull/11774) by [@STRML](https://github.com/STRML)).
+- Fixed Meta muse-spark models on OpenRouter wedging every turn with `400 Referenced reasoning item ... was not found or has expired`: replayed Responses reasoning history is now filtered for the muse-spark family, matching the existing Anthropic-on-OpenRouter treatment ([#10675](https://github.com/can1357/oh-my-pi/pull/10675) by [@Giardi77](https://github.com/Giardi77)).
 - Amazon Bedrock OpenAI models, plus unclassified profiles such as opaque application-inference-profile ARNs, now carry the compatibility policy required to preserve image-bearing tool results ([#11681](https://github.com/can1357/oh-my-pi/issues/11681)).
 - DeepSeek V4.1 Flash requests now honor the documented 384K output maximum instead of being capped at 64K ([#11769](https://github.com/can1357/oh-my-pi/issues/11769)).
 - Fixed the first-party `deepseek-flash` alias missing the V4.1 Flash wire contract: it now sends `max_tokens` with `reasoning_content` and replays reasoning and assistant content on tool calls with no tool choice ([#11799](https://github.com/can1357/oh-my-pi/pull/11799) by [@brit](https://github.com/brit)).
