@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { DEFAULT_CLOUD_STT_MODEL, resolveCloudSttModel } from "@oh-my-pi/pi-coding-agent/stt/cloud-models";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
+import { __resetExtraCaCache } from "@oh-my-pi/pi-utils";
 import type { CloudSttCredential } from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
 import { encodeWav16k, startCloudSttStream } from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
 import { resolveSttCloudCredential, STTController, type SttState } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
@@ -191,6 +192,81 @@ describe("cloud STT stream", () => {
 		expect(keys).toEqual(["Bearer sk-stale", "Bearer sk-fresh"]);
 		// Seeded initial resolve, then step (b): force-refresh the same account.
 		expect(contexts).toEqual([{ lastChance: false, hasError: true }]);
+	});
+
+	it("re-reads live provider headers on each auth retry", async () => {
+		// Mirrors the registry's `createLiveConfigHeaders` view: every
+		// materialization re-runs the command-backed value. The Content-Type key
+		// forces the sanitizer down its filtering path, which is where a
+		// snapshot would otherwise be frozen before the first attempt.
+		let generation = 0;
+		const liveHeaders = new Proxy({} as Record<string, string>, {
+			ownKeys: () => ["Content-Type", "X-Session-Token"],
+			getOwnPropertyDescriptor: (_target, property) =>
+				property === "Content-Type" || property === "X-Session-Token"
+					? { enumerable: true, configurable: true, writable: true, value: undefined }
+					: undefined,
+			get: (_target, property) => {
+				if (property === "Content-Type") return "application/json";
+				if (property === "X-Session-Token") {
+					generation += 1;
+					return `session-${generation}`;
+				}
+				return undefined;
+			},
+		});
+		const seen: string[] = [];
+		const fetchImpl = (async (_url: string, init: RequestInit) => {
+			const headers = init.headers as Record<string, string>;
+			seen.push(headers["X-Session-Token"]!);
+			return headers["Authorization"] === "Bearer sk-stale"
+				? new Response("unauthorized", { status: 401 })
+				: new Response(JSON.stringify({ text: "ok" }), { status: 200 });
+		}) as typeof fetch;
+		const handle = startCloudSttStream({
+			credential: {
+				kind: "openai",
+				apiKey: seedApiKeyResolver("sk-stale", () => "sk-fresh"),
+				headers: liveHeaders,
+			},
+			fetchImpl,
+		});
+		handle.pushAudio(sine16kHz(160));
+		await expect(handle.stop()).resolves.toBe("ok");
+		// Two attempts, two distinct materializations — the retry did not reuse
+		// the header value the first attempt saw.
+		expect(seen).toHaveLength(2);
+		expect(seen[0]).not.toBe(seen[1]);
+		expect(seen[1]).toMatch(/^session-\d+$/);
+	});
+
+	it("applies NODE_EXTRA_CA_CERTS to the upload's TLS options", async () => {
+		const pem = "-----BEGIN CERTIFICATE-----\nMIIBtest\n-----END CERTIFICATE-----";
+		const previous = Bun.env.NODE_EXTRA_CA_CERTS;
+		Bun.env.NODE_EXTRA_CA_CERTS = pem;
+		__resetExtraCaCache();
+		try {
+			const stub = stubFetch("ok");
+			const handle = startCloudSttStream({
+				credential: { kind: "openai", apiKey: "sk-test" },
+				fetchImpl: stub.impl,
+			});
+			handle.pushAudio(sine16kHz(160));
+			await expect(handle.stop()).resolves.toBe("ok");
+			const init = stub.calls[0]!.init;
+			const ca =
+				"tls" in init && typeof init.tls === "object" && init.tls !== null && "ca" in init.tls
+					? init.tls.ca
+					: undefined;
+			expect(Array.isArray(ca)).toBe(true);
+			// The extra bundle is appended to the system roots, not substituted for them.
+			expect((ca as unknown[]).at(-1)).toBe(pem);
+			expect((ca as unknown[]).length).toBeGreaterThan(1);
+		} finally {
+			if (previous === undefined) delete Bun.env.NODE_EXTRA_CA_CERTS;
+			else Bun.env.NODE_EXTRA_CA_CERTS = previous;
+			__resetExtraCaCache();
+		}
 	});
 
 	it("stops after one attempt for a static key", async () => {
