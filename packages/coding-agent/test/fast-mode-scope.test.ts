@@ -8,6 +8,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -48,6 +49,7 @@ describe("/fast targets the current model's service-tier family", () => {
 		streamFn?: Agent["streamFn"],
 		agentKind?: "main" | "sub",
 		usageReports?: UsageReport[],
+		extensionRunner?: ExtensionRunner,
 	): Promise<AgentSession> {
 		const agent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -65,6 +67,7 @@ describe("/fast targets the current model's service-tier family", () => {
 			settings,
 			modelRegistry,
 			agentKind,
+			extensionRunner,
 		});
 		session.subscribe(() => {});
 		return session;
@@ -420,6 +423,76 @@ describe("/fast targets the current model's service-tier family", () => {
 			// The lease is per-request, so the family map stays untouched and every
 			// other model keeps its own lease.
 			expect(session.serviceTierByFamily).toEqual({});
+		});
+
+		it("keeps a delayed auto rejection from clearing a later manual tier", async () => {
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled claude-sonnet-4-5 model to exist");
+			const hookStarted = Promise.withResolvers<void>();
+			const releaseHook = Promise.withResolvers<void>();
+			let delayMessageEnd = false;
+			const extensionRunner = {
+				hasHandlers: (type: string) => type === "message_end",
+				emitBeforeAgentStart: async () => undefined,
+				emit: async (event: { type: string }) => {
+					if (!delayMessageEnd || event.type !== "message_end") return;
+					hookStarted.resolve();
+					await releaseHook.promise;
+				},
+			} as unknown as ExtensionRunner;
+			const mock = createMockModel({ responses: [{ content: ["Done"] }] });
+			const session = await createSessionForModel(
+				model,
+				Settings.isolated({
+					"tier.autoFastMode": true,
+					"tier.autoFastModeDurationMinutes": 20,
+					"compaction.enabled": false,
+				}),
+				mock.stream,
+				undefined,
+				undefined,
+				extensionRunner,
+			);
+			await session.prompt("Start the automatic lease");
+			await session.waitForIdle();
+
+			expect(session.agent.serviceTierResolver?.(model)).toBe("priority");
+			delayMessageEnd = true;
+			const notice = Promise.withResolvers<string>();
+			session.subscribe(event => {
+				if (event.type === "notice" && event.source === "priority") notice.resolve(event.message);
+			});
+			const rejected: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "Rejected automatic priority" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				disabledFeatures: ["priority"],
+				timestamp: Date.now(),
+			};
+			try {
+				session.agent.emitExternalEvent({ type: "message_end", message: rejected });
+				await hookStarted.promise;
+
+				expect(session.setFastMode(true)).toBe(true);
+				expect(session.agent.serviceTierResolver?.(model)).toBe("priority");
+				releaseHook.resolve();
+
+				expect(await notice.promise).toContain("Auto fast mode rejected");
+				expect(session.serviceTierByFamily.anthropic).toBe("priority");
+			} finally {
+				releaseHook.resolve();
+			}
 		});
 
 		function creditlessReport(): UsageReport {

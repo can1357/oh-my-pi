@@ -585,6 +585,7 @@ export class AgentSession {
 
 	#lastUserPromptAt: number | undefined;
 	#autoFastModeSuppressed = false;
+	#requestPrioritySource: "manual" | "auto" | undefined;
 	/**
 	 * What the provider did with the last priority request per `provider/model`:
 	 * `false` when it was refused (Anthropic fast-mode rejection, OpenAI tier
@@ -1460,10 +1461,15 @@ export class AgentSession {
 			memoryTaskDepth: config.memoryTaskDepth,
 			createMemoryTools: config.createMemoryTools,
 		});
-		// Resolve the wire service-tier per request so the Fireworks Priority
-		// toggle scopes priority to Fireworks alone, without mutating the shared
-		// session `serviceTier` that drives `/fast` and OpenAI/Anthropic priority.
-		this.agent.serviceTierResolver = model => this.#resolveMainServiceTier(model);
+		// Resolve the wire tier once per request and retain whether priority came
+		// from explicit configuration or the temporary activity lease.
+		this.agent.serviceTierResolver = model => {
+			const configuredTier = this.#models.effectiveServiceTier(model);
+			const resolvedTier = this.#resolveMainServiceTier(model);
+			this.#requestPrioritySource =
+				resolvedTier === "priority" ? (configuredTier === "priority" ? "manual" : "auto") : undefined;
+			return resolvedTier;
+		};
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#pruneToolDescriptions = config.pruneToolDescriptions === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
@@ -2934,6 +2940,13 @@ export class AgentSession {
 
 	#processAgentEvent = async (event: AgentEvent): Promise<void> => {
 		const eventPromptGeneration = this.#promptGeneration;
+		// Agent listeners are fire-and-forget, so capture the origin before this
+		// handler reaches any await and a later request can overwrite the slot.
+		const requestPrioritySource =
+			event.type === "message_end" && event.message.role === "assistant" ? this.#requestPrioritySource : undefined;
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			this.#requestPrioritySource = undefined;
+		}
 		// A fresh run supersedes the previously settled (and pruned) refusal
 		// turn: state-based lookups take over again.
 		if (event.type === "agent_start") {
@@ -3196,41 +3209,31 @@ export class AgentSession {
 				}
 				const priorityKey = `${assistantMsg.provider}/${assistantMsg.model}`;
 				if (assistantMsg.disabledFeatures?.includes("priority")) {
-					// Every refusal lands here: Anthropic dropping `speed: "fast"` and
-					// OpenAI echoing a downgraded `service_tier` both stamp the marker.
 					const firstDenial = this.#priorityObserved.get(priorityKey) !== false;
 					this.#priorityObserved.set(priorityKey, false);
-					if (this.serviceTierByFamily.anthropic === "priority") {
-						this.setServiceTierFamily("anthropic", undefined);
+					const manualRequest =
+						requestPrioritySource === "manual" ||
+						(requestPrioritySource === undefined && this.serviceTierByFamily.anthropic === "priority");
+					if (manualRequest) {
+						const fastModeStillEnabled = this.serviceTierByFamily.anthropic === "priority";
+						if (fastModeStillEnabled) this.setServiceTierFamily("anthropic", undefined);
 						this.emitNotice(
 							"warning",
-							"Priority/fast mode rejected for this model; retried without it. Fast mode is now off.",
+							fastModeStillEnabled
+								? "Priority/fast mode rejected for this model; retried without it. Fast mode is now off."
+								: "Priority/fast mode was rejected for this request and retried without it.",
 							"priority",
 						);
 					} else if (firstDenial) {
-						// Auto fast mode supplies `priority` per request without touching
-						// the family map, so the branch above never fires for it. Warn
-						// instead of failing silently, once per model: the marker repeats
-						// on every later turn while the refusal stands.
 						this.emitNotice(
 							"warning",
 							`Auto fast mode rejected for ${priorityKey}; retried without it. Other models keep auto fast mode; /fast on re-arms this one.`,
 							"priority",
 						);
 					}
-				} else {
-					// No marker only means "priority landed" when the turn asked for it,
-					// hence the re-resolve. Recording the success matters as much as the
-					// refusal: it outranks a stale account entitlement, and OpenAI
-					// capacity downgrades recover on their own.
-					const model = this.agent.state.model;
-					if (
-						model &&
-						`${model.provider}/${model.id}` === priorityKey &&
-						realizesPriorityServiceTier(this.#resolveMainServiceTier(model), model)
-					) {
-						this.#priorityObserved.set(priorityKey, true);
-					}
+				} else if (requestPrioritySource !== undefined) {
+					// A served request outranks stale entitlement or refusal evidence.
+					this.#priorityObserved.set(priorityKey, true);
 				}
 				this.#ttsr.onAssistantMessageEnd(assistantMsg);
 				if (this.#handoff.isGeneratingHandoff) {
