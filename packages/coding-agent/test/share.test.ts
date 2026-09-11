@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { SessionData } from "../src/export/html";
 import {
 	buildShareSnapshot,
@@ -618,10 +621,78 @@ describe("shareSession", () => {
 
 			expect(result.method).toBe("server");
 			expect(result.gistUrl).toBeUndefined();
+			expect(result.notice).toContain("gh CLI not found");
 			expect(result.notice).toMatch(/gist/i);
 			expect(result.notice).toMatch(/share server/);
 		} finally {
 			server.stop(true);
 		}
+	});
+
+	// Fake-`gh` shims exercise each tryCreateGist failure reason through the
+	// real `$`gh …`` subprocess path, so the notice contract is pinned per
+	// reason instead of matching a generic "gist unavailable" string. Skipped
+	// on Windows: Bun/Windows resolves an installed gh.exe past extensionless
+	// shims no matter the PATH order (verified by probe), so the shim never
+	// takes effect there; the lookup-seam test above still covers the
+	// fallback shape on every platform.
+	const shimSkippedOnWindows = process.platform === "win32";
+
+	function writeFakeGh(script: string): { dir: string; gh: string } {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-share-gh-"));
+		const gh = path.join(dir, "gh");
+		fs.writeFileSync(gh, script);
+		fs.chmodSync(gh, 0o755);
+		return { dir, gh };
+	}
+
+	async function gistFallbackNotice(fakeGh: string): Promise<string | undefined> {
+		const entries = [messageEntry("e1", null, "share me")];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "e1",
+		} as unknown as SessionManager;
+		const server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				if (req.method !== "POST") return new Response("nope", { status: 405 });
+				return Response.json({ id: "blobshareid03" });
+			},
+		});
+		// Prepend (never replace) so every other binary keeps resolving; the
+		// fake `gh` shadows the real one by PATH order on POSIX.
+		const originalPath = process.env.PATH;
+		process.env.PATH = path.dirname(fakeGh) + path.delimiter + (originalPath ?? "");
+		try {
+			const result = await shareSession(sm, {
+				serverUrl: `http://localhost:${server.port}`,
+				store: "gist",
+				which: () => fakeGh,
+			});
+			expect(result.method).toBe("server");
+			expect(result.gistUrl).toBeUndefined();
+			return result.notice;
+		} finally {
+			if (originalPath === undefined) delete process.env.PATH;
+			else process.env.PATH = originalPath;
+			server.stop(true);
+			fs.rmSync(path.dirname(fakeGh), { recursive: true, force: true });
+		}
+	}
+
+	test.skipIf(shimSkippedOnWindows)("gist fallback names gh unauthenticated (#11590)", async () => {
+		const { gh } = writeFakeGh("#!/bin/sh\nexit 1\n");
+		expect(await gistFallbackNotice(gh)).toContain("gh is not authenticated");
+	});
+
+	test.skipIf(shimSkippedOnWindows)("gist fallback names gist creation failure (#11590)", async () => {
+		const { gh } = writeFakeGh('#!/bin/sh\nif [ "$1" = "gist" ]; then exit 1; fi\nexit 0\n');
+		expect(await gistFallbackNotice(gh)).toContain("gist creation failed");
+	});
+
+	test.skipIf(shimSkippedOnWindows)("gist fallback names unparseable gist id (#11590)", async () => {
+		const { gh } = writeFakeGh('#!/bin/sh\nif [ "$1" = "gist" ]; then echo "this is not a url"; fi\nexit 0\n');
+		expect(await gistFallbackNotice(gh)).toContain("could not parse the gist id");
 	});
 });
