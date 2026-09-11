@@ -4731,7 +4731,7 @@ export function convertAnthropicMessages(
 		dropAllThinking?: boolean;
 		droppedThinkingBlocks?: ReadonlySet<string>;
 	},
-): AnthropicMessageParam[] {
+): Array<AnthropicMessageParam & ConversationalUserCarrier> {
 	// Indices of params emitted from `developer` messages. After the main pass,
 	// the ones whose placement satisfies Anthropic's mid-conversation rules are
 	// upgraded from the `user` role to the authoritative `system` role.

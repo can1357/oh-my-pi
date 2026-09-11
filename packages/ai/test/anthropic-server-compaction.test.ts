@@ -15,6 +15,7 @@
  *     endpoints without context management keep the text.
  *   • The empty-completion retry does not re-issue a compaction pause.
  */
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import {
 	convertAnthropicMessages,
 	streamAnthropic,
@@ -816,6 +817,7 @@ describe("anthropic server-side compaction replay", () => {
 					role: "toolResult",
 					toolCallId: "toolu_1",
 					toolName: "read",
+					isError: false,
 					content: [{ type: "text", text: "file bytes" }],
 					timestamp: 3,
 				},
