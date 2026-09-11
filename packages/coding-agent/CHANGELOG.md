@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Deleting a session now removes its stale rewrite backups (`<basename>.jsonl.<snowflake>.bak`) before the session file itself, so the resume picker can no longer resurrect a deleted session; a backup that cannot be removed now fails the deletion instead of reporting success ([#11499](https://github.com/can1357/oh-my-pi/issues/11499)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added

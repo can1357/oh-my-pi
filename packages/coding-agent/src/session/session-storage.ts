@@ -55,6 +55,17 @@ export interface WriteTextAtomicOptions {
 	commitGuard?: () => boolean;
 }
 
+export interface ListFilesOptions {
+	/**
+	 * Propagate a directory-scan failure instead of returning an empty list.
+	 *
+	 * File-backed storages use this where an empty result would be read as "no
+	 * matching files" and silently skip required work. Backends that list from an
+	 * in-memory index cannot fail mid-scan and ignore it.
+	 */
+	strict?: boolean;
+}
+
 export interface SessionStorage {
 	ensureDirSync(dir: string): void;
 	existsSync(path: string): boolean;
@@ -68,7 +79,8 @@ export interface SessionStorage {
 	 */
 	updateSessionTitle(path: string, update: SessionTitleUpdate): Promise<void>;
 	statSync(path: string): SessionStorageStat;
-	listFilesSync(dir: string, pattern: string): string[];
+	/** List direct children of `dir` matching a glob `pattern`, joined to `dir`. */
+	listFilesSync(dir: string, pattern: string, options?: ListFilesOptions): string[];
 
 	exists(path: string): Promise<boolean>;
 	readText(path: string): Promise<string>;
@@ -200,6 +212,14 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	}
 }
 
+/**
+ * Bound on the sweep-unlink-sweep passes in
+ * {@link FileSessionStorage.deleteSessionWithArtifacts}. A pass repeats only when a
+ * concurrent scan promoted a backup back onto the freed primary; past this the
+ * deletion fails closed instead of looping against a writer that keeps recreating it.
+ */
+const MAX_DELETE_CLEANUP_PASSES = 5;
+
 export class FileSessionStorage implements SessionStorage {
 	ensureDirSync(dir: string): void {
 		if (!fs.existsSync(dir)) {
@@ -261,10 +281,11 @@ export class FileSessionStorage implements SessionStorage {
 		return { size: stats.size, mtimeMs: stats.mtimeMs, mtime: stats.mtime };
 	}
 
-	listFilesSync(dir: string, pattern: string): string[] {
+	listFilesSync(dir: string, pattern: string, options?: ListFilesOptions): string[] {
 		try {
 			return Array.from(new Bun.Glob(pattern).scanSync(dir)).map(name => path.join(dir, name));
-		} catch {
+		} catch (err) {
+			if (options?.strict) throw err;
 			return [];
 		}
 	}
@@ -444,10 +465,40 @@ export class FileSessionStorage implements SessionStorage {
 	/**
 	 * Delete a session file and its artifacts directory.
 	 * Artifacts are stored in a sibling directory with the same name minus .jsonl extension.
+	 * Stale `<basename>.jsonl.<snowflake>.bak` rewrite backups are swept before and
+	 * after the primary unlink, and the pass repeats if a concurrent scan promotes one
+	 * back onto the freed primary, so a later listing cannot silently resurrect the
+	 * deleted session.
 	 */
 	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
-		// Delete the session file itself
-		await this.unlink(sessionPath);
+		// One sweep-unlink-sweep is not final: a rewrite can land a fresh backup after
+		// a sweep, and a scan running recoverOrphanedBackups() can promote a surviving
+		// backup back onto this primary between the unlink and the follow-up sweep,
+		// which then sees no `*.bak` and returns while the primary is back. Repeat
+		// until a pass ends with the primary still gone, and fail closed rather than
+		// report success while a writer keeps recreating it.
+		for (let pass = 1; ; pass++) {
+			const outcome = pass === 1 ? "Session file not deleted" : "Session file deleted";
+
+			// Sweep before the primary: leftovers happen when the EPERM-rewrite cleanup
+			// unlink fails or a crash lands between the two renames. Sweeping first
+			// closes the resurrection window for a scan running recoverOrphanedBackups().
+			await this.#sweepStaleBackups(sessionPath, outcome);
+
+			// Delete the session file itself
+			await this.unlink(sessionPath);
+
+			// Sweep once more: a rewrite racing deletion can land a fresh backup
+			// between the sweep and the unlink, and the next scan would promote it back.
+			await this.#sweepStaleBackups(sessionPath, "Session file deleted");
+
+			if (!(await this.exists(sessionPath))) break;
+			if (pass >= MAX_DELETE_CLEANUP_PASSES) {
+				throw new Error(
+					`${outcome}: session file ${sessionPath} still present after ${pass} cleanup passes`,
+				);
+			}
+		}
 
 		// Compute artifacts directory: /path/to/session.jsonl -> /path/to/session
 		const artifactsDir = sessionPath.slice(0, -6);
@@ -464,6 +515,54 @@ export class FileSessionStorage implements SessionStorage {
 					cause: error,
 				},
 			);
+		}
+	}
+
+	/**
+	 * Remove stale `<basename>.jsonl.<snowflake>.bak` rewrite backups for one primary.
+	 * Fail-closed: non-ENOENT failures reject so callers never report success while
+	 * recoverable data remains. ENOENT passes through for idempotent deletion.
+	 */
+	async #sweepStaleBackups(sessionPath: string, outcome: string): Promise<void> {
+		// Enumerate with a strict scan: the default listFilesSync swallows scan errors
+		// into [], which would skip this loop and unlink the primary while backups survive.
+		const dir = path.dirname(sessionPath);
+		const sessionBase = path.basename(sessionPath);
+		let backups: string[];
+		try {
+			backups = this.listFilesSync(dir, "*.bak", { strict: true });
+		} catch (err) {
+			// Preserve ENOENT (absent directory): callers treat it as idempotent success.
+			if (isEnoent(err)) throw err;
+			const error = toError(err);
+			throw new Error(`${outcome}: failed to enumerate stale backups in ${dir}: ${error.message}`, {
+				cause: error,
+			});
+		}
+		for (const backup of backups) {
+			// Match only "<primary>.<snowflake>.bak" for THIS primary: parse the final
+			// suffix the same way recoverOrphanedBackups() does and require the derived
+			// primary basename to equal this session's. A plain startsWith would also
+			// match "foo.jsonl.copy.jsonl.<snowflake>.bak", the backup of the distinct
+			// primary "foo.jsonl.copy.jsonl".
+			const name = path.basename(backup);
+			if (!name.endsWith(".bak")) continue;
+			const trimmed = name.slice(0, -".bak".length);
+			const dotIdx = trimmed.lastIndexOf(".");
+			if (dotIdx <= 0) continue;
+			if (trimmed.slice(0, dotIdx) !== sessionBase) continue;
+			// Only real rewrite backups carry a Snowflake suffix — the sole producer uses
+			// Snowflake.next() — so a manual/unrelated ".bak" beside the primary survives.
+			if (!Snowflake.valid(trimmed.slice(dotIdx + 1))) continue;
+			try {
+				await this.unlink(backup);
+			} catch (err) {
+				if (isEnoent(err)) continue;
+				const error = toError(err);
+				throw new Error(`${outcome}: failed to remove stale backup ${backup}: ${error.message}`, {
+					cause: error,
+				});
+			}
 		}
 	}
 }

@@ -8,6 +8,7 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
+import { listSessions } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
@@ -203,6 +204,165 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		await expect(storage.deleteSessionWithArtifacts(sessionPath)).resolves.toBeUndefined();
 		expect(fs.existsSync(sessionPath)).toBe(false);
 		expect(fs.existsSync(artifactsDir)).toBe(false);
+	});
+
+	it("removes stale backup siblings so a rescan cannot resurrect the session", async () => {
+		const sessionPath = await createSessionFile("stale-backup");
+		// A crash between the two renames of the EPERM-rewrite path leaves a
+		// rollback copy beside the primary: "<primary>.<snowflake>.bak".
+		const staleBackup = `${sessionPath}.abcdef1234567890.bak`;
+		await fsp.copyFile(sessionPath, staleBackup);
+		expect(fs.existsSync(staleBackup)).toBe(true);
+
+		await expect(storage.deleteSessionWithArtifacts(sessionPath)).resolves.toBeUndefined();
+
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(staleBackup)).toBe(false);
+		// recoverOrphanedBackups promotes any surviving backup back to the primary
+		// path during a scan, so a leftover here would list the deleted session.
+		await expect(listSessions(tempDir, storage)).resolves.toEqual([]);
+	});
+	it("removes stale backups before the primary so a concurrent scan cannot resurrect the session", async () => {
+		const sessionPath = await createSessionFile("backup-first");
+		const staleBackup = `${sessionPath}.abcdef1234567890.bak`;
+		await fsp.copyFile(sessionPath, staleBackup);
+
+		const order: string[] = [];
+		vi.spyOn(storage, "unlink").mockImplementation(async (target: string) => {
+			order.push(target);
+			return fs.promises.unlink(target);
+		});
+
+		await storage.deleteSessionWithArtifacts(sessionPath);
+
+		expect(order).toEqual([staleBackup, sessionPath]);
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(staleBackup)).toBe(false);
+	});
+
+	it("fails closed when a stale backup cannot be removed", async () => {
+		const sessionPath = await createSessionFile("backup-cleanup-failure");
+		const staleBackup = `${sessionPath}.abcdef1234567890.bak`;
+		await fsp.copyFile(sessionPath, staleBackup);
+
+		const backupError = Object.assign(new Error("permission denied"), { code: "EACCES" });
+		vi.spyOn(storage, "unlink").mockImplementation(async (target: string) => {
+			if (target === staleBackup) throw backupError;
+			return fs.promises.unlink(target);
+		});
+
+		await expect(storage.deleteSessionWithArtifacts(sessionPath)).rejects.toThrow(
+			`Session file not deleted: failed to remove stale backup ${staleBackup}: permission denied`,
+		);
+		// Fail-closed: the primary is left in place so the caller sees the failure
+		// instead of a success that a later rescan would undo.
+		expect(fs.existsSync(sessionPath)).toBe(true);
+		expect(fs.existsSync(staleBackup)).toBe(true);
+	});
+
+	// chmod(0o333) does not remove directory-read access for root or on Windows,
+	// where the scan would succeed and the test would fail environmentally.
+	const cannotRestrictEnumeration =
+		process.platform === "win32" || (typeof process.getuid === "function" && process.getuid() === 0);
+
+	it.skipIf(cannotRestrictEnumeration)("fails closed when backup enumeration fails", async () => {
+		const sessionPath = await createSessionFile("backup-enumeration-failure");
+		// A directory that permits unlinking but not enumeration (POSIX write+execute
+		// without read): the sweep must abort instead of deleting the primary blind,
+		// leaving a backup for a later scan to resurrect.
+		await fsp.chmod(tempDir, 0o333);
+		try {
+			await expect(storage.deleteSessionWithArtifacts(sessionPath)).rejects.toThrow(
+				`Session file not deleted: failed to enumerate stale backups in ${tempDir}:`,
+			);
+			expect(fs.existsSync(sessionPath)).toBe(true);
+		} finally {
+			await fsp.chmod(tempDir, 0o755);
+		}
+	});
+
+	it("preserves ENOENT when the session directory is gone", async () => {
+		// SessionManager.dropSession treats ENOENT as idempotent success; the
+		// enumeration wrapper must not convert it into a codeless Error.
+		const sessionPath = path.join(tempDir, "gone", "ghost.jsonl");
+
+		const result = await storage.deleteSessionWithArtifacts(sessionPath).then(
+			() => "resolved",
+			(e: unknown) => e,
+		);
+		expect((result as NodeJS.ErrnoException).code).toBe("ENOENT");
+	});
+
+	it("sweeps again after the primary so a racing rewrite cannot resurrect the session", async () => {
+		const sessionPath = await createSessionFile("race");
+		const content = await fsp.readFile(sessionPath, "utf8");
+		const racedBackup = `${sessionPath}.abcdef1234567890.bak`;
+		vi.spyOn(storage, "unlink").mockImplementation(async (target: string) => {
+			await fs.promises.unlink(target);
+			if (target === sessionPath) {
+				// A concurrent rewrite landing a fresh backup between sweep and unlink.
+				await Bun.write(racedBackup, content);
+			}
+		});
+
+		await storage.deleteSessionWithArtifacts(sessionPath);
+
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(racedBackup)).toBe(false);
+		await expect(listSessions(tempDir, storage)).resolves.toEqual([]);
+	});
+
+	it("removes the primary again when a scan revives it between the unlink and the sweep", async () => {
+		const sessionPath = await createSessionFile("revive-race");
+		const content = await fsp.readFile(sessionPath, "utf8");
+		let revived = false;
+		vi.spyOn(storage, "unlink").mockImplementation(async (target: string) => {
+			await fs.promises.unlink(target);
+			if (target === sessionPath && !revived) {
+				revived = true;
+				// A concurrent rewrite lands a fresh backup after the sweep, then a
+				// picker scan's recoverOrphanedBackups() promotes it back onto the
+				// freed primary path, so the follow-up sweep sees no *.bak at all.
+				const backup = `${sessionPath}.abcdef1234567890.bak`;
+				await Bun.write(backup, content);
+				await fs.promises.rename(backup, sessionPath);
+			}
+		});
+
+		await storage.deleteSessionWithArtifacts(sessionPath);
+
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		await expect(listSessions(tempDir, storage)).resolves.toEqual([]);
+	});
+
+	it("leaves backups of a different primary alone", async () => {
+		const sessionPath = await createSessionFile("foo");
+		// A distinct primary whose name extends this session's basename.
+		const siblingPath = await createSessionFile("foo.jsonl.copy");
+		// A valid 16-char Snowflake suffix: a short one would be rejected by
+		// Snowflake.valid() and the fixture would never reach the primary-basename
+		// comparison, so a permissive prefix match would still pass this test.
+		const siblingBackup = `${siblingPath}.abcdef1234567890.bak`;
+		await fsp.copyFile(siblingPath, siblingBackup);
+
+		await storage.deleteSessionWithArtifacts(sessionPath);
+
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(siblingPath)).toBe(true);
+		expect(fs.existsSync(siblingBackup)).toBe(true);
+	});
+
+	it("leaves a non-snowflake manual backup alone", async () => {
+		const sessionPath = await createSessionFile("manual");
+		// Not produced by the EPERM-rewrite path (sole producer uses Snowflake.next()):
+		// a user-kept copy the sweep must not destroy.
+		const manualBackup = `${sessionPath}.manual.bak`;
+		await fsp.copyFile(sessionPath, manualBackup);
+
+		await storage.deleteSessionWithArtifacts(sessionPath);
+
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(manualBackup)).toBe(true);
 	});
 
 	it("throws when artifact cleanup fails after the session file is deleted", async () => {
