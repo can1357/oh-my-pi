@@ -658,8 +658,25 @@ export interface ReadToolDetails {
 	conflictCount?: number;
 	/** Paths recovered from a delimited read argument; used only by the TUI to render one call as multiple read rows. */
 	displayReadTargets?: string[];
+	/**
+	 * Resolved filesystem link target for each {@link displayReadTargets} entry, aligned by index; `null` when a
+	 * delimited part has no linkable fs path. Lets the TUI hyperlink each grouped row the same way a standalone read row is.
+	 */
+	displayReadTargetLinks?: Array<string | null>;
 }
 type ReadParams = ReadToolInput;
+
+/**
+ * Resolve the filesystem path a read result should hyperlink to: the explicit
+ * `resolvedPath` when the read corrected/resolved the input, else the absolute
+ * path plain-file reads record only in `meta.source`. Returns `null` for
+ * URL/internal sources that are not fs paths.
+ */
+function readDetailsLinkPath(details: ReadToolDetails | undefined): string | null {
+	if (typeof details?.resolvedPath === "string") return details.resolvedPath;
+	const source = details?.meta?.source;
+	return source?.type === "path" && typeof source.value === "string" ? source.value : null;
+}
 
 /** Identical reads tolerated before the loop hint is appended. */
 const REPEAT_READ_HINT_THRESHOLD = 3;
@@ -787,6 +804,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const notes = [notice];
 		const content: Array<TextContent | ImageContent> = [];
 		const displayReadTargets: string[] = [];
+		const displayReadTargetLinks: Array<string | null> = [];
 		let pendingText = notice;
 		const flushText = () => {
 			if (pendingText.length === 0) return;
@@ -800,7 +818,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		for (const part of parts) {
 			try {
 				const result = await this.execute("read-delimited-part", { path: part }, signal);
-				displayReadTargets.push(result.details?.suffixResolution?.to ?? part);
+				const nestedTargets = result.details?.displayReadTargets;
+				if (nestedTargets?.length) {
+					const nestedLinks = result.details?.displayReadTargetLinks;
+					for (const [index, target] of nestedTargets.entries()) {
+						displayReadTargets.push(target);
+						displayReadTargetLinks.push(nestedLinks?.[index] ?? null);
+					}
+				} else {
+					displayReadTargets.push(result.details?.suffixResolution?.to ?? part);
+					displayReadTargetLinks.push(readDetailsLinkPath(result.details));
+				}
 				for (const block of result.content) {
 					if (block.type === "text") {
 						appendText(block.text);
@@ -815,12 +843,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				const errorNote = `Could not read ${part}: ${message}`;
 				notes.push(errorNote);
 				displayReadTargets.push(part);
+				displayReadTargetLinks.push(null);
 				appendText(`[${errorNote}]`);
 			}
 		}
 		flushText();
 
-		return toolResult<ReadToolDetails>({ notes, displayReadTargets }).content(content).done();
+		return toolResult<ReadToolDetails>({ notes, displayReadTargets, displayReadTargetLinks }).content(content).done();
 	}
 
 	/**
