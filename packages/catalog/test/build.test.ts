@@ -776,6 +776,36 @@ describe("OpenAI explicit prompt-cache breakpoint compat", () => {
 	});
 });
 
+describe("Responses configuration_update compat", () => {
+	/** The gpt-6-astra id served by a custom Responses-compatible proxy. */
+	function astraProxySpec(overrides: Partial<ModelSpec<"openai-responses">> = {}): ModelSpec<"openai-responses"> {
+		return responsesSpec({
+			id: "gpt-6-astra",
+			name: "GPT-6 Astra",
+			provider: "astra-proxy",
+			baseUrl: "https://proxy.example.com/v1",
+			reasoning: true,
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+			...overrides,
+		});
+	}
+
+	it("turns supportsConfigurationUpdate on for gpt-6-astra on any host and leaves sibling ids off", () => {
+		// The class rule is keyed on the exact id, not on the host: a custom proxy
+		// serving gpt-6-astra gets the item, its gpt-6 neighbour never does.
+		expect(buildModel(astraProxySpec()).compat.supportsConfigurationUpdate).toBe(true);
+		expect(buildModel(astraProxySpec({ id: "gpt-6", name: "GPT-6" })).compat.supportsConfigurationUpdate).toBe(false);
+	});
+
+	it("lets a spec-level compat override switch configuration_update off for a custom endpoint", () => {
+		// Spec-authored overrides are the last compat layer, so a models.yml
+		// `compat.supportsConfigurationUpdate: false` beats the class rule.
+		const model = buildModel(astraProxySpec({ compat: { supportsConfigurationUpdate: false } }));
+		expect(model.compat.supportsConfigurationUpdate).toBe(false);
+	});
+});
+
 describe("OpenRouter model discovery", () => {
 	it("keeps refreshed OpenRouter models on the OpenRouter pseudo API", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-openrouter-refresh-"));

@@ -172,6 +172,12 @@ describe("ModelRegistry", () => {
 		return compat && "replayUnsignedThinking" in compat ? compat.replayUnsignedThinking : undefined;
 	}
 
+	/** The resolved Responses view the driver gates `configuration_update` emission on. */
+	function getSupportsConfigurationUpdate(model: Model | undefined): boolean | undefined {
+		const compat = model?.compat;
+		return compat && "supportsConfigurationUpdate" in compat ? compat.supportsConfigurationUpdate : undefined;
+	}
+
 	/** Create a baseUrl-only override (no custom models) */
 	function overrideConfig(baseUrl: string, headers?: Record<string, string>) {
 		return { baseUrl, ...(headers && { headers }) };
@@ -558,6 +564,7 @@ describe("ModelRegistry", () => {
 		let customAnthropicCompat: ModelRegistry;
 		let customModelCompat: ModelRegistry;
 		let customResponsesCompat: ModelRegistry;
+		let customAstraProxyCompat: ModelRegistry;
 		beforeAll(() => {
 			providerCompat = readonlyRegistry({
 				providers: {
@@ -650,6 +657,28 @@ describe("ModelRegistry", () => {
 									v2Endpoint: "http://127.0.0.1:8080/v1/responses/model-stream",
 									model: "gpt-5.5-compact",
 								},
+							},
+						],
+					},
+				},
+			});
+			customAstraProxyCompat = readonlyRegistry({
+				providers: {
+					"astra-proxy": {
+						baseUrl: "https://proxy.example.com/v1",
+						apiKey: "PROXY_KEY",
+						api: "openai-responses",
+						compat: {
+							supportsConfigurationUpdate: false,
+						},
+						models: [
+							{
+								id: "gpt-6-astra",
+								reasoning: true,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 400_000,
+								maxTokens: 128_000,
 							},
 						],
 					},
@@ -787,6 +816,14 @@ describe("ModelRegistry", () => {
 			const model = customResponsesCompat.find("cc-switch", "gpt-5.5");
 			const compat = getOpenAICompat(model);
 			expect(compat?.supportsImageDetailOriginal).toBe(false);
+		});
+
+		test("custom Responses providers can disable configuration_update items for gpt-6-astra", () => {
+			const model = customAstraProxyCompat.find("astra-proxy", "gpt-6-astra");
+			// The sparse override survives models.yml validation…
+			expect(getOpenAICompat(model)?.supportsConfigurationUpdate).toBe(false);
+			// …and beats the gpt-6-astra class rule on the resolved view the driver reads.
+			expect(getSupportsConfigurationUpdate(model)).toBe(false);
 		});
 
 		test("custom Responses providers preserve compaction config", () => {
