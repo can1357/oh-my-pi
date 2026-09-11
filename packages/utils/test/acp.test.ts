@@ -103,6 +103,66 @@ describe("ACP JSON-RPC transport", () => {
 		writer.releaseLock();
 		reader.releaseLock();
 	});
+	it("drains accepted inbound requests before resolving closed on clean EOF", async () => {
+		const inbound = new TransformStream<AnyMessage, AnyMessage>();
+		const outbound = new TransformStream<AnyMessage, AnyMessage>();
+		const sessionStarted = Promise.withResolvers<void>();
+		const releaseSession = Promise.withResolvers<void>();
+		const connection = new RpcConnection(
+			{ writable: outbound.writable, readable: inbound.readable },
+			async method => {
+				if (method === "initialize") return { protocolVersion: 1 };
+				if (method === "session/new") {
+					sessionStarted.resolve();
+					await releaseSession.promise;
+					return { sessionId: "session-1" };
+				}
+				throw RequestError.methodNotFound(method);
+			},
+		);
+		const writer = inbound.writable.getWriter();
+		const reader = outbound.readable.getReader();
+		await writer.write({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+		await writer.write({ jsonrpc: "2.0", id: 2, method: "session/new", params: {} });
+		await sessionStarted.promise;
+		await writer.close();
+
+		const initialize = await reader.read();
+		expect(initialize.done).toBe(false);
+		expect(initialize.value).toEqual({ jsonrpc: "2.0", id: 1, result: { protocolVersion: 1 } });
+
+		const closedBeforeDrain = await Promise.race([
+			connection.closed.then(() => true),
+			new Promise<boolean>(resolve => setTimeout(() => resolve(false), 25)),
+		]);
+		expect(closedBeforeDrain).toBe(false);
+
+		releaseSession.resolve();
+		const created = await reader.read();
+		expect(created.done).toBe(false);
+		expect(created.value).toEqual({ jsonrpc: "2.0", id: 2, result: { sessionId: "session-1" } });
+		await connection.closed;
+		reader.releaseLock();
+	});
+
+	it("still fail-fast closes on read errors without waiting for inbound handlers", async () => {
+		const inbound = new TransformStream<AnyMessage, AnyMessage>();
+		const outbound = new TransformStream<AnyMessage, AnyMessage>();
+		const started = Promise.withResolvers<void>();
+		const hold = Promise.withResolvers<void>();
+		const connection = new RpcConnection({ writable: outbound.writable, readable: inbound.readable }, async () => {
+			started.resolve();
+			await hold.promise;
+			return {};
+		});
+		const writer = inbound.writable.getWriter();
+		await writer.write({ jsonrpc: "2.0", id: 1, method: "slow" });
+		await started.promise;
+		await writer.abort(new Error("broken pipe"));
+		await connection.closed;
+		hold.resolve();
+	});
+
 	it("matches the SDK error-code fixtures", () => {
 		expect([
 			RequestError.parseError().toErrorResponse(),
