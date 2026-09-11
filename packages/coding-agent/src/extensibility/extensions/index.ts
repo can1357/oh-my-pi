@@ -3,15 +3,7 @@
  */
 
 export type { SlashCommandInfo, SlashCommandLocation, SlashCommandSource } from "../slash-commands";
-export {
-	bindPreparedExtensions,
-	discoverAndLoadExtensions,
-	discoverExtensionPaths,
-	ExtensionRuntimeNotInitializedError,
-	extensionToolSourceInfo,
-	loadExtensionFromFactory,
-	loadExtensions,
-} from "./loader";
+export * from "./loader";
 export * from "./runner";
 // Type guards
 export * from "./types";

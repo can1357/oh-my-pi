@@ -43,7 +43,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionFactory,
-	ExtensionRuntime as IExtensionRuntime,
+	ExtensionRuntimeContract as IExtensionRuntime,
 	LoadExtensionsResult,
 	MessageRenderer,
 	PreparedExtension,

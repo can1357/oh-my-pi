@@ -1754,8 +1754,8 @@ export interface ExtensionCommandContextActions {
 	reload: () => Promise<void>;
 }
 
-/** Full runtime = state + actions, including host-compatible service-tier fallbacks. */
-export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionActions {
+/** Runtime contract implemented by the loader and consumed by extension hosts. */
+export interface ExtensionRuntimeContract extends ExtensionRuntimeState, ExtensionActions {
 	getServiceTiers: GetServiceTiersHandler;
 	setServiceTier: SetServiceTierHandler;
 }
@@ -1794,7 +1794,7 @@ export interface PreparedExtension {
 export interface LoadExtensionsResult {
 	extensions: Extension[];
 	errors: Array<{ path: string; error: string }>;
-	runtime: ExtensionRuntime;
+	runtime: ExtensionRuntimeContract;
 	/** Session-independent imported factories safe to rebind in child sessions. */
 	preparedExtensions?: PreparedExtension[];
 }
