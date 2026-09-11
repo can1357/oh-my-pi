@@ -37,8 +37,10 @@ describe("model identity strictness", () => {
 
 	test("runtime context-window re-resolution stays lenient", () => {
 		const model = buildModel(ambiguousSpec);
-		expect(() => resolveMaxContextWindow(model)).not.toThrow();
-		expect(() => clampsContextOverride(model)).not.toThrow();
+		// Unknown identity has no curated ceiling/clamp; live maxima still pass through.
+		expect(resolveMaxContextWindow(model)).toBeUndefined();
+		expect(resolveMaxContextWindow({ ...model, maxContextWindow: 64_000 })).toBe(64_000);
+		expect(clampsContextOverride(model)).toBe(false);
 	});
 
 	test("curated policy rebaking rejects ambiguous identities", () => {
