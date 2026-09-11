@@ -1978,7 +1978,6 @@ export class AgentSession {
 		void this.#retryInactiveAdvisorAfterModelDiscovery();
 		void this.#revalidateFallbackChainsAfterModelDiscovery();
 		if (config.rebindModelAfterDiscovery) void this.#rebindActiveModelAfterModelDiscovery();
-		this.#applyStartupOAuthAccountPin();
 	}
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
@@ -4431,6 +4430,13 @@ export class AgentSession {
 		if (!this.#freshProviderSessionId) {
 			seedCredentialPins(this.#modelRegistry.authStorage, this.sessionManager, sid);
 		}
+		// Then apply the configured startup default for any provider still
+		// unpinned for `sid` — covers first construction as well as every later
+		// transition that mints a new effective session id (`/new`, `/fresh`,
+		// fork, rewind, …), not just the initial one. `#applyStartupOAuthAccountPin`
+		// itself no-ops once an account is already active, so this never
+		// overrides what `seedCredentialPins` just restored above.
+		this.#applyStartupOAuthAccountPin();
 		// Keep every live advisor's provider identity in lockstep with the primary's
 		// across every session-boundary transition — including branch paths that
 		// skip conversation restore — so advisors never emit the previous
