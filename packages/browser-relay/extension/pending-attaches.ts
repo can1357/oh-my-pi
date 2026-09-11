@@ -8,12 +8,18 @@ export async function finalizePendingAttach(
 	operation: PendingAttachToken,
 	persist: () => Promise<void>,
 	onCanceled: () => Promise<void>,
+	onPersistFailed: () => Promise<void>,
 ): Promise<void> {
 	if (operation.canceled) {
 		await onCanceled();
 		throw new Error("debugger attachment detached before attach completed");
 	}
-	await persist();
+	try {
+		await persist();
+	} catch (error) {
+		await onPersistFailed();
+		throw error;
+	}
 	if (operation.canceled) {
 		await onCanceled();
 		throw new Error("debugger attachment detached before attach completed");

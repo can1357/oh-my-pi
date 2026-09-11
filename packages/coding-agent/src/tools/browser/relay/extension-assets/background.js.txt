@@ -263,12 +263,17 @@ function serializeOrphanSweepDeadlineUpdate(previousUpdate, alarmUpdate, isCurre
 }
 
 // extension/pending-attaches.ts
-async function finalizePendingAttach(operation, persist, onCanceled) {
+async function finalizePendingAttach(operation, persist, onCanceled, onPersistFailed) {
   if (operation.canceled) {
     await onCanceled();
     throw new Error("debugger attachment detached before attach completed");
   }
-  await persist();
+  try {
+    await persist();
+  } catch (error) {
+    await onPersistFailed();
+    throw error;
+  }
   if (operation.canceled) {
     await onCanceled();
     throw new Error("debugger attachment detached before attach completed");
@@ -862,6 +867,20 @@ async function attachTabOperation(tabId, socket, operation) {
     if (operation.canceledAtEpoch !== null && isAttachmentStateCurrent(attachmentStateEpochs, tabId, operation.canceledAtEpoch)) {
       attachmentGuard.untrack(tabId);
       await forgetRecoverable(tabId);
+    }
+  }, async () => {
+    if (!isAttachmentStateCurrent(attachmentStateEpochs, tabId, attachmentEpoch))
+      return;
+    guardDetachments.add(tabId);
+    try {
+      await trackPendingDetach(chrome.debugger.detach({ tabId }));
+      await forgetRecoverable(tabId).catch(() => {});
+    } catch {
+      guardDetachments.delete(tabId);
+      const targets = await chrome.debugger.getTargets().catch(() => null);
+      if ((attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch && shouldRetrackAfterDetachFailure(targets, tabId)) {
+        attachmentGuard.retry(tabId, () => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch);
+      }
     }
   });
 }

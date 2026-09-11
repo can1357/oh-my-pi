@@ -36,6 +36,7 @@ describe("PendingAttaches", () => {
 			async () => {
 				canceled = true;
 			},
+			async () => {},
 		);
 
 		operation.canceled = true;
@@ -46,5 +47,28 @@ describe("PendingAttaches", () => {
 			"debugger attachment detached before attach completed",
 		);
 		expect(canceled).toBe(true);
+	});
+
+	it("cleans up a live attachment when final state persistence fails", async () => {
+		const operation: PendingAttachToken = {
+			canceled: false,
+			canceledAtEpoch: null,
+		};
+		const persistenceError = new Error("storage unavailable");
+		let cleanedUp = false;
+
+		const finalized = finalizePendingAttach(
+			operation,
+			async () => {
+				throw persistenceError;
+			},
+			async () => {},
+			async () => {
+				cleanedUp = true;
+			},
+		);
+
+		await expect(finalized).rejects.toBe(persistenceError);
+		expect(cleanedUp).toBe(true);
 	});
 });

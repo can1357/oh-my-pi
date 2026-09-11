@@ -1054,6 +1054,35 @@ async function attachTabOperation(
 				await forgetRecoverable(tabId);
 			}
 		},
+		async () => {
+			if (
+				!isAttachmentStateCurrent(attachmentStateEpochs, tabId, attachmentEpoch)
+			)
+				return;
+			guardDetachments.add(tabId);
+			try {
+				await trackPendingDetach(chrome.debugger.detach({ tabId }));
+				// The guard-owned onDetach path deliberately preserves recovery state for
+				// reconnects. This detach instead follows a failed attach RPC, so no relay
+				// session can own or recover it. Clear that state after Chrome confirms the
+				// attachment is gone, without replacing the persistence error we report.
+				await forgetRecoverable(tabId).catch(() => {});
+			} catch {
+				guardDetachments.delete(tabId);
+				const targets = await chrome.debugger.getTargets().catch(() => null);
+				if (
+					(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch &&
+					shouldRetrackAfterDetachFailure(targets, tabId)
+				) {
+					attachmentGuard.retry(
+						tabId,
+						() =>
+							(attachmentStateEpochs.get(tabId) ?? 0) ===
+							attachmentEpoch,
+					);
+				}
+			}
+		},
 	);
 }
 
