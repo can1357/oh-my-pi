@@ -44,6 +44,10 @@ function isTransientTransportMessage(message: string): boolean {
  * doing the same — and postpone credential rotation and model fallback, the
  * layers that can actually clear it.
  *
+ * A 429 whose response body could not be read is different: the transport
+ * failed before it could classify and spend the rate-limit budget, so the
+ * existing body-read recovery remains retryable.
+ *
  * Every 4xx other than 408 is terminal: a request the provider rejected
  * as malformed, unauthorized, or unentitled fails identically on replay.
  */
@@ -51,10 +55,17 @@ export function isProviderRetryableError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	if (isUsageLimit(error)) return false;
 	const httpStatus = status(error);
-	if (httpStatus !== undefined && httpStatus >= 400 && httpStatus < 500 && httpStatus !== 408) {
+	const msg = error.message.toLowerCase();
+	const unreadableRateLimit = httpStatus === 429 && CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(msg);
+	if (
+		httpStatus !== undefined &&
+		httpStatus >= 400 &&
+		httpStatus < 500 &&
+		httpStatus !== 408 &&
+		!unreadableRateLimit
+	) {
 		return false;
 	}
-	const msg = error.message.toLowerCase();
 	if (
 		isUnexpectedSocketCloseMessage(msg) ||
 		isTransientTransportMessage(msg) ||
