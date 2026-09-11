@@ -6,16 +6,29 @@ import {
 	buildHeatmapLayout,
 	buildProviderCards,
 	formatActivityErrorDetail,
+	formatReportAccountLabel,
 	UsageDashboardComponent,
 } from "@oh-my-pi/pi-coding-agent/modes/components/usage-dashboard";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { createAccountMasker } from "@oh-my-pi/pi-coding-agent/modes/utils/usage-mask";
+
+beforeAll(async () => {
+	const uiTheme = await getThemeByName("dark");
+	if (!uiTheme) throw new Error("theme unavailable");
+	setThemeInstance(uiTheme);
+});
 
 function day(day: string, cost: number, requests = 1): DailyActivityPoint {
 	return { day, cost, requests, totalTokens: 0 };
 }
 
-function report(provider: string, email: string, limits: UsageReport["limits"]): UsageReport {
-	return { provider, fetchedAt: Date.now(), limits, metadata: { email } };
+function report(
+	provider: string,
+	email: string,
+	limits: UsageReport["limits"],
+	organization?: { orgId: string; orgName?: string },
+): UsageReport {
+	return { provider, fetchedAt: Date.now(), limits, metadata: { email, ...organization } };
 }
 
 function limit(
@@ -83,6 +96,35 @@ describe("buildHeatmapLayout", () => {
 describe("buildProviderCards", () => {
 	const now = Date.now();
 
+	it("keeps same-email organization accounts separate by their account IDs", () => {
+		const reports = ["first-id", "second-id"].map((id, index) =>
+			report("openai", "shared@example.test", [limit("openai", id, "weekly", "Weekly", index ? 0.8 : 0.2, "ok")], {
+				orgId: "shared-org",
+			}),
+		);
+		for (const enabled of [false, true]) {
+			const cards = buildProviderCards(reports, now, {
+				merge: false,
+				mask: createAccountMasker(reports.map(formatReportAccountLabel), enabled),
+			});
+			expect(cards.map(card => card.accounts)).toEqual([1, 1]);
+			expect(cards.map(card => card.windows[0].fraction).sort()).toEqual([0.2, 0.8]);
+			expect(new Set(cards.map(card => card.account)).size).toBe(2);
+		}
+	});
+
+	it("does not merge anonymous reports with real identifiers matching fallback labels", () => {
+		const reports: UsageReport[] = [0.2, 0.8].map((fraction, index) => ({
+			provider: "openai",
+			fetchedAt: now,
+			metadata: index === 0 ? {} : { accountId: "account-1" },
+			limits: [{ ...limit("openai", "", "weekly", "Weekly", fraction, "ok"), scope: { provider: "openai" } }],
+		}));
+		const cards = buildProviderCards(reports, now, { merge: false });
+		expect(cards.map(card => card.accounts)).toEqual([1, 1]);
+		expect(cards.map(card => card.windows[0].fraction).sort()).toEqual([0.2, 0.8]);
+	});
+
 	it("averages a window across accounts instead of showing the worst account", () => {
 		// One exhausted + one barely-used account: the classic report shows the
 		// aggregate (~50% free), so the card must not read 0% free.
@@ -115,15 +157,315 @@ describe("buildProviderCards", () => {
 		expect(unlimited?.unlimited).toBe(true);
 	});
 });
-describe("UsageDashboardComponent", () => {
-	beforeAll(async () => {
-		await initTheme(false);
+
+describe("buildProviderCards split + privacy", () => {
+	const now = Date.now();
+	const reports = [
+		report("anthropic", "alice@x.test", [limit("anthropic", "a", "7d", "Claude 7 Day", 1.0, "exhausted")]),
+		report("anthropic", "alina@x.test", [limit("anthropic", "b", "7d", "Claude 7 Day", 0.0, "ok")]),
+	];
+
+	it("merge=false yields one card per account, each with its own fraction", () => {
+		const cards = buildProviderCards(reports, now, { merge: false });
+		expect(cards.map(card => card.account)).toEqual(["alice@x.test", "alina@x.test"]);
+		expect(cards.map(card => card.windows[0].fraction)).toEqual([1, 0]);
 	});
+
+	it("keeps same-label organizations distinct when split and aggregates them when merged", () => {
+		const sameEmail = "shared@x.test";
+		const reports = [
+			report("anthropic", sameEmail, [limit("anthropic", "shared", "7d", "Claude 7 Day", 0.8, "warning")], {
+				orgId: "org-team-east",
+				orgName: "Team",
+			}),
+			report("anthropic", sameEmail, [limit("anthropic", "shared", "7d", "Claude 7 Day", 0.2, "ok")], {
+				orgId: "org-team-west",
+				orgName: "Team",
+			}),
+		];
+
+		const split = buildProviderCards(reports, now, { merge: false });
+		expect(split).toHaveLength(2);
+		expect(split.map(card => card.account)).toEqual([`${sameEmail} (Team)`, `${sameEmail} (Team)`]);
+		expect(split.map(card => card.windows[0].fraction)).toEqual([0.8, 0.2]);
+		for (const enabled of [false, true]) {
+			const labeled = buildProviderCards(reports, now, {
+				merge: false,
+				mask: createAccountMasker(reports.map(formatReportAccountLabel), enabled),
+			});
+			expect(new Set(labeled.map(card => card.account)).size).toBe(2);
+			expect(labeled.every(card => card.account?.includes("Team"))).toBe(true);
+		}
+
+		const merged = buildProviderCards(reports, now, { merge: true });
+		expect(merged).toHaveLength(1);
+		expect(merged[0].accounts).toBe(2);
+		expect(merged[0].windows[0].fraction).toBeCloseTo(0.5);
+	});
+
+	it("splits same-base accounts by organization name when ids are absent", () => {
+		const sameEmail = "shared@x.test";
+		const reports = ["East", "West"].map((orgName, index) =>
+			report("anthropic", sameEmail, [limit("anthropic", "shared", "7d", "Claude 7 Day", index / 10, "ok")], {
+				orgId: "",
+				orgName,
+			}),
+		);
+		const cards = buildProviderCards(reports, now, { merge: false });
+		expect(cards).toHaveLength(2);
+		expect(Object.fromEntries(cards.map(card => [card.account, card.windows[0].fraction]))).toEqual({
+			[`${sameEmail} (East)`]: 0,
+			[`${sameEmail} (West)`]: 0.1,
+		});
+	});
+
+	it("retains distinguishing organization tails in narrow split-card headers", () => {
+		const reports: UsageReport[] = ["East", "West"].map(region => ({
+			provider: "openai",
+			fetchedAt: 1,
+			limits: [],
+			metadata: { email: "shared@example.test", orgName: `Acme Corporation Workspace ${region}` },
+		}));
+		const dashboard = new UsageDashboardComponent({
+			reports,
+			renderDetail: () => "",
+			createMasker: createAccountMasker,
+			maskAccountLabels: true,
+			mergeAccounts: false,
+			labelPlacement: "moving",
+			loadActivity: async () => {},
+			requestRender: () => {},
+			onClose: () => {},
+		});
+		const lines = dashboard.render(80).map(line => Bun.stripANSI(line));
+		expect(lines.join("\n")).toContain("East");
+		expect(lines.join("\n")).toContain("West");
+		expect(lines.every(line => Bun.stringWidth(line) <= 80)).toBe(true);
+	});
+
+	it("masks opaque parentheses while preserving only metadata-attributed organization labels", () => {
+		const reports: UsageReport[] = [
+			{ provider: "openai", fetchedAt: 1, limits: [], metadata: { accountId: "Jane Doe (finance)" } },
+			{ provider: "openai", fetchedAt: 1, limits: [], metadata: { accountId: "Jane Doe", orgName: "finance" } },
+		];
+		const cards = buildProviderCards(reports, 1, {
+			merge: false,
+			mask: createAccountMasker(reports.map(formatReportAccountLabel), true),
+		});
+		expect(cards.map(card => card.account).sort()).toEqual(["Jan***", "Jan*** (finance)"]);
+		const dashboard = new UsageDashboardComponent({
+			reports,
+			renderDetail: () => "",
+			createMasker: createAccountMasker,
+			maskAccountLabels: true,
+			mergeAccounts: false,
+			labelPlacement: "moving",
+			loadActivity: async () => {},
+			requestRender: () => {},
+			onClose: () => {},
+		});
+		const text = Bun.stripANSI(dashboard.render(160).join("\n"));
+		expect(text).not.toContain("Jane Doe");
+		expect(text).toContain("Jan*** (finance)");
+	});
+
+	it("neutralizes terminal controls in split-card account labels before fitting", () => {
+		const reports = [
+			report("anthropic", "alice\t\x1b[31m@x.test", [limit("anthropic", "a", "7d", "Claude 7 Day", 0.2, "ok")], {
+				orgId: "org-a",
+				orgName: "East\t\x1b[2J",
+			}),
+		];
+		const dashboard = new UsageDashboardComponent({
+			reports,
+			renderDetail: () => "",
+			createMasker: createAccountMasker,
+			maskAccountLabels: false,
+			mergeAccounts: false,
+			labelPlacement: "moving",
+			loadActivity: async () => {},
+			requestRender: () => {},
+			onClose: () => {},
+		});
+		const rendered = dashboard.render(36).join("\n");
+		expect(rendered).not.toContain("\x1b[31m");
+		expect(rendered).not.toContain("\x1b[2J");
+		expect(
+			Bun.stripANSI(rendered)
+				.split("\n")
+				.every(line => line.length <= 36),
+		).toBe(true);
+	});
+
+	it("masks split-card account labels and keeps colliding prefixes distinguishable", () => {
+		const labels = reports.map(formatReportAccountLabel);
+		const cards = buildProviderCards(reports, now, { merge: false, mask: createAccountMasker(labels, true) });
+
+		const masked = cards.map(card => card.account);
+		expect(masked.every(label => label !== undefined && !label.includes("@x.test"))).toBe(true);
+		expect(new Set(masked).size).toBe(2);
+	});
+	it("keeps organization qualifiers visible in narrow split-card headers", () => {
+		const email = "shared-account-with-a-long-address@example.test";
+		const reports = [
+			report("anthropic", email, [limit("anthropic", "east", "7d", "Claude 7 Day", 0.8, "warning")], {
+				orgId: "org-east",
+				orgName: "East",
+			}),
+			report("anthropic", email, [limit("anthropic", "west", "7d", "Claude 7 Day", 0.2, "ok")], {
+				orgId: "org-west",
+				orgName: "West",
+			}),
+		];
+		const dashboard = new UsageDashboardComponent({
+			reports,
+			renderDetail: () => "",
+			createMasker: createAccountMasker,
+			maskAccountLabels: false,
+			mergeAccounts: false,
+			labelPlacement: "moving",
+			loadActivity: async () => {},
+			requestRender: () => {},
+			onClose: () => {},
+		});
+		const headers = Bun.stripANSI(dashboard.render(36).join("\n"))
+			.split("\n")
+			.filter(line => line.includes("(East)") || line.includes("(West)"));
+		expect(headers).toHaveLength(2);
+		expect(headers.some(line => line.includes("(East)"))).toBe(true);
+		expect(headers.some(line => line.includes("(West)"))).toBe(true);
+		expect(headers.every(line => line.length <= 36)).toBe(true);
+	});
+	it("keeps collision ordinals visible for narrow same-organization split cards", () => {
+		const reports = ["mailone@example.test", "mailtwo@example.test"].map((email, index) =>
+			report(
+				"anthropic",
+				email,
+				[limit("anthropic", `account-${index}`, "7d", "Claude 7 Day", 0.2 + index * 0.1, "ok")],
+				{ orgId: `org-${index}`, orgName: "Long Organization" },
+			),
+		);
+		const dashboard = new UsageDashboardComponent({
+			reports,
+			renderDetail: () => "",
+			createMasker: createAccountMasker,
+			maskAccountLabels: true,
+			mergeAccounts: false,
+			labelPlacement: "moving",
+			loadActivity: async () => {},
+			requestRender: () => {},
+			onClose: () => {},
+		});
+		const headers = Bun.stripANSI(dashboard.render(48).join("\n"))
+			.split("\n")
+			.filter(line => line.includes("mai***"));
+
+		expect(headers).toHaveLength(2);
+		expect(headers.some(line => line.includes("mai*** (2)"))).toBe(true);
+		expect(new Set(headers).size).toBe(2);
+		expect(headers.every(line => line.length <= 48)).toBe(true);
+	});
+
+	it("renders normalized masked short account IDs without embedded line breaks", () => {
+		const dashboard = new UsageDashboardComponent({
+			reports: [
+				{
+					provider: "openai-codex",
+					fetchedAt: Date.now(),
+					limits: [limit("openai-codex", "ab\r\ncd", "5h", "5 hours", 0.2, "ok")],
+					metadata: { accountId: "ab\r\ncd", orgName: "Org\tName" },
+				},
+			],
+			renderDetail: () => "",
+			createMasker: createAccountMasker,
+			maskAccountLabels: true,
+			mergeAccounts: false,
+			labelPlacement: "moving",
+			loadActivity: async () => {},
+			requestRender: () => {},
+			onClose: () => {},
+		});
+		const rendered = dashboard.render(48).join("\n");
+		expect(rendered).not.toContain("\r");
+		expect(rendered).not.toContain("\t");
+		expect(Bun.stripANSI(rendered)).toContain("ab *** (Org   Name)");
+	});
+});
+
+describe("UsageDashboardComponent session toggles", () => {
+	function mount(maskAccountLabels: boolean, mergeAccounts: boolean) {
+		const reports = [
+			report("anthropic", "alice@x.test", [limit("anthropic", "a", "7d", "Claude 7 Day", 0.5, "ok")]),
+			report("anthropic", "bob@x.test", [limit("anthropic", "b", "7d", "Claude 7 Day", 0.1, "ok")]),
+		];
+		return new UsageDashboardComponent({
+			reports,
+			renderDetail: () => "",
+			createMasker: createAccountMasker,
+			maskAccountLabels,
+			mergeAccounts,
+			labelPlacement: "moving",
+			loadActivity: async () => {},
+			requestRender: () => {},
+			onClose: () => {},
+		});
+	}
+
+	it("p and m flip privacy/merge only for the open overlay, starting from the settings values", () => {
+		const dashboard = mount(true, true);
+		expect(dashboard.viewState).toMatchObject({ maskAccountLabels: true, mergeAccounts: true });
+		dashboard.handleInput("p");
+		dashboard.handleInput("m");
+		expect(dashboard.viewState).toMatchObject({ maskAccountLabels: false, mergeAccounts: false });
+		const text = Bun.stripANSI(dashboard.render(120).join("\n"));
+		expect(text).toContain("alice@x.test");
+		expect(text).toContain("bob@x.test");
+		// A fresh mount re-reads the (unchanged) settings: toggles never persisted.
+		expect(mount(true, true).viewState).toMatchObject({ maskAccountLabels: true, mergeAccounts: true });
+	});
+
+	it("masks split cards while privacy is on", () => {
+		const dashboard = mount(true, false);
+		const text = Bun.stripANSI(dashboard.render(120).join("\n"));
+		expect(text).not.toContain("alice@x.test");
+		expect(text).toContain("***");
+	});
+});
+
+it("aborts the activity load when the dashboard closes", () => {
+	let activitySignal: AbortSignal | undefined;
+	const dashboard = new UsageDashboardComponent({
+		reports: [],
+		renderDetail: () => "",
+		createMasker: createAccountMasker,
+		maskAccountLabels: true,
+		mergeAccounts: true,
+		labelPlacement: "moving",
+		loadActivity: async (_push, signal) => {
+			activitySignal = signal;
+			const closed = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => closed.resolve(), { once: true });
+			await closed.promise;
+		},
+		requestRender: () => {},
+		onClose: () => {},
+	});
+
+	expect(activitySignal?.aborted).toBe(false);
+	dashboard.dispose();
+	expect(activitySignal?.aborted).toBe(true);
+});
+
+describe("UsageDashboardComponent", () => {
 	it("renders specific error reason when activity loading fails instead of generic DB read error", async () => {
 		const { promise: rendered, resolve: markRendered } = Promise.withResolvers<void>();
 		const component = new UsageDashboardComponent({
 			reports: [],
 			renderDetail: () => "",
+			createMasker: createAccountMasker,
+			maskAccountLabels: true,
+			mergeAccounts: true,
+			labelPlacement: "moving",
 			loadActivity: () => Promise.reject(new Error("worker spawn failed")),
 			requestRender: () => markRendered(),
 			onClose: () => {},
@@ -141,6 +483,10 @@ describe("UsageDashboardComponent", () => {
 		const component = new UsageDashboardComponent({
 			reports: [],
 			renderDetail: () => "",
+			createMasker: createAccountMasker,
+			maskAccountLabels: true,
+			mergeAccounts: true,
+			labelPlacement: "moving",
 			loadActivity: () => Promise.reject(new Error(rawError)),
 			requestRender: () => markRendered(),
 			onClose: () => {},

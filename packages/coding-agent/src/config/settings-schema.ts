@@ -5446,6 +5446,37 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"usage.maskAccountLabels": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "providers",
+			group: "Privacy",
+			label: "Mask Usage Accounts",
+			description: "Show email accounts as the first three characters followed by *** in /usage",
+		},
+	},
+	"usage.mergeAccounts": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "providers",
+			group: "Privacy",
+			label: "Merge Usage Accounts",
+			description: "Show one /usage card per provider (accounts averaged) instead of one card per account",
+		},
+	},
+	"usage.labelPlacement": {
+		type: "enum",
+		default: "moving",
+		values: ["moving", "right"] as const,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Usage Label Position",
+			description: "Move the percentage with the filled bar or anchor it at the right edge",
+		},
+	},
 	// Provider selection
 	"providers.ollama-cloud.maxConcurrency": {
 		type: "number",

@@ -310,6 +310,81 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("user@example.com: 0.24 unknown used (76.0% left)");
 		expect(output[0]).toContain("resets in");
 	});
+	it("applies collision-aware account masking consistently in text usage output", async () => {
+		const { output, runtime } = createRuntime();
+		runtime.settings.set("usage.maskAccountLabels", true);
+		runtime.session.fetchUsageReports = async () => [
+			...["alice@example.com", "alice@example.com"].map((email, index) => ({
+				provider: "openai-codex",
+				fetchedAt: Date.now(),
+				limits: [
+					{
+						id: String(index),
+						label: "5 hours",
+						scope: { provider: "openai-codex", accountId: `account-${index}` },
+						amount: { used: 1, unit: "requests" as const },
+					},
+				],
+				metadata: { email, orgName: "Team" },
+			})),
+			{
+				provider: "openai-codex",
+				fetchedAt: Date.now(),
+				limits: [],
+				metadata: { email: "alice@example.com", accountId: "account-2", orgName: "Team" },
+				resetCredits: { availableCount: 2 },
+			},
+		];
+		await executeAcpBuiltinSlashCommand("/usage", runtime);
+		expect(output[0]).toContain("ali*** (Team)");
+		expect(output[0]).toContain("ali*** (2) (Team)");
+		expect(output[0]).toContain("ali*** (3) (Team): 2 saved rate-limit resets");
+		expect(output[0]).toContain("ali*** (3) (Team): no limits reported");
+		expect(output[0]).not.toContain("@example.com");
+	});
+	it("masks opaque parenthesized identifiers without dropping real organization metadata", async () => {
+		const { output, runtime } = createRuntime();
+		runtime.settings.set("usage.maskAccountLabels", true);
+		runtime.session.fetchUsageReports = async () => [
+			{
+				provider: "openai-codex",
+				fetchedAt: 1,
+				limits: [],
+				metadata: { accountId: "Jane Doe (finance)" },
+				resetCredits: { availableCount: 1 },
+			},
+			{
+				provider: "openai-codex",
+				fetchedAt: 1,
+				limits: [],
+				metadata: { accountId: "Jane Doe", orgName: "finance" },
+				resetCredits: { availableCount: 2 },
+			},
+		];
+		await executeAcpBuiltinSlashCommand("/usage", runtime);
+		expect(output[0]).toContain("Jan***: 1 saved rate-limit reset");
+		expect(output[0]).toContain("Jan*** (finance): 2 saved rate-limit resets");
+		expect(output[0]).not.toContain("Jane Doe");
+	});
+
+	it("preserves the generated bare account placeholder when masking no-identity reports", async () => {
+		const { output, runtime } = createRuntime();
+		runtime.settings.set("usage.maskAccountLabels", true);
+		runtime.session.fetchUsageReports = async () => [
+			{
+				provider: "openai-codex",
+				fetchedAt: Date.now(),
+				limits: [],
+				metadata: {},
+				resetCredits: { availableCount: 1 },
+			},
+		];
+
+		await executeAcpBuiltinSlashCommand("/usage", runtime);
+
+		expect(output[0]).toContain("account: 1 saved rate-limit reset");
+		expect(output[0]).not.toContain("acc***");
+	});
 
 	it("suppresses redundant usage window suffixes while retaining legitimate ones", async () => {
 		const { output, runtime } = createRuntime();

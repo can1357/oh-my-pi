@@ -111,6 +111,7 @@ import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UsageDashboardComponent } from "../components/usage-dashboard";
+import { createAccountMasker } from "../utils/usage-mask";
 import { renderUsageReports } from "./command-controller";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 
@@ -295,16 +296,25 @@ export class SelectorController {
 		};
 		const dashboard = new UsageDashboardComponent({
 			reports,
-			renderDetail: width =>
+			renderDetail: (width, view) =>
 				renderUsageReports(
 					reports,
 					theme,
 					Date.now(),
 					width,
 					provider => (provider === currentProvider ? activeAccount : undefined),
-					usageModelSelectors,
+					{
+						usageModelSelectors,
+						maskAccountLabels: view.maskAccountLabels,
+						labelPlacement: this.ctx.settings.get("usage.labelPlacement"),
+					},
 				),
-			loadActivity: loadDailyActivity,
+			createMasker: createAccountMasker,
+			// Read on every open; the overlay's p/m toggles never write back.
+			maskAccountLabels: this.ctx.settings.get("usage.maskAccountLabels"),
+			mergeAccounts: this.ctx.settings.get("usage.mergeAccounts"),
+			labelPlacement: this.ctx.settings.get("usage.labelPlacement"),
+			loadActivity: (push, signal) => loadDailyActivity(push, signal),
 			requestRender: () => this.ctx.ui.requestRender(),
 			onClose: done,
 		});

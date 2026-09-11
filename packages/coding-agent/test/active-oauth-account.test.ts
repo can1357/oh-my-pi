@@ -154,9 +154,10 @@ describe("reportMatchesActiveAccount", () => {
 		expect(reportMatchesActiveAccount(report, { accountId: "acc-3" })).toBe(false);
 	});
 
-	test("does not match a report with no limits", () => {
+	test("matches report metadata when no limits are present", () => {
 		const report = makeReport({ limits: [], metadata: { email: "user@example.com" } });
-		expect(reportMatchesActiveAccount(report, { email: "user@example.com" })).toBe(false);
+		expect(reportMatchesActiveAccount(report, { email: "user@example.com" })).toBe(true);
+		expect(reportMatchesActiveAccount(report, { email: "other@example.com" })).toBe(false);
 	});
 });
 

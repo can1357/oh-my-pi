@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Improved `/usage` with provider/account cards, temporary privacy and account-grouping controls, and configurable quota-bar labels.
+### Fixed
+
+- Applied account masking consistently to text-mode and ACP `/usage` output, including reset-credit labels.
+
+### Fixed
+
+- Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 ### Fixed
 
 - The `set_steering_mode`, `set_follow_up_mode`, and `set_interrupt_mode` RPC commands are now session-scoped, so a short-lived RPC client no longer silently writes queue-mode fields to the machine-global `config.yml`. The setters still persist by default, so the settings panel and existing callers are unaffected ([#11555](https://github.com/can1357/oh-my-pi/issues/11555)).

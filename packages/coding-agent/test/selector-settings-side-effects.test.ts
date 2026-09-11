@@ -18,6 +18,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import { setTerminalHyperlinks, TERMINAL } from "@oh-my-pi/pi-tui";
+import type { Component } from "@oh-my-pi/pi-tui";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
@@ -34,6 +35,50 @@ afterEach(() => {
 });
 
 describe("selector setting side effects", () => {
+	it("keeps account labels masked when only the active session enables masking", async () => {
+		const uiTheme = await getThemeByName("dark");
+		if (!uiTheme) throw new Error("theme unavailable");
+		setThemeInstance(uiTheme);
+		Settings.instance.override("usage.maskAccountLabels", false);
+		const scoped = Settings.isolated();
+		scoped.override("usage.maskAccountLabels", true);
+		scoped.override("usage.mergeAccounts", false);
+		let overlay: Component | undefined;
+		const controller = new SelectorController({
+			settings: scoped,
+			session: { getUsageReportingModelSelectors: () => [] },
+			ui: {
+				showOverlay: (component: Component) => {
+					overlay = component;
+					return { hide() {} };
+				},
+				setFocus() {},
+				requestRender() {},
+			},
+		} as unknown as InteractiveModeContext);
+		controller.showUsageDashboard([
+			{
+				provider: "openai-codex",
+				fetchedAt: Date.now(),
+				metadata: { email: "private@example.test" },
+				limits: [
+					{
+						id: "weekly",
+						label: "Weekly",
+						scope: { provider: "openai-codex", accountId: "account", windowId: "weekly" },
+						window: { id: "weekly", label: "Weekly" },
+						amount: { usedFraction: 0.5, unit: "percent" },
+						status: "ok",
+					},
+				],
+			},
+		]);
+		const rendered = stripVTControlCharacters(overlay!.render(120).join("\n"));
+		expect(rendered).not.toContain("private@example.test");
+		overlay?.handleInput?.("p");
+		expect(stripVTControlCharacters(overlay!.render(120).join("\n"))).toContain("private@example.test");
+		overlay?.dispose?.();
+	});
 	it("refreshes the status line when git integration changes at runtime", () => {
 		const updateSettings = vi.fn();
 		const requestRender = vi.fn();

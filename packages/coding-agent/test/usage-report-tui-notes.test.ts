@@ -18,6 +18,8 @@ import { stripVTControlCharacters } from "node:util";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { loadTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/loader";
+import { renderFractionBar } from "@oh-my-pi/pi-coding-agent/modes/utils/usage-bar";
 
 const HOUR = 3_600_000;
 
@@ -74,7 +76,9 @@ describe("renderUsageReports (#3268 TUI aggregate)", () => {
 			report("github-copilot", "acct@example.test", [limit("Copilot", "monthly", 30 * 24 * HOUR, 0.4)]),
 		];
 		const models = ["github-copilot/gpt-5.6", "github-copilot/claude-sonnet-4.6"];
-		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120, undefined, models));
+		const text = stripVTControlCharacters(
+			renderUsageReports(reports, theme, Date.now(), 120, undefined, { usageModelSelectors: models }),
+		);
 		expect(text).toContain("Models with usage data");
 		expect(text).toContain(models[0]);
 		expect(text).toContain(models[1]);
@@ -203,5 +207,151 @@ describe("renderUsageReports session marker (#5691 org-qualified identity)", () 
 		const marker = text.split("\n").find(line => line.includes("in use by this session"));
 		expect(marker).toContain(email);
 		expect(marker).not.toContain("(");
+	});
+});
+
+describe("renderUsageReports account privacy", () => {
+	it("masks email identities across account rows and the active-session marker", () => {
+		const email = "aiforall@ghostit.dev";
+		const reports: UsageReport[] = [
+			{
+				...report("anthropic", email, [limit("Claude 7 Day", "weekly", 7 * 24 * HOUR, 0.4)]),
+				metadata: { email, orgId: "uuid-A", orgName: "Team Org" },
+			},
+		];
+		const rendered = renderUsageReports(
+			reports,
+			theme,
+			Date.now(),
+			120,
+			provider => (provider === "anthropic" ? { email, orgId: "uuid-A", orgName: "Team Org" } : undefined),
+			{ maskAccountLabels: true },
+		);
+		const text = stripVTControlCharacters(rendered);
+
+		expect(text).toContain("aif*** (Team Org)");
+		expect(text).not.toContain(email);
+		expect(text.split("\n").find(line => line.includes("in use by this session"))).toContain("aif*** (Team Org)");
+		expect(rendered).toContain(theme.fg("warning", "***"));
+	});
+
+	it("shows the full email when masking is disabled", () => {
+		const email = "aiforall@ghostit.dev";
+		const reports = [report("anthropic", email, [limit("Claude 7 Day", "weekly", 7 * 24 * HOUR, 0.4)])];
+
+		const text = stripVTControlCharacters(
+			renderUsageReports(reports, theme, Date.now(), 120, undefined, { maskAccountLabels: false }),
+		);
+
+		expect(text).toContain(email);
+		expect(text).not.toContain("aif***");
+	});
+});
+
+describe("renderUsageReports terminal width", () => {
+	it("keeps every rendered line within the available width for many accounts", () => {
+		const reports = Array.from({ length: 24 }, (_, index) =>
+			report("github-copilot", `account-${index + 1}@example.test`, [
+				limit("Copilot", "monthly", 30 * 24 * HOUR, (index + 1) / 25),
+			]),
+		);
+		const availableWidth = 40;
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), availableWidth));
+
+		for (const line of text.split("\n")) {
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(availableWidth);
+		}
+	});
+
+	it("does not stretch account blocks across surplus terminal width", () => {
+		const now = Date.now();
+		const reports: UsageReport[] = [
+			report("anthropic", "aiforall@ghostit.dev", [limit("Claude 7 Day", "weekly", 7 * 24 * HOUR, 0.4)]),
+			report("anthropic", "ualexen92@gmail.com", [limit("Claude 7 Day", "weekly", 7 * 24 * HOUR, 0.2)]),
+		];
+
+		const compact = stripVTControlCharacters(renderUsageReports(reports, theme, now, 80));
+		const wide = stripVTControlCharacters(renderUsageReports(reports, theme, now, 160));
+
+		expect(wide).toBe(compact);
+	});
+	it("embeds each account's remaining usage in its bar and keeps the combined total on that row", () => {
+		const reports: UsageReport[] = [
+			report("anthropic", "aiforall@ghostit.dev", [limit("Claude 7 Day", "weekly", 7 * 24 * HOUR, 0.52)]),
+			report("anthropic", "ualexen92@gmail.com", [limit("Claude 7 Day", "weekly", 7 * 24 * HOUR, 0)]),
+		];
+
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 160));
+		const usageLine = text.split("\n").find(line => line.includes("48% free"));
+
+		expect(usageLine).toContain("100% free");
+		expect(usageLine).toContain("combined 74% free");
+		expect(usageLine).toMatch(/[█▓▒░].*48% free/);
+	});
+
+	it("moves the embedded percentage toward the end as remaining usage grows", () => {
+		const barLine = (usedFraction: number) => {
+			const reports = [
+				report("anthropic", "account@example.test", [limit("Claude 7 Day", "weekly", 7 * 24 * HOUR, usedFraction)]),
+			];
+			return stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 80))
+				.split("\n")
+				.find(line => line.includes("% free"));
+		};
+
+		expect(barLine(0.2)?.indexOf("80% free")).toBeGreaterThan(barLine(0.8)?.indexOf("20% free") ?? Number.MAX_VALUE);
+	});
+
+	it("uses a gradual red-to-green fill and lets the boundary cross the label only near exhaustion", async () => {
+		const truecolorTheme = await loadTheme("dark", { mode: "truecolor" });
+		const renderBarLine = (usedFraction: number) => {
+			const reports = [
+				report("anthropic", "account@example.test", [limit("Claude 7 Day", "weekly", 7 * 24 * HOUR, usedFraction)]),
+			];
+			return renderUsageReports(reports, truecolorTheme, Date.now(), 80)
+				.split("\n")
+				.find(line => line.includes("% free"));
+		};
+		const low = renderBarLine(0.9);
+		const mid = renderBarLine(0.5);
+		const high = renderBarLine(0.1);
+		const rgb = (line: string | undefined) => {
+			const match = line?.match(/\x1b\[(?:30;)?(?:38|48);2;(\d+);(\d+);(\d+)m/);
+			return match ? match.slice(1).map(Number) : [];
+		};
+		const [lowRed = 0, lowGreen = 0] = rgb(low);
+		const [midRed = 0, midGreen = 0, midBlue = 0] = rgb(mid);
+		const [highRed = 0, highGreen = 0] = rgb(high);
+
+		expect(lowRed).toBeGreaterThan(lowGreen);
+		expect(midRed).toBeGreaterThan(midGreen);
+		expect(midGreen).toBeGreaterThan(midBlue);
+		expect(highGreen).toBeGreaterThan(highRed);
+		expect(mid).toMatch(/\x1b\[38;2;\d+;\d+;\d+m/);
+		expect(mid).toMatch(/\x1b\[48;2;\d+;\d+;\d+m50% free\x1b\[39;49m/);
+	});
+
+	it("can anchor the embedded percentage at the right edge while the fill crosses through it", () => {
+		const reports = [
+			report("anthropic", "account@example.test", [limit("Claude 7 Day", "weekly", 7 * 24 * HOUR, 0.5)]),
+		];
+		const line = renderUsageReports(reports, theme, Date.now(), 80, undefined, { labelPlacement: "right" })
+			.split("\n")
+			.find(candidate => candidate.includes("% free"));
+		expect(Bun.stripANSI(line ?? "")).toMatch(/50% free$/);
+	});
+
+	it("keeps a fully free narrow bar within its requested width", () => {
+		for (const width of [1, 2, 9, 10, 12]) {
+			const rendered = renderFractionBar(1, width, theme);
+			expect(Bun.stringWidth(Bun.stripANSI(rendered))).toBe(width);
+		}
+	});
+	it("uses ANSI-256 escapes for both bar foreground and inverse background", async () => {
+		const ansi256Theme = await loadTheme("dark", { mode: "256color" });
+		const rendered = renderFractionBar(0.5, 20, ansi256Theme);
+		expect(rendered).toMatch(/\x1b\[38;5;\d+m/);
+		expect(rendered).toMatch(/\x1b\[48;5;\d+m/);
+		expect(rendered).not.toMatch(/\x1b\[(?:38|48);2;/);
 	});
 });
