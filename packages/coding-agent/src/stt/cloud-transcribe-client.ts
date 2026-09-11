@@ -1,4 +1,5 @@
-import type { OAuthAccess } from "@oh-my-pi/pi-ai";
+import { type OAuthAccess, type OAuthAccessSource, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
 	applyCodexResidencyHeader,
@@ -58,6 +59,8 @@ export function resolveCloudSttModel(name: string | undefined): CloudSttModel {
 }
 
 const CODEX_STT_URL = `${CODEX_BASE_URL}${URL_PATHS.TRANSCRIBE}`;
+/** Provider id the Codex ChatGPT-subscription credential is stored under. */
+const CODEX_STT_PROVIDER = "openai-codex";
 const CLOUD_STT_TIMEOUT_MS = 60_000;
 
 /** omp records at 16 kHz mono; the endpoint accepts 16-bit PCM WAV as-is. */
@@ -81,8 +84,17 @@ export const STT_BACKEND_OPTIONS = [
 		description: "OpenAI transcription on release. Subscription first, else API key.",
 	},
 ] as const satisfies ReadonlyArray<{ value: SttBackend; label: string; description: string }>;
+/**
+ * A resolved cloud STT credential with its provenance intact.
+ *
+ * The `codex` variant carries the OAuth *source* (not just a bearer) so the
+ * request runs through {@link withOAuthAccess}: a server-rejected but
+ * unexpired session-sticky token gets force-refreshed and, on an
+ * account-scoped denial, rotated to a sibling account instead of dropping the
+ * dictation.
+ */
 export type CloudSttCredential =
-	| { kind: "codex"; access: OAuthAccess }
+	| { kind: "codex"; access: OAuthAccess; source: OAuthAccessSource; sessionId?: string }
 	| { kind: "openai"; apiKey: string; baseUrl?: string; headers?: Record<string, string> };
 export interface CloudSttStreamOptions extends SttStreamOptions {
 	credential: CloudSttCredential;
@@ -178,44 +190,101 @@ async function transcribeBuffer(
 	options: CloudSttStreamOptions,
 	audio: Float32Array,
 ): Promise<string> {
-	const form = new FormData();
+	// Encode once: a credential retry replays the upload, not the WAV encode.
+	const wav = new Blob([encodeWav16k(audio)], { type: "audio/wav" });
 	const credential = options.credential;
-	let url: string;
-	let headers: Record<string, string>;
-	if (credential.kind === "codex") {
-		const accountId = credential.access.accountId ?? getCodexAccountId(credential.access.accessToken);
-		if (!accountId) throw new Error("OpenAI Codex authentication is missing an account id.");
-		url = CODEX_STT_URL;
-		headers = {
-			Authorization: `Bearer ${credential.access.accessToken}`,
-			[OPENAI_HEADERS.ACCOUNT_ID]: accountId,
-			[OPENAI_HEADERS.ORIGINATOR]: OPENAI_HEADER_VALUES.ORIGINATOR_CODEX,
-			[OPENAI_HEADERS.VERSION]: CODEX_CLIENT_VERSION,
-			"User-Agent": `Codex Desktop/${CODEX_CLIENT_VERSION}`,
-		};
-		applyCodexResidencyHeader(headers, credential.access.accessToken);
-		const attestation = await getCodexAttestationHeader(accountId);
-		if (attestation) headers[OPENAI_HEADERS.ATTESTATION] = attestation;
-	} else {
-		const baseUrl = credential.baseUrl?.replace(/\/$/, "") ?? "https://api.openai.com/v1";
-		url = `${baseUrl}/audio/transcriptions`;
-		headers = { ...credential.headers, Authorization: `Bearer ${credential.apiKey}` };
-		form.append("model", resolveCloudSttModel(options.model));
-		if (options.language) form.append("language", options.language);
-		if (options.keywords?.length) form.append("prompt", options.keywords.join(", "));
-		form.append("response_format", "json");
-	}
-	form.append("file", new Blob([encodeWav16k(audio)], { type: "audio/wav" }), "dictation.wav");
+	if (credential.kind === "openai") return await transcribeWithApiKey(fetchImpl, options, credential, wav);
+	return await withOAuthAccess(
+		credential.source,
+		CODEX_STT_PROVIDER,
+		access => transcribeWithCodexAccess(fetchImpl, options, access, wav),
+		{
+			sessionId: credential.sessionId,
+			signal: options.signal,
+			seed: credential.access,
+			missingAccessMessage: "No Codex OAuth credential is available for cloud dictation.",
+		},
+	);
+}
+
+/** ChatGPT-subscription route: Codex transcribe endpoint with identity headers. */
+async function transcribeWithCodexAccess(
+	fetchImpl: typeof fetch,
+	options: CloudSttStreamOptions,
+	access: OAuthAccess,
+	wav: Blob,
+): Promise<string> {
+	const accountId = access.accountId ?? getCodexAccountId(access.accessToken);
+	if (!accountId) throw new Error("OpenAI Codex authentication is missing an account id.");
+	const headers: Record<string, string> = {
+		Authorization: `Bearer ${access.accessToken}`,
+		[OPENAI_HEADERS.ACCOUNT_ID]: accountId,
+		[OPENAI_HEADERS.ORIGINATOR]: OPENAI_HEADER_VALUES.ORIGINATOR_CODEX,
+		[OPENAI_HEADERS.VERSION]: CODEX_CLIENT_VERSION,
+		"User-Agent": `Codex Desktop/${CODEX_CLIENT_VERSION}`,
+	};
+	applyCodexResidencyHeader(headers, access.accessToken);
+	const attestation = await getCodexAttestationHeader(accountId);
+	if (attestation) headers[OPENAI_HEADERS.ATTESTATION] = attestation;
+	const form = new FormData();
+	form.append("file", wav, "dictation.wav");
+	return await postTranscription(fetchImpl, CODEX_STT_URL, headers, form, options.signal);
+}
+
+/** Platform route: honours a provider override's base URL and headers. */
+async function transcribeWithApiKey(
+	fetchImpl: typeof fetch,
+	options: CloudSttStreamOptions,
+	credential: Extract<CloudSttCredential, { kind: "openai" }>,
+	wav: Blob,
+): Promise<string> {
+	const baseUrl = credential.baseUrl?.replace(/\/$/, "") ?? "https://api.openai.com/v1";
+	const headers: Record<string, string> = {
+		...stripContentType(credential.headers),
+		Authorization: `Bearer ${credential.apiKey}`,
+	};
+	const form = new FormData();
+	form.append("model", resolveCloudSttModel(options.model));
+	if (options.language) form.append("language", options.language);
+	if (options.keywords?.length) form.append("prompt", options.keywords.join(", "));
+	form.append("response_format", "json");
+	form.append("file", wav, "dictation.wav");
+	return await postTranscription(fetchImpl, `${baseUrl}/audio/transcriptions`, headers, form, options.signal);
+}
+
+/**
+ * Drop a configured `Content-Type` (any casing) from provider headers: the
+ * multipart body needs fetch to generate its own boundary, and a provider
+ * override carrying `application/json` would otherwise make the endpoint
+ * reject an otherwise valid recording.
+ */
+function stripContentType(headers: Record<string, string> | undefined): Record<string, string> | undefined {
+	if (!headers) return undefined;
+	const entries = Object.entries(headers).filter(([name]) => name.toLowerCase() !== "content-type");
+	return entries.length === Object.keys(headers).length ? headers : Object.fromEntries(entries);
+}
+
+async function postTranscription(
+	fetchImpl: typeof fetch,
+	url: string,
+	headers: Record<string, string>,
+	form: FormData,
+	signal: AbortSignal | undefined,
+): Promise<string> {
 	const timeout = AbortSignal.timeout(CLOUD_STT_TIMEOUT_MS);
 	const response = await fetchImpl(url, {
 		method: "POST",
 		headers,
 		body: form,
-		signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
+		signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
 	});
 	if (!response.ok) {
 		const detail = (await response.text().catch(() => "")).slice(0, 300);
-		throw new Error(`Cloud transcription failed (${response.status}): ${detail}`);
+		// Typed status so `withOAuthAccess` can classify 401 (refresh) and
+		// 403/usage-limit (rotate) instead of seeing an opaque Error.
+		throw new ProviderHttpError(`Cloud transcription failed (${response.status}): ${detail}`, response.status, {
+			headers: response.headers,
+		});
 	}
 	const body = (await response.json()) as { text?: string };
 	return (body.text ?? "").trim();

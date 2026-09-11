@@ -1,3 +1,4 @@
+import type { OAuthAccess, OAuthAccessSource } from "@oh-my-pi/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -32,6 +33,32 @@ function stubFetch(text = "hello world", status = 200): StubFetch {
 			const body = JSON.stringify({ text: stub.text });
 			return new Response(body, { status: stub.status, headers: { "Content-Type": "application/json" } });
 		}) as typeof fetch,
+	};
+	return stub;
+}
+
+interface OAuthSourceStub {
+	resolves: Array<{ forceRefresh: boolean | undefined }>;
+	rotations: number;
+	source: OAuthAccessSource;
+}
+
+/** Fake {@link OAuthAccessSource}: `tokens` are handed out in order, last one sticks. */
+function oauthSource(...tokens: string[]): OAuthSourceStub {
+	const stub: OAuthSourceStub = {
+		resolves: [],
+		rotations: 0,
+		source: {
+			async getOAuthAccess(_provider, _sessionId, options) {
+				stub.resolves.push({ forceRefresh: options?.forceRefresh });
+				const token = tokens[Math.min(stub.resolves.length - 1, tokens.length - 1)];
+				return token ? { accessToken: token, accountId: "account-1" } : undefined;
+			},
+			async rotateSessionCredential() {
+				stub.rotations++;
+				return false;
+			},
+		},
 	};
 	return stub;
 }
@@ -105,6 +132,7 @@ describe("cloud STT stream", () => {
 			credential: {
 				kind: "codex",
 				access: { accessToken: "subscription-token", accountId: "account-1" },
+				source: oauthSource("subscription-token").source,
 			},
 			fetchImpl: codexStub.impl,
 		});
@@ -117,6 +145,68 @@ describe("cloud STT stream", () => {
 			originator: "omp",
 		});
 		expect((codexStub.calls[0]!.init.body as FormData).has("model")).toBe(false);
+	});
+
+	it("drops a provider Content-Type so fetch generates the multipart boundary", async () => {
+		const stub = stubFetch("ok");
+		const handle = startCloudSttStream({
+			credential: {
+				kind: "openai",
+				apiKey: "sk-test",
+				headers: { "Content-Type": "application/json", "X-Workspace": "workspace-1" },
+			},
+			fetchImpl: stub.impl,
+		});
+		handle.pushAudio(sine16kHz(160));
+		await expect(handle.stop()).resolves.toBe("ok");
+		expect(stub.calls[0]!.init.headers).toEqual({
+			"X-Workspace": "workspace-1",
+			Authorization: "Bearer sk-test",
+		});
+	});
+
+	it("force-refreshes a rejected Codex token and retries the upload", async () => {
+		// The stale bearer is the seeded access; the refresh resolve yields the fresh one.
+		const oauth = oauthSource("fresh-token");
+		const bearers: string[] = [];
+		const fetchImpl = (async (url: string, init: RequestInit) => {
+			const bearer = (init.headers as Record<string, string>)["Authorization"]!;
+			bearers.push(bearer);
+			if (bearer.endsWith("stale-token")) return new Response("unauthorized", { status: 401 });
+			return new Response(JSON.stringify({ text: "retried" }), { status: 200 });
+		}) as typeof fetch;
+		const handle = startCloudSttStream({
+			credential: {
+				kind: "codex",
+				access: { accessToken: "stale-token", accountId: "account-1" },
+				source: oauth.source,
+				sessionId: "s1",
+			},
+			fetchImpl,
+		});
+		handle.pushAudio(sine16kHz(160));
+		await expect(handle.stop()).resolves.toBe("retried");
+		expect(bearers).toEqual(["Bearer stale-token", "Bearer fresh-token"]);
+		// Seeded first attempt, then exactly one forced refresh of the same account.
+		expect(oauth.resolves).toEqual([{ forceRefresh: true }]);
+	});
+
+	it("rotates to a sibling account when Codex denies the account", async () => {
+		const oauth = oauthSource("denied-token");
+		const fetchImpl = (async (_url: string, _init: RequestInit) =>
+			new Response("account denied", { status: 403 })) as typeof fetch;
+		const handle = startCloudSttStream({
+			credential: {
+				kind: "codex",
+				access: { accessToken: "denied-token", accountId: "account-1" },
+				source: oauth.source,
+				sessionId: "s1",
+			},
+			fetchImpl,
+		});
+		handle.pushAudio(sine16kHz(160));
+		await expect(handle.stop()).rejects.toThrow("403");
+		expect(oauth.rotations).toBe(1);
 	});
 	it("resolves empty text without a request when nothing was recorded", async () => {
 		const stub = stubFetch();
@@ -236,20 +326,26 @@ describe("resolveSttCloudCredential", () => {
 	function registry(codex: string | undefined, openai: string | undefined) {
 		return {
 			authStorage: {
-				async getOAuthAccess(): Promise<{ accessToken: string; accountId: string } | undefined> {
+				async getOAuthAccess(): Promise<OAuthAccess | undefined> {
 					return codex ? { accessToken: codex, accountId: "account-1" } : undefined;
 				},
-			},
+				async rotateSessionCredential(): Promise<boolean> {
+					return false;
+				},
+			} satisfies OAuthAccessSource,
 			async getApiKeyForProvider(): Promise<string | undefined> {
 				return openai;
 			},
 		};
 	}
 
-	it("preserves ChatGPT subscription provenance", async () => {
-		await expect(resolveSttCloudCredential(registry("sub-token", "sk-key"), "s1")).resolves.toEqual({
+	it("preserves ChatGPT subscription provenance and its retry source", async () => {
+		const source = registry("sub-token", "sk-key");
+		await expect(resolveSttCloudCredential(source, "s1")).resolves.toEqual({
 			kind: "codex",
 			access: { accessToken: "sub-token", accountId: "account-1" },
+			source: source.authStorage,
+			sessionId: "s1",
 		});
 	});
 
