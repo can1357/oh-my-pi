@@ -32218,7 +32218,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"requiresToolResultImageHoisting": true
 		},
 		"cohere.command-r-v1:0": {
 			"id": "cohere.command-r-v1:0",
@@ -32248,7 +32249,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"requiresToolResultImageHoisting": true
 		},
 		"deepseek.v3-v1:0": {
 			"id": "deepseek.v3-v1:0",
@@ -33853,7 +33855,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
 				"streamIdleTimeoutMs": 600000
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"global.openai.gpt-5.6-sol": {
 			"id": "global.openai.gpt-5.6-sol",
@@ -33896,7 +33899,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
 				"streamIdleTimeoutMs": 600000
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"global.openai.gpt-5.6-terra": {
 			"id": "global.openai.gpt-5.6-terra",
@@ -33939,7 +33943,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
 				"streamIdleTimeoutMs": 600000
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"google.gemma-3-27b-it": {
 			"id": "google.gemma-3-27b-it",
@@ -33970,7 +33975,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"google.gemma-3-4b-it": {
 			"id": "google.gemma-3-4b-it",
@@ -34001,7 +34007,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"jp.anthropic.claude-haiku-4-5-20251001-v1:0": {
 			"id": "jp.anthropic.claude-haiku-4-5-20251001-v1:0",
@@ -34298,7 +34305,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"requiresToolResultImageHoisting": true
 		},
 		"meta.llama3-1-70b-instruct-v1:0": {
 			"id": "meta.llama3-1-70b-instruct-v1:0",
@@ -34328,7 +34336,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"meta.llama3-1-8b-instruct-v1:0": {
 			"id": "meta.llama3-1-8b-instruct-v1:0",
@@ -34358,7 +34367,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"minimax.minimax-m2": {
 			"id": "minimax.minimax-m2",
@@ -34851,7 +34861,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
 				"streamIdleTimeoutMs": 600000
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"moonshotai.kimi-k2.5": {
 			"id": "moonshotai.kimi-k2.5",
@@ -34892,7 +34903,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
 				"streamIdleTimeoutMs": 600000
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"nvidia.nemotron-nano-12b-v2": {
 			"id": "nvidia.nemotron-nano-12b-v2",
@@ -34923,7 +34935,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"nvidia.nemotron-nano-3-30b": {
 			"id": "nvidia.nemotron-nano-3-30b",
@@ -34963,7 +34976,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
 				"streamIdleTimeoutMs": 600000
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"nvidia.nemotron-nano-9b-v2": {
 			"id": "nvidia.nemotron-nano-9b-v2",
@@ -34995,7 +35009,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"nvidia.nemotron-super-3-120b": {
 			"id": "nvidia.nemotron-super-3-120b",
@@ -35035,7 +35050,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
 				"streamIdleTimeoutMs": 600000
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"openai.gpt-oss-120b": {
 			"id": "openai.gpt-oss-120b",
@@ -36903,7 +36919,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"requiresToolResultImageHoisting": true
 		},
 		"us.meta.llama3-2-1b-instruct-v1:0": {
 			"id": "us.meta.llama3-2-1b-instruct-v1:0",
@@ -36933,7 +36950,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"requiresToolResultImageHoisting": true
 		},
 		"us.meta.llama3-2-3b-instruct-v1:0": {
 			"id": "us.meta.llama3-2-3b-instruct-v1:0",
@@ -36963,7 +36981,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"requiresToolResultImageHoisting": true
 		},
 		"us.meta.llama3-2-90b-instruct-v1:0": {
 			"id": "us.meta.llama3-2-90b-instruct-v1:0",
@@ -36994,7 +37013,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"requiresToolResultImageHoisting": true
 		},
 		"us.meta.llama3-3-70b-instruct-v1:0": {
 			"id": "us.meta.llama3-3-70b-instruct-v1:0",
@@ -37024,7 +37044,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"us.meta.llama4-maverick-17b-instruct-v1:0": {
 			"id": "us.meta.llama4-maverick-17b-instruct-v1:0",
@@ -37055,7 +37076,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"us.meta.llama4-scout-17b-instruct-v1:0": {
 			"id": "us.meta.llama4-scout-17b-instruct-v1:0",
@@ -37086,7 +37108,8 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"writer.palmyra-x4-v1:0": {
 			"id": "writer.palmyra-x4-v1:0",
@@ -37126,7 +37149,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
 				"streamIdleTimeoutMs": 600000
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"writer.palmyra-x5-v1:0": {
 			"id": "writer.palmyra-x5-v1:0",
@@ -37166,7 +37190,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
 				"streamIdleTimeoutMs": 600000
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"xai.grok-4.3": {
 			"id": "xai.grok-4.3",
@@ -37207,7 +37232,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
 				"streamIdleTimeoutMs": 600000
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"xai.grok-4.6": {
 			"id": "xai.grok-4.6",
@@ -37248,7 +37274,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
 				"streamIdleTimeoutMs": 600000
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"zai.glm-4.7": {
 			"id": "zai.glm-4.7",
@@ -37288,7 +37315,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
 				"streamIdleTimeoutMs": 600000
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"zai.glm-4.7-flash": {
 			"id": "zai.glm-4.7-flash",
@@ -37328,7 +37356,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
 				"streamIdleTimeoutMs": 600000
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		},
 		"zai.glm-5": {
 			"id": "zai.glm-5",
@@ -37368,7 +37397,8 @@
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
 				"streamIdleTimeoutMs": 600000
-			}
+			},
+			"requiresToolResultImageHoisting": true
 		}
 	},
 	"anthropic": {
@@ -291031,6 +291061,106 @@
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
 				"stripImageInput": true,
+				"thinkingLoopGuard": "deepseek",
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false,
+				"supportsLongPromptCacheRetention": false,
+				"strictResponsesPairing": false,
+				"supportsImageDetailOriginal": true,
+				"supportsObfuscationOptOut": false,
+				"supportsAllTurnsReasoningContext": false,
+				"supportsConfigurationUpdate": false,
+				"officialEndpoint": false,
+				"harmonyLeakMitigation": false,
+				"requiresReasoningOffJuiceInstruction": false,
+				"supportsReasoningSummary": true
+			},
+			"supportsComputerUse": false
+		},
+		"deepseek/deepseek-v4.1-flash": {
+			"id": "deepseek/deepseek-v4.1-flash",
+			"name": "DeepSeek V4.1 Flash",
+			"api": "openrouter",
+			"provider": "openrouter",
+			"baseUrl": "https://openrouter.ai/api/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.15,
+				"output": 0.6,
+				"cacheRead": 0.003,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 384000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"high",
+					"max"
+				]
+			},
+			"identity": {
+				"class": "deepseek",
+				"family": "flash"
+			},
+			"requiresGlyphTokenization": false,
+			"tokenizer": "deepseek-v3",
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": true,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openrouter",
+				"reasoningDisableMode": "openrouter-enabled-false",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": false,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": true,
+				"wireModelIdMode": "openrouter",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": true,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "dsml",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false,
+				"nativeKimiK3Reasoning": false,
+				"zaiReasoningEffortDialect": false,
+				"clampOutputToModelMax": false,
+				"stripImageInput": false,
 				"thinkingLoopGuard": "deepseek",
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
