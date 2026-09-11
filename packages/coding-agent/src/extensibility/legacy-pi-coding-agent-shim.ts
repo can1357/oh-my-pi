@@ -231,6 +231,12 @@ function createRegistryTool(
 	settingOverrides?: LegacySettingOverrides,
 ): Tool {
 	const session = legacyToolSession(cwd, settingOverrides);
+	// The factory creates exactly this one tool, so it is the only
+	// availability the session can assert. Without this, tool prompts fall
+	// back to the main agent's defaults and steer the model toward siblings
+	// the extension may never have registered (e.g. bash-only setups told
+	// to query SQLite via an unregistered `read` — Codex P2 3986069142).
+	session.isToolActive = toolName => toolName === name;
 	switch (name) {
 		case "bash":
 			return new BashTool(session);
