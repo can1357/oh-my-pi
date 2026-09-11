@@ -237,13 +237,16 @@ The flag never reaches provider wire formats, and flagged pairs are never remove
 
 ### Boundary and cut-point logic
 
-`prepareCompaction()` normally starts after the last reusable compaction record. A speculative native record can leave an uncovered interval before that record, so its replay snapshot boundary takes precedence.
+`prepareCompaction()` builds one effective message sequence for estimation, cut-point selection, and the history-summary, turn-prefix, and retained-message regions.
 
-1. Find previous compaction index.
-2. Honor the latest `/clear` `reset_boundary` marker: a boundary after the last reusable compaction supersedes it, so a compaction after an in-place `/clear` only summarizes messages created after the reset (issue #8718).
-3. Start after the previous compaction, or after its `providerReplayThroughEntryId` when native replay covers an older snapshot. Never cross the latest reset boundary. A trailing native compaction record does not make an uncovered snapshot-to-commit interval already compacted.
-4. Adapt `keepRecentTokens` using measured usage ratio when available.
-5. Run `findCutPoint()` over the boundary window.
+1. Find the latest compaction whose summary or provider-native history is reusable by the active model.
+2. Honor the latest `/clear` `reset_boundary`: a newer reset discards the previous summary, and an older reset remains the lower bound for recovering retained messages.
+3. For a local summary, recover the original entries from `firstKeptEntryId` up to the previous compaction record, then append entries after that record.
+4. For reusable provider-native history, start after `providerReplayThroughEntryId` when it identifies an older snapshot, without crossing the latest reset boundary. This recovers the uncovered snapshot-to-commit interval, not the original messages already covered by native replay. A trailing native compaction record does not make that interval already compacted.
+5. Exclude compaction records and other non-message metadata. Pass the previous summary separately through `previousSummary`; retain message-bearing `custom_message` and `branch_summary` entries.
+6. Adapt `keepRecentTokens` using the measured usage ratio, then run `findCutPoint()` and partition that same sequence into `messagesToSummarize`, `turnPrefixMessages`, and `recentMessages`.
+
+When updating a local summary, every effective original message belongs to exactly one of those three regions. For example, after `summary(A) + B` grows to `summary(A) + B + C`, the next preparation distributes both B and C, not just C. The new `firstKeptEntryId` refers to an original entry; preparation does not move, duplicate, or rewrite journal entries. This is a local-summary preparation guarantee, not an end-to-end guarantee for provider-native or speculative native replay.
 
 Valid cut points include:
 
@@ -253,7 +256,7 @@ Valid cut points include:
 
 Hard rule: never cut at `toolResult`.
 
-If there are non-message metadata entries immediately before the cut point (`model_change`, `thinking_level_change`, labels, etc.), they are pulled into the kept region by moving cut index backward until a message or compaction boundary is hit.
+Preparation filters out pure metadata (`model_change`, `thinking_level_change`, labels, etc.) before selecting the retained-message boundary. Those records remain in the journal but are not conversation input.
 
 ### Split-turn handling
 
