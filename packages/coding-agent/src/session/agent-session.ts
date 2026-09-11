@@ -8849,6 +8849,12 @@ export class AgentSession {
 		if (!model) {
 			throw new Error("No active model on session");
 		}
+		for (const field of ["maxTokens", "maxContextBytes"] as const) {
+			const cap = args[field];
+			if (cap !== undefined && (!Number.isSafeInteger(cap) || cap <= 0)) {
+				throw new Error(`${field} must be a positive safe integer.`);
+			}
+		}
 		// Do not silently start an unbounded request when discovery or transport
 		// policy says the output limit will be omitted.
 		if (args.maxTokens !== undefined && omitsOutputTokenLimit(model)) {

@@ -19,6 +19,7 @@ import {
 	type TextContent,
 	type ToolCall,
 } from "@oh-my-pi/pi-ai";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -839,60 +840,54 @@ describe("AgentSession message pipeline", () => {
 	});
 
 	it.each(["anthropic-messages", "ollama-chat", "openai-responses"])(
-		"runs capped ephemeral requests through the %s side stream",
+		"encodes the ephemeral output cap in the %s HTTP request",
 		async api => {
 			const model = buildModel({
 				id: "side-stream-model",
 				name: "Side Stream Model",
 				api,
 				provider: "test-provider",
-				baseUrl: "",
+				baseUrl: "https://provider.invalid",
 				reasoning: false,
 				input: ["text"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow: 4096,
 				maxTokens: 1024,
-			} as ModelSpec<Api>) as Model<Api>;
-			let capturedOptions: SimpleStreamOptions | undefined;
-			let capturedContext: Context | undefined;
-			const sideStreamFn: StreamFn = (_model, context, options) => {
-				capturedContext = context;
-				capturedOptions = options;
-				const stream = new AssistantMessageEventStream();
-				queueMicrotask(() => {
-					const message = createAssistantMessage("Side answer");
-					stream.push({ type: "text_delta", contentIndex: 0, delta: "Side answer", partial: message });
-					stream.push({ type: "done", reason: "stop", message });
-				});
-				return stream;
-			};
+			});
+			const bodies: Record<string, unknown>[] = [];
 			const session = new AgentSession({
-				agent: new Agent({
-					initialState: {
-						model,
-						systemPrompt: ["system prompt"],
-						messages: [],
-						tools: [],
-					},
-				}),
+				agent: new Agent({ initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [] } }),
 				sessionManager: SessionManager.inMemory(),
 				settings: Settings.isolated({ "compaction.enabled": false }),
 				modelRegistry: createModelRegistryStub() as never,
-				sideStreamFn,
+				sideStreamFn: (target, context, options) =>
+					streamSimple(target, context, {
+						...options,
+						apiKey: "test-key",
+						fetch: async (_url, init) => {
+							bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+							// Exercise the real encoder but stop at the HTTP boundary, without inference.
+							return new Response(JSON.stringify({ error: { message: "Request captured" } }), { status: 400 });
+						},
+					}),
 			});
 			sessions.push(session);
-
-			const result = await session.runEphemeralTurn({ promptText: "Question?", maxTokens: 321 });
-
-			expect(result.replyText).toBe("Side answer");
-			expect(capturedContext?.messages.at(-1)?.content).toEqual([{ type: "text", text: "Question?" }]);
-			expect(capturedOptions?.sessionId).toStartWith(`${session.sessionId}:side:`);
-			expect(capturedOptions?.maxTokens).toBe(321);
+			await expect(session.runEphemeralTurn({ promptText: "Question?", maxTokens: 321 })).rejects.toThrow();
+			expect(bodies).toHaveLength(1);
+			if (api === "ollama-chat") expect(bodies[0].options).toMatchObject({ num_predict: 321 });
+			else expect(bodies[0][api === "anthropic-messages" ? "max_tokens" : "max_output_tokens"]).toBe(321);
 		},
 	);
 
 	it.each([
 		["Codex", getBundledModel("openai-codex", "gpt-5.4")],
+		...(["cursor-agent", "gitlab-duo-agent"] as const).map(
+			api =>
+				[
+					api,
+					buildModel({ ...getBundledModel("openai", "gpt-4o"), api, provider: "custom", compat: undefined }),
+				] as const,
+		),
 		[
 			"custom Codex route",
 			buildModel({
@@ -1007,6 +1002,32 @@ describe("AgentSession message pipeline", () => {
 		}
 		expect(context).toEqual(before);
 	});
+
+	it.each([0, -1, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+		"rejects invalid ephemeral caps (%s) before dispatch",
+		async cap => {
+			let calls = 0;
+			const session = new AgentSession({
+				agent: new Agent({
+					initialState: { model: getBundledModel("openai", "gpt-4o-mini"), messages: [], tools: [] },
+				}),
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: createModelRegistryStub() as never,
+				sideStreamFn: () => {
+					calls++;
+					throw new Error("Unexpected provider dispatch");
+				},
+			});
+			sessions.push(session);
+			for (const field of ["maxTokens", "maxContextBytes"] as const) {
+				await expect(session.runEphemeralTurn({ promptText: "Question?", [field]: cap })).rejects.toThrow(
+					`${field} must be a positive safe integer`,
+				);
+			}
+			expect(calls).toBe(0);
+		},
+	);
 
 	it("rejects an oversized ephemeral context before inference", async () => {
 		let calls = 0;

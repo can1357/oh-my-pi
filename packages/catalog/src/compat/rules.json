@@ -14074,7 +14074,9 @@
 			{
 				"source": "providers/output-limits.kdl:2",
 				"apis": [
-					"openai-codex-responses"
+					"openai-codex-responses",
+					"cursor-agent",
+					"gitlab-duo-agent"
 				],
 				"catalog": {
 					"omitMaxOutputTokens": true

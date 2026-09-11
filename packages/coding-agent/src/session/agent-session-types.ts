@@ -479,9 +479,9 @@ export interface EphemeralTurnOptions {
 	promptText: string;
 	/** Omit tool definitions and request no tool calls. Tool calls are never executed, even when this option is omitted. */
 	tools?: false;
-	/** Optional provider output-token cap. Models that omit output limits (including Codex Responses and Ollama Cloud) reject this option before inference. */
+	/** Optional positive safe-integer output-token cap. Models that omit output limits reject this option before inference. */
 	maxTokens?: number;
-	/** Reject before inference when the post-transform, secret-obfuscated provider context exceeds this serialized UTF-8 byte cap. */
+	/** Positive safe-integer UTF-8 byte cap. Reject before inference when the serialized post-transform, secret-obfuscated provider context exceeds it. */
 	maxContextBytes?: number;
 	/** Awaited in order; a delivery failure rejects the side turn and aborts the request. */
 	onTextDelta?: (delta: string) => void | Promise<void>;
