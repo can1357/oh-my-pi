@@ -5,6 +5,7 @@
 ### Added
 
 - The `remote` compaction method now covers Claude: Anthropic server-side compaction (`compact-2026-01-12` beta) runs behind the existing `compaction.methodOrder` / `compaction.remoteEnabled` gates for first-party Anthropic models, persists its plain-text summary with a native replay payload that later Anthropic turns send back as a `compaction` block, and falls through to the next configured method on failure like OpenAI server compaction.
+- `/prewalk` now accepts a model selector and offers model autocomplete, defaulting to `@smol` when omitted.
 
 ### Fixed
 

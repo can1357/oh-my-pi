@@ -47,18 +47,25 @@ The switch is one-shot: after the handoff, prewalk disarms itself. The target mo
 
 ## Arm from an active session
 
-Run either slash command without restarting OMP:
+Run one of these commands without restarting OMP:
 
 ```text
-/prewalk
+/prewalk [model-or-role]
 /prewalk restart
 ```
 
-`/prewalk` arms a one-shot handoff from the active model to the current `@smol` assignment.
+Without an argument, `/prewalk` targets the `@smol` role. An explicit selector follows the normal [model-resolution rules](./models.md#runtime-model-resolution): it can be a provider-qualified id, bare or fuzzy model id, role alias, or a selector with a thinking-level suffix.
 
-After a handoff, `/prewalk restart` immediately returns the session to the current `@default` assignment and re-arms the handoff to `@smol`. Both roles are resolved when the command runs, so the cycle is independent of concrete model names and does not alter either role's persisted configuration.
+```text
+/prewalk
+/prewalk @smol
+/prewalk openai/gpt-5.6-luna
+/prewalk claude-sonnet-4-6:high
+```
 
-If prewalk is already armed, the command leaves the existing target in place. To choose a different target at startup, use `--prewalk-into`.
+If the selector cannot resolve or its model has no configured credentials, the command does not create or replace a prewalk arm. While a prewalk is already armed, `/prewalk`—with or without a different selector—keeps its existing target in place. After a handoff is consumed, switch to another model and run `/prewalk [model-or-role]` again to arm another one-shot handoff.
+
+`/prewalk restart` immediately returns the session to the current `@default` assignment and re-arms the handoff to the current `@smol` assignment. Both roles are resolved when the command runs, so the cycle is independent of concrete model names and does not alter either role's persisted configuration.
 
 ## Subagent prewalk
 

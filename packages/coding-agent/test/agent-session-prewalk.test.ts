@@ -12,7 +12,10 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import {
+	buildTuiBuiltinSlashCommands,
+	executeBuiltinSlashCommand,
+} from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -870,6 +873,88 @@ describe("AgentSession prewalk", () => {
 		expect(session.getPrewalkState()).toBeUndefined();
 		expect(showStatus).toHaveBeenCalledTimes(2);
 		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Prewalk reset"));
+	});
+	it("/prewalk prefers an explicit bare model selector over @smol", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const sessionManager = SessionManager.inMemory();
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			convertToLlm,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			toolRegistry,
+			thinkingLevel: Effort.Medium,
+		});
+		const ctx = {
+			session,
+			sessionManager,
+			settings,
+			collabGuest: false,
+			showStatus: vi.fn(),
+			editor: { setText: vi.fn() },
+			refreshSlashCommandState: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const runtime = { ctx } satisfies TuiSlashCommandRuntime;
+
+		settings.setModelRole("smol", `${primary.provider}/${primary.id}`);
+		expect(await executeBuiltinSlashCommand("/prewalk claude-sonnet-4-6", runtime)).toBe(true);
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
+	});
+
+	it("/prewalk autocompletes model selectors and restart", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const sessionManager = SessionManager.inMemory();
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			convertToLlm,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			toolRegistry,
+			thinkingLevel: Effort.Medium,
+		});
+		const ctx = {
+			session,
+			sessionManager,
+			settings,
+			collabGuest: false,
+			showStatus: vi.fn(),
+			editor: { setText: vi.fn() },
+			refreshSlashCommandState: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const runtime = { ctx } satisfies TuiSlashCommandRuntime;
+		const prewalk = buildTuiBuiltinSlashCommands(runtime).find(command => command.name === "prewalk");
+		if (!prewalk?.getArgumentCompletions) throw new Error("expected /prewalk model completions");
+
+		const modelMatches = await prewalk.getArgumentCompletions("claude-sonnet-4-6");
+		expect(modelMatches?.some(match => match.value === "anthropic/claude-sonnet-4-6 ")).toBe(true);
+
+		const restartMatches = await prewalk.getArgumentCompletions("r");
+		expect(restartMatches?.some(match => match.value === "restart ")).toBe(true);
 	});
 
 	it("requires a fresh todo before a later explicit prewalk can hand off", async () => {
