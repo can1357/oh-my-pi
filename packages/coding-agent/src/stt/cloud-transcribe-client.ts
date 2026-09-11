@@ -1,4 +1,4 @@
-import { type OAuthAccess, type OAuthAccessSource, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import { type ApiKey, type OAuthAccess, type OAuthAccessSource, withAuth, withOAuthAccess } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
@@ -95,7 +95,13 @@ export const STT_BACKEND_OPTIONS = [
  */
 export type CloudSttCredential =
 	| { kind: "codex"; access: OAuthAccess; source: OAuthAccessSource; sessionId?: string }
-	| { kind: "openai"; apiKey: string; baseUrl?: string; headers?: Record<string, string> };
+	| {
+			kind: "openai";
+			/** Resolver form gets the central refresh/rotate retry; a string is a single attempt. */
+			apiKey: ApiKey;
+			baseUrl?: string;
+			headers?: Record<string, string>;
+	  };
 export interface CloudSttStreamOptions extends SttStreamOptions {
 	credential: CloudSttCredential;
 	/** Transcription model id; resolved with {@link resolveCloudSttModel}. */
@@ -231,7 +237,13 @@ async function transcribeWithCodexAccess(
 	return await postTranscription(fetchImpl, CODEX_STT_URL, headers, form, options.signal);
 }
 
-/** Platform route: honours a provider override's base URL and headers. */
+/**
+ * Platform route: honours a provider override's base URL and headers, and runs
+ * the upload through {@link withAuth} so a resolver-backed credential
+ * (command-backed, broker-refreshed, or one of several stored keys) gets the
+ * central force-refresh/rotate treatment instead of failing on a stale key.
+ * A static string key stays a single attempt.
+ */
 async function transcribeWithApiKey(
 	fetchImpl: typeof fetch,
 	options: CloudSttStreamOptions,
@@ -239,28 +251,48 @@ async function transcribeWithApiKey(
 	wav: Blob,
 ): Promise<string> {
 	const baseUrl = credential.baseUrl?.replace(/\/$/, "") ?? "https://api.openai.com/v1";
-	const headers: Record<string, string> = {
-		...stripContentType(credential.headers),
-		Authorization: `Bearer ${credential.apiKey}`,
-	};
-	const form = new FormData();
-	form.append("model", resolveCloudSttModel(options.model));
-	if (options.language) form.append("language", options.language);
-	if (options.keywords?.length) form.append("prompt", options.keywords.join(", "));
-	form.append("response_format", "json");
-	form.append("file", wav, "dictation.wav");
-	return await postTranscription(fetchImpl, `${baseUrl}/audio/transcriptions`, headers, form, options.signal);
+	const overrides = sanitizeOverrideHeaders(credential.headers);
+	return await withAuth(
+		credential.apiKey,
+		apiKey => {
+			// Rebuilt per attempt: a retry needs its own multipart body.
+			const form = new FormData();
+			form.append("model", resolveCloudSttModel(options.model));
+			if (options.language) form.append("language", options.language);
+			if (options.keywords?.length) form.append("prompt", options.keywords.join(", "));
+			form.append("response_format", "json");
+			form.append("file", wav, "dictation.wav");
+			return postTranscription(
+				fetchImpl,
+				`${baseUrl}/audio/transcriptions`,
+				{ ...overrides, Authorization: `Bearer ${apiKey}` },
+				form,
+				options.signal,
+			);
+		},
+		{
+			signal: options.signal,
+			missingKeyMessage: "No OpenAI API key is available for cloud dictation.",
+		},
+	);
 }
 
 /**
- * Drop a configured `Content-Type` (any casing) from provider headers: the
- * multipart body needs fetch to generate its own boundary, and a provider
- * override carrying `application/json` would otherwise make the endpoint
- * reject an otherwise valid recording.
+ * Drop the request-owned headers from a provider override, matching any casing.
+ *
+ * - `Content-Type`: the multipart body needs fetch to generate its own
+ *   boundary, so a configured `application/json` would make the endpoint reject
+ *   an otherwise valid recording.
+ * - `Authorization`: a differently-cased override key would survive alongside
+ *   the one this request sets, and fetch joins same-name headers into a single
+ *   comma-separated value (`Custom old, Bearer new`) the endpoint rejects.
  */
-function stripContentType(headers: Record<string, string> | undefined): Record<string, string> | undefined {
+function sanitizeOverrideHeaders(headers: Record<string, string> | undefined): Record<string, string> | undefined {
 	if (!headers) return undefined;
-	const entries = Object.entries(headers).filter(([name]) => name.toLowerCase() !== "content-type");
+	const entries = Object.entries(headers).filter(([name]) => {
+		const lower = name.toLowerCase();
+		return lower !== "content-type" && lower !== "authorization";
+	});
 	return entries.length === Object.keys(headers).length ? headers : Object.fromEntries(entries);
 }
 
