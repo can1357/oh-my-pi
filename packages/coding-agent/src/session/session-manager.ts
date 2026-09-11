@@ -600,6 +600,24 @@ export class SessionManager {
 		this.#diskFailureLogged = false;
 	}
 
+	/**
+	 * Deliver one store failure to a single observer. Observer failures are
+	 * swallowed: a host surface that throws must not corrupt session teardown.
+	 */
+	#invokePersistenceErrorObserver(observer: (error: Error) => void, error: Error): void {
+		try {
+			observer(error);
+		} catch (callbackError) {
+			logger.warn("Session persistence error observer failed", {
+				error: toError(callbackError).message,
+			});
+		}
+	}
+
+	#notifyPersistenceErrorObservers(error: Error): void {
+		for (const observer of this.#persistenceErrorCallbacks) this.#invokePersistenceErrorObserver(observer, error);
+	}
+
 	#noteDiskFailure(errorLike: unknown): Error {
 		const error = toError(errorLike);
 		if (!this.#diskFailure) this.#diskFailure = error;
@@ -611,15 +629,7 @@ export class SessionManager {
 				error: error.message,
 				stack: error.stack,
 			});
-			for (const callback of this.#persistenceErrorCallbacks) {
-				try {
-					callback(error);
-				} catch (callbackError) {
-					logger.warn("Session persistence error observer failed", {
-						error: toError(callbackError).message,
-					});
-				}
-			}
+			this.#notifyPersistenceErrorObservers(error);
 		}
 
 		return this.#diskFailure;
@@ -690,6 +700,7 @@ export class SessionManager {
 				sessionFile: this.#sessionFile,
 				error: error.message,
 			});
+			this.#notifyPersistenceErrorObservers(error);
 		}
 		return error;
 	}
@@ -1811,7 +1822,9 @@ export class SessionManager {
 		// Drain any fire-and-forget backing writes (e.g. `writeTextSync` queued
 		// on IndexedSessionStorage during `flushSync`) so callers relying on
 		// flush() see the write durably visible to readers.
-		await this.#storage.drain();
+		await this.#scheduleDiskWork(async () => {
+			await this.#storage.drain();
+		});
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
 
@@ -1879,7 +1892,9 @@ export class SessionManager {
 		// Wait for any queued backing writes (IndexedSessionStorage per-path
 		// tail) to become durable so a graceful shutdown does not exit while
 		// a fire-and-forget publish is still on the wire.
-		await this.#storage.drain();
+		await this.#scheduleDiskWork(async () => {
+			await this.#storage.drain();
+		});
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
 
@@ -2216,9 +2231,18 @@ export class SessionManager {
 		};
 	}
 
-	/** Subscribe to persistence failures so hosts can surface lost-durability state. */
+	/**
+	 * Subscribe to persistence failures so hosts can surface lost-durability state.
+	 *
+	 * A failure latched before this call — a store that failed on its first write,
+	 * before the host wired its observer — is replayed to the new subscriber.
+	 * Without the replay the host sees only a dispose rejection it cannot
+	 * attribute to persistence (issue #11493).
+	 */
 	onPersistenceError(cb: (error: Error) => void): () => void {
 		this.#persistenceErrorCallbacks.add(cb);
+		const latched = this.#diskFailure;
+		if (latched) this.#invokePersistenceErrorObserver(cb, latched);
 		return () => {
 			this.#persistenceErrorCallbacks.delete(cb);
 		};

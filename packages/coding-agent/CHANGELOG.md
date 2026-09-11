@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A session store that stops accepting writes (full disk, locked file, removed drive) now reports the failure on stderr in print mode and as an error notice in RPC mode, and a run whose transcript never became durable exits nonzero instead of reporting success ([#11493](https://github.com/can1357/oh-my-pi/issues/11493)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added
