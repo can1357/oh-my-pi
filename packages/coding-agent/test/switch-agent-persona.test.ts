@@ -112,11 +112,7 @@ describe("/agent slash command", () => {
 		await runtime.enter(makeAgent(), {}, makePersonaHooks());
 		expect(policy.isPersonaActive()).toBe(true);
 		(session as unknown as { getPlanModeState: () => { enabled: boolean; planFilePath: string } }).getPlanModeState =
-			() => ({
-				enabled: true,
-				planFilePath:
-					"/home/slava/.omp/agent/sessions/-aiexp-oh-my-pi/2026-09-11T10-54-25-254Z_01a0901a-b7e6-7767-bff5-c5badda70564/local/PLAN.md",
-			});
+			() => ({ enabled: true, planFilePath: '/home/slava/.omp/agent/sessions/-aiexp-oh-my-pi/2026-09-11T10-54-25-254Z_01a0901a-b7e6-7767-bff5-c5badda70564/local/PLAN.md' });
 
 		const result = await executeAcpBuiltinSlashCommand("/agent", slashRuntime);
 
