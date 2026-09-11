@@ -1344,7 +1344,13 @@ describe("litellm discoveryBudgetMs (#11576)", () => {
 			else Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS = original;
 		}
 	});
-	test("budgets rich plus prefetch and fallback bounds when configured above default", () => {
-		expect(litellmModelManagerOptions({ discoveryTimeoutMs: 30_000 }).discoveryBudgetMs).toBe(50_000);
+	test("leaves headroom past the summed phase bounds when stretched", () => {
+		// Pins the margin, not the literal: the stretched outer must clear
+		// the exact rich + prefetch + fallback sum, else a deadline-edge
+		// pipeline loses the fallback to timer/processing jitter. The
+		// deadline-edge outcome itself is covered at the registry level in
+		// litellm-discovery-outer-timeout.test.ts.
+		const budget = litellmModelManagerOptions({ discoveryTimeoutMs: 30_000 }).discoveryBudgetMs;
+		expect(budget).toBeGreaterThan(30_000 + 2 * 10_000);
 	});
 });

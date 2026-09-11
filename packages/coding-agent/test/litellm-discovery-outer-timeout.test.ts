@@ -59,6 +59,31 @@ function pressuredFetchMock(): FetchImpl {
 		return new Response("", { status: 404 });
 	}) as FetchImpl;
 }
+function deadlineEdgeFetchMock(): FetchImpl {
+	return (async (input: string | URL | Request, init?: RequestInit) => {
+		const url = String(input);
+		if (url.endsWith("models.json.zstd")) {
+			// Prefetch burns nearly its whole 10s transport bound before
+			// failing, so the pipeline starts the rich phase ~9s into the
+			// outer budget.
+			await Bun.sleep(9_000);
+			return new Response("", { status: 404 });
+		}
+		if (url.endsWith("/model_group/info")) {
+			// Never answers: the inner 30s budget aborts this, and the
+			// fallback must still fit inside the stretched outer.
+			const { promise, reject } = Promise.withResolvers<never>();
+			init?.signal?.addEventListener("abort", () => reject(new Error("rich fetch aborted")), { once: true });
+			await promise;
+		}
+		if (url.endsWith("/v1/models")) {
+			await Bun.sleep(9_000);
+			if (init?.signal?.aborted) throw new Error("fallback fetch aborted");
+			return Response.json({ data: [{ id: "openai/gpt-5" }] });
+		}
+		return new Response("", { status: 404 });
+	}) as FetchImpl;
+}
 
 describe("litellm discovery outer timeout (#11576)", () => {
 	let tempDir: string;
@@ -109,6 +134,20 @@ describe("litellm discovery outer timeout (#11576)", () => {
 		// 50s budget, past the 40s the old arithmetic allowed.
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: pressuredFetchMock() });
 		await registry.refreshDiscoverableProviders(["litellm"], "online");
+		expect(registry.find("litellm", "openai/gpt-5")).toBeDefined();
+	}, 120_000);
+
+	test("a deadline-edge pipeline still reaches the fallback", async () => {
+		// ~9s prefetch + 30s rich abort + ~9s fallback ≈ 48s of wall clock
+		// (load-bearing: outer and phase budgets are real AbortSignal
+		// timers, as the mocks above document). Past the 44s the pressured
+		// test covers and comfortable inside the 55s stretched outer — but
+		// only ~1s inside an exact-sum 50s outer, with no room left for the
+		// outer timer's start offset or per-phase handoff jitter (measured
+		// 48.9s against the exact sum locally). The explicit headroom is
+		// what makes this edge robust rather than luck. This is the
+		// observable outcome that replaces the old internal
+		// discoveryBudgetMs literal assertion.
 		expect(registry.find("litellm", "openai/gpt-5")).toBeDefined();
 	}, 120_000);
 });

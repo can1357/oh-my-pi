@@ -5366,6 +5366,13 @@ export function xiaomiModelManagerOptions(
 // ---------------------------------------------------------------------------
 
 const LITELLM_DISCOVERY_TIMEOUT_MS = DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS;
+/**
+ * Headroom past the summed phase bounds in the stretched outer budget: the
+ * outer timer starts before cache work and each phase hands off to the next,
+ * so an exact rich + prefetch + fallback sum can expire before the fallback
+ * completes under ordinary timer/processing jitter.
+ */
+const LITELLM_DISCOVERY_OUTER_HEADROOM_MS = 5_000;
 
 export interface LiteLLMModelManagerConfig {
 	apiKey?: string;
@@ -5958,11 +5965,14 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 		providerId: "litellm",
 		// Stretch the runtime outer guard past its default only when the
 		// configured rich budget exceeds the default it was sized for. Budget
-		// all three sequential phases: the models.dev prefetch and the
-		// /v1/models fallback are each bounded by the shared default.
+		// all three sequential phases — the models.dev prefetch and the
+		// /v1/models fallback are each bounded by the shared default — plus
+		// headroom for the outer timer's start offset and per-phase handoff.
 		discoveryBudgetMs:
 			discoveryTimeoutMs > DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS
-				? discoveryTimeoutMs + 2 * DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS
+				? discoveryTimeoutMs +
+					2 * DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS +
+					LITELLM_DISCOVERY_OUTER_HEADROOM_MS
 				: undefined,
 		// rich-v8 invalidates rows whose `compatConfig` retained a colliding
 		// bundled model's provider-specific transport (e.g. Fireworks
