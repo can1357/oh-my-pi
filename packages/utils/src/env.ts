@@ -115,7 +115,7 @@ export function filterChildShellEnv(
 ): Record<string, string> {
 	const runtimeLaunchEnvValues = env === Bun.env || env === process.env ? launchEnvValues : undefined;
 	const result = filterProcessEnv(env);
-	const projectEnv = parseEnvFile(path.join(cwd, ".env"));
+	const projectEnv = readProjectDotenv(path.join(cwd, ".env"));
 	const launchNodeEnv = runtimeLaunchEnvValues ? runtimeLaunchEnvValues.get("NODE_ENV") : env.NODE_ENV;
 	const nodeEnvName = `.env.${launchNodeEnv || "development"}`;
 	const modeEnv = parseEnvFile(path.join(cwd, nodeEnvName));
@@ -235,16 +235,25 @@ export function parseEnvFile(filePath: string): Record<string, string> {
 	}
 }
 
+/**
+ * Reads the project `.env`, reusing the bounded startup preload
+ * ({@link getPreloadedProjectEnv}) when the CLI captured it. Every synchronous
+ * consumer (module init below, {@link filterChildShellEnv} on each child spawn)
+ * routes through here so a stalled drvfs/9p `.env` is read at most once under a
+ * deadline instead of blocking the JS thread again per spawn (#11519).
+ */
+function readProjectDotenv(filePath: string): Record<string, string> {
+	const preloaded = getPreloadedProjectEnv(filePath);
+	return preloaded ? parseEnvContent(preloaded.content ?? "") : parseEnvFile(filePath);
+}
+
 // Home/profile files live outside the project filesystem. The CLI preloads the
 // launch project's file asynchronously; non-CLI consumers retain the sync fallback.
 const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));
 const piEnv = parseEnvFile(path.join(getConfigRootDir(), ".env"));
 const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
 const projectEnvPath = path.join(getProjectDir(), ".env");
-const preloadedProjectEnv = getPreloadedProjectEnv(projectEnvPath);
-const projectEnv = preloadedProjectEnv
-	? parseEnvContent(preloadedProjectEnv.content ?? "")
-	: parseEnvFile(projectEnvPath);
+const rawProjectEnv = readProjectDotenv(projectEnvPath);
 
 for (const key of Object.keys(Bun.env)) {
 	const value = Bun.env[key];
@@ -252,6 +261,12 @@ for (const key of Object.keys(Bun.env)) {
 		delete Bun.env[key];
 	}
 }
+
+// Bun's dotenv autoload (disabled via `--no-env-file` so a stalled read cannot
+// block startup) expands `$VAR` / `${VAR}` references in project `.env` values.
+// env.ts owns that loading now, so reproduce the expansion here — otherwise npm
+// launches would receive the literal `$VAR` for interpolated credentials/URLs.
+const projectEnv = expandDotenvValues(rawProjectEnv, Bun.env as Record<string, string>);
 
 for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
 	for (const key in file) {

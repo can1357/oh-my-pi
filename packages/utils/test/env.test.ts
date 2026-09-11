@@ -14,12 +14,28 @@ import { getPreloadedProjectEnv, preloadProjectEnv } from "@oh-my-pi/pi-utils/en
 const tempDirs: string[] = [];
 const runtimeProbePath = path.join(import.meta.dir, "fixtures", "test-runtime-probe.ts");
 const preloadExitProbePath = path.join(import.meta.dir, "fixtures", "env-preload-exit-probe.ts");
+const childShellProbePath = path.join(import.meta.dir, "fixtures", "env-childshell-exit-probe.ts");
+const expandProbePath = path.join(import.meta.dir, "fixtures", "env-expand-probe.ts");
 
 function mkfifo(dir: string): string {
 	const fifo = path.join(dir, ".env");
 	const result = Bun.spawnSync(["mkfifo", fifo]);
 	if (result.exitCode !== 0) throw new Error(`mkfifo failed: ${result.stderr.toString()}`);
 	return fifo;
+}
+
+// Runs a fixture that reads a stalled `.env` then falls off the end without
+// process.exit, so a synchronous reread that keeps the loop referenced hangs
+// `proc.exited`. Only a real child exit proves the read was torn down; fake
+// timers cannot drive another process, so a genuine wall-clock ceiling is used.
+async function runProbeToExit(probePath: string, cwd: string): Promise<{ exitCode: number; stdout: string }> {
+	const proc = Bun.spawn([process.execPath, probePath, cwd], { stdout: "pipe", stderr: "pipe" });
+	const outcome = await Promise.race([proc.exited, Bun.sleep(4000).then(() => "hang" as const)]);
+	if (outcome === "hang") {
+		proc.kill(9);
+		throw new Error(`${path.basename(probePath)} left the event loop referenced; the process could not exit`);
+	}
+	return { exitCode: outcome, stdout: await new Response(proc.stdout).text() };
 }
 
 afterEach(() => {
@@ -55,27 +71,45 @@ describe("preloadProjectEnv", () => {
 			tempDirs.push(dir);
 			mkfifo(dir);
 
-			const proc = Bun.spawn([process.execPath, preloadExitProbePath, dir], {
-				stdout: "pipe",
-				stderr: "pipe",
-			});
-			// Integration guard: only a real child process exit proves the stalled
-			// read no longer keeps the event loop referenced. Fake timers cannot
-			// drive another process, so a genuine wall-clock ceiling is required;
-			// a regression makes `proc.exited` never resolve and the race reports it.
-			const outcome = await Promise.race([proc.exited, Bun.sleep(4000).then(() => "hang" as const)]);
-			if (outcome === "hang") {
-				proc.kill(9);
-				throw new Error("preload left the event loop referenced; the process could not exit");
-			}
-
-			const stdout = await new Response(proc.stdout).text();
+			const { exitCode, stdout } = await runProbeToExit(preloadExitProbePath, dir);
 			const parsed = JSON.parse(stdout) as { elapsedMs: number; content: string | null };
-			expect(outcome).toBe(0);
+			expect(exitCode).toBe(0);
 			expect(parsed.elapsedMs).toBeLessThan(2000);
 			expect(parsed.content).toBeNull();
 		},
 	);
+});
+
+describe("project dotenv reuse and expansion", () => {
+	it.skipIf(process.platform === "win32")(
+		"reuses the preloaded snapshot instead of re-reading a stalled .env on child spawn",
+		async () => {
+			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-"));
+			tempDirs.push(dir);
+			mkfifo(dir);
+
+			const { exitCode, stdout } = await runProbeToExit(childShellProbePath, dir);
+			const parsed = JSON.parse(stdout) as { elapsedMs: number };
+			expect(exitCode).toBe(0);
+			expect(parsed.elapsedMs).toBeLessThan(2000);
+		},
+	);
+
+	it("expands $VAR references env.ts owns when Bun autoload is disabled", async () => {
+		const dir = path.dirname(writeTempEnv("BASE=root\nAPI=$BASE/v1\n"));
+		const proc = Bun.spawn([process.execPath, "--no-env-file", expandProbePath], {
+			cwd: dir,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		expect(JSON.parse(stdout)).toEqual({ api: "root/v1", base: "root" });
+	});
 });
 
 describe("getDbBusyTimeoutMs", () => {
