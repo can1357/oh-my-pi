@@ -210,7 +210,8 @@ export async function renderGalleryState(
 
 	// Edit-like renderers compute their diff preview off the render path; wait
 	// for it to settle so the snapshot is deterministic instead of racing a tick.
-	await component.whenPreviewSettled();
+	// Static fixtures have no live batch source, so bound the wait tightly.
+	await component.whenPreviewSettled(50);
 
 	const lines = component.render(width);
 	component.stopAnimation();

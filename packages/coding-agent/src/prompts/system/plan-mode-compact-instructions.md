@@ -13,5 +13,5 @@ Drop:
 - Context restated in plan file.
 
 {{#if planFilePath}}
-Approved plan file: `{{planFilePath}}`; authoritative source of truth. MUST preserve this durable path; executor MUST read it directly after compaction.
+Approved plan file: `{{planFilePath}}`; authoritative source of truth. MUST preserve this durable path; the plan body is re-inlined for the executor after compaction, so NEVER restate it in the summary.
 {{/if}}

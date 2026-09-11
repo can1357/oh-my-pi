@@ -711,6 +711,10 @@ export class ComputerWorkerCore {
 				const node = await nativeCall(signal, () => session.axFocused());
 				return node ? el(node) : null;
 			},
+			ref: async (ref: string): Promise<El> => {
+				const { signal } = getContext();
+				return el(await nativeCall(signal, () => session.axNode(ref)));
+			},
 			clipboard: {
 				read: async (): Promise<string> => {
 					const { signal } = getContext();

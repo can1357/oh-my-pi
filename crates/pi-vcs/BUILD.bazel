@@ -13,7 +13,9 @@ rust_library(
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
     version = "17.1.5",
-    deps = all_crate_deps(normal = True),
+    deps = all_crate_deps(normal = True) + [
+        "//crates/pi-iso",
+    ],
 )
 
 rust_test(

@@ -1,0 +1,28 @@
+auth "google-antigravity" {
+	name "Antigravity (Gemini 3, Claude, GPT-OSS)"
+	login "oauth-code" {
+		// Antigravity uses different Google OAuth credentials for its additional models.
+		client-id "MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlcC5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ==" encoding="base64"
+		client-secret "R09DU1BYLUs1OEZXUjQ4NkxkTEoxbUxCOHNYQzR6NnFEQWY=" encoding="base64"
+		authorize-url "https://accounts.google.com/o/oauth2/v2/auth"
+		scopes "https://www.googleapis.com/auth/cloud-platform" "https://www.googleapis.com/auth/userinfo.email" \
+			"https://www.googleapis.com/auth/userinfo.profile" "https://www.googleapis.com/auth/cclog" \
+			"https://www.googleapis.com/auth/experimentsandconfigs"
+		authorize-params { access_type "offline"; prompt "consent" }
+		instructions "Complete the sign-in in your browser."
+		callback port=51121 path="/oauth-callback" hostname="127.0.0.1"
+		token url="https://oauth2.googleapis.com/token" body="form"
+		credential {
+			access "access_token"
+			refresh "refresh_token"
+			expires "seconds" path="expires_in" skew-ms=300000
+		}
+		userinfo url="https://www.googleapis.com/oauth2/v1/userinfo?alt=json" email="email"
+		after-exchange hook="google-antigravity-project"
+	}
+	refresh {
+		require "projectId"
+		after-refresh hook="google-antigravity-project"
+	}
+	api-key-format "structured"
+}

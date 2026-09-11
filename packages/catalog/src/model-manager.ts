@@ -1,7 +1,9 @@
 import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
+import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
+import { isTimeBasedCost } from "./pricing";
 import type { Api, Model, ModelCost, ModelSpec, Provider, TokenCost } from "./types";
 import { isRecord } from "./utils";
 
@@ -257,7 +259,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			? restoredCache.models.filter(model => !additiveStaticModelIds.has(model.id))
 			: restoredCache.models;
 		const cachedModels = additiveStaticModelIds
-			? mergeDynamicModels(staticModels, cacheContribution)
+			? mergeCatalogMetrics(mergeDynamicModels(staticModels, cacheContribution), restoredCache.models)
 			: restoredCache.models;
 		const source: ModelResolutionSource = cacheContribution.length > 0 ? "cache" : "bundled";
 		return {
@@ -312,7 +314,11 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		: modelsDevFetchSucceeded;
 	const mergedWithCache = mergeDynamicModels(staticModels, cacheModels);
 	const mergedWithModelsDev = mergeDynamicModels(mergedWithCache, modelsDevModels);
-	const mergedModels = mergeDynamicModels(mergedWithModelsDev, dynamicModels);
+	const catalogMetricsSource = modelsDevFetchSucceeded ? normalizedModelsDevModels : preparedCacheModels;
+	const mergedWithCatalogMetrics = additiveStaticModelIds
+		? mergeCatalogMetrics(mergedWithModelsDev, catalogMetricsSource)
+		: mergedWithModelsDev;
+	const mergedModels = mergeDynamicModels(mergedWithCatalogMetrics, dynamicModels);
 	const models = collapseBuiltVariants(
 		authoritativeDynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
 	);
@@ -331,8 +337,15 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				restorableHeaderFallback,
 			);
 		} else {
-			// Remote fetch failed — update cache with a non-authoritative snapshot so
-			// stale state remains visible while retry backoff still applies.
+			// Remote fetch failed. Re-persist any prior catalog as a
+			// non-authoritative snapshot so stale state stays visible while the
+			// retry backoff applies. When there is no prior cache and nothing to
+			// preserve (a discovery-only provider on its first failed fetch), leave
+			// the row absent rather than writing an empty snapshot: an empty
+			// non-authoritative row reads back as a fresh catalog and suppresses
+			// refetch for NON_AUTHORITATIVE_RETRY_MS, hiding every discovery-only
+			// model until it ages out. Writing nothing lets the next launch retry
+			// immediately (#10964).
 			const latestCache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
 			const latestRestoredCache = restoreCachedModelHeaders(
 				latestCache?.models ?? cache?.models ?? [],
@@ -357,16 +370,18 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			const fallbackSnapshotModels = collapseBuiltVariants(
 				mergeDynamicModels(mergeDynamicModels(staticModels, latestCacheModels), modelsDevModels),
 			);
-			writeModelCache(
-				cacheProviderId,
-				now(),
-				fallbackSnapshotModels,
-				false,
-				staticFingerprint,
-				dbPath,
-				staticModels,
-				restorableHeaderFallback,
-			);
+			if (fallbackSnapshotModels.length > 0 || latestCache !== null || cache !== null) {
+				writeModelCache(
+					cacheProviderId,
+					now(),
+					fallbackSnapshotModels,
+					false,
+					staticFingerprint,
+					dbPath,
+					staticModels,
+					restorableHeaderFallback,
+				);
+			}
 		}
 	}
 	const cacheContributed = cacheModels.length > 0;
@@ -467,6 +482,14 @@ function prepareCacheModelsForStaticMismatch<TApi extends Api>(
 	return sanitizedModels;
 }
 
+function mergeCatalogMetrics<TApi extends Api>(
+	models: Model<TApi>[],
+	catalogModels: readonly Model<TApi>[],
+): Model<TApi>[] {
+	if (models.length === 0 || catalogModels.length === 0) return models;
+	return applyCatalogMetrics(models, new CatalogMetricsIndex(catalogModels));
+}
+
 function mergeDynamicModels<TApi extends Api>(
 	baseModels: readonly Model<TApi>[],
 	dynamicModels: readonly Model<TApi>[],
@@ -560,6 +583,7 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		? dynamicModel.reasoning
 		: existingModel.reasoning || dynamicModel.reasoning;
 	const longContextCost = dynamicModel.cost.longContext ?? existingModel.cost.longContext;
+	const timeBasedCost = dynamicModel.cost.timeBased ?? existingModel.cost.timeBased;
 	// Re-build from spec stage: sparse compat comes from `compatConfig` (the
 	// verbatim override vocabulary), never the resolved `compat` record.
 	return buildModel({
@@ -574,6 +598,7 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 			cacheRead: preferDiscoveryCost(dynamicModel.cost.cacheRead, existingModel.cost.cacheRead),
 			cacheWrite: preferDiscoveryCost(dynamicModel.cost.cacheWrite, existingModel.cost.cacheWrite),
 			...(longContextCost ? { longContext: longContextCost } : {}),
+			...(timeBasedCost ? { timeBased: timeBasedCost } : {}),
 		},
 		contextWindow: preferDiscoveryLimit(dynamicModel.contextWindow, existingModel.contextWindow),
 		maxTokens: preferDiscoveryLimit(dynamicModel.maxTokens, existingModel.maxTokens),
@@ -724,7 +749,9 @@ function isTokenCost(value: unknown): value is TokenCost {
 
 function isModelCost(value: unknown): value is ModelCost {
 	if (!isTokenCost(value)) return false;
-	const longContext = (value as TokenCost & { longContext?: unknown }).longContext;
+	const cost = value as TokenCost & { longContext?: unknown; timeBased?: unknown };
+	if (cost.timeBased !== undefined && !isTimeBasedCost(cost.timeBased)) return false;
+	const longContext = cost.longContext;
 	if (longContext === undefined) return true;
 	if (!isTokenCost(longContext) || !isRecord(longContext)) return false;
 	const threshold = longContext.inputThreshold;

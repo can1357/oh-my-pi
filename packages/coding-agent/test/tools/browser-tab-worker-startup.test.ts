@@ -182,7 +182,7 @@ describe("browser init deadline carry-over", () => {
 				// the original init error — never the wrapped inline-fallback error.
 				const deadlineStart = performance.now() - 60_000;
 				const started = performance.now();
-				// Mirror BrowserTool's outer acquisition lease. Its timeout can
+				// Mirror the browser prelude host's outer acquisition lease. Its timeout can
 				// release this lease before acquireTab spends the supervisor's
 				// phase floors, but acquireTab must retain its own hold so target
 				// cleanup still has a connected Puppeteer handle.

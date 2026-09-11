@@ -102,6 +102,7 @@ describe("AgentSession eager todo enforcement", () => {
 	let sharedDir: TempDir;
 	let sharedAuthStorage: AuthStorage;
 	let sharedModelRegistry: ModelRegistry;
+	let previousNoTitle: string | undefined;
 	const observedCalls: ObservedPromptCall[] = [];
 
 	async function createSession(
@@ -226,6 +227,8 @@ describe("AgentSession eager todo enforcement", () => {
 	});
 
 	beforeEach(async () => {
+		previousNoTitle = Bun.env.PI_NO_TITLE;
+		delete Bun.env.PI_NO_TITLE;
 		tempDir = TempDir.createSync("@pi-agent-session-eager-todo-");
 		streamCallCount = 0;
 		scriptedResponses = [];
@@ -238,6 +241,8 @@ describe("AgentSession eager todo enforcement", () => {
 			await session.dispose();
 		}
 		vi.restoreAllMocks();
+		if (previousNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
+		else Bun.env.PI_NO_TITLE = previousNoTitle;
 		tempDir.removeSync();
 	});
 
@@ -326,6 +331,15 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(titleInput).toContain("I found the parser recovery path.");
 		expect(titleInput).toContain("The recovery heuristic should drive the replan title.");
 		expect(titleInput).toContain("replan parser diagnostics");
+		const metadata = completeSimpleMock.mock.calls[0]?.[2]?.metadata;
+		if (!metadata || typeof metadata.user_id !== "string") {
+			throw new Error("Expected title request metadata.user_id");
+		}
+		const userId: unknown = JSON.parse(metadata.user_id);
+		if (!userId || typeof userId !== "object" || !("session_id" in userId) || typeof userId.session_id !== "string") {
+			throw new Error("Expected title request metadata.user_id.session_id");
+		}
+		expect(userId.session_id).not.toBe(session.sessionId);
 	});
 
 	it("forwards the configured title system prompt to the replan refresh path", async () => {
@@ -452,6 +466,25 @@ describe("AgentSession eager todo enforcement", () => {
 	it("does not refresh todo-init titles when title refresh on replan is disabled", async () => {
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
 		await session.setSessionName("Old auto title", "auto");
+		scriptedResponses = [
+			createToolCallAssistantMessage("todo", {
+				op: "init",
+				list: [{ phase: "Parser", items: ["Replan parser diagnostics"] }],
+			}),
+			createAssistantMessage("todo initialized"),
+		];
+
+		await session.prompt("replan parser diagnostics");
+
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+		expect(session.sessionManager.getSessionName()).toBe("Old auto title");
+	});
+
+	it("does not refresh todo-init titles when automatic titles are disabled", async () => {
+		Bun.env.PI_NO_TITLE = "1";
+		await recreateSession({ "title.refreshOnReplan": true });
+		await session.setSessionName("Old auto title", "auto");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
 		scriptedResponses = [
 			createToolCallAssistantMessage("todo", {
 				op: "init",

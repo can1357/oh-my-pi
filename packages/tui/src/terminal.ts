@@ -427,6 +427,7 @@ export function emergencyTerminalRestore(): void {
 					// buffer homes the cursor (unconditional CursorRestoreState
 					// with no prior save), corrupting the shell handoff on exit.
 					(altScreenActive ? "\x1b[?1049l\x1b[?1l\x1b>\x1b[<u" : "") + // Leave alt; reset main keyboard
+					"\x1b[0 q" + // Restore the terminal's configured cursor shape (DECSCUSR)
 					"\x1b[?25h", // Show cursor
 			);
 			altScreenActive = false;
@@ -454,6 +455,27 @@ export interface TerminalStartOptions {
 }
 /** Identity of an accepted explicit terminal appearance refresh request. */
 export type TerminalAppearanceRequestToken = number;
+/**
+ * Fired once per DEC private mode when DECRQM support resolves.
+ * `confirmed` is false when only the DA1 sentinel arrived.
+ * `status` is the DECRPM value (0 unrecognized, 1/2 set/reset, 3 permanently
+ * set, 4 permanently reset) when the terminal answered DECRQM.
+ */
+export type PrivateModeReportHandler = (mode: number, supported: boolean, confirmed?: boolean, status?: number) => void;
+
+/**
+ * Cursor shapes addressable via DECSCUSR (`CSI <n> SP q`). `"default"` (0) hands the shape back to
+ * the terminal's own configuration, which is what teardown restores rather than guessing a shape
+ * the user never chose.
+ */
+export type CursorShape = "default" | "block" | "underline" | "bar";
+
+export const CURSOR_SHAPE_CODES: Record<CursorShape, number> = {
+	default: 0,
+	block: 2,
+	underline: 4,
+	bar: 6,
+};
 export interface Terminal {
 	// Start the terminal with input, resize, and host-disconnect handlers.
 	start(
@@ -525,6 +547,12 @@ export interface Terminal {
 	hideCursor(force?: boolean): void; // Hide the cursor
 	showCursor(force?: boolean): void; // Show the cursor
 
+	// Cursor shape (DECSCUSR). Written whenever it changes, whether or not the
+	// hardware cursor is currently visible: reshaping a hidden cursor has no
+	// visible effect, and `stop()` restores the user's configured shape. Hosts
+	// that render a software cursor simply never call this.
+	setCursorShape?(shape: CursorShape): void;
+
 	// Clear operations
 	clearLine(): void; // Clear current line
 	clearFromCursor(): void; // Clear from cursor to end of screen
@@ -577,8 +605,9 @@ export interface Terminal {
 	 * status resolves. `confirmed` is false when the terminal answered the DA1
 	 * sentinel without answering DECRQM, which proves only that querying support
 	 * is unavailable — not that the private mode itself is unsupported.
+	 * `status` is the DECRPM value when the terminal answered DECRQM.
 	 */
-	onPrivateModeReport?(callback: (mode: number, supported: boolean, confirmed?: boolean) => void): void;
+	onPrivateModeReport?(callback: PrivateModeReportHandler): void;
 }
 
 /**
@@ -674,6 +703,9 @@ export class ProcessTerminal implements Terminal {
 	// unknown (fresh start, resize, or an alt-screen switch newer than the
 	// last cursor sequence — some hosts keep DECTCEM per buffer).
 	#cursorVisible: boolean | undefined;
+	// Last DECSCUSR shape written, so per-keystroke mode changes dedupe.
+	// `undefined` = never set, i.e. the terminal's own configured shape.
+	#cursorShape: CursorShape | undefined;
 	// Captured at construction and re-read at start(): when true, every real
 	// terminal side effect (writes, probes, raw mode, SIGWINCH, timers) is
 	// suppressed. Defaults on under `bun test` — see isTerminalHeadless().
@@ -724,7 +756,7 @@ export class ProcessTerminal implements Terminal {
 	#da1SentinelOwners: Da1SentinelOwner[] = [];
 	/** Resolved DECRQM support per private mode (mode → supported). */
 	#privateModeSupport = new Map<number, boolean>();
-	#privateModeCallbacks: Array<(mode: number, supported: boolean, confirmed: boolean) => void> = [];
+	#privateModeCallbacks: PrivateModeReportHandler[] = [];
 	/** Whether DEC 2048 in-band resize notifications are currently enabled. */
 	#inBandResizeActive = false;
 	/** Reassembly buffer for a DEC 2048 in-band resize report split across stdin reads. */
@@ -815,7 +847,7 @@ export class ProcessTerminal implements Terminal {
 		return token;
 	}
 
-	onPrivateModeReport(callback: (mode: number, supported: boolean, confirmed?: boolean) => void): void {
+	onPrivateModeReport(callback: PrivateModeReportHandler): void {
 		this.#privateModeCallbacks.push(callback);
 	}
 
@@ -1351,10 +1383,13 @@ export class ProcessTerminal implements Terminal {
 			}
 		});
 
-		// Re-wrap paste content with bracketed paste markers for existing editor handling
-		this.#stdinBuffer.on("paste", (content: string) => {
+		// Re-wrap paste content with bracketed paste markers for existing editor
+		// handling. An Enter that shared the paste's stdin read rides along so
+		// paste and submit reach the component focused right now, not one the
+		// paste itself is about to open.
+		this.#stdinBuffer.on("paste", (content: string, enter?: string) => {
 			if (this.#inputHandler) {
-				this.#inputHandler(`\x1b[200~${content}\x1b[201~`);
+				this.#inputHandler(`\x1b[200~${content}\x1b[201~${enter ?? ""}`);
 			}
 		});
 
@@ -1537,7 +1572,7 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	#handlePrivateModeReport(mode: number, status: string): void {
-		this.#resolvePrivateMode(mode, isPrivateModeSupported(status), true);
+		this.#resolvePrivateMode(mode, isPrivateModeSupported(status), true, Number.parseInt(status, 10));
 		if (isXtermScrollToBottomMode(mode) && isPrivateModeSet(status)) {
 			this.#disableXtermScrollToBottomMode(mode);
 		}
@@ -1549,12 +1584,12 @@ export class ProcessTerminal implements Terminal {
 	 * unsupported response from an absent response followed by the DA1 sentinel.
 	 * Enables DEC 2048 in-band resize only after positive confirmation.
 	 */
-	#resolvePrivateMode(mode: number, supported: boolean, confirmed: boolean): void {
+	#resolvePrivateMode(mode: number, supported: boolean, confirmed: boolean, status?: number): void {
 		if (this.#privateModeSupport.has(mode)) return;
 		this.#privateModeSupport.set(mode, supported);
 		for (const cb of this.#privateModeCallbacks) {
 			try {
-				cb(mode, supported, confirmed);
+				cb(mode, supported, confirmed, status);
 			} catch {
 				// Ignore subscriber errors — capability reporting must not crash input.
 			}
@@ -1721,6 +1756,13 @@ export class ProcessTerminal implements Terminal {
 		// Disable bracketed paste mode
 		this.#safeWrite("\x1b[?2004l");
 		this.#safeWrite("\x1b[?5522l");
+
+		// Hand the cursor shape back to the user's terminal configuration; a Vim
+		// Normal-mode block must not outlive the session in their shell.
+		if (this.#cursorShape !== undefined && this.#cursorShape !== "default") {
+			this.#safeWrite(`\x1b[${CURSOR_SHAPE_CODES.default} q`);
+		}
+		this.#cursorShape = undefined;
 
 		// Disable mouse tracking (enabled only by fullscreen overlays; safe
 		// no-ops otherwise). Covers crash paths that reach stop() without the
@@ -2018,6 +2060,17 @@ export class ProcessTerminal implements Terminal {
 	showCursor(force = false): void {
 		if (!force && this.#cursorVisible === true) return;
 		this.#safeWrite("\x1b[?25h");
+	}
+
+	/**
+	 * Set the hardware cursor shape (DECSCUSR). Deduped against the last shape written so a
+	 * per-keystroke mode indicator does not add a sequence to every frame; {@link stop} restores
+	 * `"default"` so the user's own cursor configuration survives exit.
+	 */
+	setCursorShape(shape: CursorShape): void {
+		if (this.#cursorShape === shape) return;
+		this.#cursorShape = shape;
+		this.#safeWrite(`\x1b[${CURSOR_SHAPE_CODES[shape]} q`);
 	}
 
 	/**

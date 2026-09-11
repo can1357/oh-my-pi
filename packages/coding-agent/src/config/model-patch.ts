@@ -18,6 +18,7 @@ export interface ProviderOverride {
 	guardrailIdentifier?: Model<Api>["guardrailIdentifier"];
 	guardrailVersion?: Model<Api>["guardrailVersion"];
 	guardrailTrace?: Model<Api>["guardrailTrace"];
+	requestMetadata?: Model<Api>["requestMetadata"];
 }
 
 /**
@@ -48,13 +49,21 @@ export interface ProviderOverride {
  * values keep resolving per request on the inference path, matching the
  * `modelOverrides`/`applyModelPatch` behavior — otherwise a discovery
  * provider would send the raw `!command` literal upstream (#10457).
- * See `xiaomi-tp-discovery-merge.test.ts` and the `refresh()` baseUrl-override
- * regression in `model-registry.test.ts`.
+ * The `authHeader`/`apiKey` override fields are threaded into the live
+ * resolver too, so an `authHeader: true` + `apiKey` provider with no explicit
+ * `headers:` block re-derives `Authorization` from the current `apiKey`
+ * resolution each request — a 401 force-refresh (command-cache invalidation)
+ * reaches the retry instead of resending the discovery-time baked bearer
+ * (#10551). See `xiaomi-tp-discovery-merge.test.ts` and the `refresh()`
+ * baseUrl-override regression in `model-registry.test.ts`.
  */
 export function mergeDiscoveredModel<TApi extends Api>(
 	model: Model<TApi>,
 	existing: Model<Api> | undefined,
-	providerOverride?: Pick<ProviderOverride, "baseUrl" | "compat" | "headers" | "remoteCompaction" | "transport">,
+	providerOverride?: Pick<
+		ProviderOverride,
+		"baseUrl" | "compat" | "headers" | "remoteCompaction" | "transport" | "authHeader" | "apiKey"
+	>,
 ): Model<TApi> {
 	if (existing) {
 		const supportsTools = model.supportsTools ?? existing.supportsTools;
@@ -65,7 +74,10 @@ export function mergeDiscoveredModel<TApi extends Api>(
 			// source: `model.headers` is a discovery-time resolved snapshot, so
 			// without this a rotated credential (401 → cache invalidation) would
 			// stay shadowed by the stale snapshot on the inference path (#10458).
-			headers: createLiveConfigHeaders([existing.headers, model.headers, providerOverride?.headers]),
+			headers: createLiveConfigHeaders([existing.headers, model.headers, providerOverride?.headers], {
+				authHeader: providerOverride?.authHeader,
+				apiKeyConfig: providerOverride?.apiKey,
+			}),
 			transport: providerOverride?.transport ?? existing.transport ?? model.transport,
 			remoteCompaction: mergeProviderRemoteCompactionConfig(
 				mergeRemoteCompactionConfig(existing.remoteCompaction, model.remoteCompaction),
@@ -79,7 +91,10 @@ export function mergeDiscoveredModel<TApi extends Api>(
 		return buildModel({
 			...toModelSpec(model),
 			baseUrl: providerOverride.baseUrl ?? model.baseUrl,
-			headers: createLiveConfigHeaders([model.headers, providerOverride.headers]),
+			headers: createLiveConfigHeaders([model.headers, providerOverride.headers], {
+				authHeader: providerOverride.authHeader,
+				apiKeyConfig: providerOverride.apiKey,
+			}),
 			...(providerOverride.transport !== undefined ? { transport: providerOverride.transport } : {}),
 			remoteCompaction: mergeProviderRemoteCompactionConfig(
 				model.remoteCompaction,
@@ -261,16 +276,15 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		// first so non-reasoning and wire-disabled models still suppress it.
 		built.thinking = patch.thinking;
 	}
-	// Explicitly patched value fields outrank the engine's reviewed catalog
-	// corrections (`limits-patch`/`context-window-floor`/`cost-patch`/
-	// `input-modalities`): rebuild first for compat/identity, then re-assert
-	// the user-authored values.
-	if (patch.contextWindow !== undefined) built.contextWindow = patch.contextWindow;
-	if (patch.maxTokens !== undefined) built.maxTokens = patch.maxTokens;
+	// Capacity already includes registry policy and runtime metadata; rebuilding
+	// compat must not replace it with the catalog's baseline limits.
+	built.contextWindow = result.contextWindow;
+	built.maxTokens = result.maxTokens;
+	// Explicit input and cost patches outrank catalog corrections.
 	if (patch.input !== undefined) built.input = patch.input;
-	if (patch.cost) {
-		built.cost = { ...result.cost };
-	}
+	// Patches never change model identity. Preserve already-resolved pricing,
+	// including earlier custom prices and the deliberate absence of a schedule.
+	built.cost = result.cost;
 	return built;
 }
 

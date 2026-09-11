@@ -7,12 +7,7 @@
 /// <reference types="./bun-imports.d.ts" />
 import * as fs from "node:fs";
 import * as path from "node:path";
-import {
-	type BlockTarget as HashlineBlockTarget,
-	formatHashlineHeader,
-	InMemorySnapshotStore,
-	Tokenizer as HashlineTokenizer,
-} from "@oh-my-pi/hashline";
+import { EditStore, hashlineCountOps, hashlineFormatHeader } from "@oh-my-pi/pi-natives";
 import type { AgentMessage, ResolvedThinkingLevel, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model, ToolExample } from "@oh-my-pi/pi-ai";
 import { formatSessionDumpText, RpcClient } from "@oh-my-pi/pi-coding-agent";
@@ -283,52 +278,6 @@ function isMutationTool(toolName: unknown): boolean {
 	return isEditTool(toolName) || toolName === "write";
 }
 
-// Pure classification — single shared tokenizer is safe.
-const HASHLINE_OP_TOKENIZER = new HashlineTokenizer();
-
-function hashlinePutSuffix(register: string | undefined, hadColon: boolean, allowsAnonymousPaste: boolean): string {
-	if (register !== undefined) return hadColon ? " @reg: (invalid)" : " @reg";
-	if (hadColon) return ":";
-	return allowsAnonymousPaste ? "" : " (invalid)";
-}
-
-function hashlineCutSuffix(register: string | undefined, hadColon: boolean): string {
-	if (register !== undefined) return hadColon ? " @reg: (invalid)" : " @reg";
-	return hadColon ? ": (invalid)" : "";
-}
-
-/** Display the canonical S3 header shape for a parsed hashline target. */
-function hashlineOpLabel(target: HashlineBlockTarget, hadColon: boolean): string {
-	switch (target.kind) {
-		case "replace": {
-			const locator = target.range.start.line === target.range.end.line ? "N.=N" : "N.=M";
-			return `PUT ${locator}${hashlinePutSuffix(target.register, hadColon, false)}`;
-		}
-		case "block":
-			return `PUT N*${hashlinePutSuffix(target.register, hadColon, false)}`;
-		case "insert_before":
-			return `PUT <N${hashlinePutSuffix(target.register, hadColon, true)}`;
-		case "insert_after":
-			return `PUT >N${hashlinePutSuffix(target.register, hadColon, true)}`;
-		case "bof":
-			return `PUT <1${hashlinePutSuffix(target.register, hadColon, true)}`;
-		case "eof":
-			return `PUT >$${hashlinePutSuffix(target.register, hadColon, true)}`;
-		case "insert_after_block":
-			return `PUT >N*${hashlinePutSuffix(target.register, hadColon, true)}`;
-		case "cut": {
-			const locator = target.range.start.line === target.range.end.line ? "N.=N" : "N.=M";
-			return `CUT ${locator}${hashlineCutSuffix(target.register, hadColon)}`;
-		}
-		case "cut_block":
-			return `CUT N*${hashlineCutSuffix(target.register, hadColon)}`;
-		case "rem":
-			return "REM";
-		case "move":
-			return "MV";
-	}
-}
-
 /**
  * Count canonical hashline op header shapes (`PUT N.=M:`, `CUT N*`,
  * `PUT >N @reg`, …) in an edit call's patch input. Returns `null` when
@@ -338,13 +287,9 @@ function countHashlineOps(args: unknown): Record<string, number> | null {
 	if (!args || typeof args !== "object" || !("input" in args)) return null;
 	const input = args.input;
 	if (typeof input !== "string" || input.length === 0) return null;
-	const counts: Record<string, number> = {};
-	for (const token of HASHLINE_OP_TOKENIZER.tokenizeAll(input)) {
-		if (token.kind !== "op-block") continue;
-		const label = hashlineOpLabel(token.target, token.hadColon);
-		counts[label] = (counts[label] ?? 0) + 1;
-	}
-	return Object.keys(counts).length > 0 ? counts : null;
+	const entries = hashlineCountOps(input);
+	if (entries.length === 0) return null;
+	return Object.fromEntries(entries.map(entry => [entry.label, entry.count]));
 }
 
 async function collectOriginalFileContents(cwd: string, files: string[]): Promise<Map<string, string>> {
@@ -674,9 +619,9 @@ function buildGuidedHashlinePatch(file: string, actual: string, expected: string
 
 	if (ops.length === 0) return null;
 	const normalizedActual = actual.replace(/\r\n?/g, "\n");
-	const snapshots = new InMemorySnapshotStore();
-	const tag = snapshots.record(file, normalizedActual);
-	const header = formatHashlineHeader(file, tag);
+	const snapshots = new EditStore();
+	const tag = snapshots.recordSnapshot(file, normalizedActual);
+	const header = hashlineFormatHeader(file, tag);
 	return `${header}\n${ops.join("\n")}`;
 }
 

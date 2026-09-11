@@ -3,8 +3,9 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
+import { disposeAllVmContexts, invokeJsTool } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { executeJs, type JsResult } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
+import { describeEvalTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -93,27 +94,78 @@ describe("executeJs", () => {
 		expect(resetResult.output.trim()).toBe("undefined");
 	});
 
-	it("parallel() barriers until every thunk settles and throws the lowest-index error", async () => {
-		const result = await executeJs(
+	it("describes and invokes tools defined in the retained JavaScript kernel", async () => {
+		const evalSessionId = `${sessionId}:defined-tools`;
+		const evalSession: ToolSession = {
+			...session,
+			getEvalSessionId: () => evalSessionId,
+		};
+		const toolSessionId = `js:${evalSessionId}`;
+		const defined = await executeJs(
 			[
-				"const settled = [];",
-				"try {",
-				"	await parallel([",
-				"		async () => { await new Promise(r => setTimeout(r, 30)); settled.push('slow'); },",
-				"		async () => { settled.push('bad1'); throw new Error('bad1'); },",
-				"		async () => { settled.push('bad2'); throw new Error('bad2'); },",
-				"	]);",
-				"	return 'no-throw';",
-				"} catch (err) {",
-				"	return JSON.stringify([err.message, settled.sort()]);",
-				"}",
+				"tool(async ({ n }) => n * 2, {",
+				'  name: "dbl",',
+				'  description: "Double an integer",',
+				'  parameters: { type: "object", properties: { n: { type: "integer" } }, required: ["n"], additionalProperties: false },',
+				"});",
 			].join("\n"),
-			{ sessionId, session, sessionFile },
+			{ sessionId: toolSessionId, session: evalSession, sessionFile },
 		);
-		expect(result.exitCode).toBe(0);
-		// Every thunk ran to completion (the slow one was not orphaned by the
-		// early rejections), and the lowest-index error propagated.
-		expect(JSON.parse(result.output.trim())).toEqual(["bad1", ["bad1", "bad2", "slow"]]);
+		expect(defined.exitCode).toBe(0);
+		expect(getStatusEvents(defined)).toContainEqual({
+			type: "status",
+			event: { op: "tool_define", name: "dbl", params: ["n"] },
+		});
+
+		const described = await invokeJsTool(
+			{ op: "describe", names: ["dbl", "missing"] },
+			{ sessionKey: toolSessionId, session: evalSession },
+		);
+		expect(described.ok).toBe(true);
+		if (!described.ok || !("tools" in described)) throw new Error("Expected a JavaScript tool descriptor");
+		expect(described.tools).toEqual([
+			{
+				name: "dbl",
+				description: "Double an integer",
+				parameters: {
+					type: "object",
+					properties: { n: { type: "integer" } },
+					required: ["n"],
+					additionalProperties: false,
+				},
+				language: "js",
+			},
+		]);
+		expect(described.missing).toEqual(["missing"]);
+		expect(await describeEvalTools(evalSession, ["dbl"])).toEqual(described.tools);
+		await expect(describeEvalTools(evalSession, ["nope"])).rejects.toThrow("Unknown eval tool(s): nope");
+
+		const called = await invokeJsTool(
+			{ op: "call", name: "dbl", args: { n: 2 } },
+			{ sessionKey: toolSessionId, session: evalSession },
+		);
+		expect(called).toEqual({ ok: true, value: 4 });
+
+		// A throwing tool is forwarded to the caller; the worker stays alive.
+		await executeJs('tool(() => { throw new Error("kaboom"); }, { name: "boom" });', {
+			sessionId: toolSessionId,
+			session: evalSession,
+			sessionFile,
+		});
+		const failed = await invokeJsTool(
+			{ op: "call", name: "boom", args: {} },
+			{ sessionKey: toolSessionId, session: evalSession },
+		);
+		expect(failed).toEqual({ ok: false, error: "kaboom" });
+		const alive = await executeJs("return 'still here';", {
+			sessionId: toolSessionId,
+			session: evalSession,
+			sessionFile,
+		});
+		expect(alive.output.trim()).toBe("still here");
+
+		evalSession.settings.set("eval.tools.enabled", false);
+		await expect(describeEvalTools(evalSession, ["dbl"])).rejects.toThrow("Eval-defined tools are disabled");
 	});
 
 	it("persists bindings from cells that contain nested returns", async () => {

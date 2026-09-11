@@ -1,0 +1,7 @@
+auth "github-copilot" {
+    name "GitHub Copilot"
+    // Enterprise-domain prompting must happen before the domain-dependent device request.
+    login "custom" hook="github-copilot"
+    refresh hook="github-copilot"
+    api-key-format "structured"
+}

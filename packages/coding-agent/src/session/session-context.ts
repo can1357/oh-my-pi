@@ -1,16 +1,26 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { coerceServiceTierByFamily, type ProviderPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
-import * as snapcompact from "@oh-my-pi/snapcompact";
+import { getAnthropicCompactionPayload } from "@oh-my-pi/pi-agent-core/compaction";
 import {
+	coerceServiceTierByFamily,
+	type OpenAIResponsesHistoryPayload,
+	type ServiceTierByFamily,
+} from "@oh-my-pi/pi-ai";
+import * as snapcompact from "@oh-my-pi/snapcompact";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import {
+	type CustomMessage,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	isCustomMessageContent,
 	isEmptyErrorTurn,
+	isUserTurnInitiator,
 	normalizeCustomMessagePayload,
 	PREWALK_PLAN_MESSAGE_TYPE,
+	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
+import { CONTEXT_NOTES_ENTRY_TYPE, getContextNotes, renderContextNotes } from "./context-notes";
 import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 
 // #4470 crash artifacts had legacy frames (no shape metadata) with 17 frames,
@@ -156,19 +166,51 @@ function snapcompactHistoryBlocksForContext(
 	return snapcompact.historyBlocks(archive, snapcompactHistoryBlockOptions(archive, options));
 }
 
+/** Reads validated OpenAI Responses replacement history from a compaction entry. */
 export function getOpenAiRemoteCompactionPayload(
 	compaction: CompactionEntry | null | undefined,
-): ProviderPayload | undefined {
+): OpenAIResponsesHistoryPayload | undefined {
 	const candidate = compaction?.preserveData?.openaiRemoteCompaction;
-	if (!candidate || typeof candidate !== "object") return undefined;
-	const remote = candidate as { provider?: unknown; replacementHistory?: unknown };
-	if (typeof remote.provider !== "string" || remote.provider.length === 0) return undefined;
-	if (!Array.isArray(remote.replacementHistory)) return undefined;
+	if (!isRecord(candidate)) return undefined;
+	if (typeof candidate.provider !== "string" || candidate.provider.length === 0) return undefined;
+	if (!Array.isArray(candidate.replacementHistory) || !candidate.replacementHistory.every(isRecord)) return undefined;
 	return {
 		type: "openaiResponsesHistory",
-		provider: remote.provider,
-		items: remote.replacementHistory as Array<Record<string, unknown>>,
+		provider: candidate.provider,
+		items: candidate.replacementHistory,
 	};
+}
+
+/**
+ * True for entries that represent a user-attributed request: an ordinary user
+ * message, or a custom message that initiates a user turn per the shared
+ * `isUserTurnInitiator` semantics (directly invoked `/skill:` prompts and
+ * writable-collab prompts). Notes-backed rollover retention uses this so a
+ * custom request crossing a boundary is retained exactly like an ordinary
+ * one, instead of being skipped in favor of an older plain user message.
+ */
+function isUserRequestEntry(entry: SessionEntry): boolean {
+	if (entry.type === "message") {
+		if (entry.message.role === "user") return true;
+		if (entry.message.role === "custom") return isUserTurnInitiator(entry.message as CustomMessage);
+		return false;
+	}
+	if (entry.type === "custom_message") {
+		if (!isCustomMessageContent(entry.content)) return false;
+		const normalized = normalizeCustomMessagePayload(entry);
+		const attribution = entry.attribution === undefined ? undefined : normalized.attribution;
+		return isUserTurnInitiator(
+			createCustomMessage(
+				normalized.customType,
+				normalized.content,
+				normalized.display,
+				normalized.details,
+				entry.timestamp,
+				attribution,
+			),
+		);
+	}
+	return false;
 }
 
 export function buildSessionContext(
@@ -343,7 +385,12 @@ export function buildSessionContext(
 			}
 			pushMessage(entry.message);
 		} else if (entry.type === "custom_message") {
-			if (!options?.transcript && entry.customType === PREWALK_PLAN_MESSAGE_TYPE) return;
+			if (
+				!options?.transcript &&
+				(entry.customType === PREWALK_PLAN_MESSAGE_TYPE || entry.customType === VIBE_MODE_CONTEXT_MESSAGE_TYPE)
+			) {
+				return;
+			}
 			if (!isCustomMessageContent(entry.content)) return;
 			const normalized = normalizeCustomMessagePayload(entry);
 			const attribution = entry.attribution === undefined ? undefined : normalized.attribution;
@@ -411,8 +458,32 @@ export function buildSessionContext(
 			appendMessage(path[i]);
 		}
 	} else if (compaction) {
-		const providerPayload = getOpenAiRemoteCompactionPayload(compaction);
-		const remoteReplacementHistory = providerPayload?.items;
+		const remotePayload = getOpenAiRemoteCompactionPayload(compaction);
+		const remoteReplacementHistory = remotePayload?.items;
+		// Anthropic server compaction persists a plain-text summary plus its
+		// native replay; the kept tail still comes from entries below.
+		const anthropicPayload = getAnthropicCompactionPayload(compaction.preserveData);
+		const providerPayload = remotePayload ?? anthropicPayload;
+
+		// Find compaction index in path
+		const compactionIdx = path.findIndex(e => e.type === "compaction" && e.id === compaction.id);
+
+		// A natively replayed summary must not invalidate the retained tail's
+		// bound thinking: stamping it with the entry commit timestamp would
+		// expose that as historyRewriteAt newer than the tail and strip its
+		// signatures on the next request. Predate the marker before the first
+		// retained entry instead (other lanes keep the commit timestamp).
+		let summaryTimestamp = compaction.timestamp;
+		if (anthropicPayload !== undefined) {
+			const firstKeptIdx = path.findIndex(entry => entry.id === compaction.firstKeptEntryId);
+			const firstRetained =
+				(firstKeptIdx >= 0 && firstKeptIdx < compactionIdx ? path[firstKeptIdx] : undefined) ??
+				path[compactionIdx + 1];
+			const retainedAt = firstRetained ? new Date(firstRetained.timestamp).getTime() : NaN;
+			if (Number.isFinite(retainedAt)) {
+				summaryTimestamp = new Date(retainedAt - 1).toISOString();
+			}
+		}
 
 		// Re-attach any archived snapcompact frames so the model can keep
 		// reading the archived history after every context rebuild.
@@ -420,7 +491,7 @@ export function buildSessionContext(
 		const compactionSummaryMsg = createCompactionSummaryMessage(
 			compaction.summary,
 			compaction.tokensBefore,
-			compaction.timestamp,
+			summaryTimestamp,
 			{
 				shortSummary: compaction.shortSummary,
 				providerPayload,
@@ -436,8 +507,26 @@ export function buildSessionContext(
 			pushMessage(compactionSummaryMsg);
 		}
 
-		// Find compaction index in path
-		const compactionIdx = path.findIndex(e => e.type === "compaction" && e.id === compaction.id);
+		// Notes-backed windows do not summarize a discarded turn prefix. Recover
+		// its latest user request verbatim, independently of the disposable tail.
+		// Resolve from the branch journal so repeated rollovers and resume retain
+		// it too, without copying messages into compaction metadata or transcripts.
+		// Attribution follows the shared turn-initiator semantics so a
+		// user-invoked skill or writable-collab request is retained like an
+		// ordinary one instead of being skipped for an older plain user message.
+		if (
+			!options?.transcript &&
+			isRecord(compaction.details) &&
+			compaction.details.kind === "experimental-context-rollover"
+		) {
+			const firstKeptIdx = path.findIndex(entry => entry.id === compaction.firstKeptEntryId);
+			for (let i = compactionIdx - 1; i > resetBoundaryIdx; i--) {
+				const entry = path[i];
+				if (!isUserRequestEntry(entry)) continue;
+				if (i < firstKeptIdx) appendMessage(entry);
+				break;
+			}
+		}
 
 		// The remote replacement payload (OpenAI remote compaction) carries the
 		// kept turns for the LLM context only; it is not rendered as visible
@@ -484,6 +573,19 @@ export function buildSessionContext(
 		// No compaction - emit all messages, handle branch summaries and custom messages
 		for (const entry of path) {
 			appendMessage(entry);
+		}
+	}
+
+	if (!options?.transcript) {
+		const notes = getContextNotes(path);
+		const renderedNotes = renderContextNotes(path);
+		if (notes && renderedNotes.length > 0) {
+			const sourceEntry = path.find(entry => entry.id === notes.entryId);
+			if (sourceEntry) {
+				messages.unshift(
+					createCustomMessage(CONTEXT_NOTES_ENTRY_TYPE, renderedNotes, false, undefined, sourceEntry.timestamp),
+				);
+			}
 		}
 	}
 

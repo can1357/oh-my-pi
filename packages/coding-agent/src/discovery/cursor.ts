@@ -24,7 +24,7 @@ import type { Settings } from "../capability/settings";
 import { settingsCapability } from "../capability/settings";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import {
-	buildRuleFromMarkdown,
+	discoverRuleFromMarkdown,
 	createSourceMeta,
 	expandEnvVarsDeep,
 	getProjectPath,
@@ -141,8 +141,8 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 	return { items, warnings };
 }
 
-function transformMDCRule(name: string, content: string, path: string, source: SourceMeta): Rule {
-	return buildRuleFromMarkdown(name, content, path, source, { stripNamePattern: /\.(mdc|md)$/ });
+function transformMDCRule(name: string, content: string, path: string, source: SourceMeta): Rule | null {
+	return discoverRuleFromMarkdown(name, content, path, source, { stripNamePattern: /\.(mdc|md)$/ });
 }
 
 // =============================================================================

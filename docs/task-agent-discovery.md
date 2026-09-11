@@ -38,7 +38,7 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 - `spawns` accepts `*`, CSV, or array
 - backward-compat behavior: if `spawns` missing but `tools` includes `task`, `spawns` becomes `*`
 - `output` is passed through as opaque schema data
-- `read-summarize: false` (normalized to `readSummarize`) forces the subagent's `read` tool to return verbatim file content instead of structural summaries — `runSubprocess` applies it as a `read.summarize.enabled: false` override on the subagent's isolated settings (`src/task/executor.ts`). `scout` and `librarian` ship with it disabled. Defaults to enabled when the field is absent.
+- `read-summarize: false` (normalized to `readSummarize`) forces the subagent's `read` tool to return verbatim file content instead of structural summaries — `runSubprocess` applies it as a `read.summarize.enabled: false` override on the subagent's isolated settings (`src/task/executor.ts`). `scout` ships with it disabled. Defaults to enabled when the field is absent.
 - `model` accepts one selector, CSV, or an array. Entries are tried in order after role aliases are expanded.
 - `thinking-level` / `thinking` selects the agent's configured effort. When `task.enableEffort` (default `false`) exposes it, a task item's coarse `effort` (`lo`, `med`, `hi`) takes precedence at launch. OMP maps that hint to the selected model's lowest, middle, or highest supported effort, then clamps it to `task.maxEffort` (default `max`). The ceiling is carried across retry-fallback model switches. If the selected model has no supported effort at or below the ceiling, the spawn fails; models without a controllable effort surface instead fall back to their normal selector.
 - `blocking: true` makes the parent wait for that agent even when async task execution is enabled
@@ -114,7 +114,7 @@ Bundled agents are embedded at build time (`src/task/agents.ts`) using text impo
 
 `EMBEDDED_AGENT_DEFS` defines:
 
-- `scout`, `designer`, `reviewer`, `security-reviewer`, and `librarian` from prompt files
+- `scout`, `reviewer`, and `security-reviewer` from prompt files
 - `task` and `sonic` from the shared `task.md` body plus injected frontmatter; no bundled agent sets `prewalk` — the generic `task` agent's hand-off is armed by the `task.prewalk` setting (default off), or per agent via `/agents` / `task.agentPrewalk` / user agent frontmatter
 
 Loading path:

@@ -651,15 +651,7 @@ fn seq_main(matches: &ArgMatches, host: &mut Host) -> Result<(), Box<dyn Error>>
 		padding,
 	);
 
-	match result {
-		Ok(()) => Ok(()),
-		Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {
-			// GNU seq prints the Broken pipe message but still exits with status 0.
-			let _ = writeln!(host.stderr, "seq: write error: {err}");
-			Ok(())
-		},
-		Err(err) => Err(format!("write error: {err}").into()),
-	}
+	result.map_err(|err| format!("write error: {err}").into())
 }
 
 fn uu_app() -> Command {

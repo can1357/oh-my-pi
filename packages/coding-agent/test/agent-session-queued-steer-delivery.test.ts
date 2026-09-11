@@ -79,7 +79,7 @@ describe("AgentSession queued steer delivery", () => {
 		return { session, sessionManager, mock };
 	}
 
-	function steerCollabPrompt(target: AgentSession, text: string): Promise<void> {
+	function steerCollabPrompt(target: AgentSession, text: string): Promise<boolean> {
 		return target.promptCustomMessage(
 			{
 				customType: COLLAB_PROMPT_TYPE,

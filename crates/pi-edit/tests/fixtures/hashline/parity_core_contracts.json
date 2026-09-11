@@ -1,0 +1,371 @@
+{
+	"source": "packages/hashline/test/core-contracts.test.ts",
+	"cases": [
+		{
+			"name": "keeps parsed sections reusable across target snapshots",
+			"parse": [
+				{
+					"input": "PUT >2:\n+tail",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "aaa\nbbb",
+					"input": "PUT >2:\n+tail",
+					"path": "a.ts",
+					"expect": {
+						"text": "aaa\nbbb\ntail",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "aaa\nbbb\nccc",
+					"input": "PUT >2:\n+tail",
+					"path": "a.ts",
+					"expect": {
+						"text": "aaa\nbbb\ntail\nccc",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "applies canonical PUT/CUT operations against concrete anchors",
+			"parse": [
+				{
+					"input": "PUT <2:\n+before b\nPUT >2:\n+after b\nPUT <1:\n+top\nPUT >$:\n+tail",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				},
+				{
+					"input": "CUT 2",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				},
+				{
+					"input": "CUT 2-3",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 2:\n+BBB",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "aaa\nbbb\nccc",
+					"input": "PUT <2:\n+before b\nPUT >2:\n+after b\nPUT <1:\n+top\nPUT >$:\n+tail",
+					"expect": {
+						"text": "top\naaa\nbefore b\nbbb\nafter b\nccc\ntail",
+						"firstChangedLine": 1
+					}
+				},
+				{
+					"text": "aaa\nbbb\nccc",
+					"input": "CUT 2",
+					"expect": {
+						"text": "aaa\nccc",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "aaa\nbbb\nccc",
+					"input": "CUT 2-3",
+					"expect": {
+						"text": "aaa",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "aaa\nbbb\nccc",
+					"input": "PUT 2:\n+BBB",
+					"expect": {
+						"text": "aaa\nBBB\nccc",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "inserts after the final line without falling off the file",
+			"parse": [
+				{
+					"input": "PUT >3:\n+tail",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "aaa\nbbb\nccc",
+					"input": "PUT >3:\n+tail",
+					"expect": {
+						"text": "aaa\nbbb\nccc\ntail",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "preserves whitespace-bearing and sigil-leading payload exactly",
+			"parse": [
+				{
+					"input": "PUT >2:\n+\tconst streamKeepaliveMs = opts.streamKeepaliveMs;",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 2:\n+|literal\n+^literal\n+↓literal",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "aaa\nbbb\nccc",
+					"input": "PUT >2:\n+\tconst streamKeepaliveMs = opts.streamKeepaliveMs;",
+					"expect": {
+						"text": "aaa\nbbb\n\tconst streamKeepaliveMs = opts.streamKeepaliveMs;\nccc",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "aaa\nbbb\nccc",
+					"input": "PUT 2:\n+|literal\n+^literal\n+↓literal",
+					"expect": {
+						"text": "aaa\n|literal\n^literal\n↓literal\nccc",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "strips copied read-output prefixes only inside pasted bare body rows",
+			"parse": [
+				{
+					"input": "PUT 2-4:\n+line one\n3:line two",
+					"expect": {
+						"editCount": 5,
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "aaa\nbbb\nccc\nddd\neee",
+					"input": "PUT 2-4:\n+line one\n3:line two",
+					"expect": {
+						"text": "aaa\nline one\nline two\neee",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects overlapping replacement ranges",
+			"parse": [
+				{
+					"input": "PUT 2-4:\n+NEW1\nPUT 3-5:\n+NEW2",
+					"error": "Error: line 3: anchor line 3 is already targeted by another hunk on line 1. Issue ONE hunk per range; payload is only the final desired content, never a before/after pair."
+				}
+			]
+		},
+		{
+			"name": "rejects obsolete line-hash anchors and applies line-number anchors without per-anchor hashes",
+			"parse": [
+				{
+					"input": "2ab:\n+BBB",
+					"error": "Error: line 1: payload line has no preceding hunk header. Use `PUT N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` above the body. Got \"2ab:\"."
+				},
+				{
+					"input": "PUT 2:\n+BBB",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "aaa\nbbb\nccc",
+					"input": "PUT 2:\n+BBB",
+					"expect": {
+						"text": "aaa\nBBB\nccc",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "preflights write policy for every section before committing a batch",
+			"parse": [
+				{
+					"input": "PUT 1:\n+AAA",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 1:\n+BBB",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "aaa\n",
+					"input": "PUT 1:\n+AAA",
+					"path": "a.ts",
+					"expect": {
+						"text": "AAA\n",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "returns null when neither patch recovery nor replay can land",
+			"parse": [
+				{
+					"input": "PUT 2:\n+BETA-MODEL",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "recovers from an older in-session snapshot after the current file advanced",
+			"parse": [
+				{
+					"input": "PUT 10-10:\n+L10-EDITED",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "terminates parsing without surfacing a warning",
+			"parse": [
+				{
+					"input": "PUT >1:\n+HELLO\n*** Abort\nPUT >99:\n+never",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "applies inline cut operations",
+			"parse": [
+				{
+					"input": "CUT 2\n",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				},
+				{
+					"input": "CUT 2-3\n",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "line1\nline2\nline3\n",
+					"input": "CUT 2\n",
+					"expect": {
+						"text": "line1\nline3\n",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "line1\nline2\nline3\nline4\n",
+					"input": "CUT 2-3\n",
+					"expect": {
+						"text": "line1\nline4\n",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "treats old inline replacement syntax as orphan body",
+			"parse": [
+				{
+					"input": "2.=2=replacement\n",
+					"error": "Error: line 1: payload line has no preceding hunk header. Use `PUT N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` above the body. Got \"2.=2=replacement\"."
+				}
+			]
+		},
+		{
+			"name": "preserves explicit blank replacement rows",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+\n+\nPUT 4-4:\n+D\n",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 2-2:\n+first\n+\n+second\n",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne\n",
+					"input": "PUT 2-2:\n+\n+\nPUT 4-4:\n+D\n",
+					"expect": {
+						"text": "a\n\n\nc\nD\ne\n",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\n",
+					"input": "PUT 2-2:\n+first\n+\n+second\n",
+					"expect": {
+						"text": "a\nfirst\n\nsecond\nc\n",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		}
+	]
+}

@@ -14,7 +14,7 @@ import {
 	ISOLATION_BASELINE_MAX_CONTENT_BYTES,
 	IsolationBaselineTooLargeError,
 	mergeTaskBranches,
-	parseIsolationMode,
+	parseIsolationBackend,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -57,20 +57,16 @@ describe("worktree isolation helpers", () => {
 		expect(getGitNoIndexNullPath()).toBe(expected);
 	});
 
-	it("maps every isolation mode to the native backend contract", () => {
-		expect(parseIsolationMode("none")).toBeUndefined();
-		expect(parseIsolationMode("auto")).toBeUndefined();
-		expect(parseIsolationMode("apfs")).toBe(natives.IsoBackendKind.Apfs);
-		expect(parseIsolationMode("btrfs")).toBe(natives.IsoBackendKind.Btrfs);
-		expect(parseIsolationMode("zfs")).toBe(natives.IsoBackendKind.Zfs);
-		expect(parseIsolationMode("reflink")).toBe(natives.IsoBackendKind.LinuxReflink);
-		expect(parseIsolationMode("overlayfs")).toBe(natives.IsoBackendKind.Overlayfs);
-		expect(parseIsolationMode("fuse-overlay")).toBe(natives.IsoBackendKind.Overlayfs);
-		expect(parseIsolationMode("projfs")).toBe(natives.IsoBackendKind.Projfs);
-		expect(parseIsolationMode("fuse-projfs")).toBe(natives.IsoBackendKind.Projfs);
-		expect(parseIsolationMode("block-clone")).toBe(natives.IsoBackendKind.WindowsBlockClone);
-		expect(parseIsolationMode("rcopy")).toBe(natives.IsoBackendKind.Rcopy);
-		expect(parseIsolationMode("worktree")).toBe(natives.IsoBackendKind.Rcopy);
+	it("maps every isolation backend to the native backend contract", () => {
+		expect(parseIsolationBackend("auto")).toBeUndefined();
+		expect(parseIsolationBackend("apfs")).toBe(natives.IsoBackendKind.Apfs);
+		expect(parseIsolationBackend("btrfs")).toBe(natives.IsoBackendKind.Btrfs);
+		expect(parseIsolationBackend("zfs")).toBe(natives.IsoBackendKind.Zfs);
+		expect(parseIsolationBackend("reflink")).toBe(natives.IsoBackendKind.LinuxReflink);
+		expect(parseIsolationBackend("overlayfs")).toBe(natives.IsoBackendKind.Overlayfs);
+		expect(parseIsolationBackend("projfs")).toBe(natives.IsoBackendKind.Projfs);
+		expect(parseIsolationBackend("block-clone")).toBe(natives.IsoBackendKind.WindowsBlockClone);
+		expect(parseIsolationBackend("rcopy")).toBe(natives.IsoBackendKind.Rcopy);
 	});
 
 	// Regression for #8939: baseline capture buffered every untracked byte into
@@ -102,7 +98,7 @@ describe("worktree isolation helpers", () => {
 		expect((error as IsolationBaselineTooLargeError).contentBytes).toBeGreaterThan(
 			ISOLATION_BASELINE_MAX_CONTENT_BYTES,
 		);
-		expect((error as Error).message).toContain("task.isolation.mode: none");
+		expect((error as Error).message).toContain("task.isolation.enabled: false");
 	});
 
 	it("sizes an untracked symlink itself rather than its target", async () => {

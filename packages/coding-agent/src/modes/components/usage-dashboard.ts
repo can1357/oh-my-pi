@@ -5,10 +5,18 @@
  * above a GitHub-style daily activity heatmap fed by the local stats DB.
  * Enter flips into the classic full per-account report, scrollable in place.
  */
+import * as os from "node:os";
 import { resolveUsedFraction, type UsageLimit, type UsageReport } from "@oh-my-pi/pi-ai";
 import type { DailyActivityPoint } from "@oh-my-pi/omp-stats/shared-types";
-import { type Component, matchesKey, routeSgrMouseInput, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
-import { colorLuma, formatDuration, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils";
+import {
+	type Component,
+	matchesKey,
+	replaceTabs,
+	routeSgrMouseInput,
+	truncateToWidth,
+	visibleWidth,
+} from "@oh-my-pi/pi-tui";
+import { colorLuma, formatDuration, hexToRgb, rgbToHex, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatProviderName } from "../../slash-commands/helpers/format";
 import { colorToAnsi } from "../theme/color";
 import { theme } from "../theme/theme";
@@ -296,11 +304,27 @@ export interface UsageDashboardOptions {
 	/**
 	 * Stream daily activity into the heatmap: push cached DB rows immediately,
 	 * then push again after an incremental session sync. Resolves when the sync
-	 * settles; rejection renders as a dim unavailable note.
+	 * settles; rejection renders as a dim unavailable note. `signal` aborts when
+	 * the dashboard closes so an in-flight sync can stop early.
 	 */
-	loadActivity: (push: (points: DailyActivityPoint[]) => void) => Promise<void>;
+	loadActivity: (push: (points: DailyActivityPoint[]) => void, signal: AbortSignal) => Promise<void>;
 	requestRender: () => void;
 	onClose: () => void;
+}
+
+/**
+ * Sanitize activity loading error text for safe single-line display in the TUI overlay.
+ * Strips ANSI/control sequences, expands tabs, collapses whitespace runs/newlines,
+ * shortens home directory paths to ~, and removes trailing dots.
+ */
+export function formatActivityErrorDetail(error: string, homeDir = os.homedir()): string {
+	let text = replaceTabs(sanitizeText(error)).replace(/\s+/g, " ").trim();
+	if (homeDir) {
+		const escaped = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const forward = homeDir.replaceAll("\\", "/").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		text = text.replace(new RegExp(`${escaped}|${forward}`, "gi"), "~");
+	}
+	return text.replace(/\.+$/, "");
 }
 
 const CARD_MIN_WIDTH = 32;
@@ -314,11 +338,12 @@ export class UsageDashboardComponent implements Component {
 	#view: "overview" | "detail" = "overview";
 	#scroll = 0;
 	#activity: DailyActivityPoint[] | null = null;
-	#activityError = false;
+	#activityError: string | null = null;
 	#syncing = true;
 	#detailCache: { width: number; lines: string[] } | null = null;
 	#lastViewportRows = 10;
 	#closed = false;
+	readonly #closeController = new AbortController();
 
 	constructor(options: UsageDashboardOptions) {
 		this.#options = options;
@@ -333,9 +358,9 @@ export class UsageDashboardComponent implements Component {
 				if (this.#closed) return;
 				this.#activity = points;
 				this.#options.requestRender();
-			});
-		} catch {
-			this.#activityError = true;
+			}, this.#closeController.signal);
+		} catch (error) {
+			this.#activityError = error instanceof Error ? error.message : String(error);
 		} finally {
 			this.#syncing = false;
 			if (!this.#closed) this.#options.requestRender();
@@ -344,6 +369,7 @@ export class UsageDashboardComponent implements Component {
 
 	dispose(): void {
 		this.#closed = true;
+		this.#closeController.abort();
 	}
 
 	// ---------------------------------------------------------------------------
@@ -480,7 +506,8 @@ export class UsageDashboardComponent implements Component {
 	#renderHeatmap(innerWidth: number): string[] {
 		const summary: string[] = [];
 		if (this.#activityError) {
-			return [theme.fg("dim", "Usage history unavailable (stats database could not be read).")];
+			const detail = formatActivityErrorDetail(this.#activityError);
+			return [theme.fg("dim", detail ? `Usage history unavailable (${detail}).` : "Usage history unavailable.")];
 		}
 		const points = this.#activity;
 		if (!points) return [theme.fg("dim", "Loading usage history…")];

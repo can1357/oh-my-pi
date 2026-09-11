@@ -4,4 +4,7 @@ class "meta" {
 	namespace "meta-llama"
 
 	family "llama" glob="*llama*"
+	family "muse-spark" glob="*muse-spark*"
+
+	revision prefix="muse-spark-"
 }

@@ -44,12 +44,11 @@ describe("error-id classification", () => {
 	});
 
 	it("classifies provider connection failures as transient", () => {
-		const assistant = message({
-			errorMessage: "Unable to connect. Is the computer able to access the url?",
-		});
-		const id = AIError.classifyMessage(assistant);
-		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
-		expect(AIError.retriable(id)).toBe(true);
+		for (const errorMessage of ["Unable to connect. Is the computer able to access the url?", "Socket is closed"]) {
+			const id = AIError.classifyMessage(message({ errorMessage }));
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+			expect(AIError.retriable(id)).toBe(true);
+		}
 	});
 
 	it("keeps authenticated connection rejections non-retryable", () => {
@@ -240,6 +239,49 @@ describe("error-id classification", () => {
 			const id = AIError.classifyMessage(assistant);
 			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
 			expect(AIError.retriable(id)).toBe(true);
+		}
+	});
+
+	it("retries remote Python HTTP/2 internal and refused stream resets", () => {
+		for (const code of [2, 7]) {
+			const assistant = message({
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				errorId: 0,
+				errorMessage: `Codex error event: <StreamReset stream_id:1283, error_code:${code}, remote_reset:True> (code=api_error)`,
+			});
+			expect(AIError.retriable(AIError.classifyMessage(assistant))).toBe(true);
+		}
+	});
+
+	it("keeps other Python stream resets outside transient recovery", () => {
+		for (const details of [
+			"error_code:8, remote_reset:True",
+			"error_code:20, remote_reset:True",
+			"error_code:2, remote_reset:False",
+			"error_code:2",
+		]) {
+			const assistant = message({
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				errorMessage: `Codex error event: <StreamReset stream_id:1283, ${details}> (code=api_error)`,
+			});
+			expect(AIError.retriable(AIError.classifyMessage(assistant))).toBe(false);
+		}
+	});
+
+	it("keeps generic API and chunk-format errors outside transient recovery", () => {
+		for (const errorMessage of [
+			"Codex error event: invalid chunk header (code=api_error)",
+			"Codex error event: malformed chunk footer (code=api_error)",
+			"Codex error event: invalid request body (code=api_error)",
+		]) {
+			const assistant = message({
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				errorMessage,
+			});
+			expect(AIError.retriable(AIError.classifyMessage(assistant))).toBe(false);
 		}
 	});
 

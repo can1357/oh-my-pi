@@ -154,7 +154,7 @@ export function serializeEvalWithEnvelope(fn: string | ((...args: unknown[]) => 
  * returns with an actionable message, and pass through values from daemons
  * that did not run the wrapper.
  */
-export function unwrapEvalEnvelope<TResult>(value: unknown, label: string): TResult {
+export function unwrapEvalEnvelope<R>(value: unknown, label: string): R {
 	if (value && typeof value === "object") {
 		if ("__ompErr" in value && typeof value.__ompErr === "string") {
 			throw new ToolError(`${label} threw a JavaScript exception:\n${value.__ompErr}`);
@@ -165,10 +165,10 @@ export function unwrapEvalEnvelope<TResult>(value: unknown, label: string): TRes
 			);
 		}
 		if ("__ompOk" in value) {
-			return value.__ompOk as TResult;
+			return value.__ompOk as R;
 		}
 	}
-	return value as TResult;
+	return value as R;
 }
 
 export function mapWaitUntil(waitUntil: string | undefined): "interactive" | "complete" {

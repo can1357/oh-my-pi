@@ -25,9 +25,13 @@ describe("disabledExtensions runtime filtering", () => {
 	let originalOmpProfileEnv: string | undefined;
 	let originalPiProfileEnv: string | undefined;
 	let originalUserProfile: string | undefined;
+	let originalClaudeConfigDir: string | undefined;
 
 	beforeEach(async () => {
 		resetSettingsForTest();
+		originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+		delete process.env.CLAUDE_CONFIG_DIR;
+		delete Bun.env.CLAUDE_CONFIG_DIR;
 		originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 		originalOmpProfileEnv = process.env.OMP_PROFILE;
 		originalPiProfileEnv = process.env.PI_PROFILE;
@@ -60,6 +64,7 @@ describe("disabledExtensions runtime filtering", () => {
 		restoreEnvValue("PI_PROFILE", originalPiProfileEnv);
 		restoreEnvValue("PI_CODING_AGENT_DIR", originalAgentDirEnv);
 		restoreEnvValue("USERPROFILE", originalUserProfile);
+		restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
 		__resetDirsFromEnvForTests();
 		await removeWithRetries(tempHomeDir);
 		await removeWithRetries(tempDir);

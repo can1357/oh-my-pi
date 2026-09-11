@@ -376,6 +376,19 @@ export interface CodexCompactionRequestContext extends CodexCompactionMetadata {
 	operationId: string;
 }
 
+/** Anthropic `compact_20260112` context-management edit (`compact-2026-01-12` beta). */
+export interface AnthropicCompactionRequest {
+	/**
+	 * Prompt input-token count at which the API compacts. The API enforces a
+	 * 50,000-token floor and defaults to 150,000 when omitted.
+	 */
+	triggerInputTokens?: number;
+	/** Stop after the compaction block instead of continuing the response. */
+	pauseAfterCompaction?: boolean;
+	/** Custom summarization prompt; replaces the API default entirely when set. */
+	instructions?: string;
+}
+
 /** OpenAI's GPT-5.6+ explicit prompt-cache controls. */
 export interface OpenAIPromptCacheOptions {
 	/** `explicit` disables OpenAI's automatic latest-message breakpoint. */
@@ -426,8 +439,22 @@ export interface StreamOptions {
 	 * Side-channel and advisor requests must leave it unset.
 	 */
 	anthropicCacheRefresh?: boolean;
+	/**
+	 * Anthropic preserved-thinking behavior when a signed block no longer matches
+	 * its conversation prefix. Binding-capable models default to `"drop_block"`.
+	 */
+	anthropicPrefixMismatchBehavior?: "drop_block" | "error";
 	/** @internal Marks a replay-only Anthropic request that must use non-streaming `max_tokens: 0`. */
 	anthropicCacheRefreshRequest?: boolean;
+	/**
+	 * Anthropic server-side compaction (`compact-2026-01-12` beta). Sends the
+	 * `compact_20260112` context-management edit so the API summarizes the
+	 * prompt in-band once its input reaches the trigger; the resulting summary
+	 * arrives as an {@link AnthropicCompactionPayload} on the assistant message.
+	 * Ignored by every other provider and by Anthropic-compatible endpoints
+	 * without context-management support.
+	 */
+	anthropicCompaction?: AnthropicCompactionRequest;
 	/**
 	 * Additional headers to include in provider requests.
 	 * These are merged on top of model-defined headers.
@@ -641,6 +668,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * A rejecting transformer is swallowed and the reserved payload stands in.
 	 */
 	cursorOnToolResult?: CursorToolResultHandler;
+	/** Cursor hands unhandled MCP calls to an external executor instead of reporting them as missing. */
+	cursorExternalToolExecutor?: boolean;
 	/**
 	 * Amazon Bedrock Guardrail settings forwarded through transports that do not
 	 * dispatch directly to the Bedrock provider. Model-level values take
@@ -649,6 +678,13 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	guardrailIdentifier?: string;
 	guardrailVersion?: string;
 	guardrailTrace?: "enabled" | "disabled" | "enabled_full";
+	/**
+	 * Bedrock invocation-log tags forwarded through transports that do not dispatch
+	 * directly to the Bedrock provider. Unlike the guardrail fields above, these
+	 * MERGE per key with the model's own `requestMetadata` (these win) rather than
+	 * replacing it wholesale — they are independent attribution tags, not one value.
+	 */
+	requestMetadata?: Record<string, string>;
 	/** Optional tool choice override for compatible providers */
 	toolChoice?: ToolChoice;
 	/** OpenAI service tier for processing priority/cost control. Ignored by non-OpenAI providers. */
@@ -864,7 +900,49 @@ export interface OpenAIResponsesHistoryPayload {
 	items: Array<Record<string, unknown>>;
 }
 
-export type ProviderPayload = OpenAIResponsesHistoryPayload;
+/** Anthropic-only controls attached to a mid-conversation system message. */
+export interface AnthropicMessagePayload {
+	type: "anthropicMessage";
+	clearAt?: "never" | "next_user_message";
+	effort?: "low" | "medium" | "high" | "xhigh" | "max";
+	toolChanges?: Array<{ type: "tool_addition" | "tool_removal"; name: string }>;
+}
+
+/**
+ * Anthropic server-side compaction summary (`compact-2026-01-12` beta).
+ *
+ * Produced by the Anthropic provider on the assistant message of a request
+ * that streamed a `compaction` content block, and attached to the user-role
+ * compaction summary message that replaces the compacted history so the
+ * provider can replay the block verbatim: the API drops every block that
+ * precedes it. `content` is the plain-text summary, so every other provider
+ * reads the message text and ignores the payload.
+ */
+export interface AnthropicCompactionPayload {
+	type: "anthropicCompaction";
+	/** Provider that produced the summary; only that provider replays it natively. */
+	provider: string;
+	content: string;
+	/** Opaque provider state the API attached to the block; replayed verbatim when present. */
+	encryptedContent?: string;
+	/**
+	 * Harness-appended file metadata (`<files>` section) kept out of the
+	 * byte-identical block. Replayed as a user message after the native block:
+	 * the converter replaces the summary message with the block and skips its
+	 * text, so without this the metadata would be invisible to this provider.
+	 */
+	filesText?: string;
+}
+
+export type ProviderPayload = OpenAIResponsesHistoryPayload | AnthropicMessagePayload | AnthropicCompactionPayload;
+
+/** Provider-reported rewrite applied to request content before inference. */
+export interface ProviderInputTransformation {
+	type: string;
+	path?: string;
+	reason?: string;
+	[key: string]: unknown;
+}
 
 export interface UserMessage {
 	role: "user";
@@ -873,6 +951,8 @@ export interface UserMessage {
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */
 	steering?: boolean;
+	/** Timestamp of a client-side history rewrite represented by this message. */
+	historyRewriteAt?: number;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
@@ -983,6 +1063,8 @@ export interface AssistantMessage {
 	 * server's actual state.
 	 */
 	disabledFeatures?: string[];
+	/** Provider-reported input rewrites such as dropped bound-thinking blocks. */
+	inputTransformations?: ProviderInputTransformation[];
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
 	timestamp: number; // Unix timestamp in milliseconds
@@ -1258,6 +1340,8 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	parameters: TParameters;
 	/** If true, tool is strictly typed and validated against the parameters schema before execution */
 	strict?: boolean;
+	/** Withhold this Anthropic tool until a `tool_addition` message references it. */
+	deferLoading?: boolean;
 	/**
 	 * Optional grammar constraint for OpenAI custom-tool emission.
 	 * When set, providers that support grammar-constrained tools (currently only

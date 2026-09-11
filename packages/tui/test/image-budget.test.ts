@@ -34,10 +34,16 @@ const BASE64_ONE_PIXEL_PNG =
 
 const ORIGINAL_TMUX = Bun.env.TMUX;
 const ORIGINAL_HERDR_ENV = Bun.env.HERDR_ENV;
+const ORIGINAL_HERDR_PANE_ID = Bun.env.HERDR_PANE_ID;
+const ORIGINAL_HERDR_TAB_ID = Bun.env.HERDR_TAB_ID;
+const ORIGINAL_HERDR_WORKSPACE_ID = Bun.env.HERDR_WORKSPACE_ID;
 
 beforeEach(() => {
 	delete Bun.env.TMUX;
 	delete Bun.env.HERDR_ENV;
+	delete Bun.env.HERDR_PANE_ID;
+	delete Bun.env.HERDR_TAB_ID;
+	delete Bun.env.HERDR_WORKSPACE_ID;
 });
 
 afterEach(() => {
@@ -45,6 +51,12 @@ afterEach(() => {
 	else Bun.env.TMUX = ORIGINAL_TMUX;
 	if (ORIGINAL_HERDR_ENV === undefined) delete Bun.env.HERDR_ENV;
 	else Bun.env.HERDR_ENV = ORIGINAL_HERDR_ENV;
+	if (ORIGINAL_HERDR_PANE_ID === undefined) delete Bun.env.HERDR_PANE_ID;
+	else Bun.env.HERDR_PANE_ID = ORIGINAL_HERDR_PANE_ID;
+	if (ORIGINAL_HERDR_TAB_ID === undefined) delete Bun.env.HERDR_TAB_ID;
+	else Bun.env.HERDR_TAB_ID = ORIGINAL_HERDR_TAB_ID;
+	if (ORIGINAL_HERDR_WORKSPACE_ID === undefined) delete Bun.env.HERDR_WORKSPACE_ID;
+	else Bun.env.HERDR_WORKSPACE_ID = ORIGINAL_HERDR_WORKSPACE_ID;
 });
 
 /** Drive one render pass against the budget with `count` images (ids 1..count, stable across passes). */

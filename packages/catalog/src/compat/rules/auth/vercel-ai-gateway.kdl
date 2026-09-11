@@ -1,0 +1,8 @@
+auth "vercel-ai-gateway" {
+	name "Vercel AI Gateway"
+	login "api-key" {
+		auth-url "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys"
+		instructions "Copy your Vercel AI Gateway API key from the Vercel dashboard"
+		prompt "Paste your Vercel AI Gateway API key" placeholder="vck_..."
+	}
+}

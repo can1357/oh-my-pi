@@ -28,6 +28,10 @@ process.env.PCRE2_SYS_STATIC ??= "1";
 // "cmake not found". Resolve the VS install via vswhere and append its
 // CMake/Ninja dirs, keeping any user-provided tools ahead.
 if (process.platform === "win32" && (!Bun.which("cmake") || !Bun.which("ninja"))) {
+	const vcToolsComponent =
+		process.arch === "arm64"
+			? "Microsoft.VisualStudio.Component.VC.Tools.ARM64"
+			: "Microsoft.VisualStudio.Component.VC.Tools.x86.x64";
 	const vswhere = path.join(
 		process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)",
 		"Microsoft Visual Studio",
@@ -35,16 +39,7 @@ if (process.platform === "win32" && (!Bun.which("cmake") || !Bun.which("ninja"))
 		"vswhere.exe",
 	);
 	const probe = Bun.spawnSync(
-		[
-			vswhere,
-			"-latest",
-			"-products",
-			"*",
-			"-requires",
-			"Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-			"-property",
-			"installationPath",
-		],
+		[vswhere, "-latest", "-products", "*", "-requires", vcToolsComponent, "-property", "installationPath"],
 		{ stdout: "pipe", stderr: "pipe" },
 	);
 	const vsRoot = probe.exitCode === 0 ? probe.stdout.toString("utf-8").trim() : "";
@@ -76,12 +71,20 @@ const variantSuffix = effectiveVariant ? `-${effectiveVariant}` : "";
 // instead of inheriting the host CPU when RUSTFLAGS is unset. Non-x64 builds keep
 // the target's default CPU features: `-C target-cpu=native` would bake the build
 // host's CPU features into the addon and trips ring 0.17's aarch64-apple
-// const assertion (CAPS_STATIC == MIN_STATIC_FEATURES).
+// const assertion (CAPS_STATIC == MIN_STATIC_FEATURES). Shipping Windows addons
+// also link the MSVC CRT statically so clean systems need no VC++ Redistributable.
 if (!Bun.env.RUSTFLAGS) {
+	const rustFlags: string[] = [];
+	if (process.platform === "win32") {
+		rustFlags.push("-C", "target-feature=+crt-static");
+	}
 	if (effectiveVariant === "modern") {
-		Bun.env.RUSTFLAGS = "-C target-cpu=x86-64-v3";
+		rustFlags.push("-C", "target-cpu=x86-64-v3");
 	} else if (effectiveVariant === "baseline") {
-		Bun.env.RUSTFLAGS = "-C target-cpu=x86-64-v2";
+		rustFlags.push("-C", "target-cpu=x86-64-v2");
+	}
+	if (rustFlags.length > 0) {
+		Bun.env.RUSTFLAGS = rustFlags.join(" ");
 	}
 }
 

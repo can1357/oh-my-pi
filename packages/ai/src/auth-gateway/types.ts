@@ -72,6 +72,8 @@ export interface AuthGatewayParsedRequestOptions {
 	hideThinkingSummary?: boolean;
 	/** Anthropic `output_config.task_budget` advisory loop budget. */
 	taskBudget?: TokenTaskBudget;
+	/** Anthropic preserved-thinking behavior for a changed conversation prefix. */
+	anthropicPrefixMismatchBehavior?: "drop_block" | "error";
 
 	// ── Service / routing ─────────────────────────────────────────────────
 	/** OpenAI service tier (auto|default|flex|scale|priority). */

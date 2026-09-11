@@ -1,0 +1,12 @@
+// Provider-wire compat for "google-gemini-cli"; Cloud Code Assist host contracts.
+
+provider "google-gemini-cli" {
+	class "gemini" {
+		// Cloud Code Assist rejects an unsigned first function call; the bypass
+		// sentinel is required only on that first call (secondary parallel calls
+		// may stay unsigned). Host contract, so it lives with the provider.
+		revision ">=3" {
+			requires-skip-thought-signature-on-first-function-call #true
+		}
+	}
+}

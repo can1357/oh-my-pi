@@ -281,4 +281,28 @@ describe("AgentSession historical image prompts", () => {
 			await ctx.cleanup();
 		}
 	});
+
+	it("rewinds past a user prompt that is the current leaf", async () => {
+		// A turn aborted before any assistant reply leaves the user prompt as
+		// the leaf; rewinding to it must still move the leaf to its parent and
+		// hand the prompt back, not report a no-op.
+		const ctx = await createTestSession({ inMemory: true });
+		try {
+			ctx.sessionManager.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
+			const parentId = ctx.sessionManager.appendMessage(assistantMsg("reply"));
+			const leafId = ctx.sessionManager.appendMessage({
+				role: "user",
+				content: "aborted prompt",
+				timestamp: Date.now(),
+			});
+			expect(ctx.sessionManager.getLeafId()).toBe(leafId);
+
+			const result = await ctx.session.navigateTree(leafId);
+
+			expect(result).toMatchObject({ editorText: "aborted prompt", cancelled: false });
+			expect(ctx.sessionManager.getLeafId()).toBe(parentId);
+		} finally {
+			await ctx.cleanup();
+		}
+	});
 });

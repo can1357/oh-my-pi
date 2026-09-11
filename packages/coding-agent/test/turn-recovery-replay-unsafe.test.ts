@@ -729,6 +729,48 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			return new TurnRecovery(createHost(model, modelRegistry, { messages: [message as AgentMessage, ...tail] }));
 		}
 
+		function pythonResetMessage(content: AssistantMessage["content"], errorMessage: string): AssistantMessage {
+			return {
+				...makeMessage(content, model),
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				errorId: 0,
+				errorMessage,
+			};
+		}
+
+		describe.each([
+			[
+				"Python HTTP/2 reset",
+				"Codex error event: <StreamReset stream_id:1283, error_code:2, remote_reset:True> (code=api_error)",
+			],
+			[
+				"Python HTTP/1.1 chunked body",
+				"Codex error event: peer closed connection without sending complete message body (incomplete chunked read) (code=api_error)",
+			],
+		])("%s recovery", (_label, errorMessage) => {
+			it("preserves the replay veto with committed text", () => {
+				const message = pythonResetMessage([{ type: "text", text: "Partial answer." }], errorMessage);
+				const recovery = recoveryForReset(message, []);
+				expect(recovery.isRetryableError(message)).toBe(false);
+				expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+			});
+
+			it("continues completed tools through preserved-turn recovery", () => {
+				const message = pythonResetMessage([execToolCall("call-1")], errorMessage);
+				const recovery = recoveryForReset(message, [realResult("call-1")]);
+				expect(recovery.isRetryableError(message)).toBe(false);
+				expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
+			});
+
+			it("keeps an unresolved tool outside recovery", () => {
+				const message = pythonResetMessage([execToolCall("call-1")], errorMessage);
+				const recovery = recoveryForReset(message, []);
+				expect(recovery.isRetryableError(message)).toBe(false);
+				expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+			});
+		});
+
 		it("continues a Cursor NGHTTP2_INTERNAL_ERROR after a marked exec result", () => {
 			const message = cursorMessage([execToolCall("call-1", true)], nghttp2Internal);
 			const recovery = recoveryForReset(message, [realResult("call-1")]);
@@ -783,6 +825,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 	describe("premature stream close after resolved tool calls", () => {
 		const completionsClose = "OpenAI completions stream closed before a finish_reason was received";
 		const responsesClose = "OpenAI responses stream closed before a terminal response event was received";
+		const codexClose = "Codex stream ended before terminal completion event";
 
 		function gatewayMessage(content: AssistantMessage["content"], errorMessage: string): AssistantMessage {
 			const message = makeMessage(content, model);
@@ -798,29 +841,14 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			return new TurnRecovery(createHost(model, modelRegistry, { messages: [message as AgentMessage, ...tail] }));
 		}
 
-		it("continues a premature completions close after a resolved tool call", () => {
+		it.each([
+			["completions", completionsClose],
+			["responses", responsesClose],
+			["Codex responses", codexClose],
+		])("continues a premature %s close after a resolved tool call", (_provider, errorMessage) => {
 			const message = gatewayMessage(
 				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
-				completionsClose,
-			);
-			const recovery = recoveryForClose(message, [
-				{
-					role: "toolResult",
-					toolCallId: "call-1",
-					toolName: "bash",
-					content: [{ type: "text", text: "Tool call was not executed." }],
-					isError: true,
-					details: { __synthetic: true, source: "assistant_stop_error", executed: false },
-					timestamp: Date.now(),
-				},
-			]);
-			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
-		});
-
-		it("continues a premature responses close after a resolved tool call", () => {
-			const message = gatewayMessage(
-				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
-				responsesClose,
+				errorMessage,
 			);
 			const recovery = recoveryForClose(message, [
 				{
@@ -938,5 +966,84 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			}),
 		);
 		expect(recovery.resolveRetryFallbackRole(`${other.provider}/${other.id}`, other)).toBeUndefined();
+	});
+
+	// Gemini reports MALFORMED_FUNCTION_CALL when the model transcribes the call
+	// as text (`call:default_api:read{…}`). The text is committed, so the replay
+	// retry refuses the turn; the session must still recover by keeping the turn
+	// and continuing with a corrective reminder instead of pinning the error.
+	describe("malformed function call without a structured tool call", () => {
+		function malformedTextTurn(): AssistantMessage {
+			const message = makeMessage(
+				[
+					{
+						type: "text",
+						text: "```call:default_api:read{i:Read call_frame.rs,path:src/call_frame.rs:215-320}```",
+					},
+				],
+				model,
+			);
+			message.errorMessage = "Generation failed with finish reason: MALFORMED_FUNCTION_CALL";
+			return message;
+		}
+
+		function continuationHost(message: AssistantMessage) {
+			const messages: AgentMessage[] = [message];
+			const continues: string[] = [];
+			const host = createHost(model, modelRegistry, { messages });
+			host.agent = {
+				state: { messages },
+				appendMessage: (appended: AgentMessage) => messages.push(appended),
+			} as never;
+			host.scheduleAgentContinue = options => continues.push(options.source);
+			return { host, messages, continues };
+		}
+
+		it("continues with a corrective developer message when replay is refused", () => {
+			const message = malformedTextTurn();
+			const { host, messages, continues } = continuationHost(message);
+			const recovery = new TurnRecovery(host);
+
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(true);
+
+			expect(messages[0]).toBe(message);
+			const reminder = messages[1];
+			expect(reminder?.role).toBe("developer");
+			if (reminder?.role !== "developer") throw new Error("expected developer reminder");
+			const text =
+				typeof reminder.content === "string"
+					? reminder.content
+					: reminder.content.map(part => (part.type === "text" ? part.text : "")).join("");
+			expect(text).toContain("malformed");
+			expect(text).toContain("Attempt #1/3");
+			expect(continues).toEqual(["malformed-function-call-retry"]);
+		});
+
+		it("stops continuing past the per-prompt cap and resets on a new prompt", () => {
+			const message = malformedTextTurn();
+			const { host, continues } = continuationHost(message);
+			const recovery = new TurnRecovery(host);
+
+			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(true);
+			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(true);
+			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(true);
+			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(false);
+			expect(continues).toHaveLength(3);
+
+			recovery.resetForNewPrompt();
+			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(true);
+		});
+
+		it("ignores errors that are not malformed function calls", () => {
+			const message = makeMessage([{ type: "text", text: "partial answer" }], model);
+			message.errorMessage = "500 Internal Server Error";
+			const { host, messages, continues } = continuationHost(message);
+			const recovery = new TurnRecovery(host);
+
+			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(false);
+			expect(messages).toHaveLength(1);
+			expect(continues).toEqual([]);
+		});
 	});
 });

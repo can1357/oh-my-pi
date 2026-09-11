@@ -30,9 +30,10 @@ import {
 	type CatalogProviderDescriptor,
 	isCatalogDescriptor,
 } from "../src/provider-models/descriptor-types";
-import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
+import { getCatalogProviderEntry, PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
 import {
+	ABLITERATION_STATIC_MODELS,
 	AIAND_STATIC_MODELS,
 	ALIBABA_TOKEN_PLAN_STATIC_MODELS,
 	ANTHROPIC_CURATED_FALLBACK_MODELS,
@@ -43,15 +44,18 @@ import {
 	clampFireworksKimiMaxTokens,
 	clampKimiK27CodeMaxTokens,
 	fetchWellKnownModels,
+	FIREPASS_STATIC_MODELS,
 	GMI_CLOUD_STATIC_MODELS,
 	isFireworksKimiK2ModelId,
 	isKimiK27CodeModelId,
 	kimiCodeMaxTokens,
 	META_MUSE_STATIC_MODELS,
+	MUSE_CODE_STATIC_MODELS,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
 	OPENAI_DAYBREAK_CURATED_FALLBACK_MODELS,
 	projectOpenAIProReasoningAliases,
+	resolveZaiApi,
 	SAKANA_FUGU_STATIC_MODELS,
 	stripFireworksDeepSeekThinkingToggle,
 	YOLO_AUTO_STATIC_MODELS,
@@ -63,6 +67,7 @@ import {
 } from "../src/provider-models/special";
 import type { Api, Model, ModelSpec } from "../src/types";
 import { cleanModelName } from "../src/utils";
+import { mergeCopilotApiHeaders } from "../src/wire/github-copilot";
 import {
 	applyAntigravityPricingFallback,
 	applyCanonicalLimitFallback,
@@ -259,7 +264,13 @@ function applyGlobalModelsDevFallback(
 		if (
 			providerScopedKeys.has(`${model.provider}/${model.id}`) ||
 			model.provider === "devin" ||
-			model.provider === "baseten"
+			model.provider === "baseten" ||
+			// Meta's first-party rows come from the reviewed seed; a same-id
+			// gateway row would overwrite their display names.
+			model.provider === "meta" ||
+			// Providers whose discovery is the deployment truth and whose
+			// corrections live in KDL opt out of same-id reference fills.
+			getCatalogProviderEntry(model.provider)?.skipCrossProviderReferenceFills === true
 		) {
 			return model;
 		}
@@ -290,6 +301,8 @@ function applyGlobalModelsDevFallback(
 			// provider-specific values when discovery returned them explicitly.
 			contextWindow: model.contextWindow ?? reference.contextWindow,
 			maxTokens: model.maxTokens ?? reference.maxTokens,
+			int: model.int ?? reference.int,
+			tps: model.tps ?? reference.tps,
 		};
 	});
 }
@@ -553,8 +566,11 @@ async function generateModels() {
 	const gitLabDuoModels = getGitLabDuoModels().map(model => toModelSpec(model));
 	// Combine models. stencil.so has priority unless a provider's successful endpoint
 	// discovery is authoritative; those endpoint snapshots replace stencil.so rows.
+	// Meta's reviewed first-party seed goes first: it carries the documented
+	// Responses capabilities and display names, and keeps first-run selection
+	// independent of credentials or live discovery.
 	let allModels = applyGlobalModelsDevFallback(
-		[...bundledModelsDevModels, ...catalogProviderModels, ...gitLabDuoModels],
+		[...META_MUSE_STATIC_MODELS, ...bundledModelsDevModels, ...catalogProviderModels, ...gitLabDuoModels],
 		modelsDevModels,
 	);
 
@@ -597,29 +613,26 @@ async function generateModels() {
 		contextWindow: 1_000_000,
 		maxTokens: 131_072,
 	} as ModelSpec<"anthropic-messages">);
-	// GLM-5.3-Flash ships on the same coding-plan endpoints and is likewise
-	// absent from `/v1/models`-derived upstream metadata. It is the first
-	// natively multimodal GLM coding SKU — its id carries no `v` marker, and
-	// base64 image blocks are accepted on `https://api.z.ai/api/anthropic` —
-	// so the seed declares image input directly instead of inheriting the
-	// text-only default. Use the documented list price from
+	// GLM-5.3-Flash is absent from `/v1/models`-derived upstream metadata.
+	// It is the first natively multimodal GLM coding SKU — its id carries no
+	// `v` marker — so the seed declares image input directly instead of
+	// inheriting the text-only default. Its API route is model-specific because
+	// Z.AI serves this SKU on the native endpoint rather than the Anthropic
+	// coding endpoint. Use the documented list price from
 	// https://docs.z.ai/guides/overview/pricing rather than the 50%-off launch
 	// promotion, which expires on 2026-09-09.
+	const zaiGlm53FlashApi = resolveZaiApi("glm-5.3-flash");
 	allModels.push({
 		id: "glm-5.3-flash",
 		name: "GLM-5.3-Flash",
-		api: "anthropic-messages",
+		...zaiGlm53FlashApi,
 		provider: "zai",
-		baseUrl: "https://api.z.ai/api/anthropic",
 		reasoning: true,
 		input: ["text", "image"],
 		cost: { input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 },
 		contextWindow: 1_000_000,
 		maxTokens: 131_072,
-	} as ModelSpec<"anthropic-messages">);
-	// Seed Meta's documented Muse model so first-run selection does not depend on
-	// credentials or live discovery.
-	allModels.push(...META_MUSE_STATIC_MODELS);
+	} satisfies ModelSpec<Api>);
 	// Mantle's catalog endpoint is account/API-key scoped. Keep the generated
 	// bundle deterministic; authenticated runtime discovery may replace this seed.
 	allModels.push(...BEDROCK_MANTLE_STATIC_MODELS);
@@ -635,6 +648,12 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("aiand")) {
 		allModels.push(...AIAND_STATIC_MODELS);
 	}
+	// Seed Abliteration's documented catalog so the provider is usable when
+	// generation has no ABLITERATION_API_KEY. A live `/v1/models` snapshot is
+	// authoritative and replaces the seed.
+	if (!authoritativeCatalogProviders.has("abliteration")) {
+		allModels.push(...ABLITERATION_STATIC_MODELS);
+	}
 	// Seed Yolo-Auto's documented catalog so the provider is usable when
 	// generation has no YOLO_AUTO_API_KEY. A live `/v1/models` snapshot is
 	// authoritative and replaces the seed.
@@ -647,7 +666,12 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("gmi-cloud")) {
 		allModels.push(...GMI_CLOUD_STATIC_MODELS);
 	}
-	// Seed the GitLab Duo Agent fallback model so a fresh install (no credentialed
+	// Seed Fire Pass router models so the provider is usable when generation has
+	// no live key. Dedicated `fpk_...` keys only authorize router endpoints, not
+	// `/v1/models`, so dynamic discovery is never performed.
+	if (!authoritativeCatalogProviders.has("firepass")) {
+		allModels.push(...FIREPASS_STATIC_MODELS);
+	}
 	// dynamic discovery/cache yet) still surfaces the provider's default model in the
 	// built-in catalog. The descriptor deliberately has NO `catalogDiscovery`, so it is
 	// excluded from the generator's discovery loop (`isCatalogDescriptor` filter above):
@@ -667,6 +691,9 @@ async function generateModels() {
 	// default must resolve synchronously at boot, before credential-scoped
 	// runtime discovery replaces the seed with the account's live catalog.
 	allModels.push(...DEVIN_STATIC_MODELS);
+	// Muse Code discovery is scoped to the signed-in subscription. Bundle the
+	// documented seed, then replace it with the account's live roster at runtime.
+	allModels.push(...MUSE_CODE_STATIC_MODELS);
 	// Seed Fireworks "Fast" serving-path variants (`<id>-fast`). Fast routers are
 	// not enumerated by the serverless control-plane list, so discovery never
 	// surfaces them; the seed projects each base entry into a fast variant.
@@ -711,6 +738,7 @@ async function generateModels() {
 		...authoritativeCatalogProviders,
 		...authoritativeSpecialDiscoveryProviders,
 		...modelsDevSnapshotExcludedProviders,
+		"firepass",
 	]);
 
 	// Previous-snapshot entries may carry an older ThinkingConfig vocabulary;
@@ -721,8 +749,12 @@ async function generateModels() {
 		prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>,
 		previousSnapshotExcludedProviders,
 	);
-
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
+	// Previous-snapshot fallbacks can retain a retired client fingerprint. Force
+	// every bundled Copilot model onto the same identity used by live discovery.
+	allModels = allModels.map(model =>
+		model.provider === "github-copilot" ? { ...model, headers: mergeCopilotApiHeaders(model.headers) } : model,
+	);
 	// Seed QwenCloud's documented Token Plan models when credentialed
 	// discovery is unavailable. A successful `/models` response is authoritative
 	// for the subscribed edition and must not be widened by the fallback.

@@ -94,6 +94,7 @@ import {
 	type McpConnectionStatusEvent,
 } from "../mcp/startup-events";
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../plan-mode/approved-plan";
+import { autosaveApprovedPlan, planSaveFileName } from "../plan-mode/plan-autosave";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
 import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
 import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type: "text" };
@@ -124,9 +125,20 @@ import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "../task/render";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
+import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
-import { formatMoreItems, replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
+import {
+	FEED_MODEL_BADGE_WIDTH,
+	formatFeedModelBadge,
+	formatMoreItems,
+	isFeedModelBadgeEnabled,
+	replaceTabs,
+	shortenEmbeddedPaths,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "../tools/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import {
 	formatPhaseDisplayName,
@@ -179,8 +191,8 @@ import { StatusLineComponent } from "./components/status-line";
 import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "./components/tool-execution";
 import { TranscriptContainer } from "./components/transcript-container";
 import type { LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
-import { Composer } from "./composer";
-import { writeComposerWelcomeCache } from "./composer-cache";
+import { Composer, type ComposerStatusSnapshot } from "./composer";
+import { writeComposerStatusCache, writeComposerWelcomeCache } from "./composer-cache";
 import { BtwController } from "./controllers/btw-controller";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
@@ -197,13 +209,20 @@ import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
 import { imageReferenceHyperlink, materializeImageReferenceLinks } from "./image-references";
 import {
+	describeLoopCondition,
+	evaluateLoopCondition,
+	type LoopConditionConfig,
+	type LoopConditionVerdict,
+} from "./loop-condition";
+import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
 	describeLoopLimit,
 	describeLoopLimitRuntime,
 	isLoopDurationExpired,
+	isLoopLimitExhausted,
 	type LoopLimitRuntime,
-	parseLoopLimitArgs,
+	parseLoopArgs,
 } from "./loop-limit";
 import { OAuthManualInputManager } from "./oauth-manual-input";
 import { getRunningSubagentBadgeAgentIds, getRunningSubagentBadgeRegistry } from "./running-subagent-badge";
@@ -324,25 +343,7 @@ const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
 const PLAN_SAVE_AND_QUIT_OPTION = "Save and quit";
 const PLAN_SAVE_TITLE_LINE_LIMIT = 6;
 
-const PLAN_SAVE_STEM_MAX_LENGTH = 32;
 const PLAN_FILENAME_SYSTEM_PROMPT = prompt.render(planFilenamePrompt);
-/** Suggested save filename for an approved plan: `<TOPIC>_PLAN.md` from the
- *  tiny-model topic (e.g. `PYO3_METHODS_PLAN.md`), trimmed to a word boundary
- *  when a verbose fallback title sneaks through. */
-export function planSaveFileName(title: string): string {
-	let stem = title
-		.normalize("NFC")
-		.replace(/[^\p{L}\p{N}]+/gu, "_")
-		.replace(/_+/g, "_")
-		.replace(/^_+|_+$/g, "")
-		.toUpperCase();
-	if (stem.length > PLAN_SAVE_STEM_MAX_LENGTH) {
-		const cut = stem.lastIndexOf("_", PLAN_SAVE_STEM_MAX_LENGTH);
-		stem = cut > 0 ? stem.slice(0, cut) : stem.slice(0, PLAN_SAVE_STEM_MAX_LENGTH);
-	}
-	if (!stem || stem === "PLAN") return "PLAN.md";
-	return `${stem.endsWith("_PLAN") ? stem : `${stem}_PLAN`}.md`;
-}
 
 function planSaveTitleExcerpt(planContent: string): string {
 	return planContent
@@ -513,35 +514,55 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 	const dot = theme.styledSymbol("status.done", "accent");
 	const visible = running.slice(0, SUBAGENT_HUD_VISIBLE_LIMIT);
 	const hiddenCount = running.length - visible.length;
+	const showModelBadge = isFeedModelBadgeEnabled();
+	const outerIndent = " ";
 	const rows = renderTreeList(
 		{
 			items: visible,
 			expanded: true,
-			renderItem: session => {
-				const displayId = formatTaskId(session.id);
+			renderItem: (session, context) => {
+				const rowWidth = Math.max(0, columns - visibleWidth(outerIndent) - (context.prefixWidth ?? 0));
 				const role = session.agent ?? session.progress?.agent;
-				const badge = agentTypeBadge(role, theme);
-				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}${badge}`;
+				const displayId = truncateToWidth(
+					formatTaskId(session.id),
+					Math.max(0, rowWidth - visibleWidth(`${dot} `)),
+				);
+				const badge = truncateToWidth(
+					agentTypeBadge(role, theme),
+					Math.max(0, rowWidth - visibleWidth(`${dot} ${displayId}`)),
+				);
+				const titleBudget = Math.max(0, rowWidth - visibleWidth(`${dot} ${displayId}${badge}`));
+				const modelBadge = showModelBadge
+					? formatFeedModelBadge(
+							session.progress?.resolvedModelIdentity ?? session.progress?.resolvedModel,
+							session.progress?.resolvedThinkingLevel,
+							session.progress?.advisor,
+							theme,
+							Math.min(FEED_MODEL_BADGE_WIDTH, Math.max(0, titleBudget - 1)),
+						)
+					: "";
+				const modelLead = modelBadge ? `${modelBadge} ` : "";
+				let line = `${dot} ${modelLead}${theme.fg("accent", theme.bold(displayId))}${badge}`;
 				const description = session.description?.trim() || session.progress?.description?.trim();
 				const distinctDescription =
 					description && !labelEchoesHandle(session.id, description) ? description : undefined;
 				if (distinctDescription) {
-					const budget = Math.max(
-						TRUNCATE_LENGTHS.SHORT,
-						columns - visibleWidth(displayId) - visibleWidth(Bun.stripANSI(badge)) - 10,
-					);
+					const budget = Math.max(0, rowWidth - visibleWidth(line) - visibleWidth(": "));
 					const formatted = replaceTabs(distinctDescription).replace(/\s*[\r\n]+\s*/g, " ↵ ");
-					line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(formatted, budget))}`;
+					if (budget > 0) {
+						line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(formatted, budget))}`;
+					}
 				} else {
 					// No spawn description: fall back to a muted task preview, same as
 					// the inline task rows when a row has no label.
 					const taskPreview = session.progress?.task?.trim();
 					if (taskPreview && !labelEchoesHandle(session.id, taskPreview)) {
 						const formatted = replaceTabs(taskPreview).replace(/\s*[\r\n]+\s*/g, " ↵ ");
-						line += ` ${theme.fg("muted", truncateToWidth(formatted, TRUNCATE_LENGTHS.SHORT))}`;
+						const budget = Math.min(TRUNCATE_LENGTHS.SHORT, Math.max(0, rowWidth - visibleWidth(line) - 1));
+						if (budget > 0) line += ` ${theme.fg("muted", truncateToWidth(formatted, budget))}`;
 					}
 				}
-				return line;
+				return truncateToWidth(line, rowWidth, "");
 			},
 		},
 		theme,
@@ -549,7 +570,11 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 	if (hiddenCount > 0) {
 		rows.push(theme.fg("dim", `… ${hiddenCount} more running — open Agent Hub for full list`));
 	}
-	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)];
+	return [
+		"",
+		truncateToWidth(theme.bold(theme.fg("accent", "Subagents")), columns),
+		...rows.map(line => truncateToWidth(`${outerIndent}${line}`, columns, "")),
+	];
 }
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
@@ -603,6 +628,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	loopModePaused = false;
 	loopPrompt: string | undefined = undefined;
 	loopLimit: LoopLimitRuntime | undefined = undefined;
+	loopCondition: LoopConditionConfig | undefined = undefined;
+	/**
+	 * Aborts the in-flight `--while` / `--until` evaluation. Esc between
+	 * iterations lands while the condition command is still running, and
+	 * `#cancelLoopAutoSubmit` only clears the pending timer — without this the
+	 * child process would outlive the loop it was gating.
+	 */
+	#loopConditionAbort: AbortController | undefined;
 	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
@@ -727,10 +760,23 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #startupChangelog: StartupChangelogSelection | undefined;
 	/** Header components below the config warnings + welcome, retained so a live config-warning change can rebuild the header (#10048). */
 	#headerAfter: readonly Component[] = [];
-	#planModePreviousTools: string[] | undefined;
+	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[] } | undefined;
 	#goalModePreviousTools: string[] | undefined;
 	#vibeModePreviousTools: string[] | undefined;
 	#vibeModeOwnerScope: VibeOwnerScope | undefined;
+	// In-flight #enterVibeMode promise: set before the activateVibeTools await
+	// (while vibeModeEnabled is still false) and cleared when entry settles.
+	// Loop reset guards treat a pending entry as active, and a concurrent /vibe
+	// command awaits it instead of dispatching its prompt on the stale toolset.
+	#vibeModeEntry: Promise<void> | undefined;
+	// FIFO tail + live count for concurrent /vibe skill dispatches. A skill
+	// prompt yields on its file read before the turn reserves, so each skill
+	// links behind its predecessor (arrival order) while the count — visible
+	// synchronously, unlike a single shared slot — stops later prompts from
+	// overtaking any of them. Both settle when the dispatch settles, so a
+	// failure unblocks every waiter instead of hanging it.
+	#vibeSkillTail: Promise<void> = Promise.resolve();
+	#vibeSkillInFlight = 0;
 	#vibeScopeSuspendedForSwitch = false;
 	#goalContinuationTimer: NodeJS.Timeout | undefined;
 	#goalTurnHadToolCalls = false;
@@ -947,6 +993,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.deferredCommandContainer = new AnchoredLiveContainer();
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setImeSafeCursorLayout(settings.get("tui.imeSafeCursor"));
+		this.#applyVimMode(this.editor);
 		this.editor.setAutocompleteMaxVisible(settings.get("autocompleteMaxVisible"));
 		this.syncEditorSpelling();
 		this.editor.viewportRowsProvider = () => this.ui.terminal.rows;
@@ -1041,9 +1088,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController = new SelectorController(this);
 		this.#focusController = new SessionFocusController(this);
 		this.#inputController = new InputController(this);
-		this.session.setTitleGenerationStart?.(() => {
-			this.#inputController.notifyTitleGenerationStart();
-		});
+		this.session.setTitleGenerationStart?.(() => this.#inputController.notifyTitleGenerationStart());
 		this.session.setPromptDropped?.(prompt => this.#restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
 	}
@@ -1059,6 +1104,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#trackMcpStatusServer(serverName);
 				this.#mcpPendingServers.add(serverName);
 			}
+		} else if (event.type === "reconnecting") {
+			this.#trackMcpStatusServer(event.serverName);
+			this.#mcpConnectedServers.delete(event.serverName);
+			this.#mcpFailedServers.delete(event.serverName);
+			this.#mcpPendingServers.add(event.serverName);
 		} else if (event.type === "connected") {
 			this.#trackMcpStatusServer(event.serverName);
 			this.#mcpPendingServers.delete(event.serverName);
@@ -1192,6 +1242,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#headerAfter = headerAfter;
 		this.composer.setHeaderExtras(headerBefore, headerAfter);
 		this.statusLine.watchBranch(() => {
+			this.#persistComposerStatus();
 			this.ui.requestRender();
 		});
 		this.composer.setStatusComponent(this.statusLine);
@@ -1254,7 +1305,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		pushTerminalTitle();
 		setTerminalTitleStateEnabled(this.settings.get("tui.titleState"));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
-		this.updateEditorBorderColor();
+		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
+		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
+		// #focusController exists, which updateEditorBorderColor dereferences.
+		this.#syncVimStatus(this.editor);
 		// Single side-effect point for title changes: every setSessionName caller
 		// (first-input titling, /rename, extension renames, plan seeding, replan
 		// refresh) gets the terminal title + accent updates from here. Registered
@@ -1779,7 +1833,39 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
-		if (action === "reset" && this.vibeModeEnabled) {
+		if (action === "reset" && (this.vibeModeEnabled || this.#vibeModeEntry !== undefined)) {
+			this.disableLoopMode("Exit vibe mode before using reset loops. Loop mode disabled.");
+			return;
+		}
+
+		// An exhausted budget ends the loop regardless of the condition, so check
+		// it first: the user's command must not run one last time for nothing.
+		if (isLoopLimitExhausted(this.loopLimit)) {
+			this.disableLoopMode("Loop limit reached. Loop mode disabled.");
+			return;
+		}
+
+		// The gate sits before the budget consume so a halt never burns an
+		// iteration that did not run, and after the blocked-check/defer above so
+		// a streaming turn cannot re-run the command on every retry tick.
+		if (this.loopCondition && !(await this.#passesLoopCondition(prompt))) return;
+
+		// The gate awaited a child process: a turn may have started meanwhile
+		// (async job, idle flush), so re-check before spending budget or
+		// compacting/resetting into the now-busy session.
+		if (this.#isAutoSubmitBlocked()) {
+			this.#deferLoopAutoSubmit(() => {
+				void this.#runLoopIteration(action, prompt);
+			});
+			return;
+		}
+
+		// /vibe can be enabled while the gate was awaiting: the pre-gate guard
+		// above is stale, and handleClearCommand would only warn and then let
+		// the iteration submit without resetting. Check the entering transition
+		// too: vibeModeEnabled is still false while activateVibeTools is in
+		// flight, but the reset must not run concurrently with the toolset switch.
+		if (action === "reset" && (this.vibeModeEnabled || this.#vibeModeEntry !== undefined)) {
 			this.disableLoopMode("Exit vibe mode before using reset loops. Loop mode disabled.");
 			return;
 		}
@@ -1798,13 +1884,59 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#submitLoopPromptWhenReady(prompt);
 	}
 
+	/**
+	 * Evaluate the `--while` / `--until` condition for one iteration.
+	 *
+	 * Returns false when the loop must not continue: either the condition said
+	 * to stop (already reported through {@link disableLoopMode}) or the loop was
+	 * paused/disabled while the command was still running.
+	 */
+	async #passesLoopCondition(prompt: string): Promise<boolean> {
+		const condition = this.loopCondition;
+		if (!condition) return true;
+
+		const controller = new AbortController();
+		// A prior evaluation can still be in flight when the next iteration
+		// starts (the user submitted mid-command); drop it instead of leaking a
+		// child process that Esc can no longer reach.
+		this.#abortLoopCondition();
+		this.#loopConditionAbort = controller;
+		let verdict: LoopConditionVerdict;
+		try {
+			verdict = await evaluateLoopCondition(condition, {
+				cwd: this.sessionManager.getCwd(),
+				timeoutMs: settings.get("loop.conditionTimeoutMs"),
+				signal: controller.signal,
+				sessionId: this.sessionManager.getSessionId(),
+			});
+		} finally {
+			if (this.#loopConditionAbort === controller) this.#loopConditionAbort = undefined;
+		}
+
+		// Running the condition is an await point: Esc (pauseLoop) or a second
+		// /loop (disableLoopMode) can land mid-command, so re-check the same
+		// guards the method entry used before acting on a now-stale verdict.
+		if (!this.loopModeEnabled || this.loopPrompt !== prompt || !this.onInputCallback) return false;
+		if (verdict.kind === "continue") return true;
+		if (verdict.kind === "aborted") return false;
+		this.disableLoopMode(verdict.message);
+		return false;
+	}
+
+	#abortLoopCondition(): void {
+		this.#loopConditionAbort?.abort();
+		this.#loopConditionAbort = undefined;
+	}
+
 	#syncLoopModeStatus(): void {
 		const state: "waiting" | "running" | "paused" = this.loopModePaused
 			? "paused"
 			: this.loopPrompt
 				? "running"
 				: "waiting";
-		this.statusLine.setLoopModeStatus(this.loopModeEnabled ? { state, limit: this.loopLimit } : undefined);
+		this.statusLine.setLoopModeStatus(
+			this.loopModeEnabled ? { state, limit: this.loopLimit, condition: this.loopCondition } : undefined,
+		);
 		this.ui.requestRender();
 	}
 
@@ -1814,7 +1946,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loopModePaused = false;
 		this.loopPrompt = undefined;
 		this.loopLimit = undefined;
+		this.loopCondition = undefined;
 		this.#cancelLoopAutoSubmit();
+		this.#abortLoopCondition();
 		this.#syncLoopModeStatus();
 		if (wasEnabled) {
 			this.showStatus(message);
@@ -1823,6 +1957,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	setLoopPrompt(prompt: string): void {
 		if (!this.loopModeEnabled) return;
+		// Any manual submit supersedes whatever gate is currently pending, even
+		// one resubmitting identical text: the gate was checking the *previous*
+		// iteration, and that iteration's turn is about to be superseded either
+		// way. Abort immediately instead of letting it run for up to the
+		// configured timeout in parallel with the turn it can no longer gate.
+		this.#abortLoopCondition();
 		this.loopPrompt = prompt;
 		this.loopModePaused = false;
 		this.#syncLoopModeStatus();
@@ -1837,6 +1977,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loopPrompt = undefined;
 		this.loopModePaused = true;
 		this.#cancelLoopAutoSubmit();
+		this.#abortLoopCondition();
 		this.#syncLoopModeStatus();
 	}
 
@@ -1845,7 +1986,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.disableLoopMode();
 			return undefined;
 		}
-		const parsed = parseLoopLimitArgs(args);
+		const parsed = parseLoopArgs(args);
 		if (typeof parsed === "string") {
 			this.showError(parsed);
 			return undefined;
@@ -1854,12 +1995,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loopModePaused = false;
 		this.loopPrompt = undefined;
 		this.loopLimit = createLoopLimitRuntime(parsed.limit);
+		this.loopCondition = parsed.condition;
 		this.#syncLoopModeStatus();
 		const limitSuffix = parsed.limit ? ` Limited to ${describeLoopLimit(parsed.limit)}.` : "";
 		const remainingSuffix = this.loopLimit ? ` ${describeLoopLimitRuntime(this.loopLimit)}.` : "";
+		// The condition is a *continuation* signal: the first iteration always
+		// runs, and it is re-evaluated before each subsequent one.
+		const conditionSuffix = parsed.condition ? ` Continuing ${describeLoopCondition(parsed.condition)}.` : "";
 		const tail = parsed.prompt ? "Repeating it after each turn." : "Your next prompt will repeat after each turn.";
 		this.showStatus(
-			`Loop mode enabled.${limitSuffix}${remainingSuffix} ${tail} Esc cancels the current iteration; /loop again to disable.`,
+			`Loop mode enabled.${limitSuffix}${remainingSuffix}${conditionSuffix} ${tail} Esc cancels the current iteration; /loop again to disable.`,
 		);
 		// Hand any inline prompt back to the dispatcher so the normal submit flow
 		// runs the first iteration — it records the text as the loop prompt and
@@ -2158,7 +2303,55 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.statusLine.setComposerStyle(style);
 		this.updateEditorBorderColor();
+		this.#persistComposerStatus();
 		this.ui.requestRender();
+	}
+
+	/**
+	 * Cache placeholder-only status chrome so the next launch paints the row
+	 * immediately without presenting values from the previous session.
+	 */
+	#persistComposerStatus(): void {
+		if (!this.sessionManager.getSessionFile()) return;
+		const shape = settings.get("composer.shape") ?? "band";
+		const style = getComposerStyle(shape);
+		const terminalWidth = this.ui.terminal.columns;
+		const availableWidth = this.editor.getTopBorderAvailableWidth(terminalWidth);
+		const topContent =
+			style.statusAttachment === "top-border"
+				? this.statusLine.renderStartupPlaceholder(availableWidth, "box")
+				: style.statusAttachment === "top-band"
+					? this.statusLine.renderStartupPlaceholder(availableWidth, "band")
+					: style.statusAttachment === "top-rule-chip"
+						? this.statusLine.renderStartupPlaceholder(availableWidth, "plain-right")
+						: undefined;
+		const bottomLines: string[] = [];
+		if (style.bottomBar !== "none") {
+			const content = this.statusLine.renderStartupPlaceholder(
+				terminalWidth,
+				style.bottomBar === "left" ? "plain-left" : "plain-full",
+			);
+			if (content) {
+				if (style.bottomBarGap) bottomLines.push("");
+				bottomLines.push(content);
+			}
+		}
+		// Recover the border's ANSI wrapper by coloring a sentinel and splitting around it.
+		const marker = "\0";
+		const colored = this.editor.borderColor(marker);
+		const markerIndex = colored.indexOf(marker);
+		const snapshot: ComposerStatusSnapshot = {
+			shape,
+			borderColor:
+				markerIndex < 0
+					? undefined
+					: { prefix: colored.slice(0, markerIndex), suffix: colored.slice(markerIndex + marker.length) },
+			topBorder: topContent ? { content: topContent, width: visibleWidth(topContent) } : undefined,
+			bottomLines,
+		};
+		void writeComposerStatusCache(this.sessionManager.getCwd(), snapshot).catch(error => {
+			logger.debug("composer status cache write failed", { error });
+		});
 	}
 
 	#handleSessionAccentInputsChanged(): void {
@@ -2168,10 +2361,22 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	updateEditorBorderColor(): void {
+		// `vimMode` reads "insert" when modal editing is off, so every Vim branch below must gate on
+		// `vimEnabled` — otherwise non-Vim users would lose the session-accent/thinking border.
+		const vimMode = this.editor.vimEnabled ? this.editor.vimMode : undefined;
 		if (this.isBashMode) {
 			this.editor.borderColor = theme.getBashModeBorderColor();
 		} else if (this.isPythonMode) {
 			this.editor.borderColor = theme.getPythonModeBorderColor();
+		} else if (vimMode === "visual" || vimMode === "visual-line") {
+			this.editor.borderColor = (str: string) => theme.fg("warning", str);
+		} else if (vimMode === "normal") {
+			this.editor.borderColor = (str: string) => theme.fg("accent", str);
+		} else if (vimMode === "insert") {
+			// Insert gets its own colour rather than falling through to the session accent: with Normal
+			// and Visual both coloured, an uncoloured Insert made the border unreadable as a mode.
+			// Matches the `vim` status-line segment, which uses the same three colours.
+			this.editor.borderColor = (str: string) => theme.fg("success", str);
 		} else {
 			const accentEnabled = !isSettingsInitialized() || settings.get("statusLine.sessionAccent") !== false;
 			const sessionName = accentEnabled ? this.sessionManager.getSessionName() : undefined;
@@ -3000,15 +3205,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.planModeEnabled || this.planModePaused) {
 			this.session.setPlanModeState(undefined);
 			try {
-				if (this.#planModePreviousTools !== undefined) {
-					await this.session.setActiveToolsByName(this.#planModePreviousTools);
+				const previousPresentation = this.#planModePreviousToolPresentation;
+				if (previousPresentation) {
+					await this.session.restoreNonMCPToolPresentation(
+						previousPresentation.enabled,
+						previousPresentation.mounted,
+					);
 				}
 			} finally {
 				this.session.setPlanProposalHandler?.(null);
 				this.planModeEnabled = false;
 				this.planModePaused = false;
 				this.planModePlanFilePath = undefined;
-				this.#planModePreviousTools = undefined;
+				this.#planModePreviousToolPresentation = undefined;
 				this.#planModePreviousModelState = undefined;
 				this.#pendingModelSwitch = undefined;
 				this.#pendingPlanModelSwitch = false;
@@ -3157,6 +3366,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		const planFilePath = options?.planFilePath ?? (await this.#getPlanFilePath());
 		const previousTools = this.session.getEnabledToolNames();
+		const previousMountedTools = this.session.getMountedXdevToolNames();
 		// `plan-mode-active.md` instructs the agent to draft the plan file with
 		// `write` and refine it with `edit`, and plan approval itself is a `write`
 		// to `xd://propose`. Both must be in the active set or the agent falls
@@ -3173,7 +3383,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		const uniquePlanTools = [...new Set([...previousTools, ...planAugmentations])];
 
-		this.#planModePreviousTools = previousTools;
+		this.#planModePreviousToolPresentation = {
+			enabled: previousTools.filter(name => !isMCPToolName(name)),
+			mounted: previousMountedTools.filter(name => !isMCPToolName(name)),
+		};
 		this.planModePlanFilePath = planFilePath;
 		this.planModeEnabled = true;
 		// Suppress cache-miss marker on the next turn: plan mode changes the system
@@ -3283,8 +3496,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			: undefined;
 		this.session.setPlanModeState(undefined);
 		try {
-			if (this.#planModePreviousTools !== undefined) {
-				await this.session.setActiveToolsByName(this.#planModePreviousTools);
+			const previousPresentation = this.#planModePreviousToolPresentation;
+			if (previousPresentation) {
+				await this.session.restoreNonMCPToolPresentation(
+					previousPresentation.enabled,
+					previousPresentation.mounted,
+				);
 			}
 			if (this.#planModePreviousModelState && !options?.deferModelRestore) {
 				await this.#restorePlanPreviousModel(this.#planModePreviousModelState);
@@ -3333,7 +3550,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.lastAssistantUsage = undefined;
 		this.planModePaused = options?.paused ?? false;
 		this.planModePlanFilePath = undefined;
-		this.#planModePreviousTools = undefined;
+		this.#planModePreviousToolPresentation = undefined;
 		if (!options?.deferModelRestore) this.#planModePreviousModelState = undefined;
 		this.#updatePlanModeStatus();
 		const paused = options?.paused ?? false;
@@ -3511,7 +3728,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			maxHeight: "100%",
 			margin: 0,
 			fullscreen: true,
-			mouseTracking: false,
 		});
 		this.ui.setFocus(overlay);
 		this.ui.requestRender();
@@ -3552,6 +3768,67 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#isKeepContextDisabled(contextUsage: ContextUsage | undefined): boolean {
 		return contextUsage !== undefined && contextUsage.percent > PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT;
+	}
+
+	/** Apply the `tui.vimMode` setting to an editor and route Visual-mode yanks to the clipboard. */
+	#applyVimMode(editor: CustomEditor): void {
+		editor.setVimMode(settings.get("tui.vimMode"));
+		editor.onYank = text => {
+			void this.#copyYankToClipboard(text);
+		};
+		// Recolor the prompt border on every mode switch: in a modal editor the mode has to be
+		// visible at a glance, and the border is where bash/python mode already signal themselves.
+		editor.onVimModeChange = () => this.#syncVimStatus(editor);
+	}
+
+	/**
+	 * Re-apply `tui.vimMode` to the live editor. `setVimMode` is idempotent and always lands in
+	 * Insert, so toggling the setting mid-session can never strand the editor in a mode where
+	 * ordinary typing does nothing.
+	 */
+	applyVimModeSetting(): void {
+		this.#applyVimMode(this.editor);
+		this.#syncVimStatus(this.editor);
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Push an editor's modal state into the three places that surface it: the prompt border, the
+	 * status-line `vim` segment, and the hardware cursor shape. Called on every mode/pending change,
+	 * so it stays cheap — the terminal dedupes an unchanged DECSCUSR shape. Takes the editor rather
+	 * than reading `this.editor`: `setEditorComponent` configures its replacement before swapping it in.
+	 */
+	#syncVimStatus(editor: CustomEditor): void {
+		this.statusLine.setVimStatus(
+			editor.vimEnabled
+				? {
+						mode: editor.vimMode,
+						pending: editor.vimPending,
+						selectedLines: editor.vimSelectedLines,
+						display: settings.get("tui.vimModeDisplay"),
+					}
+				: undefined,
+		);
+		// Insert gets the bar every non-modal editor uses; Normal/Visual rest *on* a grapheme, which
+		// is a block. Sent unconditionally: the software cursor carries the same distinction itself
+		// (Editor#cursorCell), and when the hardware cursor is hidden this only reshapes something
+		// invisible. ProcessTerminal dedupes, so an unchanged shape costs nothing per frame.
+		this.ui.terminal.setCursorShape?.(
+			editor.vimEnabled && editor.vimMode !== "insert" ? "block" : editor.vimEnabled ? "bar" : "default",
+		);
+		this.updateEditorBorderColor();
+	}
+
+	async #copyYankToClipboard(content: string): Promise<void> {
+		try {
+			await copyToClipboard(content);
+		} catch (error) {
+			// Best-effort: the yank already landed in the internal register, so `p` still puts it
+			// back. A per-yank warning would spam headless/SSH sessions on every `yy`.
+			logger.debug("Vim yank clipboard copy failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	async #copyPlanToClipboard(content: string): Promise<void> {
@@ -3732,7 +4009,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			executionModel?: ResolvedRoleModel;
 		},
 	): Promise<boolean> {
-		const previousTools = this.#planModePreviousTools ?? this.session.getEnabledToolNames();
+		const previousPresentation = this.#planModePreviousToolPresentation ?? {
+			enabled: this.session.getEnabledToolNames().filter(name => !isMCPToolName(name)),
+			mounted: this.session.getMountedXdevToolNames().filter(name => !isMCPToolName(name)),
+		};
 
 		// Mark the pending abort caused by the plan-mode → compaction transition as
 		// silent BEFORE #exitPlanMode raises it. The `finally` below clears the
@@ -3800,11 +4080,35 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.clearPlanInternalAbortPending();
 		}
 
-		// Restore the execution tool set, but force-enable `read`: approved-plan
-		// prompts now require loading the durable local:// plan file before work.
-		const executionTools = previousTools.includes("read") ? previousTools : [...previousTools, "read"];
-		await this.session.setActiveToolsByName(executionTools);
+		// Restore the execution tool set, but force-enable `read` so the durable
+		// local:// plan remains available if the inline copy becomes unrecoverable.
+		const executionTools = previousPresentation.enabled.includes("read")
+			? previousPresentation.enabled
+			: [...previousPresentation.enabled, "read"];
+		await this.session.restoreNonMCPToolPresentation(executionTools, previousPresentation.mounted);
 		this.session.setPlanReferencePath(options.planFilePath);
+		try {
+			const autosaved = await autosaveApprovedPlan({
+				settings: this.session.settings,
+				cwd: this.sessionManager.getCwd(),
+				title: options.title,
+				planContent,
+			});
+			if (autosaved) {
+				const displayPath = truncateToWidth(replaceTabs(shortenPath(autosaved)), TRUNCATE_LENGTHS.CONTENT);
+				this.showStatus(`Saved plan to ${displayPath}.`);
+			}
+		} catch (error) {
+			const detail = truncateToWidth(
+				shortenEmbeddedPaths(
+					replaceTabs(error instanceof Error ? error.message : String(error))
+						.replace(/[\r\n]+/g, " ")
+						.trim(),
+				),
+				TRUNCATE_LENGTHS.CONTENT,
+			);
+			this.showWarning(`Failed to autosave plan: ${detail}`);
+		}
 
 		// Resolve the deferred plan-approval model transition. On the compact path
 		// the before-flush hook passed to handleCompactCommand already ran this (so
@@ -3848,6 +4152,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.session.markPlanReferenceSent();
 		const planModePrompt = prompt.render(planModeApprovedPrompt, {
 			planFilePath: options.planFilePath,
+			planContent,
 			contextPreserved: options.preserveContext === true,
 		});
 		// Close the review overlay only now — after the async title write and plan
@@ -3983,13 +4288,33 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#enterVibeMode();
 		if (!initialPrompt) return false;
 		if (isKnownSkillCommand(this, initialPrompt)) {
-			await invokeSkillCommandFromText(this, initialPrompt, "steer", {
-				images: input?.images,
-				propagateErrors: true,
-			});
+			// Append synchronously: the skill file read below yields before the
+			// turn reserves, so a concurrent plain prompt must see this claim
+			// before it can take the idle waiter — and a later skill must queue
+			// behind this one rather than overwrite a shared slot.
+			const prev = this.#vibeSkillTail;
+			this.#vibeSkillInFlight++;
+			const mine = (async () => {
+				try {
+					await prev;
+					await this.#waitForInFlightSubmission(true);
+					await invokeSkillCommandFromText(this, initialPrompt, "steer", {
+						images: input?.images,
+						propagateErrors: true,
+					});
+				} finally {
+					this.#vibeSkillInFlight--;
+				}
+			})();
+			// Never reject: a failed skill must not break the chain for later ones.
+			this.#vibeSkillTail = mine.catch(() => {});
+			await mine;
 			return true;
 		}
 		if (this.session.isStreaming) {
+			// Same ordering covenant as below: a skill prompt may be reserving
+			// ahead of us even though the session looks continuously busy.
+			await this.#waitForInFlightSubmission();
 			const images = input?.images?.length ? input.images : undefined;
 			await this.withLocalSubmission(
 				initialPrompt,
@@ -3998,15 +4323,73 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 			return true;
 		}
-		if (this.onInputCallback) {
-			this.onInputCallback(this.startPendingSubmission({ text: initialPrompt, ...input }, { preserveDraft: true }));
+		const dispatchViaWaiter = (): boolean => {
+			// A skill prompt reserving ahead of us owns the next turn: leave the
+			// waiter armed until it reserves, so the main loop submits in order.
+			if (this.#vibeSkillInFlight > 0) return false;
+			const onInput = this.onInputCallback;
+			if (!onInput) return false;
+			onInput(this.startPendingSubmission({ text: initialPrompt, ...input }, { preserveDraft: true }));
 			return true;
+		};
+		if (dispatchViaWaiter()) return true;
+		// No input waiter: a concurrent dispatch may have just taken the one-shot
+		// waiter — its submission exists but the main loop hasn't handed it to the
+		// session yet. Steering now would overtake it and reverse prompt order, so
+		// yield until it reserves its turn, then re-check for a fresh waiter.
+		await this.#waitForInFlightSubmission();
+		if (dispatchViaWaiter()) return true;
+		// Still no waiter (the main loop is between turns): steer directly instead
+		// of silently swallowing the prompt — the same fallback the normal submit
+		// path uses when its waiter is gone.
+		const images = input?.images?.length ? input.images : undefined;
+		await this.withLocalSubmission(
+			initialPrompt,
+			() => this.session.prompt(initialPrompt, { streamingBehavior: "steer", images }),
+			{ imageCount: images?.length ?? 0 },
+		);
+		return true;
+	}
+
+	/**
+	 * Yield until prior dispatches reserve their turn (streaming, queued, or
+	 * dropped) or a fresh waiter arms. Without this, a prompt dispatched right
+	 * after a concurrent submit resolved the one-shot input waiter — or while a
+	 * skill prompt is still reading its file — would reach
+	 * {@link session.prompt} before the main loop submits the earlier input,
+	 * reversing their order. No-op when nothing is in flight; bounded so a
+	 * stalled loop degrades to immediate dispatch. `ignoreSkills` lets a skill
+	 * dispatch wait for earlier plain submissions only: concurrent skills order
+	 * themselves through the tail chain, and counting the live total here would
+	 * stall an earlier skill behind a later one it must precede.
+	 */
+	async #waitForInFlightSubmission(ignoreSkills = false): Promise<void> {
+		for (let index = 0; index < 200; index++) {
+			const skillBlocked = !ignoreSkills && this.#vibeSkillInFlight > 0;
+			const awaited = this.#pendingSubmittedInput;
+			const pendingBlocked =
+				awaited !== undefined &&
+				!awaited.cancelled &&
+				!this.session.isStreaming &&
+				this.session.queuedMessageCount === 0 &&
+				!this.onInputCallback;
+			if (!skillBlocked && !pendingBlocked) return;
+			await Bun.sleep(10);
 		}
-		return false;
 	}
 
 	async #enterVibeMode(options?: { persistModeChange?: boolean; previousTools?: string[] }): Promise<void> {
 		if (this.vibeModeEnabled) {
+			return;
+		}
+		const inFlight = this.#vibeModeEntry;
+		if (inFlight) {
+			// A second /vibe (possibly with a prompt) submitted while activation
+			// is still in flight must not dispatch on the stale toolset: wait for
+			// the first entry, then return with vibe active. A failed entry
+			// rejects here too, so the prompt is dropped instead of running
+			// outside vibe mode.
+			await inFlight;
 			return;
 		}
 		if (this.planModeEnabled || this.planModePaused) {
@@ -4029,22 +4412,34 @@ export class InteractiveMode implements InteractiveModeContext {
 		const previousTools = options?.previousTools ?? this.session.getEnabledToolNames();
 		const vibeBaseTools = ["read"];
 		if (this.session.hasBuiltInTool("todo")) vibeBaseTools.push("todo");
-		await this.session.activateVibeTools(vibeBaseTools);
-		this.#vibeModePreviousTools = previousTools;
-		this.#vibeModeOwnerScope = ownerScope;
-		this.vibeModeEnabled = true;
-		// Suppress cache-miss marker on the next turn: vibe mode changes the
-		// injected context, which predictably invalidates the cache.
-		this.lastAssistantUsage = undefined;
-		this.session.setVibeModeState({ enabled: true });
-		if (this.session.isStreaming) {
-			await this.session.sendVibeModeContext({ deliverAs: "steer" });
+		// The entry runs as a stored promise so a concurrent /vibe joins it
+		// above instead of dispatching on the stale toolset. The first caller
+		// awaits it below, so a failure is always observed (no unhandled
+		// rejection) and propagates to every joiner, dropping their prompts.
+		const entry = (async () => {
+			await this.session.activateVibeTools(vibeBaseTools);
+			this.#vibeModePreviousTools = previousTools;
+			this.#vibeModeOwnerScope = ownerScope;
+			this.vibeModeEnabled = true;
+			// Suppress cache-miss marker on the next turn: vibe mode changes the
+			// injected context, which predictably invalidates the cache.
+			this.lastAssistantUsage = undefined;
+			this.session.setVibeModeState({ enabled: true });
+			if (this.session.isStreaming) {
+				await this.session.sendVibeModeContext({ deliverAs: "steer" });
+			}
+			this.#updateVibeModeStatus();
+			if (options?.persistModeChange !== false) this.sessionManager.appendModeChange("vibe", { previousTools });
+			this.showStatus(
+				"Vibe mode enabled. You direct fast/good worker sessions; toolset is read + optional parent Todo + vibe tools.",
+			);
+		})();
+		this.#vibeModeEntry = entry;
+		try {
+			await entry;
+		} finally {
+			if (this.#vibeModeEntry === entry) this.#vibeModeEntry = undefined;
 		}
-		this.#updateVibeModeStatus();
-		if (options?.persistModeChange !== false) this.sessionManager.appendModeChange("vibe", { previousTools });
-		this.showStatus(
-			"Vibe mode enabled. You direct fast/good worker sessions; toolset is read + optional parent Todo + vibe tools.",
-		);
 	}
 
 	async #exitVibeMode(): Promise<void> {
@@ -4686,6 +5081,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	stop(): void {
 		this.#appearanceRefreshRequest = undefined;
+		// Last chance to refresh the startup status placeholder for the next launch.
+		this.#persistComposerStatus();
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(false);
 		}
@@ -4797,6 +5194,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
 	async #teardown(): Promise<void> {
+		// An in-flight loop condition (or a deferred auto-submit timer) must not
+		// outlive session disposal: an unaborted `sleep 30`-style condition can
+		// resolve mid-teardown and drive `#passesLoopCondition` into invoking the
+		// pending input callback against a session that is already disposing.
+		this.#abortLoopCondition();
+		this.#cancelLoopAutoSubmit();
 		await this.#liveCommandController.stop();
 
 		this.#btwController.dispose();
@@ -4869,6 +5272,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			: new CustomEditor(getEditorTheme());
 		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		nextEditor.setImeSafeCursorLayout(this.settings.get("tui.imeSafeCursor"));
+		this.#applyVimMode(nextEditor);
 		nextEditor.setAutocompleteMaxVisible(this.settings.get("autocompleteMaxVisible"));
 		nextEditor.setSpellingFeatures({
 			typoDetection: this.settings.get("spelling.typoDetection"),
@@ -4905,7 +5309,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			logger.warn("Failed to refresh slash command state for custom editor", { error: String(error) });
 		});
 
-		this.updateEditorBorderColor();
+		this.#syncVimStatus(nextEditor);
 		this.ui.requestRender();
 	}
 
@@ -5091,6 +5495,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const providerName = this.session.model?.provider ?? "Unknown";
 		this.composer.updateWelcome({ modelName, providerName });
 		this.#persistComposerWelcome(modelName, providerName);
+		this.#persistComposerStatus();
 	}
 
 	#syncConfigWarningHeader(): void {
@@ -5169,6 +5574,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	ensureLoadingAnimation(): void {
+		if (this.autoCompactionLoader || this.retryLoader) return;
 		if (!this.loadingAnimation) {
 			this.#clearWorkingMessageAccentCache();
 			this.statusContainer.disposeChildren();
@@ -5198,6 +5604,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.statusContainer.addChild(this.loadingAnimation);
 		} else if (!this.statusContainer.children.includes(this.loadingAnimation)) {
 			this.statusContainer.disposeChildren();
+			this.loadingAnimation.start();
 			this.statusContainer.addChild(this.loadingAnimation);
 			this.ui.requestRender();
 		}
@@ -5457,6 +5864,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#commandController.handleMoveCommand(targetPath);
 	}
 
+	async handleWorktreeCommand(branch?: string): Promise<void> {
+		if (this.#vibeSessionTransitionBlocked()) return;
+		await this.#commandController.handleWorktreeCommand(branch);
+	}
+
 	handleRenameCommand(title: string): Promise<void> {
 		return this.#commandController.handleRenameCommand(title);
 	}
@@ -5648,6 +6060,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showModelSelector(options?: { temporaryOnly?: boolean }): void {
 		this.#selectorController.showModelSelector(options);
+	}
+
+	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void> {
+		return this.#selectorController.switchSessionModel(model, thinkingLevel);
 	}
 
 	showPluginSelector(mode?: "install" | "uninstall"): void {

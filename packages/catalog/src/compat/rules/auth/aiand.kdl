@@ -1,0 +1,9 @@
+auth "aiand" {
+	name "ai&"
+	login "api-key" {
+		auth-url "https://console.aiand.com/api-keys"
+		instructions "Copy your API key from the ai& console"
+		prompt "Paste your ai& API key" placeholder="sk-..."
+		validate "models-endpoint" label="ai&" url="https://api.aiand.com/v1/models"
+	}
+}

@@ -1,0 +1,5 @@
+auth "amazon-bedrock" {
+	name "Amazon Bedrock"
+	// Amazon Bedrock accepts bearer tokens, IAM keys, profiles, ECS/IRSA credential chains.
+	env hook="aws-bedrock"
+}

@@ -1,0 +1,11 @@
+auth "yolo-auto" {
+	name "Yolo-Auto"
+	login "api-key" {
+		// Yolo-Auto's `GET /v1/models` rejects missing or invalid bearer keys,
+		// so it serves as the model-agnostic identity check without token spend.
+		auth-url "https://yolo-auto.com/app"
+		instructions "Create or copy your Yolo-Auto API key (yolo_...)"
+		prompt "Paste your Yolo-Auto API key" placeholder="yolo_..."
+		validate "models-endpoint" label="Yolo-Auto" url="https://yolo-auto.com/v1/models"
+	}
+}

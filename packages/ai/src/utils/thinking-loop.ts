@@ -304,7 +304,7 @@ export class ThinkingLoopDetector {
  * real narration runaway burns dozens-to-hundreds of titles, so this still trips
  * fast on the actual pathology.
  */
-export const GEMINI_HEADER_RUNAWAY_THRESHOLD = 24;
+export const GEMINI_HEADER_RUNAWAY_THRESHOLD = 36;
 
 /**
  * True when a single trimmed line is a Gemini reasoning-summary title: a markdown

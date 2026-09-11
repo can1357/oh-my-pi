@@ -90,6 +90,51 @@ describe("SignInTab", () => {
 		}
 	});
 
+	it("clears manual input after a native callback path settles", async () => {
+		const url = "https://example.com/oauth/authorize?client_id=omp&state=native";
+		const loginCompleted = Promise.withResolvers<void>();
+		const authStorage = {
+			has: (_providerId: string) => false,
+			hasAuth: (_providerId: string) => false,
+			getCredentialOrigin: (_providerId: string) => undefined,
+			async login(_provider: OAuthProviderId, ctrl: OAuthLoginCallbacks): Promise<void> {
+				ctrl.onAuth({ url });
+				const settled = new AbortController();
+				const prompt = ctrl.onManualCodeInput?.(settled.signal);
+				settled.abort(new Error("native callback received"));
+				await prompt?.catch(() => {});
+				loginCompleted.resolve();
+			},
+		} as unknown as AuthStorage;
+		const host = {
+			ctx: {
+				openInBrowser(): void {},
+				session: {
+					modelRegistry: {
+						authStorage,
+						async refresh(): Promise<void> {},
+					},
+				},
+			},
+			requestRender(): void {},
+			finish(): void {},
+			setFocus(): void {},
+			restoreFocus(): void {},
+		} as unknown as SetupSceneHost;
+
+		const tab = new SignInTab(host);
+		try {
+			for (const char of "anthropic") tab.handleInput(char);
+			tab.handleInput("\n");
+			await loginCompleted.promise;
+			await Promise.resolve();
+
+			expect(tab.render(80).join("\n")).not.toContain("Paste the authorization code");
+		} finally {
+			tab.dispose();
+		}
+	});
+
 	it("copies the active login URL from the keyboard while the setup TUI owns selection", async () => {
 		const url = "https://example.com/oauth/authorize?client_id=omp&state=copy";
 		const loginGate = Promise.withResolvers<void>();

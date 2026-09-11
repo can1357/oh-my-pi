@@ -3,10 +3,11 @@ import * as path from "node:path";
 import "@oh-my-pi/pi-utils/env";
 import { getComposerCacheDir } from "@oh-my-pi/pi-utils/dirs";
 import type { LspServerInfo, RecentSession } from "./components/welcome";
-import type { ComposerPreferences } from "./composer";
+import type { ComposerPreferences, ComposerStatusSnapshot } from "./composer";
 import type { SymbolPreset } from "./theme/theme";
 
 const CACHE_VERSION = 1;
+const STATUS_CACHE_VERSION = 3;
 /** Theme inputs cached from the last resolved settings load for stable prepaint colors. */
 export interface ComposerThemePreferences {
 	readonly symbolPreset?: SymbolPreset;
@@ -28,6 +29,7 @@ export interface ComposerStartupCache {
 	readonly welcome?: ComposerWelcomeCache;
 	readonly recentSessions: RecentSession[];
 	readonly lspServers: LspServerInfo[];
+	readonly status?: ComposerStatusSnapshot;
 }
 
 function projectCacheDir(cwd: string): string {
@@ -114,6 +116,47 @@ function readWelcome(file: string): ComposerWelcomeCache | undefined {
 	const modelName = field(parsed, "modelName");
 	const providerName = field(parsed, "providerName");
 	return typeof modelName === "string" && typeof providerName === "string" ? { modelName, providerName } : undefined;
+}
+
+function readStatus(file: string): ComposerStatusSnapshot | undefined {
+	const content = readFile(file);
+	if (!content) return undefined;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(content);
+	} catch {
+		return undefined;
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+	if (field(parsed, "version") !== CACHE_VERSION) return undefined;
+	if (field(parsed, "statusVersion") !== STATUS_CACHE_VERSION) return undefined;
+	const shape = field(parsed, "shape");
+	const rawBorderColor = field(parsed, "borderColor");
+	const rawTopBorder = field(parsed, "topBorder");
+	const bottomLines = field(parsed, "bottomLines");
+	if (
+		typeof shape !== "string" ||
+		!Array.isArray(bottomLines) ||
+		!bottomLines.every(line => typeof line === "string")
+	) {
+		return undefined;
+	}
+	let borderColor: ComposerStatusSnapshot["borderColor"];
+	if (rawBorderColor !== undefined) {
+		if (typeof rawBorderColor !== "object" || rawBorderColor === null || Array.isArray(rawBorderColor)) {
+			return undefined;
+		}
+		const prefix = field(rawBorderColor, "prefix");
+		const suffix = field(rawBorderColor, "suffix");
+		if (typeof prefix !== "string" || typeof suffix !== "string") return undefined;
+		borderColor = { prefix, suffix };
+	}
+	if (rawTopBorder === undefined) return { shape, borderColor, bottomLines };
+	if (typeof rawTopBorder !== "object" || rawTopBorder === null || Array.isArray(rawTopBorder)) return undefined;
+	const borderContent = field(rawTopBorder, "content");
+	const borderWidth = field(rawTopBorder, "width");
+	if (typeof borderContent !== "string" || typeof borderWidth !== "number") return undefined;
+	return { shape, borderColor, topBorder: { content: borderContent, width: borderWidth }, bottomLines };
 }
 
 function readUiState(file: string): { preferences: ComposerPreferences; theme: ComposerThemePreferences } | undefined {
@@ -211,6 +254,7 @@ export function readComposerStartupCache(cwd: string): ComposerStartupCache {
 		welcome: readWelcome(path.join(dir, "welcome.json")),
 		recentSessions: readRecentSessions(path.join(dir, "recent-sessions.jsonl")),
 		lspServers: readLspServers(path.join(dir, "lsp-servers.json")),
+		status: readStatus(path.join(dir, "status.json")),
 	};
 }
 
@@ -231,6 +275,14 @@ export async function writeComposerWelcomeCache(cwd: string, welcome: ComposerWe
 	await Bun.write(
 		path.join(projectCacheDir(cwd), "welcome.json"),
 		JSON.stringify({ version: CACHE_VERSION, ...welcome }),
+	);
+}
+
+/** Persist placeholder-only status chrome for speculative first-frame rendering. */
+export async function writeComposerStatusCache(cwd: string, status: ComposerStatusSnapshot): Promise<void> {
+	await Bun.write(
+		path.join(projectCacheDir(cwd), "status.json"),
+		JSON.stringify({ version: CACHE_VERSION, statusVersion: STATUS_CACHE_VERSION, ...status }),
 	);
 }
 

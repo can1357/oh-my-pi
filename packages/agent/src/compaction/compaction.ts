@@ -25,7 +25,12 @@ import {
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import {
+	buildTransformedCodexRequestBody,
+	createOpenAICodexCompactionRequestContext,
+	type OpenAICodexCompactionBody,
+} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import type { InputItem as CodexInputItem } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import { convertTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput, resolveOpenAICompatPolicy } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { stripOpenAIResponsesOutputOnlyStatusesForReplay } from "@oh-my-pi/pi-ai/utils";
@@ -38,7 +43,17 @@ import { ThinkingLevel } from "../thinking";
 import { Tokenizer } from "../tokenizer";
 import type { AgentMessage } from "../types";
 import {
+	ANTHROPIC_COMPACTION_MIN_CONTEXT_TOKENS,
+	buildAnthropicCompactionInstructions,
+	describeRetainedTail,
+	getPreservedAnthropicCompactionData,
+	requestAnthropicNativeCompaction,
+	shouldUseAnthropicNativeCompaction,
+	withAnthropicCompactionPreserveData,
+} from "./anthropic";
+import {
 	buildCompactionV2Request,
+	buildCompactionV2RequestFromBody,
 	getCompactionV2PreserveData,
 	requestCompactionV2Streaming,
 	shouldUseCompactionV2Streaming,
@@ -47,7 +62,13 @@ import {
 } from "./compaction-v2-streaming";
 import type { CompactionEntry, SessionEntry } from "./entries";
 import { NativeCompactionError } from "./errors";
-import { type ConvertToLlm, createBranchSummaryMessage, createCustomMessage, defaultConvertToLlm } from "./messages";
+import {
+	type ConvertToLlm,
+	createBranchSummaryMessage,
+	createCompactionSummaryMessage,
+	createCustomMessage,
+	defaultConvertToLlm,
+} from "./messages";
 import {
 	buildOpenAiNativeHistory,
 	getPreservedOpenAiRemoteCompactionData,
@@ -218,7 +239,11 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	v2RetainedMessageBudget: V2_RETAINED_MESSAGE_TOKEN_BUDGET,
 };
 
-/** Whether a compaction candidate preserves provider-native transport under the effective settings. */
+/**
+ * Whether a compaction candidate preserves provider-native transport under the
+ * effective settings: an OpenAI Responses compact route (V1 or streamed V2) or
+ * the Anthropic compaction beta.
+ */
 export function shouldUseProviderNativeCompaction(
 	model: Model,
 	settings: Pick<CompactionSettings, "remoteEnabled" | "remoteStreamingV2Enabled">,
@@ -226,7 +251,8 @@ export function shouldUseProviderNativeCompaction(
 	if (settings.remoteEnabled === false) return false;
 	return (
 		shouldUseOpenAiRemoteCompaction(model) ||
-		(settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(model))
+		(settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(model)) ||
+		shouldUseAnthropicNativeCompaction(model)
 	);
 }
 
@@ -388,22 +414,6 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
 // ============================================================================
 // Cut point detection
 // ============================================================================
-
-function estimateEntriesTokens(
-	entries: SessionEntry[],
-	tokenizer: Tokenizer,
-	startIndex: number,
-	endIndex: number,
-): number {
-	let total = 0;
-	for (let i = startIndex; i < endIndex; i++) {
-		const msg = getMessageFromEntry(entries[i]);
-		if (msg) {
-			total += tokenizer.countMessage(msg);
-		}
-	}
-	return total;
-}
 
 /**
  * Find valid cut points: indices of user, assistant, custom, or bashExecution messages.
@@ -660,7 +670,8 @@ export interface SummaryOptions {
 	promptOverride?: string;
 	extraContext?: string[];
 	remoteEndpoint?: string;
-	remoteInstructions?: string;
+	/** Stable system-prompt segments from the live turn, preserved for provider cache reuse. */
+	remoteSystemPrompt?: string[];
 	initiatorOverride?: MessageAttribution;
 	metadata?: Record<string, unknown>;
 	convertToLlm?: ConvertToLlm;
@@ -1245,6 +1256,8 @@ export interface CompactionPreparation {
 	tokensBefore: number;
 	/** Summary from previous compaction, for iterative update */
 	previousSummary?: string;
+	/** ISO timestamp of the previous compaction entry, for iterative update */
+	previousSummaryTimestamp?: string;
 	/** Preserved opaque compaction payload from the previous compaction, if any. */
 	previousPreserveData?: Record<string, unknown>;
 	/** File operations extracted from messagesToSummarize */
@@ -1324,16 +1337,10 @@ export function prepareCompaction(
 
 	let prevCompactionIndex = findReadableCompactionIndex(pathEntries, settings, activeModel);
 
-	// Honor the latest `/clear` reset boundary. `/clear` records a
-	// `reset_boundary` marker and reports the model context empty, so compaction
-	// must not resurrect the dropped pre-clear turns into its summary — matching
-	// how buildSessionContext starts the model-context rebuild after the boundary.
-	// A boundary after the last reusable compaction supersedes it: the pre-reset
-	// summary was cleared too, so drop the previous-compaction reuse and start
-	// fresh after the boundary. A boundary at or before that compaction is already
-	// superseded by it, so only scan newer entries.
+	// A reset after the reusable compaction clears its summary too. An older
+	// reset still bounds how far we may recover that compaction's kept messages.
 	let resetBoundaryIndex = -1;
-	for (let i = pathEntries.length - 1; i > prevCompactionIndex; i--) {
+	for (let i = pathEntries.length - 1; i >= 0; i--) {
 		if (pathEntries[i].type === "reset_boundary") {
 			resetBoundaryIndex = i;
 			break;
@@ -1342,14 +1349,43 @@ export function prepareCompaction(
 	if (resetBoundaryIndex > prevCompactionIndex) {
 		prevCompactionIndex = -1;
 	}
-	const boundaryStart = Math.max(prevCompactionIndex, resetBoundaryIndex) + 1;
-	const boundaryEnd = pathEntries.length;
+	const previousCompaction =
+		prevCompactionIndex >= 0 ? (pathEntries[prevCompactionIndex] as CompactionEntry) : undefined;
+	let boundaryStart = Math.max(prevCompactionIndex, resetBoundaryIndex) + 1;
+	if (
+		previousCompaction &&
+		!getCompactionV2PreserveData(previousCompaction.preserveData) &&
+		!getPreservedOpenAiRemoteCompactionData(previousCompaction.preserveData)
+	) {
+		// Local summaries exclude the retained tail, whose original entries precede
+		// the compaction record. Native replay already carries that tail. Only look
+		// backwards: advisor snapshots put all retained messages after the summary
+		// and may carry a keep ID from their previous, differently indexed snapshot.
+		for (let i = resetBoundaryIndex + 1; i < prevCompactionIndex; i++) {
+			if (pathEntries[i].id === previousCompaction.firstKeptEntryId) {
+				boundaryStart = i;
+				break;
+			}
+		}
+	}
+
+	// Keep original IDs beside the converted messages so estimation, cutting,
+	// and all three output regions share one sequence without journal metadata.
+	const compactionEntries: SessionEntry[] = [];
+	const compactionMessages: AgentMessage[] = [];
+	for (let i = boundaryStart; i < pathEntries.length; i++) {
+		const entry = pathEntries[i];
+		const message = getMessageFromEntry(entry);
+		if (!message) continue;
+		compactionEntries.push(entry);
+		compactionMessages.push(message);
+	}
 
 	const lastUsage = getLastAssistantUsage(pathEntries);
 	const tokensBefore = lastUsage ? calculateContextTokens(lastUsage) : 0;
 	let keepRecentTokens = settings.keepRecentTokens;
 	if (lastUsage) {
-		const estimatedTokens = estimateEntriesTokens(pathEntries, tokenizer, boundaryStart, boundaryEnd);
+		const estimatedTokens = tokenizer.countMessages(compactionMessages);
 		const promptTokens = calculatePromptTokens(lastUsage);
 		const ratio = estimatedTokens > 0 ? promptTokens / estimatedTokens : 0;
 		if (Number.isFinite(ratio) && ratio > 1) {
@@ -1357,10 +1393,10 @@ export function prepareCompaction(
 		}
 	}
 
-	const cutPoint = findCutPoint(pathEntries, tokenizer, boundaryStart, boundaryEnd, keepRecentTokens);
+	const cutPoint = findCutPoint(compactionEntries, tokenizer, 0, compactionEntries.length, keepRecentTokens);
 
 	// Get ID of first kept entry
-	const firstKeptEntry = pathEntries[cutPoint.firstKeptEntryIndex];
+	const firstKeptEntry = compactionEntries[cutPoint.firstKeptEntryIndex];
 	if (!firstKeptEntry?.id) {
 		return undefined; // Session needs migration
 	}
@@ -1368,40 +1404,14 @@ export function prepareCompaction(
 
 	const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
 
-	// Messages to summarize (will be discarded after summary)
-	const messagesToSummarize: AgentMessage[] = [];
-	for (let i = boundaryStart; i < historyEnd; i++) {
-		const msg = getMessageFromEntry(pathEntries[i]);
-		if (msg) messagesToSummarize.push(msg);
-	}
-
-	// Messages for turn prefix summary (if splitting a turn)
-	const turnPrefixMessages: AgentMessage[] = [];
-	if (cutPoint.isSplitTurn) {
-		for (let i = cutPoint.turnStartIndex; i < cutPoint.firstKeptEntryIndex; i++) {
-			const msg = getMessageFromEntry(pathEntries[i]);
-			if (msg) turnPrefixMessages.push(msg);
-		}
-	}
-
-	// Messages kept after compaction (recent history)
-	const recentMessages: AgentMessage[] = [];
-	for (let i = cutPoint.firstKeptEntryIndex; i < boundaryEnd; i++) {
-		const msg = getMessageFromEntry(pathEntries[i]);
-		if (msg) recentMessages.push(msg);
-	}
+	const messagesToSummarize = compactionMessages.slice(0, historyEnd);
+	const turnPrefixMessages = cutPoint.isSplitTurn
+		? compactionMessages.slice(cutPoint.turnStartIndex, cutPoint.firstKeptEntryIndex)
+		: [];
+	const recentMessages = compactionMessages.slice(cutPoint.firstKeptEntryIndex);
 	// Nothing to summarize means compaction would be a no-op.
 	if (messagesToSummarize.length === 0 && turnPrefixMessages.length === 0) {
 		return undefined;
-	}
-
-	// Get previous summary and preserved data for iterative updates
-	let previousSummary: string | undefined;
-	let previousPreserveData: Record<string, unknown> | undefined;
-	if (prevCompactionIndex >= 0) {
-		const prevCompaction = pathEntries[prevCompactionIndex] as CompactionEntry;
-		previousSummary = prevCompaction.summary;
-		previousPreserveData = prevCompaction.preserveData;
 	}
 
 	// Extract file operations from messages and previous compaction
@@ -1421,8 +1431,9 @@ export function prepareCompaction(
 		recentMessages,
 		isSplitTurn: cutPoint.isSplitTurn,
 		tokensBefore,
-		previousSummary,
-		previousPreserveData,
+		previousSummary: previousCompaction?.summary,
+		previousSummaryTimestamp: previousCompaction?.timestamp,
+		previousPreserveData: previousCompaction?.preserveData,
 		fileOps,
 		settings,
 	};
@@ -1433,6 +1444,19 @@ export function prepareCompaction(
 // ============================================================================
 
 const TURN_PREFIX_SUMMARIZATION_PROMPT = prompt.render(compactionTurnPrefixPrompt);
+function isCodexResponsesModel(model: Model): model is Model<"openai-codex-responses"> {
+	return model.api === "openai-codex-responses";
+}
+
+function isCodexInputItem(item: Record<string, unknown>): item is CodexInputItem & Record<string, unknown> {
+	return (
+		(item.id === undefined || item.id === null || typeof item.id === "string") &&
+		(item.type === undefined || item.type === null || typeof item.type === "string") &&
+		(item.role === undefined || typeof item.role === "string") &&
+		(item.call_id === undefined || item.call_id === null || typeof item.call_id === "string") &&
+		(item.name === undefined || typeof item.name === "string")
+	);
+}
 
 function openAiCompatSupportsImageDetailOriginal(model: Model): boolean {
 	const compat = model.compat;
@@ -1546,7 +1570,7 @@ export async function compact(
 		promptOverride: options?.promptOverride,
 		extraContext: options?.extraContext,
 		remoteEndpoint: settings.remoteEnabled === false ? undefined : settings.remoteEndpoint,
-		remoteInstructions: options?.remoteInstructions,
+		remoteSystemPrompt: options?.remoteSystemPrompt,
 		initiatorOverride: options?.initiatorOverride,
 		metadata: options?.metadata,
 		convertToLlm: options?.convertToLlm,
@@ -1565,6 +1589,9 @@ export async function compact(
 		tools: options?.tools,
 		fetch: options?.fetch,
 		completeImpl: options?.completeImpl,
+		// The caller's opt-out must reach every summarization oneshot, otherwise
+		// an outer retry loop multiplies with the inner one (see SummaryOptions).
+		oneshotRetry: options?.oneshotRetry,
 	};
 
 	const previousSnapcompactArchive = snapcompact.getPreservedArchive(previousPreserveData);
@@ -1579,7 +1606,10 @@ export async function compact(
 		? createSnapcompactArchiveMigrationMessage(previousSnapcompactArchiveText)
 		: undefined;
 
-	let preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, undefined);
+	let preserveData = withAnthropicCompactionPreserveData(
+		withOpenAiRemoteCompactionPreserveData(previousPreserveData, undefined),
+		undefined,
+	);
 	const remoteMessages: AgentMessage[] = [
 		...(snapcompactArchiveMigrationMessage ? [snapcompactArchiveMigrationMessage] : []),
 		...messagesToSummarize,
@@ -1598,17 +1628,63 @@ export async function compact(
 			previousRemoteCompaction?.provider === model.provider
 				? previousRemoteCompaction.replacementHistory
 				: undefined;
-		const remoteHistory = buildOpenAiResponsesCompactionInput(
-			(summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages),
-			model,
-			previousReplacementHistory,
-		);
+		const messages = (summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages);
+		const remoteSystemPrompt = summaryOptions.remoteSystemPrompt ?? [SUMMARIZATION_SYSTEM_PROMPT];
+		let codexBody: OpenAICodexCompactionBody | undefined;
+		let remoteHistory: Array<Record<string, unknown>>;
+		if (isCodexResponsesModel(model)) {
+			const previousCodexInput: CodexInputItem[] = [];
+			for (const item of previousReplacementHistory ?? []) {
+				if (!isCodexInputItem(item)) {
+					throw new Error("Stored Codex V2 compaction history contains an invalid input item");
+				}
+				previousCodexInput.push(item);
+			}
+			codexBody = await buildTransformedCodexRequestBody(
+				model,
+				{ systemPrompt: remoteSystemPrompt, messages, tools: summaryOptions.tools },
+				{
+					reasoning: resolveCompactionEffort(model, summaryOptions.thinkingLevel),
+					forceReasoningOff: summaryOptions.thinkingLevel === ThinkingLevel.Off,
+					responsesLite: model.useResponsesLite,
+					sessionId: summaryOptions.sessionId,
+					promptCacheKey: summaryOptions.promptCacheKey,
+					providerSessionState: summaryOptions.providerSessionState,
+					codexCompaction: createOpenAICodexCompactionRequestContext({
+						context: summaryOptions.codexCompaction,
+						implementation: "responses_compaction_v2",
+					}),
+				},
+				undefined,
+				previousCodexInput,
+			);
+			const input = Array.isArray(codexBody.input) ? codexBody.input : [];
+			const nativeInput: Array<Record<string, unknown>> = [];
+			for (const item of input) {
+				if (!isRecord(item)) {
+					throw new Error("Codex V2 compaction input contains a non-object item");
+				}
+				nativeInput.push(item);
+			}
+			remoteHistory = stripOpenAIResponsesOutputOnlyStatusesForReplay(nativeInput);
+			codexBody.input = remoteHistory;
+		} else {
+			remoteHistory = buildOpenAiResponsesCompactionInput(messages, model, previousReplacementHistory);
+		}
 		if (remoteHistory.length > 0) {
 			try {
-				const instructions = summaryOptions.remoteInstructions ?? SUMMARIZATION_SYSTEM_PROMPT;
-				const tools = summaryOptions.tools
-					? convertTools(summaryOptions.tools, model.compat.supportsStrictMode, model)
-					: undefined;
+				const instructions = codexBody
+					? typeof codexBody.instructions === "string"
+						? codexBody.instructions
+						: ""
+					: remoteSystemPrompt.join("\n\n");
+				const tools = codexBody
+					? Array.isArray(codexBody.tools)
+						? codexBody.tools
+						: undefined
+					: summaryOptions.tools
+						? convertTools(summaryOptions.tools, model.compat.supportsStrictMode, model)
+						: undefined;
 				const trimmed = trimRemoteCompactionInputToContextWindow(
 					remoteHistory,
 					new Tokenizer(model),
@@ -1626,13 +1702,18 @@ export async function compact(
 						contextWindow: model.contextWindow,
 					});
 				}
-				const request = buildCompactionV2Request(model, trimmed.input, instructions, {
-					tools,
-					reasoning: buildCompactionV2Reasoning(model, summaryOptions.thinkingLevel),
+				const requestOptions = {
 					sessionId: summaryOptions.sessionId,
 					promptCacheKey: summaryOptions.promptCacheKey,
 					retainedMessageBudget: settings.v2RetainedMessageBudget,
-				});
+				};
+				const request = codexBody
+					? buildCompactionV2RequestFromBody(model, { ...codexBody, input: trimmed.input }, requestOptions)
+					: buildCompactionV2Request(model, trimmed.input, instructions, {
+							...requestOptions,
+							tools,
+							reasoning: buildCompactionV2Reasoning(model, summaryOptions.thinkingLevel),
+						});
 				const remote = await withAuth(
 					apiKey,
 					key =>
@@ -1685,7 +1766,7 @@ export async function compact(
 							model,
 							key,
 							remoteHistory,
-							summaryOptions.remoteInstructions ?? SUMMARIZATION_SYSTEM_PROMPT,
+							summaryOptions.remoteSystemPrompt?.join("\n\n") ?? SUMMARIZATION_SYSTEM_PROMPT,
 							signal,
 							{
 								fetch: summaryOptions.fetch,
@@ -1713,6 +1794,112 @@ export async function compact(
 		}
 	}
 
+	// Anthropic server-side compaction: the live turn's request shape plus the
+	// compact edit, so the API summarizes from its cached prefix. The summary is
+	// real text, persisted both as the entry summary and as the native replay
+	// payload. A context below the API's trigger floor cannot compact remotely
+	// and takes the local summarizer instead — an eligibility boundary, not a
+	// failure.
+	let nativeSummary: string | undefined;
+	let nativeEncryptedContent: string | undefined;
+	let nativeUsedTokens: number | undefined;
+	if (
+		!usedRemoteCompaction &&
+		settings.remoteEnabled !== false &&
+		shouldUseAnthropicNativeCompaction(model) &&
+		tokensBefore >= ANTHROPIC_COMPACTION_MIN_CONTEXT_TOKENS
+	) {
+		const previousNative = getPreservedAnthropicCompactionData(previousPreserveData);
+		// Lead with the previous summary exactly as the live context renders it:
+		// natively when this provider wrote it, as text otherwise. The request
+		// then shares the live turn's prefix byte-for-byte. A prior snapcompact
+		// archive is already merged into that summary text, so the archive
+		// migration message the OpenAI lanes carry is omitted here.
+		// The rewrite marker must precede every message this request replays —
+		// summarized history and retained tail alike — exactly like the live
+		// context rebuild predates its tail. A previous compaction's commit
+		// timestamp is newer than re-retained or re-summarized turns, so
+		// reusing it would strip their bound thinking only in this request,
+		// diverging from the cached live prefix (and possibly dropping below
+		// the trigger). Manually built preparations with no input at all fall
+		// back to the current time.
+		const firstReplayed = messagesToSummarize[0] ?? turnPrefixMessages[0] ?? recentMessages[0];
+		const previousSummaryAt =
+			firstReplayed !== undefined ? new Date(firstReplayed.timestamp - 1).toISOString() : new Date().toISOString();
+		const previousSummaryMessage = previousSummaryForCompaction
+			? createCompactionSummaryMessage(previousSummaryForCompaction, tokensBefore, previousSummaryAt, {
+					providerPayload:
+						previousNative?.provider === model.provider
+							? {
+									type: "anthropicCompaction",
+									provider: previousNative.provider,
+									content: previousNative.content,
+									...(previousNative.encryptedContent
+										? { encryptedContent: previousNative.encryptedContent }
+										: {}),
+									...(previousNative.filesText ? { filesText: previousNative.filesText } : {}),
+								}
+							: undefined,
+				})
+			: undefined;
+		const convertToLlm = summaryOptions.convertToLlm ?? defaultConvertToLlm;
+		const retainedTail = convertToLlm(recentMessages);
+		const messages = [
+			...convertToLlm([
+				...(previousSummaryMessage ? [previousSummaryMessage] : []),
+				...messagesToSummarize,
+				...turnPrefixMessages,
+			]),
+			...retainedTail,
+		];
+		try {
+			const remote = await requestAnthropicNativeCompaction(
+				model,
+				apiKey,
+				{
+					systemPrompt: summaryOptions.remoteSystemPrompt ?? [SUMMARIZATION_SYSTEM_PROMPT],
+					messages,
+					tools: summaryOptions.tools,
+					instructions: buildAnthropicCompactionInstructions(
+						summaryOptions.promptOverride ?? SUMMARIZATION_PROMPT,
+						customInstructions,
+						formatAdditionalContext(summaryOptions.extraContext).trim() || undefined,
+						describeRetainedTail(retainedTail),
+					),
+					maxTokens: Math.min(Math.floor(0.8 * reserveTokens), MAX_SUMMARY_TOKENS),
+					reasoning: resolveCompactionEffort(model, summaryOptions.thinkingLevel),
+				},
+				signal,
+				{
+					initiatorOverride: summaryOptions.initiatorOverride,
+					metadata: summaryOptions.metadata,
+					fetch: summaryOptions.fetch,
+					sessionId: summaryOptions.sessionId,
+					promptCacheKey: summaryOptions.promptCacheKey,
+					providerSessionState: summaryOptions.providerSessionState,
+					completeImpl: summaryOptions.completeImpl,
+					telemetry: summaryOptions.telemetry,
+					retry: summaryOneshotRetry(summaryOptions),
+				},
+			);
+			nativeSummary = remote.content;
+			nativeEncryptedContent = remote.encryptedContent;
+			nativeUsedTokens = calculatePromptTokens(remote.usage);
+			usedRemoteCompaction = true;
+		} catch (err) {
+			// A user/session abort is a cancellation, not a remote failure —
+			// swallowing it here would downgrade Esc into "fall back to local
+			// summarization" and keep compaction running on an aborted signal.
+			if (signal?.aborted) throw err;
+			nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
+			logger.warn("Anthropic server-side compaction failed", {
+				error: err instanceof Error ? err.message : String(err),
+				model: model.id,
+				provider: model.provider,
+			});
+		}
+	}
+
 	if (!usedRemoteCompaction && nativeCompactionError !== undefined && !summaryOptions.remoteEndpoint) {
 		throw new NativeCompactionError(nativeCompactionError);
 	}
@@ -1720,7 +1907,11 @@ export async function compact(
 	// Generate summaries (can be parallel if both needed) and merge into one
 	let summary: string;
 
-	if (usedRemoteCompaction) {
+	if (nativeSummary !== undefined) {
+		// The API wrote a real summary; it is the entry text. The replayed
+		// block below stays verbatim so it matches the opaque state.
+		summary = nativeSummary;
+	} else if (usedRemoteCompaction) {
 		// Remote compaction (V2 or V1) already compacted remotely; the durable
 		// history lives in the provider replay payload (preserveData). Skip local
 		// summarization so a successful remote compaction never pays for a second,
@@ -1779,6 +1970,22 @@ export async function compact(
 	// Compute file lists and append to summary
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	summary = upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
+	if (nativeSummary !== undefined) {
+		// The replayed block stays byte-identical to the API's summary so it
+		// matches `encryptedContent`. The harness file lists above travel
+		// separately: the converter replaces the summary message with the
+		// block and skips its text, so they would otherwise be invisible to
+		// this provider. Every other provider keeps reading the entry text.
+		const filesText = upsertFileOperations("", readFiles, modifiedFiles, fileOps.read) || undefined;
+		preserveData = withAnthropicCompactionPreserveData(preserveData, {
+			provider: model.provider,
+			content: nativeSummary,
+			...(nativeEncryptedContent ? { encryptedContent: nativeEncryptedContent } : {}),
+			...(filesText ? { filesText } : {}),
+			model: model.id,
+			usedTokens: nativeUsedTokens,
+		});
+	}
 
 	if (!firstKeptEntryId) {
 		throw new Error("First kept entry has no ID - session may need migration");

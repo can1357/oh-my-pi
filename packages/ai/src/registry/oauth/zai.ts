@@ -11,40 +11,18 @@
 
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
-import { OAuthCallbackFlow } from "./callback-server";
-import type { OAuthController, OAuthCredentials } from "./types";
+import type { AfterExchangeHook } from "../hooks/types";
 
 const env = (key: string): string | undefined => {
 	const value = process.env[key];
 	return typeof value === "string" && value.length > 0 ? value : undefined;
 };
 
-const CLIENT_ID = env("ZAI_OAUTH_CLIENT_ID") ?? "client_P8X5CMWmlaRO9gyO-KSqtg";
-const AUTHORIZE_URL = env("ZAI_OAUTH_AUTHORIZE_URL") ?? "https://chat.z.ai/api/oauth/authorize";
-const TOKEN_URL = env("ZAI_OAUTH_TOKEN_URL") ?? "https://zcode.z.ai/api/v1/oauth/token";
 const BIZ_BASE = env("ZAI_BIZ_BASE") ?? "https://api.z.ai";
 /** Business-login endpoint: exchanges the OAuth access token for a biz token. */
 const BUSINESS_LOGIN_URL = env("ZAI_BUSINESS_LOGIN_URL") ?? "https://api.z.ai/api/auth/z/login";
 /** OMP's own key name so sign-in never mutates ZCode's `zcode-api-key`. */
 const KEY_NAME = "oh-my-pi";
-// ZCode reuses this OAuth client id server-side, so the redirect must match an
-// entry registered against it: the CLI flow's `http://127.0.0.1:9999/callback`
-// (the desktop app uses the `zcode://` scheme). Any other host/port — e.g. the
-// invented `localhost:54548` — is rejected with "Redirect URI not registered
-// for this client" before the login page renders (#10245).
-const CALLBACK_PORT = 9999;
-const CALLBACK_HOSTNAME = "127.0.0.1";
-const CALLBACK_PATH = "/callback";
-const REDIRECT_URI = `http://${CALLBACK_HOSTNAME}:${CALLBACK_PORT}${CALLBACK_PATH}`;
-/** Durable minted key never expires; matches the perplexity NEVER_EXPIRES sentinel. */
-const NEVER_EXPIRES = 8.64e15;
-
-function formatErrorDetails(error: unknown): string {
-	if (error instanceof Error) {
-		return error.message;
-	}
-	return String(error);
-}
 
 /**
  * Z.ai's `{ code, msg, data, success }` envelope. The OAuth token endpoint
@@ -220,80 +198,8 @@ async function mintZaiApiKey(oauthAccessToken: string, fetchImpl: FetchImpl): Pr
 	return `${apiKey}.${secretKey}`;
 }
 
-export class ZaiOAuthFlow extends OAuthCallbackFlow {
-	#fetch: FetchImpl;
-
-	constructor(ctrl: OAuthController) {
-		super(ctrl, {
-			preferredPort: CALLBACK_PORT,
-			callbackPath: CALLBACK_PATH,
-			callbackHostname: CALLBACK_HOSTNAME,
-			// Pin the exact registered redirect: a busy port must fail fast, not
-			// fall back to a random port the provider's allowlist would reject.
-			redirectUri: REDIRECT_URI,
-		});
-		this.#fetch = ctrl.fetch ?? fetch;
-	}
-
-	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
-		// No PKCE: matches ZCode's authorize request verbatim.
-		const authParams = new URLSearchParams({
-			redirect_uri: redirectUri,
-			response_type: "code",
-			client_id: CLIENT_ID,
-			state,
-		});
-		return {
-			url: `${AUTHORIZE_URL}?${authParams.toString()}`,
-			instructions:
-				"Complete Z.ai login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted.",
-		};
-	}
-
-	async exchangeToken(code: string, state: string, redirectUri: string): Promise<OAuthCredentials> {
-		if (this.ctrl.signal?.aborted) {
-			throw new AIError.LoginCancelledError(`OAuth callback cancelled: ${this.ctrl.signal.reason}`);
-		}
-
-		let body: unknown;
-		try {
-			// Non-standard token body (no grant_type/code_verifier): matches ZCode.
-			body = await postJson(TOKEN_URL, { provider: "zai", code, redirect_uri: redirectUri, state }, {}, this.#fetch);
-		} catch (error) {
-			throw new AIError.OAuthError(
-				`Token exchange request failed. url=${TOKEN_URL}; redirect_uri=${redirectUri}; details=${formatErrorDetails(error)}`,
-				{ kind: "token-exchange", provider: "zai", cause: error },
-			);
-		}
-
-		const data = unwrapEnvelope(body, "token exchange") as
-			| { zai?: { access_token?: unknown }; user?: { email?: unknown; id?: unknown } }
-			| undefined;
-		const oauthAccessToken = trimmedString(data?.zai?.access_token);
-		if (!oauthAccessToken) {
-			throw new AIError.OAuthError("Z.ai token response missing access token", {
-				kind: "validation",
-				provider: "zai",
-			});
-		}
-
-		const mintedKey = await mintZaiApiKey(oauthAccessToken, this.#fetch);
-
-		return {
-			access: mintedKey,
-			refresh: "",
-			expires: NEVER_EXPIRES,
-			email: typeof data?.user?.email === "string" ? data.user.email : undefined,
-			accountId:
-				typeof data?.user?.id === "string" || typeof data?.user?.id === "number" ? String(data.user.id) : undefined,
-		};
-	}
-}
-
-/**
- * Login with Z.ai OAuth (GLM Coding Plan).
- */
-export async function loginZaiOAuth(ctrl: OAuthController): Promise<OAuthCredentials> {
-	const flow = new ZaiOAuthFlow(ctrl);
-	return flow.login();
-}
+/** Replaces the short-lived OAuth token with the durable key minted by the Z.ai business APIs. */
+export const zaiMintKeyHook: AfterExchangeHook = async (credentials, context) => ({
+	...credentials,
+	access: await mintZaiApiKey(credentials.access, context.fetch),
+});

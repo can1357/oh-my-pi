@@ -37,6 +37,11 @@ impl Win32Ax {
 		}
 	}
 
+	#[allow(
+		clippy::missing_const_for_fn,
+		clippy::unnecessary_wraps,
+		reason = "in test configuration handle matching can return an error"
+	)]
 	fn element(handle: &AxHandle) -> CoreResult<&UIElement> {
 		match handle {
 			AxHandle::Uia(element) => Ok(element),
@@ -60,6 +65,7 @@ impl Win32Ax {
 		self.displays.as_deref()
 	}
 
+	#[allow(clippy::suboptimal_flops, reason = "clarity of physical coordinate calculation")]
 	fn logical_bounds(&mut self, left: i32, top: i32, right: i32, bottom: i32) -> Option<AxBounds> {
 		let displays = self.display_layout()?;
 		let display = displays
@@ -167,8 +173,7 @@ impl AxBackend for Win32Ax {
 		let walker = self.walker()?;
 		let child_count = walker
 			.get_children(element)
-			.map(|children| children.len().min(u32::MAX as usize) as u32)
-			.unwrap_or(0);
+			.map_or(0, |children| children.len().min(u32::MAX as usize) as u32);
 		let bounds = element.get_bounding_rectangle().ok().and_then(|rect| {
 			self.logical_bounds(rect.get_left(), rect.get_top(), rect.get_right(), rect.get_bottom())
 		});

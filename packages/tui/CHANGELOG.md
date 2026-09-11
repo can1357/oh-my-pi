@@ -2,6 +2,71 @@
 
 ## [Unreleased]
 
+## [18.1.17] - 2026-09-10
+
+### Added
+
+- Editor history can retain local draft snapshots with their paste expansions and host-owned attachment restoration, without writing them to persistent history ([#11524](https://github.com/can1357/oh-my-pi/pull/11524) by [@camjac251](https://github.com/camjac251)).
+- Added an optional Vim-style modal editing layer to `Editor`, off unless `setVimMode(true)` is called: Insert, Normal, and Visual/Visual-Line with motions, count prefixes, and operators. `j`/`k` keep Vim's desired column, so passing over a shorter line does not collapse it, and `$` sticks to end-of-line. `p`/`P` paste from an internal register; yanks are surfaced to the host through `onYank` so it can route them to the system clipboard.
+- Vim mode now exposes its chrome to hosts: `Editor.vimEnabled`, `Editor.vimPending` (the half-typed command, e.g. `2d`), and `Editor.vimSelectedLines` (Visual selection height). `onVimModeChange` additionally fires when the pending command or selection size changes, not only on mode switches.
+- Vim mode now understands text objects: `iw`/`aw` (and `W`), quotes `i"`/`a'`/`` a` ``, bracket pairs `i(`/`a{`/`i[`/`a<` (nesting-aware and multi-line), and paragraphs `ip`/`ap`. They work under an operator (`diw`, `ca(`) and in Visual mode (`viw`), with counts (`d2aw`). Previously `i` after an operator fell through to Insert mode, so `diw` typed text instead of deleting a word.
+- Vim mode's `c` operator now actually enters Insert mode (`cw`, `cip`, `c` in Visual); it also follows Vim's `cw`-acts-like-`ce` quirk and parks the cursor correctly when the changed range is empty (`ci"` between bare quotes).
+- Added `Terminal.setCursorShape()` (DECSCUSR), restored to the terminal's configured shape on teardown and crash cleanup.
+
+### Changed
+
+- The software cursor now reflects the Vim mode: a reverse-video block in Normal/Visual and an underline in Insert. Both occupy one cell, so layout is unchanged, and non-modal editors keep the reverse-video block they always had.
+
+## [18.1.15] - 2026-09-08
+
+### Fixed
+
+- Stopped long flicker when moving or resizing an omp pane in Warp. Resize repaints in place there after the drag settles (override with `PI_TUI_RESIZE_IN_PLACE=0`), with no alternate-screen borrow, no scrollback replay, blanked live rows so shrink drags cannot archive unfinished rows, and overlay toggle echoes repainting the modal instead of probing ([#11247](https://github.com/can1357/oh-my-pi/pull/11247) by [@H4vC](https://github.com/H4vC)).
+
+## [18.1.14] - 2026-09-07
+
+### Fixed
+
+- `extractMarkdownLinks()` now returns one-row visible labels for formatted and multiline links ([#11086](https://github.com/can1357/oh-my-pi/pull/11086) by [@mustafaabidali](https://github.com/mustafaabidali)).
+
+## [18.1.13] - 2026-09-07
+
+### Fixed
+
+- Fixed notifications never arriving in a Herdr pane. Herdr multiplexes panes like tmux but swallows bare OSC 9 / OSC 99 and has no passthrough envelope, so a backgrounded pane got no signal at all; delivery now goes through `herdr notification show` (a waiting question or an error rings `request`, a settled turn rings `done`), and the in-band write stays as the fallback when the pane id or the `herdr` binary is missing.
+
+## [18.1.12] - 2026-09-06
+
+### Fixed
+
+- Avoid inserting a trailing space when auto-completing directory paths with `@`, and keep autocomplete open when accepting a directory with Tab or Enter.
+- Horizontal wheel reports (the sideways drift of a two-finger trackpad scroll) no longer decode as a vertical wheel direction, so fullscreen selectors such as `/copy` and the rewind picker stop jumping up and back down at the end of a scroll gesture.
+
+## [18.1.9] - 2026-09-04
+
+### Added
+
+- Added Markdown hyperlink target resolution while preserving the displayed URL text.
+
+## [18.1.6] - 2026-09-03
+
+### Fixed
+
+- Fixed the band composer layout so the status line remains visible and no longer causes the prompt to shift unexpectedly when the top border is empty.
+
+## [18.1.5] - 2026-09-03
+
+### Fixed
+
+- Fixed terminal query support in supervised PTY processes, including cursor position reports.
+- Fixed paste-and-submit handling so an Enter keypress received with a bracketed paste is delivered to the previously focused component; `Editor.onLargePaste` now receives `PasteOptions` describing the queued submit.
+
+## [18.1.3] - 2026-09-02
+
+### Fixed
+
+- Fixed the TUI tearing in Herdr panes so the live viewport updates as one frame instead of leaving the top frozen while only the bottom refreshed. Pane identity vars (`HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`) also count as inside Herdr, not only `HERDR_ENV=1`. A DECRPM “unrecognized” report keeps synchronized output on; a “permanently reset” report, or a custom terminal that omits the DECRPM status, still turns it off.
+
 ## [18.1.0] - 2026-09-01
 
 ### Fixed

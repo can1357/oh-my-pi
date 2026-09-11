@@ -558,6 +558,138 @@ describe("read tool URL handling", () => {
 		expect(htmlToMarkdownSpy).not.toHaveBeenCalled();
 	});
 
+	it("prefers Firecrawl scrape first when providers.fetch is set to firecrawl", async () => {
+		const originalApiKey = process.env.FIRECRAWL_API_KEY;
+		process.env.FIRECRAWL_API_KEY = "test-firecrawl-key";
+		try {
+			const session = createSession({ "providers.fetch": "firecrawl" });
+			const tool = new ReadTool(session);
+			const pageUrl = "https://example.com/firecrawl-page";
+			const requests: { url: string; authorization: string | null; body: unknown }[] = [];
+			session.fetch = asGlobalFetch(async (input, init) => {
+				if (String(input) === "https://api.firecrawl.dev/v2/scrape") {
+					requests.push({
+						url: String(input),
+						authorization: new Headers(init?.headers).get("authorization"),
+						body: JSON.parse(String(init?.body)),
+					});
+					return new Response(
+						JSON.stringify({
+							success: true,
+							data: {
+								markdown:
+									"Firecrawl-rendered content that is comfortably longer than one hundred characters. ".repeat(
+										2,
+									),
+								metadata: { sourceURL: pageUrl, statusCode: 200 },
+							},
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response("blocked", { status: 500, statusText: "Blocked" });
+			});
+			const pageHtml = "<html><body><main><h1>Firecrawl Page</h1></main></body></html>";
+			const ensureToolSpy = vi.spyOn(toolsManager, "ensureTool");
+			const htmlToMarkdownSpy = vi.spyOn(natives, "htmlToMarkdown");
+			vi.spyOn(scrapers, "loadPage").mockImplementation(async requestedUrl => {
+				if (requestedUrl === pageUrl) {
+					return {
+						ok: true,
+						status: 200,
+						contentType: "text/html",
+						finalUrl: pageUrl,
+						content: pageHtml,
+					};
+				}
+
+				return {
+					ok: false,
+					status: 404,
+					contentType: "text/plain",
+					finalUrl: requestedUrl,
+					content: "",
+				};
+			});
+
+			const result = await tool.execute("fetch-firecrawl-html", { path: pageUrl });
+			const textBlock = result.content.find(content => content.type === "text");
+
+			expect(result.details?.method).toBe("firecrawl");
+			expect(textBlock?.type).toBe("text");
+			expect(textBlock?.text).toContain("Firecrawl-rendered content");
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.authorization).toBe("Bearer test-firecrawl-key");
+			expect(requests[0]?.body).toMatchObject({ url: pageUrl, formats: ["markdown"] });
+			expect(ensureToolSpy).not.toHaveBeenCalled();
+			expect(htmlToMarkdownSpy).not.toHaveBeenCalled();
+		} finally {
+			if (originalApiKey === undefined) delete process.env.FIRECRAWL_API_KEY;
+			else process.env.FIRECRAWL_API_KEY = originalApiKey;
+		}
+	});
+
+	it("retries a retryable Firecrawl response before falling through", async () => {
+		const originalApiKey = process.env.FIRECRAWL_API_KEY;
+		process.env.FIRECRAWL_API_KEY = "test-firecrawl-key";
+		try {
+			const session = createSession({ "providers.fetch": "firecrawl" });
+			const tool = new ReadTool(session);
+			const pageUrl = "https://example.com/firecrawl-retry";
+			let scrapeCalls = 0;
+			session.fetch = asGlobalFetch(async input => {
+				if (String(input) === "https://api.firecrawl.dev/v2/scrape") {
+					scrapeCalls++;
+					if (scrapeCalls === 1) {
+						return new Response(JSON.stringify({ error: "temporarily unavailable" }), { status: 503 });
+					}
+					return new Response(
+						JSON.stringify({
+							success: true,
+							data: {
+								markdown:
+									"Firecrawl content served on the retry attempt, comfortably over one hundred characters. ".repeat(
+										2,
+									),
+							},
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response("blocked", { status: 500, statusText: "Blocked" });
+			});
+			vi.spyOn(scrapers, "loadPage").mockImplementation(async requestedUrl => {
+				if (requestedUrl === pageUrl) {
+					return {
+						ok: true,
+						status: 200,
+						contentType: "text/html",
+						finalUrl: pageUrl,
+						content: "<html><body><main><h1>Firecrawl Retry</h1></main></body></html>",
+					};
+				}
+
+				return {
+					ok: false,
+					status: 404,
+					contentType: "text/plain",
+					finalUrl: requestedUrl,
+					content: "",
+				};
+			});
+
+			const result = await tool.execute("fetch-firecrawl-retry", { path: pageUrl });
+			const textBlock = result.content.find(content => content.type === "text");
+
+			expect(scrapeCalls).toBe(2);
+			expect(result.details?.method).toBe("firecrawl");
+			expect(textBlock?.text).toContain("served on the retry attempt");
+		} finally {
+			if (originalApiKey === undefined) delete process.env.FIRECRAWL_API_KEY;
+			else process.env.FIRECRAWL_API_KEY = originalApiKey;
+		}
+	});
+
 	it("supports offset and limit selectors on URL reads", async () => {
 		const session = createSession();
 		const tool = new ReadTool(session);

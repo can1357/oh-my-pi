@@ -1,0 +1,9 @@
+auth "sakana" {
+	name "Sakana AI"
+	login "api-key" {
+		auth-url "https://console.sakana.ai/api-keys"
+		instructions "Copy your API key from the Sakana AI console"
+		prompt "Paste your Sakana AI API key" placeholder="sk-..."
+		validate "models-endpoint" url="https://api.sakana.ai/v1/models"
+	}
+}

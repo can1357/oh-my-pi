@@ -93,6 +93,7 @@ export class SpeechEnhancer {
 						},
 						{
 							apiKey: registry.resolver(model, sessionId),
+							sessionId,
 							maxTokens: ANSWER_MAX_TOKENS,
 							disableReasoning: true,
 							metadata,

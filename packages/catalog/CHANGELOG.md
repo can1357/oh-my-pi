@@ -2,6 +2,159 @@
 
 ## [Unreleased]
 
+### Added
+
+- `supports-server-compaction` compat axis (`compat.supportsServerCompaction`): whether a model line accepts Anthropic server-side compaction (`compact-2026-01-12`). Class rules enable it for Opus 4.6+, Sonnet 4.6+, and Fable/Mythos 5 on every Anthropic-messages host; the default is `false`.
+### Fixed
+
+- Amazon Bedrock OpenAI models, plus unclassified profiles such as opaque application-inference-profile ARNs, now carry the compatibility policy required to preserve image-bearing tool results ([#11681](https://github.com/can1357/oh-my-pi/issues/11681)).
+
+## [18.1.17] - 2026-09-10
+
+### Added
+
+- Added DeepSeek V4.1 Flash on OpenRouter with image input and low/high/max reasoning levels ([#11592](https://github.com/can1357/oh-my-pi/pull/11592) by [@mazzanfar](https://github.com/mazzanfar)).
+- Added DeepSeek cost estimates that follow published peak/off-peak rates.
+- Added dated, announced price changes to the catalog, so rates switch on their effective date (e.g. DeepSeek Pro moving to Flash rates).
+- Added Command Code as a built-in provider with API-key login, live model discovery, per-model pricing, native OpenAI/Anthropic-compatible routing, cache-aware token usage, and TTFT metrics ([#11391](https://github.com/can1357/oh-my-pi/pull/11391) by [@CherkaSSH](https://github.com/CherkaSSH)).
+
+### Fixed
+
+- Fixed Command Code models outside the verified effort registry offering unsupported reasoning effort controls, and bundled the live Command Code catalog so fresh installs resolve the default model without waiting for discovery ([#11595](https://github.com/can1357/oh-my-pi/pull/11595) by [@H4vC](https://github.com/H4vC)).
+- Fixed the bundled `deepseek-flash` row shipping without context limits: it now carries its documented 1M context / 384K output so offline context accounting enforces the real window.
+
+## [18.1.16] - 2026-09-09
+
+- Updated Fire Pass (`firepass`) login validation probe to `accounts/fireworks/routers/glm-5p2-fast` and bundled `glm-5.2-fast` and `kimi-k3-fast` models in place of decommissioned `kimi-k2.6-turbo` ([#10859](https://github.com/can1357/oh-my-pi/pull/10859) by [@olegpulatov](https://github.com/olegpulatov)).
+
+## [18.1.14] - 2026-09-07
+
+### Fixed
+
+- Bills Astra API requests above 272K input at the documented 2x input / 1.5x output long-context tier; the Codex subscription route stays exempt with free cache writes ([#11157](https://github.com/can1357/oh-my-pi/pull/11157) by [@H4vC](https://github.com/H4vC)).
+- Fixed Astra's extended window over-advertising input by 128K; it now uses the documented 922K input cap inside the 1.05M total context ([#11157](https://github.com/can1357/oh-my-pi/pull/11157) by [@H4vC](https://github.com/H4vC)).
+- Fixed explicit Codex context-window overrides widening past the server-honored maximum; they now clamp to the documented ceiling like upstream Codex ([#11157](https://github.com/can1357/oh-my-pi/pull/11157) by [@H4vC](https://github.com/H4vC)).
+- Fixed Codex Astra using its larger window without opt-in; its default is 272K and Extended Context enables at least the documented 1.05M window ([#11126](https://github.com/can1357/oh-my-pi/pull/11126) by [@H4vC](https://github.com/H4vC)).
+- Fixed GitHub Copilot enterprise-only model ids inheriting another provider's wire routing (e.g. `gpt-5.6-sol-fast` pinning every request to the `-none` sibling id regardless of thinking level) ([#11128](https://github.com/can1357/oh-my-pi/pull/11128) by [@H4vC](https://github.com/H4vC)).
+
+## [18.1.13] - 2026-09-07
+
+### Fixed
+
+- Fixed GPT-6 Astra compacting early at a 272K-token window with its full window gated behind `/extended-context`: it now defaults to the documented 1.05M-token window.
+
+## [18.1.12] - 2026-09-06
+
+### Added
+
+- Added Muse Code as a provider with Muse Spark models and live account-scoped discovery.
+- Muse Code subscriptions now resolve a compact edit-prompt variant, cutting recurring per-request tool bytes without touching other providers.
+- Added Meta's new `max` reasoning effort tier to Muse Spark 1.3 (standard) on the Meta Model API and Muse Code.
+
+### Fixed
+
+- Fixed OpenCode Go/Zen live model discovery (`GET /v1/models`) missing `x-opencode-session` and omp's `User-Agent`: discovery requests now attribute with the stable install id so the requests OpenCode flags as `Bun fetch` carry the required session header.
+	- Fixed GPT-6 Astra requests through GitHub Copilot failing with an unsupported endpoint error ([#10874](https://github.com/can1357/oh-my-pi/pull/10874) by [@xpcmdshell](https://github.com/xpcmdshell)).
+	- Fixed GPT-6 Astra showing as free with a 272K-token window in the OpenAI Codex catalog by applying its documented pricing; `/extended-context` enables the wire-advertised 872K-token maximum ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).
+	- Made extended-context catalog rebuilds faster by resolving each model's maximum window once per process ([#11039](https://github.com/can1357/oh-my-pi/pull/11039) by [@H4vC](https://github.com/H4vC)).
+
+## [18.1.9] - 2026-09-04
+
+### Added
+
+- Added the `delegation-bias` capability for tuning how agents delegate work to subagents.
+
+### Changed
+
+- Adjusted subagent delegation for GPT-6 and newer OpenAI models to reduce unnecessary delegation.
+
+### Fixed
+
+- Fixed `/login zai` for Z.AI GLM Coding Plan by supporting the provider’s updated authentication flow, including local desktop sign-in, remote paste-code completion, and the configurable `ZAI_OAUTH_REDIRECT_URI`.
+
+## [18.1.8] - 2026-09-03
+
+### Added
+
+- Added GPT-6 Astra to the OpenAI Codex model catalog, including support for configuration updates and requests using the freeform `apply_patch` tool.
+
+### Fixed
+
+- Fixed `omp models refresh` so revoked ChatGPT account tokens no longer prevent the remaining OpenAI Codex models from being discovered.
+
+## [18.1.6] - 2026-09-03
+
+### Added
+
+- Added catalog-delivered model intelligence scores and estimated output throughput to help compare model capabilities and performance.
+
+### Changed
+
+- Improved model search and selection so configured roles, provider preferences, and recent usage are prioritized while browsing and filtering models.
+
+## [18.1.5] - 2026-09-03
+
+### Added
+
+- Added the Abliteration (abliteration.ai) provider, including its documented abliterated-model catalog and live model discovery.
+- Added the GLM 5.3 Promo 50 model.
+- Added computer-use capability metadata to model configurations.
+- Added declarative provider authentication policies covering login, refresh, environment-key, and credential behavior, with generated compatibility data and typed accessors.
+
+### Changed
+
+- Gemini 3.8 Flash now supports reasoning modes and image inputs.
+- Updated the GitHub Copilot API version to 2026-08-01.
+- Reduced input pricing for the minimax/minimax-m2 model.
+- Renamed Meta Model API contributor SKUs to use the Muse Spark 1.x (C) naming.
+
+### Fixed
+
+- GitHub Copilot model discovery now respects the Copilot CLI identity, ensuring eligible enterprise and experimental models are available.
+- Fixed startup failures when discovering Bedrock-style Mistral Mixtral models.
+- Fixed Muse Spark 1.3 contributor models on OpenCode gateways so they use the correct Responses API route.
+- Updated Meta and OpenCode Muse Spark 1.3 model metadata and capabilities, including context windows, reasoning levels, image input, pricing, and model naming; media-only Muse SKUs are no longer presented as chat models.
+
+## [18.1.4] - 2026-09-02
+
+### Changed
+
+- Enabled Cursor tool schema projection for supported models
+
+### Fixed
+
+- Antigravity and Gemini CLI now collapse every Gemini Flash generation from 3.6 on (`gemini-3.8-flash-low/-medium/-high` and the `-tiered` alias, and future revisions) into one routed `gemini-<rev>-flash` entry via a revision-templated `variant-family`, instead of surfacing raw per-level ids until a per-revision rule lands.
+
+## [18.1.3] - 2026-09-02
+
+### Added
+
+- Added support for Claude Fable 5.1
+
+### Changed
+
+- Updated pricing and context limits for various Claude models
+
+### Fixed
+
+- Claude Sonnet 5 no longer advertises unsupported mid-conversation system messages.
+- Custom GLM 5.2 models on `alibaba-coding-plan` (and other blanket-GLM hosts) no longer crash startup with `AmbiguousOverlapError` ([#10553](https://github.com/can1357/oh-my-pi/issues/10553)).
+- Gemini 3.7 Flash no longer offers the `minimal` thinking effort on direct google-level hosts (`google`, `google-vertex`, `opencode-zen`), which reject `thinkingLevel: MINIMAL` with a 400; budget and reasoning-effort resellers keep the tier ([#10543](https://github.com/can1357/oh-my-pi/issues/10543)).
+- Fixed Alibaba Token Plan discovery for `qwen3.8-flash` to include its context limits, reasoning support, and image input.
+- Z.AI GLM-5.3-Flash now uses the native API instead of failing through the unsupported Anthropic-compatible route ([#10539](https://github.com/can1357/oh-my-pi/issues/10539)).
+
+## [18.1.2] - 2026-09-01
+
+### Added
+
+- Added support for turn-scoped system messages, changing tools during a conversation, and setting effort on individual messages.
+- Added support for Claude Fable 5.1 models, with improved thinking-prefix handling across supported Claude models.
+- Added DeepSeek V4 Flash Vision Exp, Mercury 2.5 Preview, and Xiaomi MiMo V2.5 Pro UltraSpeed models.
+
+### Changed
+
+- Updated model pricing and context-window limits.
+
 ## [18.1.0] - 2026-09-01
 
 ### Added

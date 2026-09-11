@@ -1,0 +1,32 @@
+auth "openrouter" {
+	name "OpenRouter"
+	login "oauth-code" {
+		// No client registration: the S256 verifier is the only proof of identity.
+		// OpenRouter never echoes state, so state validation is disabled.
+		authorize-url "https://openrouter.ai/auth"
+		pkce #true
+		state "none"
+		authorize-params standard=#false {
+			callback_url "{redirect_uri}"
+			code_challenge "{code_challenge}"
+			code_challenge_method "S256"
+		}
+		callback port=54549 path="/callback"
+		token url="https://openrouter.ai/api/v1/auth/keys" body="json" standard=#false {
+			params {
+				code "{code}"
+				code_verifier "{code_verifier}"
+				code_challenge_method "S256"
+			}
+		}
+		credential {
+			access "key"
+			expires "never"
+		}
+		// The key endpoint authenticates keys; /models returns 200 for any bearer.
+		paste-key prefix="sk-or-" validate-url="https://openrouter.ai/api/v1/auth/key"
+	}
+	refresh "none"
+	// Both browser sign-in and key paste yield the durable key; stored as a plain api_key credential.
+	result "api-key"
+}

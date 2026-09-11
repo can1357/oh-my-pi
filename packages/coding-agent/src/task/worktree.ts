@@ -6,6 +6,7 @@ import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { formatBytes, getWorktreeDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import type { SettingValue } from "../config/settings-schema";
 import { withRepoLock } from "../utils/repo-lock";
 import { writeIsolationOwner } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
@@ -57,7 +58,7 @@ export async function getRepoRoot(cwd: string): Promise<string> {
 	// mutating the surrounding Git tree behind jj's back.
 	if (vcs.isPureJj(cwd)) {
 		throw new Error(
-			"Isolated task execution requires a Git checkout, but this workspace is pure Jujutsu (`.jj/` without a colocated `.git/`). Run `jj git init --colocate` to add a Git checkout, or set `task.isolation.mode: none` to disable task isolation.",
+			"Isolated task execution requires a Git checkout, but this workspace is pure Jujutsu (`.jj/` without a colocated `.git/`). Run `jj git init --colocate` to add a Git checkout, or set `task.isolation.enabled: false` to disable task isolation.",
 		);
 	}
 
@@ -141,7 +142,7 @@ export class IsolationBaselineTooLargeError extends Error {
 				`over the ${formatBytes(ISOLATION_BASELINE_MAX_CONTENT_BYTES)} isolation-snapshot budget. ` +
 				`Isolated task snapshots buffer this content in memory, so proceeding would exhaust the host. ` +
 				`Commit or gitignore the bulk (untracked files that aren't ignored are the usual culprit), ` +
-				`or set \`task.isolation.mode: none\` to run tasks without isolation.`,
+				`or set \`task.isolation.enabled: false\` to run tasks without isolation.`,
 		);
 		this.name = "IsolationBaselineTooLargeError";
 	}
@@ -411,37 +412,15 @@ export async function applyNestedPatches(
 // returns the merged-view path together with the resolved kind.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * User-facing isolation mode names exposed by the `task.isolation.mode`
- * setting. Mapped to a backend-kind hint via {@link parseIsolationMode};
- * the PAL's `iso_resolve` then falls back through the kind order
- * whenever the hint isn't available on the current host.
- */
-export type TaskIsolationMode =
-	| "none"
-	| "auto"
-	| "apfs"
-	| "btrfs"
-	| "zfs"
-	| "reflink"
-	| "overlayfs"
-	| "projfs"
-	| "block-clone"
-	| "rcopy"
-	// Legacy values, accepted for back-compat with pre-PAL settings files.
-	| "worktree"
-	| "fuse-overlay"
-	| "fuse-projfs";
+/** User-facing backend names exposed by the `isolation.backend` setting. */
+export type IsolationBackendSetting = SettingValue<"isolation.backend">;
 
 /**
- * Translate a {@link TaskIsolationMode} string to an [`IsoBackendKind`]
- * the PAL can act on. `"none"` returns `null` (caller skips isolation
- * entirely); `"auto"` returns `undefined` (no hint — let the resolver
- * pick). Anything else returns the matching kind.
+ * Translate an {@link IsolationBackendSetting} to the native backend hint.
+ * `"auto"` returns `undefined`, allowing the PAL resolver to pick.
  */
-export function parseIsolationMode(mode: TaskIsolationMode): IsoBackendKind | undefined {
-	switch (mode) {
-		case "none":
+export function parseIsolationBackend(backend: IsolationBackendSetting): IsoBackendKind | undefined {
+	switch (backend) {
 		case "auto":
 			return undefined;
 		case "apfs":
@@ -453,16 +432,35 @@ export function parseIsolationMode(mode: TaskIsolationMode): IsoBackendKind | un
 		case "reflink":
 			return IsoBackendKind.LinuxReflink;
 		case "overlayfs":
-		case "fuse-overlay":
 			return IsoBackendKind.Overlayfs;
 		case "projfs":
-		case "fuse-projfs":
 			return IsoBackendKind.Projfs;
 		case "block-clone":
 			return IsoBackendKind.WindowsBlockClone;
 		case "rcopy":
-		case "worktree":
 			return IsoBackendKind.Rcopy;
+	}
+}
+
+/** Return the canonical setting label for a resolved native backend. */
+export function formatIsolationBackend(backend: IsoBackendKind): Exclude<IsolationBackendSetting, "auto"> {
+	switch (backend) {
+		case IsoBackendKind.Apfs:
+			return "apfs";
+		case IsoBackendKind.Btrfs:
+			return "btrfs";
+		case IsoBackendKind.Zfs:
+			return "zfs";
+		case IsoBackendKind.LinuxReflink:
+			return "reflink";
+		case IsoBackendKind.Overlayfs:
+			return "overlayfs";
+		case IsoBackendKind.Projfs:
+			return "projfs";
+		case IsoBackendKind.WindowsBlockClone:
+			return "block-clone";
+		case IsoBackendKind.Rcopy:
+			return "rcopy";
 	}
 }
 
@@ -747,7 +745,7 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 
 	const tmpDir = path.join(os.tmpdir(), `omp-branch-${Snowflake.next()}`);
 	try {
-		await repo.worktreeAdd(tmpDir, opts.branchName, false);
+		await repo.worktreeAdd(tmpDir, opts.branchName, { detach: false, clone: false });
 		const agentCommits = await isolationRepo.revListRange(baselineSha, opts.isolationHead);
 		const baselineWip = [opts.baseline.root.staged, opts.baseline.root.unstaged, opts.baseline.root.untrackedPatch];
 		// Seed the parent ODB with the dirty-side blobs needed by `git apply
@@ -886,7 +884,7 @@ export async function commitToBranch(
 			if (leftoverPatch.trim()) {
 				const tmpDir = path.join(os.tmpdir(), `omp-branch-${Snowflake.next()}`);
 				try {
-					await repo.worktreeAdd(tmpDir, branchName, false);
+					await repo.worktreeAdd(tmpDir, branchName, { detach: false, clone: false });
 					const msg = (commitMessage && (await commitMessage(leftoverPatch))) || fallbackMessage;
 					await commitPatchToBranchWorktree(tmpDir, taskId, leftoverPatch, msg);
 				} finally {
@@ -901,7 +899,7 @@ export async function commitToBranch(
 		branchCreated = true;
 		const tmpDir = path.join(os.tmpdir(), `omp-branch-${Snowflake.next()}`);
 		try {
-			await repo.worktreeAdd(tmpDir, branchName, false);
+			await repo.worktreeAdd(tmpDir, branchName, { detach: false, clone: false });
 
 			const msg = (commitMessage && (await commitMessage(rootPatch))) || fallbackMessage;
 			const wip = baselineHasRootWip(baseline.root) ? baseline.root : undefined;

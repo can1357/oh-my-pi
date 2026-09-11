@@ -1,4 +1,4 @@
-import { USER_AGENT } from "@oh-my-pi/pi-utils";
+import { USER_AGENT, getInstallId } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { toClinePassPublicModelId } from "../cline-pass-model-id";
 import {
@@ -12,7 +12,7 @@ import {
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision } from "../compat/revision";
-import { classifyModel, discoveryVocabulary } from "../compat/taxonomy";
+import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
 import {
 	DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
 	fetchOpenAICompatibleModels,
@@ -33,9 +33,11 @@ import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gat
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
 import {
 	COPILOT_API_HEADERS,
+	COPILOT_DISCOVERY_HEADERS,
 	discoverGitHubCopilotApiEndpoint,
 	getGitHubCopilotBaseUrl,
 	isPersonalGitHubCopilotBaseUrl,
+	mergeCopilotApiHeaders,
 	parseGitHubCopilotApiKey,
 } from "../wire/github-copilot";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
@@ -108,6 +110,8 @@ export interface ModelsDevModel {
 	};
 	status?: string;
 	provider?: { npm?: string };
+	int?: number;
+	tps?: number;
 }
 
 function toModelName(value: unknown, fallback: string): string {
@@ -2428,8 +2432,39 @@ export function fireworksModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
-// 7.6 Fire Pass (Fireworks Kimi K2.6 Turbo subscription)
+// 7.6 Fire Pass (Fireworks subscription)
 // ---------------------------------------------------------------------------
+
+// Pricing and limits are the published Fire Pass router tariff
+// (https://docs.fireworks.ai/firepass), not upstream-discoverable: dedicated
+// `fpk_…` keys never authorize `/v1/models`, so this seed is the authoritative
+// source. cacheRead is 0.1x input; cacheWrite stays 0 (not billed separately).
+export const FIREPASS_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "glm-5.2-fast",
+		name: "GLM 5.2 Fast (Fire Pass)",
+		api: "openai-completions",
+		provider: "firepass",
+		baseUrl: "https://api.fireworks.ai/inference/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 2.1, output: 6.6, cacheRead: 0.21, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+	},
+	{
+		id: "kimi-k3-fast",
+		name: "Kimi K3 Fast (Fire Pass)",
+		api: "openai-completions",
+		provider: "firepass",
+		baseUrl: "https://api.fireworks.ai/inference/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 4.5, output: 22.5, cacheRead: 0.45, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+	},
+];
 
 export interface FirepassModelManagerConfig {
 	apiKey?: string;
@@ -2438,8 +2473,8 @@ export interface FirepassModelManagerConfig {
 }
 
 /**
- * Fire Pass is a Fireworks subscription product that exposes a single router
- * model (Kimi K2.6 Turbo) under `accounts/fireworks/routers/kimi-k2p6-turbo`.
+ * Fire Pass is a Fireworks subscription product that exposes router models
+ * (GLM 5.2 Fast, Kimi K3 Fast) under `accounts/fireworks/routers/<id>`.
  * The dedicated `fpk_…` keys do not authorize `/v1/models`, so this manager
  * never performs dynamic discovery — the bundled catalog entry is canonical.
  * See https://docs.fireworks.ai/firepass.
@@ -2958,6 +2993,7 @@ function openCodeBaseUrlForApi(api: Api, basePath: string): string {
 // Runtime-discovered rows cached before model-identity corrections retain
 // stale capability metadata until the authoritative catalog TTL expires.
 const OPENCODE_CACHE_MIGRATION_MODEL_IDS = ["glm-5.3-flash"] as const;
+const OPENCODE_ZEN_CACHE_MIGRATION_MODEL_IDS = ["gemini-3.7-flash"] as const;
 
 // Billing-variant suffixes the OpenCode gateways append to a base model id
 // without changing its transport (`deepseek-v4-flash-free`,
@@ -3026,8 +3062,12 @@ function openCodeModelManagerOptions(
 		dynamicModelsAuthoritative: true,
 		// Per-id route pins and capability migrations are cache identity:
 		// without this, rows cached before a correction keep the stale route or
-		// thinking surface until TTL expiry (#8957, #9960).
-		dropCachedModelIdsOnStaticMismatch: [...apiRouteExactModelIds(providerId), ...OPENCODE_CACHE_MIGRATION_MODEL_IDS],
+		// thinking surface until TTL expiry (#8957, #9960, #10543).
+		dropCachedModelIdsOnStaticMismatch: [
+			...apiRouteExactModelIds(providerId),
+			...OPENCODE_CACHE_MIGRATION_MODEL_IDS,
+			...(providerId === "opencode-zen" ? OPENCODE_ZEN_CACHE_MIGRATION_MODEL_IDS : []),
+		],
 		modelsDev: {
 			fetch: () => fetchRevalidatedWellKnownModelsWithTimeout(config?.fetch),
 			map: payload => {
@@ -3047,6 +3087,11 @@ function openCodeModelManagerOptions(
 					provider: providerId,
 					baseUrl: discoveryBaseUrl,
 					apiKey,
+					// Live discovery hits the OpenCode gateway outside any
+					// conversation: attribute with the stable install id
+					// (x-opencode-session required from 09/06) and omp's UA
+					// instead of Bun's default.
+					headers: { "User-Agent": USER_AGENT, "x-opencode-session": getInstallId() },
 					mapModel: (entry, defaults) => {
 						const reference = references.get(defaults.id);
 						const name = toModelName(entry.name, reference?.name ?? defaults.name);
@@ -3054,13 +3099,13 @@ function openCodeModelManagerOptions(
 						// stencil fallback; the fallback never selects a transport.
 						const api = resolveApi(defaults.id, defaults.api);
 						const baseUrl = openCodeBaseUrlForApi(api, basePath);
-						const identity = classifyModel(providerId, defaults.id, { lenient: true });
-						if (identity.class === "meta" && identity.family === undefined) {
-							// Gateway lists these as bare ids with no capability
-							// metadata and no local bundled row, so the generic
-							// defaults would hide the effort dial
-							// (`reasoning: false`). Keep the pinned/fallback route
-							// and restore the documented thinking surface.
+						const lineage = museSparkLineageSpec(defaults.id);
+						if (lineage) {
+							// Gateway lists Muse Spark as bare ids with no capability
+							// metadata and often no local bundled row, so the generic
+							// defaults would hide the effort dial (`reasoning: false`).
+							// Keep the pinned/fallback route and restore the lineage's
+							// thinking surface.
 							return {
 								...(reference ?? defaults),
 								id: defaults.id,
@@ -3069,10 +3114,16 @@ function openCodeModelManagerOptions(
 								provider: providerId,
 								baseUrl,
 								reasoning: true,
-								input: reference?.input ?? ["text", "image"],
-								thinking: reference?.thinking ?? META_MUSE_SPARK_THINKING,
-								contextWindow: toPositiveNumber(entry.context_length, reference?.contextWindow ?? 1_048_576),
-								maxTokens: toPositiveNumber(entry.max_completion_tokens, reference?.maxTokens ?? 131_072),
+								input: reference?.input ?? lineage.input,
+								thinking: reference?.thinking ?? lineage.thinking,
+								contextWindow: toPositiveNumber(
+									entry.context_length,
+									reference?.contextWindow ?? lineage.contextWindow,
+								),
+								maxTokens: toPositiveNumber(
+									entry.max_completion_tokens,
+									reference?.maxTokens ?? lineage.maxTokens,
+								),
 							};
 						}
 						if (!reference) {
@@ -3486,6 +3537,20 @@ export const ALIBABA_TOKEN_PLAN_STATIC_MODELS: readonly ModelSpec<"openai-comple
 			defaultLevel: Effort.XHigh,
 		},
 		compat: ALIBABA_TOKEN_PLAN_QWEN_EFFORT_COMPAT,
+	},
+	{
+		id: "qwen3.8-flash",
+		name: "Qwen3.8 Flash",
+		api: "openai-completions",
+		provider: "alibaba-token-plan",
+		baseUrl: ALIBABA_TOKEN_PLAN_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: ALIBABA_TOKEN_PLAN_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+		thinking: ALIBABA_TOKEN_PLAN_REASONING,
+		compat: ALIBABA_TOKEN_PLAN_COMPAT,
 	},
 	{
 		id: "qwen3.7-max",
@@ -4331,66 +4396,75 @@ export function coreWeaveModelManagerOptions(
 // 15.75 Meta Model API
 // ---------------------------------------------------------------------------
 
-const META_MODEL_API_BASE_URL = "https://api.meta.ai/v1";
+const META_MODEL_API_BASE_URL = getDefaultModelDiscoveryBaseUrl("meta")!;
 const META_MUSE_SPARK_COST = { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 } as const;
+// Contributor SKUs (`-contributor`): same model, discounted because prompts
+// are used for training.
+const META_MUSE_SPARK_CONTRIBUTOR_COST = { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 } as const;
 const META_MUSE_SPARK_THINKING: ThinkingConfig = {
 	mode: "effort",
 	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 };
+// Meta documents the `max` effort tier for Muse Spark 1.3 (standard) only;
+// contributor tiers and other revisions stay on the 5-tier ladder.
+const META_MUSE_SPARK_MAX_THINKING: ThinkingConfig = {
+	mode: "effort",
+	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+};
 
+function museSparkSpec(revision: string, tier: "standard" | "contributor"): ModelSpec<"openai-responses"> {
+	const contributor = tier === "contributor";
+	return {
+		id: contributor ? `muse-spark-${revision}-contributor` : `muse-spark-${revision}`,
+		name: contributor ? `Muse Spark ${revision} (C)` : `Muse Spark ${revision}`,
+		api: "openai-responses",
+		provider: "meta",
+		baseUrl: META_MODEL_API_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: contributor ? META_MUSE_SPARK_CONTRIBUTOR_COST : META_MUSE_SPARK_COST,
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+		thinking: revision === "1.3" && tier === "standard" ? META_MUSE_SPARK_MAX_THINKING : META_MUSE_SPARK_THINKING,
+		compat: {
+			supportsReasoningEffort: true,
+			includeEncryptedReasoning: true,
+		},
+	};
+}
+
+/**
+ * Muse Spark revisions served by Meta's first-party Responses API. Meta's
+ * `/v1/models` lists bare ids with no capability metadata, so every revision
+ * must be seeded here or discovery yields a text-only, non-reasoning model
+ * with an unknown context window.
+ */
 export const META_MUSE_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] = [
-	{
-		id: "muse-spark-1.1",
-		name: "Muse Spark 1.1",
-		api: "openai-responses",
-		provider: "meta",
-		baseUrl: META_MODEL_API_BASE_URL,
-		reasoning: true,
-		input: ["text", "image"],
-		cost: META_MUSE_SPARK_COST,
-		contextWindow: 1_048_576,
-		maxTokens: 131_072,
-		thinking: META_MUSE_SPARK_THINKING,
-		compat: {
-			supportsReasoningEffort: true,
-			includeEncryptedReasoning: true,
-		},
-	},
-	{
-		id: "muse-spark-1.2",
-		name: "Muse Spark 1.2",
-		api: "openai-responses",
-		provider: "meta",
-		baseUrl: META_MODEL_API_BASE_URL,
-		reasoning: true,
-		input: ["text", "image"],
-		cost: META_MUSE_SPARK_COST,
-		contextWindow: 1_048_576,
-		maxTokens: 131_072,
-		thinking: META_MUSE_SPARK_THINKING,
-		compat: {
-			supportsReasoningEffort: true,
-			includeEncryptedReasoning: true,
-		},
-	},
-	{
-		id: "muse-spark-1.2-contributor",
-		name: "Muse Spark 1.2 Contributor (Data Used for Training)",
-		api: "openai-responses",
-		provider: "meta",
-		baseUrl: META_MODEL_API_BASE_URL,
-		reasoning: true,
-		input: ["text", "image"],
-		cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
-		contextWindow: 1_048_576,
-		maxTokens: 131_072,
-		thinking: META_MUSE_SPARK_THINKING,
-		compat: {
-			supportsReasoningEffort: true,
-			includeEncryptedReasoning: true,
-		},
-	},
+	museSparkSpec("1.1", "standard"),
+	museSparkSpec("1.2", "standard"),
+	museSparkSpec("1.2", "contributor"),
+	museSparkSpec("1.3", "standard"),
+	museSparkSpec("1.3", "contributor"),
 ];
+
+const META_MUSE_MODEL_BY_ID: Partial<Record<string, ModelSpec<"openai-responses">>> = Object.fromEntries(
+	META_MUSE_STATIC_MODELS.map(model => [model.id, model]),
+);
+
+/**
+ * Lineage reference for a Muse Spark revision Meta ships before the seed
+ * lists it. Every revision so far has kept the 1M window, the effort ladder,
+ * and per-tier pricing, so a new one inherits them (with its own display
+ * name) instead of surfacing as a text-only model with no limits. Only ids
+ * that classify into the `muse-spark` family with a revision qualify.
+ */
+function museSparkLineageSpec(id: string): ModelSpec<"openai-responses"> | undefined {
+	const identity = classifyModel("meta", id, { lenient: true });
+	if (identity.family !== "muse-spark" || identity.revision === undefined) return undefined;
+	const [major, minor, patch] = parseRevision(identity.revision) ?? [0, 0, 0];
+	const revision = patch === 0 ? `${major}.${minor}` : identity.revision;
+	return museSparkSpec(revision, billingVariantPlain(id) === undefined ? "standard" : "contributor");
+}
 
 // ---------------------------------------------------------------------------
 // 15.76 Amazon Bedrock Mantle
@@ -4526,9 +4600,58 @@ export function metaModelManagerOptions(config?: MetaModelManagerConfig): ModelM
 			defaultBaseUrl: META_MODEL_API_BASE_URL,
 			config,
 			requireApiKey: true,
-			mapModel: mapWithBundledReference,
+			filterModel: (_entry, model) => !isExcludedModel("meta", model.id),
+			// The seed backs ids the bundle has not been regenerated with yet;
+			// the lineage spec backs revisions the seed has not been taught.
+			mapModel: (entry, defaults, reference) =>
+				mapWithBundledReference(
+					entry,
+					defaults,
+					reference ?? META_MUSE_MODEL_BY_ID[defaults.id] ?? museSparkLineageSpec(defaults.id),
+				),
 		}),
 		staticModels: META_MUSE_STATIC_MODELS,
+	};
+}
+
+/** Muse Code shares Meta Model API's model capabilities and equivalent token pricing. */
+export const MUSE_CODE_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] = META_MUSE_STATIC_MODELS.map(model => ({
+	...model,
+	provider: "muse-code",
+}));
+
+const MUSE_CODE_MODEL_BY_ID: Partial<Record<string, ModelSpec<"openai-responses">>> = Object.fromEntries(
+	MUSE_CODE_STATIC_MODELS.map(model => [model.id, model]),
+);
+
+function museCodeLineageSpec(id: string): ModelSpec<"openai-responses"> | undefined {
+	const model = museSparkLineageSpec(id);
+	return model ? { ...model, provider: "muse-code" } : undefined;
+}
+
+export function museCodeModelManagerOptions(config?: MetaModelManagerConfig): ModelManagerOptions<"openai-responses"> {
+	return {
+		...createOpenAICompatibleModelManagerOptions({
+			api: "openai-responses",
+			providerId: "muse-code",
+			defaultBaseUrl: META_MODEL_API_BASE_URL,
+			config,
+			headers: { "x-api-version": "1.0.0" },
+			dynamicModelsAuthoritative: true,
+			requireApiKey: true,
+			filterModel: (_entry, model) => !isExcludedModel("muse-code", model.id),
+			mapModel: (entry, defaults, reference) =>
+				mapWithBundledReference(
+					entry,
+					defaults,
+					reference ?? MUSE_CODE_MODEL_BY_ID[defaults.id] ?? museCodeLineageSpec(defaults.id),
+				),
+		}),
+		cacheProviderId: resolveModelCacheProviderId("muse-code", {
+			apiKey: config?.apiKey,
+			baseUrl: config?.baseUrl ?? META_MODEL_API_BASE_URL,
+		}),
+		staticModels: MUSE_CODE_STATIC_MODELS,
 	};
 }
 
@@ -4873,7 +4996,114 @@ export function aiandModelManagerOptions(config?: AiandModelManagerConfig): Mode
 }
 
 // ---------------------------------------------------------------------------
-// 16.7 Yolo-Auto (yolo-auto.com)
+// 16.7 Abliteration (abliteration.ai)
+// ---------------------------------------------------------------------------
+
+const ABLITERATION_DEFAULT_BASE_URL = "https://api.abliteration.ai/v1";
+const ABLITERATION_MODEL_COST = { input: 3, output: 3, cacheRead: 0.3, cacheWrite: 0 } as const;
+const ABLITERATION_LARGE_COST = { input: 5, output: 5, cacheRead: 0.5, cacheWrite: 0 } as const;
+
+function normalizeAbliterationBaseUrl(baseUrl: string | undefined): string {
+	const value = baseUrl?.trim() || ABLITERATION_DEFAULT_BASE_URL;
+	const normalized = value.replace(/\/+$/, "");
+	return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;
+}
+
+function createAbliterationStaticModel(
+	id: string,
+	name: string,
+	cost: ModelSpec<"openai-responses">["cost"],
+	contextWindow: number,
+	maxTokens: number,
+	input: ModelSpec<"openai-responses">["input"],
+): ModelSpec<"openai-responses"> {
+	return {
+		id,
+		name,
+		api: "openai-responses",
+		provider: "abliteration",
+		baseUrl: ABLITERATION_DEFAULT_BASE_URL,
+		reasoning: true,
+		input: [...input],
+		cost: { ...cost },
+		contextWindow,
+		maxTokens,
+	};
+}
+
+/**
+ * Documented abliteration.ai catalog (docs.abliteration.ai/models, 2026-09)
+ * bundled so the provider is usable when generation and first boot have no
+ * live key. The `/v1/models` response is authoritative once discovery runs.
+ * Rows carry only the documented limits and pricing; the per-model reasoning
+ * ladders, alias map and wire quirks come from `rules/classes/glm.kdl` and
+ * `rules/providers/abliteration.kdl` via `buildModel`.
+ */
+export const ABLITERATION_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] = [
+	createAbliterationStaticModel("abliterated-model", "Abliterated Model", ABLITERATION_MODEL_COST, 262_144, 262_134, [
+		"text",
+		"image",
+	]),
+	createAbliterationStaticModel(
+		"abliterated-model-large-v2",
+		"Abliterated Model Large V2",
+		ABLITERATION_LARGE_COST,
+		1_000_000,
+		999_990,
+		["text"],
+	),
+	createAbliterationStaticModel(
+		"abliterated-model-large",
+		"Abliterated Model Large",
+		ABLITERATION_LARGE_COST,
+		1_000_000,
+		999_990,
+		["text"],
+	),
+];
+
+const ABLITERATION_STATIC_MODEL_BY_ID = new Map(ABLITERATION_STATIC_MODELS.map(model => [model.id, model] as const));
+const ABLITERATION_STATIC_MODEL_IDS = ABLITERATION_STATIC_MODELS.map(model => model.id);
+
+export interface AbliterationModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function abliterationModelManagerOptions(
+	config?: AbliterationModelManagerConfig,
+): ModelManagerOptions<"openai-responses"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = normalizeAbliterationBaseUrl(config?.baseUrl);
+	const references = createBundledReferenceMap<"openai-responses">("abliteration");
+	return {
+		providerId: "abliteration",
+		dynamicModelsAuthoritative: true,
+		dropCachedModelIdsOnStaticMismatch: ABLITERATION_STATIC_MODEL_IDS,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-responses",
+					provider: "abliteration",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => {
+						const reference = references.get(defaults.id) ?? ABLITERATION_STATIC_MODEL_BY_ID.get(defaults.id);
+						const model = mapWithBundledReference(entry, defaults, reference);
+						// Every abliteration.ai model reasons; `/v1/models` carries no
+						// capability metadata, so an unseeded id would otherwise lose
+						// its effort dial.
+						return reference ? model : { ...model, reasoning: true };
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// 16.8 Yolo-Auto (yolo-auto.com)
 // ---------------------------------------------------------------------------
 
 const YOLO_AUTO_BASE_URL = "https://yolo-auto.com/v1";
@@ -5874,6 +6104,8 @@ export interface GithubCopilotModelManagerConfig {
 }
 
 const COPILOT_CACHE_INVALIDATED_MODEL_IDS = [
+	"gpt-6-astra",
+	"gpt-6-astra-1m",
 	"grok-4.5",
 	"grok-4.5-1m",
 	"grok-4.6",
@@ -6042,8 +6274,8 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 		providerId: "github-copilot",
 		cacheProviderId: resolveModelCacheProviderId("github-copilot", { apiKey: rawApiKey, baseUrl }),
 		dropCachedModelIdsOnStaticMismatch: COPILOT_CACHE_INVALIDATED_MODEL_IDS,
-		// COPILOT_API_HEADERS are compile-time constants (User-Agent + API
-		// version), not credentials. The cache omits all request headers for
+		// COPILOT_API_HEADERS are compile-time wire identity constants, not
+		// credentials. The cache omits all request headers for
 		// safety and can only restore them from a bundled static entry — so a
 		// Copilot model with no bundled reference (e.g. a freshly served
 		// claude-opus-5 and its synthesized -1m sibling) is dropped on offline
@@ -6063,7 +6295,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 					provider: "github-copilot",
 					baseUrl: requestBaseUrl,
 					apiKey,
-					headers: COPILOT_API_HEADERS,
+					headers: COPILOT_DISCOVERY_HEADERS,
 					mapModel: (
 						entry: OpenAICompatibleModelRecord,
 						defaults: ModelSpec<Api>,
@@ -6137,10 +6369,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 									input,
 									contextWindow: defaultTierWindow,
 									maxTokens,
-									headers: {
-										...COPILOT_API_HEADERS,
-										...getProviderReferences().get(defaults.id)?.headers,
-									},
+									headers: mergeCopilotApiHeaders(getProviderReferences().get(defaults.id)?.headers),
 									...(api === "openai-completions"
 										? {
 												compat: {
@@ -6159,7 +6388,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 									input,
 									contextWindow: defaultTierWindow,
 									maxTokens,
-									headers: { ...COPILOT_API_HEADERS },
+									headers: mergeCopilotApiHeaders(),
 									// Copilot's `/models` advertises no reasoning bit, so a
 									// thinking-capable Claude with no bundled reference would
 									// fall back to `reasoning: false` and lose its effort dial.
@@ -6182,6 +6411,22 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 											}
 										: {}),
 								};
+						// Cross-provider fallback references (e.g. a Cursor
+						// collapsed family for an enterprise-only sibling id)
+						// carry provider-specific wire routing that must not
+						// transfer: the off-tier `requestModelId` pin would send
+						// every Copilot request under the `-none` sibling id
+						// regardless of thinking level.
+						if (reference && reference.provider !== "github-copilot") {
+							delete base.requestModelId;
+							if (base.thinking) {
+								// `base` is a shallow copy of the shared global
+								// reference: clone before deleting or the bundled
+								// entry loses its routing process-wide.
+								base.thinking = { ...base.thinking };
+								delete base.thinking.effortRouting;
+							}
+						}
 						const defaultCost = copilotTierCost(tokenPrices.defaultTier);
 						if (defaultCost) {
 							// Cache writes are not reported per tier; retain the bundled provider rate.
@@ -6376,6 +6621,8 @@ export function mapModelsDevToModels(
 				},
 				contextWindow: toPositiveNumber(m.limit?.context, desc.defaultContextWindow ?? null),
 				maxTokens: toPositiveNumber(m.limit?.output, desc.defaultMaxTokens ?? null),
+				...(m.int != null ? { int: m.int } : {}),
+				...(m.tps != null ? { tps: m.tps } : {}),
 				...(m.tool_call === false ? { supportsTools: false } : {}),
 				...(desc.compat && { compat: desc.compat }),
 				...(desc.headers && { headers: { ...desc.headers } }),
@@ -6494,6 +6741,26 @@ const OPENCODE_ZEN_API_RESOLUTION = createOpenCodeApiResolution("https://opencod
 const OPENCODE_GO_API_RESOLUTION = createOpenCodeApiResolution("https://opencode.ai/zen/go", "opencode-go");
 
 const COPILOT_BASE_URL = "https://api.githubcopilot.com";
+
+const ZAI_ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
+// The `zai` catalog provider is the GLM Coding Plan: `/login zai` validates and
+// stores credentials against the coding-plan endpoint (see auth/zai.kdl), so
+// the native OpenAI transport must ride the coding-plan base rather than the
+// general PAYG `/api/paas/v4`, which would bypass plan quota or fail auth.
+const ZAI_OPENAI_BASE_URL = "https://api.z.ai/api/coding/paas/v4";
+
+/** Resolves the transport and endpoint for one Z.AI model catalog entry. */
+export function resolveZaiApi(modelId: string): { api: "anthropic-messages" | "openai-completions"; baseUrl: string } {
+	const api = apiRouteFor("zai", modelId)?.api ?? "anthropic-messages";
+	switch (api) {
+		case "anthropic-messages":
+			return { api, baseUrl: ZAI_ANTHROPIC_BASE_URL };
+		case "openai-completions":
+			return { api, baseUrl: ZAI_OPENAI_BASE_URL };
+		default:
+			throw new Error(`Unsupported Z.AI API route: ${api}`);
+	}
+}
 
 const COPILOT_DEFAULT_RESOLUTION = {
 	api: "openai-completions",
@@ -6772,7 +7039,9 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDe
 	// SKU as "Free" in `/models`. The PAYG key carries the real per-token rates for
 	// the identical model ids, so the enumerated token costs line up with the other
 	// subscription providers for comparison (issue #5598).
-	anthropicMessagesDescriptor("zai", "zai", "https://api.z.ai/api/anthropic"),
+	anthropicMessagesDescriptor("zai", "zai", ZAI_ANTHROPIC_BASE_URL, {
+		resolveApi: modelId => resolveZaiApi(modelId),
+	}),
 	// --- Umans AI ---
 	// Source the pay-as-you-go catalog: the coding-plan key publishes subscription
 	// costs as zero, while `/models/info` omits pricing entirely. The generator
@@ -7024,5 +7293,96 @@ export function modelsDevCatalogFallback(
 		additiveOnly: true,
 		fetch: () => fetchRevalidatedWellKnownModelsWithTimeout(fetchImpl, timeoutMs),
 		map: payload => (isRecord(payload) ? filterModelsDevCatalogRows(mapModelsDevToModels(payload, descriptors)) : []),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Command Code
+// ---------------------------------------------------------------------------
+
+/**
+ * Configuration for the Command Code Provider API model manager.
+ *
+ * `baseUrl` overrides the Provider API base path for testing; it is
+ * normalized to the shared `/provider` root (a trailing `/v1` is stripped)
+ * so Claude ids route to the Anthropic-compatible Messages endpoint at the
+ * root while every other id uses chat completions under `/v1`.
+ */
+export interface CommandCodeModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+const COMMAND_CODE_PROVIDER_BASE_PATH = "https://api.commandcode.ai/provider";
+
+function normalizeCommandCodeBasePath(baseUrl: string | undefined): string {
+	const normalized = (baseUrl ?? COMMAND_CODE_PROVIDER_BASE_PATH).trim().replace(/\/+$/, "");
+	return normalized.endsWith("/v1") ? normalized.slice(0, -3) : normalized;
+}
+
+/**
+ * Builds the Command Code model manager: a mixed-protocol OpenAI-compatible
+ * discovery client. The public `/v1/models` catalog is fetched once per
+ * options instance; `mapModel` pins each row's transport from the
+ * `api-routes` table (Claude ids to `anthropic-messages`, everything else to
+ * `openai-completions`) and seeds neutral capability defaults. Reviewed
+ * Command Code policy (effort ladders, pricing, limits, modalities) is
+ * applied later by `buildModel` from `providers/commandcode.kdl` — the
+ * mapper never inherits another provider's reasoning, rates, image support,
+ * or context window.
+ */
+export function commandCodeModelManagerOptions(config?: CommandCodeModelManagerConfig): ModelManagerOptions<Api> {
+	const basePath = normalizeCommandCodeBasePath(config?.baseUrl);
+	const discoveryBaseUrl = `${basePath}/v1`;
+	return {
+		providerId: "commandcode",
+		cacheProviderId: resolveModelCacheProviderId("commandcode", {
+			apiKey: config?.apiKey,
+			baseUrl: discoveryBaseUrl,
+		}),
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () => {
+			return fetchOpenAICompatibleModels<Api>({
+				api: "openai-completions",
+				provider: "commandcode",
+				baseUrl: discoveryBaseUrl,
+				// The catalog endpoint is public, but forward the key when the
+				// caller has one so entitled rows resolve identically to
+				// inference. The helper only sends Authorization when set.
+				apiKey: config?.apiKey,
+				mapModel: (entry, defaults) => {
+					const route = apiRouteFor("commandcode", defaults.id);
+					const api = route?.api === "anthropic-messages" ? route.api : "openai-completions";
+					return {
+						...defaults,
+						name: toModelName(entry.name, defaults.name),
+						api,
+						baseUrl: api === "anthropic-messages" ? basePath : discoveryBaseUrl,
+						// Neutral reasoning: the catalog row carries no
+						// reasoning metadata. Verified effort ids opt back in
+						// through exact `thinking-efforts` in KDL (the cascade
+						// upgrades the target and the engine materializes
+						// `reasoning: true` alongside the ladder); every other
+						// served id keeps no effort dial.
+						reasoning: defaults.reasoning,
+						// Keep the discovery default (`["text"]`): the catalog
+						// row carries no modality metadata and a bundled
+						// reference from another host must not advertise image
+						// support for this deployment. Verified image routes
+						// opt back in via `input-modalities` in KDL.
+						input: defaults.input,
+						// Neutral context window: an omitted or invalid
+						// `context_length` retains an unknown limit (`null`)
+						// instead of copying another host's deployment limit.
+						// Verified corrections live in KDL (`limits-patch`,
+						// `model-limits`, `context-window-floor`).
+						contextWindow: toPositiveNumber(entry.context_length, null),
+						maxTokens: null,
+					};
+				},
+				fetch: config?.fetch,
+			});
+		},
 	};
 }

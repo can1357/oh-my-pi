@@ -9,6 +9,7 @@ import type { ModelManagerConfig, ProviderCatalogEntry, ProviderDescriptor } fro
 import { googleModelManagerOptions, googleVertexModelManagerOptions } from "./google";
 import { ollamaCloudModelManagerOptions } from "./ollama";
 import {
+	abliterationModelManagerOptions,
 	aiandModelManagerOptions,
 	aimlApiModelManagerOptions,
 	alibabaCodingPlanModelManagerOptions,
@@ -19,6 +20,7 @@ import {
 	cerebrasModelManagerOptions,
 	clinePassModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
+	commandCodeModelManagerOptions,
 	coreWeaveModelManagerOptions,
 	deepinfraModelManagerOptions,
 	deepseekModelManagerOptions,
@@ -33,6 +35,7 @@ import {
 	litellmModelManagerOptions,
 	lmStudioModelManagerOptions,
 	metaModelManagerOptions,
+	museCodeModelManagerOptions,
 	mistralModelManagerOptions,
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
@@ -70,6 +73,14 @@ import {
 } from "./special";
 
 export const CATALOG_PROVIDERS = [
+	{
+		id: "abliteration",
+		defaultModel: "abliterated-model",
+		envVars: ["ABLITERATION_API_KEY", "ABLIT_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => abliterationModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Abliteration" },
+	},
 	{
 		id: "aiand",
 		defaultModel: "moonshotai/kimi-k2.7-code",
@@ -147,6 +158,19 @@ export const CATALOG_PROVIDERS = [
 		catalogDiscovery: { label: "Cloudflare AI Gateway" },
 	},
 	{
+		id: "commandcode",
+		defaultModel: "claude-sonnet-4-6",
+		envVars: ["COMMAND_CODE_API_KEY", "COMMANDCODE_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => commandCodeModelManagerOptions(config),
+		allowUnauthenticated: true,
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Command Code", allowUnauthenticated: true },
+		// The Provider API rows carry no reasoning/modality metadata and KDL
+		// owns the deployment policy: same-id references on other hosts must
+		// not backfill reasoning, input, or limits during generation.
+		skipCrossProviderReferenceFills: true,
+	},
+	{
 		id: "cursor",
 		defaultModel: "claude-4.6-opus-high",
 		envVars: ["CURSOR_ACCESS_TOKEN"],
@@ -186,7 +210,7 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "firepass",
-		defaultModel: "kimi-k2.6-turbo",
+		defaultModel: "glm-5.2-fast",
 		envVars: ["FIREPASS_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => firepassModelManagerOptions(config),
 	},
@@ -305,6 +329,12 @@ export const CATALOG_PROVIDERS = [
 		defaultModel: "devstral-medium-latest",
 		envVars: ["MISTRAL_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => mistralModelManagerOptions(config),
+	},
+	{
+		id: "muse-code",
+		defaultModel: "muse-spark-1.3",
+		createModelManagerOptions: (config: ModelManagerConfig) => museCodeModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "meta",
@@ -595,6 +625,7 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = CATALOG_ENTRY
 			createModelManagerOptions: provider.createModelManagerOptions,
 			allowUnauthenticated: provider.allowUnauthenticated,
 			dynamicModelsAuthoritative: provider.dynamicModelsAuthoritative,
+			skipCrossProviderReferenceFills: provider.skipCrossProviderReferenceFills,
 			catalogDiscovery: provider.catalogDiscovery
 				? { ...provider.catalogDiscovery, envVars: provider.catalogDiscovery.envVars ?? provider.envVars ?? [] }
 				: undefined,

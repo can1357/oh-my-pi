@@ -122,6 +122,9 @@ mod base32;
 mod base64;
 #[cfg(feature = "util.basename")]
 mod basename;
+/// Shared POSIX basic-regular-expression translation behind `grep` and `sed`.
+#[cfg(feature = "util.bre")]
+mod bre;
 #[cfg(feature = "util.cat")]
 mod cat;
 /// The `cksum` builtin plus the shared checksum machinery behind `md5sum`,

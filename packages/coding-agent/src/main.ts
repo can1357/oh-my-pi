@@ -138,7 +138,10 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 // Todo settings are caller-controlled in protocol modes. Do not host-default them:
 // embedders need project-level opt-outs for reminder/prelude prompt injection.
 const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
-	"task.isolation.mode",
+	"task.isolation.enabled",
+	"isolation.backend",
+	"worktree.clone",
+	"worktree.cleanSource",
 	"task.isolation.apply",
 	"task.isolation.merge",
 	"task.isolation.commits",
@@ -160,6 +163,7 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"advisor.enabled",
 	"advisor.syncBacklog",
 	"advisor.immuneTurns",
+	"advisor.maxNotesPerUpdate",
 	"tier.advisor",
 ];
 
@@ -303,7 +307,8 @@ export async function submitInteractiveInput(
 	mode: Pick<
 		InteractiveMode,
 		"markPendingSubmissionStarted" | "finishPendingSubmission" | "showError" | "checkShutdownRequested"
-	>,
+	> &
+		Partial<Pick<InteractiveMode, "loopPrompt" | "pauseLoop">>,
 	session: Pick<AgentSession, "prompt" | "promptCustomMessage" | "isStreaming">,
 	input: SubmittedUserInput,
 ): Promise<void> {
@@ -352,7 +357,18 @@ export async function submitInteractiveInput(
 				userInitiated: input.userInitiated,
 			});
 		} else {
-			await session.prompt(input.text, { images: input.images, streamingBehavior });
+			let forwarded = false;
+			try {
+				forwarded = await session.prompt(input.text, { images: input.images, streamingBehavior });
+			} catch (error: unknown) {
+				mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
+			}
+			// Dispatch consumed the body locally (void custom command) or rejected
+			// instead of starting a turn: when it is the armed loop body, park the
+			// loop rather than resubmitting a failed or local-only body after
+			// every yield. A failed body degrades to idle like any other
+			// submission failure instead of error-looping.
+			if (!forwarded && mode.loopPrompt === input.text) mode.pauseLoop?.();
 		}
 	} catch (error: unknown) {
 		const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
@@ -1169,6 +1185,7 @@ export async function buildSessionOptions(
 			}
 		} else if (resolved.model) {
 			options.model = resolved.model;
+			options.rebindModelAfterDiscovery = true;
 			// The recorded role must carry the effort the session actually starts
 			// at, or the first cycle back into `default` overrides it.
 			activeSettings.overrideModelRoles({
@@ -1202,6 +1219,7 @@ export async function buildSessionOptions(
 				: scopedModels.find(scopedModel => scopedModel.model.id.toLowerCase() === remembered.toLowerCase());
 			if (rememberedModel) {
 				options.model = rememberedModel.model;
+				options.rebindModelAfterDiscovery = true;
 				// Apply explicit thinking level from remembered role value
 				if (!parsed.thinking && rememberedSpec.explicitThinkingLevel && rememberedSpec.thinkingLevel) {
 					options.thinkingLevel = rememberedSpec.thinkingLevel;
@@ -1221,7 +1239,10 @@ export async function buildSessionOptions(
 		// deferring under an explicit CLI scope would let the saved default
 		// escape it — keep pinning the first scoped model there.
 		deferredDefaultRole = !options.model && Boolean(remembered) && !((parsed.models?.length ?? 0) > 0);
-		if (!options.model && !deferredDefaultRole) options.model = scopedModels[0].model;
+		if (!options.model && !deferredDefaultRole) {
+			options.model = scopedModels[0].model;
+			options.rebindModelAfterDiscovery = true;
+		}
 	} else if ((parsed.models?.length ?? 0) > 0 && !restoringSession) {
 		// A CLI `--models` scope that resolved to zero models at startup: its
 		// selectors name only models supplied by extension providers (or discovery)

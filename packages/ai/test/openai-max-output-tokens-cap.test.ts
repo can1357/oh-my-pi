@@ -51,8 +51,12 @@ async function drainResponses(
 	if (model.api === "openrouter") Bun.env.PI_OPENROUTER_RESPONSES = "1";
 	try {
 		const { fetchMock, captured } = captureResponsesBody();
+		const apiKey =
+			model.provider === "muse-code"
+				? JSON.stringify({ oauthAccessToken: "meta-account-access", apiKey: "muse-subscription-key" })
+				: "k";
 		const stream = streamSimple(model, ctx, {
-			apiKey: "k",
+			apiKey,
 			...(maxTokens === undefined ? {} : { maxTokens }),
 			fetch: fetchMock,
 		});
@@ -187,8 +191,11 @@ describe("OpenAI-family output-token cap", () => {
 		expect(body.max_output_tokens).toBe(OPENAI_MAX_OUTPUT_TOKENS);
 	});
 
-	it("lets native Meta Responses requests use the advertised model cap", async () => {
-		const model = getBundledModel("meta", "muse-spark-1.1") as Model<"openai-responses">;
+	it.each([
+		["Meta Model API", "meta"],
+		["Muse Code", "muse-code"],
+	] as const)("lets %s Responses requests use the advertised model cap", async (_label, provider) => {
+		const model = getBundledModel(provider, "muse-spark-1.1") as Model<"openai-responses">;
 		const body = await drainResponses(model);
 		expect(body.max_output_tokens).toBe(131_072);
 	});

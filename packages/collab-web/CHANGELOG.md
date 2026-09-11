@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [18.1.17] - 2026-09-10
+
+### Fixed
+
+- Transcript links are now allowed by the scheme the browser will actually resolve, so a destination that only becomes `javascript:` after URL normalization is dropped like any other unsafe scheme ([#11562](https://github.com/can1357/oh-my-pi/pull/11562) by [@alphastorm](https://github.com/alphastorm)).
+
+## [18.1.3] - 2026-09-02
+
+### Fixed
+
+- The guest transcript now returns to the latest message after an initial connection or reconnect.
+
 ## [18.0.8] - 2026-08-27
 
 ### Added

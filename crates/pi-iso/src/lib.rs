@@ -1,7 +1,9 @@
 //! Cross-platform isolation PAL.
 //!
 //! A backend gives the caller a writable "merged" view of a read-only
-//! "lower" tree without paying for a deep copy:
+//! "lower" tree without paying for a deep copy, and tree-cloning backends can
+//! also copy-on-write clone a checkout while omitting selected top-level
+//! entries:
 //!
 //! - **macOS** uses `clonefile(2)` to seed an APFS copy-on-write clone.
 //! - **Linux** mounts a kernel `overlay` filesystem, falling back to
@@ -66,6 +68,11 @@ pub enum BackendKind {
 }
 
 impl BackendKind {
+	/// Whether this backend can clone a directory tree in place.
+	pub const fn clones_tree(self) -> bool {
+		matches!(self, Self::Apfs | Self::LinuxReflink | Self::WindowsBlockClone)
+	}
+
 	/// Short, stable string identifier. Used by the napi shim.
 	pub const fn as_str(self) -> &'static str {
 		match self {
@@ -243,6 +250,17 @@ pub trait IsolationBackend: Send + Sync {
 
 	fn start(&self, lower: &Path, merged: &Path) -> IsoResult<()>;
 
+	/// Clone `lower` into `merged` copy-on-write, omitting named top-level
+	/// entries.
+	fn clone_tree(
+		&self,
+		_lower: &Path,
+		_merged: &Path,
+		_skip: &[&std::ffi::OsStr],
+	) -> IsoResult<()> {
+		Err(IsoError::unavailable(format!("{} cannot clone a directory tree in place", self.kind())))
+	}
+
 	fn stop(&self, merged: &Path) -> IsoResult<()>;
 
 	/// Capture the changes between `lower` and the current state of
@@ -335,6 +353,26 @@ pub struct Resolution {
 	pub reason:     Option<String>,
 }
 
+/// Host-available tree-cloning backends in fallback order.
+///
+/// A preferred cloning backend is tried first when available. Non-cloning
+/// backends are excluded.
+pub fn clone_candidates(preferred: Option<BackendKind>) -> Vec<BackendKind> {
+	let mut candidates = Vec::new();
+	if let Some(kind) = preferred
+		&& kind.clones_tree()
+		&& backend(kind).probe().available
+	{
+		candidates.push(kind);
+	}
+	for &kind in auto_order() {
+		if Some(kind) != preferred && kind.clones_tree() && backend(kind).probe().available {
+			candidates.push(kind);
+		}
+	}
+	candidates
+}
+
 /// Pick the best backend whose host-level prerequisites are available.
 ///
 /// Caller priority:
@@ -346,9 +384,7 @@ pub struct Resolution {
 ///
 /// This is only a host-level probe. Some backends still reject a specific
 /// `lower`/`merged` pair at [`IsolationBackend::start`] time (cross-device
-/// reflinks, non-subvolume btrfs paths, non-ZFS mountpoints). Callers that can
-/// recover should retry the remaining automatic candidates when `start`
-/// returns [`IsoError::Unavailable`].
+/// reflinks, non-subvolume btrfs paths, non-ZFS mountpoints).
 pub fn resolve(preferred: Option<BackendKind>) -> Resolution {
 	let mut reason = None;
 	let mut candidates = Vec::with_capacity(auto_order().len() + usize::from(preferred.is_some()));

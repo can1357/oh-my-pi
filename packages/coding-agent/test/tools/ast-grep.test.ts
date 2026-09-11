@@ -177,4 +177,54 @@ describe("ast_grep parse errors", () => {
 			await removeWithRetries(tempDir);
 		}
 	});
+
+	it("honors an explicit C++ language for ambiguous headers", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-cpp-header-"));
+		try {
+			const filePath = path.join(tempDir, "buffer.h");
+			await Bun.write(filePath, "class Buffer { public: int size() const { return 1; } };\n");
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
+			const tool = tools.find(entry => entry.name === "ast_grep");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-grep-explicit-cpp", {
+				pat: "class Buffer",
+				path: filePath,
+				lang: "cpp",
+			});
+			const details = result.details as { matchCount?: number } | undefined;
+			expect(details?.matchCount).toBe(1);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("forwards an explicit language to every multi-target branch", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-multi-lang-"));
+		try {
+			// `.h` infers as C, so only the explicit `cpp` override can match the
+			// class pattern — and only if `runMultiTargetAstGrep` forwards `lang`
+			// to each per-target `astGrep` call behind the `;` scope.
+			const firstDir = path.join(tempDir, "a");
+			const secondDir = path.join(tempDir, "b");
+			await fs.mkdir(firstDir, { recursive: true });
+			await fs.mkdir(secondDir, { recursive: true });
+			for (const dir of [firstDir, secondDir]) {
+				await Bun.write(path.join(dir, "buffer.h"), "class Buffer { public: int size() const { return 1; } };\n");
+			}
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
+			const tool = tools.find(entry => entry.name === "ast_grep");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-grep-multi-lang", {
+				pat: "class Buffer",
+				path: `${firstDir};${secondDir}`,
+				lang: "cpp",
+			});
+			const details = result.details as { matchCount?: number } | undefined;
+			expect(details?.matchCount).toBe(2);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
 });

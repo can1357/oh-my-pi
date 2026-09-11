@@ -1,0 +1,9 @@
+auth "venice" {
+	name "Venice"
+	login "api-key" {
+		auth-url "https://venice.ai/settings/api"
+		instructions "Copy your API key from the Venice dashboard"
+		prompt "Paste your Venice API key" placeholder="vapi_..."
+		validate "chat-completions" base-url="https://api.venice.ai/api/v1" model="qwen3-4b"
+	}
+}

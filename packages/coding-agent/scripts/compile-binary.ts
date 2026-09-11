@@ -1,3 +1,6 @@
+// Deep import: the pi-utils barrel loads the host native addon, which is
+// absent on cross-compiling release runners.
+import { USER_AGENT } from "@oh-my-pi/pi-utils/dirs";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
 
@@ -49,6 +52,9 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			},
 			plugins: [await createLegacyPiVirtualModulePlugin()],
 			compile: {
+				// Bun's process-wide fetch User-Agent default. Any explicit
+				// provider fingerprint (Anthropic/Codex OAuth) still wins.
+				execArgv: [`--user-agent=${USER_AGENT}`],
 				...(options.executablePath
 					? { executablePath: options.executablePath }
 					: options.target

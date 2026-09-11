@@ -21,7 +21,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
-const yieldToolSchema = type({ result: type("unknown") });
+const yieldToolSchema = type({ data: type("unknown") });
 const recordToolSchema = type({ value: type("string") });
 
 type Harness = { session: AgentSession; tempDir: TempDir };
@@ -40,10 +40,9 @@ const yieldTool: AgentTool<typeof yieldToolSchema, { value: unknown }> = {
 	description: "Finish the task with structured JSON output.",
 	parameters: yieldToolSchema,
 	async execute(_toolCallId, params) {
-		const result = (params.result ?? {}) as Record<string, unknown>;
 		return {
 			content: [{ type: "text", text: "Result submitted." }],
-			details: { value: result.data ?? null },
+			details: { value: params.data ?? null },
 		};
 	},
 };
@@ -63,7 +62,7 @@ const recordTool: AgentTool<typeof recordToolSchema, { value: string }> = {
 
 function yieldCall(value: string, id: string): MockResponse {
 	return {
-		content: [{ type: "toolCall", id, name: "yield", arguments: { result: { data: { value } } } }],
+		content: [{ type: "toolCall", id, name: "yield", arguments: { data: { value } } }],
 		stopReason: "toolUse",
 	};
 }

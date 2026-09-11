@@ -260,6 +260,48 @@ describe("collapseVariants with a reviewed table", () => {
 		expect(flash ? mapEffortToGoogleThinkingLevel(Effort.Minimal, flash) : undefined).toBe("LOW");
 	});
 
+	it("instantiates the gemini-{rev}-flash template for a generation no reviewed entry names", () => {
+		// Discovery advertises a brand-new Flash revision: the template must
+		// collapse it like 3.6/3.7 without a per-revision KDL entry, while a
+		// pre-3.6 sibling set (outside `revision=">=3.6"`) stays expanded and the
+		// concrete 3.5 family keeps precedence over the template.
+		const out = collapseVariants(
+			[
+				memberSpec("gemini-3.9-flash-high"),
+				memberSpec("gemini-3.9-flash-low"),
+				memberSpec("gemini-3.9-flash-medium"),
+				memberSpec("gemini-3.9-flash-tiered"),
+				memberSpec("gemini-2.9-flash-low"),
+				memberSpec("gemini-2.9-flash-high"),
+				memberSpec("gemini-3.5-flash-low"),
+			],
+			{ table: antigravityTable },
+		);
+
+		expect(out.map(m => m.id)).toEqual([
+			"gemini-3.9-flash",
+			"gemini-2.9-flash-low",
+			"gemini-2.9-flash-high",
+			"gemini-3.5-flash",
+		]);
+		const flash = out[0];
+		expect(flash?.name).toBe("Gemini 3.9 Flash");
+		expect(flash?.requestModelId).toBe("gemini-3.9-flash-low");
+		expect(flash?.thinking?.effortRouting).toEqual({
+			minimal: "gemini-3.9-flash-low",
+			low: "gemini-3.9-flash-low",
+			medium: "gemini-3.9-flash-medium",
+			high: "gemini-3.9-flash-high",
+		});
+		expect(out[3]?.thinking?.effortRouting).toEqual({ medium: "gemini-3.5-flash-low" });
+
+		const model = buildModel(flash as ModelSpec<"google-gemini-cli">);
+		expect(model.thinking?.mode).toBe("google-level");
+		expect(resolveWireModelId(model, Effort.Minimal)).toBe("gemini-3.9-flash-low");
+		expect(resolveVariantSelector("google-antigravity", "gemini-3.9-flash-tiered")).toBe("gemini-3.9-flash");
+		expect(resolveVariantSelector("google-antigravity", "gemini-2.9-flash-low")).toBeUndefined();
+	});
+
 	it("drops routes whose target member is absent", () => {
 		const out = collapseVariants([memberSpec("gemini-3.5-flash-extra-low")], { table: antigravityTable });
 

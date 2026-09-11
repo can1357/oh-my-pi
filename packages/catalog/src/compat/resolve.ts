@@ -714,6 +714,7 @@ function resolveOpenAIResponsesPolicy(
 		supportsImageDetailOriginal: !isXaiHost && !modelMatchesHost(hostModel, "githubCopilot"),
 		supportsReasoningSummary: !isXaiHost,
 		supportsAllTurnsReasoningContext: false,
+		supportsConfigurationUpdate: false,
 		requiresReasoningOffJuiceInstruction: false,
 		stripImageInput: false,
 		thinkingLoopGuard: undefined,
@@ -752,6 +753,7 @@ function resolveOpenAIResponsesPolicy(
 		wireModelIdMode: isOpenRouter ? "openrouter" : "raw",
 		toolSchemaFlavor: facts.is("kimi") ? "moonshot-mfjs" : undefined,
 		alwaysSendMaxTokens: facts.is("kimi"),
+		clampOutputToModelMax: false,
 		supportsObfuscationOptOut: isOpenAIUrl || provider === "openai",
 		officialEndpoint: isOfficialOpenAIEndpoint(provider, baseUrl),
 		harmonyLeakMitigation: false,
@@ -815,6 +817,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		supportsImageDetailOriginal: compat.supportsImageDetailOriginal,
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,
 		supportsAllTurnsReasoningContext: compat.supportsAllTurnsReasoningContext,
+		supportsConfigurationUpdate: compat.supportsConfigurationUpdate,
 		officialEndpoint: compat.officialEndpoint,
 		harmonyLeakMitigation: compat.harmonyLeakMitigation,
 		cacheControlFormat: compat.cacheControlFormat,
@@ -840,13 +843,19 @@ function resolveAnthropicPolicy(
 		officialEndpoint: official,
 		signingEndpoint,
 		supportsContextManagement: true,
+		supportsServerCompaction: false,
+		firstPartyProvider: false,
 		supportsOutputEffort: true,
 		disableStrictTools: isAzure,
 		disableAdaptiveThinking: false,
 		allowAnthropicHeaderOverrides: false,
 		supportsEagerToolInputStreaming: official,
 		supportsLongCacheRetention: official,
-		supportsMidConversationSystem: official && facts.anthropicAdaptiveGenAtLeast("4.8"),
+		supportsMidConversationSystem: official && !facts.family("sonnet") && facts.anthropicAdaptiveGenAtLeast("4.8"),
+		supportsTurnScopedSystem: false,
+		supportsMidConversationToolChanges: false,
+		supportsPerMessageEffort: false,
+		supportsThinkingBindingControls: false,
 		supportsForcedToolChoice: !requiresThinkingEnabled && !facts.family("fable", "mythos"),
 		supportsSamplingParams: !facts.anthropicAdaptiveGenAtLeast("4.7"),
 		requiresToolResultId: false,
@@ -899,6 +908,7 @@ function resolveGooglePolicy(
 	const compat: ResolvedGoogleCompat = {
 		supportsFunctionPartId: false,
 		requiresSkipThoughtSignature: false,
+		requiresSkipThoughtSignatureOnFirstFunctionCall: false,
 		dropUnsignedThinking: false,
 		ccaLegacyParametersSchema: false,
 		multimodalFunctionResponse: false,
@@ -1012,6 +1022,8 @@ interface RuleThinking {
 	requiresEffort?: boolean;
 	suppressWhenOff?: boolean;
 	supportsDisplay?: boolean;
+	prefixBinding?: boolean;
+	upgradeNeutral?: boolean;
 }
 
 function readRuleThinking(axes: ResolvedAxes): RuleThinking {
@@ -1030,6 +1042,8 @@ function readRuleThinking(axes: ResolvedAxes): RuleThinking {
 	if (typeof raw.requiresEffort === "boolean") out.requiresEffort = raw.requiresEffort;
 	if (typeof raw.suppressWhenOff === "boolean") out.suppressWhenOff = raw.suppressWhenOff;
 	if (typeof raw.supportsDisplay === "boolean") out.supportsDisplay = raw.supportsDisplay;
+	if (typeof raw.prefixBinding === "boolean") out.prefixBinding = raw.prefixBinding;
+	if (typeof raw.upgradeNeutral === "boolean") out.upgradeNeutral = raw.upgradeNeutral;
 	return out;
 }
 
@@ -1055,7 +1069,18 @@ function resolveThinkingPolicy<TApi extends Api>(
 	axes: ResolvedAxes,
 	compat: CompatOf<TApi>,
 ): ThinkingConfig | undefined {
-	if (!spec.reasoning) return undefined;
+	const rule = readRuleThinking(axes);
+	const explicitThinking =
+		spec.thinking !== undefined && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0
+			? spec.thinking
+			: undefined;
+	// An explicit wire vocabulary is authoritative when discovery reports no
+	// reasoning (e.g. Synthetic's `none`-only off-switch): reviewed KDL must
+	// not re-expand it into an unadvertised ladder. Absent metadata is
+	// repaired only where KDL opts in with `thinking-upgrade-neutral`
+	// alongside an exact `thinking-efforts` ladder (the cascade upgrade for
+	// stale source capability data); otherwise the neutral default holds.
+	if (!spec.reasoning && (explicitThinking !== undefined || rule.upgradeNeutral !== true)) return undefined;
 	if (
 		spec.provider === "cline-pass" &&
 		compat !== undefined &&
@@ -1065,9 +1090,8 @@ function resolveThinkingPolicy<TApi extends Api>(
 		return undefined;
 	}
 	if (omitsWireReasoningEffort(spec.api, compat)) return undefined;
-	const rule = readRuleThinking(axes);
-	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
-		return fillExplicitThinking(spec, facts, compat, spec.thinking, rule);
+	if (explicitThinking !== undefined) {
+		return fillExplicitThinking(spec, facts, compat, explicitThinking, rule);
 	}
 	if (compat !== undefined && "trustExplicitThinkingOnly" in compat && compat.trustExplicitThinkingOnly === true) {
 		return undefined;
@@ -1085,6 +1109,7 @@ function resolveThinkingPolicy<TApi extends Api>(
 	if (rule.effortBudgets !== undefined) config.effortBudgets = rule.effortBudgets;
 	const supportsDisplay = rule.supportsDisplay ?? defaultSupportsDisplay(spec, facts);
 	if (supportsDisplay) config.supportsDisplay = true;
+	if (rule.prefixBinding) config.prefixBinding = true;
 	const requiresEffort =
 		rule.requiresEffort ?? (impliesMandatoryReasoning(facts, spec.id) || isQwenTemplateReasoningEffortCompat(compat));
 	if (requiresEffort) config.requiresEffort = true;
@@ -1142,7 +1167,8 @@ function fillExplicitThinking<TApi extends Api>(
 		(rule.requiresEffort ??
 			(impliesMandatoryReasoning(facts, spec.id) || isQwenTemplateReasoningEffortCompat(compat)));
 	const needsDefaultLevel = thinking.defaultLevel === undefined && rule.defaultLevel !== undefined;
-	if (effortMap === undefined && !needsDisplay && !needsRequiresEffort && !needsDefaultLevel) {
+	const needsPrefixBinding = thinking.prefixBinding === undefined && rule.prefixBinding === true;
+	if (effortMap === undefined && !needsDisplay && !needsRequiresEffort && !needsDefaultLevel && !needsPrefixBinding) {
 		return thinking;
 	}
 	const filled: ThinkingConfig = { ...thinking };
@@ -1150,6 +1176,7 @@ function fillExplicitThinking<TApi extends Api>(
 	if (needsDisplay) filled.supportsDisplay = true;
 	if (needsDefaultLevel && rule.defaultLevel !== undefined) filled.defaultLevel = rule.defaultLevel;
 	if (needsRequiresEffort) filled.requiresEffort = true;
+	if (needsPrefixBinding) filled.prefixBinding = true;
 	return filled;
 }
 
@@ -1160,6 +1187,7 @@ function fillExplicitThinking<TApi extends Api>(
 function buildResolveTarget<TApi extends Api>(spec: ModelSpec<TApi>, identity: ModelIdentity): ResolveTarget {
 	const target: ResolveTarget = {
 		provider: spec.provider,
+		api: spec.api,
 		class: identity.class,
 		model: spec.id,
 		reasoning: Boolean(spec.reasoning),

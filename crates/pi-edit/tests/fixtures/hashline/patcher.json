@@ -1,0 +1,176 @@
+{
+ "cases": [
+  {
+   "name": "applies when the section tag is the live file's content hash",
+   "files": {"a.txt": "before\n"},
+   "snapshots": [{"path": "a.txt"}],
+   "args": {"input": "[a.txt#{{tag:a.txt}}]\nPUT 1.=1:\n+after"},
+   "expect": {"files": {"a.txt": "after\n"}, "writes": 1}
+  },
+  {
+   "name": "validates any anchor purely from the content hash, even with no recorded snapshot",
+   "files": {"a.txt": "before\n"},
+   "args": {"input": "[a.txt#F27C]\nPUT 1.=1:\n+after"},
+   "expect": {"files": {"a.txt": "after\n"}, "writes": 1}
+  },
+  {
+   "name": "normalizes lowercase section tags while parsing",
+   "files": {"a.txt": "before\n"},
+   "args": {"input": "[a.txt#f27c]\nPUT 1.=1:\n+after"},
+   "expect": {"files": {"a.txt": "after\n"}, "writes": 1}
+  },
+  {
+   "name": "restores a UTF-8 BOM hidden by text decoding",
+   "files": {"bom.txt": "﻿before\n"},
+   "snapshots": [{"path": "bom.txt", "text": "before\n"}],
+   "args": {"input": "[bom.txt#{{tag:bom.txt}}]\nPUT 1.=1:\n+after"},
+   "expect": {"files": {"bom.txt": "﻿after\n"}, "writes": 1}
+  },
+  {
+   "name": "applies a head/tail insert with a stale tag and warns instead of hard-failing",
+   "files": {"drift.txt": "external\na\nb\n"},
+   "snapshots": [{"path": "drift.txt", "text": "a\nb\n"}],
+   "args": {"input": "[drift.txt#{{tag:drift.txt}}]\nPUT <1:\n+head"},
+   "expect": {"files": {"drift.txt": "head\nexternal\na\nb\n"}, "writes": 1, "textContains": ["Applied the `PUT <1:`/`PUT >$:` edit despite a stale snapshot tag"]}
+  },
+  {
+   "name": "rejects a hashless head/tail insert — the tag is required on every section",
+   "files": {"a.txt": "a\nb\n"},
+   "args": {"input": "[a.txt]\nPUT <1:\n+head"},
+   "expect": {"error": "snapshot tag", "writes": 0}
+  },
+  {
+   "name": "rejects a tagged edit whose target file does not exist (create with write instead)",
+   "args": {"input": "[missing.txt#FFFF]\nPUT <1:\n+head"},
+   "expect": {"error": "File not found: missing.txt. Use the write tool to create new files.", "writes": 0}
+  },
+  {
+   "name": "deletes a tagged file with REM",
+   "files": {"remove.txt": "gone\n"},
+   "snapshots": [{"path": "remove.txt"}],
+   "args": {"input": "[remove.txt#{{tag:remove.txt}}]\nREM"},
+   "expect": {"deleted": ["remove.txt"], "writes": 1}
+  },
+  {
+   "name": "moves a file without content edits",
+   "files": {"from.txt": "move me\n"},
+   "snapshots": [{"path": "from.txt"}],
+   "args": {"input": "[from.txt#{{tag:from.txt}}]\nMV to.txt"},
+   "expect": {"files": {"to.txt": "move me\n"}, "deleted": ["from.txt"], "writes": 1}
+  },
+  {
+   "name": "emits an actionable no-op diagnostic when the payload matches the file byte-for-byte",
+   "files": {"same.txt": "same\n"},
+   "snapshots": [{"path": "same.txt"}],
+   "args": {"input": "[same.txt#{{tag:same.txt}}]\nPUT 1.=1:\n+same"},
+   "expect": {"textContains": ["parsed and applied cleanly, but produced no change"], "writes": 0}
+  },
+  {
+   "name": "rejects an edit on a line the partial read never displayed",
+   "files": {"seen.txt": "one\ntwo\nthree\n"},
+   "snapshots": [{"path": "seen.txt", "seenLines": [1]}],
+   "policy": {"enforceSeenLines": true},
+   "args": {"input": "[seen.txt#{{tag:seen.txt}}]\nPUT 2.=2:\n+TWO"},
+   "expect": {"error": "anchors to lines 2", "writes": 0}
+  },
+  {
+   "name": "applies an edit anchored on a displayed line",
+   "files": {"seen.txt": "one\ntwo\nthree\n"},
+   "snapshots": [{"path": "seen.txt", "seenLines": [2]}],
+   "policy": {"enforceSeenLines": true},
+   "args": {"input": "[seen.txt#{{tag:seen.txt}}]\nPUT 2.=2:\n+TWO"},
+   "expect": {"files": {"seen.txt": "one\nTWO\nthree\n"}, "writes": 1}
+  },
+  {
+   "name": "redirects a bare filename to the full path of the file its tag names",
+   "files": {"nested/a.txt": "before\n"},
+   "snapshots": [{"path": "nested/a.txt"}],
+   "args": {"input": "[a.txt#{{tag:nested/a.txt}}]\nPUT 1.=1:\n+after"},
+   "expect": {"files": {"nested/a.txt": "after\n"}, "writes": 1, "textContains": ["matched its filename and snapshot tag"]}
+  },
+  {
+   "name": "preflights every section before writing multi-file edits",
+   "files": {"a.txt": "a\n", "b.txt": "b\n"},
+   "snapshots": [{"path": "a.txt"}, {"path": "b.txt"}],
+   "args": {"input": "[a.txt#{{tag:a.txt}}]\nPUT 1.=1:\n+A\n[b.txt#FFFF]\nPUT 1.=1:\n+B"},
+   "expect": {"error": "not from this session", "files": {"a.txt": "a\n", "b.txt": "b\n"}, "writes": 0}
+  },
+  {
+   "name": "rejects duplicate canonical targets before writing stale section results",
+   "files": {"a.txt": "a\n"},
+   "snapshots": [{"path": "a.txt"}],
+   "args": {"input": "[a.txt#{{tag:a.txt}}]\nPUT 1.=1:\n+A\n[./a.txt#{{tag:a.txt}}]\nPUT 1.=1:\n+B"},
+   "expect": {"error": "Multiple hashline sections resolve to the same file", "files": {"a.txt": "a\n"}, "writes": 0}
+  },
+  {
+   "name": "applies line edits then moves the updated content",
+   "files": {"from.txt": "old\nkeep\n"},
+   "snapshots": [{"path": "from.txt"}],
+   "args": {"input": "[from.txt#{{tag:from.txt}}]\nPUT 1.=1:\n+new\nMV nested/to.txt"},
+   "expect": {"files": {"nested/to.txt": "new\nkeep\n"}, "deleted": ["from.txt"], "writes": 1}
+  },
+  {
+   "name": "multi-section no-op is a hard error",
+   "files": {"a.txt": "a\n", "b.txt": "b\n"},
+   "snapshots": [{"path": "a.txt"}, {"path": "b.txt"}],
+   "args": {"input": "[a.txt#{{tag:a.txt}}]\nPUT 1.=1:\n+a\n[b.txt#{{tag:b.txt}}]\nPUT 1.=1:\n+B"},
+   "expect": {"error": "parsed and applied cleanly, but produced no change", "files": {"a.txt": "a\n", "b.txt": "b\n"}, "writes": 0}
+  },
+  {
+   "name": "inserts after the final line without falling off the file",
+   "files": {"lines.txt": "aaa\nbbb\nccc"},
+   "snapshots": [{"path": "lines.txt"}],
+   "args": {"input": "[lines.txt#{{tag:lines.txt}}]\nPUT >3:\n+tail"},
+   "expect": {"files": {"lines.txt": "aaa\nbbb\nccc\ntail"}, "writes": 1}
+  },
+  {
+   "name": "preserves whitespace-bearing and sigil-leading payload exactly",
+   "files": {"payload.txt": "before\n"},
+   "snapshots": [{"path": "payload.txt"}],
+   "args": {"input": "[payload.txt#{{tag:payload.txt}}]\nPUT 1.=1:\n+\tconst value = 1;\n++literal-plus\n+- literal-minus"},
+   "expect": {"files": {"payload.txt": "\tconst value = 1;\n+literal-plus\n- literal-minus\n"}, "writes": 1}
+  },
+  {
+   "name": "applies inline cut operations",
+   "files": {"cut.txt": "line1\nline2\nline3\n"},
+   "snapshots": [{"path": "cut.txt"}],
+   "args": {"input": "[cut.txt#{{tag:cut.txt}}]\nCUT 2"},
+   "expect": {"files": {"cut.txt": "line1\nline3\n"}, "writes": 1}
+  },
+  {
+   "name": "preserves explicit blank replacement rows",
+   "files": {"blank.txt": "a\nb\nc\n"},
+   "snapshots": [{"path": "blank.txt"}],
+   "args": {"input": "[blank.txt#{{tag:blank.txt}}]\nPUT 2.=2:\n+"},
+   "expect": {"files": {"blank.txt": "a\n\nc\n"}, "writes": 1}
+  },
+  {
+   "name": "leniently accepts single-number replace shorthand",
+   "files": {"short.txt": "a\nb\nc\n"},
+   "snapshots": [{"path": "short.txt"}],
+   "args": {"input": "[short.txt#{{tag:short.txt}}]\nPUT 2:\n+X"},
+   "expect": {"files": {"short.txt": "a\nX\nc\n"}, "writes": 1}
+  },
+  {
+   "name": "recovers a dangling range separator as a single-line range",
+   "files": {"dangling.txt": "a\nb\nc\n"},
+   "snapshots": [{"path": "dangling.txt"}],
+   "args": {"input": "[dangling.txt#{{tag:dangling.txt}}]\nPUT 2.=:\n+X"},
+   "expect": {"files": {"dangling.txt": "a\nX\nc\n"}, "writes": 1}
+  },
+  {
+   "name": "recovers a bare range header as an implicit PUT",
+   "files": {"bare.txt": "a\nb\nc\nd\n"},
+   "snapshots": [{"path": "bare.txt"}],
+   "args": {"input": "[bare.txt#{{tag:bare.txt}}]\n2.=3:\n+X"},
+   "expect": {"files": {"bare.txt": "a\nX\nd\n"}, "writes": 1, "textContains": ["Recovered a bare"]}
+  },
+  {
+   "name": "accepts a harmless trailing colon on bodyless CUT",
+   "files": {"colon.txt": "a\nb\nc\nd\n"},
+   "snapshots": [{"path": "colon.txt"}],
+   "args": {"input": "[colon.txt#{{tag:colon.txt}}]\nCUT 2.=3:"},
+   "expect": {"files": {"colon.txt": "a\nd\n"}, "writes": 1, "textContains": ["Ignored a trailing `:`"]}
+  }
+ ]
+}

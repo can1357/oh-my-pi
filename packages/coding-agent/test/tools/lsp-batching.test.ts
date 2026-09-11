@@ -48,7 +48,7 @@ describe("createLspWritethrough batching", () => {
 			flush: false,
 		});
 
-		expect(firstResult).toBeUndefined();
+		expect(firstResult.finalContent).toBe("const a = 1;\n");
 		expect(getServersSpy).toHaveBeenCalledTimes(0);
 		expect(loadConfigSpy).toHaveBeenCalledTimes(0);
 		expect(await Bun.file(fileA).text()).toBe("const a = 1;\n");
@@ -58,7 +58,7 @@ describe("createLspWritethrough batching", () => {
 			flush: true,
 		});
 
-		expect(secondResult).toBeUndefined();
+		expect(secondResult.finalContent).toBe("const b = 2;\n");
 		expect(getServersSpy).toHaveBeenCalledTimes(2);
 		expect(loadConfigSpy).toHaveBeenCalledTimes(1);
 		expect(await Bun.file(fileA).text()).toBe("const a = 1;\n");
@@ -127,10 +127,11 @@ describe("createLspWritethrough batching", () => {
 			id: batchId,
 			flush: false,
 		});
-		await writethrough(fileB, "const other=1\n", undefined, undefined, {
+		const result = await writethrough(fileB, "const other=1\n", undefined, undefined, {
 			id: batchId,
 			flush: true,
 		});
+		expect(result.finalContent).toBe("const other = 1;\n");
 
 		const bytes = new Uint8Array(await Bun.file(fileA).arrayBuffer());
 		expect([...bytes.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
@@ -157,7 +158,7 @@ describe("createLspWritethrough batching", () => {
 			flush: true,
 		});
 
-		expect(result?.formatter).toBe(FileFormatResult.FAILED);
+		expect(result.diagnostics?.formatter).toBe(FileFormatResult.FAILED);
 	});
 
 	it("flushes earlier entries when the final batch write fails", async () => {
@@ -199,7 +200,7 @@ describe("createLspWritethrough batching", () => {
 		const filePath = path.join(tempDir.path(), "single.ts");
 		const result = await writethrough(filePath, "const single = true;\n");
 
-		expect(result).toBeUndefined();
+		expect(result.finalContent).toBe("const single = true;\n");
 		expect(getServersSpy).toHaveBeenCalledTimes(1);
 		expect(loadConfigSpy).toHaveBeenCalledTimes(1);
 		expect(await Bun.file(filePath).text()).toBe("const single = true;\n");

@@ -1,8 +1,19 @@
 /** Runtime backend that an eval cell dispatches to. */
-export type EvalLanguage = "python" | "js" | "ruby" | "julia";
+export type EvalLanguage = "python" | "js";
 
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { OutputMeta } from "../tools/output-meta";
+
+/** Kernel-defined tool metadata exposed to task subagents. */
+export interface EvalToolDescriptor {
+	name: string;
+	description: string;
+	parameters: Record<string, unknown>;
+	language: EvalLanguage;
+}
+
+/** Result of invoking a kernel-defined tool. */
+export type EvalToolInvokeResult = { ok: true; value: unknown } | { ok: false; error: string };
 
 /** Status event emitted by eval prelude helpers for TUI rendering. */
 export interface EvalStatusEvent {

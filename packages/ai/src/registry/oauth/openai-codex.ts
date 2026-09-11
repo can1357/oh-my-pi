@@ -6,15 +6,12 @@ import { OPENAI_HEADER_VALUES } from "@oh-my-pi/pi-catalog/wire/codex";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import { isRecord } from "../../utils";
-import { OAuthCallbackFlow, type OAuthCallbackFlowOptions } from "./callback-server";
-import { generatePKCE } from "./pkce";
+import type { AfterExchangeHook } from "../hooks/types";
 import type { OAuthController, OAuthCredentials } from "./types";
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
-const CALLBACK_PORT = 1455;
-const CALLBACK_PATH = "/auth/callback";
 const SCOPE = "openid profile email offline_access api.connectors.read api.connectors.invoke";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
 const JWT_PROFILE_CLAIM = "https://api.openai.com/profile";
@@ -65,8 +62,8 @@ function getTokenProfile(
 	const idPayload = idToken ? decodeJwt<JwtPayload>(idToken) : null;
 	const auth = payload?.[JWT_CLAIM_PATH];
 	const idAuth = idPayload?.[JWT_CLAIM_PATH];
-	const accountId = auth?.chatgpt_account_id;
-	const email = payload?.[JWT_PROFILE_CLAIM]?.email?.trim().toLowerCase();
+	const accountId = auth?.chatgpt_account_id ?? idAuth?.chatgpt_account_id;
+	const email = (payload?.[JWT_PROFILE_CLAIM]?.email ?? idPayload?.[JWT_PROFILE_CLAIM]?.email)?.trim().toLowerCase();
 	const planType = (auth?.chatgpt_plan_type ?? idAuth?.chatgpt_plan_type)?.trim().toLowerCase();
 	return {
 		accountId: typeof accountId === "string" && accountId.length > 0 ? accountId : undefined,
@@ -75,10 +72,6 @@ function getTokenProfile(
 	};
 }
 
-interface PKCE {
-	verifier: string;
-	challenge: string;
-}
 function describeTokenEndpointValue(value: unknown): string | undefined {
 	if (typeof value === "string") {
 		const trimmed = value.trim();
@@ -93,7 +86,31 @@ function describeTokenEndpointValue(value: unknown): string | undefined {
 	return code ?? message ?? JSON.stringify(value);
 }
 
-/** Formats OpenAI Codex OAuth token endpoint errors for login and refresh failures. */
+/** Enriches declaratively exchanged Codex credentials from access/id-token JWT claims. */
+export const openAICodexProfileHook: AfterExchangeHook = async (credentials, context) => {
+	const idToken = isRecord(context.raw) && typeof context.raw.id_token === "string" ? context.raw.id_token : undefined;
+	const { accountId, email, planType } = getTokenProfile(credentials.access, idToken);
+	if (context.phase === "login" && !accountId) {
+		throw new AIError.OAuthError("Failed to extract accountId from token", {
+			kind: "validation",
+			provider: context.provider,
+		});
+	}
+	const resolvedAccountId = accountId ?? context.stored?.accountId;
+	return {
+		...credentials,
+		...(resolvedAccountId ? { accountId: resolvedAccountId } : {}),
+		...(email ? { email } : context.stored?.email ? { email: context.stored.email } : {}),
+		...(context.phase === "login" && resolvedAccountId ? { orgId: resolvedAccountId } : {}),
+		...(context.phase === "login" && planType ? { orgName: planType } : {}),
+		...(context.phase === "refresh" && context.stored?.orgId ? { orgId: context.stored.orgId } : {}),
+		...(context.phase === "refresh" && context.stored?.orgName ? { orgName: context.stored.orgName } : {}),
+	};
+};
+
+/**
+ * Formats OpenAI Codex OAuth token endpoint errors for login and refresh failures.
+ */
 export function formatOpenAICodexTokenEndpointError(status: number, bodyText: string): string {
 	const trimmed = bodyText.trim();
 	if (trimmed.length === 0) return `${status}`;
@@ -132,41 +149,6 @@ export function createOpenAICodexAuthorizationUrl(args: {
 	});
 
 	return `${AUTHORIZE_URL}?${searchParams.toString()}`;
-}
-
-class OpenAICodexOAuthFlow extends OAuthCallbackFlow {
-	#pkce: PKCE;
-	#originator: string;
-	#fetch: FetchImpl;
-
-	constructor(ctrl: OAuthController, pkce: PKCE, originator: string, fetchImpl: FetchImpl) {
-		super(ctrl, {
-			preferredPort: CALLBACK_PORT,
-			callbackPath: CALLBACK_PATH,
-			// Enforce the fixed port: OpenAI only allows http://localhost:1455/auth/callback.
-			// Without this, a busy port 1455 falls back to a random port, and the token
-			// exchange would fail with 403 because the redirect_uri no longer matches the
-			// registered allowlist entry.
-			redirectUri: `http://localhost:${CALLBACK_PORT}${CALLBACK_PATH}`,
-		} satisfies OAuthCallbackFlowOptions);
-		this.#pkce = pkce;
-		this.#originator = originator;
-		this.#fetch = fetchImpl;
-	}
-
-	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
-		const url = createOpenAICodexAuthorizationUrl({
-			state,
-			redirectUri,
-			challenge: this.#pkce.challenge,
-			originator: this.#originator,
-		});
-		return { url, instructions: "A browser window should open. Complete login to finish." };
-	}
-
-	async exchangeToken(code: string, _state: string, redirectUri: string): Promise<OAuthCredentials> {
-		return exchangeCodeForToken(code, this.#pkce.verifier, redirectUri, this.#fetch);
-	}
 }
 
 async function exchangeCodeForToken(
@@ -221,22 +203,6 @@ async function exchangeCodeForToken(
 		orgId: accountId,
 		orgName: planType,
 	};
-}
-
-/**
- * Login with OpenAI Codex OAuth
- */
-export type OpenAICodexLoginOptions = OAuthController & {
-	/** Optional originator value for OpenAI Codex OAuth. Default matches OMP Codex request headers. */
-	originator?: string;
-};
-
-export async function loginOpenAICodex(options: OpenAICodexLoginOptions): Promise<OAuthCredentials> {
-	const pkce = await generatePKCE();
-	const originator = options.originator?.trim() || OPENAI_HEADER_VALUES.ORIGINATOR_CODEX;
-	const flow = new OpenAICodexOAuthFlow(options, pkce, originator, options.fetch ?? fetch);
-
-	return flow.login();
 }
 
 /**
@@ -334,51 +300,4 @@ export async function loginOpenAICodexDevice(ctrl: OAuthController): Promise<OAu
 	throw new AIError.OAuthError("Device authorization timed out — user did not complete login in time", {
 		kind: "timeout",
 	});
-}
-
-/**
- * Refresh OpenAI Codex OAuth token
- */
-export async function refreshOpenAICodexToken(refreshToken: string): Promise<OAuthCredentials> {
-	const response = await fetch(TOKEN_URL, {
-		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
-		body: new URLSearchParams({
-			grant_type: "refresh_token",
-			refresh_token: refreshToken,
-			client_id: CLIENT_ID,
-		}),
-		signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
-	});
-
-	if (!response.ok) {
-		const bodyText = await response.text();
-		throw new AIError.OAuthError(
-			`OpenAI Codex token refresh failed: ${formatOpenAICodexTokenEndpointError(response.status, bodyText)}`,
-			{ kind: "token-refresh", status: response.status },
-		);
-	}
-
-	const tokenData = (await response.json()) as {
-		access_token?: string;
-		refresh_token?: string;
-		expires_in?: number;
-	};
-
-	if (!tokenData.access_token || !tokenData.refresh_token || typeof tokenData.expires_in !== "number") {
-		throw new AIError.OAuthError("Token response missing required fields", { kind: "validation" });
-	}
-
-	const { accountId, email } = getTokenProfile(tokenData.access_token);
-
-	// Deliberately no org fields on the result: the workspace a credential is
-	// scoped to is fixed at login. Callers merge refresh results over the
-	// stored credential, so omitting org here preserves it verbatim.
-	return {
-		access: tokenData.access_token,
-		refresh: tokenData.refresh_token || refreshToken,
-		expires: Date.now() + tokenData.expires_in * 1000,
-		accountId: accountId ?? undefined,
-		email,
-	};
 }

@@ -131,6 +131,11 @@ describe("parseReportedVersion", () => {
 		expect(parseReportedVersion("omp/18.0.5")).toBe("18.0.5");
 		expect(parseReportedVersion("not a version")).toBeUndefined();
 	});
+
+	it("rejects version output from a different executable", () => {
+		expect(parseReportedVersion("node/18.0.5")).toBeUndefined();
+		expect(parseReportedVersion("codex/18.0.5")).toBeUndefined();
+	});
 });
 
 describe("update-cli libc detection", () => {
@@ -260,7 +265,12 @@ describe("update-cli install target detection", () => {
 			npmBinDir,
 		});
 
-		expect(target).toEqual({ method: "binary", path: standalonePath, replacesSymlink: false });
+		expect(target).toEqual({
+			method: "binary",
+			path: standalonePath,
+			replacesSymlink: false,
+			validateExistingTarget: true,
+		});
 		expect(await fs.readlink(aliasPath)).toBe(standalonePath);
 	});
 
@@ -302,7 +312,12 @@ describe("update-cli install target detection", () => {
 			allowPackageManagers: true,
 		});
 
-		expect(target).toEqual({ method: "binary", path: standalonePath, replacesSymlink: false });
+		expect(target).toEqual({
+			method: "binary",
+			path: standalonePath,
+			replacesSymlink: false,
+			validateExistingTarget: true,
+		});
 	});
 
 	it("resolves a foreign symlink to its real binary on a binary-only release instead of clobbering the launcher", async () => {
@@ -325,9 +340,66 @@ describe("update-cli install target detection", () => {
 			allowPackageManagers: false,
 		});
 
-		expect(target).toEqual({ method: "binary", path: standalonePath, replacesSymlink: false });
+		expect(target).toEqual({
+			method: "binary",
+			path: standalonePath,
+			replacesSymlink: false,
+			validateExistingTarget: true,
+		});
 		expect(await fs.readlink(launcherPath)).toBe(standalonePath);
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"refuses to overwrite a shared shebang dispatcher behind a foreign symlink",
+		async () => {
+			const dir = await makeTempDir();
+			const dispatcherPath = path.join(dir, "launch");
+			const aliasPath = path.join(dir, "omp");
+			const dispatcher = "#!/bin/sh\necho dispatcher\n";
+			await Bun.write(dispatcherPath, dispatcher);
+			await fs.chmod(dispatcherPath, 0o755);
+			await fs.symlink("launch", aliasPath);
+			const fetchImpl = vi.fn(async () => new Response());
+
+			const target = resolveUpdateTargetFromPath(aliasPath, undefined, {
+				allowPackageManagers: true,
+			});
+			if (target.method !== "binary") throw new Error("Expected binary update target");
+
+			await expect(
+				updateViaBinaryAt(target.path, "18.1.13", {
+					binaryName: "omp-linux-x64",
+					fetchImpl,
+					validateExistingTarget: target.validateExistingTarget,
+				}),
+			).rejects.toThrow(`Refusing to replace ${dispatcherPath}`);
+			expect(fetchImpl).not.toHaveBeenCalled();
+			expect(await Bun.file(dispatcherPath).text()).toBe(dispatcher);
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"refuses a foreign native target that does not report an OMP version",
+		async () => {
+			const dir = await makeTempDir();
+			const aliasPath = path.join(dir, "omp");
+			await fs.symlink(process.execPath, aliasPath);
+			const fetchImpl = vi.fn(async () => new Response());
+			const target = resolveUpdateTargetFromPath(aliasPath, undefined, {
+				allowPackageManagers: true,
+			});
+			if (target.method !== "binary") throw new Error("Expected binary update target");
+
+			await expect(
+				updateViaBinaryAt(target.path, "18.1.13", {
+					binaryName: "omp-linux-x64",
+					fetchImpl,
+					validateExistingTarget: target.validateExistingTarget,
+				}),
+			).rejects.toThrow("does not report an OMP version when run directly");
+			expect(fetchImpl).not.toHaveBeenCalled();
+		},
+	);
 
 	it("takes over a package-manager launcher in place on a binary-only release", async () => {
 		// A bun/npm-managed launcher symlinks into the manager's node_modules.
@@ -348,7 +420,12 @@ describe("update-cli install target detection", () => {
 			npmBinDir,
 		});
 
-		expect(target).toEqual({ method: "binary", path: aliasPath, replacesSymlink: true });
+		expect(target).toEqual({
+			method: "binary",
+			path: aliasPath,
+			replacesSymlink: true,
+			validateExistingTarget: false,
+		});
 	});
 
 	it("keeps a split-root Bun-linked checkout under Bun management instead of overwriting its script", async () => {
@@ -622,7 +699,7 @@ describe("update-cli bun install command", () => {
 		// file and aborted at validateLoadedBindings with `The .node file on
 		// disk is from a different release than this loader`. See
 		// https://github.com/can1357/oh-my-pi/issues/1824.
-		for (const tag of ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64"]) {
+		for (const tag of ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64"]) {
 			const args = buildBunInstallArgs("15.9.0", tag);
 			expect(args).toContain("@oh-my-pi/pi-natives@15.9.0");
 			expect(args).toContain(`@oh-my-pi/pi-natives-${tag}@15.9.0`);
@@ -1308,6 +1385,26 @@ describe("update-cli script-shim takeover", () => {
 
 		expect(await Bun.file(targetPath).text()).toBe(exe);
 		expect(await Bun.file(marker).exists()).toBe(false);
+	});
+
+	it.skipIf(process.platform === "win32")("reports the physical binary path verified after an update", async () => {
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, "omp");
+		const exe = `#!/bin/sh\necho omp/${version}\n`;
+		await Bun.write(targetPath, "old binary");
+		const logSpy = spyOn(console, "log").mockImplementation(() => {});
+
+		await updateViaBinaryAt(targetPath, version, {
+			binaryName,
+			fetchImpl: makeFetch(exe),
+			githubToken: "test-token",
+		});
+
+		expect(
+			logSpy.mock.calls.some(
+				([message]) => String(message).includes(targetPath) && String(message).includes(version),
+			),
+		).toBe(true);
 	});
 
 	it("restores the shims and removes the exe when the exe reports the wrong version", async () => {

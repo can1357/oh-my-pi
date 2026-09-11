@@ -1,0 +1,9 @@
+auth "zenmux" {
+	name "ZenMux"
+	login "api-key" {
+		auth-url "https://zenmux.ai/settings/keys"
+		instructions "Create or copy your ZenMux API key"
+		prompt "Paste your ZenMux API key" placeholder="sk-..."
+		validate "models-endpoint" url="https://zenmux.ai/api/v1/models"
+	}
+}

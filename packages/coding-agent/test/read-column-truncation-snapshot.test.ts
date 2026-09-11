@@ -13,12 +13,10 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Patch, Patcher } from "@oh-my-pi/hashline";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { canonicalSnapshotKey, getFileSnapshotStore } from "@oh-my-pi/pi-coding-agent/edit/file-snapshot-store";
-import { HashlineFilesystem } from "@oh-my-pi/pi-coding-agent/edit/hashline/filesystem";
-import { writethroughNoop } from "@oh-my-pi/pi-coding-agent/lsp";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
@@ -58,27 +56,9 @@ function extractHeader(text: string): { header: string; tag: string; relPath: st
 	return { header: header!, tag: tag!, relPath: relPath! };
 }
 
-async function applyEditWithTag(args: {
-	session: ToolSession;
-	tmpDir: string;
-	filePath: string;
-	header: string;
-	patchBody: string;
-}): Promise<void> {
+async function applyEditWithTag(args: { session: ToolSession; header: string; patchBody: string }): Promise<void> {
 	const patchInput = `${args.header}\n${args.patchBody}`;
-	const patch = Patch.parse(patchInput, { cwd: args.tmpDir });
-	expect(patch.sections).toHaveLength(1);
-
-	const filesystem = new HashlineFilesystem({
-		session: args.session,
-		writethrough: writethroughNoop,
-		beginDeferredDiagnosticsForPath: () => {
-			throw new Error("deferred diagnostics unused with writethroughNoop");
-		},
-	});
-	const patcher = new Patcher({ fs: filesystem, snapshots: getFileSnapshotStore(args.session) });
-	const prepared = await patcher.prepare(patch.sections[0]!);
-	await patcher.commit(prepared);
+	await new EditTool(args.session, "hashline").execute("call-edit", { input: patchInput });
 }
 
 describe("read tool column truncation vs hashline snapshot", () => {
@@ -112,12 +92,12 @@ describe("read tool column truncation vs hashline snapshot", () => {
 		expect(text).not.toContain(longLine);
 
 		const { tag } = extractHeader(text);
-		const snapshot = getFileSnapshotStore(session).byHash(canonicalSnapshotKey(filePath), tag);
+		const snapshot = getEditStore(session).byHashText(filePath, tag);
 		expect(snapshot).not.toBeNull();
 
 		// The snapshot MUST hold the on-disk text, not the display-truncated version.
-		expect(snapshot?.text).toBe(fullText);
-		expect(snapshot?.text.split("\n")[1]).toBe(longLine);
+		expect(snapshot).toBe(fullText);
+		expect(snapshot?.split("\n")[1]).toBe(longLine);
 	});
 
 	it("range read snapshot keeps untruncated content for long lines", async () => {
@@ -133,8 +113,8 @@ describe("read tool column truncation vs hashline snapshot", () => {
 		expect(text).toContain("…");
 
 		const { tag } = extractHeader(text);
-		const snapshot = getFileSnapshotStore(session).byHash(canonicalSnapshotKey(filePath), tag);
-		expect(snapshot?.text.split("\n")[1]).toBe(longLine);
+		const snapshot = getEditStore(session).byHashText(filePath, tag);
+		expect(snapshot?.split("\n")[1]).toBe(longLine);
 	});
 
 	it("multi-range read snapshot keeps untruncated content for long lines", async () => {
@@ -150,9 +130,9 @@ describe("read tool column truncation vs hashline snapshot", () => {
 		expect(text).toContain("…");
 
 		const { tag } = extractHeader(text);
-		const snapshot = getFileSnapshotStore(session).byHash(canonicalSnapshotKey(filePath), tag);
-		expect(snapshot?.text.split("\n")[1]).toBe(longLine);
-		expect(snapshot?.text.split("\n")[5]).toBe(longLine);
+		const snapshot = getEditStore(session).byHashText(filePath, tag);
+		expect(snapshot?.split("\n")[1]).toBe(longLine);
+		expect(snapshot?.split("\n")[5]).toBe(longLine);
 	});
 
 	it("edit can apply against a file with long lines without re-reading", async () => {
@@ -173,8 +153,6 @@ describe("read tool column truncation vs hashline snapshot", () => {
 		// Replace line 3 ("outro") using the TAG returned by the truncating read.
 		await applyEditWithTag({
 			session,
-			tmpDir,
-			filePath,
 			header,
 			patchBody: "PUT 3-3:\n+epilogue\n",
 		});
@@ -195,8 +173,6 @@ describe("read tool column truncation vs hashline snapshot", () => {
 		const { header } = extractHeader(readText);
 		await applyEditWithTag({
 			session,
-			tmpDir,
-			filePath,
 			header,
 			patchBody: "CUT 2\n",
 		});

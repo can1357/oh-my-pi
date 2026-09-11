@@ -760,6 +760,76 @@ describe("ACP agent", () => {
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
+	it("plan-proposal handler autosaves the approved plan without leaking the path", async () => {
+		const harness = await createHarness();
+		Settings.instance.set("plan.enabled", true);
+		Settings.instance.set("plan.autosave", true);
+
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "plan" });
+
+		const localOptions = {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		};
+		cleanupRoots.push(resolveLocalUrlToPath("local://", localOptions));
+		const planPath = resolveLocalUrlToPath("local://words-counter-plan.md", localOptions);
+		await Bun.write(planPath, "# Words Counter\n\nFile contents.");
+
+		const handler = session.planProposalHandler!;
+		const result = (await handler("words-counter")) as {
+			content: Array<{ type: string; text: string }>;
+			details: { planFilePath: string; title: string; planExists: boolean };
+		};
+
+		expect(result.details.planExists).toBe(true);
+		expect(result.content[0]?.text).toMatch(/Plan approved/);
+		expect(result.content[0]?.text).not.toContain(harness.cwdA);
+		expect(result.content[0]?.text).not.toContain("autosaved to");
+		const saved = path.join(harness.cwdA, ".omp", "plans", "WORDS_COUNTER_PLAN.md");
+		expect(await Bun.file(saved).text()).toBe("# Words Counter\n\nFile contents.");
+		expect(session.planModeState).toBeUndefined();
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("plan-proposal handler approves and notes autosave failure without the path", async () => {
+		const harness = await createHarness();
+		Settings.instance.set("plan.enabled", true);
+		const blocker = path.join(harness.cwdA, "blocker");
+		await Bun.write(blocker, "x");
+		Settings.instance.set("plan.autosave", true);
+		Settings.instance.set("plan.autosaveDir", path.join(blocker, "sub"));
+
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "plan" });
+
+		const localOptions = {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		};
+		cleanupRoots.push(resolveLocalUrlToPath("local://", localOptions));
+		const planPath = resolveLocalUrlToPath("local://words-counter-plan.md", localOptions);
+		await Bun.write(planPath, "# Words Counter\n\nFile contents.");
+
+		const handler = session.planProposalHandler!;
+		const result = (await handler("words-counter")) as {
+			content: Array<{ type: string; text: string }>;
+		};
+		const text = result.content[0]?.text ?? "";
+
+		expect(text).toMatch(/Plan approved/);
+		expect(text).toMatch(/autosave failed/);
+		expect(text).not.toContain(harness.cwdA);
+		expect(session.planModeState).toBeUndefined();
+		expect(session.planReferencePath).toBe("local://words-counter-plan.md");
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
 
 	it("plan-proposal handler treats dismissed elicitation as refine, never approves", async () => {
 		// Regression for the P1 review finding on #1870: when a form-capable
@@ -1298,7 +1368,7 @@ describe("ACP agent", () => {
 
 	it("surfaces a provider error that reaches the client only via agent_end", async () => {
 		// A request that fails before streaming any assistant events (e.g.
-		// GitHub Copilot's HTTP 400 model_not_supported after retries) emits no
+		// GitHub Copilot's HTTP 400 model_not_supported) emits no
 		// message_update/message_end — only agent_end carrying an empty
 		// assistant message with errorMessage. The client must still see why
 		// the turn ended instead of a silent stop.
@@ -1307,8 +1377,7 @@ describe("ACP agent", () => {
 		const session = harness.findSession(created.sessionId);
 		if (!session) throw new Error("session not registered");
 
-		const errorText =
-			"GitHub Copilot rejected this model (HTTP 400 model_not_supported) after retries. Try again in a few seconds.";
+		const errorText = "400 The requested model is not supported.";
 		const failedMessage = {
 			...makeAssistantMessage(""),
 			stopReason: "error" as const,
@@ -2392,6 +2461,89 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("keeps a cancelled bare rename from updating or settling its successor", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const inferences = [
+			{ started: Promise.withResolvers<void>(), title: Promise.withResolvers<string | null>() },
+			{ started: Promise.withResolvers<void>(), title: Promise.withResolvers<string | null>() },
+		];
+		const titleSignals: Array<AbortSignal | undefined> = [];
+		let inferenceIndex = 0;
+		try {
+			await session.sessionManager.setSessionName("Original title", "user");
+			session.sessionManager.appendMessage({
+				role: "user",
+				content: "Investigate why cancelling a generated session title interrupts the next rename request.",
+				timestamp: Date.now(),
+			});
+			Object.assign(session, {
+				messages: session.sessionManager.buildSessionContext().messages,
+				titleGenerationSignal: new AbortController().signal,
+				notifyTitleGenerationStart: () => undefined,
+				generateTitle: (_context: string, _systemPrompt?: string, signal?: AbortSignal) => {
+					const inference = inferences[inferenceIndex++];
+					titleSignals.push(signal);
+					inference.started.resolve();
+					// Deliberately ignore abort so a cancelled inference can return late.
+					return inference.title.promise;
+				},
+			});
+
+			const firstPrompt = harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "/rename" }],
+			});
+			await Promise.race([inferences[0].started.promise, firstPrompt]);
+			await harness.agent.cancel({ sessionId: created.sessionId });
+			expect((await firstPrompt).stopReason).toBe("cancelled");
+			expect(titleSignals[0]?.aborted).toBe(true);
+
+			const secondPrompt = harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "/rename" }],
+			});
+			await Promise.race([inferences[1].started.promise, secondPrompt]);
+			expect(titleSignals[1]?.aborted).toBe(false);
+			const beforeLateResult = harness.updates.length;
+
+			inferences[0].title.resolve("Cancelled title");
+			const settledByOldRename = await Promise.race([secondPrompt.then(() => true), Bun.sleep(0).then(() => false)]);
+			expect(settledByOldRename).toBe(false);
+			expect(session.sessionManager.getSessionName()).toBe("Original title");
+			expect(
+				harness.updates
+					.slice(beforeLateResult)
+					.filter(
+						update =>
+							update.sessionId === created.sessionId &&
+							(update.update.sessionUpdate === "session_info_update" ||
+								update.update.sessionUpdate === "agent_message_chunk"),
+					),
+			).toEqual([]);
+
+			inferences[1].title.resolve("Rename cancellation isolation");
+			expect((await secondPrompt).stopReason).toBe("end_turn");
+			expect(session.sessionManager.getSessionName()).toBe("Rename cancellation isolation");
+			expect(harness.updates.slice(beforeLateResult)).toContainEqual({
+				sessionId: created.sessionId,
+				update: {
+					sessionUpdate: "session_info_update",
+					title: "Rename cancellation isolation",
+					updatedAt: expect.any(String),
+				},
+			});
+		} finally {
+			for (const inference of inferences) {
+				inference.started.resolve();
+				inference.title.resolve(null);
+			}
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
 	});
 
 	it("closes the ACP session when cancel cleanup times out", async () => {

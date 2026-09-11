@@ -1,0 +1,3 @@
+auth "mistral" {
+	name "Mistral"
+}

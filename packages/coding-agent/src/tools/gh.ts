@@ -6,6 +6,7 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
+import type { IsoBackendKind } from "@oh-my-pi/pi-natives";
 import {
 	BINARY_SNIFF_BYTES,
 	formatBytes,
@@ -154,6 +155,7 @@ export interface GhPrCheckoutSummary {
 	remote: string;
 	remoteBranch: string;
 	reused: boolean;
+	clonedWith?: IsoBackendKind;
 }
 
 export interface GhRunWatchJobDetails {

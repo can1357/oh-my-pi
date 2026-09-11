@@ -14,15 +14,14 @@
  * raw candidates being reverts — hence the explicit revert rejection.
  */
 import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
-import { diffLineRuns, summarizeCode } from "@oh-my-pi/pi-natives";
+import { diffLineRuns, editDiffString, summarizeCode } from "@oh-my-pi/pi-natives";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { WritethroughCallback } from "../lsp";
 import type { ToolSession } from "../tools";
 import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
 import repairPromptSource from "./auto-repair.md" with { type: "text" };
-import { type AppliedEditSnapshot, sourceParses } from "./blackbox";
-import { generateDiffString } from "./diff";
+import type { AppliedEditSnapshot } from "./blackbox";
 
 /** Context lines shown around the culprit hunks. */
 const CONTEXT_LINES = 6;
@@ -41,6 +40,10 @@ interface EditHunk {
 	aEnd: number;
 	bStart: number;
 	bEnd: number;
+}
+
+function parsesSource(code: string, path: string): boolean {
+	return summarizeCode({ code: code.length === 0 ? "\n" : code, path }).parsed;
 }
 
 /** The localized broken region plus its parseable pre-image reference. */
@@ -108,12 +111,12 @@ function isolateCulpritHunks(path: string, a: string[], b: string[], hunks: Edit
 	const n = hunks.length;
 	if (n === 0) return undefined;
 	for (let i = 0; i < n; i++) {
-		if (sourceParses(revertHunks(a, b, hunks, [i]), path)) return [i];
+		if (parsesSource(revertHunks(a, b, hunks, [i]), path)) return [i];
 	}
 	if (n <= MAX_PAIR_SEARCH_HUNKS) {
 		for (let i = 0; i < n; i++) {
 			for (let j = i + 1; j < n; j++) {
-				if (sourceParses(revertHunks(a, b, hunks, [i, j]), path)) return [i, j];
+				if (parsesSource(revertHunks(a, b, hunks, [i, j]), path)) return [i, j];
 			}
 		}
 	}
@@ -121,11 +124,11 @@ function isolateCulpritHunks(path: string, a: string[], b: string[], hunks: Edit
 	for (let i = 0; i < n; i++) {
 		const trial = new Set(keep);
 		trial.delete(i);
-		if (sourceParses(revertHunks(a, b, hunks, [...trial]), path)) keep.delete(i);
+		if (parsesSource(revertHunks(a, b, hunks, [...trial]), path)) keep.delete(i);
 	}
 	// Reverting every remaining hunk must parse (the full revert is the
 	// pre-image); an empty set would mean the pre-image itself is broken.
-	if (keep.size === 0 || !sourceParses(revertHunks(a, b, hunks, [...keep]), path)) return undefined;
+	if (keep.size === 0 || !parsesSource(revertHunks(a, b, hunks, [...keep]), path)) return undefined;
 	return [...keep];
 }
 
@@ -256,7 +259,7 @@ export async function repairParseRegression(
 			// intended change — worse than surfacing the parse warning.
 			if (normalizeForRevertCheck(text) === normalizedReference) continue;
 			const content = spliceRegion(b, region, text);
-			if (sourceParses(content, snapshot.path)) return { content, region, attempts: attempt };
+			if (parsesSource(content, snapshot.path)) return { content, region, attempts: attempt };
 		}
 	}
 	return undefined;
@@ -305,7 +308,7 @@ export async function attemptEditAutoRepair(options: {
 	} catch {
 		return undefined;
 	}
-	if (sourceParses(current, snapshot.path)) return undefined;
+	if (parsesSource(current, snapshot.path)) return undefined;
 
 	const timeout = AbortSignal.timeout(REPAIR_TIMEOUT_MS);
 	const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
@@ -317,6 +320,7 @@ export async function attemptEditAutoRepair(options: {
 					{ messages: [{ role: "user", content: builtPrompt, timestamp: Date.now() }] },
 					{
 						apiKey: registry.resolver(model, sessionId),
+						sessionId,
 						maxTokens: COMPLETION_MAX_TOKENS,
 						disableReasoning: true,
 						signal,
@@ -340,6 +344,6 @@ export async function attemptEditAutoRepair(options: {
 		attempts: repair.attempts,
 		regionLines: repair.region.bEnd - repair.region.bStart,
 	});
-	const diffResult = generateDiffString(current, repair.content, undefined, { path: snapshot.path });
+	const diffResult = editDiffString(current, repair.content, snapshot.path);
 	return { diff: diffResult.diff, model: `${model.provider}/${model.id}`, attempts: repair.attempts };
 }

@@ -109,6 +109,111 @@ pub(crate) struct Host {
 	/// The shared stdout/stderr writer when both fds point at one
 	/// destination; `None` when they diverge.
 	merged_out:            Option<Arc<Mutex<StreamWriter>>>,
+	/// Emulated SIGPIPE state shared with every guarded stream handed out by
+	/// this host; see [`Sigpipe`].
+	sigpipe:               Arc<Sigpipe>,
+}
+
+/// Exit status of a process killed by SIGPIPE (128 + 13).
+pub(crate) const SIGPIPE_EXIT_CODE: i32 = 141;
+
+/// Emulated SIGPIPE for an in-process utility.
+///
+/// A standalone utility whose reader goes away (`cut big.txt | head`) never
+/// observes `EPIPE`: the kernel delivers SIGPIPE and the process dies silently
+/// with status 141. A builtin runs inside the long-lived shell process, which
+/// must ignore SIGPIPE, so the same write returns `ErrorKind::BrokenPipe` and
+/// every ported error path would report it as a generic write failure.
+///
+/// [`SigpipeGuard`] wraps the host's stdout and stderr: the first broken-pipe
+/// write flips [`Sigpipe::hit`], after which stderr writes are discarded (a
+/// dead process prints nothing) while stdout writes keep failing so the
+/// utility's loops still terminate. [`run_caught`] then reports
+/// [`SIGPIPE_EXIT_CODE`] regardless of what the body returned.
+///
+/// [`Sigpipe::ignored`] is the builtin analogue of `signal(SIGPIPE, SIG_IGN)`
+/// for utilities that must survive a closed reader (`tee -p`).
+#[derive(Default)]
+pub(crate) struct Sigpipe {
+	hit:     AtomicBool,
+	ignored: AtomicBool,
+}
+
+impl Sigpipe {
+	fn record(&self, error: &io::Error) {
+		if error.kind() == io::ErrorKind::BrokenPipe && !self.ignored.load(Ordering::Relaxed) {
+			self.hit.store(true, Ordering::Relaxed);
+		}
+	}
+
+	fn is_hit(&self) -> bool {
+		self.hit.load(Ordering::Relaxed)
+	}
+}
+
+/// Which standard stream a [`SigpipeGuard`] fronts; decides what a write does
+/// once the emulated process is dead.
+#[derive(Clone, Copy)]
+enum GuardedStream {
+	Stdout,
+	Stderr,
+}
+
+/// An [`openfiles::Stream`] wrapper that turns `EPIPE` into emulated SIGPIPE.
+/// Clones share the [`Sigpipe`] state, so `stdout_clone()` handles given to
+/// helper threads participate too.
+struct SigpipeGuard {
+	inner:   OpenFile,
+	stream:  GuardedStream,
+	sigpipe: Arc<Sigpipe>,
+}
+
+impl SigpipeGuard {
+	fn wrap(inner: OpenFile, stream: GuardedStream, sigpipe: &Arc<Sigpipe>) -> OpenFile {
+		OpenFile::Stream(Box::new(Self { inner, stream, sigpipe: Arc::clone(sigpipe) }))
+	}
+}
+
+impl Read for SigpipeGuard {
+	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		self.inner.read(buf)
+	}
+}
+
+impl Write for SigpipeGuard {
+	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+		if matches!(self.stream, GuardedStream::Stderr) && self.sigpipe.is_hit() {
+			return Ok(buf.len());
+		}
+		self.inner.write(buf).inspect_err(|error| self.sigpipe.record(error))
+	}
+
+	fn flush(&mut self) -> io::Result<()> {
+		if matches!(self.stream, GuardedStream::Stderr) && self.sigpipe.is_hit() {
+			return Ok(());
+		}
+		self.inner.flush().inspect_err(|error| self.sigpipe.record(error))
+	}
+}
+
+impl openfiles::Stream for SigpipeGuard {
+	fn clone_box(&self) -> Box<dyn openfiles::Stream> {
+		Box::new(Self {
+			inner:   self.inner.clone(),
+			stream:  self.stream,
+			sigpipe: Arc::clone(&self.sigpipe),
+		})
+	}
+
+	#[cfg(unix)]
+	fn try_clone_to_owned(&self) -> Result<std::os::fd::OwnedFd, Error> {
+		Ok(self.inner.try_borrow_as_fd()?.try_clone_to_owned()?)
+	}
+
+	#[cfg(unix)]
+	fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, Error> {
+		self.inner.try_borrow_as_fd()
+	}
 }
 
 struct CancelOnDrop(Arc<AtomicBool>);
@@ -192,6 +297,20 @@ impl Host {
 	/// The status accumulated via [`Host::fail`]; 0 when nothing failed.
 	pub const fn exit_code(&self) -> i32 {
 		self.exit_code
+	}
+
+	/// Whether a write to stdout or stderr has hit a closed reader. The
+	/// utility is, in process terms, already dead: stop work, skip
+	/// diagnostics, and return; [`run_caught`] reports the SIGPIPE status.
+	pub fn sigpipe_hit(&self) -> bool {
+		self.sigpipe.is_hit()
+	}
+
+	/// Stops treating a closed reader as fatal, like `signal(SIGPIPE,
+	/// SIG_IGN)`: broken-pipe writes stay ordinary `io::Error`s for the utility
+	/// to handle (`tee -p`, `tee --output-error`).
+	pub fn ignore_sigpipe(&self) {
+		self.sigpipe.ignored.store(true, Ordering::Relaxed);
 	}
 
 	/// Writes `<name>: <message>` to stderr and records exit status `code`.
@@ -389,11 +508,26 @@ impl Write for StreamWriter {
 /// A pipe wrapped in `std::fs::File` (how the shell hands the capture pipe to
 /// a command) reports a fifo file type, and `metadata` on exotic handles can
 /// fail outright; both classify as "not a regular file" and get line
-/// buffering, the visibility-safe default.
+/// buffering, the visibility-safe default. The check goes through the
+/// descriptor rather than the variant so a [`SigpipeGuard`] around a file
+/// still block-buffers.
 pub(crate) fn is_regular_file(file: &OpenFile) -> bool {
-	match file {
-		OpenFile::File(f) => f.metadata().is_ok_and(|m| m.is_file()),
-		_ => false,
+	#[cfg(unix)]
+	{
+		let Ok(fd) = file.try_borrow_as_fd() else {
+			return false;
+		};
+		let Ok(dup) = fd.try_clone_to_owned() else {
+			return false;
+		};
+		std::fs::File::from(dup).metadata().is_ok_and(|m| m.is_file())
+	}
+	#[cfg(not(unix))]
+	{
+		match file {
+			OpenFile::File(f) => f.metadata().is_ok_and(|m| m.is_file()),
+			_ => false,
+		}
 	}
 }
 
@@ -802,12 +936,18 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 	Ok(ExecutionResult::new((code & 0xff) as u8))
 }
 
-/// Runs a utility body, containing any panic at the builtin boundary.
+/// Runs a utility body, containing any panic at the builtin boundary and
+/// applying emulated SIGPIPE.
 ///
 /// A port that panics (an `unwrap` on a `BrokenPipe`, say) must not take down
 /// the long-lived host process. With `panic = "unwind"` the panic unwinds to
 /// here, where it becomes a non-zero exit plus a concise note on the command's
 /// own stderr.
+///
+/// When a guarded stream hit a closed reader ([`Sigpipe`]), the body's own
+/// verdict — exit status, diagnostics, even a panic — is what a process killed
+/// mid-write would never have produced, so the result is [`SIGPIPE_EXIT_CODE`]
+/// and nothing else.
 pub(crate) fn run_caught<U: Utility>(parsed: U, host: &mut Host) -> i32 {
 	struct Guard;
 	impl Drop for Guard {
@@ -818,7 +958,11 @@ pub(crate) fn run_caught<U: Utility>(parsed: U, host: &mut Host) -> i32 {
 	PANIC_SCOPE_DEPTH.with(|depth| depth.set(depth.get() + 1));
 	let _guard = Guard;
 
-	match catch_unwind(AssertUnwindSafe(|| parsed.run(host))) {
+	let outcome = catch_unwind(AssertUnwindSafe(|| parsed.run(host)));
+	if host.sigpipe_hit() {
+		return SIGPIPE_EXIT_CODE;
+	}
+	match outcome {
 		Ok(code) => code,
 		Err(_) => {
 			let _ = writeln!(host.stderr, "{}: internal error", U::NAME);
@@ -869,14 +1013,20 @@ fn build_host<SE: ShellExtensions>(
 
 	let stdout = or_null(context.try_fd(OpenFiles::STDOUT_FD))?;
 	let stderr_file = or_null(context.try_fd(OpenFiles::STDERR_FD))?;
+	let sigpipe = Arc::new(Sigpipe::default());
 	// `2>&1` (and the default capture pipe): one shared writer keeps
-	// diagnostics and output in exact write order.
+	// diagnostics and output in exact write order. It carries stdout output,
+	// so it takes the stdout guard: once the reader is gone every write fails
+	// and nothing is observable either way.
 	let (merged_out, stderr) = if same_destination(&stdout, &stderr_file) {
-		let shared = Arc::new(Mutex::new(StreamWriter::new(stderr_file)));
+		let guarded = SigpipeGuard::wrap(stderr_file, GuardedStream::Stdout, &sigpipe);
+		let shared = Arc::new(Mutex::new(StreamWriter::new(guarded)));
 		(Some(Arc::clone(&shared)), StreamWriter::Shared(shared))
 	} else {
-		(None, StreamWriter::new(stderr_file))
+		let guarded = SigpipeGuard::wrap(stderr_file, GuardedStream::Stderr, &sigpipe);
+		(None, StreamWriter::new(guarded))
 	};
+	let stdout = SigpipeGuard::wrap(stdout, GuardedStream::Stdout, &sigpipe);
 
 	Ok(Host {
 		stdin: Stdin {
@@ -893,6 +1043,7 @@ fn build_host<SE: ShellExtensions>(
 		exit_code: 0,
 		stdin_is_search_input,
 		merged_out,
+		sigpipe,
 	})
 }
 
@@ -989,8 +1140,8 @@ mod testing {
 	use parking_lot::Mutex;
 
 	use super::{
-		Arc, AtomicBool, HashMap, Host, OpenFile, OsString, PathBuf, Read, Stdin, StreamWriter,
-		Utility, Write, io, openfiles, run_caught,
+		Arc, AtomicBool, GuardedStream, HashMap, Host, OpenFile, OsString, PathBuf, Read, Sigpipe,
+		SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles, run_caught,
 	};
 
 	/// Captured in-memory output from [`Host::for_test`].
@@ -1054,18 +1205,21 @@ mod testing {
 				stderr: Arc::new(Mutex::new(Vec::new())),
 			};
 			let cancel = Arc::new(AtomicBool::new(false));
+			let sigpipe = Arc::new(Sigpipe::default());
+			let stdout = OpenFile::Stream(Box::new(MemStream::writer(Arc::clone(&capture.stdout))));
+			let stderr = OpenFile::Stream(Box::new(MemStream::writer(Arc::clone(&capture.stderr))));
 			let host = Self {
 				stdin:                 Stdin {
 					file:   OpenFile::Stream(stdin),
 					fd:     None,
 					cancel: Arc::clone(&cancel),
 				},
-				stdout:                OpenFile::Stream(Box::new(MemStream::writer(Arc::clone(
-					&capture.stdout,
-				)))),
-				stderr:                StreamWriter::new(OpenFile::Stream(Box::new(
-					MemStream::writer(Arc::clone(&capture.stderr)),
-				))),
+				stdout:                SigpipeGuard::wrap(stdout, GuardedStream::Stdout, &sigpipe),
+				stderr:                StreamWriter::new(SigpipeGuard::wrap(
+					stderr,
+					GuardedStream::Stderr,
+					&sigpipe,
+				)),
 				name:                  name.to_string(),
 				cwd:                   cwd.into(),
 				env:                   HashMap::new(),
@@ -1073,8 +1227,17 @@ mod testing {
 				exit_code:             0,
 				stdin_is_search_input: false,
 				merged_out:            None,
+				sigpipe,
 			};
 			(host, capture)
+		}
+
+		/// Replaces stdout on a test host, keeping it under the SIGPIPE guard
+		/// like the stream [`build_host`](super::build_host) installs. Tests
+		/// that model a departed reader (`… | head`) hand in the write end of a
+		/// pipe whose read end is already dropped.
+		pub(crate) fn set_test_stdout(&mut self, file: OpenFile) {
+			self.stdout = SigpipeGuard::wrap(file, GuardedStream::Stdout, &self.sigpipe);
 		}
 
 		/// Sets an exported variable on a test host.
@@ -1283,6 +1446,68 @@ mod testing {
 			assert!(!same_destination(&f1, &f2));
 
 			drop((reader, reader2));
+		}
+	}
+
+	#[cfg(unix)]
+	mod sigpipe {
+		use std::ffi::OsString;
+
+		use crate::host::{Host, OpenFile, SIGPIPE_EXIT_CODE, Utility, Write, run_caught};
+
+		/// A port written the naive way: any write failure is a diagnostic on
+		/// stderr plus exit 1. Nothing in it knows about broken pipes.
+		#[derive(clap::Parser)]
+		struct NaiveWriter {
+			#[arg(long)]
+			ignore_sigpipe: bool,
+		}
+
+		impl Utility for NaiveWriter {
+			const NAME: &'static str = "naive";
+
+			fn run(self, host: &mut Host) -> i32 {
+				if self.ignore_sigpipe {
+					host.ignore_sigpipe();
+				}
+				for _ in 0..4 {
+					if let Err(error) = writeln!(host.stdout, "line") {
+						let _ = writeln!(host.stderr, "naive: write error: {error}");
+						return 1;
+					}
+				}
+				0
+			}
+		}
+
+		fn closed_pipe_host(args: &[&str]) -> (i32, super::Capture) {
+			let (mut host, capture) = Host::for_test("naive", "", "/");
+			let (reader, writer) = std::io::pipe().unwrap();
+			drop(reader);
+			host.set_test_stdout(OpenFile::from(writer));
+			let argv: Vec<OsString> =
+				std::iter::once("naive").chain(args.iter().copied()).map(OsString::from).collect();
+			let parsed = <NaiveWriter as clap::Parser>::try_parse_from(argv).unwrap();
+			(run_caught::<NaiveWriter>(parsed, &mut host), capture)
+		}
+
+		/// Contract: a utility that knows nothing about SIGPIPE still dies the
+		/// way its standalone counterpart does — status 141, no diagnostic —
+		/// when the downstream stage has already exited (`cut f | sed 'bad'`).
+		#[test]
+		fn closed_reader_silences_diagnostics_and_exits_141() {
+			let (code, capture) = closed_pipe_host(&[]);
+			assert_eq!(code, SIGPIPE_EXIT_CODE);
+			assert_eq!(capture.err(), "");
+		}
+
+		/// Contract: `ignore_sigpipe` is `SIG_IGN` — the utility sees the
+		/// `io::Error` and its own reporting stands.
+		#[test]
+		fn ignored_sigpipe_leaves_error_handling_to_the_utility() {
+			let (code, capture) = closed_pipe_host(&["--ignore-sigpipe"]);
+			assert_eq!(code, 1);
+			assert!(capture.err().starts_with("naive: write error: Broken pipe"), "{:?}", capture.err());
 		}
 	}
 }

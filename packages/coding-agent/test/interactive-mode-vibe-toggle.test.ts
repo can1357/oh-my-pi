@@ -14,10 +14,13 @@ import { Agent, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { convertToLlm, VIBE_MODE_CONTEXT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, type WriteTextAtomicOptions } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
@@ -41,6 +44,61 @@ function stubTool(name: string): AgentTool {
 
 function vibeModeEntryCount(manager: SessionManager): number {
 	return manager.getEntries().filter(entry => entry.type === "mode_change" && entry.mode === "vibe").length;
+}
+
+async function registerOrderSkill(
+	tempDir: TempDir,
+	mode: InteractiveMode,
+	name = "order-skill",
+	body = "Do it in order.",
+): Promise<void> {
+	const filePath = path.join(tempDir.path(), `${name}.md`);
+	await Bun.write(filePath, `---\nname: ${name}\n---\n${body}\n`);
+	const skill: Skill = {
+		name,
+		description: "",
+		filePath,
+		baseDir: tempDir.path(),
+		source: "test",
+	};
+	mode.skillCommands.set(`skill:${name}`, skill);
+}
+
+function armOrderLoop(
+	mode: InteractiveMode,
+	session: AgentSession,
+	onDispatch?: (label: string) => void,
+): { done: Promise<void>; order: string[] } {
+	const order: string[] = [];
+	vi.spyOn(session, "prompt").mockImplementation(async text => {
+		order.push(`plain:${text}`);
+		return true;
+	});
+	vi.spyOn(session, "promptCustomMessage").mockImplementation(async message => {
+		const text = typeof message.content === "string" ? message.content : "";
+		let label = "skill";
+		if (text.includes("Skill A body")) label = "skill-a";
+		else if (text.includes("Skill B body")) label = "skill-b";
+		order.push(label);
+		onDispatch?.(label);
+		return true;
+	});
+	// Faithful main-loop dispatch: the waiter-delivered prompt travels the real
+	// getUserInput → submit path, so waiter-vs-steer order is agent-visible.
+	const done = (async () => {
+		const input = await mode.getUserInput();
+		if (mode.markPendingSubmissionStarted(input)) {
+			try {
+				await session.prompt(input.text, {
+					images: input.images,
+					streamingBehavior: input.streamingBehavior ?? "followUp",
+				});
+			} finally {
+				mode.finishPendingSubmission(input);
+			}
+		}
+	})();
+	return { done, order };
 }
 
 class ExitFaultStorage extends FileSessionStorage {
@@ -115,6 +173,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 					tools: [],
 					messages: [],
 				},
+				convertToLlm,
 				streamFn: (...args) => {
 					if (!streamFn) throw new Error("No test stream configured");
 					return streamFn(...args);
@@ -164,6 +223,76 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(mode.vibeModeEnabled).toBe(false);
 		expect(session.getActiveToolNames()).toEqual([]);
 		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+	});
+
+	it("removes the Vibe directive from provider context on exit", async () => {
+		const vibeDirectivePerCall: boolean[] = [];
+		streamFn = (_model, context) => {
+			vibeDirectivePerCall.push(JSON.stringify(context).includes("<vibe-mode>"));
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Done") });
+			});
+			return stream;
+		};
+
+		await mode.handleVibeModeCommand();
+		await session.prompt("Delegate this");
+		await mode.handleVibeModeCommand();
+		await session.prompt("Use the restored tools");
+
+		expect(vibeDirectivePerCall).toEqual([true, false]);
+	});
+
+	it("removes a queued Vibe directive when exiting during a model turn", async () => {
+		const vibeDirectivePerCall: boolean[] = [];
+		const firstStarted = Promise.withResolvers<void>();
+		streamFn = (_model, context, options) => {
+			vibeDirectivePerCall.push(JSON.stringify(context).includes("<vibe-mode>"));
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				stream.push({ type: "start", partial: createAssistantMessage("") });
+				if (vibeDirectivePerCall.length === 1) {
+					options?.signal?.addEventListener(
+						"abort",
+						() => stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") }),
+						{ once: true },
+					);
+					firstStarted.resolve();
+				} else {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Done") });
+				}
+			});
+			return stream;
+		};
+
+		const prompt = session.prompt("Start normally");
+		await firstStarted.promise;
+		await mode.handleVibeModeCommand();
+		expect(
+			session.agent
+				.peekSteeringQueue()
+				.some(message => message.role === "custom" && message.customType === VIBE_MODE_CONTEXT_MESSAGE_TYPE),
+		).toBe(true);
+
+		await mode.handleVibeModeCommand();
+		await prompt;
+		await session.waitForIdle();
+		await session.prompt("Use the restored tools");
+
+		expect(vibeDirectivePerCall).toEqual([false, false]);
+	});
+
+	it("omits persisted Vibe directives from restored model context", () => {
+		session.sessionManager.appendCustomMessageEntry(
+			VIBE_MODE_CONTEXT_MESSAGE_TYPE,
+			"<vibe-mode>stale</vibe-mode>",
+			false,
+		);
+
+		const restoredMessages = convertToLlm(session.sessionManager.buildSessionContext().messages);
+
+		expect(JSON.stringify(restoredMessages)).not.toContain("<vibe-mode>");
 	});
 
 	it("cancels an in-flight model turn before removing Vibe tools", async () => {
@@ -653,5 +782,212 @@ describe("InteractiveMode vibe mode toggle", () => {
 
 		await mode.handleVibeModeCommand();
 		expect(mode.vibeModeEnabled).toBe(false);
+	});
+
+	it("exits vibe mode after a tree branch re-anchors the owner scope (issue #10468)", async () => {
+		// Status-line worktree discovery hits the native VCS addon during init,
+		// which is irrelevant here; short-circuit it to the no-repository case.
+		vi.spyOn(vcs, "git").mockReturnValue(null);
+		vi.spyOn(vcs, "repo").mockReturnValue(null);
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(true);
+
+		// A user turn taken while in vibe mode, so branching from it carries the
+		// vibe mode_change entry and the branch reopens in vibe mode.
+		const entryId = session.sessionManager.appendMessage({
+			role: "user",
+			content: "keep going",
+			timestamp: Date.now(),
+		});
+		await session.sessionManager.ensureOnDisk();
+		const originalSessionId = session.sessionManager.getSessionId();
+
+		const result = await session.branch(entryId);
+		expect(result.cancelled).toBe(false);
+		expect(session.sessionManager.getSessionId()).not.toBe(originalSessionId);
+		// Reconciliation re-anchored the vibe owner scope to the branched session.
+		expect(mode.vibeModeEnabled).toBe(true);
+
+		// Before the fix this threw "Vibe parent session changed before mode exit
+		// could be persisted." because the owner scope stayed on the pre-branch
+		// session; the toggle must now disable vibe mode cleanly.
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getVibeModeState()).toBeUndefined();
+	});
+
+	it("exits vibe mode after a /btw branch re-anchors the owner scope (issue #10468)", async () => {
+		vi.spyOn(vcs, "git").mockReturnValue(null);
+		vi.spyOn(vcs, "repo").mockReturnValue(null);
+		await mode.init({ suppressWelcomeIntro: true });
+		session.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() - 2 });
+		session.sessionManager.appendMessage(createAssistantMessage("seed response"));
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(true);
+		await session.sessionManager.ensureOnDisk();
+		const originalSessionId = session.sessionManager.getSessionId();
+		const leafId = session.sessionManager.getLeafId();
+		if (!leafId) throw new Error("Expected session leaf");
+
+		const result = await session.branchFromBtw(
+			"why did that happen?",
+			createAssistantMessage("because reasons"),
+			leafId,
+			originalSessionId,
+		);
+		expect(result.cancelled).toBe(false);
+		expect(session.sessionManager.getSessionId()).not.toBe(originalSessionId);
+		expect(mode.vibeModeEnabled).toBe(true);
+
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getVibeModeState()).toBeUndefined();
+	});
+
+	it("preserves submission order when a concurrent /vibe joins activation", async () => {
+		const gate = Promise.withResolvers<void>();
+		vi.spyOn(session, "activateVibeTools").mockImplementation(() => gate.promise);
+		const promptCalls: string[] = [];
+		vi.spyOn(session, "prompt").mockImplementation(async text => {
+			promptCalls.push(text);
+			return true;
+		});
+		// Faithful main-loop dispatch: the waiter-delivered prompt travels the
+		// real getUserInput → submit path (mark + session.prompt + finish), so
+		// merely recording the waiter result cannot hide an order reversal.
+		void (async () => {
+			const input = await mode.getUserInput();
+			if (mode.markPendingSubmissionStarted(input)) {
+				try {
+					await session.prompt(input.text, {
+						images: input.images,
+						streamingBehavior: input.streamingBehavior ?? "followUp",
+					});
+				} finally {
+					mode.finishPendingSubmission(input);
+				}
+			}
+		})();
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+
+		// First /vibe <prompt> parks on tool activation with vibe not yet enabled.
+		const first = mode.handleVibeModeCommand("first prompt");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		expect(mode.vibeModeEnabled).toBe(false);
+
+		// A second submit while activation is in flight (the editor fires
+		// onSubmit without awaiting the first handler) must wait for vibe
+		// instead of dispatching on the stale toolset — and must not overtake
+		// the first prompt, which is still on its way through the main loop.
+		const second = mode.handleVibeModeCommand("second prompt");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		expect(promptCalls).toHaveLength(0);
+
+		gate.resolve();
+		expect(await first).toBe(true);
+		expect(await second).toBe(true);
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(promptCalls).toEqual(["first prompt", "second prompt"]);
+	});
+
+	it("orders a skill vibe prompt before a concurrent plain prompt", async () => {
+		const gate = Promise.withResolvers<void>();
+		vi.spyOn(session, "activateVibeTools").mockImplementation(() => gate.promise);
+		await registerOrderSkill(tempDir, mode);
+		const loop = armOrderLoop(mode, session);
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+
+		// Skill first: its file read yields before the turn reserves.
+		const first = mode.handleVibeModeCommand("/skill:order-skill do it");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		expect(mode.vibeModeEnabled).toBe(false);
+
+		// Plain second must not take the still-armed waiter and start its turn
+		// first: the skill reservation owns the next turn.
+		const second = mode.handleVibeModeCommand("plain follow-up");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		expect(loop.order).toHaveLength(0);
+
+		gate.resolve();
+		expect(await first).toBe(true);
+		expect(await second).toBe(true);
+		await loop.done;
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(loop.order).toEqual(["skill", "plain:plain follow-up"]);
+	});
+
+	it("orders a plain vibe prompt before a concurrent skill prompt", async () => {
+		const gate = Promise.withResolvers<void>();
+		vi.spyOn(session, "activateVibeTools").mockImplementation(() => gate.promise);
+		await registerOrderSkill(tempDir, mode);
+		const loop = armOrderLoop(mode, session);
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+
+		const first = mode.handleVibeModeCommand("plain first");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		expect(mode.vibeModeEnabled).toBe(false);
+
+		// Skill second must wait for the waiter-delivered prompt to reserve
+		// before reading its file and steering behind it.
+		const second = mode.handleVibeModeCommand("/skill:order-skill do it");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		expect(loop.order).toHaveLength(0);
+
+		gate.resolve();
+		expect(await first).toBe(true);
+		expect(await second).toBe(true);
+		await loop.done;
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(loop.order).toEqual(["plain:plain first", "skill"]);
+	});
+
+	it("orders two skill vibe prompts behind a plain prompt in arrival order", async () => {
+		const gate = Promise.withResolvers<void>();
+		vi.spyOn(session, "activateVibeTools").mockImplementation(() => gate.promise);
+		await registerOrderSkill(tempDir, mode, "order-skill-a", "Skill A body.");
+		await registerOrderSkill(tempDir, mode, "order-skill-b", "Skill B body.");
+		// Signal, not a timer: the first skill must dispatch without stalling
+		// behind the second (parked on the first's own link). A
+		// successor-inclusive count leaves this unsettled until the ~2s bound
+		// expires instead, so this hangs to the test timeout pre-fix.
+		const aDispatched = Promise.withResolvers<void>();
+		const loop = armOrderLoop(mode, session, label => {
+			if (label === "skill-a") aDispatched.resolve();
+		});
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+
+		const first = mode.handleVibeModeCommand("plain first");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		expect(mode.vibeModeEnabled).toBe(false);
+
+		// Each skill links behind its predecessor instead of overwriting a
+		// shared slot, so the second skill cannot dispatch ahead of the first
+		// once the plain prompt reserves.
+		const second = mode.handleVibeModeCommand("/skill:order-skill-a go a");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		const third = mode.handleVibeModeCommand("/skill:order-skill-b go b");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		expect(loop.order).toHaveLength(0);
+
+		gate.resolve();
+		// Wall-clock bound, not a guessed duration: the first skill must dispatch
+		// without stalling behind the second (parked on the first's own link). A
+		// successor-inclusive count burns 200 sequential 10ms sleeps (provably
+		// >=2000ms — timers never fire early), while the fixed path does
+		// millisecond-scale I/O with no wall waits; fake timers cannot drive the
+		// real file reads, so assert absence of the stall instead of exact order
+		// timing. Awaiting the dispatch signal above would merely pass slowly.
+		const startedAt = performance.now();
+		await aDispatched.promise;
+		expect(loop.order[0]).toBe("plain:plain first");
+		expect(loop.order).toContain("skill-a");
+		expect(await first).toBe(true);
+		expect(await second).toBe(true);
+		expect(await third).toBe(true);
+		await loop.done;
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(loop.order).toEqual(["plain:plain first", "skill-a", "skill-b"]);
+		expect(performance.now() - startedAt).toBeLessThan(1500);
 	});
 });

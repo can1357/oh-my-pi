@@ -2,7 +2,7 @@
 
 The advisor subsystem attaches one or more optional reviewer models to a session. Each advisor reviews primary-agent transcript updates, can inspect the workspace with its own tools, and injects concise advice back into the primary session.
 
-An advisor does not approve actions or mutate primary session state directly. Its default investigative toolset is `read`, `grep`, and `glob`, but a `WATCHDOG.yml` roster entry may grant any built-in — including mutating tools such as `edit`, `write`, `bash`, `eval`, and `browser`. Those tools run in an isolated advisor `ToolSession`, but they honor the session's normal approval mode and per-tool policies; grant them only when the advisor model and workspace are trusted (see [Tools and isolation](#tools-and-isolation)).
+An advisor does not approve actions or mutate primary session state directly. Its default investigative toolset is `read`, `grep`, and `glob`, but a `WATCHDOG.yml` roster entry may grant any built-in — including mutating tools such as `edit`, `write`, `bash`, and `eval`. Those tools run in an isolated advisor `ToolSession`, but they honor the session's normal approval mode and per-tool policies; grant them only when the advisor model and workspace are trusted (see [Tools and isolation](#tools-and-isolation)).
 
 ## Implementation files
 
@@ -97,7 +97,7 @@ Every advisor has the `advise` tool for surfacing notes into the primary transcr
 - `grep`
 - `glob`
 
-A `WATCHDOG.yml` roster entry may select any subset of built-ins that were actually constructed for the session (a factory that returned `null`, such as unavailable `lsp`, is absent). An explicit empty `tools: []` grants no investigative tools; `advise` remains available. Unknown-only lists are dropped with a warning and currently fall back to the default subset. Grantable names include mutating tools such as `edit`, `write`, `bash`, `eval`, `browser`, `debug`, `ast_edit`, `task`, `hub`, and memory tools.
+A `WATCHDOG.yml` roster entry may select any subset of built-ins that were actually constructed for the session (a factory that returned `null`, such as unavailable `lsp`, is absent). An explicit empty `tools: []` grants no investigative tools; `advise` remains available. Unknown-only lists are dropped with a warning and currently fall back to the default subset. Grantable names include mutating tools such as `edit`, `write`, `bash`, `eval`, `debug`, `ast_edit`, `task`, `hub`, and memory tools. Enabled browser/computer preludes are reached through `eval`, not granted as tools.
 
 Advisor tools are built against the isolated advisor `ToolSession` and wrapped with `ExtensionToolWrapper`, so `tools.approvalMode`, per-tool approval policies, and `autoApprove` apply just as they do to registry tools. Cursor's server-side exec bridge uses the same approval context and only exposes delete/edit/search capabilities when the corresponding advisor grant exists.
 

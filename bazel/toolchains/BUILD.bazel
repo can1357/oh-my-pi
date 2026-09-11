@@ -10,8 +10,6 @@
 # cc toolchain for x86_64-pc-windows-msvc cross builds from linux.
 
 package(default_visibility = ["//visibility:public"])
-# cc shim consumed by the sha2-asm crate annotation in MODULE.bazel.
-exports_files(["sha2-asm-cc.sh"])
 
 _MUSL_RUST_TOOLCHAINS = {
     "linux-x64-to-musl-x64": (

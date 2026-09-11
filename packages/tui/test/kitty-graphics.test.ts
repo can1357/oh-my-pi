@@ -125,6 +125,9 @@ describe("detectKittyUnicodePlaceholdersSupport", () => {
 		const leaked = env({ HERDR_ENV: "1", GHOSTTY_RESOURCES_DIR: "/usr/share/ghostty" });
 		expect(detectKittyUnicodePlaceholdersSupport("ghostty", leaked)).toBe(false);
 		expect(detectKittyUnicodePlaceholdersSupport("ghostty", { ...leaked, PI_KITTY_PLACEHOLDERS: "1" })).toBe(true);
+		const paneOnly = env({ HERDR_PANE_ID: "p1", GHOSTTY_RESOURCES_DIR: "/usr/share/ghostty" });
+		expect(detectKittyUnicodePlaceholdersSupport("ghostty", paneOnly)).toBe(false);
+		expect(detectKittyUnicodePlaceholdersSupport("ghostty", { ...paneOnly, PI_KITTY_PLACEHOLDERS: "1" })).toBe(true);
 	});
 
 	it("honors PI_NO_KITTY_PLACEHOLDERS=1 as a hard off override on supporting terminals", () => {

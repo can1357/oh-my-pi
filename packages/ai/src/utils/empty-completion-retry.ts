@@ -140,6 +140,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				completedMessage !== undefined &&
 				completedMessage.stopReason === "stop" &&
 				completedMessage.stopDetails?.type !== "pause_turn" &&
+				completedMessage.stopDetails?.type !== "compaction" &&
 				!completedMessage.errorMessage &&
 				(completedMessage.usage?.output ?? 0) <= 1 &&
 				!hasVisibleAssistantContent(completedMessage) &&
@@ -153,7 +154,6 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				providerErrorRetries < (policy.maxProviderErrorRetries ?? 0) &&
 				AIError.isProviderRetryableError(
 					new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
-					{ provider: failedMessage.provider },
 				);
 
 			let delayMs: number | undefined;

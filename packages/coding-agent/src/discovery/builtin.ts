@@ -25,7 +25,7 @@ import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
 import { expandTilde } from "../tools/path-utils";
 import {
-	buildRuleFromMarkdown,
+	discoverRuleFromMarkdown,
 	createSourceMeta,
 	discoverExtensionModulePaths,
 	expandEnvVarsDeep,
@@ -378,15 +378,16 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 		const result = await loadFilesFromDir<Rule>(ctx, rulesDir, PROVIDER_ID, level, {
 			extensions: ["md", "mdc"],
 			transform: (name, content, path, source) =>
-				buildRuleFromMarkdown(name, content, path, source, { stripNamePattern: /\.(md|mdc)$/ }),
+				discoverRuleFromMarkdown(name, content, path, source, { stripNamePattern: /\.(md|mdc)$/ }),
 		});
 		items.push(...result.items);
 		if (result.warnings) warnings.push(...result.warnings);
 	}
 
 	// Top-level RULES.md is a sticky always-apply rule. Documented in
-	// https://omp.sh/docs/context-files as the file that gets "re-injected near
-	// the current turn so they keep hold across long conversations".
+	// https://omp.sh/docs/context-files: its full body is carried on every
+	// request (system-prompt text, or image frames under snapcompact
+	// system-prompt imaging) so it keeps its hold across long sessions.
 	// User scope:    ~/.omp/agent/RULES.md
 	// Project scope: nearest .omp/RULES.md walking up from cwd to repoRoot
 	const userRulesFile = path.join(getAgentDir(), "RULES.md");
@@ -412,9 +413,11 @@ async function loadStickyRulesFile(filePath: string, level: "user" | "project"):
 	if (!content) return null;
 	const source = createSourceMeta(PROVIDER_ID, filePath, level);
 	const ruleName = level === "project" ? "RULES@project" : "RULES";
-	const rule = buildRuleFromMarkdown("RULES.md", content, filePath, source, { ruleName });
+	const rule = discoverRuleFromMarkdown("RULES.md", content, filePath, source, { ruleName });
+	if (!rule) return null;
 	// Force alwaysApply regardless of frontmatter — the whole point of RULES.md
-	// is to be reattached every turn.
+	// is that its body is carried on every request instead of degrading to an
+	// on-demand rulebook entry.
 	return { ...rule, alwaysApply: true };
 }
 

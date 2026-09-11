@@ -36,7 +36,15 @@ single_version_override(
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2024",
-    versions = ["nightly/2026-04-29"],
+    extra_target_triples = [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+    ],
     # Pinned archive checksums for every toolchain component. Not (only) a
     # supply-chain nicety: rules_rust marks a toolchain-tools repo as
     # reproducible — and therefore eligible for Bazel's repo contents cache —
@@ -76,15 +84,7 @@ rust.toolchain(
         "2026-04-29/rustfmt-nightly-x86_64-apple-darwin.tar.xz": "9c64403758b4b631b60057f6ed4a93b02f19286a59a60f8ea235b4f7d4e1ba4c",
         "2026-04-29/rustfmt-nightly-x86_64-unknown-linux-gnu.tar.xz": "397e4ead440f29a1fc10903388a377f5607a1d404c29dc3e3a979d2bc813a801",
     },
-    extra_target_triples = [
-        "x86_64-unknown-linux-gnu",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-unknown-linux-musl",
-        "aarch64-unknown-linux-musl",
-        "x86_64-apple-darwin",
-        "aarch64-apple-darwin",
-        "x86_64-pc-windows-msvc",
-    ],
+    versions = ["nightly/2026-04-29"],
 )
 use_repo(
     rust,
@@ -93,17 +93,18 @@ use_repo(
     # explicit @zig_sdk//libc:musl constraint: rules_rust's generated gnu and
     # musl toolchains share (os, cpu) constraints, so without the extra
     # constraint whichever registers first would win for both libcs.
-    "rust_linux_x86_64__x86_64-unknown-linux-musl__nightly_tools",
-    "rust_linux_x86_64__aarch64-unknown-linux-musl__nightly_tools",
-    "rust_macos_aarch64__x86_64-unknown-linux-musl__nightly_tools",
-    "rust_macos_aarch64__aarch64-unknown-linux-musl__nightly_tools",
     "rust_linux_aarch64__aarch64-unknown-linux-musl__nightly_tools",
     "rust_linux_aarch64__x86_64-unknown-linux-musl__nightly_tools",
+    "rust_linux_x86_64__aarch64-unknown-linux-musl__nightly_tools",
+    "rust_linux_x86_64__x86_64-unknown-linux-musl__nightly_tools",
+    "rust_macos_aarch64__aarch64-unknown-linux-musl__nightly_tools",
+    "rust_macos_aarch64__x86_64-unknown-linux-musl__nightly_tools",
 )
 
 # Order matters: repo-local toolchains (musl disambiguation wrappers, msvc
 # cross cc toolchain) MUST resolve before the generated @rust_toolchains set.
 register_toolchains("//bazel/toolchains:all")
+
 register_toolchains("@rust_toolchains//:all")
 
 # --- C/C++ toolchains ---------------------------------------------------------
@@ -114,6 +115,7 @@ register_toolchains("@rust_toolchains//:all")
 # the hermetic clang-cl+xwin toolchain in //bazel/toolchains/msvc.
 zig = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
 use_repo(zig, "zig_sdk")
+
 register_toolchains(
     "@zig_sdk//libc_aware/toolchain:linux_amd64_gnu.2.17",
     "@zig_sdk//libc_aware/toolchain:linux_arm64_gnu.2.17",
@@ -145,6 +147,10 @@ crate.from_cargo(
     # Nightly host tools (see the rust_host_tools extension above): the
     # splice's rustc probe must accept user-level -Z RUSTFLAGS.
     host_tools = "@rust_host_tools_nightly",
+    # The root manifest covers all workspace members, including the vendored
+    # brush fork (members so their sources render hermetically; the
+    # [patch.crates-io] entry redirects brush-core's registry dep to it).
+    manifests = ["//:Cargo.toml"],
     # Exactly the shipped addon triples: crate BUILD files get
     # target_compatible_with selects over this set (defaults omit darwin-x64
     # and musl), and features/deps resolve per-triple from Cargo.lock.
@@ -157,10 +163,6 @@ crate.from_cargo(
         "aarch64-apple-darwin",
         "x86_64-pc-windows-msvc",
     ],
-    # The root manifest covers all workspace members, including the vendored
-    # brush fork (members so their sources render hermetically; the
-    # [patch.crates-io] entry redirects brush-core's registry dep to it).
-    manifests = ["//:Cargo.toml"],
 )
 
 # audiopus_sys builds its vendored opus via the `cmake` crate: give the build
@@ -170,9 +172,6 @@ crate.from_cargo(
 # from <prefix>/lib while CMake uses lib64 on some aarch64 systems. The cmake
 # crate picks up CC/CFLAGS from the Bazel cc toolchain on its own.
 crate.annotation(
-    crate = "audiopus_sys",
-    patches = ["//bazel/patches:audiopus-sys-libdir.patch"],
-    patch_args = ["-p1"],
     build_script_env = {
         "CMAKE_POLICY_VERSION_MINIMUM": "3.5",
         # Release artifacts must use the vendored Opus rather than a host
@@ -197,37 +196,25 @@ crate.annotation(
         "CFLAGS": "-fno-sanitize=undefined",
         "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/run/current-system/sw/bin",
     },
+    crate = "audiopus_sys",
+    patch_args = ["-p1"],
+    patches = ["//bazel/patches:audiopus-sys-libdir.patch"],
 )
 
 # Release addons must never pick up a host libpcre2 (Homebrew paths leaked into
 # shipped dylibs before); always build the vendored static copy.
 crate.annotation(
-    crate = "pcre2-sys",
     build_script_env = {"PCRE2_SYS_STATIC": "1"},
-)
-# sha2-asm's build script compiles SHA-256 assembly with cc-rs flags zig cc
-# rejects (the launcher appends its glibc suffix to the rust-style --target
-# triple; -march values parse as zig's cpu+feature syntax). The shim rewrites
-# both and execs the real $CC. Scoped to the zig-built linux aarch64 triples,
-# so apple (host Xcode) builds never see it.
-crate.annotation(
-    crate = "sha2-asm",
-    build_script_data = ["@@//bazel/toolchains:sha2-asm-cc.sh"],
-    build_script_env = {
-        "CC_aarch64_unknown_linux_gnu": "$${pwd}/bazel/toolchains/sha2-asm-cc.sh",
-        "CC_aarch64_unknown_linux_musl": "$${pwd}/bazel/toolchains/sha2-asm-cc.sh",
-    },
+    crate = "pcre2-sys",
 )
 
 # tree-sitter-just's scanner.c hard-errors when NDEBUG is set (opt-mode cc
 # default). cc-rs appends env CFLAGS after its computed flags, so -UNDEBUG wins.
 crate.annotation(
-    crate = "tree-sitter-just",
     build_script_env = {"CFLAGS": "-UNDEBUG"},
+    crate = "tree-sitter-just",
 )
-
 use_repo(crate, "crates")
-
 
 # --- msvc cross toolchain (owned by bazel/toolchains/msvc) ---------------------
 # Hermetic clang-cl + lld-link + xwin CRT/SDK toolchain for x86_64-pc-windows-msvc
@@ -261,9 +248,9 @@ msvc_cc(name = "msvc_cc")
 # this section is ever renamed. On non-msvc targets the dir simply does not
 # exist and the rest of the PATH matches the audiopus_sys annotation above.
 crate.annotation(
-    crate = "blake3",
     build_script_env = {
         "PATH": "$${pwd}/external/+msvc_cc_repository+msvc_cc/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
     },
+    crate = "blake3",
 )
 # --- end msvc cross toolchain ---------------------------------------------------

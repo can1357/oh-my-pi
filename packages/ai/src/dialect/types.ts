@@ -8,6 +8,14 @@ export type InbandScanEvent =
 	| { type: "thinkingStart" }
 	| { type: "thinkingDelta"; delta: string }
 	| { type: "thinkingEnd"; thinking: string }
+	/**
+	 * A reasoning close tag with no open in this stream. Chat templates that
+	 * prefill the opener into the prompt (DeepSeek-R1, Qwen3-Thinking) make the
+	 * model stream only the close, so everything emitted as `text` before this
+	 * event was reasoning. Only {@link ThinkingInbandScanner} with `impliedOpen`
+	 * emits it.
+	 */
+	| { type: "impliedThinkingEnd" }
 	| { type: "toolStart"; id: string; name: string }
 	| { type: "toolArgDelta"; id: string; name: string; key: string; delta: string }
 	| { type: "toolEnd"; id: string; name: string; arguments: Record<string, unknown>; rawBlock?: string };
