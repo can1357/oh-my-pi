@@ -734,7 +734,7 @@ If a dialog has a timeout, RPC mode resolves to a default value when timeout/abo
 }
 ```
 
-`toolKind` is `shell`, `edit`, `write`, or `other`. `identity` is reserved before generic arguments: shell carries its command, edit carries paths plus edit content, and write carries path plus content. If required identity is absent or cannot be represented, the gate fails closed. `input` is an additional bounded, terminal-sanitized presentation copy derived from the exact post-extension input.
+`toolKind` is `shell`, `edit`, `write`, or `other`. `identity` is reserved before generic arguments: shell carries its command, edit carries paths plus edit content, and write carries path plus content. Edit paths come from the tool's structured path inspection and raw operation payload, never the 2,000-character presentation lines. If required identity is absent or cannot be represented, the gate fails closed. `input` is an additional bounded, terminal-sanitized presentation copy derived from the exact post-extension input.
 
 The complete escaped JSONL frame, including its newline, is capped at 64 KiB. Individual generic strings are capped at 8 KiB, collections at 32 items, and nesting at four levels. Overflow reduction is deterministic: presentation lines, reason, safety-check tail, then generic input tail are trimmed or dropped; reserved `identity` is never shed. `detail.truncatedFields` names every affected field.
 

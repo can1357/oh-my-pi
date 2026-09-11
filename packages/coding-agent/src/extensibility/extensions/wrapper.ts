@@ -14,6 +14,7 @@ import type { Settings } from "../../config/settings";
 import type { Theme } from "../../modes/theme/theme";
 import {
 	type ApprovalMode,
+	buildToolApprovalIdentity,
 	denyError,
 	formatApprovalPrompt,
 	getApprovalDetailLines,
@@ -332,15 +333,19 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			try {
 				const nativeApproval = requestNativeToolApproval(
 					uiContext,
-					{
-						toolCallId,
-						toolName: this.tool.name,
-						toolKind: getToolApprovalKind(this.tool.name),
-						tier: resolved.tier,
-						input: resolvedArgs,
-						...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
-						details: getApprovalDetailLines(this.tool, resolvedArgs),
-						...(providerSafetyChecks.length > 0 ? { providerSafetyChecks } : {}),
+					() => {
+						const toolKind = getToolApprovalKind(this.tool.name);
+						return {
+							toolCallId,
+							toolName: this.tool.name,
+							toolKind,
+							tier: resolved.tier,
+							identity: buildToolApprovalIdentity(this.tool, toolKind, resolvedArgs),
+							input: resolvedArgs,
+							...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
+							details: getApprovalDetailLines(this.tool, resolvedArgs),
+							...(providerSafetyChecks.length > 0 ? { providerSafetyChecks } : {}),
+						};
 					},
 					{
 						signal,

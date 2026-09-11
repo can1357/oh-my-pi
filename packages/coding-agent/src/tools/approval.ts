@@ -16,12 +16,19 @@ export type ApprovalMode = "always-ask" | "write" | "yolo";
 type ApprovalSubject = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails">;
 export type ToolApprovalKind = "shell" | "edit" | "write" | "other";
 
+export type ToolApprovalIdentity =
+	| { kind: "shell"; command: string }
+	| { kind: "edit"; paths: readonly string[]; content: string }
+	| { kind: "write"; path: string; content: string }
+	| { kind: "other" };
+
 /** Trusted in-process approval payload. RPC mode bounds and sanitizes it before transport. */
 export interface ToolApprovalRequest {
 	readonly toolCallId: string;
 	readonly toolName: string;
 	readonly toolKind: ToolApprovalKind;
 	readonly tier: ToolTier;
+	readonly identity: ToolApprovalIdentity;
 	readonly input: unknown;
 	readonly reason?: string;
 	readonly details: readonly string[];
@@ -51,10 +58,11 @@ export function registerNativeToolApprovalHandler(context: object, handler: Nati
 /** Request native approval when the current host registered a trusted channel. */
 export function requestNativeToolApproval(
 	context: object,
-	request: ToolApprovalRequest,
+	createRequest: () => ToolApprovalRequest,
 	dialogOptions?: ToolApprovalDialogOptions,
 ): Promise<boolean> | undefined {
-	return nativeToolApprovalHandlers.get(context)?.(request, dialogOptions);
+	const handler = nativeToolApprovalHandlers.get(context);
+	return handler?.(createRequest(), dialogOptions);
 }
 
 export function getToolApprovalKind(toolName: string): ToolApprovalKind {
@@ -62,6 +70,59 @@ export function getToolApprovalKind(toolName: string): ToolApprovalKind {
 	if (toolName === "edit" || toolName === "ast_edit") return "edit";
 	if (toolName === "write") return "write";
 	return "other";
+}
+
+function approvalInputRecord(args: unknown): Record<string, unknown> {
+	return args !== null && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : {};
+}
+
+function structuredEditContent(input: Record<string, unknown>): string | undefined {
+	for (const key of ["input", "content", "new_string"] as const) {
+		if (typeof input[key] === "string") return input[key];
+	}
+	for (const key of ["edits", "ops"] as const) {
+		if (input[key] === undefined) continue;
+		try {
+			return JSON.stringify(input[key]);
+		} catch {
+			return undefined;
+		}
+	}
+	return undefined;
+}
+
+/** Derive approval identity from executable structured arguments, never formatted presentation text. */
+export function buildToolApprovalIdentity(
+	tool: Pick<AgentTool, "matcherPaths">,
+	kind: ToolApprovalKind,
+	args: unknown,
+): ToolApprovalIdentity {
+	const input = approvalInputRecord(args);
+	switch (kind) {
+		case "shell":
+			if (typeof input.command !== "string" || input.command.length === 0)
+				throw new Error("Shell approval cannot represent its required command identity");
+			return { kind, command: input.command };
+		case "edit": {
+			const paths = [
+				...(tool.matcherPaths?.(args) ?? []),
+				...(typeof input.path === "string" ? [input.path] : []),
+				...(Array.isArray(input.paths)
+					? input.paths.filter((path): path is string => typeof path === "string")
+					: []),
+			].filter(path => path.length > 0);
+			const content = structuredEditContent(input);
+			if (paths.length === 0 || content === undefined)
+				throw new Error("Edit approval cannot represent its required paths and content identity");
+			return { kind, paths: Array.from(new Set(paths)), content };
+		}
+		case "write":
+			if (typeof input.path !== "string" || input.path.length === 0 || typeof input.content !== "string")
+				throw new Error("Write approval cannot represent its required path and content identity");
+			return { kind, path: input.path, content: input.content };
+		case "other":
+			return { kind };
+	}
 }
 
 export interface ResolvedApproval {

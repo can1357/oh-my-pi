@@ -19,7 +19,7 @@ import type {
 	SubagentProgressPayload,
 } from "../../task";
 import type { TodoPhase } from "../../tools/todo";
-import type { ToolApprovalKind } from "../../tools/approval";
+import type { ToolApprovalIdentity, ToolApprovalKind } from "../../tools/approval";
 import type { RpcMessagesPage } from "./rpc-messages";
 
 // ============================================================================
@@ -495,11 +495,7 @@ export type RpcToolApprovalValue =
 	| RpcToolApprovalValue[]
 	| { [key: string]: RpcToolApprovalValue };
 
-export type RpcToolApprovalIdentity =
-	| { kind: "shell"; command: string }
-	| { kind: "edit"; paths: string[]; content: string }
-	| { kind: "write"; path: string; content: string }
-	| { kind: "other" };
+export type RpcToolApprovalIdentity = ToolApprovalIdentity;
 
 export interface RpcToolApprovalDetail {
 	/** Tool-provided presentation lines. Informational only; never used for response correlation. */

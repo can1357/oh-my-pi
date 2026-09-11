@@ -105,15 +105,16 @@ async function approvePreludeInvocation(
 	}
 	const nativeApproval = requestNativeToolApproval(
 		ui,
-		{
+		() => ({
 			toolCallId: context.toolCallId,
 			toolName: definition.name,
 			toolKind: getToolApprovalKind(definition.name),
 			tier: resolved.tier,
+			identity: { kind: "other" },
 			input: parameters,
 			...(resolved.reason ? { reason: resolved.reason } : {}),
 			details: [],
-		},
+		}),
 		{ signal: context.signal },
 	);
 	const approved = nativeApproval

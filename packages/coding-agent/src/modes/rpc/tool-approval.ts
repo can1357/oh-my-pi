@@ -292,7 +292,7 @@ function sanitizeValue(value: unknown, state: SanitizeState, depth: number, fiel
 }
 
 function sanitizeInput(value: unknown, state: SanitizeState): { [key: string]: RpcToolApprovalValue } {
-	if (!isRecord(value)) return { value: sanitizeValue(value, state, 0, "input") };
+	if (!isRecord(value)) return { value: sanitizeValue(value, state, 1, "input") };
 	const entries: Array<[string, RpcToolApprovalValue]> = [];
 	for (const [rawKey, child] of Object.entries(value)) {
 		if (entries.length >= RPC_TOOL_APPROVAL_MAX_COLLECTION_ITEMS) {
@@ -319,47 +319,20 @@ function sanitizeInput(value: unknown, state: SanitizeState): { [key: string]: R
 			entries.push([key, env]);
 			continue;
 		}
-		entries.push([key, sanitizeValue(child, state, 0, field)]);
+		entries.push([key, sanitizeValue(child, state, 1, field)]);
 	}
 	return Object.fromEntries(entries);
 }
 
-function editPaths(input: Record<string, unknown>, details: readonly string[]): string[] {
-	const paths: string[] = [];
-	if (typeof input.path === "string") paths.push(input.path);
-	if (Array.isArray(input.paths)) {
-		for (const path of input.paths) if (typeof path === "string") paths.push(path);
-	}
-	for (const line of details) {
-		const match = /^(?:File|Path):\s*(.+)$/.exec(line);
-		if (match?.[1]) paths.push(match[1]);
-	}
-	return Array.from(new Set(paths.filter(path => path.length > 0)));
-}
-
-function editContent(input: Record<string, unknown>): string | undefined {
-	for (const key of ["input", "content", "new_string"] as const) {
-		if (typeof input[key] === "string") return input[key];
-	}
-	for (const key of ["edits", "ops"] as const) {
-		if (input[key] === undefined) continue;
-		try {
-			return JSON.stringify(input[key]);
-		} catch {
-			return undefined;
-		}
-	}
-	return undefined;
-}
-
 function buildIdentity(request: ToolApprovalRequest, metadata: ApprovalMetadata): RpcToolApprovalIdentity {
-	const input = isRecord(request.input) ? request.input : {};
-	switch (request.toolKind) {
+	const identity = request.identity;
+	if (identity.kind !== request.toolKind) throw new Error("Tool approval identity kind does not match its tool kind");
+	switch (identity.kind) {
 		case "shell": {
-			if (typeof input.command !== "string" || input.command.length === 0)
+			if (identity.command.length === 0)
 				throw new Error("Shell approval cannot represent its required command identity");
 			const command = boundedJsonString(
-				input.command,
+				identity.command,
 				RPC_TOOL_APPROVAL_SHELL_COMMAND_BYTES,
 				metadata,
 				"identity.command",
@@ -368,13 +341,11 @@ function buildIdentity(request: ToolApprovalRequest, metadata: ApprovalMetadata)
 			return { kind: "shell", command };
 		}
 		case "edit": {
-			const rawPaths = editPaths(input, request.details);
-			const rawContent = editContent(input);
-			if (rawPaths.length === 0 || rawContent === undefined)
+			if (identity.paths.length === 0)
 				throw new Error("Edit approval cannot represent its required paths and content identity");
 			const paths: string[] = [];
 			let remaining = RPC_TOOL_APPROVAL_EDIT_PATHS_BYTES;
-			for (const rawPath of rawPaths.slice(0, RPC_TOOL_APPROVAL_MAX_DETAIL_LINES)) {
+			for (const rawPath of identity.paths.slice(0, RPC_TOOL_APPROVAL_MAX_DETAIL_LINES)) {
 				const path = boundedJsonString(
 					rawPath,
 					Math.min(remaining, RPC_TOOL_APPROVAL_PATH_BYTES),
@@ -385,23 +356,28 @@ function buildIdentity(request: ToolApprovalRequest, metadata: ApprovalMetadata)
 				paths.push(path);
 				remaining -= jsonStringBytes(path);
 			}
-			if (paths.length < rawPaths.length) markField(metadata.truncatedFields, "identity.paths");
-			const content = boundedJsonString(rawContent, RPC_TOOL_APPROVAL_CONTENT_BYTES, metadata, "identity.content");
-			if (paths.length === 0 || (rawContent.length > 0 && content.length === 0))
-				throw new Error("Edit approval cannot represent its required paths and content identity");
-			return { kind: "edit", paths, content };
-		}
-		case "write": {
-			if (typeof input.path !== "string" || input.path.length === 0 || typeof input.content !== "string")
-				throw new Error("Write approval cannot represent its required path and content identity");
-			const path = boundedJsonString(input.path, RPC_TOOL_APPROVAL_PATH_BYTES, metadata, "identity.path");
+			if (paths.length < identity.paths.length) markField(metadata.truncatedFields, "identity.paths");
 			const content = boundedJsonString(
-				input.content,
+				identity.content,
 				RPC_TOOL_APPROVAL_CONTENT_BYTES,
 				metadata,
 				"identity.content",
 			);
-			if (!path || (input.content.length > 0 && !content))
+			if (paths.length === 0 || (identity.content.length > 0 && content.length === 0))
+				throw new Error("Edit approval cannot represent its required paths and content identity");
+			return { kind: "edit", paths, content };
+		}
+		case "write": {
+			if (identity.path.length === 0)
+				throw new Error("Write approval cannot represent its required path and content identity");
+			const path = boundedJsonString(identity.path, RPC_TOOL_APPROVAL_PATH_BYTES, metadata, "identity.path");
+			const content = boundedJsonString(
+				identity.content,
+				RPC_TOOL_APPROVAL_CONTENT_BYTES,
+				metadata,
+				"identity.content",
+			);
+			if (!path || (identity.content.length > 0 && !content))
 				throw new Error("Write approval cannot represent its required path and content identity");
 			return { kind: "write", path, content };
 		}

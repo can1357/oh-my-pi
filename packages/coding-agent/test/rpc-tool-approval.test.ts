@@ -10,12 +10,17 @@ import type {
 	RpcToolApprovalCancelRequest,
 	RpcToolApprovalRequest,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import { buildToolApprovalIdentity } from "@oh-my-pi/pi-coding-agent/tools/approval";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { ToolApprovalRequest } from "@oh-my-pi/pi-coding-agent/tools/approval";
 
 const shellApproval: ToolApprovalRequest = {
 	toolCallId: "toolu_shell_1",
 	toolName: "bash",
 	toolKind: "shell",
+	identity: { kind: "shell", command: "rm -rf build" },
 	tier: "exec",
 	input: { command: "rm -rf build", cwd: "/workspace", env: { API_TOKEN: "secret", PATH: "/bin" } },
 	reason: "Critical pattern detected",
@@ -40,6 +45,7 @@ describe("RPC tool approvals", () => {
 				password: "do-not-emit",
 				oauthToken: "also-do-not-emit",
 			},
+			identity: { kind: "shell", command: "x".repeat(RPC_TOOL_APPROVAL_MAX_STRING_BYTES * 2) },
 			details: ["Command: dangerous", "d".repeat(10_000)],
 		});
 
@@ -64,11 +70,66 @@ describe("RPC tool approvals", () => {
 		expect(isRpcToolApprovalRequest({ ...request, detail: { ...request.detail, approved: true } })).toBe(false);
 	});
 
+	test("truncates over-depth input before validation", () => {
+		const request = buildRpcToolApprovalRequest("deep-input", {
+			...shellApproval,
+			input: { command: "echo deep", nested: { a: { b: { c: { d: { e: "too deep" } } } } } },
+			identity: { kind: "shell", command: "echo deep" },
+		});
+
+		expect(isRpcToolApprovalRequest(request)).toBe(true);
+		expect(request.input).toEqual({
+			command: "echo deep",
+			nested: { a: { b: { c: "[truncated]" } } },
+		});
+		expect(request.detail.truncatedFields).toContain("input.nested");
+	});
+
+	test("derives long apply-patch and hashline paths from structured edit inspection", () => {
+		const session: ToolSession = {
+			cwd: ".",
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(),
+		};
+		const longPath = `src/${"nested/".repeat(700)}target.ts`;
+		const cases = [
+			{
+				tool: new EditTool(session, "apply_patch"),
+				input: `*** Begin Patch\n*** Update File: ${longPath}\n@@\n-old\n+new\n*** End Patch\n`,
+			},
+			{
+				tool: new EditTool(session, "hashline"),
+				input: `[${longPath}#A1B2]\nPUT 1.=1:\n+new`,
+			},
+		] as const;
+
+		for (const [index, { tool, input }] of cases.entries()) {
+			const identity = buildToolApprovalIdentity(tool, "edit", { input });
+			expect(identity).toEqual({ kind: "edit", paths: [longPath], content: input });
+			const request = buildRpcToolApprovalRequest(`long-edit-${index}`, {
+				toolCallId: `toolu_long_edit_${index}`,
+				toolName: "edit",
+				toolKind: "edit",
+				tier: "write",
+				identity,
+				input: { input },
+				details: [`File: ${longPath.slice(0, 2_000)}`],
+			});
+			if (request.identity.kind !== "edit") throw new Error("Expected edit identity");
+			expect(request.identity.paths[0]).not.toBe(longPath.slice(0, 2_000));
+			expect(request.detail.truncatedFields).toContain("identity.paths");
+			expect(isRpcToolApprovalRequest(request)).toBe(true);
+		}
+	});
+
 	test("preserves bounded edit and write fields for native rendering", () => {
 		const edit = buildRpcToolApprovalRequest("approval-edit", {
 			toolCallId: "toolu_edit_1",
 			toolName: "edit",
 			toolKind: "edit",
+			identity: { kind: "edit", paths: ["src/app.ts"], content: "after" },
 			tier: "write",
 			input: { path: "src/app.ts", old_string: "before", new_string: "after" },
 			details: ["File: src/app.ts"],
@@ -78,6 +139,7 @@ describe("RPC tool approvals", () => {
 			toolName: "write",
 			toolKind: "write",
 			tier: "write",
+			identity: { kind: "write", path: "src/new.ts", content: "export const ready = true;\n" },
 			input: { path: "src/new.ts", content: "export const ready = true;\n" },
 			details: ["Path: src/new.ts", "Content:\nexport const ready = true;"],
 		});
@@ -98,6 +160,7 @@ describe("RPC tool approvals", () => {
 			toolKind: "write",
 			tier: "write",
 			input: { path: `src/${escaped}`, content: escaped },
+			identity: { kind: "write", path: `src/${escaped}`, content: escaped },
 			details: [],
 		});
 
@@ -119,6 +182,7 @@ describe("RPC tool approvals", () => {
 		]);
 		const approval: ToolApprovalRequest = {
 			...shellApproval,
+			identity: { kind: "shell", command: escaped },
 			input,
 			reason: escaped,
 			details: Array.from({ length: 16 }, () => escaped),
@@ -149,6 +213,7 @@ describe("RPC tool approvals", () => {
 			toolName: "edit",
 			toolKind: "edit",
 			tier: "write",
+			identity: { kind: "edit", paths: ["src/a.ts", "src/b.ts"], content: "+changed" },
 			input: Object.fromEntries([...noise, ["paths", ["src/a.ts", "src/b.ts"]], ["input", "+changed"]]),
 			details: [],
 		});
@@ -157,6 +222,7 @@ describe("RPC tool approvals", () => {
 			toolName: "write",
 			toolKind: "write",
 			tier: "write",
+			identity: { kind: "write", path: "src/out.ts", content: "export const x = 1;" },
 			input: Object.fromEntries([...noise, ["path", "src/out.ts"], ["content", "export const x = 1;"]]),
 			details: [],
 		});
@@ -173,13 +239,18 @@ describe("RPC tool approvals", () => {
 
 	test("fails closed when required tool identity is absent", () => {
 		expect(() =>
-			buildRpcToolApprovalRequest("missing-shell", { ...shellApproval, input: { cwd: "/workspace" } }),
+			buildRpcToolApprovalRequest("missing-shell", {
+				...shellApproval,
+				identity: { kind: "shell", command: "" },
+				input: { cwd: "/workspace" },
+			}),
 		).toThrow("required command identity");
 		expect(() =>
 			buildRpcToolApprovalRequest("missing-edit", {
 				...shellApproval,
 				toolKind: "edit",
 				toolName: "edit",
+				identity: { kind: "edit", paths: [], content: "" },
 				input: { paths: ["src/a.ts"] },
 			}),
 		).toThrow("required paths and content identity");
@@ -188,6 +259,7 @@ describe("RPC tool approvals", () => {
 				...shellApproval,
 				toolKind: "write",
 				toolName: "write",
+				identity: { kind: "write", path: "", content: "" },
 				input: { path: "src/a.ts" },
 			}),
 		).toThrow("required path and content identity");
@@ -206,6 +278,7 @@ describe("RPC tool approvals", () => {
 				authorization_header_value: token,
 			},
 			reason: `token_url=${token}`,
+			identity: { kind: "shell", command: `deploy ${token}` },
 			details: [`Command token: ${token}`],
 			providerSafetyChecks: [`authorization=${token}`],
 		});

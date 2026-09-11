@@ -2470,6 +2470,7 @@ describe("ExtensionRunner", () => {
 					toolKind: "other",
 					tier: "exec",
 					input: { command: "echo safe" },
+					identity: { kind: "other" },
 					details: [],
 				},
 				{ signal: undefined, onTimeout: expect.any(Function) },
