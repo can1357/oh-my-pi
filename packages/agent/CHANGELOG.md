@@ -24,6 +24,7 @@
 - Fixed repeated local compaction omitting messages retained before the previous compaction record, while preserving original entry IDs and `/clear` boundaries.
 - Raised remote compaction request timeout from 3 minutes to 5 minutes so long Codex/gpt-6-astra compact streams can finish before the watchdog aborts them.
 - Fixed proxy responses dropping the cost the server reported; recorded costs are kept instead of being recomputed.
+- `Agent.queueRevision` changes on every queue mutation — including consumption by the running loop — so session-level features can detect out-of-band queue changes. `Agent.prependSteeringBatch` queues an intact batch ahead of other steering even in all-at-once mode; `replaceQueues`/`clearAllQueues`/steer/follow-up/dequeue paths carry a revision counter that never goes backwards.
 
 ## [18.1.10] - 2026-09-04
 

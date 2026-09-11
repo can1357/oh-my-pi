@@ -918,6 +918,16 @@ export class AgentSession {
 		// so they neither auto-resume the run the user stopped (a non-empty steer queue
 		// otherwise bypasses the latch in #canAutoContinueForFollowUp) nor linger to
 		// flush at the next prompt. Real user steers/follow-ups are left untouched.
+		if (this.#queueSendNowInFlight) {
+			// Queue send-now aborted the run deliberately with the other queue
+			// content preserved (the operator asked for exactly one item to move).
+			// The stranded-drain advisor reclaim must NOT fire here or it would
+			// pull queued advisor cards out and persist them mid-operation, mutating
+			// queue content the send-now owner does not own — including on the
+			// rollback path, which restores reservations assuming the queue intact.
+			this.#scheduleQueuedMessageDrain();
+			return;
+		}
 		if (this.#advisors.autoResumeSuppressed && !this.isStreaming) {
 			for (const card of this.#extractQueuedAdvisorCards()) {
 				this.#preserveAdvisorCard(card);
@@ -7483,7 +7493,14 @@ export class AgentSession {
 		let dispatched = false;
 		let unsubscribe = () => {};
 		try {
-			await this.abort({ reason: USER_INTERRUPT_LABEL, preserveQueuedMessages: true });
+			// Internal to queue send-now: the goal runtime must not pause an active
+			// goal — only "interrupted" pauses goal mode, and the replacement turn
+			// must keep chasing the same goal.
+			await this.abort({
+				goalReason: "internal",
+				reason: USER_INTERRUPT_LABEL,
+				preserveQueuedMessages: true,
+			});
 			this.#assertQueueSession(input.sessionId);
 			this.#allowQueuedMessageDrainRetry();
 			this.#advisors.autoResumeSuppressed = false;
