@@ -1519,6 +1519,12 @@ const ANTHROPIC_PING_EVENT: RawMessagePingEvent = { type: "ping" };
  * error type token (e.g. `overloaded_error`, `rate_limit_error`) is kept in
  * the message so `isProviderRetryableError`'s classification keys off the
  * structured type rather than incidental JSON substrings.
+ *
+ * A `rate_limit_error` frame rides a 200 stream, so it carries no HTTP status
+ * of its own. It is given one at construction: without it the failure reads as
+ * generic transient rate-limit text and the provider loop replays a saturated
+ * route up to {@link PROVIDER_MAX_RETRIES} times instead of handing it to
+ * session recovery, exactly as a wire 429 would be handled.
  */
 function createAnthropicSseStreamError(data: string): Error {
 	try {
@@ -1526,10 +1532,13 @@ function createAnthropicSseStreamError(data: string): Error {
 		const errorType = typeof parsed?.error?.type === "string" ? parsed.error.type : undefined;
 		const message = typeof parsed?.error?.message === "string" ? parsed.error.message : undefined;
 		if (message) {
-			return new AIError.ProviderResponseError(
-				errorType ? `Anthropic stream error (${errorType}): ${message}` : `Anthropic stream error: ${message}`,
-				{ provider: "anthropic", kind: "output" },
-			);
+			const detail = errorType
+				? `Anthropic stream error (${errorType}): ${message}`
+				: `Anthropic stream error: ${message}`;
+			if (errorType === "rate_limit_error") {
+				return new AIError.ProviderHttpError(detail, 429, { code: errorType });
+			}
+			return new AIError.ProviderResponseError(detail, { provider: "anthropic", kind: "output" });
 		}
 	} catch {
 		// Not a JSON envelope; fall through to the raw payload.

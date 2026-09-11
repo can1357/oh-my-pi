@@ -124,15 +124,27 @@ attempt both delays the recovery this policy owns (credential rotation, model
 fallback) and re-applies the load that tripped the limit — multiplied by every
 concurrent subagent.
 
-- A 429 costs at most `MAX_RATE_LIMIT_ATTEMPTS` (2) same-route requests, and
-  the second one only happens when the response itself promises recovery
-  within `CREDIBLE_RATE_LIMIT_HINT_MS` (5s) via `Retry-After`/`retry-after-ms`
-  or an equivalent body hint.
+- The budget is opt-in per call site (`fetchWithRetry({ rateLimitBudget: true })`)
+  and enabled only for LLM provider transports, whose failures reach this
+  policy: `openai-http` (chat completions / responses / azure), codex
+  responses, gemini-cli, ollama, bedrock, plus the Anthropic Messages client's
+  own retry loop. Generic helpers — embeddings, local-model probes, catalog
+  model listings, web search/scrape — keep the ordinary `maxAttempts` backoff,
+  because in-transport retry is the only recovery they have.
+- Where it applies, a 429 costs at most `MAX_RATE_LIMIT_ATTEMPTS` (2)
+  same-route requests, and the second one only happens when the response
+  itself promises recovery within `CREDIBLE_RATE_LIMIT_HINT_MS` (5s) via
+  `Retry-After`/`retry-after-ms` or an equivalent body hint.
 - A 429 with no hint, a long hint, or a quota/usage-limit body surfaces on the
   first attempt.
 - Provider-level replay loops (`withReplaySafeStreamRetry`, the Anthropic
   stream retry loop) do not re-run a 429 either: `isProviderRetryableError`
   rejects it because the transport already spent that budget.
+- In-band rate limits ride a 200 stream and therefore carry no HTTP status of
+  their own, so they are given one at construction — an Anthropic
+  `rate_limit_error` SSE frame becomes a 429, matching the OpenAI-completions
+  in-band mapping — and take the same path as a wire 429 instead of being
+  replayed as generic transient text.
 - Capacity (5xx), timeouts (408), and transient transport failures keep the
   full per-transport `maxAttempts` budget.
 

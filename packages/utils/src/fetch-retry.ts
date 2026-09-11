@@ -249,6 +249,19 @@ export interface FetchWithRetryOptions extends RequestInit {
 	 */
 	shouldRetryResponse?: (response: Response, bodyText: string, attempt: number) => boolean | Promise<boolean>;
 	/**
+	 * Opt into the bounded 429 policy: at most {@link MAX_RATE_LIMIT_ATTEMPTS}
+	 * same-route attempts, and only while the response promises recovery within
+	 * {@link CREDIBLE_RATE_LIMIT_HINT_MS}.
+	 *
+	 * Enable it for LLM provider transports, whose caller (session turn
+	 * recovery) can rotate credentials or fall back to another model — recovery
+	 * a same-route replay can never achieve, and which the replay only delays.
+	 * Leave it off (the default) for generic helpers — embeddings, local-model
+	 * probes, catalog listings, web scrapers — where in-transport backoff is
+	 * the only recovery there is.
+	 */
+	rateLimitBudget?: boolean;
+	/**
 	 * Bun extension forwarded verbatim to the underlying `fetch` call. `false`
 	 * disables Bun's native ~300s pre-response timeout (callers that own a
 	 * configurable first-event/idle watchdog or an external `AbortSignal`
@@ -288,10 +301,11 @@ export const CREDIBLE_RATE_LIMIT_HINT_MS = 5_000;
  * the cap returns the current response so the caller can fail fast. Aborts on
  * `init.signal` propagate as `"Request was aborted"`.
  *
- * 429s are budgeted separately: at most {@link MAX_RATE_LIMIT_ATTEMPTS}
- * same-route attempts, and only while the response promises recovery within
- * {@link CREDIBLE_RATE_LIMIT_HINT_MS}. Capacity (5xx) and timeout (408)
- * failures keep the full `maxAttempts` budget.
+ * Callers that pass `rateLimitBudget` budget 429s separately: at most
+ * {@link MAX_RATE_LIMIT_ATTEMPTS} same-route attempts, and only while the
+ * response promises recovery within {@link CREDIBLE_RATE_LIMIT_HINT_MS}.
+ * Capacity (5xx) and timeout (408) failures always keep the full `maxAttempts`
+ * budget, as does a 429 when the option is off (the default).
  *
  * The caller is responsible for inspecting `!response.ok` once the call returns.
  */
@@ -305,6 +319,7 @@ export async function fetchWithRetry(
 		defaultDelayMs,
 		prepareInit,
 		shouldRetryResponse,
+		rateLimitBudget = false,
 		fetch: fetchImpl = fetch,
 		timeout = false,
 		...baseInit
@@ -340,7 +355,7 @@ export async function fetchWithRetry(
 		}
 
 		if (!isRetryableStatus(response.status)) return response;
-		const rateLimited = response.status === 429;
+		const rateLimited = rateLimitBudget && response.status === 429;
 		if (rateLimited) rateLimitAttempts++;
 		if (attempt + 1 >= maxAttempts) return response;
 		if (rateLimited && rateLimitAttempts >= MAX_RATE_LIMIT_ATTEMPTS) return response;

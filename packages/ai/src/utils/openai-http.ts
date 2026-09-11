@@ -98,6 +98,9 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		signal: init.signal,
 		fetch: init.fetch,
 		maxAttempts: DEFAULT_MAX_ATTEMPTS,
+		// Session turn recovery owns rate limits: rotate the credential or fall
+		// back to another model rather than replaying a saturated route.
+		rateLimitBudget: true,
 		// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
 		// surfaces immediately instead of being slept-and-retried here; session
 		// recovery owns its backoff/fallback (issue #8854).

@@ -197,4 +197,29 @@ describe("transport rate-limit budget", () => {
 		expect(requests).toBeLessThanOrEqual(MAX_RATE_LIMIT_ATTEMPTS);
 		vi.restoreAllMocks();
 	});
+
+	// An in-band `rate_limit_error` frame arrives on a 200 stream, so it carries
+	// no HTTP status of its own. Left status-less it reads as generic transient
+	// rate-limit text and the provider loop replays it up to PROVIDER_MAX_RETRIES
+	// times — the same storm by another route. It must classify as 429.
+	it("classifies a status-less in-band rate_limit_error frame as rate-limited", async () => {
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		let requests = 0;
+		const fetchMock: FetchImpl = async () => {
+			requests++;
+			return new Response(
+				'event: error\ndata: {"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}\n\n',
+				{ status: 200, headers: { "content-type": "text/event-stream" } },
+			);
+		};
+		const result = await streamAnthropic(anthropicModel, context, {
+			apiKey: "sk-test",
+			fetch: fetchMock,
+			providerRetryWait: async () => {},
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(429);
+		expect(requests).toBe(1);
+		vi.restoreAllMocks();
+	});
 });

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { extractRetryHint, fetchWithRetry, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
+import {
+	extractRetryHint,
+	fetchWithRetry,
+	isUnexpectedSocketCloseMessage,
+	MAX_RATE_LIMIT_ATTEMPTS,
+} from "@oh-my-pi/pi-utils/fetch-retry";
 
 describe("isUnexpectedSocketCloseMessage", () => {
 	it.each(["Socket is closed", "Error: Socket is closed.", "The socket connection was closed unexpectedly"])(
@@ -90,6 +95,75 @@ describe("fetchWithRetry", () => {
 		expect(response.status).toBe(429);
 		expect(await response.text()).toBe("slow down");
 		expect(attempt).toBe(1);
+	});
+
+	// Generic callers (embeddings, local LLM probes, catalog/model listings,
+	// web scrapers) have no credential rotation or model fallback behind them:
+	// in-transport backoff is their only recovery, so a 429 keeps spending the
+	// ordinary `maxAttempts` budget.
+	it("keeps the ordinary attempt budget for a 429 by default", async () => {
+		let attempt = 0;
+		const response = await fetchWithRetry("https://example.invalid/generic-rate-limit", {
+			fetch: async () => {
+				attempt += 1;
+				return new Response("slow down", { status: 429 });
+			},
+			defaultDelayMs: 1,
+			maxAttempts: 4,
+		});
+
+		expect(response.status).toBe(429);
+		expect(attempt).toBe(4);
+	});
+
+	// Provider transports opt in: their caller (session recovery) can rotate
+	// credentials or switch models, which a same-route replay never can.
+	it("bounds a hintless 429 to one attempt when the rate-limit budget is enabled", async () => {
+		let attempt = 0;
+		const response = await fetchWithRetry("https://example.invalid/provider-rate-limit", {
+			fetch: async () => {
+				attempt += 1;
+				return new Response("slow down", { status: 429 });
+			},
+			defaultDelayMs: 1,
+			maxAttempts: 6,
+			rateLimitBudget: true,
+		});
+
+		expect(response.status).toBe(429);
+		expect(attempt).toBe(1);
+	});
+
+	it("allows one short-hinted 429 replay when the rate-limit budget is enabled", async () => {
+		let attempt = 0;
+		const response = await fetchWithRetry("https://example.invalid/provider-rate-limit-hint", {
+			fetch: async () => {
+				attempt += 1;
+				return new Response("slow down", { status: 429, headers: { "retry-after-ms": "1" } });
+			},
+			defaultDelayMs: 1,
+			maxAttempts: 6,
+			rateLimitBudget: true,
+		});
+
+		expect(response.status).toBe(429);
+		expect(attempt).toBe(MAX_RATE_LIMIT_ATTEMPTS);
+	});
+
+	it("keeps the full attempt budget for 5xx even when the rate-limit budget is enabled", async () => {
+		let attempt = 0;
+		const response = await fetchWithRetry("https://example.invalid/provider-capacity", {
+			fetch: async () => {
+				attempt += 1;
+				return new Response("overloaded", { status: 503 });
+			},
+			defaultDelayMs: 1,
+			maxAttempts: 4,
+			rateLimitBudget: true,
+		});
+
+		expect(response.status).toBe(503);
+		expect(attempt).toBe(4);
 	});
 
 	it("normalizes aborts during response backoff", async () => {

@@ -598,6 +598,7 @@ const streamOllamaOnce = (
 					signal: watchdog.signal,
 					defaultDelayMs: OLLAMA_RETRY_DELAYS_MS,
 					shouldRetryResponse: shouldRetryOllamaResponse,
+					rateLimitBudget: true,
 					fetch: options.fetch,
 					timeout: false,
 				});
