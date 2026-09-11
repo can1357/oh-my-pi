@@ -4,7 +4,6 @@ import {
 	formatModelString,
 	getModelMatchPreferences,
 	resolveCliModel,
-	type ResolveCliModelResult,
 } from "../config/model-resolver";
 import type { SettingPath, Settings } from "../config/settings";
 import { describeLoopCondition } from "../modes/loop-condition";
@@ -14,6 +13,7 @@ import type { AgentSession } from "../session/agent-session";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
 import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
+import { resolveSessionModelSelector, resolveSwitchModelWithFallback } from "./helpers/switch-model";
 
 export function refreshStatusLine(ctx: InteractiveModeContext): void {
 	ctx.statusLine.invalidate();
@@ -26,20 +26,7 @@ export function refreshStatusLine(ctx: InteractiveModeContext): void {
  * and `:level` thinking suffixes. Unqualified selectors prefer the session's
  * `--models` scope, else the authenticated set, before the full catalog.
  */
-function resolveSessionModelSelector(
-	selector: string,
-	session: AgentSession,
-	settings: Settings,
-): ResolveCliModelResult {
-	const scoped = session.scopedModels.map(entry => entry.model);
-	return resolveCliModel({
-		cliModel: selector,
-		modelRegistry: session.modelRegistry,
-		availableModels: scoped.length > 0 ? scoped : undefined,
-		settings,
-		preferences: getModelMatchPreferences(settings),
-	});
-}
+// resolveSessionModelSelector is re-exported from helpers/switch-model
 
 async function runWithDetachedModeDraft(
 	command: ParsedSlashCommand,
@@ -387,11 +374,15 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				);
 				return commandConsumed();
 			}
-			const resolved = resolveSessionModelSelector(selector, runtime.session, runtime.settings);
-			if (!resolved.model) return usage(`Unknown model: ${selector}`, runtime);
+			const resolved = resolveSwitchModelWithFallback(selector, runtime.session, runtime.settings);
+			if (!resolved.model) return usage(resolved.error ?? `Unknown model: ${selector}`, runtime);
 			try {
-				await runtime.session.setModelTemporary(resolved.model, resolved.thinkingLevel);
-				await runtime.output(`Session-only model: ${formatModelString(resolved.model)}.`);
+				await runtime.session.setModelTemporary(resolved.model, resolved.thinkingLevel, { role: resolved.role });
+				const fallbackNotice =
+					resolved.fallbackUsed && resolved.fallbackFrom
+						? ` (fell back from ${resolved.fallbackFrom}: no API key)`
+						: "";
+				await runtime.output(`Session-only model: ${formatModelString(resolved.model)}${fallbackNotice}.`);
 				await runtime.notifyTitleChanged?.();
 				await runtime.notifyConfigChanged?.();
 				return commandConsumed();
@@ -406,13 +397,24 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.showModelSelector({ temporaryOnly: true });
 				return;
 			}
-			const resolved = resolveSessionModelSelector(selector, runtime.ctx.session, runtime.ctx.settings);
+			const resolved = resolveSwitchModelWithFallback(selector, runtime.ctx.session, runtime.ctx.settings);
 			if (!resolved.model) {
-				runtime.ctx.showError(`Unknown model: ${selector}`);
+				runtime.ctx.showError(resolved.error ?? `Unknown model: ${selector}`);
 				return;
 			}
 			if (resolved.warning) runtime.ctx.showStatus(resolved.warning);
-			await runtime.ctx.switchSessionModel(resolved.model, resolved.thinkingLevel);
+			const fallbackNotice =
+				resolved.fallbackUsed && resolved.fallbackFrom
+					? `fell back from ${resolved.fallbackFrom}: no API key`
+					: undefined;
+			if (resolved.role || fallbackNotice) {
+				await runtime.ctx.switchSessionModel(resolved.model, resolved.thinkingLevel, {
+					role: resolved.role,
+					fallbackNotice,
+				});
+			} else {
+				await runtime.ctx.switchSessionModel(resolved.model, resolved.thinkingLevel);
+			}
 		},
 	},
 	{
