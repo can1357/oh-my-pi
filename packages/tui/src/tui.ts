@@ -1223,11 +1223,21 @@ export class TUI extends Container {
 	 * there self-sustains. Every other terminal keeps the alt-borrow path. Inside a
 	 * multiplexer the mux owns the grid and consumes the toggles itself, so an
 	 * inherited Warp marker must not divert the mux-tuned borrow path.
+	 *
+	 * A ConPTY host is excluded for the same reason as a multiplexer: conhost owns
+	 * the grid the application writes to. Measured on conhost, resizing the
+	 * pseudoconsole makes it re-emit its whole viewport from `CSI H` with absolute
+	 * addressing while the application writes nothing, and it re-homes the cursor,
+	 * so the settled DSR reply carries column 1 instead of the probe's tag column
+	 * and can never be attributed. In-place resize has neither of its
+	 * preconditions there — a recoverable anchor and a grid nobody else
+	 * repaints — so keep the borrow, whose settled transaction ends in the
+	 * {@link ResizeScrollbackMode} rebuild that erases conhost's stale copy.
 	 */
 	#resizeRepaintsInPlace(): boolean {
 		const override = resizeInPlaceOverride();
 		if (override !== null) return override;
-		if (isInsideTerminalMultiplexer()) return false;
+		if (isInsideTerminalMultiplexer() || this.terminal.hostOwnsGridOnResize === true) return false;
 		return Bun.env.TERM_PROGRAM?.toLowerCase() === "warpterminal";
 	}
 
@@ -1437,6 +1447,24 @@ export class TUI extends Container {
 			epoch: this.#geometryEpoch,
 			retried: retry,
 		};
+		// A ConPTY host re-homes the cursor on every resize, so its reply carries
+		// column 1 and can never be attributed to a tag. Sending the DSR would
+		// only burn a tag column for the rest of the session (dead tags are
+		// deliberately never reclaimed) and stall the settled repaint for the
+		// full timeout, so anchor from the fallback immediately. Two exemptions:
+		// a multiplexer answers DSR from its own grid, so under WSL-in-tmux the
+		// reply is attributable and the width-reflow / hidden-grow / reversed-
+		// burst logic still needs it; and PI_TUI_RESIZE_IN_PLACE=1 forces the
+		// in-place repaint, whose anchor is only as good as this probe, so the
+		// documented escape hatch restores the whole pre-change path.
+		if (
+			this.terminal.hostOwnsGridOnResize === true &&
+			!isInsideTerminalMultiplexer() &&
+			resizeInPlaceOverride() !== true
+		) {
+			this.#resolveResizeAnchor(undefined);
+			return;
+		}
 		// Tags are never expired by age: a reply has no lifetime guarantee, and
 		// freeing a column while its reply may still arrive would let that
 		// reply match a newer tag on the reused column. Dead tags only
