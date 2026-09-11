@@ -21,6 +21,11 @@ export function buildNamedToolChoice(toolName: string, model?: Model<Api>): Tool
 		model.api === "azure-openai-responses" ||
 		model.api === "openrouter"
 	) {
+		// Both OpenAI transports drop tool_choice when the model has none and turn a
+		// forced choice into "auto" when forcing is unsupported. Such a choice never
+		// reaches the wire, so it must not be reported as a forced one.
+		const compat = model.compat as { supportsToolChoice?: boolean; supportsForcedToolChoice?: boolean };
+		if (compat?.supportsToolChoice === false || compat?.supportsForcedToolChoice === false) return undefined;
 		return { type: "function", name: toolName };
 	}
 
