@@ -96,6 +96,7 @@ export type HeaderSource = Record<string, string> | undefined;
 interface HeaderResolutionOptions {
 	authHeader?: boolean;
 	apiKeyConfig?: string;
+	apiKeyOverride?: () => string | undefined;
 }
 
 /**
@@ -133,9 +134,15 @@ function materializeConfigHeaderSources(
 			if (next) resolved[key] = next;
 		}
 	}
-	if (options?.authHeader && options.apiKeyConfig) {
-		const resolvedKey = resolveConfigValue(options.apiKeyConfig);
-		if (resolvedKey) resolved.Authorization = `Bearer ${resolvedKey}`;
+	if (options?.authHeader) {
+		const resolvedKey =
+			options.apiKeyOverride?.() || (options.apiKeyConfig ? resolveConfigValue(options.apiKeyConfig) : undefined);
+		if (resolvedKey) {
+			for (const header of Object.keys(resolved)) {
+				if (header.toLowerCase() === "authorization") delete resolved[header];
+			}
+			resolved.Authorization = `Bearer ${resolvedKey}`;
+		}
 	}
 	return Object.keys(resolved).length > 0 ? resolved : undefined;
 }
@@ -145,7 +152,8 @@ export function createLiveConfigHeaders(
 	options?: HeaderResolutionOptions,
 ): Record<string, string> | undefined {
 	const liveSources = sources.filter((source): source is Record<string, string> => source !== undefined);
-	if (liveSources.length === 0 && (!options?.authHeader || !options.apiKeyConfig)) return undefined;
+	if (liveSources.length === 0 && (!options?.authHeader || !(options.apiKeyConfig || options.apiKeyOverride)))
+		return undefined;
 
 	const localHeaders: Record<string, string> = {};
 	const allSources = [...liveSources, localHeaders];

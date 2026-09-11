@@ -33,6 +33,14 @@ export const launchHelp = {
 		"plan-yolo-into": Flags.string({ description: 'Target model for plan-yolo execution (default the "smol" role)' }),
 		provider: Flags.string({ description: "Provider to use (legacy; prefer --model)" }),
 		"api-key": Flags.string({ description: "API key (defaults to env vars)" }),
+		"provider-api-keys": Flags.string({
+			description:
+				"Direct path to a provider API key JSON object for this process only; mutually exclusive with --provider-api-keys-fd",
+		}),
+		"provider-api-keys-fd": Flags.string({
+			description:
+				"Exact open descriptor containing provider API key JSON; consumed on read; mutually exclusive with --provider-api-keys",
+		}),
 		"system-prompt": Flags.string({ description: "System prompt (default: coding assistant prompt)" }),
 		"append-system-prompt": Flags.string({ description: "Append text or file contents to the system prompt" }),
 		"allow-home": Flags.boolean({ description: "Allow starting in ~ without auto-switching to a temp dir" }),

@@ -14,6 +14,7 @@ import {
 	EXTENSION_SHADOWABLE_STRING_FLAGS,
 	flagConsumesValue,
 	OPTIONAL_VALUE_FLAGS,
+	PROVIDER_API_KEYS_FD_FLAG,
 	STRING_VALUE_FLAGS,
 	VALUELESS_FLAGS,
 } from "./cli/flag-tables";
@@ -298,8 +299,12 @@ export function isSubcommand(first: string | undefined): boolean {
 	return commands.some(entry => entry.name === first || entry.aliases?.includes(first));
 }
 
-export type ResolvedCliArgv = { argv: string[] } | { error: string };
-
+/**
+ * `orphanedKeyDescriptors` lists credential descriptors that were stripped as
+ * launch-global flags before a non-launch subcommand. Nothing downstream will
+ * read them, so the caller closes them rather than leaving them inheritable.
+ */
+export type ResolvedCliArgv = { argv: string[]; orphanedKeyDescriptors?: readonly number[] } | { error: string };
 /**
  * Index of the first argv token that names a registered subcommand, skipping
  * leading global option flags (and any value they consume) with the same
@@ -345,17 +350,36 @@ function isLaunchGlobalFlag(arg: string): boolean {
  * `node:util.parseArgs` error (#8891). Tokens the launch tables don't recognize
  * are kept, so a subcommand's own leading flags still reach it.
  */
-function stripLaunchGlobalFlags(leading: readonly string[]): string[] {
+function stripLaunchGlobalFlags(leading: readonly string[]): {
+	kept: string[];
+	orphanedKeyDescriptors: number[];
+} {
 	const kept: string[] = [];
+	// A launcher may prepend the credential descriptor to any command, including
+	// non-launch ones like `update` that never read it. Dropping the flag on the
+	// floor left the descriptor open and inheritable, so `update`'s
+	// package-manager subprocesses inherited a live credential fd. Report every
+	// stripped descriptor so the caller can close it before dispatch.
+	const orphanedKeyDescriptors: number[] = [];
+	const noteDescriptor = (value: string | undefined) => {
+		const fd = Number(value);
+		if (Number.isInteger(fd) && fd > 2) orphanedKeyDescriptors.push(fd);
+	};
 	for (let index = 0; index < leading.length; index += 1) {
 		const arg = leading[index];
 		if (isLaunchGlobalFlag(arg)) {
-			if (flagConsumesValue(arg, leading[index + 1])) index += 1;
+			const flag = arg.startsWith("--") ? arg.split("=", 1)[0] : arg;
+			const inlineValue = arg.startsWith(`${flag}=`) ? arg.slice(flag.length + 1) : undefined;
+			const consumesNext = flagConsumesValue(arg, leading[index + 1]);
+			if (flag === PROVIDER_API_KEYS_FD_FLAG) {
+				noteDescriptor(inlineValue ?? (consumesNext ? leading[index + 1] : undefined));
+			}
+			if (consumesNext) index += 1;
 			continue;
 		}
 		kept.push(arg);
 	}
-	return kept;
+	return { kept, orphanedKeyDescriptors };
 }
 
 /**
@@ -386,8 +410,10 @@ export function resolveCliArgv(argv: string[]): ResolvedCliArgv {
 		const sub = argv[subIndex];
 		const leading = argv.slice(0, subIndex);
 		const trailing = argv.slice(subIndex + 1);
-		const forwardedLeading = LAUNCH_FLAG_COMMANDS[sub] === true ? leading : stripLaunchGlobalFlags(leading);
-		return { argv: [sub, ...forwardedLeading, ...trailing] };
+		if (LAUNCH_FLAG_COMMANDS[sub] === true) return { argv: [sub, ...leading, ...trailing] };
+		const { kept, orphanedKeyDescriptors } = stripLaunchGlobalFlags(leading);
+		const routed = [sub, ...kept, ...trailing];
+		return orphanedKeyDescriptors.length > 0 ? { argv: routed, orphanedKeyDescriptors } : { argv: routed };
 	}
 	return { argv: ["launch", ...argv] };
 }

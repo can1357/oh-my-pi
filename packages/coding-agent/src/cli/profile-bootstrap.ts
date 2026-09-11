@@ -40,8 +40,10 @@ import {
 	OPTIONAL_FLAGS,
 	OPTIONAL_VALUE_FLAGS,
 	PROFILE_BOOTSTRAP_BOUNDARY_ARG,
+	PROVIDER_API_KEYS_FD_FLAG,
 	STRING_VALUE_FLAGS,
 } from "./flag-tables";
+import { claimProviderApiKeyDescriptor } from "./provider-api-keys";
 
 function needsBoundaryAfterGlobalStrip(stripped: readonly string[]): boolean {
 	const previous = stripped[stripped.length - 1];
@@ -142,6 +144,26 @@ export function extractProfileFlags(argv: readonly string[]): ProfileBootstrapRe
 			}
 			aliasName = value;
 			insertBoundaryBeforeNextValue = needsBoundaryAfterGlobalStrip(stripped);
+			continue;
+		}
+
+		// A launcher may transfer a credential descriptor on any invocation.
+		// Ownership is taken the moment the flag is parsed — including alias and
+		// profile-bootstrap invocations that exit before the launch parser can
+		// register it — for both the bare and the `--provider-api-keys-fd=N`
+		// spelling. `runCli` closes everything still claimed when it exits.
+		if (arg === PROVIDER_API_KEYS_FD_FLAG || arg.startsWith(`${PROVIDER_API_KEYS_FD_FLAG}=`)) {
+			canDispatchSubcommand = false;
+			stripped.push(arg);
+			if (arg === PROVIDER_API_KEYS_FD_FLAG) {
+				claimProviderApiKeyDescriptor(argv[index + 1]);
+				if (index + 1 < argv.length) {
+					stripped.push(argv[index + 1]);
+					index += 1;
+				}
+			} else {
+				claimProviderApiKeyDescriptor(arg.slice(PROVIDER_API_KEYS_FD_FLAG.length + 1));
+			}
 			continue;
 		}
 
