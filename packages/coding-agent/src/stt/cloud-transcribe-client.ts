@@ -1,6 +1,14 @@
-import { type ApiKey, type OAuthAccess, type OAuthAccessSource, withAuth, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import {
+	type ApiKey,
+	type FetchImpl,
+	type OAuthAccess,
+	type OAuthAccessSource,
+	withAuth,
+	withOAuthAccess,
+} from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { wrapFetchForProxy } from "@oh-my-pi/pi-ai/utils/proxy";
 import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
@@ -19,6 +27,8 @@ import { resolveCloudSttModel } from "./cloud-models";
 const CODEX_STT_URL = `${CODEX_BASE_URL}${URL_PATHS.TRANSCRIBE}`;
 /** Provider id the Codex ChatGPT-subscription credential is stored under. */
 const CODEX_STT_PROVIDER = "openai-codex";
+/** Provider id the platform API-key credential is stored under. */
+const OPENAI_STT_PROVIDER = "openai";
 const CLOUD_STT_TIMEOUT_MS = 60_000;
 
 /** omp records at 16 kHz mono; the endpoint accepts 16-bit PCM WAV as-is. */
@@ -60,7 +70,10 @@ export interface CloudSttStreamOptions extends SttStreamOptions {
  * the text (empty when silent), `cancel()` resolves "" without a request.
  */
 export function startCloudSttStream(options: CloudSttStreamOptions): SttStreamHandle {
-	const fetchImpl = options.fetchImpl ?? fetch;
+	// Provider-scoped proxy (`PI_PROXY_OPENAI` / `PI_PROXY_OPENAI_CODEX`) is only
+	// applied by this helper; the global fetch wrapper covers bare `PI_PROXY`.
+	const provider = options.credential.kind === "codex" ? CODEX_STT_PROVIDER : OPENAI_STT_PROVIDER;
+	const fetchImpl = wrapFetchForProxy(options.fetchImpl ?? fetch, provider);
 	const requestAbort = new AbortController();
 	const chunks: Float32Array[] = [];
 	let queuedBytes = 0;
@@ -133,7 +146,7 @@ function concat(chunks: Float32Array[], total: number): Float32Array {
 }
 
 async function transcribeBuffer(
-	fetchImpl: typeof fetch,
+	fetchImpl: FetchImpl,
 	options: CloudSttStreamOptions,
 	audio: Float32Array,
 ): Promise<string> {
@@ -156,7 +169,7 @@ async function transcribeBuffer(
 
 /** ChatGPT-subscription route: Codex transcribe endpoint with identity headers. */
 async function transcribeWithCodexAccess(
-	fetchImpl: typeof fetch,
+	fetchImpl: FetchImpl,
 	options: CloudSttStreamOptions,
 	access: OAuthAccess,
 	wav: Blob,
@@ -186,7 +199,7 @@ async function transcribeWithCodexAccess(
  * A static string key stays a single attempt.
  */
 async function transcribeWithApiKey(
-	fetchImpl: typeof fetch,
+	fetchImpl: FetchImpl,
 	options: CloudSttStreamOptions,
 	credential: Extract<CloudSttCredential, { kind: "openai" }>,
 	wav: Blob,
@@ -251,7 +264,7 @@ function displayableErrorDetail(body: string): string {
 }
 
 async function postTranscription(
-	fetchImpl: typeof fetch,
+	fetchImpl: FetchImpl,
 	url: string,
 	headers: Record<string, string>,
 	form: FormData,
