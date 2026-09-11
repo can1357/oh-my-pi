@@ -5,6 +5,7 @@
 ### Added
 
 - Added historical decimation prompt-cache breakpoints every 15 user turns on Anthropic requests, so long conversations retain stable cached prefixes during branching, rewinds, and session resume ([#11665](https://github.com/can1357/oh-my-pi/pull/11665) by [@camjac251](https://github.com/camjac251)).
+- Added a LiteLLM usage provider: the `/usage` command and status-line `usage` segment now show the virtual key's and owning user's spend against `max_budget` per budget window (daily/weekly/monthly), read from the proxy's self-service `/key/info` and `/user/info` routes.
 ### Fixed
 
 - Fixed Anthropic OAuth requests omitting the tool-array cache breakpoint, so tool definitions are now cached across session rewrites and sibling subagents ([#11660](https://github.com/can1357/oh-my-pi/pull/11660) by [@camjac251](https://github.com/camjac251)).

@@ -600,6 +600,41 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("42%");
 	});
 
+	it("renders LiteLLM daily key and monthly user budgets", async () => {
+		const now = Date.now();
+		const component = makeComponent(
+			[
+				{
+					provider: "litellm",
+					limits: [
+						{
+							id: "litellm:key:daily",
+							scope: { windowId: "daily" },
+							window: { id: "daily", durationMs: 86_400_000, resetsAt: now + 6 * 3_600_000 },
+							amount: { used: 2.5, limit: 10, usedFraction: 0.25, unit: "usd" },
+						},
+						{
+							id: "litellm:user:monthly",
+							scope: { windowId: "monthly" },
+							window: { id: "monthly", resetsAt: now + 400 * 3_600_000 },
+							amount: { used: 40, limit: 100, usedFraction: 0.4, unit: "usd" },
+						},
+					],
+				},
+			],
+			{ provider: "litellm" },
+		);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).toContain("1d");
+		expect(content).toContain("25%");
+		expect(content).toContain("mo");
+		expect(content).toContain("40%");
+	});
+
 	it("does not render monthly usage for providers outside the single-bucket gate", async () => {
 		const component = makeComponent(
 			[
