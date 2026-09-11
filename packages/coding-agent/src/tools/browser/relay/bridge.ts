@@ -78,6 +78,8 @@ interface PreservedPreloadScript {
 	rootIdentifier: string;
 	/** Companion registration that removes the private recovery marker. */
 	cleanupRootIdentifier?: string;
+	/** Relay-private exception suppressed while the marker-bearing producer is live. */
+	applicationMarker?: string;
 	params?: Record<string, unknown>;
 	/** Main-frame document that already received an immediate invocation. */
 	loaderId?: string;
@@ -1114,6 +1116,7 @@ export class RelayBridge {
 				method: msg.method,
 				params,
 			});
+			if (script?.applicationMarker) tab.preloadApplicationMarkers.delete(script.applicationMarker);
 			if (script?.cleanupRootIdentifier) {
 				try {
 					await this.#rpc({
@@ -1840,7 +1843,15 @@ export class RelayBridge {
 		tab.pendingPreloadScriptCleanup.push(
 			...scripts.flatMap(script =>
 				script.cleanupRootIdentifier
-					? [script, { ...script, rootIdentifier: script.cleanupRootIdentifier, cleanupRootIdentifier: undefined }]
+					? [
+							script,
+							{
+								...script,
+								rootIdentifier: script.cleanupRootIdentifier,
+								cleanupRootIdentifier: undefined,
+								applicationMarker: undefined,
+							},
+						]
 					: [script],
 			),
 		);
@@ -1889,6 +1900,7 @@ export class RelayBridge {
 						continue;
 					}
 					this.#assertExtensionCurrent(expectedExt);
+					if (script.applicationMarker) tab.preloadApplicationMarkers.delete(script.applicationMarker);
 					if (tab.pendingPreloadScriptCleanup[0] === script) tab.pendingPreloadScriptCleanup.shift();
 				}
 			})
@@ -3378,11 +3390,14 @@ export class RelayBridge {
 			}
 			const current = this.#preloadScript(tab, script.ownerSessionId, script.clientIdentifier);
 			if (!current) {
-				this.#enqueuePreloadScriptCleanup(tab, [{ ...script, rootIdentifier, cleanupRootIdentifier }]);
+				this.#enqueuePreloadScriptCleanup(tab, [
+					{ ...script, rootIdentifier, cleanupRootIdentifier, applicationMarker },
+				]);
 				continue;
 			}
 			current.rootIdentifier = rootIdentifier;
 			current.cleanupRootIdentifier = cleanupRootIdentifier;
+			current.applicationMarker = applicationMarker;
 			if (navigationDuringRegistration && rootIdentifier !== identifier) {
 				const loaderAfterReplay = await this.#mainFrameLoaderId(tab.tabId).catch(err => {
 					if (isExtensionTransportInterrupted(err)) {

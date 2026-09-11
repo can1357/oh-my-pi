@@ -3668,6 +3668,21 @@ describe("RelayBridge tab grouping", () => {
 		expect(cleanupRemoval?.params).toEqual({ identifier: "root-script-marker-only" });
 		ack(bridge, ext2, "send");
 		await flush();
+		const messagesBeforeRetiredMarker = cdp.messages.length;
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Runtime.exceptionThrown",
+				params: { exceptionDetails: { exception: { value: JSON.parse(privateMarker!) } } },
+			}),
+		);
+		expect(cdp.messages).toHaveLength(messagesBeforeRetiredMarker + 1);
+		expect(cdp.messages.at(-1)).toMatchObject({
+			sessionId: pageSession,
+			method: "Runtime.exceptionThrown",
+		});
 	});
 
 	it("records an immediate preload that throws after mutating the document", async () => {
