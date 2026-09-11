@@ -85,17 +85,25 @@ export class TtsrCoordinator {
 		const assistantEvent = event.assistantMessageEvent;
 		let matchContext: TtsrMatchContext | undefined;
 		let streamingToolCall: ToolCall | undefined;
+		let delta: string | undefined;
 		if (assistantEvent.type === "text_delta") {
 			matchContext = { source: "text" };
+			delta = assistantEvent.delta;
 		} else if (assistantEvent.type === "thinking_delta") {
 			matchContext = { source: "thinking" };
+			delta = assistantEvent.delta;
 		} else if (assistantEvent.type === "toolcall_delta") {
 			streamingToolCall = this.#getStreamingToolCallBlock(event.message, assistantEvent.contentIndex);
 			matchContext = this.#getToolMatchContext(streamingToolCall, assistantEvent.contentIndex);
+			delta = assistantEvent.delta;
+		} else if (assistantEvent.type === "toolcall_end") {
+			streamingToolCall = assistantEvent.toolCall;
+			matchContext = this.#getToolMatchContext(streamingToolCall, assistantEvent.contentIndex);
+			delta = "";
 		}
-		if (!matchContext || !("delta" in assistantEvent)) return false;
+		if (!matchContext || delta === undefined) return false;
 		const targetMessageTimestamp = event.message.role === "assistant" ? event.message.timestamp : undefined;
-		const matches = this.#checkStream(assistantEvent.delta, matchContext, streamingToolCall);
+		const matches = this.#checkStream(delta, matchContext, streamingToolCall, assistantEvent.type === "toolcall_end");
 		if (matches.length > 0 && this.#handleMatches(matches, matchContext, targetMessageTimestamp)) return true;
 		// AST rules use the reconstructed edit/write snapshot and are awaited so
 		// the manager self-throttles native matching.
@@ -325,7 +333,12 @@ export class TtsrCoordinator {
 		return this.#extractFilePathsFromArgs(args);
 	}
 
-	#checkStream(delta: string, matchContext: TtsrMatchContext, toolCall: ToolCall | undefined): Rule[] {
+	#checkStream(
+		delta: string,
+		matchContext: TtsrMatchContext,
+		toolCall: ToolCall | undefined,
+		isFinal = false,
+	): Rule[] {
 		if (!this.#manager) return [];
 		const entries = this.#resolveMatcherEntries(toolCall);
 		if (entries) {
@@ -336,9 +349,17 @@ export class TtsrCoordinator {
 			return matches;
 		}
 		const digest = this.#resolveMatcherDigest(toolCall);
-		return digest !== undefined
-			? this.#manager.checkSnapshot(digest, matchContext)
-			: this.#manager.checkDelta(delta, matchContext);
+		if (digest !== undefined) return this.#manager.checkSnapshot(digest, matchContext);
+		// Tools without matcher hooks accumulate raw argument deltas. Providers
+		// that emit toolcall_start -> toolcall_end with no intermediate deltas
+		// (Cursor exec synthesis, OpenAI lossy-proxy fallback) leave that buffer
+		// empty, so the finalized arguments must seed the snapshot themselves.
+		const finalArgs = isFinal ? toolCall?.arguments : undefined;
+		if (finalArgs !== undefined && finalArgs !== null) {
+			const snapshot = typeof finalArgs === "string" ? finalArgs : JSON.stringify(finalArgs);
+			return this.#manager.checkSnapshot(snapshot, matchContext);
+		}
+		return this.#manager.checkDelta(delta, matchContext);
 	}
 
 	#resolveMatcherDigest(toolCall: ToolCall | undefined): string | undefined {

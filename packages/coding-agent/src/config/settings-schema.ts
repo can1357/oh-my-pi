@@ -1,3 +1,4 @@
+import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "../advisor/emission-guard";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
@@ -261,7 +262,8 @@ export type StatusLineSegmentId =
 	| "cache_hit"
 	| "session_name"
 	| "usage"
-	| "collab";
+	| "collab"
+	| "vim";
 
 /** Submenu choice metadata. */
 export type SubmenuOption<V extends string = string> = {
@@ -582,6 +584,25 @@ export const SETTINGS_SCHEMA = {
 				{ value: "3", label: "3 turns", description: "Default." },
 				{ value: "4", label: "4 turns" },
 				{ value: "5", label: "5 turns" },
+			],
+			condition: "advisorEnabled",
+		},
+	},
+	"advisor.maxNotesPerUpdate": {
+		type: "number",
+		default: ADVISOR_DEFAULT_BUDGET_PER_UPDATE,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Max Notes Per Update",
+			description:
+				"Maximum non-blocker advice notes accepted per advisor prompt update (1–32; UI offers 1–5 quick picks). Blockers are exempt.",
+			options: [
+				{ value: "1", label: "1 note", description: "Anti-flood (strict)." },
+				{ value: "2", label: "2 notes" },
+				{ value: "3", label: "3 notes" },
+				{ value: "4", label: "4 notes", description: "Default." },
+				{ value: "5", label: "5 notes" },
 			],
 			condition: "advisorEnabled",
 		},
@@ -1256,6 +1277,17 @@ export const SETTINGS_SCHEMA = {
 				"Wrap paths and URLs in OSC 8 hyperlinks for terminal-native click-to-open (auto: detect support; off: never; always: unconditional)",
 		},
 	},
+	"tui.mouse": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Mouse Click-to-Focus",
+			description:
+				"Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on",
+		},
+	},
 	"tui.tight": {
 		type: "boolean",
 		default: false,
@@ -1280,6 +1312,23 @@ export const SETTINGS_SCHEMA = {
 				{ value: "classic", label: "Classic", description: "Soft cosine wave sweeping across the text" },
 				{ value: "kitt", label: "KITT Scanner", description: "Knight Rider 1982 red light bouncing left-right" },
 				{ value: "disabled", label: "Disabled", description: "No animation; static muted text" },
+			],
+		},
+	},
+	"display.pinnedAgents": {
+		type: "enum",
+		values: ["off", "collapsed", "full"] as const,
+		default: "collapsed",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Pinned Agents",
+			description:
+				"Pinned live-agent jump list above the editor (off hides it; collapsed shows a few rows with an expander; full lists all)",
+			options: [
+				{ value: "off", label: "Off", description: "Hide the pinned jump list" },
+				{ value: "collapsed", label: "Collapsed", description: "Show a few rows with an expander" },
+				{ value: "full", label: "Full", description: "Always list every live agent" },
 			],
 		},
 	},
@@ -2001,6 +2050,36 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.vimMode": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Vim Editing Mode",
+			description:
+				"Modal prompt editing. Escape leaves Insert mode; Normal mode has hjkl, 0, $, ^, w, b, e, gg, G, counts, x/D/C, dd/yy, p and u; operators take motions or text objects (diw, ca(, dap); v/V start a Visual selection that y copies and d deletes",
+		},
+	},
+
+	"tui.vimModeDisplay": {
+		type: "enum",
+		values: ["text", "icon", "none"] as const,
+		default: "text",
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Vim Mode Indicator",
+			description: "How the current Vim mode appears in the status line",
+			condition: "vimModeEnabled",
+			options: [
+				{ value: "text", label: "Text", description: "Full mode name — NORMAL, INSERT, VISUAL, V-LINE" },
+				{ value: "icon", label: "Icon", description: "Single compact glyph per mode" },
+				{ value: "none", label: "Hidden", description: "Do not show the mode in the status line" },
+			],
+		},
+	},
+
 	"loop.mode": {
 		type: "enum",
 		values: ["prompt", "compact", "reset"] as const,
@@ -2026,7 +2105,37 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"loop.conditionTimeoutMs": {
+		type: "number",
+		default: 30_000,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Loop Condition Timeout (ms)",
+			description:
+				"Max wait for a `/loop --while` / `--until` condition command before treating it as broken and stopping the loop. Set to 0 to wait indefinitely",
+			options: [
+				{ value: "0", label: "Unlimited" },
+				{ value: "10000", label: "10 seconds" },
+				{ value: "30000", label: "30 seconds" },
+				{ value: "120000", label: "2 minutes" },
+			],
+		},
+	},
+
 	// Input and startup
+	"composer.recallClearedDrafts": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Recall Cleared Drafts",
+			description:
+				"Keep drafts cleared with Ctrl+C in local Up/Down history until exit; disabling affects future clears",
+		},
+	},
+
 	doubleEscapeAction: {
 		type: "enum",
 		values: ["rewind", "tree", "none"] as const,
@@ -2537,6 +2646,17 @@ export const SETTINGS_SCHEMA = {
 			group: "Compaction",
 			label: "Auto-Compact",
 			description: "Automatically compact context when it gets too large",
+		},
+	},
+	"compaction.experimentalContextManagement": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Notes-backed context windows (experimental)",
+			description:
+				"Keep persistent notes and searchable raw history across context windows. Restart to update available tools.",
 		},
 	},
 
@@ -4568,6 +4688,34 @@ export const SETTINGS_SCHEMA = {
 				"Use cmux WKWebView surfaces for browser automation when a cmux socket is available. Set PI_BROWSER_CMUX=0 or PI_BROWSER_CMUX=1 to override.",
 		},
 	},
+	"browser.freezeOnTurnEnd": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			group: "Grep & Browser",
+			label: "Freeze Browser Tabs On Turn End",
+			description:
+				"Freeze OMP-owned headless browser tabs when a turn settles so animated pages stop burning CPU/GPU while idle. Tabs unfreeze automatically on next use; pass persist:true on open to opt a tab out.",
+		},
+	},
+	"browser.idleCloseSec": {
+		type: "number",
+		default: 1800,
+		ui: {
+			tab: "tools",
+			group: "Grep & Browser",
+			label: "Browser Idle Close Timeout",
+			description:
+				"Close OMP-owned headless browser tabs idle longer than this many seconds (0 = never; session dispose still reaps). Applies only to OMP-launched headless tabs, never relay/CDP/spawned browsers or other sessions' tabs.",
+			options: [
+				{ value: "0", label: "Never" },
+				{ value: "900", label: "15 minutes" },
+				{ value: "1800", label: "30 minutes" },
+				{ value: "3600", label: "1 hour" },
+			],
+		},
+	},
 	"browser.screenshotDir": {
 		type: "string",
 		default: undefined,
@@ -4801,6 +4949,31 @@ export const SETTINGS_SCHEMA = {
 			label: "Start in Plan Mode",
 			description: "Automatically enter plan mode at the start of every new session",
 			condition: "planModeEnabled",
+		},
+	},
+
+	"plan.autosave": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Autosave Plans",
+			description: "Automatically save approved plans to disk when plan mode completes",
+			condition: "planModeEnabled",
+		},
+	},
+
+	"plan.autosaveDir": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Autosave Directory",
+			description:
+				"Directory for autosaved plans. Supports ~, absolute, and cwd-relative paths. Empty uses <project>/.omp/plans/.",
+			condition: "planAutosaveEnabled",
 		},
 	},
 
@@ -5715,7 +5888,7 @@ export const SETTINGS_SCHEMA = {
 					value: "auto",
 					label: "Auto",
 					description:
-						"Provider default — Anthropic uses 5m entries kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
+						"Provider default — Anthropic OAuth subscriber sessions default to 1h, API keys use 5m kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
 				},
 				{
 					value: "short",
@@ -6161,6 +6334,7 @@ export type Personality = SettingValue<"personality">;
 
 export interface CompactionSettings {
 	enabled: boolean;
+	experimentalContextManagement?: boolean;
 	methodOrder: CompactionMethod[];
 	thresholdPercent: number;
 	thresholdTokens: number;

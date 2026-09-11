@@ -27,7 +27,7 @@
 	"clangd": {
 		"command": "clangd",
 		"args": ["--background-index", "--clang-tidy", "--header-insertion=iwyu"],
-		"fileTypes": [".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx", ".m", ".mm"],
+		"fileTypes": [".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx", ".cu", ".cuh", ".m", ".mm"],
 		"rootMarkers": ["compile_commands.json", "CMakeLists.txt", ".clangd", ".clang-format", "Makefile"]
 	},
 	"zls": {

@@ -14,6 +14,7 @@ import { Agent, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -43,6 +44,61 @@ function stubTool(name: string): AgentTool {
 
 function vibeModeEntryCount(manager: SessionManager): number {
 	return manager.getEntries().filter(entry => entry.type === "mode_change" && entry.mode === "vibe").length;
+}
+
+async function registerOrderSkill(
+	tempDir: TempDir,
+	mode: InteractiveMode,
+	name = "order-skill",
+	body = "Do it in order.",
+): Promise<void> {
+	const filePath = path.join(tempDir.path(), `${name}.md`);
+	await Bun.write(filePath, `---\nname: ${name}\n---\n${body}\n`);
+	const skill: Skill = {
+		name,
+		description: "",
+		filePath,
+		baseDir: tempDir.path(),
+		source: "test",
+	};
+	mode.skillCommands.set(`skill:${name}`, skill);
+}
+
+function armOrderLoop(
+	mode: InteractiveMode,
+	session: AgentSession,
+	onDispatch?: (label: string) => void,
+): { done: Promise<void>; order: string[] } {
+	const order: string[] = [];
+	vi.spyOn(session, "prompt").mockImplementation(async text => {
+		order.push(`plain:${text}`);
+		return true;
+	});
+	vi.spyOn(session, "promptCustomMessage").mockImplementation(async message => {
+		const text = typeof message.content === "string" ? message.content : "";
+		let label = "skill";
+		if (text.includes("Skill A body")) label = "skill-a";
+		else if (text.includes("Skill B body")) label = "skill-b";
+		order.push(label);
+		onDispatch?.(label);
+		return true;
+	});
+	// Faithful main-loop dispatch: the waiter-delivered prompt travels the real
+	// getUserInput → submit path, so waiter-vs-steer order is agent-visible.
+	const done = (async () => {
+		const input = await mode.getUserInput();
+		if (mode.markPendingSubmissionStarted(input)) {
+			try {
+				await session.prompt(input.text, {
+					images: input.images,
+					streamingBehavior: input.streamingBehavior ?? "followUp",
+				});
+			} finally {
+				mode.finishPendingSubmission(input);
+			}
+		}
+	})();
+	return { done, order };
 }
 
 class ExitFaultStorage extends FileSessionStorage {
@@ -787,5 +843,151 @@ describe("InteractiveMode vibe mode toggle", () => {
 		await mode.handleVibeModeCommand();
 		expect(mode.vibeModeEnabled).toBe(false);
 		expect(session.getVibeModeState()).toBeUndefined();
+	});
+
+	it("preserves submission order when a concurrent /vibe joins activation", async () => {
+		const gate = Promise.withResolvers<void>();
+		vi.spyOn(session, "activateVibeTools").mockImplementation(() => gate.promise);
+		const promptCalls: string[] = [];
+		vi.spyOn(session, "prompt").mockImplementation(async text => {
+			promptCalls.push(text);
+			return true;
+		});
+		// Faithful main-loop dispatch: the waiter-delivered prompt travels the
+		// real getUserInput → submit path (mark + session.prompt + finish), so
+		// merely recording the waiter result cannot hide an order reversal.
+		void (async () => {
+			const input = await mode.getUserInput();
+			if (mode.markPendingSubmissionStarted(input)) {
+				try {
+					await session.prompt(input.text, {
+						images: input.images,
+						streamingBehavior: input.streamingBehavior ?? "followUp",
+					});
+				} finally {
+					mode.finishPendingSubmission(input);
+				}
+			}
+		})();
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+
+		// First /vibe <prompt> parks on tool activation with vibe not yet enabled.
+		const first = mode.handleVibeModeCommand("first prompt");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		expect(mode.vibeModeEnabled).toBe(false);
+
+		// A second submit while activation is in flight (the editor fires
+		// onSubmit without awaiting the first handler) must wait for vibe
+		// instead of dispatching on the stale toolset — and must not overtake
+		// the first prompt, which is still on its way through the main loop.
+		const second = mode.handleVibeModeCommand("second prompt");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		expect(promptCalls).toHaveLength(0);
+
+		gate.resolve();
+		expect(await first).toBe(true);
+		expect(await second).toBe(true);
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(promptCalls).toEqual(["first prompt", "second prompt"]);
+	});
+
+	it("orders a skill vibe prompt before a concurrent plain prompt", async () => {
+		const gate = Promise.withResolvers<void>();
+		vi.spyOn(session, "activateVibeTools").mockImplementation(() => gate.promise);
+		await registerOrderSkill(tempDir, mode);
+		const loop = armOrderLoop(mode, session);
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+
+		// Skill first: its file read yields before the turn reserves.
+		const first = mode.handleVibeModeCommand("/skill:order-skill do it");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		expect(mode.vibeModeEnabled).toBe(false);
+
+		// Plain second must not take the still-armed waiter and start its turn
+		// first: the skill reservation owns the next turn.
+		const second = mode.handleVibeModeCommand("plain follow-up");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		expect(loop.order).toHaveLength(0);
+
+		gate.resolve();
+		expect(await first).toBe(true);
+		expect(await second).toBe(true);
+		await loop.done;
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(loop.order).toEqual(["skill", "plain:plain follow-up"]);
+	});
+
+	it("orders a plain vibe prompt before a concurrent skill prompt", async () => {
+		const gate = Promise.withResolvers<void>();
+		vi.spyOn(session, "activateVibeTools").mockImplementation(() => gate.promise);
+		await registerOrderSkill(tempDir, mode);
+		const loop = armOrderLoop(mode, session);
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+
+		const first = mode.handleVibeModeCommand("plain first");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		expect(mode.vibeModeEnabled).toBe(false);
+
+		// Skill second must wait for the waiter-delivered prompt to reserve
+		// before reading its file and steering behind it.
+		const second = mode.handleVibeModeCommand("/skill:order-skill do it");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		expect(loop.order).toHaveLength(0);
+
+		gate.resolve();
+		expect(await first).toBe(true);
+		expect(await second).toBe(true);
+		await loop.done;
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(loop.order).toEqual(["plain:plain first", "skill"]);
+	});
+
+	it("orders two skill vibe prompts behind a plain prompt in arrival order", async () => {
+		const gate = Promise.withResolvers<void>();
+		vi.spyOn(session, "activateVibeTools").mockImplementation(() => gate.promise);
+		await registerOrderSkill(tempDir, mode, "order-skill-a", "Skill A body.");
+		await registerOrderSkill(tempDir, mode, "order-skill-b", "Skill B body.");
+		// Signal, not a timer: the first skill must dispatch without stalling
+		// behind the second (parked on the first's own link). A
+		// successor-inclusive count leaves this unsettled until the ~2s bound
+		// expires instead, so this hangs to the test timeout pre-fix.
+		const aDispatched = Promise.withResolvers<void>();
+		const loop = armOrderLoop(mode, session, label => {
+			if (label === "skill-a") aDispatched.resolve();
+		});
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+
+		const first = mode.handleVibeModeCommand("plain first");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		expect(mode.vibeModeEnabled).toBe(false);
+
+		// Each skill links behind its predecessor instead of overwriting a
+		// shared slot, so the second skill cannot dispatch ahead of the first
+		// once the plain prompt reserves.
+		const second = mode.handleVibeModeCommand("/skill:order-skill-a go a");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		const third = mode.handleVibeModeCommand("/skill:order-skill-b go b");
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		expect(loop.order).toHaveLength(0);
+
+		gate.resolve();
+		// Wall-clock bound, not a guessed duration: the first skill must dispatch
+		// without stalling behind the second (parked on the first's own link). A
+		// successor-inclusive count burns 200 sequential 10ms sleeps (provably
+		// >=2000ms — timers never fire early), while the fixed path does
+		// millisecond-scale I/O with no wall waits; fake timers cannot drive the
+		// real file reads, so assert absence of the stall instead of exact order
+		// timing. Awaiting the dispatch signal above would merely pass slowly.
+		const startedAt = performance.now();
+		await aDispatched.promise;
+		expect(loop.order[0]).toBe("plain:plain first");
+		expect(loop.order).toContain("skill-a");
+		expect(await first).toBe(true);
+		expect(await second).toBe(true);
+		expect(await third).toBe(true);
+		await loop.done;
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(loop.order).toEqual(["plain:plain first", "skill-a", "skill-b"]);
+		expect(performance.now() - startedAt).toBeLessThan(1500);
 	});
 });

@@ -5,10 +5,18 @@
  * above a GitHub-style daily activity heatmap fed by the local stats DB.
  * Enter flips into the classic full per-account report, scrollable in place.
  */
+import * as os from "node:os";
 import { resolveUsedFraction, type UsageLimit, type UsageReport } from "@oh-my-pi/pi-ai";
 import type { DailyActivityPoint } from "@oh-my-pi/omp-stats/shared-types";
-import { type Component, matchesKey, routeSgrMouseInput, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
-import { colorLuma, formatDuration, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils";
+import {
+	type Component,
+	matchesKey,
+	replaceTabs,
+	routeSgrMouseInput,
+	truncateToWidth,
+	visibleWidth,
+} from "@oh-my-pi/pi-tui";
+import { colorLuma, formatDuration, hexToRgb, rgbToHex, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatProviderName } from "../../slash-commands/helpers/format";
 import { colorToAnsi } from "../theme/color";
 import { theme } from "../theme/theme";
@@ -304,6 +312,21 @@ export interface UsageDashboardOptions {
 	onClose: () => void;
 }
 
+/**
+ * Sanitize activity loading error text for safe single-line display in the TUI overlay.
+ * Strips ANSI/control sequences, expands tabs, collapses whitespace runs/newlines,
+ * shortens home directory paths to ~, and removes trailing dots.
+ */
+export function formatActivityErrorDetail(error: string, homeDir = os.homedir()): string {
+	let text = replaceTabs(sanitizeText(error)).replace(/\s+/g, " ").trim();
+	if (homeDir) {
+		const escaped = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const forward = homeDir.replaceAll("\\", "/").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		text = text.replace(new RegExp(`${escaped}|${forward}`, "gi"), "~");
+	}
+	return text.replace(/\.+$/, "");
+}
+
 const CARD_MIN_WIDTH = 32;
 const CARD_GUTTER = 3;
 const CARD_MAX_WINDOWS = 4;
@@ -315,7 +338,7 @@ export class UsageDashboardComponent implements Component {
 	#view: "overview" | "detail" = "overview";
 	#scroll = 0;
 	#activity: DailyActivityPoint[] | null = null;
-	#activityError = false;
+	#activityError: string | null = null;
 	#syncing = true;
 	#detailCache: { width: number; lines: string[] } | null = null;
 	#lastViewportRows = 10;
@@ -336,8 +359,8 @@ export class UsageDashboardComponent implements Component {
 				this.#activity = points;
 				this.#options.requestRender();
 			}, this.#closeController.signal);
-		} catch {
-			this.#activityError = true;
+		} catch (error) {
+			this.#activityError = error instanceof Error ? error.message : String(error);
 		} finally {
 			this.#syncing = false;
 			if (!this.#closed) this.#options.requestRender();
@@ -483,7 +506,8 @@ export class UsageDashboardComponent implements Component {
 	#renderHeatmap(innerWidth: number): string[] {
 		const summary: string[] = [];
 		if (this.#activityError) {
-			return [theme.fg("dim", "Usage history unavailable (stats database could not be read).")];
+			const detail = formatActivityErrorDetail(this.#activityError);
+			return [theme.fg("dim", detail ? `Usage history unavailable (${detail}).` : "Usage history unavailable.")];
 		}
 		const points = this.#activity;
 		if (!points) return [theme.fg("dim", "Loading usage history…")];

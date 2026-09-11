@@ -10,14 +10,14 @@
  * initialization`.
  */
 import type { Component } from "@oh-my-pi/pi-tui";
-import { Markdown, Text } from "@oh-my-pi/pi-tui";
-import { formatNumber } from "@oh-my-pi/pi-utils";
-import { settings } from "../config/settings";
+import { Markdown, Text, visibleWidth } from "@oh-my-pi/pi-tui";
+import { formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { EvalCellResult, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "../eval/types";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { formatContextUsage } from "../modes/components/status-line/context-thresholds";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
+import { parseConfiguredThinkingLevel } from "../thinking";
 import { markFramedBlockComponent, outputBlockContentWidth, renderCodeCell } from "../tui";
 import { formatEvalCodeForDisplay } from "./eval-format";
 import {
@@ -31,10 +31,13 @@ import {
 } from "./json-tree";
 import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
 import {
+	FEED_MODEL_BADGE_WIDTH,
 	formatBadge,
 	formatDuration,
+	formatFeedModelBadge,
 	formatStatusIcon,
 	formatTitle,
+	isFeedModelBadgeEnabled,
 	previewWindowRows,
 	replaceTabs,
 	shortenPath,
@@ -138,7 +141,7 @@ function agentEventStatus(value: unknown): AgentEventStatus {
 	}
 }
 
-/** Append the toolCount · context · cost · model stat run, mirroring the task tool. */
+/** Append the toolCount · context · cost stat run, mirroring the task tool. */
 function formatAgentStats(event: EvalStatusEvent, theme: Theme): string {
 	let line = "";
 	const toolCount = eventNumber(event.toolCount);
@@ -158,10 +161,6 @@ function formatAgentStats(event: EvalStatusEvent, theme: Theme): string {
 	if (cost > 0) {
 		line += `${theme.sep.dot}${theme.fg("statusLineCost", `$${cost.toFixed(2)}`)}`;
 	}
-	const model = eventString(event.model);
-	if (model && settings.get("task.showResolvedModelBadge")) {
-		line += `${theme.sep.dot}${theme.fg("dim", truncateToWidth(replaceTabs(model), 30))}`;
-	}
 	return line;
 }
 
@@ -170,7 +169,12 @@ function formatAgentStats(event: EvalStatusEvent, theme: Theme): string {
  * subagent: a status line (icon · id · stats) plus, while running, the current
  * tool/intent. Drawn below the cell box so progress streams live.
  */
-function renderAgentProgressEvents(events: EvalStatusEvent[], theme: Theme, spinnerFrame?: number): string[] {
+function renderAgentProgressEvents(
+	events: EvalStatusEvent[],
+	theme: Theme,
+	width: number,
+	spinnerFrame?: number,
+): string[] {
 	const lines: string[] = [];
 	for (let i = 0; i < events.length; i++) {
 		const event = events[i];
@@ -196,12 +200,30 @@ function renderAgentProgressEvents(events: EvalStatusEvent[], theme: Theme, spin
 				? theme.styledSymbol("tool.eval", "accent")
 				: theme.fg(iconColor, formatStatusIcon(iconStatus, theme, status === "running" ? spinnerFrame : undefined));
 
-		const id = eventString(event.id) ?? "agent";
-		let line = `${prefix} ${icon} ${theme.fg("accent", theme.bold(id))}`;
-
-		if (status === "failed" || status === "aborted") {
-			line += ` ${formatBadge(status, iconColor, theme)}`;
-		}
+		const lead = `${prefix} ${icon} `;
+		const statusSuffix =
+			status === "failed" || status === "aborted" ? ` ${formatBadge(status, iconColor, theme)}` : "";
+		const id = truncateToWidth(
+			sanitizeText(eventString(event.id) ?? "agent").replace(/\s+/g, " "),
+			Math.max(0, width - visibleWidth(lead) - visibleWidth(statusSuffix)),
+		);
+		const model = eventString(event.resolvedModelIdentity ?? event.model ?? event.resolvedModel);
+		const thinkingLevel = parseConfiguredThinkingLevel(eventString(event.resolvedThinkingLevel));
+		const modelPrefix =
+			model && isFeedModelBadgeEnabled()
+				? formatFeedModelBadge(
+						model,
+						thinkingLevel,
+						event.advisor === true,
+						theme,
+						Math.min(
+							FEED_MODEL_BADGE_WIDTH,
+							width - visibleWidth(lead) - visibleWidth(id) - visibleWidth(statusSuffix) - 1,
+						),
+					)
+				: "";
+		const modelLead = modelPrefix ? `${modelPrefix} ` : "";
+		let line = `${lead}${modelLead}${theme.fg("accent", theme.bold(id))}${statusSuffix}`;
 
 		const currentTool = eventString(event.currentTool);
 		const lastIntent = eventString(event.lastIntent);
@@ -215,16 +237,22 @@ function renderAgentProgressEvents(events: EvalStatusEvent[], theme: Theme, spin
 			const durationMs = eventNumber(event.durationMs);
 			if (durationMs > 0) line += `${theme.sep.dot}${theme.fg("dim", formatDuration(durationMs))}`;
 		}
-		lines.push(line);
+		// Do not let optional stats replace the end of the reserved failure status with an ellipsis.
+		lines.push(truncateToWidth(line, width, ""));
 
 		if (status === "running") {
 			if (currentTool) {
 				let toolLine = `${cont}${theme.tree.hook} ${theme.fg("muted", currentTool)}`;
 				const detail = lastIntent ?? eventString(event.currentToolArgs);
 				if (detail) toolLine += `: ${theme.fg("dim", truncateToWidth(replaceTabs(detail), 48))}`;
-				lines.push(toolLine);
+				lines.push(truncateToWidth(toolLine, width));
 			} else if (lastIntent) {
-				lines.push(`${cont}${theme.tree.hook} ${theme.fg("dim", truncateToWidth(replaceTabs(lastIntent), 48))}`);
+				lines.push(
+					truncateToWidth(
+						`${cont}${theme.tree.hook} ${theme.fg("dim", truncateToWidth(replaceTabs(lastIntent), 48))}`,
+						width,
+					),
+				);
 			}
 		}
 	}
@@ -663,7 +691,7 @@ export const evalToolRenderer = {
 						);
 						lines.push(...cellLines);
 						if (agentEvents.length > 0) {
-							lines.push(...renderAgentProgressEvents(agentEvents, uiTheme, options.spinnerFrame));
+							lines.push(...renderAgentProgressEvents(agentEvents, uiTheme, width, options.spinnerFrame));
 						}
 						if (i < cellResults.length - 1) {
 							lines.push("");

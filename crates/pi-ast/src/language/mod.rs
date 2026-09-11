@@ -554,7 +554,7 @@ const fn extensions(lang: SupportLang) -> &'static [&'static str] {
 		},
 		C => &["c", "h"],
 		Cmake => &["cmake"],
-		Cpp => &["cc", "hpp", "cpp", "c++", "hh", "cxx", "cu", "ino"],
+		Cpp => &["cc", "hpp", "cpp", "c++", "hh", "cxx", "cu", "cuh", "ino"],
 		CSharp => &["cs"],
 		Dart => &["dart"],
 		Clojure => &["clj", "cljs", "cljc", "edn"],
@@ -684,6 +684,7 @@ static LANG_ALIASES: phf::Map<&'static str, SupportLang> = phf_map! {
 "hh"             => SupportLang::Cpp,
 "hpp"            => SupportLang::Cpp,
 "cu"             => SupportLang::Cpp,
+"cuh"            => SupportLang::Cpp,
 "ino"            => SupportLang::Cpp,
 "csharp"         => SupportLang::CSharp,
 "c#"             => SupportLang::CSharp,
@@ -826,3 +827,20 @@ static LANG_ALIASES: phf::Map<&'static str, SupportLang> = phf_map! {
 "yml"            => SupportLang::Yaml,
 "zig"            => SupportLang::Zig,
 };
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn infers_cuda_sources_and_headers_as_cpp() {
+		assert_eq!(SupportLang::from_path(Path::new("kernel.cu")), Some(SupportLang::Cpp));
+		assert_eq!(SupportLang::from_path(Path::new("kernel.cuh")), Some(SupportLang::Cpp));
+	}
+
+	#[test]
+	fn resolves_cuda_language_aliases_as_cpp() {
+		assert_eq!(SupportLang::from_alias("cu"), Some(SupportLang::Cpp));
+		assert_eq!(SupportLang::from_alias("cuh"), Some(SupportLang::Cpp));
+	}
+}

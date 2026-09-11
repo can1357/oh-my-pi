@@ -8,7 +8,7 @@
  *
  * Navigation:
  * - Tab/Shift+Tab or ←/→: switch provider tab
- * - Up/Down/j/k or wheel: move list selection
+ * - Up/Down or wheel: move list selection
  * - Space/Enter or click: toggle selected item (or provider master switch)
  * - Wheel over the inspector, or PageUp/PageDown when the inspector overflows: scroll the detail pane
  * - Esc: clear search (if active) then close

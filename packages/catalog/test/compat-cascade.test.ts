@@ -9,6 +9,7 @@ function compile(text: string) {
 
 const target = (overrides: Partial<ResolveTarget>): ResolveTarget => ({
 	provider: "prov",
+	api: "api",
 	class: "cls",
 	model: "model-1",
 	reasoning: true,
@@ -47,6 +48,21 @@ describe("cascade rank precedence", () => {
 		);
 		expect(resolveCascadeRules(cascade, target({ family: "fam" })).wire.supportsStore).toBe(false);
 		expect(resolveCascadeRules(cascade, target({})).wire.supportsStore).toBe(true);
+	});
+
+	test("API selectors match independently of custom provider names", () => {
+		const cascade = compile(
+			`class "cls" {
+				on-api "google-generative-ai" {
+					requires-skip-thought-signature #true
+				}
+			}`,
+		);
+
+		expect(resolveCascadeRules(cascade, target({ api: "google-generative-ai" })).wire).toMatchObject({
+			requiresSkipThoughtSignature: true,
+		});
+		expect(resolveCascadeRules(cascade, target({ api: "google-vertex" })).wire).toEqual({});
 	});
 
 	test("priority breaks intentional equal-specificity overlap", () => {
@@ -115,6 +131,7 @@ describe("resolveCascade over committed rules", () => {
 	test("bundled rules resolve thinking for a reasoning glm target", () => {
 		const resolved = resolveCascade({
 			provider: "opencode-zen",
+			api: "openai-completions",
 			class: "glm",
 			model: "glm-5.2",
 			reasoning: true,
@@ -128,6 +145,7 @@ describe("resolveCascade over committed rules", () => {
 		// classes/glm.kdl revision >=5.2 ladder and throw AmbiguousOverlapError.
 		const resolved = resolveCascade({
 			provider: "alibaba-coding-plan",
+			api: "openai-completions",
 			class: "glm",
 			model: "glm-5.2",
 			revision: "5.2",
