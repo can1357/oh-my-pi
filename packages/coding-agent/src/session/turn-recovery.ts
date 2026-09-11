@@ -1591,7 +1591,11 @@ export class TurnRecovery {
 		const role = this.#host.sessionManager?.getLastModelChangeRole?.();
 		if (!role || role === EPHEMERAL_MODEL_CHANGE_ROLE || !currentModel) return undefined;
 		const configured = this.#host.settings.getModelRole(role);
-		if (!configured) return undefined;
+		if (!configured) {
+			const chains = this.#host.settings.get("retry.fallbackChains");
+			if (chains && typeof chains === "object" && role in chains) return role;
+			return undefined;
+		}
 		const resolved = resolveModelOverride([configured], this.#host.modelRegistry, this.#host.settings);
 		return resolved.model && modelsAreEqual(resolved.model, currentModel) ? role : undefined;
 	}

@@ -351,13 +351,9 @@ export function resolveRetryFallbackChainKey(
 	}
 	if (matchedRole) return matchedRole;
 
-	// 4. The default chain, when default has no explicit role primary.
+	// 4. The default chain, when no specific chain matched.
 	const defaultChain = context.chains.default;
-	if (
-		Array.isArray(defaultChain) &&
-		defaultChain.length > 0 &&
-		getRetryFallbackPrimarySelector(context, "default") === undefined
-	) {
+	if (Array.isArray(defaultChain) && defaultChain.length > 0) {
 		return "default";
 	}
 	return undefined;

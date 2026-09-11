@@ -451,7 +451,11 @@ export interface InteractiveModeContext {
 	showGitUi(revision?: string): void;
 	showModelSelector(options?: { temporaryOnly?: boolean }): void;
 	/** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
-	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
+	switchSessionModel(
+		model: Model,
+		thinkingLevel?: ConfiguredThinkingLevel,
+		options?: { role?: string; fallbackNotice?: string },
+	): Promise<void>;
 	showPluginSelector(mode?: "install" | "uninstall"): void;
 	showUserMessageSelector(): void;
 	showCopySelector(): void;

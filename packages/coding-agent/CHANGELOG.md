@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added fallback support to `/switch` (and interactive switch `alt+p`), including multi-model fallback sequences, auth-aware fallback for unauthenticated models, role preservation on temporary switches, and default retry fallback chain coverage for session-switched models.
+
 ## [18.1.17] - 2026-09-10
 
 ### Added

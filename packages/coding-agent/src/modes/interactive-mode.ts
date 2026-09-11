@@ -6062,8 +6062,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showModelSelector(options);
 	}
 
-	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void> {
-		return this.#selectorController.switchSessionModel(model, thinkingLevel);
+	switchSessionModel(
+		model: Model,
+		thinkingLevel?: ConfiguredThinkingLevel,
+		options?: { role?: string; fallbackNotice?: string },
+	): Promise<void> {
+		return this.#selectorController.switchSessionModel(model, thinkingLevel, options);
 	}
 
 	showPluginSelector(mode?: "install" | "uninstall"): void {

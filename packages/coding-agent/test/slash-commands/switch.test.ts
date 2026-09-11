@@ -79,7 +79,10 @@ describe("/switch slash command", () => {
 
 		await executeBuiltinSlashCommand("/switch @smol", harness.runtime);
 
-		expect(harness.switchSessionModel).toHaveBeenCalledWith(MODELS[2], undefined);
+		expect(harness.switchSessionModel).toHaveBeenCalledWith(MODELS[2], undefined, {
+			role: "smol",
+			fallbackNotice: undefined,
+		});
 	});
 
 	it("/switch unknown surfaces an error without opening the picker or switching", async () => {
