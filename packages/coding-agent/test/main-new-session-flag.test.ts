@@ -4,8 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
-import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createSessionManager, SessionResolutionError } from "@oh-my-pi/pi-coding-agent/main";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import {
+	createSessionManager,
+	resolveForeignSessionSource,
+	SessionResolutionError,
+} from "@oh-my-pi/pi-coding-agent/main";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -21,9 +25,7 @@ function buildArgs(overrides: Partial<Args> = {}): Args {
 	};
 }
 
-const autoResumeSettings = {
-	get: (key: string) => (key === "autoResume" ? true : undefined),
-} as unknown as Settings;
+const autoResumeSettings = Settings.isolated({ autoResume: true });
 
 describe("createSessionManager — --new versus the autoResume setting", () => {
 	let agentDir: string;
@@ -102,6 +104,31 @@ describe("createSessionManager — --new versus the autoResume setting", () => {
 				"--new cannot be combined with --continue, --resume, or --fork",
 			);
 		}
+	});
+});
+
+describe("resolveForeignSessionSource — --new versus a foreign import", () => {
+	it("rejects --new for each import source before the picker opens", () => {
+		for (const [overrides, source] of [
+			[{ fromClaude: true }, "claude"],
+			[{ fromCodex: true }, "codex"],
+		] as const) {
+			let caught: unknown;
+			try {
+				resolveForeignSessionSource(buildArgs({ newSession: true, ...overrides }));
+			} catch (error: unknown) {
+				caught = error;
+			}
+			expect(caught).toBeInstanceOf(SessionResolutionError);
+			expect((caught as SessionResolutionError).message).toBe(
+				`--from-${source} cannot be combined with --continue, --resume, --fork, or --new`,
+			);
+		}
+	});
+
+	it("still resolves an import source when --new is absent", () => {
+		expect(resolveForeignSessionSource(buildArgs({ fromClaude: true }))).toBe("claude");
+		expect(resolveForeignSessionSource(buildArgs({ fromCodex: true }))).toBe("codex");
 	});
 });
 

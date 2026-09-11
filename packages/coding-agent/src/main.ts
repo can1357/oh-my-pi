@@ -686,7 +686,8 @@ export class SessionResolutionError extends Error {
 	}
 }
 
-function resolveForeignSessionSource(
+/** Startup gate for `--from-claude`/`--from-codex`: resolves the import source or rejects a conflicting session source. */
+export function resolveForeignSessionSource(
 	parsed: Pick<Args, "continue" | "fork" | "fromClaude" | "fromCodex" | "newSession" | "noSession" | "resume">,
 ): ForeignSessionSource | undefined {
 	if (parsed.fromClaude && parsed.fromCodex) {
