@@ -864,6 +864,15 @@ export class AgentSession {
 
 	#endInFlight(onSettled?: () => void | Promise<void>): void {
 		if (onSettled) this.#inFlightSettledCallbacks.push(onSettled);
+		// An endInFlight with no matching beginInFlight is a bug: the clamp below
+		// prevents a negative count, but the mismatched release would drop the
+		// power assertion and flush agent_end early. Surface it in dev/test so a
+		// missing beginInFlight surfaces instead of silently corrupting in-flight state.
+		if (this.#promptInFlightCount === 0 && !isBunTestRuntime()) {
+			logger.warn("endInFlight called without a matching beginInFlight", {
+				promptGeneration: this.#promptGeneration,
+			});
+		}
 		this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount !== 0) return;
 		this.yieldQueue.requestIdleFlush();
@@ -894,7 +903,7 @@ export class AgentSession {
 	 *  Runs whenever the session settles; the guard makes it a no-op when the
 	 *  queue was consumed normally or a new turn already started. */
 	#drainStrandedQueuedMessages(): void {
-		if (this.#abortInProgress) return;
+		if (this.#isDisposed || this.#abortInProgress) return;
 		// Session transitions (newSession/`/new`, compact, model-switch, session-switch,
 		// dispose) call #disconnectFromAgent() BEFORE `await abort()`, so abort's own
 		// finally lands here with no listener attached. Auto-resuming now would snapshot
@@ -4537,6 +4546,7 @@ export class AgentSession {
 		this.agent.hasIrcInterrupts = undefined;
 		this.#advisors.stopRuntime();
 		this.#eval.beginDispose();
+		this.#lazyContextRefreshed.clear();
 	}
 
 	/**

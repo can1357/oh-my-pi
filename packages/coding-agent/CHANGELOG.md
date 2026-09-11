@@ -33,6 +33,10 @@
 - `#readProjectSettings` now logs capability warnings when a project `.claude/settings.json` fails to parse, instead of silently dropping them ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
 - A malformed project `.claude/settings.json` now produces a warning instead of being silently ignored ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
 
+### Fixed
+
+- Clearing `#lazyContextRefreshed` on session dispose so the process-lifetime set doesn't retain stale entries after a session ends; guarding `#drainStrandedQueuedMessages` against a disposed session; and warning on `endInFlight` without matching `beginInFlight` in dev builds to surface mismatched in-flight accounting.
+
 ## [18.1.17] - 2026-09-10
 
 ### Added

@@ -169,6 +169,7 @@ import {
 	parseStreamingJsonThrottled,
 	sanitizeText,
 } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
 import type {
 	Api,
@@ -322,9 +323,31 @@ const RESOURCE_EXHAUSTED_PATTERN = /resource.?exhausted/i;
 const CURSOR_MODEL_NOT_FOUND_PATTERN = /^(?:Connect error not_found:|gRPC error 5:)/i;
 const NOT_IMPLEMENTED = `Not implemented by this client`;
 
-const conversationStateCache = new Map<string, ConversationStateStructure>();
+/**
+ * Cap on per-conversation state retained process-wide. Cursor caches one
+ * {@link ConversationStateStructure} plus its blob store per conversationId;
+ * without a bound, a long-lived daemon (omp daemon, collab session) would
+ * hold every conversation it ever touched forever. 64 covers active working
+ * set; the LRU evicts least-recently-used under pressure.
+ */
+const CURSOR_CONVERSATION_CACHE_MAX = 64;
+
+/** Bounded dedup cap for one-shot warning keys (low per-entry cost). */
+const CURSOR_DEDUP_CACHE_MAX = 256;
+
 const conversationBlobStores = new Map<string, Map<string, Uint8Array>>();
-const warnedCursorKimiK3ReplayMessages = new Set<string>();
+const conversationStateCache = new LRUCache<string, ConversationStateStructure>({
+	max: CURSOR_CONVERSATION_CACHE_MAX,
+	// Tie blob-store lifetime to conversation-state eviction: the blob store
+	// is populated and read alongside the state (same conversationId key), so
+	// it must not outlive the state entry that owns it.
+	dispose: (_value, key) => {
+		conversationBlobStores.delete(key);
+	},
+});
+const warnedCursorKimiK3ReplayMessages = new LRUCache<string, true>({
+	max: CURSOR_DEDUP_CACHE_MAX,
+});
 /**
  * Base conversation id → rotated wire id (#8345). Cursor's backend can pin a
  * per-conversation rejection (bare `resource_exhausted`, zero tokens) to one
@@ -334,9 +357,15 @@ const warnedCursorKimiK3ReplayMessages = new Set<string>();
  * is not hidden. After the rotated id completes a turn, a later poison of
  * that id is allowed to rotate again.
  */
-const rotatedConversationIds = new Map<string, string>();
-const successfulRotatedConversationIds = new Set<string>();
-const freshRotatedConversationIds = new Set<string>();
+const rotatedConversationIds = new LRUCache<string, string>({
+	max: CURSOR_CONVERSATION_CACHE_MAX,
+});
+const successfulRotatedConversationIds = new LRUCache<string, true>({
+	max: CURSOR_CONVERSATION_CACHE_MAX,
+});
+const freshRotatedConversationIds = new LRUCache<string, true>({
+	max: CURSOR_CONVERSATION_CACHE_MAX,
+});
 
 export interface CursorOptions extends StreamOptions {
 	customSystemPrompt?: string;
@@ -942,7 +971,7 @@ function streamCursorWithWireMode(
 			heartbeatTimer = setInterval(sendHeartbeat, 5000);
 			await h2Completion.promise;
 			if (conversationId && baseConversationId && conversationId !== baseConversationId) {
-				successfulRotatedConversationIds.add(conversationId);
+				successfulRotatedConversationIds.set(conversationId, true);
 				freshRotatedConversationIds.delete(conversationId);
 			}
 			// The transport is done, but a handler decoded from the last chunk may
@@ -1048,7 +1077,7 @@ function streamCursorWithWireMode(
 				const rotated = crypto.randomUUID();
 				if (currentRotated) successfulRotatedConversationIds.delete(currentRotated);
 				rotatedConversationIds.set(baseConversationId, rotated);
-				freshRotatedConversationIds.add(rotated);
+				freshRotatedConversationIds.set(rotated, true);
 				logger.debug("cursor conversation rotated", {
 					base: baseConversationId,
 					from: conversationId,
@@ -4829,7 +4858,7 @@ function assertCursorKimiK3HistoryReplayable(
 		newlyWarnedKeys.push(warningKey);
 	}
 	if (missingThinkingTurns.length === 0) return;
-	for (const key of newlyWarnedKeys) warnedCursorKimiK3ReplayMessages.add(key);
+	for (const key of newlyWarnedKeys) warnedCursorKimiK3ReplayMessages.set(key, true);
 	logger.warn(
 		`Cursor kimi-k3 history contains same-model assistant turn(s) ${missingThinkingTurns.join(", ")} without thinking blocks; replaying those spans without reasoning may make generation less stable`,
 		{ model: targetModelId, assistantTurns: missingThinkingTurns },
