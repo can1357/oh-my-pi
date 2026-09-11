@@ -19,7 +19,7 @@ import {
 	URL_PATHS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
-import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { TRUNCATE_LENGTHS } from "../tools/render-utils";
 import type { SttStreamHandle, SttStreamOptions } from "./asr-client";
 import { resolveCloudSttModel } from "./cloud-models";
@@ -70,10 +70,13 @@ export interface CloudSttStreamOptions extends SttStreamOptions {
  * the text (empty when silent), `cancel()` resolves "" without a request.
  */
 export function startCloudSttStream(options: CloudSttStreamOptions): SttStreamHandle {
-	// Provider-scoped proxy (`PI_PROXY_OPENAI` / `PI_PROXY_OPENAI_CODEX`) is only
-	// applied by this helper; the global fetch wrapper covers bare `PI_PROXY`.
+	// Same transport layers `transportFetch` applies to inference requests, for a
+	// request that has no Model to route through it: `NODE_EXTRA_CA_CERTS` (Bun
+	// fetch does not read it itself) and the provider-scoped proxy
+	// (`PI_PROXY_OPENAI` / `PI_PROXY_OPENAI_CODEX`; the global wrapper only
+	// covers bare `PI_PROXY`).
 	const provider = options.credential.kind === "codex" ? CODEX_STT_PROVIDER : OPENAI_STT_PROVIDER;
-	const fetchImpl = wrapFetchForProxy(options.fetchImpl ?? fetch, provider);
+	const fetchImpl = wrapFetchForProxy(wrapFetchForExtraCa(options.fetchImpl ?? fetch), provider);
 	const requestAbort = new AbortController();
 	const chunks: Float32Array[] = [];
 	let queuedBytes = 0;
@@ -205,11 +208,13 @@ async function transcribeWithApiKey(
 	wav: Blob,
 ): Promise<string> {
 	const baseUrl = credential.baseUrl?.replace(/\/$/, "") ?? "https://api.openai.com/v1";
-	const overrides = sanitizeOverrideHeaders(credential.headers);
 	return await withAuth(
 		credential.apiKey,
 		apiKey => {
-			// Rebuilt per attempt: a retry needs its own multipart body.
+			// Both rebuilt per attempt: a retry needs its own multipart body, and
+			// the registry's provider headers are a live view whose command-backed
+			// values are re-run on the 401 force-refresh — a snapshot taken before
+			// the first attempt would pin the stale header across the retry.
 			const form = new FormData();
 			form.append("model", resolveCloudSttModel(options.model));
 			if (options.language) form.append("language", options.language);
@@ -219,7 +224,7 @@ async function transcribeWithApiKey(
 			return postTranscription(
 				fetchImpl,
 				`${baseUrl}/audio/transcriptions`,
-				{ ...overrides, Authorization: `Bearer ${apiKey}` },
+				{ ...sanitizeOverrideHeaders(credential.headers), Authorization: `Bearer ${apiKey}` },
 				form,
 				options.signal,
 			);
