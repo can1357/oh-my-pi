@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -911,6 +912,39 @@ describe("OpenCode provider discovery", () => {
 		});
 
 		expect(policy.catalog).toMatchObject({ longUsageLimitFallback: true });
+	});
+
+	test("serves image input on the OpenCode Go DeepSeek Flash lanes", () => {
+		// The deepseek class rule strips image input for the whole lineage, which
+		// is right for the DeepSeek API but wrong for this gateway: both Flash
+		// lanes accept image_url and read an unguessable pixel-rendered string
+		// back verbatim (live gateway, 2026-09-11). The rule declares the
+		// modality as well as clearing the strip, because live discovery seeds
+		// `input: ["text"]` and the wire guard requires the declared modality —
+		// clearing the strip alone would leave the lane text-only.
+		const discovered = (id: string) =>
+			buildModel({
+				id,
+				name: id,
+				api: "openai-completions",
+				provider: "opencode-go",
+				baseUrl: "https://opencode.ai/zen/go/v1",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 1_048_576,
+				maxTokens: 384_000,
+			});
+
+		for (const id of ["deepseek-flash", "deepseek-v4.1-flash"]) {
+			const model = discovered(id);
+			expect(model.input).toContain("image");
+			expect(sendsImageInputOnWire(model)).toBe(true);
+		}
+		// The plain V4 Flash lane carries no such evidence and stays text-only.
+		const plain = discovered("deepseek-v4-flash");
+		expect(plain.input).toEqual(["text"]);
+		expect(sendsImageInputOnWire(plain)).toBe(false);
 	});
 });
 

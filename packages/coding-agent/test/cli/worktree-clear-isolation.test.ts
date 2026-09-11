@@ -20,11 +20,8 @@ import { setWorktreesDir } from "@oh-my-pi/pi-utils";
 describe("worktree clear task-isolation ownership", () => {
 	let base: string;
 	let savedEnv: string | undefined;
-	let savedExitCode: typeof process.exitCode;
 
 	beforeEach(async () => {
-		// Bun needs an explicit zero to clear an exit code set by an expected CLI failure.
-		savedExitCode = process.exitCode ?? 0;
 		base = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-clear-"));
 		savedEnv = process.env.OMP_WORKTREE_DIR;
 		delete process.env.OMP_WORKTREE_DIR;
@@ -33,7 +30,6 @@ describe("worktree clear task-isolation ownership", () => {
 	});
 
 	afterEach(async () => {
-		process.exitCode = savedExitCode;
 		setWorktreesDir(undefined);
 		if (savedEnv === undefined) delete process.env.OMP_WORKTREE_DIR;
 		else process.env.OMP_WORKTREE_DIR = savedEnv;
@@ -93,7 +89,9 @@ describe("worktree clear task-isolation ownership", () => {
 		expect(await exists(orphan)).toBe(false);
 		expect(await exists(corrupt)).toBe(false);
 		expect(await exists(pending)).toBe(true);
-		expect(await exists(recycled)).toBe(false);
+		// Windows reports neither /proc start times nor `ps`, so pid-only liveness
+		// cannot spot the recycled pid and the sandbox is conservatively kept.
+		expect(await exists(recycled)).toBe(process.platform === "win32");
 	});
 
 	it("unmounts retained mounting-backend workspaces before removal", async () => {
@@ -131,7 +129,8 @@ describe("worktree clear task-isolation ownership", () => {
 		await writeRetainedBackend(retained, natives.IsoBackendKind.Overlayfs);
 		vi.spyOn(natives, "isoStop").mockRejectedValue(new Error("umount EBUSY"));
 
-		await clearWorktrees({ all: false, dryRun: false, json: true });
+		const { failed } = await clearWorktrees({ all: false, dryRun: false, json: true });
+		expect(failed).toBe(1);
 
 		expect(await Bun.file(path.join(retained, "m", "work.txt")).exists()).toBe(true);
 	});

@@ -1,6 +1,16 @@
 // Provider-wire compat for "opencode-go"; regenerated from the frozen census using deployment contract selectors.
 
 provider "opencode-go" {
+	// The Flash lanes accept images despite their IDs lacking a vision suffix;
+	// verified against the gateway (unguessable pixel-rendered text read back
+	// verbatim). Mirrors the OpenRouter carve-out for deepseek-v4.1-flash.
+	// The modality is declared here as well: live gateway discovery seeds
+	// `input: ["text"]`, and the wire guard requires the declared modality, so
+	// clearing `strip-image-input` alone would leave the lane text-only.
+	models "deepseek-flash" "deepseek-v4.1-flash" {
+		input-modalities "text" "image"
+		strip-image-input #false
+	}
 	// Replaces the OpenCode reasoning-model whenThinking fallback object.
 	when-thinking {
 		requires-reasoning-content-for-tool-calls #true
@@ -14,7 +24,6 @@ provider "opencode-go" {
 	// https://opencode.ai/docs/go/#endpoints (2026-09-10).
 	models "deepseek-flash" {
 		display-id "deepseek-v4.1-flash"
-		strip-image-input #false
 		max-tokens-field "max_tokens"
 		reasoning-content-field "reasoning_content"
 		requires-reasoning-content-for-tool-calls #true

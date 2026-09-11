@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.18] - 2026-09-11
+
 ### Fixed
 
 - A snapcompact pass now also strips a superseded Anthropic server-compaction payload (`preserveData.anthropicCompaction`) alongside the OpenAI replacement history, so a stale native summary can never replay ahead of the archived frames.

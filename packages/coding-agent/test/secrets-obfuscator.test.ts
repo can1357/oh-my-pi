@@ -275,7 +275,8 @@ describe("SecretObfuscator regex behavior", () => {
 		};
 
 		const [obfuscated] = obfuscateMessages(obfuscator, [message]);
-		const payload = obfuscated?.providerPayload;
+		if (obfuscated?.role !== "user") throw new Error("expected user message");
+		const payload = obfuscated.providerPayload;
 		if (payload?.type !== "anthropicCompaction") throw new Error("expected compaction payload");
 		// The metadata takes the same boundary as the summary text...
 		expect(payload.filesText).not.toContain(secret);
