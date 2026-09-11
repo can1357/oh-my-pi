@@ -271,7 +271,10 @@ describe("transport rate-limit budget", () => {
 		expect(requests).toBe(MAX_RATE_LIMIT_ATTEMPTS);
 	});
 
-	it("preserves one short-hinted retry for an injected anthropic client", async () => {
+	it.each([
+		["header", "Too many requests", new Headers({ "retry-after-ms": "20" })],
+		["body", "Too many requests. Please retry in 20ms", new Headers()],
+	])("preserves one short-hinted retry from an injected anthropic client's %s", async (_source, message, headers) => {
 		let requests = 0;
 		const client: AnthropicMessagesClientLike = {
 			messages: {
@@ -280,7 +283,7 @@ describe("transport rate-limit budget", () => {
 						async asResponse() {
 							requests++;
 							if (requests === 1) {
-								throw new AnthropicApiError(429, "Too many requests", new Headers({ "retry-after-ms": "20" }));
+								throw new AnthropicApiError(429, message, headers);
 							}
 							return anthropicSuccess("Hello");
 						},
