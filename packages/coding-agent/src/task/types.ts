@@ -451,8 +451,14 @@ export interface AgentProgress {
 	modelRole?: string;
 	/** Resolved model display string in the form `<provider>/<id>`, optionally suffixed with `:<thinkingLevel>` when the level was set explicitly. Undefined when the model could not be resolved. */
 	resolvedModel?: string;
+	/** Provider/id including routing, with no added thinking suffix. */
+	resolvedModelIdentity?: string;
+	/** Explicit thinking metadata; never inferred from the model identity. */
+	resolvedThinkingLevel?: ConfiguredThinkingLevel;
 	/** True when {@link resolvedModel} is the target of an active retry fallback (not the originally configured model). Lets observer-only UIs (collab guests, Agent Hub rows with no live session) flag the fallback and keep the provider. */
 	resolvedModelIsFallback?: boolean;
+	/** True when a live advisor was attached to this run's session, not merely enabled in settings. */
+	advisor?: boolean;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**
@@ -522,8 +528,14 @@ export interface SingleResult {
 	modelRole?: string;
 	/** Resolved model display string in the form `<provider>/<id>`, optionally suffixed with `:<thinkingLevel>` when the level was set explicitly. Omitted from tool-result JSON when undefined to keep wire payloads small. */
 	resolvedModel?: string;
+	/** Retains the unambiguous identity from {@link AgentProgress.resolvedModelIdentity}. */
+	resolvedModelIdentity?: string;
+	/** Retains {@link AgentProgress.resolvedThinkingLevel} after settlement. */
+	resolvedThinkingLevel?: ConfiguredThinkingLevel;
 	/** True when {@link resolvedModel} is the target of an active retry fallback. Mirrors {@link AgentProgress.resolvedModelIsFallback} onto the settled result. */
 	resolvedModelIsFallback?: boolean;
+	/** Retains {@link AgentProgress.advisor} after the advised session is disposed. */
+	advisor?: boolean;
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;

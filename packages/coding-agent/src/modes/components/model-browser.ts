@@ -27,7 +27,8 @@ import { getModelMatchPreferences, resolveModelRoleValue } from "../../config/mo
 import { getKnownRoleIds, getRoleInfo, MODEL_ROLE_IDS } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import type { ModelPerfStats } from "../../session/agent-storage";
-import { AUTO_THINKING, type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../../thinking";
+import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../../thinking";
+import { thinkingLevelGlyph as sharedThinkingLevelGlyph } from "../../tools/render-utils";
 import { type ThemeColor, theme } from "../theme/theme";
 import {
 	matchesSelectCancel,
@@ -326,29 +327,9 @@ function modelSearchTier(query: string, item: ModelBrowserItem): number {
 	return 2;
 }
 
-/** Compact glyph for a configured thinking level; empty for `inherit` (nothing to show). */
+/** Compact glyph for a configured thinking level using the active theme. */
 export function thinkingLevelGlyph(level: ConfiguredThinkingLevel): string {
-	const glyphOf = (symbol: string) => symbol.split(" ")[0] ?? symbol;
-	switch (level) {
-		case AUTO_THINKING:
-			return glyphOf(theme.thinking.autoPending);
-		case ThinkingLevel.Off:
-			return theme.status.disabled;
-		case ThinkingLevel.Minimal:
-			return glyphOf(theme.thinking.minimal);
-		case ThinkingLevel.Low:
-			return glyphOf(theme.thinking.low);
-		case ThinkingLevel.Medium:
-			return glyphOf(theme.thinking.medium);
-		case ThinkingLevel.High:
-			return glyphOf(theme.thinking.high);
-		case ThinkingLevel.XHigh:
-			return glyphOf(theme.thinking.xhigh);
-		case ThinkingLevel.Max:
-			return glyphOf(theme.thinking.max);
-		case ThinkingLevel.Inherit:
-			return "";
-	}
+	return sharedThinkingLevelGlyph(level, theme);
 }
 
 /**

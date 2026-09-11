@@ -7,7 +7,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { disposeAllKernelSessions, executePythonWithKernel } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
+import {
+	disposeAllKernelSessions,
+	executePython,
+	executePythonWithKernel,
+} from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { PythonKernel } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import { filterEnv, resolvePythonRuntime } from "@oh-my-pi/pi-coding-agent/eval/py/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -42,6 +46,35 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 	afterEach(async () => {
 		await disposeAllKernelSessions();
 	});
+
+	it("does not replay a crashed cell's file write and accepts the next cell in a fresh kernel", async () => {
+		using tempDir = TempDir.createSync("@python-runner-crash-");
+		const options = {
+			cwd: tempDir.path(),
+			sessionId: "crash-recovery",
+			kernelMode: "session" as const,
+			timeoutMs: 10_000,
+		};
+		const result = await executePython(
+			[
+				"import os",
+				"with open('effects.txt', 'a') as effects:",
+				"    effects.write('once\\n')",
+				"print('before crash', flush=True)",
+				"os._exit(17)",
+			].join("\n"),
+			options,
+		);
+		expect(await Bun.file(path.join(tempDir.path(), "effects.txt")).text()).toBe("once\n");
+		expect(result.cancelled).toBe(true);
+		expect(result.output).toContain("before crash");
+		expect(result.output).toContain("completion is uncertain");
+
+		const next = await executePython("print(21 * 2)", options);
+		expect(next.exitCode).toBe(0);
+		expect(next.output.trim()).toBe("42");
+		expect(await Bun.file(path.join(tempDir.path(), "effects.txt")).text()).toBe("once\n");
+	}, 30_000);
 
 	it("streams stdout chunks as they are produced", async () => {
 		using tempDir = TempDir.createSync("@python-runner-stream-");

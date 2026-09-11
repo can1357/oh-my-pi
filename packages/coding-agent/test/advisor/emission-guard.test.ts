@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { AdvisorEmissionGuard, normalizeAdvisorNote } from "../../src/advisor/emission-guard";
+import {
+	ADVISOR_MAX_BUDGET_PER_UPDATE,
+	AdvisorEmissionGuard,
+	normalizeAdvisorNote,
+} from "../../src/advisor/emission-guard";
 
 describe("normalizeAdvisorNote", () => {
 	it("collapses punctuation, casing, and surrounding whitespace into one canonical key", () => {
@@ -32,50 +36,102 @@ describe("AdvisorEmissionGuard", () => {
 		// none of these carry a concrete reason and they cannot be acted on, so
 		// the guard suppresses them regardless of severity.
 		const guard = new AdvisorEmissionGuard();
-		expect(guard.accept("Stop.")).toBe(false);
-		expect(guard.accept("Done.")).toBe(false);
-		expect(guard.accept("No issue; continue.")).toBe(false);
-		expect(guard.accept("LGTM")).toBe(false);
-		expect(guard.accept("No further watcher input needed.")).toBe(false);
+		expect(guard.accept("Stop.")).toBe("suppressed_noise");
+		expect(guard.accept("Done.")).toBe("suppressed_noise");
+		expect(guard.accept("No issue; continue.")).toBe("suppressed_noise");
+		expect(guard.accept("LGTM")).toBe("suppressed_noise");
+		expect(guard.accept("No further watcher input needed.")).toBe("suppressed_noise");
 	});
 
 	it("dedupes by normalized text across the session, ignoring casing and trailing punctuation", () => {
 		const guard = new AdvisorEmissionGuard();
-		expect(guard.accept("Move retries into the queue, not the request path.")).toBe(true);
+		expect(guard.accept("Move retries into the queue, not the request path.")).toBe("accepted");
 		// Same advice with different casing and trailing punctuation must NOT
 		// land twice in the primary transcript.
-		expect(guard.accept("move retries into the queue, not the request path")).toBe(false);
-		expect(guard.accept("Move retries into the queue, not the request path!")).toBe(false);
+		expect(guard.accept("move retries into the queue, not the request path")).toBe("duplicate");
+		expect(guard.accept("Move retries into the queue, not the request path!")).toBe("duplicate");
 	});
 
-	it("rate-limits to one accepted advise per advisor update cycle", () => {
-		// The advisor system prompt says "at most one `advise` per update". Real
-		// models violate this; the guard enforces it at the boundary so the
-		// primary transcript never receives two advisories from one model cycle.
+	it("rate-limits non-blockers past the default budget of 4 per advisor update cycle", () => {
 		const guard = new AdvisorEmissionGuard();
-		expect(guard.accept("First concern: missing await in #handleRetry.")).toBe(true);
-		expect(guard.accept("Second concern: wrong env var name.")).toBe(false);
+		expect(guard.accept("First concern: missing await in #handleRetry.")).toBe("accepted");
+		expect(guard.accept("Second concern: wrong env var name.")).toBe("accepted");
+		expect(guard.accept("Third concern: unhandled rejection.")).toBe("accepted");
+		expect(guard.accept("Fourth concern: missing validation.")).toBe("accepted");
+		expect(guard.accept("Fifth concern: unhandled error.")).toBe("rate_limited");
 		guard.beginUpdate();
 		// New cycle: budget reset.
-		expect(guard.accept("Second concern: wrong env var name.")).toBe(true);
+		expect(guard.accept("Fifth concern: unhandled error.")).toBe("accepted");
+	});
+
+	it("supports strict 1-note rate-limiting when budgetPerUpdate is set to 1", () => {
+		const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 1 });
+		expect(guard.accept("First concern: missing await in #handleRetry.")).toBe("accepted");
+		expect(guard.accept("Second concern: wrong env var name.")).toBe("rate_limited");
+		guard.beginUpdate();
+		expect(guard.accept("Second concern: wrong env var name.")).toBe("accepted");
+	});
+
+	it("honors a configured budgetPerUpdate allowing multiple accepted non-blockers per cycle", () => {
+		const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 3 });
+		expect(guard.accept("First concern: missing await in #handleRetry.", "concern")).toBe("accepted");
+		expect(guard.accept("Second concern: wrong env var name.", "concern")).toBe("accepted");
+		expect(guard.accept("Third nit: variable name could be clearer.", "nit")).toBe("accepted");
+		// Exceeds the configured budget of 3
+		expect(guard.accept("Fourth concern: missing error boundary.", "concern")).toBe("rate_limited");
+		// Blockers still bypass the budget
+		expect(guard.accept("Destructive migration will drop user data.", "blocker")).toBe("accepted");
+		// Reset on next cycle
+		guard.beginUpdate();
+		expect(guard.accept("Fourth concern: missing error boundary.", "concern")).toBe("accepted");
+	});
+
+	it("clamps non-positive budgetPerUpdate to at least 1", () => {
+		const guardZero = new AdvisorEmissionGuard({ budgetPerUpdate: 0 });
+		expect(guardZero.accept("First concern.", "concern")).toBe("accepted");
+		expect(guardZero.accept("Second concern.", "concern")).toBe("rate_limited");
+
+		const guardNegative = new AdvisorEmissionGuard({ budgetPerUpdate: -3 });
+		expect(guardNegative.accept("First concern.", "concern")).toBe("accepted");
+		expect(guardNegative.accept("Second concern.", "concern")).toBe("rate_limited");
+	});
+
+	it("clamps budgetPerUpdate to at most ADVISOR_MAX_BUDGET_PER_UPDATE (32)", () => {
+		const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 100 });
+		for (let i = 0; i < ADVISOR_MAX_BUDGET_PER_UPDATE; i++) {
+			expect(guard.accept(`Note ${i}`, "concern")).toBe("accepted");
+		}
+		expect(guard.accept("Note 33", "concern")).toBe("rate_limited");
+	});
+
+	it("exempts blockers from the per-update budget so they always interrupt", () => {
+		// A nit emitted first in an update must never rate-limit a blocker that
+		// follows it: blockers are the always-interrupt severity. Noise and dedupe
+		// still apply to blockers.
+		const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 1 });
+		expect(guard.accept("Minor naming nit.", "nit")).toBe("accepted");
+		expect(guard.accept("Destructive migration will drop user data.", "blocker")).toBe("accepted");
+		// A repeat blocker is still deduped, not waved through by the exemption.
+		expect(guard.accept("Destructive migration will drop user data.", "blocker")).toBe("duplicate");
+		expect(guard.accept("Stop.", "blocker")).toBe("suppressed_noise");
 	});
 
 	it("does not let a suppressed call consume the per-update budget", () => {
 		// A noise call like "Stop." must never displace a real concern that
 		// follows in the same advisor model cycle.
 		const guard = new AdvisorEmissionGuard();
-		expect(guard.accept("Stop.")).toBe(false);
-		expect(guard.accept("Concrete: read race in #handleRetry.")).toBe(true);
+		expect(guard.accept("Stop.")).toBe("suppressed_noise");
+		expect(guard.accept("Concrete: read race in #handleRetry.")).toBe("accepted");
 	});
 
 	it("does not let a deduped call consume the per-update budget", () => {
 		// A repeat of a prior session note is dropped, but the model can still
 		// follow it with a fresh concrete concern in the same cycle.
 		const guard = new AdvisorEmissionGuard();
-		expect(guard.accept("Concrete: read race in #handleRetry.")).toBe(true);
+		expect(guard.accept("Concrete: read race in #handleRetry.")).toBe("accepted");
 		guard.beginUpdate();
-		expect(guard.accept("Concrete: read race in #handleRetry.")).toBe(false);
-		expect(guard.accept("New concern: cache eviction never fires.")).toBe(true);
+		expect(guard.accept("Concrete: read race in #handleRetry.")).toBe("duplicate");
+		expect(guard.accept("New concern: cache eviction never fires.")).toBe("accepted");
 	});
 
 	it("reset clears dedupe and the per-update gate so a re-primed advisor can re-raise old issues", () => {
@@ -83,10 +139,10 @@ describe("AdvisorEmissionGuard", () => {
 		// advisor is re-primed from scratch and may legitimately re-raise the
 		// same concerns — they're new context for a freshly-primed reviewer.
 		const guard = new AdvisorEmissionGuard();
-		expect(guard.accept("Race in #handleRetry.")).toBe(true);
-		expect(guard.accept("Race in #handleRetry.")).toBe(false);
+		expect(guard.accept("Race in #handleRetry.")).toBe("accepted");
+		expect(guard.accept("Race in #handleRetry.")).toBe("duplicate");
 		guard.reset();
-		expect(guard.accept("Race in #handleRetry.")).toBe(true);
+		expect(guard.accept("Race in #handleRetry.")).toBe("accepted");
 	});
 
 	it("evicts oldest entries when dedupe history exceeds capacity", () => {
@@ -94,26 +150,26 @@ describe("AdvisorEmissionGuard", () => {
 		// bound. Pre-eviction unique notes are remembered; post-eviction the
 		// oldest one is forgotten and can resurface.
 		const guard = new AdvisorEmissionGuard({ capacity: 3 });
-		expect(guard.accept("first")).toBe(true);
+		expect(guard.accept("first")).toBe("accepted");
 		guard.beginUpdate();
-		expect(guard.accept("second")).toBe(true);
+		expect(guard.accept("second")).toBe("accepted");
 		guard.beginUpdate();
-		expect(guard.accept("third")).toBe(true);
+		expect(guard.accept("third")).toBe("accepted");
 		guard.beginUpdate();
 		// "first" still in history.
-		expect(guard.accept("first")).toBe(false);
+		expect(guard.accept("first")).toBe("duplicate");
 		guard.beginUpdate();
 		// Fourth unique entry evicts "first".
-		expect(guard.accept("fourth")).toBe(true);
+		expect(guard.accept("fourth")).toBe("accepted");
 		guard.beginUpdate();
-		expect(guard.accept("first")).toBe(true);
+		expect(guard.accept("first")).toBe("accepted");
 	});
 
 	it("rejects empty / whitespace-only notes without consuming the budget", () => {
 		const guard = new AdvisorEmissionGuard();
-		expect(guard.accept("")).toBe(false);
-		expect(guard.accept("   ")).toBe(false);
-		expect(guard.accept("Concrete advice.")).toBe(true);
+		expect(guard.accept("")).toBe("suppressed_noise");
+		expect(guard.accept("   ")).toBe("suppressed_noise");
+		expect(guard.accept("Concrete advice.")).toBe("accepted");
 	});
 
 	it("end-to-end: the reporter's 309-call spam log produces ≤1 accepted note across many updates", () => {
@@ -139,7 +195,7 @@ describe("AdvisorEmissionGuard", () => {
 			for (let i = 0; i < perCycle; i++) {
 				const note = stream[c * perCycle + i];
 				if (note === undefined) break;
-				if (guard.accept(note)) accepted.push(note);
+				if (guard.accept(note) === "accepted") accepted.push(note);
 			}
 		}
 		expect(accepted).toEqual(["Concrete-but-repeated nit: x"]);

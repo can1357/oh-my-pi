@@ -1021,6 +1021,7 @@ interface RuleThinking {
 	suppressWhenOff?: boolean;
 	supportsDisplay?: boolean;
 	prefixBinding?: boolean;
+	upgradeNeutral?: boolean;
 }
 
 function readRuleThinking(axes: ResolvedAxes): RuleThinking {
@@ -1040,6 +1041,7 @@ function readRuleThinking(axes: ResolvedAxes): RuleThinking {
 	if (typeof raw.suppressWhenOff === "boolean") out.suppressWhenOff = raw.suppressWhenOff;
 	if (typeof raw.supportsDisplay === "boolean") out.supportsDisplay = raw.supportsDisplay;
 	if (typeof raw.prefixBinding === "boolean") out.prefixBinding = raw.prefixBinding;
+	if (typeof raw.upgradeNeutral === "boolean") out.upgradeNeutral = raw.upgradeNeutral;
 	return out;
 }
 
@@ -1065,7 +1067,18 @@ function resolveThinkingPolicy<TApi extends Api>(
 	axes: ResolvedAxes,
 	compat: CompatOf<TApi>,
 ): ThinkingConfig | undefined {
-	if (!spec.reasoning) return undefined;
+	const rule = readRuleThinking(axes);
+	const explicitThinking =
+		spec.thinking !== undefined && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0
+			? spec.thinking
+			: undefined;
+	// An explicit wire vocabulary is authoritative when discovery reports no
+	// reasoning (e.g. Synthetic's `none`-only off-switch): reviewed KDL must
+	// not re-expand it into an unadvertised ladder. Absent metadata is
+	// repaired only where KDL opts in with `thinking-upgrade-neutral`
+	// alongside an exact `thinking-efforts` ladder (the cascade upgrade for
+	// stale source capability data); otherwise the neutral default holds.
+	if (!spec.reasoning && (explicitThinking !== undefined || rule.upgradeNeutral !== true)) return undefined;
 	if (
 		spec.provider === "cline-pass" &&
 		compat !== undefined &&
@@ -1075,9 +1088,8 @@ function resolveThinkingPolicy<TApi extends Api>(
 		return undefined;
 	}
 	if (omitsWireReasoningEffort(spec.api, compat)) return undefined;
-	const rule = readRuleThinking(axes);
-	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
-		return fillExplicitThinking(spec, facts, compat, spec.thinking, rule);
+	if (explicitThinking !== undefined) {
+		return fillExplicitThinking(spec, facts, compat, explicitThinking, rule);
 	}
 	if (compat !== undefined && "trustExplicitThinkingOnly" in compat && compat.trustExplicitThinkingOnly === true) {
 		return undefined;
@@ -1173,6 +1185,7 @@ function fillExplicitThinking<TApi extends Api>(
 function buildResolveTarget<TApi extends Api>(spec: ModelSpec<TApi>, identity: ModelIdentity): ResolveTarget {
 	const target: ResolveTarget = {
 		provider: spec.provider,
+		api: spec.api,
 		class: identity.class,
 		model: spec.id,
 		reasoning: Boolean(spec.reasoning),

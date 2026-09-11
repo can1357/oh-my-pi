@@ -3,6 +3,7 @@ import { collapseBuiltVariants } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
+import { isTimeBasedCost } from "./pricing";
 import type { Api, Model, ModelCost, ModelSpec, Provider, TokenCost } from "./types";
 import { isRecord } from "./utils";
 
@@ -573,6 +574,7 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		? dynamicModel.reasoning
 		: existingModel.reasoning || dynamicModel.reasoning;
 	const longContextCost = dynamicModel.cost.longContext ?? existingModel.cost.longContext;
+	const timeBasedCost = dynamicModel.cost.timeBased ?? existingModel.cost.timeBased;
 	// Re-build from spec stage: sparse compat comes from `compatConfig` (the
 	// verbatim override vocabulary), never the resolved `compat` record.
 	return buildModel({
@@ -587,6 +589,7 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 			cacheRead: preferDiscoveryCost(dynamicModel.cost.cacheRead, existingModel.cost.cacheRead),
 			cacheWrite: preferDiscoveryCost(dynamicModel.cost.cacheWrite, existingModel.cost.cacheWrite),
 			...(longContextCost ? { longContext: longContextCost } : {}),
+			...(timeBasedCost ? { timeBased: timeBasedCost } : {}),
 		},
 		contextWindow: preferDiscoveryLimit(dynamicModel.contextWindow, existingModel.contextWindow),
 		maxTokens: preferDiscoveryLimit(dynamicModel.maxTokens, existingModel.maxTokens),
@@ -737,7 +740,9 @@ function isTokenCost(value: unknown): value is TokenCost {
 
 function isModelCost(value: unknown): value is ModelCost {
 	if (!isTokenCost(value)) return false;
-	const longContext = (value as TokenCost & { longContext?: unknown }).longContext;
+	const cost = value as TokenCost & { longContext?: unknown; timeBased?: unknown };
+	if (cost.timeBased !== undefined && !isTimeBasedCost(cost.timeBased)) return false;
+	const longContext = cost.longContext;
 	if (longContext === undefined) return true;
 	if (!isTokenCost(longContext) || !isRecord(longContext)) return false;
 	const threshold = longContext.inputThreshold;

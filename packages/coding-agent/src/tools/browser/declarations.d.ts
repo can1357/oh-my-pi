@@ -39,6 +39,8 @@ interface BrowserOpenOptions {
 	wait_until?: BrowserWaitUntil;
 	/** Automatic JavaScript-dialog policy. */
 	dialogs?: "accept" | "dismiss";
+	/** Keep the tab live across turn settle and idle close (default false). */
+	persist?: boolean;
 	/** Whole-operation timeout in seconds. */
 	timeout?: number;
 }

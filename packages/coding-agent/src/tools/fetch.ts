@@ -30,7 +30,7 @@ import { applyListLimit } from "./list-limit";
 import { formatStyledArtifactReference, type OutputMeta } from "./output-meta";
 import { isReadableUrlPath, type LineRange, parseLineRanges, parseTailCount } from "./path-utils";
 import type { ParsedSelector } from "./read-selector";
-import { formatBytes, formatExpandHint, getDomain, replaceTabs } from "./render-utils";
+import { formatBytes, formatExpandHint, getDomain, sanitizeDisplayLines } from "./render-utils";
 import { listTables, looksLikeSqlite, openSqliteReadConnection, renderTableList } from "./sqlite-reader";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
@@ -1821,7 +1821,7 @@ export function renderReadUrlResult(
 		const urlText = details?.finalUrl ?? details?.url ?? "";
 		const description = urlText ? formatReadUrlDescription(urlText) : undefined;
 		const header = renderStatusLine({ icon: "error", title: "Read", description }, uiTheme);
-		const errorLines = errorText.split("\n").map(line => uiTheme.fg("error", replaceTabs(line)));
+		const errorLines = sanitizeDisplayLines(errorText).map(line => uiTheme.fg("error", line));
 		const outputBlock = new CachedOutputBlock();
 		return markFramedBlockComponent({
 			render: (width: number) =>
@@ -1884,7 +1884,9 @@ export function renderReadUrlResult(
 			if (contentPreviewLines === undefined || lastExpanded !== expanded) {
 				const previewLimit = expanded ? 12 : 3;
 				const previewList = applyListLimit(contentLines, { headLimit: previewLimit });
-				const previewLines = previewList.items.map(line => line.trimEnd());
+				const previewLines = previewList.items
+					.flatMap(line => sanitizeDisplayLines(line))
+					.map(line => line.trimEnd());
 				const remaining = Math.max(0, contentLines.length - previewList.items.length);
 				contentPreviewLines =
 					previewLines.length > 0

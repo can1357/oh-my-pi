@@ -1641,7 +1641,53 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.tools?.[0]?.name).toBe(`${claudeToolPrefix}bash`);
 		expect(payload.tools?.[0]?.strict).toBe(true);
 		expect(payload.tools?.[0]?.eager_input_streaming).toBe(true);
+		// Sole tool is also the last tool, so it carries the head breakpoint.
+		expect(payload.tools?.[0]?.cache_control).toEqual({ type: "ephemeral" });
+	});
+
+	it("breakpoints the last tool definition so the stable head gets its own cache entry", async () => {
+		const tools: Tool[] = ["search", "fetch", "run"].map(name => ({
+			name,
+			description: `${name} tool`,
+			parameters: {
+				type: "object",
+				properties: { value: { type: "string" } },
+				required: ["value"],
+			} as TJsonSchema,
+		}));
+
+		const payload = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
+			systemPrompt: ["Stay concise."],
+			messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+			tools,
+		})) as {
+			tools?: Array<{ cache_control?: unknown }>;
+			system?: Array<{ cache_control?: unknown }>;
+			messages?: Array<{ content?: Array<{ cache_control?: unknown }> | string }>;
+		};
+
+		// Only the last tool is marked: it caches every definition before it as a
+		// single prefix, so earlier markers would spend breakpoints for nothing.
 		expect(payload.tools?.[0]?.cache_control).toBeUndefined();
+		expect(payload.tools?.[1]?.cache_control).toBeUndefined();
+		expect(payload.tools?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+
+		// The trailing message window is untouched; the OAuth identity block carries its
+		// own breakpoint, while caller system blocks stay uncached.
+		const content = payload.messages?.at(-1)?.content;
+		expect(Array.isArray(content) ? content.at(-1)?.cache_control : undefined).toEqual({
+			type: "ephemeral",
+		});
+		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral" });
+		expect(payload.system?.[2]?.cache_control).toBeUndefined();
+		// Anthropic rejects a fifth breakpoint, so the total must stay in budget.
+		const marked = (blocks: Array<{ cache_control?: unknown }> | undefined) =>
+			(blocks ?? []).filter(block => block.cache_control != null).length;
+		const messageBreakpoints = (payload.messages ?? []).reduce(
+			(total, message) => total + (Array.isArray(message.content) ? marked(message.content) : 0),
+			0,
+		);
+		expect(marked(payload.tools) + marked(payload.system) + messageBreakpoints).toBeLessThanOrEqual(4);
 	});
 
 	it("marks only the Anthropic strict allowlist strict", async () => {

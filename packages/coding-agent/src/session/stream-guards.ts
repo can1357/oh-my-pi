@@ -1,4 +1,10 @@
-import type { Agent, AgentEvent, AgentMessage, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
+import {
+	type Agent,
+	type AgentEvent,
+	type AgentMessage,
+	type AgentTurnEndContext,
+	createToolScopedAbortReason,
+} from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent, Model, ToolCall } from "@oh-my-pi/pi-ai";
 import { GeminiHeaderRunDetector } from "@oh-my-pi/pi-ai/utils/thinking-loop";
 import { type RepeatedToolCallDetection, ToolCallLoopGuard } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
@@ -20,6 +26,12 @@ import {
 
 const GEMINI_HEADER_INTERRUPT_REASON = "Interrupted: emit a tool call instead of more planning";
 const GEMINI_TOOL_REMINDER_TYPE = "gemini-tool-call-reminder";
+// Prefix of the native no-op diagnostic emitted by the Rust edit engine when a
+// preview produces byte-identical content. Kept in sync with
+// crates/pi-edit/src/modes/replace.rs and crates/pi-edit/src/hashline/preview.rs
+// ("No changes would be made to <path>..."). Prefix match (not equality)
+// because the Rust messages append the path and mode-specific suffixes.
+const NO_CHANGES_PREVIEW_PREFIX = "No changes would be made";
 
 /** Capabilities borrowed by the session's streaming and loop guards. */
 export interface StreamGuardsHost {
@@ -109,7 +121,8 @@ export class StreamingEditGuard {
 				typeof file.path === "string" &&
 				"error" in file &&
 				typeof file.error === "string" &&
-				file.error.length > 0,
+				file.error.length > 0 &&
+				!file.error.startsWith(NO_CHANGES_PREVIEW_PREFIX),
 		);
 		if (failed) this.#abortPatch(event.toolCallId, failed.path, failed.error);
 	}
@@ -158,7 +171,14 @@ export class StreamingEditGuard {
 	#abortPatch(toolCallId: string, filePath: string, error: string): void {
 		this.#abortTriggered = true;
 		logger.warn("Streaming edit aborted due to patch preview failure", { toolCallId, path: filePath, error });
-		this.#host.agent.abort();
+		const diagnostic = `Streaming edit preview failed for ${filePath}: ${error}`;
+		this.#host.agent.abort(
+			createToolScopedAbortReason(
+				"Streaming edit preview failed",
+				{ [toolCallId]: diagnostic },
+				"Streaming edit preview failed",
+			),
+		);
 	}
 }
 

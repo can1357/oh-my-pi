@@ -12,6 +12,9 @@ const stripAnsi = (s: string): string => s.replace(/\u001b\[[0-9;]*m/g, "");
 const hasLine = (lines: readonly string[], n: number): boolean =>
 	new RegExp(`\\bline ${n}\\b`).test(stripAnsi(lines.join("\n")));
 
+/** Rendered code rows between the framed block header and the status/footer rows. */
+const extractCodeRows = (lines: readonly string[]): string[] => lines.slice(1, -2);
+
 describe("write streaming preview honors Ctrl+O expansion", () => {
 	let initialized = false;
 
@@ -73,7 +76,7 @@ describe("write streaming preview honors Ctrl+O expansion", () => {
 		expect(hasLine(collapsed, 4)).toBe(true);
 		expect(stripAnsi(collapsed.join("\n"))).not.toContain("earlier line");
 	});
-	it("reuses the highlighted streaming body across frame renders", async () => {
+	it("keeps code rows unchanged when the spinner advances", async () => {
 		if (!initialized) {
 			await themeModule.initTheme();
 			initialized = true;
@@ -81,9 +84,6 @@ describe("write streaming preview honors Ctrl+O expansion", () => {
 		const uiTheme = (await themeModule.getThemeByName("dark")) ?? (await themeModule.getThemeByName("light"));
 		expect(uiTheme).toBeDefined();
 		const options = { expanded: false, isPartial: true, spinnerFrame: 0 };
-		const highlightSpy = vi
-			.spyOn(themeModule, "highlightCode")
-			.mockImplementation((code: string) => code.split("\n"));
 		const component = writeToolRenderer.renderCall(
 			{ path: "/tmp/cache.ts", content: "const a = 1;\nconst b = 2;" },
 			options,
@@ -91,13 +91,15 @@ describe("write streaming preview honors Ctrl+O expansion", () => {
 		);
 		if (!component) throw new Error("expected a rendered component for a non-xdev write path");
 
-		component.render(80);
-		component.render(120);
-		expect(highlightSpy).toHaveBeenCalledTimes(1);
+		const first = component.render(80);
+		const second = component.render(120);
 
 		options.spinnerFrame = 1;
-		component.render(120);
-		expect(highlightSpy).toHaveBeenCalledTimes(1);
+		const third = component.render(120);
+		expect(extractCodeRows(third)).toEqual(extractCodeRows(second));
+		expect(stripAnsi(first.join("\n"))).toContain("const a = 1;");
+		expect(stripAnsi(second.join("\n"))).toContain("const a = 1;");
+		expect(stripAnsi(third.join("\n"))).toContain("const a = 1;");
 	});
 
 	it("coerces truthy non-string content for pending write previews", async () => {

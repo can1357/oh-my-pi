@@ -1165,8 +1165,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 							// status back to the subagent's initial "pending" snapshot.
 							progress.modelRole = nextProgress.modelRole ?? progress.modelRole;
 							progress.resolvedModel = nextProgress.resolvedModel;
-							progress.resolvedModelIsFallback =
-								nextProgress.resolvedModelIsFallback ?? progress.resolvedModelIsFallback;
+							progress.resolvedModelIdentity = nextProgress.resolvedModelIdentity;
+							progress.resolvedThinkingLevel = nextProgress.resolvedThinkingLevel;
+							progress.resolvedModelIsFallback = nextProgress.resolvedModel
+								? nextProgress.resolvedModelIsFallback
+								: undefined;
+							progress.advisor = nextProgress.advisor ?? progress.advisor;
 							progress.tokens = nextProgress.tokens;
 							progress.requests = nextProgress.requests;
 							progress.contextTokens = nextProgress.contextTokens;
@@ -1222,12 +1226,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					progress.retryFailure = singleResult?.retryFailure;
 					progress.retryState = undefined;
 					progress.modelRole = singleResult?.modelRole ?? progress.modelRole;
+					progress.advisor = singleResult?.advisor ?? progress.advisor;
 					if (singleResult?.resolvedModel) {
 						progress.resolvedModel = singleResult.resolvedModel;
-						progress.resolvedModelIsFallback =
-							singleResult.resolvedModelIsFallback ?? progress.resolvedModelIsFallback;
+						progress.resolvedModelIdentity = singleResult.resolvedModelIdentity;
+						progress.resolvedThinkingLevel = singleResult.resolvedThinkingLevel;
+						progress.resolvedModelIsFallback = singleResult.resolvedModelIsFallback;
 					} else {
 						delete progress.resolvedModel;
+						delete progress.resolvedModelIdentity;
+						delete progress.resolvedThinkingLevel;
 						delete progress.resolvedModelIsFallback;
 					}
 					onSettled?.(resultFailed);
