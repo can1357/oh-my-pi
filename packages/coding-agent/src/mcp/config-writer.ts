@@ -90,13 +90,15 @@ export function validateServerName(name: string): string | undefined {
 	if (name.length > 100) {
 		return "Server name is too long (max 100 characters)";
 	}
-	// Check for invalid characters. Colon is allowed so namespaced plugin servers
-	// (e.g. "cloudflare:cloudflare-api" from a Claude Code marketplace plugin) can
-	// be persisted: the runtime already accepts colons in server names (tool names
-	// sanitize them via createMCPToolName) and `/mcp reauth` writes such names back
-	// as a user-config override that shadows the discovered entry.
-	if (!/^[a-zA-Z0-9_.:-]+$/.test(name)) {
-		return "Server name can only contain letters, numbers, dash, underscore, dot, and colon";
+	// Check for invalid characters. Colons and spaces are allowed so namespaced
+	// plugin servers (e.g. "cloudflare:cloudflare-api" from a Claude Code
+	// marketplace plugin) and human display labels (e.g. "MaaS Slack") can be
+	// persisted: the runtime already accepts them in server names (tool names
+	// sanitize them via createMCPToolName, ownership matches on the raw name) and
+	// `/mcp reauth` writes such names back as a user-config override that shadows
+	// the discovered entry.
+	if (!/^[a-zA-Z0-9_.: -]+$/.test(name)) {
+		return "Server name can only contain letters, numbers, dash, underscore, dot, colon, and space";
 	}
 	return undefined;
 }
