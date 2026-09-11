@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Clearing `#lazyContextRefreshed` on session dispose so the process-lifetime set doesn't retain stale entries after a session ends; guarding `#drainStrandedQueuedMessages` against a disposed session; and warning on `endInFlight` without matching `beginInFlight` in dev builds to surface mismatched in-flight accounting.
+
 ## [18.1.17] - 2026-09-10
 
 ### Added

@@ -1422,8 +1422,11 @@ export class AuthStorage {
 		// failures must never block construction.
 		try {
 			this.#store.cleanExpiredCache();
-		} catch {
-			// Best-effort.
+		} catch (err) {
+			// Best-effort hygiene: a corrupted cache at init is non-fatal, but log
+			// it so a re-query hitting the same corruption is traceable. The block
+			// store below latches its own init-time corruption separately.
+			logger.warn("cleanExpiredCache failed during AuthStorage init", { error: String(err) });
 		}
 		try {
 			this.#store.cleanExpiredCredentialBlocks?.(Date.now());
