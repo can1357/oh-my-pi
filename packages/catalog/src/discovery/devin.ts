@@ -313,9 +313,10 @@ export async function fetchDevinModels(
 	const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
 
 	try {
+		const metadata = await devinDiscoveryMetadata(options.apiKey);
 		const request = create(GetCliModelConfigsRequestSchema, {
 			metadata: create(MetadataSchema, {
-				...devinDiscoveryMetadata(options.apiKey),
+				...metadata,
 				supportedModelDisplays: [...DEVIN_SUPPORTED_MODEL_DISPLAYS],
 			}),
 		});
@@ -349,7 +350,7 @@ export async function fetchDevinModels(
 			// this after filtering because a response containing only disabled or
 			// internal configs is equally unusable.
 			logger.warn("Devin returned an empty native model catalog; the pinned CLI identity may be stale", {
-				metadata: devinDiscoveryMetadata(undefined),
+				metadata: { ...metadata, apiKey: "", f: "" },
 			});
 			return null;
 		}
