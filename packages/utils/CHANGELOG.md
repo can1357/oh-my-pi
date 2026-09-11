@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the public `postmortem.exitProcess()` utility for host-owned hard exits that must bypass temporary process-exit guards ([#11789](https://github.com/can1357/oh-my-pi/issues/11789)).
+
 ## [18.1.16] - 2026-09-09
 
 ### Fixed
