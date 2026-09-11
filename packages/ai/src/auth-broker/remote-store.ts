@@ -541,15 +541,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#applyStreamEvent(event: SnapshotStreamEvent): void {
 		switch (event.kind) {
 			case "snapshot": {
-				// Strip the discriminator so we store the wire-shape SnapshotResponse.
+				// The first frame of every SSE connection is a full authoritative
+				// snapshot. Always adopt it as the new generation baseline: the
+				// broker's in-memory generation counter resets on restart and may
+				// therefore be lower than the previous stream's last value.
+				// Subsequent entry/removal frames remain guarded against reordering
+				// relative to this new baseline below.
 				const { kind: _kind, ...snapshot } = event;
-				if (snapshot.generation < this.#generation) {
-					logger.debug("auth-broker stream snapshot older than local; ignoring", {
-						local: this.#generation,
-						incoming: snapshot.generation,
-					});
-					return;
-				}
 				this.#applySnapshot(snapshot, snapshot.generation);
 				return;
 			}

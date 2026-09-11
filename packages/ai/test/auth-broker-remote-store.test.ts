@@ -159,6 +159,77 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		}
 	});
 
+	test("accepts a lower-generation authoritative snapshot after broker restart", async () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const initial = await client.fetchSnapshot();
+		if (initial.status !== 200) throw new Error("expected initial broker snapshot");
+		remote = new RemoteAuthCredentialStore({ client, initialSnapshot: initial.snapshot });
+		const gatewayStorage = new AuthStorage(remote, { sourceLabel: `broker ${handle!.url}` });
+		try {
+			await gatewayStorage.reload();
+
+			// Drive the original broker above the generation its replacement will
+			// start at, then acknowledge that complete credential view.
+			storage!.upsertCredential("deepseek", { type: "api_key", key: "sk-deepseek" });
+			storage!.upsertCredential("openai", { type: "api_key", key: "sk-openai" });
+			storage!.upsertCredential("xai", { type: "api_key", key: "sk-xai" });
+			await waitUntil(() => remote!.snapshot.credentials.length === 4);
+			const previousGeneration = remote.snapshot.generation;
+			expect(await gatewayStorage.pollExternalChanges()).toBe(true);
+			expect(await gatewayStorage.pollExternalChanges()).toBe(false);
+
+			// Stop the broker, replace its persisted credential set, and boot a
+			// fresh AuthStorage whose in-memory generation starts below the
+			// client's previously acknowledged value.
+			const brokerUrl = new URL(handle!.url);
+			const bind = `${brokerUrl.hostname}:${brokerUrl.port}`;
+			await handle!.close();
+			storage!.close();
+
+			store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+			for (const provider of ["anthropic", "deepseek", "openai", "xai"]) {
+				store.deleteProvider(provider);
+			}
+			store.saveApiKey("google", "sk-restarted");
+			storage = new AuthStorage(store);
+			await storage.reload();
+			expect(storage.getGeneration()).toBeLessThan(previousGeneration);
+			handle = startAuthBroker({
+				storage,
+				bind,
+				bearerTokens: [token],
+				disableRefresher: true,
+			});
+
+			// The reconnect's first SSE frame is authoritative despite its lower
+			// generation. The wrapping AuthStorage must reload that content.
+			await waitUntil(
+				() =>
+					remote!.snapshot.generation < previousGeneration &&
+					remote!.snapshot.credentials.length === 1 &&
+					remote!.snapshot.credentials[0]?.provider === "google",
+				4_000,
+			);
+			expect(await gatewayStorage.pollExternalChanges()).toBe(true);
+			expect(gatewayStorage.exportSnapshot().credentials.map(c => c.provider)).toEqual(["google"]);
+
+			// Incremental events are now ordered against the replacement
+			// baseline, not the previous broker process's higher generation.
+			storage!.upsertCredential("deepseek", { type: "api_key", key: "sk-after-restart" });
+			await waitUntil(() => remote!.snapshot.credentials.some(c => c.provider === "deepseek"));
+			expect(remote.snapshot.generation).toBeLessThan(previousGeneration);
+			expect(await gatewayStorage.pollExternalChanges()).toBe(true);
+			expect(
+				gatewayStorage
+					.exportSnapshot()
+					.credentials.map(c => c.provider)
+					.sort(),
+			).toEqual(["deepseek", "google"]);
+		} finally {
+			gatewayStorage.close();
+		}
+	});
+
 	test("batches observed usage and reports it to the broker as per-install client usage", async () => {
 		const client = new AuthBrokerClient({ url: handle!.url, token });
 		remote = new RemoteAuthCredentialStore({ client, observedUsageFlushMs: 25 });
