@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Added project/global `/advisor configure` editing with per-advisor enablement, compact per-advisor status glyphs, and ancestor-aware advisor inheritance for spawned sessions.
 
 ### Added
 

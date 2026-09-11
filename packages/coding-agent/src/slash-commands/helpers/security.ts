@@ -42,6 +42,7 @@ function coordinatorFor(runtime: SlashCommandRuntime) {
 		activeModel: runtime.session.model,
 		sessionId: runtime.session.sessionId,
 		agentId: runtime.session.getAgentId(),
+		getAdvisorScope: () => runtime.session.advisorScope,
 		asyncJobManager: runtime.session.asyncJobManager,
 	});
 }

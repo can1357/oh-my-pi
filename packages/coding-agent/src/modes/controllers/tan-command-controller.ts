@@ -159,6 +159,7 @@ export class TanCommandController {
 							agentDisplayName: "tan",
 							parentTaskPrefix: cloneId,
 							parentAgentId: ownerId,
+							advisorScope: session.advisorScope,
 							agentRegistry,
 							disableExtensionDiscovery: true,
 							// `[]` is truthy and would make the child pick bindPreparedExtensions([])

@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { type AgentMessage, type AgentTelemetryConfig, Tokenizer } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import {
 	AdviseTool,
@@ -26,7 +27,8 @@ import {
 	type WatchdogConfigDoc,
 } from "../../src/advisor";
 import type { ModelRegistry } from "../../src/config/model-registry";
-import type { Settings } from "../../src/config/settings";
+import { Settings } from "../../src/config/settings";
+import { loadTheme } from "../../src/modes/theme/loader";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../../src/modes/components/advisor-config";
 import { createAdvisorMessageCard } from "../../src/modes/components/advisor-message";
 import { getThemeByName, setThemeInstance } from "../../src/modes/theme/theme";
@@ -6262,7 +6264,6 @@ describe("advisor", () => {
 			// whose offset broke mouse hit-testing and wasted the upper space).
 			expect(frame.length).toBe(fullHeight);
 			const text = strip(frame);
-			expect(text).toContain("Advisor configuration");
 			expect(text).toContain("project");
 			expect(text).toContain("Architecture");
 			expect(text).toContain("Security");
@@ -6298,18 +6299,159 @@ describe("advisor", () => {
 			expect(strip(overlay.render(200))).toContain("read, web_search");
 		});
 
-		it("opens an advisor's detail editor on a left click in the sidebar", async () => {
+		it("keeps roster focus when pointer motion or the wheel is routed over the editor", async () => {
 			const uiTheme = await getThemeByName("dark");
 			if (!uiTheme) throw new Error("theme unavailable");
 			setThemeInstance(uiTheme);
-			const overlay = make({ advisors: [{ name: "Architecture" }, { name: "Security" }] });
-			// Render once so the frame geometry is recorded; the first advisor sits on
-			// the first body row (0-based screen row 1 → SGR 1-based row 2).
+			for (const mouseInput of ["\x1b[<32;80;3M", "\x1b[<65;80;3M"]) {
+				const overlay = make({ advisors: [{ name: "Architecture" }, { name: "Security", tools: ["web_search"] }] });
+				overlay.render(120);
+				overlay.handleInput(mouseInput);
+				overlay.handleInput("\x1b[B");
+				expect(strip(overlay.render(120))).toContain("web_search");
+			}
+		});
+
+		it("preserves an unsaved name draft when pointer motion hovers over the roster", async () => {
+			const uiTheme = await getThemeByName("dark");
+			if (!uiTheme) throw new Error("theme unavailable");
+			setThemeInstance(uiTheme);
+			const overlay = make({
+				advisors: [{ name: "Architecture" }, { name: "Security" }],
+			});
+			const frame = overlay.render(120);
+			const architectureRow = frame.findIndex(line => strip([line]).includes("Architecture"));
+			expect(architectureRow).toBeGreaterThanOrEqual(0);
+
+			overlay.handleInput("\x1b[C");
+			overlay.handleInput("\x1b[B");
+			overlay.handleInput("\r");
+			overlay.handleInput(" draft");
+			expect(strip(overlay.render(120))).toContain("Architecture draft");
+
+			overlay.handleInput(`\x1b[<32;4;${architectureRow + 1}M`);
+
+			expect(strip(overlay.render(120))).toContain("Architecture draft");
+		});
+		it("rebinds the editor after changing advisors before a right-pane click", async () => {
+			const uiTheme = await getThemeByName("dark");
+			if (!uiTheme) throw new Error("theme unavailable");
+			setThemeInstance(uiTheme);
+			const overlay = make(
+				{
+					advisors: [{ name: "Architecture" }, { name: "Security", tools: ["read"] }],
+				},
+				{ settings: Settings.isolated({}) },
+			);
 			overlay.render(120);
-			overlay.handleInput("\x1b[<0;4;2M"); // left-button press, col 4, row 2
-			const text = strip(overlay.render(120));
-			expect(text).toContain("Editing");
-			expect(text).toContain("Architecture");
+			overlay.handleInput("\x1b[C"); // open Architecture fields
+			overlay.handleInput("\x1b[B"); // name
+			overlay.handleInput("\x1b[B"); // model
+			overlay.handleInput("\x1b[B"); // tools
+			overlay.handleInput("\r"); // open tools editor
+			overlay.handleInput("\x1b[D"); // return to roster
+			overlay.handleInput("\x1b[B"); // select Security
+			overlay.handleInput("\x1b[<0;80;10M"); // click the right pane
+			expect(strip(overlay.render(120))).toContain("Security  · Project");
+		});
+
+		it("selects the exact current model when its literal id contains a colon", async () => {
+			const uiTheme = await getThemeByName("dark");
+			if (!uiTheme) throw new Error("theme unavailable");
+			setThemeInstance(uiTheme);
+			const makeModel = (id: string): Model =>
+				buildModel({
+					id,
+					name: id,
+					api: "ollama-chat",
+					provider: "openrouter",
+					baseUrl: "https://example.com",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 1024,
+				});
+			const models = [makeModel("a-first"), makeModel("z-route:free")];
+			const doc: WatchdogConfigDoc = {
+				advisors: [{ name: "Architecture", model: "openrouter/z-route:free" }],
+			};
+			const overlay = make(doc, {
+				settings: Settings.isolated({}),
+				scopedModels: models.map(model => ({ model })),
+			});
+			overlay.render(120);
+			overlay.handleInput("\x1b[C");
+			overlay.handleInput("\x1b[B");
+			overlay.handleInput("\x1b[B");
+			overlay.handleInput("\r");
+			overlay.handleInput("\r");
+
+			expect(doc.advisors[0]?.model).toBe("openrouter/z-route:free");
+		});
+
+		it("preserves routed model identity and explicit effort through Enter on both pickers", async () => {
+			const uiTheme = await getThemeByName("dark");
+			if (!uiTheme) throw new Error("theme unavailable");
+			setThemeInstance(uiTheme);
+			const model = buildModel({
+				id: "z-route:free",
+				name: "z-route:free",
+				api: "openai-completions",
+				provider: "openrouter",
+				baseUrl: "https://example.com",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 1024,
+			});
+			const doc: WatchdogConfigDoc = {
+				advisors: [{ name: "Architecture", model: "openrouter/z-route:free:high" }],
+			};
+			const overlay = make(doc, {
+				settings: Settings.isolated({}),
+				scopedModels: [{ model }],
+			});
+			overlay.render(120);
+			overlay.handleInput("\x1b[C");
+			overlay.handleInput("\x1b[B");
+			overlay.handleInput("\x1b[B");
+			overlay.handleInput("\r");
+			overlay.handleInput("\r");
+			overlay.handleInput("\r");
+
+			expect(doc.advisors[0]?.model).toBe("openrouter/z-route:free:high");
+		});
+
+		it("saves an enabled toggle only for the clicked advisor and scope", async () => {
+			const uiTheme = await getThemeByName("dark");
+			if (!uiTheme) throw new Error("theme unavailable");
+			setThemeInstance(uiTheme);
+			const saved = Promise.withResolvers<{ scope: string; doc: WatchdogConfigDoc }>();
+			const overlay = new AdvisorConfigOverlayComponent(
+				{ terminal: { rows: 40 } } as unknown as TUI,
+				deps,
+				"project",
+				{ advisors: [{ name: "Architecture" }, { name: "Security" }] },
+				{
+					...callbacks,
+					save: async (scope, doc) => {
+						saved.resolve({ scope, doc });
+					},
+				},
+			);
+			overlay.render(120);
+			overlay.handleInput("\x1b[<0;4;3M");
+			overlay.handleInput("\r");
+			overlay.handleInput("\x1b[D");
+			overlay.handleInput("\x1b[B");
+			overlay.handleInput("\x1b[B");
+			overlay.handleInput("\x1b[B");
+			overlay.handleInput("\r");
+			const result = await saved.promise;
+			expect(result.scope).toBe("project");
+			expect(result.doc.advisors).toEqual([{ name: "Architecture" }, { name: "Security", enabled: false }]);
 		});
 
 		it("seeds a visible default advisor (labeled with the role model) when the config is empty", async () => {
@@ -6332,11 +6474,48 @@ describe("advisor", () => {
 				],
 			});
 			const text = strip(overlay.render(200));
-			// The list shows ● for enabled and ○ for disabled.
-			expect(text).toContain("● Active");
-			expect(text).toContain("○ Disabled");
+			// The list and preview use the active theme's enabled/disabled markers.
+			expect(text).toContain(`${uiTheme.symbol("status.enabled")} Active`);
+			expect(text).toContain(`${uiTheme.symbol("status.disabled")} Disabled`);
 			// The preview of the highlighted (first) advisor shows its enabled status.
-			expect(text).toContain("● on");
+			expect(text).toContain(`${uiTheme.symbol("status.enabled")} on`);
+		});
+
+		it("sanitizes project names and blocks global editing while loading", async () => {
+			const uiTheme = await getThemeByName("dark");
+			if (!uiTheme) throw new Error("theme unavailable");
+			setThemeInstance(uiTheme);
+			const { promise: loading, resolve: resolveLoad } = Promise.withResolvers<WatchdogConfigDoc>();
+			let saves = 0;
+			const overlay = new AdvisorConfigOverlayComponent(
+				{ terminal: { rows: 20 } } as unknown as TUI,
+				{ ...deps, projectName: "bad\tname\ninjected\x1b[31m" },
+				"project",
+				{ advisors: [{ name: "Project" }] },
+				{ ...callbacks, loadDoc: () => loading, save: async () => void saves++ },
+			);
+			const renderedName = strip(overlay.render(120));
+			expect(renderedName).toContain("bad name injected");
+			expect(renderedName).not.toMatch(/[\x00-\x09\x0b-\x1f\x7f]/);
+			for (let index = 0; index < 6; index++) overlay.handleInput("\x1b[B");
+			overlay.handleInput("\x1b[C");
+			overlay.handleInput("discarded draft");
+			expect(strip(overlay.render(120))).not.toContain("discarded draft");
+			overlay.handleInput("\r");
+			expect(saves).toBe(0);
+			resolveLoad({ instructions: "Loaded instructions", advisors: [{ name: "Loaded global" }] });
+			await loading;
+			expect(strip(overlay.render(120))).toContain("Loaded global");
+		});
+		it("uses ASCII preset markers for roster and dirty state", async () => {
+			const asciiTheme = await loadTheme("dark", { symbolPresetOverride: "ascii" });
+			setThemeInstance(asciiTheme);
+			const overlay = make({ advisors: [{ name: "Active" }, { name: "Disabled", enabled: false }] });
+			const text = strip(overlay.render(120));
+			expect(text).toContain("[x] Active");
+			expect(text).toContain("[ ] Disabled");
+			expect(text).not.toMatch(/[●○]/);
+			setThemeInstance((await getThemeByName("dark"))!);
 		});
 
 		it("preserves top-level maxNotesPerUpdate while stripping the synthetic default advisor on save", async () => {
@@ -6358,8 +6537,8 @@ describe("advisor", () => {
 			overlay.handleInput("\x1b[B");
 			overlay.handleInput("\x1b[B");
 			overlay.handleInput("\x1b[B");
-			overlay.handleInput("\x1b[B");
 			overlay.handleInput("\r");
+			await Promise.resolve();
 			await Promise.resolve();
 			expect(savedDoc).toBeDefined();
 			expect(savedDoc?.maxNotesPerUpdate).toBe(3);
@@ -6385,8 +6564,8 @@ describe("advisor", () => {
 			overlay.handleInput("\x1b[B");
 			overlay.handleInput("\x1b[B");
 			overlay.handleInput("\x1b[B");
-			overlay.handleInput("\x1b[B");
 			overlay.handleInput("\r");
+			await Promise.resolve();
 			await Promise.resolve();
 			expect(savedDoc).toBeDefined();
 			expect(savedDoc?.maxNotesPerUpdate).toBe(3);
@@ -6412,8 +6591,8 @@ describe("advisor", () => {
 			overlay.handleInput("\x1b[B");
 			overlay.handleInput("\x1b[B");
 			overlay.handleInput("\x1b[B");
-			overlay.handleInput("\x1b[B");
 			overlay.handleInput("\r");
+			await Promise.resolve();
 			await Promise.resolve();
 			expect(savedDoc).toBeDefined();
 			expect(savedDoc?.instructions).toBe("baseline rules");

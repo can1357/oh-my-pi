@@ -38,6 +38,7 @@ import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
+import type { AdvisorScope } from "./session-advisors";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
 import type { SessionManager } from "./session-manager";
 
@@ -277,6 +278,8 @@ export interface AgentSessionConfig {
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */
 	providerPromptCacheKeySource?: "explicit" | "fork";
 	/** Full advisor toolset built against an advisor-scoped tool session. */
+	/** Parent session's runtime advisor veto. */
+	advisorScope?: AdvisorScope;
 	advisorTools?: AgentTool[];
 	/**
 	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and

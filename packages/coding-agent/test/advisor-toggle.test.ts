@@ -16,6 +16,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionProviderBoundary } from "../src/session/session-provider-boundary";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as advisorModule from "../src/advisor";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -419,6 +420,192 @@ describe("AgentSession advisor toggle", () => {
 
 		expect(sessionB.isAdvisorEnabled()).toBe(true);
 		expect(sessionB.isAdvisorActive()).toBe(true);
+	});
+	it("applies explicit parent off to live, new and restored opted-in descendants only", async () => {
+		const children: AgentSession[] = [];
+		const { promise: reviewStarted, resolve: signalReviewStarted } = Promise.withResolvers<AbortSignal>();
+		const advisorMock = createMockModel({
+			handler: (_context, options) => {
+				if (!options?.signal) throw new Error("Expected cancellable advisor request");
+				signalReviewStarted(options.signal);
+				return { delayMs: 60_000, content: ["late advice"] };
+			},
+		});
+		const makeChild = (parent?: AgentSession, enabled = true): AgentSession => {
+			const child = new AgentSession({
+				agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({
+					"advisor.enabled": enabled,
+					modelRoles: { advisor: `${model.provider}/${model.id}` },
+				}),
+				modelRegistry,
+				advisorTools: [],
+				advisorStreamFn: advisorMock.stream,
+				advisorScope: parent?.advisorScope,
+			});
+			children.push(child);
+			return child;
+		};
+		try {
+			const live = makeChild(session);
+			const nested = makeChild(live);
+			const unrelated = makeChild();
+			expect(live.isAdvisorActive()).toBe(true);
+			const reviewing = live.getAdvisorAgent()!.prompt("review the current task");
+			const reviewSignal = await reviewStarted;
+			session.setAdvisorEnabled(false);
+			expect(reviewSignal.aborted).toBe(true);
+			await reviewing;
+			expect(live.isAdvisorActive()).toBe(false);
+			expect(nested.isAdvisorActive()).toBe(false);
+			expect(unrelated.isAdvisorActive()).toBe(true);
+			expect(live.setAdvisorEnabled(true)).toBe(false);
+			const fresh = makeChild(session);
+			expect(fresh.isAdvisorActive()).toBe(false);
+			await live.dispose();
+			const restored = makeChild(session);
+			expect(restored.isAdvisorActive()).toBe(false);
+			const optedOut = makeChild(session, false);
+			const explicitlyOff = makeChild(session);
+			explicitlyOff.setAdvisorEnabled(false);
+			session.setAdvisorEnabled(true);
+			expect(fresh.isAdvisorActive()).toBe(true);
+			expect(restored.isAdvisorActive()).toBe(true);
+			expect(nested.isAdvisorActive()).toBe(true);
+			expect(optedOut.isAdvisorActive()).toBe(false);
+			expect(explicitlyOff.isAdvisorActive()).toBe(false);
+			expect(session.settings.get("advisor.enabled")).toBe(false);
+		} finally {
+			await Promise.all(children.map(child => child.dispose()));
+		}
+	});
+	it.each([false, true])("cancels inherited advice awaiting normalization (streaming=%s)", async streaming => {
+		session.setAdvisorEnabled(true);
+		const child = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"advisor.enabled": true,
+				modelRoles: { advisor: `${model.provider}/${model.id}` },
+			}),
+			modelRegistry,
+			advisorTools: [],
+			advisorScope: session.advisorScope,
+		});
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const normalization = vi
+			.spyOn(SessionProviderBoundary.prototype, "normalizeAgentMessageImages")
+			.mockImplementation(async message => {
+				entered.resolve();
+				await release.promise;
+				return message;
+			});
+		const send = child.sendCustomMessage.bind(child);
+		let delivery: Promise<boolean> | undefined;
+		const sendSpy = vi.spyOn(child, "sendCustomMessage").mockImplementation((message, options) => {
+			delivery = send(message, options);
+			return delivery;
+		});
+		try {
+			child.agent.state.isStreaming = streaming;
+			const tool = child.getAdvisorAgent()?.state.tools.find(tool => tool.name === "advise");
+			if (!(tool instanceof advisorModule.AdviseTool)) throw new Error("Missing advise tool");
+			await tool.execute("scope-race", {
+				note: "The asynchronous delivery can resurrect cancelled work.",
+				severity: "blocker",
+			});
+			await entered.promise;
+			session.setAdvisorEnabled(false);
+			session.setAdvisorEnabled(true);
+			release.resolve();
+			await delivery;
+			expect(child.agent.peekSteeringQueue()).toEqual([]);
+			expect(child.agent.state.messages).toEqual([]);
+			expect(child.agent.state.isStreaming).toBe(streaming);
+		} finally {
+			release.resolve();
+			normalization.mockRestore();
+			sendSpy.mockRestore();
+			child.agent.state.isStreaming = false;
+			await child.dispose();
+		}
+	});
+	it("removes inherited advisor queue entries while retaining user steering", async () => {
+		session.setAdvisorEnabled(true);
+		const child = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"advisor.enabled": true,
+				modelRoles: { advisor: `${model.provider}/${model.id}` },
+			}),
+			modelRegistry,
+			advisorTools: [],
+			advisorScope: session.advisorScope,
+		});
+		try {
+			const advice = {
+				role: "custom",
+				customType: "advisor",
+				content: "queued concern",
+				display: true,
+				timestamp: 1,
+			} as AgentMessage;
+			const userSteer: AgentMessage = { role: "user", content: "queued user request", timestamp: 2 };
+			const userFollowUp: AgentMessage = { role: "user", content: "next user request", timestamp: 3 };
+			child.agent.steer(advice);
+			child.agent.steer(userSteer);
+			child.agent.followUp(advice);
+			child.agent.followUp(userFollowUp);
+			expect(child.agent.peekSteeringQueue()).toEqual([advice, userSteer]);
+			expect(child.agent.peekFollowUpQueue()).toEqual([advice, userFollowUp]);
+			session.setAdvisorEnabled(false);
+			expect(child.agent.peekSteeringQueue()).toEqual([userSteer]);
+			expect(child.agent.peekFollowUpQueue()).toEqual([userFollowUp]);
+		} finally {
+			await child.dispose();
+		}
+	});
+	it("forwards an inherited advisor scope through SDK session construction", async () => {
+		const settings = Settings.isolated({
+			"async.enabled": false,
+			"advisor.enabled": true,
+			"compaction.enabled": false,
+		});
+		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		const result = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings,
+			model,
+			advisorScope: session.advisorScope,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			workspaceTree: {
+				rootPath: tempDir.path(),
+				rendered: "",
+				truncated: false,
+				totalLines: 0,
+				agentsMdFiles: [],
+			},
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+		try {
+			expect(result.session.isAdvisorActive()).toBe(true);
+			session.setAdvisorEnabled(false);
+			expect(result.session.isAdvisorActive()).toBe(false);
+		} finally {
+			await result.session.dispose();
+		}
 	});
 
 	it("exposes provider sessionId on live advisor stats", () => {

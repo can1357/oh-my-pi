@@ -344,6 +344,7 @@ import {
 } from "./queued-messages";
 import type { ServingModel } from "./retry-fallback-chains";
 import {
+	type AdvisorScope,
 	type AdvisorStats,
 	type AdvisorStatusOverviewEntry,
 	SessionAdvisors,
@@ -1791,6 +1792,7 @@ export class AgentSession {
 		};
 		this.#advisors = new SessionAdvisors(advisorsHost, {
 			enabled: this.settings.get("advisor.enabled"),
+			parentScope: config.advisorScope,
 			tools: config.advisorTools,
 			createGrepTool: config.advisorCreateGrepTool,
 			createEditTool: config.advisorCreateEditTool,
@@ -4520,7 +4522,7 @@ export class AgentSession {
 		this.yieldQueue.clear();
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
-		this.#advisors.stopRuntime();
+		this.#advisors.dispose();
 		this.#eval.beginDispose();
 	}
 
@@ -7197,6 +7199,7 @@ export class AgentSession {
 			deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
 			queueChipText?: string;
 			acceptTerminalEmptyStop?: boolean;
+			signal?: AbortSignal;
 		},
 	): Promise<boolean> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
@@ -7222,6 +7225,7 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		if (options?.signal?.aborted) return false;
 		if (this.isStreaming) {
 			if (options?.deliverAs === "nextTurn") {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, options?.triggerTurn ?? false);
@@ -10748,11 +10752,16 @@ export class AgentSession {
 	}
 
 	/**
+	 * Runtime advisor veto inherited by newly spawned and revived descendants.
+	 */
+	get advisorScope(): AdvisorScope {
+		return this.#advisors.scope;
+	}
+
+	/**
 	 * Whether a live advisor agent is attached to this session. True only when
-	 * `advisor.enabled` is set for this session (subagents opt in per agent via
-	 * frontmatter `advisor` / `task.agentAdvisor`) AND a model resolved for the
-	 * `advisor` role — i.e. the actual runtime exists, not merely the setting.
-	 * Drives the status-line badge and `/dump advisor`.
+	 * advisor use is enabled for this session, no ancestor has vetoed it, and a
+	 * model resolved for the `advisor` role.
 	 */
 	isAdvisorActive(): boolean {
 		return this.#advisors.isAdvisorActive();

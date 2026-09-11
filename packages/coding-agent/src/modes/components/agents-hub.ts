@@ -32,6 +32,7 @@ import { YAML } from "bun";
 import type { EffectiveExtensionRoots } from "../../capability/types";
 import { getConfigDirs } from "../../config";
 import type { ModelRegistry } from "../../config/model-registry";
+import type { AdvisorScope } from "../../session/session-advisors";
 import {
 	resolveAgentAdvisorSelection,
 	resolveAgentModelPatterns,
@@ -121,6 +122,7 @@ interface GeneratedAgentSpec {
 /** Ambient model context for resolution previews and the creation architect. */
 export interface AgentsHubModelContext {
 	modelRegistry?: ModelRegistry;
+	advisorScope?: AdvisorScope;
 	activeModelPattern?: string;
 	defaultModelPattern?: string;
 	/**
@@ -768,6 +770,7 @@ export class AgentsHubComponent implements Component {
 			authStorage: modelRegistry.authStorage,
 			modelRegistry,
 			settings: this.#settings,
+			advisorScope: this.#modelContext.advisorScope,
 			model: selectedModel,
 			systemPrompt: [systemPrompt],
 			hasUI: false,

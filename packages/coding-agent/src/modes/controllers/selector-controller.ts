@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import { type Model, PASTE_CODE_LOGIN_PROVIDERS, type UsageReport } from "@oh-my-pi/pi-ai";
@@ -348,6 +349,7 @@ export class SelectorController {
 				defaultModelLabel: defaultAdvisorModel
 					? `${defaultAdvisorModel.provider}/${defaultAdvisorModel.id}`
 					: undefined,
+				projectName: path.basename(projectDir),
 			};
 			const overlay = new AdvisorConfigOverlayComponent(this.ctx.ui, deps, initialScope, initialDoc, {
 				loadDoc: async scope => loadWatchdogConfigFile(await resolveAdvisorConfigEditPath(scope, dirs)),
@@ -493,6 +495,7 @@ export class SelectorController {
 				modelRegistry: this.ctx.session.modelRegistry,
 				activeModelPattern,
 				defaultModelPattern,
+				advisorScope: this.ctx.session.advisorScope,
 				extensionRoots: () => this.ctx.session.effectiveExtensionRoots,
 			},
 			{ onCancel: () => done() },

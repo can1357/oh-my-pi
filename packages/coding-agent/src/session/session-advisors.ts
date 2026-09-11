@@ -189,9 +189,38 @@ interface AdvisorRuntimeDescriptor {
 	signature: string;
 }
 
+/** Runtime-only veto inherited by descendants, independent of persisted advisor opt-ins. */
+export class AdvisorScope {
+	#suppressed = false;
+	readonly #listeners = new Set<() => void>();
+
+	constructor(readonly parent?: AdvisorScope) {}
+
+	get suppressed(): boolean {
+		return this.#suppressed || (this.parent?.suppressed ?? false);
+	}
+
+	setSuppressed(suppressed: boolean): boolean {
+		if (this.#suppressed === suppressed) return false;
+		this.#suppressed = suppressed;
+		for (const listener of this.#listeners) listener();
+		return true;
+	}
+
+	subscribe(listener: () => void): () => void {
+		this.#listeners.add(listener);
+		const unsubscribeParent = this.parent?.subscribe(listener);
+		return () => {
+			this.#listeners.delete(listener);
+			unsubscribeParent?.();
+		};
+	}
+}
+
 /** Inputs that configure the advisor roster owned by a session. */
 export interface SessionAdvisorsOptions {
 	enabled: boolean;
+	parentScope?: AdvisorScope;
 	tools?: AgentTool[];
 	/**
 	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and
@@ -240,6 +269,7 @@ export interface AdvisorMessageDeliveryOptions {
 	deliverAs?: "steer" | "followUp" | "nextTurn";
 	queueChipText?: string;
 	acceptTerminalEmptyStop?: boolean;
+	signal?: AbortSignal;
 }
 
 /** Session capabilities borrowed by the advisor controller. */
@@ -314,8 +344,14 @@ export interface AdvisorStatusOverviewEntry {
 /** Owns advisor runtimes, delivery policy, context maintenance, and status reporting. */
 export class SessionAdvisors {
 	readonly #host: SessionAdvisorsHost;
-	#advisorEnabled: boolean;
-	#advisorTools: AgentTool[] | undefined;
+	#advisorRequested: boolean;
+	readonly scope: AdvisorScope;
+	get #advisorEnabled(): boolean {
+		return this.#advisorRequested && !this.scope.suppressed;
+	}
+	readonly #unsubscribeScope: () => void;
+	#deliveryAbort = new AbortController();
+	#advisorTools: SessionAdvisorsOptions["tools"];
 	#advisorCreateGrepTool: SessionAdvisorsOptions["createGrepTool"];
 	#advisorCreateEditTool: SessionAdvisorsOptions["createEditTool"];
 	#advisorGetToolContext: SessionAdvisorsOptions["getToolContext"];
@@ -352,7 +388,8 @@ export class SessionAdvisors {
 
 	constructor(host: SessionAdvisorsHost, options: SessionAdvisorsOptions) {
 		this.#host = host;
-		this.#advisorEnabled = options.enabled;
+		this.#advisorRequested = options.enabled;
+		this.scope = new AdvisorScope(options.parentScope);
 		this.#advisorTools = options.tools;
 		this.#advisorCreateGrepTool = options.createGrepTool;
 		this.#advisorCreateEditTool = options.createEditTool;
@@ -366,6 +403,7 @@ export class SessionAdvisors {
 		this.#advisorConfigs = options.configs;
 		this.#advisorStreamFn = options.streamFn;
 		this.#transformProviderContext = options.transformProviderContext;
+		this.#unsubscribeScope = this.scope.subscribe(() => this.#applyAdvisorEnabled());
 		if (this.#advisorEnabled) this.#buildAdvisorRuntime();
 	}
 
@@ -461,6 +499,10 @@ export class SessionAdvisors {
 			closes.push(advisor.recorderClosed);
 		}
 		await Promise.all(closes);
+	}
+	dispose(): void {
+		this.#unsubscribeScope();
+		if (this.#advisors.length > 0) this.#stopAdvisorRuntime();
 	}
 
 	/** Reattach recorder feeds and resume work after a rolled-back or preserving transition. */
@@ -1315,7 +1357,7 @@ export class SessionAdvisors {
 		void this.#host
 			.sendCustomMessage(
 				{ customType: "advisor", content, display: true, attribution: "agent", details },
-				{ deliverAs: "steer", triggerTurn: true },
+				{ deliverAs: "steer", triggerTurn: true, signal: this.#deliveryAbort.signal },
 			)
 			.catch(err => logger.debug("advisor delivery failed", { err: String(err) }));
 	}
@@ -1865,18 +1907,25 @@ export class SessionAdvisors {
 		return true;
 	}
 	/**
-	 * Enable or disable the advisor for this session. The setting is overridden for the session,
-	 * and the runtime is started or stopped to match.
-	 *
-	 * @returns true when the advisor is actively running after the call.
+	 * Enable or disable the advisor for this session, subject to ancestor veto.
 	 */
 	setAdvisorEnabled(enabled: boolean): boolean {
-		this.#advisorEnabled = enabled;
-		if (enabled) {
+		this.#advisorRequested = enabled;
+		this.scope.setSuppressed(!enabled);
+		return this.#applyAdvisorEnabled();
+	}
+
+	#applyAdvisorEnabled(): boolean {
+		if (this.#host.isDisposed()) return false;
+		if (this.#advisorEnabled) {
 			if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
 			return this.#buildAdvisorRuntime(true);
 		}
-		this.#stopAdvisorRuntime();
+		this.#deliveryAbort.abort();
+		this.#deliveryAbort = new AbortController();
+		if (this.#advisors.length > 0) this.#stopAdvisorRuntime();
+		this.#host.extractQueuedAdvisorCards();
+		this.#host.dropPendingAdvisorCards();
 		return false;
 	}
 
