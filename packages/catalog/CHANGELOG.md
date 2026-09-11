@@ -6,6 +6,7 @@
 
 - Added DeepSeek V4.1 Flash on OpenCode Go with image input and low/high/max reasoning levels ([#11586](https://github.com/can1357/oh-my-pi/pull/11586) by [@mazzanfar](https://github.com/mazzanfar)).
 
+- `supports-server-compaction` compat axis (`compat.supportsServerCompaction`): whether a model line accepts Anthropic server-side compaction (`compact-2026-01-12`). Class rules enable it for Opus 4.6+, Sonnet 4.6+, and Fable/Mythos 5 on every Anthropic-messages host; the default is `false`.
 ### Fixed
 
 - Amazon Bedrock OpenAI models, plus unclassified profiles such as opaque application-inference-profile ARNs, now carry the compatibility policy required to preserve image-bearing tool results ([#11681](https://github.com/can1357/oh-my-pi/issues/11681)).

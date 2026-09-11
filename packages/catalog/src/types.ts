@@ -460,6 +460,20 @@ export interface AnthropicCompat {
 	/** Whether thinking requests may include `context_management` and its beta header. Default: true. */
 	supportsContextManagement?: boolean;
 	/**
+	 * Whether the model lineage supports Anthropic server-side compaction
+	 * (`compact-2026-01-12`: the `compact_20260112` edit and replayed
+	 * `compaction` blocks). Rule-owned per model line; the beta covers the
+	 * adaptive-thinking generation onward and rejects older lines. Default: false.
+	 */
+	supportsServerCompaction?: boolean;
+	/**
+	 * Whether the model is served by the first-party Anthropic provider (its
+	 * default route is the official API). Rule-owned on the provider; the
+	 * compaction transport pairs it with a per-request effective-URL check
+	 * because reroutes leave it stale-true. Default: false.
+	 */
+	firstPartyProvider?: boolean;
+	/**
 	 * Whether requests may carry `output_config.effort` (and its effort beta
 	 * header). Vertex AI rejects the field/header. Default: true.
 	 */
@@ -879,6 +893,13 @@ export type ResolvedAnthropicCompat = Required<Omit<AnthropicCompat, "streamIdle
 	 * env headers, and cache-TTL shaping without per-request URL parsing.
 	 */
 	officialEndpoint: boolean;
+	/**
+	 * The model is served by the first-party Anthropic provider. Unlike
+	 * `officialEndpoint` (URL-derived per deployment), this is provider
+	 * identity for compaction gating, always paired with a per-request
+	 * effective-URL check.
+	 */
+	firstPartyProvider: boolean;
 };
 
 /**

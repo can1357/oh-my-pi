@@ -356,16 +356,36 @@ export function formatRoleChip(role: string, assignment: RoleAssignment, setting
 	return theme.fg(info.color ?? "muted", `${theme.status.enabled} ${label}`) + suffix;
 }
 
+/** Both token legs at zero cost — the condition {@link formatCostPair} renders as `free`. */
+function isFreeModel(model: Model): boolean {
+	const cost = model.cost;
+	return !cost || (cost.input <= 0 && cost.output <= 0);
+}
+
 /** `$in/out` per-million cost pair; `free` when both legs are zero. */
 function formatCostPair(model: Model): string {
+	if (isFreeModel(model)) return "free";
 	const cost = model.cost;
-	if (!cost || (cost.input <= 0 && cost.output <= 0)) return "free";
 	const fmt = (n: number): string => {
 		if (n <= 0) return "0";
 		const s = n >= 100 ? String(Math.round(n)) : n >= 10 ? n.toFixed(1) : n.toFixed(2);
 		return s.replace(/\.?0+$/, "");
 	};
 	return `$${fmt(cost.input)}/${fmt(cost.output)}`;
+}
+
+/**
+ * The fuzzy haystack for a model row: the displayed `provider/id`, plus `free`
+ * for zero-cost models so the cost column's own word is searchable even when
+ * the id never says it (openrouter suffixes `:free`; nvidia does not).
+ *
+ * Must stay a pure function of the item — never of the query. `fuzzyRank`
+ * caches match indices keyed on this string and stops admitting new entries
+ * past its cap, so a query-dependent haystack would thrash that cache.
+ */
+export function modelSearchText({ provider, id, model }: ModelBrowserItem): string {
+	const base = `${provider}/${id}`;
+	return isFreeModel(model) ? `${base} free` : base;
 }
 
 /** Provider-supplied blurb, flattened to a single renderable detail-line cell. */
@@ -704,10 +724,10 @@ export class ModelBrowser implements Component {
 		const query = this.#searchInput.getValue();
 		let items: ModelBrowserItem[];
 		if (query.trim()) {
-			// Match against the displayed "provider/id" string so the user can
-			// type what they see: bare names, provider prefixes, or scoped
-			// queries all flow through the same fuzzy matcher.
-			const ranked = fuzzyRank(this.#baseItems, query, ({ provider, id }) => `${provider}/${id}`);
+			// Match against the displayed row text so the user can type what
+			// they see: bare names, provider prefixes, scoped queries, and the
+			// cost column's `free` all flow through the same fuzzy matcher.
+			const ranked = fuzzyRank(this.#baseItems, query, modelSearchText);
 			const matches = ranked.map(result => result.item);
 			if (this.#preserveQueryOrder) {
 				items = matches;
