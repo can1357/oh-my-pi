@@ -254,7 +254,7 @@ describe("async speculative compaction", () => {
 		expect(events).toEqual(expect.arrayContaining(["auto_compaction_start", "auto_compaction_end"]));
 	});
 
-	it("replays a user turn appended while remote compaction is in flight", async () => {
+	it("preserves an in-flight native interval through the next compaction", async () => {
 		const bundled = getBundledModel("openai", "gpt-5");
 		if (!bundled) throw new Error("Expected built-in OpenAI model");
 		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
@@ -297,6 +297,7 @@ describe("async speculative compaction", () => {
 			isError: false,
 			timestamp: Date.now(),
 		});
+		sessionManager.appendMessage(userMessage("post-snapshot follow-up"));
 		release.resolve();
 		await waitForState("armed");
 
@@ -307,6 +308,7 @@ describe("async speculative compaction", () => {
 			"user",
 			"assistant",
 			"toolResult",
+			"user",
 		]);
 		expect(agent.state.messages[1]).toEqual(
 			expect.objectContaining({
@@ -314,6 +316,54 @@ describe("async speculative compaction", () => {
 				content: [{ type: "text", text: "post-snapshot request" }],
 			}),
 		);
+
+		const replayedInterval = agent.state.messages.slice(1);
+		// The journal still ends at the compaction record, but the payload does
+		// not cover the user/tool exchange appended after its snapshot.
+		const next = compactionModule.prepareCompaction(
+			sessionManager.getBranch(),
+			{ ...compactionModule.DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 },
+			model,
+			agent.tokenizer,
+		);
+		if (!next) throw new Error("Expected the uncovered native interval to remain compactable");
+		expect([...next.messagesToSummarize, ...next.turnPrefixMessages, ...next.recentMessages]).toEqual(
+			replayedInterval,
+		);
+		expect(next.recentMessages.map(message => message.role)).toEqual(["user"]);
+
+		const afterCommit = userMessage("request after native commit");
+		sessionManager.appendMessage(afterCommit);
+		const later = compactionModule.prepareCompaction(
+			sessionManager.getBranch(),
+			{ ...compactionModule.DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 },
+			model,
+			agent.tokenizer,
+		);
+		if (!later) throw new Error("Expected compaction after the native commit");
+		expect([...later.messagesToSummarize, ...later.turnPrefixMessages, ...later.recentMessages]).toEqual([
+			...replayedInterval,
+			afterCommit,
+		]);
+		expect(later.previousPreserveData).toEqual(next.previousPreserveData);
+
+		sessionManager.appendResetBoundary();
+		const fresh = userMessage("fresh history after clear");
+		const kept = userMessage("fresh retained request");
+		sessionManager.appendMessage(fresh);
+		sessionManager.appendMessage(kept);
+		const cleared = compactionModule.prepareCompaction(
+			sessionManager.getBranch(),
+			{ ...compactionModule.DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 },
+			model,
+			agent.tokenizer,
+		);
+		if (!cleared) throw new Error("Expected fresh post-clear compaction");
+		expect(cleared.previousPreserveData).toBeUndefined();
+		expect([...cleared.messagesToSummarize, ...cleared.turnPrefixMessages, ...cleared.recentMessages]).toEqual([
+			fresh,
+			kept,
+		]);
 	});
 
 	it("discards an armed summary after a reset boundary and re-summarizes the new branch", async () => {

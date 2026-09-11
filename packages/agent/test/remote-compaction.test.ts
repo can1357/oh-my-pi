@@ -1948,6 +1948,62 @@ describe("compact() remote compaction failure handling", () => {
 		};
 	}
 
+	test.each(["v1", "v2", "codex-v2"])(
+		"preserves local summary history when entering native replay (%s)",
+		async protocol => {
+			const streaming = protocol !== "v1";
+			const preparation = makePreparation();
+			preparation.previousSummary = "Archived decision: use port 4242.";
+			preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: streaming };
+			const baseModel = makeOpenAiModel({
+				remoteCompaction: { enabled: true, v2StreamingEnabled: streaming },
+			});
+			const model: Model =
+				protocol === "codex-v2"
+					? {
+							...baseModel,
+							api: "openai-codex-responses",
+							provider: "openai-codex",
+							baseUrl: "https://chatgpt.example/backend-api",
+							preferWebsockets: false,
+							remoteCompaction: { enabled: true, api: "openai-codex-responses", v2StreamingEnabled: true },
+						}
+					: baseModel;
+			const requests: Array<{ input: Array<Record<string, unknown>> }> = [];
+			const fetchMock: FetchImpl = async (_url, init) => {
+				requests.push(JSON.parse(String(init?.body)) as (typeof requests)[number]);
+				const item = { type: "compaction", encrypted_content: `history-${requests.length}` };
+				return streaming
+					? sseResponse([
+							{ type: "response.output_item.done", output_index: 0, item },
+							{
+								type: "response.completed",
+								response: { usage: { input_tokens: 100, output_tokens: 1, total_tokens: 101 } },
+							},
+						])
+					: new Response(JSON.stringify({ output: [item] }));
+			};
+			const first = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+			const firstInput = JSON.stringify(requests[0].input);
+			expect(firstInput.match(/Archived decision: use port 4242\./g)).toHaveLength(1);
+			expect(firstInput).toContain("long history");
+			expect(firstInput).toContain("recent");
+
+			await compact(
+				{ ...preparation, previousSummary: first.summary, previousPreserveData: first.preserveData },
+				model,
+				"test-key",
+				undefined,
+				undefined,
+				{ fetch: fetchMock },
+			);
+			const secondInput = JSON.stringify(requests[1].input);
+			expect(secondInput.match(/history-1/g)).toHaveLength(1);
+			expect(secondInput).not.toContain(first.summary);
+			expect(secondInput).not.toContain(preparation.previousSummary);
+		},
+	);
+
 	test("streams V2 compaction before V1 when both settings and model opt in", async () => {
 		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
 		const compactionItem = { type: "compaction", encrypted_content: "enc_v2" };
@@ -2117,8 +2173,10 @@ describe("compact() remote compaction failure handling", () => {
 		expect(requestInput.at(-1)).toEqual({ type: "compaction_trigger" });
 	});
 
-	test("re-expands a prior V2 compaction's originals when no candidate can reuse the replay", async () => {
-		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("re-expanded local summary"));
+	test("re-expands native history for local preparation when new native compaction is disabled", async () => {
+		const localComplete = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(localSummaryMessage("re-expanded local summary"));
 		const compactionItem = { type: "compaction", encrypted_content: "enc_v2" };
 		const v2Model = makeOpenAiModel({
 			remoteCompaction: {
@@ -2142,8 +2200,6 @@ describe("compact() remote compaction failure handling", () => {
 					},
 				]),
 		});
-		// V2 success persists only the opaque placeholder — no second local summarization round.
-		expect(v2Result.summary).toContain("Remote compaction preserved provider-native history");
 
 		// Session branch after that V2 compaction: originals + compaction boundary + new turns.
 		const ts = (n: number) => new Date(n).toISOString();
@@ -2182,11 +2238,23 @@ describe("compact() remote compaction failure handling", () => {
 		];
 		const baseSettings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 };
 
-		// Remote disabled → the V2 replay is unusable → re-expand the pre-V2 original.
-		const reexpanded = prepareCompaction(entries, { ...baseSettings, remoteEnabled: false }, v2Model);
-		expect(reexpanded).toBeDefined();
-		const reexpandedText = JSON.stringify(reexpanded?.messagesToSummarize ?? []);
-		expect(reexpandedText).toContain("ORIGINAL ALPHA port 4242");
+		// Normal replay still works, but local preparation must re-expand the
+		// originals rather than send an opaque placeholder to its summarizer.
+		for (const { model, settings } of [
+			{ model: v2Model, settings: { ...baseSettings, remoteEnabled: false } },
+			{
+				model: { ...v2Model, remoteCompaction: { ...v2Model.remoteCompaction, enabled: false } },
+				settings: baseSettings,
+			},
+		]) {
+			const reexpanded = prepareCompaction(entries, settings, model);
+			if (!reexpanded) throw new Error("Expected local compaction preparation");
+			localComplete.mockClear();
+			await compact(reexpanded, model, "k");
+			expect(JSON.stringify(localComplete.mock.calls.map(([, context]) => context.messages))).toContain(
+				"ORIGINAL ALPHA port 4242",
+			);
+		}
 
 		// Remote + V2 still enabled, same provider → reuse the replay, don't re-summarize originals.
 		const reused = prepareCompaction(entries, { ...baseSettings, remoteStreamingV2Enabled: true }, v2Model);

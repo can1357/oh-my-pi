@@ -53,10 +53,17 @@ import {
 } from "./compaction-v2-streaming";
 import type { CompactionEntry, SessionEntry } from "./entries";
 import { NativeCompactionError } from "./errors";
-import { type ConvertToLlm, createBranchSummaryMessage, createCustomMessage, defaultConvertToLlm } from "./messages";
+import {
+	type ConvertToLlm,
+	createBranchSummaryMessage,
+	createCompactionSummaryMessage,
+	createCustomMessage,
+	defaultConvertToLlm,
+} from "./messages";
 import {
 	buildOpenAiNativeHistory,
 	getPreservedOpenAiRemoteCompactionData,
+	isOpenAiRemoteCompactionApi,
 	requestOpenAiRemoteCompaction,
 	requestRemoteCompaction,
 	shouldUseOpenAiRemoteCompaction,
@@ -1245,19 +1252,27 @@ export interface CompactionPreparation {
 }
 
 /**
- * Whether a prior remote compaction's provider-native replay can still be read
- * by the active model — the model that assembles the request context on every
- * turn. A local compaction (no remote preserve) always can: it holds a real
- * textual summary. A remote compaction (V2 or V1) only can when the active model
- * shares the blob's provider AND remote replay is still enabled; otherwise the
- * active model's encoder drops the payload (see `getOpenAIResponsesHistoryPayload`)
- * and only the opaque placeholder summary survives, so the caller must re-expand
- * the originals into a portable local summary rather than strand that history.
+ * Whether the active model's normal encoder can consume stored native history.
+ * Creating future compactions is a separate policy: disabling it does not disable
+ * Responses-family replay. Local summaries have no provider restriction.
+ */
+export function canReplayRemoteCompaction(
+	preserveData: Record<string, unknown> | undefined,
+	activeModel: Model,
+): boolean {
+	const remote = getCompactionV2PreserveData(preserveData) ?? getPreservedOpenAiRemoteCompactionData(preserveData);
+	return !remote || (remote.provider === activeModel.provider && isOpenAiRemoteCompactionApi(activeModel.api));
+}
+
+/**
+ * Whether compaction preparation may reuse a native boundary instead of
+ * re-expanding its original messages. This is deliberately stricter than normal
+ * replay: the active model must both read the payload and remain eligible for
+ * native compaction under the current settings. Otherwise local summarization
+ * needs the originals, not an opaque placeholder.
  *
- * Judged against the ACTIVE model, not the compaction candidate set: a role
- * model (e.g. `modelRoles.smol`) that still maps to the blob's provider does not
- * let the active model replay it, so keying reuse on "any candidate shares the
- * provider" left a provider-switched session permanently context-less (#6343).
+ * Main-session preparation is judged against the active model, not any role
+ * candidate, so a provider switch cannot strand the original history (#6343).
  */
 export function remotePreserveReusable(
 	preserveData: Record<string, unknown> | undefined,
@@ -1266,15 +1281,16 @@ export function remotePreserveReusable(
 ): boolean {
 	const remote = getCompactionV2PreserveData(preserveData) ?? getPreservedOpenAiRemoteCompactionData(preserveData);
 	if (!remote) return true;
-	if (settings.remoteEnabled === false) return false;
-	if (remote.provider !== activeModel.provider) return false;
-	const v2Ok = settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(activeModel);
-	return v2Ok || shouldUseOpenAiRemoteCompaction(activeModel);
+	return (
+		remote.provider === activeModel.provider &&
+		isOpenAiRemoteCompactionApi(activeModel.api) &&
+		shouldUseProviderNativeCompaction(activeModel, settings)
+	);
 }
 
 /**
- * Index of the newest compaction entry the active model can actually read, or
- * `-1` when none can.
+ * Index of the newest compaction boundary reusable under preparation policy,
+ * or `-1` when none can be reused (see {@link remotePreserveReusable}).
  *
  * A provider-native remote compaction (V2 or V1) stores an opaque replay payload
  * and only a placeholder summary, so for any OTHER provider that entry
@@ -1309,14 +1325,16 @@ export function prepareCompaction(
 	activeModel?: Model,
 	tokenizer: Tokenizer = new Tokenizer(activeModel),
 ): CompactionPreparation | undefined {
-	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
+	const lastEntry = pathEntries[pathEntries.length - 1];
+	// A speculative native record may leave uncovered messages before the record.
+	if (lastEntry?.type === "compaction" && !lastEntry.providerReplayThroughEntryId) {
 		return undefined;
 	}
 
 	let prevCompactionIndex = findReadableCompactionIndex(pathEntries, settings, activeModel);
 
-	// A reset after the reusable compaction clears its summary too. An older
-	// reset still bounds how far we may recover that compaction's kept messages.
+	// A newer reset clears the previous summary. An older reset bounds both
+	// the local retained tail and the native snapshot-to-commit interval.
 	let resetBoundaryIndex = -1;
 	for (let i = pathEntries.length - 1; i >= 0; i--) {
 		if (pathEntries[i].type === "reset_boundary") {
@@ -1332,9 +1350,20 @@ export function prepareCompaction(
 	let boundaryStart = Math.max(prevCompactionIndex, resetBoundaryIndex) + 1;
 	if (
 		previousCompaction &&
-		!getCompactionV2PreserveData(previousCompaction.preserveData) &&
-		!getPreservedOpenAiRemoteCompactionData(previousCompaction.preserveData)
+		(getCompactionV2PreserveData(previousCompaction.preserveData) ||
+			getPreservedOpenAiRemoteCompactionData(previousCompaction.preserveData))
 	) {
+		if (previousCompaction.providerReplayThroughEntryId) {
+			const replayThroughIndex = pathEntries.findIndex(
+				entry => entry.id === previousCompaction.providerReplayThroughEntryId,
+			);
+			if (replayThroughIndex >= 0 && replayThroughIndex < prevCompactionIndex) {
+				// Native replay covers the snapshot, not messages appended while the
+				// request was running. Include that interval in the next preparation.
+				boundaryStart = Math.max(replayThroughIndex, resetBoundaryIndex) + 1;
+			}
+		}
+	} else if (previousCompaction) {
 		// Local summaries exclude the retained tail, whose original entries precede
 		// the compaction record. Native replay already carries that tail. Only look
 		// backwards: advisor snapshots put all retained messages after the summary
@@ -1579,9 +1608,18 @@ export async function compact(
 	const snapcompactArchiveMigrationMessage = previousSnapcompactArchiveText
 		? createSnapcompactArchiveMigrationMessage(previousSnapcompactArchiveText)
 		: undefined;
+	const previousNativeHistory =
+		getCompactionV2PreserveData(previousPreserveData) ?? getPreservedOpenAiRemoteCompactionData(previousPreserveData);
+	// A local summary has no native payload to carry it into the first remote
+	// request. Encode it as history; do not resend opaque native placeholders.
+	const previousSummaryMigrationMessage =
+		settings.remoteEnabled !== false && previousSummary && !previousNativeHistory
+			? createCompactionSummaryMessage(previousSummary, tokensBefore, new Date().toISOString())
+			: undefined;
 
 	let preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, undefined);
 	const remoteMessages: AgentMessage[] = [
+		...(previousSummaryMigrationMessage ? [previousSummaryMigrationMessage] : []),
 		...(snapcompactArchiveMigrationMessage ? [snapcompactArchiveMigrationMessage] : []),
 		...messagesToSummarize,
 		...turnPrefixMessages,

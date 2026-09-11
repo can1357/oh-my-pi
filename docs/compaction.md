@@ -34,6 +34,7 @@ Compaction and branch summaries are first-class session entries, not plain assis
    - `firstKeptEntryId` (compaction boundary)
    - `tokensBefore`
    - optional `details`, `preserveData`, `fromExtension`
+   - optional `providerReplayThroughEntryId` (last entry covered by a native replay snapshot)
 - `BranchSummaryEntry`
    - `type: "branch_summary"`
    - `fromId`, `summary`
@@ -53,6 +54,10 @@ Those custom roles are then transformed into LLM-facing messages in `convertToLl
 - `packages/agent/src/compaction/prompts/branch-summary-context.md`
 
 while `custom` messages pass through as developer messages with their raw content (no template).
+
+Native replay also requires a matching provider and a Responses-family API on the active model. A separate native compaction endpoint does not give a Chat Completions or Anthropic encoder the ability to consume its output.
+
+Disabling future native compaction does not disable normal replay of an existing payload. Compaction preparation has a separate, stricter reuse policy: local summarization must re-expand the original messages rather than treat an opaque placeholder as a readable summary.
 
 ## Compaction pipeline
 
@@ -236,9 +241,10 @@ The flag never reaches provider wire formats, and flagged pairs are never remove
 
 1. Find the latest compaction whose summary or provider-native history is reusable by the active model.
 2. Honor the latest `/clear` `reset_boundary`: a newer reset discards the previous summary, and an older reset remains the lower bound for recovering retained messages.
-3. For a local summary, recover the original entries from `firstKeptEntryId` up to the previous compaction record, then append entries after that record. When a reusable provider-native payload is selected, preparation retains the existing native replay handling instead of re-expanding that payload's original entries.
-4. Exclude compaction records and other non-message metadata. Pass the previous summary separately through `previousSummary`; retain message-bearing `custom_message` and `branch_summary` entries.
-5. Adapt `keepRecentTokens` using the measured usage ratio, then run `findCutPoint()` and partition that same sequence into `messagesToSummarize`, `turnPrefixMessages`, and `recentMessages`.
+3. For a local summary, recover the original entries from `firstKeptEntryId` up to the previous compaction record, then append entries after that record.
+4. For reusable provider-native history, start after `providerReplayThroughEntryId` when it identifies an older snapshot, without crossing the latest reset boundary. This recovers the uncovered snapshot-to-commit interval, not the original messages already covered by native replay. A trailing native compaction record does not make that interval already compacted.
+5. Exclude compaction records and other non-message metadata. Pass the previous summary separately through `previousSummary`; retain message-bearing `custom_message` and `branch_summary` entries.
+6. Adapt `keepRecentTokens` using the measured usage ratio, then run `findCutPoint()` and partition that same sequence into `messagesToSummarize`, `turnPrefixMessages`, and `recentMessages`.
 
 When updating a local summary, every effective original message belongs to exactly one of those three regions. For example, after `summary(A) + B` grows to `summary(A) + B + C`, the next preparation distributes both B and C, not just C. The new `firstKeptEntryId` refers to an original entry; preparation does not move, duplicate, or rewrite journal entries. This is a local-summary preparation guarantee, not an end-to-end guarantee for provider-native or speculative native replay.
 
@@ -308,6 +314,12 @@ Remote summarization modes, consulted in order (each stage falls back to the nex
    - OpenAI-compatible endpoints whose path ends in `/chat/completions` receive `{ model, messages, stream: false }`, where `messages` contains one system prompt and one user prompt. The summary is read from `choices[0].message.content`, which lets self-hosted servers such as llama.cpp and vLLM act as remote compactors without a separate summarizer shim.
 
 When a native remote compaction (V2 or V1) succeeds, local LLM summarization is skipped entirely — the durable history lives in the provider replay payload and the stored `summary` is a placeholder lead-in plus the file-operation list.
+
+When native compaction starts from an ordinary local summary, that summary is included as a context message alongside the prepared conversation. Later native passes reuse the provider payload instead of re-injecting its placeholder summary. Snapcompact source text keeps its separate archive migration path.
+
+For speculative native compaction, `providerReplayThroughEntryId` records the snapshot's last entry, not the later commit position. Context rebuilding and the next compaction preparation both include messages appended between those positions, followed by post-commit messages. The native payload and uncovered interval are replayed once each; `/clear` discards both when it supersedes that compaction.
+
+Advisor runtimes retain native `preserveData` for subsequent maintenance and attach its provider payload to the in-memory compaction summary for the next model request. Native replay already contains the retained tail, so advisors do not also append that tail as raw messages. Local summaries still keep recent messages separately. Advisor requests use the shared message converter so both textual compaction summaries and native payloads reach the provider.
 
 ### Handoff generation
 

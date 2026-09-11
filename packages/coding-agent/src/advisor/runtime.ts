@@ -4,7 +4,11 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
 import { type CursorExecResolvedCarrier, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { logger } from "@oh-my-pi/pi-utils";
-import { obfuscateToolArguments } from "../secrets/message-transform";
+import {
+	collectNativeReplayRegexSecretValues,
+	obfuscateNativeReplay,
+	obfuscateToolArguments,
+} from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
 	formatExecutionSourcePreview,
@@ -637,9 +641,9 @@ export class AdvisorRuntime {
 	 * Shared obfuscation side effects for BOTH render paths (single-block
 	 * {@link #renderPreparedDelta} and multi-message
 	 * {@link #formatRawDeltaMessageChunks}): collect regex secret values from
-	 * primary-context custom messages and the rendered markdown, scrub the
-	 * advisor's own history, and refresh pending placeholder prefixes when new
-	 * secrets appear. Returns whether new secret values were discovered.
+	 * primary-context custom messages, rendered markdown and native advisor history
+	 * before scrubbing that history, then refresh pending placeholder prefixes.
+	 * Returns whether new secret values were discovered.
 	 * Idempotent across the two calls one drain makes for the same prepared
 	 * list: the second call discovers nothing new and skips the strip.
 	 */
@@ -672,14 +676,20 @@ export class AdvisorRuntime {
 			if (message.role === "toolResult") addTextualContent(message.content as TextualContent);
 		}
 		addRegexValues(renderedMd);
-		scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues);
+		discoveredNewRegexSecretValue =
+			scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues) ||
+			discoveredNewRegexSecretValue;
 		if (discoveredNewRegexSecretValue) {
-			this.#pending = this.#pending.map(delta => ({
-				...delta,
-				text: obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(delta.text, this.#advisorRegexSecretValues),
-			}));
+			this.#refreshPendingSecretPrefixes(obfuscator);
 		}
 		return discoveredNewRegexSecretValue;
+	}
+
+	#refreshPendingSecretPrefixes(obfuscator: SecretObfuscator): void {
+		this.#pending = this.#pending.map(delta => ({
+			...delta,
+			text: obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(delta.text, this.#advisorRegexSecretValues),
+		}));
 	}
 
 	/**
@@ -980,6 +990,16 @@ export class AdvisorRuntime {
 				// Epoch guard — a reset/dispose during the maintainContext await
 				// invalidates this batch.
 				if (this.#epoch !== epoch) return null;
+				// Maintenance can commit unseen native plaintext or a snapshot predating
+				// concurrent collisions. Collect before scrubbing and refresh both queues
+				// before another round can send history or the popped batch to compaction.
+				const obfuscator = this.host.obfuscator;
+				if (obfuscator?.hasSecrets()) {
+					if (scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues)) {
+						this.#refreshPendingSecretPrefixes(obfuscator);
+					}
+					batchText = obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(batchText, this.#advisorRegexSecretValues);
+				}
 
 				if (shouldResetContext) {
 					// Once coalescing has begun (round > 0), deltas that arrived during
@@ -1667,11 +1687,32 @@ function obfuscateAdvisorMessage(
 function scrubAdvisorHistory(
 	obfuscator: SecretObfuscator,
 	messages: AgentMessage[],
-	sharedRegexSecretValues: ReadonlySet<string>,
-): void {
+	sharedRegexSecretValues: Set<string>,
+): boolean {
+	const previousSize = sharedRegexSecretValues.size;
+	// Collect across the entire history first: redacting a search-only regex
+	// value would otherwise erase the evidence needed to scrub an earlier prefix.
+	for (const message of messages) {
+		if (
+			message.role === "user" ||
+			message.role === "developer" ||
+			message.role === "assistant" ||
+			message.role === "compactionSummary"
+		) {
+			collectNativeReplayRegexSecretValues(obfuscator, message, sharedRegexSecretValues);
+		}
+	}
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index]!;
-		const next = obfuscateAdvisorMessage(obfuscator, message, sharedRegexSecretValues);
+		const replay =
+			message.role === "user" ||
+			message.role === "developer" ||
+			message.role === "assistant" ||
+			message.role === "compactionSummary"
+				? obfuscateNativeReplay(obfuscator, message, sharedRegexSecretValues)
+				: message;
+		const next = obfuscateAdvisorMessage(obfuscator, replay, sharedRegexSecretValues);
 		if (next !== message) messages[index] = next;
 	}
+	return sharedRegexSecretValues.size !== previousSize;
 }

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Native compaction now carries an existing local summary into the first provider-native request instead of losing the summarized history. ([#11525](https://github.com/can1357/oh-my-pi/pull/11525) by [@rpie9](https://github.com/rpie9))
+- Subsequent native compactions preserve messages appended between a speculative snapshot and its commit, while honoring `/clear` boundaries. ([#11525](https://github.com/can1357/oh-my-pi/pull/11525) by [@rpie9](https://github.com/rpie9))
+- Native replay compatibility checks the active provider and Responses API independently of whether future native compaction is enabled. ([#11525](https://github.com/can1357/oh-my-pi/pull/11525) by [@rpie9](https://github.com/rpie9))
+
 ## [18.1.17] - 2026-09-10
 
 ### Changed

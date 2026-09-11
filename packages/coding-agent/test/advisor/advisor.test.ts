@@ -1,9 +1,22 @@
 import { describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { type AgentMessage, type AgentTelemetryConfig, Tokenizer } from "@oh-my-pi/pi-agent-core";
+import {
+	buildOpenAiNativeHistory,
+	createCompactionSummaryMessage,
+	defaultConvertToLlm,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type {
+	ResponseFileSearchToolCall,
+	ResponseFunctionWebSearch,
+	ResponseInput,
+	ResponseToolSearchOutputItemParam,
+} from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
+import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import {
 	AdviseTool,
@@ -30,7 +43,9 @@ import type { Settings } from "../../src/config/settings";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../../src/modes/components/advisor-config";
 import { createAdvisorMessageCard } from "../../src/modes/components/advisor-message";
 import { getThemeByName, setThemeInstance } from "../../src/modes/theme/theme";
+import { obfuscateMessages } from "../../src/secrets/message-transform";
 import { SecretObfuscator } from "../../src/secrets/obfuscator";
+import { getOpenAiRemoteCompactionPayload } from "../../src/session/session-context";
 import { formatSessionHistoryMarkdown } from "../../src/session/session-history-format";
 import { YieldQueue } from "../../src/session/yield-queue";
 
@@ -2628,6 +2643,426 @@ describe("advisor", () => {
 			expect(promptInputs).toHaveLength(2);
 			expect(firstStoredPrompt()).not.toContain("TOKABC123_");
 			expect(promptText(promptInputs[1])).not.toContain("TOKABC123_");
+		});
+
+		it.each(["v1", "v2", "codex"])(
+			"scrubs native %s replay and next-compaction history after a later friendly-prefix collision",
+			async version => {
+				const obfuscator = new SecretObfuscator([
+					{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+					{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace" },
+				]);
+				const model = getBundledModel("openai", "gpt-5.4");
+				if (!model) throw new Error("Expected bundled OpenAI replay model");
+				const replayModel =
+					version === "codex"
+						? { ...model, provider: "openai-codex" as const, api: "openai-codex-responses" as const }
+						: model;
+				const promptInputs: Array<string | AgentMessage[]> = [];
+				const agent = makeAgent(promptInputs);
+				const messages: AgentMessage[] = [{ role: "user", content: "remember OTHERSECRET", timestamp: 1 }];
+				const maintenanceInputs: Array<Array<Record<string, unknown>>> = [];
+				const runtime = new AdvisorRuntime(agent, {
+					snapshotMessages: () => messages,
+					enqueueAdvice: () => {},
+					obfuscator,
+					maintainContext: async () => {
+						const summary = agent.state.messages[0];
+						if (summary?.role === "compactionSummary") {
+							const payload = getOpenAiRemoteCompactionPayload(
+								summary as typeof summary & { preserveData?: Record<string, unknown> },
+							);
+							maintenanceInputs.push(buildOpenAiNativeHistory([], replayModel, payload?.items));
+						}
+						return false;
+					},
+				});
+
+				runtime.onTurnEnd();
+				await runtime.waitForCatchup(1000, 1);
+				const retainedPrompt = promptText(promptInputs[0]!);
+				expect(retainedPrompt).toContain("TOKABC123_");
+				const staleToken = obfuscator.obfuscate("OTHERSECRET");
+				const searchItemsFor = (
+					secret: string,
+				): Array<Omit<ResponseFileSearchToolCall, "id"> | Omit<ResponseFunctionWebSearch, "id">> => [
+					{
+						type: "file_search_call",
+						status: "completed",
+						queries: [`file query ${secret}`, "public query"],
+						results: [
+							{
+								file_id: staleToken,
+								filename: `${secret}.txt`,
+								text: `retrieved ${secret}`,
+								attributes: { label: secret, count: 3, enabled: true },
+								score: 0.75,
+							},
+							{
+								file_id: "file-public",
+								filename: "public.txt",
+								text: "public result",
+								attributes: null,
+								score: 0,
+							},
+						],
+					},
+					{
+						type: "web_search_call",
+						status: "completed",
+						action: {
+							type: "search",
+							queries: [`web query ${secret}`, "public query"],
+							query: `legacy ${secret}`,
+							sources: [{ type: "url", url: `https://example.test/${secret}` }],
+						},
+					},
+					{
+						type: "web_search_call",
+						status: "completed",
+						action: { type: "open_page", url: `https://example.test/${secret}` },
+					},
+					{
+						type: "web_search_call",
+						status: "completed",
+						action: { type: "find_in_page", url: `https://example.test/${secret}`, pattern: `find ${secret}` },
+					},
+				];
+				const searchItems = searchItemsFor(staleToken).map((item, index) => ({
+					...item,
+					id: `native-search-${index}`,
+				}));
+				const searchSnapshot = structuredClone(searchItems);
+				const compactionItem = {
+					type: "compaction",
+					id: "opaque-native-state",
+					encrypted_content: "OTHERSECRET TOKABC123_ tok_opaque",
+				};
+				const replacementHistory = buildOpenAiNativeHistory(
+					[{ role: "user", content: retainedPrompt, timestamp: 1 }],
+					replayModel,
+				);
+				replacementHistory.push(...searchItems, compactionItem);
+				const preserveData = {
+					openaiRemoteCompaction: {
+						provider: replayModel.provider,
+						replacementHistory,
+						...(version === "v2"
+							? { version: "v2", usedTokens: 100, retainedImageCount: 0 }
+							: { compactionItem }),
+					},
+				};
+				const originalSummary = {
+					...createCompactionSummaryMessage("Native compaction", 100, new Date(1).toISOString(), {
+						providerPayload: getOpenAiRemoteCompactionPayload({ preserveData }),
+					}),
+					preserveData,
+				};
+				agent.state.messages.push(originalSummary);
+				messages.push({ role: "user", content: "later tok_abc123", timestamp: 2 });
+				runtime.onTurnEnd();
+				await runtime.waitForCatchup(1000, 1);
+
+				const encoded = buildResponsesInput({
+					model: replayModel,
+					context: { messages: defaultConvertToLlm(agent.state.messages) },
+					strictResponsesPairing: false,
+					supportsImageDetailOriginal: false,
+					nativeHistory: { replay: true, filterReasoning: false },
+				});
+				const redactedToken = obfuscator.obfuscate(
+					staleToken,
+					obfuscator.collectRegexSecretValuesForObfuscation("tok_abc123"),
+				);
+				expect(redactedToken).not.toContain("TOKABC123_");
+				for (const history of [encoded, ...maintenanceInputs]) {
+					const retained = history.filter(item => item.type === "message");
+					const plaintext = JSON.stringify(retained);
+					expect(plaintext).toContain("remember");
+					expect(plaintext).not.toContain("TOKABC123_");
+					expect(plaintext).not.toContain("OTHERSECRET");
+					expect(obfuscator.deobfuscate(plaintext)).toContain("OTHERSECRET");
+					const searches = history.filter(
+						item => item.type === "file_search_call" || item.type === "web_search_call",
+					);
+					expect(searches).toHaveLength(searchItems.length);
+					// Assert every schema-defined search plaintext slot, without pinning output IDs stripped by encoders.
+					expect(searches).toMatchObject(searchItemsFor(redactedToken));
+					expect(history.find(item => item.type === "compaction")).toMatchObject({
+						encrypted_content: compactionItem.encrypted_content,
+					});
+				}
+				expect(maintenanceInputs).toHaveLength(1);
+				expect(JSON.stringify(replacementHistory[0])).toContain("TOKABC123_");
+				expect(searchItems).toEqual(searchSnapshot);
+				expect(agent.state.messages[0]).not.toBe(originalSummary);
+			},
+		);
+
+		it.each([
+			{ source: "retained", kind: "file_search_call" },
+			{ source: "maintenance", kind: "file_search_call" },
+			{ source: "maintenance", kind: "tool_search_output" },
+		])(
+			"collects $kind-only collisions from $source history before replay and pending compaction input",
+			async ({ source, kind }) => {
+				const obfuscator = new SecretObfuscator([
+					{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+					{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace", replacement: "[hidden]" },
+				]);
+				const model = getBundledModel("openai", "gpt-5.4");
+				if (!model) throw new Error("Expected bundled OpenAI replay model");
+				const stalePrompt = obfuscator.obfuscate("remember OTHERSECRET");
+				expect(stalePrompt).toContain("TOKABC123_");
+				const compactionItem = { type: "compaction", encrypted_content: "opaque TOKABC123_" };
+				const searchItemFor = (text: string) =>
+					kind === "file_search_call"
+						? ({ type: "file_search_call", status: "completed", queries: [text] } satisfies Omit<
+								ResponseFileSearchToolCall,
+								"id"
+							>)
+						: ({
+								type: "tool_search_output",
+								execution: "server",
+								status: "completed",
+								tools: [
+									{
+										type: "namespace",
+										name: "workspace",
+										description: "Workspace tools",
+										tools: [
+											{
+												type: "custom",
+												name: "lookup",
+												description: `Use ${text}`,
+												format: { type: "text" },
+											},
+										],
+									},
+								],
+							} satisfies ResponseToolSearchOutputItemParam);
+				const searchItem = { ...searchItemFor("tok_abc123"), id: "search-only-collision" };
+				const replacementHistory = buildOpenAiNativeHistory(
+					[{ role: "user", content: stalePrompt, timestamp: 1 }],
+					model,
+				);
+				replacementHistory.push(searchItem, compactionItem);
+				const preserveData = {
+					openaiRemoteCompaction: { provider: model.provider, replacementHistory, compactionItem },
+				};
+				const summary = {
+					...createCompactionSummaryMessage("Native compaction", 100, new Date(1).toISOString(), {
+						providerPayload: getOpenAiRemoteCompactionPayload({ preserveData }),
+					}),
+					preserveData: structuredClone(preserveData),
+				};
+				const originalSummary = structuredClone(summary);
+				const promptInputs: Array<string | AgentMessage[]> = [];
+				const encodedPrompts: ResponseInput[] = [];
+				const maintenanceInputs: Array<Array<Record<string, unknown>>> = [];
+				const maintenancePreviews: string[] = [];
+				const agent = makeAgent(promptInputs);
+				if (source === "retained") agent.state.messages.push(summary);
+				agent.prompt = async input => {
+					promptInputs.push(input);
+					const incoming: AgentMessage[] =
+						typeof input === "string" ? [{ role: "user", content: input, timestamp: 2 }] : input;
+					encodedPrompts.push(
+						buildResponsesInput({
+							model,
+							context: {
+								messages: obfuscateMessages(
+									obfuscator,
+									defaultConvertToLlm([...agent.state.messages, ...incoming]),
+								),
+							},
+							strictResponsesPairing: false,
+							supportsImageDetailOriginal: false,
+							nativeHistory: { replay: true, filterReasoning: false },
+						}),
+					);
+				};
+				const { promise: maintenanceStarted, resolve: startMaintenance } = Promise.withResolvers<void>();
+				const { promise: maintenanceReleased, resolve: releaseMaintenance } = Promise.withResolvers<void>();
+				const messages: AgentMessage[] = [{ role: "user", content: "review OTHERSECRET", timestamp: 2 }];
+				const runtime = new AdvisorRuntime(agent, {
+					snapshotMessages: () => messages,
+					enqueueAdvice: () => {},
+					obfuscator,
+					maintainContext: async incoming => {
+						maintenancePreviews.push(promptText([incoming]));
+						if (maintenancePreviews.length === 1) {
+							startMaintenance();
+							await maintenanceReleased;
+							if (source === "maintenance") agent.state.messages.push(summary);
+						} else {
+							maintenanceInputs.push(buildOpenAiNativeHistory(defaultConvertToLlm(agent.state.messages), model));
+							const retained = agent.state.messages[0] as typeof summary;
+							maintenanceInputs.push(
+								buildOpenAiNativeHistory([], model, getOpenAiRemoteCompactionPayload(retained)?.items),
+							);
+						}
+						return false;
+					},
+				});
+				runtime.onTurnEnd();
+				await maintenanceStarted;
+				messages.push({ role: "user", content: "queued OTHERSECRET", timestamp: 3 });
+				runtime.onTurnEnd();
+				releaseMaintenance();
+				await runtime.waitForCatchup(1000, 1);
+
+				expect(maintenancePreviews).toHaveLength(2);
+				expect(maintenancePreviews[1]).not.toContain("TOKABC123_");
+				expect(obfuscator.deobfuscate(maintenancePreviews[1]!)).toContain("queued OTHERSECRET");
+				expect(promptInputs).toHaveLength(1);
+				expect(promptText(promptInputs[0])).not.toContain("TOKABC123_");
+				expect(maintenanceInputs).toHaveLength(2);
+				for (const history of [encodedPrompts[0]!, ...maintenanceInputs]) {
+					const plaintext = JSON.stringify(history.filter(item => item.type !== "compaction"));
+					expect(plaintext).not.toContain("TOKABC123_");
+					expect(plaintext).not.toContain("tok_abc123");
+					expect(plaintext).not.toContain("OTHERSECRET");
+					expect(obfuscator.deobfuscate(plaintext)).toContain("remember OTHERSECRET");
+					expect(history.find(item => item.type === kind)).toMatchObject(searchItemFor("[hidden]"));
+					expect(history.filter(item => item.type === "compaction")).toEqual([compactionItem]);
+				}
+				expect(summary).toEqual(originalSummary);
+			},
+		);
+
+		it("scrubs a stale assistant native snapshot committed after a collision arrives during maintenance", async () => {
+			const obfuscator = new SecretObfuscator([
+				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+				{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace" },
+			]);
+			const model = getBundledModel("openai", "gpt-5.4");
+			if (!model) throw new Error("Expected bundled OpenAI replay model");
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const encodedPrompts: ResponseInput[] = [];
+			const maintenanceInputs: Array<Array<Record<string, unknown>>> = [];
+			const agent = makeAgent(promptInputs);
+			agent.prompt = async input => {
+				promptInputs.push(input);
+				const incoming: AgentMessage[] =
+					typeof input === "string" ? [{ role: "user", content: input, timestamp: 1 }] : input;
+				encodedPrompts.push(
+					buildResponsesInput({
+						model,
+						context: {
+							messages: obfuscateMessages(
+								obfuscator,
+								defaultConvertToLlm([...agent.state.messages, ...incoming]),
+							),
+						},
+						strictResponsesPairing: false,
+						supportsImageDetailOriginal: false,
+						nativeHistory: { replay: true, filterReasoning: false },
+					}),
+				);
+			};
+			const { promise: maintenanceStarted, resolve: startMaintenance } = Promise.withResolvers<void>();
+			const { promise: maintenanceReleased, resolve: releaseMaintenance } = Promise.withResolvers<void>();
+			const staleHistory: AgentMessage[] = [];
+			let maintenanceCalls = 0;
+			const messages: AgentMessage[] = [{ role: "user", content: "remember OTHERSECRET", timestamp: 1 }];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+				obfuscator,
+				maintainContext: async () => {
+					maintenanceCalls++;
+					if (maintenanceCalls === 2) {
+						startMaintenance();
+						await maintenanceReleased;
+						// The result was produced from a snapshot taken before the late delta.
+						agent.state.messages.splice(0, agent.state.messages.length, ...staleHistory);
+					} else if (maintenanceCalls === 3) {
+						maintenanceInputs.push(buildOpenAiNativeHistory(defaultConvertToLlm(agent.state.messages), model));
+						const summary = agent.state.messages[0] as AgentMessage & { preserveData?: Record<string, unknown> };
+						maintenanceInputs.push(
+							buildOpenAiNativeHistory([], model, getOpenAiRemoteCompactionPayload(summary)?.items),
+						);
+					}
+					return false;
+				},
+			});
+			runtime.onTurnEnd();
+			await runtime.waitForCatchup(1000, 1);
+			const stalePrompt = promptText(promptInputs[0]!);
+			expect(stalePrompt).toContain("TOKABC123_");
+			const compactionItem = { type: "compaction", encrypted_content: "opaque TOKABC123_" };
+			const replacementHistory = buildOpenAiNativeHistory(
+				[{ role: "user", content: stalePrompt, timestamp: 1 }],
+				model,
+			);
+			replacementHistory.push(compactionItem);
+			const preserveData = {
+				openaiRemoteCompaction: { provider: model.provider, replacementHistory, compactionItem },
+			};
+			staleHistory.push({
+				...createCompactionSummaryMessage("Native compaction", 100, new Date(1).toISOString(), {
+					providerPayload: getOpenAiRemoteCompactionPayload({ preserveData }),
+				}),
+				preserveData,
+			} as AgentMessage);
+			const assistantSnapshot: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "visible response" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				stopReason: "stop",
+				timestamp: 2,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				providerPayload: {
+					type: "openaiResponsesHistory",
+					provider: model.provider,
+					dt: false,
+					items: [
+						...replacementHistory,
+						{
+							type: "message",
+							role: "assistant",
+							id: "snapshot-tail",
+							content: [{ type: "output_text", text: `assistant snapshot ${stalePrompt}`, annotations: [] }],
+						},
+					],
+				},
+			};
+			staleHistory.push(assistantSnapshot);
+			agent.state.messages.push(...staleHistory);
+			messages.push({ role: "user", content: "continue reviewing", timestamp: 2 });
+			runtime.onTurnEnd();
+			await maintenanceStarted;
+			messages.push({ role: "user", content: "later tok_abc123", timestamp: 3 });
+			runtime.onTurnEnd();
+			releaseMaintenance();
+			await runtime.waitForCatchup(1000, 1);
+
+			expect(encodedPrompts).toHaveLength(2);
+			expect(maintenanceInputs).toHaveLength(2);
+			for (const history of [encodedPrompts[1]!, ...maintenanceInputs]) {
+				const plaintext = JSON.stringify(
+					history.filter(item => item.type === "message" || item.type === undefined),
+				);
+				expect(plaintext).toContain("remember");
+				expect(plaintext).not.toContain("TOKABC123_");
+				expect(plaintext).not.toContain("tok_abc123");
+				expect(plaintext).not.toContain("OTHERSECRET");
+				expect(obfuscator.deobfuscate(plaintext)).toContain("OTHERSECRET");
+				expect(history.filter(item => item.type === "compaction")).toEqual([compactionItem]);
+			}
+			expect(JSON.stringify(encodedPrompts[1])).toContain("assistant snapshot");
+			expect(JSON.stringify(maintenanceInputs[0])).toContain("assistant snapshot");
+			expect(agent.state.messages[1]).not.toBe(assistantSnapshot);
 		});
 
 		it("redacts secrets inside assistant thinking blocks, honoring the whole-delta friendly-prefix collision set", async () => {
