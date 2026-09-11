@@ -75,9 +75,9 @@ describe("InteractiveMode prompt-template autocomplete (#2462)", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		mode?.stop();
 		await session?.dispose();
-		vi.restoreAllMocks();
 		mode = undefined;
 		session = undefined;
 	});
@@ -182,7 +182,6 @@ describe("InteractiveMode prompt-template autocomplete (#2462)", () => {
 
 	it("normalizes file-command hints before autocomplete renders them", async () => {
 		const created = createHarness([]);
-		vi.spyOn(created.mode, "stop").mockImplementation(() => {});
 		const providerSlot = captureAutocompleteProvider(created.mode);
 
 		await created.mode.refreshSlashCommandState(tempDir.path(), [
