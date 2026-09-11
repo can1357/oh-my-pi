@@ -610,6 +610,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	attachmentChipsContainer: Container;
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
+	/** Extension widgets rendered beneath the native status line (`belowStatusline`). */
+	hookWidgetContainerBelowStatusline: Container;
 	statusLine: StatusLineComponent;
 
 	isInitialized = false;
@@ -1021,6 +1023,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hookWidgetContainerAbove = new Container();
 		this.hookWidgetContainerAbove.addChild(new EditorTopGap(() => this.statusRowOccupied));
 		this.hookWidgetContainerBelow = new Container();
+		this.hookWidgetContainerBelowStatusline = new Container();
 		this.attachmentChipsContainer = new Container();
 		this.attachmentChipsContainer.addChild(
 			new AttachmentChipsBand(this.editor, this.ui.imageBudget, () => this.ui.requestRender()),
@@ -1268,6 +1271,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editorContainer,
 			this.hookWidgetContainerBelow,
 		]);
+		this.composer.setStatusTrailer([this.hookWidgetContainerBelowStatusline]);
 		this.ui.setFocus(this.editor);
 		this.syncComposerShape();
 

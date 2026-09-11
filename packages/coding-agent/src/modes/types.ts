@@ -132,6 +132,8 @@ export interface InteractiveModeContext {
 	editorContainer: Container;
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
+	/** Extension widgets rendered beneath the native status line (`belowStatusline`). */
+	hookWidgetContainerBelowStatusline: Container;
 	statusLine: StatusLineComponent;
 	syncComposerShape(): void;
 	syncEditorSpelling(): void;

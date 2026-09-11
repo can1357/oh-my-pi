@@ -219,9 +219,11 @@ export interface ExtensionUIDialogOptions {
 /** Raw terminal input listener for extensions. */
 export type TerminalInputHandler = (data: string) => { consume?: boolean; data?: string } | undefined;
 
-export type WidgetPlacement = "aboveEditor" | "belowEditor";
+export type WidgetPlacement = "aboveEditor" | "belowEditor" | "belowStatusline";
 
 export interface ExtensionWidgetOptions {
+	/** `belowEditor` renders between the composer and the native statusline;
+	 *  `belowStatusline` renders beneath the native status line. */
 	placement?: WidgetPlacement;
 }
 
@@ -287,7 +289,7 @@ export interface ExtensionUIContext {
 	/** Set the working/loading message shown during streaming. Call with no argument to restore default. */
 	setWorkingMessage(message?: string): void;
 
-	/** Set a widget to display above or below the editor. Accepts string array or component factory. */
+	/** Set a widget above/below the editor, or beneath the native status line. Accepts string array or component factory. */
 	setWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void;
 
 	/** Set a custom footer component, or undefined to restore the built-in footer. */

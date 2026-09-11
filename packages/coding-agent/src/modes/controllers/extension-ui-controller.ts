@@ -70,6 +70,7 @@ export class ExtensionUiController {
 	#composerShapeDisposers: Array<() => void> = [];
 	#hookWidgetsAbove = new Map<string, ExtensionUiComponent>();
 	#hookWidgetsBelow = new Map<string, ExtensionUiComponent>();
+	#hookWidgetsBelowStatusline = new Map<string, ExtensionUiComponent>();
 	// Single-file dialog surface (`editorContainer` + focus) is shared by the
 	// selector / input / editor modals, so only one may be presented at a time;
 	// the rest queue. See `#presentDialog`.
@@ -329,13 +330,19 @@ export class ExtensionUiController {
 		const placement = options?.placement ?? "aboveEditor";
 		this.#removeHookWidget(this.#hookWidgetsAbove, key);
 		this.#removeHookWidget(this.#hookWidgetsBelow, key);
+		this.#removeHookWidget(this.#hookWidgetsBelowStatusline, key);
 
 		if (content === undefined) {
 			this.#rebuildHookWidgets();
 			return;
 		}
 
-		const target = placement === "belowEditor" ? this.#hookWidgetsBelow : this.#hookWidgetsAbove;
+		const target =
+			placement === "belowStatusline"
+				? this.#hookWidgetsBelowStatusline
+				: placement === "belowEditor"
+					? this.#hookWidgetsBelow
+					: this.#hookWidgetsAbove;
 		target.set(key, this.#createHookWidget(content));
 		this.#rebuildHookWidgets();
 	}
@@ -366,6 +373,12 @@ export class ExtensionUiController {
 	#rebuildHookWidgets(): void {
 		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerAbove, this.#hookWidgetsAbove, true, true);
 		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerBelow, this.#hookWidgetsBelow, false, false);
+		this.#renderHookWidgetContainer(
+			this.ctx.hookWidgetContainerBelowStatusline,
+			this.#hookWidgetsBelowStatusline,
+			false,
+			false,
+		);
 		this.ctx.ui.requestRender();
 	}
 
@@ -1194,8 +1207,12 @@ export class ExtensionUiController {
 		for (const widget of this.#hookWidgetsBelow.values()) {
 			widget.dispose?.();
 		}
+		for (const widget of this.#hookWidgetsBelowStatusline.values()) {
+			widget.dispose?.();
+		}
 		this.#hookWidgetsAbove.clear();
 		this.#hookWidgetsBelow.clear();
+		this.#hookWidgetsBelowStatusline.clear();
 		this.#rebuildHookWidgets();
 	}
 

@@ -156,6 +156,8 @@ export class Composer implements TerminalFrameProvider {
 	#headerBefore: readonly Component[] = [];
 	#headerAfter: readonly Component[] = [];
 	#runtimeChildren: readonly Component[] = [];
+	/** Extension widgets mounted beneath the native status line (`belowStatusline`). */
+	#statusTrailer: readonly Component[] = [];
 	#statusSnapshot: ComposerStatusSnapshot | undefined;
 	#runtimeMounted = false;
 	// Composer-owned history id space. Transcript batch ids restart across
@@ -258,8 +260,8 @@ export class Composer implements TerminalFrameProvider {
 		}
 		this.#lastNormalRows = rows;
 		const roots = this.#runtimeMounted
-			? [...this.#runtimeChildren, this.#statusHost]
-			: [this.#header, this.#bootstrapInputGap, this.editor, this.#statusHost];
+			? [...this.#runtimeChildren, this.#statusHost, ...this.#statusTrailer]
+			: [this.#header, this.#bootstrapInputGap, this.editor, this.#statusHost, ...this.#statusTrailer];
 		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
 		if (transcriptIndex < 0) {
 			return { viewport: this.#renderRoots(roots, width).slice(-rows) };
@@ -474,7 +476,7 @@ export class Composer implements TerminalFrameProvider {
 	 * it renders only when that tail underfills the screen.
 	 */
 	#renderResizeTail(width: number, rows: number): string[] {
-		const roots = [...this.#runtimeChildren, this.#statusHost];
+		const roots = [...this.#runtimeChildren, this.#statusHost, ...this.#statusTrailer];
 		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
 		if (transcriptIndex < 0) return this.#renderRoots(roots, width);
 		const transcript = roots[transcriptIndex] as TranscriptContainer;
@@ -646,6 +648,7 @@ export class Composer implements TerminalFrameProvider {
 	setRuntimeChildren(children: readonly Component[]): void {
 		if (this.#stopped) return;
 		this.ui.removeChild(this.#statusHost);
+		for (const child of this.#statusTrailer) this.ui.removeChild(child);
 		if (this.#runtimeMounted) {
 			for (const child of this.#runtimeChildren) this.ui.removeChild(child);
 		} else {
@@ -656,6 +659,16 @@ export class Composer implements TerminalFrameProvider {
 		this.#runtimeChildren = children;
 		for (const child of children) this.ui.addChild(child);
 		this.ui.addChild(this.#statusHost);
+		for (const child of this.#statusTrailer) this.ui.addChild(child);
+		this.ui.requestRender();
+	}
+
+	/** Mount components rendered beneath the native status line (extension `belowStatusline` widgets). */
+	setStatusTrailer(children: readonly Component[]): void {
+		if (this.#stopped) return;
+		for (const child of this.#statusTrailer) this.ui.removeChild(child);
+		this.#statusTrailer = children;
+		for (const child of children) this.ui.addChild(child);
 		this.ui.requestRender();
 	}
 
