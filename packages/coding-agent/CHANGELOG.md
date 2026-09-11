@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `browser` now takes `new_tab: true` on `open`, which drives a dedicated background tab in relay sessions instead of adopting one the user is working in ([#11662](https://github.com/can1357/oh-my-pi/pull/11662) by [@jwaldrip](https://github.com/jwaldrip)).
+
+### Fixed
+
+- The browser relay no longer steals window focus when activating driven tabs for screenshots ([#11662](https://github.com/can1357/oh-my-pi/pull/11662) by [@jwaldrip](https://github.com/jwaldrip)).
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

@@ -1,3 +1,11 @@
+// ../coding-agent/src/tools/browser/relay/tab-ops.ts
+function createRelayTab(tabs, url) {
+  return tabs.create({ url, active: false });
+}
+async function activateRelayTab(tabs, tabId) {
+  await tabs.update(tabId, { active: true });
+}
+
 // extension/background.ts
 var DEFAULT_PORT = 9224;
 var PING_INTERVAL_MS = 20000;
@@ -135,7 +143,7 @@ async function runRpc(msg) {
     case "send":
       return await chrome.debugger.sendCommand(msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId }, msg.method, msg.params);
     case "createTab": {
-      const tab = await chrome.tabs.create({ url: msg.url });
+      const tab = await createRelayTab(chrome.tabs, msg.url);
       const snap = snapshot(tab);
       if (!snap)
         throw new Error("created tab has no id");
@@ -144,12 +152,9 @@ async function runRpc(msg) {
     case "removeTab":
       await chrome.tabs.remove(msg.tabId);
       return {};
-    case "activateTab": {
-      const tab = await chrome.tabs.get(msg.tabId);
-      await chrome.windows.update(tab.windowId, { focused: true });
-      await chrome.tabs.update(msg.tabId, { active: true });
+    case "activateTab":
+      await activateRelayTab(chrome.tabs, msg.tabId);
       return {};
-    }
     case "group":
       return await enqueueGroupOp(() => groupTabs(msg.tabIds, msg.title, msg.color));
     case "ungroup":

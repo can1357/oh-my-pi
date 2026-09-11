@@ -545,6 +545,20 @@ export class RelayBridge {
 			this.#reply(conn, msg, {});
 			return;
 		}
+		// Activation is relay policy, not passthrough. Chrome implements
+		// `Page.bringToFront` by activating the tab's WINDOW, which takes OS
+		// focus from whatever the user is typing in; the relay drives tabs the
+		// user is working in, so it activates the tab inside its own window
+		// instead (`activateRelayTab`) and never raises the window.
+		if (msg.method === "Page.bringToFront") {
+			try {
+				await this.#rpc({ op: "activateTab", tabId });
+				this.#reply(conn, msg, {});
+			} catch (err) {
+				this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
+			}
+			return;
+		}
 		try {
 			const result = await this.#rpc({
 				op: "send",
