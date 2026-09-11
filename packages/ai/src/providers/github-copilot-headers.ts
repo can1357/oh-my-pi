@@ -74,15 +74,18 @@ export function resolveCopilotRequestIdentity(
 }
 
 /**
- * Reissue chat-surface Copilot 403s once as the Copilot CLI.
+ * Reissue chat-surface Copilot denials once as the Copilot CLI.
  *
  * Chat is the default surface (`COPILOT_CHAT_INTEGRATION_ID`) because Business
  * organizations that gate premium models per client surface commonly allow
- * chat while blocking CLI/agentic clients (issue #11372). The retry fires
- * only for requests carrying the chat default and only when the caller
- * resolved no explicit identity — an explicit choice is never second-guessed.
- * The denied body is drained before reissuing, and the retry carries the CLI
- * identity so the guard passes it through: at most two requests, never a loop.
+ * chat while blocking CLI/agentic clients (issue #11372). Other Business and
+ * Enterprise orgs do the opposite and reject the chat identity — as an HTTP 403
+ * or, on `api.business.githubcopilot.com`, an HTTP 400 `model_not_supported`
+ * (issue #11669). Both denials retry once as the CLI. The retry fires only for
+ * requests carrying the chat default and only when the caller resolved no
+ * explicit identity — an explicit choice is never second-guessed. The denied
+ * body is drained before reissuing, and the retry carries the CLI identity so
+ * the guard passes it through: at most two requests, never a loop.
  */
 export function wrapFetchForCopilotFallback(
 	base: FetchImpl | undefined,
@@ -93,17 +96,28 @@ export function wrapFetchForCopilotFallback(
 	if (!enabled) return inner;
 	return async (input, init) => {
 		const response = await inner(input, init);
-		if (response.status !== 403) return response;
+		if (response.status !== 403 && response.status !== 400) return response;
 		if (input instanceof Request) return response;
 		if (normalizeCopilotIntegrationId(integrationId) !== undefined) return response;
 		const outgoing = new Headers(init?.headers);
 		if (outgoing.get("Copilot-Integration-Id") !== COPILOT_CHAT_INTEGRATION_ID) {
 			return response;
 		}
+		if (response.status === 400) {
+			// A 400 is only the client-identity denial when its body carries
+			// `code: "model_not_supported"`; read a clone so an unrelated 400
+			// (which must not retry) reaches the caller with its body intact.
+			let identityDenied = false;
+			try {
+				const body = (await response.clone().json()) as { error?: { code?: unknown } } | null;
+				identityDenied = body?.error?.code === "model_not_supported";
+			} catch {}
+			if (!identityDenied) return response;
+		}
 		try {
 			await response.arrayBuffer();
 		} catch {}
-		logger.warn("GitHub Copilot chat identity denied (HTTP 403); retrying once as the Copilot CLI");
+		logger.warn(`GitHub Copilot chat identity denied (HTTP ${response.status}); retrying once as the Copilot CLI`);
 		const retryHeaders = new Headers(outgoing);
 		retryHeaders.set("Copilot-Integration-Id", COPILOT_CAPI_IDENTITY_HEADERS["Copilot-Integration-Id"]);
 		return inner(input, { ...init, headers: retryHeaders });
@@ -204,6 +218,8 @@ export function buildCopilotDynamicHeaders(params: {
 	headers?: Record<string, string>;
 	initiatorOverride?: CopilotInitiator;
 	planTier?: string;
+	/** Enterprise login domain; Enterprise keeps the CLI identity that its private endpoint accepts. */
+	enterpriseUrl?: string;
 	/** Raw explicit identity; validated here, chat default when absent/invalid. */
 	integrationId?: unknown;
 }): CopilotDynamicHeaders {
@@ -215,7 +231,8 @@ export function buildCopilotDynamicHeaders(params: {
 		"X-Interaction-Type": `conversation-${initiator}`,
 	};
 	headers["Copilot-Integration-Id"] =
-		normalizeCopilotIntegrationId(params.integrationId) ?? COPILOT_CHAT_INTEGRATION_ID;
+		normalizeCopilotIntegrationId(params.integrationId) ??
+		(params.enterpriseUrl ? COPILOT_CAPI_IDENTITY_HEADERS["Copilot-Integration-Id"] : COPILOT_CHAT_INTEGRATION_ID);
 
 	if (params.hasImages) {
 		headers["Copilot-Vision-Request"] = "true";

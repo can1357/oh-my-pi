@@ -133,6 +133,12 @@ export class SessionFocusController {
 		// own todos rather than overwriting them with the main session's list.
 		await this.ctx.reloadTodos(target);
 		if (generation !== this.#attachGeneration) return false;
+		// Rebuild the pending steering/follow-up block the same way. clearTransientSessionUi()
+		// disposed pendingMessagesContainer's children, but nothing re-derived them, so returning
+		// from a focused agent left the queue intact yet permanently unpainted until an unrelated
+		// caller repainted it (#11379). Reads viewSession (target ?? main), so this restores main's
+		// queue on unfocus and shows a focused subagent's own queue on focus.
+		this.ctx.updatePendingMessagesDisplay();
 		// Sync the run-state title to the attached target: a streaming target has no
 		// agent_start incoming, so arm the loader/working title manually; an idle
 		// target would otherwise inherit the previous session's stuck spinner, so
