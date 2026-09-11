@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `auth.accountPriority` setting and `/account priority` command (also `/session priority`) to set and manage priority order for providers with multiple accounts ([#11645](https://github.com/can1357/oh-my-pi/pull/11645) by [@keethesh](https://github.com/keethesh)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added

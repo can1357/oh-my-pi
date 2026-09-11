@@ -40,6 +40,7 @@ export interface DiscoverAuthStorageOptions {
 	sourceLabel?: string;
 	/** Programmatic pool for SDK hosts. Takes precedence over the environment file. */
 	accountPool?: AuthBrokerAccountPool;
+	accountPriorityResolver?: (provider: string) => readonly string[] | undefined;
 }
 
 /** Path to the local bearer token file. Created by `omp auth-broker token`. */
@@ -296,6 +297,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		const storage = new AuthStorage(store, {
 			configValueResolver: options.configValueResolver,
 			sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}`,
+			accountPriorityResolver: options.accountPriorityResolver,
 		});
 		await storage.reload();
 		return storage;
@@ -305,6 +307,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 	const storage = await AuthStorage.create(dbPath, {
 		configValueResolver: options.configValueResolver,
 		sourceLabel: options.sourceLabel ?? `local ${dbPath}`,
+		accountPriorityResolver: options.accountPriorityResolver,
 	});
 	await storage.reload();
 	return storage;

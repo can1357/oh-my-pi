@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for configuring account priority order when multiple accounts exist for the same provider, with automatic failover to lower-priority accounts upon rate limits, blocks, or quota exhaustion ([#11645](https://github.com/can1357/oh-my-pi/pull/11645) by [@keethesh](https://github.com/keethesh)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed

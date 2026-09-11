@@ -403,6 +403,7 @@ export interface ModelTagsSettings {
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
+const EMPTY_ACCOUNT_PRIORITY_RECORD: Record<string, string[]> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
@@ -485,6 +486,16 @@ export const SETTINGS_SCHEMA = {
 	// per-machine overrides remain trivial.
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined, credential: true },
+	"auth.accountPriority": {
+		type: "record",
+		default: EMPTY_ACCOUNT_PRIORITY_RECORD,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Account Priority",
+			description: "Order of priority for multiple accounts per provider (email, account ID, or index)",
+		},
+	},
 
 	autoResume: {
 		type: "boolean",

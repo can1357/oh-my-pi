@@ -6115,6 +6115,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#selectorController.showSessionPinSelector();
 	}
 
+	showAccountPrioritySelector(targetProviderId?: string): Promise<void> {
+		return this.#selectorController.showAccountPrioritySelector(targetProviderId);
+	}
+
 	showResetUsageSelector(): Promise<void> {
 		return this.#selectorController.showResetUsageSelector();
 	}

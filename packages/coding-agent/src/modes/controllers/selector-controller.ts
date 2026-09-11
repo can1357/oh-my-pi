@@ -104,6 +104,7 @@ import { ReadToolGroupComponent } from "../components/read-tool-group";
 import { ResetUsageSelectorComponent } from "../components/reset-usage-selector";
 import { type BranchVariantPath, RewindSelectorComponent } from "../components/rewind-selector";
 import { renderSegmentTrack } from "../components/segment-track";
+import { AccountPrioritySelectorComponent } from "../components/account-priority-selector";
 import { SessionAccountSelectorComponent } from "../components/session-account-selector";
 import { SessionSelectorComponent, type SessionSelectorOptions } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
@@ -2257,6 +2258,69 @@ export class SelectorController {
 						return;
 					}
 					this.ctx.showStatus(`Pinned ${account.label} to this session for ${providerName}.`);
+					this.ctx.statusLine.invalidate();
+					this.ctx.ui.requestRender();
+				},
+				() => {
+					done();
+					this.ctx.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	async showAccountPrioritySelector(targetProviderId?: string): Promise<void> {
+		const session = this.ctx.session;
+		if (session.isStreaming) {
+			this.ctx.showStatus("Cannot set account priority while the session is streaming.");
+			return;
+		}
+		const providerId = targetProviderId ?? session.model?.provider;
+		if (!providerId) {
+			this.ctx.showStatus("Select a model or specify a provider: /account priority <provider>");
+			return;
+		}
+		this.ctx.showStatus("Loading provider accounts…", { dim: true });
+		const authStorage = session.modelRegistry.authStorage;
+		await authStorage.reload();
+		const rawAccounts = authStorage.listOAuthAccounts(providerId, session.sessionId);
+		const accounts = toSessionPinAccounts(rawAccounts);
+		const provider = getOAuthProviders().find(candidate => candidate.id === providerId);
+		const providerName = provider?.name ?? providerId;
+		if (accounts.length === 0) {
+			this.ctx.showStatus(`No stored OAuth accounts for ${providerName}. Use /login to add one.`);
+			return;
+		}
+
+		const sortedAccounts = [...accounts].sort((a, b) => {
+			const pA = a.priority ?? Number.POSITIVE_INFINITY;
+			const pB = b.priority ?? Number.POSITIVE_INFINITY;
+			if (pA !== pB) return pA - pB;
+			return a.position - b.position;
+		});
+
+		this.showSelector(done => {
+			const selector = new AccountPrioritySelectorComponent(
+				providerName,
+				sortedAccounts,
+				account => {
+					done();
+					const otherAccounts = accounts
+						.filter(a => a.credentialId !== account.credentialId)
+						.sort((a, b) => {
+							const pA = a.priority ?? Number.POSITIVE_INFINITY;
+							const pB = b.priority ?? Number.POSITIVE_INFINITY;
+							if (pA !== pB) return pA - pB;
+							return a.position - b.position;
+						});
+					const reordered = [account, ...otherAccounts];
+					const prioritySelectors = reordered.map(a => `id:${a.credentialId}`);
+					const currentPriorities = (settings.get("auth.accountPriority") as Record<string, string[]>) ?? {};
+					const updated = { ...currentPriorities, [providerId]: prioritySelectors };
+					settings.set("auth.accountPriority", updated);
+					authStorage.setAccountPriority(providerId, prioritySelectors);
+					this.ctx.showStatus(`Set ${account.label} as top priority for ${providerName}.`);
 					this.ctx.statusLine.invalidate();
 					this.ctx.ui.requestRender();
 				},
