@@ -1,5 +1,11 @@
 import { canonicalKeyId } from "@oh-my-pi/pi-tui";
-import { type AppKeybinding, type KeybindingsManager, keyHintPlatform, modifierLabel } from "../../config/keybindings";
+import {
+	type AppKeybinding,
+	formatKeyHints,
+	type KeybindingsManager,
+	keyHintPlatform,
+	modifierLabel,
+} from "../../config/keybindings";
 
 export interface HotkeysMarkdownBindings {
 	keybindings: Pick<KeybindingsManager, "getDisplayString" | "getKeys" | "matchesCanonical">;
@@ -14,13 +20,28 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 	const isMac = platform === "darwin";
 	const alt = modifierLabel("alt", platform);
 	const cmd = modifierLabel("super", platform);
-	// Does the configured exit chord also carry the editor's forward-delete role? That readline
-	// `^D` overlap is what makes CustomEditor delete instead of exiting while the prompt holds a
-	// draft; a remapped exit key without the role (or Ctrl+D dropped from deleteCharForward)
-	// always exits, so the two configurations need different descriptions.
-	const exitDeletesForward = bindings.keybindings
-		.getKeys("app.exit")
-		.some(key => bindings.keybindings.matchesCanonical(canonicalKeyId(key), "tui.editor.deleteCharForward"));
+	// CustomEditor tests the chord that was actually pressed, so exit keys split by role: a key
+	// that also carries tui.editor.deleteCharForward (the readline `^D` overlap) forward-deletes
+	// while the prompt holds a draft, any other exit key quits immediately. Mixed bindings such as
+	// `["ctrl+d", "ctrl+q"]` therefore get one row per behavior instead of a single row claiming
+	// both keys delete.
+	const exitKeys = bindings.keybindings.getKeys("app.exit");
+	const deletingExitKeys = exitKeys.filter(key =>
+		bindings.keybindings.matchesCanonical(canonicalKeyId(key), "tui.editor.deleteCharForward"),
+	);
+	const quittingExitKeys = exitKeys.filter(
+		key => !bindings.keybindings.matchesCanonical(canonicalKeyId(key), "tui.editor.deleteCharForward"),
+	);
+	const exitRows: string[] = [];
+	if (deletingExitKeys.length > 0) {
+		exitRows.push(
+			`| \`${formatKeyHints(deletingExitKeys)}\` | Delete char forward (with draft) / exit (empty prompt) |`,
+		);
+	}
+	// An unbound exit action still gets its row, mirroring the `Disabled` hint every other row uses.
+	if (quittingExitKeys.length > 0 || deletingExitKeys.length === 0) {
+		exitRows.push(`| \`${formatKeyHints(quittingExitKeys) || "Disabled"}\` | Exit |`);
+	}
 	return [
 		"**Navigation**",
 		"| Key | Action |",
@@ -47,7 +68,7 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		"| `Tab` | Path completion / accept autocomplete |",
 		`| \`${appKey(bindings, "app.interrupt")}\` | Cancel autocomplete / interrupt active work |`,
 		`| \`${appKey(bindings, "app.clear")}\` | Clear editor (first) / exit (second) |`,
-		`| \`${appKey(bindings, "app.exit")}\` | ${exitDeletesForward ? "Delete char forward (with draft) / exit (empty prompt)" : "Exit"} |`,
+		...exitRows,
 		`| \`${appKey(bindings, "app.suspend")}\` | Suspend to background |`,
 		`| \`${appKey(bindings, "app.display.reset")}\` | Reset terminal display |`,
 		`| \`${appKey(bindings, "app.thinking.cycle")}\` | Cycle thinking level |`,

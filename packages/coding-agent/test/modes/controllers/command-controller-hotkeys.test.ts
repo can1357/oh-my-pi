@@ -123,5 +123,16 @@ describe("buildHotkeysMarkdown", () => {
 		// Ctrl+D kept as exit but dropped from forward-delete: exits unconditionally again.
 		const noDelete = KeybindingsManager.inMemory({ "tui.editor.deleteCharForward": "delete" });
 		expect(buildHotkeysMarkdown({ keybindings: noDelete })).toContain("| `Ctrl+D` | Exit |");
+
+		// Mixed roles: Ctrl+D forward-deletes with a draft, Ctrl+Q always quits — one row each.
+		const mixed = buildHotkeysMarkdown({
+			keybindings: KeybindingsManager.inMemory({ "app.exit": ["ctrl+d", "ctrl+q"] }),
+		});
+		expect(mixed).toContain("| `Ctrl+D` | Delete char forward (with draft) / exit (empty prompt) |");
+		expect(mixed).toContain("| `Ctrl+Q` | Exit |");
+
+		// Unbound exit keeps a row, matching the `Disabled` hint used elsewhere.
+		const unbound = buildHotkeysMarkdown({ keybindings: KeybindingsManager.inMemory({ "app.exit": [] }) });
+		expect(unbound).toContain("| `Disabled` | Exit |");
 	});
 });
