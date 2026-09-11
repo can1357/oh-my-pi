@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-advisor `subagents` eligibility to `WATCHDOG.yml` and `/advisor configure`: `false` keeps an advisor main-session-only; unset or `true` permits it in subagent sessions already opted in through frontmatter or `task.agentAdvisor`. Session-level and per-advisor enable switches remain authoritative ([#7168](https://github.com/can1357/oh-my-pi/pull/7168) by [@metaphorics](https://github.com/metaphorics)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added

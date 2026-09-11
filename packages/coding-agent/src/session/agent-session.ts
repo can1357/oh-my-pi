@@ -1791,6 +1791,7 @@ export class AgentSession {
 		};
 		this.#advisors = new SessionAdvisors(advisorsHost, {
 			enabled: this.settings.get("advisor.enabled"),
+			agentKind: config.agentKind,
 			tools: config.advisorTools,
 			createGrepTool: config.advisorCreateGrepTool,
 			createEditTool: config.advisorCreateEditTool,
