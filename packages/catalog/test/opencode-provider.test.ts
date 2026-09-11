@@ -996,3 +996,62 @@ describe("issue #10416 — retired bare opencode provider", () => {
 		expect(getBundledModels("opencode-zen").length).toBeGreaterThan(0);
 	});
 });
+
+describe("OpenCode Go V4.1 Flash cache recovery", () => {
+	test("refreshes a fresh bare-id cache so reasoning and image input become available", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-go-v41-"));
+		try {
+			const cacheDbPath = path.join(tempDir, "models.db");
+			let fetches = 0;
+			const options = opencodeGoModelManagerOptions({
+				apiKey: "go-v41-test",
+				fetch: async () => {
+					fetches++;
+					return modelListResponse(["deepseek-flash"]);
+				},
+			});
+			const staleSpec: ModelSpec<"openai-completions"> = {
+				id: "deepseek-flash",
+				name: "deepseek-flash",
+				provider: "opencode-go",
+				api: "openai-completions",
+				baseUrl: "https://opencode.ai/zen/go/v1",
+				reasoning: false,
+				input: ["text"],
+				contextWindow: null,
+				maxTokens: null,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			};
+			await resolveProviderModels(
+				{
+					...options,
+					cacheDbPath,
+					modelsDev: undefined,
+					dropCachedModelIdsOnStaticMismatch: options.dropCachedModelIdsOnStaticMismatch?.filter(
+						id => id !== staleSpec.id,
+					),
+					fetchDynamicModels: async () => [staleSpec],
+				},
+				"online",
+			);
+			const recovered = await resolveProviderModels(
+				{
+					...options,
+					cacheDbPath,
+					modelsDev: undefined,
+				},
+				"online-if-uncached",
+			);
+			const model = recovered.models.find(model => model.id === staleSpec.id);
+			expect(fetches).toBe(1);
+			expect(model?.api).toBe("openai-completions");
+			expect(model?.reasoning).toBe(true);
+			expect(model?.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+			expect(model?.input).toEqual(["text", "image"]);
+			expect(model?.contextWindow).toBe(1_000_000);
+			expect(model?.maxTokens).toBe(384_000);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+});

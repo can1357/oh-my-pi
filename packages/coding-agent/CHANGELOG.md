@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- OpenCode Go's new Flash model appears as `deepseek-v4.1-flash` in the model picker to distinguish it from V4 Flash ([#11586](https://github.com/can1357/oh-my-pi/pull/11586) by [@mazzanfar](https://github.com/mazzanfar)).
+
 ## [18.1.18] - 2026-09-11
 
 ### Added

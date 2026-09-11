@@ -4,6 +4,7 @@ import {
 	applyOpenRouterRoutingVariant,
 	convertMessages,
 	parseChunkUsage,
+	type OpenAICompletionsOptions,
 	streamOpenAICompletions,
 } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type {
@@ -115,7 +116,10 @@ function kimiZaiModel(): Model<"openai-completions"> {
 async function captureOpenAICompletionsPayload(
 	model: Model<"openai-completions">,
 	context: Context = baseContext(),
-	options?: { reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max"; temperature?: number },
+	options?: Pick<
+		OpenAICompletionsOptions,
+		"reasoning" | "temperature" | "maxTokens" | "disableReasoning" | "toolChoice"
+	>,
 ): Promise<unknown> {
 	const { promise, resolve } = Promise.withResolvers<unknown>();
 	const fetchMock = createMockFetch(["[DONE]"]);
@@ -2811,5 +2815,74 @@ describe("grammar tool-schema normalization (issue #5914)", () => {
 		const properties = toObject(toolParameters(payload, "task").properties);
 		// Off the grammar path the open field keeps the normalized bare boolean.
 		expect(properties?.outputSchema).toBe(true);
+	});
+});
+
+describe("OpenCode Go DeepSeek V4.1 Flash requests", () => {
+	function flashModel(): Model<"openai-completions"> {
+		return buildModel({
+			id: "deepseek-flash",
+			name: "DeepSeek V4.1 Flash",
+			provider: "opencode-go",
+			api: "openai-completions",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1_000_000,
+			maxTokens: 384_000,
+			cost: { input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0 },
+		});
+	}
+
+	it("keeps images and max effort while omitting unsupported forced tool choice", async () => {
+		const model = flashModel();
+		const payload = toObject(
+			await captureOpenAICompletionsPayload(
+				model,
+				{
+					messages: [
+						{
+							role: "user",
+							content: [
+								{ type: "text", text: "Describe this image." },
+								{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+							],
+							timestamp: 0,
+						},
+					],
+					tools: [
+						{
+							name: "describe",
+							description: "Describe the image",
+							parameters: {
+								type: "object",
+								properties: { description: { type: "string" } },
+								required: ["description"],
+							},
+						},
+					],
+				},
+				{ reasoning: "max", maxTokens: 1024, toolChoice: "required" },
+			),
+		);
+		expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(payload?.model).toBe("deepseek-flash");
+		expect(payload?.max_tokens).toBe(1024);
+		expect(payload?.max_completion_tokens).toBeUndefined();
+		expect(payload?.reasoning_effort).toBe("max");
+		expect(payload?.tool_choice).toBeUndefined();
+		expect(getLastPayloadContent(payload)).toContainEqual({
+			type: "image_url",
+			image_url: { url: "data:image/png;base64,aGVsbG8=" },
+		});
+	});
+
+	it("disables reasoning with none instead of silently retaining low effort", async () => {
+		const payload = toObject(
+			await captureOpenAICompletionsPayload(flashModel(), baseContext(), {
+				disableReasoning: true,
+			}),
+		);
+		expect(payload?.reasoning_effort).toBe("none");
 	});
 });

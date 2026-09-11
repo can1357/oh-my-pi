@@ -313,3 +313,19 @@ describe("ModelBrowser native model metadata", () => {
 		expect(renderDetail(makeModel("openai", "gpt-5"))).toContain("gpt-5 · 128k ctx · 1k out · free per M");
 	});
 });
+
+describe("version-explicit model labels", () => {
+	test("finds V4.1 Flash by its visible label but selects OpenCode's original API id", () => {
+		const model = makeModel("opencode-go", "deepseek-flash");
+		const oldModel = makeModel("opencode-go", "deepseek-v4-flash");
+		const browser = makeBrowser([oldModel, model], []);
+		browser.setQuery("deepseek-v4.1-flash");
+		expect(browser.getSelected()?.selector).toBe("opencode-go/deepseek-flash");
+		expect(browser.getSelected()?.model.id).toBe("deepseek-flash");
+		expect(Bun.stripANSI(browser.render(120).join("\n"))).toContain("deepseek-v4.1-flash");
+		browser.setQuery("deepseek-flash");
+		expect(browser.getSelected()?.selector).toBe("opencode-go/deepseek-flash");
+		browser.setQuery("deepseek-v4-flash");
+		expect(browser.getSelected()?.selector).toBe("opencode-go/deepseek-v4-flash");
+	});
+});

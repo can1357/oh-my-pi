@@ -20,6 +20,15 @@ provider "opencode-go" {
 	// The gateway's usage-limit error means a provider-wide quota window; when it
 	// exceeds the retry cap, recovery may route to a different provider.
 	long-usage-limit-fallback #true
+	// V4.1 Flash is the multimodal chat-completions lane documented at
+	// https://opencode.ai/docs/go/#endpoints (2026-09-10).
+	models "deepseek-flash" {
+		display-id "deepseek-v4.1-flash"
+		max-tokens-field "max_tokens"
+		reasoning-content-field "reasoning_content"
+		requires-reasoning-content-for-tool-calls #true
+		reasoning-disable-mode "none-effort"
+	}
 	class "deepseek" {
 		thinking-mode "effort"
 		family "flash" {

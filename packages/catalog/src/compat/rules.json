@@ -429,6 +429,11 @@
 						"priority": 0
 					},
 					{
+						"id": "flash",
+						"glob": "deepseek-flash",
+						"priority": 0
+					},
+					{
 						"id": "pro",
 						"glob": "*deepseek*v4*pro*",
 						"priority": 0
@@ -13055,6 +13060,27 @@
 			},
 			{
 				"source": "providers/opencode-go.kdl:25",
+				"providers": [
+					"opencode-go"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek-flash"
+					}
+				],
+				"wire": {
+					"maxTokensField": "max_tokens",
+					"reasoningContentField": "reasoning_content",
+					"requiresReasoningContentForToolCalls": true,
+					"reasoningDisableMode": "none-effort"
+				},
+				"catalog": {
+					"displayId": "deepseek-v4.1-flash"
+				}
+			},
+			{
+				"source": "providers/opencode-go.kdl:34",
 				"class": "deepseek",
 				"providers": [
 					"opencode-go"
@@ -13065,7 +13091,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:23",
+				"source": "providers/opencode-go.kdl:32",
 				"class": "deepseek",
 				"providers": [
 					"opencode-go"
@@ -13075,7 +13101,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:30",
+				"source": "providers/opencode-go.kdl:39",
 				"providers": [
 					"opencode-go"
 				],
@@ -13090,7 +13116,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:36",
+				"source": "providers/opencode-go.kdl:45",
 				"providers": [
 					"opencode-go"
 				],
@@ -13112,7 +13138,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:42",
+				"source": "providers/opencode-go.kdl:51",
 				"class": "glm",
 				"providers": [
 					"opencode-go"
@@ -13122,7 +13148,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:45",
+				"source": "providers/opencode-go.kdl:54",
 				"class": "kimi",
 				"providers": [
 					"opencode-go"
@@ -13132,7 +13158,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:49",
+				"source": "providers/opencode-go.kdl:58",
 				"class": "mimo",
 				"providers": [
 					"opencode-go"
@@ -13143,7 +13169,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:48",
+				"source": "providers/opencode-go.kdl:57",
 				"class": "mimo",
 				"providers": [
 					"opencode-go"
@@ -13153,7 +13179,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:56",
+				"source": "providers/opencode-go.kdl:65",
 				"class": "qwen",
 				"providers": [
 					"opencode-go"
@@ -13179,7 +13205,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:60",
+				"source": "providers/opencode-go.kdl:69",
 				"class": "qwen",
 				"providers": [
 					"opencode-go"
@@ -13205,7 +13231,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:66",
+				"source": "providers/opencode-go.kdl:75",
 				"providers": [
 					"opencode-go"
 				],
@@ -13230,7 +13256,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:71",
+				"source": "providers/opencode-go.kdl:80",
 				"providers": [
 					"opencode-go"
 				],
@@ -13250,7 +13276,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:76",
+				"source": "providers/opencode-go.kdl:85",
 				"providers": [
 					"opencode-go"
 				],
@@ -13272,7 +13298,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:81",
+				"source": "providers/opencode-go.kdl:90",
 				"providers": [
 					"opencode-go"
 				],
@@ -13293,7 +13319,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:85",
+				"source": "providers/opencode-go.kdl:94",
 				"providers": [
 					"opencode-go"
 				],
@@ -13320,7 +13346,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:89",
+				"source": "providers/opencode-go.kdl:98",
 				"providers": [
 					"opencode-go"
 				],
@@ -13342,7 +13368,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:94",
+				"source": "providers/opencode-go.kdl:103",
 				"providers": [
 					"opencode-go"
 				],
@@ -13357,7 +13383,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:98",
+				"source": "providers/opencode-go.kdl:107",
 				"providers": [
 					"opencode-go"
 				],
@@ -16427,6 +16453,14 @@
 			{
 				"provider": "opencode-go",
 				"routes": [
+					{
+						"api": "openai-completions",
+						"match": {
+							"exact": [
+								"deepseek-flash"
+							]
+						}
+					},
 					{
 						"api": "openai-responses",
 						"match": {
