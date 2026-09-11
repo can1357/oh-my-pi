@@ -5308,6 +5308,17 @@ describe("advisor", () => {
 					const unsafeOutput: AssistantMessage = {
 						role: "assistant",
 						content: [{ type: "toolCall", id: "stale-bash", name: "bash", arguments: { command: "true" } }],
+						api: "openai-responses",
+						provider: "openai",
+						model: "quarantine-reset-race",
+						usage: {
+							input: 1,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 1,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
 						stopReason: "toolUse",
 						timestamp: Date.now(),
 					};
