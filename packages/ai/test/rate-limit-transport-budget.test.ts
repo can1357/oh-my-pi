@@ -14,7 +14,11 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { __anthropicApiErrorForTesting } from "@oh-my-pi/pi-ai/error";
-import { AnthropicApiError, AnthropicMessagesClient } from "@oh-my-pi/pi-ai/providers/anthropic-client";
+import {
+	AnthropicApiError,
+	AnthropicMessagesClient,
+	type AnthropicMessagesClientLike,
+} from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -259,6 +263,32 @@ describe("transport rate-limit budget", () => {
 		const result = await streamAnthropic(anthropicModel, context, {
 			apiKey: "sk-test",
 			fetch: fetchMock,
+			providerRetryWait: async () => {},
+		}).result();
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find(block => block.type === "text")?.text).toBe("Hello");
+		expect(requests).toBe(MAX_RATE_LIMIT_ATTEMPTS);
+	});
+
+	it("preserves one short-hinted retry for an injected anthropic client", async () => {
+		let requests = 0;
+		const client: AnthropicMessagesClientLike = {
+			messages: {
+				create: () =>
+					({
+						async asResponse() {
+							requests++;
+							if (requests === 1) {
+								throw new AnthropicApiError(429, "Too many requests", new Headers({ "retry-after-ms": "20" }));
+							}
+							return anthropicSuccess("Hello");
+						},
+					}) as never,
+			},
+		};
+		const result = await streamAnthropic(anthropicModel, context, {
+			client,
 			providerRetryWait: async () => {},
 		}).result();
 		expect(result.errorMessage).toBeUndefined();
