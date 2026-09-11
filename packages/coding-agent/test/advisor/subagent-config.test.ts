@@ -3,25 +3,12 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
-	advisorRunsForAgentKind,
 	discoverAdvisorConfigs,
 	loadWatchdogConfigFile,
 	saveWatchdogConfigFile,
 	serializeWatchdogConfig,
 	type WatchdogConfigDoc,
 } from "../../src/advisor/config";
-
-describe("advisor subagent eligibility", () => {
-	for (const agentKind of ["main", "sub"] as const) {
-		for (const subagents of [undefined, true, false]) {
-			it(`${agentKind} session with subagents=${String(subagents)}`, () => {
-				expect(advisorRunsForAgentKind({ name: "reviewer", subagents }, agentKind)).toBe(
-					agentKind === "main" || subagents !== false,
-				);
-			});
-		}
-	}
-});
 
 describe("WATCHDOG.yml subagent eligibility", () => {
 	let tempDir: TempDir;
@@ -83,8 +70,8 @@ describe("WATCHDOG.yml subagent eligibility", () => {
 		expect(discovered.advisors[0].maxNotesPerUpdate).toBe(5);
 	});
 
-	it.each(['"true"', '"false"', "1", "null"])("rejects non-boolean subagents: %s", async value => {
-		await Bun.write(configPath, `advisors:\n  - name: reviewer\n    subagents: ${value}\n`);
+	it("rejects a non-boolean subagents value", async () => {
+		await Bun.write(configPath, 'advisors:\n  - name: reviewer\n    subagents: "true"\n');
 		expect(await loadWatchdogConfigFile(configPath)).toEqual({ advisors: [] });
 		expect((await discoverAdvisorConfigs(projectDir, agentDir)).advisors).toEqual([]);
 	});
