@@ -25,7 +25,9 @@ import {
 	previewLine,
 	previewWindowRows,
 	replaceTabs,
+	shortenPath,
 	type ToolUIStatus,
+	TRUNCATE_LENGTHS,
 	truncateToWidth,
 } from "../tools/render-utils";
 import {
@@ -1454,10 +1456,25 @@ function renderAgentResult(
 		lines.push(...deferredToolLines);
 	}
 
-	if (result.patchPath && !aborted && result.exitCode === 0) {
-		lines.push(`${continuePrefix}${theme.fg("dim", `Patch: ${result.patchPath}`)}`);
+	// Artifact rows: paths shortened (home → `~`), tabs expanded, and width-bounded
+	// like every other rendered line; the full paths live in the model-facing summary.
+	// A nested-only run still carries its (empty) root patch path, so hide that
+	// row when the runner reports no root changes — same as the model summary.
+	if (result.patchPath && result.hasRootChanges !== false && !aborted && result.exitCode === 0) {
+		lines.push(
+			`${continuePrefix}${theme.fg("dim", truncateToWidth(`Patch: ${replaceTabs(shortenPath(result.patchPath))}`, TRUNCATE_LENGTHS.CONTENT))}`,
+		);
 	} else if (result.branchName && !aborted && result.exitCode === 0) {
-		lines.push(`${continuePrefix}${theme.fg("dim", `Branch: ${result.branchName}`)}`);
+		lines.push(
+			`${continuePrefix}${theme.fg("dim", truncateToWidth(`Branch: ${replaceTabs(sanitizeText(result.branchName))}`, TRUNCATE_LENGTHS.CONTENT))}`,
+		);
+	}
+	if (!aborted && result.exitCode === 0) {
+		for (const nestedPath of result.nestedPatchPaths ?? []) {
+			lines.push(
+				`${continuePrefix}${theme.fg("dim", truncateToWidth(`Nested patch: ${replaceTabs(shortenPath(nestedPath))}`, TRUNCATE_LENGTHS.CONTENT))}`,
+			);
+		}
 	}
 
 	// Error message

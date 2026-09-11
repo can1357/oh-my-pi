@@ -8193,30 +8193,39 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
-	 * Set steering mode.
-	 * Saves to settings.
+	 * Set steering mode. Persists to global config by default; pass
+	 * `persist: false` for a session-only change (RPC) that leaves Settings —
+	 * and therefore later sessions and subagents — untouched.
 	 */
-	setSteeringMode(mode: "all" | "one-at-a-time"): void {
+	setSteeringMode(mode: "all" | "one-at-a-time", persist = true): void {
 		this.agent.setSteeringMode(mode);
-		this.settings.set("steeringMode", mode);
+		if (persist) {
+			this.settings.set("steeringMode", mode);
+		}
 	}
 
 	/**
-	 * Set follow-up mode.
-	 * Saves to settings.
+	 * Set follow-up mode. Persists to global config by default; pass
+	 * `persist: false` for a session-only change (RPC) that leaves Settings —
+	 * and therefore later sessions and subagents — untouched.
 	 */
-	setFollowUpMode(mode: "all" | "one-at-a-time"): void {
+	setFollowUpMode(mode: "all" | "one-at-a-time", persist = true): void {
 		this.agent.setFollowUpMode(mode);
-		this.settings.set("followUpMode", mode);
+		if (persist) {
+			this.settings.set("followUpMode", mode);
+		}
 	}
 
 	/**
-	 * Set interrupt mode.
-	 * Saves to settings.
+	 * Set interrupt mode. Persists to global config by default; pass
+	 * `persist: false` for a session-only change (RPC) that leaves Settings —
+	 * and therefore later sessions and subagents — untouched.
 	 */
-	setInterruptMode(mode: "immediate" | "wait"): void {
+	setInterruptMode(mode: "immediate" | "wait", persist = true): void {
 		this.agent.setInterruptMode(mode);
-		this.settings.set("interruptMode", mode);
+		if (persist) {
+			this.settings.set("interruptMode", mode);
+		}
 	}
 
 	/**
