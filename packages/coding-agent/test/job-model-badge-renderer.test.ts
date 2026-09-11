@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 import { AsyncJobManager } from "../src/async/job-manager";
@@ -6,6 +7,7 @@ import { resetSettingsForTest, Settings, settings } from "../src/config/settings
 import { getThemeByName, setThemeInstance, type Theme } from "../src/modes/theme/theme";
 import type { ToolSession } from "../src/tools";
 import { jobsRenderResult, snapshotJobs } from "../src/tools/hub/jobs";
+import { createIrcMessageCard } from "../src/tools/hub/messaging";
 import type { CoordinationDetails } from "../src/tools/hub/types";
 import { formatDuration, thinkingLevelGlyph } from "../src/tools/render-utils";
 
@@ -45,6 +47,245 @@ describe("hub jobs task model badges", () => {
 		settings.override("task.showResolvedModelBadge", priorShowResolvedModelBadge);
 		settings.clearOverride("task.showResolvedModelBadge");
 		vi.restoreAllMocks();
+	});
+
+	it("displays yielded prose without transport markup in settled jobs and IRC replies", () => {
+		const envelope =
+			'<task-result id="Reader" status="completed">\n<meta lines="3" />\n<output>\n{"summary":"Read completed.\\nNo files changed."}\n</output>\n</task-result>';
+		for (const expanded of [false, true]) {
+			const jobText = renderJobText(
+				{
+					jobs: [
+						{
+							id: "Reader",
+							type: "task",
+							status: "completed",
+							label: "Reader",
+							durationMs: 1,
+							resultText: envelope,
+						},
+					],
+				},
+				expanded,
+			);
+			const cardText = createIrcMessageCard(
+				{ kind: "incoming", from: "Reader", body: envelope },
+				() => expanded,
+				uiTheme,
+			)
+				.render(160)
+				.join("\n")
+				.replace(ansiPattern, "");
+			for (const text of [jobText, cardText]) {
+				expect(text).toContain("Read completed.");
+				expect(text).not.toContain("<task-result");
+				expect(text).not.toContain("<meta");
+				expect(text).not.toContain('"summary"');
+				expect(text).not.toContain("\\n");
+			}
+			expect(cardText).toContain("No files changed.");
+		}
+	});
+
+	it("neutralizes terminal commands materialized by task result JSON decoding", () => {
+		const envelope = `<task-result id="Reader"><output>\n${JSON.stringify({ summary: "Read \x1b[2Jcompleted.\x00\tNext" })}\n</output></task-result>`;
+		const jobText = renderJobText(
+			{
+				jobs: [
+					{
+						id: "Reader",
+						type: "task",
+						status: "completed",
+						label: "Reader",
+						durationMs: 1,
+						resultText: envelope,
+					},
+				],
+			},
+			true,
+		);
+		const cardText = createIrcMessageCard({ kind: "incoming", from: "Reader", body: envelope }, () => true, uiTheme)
+			.render(160)
+			.join("\n");
+		for (const text of [jobText, cardText]) {
+			expect(text).toContain("Read completed.");
+			expect(text).not.toContain("\x1b[2J");
+			expect(text).not.toContain("\x00");
+			expect(text).not.toContain("\t");
+			expect(text).toContain("Next");
+		}
+	});
+
+	it("shows the failure detail beside the failed status in a collapsed job", () => {
+		const text = renderJobText(
+			{
+				jobs: [
+					{
+						id: "Reader",
+						type: "task",
+						status: "failed",
+						label: "Reader",
+						durationMs: 1,
+						errorText:
+							'<task-result id="Reader" status="failed"><output>\n{"summary":"Could not read the requested file."}\n</output></task-result>',
+					},
+				],
+			},
+			false,
+		);
+		expect(text).toContain("failed");
+		expect(text).toContain("Could not read the requested file.");
+		expect(text).not.toContain("<task-result");
+		expect(text).not.toContain('"summary"');
+	});
+
+	it("keeps failed task status visible in IRC cards without a separate job status", () => {
+		const body =
+			'<task-result id="Reader" status="failed (exit 1)"><output>\nPartial findings\n</output></task-result>';
+		const text = Bun.stripANSI(
+			createIrcMessageCard({ kind: "incoming", from: "Reader", body }, () => true, uiTheme)
+				.render(160)
+				.join("\n"),
+		);
+		expect(text).toContain("failed (exit 1)");
+		expect(text).toContain("Partial findings");
+		expect(text).not.toContain("<task-result");
+	});
+
+	it("preserves cancellation reasons and resumability in relayed task previews", () => {
+		const reason = `Cancelled by user — ${os.homedir()}/private/file.txt; resume through hub.`;
+		const envelope = `<task-result id="Reader" status="aborted"><abort-reason>${reason}</abort-reason><output>\n(no output)\n</output></task-result>`;
+		const jobText = renderJobText(
+			{
+				jobs: [
+					{
+						id: "Reader",
+						type: "task",
+						status: "failed",
+						label: "Reader",
+						durationMs: 1,
+						errorText: envelope,
+					},
+				],
+			},
+			true,
+		);
+		const cardText = createIrcMessageCard({ kind: "incoming", from: "Reader", body: envelope }, () => true, uiTheme)
+			.render(180)
+			.join("\n");
+		for (const text of [jobText, cardText]) {
+			expect(text).toContain("Cancelled by user");
+			expect(text).toContain("resume through hub");
+			expect(text).toContain("~/private/file.txt");
+			expect(text).not.toContain(os.homedir());
+			expect(text).not.toContain("<abort-reason>");
+		}
+	});
+
+	it("retains literal closing tags inside task output and preview envelopes", () => {
+		for (const tag of ["output", "preview"]) {
+			const body = "Literal </output> and </preview> remain. Tail intact.";
+			const attributes = tag === "preview" ? ' full-output="agent://Reader"' : "";
+			const envelope = `<task-result id="Reader"><${tag}${attributes}>\n${body}\n</${tag}></task-result>`;
+			const jobText = renderJobText(
+				{
+					jobs: [
+						{
+							id: "Reader",
+							type: "task",
+							status: "completed",
+							label: "Reader",
+							durationMs: 1,
+							resultText: envelope,
+						},
+					],
+				},
+				true,
+			);
+			const cardText = createIrcMessageCard(
+				{ kind: "incoming", from: "Reader", body: envelope },
+				() => true,
+				uiTheme,
+			)
+				.render(160)
+				.join("\n");
+			const collapsedJobText =
+				tag === "preview"
+					? renderJobText(
+							{
+								jobs: [
+									{
+										id: "Reader",
+										type: "task",
+										status: "completed",
+										label: "Reader",
+										durationMs: 1,
+										resultText: envelope,
+									},
+								],
+							},
+							false,
+						)
+					: undefined;
+			for (const text of [jobText, cardText]) {
+				expect(text).toContain("</output>");
+				expect(text).toContain("</preview>");
+				expect(text).toContain("Tail intact.");
+				if (tag === "preview") {
+					expect(collapsedJobText).toContain("Literal </output>");
+					expect(text).toContain("agent://Reader");
+					expect(text.indexOf("Tail intact.")).toBeLessThan(text.indexOf("Full output: agent://Reader"));
+				}
+				expect(text).not.toContain("<task-result");
+			}
+		}
+	});
+
+	it("retains arbitrary single-field schemas in task job and IRC previews", () => {
+		const body = '{"report":"No issues"}';
+		const envelope = `<task-result id="Reader"><output>\n${body}\n</output></task-result>`;
+		const jobText = renderJobText(
+			{
+				jobs: [
+					{
+						id: "Reader",
+						type: "task",
+						status: "completed",
+						label: "Reader",
+						durationMs: 1,
+						resultText: envelope,
+					},
+				],
+			},
+			true,
+		);
+		const cardText = createIrcMessageCard({ kind: "incoming", from: "Reader", body: envelope }, () => true, uiTheme)
+			.render(160)
+			.join("\n");
+		for (const text of [jobText, cardText]) {
+			expect(text).toContain('"report"');
+			expect(text).toContain("No issues");
+			expect(text).not.toContain("<task-result");
+		}
+	});
+
+	it("does not reinterpret JSON emitted by shell jobs or ordinary IRC messages", () => {
+		const body = '{"summary":"literal data"}';
+		const text = renderJobText({
+			jobs: [
+				{
+					id: "Shell",
+					type: "bash",
+					status: "completed",
+					label: "Shell",
+					durationMs: 1,
+					resultText: body,
+				},
+			],
+		});
+		const card = createIrcMessageCard({ kind: "incoming", from: "Reader", body }, () => true, uiTheme);
+		expect(text).toContain(body);
+		expect(card.render(160).join("\n").replace(ansiPattern, "")).toContain(body);
 	});
 
 	it("keeps a literal thinking suffix in a completed task's identity with a separate thinking glyph", () => {

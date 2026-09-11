@@ -61,6 +61,18 @@ describe("mcp/startup-events — connection-status cross-module contract", () =>
 		expect(message).toContain("broken: failed at   ~/.omp/mcp.log");
 	});
 
+	it("uses shared path boundaries in command-like and quoted failure text", () => {
+		const home = os.homedir();
+		const message = formatMCPConnectionStatusMessage({
+			pendingServers: [],
+			connectedServers: [],
+			failedServers: [{ serverName: "broken", error: `PYTHONPATH=${home}:/opt/lib; config \`${home}/cfg\`` }],
+		});
+		expect(message).toContain("PYTHONPATH=~:/opt/lib");
+		expect(message).toContain("`~/cfg`");
+		expect(message).not.toContain(home);
+	});
+
 	it("keeps the config source and transport error visible under independent truncation", () => {
 		const message = formatMCPConnectionStatusMessage({
 			pendingServers: [],

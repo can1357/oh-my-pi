@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Subagents now show their current activity and a separate, width-bounded current-tool row; resolved model labels follow the model badge setting.
+### Fixed
+
+- Fixed completed subagent jobs and IRC replies displaying internal XML/JSON wrappers instead of readable results.
+- Collapsed failed subagent jobs now show the error details instead of repeating the job status.
+- Fixed fast subagent tool transitions being dropped by progress and HUD update batching.
+- Kept the last completed subagent tool visible with the configured success/error symbol until the next tool starts; edit previews include affected file paths.
+
+### Fixed
+
+- Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 ### Fixed
 
 - The `set_steering_mode`, `set_follow_up_mode`, and `set_interrupt_mode` RPC commands are now session-scoped, so a short-lived RPC client no longer silently writes queue-mode fields to the machine-global `config.yml`. The setters still persist by default, so the settings panel and existing callers are unaffected ([#11555](https://github.com/can1357/oh-my-pi/issues/11555)).

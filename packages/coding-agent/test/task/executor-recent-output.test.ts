@@ -23,6 +23,7 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition, AgentProgress } from "@oh-my-pi/pi-coding-agent/task/types";
+import { shortenToolArgumentPaths, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
@@ -85,6 +86,8 @@ interface Observation {
 
 interface ScenarioResult {
 	observations: Observation[];
+	tools: Array<string | undefined>;
+	toolSnapshots: Array<Pick<AgentProgress, "currentTool" | "currentToolArgs" | "lastIntent" | "recentTools">>;
 	/** Snapshot arrays captured by reference + a deep copy taken at observation time. */
 	immutability: Array<{ live: string[]; copy: string[] }>;
 	exitCode: number;
@@ -205,9 +208,14 @@ const agent: AgentDefinition = {
 	source: "bundled",
 };
 
-async function runScenario(ops: Op[], options?: { abortAfterOps?: boolean }): Promise<ScenarioResult> {
+async function runScenario(
+	ops: Op[],
+	options?: { abortAfterOps?: boolean; events?: AgentSessionEvent[] },
+): Promise<ScenarioResult> {
 	const ref = new RecentOutputReference();
 	const observations: Observation[] = [];
+	const tools: Array<string | undefined> = [];
+	const toolSnapshots: ScenarioResult["toolSnapshots"] = [];
 	const immutability: Array<{ live: string[]; copy: string[] }> = [];
 	const abortController = new AbortController();
 
@@ -233,6 +241,7 @@ async function runScenario(ops: Op[], options?: { abortAfterOps?: boolean }): Pr
 					break;
 			}
 		}
+		for (const event of options?.events ?? []) emit(event);
 		if (options?.abortAfterOps) {
 			abortController.abort();
 			return;
@@ -255,12 +264,19 @@ async function runScenario(ops: Op[], options?: { abortAfterOps?: boolean }): Pr
 		signal: abortController.signal,
 		eventBus: new EventBus(),
 		onProgress: (progress: AgentProgress) => {
+			tools.push(progress.currentTool);
+			toolSnapshots.push({
+				currentTool: progress.currentTool,
+				currentToolArgs: progress.currentToolArgs,
+				lastIntent: progress.lastIntent,
+				recentTools: progress.recentTools.slice(),
+			});
 			observations.push({ got: [...progress.recentOutput], want: ref.expected() });
 			immutability.push({ live: progress.recentOutput, copy: [...progress.recentOutput] });
 		},
 	});
 
-	return { observations, immutability, exitCode: result.exitCode, finalWant: ref.expected() };
+	return { observations, tools, toolSnapshots, immutability, exitCode: result.exitCode, finalWant: ref.expected() };
 }
 
 function expectAllMatch(result: ScenarioResult, minObservations: number): void {
@@ -288,10 +304,170 @@ function mulberry32(seed: number): () => number {
 		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 	};
 }
+describe("tool argument preview semantics", () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	it("does not reinterpret another tool's input as an edit path", async () => {
+		const result = await runScenario([], {
+			events: [
+				{
+					type: "tool_execution_start",
+					toolCallId: "custom-1",
+					toolName: "custom-search",
+					args: { input: "[draft]", query: "real query" },
+				},
+			],
+		});
+		expect(result.toolSnapshots.find(p => p.currentTool === "custom-search")?.currentToolArgs).toBe("real query");
+	});
+
+	it("keeps complete home path boundaries until the display sanitizer runs", async () => {
+		const home = process.env.HOME!;
+		const command = `echo ${"x".repeat(Math.max(0, 53 - home.length))} ${home}/private/file`;
+		const result = await runScenario([], {
+			events: [
+				{
+					type: "tool_execution_start",
+					toolCallId: "bash-1",
+					toolName: "bash",
+					args: { command },
+				},
+			],
+		});
+		const args = result.toolSnapshots.find(p => p.currentTool === "bash")?.currentToolArgs ?? "";
+		const preview = shortenToolArgumentPaths(args, "command");
+		expect(preview).toContain("~/private/file");
+		expect(preview).not.toContain(home);
+	});
+
+	it("bounds large arguments in both active and completed progress snapshots", async () => {
+		const result = await runScenario([], {
+			events: [
+				{
+					type: "tool_execution_start",
+					toolCallId: "large",
+					toolName: "bash",
+					args: { command: `echo ${"payload ".repeat(20_000)}` },
+				},
+				{
+					type: "tool_execution_end",
+					toolCallId: "large",
+					toolName: "bash",
+					result: { content: [] },
+					isError: false,
+				},
+			],
+		});
+		const active = result.toolSnapshots.find(p => p.currentTool === "bash")!;
+		const completed = result.toolSnapshots.find(p => p.recentTools[0]?.tool === "bash")!;
+		expect(active.currentToolArgs).toContain("echo payload");
+		expect(active.currentToolArgs!.length).toBeLessThanOrEqual(TRUNCATE_LENGTHS.CONTENT);
+		expect(completed.recentTools[0].args.length).toBeLessThanOrEqual(TRUNCATE_LENGTHS.CONTENT);
+	});
+});
 
 describe("recentOutput event-sequence equivalence (deferred reconstruction)", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+	});
+
+	it("publishes fast tool starts even within the progress coalescing window", async () => {
+		vi.spyOn(Date, "now").mockReturnValue(10_000);
+		const result = await runScenario([{ kind: "delta", text: "Reading" }, { kind: "observe" }, { kind: "observe" }]);
+		expect(result.exitCode).toBe(0);
+		expect(result.tools.filter(tool => tool === "read")).toHaveLength(2);
+		for (let index = 0; index < result.tools.length; index++) {
+			if (result.tools[index] === "read") expect(result.tools[index + 1]).toBeUndefined();
+		}
+	});
+
+	it("keeps another concurrent tool running and attributes each completion to its call", async () => {
+		for (const finishReadFirst of [true, false]) {
+			const readEvents = toolPair(1);
+			readEvents[0] = {
+				type: "tool_execution_start",
+				toolCallId: "obs-1",
+				toolName: "read",
+				args: { path: "src/one.ts" },
+				intent: "Reading the first file",
+			};
+			const searchEvents: AgentSessionEvent[] = [
+				{
+					type: "tool_execution_start",
+					toolCallId: "search-2",
+					toolName: "grep",
+					args: { pattern: "needle" },
+					intent: "Searching for the symbol",
+				},
+				{
+					type: "tool_execution_end",
+					toolCallId: "search-2",
+					toolName: "grep",
+					result: { content: [] },
+					isError: true,
+				},
+			];
+			const events = [
+				readEvents[0],
+				searchEvents[0],
+				...(finishReadFirst ? [readEvents[1], searchEvents[1]] : [searchEvents[1], readEvents[1]]),
+			];
+			const result = await runScenario([], { events });
+			expect(result.exitCode).toBe(0);
+			const finishedName = finishReadFirst ? "read" : "grep";
+			const afterFirst = result.toolSnapshots.find(snapshot => snapshot.recentTools[0]?.tool === finishedName);
+			expect(afterFirst?.currentTool).toBe(finishReadFirst ? "grep" : "read");
+			expect(afterFirst?.currentToolArgs).toBe(finishReadFirst ? "needle" : "src/one.ts");
+			expect(afterFirst?.lastIntent).toBe(finishReadFirst ? "Searching for the symbol" : "Reading the first file");
+			expect(afterFirst?.recentTools[0]).toMatchObject({
+				tool: finishedName,
+				args: finishReadFirst ? "src/one.ts" : "needle",
+				isError: !finishReadFirst,
+			});
+		}
+	});
+
+	it("extracts source and destination paths across supported edit modes", async () => {
+		for (const args of [
+			{
+				input: "*** Begin Patch\n[src/one.ts#A1B2]\nPUT 1.=1:\n+private body\n[src/two.ts#C3D4]\nCUT 2.=2\n*** End Patch",
+			},
+			{ input: "*** Begin Patch\n[src/one.ts#A1B2]\nMV src/two.ts\n*** End Patch" },
+			{
+				input: "*** Begin Patch\n*** Update File: src/one.ts\n@@\n [draft]\n-old body\n+private body\n*** Delete File: src/two.ts\n*** End Patch",
+			},
+			{
+				input: "*** Begin Patch\n*** Update File: src/one.ts\n*** Move to: src/two.ts\n@@\n-old\n+new\n*** End Patch",
+			},
+			{
+				input: '*** Begin Patch\n<sm:edit path="src/one.ts">\n<SM:FIND>\n[draft]\n</SM:FIND>\n<SM:PUT>\nprivate body\n</SM:PUT>\n<Sm:Edit path="src/two.ts">\n<SM:FIND>\nold\n</SM:FIND>\n<SM:PUT>\nnew\n</SM:PUT>\n*** End Patch',
+			},
+			{ path: "src/one.ts", edits: [{ op: "update", rename: "src/two.ts", diff: "@@\n-old\n+new" }] },
+		]) {
+			const result = await runScenario([], {
+				events: [
+					{ type: "tool_execution_start", toolCallId: "edit-1", toolName: "edit", args },
+					{
+						type: "tool_execution_end",
+						toolCallId: "edit-1",
+						toolName: "edit",
+						result: { content: [] },
+						isError: false,
+					},
+				],
+			});
+			expect(result.exitCode).toBe(0);
+			expect(result.toolSnapshots.find(snapshot => snapshot.currentTool === "edit")?.currentToolArgs).toBe(
+				"src/one.ts, src/two.ts",
+			);
+			expect(
+				result.toolSnapshots.find(snapshot => snapshot.recentTools[0]?.tool === "edit")?.recentTools[0],
+			).toMatchObject({
+				tool: "edit",
+				args: "src/one.ts, src/two.ts",
+				argsKey: "path",
+			});
+		}
 	});
 
 	it("matches the reference across arbitrary chunk boundaries and blank lines", async () => {

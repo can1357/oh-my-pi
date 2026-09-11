@@ -136,6 +136,7 @@ import {
 	replaceTabs,
 	shortenEmbeddedPaths,
 	shortenPath,
+	shortenToolArgumentPaths,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
 } from "../tools/render-utils";
@@ -505,16 +506,19 @@ const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
  * eval `agent()` spawns are rendered by their own eval cell tree.
  * Returns an empty array when nothing is running so the container can clear.
  */
-export function renderSubagentHudLines(sessions: ObservableSession[], columns: number): string[] {
+export function renderSubagentHudLines(
+	sessions: ObservableSession[],
+	columns: number,
+	showResolvedModelBadge = isFeedModelBadgeEnabled(),
+): string[] {
 	const running = sessions.filter(
 		session => session.kind === "subagent" && session.status === "active" && session.detached === true,
 	);
 	if (running.length === 0) return [];
-
 	const dot = theme.styledSymbol("status.done", "accent");
 	const visible = running.slice(0, SUBAGENT_HUD_VISIBLE_LIMIT);
 	const hiddenCount = running.length - visible.length;
-	const showModelBadge = isFeedModelBadgeEnabled();
+	const showModelBadge = showResolvedModelBadge;
 	const outerIndent = " ";
 	const rows = renderTreeList(
 		{
@@ -543,24 +547,43 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 					: "";
 				const modelLead = modelBadge ? `${modelBadge} ` : "";
 				let line = `${dot} ${modelLead}${theme.fg("accent", theme.bold(displayId))}${badge}`;
-				const description = session.description?.trim() || session.progress?.description?.trim();
-				const distinctDescription =
-					description && !labelEchoesHandle(session.id, description) ? description : undefined;
-				if (distinctDescription) {
+				let description = session.progress?.lastIntent?.trim();
+				if (!description || labelEchoesHandle(session.id, description))
+					description = session.progress?.description?.trim();
+				if (!description || labelEchoesHandle(session.id, description)) description = session.description?.trim();
+				if (!description || labelEchoesHandle(session.id, description))
+					description = session.progress?.assignment?.trim();
+				if (!description || labelEchoesHandle(session.id, description))
+					description = session.progress?.task?.trim();
+				if (description && labelEchoesHandle(session.id, description)) description = undefined;
+				if (description) {
 					const budget = Math.max(0, rowWidth - visibleWidth(line) - visibleWidth(": "));
-					const formatted = replaceTabs(distinctDescription).replace(/\s*[\r\n]+\s*/g, " ↵ ");
-					if (budget > 0) {
+					const formatted = replaceTabs(shortenEmbeddedPaths(sanitizeText(description))).replace(
+						/\s*[\r\n]+\s*/g,
+						" ",
+					);
+					if (budget > 0)
 						line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(formatted, budget))}`;
-					}
-				} else {
-					// No spawn description: fall back to a muted task preview, same as
-					// the inline task rows when a row has no label.
-					const taskPreview = session.progress?.task?.trim();
-					if (taskPreview && !labelEchoesHandle(session.id, taskPreview)) {
-						const formatted = replaceTabs(taskPreview).replace(/\s*[\r\n]+\s*/g, " ↵ ");
-						const budget = Math.min(TRUNCATE_LENGTHS.SHORT, Math.max(0, rowWidth - visibleWidth(line) - 1));
-						if (budget > 0) line += ` ${theme.fg("muted", truncateToWidth(formatted, budget))}`;
-					}
+				}
+				const currentTool = session.progress?.currentTool?.trim();
+				const lastTool = currentTool ? undefined : session.progress?.recentTools[0];
+				const toolName = currentTool || lastTool?.tool;
+				if (toolName) {
+					const rawArgs = currentTool ? session.progress?.currentToolArgs?.trim() : lastTool?.args.trim();
+					const args =
+						rawArgs === undefined ? undefined : replaceTabs(sanitizeText(rawArgs)).replace(/\s*[\r\n]+\s*/g, " ");
+					const argsKey = currentTool ? session.progress?.currentToolArgsKey : lastTool?.argsKey;
+					const displayArgs = shortenToolArgumentPaths(args ?? "", argsKey);
+					const cleanName = replaceTabs(sanitizeText(toolName)).replace(/\s*[\r\n]+\s*/g, " ");
+					const toolText = displayArgs ? `${cleanName}(${displayArgs})` : cleanName;
+					const toolLabel = lastTool
+						? `${theme.styledSymbol(lastTool.isError ? "status.error" : "status.success", lastTool.isError ? "error" : "success")} ${toolText}`
+						: toolText;
+					const lead = `${theme.tree.hook} `;
+					return [
+						truncateToWidth(line, rowWidth, ""),
+						`${lead}${theme.fg("dim", truncateToWidth(toolLabel, Math.max(0, rowWidth - visibleWidth(lead)), ""))}`,
+					];
 				}
 				return truncateToWidth(line, rowWidth, "");
 			},
@@ -1407,6 +1430,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			onStatusLineSessionAccentChanged(() => {
 				this.#syncStatusLineSettings();
 				this.#handleSessionAccentInputsChanged();
+			}),
+		);
+		this.#eventBusUnsubscribers.push(
+			this.settings.onEffectiveChange(path => {
+				if (path === "task.showResolvedModelBadge") {
+					this.#renderSubagentList();
+					this.ui.requestRender();
+				}
 			}),
 		);
 		// Resync the welcome banner to the live model: init-time reconciliations
@@ -2726,6 +2757,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#scheduleObserverUiSync(kind: SessionObserverChangeKind): void {
+		if (kind === "tool") {
+			if (this.#observerUiSyncTimer) {
+				clearTimeout(this.#observerUiSyncTimer);
+				this.#observerUiSyncTimer = undefined;
+			}
+			this.#flushObserverUiSync();
+			return;
+		}
 		if (kind !== "progress") {
 			this.#observerUiSyncNeedsTodoReconcile = true;
 		}
@@ -2939,16 +2978,17 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/**
 	 * Anchored HUD of in-flight subagents, mirroring the Todos block above the
-
-	/**
-	 * Anchored HUD of in-flight subagents, mirroring the Todos block above the
 	 * editor. Driven entirely by observer-registry change events, so rows appear
 	 * on spawn and the whole block clears itself once the last subagent leaves
 	 * the "active" state.
 	 */
 	#renderSubagentList(): void {
 		this.subagentContainer.clear();
-		const lines = renderSubagentHudLines(this.#observerRegistry.getSessions(), this.ui.terminal.columns);
+		const lines = renderSubagentHudLines(
+			this.#observerRegistry.getSessions(),
+			this.ui.terminal.columns,
+			this.settings.get("task.showResolvedModelBadge"),
+		);
 		if (lines.length === 0) return;
 		this.subagentContainer.addChild(new Text(lines.join("\n"), 1, 0));
 	}

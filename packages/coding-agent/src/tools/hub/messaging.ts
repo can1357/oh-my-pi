@@ -18,6 +18,7 @@ import { IrcAwaitTargetStopped, IrcBus, type IrcDeliveryReceipt, type IrcMessage
 import type { Theme } from "../../modes/theme/theme";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../../registry/persisted-agents";
+import { formatTaskResultPreview } from "../../task/result-preview";
 import { canSpawnAtDepth } from "../../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
 import {
@@ -593,7 +594,8 @@ export function createIrcMessageCard(
 				: card.kind === "workpool"
 					? `Pool ${card.pool?.trim() || "?"} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`
 					: `IRC ${from} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`;
-	const body = card.body ?? "";
+	const rawBody = card.body ?? "";
+	const body = rawBody.trimStart().startsWith("<task-result ") ? formatTaskResultPreview(rawBody) : rawBody;
 	const meta: string[] = [];
 	if (card.kind === "autoreply") meta.push("auto");
 	if (card.kind === "workpool" && card.mode) meta.push(card.mode);

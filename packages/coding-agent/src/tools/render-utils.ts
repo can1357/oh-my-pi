@@ -835,6 +835,32 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 	}
 	return filePath;
 }
+/** Shortens home-directory prefixes embedded in display-only path tokens. */
+export function shortenEmbeddedPaths(text: string, homeDir?: string): string {
+	if (!text) return text;
+	const home = homeDir ?? os.homedir();
+	if (!home) return text;
+	const windowsHome = /^[A-Za-z]:[\\/]|^\\\\/.test(home);
+	const escapedHome = windowsHome
+		? home
+				.split(/[\\/]/)
+				.map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+				.join("[\\\\/]")
+		: home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const flags = windowsHome ? "gi" : "g";
+	const tokenBoundary = String.raw`[\s"'\x60([{=(:,;<>&|]`;
+	return text.replace(
+		new RegExp(`(^|${tokenBoundary})${escapedHome}(?=$|[/\\\\\\s"'\\]),;:\\x60<>&|])`, flags),
+		"$1~",
+	);
+}
+
+/** Shorten filesystem and command arguments without rewriting literal search patterns. */
+export function shortenToolArgumentPaths(text: string, key: string | undefined): string {
+	return key === "path" || key === "file_path" || key === "command" || key === "task" || key === "prompt"
+		? shortenEmbeddedPaths(text)
+		: text;
+}
 
 /** Shorten any home-prefixed segments inside free text, preserving surrounding
  *  punctuation so error strings with embedded paths stay readable. */

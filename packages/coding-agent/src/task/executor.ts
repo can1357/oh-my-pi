@@ -9,7 +9,7 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
-import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -62,11 +62,13 @@ import { LIST_STATUS_ORDER } from "../tools/hub/messaging";
 import { DEFAULT_HUB_LIST_LIMIT } from "../tools/hub/types";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
+import { previewLine, replaceTabs, shortenToolArgumentPaths, TRUNCATE_LENGTHS } from "../tools/render-utils";
 import { ToolAbortError } from "../tools/tool-errors";
 import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
+import { getEditInputPaths } from "../edit/renderer";
 import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
@@ -812,21 +814,41 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, structuredOutput };
 }
 
-/**
- * Extract a short preview from tool args for display.
- */
-function extractToolArgsPreview(args: Record<string, unknown>): string {
-	// Priority order for preview
-	const previewKeys = ["command", "file_path", "path", "pattern", "query", "url", "task", "prompt"];
+function formatToolArgsPreview(value: string, key: string): { value: string; key: string } {
+	const safe = shortenToolArgumentPaths(replaceTabs(sanitizeText(value)), key);
+	return { value: previewLine(safe, TRUNCATE_LENGTHS.CONTENT), key };
+}
 
+/**
+ * Extract bounded display arguments after path and terminal sanitation.
+ */
+function extractToolArgsPreview(
+	args: Record<string, unknown>,
+	toolName: string,
+): { value: string; key: string } | undefined {
+	const previewKeys = ["command", "file_path", "path", "pattern", "query", "url", "task", "prompt"];
+	if (toolName === "edit" && typeof args.input === "string") {
+		const paths = getEditInputPaths(args.input);
+		if (paths.length > 0) return formatToolArgsPreview(paths.join(", "), "path");
+	}
+	const compoundEdits = args.edits;
+	if (toolName === "edit" && Array.isArray(compoundEdits)) {
+		const paths = new Set<string>();
+		if (typeof args.path === "string" && args.path) paths.add(args.path);
+		for (const edit of compoundEdits) {
+			if (!isRecord(edit)) continue;
+			if (typeof edit.path === "string" && edit.path) paths.add(edit.path);
+			if (typeof edit.rename === "string" && edit.rename) paths.add(edit.rename);
+		}
+		if (paths.size > 0) return formatToolArgsPreview([...paths].join(", "), "path");
+	}
 	for (const key of previewKeys) {
-		if (args[key] && typeof args[key] === "string") {
+		if (typeof args[key] === "string" && args[key]) {
 			const value = args[key] as string;
-			return value.length > 60 ? `${value.slice(0, 59)}…` : value;
+			return formatToolArgsPreview(value, key);
 		}
 	}
-
-	return "";
+	return undefined;
 }
 
 function getNumberField(record: Record<string, unknown>, key: string): number | undefined {
@@ -1471,6 +1493,12 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		}
 	};
 
+	const activeTools = new Map<
+		string,
+		{ tool: string; args?: string; argsKey?: string; intent?: string; startMs: number }
+	>();
+	let visibleToolCallId: string | undefined;
+
 	const processEvent = (event: AgentEvent) => {
 		if (resolved) return;
 		const now = Date.now();
@@ -1502,8 +1530,21 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				} else if (isRecord(event.args)) {
 					startArgs = event.args;
 				}
-				progress.currentToolArgs = extractToolArgsPreview(startArgs);
+				const preview = extractToolArgsPreview(startArgs, event.toolName);
+				progress.currentToolArgs = preview?.value;
+				progress.currentToolArgsKey = preview?.key;
 				progress.currentToolStartMs = now;
+				activeTools.set(event.toolCallId, {
+					tool: event.toolName,
+					args: preview?.value,
+					argsKey: preview?.key,
+					intent: event.intent?.trim() || progress.lastIntent,
+					startMs: now,
+				});
+				visibleToolCallId = event.toolCallId;
+				// A fast tool may finish before the coalesced update fires.
+				// Publish both lifecycle edges rather than dropping its start.
+				flushProgress = true;
 				const intent = event.intent?.trim();
 				if (intent) {
 					progress.lastIntent = intent;
@@ -1520,10 +1561,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			}
 
 			case "tool_execution_end": {
-				if (progress.currentTool) {
+				const finished = activeTools.get(event.toolCallId);
+				activeTools.delete(event.toolCallId);
+				if (finished) {
 					progress.recentTools.unshift({
-						tool: progress.currentTool,
-						args: progress.currentToolArgs || "",
+						tool: finished.tool,
+						args: finished.args ?? "",
+						argsKey: finished.argsKey,
+						isError: event.isError,
 						endMs: now,
 					});
 					// Keep only last 5
@@ -1531,9 +1576,16 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						progress.recentTools.pop();
 					}
 				}
-				progress.currentTool = undefined;
-				progress.currentToolArgs = undefined;
-				progress.currentToolStartMs = undefined;
+				if (visibleToolCallId === event.toolCallId) {
+					const remaining = activeTools.entries().next().value;
+					visibleToolCallId = remaining?.[0];
+					const visible = remaining?.[1];
+					progress.currentTool = visible?.tool;
+					progress.currentToolArgs = visible?.args;
+					progress.currentToolArgsKey = visible?.argsKey;
+					progress.currentToolStartMs = visible?.startMs;
+					if (visible) progress.lastIntent = visible.intent;
+				}
 				// The finalized TaskToolDetails will be captured below into
 				// `extractedToolData.task`; drop the in-flight snapshot so the
 				// renderer doesn't double-count it against the final entry.

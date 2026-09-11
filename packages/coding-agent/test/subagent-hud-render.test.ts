@@ -1,8 +1,8 @@
 /**
  * Contract: the anchored subagent HUD (rendered above the editor, next to the
- * Todos block) lists exactly the running *detached* subagents as
- * `Id: description` rows and yields no output once nothing qualifies, so the
- * block self-clears. Sync task spawns and eval `agent()` spawns are excluded:
+ * Todos block) lists exactly the running *detached* subagents as paired ID and
+ * activity rows and yields no output once nothing qualifies, so the block
+ * self-clears. Sync task spawns and eval `agent()` spawns are excluded:
  * their progress is already rendered inline (tool block / eval cell).
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
@@ -15,7 +15,8 @@ import {
 	type ObservableSession,
 	SessionObserverRegistry,
 } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { loadTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/loader";
+import { initTheme, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -90,6 +91,18 @@ function makeProgressPayload(
 
 function render(sessions: ObservableSession[], columns = 120): string {
 	return Bun.stripANSI(renderSubagentHudLines(sessions, columns).join("\n"));
+}
+
+function expectSameRow(output: string, ...contents: string[]): void {
+	expect(output.split("\n").some(line => contents.every(content => line.includes(content)))).toBe(true);
+}
+
+function expectDescriptionNotEchoed(output: string, id: string, description: string): void {
+	const row = output.split("\n").find(line => line.includes(id));
+	expect(row).toBeDefined();
+	const normalized = row!.toLowerCase();
+	const needle = description.toLowerCase();
+	expect(normalized.split(needle)).toHaveLength(2);
 }
 
 describe("subagent HUD lines", () => {
@@ -244,8 +257,225 @@ describe("subagent HUD lines", () => {
 			makeSession({ id: "SchemaMigrator", description: "Migrating the users table" }),
 		]);
 		expect(out).toContain("Subagents");
-		expect(out).toContain("AuthLoader: Refactoring the auth flow");
-		expect(out).toContain("SchemaMigrator: Migrating the users table");
+		expectSameRow(out, "AuthLoader", "Refactoring the auth flow");
+		expectSameRow(out, "SchemaMigrator", "Migrating the users table");
+	});
+
+	it("keeps the last finished tool visible until the next tool starts", () => {
+		const active = makeSession({
+			id: "Reader",
+			description: "Inspecting renderer behavior",
+			progress: makeProgress({
+				id: "Reader",
+				resolvedModel: "openai/gpt-5.6-sol",
+				lastIntent: "Inspecting renderer behavior",
+				currentTool: "read",
+				currentToolArgs: "packages/coding-agent/src/modes/interactive-mode.ts",
+			}),
+		});
+		const withoutModel = renderSubagentHudLines([active], 40, false).join("\n");
+		expect(withoutModel).not.toContain("openai/gpt-5.6-sol");
+		const activeLines = renderSubagentHudLines([active], 40, true);
+		const activeText = Bun.stripANSI(activeLines.join("\n"));
+		expectSameRow(
+			Bun.stripANSI(renderSubagentHudLines([active], 120, true).join("\n")),
+			"Reader",
+			"openai/gpt-5.6-sol",
+			"Inspecting renderer behavior",
+		);
+		expectSameRow(activeText, "read(packages/");
+		for (const line of activeLines) expect(Bun.stringWidth(Bun.stripANSI(line))).toBeLessThanOrEqual(40);
+		const settled = makeSession({
+			...active,
+			progress: makeProgress({
+				id: "Reader",
+				lastIntent: "Inspecting renderer behavior",
+				recentTools: [{ tool: "read", args: "package.json", endMs: Date.now() }],
+			}),
+		});
+		const settledText = Bun.stripANSI(renderSubagentHudLines([settled], 40, true).join("\n"));
+		expectSameRow(settledText, theme.symbol("status.success"), "read(package.json)");
+		const next = makeSession({
+			...settled,
+			progress: makeProgress({
+				id: "Reader",
+				currentTool: "grep",
+				currentToolArgs: "symbol",
+				recentTools: settled.progress!.recentTools,
+			}),
+		});
+		const nextText = render([next]);
+		expect(nextText).toContain("grep(symbol)");
+		expect(nextText).not.toContain("read(");
+	});
+
+	it("retains failure status and path privacy in the completed tool row", () => {
+		const homePath = path.join(process.env.HOME!, "private-project", "missing.ts");
+		const text = render([
+			makeSession({
+				id: "Reader",
+				progress: makeProgress({
+					id: "Reader",
+					recentTools: [{ tool: "read", args: homePath, argsKey: "path", isError: true, endMs: 1 }],
+				}),
+			}),
+		]);
+		expectSameRow(text, theme.symbol("status.error"), "read(~/private-project/missing.ts)");
+		expect(text).not.toContain(homePath);
+	});
+
+	it("formats selected tool arguments by semantic key without changing raw command text", () => {
+		const homePath = path.join(process.env.HOME!, "private-project", "secret.ts");
+		const readOut = render([
+			makeSession({
+				id: "Reader",
+				progress: makeProgress({
+					id: "Reader",
+					currentTool: "ast_grep",
+					currentToolArgs: homePath,
+					currentToolArgsKey: "path",
+				}),
+			}),
+		]);
+		expect(readOut).toContain("ast_grep(~/private-project/secret.ts)");
+		const patternOut = render([
+			makeSession({
+				id: "Searcher",
+				progress: makeProgress({
+					id: "Searcher",
+					currentTool: "grep",
+					currentToolArgs: homePath,
+					currentToolArgsKey: "pattern",
+				}),
+			}),
+		]);
+		expect(patternOut).toContain(`grep(${homePath})`);
+		const command = `MODE=check cat "${homePath}"`;
+		const bashOut = render([
+			makeSession({
+				id: "Runner",
+				progress: makeProgress({
+					id: "Runner",
+					currentTool: "bash",
+					currentToolArgs: command,
+					currentToolArgsKey: "command",
+				}),
+			}),
+		]);
+		expect(bashOut).toContain('bash(MODE=check cat "~/private-project/secret.ts")');
+	});
+
+	it("uses configured status glyphs for completed edits without hiding file locations", async () => {
+		const previousTheme = theme;
+		try {
+			for (const preset of ["ascii", "nerd"] as const) {
+				setThemeInstance(await loadTheme("dark", { symbolPresetOverride: preset }));
+				for (const isError of [false, true]) {
+					const text = render([
+						makeSession({
+							id: "Editor",
+							progress: makeProgress({
+								id: "Editor",
+								recentTools: [
+									{ tool: "edit", args: "src/one.ts, src/two.ts", argsKey: "path", isError, endMs: 1 },
+								],
+							}),
+						}),
+					]);
+					expectSameRow(
+						text,
+						theme.symbol(isError ? "status.error" : "status.success"),
+						"edit(src/one.ts, src/two.ts)",
+					);
+				}
+			}
+		} finally {
+			setThemeInstance(previousTheme);
+		}
+	});
+
+	it("shortens compound path tokens without rewriting unrelated absolute paths", () => {
+		const home = process.env.HOME!;
+		const args = `src/**/*.ts; ${home}/private/*.ts; /mnt${home}/keep.ts`;
+		const text = render(
+			[
+				makeSession({
+					id: "Locator",
+					progress: makeProgress({
+						id: "Locator",
+						currentTool: "glob",
+						currentToolArgs: args,
+						currentToolArgsKey: "path",
+					}),
+				}),
+			],
+			240,
+		);
+		expect(text).toContain(`glob(src/**/*.ts; ~/private/*.ts; /mnt${home}/keep.ts)`);
+	});
+
+	it("shortens a home-directory entry in colon-separated command paths", () => {
+		const text = render([
+			makeSession({
+				id: "Runner",
+				progress: makeProgress({
+					id: "Runner",
+					currentTool: "bash",
+					currentToolArgs: `PYTHONPATH=${process.env.HOME!}:/opt/lib python`,
+					currentToolArgsKey: "command",
+				}),
+			}),
+		]);
+		expect(text).toContain("PYTHONPATH=~:/opt/lib python");
+	});
+
+	it("shortens home paths adjoining shell redirections", () => {
+		const text = render(
+			[
+				makeSession({
+					id: "Runner",
+					progress: makeProgress({
+						id: "Runner",
+						currentTool: "bash",
+						currentToolArgsKey: "command",
+						currentToolArgs: `cat <${process.env.HOME!}/in >>${process.env.HOME!}/out`,
+					}),
+				}),
+			],
+			240,
+		);
+		expect(text).toContain("cat <~/in >>~/out");
+		expect(text).not.toContain(process.env.HOME!);
+	});
+
+	it("preserves model revision and effort in a roomy HUD badge", () => {
+		const selector = "anthropic/claude-sonnet-4-20250514:high";
+		const text = Bun.stripANSI(
+			renderSubagentHudLines(
+				[
+					makeSession({
+						id: "Worker",
+						progress: makeProgress({ id: "Worker", resolvedModel: selector }),
+					}),
+				],
+				160,
+				true,
+			).join("\n"),
+		);
+		expect(text).toContain("anthropic/");
+		expect(text).toContain("20250514:high");
+	});
+
+	it("shortens home paths in live activity labels", () => {
+		const homePath = path.join(process.env.HOME!, "private-project", "source.ts");
+		const text = render([
+			makeSession({
+				id: "Reader",
+				progress: makeProgress({ id: "Reader", lastIntent: `${homePath} checking imports` }),
+			}),
+		]);
+		expect(text).toContain("~/private-project/source.ts checking imports");
+		expect(text).not.toContain(homePath);
 	});
 
 	it("shows a non-default role badge and hides descriptions that only echo the id", () => {
@@ -269,7 +499,7 @@ describe("subagent HUD lines", () => {
 		]);
 		expect(echoed).toContain("AuthLoader");
 		expect(echoed).toMatch(/AuthLoader.*scout/);
-		expect(echoed).not.toContain("AuthLoader: AuthLoader");
+		expectDescriptionNotEchoed(echoed, "AuthLoader", "AuthLoader");
 
 		const collision = render([
 			makeSession({
@@ -280,7 +510,7 @@ describe("subagent HUD lines", () => {
 		]);
 		expect(collision).toContain("AuthLoader-3");
 		expect(collision).toMatch(/AuthLoader-3.*scout/);
-		expect(collision).not.toContain("AuthLoader-3: AuthLoader");
+		expectDescriptionNotEchoed(collision, "AuthLoader-3", "AuthLoader");
 
 		const mixedCase = render([
 			makeSession({
@@ -290,12 +520,12 @@ describe("subagent HUD lines", () => {
 			}),
 		]);
 		expect(mixedCase).toContain("AuthLoader-3");
-		expect(mixedCase).not.toContain("AuthLoader-3: authloader");
+		expectDescriptionNotEchoed(mixedCase, "AuthLoader-3", "authloader");
 
 		const defaultWorker = render([
 			makeSession({ id: "SchemaMigrator", agent: "task", description: "Migrate users" }),
 		]);
-		expect(defaultWorker).toContain("SchemaMigrator: Migrate users");
+		expectSameRow(defaultWorker, "SchemaMigrator", "Migrate users");
 		expect(defaultWorker).not.toMatch(/SchemaMigrator.*task/);
 	});
 
@@ -308,7 +538,7 @@ describe("subagent HUD lines", () => {
 		expect(renderSubagentHudLines(sessions, 120)).toEqual([]);
 
 		const out = render([...sessions, makeSession({ id: "StillRunning", description: "live work" })]);
-		expect(out).toContain("StillRunning: live work");
+		expectSameRow(out, "StillRunning", "live work");
 		expect(out).not.toContain("Done-");
 		expect(out).not.toContain("Main Session");
 	});
@@ -317,12 +547,42 @@ describe("subagent HUD lines", () => {
 		const fromProgressDesc = render([
 			makeSession({ id: "Worker", progress: makeProgress({ id: "Worker", description: "From progress" }) }),
 		]);
-		expect(fromProgressDesc).toContain("Worker: From progress");
+		expectSameRow(fromProgressDesc, "Worker", "From progress");
 
 		const fromTask = render([
 			makeSession({ id: "Worker", progress: makeProgress({ id: "Worker", task: "Investigate flaky CI on macOS" }) }),
 		]);
-		expect(fromTask).toContain("Worker Investigate flaky CI on macOS");
+		expectSameRow(fromTask, "Worker", "Investigate flaky CI on macOS");
+
+		const generatedOverWrappedTask = render([
+			makeSession({
+				id: "Worker",
+				description: "Generated activity label",
+				progress: makeProgress({
+					id: "Worker",
+					description: "Generated progress label",
+					assignment: "Inspect HUD precedence",
+					task: "Complete assignment thoroughly:\n\n# Target\nHUD",
+				}),
+			}),
+		]);
+		expectSameRow(generatedOverWrappedTask, "Worker", "Generated progress label");
+		expect(generatedOverWrappedTask).not.toContain("Complete assignment thoroughly");
+
+		const assignmentAfterHandleEcho = render([
+			makeSession({
+				id: "Worker",
+				progress: makeProgress({
+					id: "Worker",
+					lastIntent: "Worker",
+					description: "worker",
+					assignment: "Inspect HUD fallback",
+					task: "Complete assignment thoroughly",
+				}),
+			}),
+		]);
+		expectSameRow(assignmentAfterHandleEcho, "Worker", "Inspect HUD fallback");
+		expect(assignmentAfterHandleEcho).not.toContain("Complete assignment thoroughly");
 
 		const multiLineTask = render([
 			makeSession({
@@ -336,7 +596,7 @@ describe("subagent HUD lines", () => {
 			}),
 		]);
 		expect(multiLineTask).toContain("ReviewShell");
-		expect(multiLineTask).toContain("Complete assignment thoroughly: ↵ # Tar");
+		expectSameRow(multiLineTask, "ReviewShell", "Complete assignment thoroughly:", "# Target");
 		expect(multiLineTask).not.toContain("\n# Target");
 
 		const multiLineDesc = render([
@@ -347,7 +607,7 @@ describe("subagent HUD lines", () => {
 			}),
 		]);
 		expect(multiLineDesc).toContain("ReviewShell");
-		expect(multiLineDesc).toContain("First line ↵ Second line");
+		expectSameRow(multiLineDesc, "ReviewShell", "First line", "Second line");
 		expect(multiLineDesc).not.toContain("\nSecond line");
 	});
 	it("hides non-detached spawns: sync task calls and eval agent() helpers", () => {
@@ -360,7 +620,7 @@ describe("subagent HUD lines", () => {
 		expect(renderSubagentHudLines(sessions, 120)).toEqual([]);
 
 		const out = render([...sessions, makeSession({ id: "BackgroundSpawn", description: "detached work" })]);
-		expect(out).toContain("BackgroundSpawn: detached work");
+		expectSameRow(out, "BackgroundSpawn", "detached work");
 		expect(out).not.toContain("SyncSpawn");
 		expect(out).not.toContain("EvalSpawn");
 	});
@@ -375,14 +635,14 @@ describe("subagent HUD lines", () => {
 		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("FromProgress", 2, "background work", true));
 
 		const out = render(registry.getSessions());
-		expect(out).toContain("Detached: background work");
-		expect(out).toContain("FromProgress: background work");
+		expectSameRow(out, "Detached", "background work");
+		expectSameRow(out, "FromProgress", "background work");
 		expect(out).not.toContain("Inline");
 	});
 
 	it("renders nested ids as a breadcrumb and truncates long descriptions to the viewport", () => {
 		const out = render([makeSession({ id: "Anna.Bob", description: `start ${"x".repeat(300)} end` })], 60);
-		expect(out).toContain("Anna>Bob:");
+		expectSameRow(out, "Anna>Bob", "start");
 		expect(out).not.toContain("end");
 		for (const line of out.split("\n")) {
 			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(60);
@@ -451,10 +711,12 @@ describe("subagent HUD lines", () => {
 		const out = render(active, 120);
 
 		for (const session of active.slice(0, 8)) {
-			expect(out).toContain(`${session.id}: ${session.description}`);
+			expectSameRow(out, session.id, session.description!);
 		}
 		for (const session of active.slice(8)) {
-			expect(out).not.toContain(`${session.id}: ${session.description}`);
+			expect(out.split("\n").some(line => line.includes(session.id) && line.includes(session.description!))).toBe(
+				false,
+			);
 		}
 		expect(out).toContain("2 more running");
 	});
@@ -511,6 +773,32 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		resetSettingsForTest();
 	});
 
+	it("renders tool lifecycle changes without waiting for the progress debounce", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		vi.useFakeTimers();
+		const payload = makeProgressPayload("FastReader", 0, "Inspecting source", true);
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+			...payload,
+			progress: { ...payload.progress, currentTool: "read", currentToolArgs: "package.json", currentToolStartMs: 1 },
+		});
+		await Promise.resolve();
+		expect(Bun.stripANSI(mode.subagentContainer.render(120).join("\n"))).toContain("read(package.json)");
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+			...payload,
+			progress: { ...payload.progress, currentTool: "read", currentToolArgs: "bun.lock", currentToolStartMs: 1 },
+		});
+		await Promise.resolve();
+		expect(Bun.stripANSI(mode.subagentContainer.render(120).join("\n"))).toContain("read(bun.lock)");
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+			...payload,
+			progress: { ...payload.progress, recentTools: [{ tool: "read", args: "bun.lock", endMs: 2 }] },
+		});
+		await Promise.resolve();
+		const settled = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
+		expect(settled).toContain("FastReader");
+		expectSameRow(settled, theme.symbol("status.success"), "read(bun.lock)");
+	});
+
 	it("coalesces a burst of progress observer changes into one HUD rebuild and render request", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
@@ -529,9 +817,28 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		await Promise.resolve();
 
 		const hud = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
-		expect(hud).toContain("BurstAgent0: Burst job 0");
-		expect(hud).toContain("BurstAgent5: Burst job 5");
+		expectSameRow(hud, "BurstAgent0", "Burst job 0");
+		expectSameRow(hud, "BurstAgent5", "Burst job 5");
 		expect(rebuildHud).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+	it("rebuilds HUD immediately when badge setting changes", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+			...makeProgressPayload("LongRunner", 0, "Long-running work", true),
+			progress: makeProgress({
+				id: "LongRunner",
+				description: "Long-running work",
+				task: "Long-running work",
+				resolvedModel: "openai/gpt-5.6-sol",
+			}),
+		});
+		vi.useFakeTimers();
+		await Promise.resolve();
+		vi.runAllTimers();
+		await Promise.resolve();
+		expect(Bun.stripANSI(mode.subagentContainer.render(120).join("\n"))).not.toContain("openai/gpt-5.6-sol");
+		session.settings.override("task.showResolvedModelBadge", true);
+		expect(Bun.stripANSI(mode.subagentContainer.render(120).join("\n"))).toContain("openai/gpt-5.6-sol");
 	});
 });

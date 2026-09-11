@@ -71,6 +71,37 @@ describe("task progress rendering", () => {
 		resetSettingsForTest();
 	});
 
+	it("shortens current and recent path arguments without rewriting search patterns", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const file = `${process.env.HOME!}/private/file`;
+		for (const [key, recent, args, expected] of [
+			["file_path", false, file, "~/private/file"],
+			["path", true, file, "~/private/file"],
+			["command", false, `cat <${file}`, "cat <~/private/file"],
+			["task", false, `Inspect ${file}`, "Inspect ~/private/file"],
+			["prompt", false, `Explain ${file}`, "Explain ~/private/file"],
+			["pattern", false, file, file],
+		] as const) {
+			const progress = runningProgress(
+				recent
+					? { recentTools: [{ tool: "read", args, argsKey: key, endMs: 1 }] }
+					: { currentTool: "read", currentToolArgs: args, currentToolArgsKey: key },
+			);
+			const text = Bun.stripANSI(
+				taskToolRenderer
+					.renderResult(
+						{ content: [], details: detailsFor(progress) },
+						{ expanded: false, isPartial: true },
+						theme,
+					)
+					.render(180)
+					.join("\n"),
+			);
+			expect(text).toContain(expected);
+			if (key !== "pattern") expect(text).not.toContain(process.env.HOME!);
+		}
+	});
+
 	it("places the model and advisor before the live agent title without displacing stats", async () => {
 		Settings.instance.set("task.showResolvedModelBadge", true);
 		const theme = (await getThemeByName("dark"))!;
