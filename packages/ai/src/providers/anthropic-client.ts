@@ -15,12 +15,17 @@
  * - Pre-response timeouts throw {@link AnthropicConnectionTimeoutError}
  *   ("Request timed out.").
  * - Caller aborts throw an `Error` with message "Request was aborted.".
- * - Retries: connection errors and 408/409/429/5xx (or `x-should-retry: true`)
+ * - Retries: connection errors and 408/409/5xx (or `x-should-retry: true`)
  *   are retried up to `maxRetries` times, honoring `retry-after-ms` /
  *   `retry-after`, otherwise exponential backoff (0.5s * 2^n, capped at 8s,
- *   with up to 25% jitter).
+ *   with up to 25% jitter). A 429 gets the shared, much smaller rate-limit
+ *   budget instead ({@link MAX_RATE_LIMIT_ATTEMPTS} same-route attempts, only
+ *   while the server promises recovery within
+ *   {@link CREDIBLE_RATE_LIMIT_HINT_MS}) so a limited route reaches credential
+ *   rotation and model fallback instead of being replayed.
  */
 import { scheduler } from "node:timers/promises";
+import { CREDIBLE_RATE_LIMIT_HINT_MS, MAX_RATE_LIMIT_ATTEMPTS } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError } from "../error";
 
@@ -228,6 +233,7 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 		const url = `${opts.baseURL ?? "https://api.anthropic.com"}${path}`;
 		const headers = this.#buildHeaders(options?.headers);
 		const body = JSON.stringify(params);
+		let rateLimitAttempts = 0;
 
 		for (let attempt = 0; ; attempt++) {
 			if (callerSignal?.aborted) throw createAbortError();
@@ -247,6 +253,8 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 
 			if (response.ok) return response;
 
+			const rateLimited = response.status === 429;
+			if (rateLimited) rateLimitAttempts++;
 			if (attempt < maxRetries && shouldRetryResponse(response)) {
 				// Bound the server-directed wait: an over-cap `retry-after` declines
 				// the retry and surfaces the original error (status/body/headers
@@ -254,6 +262,18 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 				// Checked before draining the body so `fromResponse` can still read it.
 				const headerDelayMs = retryDelayFromHeaders(response.headers);
 				if (headerDelayMs !== undefined && maxRetryDelayMs > 0 && headerDelayMs > maxRetryDelayMs) {
+					throw await AIError.AnthropicApiError.fromResponse(response, callerSignal);
+				}
+				// A 429 is the route saying "not you, not now": replaying it cannot
+				// clear the limit, so it gets the small shared rate-limit budget and
+				// only while the server itself promises a short recovery window.
+				// Anything else surfaces immediately for rotation/fallback.
+				if (
+					rateLimited &&
+					(rateLimitAttempts >= MAX_RATE_LIMIT_ATTEMPTS ||
+						headerDelayMs === undefined ||
+						headerDelayMs > CREDIBLE_RATE_LIMIT_HINT_MS)
+				) {
 					throw await AIError.AnthropicApiError.fromResponse(response, callerSignal);
 				}
 				await response.body?.cancel().catch(() => {});
