@@ -10,7 +10,7 @@
 - `/mcp reload` now distinguishes servers still connecting after the bounded reload window instead of reporting a healthy asynchronous reload as zero active servers ([#11639](https://github.com/can1357/oh-my-pi/issues/11639)).
 ### Added
 
-- Added `auth.startupOAuthAccount` and `omp auth accounts|pin|unpin <provider> [selector]` to pin a specific stored OAuth account per provider as the one a new session starts on; a rate limit on the pinned account still fails over to a sibling automatically ([#11717](https://github.com/can1357/oh-my-pi/pull/11717) by [@JoshKirk800](https://github.com/JoshKirk800)).
+- Added `auth.startupOAuthAccount` and `omp auth accounts|pin|unpin <provider> [selector]` to pin a specific stored OAuth account per provider as the one a new session starts on; a rate limit on the pinned account still fails over to a sibling automatically. Added `/switchaccount [account]` to switch a running session's OAuth account for the current provider without leaving the TUI ([#11717](https://github.com/can1357/oh-my-pi/pull/11717) by [@JoshKirk800](https://github.com/JoshKirk800)).
 
 ### Changed
 

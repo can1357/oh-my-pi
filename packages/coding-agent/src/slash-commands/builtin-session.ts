@@ -254,6 +254,34 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "switchaccount",
+		icon: "swap",
+		description:
+			"Switch this session's OAuth account for the current provider (same as /session pin); accepts position, email, account id, org id, or org name",
+		acpDescription: "Switch OAuth account for this session only",
+		acpInputHint: "[account]",
+		inlineHint: "[account]",
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const provider = runtime.ctx.session.model?.provider;
+			return provider ? `Account: ${provider}` : "Account: no model selected";
+		},
+		handle: async (command, runtime) => {
+			await handleSessionPinCommand(command.args, runtime.session, runtime.output);
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			const selector = command.args.trim();
+			runtime.ctx.editor.setText("");
+			if (selector) {
+				await handleSessionPinCommand(selector, runtime.ctx.session, text => runtime.ctx.showStatus(text));
+				refreshStatusLine(runtime.ctx);
+			} else {
+				await runtime.ctx.showSessionPinSelector();
+			}
+		},
+	},
+	{
 		name: "jobs",
 		icon: "jobs",
 		description: "Show async background jobs status",
