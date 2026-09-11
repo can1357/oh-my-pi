@@ -92,4 +92,24 @@ describe("AgentSession deferred model restore", () => {
 		expect(session.getDeferredModelRestore()).toBeUndefined();
 		expect(session.model?.id).toBe(activeModel.id);
 	});
+
+	it("discards a owed deferred restore when the session switch commits", async () => {
+		// Review P2-1 (headless parity with the TUI discard): a retained failed
+		// restore is SOURCE-session state. switchSession to another journal must
+		// drop it — otherwise the target's first agent_end flushes the source's
+		// owed model over the target's restored state, and a later first persona
+		// enter ADOPTS it as its exit baseline.
+		const otherManager = SessionManager.create(tempDir.path(), tempDir.path());
+		otherManager.appendMessage({ role: "user", content: "target", timestamp: Date.now() });
+		await otherManager.ensureOnDisk();
+		await otherManager.flush();
+		const otherFile = otherManager.getSessionFile();
+		if (!otherFile) throw new Error("Expected session file");
+		await otherManager.close();
+
+		session.queueDeferredModelRestore(activeModel);
+		const switched = await session.switchSession(otherFile);
+		expect(switched).toBe(true);
+		expect(session.getDeferredModelRestore()).toBeUndefined();
+	});
 });

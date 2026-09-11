@@ -3607,6 +3607,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				thinkingLevel: prev.thinkingLevel,
 			};
 			this.#pendingPlanModelSwitch = false;
+			// Fresh entry: the retry budget restarts (else a prior failed
+			// persona restore's count would make this give up early).
+			this.#pendingModelSwitchFailures = 0;
 		} else {
 			await this.session.setModelTemporary(prev.model, prev.thinkingLevel);
 		}
@@ -4772,6 +4775,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.showWarning("Goal mode is disabled. Enable it in settings (goal.enabled).");
 				return false;
 			}
+			// The interview is fresh goal entry: it installs the goal tool and
+			// records the pre-interview toolset, which would widen past an
+			// active persona's grant — same entry refusal as /goal.
+			if (this.session.toolPolicy?.isPersonaActive()) {
+				this.showWarning("Exit the agent persona first (/agent).");
+				return false;
+			}
 			if (this.goalModeEnabled) {
 				this.showStatus("Goal mode is already active. Use /goal to manage it, or /goal drop to start over.");
 				return false;
@@ -5022,6 +5032,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				)?.trim();
 		if (!objective) return false;
 		if (this.goalModeEnabled) return await this.#replaceGoalFromObjective(objective, input);
+		// Fresh goal START is mode entry: refuse under a persona (the dispatcher
+		// runs before handleGoalModeCommand's entry guard, which exists only to
+		// keep the unwind subcommands reachable).
+		if (this.session.toolPolicy?.isPersonaActive()) {
+			this.showWarning("Exit the agent persona first (/agent).");
+			return false;
+		}
 		return await this.#startGoalFromObjective(objective, input);
 	}
 

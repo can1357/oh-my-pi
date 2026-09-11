@@ -43,6 +43,9 @@ tools:
 
 You are the fixture reader persona.`;
 
+/** Plan-mode journal marker URL (built at runtime; literals get rewritten). */
+const PLAN_URL = "local" + "://" + "PLAN.md";
+
 describe("InteractiveMode persona resume reconcile", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
@@ -293,7 +296,7 @@ describe("InteractiveMode persona resume reconcile", () => {
 		const sourceManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
 		sourceManager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
 		sourceManager.appendModeChange("agent", { name: "fixture-reader" });
-		sourceManager.appendModeChange("plan", { planFilePath: "local://PLAN.md" });
+		sourceManager.appendModeChange("plan", { planFilePath: PLAN_URL });
 		sourceManager.appendModeChange("plan_paused");
 		await sourceManager.ensureOnDisk();
 		await sourceManager.flush();
@@ -965,6 +968,34 @@ Beta.`,
 		expect(liveSession.model?.id).toBe("claude-haiku-4-5");
 	});
 
+	// Review P2-1/b: the mode guards were reordered so UNWIND paths stay
+	// available under a persona — mode ENTRY must still refuse.
+	it("fresh mode entry still refuses under an active persona after the reorder", async () => {
+		await writeFixtureAgent(READER_AGENT_MD);
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		liveSession.settings.set("goal.enabled", true);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+		const warnings: string[] = [];
+		vi.spyOn(created, "showWarning").mockImplementation(((message: string) => {
+			warnings.push(message);
+		}) as typeof created.showWarning);
+		await created.switchAgentPersona("fixture-reader");
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
+
+		// /plan entry refuses (no active plan to unwind).
+		expect(await created.handlePlanModeCommand()).toBe(false);
+		expect(created.planModeEnabled).toBe(false);
+		expect(warnings.some(message => message.includes("Exit the agent persona first"))).toBe(true);
+		// /goal set (fresh start through the dispatcher, which runs BEFORE the
+		// top-level guard) must not start a goal under the persona either.
+		warnings.length = 0;
+		expect(await created.handleGoalModeCommand("set a fresh objective")).toBe(false);
+		expect(created.goalModeEnabled).toBe(false);
+		expect(warnings.some(message => message.includes("Exit the agent persona first"))).toBe(true);
+	});
+
 	// Codex R5-1: when the gone-persona baseline restore FAILS (an extension
 	// model-change hook vetoes setModelTemporary), the journal's persona entry
 	// is the only record of the baseline — clearing it (mode_change none) would
@@ -1040,7 +1071,7 @@ Beta.`,
 		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
 		manager.appendMessage({ role: "user", content: "turn", timestamp: Date.now() });
 		manager.appendModeChange("agent", { name: "fixture-reader" });
-		manager.appendModeChange("plan", { planFilePath: "local:///PLAN.md" });
+		manager.appendModeChange("plan", { planFilePath: PLAN_URL });
 		await manager.ensureOnDisk();
 		await manager.flush();
 		const sessionFile = manager.getSessionFile();
@@ -1276,10 +1307,7 @@ Alpha.`,
 		personaTarget.appendModeChange("agent", { name: "fixture-reader" });
 		// Transparent plan-mode entry AFTER the persona (persona stays active
 		// underneath; resume enters plan after reconciling the persona).
-		personaTarget.appendModeChange("plan", {
-			planFilePath:
-				"/home/slava/.omp/agent/sessions/-aiexp-oh-my-pi/2026-09-11T10-54-25-254Z_01a0901a-b7e6-7767-bff5-c5badda70564/local/PLAN.md",
-		});
+		personaTarget.appendModeChange("plan", { planFilePath: PLAN_URL });
 		await personaTarget.ensureOnDisk();
 		await personaTarget.flush();
 		const personaFile = personaTarget.getSessionFile();
