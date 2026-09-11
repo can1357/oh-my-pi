@@ -229,14 +229,19 @@ function createRegistryTool(
 	cwd: string,
 	name: LegacyRegistryToolName,
 	settingOverrides?: LegacySettingOverrides,
+	activeNames?: ReadonlySet<string>,
 ): Tool {
 	const session = legacyToolSession(cwd, settingOverrides);
 	// The factory creates exactly this one tool, so it is the only
-	// availability the session can assert. Without this, tool prompts fall
-	// back to the main agent's defaults and steer the model toward siblings
-	// the extension may never have registered (e.g. bash-only setups told
-	// to query SQLite via an unregistered `read` — Codex P2 3986069142).
-	session.isToolActive = toolName => toolName === name;
+	// availability the session can assert — unless the caller passes the
+	// bundle's full name set (createCodingTools below), mirroring the
+	// main agent's setActiveToolNames precedent (tools/index.ts). Without
+	// this, tool prompts fall back to the main agent's defaults and steer
+	// the model toward siblings the extension may never have registered
+	// (e.g. bash-only setups told to query SQLite via an unregistered
+	// `read` — Codex P2 3986069142).
+	const names = activeNames ?? new Set([name]);
+	session.isToolActive = toolName => names.has(toolName);
 	switch (name) {
 		case "bash":
 			return new BashTool(session);
@@ -265,8 +270,8 @@ async function executeBuiltinTool(
 	return tool.execute(toolCallId, params, signal, onUpdate);
 }
 
-function legacyBuiltinTool(cwd: string, name: LegacyCodingToolName): ToolDefinition {
-	const tool = createRegistryTool(cwd, name);
+function legacyBuiltinTool(cwd: string, name: LegacyCodingToolName, activeNames?: ReadonlySet<string>): ToolDefinition {
+	const tool = createRegistryTool(cwd, name, undefined, activeNames);
 	const definition: LegacyBuiltinToolDefinition = {
 		name: tool.name,
 		label: tool.label,
@@ -750,7 +755,11 @@ export function createWriteTool(cwd: string, options?: WriteToolOptions): ToolDe
 
 /** Create legacy read, bash, edit, and write tools. */
 export function createCodingTools(cwd: string): ToolDefinition[] {
-	return LEGACY_CODING_TOOL_NAMES.map(name => legacyBuiltinTool(cwd, name));
+	// The bundle always registers every name, so each definition's session
+	// reports the full set — otherwise bundled bash would lose read-gated
+	// guidance it legitimately has (Codex P2 3986602647).
+	const activeNames = new Set<string>(LEGACY_CODING_TOOL_NAMES);
+	return LEGACY_CODING_TOOL_NAMES.map(name => legacyBuiltinTool(cwd, name, activeNames));
 }
 
 /** Create legacy read, grep, find, and ls tools. */
