@@ -1,4 +1,4 @@
-import type { OAuthAccess } from "@oh-my-pi/pi-ai";
+import type { OAuthAccessSource } from "@oh-my-pi/pi-ai";
 import { AudioCapture } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../config/settings";
@@ -42,13 +42,12 @@ type CaptureFactory = (onAudio: (error: Error | null, samples: Float32Array) => 
 
 /** Minimal registry surface for cloud credential and route resolution. */
 export interface SttCredentialRegistry {
-	authStorage?: {
-		getOAuthAccess(
-			provider: string,
-			sessionId?: string,
-			options?: { signal?: AbortSignal },
-		): Promise<OAuthAccess | undefined>;
-	};
+	/**
+	 * OAuth source for the ChatGPT-subscription route. Typed as the full
+	 * {@link OAuthAccessSource} because the resolved credential hands it to
+	 * `withOAuthAccess`, which force-refreshes and rotates on rejection.
+	 */
+	authStorage?: OAuthAccessSource;
 	getApiKeyForProvider(provider: string, sessionId?: string): Promise<string | undefined>;
 	getProviderBaseUrl?(provider: string): string | undefined;
 	getProviderHeaders?(provider: string): Record<string, string> | undefined;
@@ -63,10 +62,13 @@ export async function resolveSttCloudCredential(
 	registry: SttCredentialRegistry,
 	sessionId?: string,
 ): Promise<CloudSttCredential | undefined> {
-	try {
-		const access = await registry.authStorage?.getOAuthAccess("openai-codex", sessionId);
-		if (access?.accessToken) return { kind: "codex", access };
-	} catch {}
+	const authStorage = registry.authStorage;
+	if (authStorage) {
+		try {
+			const access = await authStorage.getOAuthAccess("openai-codex", sessionId);
+			if (access?.accessToken) return { kind: "codex", access, source: authStorage, sessionId };
+		} catch {}
+	}
 	try {
 		const apiKey = await registry.getApiKeyForProvider("openai", sessionId);
 		if (!apiKey) return undefined;
