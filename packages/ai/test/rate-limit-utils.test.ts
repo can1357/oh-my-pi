@@ -56,11 +56,30 @@ describe("parseRateLimitReason", () => {
 		).toBe("QUOTA_EXHAUSTED");
 	});
 
-	// "Resource has been exhausted (e.g. check quota)" is a quota/daily-limit error — long wait.
-	// Only the literal phrase "resource exhausted" (gRPC status name) is MODEL_CAPACITY.
-	it("classifies 'Resource has been exhausted (e.g. check quota)' as QUOTA_EXHAUSTED", () => {
+	// Google's generic HTTP 429 boilerplate "Resource has been exhausted (e.g.
+	// check quota)." is a transient per-minute/per-region request throttle, not
+	// daily-quota exhaustion (which sends "exhausted your capacity … quota will
+	// reset" or ships structured google.rpc details). It must classify as
+	// RATE_LIMIT_EXCEEDED so the session retries on a 30s backoff instead of
+	// synthesizing a 30-min QUOTA_EXHAUSTED wait that trips retry.maxDelayMs and
+	// hard-fails users with quota left. Regression for #11689.
+	it("classifies generic 'Resource has been exhausted (e.g. check quota)' as RATE_LIMIT_EXCEEDED", () => {
 		expect(
 			parseRateLimitReason("Cloud Code Assist API error (429): Resource has been exhausted (e.g. check quota)."),
+		).toBe("RATE_LIMIT_EXCEEDED");
+		// Reporter's exact wire body (JSON, RESOURCE_EXHAUSTED status, no details).
+		expect(
+			parseRateLimitReason(
+				'Cloud Code Assist API error (429): {"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}',
+			),
+		).toBe("RATE_LIMIT_EXCEEDED");
+	});
+
+	it("keeps genuine Antigravity daily-quota exhaustion as QUOTA_EXHAUSTED", () => {
+		expect(
+			parseRateLimitReason(
+				"Cloud Code Assist API error (429): You have exhausted your capacity on this model. Your quota will reset after 3 hours.",
+			),
 		).toBe("QUOTA_EXHAUSTED");
 	});
 
@@ -457,6 +476,15 @@ describe("isUsageLimitOutcome", () => {
 		// UNKNOWN but carries a transient retry hint — body is informative,
 		// so we defer to parseRateLimitReason and stay out of the quota lane.
 		expect(isUsageLimitOutcome(429, "Please retry in 5s")).toBe(false);
+		// Google's generic RESOURCE_EXHAUSTED boilerplate is a transient throttle;
+		// it must not burn a sibling credential even though its JSON status token
+		// matches USAGE_LIMIT_PATTERN's `resource_exhausted` arm (#11689).
+		expect(
+			isUsageLimitOutcome(
+				429,
+				'Cloud Code Assist API error (429): {"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}',
+			),
+		).toBe(false);
 	});
 
 	it("rotates on subscription caps without treating generic rate limits as usage exhaustion", () => {

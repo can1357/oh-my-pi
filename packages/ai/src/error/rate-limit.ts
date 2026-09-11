@@ -102,6 +102,14 @@ export function isDashScopeTokenLimitText(errorMessage: string): boolean {
 
 const GOOGLE_RPC_ERROR_INFO_TYPE = "type.googleapis.com/google.rpc.ErrorInfo";
 const ANTIGRAVITY_MODEL_QUOTA_PATTERN = /\bexhausted your capacity on this model\b/i;
+// Google's canonical generic HTTP 429 body: "Resource has been exhausted (e.g.
+// check quota)." Google returns it for per-minute / per-region request throttles
+// on the Gemini / Cloud Code Assist API — a transient cap that clears within the
+// window, NOT daily-quota exhaustion. Genuine Antigravity daily exhaustion sends
+// the distinct ANTIGRAVITY_MODEL_QUOTA_PATTERN message or ships structured
+// google.rpc details, so the bare boilerplate must stay in the short-backoff
+// lane instead of synthesizing a 30-minute QUOTA_EXHAUSTED wait (#11689).
+const GOOGLE_GENERIC_RESOURCE_EXHAUSTED_PATTERN = /\bresource has been exhausted\s*\(\s*e\.?g\.?\s*check quota\s*\)/i;
 const LONG_RATE_LIMIT_DELAY_MS = 5 * 60 * 1000;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -167,6 +175,20 @@ function isQuotaExhaustedReason(reason: RateLimitReason): boolean {
 }
 
 /**
+ * True for Google's bare generic RESOURCE_EXHAUSTED boilerplate ("Resource has
+ * been exhausted (e.g. check quota).") when nothing authoritative overrides it.
+ * Google emits this string for transient per-minute / per-region request
+ * throttles, so — absent structured google.rpc details or the distinct
+ * daily-quota "exhausted your capacity … quota will reset" wording — it must be
+ * treated as a transient rate limit rather than daily-quota exhaustion (#11689).
+ */
+function isGoogleGenericResourceExhaustedText(errorMessage: string): boolean {
+	if (!GOOGLE_GENERIC_RESOURCE_EXHAUSTED_PATTERN.test(errorMessage)) return false;
+	if (parseGoogleRpcRateLimitReason(errorMessage) !== undefined) return false;
+	return !(ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(errorMessage) || /\bquota will reset\b/i.test(errorMessage));
+}
+
+/**
  * Classify a rate-limit error message into a reason category.
  * Priority order: explicit details in a resource-exhausted error > QUOTA
  * (Antigravity "quota will reset") > CN quota > DASHSCOPE_TOKEN_LIMIT (TPM/TPS
@@ -190,6 +212,15 @@ export function parseRateLimitReason(errorMessage: string): RateLimitReason {
 	// MODEL_CAPACITY fallthrough so credential rotation (not 60s backoff) kicks in.
 	if (lower.includes("quota will reset") || lower.includes("exhausted your capacity")) {
 		return "QUOTA_EXHAUSTED";
+	}
+
+	// Google's bare generic RESOURCE_EXHAUSTED boilerplate is a transient
+	// per-minute/per-region request throttle, not daily-quota exhaustion. Placed
+	// after the daily-quota short-circuit above so the specific "quota will reset"
+	// wording still wins; the generic string must not fall through to the generic
+	// "exhausted"/"quota" QUOTA branch below (#11689).
+	if (isGoogleGenericResourceExhaustedText(errorMessage)) {
+		return "RATE_LIMIT_EXCEEDED";
 	}
 
 	// Simplified Chinese quota-exhaustion phrasing (Zhipu Coding Plan and other
@@ -395,6 +426,10 @@ export function matchesUsageLimitText(errorMessage: string): boolean {
 	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage);
 	if (structuredReason !== undefined) return isQuotaExhaustedReason(structuredReason);
 	if (isDashScopeTokenLimitText(errorMessage)) return false;
+	// The generic RESOURCE_EXHAUSTED boilerplate matches USAGE_LIMIT_PATTERN only
+	// via its "resource_exhausted" status token; it is a transient throttle, so
+	// it must not burn a sibling credential as a usage-limit outcome (#11689).
+	if (isGoogleGenericResourceExhaustedText(errorMessage)) return false;
 	return (
 		USAGE_LIMIT_PATTERN.test(errorMessage) ||
 		CREDITS_EXHAUSTED_PATTERN.test(errorMessage) ||
