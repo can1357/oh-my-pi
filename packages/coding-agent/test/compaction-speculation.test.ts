@@ -331,7 +331,9 @@ describe("async speculative compaction", () => {
 			obfuscatePreparationForProvider: preparation => ({ ...preparation, previousSummary: "MARKED PREVIOUS" }),
 			convertToLlmForSideRequest: messages =>
 				messages.map(message =>
-					typeof message.content === "string" ? { ...message, content: `MARKED:${message.content}` } : message,
+					"content" in message && typeof message.content === "string"
+						? { ...message, content: `MARKED:${message.content}` }
+						: message,
 				) as never,
 		});
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({

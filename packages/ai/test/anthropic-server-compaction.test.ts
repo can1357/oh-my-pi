@@ -15,15 +15,18 @@
  *     endpoints without context management keep the text.
  *   • The empty-completion retry does not re-issue a compaction pause.
  */
+import { afterEach, describe, expect, it, vi } from "bun:test";
+
 import {
 	convertAnthropicMessages,
 	streamAnthropic,
 	supportsAnthropicCompaction,
 } from "@oh-my-pi/pi-ai/providers/anthropic";
+import type { AnthropicMessageParam } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { AnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import { configureCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type { AssistantMessage, Context, Model, ModelSpec, UserMessage } from "@oh-my-pi/pi-ai/types";
-import { kConversationalUser } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { type ConversationalUserCarrier, kConversationalUser } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
 
@@ -684,7 +687,8 @@ describe("anthropic server-side compaction replay", () => {
 
 		expect(params).toEqual([
 			{ role: "assistant", content: [{ type: "compaction", content: SUMMARY }] },
-			{ role: "user", content: "next", [kConversationalUser]: true },
+			{ role: "user", content: "next", [kConversationalUser]: true } as AnthropicMessageParam &
+				ConversationalUserCarrier,
 		]);
 	});
 
@@ -724,7 +728,8 @@ describe("anthropic server-side compaction replay", () => {
 		expect(params).toEqual([
 			{ role: "assistant", content: [{ type: "compaction", content: SUMMARY, encrypted_content: ENCRYPTED }] },
 			{ role: "user", content: filesText },
-			{ role: "user", content: "next", [kConversationalUser]: true },
+			{ role: "user", content: "next", [kConversationalUser]: true } as AnthropicMessageParam &
+				ConversationalUserCarrier,
 		]);
 	});
 
@@ -775,7 +780,8 @@ describe("anthropic server-side compaction replay", () => {
 				],
 			},
 			{ role: "user", content: filesText },
-			{ role: "user", content: "next", [kConversationalUser]: true },
+			{ role: "user", content: "next", [kConversationalUser]: true } as AnthropicMessageParam &
+				ConversationalUserCarrier,
 		]);
 	});
 
@@ -817,6 +823,7 @@ describe("anthropic server-side compaction replay", () => {
 					toolCallId: "toolu_1",
 					toolName: "read",
 					content: [{ type: "text", text: "file bytes" }],
+					isError: false,
 					timestamp: 3,
 				},
 			],
@@ -909,7 +916,7 @@ describe("anthropic server-side compaction replay", () => {
 				role: "user",
 				content: [{ type: "text", text: "next", cache_control: { type: "ephemeral" } }],
 				[kConversationalUser]: true,
-			},
+			} as AnthropicMessageParam & ConversationalUserCarrier,
 		]);
 
 		const proxy = await captureRequest(noContextManagementModel, { thinkingEnabled: false }, [
@@ -978,7 +985,8 @@ describe("anthropic server-side compaction replay", () => {
 					{ type: "text", text: "Reading chunk 11 now." },
 				],
 			},
-			{ role: "user", content: "next", [kConversationalUser]: true },
+			{ role: "user", content: "next", [kConversationalUser]: true } as AnthropicMessageParam &
+				ConversationalUserCarrier,
 		]);
 	});
 });

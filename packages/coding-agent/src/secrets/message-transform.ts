@@ -286,7 +286,7 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 		if (compactionPayload !== undefined && compactionFiles !== undefined) {
 			const filesText = obfuscator.obfuscate(compactionFiles, sharedRegexSecretValues);
 			if (filesText !== compactionFiles) {
-				current = { ...current, providerPayload: { ...compactionPayload, filesText } };
+				current = { ...current, providerPayload: { ...compactionPayload, filesText } } as Message;
 				changed = true;
 			}
 		}

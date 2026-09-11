@@ -89,7 +89,9 @@ describe("worktree clear task-isolation ownership", () => {
 		expect(await exists(orphan)).toBe(false);
 		expect(await exists(corrupt)).toBe(false);
 		expect(await exists(pending)).toBe(true);
-		expect(await exists(recycled)).toBe(false);
+		// Windows reports neither /proc start times nor `ps`, so pid-only liveness
+		// cannot spot the recycled pid and the sandbox is conservatively kept.
+		expect(await exists(recycled)).toBe(process.platform === "win32");
 	});
 
 	it("unmounts retained mounting-backend workspaces before removal", async () => {
@@ -127,7 +129,8 @@ describe("worktree clear task-isolation ownership", () => {
 		await writeRetainedBackend(retained, natives.IsoBackendKind.Overlayfs);
 		vi.spyOn(natives, "isoStop").mockRejectedValue(new Error("umount EBUSY"));
 
-		await clearWorktrees({ all: false, dryRun: false, json: true });
+		const { failed } = await clearWorktrees({ all: false, dryRun: false, json: true });
+		expect(failed).toBe(1);
 
 		expect(await Bun.file(path.join(retained, "m", "work.txt")).exists()).toBe(true);
 	});

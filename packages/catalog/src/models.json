@@ -76194,7 +76194,7 @@
 				"dropThinkingWhenReasoningEffort": false,
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
-				"clampOutputToModelMax": false,
+				"clampOutputToModelMax": true,
 				"stripImageInput": true,
 				"thinkingLoopGuard": "deepseek",
 				"rejectRootObjectUnion": false,
@@ -76250,6 +76250,20 @@
 			"maxTokens": 384000,
 			"int": 51.8,
 			"tps": 140,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"high",
+					"max"
+				]
+			},
+			"identity": {
+				"class": "deepseek",
+				"family": "flash"
+			},
+			"requiresGlyphTokenization": false,
+			"tokenizer": "deepseek-v3",
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -76299,7 +76313,7 @@
 				"dropThinkingWhenReasoningEffort": false,
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
-				"clampOutputToModelMax": false,
+				"clampOutputToModelMax": true,
 				"stripImageInput": true,
 				"thinkingLoopGuard": "deepseek",
 				"rejectRootObjectUnion": false,
@@ -76359,7 +76373,7 @@
 					"dropThinkingWhenReasoningEffort": false,
 					"nativeKimiK3Reasoning": false,
 					"zaiReasoningEffortDialect": false,
-					"clampOutputToModelMax": false,
+					"clampOutputToModelMax": true,
 					"stripImageInput": true,
 					"thinkingLoopGuard": "deepseek",
 					"rejectRootObjectUnion": false,
@@ -76367,20 +76381,6 @@
 					"supportsPromptCacheKey": false
 				}
 			},
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"low",
-					"high",
-					"max"
-				]
-			},
-			"identity": {
-				"class": "deepseek",
-				"family": "flash"
-			},
-			"requiresGlyphTokenization": false,
-			"tokenizer": "deepseek-v3",
 			"supportsComputerUse": false,
 			"compatConfig": {
 				"supportsDeveloperRole": false,
@@ -76443,6 +76443,20 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 384000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"high",
+					"max"
+				]
+			},
+			"identity": {
+				"class": "deepseek",
+				"family": "flash"
+			},
+			"requiresGlyphTokenization": false,
+			"tokenizer": "deepseek-v3",
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -76492,7 +76506,7 @@
 				"dropThinkingWhenReasoningEffort": false,
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
-				"clampOutputToModelMax": false,
+				"clampOutputToModelMax": true,
 				"stripImageInput": false,
 				"thinkingLoopGuard": "deepseek",
 				"rejectRootObjectUnion": false,
@@ -76552,7 +76566,7 @@
 					"dropThinkingWhenReasoningEffort": false,
 					"nativeKimiK3Reasoning": false,
 					"zaiReasoningEffortDialect": false,
-					"clampOutputToModelMax": false,
+					"clampOutputToModelMax": true,
 					"stripImageInput": false,
 					"thinkingLoopGuard": "deepseek",
 					"rejectRootObjectUnion": false,
@@ -76560,20 +76574,6 @@
 					"supportsPromptCacheKey": false
 				}
 			},
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"low",
-					"high",
-					"max"
-				]
-			},
-			"identity": {
-				"class": "deepseek",
-				"family": "flash"
-			},
-			"requiresGlyphTokenization": false,
-			"tokenizer": "deepseek-v3",
 			"supportsComputerUse": false,
 			"compatConfig": {
 				"supportsDeveloperRole": false,

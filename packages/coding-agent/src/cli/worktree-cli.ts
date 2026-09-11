@@ -184,7 +184,7 @@ export async function listWorktrees(options: ListWorktreesOptions): Promise<void
 	console.log(chalk.dim(`\n${live} live · ${orphaned} orphaned · ${entries.length} total`));
 }
 
-export async function clearWorktrees(options: ClearWorktreesOptions): Promise<void> {
+export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ removed: number; failed: number }> {
 	const entries = await scanWorktrees();
 	const targets = options.all ? entries : entries.filter(entry => entry.orphanReason !== undefined);
 
@@ -194,7 +194,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<vo
 		} else {
 			console.log(chalk.dim(options.all ? "No worktrees to remove." : "No orphaned worktrees to remove."));
 		}
-		return;
+		return { removed: 0, failed: 0 };
 	}
 
 	if (options.dryRun) {
@@ -206,7 +206,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<vo
 			}
 			console.log(chalk.dim(`\n${targets.length} dir${targets.length === 1 ? "" : "s"} would be removed.`));
 		}
-		return;
+		return { removed: 0, failed: 0 };
 	}
 
 	const results: { path: string; ok: boolean; error?: string }[] = [];
@@ -247,8 +247,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<vo
 
 	if (options.json) {
 		console.log(JSON.stringify({ removed: succeeded, failed, results }, null, 2));
-		if (failed > 0) process.exitCode = 1;
-		return;
+		return { removed: succeeded, failed };
 	}
 
 	for (const result of results) {
@@ -260,7 +259,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<vo
 		}
 	}
 	console.log(chalk.dim(`\n${succeeded} removed${failed > 0 ? ` · ${chalk.red(`${failed} failed`)}` : ""}`));
-	if (failed > 0) process.exitCode = 1;
+	return { removed: succeeded, failed };
 }
 
 // ───────────────────────────────────────────────────────────────────────────
