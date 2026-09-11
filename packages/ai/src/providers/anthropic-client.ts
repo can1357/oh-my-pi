@@ -48,6 +48,8 @@ export interface AnthropicRequestOptions {
 	timeout?: number;
 	/** Per-request retry budget override. */
 	maxRetries?: number;
+	/** Allow the dedicated two-attempt 429 budget independently of the general retry budget. */
+	rateLimitBudget?: boolean;
 	/**
 	 * Maximum delay in milliseconds to wait for a server-directed retry. If the
 	 * server's `retry-after` hint exceeds this value, the retry is declined and
@@ -255,7 +257,10 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 
 			const rateLimited = response.status === 429;
 			if (rateLimited) rateLimitAttempts++;
-			if (attempt < maxRetries && shouldRetryResponse(response)) {
+			if (
+				shouldRetryResponse(response) &&
+				(attempt < maxRetries || (rateLimited && options?.rateLimitBudget === true))
+			) {
 				// Bound the server-directed wait: an over-cap `retry-after` declines
 				// the retry and surfaces the original error (status/body/headers
 				// intact) so higher-level recovery can run. A non-positive cap disables enforcement.

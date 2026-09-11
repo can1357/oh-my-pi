@@ -67,6 +67,44 @@ function completionsSuccess(text: string): Response {
 	});
 }
 
+function anthropicSuccess(text: string): Response {
+	const events = [
+		{
+			type: "message_start",
+			message: {
+				id: "msg_ok",
+				usage: {
+					input_tokens: 5,
+					output_tokens: 0,
+					cache_read_input_tokens: 0,
+					cache_creation_input_tokens: 0,
+				},
+			},
+		},
+		{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+		{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+		{ type: "content_block_stop", index: 0 },
+		{
+			type: "message_delta",
+			delta: { stop_reason: "end_turn" },
+			usage: {
+				input_tokens: 5,
+				output_tokens: 1,
+				cache_read_input_tokens: 0,
+				cache_creation_input_tokens: 0,
+			},
+		},
+		{ type: "message_stop" },
+	];
+	return new Response(
+		`${events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}`).join("\n\n")}\n\n`,
+		{
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		},
+	);
+}
+
 /** Counts transport requests for one full provider call. */
 async function countCompletionsRequests(respond: (request: number) => Response): Promise<{
 	requests: number;
@@ -204,6 +242,29 @@ describe("transport rate-limit budget", () => {
 		}).result();
 		expect(result.stopReason).toBe("error");
 		expect(requests).toBeLessThanOrEqual(MAX_RATE_LIMIT_ATTEMPTS);
+	});
+
+	it("preserves one short-hinted retry through the production anthropic stream", async () => {
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		let requests = 0;
+		const fetchMock: FetchImpl = async () => {
+			requests++;
+			return requests === 1
+				? rateLimited(
+						{ "retry-after-ms": "20" },
+						'{"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}',
+					)
+				: anthropicSuccess("Hello");
+		};
+		const result = await streamAnthropic(anthropicModel, context, {
+			apiKey: "sk-test",
+			fetch: fetchMock,
+			providerRetryWait: async () => {},
+		}).result();
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find(block => block.type === "text")?.text).toBe("Hello");
+		expect(requests).toBe(MAX_RATE_LIMIT_ATTEMPTS);
 	});
 
 	// An in-band `rate_limit_error` frame arrives on a 200 stream, so it carries
