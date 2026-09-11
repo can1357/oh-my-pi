@@ -2,11 +2,25 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Defaulted Anthropic OAuth requests to 1h prompt-cache retention where supported, matching Claude Code subscriber behavior and preventing cache expiry during idle intervals ([#11667](https://github.com/can1357/oh-my-pi/pull/11667) by [@camjac251](https://github.com/camjac251)).
+### Added
+
+- Added historical decimation prompt-cache breakpoints every 15 user turns on Anthropic requests, so long conversations retain stable cached prefixes during branching, rewinds, and session resume ([#11665](https://github.com/can1357/oh-my-pi/pull/11665) by [@camjac251](https://github.com/camjac251)).
+### Fixed
+
+- Fixed Anthropic OAuth requests omitting the tool-array cache breakpoint, so tool definitions are now cached across session rewrites and sibling subagents ([#11660](https://github.com/can1357/oh-my-pi/pull/11660) by [@camjac251](https://github.com/camjac251)).
+- Fixed Amazon Bedrock OpenAI models rejecting image-bearing tool results by sending each image as a sibling user content block ([#11681](https://github.com/can1357/oh-my-pi/issues/11681)).
+
+## [18.1.17] - 2026-09-10
+
 ### Fixed
 
 - Fixed transient Python HTTP/2 stream resets and HTTP/1.1 chunked response interruptions being treated as terminal errors when forwarded by a proxy ([#11160](https://github.com/can1357/oh-my-pi/pull/11160) by [@cyriusweng](https://github.com/cyriusweng)).
 - Ollama cache hits now populate cached-token usage: `prompt_eval_cached_count` from the `/api/chat` done chunk maps to `cacheRead`, with `input` reduced to the uncached portion, so status-line `cache_turn`/`cache_hit` segments and cache-prefix audits report real hit rates instead of false misses.
 - Fixed requests that run across a price change being costed at the newer rate; peak/off-peak estimates now use the rate in effect when the request started.
+- Fixed GitHub Copilot Business seats getting HTTP 403 on every model while the same token succeeds with a Chat client identity: chat and model-policy requests now identify as `copilot-chat`, denied requests retry once as the Copilot CLI (`copilot-developer-cli`), and `COPILOT_INTEGRATION_ID` pins the `Copilot-Integration-Id` header up front; model discovery keeps the CLI identity and the 403 message names the identity and the remedies ([#11372](https://github.com/can1357/oh-my-pi/issues/11372)).
 
 ## [18.1.16] - 2026-09-09
 

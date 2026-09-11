@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.17] - 2026-09-10
+
 ### Fixed
 
 - Transcript links are now allowed by the scheme the browser will actually resolve, so a destination that only becomes `javascript:` after URL normalization is dropped like any other unsafe scheme ([#11562](https://github.com/can1357/oh-my-pi/pull/11562) by [@alphastorm](https://github.com/alphastorm)).

@@ -1092,6 +1092,8 @@ export interface Model<TApi extends Api = Api> {
 	requiresGlyphTokenization?: boolean;
 	/** Whether this model requires Cursor's tool-schema combiner projection. */
 	requiresCursorToolSchemaProjection?: boolean;
+	/** Whether this model requires tool-result images hoisted into sibling user content blocks. */
+	requiresToolResultImageHoisting?: boolean;
 	/**
 	 * Model id to send on the wire when it differs from `id`. Used by catalog
 	 * variants that present one upstream model under several local entries —
@@ -1273,6 +1275,7 @@ export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	| "compatConfig"
 	| "requiresGlyphTokenization"
 	| "requiresCursorToolSchemaProjection"
+	| "requiresToolResultImageHoisting"
 	| "supportsComputerUseConfig"
 > {
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */

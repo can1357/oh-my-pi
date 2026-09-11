@@ -3,6 +3,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getEnvApiKey, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { commandCodeModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
@@ -173,8 +174,14 @@ describe("Command Code provider support", () => {
 			allowUnauthenticated: true,
 			dynamicModelsAuthoritative: true,
 			catalogDiscovery: { label: "Command Code", allowUnauthenticated: true },
+			skipCrossProviderReferenceFills: true,
 		});
 		expect(DEFAULT_MODEL_PER_PROVIDER.commandcode).toBe("claude-sonnet-4-6");
+		// Fresh installs resolve the default synchronously from the bundle:
+		// dropping the default id from models.json must fail here, not at boot.
+		expect(getBundledModels("commandcode").some(model => model.id === DEFAULT_MODEL_PER_PROVIDER.commandcode)).toBe(
+			true,
+		);
 
 		delete Bun.env.COMMAND_CODE_API_KEY;
 		Bun.env.COMMANDCODE_API_KEY = "legacy-key";
@@ -279,7 +286,7 @@ describe("Command Code provider support", () => {
 			"deepseek/deepseek-v4-flash",
 			"deepseek/deepseek-v4-flash-fast",
 			"deepseek/deepseek-v4-flash-vision-exp",
-			"deepseek/deepseek-v4-pro",
+			"deepseek/deepseek-v4.1-flash",
 			"google/gemini-3.1-flash-lite",
 			"google/gemini-3.5-flash",
 			"google/gemini-3.5-flash-lite",
@@ -350,29 +357,63 @@ describe("Command Code provider support", () => {
 	});
 	test("omits effort controls for ids outside the verified effort registry", async () => {
 		// Negative contract: ids absent from the exact `thinking-efforts`
-		// groups expose no effort dial upstream, so the provider-default
-		// `supports-reasoning-effort #false` must hold and the OpenAI path
-		// must omit `reasoning_effort` even though bundled class ladders
-		// exist for these lineages on other hosts.
+		// groups expose no effort dial upstream. Discovery stays neutral
+		// (`reasoning: false`, no cross-provider inheritance), the KDL
+		// cascade grants no ladder without an exact rule, and the OpenAI
+		// path omits `reasoning_effort` via the provider-default
+		// `supports-reasoning-effort #false` — including on the Anthropic
+		// route, where a fallback ladder would otherwise emit an
+		// unsupported thinking payload.
 		const fetchMock: FetchImpl = vi.fn(async () =>
 			Response.json({
 				data: [
 					{ id: "moonshotai/Kimi-K2.7-Code", name: "Kimi K2.7 Code", context_length: 262_144 },
 					{ id: "moonshotai/Kimi-K2.5", name: "Kimi K2.5", context_length: 262_144 },
 					{ id: "Qwen/Qwen3.7-Max", name: "Qwen 3.7 Max", context_length: 1_000_000 },
+					{ id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", context_length: 200_000 },
 				],
 			}),
 		);
 		const options = commandCodeModelManagerOptions({ apiKey: "user_test", fetch: fetchMock });
 		const specs = await options.fetchDynamicModels?.();
 		const models = (specs ?? []).map(spec => buildModel(spec));
-		expect(models).toHaveLength(3);
+		expect(models).toHaveLength(4);
 		for (const model of models) {
-			expect(model.api).toBe("openai-completions");
+			expect(model.reasoning).toBe(false);
+			expect(model.thinking).toBeUndefined();
+		}
+		for (const model of models.filter(model => model.api === "openai-completions")) {
 			expect(model.compat).toMatchObject({
 				supportsReasoningEffort: false,
 				omitReasoningEffort: true,
 			});
+		}
+		expect(models.find(model => model.id === "claude-haiku-4-5-20251001")).toMatchObject({
+			api: "anthropic-messages",
+		});
+	});
+	test("keeps unknown context limits instead of copying another host", async () => {
+		// A catalog row that omits or misreports `context_length` retains a
+		// null window rather than inheriting another provider's deployment
+		// limit; verified corrections arrive through KDL, never the mapper.
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			Response.json({
+				data: [
+					{ id: "mystery-model", name: "Mystery Model" },
+					{ id: "broken-model", name: "Broken Model", context_length: -5 },
+				],
+			}),
+		);
+		const options = commandCodeModelManagerOptions({ apiKey: "user_test", fetch: fetchMock });
+		const specs = await options.fetchDynamicModels?.();
+		expect(specs).toHaveLength(2);
+		for (const spec of specs ?? []) {
+			expect(spec.contextWindow).toBeNull();
+		}
+		const models = (specs ?? []).map(spec => buildModel(spec));
+		for (const model of models) {
+			expect(model.contextWindow).toBeNull();
+			expect(model.input).toEqual(["text"]);
 		}
 	});
 });

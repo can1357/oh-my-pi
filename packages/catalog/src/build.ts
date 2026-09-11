@@ -34,8 +34,8 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * corrections (`cost-patch`, `limits-patch`, `long-context-cost`,
  * `context-window-floor`) overwrite upstream values; selection metadata
  * (`priority`, `apply-patch-tool-type`, `service-tier-cost`,
- * `requires-cursor-tool-schema-projection`) is rule-owned;
- * `context-promotion-target` fills only when the spec left it unset.
+ * `requires-cursor-tool-schema-projection`, `requires-tool-result-image-hoisting`)
+ * is rule-owned; `context-promotion-target` fills only when the spec left it unset.
  */
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
 	if (typeof catalog.displayId === "string") model.displayId = catalog.displayId;
@@ -63,6 +63,12 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 		model.requiresCursorToolSchemaProjection = true;
 	} else {
 		delete model.requiresCursorToolSchemaProjection;
+	}
+	const requiresToolResultImageHoisting = catalog.requiresToolResultImageHoisting;
+	if (requiresToolResultImageHoisting === true) {
+		model.requiresToolResultImageHoisting = true;
+	} else {
+		delete model.requiresToolResultImageHoisting;
 	}
 	const contextPromotionTarget = catalog.contextPromotionTarget;
 	if (typeof contextPromotionTarget === "string" && model.contextPromotionTarget === undefined) {
@@ -213,6 +219,10 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
 	const model: Model<TApi> = {
 		...spec,
+		// An exact `thinking-efforts` rule upgrades a stale `reasoning: false`
+		// discovery default (see `resolveThinkingPolicy`); materialize the
+		// correction so transports and the picker see a reasoning-capable model.
+		reasoning: spec.reasoning || policy.thinking !== undefined,
 		name: cleanModelName(spec.name),
 		identity: policy.identity,
 		requiresGlyphTokenization: policy.identity.class === "anthropic",

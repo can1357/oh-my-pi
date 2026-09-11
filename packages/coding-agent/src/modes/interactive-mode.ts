@@ -94,6 +94,7 @@ import {
 	type McpConnectionStatusEvent,
 } from "../mcp/startup-events";
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../plan-mode/approved-plan";
+import { autosaveApprovedPlan, planSaveFileName } from "../plan-mode/plan-autosave";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
 import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
 import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type: "text" };
@@ -133,6 +134,7 @@ import {
 	formatMoreItems,
 	isFeedModelBadgeEnabled,
 	replaceTabs,
+	shortenEmbeddedPaths,
 	shortenPath,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
@@ -341,25 +343,7 @@ const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
 const PLAN_SAVE_AND_QUIT_OPTION = "Save and quit";
 const PLAN_SAVE_TITLE_LINE_LIMIT = 6;
 
-const PLAN_SAVE_STEM_MAX_LENGTH = 32;
 const PLAN_FILENAME_SYSTEM_PROMPT = prompt.render(planFilenamePrompt);
-/** Suggested save filename for an approved plan: `<TOPIC>_PLAN.md` from the
- *  tiny-model topic (e.g. `PYO3_METHODS_PLAN.md`), trimmed to a word boundary
- *  when a verbose fallback title sneaks through. */
-export function planSaveFileName(title: string): string {
-	let stem = title
-		.normalize("NFC")
-		.replace(/[^\p{L}\p{N}]+/gu, "_")
-		.replace(/_+/g, "_")
-		.replace(/^_+|_+$/g, "")
-		.toUpperCase();
-	if (stem.length > PLAN_SAVE_STEM_MAX_LENGTH) {
-		const cut = stem.lastIndexOf("_", PLAN_SAVE_STEM_MAX_LENGTH);
-		stem = cut > 0 ? stem.slice(0, cut) : stem.slice(0, PLAN_SAVE_STEM_MAX_LENGTH);
-	}
-	if (!stem || stem === "PLAN") return "PLAN.md";
-	return `${stem.endsWith("_PLAN") ? stem : `${stem}_PLAN`}.md`;
-}
 
 function planSaveTitleExcerpt(planContent: string): string {
 	return planContent
@@ -4103,6 +4087,28 @@ export class InteractiveMode implements InteractiveModeContext {
 			: [...previousPresentation.enabled, "read"];
 		await this.session.restoreNonMCPToolPresentation(executionTools, previousPresentation.mounted);
 		this.session.setPlanReferencePath(options.planFilePath);
+		try {
+			const autosaved = await autosaveApprovedPlan({
+				settings: this.session.settings,
+				cwd: this.sessionManager.getCwd(),
+				title: options.title,
+				planContent,
+			});
+			if (autosaved) {
+				const displayPath = truncateToWidth(replaceTabs(shortenPath(autosaved)), TRUNCATE_LENGTHS.CONTENT);
+				this.showStatus(`Saved plan to ${displayPath}.`);
+			}
+		} catch (error) {
+			const detail = truncateToWidth(
+				shortenEmbeddedPaths(
+					replaceTabs(error instanceof Error ? error.message : String(error))
+						.replace(/[\r\n]+/g, " ")
+						.trim(),
+				),
+				TRUNCATE_LENGTHS.CONTENT,
+			);
+			this.showWarning(`Failed to autosave plan: ${detail}`);
+		}
 
 		// Resolve the deferred plan-approval model transition. On the compact path
 		// the before-flush hook passed to handleCompactCommand already ran this (so

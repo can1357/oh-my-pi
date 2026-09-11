@@ -259,6 +259,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"thinking-prefix-binding": { key: "prefixBinding", set: "thinking", shape: "scalar" },
 	"thinking-suppress-when-off": { key: "suppressWhenOff", set: "thinking", shape: "scalar" },
 	"thinking-supports-display": { key: "supportsDisplay", set: "thinking", shape: "scalar" },
+	"thinking-upgrade-neutral": { key: "upgradeNeutral", set: "thinking", shape: "scalar" },
 
 	// ── catalog metadata ──
 	"apply-patch-tool-type": {
@@ -282,6 +283,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	"requires-cursor-tool-schema-projection": {
 		key: "requiresCursorToolSchemaProjection",
+		set: "catalog",
+		shape: "scalar",
+	},
+	"requires-tool-result-image-hoisting": {
+		key: "requiresToolResultImageHoisting",
 		set: "catalog",
 		shape: "scalar",
 	},
