@@ -212,6 +212,10 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
 	const model: Model<TApi> = {
 		...spec,
+		// An exact `thinking-efforts` rule upgrades a stale `reasoning: false`
+		// discovery default (see `resolveThinkingPolicy`); materialize the
+		// correction so transports and the picker see a reasoning-capable model.
+		reasoning: spec.reasoning || policy.thinking !== undefined,
 		name: cleanModelName(spec.name),
 		identity: policy.identity,
 		requiresGlyphTokenization: policy.identity.class === "anthropic",

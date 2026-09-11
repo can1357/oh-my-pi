@@ -1,9 +1,11 @@
 import type { Agent, AgentMessage, AgentToolResult, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
 import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
+import type { Settings } from "../config/settings";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { resolveApprovedPlan } from "../plan-mode/approved-plan";
+import { autosaveApprovedPlan } from "../plan-mode/plan-autosave";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import type { PlanModeState } from "../plan-mode/state";
 import planYoloHandoffPrompt from "../prompts/system/plan-yolo-handoff.md" with { type: "text" };
@@ -12,12 +14,18 @@ import prewalkContinuePrompt from "../prompts/system/prewalk-continue.md" with {
 import prewalkPlanPrompt from "../prompts/system/prewalk-plan.md" with { type: "text" };
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop } from "../thinking";
 import { isMCPToolName } from "../tools/builtin-names";
+import {
+	replaceTabs,
+	shortenEmbeddedPaths,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "../tools/render-utils";
 import type { PlanProposalHandler } from "../tools/resolve";
 import { ToolError } from "../tools/tool-errors";
 import type { PlanYolo, Prewalk } from "./agent-session-types";
 import { PREWALK_PLAN_MESSAGE_TYPE } from "./messages";
 import type { SessionManager } from "./session-manager";
-
 const PREWALK_CONTINUE_MESSAGE_TYPE = "prewalk-continue";
 const PREWALK_CHECKLIST_MESSAGE_TYPE = "prewalk-checklist";
 
@@ -57,6 +65,7 @@ function isPrewalkImplementationAction(result: ToolResultMessage): boolean {
 export interface PrewalkCoordinatorHost {
 	agent: Agent;
 	sessionManager: SessionManager;
+	settings: Pick<Settings, "get">;
 	model(): Model | undefined;
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
@@ -307,7 +316,11 @@ export class PrewalkCoordinator {
 		const planYolo = this.#planYolo;
 		const state = this.#host.getPlanModeState();
 		if (!planYolo || !state?.enabled) throw new ToolError("Plan mode is not active.");
-		const { planFilePath, title: resolvedTitle } = await resolveApprovedPlan({
+		const {
+			planFilePath,
+			planContent,
+			title: resolvedTitle,
+		} = await resolveApprovedPlan({
 			suppliedTitle: title,
 			statePlanFilePath: state.planFilePath,
 			readPlan: url =>
@@ -317,6 +330,34 @@ export class PrewalkCoordinator {
 				}),
 			listPlanFiles: () => listPlanFiles({ localProtocolOptions: this.#host.localProtocolOptions() }),
 		});
+		let autosavedPlan: string | null = null;
+		try {
+			autosavedPlan = await autosaveApprovedPlan({
+				settings: this.#host.settings,
+				cwd: this.#host.sessionManager.getCwd(),
+				title: resolvedTitle,
+				planContent,
+			});
+			if (autosavedPlan) {
+				const displayPath = truncateToWidth(replaceTabs(shortenPath(autosavedPlan)), TRUNCATE_LENGTHS.CONTENT);
+				this.#host.emitNotice("info", `Plan autosaved to ${displayPath}.`, "plan-yolo");
+			}
+		} catch (error) {
+			logger.warn("Failed to autosave approved plan", { error });
+			const detail = truncateToWidth(
+				shortenEmbeddedPaths(
+					replaceTabs(error instanceof Error ? error.message : String(error))
+						.replace(/[\r\n]+/g, " ")
+						.trim(),
+				),
+				TRUNCATE_LENGTHS.CONTENT,
+			);
+			this.#host.emitNotice(
+				"warning",
+				`Plan autosave failed: ${detail} Continuing with implementation.`,
+				"plan-yolo",
+			);
+		}
 		this.#host.setPlanModeState(undefined);
 		const previousPresentation = this.#planYoloPreviousNonMCPPresentation;
 		try {

@@ -108,11 +108,12 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 
 ### GitHub/Copilot tokens
 
-| Variable               | Used for                       | Notes                                     |
-| ---------------------- | ------------------------------ | ----------------------------------------- |
-| `COPILOT_GITHUB_TOKEN` | GitHub Copilot provider auth   | Generic GitHub tokens are not used here   |
-| `GH_TOKEN`             | GitHub API auth in web scraper | Web scraper fallback after `GITHUB_TOKEN` |
-| `GITHUB_TOKEN`         | GitHub API auth in web scraper | Web scraper checks this before `GH_TOKEN` |
+| Variable                  | Used for                                        | Notes                                                                                                                                                                                                                                                   |
+| ------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `COPILOT_GITHUB_TOKEN`    | GitHub Copilot provider auth                    | Generic GitHub tokens are not used here                                                                                                                                                                                                                 |
+| `COPILOT_INTEGRATION_ID`  | GitHub Copilot client identity override         | Default `copilot-chat` (chat surface). Denied requests retry once as the Copilot CLI; set to pin the client id and skip the retry ([#11372](https://github.com/can1357/oh-my-pi/issues/11372)) |
+| `GH_TOKEN`                | GitHub API auth in web scraper                  | Web scraper fallback after `GITHUB_TOKEN`                                                                                                                                                                                                               |
+| `GITHUB_TOKEN`            | GitHub API auth in web scraper                  | Web scraper checks this before `GH_TOKEN`                                                                                                                                                                                                               |
 
 ### Auth broker / auth gateway (remote credential vault)
 
