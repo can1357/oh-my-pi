@@ -23,6 +23,7 @@ import type { Theme } from "../modes/theme/theme";
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskAsyncContractTemplate from "../prompts/tools/task-async-contract.md" with { type: "text" };
+import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
 import { TASK_EFFORTS, type TaskEffort } from "../thinking";
 import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
@@ -1100,19 +1101,21 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
 			options;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
-			if (aborted) {
-				const ref = AgentRegistry.global().get(agentId);
-				const transcript = (await hasResolvableTranscript(agentId))
-					? `transcript at history://${agentId}`
-					: "transcript unavailable";
-				if (ref?.status === "idle" || ref?.status === "parked") {
-					const followUp = ircEnabled ? "message it via `hub` to resume; " : "";
-					return `\n\n${agentId} was stopped but is still resumable — ${followUp}${transcript}`;
-				}
-				return `\n\n${agentId} was aborted — ${transcript}`;
-			}
-			const followUp = ircEnabled ? "message it via `hub` to follow up; " : "";
-			return `\n\n${agentId} is now idle — ${followUp}transcript at history://${agentId}`;
+			// Isolated runs are parked without a reviver once the run ends
+			// (`finalizeSubagentLifecycle`), so "message it" would point the
+			// caller at a follow-up path that no longer exists. The template says
+			// nothing about the worktree itself: the runner keeps it when captured
+			// changes could not be written, and names that path in the result.
+			const isolated = spawnParams.isolated === true;
+			const ref = aborted ? AgentRegistry.global().get(agentId) : undefined;
+			return `\n\n${prompt.render(taskFollowUpTemplate, {
+				agentId,
+				aborted,
+				isolated,
+				ircEnabled,
+				resumable: !isolated && (ref?.status === "idle" || ref?.status === "parked"),
+				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId) : true,
+			})}`;
 		};
 		return manager.register(
 			"task",
@@ -1213,8 +1216,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
 					const singleResult = result.details?.results[0];
 					// A missing result means the sync path failed at the tool level
-					// (results: []) — treat it as a failure, not success.
-					const resultFailed = !singleResult || (singleResult.aborted ?? false) || singleResult.exitCode !== 0;
+					// (results: []) — treat it as a failure, not success. A runner
+					// error on a zero exit (changes captured but not landed, or a
+					// retained workspace) is a failure too: the work needs manual
+					// recovery, which a "completed" job would hide. Mirrors the sync
+					// path's status derivation.
+					const resultFailed =
+						!singleResult ||
+						(singleResult.aborted ?? false) ||
+						singleResult.exitCode !== 0 ||
+						singleResult.error !== undefined;
 					progress.status = singleResult?.aborted ? "aborted" : resultFailed ? "failed" : "completed";
 					progress.durationMs = singleResult?.durationMs ?? Math.max(0, Date.now() - startedAt);
 					progress.tokens = singleResult?.tokens ?? 0;
