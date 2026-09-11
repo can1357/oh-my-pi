@@ -365,6 +365,49 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		});
 	});
 
+	it("counts the config link's own hop against the ancestor-chain budget", async () => {
+		// `mcp.json -> missing/../dir/a0/config.json` over a dangling link
+		// chain: the config link itself is ONE traversal, and the kernel's
+		// MAXSYMLINKS caps the TOTAL for one open — so a chain making the
+		// whole path exceed the budget must reject with ELOOP. Resolving it
+		// anyway would "successfully" publish to a referent the repaired link
+		// can never open. A total exactly AT the budget succeeds and stays
+		// readable back through the link.
+		const maxHops = process.platform === "darwin" ? 32 : 40;
+		const chain = async (base: string, links: number): Promise<void> => {
+			for (let i = 0; i < links; i++) {
+				const target = i + 1 < links ? `a${i + 1}` : "dest";
+				await fs.promises.symlink(target, path.join(base, `a${i}`));
+			}
+		};
+
+		const atLimit = path.join(dir, "total-at-limit");
+		await fs.promises.mkdir(path.join(atLimit, "dir"), { recursive: true });
+		await chain(path.join(atLimit, "dir"), maxHops - 1); // chain links + the config link = budget
+		const atLimitLink = path.join(atLimit, "mcp.json");
+		await fs.promises.symlink("missing/../dir/a0/config.json", atLimitLink);
+		await addMCPServer(atLimitLink, "alpha", {
+			type: "stdio",
+			command: "a",
+		});
+		// The write must land where the KERNEL can read it back through the link.
+		const config = await readMCPConfigFile(atLimitLink);
+		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
+
+		const pastLimit = path.join(dir, "total-past-limit");
+		await fs.promises.mkdir(path.join(pastLimit, "dir"), { recursive: true });
+		await chain(path.join(pastLimit, "dir"), maxHops); // chain links + the config link = budget + 1
+		await fs.promises.symlink("missing/../dir/a0/config.json", path.join(pastLimit, "mcp.json"));
+		await expect(
+			addMCPServer(path.join(pastLimit, "mcp.json"), "alpha", {
+				type: "stdio",
+				command: "a",
+			}),
+		).rejects.toMatchObject({
+			code: "ELOOP",
+		});
+	});
+
 	it("walks an alias and .. in a missing leaf path physically, not lexically", async () => {
 		// /base/alias/../mcp.json where `alias -> /other/deep`. The kernel
 		// follows `alias` first and pops its PHYSICAL parent, so the write must

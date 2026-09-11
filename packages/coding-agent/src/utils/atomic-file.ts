@@ -110,23 +110,24 @@ async function resolveSymlinkTargetPath(filePath: string): Promise<string> {
 	// referent is a non-symlink or does not exist, so the write lands on the
 	// final target and preserves every intermediate link instead of clobbering
 	// one into a regular file.
+	// ONE shared budget for every symlink this resolution traverses: the
+	// final-component chain below AND the intermediate links spliced inside
+	// the segment walks. The kernel's MAXSYMLINKS caps the TOTAL traversals
+	// for one open, so independent per-walk counters could resolve 1 + 40
+	// hops and "successfully" publish to a referent the repaired link can
+	// never reach — opening it surfaces ELOOP forever after.
+	const hopBudget = { hops: 0 };
 	try {
 		if ((await fs.promises.lstat(filePath)).isSymbolicLink()) {
 			let current = filePath;
-			for (let hops = 0; ; hops++) {
+			for (;;) {
 				// realpath() rejects a fully-linked cycle up front, so we only
 				// reach the manual walk on a chain that dangles today. It can
 				// still turn cyclic mid-walk if another process retargets an
 				// intermediate link, at which point readlink() would alternate
 				// forever. Cap the hops and surface an ELOOP so a cycle has
 				// bounded behavior instead of hanging the writer.
-				if (hops >= MAX_SYMLINK_HOPS) {
-					const cyclic = new Error(
-						`ELOOP: symlink chain for ${filePath} exceeds ${MAX_SYMLINK_HOPS} hops (possible cycle)`,
-					) as Error & { code?: string };
-					cyclic.code = "ELOOP";
-					throw cyclic;
-				}
+				if (++hopBudget.hops > MAX_SYMLINK_HOPS) throw symlinkHopOverflow(filePath);
 				let target: string;
 				try {
 					target = await fs.promises.readlink(current);
@@ -136,8 +137,7 @@ async function resolveSymlinkTargetPath(filePath: string): Promise<string> {
 					// symlink by the lstat below on the prior hop, then removed
 					// before this readlink. Land on the deepest hop we resolved
 					// rather than collapsing to the chain head, which would let
-					// the atomic rename replace the first user-managed symlink.
-					return current === filePath ? walkOriginalSpelling(filePath) : current;
+					return current === filePath ? walkOriginalSpelling(filePath, hopBudget) : current;
 				}
 				// Resolve the target one physical segment at a time so an
 				// intermediate directory symlink is followed by the filesystem
@@ -170,7 +170,7 @@ async function resolveSymlinkTargetPath(filePath: string): Promise<string> {
 				// `..`, or a trailing `/` or `/.` that demands it be a directory —
 				// cannot be satisfied by the filesystem and must surface ENOTDIR
 				// rather than lexically landing a regular file at a mislocated path.
-				const resolved = await walkPhysicalSegments(filePath, acc, physicalTargetSegments(target));
+				const resolved = await walkPhysicalSegments(filePath, acc, physicalTargetSegments(target), hopBudget);
 
 				let nextIsSymlink = false;
 				try {
@@ -193,7 +193,7 @@ async function resolveSymlinkTargetPath(filePath: string): Promise<string> {
 	// their referents recreated instead of failing mkdir through the dangling
 	// link. This also canonicalizes every existing component, which collapses
 	// directory aliases onto one physical parent for the missing-leaf case.
-	return walkOriginalSpelling(filePath);
+	return walkOriginalSpelling(filePath, hopBudget);
 }
 
 /**
@@ -205,10 +205,10 @@ async function resolveSymlinkTargetPath(filePath: string): Promise<string> {
  * input is anchored onto the cwd by plain concatenation for the same reason —
  * `path.join`/`path.resolve` would normalize the `..` away.
  */
-function walkOriginalSpelling(filePath: string): Promise<string> {
+function walkOriginalSpelling(filePath: string, hopBudget: { hops: number }): Promise<string> {
 	const cwd = process.cwd();
 	const spelling = path.isAbsolute(filePath) ? filePath : `${cwd}${path.sep}${filePath}`;
-	return walkPhysicalSegments(filePath, path.parse(spelling).root, physicalTargetSegments(spelling));
+	return walkPhysicalSegments(filePath, path.parse(spelling).root, physicalTargetSegments(spelling), hopBudget);
 }
 
 /** The result of one physical segment walk: where it landed, whether
@@ -231,7 +231,7 @@ interface SegmentWalkResult {
  *    live symlinks, `..` pops the PHYSICAL parent (TOCTOU-checked), trailing
  *    separators demand directories, and a DANGLING symlink component is
  *    followed by recursing into its target segments — bounded by the shared
- *    `linkHops` budget. A splice that ends FROZEN (its referent missing)
+ *    `hopBudget`. A splice that ends FROZEN (its referent missing)
  *    marks the accumulator: a `..` directly after it in the CONFIG's own
  *    spelling repairs the missing component by materializing it, the same
  *    fix the frozen phase applies for a plainly-missing `X/../leaf`.
@@ -247,12 +247,17 @@ interface SegmentWalkResult {
  * deliberate exception is the `..` repair above, because the spelling only
  * becomes resolvable by entering the materialized component.
  */
-async function walkPhysicalSegments(filePath: string, acc: string, segments: readonly string[]): Promise<string> {
-	// Shared budget for dangling-link follows inside ONE segment walk; the
-	// outer chain loop in resolveSymlinkTargetPath keeps its own counter for
-	// final-component chain hops. Both permit forty follows and reject the
-	// forty-first, matching Linux's MAXSYMLINKS.
-	let linkHops = 0;
+async function walkPhysicalSegments(
+	filePath: string,
+	acc: string,
+	segments: readonly string[],
+	hopBudget: { hops: number },
+): Promise<string> {
+	// `hopBudget` is SHARED with the chain loop in resolveSymlinkTargetPath:
+	// the kernel's MAXSYMLINKS caps the total symlink traversals for one
+	// open, so every link this resolution follows — final-component chain
+	// hops and intermediate-link splices alike — must draw on one budget.
+	// Both reject the forty-first traversal, matching Linux's MAXSYMLINKS.
 	// Materializing a missing component races any concurrent creator (or
 	// remover) of the same path; bound the retries so adversarial churn
 	// surfaces an error instead of hanging the writer.
@@ -346,13 +351,7 @@ async function walkPhysicalSegments(filePath: string, acc: string, segments: rea
 				if (!isEnoent(lstatError)) throw lstatError;
 			}
 			if (linkTarget !== undefined) {
-				if (++linkHops > MAX_SYMLINK_HOPS) {
-					const cyclic = new Error(
-						`ELOOP: symlink chain for ${filePath} exceeds ${MAX_SYMLINK_HOPS} hops (possible cycle)`,
-					) as Error & { code?: string };
-					cyclic.code = "ELOOP";
-					throw cyclic;
-				}
+				if (++hopBudget.hops > MAX_SYMLINK_HOPS) throw symlinkHopOverflow(filePath);
 				// An absolute target re-anchors at its root; a relative one
 				// resolves against the canonical accumulator we stand on.
 				// The followed link's segments are the LINK author's spelling,
@@ -477,6 +476,17 @@ async function statTraversingDirectory(acc: string, filePath: string, requiremen
 		if (!isEnoent(error)) throw error;
 		throw enotDir(`symlink target requires a directory (${requirement}) but ${acc} is gone for ${filePath}`);
 	}
+}
+
+/** Surface a bounded ELOOP when one resolution's total symlink traversals
+ * would exceed the kernel's MAXSYMLINKS: publishing past that budget would
+ * land the write on a referent the repaired link can never open. */
+function symlinkHopOverflow(filePath: string): Error & { code?: string } {
+	const cyclic = new Error(
+		`ELOOP: symlink chain for ${filePath} exceeds ${MAX_SYMLINK_HOPS} hops (possible cycle)`,
+	) as Error & { code?: string };
+	cyclic.code = "ELOOP";
+	return cyclic;
 }
 
 function enotDir(message: string): Error & { code?: string } {
