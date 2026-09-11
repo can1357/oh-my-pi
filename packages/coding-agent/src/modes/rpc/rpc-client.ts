@@ -537,7 +537,7 @@ export class RpcClient {
 	}
 
 	/**
-	 * Subscribe to subagent lifecycle frames after setSubagentSubscription("progress" | "events").
+	 * Subscribe to subagent lifecycle frames after setSubagentSubscription("progress" | "messages" | "events").
 	 */
 	onSubagentLifecycle(listener: RpcSubagentLifecycleListener): () => void {
 		this.#subagentLifecycleListeners.add(listener);
@@ -545,7 +545,7 @@ export class RpcClient {
 	}
 
 	/**
-	 * Subscribe to aggregated subagent progress frames after setSubagentSubscription("progress" | "events").
+	 * Subscribe to aggregated subagent progress frames after setSubagentSubscription("progress" | "messages" | "events").
 	 */
 	onSubagentProgress(listener: RpcSubagentProgressListener): () => void {
 		this.#subagentProgressListeners.add(listener);
@@ -553,7 +553,8 @@ export class RpcClient {
 	}
 
 	/**
-	 * Subscribe to raw subagent session events. Call setSubagentSubscription(\"events\") to enable them server-side.
+	 * Subscribe to subagent session events. Call setSubagentSubscription("messages") for completed
+	 * message_end events of every role, or setSubagentSubscription("events") for all raw session events.
 	 */
 	onSubagentEvent(listener: RpcSubagentEventListener): () => void {
 		this.#subagentEventListeners.add(listener);
@@ -659,7 +660,9 @@ export class RpcClient {
 
 	/**
 	 * Configure subagent frames emitted by the RPC server. Servers default to "off".
-	 * "progress" emits lifecycle/progress frames; "events" additionally emits raw subagent session events.
+	 * "progress" emits lifecycle/progress frames.
+	 * "messages" additionally emits completed message_end events of every role, without intermediate snapshots.
+	 * "events" emits lifecycle/progress frames and all raw subagent session events.
 	 */
 	async setSubagentSubscription(level: RpcSubagentSubscriptionLevel): Promise<RpcSubagentSubscriptionLevel> {
 		const response = await this.#send({ type: "set_subagent_subscription", level });
