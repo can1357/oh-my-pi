@@ -202,11 +202,13 @@ function hasUsableCompactionMethod(
  * session that ordinary compaction could actually recover (#11482). Require
  * the noun to co-occur with a count/limit signal instead — covering the
  * common phrasings: "too many images", "image count"/"image limit", "limit
- * of N images", "maximum (of N) images", "number/count of images", and
- * "images exceeds ... maximum" (#11482).
+ * of N images", "maximum (of N) images", "number/count of images",
+ * "images exceeds ... maximum", and per-image size/dimension rejections
+ * like "image is too large" or "image dimensions exceed 8000 pixels"
+ * (#11482).
  */
 const PAYLOAD_MEDIA_LIMIT_EVIDENCE_PATTERN =
-	/\btoo many (?:images?|frames?|pixels?)\b|\b(?:images?|frames?|pixels?)\s*(?:count|limit)\b|\blimit of \d+\s*(?:images?|frames?|pixels?)\b|\bmaximum(?: of \d+)? (?:images?|frames?|pixels?)\b|\b(?:number|count) of (?:images?|frames?|pixels?)\b|\b(?:images?|frames?|pixels?)\b.{0,20}\bexceeds?\b.{0,20}\bmaximum\b/i;
+	/\btoo many (?:images?|frames?|pixels?)\b|\b(?:images?|frames?|pixels?)\s*(?:count|limit)\b|\blimit of \d+\s*(?:images?|frames?|pixels?)\b|\bmaximum(?: of \d+)? (?:images?|frames?|pixels?)\b|\b(?:number|count) of (?:images?|frames?|pixels?)\b|\b(?:images?|frames?|pixels?)\b.{0,20}\bexceeds?\b.{0,20}\bmaximum\b|\b(?:images?|frames?) (?:is |are )?too large\b|\b(?:images?|frames?) dimensions?\b.{0,30}\bexceeds?\b.{0,30}\b(?:pixels?|\d+)\b/i;
 function hasExplicitMediaRejectionEvidence(errorMessage: string | undefined): boolean {
 	return errorMessage !== undefined && PAYLOAD_MEDIA_LIMIT_EVIDENCE_PATTERN.test(errorMessage);
 }

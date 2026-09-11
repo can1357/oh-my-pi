@@ -318,6 +318,61 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		return message;
 	}
 
+	/** Per-image size rejection: "image is too large" — no count/limit/digit,
+	 *  so classifies non-ambiguous (PayloadRejected only, no ContextOverflow).
+	 *  A definitive per-image constraint that token compaction cannot fix —
+	 *  the oversized image stays in the kept region regardless (#11482). */
+	function imageSizeTooLargePayloadAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: "request_too_large: image is too large",
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
+	/** Per-image dimension rejection: "image dimensions exceed 8000 pixels" —
+	 *  no count/limit noun, so classifies non-ambiguous (PayloadRejected only,
+	 *  no ContextOverflow). A definitive per-image pixel constraint that token
+	 *  compaction cannot fix — the oversized image stays in the kept region
+	 *  regardless (#11482). */
+	function imageDimensionsExceedPayloadAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: "request_too_large: image dimensions exceed 8000 pixels",
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
 	function usageBackedMediaBudgetAssistant(): AssistantMessage {
 		const message = {
 			role: "assistant",
@@ -850,11 +905,14 @@ describe("AgentSession payload-rejection 413 handling", () => {
 	it.each([
 		["maximum of N images", mediaMaximumLimitPayloadAssistant] as const,
 		["number of images exceeds the maximum", mediaNumberOfImagesPayloadAssistant] as const,
+		["per-image size too large", imageSizeTooLargePayloadAssistant] as const,
+		["per-image dimensions exceed pixels", imageDimensionsExceedPayloadAssistant] as const,
 	])(
 		"keeps a %s media rejection on the terminal path even with no context window and compaction available (#11482)",
 		async (_label, buildAssistant) => {
-			// "maximum of 20 images allowed" and "the number of images exceeds the
-			// maximum" are both definitive media-limit evidence but matched neither
+			// "maximum of 20 images allowed", "the number of images exceeds the
+			// maximum", "image is too large", and "image dimensions exceed 8000
+			// pixels" are all definitive media-limit evidence but matched neither
 			// the original bare-word pattern's replacement nor "too many images" /
 			// "image count/limit" / "limit of N images" — the narrowed matcher
 			// needs explicit coverage for these common phrasings too, or they fall
