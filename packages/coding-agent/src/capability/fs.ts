@@ -8,8 +8,34 @@ function resolvePath(filePath: string): string {
 	return path.resolve(filePath);
 }
 
+/**
+ * Canonical cache identity. `path.resolve()` alone keys by LEXICAL spelling,
+ * so two symlinks aliasing one file (e.g. a user-level and a project-level
+ * `mcp.json` managed by one dotfiles checkout) cache independently — a write
+ * published through one alias then leaves the other serving stale content.
+ * `realpath` collapses every alias onto the referent's single key, so any
+ * alias's read or invalidation maintains the one shared entry. A path that
+ * cannot be resolved (missing or dangling) keeps its lexical spelling: each
+ * alias of a missing file caches its own harmless null.
+ */
+async function canonicalPath(abs: string): Promise<string> {
+	try {
+		return await fs.promises.realpath(abs);
+	} catch {
+		return abs;
+	}
+}
+
+function canonicalPathSync(abs: string): string {
+	try {
+		return fs.realpathSync(abs);
+	} catch {
+		return abs;
+	}
+}
+
 export async function readFile(filePath: string): Promise<string | null> {
-	const abs = resolvePath(filePath);
+	const abs = await canonicalPath(resolvePath(filePath));
 	if (contentCache.has(abs)) {
 		return contentCache.get(abs) ?? null;
 	}
@@ -35,7 +61,7 @@ export async function readFile(filePath: string): Promise<string | null> {
 }
 
 export async function readDirEntries(dirPath: string): Promise<fs.Dirent[]> {
-	const abs = resolvePath(dirPath);
+	const abs = await canonicalPath(resolvePath(dirPath));
 	if (dirCache.has(abs)) {
 		return dirCache.get(abs) ?? [];
 	}
@@ -107,7 +133,7 @@ export function clearCache(): void {
 }
 
 export function invalidate(filePath: string): void {
-	const abs = resolvePath(filePath);
+	const abs = canonicalPathSync(resolvePath(filePath));
 	contentCache.delete(abs);
 	dirCache.delete(abs);
 	const parent = path.dirname(abs);
