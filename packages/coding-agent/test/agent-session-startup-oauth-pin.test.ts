@@ -25,6 +25,8 @@ function mintOAuthCredential(suffix: string, extra?: { orgId?: string; orgName?:
 
 const model = getBundledModel("anthropic", "claude-opus-4-5") ?? getBundledModel("anthropic", "claude-sonnet-4-5");
 if (!model) throw new Error("expected a bundled anthropic model for this test file");
+const openaiModel = getBundledModel("openai", "gpt-5");
+if (!openaiModel) throw new Error("expected a bundled openai model for this test file");
 
 const cleanup: Array<() => Promise<void> | void> = [];
 
@@ -131,5 +133,69 @@ describe("AgentSession startup OAuth account pin", () => {
 
 		const resolution = await authStorage.getOAuthAccess("anthropic", session.sessionId);
 		expect(resolution?.accountId).toBe("account-b");
+	});
+
+	it("does not crash session construction when the configured value is not a string", async () => {
+		// A hand-edited YAML `anthropic: 1` (unquoted) or the generic /settings
+		// record editor can save a number instead of a string selector.
+		const tempDir = TempDir.createSync("@pi-startup-oauth-pin-nonstring-");
+		const cwd = tempDir.path();
+		const store = new SqliteAuthCredentialStore(new Database(path.join(cwd, "auth.db")));
+		store.saveOAuth("anthropic", mintOAuthCredential("a"));
+		const authStorage = new AuthStorage(store);
+		await authStorage.reload();
+
+		const settings = Settings.isolated({
+			"auth.startupOAuthAccount": { anthropic: 1 } as unknown as Record<string, string>,
+		});
+		const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"), { settings });
+		const sessionManager = SessionManager.create(cwd, path.join(cwd, "sessions"));
+		const agent = new Agent({ initialState: { systemPrompt: ["Test"], tools: [], messages: [], model } });
+
+		let session: AgentSession | undefined;
+		expect(() => {
+			session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+		}).not.toThrow();
+
+		const accounts = await session?.listCurrentProviderOAuthAccounts();
+		expect(accounts?.accounts.some(a => a.active)).toBe(false);
+
+		await session?.dispose();
+		authStorage.close();
+		tempDir.removeSync();
+	});
+
+	it("reapplies the startup default when /model switches provider", async () => {
+		const tempDir = TempDir.createSync("@pi-startup-oauth-pin-provider-switch-");
+		const cwd = tempDir.path();
+		const store = new SqliteAuthCredentialStore(new Database(path.join(cwd, "auth.db")));
+		store.saveOAuth("anthropic", mintOAuthCredential("a"));
+		store.saveOAuth("openai", mintOAuthCredential("o"));
+		const authStorage = new AuthStorage(store);
+		await authStorage.reload();
+
+		const settings = Settings.isolated({
+			"auth.startupOAuthAccount": { anthropic: "a@example.com", openai: "o@example.com" },
+		});
+		const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"), { settings });
+		const sessionManager = SessionManager.create(cwd, path.join(cwd, "sessions"));
+		const agent = new Agent({ initialState: { systemPrompt: ["Test"], tools: [], messages: [], model } });
+		const session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+
+		expect((await session.listCurrentProviderOAuthAccounts())?.accounts.find(a => a.active)?.accountId).toBe(
+			"account-a",
+		);
+
+		// `/model` to a different provider funnels through
+		// `#setModelWithProviderSessionReset`, a different code path from the
+		// session-identity transitions `#syncAgentSessionId` covers.
+		await session.setModel(openaiModel);
+
+		const openaiAccounts = authStorage.listOAuthAccounts("openai", session.sessionId);
+		expect(openaiAccounts.find(a => a.active)?.accountId).toBe("account-o");
+
+		await session.dispose();
+		authStorage.close();
+		tempDir.removeSync();
 	});
 });

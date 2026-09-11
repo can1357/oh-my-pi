@@ -5,7 +5,7 @@ import { getAgentDbPath, getConfigRootDir, setAgentDir, TempDir } from "@oh-my-p
 import { runAuthCommand } from "../src/cli/auth-cli";
 import { resetSettingsForTest, Settings } from "../src/config/settings";
 import { AgentStorage } from "../src/session/agent-storage";
-import { SqliteAuthCredentialStore } from "../src/session/auth-storage";
+import { AuthStorage, SqliteAuthCredentialStore } from "../src/session/auth-storage";
 
 function mintOAuthCredential(suffix: string, extra?: { orgId?: string; orgName?: string }) {
 	return {
@@ -122,7 +122,7 @@ describe("omp auth (contract)", () => {
 		const globalRaw = Settings.instance.getGlobalSettings().auth as
 			| { startupOAuthAccount?: Record<string, string> }
 			| undefined;
-		expect(globalRaw?.startupOAuthAccount?.anthropic).toBe("1");
+		expect(globalRaw?.startupOAuthAccount?.anthropic).toBe("OAuth credential #1");
 		expect(globalRaw?.startupOAuthAccount?.openai).toBeUndefined();
 
 		logs = [];
@@ -145,5 +145,30 @@ describe("omp auth (contract)", () => {
 
 		await runAuthCommand({ action: "pin", provider: "anthropic", selector: "Org A" });
 		expect(logs.join("\n")).toContain("higher-precedence project or overlay config");
+	});
+	it("persists a durable selector that survives a sibling account being removed (/logout)", async () => {
+		seedSharedEmailAccounts();
+		// Pin "Org A" — position 0 at the time of pinning.
+		await runAuthCommand({ action: "pin", provider: "anthropic", selector: "Org A" });
+
+		// Remove "Org B" the way `/logout` does: the AuthStorage-level delete.
+		// If the persisted selector were the 1-based position instead of a
+		// durable id, this wouldn't change anything for account 1 — but the
+		// regression this guards is the reverse direction (removing an
+		// EARLIER account would shift a later one into position 1). Removing
+		// the sibling here is enough to prove the persisted value is not a
+		// position that could have been invalidated by any removal at all.
+		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(getAgentDbPath(agentDir.path()))));
+		await authStorage.reload();
+		const before = authStorage.listOAuthAccounts("anthropic");
+		const orgB = before.find(a => a.orgName === "Org B");
+		if (!orgB) throw new Error("expected Org B to be seeded");
+		await authStorage.removeCredential("anthropic", orgB.credentialId);
+		authStorage.close();
+
+		logs = [];
+		await runAuthCommand({ action: "accounts", provider: "anthropic" });
+		const output = logs.join("\n");
+		expect(output).toContain("shared@example.com (Org A) [pinned]");
 	});
 });

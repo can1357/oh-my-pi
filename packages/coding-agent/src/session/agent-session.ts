@@ -8495,6 +8495,7 @@ export class AgentSession {
 	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
 		const currentModel = this.model;
 		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
+		const providerChanged = !currentModel || currentModel.provider !== model.provider;
 		if (currentModel) {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
 			if (isChanging) {
@@ -8517,6 +8518,14 @@ export class AgentSession {
 		// retry-fallback on the error path.
 		if (isChanging) {
 			this.#emit({ type: "model_changed" });
+		}
+		// `#syncAgentSessionId` only reapplies the startup default on a
+		// session-identity transition, not a same-session provider switch — a
+		// session that starts on one provider and later switches to another
+		// (or back) needs its own reapplication here, or the new provider's
+		// configured account is silently skipped in favor of automatic ranking.
+		if (providerChanged) {
+			this.#applyStartupOAuthAccountPin();
 		}
 
 		await this.#reconcileModelDependentState(currentModel, model);
@@ -10154,21 +10163,30 @@ export class AgentSession {
 
 	/**
 	 * Auto-pin this session's OAuth account for the active model's provider from
-	 * `auth.startupOAuthAccount`, run once at construction time. Selector syntax
-	 * matches `/session pin`: 1-based stored-account position, email, account
-	 * id, org id, or org name (case-insensitive). No-ops when unconfigured, when
-	 * a session pin already exists (e.g. resuming a session that pinned one
-	 * earlier — never overrides a later manual `/session pin`), or when the
-	 * selector is missing/ambiguous. This only decides which account a fresh
-	 * session starts from; normal usage-based ranking still fails over to a
-	 * sibling account when the pinned one is rate-limited (see
-	 * {@link AuthStorage.pinSessionOAuthAccount}).
+	 * `auth.startupOAuthAccount`, run whenever this session's active provider is
+	 * (re)established: at construction, on every session-identity transition
+	 * (`#syncAgentSessionId`, e.g. `/new`, `/fresh`, fork, rewind), and on a
+	 * `/model` switch that changes provider (`#setModelWithProviderSessionReset`).
+	 * Selector syntax matches `/session pin`: 1-based stored-account position,
+	 * email, account id, org id, org name, or `OAuth credential #<id>`
+	 * (case-insensitive). No-ops when unconfigured, when the configured value
+	 * isn't a string (a hand-edited YAML/JSON record can hold any value type —
+	 * e.g. an unquoted numeric position — so this must not assume `string` and
+	 * call `.trim()` on it), when a session pin already exists for this
+	 * provider (e.g. resuming a session that pinned one earlier, or an earlier
+	 * provider switch in this same session — never overrides a later manual
+	 * `/session pin`), or when the selector is missing/ambiguous. This only
+	 * decides which account this session's active provider starts from; normal
+	 * usage-based ranking still fails over to a sibling account when the
+	 * pinned one is rate-limited (see {@link AuthStorage.pinSessionOAuthAccount}).
 	 */
 	#applyStartupOAuthAccountPin(): void {
 		const provider = this.model?.provider;
 		if (!provider) return;
-		const configured = this.settings.get("auth.startupOAuthAccount") as Record<string, string> | undefined;
-		const selector = configured?.[provider]?.trim();
+		const configuredValue = (this.settings.get("auth.startupOAuthAccount") as Record<string, unknown> | undefined)?.[
+			provider
+		];
+		const selector = typeof configuredValue === "string" ? configuredValue.trim() : undefined;
 		if (!selector) return;
 		const authStorage = this.#modelRegistry.authStorage;
 		const accounts = authStorage.listOAuthAccounts(provider, this.sessionId);

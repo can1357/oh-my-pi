@@ -17,7 +17,6 @@ import {
 	STRING_VALUE_FLAGS,
 	VALUELESS_FLAGS,
 } from "./cli/flag-tables";
-import Auth from "./commands/auth";
 import { launchHelp } from "./commands/launch-help";
 
 export const commands: CommandEntry[] = [
@@ -29,7 +28,7 @@ export const commands: CommandEntry[] = [
 	},
 	{
 		name: "auth",
-		load: () => Promise.resolve(Auth),
+		load: () => import("./commands/auth").then(m => m.default),
 		help: commandHelp.authHelp,
 	},
 	{

@@ -39,8 +39,12 @@ function accountLabel(account: OAuthAccountSummary): string {
  * A selector that resolves back to exactly `account` and only `account` among
  * `accounts` — so persisting it can't go ambiguous later if a sibling shares
  * the same email or account id under a different org (Anthropic/ChatGPT
- * multi-subscription: same email, two orgs). Falls back to the 1-based
- * position, which is unique by construction.
+ * multi-subscription: same email, two orgs). Falls back to the durable
+ * `OAuth credential #<id>` form (already an accepted selector, see
+ * `matchOAuthAccountsBySelector`) rather than the 1-based position: a stored
+ * position shifts when an earlier account is removed via `/logout`, which
+ * would silently repoint the pin at a different account instead of just
+ * going stale.
  */
 function uniqueStartupSelector(account: OAuthAccountSummary, accounts: readonly OAuthAccountSummary[]): string {
 	for (const candidate of [account.email, account.accountId]) {
@@ -48,7 +52,7 @@ function uniqueStartupSelector(account: OAuthAccountSummary, accounts: readonly 
 		const matches = matchOAuthAccountsBySelector(accounts, candidate);
 		if (matches.length === 1 && matches[0].credentialId === account.credentialId) return candidate;
 	}
-	return String(account.position + 1);
+	return `OAuth credential #${account.credentialId}`;
 }
 
 /**
