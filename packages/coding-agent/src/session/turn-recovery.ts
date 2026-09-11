@@ -1553,10 +1553,15 @@ export class TurnRecovery {
 	}
 
 	/** Records the cooldown that should suppress a failing selector. */
-	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void {
+	noteRetryFallbackCooldown(
+		currentSelector: string,
+		retryAfterMs: number | undefined,
+		errorMessage: string,
+		rateLimitPolicy: RateLimitPolicy,
+	): void {
 		let cooldownMs = retryAfterMs;
 		if (!cooldownMs || cooldownMs <= 0) {
-			const reason = this.#parseRateLimitReason(errorMessage);
+			const reason = parseRateLimitReason(errorMessage, rateLimitPolicy);
 			cooldownMs = reason === "UNKNOWN" ? 5 * 60 * 1000 : calculateRateLimitBackoffMs(reason);
 		}
 		this.#host.modelRegistry.suppressSelector(currentSelector, Date.now() + cooldownMs);
@@ -2334,7 +2339,12 @@ export class TurnRecovery {
 				!(retryBudgetExhausted && classifierRefusal)
 			) {
 				if (!classifierRefusal) {
-					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
+					this.noteRetryFallbackCooldown(
+						currentSelector,
+						parsedRetryAfterMs,
+						errorMessage,
+						this.#rateLimitPolicy(),
+					);
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
 					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,

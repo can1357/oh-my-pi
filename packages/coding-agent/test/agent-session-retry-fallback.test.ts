@@ -130,6 +130,26 @@ function thinkingLoopErrorStream(model: Model<Api>): AssistantMessageEventStream
 	return stream;
 }
 
+function advisorUsageLimitErrorStream(model: Model<Api>, errorMessage: string): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	queueMicrotask(() => {
+		const partial: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: emptyUsage(),
+			stopReason: "error",
+			errorMessage,
+			errorId: AIError.create(AIError.Flag.UsageLimit),
+			timestamp: Date.now(),
+		};
+		stream.push({ type: "error", reason: "error", error: partial });
+	});
+	return stream;
+}
+
 /** A stream that completes normally with a single text block. */
 function recoveredTextStream(model: Model<Api>, text: string): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
@@ -227,6 +247,7 @@ describe("AgentSession retry fallback", () => {
 		authStorage.setRuntimeApiKey("openai", "openai-test-key");
 		authStorage.setRuntimeApiKey("fireworks", "fireworks-test-key");
 		authStorage.setRuntimeApiKey("google", "google-test-key");
+		authStorage.setRuntimeApiKey("google-antigravity", "google-antigravity-test-key");
 		authStorage.setRuntimeApiKey("google-vertex", "google-vertex-test-key");
 		authStorage.setRuntimeApiKey("openrouter", "openrouter-test-key");
 		authStorage.setRuntimeApiKey("devin", "devin-test-key");
@@ -1602,9 +1623,9 @@ describe("AgentSession retry fallback", () => {
 		});
 	});
 
-	it("keeps advisor fallback recovery on its role chain when another role shares its model", async () => {
+	it("uses the advisor model policy while keeping fallback recovery on its role chain", async () => {
 		const mainModel = getBundledModel("openai", "gpt-4o-mini");
-		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const advisorPrimary = getBundledModel("google-antigravity", "gemini-3.8-flash");
 		const unrelatedFallback = getBundledModel("openai", "gpt-4o");
 		const advisorFallback = getBundledModel("google", "gemini-2.5-flash");
 		if (!mainModel || !advisorPrimary || !unrelatedFallback || !advisorFallback) {
@@ -1639,6 +1660,7 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 0,
 			"retry.fallbackChains": {
 				commit: [unrelatedFallbackSelector],
 				advisor: [advisorFallbackSelector],
@@ -1660,9 +1682,10 @@ describe("AgentSession retry fallback", () => {
 				const selector = `${model.provider}/${model.id}`;
 				requestedAdvisorModels.push(selector);
 				if (selector === advisorPrimarySelector && advisorPrimaryAttempts++ === 0) {
-					advisorMock.push({
-						throw: "Devin stream error failed_precondition: Your daily usage quota has been exhausted. Your quota will reset after 1s.",
-					});
+					return advisorUsageLimitErrorStream(
+						model,
+						'Cloud Code Assist API error (429): {"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}',
+					);
 				} else if (selector === advisorPrimarySelector) {
 					advisorMock.push({ content: ["Advisor primary restored"] });
 				} else if (selector === unrelatedFallbackSelector) {
@@ -1717,7 +1740,7 @@ describe("AgentSession retry fallback", () => {
 		expect(advisorFailures).toEqual([]);
 
 		const getApiKey = vi.spyOn(modelRegistry, "getApiKey");
-		const afterCooldown = Date.now() + 2_000;
+		const afterCooldown = Date.now() + 31_000;
 		vi.spyOn(Date, "now").mockReturnValue(afterCooldown);
 		await session.prompt("Complete another primary turn after the advisor cooldown");
 		await session.waitForIdle();

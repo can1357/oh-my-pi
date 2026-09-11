@@ -1784,8 +1784,8 @@ export class AgentSession {
 			findRetryFallbackCandidates: (role, selector, model) =>
 				this.#recovery.findRetryFallbackCandidates(role, selector, model),
 			isRetryFallbackSelectorSuppressed: selector => this.#recovery.isRetryFallbackSelectorSuppressed(selector),
-			noteRetryFallbackCooldown: (selector, retryAfterMs, errorMessage) =>
-				this.#recovery.noteRetryFallbackCooldown(selector, retryAfterMs, errorMessage),
+			noteRetryFallbackCooldown: (selector, retryAfterMs, errorMessage, rateLimitPolicy) =>
+				this.#recovery.noteRetryFallbackCooldown(selector, retryAfterMs, errorMessage, rateLimitPolicy),
 			createCodexCompactionContext: createMaintenanceCodexCompactionContext,
 			sessionId: () => this.sessionId,
 		};
