@@ -211,12 +211,17 @@ function walkOriginalSpelling(filePath: string): Promise<string> {
 	return walkPhysicalSegments(filePath, path.parse(spelling).root, physicalTargetSegments(spelling));
 }
 
-/** The result of one physical segment walk: where it landed, and whether
+/** The result of one physical segment walk: where it landed, whether
  * that path is a FROZEN (missing-on-disk) resolution whose direct continuations
- * must repair before traversing. */
+ * must repair before traversing, and whether the walked spelling ENDED naming
+ * a directory (a trailing `/` or `/.`) whose demand is still outstanding —
+ * deferred because an ENCLOSING walk may append further segments through that
+ * directory, which dissolves the demand; only a walk that ends terminally
+ * with it names a directory and must surface ENOTDIR. */
 interface SegmentWalkResult {
 	path: string;
 	frozen: boolean;
+	pendingDir: boolean;
 }
 
 /**
@@ -356,6 +361,15 @@ async function walkPhysicalSegments(filePath: string, acc: string, segments: rea
 				// which the frozen-accumulator branch above repairs.
 				const anchor = path.isAbsolute(linkTarget) ? path.parse(linkTarget).root : liveAcc;
 				const spliced = await walkLive(anchor, physicalTargetSegments(linkTarget), false);
+				if (spliced.pendingDir && index >= liveSegments.length) {
+					// The link's own spelling ends naming a directory. Nothing in
+					// THIS walk continues past it, so defer the demand upward: an
+					// enclosing walk may still append its own segments through that
+					// directory (`~/.omp -> /missing/dotfiles/` while the writer
+					// targets `~/.omp/mcp.json`), which dissolves it; only the
+					// outermost walk treats a still-terminal demand as ENOTDIR.
+					return { path: spliced.path, frozen: spliced.frozen, pendingDir: true };
+				}
 				liveAcc = spliced.path;
 				accFrozen = spliced.frozen;
 				continue;
@@ -363,7 +377,7 @@ async function walkPhysicalSegments(filePath: string, acc: string, segments: rea
 			// Plainly missing: freeze here and interpret the remainder.
 			return await frozenTail(candidate, liveSegments.slice(index), repairAllowed);
 		}
-		return { path: liveAcc, frozen: accFrozen };
+		return { path: liveAcc, frozen: accFrozen, pendingDir: false };
 	};
 
 	const frozenTail = async (
@@ -386,28 +400,44 @@ async function walkPhysicalSegments(filePath: string, acc: string, segments: rea
 		//                             symlink); the all-plain leaf resolves
 		//                             beside it
 		//   inert     interior `//` and `./` fold into the two shapes above
+		//   deferred  a TRAILING `/` or `/.` names a directory: returned as
+		//                             `pendingDir` rather than rejected,
+		//                             because an enclosing walk may append its
+		//                             own segments through that directory;
+		//                             only the outermost walk converts a
+		//                             still-terminal demand to ENOTDIR
 		//
 		// Rejected: `..` after lexically appended names (`X/a/..` — needs
 		// `X/a` entered), a bare or repeated `X/..`/`X/../..` (names a
-		// directory, and a config publish needs a file leaf), a trailing `X/`
-		// or `X/.` (directory demand), and any `..` inside a FOLLOWED LINK's
-		// target (the missing name belongs to the link author's world; only
-		// the config's own spelling is ours to repair).
+		// directory, and a config publish needs a file leaf), `X/../` (a `..`
+		// the separator demands be entered first), and any `..` inside a
+		// FOLLOWED LINK's target (the missing name belongs to the link
+		// author's world; only the config's own spelling is ours to repair).
 		const stripped: string[] = [];
 		for (const [i, seg] of tail.entries()) {
 			if ((seg === "" || seg === ".") && i < tail.length - 1) continue;
 			stripped.push(seg);
 		}
-		if (stripped.length === 0) return { path: frozenPath, frozen: true };
+		if (stripped.length === 0) return { path: frozenPath, frozen: true, pendingDir: false };
 		const last = stripped[stripped.length - 1];
 		if (last === "" || last === ".") {
-			throw enotDir(`symlink target requires a directory for the missing component ${frozenPath} (${filePath})`);
+			// The spelling ends demanding a directory. An enclosing walk may
+			// still append its own segments THROUGH that directory — any
+			// continuation requires one there anyway and the writer's mkdir
+			// creates it — so defer via `pendingDir` instead of throwing. A
+			// `..` before the separator (`X/../`) cannot be joined lexically
+			// and stays a hard rejection.
+			const before = stripped.slice(0, -1);
+			if (!before.every(isPlainName)) {
+				throw enotDir(`symlink target requires a directory for the missing component ${frozenPath} (${filePath})`);
+			}
+			return { path: path.join(frozenPath, ...before), frozen: true, pendingDir: true };
 		}
 		const leaf = stripped[0] === ".." ? stripped.slice(1) : stripped;
 		if (leaf.some(seg => !isPlainName(seg)) || (stripped[0] === ".." && (leaf.length === 0 || !repairAllowed))) {
 			throw enotDir(`cannot resolve '..' past an unresolved component in symlink target for ${filePath}`);
 		}
-		if (stripped[0] !== "..") return { path: path.join(frozenPath, ...stripped), frozen: true };
+		if (stripped[0] !== "..") return { path: path.join(frozenPath, ...stripped), frozen: true, pendingDir: false };
 		// Repair `X/../leaf`: materialize `X`, then RE-ENTER it physically
 		// instead of popping lexically — between the failed lstat and the
 		// mkdir another process can create `X` as a symlink to an existing
@@ -419,7 +449,11 @@ async function walkPhysicalSegments(filePath: string, acc: string, segments: rea
 		return walkLive(path.dirname(frozenPath), [path.basename(frozenPath), "..", ...leaf], repairAllowed);
 	};
 
-	return (await walkLive(acc, segments, true)).path;
+	const result = await walkLive(acc, segments, true);
+	if (result.pendingDir) {
+		throw enotDir(`symlink target requires a directory but resolves to ${result.path} (${filePath})`);
+	}
+	return result.path;
 }
 
 /** A plain path-name segment — not a separator, dot, or parent traversal. */

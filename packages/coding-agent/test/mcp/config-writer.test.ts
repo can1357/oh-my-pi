@@ -293,11 +293,47 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
 	});
 
-	it("permits exactly forty ancestor symlink hops and rejects the forty-first", async () => {
-		// Linux MAXSYMLINKS resolves forty symlink traversals and fails on
-		// the forty-first; the dangling-ancestor walk must match that
-		// boundary so a maximally deep (but legal) chain still recreates its
-		// referent instead of surfacing ELOOP one hop early.
+	it("recreates the referent of a dangling ancestor link whose target ends with a separator", async () => {
+		// `dotfiles-link -> missing/dotfiles/` — the trailing separator in the
+		// link target names a directory only if nothing follows it; the config
+		// leaf continues THROUGH it, so the walk must defer that demand and
+		// recreate missing/dotfiles/mcp.json instead of surfacing ENOTDIR.
+		const linkDir = path.join(dir, "dotfiles-link");
+		await fs.promises.symlink(path.join(dir, "missing", "dotfiles") + path.sep, linkDir);
+
+		await addMCPServer(path.join(linkDir, "mcp.json"), "alpha", {
+			type: "stdio",
+			command: "a",
+		});
+
+		expect((await fs.promises.lstat(linkDir)).isSymbolicLink()).toBe(true);
+		const config = await readMCPConfigFile(path.join(dir, "missing", "dotfiles", "mcp.json"));
+		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
+	});
+
+	it("rejects a dangling link whose entire target names a directory", async () => {
+		// `mcp.json -> missing-dir/`: the trailing separator is TERMINAL — the
+		// whole resolution names a directory, which a config publish can never
+		// target — so the write surfaces ENOTDIR instead of staging a regular
+		// file where the referent directory belongs.
+		await fs.promises.symlink("missing-dir/", path.join(dir, "mcp.json"));
+
+		await expect(
+			addMCPServer(path.join(dir, "mcp.json"), "alpha", {
+				type: "stdio",
+				command: "a",
+			}),
+		).rejects.toMatchObject({ code: "ENOTDIR" });
+	});
+
+	it("permits the host's full symlink-hop budget and rejects one past it", async () => {
+		// MAXSYMLINKS is a kernel limit, not a constant: Linux resolves forty
+		// symlink traversals and fails the forty-first, Darwin caps at
+		// thirty-two. The boundary the walk must match is the HOST's, so a
+		// maximally deep (but legal) chain still recreates its referent
+		// instead of surfacing ELOOP one hop early — or, on Darwin, instead
+		// of asserting Linux's forty and failing against the kernel's 32.
+		const maxHops = process.platform === "darwin" ? 32 : 40;
 		const hopChain = async (base: string, links: number): Promise<string> => {
 			for (let i = 0; i < links; i++) {
 				// a0 -> a1 -> …; the last link names the missing directory
