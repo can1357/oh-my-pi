@@ -5,7 +5,8 @@ import { DEFAULT_CLOUD_STT_MODEL, resolveCloudSttModel } from "@oh-my-pi/pi-codi
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { __resetExtraCaCache } from "@oh-my-pi/pi-utils";
 import type { CloudSttCredential } from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
-import { encodeWav16k, startCloudSttStream } from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
+import { startCloudSttStream } from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
+import { encodeWav } from "@oh-my-pi/pi-coding-agent/tts/wav";
 import { resolveSttCloudCredential, STTController, type SttState } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
@@ -393,18 +394,23 @@ describe("cloud STT stream", () => {
 	});
 });
 
-describe("encodeWav16k", () => {
-	it("writes a valid 16 kHz mono PCM16 header with zeroed silence", () => {
-		const buffer = encodeWav16k(new Float32Array(160));
-		const view = new DataView(buffer);
+describe("dictation WAV payload", () => {
+	it("encodes mic audio as a 16 kHz mono PCM16 file through the shared encoder", () => {
+		// The upload's `file.size` assertion above proves the byte count; this
+		// pins the header fields the transcription endpoint parses, at the mic
+		// sample rate the client passes rather than the TTS rate.
+		const bytes = encodeWav(new Float32Array(160), 16_000);
+		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 		const ascii = (offset: number, length: number): string =>
-			String.fromCharCode(...new Uint8Array(buffer, offset, length));
+			String.fromCharCode(...bytes.subarray(offset, offset + length));
 		expect(ascii(0, 4)).toBe("RIFF");
 		expect(ascii(8, 4)).toBe("WAVE");
 		expect(view.getUint32(24, true)).toBe(16000);
+		expect(view.getUint32(28, true)).toBe(32000);
 		expect(view.getUint16(22, true)).toBe(1);
+		expect(view.getUint16(34, true)).toBe(16);
 		expect(view.getUint32(40, true)).toBe(320);
-		expect(new Int16Array(buffer, 44).every(v => v === 0)).toBe(true);
+		expect(bytes.subarray(44).every(v => v === 0)).toBe(true);
 	});
 });
 
