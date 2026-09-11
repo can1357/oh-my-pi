@@ -130,7 +130,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		(options.useDefaults ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } : undefined);
 	const input = resolvedModel.input ?? reference?.input ?? (options.useDefaults ? ["text"] : undefined);
 	const supportsTools = resolvedModel.supportsTools ?? reference?.supportsTools;
-	return buildModel({
+	const built = buildModel({
 		id: resolvedModel.id,
 		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
 		api: resolvedModel.api,
@@ -155,6 +155,13 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		premiumMultiplier: resolvedModel.premiumMultiplier,
 		isOAuth: resolvedModel.isOAuth,
 	} as ModelSpec<Api>);
+	if (resolvedModel.cost) {
+		// Explicit custom prices outrank catalog corrections and schedules, just
+		// as they do for same-id model patches.
+		built.cost = { ...resolvedModel.cost };
+		delete built.cost.timeBased;
+	}
+	return built;
 }
 
 export function normalizeSuppressedSelector(

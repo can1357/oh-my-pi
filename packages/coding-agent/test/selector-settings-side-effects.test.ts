@@ -123,6 +123,22 @@ describe("selector setting side effects", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
+	it("re-enables live advisor runtime to rebuild when advisor.maxNotesPerUpdate changes in /settings", () => {
+		const setAdvisorEnabled = vi.fn();
+		const isAdvisorEnabled = vi.fn().mockReturnValue(true);
+		const requestRender = vi.fn();
+		const controller = new SelectorController({
+			session: { setAdvisorEnabled, isAdvisorEnabled },
+			ui: { requestRender },
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("advisor.maxNotesPerUpdate", 3);
+
+		expect(isAdvisorEnabled).toHaveBeenCalledTimes(1);
+		expect(setAdvisorEnabled).toHaveBeenCalledWith(true);
+		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+
 	for (const id of ["terminal.showImages", "showImages"]) {
 		for (const visible of [false, true]) {
 			it(`updates every image owner and rebuilds the transcript when ${id}=${visible}`, () => {

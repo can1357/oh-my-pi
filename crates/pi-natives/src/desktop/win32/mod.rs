@@ -48,8 +48,7 @@ impl Win32Backend {
 impl Backend for Win32Backend {
 	fn capabilities(&mut self) -> DesktopCapabilities {
 		let display_count = capture::displays(&self.display)
-			.map(|displays| displays.len().min(u32::MAX as usize) as u32)
-			.unwrap_or(0);
+			.map_or(0, |displays| displays.len().min(u32::MAX as usize) as u32);
 		DesktopCapabilities {
 			backend: "win32".to_string(),
 			display_server: Some("win32".to_string()),

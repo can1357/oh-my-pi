@@ -17,6 +17,7 @@ const DESKTOP_SOURCE_NAME: &str = "linux-callback.desktop";
 const DEFAULT_APPLICATIONS_SECTION: &str = "Default Applications";
 const DEFAULT_APPLICATIONS_HEADER: &str = "[Default Applications]";
 const XDG_MIME: &str = "xdg-mime";
+const UPDATE_DESKTOP_DATABASE: &str = "update-desktop-database";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -496,6 +497,23 @@ fn effective_default(context: &Context, mime_type: &str) -> anyhow::Result<Strin
 	])
 }
 
+/// Best-effort refresh of `mimeinfo.cache` for the user applications directory.
+///
+/// [`activate`] records the handler in `mimeapps.list`, which `xdg-mime query
+/// default` reads directly, but portals such as `xdg-desktop-portal-gtk`
+/// enumerate scheme handlers from `mimeinfo.cache`. Without this refresh the
+/// two disagree: `xdg-mime` resolves the handler while the portal reports "No
+/// Apps available", so the browser never launches the callback helper — and
+/// once the cache is refreshed out-of-band it may still point at a prior
+/// transaction's desktop entry, routing the callback to a directory the current
+/// waiter never polls. A missing `update-desktop-database` or a non-zero exit
+/// is non-fatal: the manual paste fallback still completes login.
+fn refresh_desktop_database(context: &Context, applications_directory: &Path) {
+	if let Some(directory) = applications_directory.to_str() {
+		let _ = context.run(Path::new(UPDATE_DESKTOP_DATABASE), &[directory.to_owned()]);
+	}
+}
+
 fn file_ownership(path: &Path, expected: &[u8]) -> anyhow::Result<FileOwnership> {
 	match fs::read(path) {
 		Ok(content) if content == expected => Ok(FileOwnership::Ours),
@@ -589,6 +607,7 @@ pub(super) fn activate(context: &Context, snapshot: &Snapshot) -> anyhow::Result
 		},
 		FileOwnership::Ours => {},
 	}
+	refresh_desktop_database(context, &snapshot.applications_directory);
 
 	let owned_default = DefaultEntry { present: true, value: format!("{};", snapshot.desktop_id) };
 	fs::create_dir_all(&snapshot.config_home)
@@ -651,6 +670,7 @@ pub(super) fn restore(context: &Context, snapshot: &Snapshot) -> anyhow::Result<
 	if installed == FileOwnership::Ours {
 		context.check()?;
 		remove_if_exists(&snapshot.desktop_path)?;
+		refresh_desktop_database(context, &snapshot.applications_directory);
 	}
 	if effective_default(context, &snapshot.mime_type)? == snapshot.desktop_id {
 		bail!("Linux OAuth callback handler remained active after desktop cleanup");
@@ -667,6 +687,8 @@ mod tests {
 			atomic::{AtomicU64, Ordering},
 		},
 	};
+
+	use parking_lot::Mutex;
 
 	use super::*;
 	use crate::task::CancelToken;
@@ -692,7 +714,15 @@ mod tests {
 		}
 	}
 
-	fn context(root: &TempDir, desktop: &str, inherited: &str) -> Context {
+	/// Programs (and their arguments) the mocked [`Context::run`] observed.
+	type CommandLog = Arc<Mutex<Vec<(PathBuf, Vec<String>)>>>;
+
+	/// Build a test [`Context`] plus the log of commands its runner intercepts.
+	///
+	/// The runner resolves `xdg-mime query default` against the on-disk
+	/// preference and accepts `update-desktop-database` as a best-effort no-op,
+	/// mirroring how the real binaries behave for the registration flow.
+	fn build_context(root: &TempDir, desktop: &str, inherited: &str) -> (Context, CommandLog) {
 		let home = root.0.join("home");
 		let directory = home.join("transaction");
 		let config = home.join("xdg-config");
@@ -713,7 +743,13 @@ mod tests {
 		);
 		let preference = config.join("kde-mimeapps.list");
 		let inherited = inherited.to_owned();
+		let log: CommandLog = Arc::new(Mutex::new(Vec::new()));
+		let recorder = Arc::clone(&log);
 		context.runner = Some(Arc::new(move |program, args| {
+			recorder.lock().push((program.to_path_buf(), args.to_vec()));
+			if program == Path::new(UPDATE_DESKTOP_DATABASE) {
+				return Ok(String::new());
+			}
 			assert_eq!(program, Path::new(XDG_MIME));
 			assert_eq!(args.len(), 3);
 			assert_eq!(args[0], "query");
@@ -727,7 +763,11 @@ mod tests {
 				inherited.clone()
 			})
 		}));
-		context
+		(context, log)
+	}
+
+	fn context(root: &TempDir, desktop: &str, inherited: &str) -> Context {
+		build_context(root, desktop, inherited).0
 	}
 
 	#[test]
@@ -867,6 +907,38 @@ mod tests {
 		assert!(restored.contains("text/plain=external-editor.desktop;"));
 		assert!(!restored.contains(&snapshot.desktop_id));
 		assert!(!snapshot.desktop_path.exists());
+	}
+
+	#[test]
+	fn activate_and_restore_refresh_the_desktop_database() {
+		let root = TempDir::new();
+		let (context, log) = build_context(&root, "KDE", "inherited.desktop");
+		let snapshot = prepare(&context).unwrap();
+
+		activate(&context, &snapshot).unwrap();
+		let refreshed_on_activate = log.lock().iter().any(|(program, args)| {
+			program == Path::new(UPDATE_DESKTOP_DATABASE)
+				&& args.len() == 1
+				&& Path::new(&args[0]) == snapshot.applications_directory
+		});
+		assert!(
+			refreshed_on_activate,
+			"activate must run update-desktop-database on the applications directory so \
+			 mimeinfo.cache-based portals resolve the freshly installed handler"
+		);
+
+		log.lock().clear();
+		restore(&context, &snapshot).unwrap();
+		let refreshed_on_restore = log.lock().iter().any(|(program, args)| {
+			program == Path::new(UPDATE_DESKTOP_DATABASE)
+				&& args.len() == 1
+				&& Path::new(&args[0]) == snapshot.applications_directory
+		});
+		assert!(
+			refreshed_on_restore,
+			"restore must run update-desktop-database after removing the handler so a stale \
+			 mimeinfo.cache does not route later callbacks to a dead transaction directory"
+		);
 	}
 
 	#[test]

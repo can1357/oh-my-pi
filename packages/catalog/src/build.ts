@@ -10,6 +10,7 @@
 import { resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
+import { materializeTimeBasedCost } from "./pricing";
 import type { Api, Model, ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
 
@@ -51,6 +52,10 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	const applyPatchToolType = catalog.applyPatchToolType;
 	if (applyPatchToolType === "freeform" || applyPatchToolType === "function") {
 		model.applyPatchToolType = applyPatchToolType;
+	}
+	const editPromptVariant = catalog.editPromptVariant;
+	if (editPromptVariant === "full" || editPromptVariant === "compact") {
+		model.editPromptVariant = editPromptVariant;
 	}
 	const requiresCursorToolSchemaProjection = catalog.requiresCursorToolSchemaProjection;
 	if (requiresCursorToolSchemaProjection === true) {
@@ -121,6 +126,9 @@ export function applyCatalogCorrections(
 		if (cacheRead !== undefined) model.cost.cacheRead = cacheRead;
 		const cacheWrite = numberField(patch, "cacheWrite");
 		if (cacheWrite !== undefined) model.cost.cacheWrite = cacheWrite;
+	}
+	if (catalog.timeBased !== undefined) {
+		model.cost = { ...model.cost, timeBased: materializeTimeBasedCost(catalog.timeBased) };
 	}
 	const limitsPatch = objectPayload(catalog.limitsPatch);
 	if (limitsPatch !== undefined) {
@@ -204,6 +212,10 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
 	const model: Model<TApi> = {
 		...spec,
+		// An exact `thinking-efforts` rule upgrades a stale `reasoning: false`
+		// discovery default (see `resolveThinkingPolicy`); materialize the
+		// correction so transports and the picker see a reasoning-capable model.
+		reasoning: spec.reasoning || policy.thinking !== undefined,
 		name: cleanModelName(spec.name),
 		identity: policy.identity,
 		requiresGlyphTokenization: policy.identity.class === "anthropic",

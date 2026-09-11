@@ -23,10 +23,22 @@ export function formatEstimatedCost(value: number, unpricedRequests: number, dig
 	return value === 0 && unpricedRequests > 0 ? "N/A" : formatCost(value, digits);
 }
 
-/** Format one request's cost, distinguishing unpriced SuperGrok usage from free usage. */
-export function formatMessageCost(message: Pick<MessageStats, "provider" | "usage">, digits?: number): string {
+/**
+ * Format one request's cost, distinguishing unpriced usage from free usage.
+ * Mirrors the server's `unpricedRequestSql`: `xai-oauth` is billed through a
+ * subscription, and `costUnpriced` marks a row the ingest path could not price
+ * (a scheduled card with no recoverable request timestamp).
+ */
+export function formatMessageCost(
+	message: Pick<MessageStats, "provider" | "usage" | "costUnpriced">,
+	digits?: number,
+): string {
 	const unpricedRequests =
-		message.provider === "xai-oauth" && message.usage.totalTokens > 0 && message.usage.cost.total === 0 ? 1 : 0;
+		message.usage.totalTokens > 0 &&
+		message.usage.cost.total === 0 &&
+		(message.provider === "xai-oauth" || message.costUnpriced === true)
+			? 1
+			: 0;
 	return formatEstimatedCost(message.usage.cost.total, unpricedRequests, digits);
 }
 

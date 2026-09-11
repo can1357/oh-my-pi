@@ -42,7 +42,7 @@ describe("EditTool patch post-write verification", () => {
 		await fs.mkdir(path.join(tempDir, "deep", "nested"), { recursive: true });
 		await fs.writeFile(path.join(tempDir, relPath), "a\n");
 
-		spyOn(lsp, "writethroughNoop").mockImplementation(async () => undefined);
+		spyOn(lsp, "writethroughNoop").mockImplementation(async () => ({ finalContent: "" }));
 		const result = await new EditTool(makeSession(tempDir), "patch").execute("unchanged", {
 			path: relPath,
 			edits: [{ op: "update", diff: "@@\n-a\n+b" }],

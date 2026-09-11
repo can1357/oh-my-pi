@@ -33,6 +33,7 @@ import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolLo
 import { type Tool as AiTool, jsonSchemaToTypeScript, toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
 import { parseStreamingJson } from "@oh-my-pi/pi-utils";
+import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "../internal-urls/xd-protocol";
 import { parseMCPToolName } from "../mcp/tool-bridge";
@@ -112,13 +113,6 @@ let rendererLookup: ((name: string) => ToolRenderer | undefined) | undefined;
 /** Wire the wrapped-renderer lookup. Called once by `renderers.ts`. */
 export function setXdevRendererLookup(lookup: (name: string) => ToolRenderer | undefined): void {
 	rendererLookup = lookup;
-}
-
-/** Whether a wire JSON schema declares a top-level `i` (intent) property. */
-function schemaDeclaresIntentField(schema: unknown): boolean {
-	if (!schema || typeof schema !== "object" || !("properties" in schema)) return false;
-	const props = schema.properties;
-	return !!props && typeof props === "object" && "i" in props;
 }
 
 function renderDocs(inst: Tool, heading = "#", descriptionCap?: number): string {

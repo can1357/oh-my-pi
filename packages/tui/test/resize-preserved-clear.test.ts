@@ -108,6 +108,8 @@ const MUX_SIGNALS = [
 	"CMUX_SURFACE_ID",
 	"CMUX_REMOTE_TRANSPORT",
 	"TERM",
+	"TERM_PROGRAM",
+	"PI_TUI_RESIZE_IN_PLACE",
 ] as const;
 
 function startRig(markerRow?: number, columns = 40, rows = 12) {

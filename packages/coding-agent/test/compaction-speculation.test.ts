@@ -60,7 +60,12 @@ describe("async speculative compaction", () => {
 	let maintenanceSettings: Settings;
 
 	function createMaintenance(
-		options: { asyncEnabled?: boolean; methodOrder?: CompactionMethod[] } = {},
+		options: {
+			asyncEnabled?: boolean;
+			methodOrder?: CompactionMethod[];
+			experimental?: boolean;
+			recoveryTools?: boolean;
+		} = {},
 	): SessionMaintenance {
 		agent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -72,6 +77,7 @@ describe("async speculative compaction", () => {
 			"compaction.thresholdPercent": 50,
 			"compaction.keepRecentTokens": 1,
 			"compaction.autoContinue": false,
+			"compaction.experimentalContextManagement": options.experimental ?? false,
 		});
 		maintenanceSettings = settings;
 		const host = {
@@ -91,6 +97,8 @@ describe("async speculative compaction", () => {
 			isStreaming: () => false,
 			isGeneratingHandoff: () => false,
 			promptGeneration: () => 0,
+			hasExperimentalContextRolloverTools: () => options.recoveryTools ?? true,
+			queueExperimentalContextNotesReminder: () => events.push("notes-reminder"),
 			sessionId: () => sessionManager.getSessionId(),
 			messages: () => agent.state.messages,
 			baseSystemPrompt: () => ["Test"],
@@ -170,6 +178,44 @@ describe("async speculative compaction", () => {
 
 	afterAll(() => {
 		authStorage.close();
+	});
+
+	it("reminds only near threshold once per experimental window, including the first and reset windows", async () => {
+		maintenance = createMaintenance({ experimental: true });
+		const network = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected network request"));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START - 1, CONTEXT_WINDOW);
+		expect(events).not.toContain("notes-reminder");
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		maintenance.resetForNewPrompt();
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START + 1, CONTEXT_WINDOW);
+		expect(events.filter(event => event === "notes-reminder")).toHaveLength(1);
+		expect(maintenance.speculationState).toBe("idle");
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		expect(sessionManager.getEntries().findLast(entry => entry.type === "compaction")?.details).toEqual({
+			kind: "experimental-context-rollover",
+			version: 1,
+		});
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		expect(events.filter(event => event === "notes-reminder")).toHaveLength(2);
+		sessionManager.appendResetBoundary();
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		expect(events.filter(event => event === "notes-reminder")).toHaveLength(3);
+		expect(network).not.toHaveBeenCalled();
+	});
+
+	it("keeps legacy speculation when experimental recovery tools are unavailable", async () => {
+		maintenance = createMaintenance({ experimental: true, recoveryTools: false });
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "legacy summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(events).not.toContain("notes-reminder");
 	});
 
 	it("does not call the summarizer below the speculative band, then arms inside it", async () => {
