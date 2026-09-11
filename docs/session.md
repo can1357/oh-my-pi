@@ -309,6 +309,8 @@ Extension-provided message that does participate in LLM context. `content` can b
 
 Append-only audit entry for a session rename. It records `title`, `source` (`auto` or `user`), and optionally `previousTitle` and `trigger`. The current title is also updated in the fixed-width title slot so listing does not require a full-file rewrite.
 
+`/rename <title>` sets an explicit title. `/rename` without a title generates one from recent conversation using the configured tiny title model. Both are user-requested renames (`source: "user"`), so later automatic titling cannot replace them. Empty conversation or failed generation leaves the current title unchanged. A session switch or newer rename while generation runs discards the stale result. Local tiny-model failures never fall back to an online provider.
+
 ### `ttsr_injection`
 
 ```json

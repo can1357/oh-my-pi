@@ -177,6 +177,10 @@ pub(super) fn restore(context: &Context, snapshot: &Snapshot) -> Result<()> {
 	let marker_current = read_value(&layout.root, MARKER_NAME)?;
 
 	if marker_current == *marker_before {
+		#[allow(
+			clippy::needless_range_loop,
+			reason = "indexes both snapshot.values and owned concurrently"
+		)]
 		for index in 0..3 {
 			let current = read_value(&snapshot.values[index].path, &snapshot.values[index].name)?;
 			if current == Some(owned[index].clone()) && current != snapshot.values[index].value {
@@ -200,6 +204,10 @@ pub(super) fn restore(context: &Context, snapshot: &Snapshot) -> Result<()> {
 	}
 
 	let mut conflicts = Vec::new();
+	#[allow(
+		clippy::needless_range_loop,
+		reason = "indexes both snapshot.values and owned concurrently"
+	)]
 	for index in 0..3 {
 		context.check()?;
 		let entry = &snapshot.values[index];
@@ -277,6 +285,10 @@ fn validate_identity(context: &Context) -> Result<()> {
 	Ok(())
 }
 
+#[allow(
+	clippy::suspicious_operation_groupings,
+	reason = "layout fields are paths and values, not keys"
+)]
 fn validate_snapshot(context: &Context, snapshot: &Snapshot) -> Result<Layout> {
 	validate_identity(context)?;
 	let layout = Layout::new(&context.scheme);
@@ -474,11 +486,10 @@ fn quote_windows_argument(value: &OsStr) -> Vec<u16> {
 		}
 		if unit == b'"' as u16 {
 			output.extend(std::iter::repeat_n(b'\\' as u16, backslashes * 2 + 1));
-			output.push(unit);
 		} else {
 			output.extend(std::iter::repeat_n(b'\\' as u16, backslashes));
-			output.push(unit);
 		}
+		output.push(unit);
 		backslashes = 0;
 	}
 	output.extend(std::iter::repeat_n(b'\\' as u16, backslashes * 2));
@@ -495,13 +506,16 @@ fn reg_sz(value: &OsStr) -> RawValue {
 }
 
 fn decode_reg_sz(value: &RegValue<'_>) -> Option<OsString> {
-	if value.vtype != REG_SZ && value.vtype != REG_EXPAND_SZ || value.bytes.len() % 2 != 0 {
+	if value.vtype != REG_SZ && value.vtype != REG_EXPAND_SZ || !value.bytes.len().is_multiple_of(2)
+	{
 		return None;
 	}
 	let mut units = value
 		.bytes
-		.chunks_exact(2)
-		.map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+		.as_chunks::<2>()
+		.0
+		.iter()
+		.map(|&[b0, b1]| u16::from_le_bytes([b0, b1]))
 		.collect::<Vec<_>>();
 	while units.last() == Some(&0) {
 		units.pop();
@@ -528,6 +542,9 @@ fn reg_type(value_type: u32) -> Result<RegType> {
 }
 
 fn notify_association_changed() {
+	// SAFETY: SHChangeNotify with SHCNE_ASSOCCHANGED and null pointers safely
+	// notifies the Windows shell of file association changes without dereferencing
+	// invalid memory.
 	unsafe {
 		SHChangeNotify(
 			SHCNE_ASSOCCHANGED as i32,
@@ -545,6 +562,9 @@ fn effective_command(scheme: &str) -> Result<OsString> {
 		.collect::<Vec<_>>();
 	let mut output = vec![0u16; 32_768];
 	let mut length = output.len() as u32;
+	// SAFETY: `association` is null-terminated, `output` is allocated with `length`
+	// capacity, and AssocQueryStringW writes within the bounds specified by `&mut
+	// length`.
 	let result = unsafe {
 		AssocQueryStringW(
 			ASSOCF_IS_PROTOCOL | ASSOCF_NOFIXUPS | ASSOCF_VERIFY,

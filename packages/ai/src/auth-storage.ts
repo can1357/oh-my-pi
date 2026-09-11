@@ -21,7 +21,7 @@ import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";
 import { isUsageLimitOutcome } from "./error/rate-limit";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "./registry";
-import { getOAuthApiKey, getOAuthProvider, refreshOAuthToken } from "./registry/oauth";
+import { getOAuthApiKey, getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "./registry/oauth";
 import type {
 	OAuthAuthInfo,
 	OAuthController,
@@ -59,6 +59,7 @@ import { googleGeminiCliUsageProvider } from "./usage/gemini";
 import { githubCopilotUsageProvider } from "./usage/github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./usage/google-antigravity";
 import { kimiRankingStrategy, kimiUsageProvider } from "./usage/kimi";
+import { museCodeUsageProvider } from "./usage/muse-code";
 import { minimaxCodeUsageProvider } from "./usage/minimax-code";
 import { ollamaCloudUsageProvider, ollamaUsageProvider } from "./usage/ollama";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "./usage/openai-codex";
@@ -661,6 +662,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	openaiCodexUsageProvider,
 	kimiUsageProvider,
 	minimaxCodeUsageProvider,
+	museCodeUsageProvider,
 	antigravityUsageProvider,
 	googleGeminiCliUsageProvider,
 	ollamaUsageProvider,
@@ -3601,13 +3603,14 @@ export class AuthStorage {
 			// re-hit the endpoint on every poll. Most providers serve the last good
 			// value through transient failures. Session-cookie providers can opt out
 			// so an expired login does not display stale quota indefinitely.
-			const retainLastGood =
-				!forceRefresh && this.#resolveUsageProvider(request.provider)?.retainLastGoodOnFailure !== false;
+			const providerImpl = this.#resolveUsageProvider(request.provider);
+			const retainLastGood = !forceRefresh && providerImpl?.retainLastGoodOnFailure !== false;
 			const lastGood = retainLastGood
 				? (this.#usageCache.getStale<UsageReport | null>(cacheKey)?.value ?? null)
 				: null;
-			const backoffJitter = USAGE_FAILURE_BACKOFF_MS * (Math.random() * 0.5 - 0.25);
-			const coolDown = Date.now() + USAGE_FAILURE_BACKOFF_MS + backoffJitter;
+			const failureBackoffMs = providerImpl?.failureBackoffMs ?? USAGE_FAILURE_BACKOFF_MS;
+			const backoffJitter = failureBackoffMs * (Math.random() * 0.5 - 0.25);
+			const coolDown = Date.now() + failureBackoffMs + backoffJitter;
 			this.#usageCache.set(cacheKey, { value: lastGood, expiresAt: coolDown });
 			return lastGood;
 		})().finally(() => {
@@ -5484,6 +5487,7 @@ export class AuthStorage {
 		credentialId: number | undefined,
 		signal?: AbortSignal,
 	): Promise<OAuthCredentials> {
+		credential = normalizeOAuthCredentialExpiry(provider, credential);
 		if (credentialId !== undefined) {
 			const existing = this.#oauthCredentialRefreshInFlight.get(credentialId);
 			if (existing) return raceCredentialRefreshWithSignal(existing, signal);

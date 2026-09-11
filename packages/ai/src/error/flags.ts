@@ -156,6 +156,11 @@ const TIMEOUT_PATTERN = /\b(?:operation\s+)?timed?\s*out\b|\btimeout\b|\bstream 
 const TRANSIENT_ENVELOPE_PATTERN = /anthropic stream envelope error:/i;
 const TRANSIENT_ENVELOPE_TRUNCATION_PATTERN = /before message_(?:start|stop)/i;
 export const STREAM_READ_ERROR_PATTERN = /stream[_ -]?read[_ -]?error/i;
+/** Python h2/httpx diagnostics forwarded through provider or proxy error events. */
+export const PYTHON_HTTP2_STREAM_RESET_PATTERN = /<StreamReset stream_id:\d+, error_code:(?:2|7), remote_reset:True>/;
+/** Python h11/httpx EOF while reading an HTTP/1.1 chunked response body. */
+export const PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN =
+	/peer closed connection without sending complete message body \(incomplete chunked read\)/;
 export const TRANSIENT_TRANSPORT_PATTERN =
 	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|provider.?returned.?error|rate.?limit|too many requests|auth-gateway\s+5\d{2}(?=[:\s]|$)|\b(?:429|500|502|503|504)\b|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|unable.?to.?connect\.\s*is the computer able to access the url\?|other side closed|fetch failed|upstream.?connect|upstream.?request.?failed|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)|nghttp2_(?:internal_error|refused_stream)|stream closed with error code nghttp2_(?:internal_error|refused_stream)|malformed.?function.?call/i;
 const AUTH_FAILURE_PATTERN =
@@ -396,6 +401,8 @@ function isTransientErrorText(text: string): boolean {
 	return (
 		isUnexpectedSocketCloseMessage(text) ||
 		isStreamReadErrorText(text) ||
+		PYTHON_HTTP2_STREAM_RESET_PATTERN.test(text) ||
+		PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(text) ||
 		(TRANSIENT_ENVELOPE_PATTERN.test(text) && TRANSIENT_ENVELOPE_TRUNCATION_PATTERN.test(text)) ||
 		TRANSIENT_TRANSPORT_PATTERN.test(text)
 	);
@@ -692,6 +699,26 @@ const CLINE_PASS_SURFACE_GATE_PATTERN = /only available via cline product surfac
  */
 export function isClinePassSurfaceGateMessage(errorMessage: string | undefined): boolean {
 	return errorMessage !== undefined && CLINE_PASS_SURFACE_GATE_PATTERN.test(errorMessage);
+}
+
+const GITHUB_COPILOT_POLICY_DENIAL_PATTERN = /GitHub Copilot access denied \(HTTP 403\)/;
+
+/**
+ * GitHub Copilot 403s are plan/model-policy/org denials against a valid token —
+ * never a revoked credential (those arrive as 401). Wiping stored credentials
+ * on them hides the whole provider from `/model` and forces a pointless
+ * re-login, so credential-lifetime decisions must exempt them even though
+ * they still classify as `Flag.AuthFailed` (issue #11275). Mirrors the 403
+ * contract in `rewriteCopilotError` (`utils/http-inspector.ts`).
+ */
+export function isGitHubCopilotPolicyDenial(
+	provider: string | undefined,
+	status: number | undefined,
+	errorMessage: string | undefined,
+): boolean {
+	if (provider !== "github-copilot") return false;
+	if (status === 403) return true;
+	return errorMessage !== undefined && GITHUB_COPILOT_POLICY_DENIAL_PATTERN.test(errorMessage);
 }
 
 export function classifyMessage(message: {

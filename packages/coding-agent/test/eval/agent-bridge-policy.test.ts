@@ -729,6 +729,7 @@ describe("agent() through eval runtimes", () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-progress-");
 		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent-progress");
 		mockAgents();
+		const releaseCompletion = Promise.withResolvers<void>();
 
 		const makeProgress = (options: ExecutorOptions, overrides: Partial<AgentProgress>): AgentProgress => ({
 			index: options.index,
@@ -764,6 +765,7 @@ describe("agent() through eval runtimes", () => {
 					resolvedModel: "p/model",
 				}),
 			);
+			await releaseCompletion.promise;
 			options.onProgress?.(
 				makeProgress(options, {
 					status: "completed",
@@ -786,16 +788,29 @@ describe("agent() through eval runtimes", () => {
 				sessionId: sharedJsSessionId,
 				session,
 				sessionFile,
-				onStatus: event => events.push(event),
+				onStatus: event => {
+					events.push(event);
+					if (event.op === "agent" && event.status === "running") releaseCompletion.resolve();
+				},
 			},
 		);
 
 		expect(result.exitCode).toBe(0);
 
+		// Wait-start, interval, and wait-end snapshots may all be delivered.
+		// Assert the final enriched state, not a timing-dependent event count (#10821).
 		const agentEvents = events.filter(event => event.op === "agent");
-		expect(agentEvents).toHaveLength(1);
+		const completedIndex = agentEvents.findIndex(event => event.status === "completed");
+		expect(completedIndex).toBeGreaterThan(0);
+		expect(completedIndex).toBe(agentEvents.length - 1);
+		expect(agentEvents.slice(0, completedIndex).every(event => event.status === "running")).toBe(true);
 
-		const completed = agentEvents[0];
+		const running = agentEvents[completedIndex - 1];
+		const completed = agentEvents[completedIndex];
+		if (!running || !completed) throw new Error("agent progress was not streamed");
+		expect(running.currentTool).toBe("read");
+		expect(running.lastIntent).toBe("Reading config");
+		expect(running.toolCount).toBe(4);
 		expect(completed.status).toBe("completed");
 		expect(completed.toolCount).toBe(7);
 		expect(completed.cost).toBeCloseTo(0.06);
@@ -803,11 +818,12 @@ describe("agent() through eval runtimes", () => {
 		expect(completed.taskPreview).toBe("investigate");
 		expect(typeof completed.id).toBe("string");
 
-		// The same final snapshot is retained in the executor's display outputs.
+		// The latest retained agent snapshot matches the latest streamed one.
 		const displayAgentEvents = result.displayOutputs.filter(
-			(output): output is Extract<typeof output, { type: "status" }> => output.type === "status",
+			(output): output is Extract<typeof output, { type: "status" }> =>
+				output.type === "status" && output.event.op === "agent",
 		);
-		expect(displayAgentEvents).toHaveLength(1);
+		expect(displayAgentEvents.at(-1)?.event).toEqual(completed);
 	});
 
 	it("pauses the idle watchdog while a quiet agent() runs past the budget", async () => {
@@ -1471,6 +1487,31 @@ describe("runEvalAgent isolation", () => {
 		expect(result.details.nestedPatches).toEqual([{ relativePath: "nested", patch: "diff --git a/file b/file\n" }]);
 		expect(result.text).toContain("nested repository");
 		expect(result.text).toContain("apply=false");
+	});
+
+	it("names each nested patch file and not the empty root patch when apply=false captured nested-only changes", async () => {
+		mockAgents();
+		mockIsolationContext();
+		const nestedPatchPath = "/artifacts/NestedOnly.nested-0-inner.patch";
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+			singleResult(opts.baseOptions, {
+				output: "nested-only",
+				patchPath: `/artifacts/${opts.agentId}.patch`,
+				hasRootChanges: false,
+				nestedPatches: [{ relativePath: "inner", patch: "diff --git a/b.txt b/b.txt\n" }],
+				nestedPatchPaths: [nestedPatchPath],
+			}),
+		);
+
+		const session = isolatedSession();
+		const result = await runEvalAgentAndWait({ prompt: "scout", isolated: true, apply: false }, { session });
+
+		// The headline fix: a 0-byte root patch is not reported as "changes
+		// captured at …"; the nested file that holds the work is named instead.
+		expect(result.text).toContain("Isolation: changes captured for 1 nested repository (apply=false). Not applied.");
+		expect(result.text).toContain(`- nested repository patch: \`${nestedPatchPath}\``);
+		expect(result.text).not.toContain("changes captured at");
+		expect(result.details.nestedPatchPaths).toEqual([nestedPatchPath]);
 	});
 
 	it("preserves the temp artifacts dir when apply=false so details.patchPath remains valid", async () => {

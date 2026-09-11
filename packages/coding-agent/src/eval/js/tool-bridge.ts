@@ -1,8 +1,10 @@
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
 import { ToolError } from "../../tools/tool-errors";
+import { schemaDeclaresIntentField } from "../../utils/tool-schema";
 import { invokeEvalPrelude } from "../preludes";
 import { EVAL_AGENT_BRIDGE_NAME, type EvalAgentHandleResult, runEvalAgent } from "../agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME, type EvalBudgetResult, runEvalBudget } from "../budget-bridge";
@@ -25,6 +27,7 @@ interface ToolBridgeOptions {
 	session: ToolSession;
 	signal?: AbortSignal;
 	emitStatus?: (event: JsStatusEvent) => void;
+	defaultIntent?: string;
 }
 
 type ToolValue =
@@ -55,11 +58,11 @@ function getTool(session: ToolSession, name: string): AgentTool {
 	return tool;
 }
 
-function normalizeArgs(args: unknown): unknown {
+function normalizeArgs(args: unknown, defaultIntent?: string): unknown {
 	if (!isRecord(args)) return args;
 	const record = { ...args };
-	if (record[INTENT_FIELD] === undefined) {
-		record[INTENT_FIELD] = "js prelude";
+	if (defaultIntent !== undefined && !(INTENT_FIELD in record)) {
+		record[INTENT_FIELD] = defaultIntent;
 	}
 	return record;
 }
@@ -201,8 +204,45 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		throw new ToolError(`\`${name}\` cannot run through the eval bridge; call the direct \`${name}\` tool.`);
 	}
 	const tool = getTool(options.session, name);
-	const normalizedArgs = normalizeArgs(args);
 	const toolCallId = `js-${name}-${crypto.randomUUID()}`;
+	// A schema-owned name stays tool data across alternatives. Deleting an
+	// invalid value to make another branch match could select a different operation.
+	const intentIsDeclared = schemaDeclaresIntentField(toolWireSchema(tool));
+	const suppliedIntent = isRecord(args) ? args[INTENT_FIELD] : undefined;
+	const validationArgs = isRecord(args) ? { ...args } : args;
+	if (isRecord(validationArgs) && !intentIsDeclared) delete validationArgs[INTENT_FIELD];
+	let validatedArgs: unknown;
+	try {
+		validatedArgs = validateToolArguments(tool, {
+			type: "toolCall",
+			id: toolCallId,
+			name,
+			arguments: validationArgs as Record<string, unknown>,
+		});
+	} catch (error) {
+		if (!tool.lenientArgValidation) {
+			options.emitStatus?.({
+				op: name,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+		if (isRecord(validationArgs)) {
+			const fallback = { ...validationArgs };
+			delete fallback.__parseError;
+			delete fallback.__rawJson;
+			validatedArgs = fallback;
+		} else {
+			validatedArgs = validationArgs;
+		}
+	}
+	if (isRecord(validatedArgs) && !intentIsDeclared && suppliedIntent !== undefined) {
+		validatedArgs[INTENT_FIELD] = suppliedIntent;
+	}
+	const normalizedArgs = normalizeArgs(
+		validatedArgs,
+		!intentIsDeclared ? (options.defaultIntent ?? "js prelude") : undefined,
+	);
 	try {
 		const result = await tool.execute(
 			toolCallId,

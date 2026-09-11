@@ -2,8 +2,64 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Defaulted Anthropic OAuth requests to 1h prompt-cache retention where supported, matching Claude Code subscriber behavior and preventing cache expiry during idle intervals ([#11667](https://github.com/can1357/oh-my-pi/pull/11667) by [@camjac251](https://github.com/camjac251)).
+### Added
+
+- Added historical decimation prompt-cache breakpoints every 15 user turns on Anthropic requests, so long conversations retain stable cached prefixes during branching, rewinds, and session resume ([#11665](https://github.com/can1357/oh-my-pi/pull/11665) by [@camjac251](https://github.com/camjac251)).
 ### Fixed
 
+- Fixed Anthropic OAuth requests omitting the tool-array cache breakpoint, so tool definitions are now cached across session rewrites and sibling subagents ([#11660](https://github.com/can1357/oh-my-pi/pull/11660) by [@camjac251](https://github.com/camjac251)).
+- Fixed Amazon Bedrock OpenAI models rejecting image-bearing tool results by sending each image as a sibling user content block ([#11681](https://github.com/can1357/oh-my-pi/issues/11681)).
+
+## [18.1.17] - 2026-09-10
+
+### Fixed
+
+- Fixed transient Python HTTP/2 stream resets and HTTP/1.1 chunked response interruptions being treated as terminal errors when forwarded by a proxy ([#11160](https://github.com/can1357/oh-my-pi/pull/11160) by [@cyriusweng](https://github.com/cyriusweng)).
+- Ollama cache hits now populate cached-token usage: `prompt_eval_cached_count` from the `/api/chat` done chunk maps to `cacheRead`, with `input` reduced to the uncached portion, so status-line `cache_turn`/`cache_hit` segments and cache-prefix audits report real hit rates instead of false misses.
+- Fixed requests that run across a price change being costed at the newer rate; peak/off-peak estimates now use the rate in effect when the request started.
+- Fixed GitHub Copilot Business seats getting HTTP 403 on every model while the same token succeeds with a Chat client identity: chat and model-policy requests now identify as `copilot-chat`, denied requests retry once as the Copilot CLI (`copilot-developer-cli`), and `COPILOT_INTEGRATION_ID` pins the `Copilot-Integration-Id` header up front; model discovery keeps the CLI identity and the 403 message names the identity and the remedies ([#11372](https://github.com/can1357/oh-my-pi/issues/11372)).
+
+## [18.1.16] - 2026-09-09
+
+### Fixed
+
+- Codex SSE streams that end without a terminal completion event now retry when replay-safe and remain transient errors when partial output prevents replay ([#11349](https://github.com/can1357/oh-my-pi/issues/11349)).
+
+## [18.1.15] - 2026-09-08
+
+### Fixed
+
+- GitHub Copilot sign-in keeps the GitHub-owned Copilot CLI OAuth app on Enterprise domains: private instances run their own OAuth registry and reject the github.com-registered OpenCode client, which is now used only for public github.com sign-ins ([#11285](https://github.com/can1357/oh-my-pi/pull/11285) by [@H4vC](https://github.com/H4vC))
+- GitHub Copilot sign-in uses the minimal-grant OpenCode OAuth app again (`read:user` only): GitHub renders each app's existing per-user grant on the consent page, so Enterprise organizations that block the Copilot CLI app's broad historic grant can log in as on 18.1.4. API request identity still mimics the Copilot CLI, and tokens minted by either app keep working ([#11280](https://github.com/can1357/oh-my-pi/pull/11280) by [@H4vC](https://github.com/H4vC)).
+- GitHub Copilot plan/model-policy 403s no longer count as credential failures for credential-lifetime decisions: the token is valid, so stored credentials are preserved instead of wiped ([#11280](https://github.com/can1357/oh-my-pi/pull/11280) by [@H4vC](https://github.com/H4vC)).
+- Fixed custom `google-generative-ai` providers failing mid-turn model fallback when Gemini 3 tool calls are replayed without their original thought signature ([#11270](https://github.com/can1357/oh-my-pi/issues/11270)).
+- Fixed Linux `zcode://` (Z.AI coding-plan) OAuth sign-in hanging at the paste prompt after a successful browser authorization: native scheme registration now runs `update-desktop-database`, so `xdg-desktop-portal-gtk` resolves the handler on the first attempt instead of reporting "No Apps available" and no longer routes the callback to a stale transaction directory ([#11279](https://github.com/can1357/oh-my-pi/issues/11279)).
+
+## [18.1.14] - 2026-09-07
+
+### Fixed
+
+- Fixed reasoning-off requests (e.g. GitHub Copilot `gpt-6-astra`) surfacing `400 Unsupported value: 'none' … Supported values are: …` instead of retrying at the lowest allowed effort: the reasoning-effort fallback now recognizes `Supported values` phrasing ([#11128](https://github.com/can1357/oh-my-pi/pull/11128) by [@H4vC](https://github.com/H4vC)).
+- Fixed Cursor GPT off-tier requests sending raw `-none` sibling ids (e.g. `gpt-5.6-sol-none-fast`), which the Run endpoint rejects; they now normalize to the base model id with no reasoning parameter, matching every other effort tier ([#11128](https://github.com/can1357/oh-my-pi/pull/11128) by [@H4vC](https://github.com/H4vC)).
+
+## [18.1.12] - 2026-09-06
+
+### Added
+
+- Added Muse Code subscription sign-in, credential refresh, inference, and quota reporting in `/usage`, with durable rate-limit backoff so quota refresh recovers instead of repeatedly retrying.
+
+### Fixed
+
+- Fixed Codex compaction timeouts triggering prolonged retries instead of advancing to the next compaction method.
+
+## [18.1.11] - 2026-09-05
+
+### Fixed
+
+- Fixed OpenCode Go usage polls (`GET /zen/go/v1/usage`) missing `x-opencode-session` and omp's `User-Agent`: background polls now attribute with the stable install id so the requests OpenCode flags as `Bun fetch` carry the required session header.
 - GitHub Copilot sign-in now requests only basic profile access, restoring login for Enterprise organizations that reject repository, gist, and Codespaces permissions ([#10656](https://github.com/can1357/oh-my-pi/issues/10656)).
 
 ## [18.1.9] - 2026-09-04
@@ -31,8 +87,6 @@
 ### Fixed
 
 - Fixed DeepSeek-family Responses replay (e.g. opencode-go) rejecting a resumed thinking-mode turn with `400 The reasoning_text in the thinking mode must be passed back to the API` when compaction dropped the turn's reasoning; a non-empty placeholder is now synthesized instead of an empty `reasoning_text` ([#10690](https://github.com/can1357/oh-my-pi/issues/10690)).
-### Fixed
-
 - Fixed pi-native streams treating a connection that closed before its terminal event as a successful empty response; incomplete streams and namespaced gateway 5xx failures now remain retryable.
 
 ## [18.1.6] - 2026-09-03

@@ -1,4 +1,5 @@
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { type Api, type AssistantMessage, completeSimple, type Model, type Usage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
@@ -51,7 +52,7 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 	let selectedPattern: string | undefined;
 	for (const pattern of ["@vision", "@default", activeModelPattern]) {
 		const resolved = resolvePattern(pattern);
-		if (resolved?.input.includes("image")) {
+		if (resolved && sendsImageInputOnWire(resolved)) {
 			model = resolved;
 			selectedPattern = pattern;
 			break;
@@ -60,9 +61,9 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 
 	const activeProvider = resolvePattern(activeModelPattern)?.provider;
 	model ??= availableModels.find(
-		candidate => candidate.provider === activeProvider && candidate.input.includes("image"),
+		candidate => candidate.provider === activeProvider && sendsImageInputOnWire(candidate),
 	);
-	model ??= availableModels.find(candidate => candidate.input.includes("image"));
+	model ??= availableModels.find(candidate => sendsImageInputOnWire(candidate));
 	if (!model) {
 		const textOnly = resolvePattern("@vision") ?? resolvePattern("@default") ?? resolvePattern(activeModelPattern);
 		if (!textOnly) throw new ToolError("Unable to resolve a model for image questions.");

@@ -212,6 +212,8 @@ function expiry(node: KdlNodeView): CompiledCredentialExpiry {
 				if (!from) malformed(node);
 				result.fromPath = from;
 			}
+			const fallback = propInt(node, "fallback-ms");
+			if (fallback !== undefined) result.fallbackMs = fallback;
 			return result;
 		}
 		case "jwt": {

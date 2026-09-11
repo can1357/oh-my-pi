@@ -43,6 +43,7 @@ import { AstGrepTool } from "./ast-grep";
 import { BashTool } from "./bash";
 import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
+import { ContextNotesTool, NewContextTool } from "./context-notes";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
@@ -80,6 +81,7 @@ export * from "./browser";
 export * from "./checkpoint";
 export * from "./computer";
 export * from "./computer/supervisor";
+export * from "./context-notes";
 export * from "./debug";
 export * from "./essential-tools";
 export * from "./eval";
@@ -261,8 +263,11 @@ export interface ToolSession {
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
 	getSessionFile: () => string | null;
-	/** Parent session journal used by tools that persist runtime lifecycle state. */
-	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries">;
+	/** Owning journal; full SDK managers also supply registered identity without changing advisor-local IDs. */
+	sessionManager?: Pick<
+		SessionManager,
+		"appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"
+	> & { getSessionId?: SessionManager["getSessionId"] };
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
 	/** Current enabled eval prelude definitions. */
@@ -271,7 +276,7 @@ export interface ToolSession {
 	assertEvalExecutionAllowed?: () => void;
 	/** Track tool-owned eval work so session disposal can await/abort it like direct session eval runs. */
 	trackEvalExecution?<T>(execution: Promise<T>, abortController: AbortController): Promise<T>;
-	/** Get session ID */
+	/** Get tool-state session ID (distinct from the owning session for advisors). */
 	getSessionId?: () => string | null;
 	/** Get Hindsight runtime state for this agent session. */
 	getHindsightSessionState?: () => HindsightSessionState | undefined;
@@ -380,8 +385,8 @@ export interface ToolSession {
 	setTodoPhases?: (phases: TodoPhase[]) => void;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
-	/** Replace the active workpool item contract before a pooled turn starts. */
-	setWorkPoolYieldItems?: (items: readonly WorkPoolYieldItem[]) => void;
+	/** Replace the active workpool item contract and refresh its provider-facing prompt. */
+	setWorkPoolYieldItems?: (items: readonly WorkPoolYieldItem[]) => Promise<void>;
 	/** The tool-choice queue used to force forthcoming tool invocations and carry invocation handlers. */
 	getToolChoiceQueue?(): ToolChoiceQueue;
 	/** Build a model-provider-specific ToolChoice that targets the named tool, or undefined if unsupported. */
@@ -469,6 +474,8 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	lsp: LspTool.createIf,
 	checkpoint: CheckpointTool.createIf,
 	rewind: RewindTool.createIf,
+	context_notes: ContextNotesTool.createIf,
+	new_context: NewContextTool.createIf,
 	task: s => TaskTool.create(s),
 	hub: s => new HubTool(s),
 	todo: s => new TodoTool(s),
@@ -560,6 +567,14 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// Auto-include AST counterparts when their text-based sibling is present.
 	// Restricted callers own the active list and must not have it widened.
 	if (requestedTools && !restrictToolNames) {
+		if (
+			session.settings.get("compaction.experimentalContextManagement") &&
+			requestedTools.includes("read") &&
+			requestedTools.includes("grep")
+		) {
+			if (!requestedTools.includes("context_notes")) requestedTools.push("context_notes");
+			if (!requestedTools.includes("new_context")) requestedTools.push("new_context");
+		}
 		if (goalModeActive && !requestedTools.includes("goal")) {
 			requestedTools.push("goal");
 		}

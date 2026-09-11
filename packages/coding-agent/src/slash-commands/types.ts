@@ -62,6 +62,8 @@ export interface SlashCommandRuntime {
 	sessionManager: SessionManager;
 	settings: Settings;
 	cwd: string;
+	/** Cancellation of the host prompt/request, when supported. */
+	signal?: AbortSignal;
 	/** Emit text to the operator. TUI maps to `ctx.showStatus`, ACP to `sessionUpdate`. */
 	output: (text: string) => Promise<void> | void;
 	/** Re-advertise the available command list (no-op outside ACP). */
