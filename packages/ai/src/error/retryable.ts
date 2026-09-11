@@ -37,14 +37,21 @@ function isTransientTransportMessage(message: string): boolean {
  * here — they are owned by the credential-rotation layer (auth-gateway /
  * `streamSimple` a/b/c policy), not this seconds-scale provider backoff.
  *
- * Every 4xx other than 408/429 is terminal: a request the provider rejected
+ * A rate-limit rejection carrying HTTP 429 is likewise non-retryable here: the
+ * transport already spent its dedicated same-route budget
+ * (`MAX_RATE_LIMIT_ATTEMPTS`) on it, so a provider-level replay would only
+ * re-apply the load that tripped the limit — multiplied by every subagent
+ * doing the same — and postpone credential rotation and model fallback, the
+ * layers that can actually clear it.
+ *
+ * Every 4xx other than 408 is terminal: a request the provider rejected
  * as malformed, unauthorized, or unentitled fails identically on replay.
  */
 export function isProviderRetryableError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	if (isUsageLimit(error)) return false;
 	const httpStatus = status(error);
-	if (httpStatus !== undefined && httpStatus >= 400 && httpStatus < 500 && httpStatus !== 408 && httpStatus !== 429) {
+	if (httpStatus !== undefined && httpStatus >= 400 && httpStatus < 500 && httpStatus !== 408) {
 		return false;
 	}
 	const msg = error.message.toLowerCase();

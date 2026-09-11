@@ -2,9 +2,11 @@
  * JSON-POST → SSE transport for OpenAI-wire streaming endpoints (chat
  * completions, responses, azure responses). Replaces the `openai` SDK client:
  *
- * - Retries: `fetchWithRetry` (Retry-After/quota-hint aware; 5xx/408/429 and
+ * - Retries: `fetchWithRetry` (Retry-After/quota-hint aware; 5xx/408 and
  *   transient network errors). Default 6 total attempts — parity with the
- *   SDK's former `maxRetries: 5`.
+ *   SDK's former `maxRetries: 5`. A 429 instead gets the transport's small
+ *   rate-limit budget (`MAX_RATE_LIMIT_ATTEMPTS`), so a limited route reaches
+ *   credential rotation and model fallback instead of being replayed.
  * - SSE decode: `readSseJson` (spec-compliant framing, `[DONE]`-aware).
  *   `onSseEvent` observers now receive real wire frames instead of events
  *   re-synthesized from decoded SDK objects.
@@ -24,11 +26,12 @@ import type { FetchImpl } from "../types";
 import type { CapturedHttpErrorResponse } from "./http-inspector";
 
 /**
- * Total attempts (initial + retries). Parity with the removed SDK clients'
- * `maxRetries: 5`, i.e. 6 requests. Callers arming a first-event watchdog
- * stay bounded: the watchdog aborts the request `signal`, which
- * `fetchWithRetry` races on every attempt and every backoff sleep, so
- * transient 408/429/5xx retries can never extend the caller's deadline.
+ * Total attempts (initial + retries) for capacity/timeout/transport failures.
+ * Parity with the removed SDK clients' `maxRetries: 5`, i.e. 6 requests; 429s
+ * are bounded separately by `MAX_RATE_LIMIT_ATTEMPTS`. Callers arming a
+ * first-event watchdog stay bounded: the watchdog aborts the request `signal`,
+ * which `fetchWithRetry` races on every attempt and every backoff sleep, so
+ * transient 408/5xx retries can never extend the caller's deadline.
  */
 const DEFAULT_MAX_ATTEMPTS = 6;
 
