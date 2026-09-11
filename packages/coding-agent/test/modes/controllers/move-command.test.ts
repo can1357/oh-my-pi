@@ -2,9 +2,17 @@ import { beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import {
+	getMarkdownTheme,
+	getThemeByName,
+	setMarkdownMermaidRendering,
+	setMarkdownMermaidSpacing,
+	setThemeInstance,
+} from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { beginSettingsTest, restoreSettingsTestState } from "../../helpers/settings-test-state";
 
 function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void>) {
 	const state = { cwd: sourceDir, movedTo: undefined as string | undefined };
@@ -28,8 +36,10 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		restoreState(snapshot);
 	});
 	const shutdown = vi.fn(async () => {});
+	const refreshBaseSystemPrompt = vi.fn(async () => {});
+	const rebuildChatFromMessages = vi.fn();
 	const ctx = {
-		session: { isStreaming: false, moveSession },
+		session: { isStreaming: false, moveSession, refreshBaseSystemPrompt },
 		sessionManager: {
 			getCwd: () => state.cwd,
 			captureState,
@@ -47,11 +57,23 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		applyCwdChange,
 		updateEditorBorderColor: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),
+		rebuildChatFromMessages: vi.fn(),
 		ui: { requestRender: vi.fn() },
 		present,
 		shutdown,
 	} as unknown as InteractiveModeContext;
 	return { ctx, state, present, captureState, restoreState, rollbackMove, shutdown, sessionDir };
+}
+
+function stripAnsi(text: string): string {
+	return text.replace(/\x1b\[[0-9;]*m/g, "");
+}
+function renderMermaidAscii(source: string, maxWidth = 120): string {
+	const resolve = getMarkdownTheme().resolveMermaidAscii;
+	if (!resolve) throw new Error("Mermaid renderer unavailable");
+	const rendered = resolve(source, maxWidth);
+	if (rendered === null) throw new Error("Mermaid renderer returned null");
+	return stripAnsi(rendered);
 }
 
 describe("CommandController /move", () => {
@@ -175,6 +197,103 @@ describe("CommandController /move", () => {
 			expect(ctx.applyCwdChange).not.toHaveBeenCalled();
 			expect(state.movedTo).toBeUndefined();
 			expect(state.cwd).toBe(sourceDir);
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+			await fs.rm(targetDir, { recursive: true, force: true });
+		}
+	});
+
+	it("refreshes the base system prompt after relocating (renderMermaid can differ per project)", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-source-"));
+		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-target-"));
+		try {
+			const { ctx } = createMoveContext(sourceDir);
+			const controller = new CommandController(ctx);
+
+			await controller.handleMoveCommand(targetDir);
+
+			expect(ctx.session.refreshBaseSystemPrompt).toHaveBeenCalledTimes(1);
+			expect(ctx.rebuildChatFromMessages).toHaveBeenCalled();
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+			await fs.rm(targetDir, { recursive: true, force: true });
+		}
+	});
+
+	it("applies the destination project's Mermaid spacing to rendered diagrams after /move", async () => {
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-spacing-global-"));
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-spacing-source-"));
+		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-spacing-target-"));
+		const plainDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-spacing-plain-"));
+		const settingsState = beginSettingsTest();
+		try {
+			await Settings.init({ cwd: sourceDir, agentDir });
+			await settings.reloadForCwd(sourceDir);
+			await fs.mkdir(path.join(targetDir, ".claude"), { recursive: true });
+			await fs.writeFile(
+				path.join(targetDir, ".claude", "settings.json"),
+				JSON.stringify({ tui: { mermaidPaddingX: 0, mermaidPaddingY: 0, mermaidBoxBorderPadding: 0 } }),
+			);
+			await fs.mkdir(path.join(plainDir, ".claude"), { recursive: true });
+			await fs.writeFile(
+				path.join(plainDir, ".claude", "settings.json"),
+				JSON.stringify({ tui: { renderMermaid: false } }),
+			);
+			const source = "flowchart TD\n  A[alpha] --> B[beta]";
+			const baseline = renderMermaidAscii(source);
+			const { ctx, state } = createMoveContext(sourceDir);
+			const controller = new CommandController(ctx);
+			ctx.applyCwdChange = async (cwd: string) => {
+				expect(state.cwd).toBe(cwd);
+				await settings.reloadForCwd(cwd);
+				return true;
+			};
+
+			await controller.handleMoveCommand(targetDir);
+
+			expect(settings.get("tui.mermaidPaddingX")).toBe(0);
+			expect(settings.get("tui.mermaidPaddingY")).toBe(0);
+			expect(settings.get("tui.mermaidBoxBorderPadding")).toBe(0);
+			const tight = renderMermaidAscii(source);
+			expect(tight).not.toBe(baseline);
+			expect(tight.length).toBeLessThan(baseline.length);
+
+			await controller.handleMoveCommand(plainDir);
+
+			expect(settings.get("tui.renderMermaid")).toBe(false);
+			expect(getMarkdownTheme().resolveMermaidAscii).toBeUndefined();
+		} finally {
+			setMarkdownMermaidSpacing({ paddingX: 5, paddingY: 5, boxBorderPadding: 1 });
+			setMarkdownMermaidRendering(true);
+			restoreSettingsTestState(settingsState);
+			await fs.rm(sourceDir, { recursive: true, force: true });
+			await fs.rm(targetDir, { recursive: true, force: true });
+			await fs.rm(plainDir, { recursive: true, force: true });
+			await fs.rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("presents a prompt-refresh failure after rebuilding the transcript", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-refresh-error-"));
+		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-refresh-target-"));
+		try {
+			const { ctx } = createMoveContext(sourceDir);
+			const rebuildChatFromMessages = vi.fn();
+			const showError = vi.fn();
+			ctx.rebuildChatFromMessages = rebuildChatFromMessages;
+			ctx.showError = showError;
+			ctx.session.refreshBaseSystemPrompt = vi.fn(async () => {
+				throw new Error("prompt boom");
+			});
+			const controller = new CommandController(ctx);
+
+			await controller.handleMoveCommand(targetDir);
+
+			expect(showError).toHaveBeenCalledWith(expect.stringContaining("prompt boom"));
+			expect(rebuildChatFromMessages).toHaveBeenCalledTimes(1);
+			expect(rebuildChatFromMessages.mock.invocationCallOrder[0]).toBeLessThan(
+				showError.mock.invocationCallOrder[0],
+			);
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 			await fs.rm(targetDir, { recursive: true, force: true });

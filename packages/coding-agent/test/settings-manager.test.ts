@@ -17,6 +17,13 @@ import {
 	type SettingPath,
 	Settings,
 } from "@oh-my-pi/pi-coding-agent/config/settings";
+import {
+	getMarkdownTheme,
+	getThemeByName,
+	setMarkdownMermaidRendering,
+	setMarkdownMermaidSpacing,
+	setThemeInstance,
+} from "../src/modes/theme/theme";
 import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/tools/image-providers";
@@ -1045,6 +1052,43 @@ describe("Settings", () => {
 			expect(settings.get("retry.modelFallback")).toBe(true);
 			expect(settings.get("task.enableEffort")).toBe(false);
 			expect(settings.get("task.maxConcurrency")).toBe(7);
+		});
+		it("reloads mermaid settings from disk without flipping the process-global renderer", async () => {
+			const theme = await getThemeByName("dark");
+			if (!theme) throw new Error("theme unavailable");
+			setThemeInstance(theme);
+			setMarkdownMermaidRendering(true);
+			setMarkdownMermaidSpacing({ paddingX: 5, paddingY: 5, boxBorderPadding: 1 });
+			try {
+				await writeSettings({
+					tui: { renderMermaid: true, mermaidPaddingX: 5, mermaidPaddingY: 5, mermaidBoxBorderPadding: 1 },
+				});
+				const settings = await Settings.init({ cwd: projectDir, agentDir });
+				expect(settings.get("tui.renderMermaid")).toBe(true);
+				const resolveBefore = getMarkdownTheme().resolveMermaidAscii;
+				if (!resolveBefore) throw new Error("mermaid resolver unavailable");
+				const source = "flowchart TD\n  A[alpha] --> B[beta]";
+				const rendered = resolveBefore(source, 120);
+				if (rendered === null) throw new Error("mermaid renderer returned null");
+
+				await writeSettings({
+					tui: { renderMermaid: false, mermaidPaddingX: 0, mermaidPaddingY: 0, mermaidBoxBorderPadding: 0 },
+				});
+				await settings.reloadFromDisk();
+
+				// Effective values follow the disk...
+				expect(settings.get("tui.renderMermaid")).toBe(false);
+				expect(settings.get("tui.mermaidPaddingX")).toBe(0);
+				// ...but the task/eval preflight path has no UI handle for the
+				// prompt refresh and transcript rebuild the /settings and /move
+				// paths pair with the same change, so the renderer must stay put.
+				const resolveAfter = getMarkdownTheme().resolveMermaidAscii;
+				if (!resolveAfter) throw new Error("disk reload flipped the mermaid renderer");
+				expect(resolveAfter(source, 120)).toBe(rendered);
+			} finally {
+				setMarkdownMermaidRendering(true);
+				setMarkdownMermaidSpacing({ paddingX: 5, paddingY: 5, boxBorderPadding: 1 });
+			}
 		});
 		it("retries when a persisted setting changes while files are being read", async () => {
 			await writeSettings({ setupVersion: 1 });

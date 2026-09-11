@@ -2,11 +2,19 @@ import { beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { BashResult } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import { BashExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/bash-execution";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import {
+	getMarkdownTheme,
+	getThemeByName,
+	setMarkdownMermaidRendering,
+	setMarkdownMermaidSpacing,
+	setThemeInstance,
+} from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { beginSettingsTest, restoreSettingsTestState } from "../../helpers/settings-test-state";
 
 function createContainer() {
 	return {
@@ -15,6 +23,17 @@ function createContainer() {
 			this.children.push(child);
 		},
 	};
+}
+
+function stripAnsi(text: string): string {
+	return text.replace(/\x1b\[[0-9;]*m/g, "");
+}
+function renderMermaidAscii(source: string, maxWidth = 120): string {
+	const resolve = getMarkdownTheme().resolveMermaidAscii;
+	if (!resolve) throw new Error("Mermaid renderer unavailable");
+	const rendered = resolve(source, maxWidth);
+	if (rendered === null) throw new Error("Mermaid renderer returned null");
+	return stripAnsi(rendered);
 }
 
 function createCwdContext(sourceDir: string, isStreaming = false, showImages = true) {
@@ -39,6 +58,7 @@ function createCwdContext(sourceDir: string, isStreaming = false, showImages = t
 		session: {
 			isStreaming,
 			executeBash,
+			refreshBaseSystemPrompt: vi.fn(async () => {}),
 		},
 		sessionManager: {
 			getCwd: () => state.cwd,
@@ -64,6 +84,7 @@ function createCwdContext(sourceDir: string, isStreaming = false, showImages = t
 		}),
 		updateEditorBorderColor: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),
+		rebuildChatFromMessages: vi.fn(),
 	} as unknown as InteractiveModeContext;
 	return { ctx, executeBash, pendingMessagesContainer, present, state };
 }
@@ -340,6 +361,153 @@ describe("bash shortcut command", () => {
 			expect((component as BashExecutionComponent).getOutput()).toContain("final output");
 			expect(state.cwd).toBe(childDir);
 			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("completed, but"));
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("rebuilds the transcript and refreshes the prompt after a shell-driven cwd change", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-cwd-rebuild-"));
+		const childDir = path.join(sourceDir, "child");
+		await fs.mkdir(childDir);
+		try {
+			const { ctx, executeBash, state } = createCwdContext(sourceDir);
+			executeBash.mockImplementationOnce(async () => ({
+				output: "",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				totalLines: 0,
+				totalBytes: 0,
+				outputLines: 0,
+				outputBytes: 0,
+				workingDir: childDir,
+			}));
+			const controller = new CommandController(ctx);
+
+			await controller.handleBashCommand("cd child");
+
+			expect(state.cwd).toBe(childDir);
+			expect(ctx.session.refreshBaseSystemPrompt).toHaveBeenCalledTimes(1);
+			expect(ctx.rebuildChatFromMessages).toHaveBeenCalledTimes(1);
+			expect(ctx.ui.requestRender).toHaveBeenCalled();
+			expect(ctx.showError).not.toHaveBeenCalled();
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("applies the destination project's Mermaid spacing to rendered diagrams after a shell-driven cwd change", async () => {
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-spacing-global-"));
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-spacing-source-"));
+		const childDir = path.join(sourceDir, "child");
+		await fs.mkdir(childDir);
+		const plainDir = path.join(sourceDir, "plain");
+		await fs.mkdir(plainDir);
+		const settingsState = beginSettingsTest();
+		try {
+			await Settings.init({ cwd: sourceDir, agentDir });
+			await settings.reloadForCwd(sourceDir);
+			await fs.mkdir(path.join(childDir, ".claude"), { recursive: true });
+			await fs.writeFile(
+				path.join(childDir, ".claude", "settings.json"),
+				JSON.stringify({ tui: { mermaidPaddingX: 0, mermaidPaddingY: 0, mermaidBoxBorderPadding: 0 } }),
+			);
+			await fs.mkdir(path.join(plainDir, ".claude"), { recursive: true });
+			await fs.writeFile(
+				path.join(plainDir, ".claude", "settings.json"),
+				JSON.stringify({ tui: { renderMermaid: false } }),
+			);
+			const source = "flowchart TD\n  A[alpha] --> B[beta]";
+			const baseline = renderMermaidAscii(source);
+			const { ctx, executeBash, state } = createCwdContext(sourceDir);
+			const controller = new CommandController(ctx);
+			ctx.applyCwdChange = async (cwd: string) => {
+				expect(state.cwd).toBe(cwd);
+				await settings.reloadForCwd(cwd);
+				return true;
+			};
+			executeBash.mockImplementationOnce(async () => ({
+				output: "",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				totalLines: 0,
+				totalBytes: 0,
+				outputLines: 0,
+				outputBytes: 0,
+				workingDir: childDir,
+			}));
+
+			await controller.handleBashCommand("cd child");
+
+			expect(state.cwd).toBe(childDir);
+			expect(settings.get("tui.mermaidPaddingX")).toBe(0);
+			expect(settings.get("tui.mermaidPaddingY")).toBe(0);
+			expect(settings.get("tui.mermaidBoxBorderPadding")).toBe(0);
+			const tight = renderMermaidAscii(source);
+			expect(tight).not.toBe(baseline);
+			expect(tight.length).toBeLessThan(baseline.length);
+
+			executeBash.mockImplementationOnce(async () => ({
+				output: "",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				totalLines: 0,
+				totalBytes: 0,
+				outputLines: 0,
+				outputBytes: 0,
+				workingDir: plainDir,
+			}));
+
+			await controller.handleBashCommand("cd ../plain");
+
+			expect(state.cwd).toBe(plainDir);
+			expect(settings.get("tui.renderMermaid")).toBe(false);
+			expect(getMarkdownTheme().resolveMermaidAscii).toBeUndefined();
+		} finally {
+			setMarkdownMermaidSpacing({ paddingX: 5, paddingY: 5, boxBorderPadding: 1 });
+			setMarkdownMermaidRendering(true);
+			restoreSettingsTestState(settingsState);
+			await fs.rm(sourceDir, { recursive: true, force: true });
+			await fs.rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("presents a shell-driven prompt-refresh failure after rebuilding the transcript", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-refresh-error-"));
+		const childDir = path.join(sourceDir, "child");
+		await fs.mkdir(childDir);
+		try {
+			const { ctx, executeBash } = createCwdContext(sourceDir);
+			const rebuildChatFromMessages = vi.fn();
+			const showError = vi.fn();
+			ctx.rebuildChatFromMessages = rebuildChatFromMessages;
+			ctx.showError = showError;
+			executeBash.mockImplementationOnce(async () => ({
+				output: "",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				totalLines: 0,
+				totalBytes: 0,
+				outputLines: 0,
+				outputBytes: 0,
+				workingDir: childDir,
+			}));
+			ctx.session.refreshBaseSystemPrompt = vi.fn(async () => {
+				throw new Error("shell prompt boom");
+			});
+			const controller = new CommandController(ctx);
+
+			await controller.handleBashCommand("cd child");
+
+			expect(showError).toHaveBeenCalledWith(expect.stringContaining("shell prompt boom"));
+			expect(rebuildChatFromMessages).toHaveBeenCalledTimes(1);
+			expect(rebuildChatFromMessages.mock.invocationCallOrder[0]).toBeLessThan(
+				showError.mock.invocationCallOrder[0],
+			);
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}

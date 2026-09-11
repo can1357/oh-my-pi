@@ -36,7 +36,14 @@ import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
-import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
+import {
+	isLightTheme,
+	setAutoThemeMapping,
+	setColorBlindMode,
+	setMarkdownMermaidRendering,
+	setMarkdownMermaidSpacing,
+	setSymbolPreset,
+} from "../modes/theme/theme";
 import { AgentStorage } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
 import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
@@ -574,6 +581,13 @@ export class Settings {
 				globalInstance = instance;
 				clearBoundSettingsMethods();
 				globalInstancePromise = Promise.resolve(instance);
+				// Hooks fired during #load ran before the singleton was published,
+				// so active-instance reads (tui.renderMermaid/spacing) were no-ops
+				// and standalone renderers kept process defaults. Re-fire once now
+				// that global reads resolve. Every hook tolerates same-value
+				// re-fire: reloadForCwd() re-fires unconditionally, and the
+				// renderer setters early-return on identical values.
+				instance.#fireAllHooks();
 				return instance;
 			},
 			error => {
@@ -838,7 +852,6 @@ export class Settings {
 			}
 		}
 	}
-
 	async #reloadPersistedLayers(): Promise<void> {
 		for (;;) {
 			await this.flush();
@@ -887,7 +900,7 @@ export class Settings {
 			this.#fireCodeModeChangeIfNeeded(previousCodeModeValues);
 			for (const [key, previous] of previousHookValues) {
 				const next = this.get(key);
-				if (!Bun.deepEquals(next, previous)) {
+				if (!Bun.deepEquals(next, previous) && !DISK_RELOAD_SILENT_HOOKS[key]) {
 					SETTING_HOOKS[key]?.(next, previous);
 				}
 			}
@@ -3047,6 +3060,40 @@ class SettingSignal<A extends unknown[] = []> {
 	}
 }
 
+/**
+ * Hooks skipped by disk reloads (`reloadFromDisk`, called only from
+ * task/eval preflight in `task/structured-subagent.ts`). The Mermaid
+ * renderer and spacing flags are process-global side effects, and that path
+ * has no UI handle for the base-prompt refresh and transcript rebuild the
+ * `/settings` and `/move` paths pair with the same change — firing them
+ * would flip live diagrams while the cached prompt still instructs the
+ * previous mode. Effective values still follow the disk via `get()` (so a
+ * freshly spawned child prompts correctly); the renderer picks them up at
+ * the next explicit refresh. `set()` and `reloadForCwd()` still fire them.
+ */
+const DISK_RELOAD_SILENT_HOOKS: Partial<Record<SettingPath, true>> = {
+	"tui.renderMermaid": true,
+	"tui.mermaidPaddingX": true,
+	"tui.mermaidPaddingY": true,
+	"tui.mermaidBoxBorderPadding": true,
+};
+
+/**
+ * Reapply Mermaid ASCII spacing from the effective settings. Reads all three
+ * values together because `setMarkdownMermaidSpacing` takes the full triple
+ * while each hook fires for a single key. `set()` rebuilds the merged layers
+ * before firing hooks and `reloadForCwd()` re-fires every hook after its
+ * rebuild, so global reads observe the new values in both paths.
+ */
+function applyMermaidSpacingFromSettings(): void {
+	if (!globalInstance) return;
+	setMarkdownMermaidSpacing({
+		paddingX: globalInstance.get("tui.mermaidPaddingX"),
+		paddingY: globalInstance.get("tui.mermaidPaddingY"),
+		boxBorderPadding: globalInstance.get("tui.mermaidBoxBorderPadding"),
+	});
+}
+
 const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	"theme.dark": value => {
 		if (typeof value === "string") {
@@ -3077,6 +3124,20 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	// track it the same instant path/resource links do. Runtime `/settings` edits
 	// also go through the selector controller to invalidate and repaint live views.
 	"tui.hyperlinks": value => applyHyperlinkSetting(value),
+	// Mermaid rendering and spacing track the effective settings the same way:
+	// `reloadForCwd()` re-fires every hook, so `/move` and cross-project resume
+	// pick up the destination project's values without a restart or manual edit.
+	// Read the active instance like the spacing hooks below: `cloneForCwd()` and
+	// `loadIsolated()` re-fire every hook, and applying a clone's value here would
+	// flip the process-global renderer for sessions that never changed projects
+	// (e.g. a security scan cloning settings for its execution root).
+	"tui.renderMermaid": () => {
+		const value = globalInstance?.get("tui.renderMermaid");
+		if (typeof value === "boolean") setMarkdownMermaidRendering(value);
+	},
+	"tui.mermaidPaddingX": () => applyMermaidSpacingFromSettings(),
+	"tui.mermaidPaddingY": () => applyMermaidSpacingFromSettings(),
+	"tui.mermaidBoxBorderPadding": () => applyMermaidSpacingFromSettings(),
 	"provider.appendOnlyContext": value => {
 		if (typeof value === "string") {
 			appendOnlyModeSignal.fire(value);

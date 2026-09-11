@@ -1297,6 +1297,23 @@ export class CommandController {
 
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
+		// A project reload can change prompt-effective settings (e.g.
+		// tui.renderMermaid) as well as spacing-effective settings (e.g.
+		// tui.mermaidPaddingX/Y). Refresh the cached base prompt like direct
+		// /settings edits do, and rebuild cached transcript lines. The cwd move
+		// above already committed, so a refresh failure must not escape as a
+		// failed move: report it and continue with the rebuilt transcript.
+		try {
+			await this.ctx.session.refreshBaseSystemPrompt();
+			this.ctx.rebuildChatFromMessages();
+		} catch (error) {
+			// Rebuild first: showError mounts a transient Text child that the
+			// rebuild would clear before setImmediate renders it (#11360 P2).
+			this.ctx.rebuildChatFromMessages();
+			this.ctx.showError(
+				`Failed to refresh system prompt after move: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 		this.ctx.ui.requestRender();
 		return true;
 	}
@@ -1410,9 +1427,26 @@ export class CommandController {
 			await this.#restoreAfterMoveFailure(previousState);
 			return;
 		}
-
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
+
+		// Shell-driven cwd changes rescope settings via applyCwdChange like
+		// /move does; refresh the cached base prompt and rebuild cached
+		// transcript lines so the new project's Mermaid settings take effect.
+		// The cwd move above already committed, so a refresh failure must not
+		// escape as a failed cwd update: report it and continue.
+		try {
+			await this.ctx.session.refreshBaseSystemPrompt();
+			this.ctx.rebuildChatFromMessages();
+		} catch (error) {
+			// Rebuild first: showError mounts a transient Text child that the
+			// rebuild would clear before setImmediate renders it (#11360 P2).
+			this.ctx.rebuildChatFromMessages();
+			this.ctx.showError(
+				`Failed to refresh system prompt after directory change: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		this.ctx.ui.requestRender();
 	}
 
 	async #applyBashResultCwd(result: BashResult): Promise<void> {

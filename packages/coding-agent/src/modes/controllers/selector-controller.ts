@@ -38,6 +38,7 @@ import {
 	previewTheme,
 	setColorBlindMode,
 	setMarkdownMermaidRendering,
+	setMarkdownMermaidSpacing,
 	setSymbolPreset,
 	setTheme,
 	theme,
@@ -690,6 +691,17 @@ export class SelectorController {
 				setMarkdownMermaidRendering(value as boolean);
 				this.ctx.session.refreshBaseSystemPrompt().catch(err => {
 					this.ctx.showError(`Failed to apply Mermaid rendering setting: ${err}`);
+				});
+				this.ctx.rebuildChatFromMessages();
+				this.ctx.ui.resetDisplay();
+				break;
+			case "tui.mermaidPaddingX":
+			case "tui.mermaidPaddingY":
+			case "tui.mermaidBoxBorderPadding":
+				setMarkdownMermaidSpacing({
+					paddingX: settings.get("tui.mermaidPaddingX"),
+					paddingY: settings.get("tui.mermaidPaddingY"),
+					boxBorderPadding: settings.get("tui.mermaidBoxBorderPadding"),
 				});
 				this.ctx.rebuildChatFromMessages();
 				this.ctx.ui.resetDisplay();

@@ -244,6 +244,7 @@ import {
 	onTerminalAppearanceChange,
 	onThemeChange,
 	setMarkdownMermaidRendering,
+	setMarkdownMermaidSpacing,
 	startMacOSAppearanceReprobeFallback,
 	theme,
 } from "./theme/theme";
@@ -970,6 +971,11 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		setTuiTight(settings.get("tui.tight"));
 		setMarkdownMermaidRendering(settings.get("tui.renderMermaid"));
+		setMarkdownMermaidSpacing({
+			paddingX: settings.get("tui.mermaidPaddingX"),
+			paddingY: settings.get("tui.mermaidPaddingY"),
+			boxBorderPadding: settings.get("tui.mermaidBoxBorderPadding"),
+		});
 		// A cold-start composer already owns the terminal. Reuse it so input
 		// buffered during startup remains in the same editor instance.
 		this.ui.setMaxInlineImages(settings.get("tui.maxInlineImages"));

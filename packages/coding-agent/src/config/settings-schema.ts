@@ -9,6 +9,7 @@ import {
 } from "../blob-broker/destinations";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
 import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "../live/voices";
+import { MERMAID_SPACING_DEFAULTS } from "../modes/theme/tui-adapters";
 import {
 	COMPACTION_METHOD_CHOICES,
 	type CompactionMethod,
@@ -1228,6 +1229,26 @@ export const SETTINGS_SCHEMA = {
 			label: "Render Mermaid Diagrams",
 			description: "Render Mermaid fenced code blocks as ASCII diagrams",
 		},
+	},
+	"tui.mermaidPaddingX": {
+		type: "number",
+		default: MERMAID_SPACING_DEFAULTS.paddingX,
+		description:
+			"Horizontal spacing between nodes in flowchart and state ASCII Mermaid diagrams (default 5). Must be an integer from 0 to 32; invalid values fall back to the default. Sequence, class, ER, and xychart diagrams ignore spacing settings.",
+	},
+
+	"tui.mermaidPaddingY": {
+		type: "number",
+		default: MERMAID_SPACING_DEFAULTS.paddingY,
+		description:
+			"Vertical spacing between nodes in flowchart and state ASCII Mermaid diagrams (default 5). Must be an integer from 0 to 32; invalid values fall back to the default. Sequence, class, ER, and xychart diagrams ignore spacing settings.",
+	},
+
+	"tui.mermaidBoxBorderPadding": {
+		type: "number",
+		default: MERMAID_SPACING_DEFAULTS.boxBorderPadding,
+		description:
+			"Padding inside node boxes in flowchart and state ASCII Mermaid diagrams (default 1). Must be an integer from 0 to 32; invalid values fall back to the default. Sequence, class, ER, and xychart diagrams ignore spacing settings.",
 	},
 
 	"tui.reactions": {

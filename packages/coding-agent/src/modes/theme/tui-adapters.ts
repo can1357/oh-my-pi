@@ -164,6 +164,50 @@ export function getSymbolTheme(): SymbolTheme {
 	};
 }
 
+export interface MarkdownMermaidSpacing {
+	paddingX: number;
+	paddingY: number;
+	boxBorderPadding: number;
+}
+
+// Upper bound so a configuration typo (e.g. paddingX 100000) cannot make the
+// flowchart grid pipeline build an enormous canvas and freeze the TUI.
+const MERMAID_SPACING_MAX = 32;
+
+// Single owner of the ASCII Mermaid spacing defaults: settings-schema derives
+// its documented defaults from this triple (never the reverse), keeping the
+// startup prepaint graph free of settings/catalog modules.
+export const MERMAID_SPACING_DEFAULTS = { paddingX: 5, paddingY: 5, boxBorderPadding: 1 } as const;
+
+let markdownMermaidSpacing: MarkdownMermaidSpacing = { ...MERMAID_SPACING_DEFAULTS };
+
+function sanitizeMermaidSpacing(value: number, fallback: number): number {
+	if (
+		typeof value !== "number" ||
+		!Number.isFinite(value) ||
+		!Number.isInteger(value) ||
+		value < 0 ||
+		value > MERMAID_SPACING_MAX
+	)
+		return fallback;
+	return value;
+}
+export function setMarkdownMermaidSpacing(spacing: MarkdownMermaidSpacing): void {
+	const next = {
+		paddingX: sanitizeMermaidSpacing(spacing.paddingX, MERMAID_SPACING_DEFAULTS.paddingX),
+		paddingY: sanitizeMermaidSpacing(spacing.paddingY, MERMAID_SPACING_DEFAULTS.paddingY),
+		boxBorderPadding: sanitizeMermaidSpacing(spacing.boxBorderPadding, MERMAID_SPACING_DEFAULTS.boxBorderPadding),
+	};
+	if (
+		next.paddingX === markdownMermaidSpacing.paddingX &&
+		next.paddingY === markdownMermaidSpacing.paddingY &&
+		next.boxBorderPadding === markdownMermaidSpacing.boxBorderPadding
+	)
+		return;
+	markdownMermaidSpacing = next;
+	cachedMarkdownTheme = undefined;
+}
+
 let cachedMarkdownTheme: MarkdownTheme | undefined;
 let cachedMarkdownThemeRef: Theme | undefined;
 let markdownMermaidRendering = true;
@@ -217,6 +261,9 @@ export function getMarkdownTheme(): MarkdownTheme {
 						maxWidth,
 						theme: mermaid.mermaidTheme,
 						colorMode: mermaid.mermaidColorMode,
+						paddingX: markdownMermaidSpacing.paddingX,
+						paddingY: markdownMermaidSpacing.paddingY,
+						boxBorderPadding: markdownMermaidSpacing.boxBorderPadding,
 					})
 			: undefined,
 		highlightCode: (code: string, lang?: string): string[] => {
