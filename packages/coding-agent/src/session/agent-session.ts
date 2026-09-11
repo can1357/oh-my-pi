@@ -8848,6 +8848,13 @@ export class AgentSession {
 		if (!model) {
 			throw new Error("No active model on session");
 		}
+		// This adapter's wire contract rejects output-limit fields, so it drops
+		// maxTokens. Do not silently start an unbounded request for a capped turn.
+		if (args.maxTokens !== undefined && model.api === "openai-codex-responses") {
+			throw new Error(
+				"The openai-codex-responses API does not support maxTokens for ephemeral turns. Omit the cap or use an API that supports output limits.",
+			);
+		}
 		const cacheSessionId = this.sessionId;
 		const snapshot = this.#buildEphemeralSnapshot(args.promptText);
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);

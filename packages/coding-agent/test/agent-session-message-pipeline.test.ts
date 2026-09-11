@@ -888,6 +888,42 @@ describe("AgentSession message pipeline", () => {
 		expect(capturedOptions?.maxTokens).toBe(321);
 	});
 
+	it("rejects capped Codex side turns before inference but permits uncapped turns", async () => {
+		let calls = 0;
+		const sideStreamFn: StreamFn = () => {
+			calls++;
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("Uncapped answer");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "Uncapped answer", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: getBundledModel("openai-codex", "gpt-5.4"),
+					systemPrompt: ["system prompt"],
+					messages: [],
+					tools: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn,
+		});
+		sessions.push(session);
+
+		await expect(session.runEphemeralTurn({ promptText: "Question?", maxTokens: 32 })).rejects.toThrow(
+			"does not support maxTokens",
+		);
+		expect(calls).toBe(0);
+		expect((await session.runEphemeralTurn({ promptText: "Question?" })).replyText).toBe("Uncapped answer");
+		expect(calls).toBe(1);
+	});
+
 	it("rejects an oversized ephemeral context before inference", async () => {
 		let calls = 0;
 		const sideStreamFn: StreamFn = () => {

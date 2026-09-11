@@ -479,7 +479,7 @@ export interface EphemeralTurnOptions {
 	promptText: string;
 	/** Omit tool definitions and request no tool calls. Tool calls are never executed, even when this option is omitted. */
 	tools?: false;
-	/** Optional provider output-token cap for this side turn. */
+	/** Optional provider output-token cap. Codex Responses rejects this option before inference because its backend does not support output caps. */
 	maxTokens?: number;
 	/** Reject before inference when the post-transform provider context exceeds this serialized UTF-8 byte cap. */
 	maxContextBytes?: number;
