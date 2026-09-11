@@ -367,18 +367,27 @@ describe("Composer prepaint", () => {
 		expect(exit).toHaveBeenCalledWith(130);
 	});
 
-	it("uses standard emergency exit before interactive keybindings load", () => {
+	it("forward-deletes a startup draft before interactive keybindings load, exiting once it is empty", () => {
 		const terminal = new CountingTerminal();
 		const exit = vi.fn();
 		const composer = new Composer({ preferences: config, terminal, exit });
 		composer.start();
 
 		terminal.sendInput("draft");
+		terminal.sendInput("\x1b[D"); // Left, so Ctrl+D has a character ahead of the cursor
+		terminal.sendInput("\x04");
+		expect(composer.editor.getExpandedText()).toBe("draf");
+		expect(exit).not.toHaveBeenCalled();
+		expect(terminal.stops).toBe(0);
+
+		for (let i = 0; i < 4; i++) terminal.sendInput("\x7f"); // Backspace the rest of the draft
+		expect(composer.editor.getExpandedText()).toBe("");
 		terminal.sendInput("\x04");
 
 		expect(exit).toHaveBeenCalledWith(0);
 		expect(terminal.stops).toBe(1);
 	});
+
 	it("keeps emergency exit live after adoption until interactive handlers replace it", () => {
 		const terminal = new CountingTerminal();
 		const exit = vi.fn();
