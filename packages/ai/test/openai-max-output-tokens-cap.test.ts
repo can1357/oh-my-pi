@@ -178,6 +178,22 @@ function kimiOpenRouterModel(maxTokens: number): Model<"openai-completions"> {
 	});
 }
 
+function deepSeekFlashModel(id: string): Model<"openai-completions"> {
+	const spec: ModelSpec<"openai-completions"> = {
+		id,
+		name: id,
+		api: "openai-completions",
+		provider: "deepseek",
+		baseUrl: "https://api.deepseek.com",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 384_000,
+	};
+	return buildModel(spec);
+}
+
 describe("OpenAI-family output-token cap", () => {
 	it("clamps openai-responses max_output_tokens to the 64k ceiling", async () => {
 		const base = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-responses">;
@@ -213,7 +229,7 @@ describe("OpenAI-family output-token cap", () => {
 	it.each(["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"])(
 		"lets first-party DeepSeek %s requests use the documented 384k output cap",
 		async id => {
-			const model = getBundledModel("deepseek", id) as Model<"openai-completions">;
+			const model = deepSeekFlashModel(id);
 			const body = await captureCompletionsBody(model, model.maxTokens ?? undefined);
 			expect(body.max_tokens).toBe(384_000);
 		},
