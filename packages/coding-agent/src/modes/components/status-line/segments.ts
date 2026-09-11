@@ -1,6 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { getTimeBasedPricingPeriod } from "@oh-my-pi/pi-catalog/models";
 import { SPINNER_ADVANCE_MS, TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
 import { type SymbolKey, type Theme, type ThemeColor, theme } from "../../../modes/theme/theme";
@@ -564,14 +565,17 @@ const costSegment: StatusLineSegment = {
 		const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
 		const normalizedPremiumRequests = normalizePremiumRequests(premiumRequests);
 		const state = ctx.session.state;
+		const pricingPeriod = state.model?.cost
+			? getTimeBasedPricingPeriod(state.model.cost, ctx.now?.getTime())
+			: undefined;
 		const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
 
-		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests) {
+		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests && !pricingPeriod) {
 			return { content: "", visible: false };
 		}
 
 		const billingParts: string[] = [];
-		if (cost) {
+		if (cost || pricingPeriod) {
 			billingParts.push(
 				ctx.startupPlaceholder
 					? formatSpendPlaceholder(usingSubscription, theme)
@@ -582,6 +586,7 @@ const costSegment: StatusLineSegment = {
 				theme.getSymbolPreset() === "nerd" && theme.icon.subscription ? theme.icon.subscription : "(sub)",
 			);
 		}
+		if (pricingPeriod) billingParts.push(pricingPeriod === "peak" ? "↑" : "↓");
 		if (normalizedPremiumRequests) {
 			billingParts.push(`★ ${statusValue(ctx, formatNumber(normalizedPremiumRequests))}`);
 		}
