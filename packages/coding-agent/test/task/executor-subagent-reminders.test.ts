@@ -577,6 +577,95 @@ describe("runSubprocess yield reminders", () => {
 		expect(result.output).toContain("SYSTEM WARNING: Subagent called yield with null data.");
 	});
 
+	it("finalizes from the reporting turn when the data-less yield lands in its own turn", async () => {
+		// The idle reminder instructs a complete subagent to finalize with
+		// `type: string` "from last assistant turn". Models comply across two
+		// turns: prose report first, then a text-less turn carrying only the bare
+		// `yield`. Sampling the salvage text once at end-of-run saw that empty
+		// finalize turn, so `useLastTurn` resolved to nothing and the parent got
+		// "null data" stapled onto accumulated narration instead of the report
+		// (muse-spark-1.3 on the `lumbridge-fixups` subagent).
+		const report = "All four tasks done on content/lumbridge-pass; PR #139 updated in place.";
+		const session = createMockSession(({ promptIndex, emit, state }) => {
+			if (promptIndex === 1) {
+				const assistant = createAssistantStopMessage(report);
+				state.messages.push(assistant);
+				emit({ type: "message_end", message: assistant });
+				return;
+			}
+			const finalize: AssistantMessage = {
+				...createAssistantStopMessage(""),
+				content: [{ type: "toolCall", id: "tool-finalize", name: "yield", arguments: { type: "result" } }],
+				stopReason: "toolUse",
+			};
+			state.messages.push(finalize);
+			emit({ type: "message_end", message: finalize });
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-finalize",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", type: "result", useLastTurn: true },
+				},
+				isError: false,
+			});
+		});
+
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-last-turn-finalize" });
+		expect(result.output).toBe(report);
+		expect(result.output).not.toContain("SYSTEM WARNING");
+	});
+
+	it("never harvests mid-work narration as the final result", async () => {
+		// Counterpart to the test above: the report turn is the one that started
+		// no further work. A turn that narrated and then called a tool is mid-run
+		// chatter, so a later data-less finalize must NOT harvest it — handing the
+		// parent a stale fragment as the subagent's answer is worse than saying
+		// the report is missing.
+		const narration = "Checking the failing test first.";
+		const session = createMockSession(({ promptIndex, emit, state }) => {
+			if (promptIndex === 1) {
+				const working: AssistantMessage = {
+					...createAssistantStopMessage(""),
+					content: [
+						{ type: "text", text: narration },
+						{ type: "toolCall", id: "tool-bash", name: "bash", arguments: { command: "bun test" } },
+					],
+					stopReason: "toolUse",
+				};
+				state.messages.push(working);
+				emit({ type: "message_end", message: working });
+				return;
+			}
+			const finalize: AssistantMessage = {
+				...createAssistantStopMessage(""),
+				content: [{ type: "toolCall", id: "tool-bare", name: "yield", arguments: { type: "result" } }],
+				stopReason: "toolUse",
+			};
+			state.messages.push(finalize);
+			emit({ type: "message_end", message: finalize });
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-bare",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", type: "result", useLastTurn: true },
+				},
+				isError: false,
+			});
+		});
+
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-no-stale-harvest" });
+		expect(result.output).toContain("SYSTEM WARNING: Subagent called yield with null data.");
+		expect(result.output).not.toBe(narration);
+	});
+
 	it("retries when yield tool returns an error before succeeding", async () => {
 		const prompts: string[] = [];
 		const session = createMockSession(({ text, promptIndex, emit, state }) => {
