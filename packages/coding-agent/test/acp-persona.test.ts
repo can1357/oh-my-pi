@@ -17,14 +17,20 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
 import { AcpAgent, createAcpPersonaModelHooks } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { PersonaRuntime } from "@oh-my-pi/pi-coding-agent/session/persona-runtime";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { type DiscoveredAgent, SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
+import {
+	type DiscoveredAgent,
+	type PersonaExplicitOverrides,
+	SessionToolPolicy,
+} from "@oh-my-pi/pi-coding-agent/session/tool-policy";
 import { __resetDirsFromEnvForTests, getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import type { AgentSideConnection, SessionNotification } from "@oh-my-pi/pi-utils/acp";
 
@@ -305,7 +311,10 @@ interface AcpPersonaHarness {
 	home: string;
 }
 
-async function createPersonaHarness(): Promise<AcpPersonaHarness> {
+async function createPersonaHarness(launchPersona?: {
+	agent: DiscoveredAgent;
+	explicit?: PersonaExplicitOverrides;
+}): Promise<AcpPersonaHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-persona-test-"));
 	cleanupRoots.push(root);
 	const agentDir = path.join(root, "agent");
@@ -341,7 +350,11 @@ async function createPersonaHarness(): Promise<AcpPersonaHarness> {
 	const factory = async (factoryCwd: string) => {
 		const session = new PersonaStubSession(factoryCwd);
 		sessions.push(session);
-		return session as unknown as AgentSession;
+		// The production factory answers with an AcpSessionHandle; carry the
+		// `--agent` launch persona on it when the test simulates that flag.
+		return (launchPersona
+			? { session, setToolUIContext: undefined, launchPersona }
+			: session) as unknown as AgentSession;
 	};
 
 	const agent = new AcpAgent(connection, factory);
@@ -466,6 +479,45 @@ describe("ACP persona reconciliation", () => {
 		expect(noticeChunks()).toBe(1);
 	});
 
+	// Regression (Codex P2, fvInv parity): ACP `--agent X` must win over the
+	// STORED persona across session/load. The per-workspace factory entered X at
+	// construction, but switchSession tears that source persona down and restores
+	// the loaded journal; without a re-assert after reconcile, the launch flag
+	// silently disappears for load/resume/fork while the stored persona wins.
+	it("launch --agent overrides the stored persona on session/load", async () => {
+		const launchAgent: DiscoveredAgent = {
+			name: "acp-launch",
+			description: "launch-flag persona",
+			systemPrompt: "You are the launch-flag persona.",
+			source: "bundled",
+			tools: ["read"],
+		};
+		const harness = await createPersonaHarness({ agent: launchAgent });
+		const source = new PersonaStubSession(harness.cwd);
+		harness.sessions.push(source);
+		source.sessionManager.appendMessage({ role: "user", content: "hi", timestamp: Date.now() });
+		source.sessionManager.appendModeChange("agent", { name: "acp-testa" });
+		await source.sessionManager.ensureOnDisk();
+		await source.sessionManager.flush();
+
+		await harness.agent.loadSession({
+			sessionId: source.sessionId,
+			cwd: harness.cwd,
+			mcpServers: [],
+		});
+
+		const stored = harness.sessions.at(-1)!;
+		const runtime = stored.getPersonaRuntime()!;
+		expect(runtime.policy.isPersonaActive()).toBe(true);
+		// The launch persona won over the journal's stored acp-testa.
+		expect(runtime.policy.snapshot().persona?.agent.name).toBe("acp-launch");
+		expect(stored.getPersonaAppendPrompt()).toContain("launch-flag persona");
+		// Drift-free journal: the LAST agent entry records the launch persona.
+		const entry = await lastAgentModeChange(stored);
+		expect(entry?.mode).toBe("agent");
+		expect(entry?.data.name).toBe("acp-launch");
+	});
+
 	it("resolves the persona from the session cwd's project agents dir", async () => {
 		const harness = await createPersonaHarness();
 		const projectAgentsDir = path.join(harness.cwd, ".omp", "agents");
@@ -547,23 +599,25 @@ describe("ACP persona reconciliation", () => {
 		expect(notices[0]).toContain("model restore deferred");
 	});
 
-	// Regression (ChainedA P1): a failed chained switch on ACP must undo the
-	// deferred-restore mutation ITS transaction queued. Mid-turn enter(B) while
-	// A is active runs exitInner(A) first, which queues A's pre-persona restore
-	// on the session; when B's apply fails, the runtime rolls back and A stays
-	// active — flushing A's restore at agent_end would drop the session to the
-	// pre-persona model under an active persona. onPersonaSwitchFailed clears the
-	// queue, but only restores queued by that same hooks transaction (a previous
-	// successful exit's owed restore must survive).
-	it("failed chained switch clears only its own deferred restore", async () => {
-		const harness = await createPersonaHarness();
+	const prePersonaBaseline = () => ({ model: { id: "pre" } as Model, thinkingLevel: undefined });
+
+	// Regression (Codex P2 ×2): the ACP surface queues ONE deferred model
+	// operation on the session, flushed at agent_end. Mid-turn enter of a
+	// modeled persona B while A is active must REPLACE A's queued baseline
+	// restore with B's resolved switch (else agent_end applies the pre-A model
+	// while B runs and B's model never lands), and a FAILED transaction must
+	// restore the entry that existed before it rather than clearing (TUI
+	// #pendingModelSwitch parity).
+	function makeDeferredQueueStub(harness: { cwd: string }) {
 		const session = new PersonaStubSession(harness.cwd);
 		session.stub.isStreaming = true;
-		const baseline = { model: {} as Model, thinkingLevel: undefined };
-		let queued: { model: Model; thinkingLevel: unknown } | undefined;
+		let queued: { model: Model; thinkingLevel: ConfiguredThinkingLevel | undefined } | undefined;
 		const target = session as unknown as AgentSession & {
-			queueDeferredModelRestore: (model: Model, thinkingLevel?: unknown) => void;
+			queueDeferredModelRestore: (model: Model, thinkingLevel?: ConfiguredThinkingLevel) => void;
 			clearDeferredModelRestore: () => void;
+			getDeferredModelRestore: () =>
+				| { model: Model; thinkingLevel: ConfiguredThinkingLevel | undefined }
+				| undefined;
 		};
 		target.queueDeferredModelRestore = (model, thinkingLevel) => {
 			queued = { model, thinkingLevel };
@@ -571,21 +625,90 @@ describe("ACP persona reconciliation", () => {
 		target.clearDeferredModelRestore = () => {
 			queued = undefined;
 		};
+		target.getDeferredModelRestore = () => queued;
+		return { session, target, peek: () => queued };
+	}
 
-		// Transaction 1 (the failing chained enter): queues A's restore, then
-		// rolls back — the queue must be empty for the agent_end flush.
+	it("mid-turn modeled persona enter replaces the queued baseline restore (chained A→B)", async () => {
+		const personaModel = buildModel({
+			id: "persona-model",
+			name: "Persona Model",
+			api: "anthropic-messages",
+			provider: "stub",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		}) as Model<Api>;
+		let queued: { model: Model; thinkingLevel: unknown } | undefined;
+		const target = {
+			isStreaming: true,
+			model: undefined,
+			settings: Settings.isolated(),
+			modelRegistry: { getAvailable: () => [personaModel] },
+			queueDeferredModelRestore: (model: Model, thinkingLevel?: unknown) => {
+				queued = { model, thinkingLevel };
+			},
+			clearDeferredModelRestore: () => {
+				queued = undefined;
+			},
+			getDeferredModelRestore: () => queued,
+		} as unknown as AgentSession;
+		const hooks = createAcpPersonaModelHooks(target, async () => {});
+		// A's exit queued its pre-persona baseline first (a prior transaction).
+		const preA = buildModel({
+			id: "pre-a",
+			name: "Pre A",
+			api: "anthropic-messages",
+			provider: "stub",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		}) as Model<Api>;
+		hooks.deferModelRestoreWhileStreaming?.({ model: preA, thinkingLevel: undefined });
+		expect(queued?.model).toBe(preA);
+
+		hooks.deferModelSwitchWhileStreaming?.({
+			name: "acp-b",
+			description: "",
+			systemPrompt: "prompt",
+			source: "bundled",
+			model: ["stub/persona-model"],
+		} as DiscoveredAgent);
+		// B's switch REPLACES A's restore; agent_end now lands B's model.
+		// Pre-fix the enter path only noticed, so the queue still held A's
+		// pre-persona model and B ran on the wrong model.
+		expect(queued?.model).toBe(personaModel);
+	});
+
+	it("failed ACP transaction restores the prior deferred entry instead of clearing", async () => {
+		const harness = await createPersonaHarness();
+		const { target, peek } = makeDeferredQueueStub(harness);
+		const owed = { model: { id: "owed" } as Model, thinkingLevel: undefined };
+		// A restore queued by an EARLIER (successful) transaction exists when
+		// this hooks instance is created — its rollback must put it back.
+		const owedModel = owed.model;
+		target.queueDeferredModelRestore(owedModel, owed.thinkingLevel);
 		const failing = createAcpPersonaModelHooks(target, async () => {});
-		failing.deferModelRestoreWhileStreaming?.(baseline);
-		expect(queued?.model).toBe(baseline.model);
+		// The failed transaction mutated the queue…
+		failing.deferModelRestoreWhileStreaming?.({ model: { id: "this-tx" } as Model, thinkingLevel: undefined });
+		expect(peek()?.model.id).toBe("this-tx");
+		// …rollback restores the prior owner's entry.
 		failing.onPersonaSwitchFailed?.();
-		expect(queued).toBeUndefined();
+		expect(peek()?.model).toBe(owedModel);
 
-		// A restore queued by a DIFFERENT (successful) transaction is untouched.
-		const other = createAcpPersonaModelHooks(target, async () => {});
-		other.deferModelRestoreWhileStreaming?.(baseline);
-		expect(queued?.model).toBe(baseline.model);
-		failing.onPersonaSwitchFailed?.();
-		expect(queued?.model).toBe(baseline.model);
+		// With an EMPTY prior, the same rollback clears the transaction's entry.
+		target.clearDeferredModelRestore();
+		const fresh = createAcpPersonaModelHooks(target, async () => {});
+		fresh.deferModelRestoreWhileStreaming?.(prePersonaBaseline());
+		expect(peek()?.model).toBeDefined();
+		fresh.onPersonaSwitchFailed?.();
+		expect(peek()).toBeUndefined();
 	});
 
 	it("emits the defer notice for a thinking-only persona mid-turn (fo80k)", async () => {

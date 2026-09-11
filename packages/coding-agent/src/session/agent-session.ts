@@ -8296,17 +8296,25 @@ export class AgentSession {
 		this.#pendingDeferredModelRestore = { model, thinkingLevel };
 	}
 
+	/** Reads the currently queued deferred restore (chained-switch merge channel). */
+	getDeferredModelRestore(): { model: Model; thinkingLevel: ConfiguredThinkingLevel | undefined } | undefined {
+		return this.#pendingDeferredModelRestore;
+	}
+
 	/** Drops a queued deferred model restore without applying it (persona-transaction rollback). */
 	clearDeferredModelRestore(): void {
 		this.#pendingDeferredModelRestore = undefined;
 	}
 
-	/** Applies and clears a queued deferred model restore, if any. */
+	/** Applies a queued deferred model restore, clearing it only once the application succeeds. */
 	async flushDeferredModelRestore(): Promise<boolean> {
 		const pending = this.#pendingDeferredModelRestore;
-		this.#pendingDeferredModelRestore = undefined;
 		if (!pending) return false;
+		// A failed apply (extension model-change hook, provider reset) must keep
+		// the restore owed: the next turn boundary retries it. Clearing up front
+		// strands a cleared persona on its persona model indefinitely.
 		await this.#models.setModelTemporary(pending.model, pending.thinkingLevel);
+		if (this.#pendingDeferredModelRestore === pending) this.#pendingDeferredModelRestore = undefined;
 		return true;
 	}
 

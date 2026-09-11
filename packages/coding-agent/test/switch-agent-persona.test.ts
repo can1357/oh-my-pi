@@ -100,6 +100,33 @@ describe("/agent slash command", () => {
 		expect(modeChangeEntries).toEqual([{ mode: "none" }]);
 	});
 
+	// Regression (Codex P2): the headless exit mirrors the TUI's fw_r- guard —
+	// persona and ACTIVE plan mode are mutually exclusive, so bare `/agent` must
+	// refuse while the partition runs. Pre-fix the exit restored the
+	// pre-persona model/toolset under a live plan mode: the session kept
+	// reporting plan mode with ordinary tools exposed.
+	it("refuses bare /agent exit while plan mode is active", async () => {
+		const { session, policy, runtime, modeChangeEntries } = makeSessionStub();
+		const { output, runtime: slashRuntime } = makeAgentSlashHarness(session);
+		mockDiscovery([makeAgent()]);
+		await runtime.enter(makeAgent(), {}, makePersonaHooks());
+		expect(policy.isPersonaActive()).toBe(true);
+		(session as unknown as { getPlanModeState: () => { enabled: boolean; planFilePath: string } }).getPlanModeState =
+			() => ({
+				enabled: true,
+				planFilePath:
+					"/home/slava/.omp/agent/sessions/-aiexp-oh-my-pi/2026-09-11T10-54-25-254Z_01a0901a-b7e6-7767-bff5-c5badda70564/local/PLAN.md",
+			});
+
+		const result = await executeAcpBuiltinSlashCommand("/agent", slashRuntime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output.some(line => line.includes("Exit plan mode"))).toBe(true);
+		// Persona untouched; no `none` clear marker ever reached the journal.
+		expect(policy.isPersonaActive()).toBe(true);
+		expect(modeChangeEntries.some(entry => entry.mode === "none")).toBe(false);
+	});
+
 	it("reports usage when no persona is active and no name is given", async () => {
 		const { session } = makeSessionStub();
 		const { output, runtime: slashRuntime } = makeAgentSlashHarness(session);

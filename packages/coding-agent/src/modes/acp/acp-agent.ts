@@ -45,6 +45,7 @@ import {
 	type Usage,
 } from "@oh-my-pi/pi-utils/acp";
 import { disableProvider, enableProvider, reset as resetCapabilities } from "../../capability";
+import { resolveModelOverride } from "../../config/model-resolver";
 import { Settings } from "../../config/settings";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -68,6 +69,7 @@ import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import {
 	appendPersonaJournalEntry,
+	deserializePersonaBaseline,
 	reconcileSessionPersona,
 	readPersistedAgentPersona,
 } from "../../session/persisted-persona";
@@ -78,7 +80,8 @@ import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "../../stt/models";
-import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../thinking";
+import { type ConfiguredThinkingLevel, AUTO_THINKING, parseConfiguredThinkingLevel } from "../../thinking";
+import type { DiscoveredAgent, PersonaExplicitOverrides } from "../../session/tool-policy";
 import { OTHER_OPTION } from "../../tools/ask";
 import { normalizeLocalScheme } from "../../tools/path-utils";
 import { ToolError } from "../../tools/tool-errors";
@@ -138,41 +141,60 @@ export function createAcpPersonaModelHooks(
 	emitNotice: (text: string) => void | Promise<void>,
 ): PersonaModelApplyHooks {
 	const defaultHooks = createDefaultPersonaModelHooks(session);
-	// Transaction-local: whether THIS hooks instance queued a deferred restore,
-	// so a rollback clear never drops a restore a previous successful exit owed.
-	let queuedRestoreThisTransaction = false;
+	// fw_sA: one session-level deferred slot is flushed at `agent_end`
+	// (#handlePromptEvent). Snapshot the queue as it stands BEFORE this
+	// transaction touches it so a rollback restores the prior owner's entry
+	// instead of deleting it (TUI #pendingModelSwitch parity).
+	const priorPending = session.getDeferredModelRestore?.();
+	// Model/thinking resolution mirrors the TUI's queue channel: the default
+	// hooks resolve the agent's pattern synchronously; a pattern-carried
+	// `:level` suffix rides the same value the non-deferred apply would set.
+	const resolveQueuedSelection = (
+		agent: DiscoveredAgent,
+	): { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined => {
+		if (!agent.model || agent.model.length === 0) {
+			// Thinking-only persona: the flush forwards both halves to
+			// setModelTemporary, which applies a thinking-only change without
+			// touching the model (fo80k).
+			if (agent.thinkingLevel === undefined) return undefined;
+			const current = session.model;
+			return current ? { model: current, thinkingLevel: agent.thinkingLevel } : undefined;
+		}
+		const resolved = resolveModelOverride(agent.model, session.modelRegistry, session.settings);
+		if (!resolved.model) return undefined;
+		const queuedThinking =
+			agent.thinkingLevel ?? (resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined);
+		return { model: resolved.model, thinkingLevel: queuedThinking };
+	};
 	return {
 		...defaultHooks,
 		shouldDeferModelSwitch: () => session.isStreaming,
 		deferModelSwitchWhileStreaming: agent => {
-			// A thinking-only persona (thinking set, no model) still notices:
-			// its tools/prompt apply now, and the thinking change rides the
-			// same deferred-model retry at turn end (fo80k).
-			if ((!agent.model || agent.model.length === 0) && agent.thinkingLevel === undefined) return;
+			// Chained switches (A active, mid-turn enter of modeled B): the
+			// runtime already queued A's pre-persona restore through the exit
+			// channel. B's selection must REPLACE it — leaving A's restore queued
+			// would apply the pre-A model at agent_end while B runs (and B's
+			// model would never land). The notice keeps promising what the queue
+			// now delivers.
+			const selection = resolveQueuedSelection(agent);
+			if (selection) session.queueDeferredModelRestore?.(selection.model, selection.thinkingLevel);
 			void emitNotice(PERSONA_DEFERRED_NOTICE_TEMPLATE.replace("{name}", agent.name));
 		},
 		deferModelRestoreWhileStreaming: baseline => {
-			// fw_sA: unlike the TUI there is no shared pending-model queue in
-			// ACP — queue the restore on the SESSION and flush it at
-			// `agent_end` (#handlePromptEvent), so the advertised turn-end
+			// Mid-turn persona exit: queue the pre-persona restore on the
+			// session; `agent_end` applies it, so the advertised turn-end
 			// restore actually lands.
 			if (!baseline.model) return;
 			session.queueDeferredModelRestore?.(baseline.model, baseline.thinkingLevel);
-			queuedRestoreThisTransaction = true;
 			void emitNotice(PERSONA_RESTORE_DEFERRED_NOTICE_TEMPLATE);
 		},
-		// Rollback safety (ChainedA P1): a failed chained switch (A active, B
-		// entered mid-turn) leaves the A-exit restore queued above while the
-		// runtime rollback RE-ARMS A — flushing it at agent_end would drop the
-		// session to the pre-persona model with A still active. Undo the queue
-		// mutation the defer channel made, mirroring the TUI's
-		// onPersonaSwitchFailed.
+		// Rollback safety: undo THIS transaction's queue mutation by restoring
+		// the transaction-start entry (not blanket-clearing): a failed chained
+		// switch rolls the runtime back to A, whose own owed switch (or an
+		// earlier successful exit's restore) must survive.
 		onPersonaSwitchFailed: () => {
-			// One-shot: consume the flag so a repeated rollback can never clear a
-			// restore a later (successful) transaction owns.
-			if (!queuedRestoreThisTransaction) return;
-			queuedRestoreThisTransaction = false;
-			session.clearDeferredModelRestore?.();
+			if (priorPending) session.queueDeferredModelRestore?.(priorPending.model, priorPending.thinkingLevel);
+			else session.clearDeferredModelRestore?.();
 		},
 	};
 }
@@ -190,6 +212,7 @@ export function createAcpPersonaModelHooks(
 export async function reconcileAcpSessionPersona(
 	session: AgentSession,
 	emitNotice: (text: string) => void | Promise<void>,
+	launchPersona?: { agent: DiscoveredAgent; explicit?: PersonaExplicitOverrides },
 ): Promise<void> {
 	const result = await reconcileSessionPersona(session, {
 		buildHooks: current => createAcpPersonaModelHooks(current, emitNotice),
@@ -204,13 +227,50 @@ export async function reconcileAcpSessionPersona(
 			});
 		},
 	});
-	if (!result.entered) return;
-	// Re-append carries the (unchanged) baseline forward so the contract key
-	// survives across load/resume cycles.
-	const desired = readPersistedAgentPersona(session.sessionManager.getEntries());
-	if (desired) {
-		appendPersonaJournalEntry(session, desired);
+	if (result.entered && !launchPersona) {
+		// Re-append carries the (unchanged) baseline forward so the contract key
+		// survives across load/resume cycles.
+		const desired = readPersistedAgentPersona(session.sessionManager.getEntries());
+		if (desired) {
+			appendPersonaJournalEntry(session, desired);
+		}
+		return;
 	}
+	// `--agent X` launch precedence over the loaded journal (fvInv parity with
+	// the TUI `--agent X --resume` seam): switchSession tore the construction-time
+	// launch persona down and restored the target journal's state, so re-assert
+	// the requested persona HERE. `launchPersona.agent` is resolved against THIS
+	// workspace by the factory — a name that misses there stays undefined (the
+	// documented ACP degrade) and the stored persona survives; a name that hits
+	// wins, including over a stored persona reconcileSessionPersona just entered.
+	// The stored entry's baseline — whichever persona it records — stays
+	// authoritative for the eventual exit; otherwise capture the restored live
+	// state.
+	if (!launchPersona) return;
+	const runtime = session.getPersonaRuntime?.();
+	if (!runtime) return;
+	const persisted = readPersistedAgentPersona(session.sessionManager.getEntries());
+	const baselineOverride = persisted?.baseline ? deserializePersonaBaseline(session, persisted.baseline) : undefined;
+	try {
+		await runtime.reconcile(
+			{ agent: launchPersona.agent, explicit: launchPersona.explicit, baselineOverride },
+			createAcpPersonaModelHooks(session, emitNotice),
+		);
+	} catch (error) {
+		// Same degrade philosophy as the stored reconcile: a failed launch-persona
+		// re-assert must not fail the load; the session runs without it.
+		logger.warn("Failed to re-assert ACP launch persona after session open", {
+			sessionId: session.sessionId,
+			persona: launchPersona.agent.name,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return;
+	}
+	appendPersonaJournalEntry(session, {
+		name: launchPersona.agent.name,
+		explicit: launchPersona.explicit,
+		baseline: runtime.getActiveBaseline(),
+	});
 }
 
 type AgentImageContent = {
@@ -320,6 +380,7 @@ type MCPSourceMap = {
 type AcpSessionHandle = {
 	session: AgentSession;
 	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
+	launchPersona?: { agent: DiscoveredAgent; explicit?: PersonaExplicitOverrides };
 };
 
 type CreateAcpSession = (
@@ -330,8 +391,11 @@ type CreateAcpSession = (
 function normalizeCreatedAcpSession(created: AgentSession | AcpSessionHandle): {
 	session: AgentSession;
 	setToolUIContext: AcpSessionHandle["setToolUIContext"] | undefined;
+	launchPersona: AcpSessionHandle["launchPersona"] | undefined;
 } {
-	return "session" in created ? created : { session: created, setToolUIContext: undefined };
+	return "session" in created
+		? { session: created.session, setToolUIContext: created.setToolUIContext, launchPersona: created.launchPersona }
+		: { session: created, setToolUIContext: undefined, launchPersona: undefined };
 }
 
 type AcpSpeechOption = {
@@ -1407,7 +1471,7 @@ export class AcpAgent implements Agent {
 
 	async #forkManagedSession(params: ForkSessionRequest): Promise<ManagedSessionRecord> {
 		const sourcePath = await this.#resolveForkSourceSessionPath(params.sessionId);
-		const { session, setToolUIContext } = normalizeCreatedAcpSession(
+		const { session, setToolUIContext, launchPersona } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(params.cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
@@ -1432,9 +1496,13 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		await reconcileAcpSessionPersona(session, text => {
-			forkNotices.push(text);
-		});
+		await reconcileAcpSessionPersona(
+			session,
+			text => {
+				forkNotices.push(text);
+			},
+			launchPersona,
+		);
 		unsubscribe();
 		return await this.#registerPreparedSession(session, params.mcpServers ?? [], setToolUIContext, forkNotices);
 	}
@@ -1445,7 +1513,7 @@ export class AcpAgent implements Agent {
 		mcpServers: McpServer[],
 		sessionId: string,
 	): Promise<ManagedSessionRecord> {
-		const { session, setToolUIContext } = normalizeCreatedAcpSession(
+		const { session, setToolUIContext, launchPersona } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
@@ -1466,9 +1534,13 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		await reconcileAcpSessionPersona(session, text => {
-			openNotices.push(text);
-		});
+		await reconcileAcpSessionPersona(
+			session,
+			text => {
+				openNotices.push(text);
+			},
+			launchPersona,
+		);
 		unsubscribe();
 		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext, openNotices);
 	}

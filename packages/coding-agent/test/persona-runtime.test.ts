@@ -416,6 +416,66 @@ describe("PersonaRuntime", () => {
 		expect(stub.thinkingLevel).toBe("low");
 	});
 
+	// Regression (Codex P2): a mid-turn exit parks its pre-persona baseline in
+	// the runtime's deferred slot; the next enter CONSUMES it. If that enter
+	// fails and rolls back, the deferred baseline must come back with the
+	// transaction — a retry before the turn ends would otherwise capture the
+	// still-live persona model as its "pre-persona" state and restore it on the
+	// eventual exit.
+	it("failed mid-turn retry restores the deferred exit baseline for the next enter", async () => {
+		const { stub, session } = makeSessionStub();
+		const runtime = makeRuntime(session);
+		stub.model = { provider: "stub", id: "pre-a" };
+		stub.thinkingLevel = "low";
+		await runtime.enter(
+			makeAgent({ name: "a", tools: ["read"] }),
+			{},
+			makeHooks({
+				apply: async () => {
+					stub.model = { provider: "stub", id: "a-model" };
+				},
+			}),
+		);
+
+		stub.isStreaming = true;
+		const deferHooks = () =>
+			makeHooks({
+				shouldDeferModelSwitch: () => true,
+				deferModelSwitchWhileStreaming: () => {},
+				deferModelRestoreWhileStreaming: () => {},
+				apply: async () => {
+					stub.model = { provider: "stub", id: "x-model" };
+				},
+			});
+		// Mid-turn exit of A: the pre-A baseline is parked as the deferred
+		// (pre-chain) baseline for the next enter.
+		await runtime.exit(deferHooks());
+		expect(runtime.getActiveBaseline()).toBeUndefined();
+
+		// Enter B (still mid-turn): consumes the deferred baseline, then fails
+		// and rolls back.
+		const failingB = makeHooks({
+			shouldDeferModelSwitch: () => true,
+			deferModelSwitchWhileStreaming: () => {
+				throw new Error("queue boom");
+			},
+			apply: async () => {},
+		});
+		await expect(runtime.enter(makeAgent({ name: "b", tools: ["write"] }), {}, failingB)).rejects.toThrow(
+			"queue boom",
+		);
+		// The failed enter rolls back to the transaction start: no persona (A's
+		// exit succeeded in its own transaction), and the DEFERRED pre-A
+		// baseline must be back in the runtime slot for the retry.
+
+		// Retry with C mid-turn: its baseline must be the TRUE pre-A state from
+		// the restored deferred slot, not the live a-model.
+		await runtime.enter(makeAgent({ name: "c", tools: ["read"] }), {}, deferHooks());
+		const retryBaseline = runtime.getActiveBaseline();
+		expect(retryBaseline?.model).toMatchObject({ provider: "stub", id: "pre-a" });
+		expect(retryBaseline?.thinkingLevel).toBe(Effort.Low);
+	});
+
 	// Regression (Codex P2): baselines are RECORDED selectors, not fuzzy
 	// patterns. A pinned aggregator baseline (`openrouter/<id>@cerebras`) must
 	// round-trip the pin, and a selector the registry cannot reproduce exactly

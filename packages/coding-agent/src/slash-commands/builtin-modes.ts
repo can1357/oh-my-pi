@@ -684,9 +684,15 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 async function handleAgentCommandNoName(runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	const session = runtime.session;
 	if (session.getToolPolicy()?.isPersonaActive()) {
-		// No mode guard: exiting the persona is the recovery path out of the
-		// mode-entry refusal — a guard here would deadlock the user inside the
-		// persona (TUI exitAgentPersona mirrors this).
+		// fw_r- parity with the TUI (exitAgentPersona): persona and plan mode are
+		// mutually exclusive, and the exit's model/presentation restore would
+		// clobber an ACTIVE plan partition. The user can never strand: exiting
+		// the mode first is the recovery path (handleAgentCommandSwitch already
+		// refuses entry under plan mode, so the two cannot co-activate here).
+		const modeState = typeof session.getPlanModeState === "function" ? session.getPlanModeState() : undefined;
+		if (modeState?.enabled) {
+			return usage("Exit plan mode before switching or clearing the agent persona.", runtime);
+		}
 		await session.getPersonaRuntime()?.exit(createDefaultPersonaModelHooks(session));
 		clearPersonaJournalEntry(session);
 		// Exit reverts the model/thinking/toolset to the pre-persona baseline;

@@ -44,6 +44,13 @@ export interface PersonaSwitchSnapshot {
 	spawns: string[] | "*" | null;
 	/** Runtime model baseline owned by the active persona; `undefined` when none captured. */
 	activeBaseline: ModelOverrideState | undefined;
+	/**
+	 * The pre-chain exit baseline an in-flight mid-turn exit parked for the NEXT
+	 * enter. Rolled back with the transaction: a failed enter CONSUMED it (and
+	 * its own baseline capture then ran against the still-live persona model),
+	 * so the retry must find it in the slot again.
+	 */
+	deferredExitBaseline: ModelOverrideState | undefined;
 	/** Pre-enter presentation captured by the active persona's enter. */
 	activePresentationSnapshot: { tools: readonly string[]; mountedToolNames: readonly string[] } | undefined;
 	/** Tool registry names at enter time (j2l merge). */
@@ -204,6 +211,7 @@ export class PersonaRuntime {
 			appendPrompt: this.session.getPersonaAppendPrompt(),
 			spawns: this.session.getSessionSpawns(),
 			activeBaseline: this.#activeBaseline,
+			deferredExitBaseline: this.#deferredExitBaseline,
 			activePresentationSnapshot: this.#activePresentationSnapshot,
 			enterRegistryNames: this.#enterRegistryNames,
 		};
@@ -215,6 +223,7 @@ export class PersonaRuntime {
 		this.session.setSessionSpawns(snap.spawns);
 		this.session.applyPersonaAppendPrompt(snap.appendPrompt);
 		this.#activeBaseline = snap.activeBaseline;
+		this.#deferredExitBaseline = snap.deferredExitBaseline;
 		this.#activePresentationSnapshot = snap.activePresentationSnapshot
 			? {
 					tools: [...snap.activePresentationSnapshot.tools],

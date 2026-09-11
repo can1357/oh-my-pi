@@ -108,6 +108,7 @@ import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
+import type { DiscoveredAgent } from "./session/tool-policy";
 import { discoverAgents, getAgent } from "./task/discovery";
 import type { PersonaExplicitOverrides } from "./session/tool-policy";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
@@ -390,6 +391,8 @@ export async function submitInteractiveInput(
 interface AcpSessionHandle {
 	session: AgentSession;
 	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
+	/** See modes/acp/acp-mode.ts AcpSessionHandle.launchPersona. */
+	launchPersona?: { agent: DiscoveredAgent; explicit?: PersonaExplicitOverrides };
 }
 
 type AcpSessionFactory = (cwd: string, options?: { interactivePrompts?: boolean }) => Promise<AcpSessionHandle>;
@@ -484,7 +487,19 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		}
 		const { session: nextSession, setToolUIContext } = await args.createSession({
 			...args.baseOptions,
-			extensionRoots: sessionRoots ? () => sessionRoots : args.baseOptions.extensionRoots,
+			// Workspace-pinned EXPLICIT lanes, LIVE configured lane: the
+			// creation-time snapshot keeps B's package roots, but a settings
+			// reload changes `extensions` on nextSettings — discovery reads the
+			// provider per call, so rebuild the configured lane from the session's
+			// own Settings instance on every read (matches the launch-workspace
+			// provider's settings-awareness).
+			extensionRoots: sessionRoots
+				? (): EffectiveExtensionRoots => ({
+						...sessionRoots,
+						configured: nextSettings.get("extensions") ?? [],
+						configuredLevel: nextSettings.extensionsSourceLevel(),
+					})
+				: args.baseOptions.extensionRoots,
 			pendingPersonaAgent,
 			cwd,
 			sessionManager: nextSessionManager,
@@ -525,7 +540,15 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 				throw error;
 			}
 		}
-		return { session: nextSession, setToolUIContext };
+		return {
+			session: nextSession,
+			setToolUIContext,
+			// Carried so stored-session flows (load/resume/fork) can re-assert the
+			// CLI `--agent` over the loaded journal (fvInv precedence parity).
+			launchPersona: pendingPersonaAgent
+				? { agent: pendingPersonaAgent, explicit: args.baseOptions.pendingPersonaExplicit }
+				: undefined,
+		};
 	};
 }
 
@@ -1524,10 +1547,14 @@ export async function buildSessionOptions(
 					packageRootsInFlight.delete(effectiveCwd);
 					return derived;
 				},
-				error => {
-					// Drop the memo so a later call retries; rethrow to the awaiter.
+				() => {
+					// The walk already swallows per-path fs errors, so this is a
+					// last-resort settle: cache "no extra package roots" for the
+					// cwd (the outcome the sync lane needs) instead of stranding
+					// callers on a rejected memo.
+					packageRootsByCwd.set(effectiveCwd, []);
 					packageRootsInFlight.delete(effectiveCwd);
-					throw error;
+					return [] as string[];
 				},
 			);
 			packageRootsInFlight.set(effectiveCwd, pending);
@@ -1568,10 +1595,10 @@ export async function buildSessionOptions(
 			// a workspace that legitimately derives ZERO roots — serving the launch
 			// view for the latter would scan workspace A's packages after a switch
 			// to B. Kick the derivation so the next discovery call is correct, and
-			// serve the launch view only for this first, bounded window.
-			packageRootsFor(liveCwd).catch(() => {
-				if (!packageRootsByCwd.has(liveCwd)) packageRootsByCwd.set(liveCwd, []);
-			});
+			// serve the launch view only for this first, bounded window. The
+			// memoized walk always settles (see packageRootsFor), so firing it
+			// here can never surface an unhandled rejection.
+			void packageRootsFor(liveCwd);
 			return launchRootsView;
 		}
 		return buildEffectiveExtensionRoots({
