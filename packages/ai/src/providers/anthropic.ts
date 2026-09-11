@@ -11,6 +11,7 @@ import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copil
 import {
 	$env,
 	CREDIBLE_RATE_LIMIT_HINT_MS,
+	extractRetryHint,
 	getInstallId,
 	isEnoent,
 	logger,
@@ -3405,7 +3406,10 @@ const streamAnthropicOnce = (
 						streamFailure === idleTimeoutAbortError ||
 						(streamFailure instanceof Error && streamFailure.message === idleTimeoutAbortError.message);
 					const rateLimited = AIError.status(streamFailure) === 429;
-					const headerDelayMs = getRetryAfterMsFromHeaders(getHeadersFromError(streamFailure));
+					const headerRetryHintMs = getRetryAfterMsFromHeaders(getHeadersFromError(streamFailure));
+					const retryHintMs =
+						headerRetryHintMs ??
+						extractRetryHint(undefined, streamFailure instanceof Error ? streamFailure.message : undefined);
 					const maxRetryDelayMs = options?.maxRetryDelayMs ?? 60_000;
 					const rateLimitHintCapMs =
 						maxRetryDelayMs > 0
@@ -3418,8 +3422,8 @@ const streamAnthropicOnce = (
 						!transportOwnsRateLimitBudget &&
 						!AIError.isUsageLimit(streamFailure) &&
 						providerRateLimitRetries < MAX_RATE_LIMIT_ATTEMPTS - 1 &&
-						headerDelayMs !== undefined &&
-						headerDelayMs <= rateLimitHintCapMs;
+						retryHintMs !== undefined &&
+						retryHintMs <= rateLimitHintCapMs;
 					const canRetryTransientEnvelopeFailure = isTransientEnvelopeFailure && !streamedReplayUnsafeContent;
 					const canRetryProviderFailure =
 						!isLocalIdleTimeout &&
@@ -3442,10 +3446,10 @@ const streamAnthropicOnce = (
 					// Bound the server-directed wait so a multi-hour `retry-after` cannot
 					// park the provider stream before higher-level recovery runs. A non-positive cap
 					// disables the bound; an over-cap hint surfaces the original error immediately.
-					if (headerDelayMs !== undefined && maxRetryDelayMs > 0 && headerDelayMs > maxRetryDelayMs) {
+					if (retryHintMs !== undefined && maxRetryDelayMs > 0 && retryHintMs > maxRetryDelayMs) {
 						throw streamFailure;
 					}
-					const delayMs = headerDelayMs !== undefined ? Math.max(headerDelayMs, backoffDelayMs) : backoffDelayMs;
+					const delayMs = retryHintMs !== undefined ? Math.max(retryHintMs, backoffDelayMs) : backoffDelayMs;
 					if (options?.providerRetryWait) {
 						await options.providerRetryWait(delayMs, options.signal);
 					} else {
