@@ -15,12 +15,19 @@ import { scheduler } from "node:timers/promises";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
 	COPILOT_API_HEADERS,
+	COPILOT_CHAT_INTEGRATION_ID,
 	discoverGitHubCopilotApiEndpoint,
 	getGitHubCopilotBaseUrl,
 	isPublicGitHubHost,
+	normalizeCopilotIntegrationId,
 	normalizeDomain,
 	normalizeGitHubCopilotEnterpriseDomain,
 } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { $env } from "@oh-my-pi/pi-utils";
+import {
+	resolveCopilotIntegrationIdOverride,
+	wrapFetchForCopilotFallback,
+} from "../../providers/github-copilot-headers";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import type { OAuthController, OAuthCredentials } from "./types";
@@ -51,6 +58,7 @@ type GitHubCopilotLoginOptions = {
 	onAuth: (url: string, instructions?: string) => void;
 	onPrompt: (prompt: { message: string; placeholder?: string; allowEmpty?: boolean }) => Promise<string>;
 	onProgress?: (message: string) => void;
+	copilotIntegrationId?: unknown;
 	signal?: AbortSignal;
 	pollIntervalFloorMs?: number;
 	pollIntervalScaleMs?: number;
@@ -259,6 +267,7 @@ async function enableGitHubCopilotModel(
 	fetchImpl: FetchImpl,
 	enterpriseDomain: string | undefined,
 	apiEndpoint: string | undefined,
+	integrationId?: string,
 ): Promise<boolean> {
 	const baseUrl = apiEndpoint ?? getGitHubCopilotBaseUrl(enterpriseDomain);
 	const url = `${baseUrl}/models/${modelId}/policy`;
@@ -270,6 +279,7 @@ async function enableGitHubCopilotModel(
 				"Content-Type": "application/json",
 				Authorization: `Bearer ${token}`,
 				...COPILOT_API_HEADERS,
+				"Copilot-Integration-Id": integrationId ?? COPILOT_CHAT_INTEGRATION_ID,
 				"Openai-Intent": "chat-policy",
 				"X-Initiator": "user",
 				"X-Interaction-Type": "chat-policy",
@@ -292,16 +302,24 @@ async function enableAllGitHubCopilotModels(
 	apiEndpoint: string | undefined,
 	fetchImpl: FetchImpl,
 	onProgress?: (model: string, success: boolean) => void,
+	integrationId?: unknown,
 ): Promise<void> {
-	// Synthesized catalog variants (Copilot long-context `-1m` entries) share
-	// the upstream model id; enable each wire id exactly once.
 	const wireModelIds = [...new Set(getBundledModels("github-copilot").map(model => model.requestModelId ?? model.id))];
+	const resolvedId = normalizeCopilotIntegrationId(integrationId) ?? resolveCopilotIntegrationIdOverride();
+	const copilotFetch = wrapFetchForCopilotFallback(fetchImpl, true, resolvedId);
 	const BATCH_SIZE = 5;
 	for (let i = 0; i < wireModelIds.length; i += BATCH_SIZE) {
 		const batch = wireModelIds.slice(i, i + BATCH_SIZE);
 		await Promise.all(
 			batch.map(async modelId => {
-				const success = await enableGitHubCopilotModel(token, modelId, fetchImpl, enterpriseDomain, apiEndpoint);
+				const success = await enableGitHubCopilotModel(
+					token,
+					modelId,
+					copilotFetch,
+					enterpriseDomain,
+					apiEndpoint,
+					resolvedId,
+				);
 				onProgress?.(modelId, success);
 			}),
 		);
@@ -368,7 +386,14 @@ export async function loginGitHubCopilot(options: GitHubCopilotLoginOptions): Pr
 
 	// Enable all models after successful login
 	options.onProgress?.("Enabling models...");
-	await enableAllGitHubCopilotModels(githubAccessToken, enterpriseDomain ?? undefined, apiEndpoint, fetchImpl);
+	await enableAllGitHubCopilotModels(
+		githubAccessToken,
+		enterpriseDomain ?? undefined,
+		apiEndpoint,
+		fetchImpl,
+		undefined,
+		options.copilotIntegrationId,
+	);
 	return credentials;
 }
 
