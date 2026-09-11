@@ -374,6 +374,7 @@ export class Agent {
 	#steeringQueue: AgentMessage[] = [];
 	#followUpQueue: AgentMessage[] = [];
 	#steeringWaiters = new Set<() => void>();
+	#queuedMessageGrouping?: (previous: AgentMessage, next: AgentMessage) => boolean;
 
 	#steeringMode: "all" | "one-at-a-time";
 	#followUpMode: "all" | "one-at-a-time";
@@ -1052,32 +1053,32 @@ export class Agent {
 		return this.#abortController?.signal.aborted === true && this.#state.isStreaming;
 	}
 
+	/**
+	 * Join adjacent queued records into one delivery unit in one-at-a-time mode.
+	 * The predicate must be synchronous and side-effect-free. By default each
+	 * record is independent; all mode, queue inspection, and removal stay unchanged.
+	 */
+	setQueuedMessageGrouping(predicate: ((previous: AgentMessage, next: AgentMessage) => boolean) | undefined): void {
+		this.#queuedMessageGrouping = predicate;
+	}
+
+	#dequeueMessages(queue: readonly AgentMessage[], mode: "all" | "one-at-a-time"): AgentMessage[] {
+		if (mode === "all") return queue.slice();
+		let count = Math.min(1, queue.length);
+		while (count < queue.length && this.#queuedMessageGrouping?.(queue[count - 1], queue[count])) count++;
+		return queue.slice(0, count);
+	}
+
 	#dequeueSteeringMessages(): AgentMessage[] {
-		if (this.#steeringMode === "one-at-a-time") {
-			if (this.#steeringQueue.length > 0) {
-				const first = this.#steeringQueue[0];
-				this.#steeringQueue = this.#steeringQueue.slice(1);
-				return [first];
-			}
-			return [];
-		}
-		const steering = this.#steeringQueue.slice();
-		this.#steeringQueue = [];
-		return steering;
+		const messages = this.#dequeueMessages(this.#steeringQueue, this.#steeringMode);
+		this.#steeringQueue = this.#steeringQueue.slice(messages.length);
+		return messages;
 	}
 
 	#dequeueFollowUpMessages(): AgentMessage[] {
-		if (this.#followUpMode === "one-at-a-time") {
-			if (this.#followUpQueue.length > 0) {
-				const first = this.#followUpQueue[0];
-				this.#followUpQueue = this.#followUpQueue.slice(1);
-				return [first];
-			}
-			return [];
-		}
-		const followUp = this.#followUpQueue.slice();
-		this.#followUpQueue = [];
-		return followUp;
+		const messages = this.#dequeueMessages(this.#followUpQueue, this.#followUpMode);
+		this.#followUpQueue = this.#followUpQueue.slice(messages.length);
+		return messages;
 	}
 
 	/**
