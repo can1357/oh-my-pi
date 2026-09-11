@@ -119,12 +119,11 @@ export const SMOKE_TEST_TIMEOUT_MS = 30_000;
 export function resolveExecutablePath(): string {
 	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
 	if (isCompiledBinary() && !isExecutable(executable)) {
-		const argv0 = process.argv0;
+		const argv0 = stripWindowsExtendedLengthPathPrefix(process.argv0);
 		const isPath = argv0.includes("/") || argv0.includes("\\") || argv0.includes(":");
 		const candidates = [
 			// Prefer the original launcher when invoked with an absolute path
 			isFullyQualifiedPath(argv0) ? argv0 : null,
-			// Search PATH for the launcher name only if it is a bare command name
 			!isPath ? $which(argv0, { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass }) : null,
 			// Generic fallback to finding "omp" on PATH
 			$which("omp", { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass }),
