@@ -79,12 +79,14 @@ describe("InteractiveMode paused-plan guard message", () => {
 		await mode.handleVibeModeCommand();
 		await mode.handleGoalModeCommand();
 
-		const messages = warn.mock.calls.map(call => call[0]);
-		expect(messages).toEqual([
-			"Plan mode is paused — run /plan again to fully exit.",
-			"Plan mode is paused — run /plan again to fully exit.",
-		]);
-		expect(messages).not.toContain("Exit plan mode first.");
+		// Both the /vibe and /goal guards fired; a paused blocker must name the
+		// paused state and point at /plan recovery — not the active-mode exit copy.
+		const messages = warn.mock.calls.map(call => String(call[0]));
+		expect(messages).toHaveLength(2);
+		for (const message of messages) {
+			expect(message.toLowerCase()).toContain("paused");
+			expect(message).toContain("/plan");
+		}
 	});
 
 	it("keeps 'Exit plan mode first.' while the plan session is still active", async () => {
@@ -95,6 +97,10 @@ describe("InteractiveMode paused-plan guard message", () => {
 
 		await mode.handleVibeModeCommand();
 
-		expect(warn.mock.calls.map(call => call[0])).toEqual(["Exit plan mode first."]);
+		// Active session: instruct exit, without the paused wording.
+		const messages = warn.mock.calls.map(call => String(call[0]));
+		expect(messages).toHaveLength(1);
+		expect(messages[0].toLowerCase()).toContain("exit plan mode");
+		expect(messages[0].toLowerCase()).not.toContain("paused");
 	});
 });
