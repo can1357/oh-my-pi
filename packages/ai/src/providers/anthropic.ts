@@ -2699,6 +2699,7 @@ const streamAnthropicOnce = (
 				const requestOptions = {
 					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
 					maxRetries: 0,
+					rateLimitBudget: true,
 					...(perRequestHeaders ? { headers: perRequestHeaders } : {}),
 				};
 				const anthropicRequest: unknown =
