@@ -91,6 +91,18 @@ export function shouldPromptCodexAutoRedeem(mode: CodexAutoRedeemMode): boolean 
 	return mode === "unset";
 }
 
+/**
+ * True when a planned spend would consume a final or unknown-balance credit
+ * (issue #11200): any action with `availableCount <= 1`, or `undefined`
+ * (synthesized live-429 candidate with no usable report). Callers treat this
+ * as an explicit-consent gate even when `autoRedeem === "yes"`, so a
+ * system-triggered continuation (e.g. background-job delivery) can never
+ * silently spend the last saved reset.
+ */
+export function isFinalCreditSpend(actions: readonly CodexResetAction[]): boolean {
+	return actions.some(action => (action.availableCount ?? 1) <= 1);
+}
+
 /** What woke the planner. `sweep` may only salvage; `blocked` may also restore. */
 export type CodexResetTrigger = "blocked" | "sweep";
 

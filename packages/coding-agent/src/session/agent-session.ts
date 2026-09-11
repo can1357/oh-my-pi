@@ -280,6 +280,7 @@ import {
 	type CodexResetPlan,
 	type CodexResetTrigger,
 	defaultCodexAutoRedeemCoordinator,
+	isFinalCreditSpend,
 	isTerminalRedeemOutcome,
 	overlayLiveResetCredits,
 	planCodexResetRedemptions,
@@ -10217,6 +10218,66 @@ export class AgentSession {
 		}
 		return false;
 	}
+	/**
+	 * One-shot explicit consent before spending the final saved reset (issue
+	 * #11200). Unlike `#confirmCodexAutoRedeem` this never persists: `yes`
+	 * keeps meaning "spend without prompting" for non-final credits, while the
+	 * irreversible last-credit spend — including system-triggered continuations
+	 * such as background-job delivery — always asks. A single "Yes" executes
+	 * the entire plan, so the dialog enumerates every action (not just the
+	 * first) with its last-credit marking. Headless hosts get a one-shot
+	 * warning notice per episode and no spend, mirroring the unset-mode
+	 * behavior.
+	 */
+	async #confirmFinalCodexReset(
+		actions: CodexResetAction[],
+		coordinator: CodexAutoRedeemCoordinator,
+	): Promise<boolean> {
+		const first = actions[0];
+		if (!first) return false;
+		const finals = actions.filter(action => (action.availableCount ?? 1) <= 1);
+		const runner = this.#extensionRunner;
+		if (!runner?.hasUI()) {
+			// Name the accounts that actually hold a final credit, not the
+			// batch head: a non-final action can sort before the final one.
+			const target = finals[0] ?? first;
+			// Record a key per final action, not just the first: the warning is
+			// once per episode, but each final account needs its own dedup entry
+			// so a later single-final pass for another account still warns.
+			const pending = finals.length > 0 ? finals : [first];
+			const fresh = pending.some(action => !coordinator.notifiedKeys.has(action.attemptKey));
+			for (const action of pending) coordinator.notifiedKeys.add(action.attemptKey);
+			if (fresh) {
+				this.emitNotice(
+					"warning",
+					finals.length > 1
+						? `This would spend the last saved Codex rate-limit resets for ${finals.map(action => action.label).join(", ")}, but no prompt UI is available. Run \`/usage reset\` to redeem them explicitly.`
+						: `This would spend your last saved Codex rate-limit reset for ${target.label}, but no prompt UI is available. Run \`/usage reset\` to redeem it explicitly.`,
+					"codex-auto-reset",
+				);
+			}
+			return false;
+		}
+		const lines = actions.map(action =>
+			(action.availableCount ?? 1) <= 1
+				? `${action.label}: this would spend its last saved reset.`
+				: `${action.label}: ${action.availableCount} saved resets banked (not the last).`,
+		);
+		const question =
+			actions.length === 1
+				? `Spend your last saved Codex rate-limit reset?\n${lines[0]}`
+				: `Spend ${actions.length} saved Codex rate-limit resets, including ${finals.length} last saved reset${finals.length === 1 ? "" : "s"}?\n${lines.join("\n")}`;
+		try {
+			const choice = await runner.getUIContext().select(question, [
+				{ label: "Yes", description: "Redeem the listed resets now. Your auto-redeem setting is unchanged." },
+				{ label: "No", description: "Keep your saved resets." },
+			]);
+			return choice === "Yes";
+		} catch (error) {
+			logger.warn("codex-auto-reset final-credit prompt failed", { error: String(error) });
+		}
+		return false;
+	}
 
 	/** Run the pure planner over a usage snapshot with this session's settings. */
 	#planCodexResets(
@@ -10262,20 +10323,23 @@ export class AgentSession {
 		coordinator: CodexAutoRedeemCoordinator,
 	): Promise<number> {
 		const authStorage = this.#modelRegistry.authStorage;
-		let redeemed = 0;
-		for (const action of actions) {
-			if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
-			// Commit the attempt BEFORE acting so this episode can never re-enter.
-			coordinator.attemptedKeys.add(action.attemptKey);
-			coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
-			let outcome: ResetCreditRedeemOutcome;
+		// `yes` mode spends planned non-final credits without prompting, so an
+		// action can go final between planning and execution (another CLI or
+		// client redeeming concurrently). Those actions carry the consent gate
+		// into redemption; the live pre-POST listing enforces it.
+		const revalidateFinalCredit = !shouldPromptCodexAutoRedeem(this.settings.getGroup("codexResets").autoRedeem);
+		const redeem = async (
+			action: CodexResetAction,
+			requireFinalCreditConsent: boolean,
+		): Promise<ResetCreditRedeemOutcome | undefined> => {
 			try {
-				outcome = await authStorage.redeemResetCredit({
+				return await authStorage.redeemResetCredit({
 					target: action.target,
 					baseUrlResolver: provider => this.#modelRegistry.getProviderBaseUrl?.(provider),
 					// Not tied to the retry abort controller: aborting a consume
 					// mid-flight leaves credit state unknown.
 					signal: AbortSignal.timeout(15_000),
+					...(requireFinalCreditConsent ? { requireFinalCreditConsent: true as const } : {}),
 				});
 			} catch (error) {
 				// Thrown transport failure (network error, 15s timeout): same policy
@@ -10289,7 +10353,32 @@ export class AgentSession {
 					account: action.accountKey,
 					error: String(error),
 				});
-				continue;
+				return undefined;
+			}
+		};
+		let redeemed = 0;
+		for (let index = 0; index < actions.length; index++) {
+			const action = actions[index];
+			if (!action) continue;
+			if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
+			// Commit the attempt BEFORE acting so this episode can never re-enter.
+			coordinator.attemptedKeys.add(action.attemptKey);
+			coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
+			let outcome = await redeem(action, revalidateFinalCredit && (action.availableCount ?? 1) > 1);
+			if (!outcome) continue;
+			if (outcome.code === "final_consent_required") {
+				// The live listing reports one credit left: this is now a
+				// final-credit spend, which always needs explicit consent.
+				// Release the episode (nothing was spent) and prompt over this
+				// action plus the rest of the batch; a "Yes" retries with the
+				// gate cleared, anything else aborts the batch.
+				coordinator.attemptedKeys.delete(action.attemptKey);
+				action.availableCount = 1;
+				if (!(await this.#confirmFinalCodexReset(actions.slice(index), coordinator))) return redeemed;
+				coordinator.attemptedKeys.add(action.attemptKey);
+				coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
+				outcome = await redeem(action, false);
+				if (!outcome) continue;
 			}
 			if (!isTerminalRedeemOutcome(outcome.code)) {
 				// `nothing_to_reset` (limits not constrained enough yet) or a
@@ -10390,8 +10479,37 @@ export class AgentSession {
 		if (!accountKey) return false;
 		const existing = coordinator.inFlightByAccount.get(accountKey);
 		if (existing) return existing;
+		// Target keys claimed by this pass below; released in the finally.
+		const claimedTargetKeys: string[] = [];
 
-		const run = (async (): Promise<boolean> => {
+		const run = executePass
+			.call(this)
+			.catch(error => {
+				// Eligibility IO (cache invalidation / usage fetch) failed; the
+				// retry pipeline must keep running, so a blocked pass never rejects.
+				logger.warn("codex-auto-reset: blocked pass failed", { account: accountKey, error: String(error) });
+				return false;
+			})
+			.finally(() => {
+				coordinator.inFlightByAccount.delete(accountKey);
+				for (const key of claimedTargetKeys) coordinator.inFlightByAccount.delete(key);
+			});
+		async function executePass(this: AgentSession): Promise<boolean> {
+			// Serialize against an in-flight salvage sweep: it planned on a
+			// live listing that predates this pass, and attempt keys differ
+			// per trigger (`salvage|…` vs `block|…`), so planning concurrently
+			// on the same snapshot could double-spend the final credit. The
+			// sweep already defers to blocked passes at schedule time; this
+			// covers the reverse order (sweep first, 429 second).
+			const sweep = coordinator.sweepInFlight ? coordinator.sweepPromise : undefined;
+			if (sweep) {
+				try {
+					await sweep;
+				} catch {
+					// Sweep failures are logged at the sweep site; proceed with
+					// a fresh plan below.
+				}
+			}
 			// Live data: the cached report predates the block that got us here.
 			await authStorage.invalidateUsageCache("openai-codex");
 			const reports = await this.fetchUsageReports();
@@ -10410,21 +10528,38 @@ export class AgentSession {
 			}
 			const plan = this.#planCodexResets("blocked", effectiveReports, identity, coordinator, activeBlockUnblockAtMs);
 			if (plan.actions.length === 0) return false;
+			// Claim every planned target account in the existing process-wide
+			// in-flight map, all-or-nothing: a blocked pass in another session
+			// shares this coordinator and its plan can name the same sibling
+			// accounts (the salvage rule runs on any trigger), while attempt keys
+			// differ per trigger — so without this, two passes can plan on one
+			// live listing and double-spend a final credit. Denial defers the
+			// whole pass (fail closed, nothing spent, no prompt). The synchronous
+			// check-and-set is atomic, so claims can never deadlock.
+			for (const action of plan.actions) {
+				if (action.accountKey === accountKey) continue;
+				if (coordinator.inFlightByAccount.has(action.accountKey)) return false;
+			}
+			for (const action of plan.actions) {
+				if (action.accountKey === accountKey || claimedTargetKeys.includes(action.accountKey)) continue;
+				coordinator.inFlightByAccount.set(action.accountKey, run);
+				claimedTargetKeys.push(action.accountKey);
+			}
 			if (
 				shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
 				!(await this.#confirmCodexAutoRedeem(plan.actions, coordinator))
 			) {
 				return false;
 			}
-			return (await this.#executeCodexResetActions(plan.actions, coordinator)) > 0;
-		})()
-			.catch(error => {
-				// Eligibility IO (cache invalidation / usage fetch) failed; the
-				// retry pipeline must keep running, so a blocked pass never rejects.
-				logger.warn("codex-auto-reset: blocked pass failed", { account: accountKey, error: String(error) });
+			if (
+				!shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
+				isFinalCreditSpend(plan.actions) &&
+				!(await this.#confirmFinalCodexReset(plan.actions, coordinator))
+			) {
 				return false;
-			})
-			.finally(() => coordinator.inFlightByAccount.delete(accountKey));
+			}
+			return (await this.#executeCodexResetActions(plan.actions, coordinator)) > 0;
+		}
 		coordinator.inFlightByAccount.set(accountKey, run);
 		return run;
 	}
@@ -10450,11 +10585,31 @@ export class AgentSession {
 		coordinator.lastSweepAt = now;
 		coordinator.sweepPromise = (async () => {
 			const identity = this.#modelRegistry.authStorage.getOAuthAccountIdentity("openai-codex", this.sessionId);
-			const plan = this.#planCodexResets("sweep", reports, identity, coordinator);
+			// Live per-account credit counts: the usage snapshot's counts can be
+			// stale (kept last-good-on-failure), and a stale count above 1 would
+			// skip the final-credit consent gate below — the same overlay the
+			// blocked pass applies before planning.
+			let effectiveReports: UsageReport[] | null = reports;
+			try {
+				const statuses = await this.listResetCredits(AbortSignal.timeout(10_000));
+				effectiveReports = overlayLiveResetCredits(reports, statuses);
+			} catch (error) {
+				logger.debug("codex-auto-reset: live credit listing failed; keeping report counts", {
+					error: String(error),
+				});
+			}
+			const plan = this.#planCodexResets("sweep", effectiveReports, identity, coordinator);
 			if (plan.actions.length === 0) return;
 			if (
 				shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
 				!(await this.#confirmCodexAutoRedeem(plan.actions, coordinator))
+			) {
+				return;
+			}
+			if (
+				!shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
+				isFinalCreditSpend(plan.actions) &&
+				!(await this.#confirmFinalCodexReset(plan.actions, coordinator))
 			) {
 				return;
 			}

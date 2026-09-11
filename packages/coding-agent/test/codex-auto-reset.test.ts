@@ -22,7 +22,9 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import {
 	blockedAttemptKey,
+	type CodexResetAction,
 	type CodexResetPlanInput,
+	isFinalCreditSpend,
 	isTerminalRedeemOutcome,
 	planCodexResetRedemptions,
 	SALVAGE_MIN_USED_FRACTION,
@@ -759,5 +761,25 @@ describe("codexResets policy plumbing", () => {
 		expect(Settings.isolated().get("codexResets.autoRedeem")).toBe("unset");
 		expect(Settings.isolated({ "codexResets.autoRedeem": true }).get("codexResets.autoRedeem")).toBe("yes");
 		expect(Settings.isolated({ "codexResets.autoRedeem": false }).get("codexResets.autoRedeem")).toBe("no");
+	});
+	it("flags a final or unknown-balance credit for explicit consent (issue #11200)", () => {
+		const action = (availableCount: number | undefined): CodexResetAction => ({
+			reason: "blocked-account",
+			target: {},
+			accountKey: "acct-123",
+			attemptKey: "block|acct-123|1",
+			label: "user@example.com",
+			availableCount,
+			active: true,
+		});
+		// Without the fix there is no gate: `yes` spends silently on any blocked
+		// turn, including background-job continuations. These cases must prompt.
+		expect(isFinalCreditSpend([action(1)])).toBe(true);
+		expect(isFinalCreditSpend([action(undefined)])).toBe(true);
+		expect(isFinalCreditSpend([action(1), action(3)])).toBe(true);
+		// Non-final balances keep the documented `yes` contract: no extra prompt.
+		expect(isFinalCreditSpend([action(2)])).toBe(false);
+		expect(isFinalCreditSpend([action(3)])).toBe(false);
+		expect(isFinalCreditSpend([])).toBe(false);
 	});
 });

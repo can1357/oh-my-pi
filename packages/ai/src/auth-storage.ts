@@ -997,8 +997,10 @@ export interface ResetCreditRedeemOutcome {
 	 * `no_credit`, `nothing_to_reset`. Locally-synthesized: `no_account`
 	 * (target not found), `account_unavailable` (token refresh failed),
 	 * `credit_list_failed` (transport/auth failure while listing credits —
-	 * retryable, unlike a genuine `no_credit`), `http_<status>` (unexpected
-	 * HTTP).
+	 * retryable, unlike a genuine `no_credit`), `final_consent_required`
+	 * (the live pre-POST listing reports a final credit and the caller set
+	 * `requireFinalCreditConsent` — nothing was spent, prompt and retry),
+	 * `http_<status>` (unexpected HTTP).
 	 */
 	code: CodexResetConsumeCode;
 	accountId?: string;
@@ -6312,6 +6314,16 @@ export class AuthStorage {
 		creditId?: string;
 		baseUrlResolver?: (provider: string) => string | undefined;
 		signal?: AbortSignal;
+		/**
+		 * When true and no explicit `creditId` is given, the live listing
+		 * immediately before the POST enforces the final-credit consent
+		 * threshold: a listing that reports one (or zero) redeemable credits
+		 * returns `final_consent_required` WITHOUT spending. Callers that
+		 * planned on a stale non-final count set this so a concurrent client
+		 * cannot turn the spend final unnoticed; after explicit consent they
+		 * retry with the flag cleared.
+		 */
+		requireFinalCreditConsent?: boolean;
 	}): Promise<ResetCreditRedeemOutcome> {
 		const provider = options.provider ?? "openai-codex";
 		const baseUrl = options.baseUrlResolver?.(provider);
@@ -6355,6 +6367,30 @@ export class AuthStorage {
 				return {
 					ok: false,
 					code: "credit_list_failed",
+					accountId: match.accountId,
+					email: match.email,
+				};
+			}
+			if (list.availableCount <= 0) {
+				// Another client already consumed every credit: there is nothing
+				// to spend, so report `no_credit` before the final-credit consent
+				// gate below — prompting to approve a nonexistent "last" reset
+				// would mislead UI sessions and warn headless ones pointlessly.
+				return {
+					ok: false,
+					code: "no_credit",
+					accountId: match.accountId,
+					email: match.email,
+				};
+			}
+			if (options.requireFinalCreditConsent && list.availableCount <= 1) {
+				// The bank drained between planning and execution (another CLI or
+				// client redeemed concurrently): spending now would silently
+				// consume the final credit. Report it so the caller can prompt;
+				// this outcome is non-terminal — the credit is still banked.
+				return {
+					ok: false,
+					code: "final_consent_required",
 					accountId: match.accountId,
 					email: match.email,
 				};
