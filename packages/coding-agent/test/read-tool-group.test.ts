@@ -215,6 +215,35 @@ describe("ReadToolGroupComponent", () => {
 		expect(plain).toContain(`${themeModule.theme.tree.last} ${twoPath}`);
 	});
 
+	it("links every grouped delimited row from result-provided link paths", () => {
+		settings.override("tui.hyperlinks", "always");
+		const component = new ReadToolGroupComponent();
+		const oneLink = path.resolve("/workspace/src/one.ts");
+		const twoLink = path.resolve("/workspace/src/two.ts");
+		component.updateArgs({ path: "src/one.ts:1-5, src/two.ts:9-12" }, "read-grouped-link");
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "combined" }],
+				details: {
+					displayReadTargets: ["src/one.ts:1-5", "src/two.ts:9-12"],
+					displayReadTargetLinks: [oneLink, twoLink],
+				},
+			},
+			false,
+			"read-grouped-link",
+		);
+
+		const rendered = component.render(120).join("\n");
+
+		const oneUri = new URL(url.pathToFileURL(oneLink).href);
+		oneUri.searchParams.set("line", "1");
+		const twoUri = new URL(url.pathToFileURL(twoLink).href);
+		twoUri.searchParams.set("line", "9");
+		expect(Bun.stripANSI(rendered)).toContain("Read (2)");
+		expect(extractLinkUris(rendered)).toEqual(expect.arrayContaining([oneUri.href, twoUri.href]));
+		expect(extractLinkTexts(rendered)).toEqual(expect.arrayContaining(["src/one.ts", "src/two.ts"]));
+	});
+
 	it("renders warning previews with warning styling instead of success styling", () => {
 		const component = new ReadToolGroupComponent({ showContentPreview: true });
 		const examplePath = path.resolve("/tmp/example.ts");
