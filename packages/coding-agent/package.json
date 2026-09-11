@@ -47,6 +47,7 @@
     "bench:guard": "bun scripts/bench-guard.ts"
   },
   "dependencies": {
+    "filesnap": "0.5.0",
     "@babel/parser": "catalog:",
     "@oh-my-pi/omp-stats": "catalog:",
     "@oh-my-pi/omptype": "catalog:",
@@ -93,6 +94,7 @@
     "dist/template-*.js",
     "dist/tool-views.generated-*.js",
     "scripts",
+    "vendor/filesnap",
     "examples",
     "README.md",
     "CHANGELOG.md"

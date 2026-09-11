@@ -104,6 +104,7 @@
         "@opentelemetry/sdk-metrics": "catalog:",
         "@opentelemetry/sdk-trace-base": "catalog:",
         "@opentelemetry/sdk-trace-node": "catalog:",
+        "filesnap": "0.5.0",
         "puppeteer-core": "catalog:",
       },
       "devDependencies": {
@@ -1152,6 +1153,20 @@
     "fastembed": ["fastembed@2.1.0", "", { "dependencies": { "@anush008/tokenizers": "^0.0.0", "@huggingface/hub": "^2.7.1", "onnxruntime-node": "1.21.0", "progress": "^2.0.3", "tar": "^6.2.0" } }, "sha512-oQkpcRHBppJ3+a3w9dU0uytSY0N1cnEa/iVMc8AXEd+tvT529GekOEFhNviJy89R3lvQXF6cdIMTXHj1Gi00xQ=="],
 
     "fdir": ["fdir@6.5.0", "", { "peerDependencies": { "picomatch": "^3 || ^4" }, "optionalPeers": ["picomatch"] }, "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg=="],
+
+    "filesnap": ["filesnap@0.5.0", "", { "optionalDependencies": { "filesnap-darwin-arm64": "npm:filesnap@0.5.0-darwin-arm64", "filesnap-darwin-x64": "npm:filesnap@0.5.0-darwin-x64", "filesnap-linux-arm64": "npm:filesnap@0.5.0-linux-arm64", "filesnap-linux-x64": "npm:filesnap@0.5.0-linux-x64", "filesnap-win32-arm64": "npm:filesnap@0.5.0-win32-arm64", "filesnap-win32-x64": "npm:filesnap@0.5.0-win32-x64" }, "bin": { "filesnap": "bin/filesnap.mjs" } }, "sha512-EUiHtyK06V/DxcBZpKsisCKj/cFKD7a8cRSzbseGuls8eNs4JiCfjC8YGMVXjWEEcy828aUJnYjOs75WUu3rkw=="],
+
+    "filesnap-darwin-arm64": ["filesnap@0.5.0-darwin-arm64", "", { "os": "darwin", "cpu": "arm64" }, "sha512-EQXeP23WVL2DExoNZ1hSgWvE1qskpob5Nj7a8zRxisiwcLgG9Mn3yRuJsi7alybkvIRR2uw+ieRfQN3v4/qdJA=="],
+
+    "filesnap-darwin-x64": ["filesnap@0.5.0-darwin-x64", "", { "os": "darwin", "cpu": "x64" }, "sha512-/eE9MjLN0658RunVnAoYOj3/Qkppb+mkcWpsFd1OEJjl7GWdVyvDRMT5MpYPxSkgGVL97ZsIjWwny5rUM7suHQ=="],
+
+    "filesnap-linux-arm64": ["filesnap@0.5.0-linux-arm64", "", { "os": "linux", "cpu": "arm64" }, "sha512-xVAaNwqV9nnkyl9GWOh4+Q5+9e1ytneaOZBIDdoqeju6joHcOYOCFgw/mlmKETRQOUE/tggk8LYMQwbib4jimA=="],
+
+    "filesnap-linux-x64": ["filesnap@0.5.0-linux-x64", "", { "os": "linux", "cpu": "x64" }, "sha512-UE3tULZLVc/HiI88ZIh5QiwZL/BotSadYRNhLFOMG8G3gzyZTFmwMAunZqqQwG1k6cApLdcYb2HUtc1Dj/f7RQ=="],
+
+    "filesnap-win32-arm64": ["filesnap@0.5.0-win32-arm64", "", { "os": "win32", "cpu": "arm64" }, "sha512-R5fUfeH37gPWBmVu/Dn7mZqCkCAEH4IZIIsCFgOLw6pwr0GRRuhSVEYZ5TEF829pNzmIkipbNSAwI8FcTY0KCQ=="],
+
+    "filesnap-win32-x64": ["filesnap@0.5.0-win32-x64", "", { "os": "win32", "cpu": "x64" }, "sha512-uqIjOz41Cj+dnORjyQY1p3RquNRQYfZM6OemTYhCdBRNZqOoHaYk1mUp2gscyKi6xK1Z8/2Qj8HZhh+tchnKFQ=="],
 
     "flatbuffers": ["flatbuffers@25.9.23", "", {}, "sha512-MI1qs7Lo4Syw0EOzUl0xjs2lsoeqFku44KpngfIduHBYvzm8h2+7K8YMQh1JtVVVrUvhLpNwqVi4DERegUJhPQ=="],
 

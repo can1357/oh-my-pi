@@ -138,6 +138,70 @@ async function handleSessionPinCommand(
 
 export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
+		name: "rewind",
+		description: "Restore files and conversation to an earlier prompt",
+		handleTui: async (_command, { ctx }) => {
+			if (ctx.session.isStreaming) {
+				ctx.showStatus("Wait for the agent to finish before rewinding");
+				return;
+			}
+			const points = await ctx.session.rewindPoints();
+			if (!points.length) {
+				ctx.showStatus("No saved prompts yet. New prompts are checkpointed automatically.");
+				return;
+			}
+			const labels = points.map(
+				(point, index) => `${index + 1}. ${point.label.replace(/\s+/g, " ").slice(0, 120) || "Untitled prompt"}`,
+			);
+			const choice = await ctx.showHookSelector("Rewind — restore files and conversation", labels);
+			if (choice === undefined) return;
+			const point = points[labels.indexOf(choice)];
+			if (!point) return;
+			const restored = await ctx.session.rewindFilesAndConversation(point.turn, async changes => {
+				const choice = await ctx.showHookSelector(
+					`Restore files and conversation? ${changes.length} file changes\n${changes.slice(0, 12).join("\n")}`,
+					["Restore files and conversation", "Cancel"],
+				);
+				return choice === "Restore files and conversation";
+			});
+			if (!restored) return;
+			await ctx.renderInitialMessages({ clearTerminalHistory: true });
+			await ctx.reloadTodos();
+			ctx.editor.setText(point.label);
+			ctx.showStatus("Files and conversation restored. /redo returns to the previous state.");
+		},
+	},
+	{
+		name: "redo",
+		description: "Restore files and conversation from before the last rewind",
+		handleTui: async (_command, { ctx }) => {
+			await ctx.session.rewindFilesAndConversation();
+			await ctx.renderInitialMessages({ clearTerminalHistory: true });
+			await ctx.reloadTodos();
+			ctx.editor.setText("");
+			ctx.showStatus("Files and conversation restored.");
+		},
+	},
+	{
+		name: "rewind-recover",
+		description: "Recover both files and conversation after an interrupted rewind",
+		handleTui: async (_command, { ctx }) => {
+			await ctx.session.rewindFilesAndConversation(undefined, async () => true, true);
+			await ctx.renderInitialMessages({ clearTerminalHistory: true });
+			await ctx.reloadTodos();
+			ctx.showStatus("Files and conversation recovered.");
+		},
+	},
+	{
+		name: "file-history",
+		description: "Capture and restore workspace files independently of conversation history",
+		allowArgs: true,
+		inlineHint: "on|off|list|restore <turn>|redo|clear",
+		handle: async (args, runtime) => {
+			await runtime.output(await runtime.session.fileHistoryCommand(args.args));
+		},
+	},
+	{
 		name: "todo",
 		icon: "todo",
 		description: "View or modify the agent's todo list",
@@ -482,7 +546,6 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "branch",
-		aliases: ["rewind"],
 		icon: "branch",
 		description: "Rewind to a previous message, keeping the old path as a branch",
 		handleTui: (_command, runtime) => {

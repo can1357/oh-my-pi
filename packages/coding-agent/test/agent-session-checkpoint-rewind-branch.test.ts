@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -13,6 +13,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { FileHistory, type FileHistoryPoint } from "@oh-my-pi/pi-coding-agent/session/file-history";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -909,5 +910,45 @@ describe("AgentSession checkpoint rewind branch context", () => {
 				report: "post-resume findings",
 			}),
 		).resolves.toMatchObject({ details: { report: "post-resume findings", rewound: true } });
+	});
+});
+
+describe("workspace rewind picker", () => {
+	it("hides withdrawn prompts, restores them on redo, and excludes abandoned prompts after branching", async () => {
+		const { session } = await createHarness([]);
+		const manager = session.sessionManager;
+		const points: FileHistoryPoint[] = [];
+		const appendPrompt = (label: string) => {
+			const leafId = manager.appendCustomEntry("filesnap_checkpoint", {});
+			points.push({ turn: `turn-${points.length}`, leafId, label, timestamp: Date.now() });
+			manager.appendMessage({ role: "user", content: label, timestamp: Date.now() });
+			return leafId;
+		};
+		const first = appendPrompt("pwd");
+		appendPrompt("ls");
+		appendPrompt("write a hello world py");
+		const latest = appendPrompt("add greeting");
+		const sourceLeaf = manager.getLeafId()!;
+		const savedPoints = spyOn(FileHistory.prototype, "points").mockImplementation(async () => points);
+		const labels = async () => (await session.rewindPoints()).map(point => point.label);
+		try {
+			expect(await labels()).toEqual(["add greeting", "write a hello world py", "ls", "pwd"]);
+			// This is the exact leaf retained by a successful files + conversation rewind.
+			manager.branch(latest);
+			expect(await labels()).toEqual(["write a hello world py", "ls", "pwd"]);
+			// Metadata appended after rewind must not resurrect a withdrawn prompt.
+			manager.appendCustomEntry("session_metadata", {});
+			expect(await labels()).toEqual(["write a hello world py", "ls", "pwd"]);
+			manager.branch(first);
+			expect(await labels()).toEqual([]);
+			// Redo restores the original conversation leaf and its available history.
+			manager.branch(sourceLeaf);
+			expect(await labels()).toEqual(["add greeting", "write a hello world py", "ls", "pwd"]);
+			manager.branch(latest);
+			appendPrompt("replace greeting");
+			expect(await labels()).toEqual(["replace greeting", "write a hello world py", "ls", "pwd"]);
+		} finally {
+			savedPoints.mockRestore();
+		}
 	});
 });

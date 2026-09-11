@@ -570,7 +570,8 @@ jobs:
            with:
               path: ~/.bun/install/cache
               key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
-         - run: bun install --frozen-lockfile
+         # Include target executables when cross-compiling (e.g. Windows on Linux).
+         - run: bun install --frozen-lockfile --os='*' --cpu='*'
          - name: Install prebuilt native addon(s)
            uses: ./.github/actions/native-artifacts
            with:

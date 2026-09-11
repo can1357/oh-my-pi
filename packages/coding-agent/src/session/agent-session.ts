@@ -16,6 +16,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { FileHistory, type FileHistoryPoint } from "./file-history";
 import { scheduler } from "node:timers/promises";
 import { isPromise } from "node:util/types";
 
@@ -803,6 +804,94 @@ export class AgentSession {
 	#obfuscator: SecretObfuscator | undefined;
 	/** Session-start value of `inlineToolDescriptors`; drives handoff tool pruning. */
 	#pruneToolDescriptions = false;
+	#fileHistory: FileHistory | undefined;
+	#fileHistoryBusy = false;
+
+	#getFileHistory(): FileHistory {
+		const cwd = this.sessionManager.getCwd();
+		if (!this.#fileHistory || this.#fileHistory.cwd !== cwd || this.#fileHistory.session !== this.sessionId) {
+			this.#fileHistory = new FileHistory(
+				cwd,
+				path.join(path.dirname(getAgentDbPath()), "file-history"),
+				this.sessionId,
+				undefined,
+				Boolean(this.sessionManager.getSessionFile()),
+			);
+		}
+		return this.#fileHistory;
+	}
+
+	async fileHistoryCommand(args: string): Promise<string> {
+		if (this.isStreaming || this.#promptInFlightCount > 0 || this.#fileHistoryBusy)
+			throw new Error("Wait for the session to become idle before changing file history");
+		this.#fileHistoryBusy = true;
+		try {
+			return await this.#getFileHistory().command(args);
+		} finally {
+			this.#fileHistoryBusy = false;
+		}
+	}
+
+	async rewindPoints(): Promise<FileHistoryPoint[]> {
+		const active = new Set<string | null>();
+		let checkpoint: string | null = null;
+		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type === "custom" && entry.customType === "filesnap_checkpoint") {
+				checkpoint = entry.id;
+			} else if (entry.type === "message" && entry.message.role === "user") {
+				// Rewind retains the pre-prompt anchor but removes its user message.
+				// A newer anchor also prevents a new branch from reviving that prompt.
+				active.add(checkpoint);
+			}
+		}
+		return (await this.#getFileHistory().points()).filter(point => active.has(point.leafId)).reverse();
+	}
+
+	/** Restore files before committing an exact conversation leaf; old branches remain intact. */
+	async rewindFilesAndConversation(
+		turn?: string,
+		confirm: (changes: string[]) => Promise<boolean> = async () => true,
+		recover = false,
+	): Promise<boolean> {
+		if (this.isStreaming || this.#promptInFlightCount > 0 || this.#fileHistoryBusy)
+			throw new Error("Wait for the agent to finish before rewinding");
+		this.#fileHistoryBusy = true;
+		try {
+			await this.#bash.flushPending();
+			const points = await this.rewindPoints();
+			const index = turn ? points.findIndex(point => point.turn === turn) : -1;
+			if (turn && index < 0) throw new Error("Checkpoint is not on the current branch");
+			return await this.#getFileHistory().change(
+				turn ? points.slice(0, index + 1) : [],
+				this.sessionManager.getLeafId(),
+				async leafId => {
+					if (leafId !== null && !this.sessionManager.getEntry(leafId))
+						throw new Error("Conversation checkpoint is missing");
+					const transition = this.#bash.beginSessionTransition();
+					let committed = false;
+					try {
+						if (leafId === null) this.sessionManager.resetLeaf();
+						else this.sessionManager.branch(leafId);
+						this.#bash.markSessionTransition(transition);
+						committed = true;
+					} finally {
+						this.#bash.finishSessionTransition(transition, committed);
+					}
+					const context = deobfuscateSessionContext(this.sessionManager.buildSessionContext(), this.#obfuscator);
+					this.agent.replaceMessages(context.messages);
+					this.#rehydrateCheckpointRewindState();
+					this.#advisors.resetSessionState({ preserveCost: true });
+					this.#todo.syncFromBranch();
+					this.#closeCodexProviderSessionsForHistoryRewrite();
+				},
+				confirm,
+				recover,
+			);
+		} finally {
+			this.#fileHistoryBusy = false;
+		}
+	}
+
 	#checkpointState: CheckpointState | undefined = undefined;
 	#pendingRewindReport: string | undefined = undefined;
 	#lastCompletedRewind: CompletedRewindState | undefined = undefined;
@@ -3996,6 +4085,32 @@ export class AgentSession {
 	 * execution still emit there).
 	 */
 	async #beforeToolCall(ctx: BeforeToolCallContext, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined> {
+		if (this.#fileHistoryBusy) return { block: true, reason: "File recovery is in progress" };
+		const result = await this.#beforeToolCallExtensions(ctx, signal);
+		if (result?.block) return result;
+		const args = result?.args ?? ctx.args;
+		const isFileEdit = ctx.tool.name === "write" || ctx.tool.name === "edit" || ctx.tool.name === "apply_patch";
+		const targets = isFileEdit ? (ctx.tool.matcherPaths?.(args) ?? []) : [];
+		const record = args && typeof args === "object" ? args : {};
+		const paths = targets.length
+			? targets
+			: (ctx.tool.name === "write" || ctx.tool.name === "edit") &&
+				  "path" in record &&
+				  typeof record.path === "string"
+				? [record.path]
+				: [];
+		await this.#getFileHistory().declare(
+			paths
+				.filter(target => !/^[a-z][a-z0-9+.-]*:\/\//i.test(target))
+				.map(target => resolveToCwd(target, this.sessionManager.getCwd())),
+		);
+		return result;
+	}
+
+	async #beforeToolCallExtensions(
+		ctx: BeforeToolCallContext,
+		signal?: AbortSignal,
+	): Promise<BeforeToolCallResult | undefined> {
 		const runner = this.#extensionRunner;
 		if (!runner?.hasHandlers("tool_call")) return undefined;
 		const metadata = ctx.toolCall.providerMetadata;
@@ -6107,6 +6222,7 @@ export class AgentSession {
 	 * the ACP agent) use this to know whether to expect an `agent_end` event.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
+		if (this.#fileHistoryBusy) throw new Error("File recovery is in progress");
 		// Stamp the operator's submission instant before ANY async preprocessing —
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
@@ -6604,6 +6720,12 @@ export class AgentSession {
 				this.#planReferenceSent = true;
 			}
 			try {
+				const history = this.#getFileHistory();
+				if (await history.enabled()) {
+					const leafId = this.sessionManager.appendCustomEntry("filesnap_checkpoint", {});
+					await history.beginTurn({ leafId, label: expandedText });
+				}
+				if (this.#promptGeneration !== generation) return false;
 				await this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions);
 			} finally {
 				this.#stats.setPendingSnapshot(undefined);

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Automatic prompt checkpoints and native `/rewind`, `/redo`, and `/rewind-recover` restore files and the matching conversation with persistent multi-level redo.
+- `/file-history` retains file-only diagnostics, capture controls and session history cleanup.
+
+### Fixed
+
+- `/rewind` hides withdrawn prompts from the picker and shows them again when restored with `/redo`.
+
 ## [18.1.16] - 2026-09-09
 
 ### Added
