@@ -30,10 +30,7 @@ try {
 }
 // The failed send must not mute the tab for the messages after it.
 handle.send({ type: "abort", id: "r-after" });
-const raced = await Promise.race([
-	delivered.promise,
-	new Promise<"NO DELIVERY">(resolve => setTimeout(() => resolve("NO DELIVERY"), 3000)),
-]);
+const raced = await Promise.race([delivered.promise, Bun.sleep(3000).then((): "NO DELIVERY" => "NO DELIVERY")]);
 stopListening();
 process.stdout.write(`DELIVERED:${raced}\n`);
 await handle.terminate();

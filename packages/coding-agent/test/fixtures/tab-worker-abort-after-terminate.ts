@@ -60,5 +60,5 @@ caller.abort(new DOMException("Idle for 300s", "TimeoutError"));
 // Yields one event-loop turn: the awaited condition is the turn itself, so an
 // error escaping the listener has reached the process handlers when the child
 // reports its outcome.
-await new Promise<void>(resolve => setTimeout(resolve, 0));
+await Bun.sleep(0);
 process.stdout.write(`ABORTED_TOOL_CALLS:${abortedToolCalls}\n`);
