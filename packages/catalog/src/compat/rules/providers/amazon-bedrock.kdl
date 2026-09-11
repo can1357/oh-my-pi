@@ -15,6 +15,8 @@ provider "amazon-bedrock" {
 	}
 	class "openai" {
 		thinking-mode "effort"
+		// OpenAI models reject Converse image blocks nested inside toolResult content.
+		requires-tool-result-image-hoisting #true
 	}
 	class "deepseek" {
 		requires-reasoning-content-for-all-assistant-turns #true
@@ -28,6 +30,11 @@ provider "amazon-bedrock" {
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high"
 		thinking-mode "budget"
+		// Opaque application-inference-profile ARNs carry no vendor signal, so an
+		// OpenAI-backed profile classifies here and would otherwise nest images in
+		// toolResult content and hit the same rejection. Hoisting is accepted by
+		// every Converse model measured, so it is the safe default for unknowns.
+		requires-tool-result-image-hoisting #true
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "moonshot.kimi-k2-thinking" {
