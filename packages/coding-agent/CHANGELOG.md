@@ -4,7 +4,7 @@
 
 ### Added
 
-- RPC clients can subscribe to completed child messages and progress with the `messages` subagent subscription level.
+- RPC clients can subscribe to completed child messages and progress with the `messages` subagent subscription level ([#11751](https://github.com/can1357/oh-my-pi/pull/11751) by [@numman-ali](https://github.com/numman-ali)).
 
 ### Fixed
 
