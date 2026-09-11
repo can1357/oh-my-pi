@@ -405,6 +405,50 @@ describe("cloud backend in STTController", () => {
 			controller.dispose();
 		}
 	});
+
+	it("strips control sequences from the transcript it commits to the editor", async () => {
+		const stub = stubFetch("\u001b[2Jhello\u0007 \u001b[31mworld\u001b[0m");
+		let onAudio!: (error: Error | null, samples: Float32Array) => void;
+		const editor = {
+			volatile: "",
+			committed: "",
+			insertText(_text: string): void {},
+			setVolatileText(text: string): void {
+				editor.volatile = text;
+			},
+			clearVolatileText(): void {
+				editor.volatile = "";
+			},
+			commitVolatileText(text: string): void {
+				editor.committed += text;
+			},
+			submit(): void {},
+			deleteBeforeCursor(_count: number): void {},
+		};
+		const options = {
+			showWarning(_msg: string): void {},
+			showStatus(_msg: string): void {},
+			onStateChange(_state: SttState): void {},
+		};
+		const controller = new STTController(
+			callback => {
+				onAudio = callback;
+				return { stop(): void {} };
+			},
+			{
+				resolveCloudCredential: () => Promise.resolve({ kind: "openai", apiKey: "sk-test" }),
+				createCloudFetch: stub.impl,
+			},
+		);
+		try {
+			await controller.toggle(editor, options);
+			onAudio(null, sine16kHz());
+			await controller.toggle(editor, options);
+			expect(editor.committed).toBe("hello world");
+		} finally {
+			controller.dispose();
+		}
+	});
 });
 
 describe("resolveSttCloudCredential", () => {
