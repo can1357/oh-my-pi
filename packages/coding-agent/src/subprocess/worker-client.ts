@@ -3,6 +3,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	$env,
+	$which,
+	APP_NAME,
 	isBunTestRuntime,
 	isCompiledBinary,
 	logger,
@@ -107,6 +109,37 @@ export interface WorkerSpawnCommand {
 export const SMOKE_TEST_TIMEOUT_MS = 30_000;
 
 /**
+ * Resolve the compiled binary's launcher path, preferring a location that
+ * survives version upgrades under a live session.
+ *
+ * `process.execPath` is symlink-resolved, so a Homebrew install reports the
+ * versioned `Cellar/omp/<version>/bin/omp` path rather than the stable
+ * `<prefix>/bin/omp` symlink it was invoked through. `brew upgrade` deletes the
+ * old Cellar directory, so any already-running session holds an `execPath` that
+ * no longer exists: re-spawning a worker or the daemon broker through it fails
+ * with `ENOENT ... posix_spawn`, silently breaking every hub process op for the
+ * session's lifetime (issue #11407). Resolve a launcher that still exists:
+ *   1. `OMP_BIN` when it points at an existing file (operator override).
+ *   2. `process.execPath` when it still exists (the common, un-upgraded case).
+ *   3. the `omp` launcher on `PATH` — the stable `<prefix>/bin/omp` symlink
+ *      Homebrew repoints to the current version on upgrade.
+ *   4. `process.execPath` as a last resort so the spawn's own ENOENT surfaces.
+ *
+ * Only meaningful for the compiled binary, whose `execPath` is the omp
+ * launcher; in source/bundle mode `execPath` is `bun` (always present), so
+ * callers gate this behind {@link isCompiledBinary}.
+ */
+function resolveSelfExecutable(): string {
+	const execPath = stripWindowsExtendedLengthPathPrefix(process.execPath);
+	const override = process.env.OMP_BIN;
+	if (override && fs.existsSync(override)) return stripWindowsExtendedLengthPathPrefix(override);
+	if (fs.existsSync(execPath)) return execPath;
+	const onPath = $which(APP_NAME);
+	if (onPath) return stripWindowsExtendedLengthPathPrefix(onPath);
+	return execPath;
+}
+
+/**
  * Resolve the command that re-enters this CLI's entrypoint: the compiled
  * binary itself, or the runtime plus the declared worker-host entry. Used by
  * the TUI `/restart` relaunch; workers go through {@link resolveWorkerSpawnCmd},
@@ -115,8 +148,8 @@ export const SMOKE_TEST_TIMEOUT_MS = 30_000;
  * absolute path of `src/cli.ts` so the relaunch keeps the caller's cwd.
  */
 export function resolveCliEntryCmd(): string[] {
+	if (isCompiledBinary()) return [resolveSelfExecutable()];
 	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
-	if (isCompiledBinary()) return [executable];
 	const hostEntry = workerHostEntry();
 	if (hostEntry) return [executable, hostEntry];
 	return [executable, path.resolve(import.meta.dir, "..", "cli.ts")];
@@ -134,8 +167,8 @@ export function resolveCliEntryCmd(): string[] {
  * IPC handles more reliably under `bun test`.
  */
 export function resolveWorkerSpawnCmd(workerArg: string): WorkerSpawnCommand {
+	if (isCompiledBinary()) return { cmd: [resolveSelfExecutable(), workerArg] };
 	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
-	if (isCompiledBinary()) return { cmd: [executable, workerArg] };
 	const hostEntry = workerHostEntry();
 	if (hostEntry) {
 		return { cmd: [executable, hostEntry, workerArg] };

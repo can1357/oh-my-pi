@@ -54,6 +54,7 @@
 - Extensions loaded by the npm CLI now apply settings overrides to the active session, so generated agents and model choices remain isolated between sessions ([#11047](https://github.com/can1357/oh-my-pi/pull/11047) by [@mgpai22](https://github.com/mgpai22)).
 - Live task dispatch now reloads added, changed, removed, and deleted project task and retry settings before resolving subagents ([#11191](https://github.com/can1357/oh-my-pi/issues/11191)).
 - Reset `/loop` iterations combined with `--while` / `--until` no longer keep submitting without resetting when vibe mode is enabled while the condition command is still running; the loop now disables itself instead ([#10858](https://github.com/can1357/oh-my-pi/pull/10858)).
+- Long-running sessions no longer break every `hub` process op (`ps`/`start`/`logs`/`stop`) with `ENOENT ... posix_spawn` after `brew upgrade omp`; the daemon broker and workers now spawn through a launcher path that survives version upgrades (`OMP_BIN` → existing `execPath` → the `omp` launcher on `PATH`) ([#11407](https://github.com/can1357/oh-my-pi/issues/11407)).
 
 ## [18.1.15] - 2026-09-08
 
