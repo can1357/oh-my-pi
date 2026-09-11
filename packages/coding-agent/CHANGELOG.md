@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `write` now rejects exact incomplete read projections before they can replace and truncate an existing file ([#11792](https://github.com/can1357/oh-my-pi/issues/11792)).
+
 ## [18.1.18] - 2026-09-11
 
 ### Added

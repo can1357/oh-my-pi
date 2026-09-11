@@ -740,6 +740,12 @@ pub fn hashline_strip_prefixes(lines: Vec<String>) -> Vec<String> {
 	hashline::prefixes::strip_hashline_prefixes(&lines)
 }
 
+/// Whether a row is a truncation notice emitted by `read`.
+#[napi]
+pub fn hashline_is_read_truncation_notice(line: String) -> bool {
+	hashline::prefixes::is_read_truncation_notice(&line)
+}
+
 /// Count of one canonical hashline op header shape in a payload.
 #[napi(object)]
 pub struct HashlineOpCount {

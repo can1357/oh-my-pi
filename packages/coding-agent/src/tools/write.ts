@@ -36,10 +36,15 @@ import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" w
 import type { ToolSession } from "../sdk";
 import { fileHyperlink, framedBlock, renderStatusLine } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import { routeWriteThroughBridge } from "./acp-bridge";
+import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
 import { resolveToolTier, truncateForPrompt } from "./approval";
 import { assertEditableFile } from "./auto-generated-guard";
-import { formatHashlineHeader, stripHashlinePrefixes } from "./hashline-format";
+import {
+	formatHashlineHeader,
+	isReadTruncationNotice,
+	splitAddressableFileLines,
+	stripHashlinePrefixes,
+} from "./hashline-format";
 import {
 	type ConflictEntry,
 	conflictRegionPresent,
@@ -65,6 +70,7 @@ import {
 	targetsLocalSandbox,
 	unwrapHashlineHeaderPath,
 } from "./plan-mode-guard";
+import { routeReadThroughBridge } from "./read-summary";
 import {
 	cachedRenderedString,
 	createRenderedStringCache,
@@ -362,6 +368,51 @@ function stripWriteContent(session: ToolSession, content: string): { text: strin
 		return { text: content, stripped: false };
 	}
 	return stripWriteContentWithPotentialLooseHeader(content.split("\n"));
+}
+function endsWithReadTruncationNotice(content: string): boolean {
+	const lines = splitAddressableFileLines(normalizeToLF(content));
+	const noticeIndex = lines.findLastIndex(line => line.trim().length > 0);
+	if (noticeIndex === -1) return false;
+	return isReadTruncationNotice(lines[noticeIndex]!);
+}
+
+async function readCurrentWriteSource(
+	session: ToolSession,
+	requestedPath: string,
+	absolutePath: string,
+): Promise<string | undefined> {
+	const readDisk = async (): Promise<string | undefined> => {
+		try {
+			return await Bun.file(absolutePath).text();
+		} catch (error) {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		}
+	};
+	if (!shouldRouteWriteThroughBridge(session, requestedPath, absolutePath)) return readDisk();
+	const bridgeRead = routeReadThroughBridge(session, absolutePath);
+	if (!bridgeRead) return readDisk();
+	try {
+		return await bridgeRead;
+	} catch {
+		return readDisk();
+	}
+}
+
+async function assertNotTruncatedReadProjection(
+	session: ToolSession,
+	requestedPath: string,
+	absolutePath: string,
+	displayPath: string,
+	content: string,
+	cleanContent: string,
+): Promise<void> {
+	if (!endsWithReadTruncationNotice(content)) return;
+	const currentContent = await readCurrentWriteSource(session, requestedPath, absolutePath);
+	if (currentContent === undefined || cleanContent.length >= currentContent.length) return;
+	throw new ToolError(
+		`Refusing to overwrite '${displayPath}' with an incomplete read projection: the replacement ends with an omp read truncation notice and is shorter than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use edit for a partial change.`,
+	);
 }
 
 /**
@@ -1286,14 +1337,15 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			await assertNotReadSelectorMisfire(path, cleanContent, this.session.cwd);
 			enforcePlanModeWrite(this.session, path, { op: "create" });
 			const absolutePath = resolvePlanPath(this.session, path);
+			const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
 			const batchRequest = getLspBatchRequest(context?.toolCall);
 
-			// Check if file exists and is auto-generated before overwriting
+			// Check if file exists and is auto-generated before overwriting.
 			if (await fs.exists(absolutePath)) {
 				await assertEditableFile(absolutePath, path, this.session.settings);
 			}
+			await assertNotTruncatedReadProjection(this.session, path, absolutePath, displayPath, content, cleanContent);
 
-			const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
 			emitWriteProgress(onUpdate, cleanContent, displayPath, absolutePath);
 
 			// Try ACP bridge first for editor-visible filesystem paths. Internal
