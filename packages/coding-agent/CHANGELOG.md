@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Disabled providers are no longer selected as pinned subagent models; ordered agent model lists now skip them ([#11709](https://github.com/can1357/oh-my-pi/issues/11709)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added

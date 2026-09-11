@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { kNoAuth } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -6,6 +6,7 @@ import {
 	type ModelLookupRegistry,
 	resolveModelOverrideWithAuthFallback,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
 /**
  * Regression test for #985.
@@ -274,5 +275,52 @@ describe("issue #5325: sessionId forwarded to getApiKey for session-sticky OAuth
 		expect(result.authFallbackUsed).toBe(true);
 		expect(result.model?.provider).toBe("deepseek");
 		expect(result.model?.id).toBe("deepseek-v4-pro");
+	});
+});
+
+describe("issue #11709: disabled provider subagent model resolution", () => {
+	afterEach(() => {
+		resetSettingsForTest();
+	});
+
+	test("skips an authenticated model from a disabled provider", async () => {
+		const settings = await Settings.init({
+			inMemory: true,
+			overrides: { disabledProviders: ["opencode-zen"] },
+		});
+		const registry = createMockRegistry({
+			models: [unauthedTaskModel, parentModel],
+			authedProviders: new Set(["opencode-zen", "deepseek"]),
+		});
+
+		const result = await resolveModelOverrideWithAuthFallback(
+			["opencode-zen/qwen3.6-plus-free", "deepseek/deepseek-v4-pro"],
+			undefined,
+			registry,
+			settings,
+		);
+
+		expect(result.model?.provider).toBe("deepseek");
+		expect(result.model?.id).toBe("deepseek-v4-pro");
+	});
+
+	test("returns no model when every override provider is disabled", async () => {
+		const settings = await Settings.init({
+			inMemory: true,
+			overrides: { disabledProviders: ["opencode-zen"] },
+		});
+		const registry = createMockRegistry({
+			models: [unauthedTaskModel],
+			authedProviders: new Set(["opencode-zen"]),
+		});
+
+		const result = await resolveModelOverrideWithAuthFallback(
+			["opencode-zen/qwen3.6-plus-free"],
+			undefined,
+			registry,
+			settings,
+		);
+
+		expect(result.model).toBeUndefined();
 	});
 });
