@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added per-advisor `subagents` eligibility to `WATCHDOG.yml` and `/advisor configure`: `false` keeps an advisor main-session-only; unset or `true` permits it in subagent sessions already opted in through frontmatter or `task.agentAdvisor`. Session-level and per-advisor enable switches remain authoritative ([#7168](https://github.com/can1357/oh-my-pi/pull/7168) by [@metaphorics](https://github.com/metaphorics)).
 - The `remote` compaction method now covers Claude: Anthropic server-side compaction (`compact-2026-01-12` beta) runs behind the existing `compaction.methodOrder` / `compaction.remoteEnabled` gates for first-party Anthropic models, persists its plain-text summary with a native replay payload that later Anthropic turns send back as a `compaction` block, and falls through to the next configured method on failure like OpenAI server compaction.
 
 ### Fixed

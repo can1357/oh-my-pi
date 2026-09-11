@@ -284,6 +284,7 @@ Fields:
 - `instructions` (top level): shared prompt prepended to every advisor's system prompt alongside `WATCHDOG.md`. Concatenated across all discovered `WATCHDOG.yml` files.
 - `advisors[].name`: human label; slugified for the session id and its `__advisor.<slug>.jsonl` filename. Duplicate slugs across files are resolved by the same specificity rule as `WATCHDOG.md` discovery (project leaf > project ancestor > user).
 - `advisors[].enabled`: optional per-advisor switch, default `true`. `false` leaves the advisor visible as paused in status/configuration.
+- `advisors[].subagents`: optional eligibility within an advised subagent session. Unset or `true` permits this advisor; `false` keeps it main-session-only and visible as paused in subagent status. This field never enables an unadvised session and is ignored in main sessions. `/advisor configure` cycles inherit → on → off → inherit.
 - `advisors[].model`: optional model selector with optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`). Omitted → the advisor uses `modelRoles.advisor`.
 - `advisors[].tools`: optional list of built-in tool names to grant. Omitted → the default `read`/`grep`/`glob` subset; explicit `[]` → no investigative tools. Any name in [`BUILTIN_TOOL_NAMES`](../packages/coding-agent/src/tools/builtin-names.ts) is accepted, including mutating tools. Legacy aliases (`search`→`grep`, `find`→`glob`) are normalized. Unknown names are dropped with a warning; if that leaves a nonempty input with no valid names, the implementation currently treats the result as omitted and uses the default subset.
 - `advisors[].instructions`: this advisor's specialization, appended after the shared baseline. Both instruction fields expand `@path` imports like `WATCHDOG.md`.
@@ -300,6 +301,36 @@ Subagents run unadvised by default; advisors are opted in **per agent** instead 
 - The `task.agentAdvisor` settings record (agent name → `"on"` / `"off"` / model pattern) overrides the frontmatter, and is configured per agent from the `/agents` hub: Enter on an agent opens its property strip; the advisor strip offers on/off, a model-browser pick, or a raw pattern.
 
 The legacy `advisor.subagents: true` setting migrates to `task.agentAdvisor: { task: "on" }` — the bundled generic `task` agent keeps its advisor, other agents start unadvised.
+
+Within an advised subagent session, `advisors[].subagents` filters the discovered roster:
+
+- Unset: retain the existing per-agent behavior and include this advisor.
+- `true`: explicitly include this advisor, but only when the session is already advised.
+- `false`: exclude this advisor from subagent sessions, keeping it visible as paused.
+
+The session-level opt-in and `advisors[].enabled` are still required. In particular, `subagents: true` does not override frontmatter `advisor: false`, `task.agentAdvisor: { task: "off" }`, or a disabled session. Main sessions retain the entire enabled roster, including advisors marked `subagents: false`.
+
+For example, enable advisors for the generic task agent in `config.yml`:
+
+```yaml
+task:
+  agentAdvisor:
+    task: "on"
+```
+
+Then use `WATCHDOG.yml` to keep one advisor main-session-only while allowing another to review advised subagents:
+
+```yaml
+advisors:
+  - name: Architecture
+    model: anthropic/claude-sonnet-4-5:medium
+    subagents: false
+  - name: Subagent review
+    model: openai/gpt-4o-mini
+    subagents: true
+```
+
+Both advisors run in the main session; only `Subagent review` runs in opted-in task sessions. Other agents remain unadvised unless they are independently opted in. Explicit per-advisor models still take precedence over the spawned session's advisor model role.
 
 An advised subagent session builds its own advisor subsystem with the same settings/model-role resolution (an explicit pattern lands on the spawned session's `modelRoles.advisor`), then reruns both `WATCHDOG.md` and `WATCHDOG.yml` discovery for that subagent session's `cwd` and agent directory. Subagent advisors remain isolated from the subagent's primary tool session in the same way the main advisor is isolated from the main agent.
 
