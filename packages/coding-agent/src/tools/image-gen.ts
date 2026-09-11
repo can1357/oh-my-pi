@@ -1150,7 +1150,6 @@ function buildAntigravityRequest(
 				{ category: "HARM_CATEGORY_CIVIC_INTEGRITY", threshold: "BLOCK_ONLY_HIGH" },
 			],
 		},
-		requestType: "agent",
 		requestId: `agent-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
 		userAgent: "antigravity",
 	};
