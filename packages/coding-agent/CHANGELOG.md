@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `extensionHandlers.timeoutMs` setting: a global wall-clock timeout for all extension handler events, so long legitimate workloads (e.g. multi-model compaction) are no longer killed by the fixed 30s cap ([#11286](https://github.com/can1357/oh-my-pi/issues/11286)).
 ## [18.1.17] - 2026-09-10
 
 ### Added
