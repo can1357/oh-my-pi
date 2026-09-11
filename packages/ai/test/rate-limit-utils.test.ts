@@ -129,6 +129,37 @@ describe("parseRateLimitReason", () => {
 		}
 	});
 
+	it("keeps a per-minute QuotaFailure with a short retry hint transient", () => {
+		const perMinute = `Cloud Code Assist API error (429): ${JSON.stringify({
+			error: {
+				code: 429,
+				message: "Resource has been exhausted (e.g. check quota).",
+				status: "RESOURCE_EXHAUSTED",
+				details: [
+					{
+						"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+						reason: "RATE_LIMIT_EXCEEDED",
+						domain: "cloudcode-pa.googleapis.com",
+					},
+					{
+						"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+						violations: [
+							{
+								subject: "project:example",
+								quotaId: "GenerateRequestsPerMinutePerProjectPerModel",
+								description: "Quota exceeded for GenerateContent requests per minute.",
+							},
+						],
+					},
+					{ "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "18s" },
+				],
+			},
+		})}`;
+
+		expect(parseRateLimitReason(perMinute, antigravityRateLimitPolicy)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(isUsageLimitOutcome(429, perMinute, antigravityRateLimitPolicy)).toBe(false);
+	});
+
 	it("keeps genuine Antigravity daily-quota exhaustion as QUOTA_EXHAUSTED", () => {
 		expect(
 			parseRateLimitReason(

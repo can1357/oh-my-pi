@@ -119,6 +119,11 @@ const ANTIGRAVITY_MODEL_QUOTA_PATTERN = /\bexhausted your capacity on this model
 // providers can pair the same sentence with quota evidence. Provider policy
 // decides whether a truly bare body enters the short-backoff lane.
 const GOOGLE_GENERIC_RESOURCE_EXHAUSTED_PATTERN = /\bresource has been exhausted\s*\(\s*e\.?g\.?\s*check quota\s*\)/i;
+// Google reuses google.rpc.QuotaFailure for per-interval rate quotas. The
+// quotaId (`GenerateRequestsPerMinutePerProjectPerModel`) and human violation
+// descriptions ("requests per minute") both carry this token; matches keep the
+// failure in the transient rate-limit lane instead of rotating a credential.
+const PER_INTERVAL_QUOTA_PATTERN = /per[\s_-]?(?:minute|second)/i;
 const LONG_RATE_LIMIT_DELAY_MS = 5 * 60 * 1000;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -152,35 +157,42 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 	}
 	if (!Array.isArray(error.details)) return undefined;
 
-	// QuotaFailure is authoritative regardless of detail ordering: Google can
-	// include it after a generic RATE_LIMIT_EXCEEDED ErrorInfo record.
-	for (const value of error.details) {
-		if (asRecord(value)?.["@type"] === GOOGLE_RPC_QUOTA_FAILURE_TYPE) return "QUOTA_EXHAUSTED";
-	}
-
+	// Unambiguous ErrorInfo exhaustion reasons win outright, regardless of order.
+	let errorInfoRateLimited = false;
 	for (const value of error.details) {
 		const detail = asRecord(value);
 		if (detail?.["@type"] !== GOOGLE_RPC_ERROR_INFO_TYPE || typeof detail.reason !== "string") continue;
 		const reason = detail.reason.trim().toUpperCase();
-		switch (reason) {
-			case "QUOTA_EXHAUSTED":
-				return "QUOTA_EXHAUSTED";
-			case "INSUFFICIENT_G1_CREDITS_BALANCE":
-				// Keep Google's specific credit-balance reason available to logs
-				// and callers while treating it as credential-rotatable below.
-				return "INSUFFICIENT_G1_CREDITS_BALANCE";
-			case "RATE_LIMIT_EXCEEDED": {
-				// Cloud Code Assist also uses this reason for an account's
-				// per-model quota, even when that quota resets within seconds.
-				if (typeof error.message === "string" && ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(error.message)) {
-					return "QUOTA_EXHAUSTED";
-				}
-				const retryDelayMs = extractRetryHint(undefined, errorMessage);
-				return retryDelayMs !== undefined && retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS
-					? "QUOTA_EXHAUSTED"
-					: "RATE_LIMIT_EXCEEDED";
-			}
+		if (reason === "QUOTA_EXHAUSTED") return "QUOTA_EXHAUSTED";
+		if (reason === "INSUFFICIENT_G1_CREDITS_BALANCE") {
+			// Keep Google's specific credit-balance reason available to logs
+			// and callers while treating it as credential-rotatable below.
+			return "INSUFFICIENT_G1_CREDITS_BALANCE";
 		}
+		if (reason === "RATE_LIMIT_EXCEEDED") errorInfoRateLimited = true;
+	}
+
+	// Cloud Code Assist phrases multi-hour daily exhaustion in the top-level
+	// message even under a RATE_LIMIT_EXCEEDED ErrorInfo.
+	if (typeof error.message === "string" && ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(error.message)) {
+		return "QUOTA_EXHAUSTED";
+	}
+
+	// A QuotaFailure covers both exhausted account allowances and per-interval
+	// rate quotas (requests per minute/second). Treat it as exhaustion only when
+	// the evidence is not transient: a per-interval violation or a short retry
+	// hint keeps it in the rate-limit lane, a long/absent retry window rotates.
+	const retryDelayMs = extractRetryHint(undefined, errorMessage);
+	const shortWait = retryDelayMs !== undefined && retryDelayMs < LONG_RATE_LIMIT_DELAY_MS;
+	const longWait = retryDelayMs !== undefined && retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS;
+	const perIntervalQuota = PER_INTERVAL_QUOTA_PATTERN.test(errorMessage);
+	const hasQuotaFailure = error.details.some(value => asRecord(value)?.["@type"] === GOOGLE_RPC_QUOTA_FAILURE_TYPE);
+	if (hasQuotaFailure) {
+		return perIntervalQuota || shortWait ? "RATE_LIMIT_EXCEEDED" : "QUOTA_EXHAUSTED";
+	}
+
+	if (errorInfoRateLimited) {
+		return longWait ? "QUOTA_EXHAUSTED" : "RATE_LIMIT_EXCEEDED";
 	}
 	return undefined;
 }
