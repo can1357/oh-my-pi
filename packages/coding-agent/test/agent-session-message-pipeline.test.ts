@@ -838,57 +838,89 @@ describe("AgentSession message pipeline", () => {
 		expect(capturedOptions?.providerSessionState).toBe(session.providerSessionState);
 	});
 
-	it("runs ephemeral side-channel requests through the configured side stream function", async () => {
-		const model = buildModel({
-			id: "side-stream-model",
-			name: "Side Stream Model",
-			api: "anthropic",
-			provider: "test-provider",
-			baseUrl: "",
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 4096,
-			maxTokens: 1024,
-		} as ModelSpec<Api>) as Model<Api>;
-		let capturedOptions: SimpleStreamOptions | undefined;
-		let capturedContext: Context | undefined;
-		const sideStreamFn: StreamFn = (_model, context, options) => {
-			capturedContext = context;
-			capturedOptions = options;
-			const stream = new AssistantMessageEventStream();
-			queueMicrotask(() => {
-				const message = createAssistantMessage("Side answer");
-				stream.push({ type: "text_delta", contentIndex: 0, delta: "Side answer", partial: message });
-				stream.push({ type: "done", reason: "stop", message });
+	it.each(["anthropic-messages", "ollama-chat", "openai-responses"])(
+		"runs capped ephemeral requests through the %s side stream",
+		async api => {
+			const model = buildModel({
+				id: "side-stream-model",
+				name: "Side Stream Model",
+				api,
+				provider: "test-provider",
+				baseUrl: "",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 4096,
+				maxTokens: 1024,
+			} as ModelSpec<Api>) as Model<Api>;
+			let capturedOptions: SimpleStreamOptions | undefined;
+			let capturedContext: Context | undefined;
+			const sideStreamFn: StreamFn = (_model, context, options) => {
+				capturedContext = context;
+				capturedOptions = options;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage("Side answer");
+					stream.push({ type: "text_delta", contentIndex: 0, delta: "Side answer", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			};
+			const session = new AgentSession({
+				agent: new Agent({
+					initialState: {
+						model,
+						systemPrompt: ["system prompt"],
+						messages: [],
+						tools: [],
+					},
+				}),
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: createModelRegistryStub() as never,
+				sideStreamFn,
 			});
-			return stream;
-		};
-		const session = new AgentSession({
-			agent: new Agent({
-				initialState: {
-					model,
-					systemPrompt: ["system prompt"],
-					messages: [],
-					tools: [],
-				},
+			sessions.push(session);
+
+			const result = await session.runEphemeralTurn({ promptText: "Question?", maxTokens: 321 });
+
+			expect(result.replyText).toBe("Side answer");
+			expect(capturedContext?.messages.at(-1)?.content).toEqual([{ type: "text", text: "Question?" }]);
+			expect(capturedOptions?.sessionId).toStartWith(`${session.sessionId}:side:`);
+			expect(capturedOptions?.maxTokens).toBe(321);
+		},
+	);
+
+	it.each([
+		["Codex", getBundledModel("openai-codex", "gpt-5.4")],
+		[
+			"custom Codex route",
+			buildModel({
+				...getBundledModel("openai-codex", "gpt-5.4"),
+				provider: "custom",
+				id: "opaque-model",
+				omitMaxOutputTokens: false,
 			}),
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: createModelRegistryStub() as never,
-			sideStreamFn,
-		});
-		sessions.push(session);
-
-		const result = await session.runEphemeralTurn({ promptText: "Question?", maxTokens: 321 });
-
-		expect(result.replyText).toBe("Side answer");
-		expect(capturedContext?.messages.at(-1)?.content).toEqual([{ type: "text", text: "Question?" }]);
-		expect(capturedOptions?.sessionId).toStartWith(`${session.sessionId}:side:`);
-		expect(capturedOptions?.maxTokens).toBe(321);
-	});
-
-	it("rejects capped Codex side turns before inference but permits uncapped turns", async () => {
+		],
+		[
+			"Ollama Cloud",
+			buildModel({
+				...getBundledModel("openai", "gpt-4o"),
+				api: "ollama-chat",
+				provider: "ollama-cloud",
+				omitMaxOutputTokens: true,
+			}),
+		],
+		[
+			"Completions proxy",
+			buildModel({
+				...getBundledModel("openai", "gpt-4o"),
+				api: "openai-completions",
+				provider: "custom",
+				omitMaxOutputTokens: true,
+			}),
+		],
+	])("rejects capped %s side turns before inference but permits uncapped turns", async (_label, model) => {
 		let calls = 0;
 		const sideStreamFn: StreamFn = () => {
 			calls++;
@@ -903,7 +935,7 @@ describe("AgentSession message pipeline", () => {
 		const session = new AgentSession({
 			agent: new Agent({
 				initialState: {
-					model: getBundledModel("openai-codex", "gpt-5.4"),
+					model,
 					systemPrompt: ["system prompt"],
 					messages: [],
 					tools: [],

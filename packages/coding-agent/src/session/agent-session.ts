@@ -78,6 +78,7 @@ import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { omitsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-limits";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { type EditStore, PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
@@ -8848,11 +8849,11 @@ export class AgentSession {
 		if (!model) {
 			throw new Error("No active model on session");
 		}
-		// This adapter's wire contract rejects output-limit fields, so it drops
-		// maxTokens. Do not silently start an unbounded request for a capped turn.
-		if (args.maxTokens !== undefined && model.api === "openai-codex-responses") {
+		// Do not silently start an unbounded request when discovery or transport
+		// policy says the output limit will be omitted.
+		if (args.maxTokens !== undefined && omitsOutputTokenLimit(model)) {
 			throw new Error(
-				"The openai-codex-responses API does not support maxTokens for ephemeral turns. Omit the cap or use an API that supports output limits.",
+				"This model does not support maxTokens for ephemeral turns. Omit the cap or use a model that supports output limits.",
 			);
 		}
 		const cacheSessionId = this.sessionId;

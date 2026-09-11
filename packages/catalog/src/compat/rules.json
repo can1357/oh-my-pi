@@ -152,6 +152,7 @@
 		"providers/opencode-go.kdl",
 		"providers/opencode-zen.kdl",
 		"providers/openrouter.kdl",
+		"providers/output-limits.kdl",
 		"providers/qianfan.kdl",
 		"providers/sakana.kdl",
 		"providers/synthetic.kdl",
@@ -14068,6 +14069,15 @@
 				},
 				"thinking": {
 					"mode": "effort"
+				}
+			},
+			{
+				"source": "providers/output-limits.kdl:2",
+				"apis": [
+					"openai-codex-responses"
+				],
+				"catalog": {
+					"omitMaxOutputTokens": true
 				}
 			},
 			{

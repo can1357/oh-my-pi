@@ -1,0 +1,4 @@
+// Codex drops caller output caps regardless of the provider or model name.
+on-api "openai-codex-responses" {
+	omit-max-output-tokens #true
+}
