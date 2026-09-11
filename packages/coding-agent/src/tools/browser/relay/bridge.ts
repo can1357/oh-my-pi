@@ -1116,7 +1116,6 @@ export class RelayBridge {
 				method: msg.method,
 				params,
 			});
-			if (script?.applicationMarker) tab.preloadApplicationMarkers.delete(script.applicationMarker);
 			if (script?.cleanupRootIdentifier) {
 				try {
 					await this.#rpc({
@@ -1134,6 +1133,7 @@ export class RelayBridge {
 					});
 				}
 			}
+			if (script?.applicationMarker) tab.preloadApplicationMarkers.delete(script.applicationMarker);
 		} catch (err) {
 			// Chrome may have accepted this removal before the socket dropped and
 			// the result never reached us. The stable client identifier now points
@@ -1844,12 +1844,12 @@ export class RelayBridge {
 			...scripts.flatMap(script =>
 				script.cleanupRootIdentifier
 					? [
-							script,
+							{ ...script, applicationMarker: undefined },
 							{
 								...script,
 								rootIdentifier: script.cleanupRootIdentifier,
 								cleanupRootIdentifier: undefined,
-								applicationMarker: undefined,
+								applicationMarker: script.applicationMarker,
 							},
 						]
 					: [script],
@@ -1891,6 +1891,7 @@ export class RelayBridge {
 						// strand later, still-valid cleanups (such as the freshly
 						// replayed script) active without an owner.
 						this.#assertExtensionCurrent(expectedExt);
+						if (script.applicationMarker) tab.preloadApplicationMarkers.delete(script.applicationMarker);
 						if (tab.pendingPreloadScriptCleanup[0] === script) tab.pendingPreloadScriptCleanup.shift();
 						this.#log("preload script cleanup entry failed", {
 							tabId: tab.tabId,
@@ -2074,6 +2075,7 @@ export class RelayBridge {
 		if (liveSessions.size === 0) {
 			tab.preloadScripts.clear();
 			tab.pendingPreloadScriptCleanup = [];
+			tab.preloadApplicationMarkers.clear();
 			return;
 		}
 		const removed: PreservedPreloadScript[] = [];
@@ -3687,6 +3689,7 @@ export class RelayBridge {
 				tab.subscriptions.clear();
 				tab.preloadScripts.clear();
 				tab.pendingPreloadScriptCleanup = [];
+				tab.preloadApplicationMarkers.clear();
 				this.#resetRuntime(tab);
 			})
 			.catch(err => {
