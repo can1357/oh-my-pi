@@ -86,6 +86,13 @@ export interface AdvisorRuntimeHost {
 	notifyQuotaExhausted?(): void;
 	/** Stable identity for the live advisor model. Used to restore full transcript rendering after a model switch. */
 	getModelIdentity?(): string;
+	/**
+	 * Stable identity of the advisor's current model and granted toolset. A
+	 * changed value is a new capability basis, so a quarantine latch caused by
+	 * the old basis may review again. Other configuration changes rebuild the
+	 * runtime and therefore begin a new explicit review epoch.
+	 */
+	getQuarantineBasis?(): string;
 	/** Called once the runtime finishes draining its review backlog (or
 	 *  hard-stops), so the host can repaint UI that reflects whether the
 	 *  advisor is still going to comment on the current yield. */
@@ -233,11 +240,10 @@ export function buildAdvisorQuarantineSourceText(currentInput: string, messages:
 const MAX_COALESCE_ROUNDS = 3;
 
 /**
- * Consecutive quarantined advisor turns tolerated before the failure is surfaced
- * to the host UI. A quarantine discards the advisor's whole turn before dispatch,
- * so its advice never reaches the primary; one silent re-prime is allowed to
- * recover a one-off hallucination, but a persistent quarantine loop is a real
- * supervision gap the user must see (issue #6661). Reset on any successful turn.
+ * Equivalent quarantined advisor turns tolerated before the review latches.
+ * A quarantine discards the whole turn before dispatch. One recovery remains
+ * available; a second equivalent unavailable-tool quarantine ends that optional
+ * review until reset, rebuild, or a changed model/toolset basis.
  */
 const MAX_QUARANTINE_RETRIES = 2;
 
@@ -293,11 +299,17 @@ export class AdvisorRuntime {
 	#sessionTransitionPaused = false;
 	#promptInFlight: Promise<void> | undefined;
 	#iterationAbort: AbortController | undefined;
+	/** Cancels the non-review maintenance that can restore a quarantine-halted fallback. */
+	#haltedMaintenanceAbort: AbortController | undefined;
 	#backlog = 0;
 	#consecutiveFailures = 0;
 	#failureNotified = false;
 	/** Consecutive quarantined turns since the last success/reset (issue #6661). */
 	#consecutiveQuarantines = 0;
+	/** Model/tool basis that produced the current unavailable-tool quarantine. */
+	#quarantineBasis: string | undefined;
+	/** A repeated equivalent quarantine paused this optional review. */
+	#quarantineHalted = false;
 	/**
 	 * Model identities this refusal cascade has already tried. The cascade walks
 	 * the fallback chain to exhaustion — that is what the chain is for — but
@@ -393,7 +405,15 @@ export class AdvisorRuntime {
 	 *   the delta and forwarded to the reprime path so it is never silently dropped.
 	 */
 	onTurnEnd(messages?: AgentMessage[], opts?: { willContinue?: boolean }): void {
-		if (this.disposed || this.#quotaExhausted || this.#halted) return;
+		if (this.disposed || this.#quotaExhausted) return;
+		this.#syncModelIdentity();
+		this.#resumeQuarantineAfterBasisChange();
+		if (this.#halted) {
+			if (this.#quarantineHalted) {
+				this.#maintainQuarantineHaltedFallback(messages ?? this.host.snapshotMessages());
+			}
+			return;
+		}
 		const all = messages ?? this.host.snapshotMessages();
 		this.#latestMessages = all;
 		const wip = opts?.willContinue ?? false;
@@ -470,6 +490,7 @@ export class AdvisorRuntime {
 
 	dispose(): void {
 		this.#iterationAbort?.abort("advisor disposed");
+		this.#haltedMaintenanceAbort?.abort("advisor disposed");
 		this.disposed = true;
 		this.#epoch++;
 		this.#pending = [];
@@ -547,6 +568,7 @@ export class AdvisorRuntime {
 			this.#sessionTransitionPaused = true;
 			this.#wakeAllWaiters();
 			this.#iterationAbort?.abort("advisor session transition");
+			this.#haltedMaintenanceAbort?.abort("advisor session transition");
 			try {
 				this.agent.abort("advisor session transition");
 			} catch {}
@@ -579,6 +601,7 @@ export class AdvisorRuntime {
 		// pinned at the instructions/tools boundary) to a concrete path instead of
 		// inferring it from payload markers after the fact.
 		this.#iterationAbort?.abort("advisor reset");
+		this.#haltedMaintenanceAbort?.abort("advisor reset");
 		this.#epoch++;
 		this.#sessionTransitionPaused = false;
 		this.#quotaExhausted = false;
@@ -590,6 +613,8 @@ export class AdvisorRuntime {
 		this.#failing = false;
 		this.#droppedBacklogs = 0;
 		this.#consecutiveQuarantines = 0;
+		this.#quarantineBasis = undefined;
+		this.#quarantineHalted = false;
 		this.#refusalModelsTried.clear();
 		this.#failureNotified = false;
 		this.#resetAdvisorContext(true, true, reason);
@@ -622,6 +647,66 @@ export class AdvisorRuntime {
 		if (identity === undefined || identity === this.#modelIdentity) return;
 		this.#modelIdentity = identity;
 		this.#includeThinking = true;
+	}
+
+	#notifyIdle(): void {
+		try {
+			this.host.notifyIdle?.();
+		} catch (err) {
+			logger.debug("advisor idle notification failed", { err: String(err) });
+		}
+	}
+
+	#resumeQuarantineAfterBasisChange(): boolean {
+		if (!this.#quarantineHalted) return false;
+		const basis = this.host.getQuarantineBasis?.() ?? this.host.getModelIdentity?.() ?? "";
+		if (basis === this.#quarantineBasis) return false;
+		this.#quarantineHalted = false;
+		this.#quarantineBasis = undefined;
+		this.#consecutiveQuarantines = 0;
+		this.#failureNotified = false;
+		this.#failing = false;
+		this.#halted = false;
+		this.#clearSeenContext();
+		logger.info("advisor quarantine latch cleared after capability basis changed");
+		return true;
+	}
+
+	/**
+	 * A quarantine latch blocks review dispatch, but a retry fallback still needs
+	 * its regular maintenance hook to notice an expired cooldown and restore the
+	 * primary. Deliberately never enqueue this update: a basis change resumes
+	 * review only on a later primary update.
+	 */
+	#maintainQuarantineHaltedFallback(messages: AgentMessage[]): void {
+		const incoming = messages.at(-1);
+		if (
+			!this.#quarantineHalted ||
+			this.#haltedMaintenanceAbort ||
+			this.#sessionTransitionPaused ||
+			!this.host.maintainContext ||
+			incoming === undefined
+		)
+			return;
+
+		const controller = new AbortController();
+		const epoch = this.#epoch;
+		this.#haltedMaintenanceAbort = controller;
+		void (async () => {
+			try {
+				await this.host.maintainContext?.(incoming, controller.signal);
+				if (this.disposed || this.#sessionTransitionPaused || this.#epoch !== epoch || !this.#quarantineHalted)
+					return;
+				this.#syncModelIdentity();
+				if (this.#resumeQuarantineAfterBasisChange()) this.#notifyIdle();
+			} catch (err) {
+				if (!controller.signal.aborted) {
+					logger.debug("advisor quarantine-halted fallback maintenance failed", { err: String(err) });
+				}
+			} finally {
+				if (this.#haltedMaintenanceAbort === controller) this.#haltedMaintenanceAbort = undefined;
+			}
+		})();
 	}
 
 	// Candidate 4 (multi-message split): render the Session update as MULTIPLE
@@ -1207,6 +1292,8 @@ export class AdvisorRuntime {
 					this.#failureNotified = false;
 					this.#droppedBacklogs = 0;
 					this.#consecutiveQuarantines = 0;
+					this.#quarantineBasis = undefined;
+					this.#quarantineHalted = false;
 					this.#refusalModelsTried.clear();
 					if (this.host.onTurnSuccess) {
 						try {
@@ -1334,23 +1421,33 @@ export class AdvisorRuntime {
 					} catch (hookErr) {
 						logger.debug("advisor onTurnError hook failed", { err: String(hookErr) });
 					}
+					if (this.#epoch !== epoch) continue;
 					if (this.#sessionTransitionPaused) {
 						this.#pending.unshift(...popped);
 						continue;
 					}
 					if (err instanceof AdvisorOutputQuarantinedError) {
 						// A quarantine discards the advisor's whole turn before dispatch, so
-						// its advice never reaches the primary. One re-prime is allowed to
-						// recover a one-off hallucination silently; a persistent quarantine
-						// loop is a supervision gap the user must see in the main UI — not an
-						// unbounded silent retry. Surface it (deduped by #notifyFailureOnce)
-						// and drop the batch to break the loop (issue #6661).
+						// its advice never reaches the primary. One re-prime remains available
+						// for a one-off hallucination. A second quarantine on the same
+						// model/toolset basis halts this optional review until reset, config
+						// rebuild, session restart, or a changed model/toolset basis.
+						const quarantineBasis = this.host.getQuarantineBasis?.() ?? this.host.getModelIdentity?.() ?? "";
+						if (this.#quarantineBasis !== quarantineBasis) {
+							this.#quarantineBasis = quarantineBasis;
+							this.#consecutiveQuarantines = 0;
+						}
 						this.#consecutiveQuarantines++;
 						if (this.#consecutiveQuarantines >= MAX_QUARANTINE_RETRIES) {
+							this.#quarantineHalted = true;
+							this.#halted = true;
 							this.#notifyFailureOnce(err);
-							this.#consecutiveQuarantines = 0;
 							this.#notifyTurnAbandoned();
-							this.#resetAdvisorContext(true, true, "quarantine-retry-exhausted");
+							this.#resetAdvisorContext(true, true, "quarantine-latched");
+							logger.warn("advisor quarantine latch entered; waiting for reset or capability basis change", {
+								basis: quarantineBasis,
+								error: err.message,
+							});
 							continue;
 						}
 						const rePrime = this.#pending.length > 0 ? this.#latestMessages : undefined;
@@ -1360,8 +1457,6 @@ export class AdvisorRuntime {
 						if (rePrime) this.onTurnEnd(rePrime);
 						continue;
 					}
-					// Epoch guard after the async error hook.
-					if (this.#epoch !== epoch) continue;
 					if (recovered) {
 						this.#consecutiveFailures = 0;
 						this.#failureNotified = false;
@@ -1485,13 +1580,7 @@ export class AdvisorRuntime {
 			// batch (backlog/pending stay non-empty) yet `yielded` is true via
 			// the quota latch, and the eye must close without waiting for an
 			// unrelated repaint. Same for halt.
-			if (!this.disposed && this.yielded) {
-				try {
-					this.host.notifyIdle?.();
-				} catch (err) {
-					logger.debug("advisor idle notification failed", { err: String(err) });
-				}
-			}
+			if (!this.disposed && this.yielded) this.#notifyIdle();
 		}
 	}
 }

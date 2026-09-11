@@ -5211,26 +5211,28 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[1])).toContain("bbb");
 		});
 
-		it("notifies the host after the advisor persistently quarantines its output (issue #6661)", async () => {
+		it("latches alternating unavailable tools until the model/tool basis changes", async () => {
 			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
 			let promptCalls = 0;
 			let shouldQuarantine = true;
+			let quarantineBasis = "model/a\u001fadvise,read";
 			const agent: AdvisorAgent = {
 				prompt: async input => {
 					promptCalls++;
 					state.messages.push({ role: "user", content: input, timestamp: Date.now() } as AgentMessage);
 					if (shouldQuarantine) {
+						const unavailableTool = promptCalls % 2 === 1 ? "bash" : "write";
 						state.messages.push({
 							role: "assistant",
 							content: [
 								{ type: "text", text: "The agent skipped the required plan step." },
-								{ type: "toolCall", id: `tc-${promptCalls}`, name: "bash", arguments: { command: "ls" } },
+								{ type: "toolCall", id: `tc-${promptCalls}`, name: unavailableTool, arguments: {} },
 							],
 							stopReason: "toolUse",
 							timestamp: Date.now(),
 						} as unknown as AgentMessage);
 						throw new AdvisorOutputQuarantinedError(
-							"Advisor response quarantined: requested unavailable tool bash",
+							`Advisor response quarantined: requested unavailable tool ${unavailableTool}`,
 						);
 					}
 					state.messages.push({
@@ -5255,30 +5257,114 @@ describe("advisor", () => {
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
 				enqueueAdvice: () => {},
+				getQuarantineBasis: () => quarantineBasis,
 				notifyFailure: err => notifyFailures.push(err instanceof Error ? err.message : String(err)),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
-			// Every advisor turn calls an ungranted tool and is quarantined, so its
-			// advice never reaches the primary. A persistently-quarantining advisor is
-			// a supervision failure the user must see in the main UI, not an unbounded
-			// silent re-prime loop.
-			for (let i = 2; i <= 5; i++) {
+			// The first quarantine preserves the one-off recovery path. The second
+			// quarantine on the same model/tool basis is terminal, even though its
+			// requested unavailable tool differs.
+			for (let i = 2; i <= 3; i++) {
 				messages.push({ role: "user", content: `msg-${i}`, timestamp: i } as AgentMessage);
 				runtime.onTurnEnd(messages);
 				await settleUntil(() => runtime.backlog === 0);
 			}
 
-			expect(promptCalls).toBeGreaterThanOrEqual(2);
-			expect(notifyFailures).toEqual(["Advisor response quarantined: requested unavailable tool bash"]);
+			expect(promptCalls).toBe(2);
+			expect(notifyFailures).toEqual(["Advisor response quarantined: requested unavailable tool write"]);
 			expect(runtime.failureNotified).toBe(true);
+			expect(runtime.halted).toBe(true);
 
+			// Later unchanged primary updates cannot purchase another bad turn.
+			for (let i = 4; i <= 5; i++) {
+				messages.push({ role: "user", content: `msg-${i}`, timestamp: i } as AgentMessage);
+				runtime.onTurnEnd(messages);
+			}
+			expect(promptCalls).toBe(2);
+
+			// A changed model/tool basis is new admissible review work. It does not
+			// grant either unavailable tool; it merely releases this optional latch.
 			shouldQuarantine = false;
+			quarantineBasis = "model/b\u001fadvise,read,grep";
 			messages.push({ role: "user", content: "recovered", timestamp: 6 } as AgentMessage);
 			runtime.onTurnEnd(messages);
-			await settleUntil(() => runtime.backlog === 0);
+			await settleUntil(() => promptCalls === 3 && runtime.backlog === 0);
 
 			expect(runtime.failureNotified).toBe(false);
+			expect(runtime.halted).toBe(false);
+		});
+
+		it("drops stale quarantine handling when reset happens during onTurnError", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const hookEntered = Promise.withResolvers<void>();
+			const releaseHook = Promise.withResolvers<void>();
+			const failures: unknown[] = [];
+			const quarantinedOutputs: AssistantMessage[] = [];
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					if (!promptText(input).includes("stale-turn")) return;
+					const unsafeOutput: AssistantMessage = {
+						role: "assistant",
+						content: [{ type: "toolCall", id: "stale-bash", name: "bash", arguments: { command: "true" } }],
+						api: "openai-responses",
+						provider: "openai",
+						model: "quarantine-reset-race",
+						usage: {
+							input: 1,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 1,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "toolUse",
+						timestamp: Date.now(),
+					};
+					agent.state.messages.push(unsafeOutput);
+					quarantinedOutputs.push(unsafeOutput);
+					const quarantine = quarantineAdvisorUnsafeOutput(unsafeOutput, new Set(["advise"]));
+					if (quarantine !== undefined) throw new AdvisorOutputQuarantinedError(quarantine);
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const runtime = new AdvisorRuntime(
+				agent,
+				{
+					snapshotMessages: () => [],
+					enqueueAdvice: () => {},
+					onTurnError: async () => {
+						hookEntered.resolve();
+						await releaseHook.promise;
+						return false;
+					},
+					notifyFailure: error => failures.push(error),
+				},
+				0,
+			);
+
+			runtime.onTurnEnd([{ role: "user", content: "stale-turn", timestamp: 1 } as AgentMessage]);
+			await hookEntered.promise;
+			runtime.reset();
+			runtime.onTurnEnd([{ role: "user", content: "fresh-turn", timestamp: 2 } as AgentMessage]);
+			releaseHook.resolve();
+			await runtime.waitForCatchup(1000, 1);
+
+			expect(promptInputs).toHaveLength(2);
+			expect(promptText(promptInputs[0])).toContain("stale-turn");
+			expect(promptText(promptInputs[1])).toContain("fresh-turn");
+			expect(runtime.halted).toBe(false);
+			expect(runtime.failureNotified).toBe(false);
+			expect(failures).toEqual([]);
+			expect(quarantinedOutputs).toMatchObject([
+				{
+					stopReason: "error",
+					errorMessage: "Advisor response quarantined: requested unavailable tool bash",
+				},
+			]);
 		});
 
 		it("drops the in-flight batch when a reset aborts the advisor prompt", async () => {

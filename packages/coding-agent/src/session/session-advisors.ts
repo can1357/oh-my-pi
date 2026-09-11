@@ -1106,6 +1106,8 @@ export class SessionAdvisors {
 				maintainContext: (incoming, signal) => this.#maintainAdvisorContext(advisorRef, incoming, signal),
 				obfuscator: this.#host.obfuscator,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
+				getQuarantineBasis: () =>
+					[formatModelString(advisorRef.agent.state.model), ...availableAdvisorToolNames].sort().join("\u001f"),
 				beginAdvisorUpdate: inProgress => {
 					advisorRef.recorder.beginTurn();
 					// Flush the deferred backlog (notes already cleared the emission guard

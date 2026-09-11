@@ -1734,6 +1734,159 @@ describe("AgentSession retry fallback", () => {
 		});
 	});
 
+	it("restores a quarantine-latched advisor fallback after cooldown without re-reviewing the maintenance turn", async () => {
+		const mainModel = getBundledModel("openai", "gpt-4o-mini");
+		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const advisorFallback = getBundledModel("google", "gemini-2.5-flash");
+		if (!mainModel || !advisorPrimary || !advisorFallback) {
+			throw new Error("Expected bundled main, advisor primary, and fallback test models to exist");
+		}
+
+		const mainMock = createMockModel({
+			responses: [
+				{ content: ["Primary complete"] },
+				{ content: ["Primary complete again"] },
+				{ content: ["Cooldown maintenance turn"] },
+				{ content: ["Primary complete after restoration"] },
+			],
+		});
+		const advisorMock = createMockModel();
+		const requestedAdvisorModels: string[] = [];
+		const quarantineLatched = Promise.withResolvers<void>();
+		let advisorYieldedEvents = 0;
+		let advisorPrimaryAttempts = 0;
+		let fallbackQuarantineAttempts = 0;
+		const advisorPrimarySelector = `${advisorPrimary.provider}/${advisorPrimary.id}`;
+		const advisorFallbackSelector = `${advisorFallback.provider}/${advisorFallback.id}`;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: mainModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mainMock.stream,
+		});
+		const settings = Settings.isolated({
+			"advisor.syncBacklog": "1",
+			"compaction.enabled": false,
+			"retry.maxRetries": 0,
+			"retry.modelFallback": true,
+			"retry.fallbackChains": { advisor: [advisorFallbackSelector] },
+			"retry.fallbackRevertPolicy": "cooldown-expiry",
+		});
+		settings.setModelRole("advisor", advisorPrimarySelector);
+		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "quarantine-latch", model: advisorPrimarySelector }],
+			advisorStreamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedAdvisorModels.push(selector);
+				if (selector === advisorPrimarySelector && advisorPrimaryAttempts++ === 0) {
+					advisorMock.push({
+						throw: "Devin stream error failed_precondition: Your daily usage quota has been exhausted. Your quota will reset after 1s.",
+					});
+				} else if (selector === advisorFallbackSelector && fallbackQuarantineAttempts++ < 2) {
+					advisorMock.push({
+						content: [
+							{
+								type: "toolCall",
+								id: `unavailable-${fallbackQuarantineAttempts}`,
+								name: "bash",
+								arguments: { command: "true" },
+							},
+						],
+					});
+				} else if (selector === advisorPrimarySelector) {
+					advisorMock.push({ content: ["Advisor resumed after the cooldown"] });
+				} else {
+					throw new Error(`Unexpected advisor model requested: ${selector}`);
+				}
+				return advisorMock.stream(model, context, options);
+			},
+		});
+		session.subscribe(event => {
+			if (event.type === "advisor_yielded") advisorYieldedEvents++;
+			if (
+				event.type === "notice" &&
+				event.source === "advisor" &&
+				event.message.includes("requested unavailable tool")
+			) {
+				quarantineLatched.resolve();
+			}
+		});
+
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		await session.prompt("Complete one primary turn");
+		await session.prompt("Complete a second primary turn");
+		await quarantineLatched.promise;
+
+		expect(requestedAdvisorModels).toEqual([
+			advisorPrimarySelector,
+			advisorFallbackSelector,
+			advisorFallbackSelector,
+		]);
+		expect(session.getAdvisorStatusOverview().advisors[0]?.yielded).toBe(true);
+
+		// The current update must only restore the expired fallback: it cannot buy
+		// another advisor review while the unchanged-basis quarantine latch is set.
+		const restorationStarted = Promise.withResolvers<void>();
+		const releaseRestoration = Promise.withResolvers<void>();
+		const originalGetApiKey = modelRegistry.getApiKey.bind(modelRegistry);
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async (...args) => {
+			const [model] = args;
+			if (model.provider !== advisorPrimary.provider || model.id !== advisorPrimary.id)
+				return originalGetApiKey(...args);
+			restorationStarted.resolve();
+			await releaseRestoration.promise;
+			return originalGetApiKey(...args);
+		});
+		vi.spyOn(Date, "now").mockReturnValue(Date.now() + 2_000);
+		await session.prompt("Advance the primary after the advisor cooldown");
+		await restorationStarted.promise;
+		const yieldedBeforeRestoration = advisorYieldedEvents;
+		releaseRestoration.resolve();
+		for (let attempt = 0; attempt < 20; attempt++) {
+			const model = session.getAdvisorAgent()?.state.model;
+			if (
+				model?.provider === advisorPrimary.provider &&
+				model.id === advisorPrimary.id &&
+				advisorYieldedEvents > yieldedBeforeRestoration
+			)
+				break;
+			await Promise.resolve();
+		}
+
+		expect(session.getAdvisorAgent()?.state.model).toMatchObject({
+			provider: advisorPrimary.provider,
+			id: advisorPrimary.id,
+		});
+		expect(advisorYieldedEvents).toBe(yieldedBeforeRestoration + 1);
+		expect(requestedAdvisorModels).toEqual([
+			advisorPrimarySelector,
+			advisorFallbackSelector,
+			advisorFallbackSelector,
+		]);
+
+		await session.prompt("Resume advisor review after fallback restoration");
+		for (let attempt = 0; attempt < 20 && requestedAdvisorModels.length < 4; attempt++) {
+			await Promise.resolve();
+		}
+		expect(requestedAdvisorModels).toEqual([
+			advisorPrimarySelector,
+			advisorFallbackSelector,
+			advisorFallbackSelector,
+			advisorPrimarySelector,
+		]);
+	});
+
 	it("switches an advisor off a dual-classified media-budget 413 with no token excess", async () => {
 		const mainModel = getBundledModel("openai", "gpt-4o-mini");
 		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
