@@ -150,6 +150,17 @@ async function fetchBrokerSnapshot(client: AuthBrokerClient): Promise<SnapshotRe
 const CATALOG_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 
 /**
+ * How often a long-lived `serve` polls the broker-backed store for credential
+ * changes made by another process (a `login`/`logout` on the host). Kept below
+ * {@link RemoteAuthCredentialStore}'s background idle window so the poll's
+ * activity ping keeps the snapshot stream warm and new generations arrive
+ * promptly. When the poll reports a change, the served catalog is rebuilt so a
+ * newly-credentialed provider becomes routable and a removed one stops being
+ * advertised.
+ */
+const CREDENTIAL_SYNC_INTERVAL_MS = 10 * 1000;
+
+/**
  * Index resolvable models by the request ids clients may send: the
  * provider-qualified `provider/id` (always) and the bare `id` (first-write-wins
  * fallback for legacy clients). Scoped to providers the gateway holds broker
@@ -208,12 +219,35 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	// shadow broker credentials. Format handlers ask `resolveModel` to translate
 	// a client-requested `model` field into a pi-ai `Model<Api>` before dispatch;
 	// `listModels` powers `/v1/models`.
-	const snapshot = storage.exportSnapshot();
-	const providersWithCreds = new Set<string>();
-	for (const entry of snapshot.credentials) providersWithCreds.add(entry.provider);
 	const registry = new ModelRegistry(storage, undefined, { ignoreLocalModelConfig: true });
-	await registry.refresh();
-	let modelById = indexModelsByRequestId(registry.getAll(), providersWithCreds);
+	// Providers the gateway can route right now, derived live from the store on
+	// every rebuild. Captured once at boot it would freeze the served catalog:
+	// a provider logged in later stays unroutable and one logged out keeps being
+	// advertised until restart.
+	const providersWithCreds = (): Set<string> => {
+		const providers = new Set<string>();
+		for (const entry of storage.exportSnapshot().credentials) providers.add(entry.provider);
+		return providers;
+	};
+	let modelById = new Map<string, Model<Api>>();
+	// Rebuild the served catalog behind a `registry.refresh()` pass (a
+	// first-time provider has no cached models) and re-index against the current
+	// credential set. A single in-flight guard coalesces the periodic model
+	// refresh and the credential-sync poll; a failed rebuild keeps the previous
+	// catalog.
+	let rebuildInFlight: Promise<void> | null = null;
+	const rebuildCatalog = (): Promise<void> => {
+		rebuildInFlight ??= (async () => {
+			try {
+				await registry.refresh();
+				modelById = indexModelsByRequestId(registry.getAll(), providersWithCreds());
+			} finally {
+				rebuildInFlight = null;
+			}
+		})();
+		return rebuildInFlight;
+	};
+	await rebuildCatalog();
 
 	const handle = startAuthGateway({
 		storage,
@@ -232,22 +266,36 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	process.stdout.write(`upstream broker: ${brokerConfig.url}\n`);
 
 	// `serve` is long-lived: rebuild the catalog periodically so models
-	// discovered after boot become routable without a restart. A failed refresh
-	// keeps serving the previous catalog. `unref()` so the timer never keeps the
-	// process alive on its own.
+	// discovered after boot (for providers we already hold credentials for)
+	// become routable without a restart. A failed rebuild keeps serving the
+	// previous catalog. `unref()` so the timer never keeps the process alive on
+	// its own.
 	const catalogRefresh = setInterval(() => {
-		void registry
-			.refresh()
-			.then(() => {
-				modelById = indexModelsByRequestId(registry.getAll(), providersWithCreds);
-			})
-			.catch(error => {
-				logger.warn("auth-gateway catalog refresh failed", {
-					error: error instanceof Error ? error.message : String(error),
-				});
+		void rebuildCatalog().catch(error => {
+			logger.warn("auth-gateway catalog refresh failed", {
+				error: error instanceof Error ? error.message : String(error),
 			});
+		});
 	}, CATALOG_REFRESH_INTERVAL_MS);
 	catalogRefresh.unref();
+
+	// Poll the broker-backed store for credential changes made by another
+	// process (host `login`/`logout`). `pollExternalChanges()` reloads the
+	// storage's credential view so selection stops 401ing (or stops using a
+	// removed credential); rebuilding the catalog then updates `/v1/models` and
+	// `resolveModel`. `unref()` for the same reason as above.
+	const credentialSync = setInterval(() => {
+		void (async () => {
+			try {
+				if (await storage.pollExternalChanges()) await rebuildCatalog();
+			} catch (error) {
+				logger.warn("auth-gateway credential sync failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		})();
+	}, CREDENTIAL_SYNC_INTERVAL_MS);
+	credentialSync.unref();
 
 	const stopped = Promise.withResolvers<void>();
 	let shutdownStarted = false;
@@ -256,6 +304,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		shutdownStarted = true;
 		process.stdout.write(`\nReceived ${signal}, shutting down...\n`);
 		clearInterval(catalogRefresh);
+		clearInterval(credentialSync);
 		let closeError: unknown;
 		try {
 			await handle.close();

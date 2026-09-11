@@ -255,6 +255,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#snapshot: SnapshotResponse = emptySnapshot();
 	#snapshotReceivedAt = Date.now();
 	#generation = 0;
+	/**
+	 * Generation last reported as "seen" by {@link pollExternalChanges}. Seeded
+	 * from the initial snapshot so the first poll after a broker-side change
+	 * (delivered by the background SSE/long-poll loop, which advances
+	 * `#generation`) returns true and drives an {@link AuthStorage} reload.
+	 */
+	#acknowledgedGeneration = 0;
 	#usageOverlays: Map<string, UsageReport> = new Map();
 	#backgroundAbort = new AbortController();
 	readonly #backgroundIdleMs: number;
@@ -300,6 +307,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			? new Map([...opts.accountPool].map(([provider, identities]) => [provider, new Set(identities)]))
 			: undefined;
 		this.#applySnapshot(opts.initialSnapshot ?? emptySnapshot(), opts.initialSnapshot?.generation ?? 0);
+		this.#acknowledgedGeneration = this.#generation;
 		this.#onSnapshot = opts.onSnapshot;
 		void this.#runBackground();
 	}
@@ -572,6 +580,26 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		const result = await this.#client.fetchSnapshot();
 		if (result.status === 200) this.#applySnapshot(result.snapshot, result.generation);
 		return this.#snapshot;
+	}
+
+	/**
+	 * Stateful probe for broker-side credential changes, mirroring
+	 * {@link SqliteAuthCredentialStore.pollExternalChanges} so long-lived broker
+	 * clients (notably `auth-gateway serve`) pick up logins/logouts made by
+	 * another process without a restart.
+	 *
+	 * `#generation` is advanced only by the background SSE/long-poll loop
+	 * (`#applySnapshot`/`#applyStreamEntry`/`#removeStreamCredential`), so a move
+	 * past the last acknowledged generation means the broker's credential set
+	 * changed. Records foreground activity first: a low-traffic client's
+	 * background sync parks after `#backgroundIdleMs`, and without this wakeup it
+	 * would never fetch the new generation to report in the first place.
+	 */
+	pollExternalChanges(): boolean {
+		this.#noteActivity();
+		if (this.#generation === this.#acknowledgedGeneration) return false;
+		this.#acknowledgedGeneration = this.#generation;
+		return true;
 	}
 
 	listAuthCredentials(provider?: string): StoredAuthCredential[] {
