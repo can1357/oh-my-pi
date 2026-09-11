@@ -2,7 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { computeDefaultSessionDir } from "@oh-my-pi/pi-coding-agent/session/session-paths";
+import {
+	computeDefaultSessionDir,
+	hasPositiveMovedProjectEvidence,
+	readCwdIdentity,
+} from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 const cleanup: string[] = [];
@@ -63,5 +67,21 @@ describe("legacy session directory migration", () => {
 
 		expect(fs.readFileSync(recreated, "utf8")).toBe("older-process-write\n");
 		expect(fs.readFileSync(destination, "utf8")).toBe("canonical\n");
+	});
+});
+
+describe("hasPositiveMovedProjectEvidence", () => {
+	test("is true only when the continue cwd is the same directory inode", () => {
+		const from = makeTempDir("omp-cwd-from-");
+		const sibling = makeTempDir("omp-cwd-unrelated-");
+		const identity = readCwdIdentity(from);
+		expect(identity).toBeDefined();
+		expect(hasPositiveMovedProjectEvidence(identity, sibling)).toBe(false);
+
+		const to = path.join(path.dirname(from), `${path.basename(from)}-renamed`);
+		fs.renameSync(from, to);
+		cleanup.push(to);
+		expect(hasPositiveMovedProjectEvidence(identity, to)).toBe(true);
+		expect(hasPositiveMovedProjectEvidence(undefined, to)).toBe(false);
 	});
 });
