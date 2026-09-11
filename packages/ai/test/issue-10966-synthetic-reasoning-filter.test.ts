@@ -3,7 +3,7 @@ import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { AssistantMessage, Context, Model, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
-describe("issue #10966: Responses synthetic reasoning suppression when filterReasoningHistory is true", () => {
+describe("issue #10966: Responses synthetic reasoning suppression when allowsSyntheticReasoningContentForToolCalls is false", () => {
 	const museOpenRouterModel = buildModel({
 		id: "meta/muse-spark-1.3",
 		name: "Muse Spark 1.3",
@@ -16,10 +16,10 @@ describe("issue #10966: Responses synthetic reasoning suppression when filterRea
 		maxTokens: 64_000,
 	});
 
-	it("does not synthesize placeholder reasoning items on tool-call continuations when filterReasoningHistory is enabled", () => {
+	it("does not synthesize placeholder reasoning items on tool-call continuations when synthetic reasoning is disabled", () => {
 		expect(museOpenRouterModel.compat.filterReasoningHistory).toBe(true);
 		expect(museOpenRouterModel.compat.requiresReasoningContentForToolCalls).toBe(true);
-
+		expect(museOpenRouterModel.compat.allowsSyntheticReasoningContentForToolCalls).toBe(false);
 		const userMessage: UserMessage = {
 			role: "user",
 			content: "Run echo 1",
@@ -88,7 +88,7 @@ describe("issue #10966: Responses synthetic reasoning suppression when filterRea
 		expect(functionCall?.call_id).toBe("call_12345");
 	});
 
-	it("also suppresses synthetic reasoning items for Anthropic models on OpenRouter", () => {
+	it("preserves synthetic reasoning items for models with allowsSyntheticReasoningContentForToolCalls: true", () => {
 		const claudeOpenRouterModel = buildModel({
 			id: "anthropic/claude-sonnet-4",
 			name: "Claude Sonnet 4",
@@ -102,6 +102,7 @@ describe("issue #10966: Responses synthetic reasoning suppression when filterRea
 		});
 
 		expect(claudeOpenRouterModel.compat.filterReasoningHistory).toBe(true);
+		expect(claudeOpenRouterModel.compat.allowsSyntheticReasoningContentForToolCalls).toBe(true);
 
 		const userMessage: UserMessage = {
 			role: "user",
@@ -154,11 +155,9 @@ describe("issue #10966: Responses synthetic reasoning suppression when filterRea
 			undefined,
 		);
 
-		const reasoningItems = (params.input as Array<{ type?: string; id?: string }>).filter(
-			item => item.type === "reasoning",
-		);
-
-		expect(reasoningItems).toHaveLength(0);
+		// Anthropic on OpenRouter preserves synthetic reasoning replay when required
+		expect(reasoningItems.length).toBeGreaterThanOrEqual(1);
+		expect(reasoningItems[0].content?.[0]?.text).toBe("running command");
 
 		const functionCall = (params.input as Array<{ type?: string; call_id?: string }>).find(
 			item => item.type === "function_call",

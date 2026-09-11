@@ -373,11 +373,6 @@ function detectOpenAICompat(
 	const isMoonshotKimiK3 = isMoonshotKimi && facts.family("k3");
 	const usesMoonshotKimiPreservedThinking = isMoonshotKimi && facts.family("k2.6");
 	const isAnthropicModel = modelMatchesHost(hostModel, "anthropic") || facts.is("anthropic");
-	// Meta validates echoed Responses reasoning-item ids server-side and 400s
-	// expired ones; muse-spark on OpenRouter replays history through the shared
-	// completions compat, so the gate lives here as well as in the Responses
-	// resolver.
-	const isMetaMuse = facts.is("meta") && facts.family("muse-spark");
 	const isQwen = facts.is("qwen");
 	const isDeepseekFamily = modelMatchesHost(hostModel, "deepseekFamily") || facts.is("deepseek");
 	const supportsZaiReasoningEffort = (d.isZai || d.isZhipu) && facts.is("glm") && facts.revGte("5.2");
@@ -506,7 +501,7 @@ function detectOpenAICompat(
 				: resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,
 		includeEncryptedReasoning: true,
-		filterReasoningHistory: d.isOpenRouter && (isAnthropicModel || isMetaMuse),
+		filterReasoningHistory: d.isOpenRouter && isAnthropicModel,
 		thinkingKeep: usesMoonshotKimiPreservedThinking ? "all" : undefined,
 		reasoningContentField: d.isClinePass ? "reasoning" : "reasoning_content",
 		requiresReasoningContentForToolCalls:
@@ -699,10 +694,6 @@ function resolveOpenAIResponsesPolicy(
 		(PROXY_OPENAI_COMPAT_PROVIDERS[provider] !== true && LOCAL_OPENAI_COMPAT_PROVIDERS[provider] === true) ||
 		hasLocalLoopbackBaseUrl(baseUrl);
 	const isAnthropicModel = facts.is("anthropic");
-	// Meta validates echoed reasoning-item ids server-side and 400s expired
-	// ones ("Referenced reasoning item ... was not found or has expired"),
-	// which wedges every turn once history holds a stale rs_* id.
-	const isMetaMuse = facts.is("meta") && facts.family("muse-spark");
 	const isDeepseekFamily = facts.is("deepseek");
 
 	const compat: ResolvedOpenAIResponsesCompat = {
@@ -735,7 +726,7 @@ function resolveOpenAIResponsesPolicy(
 		reasoningDisableMode: resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,
 		includeEncryptedReasoning: true,
-		filterReasoningHistory: isOpenRouter && (isAnthropicModel || isMetaMuse),
+		filterReasoningHistory: isOpenRouter && isAnthropicModel,
 		disableReasoningOnForcedToolChoice: facts.is("kimi"),
 		disableReasoningOnToolChoice: isDeepseekFamily && reasoningCapable && !isOpenRouter,
 		supportsToolChoice: true,

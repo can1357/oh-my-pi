@@ -1164,13 +1164,11 @@ export function buildParams(
 		},
 		includeThinkingSignatures: shouldReplayNativeHistory && !policy.reasoning.filterReasoningHistory,
 		requiresReasoningReplayForAllTurns:
-			!policy.reasoning.filterReasoningHistory &&
-			policy.reasoning.enabled &&
-			policy.reasoning.requiresReasoningContentForAllAssistantTurns,
+			policy.reasoning.enabled && policy.reasoning.requiresReasoningContentForAllAssistantTurns,
 		requiresReasoningReplayForToolCalls:
-			!policy.reasoning.filterReasoningHistory &&
 			policy.reasoning.enabled &&
-			policy.reasoning.requiresReasoningContentForToolCalls,
+			policy.reasoning.requiresReasoningContentForToolCalls &&
+			policy.reasoning.allowsSyntheticReasoningContentForToolCalls,
 		repairOrphanOutputs: true,
 	});
 

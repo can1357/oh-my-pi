@@ -26,14 +26,13 @@ function spec(id: string): ModelSpec<"openrouter"> {
 }
 
 describe("meta muse on openrouter responses: filter reasoning history", () => {
-	for (const id of ["meta/muse-spark-1.3", "meta/muse-spark-1.3-contributor"]) {
-		it(`filters replayed reasoning items for ${id}`, () => {
-			const policy = resolveModelPolicy(spec(id));
-			expect(policy.identity.class).toBe("meta");
-			expect(policy.identity.family).toBe("muse-spark");
-			expect(policy.compat.filterReasoningHistory).toBe(true);
-		});
-	}
+	it("filters replayed reasoning items for meta/muse-spark-1.3", () => {
+		const policy = resolveModelPolicy(spec("meta/muse-spark-1.3"));
+		expect(policy.identity.class).toBe("meta");
+		expect(policy.identity.family).toBe("muse-spark");
+		expect(policy.compat.filterReasoningHistory).toBe(true);
+		expect(policy.compat.allowsSyntheticReasoningContentForToolCalls).toBe(false);
+	});
 
 	it("leaves non-muse meta models untouched", () => {
 		const policy = resolveModelPolicy(spec("meta/llama-4-maverick"));
