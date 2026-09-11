@@ -8076,6 +8076,16 @@ export class AgentSession {
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
+			// Fresh-session boundary: source-session persona lineage dies with the
+			// transcript. The teardown above only fires while a persona is ACTIVE —
+			// a RETAINED failed deferred restore or a journal-reinstalled tool
+			// ceiling would otherwise leak into the new session (its first agent_end
+			// lands the old session's model; the old ceiling keeps narrowing fresh
+			// tools). Runs AFTER the inner try/finally: a transition that failed
+			// before committing rolls the persona + journal grant back below, so the
+			// discarded state must survive for that rollback.
+			this.#pendingDeferredModelRestore = undefined;
+			this.toolPolicy?.clearCliGrantFromJournal();
 
 			this.#clearSessionScopedToolState();
 			this.#clearCheckpointRuntimeState();
@@ -9309,8 +9319,10 @@ export class AgentSession {
 		// target session's first agent_end must not flush it over the target's
 		// restored model — and a later first persona enter would otherwise
 		// ADOPT the stale entry as its exit baseline. Past the point of no
-		// return (teardown + reconciler committed), so a failed switch's
-		// rollback keeps the source session's owed entry intact.
+		// return — but setSessionFile()/cwd steps below can still fail: the
+		// slot is snapshotted and the rollback catch reinstates it, so the owed
+		// retry survives a failed switch.
+		const previousDeferredModelRestore = this.#pendingDeferredModelRestore;
 		this.#pendingDeferredModelRestore = undefined;
 		const bashTransition = this.#bash.beginSessionTransition();
 		const previousSessionState = this.sessionManager.captureState();
@@ -9567,6 +9579,9 @@ export class AgentSession {
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
+			// The source session survives: reinstate its owed deferred restore
+			// (cleared speculatively before the fallible file/cwd transitions).
+			this.#pendingDeferredModelRestore = previousDeferredModelRestore;
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();

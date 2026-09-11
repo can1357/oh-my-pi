@@ -121,6 +121,16 @@ export class SessionToolPolicy {
 		this.#cliGrantSource = "journal";
 	}
 
+	/**
+	 * The journal-sourced ceiling (null when unset or CLI-typed). Fallible
+	 * session transitions snapshot it so a rollback can reinstate exactly the
+	 * grant the journal carries — cliGrant is deliberately outside
+	 * PolicySnapshot, so the persona rollback path cannot restore it.
+	 */
+	get journalCeiling(): ReadonlySet<string> | null {
+		return this.#cliGrantSource === "journal" ? this.cliGrant : null;
+	}
+
 	/** Drops a journal-installed ceiling (target journal records none). CLI grants are untouched. */
 	clearCliGrantFromJournal(): void {
 		if (this.#cliGrantSource !== "journal") return;
@@ -152,9 +162,14 @@ export class SessionToolPolicy {
 	granted(name: string): boolean {
 		// A journal-reinstalled CLI ceiling IS a filesystem grant — unlike the
 		// live `--tools` flag's legacy presentation bypass, the persona system's
-		// durable record must gate the presentation funnel too, or a persona
+		// durable record must gate the presentation funnel too: active ==
+		// callable (nothing re-checks effective() at dispatch), so a persona
 		// exit's snapshot replay (`setActiveToolPresentation` filters through
-		// here) re-activates `write`/`bash` that `effective()` denies.
+		// here) would hand back `write`/`bash` that `effective()` reports
+		// denied. The cost — journal-ceiling sessions also lose the
+		// presentation-level `write` surfacing (xd:// transport upgrade,
+		// plan-mode augmentation) live-flag sessions keep — is intended: an
+		// active tool is executable, so the ceiling has to bound the surface.
 		if (this.#cliGrantSource === "journal" && this.cliGrant && !this.cliGrant.has(name)) return false;
 		if (this.#persona === null) return true;
 		return (
@@ -298,9 +313,14 @@ export class SessionToolPolicy {
 		// fw_sH: a raw persisted alias (`--tools search`) must normalize before
 		// becoming the grant — the initial launch worked through the
 		// normalized cliGrant; the resume path must not regress.
+		// fw_sH parity for the DECLARED half: a frontmatter `tools: [search]`
+		// carries a legacy alias the registry never registers under — the grant
+		// must hold canonical names or the persona silently loses its own
+		// search capability (subagents normalize later; this intersection runs
+		// first). expandExecToolShorthand passes unknown names through.
 		const declaredOrInherited =
 			declared !== undefined
-				? expandExecToolShorthand(declared)
+				? normalizeToolNames(expandExecToolShorthand(declared))
 				: normalizeToolNames(this.cliGrant ?? explicit.tools ?? []);
 		const grant = new Set(declaredOrInherited);
 

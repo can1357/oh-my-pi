@@ -3461,6 +3461,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		const desired = readPersistedAgentPersona(this.sessionManager.getEntries());
 		if (!desired) {
 			await this.#exitSourcePersonaForSwitch("on switch to a non-persona session");
+			// The target records no persona, so no ceiling carrier survives:
+			// drop a journal-installed grant the SOURCE session reinstalled
+			// (switchSession already exited the persona, so the shared
+			// reconcile's clear never runs here). A live CLI --tools grant is
+			// untouched; a cold resume never had a journal install to drop.
+			this.session.getToolPolicy()?.clearCliGrantFromJournal();
 			return;
 		}
 		await reconcileSessionPersona(this.session, {

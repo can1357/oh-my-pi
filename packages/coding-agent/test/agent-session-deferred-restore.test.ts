@@ -14,6 +14,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -91,6 +92,70 @@ describe("AgentSession deferred model restore", () => {
 		expect(await session.flushDeferredModelRestore()).toBe(true);
 		expect(session.getDeferredModelRestore()).toBeUndefined();
 		expect(session.model?.id).toBe(activeModel.id);
+	});
+
+	// Review R6-4: the deferred slot is cleared speculatively before the
+	// fallible setSessionFile()/cwd steps — a switch that FAILS restores the
+	// source session, and its owed retry must survive the rollback (the persona
+	// restore it carries is the only path back off the persona model).
+	it("keeps the owed deferred restore when the switch rolls back", async () => {
+		// A target recorded in ANOTHER cwd with no onCwdChange callback makes
+		// setSessionFile throw SESSION_CWD_CHANGE_REJECTED after the clear.
+		const otherDir = TempDir.createSync("@pi-deferred-restore-other-");
+		try {
+			const otherManager = SessionManager.create(otherDir.path(), otherDir.path());
+			otherManager.appendMessage({ role: "user", content: "target", timestamp: Date.now() });
+			await otherManager.ensureOnDisk();
+			await otherManager.flush();
+			const otherFile = otherManager.getSessionFile();
+			if (!otherFile) throw new Error("Expected session file");
+			await otherManager.close();
+
+			session.queueDeferredModelRestore(activeModel);
+			const switched = await session.switchSession(otherFile);
+			expect(switched).toBe(false);
+			expect(session.getDeferredModelRestore()?.model).toBe(activeModel);
+		} finally {
+			otherDir.removeSync();
+		}
+	});
+
+	// Review R6-3: /new past its commit point is a fresh-session boundary — a
+	// journal-reinstalled tool ceiling must not survive into the new transcript
+	// (the exit's presentation restore is also filtered through granted(), so a
+	// stale ceiling would keep narrowing the fresh session's tools). The slot
+	// discard (R6-5) is covered by the rollback test's counterpart above.
+	it("drops a journal-installed ceiling when a new session commits", async () => {
+		const policy = new SessionToolPolicy({
+			registry: () => new Set(["read", "write"]),
+			isDefaultActive: () => true,
+		});
+		policy.installJournalCeiling(["read"]);
+		expect(policy.journalCeiling).not.toBeNull();
+		// Drive the real discard through a session that owns this policy.
+		const withPolicy = new AgentSession({
+			agent: new Agent({
+				initialState: { model: activeModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: Settings.isolated(),
+			modelRegistry,
+			toolPolicy: policy,
+		});
+		try {
+			expect(await withPolicy.newSession()).toBe(true);
+			expect(policy.journalCeiling).toBeNull();
+			// A CLI-typed grant stays authoritative across /new (process-scoped).
+			const cliPolicy = new SessionToolPolicy({
+				toolNames: ["read"],
+				registry: () => new Set(["read", "write"]),
+				isDefaultActive: () => true,
+			});
+			cliPolicy.installJournalCeiling(["write"]);
+			expect([...cliPolicy.cliGrant!]).toEqual(["read"]);
+		} finally {
+			await withPolicy.dispose();
+		}
 	});
 
 	it("discards a owed deferred restore when the session switch commits", async () => {

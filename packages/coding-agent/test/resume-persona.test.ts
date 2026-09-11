@@ -996,6 +996,45 @@ Beta.`,
 		expect(warnings.some(message => message.includes("Exit the agent persona first"))).toBe(true);
 	});
 
+	// Codex R6-2: the TUI's persona-less switch branch bypasses
+	// reconcileSessionPersona (the only other clear site), and switchSession has
+	// already exited the source persona — so this branch must clear the
+	// journal-installed ceiling itself, or the plain target stays restricted by
+	// the SOURCE session's persisted grant.
+	it("switch to a persona-less session clears the source journal ceiling", async () => {
+		await writeFixtureAgent(READER_AGENT_MD);
+		// Source journal: persona entry carrying the persisted ceiling.
+		const personaTarget = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		personaTarget.appendMessage({ role: "user", content: "turn", timestamp: Date.now() });
+		personaTarget.appendModeChange("agent", { name: "fixture-reader", explicit: { tools: ["read"] } });
+		await personaTarget.ensureOnDisk();
+		await personaTarget.flush();
+		const personaFile = personaTarget.getSessionFile();
+		if (!personaFile) throw new Error("Expected session file");
+		await personaTarget.close();
+
+		const plainTarget = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		plainTarget.appendMessage({ role: "user", content: "plain", timestamp: Date.now() });
+		await plainTarget.ensureOnDisk();
+		await plainTarget.flush();
+		const plainFile = plainTarget.getSessionFile();
+		if (!plainFile) throw new Error("Expected session file");
+		await plainTarget.close();
+
+		const liveManager = await SessionManager.open(personaFile, path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(liveManager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+		expect([...(liveSession.getToolPolicy()!.cliGrant ?? [])]).toEqual(["read"]);
+
+		const switched = await liveSession.switchSession(plainFile);
+		expect(switched).toBe(true);
+		const policy = liveSession.getPersonaRuntime()!.policy;
+		expect(policy.isPersonaActive()).toBe(false);
+		expect(policy.cliGrant).toBeNull();
+		expect(policy.effective("write")).toBe(true);
+	});
+
 	// Codex R5-1: when the gone-persona baseline restore FAILS (an extension
 	// model-change hook vetoes setModelTemporary), the journal's persona entry
 	// is the only record of the baseline — clearing it (mode_change none) would

@@ -36,6 +36,20 @@ describe("PersonaRuntime", () => {
 		expect(snap.activePresentationSnapshot).toBeUndefined();
 	});
 
+	// Codex R6-1: a frontmatter `tools:` list is stored as the persona grant
+	// BEFORE the session's later normalization pass, so a legacy alias
+	// (`search`/`find`) would never match the canonical registry name — the
+	// persona silently loses its own search capability.
+	it("normalizes legacy aliases in persona-declared tool grants", () => {
+		const { session } = makeSessionStub();
+		const runtime = makeRuntime(session);
+		runtime.policy.enterPersona(makeAgent({ tools: ["search", "find", "read"] }), {});
+		expect(runtime.policy.effective("grep")).toBe(true); // search -> grep
+		expect(runtime.policy.effective("glob")).toBe(true); // find -> glob
+		expect(runtime.policy.effective("read")).toBe(true);
+		expect(runtime.policy.effective("write")).toBe(false); // still narrowed
+	});
+
 	it("restore round-trips a snapshot (policy persona + presentation)", async () => {
 		const { stub, session } = makeSessionStub();
 		const runtime = makeRuntime(session);
