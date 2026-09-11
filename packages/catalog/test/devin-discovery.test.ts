@@ -387,6 +387,7 @@ describe("devin native discovery request", () => {
 			DISPLAY_OPTION_NORMAL,
 		]);
 		expect(requestMetadata?.apiKey).toBe("devin-session-token$fixture-token");
+		expect(requestMetadata?.f).toMatch(/^[0-9a-f]{420}$/);
 	});
 
 	it("treats an empty-but-200 catalog as failed discovery so the seed survives", async () => {

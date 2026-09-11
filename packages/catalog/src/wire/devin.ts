@@ -4,6 +4,7 @@
  * generated protobuf runtime so the synchronous model seed can import it
  * without pulling devin-gen into the boot path.
  */
+import { createDevinFingerprint } from "./devin-fingerprint";
 
 /** Base host for Codeium/Windsurf's Cascade API (Connect protocol over HTTP/1.1). */
 export const DEVIN_DEFAULT_BASE_URL = "https://server.codeium.com";
@@ -22,9 +23,9 @@ const DEVIN_LOCALE = "en";
 const DEVIN_CLI_METADATA = {
 	ideName: "devin-cli",
 	ideType: "chisel",
-	ideVersion: "3000.6.2",
+	ideVersion: "3000.10.21",
 	extensionName: "chisel",
-	extensionVersion: "3000.6.2",
+	extensionVersion: "3000.10.21",
 	locale: DEVIN_LOCALE,
 	os: DEVIN_OS,
 } as const;
@@ -54,19 +55,24 @@ export function normalizeDevinSessionToken(apiKey: string | undefined): string {
  * Fields for `Metadata` on released-CLI calls (`GetUserJwt`, `AssignModel`,
  * `GetChatMessage`, `GetUserStatus`). `userJwt` stays empty for the calls the
  * CLI makes with the session token alone (auth, model assignment, usage).
+ * `f` seals a fresh native-format device attestation for every request.
  */
-export function devinCliMetadata(apiKey: string | undefined, userJwt = "") {
+export async function devinCliMetadata(apiKey: string | undefined, userJwt = "") {
+	const credential = normalizeDevinSessionToken(apiKey);
 	return {
-		apiKey: normalizeDevinSessionToken(apiKey),
+		apiKey: credential,
 		userJwt,
+		f: await createDevinFingerprint(credential),
 		...DEVIN_CLI_METADATA,
 	};
 }
 
 /** Fields for `Metadata` on the dev-channel `GetCliModelConfigs` call. */
-export function devinDiscoveryMetadata(apiKey: string | undefined) {
+export async function devinDiscoveryMetadata(apiKey: string | undefined) {
+	const credential = normalizeDevinSessionToken(apiKey);
 	return {
-		apiKey: normalizeDevinSessionToken(apiKey),
+		apiKey: credential,
+		f: await createDevinFingerprint(credential),
 		...DEVIN_DISCOVERY_METADATA,
 	};
 }

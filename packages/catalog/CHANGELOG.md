@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the native Devin `Metadata.f` device attestation to model discovery, sealed around a private per-account identity instead of hardware identifiers ([#11650](https://github.com/can1357/oh-my-pi/pull/11650) by [@will-bogusz](https://github.com/will-bogusz)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the native Devin `Metadata.f` device attestation to auth, model assignment, chat, and usage requests, sealed around a private per-account identity instead of hardware identifiers ([#11650](https://github.com/can1357/oh-my-pi/pull/11650) by [@will-bogusz](https://github.com/will-bogusz)).
+
+### Changed
+
+- Updated the pinned Devin CLI request identity to `3000.10.21`, verified against the current released CLI ([#11650](https://github.com/can1357/oh-my-pi/pull/11650) by [@will-bogusz](https://github.com/will-bogusz)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed
