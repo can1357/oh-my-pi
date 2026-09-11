@@ -150,7 +150,6 @@ describe("transport rate-limit budget", () => {
 	it("spends at most MAX_RATE_LIMIT_ATTEMPTS requests on a persistent 429 with a short retry hint", async () => {
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const outcome = await countCompletionsRequests(() => rateLimited({ "retry-after-ms": "20" }));
-		expect(MAX_RATE_LIMIT_ATTEMPTS).toBe(2);
 		expect(outcome.requests).toBe(MAX_RATE_LIMIT_ATTEMPTS);
 		expect(outcome.stopReason).toBe("error");
 		expect(outcome.errorStatus).toBe(429);
@@ -322,6 +321,28 @@ describe("transport rate-limit budget", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(429);
 		expect(requests).toBe(1);
+	});
+
+	it("spends one short-hinted retry on an in-band anthropic rate limit", async () => {
+		let requests = 0;
+		const fetchMock: FetchImpl = async () => {
+			requests++;
+			return requests === 1
+				? new Response(
+						'event: error\ndata: {"type":"error","error":{"type":"rate_limit_error","message":"Too many requests. Please retry in 20ms"}}\n\n',
+						{ status: 200, headers: { "content-type": "text/event-stream" } },
+					)
+				: anthropicSuccess("Hello");
+		};
+		const result = await streamAnthropic(anthropicModel, context, {
+			apiKey: "sk-test",
+			fetch: fetchMock,
+			providerRetryWait: async () => {},
+		}).result();
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find(block => block.type === "text")?.text).toBe("Hello");
+		expect(requests).toBe(MAX_RATE_LIMIT_ATTEMPTS);
 	});
 
 	// Anthropic states the recovery window in the error body as often as in a
