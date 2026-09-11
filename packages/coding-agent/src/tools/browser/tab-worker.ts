@@ -1206,7 +1206,9 @@ export async function preparePageForScreenshot(
 		() => false,
 	);
 	if (!visible) {
-		throw new ToolError("The attached browser tab is not visible; switch to it before taking a screenshot");
+		throw new ToolError(
+			"The attached browser tab is not visible: switch back to it, or reopen the tab with new_tab: true to drive one of our own",
+		);
 	}
 }
 
@@ -1231,8 +1233,10 @@ export class WorkerCore {
 	#unsub: () => void;
 	#isolated: boolean;
 	#uninstallRejectionGuard: () => void;
-	#mode?: WorkerInitPayload["mode"];
 	#activateForScreenshot = true;
+	#mode?: WorkerInitPayload["mode"];
+	/** True when the page was created for this worker, so closing the worker closes it. */
+	#ownsPage = false;
 	#dialogs?: RuntimeDialogController;
 	#network?: BrowserNetworkManager;
 	#initScripts?: InitScriptManager;
@@ -1346,6 +1350,7 @@ export class WorkerCore {
 		try {
 			this.#mode = payload.mode;
 			this.#activateForScreenshot = payload.mode === "headless" || payload.activateForScreenshot !== false;
+			this.#ownsPage = payload.mode === "headless" || payload.ownsPage === true;
 			const puppeteer = await loadPuppeteerInWorker(payload.safeDir);
 			registerSemanticQueryHandlers(puppeteer);
 			this.#browser = await puppeteer.connect({
@@ -1419,13 +1424,13 @@ export class WorkerCore {
 			this.#targetId = await targetIdForPage(this.#page);
 			this.#transport.send({ type: "ready", info: await this.#currentReadyInfo() });
 		} catch (error) {
-			// A failed headless init leaves the worker's page orphaned in the shared
+			// A failed headless or owned-page init leaves the worker's page orphaned in the shared
 			// browser (the supervisor retries with a fresh worker), so close it before
-			// reporting. Attach mode adopts an existing target — never close it.
+			// reporting. Adopted targets belong to the user — never close them.
 			const page = this.#page;
 			await this.#webmcp?.dispose().catch(() => undefined);
 			this.#webmcp = undefined;
-			if (payload.mode === "headless" && page && !page.isClosed()) {
+			if (this.#ownsPage && page && !page.isClosed()) {
 				await page.close().catch(() => undefined);
 			}
 			this.#transport.send({ type: "init-failed", error: errorPayload(error) });
@@ -2973,9 +2978,21 @@ export class WorkerCore {
 		await this.#tracing?.dispose();
 		await this.#consoleCapture.detach();
 		this.#emulation?.dispose();
-		if (this.#mode === "headless" && page && !page.isClosed()) await page.close().catch(() => undefined);
+		let closeError: unknown;
+		if (this.#ownsPage && page && !page.isClosed()) {
+			try {
+				await page.close();
+			} catch (err) {
+				closeError = err;
+			}
+		}
 		if (this.#browser?.connected) this.#browser.disconnect();
-		this.#transport.send({ type: "closed" });
+		if (closeError) {
+			const errorMsg = closeError instanceof Error ? closeError.message : String(closeError);
+			this.#transport.send({ type: "closed", ok: false, error: errorMsg });
+		} else {
+			this.#transport.send({ type: "closed", ok: true });
+		}
 		this.#transport.close();
 	}
 
