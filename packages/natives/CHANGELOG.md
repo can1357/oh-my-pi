@@ -14,6 +14,10 @@
 
 - Fixed C++ language inference excluding CUDA header (`.cuh`) files ([#10782](https://github.com/can1357/oh-my-pi/pull/10782) by [@alphastorm](https://github.com/alphastorm)).
 
+### Added
+
+- Liquid code fences now receive syntax highlighting. Raw blocks stay literal and Jekyll highlight blocks keep their embedded highlighting when the tags use whitespace control.
+
 ## [18.1.9] - 2026-09-04
 
 ### Added
