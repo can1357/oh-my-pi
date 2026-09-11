@@ -3574,6 +3574,9 @@ export class AuthStorage {
 		const cached = forceRefresh ? undefined : this.#usageCache.get<UsageReport | null>(cacheKey);
 		// Fresh cache hit: return whatever's there (success or null fallback).
 		if (cached && cached.expiresAt > now) {
+			if (cached.value !== null) {
+				this.#reconcileUsageBlock(request, cached.value);
+			}
 			return cached.value;
 		}
 
@@ -4202,7 +4205,7 @@ export class AuthStorage {
 				const credentialType = entry.credential.type;
 				const providerKey = this.#getProviderTypeKey(provider, credentialType);
 				let blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
-				if (blockedUntil !== undefined && provider !== "openai-codex") {
+				if (blockedUntil !== undefined && !this.#supportsUsageBlockHealing(provider)) {
 					return {
 						credentialId: entry.id,
 						credentialType,
@@ -4229,7 +4232,7 @@ export class AuthStorage {
 					planEligibilityByCredential.set(entry.id, getOpenAICodexPlanEligibility(report, planRequirement));
 				}
 
-				if (provider === "openai-codex") {
+				if (this.#supportsUsageBlockHealing(provider)) {
 					blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
 				}
 				if (blockedUntil !== undefined) {
@@ -4431,6 +4434,7 @@ export class AuthStorage {
 					};
 				}),
 			});
+			this.#reconcileUsageBlocksFromReports(resolved);
 			this.#clearUsageForceRefresh(forcedRefresh);
 			return resolved;
 		})().finally(() => {
@@ -5009,7 +5013,7 @@ export class AuthStorage {
 				);
 				let usage: UsageReport | null = null;
 				let usageChecked = false;
-				if (blockedUntil !== undefined && args.provider === "openai-codex") {
+				if (blockedUntil !== undefined && this.#supportsUsageBlockHealing(args.provider)) {
 					usage = await this.#getUsageReport(args.provider, selection.credential, {
 						...args.options,
 						timeoutMs: this.#usageRequestTimeoutMs,
@@ -5151,7 +5155,14 @@ export class AuthStorage {
 		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
 		const planRequirement = resolveOpenAICodexPlanRequirement(provider, options?.modelId);
 		const hasPlanRequirement = planRequirement !== "none";
-		const checkUsage = strategy !== undefined && (credentials.length > 1 || hasPlanRequirement);
+		const hasBlockedCredential = credentials.some(entry =>
+			this.#isCredentialBlocked(provider, providerKey, entry.index, blockScopes),
+		);
+		const checkUsage =
+			strategy !== undefined &&
+			(credentials.length > 1 ||
+				hasPlanRequirement ||
+				(hasBlockedCredential && this.#supportsUsageBlockHealing(provider)));
 		const sessionCredential = this.#getSessionCredential(provider, sessionId);
 		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
 		const sessionPreferredCredential =

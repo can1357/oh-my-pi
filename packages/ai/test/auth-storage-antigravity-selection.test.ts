@@ -348,4 +348,45 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 		const loaded = counts.get("api-acct-loaded") ?? 0;
 		expect(fresh).toBeGreaterThan(loaded);
 	});
+
+	test("a healthy Gemini counter report heals a stale block during candidate selection without requiring fetchUsageReports", async () => {
+		if (!authStorage || !store?.upsertCredentialBlock || !store.getCredentialBlock) {
+			throw new Error("test setup failed");
+		}
+
+		await authStorage.set("google-antigravity", [
+			{
+				type: "oauth",
+				...createCredential("acct-direct-heal", "proj-direct-heal", "direct-heal@example.com"),
+			},
+		]);
+		const row = store.listAuthCredentials("google-antigravity")[0];
+		if (!row) throw new Error("expected credential row");
+
+		const weekAhead = Date.now() + 6 * 24 * HOUR_MS;
+		store.upsertCredentialBlock({
+			credentialId: row.id,
+			providerKey: "google-antigravity:oauth",
+			blockScope: "counter:google",
+			blockedUntilMs: weekAhead,
+		});
+		ageCredentialBlockRows(dbPath);
+		store.cleanExpiredCredentialBlocks?.(Date.now() + STALE_BLOCK_GUARD_MS);
+
+		usageByAccount.set(
+			"acct-direct-heal",
+			createAntigravityReport({
+				accountId: "acct-direct-heal",
+				projectId: "proj-direct-heal",
+				windows: [{ counter: "google", usedFraction: 0, resetInMs: 5 * HOUR_MS }],
+			}),
+		);
+
+		// Must NOT call fetchUsageReports() here; getApiKey selection itself should probe usage and heal the block
+		const geminiKey = await authStorage.getApiKey("google-antigravity", "session-antigravity-direct-heal", {
+			modelId: "gemini-3-flash",
+		});
+		expect(geminiKey).toBe("api-acct-direct-heal");
+		expect(store.getCredentialBlock(row.id, "google-antigravity:oauth", "counter:google")).toBeUndefined();
+	});
 });
