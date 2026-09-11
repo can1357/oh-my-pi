@@ -33,6 +33,12 @@ export interface VisitEntriesFromFileStreamOptions {
 	onMalformedRecord?: () => void;
 }
 
+/** Controls how a missing session file is handled. */
+export interface LoadSessionOptions {
+	/** Propagate ENOENT instead of treating the path as a new empty session. */
+	throwIfMissing?: boolean;
+}
+
 /** Parsed session entries plus corruption metadata needed by writable loaders. */
 export interface SessionLoadResult {
 	entries: FileEntry[];
@@ -279,11 +285,14 @@ async function loadWithKnownSize(filePath: string, storage: SessionStorage, size
 export async function loadSessionFile(
 	filePath: string,
 	storage: SessionStorage = new FileSessionStorage(),
+	options: LoadSessionOptions = {},
 ): Promise<SessionLoadResult> {
 	try {
 		return await loadWithKnownSize(filePath, storage, storage.statSync(filePath).size);
 	} catch (err) {
-		if (isEnoent(err)) return { entries: [], titleSlot: undefined, malformedRecords: 0, invalidHeader: false };
+		if (isEnoent(err) && !options.throwIfMissing) {
+			return { entries: [], titleSlot: undefined, malformedRecords: 0, invalidHeader: false };
+		}
 		throw err;
 	}
 }

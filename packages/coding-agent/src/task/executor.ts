@@ -52,7 +52,7 @@ import { type ArtifactManager, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
-import { SessionManager } from "../session/session-manager";
+import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
@@ -3564,7 +3564,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				reviveSession = async expectedAgentRef => {
 					const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
 						suppressBreadcrumb: true,
+						throwIfMissing: true,
 					});
+					if (!hasConversationalHistory(reopened.getEntries())) {
+						await reopened.close();
+						throw new Error(
+							`Cannot revive subagent "${id}": session file "${sessionFile}" has no message history ` +
+								`(truncated to header/session_init). The agent was not revived.`,
+						);
+					}
 					if (options.parentArtifactManager) {
 						reopened.adoptArtifactManager(options.parentArtifactManager);
 					}

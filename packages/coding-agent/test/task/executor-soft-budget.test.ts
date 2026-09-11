@@ -13,6 +13,7 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { resolveSoftRequestBudget, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -364,6 +365,14 @@ describe("runSubprocess soft request budget", () => {
 
 		await AgentLifecycleManager.global().park(id);
 		expect(AgentRegistry.global().get(id)?.status).toBe("parked");
+		const parked = await SessionManager.open(`${tempDir.path()}/${id}.jsonl`);
+		parked.appendMessage({
+			role: "user",
+			content: "inventory the api surface",
+			timestamp: Date.now(),
+		});
+		await parked.flush();
+		await parked.close();
 		frames.length = 0;
 		// Parking can rebuild an unadvised session; don't retain the prior turn's marker.
 		advisorActive.mockReturnValue(false);
@@ -373,6 +382,32 @@ describe("runSubprocess soft request budget", () => {
 		await revivedTerminal;
 		expectRpcTurn(false);
 		rpcRegistry.dispose();
+	});
+
+	it("fails an irc wake when the parked transcript has no message history", async () => {
+		const id = "BlankScout";
+		const handle = createMockSession(({ promptIndex, emit, pushMessage }) => {
+			if (promptIndex !== 1) return;
+			// Never yields: budget 2 → stop at 3, grace exhausted at 8.
+			for (let i = 1; i <= 8; i++) {
+				const message = assistantText(`burning request ${i}`);
+				pushMessage(message);
+				emit({ type: "message_end", message } as unknown as AgentSessionEvent);
+			}
+		});
+		mockCreateAgentSession(handle.session);
+		registerRunning(id, handle.session);
+
+		const result = await runSubprocess(baseOptions(id));
+		expect(result.aborted).toBe(true);
+		await AgentLifecycleManager.global().park(id);
+		expect(AgentRegistry.global().get(id)?.status).toBe("parked");
+
+		const receipt = await new IrcBus().send({ from: "Main", to: id, body: "resume your inventory" });
+		expect(receipt.outcome).toBe("failed");
+		expect(receipt.error).toContain(`Cannot revive subagent "${id}"`);
+		expect(receipt.error).toContain("no message history");
+		expect(AgentRegistry.global().get(id)?.session ?? null).toBeNull();
 	});
 
 	it("a shutdown racing a budget hard-abort follows the shutdown release path", async () => {

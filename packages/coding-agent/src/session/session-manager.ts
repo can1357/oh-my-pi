@@ -1408,7 +1408,11 @@ export class SessionManager {
 		await this.#setSessionFile(sessionFile);
 	}
 
-	async #setSessionFile(sessionFile: string, loadedSession?: SessionLoadResult): Promise<void> {
+	async #setSessionFile(
+		sessionFile: string,
+		loadedSession?: SessionLoadResult,
+		options?: { throwIfMissing?: boolean },
+	): Promise<void> {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
@@ -1426,6 +1430,11 @@ export class SessionManager {
 
 		const { entries: fileEntries, titleSlot } = loaded;
 		if (fileEntries.length === 0) {
+			if (options?.throwIfMissing) {
+				throw new Error(
+					`Cannot resume session "${resolvedSessionFile}": the session file holds no entries. The file was not modified.`,
+				);
+			}
 			// Explicit but empty/missing path (e.g. --session flag): start fresh but
 			// keep the requested path and materialize the header immediately.
 			this.#resetToNewSession(undefined, resolvedSessionFile);
@@ -2921,15 +2930,16 @@ export class SessionManager {
 	 * Open a specific session file.
 	 * @param sessionDir Optional dir for /new or /branch; defaults to the file's parent.
 	 * @param options.initialCwd Cwd to use when the file is empty or missing.
+	 * @param options.throwIfMissing Propagate ENOENT instead of creating a new session at a missing path.
 	 */
 	static async open(
 		filePath: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { initialCwd?: string; suppressBreadcrumb?: boolean },
+		options?: { initialCwd?: string; suppressBreadcrumb?: boolean; throwIfMissing?: boolean },
 	): Promise<SessionManager> {
-		const loaded = await loadSessionFile(filePath, storage);
-		const header = loaded.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
+		const probed = await loadSessionFile(filePath, storage, { throwIfMissing: options?.throwIfMissing });
+		const header = probed.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		// Resume into the session's recorded cwd only when it is verifiably
 		// accessible. A deleted or permission-blocked (macOS TCC denial) project
 		// dir would make the constructor's #cwd — and the `setProjectDir` chdir
@@ -2946,7 +2956,15 @@ export class SessionManager {
 				: path.dirname(path.resolve(filePath)));
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
-		await manager.#setSessionFile(filePath, loaded);
+		// Freshness gate for fail-closed callers (revive): the cwd probe above
+		// yields, so re-read after it and adopt only the fresh snapshot. A
+		// transcript deleted, truncated, or replaced mid-probe then fails
+		// closed here (ENOENT / holds-no-entries, without minting) instead of
+		// reviving stale history. Other callers keep the single probe read.
+		const loaded = options?.throwIfMissing
+			? await loadSessionFile(filePath, storage, { throwIfMissing: true })
+			: probed;
+		await manager.#setSessionFile(filePath, loaded, options);
 		return manager;
 	}
 
@@ -2963,60 +2981,16 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 	): Promise<{
 		cwd: string;
-		init: {
-			systemPrompt: string;
-			task: string;
-			tools: string[];
-			agent?: string;
-			modelRole?: string;
-			resolvedModel?: string;
-			readOnly?: boolean;
-			outputSchema?: unknown;
-			outputSchemaMode?: StructuredSubagentSchemaMode;
-			restrictToolNames?: boolean;
-			spawns?: string;
-			readSummarize?: boolean;
-			advisor?: string;
-		} | null;
+		init: PersistedSessionInit | null;
 	} | null> {
 		let header: SessionHeader | undefined;
-		let init: {
-			systemPrompt: string;
-			task: string;
-			tools: string[];
-			agent?: string;
-			modelRole?: string;
-			resolvedModel?: string;
-			readOnly?: boolean;
-			outputSchema?: unknown;
-			outputSchemaMode?: StructuredSubagentSchemaMode;
-			restrictToolNames?: boolean;
-			spawns?: string;
-			readSummarize?: boolean;
-			advisor?: string;
-		} | null = null;
+		const initEntries: FileEntry[] = [];
 		const visit = (entry: FileEntry): void => {
 			if (entry.type === "session") {
 				header ??= entry;
 				return;
 			}
-			if (entry.type === "session_init") {
-				init = {
-					systemPrompt: entry.systemPrompt,
-					task: entry.task,
-					tools: entry.tools,
-					agent: entry.agent,
-					modelRole: entry.modelRole,
-					resolvedModel: entry.resolvedModel,
-					readOnly: entry.readOnly,
-					outputSchema: entry.outputSchema,
-					outputSchemaMode: entry.outputSchemaMode,
-					restrictToolNames: entry.restrictToolNames,
-					readSummarize: entry.readSummarize,
-					spawns: entry.spawns,
-					advisor: entry.advisor,
-				};
-			}
+			if (entry.type === "session_init") initEntries.push(entry);
 		};
 
 		try {
@@ -3026,7 +3000,7 @@ export class SessionManager {
 		}
 		// A missing, empty, or invalid file has no usable session.
 		if (!header) return null;
-		return { cwd: header.cwd ?? getProjectDir(), init };
+		return { cwd: header.cwd ?? getProjectDir(), init: extractSessionInit(initEntries) };
 	}
 
 	/** Continue the most recent session, or create a new one if none exists. */
@@ -3142,6 +3116,58 @@ export class SessionManager {
 	}
 }
 
+/** True when already-loaded entries carry at least one real user/assistant message. */
+export function hasConversationalHistory(entries: readonly FileEntry[]): boolean {
+	return entries.some(e => e.type === "message" && (e.message.role === "user" || e.message.role === "assistant"));
+}
+
+/**
+ * The persisted `session_init` contract a cold revive rebuilds a subagent from:
+ * the {@link SessionInitEntry} payload without its tree bookkeeping fields.
+ */
+export interface PersistedSessionInit {
+	systemPrompt: string;
+	task: string;
+	tools: string[];
+	agent?: string;
+	modelRole?: string;
+	resolvedModel?: string;
+	readOnly?: boolean;
+	outputSchema?: unknown;
+	outputSchemaMode?: StructuredSubagentSchemaMode;
+	restrictToolNames?: boolean;
+	spawns?: string;
+	readSummarize?: boolean;
+	advisor?: string;
+}
+
+/**
+ * Latest persisted `session_init` contract among already-loaded entries, or
+ * null when the transcript carries none.
+ */
+export function extractSessionInit(entries: readonly FileEntry[]): PersistedSessionInit | null {
+	let init: PersistedSessionInit | null = null;
+	for (const entry of entries) {
+		if (entry.type !== "session_init") continue;
+		init = {
+			systemPrompt: entry.systemPrompt,
+			task: entry.task,
+			tools: entry.tools,
+			agent: entry.agent,
+			modelRole: entry.modelRole,
+			resolvedModel: entry.resolvedModel,
+			readOnly: entry.readOnly,
+			outputSchema: entry.outputSchema,
+			outputSchemaMode: entry.outputSchemaMode,
+			restrictToolNames: entry.restrictToolNames,
+			readSummarize: entry.readSummarize,
+			spawns: entry.spawns,
+			advisor: entry.advisor,
+		};
+	}
+	return init;
+}
+
 /**
  * If the current session was created by `/move` and contains no real
  * user/assistant messages, delete it so empty move sessions don't accumulate.
@@ -3153,11 +3179,7 @@ export async function cleanupEmptyMoveSession(
 	const sessionFile = sessionManager.getSessionFile();
 	if (!sessionFile || !movedFromEmptySessionFile) return;
 	if (path.resolve(sessionFile) !== path.resolve(movedFromEmptySessionFile)) return;
-	const entries = sessionManager.getEntries();
-	const hasRealMessages = entries.some(
-		e => e.type === "message" && (e.message.role === "user" || e.message.role === "assistant"),
-	);
-	if (hasRealMessages) return;
+	if (hasConversationalHistory(sessionManager.getEntries())) return;
 	try {
 		await sessionManager.dropSession(sessionFile);
 	} catch (err) {
