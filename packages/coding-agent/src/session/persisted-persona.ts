@@ -215,6 +215,9 @@ export async function reconcileSessionPersona(
 		return { entered: false };
 	}
 	if (!desired) {
+		// No persona journal on this branch: a ceiling reinstalled by an
+		// earlier branch's journal must not outlive its carrier.
+		runtime.policy.clearCliGrantFromJournal();
 		// Branching (RPC/ACP/SDK #reconcileModeAfterBranch) can land on an
 		// entry from BEFORE the persona's `mode_change agent` marker while the
 		// live session still runs the persona — the live branch must match its
@@ -225,6 +228,19 @@ export async function reconcileSessionPersona(
 		return { entered: false };
 	}
 	try {
+		// Durable CLI ceiling (installed BEFORE discovery/teardown so even the
+		// gone-persona degrade keeps this session bounded — the ceiling's only
+		// carrier is the persona entry, which the degrade is about to erase;
+		// the NEXT resume's clear marker drops it): `explicit.tools` is only
+		// ever recorded FROM a CLI `--tools`/`--no-tools` grant (every enter
+		// path serializes policy.cliGrant there, main.ts the launch flags), so
+		// resuming without the flag would otherwise leave the fresh
+		// null-grant policy unbounded once the persona narrows nothing.
+		if (desired.explicit?.tools) {
+			runtime.policy.installJournalCeiling(desired.explicit.tools);
+		} else {
+			runtime.policy.clearCliGrantFromJournal();
+		}
 		const { agents } = await discoverAgents(
 			session.sessionManager.getCwd(),
 			undefined,
@@ -270,15 +286,6 @@ export async function reconcileSessionPersona(
 		// are persona-produced, so re-capturing them would make a later exit
 		// restore the persona model.
 		const baselineOverride = desired.baseline ? deserializePersonaBaseline(session, desired.baseline) : undefined;
-		// Durable CLI ceiling: `explicit.tools` is only ever recorded FROM a CLI
-		// `--tools`/`--no-tools` grant (every enter path serializes policy.cliGrant
-		// there). On resume WITHOUT the flag the fresh policy has cliGrant=null, so
-		// reinstall the persisted grant as the session baseline BEFORE entering:
-		// exiting this persona, or switching to another, must not silently widen
-		// past a ceiling the original launch imposed.
-		if (desired.explicit?.tools && !runtime.policy.cliGrant) {
-			runtime.policy.setCliGrant(desired.explicit.tools);
-		}
 		// fvInv double-enter guard: the CLI `--agent X --resume` launch seam
 		// (sdk.ts) already entered the same persona during construction with the
 		// same explicit overrides and the journal's baseline — a second

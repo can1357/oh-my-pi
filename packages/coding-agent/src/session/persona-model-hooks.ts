@@ -58,6 +58,17 @@ export interface PersonaModelApplyHooks {
 	 * session is streaming). Absent on the default hooks.
 	 */
 	shouldDeferModelSwitch?(): boolean;
+	/**
+	 * Reads any model switch the SURFACE has queued for its next turn boundary
+	 * and drops it (TUI: `#pendingModelSwitch`; ACP: the session-level deferred
+	 * slot). A non-deferred (pre-turn) enter calls this in its `apply`: the
+	 * queued entry — whether it came from THIS runtime transaction or an
+	 * earlier failed flush — predates the new persona and must not land
+	 * mid-persona at the next boundary. Absent on surfaces with no queue.
+	 */
+	getSurfaceDeferredRestore?(): ModelBaseline | undefined;
+	/** Drops a queued surface restore without applying it. */
+	clearSurfaceDeferredRestore?(): void;
 }
 
 /** Effective model + thinking level captured before a persona apply. */
@@ -73,6 +84,10 @@ export interface ModelBaseline {
  */
 export function createDefaultPersonaModelHooks(session: AgentSession): PersonaModelApplyHooks {
 	return {
+		// The session-level deferred slot (ACP/headless carrier): the runtime
+		// reads+drops any owed entry on a non-deferred enter through here.
+		getSurfaceDeferredRestore: () => session.getDeferredModelRestore?.(),
+		clearSurfaceDeferredRestore: () => session.clearDeferredModelRestore?.(),
 		async apply(agent: DiscoveredAgent, explicit?: PersonaExplicitOverrides): Promise<void> {
 			// j2v: the resolved pattern can carry a THINKING level too (an
 			// explicit `:level` suffix on the pattern, or a configured role whose

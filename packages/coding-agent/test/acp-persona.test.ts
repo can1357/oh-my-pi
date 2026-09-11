@@ -735,6 +735,54 @@ describe("ACP persona reconciliation", () => {
 		expect(queued).toBeUndefined();
 	});
 
+	// Review R4-A/B (convergent): the same session-level slot also carries a
+	// failed persona-MODEL SWITCH (a mid-turn enter whose flush was rejected and
+	// retained). After a CHAINED enter the runtime's #exitInner already restored
+	// the true baseline synchronously, so the queued entry is a stale persona
+	// model, not a restore — adopting it would bind the new persona's exit to a
+	// model no persona ever landed on. It must be dropped, not adopted.
+	it("chained pre-turn enter drops a stale queued switch without adopting", async () => {
+		const harness = await createPersonaHarness();
+		const session = new PersonaStubSession(harness.cwd);
+		harness.sessions.push(session);
+		const trueBase = { id: "true-base" } as Model;
+		let live: Model = { id: "persona-a-model" } as Model;
+		let queued: { model: Model; thinkingLevel: ConfiguredThinkingLevel | undefined } | undefined;
+		const target = session as unknown as AgentSession & Record<string, unknown>;
+		// Make the stub's model observable and settable (the class getter is a
+		// constant and setModel is a no-op).
+		Object.defineProperty(target, "model", { configurable: true, get: () => live });
+		target.setModel = async (model: Model) => {
+			live = model;
+			return { switched: true };
+		};
+		target.queueDeferredModelRestore = (model: Model, thinkingLevel?: ConfiguredThinkingLevel) => {
+			queued = { model, thinkingLevel };
+		};
+		target.getDeferredModelRestore = () => queued;
+		target.clearDeferredModelRestore = () => {
+			queued = undefined;
+		};
+		const runtime = session.getPersonaRuntime()!;
+		// A active on its persona model, with the TRUE base as its baseline.
+		runtime.adoptBaselineOverride({ model: trueBase, thinkingLevel: undefined });
+		runtime.policy.enterPersona(
+			{ name: "a", description: "", systemPrompt: "a", source: "bundled", tools: ["read"] } as DiscoveredAgent,
+			{},
+		);
+		// Stale queue: B's persona model from a rejected mid-turn switch flush.
+		queued = { model: { id: "persona-b-model" } as Model, thinkingLevel: undefined };
+		await runtime.enter(
+			{ name: "c", description: "", systemPrompt: "c", source: "bundled", tools: ["read"] } as DiscoveredAgent,
+			{},
+			{ apply: async () => {} },
+		);
+		// The chained exit restored A's baseline (the live model), so C baselines
+		// on the true base — NOT B's phantom — and the queue is gone.
+		expect(runtime.getActiveBaseline()?.model).toBe(trueBase);
+		expect(queued).toBeUndefined();
+	});
+
 	it("failed ACP transaction restores the prior deferred entry instead of clearing", async () => {
 		const harness = await createPersonaHarness();
 		const { target, peek } = makeDeferredQueueStub(harness);

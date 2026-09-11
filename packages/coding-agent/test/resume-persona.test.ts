@@ -93,7 +93,10 @@ describe("InteractiveMode persona resume reconcile", () => {
 	 * PersonaRuntime wired via setPersonaRuntime. `sessionManager` may be a
 	 * pre-built manager carrying the journal to resume.
 	 */
-	function createSession(sessionManager: SessionManager, options?: { vetoBeforeSwitch?: boolean }): AgentSession {
+	function createSession(
+		sessionManager: SessionManager,
+		options?: { vetoBeforeSwitch?: boolean; toolNames?: string[] },
+	): AgentSession {
 		const readTool = {
 			name: "read",
 			label: "read",
@@ -131,6 +134,7 @@ describe("InteractiveMode persona resume reconcile", () => {
 			toolRegistry,
 			builtInToolNames: ["read", "write"],
 			toolPolicy: new SessionToolPolicy({
+				...(options?.toolNames ? { toolNames: options.toolNames } : {}),
 				registry: () => new Set(["read", "write"]),
 				isDefaultActive: () => true,
 			}),
@@ -845,7 +849,7 @@ You are the modeled fixture persona.`,
 	// silently enables write past the launch ceiling.
 	it("resume reinstalls the persisted --tools ceiling across persona changes", async () => {
 		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
-		const liveSession = createSession(manager);
+		const liveSession = createSession(manager, { toolNames: ["read"] });
 		await writeFixtureAgent(READER_AGENT_MD);
 		await writeFixtureAgent(
 			`---
@@ -863,7 +867,6 @@ You are the wide fixture persona.`,
 		// explicit.tools = the ceiling into the journal).
 		const created = spyStatus(createMode(liveSession));
 		await created.init({ suppressWelcomeIntro: true });
-		liveSession.getToolPolicy()!.setCliGrant(["read"]);
 		await created.switchAgentPersona("fixture-reader");
 		expect(liveSession.getPersonaRuntime()!.policy.effective("write")).toBe(false);
 
@@ -891,6 +894,223 @@ You are the wide fixture persona.`,
 		expect(policy.effective("read")).toBe(true);
 		expect(policy.effective("write")).toBe(false);
 		await resumedSession.dispose();
+	});
+
+	// Review R4-A/B: a mid-turn exit whose flush FAILED leaves the restore in
+	// #pendingModelSwitch (retained by design). A subsequent PRE-TURN enter must
+	// (1) adopt that owed baseline into the new persona's exit lineage — the live
+	// model is still the old persona's, the restore never landed — and (2) drop
+	// the queue entry so it cannot land mid-persona at the next agent_end.
+	it("pre-turn enter adopts and clears the TUI owed restore", async () => {
+		await writeFixtureAgent(
+			`---
+name: fixture-alpha
+description: Alpha persona
+tools:
+  - read
+model:
+  - anthropic/claude-opus-4-5
+---
+
+Alpha.`,
+			"fixture-alpha.md",
+		);
+		await writeFixtureAgent(
+			`---
+name: fixture-beta
+description: Beta persona
+tools:
+  - read
+model:
+  - anthropic/claude-haiku-4-5
+---
+
+Beta.`,
+			"fixture-beta.md",
+		);
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+
+		// Enter alpha pre-turn (its model applies), then exit MID-TURN so the
+		// baseline restore is queued rather than applied.
+		await created.switchAgentPersona("fixture-alpha");
+		expect(liveSession.model?.id).toBe("claude-opus-4-5");
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => true });
+		await created.exitAgentPersona();
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => false });
+
+		// The turn-end flush FAILS: the restore stays owed (round 4 behavior).
+		const spy = vi.spyOn(liveSession, "setModelTemporary").mockRejectedValueOnce(new Error("veto"));
+		await created.flushPendingModelSwitch();
+		expect(spy).toHaveBeenCalledTimes(1);
+		spy.mockRestore();
+
+		// Pre-turn enter of beta: it must adopt the owed base and clear the queue.
+		await created.switchAgentPersona("fixture-beta");
+		expect(liveSession.model?.id).toBe("claude-haiku-4-5");
+		const runtime = liveSession.getPersonaRuntime()!;
+		// Adopted: beta's eventual exit restores the owed base, not alpha's model.
+		expect(runtime.getActiveBaseline()?.model?.id).not.toBe("claude-opus-4-5");
+		// Cleared: the next boundary must not drop the session off beta's model.
+		const flushSpy = vi.spyOn(liveSession, "setModelTemporary");
+		await created.flushPendingModelSwitch();
+		expect(flushSpy).not.toHaveBeenCalled();
+		expect(liveSession.model?.id).toBe("claude-haiku-4-5");
+	});
+
+	// Review R4-C: a journal-reinstalled ceiling must not outlive its carrier
+	// session — switching into another persona session whose journal records a
+	// DIFFERENT ceiling replaces the prior journal install (a fresh CLI flag
+	// would still win, but there is none here).
+	it("session switch replaces one journal ceiling with the other's", async () => {
+		await writeFixtureAgent(
+			`---
+name: fixture-wide
+description: Wide fixture persona
+tools:
+  - read
+  - write
+---
+
+You are the wide fixture persona.`,
+			"fixture-wide.md",
+		);
+		await writeFixtureAgent(READER_AGENT_MD);
+		const mkJournal = async (name: string, persona: string, ceiling: string[]) => {
+			const m = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+			m.appendMessage({ role: "user", content: "turn", timestamp: Date.now() });
+			m.appendModeChange("agent", { name: persona, explicit: { tools: ceiling } });
+			await m.ensureOnDisk();
+			await m.flush();
+			const file = m.getSessionFile();
+			if (!file) throw new Error("Expected session file");
+			await m.close();
+			return file;
+		};
+		const s1File = await mkJournal("s1", "fixture-reader", ["read"]);
+		const s2File = await mkJournal("s2", "fixture-wide", ["write"]);
+
+		const liveManager = await SessionManager.open(s1File, path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(liveManager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+		expect([...liveSession.getToolPolicy()!.cliGrant!]).toEqual(["read"]);
+
+		const switched = await liveSession.switchSession(s2File);
+		expect(switched).toBe(true);
+		// S2's OWN ceiling rules: write bounded-in, read bounded-out. Pre-fix S1's
+		// [read] survived (null-to-set) and silently narrowed S2 past its record.
+		expect([...liveSession.getToolPolicy()!.cliGrant!]).toEqual(["write"]);
+		expect(liveSession.getPersonaRuntime()!.policy.effective("write")).toBe(true);
+		expect(liveSession.getPersonaRuntime()!.policy.effective("read")).toBe(false);
+	});
+
+	// Review R4-D: the ceiling's only journal carrier is the persona entry, and
+	// the gone-persona branch ERASES it — the install must run BEFORE the
+	// degrade so the resumed session stays bounded this resume too.
+	it("gone persona with a persisted ceiling keeps the session bounded", async () => {
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		manager.appendMessage({ role: "user", content: "turn", timestamp: Date.now() });
+		manager.appendModeChange("agent", { name: "no-such-persona", explicit: { tools: ["read"] } });
+		await manager.ensureOnDisk();
+		await manager.flush();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		await manager.close();
+
+		const resumedManager = await SessionManager.open(sessionFile, path.join(tempDir.path(), "sessions"));
+		const resumedSession = createSession(resumedManager);
+		const resumed = spyStatus(createMode(resumedSession));
+		await resumed.init({ suppressWelcomeIntro: true });
+		const policy = resumedSession.getPersonaRuntime()!.policy;
+		expect(policy.isPersonaActive()).toBe(false);
+		expect([...(policy.cliGrant ?? [])]).toEqual(["read"]);
+		expect(policy.effective("write")).toBe(false);
+		await resumedSession.dispose();
+	});
+
+	// Review R4-A(2): a re-queued failed persona restore is source-session state
+	// — surviving the switch would clobber the target's restored model.
+	it("session switch discards a retained failed restore", async () => {
+		await writeFixtureAgent(
+			`---
+name: fixture-alpha
+description: Alpha persona
+tools:
+  - read
+model:
+  - anthropic/claude-opus-4-5
+---
+
+Alpha.`,
+			"fixture-alpha.md",
+		);
+		const plainTarget = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		plainTarget.appendMessage({ role: "user", content: "plain", timestamp: Date.now() });
+		const haiku = getBundledModel("anthropic", "claude-haiku-4-5")!;
+		plainTarget.appendModelChange(`${haiku.provider}/${haiku.id}`, "default");
+		await plainTarget.ensureOnDisk();
+		await plainTarget.flush();
+		const plainFile = plainTarget.getSessionFile();
+		if (!plainFile) throw new Error("Expected session file");
+		await plainTarget.close();
+
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+		await created.switchAgentPersona("fixture-alpha");
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => true });
+		await created.exitAgentPersona();
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => false });
+		const spy = vi.spyOn(liveSession, "setModelTemporary").mockRejectedValueOnce(new Error("veto"));
+		await created.flushPendingModelSwitch();
+		spy.mockRestore();
+
+		const switched = await liveSession.switchSession(plainFile);
+		expect(switched).toBe(true);
+		expect(liveSession.model?.id).toBe("claude-haiku-4-5");
+		const flushSpy = vi.spyOn(liveSession, "setModelTemporary");
+		await created.flushPendingModelSwitch();
+		expect(flushSpy).not.toHaveBeenCalled();
+		expect(liveSession.model?.id).toBe("claude-haiku-4-5");
+	});
+
+	// Review R4-A(4): a persistently failing restore must give up after three
+	// consecutive rejections instead of warning every turn forever.
+	it("failed restore gives up after three consecutive rejections", async () => {
+		await writeFixtureAgent(
+			`---
+name: fixture-alpha
+description: Alpha persona
+tools:
+  - read
+model:
+  - anthropic/claude-opus-4-5
+---
+
+Alpha.`,
+			"fixture-alpha.md",
+		);
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+		await created.switchAgentPersona("fixture-alpha");
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => true });
+		await created.exitAgentPersona();
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => false });
+		const spy = vi.spyOn(liveSession, "setModelTemporary").mockRejectedValue(new Error("no api key"));
+		const warnings = vi.spyOn(created, "showWarning").mockImplementation(() => {});
+		await created.flushPendingModelSwitch();
+		await created.flushPendingModelSwitch();
+		await created.flushPendingModelSwitch();
+		expect(spy).toHaveBeenCalledTimes(3);
+		await created.flushPendingModelSwitch();
+		expect(spy).toHaveBeenCalledTimes(3); // entry dropped; no fourth attempt
+		expect(warnings.mock.calls.some(call => String(call[0]).includes("Giving up"))).toBe(true);
 	});
 
 	// Codex R3-3: cold resume of a journal whose persona was DELETED leaves no

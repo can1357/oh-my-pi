@@ -52,9 +52,13 @@ function spawnsUsable(spawns: string[] | "*"): boolean {
 export class SessionToolPolicy {
 	// Durable at construction; re-installable from a resumed journal's recorded
 	// ceiling (setCliGrant) so a persisted persona's CLI grant keeps bounding
-	// the session after resume-without-the-flag.
+	// the session after resume-without-the-flag. Provenance decides overwrite
+	// rights: a fresh CLI flag always wins; journal installs may replace each
+	// other (session switches land on another journal's ceiling) and are
+	// cleared when the target journal records none.
 	/** From options.toolNames; null = no CLI grant. */
 	cliGrant: ReadonlySet<string> | null;
+	#cliGrantSource: "cli" | "journal" | undefined;
 	/** options.lspReadOnly ?? restrictToolNames (preserves restricted-session default). */
 	readonly cliLspReadOnly: boolean;
 
@@ -94,6 +98,7 @@ export class SessionToolPolicy {
 		// grant drives effective() and the persona explicit.tools intersect, so
 		// a raw alias would silently strip the canonical name.
 		this.cliGrant = options.toolNames ? new Set(normalizeToolNames(options.toolNames)) : null;
+		this.#cliGrantSource = options.toolNames ? "cli" : undefined;
 		this.cliLspReadOnly = options.lspReadOnly ?? options.restrictToolNames ?? false;
 		this.#globalRegistry = options.registry;
 		this.#isDefaultActive = options.isDefaultActive;
@@ -102,16 +107,25 @@ export class SessionToolPolicy {
 	}
 
 	/**
-	 * Reinstall the CLI ceiling from a resumed journal's persisted persona entry
-	 * when the launch carried no `--tools` flag (the durable grant would
-	 * otherwise survive only inside the current persona: exit, or a switch to
-	 * another persona, would silently widen back past the ceiling). Replaces
-	 * null-to-set only — a live grant (fresh CLI flag or prior install) stays
-	 * authoritative. Normalizes through the same path as construction.
+	 * Reinstall a ceiling from a resumed journal's persisted persona entry when
+	 * the launch carried no `--tools` flag (the durable grant would otherwise
+	 * survive only inside the current persona: exit, or a switch to another
+	 * persona, would silently widen back past the ceiling). A grant the CURRENT
+	 * launch typed is authoritative for the whole process and never replaced;
+	 * journal installs do replace prior journal installs, so a session switch
+	 * cannot leave one journal's ceiling ruling another's.
 	 */
-	setCliGrant(toolNames: readonly string[]): void {
-		if (this.cliGrant !== null) return;
+	installJournalCeiling(toolNames: readonly string[]): void {
+		if (this.#cliGrantSource === "cli") return;
 		this.cliGrant = new Set(normalizeToolNames(toolNames));
+		this.#cliGrantSource = "journal";
+	}
+
+	/** Drops a journal-installed ceiling (target journal records none). CLI grants are untouched. */
+	clearCliGrantFromJournal(): void {
+		if (this.#cliGrantSource !== "journal") return;
+		this.cliGrant = null;
+		this.#cliGrantSource = undefined;
 	}
 
 	// Pure derivations — every read recomputes; no caching; no side effects

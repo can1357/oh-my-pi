@@ -118,10 +118,11 @@ export class PersonaRuntime {
 		}
 		const txSnapshot = await this.snapshot();
 		try {
-			if (this.policy.isPersonaActive()) {
+			const exitedInTransaction = this.policy.isPersonaActive();
+			if (exitedInTransaction) {
 				await this.#exitInner(hooks, deferModel);
 			}
-			await this.#enterInner(agent, explicit, hooks, deferModel, baselineOverride);
+			await this.#enterInner(agent, explicit, hooks, deferModel, baselineOverride, exitedInTransaction);
 		} catch (err) {
 			await this.restore(txSnapshot);
 			hooks.onPersonaSwitchFailed?.();
@@ -170,10 +171,18 @@ export class PersonaRuntime {
 			if (sameAgent && sameExplicit) {
 				return;
 			}
-			if (this.policy.isPersonaActive()) {
+			const exitedInTransaction = this.policy.isPersonaActive();
+			if (exitedInTransaction) {
 				await this.#exitInner(hooks, deferModel);
 			}
-			await this.#enterInner(desired.agent, desired.explicit ?? {}, hooks, deferModel, desired.baselineOverride);
+			await this.#enterInner(
+				desired.agent,
+				desired.explicit ?? {},
+				hooks,
+				deferModel,
+				desired.baselineOverride,
+				exitedInTransaction,
+			);
 		} catch (err) {
 			await this.restore(txSnapshot);
 			hooks.onPersonaSwitchFailed?.();
@@ -247,19 +256,30 @@ export class PersonaRuntime {
 		hooks: PersonaModelApplyHooks,
 		deferModel: boolean,
 		baselineOverride?: ModelOverrideState,
+		exitedInTransaction = false,
 	): Promise<void> {
 		this.session.clearInheritedProviderPromptCacheKey();
-		// A non-deferred (pre-turn) enter supersedes any session-level deferred
-		// restore still queued from a FAILED agent_end flush (the ACP headless
-		// channel): the live model is still the previous persona's because the
-		// restore never landed, so capturing it would strand the new persona's
-		// exit on the old persona's model. Adopt the owed baseline into the
-		// capture below, then drop the superseded queue entry so the next
-		// boundary cannot apply it mid-persona. A mid-turn (deferred) enter
-		// takes the #deferredExitBaseline channel instead and leaves the queue
-		// untouched for its transaction.
-		const owed = deferModel || this.#activeBaseline ? undefined : this.session.getDeferredModelRestore?.();
-		if (owed?.model) this.session.clearDeferredModelRestore?.();
+		// A non-deferred (pre-turn) enter supersedes any model mutation the
+		// SURFACE still has queued for its next boundary (TUI pending switch,
+		// session-level ACP slot — both reachable from a RETAINED failed flush):
+		// it must not land mid-persona later. Provenance decides what it was:
+		// - TRUE FIRST enter: the entry can only be an exit restore whose flush
+		//   failed, so the live model is still the old persona's — ADOPT the
+		//   owed baseline into the capture below (dropping it would delete the
+		//   only copy of the true base).
+		// - chained enter (this transaction ran #exitInner): that exit already
+		//   restored the true baseline synchronously, so the queued entry is a
+		//   stale persona-MODEL SWITCH, not a restore — DROP it without
+		//   adopting; binding the new persona's exit to a model no persona ever
+		//   landed on is the regression adopting it causes.
+		// A mid-turn (deferred) enter takes the #deferredExitBaseline channel
+		// and leaves the surface queue untouched for its own transaction.
+		// Surfaces that keep a queue the session itself does not carry (TUI)
+		// override the channel; otherwise fall back to the session-level slot.
+		const readOwed = hooks.getSurfaceDeferredRestore ?? (() => this.session.getDeferredModelRestore?.());
+		const dropOwed = hooks.clearSurfaceDeferredRestore ?? (() => this.session.clearDeferredModelRestore?.());
+		const owed = deferModel ? undefined : readOwed();
+		if (owed?.model) dropOwed();
 		// Capture pre-persona baseline if not already active (or overridden on resume)
 		if (!this.#activeBaseline) {
 			const deferred = deferModel ? this.#deferredExitBaseline : undefined;
@@ -267,7 +287,7 @@ export class PersonaRuntime {
 			this.#activeBaseline =
 				baselineOverride ??
 				deferred ??
-				(owed?.model
+				(owed?.model && !exitedInTransaction
 					? { model: owed.model, thinkingLevel: owed.thinkingLevel }
 					: {
 							model: this.session.model,

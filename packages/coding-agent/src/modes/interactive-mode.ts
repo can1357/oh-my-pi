@@ -802,6 +802,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#goalSuppressNextContinuation = false;
 	#planModePreviousModelState: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
 	#pendingModelSwitch: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
+	/** Consecutive flush failures for the currently owed persona restore (retry cap). */
+	#pendingModelSwitchFailures = 0;
 	/** Whether #pendingModelSwitch was queued by the live plan-role reconciler. */
 	#pendingPlanModelSwitch = false;
 	#planModeHasEntered = false;
@@ -3256,14 +3258,20 @@ export class InteractiveMode implements InteractiveModeContext {
 			// the runtime's parked baseline stays intact with it. A plan-role
 			// switch re-derives from settings on the next transition, so it is
 			// not re-queued — retrying a rejected switch every turn could loop.
-			if (!pendingWasPlan && !this.#pendingModelSwitch) {
+			const retries = ++this.#pendingModelSwitchFailures;
+			const giveUp = pendingWasPlan || retries >= 3;
+			if (!giveUp && !this.#pendingModelSwitch) {
 				this.#pendingModelSwitch = pending;
 			}
 			this.showWarning(
-				`Failed to switch model after streaming: ${error instanceof Error ? error.message : String(error)}`,
+				giveUp
+					? `Giving up on the deferred model switch after ${retries} failures (${error instanceof Error ? error.message : String(error)}); switch with /model if needed.`
+					: `Failed to switch model after streaming: ${error instanceof Error ? error.message : String(error)}`,
 			);
+			if (giveUp) this.#pendingModelSwitchFailures = 0;
 			return;
 		}
+		this.#pendingModelSwitchFailures = 0;
 		// Consumed for real: drop the runtime's parked pre-chain baseline so a
 		// later mid-turn enter captures the live model instead of a stale value.
 		this.session.getPersonaRuntime()?.onPendingModelRestoreFlushed();
@@ -3273,6 +3281,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		preserveVibe?: boolean;
 		vibeScopeAlreadySuspended?: boolean;
 	}): Promise<void> {
+		// A re-queued (failed-flush) persona restore is SOURCE-session state:
+		// surviving into a switched-in target would clobber the target's
+		// restored model at its first agent_end, repeatedly until manually
+		// overridden. Runs after init's first pass (queue empty) and on every
+		// switch/branch, so any owed entry dies with its session.
+		this.#pendingModelSwitch = undefined;
+		this.#pendingPlanModelSwitch = false;
+		this.#pendingModelSwitchFailures = 0;
 		if (this.planModeEnabled || this.planModePaused) {
 			this.session.setPlanModeState(undefined);
 			try {
@@ -6439,6 +6455,20 @@ export class InteractiveMode implements InteractiveModeContext {
 		const priorPlanFlag = this.#pendingPlanModelSwitch;
 		return {
 			...createDefaultPersonaModelHooks(this.session),
+			// The runtime's non-deferred enter reads+drops the surface queue
+			// through this channel (persona entries only — a plan-role switch is
+			// a role transition the next boundary still owes, not a
+			// persona-lineage entry). Without it a RETAINED failed-flush restore
+			// or a stale persona-model switch would land mid-persona at a later
+			// agent_end (the TUI queue is invisible to the session-level default
+			// hooks channel).
+			getSurfaceDeferredRestore: () =>
+				this.#pendingPlanModelSwitch || !this.#pendingModelSwitch
+					? undefined
+					: { model: this.#pendingModelSwitch.model, thinkingLevel: this.#pendingModelSwitch.thinkingLevel },
+			clearSurfaceDeferredRestore: () => {
+				if (!this.#pendingPlanModelSwitch) this.#pendingModelSwitch = undefined;
+			},
 			shouldDeferModelSwitch: () => this.session.isStreaming,
 			deferModelSwitchWhileStreaming: agent => {
 				// A thinking-only persona (thinking set, no model) still queues:
@@ -6492,6 +6522,8 @@ export class InteractiveMode implements InteractiveModeContext {
 					thinkingLevel: baseline.thinkingLevel,
 				};
 				this.#pendingPlanModelSwitch = false;
+				// Fresh entry: the retry budget restarts.
+				this.#pendingModelSwitchFailures = 0;
 			},
 			// Rollback safety: the deferred queue mutation must be undone when
 			// the runtime rolls the transaction back — otherwise agent_end would
