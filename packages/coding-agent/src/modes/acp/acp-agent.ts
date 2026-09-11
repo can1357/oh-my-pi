@@ -176,8 +176,19 @@ export function createAcpPersonaModelHooks(
 			// would apply the pre-A model at agent_end while B runs (and B's
 			// model would never land). The notice keeps promising what the queue
 			// now delivers.
+			// j2w merge: a thinking-only selection carries the LIVE model (A's
+			// persona model), so it must keep an already-queued entry's model and
+			// only take over the thinking level — replacing wholesale would swap
+			// A's owed baseline restore for A's persona model.
 			const selection = resolveQueuedSelection(agent);
-			if (selection) session.queueDeferredModelRestore?.(selection.model, selection.thinkingLevel);
+			if (selection) {
+				const thinkingOnly = !agent.model || agent.model.length === 0;
+				const prior = thinkingOnly ? session.getDeferredModelRestore?.() : undefined;
+				session.queueDeferredModelRestore?.(
+					prior?.model ?? selection.model,
+					selection.thinkingLevel ?? prior?.thinkingLevel,
+				);
+			}
 			void emitNotice(PERSONA_DEFERRED_NOTICE_TEMPLATE.replace("{name}", agent.name));
 		},
 		deferModelRestoreWhileStreaming: baseline => {
@@ -2150,6 +2161,12 @@ export class AcpAgent implements Agent {
 		const availableModes = this.#getAvailableModes(session);
 		if (!availableModes.some(mode => mode.id === modeId)) {
 			throw new Error(`Unsupported ACP mode: ${modeId}`);
+		}
+		if (modeId === ACP_PLAN_MODE_ID && session.getToolPolicy?.()?.isPersonaActive()) {
+			// Mirror the TUI (handlePlanModeCommand refuses while a persona is
+			// active): the persona's tool grant and the plan partition would
+			// fight. Exiting the persona (`/agent`) first is the entry order.
+			throw new Error("Exit the agent persona before entering plan mode.");
 		}
 		if (modeId === ACP_PLAN_MODE_ID) {
 			const previous = session.getPlanModeState();
