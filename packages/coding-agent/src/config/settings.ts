@@ -1902,35 +1902,73 @@ export class Settings {
 
 		let settings: RawSettings = {};
 		let migrated = false;
+		let jsonSourcePath: string | undefined;
 
-		// 1. Migrate from settings.json
 		const settingsJsonPath = path.join(this.#agentDir, "settings.json");
-		try {
-			const parsed: unknown = JSONC.parse(await Bun.file(settingsJsonPath).text());
-			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-				settings = this.#deepMerge(settings, this.#migrateRawSettings(parsed as RawSettings));
-				migrated = true;
-				try {
-					fs.renameSync(settingsJsonPath, `${settingsJsonPath}.bak`);
-				} catch {}
-			}
-		} catch {}
+		const settingsJsonBakPath = `${settingsJsonPath}.bak`;
 
-		// 2. Migrate from agent.db
+		// Prefer the live file; fall back to an orphaned .bak left behind by a
+		// previous migration that renamed before the durable write completed.
+		for (const candidate of [settingsJsonPath, settingsJsonBakPath]) {
+			try {
+				const parsed: unknown = JSONC.parse(await Bun.file(candidate).text());
+				if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+					settings = this.#deepMerge(settings, this.#migrateRawSettings(parsed as RawSettings));
+					migrated = true;
+					jsonSourcePath = candidate;
+					if (candidate === settingsJsonBakPath) {
+						logger.warn("Settings: recovering from orphaned settings.json.bak", { path: candidate });
+					}
+					break;
+				}
+				// A present-but-non-object legacy file is unusable; don't fall back to a
+				// stale .bak that would overwrite the newer live file.
+				logger.warn("Settings: ignoring non-object legacy settings.json", { path: candidate });
+				break;
+			} catch (error) {
+				// Only an absent live file should trigger .bak recovery; a malformed or
+				// unreadable live file must not be replaced by a stale backup.
+				if (isEnoent(error)) continue;
+				logger.warn("Settings: failed to read legacy settings.json", {
+					path: candidate,
+					error: String(error),
+				});
+				break;
+			}
+		}
+
 		try {
 			const dbSettings = this.#storage?.getSettings();
 			if (dbSettings) {
 				settings = this.#deepMerge(settings, this.#migrateRawSettings(dbSettings as RawSettings));
 				migrated = true;
 			}
-		} catch {}
+		} catch (error) {
+			logger.warn("Settings: failed to read legacy agent.db settings", { error: String(error) });
+		}
 
-		// 3. Write merged settings
 		if (migrated && Object.keys(settings).length > 0) {
 			try {
 				await this.#writeYamlAtomically(this.#configPath, settings);
 				logger.debug("Settings: migrated to config.yml", { path: this.#configPath });
-			} catch {}
+			} catch (error) {
+				logger.warn("Settings: failed to write migrated config.yml", {
+					path: this.#configPath,
+					error: String(error),
+				});
+				return;
+			}
+
+			if (jsonSourcePath === settingsJsonPath) {
+				try {
+					await fs.promises.rename(settingsJsonPath, settingsJsonBakPath);
+				} catch (error) {
+					logger.warn("Settings: failed to archive settings.json after migration", {
+						path: settingsJsonPath,
+						error: String(error),
+					});
+				}
+			}
 		}
 	}
 
