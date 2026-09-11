@@ -1091,6 +1091,14 @@ export interface Model<TApi extends Api = Api> {
 	/** Whether this model requires Cursor's tool-schema combiner projection. */
 	requiresCursorToolSchemaProjection?: boolean;
 	/**
+	 * Whether images nested in a `toolResult` block must be hoisted into the
+	 * enclosing user message. Imposed by the host, not the lineage: Bedrock
+	 * Converse refuses `toolResult.content[].image` for the OpenAI models, while
+	 * the same model accepts the same bytes through an OpenAI-compatible
+	 * transport and as a sibling block of the same user message.
+	 */
+	requiresToolResultImageHoisting?: boolean;
+	/**
 	 * Model id to send on the wire when it differs from `id`. Used by catalog
 	 * variants that present one upstream model under several local entries —
 	 * e.g. GitHub Copilot long-context variants (`claude-opus-4.7-1m` requests
@@ -1271,6 +1279,7 @@ export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	| "compatConfig"
 	| "requiresGlyphTokenization"
 	| "requiresCursorToolSchemaProjection"
+	| "requiresToolResultImageHoisting"
 	| "supportsComputerUseConfig"
 > {
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */

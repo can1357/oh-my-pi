@@ -1022,38 +1022,52 @@ function convertMessages(
 			case "toolResult": {
 				// Collect all consecutive toolResult messages into a single user message —
 				// Bedrock requires all tool results to be in one message.
-				const toolResults: ToolResultBlockWire[] = [];
-				toolResults.push({
-					toolResult: {
-						toolUseId: normalizeToolCallId(m.toolCallId),
-						content: m.content.map(c =>
-							c.type === "image"
-								? { image: createImageBlock(c.mimeType, c.data) }
-								: { text: c.text.toWellFormed() },
-						),
-						status: m.isError ? "error" : "success",
-					},
-				});
+				//
+				// Some deployments refuse an image nested in `toolResult.content` and
+				// report it against the enclosing user message, because that is the
+				// envelope tool results ride in. Those images are hoisted after the
+				// tool-result run behind one marker block, matching what the Anthropic,
+				// openai-completions and codex encoders already do for the same reason.
+				const hoistImages = model.requiresToolResultImageHoisting === true;
+				const hoisted: ImageBlockWire[] = [];
+				const encodeToolResult = (msg: ToolResultMessage): ToolResultBlockWire => {
+					const content: Array<TextBlockWire | ImageBlockWire> = [];
+					for (const c of msg.content) {
+						if (c.type !== "image") {
+							content.push({ text: c.text.toWellFormed() });
+							continue;
+						}
+						const image = createImageBlock(c.mimeType, c.data);
+						if (hoistImages) hoisted.push({ image });
+						else content.push({ image });
+					}
+					// An image-only result empties the array, and Converse rejects that
+					// ("Invalid 'input': value did not match any expected variant"), so
+					// the block keeps a note in place of the bytes.
+					if (content.length === 0) content.push({ text: "[image hoisted below]" });
+					return {
+						toolResult: {
+							toolUseId: normalizeToolCallId(msg.toolCallId),
+							content,
+							status: msg.isError ? "error" : "success",
+						},
+					};
+				};
 
+				const content: Array<ToolResultBlockWire | TextBlockWire | ImageBlockWire> = [encodeToolResult(m)];
 				let j = i + 1;
 				while (j < transformedMessages.length && transformedMessages[j].role === "toolResult") {
-					const nextMsg = transformedMessages[j] as ToolResultMessage;
-					toolResults.push({
-						toolResult: {
-							toolUseId: normalizeToolCallId(nextMsg.toolCallId),
-							content: nextMsg.content.map(c =>
-								c.type === "image"
-									? { image: createImageBlock(c.mimeType, c.data) }
-									: { text: c.text.toWellFormed() },
-							),
-							status: nextMsg.isError ? "error" : "success",
-						},
-					});
+					content.push(encodeToolResult(transformedMessages[j] as ToolResultMessage));
 					j++;
 				}
 				i = j - 1;
 
-				result.push({ role: "user", content: toolResults });
+				// Bedrock requires the tool results themselves to lead the message, so
+				// the marker and the images follow the whole run.
+				if (hoisted.length > 0) {
+					content.push({ text: "Attached image(s) from the tool result(s) above:" }, ...hoisted);
+				}
+				result.push({ role: "user", content });
 				break;
 			}
 			default:
