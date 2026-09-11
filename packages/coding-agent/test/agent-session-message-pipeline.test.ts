@@ -924,6 +924,58 @@ describe("AgentSession message pipeline", () => {
 		expect(calls).toBe(1);
 	});
 
+	it.each([
+		["expands", "short-secret"],
+		["shrinks", "long-secret-".repeat(100)],
+	])("measures the outbound context when obfuscation %s it", async (change, secret) => {
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+		const context: Context = {
+			systemPrompt: [secret],
+			messages: [{ role: "user", content: secret, timestamp: 1 }],
+			tools: [],
+		};
+		const before = structuredClone(context);
+		const outbound = obfuscateProviderContext(obfuscator, context);
+		const plainBytes = Buffer.byteLength(JSON.stringify(context), "utf8");
+		const outboundBytes = Buffer.byteLength(JSON.stringify(outbound), "utf8");
+		const agent = new Agent({ initialState: { model: getBundledModel("openai", "gpt-4o-mini") } });
+		vi.spyOn(agent, "buildSideRequestContext").mockResolvedValue(context);
+		let capturedContext: Context | undefined;
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			obfuscator,
+			sideStreamFn: (_model, sent) => {
+				capturedContext = sent;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage("Answer");
+					stream.push({ type: "text_delta", contentIndex: 0, delta: "Answer", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			},
+		});
+		sessions.push(session);
+
+		if (change === "expands") {
+			expect(outboundBytes).toBeGreaterThan(plainBytes);
+			await expect(
+				session.runEphemeralTurn({ promptText: "Question?", maxContextBytes: plainBytes }),
+			).rejects.toThrow("context exceeds");
+			expect(capturedContext).toBeUndefined();
+		} else {
+			expect(outboundBytes).toBeLessThan(plainBytes);
+			expect(
+				(await session.runEphemeralTurn({ promptText: "Question?", maxContextBytes: outboundBytes })).replyText,
+			).toBe("Answer");
+			expect(capturedContext).toEqual(outbound);
+		}
+		expect(context).toEqual(before);
+	});
+
 	it("rejects an oversized ephemeral context before inference", async () => {
 		let calls = 0;
 		const sideStreamFn: StreamFn = () => {

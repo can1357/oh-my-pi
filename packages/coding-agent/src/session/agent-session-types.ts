@@ -481,7 +481,7 @@ export interface EphemeralTurnOptions {
 	tools?: false;
 	/** Optional provider output-token cap. Codex Responses rejects this option before inference because its backend does not support output caps. */
 	maxTokens?: number;
-	/** Reject before inference when the post-transform provider context exceeds this serialized UTF-8 byte cap. */
+	/** Reject before inference when the post-transform, secret-obfuscated provider context exceeds this serialized UTF-8 byte cap. */
 	maxContextBytes?: number;
 	/** Awaited in order; a delivery failure rejects the side turn and aborts the request. */
 	onTextDelta?: (delta: string) => void | Promise<void>;

@@ -8860,7 +8860,10 @@ export class AgentSession {
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
 		const sideContext = await this.agent.buildSideRequestContext(llmMessages);
 		// Apply after context transforms, without mutating a potentially shared context.
-		const context = args.tools === false ? { ...sideContext, tools: [] } : sideContext;
+		const context = obfuscateProviderContext(
+			this.#obfuscator,
+			args.tools === false ? { ...sideContext, tools: [] } : sideContext,
+		);
 		if (
 			args.maxContextBytes !== undefined &&
 			Buffer.byteLength(JSON.stringify(context), "utf8") > args.maxContextBytes
@@ -8901,7 +8904,7 @@ export class AgentSession {
 		let providerReplyText = "";
 		let emittedReplyText = "";
 		let assistantMessage: AssistantMessage | undefined;
-		const stream = await this.#sideStreamFn(model, obfuscateProviderContext(this.#obfuscator, context), options);
+		const stream = await this.#sideStreamFn(model, context, options);
 		try {
 			for await (const event of stream) {
 				if (event.type === "text_delta") {
