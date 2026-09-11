@@ -93,7 +93,12 @@ export async function buildAvailableSlashCommands(
 	const fileCommands = await loadFileCommands(session.sessionManager.getCwd());
 	session.setSlashCommands(fileCommands);
 	for (const command of fileCommands) {
-		appendCommand({ name: command.name, description: command.description, source: "file" });
+		appendCommand({
+			name: command.name,
+			description: command.description,
+			input: command.argumentHint ? { hint: command.argumentHint } : undefined,
+			source: "file",
+		});
 	}
 
 	return commands;
