@@ -4,7 +4,7 @@ import type { StatusResponse } from "./types";
 
 // Read from test/fixtures/status-contract.json relative to src/
 const status = await Bun.file(
-  new URL("../test/fixtures/status-contract.json", import.meta.url).pathname
+  new URL("../test/fixtures/status-contract.json", import.meta.url)
 ).json() as StatusResponse;
 
 describe("buildWorkItems contract validation", () => {

@@ -2269,6 +2269,68 @@ function resolveToolForCall(
 	);
 }
 
+/** Shortest suggestable segment; below this the match is noise (`id`, `to`). */
+const MIN_TOOL_NAME_SUGGESTION_SEGMENT = 3;
+/** Cap on names listed for an ambiguous miss, so the error stays readable. */
+const MAX_TOOL_NAME_SUGGESTIONS = 3;
+
+/**
+ * Advertised tool names sharing a trailing `_`-delimited segment with `name`.
+ *
+ * A model that mis-transcribes a long opaque tool name reliably keeps the
+ * trailing verb — that segment is the only part carrying meaning, while any
+ * leading id segments are high-entropy and mnemonic-free. Matching on it turns
+ * an otherwise dead `not found` into a self-correcting one.
+ *
+ * Both the last `__` and last `_` boundary are tried, so a name that lost only
+ * its separator (`…__resolve_library_id`) and one that lost a whole id segment
+ * (`…__read`) both recover. Purely advisory: this only builds an error string
+ * and never selects a tool, so dispatch semantics are unchanged.
+ */
+function suggestToolNames(
+	name: string,
+	tools: ReadonlyArray<Pick<AgentTool, "name" | "customWireName">> | undefined,
+): string[] {
+	if (!tools || tools.length === 0) return [];
+	const segments: string[] = [];
+	for (const boundary of ["__", "_"]) {
+		const idx = name.lastIndexOf(boundary);
+		if (idx < 0) continue;
+		const segment = name.slice(idx + boundary.length);
+		if (segment.length >= MIN_TOOL_NAME_SUGGESTION_SEGMENT && !segments.includes(segment)) segments.push(segment);
+	}
+	if (segments.length === 0) return [];
+	// Longest tail first. A distinctive `__` tail (`resolve_library_get`) is a
+	// far stronger signal than the generic `_` tail it contains (`get`), and the
+	// caller truncates the list — so the strongest match has to sort ahead of
+	// however many tools happen to share the weak one.
+	segments.sort((a, b) => b.length - a.length);
+	const matches: string[] = [];
+	for (const segment of segments) {
+		for (const tool of tools) {
+			for (const candidate of [tool.name, tool.customWireName]) {
+				if (candidate === undefined || candidate === name || matches.includes(candidate)) continue;
+				if (candidate === segment || candidate.endsWith(`_${segment}`)) matches.push(candidate);
+			}
+		}
+	}
+	return matches;
+}
+
+/**
+ * `Tool <name> not found`, plus a suggestion when the advertised set contains a
+ * plausible intended target. Exact wording is not a contract; the model reads it.
+ */
+function formatToolNotFoundMessage(
+	name: string,
+	tools: ReadonlyArray<Pick<AgentTool, "name" | "customWireName">> | undefined,
+): string {
+	const suggestions = suggestToolNames(name, tools);
+	if (suggestions.length === 0) return `Tool ${name} not found`;
+	if (suggestions.length === 1) return `Tool ${name} not found. Did you mean ${suggestions[0]}?`;
+	return `Tool ${name} not found. Closest available: ${suggestions.slice(0, MAX_TOOL_NAME_SUGGESTIONS).join(", ")}`;
+}
+
 /**
  * Pre-dispatch phase for every pending tool call on `assistantMessage`, run in
  * call order: intent extraction, argument validation, and the `beforeToolCall`
@@ -2312,7 +2374,7 @@ async function prepareToolCallDispatch(
 		}
 		const validate = (args: Record<string, unknown>): Record<string, unknown> | undefined => {
 			try {
-				if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
+				if (!tool) throw new Error(formatToolNotFoundMessage(toolCall.name, context.tools));
 				return validateToolArguments(tool, { ...toolCall, arguments: args });
 			} catch (validationError) {
 				if (tool?.lenientArgValidation) {
@@ -2637,7 +2699,7 @@ async function executeToolCalls(
 
 		await runInActiveSpan(toolSpan, async () => {
 			try {
-				if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
+				if (!tool) throw new Error(formatToolNotFoundMessage(toolCall.name, tools));
 				if (record.signal.aborted) {
 					result = createToolSignalAbortedResult(record.signal);
 					isError = true;

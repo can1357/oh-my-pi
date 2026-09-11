@@ -2,7 +2,7 @@
  * Hierarchical tree list rendering helper.
  */
 
-import { replaceTabs } from "@oh-my-pi/pi-tui";
+import { replaceTabs, visibleWidth } from "@oh-my-pi/pi-tui";
 import type { Theme } from "../modes/theme/theme";
 import { formatMoreItems } from "../tools/render-utils";
 import type { TreeContext } from "./types";
@@ -42,6 +42,16 @@ export function renderTreeList<T>(options: TreeListOptions<T>, theme: Theme): st
 	} = options;
 	const maxItems = expanded ? items.length : Math.min(items.length, maxCollapsed);
 	const linesBudget = !expanded && maxCollapsedLines !== undefined ? maxCollapsedLines : Infinity;
+	const branchPrefix = `${theme.fg("dim", getTreeBranch(false, theme))} `;
+	const lastPrefix = `${theme.fg("dim", getTreeBranch(true, theme))} `;
+	const branchContinuePrefix = theme.fg("dim", getTreeContinuePrefix(false, theme));
+	const lastContinuePrefix = theme.fg("dim", getTreeContinuePrefix(true, theme));
+	const prefixWidth = Math.max(
+		visibleWidth(branchPrefix),
+		visibleWidth(lastPrefix),
+		visibleWidth(branchContinuePrefix),
+		visibleWidth(lastContinuePrefix),
+	);
 
 	// Caller-driven collapse: render exactly the provided items (the caller
 	// already picked/capped them) plus an optional trailing summary row. The
@@ -58,19 +68,20 @@ export function renderTreeList<T>(options: TreeListOptions<T>, theme: Theme): st
 				theme,
 				prefix: "",
 				continuePrefix: "",
+				prefixWidth,
 			});
 			const itemLines = Array.isArray(rendered) ? rendered : rendered ? [rendered] : [];
 			if (itemLines.length === 0) continue;
 			const isLast = summary === "" && i === items.length - 1;
-			const prefix = `${theme.fg("dim", getTreeBranch(isLast, theme))} `;
-			const continuePrefix = `${theme.fg("dim", getTreeContinuePrefix(isLast, theme))}`;
+			const prefix = isLast ? lastPrefix : branchPrefix;
+			const continuePrefix = isLast ? lastContinuePrefix : branchContinuePrefix;
 			lines.push(`${prefix}${replaceTabs(itemLines[0]!)}`);
 			for (let j = 1; j < itemLines.length; j++) {
 				lines.push(`${continuePrefix}${replaceTabs(itemLines[j]!)}`);
 			}
 		}
 		if (summary !== "") {
-			lines.push(`${theme.fg("dim", theme.tree.last)} ${theme.fg("muted", summary)}`);
+			lines.push(`${lastPrefix}${theme.fg("muted", summary)}`);
 		}
 		return lines;
 	}
@@ -100,6 +111,7 @@ export function renderTreeList<T>(options: TreeListOptions<T>, theme: Theme): st
 			theme,
 			prefix: "",
 			continuePrefix: "",
+			prefixWidth,
 		});
 		preRendered.push(Array.isArray(rendered) ? rendered : rendered ? [rendered] : []);
 	}
@@ -147,15 +159,14 @@ export function renderTreeList<T>(options: TreeListOptions<T>, theme: Theme): st
 	const lines: string[] = [];
 
 	if (truncateFrom === "start" && hasSummary) {
-		lines.push(`${theme.fg("dim", theme.tree.branch)} ${theme.fg("muted", formatMoreItems(remaining, itemType))}`);
+		lines.push(`${branchPrefix}${theme.fg("muted", formatMoreItems(remaining, itemType))}`);
 	}
 
 	for (let i = displayedSlice.start; i < displayedSlice.end; i++) {
 		const isLast =
 			truncateFrom === "start" ? i === displayedSlice.end - 1 : !hasSummary && i === displayedSlice.end - 1;
-		const branch = getTreeBranch(isLast, theme);
-		const prefix = `${theme.fg("dim", branch)} `;
-		const continuePrefix = `${theme.fg("dim", getTreeContinuePrefix(isLast, theme))}`;
+		const prefix = isLast ? lastPrefix : branchPrefix;
+		const continuePrefix = isLast ? lastContinuePrefix : branchContinuePrefix;
 		const itemLines = preRendered[i]!;
 		if (itemLines.length === 0) continue;
 		lines.push(`${prefix}${replaceTabs(itemLines[0]!)}`);
@@ -165,7 +176,7 @@ export function renderTreeList<T>(options: TreeListOptions<T>, theme: Theme): st
 	}
 
 	if (truncateFrom === "end" && hasSummary) {
-		lines.push(`${theme.fg("dim", theme.tree.last)} ${theme.fg("muted", formatMoreItems(remaining, itemType))}`);
+		lines.push(`${lastPrefix}${theme.fg("muted", formatMoreItems(remaining, itemType))}`);
 	}
 
 	return lines;

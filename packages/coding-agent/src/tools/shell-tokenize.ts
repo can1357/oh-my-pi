@@ -564,3 +564,73 @@ export function extractLeadingCdTarget(command: string): { path: string; rest: s
 	while (command[i] === " " || command[i] === "\t") i++;
 	return { path, rest: command.slice(i) };
 }
+
+/**
+ * Reads one shell-style word from the start of `text`: quoted and unquoted
+ * runs concatenate as a shell would (`a"b c"d` → `ab cd`), quoting/escaping
+ * follows the same rules as {@link tokenizeShellSegments} (no escapes inside
+ * single quotes; `\"`, `\\`, `\$`, `` \` `` inside double quotes; backslash
+ * escapes the next character when unquoted), and the word ends at the first
+ * unquoted whitespace character (space, tab, `\n`, or `\r`) or the end of
+ * the string.
+ *
+ * Shared so callers reading one quoted flag value (`/loop --until "…"`) do not
+ * each maintain their own `indexOf`-based quote scanner, which breaks on an
+ * escaped instance of the closing delimiter.
+ *
+ * Returns `undefined` when `text` is empty or all leading whitespace, and
+ * `"unterminated"` for an unclosed quote.
+ */
+export function readShellWord(text: string): { value: string; rest: string } | "unterminated" | undefined {
+	let i = 0;
+	while (i < text.length && /[ \t\n\r]/.test(text[i])) i++;
+	if (i >= text.length) return undefined;
+
+	let value = "";
+	let inSingle = false;
+	let inDouble = false;
+	for (; i < text.length; i++) {
+		const ch = text[i];
+		if (inSingle) {
+			if (ch === "'") {
+				inSingle = false;
+				continue;
+			}
+			value += ch;
+			continue;
+		}
+		if (inDouble) {
+			if (ch === "\\" && i + 1 < text.length) {
+				const next = text[i + 1];
+				if (next === '"' || next === "\\" || next === "$" || next === "`") {
+					value += next;
+					i++;
+					continue;
+				}
+			}
+			if (ch === '"') {
+				inDouble = false;
+				continue;
+			}
+			value += ch;
+			continue;
+		}
+		if (ch === "'") {
+			inSingle = true;
+			continue;
+		}
+		if (ch === '"') {
+			inDouble = true;
+			continue;
+		}
+		if (ch === "\\" && i + 1 < text.length) {
+			value += text[i + 1];
+			i++;
+			continue;
+		}
+		if (/[ \t\n\r]/.test(ch)) break;
+		value += ch;
+	}
+	if (inSingle || inDouble) return "unterminated";
+	return { value, rest: text.slice(i).trim() };
+}

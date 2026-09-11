@@ -61,6 +61,10 @@ export interface ActiveRetryFallbackState {
 export interface ServingModel {
 	/** Full selector including routing and thinking level. */
 	selector: string;
+	/** Provider/id including routing, with no added thinking suffix. */
+	modelIdentity?: string;
+	/** Concrete thinking level captured with the attributed model. */
+	thinkingLevel?: ThinkingLevel;
 	/** Whether fallback routing, rather than the configured primary, owns it. */
 	isFallback: boolean;
 }
