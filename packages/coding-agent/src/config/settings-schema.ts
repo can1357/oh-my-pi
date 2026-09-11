@@ -486,6 +486,15 @@ export const SETTINGS_SCHEMA = {
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined, credential: true },
 
+	// Per-provider default OAuth account to pin at session start (e.g. always
+	// resolve `anthropic` to a specific org/workspace first thing in the day),
+	// selected the same way as `/session pin`: 1-based stored-account position,
+	// email, account id, org id, or org name. Automatic usage-based failover to
+	// a sibling account on a rate limit still applies — this only sets which
+	// account a fresh session starts from. Unset, unmatched, or ambiguous
+	// selectors are ignored (falls back to the normal ranked/round-robin pick).
+	"auth.startupOAuthAccount": { type: "record", default: EMPTY_STRING_RECORD },
+
 	autoResume: {
 		type: "boolean",
 		default: false,

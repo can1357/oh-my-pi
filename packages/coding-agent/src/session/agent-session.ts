@@ -190,6 +190,7 @@ import {
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
+import { matchOAuthAccountsBySelector } from "../slash-commands/helpers/session-pin";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -1977,6 +1978,7 @@ export class AgentSession {
 		void this.#retryInactiveAdvisorAfterModelDiscovery();
 		void this.#revalidateFallbackChainsAfterModelDiscovery();
 		if (config.rebindModelAfterDiscovery) void this.#rebindActiveModelAfterModelDiscovery();
+		this.#applyStartupOAuthAccountPin();
 	}
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
@@ -10142,6 +10144,32 @@ export class AgentSession {
 		const provider = this.model?.provider;
 		if (!provider || this.isStreaming) return false;
 		return this.#modelRegistry.authStorage.pinSessionOAuthAccount(provider, this.sessionId, credentialId);
+	}
+
+	/**
+	 * Auto-pin this session's OAuth account for the active model's provider from
+	 * `auth.startupOAuthAccount`, run once at construction time. Selector syntax
+	 * matches `/session pin`: 1-based stored-account position, email, account
+	 * id, org id, or org name (case-insensitive). No-ops when unconfigured, when
+	 * a session pin already exists (e.g. resuming a session that pinned one
+	 * earlier — never overrides a later manual `/session pin`), or when the
+	 * selector is missing/ambiguous. This only decides which account a fresh
+	 * session starts from; normal usage-based ranking still fails over to a
+	 * sibling account when the pinned one is rate-limited (see
+	 * {@link AuthStorage.pinSessionOAuthAccount}).
+	 */
+	#applyStartupOAuthAccountPin(): void {
+		const provider = this.model?.provider;
+		if (!provider) return;
+		const configured = this.settings.get("auth.startupOAuthAccount") as Record<string, string> | undefined;
+		const selector = configured?.[provider]?.trim();
+		if (!selector) return;
+		const authStorage = this.#modelRegistry.authStorage;
+		const accounts = authStorage.listOAuthAccounts(provider, this.sessionId);
+		if (accounts.some(account => account.active)) return;
+		const matches = matchOAuthAccountsBySelector(accounts, selector);
+		if (matches.length !== 1) return;
+		authStorage.pinSessionOAuthAccount(provider, this.sessionId, matches[0].credentialId);
 	}
 
 	/**

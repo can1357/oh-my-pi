@@ -13,7 +13,7 @@ import { formatDuration } from "./helpers/format";
 import { handleMcpAcp } from "./helpers/mcp";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import { describeRedeemOutcome, type ResetUsageAccount, toResetUsageAccounts } from "./helpers/reset-usage";
-import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session-pin";
+import { matchOAuthAccountsBySelector, toSessionPinAccounts } from "./helpers/session-pin";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
@@ -115,7 +115,7 @@ async function handleSessionPinCommand(
 		return;
 	}
 
-	const matches = matchSessionPinAccounts(accounts, selector);
+	const matches = matchOAuthAccountsBySelector(accounts, selector);
 	if (matches.length === 0) {
 		await output(`No ${providerName} account matches "${selector}".`);
 		return;
