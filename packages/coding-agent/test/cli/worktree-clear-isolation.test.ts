@@ -20,8 +20,11 @@ import { setWorktreesDir } from "@oh-my-pi/pi-utils";
 describe("worktree clear task-isolation ownership", () => {
 	let base: string;
 	let savedEnv: string | undefined;
+	let savedExitCode: typeof process.exitCode;
 
 	beforeEach(async () => {
+		// Bun needs an explicit zero to clear an exit code set by an expected CLI failure.
+		savedExitCode = process.exitCode ?? 0;
 		base = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-clear-"));
 		savedEnv = process.env.OMP_WORKTREE_DIR;
 		delete process.env.OMP_WORKTREE_DIR;
@@ -30,6 +33,7 @@ describe("worktree clear task-isolation ownership", () => {
 	});
 
 	afterEach(async () => {
+		process.exitCode = savedExitCode;
 		setWorktreesDir(undefined);
 		if (savedEnv === undefined) delete process.env.OMP_WORKTREE_DIR;
 		else process.env.OMP_WORKTREE_DIR = savedEnv;

@@ -75921,7 +75921,8 @@
 			"contextWindow": 1000000,
 			"maxTokens": 384000,
 			"identity": {
-				"class": "deepseek"
+				"class": "deepseek",
+				"family": "flash"
 			},
 			"requiresGlyphTokenization": false,
 			"tokenizer": "deepseek-v3",
