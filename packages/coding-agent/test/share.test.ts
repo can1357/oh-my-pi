@@ -642,7 +642,7 @@ describe("shareSession", () => {
 	async function writeFakeGh(script: string): Promise<{ dir: string; gh: string }> {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-share-gh-"));
 		const gh = path.join(dir, "gh");
-		await fs.writeFile(gh, script);
+		await Bun.write(gh, script);
 		await fs.chmod(gh, 0o755);
 		return { dir, gh };
 	}
