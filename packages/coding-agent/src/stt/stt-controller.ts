@@ -1,4 +1,4 @@
-import type { OAuthAccessSource } from "@oh-my-pi/pi-ai";
+import { type ApiKeyResolver, type OAuthAccessSource, seedApiKeyResolver } from "@oh-my-pi/pi-ai";
 import { AudioCapture } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../config/settings";
@@ -49,6 +49,12 @@ export interface SttCredentialRegistry {
 	 */
 	authStorage?: OAuthAccessSource;
 	getApiKeyForProvider(provider: string, sessionId?: string): Promise<string | undefined>;
+	/**
+	 * Central a/b/c key resolver. The API-key route carries it (seeded with the
+	 * preflight key) so a server-rejected command-backed or broker-refreshed
+	 * credential is refreshed/rotated instead of retried identically.
+	 */
+	resolver?(provider: string, options?: { sessionId?: string }): ApiKeyResolver;
 	getProviderBaseUrl?(provider: string): string | undefined;
 	getProviderHeaders?(provider: string): Record<string, string> | undefined;
 }
@@ -72,9 +78,12 @@ export async function resolveSttCloudCredential(
 	try {
 		const apiKey = await registry.getApiKeyForProvider("openai", sessionId);
 		if (!apiKey) return undefined;
+		const resolver = registry.resolver?.("openai", { sessionId });
 		return {
 			kind: "openai",
-			apiKey,
+			// Seeded so the first attempt reuses the key this preflight resolved;
+			// later attempts re-enter the registry for refresh/rotation.
+			apiKey: resolver ? seedApiKeyResolver(apiKey, resolver) : apiKey,
 			baseUrl: registry.getProviderBaseUrl?.("openai"),
 			headers: registry.getProviderHeaders?.("openai"),
 		};
