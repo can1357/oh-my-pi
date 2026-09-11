@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Invalidated stale background speculative compaction results when post-snapshot branch growth prevents recovery headroom or causes net context expansion, preventing dead-end progress pauses and provider context overflows ([#11637](https://github.com/can1357/oh-my-pi/pull/11637) by [@alvins82](https://github.com/alvins82)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added
