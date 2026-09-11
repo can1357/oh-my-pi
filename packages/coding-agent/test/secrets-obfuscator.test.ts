@@ -259,6 +259,32 @@ describe("SecretObfuscator regex behavior", () => {
 		expect(obfuscated[1]).toBe(systemDeveloperMsg);
 	});
 
+	it("obfuscates file metadata on a replayed compaction payload but keeps the block verbatim", () => {
+		const secret = "SUPER_SECRET_TOKEN_12345";
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+		const message: Message = {
+			role: "user",
+			content: "Prior model work available.",
+			timestamp: 1,
+			providerPayload: {
+				type: "anthropicCompaction",
+				provider: "anthropic",
+				content: "## Goal\nAudit the handlers.",
+				filesText: `<files>\n# /repo/\n${secret}.key (Read)\n</files>`,
+			},
+		};
+
+		const [obfuscated] = obfuscateMessages(obfuscator, [message]);
+		const payload = obfuscated?.providerPayload;
+		if (payload?.type !== "anthropicCompaction") throw new Error("expected compaction payload");
+		// The metadata takes the same boundary as the summary text...
+		expect(payload.filesText).not.toContain(secret);
+		expect(obfuscator.deobfuscate(payload.filesText ?? "")).toContain(secret);
+		// ...while the replayed block stays byte-identical to the API summary.
+		expect(payload.content).toBe("## Goal\nAudit the handlers.");
+		expect(obfuscated).not.toBe(message);
+	});
+
 	it("never rewrites inline image bytes", () => {
 		const secret = "SUPER_SECRET_TOKEN_12345";
 		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);

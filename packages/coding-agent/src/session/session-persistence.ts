@@ -142,6 +142,19 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 			if (isAnthropicServerToolHistoryBlock(validationView)) return obj;
 		}
 	}
+	// Anthropic server-side compaction replay state: `encrypted_content` is
+	// opaque provider state the API validates byte-for-byte on replay, so the
+	// carrier persists atomically with its summary and metadata — both as a
+	// message `providerPayload` (`type: "anthropicCompaction"`) and under the
+	// preserveData slot, whose object carries no `type` marker of its own.
+	if (
+		typeof obj === "object" &&
+		obj !== null &&
+		(("type" in obj && obj.type === "anthropicCompaction") ||
+			(key === "anthropicCompaction" && "content" in obj && typeof obj.content === "string"))
+	) {
+		return obj;
+	}
 	if (typeof obj === "object" && "type" in obj) {
 		const signed =
 			(obj.type === "thinking" && "thinkingSignature" in obj && isNonEmptyString(obj.thinkingSignature)) ||
