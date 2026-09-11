@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Ctrl+C during an in-flight extension/hook load now exits cleanly instead of raising an `ExtensionExitError` unhandled-rejection storm ([#11789](https://github.com/can1357/oh-my-pi/issues/11789)).
+
 ## [18.1.18] - 2026-09-11
 
 ### Added

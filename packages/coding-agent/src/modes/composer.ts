@@ -16,6 +16,7 @@ import {
 	type ViewportSize,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { postmortem } from "@oh-my-pi/pi-utils";
 import { CustomEditor } from "./components/custom-editor";
 import { type AnimationFrame, TranscriptContainer } from "./components/transcript-container";
 import { type LspServerInfo, type RecentSession, WelcomeComponent } from "./components/welcome";
@@ -262,7 +263,10 @@ export class Composer implements TerminalFrameProvider {
 
 	constructor(options: ComposerOptions = {}) {
 		if (typeof theme === "undefined") initThemeSync();
-		this.#exit = options.exit ?? (code => process.exit(code));
+		// Host-owned hard exit: route through postmortem so a double-Ctrl-C during
+		// an open extension-load guard window exits cleanly instead of throwing
+		// ExtensionExitError through the guarded process.exit (#11789).
+		this.#exit = options.exit ?? (code => postmortem.exitProcess(code));
 		this.#now = options.now ?? Date.now;
 		this.#preferences = { ...COMPOSER_DEFAULTS, ...options.preferences };
 		this.#statusSnapshot = options.status;

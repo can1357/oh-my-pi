@@ -8,7 +8,7 @@ import {
 	type PasteOptions,
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
-import { isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { resolveLocalRoot } from "../../internal-urls";
 import { AskDialogComponent } from "../../modes/components/ask-dialog";
@@ -1265,7 +1265,10 @@ export class InputController {
 		// common case; this is the defense-in-depth ladder for everything
 		// else. See issue #2600.
 		if (this.ctx.isShuttingDown) {
-			process.exit(130); // 128 + SIGINT
+			// Route through postmortem: this hard-abort can fire while an
+			// extension-load guard window is open, where raw process.exit is a
+			// throwing ExtensionExitError stub (#11789).
+			postmortem.exitProcess(130); // 128 + SIGINT
 		}
 
 		const now = Date.now();

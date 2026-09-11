@@ -60,6 +60,26 @@ export const NATIVE_PROCESS_EXIT = Symbol.for("omp.postmortem.nativeProcessExit"
 type HardExitFn = (code?: number) => never;
 
 /**
+ * Walk a guarded exit primitive down to the native it shadows.
+ *
+ * `withHostGuard` stamps each throwing replacement with the primitive it
+ * shadows under {@link NATIVE_PROCESS_EXIT}; nested guard windows stack, so a
+ * single unwrap can still land on another throwing stub. Follow the chain
+ * (cycle-guarded) until a link carries no stamp — that link is native.
+ */
+function nativeHardExit(fn: HardExitFn | undefined): HardExitFn | undefined {
+	let current = fn;
+	const seen = new Set<HardExitFn>();
+	while (typeof current === "function" && !seen.has(current)) {
+		seen.add(current);
+		const behind = Reflect.get(current, NATIVE_PROCESS_EXIT);
+		if (typeof behind !== "function") return current;
+		current = behind as HardExitFn;
+	}
+	return typeof current === "function" ? current : undefined;
+}
+
+/**
  * Hard-exit the process through the native primitive, resolved on every call.
  *
  * The native exit is deliberately re-resolved here rather than bound at module
@@ -70,14 +90,30 @@ type HardExitFn = (code?: number) => never;
  * init could freeze the throwing stub forever and turn every later shutdown
  * (SIGHUP/SIGINT/fatal) into an unhandled-rejection loop (#7393). When the
  * guard is active the stub carries the native exit under
- * {@link NATIVE_PROCESS_EXIT}; unwrapping it lets a mid-guard signal still exit
- * (#6488). Otherwise the current `process.reallyExit`/`process.exit` is native.
+ * {@link NATIVE_PROCESS_EXIT} (#6488).
+ *
+ * Both globals are reinstalled to their natives before exiting: Bun's
+ * `process.exit` re-reads `process.reallyExit` at call time, so exiting through
+ * one primitive while its sibling still holds the throwing stub re-enters the
+ * guard and loops the rejection storm (#11789). After restoring, `reallyExit`
+ * (the low-level primitive) is preferred; `process.exit` and finally `SIGKILL`
+ * are fallbacks so a poisoned or absent chain can never leave the process alive.
  */
-function exitProcess(code: number): never {
-	const current: HardExitFn = typeof process.reallyExit === "function" ? process.reallyExit : process.exit;
-	const behind = Reflect.get(current, NATIVE_PROCESS_EXIT);
-	const nativeExit = typeof behind === "function" ? (behind as HardExitFn) : current;
-	return nativeExit.call(process, code) as never;
+export function exitProcess(code: number): never {
+	const reallyExit = nativeHardExit(typeof process.reallyExit === "function" ? process.reallyExit : undefined);
+	const exit = nativeHardExit(process.exit as HardExitFn);
+	if (reallyExit) process.reallyExit = reallyExit as typeof process.reallyExit;
+	if (exit) process.exit = exit as typeof process.exit;
+	try {
+		reallyExit?.call(process, code);
+	} catch {}
+	try {
+		exit?.call(process, code);
+	} catch {}
+	try {
+		process.kill(process.pid, "SIGKILL");
+	} catch {}
+	throw new Error(`exitProcess(${code}) failed to terminate the process`);
 }
 let cleanupPromise: Promise<void> | undefined;
 let stdioDisconnectRegistrations = 0;
