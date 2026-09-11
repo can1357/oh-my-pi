@@ -3,6 +3,7 @@ import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import { type Model, PASTE_CODE_LOGIN_PROVIDERS, type UsageReport } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
+import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { Component, OverlayHandle, ResizeScrollbackMode } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
@@ -855,7 +856,17 @@ export class SelectorController {
 		compactFirst: boolean,
 	): Promise<void> {
 		const apply = async () => {
-			const level = thinkingLevel ?? this.ctx.session.resolveTemporaryModelThinkingLevel(model);
+			const current = this.ctx.session.model;
+			// Reselecting the active model preserves the live session effort: the
+			// picker advertises it on that row, so Enter must not silently fall
+			const reselecting = thinkingLevel === undefined && current !== undefined && modelsAreEqual(current, model);
+			const preserved = reselecting ? this.ctx.session.configuredThinkingLevel() : undefined;
+			// An effortless reselect is a no-op: the active row renders
+			// terminal with no badge, so falling through to a sibling role's
+			// level would silently apply effort the row never advertised
+			// (P2 #11330, reselect-undefined thread).
+			if (reselecting && preserved === undefined) return;
+			const level = thinkingLevel ?? preserved ?? this.ctx.session.resolveTemporaryModelThinkingLevel(model);
 			await this.ctx.session.setModelTemporary(model, level);
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
@@ -947,6 +958,10 @@ export class SelectorController {
 			{
 				currentContextTokens,
 				currentSelector,
+				// The session's configured effort, preserving `auto` while
+				// classification is active, so the selected row confirms the
+				// user's selector instead of the resolved concrete level.
+				sessionThinkingLevel: this.ctx.session.configuredThinkingLevel() ?? undefined,
 				taskModeKeys: this.ctx.keybindings.getKeys("app.model.selectTemporary"),
 				taskModeKeyLabel: this.ctx.keybindings.getDisplayString("app.model.selectTemporary") || "alt+p",
 				taskSelector,

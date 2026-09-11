@@ -38,6 +38,7 @@
 
 - `/rename` without a title now generates a session name from recent conversation using the configured tiny model.
 - Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
+- Model browser rows now show the selected thinking-effort level next to the model name: the live session effort on the active model, the row's own role level in `@` quick-role mode, and role-attributed badges when one model backs several roles at different levels.
 - `/loop` accepts `--until '<cmd>'` / `--while '<cmd>'` to gate each iteration on a shell command's exit status, so a loop can stop on real project state instead of only a count or duration. ([#10858](https://github.com/can1357/oh-my-pi/pull/10858) by [@andyhite](https://github.com/andyhite))
 
 ### Fixed

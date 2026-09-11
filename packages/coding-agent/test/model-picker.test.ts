@@ -1,9 +1,11 @@
 import { beforeAll, describe, expect, type Mock, test, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import type { Model } from "@oh-my-pi/pi-ai";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { formatThinkingLevelBadge } from "@oh-my-pi/pi-coding-agent/modes/components/model-browser";
 import { ModelPickerComponent, type ModelPickerOptions } from "@oh-my-pi/pi-coding-agent/modes/components/model-picker";
 import { resolveSegmentPalette } from "@oh-my-pi/pi-coding-agent/modes/components/segment-track";
 import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -14,8 +16,8 @@ function normalize(lines: readonly string[]): string {
 	return stripVTControlCharacters(lines.join("\n")).replace(/\s+/g, " ").trim();
 }
 
-function makeModel(provider: string, id: string, contextWindow = 128_000): Model {
-	return buildModel({
+function makeModel(provider: string, id: string, contextWindow = 128_000, ladder?: Effort[]): Model {
+	const model = buildModel({
 		id,
 		name: id,
 		api: "ollama-chat",
@@ -27,7 +29,14 @@ function makeModel(provider: string, id: string, contextWindow = 128_000): Model
 		contextWindow,
 		maxTokens: 1024,
 	});
+	// Fixtures asserting a badge opt into an explicit ladder: without one the
+	// picker clamp (activation parity) strips every badge.
+	if (!ladder) return model;
+	return { ...model, reasoning: true, thinking: { mode: "effort", efforts: ladder } };
 }
+
+/** Full effort ladder: asserted badges survive the picker clamp unchanged. */
+const FULL_LADDER = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
 
 let testTheme = await getThemeByName("dark");
 
@@ -51,18 +60,26 @@ interface PickerHarness {
 
 function createPicker(options: {
 	models: Model[] | (() => Model[]);
+	available?: Model[] | (() => Model[]);
 	scoped?: boolean;
+	scopedModels?: Model[];
 	settings?: Settings;
 	registry?: RegistryOverrides;
 	picker?: ModelPickerOptions;
 }): PickerHarness {
 	installTestTheme();
 	const modelsFn = typeof options.models === "function" ? options.models : () => options.models as Model[];
+	const availableFn =
+		options.available === undefined
+			? modelsFn
+			: typeof options.available === "function"
+				? options.available
+				: () => options.available as Model[];
 	const settings = options.settings ?? Settings.isolated({});
 	const registry = {
 		refresh: options.registry?.refresh ?? (async () => {}),
 		getError: () => undefined,
-		getAvailable: modelsFn,
+		getAvailable: availableFn,
 		getAll: modelsFn,
 	} as unknown as ModelRegistry;
 	const ui = { requestRender: vi.fn(), terminal: { rows: 40 } } as unknown as TUI;
@@ -73,7 +90,7 @@ function createPicker(options: {
 		ui,
 		settings,
 		registry,
-		options.scoped ? modelsFn().map(model => ({ model })) : [],
+		options.scoped || options.scopedModels ? (options.scopedModels ?? modelsFn()).map(model => ({ model })) : [],
 		{ onPick, onPickRole, onCancel },
 		options.picker ?? {},
 	);
@@ -250,5 +267,68 @@ describe("ModelPicker", () => {
 
 		picker.handleInput(ESC);
 		expect(onCancel).toHaveBeenCalledTimes(1);
+	});
+	test("scoped row hides effort its unqualified selector resolves away from at activation", () => {
+		// P2 (PR #11330, thread 3968076057): --models scopes the picker to
+		// providerA/shared-x while a configured unqualified `shared-x:high`
+		// selector resolves to providerB in the full available catalog, so
+		// Enter (resolveTemporaryModelThinkingLevel over getAvailable())
+		// applies no effort to the scoped row. The row must not advertise it.
+		const scoped = makeModel("providerA", "shared-x");
+		const other = makeModel("providerB", "shared-x");
+		const settings = Settings.isolated({
+			modelRoles: { default: "shared-x:high" },
+			modelProviderOrder: ["providerB", "providerA"],
+		});
+		const { picker } = createPicker({
+			models: [scoped, other],
+			scopedModels: [scoped],
+			settings,
+		});
+		const rendered = normalize(picker.render(220));
+		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
+		expect(rendered).toContain("providerA/shared-x");
+		expect(rendered).not.toContain(highBadge);
+	});
+
+	test("scoped row keeps effort its qualified selector still wins at activation", () => {
+		// Same scope, but the configured selector names the scoped provider,
+		// so activation applies high and the row must advertise it.
+		const scoped = makeModel("providerA", "shared-x", 128_000, FULL_LADDER);
+		const other = makeModel("providerB", "shared-x");
+		const settings = Settings.isolated({
+			modelRoles: { default: "providerA/shared-x:high" },
+			modelProviderOrder: ["providerB", "providerA"],
+		});
+		const { picker } = createPicker({
+			models: [scoped, other],
+			scopedModels: [scoped],
+			settings,
+		});
+		const rendered = normalize(picker.render(220));
+		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
+		expect(rendered).toContain("providerA/shared-x");
+		expect(rendered).toContain(highBadge);
+	});
+	test("empty activation catalog shows no effort badge on scoped rows", () => {
+		// P2 (PR #11330, thread 3968188070): scoped rows remain while
+		// getAvailable() returns an empty list. Enter
+		// (resolveTemporaryModelThinkingLevel) returns undefined for the same
+		// empty catalog, so even an explicitly suffixed role must not
+		// advertise effort the switch will not apply.
+		const scoped = makeModel("providerA", "shared-x");
+		const settings = Settings.isolated({
+			modelRoles: { default: "providerA/shared-x:high" },
+		});
+		const { picker } = createPicker({
+			models: [scoped],
+			available: [],
+			scopedModels: [scoped],
+			settings,
+		});
+		const rendered = normalize(picker.render(220));
+		const highBadge = Bun.stripANSI(formatThinkingLevelBadge(ThinkingLevel.High));
+		expect(rendered).toContain("providerA/shared-x");
+		expect(rendered).not.toContain(highBadge);
 	});
 });

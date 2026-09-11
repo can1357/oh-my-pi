@@ -9,6 +9,7 @@ import { addKeyAliases, type Component, canonicalKeyId, type KeyId, parseKey, ty
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
 import type { ResolvedRoleModel } from "../../session/agent-session";
+import type { ConfiguredThinkingLevel } from "../../thinking";
 import { type ThemeColor, theme } from "../theme/theme";
 import {
 	buildBrowserItems,
@@ -44,6 +45,11 @@ export interface ModelPickerOptions {
 	currentContextTokens?: number;
 	/** `provider/id` of the session's active model; highlighted and preselected. */
 	currentSelector?: string;
+	/**
+	 * The session's current thinking level, rendered on the session-model row
+	 * so a session-only effort switch stays visible on reopen.
+	 */
+	sessionThinkingLevel?: ConfiguredThinkingLevel;
 	/** Resolved role models in the same order used by the ctrl+p quick-role cycle. */
 	quickRoles?: ReadonlyArray<ResolvedRoleModel>;
 	/** Complete ctrl+p order, including unavailable roles, to preserve segment colors. */
@@ -96,6 +102,8 @@ export class ModelPickerComponent implements Component {
 	#taskMatchKeys = new Set<string>();
 	#taskModeKeyLabel: string;
 	#taskSelector: string | undefined;
+	/** Session effort for model rows; cleared while Task mode repoints selection. */
+	#sessionThinkingLevel: ConfiguredThinkingLevel | undefined;
 
 	constructor(
 		tui: TUI,
@@ -112,6 +120,7 @@ export class ModelPickerComponent implements Component {
 		this.#currentSelector = options.currentSelector;
 		this.#currentQuickRoleSelector = options.currentQuickRole ? `@${options.currentQuickRole}` : undefined;
 		this.#taskSelector = options.taskSelector;
+		this.#sessionThinkingLevel = options.sessionThinkingLevel;
 		this.#taskModeKeyLabel = options.taskModeKeyLabel ?? "alt+p";
 		if (callbacks.onPickTask) {
 			for (const key of options.taskModeKeys ?? []) addKeyAliases(this.#taskMatchKeys, key);
@@ -125,6 +134,8 @@ export class ModelPickerComponent implements Component {
 			currentContextTokens: options.currentContextTokens,
 			markOverContext: true,
 			emptyText: () => (this.#roleMode ? "  No quick roles in the Ctrl+P cycle" : undefined),
+			sessionThinkingLevel: options.sessionThinkingLevel,
+			suppressDerivedThinkingLevels: true,
 		});
 		this.#browser.onActivate = item => {
 			const quickRole = this.#quickRoles.get(item.selector);
@@ -182,8 +193,23 @@ export class ModelPickerComponent implements Component {
 			}
 		}
 
-		const allModels = this.#scopedModels.length > 0 ? models : this.#registry.getAll();
-		const roles = resolveRoleAssignments(this.#settings, allModels, models);
+		// Badge parity with resolveTemporaryModelThinkingLevel (P2 #11330):
+		// Enter resolves role values against getAvailable(), so badges must
+		// too. Resolving against the scoped list (or getAll()) lets an
+		// unqualified selector match the scoped row here while resolving to
+		// another provider at activation, advertising effort the switch will
+		// not apply. Displayed rows stay scoped; only the badge lookup uses
+		// the activation candidate set. An empty activation catalog stays
+		// authoritative: it resolves no effort (matching the resolver's early
+		// undefined return) instead of falling back to scoped display models,
+		// which would advertise effort Enter will not apply.
+		let activationModels: ReadonlyArray<Model>;
+		try {
+			activationModels = this.#registry.getAvailable();
+		} catch {
+			activationModels = models;
+		}
+		const roles = resolveRoleAssignments(this.#settings, activationModels, models);
 		const storage = this.#settings.getStorage();
 		const mruOrder = storage?.getModelUsageOrder() ?? [];
 		this.#modelItems = buildBrowserItems(models);
@@ -211,6 +237,13 @@ export class ModelPickerComponent implements Component {
 				model: entry.model,
 				selector,
 				labelColor: palette[(orderIndex >= 0 ? orderIndex : index) % palette.length],
+				// The row's own role level wins over any model-wide fallback, so
+				// two roles sharing a model never show each other's effort.
+				// Only explicit levels qualify: applying a role without one
+				// leaves the session effort untouched.
+				...(entry.explicitThinkingLevel && entry.thinkingLevel !== undefined
+					? { thinkingLevel: entry.thinkingLevel }
+					: {}),
 			};
 		});
 	}
@@ -254,6 +287,18 @@ export class ModelPickerComponent implements Component {
 	/** Flip between session-model and Task-subagent targets, repointing the highlight. */
 	#toggleTaskMode(): void {
 		this.#taskMode = !this.#taskMode;
+		// Task picks carry no effort: the session level must not badge the
+		// Task-model row as if the spawned task would use it.
+		this.#browser.setSessionThinkingLevel(this.#taskMode ? undefined : this.#sessionThinkingLevel);
+		// Role levels do not transfer either: the Task agent runs its own
+		// configured effort (auto by default), so every badge hides in Task mode.
+		this.#browser.setShowThinkingBadges(!this.#taskMode);
+		// A quick-role query (for example `@slow`) would otherwise keep
+		// filtering the swapped-in Task rows to an empty view, so entering
+		// Task mode clears it; ordinary model queries filter the same
+		// provider/id rows in both modes and are preserved, and leaving
+		// Task mode preserves the typed query either way.
+		if (this.#taskMode && this.#browser.query.startsWith("@")) this.#browser.setQuery("");
 		this.#syncItemsForQuery(this.#browser.query, true);
 		const target = this.#taskMode ? this.#taskSelector : this.#currentSelector;
 		if (target) this.#browser.selectSelector(target);

@@ -27,7 +27,13 @@ import { getModelMatchPreferences, resolveModelRoleValue } from "../../config/mo
 import { getKnownRoleIds, getRoleInfo, MODEL_ROLE_IDS } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import type { ModelPerfStats } from "../../session/agent-storage";
-import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../../thinking";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	getConfiguredThinkingLevelMetadata,
+	parseConfiguredThinkingLevel,
+	resolveThinkingLevelForModel,
+} from "../../thinking";
 import { thinkingLevelGlyph as sharedThinkingLevelGlyph } from "../../tools/render-utils";
 import { type ThemeColor, theme } from "../theme/theme";
 import {
@@ -46,6 +52,12 @@ export interface ModelBrowserItem {
 	selector: string;
 	/** Optional foreground color for the row label. */
 	labelColor?: ThemeColor;
+	/**
+	 * The row's own role thinking level for virtual `@role` rows: the level
+	 * applying that row would set, so the badge never falls back to an
+	 * unrelated role sharing the same model.
+	 */
+	thinkingLevel?: ConfiguredThinkingLevel;
 }
 
 /** Resolved role assignment as displayed by the browser and the hub. */
@@ -54,6 +66,13 @@ export interface RoleAssignment {
 	thinkingLevel: ConfiguredThinkingLevel;
 	/** True when the role has no configured value and fell back to auto-selection. */
 	autoSelected: boolean;
+	/**
+	 * True when the role value carries an explicit `:level` suffix. Absent
+	 * means explicit (test-constructed assignments predate the flag). False
+	 * marks a level derived from `defaultThinkingLevel`, which the Alt+P
+	 * session picker does not apply — so it must not render as a fallback.
+	 */
+	explicitThinkingLevel?: boolean;
 }
 
 /** Map of role id to its resolved assignment (absent roles are unresolved). */
@@ -99,6 +118,7 @@ export function resolveRoleAssignments(
 				model: resolved.model,
 				thinkingLevel: resolvedThinkingLevel(role, resolved),
 				autoSelected: false,
+				explicitThinkingLevel: resolved.explicitThinkingLevel,
 			};
 		}
 	}
@@ -113,6 +133,7 @@ export function resolveRoleAssignments(
 				model: resolved.model,
 				thinkingLevel: resolvedThinkingLevel(role, resolved),
 				autoSelected: true,
+				explicitThinkingLevel: resolved.explicitThinkingLevel,
 			};
 		}
 	}
@@ -333,6 +354,18 @@ export function thinkingLevelGlyph(level: ConfiguredThinkingLevel): string {
 }
 
 /**
+ * Styled effort badge (`◉ max`) for a configured thinking level; empty for
+ * `inherit` (nothing to show). Shared by the browser rows and the hub role
+ * rows so the two surfaces cannot drift.
+ */
+export function formatThinkingLevelBadge(level: ConfiguredThinkingLevel): string {
+	if (level === ThinkingLevel.Inherit) return "";
+	const glyph = thinkingLevelGlyph(level);
+	const label = getConfiguredThinkingLevelMetadata(level).label;
+	return theme.fg("dim", glyph ? `${glyph} ${label}` : label);
+}
+
+/**
  * A slim role chip: `● default ◉` — solid dot for configured assignments,
  * hollow for auto-selected fallbacks, thinking glyph attached when set.
  *
@@ -420,6 +453,27 @@ export interface ModelBrowserOptions {
 	markOverContext?: boolean;
 	/** Host-provided empty-state text (e.g. provider discovery status). */
 	emptyText?: () => string | undefined;
+	/**
+	 * The session's current thinking level. Rendered on the session-model row
+	 * so the badge confirms the active session effort, not just persisted
+	 * role configuration. Undefined leaves every row on role data.
+	 */
+	sessionThinkingLevel?: ConfiguredThinkingLevel;
+	/**
+	 * Suppress derived (non-explicit) fallback levels in role badges. The
+	 * Alt+P session picker sets this: applying a model without an explicit
+	 * `:level` suffix leaves the session effort untouched, so a derived
+	 * `defaultThinkingLevel` must not render as a fallback. Hosts that apply
+	 * role configuration (the shared /model hub) leave it false so derived
+	 * badges are preserved. Default false.
+	 */
+	suppressDerivedThinkingLevels?: boolean;
+	/**
+	 * Hide every effort badge. Hosts set this when the rows pick something
+	 * effortless — e.g. the Task-subagent target, whose agent runs its own
+	 * configured effort regardless of session or role levels.
+	 */
+	showThinkingBadges?: boolean;
 }
 
 /** Rendered rows before the list window: search row + blank. */
@@ -463,6 +517,12 @@ export class ModelBrowser implements Component {
 	#focused = true;
 	/** `provider/id` of the session's active model; marked in rows and detail. */
 	#currentSelector: string | undefined;
+	/** Session effort rendered on the session-model row; undefined disables it. */
+	#sessionThinkingLevel: ConfiguredThinkingLevel | undefined;
+	/** False suppresses every effort badge (Task-subagent target mode). */
+	#showThinkingBadges = true;
+	/** True suppresses derived fallback levels; set by the Alt+P picker only. */
+	#suppressDerivedThinkingLevels = false;
 
 	/** Enter or click-on-selected. */
 	onActivate?: (item: ModelBrowserItem) => void;
@@ -478,7 +538,25 @@ export class ModelBrowser implements Component {
 		this.#currentContextTokens = Number.isFinite(tokens) && tokens > 0 ? Math.floor(tokens) : 0;
 		this.#markOverContext = options.markOverContext ?? false;
 		this.#emptyText = options.emptyText;
+		this.#sessionThinkingLevel = options.sessionThinkingLevel;
+		this.#showThinkingBadges = options.showThinkingBadges ?? true;
+		this.#suppressDerivedThinkingLevels = options.suppressDerivedThinkingLevels ?? false;
 		this.#syncAffinity();
+	}
+
+	/** Picker-only: hide derived fallback levels without touching other badges. */
+	setSuppressDerivedThinkingLevels(suppress: boolean): void {
+		this.#suppressDerivedThinkingLevels = suppress;
+	}
+
+	/** Override the session effort rendered on the session-model row (undefined clears it). */
+	setSessionThinkingLevel(level: ConfiguredThinkingLevel | undefined): void {
+		this.#sessionThinkingLevel = level;
+	}
+
+	/** Show or hide every effort badge without touching roles or selection. */
+	setShowThinkingBadges(show: boolean): void {
+		this.#showThinkingBadges = show;
 	}
 
 	/** Mark `selector` as the session's active model (undefined clears the mark). */
@@ -868,6 +946,116 @@ export class ModelBrowser implements Component {
 		return index;
 	}
 
+	/**
+	 * Badge text for a role level on `model`, snapped to the model's effort
+	 * ladder exactly like activation (P2 #11330, clamp-picker-badges thread): Enter
+	 * resolves the raw role level through `setThinkingLevel`, so the picker
+	 * advertises the applied level — or no badge when the model has no
+	 * controllable effort — never the raw request. `auto` renders as today;
+	 * the session resolves it per turn.
+	 */
+	#appliedBadgeFor(model: Model, level: ConfiguredThinkingLevel): string {
+		const applied = level === AUTO_THINKING ? level : resolveThinkingLevelForModel(model, level);
+		if (applied === undefined) return "";
+		return ` ${formatThinkingLevelBadge(applied)}`;
+	}
+
+	/**
+	 * Resolved effort badge for `item`'s row. Hidden entirely while
+	 * `showThinkingBadges` is false (Task-subagent target mode). Precedence:
+	 * the row's own role level for virtual `@role` rows, then the session
+	 * effort on the session-model row, then the configured roles backing
+	 * the model. Virtual
+	 * `@role` rows are terminal — without an explicit own level they render
+	 * no badge rather than a sibling role's level, since applying the row
+	 * leaves the session effort untouched. A model backing several roles at
+	 * different levels renders one role-attributed badge per level
+	 * (`default ◔ low · slow ◉ max`); empty when nothing pins a level.
+	 */
+	#thinkingBadgeFor(item: ModelBrowserItem): string {
+		if (!this.#showThinkingBadges) return "";
+		if (item.thinkingLevel !== undefined && item.thinkingLevel !== ThinkingLevel.Inherit) {
+			return this.#appliedBadgeFor(item.model, item.thinkingLevel);
+		}
+		if (item.selector.startsWith("@")) return "";
+		if (
+			this.#sessionThinkingLevel !== undefined &&
+			this.#sessionThinkingLevel !== ThinkingLevel.Inherit &&
+			item.selector === this.#currentSelector
+		) {
+			return ` ${formatThinkingLevelBadge(this.#sessionThinkingLevel)}`;
+		}
+		// The active row is terminal in the Alt+P picker only
+		// (suppressDerivedThinkingLevels): applying the current selector there
+		// leaves the session effort untouched (undefined or inherit), so it
+		// must never render another role's level as a fallback. The setup
+		// wizard (flag unset, no session level supplied) keeps rendering the
+		// configured default effort on the current/default row (P2 #11330,
+		// thread 3968351010).
+		if (this.#suppressDerivedThinkingLevels && item.selector === this.#currentSelector) return "";
+		const seen = new Set<string>();
+		const levels = new Map<ConfiguredThinkingLevel, string>();
+		let inheritTerminates = false;
+		const match = (role: string): void => {
+			if (inheritTerminates) return;
+			if (seen.has(role)) return;
+			seen.add(role);
+			const assignment = this.#roles[role];
+			if (!assignment || assignment.autoSelected) return;
+			if (!modelsAreEqual(assignment.model, item.model)) return;
+			// Picker parity with resolveTemporaryModelThinkingLevel (P2 #11330):
+			// the activation path iterates every known role including hidden
+			// ones, so the picker badge must too. The hub (flag unset) keeps
+			// hiding them.
+			if (!this.#suppressDerivedThinkingLevels && getRoleInfo(role, this.#settings).hidden) return;
+			// Picker-only suppression: derived levels (e.g. `defaultThinkingLevel`
+			// with no `:level` suffix) are not applied by the Alt+P picker, so
+			// the picker hides them as a fallback. The hub applies role
+			// configuration and keeps them. Absent means explicit (predates the flag).
+			if (this.#suppressDerivedThinkingLevels && assignment.explicitThinkingLevel === false) return;
+			if (assignment.thinkingLevel === ThinkingLevel.Inherit) {
+				// Picker parity with resolveTemporaryModelThinkingLevel (P2 #11330,
+				// thread 3968282037): the activation path returns the first
+				// matching role including inherit, so an explicit inherit match
+				// terminates badge resolution instead of falling through to a
+				// sibling role's level. The hub (flag unset) keeps skipping.
+				if (this.#suppressDerivedThinkingLevels && assignment.explicitThinkingLevel !== false) {
+					inheritTerminates = true;
+				}
+				return;
+			}
+			if (!levels.has(assignment.thinkingLevel)) levels.set(assignment.thinkingLevel, role);
+		};
+		for (const role of MODEL_ROLE_IDS) match(role);
+		for (const role in this.#roles) match(role);
+		if (inheritTerminates) return "";
+		if (levels.size === 0) return "";
+		if (this.#suppressDerivedThinkingLevels) {
+			// Picker-specific single result: Enter applies the first matching
+			// configured role (resolveTemporaryModelThinkingLevel), so the
+			// ordinary row advertises only that level. Insertion follows
+			// MODEL_ROLE_IDS first, matching the resolver's role order. The hub
+			// (flag unset) keeps multi-role attribution below.
+			const only = [...levels.keys()][0];
+			if (only === undefined) return "";
+			return this.#appliedBadgeFor(item.model, only);
+		}
+		if (levels.size === 1) {
+			const only = [...levels.keys()][0];
+			if (only === undefined) return "";
+			return ` ${formatThinkingLevelBadge(only)}`;
+		}
+		const parts = [...levels].map(([level, role]) => {
+			const glyph = thinkingLevelGlyph(level);
+			const label = getConfiguredThinkingLevelMetadata(level).label;
+			// Custom role ids render raw here; sanitize like every other TUI
+			// surface per AGENTS.md (tabs break columns, newlines break rows).
+			const safeRole = replaceTabs(sanitizeText(role)).replace(/[\r\n]+/g, " ");
+			return glyph ? `${safeRole} ${glyph} ${label}` : `${safeRole} ${label}`;
+		});
+		return ` ${theme.fg("dim", parts.join(" · "))}`;
+	}
+
 	/** Measured TPS/TTFT, falling back to the catalog TPS as an estimated `~118t/s`. */
 	#perfCell(item: ModelBrowserItem, mode: PerfMode): string {
 		if (mode === "off") return "";
@@ -907,10 +1095,11 @@ export class ModelBrowser implements Component {
 				: item.id;
 		const currentMark =
 			item.selector === this.#currentSelector ? ` ${theme.fg("success", theme.status.enabled)}` : "";
+		const thinkingBadge = this.#thinkingBadgeFor(item);
 		const overLimit = overContext
 			? ` ${theme.status.disabled} context>${formatNumber(item.model.contextWindow ?? 0).toLowerCase()}`
 			: "";
-		let left = `${prefix}${providerPrefix}${name}${currentMark}${overLimit}`;
+		let left = `${prefix}${providerPrefix}${name}${currentMark}${thinkingBadge}${overLimit}`;
 
 		// Metric columns collapse independently when no visible row has data.
 		const intelligenceCol =

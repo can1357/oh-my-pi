@@ -37,6 +37,7 @@ import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import {
 	buildBrowserItems,
+	formatThinkingLevelBadge,
 	ModelBrowser,
 	type ModelBrowserItem,
 	type RoleAssignments,
@@ -1882,11 +1883,7 @@ export class ModelHubComponent implements Component {
 				dot = theme.fg(info.color ?? "muted", theme.status.enabled);
 				tagStyled = theme.fg(info.color ?? "muted", tag);
 				value = `${theme.fg("dim", `${assignment.model.provider}/`)}${selected ? theme.fg("accent", assignment.model.id) : assignment.model.id}`;
-				const glyph = thinkingLevelGlyph(assignment.thinkingLevel, theme);
-				const label = getConfiguredThinkingLevelMetadata(assignment.thinkingLevel).label;
-				if (assignment.thinkingLevel !== ThinkingLevel.Inherit) {
-					levelStyled = theme.fg("dim", glyph ? `${glyph} ${label}` : label);
-				}
+				levelStyled = formatThinkingLevelBadge(assignment.thinkingLevel);
 			} else if (assignment) {
 				dot = theme.fg("dim", theme.status.shadowed);
 				tagStyled = theme.fg("dim", tag);
