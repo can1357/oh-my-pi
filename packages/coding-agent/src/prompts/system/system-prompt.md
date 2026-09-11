@@ -61,7 +61,7 @@ Most FS/bash tools auto-resolve these to FS paths.
   {{/if}}
 - `agent://<id>`: output artifact; `/<child>`: nested-subagent output; otherwise `/<path>`: JSON field
 - `history://<id>`: read-only agent transcript (live|parked|released); bare `history://`: all agents. Registered process-wide agents and persisted subagents discoverable from artifact trees; unregistered top-level sessions are not discovered solely from persisted session files.
-- `artifact://<id>`: content
+- `artifact://<id>`: content (large/older tool results may be pruned to `[shaken ~N tokens — recover: artifact://<id>]`{{#has tools "read"}}; inspect via `{{toolRefs.read}}` if raw details are needed{{/has}})
 {{#if securityEnabled}}
 - `security://scans[/<id>/…]`: read-only OMP scans, findings, coverage, reports, SARIF, provenance
 {{/if}}
