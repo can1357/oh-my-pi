@@ -70,7 +70,8 @@
     "@opentelemetry/sdk-metrics": "catalog:",
     "@opentelemetry/sdk-trace-base": "catalog:",
     "@opentelemetry/sdk-trace-node": "catalog:",
-    "puppeteer-core": "catalog:"
+    "puppeteer-core": "catalog:",
+    "thinking-orbs": "file:../../vendor/thinking-orbs"
   },
   "optionalDependencies": {
     "@huggingface/transformers": "catalog:",

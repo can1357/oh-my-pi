@@ -19,6 +19,42 @@ TRACKED VENDORED CODE AND ASSET NOTICES
 =======================================
 
 -------------------------------------------------------------------------------
+vendor/thinking-orbs/LICENSE
+
+This directory contains a vendored snapshot of thinking-orbs (MIT), including
+the TUI renderer export used for opt-in voice indicators
+(https://github.com/Jakubantalik/thinking-orbs). The package is consumed via
+`file:../../vendor/thinking-orbs` from `@oh-my-pi/pi-coding-agent` so publish and
+nix builds ship immutable bytes rather than a remote tarball URL.
+
+  Copyright (c) 2026 Jakub Antalik
+
+The snapshot is dist-only (prebuilt `dist/` plus LICENSE). Upstream build tooling
+and demo assets are not included. Local packaging trims scripts and
+devDependencies from the published package.json while preserving the runtime
+exports (`./`, `./engine`, `./tui`).
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
 crates/vendor/brush-core/LICENSE
 
 This directory contains a vendored, locally-patched copy of brush-core from the
@@ -869,7 +905,7 @@ installed on this host. Package license and NOTICE/ThirdPartyNotices payloads
 are read from the frozen install; generation fails explicitly when an
 unreviewed source payload is unavailable.
 
-BUNDLED/DISTRIBUTED (97)
+BUNDLED/DISTRIBUTED (98)
 ------------------------
 - @babel/code-frame 7.29.7 — MIT
 - @babel/generator 7.29.8 — MIT
@@ -960,6 +996,7 @@ BUNDLED/DISTRIBUTED (97)
 - tailwind-merge 3.6.0 — MIT
 - tailwindcss 4.3.3 — MIT
 - tslib 2.8.1 — 0BSD
+- thinking-orbs 0.3.1 — MIT
 - typed-query-selector 2.12.2 — MIT
 - webdriver-bidi-protocol 0.4.2 — Apache-2.0
 - wrap-ansi 10.0.0 — MIT

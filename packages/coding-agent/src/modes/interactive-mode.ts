@@ -190,6 +190,7 @@ import { SessionInfoOverlay } from "./components/session-info-overlay";
 import { StatusLineComponent } from "./components/status-line";
 import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "./components/tool-execution";
 import { TranscriptContainer } from "./components/transcript-container";
+import { VoiceIndicatorComponent, type VoiceIndicatorState } from "./components/voice-indicator";
 import type { LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
 import { Composer, type ComposerStatusSnapshot } from "./composer";
 import { writeComposerStatusCache, writeComposerWelcomeCache } from "./composer-cache";
@@ -867,6 +868,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #uiHelpers: UiHelpers;
 	#sttController: STTController | undefined;
 	#voiceAnimationInterval: NodeJS.Timeout | undefined;
+	#voiceIndicator: VoiceIndicatorComponent | undefined;
+	/** Latched for one STT gesture so mid-session setting flips cannot mix mic/orb teardown. */
+	#voiceUiStyle: "orbs" | "mic" | undefined;
 	#voiceHue = 0;
 	#voicePreviousShowHardwareCursor: boolean | null = null;
 	#voicePreviousUseTerminalCursor: boolean | null = null;
@@ -5086,7 +5090,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(false);
 		}
-		this.#cleanupMicAnimation();
+		this.#cleanupVoiceUi();
 		// Stop the shared tool-spinner ticker: a live block missed by per-component
 		// stopAnimation would otherwise keep an 80ms interval pinning the process.
 		stopSharedSpinnerTicker();
@@ -5897,17 +5901,26 @@ export class InteractiveMode implements InteractiveModeContext {
 				// Duck assistant speech while the user is talking (push-to-talk); restore after.
 				if (state === "recording") vocalizer.duck();
 				else vocalizer.unduck();
-				if (state === "recording") {
-					this.#voicePreviousShowHardwareCursor = this.ui.getShowHardwareCursor();
-					this.#voicePreviousUseTerminalCursor = this.editor.getUseTerminalCursor();
-					this.ui.setShowHardwareCursor(false);
-					this.editor.setUseTerminalCursor(false);
-					this.#startMicAnimation();
-				} else if (state === "transcribing") {
-					this.#stopMicAnimation();
-					this.#setMicCursor({ r: 200, g: 200, b: 200 });
+				if (state === "idle") {
+					this.#cleanupVoiceUi();
 				} else {
-					this.#cleanupMicAnimation();
+					// Latch style for the whole recording→transcribing gesture.
+					this.#voiceUiStyle ??= this.settings.get("tui.voiceOrbs") ? "orbs" : "mic";
+					if (this.#voiceUiStyle === "orbs") {
+						this.#showVoiceIndicator(state);
+					} else if (state === "recording") {
+						if (this.#voicePreviousShowHardwareCursor === null) {
+							this.#voicePreviousShowHardwareCursor = this.ui.getShowHardwareCursor();
+							this.#voicePreviousUseTerminalCursor = this.editor.getUseTerminalCursor();
+							this.ui.setShowHardwareCursor(false);
+							this.editor.setUseTerminalCursor(false);
+						}
+						this.#startMicAnimation();
+					} else {
+						// transcribing
+						this.#stopMicAnimation();
+						this.#setMicCursor({ r: 200, g: 200, b: 200 });
+					}
 				}
 				this.ui.requestRender();
 			},
@@ -5921,6 +5934,30 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		await this.#liveCommandController.handleCommand();
+	}
+
+	#showVoiceIndicator(state: VoiceIndicatorState): void {
+		if (!this.#voiceIndicator) {
+			this.#voiceIndicator = new VoiceIndicatorComponent(state);
+			this.#voicePreviousShowHardwareCursor = this.ui.getShowHardwareCursor();
+			this.#voicePreviousUseTerminalCursor = this.editor.getUseTerminalCursor();
+			this.ui.setShowHardwareCursor(false);
+			this.editor.setUseTerminalCursor(false);
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.#voiceIndicator);
+		} else {
+			this.#voiceIndicator.setState(state);
+		}
+		if (!this.#voiceAnimationInterval) {
+			this.#voiceAnimationInterval = setInterval(() => {
+				const indicator = this.#voiceIndicator;
+				if (!indicator) return;
+				indicator.advance();
+				// Component-scoped: voice motion never repaints the transcript.
+				this.ui.requestComponentRender(indicator);
+			}, 120);
+		}
+		this.ui.requestComponentRender(this.#voiceIndicator);
 	}
 
 	#setMicCursor(color: { r: number; g: number; b: number }): void {
@@ -5954,11 +5991,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	#cleanupMicAnimation(): void {
+	#cleanupVoiceUi(): void {
 		if (this.#voiceAnimationInterval) {
 			clearInterval(this.#voiceAnimationInterval);
 			this.#voiceAnimationInterval = undefined;
 		}
+		if (this.#voiceIndicator) {
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+		}
+		this.#voiceIndicator = undefined;
+		this.#voiceUiStyle = undefined;
 		this.editor.cursorOverride = undefined;
 		this.editor.cursorOverrideWidth = undefined;
 		if (this.#voicePreviousShowHardwareCursor !== null) {
