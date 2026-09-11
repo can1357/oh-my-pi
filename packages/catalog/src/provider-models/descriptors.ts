@@ -20,6 +20,7 @@ import {
 	cerebrasModelManagerOptions,
 	clinePassModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
+	commandcodeModelManagerOptions,
 	coreWeaveModelManagerOptions,
 	deepinfraModelManagerOptions,
 	deepseekModelManagerOptions,
@@ -155,6 +156,13 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["CLOUDFLARE_AI_GATEWAY_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => cloudflareAiGatewayModelManagerOptions(config),
 		catalogDiscovery: { label: "Cloudflare AI Gateway" },
+	},
+	{
+		id: "commandcode",
+		defaultModel: "claude-sonnet-4-6",
+		envVars: ["COMMANDCODE_API_KEY", "CMD_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => commandcodeModelManagerOptions(config),
+		catalogDiscovery: { label: "Command Code", allowUnauthenticated: true },
 	},
 	{
 		id: "cursor",

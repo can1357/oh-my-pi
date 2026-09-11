@@ -3425,6 +3425,57 @@ export function zenmuxModelManagerOptions(config?: ZenMuxModelManagerConfig): Mo
 }
 
 // ---------------------------------------------------------------------------
+// Command Code
+// ---------------------------------------------------------------------------
+
+const COMMANDCODE_OPENAI_BASE_URL = "https://api.commandcode.ai/provider/v1";
+const COMMANDCODE_ANTHROPIC_BASE_URL = "https://api.commandcode.ai/provider";
+
+export interface CommandCodeModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Command Code serves open models through `/chat/completions` and Claude
+ * models through `/v1/messages` under the same `/provider/v1` root; the
+ * Anthropic transport appends `/v1/messages` itself, so its base URL drops
+ * the `/v1` suffix.
+ */
+function toCommandCodeAnthropicBaseUrl(openAiBaseUrl: string): string {
+	const trimmed = openAiBaseUrl.replace(/\/+$/, "");
+	return trimmed.endsWith("/v1") ? trimmed.slice(0, -3) : trimmed;
+}
+
+export function commandcodeModelManagerOptions(config?: CommandCodeModelManagerConfig): ModelManagerOptions<Api> {
+	const apiKey = config?.apiKey;
+	const openAiBaseUrl = config?.baseUrl?.trim().replace(/\/+$/, "") || COMMANDCODE_OPENAI_BASE_URL;
+	const anthropicBaseUrl = toCommandCodeAnthropicBaseUrl(openAiBaseUrl);
+	return {
+		providerId: "commandcode",
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels<Api>({
+				api: "openai-completions",
+				provider: "commandcode",
+				baseUrl: openAiBaseUrl,
+				apiKey,
+				mapModel: (entry, defaults) => {
+					const isAnthropicModel =
+						classifyModel("commandcode", defaults.id, { lenient: true }).class === "anthropic";
+					return {
+						...defaults,
+						api: isAnthropicModel ? "anthropic-messages" : "openai-completions",
+						baseUrl: isAnthropicModel ? anthropicBaseUrl : openAiBaseUrl,
+						contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+					};
+				},
+				fetch: config?.fetch,
+			}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 10.6 Kilo Gateway
 // ---------------------------------------------------------------------------
 

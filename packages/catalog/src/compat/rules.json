@@ -15,6 +15,7 @@
 		"auth/cerebras.kdl",
 		"auth/cline-pass.kdl",
 		"auth/cloudflare-ai-gateway.kdl",
+		"auth/commandcode.kdl",
 		"auth/coreweave.kdl",
 		"auth/cursor.kdl",
 		"auth/deepinfra.kdl",
@@ -16915,6 +16916,22 @@
 					"validate": {
 						"kind": "models-endpoint",
 						"url": "https://zenmux.ai/api/v1/models"
+					}
+				}
+			},
+			{
+				"id": "commandcode",
+				"apiKeyFormat": "bearer",
+				"name": "Command Code",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://commandcode.ai/settings/keys",
+					"instructions": "Create or copy your Command Code API key",
+					"prompt": "Paste your Command Code API key",
+					"validate": {
+						"kind": "chat-completions",
+						"baseUrl": "https://api.commandcode.ai/provider/v1",
+						"model": "deepseek/deepseek-v4-flash"
 					}
 				}
 			},

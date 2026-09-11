@@ -1,0 +1,10 @@
+auth "commandcode" {
+	name "Command Code"
+	login "api-key" {
+		auth-url "https://commandcode.ai/settings/keys"
+		instructions "Create or copy your Command Code API key"
+		prompt "Paste your Command Code API key"
+		// /models is public, so probe a real cheap completion to catch bad keys.
+		validate "chat-completions" base-url="https://api.commandcode.ai/provider/v1" model="deepseek/deepseek-v4-flash"
+	}
+}
