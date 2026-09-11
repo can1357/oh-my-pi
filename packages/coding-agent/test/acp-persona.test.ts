@@ -547,6 +547,47 @@ describe("ACP persona reconciliation", () => {
 		expect(notices[0]).toContain("model restore deferred");
 	});
 
+	// Regression (ChainedA P1): a failed chained switch on ACP must undo the
+	// deferred-restore mutation ITS transaction queued. Mid-turn enter(B) while
+	// A is active runs exitInner(A) first, which queues A's pre-persona restore
+	// on the session; when B's apply fails, the runtime rolls back and A stays
+	// active — flushing A's restore at agent_end would drop the session to the
+	// pre-persona model under an active persona. onPersonaSwitchFailed clears the
+	// queue, but only restores queued by that same hooks transaction (a previous
+	// successful exit's owed restore must survive).
+	it("failed chained switch clears only its own deferred restore", async () => {
+		const harness = await createPersonaHarness();
+		const session = new PersonaStubSession(harness.cwd);
+		session.stub.isStreaming = true;
+		const baseline = { model: {} as Model, thinkingLevel: undefined };
+		let queued: { model: Model; thinkingLevel: unknown } | undefined;
+		const target = session as unknown as AgentSession & {
+			queueDeferredModelRestore: (model: Model, thinkingLevel?: unknown) => void;
+			clearDeferredModelRestore: () => void;
+		};
+		target.queueDeferredModelRestore = (model, thinkingLevel) => {
+			queued = { model, thinkingLevel };
+		};
+		target.clearDeferredModelRestore = () => {
+			queued = undefined;
+		};
+
+		// Transaction 1 (the failing chained enter): queues A's restore, then
+		// rolls back — the queue must be empty for the agent_end flush.
+		const failing = createAcpPersonaModelHooks(target, async () => {});
+		failing.deferModelRestoreWhileStreaming?.(baseline);
+		expect(queued?.model).toBe(baseline.model);
+		failing.onPersonaSwitchFailed?.();
+		expect(queued).toBeUndefined();
+
+		// A restore queued by a DIFFERENT (successful) transaction is untouched.
+		const other = createAcpPersonaModelHooks(target, async () => {});
+		other.deferModelRestoreWhileStreaming?.(baseline);
+		expect(queued?.model).toBe(baseline.model);
+		failing.onPersonaSwitchFailed?.();
+		expect(queued?.model).toBe(baseline.model);
+	});
+
 	it("emits the defer notice for a thinking-only persona mid-turn (fo80k)", async () => {
 		// A persona with `thinkingLevel` but NO model used to skip the notice
 		// entirely, silently dropping the thinking change. The thinking-only

@@ -168,7 +168,11 @@ export function createAcpPersonaModelHooks(
 		// mutation the defer channel made, mirroring the TUI's
 		// onPersonaSwitchFailed.
 		onPersonaSwitchFailed: () => {
-			if (queuedRestoreThisTransaction) session.clearDeferredModelRestore?.();
+			// One-shot: consume the flag so a repeated rollback can never clear a
+			// restore a later (successful) transaction owns.
+			if (!queuedRestoreThisTransaction) return;
+			queuedRestoreThisTransaction = false;
+			session.clearDeferredModelRestore?.();
 		},
 	};
 }
