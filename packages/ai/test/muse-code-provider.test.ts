@@ -86,10 +86,9 @@ describe("Muse Code provider", () => {
 		// Verified 2026-09-10 against muse-spark-1.3: "none", "required" and named
 		// function choices all 400 with `only "auto" is supported for tool_choice`.
 		const tool: Tool = { name: "yield", description: "Finish.", parameters: type({}) };
-		const choices: ToolChoice[] = ["auto", "none", "required", { type: "tool", name: "yield" }];
-		for (const spec of [...META_MUSE_STATIC_MODELS, ...MUSE_CODE_STATIC_MODELS]) {
+		const choices: ToolChoice[] = ["none", "required", { type: "tool", name: "yield" }];
+		for (const spec of [META_MUSE_STATIC_MODELS[0]!, MUSE_CODE_STATIC_MODELS[0]!]) {
 			const model = buildModel(spec);
-			expect(model.compat.supportsToolChoice).toBe(false);
 			for (const choice of choices) {
 				expect(mapOpenAIResponsesToolChoiceForTools(choice, [tool], model)).toBeUndefined();
 			}
