@@ -8,6 +8,21 @@ provider "google-vertex" {
 	// Vertex rejects `output_config.effort` and its effort beta header;
 	// replaces the provider checks in anthropic.ts request shaping.
 	supports-output-effort #false
+
+	// Vertex rejects maxOutputTokens=65536 for the Gemini 2.5 Flash-Lite line
+	// with 400 "supported range is from 1 (inclusive) to 65536 (exclusive)";
+	// the 2.5 Flash/Pro siblings accept 65536 on the same endpoint (Pro does
+	// not validate the field at all), so only the Lite line is clamped here.
+	// Other hosts are unverified and keep the documented value.
+	class "gemini" {
+		family "lite" {
+			revision ">=2.5 <2.6" {
+				limits-patch {
+					max-tokens 65535
+				}
+			}
+		}
+	}
 	class "anthropic" {
 		revision ">=4.5 <4.6" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"

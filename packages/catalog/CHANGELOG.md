@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Gemini 2.5 Flash Lite on Vertex AI no longer requests `maxOutputTokens=65536`, which the endpoint rejects with a 400; the output cap is clamped to 65535 ([#10595](https://github.com/can1357/oh-my-pi/pull/10595) by [@WeMingT](https://github.com/WeMingT)).
+
 ### Added
 
 - `supports-server-compaction` compat axis (`compat.supportsServerCompaction`): whether a model line accepts Anthropic server-side compaction (`compact-2026-01-12`). Class rules enable it for Opus 4.6+, Sonnet 4.6+, and Fable/Mythos 5 on every Anthropic-messages host; the default is `false`.

@@ -10503,7 +10503,30 @@
 				}
 			},
 			{
-				"source": "providers/google-vertex.kdl:12",
+				"source": "providers/google-vertex.kdl:19",
+				"class": "gemini",
+				"providers": [
+					"google-vertex"
+				],
+				"family": "lite",
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "2.5.0"
+					},
+					{
+						"op": "<",
+						"revision": "2.6.0"
+					}
+				],
+				"catalog": {
+					"limitsPatch": {
+						"maxTokens": 65535
+					}
+				}
+			},
+			{
+				"source": "providers/google-vertex.kdl:27",
 				"class": "anthropic",
 				"providers": [
 					"google-vertex"
@@ -10529,7 +10552,7 @@
 				}
 			},
 			{
-				"source": "providers/google-vertex.kdl:17",
+				"source": "providers/google-vertex.kdl:32",
 				"providers": [
 					"google-vertex"
 				],
@@ -10550,7 +10573,7 @@
 				}
 			},
 			{
-				"source": "providers/google-vertex.kdl:22",
+				"source": "providers/google-vertex.kdl:37",
 				"providers": [
 					"google-vertex"
 				],
