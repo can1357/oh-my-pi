@@ -228,5 +228,6 @@ function resolveOverIndex(index: IndexedRule[], target: ResolveTarget): Resolved
 		wire: collect(wire, rule => rule.wire),
 		thinking: collect(thinking, rule => rule.thinking),
 		catalog: collect(catalog, rule => rule.catalog),
+		reasoning,
 	};
 }
