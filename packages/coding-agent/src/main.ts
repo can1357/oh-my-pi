@@ -1518,11 +1518,18 @@ export async function buildSessionOptions(
 		// derivation window must not each start a duplicate fs scan.
 		let pending = packageRootsInFlight.get(effectiveCwd);
 		if (!pending) {
-			pending = derivePackageRoots(effectiveCwd).then(derived => {
-				packageRootsByCwd.set(effectiveCwd, derived);
-				packageRootsInFlight.delete(effectiveCwd);
-				return derived;
-			});
+			pending = derivePackageRoots(effectiveCwd).then(
+				derived => {
+					packageRootsByCwd.set(effectiveCwd, derived);
+					packageRootsInFlight.delete(effectiveCwd);
+					return derived;
+				},
+				error => {
+					// Drop the memo so a later call retries; rethrow to the awaiter.
+					packageRootsInFlight.delete(effectiveCwd);
+					throw error;
+				},
+			);
 			packageRootsInFlight.set(effectiveCwd, pending);
 		}
 		return pending;
