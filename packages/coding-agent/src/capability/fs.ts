@@ -26,14 +26,6 @@ async function canonicalPath(abs: string): Promise<string> {
 	}
 }
 
-function canonicalPathSync(abs: string): string {
-	try {
-		return fs.realpathSync(abs);
-	} catch {
-		return abs;
-	}
-}
-
 export async function readFile(filePath: string): Promise<string | null> {
 	const abs = await canonicalPath(resolvePath(filePath));
 	if (contentCache.has(abs)) {
@@ -133,7 +125,22 @@ export function clearCache(): void {
 }
 
 export function invalidate(filePath: string): void {
-	const abs = canonicalPathSync(resolvePath(filePath));
+	let abs = resolvePath(filePath);
+	try {
+		abs = fs.realpathSync(abs);
+	} catch {
+		// The path itself may be GONE — delete-then-invalidate flows reach the
+		// fallback here, but the entry was cached under the CANONICAL key while
+		// the file existed (e.g. read through a symlinked directory). Rebuild
+		// that key from the surviving parent; only when the parent is gone too
+		// do reads fall back to lexical keys, so the lexical deletion below
+		// matches what they cached.
+		try {
+			abs = path.join(fs.realpathSync(path.dirname(abs)), path.basename(abs));
+		} catch {
+			// keep the lexical spelling
+		}
+	}
 	contentCache.delete(abs);
 	dirCache.delete(abs);
 	const parent = path.dirname(abs);
