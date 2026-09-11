@@ -11,11 +11,13 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import type { ToolApprovalAttentionSource } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { STREAMING_REVEAL_FRAME_MS } from "@oh-my-pi/pi-coding-agent/modes/controllers/streaming-reveal";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 beforeAll(async () => {
@@ -45,11 +47,22 @@ function makeStreamingMessage(content: AssistantMessage["content"]): AssistantMe
 function createFixture(streamingMessage: AssistantMessage, tool?: AgentTool) {
 	const pendingTools = new Map<string, ToolExecutionComponent>();
 	let approvalWaiter: ((toolCallId: string) => Promise<void>) | undefined;
+	let approvalAttentionHandler:
+		| ((toolCallId: string, active: boolean, source: ToolApprovalAttentionSource) => void)
+		| undefined;
 	const extensionRunner = {
 		setToolApprovalPreviewWaiter(waiter: (toolCallId: string) => Promise<void>) {
 			approvalWaiter = waiter;
 			return () => {
 				if (approvalWaiter === waiter) approvalWaiter = undefined;
+			};
+		},
+		setToolApprovalAttentionHandler(
+			handler: (toolCallId: string, active: boolean, source: ToolApprovalAttentionSource) => void,
+		) {
+			approvalAttentionHandler = handler;
+			return () => {
+				if (approvalAttentionHandler === handler) approvalAttentionHandler = undefined;
 			};
 		},
 	};
@@ -64,6 +77,7 @@ function createFixture(streamingMessage: AssistantMessage, tool?: AgentTool) {
 		controller: new EventController(ctx),
 		pendingTools,
 		getApprovalWaiter: () => approvalWaiter,
+		getApprovalAttentionHandler: () => approvalAttentionHandler,
 	};
 }
 
@@ -280,5 +294,83 @@ describe("EventController paces streamed tool args", () => {
 		await waiting;
 		const rendered = pendingTools.get("tc-approval")?.render(100).join("\n") ?? "";
 		expect(Bun.stripANSI(rendered)).toContain("ISSUE_7957_PROPOSED_EDIT");
+	});
+
+	it("shows terminal attention while an extension approval is waiting", async () => {
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		const streaming = makeStreamingMessage([]);
+		const { getApprovalAttentionHandler } = createFixture(streaming);
+		const attentionHandler = getApprovalAttentionHandler();
+		if (!attentionHandler) throw new Error("expected the TUI approval-attention handler");
+
+		attentionHandler("tc-extension-approval", true, "extension");
+		expect(stateSpy).toHaveBeenLastCalledWith("attention");
+
+		attentionHandler("tc-extension-approval", false, "extension");
+		expect(stateSpy).toHaveBeenLastCalledWith("working");
+	});
+
+	it("keeps attention when an Ask prompt outlives extension approval", async () => {
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		const streaming = makeStreamingMessage([]);
+		const { controller, getApprovalAttentionHandler } = createFixture(streaming);
+		const attentionHandler = getApprovalAttentionHandler();
+		if (!attentionHandler) throw new Error("expected the TUI approval-attention handler");
+
+		await dispatchToolStart(controller, { toolCallId: "tc-ask", toolName: "ask", args: {} });
+		stateSpy.mockClear();
+		attentionHandler("tc-ask", true, "extension");
+		attentionHandler("tc-ask", false, "extension");
+
+		expect(stateSpy).not.toHaveBeenCalledWith("working");
+	});
+
+	it("clears native attention when authorization suppresses its prompt", async () => {
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		settings.override("tools.approvalMode", "always-ask");
+		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		const tool = {
+			name: "dangerous_tool",
+			label: "Dangerous Tool",
+			description: "Test approval tool",
+			parameters: {},
+			approval: "exec",
+		} as unknown as AgentTool;
+		const streaming = makeStreamingMessage([]);
+		const { controller, getApprovalAttentionHandler } = createFixture(streaming, tool);
+		const attentionHandler = getApprovalAttentionHandler();
+		if (!attentionHandler) throw new Error("expected the TUI approval-attention handler");
+
+		await dispatchToolStart(controller, { toolCallId: "tc-native-approval", toolName: "dangerous_tool", args: {} });
+		expect(stateSpy).toHaveBeenLastCalledWith("attention");
+		stateSpy.mockClear();
+
+		attentionHandler("tc-native-approval", false, "native");
+		expect(stateSpy).toHaveBeenLastCalledWith("working");
+	});
+
+	it("keeps Ask attention when authorization suppresses native approval", async () => {
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		settings.override("tools.approvalMode", "always-ask");
+		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		const tool = {
+			name: "ask",
+			label: "Ask",
+			description: "Test Ask tool",
+			parameters: {},
+			approval: "exec",
+		} as unknown as AgentTool;
+		const streaming = makeStreamingMessage([]);
+		const { controller, getApprovalAttentionHandler } = createFixture(streaming, tool);
+		const attentionHandler = getApprovalAttentionHandler();
+		if (!attentionHandler) throw new Error("expected the TUI approval-attention handler");
+
+		await dispatchToolStart(controller, { toolCallId: "tc-ask-native", toolName: "ask", args: {} });
+		stateSpy.mockClear();
+
+		attentionHandler("tc-ask-native", false, "native");
+		expect(stateSpy).not.toHaveBeenCalledWith("working");
 	});
 });

@@ -13,14 +13,14 @@ import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import type { Theme } from "../../modes/theme/theme";
 import {
-	type ApprovalMode,
-	denyError,
-	formatApprovalPrompt,
-	resolveApproval,
-	truncateForPrompt,
-} from "../../tools/approval";
+	getPermissionIntent,
+	withApprovedAcpToolCall,
+	withRequiredAcpApproval,
+} from "../../session/acp-permission-gate";
+import { type ApprovalMode, denyError, formatApprovalPrompt, resolveApproval } from "../../tools/approval";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
+import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
@@ -129,11 +129,16 @@ function toolEventArgs(params: unknown, context: AgentToolContext | undefined): 
 	return params as Record<string, unknown>;
 }
 
+function approvalText(value: string): string {
+	return shortenPath(
+		sanitizeText(value)
+			.replace(/[\r\n\t]+/g, " ")
+			.trim(),
+	);
+}
+
 function approvalData(value: string): string {
-	const sanitized = sanitizeText(value)
-		.replace(/[\r\n\t]+/g, " ")
-		.trim();
-	const truncated = truncateForPrompt(sanitized, 500);
+	const truncated = truncateToWidth(approvalText(value), TRUNCATE_LENGTHS.CONTENT);
 	return truncated.replace(/([\\`*_{}[\]()<>#+\-.!|])/g, "\\$1");
 }
 
@@ -162,6 +167,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 	constructor(
 		private tool: AgentTool<TParameters, TDetails>,
 		private runner: ExtensionRunner,
+		private readonly hasAcpPermissionFallback = false,
 	) {
 		applyToolProxy(tool, this);
 	}
@@ -173,6 +179,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		const target = this.tool as { restartForModeChange?: () => Promise<void> };
 		if (!target.restartForModeChange) return Promise.resolve();
 		return target.restartForModeChange();
+	}
+
+	wrapInnerTool(
+		wrap: (tool: AgentTool<TParameters, TDetails>) => AgentTool<TParameters, TDetails>,
+	): ExtensionToolWrapper<TParameters, TDetails> {
+		return new ExtensionToolWrapper(wrap(this.tool), this.runner, true);
 	}
 
 	async execute(
@@ -194,7 +206,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// re-resolves against the (possibly revised) input so a handler cannot rewrite into a denied or
 		// newly prompt-gated command and have it run unapproved.
 		const cliAutoApprove = context?.autoApprove === true;
-		const settings: Settings | undefined = context?.settings;
+		const settings: Settings | undefined = context?.settings ?? this.runner.sessionSettings;
 		const configuredMode = (settings?.get("tools.approvalMode") ?? "yolo") as ApprovalMode;
 		const approvalMode: ApprovalMode = cliAutoApprove ? "yolo" : configuredMode;
 		const userPolicies = (settings?.get("tools.approval") ?? {}) as Record<string, unknown>;
@@ -208,6 +220,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// input that actually executes, closing the "approve one thing, run another" gap: the prompt
 		// text, policy resolution, and provider safety checks all see `effectiveParams`.
 		let effectiveParams = params;
+		const hasFinalAuthorization = this.runner.hasHandlers("tool_authorization");
 		if (!loopEmittedToolCall && this.runner.hasHandlers("tool_call")) {
 			try {
 				const callResult = (await this.runner.emitToolCall(
@@ -215,6 +228,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 						type: "tool_call",
 						toolName: this.tool.name,
 						toolCallId,
+						...(hasFinalAuthorization ? { finalAuthorization: true as const } : {}),
 						input: normalizeToolEventInput(
 							this.tool.name,
 							resolveToolEventInput(this.tool, toolEventArgs(params, context)),
@@ -261,47 +275,99 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// and tool-demanded overrides still prompt. Provider safety checks are
 		// stronger: yolo, per-tool allow, and xdev approval never acknowledge
 		// them on the user's behalf.
-		const explicitPrompt = resolved.override || Object.hasOwn(userPolicies, resolved.policyKey ?? this.tool.name);
+		const manualPromptRequired = resolved.policy === "prompt" && resolved.source !== "mode";
 		const xdevBypass = context?.xdevApproved === true && effectiveParams === params;
-		const approvalCheck = {
-			required: pendingSafetyChecks.length > 0 || (resolved.policy === "prompt" && (explicitPrompt || !xdevBypass)),
+		let approvalCheck = {
+			required:
+				pendingSafetyChecks.length > 0 || (resolved.policy === "prompt" && (manualPromptRequired || !xdevBypass)),
 			reason: resolved.reason,
 		};
+		const nativeApprovalRequired = approvalCheck.required;
+		const scheduledCall = context?.toolCall?.toolCalls[context.toolCall.index];
+		const matchesScheduledCall =
+			scheduledCall?.id === toolCallId &&
+			(scheduledCall.name === this.tool.name || scheduledCall.name === this.tool.customWireName);
+		let extensionApprovalRequired = false;
+		let extensionApprovalGranted = false;
+		if (hasFinalAuthorization) {
+			if (matchesScheduledCall) {
+				await untilAborted(signal, () => this.runner.waitForToolApprovalPreview(toolCallId));
+			}
+			const manualApprovalRequired = pendingSafetyChecks.length > 0 || manualPromptRequired;
+			const authorization = await this.runner.emitToolAuthorization(
+				{
+					type: "tool_authorization",
+					sessionId: this.runner.sessionId,
+					toolName: this.tool.name,
+					toolCallId,
+					input: normalizeToolEventInput(
+						this.tool.name,
+						resolveToolEventInput(this.tool, toolEventArgs(effectiveParams, context)),
+					),
+					approvalMode,
+					nativeDecision: approvalCheck.required ? "ask" : "allow",
+					manualApprovalRequired,
+					...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
+				},
+				signal,
+			);
+			if (authorization?.decision === "deny") {
+				throw new Error(authorization.reason || `Tool execution was denied by an extension: ${this.tool.name}`);
+			}
+			if (authorization?.decision === "ask") {
+				extensionApprovalRequired = true;
+				approvalCheck = {
+					required: true,
+					reason: authorization.reason || approvalCheck.reason,
+				};
+			} else if (authorization?.decision === "allow" && !manualApprovalRequired) {
+				approvalCheck = { required: false, reason: approvalCheck.reason };
+				if (nativeApprovalRequired) {
+					this.runner.reportToolApprovalAttention(toolCallId, false, "native");
+				}
+			}
+		}
 
-		if (approvalCheck.required) {
-			const scheduledCall = context?.toolCall?.toolCalls[context.toolCall.index];
-			if (
-				scheduledCall?.id === toolCallId &&
-				(scheduledCall.name === this.tool.name || scheduledCall.name === this.tool.customWireName)
-			) {
+		const deferExtensionApprovalToAcp =
+			this.hasAcpPermissionFallback &&
+			extensionApprovalRequired &&
+			pendingSafetyChecks.length === 0 &&
+			context?.hasUI !== true &&
+			getPermissionIntent(this.tool.name, effectiveParams) !== undefined;
+		const approvalReason =
+			extensionApprovalRequired && approvalCheck.reason ? approvalData(approvalCheck.reason) : approvalCheck.reason;
+		const hasApprovalHandlers =
+			this.runner.hasHandlers("tool_approval_requested") || this.runner.hasHandlers("tool_approval_resolved");
+		const sessionId = this.runner.sessionId;
+		const emitApprovalRequested = async () => {
+			if (!hasApprovalHandlers) return;
+			await this.runner.emit({
+				type: "tool_approval_requested",
+				sessionId,
+				toolName: this.tool.name,
+				toolCallId,
+				...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
+				approvalMode,
+			});
+		};
+		const emitApprovalResolved = async (approved: boolean, reason?: string) => {
+			if (!hasApprovalHandlers) return;
+			await this.runner.emit({
+				type: "tool_approval_resolved",
+				sessionId,
+				toolName: this.tool.name,
+				toolCallId,
+				approved,
+				...(reason ? { reason } : {}),
+			});
+		};
+
+		if (approvalCheck.required && !deferExtensionApprovalToAcp) {
+			if (matchesScheduledCall && !hasFinalAuthorization) {
 				await untilAborted(signal, () => this.runner.waitForToolApprovalPreview(toolCallId));
 			}
 
-			const hasApprovalHandlers =
-				this.runner.hasHandlers("tool_approval_requested") || this.runner.hasHandlers("tool_approval_resolved");
-			const sessionId = context?.sessionManager?.getSessionId() ?? "";
-			if (hasApprovalHandlers) {
-				await this.runner.emit({
-					type: "tool_approval_requested",
-					sessionId,
-					toolName: this.tool.name,
-					toolCallId,
-					...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
-					approvalMode,
-				});
-			}
-
-			const emitApprovalResolved = async (approved: boolean, reason?: string) => {
-				if (!hasApprovalHandlers) return;
-				await this.runner.emit({
-					type: "tool_approval_resolved",
-					sessionId,
-					toolName: this.tool.name,
-					toolCallId,
-					approved,
-					...(reason ? { reason } : {}),
-				});
-			};
+			await emitApprovalRequested();
 
 			// Provider safety checks fail closed without an interactive prompt. Unlike
 			// ordinary tier approval, no setting or yolo mode may bypass this gate.
@@ -311,6 +377,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				if (pendingSafetyChecks.length > 0) {
 					throw new Error(
 						`Tool "${this.tool.name}" has pending provider safety checks but no interactive UI is available.`,
+					);
+				}
+				if (extensionApprovalRequired) {
+					throw new Error(
+						`Tool "${this.tool.name}" requires approval from an extension but no interactive UI is available.\n` +
+							"Use an interactive UI or change the extension policy to allow this tool call.",
 					);
 				}
 				throw new Error(
@@ -323,23 +395,30 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 
 			const uiContext = this.runner.getUIContext();
-			const basePrompt = formatApprovalPrompt(this.tool, resolvedArgs, approvalCheck.reason);
+			const basePrompt = formatApprovalPrompt(this.tool, resolvedArgs, approvalReason);
 			const safetyPrompt =
 				pendingSafetyChecks.length > 0
 					? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
 					: basePrompt;
 			let choice: string | undefined;
+			const extensionOnlyApproval = extensionApprovalRequired && !nativeApprovalRequired;
+			if (extensionOnlyApproval) this.runner.reportToolApprovalAttention(toolCallId, true, "extension");
 			try {
-				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+				choice = signal
+					? await uiContext.select(safetyPrompt, ["Approve", "Deny"], { signal })
+					: await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
 			} catch (err) {
 				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
 				throw err;
+			} finally {
+				if (extensionOnlyApproval) this.runner.reportToolApprovalAttention(toolCallId, false, "extension");
 			}
 			const approved = choice === "Approve";
 			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
 			if (!approved) {
 				throw new Error(`Tool call denied by user: ${this.tool.name}`);
 			}
+			if (extensionApprovalRequired) extensionApprovalGranted = true;
 			if (pendingSafetyChecks.length > 0) {
 				if (!context) throw new Error("Provider safety approval context is unavailable");
 				context.providerSafetyApproved = true;
@@ -355,10 +434,24 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			// expose its settings to registered tools and any fallback handlers they
 			// trigger. `sdk.ts` wraps the whole tool registry with this class whenever
 			// a runner exists.
+			const executeTool = () => this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context);
 			result = await this.runner.runScoped(() =>
-				withFileMutationSession(this.runner.sessionId, () =>
-					this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
-				),
+				withFileMutationSession(this.runner.sessionId, () => {
+					if (extensionApprovalGranted)
+						return withApprovedAcpToolCall(toolCallId, this.tool.name, executeTool);
+					if (deferExtensionApprovalToAcp) {
+						return withRequiredAcpApproval(
+							toolCallId,
+							this.tool.name,
+							approvalReason,
+							hasApprovalHandlers
+								? { requested: emitApprovalRequested, resolved: emitApprovalResolved }
+								: undefined,
+							executeTool,
+						);
+					}
+					return executeTool();
+				}),
 			);
 		} catch (err) {
 			executionError = err instanceof Error ? err : new Error(String(err));
