@@ -475,9 +475,9 @@ export function collectJsonRegexSecretValues(obfuscator: SecretObfuscator, value
 }
 
 /**
- * Map every string in arbitrary JSON. Used ONLY for tool-call arguments, whose
- * shape is model-authored and not known ahead of time. No other caller may walk
- * untyped data: every message/content path is handled by a typed transformer.
+ * Map string values in schema-designated JSON data: tool arguments, discovery
+ * annotations, and schema examples. Keys remain identifiers. Protocol
+ * objects and JSON Schema structure require their own typed traversal.
  */
 export function mapJsonStrings(value: JsonValue, fn: (s: string) => string): JsonValue {
 	if (typeof value === "string") return fn(value);

@@ -11,6 +11,7 @@ import type {
 	ResponseFileSearchToolCall,
 	ResponseFunctionWebSearch,
 	ResponseInput,
+	ResponseToolSearchOutputItemParam,
 } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -2798,9 +2799,13 @@ describe("advisor", () => {
 			},
 		);
 
-		it.each(["retained", "maintenance"])(
-			"collects search-only collisions from %s native history before replay and pending compaction input",
-			async source => {
+		it.each([
+			{ source: "retained", kind: "file_search_call" },
+			{ source: "maintenance", kind: "file_search_call" },
+			{ source: "maintenance", kind: "tool_search_output" },
+		])(
+			"collects $kind-only collisions from $source history before replay and pending compaction input",
+			async ({ source, kind }) => {
 				const obfuscator = new SecretObfuscator([
 					{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
 					{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace", replacement: "[hidden]" },
@@ -2810,12 +2815,33 @@ describe("advisor", () => {
 				const stalePrompt = obfuscator.obfuscate("remember OTHERSECRET");
 				expect(stalePrompt).toContain("TOKABC123_");
 				const compactionItem = { type: "compaction", encrypted_content: "opaque TOKABC123_" };
-				const searchItem = {
-					type: "file_search_call",
-					id: "search-only-collision",
-					status: "completed",
-					queries: ["tok_abc123"],
-				} satisfies ResponseFileSearchToolCall;
+				const searchItemFor = (text: string) =>
+					kind === "file_search_call"
+						? ({ type: "file_search_call", status: "completed", queries: [text] } satisfies Omit<
+								ResponseFileSearchToolCall,
+								"id"
+							>)
+						: ({
+								type: "tool_search_output",
+								execution: "server",
+								status: "completed",
+								tools: [
+									{
+										type: "namespace",
+										name: "workspace",
+										description: "Workspace tools",
+										tools: [
+											{
+												type: "custom",
+												name: "lookup",
+												description: `Use ${text}`,
+												format: { type: "text" },
+											},
+										],
+									},
+								],
+							} satisfies ResponseToolSearchOutputItemParam);
+				const searchItem = { ...searchItemFor("tok_abc123"), id: "search-only-collision" };
 				const replacementHistory = buildOpenAiNativeHistory(
 					[{ role: "user", content: stalePrompt, timestamp: 1 }],
 					model,
@@ -2898,9 +2924,7 @@ describe("advisor", () => {
 					expect(plaintext).not.toContain("tok_abc123");
 					expect(plaintext).not.toContain("OTHERSECRET");
 					expect(obfuscator.deobfuscate(plaintext)).toContain("remember OTHERSECRET");
-					expect(history.filter(item => item.type === "file_search_call")).toMatchObject([
-						{ type: "file_search_call", status: "completed", queries: ["[hidden]"] },
-					]);
+					expect(history.find(item => item.type === kind)).toMatchObject(searchItemFor("[hidden]"));
 					expect(history.filter(item => item.type === "compaction")).toEqual([compactionItem]);
 				}
 				expect(summary).toEqual(originalSummary);

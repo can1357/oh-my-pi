@@ -9,11 +9,18 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { buildOpenAiNativeHistory } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Context, Message, TextContent } from "@oh-my-pi/pi-ai";
+import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type {
 	ResponseFileSearchToolCall,
 	ResponseFunctionWebSearch,
+	ResponseInputItem,
+	ResponseToolSearchOutputItemParam,
 } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
+import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { isJsonSchemaValueValid } from "@oh-my-pi/pi-ai/utils/schema/json-schema-validator";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	builtinCredentialSecretEntries,
 	getExistingSecretPlaceholderKey,
@@ -22,6 +29,7 @@ import {
 	loadSecrets,
 } from "@oh-my-pi/pi-coding-agent/secrets";
 import {
+	collectNativeReplayRegexSecretValues,
 	deobfuscateAgentMessages,
 	deobfuscateToolArguments,
 	obfuscateMessages,
@@ -3556,6 +3564,301 @@ describe("SecretObfuscator cross-turn cache stability", () => {
 });
 
 describe("native replay secret obfuscation", () => {
+	it("redacts dynamic discovery descriptions and schema examples without changing identifiers", () => {
+		const secret = "DISCOVERY_SECRET_123";
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+		const schemaFor = (text: string) => ({
+			type: "object",
+			description: text,
+			required: ["description"],
+			properties: { description: { type: "array", items: { $ref: "#/$defs/value" }, examples: [[text]] } },
+			$defs: { value: { type: "string", title: text, $comment: text } },
+		});
+		const itemsFor = (text: string) => [
+			{
+				type: "mcp_list_tools",
+				id: secret,
+				server_label: secret,
+				tools: [
+					{
+						name: secret,
+						description: text,
+						input_schema: schemaFor(text),
+						annotations: { title: text, readOnlyHint: true },
+					},
+				],
+			} satisfies ResponseInputItem.McpListTools,
+			{
+				type: "tool_search_output",
+				id: secret,
+				call_id: secret,
+				execution: "client",
+				status: "completed",
+				tools: [
+					{
+						type: "namespace",
+						name: secret,
+						description: text,
+						tools: [
+							{ type: "function", name: secret, description: text, parameters: schemaFor(text), strict: true },
+							{
+								type: "custom",
+								name: secret,
+								description: text,
+								format: { type: "grammar", syntax: "regex", definition: secret },
+							},
+						],
+					},
+					{
+						type: "mcp",
+						server_label: secret,
+						server_description: text,
+						server_url: `https://example.test/${secret}`,
+						authorization: secret,
+					},
+					{
+						type: "shell",
+						environment: { type: "local", skills: [{ name: secret, path: secret, description: text }] },
+					},
+				],
+			} satisfies ResponseToolSearchOutputItemParam,
+			{
+				type: "additional_tools",
+				role: "developer",
+				id: secret,
+				tools: [
+					{ type: "tool_search", execution: "client", description: text, parameters: schemaFor(text) },
+					{
+						type: "shell",
+						environment: {
+							type: "container_auto",
+							file_ids: [secret],
+							skills: [
+								{
+									type: "inline",
+									name: secret,
+									description: text,
+									source: { type: "base64", media_type: "application/zip", data: secret },
+								},
+								{ type: "skill_reference", skill_id: secret, version: "latest" },
+							],
+						},
+					},
+					{ type: "shell", environment: { type: "container_reference", container_id: secret } },
+				],
+			} satisfies ResponseInputItem.AdditionalTools,
+		];
+		const original = {
+			providerPayload: { type: "openaiResponsesHistory" as const, provider: "openai", items: itemsFor(secret) },
+			preserveData: { openaiRemoteCompaction: { provider: "openai", replacementHistory: itemsFor(secret) } },
+		};
+		const snapshot = structuredClone(original);
+		const scrubbed = obfuscateNativeReplay(obfuscator, original, new Set());
+		const expected = itemsFor(obfuscator.obfuscate(secret));
+		expect(scrubbed.providerPayload.items).toEqual(expected);
+		expect(scrubbed.preserveData.openaiRemoteCompaction.replacementHistory).toEqual(expected);
+		expect(original).toEqual(snapshot);
+		expect(obfuscateNativeReplay(obfuscator, scrubbed, new Set())).toBe(scrubbed);
+	});
+
+	it("preserves satisfiable discovery constraints while redacting descriptions", () => {
+		const secret = "NATIVE_SECRET_123456";
+		const obfuscator = new SecretObfuscator([
+			{ type: "plain", content: "OTHERSECRET", friendlyName: "NATIVESECRET123456" },
+			{ type: "regex", content: "NATIVE_SECRET_[0-9]+" },
+		]);
+		const stale = obfuscator.obfuscate("OTHERSECRET");
+		const parameters = {
+			type: "object",
+			description: "Choose OTHERSECRET",
+			required: ["token", "mode"],
+			additionalProperties: false,
+			properties: {
+				token: { type: "string", const: secret, pattern: "^NATIVE_SECRET_[0-9]+$", maxLength: secret.length },
+				mode: { type: "string", enum: [secret, "public"], default: secret },
+			},
+			"x-mcp-header": secret,
+		};
+		const replay = {
+			providerPayload: {
+				type: "openaiResponsesHistory" as const,
+				provider: "openai",
+				items: [
+					{
+						type: "tool_search_output",
+						id: secret,
+						execution: "client",
+						status: "completed",
+						tools: [{ type: "function", name: secret, parameters, strict: false }],
+					} satisfies ResponseToolSearchOutputItemParam,
+				],
+			},
+		};
+		const values = new Set<string>();
+		collectNativeReplayRegexSecretValues(obfuscator, replay, values);
+		expect(values).toEqual(new Set());
+		const scrubbed = obfuscateNativeReplay(obfuscator, replay, values);
+		const schema = scrubbed.providerPayload.items[0]!.tools[0]!.parameters;
+		expect(isJsonSchemaValueValid(schema, { token: secret, mode: secret })).toBe(true);
+		expect(isJsonSchemaValueValid(schema, { token: secret, mode: "public" })).toBe(true);
+		expect(isJsonSchemaValueValid(schema, { token: "invalid", mode: "public" })).toBe(false);
+		expect(isJsonSchemaValueValid(schema, { token: secret, mode: "invalid" })).toBe(false);
+		expect(schema.description).not.toContain("OTHERSECRET");
+		expect(parameters.description).toBe("Choose OTHERSECRET");
+		expect(obfuscator.obfuscate(stale, values)).toContain("NATIVESECRET123456_");
+	});
+
+	it.each([
+		{
+			source: "provider replay",
+			kind: "MCP schema examples",
+			item: {
+				type: "mcp_list_tools",
+				id: "discovery",
+				server_label: "catalog",
+				tools: [
+					{
+						name: "lookup",
+						description: "Available lookup",
+						input_schema: { properties: { query: { examples: ["tok_abc123"] } } },
+					},
+				],
+			} satisfies ResponseInputItem.McpListTools,
+		},
+		{
+			source: "detached next-compaction history",
+			kind: "function schema examples",
+			item: {
+				type: "tool_search_output",
+				id: "discovery",
+				execution: "server",
+				status: "completed",
+				tools: [
+					{
+						type: "function",
+						name: "lookup",
+						strict: false,
+						parameters: { $defs: { query: { examples: [{ value: "tok_abc123" }] } } },
+					},
+				],
+			} satisfies ResponseToolSearchOutputItemParam,
+		},
+		{
+			source: "provider replay",
+			kind: "local shell skill",
+			item: {
+				type: "tool_search_output",
+				execution: "server",
+				status: "completed",
+				tools: [
+					{
+						type: "shell",
+						environment: {
+							type: "local",
+							skills: [{ name: "lookup", path: "/tmp/lookup", description: "tok_abc123" }],
+						},
+					},
+				],
+			} satisfies ResponseToolSearchOutputItemParam,
+		},
+		{
+			source: "detached next-compaction history",
+			kind: "inline shell skill",
+			item: {
+				type: "additional_tools",
+				role: "developer",
+				tools: [
+					{
+						type: "shell",
+						environment: {
+							type: "container_auto",
+							skills: [
+								{
+									type: "inline",
+									name: "lookup",
+									description: "tok_abc123",
+									source: {
+										type: "base64",
+										media_type: "application/zip",
+										data: "UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==",
+									},
+								},
+							],
+						},
+					},
+				],
+			} satisfies ResponseInputItem.AdditionalTools,
+		},
+	])("discovers regex values only in $source ($kind) before encoding earlier history", ({ source, item }) => {
+		const model = getBundledModel<"openai-responses">("openai", "gpt-5.4");
+		if (!model || model.api !== "openai-responses") throw new Error("Expected bundled OpenAI Responses model");
+		const obfuscator = new SecretObfuscator([
+			{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+			{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace", replacement: "[hidden]" },
+		]);
+		const stale = obfuscator.obfuscate("remember OTHERSECRET");
+		expect(stale).toContain("TOKABC123_");
+		const opaque = { type: "compaction", encrypted_content: "opaque TOKABC123_" };
+		const providerItems = source === "provider replay" ? [item, opaque] : [opaque];
+		const replay = {
+			role: "developer" as const,
+			attribution: "agent" as const,
+			content: "Native replay",
+			timestamp: 2,
+			providerPayload: { type: "openaiResponsesHistory" as const, provider: model.provider, items: providerItems },
+			preserveData: {
+				openaiRemoteCompaction: {
+					provider: model.provider,
+					compactionItem: opaque,
+					replacementHistory: [
+						{ type: "message", role: "user", content: [{ type: "input_text", text: stale }] },
+						...(source === "provider replay" ? [] : [structuredClone(item)]),
+						opaque,
+					],
+				},
+			},
+		};
+		const messages: Message[] = [{ role: "user", content: stale, timestamp: 1 }, replay];
+		const snapshot = structuredClone(messages);
+		const values = new Set<string>();
+		collectNativeReplayRegexSecretValues(obfuscator, replay, values);
+		expect(values).toEqual(new Set(["tok_abc123"]));
+		const scrubbed = obfuscateMessages(obfuscator, messages);
+		const retained = scrubbed[1] as typeof replay;
+		const input = buildParams(model, { messages: scrubbed }, undefined, undefined).params.input;
+		const responsesInput = buildResponsesInput({
+			model,
+			context: { messages: scrubbed },
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: false,
+			nativeHistory: { replay: true, filterReasoning: false },
+		});
+		if (!Array.isArray(input)) throw new Error("Expected encoded Responses input");
+		const nextCompaction = buildOpenAiNativeHistory(
+			[],
+			model,
+			retained.preserveData.openaiRemoteCompaction.replacementHistory,
+		);
+		for (const history of [input, responsesInput, nextCompaction]) {
+			const plaintext = JSON.stringify(history.filter(entry => entry.type !== "compaction"));
+			expect(plaintext).not.toContain("tok_abc123");
+			expect(plaintext).not.toContain("TOKABC123_");
+			expect(plaintext).not.toContain("OTHERSECRET");
+			expect(obfuscator.deobfuscate(plaintext)).toContain("remember OTHERSECRET");
+			expect(history.find(entry => entry.type === "compaction")).toMatchObject(opaque);
+		}
+		const expectedTools = JSON.parse(JSON.stringify(item.tools).replaceAll("tok_abc123", "[hidden]"));
+		if (source === "provider replay") {
+			expect(input.find(entry => entry.type === item.type)).toMatchObject({ tools: expectedTools });
+			expect(responsesInput.find(entry => entry.type === item.type)).toMatchObject({ tools: expectedTools });
+		} else {
+			expect(nextCompaction.find(entry => entry.type === item.type)).toMatchObject({ tools: expectedTools });
+			expect(retained.providerPayload).toBe(replay.providerPayload);
+		}
+		expect(messages).toEqual(snapshot);
+		expect(obfuscateMessages(obfuscator, scrubbed)).toBe(scrubbed);
+	});
+
 	it("scrubs native plaintext and tool data without rewriting encrypted or structural fields", () => {
 		const obfuscator = new SecretObfuscator([
 			{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },

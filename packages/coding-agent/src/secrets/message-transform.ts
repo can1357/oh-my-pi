@@ -93,9 +93,8 @@ export function deobfuscateAssistantContent(
 }
 
 /**
- * Restore placeholders inside a tool call's arguments. Arguments are arbitrary
- * model-authored JSON, so tool-call arguments are the ONLY place a recursive
- * JSON walk runs.
+ * Restore placeholders in model-authored argument values. Argument keys name
+ * tool parameters and must remain unchanged.
  */
 export function deobfuscateToolArguments(
 	obfuscator: SecretObfuscator,
@@ -137,6 +136,117 @@ function mapNativeField(
 ): Record<string, unknown> {
 	const next = transform(item[key]);
 	return next === item[key] ? item : { ...item, [key]: next };
+}
+
+/** Schema maps name properties/definitions; their keys are identifiers, not annotations. */
+function mapNativeSchemaMap(value: unknown, transform: (text: string) => string): unknown {
+	if (!isRecord(value)) return value;
+	let mapped: Record<string, unknown> | undefined;
+	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
+		// Legacy dependencies can contain property-name arrays instead of schemas.
+		const next = Array.isArray(value[key]) ? value[key] : mapNativeSchema(value[key], transform);
+		if (next !== value[key]) {
+			mapped ??= { ...value };
+			mapped[key] = next;
+		}
+	}
+	return mapped ?? value;
+}
+
+/** Walk schema-valued positions, rewriting only descriptive annotations and examples. */
+function mapNativeSchema(value: unknown, transform: (text: string) => string): unknown {
+	if (!isRecord(value)) return value;
+	let mapped: Record<string, unknown> | undefined;
+	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
+		const child = value[key];
+		let next: unknown;
+		switch (key) {
+			case "title":
+			case "description":
+			case "$comment":
+			case "example":
+			case "examples":
+				next = mapJsonStrings(child as JsonValue, transform);
+				break;
+			case "properties":
+			case "patternProperties":
+			case "$defs":
+			case "definitions":
+			case "dependentSchemas":
+			case "dependencies":
+				next = mapNativeSchemaMap(child, transform);
+				break;
+			case "items":
+			case "additionalItems":
+			case "additionalProperties":
+			case "unevaluatedItems":
+			case "unevaluatedProperties":
+			case "contains":
+			case "propertyNames":
+			case "not":
+			case "if":
+			case "then":
+			case "else":
+			case "contentSchema":
+			case "allOf":
+			case "anyOf":
+			case "oneOf":
+			case "prefixItems":
+				next = Array.isArray(child)
+					? mapNativeArray(child, schema => mapNativeSchema(schema, transform))
+					: mapNativeSchema(child, transform);
+				break;
+			default:
+				// Constraints (including enum/const), execution defaults and unknown
+				// extensions are not prose. Rewriting them can invalidate tool inputs.
+				continue;
+		}
+		if (next !== child) {
+			mapped ??= { ...value };
+			mapped[key] = next;
+		}
+	}
+	return mapped ?? value;
+}
+
+/** Dynamic history definitions only; static request tools are intentionally outside this visitor. */
+function mapNativeToolDefinition(value: unknown, transform: (text: string) => string): unknown {
+	if (!isRecord(value)) return value;
+	const text = (value: unknown): unknown => (typeof value === "string" ? transform(value) : value);
+	switch (value.type) {
+		case "function":
+		case "tool_search":
+			return mapNativeField(mapNativeField(value, "description", text), "parameters", schema =>
+				mapNativeSchema(schema, transform),
+			);
+		case "namespace":
+			return mapNativeField(mapNativeField(value, "description", text), "tools", tools =>
+				mapNativeArray(tools, tool => mapNativeToolDefinition(tool, transform)),
+			);
+		case "custom":
+			// Grammar definitions are executable validation controls, not prose.
+			return mapNativeField(value, "description", text);
+		case "mcp":
+			// Connection credentials, endpoints and tool/approval selectors are transport controls.
+			return mapNativeField(value, "server_description", text);
+		case "shell":
+			return mapNativeField(value, "environment", environment => {
+				if (!isRecord(environment) || (environment.type !== "local" && environment.type !== "container_auto"))
+					return environment;
+				return mapNativeField(environment, "skills", skills =>
+					mapNativeArray(skills, skill => {
+						// Only descriptions are prose; references, paths and bundled bytes stay opaque.
+						if (!isRecord(skill) || (environment.type === "container_auto" && skill.type !== "inline"))
+							return skill;
+						return mapNativeField(skill, "description", text);
+					}),
+				);
+			});
+		default:
+			return value;
+	}
 }
 
 /**
@@ -244,6 +354,11 @@ function mapNativeReplayItem(value: unknown, transform: (text: string) => string
 		case "tool_search_call":
 		case "mcp_approval_request":
 			return mapNativeField(value, "arguments", args);
+		case "tool_search_output":
+		case "additional_tools":
+			return mapNativeField(value, "tools", tools =>
+				mapNativeArray(tools, tool => mapNativeToolDefinition(tool, transform)),
+			);
 		case "mcp_call":
 			return mapNativeField(mapNativeField(mapNativeField(value, "arguments", args), "output", text), "error", text);
 		case "custom_tool_call":
@@ -285,7 +400,18 @@ function mapNativeReplayItem(value: unknown, transform: (text: string) => string
 				isRecord(operation) ? mapNativeField(mapNativeField(operation, "path", text), "diff", text) : operation,
 			);
 		case "mcp_list_tools":
-			return mapNativeField(value, "error", text);
+			return mapNativeField(mapNativeField(value, "error", text), "tools", tools =>
+				mapNativeArray(tools, tool => {
+					if (!isRecord(tool)) return tool;
+					return mapNativeField(
+						mapNativeField(mapNativeField(tool, "description", text), "input_schema", schema =>
+							mapNativeSchema(schema, transform),
+						),
+						"annotations",
+						annotations => mapJsonStrings(annotations as JsonValue, transform),
+					);
+				}),
+			);
 		case "mcp_approval_response":
 			return mapNativeField(value, "reason", text);
 		default:
