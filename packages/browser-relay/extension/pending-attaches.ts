@@ -3,6 +3,23 @@ export interface PendingAttachToken {
 	canceledAtEpoch: number | null;
 }
 
+/** Persist final attach state without allowing a concurrent detach to report success. */
+export async function finalizePendingAttach(
+	operation: PendingAttachToken,
+	persist: () => Promise<void>,
+	onCanceled: () => Promise<void>,
+): Promise<void> {
+	if (operation.canceled) {
+		await onCanceled();
+		throw new Error("debugger attachment detached before attach completed");
+	}
+	await persist();
+	if (operation.canceled) {
+		await onCanceled();
+		throw new Error("debugger attachment detached before attach completed");
+	}
+}
+
 /** Tracks overlapping attach operations without letting one clear another's state. */
 export class PendingAttaches {
 	readonly #byTab = new Map<number, Set<PendingAttachToken>>();

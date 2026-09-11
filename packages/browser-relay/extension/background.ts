@@ -48,7 +48,11 @@ import {
 	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
 } from "./orphan-sweep";
-import { PendingAttaches, type PendingAttachToken } from "./pending-attaches";
+import {
+	finalizePendingAttach,
+	PendingAttaches,
+	type PendingAttachToken,
+} from "./pending-attaches";
 import {
 	afterPendingOperationsSettle,
 	snapshotAfterPendingOperationsSettle,
@@ -1030,26 +1034,27 @@ async function attachTabOperation(
 		);
 		throw error;
 	}
-	if (operation.canceled) {
-		// onDetach ran while the recovery marker was being persisted. Undo the
-		// delayed track and fail the RPC: returning success would make the bridge
-		// mint a session for a Chrome root the user already canceled. A replacement
-		// attach may already own this tab, though, so only clear state still owned by
-		// this operation's attachment epoch.
-		if (
-			operation.canceledAtEpoch !== null &&
-			isAttachmentStateCurrent(
-				attachmentStateEpochs,
-				tabId,
-				operation.canceledAtEpoch,
-			)
-		) {
-			attachmentGuard.untrack(tabId);
-			await forgetRecoverable(tabId);
-		}
-		throw new Error("debugger attachment detached before attach completed");
-	}
-	await forgetRelayDetach(tabId);
+	await finalizePendingAttach(
+		operation,
+		() => forgetRelayDetach(tabId),
+		async () => {
+			// onDetach ran while attach state was being persisted. Undo the delayed
+			// track and fail the RPC: returning success would make the bridge mint a
+			// session for a Chrome root the user already canceled. A replacement attach
+			// may already own this tab, so only clear state owned by this operation.
+			if (
+				operation.canceledAtEpoch !== null &&
+				isAttachmentStateCurrent(
+					attachmentStateEpochs,
+					tabId,
+					operation.canceledAtEpoch,
+				)
+			) {
+				attachmentGuard.untrack(tabId);
+				await forgetRecoverable(tabId);
+			}
+		},
+	);
 }
 
 async function runRpc(

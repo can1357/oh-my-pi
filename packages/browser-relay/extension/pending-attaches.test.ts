@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { PendingAttaches } from "./pending-attaches";
+import {
+	finalizePendingAttach,
+	PendingAttaches,
+	type PendingAttachToken,
+} from "./pending-attaches";
 
 describe("PendingAttaches", () => {
 	it("keeps a replacement attach cancellable after the older operation settles", () => {
@@ -17,5 +21,30 @@ describe("PendingAttaches", () => {
 		pending.cancel(1, 4);
 		expect(replacement.canceled).toBe(true);
 		expect(replacement.canceledAtEpoch).toBe(4);
+	});
+
+	it("rejects a detach that lands while final attach state is persisted", async () => {
+		const persist = Promise.withResolvers<void>();
+		const operation: PendingAttachToken = {
+			canceled: false,
+			canceledAtEpoch: null,
+		};
+		let canceled = false;
+		const finalized = finalizePendingAttach(
+			operation,
+			() => persist.promise,
+			async () => {
+				canceled = true;
+			},
+		);
+
+		operation.canceled = true;
+		operation.canceledAtEpoch = 2;
+		persist.resolve();
+
+		await expect(finalized).rejects.toThrow(
+			"debugger attachment detached before attach completed",
+		);
+		expect(canceled).toBe(true);
 	});
 });

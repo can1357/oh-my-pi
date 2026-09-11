@@ -263,6 +263,18 @@ function serializeOrphanSweepDeadlineUpdate(previousUpdate, alarmUpdate, isCurre
 }
 
 // extension/pending-attaches.ts
+async function finalizePendingAttach(operation, persist, onCanceled) {
+  if (operation.canceled) {
+    await onCanceled();
+    throw new Error("debugger attachment detached before attach completed");
+  }
+  await persist();
+  if (operation.canceled) {
+    await onCanceled();
+    throw new Error("debugger attachment detached before attach completed");
+  }
+}
+
 class PendingAttaches {
   #byTab = new Map;
   begin(tabId) {
@@ -846,14 +858,12 @@ async function attachTabOperation(tabId, socket, operation) {
     });
     throw error;
   }
-  if (operation.canceled) {
+  await finalizePendingAttach(operation, () => forgetRelayDetach(tabId), async () => {
     if (operation.canceledAtEpoch !== null && isAttachmentStateCurrent(attachmentStateEpochs, tabId, operation.canceledAtEpoch)) {
       attachmentGuard.untrack(tabId);
       await forgetRecoverable(tabId);
     }
-    throw new Error("debugger attachment detached before attach completed");
-  }
-  await forgetRelayDetach(tabId);
+  });
 }
 async function runRpc(msg, socket) {
   switch (msg.op) {
