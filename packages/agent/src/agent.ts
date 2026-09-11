@@ -373,6 +373,8 @@ export class Agent {
 	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	#steeringQueue: AgentMessage[] = [];
 	#followUpQueue: AgentMessage[] = [];
+	#queueRevision = 0;
+	#prioritySteering = new Set<AgentMessage>();
 	#steeringWaiters = new Set<() => void>();
 
 	#steeringMode: "all" | "one-at-a-time";
@@ -973,6 +975,22 @@ export class Agent {
 	replaceQueues(steering: AgentMessage[], followUp: AgentMessage[]) {
 		this.#steeringQueue = steering.slice();
 		this.#followUpQueue = followUp.slice();
+		this.#prioritySteering = new Set(steering.filter(message => this.#prioritySteering.has(message)));
+		this.#queueRevision++;
+		this.#notifySteeringWaiters();
+	}
+
+	/** Changes on every mutation, including consumption by the running loop. */
+	get queueRevision(): number {
+		return this.#queueRevision;
+	}
+
+	/** Dispatch this intact batch before other steering, even in all-at-once mode. */
+	prependSteeringBatch(messages: readonly AgentMessage[]): void {
+		if (messages.length === 0) return;
+		this.#steeringQueue = [...messages, ...this.#steeringQueue];
+		this.#prioritySteering = new Set(messages);
+		this.#queueRevision++;
 		this.#notifySteeringWaiters();
 	}
 
@@ -994,6 +1012,7 @@ export class Agent {
 	 */
 	steer(m: AgentMessage) {
 		this.#steeringQueue.push(m);
+		this.#queueRevision++;
 		this.#notifySteeringWaiters();
 	}
 
@@ -1003,15 +1022,19 @@ export class Agent {
 	 */
 	followUp(m: AgentMessage) {
 		this.#followUpQueue.push(m);
+		this.#queueRevision++;
 	}
 
 	clearSteeringQueue() {
 		this.#steeringQueue = [];
+		this.#prioritySteering.clear();
+		this.#queueRevision++;
 		this.#notifySteeringWaiters();
 	}
 
 	clearFollowUpQueue() {
 		this.#followUpQueue = [];
+		this.#queueRevision++;
 	}
 
 	/**
@@ -1026,6 +1049,8 @@ export class Agent {
 	clearAllQueues() {
 		this.#steeringQueue = [];
 		this.#followUpQueue = [];
+		this.#prioritySteering.clear();
+		this.#queueRevision++;
 		this.#notifySteeringWaiters();
 		this.clearDeferredToolDirectives();
 	}
@@ -1053,16 +1078,25 @@ export class Agent {
 	}
 
 	#dequeueSteeringMessages(): AgentMessage[] {
+		if (this.#prioritySteering.size > 0) {
+			const selected = this.#steeringQueue.filter(message => this.#prioritySteering.has(message));
+			this.#steeringQueue = this.#steeringQueue.filter(message => !this.#prioritySteering.has(message));
+			this.#prioritySteering.clear();
+			if (selected.length > 0) this.#queueRevision++;
+			return selected;
+		}
 		if (this.#steeringMode === "one-at-a-time") {
 			if (this.#steeringQueue.length > 0) {
 				const first = this.#steeringQueue[0];
 				this.#steeringQueue = this.#steeringQueue.slice(1);
+				this.#queueRevision++;
 				return [first];
 			}
 			return [];
 		}
 		const steering = this.#steeringQueue.slice();
 		this.#steeringQueue = [];
+		if (steering.length > 0) this.#queueRevision++;
 		return steering;
 	}
 
@@ -1071,12 +1105,14 @@ export class Agent {
 			if (this.#followUpQueue.length > 0) {
 				const first = this.#followUpQueue[0];
 				this.#followUpQueue = this.#followUpQueue.slice(1);
+				this.#queueRevision++;
 				return [first];
 			}
 			return [];
 		}
 		const followUp = this.#followUpQueue.slice();
 		this.#followUpQueue = [];
+		if (followUp.length > 0) this.#queueRevision++;
 		return followUp;
 	}
 
@@ -1085,7 +1121,12 @@ export class Agent {
 	 * Used by dequeue keybinding.
 	 */
 	popLastSteer(): AgentMessage | undefined {
-		return this.#steeringQueue.pop();
+		const message = this.#steeringQueue.pop();
+		if (message) {
+			this.#prioritySteering.delete(message);
+			this.#queueRevision++;
+		}
+		return message;
 	}
 
 	/**
@@ -1093,7 +1134,9 @@ export class Agent {
 	 * Used by dequeue keybinding.
 	 */
 	popLastFollowUp(): AgentMessage | undefined {
-		return this.#followUpQueue.pop();
+		const message = this.#followUpQueue.pop();
+		if (message) this.#queueRevision++;
+		return message;
 	}
 
 	clearMessages() {
@@ -1139,6 +1182,8 @@ export class Agent {
 		this.#state.error = undefined;
 		this.#steeringQueue = [];
 		this.#followUpQueue = [];
+		this.#prioritySteering.clear();
+		this.#queueRevision++;
 		this.#notifySteeringWaiters();
 		this.clearDeferredToolDirectives();
 	}
