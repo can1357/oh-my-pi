@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- GitHub Copilot Enterprise requests keep the Copilot CLI identity accepted by private Enterprise endpoints, and Business requests denied with HTTP 400 `model_not_supported` now retry once as the Copilot CLI (matching the existing 403 fallback), restoring models that 18.1.17 rejected as unsupported ([#11669](https://github.com/can1357/oh-my-pi/issues/11669)).
 ### Changed
 
 - Defaulted Anthropic OAuth requests to 1h prompt-cache retention where supported, matching Claude Code subscriber behavior and preventing cache expiry during idle intervals ([#11667](https://github.com/can1357/oh-my-pi/pull/11667) by [@camjac251](https://github.com/camjac251)).
