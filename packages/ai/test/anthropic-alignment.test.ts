@@ -1678,7 +1678,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.tools?.[0]?.strict).toBe(true);
 		expect(payload.tools?.[0]?.eager_input_streaming).toBe(true);
 		// Sole tool is also the last tool, so it carries the head breakpoint.
-		expect(payload.tools?.[0]?.cache_control).toEqual({ type: "ephemeral" });
+		expect(payload.tools?.[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 	});
 
 	it("breakpoints the last tool definition so the stable head gets its own cache entry", async () => {
@@ -1706,15 +1706,16 @@ describe("Anthropic request fingerprint alignment", () => {
 		// single prefix, so earlier markers would spend breakpoints for nothing.
 		expect(payload.tools?.[0]?.cache_control).toBeUndefined();
 		expect(payload.tools?.[1]?.cache_control).toBeUndefined();
-		expect(payload.tools?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+		expect(payload.tools?.at(-1)?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 
 		// The trailing message window is untouched; the OAuth identity block carries its
 		// own breakpoint, while caller system blocks stay uncached.
 		const content = payload.messages?.at(-1)?.content;
 		expect(Array.isArray(content) ? content.at(-1)?.cache_control : undefined).toEqual({
 			type: "ephemeral",
+			ttl: "1h",
 		});
-		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral" });
+		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 		expect(payload.system?.[2]?.cache_control).toBeUndefined();
 		// Anthropic rejects a fifth breakpoint, so the total must stay in budget.
 		const marked = (blocks: Array<{ cache_control?: unknown }> | undefined) =>

@@ -253,13 +253,15 @@ export function resolveOpenAIRequestSetup(
 		}
 	}
 	if (model.provider === "github-copilot") {
-		apiKey = parseGitHubCopilotApiKey(rawApiKey).accessToken;
+		const copilotApiKey = parseGitHubCopilotApiKey(rawApiKey);
+		apiKey = copilotApiKey.accessToken;
 		const copilot = buildCopilotDynamicHeaders({
 			messages: options.messages,
 			hasImages: hasCopilotVisionInput(options.messages),
 			premiumMultiplier: model.premiumMultiplier,
 			headers,
 			initiatorOverride: options.initiatorOverride,
+			enterpriseUrl: copilotApiKey.enterpriseUrl,
 			integrationId: resolveCopilotRequestIdentity(options.extraHeaders),
 		});
 		Object.assign(headers, copilot.headers);

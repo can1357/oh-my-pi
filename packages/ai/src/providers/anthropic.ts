@@ -2028,21 +2028,22 @@ const streamAnthropicOnce = (
 			// Built inside the try so a copilot credential/header failure surfaces as
 			// an error event instead of an unhandled rejection that leaves the stream
 			// (and any consumer awaiting `result()`) hanging forever.
-			const copilotDynamicHeaders =
-				model.provider === "github-copilot"
-					? buildCopilotDynamicHeaders({
-							messages: context.messages,
-							hasImages: hasCopilotVisionInput(context.messages),
-							premiumMultiplier: model.premiumMultiplier,
-							headers: { ...model.headers, ...options?.headers },
-							integrationId: resolveCopilotRequestIdentity(options?.headers),
-							initiatorOverride: options?.initiatorOverride,
-						})
-					: undefined;
+			const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
+			const copilotApiKey = model.provider === "github-copilot" ? parseGitHubCopilotApiKey(apiKey) : undefined;
+			const copilotDynamicHeaders = copilotApiKey
+				? buildCopilotDynamicHeaders({
+						messages: context.messages,
+						hasImages: hasCopilotVisionInput(context.messages),
+						premiumMultiplier: model.premiumMultiplier,
+						headers: { ...model.headers, ...options?.headers },
+						integrationId: resolveCopilotRequestIdentity(options?.headers),
+						initiatorOverride: options?.initiatorOverride,
+						enterpriseUrl: copilotApiKey.enterpriseUrl,
+					})
+				: undefined;
 			if (copilotDynamicHeaders?.premiumRequests !== undefined) {
 				output.usage.premiumRequests = copilotDynamicHeaders.premiumRequests;
 			}
-			const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
 			const baseUrl = resolveAnthropicBaseUrl(model, apiKey) ?? "https://api.anthropic.com";
 			const supportsEagerToolInputStreaming = resolveEagerToolInputStreamingSupport(model, baseUrl);
 			const providerSessionState = getAnthropicProviderSessionState(
