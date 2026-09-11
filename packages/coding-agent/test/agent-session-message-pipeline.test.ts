@@ -840,7 +840,7 @@ describe("AgentSession message pipeline", () => {
 	});
 
 	it.each(["anthropic-messages", "ollama-chat", "openai-responses"])(
-		"encodes the ephemeral output cap in the %s HTTP request",
+		"encodes the output cap and omits tools in the %s HTTP request",
 		async api => {
 			const model = buildModel({
 				id: "side-stream-model",
@@ -856,7 +856,22 @@ describe("AgentSession message pipeline", () => {
 			});
 			const bodies: Record<string, unknown>[] = [];
 			const session = new AgentSession({
-				agent: new Agent({ initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [] } }),
+				agent: new Agent({
+					initialState: {
+						model,
+						systemPrompt: ["system prompt"],
+						messages: [],
+						tools: [
+							{
+								name: "local_tool",
+								label: "Local tool",
+								description: "A local tool",
+								parameters: { type: "object", properties: {} },
+								execute: async () => ({ content: [], details: {} }),
+							},
+						],
+					},
+				}),
 				sessionManager: SessionManager.inMemory(),
 				settings: Settings.isolated({ "compaction.enabled": false }),
 				modelRegistry: createModelRegistryStub() as never,
@@ -872,8 +887,11 @@ describe("AgentSession message pipeline", () => {
 					}),
 			});
 			sessions.push(session);
-			await expect(session.runEphemeralTurn({ promptText: "Question?", maxTokens: 321 })).rejects.toThrow();
+			await expect(
+				session.runEphemeralTurn({ promptText: "Question?", maxTokens: 321, tools: false }),
+			).rejects.toThrow();
 			expect(bodies).toHaveLength(1);
+			expect(bodies[0].tools ?? []).toEqual([]);
 			if (api === "ollama-chat") expect(bodies[0].options).toMatchObject({ num_predict: 321 });
 			else expect(bodies[0][api === "anthropic-messages" ? "max_tokens" : "max_output_tokens"]).toBe(321);
 		},
@@ -2142,6 +2160,45 @@ describe("AgentSession message pipeline", () => {
 		const forkedPrompt = contexts[1]!.systemPrompt?.join("\n") ?? "";
 		const occurrences = forkedPrompt.split(injected).length - 1;
 		expect(occurrences).toBe(1);
+	});
+
+	it("rejects Cursor tool opt-out before dispatch, including custom provider names", async () => {
+		let calls = 0;
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: buildModel({
+						...getBundledModel("openai", "gpt-4o"),
+						api: "cursor-agent",
+						provider: "custom",
+						id: "opaque-model",
+						compat: undefined,
+					}),
+					messages: [],
+					tools: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn: () => {
+				calls++;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage("Answer");
+					stream.push({ type: "text_delta", contentIndex: 0, delta: "Answer", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			},
+		});
+		sessions.push(session);
+		await expect(session.runEphemeralTurn({ promptText: "Question?", tools: false })).rejects.toThrow(
+			"does not support tools: false",
+		);
+		expect(calls).toBe(0);
+		expect((await session.runEphemeralTurn({ promptText: "Question?" })).replyText).toBe("Answer");
+		expect(calls).toBe(1);
 	});
 
 	it.each([undefined, false] as const)("ephemeral tool catalog with tools=%s", async tools => {

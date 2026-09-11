@@ -79,6 +79,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { omitsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-limits";
+import { requiresNativeTools } from "@oh-my-pi/pi-catalog/compat/tools";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { type EditStore, PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
@@ -8854,6 +8855,11 @@ export class AgentSession {
 			if (cap !== undefined && (!Number.isSafeInteger(cap) || cap <= 0)) {
 				throw new Error(`${field} must be a positive safe integer.`);
 			}
+		}
+		if (args.tools === false && requiresNativeTools(model)) {
+			throw new Error(
+				"This model does not support tools: false for ephemeral turns because its transport requires native tools.",
+			);
 		}
 		// Do not silently start an unbounded request when discovery or transport
 		// policy says the output limit will be omitted.

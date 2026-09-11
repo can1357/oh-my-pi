@@ -477,7 +477,7 @@ export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
 /** Options for the same ephemeral side turn used by /btw. */
 export interface EphemeralTurnOptions {
 	promptText: string;
-	/** Omit tool definitions and request no tool calls. Tool calls are never executed, even when this option is omitted. */
+	/** Omit tool definitions and request no tool calls. Rejects before inference on transports with mandatory native tools (Cursor). Tool calls are never executed, even when this option is omitted. */
 	tools?: false;
 	/** Optional positive safe-integer output-token cap. Models that omit output limits reject this option before inference. */
 	maxTokens?: number;
