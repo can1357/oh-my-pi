@@ -51,6 +51,19 @@ describe("Transcript Markdown", () => {
 		expect(html).not.toContain("&lt;/advisory&gt;");
 	});
 
+	it("drops links whose scheme is unsafe only after browser URL normalization", () => {
+		// Browsers strip leading C0 controls before parsing the scheme, so a text
+		// check that only trims whitespace lets this through as a "relative" link.
+		const html = renderMarkdown(
+			"[ctl](\u0001javascript:alert(1)) [plain](javascript:alert(1)) [ok](https://example.com) [mail](mailto:a@b.test) [rel](#anchor)",
+		);
+
+		expect(html).not.toContain("javascript:alert(1)");
+		expect(html).toContain('href="https://example.com"');
+		expect(html).toContain('href="mailto:a@b.test"');
+		expect(html).toContain('href="#anchor"');
+	});
+
 	it("typesets every delimiter form and marks display math", () => {
 		const inline = renderMarkdown("energy $E=mc^2$ and \\(x^2\\) here");
 		expect(inline).toContain('encoding="application/x-tex">E=mc^2</annotation>');

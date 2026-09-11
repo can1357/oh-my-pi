@@ -729,6 +729,48 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			return new TurnRecovery(createHost(model, modelRegistry, { messages: [message as AgentMessage, ...tail] }));
 		}
 
+		function pythonResetMessage(content: AssistantMessage["content"], errorMessage: string): AssistantMessage {
+			return {
+				...makeMessage(content, model),
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				errorId: 0,
+				errorMessage,
+			};
+		}
+
+		describe.each([
+			[
+				"Python HTTP/2 reset",
+				"Codex error event: <StreamReset stream_id:1283, error_code:2, remote_reset:True> (code=api_error)",
+			],
+			[
+				"Python HTTP/1.1 chunked body",
+				"Codex error event: peer closed connection without sending complete message body (incomplete chunked read) (code=api_error)",
+			],
+		])("%s recovery", (_label, errorMessage) => {
+			it("preserves the replay veto with committed text", () => {
+				const message = pythonResetMessage([{ type: "text", text: "Partial answer." }], errorMessage);
+				const recovery = recoveryForReset(message, []);
+				expect(recovery.isRetryableError(message)).toBe(false);
+				expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+			});
+
+			it("continues completed tools through preserved-turn recovery", () => {
+				const message = pythonResetMessage([execToolCall("call-1")], errorMessage);
+				const recovery = recoveryForReset(message, [realResult("call-1")]);
+				expect(recovery.isRetryableError(message)).toBe(false);
+				expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
+			});
+
+			it("keeps an unresolved tool outside recovery", () => {
+				const message = pythonResetMessage([execToolCall("call-1")], errorMessage);
+				const recovery = recoveryForReset(message, []);
+				expect(recovery.isRetryableError(message)).toBe(false);
+				expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+			});
+		});
+
 		it("continues a Cursor NGHTTP2_INTERNAL_ERROR after a marked exec result", () => {
 			const message = cursorMessage([execToolCall("call-1", true)], nghttp2Internal);
 			const recovery = recoveryForReset(message, [realResult("call-1")]);

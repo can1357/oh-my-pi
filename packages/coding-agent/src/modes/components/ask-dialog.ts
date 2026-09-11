@@ -22,7 +22,7 @@ import type {
 	ExtensionAskDialogResultItem,
 	ExtensionAskDialogSubmitResult,
 } from "../../extensibility/extensions";
-import { expandKeyHint } from "../../tools/render-utils";
+import { disambiguateDisplayLabels, expandKeyHint, sanitizeCarriageReturns } from "../../tools/render-utils";
 import { getTabBarTheme } from "../shared";
 import { getMarkdownTheme, highlightCode, theme } from "../theme/theme";
 import {
@@ -40,6 +40,11 @@ import { handleTabSwitchKey } from "./selector-helpers";
 
 const OTHER_OPTION = "Other (type your own)";
 const SUBMIT_OPTION = "Submit";
+
+// Action rows appended by the guest race participant. An option sanitizing
+// to one of these must disambiguate identically on both sides, or the same
+// question renders different rows depending on who answers.
+const GUEST_ACTION_LABELS = ["Chat about this", "Next →"];
 
 /** Fraction of the terminal the dialog may occupy. The box height is fixed
  *  at spawn from the tallest tab's content (re-measured only on viewport
@@ -140,13 +145,15 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function questionTabLabel(question: ExtensionAskDialogQuestion, index: number): string {
-	const base = question.header?.trim() || question.id || `Q${index + 1}`;
+	const base = question.header?.trim() || sanitizeCarriageReturns(question.id) || `Q${index + 1}`;
 	return truncateToWidth(replaceTabs(base), MAX_HEADER_CHIP_WIDTH, Ellipsis.Unicode);
 }
 
 function wrapQuestionTitle(question: ExtensionAskDialogQuestion, width: number): string[] {
 	const mdTheme = getMarkdownTheme();
-	const questionText = renderInlineMarkdown(replaceTabs(question.question), mdTheme, t => theme.fg("text", t));
+	const questionText = renderInlineMarkdown(replaceTabs(sanitizeCarriageReturns(question.question)), mdTheme, t =>
+		theme.fg("text", t),
+	);
 	return wrapTextWithAnsi(questionText, Math.max(1, width));
 }
 
@@ -260,8 +267,32 @@ function normalizedInlineInput(input: string): string {
 	return replaceTabs(input).replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Final display labels for a question's options: sanitized, badged, unique,
+ * and sentinel-safe. The recommendation badge goes on BEFORE collision
+ * disambiguation — badging itself can collide two rows (`Retry\rnow`
+ * recommended vs a literal `Retry now (Recommended)`). Mirrors the guest
+ * selector (`#runGuestAskQuestion`): same inputs, same rows, whichever
+ * participant answers. State and results keep originals.
+ */
+function displayOptionLabels(question: ExtensionAskDialogQuestion): string[] {
+	const recommendedSuffix = " (Recommended)";
+	const badged = question.options.map((option, index) => {
+		const base = sanitizeCarriageReturns(option.label);
+		return question.recommended === index && !base.endsWith(recommendedSuffix) ? `${base}${recommendedSuffix}` : base;
+	});
+	return disambiguateDisplayLabels(badged, [OTHER_OPTION, ...GUEST_ACTION_LABELS]);
+}
+
 function renderAnswerSummary(question: ExtensionAskDialogQuestion, state: QuestionState): string {
-	const selected = question.options.map(option => option.label).filter(label => state.selectedOptions.has(label));
+	const display = displayOptionLabels(question);
+	const selected = question.options
+		.map((option, index) => ({
+			raw: option.label,
+			display: display[index] ?? sanitizeCarriageReturns(option.label),
+		}))
+		.filter(entry => state.selectedOptions.has(entry.raw))
+		.map(entry => entry.display);
 	if (question.multi) {
 		const answers = [...selected];
 		if (state.customInput !== undefined) answers.push(`Other: “${normalizedInlineInput(state.customInput)}”`);
@@ -360,7 +391,7 @@ function renderRowLabel(
  * entry throws and takes down the whole TUI render loop. Mirrors
  * `normalizeRenderQuestions` on the transcript path.
  */
-function normalizeDialogQuestions(questions: ExtensionAskDialogQuestion[]): ExtensionAskDialogQuestion[] {
+export function normalizeDialogQuestions(questions: ExtensionAskDialogQuestion[]): ExtensionAskDialogQuestion[] {
 	if (!Array.isArray(questions)) return [];
 	const out: ExtensionAskDialogQuestion[] = [];
 	for (const entry of questions) {
@@ -372,16 +403,23 @@ function normalizeDialogQuestions(questions: ExtensionAskDialogQuestion[]): Exte
 				if (!opt || typeof opt !== "object") continue;
 				const o = opt as Partial<ExtensionAskDialogOption>;
 				options.push({
+					// The label is a caller-supplied correlation key echoed verbatim
+					// in results (matching the guest path) — sanitize only the
+					// display copy (`displayOptionLabels`).
 					label: typeof o.label === "string" ? o.label : "",
-					...(typeof o.description === "string" ? { description: o.description } : {}),
-					...(typeof o.preview === "string" ? { preview: o.preview } : {}),
+					...(typeof o.description === "string" ? { description: sanitizeCarriageReturns(o.description) } : {}),
+					...(typeof o.preview === "string" ? { preview: sanitizeCarriageReturns(o.preview) } : {}),
 				});
 			}
 		}
 		out.push({
+			// The id is a caller-supplied correlation key echoed verbatim in
+			// results — sanitize only the display copy (`questionTabLabel`).
 			id: typeof q.id === "string" ? q.id : "?",
+			// The question is echoed verbatim in results (matching the guest
+			// path) — sanitize only the display copy (`wrapQuestionTitle`).
 			question: typeof q.question === "string" ? q.question : "",
-			...(typeof q.header === "string" ? { header: q.header } : {}),
+			...(typeof q.header === "string" ? { header: sanitizeCarriageReturns(q.header) } : {}),
 			options,
 			...(typeof q.multi === "boolean" ? { multi: q.multi } : {}),
 			...(Number.isInteger(q.recommended) ? { recommended: q.recommended } : {}),
@@ -670,20 +708,15 @@ export class AskDialogComponent implements Component {
 	}
 
 	#questionRows(question: ExtensionAskDialogQuestion): QuestionRow[] {
+		const display = displayOptionLabels(question);
 		const rows: QuestionRow[] = question.options.map((option, index) => ({
 			kind: "option",
 			key: `option:${index}`,
-			label: this.#optionLabel(question, option.label, index),
+			label: display[index] ?? sanitizeCarriageReturns(option.label),
 			optionIndex: index,
 		}));
 		rows.push({ kind: "other", key: "other", label: OTHER_OPTION, optionIndex: undefined });
 		return rows;
-	}
-
-	#optionLabel(question: ExtensionAskDialogQuestion, label: string, index: number): string {
-		const suffix = " (Recommended)";
-		if (question.recommended !== index || label.endsWith(suffix)) return label;
-		return `${label}${suffix}`;
 	}
 
 	#activeQuestionState(): { question: ExtensionAskDialogQuestion; state: QuestionState } | undefined {

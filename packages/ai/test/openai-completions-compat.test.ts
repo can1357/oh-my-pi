@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect";
 import {
 	applyOpenRouterRoutingVariant,
@@ -635,6 +635,68 @@ describe("openai-completions compatibility", () => {
 		expect(result.usage.output).toBe(3);
 		expect(result.usage.cacheRead).toBe(2);
 		expect(result.usage.totalTokens).toBe(15);
+	});
+
+	it("freezes DeepSeek response pricing across a UTC tariff transition", async () => {
+		const model = getBundledModel("deepseek", "deepseek-v4-flash") as Model<"openai-completions">;
+		const peakStart = Date.parse("2026-09-10T03:59:59Z");
+		const offPeakStart = Date.parse("2026-09-10T04:00:00Z");
+		let now = peakStart;
+		const clock = spyOn(Date, "now").mockImplementation(() => now);
+		const releaseFinalUsage = Promise.withResolvers<void>();
+		const encoder = new TextEncoder();
+		const firstChunk = {
+			id: "chatcmpl-tariff",
+			choices: [{ index: 0, delta: { content: "Hello" } }],
+			usage: { prompt_tokens: 1_000_000, completion_tokens: 100_000 },
+		};
+		const finalChunk = {
+			id: "chatcmpl-tariff",
+			choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+			usage: { prompt_tokens: 1_000_000, completion_tokens: 200_000 },
+		};
+		let requests = 0;
+		const fetchMock: FetchImpl = async () => {
+			if (requests++ > 0) return createSseResponse([firstChunk, finalChunk, "[DONE]"]);
+			return new Response(
+				new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.enqueue(encoder.encode(`data: ${JSON.stringify(firstChunk)}\n\n`));
+					},
+					async pull(controller) {
+						await releaseFinalUsage.promise;
+						controller.enqueue(encoder.encode(`data: ${JSON.stringify(finalChunk)}\n\ndata: [DONE]\n\n`));
+						controller.close();
+					},
+				}),
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+		};
+		try {
+			const stream = streamOpenAICompletions(model, baseContext(), { apiKey: "test-key", fetch: fetchMock });
+			let initialCost: number | undefined;
+			for await (const event of stream) {
+				if (event.type === "text_delta") {
+					initialCost = event.partial.usage.cost.total;
+					now = offPeakStart;
+					releaseFinalUsage.resolve();
+				}
+			}
+			const first = await stream.result();
+			expect(initialCost).toBeCloseTo(0.42, 12);
+			expect(first.timestamp).toBe(peakStart);
+			expect(first.usage.cost.total).toBeCloseTo(0.54, 12);
+			const second = await streamOpenAICompletions(model, baseContext(), {
+				apiKey: "test-key",
+				fetch: fetchMock,
+			}).result();
+			expect(second.timestamp).toBe(offPeakStart);
+			expect(second.usage.cost.total).toBeCloseTo(0.27, 12);
+			expect(first.usage.cost.total).toBeCloseTo(0.54, 12);
+		} finally {
+			releaseFinalUsage.resolve();
+			clock.mockRestore();
+		}
 	});
 
 	it("preserves opaque tool-call IDs when replaying a custom Chat Completions turn", async () => {

@@ -59,6 +59,7 @@ import {
 	type ToolResultMessage,
 	type Usage,
 } from "../types";
+import { resolveCopilotRequestIdentity } from "./github-copilot-headers";
 
 export type { OpenAIPromptCacheOptions } from "../types";
 
@@ -259,6 +260,7 @@ export function resolveOpenAIRequestSetup(
 			premiumMultiplier: model.premiumMultiplier,
 			headers,
 			initiatorOverride: options.initiatorOverride,
+			integrationId: resolveCopilotRequestIdentity(options.extraHeaders),
 		});
 		Object.assign(headers, copilot.headers);
 		copilotPremiumRequests = copilot.premiumRequests;
@@ -3350,7 +3352,7 @@ export async function processResponsesStream<TApi extends Api>(
 				output.responseId = response.id;
 			}
 			populateResponsesUsageFromResponse(output, response?.usage);
-			calculateCost(model, output.usage);
+			calculateCost(model, output.usage, output.timestamp);
 			applyProviderReportedCost(model, output.usage, response?.usage);
 			applyOpenAIResponsesServiceTierCost(
 				model,

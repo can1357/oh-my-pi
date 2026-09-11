@@ -894,7 +894,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								total: 0,
 							},
 						};
-						calculateCost(model, output.usage);
+						calculateCost(model, output.usage, output.timestamp);
 					}
 				}
 

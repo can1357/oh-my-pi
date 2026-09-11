@@ -94,6 +94,7 @@ import {
 	type McpConnectionStatusEvent,
 } from "../mcp/startup-events";
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../plan-mode/approved-plan";
+import { autosaveApprovedPlan, planSaveFileName } from "../plan-mode/plan-autosave";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
 import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
 import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type: "text" };
@@ -133,6 +134,7 @@ import {
 	formatMoreItems,
 	isFeedModelBadgeEnabled,
 	replaceTabs,
+	shortenEmbeddedPaths,
 	shortenPath,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
@@ -341,25 +343,7 @@ const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
 const PLAN_SAVE_AND_QUIT_OPTION = "Save and quit";
 const PLAN_SAVE_TITLE_LINE_LIMIT = 6;
 
-const PLAN_SAVE_STEM_MAX_LENGTH = 32;
 const PLAN_FILENAME_SYSTEM_PROMPT = prompt.render(planFilenamePrompt);
-/** Suggested save filename for an approved plan: `<TOPIC>_PLAN.md` from the
- *  tiny-model topic (e.g. `PYO3_METHODS_PLAN.md`), trimmed to a word boundary
- *  when a verbose fallback title sneaks through. */
-export function planSaveFileName(title: string): string {
-	let stem = title
-		.normalize("NFC")
-		.replace(/[^\p{L}\p{N}]+/gu, "_")
-		.replace(/_+/g, "_")
-		.replace(/^_+|_+$/g, "")
-		.toUpperCase();
-	if (stem.length > PLAN_SAVE_STEM_MAX_LENGTH) {
-		const cut = stem.lastIndexOf("_", PLAN_SAVE_STEM_MAX_LENGTH);
-		stem = cut > 0 ? stem.slice(0, cut) : stem.slice(0, PLAN_SAVE_STEM_MAX_LENGTH);
-	}
-	if (!stem || stem === "PLAN") return "PLAN.md";
-	return `${stem.endsWith("_PLAN") ? stem : `${stem}_PLAN`}.md`;
-}
 
 function planSaveTitleExcerpt(planContent: string): string {
 	return planContent
@@ -1009,6 +993,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.deferredCommandContainer = new AnchoredLiveContainer();
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setImeSafeCursorLayout(settings.get("tui.imeSafeCursor"));
+		this.#applyVimMode(this.editor);
 		this.editor.setAutocompleteMaxVisible(settings.get("autocompleteMaxVisible"));
 		this.syncEditorSpelling();
 		this.editor.viewportRowsProvider = () => this.ui.terminal.rows;
@@ -1320,7 +1305,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		pushTerminalTitle();
 		setTerminalTitleStateEnabled(this.settings.get("tui.titleState"));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
-		this.updateEditorBorderColor();
+		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
+		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
+		// #focusController exists, which updateEditorBorderColor dereferences.
+		this.#syncVimStatus(this.editor);
 		// Single side-effect point for title changes: every setSessionName caller
 		// (first-input titling, /rename, extension renames, plan seeding, replan
 		// refresh) gets the terminal title + accent updates from here. Registered
@@ -2373,10 +2361,22 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	updateEditorBorderColor(): void {
+		// `vimMode` reads "insert" when modal editing is off, so every Vim branch below must gate on
+		// `vimEnabled` — otherwise non-Vim users would lose the session-accent/thinking border.
+		const vimMode = this.editor.vimEnabled ? this.editor.vimMode : undefined;
 		if (this.isBashMode) {
 			this.editor.borderColor = theme.getBashModeBorderColor();
 		} else if (this.isPythonMode) {
 			this.editor.borderColor = theme.getPythonModeBorderColor();
+		} else if (vimMode === "visual" || vimMode === "visual-line") {
+			this.editor.borderColor = (str: string) => theme.fg("warning", str);
+		} else if (vimMode === "normal") {
+			this.editor.borderColor = (str: string) => theme.fg("accent", str);
+		} else if (vimMode === "insert") {
+			// Insert gets its own colour rather than falling through to the session accent: with Normal
+			// and Visual both coloured, an uncoloured Insert made the border unreadable as a mode.
+			// Matches the `vim` status-line segment, which uses the same three colours.
+			this.editor.borderColor = (str: string) => theme.fg("success", str);
 		} else {
 			const accentEnabled = !isSettingsInitialized() || settings.get("statusLine.sessionAccent") !== false;
 			const sessionName = accentEnabled ? this.sessionManager.getSessionName() : undefined;
@@ -3770,6 +3770,67 @@ export class InteractiveMode implements InteractiveModeContext {
 		return contextUsage !== undefined && contextUsage.percent > PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT;
 	}
 
+	/** Apply the `tui.vimMode` setting to an editor and route Visual-mode yanks to the clipboard. */
+	#applyVimMode(editor: CustomEditor): void {
+		editor.setVimMode(settings.get("tui.vimMode"));
+		editor.onYank = text => {
+			void this.#copyYankToClipboard(text);
+		};
+		// Recolor the prompt border on every mode switch: in a modal editor the mode has to be
+		// visible at a glance, and the border is where bash/python mode already signal themselves.
+		editor.onVimModeChange = () => this.#syncVimStatus(editor);
+	}
+
+	/**
+	 * Re-apply `tui.vimMode` to the live editor. `setVimMode` is idempotent and always lands in
+	 * Insert, so toggling the setting mid-session can never strand the editor in a mode where
+	 * ordinary typing does nothing.
+	 */
+	applyVimModeSetting(): void {
+		this.#applyVimMode(this.editor);
+		this.#syncVimStatus(this.editor);
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Push an editor's modal state into the three places that surface it: the prompt border, the
+	 * status-line `vim` segment, and the hardware cursor shape. Called on every mode/pending change,
+	 * so it stays cheap — the terminal dedupes an unchanged DECSCUSR shape. Takes the editor rather
+	 * than reading `this.editor`: `setEditorComponent` configures its replacement before swapping it in.
+	 */
+	#syncVimStatus(editor: CustomEditor): void {
+		this.statusLine.setVimStatus(
+			editor.vimEnabled
+				? {
+						mode: editor.vimMode,
+						pending: editor.vimPending,
+						selectedLines: editor.vimSelectedLines,
+						display: settings.get("tui.vimModeDisplay"),
+					}
+				: undefined,
+		);
+		// Insert gets the bar every non-modal editor uses; Normal/Visual rest *on* a grapheme, which
+		// is a block. Sent unconditionally: the software cursor carries the same distinction itself
+		// (Editor#cursorCell), and when the hardware cursor is hidden this only reshapes something
+		// invisible. ProcessTerminal dedupes, so an unchanged shape costs nothing per frame.
+		this.ui.terminal.setCursorShape?.(
+			editor.vimEnabled && editor.vimMode !== "insert" ? "block" : editor.vimEnabled ? "bar" : "default",
+		);
+		this.updateEditorBorderColor();
+	}
+
+	async #copyYankToClipboard(content: string): Promise<void> {
+		try {
+			await copyToClipboard(content);
+		} catch (error) {
+			// Best-effort: the yank already landed in the internal register, so `p` still puts it
+			// back. A per-yank warning would spam headless/SSH sessions on every `yy`.
+			logger.debug("Vim yank clipboard copy failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
 	async #copyPlanToClipboard(content: string): Promise<void> {
 		try {
 			await copyToClipboard(content);
@@ -4026,6 +4087,28 @@ export class InteractiveMode implements InteractiveModeContext {
 			: [...previousPresentation.enabled, "read"];
 		await this.session.restoreNonMCPToolPresentation(executionTools, previousPresentation.mounted);
 		this.session.setPlanReferencePath(options.planFilePath);
+		try {
+			const autosaved = await autosaveApprovedPlan({
+				settings: this.session.settings,
+				cwd: this.sessionManager.getCwd(),
+				title: options.title,
+				planContent,
+			});
+			if (autosaved) {
+				const displayPath = truncateToWidth(replaceTabs(shortenPath(autosaved)), TRUNCATE_LENGTHS.CONTENT);
+				this.showStatus(`Saved plan to ${displayPath}.`);
+			}
+		} catch (error) {
+			const detail = truncateToWidth(
+				shortenEmbeddedPaths(
+					replaceTabs(error instanceof Error ? error.message : String(error))
+						.replace(/[\r\n]+/g, " ")
+						.trim(),
+				),
+				TRUNCATE_LENGTHS.CONTENT,
+			);
+			this.showWarning(`Failed to autosave plan: ${detail}`);
+		}
 
 		// Resolve the deferred plan-approval model transition. On the compact path
 		// the before-flush hook passed to handleCompactCommand already ran this (so
@@ -5189,6 +5272,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			: new CustomEditor(getEditorTheme());
 		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		nextEditor.setImeSafeCursorLayout(this.settings.get("tui.imeSafeCursor"));
+		this.#applyVimMode(nextEditor);
 		nextEditor.setAutocompleteMaxVisible(this.settings.get("autocompleteMaxVisible"));
 		nextEditor.setSpellingFeatures({
 			typoDetection: this.settings.get("spelling.typoDetection"),
@@ -5225,7 +5309,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			logger.warn("Failed to refresh slash command state for custom editor", { error: String(error) });
 		});
 
-		this.updateEditorBorderColor();
+		this.#syncVimStatus(nextEditor);
 		this.ui.requestRender();
 	}
 

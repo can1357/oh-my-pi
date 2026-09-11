@@ -5,7 +5,7 @@
 
 import { useMemo, useState } from "react";
 import { getSessions } from "../api";
-import { formatCompact, formatCost, formatDurationMs, formatRelativeTime } from "../data/formatters";
+import { formatCompact, formatDurationMs, formatEstimatedCost, formatRelativeTime } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { TraceView } from "../traces/TraceView";
 import type { SessionSummary } from "../types";
@@ -110,7 +110,12 @@ export function TracesRoute({ active, session, onOpenSession, refreshTrigger }: 
 				numeric: true,
 				render: (item: SessionSummary) => formatCompact(item.totalTokens),
 			},
-			{ key: "cost", header: "Cost", numeric: true, render: (item: SessionSummary) => formatCost(item.costTotal) },
+			{
+				key: "cost",
+				header: "Cost",
+				numeric: true,
+				render: (item: SessionSummary) => formatEstimatedCost(item.costTotal, item.unpricedRequests),
+			},
 			{ key: "models", header: "Models", render: (item: SessionSummary) => <ModelChips models={item.models} /> },
 		],
 		[],
@@ -138,7 +143,9 @@ export function TracesRoute({ active, session, onOpenSession, refreshTrigger }: 
 				</div>
 				<div>
 					<div className="stats-mobile-card-label">Cost</div>
-					<div className="stats-mobile-card-value">{formatCost(item.costTotal)}</div>
+					<div className="stats-mobile-card-value">
+						{formatEstimatedCost(item.costTotal, item.unpricedRequests)}
+					</div>
 				</div>
 			</div>
 		</div>

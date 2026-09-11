@@ -1,11 +1,15 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import {
 	buildCopilotDynamicHeaders,
 	getCopilotInitiatorOverride,
 	getCopilotPremiumMultiplier,
 	hasCopilotVisionInput,
 	inferCopilotInitiator,
+	resolveCopilotIntegrationIdOverride,
+	resolveCopilotRequestIdentity,
+	wrapFetchForCopilotFallback,
 } from "@oh-my-pi/pi-ai/providers/github-copilot-headers";
+import { COPILOT_CHAT_INTEGRATION_ID } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import type { Message } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
@@ -210,7 +214,7 @@ describe("buildCopilotDynamicHeaders", () => {
 		expect(headers).toEqual({
 			"User-Agent": "copilot/1.0.82",
 			"Editor-Version": "copilot/1.0.82",
-			"Copilot-Integration-Id": "copilot-developer-cli",
+			"Copilot-Integration-Id": "copilot-chat",
 			"Copilot-Harness-Id": "copilot-sdk",
 			"Openai-Intent": "conversation-agent",
 			"X-Initiator": "user",
@@ -308,5 +312,192 @@ describe("buildCopilotDynamicHeaders", () => {
 			hasImages: false,
 		});
 		expect(premiumRequests).toBe(1);
+	});
+});
+
+describe("resolveCopilotIntegrationIdOverride", () => {
+	it("returns undefined when COPILOT_INTEGRATION_ID is unset", () => {
+		expect(resolveCopilotIntegrationIdOverride({})).toBeUndefined();
+	});
+
+	it("trims surrounding whitespace", () => {
+		expect(resolveCopilotIntegrationIdOverride({ COPILOT_INTEGRATION_ID: "  vscode-chat  " })).toBe("vscode-chat");
+	});
+
+	it("ignores blank and header-injection values", () => {
+		for (const value of ["", "   ", "chat\r\nX-Injected: 1"]) {
+			expect(resolveCopilotIntegrationIdOverride({ COPILOT_INTEGRATION_ID: value })).toBeUndefined();
+		}
+	});
+});
+
+describe("resolveCopilotRequestIdentity", () => {
+	it("prefers an explicit value over headers and env", () => {
+		expect(
+			resolveCopilotRequestIdentity({ "Copilot-Integration-Id": "copilot-chat" }, "vscode-chat", {
+				COPILOT_INTEGRATION_ID: "other-chat",
+			}),
+		).toBe("vscode-chat");
+	});
+
+	it("reads caller headers case-insensitively ahead of env", () => {
+		expect(resolveCopilotRequestIdentity({ "copilot-integration-id": "copilot-chat" }, undefined, {})).toBe(
+			"copilot-chat",
+		);
+	});
+
+	it("falls back to COPILOT_INTEGRATION_ID", () => {
+		expect(resolveCopilotRequestIdentity(undefined, undefined, { COPILOT_INTEGRATION_ID: "copilot-chat" })).toBe(
+			"copilot-chat",
+		);
+	});
+
+	it("returns undefined when nothing is set", () => {
+		expect(resolveCopilotRequestIdentity(undefined, undefined, {})).toBeUndefined();
+	});
+
+	it("rejects header-injection values from every source", () => {
+		expect(resolveCopilotRequestIdentity({ "Copilot-Integration-Id": "a\r\nb" }, undefined, {})).toBeUndefined();
+		expect(resolveCopilotRequestIdentity(undefined, "a\r\nb", {})).toBeUndefined();
+	});
+});
+
+describe("buildCopilotDynamicHeaders integration identity", () => {
+	it("sends an explicit integration id without touching the rest of the identity", () => {
+		const { headers } = buildCopilotDynamicHeaders({
+			messages: [],
+			hasImages: false,
+			integrationId: "copilot-chat",
+		});
+		expect(headers["Copilot-Integration-Id"]).toBe("copilot-chat");
+		expect(headers["Editor-Version"]).toBe("copilot/1.0.82");
+	});
+
+	it("falls back to the chat-surface default", () => {
+		const { headers } = buildCopilotDynamicHeaders({ messages: [], hasImages: false });
+		expect(headers["Copilot-Integration-Id"]).toBe("copilot-chat");
+	});
+
+	it("treats invalid explicit values as unset", () => {
+		for (const value of ["", "chat\r\nX-Injected: 1"]) {
+			const { headers } = buildCopilotDynamicHeaders({ messages: [], hasImages: false, integrationId: value });
+			expect(headers["Copilot-Integration-Id"]).toBe("copilot-chat");
+		}
+	});
+});
+
+describe("wrapFetchForCopilotFallback", () => {
+	const chatUrl = "https://api.githubcopilot.com/chat/completions";
+	function chatRequest(init?: RequestInit): [string, RequestInit | undefined] {
+		return [
+			chatUrl,
+			{
+				...init,
+				headers: {
+					Authorization: "Bearer ghu_test",
+					"Copilot-Integration-Id": COPILOT_CHAT_INTEGRATION_ID,
+				},
+			},
+		];
+	}
+
+	it("passes non-403 responses through untouched", async () => {
+		const ok = new Response("{}", { status: 200 });
+		const fetchMock = vi.fn(async () => ok);
+		const wrapped = wrapFetchForCopilotFallback(fetchMock as unknown as typeof fetch, true);
+		await expect(wrapped(...chatRequest())).resolves.toBe(ok);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("passes through when disabled", async () => {
+		const denied = new Response("{}", { status: 403 });
+		const fetchMock = vi.fn(async () => denied);
+		const wrapped = wrapFetchForCopilotFallback(fetchMock as unknown as typeof fetch, false);
+		await expect(wrapped(...chatRequest())).resolves.toBe(denied);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("ignores 403s without the default chat identity", async () => {
+		const denied = new Response("{}", { status: 403 });
+		const seen: (string | null)[] = [];
+		const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => {
+			seen.push(new Headers(init?.headers).get("Copilot-Integration-Id"));
+			return denied;
+		});
+		const wrapped = wrapFetchForCopilotFallback(fetchMock as unknown as typeof fetch, true);
+		await wrapped(chatUrl, { headers: { "Copilot-Integration-Id": "copilot-developer-cli" } });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(seen).toEqual(["copilot-developer-cli"]);
+	});
+
+	it("respects a resolved identity instead of retrying", async () => {
+		const denied = new Response("{}", { status: 403 });
+		const fetchMock = vi.fn(async () => denied);
+		const wrapped = wrapFetchForCopilotFallback(fetchMock as unknown as typeof fetch, true, "vscode-chat");
+		await expect(wrapped(...chatRequest())).resolves.toBe(denied);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("retries a chat-default 403 once as the Copilot CLI and returns the retry", async () => {
+		const seen: (string | null)[] = [];
+		let calls = 0;
+		let first: Response | undefined;
+		const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => {
+			calls++;
+			seen.push(new Headers(init?.headers).get("Copilot-Integration-Id"));
+			const response = new Response("{}", { status: calls === 1 ? 403 : 200 });
+			if (calls === 1) first = response;
+			return response;
+		});
+		const wrapped = wrapFetchForCopilotFallback(fetchMock as unknown as typeof fetch, true);
+		const result = await wrapped(...chatRequest());
+		expect(result.status).toBe(200);
+		expect(seen).toEqual([COPILOT_CHAT_INTEGRATION_ID, "copilot-developer-cli"]);
+		expect(first?.bodyUsed).toBe(true);
+	});
+
+	it("stops after the retry stays denied", async () => {
+		const seen: (string | null)[] = [];
+		const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => {
+			seen.push(new Headers(init?.headers).get("Copilot-Integration-Id"));
+			return new Response("{}", { status: 403 });
+		});
+		const wrapped = wrapFetchForCopilotFallback(fetchMock as unknown as typeof fetch, true);
+		const result = await wrapped(...chatRequest());
+		expect(result.status).toBe(403);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(seen).toEqual([COPILOT_CHAT_INTEGRATION_ID, "copilot-developer-cli"]);
+	});
+
+	it("preserves method, auth, and body on the retry", async () => {
+		let retryInit: RequestInit | undefined;
+		let calls = 0;
+		const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => {
+			calls++;
+			if (calls === 2) retryInit = init;
+			return new Response("{}", { status: 403 });
+		});
+		const wrapped = wrapFetchForCopilotFallback(fetchMock as unknown as typeof fetch, true);
+		const [url, init] = chatRequest({ method: "POST", body: JSON.stringify({ model: "gpt-4o" }) });
+		await wrapped(url, init);
+		const retryHeaders = new Headers(retryInit?.headers);
+		expect(retryInit?.method).toBe("POST");
+		expect(retryHeaders.get("Authorization")).toBe("Bearer ghu_test");
+		expect(retryInit?.body).toBe(JSON.stringify({ model: "gpt-4o" }));
+		expect(retryHeaders.get("Copilot-Integration-Id")).toBe("copilot-developer-cli");
+	});
+
+	it("passes Request inputs through without retrying", async () => {
+		const denied = new Response("{}", { status: 403 });
+		const fetchMock = vi.fn(async () => denied);
+		const wrapped = wrapFetchForCopilotFallback(fetchMock as unknown as typeof fetch, true);
+		const request = new Request(chatUrl, {
+			method: "POST",
+			headers: { "Copilot-Integration-Id": COPILOT_CHAT_INTEGRATION_ID },
+			body: "{}",
+		});
+		await expect(wrapped(request)).resolves.toBe(denied);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(denied.bodyUsed).toBe(false);
 	});
 });
