@@ -73,6 +73,11 @@ class "deepseek" {
 	models token="vision" {
 		strip-image-input #false
 	}
+	// V4.1 Flash is natively multimodal (vision encoder + projector, image-text
+	// pre-training) but its release id carries no `vision` token to key on.
+	models "deepseek-flash" {
+		strip-image-input #false
+	}
 	on "ollama-cloud" "nvidia" "deepseek" "fireworks" "nanogpt" "opencode-go" "openrouter" {
 		stream-markup-healing-pattern "dsml"
 	}
