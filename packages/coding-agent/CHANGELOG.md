@@ -8,6 +8,10 @@
 - Hand-authored `*.openapi.json` files can now be edited without disabling generated-file protection globally ([#11674](https://github.com/can1357/oh-my-pi/issues/11674)).
 - `models.yml` now validates the per-model `compat.stripImageInput` opt-out, so a wrong-typed value is rejected like every other declared compat key instead of being silently accepted ([#11697](https://github.com/can1357/oh-my-pi/issues/11697)).
 - `/mcp reload` now distinguishes servers still connecting after the bounded reload window instead of reporting a healthy asynchronous reload as zero active servers ([#11639](https://github.com/can1357/oh-my-pi/issues/11639)).
+### Added
+
+- Added `auth.startupOAuthAccount` and `omp auth accounts|pin|unpin <provider> [selector]` to pin a specific stored OAuth account per provider as the one a new session starts on; a rate limit on the pinned account still fails over to a sibling automatically. Added `/switchaccount [account]` to switch a running session's OAuth account for the current provider without leaving the TUI ([#11717](https://github.com/can1357/oh-my-pi/pull/11717) by [@JoshKirk800](https://github.com/JoshKirk800)).
+
 ### Changed
 
 - The `providers.cacheRetention` `auto` setting now keeps Anthropic OAuth subscriber sessions on 1h prompt-cache retention and API keys on 5m, instead of 5m for both ([#11667](https://github.com/can1357/oh-my-pi/pull/11667) by [@camjac251](https://github.com/camjac251)).

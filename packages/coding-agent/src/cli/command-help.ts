@@ -6,6 +6,10 @@ export const acpHelp = {
 
 export const agentsHelp = { description: "Manage bundled task agents" } satisfies CommandMetadata;
 
+export const authHelp = {
+	description: "List, pin, or unpin a provider's default stored OAuth account for new sessions",
+} satisfies CommandMetadata;
+
 export const authBrokerHelp = {
 	description: "Manage the omp auth-broker (credential vault)",
 } satisfies CommandMetadata;

@@ -17,8 +17,19 @@ export function toSessionPinAccounts(accounts: readonly OAuthAccountSummary[]): 
 	});
 }
 
-/** Match a `/session pin` selector by 1-based position or exact account identity. */
-export function matchSessionPinAccounts(accounts: readonly SessionPinAccount[], selector: string): SessionPinAccount[] {
+/**
+ * Match an OAuth account selector by 1-based position, the literal `active`,
+ * or an exact (case-insensitive) identity field. Shared by `/session pin`,
+ * the `auth.startupOAuthAccount` session-bootstrap pin, and `omp auth pin` —
+ * one selector syntax across all three surfaces. `label` (and the synthetic
+ * `OAuth credential #<id>` fallback it enables) is optional so callers
+ * working from a bare {@link OAuthAccountSummary} — no precomputed label —
+ * still get position/email/account-id/org matching.
+ */
+export function matchOAuthAccountsBySelector<T extends OAuthAccountSummary & { label?: string }>(
+	accounts: readonly T[],
+	selector: string,
+): T[] {
 	const wanted = selector.trim().toLowerCase();
 	if (!wanted) return [];
 	if (wanted === "active") return accounts.filter(account => account.active);

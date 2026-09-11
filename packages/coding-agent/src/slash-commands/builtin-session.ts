@@ -13,7 +13,7 @@ import { formatDuration } from "./helpers/format";
 import { handleMcpAcp } from "./helpers/mcp";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import { describeRedeemOutcome, type ResetUsageAccount, toResetUsageAccounts } from "./helpers/reset-usage";
-import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session-pin";
+import { matchOAuthAccountsBySelector, toSessionPinAccounts } from "./helpers/session-pin";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
@@ -115,7 +115,7 @@ async function handleSessionPinCommand(
 		return;
 	}
 
-	const matches = matchSessionPinAccounts(accounts, selector);
+	const matches = matchOAuthAccountsBySelector(accounts, selector);
 	if (matches.length === 0) {
 		await output(`No ${providerName} account matches "${selector}".`);
 		return;
@@ -251,6 +251,34 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.showStatus("Usage: /session [info|delete|pin [account]]");
 			}
 			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "switchaccount",
+		icon: "swap",
+		description:
+			"Switch this session's OAuth account for the current provider (same as /session pin); accepts position, email, account id, org id, or org name",
+		acpDescription: "Switch OAuth account for this session only",
+		acpInputHint: "[account]",
+		inlineHint: "[account]",
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const provider = runtime.ctx.session.model?.provider;
+			return provider ? `Account: ${provider}` : "Account: no model selected";
+		},
+		handle: async (command, runtime) => {
+			await handleSessionPinCommand(command.args, runtime.session, runtime.output);
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			const selector = command.args.trim();
+			runtime.ctx.editor.setText("");
+			if (selector) {
+				await handleSessionPinCommand(selector, runtime.ctx.session, text => runtime.ctx.showStatus(text));
+				refreshStatusLine(runtime.ctx);
+			} else {
+				await runtime.ctx.showSessionPinSelector();
+			}
 		},
 	},
 	{
