@@ -267,19 +267,24 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 				// A 429 is the route saying "not you, not now": replaying it cannot
 				// clear the limit, so it gets the small shared rate-limit budget and
 				// only while the server itself promises a short recovery window.
-				// The window is read with `extractRetryHint` — the same header+body
-				// sources `fetchWithRetry` uses — because Anthropic states it in the
-				// error body ("Please retry in 250ms") as often as in a header.
+				// Reuse the error decoder's bounded body drain: the request watchdog
+				// ends once headers arrive, so a direct `response.text()` could otherwise
+				// hang forever or allocate an unbounded response body.
 				if (rateLimited) {
-					const hintMs = extractRetryHint(response, await response.clone().text());
+					const capturedError = await AIError.AnthropicApiError.fromResponse(response, callerSignal);
+					const hintMs = extractRetryHint(response, capturedError.message);
+					const hintCapMs =
+						maxRetryDelayMs > 0
+							? Math.min(maxRetryDelayMs, CREDIBLE_RATE_LIMIT_HINT_MS)
+							: CREDIBLE_RATE_LIMIT_HINT_MS;
 					if (
 						rateLimitAttempts >= MAX_RATE_LIMIT_ATTEMPTS ||
+						AIError.isUsageLimit(capturedError) ||
 						hintMs === undefined ||
-						hintMs > CREDIBLE_RATE_LIMIT_HINT_MS
+						hintMs > hintCapMs
 					) {
-						throw await AIError.AnthropicApiError.fromResponse(response, callerSignal);
+						throw capturedError;
 					}
-					await response.body?.cancel().catch(() => {});
 					await this.#waitBeforeRetry(hintMs, callerSignal);
 					continue;
 				}
