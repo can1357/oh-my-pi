@@ -29,6 +29,7 @@ import { execCommand } from "../../exec/exec";
 import * as PiCodingAgent from "../../index";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
+import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
@@ -48,6 +49,7 @@ import type {
 	PreparedExtension,
 	ProviderConfig,
 	RegisteredCommand,
+	SourceInfo,
 	ToolDefinition,
 	ToolInfo,
 } from "./types";
@@ -60,6 +62,22 @@ type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
 function getExtensionFactory(module: LoadedExtensionModule): ExtensionFactory | null {
 	const candidate = typeof module === "function" ? module : module.default;
 	return typeof candidate === "function" ? candidate : null;
+}
+
+/**
+ * Upstream-shaped provenance for an extension-registered tool. Mirrors the
+ * `SourceInfo` synthesized by `SessionTools.getAllToolInfos()`, so consumers that
+ * read `sourceInfo` off `getAllRegisteredTools()` (e.g. pi-fabric) see the same
+ * on-disk path — or the synthetic `<extension:name>` fallback for tools with no
+ * filesystem origin.
+ */
+export function extensionToolSourceInfo(
+	definition: Pick<ToolDefinition, "name" | "sourcePath">,
+	extensionPath: string,
+): SourceInfo {
+	const candidate = definition.sourcePath ?? extensionPath;
+	const path = candidate && isFilesystemSourcePath(candidate) ? candidate : `<extension:${definition.name}>`;
+	return { path, source: "extension", scope: "temporary", origin: "top-level" };
 }
 
 export class ExtensionRuntimeNotInitializedError extends Error {
@@ -181,6 +199,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		const registered = {
 			definition: tool,
 			extensionPath: this.extension.path,
+			sourceInfo: extensionToolSourceInfo(tool, this.extension.path),
 		};
 		this.extension.tools.set(tool.name, registered);
 		for (const listener of this.extension.toolRegistrationListeners ?? []) listener(tool.name);
