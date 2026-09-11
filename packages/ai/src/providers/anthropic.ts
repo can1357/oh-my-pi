@@ -10,12 +10,14 @@ import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import {
 	$env,
+	CREDIBLE_RATE_LIMIT_HINT_MS,
 	getInstallId,
 	isEnoent,
 	logger,
 	parseJsonWithRepair,
 	parseStreamingJsonThrottled,
 	readSseEvents,
+	MAX_RATE_LIMIT_ATTEMPTS,
 } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
@@ -2464,6 +2466,7 @@ const streamAnthropicOnce = (
 				client = created.client;
 				isOAuthToken = created.isOAuthToken;
 			}
+			const transportOwnsRateLimitBudget = client instanceof AnthropicMessagesClient;
 			const preparedContext = await prepareAnthropicManyImageContext(context, model.input.includes("image"));
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
 				let nextParams = buildParams(model, preparedContext, isOAuthToken, options, {
@@ -2651,6 +2654,7 @@ const streamAnthropicOnce = (
 			// Provider-level transport/rate-limit failures: only before any streamed content starts.
 			// Malformed envelopes/JSON: only before replay-unsafe text/tool events are visible on this stream.
 			let providerRetryAttempt = 0;
+			let providerRateLimitRetries = 0;
 			const firstEventTimeoutAbortError = new AIError.StreamTimeoutError(
 				"Anthropic stream timed out while waiting for the first event",
 			);
@@ -3400,12 +3404,28 @@ const streamAnthropicOnce = (
 					const isLocalIdleTimeout =
 						streamFailure === idleTimeoutAbortError ||
 						(streamFailure instanceof Error && streamFailure.message === idleTimeoutAbortError.message);
+					const rateLimited = AIError.status(streamFailure) === 429;
+					const headerDelayMs = getRetryAfterMsFromHeaders(getHeadersFromError(streamFailure));
+					const maxRetryDelayMs = options?.maxRetryDelayMs ?? 60_000;
+					const rateLimitHintCapMs =
+						maxRetryDelayMs > 0
+							? Math.min(maxRetryDelayMs, CREDIBLE_RATE_LIMIT_HINT_MS)
+							: CREDIBLE_RATE_LIMIT_HINT_MS;
+					// Caller-injected SDK clients do not implement our transport's
+					// rate-limit budget. Spend the same two-attempt budget here instead.
+					const canRetryInjectedRateLimit =
+						rateLimited &&
+						!transportOwnsRateLimitBudget &&
+						!AIError.isUsageLimit(streamFailure) &&
+						providerRateLimitRetries < MAX_RATE_LIMIT_ATTEMPTS - 1 &&
+						headerDelayMs !== undefined &&
+						headerDelayMs <= rateLimitHintCapMs;
 					const canRetryTransientEnvelopeFailure = isTransientEnvelopeFailure && !streamedReplayUnsafeContent;
 					const canRetryProviderFailure =
 						!isLocalIdleTimeout &&
 						firstTokenTime === undefined &&
 						!streamedReplayUnsafeContent &&
-						AIError.isProviderRetryableError(streamFailure);
+						(canRetryInjectedRateLimit || AIError.isProviderRetryableError(streamFailure));
 					if (
 						activeAbortTracker.wasCallerAbort() ||
 						providerRetryAttempt >= PROVIDER_MAX_RETRIES ||
@@ -3413,16 +3433,15 @@ const streamAnthropicOnce = (
 					) {
 						throw streamFailure;
 					}
+					if (rateLimited) providerRateLimitRetries++;
 					providerRetryAttempt++;
 					const backoffDelayMs = calculateAnthropicRetryDelayMs(providerRetryAttempt - 1);
 					// Honor the server's retry hint (`retry-after-ms`/`retry-after`) on
 					// 429/529-style failures: retrying sooner than the server asked is a
 					// guaranteed failure that just burns the retry budget.
-					const headerDelayMs = getRetryAfterMsFromHeaders(getHeadersFromError(streamFailure));
 					// Bound the server-directed wait so a multi-hour `retry-after` cannot
 					// park the provider stream before higher-level recovery runs. A non-positive cap
 					// disables the bound; an over-cap hint surfaces the original error immediately.
-					const maxRetryDelayMs = options?.maxRetryDelayMs ?? 60_000;
 					if (headerDelayMs !== undefined && maxRetryDelayMs > 0 && headerDelayMs > maxRetryDelayMs) {
 						throw streamFailure;
 					}
