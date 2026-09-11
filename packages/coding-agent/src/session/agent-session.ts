@@ -76,7 +76,13 @@ import type {
 	UsageReport,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
+import {
+	type Effort,
+	isAnthropicFastModeFallbackDisabled,
+	realizesPriorityServiceTier,
+	serviceTierFamily,
+	streamSimple,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -3057,6 +3063,13 @@ export class AgentSession {
 
 	#processAgentEvent = async (event: AgentEvent): Promise<void> => {
 		const eventPromptGeneration = this.#promptGeneration;
+		// Agent listeners are fire-and-forget, so capture the origin before this
+		// handler reaches any await and a later request can overwrite the slot.
+		const requestPrioritySource =
+			event.type === "message_end" && event.message.role === "assistant" ? this.#requestPrioritySource : undefined;
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			this.#requestPrioritySource = undefined;
+		}
 		// A fresh run supersedes the previously settled (and pruned) refusal
 		// turn: state-based lookups take over again.
 		if (event.type === "agent_start") {
@@ -3320,8 +3333,6 @@ export class AgentSession {
 						ttftMs: assistantMsg.ttft,
 					});
 				}
-				const requestPrioritySource = this.#requestPrioritySource;
-				this.#requestPrioritySource = undefined;
 				if (assistantMsg.disabledFeatures?.includes("priority")) {
 					if (
 						requestPrioritySource === "manual" ||
