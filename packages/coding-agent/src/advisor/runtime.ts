@@ -649,10 +649,18 @@ export class AdvisorRuntime {
 		this.#includeThinking = true;
 	}
 
-	#resumeQuarantineAfterBasisChange(): void {
-		if (!this.#quarantineHalted) return;
+	#notifyIdle(): void {
+		try {
+			this.host.notifyIdle?.();
+		} catch (err) {
+			logger.debug("advisor idle notification failed", { err: String(err) });
+		}
+	}
+
+	#resumeQuarantineAfterBasisChange(): boolean {
+		if (!this.#quarantineHalted) return false;
 		const basis = this.host.getQuarantineBasis?.() ?? this.host.getModelIdentity?.() ?? "";
-		if (basis === this.#quarantineBasis) return;
+		if (basis === this.#quarantineBasis) return false;
 		this.#quarantineHalted = false;
 		this.#quarantineBasis = undefined;
 		this.#consecutiveQuarantines = 0;
@@ -661,6 +669,7 @@ export class AdvisorRuntime {
 		this.#halted = false;
 		this.#clearSeenContext();
 		logger.info("advisor quarantine latch cleared after capability basis changed");
+		return true;
 	}
 
 	/**
@@ -689,7 +698,7 @@ export class AdvisorRuntime {
 				if (this.disposed || this.#sessionTransitionPaused || this.#epoch !== epoch || !this.#quarantineHalted)
 					return;
 				this.#syncModelIdentity();
-				this.#resumeQuarantineAfterBasisChange();
+				if (this.#resumeQuarantineAfterBasisChange()) this.#notifyIdle();
 			} catch (err) {
 				if (!controller.signal.aborted) {
 					logger.debug("advisor quarantine-halted fallback maintenance failed", { err: String(err) });
@@ -1571,13 +1580,7 @@ export class AdvisorRuntime {
 			// batch (backlog/pending stay non-empty) yet `yielded` is true via
 			// the quota latch, and the eye must close without waiting for an
 			// unrelated repaint. Same for halt.
-			if (!this.disposed && this.yielded) {
-				try {
-					this.host.notifyIdle?.();
-				} catch (err) {
-					logger.debug("advisor idle notification failed", { err: String(err) });
-				}
-			}
+			if (!this.disposed && this.yielded) this.#notifyIdle();
 		}
 	}
 }

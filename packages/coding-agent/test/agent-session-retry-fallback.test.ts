@@ -1753,6 +1753,7 @@ describe("AgentSession retry fallback", () => {
 		const advisorMock = createMockModel();
 		const requestedAdvisorModels: string[] = [];
 		const quarantineLatched = Promise.withResolvers<void>();
+		let advisorYieldedEvents = 0;
 		let advisorPrimaryAttempts = 0;
 		let fallbackQuarantineAttempts = 0;
 		const advisorPrimarySelector = `${advisorPrimary.provider}/${advisorPrimary.id}`;
@@ -1812,6 +1813,7 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 		session.subscribe(event => {
+			if (event.type === "advisor_yielded") advisorYieldedEvents++;
 			if (
 				event.type === "notice" &&
 				event.source === "advisor" &&
@@ -1835,11 +1837,27 @@ describe("AgentSession retry fallback", () => {
 
 		// The current update must only restore the expired fallback: it cannot buy
 		// another advisor review while the unchanged-basis quarantine latch is set.
+		const restorationStarted = Promise.withResolvers<void>();
+		const releaseRestoration = Promise.withResolvers<void>();
+		const originalGetApiKey = modelRegistry.getApiKey.bind(modelRegistry);
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async (...args) => {
+			restorationStarted.resolve();
+			await releaseRestoration.promise;
+			return originalGetApiKey(...args);
+		});
 		vi.spyOn(Date, "now").mockReturnValue(Date.now() + 2_000);
 		await session.prompt("Advance the primary after the advisor cooldown");
+		await restorationStarted.promise;
+		const yieldedBeforeRestoration = advisorYieldedEvents;
+		releaseRestoration.resolve();
 		for (let attempt = 0; attempt < 20; attempt++) {
 			const model = session.getAdvisorAgent()?.state.model;
-			if (model?.provider === advisorPrimary.provider && model.id === advisorPrimary.id) break;
+			if (
+				model?.provider === advisorPrimary.provider &&
+				model.id === advisorPrimary.id &&
+				advisorYieldedEvents > yieldedBeforeRestoration
+			)
+				break;
 			await Promise.resolve();
 		}
 
@@ -1847,6 +1865,7 @@ describe("AgentSession retry fallback", () => {
 			provider: advisorPrimary.provider,
 			id: advisorPrimary.id,
 		});
+		expect(advisorYieldedEvents).toBe(yieldedBeforeRestoration + 1);
 		expect(requestedAdvisorModels).toEqual([
 			advisorPrimarySelector,
 			advisorFallbackSelector,

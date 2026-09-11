@@ -5300,14 +5300,21 @@ describe("advisor", () => {
 			const hookEntered = Promise.withResolvers<void>();
 			const releaseHook = Promise.withResolvers<void>();
 			const failures: unknown[] = [];
+			const quarantinedOutputs: AssistantMessage[] = [];
 			const agent: AdvisorAgent = {
 				prompt: async input => {
 					promptInputs.push(input);
-					if (promptText(input).includes("stale-turn")) {
-						throw new AdvisorOutputQuarantinedError(
-							"Advisor response quarantined: requested unavailable tool bash",
-						);
-					}
+					if (!promptText(input).includes("stale-turn")) return;
+					const unsafeOutput: AssistantMessage = {
+						role: "assistant",
+						content: [{ type: "toolCall", id: "stale-bash", name: "bash", arguments: { command: "true" } }],
+						stopReason: "toolUse",
+						timestamp: Date.now(),
+					};
+					agent.state.messages.push(unsafeOutput);
+					quarantinedOutputs.push(unsafeOutput);
+					const quarantine = quarantineAdvisorUnsafeOutput(unsafeOutput, new Set(["advise"]));
+					if (quarantine !== undefined) throw new AdvisorOutputQuarantinedError(quarantine);
 				},
 				abort: () => {},
 				reset: () => {},
@@ -5341,6 +5348,12 @@ describe("advisor", () => {
 			expect(runtime.halted).toBe(false);
 			expect(runtime.failureNotified).toBe(false);
 			expect(failures).toEqual([]);
+			expect(quarantinedOutputs).toMatchObject([
+				{
+					stopReason: "error",
+					errorMessage: "Advisor response quarantined: requested unavailable tool bash",
+				},
+			]);
 		});
 
 		it("drops the in-flight batch when a reset aborts the advisor prompt", async () => {
