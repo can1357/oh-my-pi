@@ -267,7 +267,7 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 
 	try {
 		const request = create(GetUserStatusRequestSchema, {
-			metadata: create(MetadataSchema, devinCliMetadata(token)),
+			metadata: create(MetadataSchema, await devinCliMetadata(token)),
 		});
 		const response = await ctx.fetch(`${baseUrl}${GET_USER_STATUS_PATH}`, {
 			method: "POST",

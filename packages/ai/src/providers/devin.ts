@@ -180,7 +180,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				assignment = await assignDevinModel(model, turn, chatBaseUrl, fetchImpl, options?.signal);
 				output.upstreamModel = assignment.modelUid;
 			}
-			const request = buildDevinChatRequest(model, context, options, turn, assignment);
+			const request = await buildDevinChatRequest(model, context, options, turn, assignment);
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
 			const gz = gzipSync(reqBytes);
 			logger.debug("devin: sending chat request", {
@@ -489,7 +489,9 @@ async function fetchDevinAuthMetadata(
 	fetchImpl: NonNullable<StreamOptions["fetch"]>,
 	signal: AbortSignal | undefined,
 ): Promise<{ userJwt: string; baseUrl?: string }> {
-	const request = create(GetUserJwtRequestSchema, { metadata: create(MetadataSchema, devinCliMetadata(apiKey)) });
+	const request = create(GetUserJwtRequestSchema, {
+		metadata: create(MetadataSchema, await devinCliMetadata(apiKey)),
+	});
 	const response = await fetchImpl(`${baseUrl}${DEVIN_AUTH_PATH}`, {
 		method: "POST",
 		headers: {
@@ -532,7 +534,7 @@ async function assignDevinModel(
 	signal: AbortSignal | undefined,
 ): Promise<ModelAssignment> {
 	const request = create(AssignModelRequestSchema, {
-		metadata: create(MetadataSchema, devinCliMetadata(turn.apiKey)),
+		metadata: create(MetadataSchema, await devinCliMetadata(turn.apiKey)),
 		modelRouterUid: model.requestModelId ?? model.id,
 		cascadeId: turn.cascadeId,
 		chatMessagePrompt: buildRouterPrompt(turn.messages),
@@ -587,7 +589,7 @@ function buildRouterPrompt(messages: Message[]): ChatMessagePrompt | undefined {
  * conversation history maps to `chatMessagePrompts`. `assignment` is present only
  * for router models and supplies both the resolved uid and its JWT.
  */
-function buildDevinChatRequest(
+async function buildDevinChatRequest(
 	model: Model<"devin-agent">,
 	context: Context,
 	options: DevinOptions | undefined,
@@ -599,7 +601,7 @@ function buildDevinChatRequest(
 			? [...DEVIN_DEFAULT_STOP_PATTERNS, ...options.stopSequences]
 			: DEVIN_DEFAULT_STOP_PATTERNS;
 	return create(GetChatMessageRequestSchema, {
-		metadata: create(MetadataSchema, devinCliMetadata(turn.apiKey, turn.userJwt)),
+		metadata: create(MetadataSchema, await devinCliMetadata(turn.apiKey, turn.userJwt)),
 		prompt: normalizeSystemPrompts(context.systemPrompt).join("\n\n"),
 		chatMessagePrompts: buildChatMessagePrompts(turn.messages, turn.cascadeId, model),
 		chatModelUid: assignment?.modelUid ?? options?.chatModelUid ?? model.requestModelId ?? model.id,
