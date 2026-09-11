@@ -1333,12 +1333,34 @@ describe("LiteLLM discovery timeout (#11355)", () => {
 });
 
 describe("litellm discoveryBudgetMs (#11576)", () => {
-	test("omits the key when the inner budget fits the default outer", () => {
+	test("omits the key only when no explicit budget is configured", () => {
 		const original = Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS;
 		delete Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS;
 		try {
 			expect(litellmModelManagerOptions({}).discoveryBudgetMs).toBeUndefined();
-			expect(litellmModelManagerOptions({ discoveryTimeoutMs: 10_000 }).discoveryBudgetMs).toBeUndefined();
+		} finally {
+			if (original === undefined) delete Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS;
+			else Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS = original;
+		}
+	});
+	test("budgets an explicitly short branch past its summed phase bounds", () => {
+		// An explicitly short rich budget still pays the full sequential
+		// pipeline: models.dev prefetch + rich + /v1/models fallback. The
+		// outer must clear that exact sum plus handoff headroom, else the
+		// guard fires before the fallback answers (Codex P1 3986054005).
+		const budget = litellmModelManagerOptions({ discoveryTimeoutMs: 5_000 }).discoveryBudgetMs;
+		expect(budget).toBeGreaterThan(5_000 + 2 * 10_000);
+	});
+	test("an explicit default-sized budget still declares the full pipeline", () => {
+		expect(litellmModelManagerOptions({ discoveryTimeoutMs: 10_000 }).discoveryBudgetMs).toBeGreaterThan(
+			10_000 + 2 * 10_000,
+		);
+	});
+	test("an explicit env budget is honored the same way", () => {
+		const original = Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS;
+		Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS = "5000";
+		try {
+			expect(litellmModelManagerOptions({}).discoveryBudgetMs).toBeGreaterThan(5_000 + 2 * 10_000);
 		} finally {
 			if (original === undefined) delete Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS;
 			else Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS = original;

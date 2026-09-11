@@ -26,7 +26,15 @@ import { resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions, ModelsDevFallback } from "../model-manager";
 import { type GeneratedProvider, getBundledModels } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec, OpenAICompat, Provider, ThinkingConfig, TokenCost } from "../types";
-import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
+import {
+	discoveryFetch,
+	isAnthropicOAuthToken,
+	isRecord,
+	toBoolean,
+	toNumber,
+	toPositiveNumber,
+	toPositiveNumberOrNull,
+} from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
 import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
@@ -5957,23 +5965,27 @@ export async function fetchLiteLLMRichModels<TApi extends Api>(
 export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
-	const discoveryTimeoutMs = toPositiveNumber(
+	const configuredTimeoutMs = toPositiveNumberOrNull(
 		config?.discoveryTimeoutMs ?? Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS,
-		LITELLM_DISCOVERY_TIMEOUT_MS,
 	);
+	const discoveryTimeoutMs = configuredTimeoutMs ?? LITELLM_DISCOVERY_TIMEOUT_MS;
 	return {
 		providerId: "litellm",
-		// Stretch the runtime outer guard past its default only when the
-		// configured rich budget exceeds the default it was sized for. Budget
-		// all three sequential phases — the models.dev prefetch and the
-		// /v1/models fallback are each bounded by the shared default — plus
-		// headroom for the outer timer's start offset and per-phase handoff.
+		// Declare the full sequential pipeline whenever a rich budget is
+		// explicitly configured: the runtime outer guard defaults to 15s,
+		// but discovery can spend the models.dev prefetch plus the
+		// configured rich phase plus the /v1/models fallback — the latter
+		// two each bounded by the shared default — so a short setting
+		// would otherwise exhaust the guard before the fallback answers.
+		// Unset means the default path, which keeps no declared budget and
+		// resolves to the byte-identical 15s guard. Headroom covers the
+		// outer timer's start offset and per-phase handoff jitter.
 		discoveryBudgetMs:
-			discoveryTimeoutMs > DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS
-				? discoveryTimeoutMs +
+			configuredTimeoutMs === null
+				? undefined
+				: configuredTimeoutMs +
 					2 * DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS +
-					LITELLM_DISCOVERY_OUTER_HEADROOM_MS
-				: undefined,
+					LITELLM_DISCOVERY_OUTER_HEADROOM_MS,
 		// rich-v8 invalidates rows whose `compatConfig` retained a colliding
 		// bundled model's provider-specific transport (e.g. Fireworks
 		// `wireModelIdMode`) before that leak was fixed. Earlier versions added

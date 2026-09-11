@@ -59,6 +59,33 @@ function pressuredFetchMock(): FetchImpl {
 		return new Response("", { status: 404 });
 	}) as FetchImpl;
 }
+function shortTimeoutFetchMock(): FetchImpl {
+	return (async (input: string | URL | Request, init?: RequestInit) => {
+		const url = String(input);
+		if (url.endsWith("models.json.zstd")) {
+			// Prefetch burns nearly its whole 10s transport bound before
+			// failing, so the pipeline starts the rich phase ~9s in.
+			// Load-bearing wall clock like the mocks above: the outer
+			// guard and phase budgets are real AbortSignal timers.
+			await Bun.sleep(9_000);
+			return new Response("", { status: 404 });
+		}
+		if (url.endsWith("/model_group/info")) {
+			// Never answers: the 5s inner budget aborts this, and the
+			// fallback must still fit inside the short-branch outer.
+			const { promise, reject } = Promise.withResolvers<never>();
+			init?.signal?.addEventListener("abort", () => reject(new Error("rich fetch aborted")), { once: true });
+			await promise;
+		}
+		if (url.endsWith("/v1/models")) {
+			await Bun.sleep(9_000);
+			if (init?.signal?.aborted) throw new Error("fallback fetch aborted");
+			return Response.json({ data: [{ id: "openai/gpt-5" }] });
+		}
+		return new Response("", { status: 404 });
+	}) as FetchImpl;
+}
+
 function deadlineEdgeFetchMock(): FetchImpl {
 	return (async (input: string | URL | Request, init?: RequestInit) => {
 		const url = String(input);
@@ -148,6 +175,19 @@ describe("litellm discovery outer timeout (#11576)", () => {
 		// what makes this edge robust rather than luck. This is the
 		// observable outcome that replaces the old internal
 		// discoveryBudgetMs literal assertion.
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: deadlineEdgeFetchMock() });
+		await registry.refreshDiscoverableProviders(["litellm"], "online");
+		expect(registry.find("litellm", "openai/gpt-5")).toBeDefined();
+	}, 120_000);
+
+	test("a short configured budget still reaches the fallback after a slow prefetch", async () => {
+		// ~9s prefetch + 5s rich abort + ~9s fallback ≈ 23s: inside the
+		// 30s short-branch outer (5s rich + 2x10s phase bounds + 5s
+		// headroom), past the 15s default guard the undeclared branch
+		// resolves to (Codex P1 3986054005).
+		Bun.env.LITELLM_DISCOVERY_TIMEOUT_MS = "5000";
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: shortTimeoutFetchMock() });
+		await registry.refreshDiscoverableProviders(["litellm"], "online");
 		expect(registry.find("litellm", "openai/gpt-5")).toBeDefined();
 	}, 120_000);
 });
