@@ -630,12 +630,13 @@ describe("shareSession", () => {
 	});
 
 	// Fake-`gh` shims exercise each tryCreateGist failure reason through the
-	// real `$`gh …`` subprocess path, so the notice contract is pinned per
-	// reason instead of matching a generic "gist unavailable" string. Skipped
-	// on Windows: Bun/Windows resolves an installed gh.exe past extensionless
-	// shims no matter the PATH order (verified by probe), so the shim never
-	// takes effect there; the lookup-seam test above still covers the
-	// fallback shape on every platform.
+	// real subprocess path, so the notice contract is pinned per reason
+	// instead of matching a generic "gist unavailable" string. The shims
+	// reach the child via the `which` lookup seam (tryCreateGist executes
+	// the resolved path), so no test mutates the process-wide PATH around
+	// the awaits below. Skipped on Windows: the shims are extensionless
+	// `#!/bin/sh` scripts, which Windows cannot execute even by direct
+	// path (verified by probe); POSIX CI runs them.
 	const shimSkippedOnWindows = process.platform === "win32";
 
 	function writeFakeGh(script: string): { dir: string; gh: string } {
@@ -660,10 +661,8 @@ describe("shareSession", () => {
 				return Response.json({ id: "blobshareid03" });
 			},
 		});
-		// Prepend (never replace) so every other binary keeps resolving; the
-		// fake `gh` shadows the real one by PATH order on POSIX.
-		const originalPath = process.env.PATH;
-		process.env.PATH = path.dirname(fakeGh) + path.delimiter + (originalPath ?? "");
+		// The fake reaches the child through the `which` seam above — no
+		// process-wide PATH mutation around the awaits below.
 		try {
 			const result = await shareSession(sm, {
 				serverUrl: `http://localhost:${server.port}`,
@@ -674,8 +673,6 @@ describe("shareSession", () => {
 			expect(result.gistUrl).toBeUndefined();
 			return result.notice;
 		} finally {
-			if (originalPath === undefined) delete process.env.PATH;
-			else process.env.PATH = originalPath;
 			server.stop(true);
 			fs.rmSync(path.dirname(fakeGh), { recursive: true, force: true });
 		}

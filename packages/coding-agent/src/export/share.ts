@@ -623,8 +623,12 @@ async function tryCreateGist(
 	sealed: Uint8Array,
 	which: (command: string) => string | null = $which,
 ): Promise<{ id: string; url: string } | { error: string }> {
-	if (!which("gh")) return { error: "gh CLI not found" };
-	const auth = await $`gh auth status`.quiet().nothrow();
+	// Execute the resolved path, not a bare `gh`: the lookup seam is the
+	// single authority for which binary runs, so tests can point it at a
+	// fake without mutating the process-wide PATH around the awaits below.
+	const gh = which("gh");
+	if (!gh) return { error: "gh CLI not found" };
+	const auth = await $`${gh} auth status`.quiet().nothrow();
 	if (auth.exitCode !== 0) {
 		logger.debug("share: gh present but not authenticated; falling back to share server");
 		return { error: "gh is not authenticated" };
@@ -634,7 +638,7 @@ async function tryCreateGist(
 	try {
 		const file = path.join(dir, GIST_FILENAME);
 		await Bun.write(file, Buffer.from(sealed).toString("base64"));
-		const result = await $`gh gist create --public=false ${file}`.quiet().nothrow();
+		const result = await $`${gh} gist create --public=false ${file}`.quiet().nothrow();
 		if (result.exitCode !== 0) {
 			logger.warn("share: gist creation failed; falling back to share server", {
 				stderr: result.stderr.toString("utf-8").trim().slice(0, 500),
