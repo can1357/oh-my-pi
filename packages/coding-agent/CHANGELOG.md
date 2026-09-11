@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- An interrupted browser run no longer crashes the session when the tab's worker had already been closed ([#11718](https://github.com/can1357/oh-my-pi/pull/11718) by [@smkzw](https://github.com/smkzw)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added
