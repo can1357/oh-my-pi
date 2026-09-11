@@ -1,7 +1,7 @@
 # Changelog
 
 ## [Unreleased]
-- Orchestration notice no longer hardcodes Bun commands as the verification gate; verification is described generically ("project checks, tests") so non-Bun projects get appropriate wording.
+- Orchestration notice no longer hardcodes Bun commands as the verification gate; verification is described generically ("project checks, tests") so non-Bun projects get appropriate wording ([#10985](https://github.com/can1357/oh-my-pi/issues/10985)).
 
 ## [18.1.17] - 2026-09-10
 
