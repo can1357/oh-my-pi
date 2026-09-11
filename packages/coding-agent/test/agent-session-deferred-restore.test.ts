@@ -120,6 +120,19 @@ describe("AgentSession deferred model restore", () => {
 		}
 	});
 
+	// A same-session reload is NOT a session boundary: the owed restore belongs
+	// to the continuing session and must survive the reload (the clear scopes
+	// to switchingToDifferentSession).
+	it("keeps the owed deferred restore across a same-session reload", async () => {
+		await session.sessionManager.ensureOnDisk();
+		await session.sessionManager.flush();
+		const ownFile = session.sessionManager.getSessionFile();
+		if (!ownFile) throw new Error("Expected session file");
+		session.queueDeferredModelRestore(activeModel);
+		await session.reload();
+		expect(session.getDeferredModelRestore()?.model).toBe(activeModel);
+	});
+
 	// Review R6-3: /new past its commit point is a fresh-session boundary — a
 	// journal-reinstalled tool ceiling must not survive into the new transcript
 	// (the exit's presentation restore is also filtered through granted(), so a

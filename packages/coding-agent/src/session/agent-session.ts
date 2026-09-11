@@ -9315,15 +9315,15 @@ export class AgentSession {
 			throw error;
 		}
 		// A queued deferred restore is SOURCE-session state (headless ACP/RPC
-		// channel; the TUI's own queue dies in #clearTransientModeState): the
-		// target session's first agent_end must not flush it over the target's
-		// restored model — and a later first persona enter would otherwise
-		// ADOPT the stale entry as its exit baseline. Past the point of no
-		// return — but setSessionFile()/cwd steps below can still fail: the
-		// slot is snapshotted and the rollback catch reinstates it, so the owed
-		// retry survives a failed switch.
+		// channel; the TUI's own queue dies in #clearTransientModeState): a
+		// DIFFERENT session's first agent_end must not flush it over the
+		// restored model — and a later first persona enter would otherwise ADOPT
+		// the stale entry as its exit baseline. A same-session reload keeps the
+		// slot (it still belongs to the continuing session). setSessionFile()/cwd
+		// steps below can still fail: the slot is snapshotted and the rollback
+		// catch reinstates it, so the owed retry survives a failed switch.
 		const previousDeferredModelRestore = this.#pendingDeferredModelRestore;
-		this.#pendingDeferredModelRestore = undefined;
+		if (switchingToDifferentSession) this.#pendingDeferredModelRestore = undefined;
 		const bashTransition = this.#bash.beginSessionTransition();
 		const previousSessionState = this.sessionManager.captureState();
 		// Only same-session reloads compare against the prior context to detect
