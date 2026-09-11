@@ -1699,12 +1699,16 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							}
 							startedMoreWork = true;
 						}
-						// Report turns only: prose plus nothing but (optionally) the
-						// terminal `yield`. A turn that kicked off more work is
-						// narration; harvesting it would hand the parent a stale
-						// mid-run fragment as the subagent's final answer.
+						// Only the report turn immediately preceding the finalize is
+						// harvestable. A turn that started more work invalidates any
+						// earlier candidate: the model took the reminder's "resume
+						// work" path, so that prose predates the work and is no longer
+						// a description of the finished assignment. Skipping the
+						// update alone would leave it harvestable and hand the parent
+						// stale narration as the completed result.
 						const text = turnText.join("\n");
-						if (!startedMoreWork && text.trim()) lastReportTurnText = text;
+						if (startedMoreWork) lastReportTurnText = undefined;
+						else if (text.trim()) lastReportTurnText = text;
 					}
 					if (softRequestBudget > 0 && !abortSent && !yieldCallPending) {
 						const stopThreshold = softRequestBudget * 1.5;

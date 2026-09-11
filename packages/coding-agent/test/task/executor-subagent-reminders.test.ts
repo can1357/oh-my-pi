@@ -666,6 +666,60 @@ describe("runSubprocess yield reminders", () => {
 		expect(result.output).not.toBe(narration);
 	});
 
+	it("invalidates an earlier report turn once the subagent resumes work", async () => {
+		// The reminder's option 1 is "resume work", so a prose-only idle turn is
+		// routinely followed by more tool calls. Skipping the capture on those
+		// turns is not enough — the earlier prose must be invalidated, or a
+		// text-less finalize many turns later harvests a report written before
+		// all that work and passes it off as the completed result (PR #11746
+		// review).
+		const staleReport = "Everything is done; nothing left to change.";
+		const session = createMockSession(({ promptIndex, emit, state }) => {
+			if (promptIndex === 1) {
+				const reporting = createAssistantStopMessage(staleReport);
+				state.messages.push(reporting);
+				emit({ type: "message_end", message: reporting });
+				return;
+			}
+			if (promptIndex === 2) {
+				const resumed: AssistantMessage = {
+					...createAssistantStopMessage(""),
+					content: [
+						{ type: "text", text: "Actually one more fix." },
+						{ type: "toolCall", id: "tool-resume", name: "bash", arguments: { command: "bun test" } },
+					],
+					stopReason: "toolUse",
+				};
+				state.messages.push(resumed);
+				emit({ type: "message_end", message: resumed });
+				return;
+			}
+			const finalize: AssistantMessage = {
+				...createAssistantStopMessage(""),
+				content: [{ type: "toolCall", id: "tool-late", name: "yield", arguments: { type: "result" } }],
+				stopReason: "toolUse",
+			};
+			state.messages.push(finalize);
+			emit({ type: "message_end", message: finalize });
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-late",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", type: "result", useLastTurn: true },
+				},
+				isError: false,
+			});
+		});
+
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-resumed-work" });
+		expect(result.output).toContain("SYSTEM WARNING: Subagent called yield with null data.");
+		expect(result.output).not.toBe(staleReport);
+	});
+
 	it("retries when yield tool returns an error before succeeding", async () => {
 		const prompts: string[] = [];
 		const session = createMockSession(({ text, promptIndex, emit, state }) => {
