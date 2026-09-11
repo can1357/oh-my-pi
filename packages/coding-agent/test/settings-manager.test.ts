@@ -965,6 +965,87 @@ describe("Settings", () => {
 			expect(settings.getModelRole("global_role")).toBe("openai/global");
 			expect(settings.getModelRole("project_role")).toBe("openai/project");
 		});
+		it("refreshes native project settings without changing overlay or runtime precedence", async () => {
+			await writeSettings({
+				task: { enableEffort: true, maxConcurrency: 2 },
+				retry: { modelFallback: true },
+			});
+			const overlayPath = tempDir.join("reload-overlay.yml");
+			await Bun.write(overlayPath, YAML.stringify({ task: { enableEffort: false } }, null, 2));
+			const reloadProjectDir = tempDir.join("reload-project");
+			await fsp.mkdir(reloadProjectDir, { recursive: true });
+			const projectConfigPath = path.join(getProjectAgentDir(reloadProjectDir), "config.yml");
+			const settings = await Settings.loadIsolated({
+				cwd: reloadProjectDir,
+				agentDir,
+				configFiles: [overlayPath],
+				overrides: { "task.maxConcurrency": 7 },
+			});
+
+			expect(await Bun.file(projectConfigPath).exists()).toBe(false);
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						task: {
+							agentModelOverrides: { task: "xai-oauth/grok-4.6:medium" },
+							enableEffort: true,
+							maxConcurrency: 3,
+						},
+						retry: { modelFallback: false },
+					},
+					null,
+					2,
+				),
+			);
+			await settings.reloadFromDisk();
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({
+				task: "xai-oauth/grok-4.6:medium",
+			});
+			expect(settings.get("retry.modelFallback")).toBe(false);
+			expect(settings.get("task.enableEffort")).toBe(false);
+			expect(settings.get("task.maxConcurrency")).toBe(7);
+
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						task: {
+							agentModelOverrides: { task: "openai/gpt-4o" },
+							enableEffort: true,
+							maxConcurrency: 4,
+						},
+						retry: { modelFallback: true },
+					},
+					null,
+					2,
+				),
+			);
+			await settings.reloadFromDisk();
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({ task: "openai/gpt-4o" });
+			expect(settings.get("retry.modelFallback")).toBe(true);
+			expect(settings.get("task.enableEffort")).toBe(false);
+			expect(settings.get("task.maxConcurrency")).toBe(7);
+
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ task: { enableEffort: true, maxConcurrency: 4 } }, null, 2),
+			);
+			await settings.reloadFromDisk();
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({});
+			expect(settings.get("retry.modelFallback")).toBe(true);
+
+			await fsp.rm(projectConfigPath);
+			await settings.reloadFromDisk();
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({});
+			expect(settings.get("retry.modelFallback")).toBe(true);
+			expect(settings.get("task.enableEffort")).toBe(false);
+			expect(settings.get("task.maxConcurrency")).toBe(7);
+		});
 		it("retries when a persisted setting changes while files are being read", async () => {
 			await writeSettings({ setupVersion: 1 });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });

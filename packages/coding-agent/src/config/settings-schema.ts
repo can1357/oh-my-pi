@@ -262,7 +262,8 @@ export type StatusLineSegmentId =
 	| "cache_hit"
 	| "session_name"
 	| "usage"
-	| "collab";
+	| "collab"
+	| "vim";
 
 /** Submenu choice metadata. */
 export type SubmenuOption<V extends string = string> = {
@@ -2021,6 +2022,36 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.vimMode": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Vim Editing Mode",
+			description:
+				"Modal prompt editing. Escape leaves Insert mode; Normal mode has hjkl, 0, $, ^, w, b, e, gg, G, counts, x/D/C, dd/yy, p and u; operators take motions or text objects (diw, ca(, dap); v/V start a Visual selection that y copies and d deletes",
+		},
+	},
+
+	"tui.vimModeDisplay": {
+		type: "enum",
+		values: ["text", "icon", "none"] as const,
+		default: "text",
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Vim Mode Indicator",
+			description: "How the current Vim mode appears in the status line",
+			condition: "vimModeEnabled",
+			options: [
+				{ value: "text", label: "Text", description: "Full mode name — NORMAL, INSERT, VISUAL, V-LINE" },
+				{ value: "icon", label: "Icon", description: "Single compact glyph per mode" },
+				{ value: "none", label: "Hidden", description: "Do not show the mode in the status line" },
+			],
+		},
+	},
+
 	"loop.mode": {
 		type: "enum",
 		values: ["prompt", "compact", "reset"] as const,
@@ -2065,6 +2096,18 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Input and startup
+	"composer.recallClearedDrafts": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Recall Cleared Drafts",
+			description:
+				"Keep drafts cleared with Ctrl+C in local Up/Down history until exit; disabling affects future clears",
+		},
+	},
+
 	doubleEscapeAction: {
 		type: "enum",
 		values: ["rewind", "tree", "none"] as const,
@@ -4878,6 +4921,31 @@ export const SETTINGS_SCHEMA = {
 			label: "Start in Plan Mode",
 			description: "Automatically enter plan mode at the start of every new session",
 			condition: "planModeEnabled",
+		},
+	},
+
+	"plan.autosave": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Autosave Plans",
+			description: "Automatically save approved plans to disk when plan mode completes",
+			condition: "planModeEnabled",
+		},
+	},
+
+	"plan.autosaveDir": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Autosave Directory",
+			description:
+				"Directory for autosaved plans. Supports ~, absolute, and cwd-relative paths. Empty uses <project>/.omp/plans/.",
+			condition: "planAutosaveEnabled",
 		},
 	},
 

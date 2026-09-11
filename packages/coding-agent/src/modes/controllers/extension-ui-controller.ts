@@ -22,7 +22,7 @@ import type {
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
-import { AskDialogComponent, boundPromptTitle } from "../../modes/components/ask-dialog";
+import { AskDialogComponent, boundPromptTitle, normalizeDialogQuestions } from "../../modes/components/ask-dialog";
 import { installExtensionComposerShape } from "../../modes/components/composer-shape-registry";
 import { EditorTopGap } from "../../modes/components/editor-top-gap";
 import { HookEditorComponent } from "../../modes/components/hook-editor";
@@ -31,6 +31,7 @@ import { HookSelectorComponent, type HookSelectorSlider } from "../../modes/comp
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "../../tools/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 
 const MAX_WIDGET_LINES = 10;
@@ -615,17 +616,22 @@ export class ExtensionUiController {
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined> {
+		// Normalize the public extension input once for both race participants:
+		// malformed entries (missing/non-string fields) coerce to empty
+		// strings/arrays here instead of throwing inside `sanitizeCarriageReturns`
+		// on the guest path or taking down the local render.
+		const normalized = normalizeDialogQuestions(questions);
 		const host = this.ctx.collabHost;
-		if (!host) return this.#showLocalAskDialog(questions, dialogOptions);
+		if (!host) return this.#showLocalAskDialog(normalized, dialogOptions);
 		const localAbort = new AbortController();
 		const remoteAbort = new AbortController();
 		const parentSignal = dialogOptions?.signal;
 		const localSignal = parentSignal ? AbortSignal.any([parentSignal, localAbort.signal]) : localAbort.signal;
 		const remoteSignal = parentSignal ? AbortSignal.any([parentSignal, remoteAbort.signal]) : remoteAbort.signal;
-		const localWinner = this.#showLocalAskDialog(questions, { ...dialogOptions, signal: localSignal }).then(
+		const localWinner = this.#showLocalAskDialog(normalized, { ...dialogOptions, signal: localSignal }).then(
 			(value): CollabAskDialogWinner => ({ source: "local", value }),
 		);
-		const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(questions, remoteSignal).then(
+		const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(normalized, remoteSignal).then(
 			result => (result === "unavailable" ? localWinner : { source: "remote", value: result }),
 		);
 		const winner = await Promise.race([localWinner, remoteWinner]);
@@ -675,8 +681,14 @@ export class ExtensionUiController {
 				promptResolve = undefined;
 				promptEditor?.dispose();
 				promptEditor = undefined;
-				restoreAskDialog();
 				resolvePrompt?.(value);
+				// Let AskDialog apply the answer and clear its prompt guard before
+				// making the dialog visible and interactive again. This single-hop
+				// deferral relies on #promptForCustomInput/#promptForNote clearing
+				// #promptActive in the synchronous resume after their lone
+				// `await onPrompt(...)` (no await before the `finally`); adding one
+				// there reopens the drop-Enter race, so revisit this deferral then.
+				queueMicrotask(restoreAskDialog);
 			};
 
 			const promptForText = (title: string, prefill?: string): Promise<string | undefined> => {
@@ -786,8 +798,27 @@ export class ExtensionUiController {
 	): Promise<ExtensionAskDialogResultItem | "chat" | "unavailable" | undefined> {
 		const selected = new Set<string>();
 		let customInput: string | undefined;
-		const baseOptions: CollabUiSelectItem[] = question.options.map(option =>
-			option.description?.trim() ? { label: option.label, description: option.description.trim() } : option.label,
+		// Sanitize display copies for the guest wire (same degeneration as
+		// the local dialog). `selected` and results keep the ORIGINAL labels
+		// so both race winners echo identical correlation values. Display
+		// labels are unique and sentinel-safe; the suffix maps back below.
+		const displayLabels = disambiguateDisplayLabels(
+			question.options.map(option => option.label),
+			[ASK_OTHER_OPTION, ASK_CHAT_OPTION, ASK_NEXT_OPTION],
+		);
+		const originalByDisplay = new Map<string, string>();
+		question.options.forEach((option, index) => {
+			originalByDisplay.set(displayLabels[index]!, option.label);
+		});
+		// Map a guest answer (a display label, suffix included) back to the
+		// original correlation value; unknown values pass through and are
+		// ignored at result build, as before.
+		const resolveGuestLabel = (value: string): string => originalByDisplay.get(value) ?? value;
+		const displayQuestion = sanitizeCarriageReturns(question.question);
+		const baseOptions: CollabUiSelectItem[] = question.options.map((option, index) =>
+			option.description?.trim()
+				? { label: displayLabels[index]!, description: sanitizeCarriageReturns(option.description.trim()) }
+				: displayLabels[index]!,
 		);
 		if (question.multi) {
 			while (true) {
@@ -806,7 +837,7 @@ export class ExtensionUiController {
 				const choice = await this.#requestGuestUiString(
 					{
 						kind: "select",
-						title: question.question,
+						title: displayQuestion,
 						options,
 						selectionMarker: "checkbox",
 						checkedIndices,
@@ -823,7 +854,7 @@ export class ExtensionUiController {
 				if (choice.value === ASK_NEXT_OPTION) break;
 				if (choice.value === ASK_OTHER_OPTION) {
 					const input = await this.#requestGuestUiString(
-						{ kind: "editor", title: boundPromptTitle("Custom answer: ", question.question) },
+						{ kind: "editor", title: boundPromptTitle("Custom answer: ", displayQuestion) },
 						signal,
 					);
 					if (input.kind === "unavailable") return "unavailable";
@@ -833,8 +864,9 @@ export class ExtensionUiController {
 					customInput = input.value;
 					break;
 				}
-				if (selected.has(choice.value)) selected.delete(choice.value);
-				else selected.add(choice.value);
+				const picked = resolveGuestLabel(choice.value);
+				if (selected.has(picked)) selected.delete(picked);
+				else selected.add(picked);
 			}
 		} else {
 			const recommended =
@@ -846,7 +878,7 @@ export class ExtensionUiController {
 				const choice = await this.#requestGuestUiString(
 					{
 						kind: "select",
-						title: question.question,
+						title: displayQuestion,
 						options: [...baseOptions, ASK_OTHER_OPTION, ASK_CHAT_OPTION],
 						initialIndex,
 						selectionMarker: "radio",
@@ -860,7 +892,7 @@ export class ExtensionUiController {
 				if (choice.value === ASK_CHAT_OPTION) return "chat";
 				if (choice.value === ASK_OTHER_OPTION) {
 					const input = await this.#requestGuestUiString(
-						{ kind: "editor", title: boundPromptTitle("Custom answer: ", question.question) },
+						{ kind: "editor", title: boundPromptTitle("Custom answer: ", displayQuestion) },
 						signal,
 					);
 					if (input.kind === "unavailable") return "unavailable";
@@ -869,7 +901,7 @@ export class ExtensionUiController {
 					if (input.kind === "cancelled") continue;
 					customInput = input.value;
 				} else {
-					selected.add(choice.value);
+					selected.add(resolveGuestLabel(choice.value));
 				}
 				break;
 			}

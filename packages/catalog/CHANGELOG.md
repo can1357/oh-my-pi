@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [18.1.17] - 2026-09-10
+
+### Added
+
+- Added DeepSeek cost estimates that follow published peak/off-peak rates.
+- Added dated, announced price changes to the catalog, so rates switch on their effective date (e.g. DeepSeek Pro moving to Flash rates).
+- Added Command Code as a built-in provider with API-key login, live model discovery, per-model pricing, native OpenAI/Anthropic-compatible routing, cache-aware token usage, and TTFT metrics ([#11391](https://github.com/can1357/oh-my-pi/pull/11391) by [@CherkaSSH](https://github.com/CherkaSSH)).
+
+### Fixed
+
+- Fixed Command Code models outside the verified effort registry offering unsupported reasoning effort controls, and bundled the live Command Code catalog so fresh installs resolve the default model without waiting for discovery ([#11595](https://github.com/can1357/oh-my-pi/pull/11595) by [@H4vC](https://github.com/H4vC)).
+- Fixed the bundled `deepseek-flash` row shipping without context limits: it now carries its documented 1M context / 384K output so offline context accounting enforces the real window.
+
+## [18.1.16] - 2026-09-09
+
+- Updated Fire Pass (`firepass`) login validation probe to `accounts/fireworks/routers/glm-5p2-fast` and bundled `glm-5.2-fast` and `kimi-k3-fast` models in place of decommissioned `kimi-k2.6-turbo` ([#10859](https://github.com/can1357/oh-my-pi/pull/10859) by [@olegpulatov](https://github.com/olegpulatov)).
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed

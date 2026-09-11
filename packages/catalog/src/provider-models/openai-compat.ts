@@ -2432,8 +2432,39 @@ export function fireworksModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
-// 7.6 Fire Pass (Fireworks Kimi K2.6 Turbo subscription)
+// 7.6 Fire Pass (Fireworks subscription)
 // ---------------------------------------------------------------------------
+
+// Pricing and limits are the published Fire Pass router tariff
+// (https://docs.fireworks.ai/firepass), not upstream-discoverable: dedicated
+// `fpk_…` keys never authorize `/v1/models`, so this seed is the authoritative
+// source. cacheRead is 0.1x input; cacheWrite stays 0 (not billed separately).
+export const FIREPASS_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "glm-5.2-fast",
+		name: "GLM 5.2 Fast (Fire Pass)",
+		api: "openai-completions",
+		provider: "firepass",
+		baseUrl: "https://api.fireworks.ai/inference/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 2.1, output: 6.6, cacheRead: 0.21, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+	},
+	{
+		id: "kimi-k3-fast",
+		name: "Kimi K3 Fast (Fire Pass)",
+		api: "openai-completions",
+		provider: "firepass",
+		baseUrl: "https://api.fireworks.ai/inference/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 4.5, output: 22.5, cacheRead: 0.45, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+	},
+];
 
 export interface FirepassModelManagerConfig {
 	apiKey?: string;
@@ -2442,8 +2473,8 @@ export interface FirepassModelManagerConfig {
 }
 
 /**
- * Fire Pass is a Fireworks subscription product that exposes a single router
- * model (Kimi K2.6 Turbo) under `accounts/fireworks/routers/kimi-k2p6-turbo`.
+ * Fire Pass is a Fireworks subscription product that exposes router models
+ * (GLM 5.2 Fast, Kimi K3 Fast) under `accounts/fireworks/routers/<id>`.
  * The dedicated `fpk_…` keys do not authorize `/v1/models`, so this manager
  * never performs dynamic discovery — the bundled catalog entry is canonical.
  * See https://docs.fireworks.ai/firepass.
@@ -7262,5 +7293,96 @@ export function modelsDevCatalogFallback(
 		additiveOnly: true,
 		fetch: () => fetchRevalidatedWellKnownModelsWithTimeout(fetchImpl, timeoutMs),
 		map: payload => (isRecord(payload) ? filterModelsDevCatalogRows(mapModelsDevToModels(payload, descriptors)) : []),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Command Code
+// ---------------------------------------------------------------------------
+
+/**
+ * Configuration for the Command Code Provider API model manager.
+ *
+ * `baseUrl` overrides the Provider API base path for testing; it is
+ * normalized to the shared `/provider` root (a trailing `/v1` is stripped)
+ * so Claude ids route to the Anthropic-compatible Messages endpoint at the
+ * root while every other id uses chat completions under `/v1`.
+ */
+export interface CommandCodeModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+const COMMAND_CODE_PROVIDER_BASE_PATH = "https://api.commandcode.ai/provider";
+
+function normalizeCommandCodeBasePath(baseUrl: string | undefined): string {
+	const normalized = (baseUrl ?? COMMAND_CODE_PROVIDER_BASE_PATH).trim().replace(/\/+$/, "");
+	return normalized.endsWith("/v1") ? normalized.slice(0, -3) : normalized;
+}
+
+/**
+ * Builds the Command Code model manager: a mixed-protocol OpenAI-compatible
+ * discovery client. The public `/v1/models` catalog is fetched once per
+ * options instance; `mapModel` pins each row's transport from the
+ * `api-routes` table (Claude ids to `anthropic-messages`, everything else to
+ * `openai-completions`) and seeds neutral capability defaults. Reviewed
+ * Command Code policy (effort ladders, pricing, limits, modalities) is
+ * applied later by `buildModel` from `providers/commandcode.kdl` — the
+ * mapper never inherits another provider's reasoning, rates, image support,
+ * or context window.
+ */
+export function commandCodeModelManagerOptions(config?: CommandCodeModelManagerConfig): ModelManagerOptions<Api> {
+	const basePath = normalizeCommandCodeBasePath(config?.baseUrl);
+	const discoveryBaseUrl = `${basePath}/v1`;
+	return {
+		providerId: "commandcode",
+		cacheProviderId: resolveModelCacheProviderId("commandcode", {
+			apiKey: config?.apiKey,
+			baseUrl: discoveryBaseUrl,
+		}),
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () => {
+			return fetchOpenAICompatibleModels<Api>({
+				api: "openai-completions",
+				provider: "commandcode",
+				baseUrl: discoveryBaseUrl,
+				// The catalog endpoint is public, but forward the key when the
+				// caller has one so entitled rows resolve identically to
+				// inference. The helper only sends Authorization when set.
+				apiKey: config?.apiKey,
+				mapModel: (entry, defaults) => {
+					const route = apiRouteFor("commandcode", defaults.id);
+					const api = route?.api === "anthropic-messages" ? route.api : "openai-completions";
+					return {
+						...defaults,
+						name: toModelName(entry.name, defaults.name),
+						api,
+						baseUrl: api === "anthropic-messages" ? basePath : discoveryBaseUrl,
+						// Neutral reasoning: the catalog row carries no
+						// reasoning metadata. Verified effort ids opt back in
+						// through exact `thinking-efforts` in KDL (the cascade
+						// upgrades the target and the engine materializes
+						// `reasoning: true` alongside the ladder); every other
+						// served id keeps no effort dial.
+						reasoning: defaults.reasoning,
+						// Keep the discovery default (`["text"]`): the catalog
+						// row carries no modality metadata and a bundled
+						// reference from another host must not advertise image
+						// support for this deployment. Verified image routes
+						// opt back in via `input-modalities` in KDL.
+						input: defaults.input,
+						// Neutral context window: an omitted or invalid
+						// `context_length` retains an unknown limit (`null`)
+						// instead of copying another host's deployment limit.
+						// Verified corrections live in KDL (`limits-patch`,
+						// `model-limits`, `context-window-floor`).
+						contextWindow: toPositiveNumber(entry.context_length, null),
+						maxTokens: null,
+					};
+				},
+				fetch: config?.fetch,
+			});
+		},
 	};
 }

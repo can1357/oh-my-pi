@@ -186,8 +186,8 @@ export class InputController {
 	) {}
 
 	/** Session-level title starts (user `/skill:` via promptCustomMessage) reuse this UI. */
-	notifyTitleGenerationStart(): void {
-		this.#showTinyTitleDownloadProgress(this.ctx.settings.get("providers.tinyModel"));
+	notifyTitleGenerationStart(): (() => void) | undefined {
+		return this.#showTinyTitleDownloadProgress(this.ctx.settings.get("providers.tinyModel"));
 	}
 
 	#enhancedPaste?: EnhancedPasteController;
@@ -214,7 +214,7 @@ export class InputController {
 	// scoped-input render fast path so the attachment chips band repaints.
 	#lastChipsSignature = "";
 
-	#showTinyTitleDownloadProgress(modelKey: string): void {
+	#showTinyTitleDownloadProgress(modelKey: string): (() => void) | undefined {
 		if (!isTinyTitleLocalModelKey(modelKey)) return;
 		const component = new TinyTitleDownloadProgressComponent(modelKey);
 		let added = false;
@@ -257,6 +257,7 @@ export class InputController {
 			}
 		};
 		const unsubscribe = tinyTitleClient.onProgress(update);
+		return remove;
 	}
 
 	#abortStreamingTurn(): void {
@@ -1090,9 +1091,9 @@ export class InputController {
 		if (this.#isLocalExtensionCommand(text)) {
 			return;
 		}
-		this.ctx.session.maybeStartTitleGeneration(text, () => {
-			this.#showTinyTitleDownloadProgress(this.ctx.settings.get("providers.tinyModel"));
-		});
+		this.ctx.session.maybeStartTitleGeneration(text, () =>
+			this.#showTinyTitleDownloadProgress(this.ctx.settings.get("providers.tinyModel")),
+		);
 	}
 
 	/** Submit editor text to the focused subagent session (chat-only focus policy). */
@@ -1185,11 +1186,19 @@ export class InputController {
 			return;
 		}
 
+		// TUI teardown pauses stdin, which leaves Bun with no referenced handles
+		// while the editor waits on an unresolved Promise. Keep the event loop
+		// alive across SIGSTOP so it can deliver SIGCONT; without this handle Bun
+		// exits successfully immediately after `fg` instead of restarting the TUI
+		// (issue #8585).
+		const suspendKeepalive = setInterval(() => {}, 2 ** 30);
+
 		// Capture the listener so we can detach it if the signal never fires;
 		// otherwise a failed suspend would leave a stale SIGCONT handler that
 		// fires on the next unrelated continue and tries to re-`start()` an
 		// already-running TUI.
 		const onResume = (): void => {
+			clearInterval(suspendKeepalive);
 			this.ctx.ui.start();
 			this.ctx.ui.requestRender(true);
 		};
@@ -1232,6 +1241,7 @@ export class InputController {
 			// their own sessions, so pgid=0 does not reach them.
 			process.kill(0, "SIGSTOP");
 		} catch (err) {
+			clearInterval(suspendKeepalive);
 			// The runtime refused the signal (e.g. seccomp filter blocks SIGSTOP
 			// delivery to the process group). Tear the resume hook down and
 			// bring the TUI back so the user is not stranded on a frozen prompt.
