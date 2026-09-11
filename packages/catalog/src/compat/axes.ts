@@ -259,6 +259,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"thinking-prefix-binding": { key: "prefixBinding", set: "thinking", shape: "scalar" },
 	"thinking-suppress-when-off": { key: "suppressWhenOff", set: "thinking", shape: "scalar" },
 	"thinking-supports-display": { key: "supportsDisplay", set: "thinking", shape: "scalar" },
+	"thinking-upgrade-neutral": { key: "upgradeNeutral", set: "thinking", shape: "scalar" },
 
 	// ── catalog metadata ──
 	"apply-patch-tool-type": {

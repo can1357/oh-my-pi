@@ -168,12 +168,32 @@ function finiteTokenCount(value: unknown): number {
 }
 
 /**
- * `Usage.totalTokens` per the documented contract: the conversation buckets plus
- * provider-reported orchestration tokens. Used when a legacy entry omits the
- * total, which would otherwise persist a zero total next to real token counts.
+ * Token-bucket view for total derivation. Persisted session payloads are
+ * outside-controlled (old versions, foreign producers), so every counter is
+ * `unknown` and validated at read time.
  */
-function sumReportedTokens(usage: Partial<Usage>): number {
-	const orchestration = usage.orchestration;
+export interface UsageBucketView {
+	totalTokens?: unknown;
+	input?: unknown;
+	output?: unknown;
+	cacheRead?: unknown;
+	cacheWrite?: unknown;
+	orchestration?: { input?: unknown; output?: unknown; cacheRead?: unknown } | null;
+}
+
+/**
+ * Total tokens for one usage payload, per the documented contract: the
+ * conversation buckets plus provider-reported orchestration tokens. A present
+ * finite provider total stays authoritative; a missing or malformed one
+ * (absent, string, NaN) is derived from the buckets, which would otherwise
+ * persist a zero total next to real token counts. Shared by ingest and the
+ * trace builder so stored and displayed totals cannot disagree.
+ */
+export function resolveUsageTotal(usage: UsageBucketView | null | undefined): number {
+	if (typeof usage?.totalTokens === "number" && Number.isFinite(usage.totalTokens)) return usage.totalTokens;
+	if (!usage || typeof usage !== "object") return 0;
+	const orchestration =
+		usage.orchestration && typeof usage.orchestration === "object" ? usage.orchestration : undefined;
 	return (
 		finiteTokenCount(usage.input) +
 		finiteTokenCount(usage.output) +
@@ -239,11 +259,8 @@ function extractStats(
 					cacheRead: finiteTokenCount(rawUsage.cacheRead),
 					cacheWrite: finiteTokenCount(rawUsage.cacheWrite),
 					// A present finite provider total stays authoritative; a missing
-					// or malformed one (absent, string, NaN) is derived below.
-					totalTokens:
-						typeof rawUsage.totalTokens === "number" && Number.isFinite(rawUsage.totalTokens)
-							? rawUsage.totalTokens
-							: sumReportedTokens(rawUsage),
+					// or malformed one (absent, string, NaN) is derived from the buckets.
+					totalTokens: resolveUsageTotal(rawUsage),
 					// An omitted `cost` must stay omitted: `resolveStoredCost` reads
 					// absence as "no recorded price" and estimates the request, while
 					// a zero would read as an explicitly free request.

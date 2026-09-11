@@ -14,7 +14,7 @@ import * as path from "node:path";
 import { getBundledModel, type GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { getSessionRollups, getToolCallCountsBySession, isScheduledCatalogModel } from "./db";
-import { extractFolderFromPath, parseAllSessionEntries } from "./parser";
+import { extractFolderFromPath, parseAllSessionEntries, resolveUsageTotal } from "./parser";
 import type {
 	SessionEntry,
 	SessionSummary,
@@ -33,7 +33,7 @@ export class TracePathError extends Error {}
  * span assembly changes so browsers don't revalidate stale cached bodies
  * against an unchanged transcript mtime.
  */
-export const TRACE_ETAG_VERSION = 2;
+export const TRACE_ETAG_VERSION = 3;
 
 const MAX_TRACK_DEPTH = 6;
 const LABEL_MAX = 80;
@@ -85,7 +85,15 @@ interface MessageView {
 	completedAt?: number;
 	duration?: number;
 	ttft?: number;
-	usage?: { totalTokens?: number; cost?: { total?: number } };
+	usage?: {
+		input?: unknown;
+		output?: unknown;
+		cacheRead?: unknown;
+		cacheWrite?: unknown;
+		totalTokens?: unknown;
+		orchestration?: { input?: unknown; output?: unknown; cacheRead?: unknown };
+		cost?: { total?: unknown };
+	};
 	model?: string;
 	provider?: string;
 	stopReason?: string;
@@ -365,9 +373,13 @@ function scanTranscript(
 			// with Costs/Recent Requests: a zero that is unknown spend, not free.
 			// Counted before the span-timing `continue` below so a fully
 			// dateless entry still surfaces as N/A rather than vanishing.
-			const totalTokens = typeof msg.usage?.totalTokens === "number" ? msg.usage.totalTokens : 0;
+			// Derive a missing total from the buckets via the shared ingest
+			// helper, so a legacy entry with tokens but no total still
+			// classifies as unpriced.
+			const totalTokens = resolveUsageTotal(msg.usage);
 			const costObj = msg.usage?.cost;
-			const costTotal = typeof costObj?.total === "number" ? costObj.total : undefined;
+			const costTotal =
+				typeof costObj?.total === "number" && Number.isFinite(costObj.total) ? costObj.total : undefined;
 			if (totalTokens > 0 && (costTotal === undefined || costTotal === 0)) {
 				const provider = typeof msg.provider === "string" ? msg.provider : "";
 				const model = typeof msg.model === "string" ? msg.model : "";
@@ -411,8 +423,9 @@ function scanTranscript(
 			if (detail) span.detail = detail;
 			if (entry.id) span.entryId = entry.id;
 			if (typeof msg.model === "string") span.model = msg.model;
-			if (typeof msg.usage?.totalTokens === "number") span.tokens = msg.usage.totalTokens;
-			if (typeof msg.usage?.cost?.total === "number") span.cost = msg.usage.cost.total;
+			if (totalTokens > 0) span.tokens = totalTokens;
+
+			if (costTotal !== undefined) span.cost = costTotal;
 			if (typeof msg.ttft === "number") span.ttft = msg.ttft;
 			if (msg.stopReason === "error" || msg.errorMessage) span.isError = true;
 			spans.push(span);
