@@ -168,16 +168,6 @@ export function createAcpPersonaModelHooks(
 	};
 	return {
 		...defaultHooks,
-		// A non-deferred enter applies its model immediately (pre-turn); any
-		// restore queued BEFORE that application is now stale (its model
-		// selector predates the persona switch — e.g. kept owed by a failed
-		// agent_end flush) and must not land at the next boundary under the
-		// freshly entered persona. Mid-turn enters take the defer channel and
-		// never reach this hook, so the transaction's own queue entry survives.
-		apply: async (agent, explicit) => {
-			await defaultHooks.apply?.(agent, explicit);
-			session.clearDeferredModelRestore?.();
-		},
 		shouldDeferModelSwitch: () => session.isStreaming,
 		deferModelSwitchWhileStreaming: agent => {
 			// Chained switches (A active, mid-turn enter of modeled B): the

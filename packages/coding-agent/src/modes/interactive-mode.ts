@@ -3244,17 +3244,29 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Apply any deferred model switch after the current stream ends. */
 	async flushPendingModelSwitch(): Promise<void> {
 		const pending = this.#pendingModelSwitch;
+		if (!pending) return;
+		const pendingWasPlan = this.#pendingPlanModelSwitch;
 		this.#pendingModelSwitch = undefined;
 		this.#pendingPlanModelSwitch = false;
-		if (!pending) return;
-		this.session.getPersonaRuntime()?.onPendingModelRestoreFlushed();
 		try {
 			await this.session.setModelTemporary(pending.model, pending.thinkingLevel);
 		} catch (error) {
+			// A persona restore (the only entry whose failure strands a cleared
+			// persona on its persona model) stays owed for the next boundary, and
+			// the runtime's parked baseline stays intact with it. A plan-role
+			// switch re-derives from settings on the next transition, so it is
+			// not re-queued — retrying a rejected switch every turn could loop.
+			if (!pendingWasPlan && !this.#pendingModelSwitch) {
+				this.#pendingModelSwitch = pending;
+			}
 			this.showWarning(
 				`Failed to switch model after streaming: ${error instanceof Error ? error.message : String(error)}`,
 			);
+			return;
 		}
+		// Consumed for real: drop the runtime's parked pre-chain baseline so a
+		// later mid-turn enter captures the live model instead of a stale value.
+		this.session.getPersonaRuntime()?.onPendingModelRestoreFlushed();
 	}
 
 	async #clearTransientModeState(options?: {
@@ -3463,6 +3475,18 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * persona, so this is a no-op.
 	 */
 	async #exitSourcePersonaForSwitch(reasonSuffix = ""): Promise<void> {
+		// A persona running UNDER an outer plan/goal mode leaves the mode's
+		// pre-mode tool snapshot holding the persona's restricted presentation.
+		// The post-switch #clearTransientModeState() would replay that
+		// SOURCE-session snapshot onto the TARGET session (and #clearTransientModeState
+		// runs even when the target has no mode, because the live flags still say
+		// plan/goal until then), leaking the source persona's tool restrictions
+		// onto a plain target — and out of a later target-persona exit. The mode
+		// itself is torn down after the switch; only its stale source snapshot is
+		// discarded here, so the restore step is skipped and the target's own
+		// active set survives.
+		this.#planModePreviousToolPresentation = undefined;
+		this.#goalModePreviousTools = undefined;
 		const runtime = this.session.getPersonaRuntime();
 		if (!runtime?.policy.isPersonaActive()) return;
 		try {

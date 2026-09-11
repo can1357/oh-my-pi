@@ -242,6 +242,22 @@ export async function reconcileSessionPersona(
 			// it). The clear marker lands only after teardown succeeds.
 			if (runtime.policy.isPersonaActive()) {
 				await runtime.reconcile(undefined, hooks.buildHooks(session));
+			} else if (desired.baseline) {
+				// Cold resume (or branch into a plain-mode prefix): session
+				// restoration already selected the persona's LAST model/thinking,
+				// and there is no active runtime to exit — without adopting the
+				// journal's recorded pre-persona baseline here, the notice says
+				// "resumed without it" while the session stays on the deleted
+				// persona's model permanently.
+				const baseline = deserializePersonaBaseline(session, desired.baseline);
+				if (baseline.model) {
+					await session.setModelTemporary(baseline.model, baseline.thinkingLevel).catch(error => {
+						logger.warn("Failed to restore persisted baseline for a gone persona", {
+							sessionId: session.sessionId,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					});
+				}
 			}
 			session.sessionManager.appendModeChange("none");
 			logger.warn(`Session persona "${desired.name}" is no longer available; resuming without it`, {
@@ -254,6 +270,15 @@ export async function reconcileSessionPersona(
 		// are persona-produced, so re-capturing them would make a later exit
 		// restore the persona model.
 		const baselineOverride = desired.baseline ? deserializePersonaBaseline(session, desired.baseline) : undefined;
+		// Durable CLI ceiling: `explicit.tools` is only ever recorded FROM a CLI
+		// `--tools`/`--no-tools` grant (every enter path serializes policy.cliGrant
+		// there). On resume WITHOUT the flag the fresh policy has cliGrant=null, so
+		// reinstall the persisted grant as the session baseline BEFORE entering:
+		// exiting this persona, or switching to another, must not silently widen
+		// past a ceiling the original launch imposed.
+		if (desired.explicit?.tools && !runtime.policy.cliGrant) {
+			runtime.policy.setCliGrant(desired.explicit.tools);
+		}
 		// fvInv double-enter guard: the CLI `--agent X --resume` launch seam
 		// (sdk.ts) already entered the same persona during construction with the
 		// same explicit overrides and the journal's baseline — a second

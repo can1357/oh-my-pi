@@ -249,15 +249,30 @@ export class PersonaRuntime {
 		baselineOverride?: ModelOverrideState,
 	): Promise<void> {
 		this.session.clearInheritedProviderPromptCacheKey();
+		// A non-deferred (pre-turn) enter supersedes any session-level deferred
+		// restore still queued from a FAILED agent_end flush (the ACP headless
+		// channel): the live model is still the previous persona's because the
+		// restore never landed, so capturing it would strand the new persona's
+		// exit on the old persona's model. Adopt the owed baseline into the
+		// capture below, then drop the superseded queue entry so the next
+		// boundary cannot apply it mid-persona. A mid-turn (deferred) enter
+		// takes the #deferredExitBaseline channel instead and leaves the queue
+		// untouched for its transaction.
+		const owed = deferModel || this.#activeBaseline ? undefined : this.session.getDeferredModelRestore?.();
+		if (owed?.model) this.session.clearDeferredModelRestore?.();
 		// Capture pre-persona baseline if not already active (or overridden on resume)
 		if (!this.#activeBaseline) {
 			const deferred = deferModel ? this.#deferredExitBaseline : undefined;
 			this.#deferredExitBaseline = undefined;
-			this.#activeBaseline = baselineOverride ??
-				deferred ?? {
-					model: this.session.model,
-					thinkingLevel: this.session.configuredThinkingLevel(),
-				};
+			this.#activeBaseline =
+				baselineOverride ??
+				deferred ??
+				(owed?.model
+					? { model: owed.model, thinkingLevel: owed.thinkingLevel }
+					: {
+							model: this.session.model,
+							thinkingLevel: this.session.configuredThinkingLevel(),
+						});
 		}
 		if (!this.#activePresentationSnapshot) {
 			this.#activePresentationSnapshot = {

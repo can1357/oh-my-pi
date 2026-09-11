@@ -686,42 +686,53 @@ describe("ACP persona reconciliation", () => {
 		expect(queued?.model).toBe(personaModel);
 	});
 
-	// A retained-after-failure restore (flushDeferredModelRestore keeps the slot
-	// owed when the model application rejects) is superseded by the NEXT
-	// successful persona enter: its model applies immediately, and flushing the
-	// older queued selector at the next agent_end would drop the session off the
-	// newly entered persona. The hooks' apply channel therefore clears the slot.
-	it("successful persona enter clears a stale owed restore", async () => {
-		let cleared = 0;
-		let queued: { model: Model; thinkingLevel: ConfiguredThinkingLevel | undefined } | undefined;
-		const target = {
-			isStreaming: false,
-			model: undefined,
-			settings: Settings.isolated(),
-			modelRegistry: { getAvailable: () => [] },
-			setModel: async () => {},
-			setThinkingLevel: () => {},
-			queueDeferredModelRestore: (model: Model, thinkingLevel?: ConfiguredThinkingLevel) => {
-				queued = { model, thinkingLevel };
-			},
-			clearDeferredModelRestore: () => {
-				cleared += 1;
-				queued = undefined;
-			},
-			getDeferredModelRestore: () => queued,
-		} as unknown as AgentSession;
-		const hooks = createAcpPersonaModelHooks(target, async () => {});
-		await hooks.apply({
-			name: "acp-enter",
-			description: "",
-			systemPrompt: "prompt",
-			source: "bundled",
-		} as DiscoveredAgent);
-		expect(cleared).toBe(1);
+	// Codex R3-5: a queued restore that survives a FAILED agent_end flush must
+	// be ADOPTED by the next pre-turn persona enter — #enterInner would capture
+	// the live model (still the old persona's, because the restore never
+	// landed), and blanket-clearing the slot would delete the only copy of the
+	// true base. The runtime seam owns adopt+clear so every headless surface
+	// gets it: enter(B) baselines on the owed pre-persona model, and the
+	// superseded queue entry is dropped (no mid-persona flush).
+	it("pre-turn enter adopts a failed flush's owed baseline and clears it", async () => {
+		const harness = await createPersonaHarness();
+		const session = new PersonaStubSession(harness.cwd);
+		harness.sessions.push(session);
+		const trueBase = { id: "true-base" } as Model;
+		let queued: { model: Model; thinkingLevel: ConfiguredThinkingLevel | undefined } | undefined = {
+			model: trueBase,
+			thinkingLevel: undefined,
+		};
+		session.setModel = (async () => {}) as typeof session.setModel;
+		const target = session as unknown as AgentSession & Record<string, unknown>;
+		target.getDeferredModelRestore = () => queued;
+		target.clearDeferredModelRestore = () => {
+			queued = undefined;
+		};
+		// Pre-turn: the live model is the OLD persona's (the flush failed).
+		session.stub.model = { id: "old-persona-model" } as never;
+		const runtime = new PersonaRuntime(session.getToolPolicy()!, target as AgentSession);
+		session.setPersonaRuntime(runtime);
+		runtime.policy.enterPersona(
+			{ name: "old", description: "", systemPrompt: "", source: "bundled", tools: ["read"] } as DiscoveredAgent,
+			{},
+		);
+		runtime.policy.exitPersona();
 
-		// Mid-turn enters take the defer channel instead; apply never runs there.
-		const streaming = createAcpPersonaModelHooks({ isStreaming: true } as unknown as AgentSession, async () => {});
-		expect(streaming.shouldDeferModelSwitch?.()).toBe(true);
+		await runtime.enter(
+			{
+				name: "next",
+				description: "",
+				systemPrompt: "next prompt",
+				source: "bundled",
+				tools: ["read"],
+			} as DiscoveredAgent,
+			{},
+			{ apply: async () => {} },
+		);
+		// The new persona's exit baseline is the TRUE base, not the stale live
+		// old-persona model, and the superseded queue entry is gone.
+		expect(runtime.getActiveBaseline()?.model).toBe(trueBase);
+		expect(queued).toBeUndefined();
 	});
 
 	it("failed ACP transaction restores the prior deferred entry instead of clearing", async () => {

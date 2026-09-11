@@ -50,9 +50,11 @@ function spawnsUsable(spawns: string[] | "*"): boolean {
 }
 
 export class SessionToolPolicy {
-	// Durable at construction
+	// Durable at construction; re-installable from a resumed journal's recorded
+	// ceiling (setCliGrant) so a persisted persona's CLI grant keeps bounding
+	// the session after resume-without-the-flag.
 	/** From options.toolNames; null = no CLI grant. */
-	readonly cliGrant: ReadonlySet<string> | null;
+	cliGrant: ReadonlySet<string> | null;
 	/** options.lspReadOnly ?? restrictToolNames (preserves restricted-session default). */
 	readonly cliLspReadOnly: boolean;
 
@@ -97,6 +99,19 @@ export class SessionToolPolicy {
 		this.#isDefaultActive = options.isDefaultActive;
 		this.#persona = null;
 		this.#sessionToggles = new Map();
+	}
+
+	/**
+	 * Reinstall the CLI ceiling from a resumed journal's persisted persona entry
+	 * when the launch carried no `--tools` flag (the durable grant would
+	 * otherwise survive only inside the current persona: exit, or a switch to
+	 * another persona, would silently widen back past the ceiling). Replaces
+	 * null-to-set only — a live grant (fresh CLI flag or prior install) stays
+	 * authoritative. Normalizes through the same path as construction.
+	 */
+	setCliGrant(toolNames: readonly string[]): void {
+		if (this.cliGrant !== null) return;
+		this.cliGrant = new Set(normalizeToolNames(toolNames));
 	}
 
 	// Pure derivations — every read recomputes; no caching; no side effects

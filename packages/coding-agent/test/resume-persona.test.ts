@@ -684,6 +684,48 @@ You are the fixture thinker persona.`,
 		expect(switchThinking).toBe("low" as ConfiguredThinkingLevel);
 	});
 
+	// Regression (Codex P2, TUI parity with the ACP flush fix): when the
+	// turn-end flush's setModelTemporary REJECTS (extension model-change hook,
+	// provider reset), the queued persona restore must stay owed — clearing it
+	// up front strands a persona the user already exited on its persona model
+	// with nothing left to restore. A later boundary must still land it.
+	it("failed TUI flush keeps the persona restore queued for the next boundary", async () => {
+		await writeFixtureAgent(
+			`---
+name: fixture-modeled-retry
+description: Modeled persona
+tools:
+  - read
+model:
+  - anthropic/claude-opus-4-5
+---
+
+You are the retry persona.`,
+			"fixture-modeled-retry.md",
+		);
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+
+		// Mid-turn enter: the persona model switch defers into #pendingModelSwitch.
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => true });
+		const flushSpy = vi.spyOn(liveSession, "setModelTemporary");
+		flushSpy.mockRejectedValueOnce(new Error("extension hook veto"));
+		await created.switchAgentPersona("fixture-modeled-retry");
+
+		// Turn ends; the flush attempts the apply once and it FAILS.
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => false });
+		await created.flushPendingModelSwitch();
+		expect(flushSpy).toHaveBeenCalledTimes(1);
+		expect(liveSession.model?.id).not.toBe("claude-opus-4-5"); // never applied
+
+		// The entry stayed owed: the next boundary lands it.
+		flushSpy.mockRestore();
+		await created.flushPendingModelSwitch();
+		expect(liveSession.model?.id).toBe("claude-opus-4-5");
+	});
+
 	// Regression (Codex P2): chained mid-turn switch. Persona A enters during a
 	// turn — its model switch is QUEUED in #pendingModelSwitch. The user then
 	// switches to B in the same turn; B's apply fails (refresh throws), so the
@@ -794,6 +836,151 @@ You are the modeled fixture persona.`,
 		await resumed.exitAgentPersona();
 		expect(resumedSession.model?.id).toBe("claude-sonnet-4-5");
 		await resumedSession.dispose();
+	});
+
+	// Codex R3-2 (P1): a session launched `--tools read` persists that ceiling
+	// in the persona entry's `explicit.tools`. Resuming WITHOUT the flag must
+	// reinstall it as the session baseline — otherwise bare `/agent` exit (or a
+	// switch to a wider persona) restores/derives from cliGrant=null and
+	// silently enables write past the launch ceiling.
+	it("resume reinstalls the persisted --tools ceiling across persona changes", async () => {
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		await writeFixtureAgent(READER_AGENT_MD);
+		await writeFixtureAgent(
+			`---
+name: fixture-wide
+description: Wide fixture persona
+tools:
+  - read
+  - write
+---
+
+You are the wide fixture persona.`,
+			"fixture-wide.md",
+		);
+		// Launch with the CLI ceiling, then enter the persona (serializes
+		// explicit.tools = the ceiling into the journal).
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+		liveSession.getToolPolicy()!.setCliGrant(["read"]);
+		await created.switchAgentPersona("fixture-reader");
+		expect(liveSession.getPersonaRuntime()!.policy.effective("write")).toBe(false);
+
+		await manager.ensureOnDisk();
+		await manager.flush();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		await created.stop();
+		await liveSession.dispose();
+
+		// Resume with NO --tools flag: a fresh null-grant policy + the journal.
+		const resumedManager = await SessionManager.open(sessionFile, path.join(tempDir.path(), "sessions"));
+		const resumedSession = createSession(resumedManager);
+		const resumed = spyStatus(createMode(resumedSession));
+		await resumed.init({ suppressWelcomeIntro: true });
+		const policy = resumedSession.getPersonaRuntime()!.policy;
+		expect(policy.isPersonaActive()).toBe(true);
+		// Baseline ceiling reinstalled (not just the persona grant).
+		expect([...(policy.cliGrant ?? [])]).toEqual(["read"]);
+		// Bare exit: the ceiling survives (previously reverted to unrestricted).
+		await resumed.exitAgentPersona();
+		expect(policy.effective("write")).toBe(false);
+		// Switch to a wider persona: its grant intersects the ceiling.
+		await resumed.switchAgentPersona("fixture-wide");
+		expect(policy.effective("read")).toBe(true);
+		expect(policy.effective("write")).toBe(false);
+		await resumedSession.dispose();
+	});
+
+	// Codex R3-3: cold resume of a journal whose persona was DELETED leaves no
+	// live runtime to exit; session restoration has already landed on the
+	// persona's last model. The gone branch must adopt the journal's recorded
+	// pre-persona baseline before appending the clear marker, or the session
+	// stays on the deleted persona's model permanently while claiming it
+	// resumed without it.
+	it("gone persona on cold resume restores its persisted baseline model", async () => {
+		const sonnet = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const opus = getBundledModel("anthropic", "claude-opus-4-5")!;
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		manager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+		manager.appendModeChange("agent", {
+			name: "no-such-persona",
+			baseline: { model: `${sonnet.provider}/${sonnet.id}` },
+		});
+		// The persona's model applied at enter time — recorded like the real flow.
+		manager.appendModelChange(`${opus.provider}/${opus.id}`, "default");
+		await manager.ensureOnDisk();
+		await manager.flush();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		await manager.close();
+
+		const resumedManager = await SessionManager.open(sessionFile, path.join(tempDir.path(), "sessions"));
+		const resumedSession = createSession(resumedManager);
+		// The real resume flow lands on the journal's LAST model_change (the
+		// persona's opus) during construction; replay that before reconciling.
+		await resumedSession.setModelTemporary(opus, undefined, { ephemeral: true });
+		const resumed = spyStatus(createMode(resumedSession));
+		await resumed.init({ suppressWelcomeIntro: true });
+		// Restored onto the persona model, then pulled back to the baseline —
+		// not left stranded on opus.
+		expect(resumedSession.model?.id).toBe("claude-sonnet-4-5");
+		expect(statusMessages.some(message => message.includes("no longer available"))).toBe(true);
+		await resumedSession.dispose();
+	});
+
+	// Codex R3-4: a persona resumed UNDER plan mode leaves the plan snapshot
+	// holding the persona's restricted presentation. The forced session switch
+	// exits the persona pre-switch; the post-switch #clearTransientModeState
+	// would then replay that SOURCE snapshot onto the TARGET, restricting a
+	// plain target with the source persona's tool set. The switch must discard
+	// the source-mode snapshot instead.
+	it("switch discards source plan-mode tool snapshot when exiting its persona", async () => {
+		// Source journal: persona entry (definition exists), then a transparent
+		// plan mode entry.
+		const personaTarget = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		personaTarget.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+		personaTarget.appendModeChange("agent", { name: "fixture-reader" });
+		// Transparent plan-mode entry AFTER the persona (persona stays active
+		// underneath; resume enters plan after reconciling the persona).
+		personaTarget.appendModeChange("plan", {
+			planFilePath:
+				"/home/slava/.omp/agent/sessions/-aiexp-oh-my-pi/2026-09-11T10-54-25-254Z_01a0901a-b7e6-7767-bff5-c5badda70564/local/PLAN.md",
+		});
+		await personaTarget.ensureOnDisk();
+		await personaTarget.flush();
+		const personaFile = personaTarget.getSessionFile();
+		if (!personaFile) throw new Error("Expected session file");
+		await personaTarget.close();
+
+		const plainTarget = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		plainTarget.appendMessage({ role: "user", content: "plain", timestamp: Date.now() });
+		await plainTarget.ensureOnDisk();
+		await plainTarget.flush();
+		const plainFile = plainTarget.getSessionFile();
+		if (!plainFile) throw new Error("Expected session file");
+		await plainTarget.close();
+
+		await writeFixtureAgent(READER_AGENT_MD);
+
+		const sourceManager = await SessionManager.open(personaFile, path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(sourceManager);
+		// plan.enabled lets the restored plan entry re-enter; it happens AFTER
+		// the persona reconcile, so the plan snapshot captures the
+		// persona-narrowed presentation.
+		liveSession.settings.set("plan.enabled", true);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+		expect(created.planModeEnabled).toBe(true);
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
+
+		const switched = await liveSession.switchSession(plainFile);
+		expect(switched).toBe(true);
+		// The plain target keeps its unrestricted set: the source persona's
+		// snapshot must not be replayed onto it.
+		expect(liveSession.getActiveToolNames()).toContain("write");
+		await created.stop();
 	});
 
 	it("headless switchSession to a persona session re-enters the target persona (j2n)", async () => {
