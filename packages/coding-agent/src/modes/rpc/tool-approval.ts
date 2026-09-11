@@ -228,6 +228,26 @@ function isSensitiveInputKey(rawKey: string): boolean {
 	);
 }
 
+function sanitizeEnvironment(
+	value: Record<string, unknown>,
+	state: SanitizeState,
+	field: string,
+	depth: number,
+): RpcToolApprovalValue {
+	if (depth >= RPC_TOOL_APPROVAL_MAX_DEPTH || state.remainingNodes <= 0) {
+		markField(state.truncatedFields, field);
+		return TRUNCATED_VALUE;
+	}
+	state.remainingNodes--;
+	const entries = Object.keys(value)
+		.slice(0, RPC_TOOL_APPROVAL_MAX_COLLECTION_ITEMS)
+		.map(envKey => [takeInputString(envKey, state, field, 128), REDACTED_VALUE] as const)
+		.filter(([envKey]) => envKey.length > 0);
+	if (entries.length < Object.keys(value).length) markField(state.truncatedFields, field);
+	markField(state.redactedFields, field);
+	return Object.fromEntries(entries);
+}
+
 function sanitizeValue(value: unknown, state: SanitizeState, depth: number, field: string): RpcToolApprovalValue {
 	if (state.remainingNodes <= 0) {
 		markField(state.truncatedFields, field);
@@ -273,13 +293,7 @@ function sanitizeValue(value: unknown, state: SanitizeState, depth: number, fiel
 				state.remainingBytes = Math.max(0, state.remainingBytes - byteLength(REDACTED_VALUE));
 				entries.push([key, REDACTED_VALUE]);
 			} else if (rawKey.toLowerCase() === "env" && isRecord(child)) {
-				const envEntries = Object.keys(child)
-					.slice(0, RPC_TOOL_APPROVAL_MAX_COLLECTION_ITEMS)
-					.map(envKey => [takeInputString(envKey, state, field, 128), REDACTED_VALUE] as const)
-					.filter(([envKey]) => envKey.length > 0);
-				if (envEntries.length < Object.keys(child).length) markField(state.truncatedFields, field);
-				markField(state.redactedFields, field);
-				entries.push([key, Object.fromEntries(envEntries)]);
+				entries.push([key, sanitizeEnvironment(child, state, field, depth + 1)]);
 			} else {
 				entries.push([key, sanitizeValue(child, state, depth + 1, field)]);
 			}
@@ -308,15 +322,7 @@ function sanitizeInput(value: unknown, state: SanitizeState): { [key: string]: R
 			continue;
 		}
 		if (rawKey.toLowerCase() === "env" && isRecord(child)) {
-			const env = Object.fromEntries(
-				Object.keys(child)
-					.slice(0, RPC_TOOL_APPROVAL_MAX_COLLECTION_ITEMS)
-					.map(envKey => [takeInputString(envKey, state, field, 128), REDACTED_VALUE])
-					.filter(([envKey]) => envKey.length > 0),
-			);
-			if (Object.keys(env).length < Object.keys(child).length) markField(state.truncatedFields, field);
-			markField(state.redactedFields, field);
-			entries.push([key, env]);
+			entries.push([key, sanitizeEnvironment(child, state, field, 1)]);
 			continue;
 		}
 		entries.push([key, sanitizeValue(child, state, 1, field)]);

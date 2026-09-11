@@ -85,6 +85,24 @@ describe("RPC tool approvals", () => {
 		expect(request.detail.truncatedFields).toContain("input.nested");
 	});
 
+	test("depth-guards nested env before applying its redaction special case", () => {
+		const request = buildRpcToolApprovalRequest("deep-env", {
+			...shellApproval,
+			input: {
+				nested: { a: { b: { env: { PATH: "/bin" } } } },
+				inDepth: { env: { PATH: "/usr/bin" } },
+			},
+		});
+
+		expect(isRpcToolApprovalRequest(request)).toBe(true);
+		expect(request.input).toEqual({
+			nested: { a: { b: { env: "[truncated]" } } },
+			inDepth: { env: { PATH: "[redacted]" } },
+		});
+		expect(request.detail.truncatedFields).toContain("input.nested");
+		expect(request.detail.redactedFields).toContain("input.inDepth");
+	});
+
 	test("derives long apply-patch and hashline paths from structured edit inspection", () => {
 		const session: ToolSession = {
 			cwd: ".",
