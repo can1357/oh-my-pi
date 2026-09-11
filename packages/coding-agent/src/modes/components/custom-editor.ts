@@ -1158,24 +1158,29 @@ export class CustomEditor extends Editor {
 
 			// Intercept configured exit shortcut. When the key doubles as
 			// forward-delete (readline ^D: the default app.exit binding overlaps
-			// tui.editor.deleteCharForward) and the buffer is non-empty, fall
-			// through to the parent handler so it deletes the character at the
-			// cursor instead of quitting. Only an empty buffer exits; firing
-			// onExit is the controller's chance to snapshot the current text as
-			// a draft before shutting down. Exit keys with no forward-delete
-			// role always exit. Draft presence is read off the buffer alone:
-			// attachments live as inline chip tokens, while `pendingImages` /
-			// `pendingTexts` intentionally retain deleted records so numbering
-			// isn't recycled (see composerChips) — trusting them would make
-			// Ctrl+D a permanent no-op after the last chip is deleted.
+			// tui.editor.deleteCharForward) and the buffer is non-empty, hand it
+			// straight to the base editor so it deletes the character at the
+			// cursor instead of quitting. Routing directly (rather than falling
+			// through) keeps the exit chord's precedence slot: a later app action
+			// or extension handler that a user also bound to the same chord must
+			// not steal the keystroke, exactly as it could not steal the exit
+			// before. Only an empty buffer exits; firing onExit is the
+			// controller's chance to snapshot the current text as a draft before
+			// shutting down. Exit keys with no forward-delete role always exit.
+			// Draft presence is read off the buffer alone: attachments live as
+			// inline chip tokens, while `pendingImages` / `pendingTexts`
+			// intentionally retain deleted records so numbering isn't recycled
+			// (see composerChips) — trusting them would make Ctrl+D a permanent
+			// no-op after the last chip is deleted.
 			if (this.#matchesAction(canonical, "app.exit")) {
 				const doublesAsForwardDelete =
 					canonical !== undefined && getKeybindings().matchesCanonical(canonical, "tui.editor.deleteCharForward");
-				const hasDraft = !this.textEquals("");
-				if (!(doublesAsForwardDelete && hasDraft)) {
-					this.onExit?.();
+				if (doublesAsForwardDelete && !this.textEquals("")) {
+					super.handleInput(data);
 					return;
 				}
+				this.onExit?.();
+				return;
 			}
 
 			// Intercept configured dequeue shortcut (restore queued message to editor)

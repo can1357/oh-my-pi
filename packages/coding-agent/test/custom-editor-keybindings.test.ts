@@ -106,6 +106,27 @@ describe("CustomEditor keybindings", () => {
 		expect(onExit).toHaveBeenCalledTimes(1);
 	});
 
+	it("keeps the exit chord's precedence when forward-deleting: later handlers on the same chord do not fire", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onExit = vi.fn();
+		const onDequeue = vi.fn();
+		const customHandler = vi.fn();
+		editor.onExit = onExit;
+		editor.onDequeue = onDequeue;
+		// A later app action and an extension handler both user-bound to Ctrl+D while
+		// the default exit binding stays; KeybindingsManager only flags clashes between
+		// explicit user claims, so this configuration is reachable.
+		editor.setActionKeys("app.message.dequeue", ["ctrl+d"]);
+		editor.setCustomKeyHandler("ctrl+d", customHandler);
+		editor.setText("ab");
+		editor.moveToLineStart();
+		editor.handleInput("\x04"); // Ctrl+D
+		expect(editor.getText()).toBe("b");
+		expect(onExit).not.toHaveBeenCalled();
+		expect(onDequeue).not.toHaveBeenCalled();
+		expect(customHandler).not.toHaveBeenCalled();
+	});
+
 	it("still exits on a remapped exit key with no forward-delete role, even with text", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		editor.setActionKeys("app.exit", ["ctrl+q"]);

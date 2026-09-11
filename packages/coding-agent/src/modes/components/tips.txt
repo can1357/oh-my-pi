@@ -1,7 +1,7 @@
 Tired of typing "keep going"? Just send a '.'
 You can /btw to ask a side question
 Use /tan to fork the current conversation into a background agent
-Ctrl+D deletes the character under the cursor instead of quitting your draft — see /hotkeys for your exit key
+With default keybindings, Ctrl+D deletes the character under the cursor instead of quitting your draft — see /hotkeys for your exit key
 Find out which model you emotionally abuse the most with `omp stats`
 Try task isolation to create CoW worktrees
 Need a cheap nested model call? Use `completion(x...)`. Have a big batch of tasks? Ask clanker to use it!
