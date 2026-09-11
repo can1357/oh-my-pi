@@ -493,7 +493,17 @@ export const SETTINGS_SCHEMA = {
 	// a sibling account on a rate limit still applies — this only sets which
 	// account a fresh session starts from. Unset, unmatched, or ambiguous
 	// selectors are ignored (falls back to the normal ranked/round-robin pick).
-	"auth.startupOAuthAccount": { type: "record", default: EMPTY_STRING_RECORD },
+	"auth.startupOAuthAccount": {
+		type: "record",
+		default: EMPTY_STRING_RECORD,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Startup OAuth Account",
+			description:
+				'Per-provider default OAuth account to pin at session start, keyed by provider id (e.g. "anthropic"). Value is a stored account selector: 1-based position, email, account id, org id, or org name — same as `/session pin`. A rate limit on the pinned account still fails over to a sibling automatically.',
+		},
+	},
 
 	autoResume: {
 		type: "boolean",
