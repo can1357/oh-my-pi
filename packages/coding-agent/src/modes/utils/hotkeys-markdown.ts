@@ -1,7 +1,8 @@
+import { canonicalKeyId } from "@oh-my-pi/pi-tui";
 import { type AppKeybinding, type KeybindingsManager, keyHintPlatform, modifierLabel } from "../../config/keybindings";
 
 export interface HotkeysMarkdownBindings {
-	keybindings: Pick<KeybindingsManager, "getDisplayString">;
+	keybindings: Pick<KeybindingsManager, "getDisplayString" | "getKeys" | "matchesCanonical">;
 }
 
 function appKey(bindings: HotkeysMarkdownBindings, action: AppKeybinding): string {
@@ -13,6 +14,13 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 	const isMac = platform === "darwin";
 	const alt = modifierLabel("alt", platform);
 	const cmd = modifierLabel("super", platform);
+	// Does the configured exit chord also carry the editor's forward-delete role? That readline
+	// `^D` overlap is what makes CustomEditor delete instead of exiting while the prompt holds a
+	// draft; a remapped exit key without the role (or Ctrl+D dropped from deleteCharForward)
+	// always exits, so the two configurations need different descriptions.
+	const exitDeletesForward = bindings.keybindings
+		.getKeys("app.exit")
+		.some(key => bindings.keybindings.matchesCanonical(canonicalKeyId(key), "tui.editor.deleteCharForward"));
 	return [
 		"**Navigation**",
 		"| Key | Action |",
@@ -39,7 +47,7 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		"| `Tab` | Path completion / accept autocomplete |",
 		`| \`${appKey(bindings, "app.interrupt")}\` | Cancel autocomplete / interrupt active work |`,
 		`| \`${appKey(bindings, "app.clear")}\` | Clear editor (first) / exit (second) |`,
-		`| \`${appKey(bindings, "app.exit")}\` | Delete char forward (with draft) / exit (empty prompt) |`,
+		`| \`${appKey(bindings, "app.exit")}\` | ${exitDeletesForward ? "Delete char forward (with draft) / exit (empty prompt)" : "Exit"} |`,
 		`| \`${appKey(bindings, "app.suspend")}\` | Suspend to background |`,
 		`| \`${appKey(bindings, "app.display.reset")}\` | Reset terminal display |`,
 		`| \`${appKey(bindings, "app.thinking.cycle")}\` | Cycle thinking level |`,

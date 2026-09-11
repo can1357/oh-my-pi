@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { setKeyHintPlatform } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import { KeybindingsManager, setKeyHintPlatform } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { buildHotkeysMarkdown } from "@oh-my-pi/pi-coding-agent/modes/utils/hotkeys-markdown";
+
+/** Exit-row wiring for stubs that only care about display strings: no key claims the
+ *  forward-delete role, so the exit row renders its plain "Exit" wording. */
+const noForwardDelete = { getKeys: () => [], matchesCanonical: () => false };
 
 describe("buildHotkeysMarkdown", () => {
 	afterEach(() => setKeyHintPlatform(undefined));
@@ -32,6 +36,7 @@ describe("buildHotkeysMarkdown", () => {
 		};
 		const markdown = buildHotkeysMarkdown({
 			keybindings: {
+				...noForwardDelete,
 				getDisplayString(action) {
 					return displayStrings[action] ?? "Disabled";
 				},
@@ -60,6 +65,7 @@ describe("buildHotkeysMarkdown", () => {
 	it("renders the temporary selector row as disabled when no display string is configured", () => {
 		const markdown = buildHotkeysMarkdown({
 			keybindings: {
+				...noForwardDelete,
 				getDisplayString(action) {
 					if (action === "app.model.selectTemporary") {
 						return "";
@@ -81,7 +87,9 @@ describe("buildHotkeysMarkdown", () => {
 
 	it("renders macOS static navigation rows on darwin", () => {
 		setKeyHintPlatform("darwin");
-		const markdown = buildHotkeysMarkdown({ keybindings: { getDisplayString: () => "Disabled" } });
+		const markdown = buildHotkeysMarkdown({
+			keybindings: { ...noForwardDelete, getDisplayString: () => "Disabled" },
+		});
 
 		expect(markdown).toContain("| `Option+Left/Right` | Move by word |");
 		expect(markdown).toContain("| `Ctrl+A` / `Home` / `Cmd+Left` | Start of line |");
@@ -91,12 +99,29 @@ describe("buildHotkeysMarkdown", () => {
 
 	it("drops Option/Cmd static navigation labels off darwin", () => {
 		setKeyHintPlatform("linux");
-		const markdown = buildHotkeysMarkdown({ keybindings: { getDisplayString: () => "Disabled" } });
+		const markdown = buildHotkeysMarkdown({
+			keybindings: { ...noForwardDelete, getDisplayString: () => "Disabled" },
+		});
 
 		expect(markdown).toContain("| `Alt+Left/Right` | Move by word |");
 		expect(markdown).toContain("| `Ctrl+A` / `Home` | Start of line |");
 		expect(markdown).toContain("| `Ctrl+W` / `Alt+Backspace` | Delete word backwards |");
 		expect(markdown).not.toContain("Option+");
 		expect(markdown).not.toContain("Cmd+");
+	});
+
+	it("describes the exit key per its actual forward-delete role", () => {
+		const shipped = KeybindingsManager.inMemory();
+		expect(buildHotkeysMarkdown({ keybindings: shipped })).toContain(
+			"| `Ctrl+D` | Delete char forward (with draft) / exit (empty prompt) |",
+		);
+
+		// Remapped exit with no forward-delete role: CustomEditor exits immediately, draft or not.
+		const remapped = KeybindingsManager.inMemory({ "app.exit": "ctrl+q" });
+		expect(buildHotkeysMarkdown({ keybindings: remapped })).toContain("| `Ctrl+Q` | Exit |");
+
+		// Ctrl+D kept as exit but dropped from forward-delete: exits unconditionally again.
+		const noDelete = KeybindingsManager.inMemory({ "tui.editor.deleteCharForward": "delete" });
+		expect(buildHotkeysMarkdown({ keybindings: noDelete })).toContain("| `Ctrl+D` | Exit |");
 	});
 });
