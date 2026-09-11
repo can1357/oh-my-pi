@@ -335,14 +335,56 @@ export interface DevinModelManagerConfig {
  * Cascade catalog is credential-scoped (gated per account/team), so catalog
  * generation never fetches it: baking one account's roster into the shared
  * bundle would misstate every other account's entitlements and leave zombie
- * rows behind (see CREDENTIAL_SCOPED_PROVIDERS in generate-models.ts). Both
- * SWE-1.6 lanes are verified live against `GetCliModelConfigs`; the
- * descriptor's `defaultModel` (`swe-1-6`) must resolve synchronously at
+ * rows behind (see CREDENTIAL_SCOPED_PROVIDERS in generate-models.ts). The
+ * SWE-2 effort lanes are verified against the native Devin CLI model roster;
+ * the descriptor's `defaultModel` (`swe-2-high`) must resolve synchronously at
  * boot, before credential-scoped runtime discovery replaces the seed. Field
  * shape mirrors `devinModelSpec` so seeded and discovered rows are
  * indistinguishable downstream.
  */
 export const DEVIN_STATIC_MODELS: readonly ModelSpec<"devin-agent">[] = [
+	{
+		id: "swe-2-low",
+		name: "SWE-2 Low",
+		api: "devin-agent",
+		provider: "devin",
+		baseUrl: DEVIN_DEFAULT_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		supportsTools: true,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 128_000,
+		compat: { supportsParallelToolCalls: true },
+	},
+	{
+		id: "swe-2-high",
+		name: "SWE-2 High",
+		api: "devin-agent",
+		provider: "devin",
+		baseUrl: DEVIN_DEFAULT_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		supportsTools: true,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 128_000,
+		compat: { supportsParallelToolCalls: true },
+	},
+	{
+		id: "swe-2-max",
+		name: "SWE-2 Max",
+		api: "devin-agent",
+		provider: "devin",
+		baseUrl: DEVIN_DEFAULT_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		supportsTools: true,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 128_000,
+		compat: { supportsParallelToolCalls: true },
+	},
 	{
 		id: "swe-1-6-fast",
 		name: "SWE-1.6 Fast",

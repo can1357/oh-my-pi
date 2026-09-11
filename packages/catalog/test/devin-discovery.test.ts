@@ -200,6 +200,7 @@ const FIXTURE_CONFIGS: readonly ClientModelConfig[] = [
 		{ name: "Max" },
 	]),
 	...tiers("DeepSeek V4 Pro", "deepseek-v4-pro", [{ name: "Low" }, { name: "High", default: true }, { name: "Max" }]),
+	...tiers("SWE-2", "swe-2", [{ name: "Low" }, { name: "High", default: true }, { name: "Max" }]),
 	...tiers("Nemotron 3 Ultra", "nemotron-3-ultra", [
 		{ name: "None", uid: "nemotron-3-ultra-none" },
 		{ name: "Medium" },
@@ -493,6 +494,12 @@ describe("devin server-declared family collapsing", () => {
 			max: "deepseek-v4-flash-max",
 		});
 		expect(thinking("deepseek-v4-pro").efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(thinking("swe-2").effortRouting).toEqual({
+			low: "swe-2-low",
+			high: "swe-2-high",
+			max: "swe-2-max",
+		});
+		expect(thinking("swe-2").efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
 		// The `Max` tier's wire uid is the bare family id: the raw row is consumed.
 		expect(thinking("swe-1-7-lightning").effortRouting).toEqual({
 			medium: "swe-1-7-lightning-medium",
@@ -523,6 +530,7 @@ describe("devin server-declared family collapsing", () => {
 		expect(model("gemini-3-7-flash").requestModelId).toBe("gemini-3-7-flash-medium");
 		expect(model("grok-4-6").requestModelId).toBe("grok-4-6-medium");
 		expect(model("deepseek-v4-pro").requestModelId).toBe("deepseek-v4-pro-high");
+		expect(model("swe-2").requestModelId).toBe("swe-2-high");
 		expect(model("swe-1-7-lightning").requestModelId).toBe("swe-1-7-lightning-medium");
 		expect(model("gemini-3-7-flash").contextWindow).toBe(400_000);
 		expect(model("gemini-3-7-flash").reasoning).toBe(true);
@@ -589,12 +597,18 @@ describe("devin server-declared family collapsing", () => {
 describe("devin catalog seed", () => {
 	it("seeds both live SWE-1.6 lanes so the descriptor default resolves offline", () => {
 		const descriptor = CATALOG_PROVIDERS.find(entry => entry.id === "devin");
-		expect(descriptor?.defaultModel).toBe("swe-1-6");
-		expect(DEVIN_STATIC_MODELS.map(model => model.id)).toEqual(["swe-1-6-fast", "swe-1-6"]);
+		expect(descriptor?.defaultModel).toBe("swe-2-high");
+		expect(DEVIN_STATIC_MODELS.map(model => model.id)).toEqual([
+			"swe-2-low",
+			"swe-2-high",
+			"swe-2-max",
+			"swe-1-6-fast",
+			"swe-1-6",
+		]);
 		expect(DEVIN_STATIC_MODELS.some(model => model.id === descriptor?.defaultModel)).toBe(true);
 
 		const fast = buildModel(DEVIN_STATIC_MODELS[0] as ModelSpec<"devin-agent">);
-		expect(fast.cost).toEqual({ input: 0.3, output: 1.5, cacheRead: 0.03, cacheWrite: 0 });
+		expect(fast.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 		expect(fast.contextWindow).toBe(200_000);
 		expect(fast.maxTokens).toBe(128_000);
 		expect(fast.compat.supportsParallelToolCalls).toBe(true);
@@ -610,6 +624,9 @@ describe("devin catalog seed", () => {
 		expect(devinModelManagerOptions().staticModels).toBe(DEVIN_STATIC_MODELS);
 		const scoped = devinModelManagerOptions({ baseUrl: "https://cascade.internal" });
 		expect(scoped.staticModels?.map(model => model.baseUrl)).toEqual([
+			"https://cascade.internal",
+			"https://cascade.internal",
+			"https://cascade.internal",
 			"https://cascade.internal",
 			"https://cascade.internal",
 		]);

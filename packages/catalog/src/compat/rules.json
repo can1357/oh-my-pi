@@ -2537,6 +2537,30 @@
 				},
 				{
 					"provider": "devin",
+					"id": "swe-2",
+					"name": "SWE-2",
+					"members": [
+						"swe-2-low",
+						"swe-2-high",
+						"swe-2-max"
+					],
+					"routing": {
+						"low": "swe-2-low",
+						"high": "swe-2-high",
+						"max": "swe-2-max"
+					},
+					"mode": "effort",
+					"efforts": [
+						"low",
+						"high",
+						"max"
+					],
+					"defaultLevel": "high",
+					"requiresEffort": true,
+					"defaultMember": "swe-2-high"
+				},
+				{
+					"provider": "devin",
 					"id": "swe-1-7",
 					"name": "SWE-1.7",
 					"members": [
@@ -3176,7 +3200,7 @@
 					"haiku": "claude-haiku-4-5",
 					"opus": "claude-opus-5",
 					"sonnet": "claude-sonnet-5",
-					"swe": "swe-1-7-lightning",
+					"swe": "swe-2",
 					"claude-haiku-4.5": "claude-haiku-4-5",
 					"gemini-3.7-flash": "gemini-3-7-flash",
 					"glm-5.2": "glm-5-2",

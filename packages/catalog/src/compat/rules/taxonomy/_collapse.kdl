@@ -467,6 +467,17 @@ collapse {
 		efforts "low" "high" "max"
 		requires-effort #true
 	}
+	variant-family "devin" "swe-2" name="SWE-2" {
+		members "swe-2-low" "swe-2-high" "swe-2-max"
+		route "low" "swe-2-low"
+		route "high" "swe-2-high"
+		route "max" "swe-2-max"
+		mode "effort"
+		efforts "low" "high" "max"
+		default-level "high"
+		requires-effort #true
+		default-member "swe-2-high"
+	}
 	variant-family "devin" "swe-1-7" name="SWE-1.7" {
 		members "swe-1-7-medium" "swe-1-7"
 		route "medium" "swe-1-7-medium"
@@ -626,7 +637,7 @@ collapse {
 	provider-alias "devin" "haiku" "claude-haiku-4-5"
 	provider-alias "devin" "opus" "claude-opus-5"
 	provider-alias "devin" "sonnet" "claude-sonnet-5"
-	provider-alias "devin" "swe" "swe-1-7-lightning"
+	provider-alias "devin" "swe" "swe-2"
 	provider-alias "devin" "claude-haiku-4.5" "claude-haiku-4-5"
 	provider-alias "devin" "gemini-3.7-flash" "gemini-3-7-flash"
 	provider-alias "devin" "glm-5.2" "glm-5-2"
