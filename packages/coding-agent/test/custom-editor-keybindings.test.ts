@@ -166,6 +166,34 @@ describe("CustomEditor keybindings", () => {
 		expect(editor.getText()).toBe("Xa");
 	});
 
+	it("deletes the whole selection and leaves visual mode on ctrl+d, like the Delete key", () => {
+		// Vim maps Delete to `x`; in Visual mode that takes the selection and returns to Normal.
+		// A direct grapheme delete would instead leave the editor in Visual with a stale anchor.
+		const editor = new CustomEditor(getEditorTheme());
+		editor.setVimMode(true);
+		editor.setText("abc");
+		editor.handleInput("\x1b"); // Escape -> Normal
+		editor.moveToLineStart();
+		editor.handleInput("v"); // Visual
+		editor.handleInput("l"); // extend over "ab"
+		editor.handleInput("\x04"); // Ctrl+D
+		expect(editor.getText()).toBe("c");
+		expect(editor.vimMode).toBe("normal");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+	});
+
+	it("cancels a pending character jump on ctrl+d so the next key still types", () => {
+		// Any control key cancels jump mode in the base input chunk; the exit slot never reaches
+		// it, so the operation clears the state itself — otherwise "z" is eaten as a jump target.
+		const editor = new CustomEditor(getEditorTheme());
+		editor.setText("abc");
+		editor.moveToLineStart();
+		editor.handleInput("\x1d"); // Ctrl+] -> jump forward, awaiting a target character
+		editor.handleInput("\x04"); // Ctrl+D
+		editor.handleInput("z");
+		expect(editor.getText()).toBe("zbc");
+	});
+
 	it("still exits on a remapped exit key with no forward-delete role, even with text", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		editor.setActionKeys("app.exit", ["ctrl+q"]);

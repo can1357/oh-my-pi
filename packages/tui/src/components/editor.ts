@@ -2474,10 +2474,20 @@ export class Editor implements Component, Focusable {
 		this.#moveToMessageEnd();
 	}
 
-	/** Delete the grapheme (or whole atomic token) at the cursor, merging with the next line at
-	 *  end-of-line — the `tui.editor.deleteCharForward` operation, callable by hosts that resolve
-	 *  the chord themselves rather than redispatching the raw key. */
+	/** The `tui.editor.deleteCharForward` operation, callable by hosts that resolve the chord
+	 *  themselves rather than redispatching the raw key (see CustomEditor's exit-chord overlap).
+	 *  Mirrors what the key dispatch does for this action so the two cannot diverge: a pending
+	 *  character jump is transient state that any other key cancels, and while Vim owns the
+	 *  buffer (Normal or Visual) the operation is Vim's `x` — deleting the selection and
+	 *  returning to Normal in Visual mode, the grapheme under the cursor otherwise. Only Insert
+	 *  mode and Vim-off editors delete straight through. */
 	deleteCharForward(): void {
+		this.#jumpMode = null;
+		const vim = this.#vim;
+		if (vim !== null && vim.mode !== "insert") {
+			this.#runVimKey("x", vim);
+			return;
+		}
 		this.#handleForwardDelete();
 	}
 
