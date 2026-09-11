@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -38,7 +37,7 @@ describe("createSessionManager — --new versus the autoResume setting", () => {
 		agentDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-new-flag-"));
 		setAgentDir(agentDir);
 		cwd = path.join(agentDir, "project");
-		fs.mkdirSync(cwd, { recursive: true });
+		await fsp.mkdir(cwd, { recursive: true });
 	});
 
 	afterEach(async () => {
