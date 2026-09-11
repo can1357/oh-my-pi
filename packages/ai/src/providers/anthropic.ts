@@ -3415,11 +3415,13 @@ const streamAnthropicOnce = (
 						maxRetryDelayMs > 0
 							? Math.min(maxRetryDelayMs, CREDIBLE_RATE_LIMIT_HINT_MS)
 							: CREDIBLE_RATE_LIMIT_HINT_MS;
-					// Caller-injected SDK clients do not implement our transport's
-					// rate-limit budget. Spend the same two-attempt budget here instead.
-					const canRetryInjectedRateLimit =
+					const transportSpentRateLimitBudget =
+						transportOwnsRateLimitBudget && streamFailure instanceof AIError.AnthropicApiError;
+					// Injected SDK failures and in-band rate-limit frames bypass
+					// the built-in HTTP transport budget. Spend the same budget here.
+					const canRetryUnspentRateLimit =
 						rateLimited &&
-						!transportOwnsRateLimitBudget &&
+						!transportSpentRateLimitBudget &&
 						!AIError.isUsageLimit(streamFailure) &&
 						providerRateLimitRetries < MAX_RATE_LIMIT_ATTEMPTS - 1 &&
 						retryHintMs !== undefined &&
@@ -3429,7 +3431,7 @@ const streamAnthropicOnce = (
 						!isLocalIdleTimeout &&
 						firstTokenTime === undefined &&
 						!streamedReplayUnsafeContent &&
-						(canRetryInjectedRateLimit || AIError.isProviderRetryableError(streamFailure));
+						(canRetryUnspentRateLimit || AIError.isProviderRetryableError(streamFailure));
 					if (
 						activeAbortTracker.wasCallerAbort() ||
 						providerRetryAttempt >= PROVIDER_MAX_RETRIES ||
