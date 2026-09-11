@@ -886,9 +886,14 @@ You are the wide fixture persona.`,
 		expect(policy.isPersonaActive()).toBe(true);
 		// Baseline ceiling reinstalled (not just the persona grant).
 		expect([...(policy.cliGrant ?? [])]).toEqual(["read"]);
-		// Bare exit: the ceiling survives (previously reverted to unrestricted).
+		// Bare exit: the ceiling survives (previously reverted to unrestricted)
+		// in BOTH layers — effective() denies, and the restored PRESENTATION must
+		// not re-activate write either (the exit snapshot replays through
+		// granted(), which gates journal ceilings).
 		await resumed.exitAgentPersona();
 		expect(policy.effective("write")).toBe(false);
+		expect(resumedSession.getActiveToolNames()).not.toContain("write");
+		expect(resumedSession.getEnabledToolNames()).not.toContain("write");
 		// Switch to a wider persona: its grant intersects the ceiling.
 		await resumed.switchAgentPersona("fixture-wide");
 		expect(policy.effective("read")).toBe(true);
@@ -958,6 +963,113 @@ Beta.`,
 		await created.flushPendingModelSwitch();
 		expect(flushSpy).not.toHaveBeenCalled();
 		expect(liveSession.model?.id).toBe("claude-haiku-4-5");
+	});
+
+	// Codex R5-1: when the gone-persona baseline restore FAILS (an extension
+	// model-change hook vetoes setModelTemporary), the journal's persona entry
+	// is the only record of the baseline — clearing it (mode_change none) would
+	// strand the session on the deleted persona's model with no retry path.
+	// The failure must propagate so the outer reconcile leaves the entry intact.
+	it("gone persona keeps the journal entry when baseline restore fails", async () => {
+		const sonnet = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const opus = getBundledModel("anthropic", "claude-opus-4-5")!;
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		manager.appendMessage({ role: "user", content: "turn", timestamp: Date.now() });
+		manager.appendModeChange("agent", {
+			name: "no-such-persona",
+			baseline: { model: `${sonnet.provider}/${sonnet.id}` },
+		});
+		manager.appendModelChange(`${opus.provider}/${opus.id}`, "default");
+		await manager.ensureOnDisk();
+		await manager.flush();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		await manager.close();
+
+		const resumedManager = await SessionManager.open(sessionFile, path.join(tempDir.path(), "sessions"));
+		const resumedSession = createSession(resumedManager);
+		await resumedSession.setModelTemporary(opus, undefined, { ephemeral: true });
+		const veto = vi.spyOn(resumedSession, "setModelTemporary").mockRejectedValue(new Error("hook veto"));
+		const resumed = spyStatus(createMode(resumedSession));
+		await resumed.init({ suppressWelcomeIntro: true });
+		veto.mockRestore();
+
+		// Entry retained (no clear marker) so the next resume retries.
+		const modes = resumedSession.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "mode_change")
+			.map(entry => entry as { mode: string });
+		expect(modes.at(-1)?.mode).toBe("agent");
+	});
+
+	// Codex R5-2: a baseline whose MODEL dropped out of the registry degrades to
+	// undefined but its recorded thinking level is still restorable; the gone
+	// branch must apply the thinking half instead of skipping the restore.
+	it("gone persona restores thinking when its baseline model is gone", async () => {
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		manager.appendMessage({ role: "user", content: "turn", timestamp: Date.now() });
+		manager.appendModeChange("agent", {
+			name: "no-such-persona",
+			baseline: { model: "anthropic/claude-vanished-9", thinkingLevel: "high" },
+		});
+		await manager.ensureOnDisk();
+		await manager.flush();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		await manager.close();
+
+		const resumedManager = await SessionManager.open(sessionFile, path.join(tempDir.path(), "sessions"));
+		const resumedSession = createSession(resumedManager);
+		const spy = vi.spyOn(resumedSession, "setModelTemporary");
+		const resumed = spyStatus(createMode(resumedSession));
+		await resumed.init({ suppressWelcomeIntro: true });
+		// thinking-only apply (live model preserved), and the clear marker lands.
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0]?.[1]).toBe(Effort.High);
+		expect(resumedSession.configuredThinkingLevel()).toBe(Effort.High);
+		expect(resumedSession.model?.id).toBe("claude-sonnet-4-5");
+		await resumedSession.dispose();
+	});
+
+	// Codex R5-4: a resumed `agent -> plan` journal activates BOTH the persona
+	// and plan mode. /agent refuses under an active plan, so /plan's exit
+	// branches must run BEFORE the persona entry guard — guarding them too
+	// deadlocks the user in both states with no command able to unwind either.
+	it("/plan exits a transparent resumed plan under an active persona", async () => {
+		await writeFixtureAgent(READER_AGENT_MD);
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		manager.appendMessage({ role: "user", content: "turn", timestamp: Date.now() });
+		manager.appendModeChange("agent", { name: "fixture-reader" });
+		manager.appendModeChange("plan", { planFilePath: "local:///PLAN.md" });
+		await manager.ensureOnDisk();
+		await manager.flush();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		await manager.close();
+
+		const resumedManager = await SessionManager.open(sessionFile, path.join(tempDir.path(), "sessions"));
+		const resumedSession = createSession(resumedManager);
+		resumedSession.settings.set("plan.enabled", true);
+		const resumed = spyStatus(createMode(resumedSession));
+		await resumed.init({ suppressWelcomeIntro: true });
+		expect(resumedSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
+		expect(resumed.planModeEnabled).toBe(true);
+
+		// /plan's first toggle PAUSES the mode even with the persona active
+		// (pre-fix the persona guard blocked the exit branches entirely, so
+		// neither /plan nor /agent could unwind anything — a hard deadlock).
+		await resumed.handlePlanModeCommand();
+		expect(resumed.planModeEnabled).toBe(false);
+		expect(resumed.planModePaused).toBe(true);
+		expect(resumedSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
+		// Second toggle clears the paused flag; then the persona exit is
+		// available too (no deadlock in either direction).
+		await resumed.handlePlanModeCommand();
+		expect(resumed.planModePaused).toBe(false);
+		await resumed.exitAgentPersona();
+		expect(resumedSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
+		expect(resumedSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
+		await resumedSession.dispose();
 	});
 
 	// Review R4-C: a journal-reinstalled ceiling must not outlive its carrier

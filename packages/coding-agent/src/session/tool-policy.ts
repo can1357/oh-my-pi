@@ -150,6 +150,12 @@ export class SessionToolPolicy {
 	 * ON (the toggles layer answers "on by default", not "may it run").
 	 */
 	granted(name: string): boolean {
+		// A journal-reinstalled CLI ceiling IS a filesystem grant — unlike the
+		// live `--tools` flag's legacy presentation bypass, the persona system's
+		// durable record must gate the presentation funnel too, or a persona
+		// exit's snapshot replay (`setActiveToolPresentation` filters through
+		// here) re-activates `write`/`bash` that `effective()` denies.
+		if (this.#cliGrantSource === "journal" && this.cliGrant && !this.cliGrant.has(name)) return false;
 		if (this.#persona === null) return true;
 		return (
 			(this.#persona.grant === null || this.#persona.grant.has(name)) &&

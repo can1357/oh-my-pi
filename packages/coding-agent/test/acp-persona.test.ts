@@ -860,6 +860,35 @@ describe("ACP persona reconciliation", () => {
 		expect(entry?.data.name).toBe("acp-testa");
 	});
 
+	// Codex R5-5: an ACP load of an `agent -> plan` journal re-appends the
+	// persona entry to carry the baseline forward — appending UNCONDITIONALLY
+	// puts `agent` after the transparent `plan` marker, so the NEXT load
+	// resolves mode `agent` and loses plan mode's state. The re-append must
+	// only run when the agent entry is already the journal's last mode.
+	it("re-append keeps a transparent plan marker as the mode tail", async () => {
+		const harness = await createPersonaHarness();
+		const session = new PersonaStubSession(harness.cwd);
+		harness.sessions.push(session);
+		session.sessionManager.appendMessage({ role: "user", content: "turn", timestamp: Date.now() });
+		session.sessionManager.appendModeChange("agent", { name: "acp-testa" });
+		session.sessionManager.appendModeChange("plan", { planFilePath: "local://PLAN.md" });
+		await session.sessionManager.ensureOnDisk();
+		await session.sessionManager.flush();
+
+		await harness.agent.resumeSession({
+			sessionId: session.sessionId,
+			cwd: harness.cwd,
+			mcpServers: [],
+		});
+		const loaded = harness.sessions.at(-1)!;
+		const modes = loaded.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "mode_change")
+			.map(entry => (entry as { mode: string }).mode);
+		expect(modes.at(-1)).toBe("plan");
+		expect(loaded.sessionManager.buildSessionContext().mode).toBe("plan");
+	});
+
 	it("fork of a persona session reconciles and appends a fresh entry", async () => {
 		const harness = await createPersonaHarness();
 		const source = new PersonaStubSession(harness.cwd);

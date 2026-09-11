@@ -176,6 +176,22 @@ export function readPersistedAgentPersona(
 }
 
 /**
+ * Whether the journal's LAST mode_change is an `agent` entry. The ACP
+ * re-append path needs this: appending ahead of a transparent plan/goal/vibe
+ * marker would make `agent` the resolved mode on the NEXT load
+ * (buildSessionContext uses the last mode_change), silently losing the outer
+ * mode and its state.
+ */
+export function personaJournalModeIsTail(entries: ReadonlyArray<{ type: unknown; mode?: unknown }>): boolean {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry.type !== "mode_change") continue;
+		return entry.mode === "agent";
+	}
+	return false;
+}
+
+/**
  * Callbacks the reconcile helper delegates surface differences to. The
  * gone-persona channel fires before the journal clear marker; the failure
  * channel fires when reconcile itself throws (the session resumes without
@@ -264,15 +280,18 @@ export async function reconcileSessionPersona(
 				// and there is no active runtime to exit — without adopting the
 				// journal's recorded pre-persona baseline here, the notice says
 				// "resumed without it" while the session stays on the deleted
-				// persona's model permanently.
+				// persona's model/thinking permanently. A FAILED apply propagates
+				// to the outer catch, which leaves the journal entry in place:
+				// clearing the only record while the restore never landed would
+				// strand the persona model with no way to retry next resume.
 				const baseline = deserializePersonaBaseline(session, desired.baseline);
 				if (baseline.model) {
-					await session.setModelTemporary(baseline.model, baseline.thinkingLevel).catch(error => {
-						logger.warn("Failed to restore persisted baseline for a gone persona", {
-							sessionId: session.sessionId,
-							error: error instanceof Error ? error.message : String(error),
-						});
-					});
+					await session.setModelTemporary(baseline.model, baseline.thinkingLevel);
+				} else if (baseline.thinkingLevel !== undefined && session.model) {
+					// A dropped baseline MODEL degrades to undefined (exact
+					// round-trip guard), but the recorded THINKING half is still
+					// restorable — passing the live model keeps it untouched.
+					await session.setModelTemporary(session.model, baseline.thinkingLevel);
 				}
 			}
 			session.sessionManager.appendModeChange("none");

@@ -69,6 +69,7 @@ import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import {
 	appendPersonaJournalEntry,
+	personaJournalModeIsTail,
 	deserializePersonaBaseline,
 	reconcileSessionPersona,
 	readPersistedAgentPersona,
@@ -240,9 +241,13 @@ export async function reconcileAcpSessionPersona(
 	});
 	if (result.entered && !launchPersona) {
 		// Re-append carries the (unchanged) baseline forward so the contract key
-		// survives across load/resume cycles.
-		const desired = readPersistedAgentPersona(session.sessionManager.getEntries());
-		if (desired) {
+		// survives across load/resume cycles — but only when the persona entry
+		// is already the journal's LAST mode: appending ahead of a transparent
+		// plan/goal/vibe marker would make `agent` the resolved mode on the next
+		// load and silently lose the outer mode's state.
+		const entries = session.sessionManager.getEntries();
+		const desired = readPersistedAgentPersona(entries);
+		if (desired && personaJournalModeIsTail(entries)) {
 			appendPersonaJournalEntry(session, desired);
 		}
 		return;

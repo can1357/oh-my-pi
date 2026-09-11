@@ -4394,10 +4394,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit vibe mode first.");
 			return false;
 		}
-		if (this.session.toolPolicy?.isPersonaActive()) {
-			this.showWarning("Exit the agent persona first (/agent).");
-			return false;
-		}
+		// The persona guard stops mode ENTRY only; unwinding an already-active
+		// transparent plan (a resumed `agent -> plan` journal) must stay
+		// available — exitAgentPersona refuses under an active plan, so guarding
+		// the exit branches too deadlocks the user in both states. Entry into
+		// plan below still refuses while a persona is active.
 		if (this.planModeEnabled) {
 			const planFilePath = this.planModePlanFilePath ?? (await this.#getPlanFilePath());
 			if (await this.#hasPlanModeDraftContent(planFilePath)) {
@@ -4421,6 +4422,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#updatePlanModeStatus();
 			this.sessionManager.appendModeChange("none");
 			this.showStatus("Plan mode disabled.");
+			return false;
+		}
+		if (this.session.toolPolicy?.isPersonaActive()) {
+			this.showWarning("Exit the agent persona first (/agent).");
 			return false;
 		}
 		if (!this.session.settings.get("plan.enabled")) {
@@ -4710,14 +4715,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit vibe mode first.");
 			return false;
 		}
-		if (this.session.toolPolicy?.isPersonaActive()) {
-			this.showWarning("Exit the agent persona first (/agent).");
-			return false;
-		}
 		if (!this.session.settings.get("goal.enabled")) {
 			this.showWarning("Goal mode is disabled. Enable it in settings (goal.enabled).");
 			return false;
 		}
+		// Plan parity: the persona guard stops goal ENTRY only — subcommands and
+		// the active/paused menus (drop/pause/resume) must stay available under
+		// a transparent goal resume, where exitAgentPersona refuses until the
+		// goal is unwound. Guarding them too deadlocks both states.
 		const { sub, rest: subRest } = parseGoalSubcommand(rest ?? "");
 		if (sub) return await this.#dispatchGoalSubcommand(sub, subRest, input);
 		if (this.goalModeEnabled) {
@@ -4735,6 +4740,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				return false;
 			}
 			await this.#openGoalMenu("paused");
+			return false;
+		}
+		if (this.session.toolPolicy?.isPersonaActive()) {
+			this.showWarning("Exit the agent persona first (/agent).");
 			return false;
 		}
 		if (subRest) return await this.#startGoalFromObjective(subRest, input);
@@ -6453,6 +6462,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Shallow copy: the merge path mutates the live entry's thinkingLevel.
 		const priorPending = this.#pendingModelSwitch ? { ...this.#pendingModelSwitch } : undefined;
 		const priorPlanFlag = this.#pendingPlanModelSwitch;
+		const priorFailures = this.#pendingModelSwitchFailures;
 		return {
 			...createDefaultPersonaModelHooks(this.session),
 			// The runtime's non-deferred enter reads+drops the surface queue
@@ -6491,6 +6501,7 @@ export class InteractiveMode implements InteractiveModeContext {
 								thinkingLevel: agent.thinkingLevel,
 							};
 							this.#pendingPlanModelSwitch = false;
+							this.#pendingModelSwitchFailures = 0;
 						}
 					}
 					return;
@@ -6509,6 +6520,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					thinkingLevel: queuedThinking,
 				};
 				this.#pendingPlanModelSwitch = false;
+				this.#pendingModelSwitchFailures = 0;
 			},
 			// Mid-turn exit: the RUNTIME passes its own captured pre-persona
 			// baseline (the hook instance that ran apply does not survive exit);
@@ -6534,6 +6546,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			onPersonaSwitchFailed: () => {
 				this.#pendingModelSwitch = priorPending;
 				this.#pendingPlanModelSwitch = priorPlanFlag;
+				this.#pendingModelSwitchFailures = priorFailures;
 			},
 		};
 	}
