@@ -18,6 +18,7 @@
 ### Fixed
 
 - Fixed OpenRouter reasoning models (e.g. Meta Muse Spark) rejecting every turn with `400 Provider returned error` after the session history contains a tool-call turn from another provider, by no longer sending a fabricated reasoning item id.
+- Fixed OpenRouter reasoning models (e.g. Meta Muse Spark) rejecting every turn with `400 Provider returned error` after the session history contains a tool-call turn from another provider, by no longer sending a fabricated reasoning item id ([#11791](https://github.com/can1357/oh-my-pi/pull/11791) by [@brndnmtthws](https://github.com/brndnmtthws)).
 
 ## [18.1.18] - 2026-09-11
 
