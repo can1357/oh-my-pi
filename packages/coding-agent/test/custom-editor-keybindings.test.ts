@@ -194,6 +194,26 @@ describe("CustomEditor keybindings", () => {
 		expect(editor.getText()).toBe("zbc");
 	});
 
+	it("dismisses the spelling-assist popup on ctrl+d, like the Delete key", () => {
+		// The debounced autocomplete refresh skips assist mode, so a popup left open by the
+		// direct delete would stay on screen indefinitely.
+		const editor = new CustomEditor(getEditorTheme());
+		const onAutocompleteUpdate = vi.fn();
+		editor.onAutocompleteUpdate = onAutocompleteUpdate;
+		editor.setTextAssistProvider({
+			getWordReplacements: () => ({ line: 0, startCol: 0, endCol: 3, items: ["the", "ten"] }),
+		});
+		editor.setText("teh cat");
+		editor.moveToLineStart();
+		editor.handleInput("\x1b[46;5u"); // Ctrl+. -> spelling replacements
+		expect(editor.isShowingAutocomplete()).toBe(true);
+		onAutocompleteUpdate.mockClear();
+		editor.handleInput("\x04"); // Ctrl+D
+		expect(editor.isShowingAutocomplete()).toBe(false);
+		expect(onAutocompleteUpdate).toHaveBeenCalled();
+		expect(editor.getText()).toBe("eh cat");
+	});
+
 	it("still exits on a remapped exit key with no forward-delete role, even with text", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		editor.setActionKeys("app.exit", ["ctrl+q"]);

@@ -2476,13 +2476,19 @@ export class Editor implements Component, Focusable {
 
 	/** The `tui.editor.deleteCharForward` operation, callable by hosts that resolve the chord
 	 *  themselves rather than redispatching the raw key (see CustomEditor's exit-chord overlap).
-	 *  Mirrors what the key dispatch does for this action so the two cannot diverge: a pending
-	 *  character jump is transient state that any other key cancels, and while Vim owns the
-	 *  buffer (Normal or Visual) the operation is Vim's `x` — deleting the selection and
-	 *  returning to Normal in Visual mode, the grapheme under the cursor otherwise. Only Insert
-	 *  mode and Vim-off editors delete straight through. */
+	 *  Mirrors the transient state the key dispatch tears down before this action so the two
+	 *  cannot diverge: a pending character jump is cancelled by any other key, and an open
+	 *  spelling-assist popup is dismissed by anything that is not one of its accept keys (its
+	 *  debounced refresh skips assist mode, so a surviving list would hang around forever).
+	 *  While Vim owns the buffer (Normal or Visual) the operation is Vim's `x` — deleting the
+	 *  selection and returning to Normal in Visual mode, the grapheme under the cursor
+	 *  otherwise. Only Insert mode and Vim-off editors delete straight through. */
 	deleteCharForward(): void {
 		this.#jumpMode = null;
+		if (this.#autocompleteState === "assist") {
+			this.#cancelAutocomplete();
+			this.onAutocompleteUpdate?.();
+		}
 		const vim = this.#vim;
 		if (vim !== null && vim.mode !== "insert") {
 			this.#runVimKey("x", vim);
