@@ -20,7 +20,7 @@ import {
 	DEFAULT_STT_BACKEND,
 	STT_BACKEND_OPTIONS,
 	STT_BACKEND_VALUES,
-} from "../stt/cloud-transcribe-client";
+} from "../stt/cloud-models";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";

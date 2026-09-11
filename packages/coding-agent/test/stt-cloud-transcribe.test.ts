@@ -1,12 +1,8 @@
 import { type ApiKeyResolver, type OAuthAccess, type OAuthAccessSource, seedApiKeyResolver } from "@oh-my-pi/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import {
-	DEFAULT_CLOUD_STT_MODEL,
-	encodeWav16k,
-	resolveCloudSttModel,
-	startCloudSttStream,
-} from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
+import { DEFAULT_CLOUD_STT_MODEL, resolveCloudSttModel } from "@oh-my-pi/pi-coding-agent/stt/cloud-models";
+import { encodeWav16k, startCloudSttStream } from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
 import { resolveSttCloudCredential, STTController, type SttState } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
