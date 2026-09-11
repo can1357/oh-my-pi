@@ -20,6 +20,7 @@ import {
 	cerebrasModelManagerOptions,
 	clinePassModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
+	commandCodeModelManagerOptions,
 	coreWeaveModelManagerOptions,
 	deepinfraModelManagerOptions,
 	deepseekModelManagerOptions,
@@ -155,6 +156,19 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["CLOUDFLARE_AI_GATEWAY_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => cloudflareAiGatewayModelManagerOptions(config),
 		catalogDiscovery: { label: "Cloudflare AI Gateway" },
+	},
+	{
+		id: "commandcode",
+		defaultModel: "claude-sonnet-4-6",
+		envVars: ["COMMAND_CODE_API_KEY", "COMMANDCODE_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => commandCodeModelManagerOptions(config),
+		allowUnauthenticated: true,
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Command Code", allowUnauthenticated: true },
+		// The Provider API rows carry no reasoning/modality metadata and KDL
+		// owns the deployment policy: same-id references on other hosts must
+		// not backfill reasoning, input, or limits during generation.
+		skipCrossProviderReferenceFills: true,
 	},
 	{
 		id: "cursor",
@@ -611,6 +625,7 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = CATALOG_ENTRY
 			createModelManagerOptions: provider.createModelManagerOptions,
 			allowUnauthenticated: provider.allowUnauthenticated,
 			dynamicModelsAuthoritative: provider.dynamicModelsAuthoritative,
+			skipCrossProviderReferenceFills: provider.skipCrossProviderReferenceFills,
 			catalogDiscovery: provider.catalogDiscovery
 				? { ...provider.catalogDiscovery, envVars: provider.catalogDiscovery.envVars ?? provider.envVars ?? [] }
 				: undefined,

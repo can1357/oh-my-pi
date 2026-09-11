@@ -10,8 +10,78 @@ provider "deepseek" {
 	class "deepseek" {
 		thinking-mode "effort"
 	}
+	// First-party peak USD / 1M tokens; all other UTC hours receive 50% off.
+	// Source: https://api-docs.deepseek.com/quick_start/pricing (2026-09-10).
+	// residue: the pricing page's Flash-priced names, not a taxonomy family: the
+	// bare alias carries no family, and the retired `v4-flash`/`-vision-exp` ids
+	// are still accepted and billed at the Flash card.
+	models "deepseek-flash" "deepseek-v4-flash" "deepseek-v4-flash-vision-exp" {
+		time-based-cost {
+			off-peak-multiplier 0.5
+			peak-windows {
+				morning {
+					weekdays "1,2,3,4,5"
+					start-minute 60
+					end-minute 240
+				}
+				afternoon {
+					weekdays "1,2,3,4,5"
+					start-minute 360
+					end-minute 600
+				}
+			}
+		}
+		cost-patch {
+			input 0.30
+			output 1.20
+			cache-read 0.006
+			cache-write 0
+		}
+	}
+	// residue: upstream discovery has not seeded the bare alias's limits; the
+	// pricing page documents this SKU (DeepSeek-V4.1-Flash) as 1M context / 384K
+	// output, and without them the agent cannot enforce its context budget.
+	models "deepseek-flash" {
+		limits-patch {
+			context-window 1000000
+			max-tokens 384000
+		}
+	}
+	// residue: the dated price transition applies to the documented exact Pro SKU only.
+	models "deepseek-v4-pro" {
+		cost-patch {
+			input 1.32
+			output 3.96
+			cache-read 0.044
+			cache-write 0
+		}
+		time-based-cost {
+			off-peak-multiplier 0.5
+			peak-windows {
+				morning {
+					weekdays "1,2,3,4,5"
+					start-minute 60
+					end-minute 240
+				}
+				afternoon {
+					weekdays "1,2,3,4,5"
+					start-minute 360
+					end-minute 600
+				}
+			}
+			effective-rates {
+				flash-pricing {
+					effective-from "2026-09-14T04:00:00Z"
+					input 0.30
+					output 1.20
+					cache-read 0.006
+					cache-write 0
+				}
+			}
+		}
+	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
-	models "deepseek-v4-flash" {
+	models "deepseek-v4-flash" "deepseek-v4.1-flash-expires-on-0910" {
 		max-tokens-field "max_tokens"
 		reasoning-content-field "reasoning_content"
 		requires-assistant-content-for-tool-calls #true
