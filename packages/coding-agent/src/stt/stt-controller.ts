@@ -1,6 +1,6 @@
 import { type ApiKeyResolver, type OAuthAccessSource, seedApiKeyResolver } from "@oh-my-pi/pi-ai";
 import { AudioCapture } from "@oh-my-pi/pi-natives";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { settings } from "../config/settings";
 import { type SttStreamHandle, sttClient } from "./asr-client";
 import { DEFAULT_STT_BACKEND, isSttBackend, type SttBackend } from "./cloud-models";
@@ -264,7 +264,11 @@ export class STTController {
 	/** Segment text gets a leading space once a prior segment is committed, so
 	 *  phrases join naturally; the first phrase is inserted at the cursor as-is. */
 	#prefixed(text: string): string {
-		const normalized = text.replace(/\s+/g, " ").trim();
+		// Strip ANSI and control bytes before anything else: a compat endpoint or
+		// proxy can return them inside transcript text, and every string that
+		// reaches the composer and the TUI renderer passes through here —
+		// partials, committed segments, and the final cloud transcript.
+		const normalized = sanitizeText(text).replace(/\s+/g, " ").trim();
 		if (!normalized) return "";
 		return this.#streamCommitted ? ` ${normalized}` : normalized;
 	}
