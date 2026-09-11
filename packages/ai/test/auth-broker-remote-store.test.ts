@@ -112,6 +112,52 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		expect(remote!.snapshot.credentials[0].id).not.toBe(bId);
 	});
 
+	test("pollExternalChanges reports broker-side changes so a wrapping AuthStorage reloads", async () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		// Mirror `auth-gateway serve`'s boot: fetch the initial snapshot so the
+		// store seeds its acknowledged generation, then wrap the broker-backed
+		// store in its own AuthStorage whose credential view only refreshes on
+		// reload().
+		const initial = await client.fetchSnapshot();
+		if (initial.status !== 200) throw new Error("expected initial broker snapshot");
+		remote = new RemoteAuthCredentialStore({ client, initialSnapshot: initial.snapshot });
+		const gatewayStorage = new AuthStorage(remote, { sourceLabel: `broker ${handle!.url}` });
+		try {
+			await gatewayStorage.reload();
+			await waitUntil(() => remote!.snapshot.credentials.length === 1);
+			// Boot generation is acknowledged: no spurious reload before any change.
+			expect(await gatewayStorage.pollExternalChanges()).toBe(false);
+			expect(gatewayStorage.exportSnapshot().credentials.map(c => c.provider)).toEqual(["anthropic"]);
+
+			// Another process logs in a new provider; the change reaches the remote
+			// store over SSE.
+			storage!.upsertCredential("deepseek", { type: "api_key", key: "sk-repro" });
+			await waitUntil(() => remote!.snapshot.credentials.some(c => c.provider === "deepseek"));
+
+			// The poll now reports the change and the reload widens the gateway view.
+			expect(await gatewayStorage.pollExternalChanges()).toBe(true);
+			expect(
+				gatewayStorage
+					.exportSnapshot()
+					.credentials.map(c => c.provider)
+					.sort(),
+			).toEqual(["anthropic", "deepseek"]);
+			// One true per observed change: an unchanged generation reports false.
+			expect(await gatewayStorage.pollExternalChanges()).toBe(false);
+
+			// A logout in another process removes the credential over SSE, and the
+			// next poll drops it from the gateway view.
+			const deepseekId = remote!.snapshot.credentials.find(c => c.provider === "deepseek")?.id;
+			expect(deepseekId).toBeDefined();
+			expect(storage!.disableCredentialById(deepseekId!, "logged out by test")).toBe(true);
+			await waitUntil(() => !remote!.snapshot.credentials.some(c => c.provider === "deepseek"));
+			expect(await gatewayStorage.pollExternalChanges()).toBe(true);
+			expect(gatewayStorage.exportSnapshot().credentials.map(c => c.provider)).toEqual(["anthropic"]);
+		} finally {
+			gatewayStorage.close();
+		}
+	});
+
 	test("batches observed usage and reports it to the broker as per-install client usage", async () => {
 		const client = new AuthBrokerClient({ url: handle!.url, token });
 		remote = new RemoteAuthCredentialStore({ client, observedUsageFlushMs: 25 });
