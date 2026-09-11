@@ -73,7 +73,28 @@ export function physicalTargetSegments(target: string, pathApi: typeof path = pa
  * directory rejects instead of publishing into it.
  */
 export async function resolveSymlinkWriteTarget(filePath: string): Promise<string> {
-	return assertFileWriteTarget(filePath, await resolveSymlinkTargetPath(filePath));
+	// Fast path: the whole logical path already resolves, and realpath itself
+	// PROVES the kernel can traverse every link on the way — an over-deep LIVE
+	// chain fails ELOOP right here.
+	try {
+		return assertFileWriteTarget(filePath, await fs.promises.realpath(filePath));
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
+	const resolved = await resolveSymlinkTargetPath(filePath);
+	// Kernel-reachability check for the slow path: the manual walk counts only
+	// the links it follows ITSELF, while a successful `realpath(candidate)`
+	// inside it walks a live intermediate chain within ONE syscall, invisible
+	// to that counter. Re-ask the kernel: resolving the logical path must end
+	// in the expected ENOENT dangle — an ELOOP means the full chain, however
+	// composed, exceeds MAXSYMLINKS and the link could never OPEN the target
+	// the write is about to publish to.
+	try {
+		await fs.promises.realpath(filePath);
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
+	return assertFileWriteTarget(filePath, resolved);
 }
 
 /**
@@ -96,20 +117,14 @@ async function assertFileWriteTarget(filePath: string, resolved: string): Promis
 }
 
 async function resolveSymlinkTargetPath(filePath: string): Promise<string> {
-	try {
-		return await fs.promises.realpath(filePath);
-	} catch (error) {
-		if (!isEnoent(error)) throw error;
-	}
-
-	// realpath fails for a dangling symlink. Resolve its target so recreating
-	// the referent repairs the target without replacing the user-managed link.
-	// Walk the symlink chain hop by hop: realpath already handled the case
-	// where every referent exists, so we only reach here when the final
-	// referent is missing. Follow each existing intermediate link until the
-	// referent is a non-symlink or does not exist, so the write lands on the
-	// final target and preserves every intermediate link instead of clobbering
-	// one into a regular file.
+	// The caller (resolveSymlinkWriteTarget) already proved realpath() fails
+	// ENOENT for this path, so every referent is missing somewhere.
+	// Resolve the dangling target so recreating the referent repairs the
+	// target without replacing the user-managed link. Walk the symlink chain
+	// hop by hop: follow each existing intermediate link until the referent
+	// is a non-symlink or does not exist, so the write lands on the final
+	// target and preserves every intermediate link instead of clobbering one
+	// into a regular file.
 	// ONE shared budget for every symlink this resolution traverses: the
 	// final-component chain below AND the intermediate links spliced inside
 	// the segment walks. The kernel's MAXSYMLINKS caps the TOTAL traversals
