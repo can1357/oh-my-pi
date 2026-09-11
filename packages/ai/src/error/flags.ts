@@ -161,6 +161,8 @@ export const PYTHON_HTTP2_STREAM_RESET_PATTERN = /<StreamReset stream_id:\d+, er
 /** Python h11/httpx EOF while reading an HTTP/1.1 chunked response body. */
 export const PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN =
 	/peer closed connection without sending complete message body \(incomplete chunked read\)/;
+/** reqwest body-frame failures forwarded by the Codex HTTP proxy. */
+export const CODEX_HTTP_BODY_READ_ERROR_PATTERN = /\btransport error reading codex response body\b/i;
 export const TRANSIENT_TRANSPORT_PATTERN =
 	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|provider.?returned.?error|rate.?limit|too many requests|auth-gateway\s+5\d{2}(?=[:\s]|$)|\b(?:429|500|502|503|504)\b|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|unable.?to.?connect\.\s*is the computer able to access the url\?|other side closed|fetch failed|upstream.?connect|upstream.?request.?failed|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)|nghttp2_(?:internal_error|refused_stream)|stream closed with error code nghttp2_(?:internal_error|refused_stream)|malformed.?function.?call/i;
 const AUTH_FAILURE_PATTERN =
@@ -501,9 +503,8 @@ function classifyText(
 		}
 		if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
 		else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
-		// A bare transport truncation ("unexpected EOF", "eof while parsing", …)
-		// is the same shape as the transient classes above but is not covered by
-		// TRANSIENT_TRANSPORT_PATTERN. Flag it explicitly so AIError.retriable and
+		// A stream truncation or forwarded Codex HTTP body-read failure may not
+		// match TRANSIENT_TRANSPORT_PATTERN. Flag it explicitly so AIError.retriable and
 		// the turn-recovery layer treat it as retryable, matching the provider
 		// retry path (isProviderRetryableError). Separate `if` (not chained onto
 		// the else-if) so a timeout whose text also reads as a truncation keeps
@@ -514,7 +515,10 @@ function classifyText(
 		// error that replays identically, so keep it terminal. classify() carries
 		// the outer terminal status down the cause chain so a wrapped truncation
 		// (ProviderHttpError 400 → cause "unexpected EOF") is caught here too.
-		if (!isTerminalClientErrorStatus(statusClean) && isTransientStreamParseError(errorMessage)) {
+		if (
+			!isTerminalClientErrorStatus(statusClean) &&
+			(isTransientStreamParseError(errorMessage) || CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(errorMessage))
+		) {
 			kinds |= Flag.Transient;
 		}
 		// A concurrency cap (e.g. Vertex "Online prediction concurrent requests
