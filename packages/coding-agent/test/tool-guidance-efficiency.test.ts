@@ -27,7 +27,15 @@ describe("tool guidance efficiency", () => {
 		expect(bash.length + grep.length + glob.length).toBeLessThan(3_050);
 	});
 	test("steers sqlite3 shell-outs to read when the read tool is active", () => {
-		expect(bash).toContain("sqlite3");
+		// Routing contract, not a token literal: every sqlite3 mention must
+		// prohibit the shell-out and redirect to read, so an inverted
+		// "use sqlite3" guidance fails instead of passing.
+		const mentions = bash.split("\n").filter(line => line.includes("sqlite3"));
+		expect(mentions.length).toBeGreaterThan(0);
+		for (const line of mentions) {
+			expect(line).toMatch(/NEVER/);
+			expect(line).toMatch(/`read`/);
+		}
 		const withoutRead = prompt.render(bashPrompt, { ...baseFlags, hasRead: false });
 		expect(withoutRead).not.toContain("sqlite3");
 	});
