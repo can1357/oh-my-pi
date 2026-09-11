@@ -123,6 +123,7 @@ export type RpcSkillCommandResult = { agentInvoked: true };
 export interface RpcSkillInvocation {
 	skill: Skill;
 	args: string;
+	queueChipText: string;
 }
 
 /**
@@ -136,7 +137,7 @@ export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text:
 	if (!parsed) return null;
 	const skill = session.skills.find(candidate => candidate.name === parsed.name);
 	if (!skill) return null;
-	return { skill, args: parsed.args };
+	return { skill, args: parsed.args, queueChipText: text };
 }
 
 /**
@@ -161,7 +162,7 @@ export async function runRpcSkillCommand(
 			details: built.details,
 			attribution: "user",
 		},
-		{ streamingBehavior },
+		{ streamingBehavior, queueChipText: invocation.queueChipText },
 	);
 }
 
