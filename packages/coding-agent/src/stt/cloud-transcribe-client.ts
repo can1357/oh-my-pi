@@ -14,51 +14,7 @@ import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { TRUNCATE_LENGTHS } from "../tools/render-utils";
 import type { SttStreamHandle, SttStreamOptions } from "./asr-client";
-
-/**
- * Cloud STT model: file transcription. The Realtime transcription sessions
- * from the docs (`transcription_sessions`, `transcription_session.update`)
- * are not served on production (REST 404s, GA realtime rejects the events),
- * so the cloud backend records mic audio and transcribes the buffer on
- * release. No live partials — text lands when recording stops.
- */
-export const DEFAULT_CLOUD_STT_MODEL = "gpt-4o-transcribe";
-
-/** Transcription models selectable via `stt.modelName` when `stt.backend` is `cloud`. */
-export const CLOUD_STT_MODEL_VALUES = [
-	"gpt-4o-transcribe",
-	"gpt-4o-mini-transcribe",
-	"gpt-transcribe",
-	"whisper-1",
-] as const;
-export type CloudSttModel = (typeof CLOUD_STT_MODEL_VALUES)[number];
-
-export const CLOUD_STT_MODEL_OPTIONS = [
-	{ value: "gpt-4o-transcribe", label: "GPT-4o Transcribe", description: "Best accuracy file transcription." },
-	{
-		value: "gpt-4o-mini-transcribe",
-		label: "GPT-4o Mini Transcribe",
-		description: "Cheaper and faster, slightly lower accuracy.",
-	},
-	{
-		value: "gpt-transcribe",
-		label: "GPT Transcribe",
-		description: "Newest transcription model; reports detected languages.",
-	},
-	{ value: "whisper-1", label: "Whisper v1", description: "Legacy general-purpose transcription." },
-] as const satisfies ReadonlyArray<{ value: CloudSttModel; label: string; description: string }>;
-
-export function isCloudSttModel(value: string): value is CloudSttModel {
-	return (CLOUD_STT_MODEL_VALUES as readonly string[]).includes(value);
-}
-
-/**
- * Resolve `stt.modelName` onto a cloud model. Local tier keys are not
- * transcription ids, so they fall back to the default rather than 400ing.
- */
-export function resolveCloudSttModel(name: string | undefined): CloudSttModel {
-	return name !== undefined && isCloudSttModel(name) ? name : DEFAULT_CLOUD_STT_MODEL;
-}
+import { resolveCloudSttModel } from "./cloud-models";
 
 const CODEX_STT_URL = `${CODEX_BASE_URL}${URL_PATHS.TRANSCRIBE}`;
 /** Provider id the Codex ChatGPT-subscription credential is stored under. */
@@ -69,23 +25,6 @@ const CLOUD_STT_TIMEOUT_MS = 60_000;
 const MIC_SAMPLE_RATE = 16_000;
 /** Keep the generated WAV below the transcription endpoint's 25 MiB upload limit. */
 const MAX_AUDIO_SAMPLES = Math.floor((24 * 1024 * 1024 - 44) / 2);
-
-export const STT_BACKEND_VALUES = ["local", "cloud"] as const;
-export type SttBackend = (typeof STT_BACKEND_VALUES)[number];
-export const DEFAULT_STT_BACKEND: SttBackend = "local";
-
-export function isSttBackend(value: string): value is SttBackend {
-	return (STT_BACKEND_VALUES as readonly string[]).includes(value);
-}
-
-export const STT_BACKEND_OPTIONS = [
-	{ value: "local", label: "Local", description: "On-device Whisper/Parakeet. Private, no network." },
-	{
-		value: "cloud",
-		label: "Cloud",
-		description: "OpenAI transcription on release. Subscription first, else API key.",
-	},
-] as const satisfies ReadonlyArray<{ value: SttBackend; label: string; description: string }>;
 /**
  * A resolved cloud STT credential with its provenance intact.
  *
