@@ -1314,6 +1314,7 @@ describe("ExtensionRunner", () => {
 			label: "Boom",
 			description: "always throws",
 			parameters: {} as never,
+			approval: "read",
 			execute: async () => {
 				throw new Error("original explosion");
 			},
@@ -1324,6 +1325,7 @@ describe("ExtensionRunner", () => {
 			label: "Fine",
 			description: "always succeeds",
 			parameters: {} as never,
+			approval: "read",
 			execute: async () => ({ content: [{ type: "text" as const, text: "success" }] }),
 		};
 
@@ -1582,6 +1584,7 @@ describe("ExtensionRunner", () => {
 				description: "records execute() invocations",
 				parameters: Type.Object({}),
 				strict: true,
+				approval: "read",
 				execute: async (_id, params) => {
 					executeCalls.push(params);
 					return { content: [{ type: "text", text: "ran" }] };
@@ -1713,6 +1716,7 @@ describe("ExtensionRunner", () => {
 					label: "Gated",
 					description: "Must not execute after a gate registration fails.",
 					parameters: Type.Object({}),
+					approval: "read",
 					execute: async (_id, params) => {
 						executeCalls.push(params);
 						return { content: [{ type: "text", text: "ran" }] };
@@ -1853,6 +1857,7 @@ describe("ExtensionRunner", () => {
 					description: "must not execute after the extension gate times out",
 					parameters: Type.Object({}),
 					strict: true,
+					approval: "read",
 					execute: async () => ({ content: [{ type: "text", text: "ran" }] }),
 				};
 				const wrapped = new ExtensionToolWrapper(tool, runner);
@@ -2007,6 +2012,7 @@ describe("ExtensionRunner", () => {
 				description: "must not execute after the dispatch aborts",
 				parameters: Type.Object({}),
 				strict: true,
+				approval: "read",
 				execute: async () => {
 					executed = true;
 					return { content: [{ type: "text", text: "ran" }] };
@@ -2614,6 +2620,10 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("tool_call input", () => {
+		const yoloContext = {
+			settings: { get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}) },
+		} as never;
+
 		function createHashlineEditTool(): AgentTool {
 			return {
 				name: "edit",
@@ -2621,6 +2631,7 @@ describe("ExtensionRunner", () => {
 				description: "Test edit tool",
 				parameters: Type.Object({ input: Type.String() }),
 				strict: true,
+				approval: "read",
 				execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
 			};
 		}
@@ -2854,7 +2865,13 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 
-			const resultMessage = await wrapped.execute("tool-call-id", { command: "echo original" });
+			const resultMessage = await wrapped.execute(
+				"tool-call-id",
+				{ command: "echo original" },
+				undefined,
+				undefined,
+				yoloContext,
+			);
 
 			expect(resultMessage.content).toEqual([{ type: "text", text: "ran" }]);
 			const executed = fs
@@ -2910,10 +2927,6 @@ describe("ExtensionRunner", () => {
 				},
 			} as AgentTool;
 		}
-
-		const yoloContext = {
-			settings: { get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}) },
-		} as never;
 
 		// Minimal runtime init so the approval gate's interactive `select` is wired for prompt-path tests.
 		const initApprovalRunner = (
@@ -3055,7 +3068,7 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 
-			await wrapped.execute("tool-call-id", { command: "echo original" });
+			await wrapped.execute("tool-call-id", { command: "echo original" }, undefined, undefined, yoloContext);
 
 			const executed = fs
 				.readFileSync(recordPath, "utf8")
@@ -3152,9 +3165,9 @@ describe("ExtensionRunner", () => {
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 
 			runner.markToolCallEmitted("loop-call-id", "bash");
-			await wrapped.execute("loop-call-id", { command: "echo original" });
+			await wrapped.execute("loop-call-id", { command: "echo original" }, undefined, undefined, yoloContext);
 			// Marker consumed above: an unmarked dispatch under the same id emits normally.
-			await wrapped.execute("loop-call-id", { command: "echo original" });
+			await wrapped.execute("loop-call-id", { command: "echo original" }, undefined, undefined, yoloContext);
 
 			const executed = fs
 				.readFileSync(recordPath, "utf8")

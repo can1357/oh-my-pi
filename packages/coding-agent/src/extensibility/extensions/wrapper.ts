@@ -10,13 +10,12 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
-import type { Settings } from "../../config/settings";
 import type { Theme } from "../../modes/theme/theme";
 import {
-	type ApprovalMode,
 	denyError,
 	formatApprovalPrompt,
 	resolveApproval,
+	resolveApprovalFromContext,
 	truncateForPrompt,
 } from "../../tools/approval";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
@@ -193,11 +192,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// runner is touched — an already-denied tool never emits `tool_call` — while the full gate below
 		// re-resolves against the (possibly revised) input so a handler cannot rewrite into a denied or
 		// newly prompt-gated command and have it run unapproved.
-		const cliAutoApprove = context?.autoApprove === true;
-		const settings: Settings | undefined = context?.settings;
-		const configuredMode = (settings?.get("tools.approvalMode") ?? "yolo") as ApprovalMode;
-		const approvalMode: ApprovalMode = cliAutoApprove ? "yolo" : configuredMode;
-		const userPolicies = (settings?.get("tools.approval") ?? {}) as Record<string, unknown>;
+		const { approvalMode, userPolicies } = resolveApprovalFromContext(
+			context ?? (this.runner.sessionSettings ? { settings: this.runner.sessionSettings } : undefined),
+		);
 		const preResolved = resolveApproval(this.tool, approvalArgs(params, context), approvalMode, userPolicies);
 		if (preResolved.policy === "deny") {
 			throw denyError(preResolved, this.tool.name);

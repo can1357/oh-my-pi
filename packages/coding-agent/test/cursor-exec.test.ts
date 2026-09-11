@@ -37,6 +37,10 @@ import type { TruncationMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { AdviseTool } from "../src/advisor/advise-tool";
 
+function yoloToolContext(): AgentToolContext {
+	return { settings: Settings.isolated({ "tools.approvalMode": "yolo" }) } as AgentToolContext;
+}
+
 function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
 		cwd,
@@ -352,6 +356,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 			cwd,
 			tools: new Map<string, Tool>(),
 			getEditReplaceTool: () => editTool,
+			getToolContext: () => yoloToolContext(),
 		});
 		const result = await withheld.piEdit({
 			toolCallId: "e1",
@@ -388,7 +393,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		const granted = new Map<string, Tool>([["edit", advisorEdit]]);
 
 		const bridged = bridgeToolMap(granted, () => createBridgeEditTool(session, passthroughRunner()));
-		const handlers = new CursorExecHandlers({ cwd, tools: bridged });
+		const handlers = new CursorExecHandlers({ cwd, tools: bridged, getToolContext: () => yoloToolContext() });
 		const result = await handlers.piEdit({
 			toolCallId: "e3",
 			args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
@@ -416,6 +421,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 			cwd,
 			tools: new Map<string, Tool>([["edit", configuredEdit]]),
 			getEditReplaceTool: () => createBridgeEditTool(session, passthroughRunner()),
+			getToolContext: () => yoloToolContext(),
 		});
 		const result = await handlers.piEdit({
 			toolCallId: "e5",
@@ -490,8 +496,8 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 	it("denies a native pi_edit frame the user's policy blocks", async () => {
 		// The bridge's `edit` is wrapped, but `ExtensionToolWrapper` reads the
 		// approval mode and per-tool policies only from the execute-time
-		// context — with none it resolves as `yolo` with empty policies and the
-		// frame edits the file regardless of what the user configured.
+		// context — without it the call fails closed, and a configured `deny`
+		// must still win when the context *is* supplied.
 		const target = path.join(cwd, "denied.txt");
 		await Bun.write(target, "alpha\nbeta\n");
 		const settings = Settings.isolated({ "tools.approval": { edit: "deny" } });
@@ -627,6 +633,7 @@ describe("Cursor MCP StrReplace fallback", () => {
 			cwd,
 			tools: new Map<string, Tool>([["edit", new EditTool(session)]]),
 			getEditReplaceTool: () => createBridgeEditTool(session, passthroughRunner()),
+			getToolContext: () => yoloToolContext(),
 		});
 
 		const result = await handlers.mcp({
@@ -654,6 +661,7 @@ describe("Cursor MCP StrReplace fallback", () => {
 			cwd,
 			tools: new Map<string, Tool>([["edit", hashline]]),
 			getEditReplaceTool: () => createBridgeEditTool(session, passthroughRunner()),
+			getToolContext: () => yoloToolContext(),
 		});
 
 		const result = await handlers.mcp({
@@ -1079,6 +1087,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			const handlers = new CursorExecHandlers({
 				cwd: workspace,
 				tools: new Map(),
+				getToolContext: () => yoloToolContext(),
 				mcpResources: {
 					serverNames: () => ["files"],
 					getServerResources: async () => undefined,
@@ -1118,6 +1127,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			const handlers = new CursorExecHandlers({
 				cwd: inner,
 				tools: new Map(),
+				getToolContext: () => yoloToolContext(),
 				mcpResources: {
 					serverNames: () => ["files"],
 					getServerResources: async () => undefined,
@@ -1161,6 +1171,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			const handlers = new CursorExecHandlers({
 				cwd: inner,
 				tools: new Map(),
+				getToolContext: () => yoloToolContext(),
 				mcpResources: {
 					serverNames: () => ["files"],
 					getServerResources: async () => undefined,
@@ -1203,6 +1214,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			const handlers = new CursorExecHandlers({
 				cwd: workspace,
 				tools: new Map(),
+				getToolContext: () => yoloToolContext(),
 				mcpResources: {
 					serverNames: () => ["files"],
 					getServerResources: async () => undefined,
@@ -1237,6 +1249,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			const handlers = new CursorExecHandlers({
 				cwd: inner,
 				tools: new Map(),
+				getToolContext: () => yoloToolContext(),
 				mcpResources: {
 					serverNames: () => ["files"],
 					getServerResources: async () => undefined,
@@ -1267,6 +1280,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			const handlers = new CursorExecHandlers({
 				cwd: workspace,
 				tools: new Map(),
+				getToolContext: () => yoloToolContext(),
 				mcpResources: {
 					serverNames: () => ["files"],
 					getServerResources: async () => undefined,
@@ -1537,6 +1551,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 			cwd,
 			tools: new Map(),
 			allowDirectFileMutation: true,
+			getToolContext: () => yoloToolContext(),
 		});
 
 		const result = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del", path: target }));
@@ -1553,6 +1568,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 			cwd,
 			tools: new Map(),
 			allowDirectFileMutation: () => mutationGranted,
+			getToolContext: () => yoloToolContext(),
 		});
 
 		const denied = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del-denied", path: target }));
@@ -1578,6 +1594,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 			getCwd: () => currentCwd,
 			tools: new Map(),
 			allowDirectFileMutation: true,
+			getToolContext: () => yoloToolContext(),
 		});
 
 		currentCwd = movedCwd;
@@ -1627,6 +1644,24 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		const result = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-ask", path: "asked.txt" }));
 
 		expect(result.isError).toBe(true);
+		expect(await Bun.file(target).exists()).toBe(true);
+	});
+
+	it("refuses a native delete when execute-time context is missing", async () => {
+		const target = path.join(cwd, "unwired.txt");
+		await Bun.write(target, "keep me\n");
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map(),
+			allowDirectFileMutation: true,
+		});
+
+		const result = await handlers.delete(
+			create(DeleteArgsSchema, { toolCallId: "call-unwired", path: "unwired.txt" }),
+		);
+
+		expect(result.isError).toBe(true);
+		expect(result.content.map(c => (c.type === "text" ? c.text : "")).join("")).toContain("requires approval");
 		expect(await Bun.file(target).exists()).toBe(true);
 	});
 });
@@ -1706,6 +1741,22 @@ describe("CursorExecHandlers MCP approval preflight", () => {
 		expect(
 			await handlers.mcpApprovalPreflight({ ...call, name: "mcp__ops__absent", toolName: "mcp__ops__absent" }),
 		).toBe(false);
+	});
+
+	it("refuses when execute-time context is missing", async () => {
+		const tool: AgentTool = {
+			name: "mcp__ops__deploy",
+			label: "deploy",
+			description: "",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "ran" }] }),
+		} as unknown as AgentTool;
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map([[tool.name, tool]]),
+		});
+
+		expect(await handlers.mcpApprovalPreflight(call)).toBe(false);
 	});
 });
 

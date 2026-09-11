@@ -13,7 +13,68 @@ export type { ToolApproval, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-
 export type ApprovalPolicy = "allow" | "deny" | "prompt";
 export type ApprovalMode = "always-ask" | "write" | "yolo";
 
+/** Settings-shaped reader the execute-time tool context may carry. */
+export type ApprovalSettingsReader = {
+	get(key: string): unknown;
+};
+
+/** The slice of `AgentToolContext` that approval resolution actually reads. */
+export type ApprovalContextSource = {
+	autoApprove?: boolean;
+	settings?: ApprovalSettingsReader;
+};
+
+export interface ResolvedExecuteTimeApproval {
+	approvalMode: ApprovalMode;
+	userPolicies: Record<string, unknown>;
+}
+
 type ApprovalSubject = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails">;
+
+const APPROVAL_MODES: ReadonlySet<ApprovalMode> = new Set(["always-ask", "write", "yolo"]);
+
+function isApprovalMode(value: unknown): value is ApprovalMode {
+	return typeof value === "string" && APPROVAL_MODES.has(value as ApprovalMode);
+}
+
+function asPolicyMap(value: unknown): Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: {};
+}
+
+/**
+ * Resolve approval mode and per-tool user policies from the execute-time
+ * `AgentToolContext`.
+ *
+ * Missing context (or context with no settings and no `--auto-approve`) is
+ * fail-closed: `always-ask` with an empty policy map — no user grant. When
+ * settings are present, the configured `tools.approvalMode` is used (schema
+ * default remains `yolo`). `--auto-approve` still forces `yolo`.
+ *
+ * Shared by `ExtensionToolWrapper.execute`, `refuseByWritePolicy`,
+ * `mcpApprovalPreflight`, and eval prelude host calls so those sites cannot
+ * drift. `ExtensionToolWrapper.execute` still inherits the runner's session
+ * settings when the caller omits context, so a live session keeps its
+ * configured (schema-default `yolo`) grant.
+ */
+export function resolveApprovalFromContext(context?: ApprovalContextSource | null): ResolvedExecuteTimeApproval {
+	if (context?.autoApprove === true) {
+		return {
+			approvalMode: "yolo",
+			userPolicies: asPolicyMap(context.settings?.get("tools.approval")),
+		};
+	}
+	const settings = context?.settings;
+	if (!settings) {
+		return { approvalMode: "always-ask", userPolicies: {} };
+	}
+	const configured = settings.get("tools.approvalMode");
+	return {
+		approvalMode: isApprovalMode(configured) ? configured : "yolo",
+		userPolicies: asPolicyMap(settings.get("tools.approval")),
+	};
+}
 
 export interface ResolvedApproval {
 	policy: ApprovalPolicy;

@@ -643,6 +643,15 @@ export class ExtensionRunner {
 		return this.sessionManager.getSessionId();
 	}
 
+	/**
+	 * Session settings this runner was constructed with. Used when a direct
+	 * `tool.execute()` omits execute-time context so approval still sees the
+	 * user's configured mode (schema default `yolo`) instead of fail-closed.
+	 */
+	get sessionSettings(): Settings | undefined {
+		return this.settings;
+	}
+
 	initialize(
 		actions: ExtensionActions,
 		contextActions: ExtensionContextActions,

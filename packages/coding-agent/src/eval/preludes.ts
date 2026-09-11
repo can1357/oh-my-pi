@@ -1,7 +1,7 @@
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolApproval } from "@oh-my-pi/pi-agent-core";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
-import { type ApprovalMode, denyError, formatApprovalPrompt, resolveApproval } from "../tools/approval";
+import { denyError, formatApprovalPrompt, resolveApproval, resolveApprovalFromContext } from "../tools/approval";
 
 /** Host context supplied when an eval prelude calls back out of its language VM. */
 export interface EvalPreludeContext {
@@ -63,26 +63,15 @@ export function findEnabledEvalPrelude(session: ToolSession, name: string): Eval
 	return definition?.enabled?.() === false ? undefined : definition;
 }
 
-function configuredApprovalMode(context: AgentToolContext | undefined): ApprovalMode {
-	if (context?.autoApprove === true) return "yolo";
-	const mode = context?.settings?.get("tools.approvalMode");
-	if (mode === "always-ask" || mode === "write" || mode === "yolo") return mode;
-	return "yolo";
-}
-
-function isUnknownRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 async function approvePreludeInvocation(
 	definition: EvalPreludeDefinition,
 	parameters: unknown,
 	context: EvalPreludeContext,
 ): Promise<void> {
 	context.signal?.throwIfAborted();
-	const mode = configuredApprovalMode(context.context);
-	const configuredPolicies = context.context?.settings?.get("tools.approval");
-	const policies = isUnknownRecord(configuredPolicies) ? configuredPolicies : {};
+	const { approvalMode: mode, userPolicies: policies } = resolveApprovalFromContext(
+		context.context ?? (context.session.settings ? { settings: context.session.settings } : undefined),
+	);
 	const subject: { name: string; approval?: ToolApproval } = { name: definition.name };
 	if (definition.approval !== undefined) subject.approval = definition.approval;
 	const resolved = resolveApproval(subject, parameters, mode, policies);
