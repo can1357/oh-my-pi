@@ -51,6 +51,8 @@ export interface Args {
 	externalThinking?: boolean;
 	continue?: boolean;
 	resume?: string | true;
+	/** `--new`/`--new-session`: start a fresh session even when `autoResume` is enabled. */
+	newSession?: boolean;
 	fromClaude?: boolean;
 	fromCodex?: boolean;
 	help?: boolean;
@@ -240,6 +242,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.alias = arg.slice("--alias=".length);
 		} else if (arg === "--continue" || arg === "-c") {
 			result.continue = true;
+		} else if (arg === "--new" || arg === "--new-session") {
+			result.newSession = true;
 		} else if (arg === "--from-claude") {
 			result.fromClaude = true;
 		} else if (arg === "--from-codex") {
