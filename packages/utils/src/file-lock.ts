@@ -20,8 +20,19 @@ const DEFAULT_OPTIONS: Required<FileLockOptions> = {
 	retryDelayMs: 100,
 };
 
-function getLockPath(filePath: string): string {
-	return `${path.resolve(filePath)}.lock`;
+function getLockPath(filePath: string, platform: NodeJS.Platform = process.platform): string {
+	// Windows lock identities derive from this string byte-for-byte (the
+	// native named-mutex name hashes it), and a MISSING leaf cannot be
+	// canonicalized by the filesystem — so on a default case-insensitive
+	// Windows filesystem, differently-cased spellings of one file (mcp.json /
+	// MCP.JSON on a first write) would otherwise acquire different mutexes
+	// while their renames address the same physical target. Fold the identity
+	// to lowercase on win32 only: POSIX filesystems are case-sensitive, and
+	// darwin locks the shared `${filePath}.lock` file itself, where
+	// case-insensitivity already unifies the spellings.
+	const resolve = platform === "win32" ? path.win32.resolve : path.resolve;
+	const resolved = resolve(filePath);
+	return `${platform === "win32" ? resolved.toLowerCase() : resolved}.lock`;
 }
 
 function tryAcquireLock(lockPath: string): NativeFileLock | null {
