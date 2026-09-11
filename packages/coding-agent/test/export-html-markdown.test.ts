@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import * as vm from "node:vm";
 import { type Element, parseHTML } from "@oh-my-pi/pi-utils/dom";
-import { Marked } from "@oh-my-pi/pi-utils/marked";
 
-const [templateHtml, templateJs] = await Promise.all([
+const [templateHtml, templateJs, markedJs] = await Promise.all([
 	Bun.file(new URL("../src/export/html/template.html", import.meta.url)).text(),
 	Bun.file(new URL("../src/export/html/template.js", import.meta.url)).text(),
+	Bun.file(new URL("../src/export/html/vendor/marked.min.js", import.meta.url)).text(),
 ]);
 
 interface MinimalMessageEntry {
@@ -62,7 +62,6 @@ function renderSession(session: MinimalSession) {
 	const context = vm.createContext({
 		window,
 		document,
-		marked: new Marked(),
 		hljs: {
 			getLanguage: () => false,
 			highlight: () => ({ value: "" }),
@@ -78,6 +77,8 @@ function renderSession(session: MinimalSession) {
 		setTimeout: () => 0,
 		clearTimeout() {},
 	});
+	vm.runInContext(markedJs, context);
+	vm.runInContext("marked = new marked.Marked()", context);
 	vm.runInContext(templateJs, context);
 	return document;
 }
@@ -161,6 +162,21 @@ describe("HTML export Markdown", () => {
 		expect(rendered.querySelector("ul > li > em")?.textContent).toBe("italic");
 		expect(rendered.querySelector("ul > li > code")?.textContent).toBe("code");
 		expect(rendered.querySelector("ol > li > strong")?.textContent).toBe("nested");
+	});
+
+	test("renders bold inline code before indented code blocks in ordered lists", () => {
+		const rendered = renderMarkdown(`1. **\`Crew Ship\`** — description
+   \`\`\`json
+   { "crew": "..." }
+   \`\`\`
+
+2. **\`Hover Ship\`** — description
+   \`\`\`json
+   { "crew": "..." }
+   \`\`\``);
+
+		const names = [...rendered.querySelectorAll("ol > li > p > strong > code")].map(element => element.textContent);
+		expect(names).toEqual(["Crew Ship", "Hover Ship"]);
 	});
 
 	test("renders a deep valid conversation tree without overflowing the call stack", () => {
