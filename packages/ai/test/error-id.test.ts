@@ -51,6 +51,50 @@ describe("error-id classification", () => {
 		}
 	});
 
+	it("classifies bare stream-truncation diagnostics as transient + retryable", () => {
+		for (const errorMessage of ["unexpected EOF", "unexpected end of json input", "eof while parsing"]) {
+			const id = AIError.classifyMessage(message({ errorMessage }));
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+			expect(AIError.retriable(id)).toBe(true);
+		}
+	});
+
+	it("keeps a truncation phrase riding on a terminal 4xx terminal", () => {
+		const messages = [
+			message({ errorStatus: 400, errorMessage: "unexpected EOF" }),
+			message({ errorMessage: "HTTP 400: unexpected EOF" }),
+			message({ errorMessage: "400 Bad Request: eof while parsing" }),
+		];
+		for (const assistant of messages) {
+			const id = AIError.classifyMessage(assistant);
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+			expect(AIError.retriable(id)).toBe(false);
+		}
+	});
+
+	it("keeps a truncation on a retryable 408/429 status transient + retryable", () => {
+		for (const errorStatus of [408, 429]) {
+			const id = AIError.classifyMessage(message({ errorStatus, errorMessage: "unexpected EOF" }));
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+			expect(AIError.retriable(id)).toBe(true);
+		}
+	});
+
+	it("keeps low-signal truncation words unclassified on persisted text", () => {
+		for (const errorMessage of ["truncated", "end of file"]) {
+			const id = AIError.classifyMessage(message({ errorMessage }));
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+			expect(AIError.retriable(id)).toBe(false);
+		}
+	});
+
+	it("keeps Flag.Timeout when a timeout message also reads as a truncation", () => {
+		const id = AIError.classifyMessage(message({ errorMessage: "read timed out: unexpected EOF" }));
+		expect(AIError.is(id, AIError.Flag.Timeout)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
 	it("keeps authenticated connection rejections non-retryable", () => {
 		const assistant = message({
 			errorMessage: "Unable to connect: 401 Unauthorized",

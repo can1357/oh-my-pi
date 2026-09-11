@@ -9671,6 +9671,9 @@
 						"value": "deepseek-v4-flash-vision-exp"
 					}
 				],
+				"wire": {
+					"clampOutputToModelMax": true
+				},
 				"catalog": {
 					"timeBased": {
 						"offPeakMultiplier": 0.5,
@@ -9696,7 +9699,7 @@
 				}
 			},
 			{
-				"source": "providers/deepseek.kdl:44",
+				"source": "providers/deepseek.kdl:45",
 				"providers": [
 					"deepseek"
 				],
@@ -9714,7 +9717,7 @@
 				}
 			},
 			{
-				"source": "providers/deepseek.kdl:51",
+				"source": "providers/deepseek.kdl:52",
 				"providers": [
 					"deepseek"
 				],
@@ -9758,7 +9761,7 @@
 				}
 			},
 			{
-				"source": "providers/deepseek.kdl:84",
+				"source": "providers/deepseek.kdl:85",
 				"providers": [
 					"deepseek"
 				],
