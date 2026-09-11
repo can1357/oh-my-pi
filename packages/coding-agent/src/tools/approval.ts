@@ -36,7 +36,7 @@ export interface ToolApprovalDialogOptions {
 type NativeToolApprovalHandler = (
 	request: ToolApprovalRequest,
 	dialogOptions?: ToolApprovalDialogOptions,
-) => Promise<boolean>;
+) => Promise<boolean> | undefined;
 
 const nativeToolApprovalHandlers = new WeakMap<object, NativeToolApprovalHandler>();
 

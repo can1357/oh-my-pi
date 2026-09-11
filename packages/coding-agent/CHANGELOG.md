@@ -11,7 +11,7 @@
 
 - Added `advisor.maxNotesPerUpdate` setting and `WATCHDOG.yml` configuration (default `4`): allows reasoning verifiers to batch findings in a single review update without being rate-limited.
 - Headless browser tabs now freeze when a turn settles so idle animated/WebGL pages stop burning CPU/GPU, resuming automatically on next use; tabs idle past `browser.idleCloseSec` (default 30 minutes) are closed. `persist: true` on `browser.open` opts a tab out of both ([#8246](https://github.com/can1357/oh-my-pi/issues/8246) by [@H4vC](https://github.com/H4vC)).
-- RPC UI tool approvals now use typed, bounded request frames with immutable request/tool-call correlation instead of encoding authorization provenance in extension dialog text.
+- RPC UI tool approvals now use reciprocally negotiated, typed request frames with immutable request/tool-call correlation, reserved shell/edit/write identity, aggregate escaped-size bounds, and credential-safe metadata instead of encoding authorization provenance in extension dialog text.
 
 ### Fixed
 

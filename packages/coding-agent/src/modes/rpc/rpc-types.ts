@@ -28,7 +28,7 @@ import type { RpcMessagesPage } from "./rpc-messages";
 
 export type RpcCommand =
 	// Protocol
-	| { id?: string; type: "negotiate_protocol"; protocolVersion: number }
+	| { id?: string; type: "negotiate_protocol"; protocolVersion: number; clientCapabilities?: RpcClientCapabilities }
 
 	// Prompting
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
@@ -144,6 +144,11 @@ export interface RpcPromptResultFrame {
 	agentRun?: "current" | "future";
 }
 
+/** Client capabilities accepted only through `negotiate_protocol`. */
+export interface RpcClientCapabilities {
+	typedToolApprovals?: 1;
+}
+
 /** Opt-in server capabilities advertised in the ready frame.
  *
  *  Each key is versioned by an integer so a host gates on an exact value rather
@@ -156,8 +161,8 @@ export interface RpcPromptResultFrame {
  *    available with `forInterrupt`.
  *  - `promptResultVerdict: 1` — asynchronously scheduled prompts emit a
  *    correlated `prompt_result` with their final `agentInvoked` verdict.
- *  - `typedToolApprovals: 1` — tool gates use bounded native approval frames
- *    correlated by request and tool-call IDs. */
+ *  - `typedToolApprovals: 1` — server supports bounded native approval frames;
+ *    emission additionally requires reciprocal client opt-in during v2 negotiation. */
 export interface RpcServerFeatures {
 	activeTurnSteering?: 1;
 	promptResultVerdict?: 1;
@@ -232,7 +237,7 @@ export type RpcResponse =
 			type: "response";
 			command: "negotiate_protocol";
 			success: true;
-			data: { protocolVersion: 2 };
+			data: { protocolVersion: 2; clientCapabilities?: RpcClientCapabilities };
 	  }
 
 	// Prompting (async - events follow)
@@ -490,13 +495,23 @@ export type RpcToolApprovalValue =
 	| RpcToolApprovalValue[]
 	| { [key: string]: RpcToolApprovalValue };
 
+export type RpcToolApprovalIdentity =
+	| { kind: "shell"; command: string }
+	| { kind: "edit"; paths: string[]; content: string }
+	| { kind: "write"; path: string; content: string }
+	| { kind: "other" };
+
 export interface RpcToolApprovalDetail {
 	/** Tool-provided presentation lines. Informational only; never used for response correlation. */
 	readonly lines: string[];
-	/** True when credential-shaped fields or environment values were replaced. */
+	/** True when credential-shaped keys or values were replaced. */
 	readonly redacted: boolean;
-	/** True when any input or detail value was clipped to the protocol bounds. */
+	/** Fields whose original values were redacted. */
+	readonly redactedFields: string[];
+	/** True when any input or detail value was clipped or dropped to fit protocol bounds. */
 	readonly truncated: boolean;
+	/** Fields whose original values were clipped or dropped. */
+	readonly truncatedFields: string[];
 	readonly reason?: string;
 	readonly providerSafetyChecks?: string[];
 }
@@ -509,6 +524,7 @@ export interface RpcToolApprovalRequest {
 	readonly toolKind: ToolApprovalKind;
 	readonly toolName: string;
 	readonly tier: ToolTier;
+	readonly identity: RpcToolApprovalIdentity;
 	readonly input: { [key: string]: RpcToolApprovalValue };
 	readonly detail: RpcToolApprovalDetail;
 	readonly timeout?: number;

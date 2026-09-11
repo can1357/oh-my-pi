@@ -14,8 +14,9 @@ if (Bun.env.MOCK_RPC_IGNORE_SIGTERM === "1") {
 	process.on("SIGTERM", () => {});
 }
 
-const supportsProtocolV2 = Bun.env.MOCK_RPC_V2 === "1";
 const supportsToolApproval = Bun.env.MOCK_RPC_TOOL_APPROVAL === "1";
+const supportsProtocolV2 = Bun.env.MOCK_RPC_V2 === "1" || supportsToolApproval;
+let typedToolApprovalsEnabled = false;
 let pendingApprovalCommandId: string | undefined;
 const legacyState = {
 	thinkingLevel: "off",
@@ -95,6 +96,16 @@ for await (const raw of console) {
 			if (Bun.env.MOCK_RPC_IGNORE_COMMANDS === "1") continue;
 			const id = typeof frame.id === "string" ? frame.id : undefined;
 			if (supportsToolApproval && frame.type === "get_state") {
+				if (!typedToolApprovalsEnabled) {
+					writeFrame({
+						id,
+						type: "response",
+						command: "get_state",
+						success: false,
+						error: "typed tool approvals were not negotiated",
+					});
+					continue;
+				}
 				pendingApprovalCommandId = id;
 				writeFrame({
 					type: "tool_approval_request",
@@ -103,8 +114,15 @@ for await (const raw of console) {
 					toolKind: "shell",
 					toolName: "bash",
 					tier: "exec",
+					identity: { kind: "shell", command: "echo fixture" },
 					input: { command: "echo fixture" },
-					detail: { lines: ["Command: echo fixture"], truncated: false, redacted: false },
+					detail: {
+						lines: ["Command: echo fixture"],
+						truncated: false,
+						truncatedFields: [],
+						redacted: false,
+						redactedFields: [],
+					},
 				});
 				continue;
 			}
@@ -123,12 +141,20 @@ for await (const raw of console) {
 				continue;
 			}
 			if (frame.type === "negotiate_protocol" && frame.protocolVersion === 2) {
+				const requested =
+					frame.clientCapabilities && typeof frame.clientCapabilities === "object"
+						? (frame.clientCapabilities as Record<string, unknown>)
+						: {};
+				typedToolApprovalsEnabled = supportsToolApproval && requested.typedToolApprovals === 1;
 				writeFrame({
 					id,
 					type: "response",
 					command: frame.type,
 					success: true,
-					data: { protocolVersion: 2 },
+					data: {
+						protocolVersion: 2,
+						clientCapabilities: typedToolApprovalsEnabled ? { typedToolApprovals: 1 } : {},
+					},
 				});
 				protocolV2Enabled = true;
 				continue;

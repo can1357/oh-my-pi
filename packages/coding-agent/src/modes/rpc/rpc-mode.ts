@@ -49,6 +49,7 @@ import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents"
 import { RpcToolApprovalBridge } from "./tool-approval";
 import type {
 	RpcClearQueueResult,
+	RpcClientCapabilities,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
@@ -76,6 +77,11 @@ export type PendingExtensionRequest = {
 	resolve: (response: RpcExtensionUIResponse) => void;
 	reject: (error: Error) => void;
 };
+
+/** Accept only exact client capability versions from `negotiate_protocol`. */
+export function negotiateRpcClientCapabilities(requested: RpcClientCapabilities | undefined): RpcClientCapabilities {
+	return requested?.typedToolApprovals === 1 ? { typedToolApprovals: 1 } : {};
+}
 
 /** Pending extension UI request map that can fail closed when the RPC client disconnects. */
 export class RpcPendingExtensionRequests extends Map<string, PendingExtensionRequest> {
@@ -880,6 +886,7 @@ export async function runRpcMode(
 	const hostToolBridge = new RpcHostToolBridge(output);
 	const hostUriBridge = new RpcHostUriBridge(output);
 	const toolApprovalBridge = new RpcToolApprovalBridge(output);
+	let negotiatedClientCapabilities: RpcClientCapabilities = {};
 	const subagentRegistry = subagentEventBus ? new RpcSubagentRegistry(subagentEventBus, output) : undefined;
 
 	// Shutdown request flag (wrapped in object to allow mutation with const)
@@ -1075,7 +1082,9 @@ export async function runRpcMode(
 	// correct waiting promise regardless of which code path created the request.
 	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output);
 	registerNativeToolApprovalHandler(rpcUiContext, (request, dialogOptions) =>
-		toolApprovalBridge.request(request, dialogOptions),
+		negotiatedClientCapabilities.typedToolApprovals === 1
+			? toolApprovalBridge.request(request, dialogOptions)
+			: undefined,
 	);
 	setToolUIContext?.(rpcUiContext, true);
 
@@ -1133,7 +1142,11 @@ export async function runRpcMode(
 			case "negotiate_protocol": {
 				if (command.protocolVersion !== 2)
 					return error(id, "negotiate_protocol", `Unsupported RPC protocol version: ${command.protocolVersion}`);
-				return success(id, "negotiate_protocol", { protocolVersion: 2 });
+				negotiatedClientCapabilities = negotiateRpcClientCapabilities(command.clientCapabilities);
+				return success(id, "negotiate_protocol", {
+					protocolVersion: 2,
+					clientCapabilities: negotiatedClientCapabilities,
+				});
 			}
 
 			// =================================================================

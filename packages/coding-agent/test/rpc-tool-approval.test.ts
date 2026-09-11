@@ -3,6 +3,7 @@ import {
 	buildRpcToolApprovalRequest,
 	isRpcToolApprovalRequest,
 	RpcToolApprovalBridge,
+	RPC_TOOL_APPROVAL_MAX_FRAME_BYTES,
 	RPC_TOOL_APPROVAL_MAX_STRING_BYTES,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/tool-approval";
 import type {
@@ -51,12 +52,14 @@ describe("RPC tool approvals", () => {
 			toolKind: "shell",
 			detail: { reason: "Critical pattern detected", truncated: true, redacted: true },
 		});
+		expect(request.identity).toMatchObject({ kind: "shell", command: expect.any(String) });
 		expect(Buffer.byteLength(request.input.command as string, "utf8")).toBeLessThanOrEqual(
 			RPC_TOOL_APPROVAL_MAX_STRING_BYTES,
 		);
 		expect(request.input.env).toEqual({ API_TOKEN: "[redacted]", PATH: "[redacted]" });
 		expect(request.input.password).toBe("[redacted]");
 		expect(request.input.oauthToken).toBe("[redacted]");
+		expect(isRpcToolApprovalRequest({ ...request, identity: { ...request.identity, approved: true } })).toBe(false);
 		expect(isRpcToolApprovalRequest({ ...request, displayApproved: true })).toBe(false);
 		expect(isRpcToolApprovalRequest({ ...request, detail: { ...request.detail, approved: true } })).toBe(false);
 	});
@@ -81,8 +84,148 @@ describe("RPC tool approvals", () => {
 
 		expect(edit.input).toEqual({ path: "src/app.ts", old_string: "before", new_string: "after" });
 		expect(edit.detail.lines).toEqual(["File: src/app.ts"]);
+		expect(edit.identity).toEqual({ kind: "edit", paths: ["src/app.ts"], content: "after" });
 		expect(write.input).toEqual({ path: "src/new.ts", content: "export const ready = true;\n" });
 		expect(write.detail.lines).toEqual(["Path: src/new.ts", "Content:\nexport const ready = true;"]);
+		expect(write.identity).toEqual({ kind: "write", path: "src/new.ts", content: "export const ready = true;\n" });
+	});
+
+	test("reports required write identity truncation per field", () => {
+		const escaped = `\\"😀`.repeat(8_000);
+		const write = buildRpcToolApprovalRequest("truncated-write", {
+			toolCallId: "toolu_write_truncated",
+			toolName: "write",
+			toolKind: "write",
+			tier: "write",
+			input: { path: `src/${escaped}`, content: escaped },
+			details: [],
+		});
+
+		expect(write.identity.kind).toBe("write");
+		if (write.identity.kind !== "write") throw new Error("Expected write identity");
+		expect(write.identity.path.length).toBeGreaterThan(0);
+		expect(write.identity.content.length).toBeGreaterThan(0);
+		expect(write.detail.truncatedFields).toEqual(expect.arrayContaining(["identity.path", "identity.content"]));
+		expect(Buffer.byteLength(JSON.stringify(write), "utf8") + 1).toBeLessThanOrEqual(
+			RPC_TOOL_APPROVAL_MAX_FRAME_BYTES,
+		);
+	});
+
+	test("reserves shell identity before adversarial generic args and aggregate escaped detail", () => {
+		const escaped = `\\"😀`.repeat(4_000);
+		const input = Object.fromEntries([
+			...Array.from({ length: 31 }, (_, index) => [`noise_${index}`, escaped]),
+			["command", escaped],
+		]);
+		const approval: ToolApprovalRequest = {
+			...shellApproval,
+			input,
+			reason: escaped,
+			details: Array.from({ length: 16 }, () => escaped),
+			providerSafetyChecks: Array.from({ length: 16 }, () => escaped),
+		};
+
+		const first = buildRpcToolApprovalRequest("aggregate-1", approval);
+		const second = buildRpcToolApprovalRequest("aggregate-1", approval);
+
+		expect(first).toEqual(second);
+		expect(Buffer.byteLength(JSON.stringify(first), "utf8") + 1).toBeLessThanOrEqual(
+			RPC_TOOL_APPROVAL_MAX_FRAME_BYTES,
+		);
+		expect(first.identity.kind).toBe("shell");
+		if (first.identity.kind !== "shell") throw new Error("Expected shell identity");
+		expect(first.identity.command.length).toBeGreaterThan(0);
+		expect(first.detail.truncated).toBe(true);
+		expect(first.detail.truncatedFields).toContain("identity.command");
+		expect(first.detail.lines.length).toBeLessThan(16);
+		expect(isRpcToolApprovalRequest(first)).toBe(true);
+	});
+
+	test("keeps edit and write identity when required fields follow overflowing generic args", () => {
+		const noiseValue = `\\"`.repeat(8_000);
+		const noise = Array.from({ length: 32 }, (_, index) => [`noise_${index}`, noiseValue]);
+		const edit = buildRpcToolApprovalRequest("ordered-edit", {
+			toolCallId: "toolu_edit_ordered",
+			toolName: "edit",
+			toolKind: "edit",
+			tier: "write",
+			input: Object.fromEntries([...noise, ["paths", ["src/a.ts", "src/b.ts"]], ["input", "+changed"]]),
+			details: [],
+		});
+		const write = buildRpcToolApprovalRequest("ordered-write", {
+			toolCallId: "toolu_write_ordered",
+			toolName: "write",
+			toolKind: "write",
+			tier: "write",
+			input: Object.fromEntries([...noise, ["path", "src/out.ts"], ["content", "export const x = 1;"]]),
+			details: [],
+		});
+
+		expect(edit.identity).toEqual({ kind: "edit", paths: ["src/a.ts", "src/b.ts"], content: "+changed" });
+		expect(write.identity).toEqual({ kind: "write", path: "src/out.ts", content: "export const x = 1;" });
+		for (const frame of [edit, write]) {
+			expect(Buffer.byteLength(JSON.stringify(frame), "utf8") + 1).toBeLessThanOrEqual(
+				RPC_TOOL_APPROVAL_MAX_FRAME_BYTES,
+			);
+			expect(frame.detail.truncated).toBe(true);
+		}
+	});
+
+	test("fails closed when required tool identity is absent", () => {
+		expect(() =>
+			buildRpcToolApprovalRequest("missing-shell", { ...shellApproval, input: { cwd: "/workspace" } }),
+		).toThrow("required command identity");
+		expect(() =>
+			buildRpcToolApprovalRequest("missing-edit", {
+				...shellApproval,
+				toolKind: "edit",
+				toolName: "edit",
+				input: { paths: ["src/a.ts"] },
+			}),
+		).toThrow("required paths and content identity");
+		expect(() =>
+			buildRpcToolApprovalRequest("missing-write", {
+				...shellApproval,
+				toolKind: "write",
+				toolName: "write",
+				input: { path: "src/a.ts" },
+			}),
+		).toThrow("required path and content identity");
+	});
+
+	test("redacts infix credential keys and value-shaped secrets in every display field", () => {
+		const token = `ghp_${"a".repeat(36)}`;
+		const request = buildRpcToolApprovalRequest("redacted-1", {
+			...shellApproval,
+			input: {
+				command: `deploy ${token}`,
+				token_url: token,
+				secretName: token,
+				api_key_id: token,
+				passwordConfirm: token,
+				authorization_header_value: token,
+			},
+			reason: `token_url=${token}`,
+			details: [`Command token: ${token}`],
+			providerSafetyChecks: [`authorization=${token}`],
+		});
+		const serialized = JSON.stringify(request);
+
+		expect(serialized).not.toContain(token);
+		expect(request.detail.redacted).toBe(true);
+		expect(request.detail.redactedFields).toEqual(
+			expect.arrayContaining([
+				"identity.command",
+				"input.token_url",
+				"input.secretName",
+				"input.api_key_id",
+				"input.passwordConfirm",
+				"input.authorization_header_value",
+				"detail.reason",
+				"detail.lines",
+				"detail.providerSafetyChecks",
+			]),
+		);
 	});
 
 	test("binds a response to both immutable ids and consumes it exactly once", async () => {
@@ -148,7 +291,7 @@ describe("RPC tool approvals", () => {
 
 		controller.abort();
 
-		expect(await result).toBe(false);
+		await expect(result).rejects.toMatchObject({ name: "AbortError" });
 		expect(frames[1]).toEqual({
 			type: "tool_approval_cancel",
 			id: expect.any(String),

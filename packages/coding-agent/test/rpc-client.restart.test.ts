@@ -90,10 +90,16 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 			client.respondToToolApproval(event, { approved: true });
 		});
 
-		const state = await client.getState();
+		const firstState = await client.getState();
+		expect(firstState.sessionId).toBe("mock-session");
+		await client.stop();
+
+		await client.start();
+		expect(client.serverFeatures.typedToolApprovals).toBe(1);
+		const secondState = await client.getState();
 		unsubscribe();
-		expect(state.sessionId).toBe("mock-session");
-		expect(received).toEqual(["shell:bash:echo fixture"]);
+		expect(secondState.sessionId).toBe("mock-session");
+		expect(received).toEqual(["shell:bash:echo fixture", "shell:bash:echo fixture"]);
 	}, 20_000);
 
 	test("start() succeeds a second time after stop() on the same instance", async () => {

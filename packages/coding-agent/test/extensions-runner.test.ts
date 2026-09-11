@@ -2400,6 +2400,37 @@ describe("ExtensionRunner", () => {
 			delete globalState.__approvalEvents;
 		});
 
+		it("keeps extension UI select for clients without typed approval opt-in", async () => {
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const select = vi.fn(async () => "Approve");
+			const gatedNativeApproval = vi.fn(() => undefined);
+			initializeRunner(runner, select);
+			registerNativeToolApprovalHandler(runner.getUIContext(), gatedNativeApproval);
+
+			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
+			await (wrapper as ExtensionToolWrapper<any>).execute("call-legacy-approval", {}, undefined, undefined, {
+				sessionManager,
+				modelRegistry,
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort: () => {},
+				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+			});
+
+			expect(gatedNativeApproval).toHaveBeenCalledTimes(1);
+			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
+				"Approve",
+				"Deny",
+			]);
+		});
 		it("uses the native approval surface without converting provenance to display text", async () => {
 			const result = await loadTestExtensions();
 			const runner = new ExtensionRunner(
@@ -2441,7 +2472,7 @@ describe("ExtensionRunner", () => {
 					input: { command: "echo safe" },
 					details: [],
 				},
-				{ signal: undefined },
+				{ signal: undefined, onTimeout: expect.any(Function) },
 			);
 		});
 
@@ -2554,6 +2585,75 @@ describe("ExtensionRunner", () => {
 			]);
 			delete globalState.__deniedApprovalEvents;
 		});
+		it("distinguishes native abort and timeout from explicit denial", async () => {
+			const events: Array<{ approved: boolean; reason?: string }> = [];
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_approval_resolved", async (event) => {
+						globalThis.__nativeApprovalOutcomes.push({ approved: event.approved, reason: event.reason });
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "native-approval-outcomes.ts"), extCode);
+			const globalState = globalThis as typeof globalThis & { __nativeApprovalOutcomes?: typeof events };
+			globalState.__nativeApprovalOutcomes = events;
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			initializeRunner(runner, async () => "Deny");
+			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
+			const context = {
+				sessionManager,
+				modelRegistry,
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort: () => {},
+				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+			};
+
+			registerNativeToolApprovalHandler(runner.getUIContext(), (_request, options) => {
+				const pending = Promise.withResolvers<boolean>();
+				options?.signal?.addEventListener(
+					"abort",
+					() => pending.reject(new DOMException("approval interrupted", "AbortError")),
+					{ once: true },
+				);
+				return pending.promise;
+			});
+			const controller = new AbortController();
+			const aborted = (wrapper as ExtensionToolWrapper<any>).execute(
+				"call-native-abort",
+				{},
+				controller.signal,
+				undefined,
+				context,
+			);
+			await Promise.resolve();
+			controller.abort();
+			await expect(aborted).rejects.toMatchObject({ name: "AbortError", message: "approval interrupted" });
+
+			registerNativeToolApprovalHandler(runner.getUIContext(), (_request, options) => {
+				options?.onTimeout?.();
+				return Promise.resolve(false);
+			});
+			await expect(
+				(wrapper as ExtensionToolWrapper<any>).execute("call-native-timeout", {}, undefined, undefined, context),
+			).rejects.toThrow("Tool approval timed out: dangerous_tool");
+
+			expect(events).toEqual([
+				{ approved: false, reason: "approval interrupted" },
+				{ approved: false, reason: "approval timed out" },
+			]);
+			delete globalState.__nativeApprovalOutcomes;
+		});
+
 		it("emits resolved false when the approval prompt throws", async () => {
 			const events: Array<{ type: string; approved?: boolean; reason?: string }> = [];
 			const extCode = `

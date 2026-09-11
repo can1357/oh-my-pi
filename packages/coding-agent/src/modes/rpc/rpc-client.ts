@@ -24,6 +24,7 @@ import type {
 	RpcAvailableCommandsUpdateFrame,
 	RpcAvailableSlashCommand,
 	RpcClearQueueResult,
+	RpcClientCapabilities,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
@@ -477,7 +478,13 @@ export class RpcClient {
 			await readyPromise;
 			if (protocolV2Supported) {
 				protocolV2Enabled = true;
-				const response = await this.#send({ type: "negotiate_protocol", protocolVersion: 2 });
+				const clientCapabilities: RpcClientCapabilities =
+					this.#serverFeatures.typedToolApprovals === 1 ? { typedToolApprovals: 1 } : {};
+				const response = await this.#send({
+					type: "negotiate_protocol",
+					protocolVersion: 2,
+					clientCapabilities,
+				});
 				if (
 					!response.success ||
 					response.command !== "negotiate_protocol" ||
@@ -485,6 +492,11 @@ export class RpcClient {
 					response.data.protocolVersion !== 2
 				)
 					throw new Error("RPC protocol v2 negotiation failed");
+				if (clientCapabilities.typedToolApprovals === 1 && response.data.clientCapabilities !== undefined) {
+					const accepted = response.data.clientCapabilities;
+					if (!isRecord(accepted) || accepted.typedToolApprovals !== 1)
+						throw new Error("RPC server did not accept typed tool approvals");
+				}
 				this.#protocolVersion = 2;
 			}
 			if (this.#customTools.length > 0) {

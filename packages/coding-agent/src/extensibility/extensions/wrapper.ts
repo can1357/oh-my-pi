@@ -327,22 +327,28 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 
 			const uiContext = this.runner.getUIContext();
 			const providerSafetyChecks = safetyCheckLines(pendingSafetyChecks);
-			const nativeApproval = requestNativeToolApproval(
-				uiContext,
-				{
-					toolCallId,
-					toolName: this.tool.name,
-					toolKind: getToolApprovalKind(this.tool.name),
-					tier: resolved.tier,
-					input: resolvedArgs,
-					...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
-					details: getApprovalDetailLines(this.tool, resolvedArgs),
-					...(providerSafetyChecks.length > 0 ? { providerSafetyChecks } : {}),
-				},
-				{ signal },
-			);
+			let approvalTimedOut = false;
 			let approved: boolean;
 			try {
+				const nativeApproval = requestNativeToolApproval(
+					uiContext,
+					{
+						toolCallId,
+						toolName: this.tool.name,
+						toolKind: getToolApprovalKind(this.tool.name),
+						tier: resolved.tier,
+						input: resolvedArgs,
+						...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
+						details: getApprovalDetailLines(this.tool, resolvedArgs),
+						...(providerSafetyChecks.length > 0 ? { providerSafetyChecks } : {}),
+					},
+					{
+						signal,
+						onTimeout: () => {
+							approvalTimedOut = true;
+						},
+					},
+				);
 				if (nativeApproval) {
 					approved = await nativeApproval;
 				} else {
@@ -358,9 +364,14 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
 				throw err;
 			}
-			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
+			const denialReason = approvalTimedOut ? "approval timed out" : "denied by user";
+			await emitApprovalResolved(approved, approved ? undefined : denialReason);
 			if (!approved) {
-				throw new Error(`Tool call denied by user: ${this.tool.name}`);
+				throw new Error(
+					approvalTimedOut
+						? `Tool approval timed out: ${this.tool.name}`
+						: `Tool call denied by user: ${this.tool.name}`,
+				);
 			}
 			if (pendingSafetyChecks.length > 0) {
 				if (!context) throw new Error("Provider safety approval context is unavailable");

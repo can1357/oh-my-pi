@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "bun:test";
 import {
 	type PendingExtensionRequest,
+	negotiateRpcClientCapabilities,
 	requestRpcDialog,
 	requestRpcSelect,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
@@ -21,6 +22,13 @@ function resolveSelection(pendingRequests: Map<string, PendingExtensionRequest>,
 }
 
 describe("RPC extension UI", () => {
+	it("keeps typed approvals off until the client opts in exactly", () => {
+		expect(negotiateRpcClientCapabilities(undefined)).toEqual({});
+		expect(negotiateRpcClientCapabilities({})).toEqual({});
+		expect(negotiateRpcClientCapabilities({ typedToolApprovals: 1 })).toEqual({ typedToolApprovals: 1 });
+		expect(negotiateRpcClientCapabilities({ typedToolApprovals: 2 as never })).toEqual({});
+	});
+
 	it("keeps the label-only wire shape for bare options", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();

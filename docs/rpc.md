@@ -54,13 +54,20 @@ Parse `features` leniently. Unknown keys, a bumped version, a non-integer value,
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `activeTurnSteering: 1`  | `steer` honors `activeTurnOnly` and answers `data.accepted`; `abort` accepts `clearQueue: true`; and `clear_queue` accepts `forInterrupt`. |
 | `promptResultVerdict: 1` | Asynchronously scheduled prompts emit a correlated `prompt_result` with their final `agentInvoked` verdict.                                |
-| `typedToolApprovals: 1`  | Tool gates use native `tool_approval_request`/`tool_approval_response` frames with structured bounded input and two-ID binding.            |
+| `typedToolApprovals: 1`  | Server support for native approval frames; the client MUST reciprocally opt in during protocol v2 negotiation before the server emits them.             |
 
 Clients that support protocol v2 SHOULD immediately send:
 
 ```json
-{ "id": "protocol-1", "type": "negotiate_protocol", "protocolVersion": 2 }
+{
+	"id": "protocol-1",
+	"type": "negotiate_protocol",
+	"protocolVersion": 2,
+	"clientCapabilities": { "typedToolApprovals": 1 }
+}
 ```
+
+The server echoes accepted client capabilities in the success response. `typedToolApprovals` is disabled unless both sides send the exact value `1`; omission, another value, protocol v1, or a new connection retains legacy `extension_ui_request` selection for approvals.
 
 After the success response, oversized stdout objects are emitted losslessly as an uninterrupted sequence of `rpc_chunk` frames. Each chunk carries a base64 segment of the original UTF-8 JSON object:
 
@@ -704,7 +711,7 @@ If a dialog has a timeout, RPC mode resolves to a default value when timeout/abo
 
 ## Tool Approval Sub-Protocol
 
-RPC servers advertising `typedToolApprovals: 1` emit a native approval frame when a tool gate needs a human decision:
+`typedToolApprovals: 1` in the ready frame advertises server support only. The server emits native approvals only after the client sends `clientCapabilities.typedToolApprovals: 1` in a successful protocol v2 negotiation. Unopted protocol v1/v2 clients continue receiving the legacy `extension_ui_request` select flow.
 
 ```json
 {
@@ -714,17 +721,24 @@ RPC servers advertising `typedToolApprovals: 1` emit a native approval frame whe
 	"toolKind": "shell",
 	"toolName": "bash",
 	"tier": "exec",
+	"identity": { "kind": "shell", "command": "rm -rf build" },
 	"input": { "command": "rm -rf build", "cwd": "/workspace" },
 	"detail": {
 		"reason": "Critical pattern detected",
 		"lines": ["Command: rm -rf build"],
 		"truncated": false,
-		"redacted": false
+		"truncatedFields": [],
+		"redacted": false,
+		"redactedFields": []
 	}
 }
 ```
 
-`toolKind` is `shell`, `edit`, `write`, or `other`. `input` is a bounded, terminal-sanitized presentation copy derived from the exact post-extension input that will execute. Individual strings are capped at 8 KiB, collections at 32 items, nesting at four levels, and the complete frame at 64 KiB. Credential-shaped fields and all `env` values are replaced with `[redacted]`; `detail.redacted` reports replacement and `detail.truncated` reports clipping. `detail.lines` is presentation metadata only. Hosts MUST bind authorization to `id`, `toolCallId`, `toolName`, and the structured `input`, never parse the display lines.
+`toolKind` is `shell`, `edit`, `write`, or `other`. `identity` is reserved before generic arguments: shell carries its command, edit carries paths plus edit content, and write carries path plus content. If required identity is absent or cannot be represented, the gate fails closed. `input` is an additional bounded, terminal-sanitized presentation copy derived from the exact post-extension input.
+
+The complete escaped JSONL frame, including its newline, is capped at 64 KiB. Individual generic strings are capped at 8 KiB, collections at 32 items, and nesting at four levels. Overflow reduction is deterministic: presentation lines, reason, safety-check tail, then generic input tail are trimmed or dropped; reserved `identity` is never shed. `detail.truncatedFields` names every affected field.
+
+Credential-shaped key names are detected at any position after separator/case normalization, environment values are always replaced, and credential-shaped values are removed from input, identity, reason, detail lines, and safety checks. `detail.redactedFields` names affected fields and `detail.redacted` is true whenever replacement occurred. `detail.lines` remains presentation metadata only. Hosts MUST bind authorization to `id`, `toolCallId`, `toolName`, and `identity`, never parse display lines.
 
 Approve or deny by echoing both immutable IDs:
 
@@ -738,9 +752,9 @@ Cancellation uses the alternate response shape:
 { "type": "tool_approval_response", "id": "approval_7", "toolCallId": "toolu_123", "cancelled": true }
 ```
 
-Each matching response is consumed exactly once. Unknown IDs are ignored. A matching response with a mismatched `toolCallId`, conflicting decision fields, extra fields, or another malformed shape fails the approval closed. Local abort or timeout emits `tool_approval_cancel` with a fresh event `id`, `targetId` equal to the request `id`, and the original `toolCallId`; late responses are ignored.
+Each matching response is consumed exactly once. Unknown IDs are ignored. A matching response with a mismatched `toolCallId`, conflicting decision fields, extra fields, or another malformed shape fails closed. A caller abort emits `tool_approval_cancel` and rejects with `AbortError`; timeout resolves as a distinct timeout denial; explicit `approved: false` remains a user denial. Late responses are ignored.
 
-The bundled TypeScript `RpcClient` exposes `onToolApproval(listener)` and `respondToToolApproval(request, decision)`. Passing the received request object back to the response helper preserves both correlation IDs. `extension_ui_request` and `extension_ui_response` remain unchanged for ordinary extension questions.
+The bundled TypeScript `RpcClient` opts in when the server advertises support, exposes `onToolApproval(listener)` and `respondToToolApproval(request, decision)`, and repeats negotiation after restart. Passing the received request object back to the response helper preserves both correlation IDs. Ordinary extension questions continue using `extension_ui_request`/`extension_ui_response`.
 
 ## Host Tool Sub-Protocol
 
