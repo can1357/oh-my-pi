@@ -10252,7 +10252,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:5",
+				"source": "providers/google-antigravity.kdl:6",
 				"class": "anthropic",
 				"providers": [
 					"google-antigravity"
@@ -10263,7 +10263,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:13",
+				"source": "providers/google-antigravity.kdl:14",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity"
@@ -10279,7 +10279,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:17",
+				"source": "providers/google-antigravity.kdl:18",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity"
@@ -10307,7 +10307,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:27",
+				"source": "providers/google-antigravity.kdl:28",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity"
@@ -10325,7 +10325,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:33",
+				"source": "providers/google-antigravity.kdl:34",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity"
@@ -10346,7 +10346,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:39",
+				"source": "providers/google-antigravity.kdl:40",
 				"providers": [
 					"google-antigravity"
 				],
@@ -10366,7 +10366,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:43",
+				"source": "providers/google-antigravity.kdl:44",
 				"providers": [
 					"google-antigravity"
 				],
@@ -10381,7 +10381,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:47",
+				"source": "providers/google-antigravity.kdl:48",
 				"providers": [
 					"google-antigravity"
 				],
@@ -10397,7 +10397,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:52",
+				"source": "providers/google-antigravity.kdl:53",
 				"providers": [
 					"google-antigravity"
 				],
@@ -10413,6 +10413,15 @@
 						"low": 1001
 					},
 					"mode": "budget"
+				}
+			},
+			{
+				"source": "providers/google-antigravity.kdl:3",
+				"providers": [
+					"google-antigravity"
+				],
+				"catalog": {
+					"genericResourceExhaustedIsRateLimit": true
 				}
 			},
 			{

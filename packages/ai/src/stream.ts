@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isVertexExpressOpenAIUrl, isVertexRawPredictUrl, resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
 import {
@@ -1124,7 +1125,11 @@ function isRetryableUpstreamError(
 	// provider's own backoff layer instead of burning siblings.
 	if (AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)) return true;
 	if (status === 401 || (status === 403 && !isConcurrencyCapExclusion(status, message))) return true;
-	return isUsageLimitOutcome(status, message);
+	const rateLimitPolicy = {
+		genericResourceExhaustedIsRateLimit:
+			resolveModelPolicy(model).catalog.genericResourceExhaustedIsRateLimit === true,
+	};
+	return isUsageLimitOutcome(status, message, rateLimitPolicy);
 }
 
 function createAssistantAuthError(message: AssistantMessage): Error {

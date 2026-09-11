@@ -1,6 +1,7 @@
 // Provider-wire compat for "google-antigravity"; regenerated from the frozen census using deployment contract selectors.
 
 provider "google-antigravity" {
+	generic-resource-exhausted-is-rate-limit #true
 	class "anthropic" {
 		family "opus" {
 			thinking-mode "budget"

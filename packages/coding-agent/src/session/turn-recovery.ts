@@ -18,7 +18,12 @@ import type {
 	ThinkingContent,
 	ToolChoice,
 } from "@oh-my-pi/pi-ai";
-import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
+import {
+	calculateRateLimitBackoffMs,
+	parseRateLimitReason,
+	type RateLimitPolicy,
+	type RateLimitReason,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
@@ -610,7 +615,8 @@ export class TurnRecovery {
 		if (!recorded) {
 			const errorMessage = message.errorMessage || "Unknown error";
 			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
-			const retryAfterMs = parsedRetryAfterMs ?? calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
+			const retryAfterMs =
+				parsedRetryAfterMs ?? calculateRateLimitBackoffMs(this.#parseRateLimitReason(errorMessage));
 			recorded = (async (): Promise<UsageLimitOutcome> => {
 				const outcome = await this.#host.modelRegistry.authStorage.markUsageLimitReached(
 					activeModel.provider,
@@ -1173,8 +1179,12 @@ export class TurnRecovery {
 	 */
 	#classifyRetryMessage(message: AssistantMessage): number {
 		const activeModel = this.#host.model();
-		if (!activeModel || message.api === activeModel.api) {
-			return AIError.classifyMessage(message);
+		if (!activeModel) return AIError.classifyMessage(message);
+		const rateLimitPolicy = this.#rateLimitPolicy();
+		if (message.api === activeModel.api) {
+			const id = AIError.classifyMessage({ ...message, rateLimitPolicy });
+			message.errorId = id;
+			return id;
 		}
 
 		const id = AIError.classifyMessage({
@@ -1182,9 +1192,23 @@ export class TurnRecovery {
 			errorId: message.errorId,
 			errorMessage: message.errorMessage,
 			errorStatus: message.errorStatus,
+			rateLimitPolicy,
 		});
 		message.errorId = id;
 		return id;
+	}
+
+	#rateLimitPolicy(): RateLimitPolicy {
+		const activeModel = this.#host.model();
+		return {
+			genericResourceExhaustedIsRateLimit:
+				activeModel !== undefined &&
+				resolveModelPolicy(activeModel).catalog.genericResourceExhaustedIsRateLimit === true,
+		};
+	}
+
+	#parseRateLimitReason(errorMessage: string): RateLimitReason {
+		return parseRateLimitReason(errorMessage, this.#rateLimitPolicy());
 	}
 
 	#isUsagePreflightBlocked(message: AssistantMessage): boolean {
@@ -1532,7 +1556,7 @@ export class TurnRecovery {
 	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void {
 		let cooldownMs = retryAfterMs;
 		if (!cooldownMs || cooldownMs <= 0) {
-			const reason = parseRateLimitReason(errorMessage);
+			const reason = this.#parseRateLimitReason(errorMessage);
 			cooldownMs = reason === "UNKNOWN" ? 5 * 60 * 1000 : calculateRateLimitBackoffMs(reason);
 		}
 		this.#host.modelRegistry.suppressSelector(currentSelector, Date.now() + cooldownMs);
@@ -2144,7 +2168,7 @@ export class TurnRecovery {
 			options?.preserveFailedTurn === true ||
 			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall) || AIError.retriable(id)) &&
 				this.#unexecutedToolCallsReplaySafe(message));
-		const rateLimitReason = parseRateLimitReason(errorMessage);
+		const rateLimitReason = this.#parseRateLimitReason(errorMessage);
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);

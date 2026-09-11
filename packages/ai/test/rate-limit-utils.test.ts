@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { classify, Flag, is, isUsageLimit, retriable } from "@oh-my-pi/pi-ai/error/flags";
+import { classify, classifyMessage, Flag, is, isUsageLimit, retriable } from "@oh-my-pi/pi-ai/error/flags";
 import {
 	calculateRateLimitBackoffMs,
 	is402BillingCapBody,
@@ -9,7 +11,20 @@ import {
 	isUsageLimitOutcome,
 	isUsageLimitStatus,
 	parseRateLimitReason,
+	type RateLimitPolicy,
 } from "@oh-my-pi/pi-ai/error/rate-limit";
+
+const antigravityModel = getBundledModel("google-antigravity", "gemini-3.8-flash");
+const geminiCliModel = getBundledModel("google-gemini-cli", "gemini-3.1-pro-preview");
+if (!antigravityModel || !geminiCliModel) throw new Error("Expected bundled Google models");
+const antigravityRateLimitPolicy = {
+	genericResourceExhaustedIsRateLimit:
+		resolveModelPolicy(antigravityModel).catalog.genericResourceExhaustedIsRateLimit === true,
+} satisfies RateLimitPolicy;
+const geminiCliRateLimitPolicy = {
+	genericResourceExhaustedIsRateLimit:
+		resolveModelPolicy(geminiCliModel).catalog.genericResourceExhaustedIsRateLimit === true,
+} satisfies RateLimitPolicy;
 
 function googleRpc429(reason: string, retryDelay?: string, message = "Resource exhausted"): string {
 	const details: Array<Record<string, string>> = [
@@ -56,23 +71,57 @@ describe("parseRateLimitReason", () => {
 		).toBe("QUOTA_EXHAUSTED");
 	});
 
-	// Google's generic HTTP 429 boilerplate "Resource has been exhausted (e.g.
-	// check quota)." is a transient per-minute/per-region request throttle, not
-	// daily-quota exhaustion (which sends "exhausted your capacity … quota will
-	// reset" or ships structured google.rpc details). It must classify as
-	// RATE_LIMIT_EXCEEDED so the session retries on a 30s backoff instead of
-	// synthesizing a 30-min QUOTA_EXHAUSTED wait that trips retry.maxDelayMs and
-	// hard-fails users with quota left. Regression for #11689.
-	it("classifies generic 'Resource has been exhausted (e.g. check quota)' as RATE_LIMIT_EXCEEDED", () => {
-		expect(
-			parseRateLimitReason("Cloud Code Assist API error (429): Resource has been exhausted (e.g. check quota)."),
-		).toBe("RATE_LIMIT_EXCEEDED");
-		// Reporter's exact wire body (JSON, RESOURCE_EXHAUSTED status, no details).
-		expect(
-			parseRateLimitReason(
-				'Cloud Code Assist API error (429): {"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}',
-			),
-		).toBe("RATE_LIMIT_EXCEEDED");
+	// Google's generic HTTP 429 boilerplate is ambiguous globally. Antigravity
+	// policy identifies its detail-free form as a transient per-minute/per-region
+	// throttle, so the session retries on a 30s backoff instead of synthesizing a
+	// 30-min QUOTA_EXHAUSTED wait that trips retry.maxDelayMs (#11689).
+	it("scopes generic RESOURCE_EXHAUSTED transient handling to Antigravity policy", () => {
+		const text = "Cloud Code Assist API error (429): Resource has been exhausted (e.g. check quota).";
+		const body =
+			'Cloud Code Assist API error (429): {"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}';
+
+		expect(parseRateLimitReason(text)).toBe("QUOTA_EXHAUSTED");
+		expect(parseRateLimitReason(body)).toBe("QUOTA_EXHAUSTED");
+		expect(antigravityRateLimitPolicy.genericResourceExhaustedIsRateLimit).toBe(true);
+		expect(geminiCliRateLimitPolicy.genericResourceExhaustedIsRateLimit).toBe(false);
+		expect(parseRateLimitReason(text, antigravityRateLimitPolicy)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(parseRateLimitReason(body, antigravityRateLimitPolicy)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(parseRateLimitReason(body, geminiCliRateLimitPolicy)).toBe("QUOTA_EXHAUSTED");
+		const id = classifyMessage({
+			errorMessage: body,
+			errorStatus: 429,
+			rateLimitPolicy: antigravityRateLimitPolicy,
+		});
+		expect(is(id, Flag.Transient)).toBe(true);
+		expect(is(id, Flag.UsageLimit)).toBe(false);
+	});
+
+	it("preserves structured and textual quota evidence under Antigravity policy", () => {
+		const quotaFailure = `Cloud Code Assist API error (429): ${JSON.stringify({
+			error: {
+				code: 429,
+				message: "Resource has been exhausted (e.g. check quota).",
+				status: "RESOURCE_EXHAUSTED",
+				details: [
+					{
+						"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+						reason: "RATE_LIMIT_EXCEEDED",
+						domain: "cloudcode-pa.googleapis.com",
+					},
+					{
+						"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+						violations: [{ subject: "project:example", description: "Daily quota exhausted" }],
+					},
+				],
+			},
+		})}`;
+		const explicitText =
+			"Cloud Code Assist API error (429): Resource has been exhausted (e.g. check quota). Project quota exceeded.";
+
+		expect(parseRateLimitReason(quotaFailure, antigravityRateLimitPolicy)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, quotaFailure, antigravityRateLimitPolicy)).toBe(true);
+		expect(parseRateLimitReason(explicitText, antigravityRateLimitPolicy)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, explicitText, antigravityRateLimitPolicy)).toBe(true);
 	});
 
 	it("keeps genuine Antigravity daily-quota exhaustion as QUOTA_EXHAUSTED", () => {
@@ -476,13 +525,13 @@ describe("isUsageLimitOutcome", () => {
 		// UNKNOWN but carries a transient retry hint — body is informative,
 		// so we defer to parseRateLimitReason and stay out of the quota lane.
 		expect(isUsageLimitOutcome(429, "Please retry in 5s")).toBe(false);
-		// Google's generic RESOURCE_EXHAUSTED boilerplate is a transient throttle;
-		// it must not burn a sibling credential even though its JSON status token
-		// matches USAGE_LIMIT_PATTERN's `resource_exhausted` arm (#11689).
+		// Antigravity policy keeps the detail-free RESOURCE_EXHAUSTED boilerplate
+		// from burning a sibling credential (#11689).
 		expect(
 			isUsageLimitOutcome(
 				429,
 				'Cloud Code Assist API error (429): {"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}',
+				antigravityRateLimitPolicy,
 			),
 		).toBe(false);
 	});

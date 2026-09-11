@@ -15,6 +15,7 @@ import {
 	isUsageLimitStatus,
 	matchesUsageLimitText,
 	parseRateLimitReason,
+	type RateLimitPolicy,
 } from "./rate-limit";
 
 export const Flag = {
@@ -446,6 +447,7 @@ function classifyText(
 	api?: Api,
 	provider?: string,
 	modelId?: string,
+	rateLimitPolicy?: RateLimitPolicy,
 ): number {
 	let kinds = 0;
 	if (errorMessage) {
@@ -469,7 +471,7 @@ function classifyText(
 		const isOpaque = isOpaqueStatusBody(cleanMessage);
 
 		const isLimitStatus = isUsageLimitStatus(statusClean);
-		const reason = parseRateLimitReason(cleanMessage);
+		const reason = parseRateLimitReason(cleanMessage, rateLimitPolicy);
 		const is402BillingCap = statusClean === 402 && is402BillingCapBody(cleanMessage);
 		// Concurrency caps (e.g. Vertex "Online prediction concurrent requests
 		// quota exceeded") are shed-and-backoff, not credential-rotatable —
@@ -482,7 +484,7 @@ function classifyText(
 		if (
 			!concurrencyExcluded &&
 			(is402BillingCap ||
-				matchesUsageLimitText(cleanMessage) ||
+				matchesUsageLimitText(cleanMessage, rateLimitPolicy) ||
 				((statusClean === 403 || statusClean === undefined) && isAccountScopedCapText(cleanMessage)) ||
 				(isLimitStatus && (isOpaque || reason === "QUOTA_EXHAUSTED")))
 		) {
@@ -523,7 +525,7 @@ function classifyText(
 	return fallbackStatus ?? 0;
 }
 
-export function classify(error: unknown, api?: Api): number {
+export function classify(error: unknown, api?: Api, rateLimitPolicy?: RateLimitPolicy): number {
 	let kinds = 0;
 	const seen = new Set<object>();
 	const causeTokenEvidence = hasCauseTokenContextOverflowEvidence(error);
@@ -602,7 +604,15 @@ export function classify(error: unknown, api?: Api): number {
 			linkMessage = (link as { message: string }).message;
 		}
 
-		const textId = classifyText(linkMessage, status(link), causeTokenEvidence, api);
+		const textId = classifyText(
+			linkMessage,
+			status(link),
+			causeTokenEvidence,
+			api,
+			undefined,
+			undefined,
+			rateLimitPolicy,
+		);
 		kinds |= textId & KIND_MASK;
 
 		link = typeof link === "object" && "cause" in link ? (link as { cause: unknown }).cause : undefined;
@@ -729,6 +739,7 @@ export function classifyMessage(message: {
 	errorMessage?: string;
 	errorClassificationMessage?: string;
 	errorStatus?: number;
+	rateLimitPolicy?: RateLimitPolicy;
 }): number {
 	const existingId = message.errorId;
 	const currentStatus = message.errorStatus ?? statusFromId(existingId);
@@ -742,9 +753,18 @@ export function classifyMessage(message: {
 		message.api,
 		message.provider,
 		message.model,
+		message.rateLimitPolicy,
 	);
 
 	let kinds = ((existingId ?? 0) | textId) & KIND_MASK;
+	if (
+		message.rateLimitPolicy?.genericResourceExhaustedIsRateLimit === true &&
+		classificationMessage !== undefined &&
+		parseRateLimitReason(classificationMessage, message.rateLimitPolicy) === "RATE_LIMIT_EXCEEDED" &&
+		!matchesUsageLimitText(classificationMessage, message.rateLimitPolicy)
+	) {
+		kinds &= ~Flag.UsageLimit;
+	}
 	// Two-phase finalization: drop stale status-inferred payload bit when final text proves token overflow (#9235).
 	if (
 		currentStatus === 413 &&

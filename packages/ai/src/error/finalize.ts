@@ -3,6 +3,7 @@ import type { AbortSourceTracker } from "../utils/abort";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
 import { classify, classifyMessage, status } from "./flags";
 import { formatMessage } from "./format";
+import type { RateLimitPolicy } from "./rate-limit";
 
 /** Context a provider catch block hands to {@link finalize}. */
 export interface FinalizeOptions {
@@ -20,6 +21,8 @@ export interface FinalizeOptions {
 	rawRequestDump?: RawHttpRequestDump;
 	/** Captured non-2xx response body, used for status fallback and message detail. */
 	capturedErrorResponse?: CapturedHttpErrorResponse;
+	/** Provider-resolved policy for ambiguous rate-limit response bodies. */
+	rateLimitPolicy?: RateLimitPolicy;
 }
 
 /** The full bundle a provider assigns onto its `AssistantMessage` error fields. */
@@ -59,9 +62,10 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 		api: opts.api,
 		provider: opts.provider,
 		model: opts.model,
-		errorId: classify(error, opts.api),
+		errorId: classify(error, opts.api, opts.rateLimitPolicy),
 		errorMessage: message,
 		errorStatus: currentStatus,
+		rateLimitPolicy: opts.rateLimitPolicy,
 	});
 
 	return {

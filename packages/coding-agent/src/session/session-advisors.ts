@@ -34,6 +34,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { isUsageLimitOutcome, resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { extractHttpStatusFromError, extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
 import {
@@ -1434,14 +1435,19 @@ export class SessionAdvisors {
 
 		const currentModel = advisor.agent.state.model;
 		const message = assistantFailure?.errorMessage ?? (error instanceof Error ? error.message : String(error));
+		const rateLimitPolicy = {
+			genericResourceExhaustedIsRateLimit:
+				resolveModelPolicy(currentModel).catalog.genericResourceExhaustedIsRateLimit === true,
+		};
 		const errorId = assistantFailure
 			? AIError.classifyMessage({
 					api: currentModel.api,
 					errorId: assistantFailure.errorId,
 					errorMessage: message,
 					errorStatus: assistantFailure.errorStatus,
+					rateLimitPolicy,
 				})
-			: AIError.classify(error, currentModel.api);
+			: AIError.classify(error, currentModel.api, rateLimitPolicy);
 		if (AIError.is(errorId, AIError.Flag.Abort) || AIError.is(errorId, AIError.Flag.UserInterrupt)) return false;
 		// Text-ambiguous overflows waive the veto; usage-backed do not — see AIError.isTextAmbiguousContextOverflow (#9235).
 		const contextWindow = currentModel.contextWindow ?? 0;
@@ -1466,7 +1472,7 @@ export class SessionAdvisors {
 		const retryAfterMs = extractRetryHint(undefined, message);
 		const usageLimit =
 			AIError.is(errorId, AIError.Flag.UsageLimit) ||
-			isUsageLimitOutcome(extractHttpStatusFromError(error), message);
+			isUsageLimitOutcome(extractHttpStatusFromError(error), message, rateLimitPolicy);
 		if (usageLimit) {
 			const outcome = await this.#host.modelRegistry.authStorage.markUsageLimitReached(
 				currentModel.provider,

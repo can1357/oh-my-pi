@@ -14,6 +14,15 @@ export type RateLimitReason =
 	| "SERVER_ERROR"
 	| "UNKNOWN";
 
+/** Provider-resolved policy for ambiguous rate-limit response bodies. */
+export interface RateLimitPolicy {
+	/**
+	 * Treat Google's detail-free `Resource has been exhausted (e.g. check quota).`
+	 * boilerplate as a transient rate limit.
+	 */
+	genericResourceExhaustedIsRateLimit?: boolean;
+}
+
 const QUOTA_EXHAUSTED_BACKOFF_MS = 30 * 60 * 1000; // 30 min
 const RATE_LIMIT_EXCEEDED_BACKOFF_MS = 30 * 1000; // 30s
 const CONCURRENT_LIMIT_BACKOFF_MS = 5 * 1000; // 5s
@@ -101,15 +110,14 @@ export function isDashScopeTokenLimitText(errorMessage: string): boolean {
 }
 
 const GOOGLE_RPC_ERROR_INFO_TYPE = "type.googleapis.com/google.rpc.ErrorInfo";
+const GOOGLE_RPC_QUOTA_FAILURE_TYPE = "type.googleapis.com/google.rpc.QuotaFailure";
 const ANTIGRAVITY_MODEL_QUOTA_PATTERN = /\bexhausted your capacity on this model\b/i;
-// Google's canonical generic HTTP 429 body: "Resource has been exhausted (e.g.
-// check quota)." Google returns it for per-minute / per-region request throttles
-// on the Gemini / Cloud Code Assist API — a transient cap that clears within the
-// window, NOT daily-quota exhaustion. Genuine Antigravity daily exhaustion sends
-// the distinct ANTIGRAVITY_MODEL_QUOTA_PATTERN message or ships structured
-// google.rpc details, so the bare boilerplate must stay in the short-backoff
-// lane instead of synthesizing a 30-minute QUOTA_EXHAUSTED wait (#11689).
+// Google's canonical generic HTTP 429 body. Some Cloud Code Assist deployments
+// use it for transient per-minute / per-region throttles, but other Google
+// providers can pair the same sentence with quota evidence. Provider policy
+// decides whether a truly bare body enters the short-backoff lane.
 const GOOGLE_GENERIC_RESOURCE_EXHAUSTED_PATTERN = /\bresource has been exhausted\s*\(\s*e\.?g\.?\s*check quota\s*\)/i;
+const EXPLICIT_GOOGLE_QUOTA_EVIDENCE_PATTERN = /\b(?:quota|exhaust(?:ed|ion)|usage.?limit)\b/i;
 const LONG_RATE_LIMIT_DELAY_MS = 5 * 60 * 1000;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -143,6 +151,12 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 	}
 	if (!Array.isArray(error.details)) return undefined;
 
+	// QuotaFailure is authoritative regardless of detail ordering: Google can
+	// include it after a generic RATE_LIMIT_EXCEEDED ErrorInfo record.
+	for (const value of error.details) {
+		if (asRecord(value)?.["@type"] === GOOGLE_RPC_QUOTA_FAILURE_TYPE) return "QUOTA_EXHAUSTED";
+	}
+
 	for (const value of error.details) {
 		const detail = asRecord(value);
 		if (detail?.["@type"] !== GOOGLE_RPC_ERROR_INFO_TYPE || typeof detail.reason !== "string") continue;
@@ -175,17 +189,20 @@ function isQuotaExhaustedReason(reason: RateLimitReason): boolean {
 }
 
 /**
- * True for Google's bare generic RESOURCE_EXHAUSTED boilerplate ("Resource has
- * been exhausted (e.g. check quota).") when nothing authoritative overrides it.
- * Google emits this string for transient per-minute / per-region request
- * throttles, so — absent structured google.rpc details or the distinct
- * daily-quota "exhausted your capacity … quota will reset" wording — it must be
- * treated as a transient rate limit rather than daily-quota exhaustion (#11689).
+ * True when provider policy identifies Google's otherwise ambiguous boilerplate
+ * as a transient throttle and the response contains no stronger quota evidence.
  */
-function isGoogleGenericResourceExhaustedText(errorMessage: string): boolean {
+function isGoogleGenericResourceExhaustedText(errorMessage: string, policy?: RateLimitPolicy): boolean {
+	if (policy?.genericResourceExhaustedIsRateLimit !== true) return false;
 	if (!GOOGLE_GENERIC_RESOURCE_EXHAUSTED_PATTERN.test(errorMessage)) return false;
 	if (parseGoogleRpcRateLimitReason(errorMessage) !== undefined) return false;
-	return !(ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(errorMessage) || /\bquota will reset\b/i.test(errorMessage));
+	const body = parseJsonBody(errorMessage);
+	const error = asRecord(body?.error);
+	if (Array.isArray(error?.details) && error.details.length > 0) return false;
+	const residual = errorMessage
+		.replace(GOOGLE_GENERIC_RESOURCE_EXHAUSTED_PATTERN, "")
+		.replace(RESOURCE_EXHAUSTED_PATTERN, "");
+	return !EXPLICIT_GOOGLE_QUOTA_EVIDENCE_PATTERN.test(residual);
 }
 
 /**
@@ -198,7 +215,7 @@ function isGoogleGenericResourceExhaustedText(errorMessage: string): boolean {
  * Bare "resource exhausted" / "resource_exhausted" maps to MODEL_CAPACITY (transient, short wait).
  * Explicit details such as "quota exceeded" retain their normal classification.
  */
-export function parseRateLimitReason(errorMessage: string): RateLimitReason {
+export function parseRateLimitReason(errorMessage: string, policy?: RateLimitPolicy): RateLimitReason {
 	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage);
 	if (structuredReason !== undefined) return structuredReason;
 	const lowerWithStatus = errorMessage.toLowerCase();
@@ -214,12 +231,11 @@ export function parseRateLimitReason(errorMessage: string): RateLimitReason {
 		return "QUOTA_EXHAUSTED";
 	}
 
-	// Google's bare generic RESOURCE_EXHAUSTED boilerplate is a transient
-	// per-minute/per-region request throttle, not daily-quota exhaustion. Placed
-	// after the daily-quota short-circuit above so the specific "quota will reset"
-	// wording still wins; the generic string must not fall through to the generic
-	// "exhausted"/"quota" QUOTA branch below (#11689).
-	if (isGoogleGenericResourceExhaustedText(errorMessage)) {
+	// Provider policy may classify Google's bare RESOURCE_EXHAUSTED boilerplate
+	// as a transient per-minute/per-region throttle. The guard rejects structured
+	// details and residual quota text; the specific daily-quota branch above still
+	// wins before this deployment-specific exception (#11689).
+	if (isGoogleGenericResourceExhaustedText(errorMessage, policy)) {
 		return "RATE_LIMIT_EXCEEDED";
 	}
 
@@ -370,11 +386,15 @@ export function is402BillingCapBody(message: string | undefined): boolean {
  *     "Please retry in 5s") stay in the provider's own backoff / failure
  *     layer so transient or non-quota responses don't burn sibling credentials.
  */
-export function isUsageLimitOutcome(status: number | undefined, message: string | undefined): boolean {
+export function isUsageLimitOutcome(
+	status: number | undefined,
+	message: string | undefined,
+	policy?: RateLimitPolicy,
+): boolean {
 	const structuredReason = message ? parseGoogleRpcRateLimitReason(message) : undefined;
 	if (structuredReason !== undefined) return isQuotaExhaustedReason(structuredReason);
 	if (isConcurrencyCapExclusion(status, message)) return false;
-	if (message && matchesUsageLimitText(message)) return true;
+	if (message && matchesUsageLimitText(message, policy)) return true;
 	// A 403 is normally an auth failure, but several providers deliver an
 	// account-scoped cap with it (Devin/Codeium Connect `permission_denied`,
 	// GitHub Copilot). Devin's end-of-stream Connect trailer carries no HTTP
@@ -385,7 +405,7 @@ export function isUsageLimitOutcome(status: number | undefined, message: string 
 	if (status === 402 && is402BillingCapBody(message)) return true;
 	if (!isUsageLimitStatus(status)) return false;
 	if (!message || isOpaqueStatusBody(message)) return true;
-	const reason = parseRateLimitReason(message);
+	const reason = parseRateLimitReason(message, policy);
 	return isQuotaExhaustedReason(reason);
 }
 /**
@@ -422,14 +442,13 @@ export function isOpaqueStatusBody(message: string): boolean {
  * flag accessor). `flags.ts` consumes this to populate `Flag.UsageLimit`, and
  * {@link isUsageLimitOutcome} uses it for the account-rotation decision.
  */
-export function matchesUsageLimitText(errorMessage: string): boolean {
+export function matchesUsageLimitText(errorMessage: string, policy?: RateLimitPolicy): boolean {
 	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage);
 	if (structuredReason !== undefined) return isQuotaExhaustedReason(structuredReason);
 	if (isDashScopeTokenLimitText(errorMessage)) return false;
-	// The generic RESOURCE_EXHAUSTED boilerplate matches USAGE_LIMIT_PATTERN only
-	// via its "resource_exhausted" status token; it is a transient throttle, so
-	// it must not burn a sibling credential as a usage-limit outcome (#11689).
-	if (isGoogleGenericResourceExhaustedText(errorMessage)) return false;
+	// A provider policy can exclude only the detail-free boilerplate. Structured
+	// details and residual quota evidence remain credential-rotatable.
+	if (isGoogleGenericResourceExhaustedText(errorMessage, policy)) return false;
 	return (
 		USAGE_LIMIT_PATTERN.test(errorMessage) ||
 		CREDITS_EXHAUSTED_PATTERN.test(errorMessage) ||

@@ -6,6 +6,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
 	getAntigravityModelWireProfile,
@@ -1112,7 +1113,15 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
+			const result = await AIError.finalize(error, {
+				api: model.api,
+				signal: options?.signal,
+				rawRequestDump,
+				rateLimitPolicy: {
+					genericResourceExhaustedIsRateLimit:
+						resolveModelPolicy(model).catalog.genericResourceExhaustedIsRateLimit === true,
+				},
+			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
