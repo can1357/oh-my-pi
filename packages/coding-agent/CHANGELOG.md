@@ -4,12 +4,12 @@
 
 ### Added
 
-- Automatic prompt checkpoints and native `/rewind`, `/redo`, and `/rewind-recover` restore files and the matching conversation with persistent multi-level redo.
-- `/file-history` retains file-only diagnostics, capture controls and session history cleanup.
+- Automatic prompt checkpoints and native `/rewind`, `/redo`, and `/rewind-recover` restore files and the matching conversation with persistent multi-level redo. ([#11663](https://github.com/can1357/oh-my-pi/pull/11663) by [@S2thend](https://github.com/S2thend))
+- `/file-history` retains file-only diagnostics, capture controls and session history cleanup. ([#11663](https://github.com/can1357/oh-my-pi/pull/11663) by [@S2thend](https://github.com/S2thend))
 
 ### Fixed
 
-- `/rewind` hides withdrawn prompts from the picker and shows them again when restored with `/redo`.
+- `/rewind` hides withdrawn prompts from the picker and shows them again when restored with `/redo`. ([#11663](https://github.com/can1357/oh-my-pi/pull/11663) by [@S2thend](https://github.com/S2thend))
 
 ## [18.1.16] - 2026-09-09
 
