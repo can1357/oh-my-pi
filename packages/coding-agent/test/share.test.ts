@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { SessionData } from "../src/export/html";
@@ -639,11 +639,11 @@ describe("shareSession", () => {
 	// path (verified by probe); POSIX CI runs them.
 	const shimSkippedOnWindows = process.platform === "win32";
 
-	function writeFakeGh(script: string): { dir: string; gh: string } {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-share-gh-"));
+	async function writeFakeGh(script: string): Promise<{ dir: string; gh: string }> {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-share-gh-"));
 		const gh = path.join(dir, "gh");
-		fs.writeFileSync(gh, script);
-		fs.chmodSync(gh, 0o755);
+		await fs.writeFile(gh, script);
+		await fs.chmod(gh, 0o755);
 		return { dir, gh };
 	}
 
@@ -674,22 +674,22 @@ describe("shareSession", () => {
 			return result.notice;
 		} finally {
 			server.stop(true);
-			fs.rmSync(path.dirname(fakeGh), { recursive: true, force: true });
+			await fs.rm(path.dirname(fakeGh), { recursive: true, force: true });
 		}
 	}
 
 	test.skipIf(shimSkippedOnWindows)("gist fallback names gh unauthenticated (#11590)", async () => {
-		const { gh } = writeFakeGh("#!/bin/sh\nexit 1\n");
+		const { gh } = await writeFakeGh("#!/bin/sh\nexit 1\n");
 		expect(await gistFallbackNotice(gh)).toContain("gh is not authenticated");
 	});
 
 	test.skipIf(shimSkippedOnWindows)("gist fallback names gist creation failure (#11590)", async () => {
-		const { gh } = writeFakeGh('#!/bin/sh\nif [ "$1" = "gist" ]; then exit 1; fi\nexit 0\n');
+		const { gh } = await writeFakeGh('#!/bin/sh\nif [ "$1" = "gist" ]; then exit 1; fi\nexit 0\n');
 		expect(await gistFallbackNotice(gh)).toContain("gist creation failed");
 	});
 
 	test.skipIf(shimSkippedOnWindows)("gist fallback names unparseable gist id (#11590)", async () => {
-		const { gh } = writeFakeGh('#!/bin/sh\nif [ "$1" = "gist" ]; then echo "this is not a url"; fi\nexit 0\n');
+		const { gh } = await writeFakeGh('#!/bin/sh\nif [ "$1" = "gist" ]; then echo "this is not a url"; fi\nexit 0\n');
 		expect(await gistFallbackNotice(gh)).toContain("could not parse the gist id");
 	});
 });
