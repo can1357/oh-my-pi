@@ -33846,6 +33846,7 @@
 				"revision": "5.6.0"
 			},
 			"requiresGlyphTokenization": false,
+			"requiresToolResultImageHoisting": true,
 			"supportsComputerUse": false,
 			"compat": {
 				"promptCacheMode": "none",
@@ -33889,6 +33890,7 @@
 				"revision": "5.6.0"
 			},
 			"requiresGlyphTokenization": false,
+			"requiresToolResultImageHoisting": true,
 			"supportsComputerUse": false,
 			"compat": {
 				"promptCacheMode": "none",
@@ -33932,6 +33934,7 @@
 				"revision": "5.6.0"
 			},
 			"requiresGlyphTokenization": false,
+			"requiresToolResultImageHoisting": true,
 			"supportsComputerUse": false,
 			"compat": {
 				"promptCacheMode": "none",

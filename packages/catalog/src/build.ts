@@ -63,6 +63,12 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	} else {
 		delete model.requiresCursorToolSchemaProjection;
 	}
+	const requiresToolResultImageHoisting = catalog.requiresToolResultImageHoisting;
+	if (requiresToolResultImageHoisting === true) {
+		model.requiresToolResultImageHoisting = true;
+	} else {
+		delete model.requiresToolResultImageHoisting;
+	}
 	const contextPromotionTarget = catalog.contextPromotionTarget;
 	if (typeof contextPromotionTarget === "string" && model.contextPromotionTarget === undefined) {
 		model.contextPromotionTarget = contextPromotionTarget;

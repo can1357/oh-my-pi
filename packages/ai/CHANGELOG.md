@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Bedrock Converse rejecting every request that replays an image inside a tool result for the OpenAI models: `HTTP 400 "This model doesn't support the image field for user messages"`. Because compaction renders large tool output as PNG frames into exactly that position, any subagent whose own output was big enough to compact died on the next turn. The models do accept image input — the same bytes pass in a plain user block, and pass nested in a tool result when the model is reached over an OpenAI-compatible transport — so `convertMessages` now hoists those images into the enclosing user message, leaving a marker in the tool result. Anthropic on the same host accepts the nested form and is unchanged ([#11681](https://github.com/can1357/oh-my-pi/issues/11681)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed

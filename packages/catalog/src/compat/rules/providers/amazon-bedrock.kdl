@@ -15,6 +15,13 @@ provider "amazon-bedrock" {
 	}
 	class "openai" {
 		thinking-mode "effort"
+		// Converse refuses an image nested in `toolResult.content` for this class:
+		// ValidationException "This model doesn't support the image field for user
+		// messages" — the envelope, since tool results ride in a user message.
+		// A deployment contract, not a lineage truth: the same model accepts the
+		// same bytes via bedrock-mantle, and accepts them here as a sibling block
+		// of the same user message. Measured on sol and luna, 2026-09-11.
+		requires-tool-result-image-hoisting #true
 	}
 	class "deepseek" {
 		requires-reasoning-content-for-all-assistant-turns #true
