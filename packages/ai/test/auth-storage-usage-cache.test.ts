@@ -996,7 +996,7 @@ describe("AuthStorage usage cache: terminal refresh failure", () => {
 		if (row.credential.type !== "oauth") throw new Error("expected OAuth test credential");
 		row.credential.expires = Date.now() - 1000;
 		const store = makeStore([row]);
-		const cacheKey = "usage_cache:report:3:anthropic:default:oauth|account:account-3|email:expired@example.com";
+		const cacheKey = "usage_cache:report:4:anthropic:default:oauth|account:account-3|email:expired@example.com";
 		store.cache.set(cacheKey, {
 			value: JSON.stringify({ value: makeReport("expired@example.com"), expiresAt: 1 }),
 			expiresAtSec: Math.floor((Date.now() + 24 * 60 * 60_000) / 1000),
@@ -1054,7 +1054,7 @@ describe("AuthStorage usage cache: terminal refresh failure", () => {
 		};
 
 		const lastGood = makeReport("b@example.com");
-		const cacheKey = "usage_cache:report:3:anthropic:default:oauth|account:account-2|email:b@example.com";
+		const cacheKey = "usage_cache:report:4:anthropic:default:oauth|account:account-2|email:b@example.com";
 		cache.set(cacheKey, {
 			value: JSON.stringify({ value: lastGood, expiresAt: 1 }),
 			expiresAtSec: Math.floor((Date.now() + 24 * 60 * 60_000) / 1000),
