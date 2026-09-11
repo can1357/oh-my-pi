@@ -915,6 +915,50 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("retains an explicit fullWrite:false downgrade across an empty restriction on full-write origins", async () => {
+		const tempDir = makeTempDir();
+		const customAmbient: CustomTool = {
+			name: "custom_ambient",
+			label: "Custom Ambient",
+			description: "Ambient tool",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			loadMode: "discoverable",
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			toolNames: ["read", "write"],
+			customTools: [customAmbient],
+		});
+
+		try {
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+
+			await session.setActiveToolPresentation(["read", "custom_ambient"], ["custom_ambient"], {
+				fullWrite: false,
+			});
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			const savedEnabled = session.getEnabledToolNames();
+
+			await session.setActiveToolsByName(["read"]);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+
+			await session.setActiveToolsByName(savedEnabled);
+			expect(session.getEnabledToolNames()).toContain("write");
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("custom_ambient");
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			const restoredTarget = path.join(tempDir, "restored.txt");
+			await expect(
+				session.getToolByName("write")!.execute("restored", { path: restoredTarget, content: "x" }),
+			).rejects.toThrow("limited to the xd:// device transport");
+			expect(await Bun.file(restoredTarget).exists()).toBe(false);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("preserves preexisting dormant full-write authorization when presentation restoration fails", async () => {
 		const tempDir = makeTempDir();
 		const customAmbient: CustomTool = {

@@ -259,6 +259,12 @@ export class SessionTools {
 	 */
 	readonly #deviceOnlyWriteTransportAvailable: boolean;
 	#dormantFullWrite = false;
+	/**
+	 * An explicit `fullWrite: false` downgrade is in effect. Unlike the live
+	 * device-only flag, this survives empty restrictions so a later infer
+	 * restore cannot revive full access via the stale origin pin.
+	 */
+	#dormantDeviceOnlyWrite = false;
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
@@ -860,6 +866,7 @@ export class SessionTools {
 			(selectedTools.some(({ name }) => name === "write") ||
 				this.#deviceOnlyWriteTransportAvailable ||
 				this.#dormantFullWrite ||
+				this.#dormantDeviceOnlyWrite ||
 				hasCurrentFullWrite ||
 				(options?.fullWrite === false &&
 					selectedTools.some(
@@ -900,6 +907,7 @@ export class SessionTools {
 			toolNames.includes("write") &&
 			(options?.fullWrite === true ||
 				(options?.fullWrite !== false &&
+					this.#dormantDeviceOnlyWrite !== true &&
 					(this.#presentationPinnedToolNames?.has("write") === true ||
 						this.#runtimeSelectedToolNames?.has("write") === true)));
 		if (fullWriteSelected) {
@@ -1003,6 +1011,7 @@ export class SessionTools {
 		const previousCodeModeDirectToolNames = this.#codeModeDirectToolNames;
 		const previousToolPredicateNames = this.#toolPredicateNames;
 		const previousDormantFullWrite = this.#dormantFullWrite;
+		const previousDormantDeviceOnlyWrite = this.#dormantDeviceOnlyWrite;
 		const previousDeviceOnlyWrite = this.#isDeviceOnlyWrite?.() === true;
 		const writePreviouslyHadFullAccess =
 			options?.fullWrite === false
@@ -1018,13 +1027,14 @@ export class SessionTools {
 		const restoreDormantDeviceOnlyWrite =
 			!validToolNames.includes("write") &&
 			mountNames.size > 0 &&
-			(this.#deviceOnlyWriteTransportAvailable || writePreviouslyHadFullAccess) &&
+			(this.#deviceOnlyWriteTransportAvailable || writePreviouslyHadFullAccess || this.#dormantDeviceOnlyWrite) &&
 			!previousDeviceOnlyWrite &&
 			this.#setDeviceOnlyWrite !== undefined;
 		const deactivateDeviceOnlyWrite =
 			!validToolNames.includes("write") &&
 			!this.#deviceOnlyWriteTransportAvailable &&
 			!writePreviouslyHadFullAccess &&
+			this.#dormantDeviceOnlyWrite !== true &&
 			previousDeviceOnlyWrite &&
 			this.#setDeviceOnlyWrite !== undefined;
 		this.#enabledToolNames = new Set([...validToolNames, ...mountNames]);
@@ -1079,6 +1089,7 @@ export class SessionTools {
 			signal?.throwIfAborted();
 		} catch (error) {
 			this.#dormantFullWrite = previousDormantFullWrite;
+			this.#dormantDeviceOnlyWrite = previousDormantDeviceOnlyWrite;
 			if (restrictDeviceOnlyWrite || restoreDormantDeviceOnlyWrite)
 				this.#setDeviceOnlyWrite?.(previousDeviceOnlyWrite);
 			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
@@ -1092,6 +1103,7 @@ export class SessionTools {
 
 		if (this.#host.isDisposed()) {
 			this.#dormantFullWrite = previousDormantFullWrite;
+			this.#dormantDeviceOnlyWrite = previousDormantDeviceOnlyWrite;
 			if (restrictDeviceOnlyWrite || restoreDormantDeviceOnlyWrite)
 				this.#setDeviceOnlyWrite?.(previousDeviceOnlyWrite);
 			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
@@ -1122,11 +1134,27 @@ export class SessionTools {
 				this.#notifyToolRosterDelta(previousActiveToolNames, appliedNames);
 				this.#lastAppliedToolSignature = frozenSignature;
 			}
-			if (fullWriteSelected) {
+			if (fullWriteSelected || options?.fullWrite === true) {
 				this.#dormantFullWrite = false;
-				this.#setDeviceOnlyWrite?.(false);
+				this.#dormantDeviceOnlyWrite = false;
+				if (fullWriteSelected) this.#setDeviceOnlyWrite?.(false);
 			} else {
 				this.#dormantFullWrite = writePreviouslyHadFullAccess;
+				if (
+					options?.fullWrite === false &&
+					(previousDeviceOnlyWrite || restrictDeviceOnlyWrite || restoreDormantDeviceOnlyWrite)
+				) {
+					this.#dormantDeviceOnlyWrite = true;
+				} else if (writePreviouslyHadFullAccess) {
+					this.#dormantDeviceOnlyWrite = false;
+				} else if (
+					options?.fullWrite !== false &&
+					!restrictDeviceOnlyWrite &&
+					!restoreDormantDeviceOnlyWrite &&
+					!previousDeviceOnlyWrite
+				) {
+					this.#dormantDeviceOnlyWrite = false;
+				}
 				if (restrictDeviceOnlyWrite || restoreDormantDeviceOnlyWrite) {
 					this.#setDeviceOnlyWrite?.(true);
 				} else if (deactivateDeviceOnlyWrite) {
@@ -1461,7 +1489,7 @@ export class SessionTools {
 						this.#runtimeSelectedToolNames?.has("write") !== true &&
 						((this.#host.planModeEnabled() && (!writeSelected || deviceOnlyWriteActive)) ||
 							(!this.#dormantFullWrite &&
-								deviceOnlyWriteActive &&
+								(deviceOnlyWriteActive || this.#dormantDeviceOnlyWrite === true) &&
 								(retainedMountedDevice || (writeSelected && retainedDeferrableTool)))));
 		const previousRuntimeSelectedToolNames = this.#runtimeSelectedToolNames;
 		this.#runtimeSelectedToolNames = new Set(
