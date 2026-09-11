@@ -1551,10 +1551,23 @@ async function spawnTabWorker(): Promise<WorkerHandle> {
 }
 
 function wrapBunWorker(worker: Worker): WorkerHandle {
+	// Bun's `postMessage` throws `InvalidStateError: Worker has been terminated`
+	// once the worker is gone. `send` runs from abort/cleanup listeners — the eval
+	// idle watchdog aborting an in-flight browser run while a tab teardown, recycle,
+	// or force-kill has already terminated the worker is a real interleaving — and a
+	// throw from inside a listener escapes as a process-level uncaught exception.
+	// A dead worker is a no-op destination: classify the send once, then drop them.
+	let terminated = false;
 	return {
 		mode: "worker",
 		send(msg, transferList) {
-			worker.postMessage(msg, { transfer: transferList ?? [] });
+			if (terminated) return;
+			try {
+				worker.postMessage(msg, { transfer: transferList ?? [] });
+			} catch (error) {
+				if (!isWorkerGoneError(error)) throw error;
+				terminated = true;
+			}
 		},
 		onMessage(handler) {
 			const wrap = (event: MessageEvent): void => handler(event.data as WorkerOutbound);
@@ -1573,9 +1586,20 @@ function wrapBunWorker(worker: Worker): WorkerHandle {
 			};
 		},
 		async terminate() {
+			terminated = true;
 			worker.terminate();
 		},
 	};
+}
+
+/**
+ * True for Bun's post-`terminate()` `postMessage` rejection (`InvalidStateError`,
+ * message "Worker has been terminated"). Matching on both spellings keeps a
+ * runtime that reports it as a plain `Error` from being swallowed silently.
+ */
+function isWorkerGoneError(error: unknown): boolean {
+	const text = String(error ?? "");
+	return text.includes("InvalidStateError") || text.includes("Worker has been terminated");
 }
 
 /**
@@ -1704,6 +1728,11 @@ export function initializeTabWorkerForTest(
 	deadlineStart: number = performance.now(),
 ): Promise<ReadyInfo> {
 	return initializeTabWorker(worker, payload, timeoutMs, deadlineStart);
+}
+
+/** Exposes the real Bun `Worker` transport so its post-`terminate()` contract is testable. */
+export function wrapBunWorkerForTest(worker: Worker): WorkerHandle {
+	return wrapBunWorker(worker);
 }
 
 function errorFromWorkerEvent(event: ErrorEvent): Error {
