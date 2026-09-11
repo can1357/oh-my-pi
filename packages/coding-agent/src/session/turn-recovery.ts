@@ -89,6 +89,31 @@ const PREMATURE_STREAM_CLOSE_ERROR_RE =
 const IMMUTABLE_ANTHROPIC_THINKING_ERROR_PATTERN =
 	/messages\.\d+\.content\.\d+.*\b(?:thinking|redacted_thinking)\b.*\blatest assistant message cannot be modified\b/is;
 
+/**
+ * A rate-limit whose provider-requested wait dwarfs any transient per-minute
+ * cap is really an account/usage cap in disguise. Anthropic tier weekly caps
+ * (Fable/Mythos/Opus/Sonnet) surface as a generic `429 rate_limit_error`
+ * rather than `usage_limit_reached`, so the central classifier tags them
+ * `Transient`, not `UsageLimit`. Left as transient, recovery sleeps the
+ * multi-hour `retry-after` and fails at `retry.maxDelayMs` instead of rotating
+ * to a healthy sibling account.
+ *
+ * Kept deliberately narrow: only fires for a transient (non-usage-limit)
+ * rate-limit whose parsed retry-after exceeds `maxDelayMs` — the longest we
+ * would ever sleep-and-retry the same account — so genuine per-minute limits
+ * (retry-after of seconds) keep their existing shed-and-backoff behavior.
+ */
+export function isRotatableRateLimitCap(
+	errorKindId: number,
+	parsedRetryAfterMs: number | undefined,
+	maxDelayMs: number,
+): boolean {
+	if (AIError.is(errorKindId, AIError.Flag.UsageLimit)) return false;
+	if (!AIError.is(errorKindId, AIError.Flag.Transient)) return false;
+	if (parsedRetryAfterMs === undefined || maxDelayMs <= 0) return false;
+	return parsedRetryAfterMs > maxDelayMs;
+}
+
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
 }
@@ -604,12 +629,22 @@ export class TurnRecovery {
 		if (message.stopReason !== "error") return false;
 		const id = this.#classifyRetryMessage(message);
 		const activeModel = this.#host.model();
-		if (!activeModel || !AIError.is(id, AIError.Flag.UsageLimit)) return false;
+		if (!activeModel) return false;
+		const errorMessage = message.errorMessage || "Unknown error";
+		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
+		// A long-`retry-after` rate-limit is an account cap in disguise (e.g.
+		// Anthropic tier weekly caps return a generic `rate_limit_error`, not
+		// `usage_limit_reached`); route it through credential rotation instead
+		// of sleeping the multi-hour window and failing at `retry.maxDelayMs`.
+		const rotatableRateLimitCap = isRotatableRateLimitCap(
+			id,
+			parsedRetryAfterMs,
+			this.#host.settings.getGroup("retry").maxDelayMs,
+		);
+		if (!AIError.is(id, AIError.Flag.UsageLimit) && !rotatableRateLimitCap) return false;
 
 		let recorded = this.#usageLimitOutcomes.get(message);
 		if (!recorded) {
-			const errorMessage = message.errorMessage || "Unknown error";
-			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
 			const retryAfterMs = parsedRetryAfterMs ?? calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
 			recorded = (async (): Promise<UsageLimitOutcome> => {
 				const outcome = await this.#host.modelRegistry.authStorage.markUsageLimitReached(
