@@ -1667,6 +1667,10 @@ export class AuthStorage {
 	 */
 	setAccountPriorityResolver(resolver: ((provider: string) => readonly string[] | undefined) | undefined): void {
 		this.#accountPriorityResolver = resolver;
+		for (const provider of this.#sessionLastCredential.keys()) {
+			this.#sessionLastCredential.get(provider)?.clear();
+			this.#clearProviderSessionCredentialCache(provider);
+		}
 	}
 
 	/**
@@ -1678,6 +1682,8 @@ export class AuthStorage {
 		} else {
 			this.#accountPriorities.set(provider, priority);
 		}
+		this.#sessionLastCredential.get(provider)?.clear();
+		this.#clearProviderSessionCredentialCache(provider);
 	}
 
 	/**
@@ -5321,16 +5327,19 @@ export class AuthStorage {
 			sessionPreferredIndex !== undefined &&
 			sessionPreferredCanRefreshOrUse &&
 			!this.#isCredentialBlocked(provider, providerKey, sessionPreferredIndex, blockScopes);
-		const shouldRank = checkUsage && (!sessionPreferredIsAvailable || !sessionPreferredIsWarm || hasPlanRequirement);
+		const priority = this.getAccountPriority(provider);
+		const hasPriority = priority !== undefined && priority.length > 0;
+		const shouldRank =
+			(checkUsage && (!sessionPreferredIsAvailable || !sessionPreferredIsWarm || hasPlanRequirement)) ||
+			(hasPriority && checkUsage);
 		// When ranking, seed the pinned credential first in the evaluation order so it wins genuine
 		// ties (the ranked comparator falls back to `orderPos`) without overriding a strictly-better
 		// sibling — this respects the residual value of a same-account shared static prefix that other
 		// workspace traffic may have kept warm, while still rotating away from a clearly-worse account.
-		const priority = this.getAccountPriority(provider);
-		const baseRankingOrder = priority && priority.length > 0 ? order : credentials.map((_credential, index) => index);
-		let rankingOrder = shouldRank && sessionId ? (priority && priority.length > 0 ? order : baseRankingOrder) : order;
+		const baseRankingOrder = hasPriority ? order : credentials.map((_credential, index) => index);
+		let rankingOrder = shouldRank && sessionId ? (hasPriority ? order : baseRankingOrder) : order;
 		const sessionPreferredRankingPos =
-			shouldRank && sessionId && sessionPreferredIndex !== undefined && !hasPlanRequirement
+			shouldRank && sessionId && sessionPreferredIndex !== undefined && !hasPlanRequirement && !hasPriority
 				? credentials.findIndex(entry => entry.index === sessionPreferredIndex)
 				: -1;
 		if (sessionPreferredRankingPos > 0) {
@@ -5365,7 +5374,7 @@ export class AuthStorage {
 		// On the warm skip path the candidate list follows the round-robin `order`, not the pin, so
 		// hoist the pinned credential to the front to actually reuse it. When ranking ran, the pin is
 		// already a mere tie-break via `rankingOrder`; do not override the ranked result here.
-		if (!shouldRank && sessionPreferredIndex !== undefined && !hasPlanRequirement) {
+		if (!shouldRank && sessionPreferredIndex !== undefined && !hasPlanRequirement && !hasPriority) {
 			const sessionPreferredCandidate = candidates.findIndex(
 				candidate =>
 					!this.#isCredentialBlocked(provider, providerKey, candidate.selection.index, blockScopes) &&

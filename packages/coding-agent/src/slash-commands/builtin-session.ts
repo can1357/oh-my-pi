@@ -233,7 +233,9 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return commandConsumed();
 			}
 			if (verb === "priority") {
-				const result = await handleAccountPriorityCommand(rest, runtime.session);
+				const result = await handleAccountPriorityCommand(rest, runtime.session, {
+					defaultToSessionProvider: true,
+				});
 				await runtime.output(result);
 				return commandConsumed();
 			}
@@ -258,7 +260,9 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			if (verb === "priority") {
 				if (rest) {
-					const result = await handleAccountPriorityCommand(rest, runtime.ctx.session);
+					const result = await handleAccountPriorityCommand(rest, runtime.ctx.session, {
+						defaultToSessionProvider: true,
+					});
 					runtime.ctx.showStatus(result);
 				} else {
 					await runtime.ctx.showAccountPrioritySelector();

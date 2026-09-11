@@ -195,4 +195,69 @@ describe("AuthStorage account priority", () => {
 		authStorage.setAccountPriority("test-provider", ["acct-1"]);
 		expect(await authStorage.getApiKey("test-provider", "s2")).toBe("access-acct-1");
 	});
+
+	test("configured priority overrides existing session assignment upon order change", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		await authStorage.set("test-provider", [
+			{ type: "oauth", ...createCredential("account-a", "a@example.com") },
+			{ type: "oauth", ...createCredential("account-b", "b@example.com") },
+		]);
+
+		// Initially resolves to account A
+		const key1 = await authStorage.getApiKey("test-provider", "same-session");
+		expect(key1).toBe("access-account-a");
+
+		// Change priority to B -> A
+		authStorage.setAccountPriority("test-provider", ["b@example.com", "a@example.com"]);
+
+		// Same session must now resolve to account B
+		const key2 = await authStorage.getApiKey("test-provider", "same-session");
+		expect(key2).toBe("access-account-b");
+	});
+
+	test("supports multi-org accounts sharing the same email without collapsing priorities", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		await authStorage.set("anthropic", [
+			{
+				type: "oauth",
+				access: "access-org-personal",
+				refresh: "refresh-1",
+				expires: Date.now() + HOUR_MS,
+				accountId: "acct-1",
+				email: "same@example.com",
+				orgId: "org-personal",
+			},
+			{
+				type: "oauth",
+				access: "access-org-team",
+				refresh: "refresh-2",
+				expires: Date.now() + HOUR_MS,
+				accountId: "acct-2",
+				email: "same@example.com",
+				orgId: "org-team",
+			},
+		]);
+
+		const rows = store.listAuthCredentials("anthropic");
+		const personalRow = rows.find(
+			r => r.credential.type === "oauth" && "orgId" in r.credential && r.credential.orgId === "org-personal",
+		);
+		const teamRow = rows.find(
+			r => r.credential.type === "oauth" && "orgId" in r.credential && r.credential.orgId === "org-team",
+		);
+		if (!personalRow || !teamRow) throw new Error("expected both rows");
+
+		// Prioritize team over personal via id:<credentialId>
+		authStorage.setAccountPriority("anthropic", [`id:${teamRow.id}`, `id:${personalRow.id}`]);
+
+		const accounts = authStorage.listOAuthAccounts("anthropic");
+		const personalAcct = accounts.find(a => a.credentialId === personalRow.id);
+		const teamAcct = accounts.find(a => a.credentialId === teamRow.id);
+
+		expect(teamAcct?.priority).toBe(1);
+		expect(personalAcct?.priority).toBe(2);
+
+		const apiKey = await authStorage.getApiKey("anthropic", "session-org-test");
+		expect(apiKey).toBe("access-org-team");
+	});
 });

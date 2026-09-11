@@ -25,7 +25,11 @@ export function resolveTargetProvider(
 	return { providerId: currentProvider, providerName: matched?.name ?? currentProvider };
 }
 
-export function formatAccountPriorityList(providerName: string, accounts: readonly SessionPinAccount[]): string {
+export function formatAccountPriorityList(
+	providerId: string,
+	providerName: string,
+	accounts: readonly SessionPinAccount[],
+): string {
 	if (accounts.length === 0) {
 		return `No stored accounts for ${providerName}. Use /login to add one.`;
 	}
@@ -37,28 +41,40 @@ export function formatAccountPriorityList(providerName: string, accounts: readon
 	}
 	lines.push(
 		"",
-		`Set priority: /account priority ${providerName.toLowerCase()} <order...> (e.g. /account priority ${providerName.toLowerCase()} 2 1)`,
-		`Clear priority: /account priority ${providerName.toLowerCase()} clear`,
+		`Set priority: /account priority ${providerId} <order...> (e.g. /account priority ${providerId} 2 1)`,
+		`Clear priority: /account priority ${providerId} clear`,
 	);
 	return lines.join("\n");
 }
 
-export async function handleAccountPriorityCommand(args: string, session: AgentSession): Promise<string> {
+export async function handleAccountPriorityCommand(
+	args: string,
+	session: AgentSession,
+	options?: { defaultToSessionProvider?: boolean },
+): Promise<string> {
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
 	let providerToken: string | undefined;
 	let orderTokens: string[] = [];
 
-	if (tokens.length > 0) {
-		const candidate = tokens[0]!;
-		const allProviders = getOAuthProviders();
-		const isProvider = allProviders.some(
-			p => p.id.toLowerCase() === candidate.toLowerCase() || p.name.toLowerCase() === candidate.toLowerCase(),
+	const allProviders = getOAuthProviders();
+	const currentSessionProvider = session.model?.provider;
+
+	if (options?.defaultToSessionProvider) {
+		orderTokens = tokens;
+	} else if (tokens.length > 0) {
+		const first = tokens[0]!;
+		const isRegisteredProvider = allProviders.some(
+			p => p.id.toLowerCase() === first.toLowerCase() || p.name.toLowerCase() === first.toLowerCase(),
 		);
-		if (isProvider || !/^\d+$/.test(candidate)) {
-			providerToken = candidate;
+		if (isRegisteredProvider) {
+			providerToken = first;
 			orderTokens = tokens.slice(1);
-		} else {
+		} else if (currentSessionProvider) {
+			// First token is not a registered provider name; treat as order/clear token for current session provider
 			orderTokens = tokens;
+		} else {
+			providerToken = first;
+			orderTokens = tokens.slice(1);
 		}
 	}
 
@@ -88,7 +104,7 @@ export async function handleAccountPriorityCommand(args: string, session: AgentS
 	}
 
 	if (orderTokens.length === 0) {
-		return formatAccountPriorityList(providerName, accounts);
+		return formatAccountPriorityList(providerId, providerName, accounts);
 	}
 
 	const selectors = orderTokens
@@ -115,7 +131,8 @@ export async function handleAccountPriorityCommand(args: string, session: AgentS
 		}
 	}
 
-	const prioritySelectors = matchedAccounts.map(acct => acct.email ?? acct.accountId ?? String(acct.credentialId));
+	// Persist unambiguous selector id:<credentialId> so same-email / multi-org accounts remain distinct
+	const prioritySelectors = matchedAccounts.map(acct => `id:${acct.credentialId}`);
 
 	const currentPriorities = (settings.get("auth.accountPriority") as Record<string, string[]>) ?? {};
 	const updated = { ...currentPriorities, [providerId]: prioritySelectors };
@@ -140,5 +157,5 @@ export async function handleAccountListCommand(args: string, session: AgentSessi
 	const authStorage = session.modelRegistry.authStorage;
 	await authStorage.reload();
 	const accounts = toSessionPinAccounts(authStorage.listOAuthAccounts(providerId, session.sessionId));
-	return formatAccountPriorityList(providerName, accounts);
+	return formatAccountPriorityList(providerId, providerName, accounts);
 }

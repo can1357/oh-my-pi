@@ -2293,15 +2293,29 @@ export class SelectorController {
 			return;
 		}
 
+		const sortedAccounts = [...accounts].sort((a, b) => {
+			const pA = a.priority ?? Number.POSITIVE_INFINITY;
+			const pB = b.priority ?? Number.POSITIVE_INFINITY;
+			if (pA !== pB) return pA - pB;
+			return a.position - b.position;
+		});
+
 		this.showSelector(done => {
 			const selector = new AccountPrioritySelectorComponent(
 				providerName,
-				accounts,
+				sortedAccounts,
 				account => {
 					done();
-					const otherAccounts = accounts.filter(a => a.credentialId !== account.credentialId);
+					const otherAccounts = accounts
+						.filter(a => a.credentialId !== account.credentialId)
+						.sort((a, b) => {
+							const pA = a.priority ?? Number.POSITIVE_INFINITY;
+							const pB = b.priority ?? Number.POSITIVE_INFINITY;
+							if (pA !== pB) return pA - pB;
+							return a.position - b.position;
+						});
 					const reordered = [account, ...otherAccounts];
-					const prioritySelectors = reordered.map(a => a.email ?? a.accountId ?? String(a.credentialId));
+					const prioritySelectors = reordered.map(a => `id:${a.credentialId}`);
 					const currentPriorities = (settings.get("auth.accountPriority") as Record<string, string[]>) ?? {};
 					const updated = { ...currentPriorities, [providerId]: prioritySelectors };
 					settings.set("auth.accountPriority", updated);

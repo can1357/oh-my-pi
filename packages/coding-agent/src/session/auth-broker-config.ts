@@ -32,6 +32,7 @@ import {
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { getAgentDir } from "@oh-my-pi/pi-utils";
 import { resolveConfigValue } from "../config/resolve-config-value";
+import { settings } from "../config/settings";
 import type { AuthStorage } from "./auth-storage";
 
 export { type AuthBrokerClientConfig, getAuthBrokerTokenFilePath };
@@ -84,13 +85,15 @@ export function resolveAuthBrokerConfig(): Promise<AuthBrokerClientConfig | null
  */
 function resolveAccountPriority(provider: string): readonly string[] | undefined {
 	try {
-		const { settings } = require("../config/settings");
 		const map = settings.get("auth.accountPriority") as Record<string, string[]> | undefined;
 		if (map && Array.isArray(map[provider]) && map[provider].length > 0) {
 			return map[provider];
 		}
-	} catch {
-		// settings singleton not yet initialized
+	} catch (error) {
+		if (error instanceof Error && error.message.includes("Settings not initialized")) {
+			return undefined;
+		}
+		throw error;
 	}
 	return undefined;
 }
