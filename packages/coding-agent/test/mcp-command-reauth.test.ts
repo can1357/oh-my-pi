@@ -73,7 +73,6 @@ function whenEscapeInstalled(editor: { onEscape?: (() => void) | undefined }): P
 	});
 	return installed.promise;
 }
-
 function createController(authStorage: AuthStorage, mcpManagerOverrides: McpManagerOverrides = {}) {
 	const prepareConfig = vi.fn(async (config: MCPServerConfig) => config);
 	const mcpManager = createMcpManagerStub({ prepareConfig, ...mcpManagerOverrides });

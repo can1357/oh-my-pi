@@ -1,8 +1,11 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/settings-selector";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { SEARCH_PROVIDER_CHOICES } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 
 beforeAll(async () => {
 	await initTheme();
@@ -210,6 +213,304 @@ describe("multiselect settings (array-of-enum)", () => {
 		sendMouse(comp, 0, targetRow, "m");
 
 		expect(settings.get("providers.webSearchOrder")).toEqual([secondChoice!.value, firstChoice!.value]);
+	});
+
+	it("keeps a provider in the global search order when only the project layer excludes it", async () => {
+		resetSettingsForTest();
+		const tempDir = TempDir.createSync("@pi-settings-multiselect-scope-");
+		try {
+			const projectDir = tempDir.join("project");
+			const agentDir = tempDir.join("agent");
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ providers: { webSearchExclude: [firstChoice!.value] } }, null, 2),
+			);
+			await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("providers.webSearchOrder", [firstChoice!.value, secondChoice!.value], "global");
+
+			// The exclusion exists only on the project layer.
+			expect(settings.get("providers.webSearchExclude")).toEqual([firstChoice!.value]);
+			expect(settings.getGlobalValue("providers.webSearchExclude")).toEqual([]);
+
+			const comp = new SettingsSelectorComponent(
+				{
+					availableThinkingLevels: [],
+					thinkingLevel: undefined,
+					availableThemes: ["dark"],
+					providers: [],
+					cwd: projectDir,
+				},
+				{
+					onChange: () => {},
+					onCancel: () => {},
+				},
+			);
+
+			// Switch to global scope: the project-only exclusion must not filter
+			// the global order's options or silently drop the provider on toggle.
+			comp.handleInput("\x1bs");
+			for (const ch of "web search provider order") comp.handleInput(ch);
+			comp.handleInput("\n");
+			expect(comp.render(120).join("\n")).toContain(firstChoice!.label);
+
+			comp.handleInput("\x1b[B");
+			comp.handleInput(" ");
+			expect(settings.getGlobalValue("providers.webSearchOrder")).toEqual([firstChoice!.value]);
+		} finally {
+			resetSettingsForTest();
+			await tempDir.remove();
+		}
+	});
+
+	it("rebuilds an open multi-select after a skipped same-key project save", async () => {
+		resetSettingsForTest();
+		const tempDir = TempDir.createSync("@pi-settings-multiselect-resync-");
+		try {
+			const projectDir = tempDir.join("project");
+			const agentDir = tempDir.join("agent");
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ providers: { webSearchExclude: [firstChoice!.value] } }, null, 2),
+			);
+			await Settings.init({ cwd: projectDir, agentDir });
+
+			const comp = new SettingsSelectorComponent(
+				{
+					availableThinkingLevels: [],
+					thinkingLevel: undefined,
+					availableThemes: ["dark"],
+					providers: [],
+					cwd: projectDir,
+				},
+				{
+					onChange: () => {},
+					onCancel: () => {},
+				},
+			);
+
+			for (const ch of "excluded web search providers") comp.handleInput(ch);
+			comp.handleInput("\n");
+			comp.handleInput(" ");
+			expect(settings.get("providers.webSearchExclude")).toEqual([]);
+
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ providers: { webSearchExclude: [secondChoice!.value] } }, null, 2),
+			);
+			await settings.flush();
+
+			expect(settings.get("providers.webSearchExclude")).toEqual([secondChoice!.value]);
+			const menu = Bun.stripANSI(comp.render(120).join("\n"));
+			expect(menu).toContain(secondChoice!.label);
+			expect(menu).not.toMatch(new RegExp(`●\\s+${firstChoice!.label}`));
+
+			comp.handleInput(" ");
+			expect(settings.get("providers.webSearchExclude")).toEqual([secondChoice!.value, firstChoice!.value]);
+		} finally {
+			resetSettingsForTest();
+			await tempDir.remove();
+		}
+	});
+
+	it("keeps the open multi-select cursor after an ordinary project save", async () => {
+		resetSettingsForTest();
+		const tempDir = TempDir.createSync("@pi-settings-multiselect-cursor-");
+		try {
+			const projectDir = tempDir.join("project");
+			const agentDir = tempDir.join("agent");
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ providers: { webSearchExclude: [firstChoice!.value] } }, null, 2),
+			);
+			await Settings.init({ cwd: projectDir, agentDir });
+
+			const comp = new SettingsSelectorComponent(
+				{
+					availableThinkingLevels: [],
+					thinkingLevel: undefined,
+					availableThemes: ["dark"],
+					providers: [],
+					cwd: projectDir,
+				},
+				{
+					onChange: () => {},
+					onCancel: () => {},
+				},
+			);
+
+			for (const ch of "excluded web search providers") comp.handleInput(ch);
+			comp.handleInput("\n");
+			comp.handleInput("\x1b[B");
+			comp.handleInput(" ");
+			expect(settings.get("providers.webSearchExclude")).toEqual([firstChoice!.value, secondChoice!.value]);
+
+			await settings.flush();
+			expect(settings.get("providers.webSearchExclude")).toEqual([firstChoice!.value, secondChoice!.value]);
+
+			comp.handleInput(" ");
+			expect(settings.get("providers.webSearchExclude")).toEqual([firstChoice!.value]);
+		} finally {
+			resetSettingsForTest();
+			await tempDir.remove();
+		}
+	});
+
+	it("keeps in-progress text after adopting an unrelated project setting", async () => {
+		resetSettingsForTest();
+		const tempDir = TempDir.createSync("@pi-settings-text-sibling-");
+		try {
+			const projectDir = tempDir.join("project");
+			const agentDir = tempDir.join("agent");
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ providers: { webSearchExclude: [firstChoice!.value] } }, null, 2),
+			);
+			await Settings.init({ cwd: projectDir, agentDir });
+
+			const comp = new SettingsSelectorComponent(
+				{
+					availableThinkingLevels: [],
+					thinkingLevel: undefined,
+					availableThemes: ["dark"],
+					providers: [],
+					cwd: projectDir,
+				},
+				{
+					onChange: () => {},
+					onCancel: () => {},
+				},
+			);
+
+			for (const ch of "image upload command") comp.handleInput(ch);
+			comp.handleInput("\n");
+			for (const ch of "/tmp/upload") comp.handleInput(ch);
+			expect(Bun.stripANSI(comp.render(120).join("\n"))).toContain("/tmp/upload");
+
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ providers: { webSearchExclude: [secondChoice!.value] } }, null, 2),
+			);
+			settings.set("git.enabled", false, "project");
+			await settings.flush();
+
+			expect(settings.get("providers.webSearchExclude")).toEqual([secondChoice!.value]);
+			expect(Bun.stripANSI(comp.render(120).join("\n"))).toContain("/tmp/upload");
+
+			comp.handleInput("\n");
+			expect(settings.get("images.urls.command")).toBe("/tmp/upload");
+		} finally {
+			resetSettingsForTest();
+			await tempDir.remove();
+		}
+	});
+
+	it("keeps in-progress global text after adopting a project same-key edit", async () => {
+		resetSettingsForTest();
+		const tempDir = TempDir.createSync("@pi-settings-text-global-adopt-");
+		try {
+			const projectDir = tempDir.join("project");
+			const agentDir = tempDir.join("agent");
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ images: { urls: { command: "/tmp/project" } } }, null, 2));
+			await Settings.init({ cwd: projectDir, agentDir });
+
+			const comp = new SettingsSelectorComponent(
+				{
+					availableThinkingLevels: [],
+					thinkingLevel: undefined,
+					availableThemes: ["dark"],
+					providers: [],
+					cwd: projectDir,
+				},
+				{
+					onChange: () => {},
+					onCancel: () => {},
+				},
+			);
+
+			settings.set("images.urls.command", "/tmp/queued", "project");
+			for (const ch of "image upload command") comp.handleInput(ch);
+			comp.handleInput("\x1bs");
+			expect(Bun.stripANSI(comp.render(120).join("\n"))).toContain("Settings · global");
+			comp.handleInput("\n");
+			for (const ch of "/tmp/global-draft") comp.handleInput(ch);
+			expect(Bun.stripANSI(comp.render(120).join("\n"))).toContain("/tmp/global-draft");
+
+			await Bun.write(projectConfigPath, YAML.stringify({ images: { urls: { command: "/tmp/disk" } } }, null, 2));
+			await settings.flush();
+
+			expect(settings.get("images.urls.command")).toBe("/tmp/disk");
+			expect(Bun.stripANSI(comp.render(120).join("\n"))).toContain("/tmp/global-draft");
+
+			comp.handleInput("\n");
+			expect(settings.getGlobalValue("images.urls.command")).toBe("/tmp/global-draft");
+			expect(settings.get("images.urls.command")).toBe("/tmp/disk");
+		} finally {
+			resetSettingsForTest();
+			await tempDir.remove();
+		}
+	});
+
+	it("releases text-input mode when an adopted sibling hides the open editor", async () => {
+		resetSettingsForTest();
+		const tempDir = TempDir.createSync("@pi-settings-text-hidden-row-");
+		try {
+			const projectDir = tempDir.join("project");
+			const agentDir = tempDir.join("agent");
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						memory: { backend: "hindsight" },
+						hindsight: { apiUrl: "http://localhost:8888" },
+						ask: { enabled: true },
+					},
+					null,
+					2,
+				),
+			);
+			await Settings.init({ cwd: projectDir, agentDir });
+
+			const comp = new SettingsSelectorComponent(
+				{
+					availableThinkingLevels: [],
+					thinkingLevel: undefined,
+					availableThemes: ["dark"],
+					providers: [],
+					cwd: projectDir,
+				},
+				{
+					onChange: () => {},
+					onCancel: () => {},
+				},
+			);
+
+			for (const ch of "hindsight api url") comp.handleInput(ch);
+			comp.handleInput("\n");
+			for (const ch of "/tmp/hindsight-draft") comp.handleInput(ch);
+			expect(Bun.stripANSI(comp.render(120).join("\n"))).toContain("/tmp/hindsight-draft");
+
+			settings.set("ask.enabled", false, "project");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ memory: { backend: "off" }, ask: { enabled: true } }, null, 2),
+			);
+			await settings.flush();
+
+			expect(settings.get("memory.backend")).toBe("off");
+			expect(Bun.stripANSI(comp.render(120).join("\n"))).not.toContain("Hindsight API URL");
+
+			comp.handleInput("\x1bs");
+			expect(Bun.stripANSI(comp.render(120).join("\n"))).toContain("Settings · global");
+		} finally {
+			resetSettingsForTest();
+			await tempDir.remove();
+		}
 	});
 });
 

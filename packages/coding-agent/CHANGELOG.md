@@ -6,22 +6,66 @@
 
 - The `remote` compaction method now covers Claude: Anthropic server-side compaction (`compact-2026-01-12` beta) runs behind the existing `compaction.methodOrder` / `compaction.remoteEnabled` gates for first-party Anthropic models, persists its plain-text summary with a native replay payload that later Anthropic turns send back as a `compaction` block, and falls through to the next configured method on failure like OpenAI server compaction.
 
-### Fixed
+### Changed
 
+- The `providers.cacheRetention` `auto` setting now keeps Anthropic OAuth subscriber sessions on 1h prompt-cache retention and API keys on 5m, instead of 5m for both ([#11667](https://github.com/can1357/oh-my-pi/pull/11667) by [@camjac251](https://github.com/camjac251)).
+
+### Fixed
+- Fixed `/settings` leaving the project-effective appearance after adopting a theme or status-line edit while previewing another scope.
+- Fixed `/settings` keeping the previous scope's theme after Alt+S onto an unloadable Dark/Light mapping.
+- Fixed `/settings` leaving a hovered theme after canceling an unloadable Dark/Light Theme submenu.
+- Fixed `/settings` previewing project glyphs and color-blind colors while browsing a different scope.
+- Fixed `/settings` dropping custom status-line segment options when closing the overlay.
+- Fixed `/settings` leaving a stale live theme or status preview after adopting a search-mode appearance submenu edit.
+- Fixed project saves leaving live browser and computer tools on the rejected local value after adopting a newer disk edit.
+- Fixed project-cleared provider request limits leaking `null` tombstones through `Settings.get()` and `omp config get --json`.
+- Fixed project saves leaving the live advisor status-line indicator stale after adopting an `advisor.enabled` disk edit.
+- Fixed conversation-flow setting signals reapplying queue modes onto unrelated Settings clones.
+- Fixed `SettingsManager.create()` missing a loaded instance when `cwd` or `agentDir` is relative.
+- Fixed persisted queue-mode changes restoring unrelated live-only conversation modes.
+- Fixed shadowed global queue-mode writes resetting the live session back to the project override.
+- Fixed `/settings` leaving a scoped theme preview after close when the effective theme name cannot load.
+- Fixed `/settings` trapping Tab and Alt+S after an adopted disk edit hid an open text editor.
+- Fixed project saves leaving already-rendered OSC 8 links on a rejected `tui.hyperlinks` value.
+- Fixed `/settings` discarding an in-progress global editor after adopting a project disk edit.
+- Fixed `/settings` discarding in-progress editors after adopting an unrelated disk edit.
+- Fixed `/settings` keeping a stale multi-select submenu after adopting a newer disk edit.
+- Fixed `/settings` resetting an open multi-select cursor after an ordinary project save.
+- Fixed project inherit treating the native `.omp/config.yml` as a non-native source when cwd is relative.
+- Fixed `/settings` copying an unchanged inherited credential into `.omp/config.yml`.
+- Fixed `/settings` project-scope record edits copying inherited keys, inheriting only a subset of migrated aliases, skipping the initial appearance preview, and re-persisting queue-mode choices globally.
+- Fixed `/settings` rendering unsanitized repository names in the project-scope title.
+- Fixed project saves leaving live git-status TUI state on the rejected local value after adopting a newer disk edit.
+- Fixed overlapping project saves dropping a later edit after the in-flight save rejected.
+- Fixed overlapping project saves leaving live session state on an adopted disk value after a later same-key edit persisted.
+- Fixed project saves discarding a second same-key edit when a sibling disk edit landed during debounce.
+- Fixed `/settings` scoped status-line previews omitting segment options from the selected layer.
+- Fixed `/settings` leaving a scoped status-line preview after close, and project saves overwriting newer same-key disk edits without firing adopted-change hooks.
+- Fixed project saves keeping a rejected local model-role override or blaming `.omp/config.yml` after adopting a newer on-disk role or inherited `shellPath`.
+- Fixed project inherit leaving a legacy flat `theme` override, and project saves treating an alias-backed clear as unconflicted when a newer legacy alias landed on disk.
+- Fixed project inherit leaving a quoted-dotted `features.unexpectedStopDetection` alias, and skipped project queue-mode saves leaving the live session on the rejected local value.
+- Fixed skipped project thinking and memory saves leaving the live session on the rejected local value.
+- Fixed project inherit leaving mnemosyne, hindsight, and Exa aliases, and skipped autocompleteMaxVisible saves leaving the editor on the rejected local value.
+- Fixed project saves leaving live session/editor state, original runtime model roles, or a stale project-config flag after adopting a sibling disk edit, role clear, or deleted `.omp/config.yml`.
+- Fixed project saves resetting a temporary `/thinking` level when adopting an unrelated session-runtime sibling edit.
+- Fixed project edits to a renamed native object dropping sibling legacy fields.
+- Fixed project inherit of one renamed native field dropping sibling legacy fields.
+- Fixed adopted project settings reapplying live session state across Settings clones, and `/settings` keeping stale row snapshots after a skipped project save.
+- Fixed project saves leaving live sampling parameters on the rejected local value after adopting a newer disk edit.
+- Fixed project saves leaving live omit-thinking and auto-compact session state on the rejected local value after adopting a newer disk edit.
+- Fixed project saves leaving the live auto-compact status indicator stale after adopting a `compaction.methodOrder` disk edit.
+- Fixed project saves leaving live web-search eligibility, tool-activity visibility, remaining display toggles, MCP notification subscriptions, composer shape, spelling, and TUI tightness/scrollback/mermaid state on the rejected local value after adopting a newer disk edit.
+- Fixed `/settings` shadowed global theme submenu commits snapping the live theme back to the project-effective mapping.
+- Fixed project saves leaving live status-line cached settings on the rejected local value after adopting a newer disk edit.
+- Fixed `/settings` shadowed global edits reapplying live session state when the effective value did not change.
+- Fixed `/settings` silently writing project-shadowed edits to the global profile by adding explicit project/global scopes and project override inheritance. ([#8208](https://github.com/can1357/oh-my-pi/issues/8208))
 - Provider-native compaction (OpenAI Responses compact, Anthropic server-side compaction) re-issues the system prompt the live turn actually sent — a per-turn `before_agent_start` override included — instead of the rebuilt base prompt, and advisor compaction sends the advisor's own prompt instead of the generic summarizer prompt, so the request reads the live request's cached prefix.
-### Fixed
-
 - The `set_steering_mode`, `set_follow_up_mode`, and `set_interrupt_mode` RPC commands are now session-scoped, so a short-lived RPC client no longer silently writes queue-mode fields to the machine-global `config.yml`. The setters still persist by default, so the settings panel and existing callers are unaffected ([#11555](https://github.com/can1357/oh-my-pi/issues/11555)).
 - Hand-authored `*.openapi.json` files can now be edited without disabling generated-file protection globally ([#11674](https://github.com/can1357/oh-my-pi/issues/11674)).
 - `models.yml` now validates the per-model `compat.stripImageInput` opt-out, so a wrong-typed value is rejected like every other declared compat key instead of being silently accepted ([#11697](https://github.com/can1357/oh-my-pi/issues/11697)).
 - `/mcp reload` now distinguishes servers still connecting after the bounded reload window instead of reporting a healthy asynchronous reload as zero active servers ([#11639](https://github.com/can1357/oh-my-pi/issues/11639)).
-### Changed
-
-- The `providers.cacheRetention` `auto` setting now keeps Anthropic OAuth subscriber sessions on 1h prompt-cache retention and API keys on 5m, instead of 5m for both ([#11667](https://github.com/can1357/oh-my-pi/pull/11667) by [@camjac251](https://github.com/camjac251)).
-### Fixed
-
 - Fixed isolated tasks dropping nested-repo work: nested diffs persist as `<agent>.nested-*.patch` before cleanup, `apply=false` lists each file, isolated agents report as non-resumable, and runs needing manual recovery report failed ([#11343](https://github.com/can1357/oh-my-pi/pull/11343) by [@grapexy](https://github.com/grapexy)).
-- Fixed the Windows PowerShell installer (`install.ps1`) aborting on Windows PowerShell 5.1 when bun or git wrote normal progress to stderr: native commands now run with `$ErrorActionPreference` scoped to `Continue` and success is gated on the process exit code, so `$ErrorActionPreference = "Stop"`'s stderr-as-terminating-error behavior no longer kills the install ([#11675](https://github.com/can1357/oh-my-pi/issues/11675)).
+- Fixed the Windows PowerShell installer (`install.ps1`) aborting on Windows PowerShell 5.1 when bun or git wrote normal progress to stderr: native commands now run with `$ErrorActionPreference` scoped to `Continue` and success is gated on the process exit code, so `$ErrorActionPreference = \"Stop\"`'s stderr-as-terminating-error behavior no longer kills the install ([#11675](https://github.com/can1357/oh-my-pi/issues/11675)).
 - Eval cell timeouts no longer fatally terminate the session when a browser tab worker is being recycled ([#11707](https://github.com/can1357/oh-my-pi/issues/11707)).
 - Models whose images are stripped on the wire (`compat.stripImageInput`) now trigger the `describeForTextModels` vision fallback and are skipped when resolving the vision model, instead of silently dropping images ([#9697](https://github.com/can1357/oh-my-pi/issues/9697)).
 - `#readProjectSettings` now logs capability warnings when a project `.claude/settings.json` fails to parse, instead of silently dropping them ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).

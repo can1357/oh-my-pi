@@ -112,6 +112,19 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 		expect(SettingsManager.create(projectB).getProjectSettings().piVim).toEqual({ session: "b" });
 	});
 
+	it("resolves a relative cwd to the initialized absolute Settings instance", async () => {
+		const previousCwd = process.cwd();
+		process.chdir(projectDir);
+		try {
+			const singleton = await Settings.init({ cwd: ".", agentDir });
+			expect(singleton.getCwd()).toBe(path.resolve(projectDir));
+			expect(SettingsManager.create(".")).toBe(singleton);
+			expect(SettingsManager.create(projectDir)).toBe(singleton);
+		} finally {
+			process.chdir(previousCwd);
+		}
+	});
+
 	it("uses the active session settings when same-cwd sessions have different managers", async () => {
 		const sdkAgentDir = tempDir.join("sdk-agent");
 		fs.mkdirSync(sdkAgentDir, { recursive: true });

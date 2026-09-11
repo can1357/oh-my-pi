@@ -645,4 +645,84 @@ describe("SettingsList", () => {
 		expect(list.routeSubmenuMouse({ leftClick: true } as never, 2, 7)).toBe(true);
 		expect(routed).toEqual([[2, 7, true]]);
 	});
+
+	it("recreates an open submenu from the current factory after setItems", () => {
+		let factoryCalls = 0;
+		const makeItem = (value: string) => ({
+			id: "picker",
+			label: "Picker",
+			currentValue: value,
+			submenu: () => {
+				factoryCalls += 1;
+				return { render: () => [`submenu ${value}`] };
+			},
+		});
+		const list = new SettingsList(
+			[makeItem("old")],
+			5,
+			testTheme,
+			() => {},
+			() => {},
+		);
+		list.handleInput("\n");
+		expect(list.hasOpenSubmenu()).toBe(true);
+		expect(list.render(60).join("\n")).toContain("submenu old");
+		expect(factoryCalls).toBe(1);
+
+		list.setItems([makeItem("adopted")]);
+		expect(list.hasOpenSubmenu()).toBe(true);
+		expect(list.render(60).join("\n")).toContain("submenu old");
+
+		expect(list.refreshOpenSubmenu()).toBe(true);
+		expect(list.hasOpenSubmenu()).toBe(true);
+		expect(list.render(60).join("\n")).toContain("submenu adopted");
+		expect(factoryCalls).toBe(2);
+		expect(list.getOpenSubmenuItemId()).toBe("picker");
+		expect(list.hasItem("picker")).toBe(true);
+		expect(list.hasItem("missing")).toBe(false);
+	});
+
+	it("cancels a vanished open submenu through its completion callback", () => {
+		let cancelled = 0;
+		const list = new SettingsList(
+			[
+				{
+					id: "editor",
+					label: "Editor",
+					currentValue: "draft",
+					submenu: (_current, done) => ({
+						render: () => ["submenu draft"],
+						handleInput(data: string) {
+							if (data === "\x1b") {
+								cancelled += 1;
+								done();
+							}
+						},
+					}),
+				},
+			],
+			5,
+			testTheme,
+			() => {},
+			() => {},
+		);
+		list.handleInput("\n");
+		expect(list.hasOpenSubmenu()).toBe(true);
+		expect(list.getOpenSubmenuItemId()).toBe("editor");
+
+		list.setItems([
+			{
+				id: "other",
+				label: "Other",
+				currentValue: "kept",
+			},
+		]);
+		expect(list.hasOpenSubmenu()).toBe(true);
+		expect(list.hasItem("editor")).toBe(false);
+
+		expect(list.refreshOpenSubmenu()).toBe(false);
+		expect(cancelled).toBe(1);
+		expect(list.hasOpenSubmenu()).toBe(false);
+		expect(list.getOpenSubmenuItemId()).toBeNull();
+	});
 });
