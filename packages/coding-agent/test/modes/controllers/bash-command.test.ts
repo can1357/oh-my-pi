@@ -39,6 +39,7 @@ function createCwdContext(sourceDir: string, isStreaming = false, showImages = t
 		session: {
 			isStreaming,
 			executeBash,
+			enterSessionIdentityOperation: async () => ({ [Symbol.dispose]() {} }),
 		},
 		sessionManager: {
 			getCwd: () => state.cwd,

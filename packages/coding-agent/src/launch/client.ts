@@ -1,13 +1,16 @@
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
-import * as os from "node:os";
 import * as path from "node:path";
-import { getGlobalDaemonRuntimeDir, isEexist, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { getGlobalDaemonRuntimeDir } from "@oh-my-pi/pi-utils/dirs";
+import { isEexist, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
 import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
 import {
 	DAEMON_BROKER_WORKER_ARG,
+	DAEMON_CAPABILITY_LIVE_SESSIONS,
 	DAEMON_IDLE_GRACE_ENV,
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_RUNTIME_DIR_ENV,
@@ -15,6 +18,8 @@ import {
 	type DaemonOperation,
 	type DaemonRpcResult,
 	type DaemonWireMessage,
+	type LiveSessionMessageNotification,
+	type LiveSessionRegistration,
 	parseDaemonRpcResult,
 	parseDaemonWireMessage,
 } from "./protocol";
@@ -22,6 +27,10 @@ import { resolveDaemonSpawnOptions } from "./spawn-options";
 
 const CONNECT_TIMEOUT_MS = 10_000;
 const CONNECT_RETRY_MS = 50;
+/** Initial delay before retrying registration against an incompatible broker. */
+export const INCOMPATIBLE_BROKER_RETRY_INITIAL_MS = 5_000;
+/** Maximum exponential-backoff delay between incompatible-broker retries. */
+export const INCOMPATIBLE_BROKER_RETRY_MAX_MS = 60_000;
 const TOKEN_FILE = "broker.token";
 const BROKER_SPAWN_OPTIONS = resolveDaemonSpawnOptions({
 	platform: process.platform,
@@ -61,8 +70,22 @@ export interface DaemonBrokerClient {
 	close(): void;
 }
 
+/** Owns one broker-hosted session registration until {@link close} unregisters it. */
+export interface LiveSessionHost {
+	/** Republish mutable session metadata without changing the endpoint identity. */
+	update(registration: LiveSessionRegistration): Promise<void>;
+	/** Remove the registration and close its independent broker connection. */
+	close(): Promise<void>;
+}
+
+/** Handles one inbound message; successful settlement is the broker's delivery acknowledgement. */
+export type LiveSessionMessageSink = (message: string) => Promise<void> | void;
+
 /** A request reached the broker and the broker rejected the operation. */
 export class DaemonBrokerRejectedError extends Error {}
+
+/** A connected broker predates a client capability required for the operation. */
+export class DaemonBrokerCapabilityError extends Error {}
 
 async function readOrCreateToken(runtimeDir: string): Promise<string> {
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
@@ -150,7 +173,14 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#connectPromise: Promise<void> | undefined;
 	#buffer = "";
 	#closed = false;
-	#completionReconnectTimer: NodeJS.Timeout | undefined;
+	#eventReconnectTimer: NodeJS.Timeout | undefined;
+	#incompatibleBrokerRetryMs = INCOMPATIBLE_BROKER_RETRY_INITIAL_MS;
+	#liveSession:
+		| {
+				registration: LiveSessionRegistration;
+				sink: (message: LiveSessionMessageNotification) => Promise<void> | void;
+		  }
+		| undefined;
 
 	constructor(projectDir: string, runtimeDir: string, token: string, options: DaemonBrokerClientOptions) {
 		this.projectDir = projectDir;
@@ -199,6 +229,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionUnsubscribes,
 				completionReplays,
 				completionSubscriptionId: this.#completionSubscriptionId,
+				liveSessionEvents: true,
+				liveSession: this.#liveSession?.registration,
 				operation,
 			})}\n`,
 		);
@@ -215,12 +247,13 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
-		clearTimeout(this.#completionReconnectTimer);
-		this.#completionReconnectTimer = undefined;
+		clearTimeout(this.#eventReconnectTimer);
+		this.#eventReconnectTimer = undefined;
 		this.#socket?.destroy();
 		this.#completionSinks.clear();
 		this.#preservedCompletionOwners.clear();
 		this.#completionReplays.clear();
+		this.#liveSession = undefined;
 		this.#socket = undefined;
 		this.#rejectPending(new Error("Daemon broker client closed"));
 	}
@@ -232,7 +265,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#completionUnsubscribes.delete(owner);
 		if (this.#preservedCompletionOwners.delete(owner)) this.#completionReplays.add(owner);
 		this.#completionSinks.set(owner, sink);
-		this.#publishCompletionOwners();
+		this.#publishRegistrations();
 		return options => {
 			if (this.#completionSinks.get(owner) !== sink) return;
 			this.#completionSinks.delete(owner);
@@ -242,33 +275,107 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				this.#preservedCompletionOwners.delete(owner);
 				this.#completionUnsubscribes.add(owner);
 			}
-			if (this.#completionSinks.size === 0 && this.#completionReconnectTimer) {
-				clearTimeout(this.#completionReconnectTimer);
-				this.#completionReconnectTimer = undefined;
+			if (this.#completionSinks.size === 0 && !this.#liveSession && this.#eventReconnectTimer) {
+				clearTimeout(this.#eventReconnectTimer);
+				this.#eventReconnectTimer = undefined;
 			}
-			this.#publishCompletionOwners();
+			this.#publishRegistrations();
 		};
 	}
 
-	#publishCompletionOwners(): void {
-		if (this.#closed) return;
-		void this.request({ op: "ping" }).catch(() => this.#scheduleCompletionReconnect());
+	async hostLiveSession(
+		registration: LiveSessionRegistration,
+		sink: (message: LiveSessionMessageNotification) => Promise<void> | void,
+	): Promise<void> {
+		if (this.#closed) throw new Error("Daemon broker client is closed");
+		this.#liveSession = { registration, sink };
+		const ping = await this.request({ op: "ping" });
+		if (ping.op !== "ping" || !ping.capabilities?.includes(DAEMON_CAPABILITY_LIVE_SESSIONS)) {
+			this.#liveSession = undefined;
+			// One-time broker upgrade: the running broker predates live sessions,
+			// and its idle shutdown refuses to exit while it supervises persistent
+			// daemons or other project processes are present — so retrying against
+			// it would reconnect forever without idle shutdown ever firing. Ask it
+			// to shut down atomically so the next attempt spawns an upgraded
+			// replacement. Best-effort: any probe failure only feeds the existing
+			// backoff retry below.
+			await this.#shutdownIncompatibleBroker().catch(() => undefined);
+			throw new DaemonBrokerCapabilityError(
+				"The running daemon broker must restart before live session attachment is available",
+			);
+		}
 	}
 
-	#scheduleCompletionReconnect(): void {
+	async #shutdownIncompatibleBroker(): Promise<boolean> {
+		let result: DaemonRpcResult;
+		try {
+			result = await this.request({ op: "shutdownIfIdle" });
+		} catch (error) {
+			if (error instanceof DaemonBrokerRejectedError && error.message.startsWith("Unknown daemon operation")) {
+				// Pre-upgrade broker: no atomic conditional shutdown exists, and a
+				// separate list + shutdown could race a concurrent start and
+				// terminate the just-launched daemon. Leave it alone and keep
+				// backing off until it exits on its own.
+				logger.debug(
+					"Live session attachment needs a broker upgrade; restart the running broker when its daemons finish",
+				);
+				return false;
+			}
+			throw error;
+		}
+		if (result.op !== "shutdownIfIdle") return false;
+		if (result.shutDown) return true;
+		logger.debug(
+			"Live session attachment needs a broker upgrade, but the running broker supervises live daemons; restart it after they finish",
+			{ daemons: result.active },
+		);
+		return false;
+	}
+
+	async clearLiveSession(): Promise<void> {
+		if (!this.#liveSession) return;
+		this.#liveSession = undefined;
+		await this.request({ op: "ping" });
+	}
+
+	#publishRegistrations(): void {
+		if (this.#closed) return;
+		void this.request({ op: "ping" })
+			.then(async result => {
+				if (
+					!this.#liveSession ||
+					(result.op === "ping" && result.capabilities?.includes(DAEMON_CAPABILITY_LIVE_SESSIONS))
+				) {
+					this.#incompatibleBrokerRetryMs = INCOMPATIBLE_BROKER_RETRY_INITIAL_MS;
+					return;
+				}
+				const shutDown = await this.#shutdownIncompatibleBroker().catch(() => false);
+				if (shutDown) return;
+				const retryDelayMs = this.#incompatibleBrokerRetryMs;
+				this.#incompatibleBrokerRetryMs = Math.min(
+					this.#incompatibleBrokerRetryMs * 2,
+					INCOMPATIBLE_BROKER_RETRY_MAX_MS,
+				);
+				this.#socket?.destroy();
+				this.#scheduleEventReconnect(retryDelayMs);
+			})
+			.catch(() => this.#scheduleEventReconnect());
+	}
+
+	#scheduleEventReconnect(delayMs = CONNECT_RETRY_MS): void {
 		if (
 			this.#closed ||
-			this.#completionSinks.size === 0 ||
-			this.#completionReconnectTimer !== undefined ||
+			(this.#completionSinks.size === 0 && !this.#liveSession) ||
+			this.#eventReconnectTimer !== undefined ||
 			(this.#socket !== undefined && !this.#socket.destroyed)
 		) {
 			return;
 		}
-		this.#completionReconnectTimer = setTimeout(() => {
-			this.#completionReconnectTimer = undefined;
-			this.#publishCompletionOwners();
-		}, CONNECT_RETRY_MS);
-		this.#completionReconnectTimer.unref();
+		this.#eventReconnectTimer = setTimeout(() => {
+			this.#eventReconnectTimer = undefined;
+			this.#publishRegistrations();
+		}, delayMs);
+		this.#eventReconnectTimer.unref();
 	}
 
 	async #connect(): Promise<void> {
@@ -334,7 +441,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		socket.on("close", () => {
 			if (this.#socket === socket) this.#socket = undefined;
 			this.#rejectPending(new Error("Daemon broker connection closed"));
-			this.#scheduleCompletionReconnect();
+			this.#scheduleEventReconnect();
 		});
 	}
 
@@ -358,20 +465,16 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				message = parseDaemonWireMessage(decoded);
 			} catch (error) {
 				const parseError = error instanceof Error ? error : new Error(String(error));
-				if (
-					typeof decoded === "object" &&
-					decoded !== null &&
-					"event" in decoded &&
-					decoded.event === "daemon-completed"
-				) {
-					logger.warn("Ignoring malformed daemon completion", { error: parseError.message });
+				if (typeof decoded === "object" && decoded !== null && "event" in decoded) {
+					logger.warn("Ignoring malformed daemon broker event", { error: parseError.message });
 					continue;
 				}
 				this.#rejectPending(parseError);
 				continue;
 			}
 			if ("event" in message) {
-				void this.#deliverCompletion(message);
+				if (message.event === "daemon-completed") void this.#deliverCompletion(message);
+				else void this.#deliverLiveSessionMessage(message);
 				continue;
 			}
 			const response = message;
@@ -421,6 +524,50 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		}
 	}
 
+	async #deliverLiveSessionMessage(message: LiveSessionMessageNotification): Promise<void> {
+		const hosted = this.#liveSession;
+		if (
+			!hosted ||
+			hosted.registration.endpointId !== message.endpointId ||
+			hosted.registration.sessionId !== message.sessionId
+		) {
+			this.#ackLiveSessionMessage(message.deliveryId, "Live session registration changed before delivery");
+			return;
+		}
+		try {
+			await hosted.sink(message);
+			this.#ackLiveSessionMessage(message.deliveryId);
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			logger.warn("Live session message sink failed", {
+				endpointId: message.endpointId,
+				deliveryId: message.deliveryId,
+				error: detail,
+			});
+			this.#ackLiveSessionMessage(message.deliveryId, detail);
+		}
+	}
+
+	#ackLiveSessionMessage(deliveryId: string, error?: string): void {
+		const socket = this.#socket;
+		if (!socket || socket.destroyed) return;
+		socket.write(
+			`${JSON.stringify({
+				id: crypto.randomUUID(),
+				token: this.#token,
+				owners: [...this.#completionSinks.keys()],
+				detachedOwners: [...this.#preservedCompletionOwners],
+				completionEvents: true,
+				completionUnsubscribes: [...this.#completionUnsubscribes],
+				completionSubscriptionId: this.#completionSubscriptionId,
+				liveSessionEvents: true,
+				liveSession: this.#liveSession?.registration,
+				liveSessionMessageAcks: [{ deliveryId, error }],
+				operation: { op: "ping" },
+			})}\n`,
+		);
+	}
+
 	#ackCompletion(completionId: string): void {
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) return;
@@ -434,6 +581,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionAcks: [completionId],
 				completionUnsubscribes: [...this.#completionUnsubscribes],
 				completionSubscriptionId: this.#completionSubscriptionId,
+				liveSessionEvents: true,
+				liveSession: this.#liveSession?.registration,
 				operation: { op: "ping" },
 			})}\n`,
 		);
@@ -464,15 +613,54 @@ function sharedDaemonClient(key: string, create: () => Promise<DaemonBrokerClien
 	return pending;
 }
 
-/** Create an independent socket connection to one daemon broker scope. */
-export async function createDaemonBrokerClient(
+async function createSocketDaemonClient(
 	projectDir: string,
-	options: DaemonBrokerClientOptions = {},
-): Promise<DaemonBrokerClient> {
+	options: DaemonBrokerClientOptions,
+): Promise<SocketDaemonClient> {
 	const canonical = await canonicalProjectDir(projectDir);
 	const runtimeDir = options.runtimeDir ?? daemonRuntimeDir(canonical);
 	const token = await readOrCreateToken(runtimeDir);
 	return new SocketDaemonClient(canonical, runtimeDir, token, options);
+}
+
+/** Create an independent socket connection to one daemon broker scope. */
+export function createDaemonBrokerClient(
+	projectDir: string,
+	options: DaemonBrokerClientOptions = {},
+): Promise<DaemonBrokerClient> {
+	return createSocketDaemonClient(projectDir, options);
+}
+
+/** Host one interactive session on an independent broker connection. */
+export async function createLiveSessionHost(
+	projectDir: string,
+	registration: LiveSessionRegistration,
+	sink: LiveSessionMessageSink,
+	options: DaemonBrokerClientOptions = {},
+): Promise<LiveSessionHost> {
+	const client = await createSocketDaemonClient(projectDir, options);
+	let closed = false;
+	try {
+		await client.hostLiveSession(registration, notification => sink(notification.message));
+	} catch (error) {
+		client.close();
+		throw error;
+	}
+	return {
+		async update(nextRegistration: LiveSessionRegistration): Promise<void> {
+			if (closed) throw new Error("Live session host is closed");
+			await client.hostLiveSession(nextRegistration, notification => sink(notification.message));
+		},
+		async close(): Promise<void> {
+			if (closed) return;
+			closed = true;
+			try {
+				await client.clearLiveSession();
+			} finally {
+				client.close();
+			}
+		},
+	};
 }
 
 /** Get the process-shared daemon broker client for one canonical project directory. */
@@ -502,25 +690,4 @@ export async function closeDaemonClients(): Promise<void> {
 	for (const client of await Promise.all(pending)) client.close();
 	cancelExitCleanup?.();
 	cancelExitCleanup = undefined;
-}
-
-/** Exercise worker-host broker startup and authenticated RPC for distribution smoke tests. */
-export async function smokeTestDaemonBroker(): Promise<void> {
-	// Keep the broker's runtime dir under a private parent this process owns, so
-	// the broker's dead-scope sweep (pruneDeadDaemonRuntimeDirs, fired on startup)
-	// can only ever reclaim siblings inside it — never unrelated neighbours in
-	// os.tmpdir() such as tmux/ssh sockets or build trees (issue #8721).
-	const smokeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-daemon-smoke-"));
-	const projectDir = path.join(smokeRoot, "project");
-	const runtimeDir = path.join(smokeRoot, "run");
-	await fs.mkdir(projectDir, { recursive: true });
-	const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
-	try {
-		const ping = await client.request({ op: "ping" });
-		if (ping.op !== "ping" || ping.projectDir !== client.projectDir) throw new Error("daemon broker ping mismatch");
-		await client.request({ op: "shutdown" });
-	} finally {
-		client.close();
-		await fs.rm(smokeRoot, { recursive: true, force: true });
-	}
 }

@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getDaemonRuntimeDir, isEisdir, isEnoent } from "@oh-my-pi/pi-utils";
+import { getDaemonRuntimeDir } from "@oh-my-pi/pi-utils/dirs";
+import { isEisdir, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 
 /** Resolve the private runtime directory shared by omp processes in one project directory. */
 export { getDaemonRuntimeDir as daemonRuntimeDir };

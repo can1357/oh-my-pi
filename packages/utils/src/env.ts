@@ -1,40 +1,25 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv } from "./dirs";
+import {
+	ensureProfileEnvLoaded,
+	isMacosMallocStackLoggingEnvName,
+	isSafeEnvName,
+	isSafeEnvValue,
+	parseEnvFile,
+	projectEnvNamesLoadedByOmp,
+} from "./dotenv";
+import { isBunTestRuntime } from "./worker-host";
 
 export * from "./worker-host";
-
-const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-/**
- * Strict shell-identifier shape. Used for dotenv keys we accept into
- * `Bun.env` — those should be referenceable as `$NAME` from POSIX shells,
- * so we reject anything outside `[A-Za-z_][A-Za-z0-9_]*`.
- */
-export function isValidEnvName(name: string): boolean {
-	return ENV_NAME_RE.test(name);
-}
-
-/**
- * The only names that are genuinely unsafe to forward to a native `execve`
- * spawn: empty, containing `=` (would corrupt the `KEY=VALUE` framing) or
- * NUL (terminates the C string mid-entry). Windows ships standard variables
- * whose names contain parentheses (e.g. `ProgramFiles(x86)`, `CommonProgramFiles(x86)`)
- * — those MUST survive the scrub so downstream resolvers (Git Bash discovery
- * in `procmgr.ts`, etc.) can still read them.
- */
-export function isSafeEnvName(name: string): boolean {
-	return name.length > 0 && !name.includes("=") && !name.includes("\0");
-}
-
-export function isSafeEnvValue(value: string): boolean {
-	return !value.includes("\0");
-}
-
-export function isMacosMallocStackLoggingEnvName(name: string): boolean {
-	return name === "MallocStackLogging" || name === "MallocStackLoggingNoCompact";
-}
+export {
+	ensureProfileEnvLoaded,
+	isMacosMallocStackLoggingEnvName,
+	isSafeEnvName,
+	isSafeEnvValue,
+	isValidEnvName,
+	parseEnvFile,
+	projectEnvNamesLoadedByOmp,
+} from "./dotenv";
 
 /**
  * True when running inside a WSL (Windows Subsystem for Linux) distribution.
@@ -89,7 +74,6 @@ function readLaunchEnv(): ReadonlyMap<string, string> | undefined {
 }
 
 const launchEnvValues = readLaunchEnv();
-const projectEnvNamesLoadedByOmp = new Set<string>();
 
 function expandDotenvValues(values: Record<string, string>, env: Record<string, string>): Record<string, string> {
 	const expanded: Record<string, string> = {};
@@ -183,88 +167,12 @@ export function filterChildShellEnv(
 	return result;
 }
 
-/**
- * Parse one dotenv line with Bun-compatible semantics: an optional `export`
- * prefix, full-line `#` comments, inline `#` comments after whitespace on
- * unquoted values, and single/double/backtick quoting (a `#` inside quotes
- * stays literal). Returns undefined for blank lines, comments, and malformed
- * names.
- */
-function parseEnvLine(line: string): { key: string; value: string } | undefined {
-	const trimmed = line.trim();
-	if (!trimmed || trimmed.startsWith("#")) return undefined;
-	const eqIndex = trimmed.indexOf("=");
-	if (eqIndex === -1) return undefined;
-	let key = trimmed.slice(0, eqIndex).trim();
-	const exported = key.match(/^export[ \t]+(.*)$/);
-	if (exported) key = exported[1].trim();
-	if (!isValidEnvName(key)) return undefined;
-	const raw = trimmed.slice(eqIndex + 1).replace(/^[ \t]+/, "");
-	const quote = raw[0];
-	if (quote === '"' || quote === "'" || quote === "`") {
-		let close = raw.indexOf(quote, 1);
-		while (close !== -1 && raw[close - 1] === "\\") close = raw.indexOf(quote, close + 1);
-		return { key, value: close === -1 ? raw.slice(1) : raw.slice(1, close) };
-	}
-	const commentIndex = raw.search(/[ \t]#/);
-	return { key, value: (commentIndex === -1 ? raw : raw.slice(0, commentIndex)).trimEnd() };
-}
-
-/**
- * Parses a .env file synchronously into key-value string pairs using
- * {@link parseEnvLine} for Bun-compatible line semantics, then mirrors valid
- * `OMP_` variables to their `PI_` aliases.
- */
-export function parseEnvFile(filePath: string): Record<string, string> {
-	const result: Record<string, string> = {};
-	try {
-		const content = fs.readFileSync(filePath, "utf-8");
-		for (const line of content.split("\n")) {
-			const parsed = parseEnvLine(line);
-			if (parsed && isSafeEnvValue(parsed.value)) result[parsed.key] = parsed.value;
-		}
-	} catch {
-		// File doesn't exist or can't be read - return empty result
-	}
-
-	// OMP_ overrides PI_
-	for (const k in result) {
-		if (k.startsWith("OMP_")) {
-			result[`PI_${k.slice(4)}`] = result[k];
-		}
-	}
-
-	return result;
-}
-
-// Eagerly parse the user's $HOME/.env and the current project's .env (from cwd)
-const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));
-const piEnv = parseEnvFile(path.join(getConfigRootDir(), ".env"));
-const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
-const projectEnv = parseEnvFile(path.join(getProjectDir(), ".env"));
-
-for (const key of Object.keys(Bun.env)) {
-	const value = Bun.env[key];
-	if (!isSafeEnvName(key) || isMacosMallocStackLoggingEnvName(key) || value === undefined || !isSafeEnvValue(value)) {
-		delete Bun.env[key];
-	}
-}
-
-for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
-	for (const key in file) {
-		if (!isMacosMallocStackLoggingEnvName(key) && !Bun.env[key]) {
-			Bun.env[key] = file[key];
-			if (file === projectEnv) projectEnvNamesLoadedByOmp.add(key);
-		}
-	}
-}
-
-// Directory-affecting keys (XDG_*_HOME, and in default mode PI_CODING_AGENT_DIR)
-// may have just arrived from the profile/agent `.env` applied above. The dirs
-// resolver cached its paths at module load — before this file ran — so rebuild
-// it now from the updated env. `getAgentDir()` already located the `.env` from
-// the profile name + home, so this re-reads only the directory vars.
-refreshDirsFromEnv();
+// Eagerly apply the home/config/agent/project `.env` files for the active
+// profile. CLI flows resolve the profile before this module first loads and
+// invoke {@link ensureProfileEnvLoaded} post-`setProfile` (see `./dotenv`),
+// so this observes the profile's agent `.env`. Shared implementation; later
+// imports are no-ops for already-set keys.
+ensureProfileEnvLoaded();
 
 /**
  * Intentional re-export of Bun.env.
@@ -329,15 +237,6 @@ export function $envpos(name: string, defaultValue: number): number {
 	const parsed = Number.parseInt(raw, 10);
 	if (Number.isNaN(parsed) || parsed <= 0) return defaultValue;
 	return parsed;
-}
-
-const BUN_TEST_ENTRY_PATTERN = /[._](?:test|spec)\.[cm]?[jt]sx?$/;
-
-/** True when the process is an explicitly marked test child or Bun is running a test entrypoint. */
-export function isBunTestRuntime(): boolean {
-	if (Bun.env.PI_TEST_RUNTIME === "1") return true;
-	const hasTestEnvironment = Bun.env.BUN_ENV === "test" || Bun.env.NODE_ENV === "test";
-	return hasTestEnvironment && BUN_TEST_ENTRY_PATTERN.test(Bun.main);
 }
 
 let terminalHeadless = isBunTestRuntime();
@@ -406,20 +305,6 @@ export function setInteractiveHost(interactive: boolean): boolean {
  */
 export function getDbBusyTimeoutMs(): number {
 	return isInteractiveHost() ? 5000 : 1000;
-}
-
-/**
- * True when this code is running inside a `bun build --compile` standalone
- * binary. Detects via the embedded virtual-filesystem path markers
- * (`$bunfs`, `~BUN`, or its URL-encoded form `%7EBUN`) in `import.meta.url`,
- * which Bun rewrites for every module bundled into the executable. The
- * `PI_COMPILED` env var (set by the build script's `--define`) is checked
- * first for cheap fast-path detection.
- */
-export function isCompiledBinary(): boolean {
-	if (process.env.PI_COMPILED || Bun.env.PI_COMPILED) return true;
-	const url = import.meta.url;
-	return url.includes("$bunfs") || url.includes("~BUN") || url.includes("%7EBUN");
 }
 
 const TRUTHY: Dict<boolean> = {

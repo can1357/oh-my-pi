@@ -29,7 +29,11 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 	});
 	const shutdown = vi.fn(async () => {});
 	const ctx = {
-		session: { isStreaming: false, moveSession },
+		session: {
+			isStreaming: false,
+			moveSession,
+			enterSessionIdentityOperation: async () => ({ [Symbol.dispose]() {} }),
+		},
 		sessionManager: {
 			getCwd: () => state.cwd,
 			captureState,

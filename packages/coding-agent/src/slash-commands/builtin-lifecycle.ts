@@ -105,6 +105,7 @@ async function relocateHeadlessSession(
 	} catch (err) {
 		return usage(`Failed to save pending settings: ${errorMessage(err)}`, runtime);
 	}
+	using _sessionIdentity = await runtime.session.enterSessionIdentityOperation();
 	const previousState = runtime.sessionManager.captureState();
 	try {
 		await runtime.session.moveSession(resolvedPath);

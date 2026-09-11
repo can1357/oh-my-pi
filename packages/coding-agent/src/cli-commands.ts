@@ -26,6 +26,13 @@ export const commands: CommandEntry[] = [
 		load: () => import("./commands/acp").then(m => m.default),
 		help: commandHelp.acpHelp,
 	},
+	// Keep this lazy: live session discovery loads native VCS bindings, while
+	// CLI profile and worker-host bootstrap must finish before command modules load.
+	{
+		name: "attach",
+		load: () => import("./commands/attach").then(m => m.default),
+		help: commandHelp.attachHelp,
+	},
 	{
 		name: "auth-broker",
 		load: () => import("./commands/auth-broker").then(m => m.default),
@@ -325,6 +332,11 @@ function leadingSubcommandIndex(argv: string[]): number {
  */
 export const LAUNCH_FLAG_COMMANDS: Record<string, true> = { launch: true, acp: true };
 
+/** Launch-global flags that a hoisted non-launch command also owns. */
+const COMMAND_OWNED_LEADING_FLAGS: Partial<Record<string, Readonly<Record<string, true>>>> = {
+	attach: { "--cwd": true, "--session": true },
+};
+
 /** Whether `arg` names a flag from the launch surface (bare or `--flag=value`). */
 function isLaunchGlobalFlag(arg: string): boolean {
 	const eq = arg.indexOf("=");
@@ -345,12 +357,20 @@ function isLaunchGlobalFlag(arg: string): boolean {
  * `node:util.parseArgs` error (#8891). Tokens the launch tables don't recognize
  * are kept, so a subcommand's own leading flags still reach it.
  */
-function stripLaunchGlobalFlags(leading: readonly string[]): string[] {
+function stripLaunchGlobalFlags(leading: readonly string[], preserved?: Readonly<Record<string, true>>): string[] {
 	const kept: string[] = [];
 	for (let index = 0; index < leading.length; index += 1) {
 		const arg = leading[index];
 		if (isLaunchGlobalFlag(arg)) {
-			if (flagConsumesValue(arg, leading[index + 1])) index += 1;
+			const eq = arg.indexOf("=");
+			const name = arg.startsWith("--") && eq !== -1 ? arg.slice(0, eq) : arg;
+			const consumesValue = flagConsumesValue(arg, leading[index + 1]);
+			if (preserved?.[name] === true) {
+				kept.push(arg);
+				if (consumesValue) kept.push(leading[++index]);
+			} else if (consumesValue) {
+				index += 1;
+			}
 			continue;
 		}
 		kept.push(arg);
@@ -386,7 +406,10 @@ export function resolveCliArgv(argv: string[]): ResolvedCliArgv {
 		const sub = argv[subIndex];
 		const leading = argv.slice(0, subIndex);
 		const trailing = argv.slice(subIndex + 1);
-		const forwardedLeading = LAUNCH_FLAG_COMMANDS[sub] === true ? leading : stripLaunchGlobalFlags(leading);
+		const forwardedLeading =
+			LAUNCH_FLAG_COMMANDS[sub] === true
+				? leading
+				: stripLaunchGlobalFlags(leading, COMMAND_OWNED_LEADING_FLAGS[sub]);
 		return { argv: [sub, ...forwardedLeading, ...trailing] };
 	}
 	return { argv: ["launch", ...argv] };

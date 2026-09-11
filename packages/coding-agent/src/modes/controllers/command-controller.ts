@@ -1269,6 +1269,8 @@ export class CommandController {
 	 * on failure. Returns true when the session now lives at `resolvedPath`.
 	 */
 	async #relocateSession(resolvedPath: string): Promise<boolean> {
+		using _sessionIdentity = await this.ctx.session.enterSessionIdentityOperation();
+
 		try {
 			await this.ctx.settings.flush();
 		} catch (err) {
@@ -1280,7 +1282,11 @@ export class CommandController {
 		try {
 			await this.ctx.session.moveSession(resolvedPath);
 		} catch (err) {
-			this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
+			if (path.resolve(this.ctx.sessionManager.getCwd()) !== path.resolve(previousState.cwd)) {
+				await this.#restoreAfterMoveFailure(previousState, err);
+			} else {
+				this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
+			}
 			return false;
 		}
 		let applied = false;
@@ -1397,8 +1403,18 @@ export class CommandController {
 	}
 
 	async #moveInteractiveCwd(resolvedPath: string): Promise<void> {
+		using _sessionIdentity = await this.ctx.session.enterSessionIdentityOperation();
 		const previousState = this.ctx.sessionManager.captureState();
-		await this.ctx.sessionManager.moveTo(resolvedPath);
+		try {
+			await this.ctx.sessionManager.moveTo(resolvedPath);
+		} catch (error) {
+			if (path.resolve(this.ctx.sessionManager.getCwd()) !== path.resolve(previousState.cwd)) {
+				await this.#restoreAfterMoveFailure(previousState, error);
+			} else {
+				this.ctx.showError(`Move failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			return;
+		}
 		let applied = false;
 		try {
 			applied = await this.ctx.applyCwdChange(resolvedPath);

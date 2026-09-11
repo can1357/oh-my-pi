@@ -793,7 +793,16 @@ export class AgentSession {
 	 *  #sessionGenerationChanged) before giving up, so a record for the still-live session isn't
 	 *  discarded moments before a rolled-back switchSession() restores the exact generation it
 	 *  was captured against. */
-	#sessionTransitionSettled: Promise<void> | undefined;
+	#sessionGenerationTransitionSettled: Promise<void> | undefined;
+	#sessionIdentityOperationTail: Promise<void> = Promise.resolve();
+	/** Reserved session/workspace identity transitions. Callers reserve before
+	 *  their first asynchronous pre-transition step and release only after final
+	 *  destination or rollback reconciliation. A live-attach delivery checks
+	 *  this synchronously and rejects instead of waiting: waiting past the
+	 *  broker timeout could execute an editor retry twice. Concurrent deliveries
+	 *  share the chain below without incrementing this, so they serialize and
+	 *  both succeed. */
+	#sessionIdentityTransitionDepth = 0;
 	#promptSequence = 0;
 	#skippedPostTurnSpeculationCompletion: Promise<void> | undefined;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
@@ -985,12 +994,12 @@ export class AgentSession {
 	/** Re-validates a #sessionGeneration snapshot captured before an aside-queueing call's
 	 *  normalization await. A mismatch alone does not mean the record's source session is gone —
 	 *  switchSession() restores the exact prior generation on rollback — so wait out any in-flight
-	 *  transition (#sessionTransitionSettled) and recheck rather than discarding immediately.
+	 *  transition (#sessionGenerationTransitionSettled) and recheck rather than discarding immediately.
 	 *  Returns true when the caller should drop its record (no in-flight transition to wait for, or
 	 *  the generation is still different once one settles); false once the generation matches again. */
 	async #sessionGenerationChanged(sessionGeneration: number): Promise<boolean> {
 		while (this.#sessionGeneration !== sessionGeneration) {
-			const settled = this.#sessionTransitionSettled;
+			const settled = this.#sessionGenerationTransitionSettled;
 			if (!settled) return true;
 			await settled;
 		}
@@ -4328,6 +4337,32 @@ export class AgentSession {
 		return () => this.#runStateListeners.delete(listener);
 	}
 
+	/** Serialize identity operations; transition callers own the complete reservation boundary. */
+	async enterSessionIdentityOperation(
+		kind: "transition" | "delivery" = "transition",
+	): Promise<{ [Symbol.dispose](): void }> {
+		if (kind === "transition") this.#sessionIdentityTransitionDepth++;
+		const previous = this.#sessionIdentityOperationTail;
+		const release = Promise.withResolvers<void>();
+		this.#sessionIdentityOperationTail = previous.then(() => release.promise);
+		await previous;
+
+		let active = true;
+		return {
+			[Symbol.dispose]: () => {
+				if (!active) return;
+				active = false;
+				if (kind === "transition") this.#sessionIdentityTransitionDepth--;
+				release.resolve();
+			},
+		};
+	}
+
+	/** Wait until session identity operations already queued at this point settle. */
+	async waitForSessionTransition(): Promise<void> {
+		await this.#sessionIdentityOperationTail;
+	}
+
 	/** Register cleanup that runs when this AgentSession adopts a different session ID. */
 	registerSessionChangeCallback(callback: () => void): () => void {
 		this.#sessionChangeCallbacks.add(callback);
@@ -6869,14 +6904,14 @@ export class AgentSession {
 	async #queueUserMessage(
 		text: string,
 		images: ImageContent[] | undefined,
-		mode: "steer" | "followUp" | "aside",
+		mode: "steer" | "followUp" | "aside" | "nonInterrupting",
 		timestamp?: number,
 		preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined },
 	): Promise<void> {
-		// Captured before any await below so the aside branch can detect a
+		// Captured before any await below so queued branches can detect a
 		// newSession()/switchSession() that completed while normalization/vision
-		// description was in flight and drop a record that would otherwise land in a
-		// different session's queue.
+		// description was in flight: aside delivery drops the stale record, while
+		// acknowledged noninterrupting delivery rejects it.
 		const sessionGeneration = this.#sessionGeneration;
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
@@ -6915,8 +6950,16 @@ export class AgentSession {
 			this.#resumeStrandedIrcAsides();
 			return;
 		}
+		if (mode === "nonInterrupting") {
+			if (this.#isDisposed) throw new Error("Session disposed before message delivery");
+			if ((await this.#sessionGenerationChanged(sessionGeneration)) || !this.#unsubscribeAgent) {
+				throw new Error("Session changed before message delivery");
+			}
+			if (this.#isDisposed) throw new Error("Session disposed before message delivery");
+		}
+		const queueMode = mode === "nonInterrupting" ? (this.isStreaming ? "followUp" : "steer") : mode;
 		this.#allowQueuedMessageDrainRetry();
-		if (mode === "followUp") {
+		if (queueMode === "followUp") {
 			for (const notice of videoAttachmentNotices) this.agent.followUp(notice);
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 			this.agent.followUp({
@@ -7314,6 +7357,34 @@ export class AgentSession {
 			normalizedAppMessage.attribution,
 		);
 		return false;
+	}
+	/** Queue a user message only while the expected live session identity remains stable. */
+	async queueNonInterruptingUserMessage(
+		content: string,
+		expectedSessionId: string,
+		expectedCwd: string,
+	): Promise<void> {
+		// Never wait out an in-flight identity transition (see
+		// #sessionIdentityTransitionDepth): a transition holding the chain past
+		// the broker's delivery timeout would let this queue the message after
+		// the broker already reported failure, executing an editor retry twice.
+		// The check and the enter() below run synchronously with no await
+		// between them, so no transition can slip in unobserved. Concurrent
+		// deliveries enter as "delivery" and share the chain without tripping
+		// this guard, so overlapping editor messages serialize and both succeed.
+		if (this.#sessionIdentityTransitionDepth > 0) {
+			throw new Error("Session changed before message delivery");
+		}
+		using _sessionIdentity = await this.enterSessionIdentityOperation("delivery");
+		if (this.#isDisposed) throw new Error("Session disposed before message delivery");
+		if (
+			!this.#unsubscribeAgent ||
+			this.sessionManager.getSessionId() !== expectedSessionId ||
+			path.resolve(this.sessionManager.getCwd()) !== path.resolve(expectedCwd)
+		) {
+			throw new Error("Session changed before message delivery");
+		}
+		await this.#queueUserMessage(content, undefined, "nonInterrupting");
 	}
 
 	/**
@@ -7840,6 +7911,8 @@ export class AgentSession {
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
+		using _sessionIdentity = await this.enterSessionIdentityOperation();
+
 		const previousSessionFile = this.sessionFile;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
@@ -7969,6 +8042,8 @@ export class AgentSession {
 	 */
 	async fork(): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("fork the session");
+		using _sessionIdentity = await this.enterSessionIdentityOperation();
+
 		const previousSessionFile = this.sessionFile;
 		const previousSessionId = this.sessionManager.getSessionId();
 
@@ -8996,6 +9071,8 @@ export class AgentSession {
 			preserveLocalCwd?: boolean;
 		},
 	): Promise<boolean> {
+		using _sessionIdentity = await this.enterSessionIdentityOperation();
+
 		const previousSessionFile = this.sessionManager.getSessionFile();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
@@ -9073,8 +9150,8 @@ export class AgentSession {
 		const previousIrcPending = this.#irc.clearPending();
 		const previousSessionGeneration = this.#sessionGeneration++;
 		const transitionSettled = Promise.withResolvers<void>();
-		const previousSessionTransitionSettled = this.#sessionTransitionSettled;
-		this.#sessionTransitionSettled = transitionSettled.promise;
+		const previousGenerationTransitionSettled = this.#sessionGenerationTransitionSettled;
+		this.#sessionGenerationTransitionSettled = transitionSettled.promise;
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.#queuedMessageDrainBlocked = false;
@@ -9257,88 +9334,95 @@ export class AgentSession {
 				this.#notifySessionChangeCallbacks();
 			}
 			transitionSettled.resolve();
-			this.#sessionTransitionSettled = previousSessionTransitionSettled;
+			this.#sessionGenerationTransitionSettled = previousGenerationTransitionSettled;
 			return true;
 		} catch (error) {
-			this.sessionManager.restoreState(previousSessionState);
-			this.#freshProviderSessionId = previousFreshProviderSessionId;
-			this.#syncAgentSessionId(previousSessionState.sessionId, false);
-			this.#memory.rekeyForCurrentSessionId();
-			this.agent.setTools(previousTools);
-			this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt);
-			this.#memory.restorePromotionSnapshot(previousBaseSystemPromptBeforeMemoryPromotion);
-			this.agent.setSystemPrompt(previousSystemPrompt);
-			this.agent.replaceMessages(previousAgentMessages);
-			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
-			this.#irc.restorePending(previousIrcPending);
-			this.#sessionGeneration = previousSessionGeneration;
-			transitionSettled.resolve();
-			this.#sessionTransitionSettled = previousSessionTransitionSettled;
-			this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
-			this.#scheduledHiddenNextTurnGeneration = previousScheduledHiddenNextTurnGeneration;
-			this.#queuedMessageDrainBlocked = previousQueuedMessageDrainBlocked;
-			this.#usagePreflightReadyForNextModelCall = previousUsagePreflightReadyForNextModelCall;
-			this.#usagePreflightReadyModel = previousUsagePreflightReadyModel;
-			this.#inheritedProviderPromptCacheKey = previousInheritedProviderPromptCacheKey;
-			this.#checkpointState = previousCheckpointState;
-			this.#pendingRewindReport = previousPendingRewindReport;
-			this.#lastCompletedRewind = previousLastCompletedRewind;
-			this.#rewoundToolResultIds = previousRewoundToolResultIds;
-			// The try block may have already reached #setModelWithProviderSessionReset
-			// for the target session's model, which emits `model_changed` for it.
-			// Restoring here bypasses that method (it also resets provider-session
-			// state we're already unwinding above), so if the rollback actually
-			// changes the model back, emit the corrective event ourselves —
-			// otherwise ACP/RPC/TUI keep advertising the never-committed target.
-			// Deferred until after restoreThinkingSnapshot below: #emit's listeners
-			// (ACP's #handleLifetimeEvent -> #pushConfigOptionUpdate) read
-			// session state synchronously before their first await, so emitting
-			// here — before the target session's thinking level is unwound —
-			// would push a { previousModel, target-session-thinking } config that
-			// was never a real session state.
-			let modelRolledBack = false;
-			if (previousModel) {
-				const rolledBackModel = this.model;
-				this.agent.setModel(previousModel);
-				modelRolledBack = !modelsAreEqual(rolledBackModel, previousModel);
-			}
-			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
-			this.#models.restoreServiceTiers(previousServiceTierByFamily);
-			if (modelRolledBack) {
-				this.#emit({ type: "model_changed" });
-			}
-			this.#todo.syncFromBranch();
-			this.#advisors.resetAllRuntimes();
-			this.#advisors.reattachRecorderFeeds();
-			this.#reconnectToAgent();
 			try {
-				await this.#sessionSwitchReconciler?.();
-			} catch (reconcileError) {
-				logger.warn("Failed to reconcile session mode after switch rollback", {
-					targetSessionFile: sessionPath,
-					error: String(reconcileError),
-				});
-			}
-			if (cwdChangeTarget && error !== SESSION_CWD_CHANGE_REJECTED && options?.onCwdChange) {
-				let rollbackFailure: string | undefined;
+				this.sessionManager.restoreState(previousSessionState);
+				this.#freshProviderSessionId = previousFreshProviderSessionId;
+				this.#syncAgentSessionId(previousSessionState.sessionId, false);
+				this.#memory.rekeyForCurrentSessionId();
+				this.agent.setTools(previousTools);
+				this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt);
+				this.#memory.restorePromotionSnapshot(previousBaseSystemPromptBeforeMemoryPromotion);
+				this.agent.setSystemPrompt(previousSystemPrompt);
+				this.agent.replaceMessages(previousAgentMessages);
+				this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
+				this.#irc.restorePending(previousIrcPending);
+				this.#sessionGeneration = previousSessionGeneration;
+				this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
+				this.#scheduledHiddenNextTurnGeneration = previousScheduledHiddenNextTurnGeneration;
+				this.#queuedMessageDrainBlocked = previousQueuedMessageDrainBlocked;
+				this.#usagePreflightReadyForNextModelCall = previousUsagePreflightReadyForNextModelCall;
+				this.#usagePreflightReadyModel = previousUsagePreflightReadyModel;
+				this.#inheritedProviderPromptCacheKey = previousInheritedProviderPromptCacheKey;
+				this.#checkpointState = previousCheckpointState;
+				this.#pendingRewindReport = previousPendingRewindReport;
+				this.#lastCompletedRewind = previousLastCompletedRewind;
+				this.#rewoundToolResultIds = previousRewoundToolResultIds;
+				// The try block may have already reached #setModelWithProviderSessionReset
+				// for the target session's model, which emits `model_changed` for it.
+				// Restoring here bypasses that method (it also resets provider-session
+				// state we're already unwinding above), so if the rollback actually
+				// changes the model back, emit the corrective event ourselves —
+				// otherwise ACP/RPC/TUI keep advertising the never-committed target.
+				// Deferred until after restoreThinkingSnapshot below: #emit's listeners
+				// (ACP's #handleLifetimeEvent -> #pushConfigOptionUpdate) read
+				// session state synchronously before their first await, so emitting
+				// here — before the target session's thinking level is unwound —
+				// would push a { previousModel, target-session-thinking } config that
+				// was never a real session state.
+				let modelRolledBack = false;
+				if (previousModel) {
+					const rolledBackModel = this.model;
+					this.agent.setModel(previousModel);
+					modelRolledBack = !modelsAreEqual(rolledBackModel, previousModel);
+				}
+				this.#models.restoreThinkingSnapshot(
+					previousThinkingLevel,
+					previousAutoThinking,
+					previousAutoResolvedLevel,
+				);
+				this.#models.restoreServiceTiers(previousServiceTierByFamily);
+				if (modelRolledBack) {
+					this.#emit({ type: "model_changed" });
+				}
+				this.#todo.syncFromBranch();
+				this.#advisors.resetAllRuntimes();
+				this.#advisors.reattachRecorderFeeds();
+				this.#reconnectToAgent();
 				try {
-					if (!(await options.onCwdChange(previousSessionState.cwd, cwdChangeTarget))) {
-						rollbackFailure = "cwd rollback was rejected";
+					await this.#sessionSwitchReconciler?.();
+				} catch (reconcileError) {
+					logger.warn("Failed to reconcile session mode after switch rollback", {
+						targetSessionFile: sessionPath,
+						error: String(reconcileError),
+					});
+				}
+				if (cwdChangeTarget && error !== SESSION_CWD_CHANGE_REJECTED && options?.onCwdChange) {
+					let rollbackFailure: string | undefined;
+					try {
+						if (!(await options.onCwdChange(previousSessionState.cwd, cwdChangeTarget))) {
+							rollbackFailure = "cwd rollback was rejected";
+						}
+					} catch (rollbackError) {
+						rollbackFailure = `cwd rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`;
 					}
-				} catch (rollbackError) {
-					rollbackFailure = `cwd rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`;
+					if (rollbackFailure) {
+						this.beginDispose();
+						this.#bash.finishSessionTransition(bashTransition, false);
+						logger.warn("Failed to restore cwd after session switch", { cwd: previousSessionState.cwd });
+						const original = error instanceof Error ? error.message : String(error);
+						throw new Error(`${original} (${rollbackFailure}; the process may remain in ${cwdChangeTarget})`);
+					}
 				}
-				if (rollbackFailure) {
-					this.beginDispose();
-					this.#bash.finishSessionTransition(bashTransition, false);
-					logger.warn("Failed to restore cwd after session switch", { cwd: previousSessionState.cwd });
-					const original = error instanceof Error ? error.message : String(error);
-					throw new Error(`${original} (${rollbackFailure}; the process may remain in ${cwdChangeTarget})`);
-				}
+				this.#bash.finishSessionTransition(bashTransition, false);
+				if (error === SESSION_CWD_CHANGE_REJECTED) return false;
+				throw error;
+			} finally {
+				transitionSettled.resolve();
+				this.#sessionGenerationTransitionSettled = previousGenerationTransitionSettled;
 			}
-			this.#bash.finishSessionTransition(bashTransition, false);
-			if (error === SESSION_CWD_CHANGE_REJECTED) return false;
-			throw error;
 		}
 	}
 
@@ -9357,6 +9441,8 @@ export class AgentSession {
 		selectedImages: ImageContent[];
 		cancelled: boolean;
 	}> {
+		using _sessionIdentity = await this.enterSessionIdentityOperation();
+
 		const previousSessionFile = this.sessionFile;
 		const selectedEntry = this.sessionManager.getEntry(entryId);
 
@@ -9461,6 +9547,8 @@ export class AgentSession {
 		leafId: string,
 		sessionId: string,
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
+		using _sessionIdentity = await this.enterSessionIdentityOperation();
+
 		const previousSessionFile = this.sessionFile;
 		if (!this.sessionManager.getSessionFile()) {
 			throw new Error("Cannot branch /btw: session is not persisted");

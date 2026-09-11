@@ -569,6 +569,7 @@ export class SessionManager {
 	 */
 	#breadcrumbFresh = false;
 	#sessionNameChangedCallbacks = new Set<() => void>();
+	#cwdChangedCallbacks = new Set<() => void>();
 	#persistenceErrorCallbacks = new Set<(error: Error) => void>();
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean, storage: SessionStorage) {
@@ -1284,6 +1285,16 @@ export class SessionManager {
 		}
 	}
 
+	#notifyCwdChangedListeners(): void {
+		for (const callback of Array.from(this.#cwdChangedCallbacks)) {
+			try {
+				callback();
+			} catch (error) {
+				logger.warn("SessionManager: cwd change hook failed", { error: String(error) });
+			}
+		}
+	}
+
 	static #cleanTitle(raw: string): string {
 		return raw
 			.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
@@ -1546,7 +1557,9 @@ export class SessionManager {
 	/** Move the session to a new working directory. */
 	async moveTo(newCwd: string, targetSessionDir?: string): Promise<void> {
 		const resolvedCwd = path.resolve(newCwd);
+		const previousCwd = path.resolve(this.#cwd);
 		const resolvedTargetDir = targetSessionDir ? path.resolve(targetSessionDir) : undefined;
+
 		const managedRoot = resolveManagedSessionRoot(this.#sessionDir, this.#cwd);
 		const nextSessionDir =
 			resolvedTargetDir ??
@@ -1678,6 +1691,9 @@ export class SessionManager {
 			if (this.#sessionFile) this.#rememberBreadcrumb(resolvedCwd, this.#sessionFile);
 		} finally {
 			this.#sessionFileRelocating = null;
+			// Cwd commits before the trailing rewrite. Observe the authoritative final
+			// manager state here so success and post-commit failure each notify once.
+			if (path.resolve(this.#cwd) !== previousCwd) this.#notifyCwdChangedListeners();
 		}
 	}
 
@@ -1946,6 +1962,7 @@ export class SessionManager {
 		if (this.#sessionFile) {
 			this.#rememberBreadcrumb(resolvedCwd, this.#sessionFile);
 		}
+		this.#notifyCwdChangedListeners();
 	}
 	adoptRecordedCwd(): void {
 		const recordedCwd = this.#header.cwd;
@@ -2213,6 +2230,13 @@ export class SessionManager {
 		this.#sessionNameChangedCallbacks.add(cb);
 		return () => {
 			this.#sessionNameChangedCallbacks.delete(cb);
+		};
+	}
+
+	onCwdChanged(callback: () => void): () => void {
+		this.#cwdChangedCallbacks.add(callback);
+		return () => {
+			this.#cwdChangedCallbacks.delete(callback);
 		};
 	}
 

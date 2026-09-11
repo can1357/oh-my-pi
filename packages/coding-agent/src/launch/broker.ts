@@ -11,6 +11,7 @@ import { workerEnvFromParent } from "../subprocess/worker-client";
 import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
+	DAEMON_CAPABILITY_LIVE_SESSIONS,
 	DAEMON_IDLE_GRACE_ENV,
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_PTY_COLUMNS,
@@ -24,6 +25,8 @@ import {
 	type DaemonSnapshot,
 	type DaemonSpec,
 	type DaemonWireRequest,
+	type LiveSessionMessageAck,
+	type LiveSessionRegistration,
 	parseDaemonSnapshot,
 	parseDaemonSpec,
 	parseDaemonWireMessage,
@@ -38,6 +41,7 @@ const MAX_LOG_BYTES = 25 * 1024 * 1024;
 const LOG_READ_BYTES = 2 * 1024 * 1024;
 const READINESS_BUFFER_CHARS = 64 * 1024;
 const RESTART_MAX_DELAY_MS = 30_000;
+const LIVE_SESSION_DELIVERY_TIMEOUT_MS = 5_000;
 const RESTART_BACKOFF_BASE_MS = 1_000;
 /**
  * Cap on terminal (exited/failed) daemons surfaced by `list`. Active daemons
@@ -101,6 +105,18 @@ interface DaemonLogRead {
 	text: string;
 	terminalOutput: string;
 	cursor: number;
+}
+
+interface HostedLiveSession {
+	registration: LiveSessionRegistration;
+	socket: net.Socket;
+}
+
+interface PendingLiveSessionMessage {
+	socket: net.Socket;
+	resolve: () => void;
+	reject: (error: Error) => void;
+	timer: NodeJS.Timeout;
 }
 
 function quoteShellArg(value: string): string {
@@ -370,9 +386,14 @@ class DaemonBroker {
 	readonly #pendingCompletions = new Map<string, Map<string, DaemonCompletionNotification>>();
 	readonly #finished = Promise.withResolvers<void>();
 	readonly #sockets = new Set<net.Socket>();
+	readonly #liveSessions = new Map<string, HostedLiveSession>();
+	readonly #liveSessionBySocket = new Map<net.Socket, string>();
+	readonly #pendingLiveSessionMessages = new Map<string, PendingLiveSessionMessage>();
 	#server: net.Server | undefined;
 	#idleTimer: NodeJS.Timeout | undefined;
 	#shuttingDown = false;
+	/** Once armed, new `start` requests fail instead of racing an imminent shutdown. Set by shutdown paths without yielding, so the check-and-arm in `shutdownIfIdle` is atomic. */
+	#quiesced = false;
 
 	constructor(
 		projectDir: string,
@@ -407,6 +428,7 @@ class DaemonBroker {
 	async shutdown(): Promise<void> {
 		if (this.#shuttingDown) return this.#finished.promise;
 		this.#shuttingDown = true;
+		this.#quiesced = true;
 		clearTimeout(this.#idleTimer);
 		this.#idleTimer = undefined;
 		for (const record of this.#records.values()) {
@@ -417,6 +439,13 @@ class DaemonBroker {
 			await record.persistQueue;
 		}
 		this.#ownerSockets.clear();
+		for (const pending of this.#pendingLiveSessionMessages.values()) {
+			clearTimeout(pending.timer);
+			pending.reject(new Error("Daemon broker shut down before delivering the live session message"));
+		}
+		this.#pendingLiveSessionMessages.clear();
+		this.#liveSessions.clear();
+		this.#liveSessionBySocket.clear();
 		for (const socket of this.#sockets) socket.destroy();
 		this.#sockets.clear();
 		this.#clients.clear();
@@ -466,6 +495,7 @@ class DaemonBroker {
 			for (const [owner, registration] of this.#ownerSockets) {
 				if (registration.socket === socket) this.#ownerSockets.delete(owner);
 			}
+			this.#removeLiveSession(socket, "Live session disconnected before accepting the message");
 		});
 	}
 
@@ -477,6 +507,8 @@ class DaemonBroker {
 			id = request.id;
 			if (request.token !== this.#token) throw new Error("Daemon broker authentication failed");
 			onAuthenticated();
+			if (request.liveSessionEvents === true) this.#syncLiveSession(socket, request.liveSession);
+			this.#ackLiveSessionMessages(socket, request.liveSessionMessageAcks ?? []);
 			for (const owner of request.completionUnsubscribes ?? []) {
 				const subscriptionId = this.#completionSubscriptions.get(owner);
 				if (
@@ -551,7 +583,11 @@ class DaemonBroker {
 			}
 			const result = await this.#dispatch(request.operation);
 			socket.write(`${JSON.stringify({ id, ok: true, result })}\n`);
-			if (request.operation.op === "shutdown") setTimeout(() => void this.shutdown(), 10);
+			if (
+				request.operation.op === "shutdown" ||
+				(request.operation.op === "shutdownIfIdle" && result.op === "shutdownIfIdle" && result.shutDown)
+			)
+				setTimeout(() => void this.shutdown(), 10);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			socket.write(`${JSON.stringify({ id, ok: false, error: message })}\n`);
@@ -561,7 +597,11 @@ class DaemonBroker {
 	async #dispatch(operation: DaemonOperation): Promise<DaemonRpcResult> {
 		switch (operation.op) {
 			case "ping":
-				return { op: "ping", projectDir: this.#projectDir };
+				return {
+					op: "ping",
+					projectDir: this.#projectDir,
+					capabilities: [DAEMON_CAPABILITY_LIVE_SESSIONS],
+				};
 			case "start":
 				return this.#start(operation.spec, operation.owner);
 			case "list": {
@@ -589,12 +629,138 @@ class DaemonBroker {
 				await this.#refreshDetached(record);
 				return { op: "describe", daemon: record.snapshot, spec: record.spec };
 			}
+			case "session-list":
+				return {
+					op: "session-list",
+					sessions: [...this.#liveSessions.values()]
+						.map(({ registration }) => ({ ...registration }))
+						.sort((left, right) => right.startedAt.localeCompare(left.startedAt)),
+				};
+			case "session-send":
+				return this.#sendLiveSessionMessage(operation);
 			case "shutdown":
 				return { op: "shutdown" };
+			case "shutdownIfIdle":
+				return this.#shutdownIfIdle();
 		}
 	}
 
+	/**
+	 * Shut down only when the broker supervises no live non-detached work.
+	 * The check and the quiesce arm below run without yielding, so a
+	 * concurrent `start` can neither slip in unobserved (its synchronous
+	 * prefix fails once quiesced) nor be terminated mid-launch: a start that
+	 * won the race is visible in `#startingNames` and refuses the shutdown.
+	 * Detached survivors and terminal history never block: `shutdown()` leaves
+	 * them alone (detached records are re-adopted from persistence).
+	 */
+	#shutdownIfIdle(): DaemonRpcResult {
+		if (this.#quiesced || this.#shuttingDown) return { op: "shutdownIfIdle", shutDown: true, active: [] };
+		const active = [
+			...[...this.#records.values()]
+				.filter(record => {
+					const detached = record.spec.detached && !record.stopRequested && record.snapshot.pid !== undefined;
+					return !detached && !terminalState(record.snapshot.state);
+				})
+				.map(record => record.snapshot.name),
+			...this.#startingNames,
+		];
+		if (active.length > 0) return { op: "shutdownIfIdle", shutDown: false, active };
+		this.#quiesced = true;
+		return { op: "shutdownIfIdle", shutDown: true, active: [] };
+	}
+
+	#syncLiveSession(socket: net.Socket, registration: LiveSessionRegistration | undefined): void {
+		const previousEndpointId = this.#liveSessionBySocket.get(socket);
+		if (!registration) {
+			if (previousEndpointId) {
+				if (this.#liveSessions.get(previousEndpointId)?.socket === socket) {
+					this.#liveSessions.delete(previousEndpointId);
+				}
+				this.#liveSessionBySocket.delete(socket);
+			}
+			return;
+		}
+		const existing = this.#liveSessions.get(registration.endpointId);
+		if (existing && existing.socket !== socket) {
+			throw new Error(`Live session endpoint is already registered: ${registration.endpointId}`);
+		}
+		if (previousEndpointId && previousEndpointId !== registration.endpointId) {
+			if (this.#liveSessions.get(previousEndpointId)?.socket === socket) {
+				this.#liveSessions.delete(previousEndpointId);
+			}
+		}
+		this.#liveSessions.set(registration.endpointId, { registration, socket });
+		this.#liveSessionBySocket.set(socket, registration.endpointId);
+	}
+
+	#removeLiveSession(socket: net.Socket, reason: string): void {
+		const endpointId = this.#liveSessionBySocket.get(socket);
+		if (endpointId) {
+			this.#liveSessionBySocket.delete(socket);
+			if (this.#liveSessions.get(endpointId)?.socket === socket) this.#liveSessions.delete(endpointId);
+		}
+		for (const [deliveryId, pending] of this.#pendingLiveSessionMessages) {
+			if (pending.socket !== socket) continue;
+			clearTimeout(pending.timer);
+			this.#pendingLiveSessionMessages.delete(deliveryId);
+			pending.reject(new Error(reason));
+		}
+	}
+
+	#ackLiveSessionMessages(socket: net.Socket, acknowledgements: LiveSessionMessageAck[]): void {
+		for (const acknowledgement of acknowledgements) {
+			const pending = this.#pendingLiveSessionMessages.get(acknowledgement.deliveryId);
+			if (!pending || pending.socket !== socket) continue;
+			clearTimeout(pending.timer);
+			this.#pendingLiveSessionMessages.delete(acknowledgement.deliveryId);
+			if (acknowledgement.error !== undefined) {
+				pending.reject(new Error(acknowledgement.error || "Live session rejected the message"));
+			} else {
+				pending.resolve();
+			}
+		}
+	}
+
+	async #sendLiveSessionMessage(
+		operation: Extract<DaemonOperation, { op: "session-send" }>,
+	): Promise<DaemonRpcResult> {
+		const hosted = this.#liveSessions.get(operation.endpointId);
+		if (!hosted || hosted.socket.destroyed) {
+			throw new Error(`Live session endpoint not found: ${operation.endpointId}`);
+		}
+		if (hosted.registration.sessionId !== operation.sessionId) {
+			throw new Error("The OMP process switched sessions; attach again");
+		}
+		const deliveryId = crypto.randomUUID();
+		const { promise, resolve, reject } = Promise.withResolvers<void>();
+		const timer = setTimeout(() => {
+			if (!this.#pendingLiveSessionMessages.delete(deliveryId)) return;
+			reject(new Error("Timed out waiting for the live session to accept the message"));
+		}, LIVE_SESSION_DELIVERY_TIMEOUT_MS);
+		timer.unref();
+		this.#pendingLiveSessionMessages.set(deliveryId, { socket: hosted.socket, resolve, reject, timer });
+		try {
+			hosted.socket.write(
+				`${JSON.stringify({
+					event: "session-message",
+					deliveryId,
+					endpointId: operation.endpointId,
+					sessionId: operation.sessionId,
+					message: operation.message,
+				})}\n`,
+			);
+		} catch (error) {
+			clearTimeout(timer);
+			this.#pendingLiveSessionMessages.delete(deliveryId);
+			throw error;
+		}
+		await promise;
+		return { op: "session-send", endpointId: operation.endpointId, sessionId: operation.sessionId };
+	}
+
 	async #start(spec: DaemonSpec, owner?: string): Promise<DaemonRpcResult> {
+		if (this.#quiesced || this.#shuttingDown) throw new Error("Daemon broker is shutting down");
 		if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(spec.name)) {
 			throw new Error("Daemon name must be 1-48 letters, numbers, dots, underscores, or hyphens");
 		}
@@ -1308,7 +1474,9 @@ class DaemonBroker {
 						if ("pendingCompletions" in decoded && Array.isArray(decoded.pendingCompletions)) {
 							return decoded.pendingCompletions.map(value => {
 								const message = parseDaemonWireMessage(value);
-								if (!("event" in message)) throw new Error("Pending daemon completion is not an event");
+								if (!("event" in message) || message.event !== "daemon-completed") {
+									throw new Error("Pending daemon completion is not a completion event");
+								}
 								return message;
 							});
 						}
