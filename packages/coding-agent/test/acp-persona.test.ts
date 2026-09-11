@@ -686,6 +686,44 @@ describe("ACP persona reconciliation", () => {
 		expect(queued?.model).toBe(personaModel);
 	});
 
+	// A retained-after-failure restore (flushDeferredModelRestore keeps the slot
+	// owed when the model application rejects) is superseded by the NEXT
+	// successful persona enter: its model applies immediately, and flushing the
+	// older queued selector at the next agent_end would drop the session off the
+	// newly entered persona. The hooks' apply channel therefore clears the slot.
+	it("successful persona enter clears a stale owed restore", async () => {
+		let cleared = 0;
+		let queued: { model: Model; thinkingLevel: ConfiguredThinkingLevel | undefined } | undefined;
+		const target = {
+			isStreaming: false,
+			model: undefined,
+			settings: Settings.isolated(),
+			modelRegistry: { getAvailable: () => [] },
+			setModel: async () => {},
+			setThinkingLevel: () => {},
+			queueDeferredModelRestore: (model: Model, thinkingLevel?: ConfiguredThinkingLevel) => {
+				queued = { model, thinkingLevel };
+			},
+			clearDeferredModelRestore: () => {
+				cleared += 1;
+				queued = undefined;
+			},
+			getDeferredModelRestore: () => queued,
+		} as unknown as AgentSession;
+		const hooks = createAcpPersonaModelHooks(target, async () => {});
+		await hooks.apply({
+			name: "acp-enter",
+			description: "",
+			systemPrompt: "prompt",
+			source: "bundled",
+		} as DiscoveredAgent);
+		expect(cleared).toBe(1);
+
+		// Mid-turn enters take the defer channel instead; apply never runs there.
+		const streaming = createAcpPersonaModelHooks({ isStreaming: true } as unknown as AgentSession, async () => {});
+		expect(streaming.shouldDeferModelSwitch?.()).toBe(true);
+	});
+
 	it("failed ACP transaction restores the prior deferred entry instead of clearing", async () => {
 		const harness = await createPersonaHarness();
 		const { target, peek } = makeDeferredQueueStub(harness);

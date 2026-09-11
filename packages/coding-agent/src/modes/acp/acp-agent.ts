@@ -168,6 +168,16 @@ export function createAcpPersonaModelHooks(
 	};
 	return {
 		...defaultHooks,
+		// A non-deferred enter applies its model immediately (pre-turn); any
+		// restore queued BEFORE that application is now stale (its model
+		// selector predates the persona switch — e.g. kept owed by a failed
+		// agent_end flush) and must not land at the next boundary under the
+		// freshly entered persona. Mid-turn enters take the defer channel and
+		// never reach this hook, so the transaction's own queue entry survives.
+		apply: async (agent, explicit) => {
+			await defaultHooks.apply?.(agent, explicit);
+			session.clearDeferredModelRestore?.();
+		},
 		shouldDeferModelSwitch: () => session.isStreaming,
 		deferModelSwitchWhileStreaming: agent => {
 			// Chained switches (A active, mid-turn enter of modeled B): the
@@ -1743,7 +1753,13 @@ export class AcpAgent implements Agent {
 			// fw_sA: apply a deferred persona model restore queued by a mid-turn
 			// exit before the turn's trailing updates flush.
 			try {
-				await record.session.flushDeferredModelRestore();
+				if (await record.session.flushDeferredModelRestore()) {
+					// The queued restore rode the runtime's parked pre-chain
+					// baseline; drop that parked value once consumed (TUI
+					// flushPendingModelSwitch parity) so a much later mid-turn
+					// enter does not re-adopt a stale baseline.
+					record.session.getPersonaRuntime()?.onPendingModelRestoreFlushed();
+				}
 			} catch (error) {
 				logger.warn("Failed to apply deferred persona model restore at turn end", {
 					sessionId: record.session.sessionId,
