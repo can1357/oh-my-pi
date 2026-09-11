@@ -150,6 +150,22 @@ describe("CustomEditor keybindings", () => {
 		}
 	});
 
+	it("leaves the cursor on a grapheme after ctrl+d in vim normal mode, like the Delete key", () => {
+		// Vim maps the Delete key to `x`, which clamps the Normal-mode cursor; Ctrl+D resolves in
+		// the exit slot and must land on the same state, or the next insert goes in at the wrong
+		// column (deleting the last grapheme of "ab" then `iX` produced "aX" instead of "Xa").
+		const editor = new CustomEditor(getEditorTheme());
+		editor.setVimMode(true);
+		editor.setText("ab");
+		editor.handleInput("\x1b"); // Escape -> Normal, cursor rests on "b"
+		editor.handleInput("\x04"); // Ctrl+D
+		expect(editor.getText()).toBe("a");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+		editor.handleInput("i");
+		editor.handleInput("X");
+		expect(editor.getText()).toBe("Xa");
+	});
+
 	it("still exits on a remapped exit key with no forward-delete role, even with text", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		editor.setActionKeys("app.exit", ["ctrl+q"]);

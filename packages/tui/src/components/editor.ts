@@ -3548,6 +3548,13 @@ export class Editor implements Component, Focusable {
 			this.#state.lines.splice(this.#state.cursorLine + 1, 1);
 		}
 
+		// Deleting the final grapheme can leave the cursor one past the end of the line, which
+		// Normal mode never allows (it rests *on* a grapheme). Vim's own `x` clamps via
+		// #applyVimCommands; callers that invoke this operation directly — hosts resolving a
+		// chord themselves, or a key bound to deleteCharForward that Vim does not map — get the
+		// same treatment here so the cursor can't sit off the buffer.
+		this.#clampVimCursor();
+
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
