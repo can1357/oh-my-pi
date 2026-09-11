@@ -1029,9 +1029,30 @@ export interface LongContextTokenCost extends TokenCost {
 	inputThresholdInclusive?: boolean;
 }
 
-/** Base token rates plus an optional long-context tier. */
+/** Recurring UTC peak interval; weekdays use Sunday = 0, and the end is exclusive. */
+export interface PeakPricingWindow {
+	weekdays: readonly number[];
+	startMinute: number;
+	endMinute: number;
+}
+
+/** Complete replacement rate card effective from a Unix-millisecond timestamp. */
+export interface EffectiveTokenCost extends TokenCost {
+	effectiveFrom: number;
+	longContext?: LongContextTokenCost;
+}
+
+/** Scheduled discounts applied after selecting the effective rate card and context tier. */
+export interface TimeBasedCost {
+	offPeakMultiplier: number;
+	peakWindows: readonly PeakPricingWindow[];
+	effectiveRates?: readonly EffectiveTokenCost[];
+}
+
+/** Base token rates plus optional long-context and time-based pricing. */
 export interface ModelCost extends TokenCost {
 	longContext?: LongContextTokenCost;
+	timeBased?: TimeBasedCost;
 }
 
 /**

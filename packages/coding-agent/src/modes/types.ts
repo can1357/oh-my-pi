@@ -379,6 +379,11 @@ export interface InteractiveModeContext {
 	/** Refresh the running-subagents status badge from the active local or collab registry. */
 	syncRunningSubagentBadge(): void;
 	updateEditorBorderColor(): void;
+	/**
+	 * Re-apply `tui.vimMode` to the live editor and refresh the mode chrome (border, status-line
+	 * segment, cursor shape). Lets the setting take effect without restarting the session.
+	 */
+	applyVimModeSetting(): void;
 	rebuildChatFromMessages(options?: { reuseSettledComponents?: boolean }): void;
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;
 	reloadTodos(source?: AgentSession): Promise<void>;
