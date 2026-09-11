@@ -33,9 +33,13 @@ import type {
 	ServiceTier,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
-import { isUsageLimitOutcome, resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
+import {
+	isUsageLimitOutcome,
+	resolveModelRateLimitPolicy,
+	resolveModelServiceTier,
+	streamSimple,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { extractHttpStatusFromError, extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
 import {
@@ -1441,10 +1445,7 @@ export class SessionAdvisors {
 
 		const currentModel = advisor.agent.state.model;
 		const message = assistantFailure?.errorMessage ?? (error instanceof Error ? error.message : String(error));
-		const rateLimitPolicy = {
-			genericResourceExhaustedIsRateLimit:
-				resolveModelPolicy(currentModel).catalog.genericResourceExhaustedIsRateLimit === true,
-		};
+		const rateLimitPolicy = resolveModelRateLimitPolicy(currentModel);
 		const errorId = assistantFailure
 			? AIError.classifyMessage({
 					api: currentModel.api,

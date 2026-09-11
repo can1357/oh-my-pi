@@ -23,6 +23,7 @@ import {
 	parseRateLimitReason,
 	type RateLimitPolicy,
 	type RateLimitReason,
+	resolveModelRateLimitPolicy,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
@@ -1199,12 +1200,7 @@ export class TurnRecovery {
 	}
 
 	#rateLimitPolicy(): RateLimitPolicy {
-		const activeModel = this.#host.model();
-		return {
-			genericResourceExhaustedIsRateLimit:
-				activeModel !== undefined &&
-				resolveModelPolicy(activeModel).catalog.genericResourceExhaustedIsRateLimit === true,
-		};
+		return resolveModelRateLimitPolicy(this.#host.model());
 	}
 
 	#parseRateLimitReason(errorMessage: string): RateLimitReason {

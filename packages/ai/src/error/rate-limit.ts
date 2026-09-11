@@ -1,4 +1,6 @@
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { extractRetryHint } from "@oh-my-pi/pi-utils/fetch-retry";
+import type { Api, Model } from "../types";
 
 /**
  * Rate limit reason classification and backoff calculation utilities.
@@ -21,6 +23,21 @@ export interface RateLimitPolicy {
 	 * boilerplate as a transient rate limit.
 	 */
 	genericResourceExhaustedIsRateLimit?: boolean;
+}
+
+/**
+ * Resolve a model's compat facts into the {@link RateLimitPolicy} the classifier
+ * consumes. The single conversion site for the deployment-owned policy fields —
+ * every classification, credential-rotation, and cooldown path MUST route model
+ * policy through here rather than reading `catalog.*` flags directly, so a new
+ * policy field lands in one place.
+ */
+export function resolveModelRateLimitPolicy(model: Model<Api> | null | undefined): RateLimitPolicy {
+	if (!model) return {};
+	return {
+		genericResourceExhaustedIsRateLimit:
+			resolveModelPolicy(model).catalog.genericResourceExhaustedIsRateLimit === true,
+	};
 }
 
 const QUOTA_EXHAUSTED_BACKOFF_MS = 30 * 60 * 1000; // 30 min
