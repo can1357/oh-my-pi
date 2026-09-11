@@ -2,6 +2,8 @@ import { type ApiKeyResolver, type OAuthAccess, type OAuthAccessSource, seedApiK
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { DEFAULT_CLOUD_STT_MODEL, resolveCloudSttModel } from "@oh-my-pi/pi-coding-agent/stt/cloud-models";
+import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
+import type { CloudSttCredential } from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
 import { encodeWav16k, startCloudSttStream } from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
 import { resolveSttCloudCredential, STTController, type SttState } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -256,6 +258,41 @@ describe("cloud STT stream", () => {
 		handle.cancel();
 		await expect(stopped).resolves.toBe("");
 		expect((stub.calls[0]!.init.signal as AbortSignal).aborted).toBe(true);
+	});
+
+	it("tunnels each credential's upload through its provider-scoped proxy", async () => {
+		const proxied = async (credential: CloudSttCredential, envKey: string): Promise<string | undefined> => {
+			const previous = Bun.env[envKey];
+			Bun.env[envKey] = "http://proxy.internal:8080";
+			__resetProxyCache();
+			try {
+				const stub = stubFetch("ok");
+				const handle = startCloudSttStream({ credential, fetchImpl: stub.impl });
+				handle.pushAudio(sine16kHz(160));
+				await handle.stop();
+				const init = stub.calls[0]!.init;
+				return "proxy" in init && typeof init.proxy === "string" ? init.proxy : undefined;
+			} finally {
+				if (previous === undefined) delete Bun.env[envKey];
+				else Bun.env[envKey] = previous;
+				__resetProxyCache();
+			}
+		};
+		await expect(proxied({ kind: "openai", apiKey: "sk-test" }, "PI_PROXY_OPENAI")).resolves.toBe(
+			"http://proxy.internal:8080",
+		);
+		await expect(
+			proxied(
+				{
+					kind: "codex",
+					access: { accessToken: "subscription-token", accountId: "account-1" },
+					source: oauthSource("subscription-token").source,
+				},
+				"PI_PROXY_OPENAI_CODEX",
+			),
+		).resolves.toBe("http://proxy.internal:8080");
+		// Another provider's proxy variable must not capture this upload.
+		await expect(proxied({ kind: "openai", apiKey: "sk-test" }, "PI_PROXY_ANTHROPIC")).resolves.toBeUndefined();
 	});
 
 	it("sanitizes a hostile provider error body before it reaches the TUI", async () => {
