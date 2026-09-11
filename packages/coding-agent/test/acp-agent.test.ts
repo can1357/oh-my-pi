@@ -385,6 +385,12 @@ class FakeAgentSession {
 		return this.fastMode;
 	}
 
+	// `/fast status` reads the realized tier, not the family toggle. The fake has no
+	// service-tier machinery, so both collapse onto the single `fastMode` flag.
+	isFastModeActive(): boolean {
+		return this.fastMode;
+	}
+
 	setForcedToolChoice(toolName: string): void {
 		this.forcedToolChoice = toolName;
 	}
