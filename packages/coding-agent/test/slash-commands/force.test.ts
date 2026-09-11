@@ -114,4 +114,23 @@ describe("/force slash command", () => {
 
 		expect(buildNamedToolChoice("write", model)).toEqual({ type: "function", name: "write" });
 	});
+
+	it("builds a named function choice for OpenRouter models", () => {
+		// OpenRouter used to be modelled as openai-completions and got this choice; since
+		// it became its own api, /force refused every OpenRouter model.
+		const model = buildModel({
+			id: "openai/gpt-5",
+			name: "GPT-5 (OpenRouter)",
+			api: "openrouter",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+		}) satisfies Model<"openrouter">;
+
+		expect(buildNamedToolChoice("write", model)).toEqual({ type: "function", name: "write" });
+	});
 });
