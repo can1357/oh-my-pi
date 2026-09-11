@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import { getKeybindings, setKeybindings } from "@oh-my-pi/pi-tui";
 import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
@@ -125,6 +126,28 @@ describe("CustomEditor keybindings", () => {
 		expect(onExit).not.toHaveBeenCalled();
 		expect(onDequeue).not.toHaveBeenCalled();
 		expect(customHandler).not.toHaveBeenCalled();
+	});
+
+	it("forward-deletes even when an earlier base-editor action is user-bound to the same chord", () => {
+		// Editor.handleInput checks tui.input.submit before tui.editor.deleteCharForward, so
+		// redispatching the raw key would submit the draft; the operation must be invoked directly.
+		const previous = getKeybindings();
+		setKeybindings(KeybindingsManager.inMemory({ "tui.input.submit": ["enter", "ctrl+d"] }));
+		try {
+			const editor = new CustomEditor(getEditorTheme());
+			const onExit = vi.fn();
+			const onSubmit = vi.fn();
+			editor.onExit = onExit;
+			editor.onSubmit = onSubmit;
+			editor.setText("ab");
+			editor.moveToLineStart();
+			editor.handleInput("\x04"); // Ctrl+D
+			expect(editor.getText()).toBe("b");
+			expect(onSubmit).not.toHaveBeenCalled();
+			expect(onExit).not.toHaveBeenCalled();
+		} finally {
+			setKeybindings(previous);
+		}
 	});
 
 	it("still exits on a remapped exit key with no forward-delete role, even with text", () => {

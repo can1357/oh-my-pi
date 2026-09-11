@@ -2474,6 +2474,13 @@ export class Editor implements Component, Focusable {
 		this.#moveToMessageEnd();
 	}
 
+	/** Delete the grapheme (or whole atomic token) at the cursor, merging with the next line at
+	 *  end-of-line — the `tui.editor.deleteCharForward` operation, callable by hosts that resolve
+	 *  the chord themselves rather than redispatching the raw key. */
+	deleteCharForward(): void {
+		this.#handleForwardDelete();
+	}
+
 	/**
 	 * Undo the last meaningful edit while ignoring transient text that is still present at the cursor.
 	 * Used for command-like autocomplete actions whose typed trigger should not count as the edit being undone.

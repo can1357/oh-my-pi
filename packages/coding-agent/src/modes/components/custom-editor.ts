@@ -1158,17 +1158,18 @@ export class CustomEditor extends Editor {
 
 			// Intercept configured exit shortcut. When the key doubles as
 			// forward-delete (readline ^D: the default app.exit binding overlaps
-			// tui.editor.deleteCharForward) and the buffer is non-empty, hand it
-			// straight to the base editor so it deletes the character at the
-			// cursor instead of quitting. Routing directly (rather than falling
-			// through) keeps the exit chord's precedence slot: a later app action
-			// or extension handler that a user also bound to the same chord must
-			// not steal the keystroke, exactly as it could not steal the exit
-			// before. Only an empty buffer exits; firing onExit is the
-			// controller's chance to snapshot the current text as a draft before
-			// shutting down. Exit keys with no forward-delete role always exit.
-			// Draft presence is read off the buffer alone: attachments live as
-			// inline chip tokens, while `pendingImages` / `pendingTexts`
+			// tui.editor.deleteCharForward) and the buffer is non-empty, perform
+			// the delete here instead of quitting. Invoking the operation directly
+			// — not falling through, not redispatching the raw key — keeps the
+			// exit chord's precedence slot on both sides: a later app action or
+			// extension handler bound to the same chord cannot steal it, and
+			// neither can an earlier base-editor action (e.g. a user-bound
+			// tui.input.submit, which Editor.handleInput checks before
+			// deleteCharForward). Only an empty buffer exits; firing onExit is
+			// the controller's chance to snapshot the current text as a draft
+			// before shutting down. Exit keys with no forward-delete role always
+			// exit. Draft presence is read off the buffer alone: attachments live
+			// as inline chip tokens, while `pendingImages` / `pendingTexts`
 			// intentionally retain deleted records so numbering isn't recycled
 			// (see composerChips) — trusting them would make Ctrl+D a permanent
 			// no-op after the last chip is deleted.
@@ -1176,7 +1177,7 @@ export class CustomEditor extends Editor {
 				const doublesAsForwardDelete =
 					canonical !== undefined && getKeybindings().matchesCanonical(canonical, "tui.editor.deleteCharForward");
 				if (doublesAsForwardDelete && !this.textEquals("")) {
-					super.handleInput(data);
+					this.deleteCharForward();
 					return;
 				}
 				this.onExit?.();
