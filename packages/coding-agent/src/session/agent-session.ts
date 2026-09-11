@@ -96,6 +96,7 @@ import {
 	stringProperty,
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
+import type { OperatorMessageQueue, OperatorQueuedMessageAction } from "@oh-my-pi/pi-wire/operator-types";
 import { type AdvisorConfig, loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
 import { reset as resetCapabilities } from "../capability";
@@ -347,6 +348,7 @@ import {
 	queueChipText,
 	toRestoredQueuedMessage,
 } from "./queued-messages";
+import { MessageQueueRegistry } from "./message-queue";
 import type { ServingModel } from "./retry-fallback-chains";
 import {
 	type AdvisorStats,
@@ -728,10 +730,13 @@ export class AgentSession {
 	#mcpPromptCommands: LoadedCustomCommand[] = [];
 
 	// Model registry for API key resolution
-	#modelRegistry: ModelRegistry;
 	#usageFallbackConfirmer: UsageFallbackConfirmer | undefined;
+	#modelRegistry: ModelRegistry;
 	#usagePreflightAbortControllers = new Set<AbortController>();
 	#queuedMessageDrainBlocked = false;
+	#messageQueueRegistry = new MessageQueueRegistry();
+	#queueSendNowInFlight = false;
+	#queueSendNowItemId: string | null = null;
 	#modeExitDrainSuppressionDepth = 0;
 	#usagePreflightReadyForNextModelCall = false;
 	#usagePreflightReadyModel: Model | undefined;
@@ -7428,6 +7433,95 @@ export class AgentSession {
 		);
 	}
 
+	/** Changes whenever the operator-visible queue contents change, including consumption by the running loop. */
+	get messageQueueRevision(): string {
+		return this.#messageQueueRegistry.revision(this.agent, this.#pendingNextTurnMessages);
+	}
+
+	#assertQueueSession(sessionId: string): void {
+		if (
+			this.#isDisposed ||
+			typeof sessionId !== "string" ||
+			!sessionId ||
+			sessionId !== this.sessionId
+		)
+			throw new Error("The queued-message session changed. Refresh the session before changing its queue.");
+	}
+
+	getMessageQueue(sessionId: string): OperatorMessageQueue {
+		this.#assertQueueSession(sessionId);
+		return this.#messageQueueRegistry.snapshot(this.sessionId, this.agent, this.#pendingNextTurnMessages);
+	}
+
+	async updateMessageQueue(
+		input: { sessionId: string; expectedRevision: string; itemId: string } & OperatorQueuedMessageAction,
+	): Promise<OperatorMessageQueue> {
+		this.#assertQueueSession(input.sessionId);
+		if (input.expectedRevision !== this.messageQueueRevision)
+			throw new Error(
+				"The message queue changed; the message may already be consumed. Refresh before trying again.",
+			);
+		if (this.#queueSendNowItemId === input.itemId) throw new Error("That queued message is being dispatched now.");
+		const selected = this.#messageQueueRegistry.select(this.agent, input.itemId);
+		if (input.action === "edit") {
+			this.#messageQueueRegistry.edit(this.agent, selected, input.text);
+			return this.getMessageQueue(input.sessionId);
+		}
+		if (input.action !== "delete" && input.action !== "send-now") throw new Error("Unknown queued-message action.");
+		if (input.action === "send-now" && this.#queueSendNowInFlight)
+			throw new Error("A queued message is already being sent now. Wait for its dispatch.");
+		// Selection and reservation are synchronous: the running loop cannot
+		// consume this item between its revision check and removal.
+		const reserved = this.#messageQueueRegistry.remove(this.agent, selected);
+		if (input.action === "delete") {
+			this.#reconcileQueuedMessageDrain();
+			return this.getMessageQueue(input.sessionId);
+		}
+		this.#queueSendNowInFlight = true;
+		this.#queueSendNowItemId = input.itemId;
+		this.#modeExitDrainSuppressionDepth++;
+		let dispatched = false;
+		let unsubscribe = () => {};
+		try {
+			await this.abort({ reason: USER_INTERRUPT_LABEL, preserveQueuedMessages: true });
+			this.#assertQueueSession(input.sessionId);
+			this.#allowQueuedMessageDrainRetry();
+			this.#advisors.autoResumeSuppressed = false;
+			const ready = Promise.withResolvers<void>();
+			unsubscribe = this.agent.subscribe(event => {
+				if (event.type === "message_start" && event.message === reserved.selected) {
+					dispatched = true;
+					ready.resolve();
+				}
+			});
+			this.agent.prependSteeringBatch(reserved.messages);
+			this.#scheduleAgentContinue({
+				source: "queue-send-now",
+				generation: this.#promptGeneration,
+				shouldContinue: () => !this.#isDisposed && this.sessionId === input.sessionId,
+				onSkip: reason =>
+					ready.reject(new Error(`The queued message was not dispatched (${reason}). Refresh the queue.`)),
+				onError: error => ready.reject(error instanceof Error ? error : new Error(String(error))),
+			});
+			// Acceptance is the selected message entering the new run, not the
+			// replacement model response finishing. Other items stay in their queues.
+			await ready.promise;
+			return this.getMessageQueue(input.sessionId);
+		} catch (error) {
+			if (!dispatched && !this.#isDisposed && this.sessionId === input.sessionId) {
+				this.#messageQueueRegistry.restore(this.agent, reserved);
+				this.#queuedMessageDrainBlocked = this.agent.hasQueuedMessages();
+			}
+			throw error;
+		} finally {
+			unsubscribe();
+			this.#queueSendNowInFlight = false;
+			this.#queueSendNowItemId = null;
+			this.#modeExitDrainSuppressionDepth--;
+			this.#scheduleIdleQueueDrain();
+		}
+	}
+
 	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[] } {
 		return {
 			steering: this.agent.peekSteeringQueue().filter(isUserQueuedMessage).map(queueChipText),
@@ -7767,6 +7861,8 @@ export class AgentSession {
 		reason?: string;
 		/** Internal `/compact` startup keeps the manual-compaction marker alive while aborting the active turn. */
 		preserveCompaction?: boolean;
+		/** Queue Send now reserves one item; all remaining queue content must stay pending. */
+		preserveQueuedMessages?: boolean;
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
@@ -7774,7 +7870,8 @@ export class AgentSession {
 		// Pull advisor concerns out of the steer/follow-up queues before any await so
 		// the post-abort stranded-message drain can't auto-resume the run on them.
 		// They are re-recorded as visible advice once the agent settles (below).
-		const strandedAdvisorCards = userInterrupt ? this.#extractQueuedAdvisorCards() : [];
+		const strandedAdvisorCards =
+			userInterrupt && !options?.preserveQueuedMessages ? this.#extractQueuedAdvisorCards() : [];
 		// Session switch/compact paths disconnect first; explicit aborts should
 		// leave any queued steer/follow-up visible for the user rather than
 		// auto-starting a fresh turn during cleanup.
@@ -7833,7 +7930,9 @@ export class AgentSession {
 			// that arrived via enqueueAdvice mid-abort and were parked hidden in
 			// #pendingNextTurnMessages while the turn was still tearing down. Other
 			// deferred next-turn context (non-advisor) stays queued, in order.
-			const parkedAdvisorCards = this.#pendingNextTurnMessages.filter(isAdvisorCard);
+			const parkedAdvisorCards = options?.preserveQueuedMessages
+				? []
+				: this.#pendingNextTurnMessages.filter(isAdvisorCard);
 			if (parkedAdvisorCards.length > 0) {
 				this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(m => !isAdvisorCard(m));
 			}

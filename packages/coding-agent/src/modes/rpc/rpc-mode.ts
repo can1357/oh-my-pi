@@ -1227,6 +1227,7 @@ export async function runRpcMode(
 					sessionName: session.sessionName,
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					queuedMessageCount: session.queuedMessageCount,
+					messageQueue: { supported: true, revision: session.messageQueueRevision },
 					todoPhases: session.getTodoPhases(),
 					fastModeEnabled: session.isFastModeEnabled(),
 					tokensPerSecond: calculateTokensPerSecond(session.messages, session.isStreaming),
@@ -1242,6 +1243,12 @@ export async function runRpcMode(
 					contextUsage: session.getContextUsage(),
 				};
 				return success(id, "get_state", state);
+			}
+			case "get_message_queue": {
+				return success(id, "get_message_queue", session.getMessageQueue(command.sessionId));
+			}
+			case "update_message_queue": {
+				return success(id, "update_message_queue", await session.updateMessageQueue(command));
 			}
 
 			case "set_fast_mode": {
