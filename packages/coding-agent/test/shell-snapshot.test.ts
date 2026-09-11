@@ -451,3 +451,76 @@ describe("getOrCreateSnapshot", () => {
 		}
 	});
 });
+
+describe.skipIf(process.platform === "win32" || !existsSync(REAL_BASH))("concurrent shell snapshots", () => {
+	async function withFixture(run: (shell: string, env: Record<string, string>, rc: string) => Promise<void>) {
+		const fixtureDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-concurrent-"));
+		const shell = path.join(fixtureDir, "fixture-bash");
+		await fs.symlink(REAL_BASH, shell);
+		try {
+			await run(
+				shell,
+				{ HOME: fixtureDir, PATH: process.env.PATH ?? "/usr/bin:/bin" },
+				path.join(fixtureDir, ".bashrc"),
+			);
+		} finally {
+			await fs.rm(fixtureDir, { recursive: true, force: true });
+		}
+	}
+
+	it("sources an equivalent environment once and recreates a deleted snapshot", async () => {
+		await withFixture(async (shell, env, rc) => {
+			await Bun.write(rc, 'echo invoked >> "$HOME/count"\n');
+			const results = await Promise.all([
+				getOrCreateSnapshot(shell, env),
+				getOrCreateSnapshot(shell, { PATH: env.PATH, HOME: env.HOME, OMITTED: undefined }),
+			]);
+			expect(results[0]).not.toBeNull();
+			expect(await Bun.file(path.join(env.HOME, "count")).text()).toBe("invoked\n");
+			await fs.rm(results[0]!);
+			const recreated = await getOrCreateSnapshot(shell, env);
+			expect(recreated).not.toBeNull();
+			expect(await Bun.file(path.join(env.HOME, "count")).text()).toBe("invoked\ninvoked\n");
+		});
+	});
+
+	it("does not share in-flight snapshots with different environments", async () => {
+		await withFixture(async (shell, env, rc) => {
+			await Bun.write(rc, 'show_probe () { echo "$PROBE_VALUE"; }\n');
+			const results = await Promise.all([
+				getOrCreateSnapshot(shell, { ...env, PROBE_VALUE: "first" }),
+				getOrCreateSnapshot(shell, { ...env, PROBE_VALUE: "second" }),
+			]);
+			for (const [index, value] of ["first", "second"].entries()) {
+				expect(results[index]).not.toBeNull();
+				expect(await Bun.file(results[index]!).text()).toContain(`export PROBE_VALUE='${value}'`);
+			}
+		});
+	});
+
+	it("keeps a short startup timeout from cancelling a longer request", async () => {
+		await withFixture(async (shell, env, rc) => {
+			await Bun.write(rc, "sleep 0.2\n");
+			const results = await Promise.all([
+				getOrCreateSnapshot(shell, env, 25),
+				getOrCreateSnapshot(shell, env, 2_000),
+			]);
+			expect(results[0]).toBeNull();
+			expect(results[1]).not.toBeNull();
+		});
+	});
+
+	it("retries after concurrent callers observe a failed creation", async () => {
+		await withFixture(async (shell, env, rc) => {
+			await Bun.write(rc, "exit 7\n");
+			expect(await Promise.all([getOrCreateSnapshot(shell, env), getOrCreateSnapshot(shell, env)])).toEqual([
+				null,
+				null,
+			]);
+			await Bun.write(rc, "recovered () { echo ready; }\n");
+			const snapshot = await getOrCreateSnapshot(shell, env);
+			expect(snapshot).not.toBeNull();
+			expect(await Bun.file(snapshot!).text()).toContain("recovered ()");
+		});
+	});
+});
