@@ -1143,7 +1143,15 @@ export class RelayBridge {
 			// transport as ambiguous: forget the entry so recovery cannot revive it,
 			// and force a fresh root so the tab returns to a known registration set.
 			if (isExtensionTransportInterrupted(err)) {
-				if (script && clientIdentifier) this.#forgetPreloadScript(tab, sessionId, clientIdentifier);
+				if (script && clientIdentifier) {
+					this.#forgetPreloadScript(tab, sessionId, clientIdentifier);
+					// The forced fresh-root recovery below discards both ambiguous
+					// Chrome registrations, so no marker-bearing producer or cleanup
+					// survives to justify suppressing this sentinel. Retire it now;
+					// otherwise genuine page exceptions with the same observable value
+					// remain hidden indefinitely after recovery.
+					if (script.applicationMarker) tab.preloadApplicationMarkers.delete(script.applicationMarker);
+				}
 				tab.forceFreshRootBeforeReplay = true;
 			}
 			throw err;

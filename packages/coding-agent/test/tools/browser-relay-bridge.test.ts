@@ -4888,6 +4888,104 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(0);
 	});
 
+	it("retires the application marker after an interrupted preload removal", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script", "loader-before");
+		const addReply = cdp.messages.find(message => message.id === msgSeq);
+		const clientIdentifier =
+			addReply &&
+			"result" in addReply &&
+			addReply.result &&
+			typeof addReply.result === "object" &&
+			"identifier" in addReply.result &&
+			typeof addReply.result.identifier === "string"
+				? addReply.result.identifier
+				: undefined;
+		expect(clientIdentifier).toBeDefined();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.pending("attach").length === 1);
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		const marked = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		ack(bridge, ext2, "send", { identifier: "root-script-with-marker" });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send", { identifier: "root-script-marker-only" });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
+		ack(bridge, ext2, "send", { result: { value: true } });
+		await waitFor(() =>
+			ext2
+				.pending("send")
+				.some(
+					rpc =>
+						rpc.method === "Page.disable" ||
+						(rpc.method === "Runtime.evaluate" &&
+							(rpc.params as { expression?: string } | undefined)?.expression?.includes("delete this")),
+				),
+		);
+		ack(bridge, ext2, "send");
+		await flush();
+		const privateMarker = (marked?.params as { source?: string } | undefined)?.source?.match(
+			/throw ("__ompRelayPreload[^"]+")/,
+		)?.[1];
+		expect(privateMarker).toBeDefined();
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.removeScriptToEvaluateOnNewDocument",
+				params: { identifier: clientIdentifier },
+			}),
+		);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
+		bridge.extClosed(ext2);
+		await flush();
+
+		const messagesBeforeException = cdp.messages.length;
+		const ext3 = new FakeExtSocket();
+		connect(bridge, ext3, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		bridge.extMessage(
+			ext3,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Runtime.exceptionThrown",
+				params: { exceptionDetails: { exception: { value: JSON.parse(privateMarker!) } } },
+			}),
+		);
+		expect(cdp.messages).toHaveLength(messagesBeforeException + 1);
+		expect(cdp.messages.at(-1)).toMatchObject({
+			sessionId: pageSession,
+			method: "Runtime.exceptionThrown",
+		});
+	});
+
 	it("forces a fresh root after an interrupted tracked shared-root setter", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
