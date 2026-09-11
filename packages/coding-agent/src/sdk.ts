@@ -2391,8 +2391,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					modelRegistry.refresh("online-if-uncached"),
 				);
 			}
-			const allModels = modelRegistry.getAll();
-			const availableModels = modelRegistry.getAvailable();
+			const disabledProviders = new Set(settings.get("disabledProviders"));
+			const allEnabledModels =
+				disabledProviders.size === 0
+					? modelRegistry.getAll()
+					: modelRegistry.getAll().filter(candidate => !disabledProviders.has(candidate.provider));
+			const availableModels =
+				disabledProviders.size === 0
+					? modelRegistry.getAvailable()
+					: modelRegistry.getAvailable().filter(candidate => !disabledProviders.has(candidate.provider));
 			const expandedModelPatterns = deferredModelPatterns.flatMap(pattern =>
 				pattern.split(",").flatMap(selector => {
 					const trimmedSelector = selector.trim();
@@ -2425,7 +2432,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						const originalSelector = resolved.configuredPatterns[0];
 						const availableOriginal = parseModelPattern(originalSelector, availableModels, matchPreferences);
 						const originalModel =
-							availableOriginal.model ?? parseModelPattern(originalSelector, allModels, matchPreferences).model;
+							availableOriginal.model ??
+							parseModelPattern(originalSelector, allEnabledModels, matchPreferences).model;
 						const chainKey = resolveRetryFallbackChainKey(
 							fallbackContext,
 							originalSelector,
@@ -2471,7 +2479,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				({ pattern }) => parseModelPattern(pattern, availableModels, matchPreferences).model,
 			)
 				? availableModels
-				: allModels;
+				: allEnabledModels;
 			let usageFallbackTriggered = false;
 			for (let patternIndex = 0; patternIndex < expandedModelPatterns.length; patternIndex += 1) {
 				const { pattern, retryFallback } = expandedModelPatterns[patternIndex];

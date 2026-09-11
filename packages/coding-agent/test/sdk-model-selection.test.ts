@@ -435,6 +435,22 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("does not resolve a disabled provider through deferred subagent model selection", async () => {
+		const settings = Settings.isolated({ disabledProviders: ["runtime-provider"] });
+		const { session, modelFallbackMessage } = await createAgentSession({
+			...buildSessionOptions("runtime-provider/runtime-model"),
+			settings,
+			modelPatternAuthFallback: "runtime-provider/runtime-fallback-model",
+		});
+
+		try {
+			expect(session.model).toBeUndefined();
+			expect(modelFallbackMessage).toBe('Model "runtime-provider/runtime-model" not found');
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("uses auth fallback when deferred subagent modelPattern resolves without working credentials", async () => {
 		const parentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!parentModel) {

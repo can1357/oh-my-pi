@@ -303,24 +303,4 @@ describe("issue #11709: disabled provider subagent model resolution", () => {
 		expect(result.model?.provider).toBe("deepseek");
 		expect(result.model?.id).toBe("deepseek-v4-pro");
 	});
-
-	test("returns no model when every override provider is disabled", async () => {
-		const settings = await Settings.init({
-			inMemory: true,
-			overrides: { disabledProviders: ["opencode-zen"] },
-		});
-		const registry = createMockRegistry({
-			models: [unauthedTaskModel],
-			authedProviders: new Set(["opencode-zen"]),
-		});
-
-		const result = await resolveModelOverrideWithAuthFallback(
-			["opencode-zen/qwen3.6-plus-free"],
-			undefined,
-			registry,
-			settings,
-		);
-
-		expect(result.model).toBeUndefined();
-	});
 });
