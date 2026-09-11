@@ -344,19 +344,19 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 			return path.join(base, "a0", "mcp.json");
 		};
 
-		const forty = path.join(dir, "forty");
-		await fs.promises.mkdir(forty);
-		await addMCPServer(await hopChain(forty, 40), "alpha", {
+		const atLimit = path.join(dir, "at-limit");
+		await fs.promises.mkdir(atLimit);
+		await addMCPServer(await hopChain(atLimit, maxHops), "alpha", {
 			type: "stdio",
 			command: "a",
 		});
-		const config = await readMCPConfigFile(path.join(forty, "a0", "mcp.json"));
+		const config = await readMCPConfigFile(path.join(atLimit, "a0", "mcp.json"));
 		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
 
-		const fortyOne = path.join(dir, "forty-one");
-		await fs.promises.mkdir(fortyOne);
+		const pastLimit = path.join(dir, "past-limit");
+		await fs.promises.mkdir(pastLimit);
 		await expect(
-			addMCPServer(await hopChain(fortyOne, 41), "alpha", {
+			addMCPServer(await hopChain(pastLimit, maxHops + 1), "alpha", {
 				type: "stdio",
 				command: "a",
 			}),
