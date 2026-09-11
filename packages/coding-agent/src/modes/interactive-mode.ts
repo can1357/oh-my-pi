@@ -117,6 +117,7 @@ import { getRecentSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
+import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
 import { formatDuration } from "../slash-commands/helpers/format";
 import { STTController, type SttState } from "../stt";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
@@ -1545,11 +1546,16 @@ export class InteractiveMode implements InteractiveModeContext {
 				});
 		this.fileSlashCommands = new Set(fileCommands.map(cmd => cmd.name));
 		const promptIcon = getSlashCommandTypeIcon("prompt");
-		const fileSlashCommands: SlashCommand[] = fileCommands.map(cmd => ({
-			name: cmd.name,
-			description: cmd.description,
-			icon: promptIcon,
-		}));
+		const fileSlashCommands: SlashCommand[] = fileCommands.map(cmd => {
+			const argumentHint = cmd.argumentHint ? replaceTabs(cmd.argumentHint).replace(/[\r\n]+/g, " ") : undefined;
+			return {
+				name: cmd.name,
+				description: cmd.description,
+				icon: promptIcon,
+				argumentHint,
+				getInlineHint: argumentHint ? buildStaticInlineHint(argumentHint) : undefined,
+			};
+		});
 		// Surface discovered prompt templates in the picker. AgentSession.prompt() expands
 		// `expandSlashCommand` before `expandPromptTemplate`, and builtin command
 		// execution resolves aliases before template expansion. Mirror that command

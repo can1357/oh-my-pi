@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- File slash commands now surface their `argument-hint` frontmatter as inline autocomplete ghost text and ACP `input.hint`, not only in the `/extensions` inspector ([#11647](https://github.com/can1357/oh-my-pi/issues/11647)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Added

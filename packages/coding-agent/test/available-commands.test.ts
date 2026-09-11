@@ -82,6 +82,33 @@ describe("buildAvailableSlashCommands", () => {
 		expect(commands.find(command => command.name === "notes")?.source).toBe("file");
 	});
 
+	test("forwards file-command argumentHint as ACP input hint", async () => {
+		const fileCommands = [
+			{
+				name: "git-sync",
+				description: "Rebase branch",
+				content: "body",
+				source: "test",
+				argumentHint: "[base-branch]",
+			},
+			{ name: "notes", description: "Open notes", content: "body", source: "test" },
+		];
+
+		const commands = await buildAvailableSlashCommands(
+			{
+				customCommands: [],
+				skills: [],
+				sessionManager: { getCwd: () => process.cwd() },
+				setSlashCommands() {},
+			} as never,
+			async () => fileCommands,
+		);
+		const byName = Object.fromEntries(commands.map(command => [command.name, command]));
+
+		expect(byName["git-sync"].input).toEqual({ hint: "[base-branch]" });
+		expect(byName.notes.input).toBeUndefined();
+	});
+
 	test("classifies MCP prompts by path and bundled custom commands as custom", async () => {
 		const commands = await buildAvailableSlashCommands(
 			{
