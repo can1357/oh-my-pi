@@ -91,9 +91,9 @@ function deadlineEdgeFetchMock(): FetchImpl {
 		const url = String(input);
 		if (url.endsWith("models.json.zstd")) {
 			// Prefetch burns nearly its whole 10s transport bound before
-			// failing, so the pipeline starts the rich phase ~9s into the
-			// outer budget.
-			await Bun.sleep(9_000);
+			// failing, so the pipeline starts the rich phase ~10s into the
+			// outer budget. 9.9s (not 10s) keeps clear of the bound itself.
+			await Bun.sleep(9_900);
 			return new Response("", { status: 404 });
 		}
 		if (url.endsWith("/model_group/info")) {
@@ -104,7 +104,8 @@ function deadlineEdgeFetchMock(): FetchImpl {
 			await promise;
 		}
 		if (url.endsWith("/v1/models")) {
-			await Bun.sleep(9_000);
+			// 9.9s (not 10s) keeps clear of the default phase bound itself.
+			await Bun.sleep(9_900);
 			if (init?.signal?.aborted) throw new Error("fallback fetch aborted");
 			return Response.json({ data: [{ id: "openai/gpt-5" }] });
 		}
@@ -163,18 +164,22 @@ describe("litellm discovery outer timeout (#11576)", () => {
 		await registry.refreshDiscoverableProviders(["litellm"], "online");
 		expect(registry.find("litellm", "openai/gpt-5")).toBeDefined();
 	}, 120_000);
-
 	test("a deadline-edge pipeline still reaches the fallback", async () => {
-		// ~9s prefetch + 30s rich abort + ~9s fallback ≈ 48s of wall clock
-		// (load-bearing: outer and phase budgets are real AbortSignal
-		// timers, as the mocks above document). Past the 44s the pressured
-		// test covers and comfortable inside the 55s stretched outer — but
-		// only ~1s inside an exact-sum 50s outer, with no room left for the
-		// outer timer's start offset or per-phase handoff jitter (measured
-		// 48.9s against the exact sum locally). The explicit headroom is
-		// what makes this edge robust rather than luck. This is the
-		// observable outcome that replaces the old internal
-		// discoveryBudgetMs literal assertion.
+		// ~9.9s prefetch + 30s rich abort + ~9.9s fallback ≈ 49.8s nominal,
+		// the most any completable pipeline can schedule: prefetch and
+		// fallback are hard-capped at the 10s shared default and rich
+		// aborts at its 30s inner, so the caps sum to exactly the old
+		// exact-sum 50s arithmetic. Measured against a zeroed headroom,
+		// this pipeline still completes (~50.7s wall, models found) —
+		// the old budget absorbs the worst case within ordinary
+		// handoff variance, so an outcome test that fails without the
+		// headroom is unconstructible without racing sub-0.2s timer
+		// margins (Codex P1 3986541327). The headroom margin itself is
+		// pinned deterministically by the margin unit in
+		// litellm-provider.test.ts (stretched budget must clear the exact
+		// phase sum — fails without headroom); this test pins end-to-end
+		// delivery at the nearest constructible edge, inside the 55s
+		// stretched outer.
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: deadlineEdgeFetchMock() });
 		await registry.refreshDiscoverableProviders(["litellm"], "online");
 		expect(registry.find("litellm", "openai/gpt-5")).toBeDefined();
