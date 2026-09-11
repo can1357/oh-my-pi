@@ -52,7 +52,7 @@ if (process.argv.includes(directFlag)) {
 	const err = new Error("Module called process.exit(130) during guarded extension/hook loading");
 	err.name = "ExtensionExitError";
 	void Promise.reject(err);
-	await new Promise<never>(() => {});
+	await Promise.withResolvers<never>().promise;
 }
 
 if (!process.argv.includes(directFlag) && !process.argv.includes(fatalFlag)) {
