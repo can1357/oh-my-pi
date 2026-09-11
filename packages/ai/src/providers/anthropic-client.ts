@@ -25,7 +25,7 @@
  *   rotation and model fallback instead of being replayed.
  */
 import { scheduler } from "node:timers/promises";
-import { CREDIBLE_RATE_LIMIT_HINT_MS, MAX_RATE_LIMIT_ATTEMPTS } from "@oh-my-pi/pi-utils";
+import { CREDIBLE_RATE_LIMIT_HINT_MS, extractRetryHint, MAX_RATE_LIMIT_ATTEMPTS } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError } from "../error";
 
@@ -267,14 +267,21 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 				// A 429 is the route saying "not you, not now": replaying it cannot
 				// clear the limit, so it gets the small shared rate-limit budget and
 				// only while the server itself promises a short recovery window.
-				// Anything else surfaces immediately for rotation/fallback.
-				if (
-					rateLimited &&
-					(rateLimitAttempts >= MAX_RATE_LIMIT_ATTEMPTS ||
-						headerDelayMs === undefined ||
-						headerDelayMs > CREDIBLE_RATE_LIMIT_HINT_MS)
-				) {
-					throw await AIError.AnthropicApiError.fromResponse(response, callerSignal);
+				// The window is read with `extractRetryHint` — the same header+body
+				// sources `fetchWithRetry` uses — because Anthropic states it in the
+				// error body ("Please retry in 250ms") as often as in a header.
+				if (rateLimited) {
+					const hintMs = extractRetryHint(response, await response.clone().text());
+					if (
+						rateLimitAttempts >= MAX_RATE_LIMIT_ATTEMPTS ||
+						hintMs === undefined ||
+						hintMs > CREDIBLE_RATE_LIMIT_HINT_MS
+					) {
+						throw await AIError.AnthropicApiError.fromResponse(response, callerSignal);
+					}
+					await response.body?.cancel().catch(() => {});
+					await this.#waitBeforeRetry(hintMs, callerSignal);
+					continue;
 				}
 				await response.body?.cancel().catch(() => {});
 				await this.#backoff(attempt, response.headers, callerSignal);
@@ -324,6 +331,10 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 		signal: AbortSignal | undefined,
 	): Promise<void> {
 		const delayMs = retryDelayFromHeaders(responseHeaders) ?? calculateAnthropicRetryDelayMs(attempt);
+		await this.#waitBeforeRetry(delayMs, signal);
+	}
+
+	async #waitBeforeRetry(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
 		try {
 			await scheduler.wait(delayMs, { signal });
 		} catch {
