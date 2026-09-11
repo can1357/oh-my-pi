@@ -30,6 +30,7 @@
 
 - Provider-native compaction (OpenAI Responses compact, Anthropic server-side compaction) re-issues the system prompt the live turn actually sent — a per-turn `before_agent_start` override included — instead of the rebuilt base prompt, and advisor compaction sends the advisor's own prompt instead of the generic summarizer prompt, so the request reads the live request's cached prefix.
 - Added `--new` (alias `--new-session`) to start a fresh session even when the `autoResume` setting is enabled.
+- Added `--new` (alias `--new-session`) to start a fresh session even when the `autoResume` setting is enabled ([#11762](https://github.com/can1357/oh-my-pi/pull/11762) by [@labi-le](https://github.com/labi-le)).
 
 ### Fixed
 
