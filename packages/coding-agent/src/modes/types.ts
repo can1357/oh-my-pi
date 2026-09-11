@@ -388,7 +388,7 @@ export interface InteractiveModeContext {
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;
 	reloadTodos(source?: AgentSession): Promise<void>;
 	toggleTodoExpansion(): void;
-
+	setTodoExpanded(expanded: boolean): void;
 	// Command handling
 	handleExportCommand(text: string): Promise<void>;
 	handleTraceCommand(): Promise<void>;

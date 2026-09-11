@@ -174,26 +174,104 @@ export function nextActionableTask(phases: readonly TodoPhase[]): TodoItem | und
 
 export const USER_TODO_EDIT_CUSTOM_TYPE = "user_todo_edit";
 
-export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPhase[] {
+export const TODO_HUD_STATE_CUSTOM_TYPE = "todo_hud_state";
+
+export type TodoHudVisibility = "dismissed" | "revealed";
+
+export interface TodoSnapshotIdentity {
+	sourceEntryId: string;
+	fingerprint: string;
+}
+
+export interface TodoHudStateEntryData extends TodoSnapshotIdentity {
+	visibility: TodoHudVisibility;
+}
+
+function todoPhasesFingerprint(phases: readonly TodoPhase[]): string {
+	return JSON.stringify(
+		phases.map(phase => ({
+			name: phase.name,
+			tasks: phase.tasks.map(task =>
+				task.blocker === undefined
+					? { content: task.content, status: task.status }
+					: { content: task.content, status: task.status, blocker: task.blocker },
+			),
+		})),
+	);
+}
+
+function canonicalTodoPhases(entry: SessionEntry): TodoPhase[] | undefined {
+	if (entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE) {
+		const phases = (entry.data as { phases?: unknown } | undefined)?.phases;
+		return Array.isArray(phases) ? (phases as TodoPhase[]) : undefined;
+	}
+	if (entry.type !== "message") return undefined;
+	const message = entry.message as {
+		role?: string;
+		toolName?: string;
+		details?: { op?: unknown; phases?: unknown };
+		isError?: boolean;
+	};
+	if (message.role !== "toolResult" || message.toolName !== "todo" || message.isError) return undefined;
+	if (message.details?.op === "view") return undefined;
+	const phases = message.details?.phases;
+	return Array.isArray(phases) ? (phases as TodoPhase[]) : undefined;
+}
+
+/** Identify the latest durable canonical todo snapshot on the active branch. */
+export function getLatestTodoSnapshotIdentity(entries: SessionEntry[]): TodoSnapshotIdentity | undefined {
+	let latest: TodoPhase[] | undefined;
+	let sourceEntryId: string | undefined;
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const phases = canonicalTodoPhases(entries[i]);
+		if (phases) {
+			latest = phases;
+			sourceEntryId = entries[i].id;
+			break;
+		}
+	}
+	if (!latest || !sourceEntryId) return undefined;
+	return { sourceEntryId, fingerprint: todoPhasesFingerprint(latest) };
+}
+
+/** Return the persisted HUD choice only when it targets the current canonical snapshot exactly. */
+export function getTodoHudVisibility(
+	entries: SessionEntry[],
+	phases: readonly TodoPhase[],
+): TodoHudVisibility | undefined {
+	const snapshot = getLatestTodoSnapshotIdentity(entries);
+	if (!snapshot || snapshot.fingerprint !== todoPhasesFingerprint(phases)) return undefined;
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		if (entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE) {
-			const data = entry.data as { phases?: unknown } | undefined;
-			if (data && Array.isArray(data.phases)) {
-				return clonePhases(data.phases as TodoPhase[]);
-			}
-			continue;
+		if (entry.type !== "custom" || entry.customType !== TODO_HUD_STATE_CUSTOM_TYPE) continue;
+		const data = entry.data as Partial<TodoHudStateEntryData> | undefined;
+		if (
+			data?.sourceEntryId === snapshot.sourceEntryId &&
+			data.fingerprint === snapshot.fingerprint &&
+			(data.visibility === "dismissed" || data.visibility === "revealed")
+		) {
+			return data.visibility;
 		}
-		if (entry.type !== "message") continue;
-		const message = entry.message as { role?: string; toolName?: string; details?: unknown; isError?: boolean };
-		if (message.role !== "toolResult" || message.toolName !== "todo" || message.isError) continue;
-
-		const details = message.details as { phases?: unknown } | undefined;
-		if (!details || !Array.isArray(details.phases)) continue;
-
-		return clonePhases(details.phases as TodoPhase[]);
 	}
+	return undefined;
+}
 
+/** Build persisted HUD metadata only for phases matching the latest durable canonical snapshot. */
+export function createTodoHudStateData(
+	entries: SessionEntry[],
+	phases: readonly TodoPhase[],
+	visibility: TodoHudVisibility,
+): TodoHudStateEntryData | undefined {
+	const snapshot = getLatestTodoSnapshotIdentity(entries);
+	if (!snapshot || snapshot.fingerprint !== todoPhasesFingerprint(phases)) return undefined;
+	return { ...snapshot, visibility };
+}
+
+export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPhase[] {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const phases = canonicalTodoPhases(entries[i]);
+		if (phases) return clonePhases(phases);
+	}
 	return [];
 }
 

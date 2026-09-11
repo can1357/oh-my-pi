@@ -58,4 +58,23 @@ describe("EventController todo reminder", () => {
 		expect(present).toHaveBeenCalledTimes(1);
 		expect(ctx.setTodos).toHaveBeenCalledWith(phases);
 	});
+
+	it("does not reveal a dismissed HUD for a read-only todo view", async () => {
+		const { ctx } = createContext();
+		const controller = new EventController(ctx);
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "todo-view",
+			toolName: "todo",
+			isError: false,
+			result: {
+				content: [{ type: "text", text: "Done" }],
+				details: {
+					op: "view",
+					phases: [{ name: "Done", tasks: [{ content: "ship", status: "completed" }] }],
+				},
+			},
+		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
+		expect(ctx.setTodos).not.toHaveBeenCalled();
+	});
 });

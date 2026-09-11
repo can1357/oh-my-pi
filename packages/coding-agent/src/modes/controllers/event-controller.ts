@@ -1364,6 +1364,24 @@ export class EventController {
 	}
 
 	async #handleMessageEnd(event: Extract<AgentSessionEvent, { type: "message_end" }>): Promise<void> {
+		// The persistence slot exists before message_end notification, unlike
+		// tool_execution_end. Resolve HUD identity only after canonical append.
+		if (event.message.role === "toolResult" && event.message.toolName === "todo" && !event.message.isError) {
+			const details = event.message.details as { phases?: TodoPhase[] } | undefined;
+			if (details?.phases) {
+				const owner = this.ctx.viewSession;
+				const sessionId = owner.sessionManager.getSessionId();
+				const sessionFile = owner.sessionManager.getSessionFile();
+				await owner.settleInFlightMessagePersistence();
+				if (
+					this.ctx.viewSession === owner &&
+					owner.sessionManager.getSessionId() === sessionId &&
+					owner.sessionManager.getSessionFile() === sessionFile
+				) {
+					this.ctx.setTodos(owner.getTodoPhases());
+				}
+			}
+		}
 		if (event.message.role === "user") return;
 		const unlockedThinkingVisibility =
 			event.message.role === "assistant" && this.ctx.noteDisplayableThinkingContent(event.message);
@@ -1833,13 +1851,11 @@ export class EventController {
 			}
 		}
 		if (syntheticFailureCard) this.#syntheticFailureCards.set(event.toolCallId, syntheticFailureCard);
-		// Update todo display when todo tool completes
 		if (event.toolName === "todo" && !event.isError) {
-			const details = event.result.details as { phases?: TodoPhase[] } | undefined;
-			if (details?.phases) {
-				this.ctx.setTodos(details.phases);
-			}
-		} else if (event.toolName === "todo" && event.isError) {
+			const details = event.result.details as { op?: string; phases?: TodoPhase[] } | undefined;
+			if (details?.op !== "view" && details?.phases) this.ctx.setTodos(details.phases);
+		}
+		if (event.toolName === "todo" && event.isError) {
 			const textContent = event.result.content.find(
 				(content: { type: string; text?: string }) => content.type === "text",
 			)?.text;
