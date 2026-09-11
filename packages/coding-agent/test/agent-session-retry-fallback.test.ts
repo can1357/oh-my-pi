@@ -1842,7 +1842,8 @@ describe("AgentSession retry fallback", () => {
 		const originalGetApiKey = modelRegistry.getApiKey.bind(modelRegistry);
 		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async (...args) => {
 			const [model] = args;
-			if (model.provider !== advisorPrimary.provider || model.id !== advisorPrimary.id) return originalGetApiKey(...args);
+			if (model.provider !== advisorPrimary.provider || model.id !== advisorPrimary.id)
+				return originalGetApiKey(...args);
 			restorationStarted.resolve();
 			await releaseRestoration.promise;
 			return originalGetApiKey(...args);
