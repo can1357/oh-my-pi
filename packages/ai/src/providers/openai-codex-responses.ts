@@ -4358,6 +4358,7 @@ async function openCodexSseEventStream(
 			},
 			maxAttempts: resolveCodexSseMaxAttempts(codexSseMaxAttempts),
 			rateLimitBudget: true,
+			shouldRetryResponse: (response, bodyText) => !AIError.isUsageLimitOutcome(response.status, bodyText),
 			defaultDelayMs: attempt => CODEX_RETRY_DELAY_MS * (attempt + 1),
 			maxDelayMs: CODEX_RATE_LIMIT_BUDGET_MS,
 			fetch: fetchAttempt,
