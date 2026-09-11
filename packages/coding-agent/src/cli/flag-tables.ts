@@ -34,6 +34,7 @@ import * as nodePath from "node:path";
 import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { Args } from "./args";
+import { claimProviderApiKeyDescriptor } from "./provider-api-keys";
 import { CliUsageError } from "./usage-error";
 
 /**
@@ -168,6 +169,10 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.providerApiKeys = value;
 	},
 	"--provider-api-keys-fd": (result, value) => {
+		// Ownership transfers at parse time, so register before the duplicate
+		// check can throw: a rejected parse must still be drained, and runCli's
+		// exit drain closes whatever remains claimed.
+		claimProviderApiKeyDescriptor(value);
 		if (result.providerApiKeysFd !== undefined) {
 			throw new CliUsageError("--provider-api-keys-fd may only be specified once");
 		}

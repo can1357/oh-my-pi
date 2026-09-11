@@ -11,6 +11,7 @@ const settingsModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/confi
 const helpersModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/discovery/helpers.ts")).href;
 const startupCwdModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/cli/startup-cwd.ts")).href;
 const flagTablesModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/cli/flag-tables.ts")).href;
+const cliModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/cli.ts")).href;
 
 afterEach(() => {
 	for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
@@ -64,6 +65,66 @@ console.log(JSON.stringify({ observedExitCode, discovered, fdOpenAfter }));`;
 		expect(stderr).toContain("mutually exclusive");
 		const result = JSON.parse(stdout.trim().split("\n").at(-1) ?? "{}");
 		expect(result).toEqual({ observedExitCode: 2, discovered: false, fdOpenAfter: false });
+	});
+
+	it("closes a transferred descriptor when profile bootstrap exits without launching", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-provider-api-keys-bootstrap-"));
+		roots.push(root);
+		const bundlePath = path.join(root, "bundle.json");
+		fs.writeFileSync(bundlePath, JSON.stringify({ anthropic: "descriptor-token" }), { mode: 0o600 });
+		const script = `
+import * as fs from "node:fs";
+import { runCli } from ${JSON.stringify(cliModuleUrl)};
+const bundlePath = ${JSON.stringify(bundlePath)};
+const results = {};
+// An alias invocation with no --profile and no active profile: the bootstrap
+// catch reports the error and returns before the launch parser can run.
+const fdError = fs.openSync(bundlePath, "r");
+process.exitCode = 0;
+await runCli(["--provider-api-keys-fd", String(fdError), "--alias", "omp-review"]);
+results.errorExitCode = process.exitCode;
+process.exitCode = 0;
+// A successful alias installation also returns before dispatch.
+const fdAlias = fs.openSync(bundlePath, "r");
+await runCli(["--provider-api-keys-fd", String(fdAlias), "--profile", "review", "--alias", "omp-review"]);
+for (const [name, fd] of Object.entries({ fdError, fdAlias })) {
+  let open = true;
+  try {
+    fs.fstatSync(fd);
+  } catch {
+    open = false;
+  }
+  results[name + "OpenAfter"] = open;
+}
+console.log(JSON.stringify(results));`;
+		const {
+			OMP_PROFILE: _ompProfile,
+			PI_PROFILE: _piProfile,
+			PI_CODING_AGENT_DIR: _agentDir,
+			...inherited
+		} = process.env;
+		const proc = Bun.spawn({
+			cmd: [process.execPath, "--eval", script],
+			cwd: process.cwd(),
+			// HOME under the temp root keeps the alias install and every profile
+			// directory out of the real agent home; a fixed POSIX shell keeps the
+			// generated alias deterministic on hosts without SHELL set.
+			env: { ...inherited, HOME: root, SHELL: "/bin/bash" },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [exitCode, stdout, stderr] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+		expect(exitCode, stderr).toBe(0);
+		// Both bail-out branches actually ran: the invalid alias reached the
+		// bootstrap catch, and the valid one installed the alias before returning.
+		expect(stderr).toContain("--alias requires --profile");
+		expect(stdout).toContain("Created omp-review for profile review");
+		const result = JSON.parse(stdout.trim().split("\n").at(-1) ?? "{}");
+		expect(result).toEqual({ errorExitCode: 1, fdErrorOpenAfter: false, fdAliasOpenAfter: false });
 	});
 
 	it("consumes and closes the descriptor before --cwd validation can fail", async () => {

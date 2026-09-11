@@ -53,10 +53,42 @@ export async function readProviderApiKeyBundle(path: string): Promise<ProviderAp
 	}
 }
 
-/** Closes a valid launcher descriptor without inspecting its contents. */
+// Descriptors registered by parsing `--provider-api-keys-fd`. Registration is
+// the moment ownership transfers: it happens before any duplicate or validity
+// check can throw, so even a rejected parse or a bootstrap-only exit can drain
+// what the launcher handed over (see `runCli`'s exit drain).
+const claimedDescriptors = new Set<number>();
+
+/**
+ * Takes ownership of the descriptor named by a parsed `--provider-api-keys-fd`
+ * value. A value that cannot name a descriptor (non-numeric, empty, stdio)
+ * claims nothing, so there is nothing to drain.
+ */
+export function claimProviderApiKeyDescriptor(value: string | number | undefined): void {
+	const fd = typeof value === "number" ? value : Number(value);
+	if (!Number.isSafeInteger(fd) || fd <= 2) return;
+	claimedDescriptors.add(fd);
+}
+
+/**
+ * Closes every descriptor still claimed by this process and empties the
+ * registry. Descriptors the loader consumed were released at close, so a
+ * transferred descriptor is closed exactly once no matter how many exit paths
+ * run — and a number the OS has since reassigned is never re-closed.
+ */
+export async function drainClaimedProviderApiKeyDescriptors(): Promise<void> {
+	const pending = [...claimedDescriptors];
+	claimedDescriptors.clear();
+	for (const fd of pending) await closeProviderApiKeyBundleFd(fd);
+}
+
+/** Closes a valid launcher descriptor without inspecting its contents, and
+ *  discharges any parse-time claim on it so the exit drain cannot close the
+ *  same number twice. */
 export async function closeProviderApiKeyBundleFd(value: string | number): Promise<void> {
 	const fd = typeof value === "number" ? value : Number(value);
 	if (!Number.isSafeInteger(fd) || fd <= 2) return;
+	claimedDescriptors.delete(fd);
 	try {
 		await closeByFd(fd);
 	} catch {

@@ -5,6 +5,11 @@
 ### Added
 
 - Added `--provider-api-keys` for loading a named provider-key bundle and `--provider-api-keys-fd` for consuming an exact launcher descriptor, both process-local and never persisted ([#8286](https://github.com/can1357/oh-my-pi/pull/8286) by [@ghosty-11](https://github.com/ghosty-11))
+
+### Fixed
+
+- Provider key descriptors handed over with `--provider-api-keys-fd` are now closed even when the CLI exits before launch — during alias installation, a profile error, or a rejected argument — instead of leaking to later child processes ([#8286](https://github.com/can1357/oh-my-pi/pull/8286) by [@ghosty-11](https://github.com/ghosty-11))
+
 ## [18.1.17] - 2026-09-10
 
 ### Added

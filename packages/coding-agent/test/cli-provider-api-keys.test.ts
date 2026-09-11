@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/cli/provider-api-keys";
 import { mergeAuthHeaderSources } from "@oh-my-pi/pi-coding-agent/config/custom-models";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { runCli } from "../src/cli";
 import { $ } from "bun";
 
 const roots: string[] = [];
@@ -37,6 +38,16 @@ function fdIsOpen(fd: number): boolean {
 	} catch {
 		return false;
 	}
+}
+
+/** The errno `fstatSync` fails with, or "open" when the descriptor answers. */
+function fstatErrno(fd: number): string {
+	try {
+		fs.fstatSync(fd);
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code ?? "unknown";
+	}
+	return "open";
 }
 
 /** A stat whose every policy-relevant field is a private, owned, well-sized regular file. */
@@ -67,6 +78,34 @@ describe("--provider-api-keys", () => {
 		expect(() => parseArgs(["--provider-api-keys-fd", "7", "--provider-api-keys-fd", "8"])).toThrow(
 			"--provider-api-keys-fd may only be specified once",
 		);
+	});
+
+	it("closes transferred descriptors when the duplicate-flag usage error aborts the launch parse", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-provider-api-keys-duplicate-"));
+		roots.push(root);
+		const bundle = path.join(root, "bundle.json");
+		fs.writeFileSync(bundle, JSON.stringify({ anthropic: "selected-token" }), { mode: 0o600 });
+		const first = fs.openSync(bundle, fs.constants.O_RDONLY);
+		const second = fs.openSync(bundle, fs.constants.O_RDONLY);
+		const captured: string[] = [];
+		const errSpy = spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+			captured.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+			return true;
+		});
+		const previousExitCode = process.exitCode;
+		try {
+			await runCli(["launch", "--provider-api-keys-fd", String(first), "--provider-api-keys-fd", String(second)]);
+		} finally {
+			errSpy.mockRestore();
+		}
+		// The launch command caught the usage error and returned without
+		// consuming either descriptor; the CLI's exit drain must have closed
+		// both, or a long-lived in-process caller passes them to later children.
+		expect(captured.join("")).toContain("--provider-api-keys-fd may only be specified once");
+		expect(process.exitCode).toBe(2);
+		expect(fstatErrno(first)).toBe("EBADF");
+		expect(fstatErrno(second)).toBe("EBADF");
+		process.exitCode = previousExitCode ?? 0;
 	});
 
 	it("rejects one descriptor value from each invalid numeric branch", async () => {
