@@ -5259,6 +5259,108 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Fetch.enable")).toHaveLength(0);
 	});
 
+	it("retains a setter dispatched after an interrupted tab-wide clear", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const sendTimezone = (timezoneId: string): void => {
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: ++msgSeq,
+					sessionId: pageSession,
+					method: "Emulation.setTimezoneOverride",
+					params: { timezoneId },
+				}),
+			);
+		};
+		sendTimezone("UTC");
+		await waitFor(() => ext.pending("send").length === 1, "initial timezone setter");
+		ack(bridge, ext, "send");
+		await flush();
+
+		sendTimezone("");
+		sendTimezone("America/Los_Angeles");
+		await waitFor(() => ext.pending("send").length === 2, "overlapping clear and newer setter");
+		const newerSetter = ext.pending("send").at(-1);
+		if (!newerSetter) throw new Error("missing newer timezone setter");
+		ext.markAcked(newerSetter.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: newerSetter.id, ok: true, result: {} }));
+		await flush();
+
+		bridge.extClosed(ext);
+		await flush();
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await waitFor(() => ext2.rpcs("detach").length === 1, "fresh-root detach after interrupted clear");
+		ack(bridge, ext2, "detach");
+		await waitFor(() => ext2.rpcs("attach").length === 1, "fresh-root attach after interrupted clear");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "newer timezone replay");
+		expect(ext2.rpcs("send")[0]).toMatchObject({
+			method: "Emulation.setTimezoneOverride",
+			params: { timezoneId: "America/Los_Angeles" },
+		});
+	});
+
+	it("keeps a newer media value after an older field clear is interrupted", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const sendMedia = (media: string): void => {
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: ++msgSeq,
+					sessionId: pageSession,
+					method: "Emulation.setEmulatedMedia",
+					params: { media },
+				}),
+			);
+		};
+		sendMedia("print");
+		await waitFor(() => ext.pending("send").length === 1, "initial media setter");
+		ack(bridge, ext, "send");
+		await flush();
+
+		sendMedia("");
+		sendMedia("screen");
+		await waitFor(() => ext.pending("send").length === 2, "overlapping media clear and newer setter");
+		const newerSetter = ext.pending("send").at(-1);
+		if (!newerSetter) throw new Error("missing newer media setter");
+		ext.markAcked(newerSetter.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: newerSetter.id, ok: true, result: {} }));
+		await flush();
+
+		bridge.extClosed(ext);
+		await flush();
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await waitFor(() => ext2.rpcs("detach").length === 1, "fresh-root detach after interrupted media clear");
+		ack(bridge, ext2, "detach");
+		await waitFor(() => ext2.rpcs("attach").length === 1, "fresh-root attach after interrupted media clear");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "newer media replay");
+		expect(ext2.rpcs("send")[0]).toMatchObject({
+			method: "Emulation.setEmulatedMedia",
+			params: { media: "screen" },
+		});
+	});
+
 	for (const [field, cleared, expectedReplay] of [
 		["media", "", { features: [{ name: "prefers-color-scheme", value: "dark" }] }],
 		["features", [], { media: "print" }],

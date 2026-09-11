@@ -1331,11 +1331,12 @@ export class RelayBridge {
 					// still records the prior enable/override under the same key. Because
 					// #recordSubscription runs only on the success path, that stale entry
 					// survives, and a fresh-root replay would resurrect the very state the
-					// caller explicitly cleared. Forget the journal entry so recovery
-					// cannot revive it before forcing the fresh root below.
+					// caller explicitly cleared. Forget journal state no newer than this
+					// dispatch so recovery cannot revive it, while retaining setters that
+					// Chrome received later and already acknowledged.
 					const clearedKey = this.#interruptedClearKey(msg);
 					if (clearedKey) {
-						this.#forgetTabSubscription(tab, clearedKey);
+						this.#forgetTabSubscriptionThroughSequence(tab, clearedKey, pendingSubscription.sequence);
 					} else {
 						// Emulation.setEmulatedMedia can clear one field while leaving
 						// another intact. Preserve those field-level tombstones when the
@@ -1344,7 +1345,9 @@ export class RelayBridge {
 						const key = this.#subscriptionTrackingKey(msg);
 						if (key) {
 							const clears = subscriptionClearedFields(key, msg.params);
-							if (clears) this.#rememberTabSubscriptionClear(tab, key, clears, ++this.#subscriptionSeq);
+							if (clears) {
+								this.#rememberTabSubscriptionClear(tab, key, clears, pendingSubscription.sequence);
+							}
 						}
 					}
 					tab.forceFreshRootBeforeReplay = true;
@@ -1801,6 +1804,43 @@ export class RelayBridge {
 	#forgetTabSubscription(tab: TabState, key: string): void {
 		tab.subscriptions.delete(key);
 		tab.subscriptionClears.delete(key);
+	}
+
+	#forgetTabSubscriptionThroughSequence(tab: TabState, key: string, sequence: number): void {
+		const owners = tab.subscriptions.get(key);
+		if (owners) {
+			for (const [ownerSessionId, subscription] of owners) {
+				if (key !== "Emulation.setEmulatedMedia") {
+					if (subscription.sequence <= sequence) owners.delete(ownerSessionId);
+					continue;
+				}
+				const params = { ...subscription.params };
+				const fieldSequences = { ...subscription.fieldSequences };
+				for (const [field, fieldSequence] of Object.entries(fieldSequences)) {
+					if (fieldSequence > sequence) continue;
+					delete params[field];
+					delete fieldSequences[field];
+				}
+				if (Object.keys(params).length === 0) {
+					owners.delete(ownerSessionId);
+					continue;
+				}
+				owners.set(ownerSessionId, {
+					...subscription,
+					sequence: Math.max(...Object.values(fieldSequences)),
+					params,
+					fieldSequences,
+				});
+			}
+			if (owners.size === 0) tab.subscriptions.delete(key);
+		}
+		const clears = tab.subscriptionClears.get(key);
+		if (clears) {
+			for (const [field, clearSequence] of Object.entries(clears)) {
+				if (clearSequence <= sequence) delete clears[field];
+			}
+			if (Object.keys(clears).length === 0) tab.subscriptionClears.delete(key);
+		}
 	}
 
 	#rememberPreloadScript(
