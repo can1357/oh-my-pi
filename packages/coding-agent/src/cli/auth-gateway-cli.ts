@@ -179,6 +179,40 @@ export function indexModelsByRequestId(
 	return modelById;
 }
 
+/**
+ * Serialize catalog rebuilds so `registry.refresh()` passes never overlap,
+ * while guaranteeing a forced rebuild requested mid-flight runs a forced pass
+ * afterward. Without the follow-up pass a credential change arriving during a
+ * weaker cached rebuild would piggyback on it and miss an account-scoped
+ * catalog change. Non-forced requests during an in-flight rebuild simply
+ * coalesce onto it. Returns `rebuild(force?)`; its promise resolves once the
+ * catalog reflects that call's requirement.
+ */
+export function createSerializedRebuilder(run: (force: boolean) => Promise<void>): (force?: boolean) => Promise<void> {
+	let inFlight: Promise<void> | null = null;
+	let forcedQueued = false;
+	const rebuild = (force = false): Promise<void> => {
+		if (inFlight) {
+			if (force) forcedQueued = true;
+			return inFlight;
+		}
+		inFlight = (async () => {
+			try {
+				await run(force);
+				while (forcedQueued) {
+					forcedQueued = false;
+					await run(true);
+				}
+			} finally {
+				inFlight = null;
+				forcedQueued = false;
+			}
+		})();
+		return inFlight;
+	};
+	return rebuild;
+}
+
 async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	const brokerConfig = await resolveAuthBrokerConfig();
 	if (!brokerConfig) {
@@ -230,23 +264,17 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		return providers;
 	};
 	let modelById = new Map<string, Model<Api>>();
-	// Rebuild the served catalog behind a `registry.refresh()` pass (a
-	// first-time provider has no cached models) and re-index against the current
-	// credential set. A single in-flight guard coalesces the periodic model
-	// refresh and the credential-sync poll; a failed rebuild keeps the previous
-	// catalog.
-	let rebuildInFlight: Promise<void> | null = null;
-	const rebuildCatalog = (): Promise<void> => {
-		rebuildInFlight ??= (async () => {
-			try {
-				await registry.refresh();
-				modelById = indexModelsByRequestId(registry.getAll(), providersWithCreds());
-			} finally {
-				rebuildInFlight = null;
-			}
-		})();
-		return rebuildInFlight;
-	};
+	// Rebuild the served catalog (a `registry.refresh()` pass, then re-index
+	// against the current credential set). Credential-triggered rebuilds force
+	// `online` discovery: an account added to or removed from an
+	// already-authenticated provider (e.g. Codex, whose discovery unions
+	// per-account catalogs) leaves that provider's model cache fresh, so the
+	// default `online-if-uncached` pass would skip the fetch and miss the change
+	// for up to a cache TTL. Periodic rebuilds stay cached.
+	const rebuildCatalog = createSerializedRebuilder(async force => {
+		await registry.refresh(force ? "online" : "online-if-uncached");
+		modelById = indexModelsByRequestId(registry.getAll(), providersWithCreds());
+	});
 	await rebuildCatalog();
 
 	const handle = startAuthGateway({
@@ -282,12 +310,13 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	// Poll the broker-backed store for credential changes made by another
 	// process (host `login`/`logout`). `pollExternalChanges()` reloads the
 	// storage's credential view so selection stops 401ing (or stops using a
-	// removed credential); rebuilding the catalog then updates `/v1/models` and
-	// `resolveModel`. `unref()` for the same reason as above.
+	// removed credential); the forced rebuild then refetches account-scoped
+	// catalogs and updates `/v1/models` and `resolveModel`. `unref()` for the
+	// same reason as above.
 	const credentialSync = setInterval(() => {
 		void (async () => {
 			try {
-				if (await storage.pollExternalChanges()) await rebuildCatalog();
+				if (await storage.pollExternalChanges()) await rebuildCatalog(true);
 			} catch (error) {
 				logger.warn("auth-gateway credential sync failed", {
 					error: error instanceof Error ? error.message : String(error),

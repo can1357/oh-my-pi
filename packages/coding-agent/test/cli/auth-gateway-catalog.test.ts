@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { indexModelsByRequestId } from "../../src/cli/auth-gateway-cli";
+import { createSerializedRebuilder, indexModelsByRequestId } from "../../src/cli/auth-gateway-cli";
 import { ModelRegistry } from "../../src/config/model-registry";
 
 function stubAuthStorage(configKeys?: string[]): AuthStorage {
@@ -107,5 +107,58 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 
 		expect(index.get(`anthropic/${anthropicModel.id}`)).toBeDefined();
 		expect(index.get(`${foreignModel.provider}/${foreignModel.id}`)).toBeUndefined();
+	});
+});
+
+describe("createSerializedRebuilder", () => {
+	// Deferred `run` gate so tests drive completion without wall-clock timers.
+	function makeRun() {
+		const calls: boolean[] = [];
+		const gates: PromiseWithResolvers<void>[] = [];
+		const run = (force: boolean): Promise<void> => {
+			calls.push(force);
+			const gate = Promise.withResolvers<void>();
+			gates.push(gate);
+			return gate.promise;
+		};
+		return { calls, gates, run };
+	}
+	// Flush queued microtasks so a resolved gate lets the serialized loop advance.
+	async function flush(): Promise<void> {
+		for (let i = 0; i < 8; i++) await Promise.resolve();
+	}
+
+	test("runs a forced pass when a forced rebuild is requested mid-flight", async () => {
+		const { calls, gates, run } = makeRun();
+		const rebuild = createSerializedRebuilder(run);
+
+		const first = rebuild(false);
+		expect(calls).toEqual([false]);
+
+		// A credential-triggered forced rebuild arrives while the cached pass runs.
+		rebuild(true);
+		expect(calls).toEqual([false]); // coalesced, not started yet
+
+		gates[0].resolve();
+		await flush();
+		// The forced follow-up pass must run so the account change is not missed.
+		expect(calls).toEqual([false, true]);
+
+		gates[1].resolve();
+		await first;
+		expect(calls).toEqual([false, true]);
+	});
+
+	test("coalesces a non-forced rebuild without an extra pass", async () => {
+		const { calls, gates, run } = makeRun();
+		const rebuild = createSerializedRebuilder(run);
+
+		const first = rebuild(false);
+		rebuild(false); // coalesces onto the in-flight pass
+		expect(calls).toEqual([false]);
+
+		gates[0].resolve();
+		await first;
+		expect(calls).toEqual([false]); // no redundant follow-up
 	});
 });
