@@ -8,6 +8,7 @@
 - Hand-authored `*.openapi.json` files can now be edited without disabling generated-file protection globally ([#11674](https://github.com/can1357/oh-my-pi/issues/11674)).
 - `models.yml` now validates the per-model `compat.stripImageInput` opt-out, so a wrong-typed value is rejected like every other declared compat key instead of being silently accepted ([#11697](https://github.com/can1357/oh-my-pi/issues/11697)).
 - `/mcp reload` now distinguishes servers still connecting after the bounded reload window instead of reporting a healthy asynchronous reload as zero active servers ([#11639](https://github.com/can1357/oh-my-pi/issues/11639)).
+- `google-antigravity` turns no longer fail with a bare `429 RESOURCE_EXHAUSTED` on a quota-healthy account: the new `providers.antigravitySensitiveWords` setting (default `["RFC 2119"]`) splits the phrases Cloud Code Assist rejects in agent-mode system instructions with a zero-width space. Set it to `[]` to send the prompt verbatim ([#11689](https://github.com/can1357/oh-my-pi/issues/11689)).
 ### Changed
 
 - The `providers.cacheRetention` `auto` setting now keeps Anthropic OAuth subscriber sessions on 1h prompt-cache retention and API keys on 5m, instead of 5m for both ([#11667](https://github.com/can1357/oh-my-pi/pull/11667) by [@camjac251](https://github.com/camjac251)).

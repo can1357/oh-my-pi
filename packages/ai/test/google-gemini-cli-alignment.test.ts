@@ -191,6 +191,58 @@ describe("Google Gemini CLI alignment", () => {
 		expect(payload.request.contents).toEqual([{ role: "user", parts: [{ text: "implement token refresh" }] }]);
 	});
 
+	it("splits configured phrases with a zero-width space in the antigravity system instruction only", () => {
+		// Cloud Code Assist answers agent-mode payloads whose systemInstruction
+		// matches its inspection rule with a bare 429 RESOURCE_EXHAUSTED, so
+		// every retry fails identically; the split clears the match.
+		const context: Context = {
+			systemPrompt: ["RFC 2119: MUST, REQUIRED, SHOULD."],
+			messages: [{ role: "user", content: "quote RFC 2119 back to me", timestamp: Date.now() }],
+		};
+		const options = { antigravitySensitiveWords: ["RFC 2119"] };
+		type Payload = {
+			request: {
+				contents: Array<{ parts?: Array<{ text?: string }> }>;
+				systemInstruction?: { parts: Array<{ text: string }> };
+			};
+		};
+
+		const antigravity = buildRequest(
+			createModel("google-antigravity"),
+			context,
+			"proj-123",
+			options,
+			true,
+		) as Payload;
+		expect(antigravity.request.systemInstruction?.parts[0]?.text).toBe("R\u200bFC 2119: MUST, REQUIRED, SHOULD.");
+		// Conversation content is never rewritten — only the inspected field is.
+		expect(antigravity.request.contents[0]?.parts?.[0]?.text).toBe("quote RFC 2119 back to me");
+
+		const geminiCli = buildRequest(createModel("google-gemini-cli"), context, "proj-123", options, false) as Payload;
+		expect(geminiCli.request.systemInstruction?.parts[0]?.text).toBe("RFC 2119: MUST, REQUIRED, SHOULD.");
+	});
+
+	it("leaves the antigravity system instruction verbatim when no phrase is configured or matches", () => {
+		const context: Context = {
+			systemPrompt: ["RFC 2119: MUST, REQUIRED, SHOULD."],
+			messages: [{ role: "user", content: "go", timestamp: Date.now() }],
+		};
+		const model = createModel("google-antigravity");
+		type Payload = { request: { systemInstruction?: { parts: Array<{ text: string }> } } };
+
+		const unconfigured = buildRequest(model, context, "proj-123", {}, true) as Payload;
+		expect(unconfigured.request.systemInstruction?.parts[0]?.text).toBe("RFC 2119: MUST, REQUIRED, SHOULD.");
+
+		const noMatch = buildRequest(
+			model,
+			context,
+			"proj-123",
+			{ antigravitySensitiveWords: ["Claude Agent SDK"] },
+			true,
+		) as Payload;
+		expect(noMatch.request.systemInstruction?.parts[0]?.text).toBe("RFC 2119: MUST, REQUIRED, SHOULD.");
+	});
+
 	it("drops only unsigned thinking when replaying Antigravity Claude history", () => {
 		const signedThinking = "signed reasoning";
 		const unsignedThinking = "unsigned reasoning";

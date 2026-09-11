@@ -33,6 +33,7 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 		const openrouterVariant =
 			openrouterRoutingPreset && openrouterRoutingPreset !== "default" ? openrouterRoutingPreset : undefined;
 		const antigravityEndpointMode = settings.get("providers.antigravityEndpoint");
+		const antigravitySensitiveWords = settings.get("providers.antigravitySensitiveWords");
 		const textVerbosity =
 			model.api === "openai-codex-responses"
 				? settings.isConfigured("textVerbosity")
@@ -70,6 +71,7 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 			...streamOptions,
 			openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
 			antigravityEndpointMode: streamOptions?.antigravityEndpointMode ?? antigravityEndpointMode,
+			antigravitySensitiveWords: streamOptions?.antigravitySensitiveWords ?? antigravitySensitiveWords,
 			textVerbosity: streamOptions?.textVerbosity ?? textVerbosity,
 			cacheRetention: streamOptions?.cacheRetention ?? cacheRetention,
 			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,

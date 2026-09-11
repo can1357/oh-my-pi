@@ -33,6 +33,7 @@ describe("createSettingsAwareStreamFn", () => {
 		const settings = Settings.isolated({
 			"providers.openrouterVariant": "floor",
 			"providers.antigravityEndpoint": "sandbox",
+			"providers.antigravitySensitiveWords": ["RFC 2119"],
 			"providers.maxInFlightRequests": { openrouter: 4 },
 			"model.loopGuard.enabled": true,
 			"model.loopGuard.checkAssistantContent": true,
@@ -45,6 +46,7 @@ describe("createSettingsAwareStreamFn", () => {
 		const options = calls[0]?.options;
 		expect(options?.openrouterVariant).toBe("floor");
 		expect(options?.antigravityEndpointMode).toBe("sandbox");
+		expect(options?.antigravitySensitiveWords).toEqual(["RFC 2119"]);
 		expect(options?.maxInFlightRequests).toEqual({ openrouter: 4 });
 		expect(options?.loopGuard).toEqual({ enabled: true, checkAssistantContent: true });
 		// caller's own option is preserved

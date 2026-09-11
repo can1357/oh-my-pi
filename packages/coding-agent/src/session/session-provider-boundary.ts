@@ -156,11 +156,14 @@ export class SessionProviderBoundary {
 				: undefined;
 		const antigravityEndpointMode =
 			provider === "google-antigravity" ? this.#host.settings.get("providers.antigravityEndpoint") : undefined;
+		const antigravitySensitiveWords =
+			provider === "google-antigravity" ? this.#host.settings.get("providers.antigravitySensitiveWords") : undefined;
 
 		const preparedOptions: SimpleStreamOptions = {
 			...options,
 			...(openrouterVariant !== undefined && { openrouterVariant }),
 			...(antigravityEndpointMode !== undefined && { antigravityEndpointMode }),
+			...(antigravitySensitiveWords !== undefined && { antigravitySensitiveWords }),
 			maxInFlightRequests: validateProviderMaxInFlightRequests(
 				options.maxInFlightRequests ?? this.#host.settings.get("providers.maxInFlightRequests"),
 			),

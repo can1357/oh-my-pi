@@ -5537,6 +5537,17 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	"providers.antigravitySensitiveWords": {
+		type: "array",
+		default: ["RFC 2119"] as string[],
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Antigravity Sensitive Phrases",
+			description:
+				"Literal phrases split with a zero-width space in the system prompt sent to google-antigravity. Cloud Code Assist answers matched agent-mode payloads with a bare 429 RESOURCE_EXHAUSTED that retries cannot clear; the split keeps the text readable for the model while clearing the match. Empty the list to send the prompt verbatim.",
+		},
+	},
 	"providers.imageOrder": {
 		type: "array",
 		default: [] as ImageProvider[],

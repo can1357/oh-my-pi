@@ -8,6 +8,7 @@
 ### Added
 
 - Added historical decimation prompt-cache breakpoints every 15 user turns on Anthropic requests, so long conversations retain stable cached prefixes during branching, rewinds, and session resume ([#11665](https://github.com/can1357/oh-my-pi/pull/11665) by [@camjac251](https://github.com/camjac251)).
+- Added the `antigravitySensitiveWords` stream option: configured literal phrases are split with a zero-width space inside the Antigravity `systemInstruction`, clearing the bare `429 RESOURCE_EXHAUSTED` that Cloud Code Assist returns for matched agent-mode payloads ([#11689](https://github.com/can1357/oh-my-pi/issues/11689)).
 ### Fixed
 
 - Fixed Anthropic OAuth requests omitting the tool-array cache breakpoint, so tool definitions are now cached across session rewrites and sibling subagents ([#11660](https://github.com/can1357/oh-my-pi/pull/11660) by [@camjac251](https://github.com/camjac251)).

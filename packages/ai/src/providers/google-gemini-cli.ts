@@ -27,6 +27,7 @@ import type {
 	ToolCall,
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
+import { obfuscateSensitiveWords } from "../utils/antigravity-sensitive-words";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../utils/google-validation";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
@@ -273,6 +274,12 @@ export interface GoogleGeminiCliOptions extends StreamOptions {
 	projectId?: string;
 	/** Antigravity endpoint routing mode: "auto" (default with failover), "production", "sandbox". */
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
+	/**
+	 * Literal phrases to split with a zero-width space inside the Antigravity
+	 * `systemInstruction`. Mitigates the bare `429 RESOURCE_EXHAUSTED` that
+	 * Cloud Code Assist returns for matched agent-mode payloads.
+	 */
+	antigravitySensitiveWords?: readonly string[];
 	providerSessionState?: Map<string, ProviderSessionState>;
 }
 
@@ -1315,11 +1322,19 @@ export function buildRequest(
 	};
 
 	// System instruction is an object with parts, not a plain string. Antigravity
-	// tags it with role "user" to mirror the real client.
+	// tags it with role "user" to mirror the real client, and splits configured
+	// phrases with a zero-width space: Cloud Code Assist answers matched
+	// agent-mode system instructions with a bare 429 RESOURCE_EXHAUSTED that no
+	// retry can clear.
 	if (systemPrompts.length > 0) {
+		const sensitiveWords = isAntigravity ? options.antigravitySensitiveWords : undefined;
+		const parts =
+			sensitiveWords && sensitiveWords.length > 0
+				? systemPrompts.map(text => ({ text: obfuscateSensitiveWords(text, sensitiveWords) }))
+				: systemPrompts.map(text => ({ text }));
 		request.systemInstruction = {
 			...(isAntigravity ? { role: "user" } : {}),
-			parts: systemPrompts.map(text => ({ text })),
+			parts,
 		};
 	}
 

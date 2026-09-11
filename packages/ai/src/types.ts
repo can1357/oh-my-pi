@@ -692,6 +692,13 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	/** Antigravity endpoint routing mode: "auto" (default with failover), "production", "sandbox". */
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
 	/**
+	 * Literal phrases to split with a zero-width space inside the Antigravity
+	 * `systemInstruction`. Mitigates the bare `429 RESOURCE_EXHAUSTED` that
+	 * Cloud Code Assist returns for matched agent-mode payloads. Ignored by
+	 * every other provider.
+	 */
+	antigravitySensitiveWords?: readonly string[];
+	/**
 	 * Anthropic `server-side-fallback-2026-06-01` fallback chain (top-level
 	 * `fallbacks` request field). Opt-in ONLY — leaving this undefined is
 	 * the default and preserves the pre-fallback behavior on every
