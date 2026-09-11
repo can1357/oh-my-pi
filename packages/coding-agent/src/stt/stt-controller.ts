@@ -3,14 +3,8 @@ import { AudioCapture } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../config/settings";
 import { type SttStreamHandle, sttClient } from "./asr-client";
-import {
-	type CloudSttCredential,
-	type CloudSttStreamOptions,
-	DEFAULT_STT_BACKEND,
-	isSttBackend,
-	startCloudSttStream,
-	type SttBackend,
-} from "./cloud-transcribe-client";
+import { DEFAULT_STT_BACKEND, isSttBackend, type SttBackend } from "./cloud-models";
+import { type CloudSttCredential, type CloudSttStreamOptions, startCloudSttStream } from "./cloud-transcribe-client";
 import { downloadSttModel, isSttModelCached } from "./downloader";
 import { resolveSttModelSpec } from "./models";
 import { evaluateSubmitTrigger } from "./submit-trigger";
