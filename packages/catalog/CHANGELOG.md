@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added Command Code (`commandcode`) as a built-in provider: log in with an API key from `/login` and use its OpenAI- and Anthropic-compatible endpoints (Claude models route through Anthropic Messages, everything else through Chat Completions).
+- Added Command Code (`commandcode`) as a built-in provider: log in with an API key from `/login` and use its OpenAI- and Anthropic-compatible endpoints (Claude models route through Anthropic Messages, everything else through Chat Completions) ([#11776](https://github.com/can1357/oh-my-pi/pull/11776) by [@iamshakibali](https://github.com/iamshakibali)).
 
 ## [18.1.16] - 2026-09-09
 
