@@ -192,6 +192,7 @@ describe("Devin account usage", () => {
 		expect(capture.metadata?.extensionVersion).toBe("3000.6.2");
 		expect(capture.metadata?.locale).toBe("en");
 		expect(capture.metadata?.os).toBe(EXPECTED_OS);
+		expect(capture.metadata?.f).toMatch(/^[0-9a-f]{412}$/);
 
 		if (!report) throw new Error("expected a usage report");
 		const prompt = limitById(report, "devin:credits:prompt");

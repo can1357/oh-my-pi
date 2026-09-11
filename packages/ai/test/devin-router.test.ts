@@ -159,11 +159,14 @@ describe("streamDevin router assignment", () => {
 			apiKey: "devin-session-token$token",
 			userJwt: "",
 		});
+		expect(recorded.assignment?.metadata?.f).toMatch(/^[0-9a-f]{404}$/);
 		// The router uid must never reach GetChatMessage as the chat model.
 		expect(recorded.chat?.chatModelUid).toBe("claude-sonnet-4-5");
 		expect(recorded.chat?.modelAssignmentJwt).toBe("assign-jwt");
 		expect(recorded.chat?.cascadeId).toBe("cascade-42");
 		expect(recorded.chat?.metadata).toMatchObject({ ideType: "chisel", userJwt: "user-jwt" });
+		expect(recorded.chat?.metadata?.f).toMatch(/^[0-9a-f]{404}$/);
+		expect(recorded.chat?.metadata?.f).not.toBe(recorded.assignment?.metadata?.f);
 		expect(result.upstreamModel).toBe("claude-sonnet-4-5");
 		expect(result.stopReason).toBe("stop");
 	});
