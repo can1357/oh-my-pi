@@ -13,6 +13,7 @@
 import { describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { AnthropicApiError, AnthropicMessagesClient } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -219,6 +220,57 @@ describe("transport rate-limit budget", () => {
 		}).result();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(429);
+		expect(requests).toBe(1);
+		vi.restoreAllMocks();
+	});
+
+	// Anthropic states the recovery window in the error body as often as in a
+	// header ("Please retry in 250ms"). The credibility gate must read the same
+	// header+body sources as the shared transport helper, or a body-only short
+	// hint is discarded and an in-place recovery never happens.
+	it("honors a body-only short retry hint on the anthropic transport", async () => {
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		let requests = 0;
+		const fetchMock: FetchImpl = async () => {
+			requests++;
+			return requests === 1
+				? new Response(
+						'{"type":"error","error":{"type":"rate_limit_error","message":"Too many requests. Please retry in 20ms"}}',
+						{ status: 429, headers: { "content-type": "application/json" } },
+					)
+				: new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } });
+		};
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 5, fetch: fetchMock });
+
+		const response = await client.messages
+			.create({ model: "claude-test", max_tokens: 16, messages: [] } as never)
+			.asResponse();
+
+		expect(response.status).toBe(200);
+		expect(requests).toBe(MAX_RATE_LIMIT_ATTEMPTS);
+		vi.restoreAllMocks();
+	});
+
+	it("surfaces a body-only long retry hint on the anthropic transport immediately", async () => {
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		let requests = 0;
+		const fetchMock: FetchImpl = async () => {
+			requests++;
+			return new Response(
+				'{"type":"error","error":{"type":"rate_limit_error","message":"Too many requests. Please retry in 300s"}}',
+				{ status: 429, headers: { "content-type": "application/json" } },
+			);
+		};
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 5, fetch: fetchMock });
+
+		const error = await client.messages
+			.create({ model: "claude-test", max_tokens: 16, messages: [] } as never)
+			.asResponse()
+			.catch((err: unknown) => err);
+
+		expect(error).toBeInstanceOf(AnthropicApiError);
+		if (!(error instanceof AnthropicApiError)) throw error;
+		expect(error.status).toBe(429);
 		expect(requests).toBe(1);
 		vi.restoreAllMocks();
 	});
