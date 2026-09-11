@@ -16,6 +16,7 @@ import {
 	compactionContextTokens,
 	createCompactionSummaryMessage,
 	estimateTranscriptTokens,
+	getAnthropicCompactionPayload,
 	NativeCompactionError,
 	prepareCompaction,
 	type SessionMessageEntry,
@@ -167,10 +168,17 @@ interface ActiveAdvisor {
 	retryFallbackPendingSuccess: boolean;
 	signature: string;
 }
-
 interface AdvisorCompactionSummaryMessage extends CompactionSummaryMessage {
 	firstKeptEntryId?: string;
 	advisorUsageAnchorStartIndex?: number;
+	/**
+	 * Provider-native replay state from `compact()` (e.g. the Anthropic
+	 * compaction block), mirroring entry `preserveData` on the primary
+	 * session. The message payload replays it on later requests; the next
+	 * maintenance run persists it back into the reconstructed entry so the
+	 * following preparation keeps the opaque state and cache continuity.
+	 */
+	preserveData?: Record<string, unknown>;
 }
 
 interface AdvisorRuntimeDescriptor {
@@ -1639,11 +1647,15 @@ export class SessionAdvisors {
 					type: "compaction",
 					id,
 					parentId,
-					timestamp,
+					// ISO like every CompactionEntry: the next round reads this
+					// back as previousSummaryTimestamp, and a millis string
+					// does not survive `new Date()` (NaN rewrite marker).
+					timestamp: new Date(message.timestamp || Date.now()).toISOString(),
 					summary: message.summary,
 					shortSummary: message.shortSummary,
 					firstKeptEntryId: advisorSummary.firstKeptEntryId || `msg-${i + 1}`,
 					tokensBefore: message.tokensBefore,
+					preserveData: advisorSummary.preserveData,
 				} satisfies CompactionEntry;
 			}
 
@@ -1727,6 +1739,9 @@ export class SessionAdvisors {
 						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 						telemetry,
 						tools: agent.state.tools,
+						// The advisor's own live prompt, so a provider-native compaction
+						// re-issues the advisor's request shape and reads its cached prefix.
+						remoteSystemPrompt: agent.state.systemPrompt,
 						sessionId: advisorProviderSessionId,
 						promptCacheKey: advisorProviderSessionId,
 						metadata: advisorMetadata,
@@ -1764,8 +1779,29 @@ export class SessionAdvisors {
 		// compaction. Record their exact array boundary on the in-memory summary so
 		// only assistants appended afterward can become the next usage anchor.
 		const advisorUsageAnchorStartIndex = preparation.recentMessages.length + 1;
+		const anthropicPayload = getAnthropicCompactionPayload(compactResult.preserveData);
+		// A native summary replays its block on later requests, so its rewrite
+		// marker must precede the retained tail: a fresh timestamp would make
+		// `historyRewriteAt` newer than the tail and strip its bound thinking
+		// on the very next request. Reuse the previous compaction's marker when
+		// one exists, else sit just before the retained tail. Local summaries
+		// keep the existing fresh timestamp.
+		const firstRetained = preparation.recentMessages[0];
+		const summaryTimestamp =
+			anthropicPayload !== undefined
+				? (preparation.previousSummaryTimestamp ??
+					(firstRetained ? new Date(firstRetained.timestamp - 1).toISOString() : new Date().toISOString()))
+				: new Date().toISOString();
 		const summaryMessage = {
-			...createCompactionSummaryMessage(summary, tokensBefore, new Date().toISOString(), { shortSummary }),
+			...createCompactionSummaryMessage(summary, tokensBefore, summaryTimestamp, {
+				shortSummary,
+				// A provider-native compaction returns its replay state in
+				// preserveData; carry it on the in-memory summary so later
+				// advisor requests replay the native block (and beta/edit)
+				// instead of resending the summary as ordinary text.
+				providerPayload: anthropicPayload,
+			}),
+			preserveData: compactResult.preserveData,
 			firstKeptEntryId,
 			advisorUsageAnchorStartIndex,
 		} satisfies AdvisorCompactionSummaryMessage;

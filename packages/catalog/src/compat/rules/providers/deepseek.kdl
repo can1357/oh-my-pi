@@ -16,6 +16,7 @@ provider "deepseek" {
 	// bare alias carries no family, and the retired `v4-flash`/`-vision-exp` ids
 	// are still accepted and billed at the Flash card.
 	models "deepseek-flash" "deepseek-v4-flash" "deepseek-v4-flash-vision-exp" {
+		clamp-output-to-model-max #true
 		time-based-cost {
 			off-peak-multiplier 0.5
 			peak-windows {

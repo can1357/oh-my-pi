@@ -795,6 +795,35 @@ describe("model thinking derivation", () => {
 		expect(opus48.compat.supportsMidConversationSystem).toBe(true);
 	});
 
+	it("bakes server-side compaction support for the adaptive-thinking lineage only, on any host", () => {
+		const supported = [
+			"claude-opus-4-6",
+			"claude-opus-4-8",
+			"claude-sonnet-4-6",
+			"claude-sonnet-5",
+			"claude-fable-5",
+			"claude-mythos-5",
+		];
+		const unsupported = ["claude-haiku-4-5", "claude-sonnet-4-5", "claude-opus-4-5", "claude-opus-4-1"];
+		for (const id of supported) {
+			expect(
+				createModel({ id, api: "anthropic-messages", provider: "anthropic" }).compat.supportsServerCompaction,
+			).toBe(true);
+		}
+		for (const id of unsupported) {
+			expect(
+				createModel({ id, api: "anthropic-messages", provider: "anthropic" }).compat.supportsServerCompaction,
+			).toBe(false);
+		}
+		// A lineage truth, not a deployment contract: the same model line carries
+		// it on a gateway; whether the gateway delivers the beta is decided at
+		// request time from the effective endpoint.
+		expect(
+			createModel({ id: "claude-sonnet-4-6", api: "anthropic-messages", provider: "opencode-zen" }).compat
+				.supportsServerCompaction,
+		).toBe(true);
+	});
+
 	it("classifies OpenAI-schema Bedrock models as effort, leaving gpt-oss on budget", () => {
 		// Bedrock serves the GPT-5.x SKUs through OpenAI's own request schema,
 		// which rejects Anthropic's budget block: `unknown_parameter: 'thinking'`.
