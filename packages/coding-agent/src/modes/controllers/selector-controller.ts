@@ -596,6 +596,9 @@ export class SelectorController {
 			case "tui.vimModeDisplay":
 				this.ctx.applyVimModeSetting();
 				break;
+			case "display.pinnedAgents":
+				this.ctx.applyPinnedAgentsSetting();
+				break;
 
 			// Settings with UI side effects
 			case "display.hideToolActivity": {
