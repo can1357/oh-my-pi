@@ -4584,7 +4584,9 @@
 					"fireworks",
 					"nanogpt",
 					"opencode-go",
-					"openrouter"
+					"openrouter",
+					"litellm",
+					"nous"
 				],
 				"wire": {
 					"streamMarkupHealingPattern": "dsml"

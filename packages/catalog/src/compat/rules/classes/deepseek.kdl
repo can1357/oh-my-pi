@@ -73,7 +73,7 @@ class "deepseek" {
 	models token="vision" {
 		strip-image-input #false
 	}
-	on "ollama-cloud" "nvidia" "deepseek" "fireworks" "nanogpt" "opencode-go" "openrouter" {
+	on "ollama-cloud" "nvidia" "deepseek" "fireworks" "nanogpt" "opencode-go" "openrouter" "litellm" "nous" {
 		stream-markup-healing-pattern "dsml"
 	}
 	thinking-loop-guard "deepseek"
