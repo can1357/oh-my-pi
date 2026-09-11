@@ -248,6 +248,11 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.setActiveToolsByName(session.getEnabledToolNames());
 			expect(session.getActiveToolNames()).toContain("default_active_tool");
 			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("default_active_tool");
+			// Pinning write top-level is an explicit full-write grant; reapplying must preserve it:
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+			const fsTarget = path.join(tempDir, "pin-restore.txt");
+			await session.getToolByName("write")!.execute("pin-restore", { path: fsTarget, content: "x" });
+			expect(await Bun.file(fsTarget).text()).toBe("x");
 		} finally {
 			await session.dispose();
 		}
@@ -519,6 +524,93 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			const fsTarget = path.join(tempDir, "should-fail.txt");
 			await expect(
 				session.getToolByName("write")!.execute("fs-target", { path: fsTarget, content: "blocked" }),
+			).rejects.toThrow("limited to the xd:// device transport");
+			expect(await Bun.file(fsTarget).exists()).toBe(false);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("preserves device-only vs full write through restoreNonMCPToolPresentation fullWrite", async () => {
+		const tempDir = makeTempDir();
+		const customAmbient: CustomTool = {
+			name: "custom_ambient",
+			label: "Custom Ambient",
+			description: "Ambient tool",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			loadMode: "discoverable",
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			toolNames: ["read"],
+			customTools: [customAmbient],
+		});
+
+		try {
+			await session.setActiveToolsByName(["read", "custom_ambient"]);
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("custom_ambient");
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+
+			await session.restoreNonMCPToolPresentation(["read", "custom_ambient"], ["custom_ambient"], {
+				fullWrite: false,
+			});
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("custom_ambient");
+			const deviceTarget = path.join(tempDir, "nonmcp-device.txt");
+			await expect(
+				session.getToolByName("write")!.execute("nonmcp-device", { path: deviceTarget, content: "x" }),
+			).rejects.toThrow("limited to the xd:// device transport");
+			expect(await Bun.file(deviceTarget).exists()).toBe(false);
+
+			await session.restoreNonMCPToolPresentation(["read", "write", "custom_ambient"], ["custom_ambient"], {
+				fullWrite: true,
+			});
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+			const fsTarget = path.join(tempDir, "nonmcp-full.txt");
+			await session.getToolByName("write")!.execute("nonmcp-full", { path: fsTarget, content: "ok" });
+			expect(await Bun.file(fsTarget).text()).toBe("ok");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("maps boolean forcePromptRefresh without changing write authorization", async () => {
+		const tempDir = makeTempDir();
+		const customAmbient: CustomTool = {
+			name: "custom_ambient",
+			label: "Custom Ambient",
+			description: "Ambient tool",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			loadMode: "discoverable",
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			toolNames: ["read"],
+			customTools: [customAmbient],
+		});
+
+		try {
+			await session.setActiveToolsByName(["read", "custom_ambient"]);
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("custom_ambient");
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+
+			// Legacy boolean overload maps to { forcePromptRefresh } with fullWrite undefined (infer):
+			await session.setActiveToolPresentation(
+				session.getEnabledToolNames(),
+				session.getMountedXdevToolNames(),
+				true,
+			);
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("custom_ambient");
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			const fsTarget = path.join(tempDir, "boolean-overload.txt");
+			await expect(
+				session.getToolByName("write")!.execute("boolean-overload", { path: fsTarget, content: "x" }),
 			).rejects.toThrow("limited to the xd:// device transport");
 			expect(await Bun.file(fsTarget).exists()).toBe(false);
 		} finally {
@@ -930,6 +1022,38 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 			await expect(
 				write!.execute("deferrable-transport-after", {
+					path: path.join(tempDir, "after.txt"),
+					content: "x",
+				}),
+			).rejects.toThrow("Filesystem writes are not available");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps deferrable-only transport under explicit fullWrite:false", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read", "ast_edit"],
+		});
+
+		try {
+			expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "ast_edit", "write"]));
+			expect(session.getMountedXdevToolNames()).toEqual([]);
+			const write = session.getToolByName("write");
+			expect(write).toBeDefined();
+			await expect(
+				write!.execute("deferrable-override-before", {
+					path: path.join(tempDir, "before.txt"),
+					content: "x",
+				}),
+			).rejects.toThrow("Filesystem writes are not available");
+
+			await session.setActiveToolPresentation(session.getEnabledToolNames(), [], { fullWrite: false });
+
+			await expect(
+				write!.execute("deferrable-override-after", {
 					path: path.join(tempDir, "after.txt"),
 					content: "x",
 				}),

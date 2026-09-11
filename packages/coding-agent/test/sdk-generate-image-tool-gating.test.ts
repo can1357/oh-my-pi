@@ -246,31 +246,37 @@ describe("generate_image tool gating", () => {
 		expect(session.getActiveToolNames()).toContain("write");
 		expect(session.getActiveToolNames()).not.toContain("mcp__test__search");
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
+		expect(session.isDeviceOnlyWrite()).toBe(true);
 
 		await session.refreshMCPTools([]);
 
 		expect(session.getActiveToolNames()).toContain("write");
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
+		expect(session.isDeviceOnlyWrite()).toBe(true);
 	});
 
 	it("keeps the device-only write during enabled-set round trips", async () => {
 		const session = await sessionWithCustomTools(["read"], [customTool("mcp__test__search", true)]);
 		expect(session.getActiveToolNames()).toContain("write");
+		expect(session.isDeviceOnlyWrite()).toBe(true);
 
 		await session.setActiveToolsByName(session.getEnabledToolNames());
 		expect(session.getActiveToolNames()).not.toContain("mcp__test__search");
 		expect(session.getActiveToolNames()).toContain("write");
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
+		expect(session.isDeviceOnlyWrite()).toBe(true);
 
 		await session.refreshMCPTools([]);
 		expect(session.getActiveToolNames()).toContain("write");
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
+		expect(session.isDeviceOnlyWrite()).toBe(true);
 	});
 
 	it("restores mounted xd tools after a temporary tool restriction", async () => {
 		const session = await sessionWithCustomTools(["read"], [customTool("mcp__test__search", true)]);
 		expect(session.getActiveToolNames()).not.toContain("mcp__test__search");
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
+		expect(session.isDeviceOnlyWrite()).toBe(true);
 		const enabledBefore = session.getEnabledToolNames();
 
 		await session.setActiveToolsByName(["read"]);
@@ -279,6 +285,7 @@ describe("generate_image tool gating", () => {
 		await session.setActiveToolsByName(enabledBefore);
 		expect(session.getActiveToolNames()).not.toContain("mcp__test__search");
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
+		expect(session.isDeviceOnlyWrite()).toBe(true);
 	});
 
 	it("preserves explicitly requested write after MCP devices disconnect", async () => {
@@ -287,6 +294,7 @@ describe("generate_image tool gating", () => {
 		await session.refreshMCPTools([]);
 
 		expect(session.getActiveToolNames()).toContain("write");
+		expect(session.isDeviceOnlyWrite()).toBe(false);
 	});
 
 	it("keeps ambient tools mounted after MCP disconnect with a device-only write", async () => {
@@ -298,6 +306,7 @@ describe("generate_image tool gating", () => {
 		expect(session.getActiveToolNames()).toContain("write");
 		expect(session.getActiveToolNames()).not.toContain(ambientTool.name);
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(ambientTool.name);
+		expect(session.isDeviceOnlyWrite()).toBe(true);
 	});
 
 	it("keeps ambient custom tools top-level when an explicit session omitted read", async () => {
