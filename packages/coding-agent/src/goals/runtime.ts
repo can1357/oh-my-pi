@@ -3,6 +3,15 @@ import goalBudgetLimitPrompt from "../prompts/goals/goal-budget-limit.md" with {
 import goalContinuationPrompt from "../prompts/goals/goal-continuation.md" with { type: "text" };
 import goalModeActivePrompt from "../prompts/goals/goal-mode-active.md" with { type: "text" };
 import type { Goal, GoalBudgetSteering, GoalModeState, GoalRuntimeEvent, GoalTokenUsage } from "./state";
+import {
+	cloneGoalWayfindingState,
+	createGoalWayfindingState,
+	normalizeGoalWayfindingUpdate,
+	parseGoalWayfindingState,
+	renderGoalWayfindingState,
+	type GoalWayfindingUpdate,
+	type NormalizedGoalWayfindingUpdate,
+} from "./wayfinding";
 
 export interface GoalRuntimeHost {
 	getState(): GoalModeState | undefined;
@@ -38,7 +47,7 @@ export interface GoalRuntimeSnapshot {
 export type GoalPromptKind = "active" | "continuation" | "budget-limit";
 
 function cloneGoal(goal: Goal): Goal {
-	return { ...goal };
+	return { ...goal, wayfinding: cloneGoalWayfindingState(goal.wayfinding) };
 }
 
 function cloneState(state: GoalModeState): GoalModeState {
@@ -60,6 +69,36 @@ export function remainingTokens(goal: Goal | null | undefined): number | null {
 
 export function renderTrustedObjective(objective: string): string {
 	return `<objective>\n${escapeXmlText(objective)}\n</objective>`;
+}
+
+export function parseGoalFromModeData(modeData: unknown): Goal | undefined {
+	if (!modeData || typeof modeData !== "object") return undefined;
+	const modeValue = modeData as Record<string, unknown>;
+	const goal = modeValue.goal;
+	if (!goal || typeof goal !== "object") return undefined;
+	const value = goal as Record<string, unknown>;
+	if (
+		typeof value.id !== "string" ||
+		typeof value.objective !== "string" ||
+		typeof value.status !== "string" ||
+		typeof value.tokensUsed !== "number" ||
+		typeof value.timeUsedSeconds !== "number" ||
+		typeof value.createdAt !== "number" ||
+		typeof value.updatedAt !== "number"
+	) {
+		return undefined;
+	}
+	return {
+		id: value.id,
+		objective: value.objective,
+		status: value.status as Goal["status"],
+		tokenBudget: typeof value.tokenBudget === "number" ? value.tokenBudget : undefined,
+		tokensUsed: value.tokensUsed,
+		timeUsedSeconds: value.timeUsedSeconds,
+		createdAt: value.createdAt,
+		updatedAt: value.updatedAt,
+		wayfinding: parseGoalWayfindingState(value.wayfinding),
+	};
 }
 
 export function goalTokenDelta(current: GoalTokenUsage, baseline: GoalTokenUsage): number {
@@ -89,6 +128,7 @@ export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
 		tokenBudget: budgetValue(goal),
 		remainingTokens: remainingValue(goal),
 		timeUsedSeconds: String(goal.timeUsedSeconds),
+		wayfindingContext: renderGoalWayfindingState(goal.wayfinding),
 	});
 }
 
@@ -112,6 +152,30 @@ function validateTokenBudget(tokenBudget: number | undefined): void {
 
 function isAccountingStatus(goal: Goal): boolean {
 	return goal.status === "active" || goal.status === "budget-limited";
+}
+
+function requireWayfindingUpdateState(
+	state: GoalModeState | undefined,
+	update: NormalizedGoalWayfindingUpdate,
+): GoalModeState {
+	if (!state?.goal) {
+		throw new Error("cannot update goal wayfinding because no goal exists");
+	}
+	if (state.goal.id !== update.goalId) {
+		throw new Error(
+			`stale goal wayfinding update: current goal is ${state.goal.id}, received goal_id ${update.goalId}`,
+		);
+	}
+	if (!state.enabled || !isAccountingStatus(state.goal)) {
+		throw new Error(`cannot update goal wayfinding while goal status is ${state.goal.status}`);
+	}
+	const currentRevision = state.goal.wayfinding?.revision ?? 0;
+	if (currentRevision !== update.expectedRevision) {
+		throw new Error(
+			`stale goal wayfinding update: current revision is ${currentRevision}, received expected_revision ${update.expectedRevision}`,
+		);
+	}
+	return state;
 }
 
 export class GoalRuntime {
@@ -171,10 +235,14 @@ export class GoalRuntime {
 	): Promise<void> {
 		this.#host.setState(state ? cloneState(state) : undefined);
 		if (options?.persist) {
-			this.#host.persist(options.persist, state);
+			this.#host.persist(options.persist, state ? cloneState(state) : undefined);
 		}
 		if (options?.emit !== false) {
-			await this.#host.emit({ type: "goal_updated", goal: state ? cloneGoal(state.goal) : null, state });
+			await this.#host.emit({
+				type: "goal_updated",
+				goal: state ? cloneGoal(state.goal) : null,
+				state: state ? cloneState(state) : undefined,
+			});
 		}
 	}
 
@@ -416,6 +484,20 @@ export class GoalRuntime {
 		});
 	}
 
+	async updateGoalWayfinding(input: GoalWayfindingUpdate): Promise<GoalModeState> {
+		const update = normalizeGoalWayfindingUpdate(input);
+		return await this.#withAccounting(async () => {
+			requireWayfindingUpdateState(this.#getStateClone(), update);
+			await this.#flushUsageLocked("suppressed");
+			const state = requireWayfindingUpdateState(this.#getStateClone(), update);
+			const nextRevision = update.expectedRevision + 1;
+			state.goal.wayfinding = createGoalWayfindingState(update, nextRevision);
+			state.goal.updatedAt = this.#now();
+			await this.#commitState(state, { persist: "goal" });
+			return state;
+		});
+	}
+
 	async resumeGoal(): Promise<GoalModeState> {
 		return await this.#withAccounting(async () => {
 			const state = this.#getStateClone();
@@ -457,13 +539,13 @@ export class GoalRuntime {
 			await this.#flushUsageLocked("suppressed");
 			const state = this.#getStateClone();
 			if (!state?.goal) return undefined;
-			const dropped = { ...state.goal, status: "dropped" as const, updatedAt: this.#now() };
+			const dropped = { ...cloneGoal(state.goal), status: "dropped" as const, updatedAt: this.#now() };
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
 			await this.#host.emit({
 				type: "goal_updated",
-				goal: dropped,
-				state: { ...state, enabled: false, goal: dropped },
+				goal: cloneGoal(dropped),
+				state: { ...state, enabled: false, goal: cloneGoal(dropped) },
 			});
 			await this.#commitState(undefined, { persist: "none", emit: false });
 			return dropped;

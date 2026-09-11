@@ -2,6 +2,30 @@ import type { UsageStatistics } from "../session/session-entries";
 
 export type GoalStatus = "active" | "paused" | "budget-limited" | "complete" | "dropped";
 
+export type GoalWayfindingOutcome = "succeeded" | "partial" | "failed" | "unexpected" | "blocked";
+
+export interface GoalWaypoint {
+	action: string;
+	rationale: string;
+	guidance?: string;
+	successSignal?: string;
+	replanIf?: string;
+}
+
+export interface GoalObservation {
+	outcome: GoalWayfindingOutcome;
+	summary: string;
+}
+
+export interface GoalWayfindingState {
+	revision: number;
+	focus?: string;
+	waypoint: GoalWaypoint;
+	lastObservation?: GoalObservation;
+	blockers?: readonly string[];
+	assumptions?: readonly string[];
+}
+
 export interface Goal {
 	id: string;
 	objective: string;
@@ -11,6 +35,7 @@ export interface Goal {
 	timeUsedSeconds: number;
 	createdAt: number;
 	updatedAt: number;
+	wayfinding?: GoalWayfindingState;
 }
 
 export interface GoalModeState {
@@ -21,7 +46,7 @@ export interface GoalModeState {
 }
 
 export interface GoalToolDetails {
-	op: "create" | "get" | "complete" | "resume" | "drop";
+	op: "create" | "get" | "update" | "complete" | "resume" | "drop";
 	goal?: Goal | null;
 	remainingTokens?: number | null;
 	completionBudgetReport?: string | null;
