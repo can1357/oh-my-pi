@@ -2367,6 +2367,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// window.
 			await logger.time("resolveModelDiscoveryDeferredRetry", startRuntimeDiscovery);
 			const matchPreferences = getModelMatchPreferences(settings);
+			const disabledProviders = new Set(settings.get("disabledProviders"));
 			const runtimeResolved = deferredModelPatterns.some(pattern =>
 				pattern.split(",").some(selector => {
 					const trimmedSelector = selector.trim();
@@ -2382,8 +2383,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// (its discoverable provider hasn't been fetched yet) must NOT
 					// short-circuit the fallback refresh below — otherwise `@role`
 					// selectors pointing at discovery-backed models never trigger the
-					// fetch and fail with `Model "@role" not found`.
-					return Boolean(resolved.model);
+					// fetch and fail with `Model "@role" not found`. A disabled provider
+					// is unreachable, so a match on one likewise must not count: otherwise
+					// a disabled first selector suppresses the discovery refresh an enabled
+					// later selector still needs.
+					return resolved.model !== undefined && !disabledProviders.has(resolved.model.provider);
 				}),
 			);
 			if (!runtimeResolved && modelRegistry.getDiscoverableProviders().length > 0) {
@@ -2391,7 +2395,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					modelRegistry.refresh("online-if-uncached"),
 				);
 			}
-			const disabledProviders = new Set(settings.get("disabledProviders"));
 			const allEnabledModels =
 				disabledProviders.size === 0
 					? modelRegistry.getAll()
