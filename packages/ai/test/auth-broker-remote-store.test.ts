@@ -7,6 +7,7 @@ import {
 	AuthBrokerClient,
 	type AuthBrokerServerHandle,
 	discoverAuthStorage,
+	type FetchSnapshotResult,
 	RemoteAuthCredentialStore,
 	type SnapshotResponse,
 	startAuthBroker,
@@ -451,5 +452,81 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 				}
 			},
 		);
+	});
+});
+
+/**
+ * Snapshot builder for the fake-client tests: only `id`/`provider`/`credential`
+ * feed the content fingerprint, so the credential key is what drives change
+ * detection.
+ */
+function buildApiKeySnapshot(
+	generation: number,
+	creds: { id: number; provider: string; key: string }[],
+): SnapshotResponse {
+	return {
+		generation,
+		generatedAt: Date.now(),
+		serverNowMs: Date.now(),
+		refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: 0 },
+		credentials: creds.map(c => ({
+			id: c.id,
+			provider: c.provider,
+			credential: { type: "api_key", key: c.key },
+			identityKey: null,
+			rotatesInMs: null,
+		})),
+	};
+}
+
+/**
+ * Minimal broker client that serves a test-controlled snapshot. Background
+ * long-poll calls (which pass `ifGenerationGt`) always report "unchanged" so
+ * the manual `refreshSnapshot()` is the sole driver, keeping the test
+ * deterministic.
+ */
+class FakeBrokerClient {
+	current: SnapshotResponse;
+	constructor(initial: SnapshotResponse) {
+		this.current = initial;
+	}
+	async fetchSnapshot(opts: { ifGenerationGt?: number } = {}): Promise<FetchSnapshotResult> {
+		if (opts.ifGenerationGt !== undefined) return { status: 304, generation: this.current.generation };
+		return { status: 200, snapshot: this.current, generation: this.current.generation };
+	}
+}
+
+describe("RemoteAuthCredentialStore.pollExternalChanges content revision", () => {
+	test("detects a replaced credential even when the broker generation repeats", async () => {
+		const initial = buildApiKeySnapshot(5, [{ id: 1, provider: "deepseek", key: "sk-old" }]);
+		const client = new FakeBrokerClient(initial);
+		const store = new RemoteAuthCredentialStore({
+			client: client as unknown as AuthBrokerClient,
+			initialSnapshot: initial,
+			streamSnapshots: false,
+			backgroundIdleMs: 0,
+		});
+		try {
+			// Boot state is acknowledged: nothing to report yet.
+			expect(store.pollExternalChanges()).toBe(false);
+
+			// An identical re-fetch (same generation, same content) stays quiet.
+			client.current = buildApiKeySnapshot(5, [{ id: 1, provider: "deepseek", key: "sk-old" }]);
+			await store.refreshSnapshot();
+			expect(store.pollExternalChanges()).toBe(false);
+
+			// The broker restarts and replaces the credential's key while its
+			// in-memory generation counter lands back on the acknowledged value 5.
+			// A generation-equality check would miss this; the content revision
+			// catches it.
+			client.current = buildApiKeySnapshot(5, [{ id: 1, provider: "deepseek", key: "sk-new" }]);
+			await store.refreshSnapshot();
+			expect(store.snapshot.generation).toBe(5);
+			expect(store.pollExternalChanges()).toBe(true);
+			// One true per observed change.
+			expect(store.pollExternalChanges()).toBe(false);
+		} finally {
+			store.close();
+		}
 	});
 });

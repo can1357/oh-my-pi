@@ -256,12 +256,17 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#snapshotReceivedAt = Date.now();
 	#generation = 0;
 	/**
-	 * Generation last reported as "seen" by {@link pollExternalChanges}. Seeded
-	 * from the initial snapshot so the first poll after a broker-side change
-	 * (delivered by the background SSE/long-poll loop, which advances
-	 * `#generation`) returns true and drives an {@link AuthStorage} reload.
+	 * Content fingerprint of the credential set in {@link #snapshot} (id +
+	 * provider + credential material), recomputed after every snapshot mutation.
+	 * Drives {@link #credentialRevision} independently of the broker's numeric
+	 * generation, which is an in-memory counter that resets when the broker
+	 * process restarts and so cannot be trusted for change detection.
 	 */
-	#acknowledgedGeneration = 0;
+	#credentialFingerprint = "";
+	/** Monotonic local counter bumped whenever {@link #credentialFingerprint} changes. */
+	#credentialRevision = 0;
+	/** Revision last reported as "seen" by {@link pollExternalChanges}; seeded from the initial snapshot. */
+	#acknowledgedRevision = 0;
 	#usageOverlays: Map<string, UsageReport> = new Map();
 	#backgroundAbort = new AbortController();
 	readonly #backgroundIdleMs: number;
@@ -307,7 +312,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			? new Map([...opts.accountPool].map(([provider, identities]) => [provider, new Set(identities)]))
 			: undefined;
 		this.#applySnapshot(opts.initialSnapshot ?? emptySnapshot(), opts.initialSnapshot?.generation ?? 0);
-		this.#acknowledgedGeneration = this.#generation;
+		this.#acknowledgedRevision = this.#credentialRevision;
 		this.#onSnapshot = opts.onSnapshot;
 		void this.#runBackground();
 	}
@@ -333,6 +338,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#snapshot = { ...snapshot, credentials };
 		this.#generation = generation;
 		this.#snapshotReceivedAt = nowMs;
+		this.#refreshCredentialRevision();
 		const onSnapshot = this.#onSnapshot;
 		if (!onSnapshot) return;
 		try {
@@ -340,6 +346,34 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		} catch (error) {
 			logger.debug("auth-broker snapshot callback failed", { error: String(error) });
 		}
+	}
+
+	/**
+	 * Recompute the credential-content fingerprint and bump
+	 * {@link #credentialRevision} when it changes. Called after every snapshot
+	 * mutation so {@link pollExternalChanges} detects add/remove/replace even
+	 * when the broker's numeric generation repeats (e.g. after a broker
+	 * restart resets its in-memory counter).
+	 */
+	#refreshCredentialRevision(): void {
+		const fingerprint = this.#computeCredentialFingerprint();
+		if (fingerprint === this.#credentialFingerprint) return;
+		this.#credentialFingerprint = fingerprint;
+		this.#credentialRevision += 1;
+	}
+
+	/**
+	 * Order-independent digest of the routable credential material — exactly the
+	 * fields {@link listAuthCredentials} exposes (id, provider, credential). A
+	 * token rotation or an add/remove changes it; credential blocks and usage
+	 * overlays do not.
+	 */
+	#computeCredentialFingerprint(): string {
+		const parts = this.#snapshot.credentials.map(
+			entry => `${entry.id}\u0000${entry.provider}\u0000${JSON.stringify(entry.credential)}`,
+		);
+		parts.sort();
+		return parts.join("\u0001");
 	}
 	#protectNewSnapshotBlocks(previous: readonly SnapshotEntry[], next: readonly SnapshotEntry[], nowMs: number): void {
 		const previousBlocksByKey = new Map<string, string>();
@@ -556,6 +590,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#snapshot = { ...this.#snapshot, generation, serverNowMs, refresher, credentials };
 		this.#generation = generation;
 		this.#snapshotReceivedAt = Date.now();
+		this.#refreshCredentialRevision();
 	}
 
 	#removeStreamCredential(
@@ -572,6 +607,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#snapshot = { ...this.#snapshot, generation, serverNowMs, refresher, credentials };
 		this.#generation = generation;
 		this.#snapshotReceivedAt = Date.now();
+		this.#refreshCredentialRevision();
 	}
 
 	/** Re-hydrate the in-memory snapshot from the broker. */
@@ -588,17 +624,20 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * clients (notably `auth-gateway serve`) pick up logins/logouts made by
 	 * another process without a restart.
 	 *
-	 * `#generation` is advanced only by the background SSE/long-poll loop
-	 * (`#applySnapshot`/`#applyStreamEntry`/`#removeStreamCredential`), so a move
-	 * past the last acknowledged generation means the broker's credential set
-	 * changed. Records foreground activity first: a low-traffic client's
-	 * background sync parks after `#backgroundIdleMs`, and without this wakeup it
-	 * would never fetch the new generation to report in the first place.
+	 * Compares a local content revision, not the broker's numeric generation:
+	 * generation is an in-memory counter that resets when the broker process
+	 * restarts, so a reconnecting stream can deliver a different credential set
+	 * under a repeated (or lower) generation. {@link #refreshCredentialRevision}
+	 * bumps the revision whenever the applied credential material actually
+	 * changes, catching those cases too. Records foreground activity first: a
+	 * low-traffic client's background sync parks after `#backgroundIdleMs`, and
+	 * without this wakeup it would never fetch the new snapshot to report in the
+	 * first place.
 	 */
 	pollExternalChanges(): boolean {
 		this.#noteActivity();
-		if (this.#generation === this.#acknowledgedGeneration) return false;
-		this.#acknowledgedGeneration = this.#generation;
+		if (this.#credentialRevision === this.#acknowledgedRevision) return false;
+		this.#acknowledgedRevision = this.#credentialRevision;
 		return true;
 	}
 
