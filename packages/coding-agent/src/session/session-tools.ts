@@ -854,15 +854,22 @@ export class SessionTools {
 			options?.fullWrite === false
 				? false
 				: this.#enabledToolNames.has("write") && this.#isDeviceOnlyWrite?.() !== true;
+		const runtimeSelected = options?.runtimeSelectedToolNames ?? this.#runtimeSelectedToolNames;
 		const xdevWriteAvailable =
 			builtInWrite &&
 			(selectedTools.some(({ name }) => name === "write") ||
 				this.#deviceOnlyWriteTransportAvailable ||
 				this.#dormantFullWrite ||
-				hasCurrentFullWrite);
+				hasCurrentFullWrite ||
+				(options?.fullWrite === false &&
+					selectedTools.some(
+						({ name, tool }) =>
+							this.#presentationPinnedToolNames?.has(name) !== true &&
+							runtimeSelected?.has(name) !== true &&
+							isMountableUnderXdev(tool),
+					)));
 		if (!xdevReadAvailable || !xdevWriteAvailable) return candidates;
 
-		const runtimeSelected = options?.runtimeSelectedToolNames ?? this.#runtimeSelectedToolNames;
 		for (const { name, tool } of selectedTools) {
 			const isPinned = this.#presentationPinnedToolNames?.has(name) === true || runtimeSelected?.has(name) === true;
 			if (!isPinned && isMountableUnderXdev(tool)) {
