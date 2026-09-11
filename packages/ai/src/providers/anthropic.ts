@@ -566,11 +566,14 @@ function dropAnthropicStrictTools(params: MessageCreateParamsStreaming): void {
 function getCacheControl(
 	model: Model<"anthropic-messages">,
 	cacheRetention: CacheRetention | undefined,
+	isOAuthToken = false,
 ): { retention: CacheRetention; cacheControl?: AnthropicCacheControl } {
-	// Five-minute writes are the cheapest cache population strategy. Longer
-	// retention remains an explicit PI_CACHE_RETENTION/request override; idle
-	// sessions keep the short entry warm with bounded read-only refreshes.
-	const retention = resolveCacheRetention(cacheRetention, "short");
+	// Five-minute writes are the cheapest cache population strategy for pay-per-token API keys.
+	// For OAuth (Claude Code subscriber seats), match Claude Code's native policy by defaulting
+	// to 1h retention where supported, avoiding cold cache re-writes after 15m idle intervals.
+	// An explicit cacheRetention ('short', 'long', 'none') or PI_CACHE_RETENTION always takes precedence.
+	const defaultRetention = isOAuthToken && model.compat.supportsLongCacheRetention ? "long" : "short";
+	const retention = resolveCacheRetention(cacheRetention, defaultRetention);
 	if (retention === "none") {
 		return { retention };
 	}
@@ -2137,12 +2140,14 @@ const streamAnthropicOnce = (
 					extraBetas.push(contextManagementBeta);
 				}
 				// `ttl: "1h"` requires the extended-cache-ttl beta on API-key
-				// requests. OAuth requests never add it here: agent requests
-				// already carry it in the Claude Code beta list, and utility
+				// requests. OAuth requests never add it here: Anthropic honors
+				// `ttl: "1h"` on the OAuth path without it (verified against live
+				// traffic: writes land in the `ephemeral_1h` bucket), and utility
 				// requests must not deviate from CC's header fingerprint.
+				const isOAuth = options?.isOAuth ?? isAnthropicOAuthToken(apiKey);
 				if (
-					!(options?.isOAuth ?? isAnthropicOAuthToken(apiKey)) &&
-					getCacheControl(model, options?.cacheRetention).cacheControl?.ttl === "1h" &&
+					!isOAuth &&
+					getCacheControl(model, options?.cacheRetention, isOAuth).cacheControl?.ttl === "1h" &&
 					!extraBetas.includes(extendedCacheTtlBeta)
 				) {
 					extraBetas.push(extendedCacheTtlBeta);
@@ -3985,7 +3990,7 @@ function buildParams(
 		forceDemoteUnsignedThinking && model.compat.replayUnsignedThinking
 			? { ...model, compat: { ...model.compat, replayUnsignedThinking: false } }
 			: model;
-	const { cacheControl } = getCacheControl(model, options?.cacheRetention);
+	const { cacheControl } = getCacheControl(model, options?.cacheRetention, isOAuthToken);
 
 	// Pre-compute system blocks so they occupy the right slot in the serialized body.
 	const shouldInjectClaudeCodeInstruction = isOAuthToken && model.compat.injectClaudeCodeInstruction !== false;
