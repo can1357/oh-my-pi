@@ -99,4 +99,36 @@ describe("RegisteredTool sourceInfo (upstream pi compat)", () => {
 			projectDir.removeSync();
 		}
 	});
+
+	test("a tool's relative sourcePath falls back to the extension's absolute resolved entry", async () => {
+		const projectDir = TempDir.createSync("@registered-tool-relative-source-");
+		const relativePath = "./plugin.ts";
+		const resolvedPath = path.join(projectDir.path(), "plugin.ts");
+		await Bun.write(
+			resolvedPath,
+			`
+				export default function(api) {
+					api.registerTool({
+						name: "relative_source_tool",
+						label: "Relative Source Tool",
+						description: "tool that declares a relative sourcePath",
+						parameters: api.arktype({}),
+						sourcePath: "./tools/relative_source.ts",
+						execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+					});
+				}
+			`,
+		);
+
+		try {
+			const loaded = await loadExtensions([relativePath], projectDir.path());
+			expect(loaded.errors).toEqual([]);
+
+			// A non-absolute sourcePath must not degrade to `<extension:name>` when the
+			// extension has a valid absolute resolved entry to point compat consumers at.
+			expect(loaded.extensions[0]?.tools.get("relative_source_tool")?.sourceInfo.path).toBe(resolvedPath);
+		} finally {
+			projectDir.removeSync();
+		}
+	});
 });

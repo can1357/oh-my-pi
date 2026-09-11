@@ -66,16 +66,22 @@ function getExtensionFactory(module: LoadedExtensionModule): ExtensionFactory | 
 
 /**
  * Upstream-shaped provenance for an extension-registered tool. Consumers that
- * read `sourceInfo` off `getAllRegisteredTools()` (e.g. pi-fabric) receive the
- * resolved on-disk extension path — or the synthetic `<extension:name>` fallback
- * for tools with no filesystem origin.
+ * read `sourceInfo` off `getAllRegisteredTools()` (e.g. pi-fabric) receive an
+ * absolute on-disk path: the tool's own `sourcePath` when it is filesystem-
+ * absolute, otherwise the extension's resolved entry (`fallbackPath`). A tool
+ * with no absolute origin at all falls back to the synthetic `<extension:name>`.
  */
 export function extensionToolSourceInfo(
 	definition: Pick<ToolDefinition, "name" | "sourcePath">,
 	fallbackPath: string,
 ): SourceInfo {
-	const candidate = definition.sourcePath ?? fallbackPath;
-	const path = candidate && isFilesystemSourcePath(candidate) ? candidate : `<extension:${definition.name}>`;
+	const sourcePath = definition.sourcePath;
+	const path =
+		sourcePath && isFilesystemSourcePath(sourcePath)
+			? sourcePath
+			: isFilesystemSourcePath(fallbackPath)
+				? fallbackPath
+				: `<extension:${definition.name}>`;
 	return { path, source: "extension", scope: "temporary", origin: "top-level" };
 }
 
