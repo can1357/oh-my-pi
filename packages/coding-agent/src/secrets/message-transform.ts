@@ -283,7 +283,11 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 		let current = message;
 		const compactionPayload = anthropicCompactionPayload(current);
 		const compactionFiles = anthropicCompactionFilesText(current);
-		if (compactionPayload !== undefined && compactionFiles !== undefined) {
+		if (
+			compactionPayload !== undefined &&
+			compactionFiles !== undefined &&
+			(current.role === "user" || current.role === "developer" || current.role === "assistant")
+		) {
 			const filesText = obfuscator.obfuscate(compactionFiles, sharedRegexSecretValues);
 			if (filesText !== compactionFiles) {
 				current = { ...current, providerPayload: { ...compactionPayload, filesText } };

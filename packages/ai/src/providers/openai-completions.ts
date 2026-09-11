@@ -811,6 +811,7 @@ const streamOpenAICompletionsOnce = (
 							copilotCacheKey,
 							copilotCacheSnapshot,
 						),
+						signal: requestSignal,
 						// Transient 408/429/5xx get Retry-After-aware transport retries.
 						// The first-event watchdog above aborts `requestSignal`, which
 						// bounds every attempt and backoff sleep — retries cannot
