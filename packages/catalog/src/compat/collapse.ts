@@ -569,11 +569,18 @@ function derivePairThinkingSurface(
 		return surface;
 	}
 	const { compat: _compat, ...policySpec } = thinkingSpec;
-	const derived = resolveModelPolicy({
-		...policySpec,
-		reasoning: true,
-		thinking: undefined,
-	}).thinking;
+	// Runtime discovery collapse must stay lenient: ambiguous X/X-thinking
+	// pairs without baked thinking would otherwise throw AmbiguousIdentityError
+	// after each buildModel already succeeded. Curated generation keeps default
+	// strict resolveModelPolicy elsewhere.
+	const derived = resolveModelPolicy(
+		{
+			...policySpec,
+			reasoning: true,
+			thinking: undefined,
+		},
+		{ strict: false },
+	).thinking;
 	if (derived && derived.efforts.length > 0) {
 		const { effortRouting: _dRouting, suppressWhenOff: _dSuppress, requiresEffort: _dRequired, ...surface } = derived;
 		return surface;

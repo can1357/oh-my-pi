@@ -827,7 +827,7 @@ async function generateModels() {
 	const MODELS: Record<string, Record<string, Model<Api>>> = {};
 	for (const [provider, models] of Object.entries(modelSpecs)) {
 		MODELS[provider] = Object.fromEntries(
-			Object.entries(sortObj(models)).map(([id, model]) => [id, buildModel(model)]),
+			Object.entries(sortObj(models)).map(([id, model]) => [id, buildModel(model, { strict: true })]),
 		);
 	}
 

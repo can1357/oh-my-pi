@@ -2292,7 +2292,7 @@ export class TurnRecovery {
 			effectiveUsageLimitWaitMs <= retrySettings.maxDelayMs;
 		const longUsageLimitFallback =
 			currentModel !== undefined &&
-			resolveModelPolicy(currentModel).catalog.longUsageLimitFallback === true &&
+			resolveModelPolicy(currentModel, { strict: false }).catalog.longUsageLimitFallback === true &&
 			retrySettings.maxDelayMs > 0 &&
 			effectiveUsageLimitWaitMs !== undefined &&
 			effectiveUsageLimitWaitMs > retrySettings.maxDelayMs &&

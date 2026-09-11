@@ -18,7 +18,7 @@ export function resolveMaxContextWindow(model: Model): number | undefined {
 	const key = `${model.provider} ${model.id} ${model.api}`;
 	let curated = ruleMaximumCache.get(key);
 	if (curated === undefined) {
-		const maximum = resolveModelPolicy(toModelSpec(model)).catalog.maxContextWindow;
+		const maximum = resolveModelPolicy(toModelSpec(model), { strict: false }).catalog.maxContextWindow;
 		curated = typeof maximum === "number" && Number.isFinite(maximum) && maximum > 0 ? maximum : null;
 		ruleMaximumCache.set(key, curated);
 	}
@@ -49,7 +49,7 @@ export function codexOverrideCeiling(model: Model): number | undefined {
  * it here keeps provider deployment contracts out of TypeScript.
  */
 export function clampsContextOverride(model: Model): boolean {
-	return resolveModelPolicy(toModelSpec(model)).catalog.clampContextOverride === true;
+	return resolveModelPolicy(toModelSpec(model), { strict: false }).catalog.clampContextOverride === true;
 }
 
 /**

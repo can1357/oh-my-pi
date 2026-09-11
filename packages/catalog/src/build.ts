@@ -7,7 +7,7 @@
  * compat per request.
  */
 
-import { resolveModelPolicy } from "./compat/resolve";
+import { resolveModelPolicy, type ResolveModelPolicyOptions } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
 import { materializeTimeBasedCost } from "./pricing";
@@ -200,21 +200,27 @@ function supportsOpenAIGAComputerUse(
 	spec: ModelSpec<Api>,
 	identity: ModelIdentity,
 	explicitSupport: boolean | undefined,
+	options: ResolveModelPolicyOptions,
 ): boolean {
 	if (explicitSupport !== undefined) return explicitSupport;
 	if (!isDirectOpenAIResponsesEndpoint(spec)) return false;
 	const wireIdentity =
-		spec.requestModelId === undefined ? identity : resolveModelPolicy({ ...spec, id: spec.requestModelId }).identity;
+		spec.requestModelId === undefined
+			? identity
+			: resolveModelPolicy({ ...spec, id: spec.requestModelId }, options).identity;
 	return wireIdentity.class === "openai" && revisionAtLeast(wireIdentity, 5, 4);
 }
 
 /**
- * Build one model from an authored spec. Bundled models.json rows are fully
- * materialized by the generator and consumed directly (see `models.ts`), so
- * this only runs for discovered/custom/override specs.
+ * Build one model from a spec. Runtime discovery/custom/override specs are lenient;
+ * the curated generator passes `strict: true` before baking models.json rows.
  */
-export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi> {
-	const policy = resolveModelPolicy(spec);
+export function buildModel<TApi extends Api>(
+	spec: ModelSpec<TApi>,
+	options: ResolveModelPolicyOptions = {},
+): Model<TApi> {
+	const identityOptions = { strict: options.strict ?? false };
+	const policy = resolveModelPolicy(spec, identityOptions);
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
 	const model: Model<TApi> = {
 		...spec,
@@ -227,7 +233,12 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 		requiresGlyphTokenization: policy.identity.class === "anthropic",
 		tokenizer: spec.tokenizer ?? resolveModelTokenizer(spec.requestModelId ?? spec.id),
 		thinking: policy.thinking,
-		supportsComputerUse: supportsOpenAIGAComputerUse(spec, policy.identity, supportsComputerUseConfig),
+		supportsComputerUse: supportsOpenAIGAComputerUse(
+			spec,
+			policy.identity,
+			supportsComputerUseConfig,
+			identityOptions,
+		),
 		supportsComputerUseConfig,
 		compat: policy.compat,
 		compatConfig: spec.compat,

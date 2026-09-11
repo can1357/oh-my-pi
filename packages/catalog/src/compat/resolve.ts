@@ -92,11 +92,13 @@ class IdentityFacts {
 	}
 }
 
-function resolveIdentity<TApi extends Api>(spec: ModelSpec<TApi>): ModelIdentity {
-	// Strict on purpose: ambiguous identity is a rule-authoring defect surfaced
-	// at build/CI time, never silently degraded to `unknown`. Discovery
-	// normalization opts into leniency through `classifyModel` directly.
-	return classifyModel(spec.provider, spec.id);
+/** Curated policy rejects ambiguous identities; runtime discovery may opt out. */
+export interface ResolveModelPolicyOptions {
+	strict?: boolean;
+}
+
+function resolveIdentity<TApi extends Api>(spec: ModelSpec<TApi>, options: ResolveModelPolicyOptions): ModelIdentity {
+	return classifyModel(spec.provider, spec.id, { lenient: options.strict === false });
 }
 
 // ---------------------------------------------------------------------------
@@ -1203,9 +1205,15 @@ function specUsesApi<TApi extends Api>(spec: ModelSpec<Api>, api: TApi): spec is
  * Resolves the full policy surface for one model spec: structured identity,
  * complete compat record, thinking metadata, and catalog-data corrections.
  */
-export function resolveModelPolicy<TApi extends Api>(spec: ModelSpec<TApi>): ResolvedModelPolicy<TApi>;
-export function resolveModelPolicy(spec: ModelSpec<Api>): ResolvedModelPolicy<Api> {
-	const identity = resolveIdentity(spec);
+export function resolveModelPolicy<TApi extends Api>(
+	spec: ModelSpec<TApi>,
+	options?: ResolveModelPolicyOptions,
+): ResolvedModelPolicy<TApi>;
+export function resolveModelPolicy(
+	spec: ModelSpec<Api>,
+	options: ResolveModelPolicyOptions = {},
+): ResolvedModelPolicy<Api> {
+	const identity = resolveIdentity(spec, options);
 	const facts = new IdentityFacts(identity);
 	const axes = resolveCascade(buildResolveTarget(spec, identity));
 	let compat: CompatOf<Api>;

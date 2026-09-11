@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Cursor request paths classify discovered/custom model ids with `lenient: true`, so equal-rank taxonomy ties no longer throw `AmbiguousIdentityError` before the request is sent ([#10939](https://github.com/can1357/oh-my-pi/pull/10939)).
 - GitHub Copilot Enterprise requests keep the Copilot CLI identity accepted by private Enterprise endpoints, and Business requests denied with HTTP 400 `model_not_supported` now retry once as the Copilot CLI (matching the existing 403 fallback), restoring models that 18.1.17 rejected as unsupported ([#11669](https://github.com/can1357/oh-my-pi/issues/11669)).
 - GitHub Copilot streams remember the working `Copilot-Integration-Id` per credential after a denied chat identity retries as the Copilot CLI, so later streams start at the working shape instead of replaying the denial ([#11669](https://github.com/can1357/oh-my-pi/issues/11669)).
 

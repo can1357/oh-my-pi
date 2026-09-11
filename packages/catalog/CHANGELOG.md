@@ -19,10 +19,12 @@
 
 - Fixed Command Code models outside the verified effort registry offering unsupported reasoning effort controls, and bundled the live Command Code catalog so fresh installs resolve the default model without waiting for discovery ([#11595](https://github.com/can1357/oh-my-pi/pull/11595) by [@H4vC](https://github.com/H4vC)).
 - Fixed the bundled `deepseek-flash` row shipping without context limits: it now carries its documented 1M context / 384K output so offline context accounting enforces the real window.
+- `buildModel` no longer aborts the process when a discovered or custom model id ties two identity classes (for example OmniRoute `openai-compatible-chat-<uuid>/cohere/...` vs the `openai` namespace). Classification is lenient for runtime specs; curated generation explicitly uses strict identity validation, and policy rebaking remains strict by default.
 
 ## [18.1.16] - 2026-09-09
 
 - Updated Fire Pass (`firepass`) login validation probe to `accounts/fireworks/routers/glm-5p2-fast` and bundled `glm-5.2-fast` and `kimi-k3-fast` models in place of decommissioned `kimi-k2.6-turbo` ([#10859](https://github.com/can1357/oh-my-pi/pull/10859) by [@olegpulatov](https://github.com/olegpulatov)).
+
 
 ## [18.1.14] - 2026-09-07
 
