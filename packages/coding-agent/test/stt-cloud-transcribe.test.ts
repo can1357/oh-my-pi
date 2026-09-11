@@ -1,4 +1,4 @@
-import type { OAuthAccess, OAuthAccessSource } from "@oh-my-pi/pi-ai";
+import { type ApiKeyResolver, type OAuthAccess, type OAuthAccessSource, seedApiKeyResolver } from "@oh-my-pi/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -147,13 +147,19 @@ describe("cloud STT stream", () => {
 		expect((codexStub.calls[0]!.init.body as FormData).has("model")).toBe(false);
 	});
 
-	it("drops a provider Content-Type so fetch generates the multipart boundary", async () => {
+	it("drops request-owned override headers so fetch owns boundary and authorization", async () => {
 		const stub = stubFetch("ok");
 		const handle = startCloudSttStream({
 			credential: {
 				kind: "openai",
 				apiKey: "sk-test",
-				headers: { "Content-Type": "application/json", "X-Workspace": "workspace-1" },
+				headers: {
+					"Content-Type": "application/json",
+					// Lowercase: a duplicate key would be joined into
+					// "Custom stale, Bearer sk-test" by fetch.
+					authorization: "Custom stale",
+					"X-Workspace": "workspace-1",
+				},
 			},
 			fetchImpl: stub.impl,
 		});
@@ -163,6 +169,38 @@ describe("cloud STT stream", () => {
 			"X-Workspace": "workspace-1",
 			Authorization: "Bearer sk-test",
 		});
+	});
+
+	it("re-resolves a rejected API key through the resolver and retries the upload", async () => {
+		const contexts: Array<{ lastChance: boolean; hasError: boolean }> = [];
+		const resolver: ApiKeyResolver = ctx => {
+			contexts.push({ lastChance: ctx.lastChance, hasError: ctx.error !== undefined });
+			return "sk-fresh";
+		};
+		const keys: string[] = [];
+		const fetchImpl = (async (_url: string, init: RequestInit) => {
+			const key = (init.headers as Record<string, string>)["Authorization"]!;
+			keys.push(key);
+			if (key === "Bearer sk-stale") return new Response("unauthorized", { status: 401 });
+			return new Response(JSON.stringify({ text: "retried" }), { status: 200 });
+		}) as typeof fetch;
+		const handle = startCloudSttStream({
+			credential: { kind: "openai", apiKey: seedApiKeyResolver("sk-stale", resolver) },
+			fetchImpl,
+		});
+		handle.pushAudio(sine16kHz(160));
+		await expect(handle.stop()).resolves.toBe("retried");
+		expect(keys).toEqual(["Bearer sk-stale", "Bearer sk-fresh"]);
+		// Seeded initial resolve, then step (b): force-refresh the same account.
+		expect(contexts).toEqual([{ lastChance: false, hasError: true }]);
+	});
+
+	it("stops after one attempt for a static key", async () => {
+		const stub = stubFetch("nope", 401);
+		const handle = startCloudSttStream({ credential: { kind: "openai", apiKey: "sk-static" }, fetchImpl: stub.impl });
+		handle.pushAudio(sine16kHz(160));
+		await expect(handle.stop()).rejects.toThrow("401");
+		expect(stub.calls).toHaveLength(1);
 	});
 
 	it("force-refreshes a rejected Codex token and retries the upload", async () => {
@@ -222,13 +260,6 @@ describe("cloud STT stream", () => {
 		handle.cancel();
 		await expect(stopped).resolves.toBe("");
 		expect((stub.calls[0]!.init.signal as AbortSignal).aborted).toBe(true);
-	});
-
-	it("rejects stop() on an HTTP error", async () => {
-		const stub = stubFetch("nope", 401);
-		const handle = startCloudSttStream({ credential: { kind: "openai", apiKey: "sk-test" }, fetchImpl: stub.impl });
-		handle.pushAudio(sine16kHz());
-		await expect(handle.stop()).rejects.toThrow("401");
 	});
 });
 
@@ -361,6 +392,27 @@ describe("resolveSttCloudCredential", () => {
 			baseUrl: "https://proxy.example/v1",
 			headers: { "X-Workspace": "workspace-1" },
 		});
+	});
+
+	it("seeds the registry resolver with the preflight key", async () => {
+		const resolverCalls: Array<boolean> = [];
+		const source = {
+			...registry(undefined, "sk-preflight"),
+			resolver: (): ApiKeyResolver => ctx => {
+				resolverCalls.push(ctx.lastChance);
+				return "sk-rotated";
+			},
+		};
+		const credential = await resolveSttCloudCredential(source, "s1");
+		if (credential?.kind !== "openai") throw new Error("expected the API-key route");
+		const apiKey = credential.apiKey;
+		if (typeof apiKey !== "function") throw new Error("expected a resolver-backed credential");
+		// Initial resolve reuses the preflight key without re-entering the registry.
+		expect(await apiKey({ lastChance: false, error: undefined })).toBe("sk-preflight");
+		expect(resolverCalls).toEqual([]);
+		// A rejection delegates to the registry resolver for refresh/rotation.
+		expect(await apiKey({ lastChance: true, error: new Error("401") })).toBe("sk-rotated");
+		expect(resolverCalls).toEqual([true]);
 	});
 
 	it("falls back to the API key when subscription lookup rejects", async () => {
