@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Antigravity image generation and Gemini search no longer send `requestType: "agent"`, matching the chat envelope and avoiding a false `429 RESOURCE_EXHAUSTED` on consumer accounts ([#11689](https://github.com/can1357/oh-my-pi/issues/11689)).
+
 - The `set_steering_mode`, `set_follow_up_mode`, and `set_interrupt_mode` RPC commands are now session-scoped, so a short-lived RPC client no longer silently writes queue-mode fields to the machine-global `config.yml`. The setters still persist by default, so the settings panel and existing callers are unaffected ([#11555](https://github.com/can1357/oh-my-pi/issues/11555)).
 - Hand-authored `*.openapi.json` files can now be edited without disabling generated-file protection globally ([#11674](https://github.com/can1357/oh-my-pi/issues/11674)).
 - `models.yml` now validates the per-model `compat.stripImageInput` opt-out, so a wrong-typed value is rejected like every other declared compat key instead of being silently accepted ([#11697](https://github.com/can1357/oh-my-pi/issues/11697)).
