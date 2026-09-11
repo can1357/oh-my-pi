@@ -543,15 +543,21 @@ export class AgentSession {
 	editStore?: EditStore;
 
 	/** Materializes this session's live extension-root policy per discovery call. */
-	readonly #extensionRoots: () => EffectiveExtensionRoots;
+	readonly #extensionRoots: (sessionCwd?: string) => EffectiveExtensionRoots;
 
 	/**
 	 * Session-local extension roots for post-startup rediscovery. Subagents may
 	 * inherit the owning session's provider so recursive task discovery preserves
 	 * explicit roots, mode, configured roots, and provenance.
+	 *
+	 * Passes THIS session's live cwd to the provider: an in-process
+	 * `switchSession` moves the manager to another workspace, and the launch
+	 * cwd the provider closure captured (or defaults to) would otherwise keep
+	 * serving the source workspace's roots to `/agent`, task-agent, and skill
+	 * discovery.
 	 */
 	get effectiveExtensionRoots(): EffectiveExtensionRoots {
-		return this.#extensionRoots();
+		return this.#extensionRoots(this.sessionManager.getCwd());
 	}
 
 	/** Parent-imported extension factories, forwarded to session forks (`/tan`) to rebind runtime providers. */
@@ -8288,6 +8294,11 @@ export class AgentSession {
 	/** Queues a deferred model/thinking restore to apply at the next turn boundary. */
 	queueDeferredModelRestore(model: Model, thinkingLevel?: ConfiguredThinkingLevel): void {
 		this.#pendingDeferredModelRestore = { model, thinkingLevel };
+	}
+
+	/** Drops a queued deferred model restore without applying it (persona-transaction rollback). */
+	clearDeferredModelRestore(): void {
+		this.#pendingDeferredModelRestore = undefined;
 	}
 
 	/** Applies and clears a queued deferred model restore, if any. */

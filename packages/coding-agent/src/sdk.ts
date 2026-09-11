@@ -1335,7 +1335,9 @@ export function createAutoLearnCaptureRunner(
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
-	const extensionRoots = options.extensionRoots?.();
+	// options.cwd wins over the provider's launch-cwd default: an SDK caller
+	// creating a session for another workspace must scan THAT workspace's roots.
+	const extensionRoots = options.extensionRoots?.(options.cwd);
 	const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
 	const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
 	return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options));
@@ -1357,7 +1359,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Snapshot this session's effective configured lane onto its invocation scope
 	// so startup sub-discovery sees the same complete policy that post-startup
 	// reloads and recursively spawned children consume.
-	const extensionRoots = options.extensionRoots?.();
+	// Session cwd (not the provider's launch-cwd default): the configured lane
+	// recorded on this invocation must belong to the workspace being created.
+	const extensionRoots = options.extensionRoots?.(cwd);
 	setInvocationConfiguredExtensions(
 		extensionRoots?.configured ?? settings.get("extensions") ?? [],
 		extensionRoots?.configuredLevel ?? settings.extensionsSourceLevel(),
@@ -2073,7 +2077,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			filterExa: true,
 			// Filter browser MCP only when Eval can expose the built-in browser prelude.
 			filterBrowser: initialBrowserPreludeAvailable,
-			extensionRoots: buildSessionExtensionRoots(),
+			extensionRoots: buildSessionExtensionRoots(cwd),
 		};
 		if (enableMCP && !mcpManager) {
 			if (deferMCPDiscoveryForUI) {
@@ -2261,7 +2265,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Forward the source-path list (NOT the loaded instances) so subagents
 		// rebuild their own session-scoped extensions.
 		toolSession.extensionPaths = extensionPaths;
-		toolSession.effectiveExtensionRoots = buildSessionExtensionRoots;
+		// Sub-agent discovery reads this provider with no argument; bind it to the
+		// owning ToolSession's cwd so a child session in workspace B never scans
+		// the launch workspace's roots (the CLI provider's arg-less default is
+		// the launch cwd). An explicit argument still wins.
+		toolSession.effectiveExtensionRoots = (sessionCwd?: string) =>
+			buildSessionExtensionRoots(sessionCwd ?? toolSession.cwd);
 
 		// Inline source ids must remain stable when caller factories are rebound in
 		// child sessions. Start after any prepared inline sources so SDK-provided

@@ -1509,14 +1509,23 @@ export async function buildSessionOptions(
 		return roots;
 	};
 	const packageRootsByCwd = new Map<string, string[]>();
+	const packageRootsInFlight = new Map<string, Promise<string[]>>();
 	const packageRootsFor = async (sessionCwd?: string): Promise<string[]> => {
 		const effectiveCwd = sessionCwd ?? options_cwd;
-		let roots = packageRootsByCwd.get(effectiveCwd);
-		if (!roots) {
-			roots = await derivePackageRoots(effectiveCwd);
-			packageRootsByCwd.set(effectiveCwd, roots);
+		const roots = packageRootsByCwd.get(effectiveCwd);
+		if (roots) return roots;
+		// Memoize the in-flight walk: repeated sync provider calls during the
+		// derivation window must not each start a duplicate fs scan.
+		let pending = packageRootsInFlight.get(effectiveCwd);
+		if (!pending) {
+			pending = derivePackageRoots(effectiveCwd).then(derived => {
+				packageRootsByCwd.set(effectiveCwd, derived);
+				packageRootsInFlight.delete(effectiveCwd);
+				return derived;
+			});
+			packageRootsInFlight.set(effectiveCwd, pending);
 		}
-		return roots;
+		return pending;
 	};
 	const buildPersonaExtensionRoots = async (
 		sessionCwd?: string,
@@ -1544,12 +1553,22 @@ export async function buildSessionOptions(
 	// manager cwd is authoritative, not the launch cwd.
 	options.extensionRoots = (sessionCwd?: string): EffectiveExtensionRoots => {
 		const liveCwd = sessionCwd ?? options_cwd;
-		const cachedRoots = packageRootsByCwd.get(liveCwd) ?? [];
-		if (cachedRoots.length === 0 && agentExtensionRoots.length > 0 && packageRootsByCwd.size > 0) {
+		const cachedRoots = packageRootsByCwd.get(liveCwd);
+		if (cachedRoots === undefined && agentExtensionRoots.length > 0) {
+			// First sync call for a workspace whose package roots the async
+			// derivation has not populated yet (a TUI/RPC session switch reaches
+			// here before any rederive call). `undefined` distinguishes that from
+			// a workspace that legitimately derives ZERO roots — serving the launch
+			// view for the latter would scan workspace A's packages after a switch
+			// to B. Kick the derivation so the next discovery call is correct, and
+			// serve the launch view only for this first, bounded window.
+			packageRootsFor(liveCwd).catch(() => {
+				if (!packageRootsByCwd.has(liveCwd)) packageRootsByCwd.set(liveCwd, []);
+			});
 			return launchRootsView;
 		}
 		return buildEffectiveExtensionRoots({
-			additionalExtensionPaths: [...agentExtensionRoots, ...cachedRoots],
+			additionalExtensionPaths: [...agentExtensionRoots, ...(cachedRoots ?? [])],
 			disableExtensionDiscovery: trustedExtensionCount > 0 || parsed.noExtensions === true,
 			configured: activeSettings.get("extensions") ?? [],
 			configuredLevel: activeSettings.extensionsSourceLevel(),

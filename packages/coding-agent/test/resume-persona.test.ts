@@ -684,6 +684,72 @@ You are the fixture thinker persona.`,
 		expect(switchThinking).toBe("low" as ConfiguredThinkingLevel);
 	});
 
+	// Regression (Codex P2): chained mid-turn switch. Persona A enters during a
+	// turn — its model switch is QUEUED in #pendingModelSwitch. The user then
+	// switches to B in the same turn; B's apply fails (refresh throws), so the
+	// runtime rolls back to A and calls onPersonaSwitchFailed. Pre-fix the
+	// rollback cleared the whole queue slot, deleting A's still-owed switch —
+	// at agent_end A stayed active while the session sat on the pre-A model.
+	// The rollback must restore the transaction-start entry, not clear it.
+	it("failed chained switch keeps the earlier persona's queued switch (rollback restore)", async () => {
+		await writeFixtureAgent(
+			`---
+name: fixture-a
+description: Modeled persona A
+tools:
+  - read
+model:
+  - anthropic/claude-opus-4-5
+---
+
+You are persona A.`,
+			"fixture-a.md",
+		);
+		await writeFixtureAgent(
+			`---
+name: fixture-b
+description: Modeled persona B
+tools:
+  - write
+model:
+  - anthropic/claude-haiku-4-5
+---
+
+You are persona B.`,
+			"fixture-b.md",
+		);
+
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+
+		// Mid-turn: both switches defer to the queue.
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => true });
+		const setModelSpy = vi.spyOn(liveSession, "setModelTemporary").mockResolvedValue(undefined);
+
+		await created.switchAgentPersona("fixture-a");
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
+		expect(setModelSpy).not.toHaveBeenCalled(); // A's opus switch is queued, not applied
+
+		// B's enter fails AFTER its defer channels ran (B queued its own
+		// haiku switch over A's restore; the runtime rollback reinstates A).
+		const refreshSpy = vi.spyOn(liveSession, "refreshBaseSystemPrompt");
+		refreshSpy.mockRejectedValueOnce(new Error("boom"));
+		// rollback restore() also refreshes; let later calls resolve.
+		refreshSpy.mockResolvedValue(undefined);
+		await expect(created.switchAgentPersona("fixture-b")).rejects.toThrow("boom");
+
+		// The rollback kept A active and undid B's queue mutation; the
+		// pre-fix rollback cleared A's queued opus switch instead.
+		expect(liveSession.getPersonaRuntime()!.policy.snapshot().persona?.agent.name).toBe("fixture-a");
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => false });
+		await created.flushPendingModelSwitch();
+
+		expect(setModelSpy).toHaveBeenCalledTimes(1);
+		expect(setModelSpy.mock.calls[0]?.[0]?.id).toBe("claude-opus-4-5");
+	});
+
 	it("exiting a resumed persona restores the pre-persona baseline captured at original launch", async () => {
 		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
 		const liveSession = createSession(manager);

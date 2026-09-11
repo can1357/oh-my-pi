@@ -1,5 +1,11 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Model } from "@oh-my-pi/pi-ai";
+import {
+	formatModelString,
+	formatModelStringWithRouting,
+	parseModelPattern,
+	splitUpstreamRouting,
+} from "../config/model-resolver";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import { parseConfiguredThinkingLevel } from "../thinking";
 import type { AgentSession } from "./agent-session";
@@ -44,9 +50,23 @@ export function serializePersonaBaseline(baseline: {
 	model: unknown;
 	thinkingLevel: unknown;
 }): AgentPersonaBaseline | undefined {
-	const model = baseline.model as { provider: string; id: string } | undefined;
+	const model = baseline.model as Model | undefined;
 	const out: AgentPersonaBaseline = {};
-	if (model) out.model = `${model.provider}/${model.id}`;
+	if (model) {
+		const plain = formatModelString(model);
+		const routed = formatModelStringWithRouting(model);
+		if (routed === plain) {
+			out.model = plain;
+		} else {
+			// Emit an `@upstream` pin only when the restore parser can split it
+			// back (bare-slug grammar); an unusual aggregator name would strand
+			// the whole baseline on resume. The plain selector still restores the
+			// model WITH its registry-side routing block — which is exactly where
+			// the emitted pin came from, so nothing is lost.
+			const upstream = splitUpstreamRouting(routed)?.upstream;
+			out.model = upstream && routed.endsWith(`@${upstream}`) ? routed : plain;
+		}
+	}
 	if (baseline.thinkingLevel !== undefined) out.thinkingLevel = String(baseline.thinkingLevel);
 	return Object.keys(out).length > 0 ? out : undefined;
 }
@@ -59,12 +79,27 @@ export function serializePersonaBaseline(baseline: {
  * removed from the catalog between sessions; the thinking half still restores).
  */
 export function deserializePersonaBaseline(session: AgentSession, baseline: AgentPersonaBaseline): ModelOverrideState {
+	// Route through the same `@upstream`-aware matcher the CLI/roles use, so a
+	// pinned aggregator baseline (`openrouter/<id>@cerebras`) re-applies the
+	// user's route on restore instead of the unpinned registry model.
+	const selector = baseline.model;
+	const parsed = selector ? parseModelPattern(selector, session.modelRegistry.getAvailable()) : undefined;
+	const resolved = parsed?.model;
+	// A baseline is a RECORDED selector, not a user-typed fuzzy pattern: the
+	// resolved model must reproduce it. When the matcher consumed an
+	// `@upstream` suffix, compare the routing-aware form; otherwise compare the
+	// plain selector (the registry model may route to a different upstream by
+	// default — that is not part of the persisted identity). Fuzzy or
+	// substring near-matches (a sibling that replaced a dropped model) degrade
+	// to `undefined` — the documented contract — instead of silently re-binding
+	// the exit restore to a different model or route.
+	const identityOk =
+		resolved !== undefined &&
+		(parsed?.upstream
+			? formatModelStringWithRouting(resolved) === selector
+			: formatModelString(resolved) === selector);
 	return {
-		model: baseline.model
-			? (session.modelRegistry
-					.getAvailable()
-					.find(candidate => `${candidate.provider}/${candidate.id}` === baseline.model) as Model | undefined)
-			: undefined,
+		model: identityOk ? resolved : undefined,
 		thinkingLevel: baseline.thinkingLevel
 			? (parseConfiguredThinkingLevel(baseline.thinkingLevel) as ConfiguredThinkingLevel | undefined)
 			: undefined,

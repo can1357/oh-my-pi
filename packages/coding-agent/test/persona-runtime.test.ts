@@ -1,9 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { Effort } from "@oh-my-pi/pi-ai";
+import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
+	deserializePersonaBaseline,
 	readPersistedAgentPersona,
 	serializePersonaBaseline,
 } from "@oh-my-pi/pi-coding-agent/session/persisted-persona";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { PersonaRuntime, PersonaSwitchError } from "@oh-my-pi/pi-coding-agent/session/persona-runtime";
 import { SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
 import type { PersonaModelApplyHooks } from "@oh-my-pi/pi-coding-agent/session/persona-model-hooks";
@@ -411,6 +414,103 @@ describe("PersonaRuntime", () => {
 		// baseline.
 		expect(stub.model).toEqual({ provider: "stub", id: "pre-a-model" });
 		expect(stub.thinkingLevel).toBe("low");
+	});
+
+	// Regression (Codex P2): baselines are RECORDED selectors, not fuzzy
+	// patterns. A pinned aggregator baseline (`openrouter/<id>@cerebras`) must
+	// round-trip the pin, and a selector the registry cannot reproduce exactly
+	// (model dropped, sibling fuzzy-matched, pin no longer expressible) must
+	// degrade to `model: undefined` — never re-bind the exit restore to a
+	// different model or route.
+	it("pinned aggregator baseline round-trips the @upstream route", () => {
+		const aggregator = (id: string, compat?: { openRouterRouting: { only: string[] } }): Model<Api> =>
+			buildModel({
+				id,
+				name: id,
+				api: "openai-completions",
+				provider: "openrouter",
+				baseUrl: "https://openrouter.ai/api/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
+				contextWindow: 128000,
+				maxTokens: 8192,
+				...(compat ? { compat } : {}),
+			}) as Model<Api>;
+		const sessionFor = (...registry: Model<Api>[]) =>
+			({ modelRegistry: { getAvailable: () => registry } }) as unknown as AgentSession;
+		const routingOnly = (model: Model<Api> | undefined): string[] | undefined =>
+			(model?.compat as { openRouterRouting?: { only?: string[] } } | undefined)?.openRouterRouting?.only;
+
+		const pinned = aggregator("z-ai/glm-4.7", { openRouterRouting: { only: ["cerebras"] } });
+		const serialized = serializePersonaBaseline({ model: pinned, thinkingLevel: undefined });
+		expect(serialized?.model).toBe("openrouter/z-ai/glm-4.7@cerebras");
+
+		const restored = deserializePersonaBaseline(sessionFor(pinned), {
+			model: "openrouter/z-ai/glm-4.7@cerebras",
+		});
+		expect(restored.model?.provider).toBe("openrouter");
+		expect(restored.model?.id).toBe("z-ai/glm-4.7");
+		expect(routingOnly(restored.model)).toEqual(["cerebras"]);
+
+		// Unpinned selectors resolve plainly.
+		const plain = aggregator("z-ai/glm-4.7");
+		const plainSession = deserializePersonaBaseline(sessionFor(plain), { model: "openrouter/z-ai/glm-4.7" });
+		expect(plainSession.model?.id).toBe("z-ai/glm-4.7");
+		expect(routingOnly(plainSession.model)).toBeUndefined();
+
+		// Fuzzy near-match guard: only a SIBLING exists → the persisted selector
+		// must not silently re-bind to it (pre-guard, the fuzzy phase matched
+		// `glm-4.7-turbo` and even re-pinned it).
+		const siblingOnly = deserializePersonaBaseline(sessionFor(aggregator("z-ai/glm-4.7-turbo")), {
+			model: "openrouter/z-ai/glm-4.7@cerebras",
+		});
+		expect(siblingOnly.model).toBeUndefined();
+
+		// The explicit pin is a user choice: re-applied over the registry
+		// model's default routing (here: none), not dropped.
+		const repinned = deserializePersonaBaseline(sessionFor(plain), { model: "openrouter/z-ai/glm-4.7@cerebras" });
+		expect(repinned.model?.id).toBe("z-ai/glm-4.7");
+		expect(routingOnly(repinned.model)).toEqual(["cerebras"]);
+
+		// Literal model ids whose suffix LOOKS like a thinking level or route
+		// must round-trip intact (the parser's `:max` alias rules could strip
+		// them).
+		const maxId = aggregator("nanogpt/coding-router:max");
+		expect(serializePersonaBaseline({ model: maxId, thinkingLevel: undefined })?.model).toBe(
+			"openrouter/nanogpt/coding-router:max",
+		);
+		expect(
+			deserializePersonaBaseline(sessionFor(maxId), { model: "openrouter/nanogpt/coding-router:max" }).model?.id,
+		).toBe("nanogpt/coding-router:max");
+
+		// Selector shapes the pattern parser must not confuse with routing or
+		// thinking suffixes: internal colons, `@` inside ids.
+		const colonId = aggregator("qwen/qwen3-coder:exacto");
+		expect(serializePersonaBaseline({ model: colonId, thinkingLevel: undefined })?.model).toBe(
+			"openrouter/qwen/qwen3-coder:exacto",
+		);
+		expect(
+			deserializePersonaBaseline(sessionFor(colonId), { model: "openrouter/qwen/qwen3-coder:exacto" }).model?.id,
+		).toBe("qwen/qwen3-coder:exacto");
+		const atId = buildModel({
+			id: "claude-opus-4-8@default",
+			name: "Opus default lane",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		}) as Model<Api>;
+		expect(serializePersonaBaseline({ model: atId, thinkingLevel: undefined })?.model).toBe(
+			"anthropic/claude-opus-4-8@default",
+		);
+		expect(
+			deserializePersonaBaseline(sessionFor(atId), { model: "anthropic/claude-opus-4-8@default" }).model?.id,
+		).toBe("claude-opus-4-8@default");
 	});
 
 	it("baseline serialization round-trips through the journal contract", () => {

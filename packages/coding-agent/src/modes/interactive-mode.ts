@@ -6404,6 +6404,15 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** TUI persona-model hooks: queue the mid-turn model switch like the plan-mode reconciler. */
 	#createPersonaModelHooks(): PersonaModelApplyHooks {
+		// Snapshot the deferred queue as it stands BEFORE this transaction touches
+		// it, so a rollback restores a prior owner's entry instead of deleting it.
+		// A chained switch (persona A entered mid-turn, then B in the same turn)
+		// already holds A's queued model switch here; B's enter/exit mutate the
+		// slot, and a failed B must leave A's queued switch intact — otherwise A
+		// stays active at agent_end while the session sits on the pre-A model.
+		// Shallow copy: the merge path mutates the live entry's thinkingLevel.
+		const priorPending = this.#pendingModelSwitch ? { ...this.#pendingModelSwitch } : undefined;
+		const priorPlanFlag = this.#pendingPlanModelSwitch;
 		return {
 			...createDefaultPersonaModelHooks(this.session),
 			shouldDeferModelSwitch: () => this.session.isStreaming,
@@ -6462,10 +6471,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 			// Rollback safety: the deferred queue mutation must be undone when
 			// the runtime rolls the transaction back — otherwise agent_end would
-			// apply a model switch belonging to a switch that failed.
+			// apply a model switch belonging to a switch that failed. Restore the
+			// transaction-start entry rather than clearing: a chained switch's
+			// prior queued entry (another persona's, or plan's) is not this
+			// transaction's to delete.
 			onPersonaSwitchFailed: () => {
-				this.#pendingModelSwitch = undefined;
-				this.#pendingPlanModelSwitch = false;
+				this.#pendingModelSwitch = priorPending;
+				this.#pendingPlanModelSwitch = priorPlanFlag;
 			},
 		};
 	}

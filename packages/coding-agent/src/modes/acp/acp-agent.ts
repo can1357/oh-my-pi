@@ -138,6 +138,9 @@ export function createAcpPersonaModelHooks(
 	emitNotice: (text: string) => void | Promise<void>,
 ): PersonaModelApplyHooks {
 	const defaultHooks = createDefaultPersonaModelHooks(session);
+	// Transaction-local: whether THIS hooks instance queued a deferred restore,
+	// so a rollback clear never drops a restore a previous successful exit owed.
+	let queuedRestoreThisTransaction = false;
 	return {
 		...defaultHooks,
 		shouldDeferModelSwitch: () => session.isStreaming,
@@ -155,7 +158,17 @@ export function createAcpPersonaModelHooks(
 			// restore actually lands.
 			if (!baseline.model) return;
 			session.queueDeferredModelRestore?.(baseline.model, baseline.thinkingLevel);
+			queuedRestoreThisTransaction = true;
 			void emitNotice(PERSONA_RESTORE_DEFERRED_NOTICE_TEMPLATE);
+		},
+		// Rollback safety (ChainedA P1): a failed chained switch (A active, B
+		// entered mid-turn) leaves the A-exit restore queued above while the
+		// runtime rollback RE-ARMS A — flushing it at agent_end would drop the
+		// session to the pre-persona model with A still active. Undo the queue
+		// mutation the defer channel made, mirroring the TUI's
+		// onPersonaSwitchFailed.
+		onPersonaSwitchFailed: () => {
+			if (queuedRestoreThisTransaction) session.clearDeferredModelRestore?.();
 		},
 	};
 }
