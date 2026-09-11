@@ -503,10 +503,13 @@ function enotDir(message: string): Error & { code?: string } {
  * durability the YAML settings flush always had, now shared by every config
  * writer. Its mode takes only the OWNER bits of the referent's current mode —
  * credential-bearing configs drop group/world bits exactly like an
- * unconditional 0o600 did, while stricter-than-600 owner modes (e.g. a
- * read-only 0o400 dotfiles checkout) survive, and a new file, or a referent
- * with no owner bits at all, falls back to owner-only — and is chmod'd
- * explicitly because creation modes pass through umask. The rename itself goes
+ * unconditional 0o600 did — and only while the owner keeps READ access:
+ * stricter-but-readable owner modes (e.g. a read-only 0o400 dotfiles
+ * checkout) survive, while a referent whose access comes from group/world
+ * bits or an ACL, or is owner-write-only (0o200, e.g. 0o266 & 0o700 — the
+ * rename hands the replacement to the caller, who could not read it back),
+ * falls back to owner-only 0o600 — chmod'd explicitly because creation
+ * modes pass through umask. The rename itself goes
  * through {@link replaceFileAtomically}, so Windows `EPERM`/`EEXIST`
  * replacement failures recover instead of failing the write.
  */
@@ -517,11 +520,12 @@ export async function publishSerializedConfig(writePath: string, content: string
 	let mode = 0o600;
 	try {
 		const referentMode = (await fs.promises.stat(writePath)).mode & 0o700;
-		// A referent whose access comes only from group/world bits or an ACL
-		// masks to 0 — publishing mode 0 would leave the replacement config
-		// unreadable even by its owner, where these writers previously
-		// created 0o600. Keep the owner-only default instead.
-		if (referentMode !== 0) mode = referentMode;
+		// Preserve the owner bits only when they include owner-read: without
+		// 0o400 the replacement would be unreadable by its (new) owner —
+		// access used to arrive via group/world bits on someone else's file,
+		// which the owner-bit mask already strips. This also covers the
+		// all-bits-via-group/world case (mask 0).
+		if ((referentMode & 0o400) !== 0) mode = referentMode;
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
 	}

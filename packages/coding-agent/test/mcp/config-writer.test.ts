@@ -136,6 +136,27 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		expect(JSON.parse(await fs.promises.readFile(target, "utf8")).mcpServers?.alpha).toBeDefined();
 	});
 
+	it("falls back to owner-only mode when the referent's owner bits omit read access", async () => {
+		// A referent whose owner nibble is write-only (0o266 — access really
+		// arrives via group/world bits) masks to a NONZERO 0o200, so the old
+		// nonzero check preserved it; the rename hands the replacement to the
+		// caller, who could then not read the config back. The gate is
+		// owner-READ: 0o400 must survive in the mask, else 0o600.
+		const target = path.join(dir, "owner-write-only.json");
+		await fs.promises.writeFile(target, JSON.stringify({ mcpServers: {} }));
+		await fs.promises.chmod(target, 0o266);
+
+		await publishSerializedConfig(
+			target,
+			JSON.stringify({
+				mcpServers: { alpha: { type: "stdio", command: "a" } },
+			}),
+		);
+
+		expect((await fs.promises.stat(target)).mode & 0o777).toBe(0o600);
+		expect(JSON.parse(await fs.promises.readFile(target, "utf8")).mcpServers?.alpha).toBeDefined();
+	});
+
 	it("follows a directory symlink inside a dangling relative target before applying ..", async () => {
 		// mcp.json -> alias/../config.json where `alias` is a symlinked
 		// directory (alias -> elsewhere/deep) and config.json does not exist.
