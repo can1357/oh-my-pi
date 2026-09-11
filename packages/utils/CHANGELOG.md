@@ -9,6 +9,7 @@
 
 - Child-shell environment filtering now tolerates a removed process working directory by retaining the resolved project directory ([#11828](https://github.com/can1357/oh-my-pi/issues/11828)).
 - `fetchWithRetry` accepts `rateLimitBudget`, which caps same-route 429 retries at two and only replays when the response promises recovery within 5s; callers without it keep the existing retry behaviour.
+- `fetchWithRetry` accepts `rateLimitBudget`, which caps same-route 429 retries at two and only replays when the response promises recovery within 5s; callers without it keep the existing retry behaviour ([#11701](https://github.com/can1357/oh-my-pi/pull/11701) by [@schickling-assistant](https://github.com/schickling-assistant)).
 
 ## [18.1.16] - 2026-09-09
 
