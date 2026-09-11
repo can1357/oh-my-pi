@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Antigravity Cloud Code requests no longer send `requestType: "agent"`, matching the official client and avoiding a false `429 RESOURCE_EXHAUSTED` on consumer accounts ([#11689](https://github.com/can1357/oh-my-pi/issues/11689)).
+
 - GitHub Copilot Enterprise requests keep the Copilot CLI identity accepted by private Enterprise endpoints, and Business requests denied with HTTP 400 `model_not_supported` now retry once as the Copilot CLI (matching the existing 403 fallback), restoring models that 18.1.17 rejected as unsupported ([#11669](https://github.com/can1357/oh-my-pi/issues/11669)).
 ### Changed
 

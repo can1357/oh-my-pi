@@ -1395,7 +1395,8 @@ export function buildRequest(
 			request,
 			model: wireModelId,
 			userAgent: "antigravity",
-			requestType: "agent",
+			// Official Antigravity omits requestType on consumer Cloud Code.
+			// "agent" is a constrained bucket that returns a detail-free 429 RESOURCE_EXHAUSTED (#11689).
 		};
 	}
 
