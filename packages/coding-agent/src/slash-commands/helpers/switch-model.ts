@@ -39,6 +39,14 @@ export function resolveSessionModelSelector(
 }
 
 /**
+ * Checks whether a candidate model has configured auth.
+ * The optional check accommodates test doubles where `hasConfiguredAuth` is not mocked.
+ */
+function isModelAuthenticated(registry: { hasConfiguredAuth?: (m: Model) => boolean }, model: Model): boolean {
+	return typeof registry.hasConfiguredAuth === "function" ? registry.hasConfiguredAuth(model) : true;
+}
+
+/**
  * Resolve a model for `/switch` (or interactive switch) with fallback support:
  * 1. Supports comma- or space-separated fallback sequences: e.g. `/switch opus,sonnet`
  * 2. If the primary candidate is unauthenticated, checks explicit command fallbacks
@@ -75,10 +83,7 @@ export function resolveSwitchModelWithFallback(
 		if (!firstResolved && resolved.model) {
 			firstResolved = resolved;
 		}
-		if (
-			resolved.model &&
-			(session.modelRegistry.hasConfiguredAuth ? session.modelRegistry.hasConfiguredAuth(resolved.model) : true)
-		) {
+		if (resolved.model && isModelAuthenticated(session.modelRegistry, resolved.model)) {
 			return {
 				model: resolved.model,
 				thinkingLevel: resolved.thinkingLevel,
@@ -116,12 +121,7 @@ export function resolveSwitchModelWithFallback(
 			if (!Array.isArray(chain)) continue;
 			for (const fallbackCandidate of chain) {
 				const fallbackResolved = resolveSessionModelSelector(fallbackCandidate, session, settings);
-				if (
-					fallbackResolved.model &&
-					(session.modelRegistry.hasConfiguredAuth
-						? session.modelRegistry.hasConfiguredAuth(fallbackResolved.model)
-						: true)
-				) {
+				if (fallbackResolved.model && isModelAuthenticated(session.modelRegistry, fallbackResolved.model)) {
 					return {
 						model: fallbackResolved.model,
 						thinkingLevel: fallbackResolved.thinkingLevel,

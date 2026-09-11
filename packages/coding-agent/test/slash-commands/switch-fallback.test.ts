@@ -5,14 +5,14 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { resolveRetryFallbackChainKey } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 
-const MODELS: Model[] = [
+const MODELS = [
 	{ provider: "anthropic", id: "claude-opus-4-5", contextWindow: 200_000 },
 	{ provider: "anthropic", id: "claude-sonnet-4-5", contextWindow: 200_000 },
 	{ provider: "openai", id: "gpt-5.2", contextWindow: 400_000 },
 	{ provider: "unauth", id: "ghost-model", contextWindow: 100_000 },
 ];
 
-function createRuntime(authenticatedModels: Model[] = [MODELS[0]!, MODELS[1]!, MODELS[2]!]) {
+function createRuntime(authenticatedModels = [MODELS[0]!, MODELS[1]!, MODELS[2]!]) {
 	const showModelSelector = vi.fn();
 	const switchSessionModel = vi.fn(async () => {});
 	const showError = vi.fn();
@@ -20,7 +20,7 @@ function createRuntime(authenticatedModels: Model[] = [MODELS[0]!, MODELS[1]!, M
 	const setText = vi.fn();
 	const settings = Settings.isolated();
 
-	const hasConfiguredAuth = vi.fn((model: Model) =>
+	const hasConfiguredAuth = vi.fn((model: { provider: string; id: string }) =>
 		authenticatedModels.some(m => m.provider === model.provider && m.id === model.id),
 	);
 
@@ -135,21 +135,42 @@ describe("/switch fallback support", () => {
 		);
 	});
 
-	it("resolves default fallback chain for session-switched models when no specific chain matches", () => {
+	it("resolves default fallback chain for session-switched models even when default has a differing explicit primary", () => {
 		const context = {
 			chains: {
 				default: ["openai/gpt-5.2"],
 			},
-			getModelRole: (_role: string) => undefined,
+			// default role has an explicit primary that differs from the switched model
+			getModelRole: (role: string) => (role === "default" ? "anthropic/claude-sonnet-4-5" : undefined),
 			modelLookup: {
-				find: (provider: string, id: string) => MODELS.find(m => m.provider === provider && m.id === id),
+				find: (provider: string, id: string) =>
+					MODELS.find(m => m.provider === provider && m.id === id) as unknown as Model,
 				hasProvider: (provider: string) => MODELS.some(m => m.provider === provider),
 			},
 		};
 
-		// Session switched to a model without an explicit chain
-		const resolvedChainKey = resolveRetryFallbackChainKey(context, "anthropic/claude-opus-4-5", MODELS[0]);
+		// When model is NOT session-switched, default chain is NOT attached (preserves test/turn-recovery-replay-unsafe contract)
+		const normalKey = resolveRetryFallbackChainKey(
+			context,
+			"anthropic/claude-opus-4-5",
+			MODELS[0] as unknown as Model,
+			undefined,
+			{
+				isSessionSwitched: false,
+			},
+		);
+		expect(normalKey).toBeUndefined();
 
-		expect(resolvedChainKey).toBe("default");
+		// When model IS session-switched, default chain is attached as fallback
+		const switchedKey = resolveRetryFallbackChainKey(
+			context,
+			"anthropic/claude-opus-4-5",
+			MODELS[0] as unknown as Model,
+			undefined,
+			{
+				isSessionSwitched: true,
+			},
+		);
+		expect(switchedKey).toBe("default");
 	});
 });

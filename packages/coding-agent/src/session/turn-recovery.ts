@@ -1550,17 +1550,19 @@ export class TurnRecovery {
 		currentModel: Model | null | undefined = this.#host.model(),
 		roleHint?: string,
 	): string | undefined {
+		const lastRole = this.#host.sessionManager?.getLastModelChangeRole?.();
+		const isSessionSwitched = lastRole === "temporary";
 		return resolveRetryFallbackChainKey(
 			this.#getRetryFallbackResolutionContext(),
 			currentSelector,
 			currentModel,
 			roleHint ?? this.#liveRetryRoleHint(currentModel),
+			{ isSessionSwitched },
 		);
 	}
 
 	/**
 	 * Chain keys to consult for the active model, most specific walk first: the
-	 * chain that owns the current fallback walk, then the chain the CURRENT model
 	 * owns when that is a different key.
 	 *
 	 * The second key is what makes a chain reachable from the end of another one.

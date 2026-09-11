@@ -269,11 +269,17 @@ function selectorMatchesCurrent(
  * longest matching wildcard, hinted role, then matching role keys with
  * `default` preferred over other shared assignments, then default.
  */
+export interface ResolveRetryFallbackChainOptions {
+	/** True when the active model was selected via a temporary session switch (`/switch` / alt+p). */
+	isSessionSwitched?: boolean;
+}
+
 export function resolveRetryFallbackChainKey(
 	context: RetryFallbackResolutionContext,
 	currentSelector: string,
 	currentModel?: Model | null,
 	roleHint?: string,
+	options?: ResolveRetryFallbackChainOptions,
 ): string | undefined {
 	const parsedConfigured = parseRetryFallbackSelector(currentSelector, context.modelLookup);
 	const currentPlainSelector = currentModel
@@ -351,9 +357,17 @@ export function resolveRetryFallbackChainKey(
 	}
 	if (matchedRole) return matchedRole;
 
-	// 4. The default chain, when no specific chain matched.
+	// 4. The default chain:
+	// - When default has no explicit role primary, OR
+	// - When the model was selected via a temporary session switch (`/switch` or alt+p).
 	const defaultChain = context.chains.default;
-	if (Array.isArray(defaultChain) && defaultChain.length > 0) {
+	if (
+		Array.isArray(defaultChain) &&
+		defaultChain.length > 0 &&
+		(getRetryFallbackPrimarySelector(context, "default") === undefined ||
+			options?.isSessionSwitched === true ||
+			roleHint === "temporary")
+	) {
 		return "default";
 	}
 	return undefined;
