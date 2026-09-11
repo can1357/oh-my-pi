@@ -4,22 +4,22 @@ import { getProjectDir } from "./dirs";
 const PROJECT_ENV_PRELOAD_TIMEOUT_MS = 5000;
 
 interface PreloadedProjectEnv {
-	readonly filePath: string;
 	readonly content: string | undefined;
 }
 
-let preloadedProjectEnv: PreloadedProjectEnv | undefined;
+let preloadedProjectEnv = new Map<string, PreloadedProjectEnv>();
 
 /** Optional inputs for bounded project-dotenv preloading. */
 export interface PreloadProjectEnvOptions {
 	readonly cwd?: string;
 	readonly timeoutMs?: number;
+	/** NODE_ENV used to select mode-specific dotenv files. */
+	readonly nodeEnv?: string;
 }
 
 /** Project dotenv bytes captured before modules synchronously initialize the environment. */
-export function getPreloadedProjectEnv(filePath: string): { readonly content: string | undefined } | undefined {
-	if (preloadedProjectEnv?.filePath === filePath) return preloadedProjectEnv;
-	return undefined;
+export function getPreloadedProjectEnv(filePath: string): PreloadedProjectEnv | undefined {
+	return preloadedProjectEnv.get(filePath);
 }
 
 /**
@@ -59,10 +59,24 @@ async function readProjectEnvBounded(filePath: string, timeoutMs: number): Promi
 	}
 }
 
-/** Preloads the launch project's optional dotenv under a finite, cancellable startup deadline. */
+function projectDotenvPaths(cwd: string, nodeEnv: string): string[] {
+	const modeName = `.env.${nodeEnv || "development"}`;
+	const names = [".env", modeName, ".env.local", `${modeName}.local`, ".env.development", ".env.development.local"];
+	return [...new Set(names)].map(name => path.join(cwd, name));
+}
+
+/** Preloads every project dotenv path consulted by child-shell filtering under one finite startup deadline. */
 export async function preloadProjectEnv(options: PreloadProjectEnvOptions = {}): Promise<void> {
 	const cwd = options.cwd ?? getProjectDir();
 	const timeoutMs = options.timeoutMs ?? PROJECT_ENV_PRELOAD_TIMEOUT_MS;
-	const filePath = path.join(cwd, ".env");
-	preloadedProjectEnv = { filePath, content: await readProjectEnvBounded(filePath, timeoutMs) };
+	const filePaths = projectDotenvPaths(cwd, options.nodeEnv ?? process.env.NODE_ENV ?? "development");
+	const entries = await Promise.all(
+		filePaths.map(async filePath => ({
+			filePath,
+			content: await readProjectEnvBounded(filePath, timeoutMs),
+		})),
+	);
+	const next = new Map<string, PreloadedProjectEnv>();
+	for (const { filePath, content } of entries) next.set(filePath, { content });
+	preloadedProjectEnv = next;
 }

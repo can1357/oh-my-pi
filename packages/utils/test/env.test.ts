@@ -17,16 +17,16 @@ const preloadExitProbePath = path.join(import.meta.dir, "fixtures", "env-preload
 const childShellProbePath = path.join(import.meta.dir, "fixtures", "env-childshell-exit-probe.ts");
 const expandProbePath = path.join(import.meta.dir, "fixtures", "env-expand-probe.ts");
 
-function mkfifo(dir: string): string {
-	const fifo = path.join(dir, ".env");
+function mkfifo(dir: string, name = ".env"): string {
+	const fifo = path.join(dir, name);
 	const result = Bun.spawnSync(["mkfifo", fifo]);
 	if (result.exitCode !== 0) throw new Error(`mkfifo failed: ${result.stderr.toString()}`);
 	return fifo;
 }
 
-// Runs a fixture that reads a stalled `.env` then falls off the end without
+// Runs a fixture that reads stalled dotenv files then falls off the end without
 // process.exit, so a synchronous reread that keeps the loop referenced hangs
-// `proc.exited`. Only a real child exit proves the read was torn down; fake
+// `proc.exited`. Only a real child exit proves each read was torn down; fake
 // timers cannot drive another process, so a genuine wall-clock ceiling is used.
 async function runProbeToExit(probePath: string, cwd: string): Promise<{ exitCode: number; stdout: string }> {
 	const proc = Bun.spawn([process.execPath, probePath, cwd], { stdout: "pipe", stderr: "pipe" });
@@ -53,15 +53,21 @@ function writeTempEnv(content: string): string {
 }
 
 describe("preloadProjectEnv", () => {
-	it("captures a present project dotenv and reports a missing one as unavailable", async () => {
-		const dir = path.dirname(writeTempEnv("FOO=bar\n"));
-		await preloadProjectEnv({ cwd: dir });
-		expect(getPreloadedProjectEnv(path.join(dir, ".env"))?.content).toBe("FOO=bar\n");
+	it("captures the complete launch dotenv set, including unavailable files", async () => {
+		const dir = path.dirname(writeTempEnv("BASE=base\n"));
+		fs.writeFileSync(path.join(dir, ".env.production"), "MODE=production\n");
+		fs.writeFileSync(path.join(dir, ".env.local"), "LOCAL=local\n");
+		fs.writeFileSync(path.join(dir, ".env.production.local"), "MODE_LOCAL=production-local\n");
+		await preloadProjectEnv({ cwd: dir, nodeEnv: "production" });
 
-		const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-"));
-		tempDirs.push(emptyDir);
-		await preloadProjectEnv({ cwd: emptyDir });
-		expect(getPreloadedProjectEnv(path.join(emptyDir, ".env"))?.content).toBeUndefined();
+		expect(getPreloadedProjectEnv(path.join(dir, ".env"))?.content).toBe("BASE=base\n");
+		expect(getPreloadedProjectEnv(path.join(dir, ".env.production"))?.content).toBe("MODE=production\n");
+		expect(getPreloadedProjectEnv(path.join(dir, ".env.local"))?.content).toBe("LOCAL=local\n");
+		expect(getPreloadedProjectEnv(path.join(dir, ".env.production.local"))?.content).toBe(
+			"MODE_LOCAL=production-local\n",
+		);
+		expect(getPreloadedProjectEnv(path.join(dir, ".env.development"))?.content).toBeUndefined();
+		expect(getPreloadedProjectEnv(path.join(dir, ".env.development.local"))?.content).toBeUndefined();
 	});
 
 	it.skipIf(process.platform === "win32")(
@@ -82,11 +88,13 @@ describe("preloadProjectEnv", () => {
 
 describe("project dotenv reuse and expansion", () => {
 	it.skipIf(process.platform === "win32")(
-		"reuses the preloaded snapshot instead of re-reading a stalled .env on child spawn",
+		"reuses every preloaded dotenv snapshot instead of blocking on child spawn",
 		async () => {
 			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-"));
 			tempDirs.push(dir);
-			mkfifo(dir);
+			mkfifo(dir, ".env.local");
+			mkfifo(dir, ".env.development");
+			mkfifo(dir, ".env.development.local");
 
 			const { exitCode, stdout } = await runProbeToExit(childShellProbePath, dir);
 			const parsed = JSON.parse(stdout) as { elapsedMs: number };

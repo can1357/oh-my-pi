@@ -119,9 +119,9 @@ export function filterChildShellEnv(
 	const projectEnv = readProjectDotenv(path.join(cwd, ".env"));
 	const launchNodeEnv = runtimeLaunchEnvValues ? runtimeLaunchEnvValues.get("NODE_ENV") : env.NODE_ENV;
 	const nodeEnvName = `.env.${launchNodeEnv || "development"}`;
-	const modeEnv = parseEnvFile(path.join(cwd, nodeEnvName));
-	const localEnv = parseEnvFile(path.join(cwd, ".env.local"));
-	const modeLocalEnv = parseEnvFile(path.join(cwd, `${nodeEnvName}.local`));
+	const modeEnv = readProjectDotenv(path.join(cwd, nodeEnvName));
+	const localEnv = readProjectDotenv(path.join(cwd, ".env.local"));
+	const modeLocalEnv = readProjectDotenv(path.join(cwd, `${nodeEnvName}.local`));
 	const launchEnv = { ...projectEnv, ...modeEnv, ...localEnv, ...modeLocalEnv };
 	const expandedLaunchEnv = {
 		...expandDotenvValues(projectEnv, result),
@@ -132,8 +132,8 @@ export function filterChildShellEnv(
 	let fallbackLaunchEnv: Record<string, string> | undefined;
 	let expandedFallbackLaunchEnv: Record<string, string> | undefined;
 	if (!runtimeLaunchEnvValues && nodeEnvName !== ".env.development") {
-		const fallbackModeEnv = parseEnvFile(path.join(cwd, ".env.development"));
-		const fallbackModeLocalEnv = parseEnvFile(path.join(cwd, ".env.development.local"));
+		const fallbackModeEnv = readProjectDotenv(path.join(cwd, ".env.development"));
+		const fallbackModeLocalEnv = readProjectDotenv(path.join(cwd, ".env.development.local"));
 		const candidate = { ...projectEnv, ...fallbackModeEnv, ...localEnv, ...fallbackModeLocalEnv };
 		const expandedCandidate = {
 			...expandDotenvValues(projectEnv, result),
@@ -208,10 +208,10 @@ export function parseEnvFile(filePath: string): Record<string, string> {
 }
 
 /**
- * Reads the project `.env`, reusing the bounded startup preload
+ * Reads a project dotenv file, reusing the bounded startup preload
  * ({@link getPreloadedProjectEnv}) when the CLI captured it. Every synchronous
  * consumer (module init below, {@link filterChildShellEnv} on each child spawn)
- * routes through here so a stalled drvfs/9p `.env` is read at most once under a
+ * routes through here so a stalled drvfs/9p file is read at most once under a
  * deadline instead of blocking the JS thread again per spawn (#11519).
  */
 function readProjectDotenv(filePath: string): Record<string, string> {
