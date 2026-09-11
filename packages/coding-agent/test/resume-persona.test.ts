@@ -996,6 +996,84 @@ Beta.`,
 		expect(warnings.some(message => message.includes("Exit the agent persona first"))).toBe(true);
 	});
 
+	// Review F-A8/P3-1 (surface parity): a same-session RELOAD is not a session
+	// boundary — the TUI's pending model queue belongs to the continuing session
+	// and must survive it (the session-level slot already scopes to
+	// switchingToDifferentSession).
+	it("keeps a retained TUI persona restore across a same-session reload", async () => {
+		await writeFixtureAgent(
+			`---
+name: fixture-alpha
+description: Alpha persona
+tools:
+  - read
+model:
+  - anthropic/claude-opus-4-5
+---
+
+Alpha.`,
+			"fixture-alpha.md",
+		);
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+		await created.switchAgentPersona("fixture-alpha");
+		// Mid-turn exit queues the base restore; its flush FAILS -> retained.
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => true });
+		await created.exitAgentPersona();
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => false });
+		const veto = vi.spyOn(liveSession, "setModelTemporary").mockRejectedValueOnce(new Error("veto"));
+		await created.flushPendingModelSwitch();
+		veto.mockRestore();
+
+		// Reload the SAME session (the installed session-switch reconciler runs
+		// from switchSession, which reload() delegates to).
+		await created.sessionManager.ensureOnDisk();
+		await created.sessionManager.flush();
+		await liveSession.reload();
+		// still owed: the next boundary (with the veto gone) lands it.
+		const flushSpy = vi.spyOn(liveSession, "setModelTemporary");
+		await created.flushPendingModelSwitch();
+		expect(flushSpy).toHaveBeenCalledTimes(1);
+	});
+
+	// Review F2 (surface parity): /new crosses a REAL boundary, so the TUI's
+	// pending model queue must not survive into the fresh transcript — its first
+	// agent_end would apply the outgoing session's persona restore.
+	it("drops the retained TUI restore when /new commits", async () => {
+		await writeFixtureAgent(
+			`---
+name: fixture-alpha
+description: Alpha persona
+tools:
+  - read
+model:
+  - anthropic/claude-opus-4-5
+---
+
+Alpha.`,
+			"fixture-alpha.md",
+		);
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+		await created.switchAgentPersona("fixture-alpha");
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => true });
+		await created.exitAgentPersona();
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => false });
+		const veto = vi.spyOn(liveSession, "setModelTemporary").mockRejectedValueOnce(new Error("veto"));
+		await created.flushPendingModelSwitch();
+		veto.mockRestore();
+
+		await created.handleClearCommand();
+		// Nothing owed on the fresh transcript: the next boundary applies nothing.
+		const flushSpy = vi.spyOn(liveSession, "setModelTemporary");
+		await created.flushPendingModelSwitch();
+		expect(flushSpy).not.toHaveBeenCalled();
+	});
+
 	// Codex R6-2: the TUI's persona-less switch branch bypasses
 	// reconcileSessionPersona (the only other clear site), and switchSession has
 	// already exited the source persona — so this branch must clear the

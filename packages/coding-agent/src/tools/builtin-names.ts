@@ -78,8 +78,11 @@ export function normalizeToolNames(names: Iterable<string>): string[] {
  * never grants a tool the session cannot actually run.
  */
 export function expandExecToolShorthand(names: readonly string[], backends?: EvalBackendsAllowance): string[] {
-	if (!names.includes("exec")) return [...names];
-	const expanded = names.filter(name => name !== "exec");
+	// Case-insensitive membership: a frontmatter `tools: [EXEC]` is the same
+	// shorthand, and callers may expand BEFORE normalization (the persona grant
+	// normalizes the expanded result).
+	if (!names.some(name => name.toLowerCase() === "exec")) return [...names];
+	const expanded = names.filter(name => name.toLowerCase() !== "exec");
 	if (!backends || backends.python || backends.js) expanded.push("eval");
 	expanded.push("bash");
 	return Array.from(new Set(expanded));

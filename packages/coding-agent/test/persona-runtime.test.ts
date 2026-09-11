@@ -40,6 +40,18 @@ describe("PersonaRuntime", () => {
 	// BEFORE the session's later normalization pass, so a legacy alias
 	// (`search`/`find`) would never match the canonical registry name — the
 	// persona silently loses its own search capability.
+	// Case-insensitive `exec` shorthand (expand runs BEFORE normalization, so the
+	// helper itself must match case-insensitively or `tools: [EXEC]` grants a
+	// dead name and the persona loses all execution tools).
+	it("expands the exec shorthand case-insensitively in declared grants", () => {
+		const { session } = makeSessionStub();
+		const runtime = makeRuntime(session);
+		runtime.policy.enterPersona(makeAgent({ tools: ["EXEC", "read"] }), {});
+		expect(runtime.policy.effective("bash")).toBe(true); // exec -> bash
+		expect(runtime.policy.effective("read")).toBe(true);
+		expect(runtime.policy.effective("write")).toBe(false);
+	});
+
 	it("normalizes legacy aliases in persona-declared tool grants", () => {
 		const { session } = makeSessionStub();
 		const runtime = makeRuntime(session);

@@ -905,6 +905,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#goalSuppressNextContinuation = false;
 	#planModePreviousModelState: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
 	#pendingModelSwitch: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
+	/** Session file of the last mode reconciliation (same-file reload vs real boundary). */
+	#reconciledSessionFile: string | undefined;
 	/** Consecutive flush failures for the currently owed persona restore (retry cap). */
 	#pendingModelSwitchFailures = 0;
 	/** Whether #pendingModelSwitch was queued by the live plan-role reconciler. */
@@ -3414,6 +3416,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	/** Drops the pending model queue without applying it (session-boundary handoff). */
+	clearPendingModelSwitch(): void {
+		this.#pendingModelSwitch = undefined;
+		this.#pendingPlanModelSwitch = false;
+		this.#pendingModelSwitchFailures = 0;
+	}
+
 	/** Apply any deferred model switch after the current stream ends. */
 	async flushPendingModelSwitch(): Promise<void> {
 		const pending = this.#pendingModelSwitch;
@@ -3451,15 +3460,20 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #clearTransientModeState(options?: {
 		preserveVibe?: boolean;
 		vibeScopeAlreadySuspended?: boolean;
+		/** This reconciliation crossed a REAL session boundary (different file / fresh session). */
+		sessionBoundary?: boolean;
 	}): Promise<void> {
 		// A re-queued (failed-flush) persona restore is SOURCE-session state:
 		// surviving into a switched-in target would clobber the target's
 		// restored model at its first agent_end, repeatedly until manually
-		// overridden. Runs after init's first pass (queue empty) and on every
-		// switch/branch, so any owed entry dies with its session.
-		this.#pendingModelSwitch = undefined;
-		this.#pendingPlanModelSwitch = false;
-		this.#pendingModelSwitchFailures = 0;
+		// overridden. A SAME-session reload is not a boundary — the owed entry
+		// still belongs to the continuing session — so the discard is scoped,
+		// matching the session-level slot's switchingToDifferentSession guard.
+		if (options?.sessionBoundary) {
+			this.#pendingModelSwitch = undefined;
+			this.#pendingPlanModelSwitch = false;
+			this.#pendingModelSwitchFailures = 0;
+		}
 		if (this.planModeEnabled || this.planModePaused) {
 			this.session.setPlanModeState(undefined);
 			try {
@@ -3520,6 +3534,14 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Reconcile mode state from session entries on resume/switch. */
 	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
+		// A different session FILE (or a fresh one) is a real boundary; a
+		// same-session reload is not — the pending model queue belongs to the
+		// continuing session and survives reloads (parity with the
+		// session-level slot's switchingToDifferentSession guard). First pass
+		// after init has no prior file: nothing queued, boundary irrelevant.
+		const sessionFile = this.sessionManager.getSessionFile();
+		const sessionBoundary = this.#reconciledSessionFile !== undefined && this.#reconciledSessionFile !== sessionFile;
+		this.#reconciledSessionFile = sessionFile;
 		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
 		this.#vibeScopeSuspendedForSwitch = false;
 		const sessionContext = this.sessionManager.buildSessionContext();
@@ -3542,6 +3564,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#clearTransientModeState({
 			preserveVibe,
 			vibeScopeAlreadySuspended,
+			sessionBoundary,
 		});
 		await VibeSessionRegistry.global().rehydrate(vibeSession);
 		// Persona resume parity with the ACP surface (plan §3): a stored session can
