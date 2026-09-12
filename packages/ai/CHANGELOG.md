@@ -33,6 +33,8 @@
 - Fixed provider stream truncations reported as a bare `unexpected EOF` (and other stream-parse diagnostics) classifying as terminal errors, so they now retry like every other transient transport failure ([#11745](https://github.com/can1357/oh-my-pi/issues/11745)).
 - GitHub Copilot streams remember the working `Copilot-Integration-Id` per credential after a denied chat identity retries as the Copilot CLI, so later streams start at the working shape instead of replaying the denial ([#11669](https://github.com/can1357/oh-my-pi/issues/11669)).
 - Fixed Anthropic OAuth requests omitting the tool-array cache breakpoint, so tool definitions are now cached across session rewrites and sibling subagents ([#11660](https://github.com/can1357/oh-my-pi/pull/11660) by [@camjac251](https://github.com/camjac251)).
+- Bounded five module-level Cursor conversation caches (`conversationStateCache`, blob stores, rotation dedup sets/maps) with LRU eviction so a long-lived daemon no longer retains every conversation it ever touched forever ([#11744](https://github.com/can1357/oh-my-pi/pull/11744) by [@justdoGIT](https://github.com/justdoGIT)).
+- AuthStorage constructor now logs `cleanExpiredCache` failures instead of silently swallowing them, so init-time cache corruption is traceable ([#11744](https://github.com/can1357/oh-my-pi/pull/11744) by [@justdoGIT](https://github.com/justdoGIT)).
 - Fixed Amazon Bedrock OpenAI models rejecting image-bearing tool results by sending each image as a sibling user content block ([#11681](https://github.com/can1357/oh-my-pi/issues/11681)).
 
 ## [18.1.17] - 2026-09-10
