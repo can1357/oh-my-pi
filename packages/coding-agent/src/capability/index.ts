@@ -210,6 +210,18 @@ async function loadImpl<T>(
 		const key = capability.key(item);
 
 		if (disabledItems.has(item)) {
+			// Disabled rows never claim their key or equivalence class, so they
+			// can't shadow an enabled survivor (issue #11870). But when an
+			// earlier enabled item already owns the key or an equivalent
+			// identity, the disabled row is a lower-priority loser: mark it
+			// shadowed so the dashboard treats it as a shadowed no-op instead of
+			// an independently toggleable row.
+			const keySeen = key !== undefined && seen.has(key);
+			const aliasSeen =
+				!keySeen &&
+				equivalent !== undefined &&
+				deduped.some(existing => !disabledItems.has(existing) && equivalent(existing, item));
+			if (keySeen || aliasSeen) item._shadowed = true;
 			if (!suppressedItems.has(item)) deduped.push(item);
 			continue;
 		}

@@ -5,7 +5,10 @@ import * as path from "node:path";
 import { type ContextFile, contextFileCapability } from "@oh-my-pi/pi-coding-agent/capability/context-file";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initializeWithSettings, loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
-import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
+import {
+	isShadowedExtension,
+	loadAllExtensions,
+} from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 function restoreEnvValue(key: string, value: string | undefined): void {
@@ -123,5 +126,26 @@ describe("disabledExtensions runtime filtering", () => {
 
 		expect(agents?.state).toBe("active");
 		expect(gemini?.state).toBe("disabled");
+	});
+
+	test("marks a disabled lower-priority row shadowed when an enabled higher-priority item owns the key", async () => {
+		// Enabled builtin .omp/AGENTS.md (priority 100) already exists at project
+		// depth 0 from beforeEach; add a lower-priority .gemini/GEMINI.md at the
+		// same depth and disable it.
+		await fs.mkdir(path.join(tempDir, ".gemini"), { recursive: true });
+		await fs.writeFile(path.join(tempDir, ".gemini", "GEMINI.md"), "# disabled lower-priority instructions\n");
+
+		const disabledIds = ["context-file:project:GEMINI.md"];
+		initializeWithSettings(Settings.isolated({ disabledExtensions: disabledIds }));
+
+		const dashboard = await loadAllExtensions(tempDir, disabledIds);
+		const agents = dashboard.find(extension => extension.path === path.join(tempDir, ".omp", "AGENTS.md"));
+		const gemini = dashboard.find(extension => extension.path === path.join(tempDir, ".gemini", "GEMINI.md"));
+
+		expect(agents?.state).toBe("active");
+		expect(gemini?.state).toBe("disabled");
+		// The disabled loser must stay shadowed so the dashboard does not treat
+		// it as an independently toggleable row.
+		expect(gemini && isShadowedExtension(gemini)).toBe(true);
 	});
 });
