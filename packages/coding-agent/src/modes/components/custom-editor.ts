@@ -1178,6 +1178,10 @@ export class CustomEditor extends Editor {
 					canonical !== undefined && getKeybindings().matchesCanonical(canonical, "tui.editor.deleteCharForward");
 				if (doublesAsForwardDelete && !this.textEquals("")) {
 					this.deleteCharForward();
+					// Same post-edit normalization the parent dispatch runs below: an edit that
+					// leaves a bare "->"/"=>" turns it into a reserved queue header, or later
+					// typing lands on the Queueing label instead of the queue body.
+					this.#normalizeQueuePrefix(hadBareQueuePrefix);
 					return;
 				}
 				this.onExit?.();
@@ -1220,11 +1224,17 @@ export class CustomEditor extends Editor {
 
 		// Pass to parent for normal handling
 		super.handleInput(data);
-		if (!hadBareQueuePrefix && (this.textEquals("->") || this.textEquals("=>"))) {
-			const cursor = this.getCursor();
-			if (cursor.line === 0 && cursor.col === 2) {
-				this.insertText("\n");
-			}
+		this.#normalizeQueuePrefix(hadBareQueuePrefix);
+	}
+
+	/** Promote a newly formed bare `->` / `=>` prefix to a reserved header line by opening the
+	 *  queue body beneath it. `hadBareQueuePrefix` is the pre-edit state: a prompt that was
+	 *  already just the prefix is left alone so the user can keep editing it. */
+	#normalizeQueuePrefix(hadBareQueuePrefix: boolean): void {
+		if (hadBareQueuePrefix || !(this.textEquals("->") || this.textEquals("=>"))) return;
+		const cursor = this.getCursor();
+		if (cursor.line === 0 && cursor.col === 2) {
+			this.insertText("\n");
 		}
 	}
 

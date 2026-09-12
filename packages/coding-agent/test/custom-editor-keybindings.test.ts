@@ -214,6 +214,22 @@ describe("CustomEditor keybindings", () => {
 		expect(editor.getText()).toBe("eh cat");
 	});
 
+	it("opens the queue body when ctrl+d leaves a bare queue prefix, like the Delete key", () => {
+		// Deleting back to "->" promotes it to a reserved header line; skipping that leaves the
+		// cursor on the Queueing label, so the next characters type into the label instead.
+		const editor = new CustomEditor(getEditorTheme());
+		editor.setText("->x");
+		editor.moveToLineStart();
+		editor.handleInput("\x1b[C"); // Right
+		editor.handleInput("\x1b[C"); // Right, cursor now before "x"
+		editor.handleInput("\x04"); // Ctrl+D
+		expect(editor.getText()).toBe("->\n");
+		expect(editor.getCursor()).toEqual({ line: 1, col: 0 });
+		editor.handleInput("h");
+		editor.handleInput("i");
+		expect(editor.getText()).toBe("->\nhi");
+	});
+
 	it("still exits on a remapped exit key with no forward-delete role, even with text", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		editor.setActionKeys("app.exit", ["ctrl+q"]);
