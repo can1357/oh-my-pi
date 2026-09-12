@@ -1,6 +1,7 @@
 import { type ApiKeyResolver, type OAuthAccess, type OAuthAccessSource, seedApiKeyResolver } from "@oh-my-pi/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { kNoAuth } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { createLiveConfigHeaders } from "@oh-my-pi/pi-coding-agent/config/model-config-values";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { DEFAULT_CLOUD_STT_MODEL, resolveCloudSttModel } from "@oh-my-pi/pi-coding-agent/stt/cloud-models";
 import * as downloader from "@oh-my-pi/pi-coding-agent/stt/downloader";
@@ -224,27 +225,15 @@ describe("cloud STT stream", () => {
 		expect(contexts).toEqual([{ lastChance: false, hasError: true }]);
 	});
 
-	it("re-reads live provider headers on each auth retry", async () => {
-		// Mirrors the registry's `createLiveConfigHeaders` view: every
-		// materialization re-runs the command-backed value. The Content-Type key
-		// forces the sanitizer down its filtering path, which is where a
-		// snapshot would otherwise be frozen before the first attempt.
+	it("materializes live provider headers once per auth attempt", async () => {
 		let generation = 0;
-		const liveHeaders = new Proxy({} as Record<string, string>, {
-			ownKeys: () => ["Content-Type", "X-Session-Token"],
-			getOwnPropertyDescriptor: (_target, property) =>
-				property === "Content-Type" || property === "X-Session-Token"
-					? { enumerable: true, configurable: true, writable: true, value: undefined }
-					: undefined,
-			get: (_target, property) => {
-				if (property === "Content-Type") return "application/json";
-				if (property === "X-Session-Token") {
-					generation += 1;
-					return `session-${generation}`;
-				}
-				return undefined;
-			},
+		const source = { "Content-Type": "application/json" };
+		Object.defineProperty(source, "X-Session-Token", {
+			configurable: true,
+			enumerable: true,
+			get: () => `session-${++generation}`,
 		});
+		const liveHeaders = createLiveConfigHeaders([source]);
 		const seen: string[] = [];
 		const fetchImpl = (async (_url: string, init: RequestInit) => {
 			const headers = init.headers as Record<string, string>;
@@ -263,11 +252,8 @@ describe("cloud STT stream", () => {
 		});
 		handle.pushAudio(sine16kHz(160));
 		await expect(handle.stop()).resolves.toBe("ok");
-		// Two attempts, two distinct materializations — the retry did not reuse
-		// the header value the first attempt saw.
-		expect(seen).toHaveLength(2);
-		expect(seen[0]).not.toBe(seen[1]);
-		expect(seen[1]).toMatch(/^session-\d+$/);
+		expect(seen).toEqual(["session-1", "session-2"]);
+		expect(generation).toBe(2);
 	});
 
 	it("applies NODE_EXTRA_CA_CERTS to the upload's TLS options", async () => {
@@ -463,6 +449,12 @@ describe("cloud backend in STTController", () => {
 
 	afterEach(() => {
 		restoreSettingsTestState(state);
+	});
+
+	it("exposes the cloud credential route through the typed STT settings group", () => {
+		settings.set("stt.cloudCredential", "api-key");
+		const stt = settings.getGroup("stt");
+		expect(stt.cloudCredential).toBe("api-key");
 	});
 
 	it("dictates through the cloud backend and commits the transcript on release", async () => {
@@ -923,6 +915,7 @@ describe("cloud backend in STTController", () => {
 
 	it("bounds audio buffered while the backend is still starting", async () => {
 		const credential = Promise.withResolvers<CloudSttCredential | undefined>();
+		let credentialSignal: AbortSignal | undefined;
 		let onAudio!: (error: Error | null, samples: Float32Array) => void;
 		const editor = {
 			insertText(_text: string): void {},
@@ -945,7 +938,12 @@ describe("cloud backend in STTController", () => {
 				onAudio = callback;
 				return { stop(): void {} };
 			},
-			{ resolveCloudCredential: () => credential.promise },
+			{
+				resolveCloudCredential: signal => {
+					credentialSignal = signal;
+					return credential.promise;
+				},
+			},
 		);
 		try {
 			await controller.toggle(editor, options);
@@ -955,6 +953,7 @@ describe("cloud backend in STTController", () => {
 			await controller.toggle(editor, options);
 			expect(controller.state).toBe("idle");
 			expect(warnings).toEqual([AUDIO_LIMIT_MESSAGE]);
+			expect(credentialSignal?.aborted).toBe(true);
 		} finally {
 			controller.dispose();
 		}

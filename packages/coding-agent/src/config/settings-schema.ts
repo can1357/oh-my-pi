@@ -6589,6 +6589,7 @@ export interface ThinkingBudgetsSettings {
 
 export interface SttSettings {
 	backend: "local" | "cloud";
+	cloudCredential: "auto" | "subscription" | "api-key";
 	enabled: boolean;
 	keywords: string;
 	language: string | undefined;
