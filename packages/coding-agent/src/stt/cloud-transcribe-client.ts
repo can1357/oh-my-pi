@@ -36,8 +36,13 @@ const CLOUD_STT_MIN_UPLOAD_BYTES_PER_SECOND = 128 * 1024;
 
 /** omp records at 16 kHz mono; the endpoint accepts 16-bit PCM WAV as-is. */
 const MIC_SAMPLE_RATE = 16_000;
-/** Keep the generated WAV below the transcription endpoint's 25 MiB upload limit. */
-const MAX_AUDIO_SAMPLES = Math.floor((24 * 1024 * 1024 - 44) / 2);
+/**
+ * Keep the generated WAV below the transcription endpoint's 25 MiB upload
+ * limit. Shared with the controller's pre-stream buffer so audio held while
+ * the backend is still starting is bounded the same way.
+ */
+export const MAX_AUDIO_SAMPLES = Math.floor((24 * 1024 * 1024 - 44) / 2);
+export const AUDIO_LIMIT_MESSAGE = "Cloud speech recording exceeds the 24 MiB upload limit.";
 /**
  * A resolved cloud STT credential with its provenance intact.
  *
@@ -125,7 +130,7 @@ export function startCloudSttStream(options: CloudSttStreamOptions): SttStreamHa
 			if (!settled && !stopped) {
 				stopped = true;
 				if (limitExceeded) {
-					finish(() => reject(new Error("Cloud speech recording exceeds the 24 MiB upload limit.")));
+					finish(() => reject(new Error(AUDIO_LIMIT_MESSAGE)));
 				} else if (queuedBytes === 0) {
 					finish(() => resolve(""));
 				} else {

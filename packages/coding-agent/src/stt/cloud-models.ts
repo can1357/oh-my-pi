@@ -72,3 +72,32 @@ export const STT_BACKEND_OPTIONS = [
 		description: "OpenAI transcription on release. Subscription first, else API key.",
 	},
 ] as const satisfies ReadonlyArray<{ value: SttBackend; label: string; description: string }>;
+
+/**
+ * Which OpenAI credential the cloud backend dictates with. `auto` keeps the
+ * "subscription first, else API key" default; the explicit values exist
+ * because a connected ChatGPT login would otherwise shadow a configured API
+ * key forever, and only the API-key route honours `stt.modelName`,
+ * `stt.language`, and `stt.keywords`.
+ */
+export const STT_CLOUD_CREDENTIAL_VALUES = ["auto", "subscription", "api-key"] as const;
+export type SttCloudCredentialRoute = (typeof STT_CLOUD_CREDENTIAL_VALUES)[number];
+export const DEFAULT_STT_CLOUD_CREDENTIAL: SttCloudCredentialRoute = "auto";
+
+export function isSttCloudCredentialRoute(value: string): value is SttCloudCredentialRoute {
+	return (STT_CLOUD_CREDENTIAL_VALUES as readonly string[]).includes(value);
+}
+
+export const STT_CLOUD_CREDENTIAL_OPTIONS = [
+	{ value: "auto", label: "Auto", description: "ChatGPT subscription when connected, else OpenAI API key." },
+	{
+		value: "subscription",
+		label: "ChatGPT subscription",
+		description: "Codex transcribe endpoint only; ignores model, language, and keywords.",
+	},
+	{
+		value: "api-key",
+		label: "OpenAI API key",
+		description: "Platform /audio/transcriptions only; honours model, language, and keywords.",
+	},
+] as const satisfies ReadonlyArray<{ value: SttCloudCredentialRoute; label: string; description: string }>;
