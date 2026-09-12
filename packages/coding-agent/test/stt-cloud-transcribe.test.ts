@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { kNoAuth } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { DEFAULT_CLOUD_STT_MODEL, resolveCloudSttModel } from "@oh-my-pi/pi-coding-agent/stt/cloud-models";
+import * as downloader from "@oh-my-pi/pi-coding-agent/stt/downloader";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { __resetExtraCaCache } from "@oh-my-pi/pi-utils";
 import type { CloudSttCredential } from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
@@ -659,6 +660,50 @@ describe("cloud backend in STTController", () => {
 		await stopping;
 		expect(credentialSignal?.aborted).toBe(true);
 		expect(controller.state).toBe("idle");
+	});
+
+	it("aborts an uncached local fallback download when disposed", async () => {
+		settings.set("stt.modelName", "gpt-4o-transcribe");
+		const cachedSpy = spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
+		const downloadStarted = Promise.withResolvers<AbortSignal>();
+		const downloadSpy = spyOn(downloader, "downloadSttModel").mockImplementation((_key, _onProgress, options) => {
+			const signal = options?.signal;
+			if (!signal) throw new Error("Expected the fallback download to receive an abort signal");
+			downloadStarted.resolve(signal);
+			const { promise, reject } = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+			return promise;
+		});
+		const editor = {
+			insertText(_text: string): void {},
+			setVolatileText(_text: string): void {},
+			clearVolatileText(): void {},
+			commitVolatileText(_text: string): void {},
+			submit(): void {},
+			deleteBeforeCursor(_count: number): void {},
+		};
+		const options = {
+			showWarning(_msg: string): void {},
+			showStatus(_msg: string): void {},
+			onStateChange(_state: SttState): void {},
+		};
+		const controller = new STTController(() => ({ stop(): void {} }), {
+			resolveCloudCredential: () => Promise.resolve(undefined),
+		});
+
+		try {
+			await controller.toggle(editor, options);
+			const signal = await downloadStarted.promise;
+			const stopping = controller.toggle(editor, options);
+			controller.dispose();
+			await stopping;
+			expect(signal.aborted).toBe(true);
+			expect(controller.state).toBe("idle");
+		} finally {
+			controller.dispose();
+			cachedSpy.mockRestore();
+			downloadSpy.mockRestore();
+		}
 	});
 
 	it("strips control sequences from the transcript it commits to the editor", async () => {
