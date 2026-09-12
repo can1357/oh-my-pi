@@ -55,7 +55,9 @@ export interface MCPToolFilterResult {
  *   character that is not the escape marker. `admin?delete` therefore matches
  *   both `admin/delete` and a name containing a literal `§`.
  * - `*`/`**` span any number of characters, `/` included (no path separator
- *   exists in the encoded domain).
+ *   exists in the encoded domain). picomatch's path-shaped dot-segment guard is
+ *   stripped after compilation: tool names are opaque, so a wildcard may match a
+ *   name the server literally called `.` or `..`.
  * - Character classes compile their body VERBATIM — the engine's own class
  *   semantics (negation, escapes, ranges, Annex-B corners) are already right
  *   for every member but the three reserved code points. Those are decided in
@@ -121,6 +123,20 @@ const SLASH_CODEPOINT = 0x2f;
 const ESCAPE_MARK_CODEPOINT = ESCAPE_MARK.codePointAt(0)!;
 const SENTINEL_CODEPOINT = SLASH_CODE.codePointAt(0)!;
 /**
+ * Rewrite a class body into the spelling the `RegExp` constructor reads the
+ * same way picomatch's class compiler does.
+ *
+ * The two readings diverge in exactly one place: a `]` immediately after `[` or
+ * `[^` is a literal MEMBER, but a bare `new RegExp("[^]]")` reads `[^]` as
+ * Annex B's empty negated class and takes the second `]` as a stray literal —
+ * so `[^]]` ("everything but `]`") instead means "any one character, then `]`".
+ * Escaping that single member is the whole normalization.
+ */
+function normalizeClassBody(body: string): string {
+	return body.replace(/^(\^?)\]/, "$1\\]");
+}
+
+/**
  * Does this class body admit the raw code point `cp`?
  *
  * The regex engine is the oracle, not a hand-rolled class parser: a class body
@@ -128,10 +144,14 @@ const SENTINEL_CODEPOINT = SLASH_CODE.codePointAt(0)!;
  * `-`, and Annex-B range quirks like `[\--^]`), and re-deriving them is how a
  * glob translator silently changes meaning. picomatch itself compiles the body
  * verbatim elsewhere in this module; here the engine answers one question.
+ *
+ * No `u` flag, matching picomatch's own `new RegExp(source, opts.flags || "")`:
+ * a class is compiled the same way in both places, so Annex-B leniency such as
+ * `\a` or a descending range resolves identically.
  */
 function classAdmits(body: string, cp: number): boolean {
 	try {
-		return new RegExp(`^[${body}]$`, "u").test(String.fromCodePoint(cp));
+		return new RegExp(`^[${normalizeClassBody(body)}]$`).test(String.fromCodePoint(cp));
 	} catch {
 		return false;
 	}
@@ -286,6 +306,17 @@ const compiledPatterns = new Map<string, ToolMatcher>();
 const ENCODED_STAR = `(?:${ESCAPE_MARK}${SLASH_CODE}|${ESCAPE_MARK}${ESCAPE_MARK}|[^${ESCAPE_MARK}])*`;
 
 /**
+ * picomatch's path-shaped dot-segment guards, removed after compilation.
+ *
+ * Even with `dot: true` picomatch keeps a wildcard from matching a `.` or `..`
+ * path segment: an anchored `(?!…)` on the pattern's first segment and an
+ * unanchored one on every later segment. Tool names are opaque strings, not
+ * paths — a server may legitimately advertise a tool named `.` — so both
+ * spellings are stripped to leave the wildcard matching every name.
+ */
+const DOT_SEGMENT_GUARDS = ["(?!(?:^|\\/)\\.{1,2}(?:\\/|$))", "(?!\\.{1,2}(?:\\/|$))"] as const;
+
+/**
  * Compile one filter entry into a raw-name matcher.
  *
  * `picomatch.makeRe` is used rather than the matcher factory so the emitted
@@ -303,8 +334,11 @@ function compilePattern(pattern: string): ToolMatcher {
 		let regex: RegExp | null = null;
 		try {
 			const source = picomatch.makeRe(translatePattern(pattern), MATCH_OPTIONS);
-			// `*` is re-quantified: picomatch emitted `[^/]*?` for each one.
-			regex = new RegExp(source.source.replaceAll("[^/]*?", ENCODED_STAR));
+			// `*` is re-quantified: picomatch emitted `[^/]*?` for each one. Any
+			// dot-segment guard goes too — MCP tool names are opaque strings.
+			let body = source.source.replaceAll("[^/]*?", ENCODED_STAR);
+			for (const guard of DOT_SEGMENT_GUARDS) body = body.replaceAll(guard, "");
+			regex = new RegExp(body);
 		} catch {
 			// A syntactically broken pattern never matches: it degrades to an
 			// unmatched entry instead of disabling the server.

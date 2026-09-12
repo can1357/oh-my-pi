@@ -292,25 +292,29 @@ export function filterExaMCPServers(
 	const exaApiKeys: string[] = [];
 
 	for (const [name, config] of Object.entries(configs)) {
+		let keep = true;
 		if (isExaMCPServer(name, config)) {
 			// Extract API key for the native Exa integration even when the MCP
-			// server is kept below for its extra tools.
+			// server is dropped below.
 			const apiKey = extractExaApiKey(config);
 			if (apiKey) {
 				exaApiKeys.push(apiKey);
 			}
-			const requested = getRequestedExaMcpTools(config);
-			// The per-server allowlist selects an effective tool set too: an
-			// entry naming a tool the native integration does not provide (e.g.
-			// `web_fetch_exa`) must keep the server mounted, exactly as a
-			// `tools=` URL/argument restriction would.
-			const allowlist = config.enabledTools ?? [];
-			const selections = requested ? [...requested, ...allowlist] : allowlist;
-			const hasExtraTools = selections.some(tool => !NATIVE_EXA_MCP_TOOLS[tool.toLowerCase()]);
-			if (!hasExtraTools) {
-				continue;
+			// A deny-only filter selects the complement of its denylist, so it
+			// always leaves the server's non-native tools reachable and the
+			// server must stay mounted.
+			if (!config.disabledTools?.length) {
+				// The per-server allowlist selects an effective tool set too: an
+				// entry naming a tool the native integration does not provide (e.g.
+				// `web_fetch_exa`) must keep the server mounted, exactly as a
+				// `tools=` URL/argument restriction would.
+				const requested = getRequestedExaMcpTools(config);
+				const allowlist = config.enabledTools ?? [];
+				const selections = requested ? [...requested, ...allowlist] : allowlist;
+				keep = selections.some(tool => !NATIVE_EXA_MCP_TOOLS[tool.toLowerCase()]);
 			}
 		}
+		if (!keep) continue;
 		filtered[name] = config;
 		if (sources[name]) {
 			filteredSources[name] = sources[name];

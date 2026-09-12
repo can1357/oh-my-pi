@@ -115,4 +115,16 @@ describe("Exa MCP filtering", () => {
 
 		expect(result.configs).toEqual({});
 	});
+
+	test("keeps an exa server restricted only by a denylist", () => {
+		// A denylist selects the complement of what it names, so it always leaves
+		// the server's non-native tools reachable; dropping the server would take
+		// `web_fetch_exa` with it.
+		const configs: Record<string, MCPServerConfig> = {
+			exa: { type: "http", url: "https://mcp.exa.ai/mcp", disabledTools: ["web_search_exa"] },
+		};
+		const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+		expect(Object.keys(result.configs)).toEqual(["exa"]);
+	});
 });

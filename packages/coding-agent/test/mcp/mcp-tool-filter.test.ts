@@ -194,6 +194,19 @@ test("classes treat the encoding's reserved characters as ordinary raw character
 	expect(run(["x¤y"], ["x[¤]y"]).allowed).toEqual(["x¤y"]);
 });
 
+test("a class with a literal leading `]` member keeps its negated meaning", () => {
+	// `[^]]` is "every character except `]`" — a leading `]` after `[^` is a
+	// member, not the closer. The membership oracle must spell that member
+	// escaped, or the bare `new RegExp("^[^]]$")` reads an Annex-B empty class
+	// and reports `/` absent, silently dropping the sentinel alternatives and
+	// leaving `admin[^]]delete` unable to match `admin/delete`.
+	expect(run(["x]y", "xay", "x/y", "xmy"], ["x[^]]y"]).allowed).toEqual(["xay", "x/y", "xmy"]);
+	expect(run(["x]y", "xay"], ["x[]a]y"]).allowed).toEqual(["x]y", "xay"]);
+	expect(run(["x]y", "xay"], ["x[]]y"]).allowed).toEqual(["x]y"]);
+	// The same member in the deny direction: only the slash survives.
+	expect(run(["x]y", "xay", "x/y"], ["x[^]a]y"]).allowed).toEqual(["x/y"]);
+});
+
 test("an unclosed class bracket is a literal, and the rest keeps its glob meaning", () => {
 	// `[]?` has no closing bracket under the class rules (a leading `]` after `[`
 	// is a member, and no second `]` follows), so the `[` is a literal and `?`
@@ -225,6 +238,17 @@ test("a trailing backslash addresses one literal backslash", () => {
 	// matching) when the RegExp is driven directly.
 	expect(run(["\\", "a"], ["\\"]).allowed).toEqual(["\\"]);
 	expect(run(["a\\", "a"], ["a\\"]).allowed).toEqual(["a\\"]);
+});
+
+test("a wildcard matches dot-segment names, which are opaque here", () => {
+	// picomatch's compiler keeps a wildcard from matching a `.`/`..` PATH
+	// SEGMENT even under `dot: true`. Tool names are opaque strings, so the
+	// guard is stripped: `*` must admit a tool the server literally named `.`,
+	// and the deny direction must subtract it.
+	expect(run([".", "..", "...", "a"], ["*"]).allowed).toEqual([".", "..", "...", "a"]);
+	expect(run([".", "..", "a"], ["*/*"]).allowed).toEqual([]);
+	expect(filterMCPTools({ toolNames: [".", "..", "a"], disabledTools: ["*"] }).allowed).toEqual([]);
+	expect(run(["a/.b"], ["a/*"]).allowed).toEqual(["a/.b"]);
 });
 
 test("a wildcard never splits an encoded unit", () => {
