@@ -172,6 +172,59 @@ describe("EvalTool auto-background", () => {
 		await asyncJobManager.dispose();
 	});
 
+	it("backgrounds long-running Python cells by default and delivers their result", async () => {
+		const deliveries: Array<{ jobId: string; text: string }> = [];
+		const asyncJobManager = new AsyncJobManager({
+			onJobComplete: async (jobId, text) => {
+				deliveries.push({ jobId, text });
+			},
+		});
+		const gate = Promise.withResolvers<void>();
+		let executionSignal: AbortSignal | undefined;
+		vi.spyOn(evalIndex.pythonBackend, "isAvailable").mockResolvedValue(true);
+		const pythonExecuteSpy = vi.spyOn(evalIndex.pythonBackend, "execute").mockImplementation((async (
+			_code: string,
+			options: { signal?: AbortSignal; onChunk: (chunk: string) => void },
+		) => {
+			executionSignal = options.signal;
+			options.onChunk("python start\n");
+			await gate.promise;
+			return baseResult({ output: "python start\npython done\n" });
+		}) as never);
+		const jsExecuteSpy = vi.spyOn(evalIndex.jsBackend, "execute");
+
+		const tool = new EvalTool(
+			makeSession(
+				Settings.isolated({
+					// Omit eval.autoBackground.enabled: this is the default-behavior contract.
+					"eval.autoBackground.thresholdMs": 10,
+				}),
+				asyncJobManager,
+			),
+		);
+		const result = await tool.execute("call-python-background", {
+			language: "py",
+			code: "print('python start'); work(); print('python done')",
+		});
+
+		expect(pythonExecuteSpy).toHaveBeenCalledTimes(1);
+		expect(jsExecuteSpy).not.toHaveBeenCalled();
+		expect(executionSignal).toBeInstanceOf(AbortSignal);
+		expect(result.details?.cells?.[0]?.language).toBe("python");
+		expect(result.details?.async?.state).toBe("running");
+		const jobId = result.details?.async?.jobId;
+		if (!jobId) {
+			throw new Error("expected an auto-backgrounded Python job id");
+		}
+		const runningJob = asyncJobManager.getJob(jobId);
+		expect(runningJob?.status).toBe("running");
+		gate.resolve();
+		await runningJob?.promise;
+		await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
+		expect(deliveries).toEqual([{ jobId, text: expect.stringContaining("python done") }]);
+		await asyncJobManager.dispose();
+	});
+
 	it("backgrounds a running cell when the steering signal fires mid-wait", async () => {
 		const asyncJobManager = new AsyncJobManager({});
 		const cell = mockGatedCell("steered\n");

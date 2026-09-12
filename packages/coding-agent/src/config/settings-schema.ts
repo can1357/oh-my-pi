@@ -4161,7 +4161,7 @@ export const SETTINGS_SCHEMA = {
 
 	"eval.autoBackground.enabled": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "shell",
 			group: "Eval & Runtimes",

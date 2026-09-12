@@ -89,7 +89,7 @@ The renderer merges call and result inline, syntax-highlights from the declared 
 
 ## Auto-backgrounding
 
-With `eval.autoBackground.enabled` (default `false`), a cell that outlives `eval.autoBackground.thresholdMs` (default 60000 ms) is converted into a managed async job instead of blocking the turn:
+With `eval.autoBackground.enabled` (default `true`), a cell that outlives `eval.autoBackground.thresholdMs` (default 60000 ms) is converted into a managed async job instead of blocking the turn. Set it to `false` to keep eval cells in the foreground:
 
 - The tool foreground-waits for `resolveAutoBackgroundWaitMs(thresholdMs, clampedCellTimeoutMs)`: the threshold, clamped down to the cell's own clamped timeout minus a 1 s buffer so a deadline expiry resolves inline rather than backgrounding moments before it fires. Raising `timeout` therefore does not extend foreground execution beyond the threshold. A threshold of `0` backgrounds immediately.
 - On backgrounding, the tool returns the live output tail plus `Backgrounded as job <id>; result will be delivered automatically.`, with `details.async = { state: "running", jobId, type: "eval" }`. The job's completion is delivered later like a backgrounded bash command.
