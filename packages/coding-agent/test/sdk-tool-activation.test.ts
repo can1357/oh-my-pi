@@ -1004,6 +1004,83 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("does not revive a parked full-write grant while plan mode is active", async () => {
+		const tempDir = makeTempDir();
+		const customAmbient: CustomTool = {
+			name: "custom_ambient",
+			label: "Custom Ambient",
+			description: "Ambient tool",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			loadMode: "discoverable",
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			toolNames: ["read", "write"],
+			customTools: [customAmbient],
+		});
+
+		try {
+			// Full write is authorized at startup via the explicit request.
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+
+			// Park the grant by restricting write away.
+			await session.setActiveToolsByName(["read"]);
+			expect(session.getActiveToolNames()).not.toContain("write");
+
+			// Revival while plan mode holds the session read-only stays device-only.
+			session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+			await session.setActiveToolsByName(["read", "write"]);
+			expect(session.getActiveToolNames()).toContain("write");
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			const planTarget = path.join(tempDir, "plan-parked-blocked.txt");
+			await expect(
+				session.getToolByName("write")!.execute("blocked", { path: planTarget, content: "blocked" }),
+			).rejects.toThrow("limited to the xd:// device transport");
+			expect(await Bun.file(planTarget).exists()).toBe(false);
+
+			// Reapplying the same selection must not mistake the injected transport
+			// tool for a live full-write grant.
+			await session.setActiveToolsByName(["read", "write"]);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			const reappliedTarget = path.join(tempDir, "plan-parked-reapplied-blocked.txt");
+			await expect(
+				session.getToolByName("write")!.execute("blocked-reapplied", {
+					path: reappliedTarget,
+					content: "blocked",
+				}),
+			).rejects.toThrow("limited to the xd:// device transport");
+			expect(await Bun.file(reappliedTarget).exists()).toBe(false);
+
+			// Code Mode reconciliation takes the direct apply path and must preserve
+			// the same transport-only state.
+			session.settings.set("providers.openai-codex.codeMode", "on");
+			await session.runToolRegistryMutation(async () => undefined);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			const reconciledTarget = path.join(tempDir, "plan-parked-reconciled-blocked.txt");
+			await expect(
+				session.getToolByName("write")!.execute("blocked-reconciled", {
+					path: reconciledTarget,
+					content: "blocked",
+				}),
+			).rejects.toThrow("limited to the xd:// device transport");
+			expect(await Bun.file(reconciledTarget).exists()).toBe(false);
+
+			// Plan exit revives the parked grant: the dormant full-write
+			// authorization survives the guarded revival.
+			session.setPlanModeState(undefined);
+			await session.setActiveToolsByName(["read", "write"]);
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+			const target = path.join(tempDir, "plan-exit-revived.txt");
+			await session.getToolByName("write")!.execute("revived", { path: target, content: "revived-ok" });
+			expect(await Bun.file(target).text()).toBe("revived-ok");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("explicit write selection with a mounted partition retains device-only downgrade", async () => {
 		const tempDir = makeTempDir();
 		const customAmbient: CustomTool = {
@@ -1234,6 +1311,58 @@ describe("createAgentSession defaultInactive tool activation", () => {
 					content: "x",
 				}),
 			).rejects.toThrow("Filesystem writes are not available");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("denies full write when reselecting write with a deferrable tool but no read", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read", "ast_edit"],
+		});
+
+		try {
+			await session.setActiveToolPresentation(["read", "ast_edit"], [], { fullWrite: false });
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+
+			// No mount candidates and no `read`: the grant cannot be a device
+			// transport, and the gate must deny rather than promote it.
+			await session.setActiveToolsByName(["write", "ast_edit"]);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			const blockedTarget = path.join(tempDir, "deferrable-no-read-blocked.txt");
+			await expect(
+				session.getToolByName("write")!.execute("blocked", { path: blockedTarget, content: "blocked" }),
+			).rejects.toThrow("Filesystem writes are not available");
+			expect(await Bun.file(blockedTarget).exists()).toBe(false);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps device-only write across reapplication after downgrading a prior full-write deferrable session", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read", "write", "ast_edit"],
+		});
+
+		try {
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+
+			await session.setActiveToolPresentation(["read", "ast_edit"], [], { fullWrite: false });
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+
+			// The stale full-write authorization must not leak back through
+			// the deferrable transport on reapplication.
+			await session.setActiveToolsByName(session.getEnabledToolNames());
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			const blockedTarget = path.join(tempDir, "deferrable-downgraded-blocked.txt");
+			await expect(
+				session.getToolByName("write")!.execute("blocked", { path: blockedTarget, content: "blocked" }),
+			).rejects.toThrow("Filesystem writes are not available");
+			expect(await Bun.file(blockedTarget).exists()).toBe(false);
 		} finally {
 			await session.dispose();
 		}

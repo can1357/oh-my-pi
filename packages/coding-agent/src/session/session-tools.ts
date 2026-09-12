@@ -920,11 +920,17 @@ export class SessionTools {
 			evalTransportAvailable: this.#hasCodeModeEvalTransport(),
 		});
 		let builtInWriteAvailable = this.#builtInToolNames.has("write");
+		// `#enabledToolNames` still holds the pre-apply set here (it is
+		// reassigned below): a parked grant revived mid-plan must not promote.
+		// Continuity keeps a live grant, but a grant that was already inactive
+		// waits for plan exit, which restores with an explicit `fullWrite`.
+		const writeLiveBeforeApply = this.#enabledToolNames.has("write") && this.#isDeviceOnlyWrite?.() !== true;
 		const fullWriteSelected =
 			toolNames.includes("write") &&
 			(options?.fullWrite === true ||
 				(options?.fullWrite !== false &&
 					this.#dormantDeviceOnlyWrite !== true &&
+					!(this.#host.planModeEnabled() && !writeLiveBeforeApply) &&
 					(this.#presentationPinnedToolNames?.has("write") === true ||
 						this.#runtimeSelectedToolNames?.has("write") === true)));
 		if (fullWriteSelected) {
@@ -1412,14 +1418,17 @@ export class SessionTools {
 			const normalized = normalizeToolNames(toolNames);
 			const mountedCandidates = this.#resolveMountCandidates(normalized);
 			// A genuine explicit `write` grant clears a stale explicit-downgrade marker:
-			// with no mount candidates it cannot be an injected `xd://` transport.
-			// Pinned or runtime-selected `write` origins stay fail-closed device-only
-			// because a pinned `write` bypasses the transport gate's plan-mode clause
-			// (`pinned !== true` short-circuits first) and would promote straight to
-			// live full write. Plan-mode selections stay guarded too: plan enter/arm
-			// inject `write` through this same API while plan mode is published, so an
-			// unguarded clear fires on the way into a plan. Restores carrying a
-			// mounted partition keep the marker via `mountedCandidates.size > 0`.
+			// deferrable-only and no-`read` selections still yield zero mount
+			// candidates, yet the transport gate re-decides `write` retention
+			// downstream (`transportWriteActive`), so such grants stay device-only
+			// until a mountable tool or `read` arrives. Pinned or runtime-selected
+			// `write` origins stay fail-closed device-only because a pinned `write`
+			// bypasses the transport gate's plan-mode clause (`pinned !== true`
+			// short-circuits first) and would promote straight to live full write.
+			// Plan-mode selections stay guarded too: plan enter/arm inject `write`
+			// through this same API while plan mode is published, so an unguarded
+			// clear fires on the way into a plan. Restores carrying a mounted
+			// partition keep the marker via `mountedCandidates.size > 0`.
 			const previousDormantDeviceOnlyWrite = this.#dormantDeviceOnlyWrite;
 			if (
 				normalized.includes("write") &&
@@ -1526,12 +1535,13 @@ export class SessionTools {
 				? false
 				: fullWrite === false
 					? true
-					: this.#presentationPinnedToolNames?.has("write") !== true &&
-						this.#runtimeSelectedToolNames?.has("write") !== true &&
-						((this.#host.planModeEnabled() && (!writeSelected || deviceOnlyWriteActive)) ||
-							(!this.#dormantFullWrite &&
-								(deviceOnlyWriteActive || this.#dormantDeviceOnlyWrite === true) &&
-								(retainedMountedDevice || (writeSelected && retainedDeferrableTool)))));
+					: (this.#host.planModeEnabled() && deviceOnlyWriteActive) ||
+						(this.#presentationPinnedToolNames?.has("write") !== true &&
+							this.#runtimeSelectedToolNames?.has("write") !== true &&
+							((this.#host.planModeEnabled() && !writeSelected) ||
+								(!this.#dormantFullWrite &&
+									(deviceOnlyWriteActive || this.#dormantDeviceOnlyWrite === true) &&
+									(retainedMountedDevice || (writeSelected && retainedDeferrableTool))))));
 		const previousRuntimeSelectedToolNames = this.#runtimeSelectedToolNames;
 		this.#runtimeSelectedToolNames = new Set(
 			normalized.filter(name => !mounted.has(name) && !(name === "write" && transportWriteActive)),

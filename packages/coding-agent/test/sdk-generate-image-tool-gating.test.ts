@@ -161,6 +161,22 @@ describe("generate_image tool gating", () => {
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("generate_image");
 	});
 
+	it("keeps generate_image unmounted in a default session when disabled", async () => {
+		const { session } = await createAgentSession({
+			...startupShortcuts(),
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "generate_image.enabled": false }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+		});
+		sessions.push(session);
+		expect(session.getActiveToolNames()).not.toContain("generate_image");
+		expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("generate_image");
+	});
+
 	it("mounts ambient tools across runtime selection with a device-only write", async () => {
 		const ambientTool = customTool("ambient_search");
 		const session = await sessionWithCustomTools(["read"], [ambientTool]);
@@ -272,6 +288,26 @@ describe("generate_image tool gating", () => {
 		expect(session.getActiveToolNames()).not.toContain("mcp__test__search");
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
 		expect(session.isDeviceOnlyWrite()).toBe(true);
+	});
+
+	it("restores device-only write after an empty-whitelist restriction", async () => {
+		const session = await sessionWithCustomTools(["read"], [customTool("mcp__test__search", true)]);
+		const enabledBefore = session.getEnabledToolNames();
+
+		await session.setActiveToolsByName([]);
+		expect(session.getActiveToolNames()).not.toContain("write");
+
+		await session.setActiveToolsByName(enabledBefore);
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
+		expect(session.isDeviceOnlyWrite()).toBe(true);
+		const blockedTarget = path.join(registryDir, "empty-whitelist-blocked.txt");
+		await expect(
+			session.getToolByName("write")!.execute("empty-whitelist-after-restore", {
+				path: blockedTarget,
+				content: "blocked",
+			}),
+		).rejects.toThrow("Filesystem writes are not available");
+		expect(await Bun.file(blockedTarget).exists()).toBe(false);
 	});
 
 	it("preserves explicitly requested write after MCP devices disconnect", async () => {
