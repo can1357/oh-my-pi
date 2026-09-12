@@ -76,4 +76,42 @@ describe("daemon broker exit diagnostics", () => {
 			process.title = previousTitle;
 		}
 	}, 20_000);
+	it("keeps a recovered terminal diagnostic when a wait races a restart", async () => {
+		using tempDir = TempDir.createSync("@omp-recovered-exit-diagnostic-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+
+		const previousTitle = process.title;
+		const firstClient = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const firstBroker = startBroker(projectDir, runtimeDir);
+		try {
+			const started = await firstClient.request({ op: "start", spec: failingSpec("code-58", projectDir) });
+			if (started.op !== "start") throw new Error("unexpected start result");
+			const waited = await firstClient.request({ op: "wait", name: "code-58", for: "exit", timeoutMs: 5_000 });
+			if (waited.op !== "wait") throw new Error("unexpected wait result");
+			expect(waited.daemon.exitReason).toBe("process exited with code 58 without a reported termination reason");
+		} finally {
+			await shutdown(firstClient, firstBroker);
+		}
+
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const broker = startBroker(projectDir, runtimeDir);
+		try {
+			const waitPending = client
+				.request({ op: "wait", name: "code-58", for: "exit", pattern: "NEVER", timeoutMs: 5_000 })
+				.then(
+					() => undefined,
+					(reason: unknown) => reason,
+				);
+			const restartedPending = client.request({ op: "restart", name: "code-58" });
+			const [, error] = await Promise.all([restartedPending, waitPending]);
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toContain("exit code 58");
+			expect((error as Error).message).toContain("without a reported termination reason");
+		} finally {
+			await shutdown(client, broker);
+			process.title = previousTitle;
+		}
+	}, 30_000);
 });

@@ -17,6 +17,7 @@ import {
 	type DaemonOutputUnregister,
 	daemonClientForProject,
 } from "../../launch/client";
+import { normalizeExitReason } from "../../launch/exit-reason";
 import type {
 	DaemonMonitorNotification,
 	DaemonMonitorWatcher,
@@ -45,6 +46,7 @@ import {
 	pluralize,
 	previewLine,
 	replaceTabs,
+	shortenEmbeddedPaths,
 	shortenPath,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
@@ -1257,10 +1259,19 @@ function daemonLabel(daemon: DaemonSnapshot): string {
 	)} restarts=${daemon.restartCount}${daemon.detached ? " detached" : daemon.persist ? " persistent" : ""}`;
 }
 
-function daemonReasonLine(daemon: DaemonSnapshot, indent = ""): string | undefined {
-	if (!daemon.exitReason) return undefined;
-	const reason = truncateToWidth(sanitizeText(daemon.exitReason).replace(/\s+/g, " ").trim(), TRUNCATE_LENGTHS.LINE);
+function normalizedDaemonReason(daemon: DaemonSnapshot): string | undefined {
+	const reason = normalizeExitReason(daemon.exitReason);
+	return reason ? shortenEmbeddedPaths(reason) : undefined;
+}
+
+function daemonReasonText(daemon: DaemonSnapshot, indent = ""): string | undefined {
+	const reason = normalizedDaemonReason(daemon);
 	return reason ? `${indent}Reason: ${reason}` : undefined;
+}
+
+function daemonReasonLine(daemon: DaemonSnapshot, indent = ""): string | undefined {
+	const reason = normalizedDaemonReason(daemon);
+	return reason ? `${indent}Reason: ${truncateToWidth(reason, TRUNCATE_LENGTHS.LINE)}` : undefined;
 }
 
 /**
@@ -1325,7 +1336,7 @@ function toolContent(
 		case "start": {
 			const daemon = result.daemon;
 			const lines = [`${daemon.state === "failed" ? "Failed to launch" : "Started"} ${daemonLabel(daemon)}`];
-			const reason = daemonReasonLine(daemon);
+			const reason = daemonReasonText(daemon);
 			if (reason) lines.push(reason);
 			if (daemon.readyMatch) lines.push(`Ready log matched: ${daemon.readyMatch}`);
 			if (result.readyTimedOut) {
@@ -1349,7 +1360,7 @@ function toolContent(
 			const lines: string[] = [];
 			for (const daemon of result.daemons) {
 				lines.push(`- ${daemonLabel(daemon)}`);
-				const reason = daemonReasonLine(daemon, "  ");
+				const reason = daemonReasonText(daemon, "  ");
 				if (reason) lines.push(reason);
 				const watchers = result.monitors?.filter(watcher => watcher.name === daemon.name) ?? [];
 				if (watchers.length === 0) continue;
@@ -1365,7 +1376,7 @@ function toolContent(
 		}
 		case "wait": {
 			const lines = [daemonLabel(result.daemon)];
-			const reason = daemonReasonLine(result.daemon);
+			const reason = daemonReasonText(result.daemon);
 			if (reason) lines.push(reason);
 			if (result.matched) lines.push(`Matched: ${result.matched}`);
 			if (result.timedOut) {
@@ -1385,7 +1396,7 @@ function toolContent(
 				if (params.progress !== "off") return `Monitoring ${daemonLabel(result.daemon)}`;
 				return `${detached ? "Stopped monitoring" : "No active monitor for"} ${daemonLabel(result.daemon)}`;
 			}
-			const reason = daemonReasonLine(result.daemon);
+			const reason = daemonReasonText(result.daemon);
 			return [
 				daemonLabel(result.daemon),
 				...(reason ? [reason] : []),
@@ -1781,6 +1792,7 @@ export function launchRenderResult(
 
 	const meta: string[] = [];
 	const body: string[] = [];
+	const listGroups: string[][] = [];
 	let description = params.name ?? daemon?.name;
 
 	if (isError) {
@@ -1844,14 +1856,16 @@ export function launchRenderResult(
 				const daemons = details?.daemons ?? [];
 				description = `${daemons.length || "no"} ${pluralize("process", daemons.length)}`;
 				for (const item of daemons) {
-					body.push(
+					const rows = [
 						`${theme.fg("accent", replaceTabs(item.name))} ${theme.fg("dim", daemonMeta(item, theme).join(theme.sep.dot))}`,
-					);
+					];
 					const reason = daemonReasonLine(item);
-					if (reason) body.push(theme.fg("error", reason));
+					if (reason) rows.push(theme.fg("error", reason));
 					for (const watcher of details?.monitors ?? []) {
-						if (watcher.name === item.name) body.push(watcherRow(watcher, item, theme));
+						if (watcher.name === item.name) rows.push(watcherRow(watcher, item, theme));
 					}
+					listGroups.push(rows);
+					body.push(...rows);
 				}
 				break;
 			}
@@ -1948,10 +1962,10 @@ export function launchRenderResult(
 		() => options.expanded,
 		(width, expanded) => {
 			let visible = body;
-			if (!expanded && op === "list" && body.length > PREVIEW_LIMITS.COLLAPSED_ITEMS) {
-				const remaining = body.length - PREVIEW_LIMITS.COLLAPSED_ITEMS;
+			if (!expanded && op === "list" && listGroups.length > PREVIEW_LIMITS.COLLAPSED_ITEMS) {
+				const remaining = listGroups.length - PREVIEW_LIMITS.COLLAPSED_ITEMS;
 				visible = [
-					...body.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS),
+					...listGroups.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS).flat(),
 					theme.fg("dim", `${formatMoreItems(remaining, "process")} ${formatExpandHint(theme, false, true)}`),
 				];
 			}

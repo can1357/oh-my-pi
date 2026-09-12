@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { DaemonBrokerClient, DaemonCompletionUnregisterOptions } from "../../../src/launch/client";
 import * as daemonClient from "../../../src/launch/client";
@@ -418,6 +419,51 @@ describe("hub process output monitoring", () => {
 		});
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 		expect(text).toContain("Reason: process exited with code 58 without a reported termination reason");
+	});
+	it("preserves model-facing diagnostics beyond the TUI line width", async () => {
+		const diagnostic = `process exited with code 58: ${"detail ".repeat(80).trim()}`;
+		const failedDaemon: DaemonSnapshot = {
+			...daemon,
+			state: "failed",
+			pid: undefined,
+			exitCode: 58,
+			exitReason: diagnostic,
+			exitedAt: 3,
+		};
+		const harness = createHarness(undefined, Promise.resolve(), failedDaemon);
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		const result = await executeLaunch(harness.session, {
+			op: "start",
+			name: daemon.name,
+			application: process.execPath,
+			pty: false,
+			progress: "wake",
+		});
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain(`Reason: ${diagnostic}`);
+	});
+	it("shortens home paths in rendered exit reasons", async () => {
+		const failedDaemon: DaemonSnapshot = {
+			...daemon,
+			state: "failed",
+			pid: undefined,
+			exitCode: 58,
+			exitReason: `runtime failure at ${os.homedir()}/watch-pr.log`,
+			exitedAt: 3,
+		};
+		const harness = createHarness(undefined, Promise.resolve(), failedDaemon);
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		const result = await executeLaunch(harness.session, {
+			op: "start",
+			name: daemon.name,
+			application: process.execPath,
+			pty: false,
+			progress: "wake",
+		});
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("Reason: runtime failure at ~/watch-pr.log");
 	});
 
 	it("never replays output that predates a successful monitor attach", async () => {

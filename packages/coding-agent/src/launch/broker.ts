@@ -25,6 +25,7 @@ import {
 } from "../session/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
 import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
+import { normalizeExitReason } from "./exit-reason";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -88,15 +89,6 @@ const SIGNAL_NUMBER: Record<DaemonSignal, number> = {
 function subprocessExitReason(subprocess: { readonly signalCode: NodeJS.Signals | null }): string | undefined {
 	if (subprocess.signalCode) return `process was terminated by ${subprocess.signalCode}`;
 	return undefined;
-}
-
-const MAX_EXIT_REASON_LENGTH = 1_024;
-
-function sanitizeExitReason(reason: string | undefined): string | undefined {
-	if (reason === undefined) return undefined;
-	const sanitized = sanitizeText(reason).replace(/\s+/g, " ").trim();
-	if (!sanitized) return undefined;
-	return sanitized.length > MAX_EXIT_REASON_LENGTH ? `${sanitized.slice(0, MAX_EXIT_REASON_LENGTH - 1)}…` : sanitized;
 }
 
 function fallbackExitReason(exitCode: number | undefined, stopRequested: boolean): string | undefined {
@@ -344,6 +336,10 @@ function reapRecoveredSnapshot(snapshot: DaemonSnapshot, now: number): boolean {
 	snapshot.exitedAt = now;
 	snapshot.exitReason = "previous broker exited";
 	return true;
+}
+function recoveredGenerationExitRecords(snapshot: DaemonSnapshot): Map<number, GenerationExit> {
+	if (!terminalState(snapshot.state)) return new Map();
+	return new Map([[0, { exitCode: snapshot.exitCode, exitReason: snapshot.exitReason }]]);
 }
 
 /** Mirror per-condition readiness progress into the snapshot so clients can see which condition is unmet. */
@@ -1889,14 +1885,23 @@ class DaemonBroker {
 	}
 
 	#settle(record: ManagedDaemon, generation: number, exitCode?: number, error?: string): Promise<void> {
-		const settlement = record.settlementQueue.then(() => this.#settleRecord(record, generation, exitCode, error));
+		const stopRequestedAtExit = record.stopRequested;
+		const settlement = record.settlementQueue.then(() =>
+			this.#settleRecord(record, generation, exitCode, error, stopRequestedAtExit),
+		);
 		record.settlementQueue = settlement.catch(() => {
 			if (!record.monitorRestarting) record.monitorSettlementPending = false;
 		});
 		return settlement;
 	}
 
-	async #settleRecord(record: ManagedDaemon, generation: number, exitCode?: number, error?: string): Promise<void> {
+	async #settleRecord(
+		record: ManagedDaemon,
+		generation: number,
+		exitCode: number | undefined,
+		error: string | undefined,
+		stopRequestedAtExit: boolean,
+	): Promise<void> {
 		// `restarting` is a settled state (child exited, relaunch timer armed). Any op that
 		// runs #refreshDetached on such a record must not re-settle it: re-entry double-counts
 		// restartCount and overwrites record.restartTimer, orphaning the armed timer so it fires
@@ -1918,15 +1923,14 @@ class DaemonBroker {
 		record.pty = undefined;
 		record.snapshot.pid = undefined;
 		record.snapshot.exitedAt = Date.now();
-		const exitReason = sanitizeExitReason(error) ?? fallbackExitReason(exitCode, record.stopRequested);
+		const exitReason = normalizeExitReason(error) ?? fallbackExitReason(exitCode, stopRequestedAtExit);
 		record.snapshot.exitCode = exitCode;
 		record.snapshot.exitReason = exitReason;
 		this.#recordGenerationExit(record, generation, exitCode, exitReason);
 		record.snapshot.readyPending = undefined;
 		const failed = exitReason !== undefined || (exitCode !== undefined && exitCode !== 0);
 		const shouldRestart =
-			!record.stopRequested &&
-			(record.spec.restart === "always" || (record.spec.restart === "on-failure" && failed));
+			!stopRequestedAtExit && (record.spec.restart === "always" || (record.spec.restart === "on-failure" && failed));
 		if (shouldRestart && !this.#shuttingDown) {
 			const uptime = Date.now() - record.snapshot.startedAt;
 			record.consecutiveFailures = uptime >= 30_000 ? 0 : record.consecutiveFailures + 1;
@@ -1952,10 +1956,10 @@ class DaemonBroker {
 			return;
 		}
 		record.monitorSettlementPending = true;
-		record.snapshot.state = failed && !record.stopRequested ? "failed" : "exited";
+		record.snapshot.state = failed && !stopRequestedAtExit ? "failed" : "exited";
 		const completion =
 			record.snapshot.owner !== undefined &&
-			!record.stopRequested &&
+			!stopRequestedAtExit &&
 			this.#completionSubscriptions.has(record.snapshot.owner)
 				? ({
 						event: "daemon-completed",
@@ -2345,7 +2349,7 @@ class DaemonBroker {
 					snapshot,
 					dir,
 					generation: 0,
-					generationExitRecords: new Map(),
+					generationExitRecords: recoveredGenerationExitRecords(snapshot),
 					generationWaiters: new Map(),
 					stopRequested: !detached || snapshot.state === "stopping",
 					ownerCompletionEmitted: "ownerNotified" in decoded && decoded.ownerNotified === true,

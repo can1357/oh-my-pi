@@ -9,6 +9,7 @@ import { type Component, Text, TruncatedText } from "@oh-my-pi/pi-tui";
 import { formatBytes, formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AsyncJobType } from "../../async";
 import type { DaemonSnapshot } from "../../launch/protocol";
+import { normalizeExitReason } from "../../launch/exit-reason";
 import {
 	ASYNC_PROGRESS_MESSAGE_TYPE,
 	type AsyncProgressDetails,
@@ -88,9 +89,8 @@ function formatBackgroundWorkName(name: string | undefined, fallback: "unknown" 
 }
 
 function formatBackgroundWorkReason(reason: string | undefined): string | undefined {
-	if (reason === undefined) return undefined;
-	const normalized = shortenEmbeddedPaths(sanitizeText(reason).replace(/\s+/g, " ")).trim();
-	return normalized ? truncateToWidth(normalized, TRUNCATE_LENGTHS.LINE) : undefined;
+	const normalized = normalizeExitReason(reason);
+	return normalized ? truncateToWidth(shortenEmbeddedPaths(normalized), TRUNCATE_LENGTHS.LINE) : undefined;
 }
 
 /** Terminal-state row for one completed background job or supervised process. */
