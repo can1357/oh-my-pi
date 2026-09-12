@@ -158,8 +158,9 @@ test("positive classes with slash members match (admin[/]delete matches admin/de
 
 test("class ranges that span the slash keep it as a member", () => {
 	// `/` (0x2F) lies between `.` (0x2E) and `0` (0x30), so a raw `[.-0]` admits
-	// it — the translator completes the range with the sentinel instead of
-	// silently dropping the slash from the member set.
+	// it — the translator splits the range around the reserved code point
+	// instead of widening it into `§` (U+00A7), which would swallow every
+	// letter between.
 	expect(run(["admin/delete", "admin.delete", "admin0delete"], ["admin[.-0]delete"]).allowed).toEqual([
 		"admin/delete",
 		"admin.delete",
@@ -168,6 +169,29 @@ test("class ranges that span the slash keep it as a member", () => {
 	expect(run(["adminXdelete"], ["admin[.-0]delete"]).allowed).toEqual([]);
 	// The negated form excludes exactly the spanned members.
 	expect(run(["admin/delete", "adminAdelete"], ["admin[^.-0]delete"]).allowed).toEqual(["adminAdelete"]);
+});
+
+test("a range may not widen into the reserved code points between its endpoints", () => {
+	// `[.-/]` is `.`, `/` only. Treating it as one code-point range would run
+	// through `0`–`§` and admit letters.
+	expect(run(["x.y", "x/y"], ["x[.-/]y"]).allowed).toEqual(["x.y", "x/y"]);
+	expect(run(["xmy", "x0y"], ["x[.-/]y"]).allowed).toEqual([]);
+	// `[/-z]` spans `/` up to `z`, so it admits the plain letters and the slash
+	// but never `-`.
+	expect(run(["x/y", "xmy", "x-y"], ["x[/-z]y"]).allowed).toEqual(["x/y", "xmy"]);
+	// `[+-0]` spans `/` between `+` and `0`: `+`, `/`, `-`, `.`, `0` — not `m`.
+	expect(run(["x+y", "x/y", "x0y", "xmy"], ["x[+-0]y"]).allowed).toEqual(["x+y", "x/y", "x0y"]);
+	// A descending range is empty, as in POSIX classes.
+	expect(run(["xby", "x/y"], ["x[a-/]y"]).allowed).toEqual([]);
+});
+
+test("classes treat the encoding's reserved characters as ordinary raw characters", () => {
+	// A literal `§` in a class addresses a tool name's own `§` (encoded `¤§`),
+	// not a slash; `/` is spelled `/`.
+	expect(run(["x§y"], ["x[§]y"]).allowed).toEqual(["x§y"]);
+	expect(run(["x/y"], ["x[§]y"]).allowed).toEqual([]);
+	expect(run(["x/y"], ["x[/]y"]).allowed).toEqual(["x/y"]);
+	expect(run(["x¤y"], ["x[¤]y"]).allowed).toEqual(["x¤y"]);
 });
 
 test("grouping and extglob syntax stay literal beside a supported wildcard", () => {

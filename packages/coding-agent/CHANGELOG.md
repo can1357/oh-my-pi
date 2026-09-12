@@ -5,7 +5,8 @@
 ### Added
 
 - Added per-server `enabledTools` and `disabledTools` MCP tool filtering ([#6299](https://github.com/can1357/oh-my-pi/issues/6299)).
-- MCP configs with a shared server field (`timeout`, `requestIdFormat`, `enabledTools`, …) now validate against the bundled JSON schema on every transport, not only after the first transport-specific key.
+- MCP configs whose server entry relies on a shared field (`timeout`, `requestIdFormat`, `enabledTools`, `disabledTools`, …) now validate against the bundled JSON schema on every transport, instead of only when no transport-specific key is present.
+
 ### Fixed
 
 - MCP HTTP reconnects now release obsolete tool generations instead of growing session memory on every reconnect ([#11784](https://github.com/can1357/oh-my-pi/issues/11784)).

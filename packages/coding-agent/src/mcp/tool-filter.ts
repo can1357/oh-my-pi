@@ -56,16 +56,22 @@ export interface MCPToolFilterResult {
  *   both `admin/delete` and a name containing a literal `§`.
  * - `*`/`**` span any number of characters, `/` included (no path separator
  *   exists in the encoded domain).
- * - Character classes translate their members; a range that spans `/`
- *   (`[.-0]`, where `.` ≤ `/` ≤ `0`) gains the sentinel as an explicit member,
- *   so the slash stays an ordinary member exactly as it is in the raw name. A
- *   negated class needs no compensation: picomatch's injected `/` member never
- *   matches, because no encoded name contains a raw `/`. Only `/` needs a
- *   compensation — `§` and `¤` are outside every code range a user writes
- *   (`§` is U+00A7), so a raw class range over them keeps its meaning.
- * - `(`, `)` and `|` are escaped, so grouping and alternation stay literal even
- *   beside a wildcard: `+(a|b)*` matches the literal `+(a|b)foo`, not `+afoo`.
- *   A leading `!`, an extglob prefix and braces outside the supported surface
+ * - Character classes compile their body VERBATIM — the engine's own class
+ *   semantics (negation, escapes, ranges, Annex-B corners) are already right
+ *   for every member but the three reserved code points. Those are decided in
+ *   the RAW domain (whether the class admits `/`, `§` or `¤`) and then spelled
+ *   as their encoded units: `/` → `§`, `§` → `¤§`, `¤` → `¤¤`. The verbatim
+ *   class is guarded so it can never consume a bare sentinel or escape marker,
+ *   which in an encoded name always belong to a raw `/`, `§` or `¤`. A class
+ *   range therefore never widens into the code points between its endpoints,
+ *   and a negated class stays exact even when a member is two characters wide.
+ *   `[!a]` is a literal `!` and `a` (picomatch reads `!` as negation only under
+ *   its `posix` option, which is off).
+ * - `(`, `)`, `|` and `+` are escaped, so grouping, alternation and extglob
+ *   prefixes stay literal even beside a wildcard: `+(a|b)*` matches the literal
+ *   `+(a|b)foo`, not `+afoo`. `+` is always escaped because emitted forms end in
+ *   `)`/`]`, which a following `+` would otherwise quantify. A leading `!`, an
+ *   extglob prefix and braces outside the supported surface
  *   behave likewise: only `*`, `?`, `[...]` and `{a,b}` carry meaning.
  */
 const MATCH_OPTIONS = { dot: true, nonegate: true, noextglob: true, windows: false } as const;
@@ -74,13 +80,13 @@ const MATCH_OPTIONS = { dot: true, nonegate: true, noextglob: true, windows: fal
 const SLASH_CODE = "§";
 /** Escape marker for the two encoding characters (`§`, `¤`). */
 const ESCAPE_MARK = "¤";
-/** Slash code point, used to detect ranges that span it. */
-const SLASH_CODEPOINT = 0x2f;
 /**
  * Matches exactly one RAW character of an encoded name: one of the two-char
- * escape units, or any character that is not the escape marker.
+ * escape units (`¤§`, `¤¤`), or any character that is not the escape marker.
+ * Written as a group alternation rather than `{…}` so a user's own brace
+ * alternation in the same pattern cannot be merged with it by picomatch.
  */
-const RAW_CHAR = `{${ESCAPE_MARK}${SLASH_CODE},${ESCAPE_MARK}${ESCAPE_MARK},[^${ESCAPE_MARK}]}`;
+const RAW_CHAR = `(?:${ESCAPE_MARK}${SLASH_CODE}|${ESCAPE_MARK}${ESCAPE_MARK}|[^${ESCAPE_MARK}])`;
 
 /** Translate one literal (non-glob) character into the encoded domain. */
 function translateLiteral(ch: string): string {
@@ -109,50 +115,75 @@ function findClassEnd(pattern: string, open: number): number {
 	return -1;
 }
 
+/** Code point a transliterated `/` occupies in the encoded domain. */
+const SLASH_CODEPOINT = 0x2f;
+/** Code point of the escape marker, and of the sentinel it escapes. */
+const ESCAPE_MARK_CODEPOINT = ESCAPE_MARK.codePointAt(0)!;
+const SENTINEL_CODEPOINT = SLASH_CODE.codePointAt(0)!;
 /**
- * Translate a class body (`[`…`]` contents), mapping `/` to the sentinel and
- * completing any range that spans it.
+ * Does this class body admit the raw code point `cp`?
+ *
+ * The regex engine is the oracle, not a hand-rolled class parser: a class body
+ * is full of engine-specific corners (a leading `]` member, escapes, a trailing
+ * `-`, and Annex-B range quirks like `[\--^]`), and re-deriving them is how a
+ * glob translator silently changes meaning. picomatch itself compiles the body
+ * verbatim elsewhere in this module; here the engine answers one question.
  */
-function translateClassBody(body: string): string {
-	let out = "";
-	let spansSlash = false;
-	for (let i = 0; i < body.length; i++) {
-		const ch = body[i];
-		if (ch === "\\") {
-			const next = body[i + 1];
-			if (next === undefined) {
-				out += "\\\\";
-				continue;
-			}
-			out += "\\" + translateClassMember(next);
-			i++;
-			continue;
-		}
-		if (ch === "/") {
-			out += SLASH_CODE;
-			continue;
-		}
-		const hi = body[i + 2];
-		if (body[i + 1] === "-" && hi !== undefined) {
-			// A trailing `-` (immediately before `]`) is a literal member, not a range.
-			out += ch + "-" + translateClassMember(hi);
-			if (ch.charCodeAt(0) <= SLASH_CODEPOINT && SLASH_CODEPOINT <= hi.charCodeAt(0)) spansSlash = true;
-			i += 2;
-			continue;
-		}
-		out += ch;
+function classAdmits(body: string, cp: number): boolean {
+	try {
+		return new RegExp(`^[${body}]$`, "u").test(String.fromCodePoint(cp));
+	} catch {
+		return false;
 	}
-	// A range spanning `/` gains it explicitly: the raw name's slash occupies a
-	// single encoded character, so it must remain an ordinary class member.
-	return spansSlash ? out + SLASH_CODE : out;
 }
 
-/** Translate one class member, keeping escapes that picomatch honours. */
-function translateClassMember(ch: string): string {
-	if (ch === "/") return SLASH_CODE;
-	if (ch === SLASH_CODE) return SLASH_CODE;
-	return ch;
+/**
+ * Translate a character-class body (`[`…`]` contents) into the encoded domain.
+ *
+ * The body is compiled VERBATIM: every member except the three reserved code
+ * points maps 1:1, so the engine's own class semantics (escapes, ranges, the
+ * Annex-B corners) are already correct for them. `classAdmits` answers, in the
+ * RAW domain, whether a reserved code point is in the class's membership set —
+ * which is what decides how that member must be spelled on the encoded side:
+ *
+ * - a raw `/` is the sentinel `§`,
+ * - a raw `§` is the two-character unit `¤§`,
+ * - a raw `¤` is the two-character unit `¤¤`.
+ *
+ * Those units are unioned into the member set. A positive class also guards its
+ * verbatim form against consuming a bare sentinel or escape character, since
+ * `§` in an encoded name is somebody's `/` and `¤` only ever prefixes a unit.
+ * A negated class is a negative lookahead over the same member set, which keeps
+ * negation exact in the raw domain instead of on encoded text.
+ */
+function translateClassBody(body: string): string {
+	// `!` is an ordinary member; a leading `^` negates (picomatch only reads `!`
+	// as negation under its `posix` option, which is off).
+	const negated = body.startsWith("^");
+	const members = negated ? body.slice(1) : body;
+	// An empty member list (`[^]`) admits every raw character.
+	if (members === "" && negated) return RAW_CHAR;
+	if (members === "") return NEVER_MATCH;
+
+	// Is this raw code point in the class's membership set? `classAdmits` already
+	// accounts for negation, so this holds for both polarities.
+	const included = (cp: number): boolean => classAdmits(body, cp);
+
+	// The verbatim class covers the unreserved characters (1:1 in both domains).
+	// A leading `^` among the members would negate it again, so escape it. The
+	// guard keeps it from ever consuming a bare sentinel or escape marker: in an
+	// encoded name those always belong to a reserved character's unit.
+	const verbatimBody = members.startsWith("^") && !negated ? `\\${members}` : members;
+	const alts = [`(?![${SLASH_CODE}${ESCAPE_MARK}])[${negated ? "^" : ""}${verbatimBody}]`];
+	if (included(SLASH_CODEPOINT)) alts.push(SLASH_CODE);
+	if (included(SENTINEL_CODEPOINT)) alts.push(ESCAPE_MARK + SLASH_CODE);
+	if (included(ESCAPE_MARK_CODEPOINT)) alts.push(ESCAPE_MARK + ESCAPE_MARK);
+
+	return alts.length === 1 ? alts[0] : `(?:${alts.join("|")})`;
 }
+
+/** A group that never matches any name. */
+const NEVER_MATCH = "(?!)";
 
 /**
  * Translate a glob pattern into the encoded domain, emitting raw-character
@@ -165,7 +196,10 @@ function translatePattern(pattern: string): string {
 		if (ch === "\\") {
 			const next = pattern[i + 1];
 			if (next === undefined) {
-				out += "\\\\";
+				// A lone trailing backslash escapes nothing and addresses a literal
+				// backslash; pass it through so picomatch decides, exactly as it does
+				// for the untranslated pattern.
+				out += ch;
 				continue;
 			}
 			// `\/`, `\§` and `\¤` become the plain encoded literal; every other
@@ -181,7 +215,8 @@ function translatePattern(pattern: string): string {
 				out += "\\[";
 				continue;
 			}
-			out += "[" + translateClassBody(pattern.slice(i + 1, end)) + "]";
+			const body = pattern.slice(i + 1, end);
+			out += translateClassBody(body);
 			i = end;
 			continue;
 		}
@@ -189,7 +224,12 @@ function translatePattern(pattern: string): string {
 			out += RAW_CHAR;
 			continue;
 		}
-		if (ch === "(" || ch === ")" || ch === "|") {
+		if (ch === "(" || ch === ")" || ch === "|" || ch === "+") {
+			// Escaped so grouping, alternation and extglob prefixes stay literal
+			// even beside a wildcard: `+(a|b)*` matches the literal `+(a|b)foo`,
+			// not `+afoo`. `+` is escaped unconditionally because the emitted
+			// `?`/class forms end in `)` and `]`, which a following `+` would
+			// otherwise quantify.
 			out += "\\" + ch;
 			continue;
 		}
