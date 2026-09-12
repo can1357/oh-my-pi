@@ -35,6 +35,12 @@
 - Fixed repeated local compaction omitting messages retained before the previous compaction record, while preserving original entry IDs and `/clear` boundaries.
 - Raised remote compaction request timeout from 3 minutes to 5 minutes so long Codex/gpt-6-astra compact streams can finish before the watchdog aborts them.
 - Fixed proxy responses dropping the cost the server reported; recorded costs are kept instead of being recomputed.
+### Changed
+
+- `Tool <name> not found` now names a plausible intended target when the advertised set contains one, e.g. `Tool mcp__abc123__xyz789_read not found. Did you mean read?`. A model that mis-transcribes a long opaque tool name reliably keeps the trailing segment, which is the only part carrying meaning, so the miss becomes recoverable in the same turn instead of costing a round trip. Purely advisory — the suggestion is only ever a string in the error, never a dispatch target, so an unrecognized name still fails ([#10109](https://github.com/can1357/oh-my-pi/issues/10109) by [@oldschoola](https://github.com/oldschoola)).
+### Added
+
+- Exposed `Agent.deadline` so session recovery can bound retries and stream watchdogs to `--max-time`.
 
 ## [18.1.10] - 2026-09-04
 
