@@ -101,8 +101,8 @@ Important edge behavior from runtime:
 - Unknown command responses are emitted with `id: undefined` (even if the request had an `id`).
 - Malformed JSON and synchronous dispatch failures emit `command: "parse"` with `id: undefined`. Exceptions while handling a recognized command emit a failure with that command's `type` and `id`.
 - `prompt` and `abort_and_prompt` return immediate success, then may emit a later error response with the **same** id if async prompt scheduling fails.
-- `prompt` success responses may include `data.agentInvoked`. `false` means the prompt completed locally without an agent turn; `true` means the prompt produced agent lifecycle events; omitted means the host must rely on session events for completion.
-- `abort_and_prompt` does not currently emit `data.agentInvoked` or `prompt_result`; hosts should treat it as the legacy abort-then-schedule path and rely on session events or same-id scheduling errors.
+- Older runtimes may include `data.agentInvoked` in a `prompt` success response. `false` is local-only completion; `true` indicates agent work. Current runtimes acknowledge first and report local-only completion through `prompt_result`.
+- `abort_and_prompt` always performs the abort before intercepting its replacement. Like `prompt`, a locally consumed replacement completes through a same-id `prompt_result` with `agentInvoked: false`; no replacement `agent_end` is fabricated. Hosts must recognize this hint rather than waiting unconditionally for a replacement turn.
 
 ## Command Schema (canonical)
 
@@ -215,20 +215,28 @@ Data payloads are command-specific and defined in `rpc-types.ts`.
   "id": "req_1",
   "type": "response",
   "command": "prompt",
-  "success": true,
-  "data": { "agentInvoked": false }
+  "success": true
 }
 ```
 
-`data.agentInvoked: false` is a completion signal for local-only prompts, including slash commands that produce output without starting an agent turn. `data.agentInvoked: true` means the prompt produced agent lifecycle events; those events can be emitted before or after the prompt response depending on the command path. Older runtimes may omit `data`; hosts should then rely on `agent_end`, custom message completion, or `prompt_result`.
+An acknowledgement is not completion. Clients must also accept the optional
+`data.agentInvoked` field emitted by older runtimes: `false` completes local-only
+work, while `true` indicates agent lifecycle events. Without that field, use the
+agent lifecycle or the correlated `prompt_result`.
 
-`prompt_result` is emitted when a prompt was accepted immediately but later resolves as local-only:
+`prompt_result` is emitted when an accepted `prompt` or `abort_and_prompt`
+replacement later resolves as local-only:
 
 ```json
 { "type": "prompt_result", "id": "req_1", "agentInvoked": false }
 ```
 
 Local-only slash commands may emit `command_output` frames before completing via `data.agentInvoked: false` or a later `prompt_result`. They do not emit `agent_end`.
+
+If an input handler or extension command schedules agent work through
+`sendUserMessage` or `sendMessage`, that work is tracked before declaring a request
+local-only. One request's extension work does not suppress another request's
+local-only completion.
 
 ### `get_state` payload
 
@@ -553,6 +561,29 @@ That means:
 - command acceptance != run completion
 - agent turns complete only on `agent_end` frames where `isTerminal !== false`
 - local-only prompts complete via `data.agentInvoked: false` on the response or via a later `prompt_result`
+
+### Input interception
+
+All four external input commands (`prompt`, `steer`, `follow_up`,
+`abort_and_prompt`) emit native `input` with `source: "rpc"` in both RPC modes,
+before command/skill/template interpretation or queue insertion. Text/image
+transformations chain once; omitted fields are preserved, `images: []` clears
+attachments, and handled or transformed-empty input does not dispatch normally.
+Queued delivery and programmatic extension messages do not emit input again.
+
+The existing command routes remain distinct: only `prompt` interprets RPC
+builtins and skills; explicit `steer`/`follow_up` retain their queue-only command
+rules, and `abort_and_prompt` retains its `session.prompt` replacement route.
+`steer`/`follow_up` success acknowledges completed input/queue processing, not a
+completed agent turn, including when a handler consumed the input locally.
+
+Input interception and route scheduling are ordered, without serializing whole
+model turns. `prompt`/`abort_and_prompt` acknowledge before asynchronous input
+handlers finish; subsequent failures retain the original command and id. UI and
+host-tool/URI responses remain dispatchable while handlers await them. Abort
+commands can overtake a waiting input handler; its normal forwarding is cancelled
+when it finishes. Disconnect or requested shutdown likewise prevents pending
+input from starting a new normal turn.
 
 ### While streaming
 

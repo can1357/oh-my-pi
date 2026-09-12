@@ -229,6 +229,37 @@ describe("dispatchRpcInputFrame", () => {
 });
 
 describe("RpcInputDispatcher", () => {
+	test("abort overtakes a blocked submission without losing either response", async () => {
+		const releaseInput = Promise.withResolvers<void>();
+		const inputStarted = Promise.withResolvers<void>();
+		const { deps, outputs } = makeDeps(async command => {
+			if (command.type === "steer") {
+				inputStarted.resolve();
+				await releaseInput.promise;
+				return { id: command.id, type: "response", command: "steer", success: true };
+			}
+			if (command.type === "abort") {
+				return { id: command.id, type: "response", command: "abort", success: true };
+			}
+			throw new Error(`unexpected command type: ${command.type}`);
+		});
+		const dispatcher = new RpcInputDispatcher({ deps });
+		dispatcher.dispatch({ id: "input", type: "steer", message: "delayed" });
+		await inputStarted.promise;
+		dispatcher.dispatch({ id: "stop", type: "abort" });
+		await flushMicrotasks();
+		try {
+			expect(outputs).toEqual([{ id: "stop", type: "response", command: "abort", success: true }]);
+		} finally {
+			releaseInput.resolve();
+			await dispatcher.drain();
+		}
+		expect(outputs).toEqual([
+			{ id: "stop", type: "response", command: "abort", success: true },
+			{ id: "input", type: "response", command: "steer", success: true },
+		]);
+	});
+
 	test("control frames resolve extension UI requests while an ordinary command is active", async () => {
 		const { deps, outputs } = makeDeps(async command => {
 			if (command.type !== "prompt") throw new Error(`unexpected command type: ${command.type}`);

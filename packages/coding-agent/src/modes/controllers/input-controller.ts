@@ -819,6 +819,31 @@ export class InputController {
 		return compacted.text.trim();
 	}
 
+	async #runInputHandlers(
+		text: string,
+		images?: ImageContent[],
+		imageLinks?: (string | undefined)[],
+	): Promise<{ text: string; images?: ImageContent[]; imageLinks?: (string | undefined)[] } | undefined> {
+		const result = await this.ctx.session.extensionRunner?.emitInput(text, images, "interactive");
+		if (result?.handled) {
+			this.ctx.editor.clearDraft();
+			return undefined;
+		}
+		if (result?.text !== undefined) text = result.text.trim();
+		if (result?.images !== undefined) {
+			images = result.images;
+			imageLinks = await materializeImageReferenceLinks(
+				images,
+				this.ctx.sessionManager.putBlob.bind(this.ctx.sessionManager),
+			);
+		}
+		if (!text && !images?.length) {
+			this.ctx.editor.clearDraft();
+			return undefined;
+		}
+		return { text, images, imageLinks };
+	}
+
 	setupEditorSubmitHandler(): void {
 		this.ctx.editor.onSubmit = async (text: string) => {
 			text = this.#compactDraftImages(text.trim());
@@ -872,21 +897,9 @@ export class InputController {
 			const submittedImages = inputImages;
 
 			if (runner?.hasHandlers("input")) {
-				const result = await runner.emitInput(text, inputImages, "interactive");
-				if (result?.handled) {
-					this.ctx.editor.clearDraft();
-					return;
-				}
-				if (result?.text !== undefined) {
-					text = result.text.trim();
-				}
-				if (result?.images !== undefined) {
-					inputImages = result.images;
-					inputImageLinks = await materializeImageReferenceLinks(
-						inputImages,
-						this.ctx.sessionManager.putBlob.bind(this.ctx.sessionManager),
-					);
-				}
+				const input = await this.#runInputHandlers(text, inputImages, inputImageLinks);
+				if (!input) return;
+				({ text, images: inputImages, imageLinks: inputImageLinks } = input);
 				hasInputImages = (inputImages?.length ?? 0) > 0;
 			}
 			const submittedMode = parseSlashCommand(text)?.name;
@@ -1577,8 +1590,8 @@ export class InputController {
 	/** Send editor text as a follow-up message (queued behind current stream). */
 	async handleFollowUp(): Promise<void> {
 		let text = this.#compactDraftImages(this.ctx.editor.getExpandedText().trim());
-		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
-		const imageLinks =
+		let images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
+		let imageLinks =
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 		if (!text && !images) return;
 
@@ -1588,13 +1601,18 @@ export class InputController {
 			return;
 		}
 
+		if (this.ctx.session.extensionRunner?.hasHandlers("input")) {
+			const input = await this.#runInputHandlers(text, images, imageLinks);
+			if (!input) return;
+			({ text, images, imageLinks } = input);
+		}
+
 		// Compaction first: while compacting, free text gets queued via
 		// `queueCompactionMessage`, and `/skill:*` rides the same queue so a
 		// skill typed during compaction is not lost or short-circuited through
 		// `promptCustomMessage`. The compaction-resume path re-parses the
 		// queued text into a user-attributed skill invocation before delivery.
 		if (this.ctx.session.isCompacting) {
-			const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
 			this.ctx.queueCompactionMessage(text, "followUp", images);
 			return;
 		}

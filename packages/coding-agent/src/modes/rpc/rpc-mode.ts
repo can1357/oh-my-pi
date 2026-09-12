@@ -10,6 +10,7 @@
  * - Events: AgentSessionEvent objects streamed as they occur
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { once } from "node:events";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -170,41 +171,6 @@ export async function runRpcSkillCommand(
 	);
 }
 
-/**
- * Skill branch of the `prompt` command: resolves the invocation cheaply, then
- * registers the slow dispatch with watchAndReportLocalOnlyPromptResult and
- * returns immediately. The caller answers the command right away — building
- * the skill prompt and running the prompt pipeline (usage preflight,
- * compaction, provider calls) can outlast any client's prompt timeout under
- * provider stress; the plain-prompt path responds first for the same reason.
- */
-export async function dispatchRpcSkillPrompt(input: {
-	id: string | undefined;
-	session: RpcSkillCommandSession;
-	message: string;
-	streamingBehavior: "steer" | "followUp" | undefined;
-	output: (obj: object) => void;
-	onError: (error: Error) => void;
-	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
-}): Promise<RpcSkillCommandResult | null> {
-	const invocation = resolveRpcSkillInvocation(input.session, input.message);
-	if (!invocation) return null;
-	// buildSkillPromptMessage is cheap file I/O and covers the failure the old
-	// synchronous path reported immediately (a removed or unreadable SKILL.md);
-	// keep that error contract by awaiting it before answering. The expensive
-	// promptCustomMessage pipeline (usage preflight, compaction, provider
-	// calls) is what moves behind the acknowledgement.
-	const built = await buildSkillPromptMessage(invocation.skill, invocation.args, "user");
-	watchAndReportLocalOnlyPromptResult({
-		id: input.id,
-		startPrompt: () => runRpcSkillCommand(input.session, invocation, input.streamingBehavior ?? "steer", built),
-		output: input.output,
-		onError: input.onError,
-		extensionUserMessageTracker: input.extensionUserMessageTracker,
-	});
-	return { agentInvoked: true };
-}
-
 export async function tryRunRpcSkillCommand(
 	session: RpcSkillCommandSession,
 	text: string,
@@ -223,8 +189,8 @@ export function reportLocalOnlyPromptResult(input: {
 	onError: (error: Error) => void;
 	hasExtensionAgentMessageTask?: () => boolean;
 	waitForExtensionAgentMessageTasks?: () => Promise<void>;
-}): void {
-	void input.prompt
+}): Promise<void> {
+	return input.prompt
 		.then(async agentInvoked => {
 			if (agentInvoked) return;
 			await input.waitForExtensionAgentMessageTasks?.();
@@ -238,6 +204,7 @@ export function reportLocalOnlyPromptResult(input: {
 }
 
 type RpcExtensionUserMessageScope = {
+	active: boolean;
 	hasAgentMessageTask: boolean;
 	pendingAgentMessageTasks: Set<Promise<void>>;
 };
@@ -249,18 +216,16 @@ type RpcExtensionUserMessageScope = {
  * with triggerTurn; that prompt must not report agentInvoked:false to the host.
  */
 export class RpcExtensionUserMessageTracker {
-	#activePromptScopes = new Set<RpcExtensionUserMessageScope>();
+	#promptScope = new AsyncLocalStorage<RpcExtensionUserMessageScope>();
 
 	markAgentMessageTask(): void {
-		for (const scope of this.#activePromptScopes) {
-			scope.hasAgentMessageTask = true;
-		}
+		const scope = this.#promptScope.getStore();
+		if (scope?.active) scope.hasAgentMessageTask = true;
 	}
 
 	trackAgentMessageTask(task: Promise<unknown>): void {
-		for (const scope of this.#activePromptScopes) {
-			this.#trackAgentMessageTaskForScope(scope, task);
-		}
+		const scope = this.#promptScope.getStore();
+		if (scope?.active) this.#trackAgentMessageTaskForScope(scope, task);
 	}
 
 	#trackAgentMessageTaskForScope(scope: RpcExtensionUserMessageScope, task: Promise<unknown>): void {
@@ -288,20 +253,20 @@ export class RpcExtensionUserMessageTracker {
 		waitForAgentMessageTasks: () => Promise<void>;
 	} {
 		const scope: RpcExtensionUserMessageScope = {
+			active: true,
 			hasAgentMessageTask: false,
 			pendingAgentMessageTasks: new Set(),
 		};
-		this.#activePromptScopes.add(scope);
 		let prompt: Promise<T>;
 		try {
-			prompt = startPrompt();
+			prompt = this.#promptScope.run(scope, startPrompt);
 		} catch (error) {
-			this.#activePromptScopes.delete(scope);
+			scope.active = false;
 			throw error;
 		}
 		return {
 			prompt: prompt.finally(() => {
-				this.#activePromptScopes.delete(scope);
+				scope.active = false;
 			}),
 			hasAgentMessageTask: () => scope.hasAgentMessageTask,
 			waitForAgentMessageTasks: () => this.#waitForAgentMessageTasks(scope),
@@ -315,9 +280,9 @@ export function watchAndReportLocalOnlyPromptResult(input: {
 	output: (obj: object) => void;
 	onError: (error: Error) => void;
 	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
-}): void {
+}): Promise<void> {
 	const trackedPrompt = input.extensionUserMessageTracker.watchPrompt(input.startPrompt);
-	reportLocalOnlyPromptResult({
+	return reportLocalOnlyPromptResult({
 		id: input.id,
 		prompt: trackedPrompt.prompt,
 		output: input.output,
@@ -444,6 +409,15 @@ export class RpcInputDispatcher {
 			const command = parsed as RpcCommand;
 			if (command.type === "bash") {
 				dispatchRpcInputFrame(command, this.#deps);
+				return;
+			}
+
+			// An input hook may be waiting on asynchronous work. Aborting must
+			// overtake it, including an explicit steer/follow-up awaiting ingress.
+			if (command.type === "abort" || command.type === "abort_and_prompt") {
+				const task = this.#dispatchSerialCommand(command);
+				this.#tasks.add(task);
+				void task.finally(() => this.#tasks.delete(task));
 				return;
 			}
 
@@ -1099,35 +1073,47 @@ export async function runRpcMode(
 	});
 	await emitAvailableCommandsUpdate();
 
-	// Handle a single command
-	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
-		const id = command.id;
-
-		switch (command.type) {
-			case "negotiate_protocol": {
-				if (command.protocolVersion !== 2)
-					return error(id, "negotiate_protocol", `Unsupported RPC protocol version: ${command.protocolVersion}`);
-				return success(id, "negotiate_protocol", { protocolVersion: 2 });
+	// Serialize interception and route scheduling, not model turns. A delayed
+	// hook must not reorder later user submissions or hold acknowledgements/UI.
+	let inputTail: Promise<void> = Promise.resolve();
+	let inputGeneration = 0;
+	let inputClosed = false;
+	type UserInputCommand = Extract<RpcCommand, { type: "prompt" | "steer" | "follow_up" | "abort_and_prompt" }>;
+	const dispatchUserInput = (command: UserInputCommand): Promise<boolean> => {
+		const generation = inputGeneration;
+		const sessionId = session.sessionId;
+		const isCurrent = () =>
+			!inputClosed && !shutdownState.requested && generation === inputGeneration && sessionId === session.sessionId;
+		const dispatch = inputTail.then(async (): Promise<{ completion: Promise<boolean> }> => {
+			let text = command.message;
+			let images = command.images;
+			const runner = session.extensionRunner;
+			if (runner?.hasHandlers("input")) {
+				const result = await runner.emitInput(text, images, "rpc");
+				if (result.handled) return { completion: Promise.resolve(false) };
+				if (result.text !== undefined) text = result.text.trim();
+				if (result.images !== undefined) images = result.images;
 			}
-
-			// =================================================================
-			// Prompting
-			// =================================================================
-
-			case "prompt": {
-				const skillResult = await dispatchRpcSkillPrompt({
-					id,
-					session,
-					message: command.message,
-					streamingBehavior: command.streamingBehavior,
-					output,
-					onError: promptError => output(error(id, "prompt", promptError.message)),
-					extensionUserMessageTracker,
-				});
-				if (skillResult) {
-					return success(id, "prompt", skillResult);
+			// An abort/session switch during a hook must not resurrect its prompt.
+			if (!isCurrent() || (!text.trim() && !images?.length)) {
+				return { completion: Promise.resolve(false) };
+			}
+			if (command.type === "steer" || command.type === "follow_up") {
+				if (command.type === "steer") await session.steer(text, images);
+				else await session.followUp(text, images);
+				return { completion: Promise.resolve(true) };
+			}
+			if (command.type === "prompt") {
+				const invocation = resolveRpcSkillInvocation(session, text);
+				if (invocation) {
+					const built = await buildSkillPromptMessage(invocation.skill, invocation.args, "user");
+					return {
+						completion: isCurrent()
+							? runRpcSkillCommand(session, invocation, command.streamingBehavior ?? "steer", built)
+							: Promise.resolve(false),
+					};
 				}
-				const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
+				const builtinResult = await executeAcpBuiltinSlashCommand(text, {
 					session,
 					sessionManager: session.sessionManager,
 					settings: session.settings,
@@ -1144,61 +1130,75 @@ export async function runRpcMode(
 					},
 				});
 				if (builtinResult !== false) {
-					if ("prompt" in builtinResult) {
-						watchAndReportLocalOnlyPromptResult({
-							id,
-							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
-							output,
-							onError: promptError => output(error(id, "prompt", promptError.message)),
-							extensionUserMessageTracker,
-						});
-						return success(id, "prompt");
-					}
-					// A consumed builtin is normally local-only, but some (e.g.
-					// `/retry`) schedule an agent turn whose events stream after
-					// this response. Report that so the host does not finalize the
-					// request as non-agent work while the agent is running.
-					return success(id, "prompt", { agentInvoked: builtinResult.agentInvoked === true });
+					return {
+						completion:
+							"prompt" in builtinResult && isCurrent()
+								? session.prompt(builtinResult.prompt, { images })
+								: Promise.resolve("agentInvoked" in builtinResult && builtinResult.agentInvoked === true),
+					};
 				}
+			}
+			return {
+				completion: isCurrent()
+					? session.prompt(text, {
+							images,
+							...(command.type === "prompt" ? { streamingBehavior: command.streamingBehavior } : {}),
+						})
+					: Promise.resolve(false),
+			};
+		});
+		inputTail = dispatch.then(
+			() => {},
+			() => {},
+		);
+		return dispatch.then(result => result.completion);
+	};
 
-				// Don't await - events will stream
-				// Extension commands are executed immediately, file prompt templates are expanded
-				// If streaming and streamingBehavior specified, queues via steer/followUp
-				watchAndReportLocalOnlyPromptResult({
-					id,
-					startPrompt: () =>
-						session.prompt(command.message, {
-							images: command.images,
-							streamingBehavior: command.streamingBehavior,
-						}),
-					output,
-					onError: promptError => output(error(id, "prompt", promptError.message)),
-					extensionUserMessageTracker,
-				});
-				return success(id, "prompt");
+	// Handle a single command
+	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
+		const id = command.id;
+
+		switch (command.type) {
+			case "negotiate_protocol": {
+				if (command.protocolVersion !== 2)
+					return error(id, "negotiate_protocol", `Unsupported RPC protocol version: ${command.protocolVersion}`);
+				return success(id, "negotiate_protocol", { protocolVersion: 2 });
 			}
 
-			case "steer": {
-				await session.steer(command.message, command.images);
-				return success(id, "steer");
+			// =================================================================
+			// Prompting
+			// =================================================================
+
+			case "prompt":
+			case "abort_and_prompt": {
+				if (command.type === "abort_and_prompt") {
+					inputGeneration++;
+					await session.abort({ reason: USER_INTERRUPT_LABEL });
+				}
+				// Acknowledge before asynchronous hooks, skills, commands or turns.
+				// One scope includes interception and any handler-generated work.
+				shutdownCoordinator.track(
+					watchAndReportLocalOnlyPromptResult({
+						id,
+						startPrompt: () => dispatchUserInput(command),
+						output,
+						onError: promptError => output(error(id, command.type, promptError.message)),
+						extensionUserMessageTracker,
+					}),
+				);
+				return success(id, command.type);
 			}
 
+			case "steer":
 			case "follow_up": {
-				await session.followUp(command.message, command.images);
-				return success(id, "follow_up");
+				await dispatchUserInput(command);
+				return success(id, command.type);
 			}
 
 			case "abort": {
+				inputGeneration++;
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				return success(id, "abort");
-			}
-
-			case "abort_and_prompt": {
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
-				session
-					.prompt(command.message, { images: command.images })
-					.catch(e => output(error(id, "abort_and_prompt", e.message)));
-				return success(id, "abort_and_prompt");
 			}
 
 			case "new_session":
@@ -1636,6 +1636,7 @@ export async function runRpcMode(
 
 	// stdin closed — RPC client is gone. Fail pending side-channel requests
 	// first so active/queued commands can settle, then drain accepted work.
+	inputClosed = true;
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
 	hostToolBridge.close("RPC client disconnected before host tool execution completed");
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");

@@ -309,6 +309,34 @@ Cancelable pre-events:
 - `turn_start` / `turn_end`
 - `message_start` / `message_update` / `message_end` — lifecycle notifications; `message_end` receives a detached message snapshot, so use `tool_result` or `context` when an extension needs to change provider context
 
+#### External input interception
+
+`input` runs once at submission ingress, before command interpretation, skill or
+prompt-template expansion, and queue insertion:
+
+| Submission | `source` |
+|---|---|
+| Main-session Enter or Ctrl+Enter | `"interactive"` |
+| `prompt`, `steer`, `follow_up`, or `abort_and_prompt` in RPC or RPC UI mode | `"rpc"` |
+
+Handlers run in extension/registration order. Returned `text` and `images`
+replacements feed subsequent handlers; omitted fields preserve the current value,
+and `images: []` removes attachments. Replacement text is trimmed before dispatch.
+`handled: true` stops the remaining handlers and normal dispatch. Empty text with
+no remaining images also stops normal dispatch. Work explicitly scheduled by a
+handler through `sendUserMessage` or `sendMessage` is not discarded.
+
+This is an ingress event, not a user-role message event. Queue delivery and replay
+do not emit it again. Programmatic `sendUserMessage`/`sendMessage` calls and
+synthetic continuations do not automatically emit `input`. Main-session Enter's
+`.`/`c` continuation shortcuts retain their synthetic path. Focused-subagent
+input retains its chat-only routing and does not invoke main-session input hooks.
+Print and ACP input are outside this interception contract.
+
+RPC input handlers may await extension UI responses without blocking the stdin
+reader. See [RPC completion and ordering](./rpc.md#promptqueue-concurrency-and-ordering),
+including local-only completion for consumed `abort_and_prompt` replacements.
+
 ### Tool lifecycle
 
 - `tool_call` (pre-exec, may block, or revise the tool's execution `input`; for model-issued calls it fires at arg-prep time in the agent loop, so a revision is revalidated and seen by concurrency scheduling, execution events, the persisted assistant message, and the approval gate alike)
