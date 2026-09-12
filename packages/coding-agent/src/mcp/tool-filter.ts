@@ -99,9 +99,17 @@ function translateLiteral(ch: string): string {
 }
 
 /**
+ * picomatch's POSIX bracket-class table, read from the library rather than
+ * copied: a hand-maintained duplicate is a second source of truth that drifts
+ * silently whenever picomatch changes a class.
+ */
+const POSIX_CLASS_SOURCE: Record<string, string> = picomatch.constants.POSIX_REGEX_SOURCE;
+
+/**
  * Locate the `]` closing the class opened at `open`, following picomatch's own
  * boundary rules: a `]` directly after `[` or `[^` is a literal member, an
- * escaped `]` never closes, and `!` is an ordinary member.
+ * escaped `]` never closes, `!` is an ordinary member, and a POSIX bracket
+ * class is one member whose expansion swallows its own brackets.
  */
 function findClassEnd(pattern: string, open: number): number {
 	let i = open + 1;
@@ -110,6 +118,17 @@ function findClassEnd(pattern: string, open: number): number {
 	for (; i < pattern.length; i++) {
 		if (pattern[i] === "\\") {
 			i++;
+			continue;
+		}
+		// picomatch's `posix` is on by default, so `[:name:]` is expanded before
+		// the class is compiled: its `[` becomes the table's source and its `]`
+		// disappears, which leaves the NEXT `]` to close the class —
+		// `[[:alpha:]]` compiles as `[a-zA-Z]`. Consume the whole group here so
+		// the inner `]` is not mistaken for the terminator. An unknown name is
+		// literal, matching picomatch, and falls through to the plain scan.
+		const posix = pattern.slice(i).match(/^\[:[a-z]+:\]/);
+		if (posix && POSIX_CLASS_SOURCE[pattern.slice(i + 2, i + posix[0].length - 2)]) {
+			i += posix[0].length - 1;
 			continue;
 		}
 		if (pattern[i] === "]") return i;
@@ -177,6 +196,12 @@ function classAdmits(body: string, cp: number): boolean {
  * negation exact in the raw domain instead of on encoded text.
  */
 function translateClassBody(body: string): string {
+	// picomatch's `posix` is on by default, so it rewrites `[:name:]` to the
+	// table's source before compiling. Spell the body the same way here, or the
+	// membership oracle and the verbatim emission would read the raw `[:name:]`
+	// as a literal member list instead. An unknown name is left alone —
+	// picomatch treats it literally too, and both readings then agree.
+	body = body.replaceAll(/\[:([a-z]+):\]/g, (whole, name: string) => POSIX_CLASS_SOURCE[name] ?? whole);
 	// `!` is an ordinary member; a leading `^` negates (picomatch only reads `!`
 	// as negation under its `posix` option, which is off).
 	const negated = body.startsWith("^");

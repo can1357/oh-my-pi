@@ -194,6 +194,27 @@ test("classes treat the encoding's reserved characters as ordinary raw character
 	expect(run(["x¤y"], ["x[¤]y"]).allowed).toEqual(["x¤y"]);
 });
 
+test("POSIX bracket classes expand the way picomatch expands them", () => {
+	// picomatch leaves `posix` on by default, so `[:punct:]` is rewritten to its
+	// table source before compiling and its brackets disappear — `[[:punct:]]`
+	// compiles as `[-!"#$%&'()*+,./:;<=>?@[\]^_`{|}~]`. A class scan that
+	// stopped at the POSIX group's own `]` truncated the body, so the class
+	// lost every member after it and never admitted `/`.
+	expect(run(["x/y", "x:y", "xay", "x]y"], ["x[[:punct:]]y"]).allowed).toEqual(["x/y", "x:y", "x]y"]);
+	expect(run(["xay", "x9y", "x/y"], ["x[[:alpha:]]y"]).allowed).toEqual(["xay"]);
+	// A POSIX group is one member of the enclosing class: `[[:alpha:]b]` admits
+	// `a`–`z` and `b`, and the class still ends at the LAST bracket.
+	expect(run(["xay", "xby", "x/y"], ["x[[:alpha:]b]y"]).allowed).toEqual(["xay", "xby"]);
+	// The `/` a POSIX class admits reaches the tool only through the encoded
+	// sentinel, so the negation must stay exact in the raw domain too.
+	expect(run(["x/y", "x:y"], ["x[^[:punct:]]y"]).allowed).toEqual([]);
+	expect(run(["xay", "x:y"], ["x[^[:punct:]]y"]).allowed).toEqual(["xay"]);
+	// An unknown class name is not expanded by picomatch either: `[:foo:` stays
+	// literal members and the class still ends at the third bracket, which is an
+	// unclosed class and so matches nothing.
+	expect(run(["x[[:foo:]]y", "xay", "x[y", "x:y"], ["x[[:foo:]]y"]).allowed).toEqual([]);
+});
+
 test("a class with a literal leading `]` member keeps its negated meaning", () => {
 	// `[^]]` is "every character except `]`" — a leading `]` after `[^` is a
 	// member, not the closer. The membership oracle must spell that member
