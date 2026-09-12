@@ -7,6 +7,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 function createPrefixBindingModel(): Model<"anthropic-messages"> {
@@ -198,5 +199,38 @@ describe("prefix-bound tool roster changes", () => {
 		const secondRequest = providerText(harness.contexts[1]);
 		expect(secondRequest).not.toContain("Tool availability changed.");
 		expect(harness.session.agent.state.systemPrompt).toEqual(["tools:read,bash"]);
+	});
+
+	it("does not ship a roster notice when a rebuild clears the delta during pre-prompt compaction", async () => {
+		const harness = newSession(createPrefixBindingModel());
+		sessions.push(harness.session);
+		await harness.session.setActiveToolPresentation(["read"], []);
+		await harness.session.prompt("first");
+
+		// A prefix-bound roster change freezes the prompt and queues a hidden delta
+		// that survives to the next prompt (no rebuild behind it).
+		await harness.session.setActiveToolPresentation(["read", "bash"], []);
+
+		// The pre-prompt maintenance pass can rebuild the base prompt mid-prompt
+		// (context promotion switches the model -> syncAfterModelChange, or a
+		// summary compaction), which re-renders the complete roster and clears the
+		// queued delta. The roster notice is consumed after that pass, so it must
+		// see the cleared delta and emit nothing — the outgoing request must never
+		// carry both a rebuilt roster and a contradicting notice.
+		const rebuildDuringCompaction = vi
+			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
+			.mockImplementation(async () => {
+				await harness.session.refreshBaseSystemPrompt();
+			});
+
+		await harness.session.prompt("second");
+
+		expect(rebuildDuringCompaction).toHaveBeenCalledTimes(1);
+		const notices = harness.session.agent.state.messages.filter(
+			message => message.role === "custom" && message.customType === "tool-roster-notice",
+		);
+		expect(notices).toHaveLength(0);
+		const secondRequest = providerText(harness.contexts[1]);
+		expect(secondRequest).not.toContain("Tool availability changed.");
 	});
 });
