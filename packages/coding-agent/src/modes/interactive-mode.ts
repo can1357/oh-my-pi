@@ -6074,8 +6074,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (!this.#sttController) {
 			this.#sttController = new STTController(undefined, {
-				resolveCloudCredential: signal =>
-					resolveSttCloudCredential(this.session.modelRegistry, this.sessionManager.getSessionId(), signal),
+				resolveCloudCredential: (signal, route) =>
+					resolveSttCloudCredential(this.session.modelRegistry, this.sessionManager.getSessionId(), signal, route),
 			});
 		}
 		await this.#sttController.toggle(this.editor, {

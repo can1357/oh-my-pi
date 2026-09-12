@@ -68,7 +68,7 @@
 - `/usage` now honors a provider's configured `baseUrl` when checking credentials before any model has been discovered, so a proxy-scoped API key is no longer sent to the provider's canonical host ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
 ### Added
 
-- Added OpenAI cloud speech-to-text for push-to-talk dictation, with ChatGPT subscription and API-key authentication ([#11216](https://github.com/can1357/oh-my-pi/pull/11216) by [@rxaviers](https://github.com/rxaviers)).
+- Added OpenAI cloud speech-to-text for push-to-talk dictation, with ChatGPT subscription and API-key authentication; `stt.cloudCredential` selects which credential dictation uses ([#11216](https://github.com/can1357/oh-my-pi/pull/11216) by [@rxaviers](https://github.com/rxaviers)).
 
 ## [18.1.18] - 2026-09-11
 

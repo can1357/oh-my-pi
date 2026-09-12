@@ -18,8 +18,11 @@ import {
 	CLOUD_STT_MODEL_OPTIONS,
 	CLOUD_STT_MODEL_VALUES,
 	DEFAULT_STT_BACKEND,
+	DEFAULT_STT_CLOUD_CREDENTIAL,
 	STT_BACKEND_OPTIONS,
 	STT_BACKEND_VALUES,
+	STT_CLOUD_CREDENTIAL_OPTIONS,
+	STT_CLOUD_CREDENTIAL_VALUES,
 } from "../stt/cloud-models";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
@@ -2596,8 +2599,22 @@ export const SETTINGS_SCHEMA = {
 			group: "Speech",
 			label: "Speech Backend",
 			description:
-				"Local runs on-device Whisper/Parakeet with no network. cloud records mic audio and transcribes it with OpenAI on release (ChatGPT subscription first, then API key; no live preview) and falls back to local without credentials.",
+				"Local runs on-device Whisper/Parakeet with no network. cloud records mic audio and transcribes it with OpenAI on release (credential chosen by stt.cloudCredential; no live preview) and falls back to local without credentials.",
 			options: STT_BACKEND_OPTIONS,
+		},
+	},
+
+	"stt.cloudCredential": {
+		type: "enum",
+		values: STT_CLOUD_CREDENTIAL_VALUES,
+		default: DEFAULT_STT_CLOUD_CREDENTIAL,
+		ui: {
+			tab: "interaction",
+			group: "Speech",
+			label: "Cloud Speech Credential",
+			description:
+				"Which OpenAI credential cloud dictation uses. auto prefers a connected ChatGPT subscription and otherwise uses the OpenAI API key; api-key forces the platform endpoint, which is the only route that honours the speech model, language, and keywords.",
+			options: STT_CLOUD_CREDENTIAL_OPTIONS,
 		},
 	},
 

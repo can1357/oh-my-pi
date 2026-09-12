@@ -7,7 +7,11 @@ import * as downloader from "@oh-my-pi/pi-coding-agent/stt/downloader";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { __resetExtraCaCache } from "@oh-my-pi/pi-utils";
 import type { CloudSttCredential } from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
-import { startCloudSttStream } from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
+import {
+	AUDIO_LIMIT_MESSAGE,
+	MAX_AUDIO_SAMPLES,
+	startCloudSttStream,
+} from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
 import { concatenatePcm, encodeWav } from "@oh-my-pi/pi-coding-agent/tts/wav";
 import { resolveSttCloudCredential, STTController, type SttState } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -858,6 +862,149 @@ describe("cloud backend in STTController", () => {
 			controller.dispose();
 		}
 	});
+
+	it("stt.cloudCredential=api-key dictates through the API key while a subscription is connected", async () => {
+		settings.set("stt.cloudCredential", "api-key");
+		settings.set("stt.language", "pt");
+		const stub = stubFetch("api route");
+		const source = oauthSource("subscription-token").source;
+		const registry = {
+			authStorage: source,
+			async getApiKeyForProvider(): Promise<string | undefined> {
+				return "sk-key";
+			},
+		};
+		let onAudio!: (error: Error | null, samples: Float32Array) => void;
+		const editor = {
+			committed: "",
+			insertText(_text: string): void {},
+			setVolatileText(_text: string): void {},
+			clearVolatileText(): void {},
+			commitVolatileText(text: string): void {
+				editor.committed += text;
+			},
+			submit(): void {},
+			deleteBeforeCursor(_count: number): void {},
+		};
+		const warnings: string[] = [];
+		const options = {
+			showWarning(message: string): void {
+				warnings.push(message);
+			},
+			showStatus(_msg: string): void {},
+			onStateChange(_state: SttState): void {},
+		};
+		const controller = new STTController(
+			callback => {
+				onAudio = callback;
+				return { stop(): void {} };
+			},
+			{
+				// Same wiring as interactive mode: the controller's route reaches the registry resolver.
+				resolveCloudCredential: (signal, route) => resolveSttCloudCredential(registry, "s1", signal, route),
+				createCloudFetch: stub.impl,
+			},
+		);
+		try {
+			await controller.toggle(editor, options);
+			onAudio(null, sine16kHz());
+			await controller.toggle(editor, options);
+			expect(editor.committed).toBe("api route");
+			expect(stub.calls[0]!.url).toBe("https://api.openai.com/v1/audio/transcriptions");
+			const form = stub.calls[0]!.init.body as FormData;
+			expect(form.get("model")).toBe("gpt-4o-mini-transcribe");
+			expect(form.get("language")).toBe("pt");
+			// The API-key route honours the settings, so nothing is reported as ignored.
+			expect(warnings).toEqual([]);
+		} finally {
+			controller.dispose();
+		}
+	});
+
+	it("bounds audio buffered while the backend is still starting", async () => {
+		const credential = Promise.withResolvers<CloudSttCredential | undefined>();
+		let onAudio!: (error: Error | null, samples: Float32Array) => void;
+		const editor = {
+			insertText(_text: string): void {},
+			setVolatileText(_text: string): void {},
+			clearVolatileText(): void {},
+			commitVolatileText(_text: string): void {},
+			submit(): void {},
+			deleteBeforeCursor(_count: number): void {},
+		};
+		const warnings: string[] = [];
+		const options = {
+			showWarning(message: string): void {
+				warnings.push(message);
+			},
+			showStatus(_msg: string): void {},
+			onStateChange(_state: SttState): void {},
+		};
+		const controller = new STTController(
+			callback => {
+				onAudio = callback;
+				return { stop(): void {} };
+			},
+			{ resolveCloudCredential: () => credential.promise },
+		);
+		try {
+			await controller.toggle(editor, options);
+			onAudio(null, sine16kHz());
+			onAudio(null, new Float32Array(MAX_AUDIO_SAMPLES));
+			// The credential never resolves: the bound must settle the recording on its own.
+			await controller.toggle(editor, options);
+			expect(controller.state).toBe("idle");
+			expect(warnings).toEqual([AUDIO_LIMIT_MESSAGE]);
+		} finally {
+			controller.dispose();
+		}
+	});
+
+	it("reports a failed local fallback download exactly once", async () => {
+		settings.set("stt.modelName", "gpt-4o-transcribe");
+		const cachedSpy = spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
+		const downloadSpy = spyOn(downloader, "downloadSttModel").mockRejectedValue(
+			new Error("Download failed: 503 Service Unavailable"),
+		);
+		let onAudio!: (error: Error | null, samples: Float32Array) => void;
+		const editor = {
+			insertText(_text: string): void {},
+			setVolatileText(_text: string): void {},
+			clearVolatileText(): void {},
+			commitVolatileText(_text: string): void {},
+			submit(): void {},
+			deleteBeforeCursor(_count: number): void {},
+		};
+		const warnings: string[] = [];
+		const options = {
+			showWarning(message: string): void {
+				warnings.push(message);
+			},
+			showStatus(_msg: string): void {},
+			onStateChange(_state: SttState): void {},
+		};
+		const controller = new STTController(
+			callback => {
+				onAudio = callback;
+				return { stop(): void {} };
+			},
+			{ resolveCloudCredential: () => Promise.resolve(undefined) },
+		);
+		try {
+			await controller.toggle(editor, options);
+			onAudio(null, sine16kHz());
+			await controller.toggle(editor, options);
+			expect(controller.state).toBe("idle");
+			expect(warnings).toEqual([
+				"No OpenAI credentials for cloud speech-to-text (API key or ChatGPT subscription) — falling back to the local model.",
+				"Download failed: 503 Service Unavailable",
+			]);
+		} finally {
+			controller.dispose();
+			cachedSpy.mockRestore();
+			downloadSpy.mockRestore();
+		}
+	});
 });
 
 describe("resolveSttCloudCredential", () => {
@@ -885,6 +1032,26 @@ describe("resolveSttCloudCredential", () => {
 			source: source.authStorage,
 			sessionId: "s1",
 		});
+	});
+
+	it("api-key route selects the OpenAI key even when a subscription is connected", async () => {
+		const source = registry("sub-token", "sk-key");
+		let subscriptionLookups = 0;
+		source.authStorage.getOAuthAccess = async () => {
+			subscriptionLookups++;
+			return { accessToken: "sub-token", accountId: "account-1" };
+		};
+		await expect(resolveSttCloudCredential(source, "s1", undefined, "api-key")).resolves.toEqual({
+			kind: "openai",
+			apiKey: "sk-key",
+		});
+		expect(subscriptionLookups).toBe(0);
+	});
+
+	it("subscription route never falls through to the API key", async () => {
+		await expect(
+			resolveSttCloudCredential(registry(undefined, "sk-key"), "s1", undefined, "subscription"),
+		).resolves.toBeUndefined();
 	});
 
 	it("preserves the OpenAI API endpoint and headers", async () => {
