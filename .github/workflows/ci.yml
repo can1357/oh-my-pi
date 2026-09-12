@@ -31,7 +31,7 @@ on:
          - "patches/**"
          - ".github/**"
    pull_request:
-      branches: [main]
+      branches: [main, omp2]
       paths:
          - "packages/**"
          - "crates/**"
