@@ -1,5 +1,6 @@
 import { type ApiKeyResolver, type OAuthAccessSource, seedApiKeyResolver } from "@oh-my-pi/pi-ai";
 import { AudioCapture } from "@oh-my-pi/pi-natives";
+import { getCodexAccountId } from "@oh-my-pi/pi-catalog/wire/codex";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { kNoAuth } from "../config/model-provider-discovery";
 import { settings } from "../config/settings";
@@ -90,7 +91,9 @@ export async function resolveSttCloudCredential(
 	if (authStorage && route !== "api-key") {
 		try {
 			const access = await authStorage.getOAuthAccess("openai-codex", sessionId, { signal });
-			if (access?.accessToken) return { kind: "codex", access, source: authStorage, sessionId };
+			if (access?.accessToken && (access.accountId ?? getCodexAccountId(access.accessToken))) {
+				return { kind: "codex", access, source: authStorage, sessionId };
+			}
 		} catch {
 			signal?.throwIfAborted();
 		}
