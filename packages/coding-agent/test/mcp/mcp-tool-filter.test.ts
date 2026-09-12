@@ -128,29 +128,28 @@ test("leading ! and extglob prefixes are literals (matcher surface pinned to doc
 });
 
 test("negated classes treat the slash as an ordinary member", () => {
-	// `[^/]` translates to `[^§]`, so `admin[^/]delete` does NOT match
-	// `admin/delete` while `[^a]` does — the slash is a member like any other.
-	// Picomatch's auto-injected `/` member is harmless here: no encoded name
-	// contains a raw `/`.
+	// `admin[^/]delete` does NOT match `admin/delete` while `admin[^a]*` does —
+	// the slash is a member like any other, and picomatch's auto-injected `/`
+	// member is dropped so it cannot exclude what the class never named.
 	expect(run(["admin/delete", "adminXdelete"], ["admin[^/]*"]).allowed).toEqual(["adminXdelete"]);
 	expect(run(["admin/delete", "adminXdelete"], ["admin[^a]*"]).allowed).toEqual(["admin/delete", "adminXdelete"]);
 	expect(run(NAMES, ["[^/]*"]).allowed).toEqual(NAMES);
 });
 
-test("single-char wildcard matches exactly one RAW character, sentinel included", () => {
-	// `/` occupies one encoded character, so `?` spans a slash position:
+test("single-char wildcard matches exactly one RAW character, slash included", () => {
+	// A slash is one character, so `?` spans a slash position:
 	expect(run(NAMES, ["a?min/delete"]).allowed).toEqual(["admin/delete"]);
-	// The name encoding is injective and variable-width (`§` → `¤§`), so `?` is
-	// emitted as an alternation over the encoded domain: it still spans exactly
-	// one RAW character — a literal `§` included — and `??` spans two.
+	// `?` is emitted as an alternation over raw characters rather than a bare
+	// negated class: it spans exactly one of them — a literal `§` included — and
+	// `??` spans two.
 	expect(run(["admin§delete"], ["admin?delete"]).allowed).toEqual(["admin§delete"]);
 	expect(run(["admin§delete"], ["admin??delete"]).allowed).toEqual([]);
 	expect(run(NAMES, ["admin??delete"]).allowed).toEqual([]);
 });
 
 test("positive classes with slash members match (admin[/]delete matches admin/delete)", () => {
-	// The slash transliteration preserves slash members inside positive
-	// classes: `[/]` matches a slash, `[a/]` matches `a` or a slash.
+	// A class body is emitted verbatim, so a slash member stays a member:
+	// `[/]` matches a slash, `[a/]` matches `a` or a slash.
 	expect(run(["admin/delete", "adminXdelete"], ["admin[/]delete"]).allowed).toEqual(["admin/delete"]);
 	expect(run(["xay", "x/y", "xby"], ["x[a/]y"]).allowed).toEqual(["xay", "x/y"]);
 	expect(run(["file_1", "file/1"], ["file[/_]1"]).allowed).toEqual(["file_1", "file/1"]);
@@ -185,9 +184,9 @@ test("a range may not widen into the reserved code points between its endpoints"
 	expect(run(["xby", "x/y"], ["x[a-/]y"]).allowed).toEqual([]);
 });
 
-test("classes treat the encoding's reserved characters as ordinary raw characters", () => {
-	// A literal `§` in a class addresses a tool name's own `§` (encoded `¤§`),
-	// not a slash; `/` is spelled `/`.
+test("a class addresses a name's own characters, not a rewritten domain", () => {
+	// A literal `§` in a class addresses a tool name's `§`, not a slash;
+	// `/` is spelled `/`.
 	expect(run(["x§y"], ["x[§]y"]).allowed).toEqual(["x§y"]);
 	expect(run(["x/y"], ["x[§]y"]).allowed).toEqual([]);
 	expect(run(["x/y"], ["x[/]y"]).allowed).toEqual(["x/y"]);
@@ -269,6 +268,14 @@ test("braces outside `{a,b}` alternation are literal", () => {
 	// A class is opaque to the brace scan too: `{[}],a}` alternates the class
 	// `[}]` with `a`, so the class's own `}` must not be read as the terminator.
 	expect(run(["}", "b", "a", "x"], ["{[}b],a}"]).allowed).toEqual(["}", "b", "a"]);
+	// `{a..c}` is a RANGE to picomatch, which collapses it to `[a-c]` and makes
+	// the brace spelling unaddressable — the opposite of the documented surface,
+	// where a brace pair without a top-level comma is literal. The same holds
+	// for a range with no endpoint, and for one ending the entry.
+	expect(run(["{a..c}", "a", "b", "c"], ["{a..c}"]).allowed).toEqual(["{a..c}"]);
+	expect(run(["{1..3}", "1", "2"], ["{1..3}"]).allowed).toEqual(["{1..3}"]);
+	expect(run(["{a..c}x", "ax", "cx"], ["{a..c}x"]).allowed).toEqual(["{a..c}x"]);
+	expect(run(["{..}", ".", ".."], ["{..}"]).allowed).toEqual(["{..}"]);
 });
 
 test("POSIX bracket classes expand the way picomatch expands them", () => {
@@ -282,8 +289,8 @@ test("POSIX bracket classes expand the way picomatch expands them", () => {
 	// A POSIX group is one member of the enclosing class: `[[:alpha:]b]` admits
 	// `a`–`z` and `b`, and the class still ends at the LAST bracket.
 	expect(run(["xay", "xby", "x/y"], ["x[[:alpha:]b]y"]).allowed).toEqual(["xay", "xby"]);
-	// The `/` a POSIX class admits reaches the tool only through the encoded
-	// sentinel, so the negation must stay exact in the raw domain too.
+	// A POSIX class admits `/` exactly when its table source names it, and a
+	// negated one excludes it just as exactly.
 	expect(run(["x/y", "x:y"], ["x[^[:punct:]]y"]).allowed).toEqual([]);
 	expect(run(["xay", "x:y"], ["x[^[:punct:]]y"]).allowed).toEqual(["xay"]);
 	// An unknown class name is not expanded by picomatch either: `[:foo:` stays
@@ -296,8 +303,7 @@ test("a class with a literal leading `]` member keeps its negated meaning", () =
 	// `[^]]` is "every character except `]`" — a leading `]` after `[^` is a
 	// member, not the closer. The membership oracle must spell that member
 	// escaped, or the bare `new RegExp("^[^]]$")` reads an Annex-B empty class
-	// and reports `/` absent, silently dropping the sentinel alternatives and
-	// leaving `admin[^]]delete` unable to match `admin/delete`.
+	// and reports `/` absent, wrongly excluding it from `admin[^]]delete`.
 	expect(run(["x]y", "xay", "x/y", "xmy"], ["x[^]]y"]).allowed).toEqual(["xay", "x/y", "xmy"]);
 	expect(run(["x]y", "xay"], ["x[]a]y"]).allowed).toEqual(["x]y", "xay"]);
 	expect(run(["x]y", "xay"], ["x[]]y"]).allowed).toEqual(["x]y"]);
@@ -363,11 +369,10 @@ test("a wildcard matches dot-segment names, which are opaque here", () => {
 	expect(run(["a/.b"], ["a/*"]).allowed).toEqual(["a/.b"]);
 });
 
-test("a wildcard never splits an encoded unit", () => {
-	// A raw `§`/`¤` occupies a two-character encoded unit (`¤§`/`¤¤`). A
-	// character-wise star may stop between those two characters, letting a
-	// following literal consume the orphaned half as if it were a whole unit:
-	// `*/` admitted the name `a§`, which has no slash at all.
+test("a wildcard never stops between the halves of a character", () => {
+	// A star counts raw characters, so it may not split a name in a way that
+	// lets a following literal consume a fragment as if it were a whole
+	// character: `*/` must not admit a name that has no slash at all.
 	expect(run(["a§", "a/", "a"], ["*/"]).allowed).toEqual(["a/"]);
 	expect(run(["§", "/"], ["**/"]).allowed).toEqual(["/"]);
 	expect(run(["§", "/", "x/"], ["{*,x}/"]).allowed).toEqual(["/", "x/"]);
@@ -377,18 +382,16 @@ test("a wildcard never splits an encoded unit", () => {
 	expect(run(["}¤/", " §"], ["*§"]).allowed).toEqual([" §"]);
 });
 
-test("slash encoding is injective (sentinel-carrying names cannot collide with slash names)", () => {
-	// A tool name containing the sentinel character (§) is reachable via JSON;
-	// the encoding escapes sentinels (§ → ¤§) before mapping slashes (/ → §),
-	// so `admin/*` must NOT admit `admin§delete` — the encoded strings differ.
+test("a slash pattern never matches the sentinel character", () => {
+	// Tool names are matched in their own domain, so a pattern spelling a slash
+	// addresses a slash: `admin/*` must NOT admit `admin§delete`.
 	expect(run(["admin/delete", "admin§delete"], ["admin/*"]).allowed).toEqual(["admin/delete"]);
-	// A star crosses the encoded slash unit, so admin* DOES match admin§delete:
-	// the encoding is injective but the star is opaque over the whole domain.
+	// A star is opaque over every character, so admin* DOES match admin§delete.
 	expect(run(["admin§delete"], ["admin*"]).allowed).toEqual(["admin§delete"]);
 	// A literal pattern matching a sentinel-carrying name still works.
 	expect(run(["admin§delete"], ["admin/delete"]).allowed).toEqual([]);
 	expect(run(["admin§delete"], ["admin§delete"]).allowed).toEqual(["admin§delete"]);
-	// The escape character (¤) is injective too: admin¤delete ≠ admin§delete.
+	// The sentinel character (¤) is distinct too: admin¤delete ≠ admin§delete.
 	expect(run(["admin¤delete", "admin§delete"], ["admin§delete"]).allowed).toEqual(["admin§delete"]);
 });
 
