@@ -104,14 +104,16 @@ function parseYieldType(value: unknown): string | string[] | undefined {
 	if (isYieldType(value)) return value;
 	throw new Error("type must be a string or non-empty array of strings");
 }
-/** Parse a `{`/`[`-leading JSON string; undefined on non-container or parse failure. */
-function parseJsonContainerString(value: string): unknown {
-	const trimmed = value.trim();
-	if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) return undefined;
+/** Parse any JSON-encoded string value (`"correct"`, `42`, `{"n":4}` …).
+ * Returns a `{parsed:true,value}` sentinel — never `undefined`-as-failure —
+ * so decoded `null`/`false` stay distinguishable from a parse error.
+ * Runs only after raw validation already failed, and the caller adopts the
+ * value only if it revalidates. */
+function parseJsonEncodedValue(value: string): { parsed: true; value: unknown } | { parsed: false } {
 	try {
-		return JSON.parse(trimmed);
+		return { parsed: true, value: JSON.parse(value) };
 	} catch {
-		return undefined;
+		return { parsed: false };
 	}
 }
 
@@ -429,6 +431,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 
 		const status = errorMessage !== undefined ? "aborted" : "success";
 		let schemaValidationOverridden = false;
+		let schemaValidationFailureCount = 0;
 		// Unknown incremental labels are a hard contract mismatch with the closed caller
 		// schema. Reject before the last-turn short-circuit too: `type: ["findings"], result: {}`
 		// would otherwise be accepted as a typed last-turn incremental yield, then a sibling
@@ -469,12 +472,13 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				// Lossless recovery: a JSON-encoded payload string parses to exactly
 				// the intended value (executor finalization already parses terminal
 				// yields the same way). Never the reverse — stringifying objects to
-				// fit string-typed fields is silent corruption.
-				const parsed = parseJsonContainerString(data);
-				if (parsed !== undefined) {
-					const revalidated = validateData(parsed);
+				// fit string-typed fields is silent corruption. The sentinel keeps
+				// decoded `null`/`false` distinct from a parse error.
+				const decoded = parseJsonEncodedValue(data);
+				if (decoded.parsed) {
+					const revalidated = validateData(decoded.value);
 					if (revalidated === undefined || revalidated.success) {
-						data = parsed;
+						data = decoded.value;
 						sectionFailure = revalidated;
 					}
 				}
@@ -492,7 +496,15 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 						`${scope} does not match schema: ${formatAllValidationIssues(sectionFailure.issues)}.${retryHint}`,
 					);
 				}
+				// Budget exhausted: capture the count for the message, accept, and
+				// reset so the next independent submission starts fresh.
+				schemaValidationFailureCount = this.#schemaValidationFailures;
+				this.#schemaValidationFailures = 0;
 				schemaValidationOverridden = true;
+			} else {
+				// Schema-valid submission: the documented budget is consecutive,
+				// so a success resets it for the next independent section.
+				this.#schemaValidationFailures = 0;
 			}
 		}
 
@@ -515,7 +527,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 						? `Item ${completedWorkPoolItem.index} submitted. All workpool items are complete; ending this turn.`
 						: `Item ${completedWorkPoolItem.index} submitted. Remaining item(s): ${remainingWorkPoolItems.map(item => item.index).join(", ")}.`
 					: schemaValidationOverridden
-						? `Result submitted (schema validation overridden after ${this.#schemaValidationFailures} failed attempt(s)).`
+						? `Result submitted (schema validation overridden after ${schemaValidationFailureCount} failed attempt(s)).`
 						: "Result submitted.";
 		return {
 			content: [{ type: "text", text: responseText }],
