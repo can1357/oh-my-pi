@@ -12,6 +12,7 @@
 import { describe, expect, it } from "bun:test";
 import { isCacheControlUnsupported } from "@oh-my-pi/pi-ai/error";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { AnthropicMessagesClient } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { AssistantMessage, Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -194,6 +195,56 @@ describe("Anthropic cache_control rejection fallback", () => {
 		// headers must be rebuilt alongside the body.
 		expect(capture.betaHeaders[1]).not.toContain(EXTENDED_CACHE_TTL_BETA);
 		expect(capture.betaHeaders[2]).not.toContain(EXTENDED_CACHE_TTL_BETA);
+	});
+
+	it("drops caller-supplied cache betas from the breakpoint-free retry", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const message = await streamAnthropic(MODEL, CONTEXT, {
+			apiKey: "sk-ant-api-test",
+			betas: [EXTENDED_CACHE_TTL_BETA, PROMPT_CACHING_SCOPE_BETA],
+			providerSessionState: new Map<string, ProviderSessionState>(),
+			fetch: createFetch(capture, ["reject", "ok"]),
+		}).result();
+
+		expect(message.stopReason).toBe("stop");
+		expect(capture.bodies).toHaveLength(2);
+		expect(capture.betaHeaders[0]).toContain(EXTENDED_CACHE_TTL_BETA);
+		expect(capture.betaHeaders[0]).toContain(PROMPT_CACHING_SCOPE_BETA);
+		expect(capture.betaHeaders[1]).not.toContain(EXTENDED_CACHE_TTL_BETA);
+		expect(capture.betaHeaders[1]).not.toContain(PROMPT_CACHING_SCOPE_BETA);
+	});
+
+	it("keeps an injected client rejection scoped to that client endpoint", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const states = new Map<string, ProviderSessionState>();
+		const fetchImpl = createFetch(capture, ["reject", "ok", "ok"]);
+		// SDK clients expose baseURL; retain the real transport underneath that shape.
+		const clientAt = (baseURL: string) => ({
+			baseURL,
+			messages: new AnthropicMessagesClient({
+				apiKey: "sk-ant-api-test",
+				baseURL,
+				fetch: fetchImpl,
+			}).messages,
+		});
+		const rejectingClient = clientAt("https://rejecting.example/v1");
+		const otherClient = clientAt("https://caching.example/v1");
+
+		const first = await streamAnthropic(MODEL, CONTEXT, {
+			client: rejectingClient,
+			providerSessionState: states,
+		}).result();
+		const other = await streamAnthropic(MODEL, CONTEXT, {
+			client: otherClient,
+			providerSessionState: states,
+		}).result();
+
+		expect(first.stopReason).toBe("stop");
+		expect(other.stopReason).toBe("stop");
+		expect(capture.bodies).toHaveLength(3);
+		expect(countBreakpoints(capture.bodies[0])).toBeGreaterThan(0);
+		expect(countBreakpoints(capture.bodies[1])).toBe(0);
+		expect(countBreakpoints(capture.bodies[2])).toBeGreaterThan(0);
 	});
 
 	it("keeps the rejection scoped to the rejecting endpoint and model", async () => {

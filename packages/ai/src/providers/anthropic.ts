@@ -2312,7 +2312,7 @@ const streamAnthropicOnce = (
 				: supportsAnthropicCompaction(model, baseUrl);
 			const providerSessionState = getAnthropicProviderSessionState(
 				options?.providerSessionState,
-				baseUrl,
+				options?.client !== undefined ? (injectedClientBaseUrl(options.client) ?? baseUrl) : baseUrl,
 				model.id,
 			);
 			let disableStrictTools =
@@ -2358,7 +2358,10 @@ const streamAnthropicOnce = (
 				if (options?.client) {
 					return { client: options.client, isOAuthToken: false };
 				}
-				const extraBetas = normalizeExtraBetas(options?.betas);
+				let extraBetas = normalizeExtraBetas(options?.betas);
+				if (dropCacheControl) {
+					extraBetas = extraBetas.filter(beta => beta !== extendedCacheTtlBeta && beta !== promptCachingScopeBeta);
+				}
 				const wantsAnthropicPriority = model.provider === "anthropic" && options?.serviceTier === "priority";
 				// Skip the fast-mode beta when this session already learned the
 				// endpoint+model rejects fast mode; `speed` is dropped from the params
