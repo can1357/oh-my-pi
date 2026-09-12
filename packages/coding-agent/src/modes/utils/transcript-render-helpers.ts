@@ -9,7 +9,7 @@ import { type Component, Text, TruncatedText } from "@oh-my-pi/pi-tui";
 import { formatBytes, formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AsyncJobType } from "../../async";
 import type { DaemonSnapshot } from "../../launch/protocol";
-import { normalizeExitReason } from "../../launch/exit-reason";
+import { displayExitReason } from "../../launch/exit-reason";
 import {
 	ASYNC_PROGRESS_MESSAGE_TYPE,
 	type AsyncProgressDetails,
@@ -89,8 +89,8 @@ function formatBackgroundWorkName(name: string | undefined, fallback: "unknown" 
 }
 
 function formatBackgroundWorkReason(reason: string | undefined): string | undefined {
-	const normalized = normalizeExitReason(reason);
-	return normalized ? truncateToWidth(shortenEmbeddedPaths(normalized), TRUNCATE_LENGTHS.LINE) : undefined;
+	const normalized = displayExitReason(reason);
+	return normalized ? truncateToWidth(normalized, TRUNCATE_LENGTHS.LINE) : undefined;
 }
 
 /** Terminal-state row for one completed background job or supervised process. */
@@ -102,7 +102,7 @@ function backgroundWorkCompletionRow(options: {
 	timedOut?: boolean;
 	durationMs?: number;
 	reason?: string;
-}): Text {
+}): TruncatedText {
 	const duration = typeof options.durationMs === "number" ? formatDuration(options.durationMs) : undefined;
 	const line = [
 		options.failed
@@ -116,7 +116,7 @@ function backgroundWorkCompletionRow(options: {
 	]
 		.filter(Boolean)
 		.join(" ");
-	return new Text(line, 1, 0);
+	return new TruncatedText(line, 1, 0);
 }
 
 /**

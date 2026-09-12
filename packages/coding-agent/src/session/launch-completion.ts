@@ -1,13 +1,11 @@
 import { prompt } from "@oh-my-pi/pi-utils";
-import { normalizeExitReason } from "../launch/exit-reason";
+import { displayExitReason } from "../launch/exit-reason";
 import type { DaemonCompletionNotification } from "../launch/protocol";
-import { shortenEmbeddedPaths } from "../tools/render-utils";
 import launchCompletionTemplate from "../prompts/session/launch-completion.md" with { type: "text" };
 import type { CustomMessage } from "./messages";
 
 function modelExitReason(reason: string | undefined): string | undefined {
-	const normalized = normalizeExitReason(reason);
-	return normalized ? shortenEmbeddedPaths(normalized) : undefined;
+	return displayExitReason(reason);
 }
 
 /** Yield-queue kind for broker-owned supervised process completions. */

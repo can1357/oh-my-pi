@@ -121,4 +121,20 @@ describe("buildLaunchCompletionBlock", () => {
 		expect(rendered).not.toContain("\t");
 		expect(message.details?.daemons[0]?.exitReason).toBe(rawReason);
 	});
+
+	it("truncates the complete supervised-process row to the viewport", () => {
+		const message = launchCompletionMessage("worker", {
+			state: "failed",
+			exitCode: 58,
+			exitReason: "diagnostic ".repeat(200),
+			exitedAt: 3,
+		});
+		const rendered = Bun.stripANSI(buildLaunchCompletionBlock(message).render(80).join("\n"));
+		const processLines = rendered.split("\n").filter(line => line.includes("Supervised process"));
+		const processLine = processLines[0] ?? "";
+
+		expect(processLines).toHaveLength(1);
+		expect(Bun.stringWidth(processLine)).toBeLessThanOrEqual(80);
+		expect(processLine).toContain("reason:");
+	});
 });
