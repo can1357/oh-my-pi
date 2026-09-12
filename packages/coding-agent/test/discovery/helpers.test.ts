@@ -1,11 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import type { LoadContext } from "@oh-my-pi/pi-coding-agent/capability/types";
-import { loadFilesFromDir } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
-import { parseFrontmatter, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { loadFilesFromDir, parseMCPToolFilterEntry } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { logger, parseFrontmatter, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 describe("parseFrontmatter", () => {
 	const parse = (content: string) => parseFrontmatter(content, { source: "tests:frontmatter", level: "off" });
@@ -201,5 +201,57 @@ describe("loadFilesFromDir recursion", () => {
 			path.join("mineru", "Lib", "site-packages", "gradio", "assets", "svelte", "media-query-D37ajmZt.js"),
 			"my-tool.ts",
 		]);
+	});
+});
+
+describe("parseMCPToolFilterEntry", () => {
+	test("drops non-string and empty members from an otherwise valid array", () => {
+		// The dropped members are what a consumer observes: a numeric entry in a
+		// list of tool names must never reach the matcher, where it would be
+		// compiled as a pattern, and an empty string would match nothing while
+		// still counting as a configured entry.
+		expect(parseMCPToolFilterEntry("srv", ["read", "", 7, "write_*", null])).toEqual(["read", "write_*"]);
+	});
+
+	test("an empty or absent array leaves the filter off", () => {
+		expect(parseMCPToolFilterEntry("srv", [])).toBeUndefined();
+		expect(parseMCPToolFilterEntry("srv", undefined)).toBeUndefined();
+	});
+
+	test("warns and rejects non-array values (the allowlist failure mode is silent over-permission)", () => {
+		const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			expect(parseMCPToolFilterEntry("srv", "read, write")).toBeUndefined();
+			expect(parseMCPToolFilterEntry("srv", { read: true })).toBeUndefined();
+			expect(warnSpy).toHaveBeenCalledTimes(2);
+			// Attribution: the warn names the server (mirrors requestIdFormat warns).
+			expect(String(warnSpy.mock.calls[0]?.[0])).toContain('MCP server "srv"');
+			expect(String(warnSpy.mock.calls[0]?.[0])).toContain("invalid tool filter value");
+			expect(String(warnSpy.mock.calls[0]?.[0])).toContain("read, write");
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
+	test("warns when a non-empty array has no valid members (same fail-open as non-array)", () => {
+		const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			expect(parseMCPToolFilterEntry("srv", [false])).toBeUndefined();
+			expect(parseMCPToolFilterEntry("srv", [""])).toBeUndefined();
+			expect(warnSpy).toHaveBeenCalledTimes(2);
+			expect(String(warnSpy.mock.calls[0]?.[0])).toContain("no valid entries");
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
+	test("dropping empty string members does not warn (valid array with filtered members)", () => {
+		const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			expect(parseMCPToolFilterEntry("srv", ["read", ""])).toEqual(["read"]);
+			expect(warnSpy).not.toHaveBeenCalled();
+		} finally {
+			warnSpy.mockRestore();
+		}
 	});
 });

@@ -5,6 +5,8 @@
 
 ### Added
 
+- Added per-server `enabledTools` and `disabledTools` MCP tool filtering ([#6299](https://github.com/can1357/oh-my-pi/issues/6299)).
+- MCP configs whose server entry relies on a shared field (`timeout`, `requestIdFormat`, `enabledTools`, `disabledTools`, …) now validate against the bundled JSON schema on every transport, instead of only when no transport-specific key is present.
 - Added default-off speculative execution for validated local reads, including reads projected from nested JavaScript and Python eval cells.
 - `/usage` now shows prepaid credit balances (e.g. Charm Hyper's `100 credits left`) on the provider cards and account summaries instead of `no data` ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
 - Retry fallback chains now support per-model reasoning efforts: a fallback entry may carry an explicit thinking suffix (`"default": ["openai/gpt-5-mini:low"]`), and pressing `t` on a fallback row in `/models` sets or clears it. Bare entries keep inheriting the failing turn's effort. ([#11842](https://github.com/can1357/oh-my-pi/pull/11842) by [@H4vC](https://github.com/H4vC)).

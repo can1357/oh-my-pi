@@ -31,6 +31,7 @@ import {
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
 	loadFilesFromDir,
+	parseMCPToolFilters,
 	parseRequestIdFormat,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
@@ -108,8 +109,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		const data = tryParseJson<{ mcpServers?: Record<string, unknown> }>(content);
 		if (!data?.mcpServers) return result;
 
-		const expanded = expandEnvVarsDeep(data.mcpServers);
-		for (const [serverName, config] of Object.entries(expanded)) {
+		for (const [serverName, config] of Object.entries(data.mcpServers)) {
 			const serverConfig = config as Record<string, unknown>;
 
 			// Validate enabled: coerce string "true"/"false", warn on other types
@@ -162,19 +162,24 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 					`MCP server "${serverName}": invalid requestIdFormat ${JSON.stringify(serverConfig.requestIdFormat)}, ignoring`,
 				);
 			}
-
+			// Strict array-of-nonempty-strings; comma globs like "{a,b}_*" survive intact
+			// Tool-filter entries are patterns, not values, so `${VAR}` in them
+			// stays literal: the fields that DO expand are expanded one by one
+			// rather than by expanding the whole server object. This matches the
+			// standalone fallback and plugin loaders.
 			result.push({
 				name: serverName,
 				enabled,
 				timeout,
 				requestIdFormat,
-				command: serverConfig.command as string | undefined,
-				args: serverConfig.args as string[] | undefined,
-				env: serverConfig.env as Record<string, string> | undefined,
-				cwd: serverConfig.cwd as string | undefined,
-				url: serverConfig.url as string | undefined,
-				headers: serverConfig.headers as Record<string, string> | undefined,
-				auth: serverConfig.auth as
+				...parseMCPToolFilters(serverName, serverConfig),
+				command: expandEnvVarsDeep(serverConfig.command) as string | undefined,
+				args: expandEnvVarsDeep(serverConfig.args) as string[] | undefined,
+				env: expandEnvVarsDeep(serverConfig.env) as Record<string, string> | undefined,
+				cwd: expandEnvVarsDeep(serverConfig.cwd) as string | undefined,
+				url: expandEnvVarsDeep(serverConfig.url) as string | undefined,
+				headers: expandEnvVarsDeep(serverConfig.headers) as Record<string, string> | undefined,
+				auth: expandEnvVarsDeep(serverConfig.auth) as
 					| {
 							type: "oauth" | "apikey";
 							credentialId?: string;
@@ -183,7 +188,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 							clientSecret?: string;
 					  }
 					| undefined,
-				oauth: serverConfig.oauth as
+				oauth: expandEnvVarsDeep(serverConfig.oauth) as
 					| {
 							clientId?: string;
 							clientSecret?: string;
