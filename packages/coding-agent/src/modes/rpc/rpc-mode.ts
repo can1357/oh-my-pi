@@ -1098,19 +1098,21 @@ export async function runRpcMode(
 	let inputTail: Promise<void> = Promise.resolve();
 	let inputGeneration = 0;
 	let abortTail: Promise<void> = Promise.resolve();
+	let inputTransition: Promise<void> | undefined;
 	const abortUserInput = () => {
 		const generation = ++inputGeneration;
-		const completion = Promise.allSettled([abortTail, session.abort({ reason: USER_INTERRUPT_LABEL })]).then(
-			results => {
-				for (const result of results) {
-					if (result.status === "rejected") throw result.reason;
-				}
-			},
-		);
+		const abort = async () => {
+			if (inputTransition) await inputTransition;
+			await session.abort({ reason: USER_INTERRUPT_LABEL });
+		};
+		const completion = Promise.allSettled([abortTail, abort()]).then(results => {
+			for (const result of results) {
+				if (result.status === "rejected") throw result.reason;
+			}
+		});
 		abortTail = completion.catch(() => {});
 		return { generation, completion };
 	};
-	let inputTransition: Promise<void> | undefined;
 	type UserInputCommand = Extract<RpcCommand, { type: "prompt" | "steer" | "follow_up" | "abort_and_prompt" }>;
 	const dispatchUserInput = (command: UserInputCommand, generation = inputGeneration): Promise<boolean> => {
 		const scope = { disconnected: false };
@@ -1176,7 +1178,10 @@ export async function runRpcMode(
 						return {
 							completion:
 								"prompt" in builtinResult && isCurrent()
-									? session.prompt(builtinResult.prompt, { images })
+									? session.prompt(builtinResult.prompt, {
+											images,
+											streamingBehavior: command.streamingBehavior,
+										})
 									: Promise.resolve("agentInvoked" in builtinResult && builtinResult.agentInvoked === true),
 						};
 					}

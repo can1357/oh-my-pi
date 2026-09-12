@@ -72,13 +72,15 @@ export default function nativeInputExtension(pi: ExtensionAPI): void {
 			transitionDecision = args;
 		},
 	});
-	pi.on("session_before_switch", async () => {
+	const gateTransition = async () => {
 		if (!transitionDecision) return;
 		const decision = transitionDecision;
 		transitionDecision = undefined;
 		await fetch(`${url}/gates`, { method: "POST", body: JSON.stringify({ name: "transition" }) });
 		return { cancel: decision === "cancel" };
-	});
+	};
+	pi.on("session_before_switch", gateTransition);
+	pi.on("session_before_branch", gateTransition);
 	pi.on("before_agent_start", async event => {
 		await record({ event: "before_agent_start", text: event.prompt, images: event.images });
 	});

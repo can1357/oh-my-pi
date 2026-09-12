@@ -574,6 +574,8 @@ Queued delivery and programmatic extension messages do not emit input again.
 The existing command routes remain distinct: only `prompt` interprets RPC
 builtins and skills; explicit `steer`/`follow_up` retain their queue-only command
 rules, and `abort_and_prompt` retains its `session.prompt` replacement route.
+Prompts returned by builtins retain the original `prompt` command's explicit
+`streamingBehavior`, so they queue as steering or follow-up work while streaming.
 `steer`/`follow_up` success acknowledges completed input/queue processing, not a
 completed agent turn, including when a handler consumed the input locally.
 
@@ -585,6 +587,8 @@ commands can overtake a waiting input handler; its normal forwarding is cancelle
 when it finishes. Commands accepted after an abort wait for its cleanup, including
 all earlier aborts still settling. A newer abort or replacement invalidates an
 older `abort_and_prompt` replacement before it can dispatch.
+An abort received during a session transition invalidates ingress immediately,
+but waits for that transition before running session-abort cleanup.
 
 Session transitions suspend pending ingress until the transition settles. A
 committed transition cancels old-session input; a vetoed transition preserves it

@@ -525,6 +525,39 @@ for (const mode of ["rpc", "rpc-ui"] as const) {
 			}
 		}, 60000);
 
+		test("preserves explicit streaming routes for prompts returned by builtins", async () => {
+			const probe = new NativeInputProbe();
+			try {
+				await probe.start(mode);
+				await probe.command({
+					type: "set_host_tools",
+					tools: [
+						{ name: "probe_echo", description: "Probe tool", parameters: { type: "object", properties: {} } },
+					],
+				});
+				await probe.command({ type: "set_interrupt_mode", mode: "wait" });
+				for (const streamingBehavior of ["steer", "followUp"] as const) {
+					const index = probe.requests.length;
+					await probe.command({ type: "prompt", message: "ACTIVE_BUILTIN_TURN" });
+					const active = await probe.request(index);
+					await probe.command({
+						type: "prompt",
+						message: `rewrite:/force:probe_echo BUILTIN_${streamingBehavior}`,
+						streamingBehavior,
+					});
+					await probe.command({ type: "follow_up", message: "handled" });
+					expect((await probe.command({ type: "get_state" })).data).toMatchObject({ queuedMessageCount: 1 });
+					active.release();
+					const queued = await probe.request(index + 1);
+					expect(userContent(queued)).toContain(`BUILTIN_${streamingBehavior}`);
+					expect(userContent(queued)).not.toContain("/force:");
+					await probe.finish(queued);
+				}
+			} finally {
+				await probe.close();
+			}
+		}, 60000);
+
 		test("keeps abort-and-prompt on its existing session prompt route", async () => {
 			const probe = new NativeInputProbe();
 			try {
@@ -759,6 +792,38 @@ for (const mode of ["rpc", "rpc-ui"] as const) {
 						expect(probe.requests).toHaveLength(0);
 					}
 					expect(probe.input("wait-ui:transition")).toHaveLength(1);
+				} finally {
+					await probe.close();
+				}
+			}, 60000);
+		}
+
+		for (const transitionType of ["new_session", "branch"] as const) {
+			test(`abort waits for an active ${transitionType} transition before reporting completion`, async () => {
+				const probe = new NativeInputProbe();
+				try {
+					await probe.start(mode);
+					await probe.command({ type: "prompt", message: "BRANCH_SEED" });
+					await probe.finish(await probe.request(0));
+					const branches = await probe.command({ type: "get_branch_messages" });
+					if (!isRecord(branches.data) || !Array.isArray(branches.data.messages))
+						throw new Error("Missing branches");
+					const entry = branches.data.messages[0];
+					if (!isRecord(entry) || typeof entry.entryId !== "string") throw new Error("Missing branch entry");
+					const armed = await probe.command({ type: "prompt", message: "/native-transition commit" });
+					await probe.localResult(String(armed.id));
+					const transition = await probe.send(
+						transitionType === "branch" ? { type: "branch", entryId: entry.entryId } : { type: "new_session" },
+					);
+					const release = await probe.gate("transition");
+					const abort = await probe.send({ type: "abort" });
+					await probe.command({ type: "bash", command: "true" });
+					expect(probe.frames.some(frame => frame.type === "response" && frame.id === abort)).toBe(false);
+					release();
+					expect(await probe.response(transition)).toMatchObject({ success: true, data: { cancelled: false } });
+					expect(await probe.response(abort)).toMatchObject({ success: true });
+					expect((await probe.command({ type: "get_messages" })).data).toMatchObject({ messages: [] });
+					expect((await probe.command({ type: "get_state" })).data).toMatchObject({ isStreaming: false });
 				} finally {
 					await probe.close();
 				}
