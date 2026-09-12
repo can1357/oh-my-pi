@@ -5,14 +5,15 @@
  * byte-identical body, so such an endpoint used to break the turn outright.
  *
  * The provider must replay the request once without prompt-cache breakpoints,
- * remember the rejection for the rest of the session (per baseUrl+model), and
- * stop advertising the extended-cache-ttl beta on requests that carry no
- * breakpoint at all.
+ * remember the rejection for the rest of the session — scoped to the model and
+ * to the endpoint the request reached, or to the injected client itself when it
+ * publishes no endpoint — and stop advertising the extended-cache-ttl beta on
+ * requests that carry no breakpoint at all.
  */
 import { describe, expect, it } from "bun:test";
 import { isCacheControlUnsupported } from "@oh-my-pi/pi-ai/error";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
-import { AnthropicMessagesClient } from "@oh-my-pi/pi-ai/providers/anthropic-client";
+import { AnthropicMessagesClient, type AnthropicMessagesClientLike } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { AssistantMessage, Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -126,6 +127,19 @@ function runTurn(fetchImpl: FetchImpl, states: Map<string, ProviderSessionState>
 	}).result();
 }
 
+/** The real transport, pointed at an arbitrary endpoint over the capturing fetch. */
+function transportAt(baseURL: string, fetchImpl: FetchImpl): AnthropicMessagesClient {
+	return new AnthropicMessagesClient({ apiKey: "sk-ant-api-test", baseURL, fetch: fetchImpl });
+}
+
+/**
+ * An injected client whose transport is real but whose routing is unknowable:
+ * it publishes no `baseURL`, exactly like a caller-owned proxy wrapper.
+ */
+function createOpaqueClient(baseURL: string, fetchImpl: FetchImpl): AnthropicMessagesClientLike {
+	return { messages: transportAt(baseURL, fetchImpl).messages };
+}
+
 /** Every `cache_control` breakpoint on the wire, across tools, system and messages. */
 function countBreakpoints(body: MessageCreateParams): number {
 	let count = 0;
@@ -214,37 +228,101 @@ describe("Anthropic cache_control rejection fallback", () => {
 		expect(capture.betaHeaders[1]).not.toContain(PROMPT_CACHING_SCOPE_BETA);
 	});
 
-	it("keeps an injected client rejection scoped to that client endpoint", async () => {
+	// Two client shapes that both publish an endpoint: an SDK-shaped wrapper over
+	// our transport, and the transport itself, which now reports the `baseURL`
+	// its requests actually go to. Both must key their learning by that endpoint
+	// rather than by the model's own routing.
+	const endpointClients: Array<{
+		label: string;
+		create: (baseURL: string, fetchImpl: FetchImpl) => AnthropicMessagesClientLike;
+	}> = [
+		{
+			label: "an SDK-shaped wrapper",
+			create: (baseURL, fetchImpl) => ({ baseURL, messages: transportAt(baseURL, fetchImpl).messages }),
+		},
+		{
+			label: "a real AnthropicMessagesClient",
+			create: (baseURL, fetchImpl) => transportAt(baseURL, fetchImpl),
+		},
+	];
+
+	for (const shape of endpointClients) {
+		it(`keeps a rejection from ${shape.label} scoped to that client endpoint`, async () => {
+			const capture: Capture = { bodies: [], betaHeaders: [] };
+			const states = new Map<string, ProviderSessionState>();
+			const fetchImpl = createFetch(capture, ["reject", "ok", "ok"]);
+			const rejectingClient = shape.create("https://rejecting.example/v1", fetchImpl);
+			const otherClient = shape.create("https://caching.example/v1", fetchImpl);
+
+			const first = await streamAnthropic(MODEL, CONTEXT, {
+				client: rejectingClient,
+				providerSessionState: states,
+			}).result();
+			const other = await streamAnthropic(MODEL, CONTEXT, {
+				client: otherClient,
+				providerSessionState: states,
+			}).result();
+
+			expect(first.stopReason).toBe("stop");
+			expect(other.stopReason).toBe("stop");
+			expect(capture.bodies).toHaveLength(3);
+			expect(countBreakpoints(capture.bodies[0])).toBeGreaterThan(0);
+			expect(countBreakpoints(capture.bodies[1])).toBe(0);
+			expect(countBreakpoints(capture.bodies[2])).toBeGreaterThan(0);
+		});
+	}
+
+	it("keeps an opaque injected client's rejection off a later non-injected request", async () => {
 		const capture: Capture = { bodies: [], betaHeaders: [] };
 		const states = new Map<string, ProviderSessionState>();
 		const fetchImpl = createFetch(capture, ["reject", "ok", "ok"]);
-		// SDK clients expose baseURL; retain the real transport underneath that shape.
-		const clientAt = (baseURL: string) => ({
-			baseURL,
-			messages: new AnthropicMessagesClient({
-				apiKey: "sk-ant-api-test",
-				baseURL,
-				fetch: fetchImpl,
-			}).messages,
-		});
-		const rejectingClient = clientAt("https://rejecting.example/v1");
-		const otherClient = clientAt("https://caching.example/v1");
 
-		const first = await streamAnthropic(MODEL, CONTEXT, {
-			client: rejectingClient,
+		const proxied = await streamAnthropic(MODEL, CONTEXT, {
+			client: createOpaqueClient("https://opaque-proxy.example/v1", fetchImpl),
 			providerSessionState: states,
 		}).result();
-		const other = await streamAnthropic(MODEL, CONTEXT, {
-			client: otherClient,
-			providerSessionState: states,
-		}).result();
+		// Same model, same session state, no client: the official endpoint, which
+		// the opaque proxy's refusal cannot speak for.
+		const direct = await runTurn(fetchImpl, states);
 
-		expect(first.stopReason).toBe("stop");
-		expect(other.stopReason).toBe("stop");
+		expect(proxied.stopReason).toBe("stop");
+		expect(direct.stopReason).toBe("stop");
 		expect(capture.bodies).toHaveLength(3);
-		expect(countBreakpoints(capture.bodies[0])).toBeGreaterThan(0);
 		expect(countBreakpoints(capture.bodies[1])).toBe(0);
 		expect(countBreakpoints(capture.bodies[2])).toBeGreaterThan(0);
+		expect(direct.disabledFeatures ?? []).not.toContain("prompt-cache");
+	});
+
+	it("keeps two opaque injected clients from sharing the rejection", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const states = new Map<string, ProviderSessionState>();
+		const fetchImpl = createFetch(capture, ["reject", "ok", "ok"]);
+		const rejecting = createOpaqueClient("https://opaque-rejecting.example/v1", fetchImpl);
+		const caching = createOpaqueClient("https://opaque-caching.example/v1", fetchImpl);
+
+		await streamAnthropic(MODEL, CONTEXT, { client: rejecting, providerSessionState: states }).result();
+		const other = await streamAnthropic(MODEL, CONTEXT, { client: caching, providerSessionState: states }).result();
+
+		expect(other.stopReason).toBe("stop");
+		expect(capture.bodies).toHaveLength(3);
+		expect(countBreakpoints(capture.bodies[1])).toBe(0);
+		expect(countBreakpoints(capture.bodies[2])).toBeGreaterThan(0);
+	});
+
+	it("still seeds the next turn through the same opaque injected client", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const states = new Map<string, ProviderSessionState>();
+		const fetchImpl = createFetch(capture, ["reject", "ok", "ok"]);
+		const client = createOpaqueClient("https://opaque-proxy.example/v1", fetchImpl);
+
+		await streamAnthropic(MODEL, CONTEXT, { client, providerSessionState: states }).result();
+		const second = await streamAnthropic(MODEL, CONTEXT, { client, providerSessionState: states }).result();
+
+		expect(second.stopReason).toBe("stop");
+		// Three requests, not four: the second turn's first attempt already
+		// carried no breakpoint, so the proxy never refused it again.
+		expect(capture.bodies).toHaveLength(3);
+		expect(countBreakpoints(capture.bodies[2])).toBe(0);
 	});
 
 	it("keeps the rejection scoped to the rejecting endpoint and model", async () => {
