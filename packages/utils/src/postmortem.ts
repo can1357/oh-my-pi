@@ -293,24 +293,22 @@ function faultWorkerIpcChannels(err: Error): void {
  * Graceful shutdown driven by `process.stdout`'s own `error` event.
  *
  * A closed stdout consumer (`omp --help | head`, an ACP client dropping the
- * pipe) delivers the failing write here — attributable to stdout by
+ * pipe) delivers the broken-pipe write here — attributable to stdout by
  * construction, unlike a process-wide `syscall: "write"` match that a closed
- * subprocess stdin or socket would also satisfy. A broken pipe runs cleanup and
- * exits 0 (Unix `| head` semantics); any other stdout error keeps the fatal
- * path so a genuine failure is never silently swallowed.
+ * subprocess stdin or socket would also satisfy — so it runs cleanup and exits
+ * 0 (Unix `| head` semantics).
+ *
+ * Only the broken-pipe case is claimed. A non-EPIPE stdout error (a revoked PTY
+ * reporting `EIO`) is left for other `error` listeners: the TUI installs its own
+ * stdout handler that treats a disconnect as SIGHUP/exit-129, and this listener
+ * is installed first on an interactive launch, so forcing a fatal exit here
+ * would preempt that established path. Attaching a listener already suppresses
+ * Node's default throw, so deferring is a safe no-op when no other listener runs.
  */
 function onStdoutDisconnect(err: Error): void {
-	if (classifyBrokenPipe(err) === "stdio-write") {
-		logger.warn("Stdout peer disconnected; shutting down gracefully", { err });
-		void runQuit(0, "native", { drainStdout: false });
-		return;
-	}
-	void exitAfterFatal(
-		`${formatFatalError("Stdout Error", err)}${formatFatalRecoveryHints()}`,
-		"Stdout error",
-		err,
-		Reason.UNCAUGHT_EXCEPTION,
-	);
+	if (classifyBrokenPipe(err) !== "stdio-write") return;
+	logger.warn("Stdout peer disconnected; shutting down gracefully", { err });
+	void runQuit(0, "native", { drainStdout: false });
 }
 
 /**

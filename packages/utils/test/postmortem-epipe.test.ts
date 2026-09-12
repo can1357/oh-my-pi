@@ -9,6 +9,7 @@ const stdoutDisconnectChildFlag = "--stdout-disconnect-child";
 const attributionChildFlag = "--attribution-write-epipe-child";
 const unrelatedUncaughtChildFlag = "--unrelated-uncaught-child";
 const socketClosedChildFlag = "--socket-closed-child";
+const deferNonEpipeChildFlag = "--defer-non-epipe-stdout-child";
 
 const CHILD_FLAGS = [
 	uncaughtIpcChildFlag,
@@ -16,6 +17,7 @@ const CHILD_FLAGS = [
 	attributionChildFlag,
 	unrelatedUncaughtChildFlag,
 	socketClosedChildFlag,
+	deferNonEpipeChildFlag,
 ];
 if (process.argv.includes(unrelatedUncaughtChildFlag)) {
 	// A synchronous throw with no stdio identity must stay fatal.
@@ -56,6 +58,17 @@ if (process.argv.includes(unrelatedUncaughtChildFlag)) {
 		throw Object.assign(new Error("EPIPE: broken pipe, write"), { code: "EPIPE", syscall: "write", errno: -32 });
 	});
 	await Promise.withResolvers<void>().promise;
+} else if (process.argv.includes(deferNonEpipeChildFlag)) {
+	const marker = process.argv[process.argv.indexOf(deferNonEpipeChildFlag) + 1];
+	if (!marker) throw new Error("Missing survival marker path");
+	postmortem.registerStdioDisconnectHandling();
+	// A non-EPIPE stdout error (a revoked PTY reporting EIO) must be deferred, not
+	// turned into a fatal exit — otherwise it would preempt the TUI's own stdout
+	// listener (SIGHUP/exit-129) on an interactive launch. Attaching the listener
+	// already suppresses Node's default throw, so the process survives.
+	process.stdout.emit("error", Object.assign(new Error("EIO"), { code: "EIO", syscall: "write" }));
+	await Bun.write(marker, "survived non-epipe stdout error");
+	process.exit(0);
 } else if (process.argv.includes(socketClosedChildFlag)) {
 	const err = Object.assign(new Error("Socket is closed"), { code: "ERR_SOCKET_CLOSED" });
 	err.stack = "Error: Socket is closed\n    at unknown\n    at close (node:net:686:67)";
@@ -134,6 +147,30 @@ if (!CHILD_FLAGS.some(flag => process.argv.includes(flag))) {
 			expect(exitCode).toBe(1);
 			expect(stderr).toContain("[Uncaught Exception]");
 			expect(stderr).toContain("EPIPE");
+		});
+
+		// A non-EPIPE stdout error (revoked PTY reporting EIO) must be deferred, not
+		// turned into a fatal exit: the postmortem listener is installed before the
+		// TUI's own stdout listener on an interactive launch, so a fatal exit here
+		// would preempt the terminal disconnect path (SIGHUP/exit-129).
+		it("defers a non-EPIPE stdout error instead of forcing a fatal exit", async () => {
+			const marker = path.join(os.tmpdir(), `omp-postmortem-defer-${process.pid}-${Date.now()}`);
+			const child = Bun.spawn([process.execPath, "run", import.meta.path, deferNonEpipeChildFlag, marker], {
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			try {
+				const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+				expect(exitCode, stderr).toBe(0);
+				expect(stderr).not.toContain("[Stdout Error]");
+				expect(stderr).not.toContain("[Uncaught Exception]");
+				expect(await Bun.file(marker).text()).toBe("survived non-epipe stdout error");
+			} finally {
+				child.kill();
+				await child.exited;
+				await fs.rm(marker, { force: true });
+			}
 		});
 
 		// Exercises a real failed stdout write (not a synthetic thrown error): a
