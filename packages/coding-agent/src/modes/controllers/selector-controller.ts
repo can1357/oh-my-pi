@@ -610,7 +610,8 @@ export class SelectorController {
 				}
 				this.ctx.chatContainer.setToolActivityVisible(!hidden);
 				if (hidden) this.ctx.ui.clearInlineImages();
-				this.ctx.ui.requestRender(true);
+				// Match the shortcut path: visibility changes must rebuild retired terminal history.
+				this.ctx.ui.resetDisplay();
 				break;
 			}
 			case "terminal.showImages":
