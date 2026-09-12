@@ -28,8 +28,10 @@ class "minimax" {
 	}
 	// MiniMax-M3: 512K is the standard pricing-tier boundary leaked into
 	// upstream metadata, not the model ceiling (documented: 1M in / 128K out).
-	on "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" {
-		models "MiniMax-M3" {
+	// Exact selectors are case-sensitive, so both served spellings are listed:
+	// MiniMax hosts publish `MiniMax-M3`, Charm Hyper publishes `minimax-m3`.
+	on "charm-hyper" "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" {
+		models "MiniMax-M3" "minimax-m3" {
 			limits-patch {
 				context-window 1000000
 				max-tokens 128000
