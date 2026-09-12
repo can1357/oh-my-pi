@@ -18,7 +18,9 @@ import { StdinStallWatchdog } from "@oh-my-pi/pi-tui/terminal";
 // therefore must NOT close an episode or reset the escalation counter —
 // only cooldownMs of sustained liveness does. While an episode is open the
 // detection window tightens to fastMs so each keystroke batch costs at most
-// one fast window of lag.
+// one fast window of lag. Once stalls persist past the re-attach rung the
+// watchdog answers "adopt": the caller parks the stream and becomes the
+// input pump itself.
 const STALL_MS = 1500;
 const SOFT = 2;
 const FAST_MS = 300;
@@ -56,13 +58,14 @@ describe("StdinStallWatchdog", () => {
 		expect(wd.sample(3, stale(2500), 2500)).toBe("resume"); // dead pump
 	});
 
-	it("escalates: soft resume re-arms first, then listener re-attach", () => {
+	it("escalates: soft resume, listener re-attach, then adoption", () => {
 		const wd = make();
 		expect(wd.sample(3, stale(1000), 1000)).toBe("none");
 		expect(wd.sample(3, stale(2500), 2500)).toBe("resume");
 		expect(wd.sample(3, stale(4000), 4000)).toBe("resume");
-		for (const t of [5500, 7000, 8500]) {
-			expect(wd.sample(3, stale(t), t)).toBe("reattach");
+		expect(wd.sample(3, stale(5500), 5500)).toBe("reattach");
+		for (const t of [7000, 8500, 10000]) {
+			expect(wd.sample(3, stale(t), t)).toBe("adopt");
 		}
 	});
 
@@ -78,16 +81,18 @@ describe("StdinStallWatchdog", () => {
 	it("a single drained sample does not close the episode (catch-up read)", () => {
 		// The flapping corpse: every pause/resume drains exactly one batch
 		// via bun's speculative catch-up read, then dies again. The stall
-		// counter must keep counting so escalation to re-attach is reached.
+		// counter must keep counting so escalation to adoption is reached.
 		const wd = make();
 		expect(wd.sample(4, stale(1000), 1000)).toBe("none");
 		expect(wd.sample(4, stale(2500), 2500)).toBe("resume"); // stall #1
 		// Re-arm drained the 4 bytes and emitted data; 10ms later the user
 		// types again and the pump is already dead.
 		expect(wd.sample(0, 2510, 2510)).toBe("none"); // one healthy sample
-		expect(wd.sample(8, stale(6000), 6000)).toBe("resume"); // stall #2 (3.5s past fire)
+		expect(wd.sample(8, stale(6000), 6000)).toBe("resume"); // stall #2
 		expect(wd.sample(0, 6010, 6010)).toBe("none"); // another catch-up drain
 		expect(wd.sample(1, stale(9000), 9000)).toBe("reattach"); // stall #3
+		expect(wd.sample(0, 9010, 9010)).toBe("none");
+		expect(wd.sample(2, stale(12_000), 12_000)).toBe("adopt"); // stall #4
 	});
 
 	it("detects re-stalls at the fast window once an episode is open", () => {
@@ -128,6 +133,8 @@ describe("StdinStallWatchdog", () => {
 		expect(wd.sample(3, stale(10_000), 10_000)).toBe("resume"); // stall #2
 		expect(wd.sample(0, 10_100, 10_100)).toBe("none");
 		expect(wd.sample(3, stale(20_000), 20_000)).toBe("reattach"); // stall #3
+		expect(wd.sample(0, 20_100, 20_100)).toBe("none");
+		expect(wd.sample(3, stale(30_000), 30_000)).toBe("adopt"); // stall #4
 	});
 
 	it("does not inherit a stale window across a healthy period", () => {
