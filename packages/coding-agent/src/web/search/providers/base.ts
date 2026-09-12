@@ -66,6 +66,8 @@ export interface SearchParams {
 	authStorage: AuthStorage;
 	/** Provider/model transport settings used by native search endpoints. */
 	modelRegistry?: ModelRegistry;
+	/** Exact active model identifier, when the caller has trusted session metadata. */
+	modelName?: string;
 	/**
 	 * Optional session id used as the round-robin / sticky key when selecting
 	 * among multiple credentials for the same provider. Pass through from the

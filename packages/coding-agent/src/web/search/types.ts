@@ -54,7 +54,11 @@ export const SEARCH_PROVIDER_OPTIONS = [
 		description:
 			"Kimi Code search (requires a Kimi Code Console key via KIMI_SEARCH_API_KEY/MOONSHOT_SEARCH_API_KEY or /login kimi-code; not MOONSHOT_API_KEY)",
 	},
-	{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
+	{
+		value: "parallel",
+		label: "Parallel",
+		description: "API via /login parallel or PARALLEL_API_KEY; explicit keyless fallback via MCP",
+	},
 	{ value: "synthetic", label: "Synthetic", description: "Requires SYNTHETIC_API_KEY" },
 	{ value: "searxng", label: "SearXNG", description: "Requires SEARXNG_ENDPOINT or searxng.endpoint" },
 	{
