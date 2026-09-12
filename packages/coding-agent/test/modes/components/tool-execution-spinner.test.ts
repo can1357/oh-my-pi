@@ -488,4 +488,162 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			stopSharedSpinnerTicker();
 		}
 	});
+
+	// Regression (PR #9377 follow-up, codex review): when the staged replay
+	// inside `UiHelpers.renderInitialMessages()` throws, its own rollback only
+	// restores the untouched visible container -- it never disposes that
+	// container's children, since they were never touched. A tool block that
+	// was tracked in `pendingTools` before `#clearTransientUi()` cleared the
+	// map is now orphaned with no remaining reference, so nothing would ever
+	// call `dispose()` on it again: its shared-ticker registration must be
+	// stopped by `#finalizeSnapshot` itself on the failure path.
+	it("stops an orphaned pending tool block's ticker when guest resync staging fails", async () => {
+		installInMemoryRelay();
+		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		try {
+			vi.useFakeTimers();
+
+			const chatContainer = new TranscriptContainer();
+			const liveBlock = new ToolExecutionComponent(
+				"eval",
+				{ language: "py", code: "import time\ntime.sleep(10)" },
+				{},
+				undefined,
+				{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
+				process.cwd(),
+			);
+			chatContainer.addChild(liveBlock);
+			expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+			await Settings.init({ inMemory: true });
+			const ctx = {
+				settings: { get: () => "" },
+				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
+				session: {
+					messages: [],
+					switchSession: () => Promise.resolve(),
+					newSession: () => Promise.resolve(),
+					agent: {
+						state: { model: undefined },
+						setModel: () => {},
+						setThinkingLevel: () => {},
+						setDisableReasoning: () => {},
+					},
+				},
+				statusContainer: { clear: () => {}, disposeChildren: () => {} },
+				pendingMessagesContainer: { clear: () => {}, disposeChildren: () => {} },
+				compactionQueuedMessages: [],
+				streamingComponent: undefined,
+				streamingMessage: undefined,
+				transcriptMessageComponents: new WeakMap(),
+				// The block under test is tracked as a pending tool, mirroring the
+				// real state right before a resync: #clearTransientUi() clears this
+				// map without disposing the block it names.
+				pendingTools: new Map([["call-1", liveBlock]]),
+				pendingBashComponents: [],
+				pendingPythonComponents: [],
+				lastAssistantUsage: undefined,
+				initialChatRendered: true,
+				hideToolActivity: false,
+				loadingAnimation: undefined,
+				statusLine: {
+					setCollabStatus: () => {},
+					invalidate: () => {},
+					resetActiveTime: () => {},
+					markActivityStart: () => {},
+					markActivityEnd: () => {},
+				},
+				ui: { requestRender: () => {} },
+				chatContainer,
+				resetObserverRegistry: () => {},
+				renderInitialMessages: (options?: { clearTerminalHistory?: boolean }) =>
+					uiHelpers.renderInitialMessages(options),
+				renderSessionContext: (context: unknown, options: unknown) =>
+					(uiHelpers.renderSessionContext as (c: unknown, o: unknown) => void)(context, options),
+				// Fails the staged replay itself, so renderInitialMessages()'s own
+				// rollback runs (restoring the untouched visible container) without
+				// ever reaching the success-path disposeChildren() that would
+				// otherwise unregister the orphaned block.
+				renderSessionContextIncrementally: () => Promise.reject(new Error("staged rebuild boom")),
+				viewSession: {
+					isStreaming: false,
+					buildTranscriptSessionContext: () => ({
+						messages: [],
+						thinkingLevel: "off",
+						serviceTier: undefined,
+						models: {},
+						injectedTtsrRules: [],
+						mode: "none",
+					}),
+					getToolByName: () => undefined,
+					hasBuiltInTool: () => true,
+					extensionRunner: undefined,
+					sessionManager: { getEntries: () => [], getCwd: () => "/local" },
+				},
+				reloadTodos: () => Promise.resolve(),
+				showStatus: () => {},
+				showError: () => {},
+				updateEditorTopBorder: () => {},
+				updateEditorBorderColor: () => {},
+				syncRunningSubagentBadge: () => {},
+			} as unknown as InteractiveModeContext;
+			const uiHelpers = new UiHelpers(ctx);
+
+			const roomId = "spinner-resync-failure-room";
+			const roomKey = generateRoomKey();
+			const cryptoKey = await importRoomKey(roomKey);
+			const link = formatCollabLink("ws://localhost:8788", roomId, roomKey);
+			const hostSocket = new CollabSocket({
+				wsUrl: `ws://localhost:8788/r/${roomId}`,
+				role: "host",
+				key: cryptoKey,
+			});
+			const hostOpen = Promise.withResolvers<void>();
+			hostSocket.onOpen = () => hostOpen.resolve();
+			hostSocket.onFrame = frame => {
+				if (frame.t !== "hello") return;
+				hostSocket.send({
+					t: "welcome",
+					proto: COLLAB_PROTO,
+					header: { type: "session", id: "resync-failure-session", timestamp: "2026-06-26T00:00:00Z", cwd: "/tmp" },
+					state: {
+						isStreaming: false,
+						queuedMessageCount: 0,
+						sessionName: "host session",
+						cwd: "/tmp",
+						participants: [{ name: "Host", role: "host" }],
+					},
+					agents: [],
+					entryCount: 0,
+				});
+			};
+			hostSocket.connect();
+			await hostOpen.promise;
+
+			const guest = new CollabGuestLink(ctx);
+			try {
+				let joinError: unknown;
+				try {
+					await guest.join(link);
+				} catch (err) {
+					joinError = err;
+				}
+				expect(joinError).toBeInstanceOf(Error);
+				expect((joinError as Error).message).toContain("staged rebuild boom");
+
+				// The block was stopped in place, not disposed from the tree: its
+				// rendered row survives the failed resync untouched.
+				expect(chatContainer.children).toContain(liveBlock);
+				// ...but it no longer holds the shared ticker open.
+				expect(vi.getTimerCount()).toBe(0);
+			} finally {
+				hostSocket.close();
+				await guest.leave("test cleanup").catch(() => {});
+			}
+		} finally {
+			writeSpy.mockRestore();
+			uninstallInMemoryRelay();
+			stopSharedSpinnerTicker();
+		}
+	});
 });
