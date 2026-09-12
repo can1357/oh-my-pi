@@ -64,6 +64,23 @@ describe("resolveRoleAssignments", () => {
 		expect(roles.tiny?.model).toBe(smol);
 		expect(roles.tiny?.autoSelected).toBe(true);
 	});
+
+	test("shows configured slow for an unconfigured advisor role", () => {
+		const slow = makeModel("demo", "custom-slow");
+		const priorityHead = makeModel("demo", "gpt-5.6-sol");
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "demo/default",
+				slow: "demo/custom-slow",
+			},
+		});
+
+		const roles = resolveRoleAssignments(settings, [slow, priorityHead], [slow, priorityHead]);
+
+		expect(roles.slow?.model).toBe(slow);
+		expect(roles.advisor?.model).toBe(slow);
+		expect(roles.advisor?.autoSelected).toBe(true);
+	});
 });
 
 describe("ModelBrowser search ranking", () => {
