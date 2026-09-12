@@ -5,6 +5,7 @@
 ### Added
 
 - Added opt-in host authorization and exact-once streamed child execution for discard-safe local reads.
+
 ## [18.1.18] - 2026-09-11
 
 ### Added
@@ -74,7 +75,6 @@
 ### Fixed
 
 - Fixed Codex remote compaction to preserve images returned by image-reading tools, preventing them from being replayed as incorrect synthetic user messages.
-
 
 ## [18.0.5] - 2026-08-25
 
