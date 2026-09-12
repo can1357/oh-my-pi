@@ -298,67 +298,118 @@ function ttyInputQueueBytes(): number {
  * progress for this long with bytes readable means a dead stream pump.
  */
 const STDIN_STALL_TIMEOUT_MS = 1_500;
-/** pause+resume re-arms before the watchdog escalates to a listener re-attach. */
+/**
+ * Liveness window once an episode has opened: a pump that died once gets
+ * re-detected at this tightened window so each keystroke batch costs at most
+ * this much lag even if recovery never fully takes.
+ */
+const STDIN_STALL_FAST_TIMEOUT_MS = 300;
+/** Stalls within one episode before escalating to a listener re-attach. */
 const STDIN_STALL_SOFT_REARMS = 2;
-/** Cadence at which ProcessTerminal samples the kernel tty input queue. */
-const STDIN_STALL_POLL_MS = 500;
+/**
+ * Sustained liveness required to close an episode. A single drained sample
+ * must NOT close it: bun's `resume()` performs exactly one catch-up read
+ * (verified by strace: `read(fd, …) = 1; read(fd, …) = -1 EAGAIN` with no
+ * epoll re-registration), so a broken pump alternates stall→one drain→stall —
+ * resetting on the drain would cap the response at soft re-arms forever and
+ * the escalation would never run.
+ */
+const STDIN_STALL_EPISODE_COOLDOWN_MS = 30_000;
+/**
+ * Cadence at which ProcessTerminal samples the kernel tty input queue. One
+ * ioctl per tick; sized for the fast window above.
+ */
+const STDIN_STALL_POLL_MS = 150;
 
 /**
  * Bounds how long bytes may sit readable in the kernel tty input queue with
  * the JS stream emitting no `data` events before the stream pump is declared
- * dead, and escalates recovery: pause+resume first (revives the TTY read
- * arm), then dropping and re-adding the data listener.
+ * dead, and escalates recovery: pause+resume first, then dropping and
+ * re-adding the data listener.
  *
  * Heavyweight `omp --resume` sessions have frozen under real multiplexer
  * panes with exactly this signature: keystrokes queued in the kernel,
  * `process.stdin` reporting healthy (not paused, listener attached, not
  * ended/destroyed), and no disconnect logged — the read pump simply stopped
- * consuming fd 0. A live reader drains typed bytes in milliseconds, so a
- * queue that neither empties nor shrinks with no `data` event for `stallMs`
- * is a dead pump, not a slow one. Unlike {@link StdoutStallWatchdog} this
- * never tears the terminal down: input loss is recoverable by re-arming,
- * and the kernel queue preserves every byte the user typed meanwhile.
+ * consuming. strace of a live corpse showed the real stdin fd (a read-only
+ * pty dup, not fd 0) with no epoll registration at all in the dead state:
+ * `pause()` never deregisters, `resume()` performs one speculative read and
+ * stops, so each keystroke batch wedges until something re-arms the pump.
+ *
+ * Stalls are grouped into episodes: the first stalls answer with soft
+ * `pause()+resume()` re-arms, repeated stalls escalate to a listener
+ * re-attach, and an episode only closes after `cooldownMs` of *sustained*
+ * liveness — a single drained sample deliberately does not close it (the
+ * catch-up read always produces one). While an episode is open the detection
+ * window tightens to `fastStallMs` so a pump that keeps dying costs the user
+ * sub-second keystroke lag instead of `stallMs` per batch. Unlike
+ * {@link StdoutStallWatchdog} this never tears the terminal down: input loss
+ * is recoverable by re-arming, and the kernel queue preserves every byte the
+ * user typed meanwhile.
  */
 export class StdinStallWatchdog {
 	#prevQueued = 0;
 	#stalledSinceMs = Number.NaN;
-	#softRearms = 0;
+	#healthySinceMs = Number.NaN;
+	#stallsInEpisode = 0;
+	#inEpisode = false;
 
 	/**
 	 * @param stallMs liveness window without queue progress or a data event.
-	 * @param softRearms pause+resume attempts before escalating to re-attach.
+	 * @param softRearms stalls within an episode answered with pause+resume
+	 * before escalating to a listener re-attach.
+	 * @param fastStallMs tightened liveness window while an episode is open.
+	 * @param cooldownMs sustained liveness required to close an episode.
 	 */
 	constructor(
 		private readonly stallMs: number = STDIN_STALL_TIMEOUT_MS,
 		private readonly softRearms: number = STDIN_STALL_SOFT_REARMS,
+		private readonly fastStallMs: number = STDIN_STALL_FAST_TIMEOUT_MS,
+		private readonly cooldownMs: number = STDIN_STALL_EPISODE_COOLDOWN_MS,
 	) {}
 
 	/**
 	 * Feed the kernel-queue byte count, the timestamp of the last `data`
 	 * event, and the clock. Returns the recovery action: "none" while any
 	 * liveness signal holds (queue empty, queue draining, or data flowing),
-	 * "resume" for the first soft re-arms, "reattach" afterwards.
+	 * "resume" for the first soft re-arms of an episode, "reattach" once
+	 * stalls repeat within one.
 	 */
 	sample(queued: number, lastDataMs: number, nowMs: number): "none" | "resume" | "reattach" {
-		const alive = queued <= 0 || queued < this.#prevQueued || nowMs - lastDataMs < this.stallMs;
+		const windowMs = this.#inEpisode ? this.fastStallMs : this.stallMs;
+		const alive = queued <= 0 || queued < this.#prevQueued || nowMs - lastDataMs < windowMs;
 		this.#prevQueued = Math.max(queued, 0);
 		if (alive) {
-			this.#stalledSinceMs = Number.NaN;
-			this.#softRearms = 0;
+			// Outside an episode the observation window restarts on liveness;
+			// inside one it deliberately persists, so a re-stall fires at the
+			// fast window (the catch-up read only ever yields one drain).
+			if (!this.#inEpisode) this.#stalledSinceMs = Number.NaN;
+			if (Number.isNaN(this.#healthySinceMs)) this.#healthySinceMs = nowMs;
+			if (this.#inEpisode && queued <= 0 && nowMs - this.#healthySinceMs >= this.cooldownMs) {
+				this.#inEpisode = false;
+				this.#stallsInEpisode = 0;
+				// The next stall must open its own observation window; leaving
+				// the old clock would fire it on the first stalled sample.
+				this.#stalledSinceMs = Number.NaN;
+			}
 			return "none";
 		}
+		this.#healthySinceMs = Number.NaN;
 		if (Number.isNaN(this.#stalledSinceMs)) this.#stalledSinceMs = nowMs;
-		if (nowMs - this.#stalledSinceMs < this.stallMs) return "none";
+		if (nowMs - this.#stalledSinceMs < windowMs) return "none";
 		this.#stalledSinceMs = nowMs;
-		this.#softRearms++;
-		return this.#softRearms <= this.softRearms ? "resume" : "reattach";
+		this.#inEpisode = true;
+		this.#stallsInEpisode++;
+		return this.#stallsInEpisode <= this.softRearms ? "resume" : "reattach";
 	}
 
 	/** Reader healthy again or terminal torn down: forget the episode. */
 	reset(): void {
 		this.#prevQueued = 0;
 		this.#stalledSinceMs = Number.NaN;
-		this.#softRearms = 0;
+		this.#healthySinceMs = Number.NaN;
+		this.#stallsInEpisode = 0;
+		this.#inEpisode = false;
 	}
 }
 

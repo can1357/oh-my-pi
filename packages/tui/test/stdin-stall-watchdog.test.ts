@@ -11,14 +11,19 @@ import { StdinStallWatchdog } from "@oh-my-pi/pi-tui/terminal";
 // escalates — the contract #armStdinStallWatchdog relies on to revive the
 // pump without ever tearing the terminal down.
 //
-// The stall window is measured between observations: it opens at the first
-// sample with no liveness signal (queue empty, queue draining, or a data
-// event within stallMs) and closes stallMs later, so expectations below are
-// written against explicit sample times. Stale last-data timestamps model a
-// pump that has not emitted anything.
+// A live strace of the flapping corpse showed why stalls are grouped into
+// episodes: bun's resume() performs exactly one catch-up read (read(fd)=n,
+// read(fd)=EAGAIN) and never re-registers the fd with epoll, so a broken
+// pump alternates stall → one drain → stall forever. A single drained sample
+// therefore must NOT close an episode or reset the escalation counter —
+// only cooldownMs of sustained liveness does. While an episode is open the
+// detection window tightens to fastMs so each keystroke batch costs at most
+// one fast window of lag.
 const STALL_MS = 1500;
 const SOFT = 2;
-const make = () => new StdinStallWatchdog(STALL_MS, SOFT);
+const FAST_MS = 300;
+const COOLDOWN_MS = 30_000;
+const make = () => new StdinStallWatchdog(STALL_MS, SOFT, FAST_MS, COOLDOWN_MS);
 /** A last-data timestamp comfortably older than the liveness window at `now`. */
 const stale = (now: number) => now - 10 * STALL_MS;
 
@@ -70,17 +75,59 @@ describe("StdinStallWatchdog", () => {
 		expect(wd.sample(2, stale(3199), 3199)).toBe("resume"); // 1500ms elapsed
 	});
 
-	it("a fresh episode after recovery starts over at soft resume", () => {
+	it("a single drained sample does not close the episode (catch-up read)", () => {
+		// The flapping corpse: every pause/resume drains exactly one batch
+		// via bun's speculative catch-up read, then dies again. The stall
+		// counter must keep counting so escalation to re-attach is reached.
+		const wd = make();
+		expect(wd.sample(4, stale(1000), 1000)).toBe("none");
+		expect(wd.sample(4, stale(2500), 2500)).toBe("resume"); // stall #1
+		// Re-arm drained the 4 bytes and emitted data; 10ms later the user
+		// types again and the pump is already dead.
+		expect(wd.sample(0, 2510, 2510)).toBe("none"); // one healthy sample
+		expect(wd.sample(8, stale(6000), 6000)).toBe("resume"); // stall #2 (3.5s past fire)
+		expect(wd.sample(0, 6010, 6010)).toBe("none"); // another catch-up drain
+		expect(wd.sample(1, stale(9000), 9000)).toBe("reattach"); // stall #3
+	});
+
+	it("detects re-stalls at the fast window once an episode is open", () => {
 		const wd = make();
 		expect(wd.sample(3, stale(1000), 1000)).toBe("none");
 		expect(wd.sample(3, stale(2500), 2500)).toBe("resume");
-		expect(wd.sample(3, stale(4000), 4000)).toBe("resume");
-		expect(wd.sample(3, stale(5500), 5500)).toBe("reattach");
-		// Re-arm worked: the queue drained and data flows again.
-		expect(wd.sample(0, 5510, 5510)).toBe("none");
-		expect(wd.sample(5, stale(60_000), 60_000)).toBe("none"); // fresh window opens
+		expect(wd.sample(0, 2510, 2510)).toBe("none"); // catch-up drain
+		// Same batch size stuck again: only fastMs needs to elapse now, and
+		// the stalled clock persisted across the drain, so it fires at the
+		// first sample past the fast window.
+		expect(wd.sample(3, stale(2700), 2700)).toBe("none"); // 200ms since fire
+		expect(wd.sample(3, stale(2800), 2800)).toBe("resume"); // 300ms: stall #2
+	});
+
+	it("closes the episode after sustained liveness, not a brief drain", () => {
+		const wd = make();
+		expect(wd.sample(3, stale(1000), 1000)).toBe("none");
+		expect(wd.sample(3, stale(2500), 2500)).toBe("resume"); // episode opens
+		// Sustained health: the real timer samples an empty queue throughout.
+		for (let t = 2600; t <= 40_000; t += 1000) {
+			expect(wd.sample(0, t, t)).toBe("none");
+		}
+		// 30s+ of liveness closed the episode: the next stall is fresh, with
+		// the full observation window and soft escalation again.
+		expect(wd.sample(5, stale(60_000), 60_000)).toBe("none"); // window opens
 		expect(wd.sample(5, stale(61_499), 61_499)).toBe("none");
-		expect(wd.sample(5, stale(61_500), 61_500)).toBe("resume"); // soft again
+		expect(wd.sample(5, stale(61_500), 61_500)).toBe("resume");
+	});
+
+	it("brief liveness between stalls never closes the episode", () => {
+		const wd = make();
+		expect(wd.sample(3, stale(1000), 1000)).toBe("none");
+		expect(wd.sample(3, stale(2500), 2500)).toBe("resume"); // stall #1
+		expect(wd.sample(0, 2600, 2600)).toBe("none");
+		// In-episode re-stalls fire fastMs after the LAST FIRE, not after a
+		// fresh observation window: 10_000 is 7.5s past the fire, so the
+		// first stalled sample acts immediately (drains at the next tick).
+		expect(wd.sample(3, stale(10_000), 10_000)).toBe("resume"); // stall #2
+		expect(wd.sample(0, 10_100, 10_100)).toBe("none");
+		expect(wd.sample(3, stale(20_000), 20_000)).toBe("reattach"); // stall #3
 	});
 
 	it("does not inherit a stale window across a healthy period", () => {
