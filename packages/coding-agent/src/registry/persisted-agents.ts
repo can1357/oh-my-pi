@@ -655,6 +655,7 @@ export async function registerPersistedSubagents(
 		shouldContinue,
 		sessionFile,
 		options.owned,
+		options.rootParentId !== undefined,
 	);
 	if (!hydrateHistory || !shouldContinue()) return;
 	let nextTranscript = 0;
@@ -680,7 +681,20 @@ async function registerPersistedSubagentsFromDir(
 	transcripts: PersistedTranscript[],
 	shouldContinue: () => boolean,
 	rootSessionFile: string,
-	owned?: Map<string, string>,
+	owned: Map<string, string> | undefined,
+	// Whether the top-level `registerPersistedSubagents` caller explicitly
+	// passed `rootParentId` (an ACP extension rescanning its own session under
+	// its own agent id) rather than defaulting to `MAIN_AGENT_ID` (a plain
+	// roster refresh, e.g. `ensurePersistedRoster`, where distinct roots
+	// legitimately supersede each other's same-named children via the
+	// `replaceable`/`sessionFileBelongsToRoot` check below). Bare-id
+	// disambiguation only makes sense once a caller has opted into
+	// session-scoped identity; otherwise every un-scoped root nominally
+	// shares the same `MAIN_AGENT_ID` owner, and treating a superseding root's
+	// child as a foreign collision would leave the old root's bare id in
+	// place instead of letting the new root replace it. Threaded unchanged
+	// through recursion so a scoped scan's descendants stay scoped too.
+	scoped: boolean,
 ): Promise<void> {
 	if (!shouldContinue()) return;
 	let entries: fs.Dirent[];
@@ -774,7 +788,15 @@ async function registerPersistedSubagentsFromDir(
 		// owning session's tree (`AgentOutputManager` allocates names
 		// per-session). Register under the disambiguated key instead of
 		// clobbering — or silently losing — a foreign entry that already holds
-		// the bare id.
+		// the bare id. Only once this scan is `scoped` (the caller passed its
+		// own `rootParentId`, e.g. an ACP extension rescanning its own
+		// session): an un-scoped scan (`ensurePersistedRoster`'s plain roster
+		// refresh) has every root nominally sharing `MAIN_AGENT_ID`, and here
+		// the bare id must stay a straightforward supersession target — the
+		// `replaceable`/`sessionFileBelongsToRoot` check below already retires
+		// a dead root's ref in favor of the current one; disambiguating it
+		// instead would leave the old root's bare id in place and strand the
+		// new root's own child under a sibling key nothing else resolves to.
 		//
 		// A same-family match (the bare id is already this owner's own
 		// descendant) is normally the very entry this scan is re-confirming —
@@ -785,10 +807,10 @@ async function registerPersistedSubagentsFromDir(
 		// is stable across those transitions); it must be qualified too, or the
 		// current transcript's own same-named child can never be registered —
 		// the bare id stays permanently claimed by the superseded generation.
-		const sameFamily = existingBare !== undefined && collectAgentFamily(registry, ownerId).has(fsId);
+		const sameFamily = scoped && existingBare !== undefined && collectAgentFamily(registry, ownerId).has(fsId);
 		const staleSameFamily =
 			sameFamily && existingBare?.sessionFile !== null && existingBare?.sessionFile !== sessionFile;
-		let id = existingBare && (!sameFamily || staleSameFamily) ? qualifyPersistedAgentId(ownerId, fsId) : fsId;
+		let id = scoped && existingBare && (!sameFamily || staleSameFamily) ? qualifyPersistedAgentId(ownerId, fsId) : fsId;
 		const existing = id === fsId ? existingBare : registry.get(id);
 		const replaceable =
 			existing !== undefined &&
@@ -823,8 +845,16 @@ async function registerPersistedSubagentsFromDir(
 			// Recursing into descendants below under an id this scan never
 			// actually claimed would graft them onto the WINNING scan's family
 			// instead of just losing the bare slot; retry once under this
-			// scan's own disambiguated key rather than accepting that.
-			if (id === fsId && current !== undefined && current.sessionFile !== sessionFile) {
+			// scan's own disambiguated key rather than accepting that. Scoped
+			// scans only: an un-scoped caller's lookups never resolve a
+			// qualified key, so retrying under one here would only orphan this
+			// entry instead of leaving it as the ordinary lost race the
+			// `stillUnclaimed`/`stillReplaceable` check below already handles.
+			// `expected === null` only: `existing` (and so `expected`) was a
+			// real ref means this is the ordinary `replaceable` supersession
+			// path, which must run its own CAS against that specific ref, not
+			// this fallback for a bare id we upfront believed was free.
+			if (scoped && expected === null && id === fsId && current !== undefined && current.sessionFile !== sessionFile) {
 				id = qualifyPersistedAgentId(ownerId, fsId);
 				current = registry.get(id);
 			}
@@ -870,6 +900,7 @@ async function registerPersistedSubagentsFromDir(
 			shouldContinue,
 			rootSessionFile,
 			owned,
+			scoped,
 		);
 	}
 }
