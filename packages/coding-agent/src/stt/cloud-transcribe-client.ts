@@ -20,6 +20,7 @@ import {
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { logger, sanitizeText, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
+import { resolveConfigHeaders } from "../config/model-config-values";
 import { TRUNCATE_LENGTHS } from "../tools/render-utils";
 import { concatenatePcm, encodeWav } from "../tts/wav";
 import type { SttStreamHandle, SttStreamOptions } from "./asr-client";
@@ -263,12 +264,13 @@ function sanitizeOverrideHeaders(
 	headers: Record<string, string> | undefined,
 	stripAuthorization: boolean,
 ): Record<string, string> {
-	if (!headers) return {};
-	const entries = Object.entries(headers).filter(([name]) => {
+	const resolved = resolveConfigHeaders(headers);
+	if (!resolved) return {};
+	const entries = Object.entries(resolved).filter(([name]) => {
 		const lower = name.toLowerCase();
 		return lower !== "content-type" && (!stripAuthorization || lower !== "authorization");
 	});
-	return entries.length === Object.keys(headers).length ? headers : Object.fromEntries(entries);
+	return entries.length === Object.keys(resolved).length ? resolved : Object.fromEntries(entries);
 }
 
 /**
