@@ -908,15 +908,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			});
 			const store = getEditStore(speculativeSession);
 			const speculativeTool = new ReadTool(speculativeSession);
-			// Execute against the requested lexical path so the committed result
-			// renders exactly like an ordinary read (hashline headers, source
-			// metadata). The resolved target above stays a validation gate and
-			// still binds content addressing below; containment and agreement are
-			// enforced by this revalidation plus the capture/execute/commit digest
-			// triple-check, never by the rendered path.
+			// Open the authorized resolved target: between validation above and
+			// the open below the lexical symlink could be retargeted (including
+			// outside the workspace), and later validation can reject the result
+			// but cannot undo that filesystem access. Render the requested
+			// lexical path instead, so the committed result matches an ordinary
+			// read exactly (hashline headers, source metadata).
+			const requestedPath = (context.args as ReadParams).path;
 			const result = await speculativeTool.#executeInner(
 				context.toolCall.id,
-				{ ...(context.args as ReadParams) },
+				{ ...(context.args as ReadParams), path: absolutePath },
 				signal,
 				undefined,
 				undefined,
@@ -926,6 +927,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				() => {
 					throw new Error("Conflict-aware reads require authoritative execution");
 				},
+				path.resolve(this.session.cwd, requestedPath),
 			);
 			const snapshotHash = store.headHash(absolutePath);
 			if (!signal.aborted && !execution.discarded && snapshotHash) {
@@ -1513,6 +1515,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		_toolContext?: AgentToolContext,
 		onBufferedFile?: (normalizedText: string) => void,
 		onConflictMarkers?: () => void,
+		lexicalAbsolutePath?: string,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		let { path: readPath } = params;
 		if (readPath.startsWith("file://")) {
@@ -1738,6 +1741,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				throw error;
 			}
 		}
+		// Speculative reads open the authorized resolved target (absolutePath)
+		// but must render the requested lexical path exactly like an ordinary
+		// read. All display derivations below use this; filesystem access keeps
+		// using absolutePath. Ordinary callers pass no lexical path, so this
+		// is identical to absolutePath for them.
+		const renderAbsolutePath = lexicalAbsolutePath ?? absolutePath;
 
 		if (isDirectory) {
 			if (question !== undefined) throw new ToolError(IMAGE_QUESTION_SELECTOR_ERROR);
@@ -1773,7 +1782,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const imageMetadata = await readImageMetadata(absolutePath);
 		const mimeType = imageMetadata?.mimeType;
 		const ext = path.extname(absolutePath).toLowerCase();
-		const resolvedDisplayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
+		const resolvedDisplayPath = formatPathRelativeToCwd(renderAbsolutePath, this.session.cwd);
 		const shouldConvertWithMarkit = CONVERTIBLE_EXTENSIONS.has(ext);
 
 		// Profiler reports (macOS `sample` call trees, V8 `.cpuprofile` JSON):
@@ -1889,14 +1898,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					? isProbablyBinaryHeader(wholeFileBytes.subarray(0, BINARY_SNIFF_BYTES))
 					: await isProbablyBinary(absolutePath));
 			if (looksBinary) {
-				return toolResult<ReadToolDetails>({ resolvedPath: absolutePath, suffixResolution })
+				return toolResult<ReadToolDetails>({ resolvedPath: renderAbsolutePath, suffixResolution })
 					.text(
 						prependSuffixResolutionNotice(
 							`[Cannot read binary file '${resolvedDisplayPath}' (${formatBytes(fileSize)}); not valid UTF-8 text. Use ':raw' to read bytes verbatim.]`,
 							suffixResolution,
 						),
 					)
-					.sourcePath(absolutePath)
+					.sourcePath(renderAbsolutePath)
 					.done();
 			}
 			// Decode only what survived the sniff.
@@ -1916,6 +1925,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						renderedSummary.elidedRanges,
 						renderedSummary.elidedLines,
 					);
+					const summaryDisplayPath = formatPathRelativeToCwd(renderAbsolutePath, this.session.cwd);
 					const summaryHashContext = displayMode.hashLines
 						? buffered
 							? hashlineHeaderContextForText(
@@ -1923,8 +1933,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 									absolutePath,
 									this.session.cwd,
 									buffered.normalizedText,
+									summaryDisplayPath,
 								)
-							: await readHashlineHeaderContext(this.session, absolutePath, this.session.cwd)
+							: await readHashlineHeaderContext(this.session, absolutePath, this.session.cwd, summaryDisplayPath)
 						: undefined;
 					const bodyText = footer ? `${renderedSummary.text}\n\n${footer}` : renderedSummary.text;
 					const modelText = prependHashlineHeader(bodyText, summaryHashContext);
@@ -1944,7 +1955,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						},
 					};
 
-					sourcePath = absolutePath;
+					sourcePath = renderAbsolutePath;
 					content = [{ type: "text", text: modelText }];
 				}
 			}
@@ -2059,7 +2070,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							totalFileLines === 0
 								? "The file is empty."
 								: `Use :1 to read from the start, or :${totalFileLines} to read the last line.`;
-						return toolResult<ReadToolDetails>({ resolvedPath: absolutePath, suffixResolution })
+						return toolResult<ReadToolDetails>({ resolvedPath: renderAbsolutePath, suffixResolution })
 							.text(
 								`Line ${requestedStart + 1} is beyond end of file (${totalFileLines} lines total). ${suggestion}`,
 							)
@@ -2147,7 +2158,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 									)
 								: getEditStore(this.session).recordSnapshotFile(absolutePath);
 						if (tag) {
-							hashContext = hashlineHeaderContext(formatPathRelativeToCwd(absolutePath, this.session.cwd), tag);
+							hashContext = hashlineHeaderContext(
+								formatPathRelativeToCwd(renderAbsolutePath, this.session.cwd),
+								tag,
+							);
 						}
 					}
 
@@ -2217,7 +2231,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							)}, exceeds ${formatBytes(maxBytesForRead)} limit. Unable to display a valid UTF-8 snippet.]`;
 						}
 						details = { truncation };
-						sourcePath = absolutePath;
+						sourcePath = renderAbsolutePath;
 						truncationInfo = {
 							result: truncation,
 							options: {
@@ -2237,7 +2251,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							)}`;
 						}
 						details = { truncation };
-						sourcePath = absolutePath;
+						sourcePath = renderAbsolutePath;
 						truncationInfo = {
 							result: truncation,
 							options: {
@@ -2255,12 +2269,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							? `\n\n[${totalFileLines - (startLine + userLimitedLines)} more lines in file. Use :${nextOffset} to continue]`
 							: `\n\n[More lines in file (${formatBytes(fileSize)} total; not scanned to EOF). Use :${nextOffset} to continue]`;
 						details = {};
-						sourcePath = absolutePath;
+						sourcePath = renderAbsolutePath;
 					} else {
 						// No truncation, no user limit exceeded
 						outputText = formatBracketAwareText() ?? formatText(truncation.content, startLineDisplay);
 						details = {};
-						sourcePath = absolutePath;
+						sourcePath = renderAbsolutePath;
 					}
 					if (reachedEof) details.totalLines = totalFileLines;
 

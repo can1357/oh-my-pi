@@ -150,6 +150,15 @@ export class EvalShadowCellSession implements ToolSpeculationStreamSession {
 			await this.discard("final eval arguments invalidate an admitted speculative operation");
 		}
 	}
+	/**
+	 * Whether the streamed plan still authorizes these final arguments. The
+	 * coordinator re-checks after hook/transform reconciliation and discards
+	 * the session on mismatch, so deferred work planned from replaced code
+	 * never releases. Pure: safe to call any number of times.
+	 */
+	matchesFinalArgs(args: Readonly<Record<string, unknown>>): boolean {
+		return this.#decoder.matchesFinal(args);
+	}
 
 	async #verifyFinalPlan(args: Readonly<Record<string, unknown>>): Promise<boolean> {
 		const { code, language } = args as { code?: unknown; language?: unknown };
