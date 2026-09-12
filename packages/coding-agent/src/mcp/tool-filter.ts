@@ -362,7 +362,7 @@ function translatePattern(pattern: string): string {
 			out += RAW_CHAR;
 			continue;
 		}
-		if (ch === "(" || ch === ")" || ch === "|" || ch === "+") {
+		if (ch === "(" || ch === ")" || ch === "|" || ch === "+" || ch === "@" || ch === "!") {
 			// Escaped so grouping, alternation and extglob prefixes stay literal
 			// even beside a wildcard: `+(a|b)*` matches the literal `+(a|b)foo`,
 			// not `+afoo`. `+` is escaped unconditionally because the emitted
@@ -398,9 +398,11 @@ type ToolMatcher = (name: string) => boolean;
 const compiledPatterns = new Map<string, ToolMatcher>();
 
 /**
- * Matches zero or more ENCODED CHARACTERS: one `¤`-prefixed unit, or any
- * character that is not the escape marker. This is the star's true meaning in
- * the encoded domain (`*` spans any run of raw characters, `/` included).
+ * Matches zero or more RAW characters, spelled as a repetition of
+ * {@link RAW_CHAR} so the star shares its cardinality rules: an astral character
+ * counts once, and the star can never stop between the halves of a surrogate
+ * pair (a following lone-surrogate literal would otherwise consume the low half
+ * and match a name whose high half it had eaten).
  *
  * The star cannot be delegated to picomatch, which compiles it to `[^/]*?` —
  * a character-wise wildcard that may stop between the two characters of an
@@ -408,7 +410,7 @@ const compiledPatterns = new Map<string, ToolMatcher>();
  * as if it were a whole unit: a star followed by a raw slash wrongly admitted
  * the name `a` + U+00A7 (whose encoded form is `a` + U+00A4 + U+00A7).
  */
-const ENCODED_STAR = `(?:${ESCAPE_MARK}${SLASH_CODE}|${ESCAPE_MARK}${ESCAPE_MARK}|[^${ESCAPE_MARK}])*`;
+const ENCODED_STAR = `(?:${RAW_CHAR})*`;
 
 /**
  * picomatch's path-shaped dot-segment guards, removed after compilation.

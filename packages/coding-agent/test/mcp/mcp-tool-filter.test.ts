@@ -205,6 +205,11 @@ test("`?` matches one raw character, astral ones included", () => {
 	// The deny direction mirrors it.
 	expect(run(["tool_😀", "tool_x"], []).allowed).toEqual(["tool_😀", "tool_x"]);
 	expect(filterMCPTools({ toolNames: ["tool_😀", "tool_x"], disabledTools: ["tool_?"] }).allowed).toEqual([]);
+	// A star may not stop between the halves of a pair either: `*` followed by a
+	// lone low surrogate used to eat the high half of 😀 and let the literal take
+	// the rest, admitting a name it had already taken apart.
+	expect(run(["😀", "a\uDE00", "x"], ["*\uDE00"]).allowed).toEqual(["a\uDE00"]);
+	expect(run(["😀", "😀x", "a/b"], ["*"]).allowed).toEqual(["😀", "😀x", "a/b"]);
 });
 
 test("a class body keeps the engine's own reading of its members", () => {

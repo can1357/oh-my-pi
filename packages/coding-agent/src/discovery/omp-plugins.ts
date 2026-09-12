@@ -316,7 +316,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			logger.warn(`[omp-plugins] Invalid JSON in ${mcpPath}`);
 			continue;
 		}
-		const servers = expandEnvVarsDeep(parsed.mcpServers);
+		const servers = parsed.mcpServers;
 		if (!servers || typeof servers !== "object" || Array.isArray(servers)) continue;
 
 		for (const [serverName, serverCfg] of Object.entries(servers)) {
@@ -326,9 +326,18 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				warnings.push(`[omp-plugins] Skipping MCP server "${serverName}" in ${mcpPath}: missing command or url`);
 				continue;
 			}
+			// `${...}` expansion covers exactly the fields discovery documents
+			// (`command`, `args`, `env`, `cwd`, `url`, `headers`, `auth`, `oauth`),
+			// never whole-server expansion: a filter entry is a tool-name pattern,
+			// so expanding `${TOOL}` there would make the same config select a
+			// different tool depending on which file it came from. Expansion runs
+			// before path rooting, so a placeholder resolving to an absolute path
+			// is not mistaken for a relative one.
+			const command = cfg.command === undefined ? undefined : expandEnvVarsDeep(cfg.command);
+			const cwd = cfg.cwd === undefined ? undefined : expandEnvVarsDeep(cfg.cwd);
 			// Root relative command/cwd at the plugin's config directory, not the
 			// session cwd (MCP stdio spawning resolves relative values there).
-			const rooted = resolvePluginStdioPaths({ command: cfg.command, cwd: cfg.cwd }, root.path);
+			const rooted = resolvePluginStdioPaths({ command, cwd }, root.path);
 			const requestIdFormat = parseRequestIdFormat(cfg.requestIdFormat);
 			items.push({
 				name: serverName,
@@ -337,13 +346,13 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				...(requestIdFormat !== undefined && { requestIdFormat }),
 				...parseMCPToolFilters(serverName, cfg),
 				...(rooted.command !== undefined && { command: rooted.command }),
-				...(cfg.args !== undefined && { args: cfg.args }),
-				...(cfg.env !== undefined && { env: cfg.env }),
+				...(cfg.args !== undefined && { args: expandEnvVarsDeep(cfg.args) }),
+				...(cfg.env !== undefined && { env: expandEnvVarsDeep(cfg.env) }),
 				...(rooted.cwd !== undefined && { cwd: rooted.cwd }),
-				...(cfg.url !== undefined && { url: cfg.url }),
-				...(cfg.headers !== undefined && { headers: cfg.headers }),
-				...(cfg.auth !== undefined && { auth: cfg.auth }),
-				...(cfg.oauth !== undefined && { oauth: cfg.oauth }),
+				...(cfg.url !== undefined && { url: expandEnvVarsDeep(cfg.url) }),
+				...(cfg.headers !== undefined && { headers: expandEnvVarsDeep(cfg.headers) }),
+				...(cfg.auth !== undefined && { auth: expandEnvVarsDeep(cfg.auth) }),
+				...(cfg.oauth !== undefined && { oauth: expandEnvVarsDeep(cfg.oauth) }),
 				...(cfg.type !== undefined && { transport: cfg.type }),
 				_source: createSourceMeta(PROVIDER_ID, mcpPath, root.level),
 			});
