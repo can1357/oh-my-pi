@@ -1165,6 +1165,15 @@ describe("resolveSttCloudCredential", () => {
 		});
 	});
 
+	it("auto falls through to the API key when subscription access has no account id", async () => {
+		const source = registry(undefined, "sk-key");
+		source.authStorage.getOAuthAccess = async () => ({ accessToken: "opaque-email-only-token" });
+		await expect(resolveSttCloudCredential(source, "s1")).resolves.toEqual({
+			kind: "openai",
+			apiKey: "sk-key",
+		});
+	});
+
 	it("api-key route selects the OpenAI key even when a subscription is connected", async () => {
 		const source = registry("sub-token", "sk-key");
 		let subscriptionLookups = 0;
