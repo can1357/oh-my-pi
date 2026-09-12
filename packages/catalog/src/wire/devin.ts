@@ -22,12 +22,22 @@ const DEVIN_LOCALE = "en";
 const DEVIN_CLI_METADATA = {
 	ideName: "devin-cli",
 	ideType: "chisel",
-	ideVersion: "3000.6.2",
+	ideVersion: "3000.10.23",
 	extensionName: "chisel",
-	extensionVersion: "3000.6.2",
+	extensionVersion: "3000.10.23",
 	locale: DEVIN_LOCALE,
 	os: DEVIN_OS,
 } as const;
+
+/**
+ * Per-process request identity. The official chisel client stamps a `sessionId`
+ * that is minted once per process and a `requestId` that counts up from 1; the
+ * backend pairs them for session routing and request dedup, so a per-call UUID
+ * or a repeated counter is not equivalent. The global `crypto` keeps this
+ * module import-free for the synchronous model seed.
+ */
+const devinSessionId = crypto.randomUUID();
+let devinRequestId = 0;
 
 /**
  * Native discovery identity. The Devin CLI announces itself as the `chisel`
@@ -59,6 +69,8 @@ export function devinCliMetadata(apiKey: string | undefined, userJwt = "") {
 	return {
 		apiKey: normalizeDevinSessionToken(apiKey),
 		userJwt,
+		sessionId: devinSessionId,
+		requestId: BigInt(++devinRequestId),
 		...DEVIN_CLI_METADATA,
 	};
 }

@@ -188,8 +188,8 @@ describe("Devin account usage", () => {
 		expect(capture.metadata?.ideName).toBe("devin-cli");
 		expect(capture.metadata?.ideType).toBe("chisel");
 		expect(capture.metadata?.extensionName).toBe("chisel");
-		expect(capture.metadata?.ideVersion).toBe("3000.6.2");
-		expect(capture.metadata?.extensionVersion).toBe("3000.6.2");
+		expect(capture.metadata?.ideVersion).toBe("3000.10.23");
+		expect(capture.metadata?.extensionVersion).toBe("3000.10.23");
 		expect(capture.metadata?.locale).toBe("en");
 		expect(capture.metadata?.os).toBe(EXPECTED_OS);
 
