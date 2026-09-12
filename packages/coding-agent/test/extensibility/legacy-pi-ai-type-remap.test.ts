@@ -3,9 +3,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
-import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
-import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	calculateCost,
 	getBundledModel,
@@ -31,16 +32,16 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 // `@sinclair/typebox` is served from.
 installLegacyPiSpecifierShim();
 
-// Own the mock-API registration under a source ID unique to this file so
-// cleanup removes only our entry — clearing the shared registry would drop
-// registrations other suites own at module scope (e.g.
-// session-manager/workspace-prompt-refresh.test.ts), failing them by schedule.
-const MOCK_API_SOURCE_ID = "legacy-pi-ai-type-remap.test";
+// Use a unique API name as well as a unique source ID: registrations are keyed
+// by API name, so registering the shared `mock` API would replace another
+// suite's module-scoped owner before source-scoped cleanup could run.
+const COMPLETE_API = "legacy-pi-ai-type-remap-complete";
+const COMPLETE_API_SOURCE_ID = "legacy-pi-ai-type-remap.test";
 const tempRoots: string[] = [];
 
 afterEach(() => {
 	vi.restoreAllMocks();
-	unregisterCustomApis(MOCK_API_SOURCE_ID);
+	unregisterCustomApis(COMPLETE_API_SOURCE_ID);
 });
 
 afterAll(async () => {
@@ -396,10 +397,53 @@ it("runs the legacy pi-ai compat `complete` export with SoL-Pi's reducer call sh
 			options?: SimpleStreamOptions & { timeoutMs?: number },
 		) => Promise<AssistantMessage>;
 	};
-	registerMockApi(MOCK_API_SOURCE_ID);
-	const mock = createMockModel({ responses: [{ content: ["reduced output"] }] });
+	let callCount = 0;
+	let capturedOptions: SimpleStreamOptions | undefined;
+	registerCustomApi(
+		COMPLETE_API,
+		(model, _context, options) => {
+			callCount++;
+			capturedOptions = options;
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "text", text: "reduced output" }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: 1,
+						output: 2,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 3,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: Date.now(),
+				};
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		},
+		COMPLETE_API_SOURCE_ID,
+	);
+	const model = buildModel({
+		id: "reducer",
+		name: "Reducer",
+		api: COMPLETE_API,
+		provider: "legacy-pi-ai-type-remap",
+		baseUrl: "",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 4096,
+		maxTokens: 1024,
+	});
 	const response = await loaded.completeCompat(
-		mock.model,
+		model,
 		{
 			systemPrompt: "Reduce",
 			messages: [{ role: "user", content: [{ type: "text", text: "payload" }], timestamp: 0 }],
@@ -417,8 +461,8 @@ it("runs the legacy pi-ai compat `complete` export with SoL-Pi's reducer call sh
 	expect(loaded.schema.safeParse("red").success).toBe(true);
 	expect(loaded.schema.safeParse("blue").success).toBe(false);
 	expect(response.content).toEqual([{ type: "text", text: "reduced output" }]);
-	expect(mock.calls).toHaveLength(1);
-	expect(mock.calls[0]?.options).toMatchObject({
+	expect(callCount).toBe(1);
+	expect(capturedOptions).toMatchObject({
 		apiKey: "test-key",
 		cacheRetention: "none",
 		maxTokens: 321,
