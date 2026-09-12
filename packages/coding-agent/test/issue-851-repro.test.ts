@@ -111,4 +111,38 @@ describe("issue-851: claude-plugins loads flat .mcp.json shape", () => {
 		expect(found).toBeDefined();
 		expect(found?.lazy).toBe(true);
 	});
+
+	// PR #9793 review (Codex, discovery/claude-plugins.ts:664): the forwarded
+	// `lazy` value was never parsed, so a marketplace `.mcp.json` using the
+	// supported `"lazy": "false"` string form (accepted by every other JSON
+	// discovery path via `parseMcpBooleanField`) produced a truthy string
+	// that reached `connectServers` and left a should-be-eager server
+	// dormant with no cache.
+	test("parses the coercible string form of lazy instead of forwarding a truthy string", async () => {
+		await setupPlugin("lazystringplugin", {
+			lazysrv: { command: "npx", lazy: "false" },
+		});
+
+		const result = await loadCapability<MCPServer>("mcps", { cwd: tempDir });
+		const found = result.all.find(s => s.name === "lazystringplugin:lazysrv");
+		expect(found).toBeDefined();
+		expect(found?.lazy).toBe(false);
+	});
+
+	test("expands an ${ENV_VAR} placeholder for lazy before parsing it", async () => {
+		const originalEnvVar = Bun.env.ISSUE_851_LAZY_TEST_VAR;
+		Bun.env.ISSUE_851_LAZY_TEST_VAR = "true";
+		try {
+			await setupPlugin("lazyenvplugin", {
+				lazysrv: { command: "npx", lazy: "${ISSUE_851_LAZY_TEST_VAR}" },
+			});
+
+			const result = await loadCapability<MCPServer>("mcps", { cwd: tempDir });
+			const found = result.all.find(s => s.name === "lazyenvplugin:lazysrv");
+			expect(found).toBeDefined();
+			expect(found?.lazy).toBe(true);
+		} finally {
+			restoreEnvValue("ISSUE_851_LAZY_TEST_VAR", originalEnvVar);
+		}
+	});
 });
