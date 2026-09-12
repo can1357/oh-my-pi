@@ -292,7 +292,7 @@ export class STTController {
 		);
 	}
 
-	async #ensureLocalDeps(options: ToggleOptions): Promise<boolean> {
+	async #ensureLocalDeps(options: ToggleOptions, signal?: AbortSignal): Promise<boolean> {
 		const modelKey = resolveSttModelSpec(settings.get("stt.modelName") as string | undefined).key;
 		// Keyed on the model rather than a one-shot flag: switching stt.modelName
 		// mid-session must re-run preflight so an uncached new tier downloads here
@@ -316,7 +316,9 @@ export class STTController {
 			if (await isSttModelCached(modelKey)) {
 				this.#warmModel(modelKey);
 			} else {
-				await downloadSttModel(modelKey, p => status(`Downloading speech model ${p.label} (${p.percent}%)`));
+				await downloadSttModel(modelKey, p => status(`Downloading speech model ${p.label} (${p.percent}%)`), {
+					signal,
+				});
 			}
 			if (wroteStatus) options.showStatus("");
 			this.#resolvedModelKey = modelKey;
@@ -382,7 +384,8 @@ export class STTController {
 		this.#streamEditor = editor;
 		this.#streamCommitted = false;
 		this.#streamUtterance = "";
-		this.#streamAbort = new AbortController();
+		const streamAbort = new AbortController();
+		this.#streamAbort = streamAbort;
 		const onPartial = (text: string): void => {
 			if (this.#disposed || this.#state !== "recording") return;
 			this.#streamEditor?.setVolatileText(this.#prefixed(text));
@@ -402,25 +405,25 @@ export class STTController {
 		};
 		const stream = cloud
 			? bufferUntilStreamReady(
-					this.#ensureCloudCredential(options, this.#streamAbort.signal).then(async credential => {
+					this.#ensureCloudCredential(options, streamAbort.signal).then(async credential => {
 						if (credential) {
 							return startCloudSttStream({
 								credential,
 								model: settings.get("stt.modelName") as string | undefined,
 								language: language || undefined,
 								keywords: keywords.length ? keywords : undefined,
-								signal: this.#streamAbort?.signal,
+								signal: streamAbort.signal,
 								fetchImpl: this.#createCloudFetch,
 								onPartial,
 								onSegment,
 							});
 						}
-						if (!(await this.#ensureLocalDeps(options))) {
+						if (!(await this.#ensureLocalDeps(options, streamAbort.signal))) {
 							throw new Error("Failed to set up local speech-to-text fallback.");
 						}
 						return sttClient.startStream(modelKey, {
 							language: language || undefined,
-							signal: this.#streamAbort?.signal,
+							signal: streamAbort.signal,
 							onPartial,
 							onSegment,
 						});
@@ -428,7 +431,7 @@ export class STTController {
 				)
 			: sttClient.startStream(modelKey, {
 					language: language || undefined,
-					signal: this.#streamAbort.signal,
+					signal: streamAbort.signal,
 					onPartial,
 					onSegment,
 				});
