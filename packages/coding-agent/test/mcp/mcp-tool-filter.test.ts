@@ -225,15 +225,33 @@ test("a double quote stays an ordinary character", () => {
 test("a class body keeps the engine's own reading of its members", () => {
 	// Class bodies are compiled verbatim with the regex engine as the membership
 	// oracle, which is what makes escapes, ranges and Annex-B corners come out
-	// exactly as a user expects them to. That reading is the engine's, so a class
-	// holding an astral character sees two code units rather than one raw
-	// character — unlike the `?` wildcard, whose cardinality this module emits
-	// itself. Rewriting astral members would mean hand-parsing class bodies,
-	// which is precisely the source of silent meaning changes the verbatim rule
-	// avoids. Pinned so the difference between the two surfaces stays deliberate.
-	expect(run(["😀", "a"], ["[😀]"]).allowed).toEqual([]);
-	expect(run(["😀", "a"], ["[a😀]"]).allowed).toEqual(["a"]);
-	expect(run(["😀", "a"], ["[^😀]"]).allowed).toEqual(["a"]);
+	// exactly as a user expects them to: `[a-c]` is a range, `[]a]` has a literal
+	// leading `]` member, `[^]]` is "everything but `]`", and `[!a]` is a literal
+	// `!` and `a` (picomatch reads `!` as negation only under its `posix`).
+	expect(run(["a", "b", "c", "d"], ["[a-c]"]).allowed).toEqual(["a", "b", "c"]);
+	expect(run(["]", "a"], ["[]a]"]).allowed).toEqual(["]", "a"]);
+	expect(run(["x]y", "xay", "x/y"], ["x[^]]y"]).allowed).toEqual(["xay", "x/y"]);
+	// `[!a]` is the two literal members `!` and `a`, NOT a negated class.
+	expect(run(["file_!", "file_a", "file_1"], ["file_[!a]"]).allowed).toEqual(["file_!", "file_a"]);
+});
+
+test("an astral class member is one character, not two code units", () => {
+	// The compiled regex carries no `u` flag, so a class body is read by code
+	// unit and `[\u{1F600}]` would be the two members U+D83D and U+DE00 —
+	// admitting half of the character it names while rejecting the character
+	// itself. A pair is lifted into an alternation, the same raw-character
+	// cardinality the `?` wildcard has.
+	expect(run(["\u{1F600}", "a"], ["[\u{1F600}]"]).allowed).toEqual(["\u{1F600}"]);
+	expect(run(["\u{1F600}", "a", "b"], ["[a\u{1F600}]"]).allowed).toEqual(["\u{1F600}", "a"]);
+	expect(run(["\u{1F600}", "a"], ["[b\u{1F600}]"]).allowed).toEqual(["\u{1F600}"]);
+	// Half of a pair is not a member either.
+	expect(run(["\uD83D", "\uDE00"], ["[\u{1F600}]"]).allowed).toEqual([]);
+	// An escaped astral member is the same member.
+	expect(run(["\u{1F600}", "a"], ["[\\\u{1F600}]"]).allowed).toEqual(["\u{1F600}"]);
+	// A negated class excludes the pair as one character, exactly as it excludes
+	// a BMP member.
+	expect(run(["\u{1F600}", "a"], ["[^\u{1F600}]"]).allowed).toEqual(["a"]);
+	expect(run(["\u{1F600}", "a", "b"], ["[^\u{1F600}b]"]).allowed).toEqual(["a"]);
 });
 
 test("a star matches zero characters even after a literal dot", () => {

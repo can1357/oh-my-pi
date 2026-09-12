@@ -250,8 +250,64 @@ function emitSimple(token: Token): string {
  * where `/` is an ordinary member here, so that injected member is dropped.
  */
 function emitClass(token: Token): string {
-	if (!token.value.startsWith("[^")) return token.value;
-	return token.value.endsWith("/]") ? `${token.value.slice(0, -2)}]` : token.value;
+	let body = token.value;
+	// Picomatch appends `/` to a negated class; `/` is an ordinary member here,
+	// so that injected member is dropped.
+	if (body.startsWith("[^") && body.endsWith("/]")) body = `${body.slice(0, -2)}]`;
+	return emitAstralClass(body) ?? body;
+}
+
+/** A surrogate pair, as the two code units the engine sees. */
+const ASTRAL_PAIR = /[\uD800-\uDBFF][\uDC00-\uDFFF]/;
+
+/**
+ * Spell a class body so one class member is one RAW character.
+ *
+ * The compiled regex carries no `u` flag, so a class body is read by code unit:
+ * `[\u{1F600}]` is the two members U+D83D and U+DE00, which admits half of an
+ * astral character while rejecting the character itself, and a negated class
+ * refuses the character it should admit. Every other member reads correctly by
+ * code unit, so only the pairs are lifted out — into an alternation for a
+ * positive class, and into exclusions for a negated one, leaving the rest of the
+ * body as the engine's to read.
+ *
+ * Returns null when the body has no pair (the common case, left exactly as
+ * written) or holds a range, whose endpoints are the engine's to interpret.
+ */
+function emitAstralClass(body: string): string | null {
+	const negated = body.startsWith("[^");
+	const members = negated ? body.slice(2, -1) : body.slice(1, -1);
+	// `prepare` spells an escaped character as a `\xNN`/`\uNNNN` escape of its
+	// own, so a member the user escaped arrives in that form; reading the
+	// spellings back is what lets an escaped pair be recognised as one too.
+	const spelling = decodeGlobEscapes(unescapePatternText(members));
+	// A positive class only needs the rewrite when a member is a pair; every
+	// other member already reads correctly by code unit.
+	if (!negated && !ASTRAL_PAIR.test(spelling)) return null;
+	// A negated class always needs it: reading by code unit would let one member
+	// claim half of an astral character, which the class must refuse, and would
+	// refuse the whole character where it should admit it.
+	if (members.includes("-")) return null;
+	const rewritten = unescapePatternText(members);
+	if (rewritten.includes("-")) return null;
+	// A leading `]` is a member, not the terminator; it is already escaped by
+	// the time a token value is visible, which is why the slice above is safe.
+	const pairs: string[] = [];
+	let units = "";
+	for (const member of [...rewritten]) {
+		if (member.length === 2) pairs.push(member);
+		else units += member;
+	}
+	if (!negated) {
+		const alternatives = [...pairs, ...(units ? [`[${units}]`] : [])];
+		return alternatives.length === 1 ? alternatives[0] : `(?:${alternatives.join("|")})`;
+	}
+	// Every member is excluded, so the class admits exactly one raw character
+	// that is none of them — an astral character included, which a code-unit
+	// reading would have refused.
+	const guards = [...pairs.map(pair => `(?!${pair})`), ...(units ? [`(?![${units}])`] : [])].join("");
+	if (guards === "") return RAW_CHAR;
+	return `(?:${guards}${RAW_CHAR})`;
 }
 
 /**
