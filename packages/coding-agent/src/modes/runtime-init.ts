@@ -134,6 +134,36 @@ export function createExtensionAgentActions(
 		const root = parentSessionFile.endsWith(".jsonl") ? parentSessionFile.slice(0, -6) : parentSessionFile;
 		return path.resolve(ref.sessionFile).startsWith(`${path.resolve(root)}${path.sep}`);
 	};
+	/**
+	 * Resolve `id` through {@link resolveInScope}, but first prefer a family
+	 * member whose backing transcript is still reachable under
+	 * `preferredSessionFile`'s own directory tree (see
+	 * {@link isCurrentTranscriptRef}) over a stale same-family sibling left
+	 * over from a `/new` or `ctx.switchSession()` transition. `scopeAgentId`
+	 * stays the same across such a transition, so a persisted child
+	 * registered from an OLD transcript remains this scope's descendant
+	 * forever — `resolveInScope` alone can't tell it apart from a genuine
+	 * current one. `get` and `prompt` have no explicit "which transcript"
+	 * argument the way `ensureLive`'s `parentSessionFile` does, so they pass
+	 * this scope's own live current transcript (`getScopeSessionFile()`)
+	 * instead; falls back to `resolveInScope`'s plain match when no preferred
+	 * transcript is known or no member backed by it exists.
+	 */
+	const resolveCurrent = (id: string, preferredSessionFile: string | null): string => {
+		if (scopeAgentId !== undefined && preferredSessionFile !== null) {
+			for (const memberId of collectAgentFamily(registry, scopeAgentId)) {
+				const ref = registry.get(memberId);
+				if (
+					ref &&
+					bareAgentId(memberId, ref.parentId) === id &&
+					isCurrentTranscriptRef(ref, preferredSessionFile)
+				) {
+					return memberId;
+				}
+			}
+		}
+		return resolveInScope(id);
+	};
 	const coldRevive = reviverFactory ? { reviverFactory, idleTtlMs } : undefined;
 	return {
 		agentsList: () => {
@@ -145,7 +175,7 @@ export function createExtensionAgentActions(
 				.map(toExtensionAgentInfo);
 		},
 		agentsGet: id => {
-			const resolvedId = resolveInScope(id);
+			const resolvedId = resolveCurrent(id, getScopeSessionFile?.() ?? null);
 			if (!inScope(resolvedId)) return undefined;
 			const ref = registry.get(resolvedId);
 			return ref ? toExtensionAgentInfo(ref) : undefined;
@@ -182,20 +212,7 @@ export function createExtensionAgentActions(
 			// (possibly still that stale ref, e.g. when the current transcript has
 			// no same-named child at all) so an id unique to this session keeps
 			// resolving exactly as before.
-			let resolvedId = priorMatch;
-			if (scopeAgentId !== undefined && scanEligible) {
-				for (const memberId of collectAgentFamily(registry, scopeAgentId)) {
-					const ref = registry.get(memberId);
-					if (
-						ref &&
-						bareAgentId(memberId, ref.parentId) === id &&
-						isCurrentTranscriptRef(ref, parentSessionFile)
-					) {
-						resolvedId = memberId;
-						break;
-					}
-				}
-			}
+			const resolvedId = scanEligible ? resolveCurrent(id, parentSessionFile ?? null) : priorMatch;
 			if (!inScope(resolvedId)) throw new Error(`Agent "${id}" is not visible to this session.`);
 			await AgentLifecycleManager.global().ensureLive(resolvedId, coldRevive);
 			const ref = registry.get(resolvedId);
@@ -203,7 +220,7 @@ export function createExtensionAgentActions(
 			return toExtensionAgentInfo(ref);
 		},
 		agentsPrompt: async (id, text, agentOptions) => {
-			const resolvedId = resolveInScope(id);
+			const resolvedId = resolveCurrent(id, getScopeSessionFile?.() ?? null);
 			if (!inScope(resolvedId)) throw new Error(`Agent "${id}" is not visible to this session.`);
 			const liveSession = await AgentLifecycleManager.global().ensureLive(resolvedId, coldRevive);
 			await liveSession.prompt(text, { streamingBehavior: agentOptions?.deliverAs ?? "steer" });

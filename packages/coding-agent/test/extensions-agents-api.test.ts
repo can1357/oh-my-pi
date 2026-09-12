@@ -466,6 +466,85 @@ describe("ExtensionAPI agents", () => {
 		expect(AgentRegistry.global().get(newRevived.id)?.sessionFile).toBe(newChildFile);
 	});
 
+	it("get and prompt resolve to the current-transcript agent, not a stale same-named sibling", async () => {
+		using tempDir = TempDir.createSync("@omp-extension-agents-get-prompt-current-");
+		const cwd = tempDir.path();
+		const oldSessionFile = path.join(cwd, "before.jsonl");
+		const oldChildFile = path.join(cwd, "before", "Worker.jsonl");
+		const newSessionFile = path.join(cwd, "after.jsonl");
+		const newChildFile = path.join(cwd, "after", "Worker.jsonl");
+		await Bun.write(oldSessionFile, "");
+		await Bun.write(oldChildFile, `${persistedWorkerTranscript()}\n`);
+		await Bun.write(newSessionFile, "");
+		await Bun.write(newChildFile, `${persistedWorkerTranscript()}\n`);
+		const prompts: Record<"old" | "new", string[]> = { old: [], new: [] };
+		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(async ref => {
+			const label = ref.sessionFile === oldChildFile ? "old" : "new";
+			return async () => sessionStub({ onPrompt: text => prompts[label].push(text) });
+		}, 0);
+
+		// Same mutable-accessor shape as the transition test above: the
+		// extension actions object is installed once and survives a `/new` /
+		// `ctx.switchSession()` transition without being rebuilt.
+		let currentSessionFile = oldSessionFile;
+		let agents: ExtensionAgentsApi | undefined;
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			api => {
+				agents = api.agents;
+			},
+			cwd,
+			new EventBus(),
+			runtime,
+		);
+		const authStorage = await AuthStorage.create(":memory:");
+		const runner = new ExtensionRunner(
+			[extension],
+			runtime,
+			cwd,
+			SessionManager.inMemory(cwd),
+			new ModelRegistry(authStorage),
+		);
+		await initializeExtensions(
+			{
+				extensionRunner: runner,
+				discoverStartupSkillPaths: async () => {},
+				getAgentId: () => MAIN_AGENT_ID,
+				sessionManager: { getSessionFile: () => currentSessionFile },
+			} as unknown as AgentSession,
+			{
+				reportSendError: (_action, error) => {
+					throw error;
+				},
+				reportRuntimeError: error => {
+					throw error.error;
+				},
+			},
+		);
+		if (!agents) throw new Error("Extension factory did not receive api.agents");
+
+		const oldRevived = await agents.ensureLive("Worker", { parentSessionFile: oldSessionFile });
+		expect(oldRevived).toMatchObject({ id: "Worker", sessionFile: oldChildFile });
+
+		// Simulate `/new` / `ctx.switchSession()`, then rescan and revive the
+		// NEW transcript's own same-named "Worker" — registered under its
+		// disambiguated key, exactly like the `ensureLive` test above.
+		currentSessionFile = newSessionFile;
+		const newRevived = await agents.ensureLive("Worker", { parentSessionFile: newSessionFile });
+		expect(newRevived.sessionFile).toBe(newChildFile);
+		expect(newRevived.id).not.toBe(oldRevived.id);
+
+		// Before the fix: `get` and `prompt` only ever called `resolveInScope`,
+		// whose early return keeps matching the still-in-scope bare "Worker" id
+		// — the OLD transcript's agent — even after the CURRENT transcript's
+		// own "Worker" was registered under its disambiguated key above.
+		expect(agents.get("Worker")).toMatchObject({ id: newRevived.id, sessionFile: newChildFile });
+
+		await agents.prompt("Worker", "hello current transcript");
+		expect(prompts.new).toEqual(["hello current transcript"]);
+		expect(prompts.old).toEqual([]);
+	});
+
 	it("ACP-safe reviver cold-revives a genuinely parked agent through a session-scoped persisted reviver", async () => {
 		using tempDir = TempDir.createSync("@omp-extension-agents-cold-");
 		const cwd = tempDir.path();
