@@ -66,6 +66,11 @@ Without `SYSTEM.md`, append text is rendered at the end of `project-prompt.md`, 
 With `SYSTEM.md`, append text is rendered immediately after the custom text in `custom-system-prompt.md`. Context, skills, and rules follow it, and the separate project/environment footer follows that block. The templates prevent the append text and context files from being emitted twice.
 
 SDK-generated append content (for enabled memory/auto-learn features and MCP guidance) is combined before the user-supplied append text.
+Those generated blocks can end with `## MCP Server Instructions`, whose text declares
+itself server-controlled and unverified. Whenever a generated block precedes the
+user-supplied text, the text is rendered under its own `## User Instructions` heading
+so it cannot read as a trailing paragraph of a server-owned section. On its own — no
+generated block, no `SYSTEM.md` — the append text is emitted unchanged, without a heading.
 
 ## Plain-text contract
 
