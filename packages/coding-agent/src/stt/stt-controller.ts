@@ -324,6 +324,9 @@ export class STTController {
 			this.#resolvedModelKey = modelKey;
 			return true;
 		} catch (err) {
+			// A cancelled download (dispose, microphone failure) is not a dependency
+			// failure: the stream is already torn down and its own path reported.
+			signal?.throwIfAborted();
 			const msg = err instanceof Error ? err.message : "Failed to setup STT dependencies";
 			options.showWarning(msg);
 			logger.error("STT dependency setup failed", { error: msg });
