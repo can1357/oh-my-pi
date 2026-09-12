@@ -1423,6 +1423,112 @@ describe("YieldTool", () => {
 		});
 	});
 
+	it("resets the schema-retry budget after a schema-valid incremental section", async () => {
+		// Reproduces the RolesFallbacksReview incident: two malformed findings
+		// must not exhaust the verdict section's budget when a valid section
+		// lands in between. Incremental sections stay nonterminal, so the
+		// counter reset is observable across submissions on one tool instance.
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					properties: {
+						overall_correctness: { enum: ["correct", "incorrect"] },
+						explanation: { type: "string" },
+						confidence: { type: "number" },
+					},
+					optionalProperties: {
+						findings: {
+							elements: { properties: { title: { type: "string" }, body: { type: "string" } } },
+						},
+					},
+				},
+			}),
+		);
+		const finding = { title: "bug", body: "details" };
+		// Two malformed findings: bare string, then double-encoded wrapper.
+		await expect(
+			tool.execute("call-reset-bad-1", { type: ["findings"], data: "just text" } as never),
+		).rejects.toThrow(/Section "findings" does not match schema.*2 retry attempt\(s\) remain/);
+		await expect(
+			tool.execute("call-reset-bad-2", {
+				type: ["findings"],
+				data: JSON.stringify({ findings: [finding] }),
+			} as never),
+		).rejects.toThrow(/Section "findings" does not match schema.*1 retry attempt\(s\) remain/);
+		// One valid finding: budget resets to full.
+		const ok = await tool.execute("call-reset-good", { type: ["findings"], data: finding } as never);
+		expect(ok.details?.data).toEqual(finding);
+		// Three invalid verdicts must ALL reject again — the earlier two
+		// failures no longer count against this independent section.
+		await expect(
+			tool.execute("call-reset-v1", { type: ["overall_correctness"], data: "Correct" } as never),
+		).rejects.toThrow(/2 retry attempt\(s\) remain/);
+		await expect(
+			tool.execute("call-reset-v2", { type: ["overall_correctness"], data: "correct." } as never),
+		).rejects.toThrow(/1 retry attempt\(s\) remain/);
+		await expect(
+			tool.execute("call-reset-v3", { type: ["overall_correctness"], data: "approved" } as never),
+		).rejects.toThrow(/final retry/);
+		const override = await tool.execute("call-reset-v4", {
+			type: ["overall_correctness"],
+			data: "still-wrong",
+		} as never);
+		expect(override.details?.schemaOverridden).toBe(true);
+		expect(override.content).toEqual([
+			{ type: "text", text: "Result submitted (schema validation overridden after 4 failed attempt(s))." },
+		]);
+	});
+
+	it("recovers double-encoded JSON primitives only when raw validation fails", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					properties: {
+						overall_correctness: { enum: ["correct", "incorrect"] },
+						verdict_count: { type: "number" },
+					},
+				},
+			}),
+		);
+		// Double-encoded enum: raw `"correct"` (with quotes) fails the enum,
+		// decoded `correct` validates — adopted without spending retries twice.
+		const recovered = await tool.execute("call-prim-enum", {
+			type: ["overall_correctness"],
+			data: '"correct"',
+		} as never);
+		expect(recovered.details?.data).toBe("correct");
+		expect(recovered.content).toEqual([{ type: "text", text: "Result submitted." }]);
+		// Double-encoded number on its own label.
+		const recoveredNum = await tool.execute("call-prim-num", {
+			type: ["verdict_count"],
+			data: "42",
+		} as never);
+		expect(recoveredNum.details?.data).toBe(42);
+		// Decoded-but-still-invalid stays rejected: `"still-wrong"` parses to
+		// a string that still misses the enum.
+		await expect(
+			tool.execute("call-prim-bad", { type: ["overall_correctness"], data: '"still-wrong"' } as never),
+		).rejects.toThrow(/Section "overall_correctness" does not match schema/);
+	});
+
+	it("leaves raw-valid strings untouched by JSON recovery", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					properties: { explanation: { type: "string" } },
+				},
+			}),
+		);
+		// `correct` without quotes is already a valid string — recovery must
+		// not parse or alter it (no reverse stringify-into-typed-fields).
+		const result = await tool.execute("call-raw-str", {
+			type: ["explanation"],
+			data: "correct",
+		} as never);
+		expect(result.details?.data).toBe("correct");
+		expect(result.content).toEqual([{ type: "text", text: "Result submitted." }]);
+	});
+
 	it("does not treat literal $ref fields inside enum values as unresolved schema references", async () => {
 		const tool = new YieldTool(
 			createSession({
