@@ -7,6 +7,30 @@ class "anthropic" {
 			thinking-prefix-binding #true
 		}
 	}
+	// Server-side compaction (compact-2026-01-12) is a lineage capability: the
+	// documented model list is the adaptive-thinking generation onward (Opus
+	// 4.6+, Sonnet 4.6+, Fable/Mythos 5+). Whether a host delivers the beta is
+	// decided at request time from the effective endpoint, not here.
+	family "fable" {
+		revision ">=5" {
+			supports-server-compaction #true
+		}
+	}
+	family "mythos" {
+		revision ">=5" {
+			supports-server-compaction #true
+		}
+	}
+	family "opus" {
+		revision ">=4.6" {
+			supports-server-compaction #true
+		}
+	}
+	family "sonnet" {
+		revision ">=4.6" {
+			supports-server-compaction #true
+		}
+	}
 	on "anthropic" "cloudflare-ai-gateway" "google-vertex" {
 		family "fable" {
 			revision ">=5" {

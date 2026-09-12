@@ -25,7 +25,9 @@ import {
 	previewLine,
 	previewWindowRows,
 	replaceTabs,
+	shortenPath,
 	type ToolUIStatus,
+	TRUNCATE_LENGTHS,
 	truncateToWidth,
 } from "../tools/render-utils";
 import {
@@ -1454,10 +1456,25 @@ function renderAgentResult(
 		lines.push(...deferredToolLines);
 	}
 
-	if (result.patchPath && !aborted && result.exitCode === 0) {
-		lines.push(`${continuePrefix}${theme.fg("dim", `Patch: ${result.patchPath}`)}`);
+	// Artifact rows: paths shortened (home → `~`), tabs expanded, and width-bounded
+	// like every other rendered line; the full paths live in the model-facing summary.
+	// A nested-only run still carries its (empty) root patch path, so hide that
+	// row when the runner reports no root changes — same as the model summary.
+	if (result.patchPath && result.hasRootChanges !== false && !aborted && result.exitCode === 0) {
+		lines.push(
+			`${continuePrefix}${theme.fg("dim", truncateToWidth(`Patch: ${replaceTabs(shortenPath(result.patchPath))}`, TRUNCATE_LENGTHS.CONTENT))}`,
+		);
 	} else if (result.branchName && !aborted && result.exitCode === 0) {
-		lines.push(`${continuePrefix}${theme.fg("dim", `Branch: ${result.branchName}`)}`);
+		lines.push(
+			`${continuePrefix}${theme.fg("dim", truncateToWidth(`Branch: ${replaceTabs(sanitizeText(result.branchName))}`, TRUNCATE_LENGTHS.CONTENT))}`,
+		);
+	}
+	if (!aborted && result.exitCode === 0) {
+		for (const nestedPath of result.nestedPatchPaths ?? []) {
+			lines.push(
+				`${continuePrefix}${theme.fg("dim", truncateToWidth(`Nested patch: ${replaceTabs(shortenPath(nestedPath))}`, TRUNCATE_LENGTHS.CONTENT))}`,
+			);
+		}
 	}
 
 	// Error message
@@ -1784,6 +1801,52 @@ function isTaskToolDetails(value: unknown): value is TaskToolDetails {
 		"results" in (value as TaskToolDetails) &&
 		Array.isArray((value as TaskToolDetails).results)
 	);
+}
+
+/**
+ * Subagent ids visible on a task tool card, for click-to-focus hit-testing.
+ * Reads `progress[]` (in-flight) and `results[]` (settled) defensively — card
+ * details arrive as `unknown` through the tool-result pipeline — and recurses
+ * into the same nested snapshots the card renders (`extractedToolData.task`
+ * details plus the in-flight snapshot), so a click on a nested worker row
+ * resolves to that worker instead of an outer agent. Callers intersect with
+ * the live registry, which decides focusability and recency.
+ */
+export function taskCardAgentIds(details: unknown): string[] {
+	if (typeof details !== "object" || details === null) return [];
+	const ids: string[] = [];
+	const seen = new Set<unknown>();
+	const pushId = (item: unknown): void => {
+		if (typeof item !== "object" || item === null || !("id" in item)) return;
+		const id: unknown = item.id;
+		if (typeof id === "string" && id.length > 0 && !ids.includes(id)) ids.push(id);
+	};
+	const collectDetails = (value: unknown, depth: number): void => {
+		if (typeof value !== "object" || value === null || depth > MAX_NESTED_TASK_RENDER_DEPTH) return;
+		if (seen.has(value)) return;
+		seen.add(value);
+		const record = value as { results?: unknown; progress?: unknown };
+		collectList(record.results, depth);
+		collectList(record.progress, depth);
+	};
+	const collectList = (value: unknown, depth: number): void => {
+		if (!Array.isArray(value)) return;
+		for (const item of value) {
+			pushId(item);
+			if (typeof item !== "object" || item === null || seen.has(item)) continue;
+			seen.add(item);
+			const record = item as { extractedToolData?: unknown; inflightTaskDetails?: unknown };
+			const nested = record.extractedToolData;
+			if (typeof nested === "object" && nested !== null && "task" in nested) {
+				const tasks = (nested as { task?: unknown }).task;
+				if (Array.isArray(tasks)) for (const task of tasks) collectDetails(task, depth + 1);
+			}
+			collectDetails(record.inflightTaskDetails, depth + 1);
+		}
+	};
+	collectList("progress" in details ? details.progress : undefined, 0);
+	collectList("results" in details ? details.results : undefined, 0);
+	return ids;
 }
 
 // Nested subagent snapshots sit one or more levels below the frame border, so

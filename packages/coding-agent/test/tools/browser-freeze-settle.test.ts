@@ -579,6 +579,47 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 			expect(getTabsMapForTest().has("settle-cancelled")).toBe(true);
 		});
 
+		it("contains a tab-worker termination race when an in-flight run is aborted", async () => {
+			const name = "settle-terminated-worker";
+			const messages: string[] = [];
+			const worker = {
+				mode: "worker",
+				send(message: { type: string }): void {
+					messages.push(message.type);
+					if (message.type === "abort") {
+						throw new DOMException("Worker has been terminated", "InvalidStateError");
+					}
+				},
+				onMessage: (): (() => void) => () => {},
+				onError: (): (() => void) => () => {},
+				terminate: async (): Promise<void> => undefined,
+			};
+			const { tab } = makeStubTab({ name, worker, activateForScreenshot: false });
+			getTabsMapForTest().set(name, tab);
+			const controller = new AbortController();
+
+			try {
+				const run = runInTab(name, {
+					code: "await Promise.withResolvers().promise;",
+					timeoutMs: 60_000,
+					session: makeSession("/tmp"),
+					signal: controller.signal,
+				});
+				await Promise.resolve();
+				expect(messages).toEqual(["run"]);
+				const pending = tab.pending.values().next().value;
+				expect(pending).toBeDefined();
+
+				controller.abort(new ToolAbortError("cell timeout"));
+				pending?.reject(new ToolAbortError("cell timeout"));
+
+				await expect(run).rejects.toThrow("cell timeout");
+				expect(messages).toEqual(["run", "abort"]);
+			} finally {
+				getTabsMapForTest().delete(name);
+			}
+		});
+
 		it("double release is idempotent for concurrent sweep losers", async () => {
 			mockCmuxSocket();
 			const browser = await acquireBrowser(makeKind("settle-idempotent"), { cwd: "/tmp" });
