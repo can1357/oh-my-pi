@@ -96,7 +96,7 @@ FAKE_SERVER = textwrap.dedent(
             "tokensPerSecond": 7.25,
             "autoCompactionEnabled": auto_compaction_enabled,
             "messageCount": len(messages),
-            "queuedMessageCount": 0,
+            "queuedMessageCount": sum(len(items) for items in queued_messages.values()),
             "todoPhases": todo_phases,
             "dumpTools": [{"name": "read", "description": "Read files", "parameters": {"type": "object"}}] + registered_host_tools,
         }
@@ -248,6 +248,7 @@ FAKE_SERVER = textwrap.dedent(
     print(json.dumps({"type": "ready"}), flush=True)
     todo_phases = []
     messages = []
+    queued_messages = {"steering": [], "followUp": []}
     branch_messages = [{"entryId": "entry-1", "text": "branch message"}]
     model_provider = "anthropic"
     model_id = "claude-sonnet-4-5"
@@ -402,7 +403,20 @@ FAKE_SERVER = textwrap.dedent(
         elif command_type == "set_session_name":
             session_name = command["name"]
             respond(request_id, "set_session_name", {})
-        elif command_type in {"steer", "follow_up", "abort"}:
+        elif command_type in {"steer", "follow_up"}:
+            queue_name = "steering" if command_type == "steer" else "followUp"
+            queued_messages[queue_name].append(command["message"])
+            respond(request_id, command_type, {})
+        elif command_type == "remove_queued_message":
+            items = queued_messages.get(command.get("queue"))
+            if items is None:
+                respond(request_id, command_type, success=False, error="invalid queue")
+                continue
+            removed = command["message"] in items
+            if removed:
+                items.remove(command["message"])
+            respond(request_id, command_type, {"removed": removed})
+        elif command_type == "abort":
             respond(request_id, command_type, {})
         elif command_type in {"prompt", "abort_and_prompt"}:
             respond(request_id, command_type, {})
@@ -883,6 +897,46 @@ class RpcClientTests(unittest.TestCase):
             request_timeout=2.0,
             **kwargs,
         )
+
+    def test_remove_queued_message_preserves_queue_and_duplicate_identity(self) -> None:
+        with self.make_client() as client:
+            client.steer("same")
+            client.steer("same")
+            client.follow_up("same")
+            client.follow_up("keep")
+            self.assertIs(client.remove_queued_message("same", "steering").removed, True)
+            self.assertEqual(client.get_state().queued_message_count, 3)
+            self.assertIs(client.remove_queued_message("same", "steering").removed, True)
+            self.assertIs(client.remove_queued_message("same", "steering").removed, False)
+            self.assertEqual(client.get_state().queued_message_count, 2)
+            self.assertIs(client.remove_queued_message("same", "followUp").removed, True)
+            self.assertIs(client.remove_queued_message("missing", "followUp").removed, False)
+            self.assertEqual(client.get_state().queued_message_count, 1)
+            self.assertIs(client.remove_queued_message("keep", "followUp").removed, True)
+
+    def test_remove_queued_message_propagates_unsupported_command(self) -> None:
+        server = FAKE_SERVER.replace(
+            'elif command_type == "remove_queued_message":',
+            'elif command_type == "unavailable_remove_queued_message":',
+        )
+        with self.make_client(server) as client:
+            client.steer("keep")
+            with self.assertRaises(RpcCommandError) as ctx:
+                client.remove_queued_message("keep", "steering")
+            self.assertEqual(ctx.exception.command, "remove_queued_message")
+            self.assertEqual(client.get_state().queued_message_count, 1)
+
+    def test_remove_queued_message_rejects_missing_result(self) -> None:
+        server = FAKE_SERVER.replace('{"removed": removed}', '{}')
+        with self.make_client(server) as client:
+            with self.assertRaises(ValueError):
+                client.remove_queued_message("missing", "steering")
+
+    def test_remove_queued_message_rejects_nonboolean_result(self) -> None:
+        server = FAKE_SERVER.replace('{"removed": removed}', '{"removed": "false"}')
+        with self.make_client(server) as client:
+            with self.assertRaises(ValueError):
+                client.remove_queued_message("missing", "steering")
 
     def test_protocol_v2_decoder_accepts_exact_logical_boundary(self) -> None:
         frame = {
