@@ -57,6 +57,7 @@ import {
 	afterPendingOperationsSettle,
 	snapshotAfterPendingOperationsSettle,
 } from "./pending-ops";
+import { invalidatesHelloStructurally } from "./hello-refresh";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
@@ -1441,7 +1442,7 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
 	const snap = snapshot(tab);
 	if (snap) {
 		// An in-flight refresh whose snapshot predates this update carries stale
-		// tab metadata (title/favicon/url) that RelayBridge.#onHello() would restore
+		// tab metadata that RelayBridge.#onHello() would restore
 		// over the newer `tabUpdated`. Mark the refresh meta-dirty so it rebuilds
 		// once more with the live metadata — but, unlike tab create/remove, an
 		// update never changes the advertised attachment set, so it must NOT
@@ -1450,10 +1451,10 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
 		// handshake, leaving the relay uninitialized until the orphan deadline
 		// detaches live sessions. Delivering the current hello and rebuilding keeps
 		// the loop bounded to one hello per settled build.
-		// Group membership is reconciliation state, not cosmetic metadata. A
-		// stale hello can otherwise overwrite the grouping RPC's result and make
-		// the bridge interpret its own group move as a permanent user opt-out.
-		if (changeInfo.groupId !== undefined) invalidateHelloRefresh();
+		// Group membership and URL are reconciliation state, not cosmetic
+		// metadata. A stale hello can otherwise overwrite a grouping RPC's result
+		// or a newly navigated URL and make recovery act on the old target state.
+		if (invalidatesHelloStructurally(changeInfo)) invalidateHelloRefresh();
 		else invalidateHelloMeta();
 		post({ t: "tabUpdated", tab: snap });
 	}
