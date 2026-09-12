@@ -447,6 +447,15 @@ type AnthropicControlState = {
 	 * {@link detectAnthropicCacheBreak}. Never affects request shaping.
 	 */
 	pendingCacheBreakReason: CacheBreakReason | undefined;
+	/**
+	 * Diagnostics only: an accepted request has already used this baseline. The
+	 * control state is created and mutated while a request is merely being
+	 * built, so "created on this call" cannot tell a genuinely new prefix from
+	 * one whose first attempt failed before a response. This flag is set by the
+	 * same deferred commit that stores the prefix snapshot, so a retry of a
+	 * failed turn still reads as the first accepted use.
+	 */
+	acceptedRequest: boolean;
 };
 
 /**
@@ -496,6 +505,7 @@ function createAnthropicControlState(): AnthropicControlState {
 		baseEffortWire: undefined,
 		currentEffort: undefined,
 		pendingCacheBreakReason: undefined,
+		acceptedRequest: false,
 	};
 }
 
@@ -4156,28 +4166,16 @@ function anthropicConversationIdentity(
 	};
 }
 
-/**
- * The conversation's control baseline, plus whether this request had to create
- * it. Freshness is the signal that this request is the first to use its exact
- * system text, which is what separates a real system-prompt edit from a side
- * request (summarizer, classifier) that shares the session and conversation
- * root but carries its own prompt.
- */
-type AnthropicControlStateLookup = {
-	state: AnthropicControlState | undefined;
-	created: boolean;
-};
-
 function getAnthropicControlState(
 	state: AnthropicProviderSessionState | undefined,
 	controlKey: string,
-): AnthropicControlStateLookup {
-	if (!state) return { state: undefined, created: false };
+): AnthropicControlState | undefined {
+	if (!state) return undefined;
 	const existing = state.controlStates.get(controlKey);
 	if (existing) {
 		state.controlStates.delete(controlKey);
 		state.controlStates.set(controlKey, existing);
-		return { state: existing, created: false };
+		return existing;
 	}
 	const created = createAnthropicControlState();
 	state.controlStates.set(controlKey, created);
@@ -4185,7 +4183,7 @@ function getAnthropicControlState(
 		const oldest = state.controlStates.keys().next().value;
 		if (oldest !== undefined) state.controlStates.delete(oldest);
 	}
-	return { state: created, created: true };
+	return created;
 }
 
 /** Fingerprint of the wire message a control transition is attached after. */
@@ -4462,11 +4460,15 @@ const NO_CACHE_BREAK_DETECTION: AnthropicCacheBreakDetection = { reason: undefin
  *
  * A session also issues side requests (summarizer, classifier) that reuse the
  * session id while carrying their own system prompt or their own root, so the
- * last snapshot may describe a different prefix entirely. Only a request that
- * had to create its control state is the first user of its exact root and
+ * last snapshot may describe a different prefix entirely. Only a baseline that
+ * no accepted request has used yet is the first user of its exact root and
  * system text, so `history_rewrite` by root and `system_prompt` both require
- * `controlStateCreated`; a mismatch without it means the snapshot belongs to
- * another prefix and nothing about tools or retention can be concluded from it.
+ * that; a mismatch without it means the snapshot belongs to another prefix and
+ * nothing about tools or retention can be concluded from it. The test is
+ * "never accepted" rather than "created on this call" because the control
+ * state is created while the request is merely being built: an attempt that
+ * fails before a response leaves its baseline behind, and its retry must still
+ * be able to name what the turn changed.
  */
 function detectAnthropicCacheBreak(
 	state: AnthropicProviderSessionState | undefined,
@@ -4475,7 +4477,7 @@ function detectAnthropicCacheBreak(
 	tools: readonly AnthropicWireTool[] | undefined,
 	cacheControl: AnthropicCacheControl | undefined,
 	controlReason: CacheBreakReason | undefined,
-	controlStateCreated: boolean,
+	controlState: AnthropicControlState | undefined,
 	toolPlaneEnabled: boolean,
 ): AnthropicCacheBreakDetection {
 	if (!state) return NO_CACHE_BREAK_DETECTION;
@@ -4498,7 +4500,9 @@ function detectAnthropicCacheBreak(
 		toolsFingerprint,
 		...(cacheTtl ? { cacheTtl } : {}),
 	};
+	const firstAcceptedUse = controlState !== undefined && !controlState.acceptedRequest;
 	const commit = (): void => {
+		if (controlState) controlState.acceptedRequest = true;
 		state.cachePrefixDiagnostics.delete(conversationKey);
 		state.cachePrefixDiagnostics.set(conversationKey, snapshot);
 		if (state.cachePrefixDiagnostics.size > MAX_ANTHROPIC_CONTROL_STATES) {
@@ -4510,7 +4514,7 @@ function detectAnthropicCacheBreak(
 	if (!previous) return { reason: undefined, commit };
 	if (controlReason?.kind === "history_rewrite") return { reason: controlReason, commit };
 	if (previous.rootFingerprint !== rootFingerprint || previous.systemFingerprint !== systemFingerprint) {
-		if (!controlStateCreated) {
+		if (!firstAcceptedUse) {
 			// Snapshot came from another prefix in this conversation; only causes
 			// this request observed itself remain trustworthy.
 			return { reason: controlReason, commit };
@@ -4733,8 +4737,7 @@ function buildParams(
 		droppedThinkingBlocks,
 	});
 	const conversation = anthropicConversationIdentity(options?.sessionId, systemBlocks, wireMessages);
-	const controlLookup = getAnthropicControlState(providerSessionState, conversation.controlKey);
-	const controlState = controlLookup.state;
+	const controlState = getAnthropicControlState(providerSessionState, conversation.controlKey);
 	if (controlState) syncAnthropicControlState(controlState, wireMessages);
 	systemBlocks = planStableAnthropicSystem(systemBlocks, controlState, model.compat.supportsMidConversationSystem);
 	tools = planStableAnthropicTools(tools, wireMessages, controlState, model.compat.supportsMidConversationToolChanges);
@@ -4750,7 +4753,7 @@ function buildParams(
 		tools,
 		cacheControl,
 		controlReason,
-		controlLookup.created,
+		controlState,
 		model.compat.supportsMidConversationToolChanges,
 	);
 	// Anchor the stable tools+system head so it stays cached across turns; the
