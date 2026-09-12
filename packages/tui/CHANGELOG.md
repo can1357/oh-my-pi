@@ -1,11 +1,5 @@
 # Changelog
 
-## [Unreleased]
-
-### Fixed
-
-- Fixed interactive sessions treating an uncaught terminal/stdio `EPIPE` write as a fatal crash instead of a graceful disconnect ([#10930](https://github.com/can1357/oh-my-pi/issues/10930)).
-
 ## [18.1.9] - 2026-09-04
 
 ### Added

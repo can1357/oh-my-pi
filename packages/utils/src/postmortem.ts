@@ -290,20 +290,49 @@ function faultWorkerIpcChannels(err: Error): void {
 }
 
 /**
- * Treat EPIPE from a registered stdio owner as a graceful peer disconnect,
- * regardless of which process error event Bun uses for the failed write.
+ * Graceful shutdown driven by `process.stdout`'s own `error` event.
  *
- * Stdio protocol servers and interactive terminals register for their active
- * lifetime so a closed peer runs cleanup without entering the fatal path.
- * The returned callback removes the registration.
+ * A closed stdout consumer (`omp --help | head`, an ACP client dropping the
+ * pipe) delivers the failing write here — attributable to stdout by
+ * construction, unlike a process-wide `syscall: "write"` match that a closed
+ * subprocess stdin or socket would also satisfy. A broken pipe runs cleanup and
+ * exits 0 (Unix `| head` semantics); any other stdout error keeps the fatal
+ * path so a genuine failure is never silently swallowed.
+ */
+function onStdoutDisconnect(err: Error): void {
+	if (classifyBrokenPipe(err) === "stdio-write") {
+		logger.warn("Stdout peer disconnected; shutting down gracefully", { err });
+		void runQuit(0, "native", { drainStdout: false });
+		return;
+	}
+	void exitAfterFatal(
+		`${formatFatalError("Stdout Error", err)}${formatFatalRecoveryHints()}`,
+		"Stdout error",
+		err,
+		Reason.UNCAUGHT_EXCEPTION,
+	);
+}
+
+/**
+ * Treat a closed stdout consumer as a graceful peer disconnect for the caller's
+ * active lifetime. Attaches one shared `process.stdout` `error` listener,
+ * ref-counted across registrants (the ACP protocol server, the one-shot CLI
+ * entry). The returned callback removes the registration; the listener detaches
+ * when the last registrant unregisters.
  */
 export function registerStdioDisconnectHandling(): () => void {
 	let registered = true;
+	if (isMainThread && stdioDisconnectRegistrations === 0) {
+		process.stdout.on("error", onStdoutDisconnect);
+	}
 	stdioDisconnectRegistrations++;
 	return () => {
 		if (!registered) return;
 		registered = false;
 		stdioDisconnectRegistrations--;
+		if (isMainThread && stdioDisconnectRegistrations === 0) {
+			process.stdout.removeListener("error", onStdoutDisconnect);
+		}
 	};
 }
 
@@ -417,15 +446,10 @@ async function exitAfterFatal(output: string, logMessage: string, err: Error, re
 	}
 }
 
-async function handleBrokenPipe(err: Error): Promise<boolean> {
-	if (isIpcSendEpipe(err)) {
-		logger.warn("Ignoring EPIPE from worker IPC send; optional subsystem will self-recover", { err });
-		return true;
-	}
-	if (classifyBrokenPipe(err) !== "stdio-write" || stdioDisconnectRegistrations === 0) return false;
-
-	logger.warn("Stdio peer disconnected; shutting down gracefully", { err });
-	await runQuit(0, "native", { drainStdout: false });
+/** Contain an EPIPE from an optional worker IPC `send()` (#2997, #9158). */
+function handleWorkerSendEpipe(err: Error): boolean {
+	if (!isIpcSendEpipe(err)) return false;
+	logger.warn("Ignoring EPIPE from worker IPC send; optional subsystem will self-recover", { err });
 	return true;
 }
 
@@ -456,16 +480,16 @@ if (isMainThread) {
 			process.stderr.write(`Inspector opened: ${url}\n`);
 		})
 		.on("uncaughtException", async thrown => {
-			// Expected cleanup is safe globally. Broken-pipe recovery below also
-			// requires an active stdio owner; unrelated synchronous errors stay fatal.
+			// Expected cleanup is safe globally; unrelated synchronous errors stay fatal.
 			if (hasExpectedCleanupMarker(thrown)) {
 				logger.warn("Ignoring expected cleanup exception", { err: thrown });
 				return;
 			}
 			const err = thrown instanceof Error ? thrown : new Error(String(thrown));
-			// Bun routes pipe failures through either process event depending on
-			// which internal stream phase observes the closed peer.
-			if (await handleBrokenPipe(err)) return;
+			// A worker IPC `send()` race can surface through either global error event;
+			// contain it in both. Stdout write disconnects are attributed to stdout by
+			// registerStdioDisconnectHandling's `error` listener, not classified here.
+			if (handleWorkerSendEpipe(err)) return;
 			// A malformed advanced-serialization frame from a worker subprocess
 			// surfaces here as a process-level uncaughtException (oven-sh/bun#37287)
 			// rather than in the channel's ipc() callback, and Bun gives no way to
@@ -495,7 +519,7 @@ if (isMainThread) {
 		})
 		.on("unhandledRejection", async reason => {
 			const err = reason instanceof Error ? reason : new Error(String(reason));
-			if (await handleBrokenPipe(err)) return;
+			if (handleWorkerSendEpipe(err)) return;
 			if (isExpectedCleanupError(reason)) {
 				logger.warn("Ignoring expected cleanup rejection", { err });
 				return;

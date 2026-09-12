@@ -2,21 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 
-const uncaughtWriteChildFlag = "--uncaught-write-epipe-child";
-if (process.argv.includes(uncaughtWriteChildFlag)) {
-	setTerminalHeadless(false);
-	Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
-	const terminal = new ProcessTerminal();
-	terminal.start(
-		() => {},
-		() => {},
-	);
-	setImmediate(() => {
-		throw Object.assign(new Error("broken pipe"), { code: "EPIPE", syscall: "write", errno: -32 });
-	});
-	await new Promise<void>(() => {});
-}
-
 // Regression: a recycled terminal pane (Muxy's "terminal offline" sweep, a
 // dropped ssh session) revokes the pty. stdin EOFs, the disconnect path runs,
 // and stop() restores raw mode on an fd that is no longer a tty, so Bun's
@@ -65,18 +50,6 @@ describe("ProcessTerminal disconnect with a revoked pty", () => {
 		restoreProperty(process.stdout, "isTTY", stdoutIsTtyDescriptor);
 		restoreProperty(process.stdin, "setRawMode", stdinSetRawModeDescriptor);
 		setTerminalHeadless(previousHeadless);
-	});
-
-	it("exits successfully when an active interactive terminal receives an uncaught write EPIPE", async () => {
-		const child = Bun.spawn([process.execPath, "run", import.meta.path, uncaughtWriteChildFlag], {
-			stdin: "ignore",
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
-
-		expect(exitCode, stderr).toBe(0);
-		expect(stderr).not.toContain("[Uncaught Exception]");
 	});
 
 	it("still signals SIGHUP when restoring raw mode throws on a revoked fd", () => {
