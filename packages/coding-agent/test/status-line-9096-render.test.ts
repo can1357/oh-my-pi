@@ -478,7 +478,7 @@ test("masks boundary ticks across the reserved compact placeholder width", () =>
 							enabled: true,
 							strategy: "summarize",
 							asyncEnabled: true,
-							thresholdPercent: 80,
+							thresholdPercent: 50,
 							methodOrder: ["soft"],
 						}
 					: {},
@@ -513,8 +513,8 @@ test("masks boundary ticks across the reserved compact placeholder width", () =>
 		segmentOptions: { context_pct: { compact: true } },
 	});
 
-	const startup = stripVTControlCharacters(component.renderStartupPlaceholder(24, "box"));
-	const rendered = stripVTControlCharacters(component.getTopBorder(24).content);
+	const startup = stripVTControlCharacters(component.renderStartupPlaceholder(11, "box"));
+	const rendered = stripVTControlCharacters(component.getTopBorder(11).content);
 	const startupLabelStart = startup.indexOf("ctx:…");
 	const liveLabelStart = rendered.indexOf("ctx:9.1%");
 	expect(startupLabelStart).toBe(liveLabelStart);
