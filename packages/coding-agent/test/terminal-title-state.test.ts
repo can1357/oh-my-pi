@@ -193,6 +193,10 @@ describe("agent state file", () => {
 	});
 
 	afterEach(async () => {
+		// Before anything else: a spy left installed here is inherited by whatever file runs
+		// next in the same module registry, together with its call history.
+		vi.restoreAllMocks();
+
 		setAgentStateFileEnabled(false);
 		await agentStateFileSettled();
 
