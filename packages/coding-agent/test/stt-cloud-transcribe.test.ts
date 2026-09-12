@@ -726,8 +726,11 @@ describe("cloud backend in STTController", () => {
 			submit(): void {},
 			deleteBeforeCursor(_count: number): void {},
 		};
+		const warnings: string[] = [];
 		const options = {
-			showWarning(_msg: string): void {},
+			showWarning(message: string): void {
+				warnings.push(message);
+			},
 			showStatus(_msg: string): void {},
 			onStateChange(_state: SttState): void {},
 		};
@@ -743,6 +746,68 @@ describe("cloud backend in STTController", () => {
 			await stopping;
 			expect(signal.aborted).toBe(true);
 			expect(controller.state).toBe("idle");
+			// Disposal aborted the download; that is not a dependency failure to report.
+			expect(warnings).toEqual([
+				"No OpenAI credentials for cloud speech-to-text (API key or ChatGPT subscription) — falling back to the local model.",
+			]);
+		} finally {
+			controller.dispose();
+			cachedSpy.mockRestore();
+			downloadSpy.mockRestore();
+		}
+	});
+
+	it("reports a microphone failure once when it cancels the local fallback download", async () => {
+		settings.set("stt.modelName", "gpt-4o-transcribe");
+		const captureError = new Error("microphone unavailable");
+		const cachedSpy = spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
+		// Wrapped so resolving does not adopt (and therefore reject with) the download itself.
+		const downloadStarted = Promise.withResolvers<{ settled: Promise<void> }>();
+		const downloadSpy = spyOn(downloader, "downloadSttModel").mockImplementation((_key, _onProgress, options) => {
+			const signal = options?.signal;
+			if (!signal) throw new Error("Expected the fallback download to receive an abort signal");
+			const { promise, reject } = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+			downloadStarted.resolve({ settled: promise.catch(() => {}) });
+			return promise;
+		});
+		let onAudio!: (error: Error | null, samples: Float32Array) => void;
+		const editor = {
+			insertText(_text: string): void {},
+			setVolatileText(_text: string): void {},
+			clearVolatileText(): void {},
+			commitVolatileText(_text: string): void {},
+			submit(): void {},
+			deleteBeforeCursor(_count: number): void {},
+		};
+		const warnings: string[] = [];
+		const options = {
+			showWarning(message: string): void {
+				warnings.push(message);
+			},
+			showStatus(_msg: string): void {},
+			onStateChange(_state: SttState): void {},
+		};
+		const controller = new STTController(
+			callback => {
+				onAudio = callback;
+				return { stop(): void {} };
+			},
+			{ resolveCloudCredential: () => Promise.resolve(undefined) },
+		);
+
+		try {
+			await controller.toggle(editor, options);
+			const { settled } = await downloadStarted.promise;
+			onAudio(captureError, new Float32Array(0));
+			// Our continuation is queued behind the controller's own reaction on the
+			// rejected download, so once this settles the fallback path has reported whatever it will.
+			await settled;
+			expect(controller.state).toBe("idle");
+			expect(warnings).toEqual([
+				"No OpenAI credentials for cloud speech-to-text (API key or ChatGPT subscription) — falling back to the local model.",
+				captureError.message,
+			]);
 		} finally {
 			controller.dispose();
 			cachedSpy.mockRestore();

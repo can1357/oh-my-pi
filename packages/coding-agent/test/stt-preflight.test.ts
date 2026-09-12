@@ -129,7 +129,7 @@ describe("STTController preflight", () => {
 
 	it("uncached model: downloads in the foreground with progress before recording", async () => {
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
-		const download = vi.spyOn(downloader, "downloadSttModel").mockImplementation((_key, onProgress) => {
+		vi.spyOn(downloader, "downloadSttModel").mockImplementation((_key, onProgress) => {
 			onProgress?.({
 				status: "progress",
 				percent: 42,
@@ -147,8 +147,6 @@ describe("STTController preflight", () => {
 		await controller.toggle(editor, options);
 
 		expect(controller.state).toBe("recording");
-		// Foreground path passes a progress callback (2 args) and surfaces it.
-		expect(download.mock.calls[0]).toHaveLength(2);
 		expect(options.showStatus).toHaveBeenCalledWith("Downloading speech model Whisper base (42%)");
 		// Status was written, so the line is cleared at the end.
 		expect(options.showStatus).toHaveBeenLastCalledWith("");
