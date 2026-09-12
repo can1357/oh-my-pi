@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `Agent.getPendingToolResults()` for reconstructing live displays before buffered tool results are persisted ([#11868](https://github.com/can1357/oh-my-pi/pull/11868) by [@serverinspector](https://github.com/serverinspector)).
 - Added opt-in host authorization and exact-once streamed child execution for discard-safe local reads.
 ### Fixed
 

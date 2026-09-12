@@ -27,9 +27,11 @@ function makeSessionStub(opts: { isStreaming?: boolean } = {}): SessionStub {
 	let queue: { steering: string[]; followUp: string[] } = { steering: [], followUp: [] };
 	const stub = {
 		isStreaming: opts.isStreaming ?? false,
+		agent: { state: { streamMessage: null } },
 		subscribe(fn: (event: AgentSessionEvent) => Promise<void> | void) {
 			listener = fn;
 			return () => {
+				if (listener === fn) listener = undefined;
 				unsubscribeCalls++;
 			};
 		},
@@ -99,6 +101,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 			resetTranscriptAnchors: () => {
 				resetTranscriptAnchors++;
 			},
+			restorePendingToolResults() {},
 		},
 		statusLine: {
 			setSession: (session: AgentSession, focusedAgentId?: string) => {
@@ -277,6 +280,35 @@ describe("SessionFocusController", () => {
 		// Guard fires once: subsequent updates pass through unsynthesized.
 		await worker.emit({ type: "message_update", message });
 		expect(h.handledEvents.slice(3)).toEqual([{ type: "message_update", message }]);
+	});
+
+	it("does not restart the next assistant when an older message end finishes rendering", async () => {
+		const h = makeHarness();
+		const worker = makeSessionStub({ isStreaming: true });
+		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+		await h.controller.focusAgent("Worker");
+		const endGate = Promise.withResolvers<void>();
+		const endStarted = Promise.withResolvers<void>();
+		const handleEvent = h.ctx.eventController.handleEvent.bind(h.ctx.eventController);
+		h.ctx.eventController.handleEvent = async event => {
+			await handleEvent(event);
+			if (event.type === "message_end") {
+				endStarted.resolve();
+				await endGate.promise;
+			}
+		};
+		const previous = { role: "assistant", content: "previous" };
+		const next = { role: "assistant", content: "next" };
+		await worker.emit({ type: "message_start", message: previous });
+		const ending = worker.emit({ type: "message_end", message: previous });
+		await endStarted.promise;
+		await worker.emit({ type: "message_start", message: next });
+		endGate.resolve();
+		await ending;
+		h.handledEvents.length = 0;
+		const update = { type: "message_update", message: next };
+		await worker.emit(update);
+		expect(h.handledEvents).toEqual([update]);
 	});
 
 	it("focusParent walks parentId to a registered non-main agent, then re-attaches the main session", async () => {
@@ -515,6 +547,92 @@ describe("SessionFocusController", () => {
 		expect(h.reloadTodoSessions).toEqual([]);
 	});
 
+	it("does not orphan an in-flight attach when the same session is focused again", async () => {
+		const renderStarted = Promise.withResolvers<void>();
+		const { promise: renderGate, resolve: releaseRender } = Promise.withResolvers<void>();
+		const h = makeHarness({
+			renderInitialMessages: () => {
+				renderStarted.resolve();
+				return renderGate;
+			},
+		});
+		const worker = makeSessionStub();
+		worker.setQueue({ steering: ["queued worker input"] });
+		const lifecycle = {
+			ensureLive: (_id: string) => Promise.resolve(worker.session),
+		};
+		const controller = new SessionFocusController(
+			h.ctx,
+			h.registry,
+			() => lifecycle as unknown as AgentLifecycleManager,
+		);
+		Object.defineProperty(h.ctx, "viewSession", { get: () => controller.target ?? h.main.session });
+
+		const first = controller.focusAgent("Worker");
+		await renderStarted.promise;
+
+		const second = controller.focusAgent("Worker");
+		releaseRender();
+		await first;
+		await second;
+		expect(controller.focusedAgentId).toBe("Worker");
+		expect(controller.target).toBe(worker.session);
+		expect(h.pendingMessagesContainer.render(80).join("\n")).toContain("queued worker input");
+	});
+
+	it("reports attachment failure to a repeated same-session focus request", async () => {
+		const renderStarted = Promise.withResolvers<void>();
+		const renderGate = Promise.withResolvers<void>();
+		const failure = new Error("worker replay failed");
+		let firstReplay = true;
+		const h = makeHarness({
+			renderInitialMessages: async () => {
+				if (!firstReplay) return;
+				firstReplay = false;
+				renderStarted.resolve();
+				await renderGate.promise;
+				throw failure;
+			},
+		});
+		const worker = makeSessionStub();
+		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+		const first = h.controller.focusAgent("Worker");
+		await renderStarted.promise;
+		const second = h.controller.focusAgent("Worker").then(
+			() => undefined,
+			error => error,
+		);
+		await flushAsync();
+		renderGate.resolve();
+		await first;
+		expect(await second).toBe(failure);
+		expect(h.controller.focusedAgentId).toBeUndefined();
+	});
+
+	it("attaches once when a second same-session request arrives before revive completes", async () => {
+		const h = makeHarness();
+		const worker = makeSessionStub();
+		const { promise: revive, resolve: releaseRevive } = Promise.withResolvers<AgentSession>();
+		const lifecycle = {
+			ensureLive: (_id: string) => revive,
+		};
+		const controller = new SessionFocusController(
+			h.ctx,
+			h.registry,
+			() => lifecycle as unknown as AgentLifecycleManager,
+		);
+
+		const first = controller.focusAgent("Worker");
+		const second = controller.focusAgent("Worker");
+		expect(controller.focusedAgentId).toBeUndefined();
+
+		releaseRevive(worker.session);
+		await first;
+		await second;
+		expect(controller.focusedAgentId).toBe("Worker");
+		expect(controller.target).toBe(worker.session);
+	});
+
 	it("drops a pending revive when the current view is reaffirmed", async () => {
 		const h = makeHarness();
 		const focused = makeSessionStub();
@@ -538,6 +656,139 @@ describe("SessionFocusController", () => {
 		await slowFocus;
 		expect(controller.focusedAgentId).toBe("Focused");
 		expect(controller.target).toBe(focused.session);
+	});
+
+	it("drops a pending revive when the already-attached session is focused again", async () => {
+		const h = makeHarness();
+		const focused = makeSessionStub();
+		const slow = makeSessionStub();
+		const { promise: slowGate, resolve: releaseSlow } = Promise.withResolvers<AgentSession>();
+		const lifecycle = {
+			ensureLive: (id: string) => (id === "Slow" ? slowGate : Promise.resolve(focused.session)),
+		};
+		const controller = new SessionFocusController(
+			h.ctx,
+			h.registry,
+			() => lifecycle as unknown as AgentLifecycleManager,
+		);
+
+		await controller.focusAgent("Focused");
+
+		const slowFocus = controller.focusAgent("Slow");
+		await controller.focusAgent("Focused");
+		releaseSlow(slow.session);
+		await slowFocus;
+		expect(controller.focusedAgentId).toBe("Focused");
+		expect(controller.target).toBe(focused.session);
+	});
+
+	it("retries the same worker after an attachment failure", async () => {
+		let failReplay = true;
+		const h = makeHarness({
+			renderInitialMessages: () => {
+				if (failReplay) {
+					failReplay = false;
+					throw new Error("replay failed");
+				}
+			},
+		});
+		h.main.setQueue({ steering: ["main input after recovery"] });
+		const worker = makeSessionStub();
+		worker.setQueue({ steering: ["worker input after retry"] });
+		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+		await expect(h.controller.focusAgent("Worker")).rejects.toThrow("replay failed");
+		expect(h.controller.focusedAgentId).toBeUndefined();
+		expect(h.pendingMessagesContainer.render(80).join("\n")).toContain("main input after recovery");
+		const mainEvent = {
+			type: "message_start",
+			message: { role: "user", content: "MAIN_AFTER_FAILURE", timestamp: 1 },
+		};
+		await h.main.emit(mainEvent);
+		expect(h.handledEvents).toContainEqual(mainEvent);
+		await h.controller.focusAgent("Worker");
+		expect(h.pendingMessagesContainer.render(80).join("\n")).toContain("worker input after retry");
+		expect(h.controller.target).toBe(worker.session);
+	});
+
+	it("does not clear a newer focused view when an older attachment fails", async () => {
+		const replayStarted = Promise.withResolvers<void>();
+		const oldReplay = Promise.withResolvers<void>();
+		let firstReplay = true;
+		const h = makeHarness({
+			renderInitialMessages: () => {
+				if (!firstReplay) return;
+				firstReplay = false;
+				replayStarted.resolve();
+				return oldReplay.promise;
+			},
+		});
+		const first = makeSessionStub();
+		const second = makeSessionStub();
+		second.setQueue({ steering: ["newer worker input"] });
+		registerSub(h.registry, "First", first.session, MAIN_AGENT_ID);
+		registerSub(h.registry, "Second", second.session, MAIN_AGENT_ID);
+		const oldFocus = h.controller.focusAgent("First");
+		await replayStarted.promise;
+		await h.controller.focusAgent("Second");
+		oldReplay.reject(new Error("old replay failed"));
+		await oldFocus;
+		expect(h.controller.target).toBe(second.session);
+		expect(h.pendingMessagesContainer.render(80).join("\n")).toContain("newer worker input");
+	});
+
+	it("retains main event delivery if its recovery replay also fails", async () => {
+		const workerFailure = new Error("worker replay failed");
+		const mainFailure = new Error("main replay failed");
+		let firstReplay = true;
+		const h = makeHarness({
+			renderInitialMessages: () => {
+				if (firstReplay) {
+					firstReplay = false;
+					throw workerFailure;
+				}
+				throw mainFailure;
+			},
+		});
+		const worker = makeSessionStub();
+		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+		const failure = await h.controller.focusAgent("Worker").catch((error: unknown) => error);
+		if (!(failure instanceof AggregateError)) throw new Error("Expected both attachment errors");
+		expect(failure.errors).toEqual([workerFailure, mainFailure]);
+		const mainEvent = {
+			type: "message_start",
+			message: { role: "user", content: "MAIN_AFTER_DOUBLE_FAILURE", timestamp: 1 },
+		};
+		await h.main.emit(mainEvent);
+		expect(h.handledEvents).toContainEqual(mainEvent);
+		expect(h.controller.focusedAgentId).toBeUndefined();
+	});
+
+	it("does not overwrite a newer focus while recovering the main attachment", async () => {
+		const recoveryStarted = Promise.withResolvers<void>();
+		const recoveryReplay = Promise.withResolvers<void>();
+		let replay = 0;
+		const h = makeHarness({
+			renderInitialMessages: () => {
+				replay++;
+				if (replay === 1) throw new Error("worker replay failed");
+				if (replay === 2) {
+					recoveryStarted.resolve();
+					return recoveryReplay.promise;
+				}
+			},
+		});
+		const first = makeSessionStub();
+		const newer = makeSessionStub();
+		newer.setQueue({ steering: ["newer view stays active"] });
+		registerSub(h.registry, "First", first.session, MAIN_AGENT_ID);
+		registerSub(h.registry, "Newer", newer.session, MAIN_AGENT_ID);
+		const firstFocus = h.controller.focusAgent("First");
+		await Promise.race([recoveryStarted.promise, firstFocus]);
+		await h.controller.focusAgent("Newer");
+		recoveryReplay.resolve();
+		await firstFocus;
+		expect(h.controller.target).toBe(newer.session);
+		expect(h.pendingMessagesContainer.render(80).join("\n")).toContain("newer view stays active");
 	});
 });
 
