@@ -788,7 +788,7 @@ async function registerPersistedSubagentsFromDir(
 		const sameFamily = existingBare !== undefined && collectAgentFamily(registry, ownerId).has(fsId);
 		const staleSameFamily =
 			sameFamily && existingBare?.sessionFile !== null && existingBare?.sessionFile !== sessionFile;
-		const id = existingBare && (!sameFamily || staleSameFamily) ? qualifyPersistedAgentId(ownerId, fsId) : fsId;
+		let id = existingBare && (!sameFamily || staleSameFamily) ? qualifyPersistedAgentId(ownerId, fsId) : fsId;
 		const existing = id === fsId ? existingBare : registry.get(id);
 		const replaceable =
 			existing !== undefined &&
@@ -814,7 +814,20 @@ async function registerPersistedSubagentsFromDir(
 			// Metadata reads yield. A spawn may claim the id while this scan is
 			// inspecting the file; never replace that live generation with a
 			// transcript-derived parked ref.
-			const current = registry.get(id);
+			let current = registry.get(id);
+			// `existingBare` was read before this function's own await points
+			// (the tombstone check above, and this metadata read), so a
+			// CONCURRENT scan — this session's own, or an unrelated one under a
+			// different `ownerId` — can register the SAME bare id in the
+			// meantime: both scans then reach here having chosen `id === fsId`.
+			// Recursing into descendants below under an id this scan never
+			// actually claimed would graft them onto the WINNING scan's family
+			// instead of just losing the bare slot; retry once under this
+			// scan's own disambiguated key rather than accepting that.
+			if (id === fsId && current !== undefined && current.sessionFile !== sessionFile) {
+				id = qualifyPersistedAgentId(ownerId, fsId);
+				current = registry.get(id);
+			}
 			const stillUnclaimed = expected === null && !current;
 			const stillReplaceable =
 				expected !== null && current === expected && current.status === "parked" && current.session === null;
