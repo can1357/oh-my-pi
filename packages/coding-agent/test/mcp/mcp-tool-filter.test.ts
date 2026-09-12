@@ -276,6 +276,18 @@ test("braces outside `{a,b}` alternation are literal", () => {
 	expect(run(["{1..3}", "1", "2"], ["{1..3}"]).allowed).toEqual(["{1..3}"]);
 	expect(run(["{a..c}x", "ax", "cx"], ["{a..c}x"]).allowed).toEqual(["{a..c}x"]);
 	expect(run(["{..}", ".", ".."], ["{..}"]).allowed).toEqual(["{..}"]);
+	// A literal brace INSIDE an alternation must not close it: `{b}` has no
+	// top-level comma, so the branch it names is the literal name `{b}`, and the
+	// enclosing alternation still has all three branches.
+	expect(run(["a", "{b}", "c", "b}"], ["{a,{b},c}"]).allowed).toEqual(["a", "{b}", "c"]);
+	expect(run(["read_file", "write_file", "{list}_file", "list_file"], ["{read,{list},write}_file"]).allowed).toEqual([
+		"read_file",
+		"write_file",
+		"{list}_file",
+	]);
+	// Branches nest, so the inner `{b,{c}}` is itself an alternation: it admits
+	// `b`, and `{c}` only as the literal name — a bare `c` is not a branch.
+	expect(run(["a", "b", "{c}", "c", "d"], ["{a,{b,{c}},d}"]).allowed).toEqual(["a", "b", "{c}", "d"]);
 });
 
 test("POSIX bracket classes expand the way picomatch expands them", () => {

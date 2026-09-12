@@ -222,13 +222,17 @@ function emitTokens(tokens: Token[]): string {
 	return tokens
 		.map(token => {
 			switch (token.type) {
+				// A literal brace (`\(`/`\}` inside an alternation, or the escaped
+				// spelling picomatch gives a pair without a comma) never touches the
+				// stack: only a paired delimiter brackets a real branch list.
 				case "brace": {
+					if (!paired.has(token)) return emitText(token.value);
 					if (token.value === "{") {
 						open.push(token);
-						return paired.has(token) ? "(" : emitText(token.value);
+						return "(";
 					}
-					const start = open.pop();
-					return start !== undefined && paired.has(start) ? ")" : emitText(token.value);
+					open.pop();
+					return ")";
 				}
 				// A comma separates branches only at the top level of a real
 				// alternation; anywhere else it is an ordinary character.
