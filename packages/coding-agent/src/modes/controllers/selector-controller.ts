@@ -1904,10 +1904,12 @@ export class SelectorController {
 			return true;
 		}
 
+		await this.ctx.prepareSessionSwitch();
 		const detached = await this.ctx.session.newSession();
 		if (!detached) {
 			return false;
 		}
+		this.ctx.resetObserverRegistry();
 		this.#refreshSessionTerminalTitle();
 
 		this.ctx.clearTransientSessionUi();
@@ -1934,6 +1936,8 @@ export class SelectorController {
 				return false;
 			}
 		}
+		await this.ctx.prepareSessionSwitch();
+		this.ctx.resetObserverRegistry();
 		// AgentSession owns the transaction. It restores the complete source state
 		// if applying the target project's cwd fails, including in-memory sessions.
 		if (
