@@ -296,7 +296,6 @@ interface AntigravityRequest {
 		};
 		safetySettings?: Array<{ category: string; threshold: string }>;
 	};
-	requestType?: string;
 	userAgent?: string;
 	requestId?: string;
 }

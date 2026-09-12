@@ -798,7 +798,7 @@ interface GoogleGenerationConfig extends GenerateContentConfig {
  * tool-config, thinking-config, and system-instruction conversion is identical.
  *
  * `google-gemini-cli` is NOT routed through here: its `CloudCodeAssistRequest` body has a
- * distinct top-level shape (project/request/requestType) and a different thinking-config
+ * distinct top-level shape (project/request/userAgent) and a different thinking-config
  * placement on `generationConfig`.
  */
 export function buildGoogleGenerateContentParams<T extends "google-generative-ai" | "google-vertex">(

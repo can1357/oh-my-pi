@@ -434,7 +434,6 @@ interface CloudCodeAssistRequest {
 		};
 		labels?: Record<string, string>;
 	};
-	requestType?: string;
 	userAgent?: string;
 	requestId?: string;
 }
