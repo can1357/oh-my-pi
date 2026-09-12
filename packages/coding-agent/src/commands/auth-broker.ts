@@ -40,6 +40,9 @@ export default class AuthBroker extends Command {
 		"include-disabled": Flags.boolean({
 			description: "Import credentials whose JSON has `disabled: true` (import)",
 		}),
+		"from-antigravity": Flags.boolean({
+			description: "Import active credentials from local Google Antigravity CLI installation (import)",
+		}),
 		"from-local": Flags.boolean({
 			description: "migrate source: local SQLite + env vars (required for `migrate`)",
 		}),
@@ -62,6 +65,7 @@ export default class AuthBroker extends Command {
 		"# Interactive provider selection\n  omp auth-broker login",
 		"# Remote login over SSH tunnel\n  omp auth-broker login anthropic --via=user@broker",
 		"# Log out of a provider (interactive without provider arg)\n  omp auth-broker logout anthropic",
+		"# Import credentials from local Google Antigravity CLI\n  omp auth-broker import --from-antigravity",
 		"# Import a CLIProxyAPI auth dump\n  omp auth-broker import ~/.cliproxy/auth",
 		"# Import a single CLIProxyAPI JSON, overriding the provider mapping\n  omp auth-broker import ~/.cliproxy/auth/claude-foo.json --provider anthropic",
 		"# Preview a migration from local store + env vars to the configured broker\n  omp auth-broker migrate --from-local --include-env --dry-run",
@@ -87,6 +91,7 @@ export default class AuthBroker extends Command {
 				// so `provider` flag (used as an override) is unambiguous.
 				provider: action === "import" ? flags.provider : (args.source ?? flags.provider),
 				source: args.source,
+				fromAntigravity: flags["from-antigravity"],
 				includeDisabled: flags["include-disabled"],
 				fromLocal: flags["from-local"],
 				includeEnv: flags["include-env"],

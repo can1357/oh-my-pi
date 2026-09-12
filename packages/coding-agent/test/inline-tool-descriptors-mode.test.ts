@@ -25,4 +25,12 @@ describe("shouldInlineToolDescriptors", () => {
 		expect(shouldInlineToolDescriptors(undefined, "gemini-3-pro")).toBe(true);
 		expect(shouldInlineToolDescriptors(undefined, "claude-opus-4-8")).toBe(false);
 	});
+
+	test("auto stays off for google-antigravity models to protect burst quotas", () => {
+		expect(shouldInlineToolDescriptors("auto", "gemini-3-pro", "google-antigravity")).toBe(false);
+		expect(shouldInlineToolDescriptors("auto", "google-antigravity/gemini-3-pro")).toBe(false);
+		expect(shouldInlineToolDescriptors(undefined, "gemini-3.8-flash", "google-antigravity")).toBe(false);
+		// Explicit on override still works if user demands it
+		expect(shouldInlineToolDescriptors("on", "gemini-3-pro", "google-antigravity")).toBe(true);
+	});
 });
