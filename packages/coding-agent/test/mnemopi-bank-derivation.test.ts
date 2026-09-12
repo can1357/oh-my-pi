@@ -15,23 +15,9 @@ import * as vcsModule from "@oh-my-pi/pi-natives/vcs";
 // Isolate `git` invocations in this file from the host's global config —
 // `~/.gitconfig` commit signing or template hooks would otherwise turn the
 // worktree fixture's `git init`/`git commit`/`git worktree add` into a flaky
-// dance. Restored in `afterAll` below so later files sharing this worker
-// don't inherit a disabled global git config.
-const savedGitEnv = {
-	GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
-	GIT_CONFIG_SYSTEM: process.env.GIT_CONFIG_SYSTEM,
-	GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM,
-	GIT_TERMINAL_PROMPT: process.env.GIT_TERMINAL_PROMPT,
-	GIT_ASKPASS: process.env.GIT_ASKPASS,
-	XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
-};
-process.env.GIT_CONFIG_GLOBAL = "/dev/null";
-process.env.GIT_CONFIG_SYSTEM = "/dev/null";
-process.env.GIT_CONFIG_NOSYSTEM = "1";
-process.env.GIT_TERMINAL_PROMPT = "0";
-process.env.GIT_ASKPASS = "true";
-delete process.env.XDG_CONFIG_HOME;
-
+// dance. Scoped to each spawned `git` process's own `env` below rather than
+// mutated onto `process.env`, so concurrently loaded tests/hooks in the same
+// worker never observe a disabled global git config.
 function runGit(cwd: string, args: string[]): string {
 	const result = Bun.spawnSync(["git", ...args], {
 		cwd,
@@ -39,6 +25,12 @@ function runGit(cwd: string, args: string[]): string {
 		stderr: "pipe",
 		env: {
 			...process.env,
+			GIT_CONFIG_GLOBAL: "/dev/null",
+			GIT_CONFIG_SYSTEM: "/dev/null",
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_TERMINAL_PROMPT: "0",
+			GIT_ASKPASS: "true",
+			XDG_CONFIG_HOME: undefined,
 			GIT_AUTHOR_NAME: "Test User",
 			GIT_AUTHOR_EMAIL: "test@example.com",
 			GIT_COMMITTER_NAME: "Test User",
@@ -84,10 +76,6 @@ beforeAll(async () => {
 afterAll(async () => {
 	await Bun.sleep(0);
 	await rootDir.remove();
-	for (const [key, value] of Object.entries(savedGitEnv)) {
-		if (value === undefined) delete process.env[key];
-		else process.env[key] = value;
-	}
 });
 
 // Schema mirrors the subset of `packages/mnemopi/src/core/beam/schema.ts`
