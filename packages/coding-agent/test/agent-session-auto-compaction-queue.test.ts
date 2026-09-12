@@ -26,6 +26,9 @@ function getRuntimeSignals(): string[] {
 	return globalWithSignals[runtimeSignalStoreKey];
 }
 
+/** Parks a prompt inside its awaited `before_agent_start` hook. */
+type AgentStartGate = { entered: PromiseWithResolvers<void>; release: PromiseWithResolvers<void> };
+
 /**
  * Regression test: auto-compaction completion should resume the agent loop when
  * there are queued agent-level messages (follow-up/steering/custom).
@@ -65,6 +68,13 @@ describe("AgentSession auto-compaction queue resume", () => {
 							details: {},
 						},
 					};
+				});
+				pi.on("before_agent_start", async () => {
+					const gate = (globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate })
+						.__ompAgentStartGate;
+					if (!gate) return;
+					gate.entered.resolve();
+					await gate.release.promise;
 				});
 				pi.on("auto_compaction_start", event => {
 					getRuntimeSignals().push(`compaction:start:${event.reason}`);
@@ -135,6 +145,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 			} finally {
 				getRuntimeSignals().length = 0;
 				(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+					undefined;
+				(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate =
 					undefined;
 				vi.restoreAllMocks();
 			}
@@ -321,6 +333,230 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		// compact()'s finally re-drained the stranded queue after reconnecting.
 		expect(continueSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("resumes the turn a manual compaction interrupted", async () => {
+		// /compact mid-turn aborts the live tool loop. Left alone the agent sits idle
+		// on a half-finished loop until the user types "continue" — an autoresearch
+		// run dies this way. The compaction must resume the interrupted turn once the
+		// summary is committed, the same way context-full compaction does.
+		session.settings.set("compaction.keepRecentTokens", 1);
+		session.settings.override("compaction.autoContinue", true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		// A turn is in flight when /compact lands; the abort ends it.
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		type Dispatched = { role: string; attribution?: string; synthetic?: boolean };
+		const prompted: Dispatched[][] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+		});
+
+		await session.compact();
+		await session.waitForIdle();
+
+		// Exactly one turn starts, driven by the synthetic auto-continue nudge.
+		expect(prompted).toHaveLength(1);
+		const resume = prompted[0]?.filter(message => message.role === "developer" && message.synthetic === true);
+		expect(resume).toHaveLength(1);
+		expect(resume?.[0]?.attribution).toBe("agent");
+	});
+
+	it("does not start a turn when a manual compaction interrupted nothing", async () => {
+		session.settings.set("compaction.keepRecentTokens", 1);
+		session.settings.override("compaction.autoContinue", true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockImplementation(async () => {});
+
+		await session.compact();
+		await session.waitForIdle();
+
+		expect(promptSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not resume when compaction lands while a prompt is still in setup", async () => {
+		// Between `session.prompt()` and the message reaching `agent.prompt()` the
+		// session reports busy (in-flight count) while the agent owns no turn. The
+		// compaction abort bumps the generation and drops that prompt; nudging the
+		// model to "resume" would run it on the previous transcript with the user's
+		// input never sent.
+		session.settings.set("compaction.keepRecentTokens", 1);
+		session.settings.override("compaction.autoContinue", true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockImplementation(async () => {});
+		const dropped: string[] = [];
+		session.setPromptDropped(prompt => dropped.push(prompt.text));
+
+		// Park the prompt inside its awaited before_agent_start hook: in-flight, but
+		// the message has not reached the agent.
+		const gate: AgentStartGate = { entered: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() };
+		(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate = gate;
+		const pending = session.prompt("new request");
+		await gate.entered.promise;
+		expect(session.isStreaming).toBe(true);
+		expect(session.agent.state.isStreaming).toBe(false);
+
+		const compacted = session.compact();
+		gate.release.resolve();
+		await compacted;
+		await pending;
+		// The abort bumped the generation, so the parked prompt is handed back unsent…
+		expect(dropped).toEqual(["new request"]);
+		await session.waitForIdle();
+
+		// …and nothing "resumes" a turn the agent never owned.
+		expect(promptSpy).not.toHaveBeenCalled();
+	});
+
+	it("leaves the resume to the caller when suppressContinuation is set", async () => {
+		// Plan-mode "Approve and compact context" dispatches the execution turn
+		// itself after compaction; resuming the aborted approval turn on top of it
+		// would double-prompt.
+		session.settings.set("compaction.keepRecentTokens", 1);
+		session.settings.override("compaction.autoContinue", true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockImplementation(async () => {});
+
+		await session.compact(undefined, { suppressContinuation: true });
+		await session.waitForIdle();
+
+		expect(promptSpy).not.toHaveBeenCalled();
+	});
+
+	it("lets a prompt submitted during the compaction supersede the resume", async () => {
+		// An RPC/SDK prompt sent while a manual compaction runs parks on the cleanup
+		// barrier. It is the user's next intent: it must dispatch once compaction
+		// ends instead of losing the session to the synthetic resume (and, without
+		// a streamingBehavior, surfacing AgentBusyError).
+		session.settings.set("compaction.keepRecentTokens", 1);
+		session.settings.override("compaction.autoContinue", true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		type Dispatched = { role: string; content?: unknown; synthetic?: boolean };
+		const prompted: Dispatched[][] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+		});
+
+		// Park the compaction inside its awaited hook so the prompt below arrives
+		// while it is in flight.
+		const gate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			gate.promise;
+		const compacted = session.compact();
+		while (!getRuntimeSignals().includes("before_compact:enter")) {
+			await Promise.resolve();
+		}
+		const redirected = session.prompt("redirect");
+		gate.resolve();
+		await compacted;
+		await redirected;
+		await session.waitForIdle();
+
+		// Exactly one turn: the user's prompt. No synthetic nudge raced it.
+		expect(prompted).toHaveLength(1);
+		const roles = prompted[0]?.map(message => message.role);
+		expect(roles).toContain("user");
+		expect(prompted[0]?.some(message => message.synthetic === true)).toBe(false);
 	});
 
 	it("cancels an in-flight auto-compaction when manual compact startup aborts", async () => {

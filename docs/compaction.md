@@ -459,7 +459,7 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 
 ## Runtime behavior and failure semantics
 
-- Manual compaction aborts current agent operation first.
+- Manual compaction aborts current agent operation first. If that abort cut a turn in flight, the committed compaction resumes it (queued steer/follow-up first, otherwise the auto-continue prompt) unless `compaction.autoContinue` is `false` or the caller passed `suppressContinuation` (plan-mode approval dispatches its own execution turn). A manual compaction issued while idle never starts a turn.
 - `abortCompaction()` cancels manual compaction, auto-compaction, and handoff generation controllers.
 - Auto compaction emits start/end session events for UI/state updates.
 - Auto compaction can try multiple model candidates and retry transient failures; long retry delays prefer the next candidate when one is available.

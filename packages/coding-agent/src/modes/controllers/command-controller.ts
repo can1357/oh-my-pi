@@ -1504,9 +1504,16 @@ export class CommandController {
 		// `customInstructions` channel of the `session_before_compact` extension
 		// hook — extensions treat that field as user focus and would otherwise
 		// bias the summary toward the plan boilerplate (issue #4359). Ride it
-		// through as a CompactOptions field instead.
+		// through as a CompactOptions field instead. That caller also dispatches
+		// the execution turn itself, so the compaction must not resume the
+		// plan-approval turn it aborted.
 		if (internalGuidance) {
-			return this.executeCompaction({ internalGuidance, ...(mode ? { mode } : {}) }, false, beforeFlush, mode);
+			return this.executeCompaction(
+				{ internalGuidance, suppressContinuation: true, ...(mode ? { mode } : {}) },
+				false,
+				beforeFlush,
+				mode,
+			);
 		}
 		return this.executeCompaction(customInstructions, false, beforeFlush, mode);
 	}

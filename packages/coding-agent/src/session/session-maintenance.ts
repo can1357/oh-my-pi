@@ -365,6 +365,8 @@ export class SessionMaintenance {
 	#compactionAbortController: AbortController | undefined;
 	/** Resolves after an active manual compaction has reconnected the agent subscription. */
 	#manualCompactionCleanup: Promise<void> | undefined;
+	/** Prompts parked in {@link waitForManualCompactionCleanup}; any waiter supersedes the interrupted-turn resume. */
+	#promptsAwaitingCleanup = 0;
 	#autoCompactionAbortController: AbortController | undefined;
 	/**
 	 * Live tool-loop contexts parked after mid-turn maintenance hit a no-progress
@@ -771,12 +773,17 @@ export class SessionMaintenance {
 	 * Aborts current agent operation first.
 	 * @param customInstructions Optional instructions for the compaction summary
 	 * @param options Optional callbacks for completion/error handling
+	 * @param onCommitted Internal: nested fallback frames report their commit to
+	 * the owning frame the moment the entry lands, so a late rejection (a
+	 * `session_compact` hook or `onComplete` throwing after the append) still
+	 * resumes the interrupted turn exactly as the direct path does.
 	 */
 	async compact(
 		customInstructions?: string,
 		options?: CompactOptions,
 		methodOffset = 0,
 		retryController?: AbortController,
+		onCommitted?: () => void,
 	): Promise<CompactionResult> {
 		const ownsCompactionController = retryController === undefined;
 		if (this.#compactionAbortController && this.#compactionAbortController !== retryController) {
@@ -799,7 +806,16 @@ export class SessionMaintenance {
 		let methods: CompactionMethod[] = [];
 		let selectedMethodIndex = -1;
 		let compactionCommitted = false;
+		const markCommitted = (): void => {
+			compactionCommitted = true;
+			onCommitted?.();
+		};
 		let methodAttempted = false;
+		// Set when this manual pass aborted a live turn: the turn is resumed once the
+		// summary lands (see the `finally`). Generation is captured after the abort
+		// bump so a reset/new-session in between skips the resume as stale.
+		let resumeInterruptedTurn = false;
+		let interruptedTurnGeneration = 0;
 		const compactionAbortController = retryController ?? new AbortController();
 		const manualCompactionCleanup = ownsCompactionController ? Promise.withResolvers<void>() : undefined;
 		if (ownsCompactionController) {
@@ -812,8 +828,21 @@ export class SessionMaintenance {
 
 		try {
 			if (ownsCompactionController) {
+				// A manual compaction aborts the live turn, tool loop included. Without a
+				// resume the agent sits idle on a half-finished loop (an autoresearch run,
+				// a pending tool result) until the user types "continue" by hand.
+				// Only a turn the agent actually owns counts: the session-level busy flag
+				// is also true while a prompt is still in async setup (before its message
+				// reaches the agent). The abort bump drops that prompt, so resuming on
+				// its behalf would nudge the model on the previous transcript instead.
+				const interruptedActiveTurn = this.#host.agent.state.isStreaming;
 				this.#host.disconnectFromAgent();
 				await this.#host.abort({ goalReason: "internal", preserveCompaction: true });
+				resumeInterruptedTurn =
+					interruptedActiveTurn &&
+					options?.suppressContinuation !== true &&
+					this.#host.settings.get("compaction.autoContinue") !== false;
+				interruptedTurnGeneration = this.#host.promptGeneration();
 			}
 			const activeModel = this.#model;
 			if (!activeModel) {
@@ -826,6 +855,7 @@ export class SessionMaintenance {
 				!options?.internalGuidance
 			) {
 				const result = await this.#compactExperimentalContext(activeModel, compactionAbortController);
+				markCommitted();
 				options?.onComplete?.(result);
 				return result;
 			}
@@ -882,7 +912,15 @@ export class SessionMaintenance {
 					`remote compaction is unavailable for ${activeModel.id}; trying the next preferred method`,
 					"compaction",
 				);
-				return await this.compact(customInstructions, options, selectedMethodIndex + 1, compactionAbortController);
+				// The nested call runs on this controller, so it never owns the resume;
+				// it reports its commit back here instead.
+				return await this.compact(
+					customInstructions,
+					options,
+					selectedMethodIndex + 1,
+					compactionAbortController,
+					markCommitted,
+				);
 			}
 			const pathEntries = this.#host.sessionManager.getBranch();
 			const preparation = prepareCompaction(pathEntries, effectiveSettings, activeModel, this.#tokenizer);
@@ -1131,7 +1169,7 @@ export class SessionMaintenance {
 				});
 			}
 
-			compactionCommitted = true;
+			markCommitted();
 			await this.#commitCompactionEntry({
 				summary,
 				shortSummary,
@@ -1170,7 +1208,13 @@ export class SessionMaintenance {
 					`${methods[selectedMethodIndex]} compaction failed; trying the next preferred method`,
 					"compaction",
 				);
-				return await this.compact(customInstructions, options, selectedMethodIndex + 1, compactionAbortController);
+				return await this.compact(
+					customInstructions,
+					options,
+					selectedMethodIndex + 1,
+					compactionAbortController,
+					markCommitted,
+				);
 			}
 			options?.onError?.(err);
 			throw error;
@@ -1191,6 +1235,20 @@ export class SessionMaintenance {
 					this.#manualCompactionCleanup = undefined;
 				}
 				manualCompactionCleanup?.resolve();
+				if (compactionCommitted && resumeInterruptedTurn && this.#promptsAwaitingCleanup === 0) {
+					// Same continuation the context-full path uses: a queued steer/follow-up
+					// (drained above) drives the resume, otherwise the auto-continue nudge
+					// does. `terminalTextAnswer` is false by construction — the turn was
+					// cut mid-run, so there is no finished answer to preserve. A prompt
+					// parked on the barrier just resolved is still counted here (its
+					// continuation is a microtask away) and takes the session instead.
+					this.#host.scheduleCompactionContinuation({
+						generation: interruptedTurnGeneration,
+						autoContinue: true,
+						terminalTextAnswer: false,
+						suppressContinuation: false,
+					});
+				}
 			}
 		}
 	}
@@ -1534,13 +1592,23 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Resolves once an in-flight manual compaction has reconnected the agent
-	 * subscription and re-drained its preserved queues; `undefined` when no manual
-	 * compaction is active. Callers that must not start a turn against the
-	 * disconnected session (e.g. ordinary prompts) await this first.
+	 * Park an ordinary prompt until an in-flight manual compaction has reconnected
+	 * the agent subscription and re-drained its preserved queues; returns at once
+	 * when no manual compaction is active. A prompt waiting here is the user's
+	 * next intent, so it supersedes the interrupted-turn resume: the cleanup
+	 * `finally` skips the synthetic continuation while any waiter is parked,
+	 * otherwise the nudge claims the session first and the prompt lands on
+	 * `AgentBusyError`.
 	 */
-	get manualCompactionCleanup(): Promise<void> | undefined {
-		return this.#manualCompactionCleanup;
+	async waitForManualCompactionCleanup(): Promise<void> {
+		const cleanup = this.#manualCompactionCleanup;
+		if (!cleanup) return;
+		this.#promptsAwaitingCleanup++;
+		try {
+			await cleanup;
+		} finally {
+			this.#promptsAwaitingCleanup--;
+		}
 	}
 
 	/** Cancel only automatic maintenance while preserving a manual compaction. */
