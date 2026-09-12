@@ -696,9 +696,24 @@ export class ProcessTerminal implements Terminal {
 	#stdinDataHandler?: (data: string) => void;
 	#disconnectHandler?: () => void;
 	#stdinEndHandler = () => {
+		// Bun's internalRead can emit a spurious 'end' on an empty
+		// nonblocking read of a live pty: a genuine EOF flips
+		// readableEnded=true BEFORE 'end' emits, so readableEnded=false
+		// here means the stream is still viable. Ignore the spurious one
+		// and re-arm the flowing read instead of tearing the TUI down.
+		if (!process.stdin.readableEnded && !process.stdin.destroyed) {
+			process.stdin.resume();
+			return;
+		}
 		this.#markTerminalDisconnected("stdin ended");
 	};
 	#stdinCloseHandler = () => {
+		// autoDestroy closes the stream right after a spurious 'end'; a
+		// genuine close only follows a real EOF (readableEnded=true) or an
+		// explicit destroy. Ignore the spurious one.
+		if (!process.stdin.readableEnded) {
+			return;
+		}
 		this.#markTerminalDisconnected("stdin closed");
 	};
 	#stdinErrorHandler = (err: Error) => {
@@ -954,6 +969,11 @@ export class ProcessTerminal implements Terminal {
 				return;
 			}
 		}
+		// A spurious 'end' (see #stdinEndHandler) would otherwise
+		// autoDestroy the stream and kill input mid-session.
+		try {
+			(process.stdin as { autoDestroy?: boolean }).autoDestroy = false;
+		} catch {}
 		process.stdin.setEncoding("utf8");
 		process.stdin.on("end", this.#stdinEndHandler);
 		process.stdin.on("close", this.#stdinCloseHandler);
