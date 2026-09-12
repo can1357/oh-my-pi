@@ -31,6 +31,18 @@ export type StreamFn = (
 	...args: Parameters<typeof streamSimple>
 ) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
 
+/** Staged queue preparation; commit synchronously only while the batch is still owned. */
+export interface QueuedMessagePreparation {
+	/** Append context after the originals; undefined stops this attempt, retaining originals unless explicitly removed. */
+	commit(): readonly AgentMessage[] | undefined;
+}
+
+/** Prepare an exclusively claimed batch. Undefined delivers unchanged; the signal also aborts when the claim is cancelled. */
+export type PrepareQueuedMessages = (
+	messages: readonly AgentMessage[],
+	signal: AbortSignal,
+) => QueuedMessagePreparation | undefined | Promise<QueuedMessagePreparation | undefined>;
+
 /** Called once an aside has been inserted into the agent's live context. */
 export const ASIDE_MESSAGE_COMMIT = Symbol("aside-message-commit");
 /** Called when an aside was drained but the agent loop ended before inserting it. */
