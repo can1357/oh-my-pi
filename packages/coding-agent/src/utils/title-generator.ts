@@ -3,7 +3,6 @@
  */
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as fs from "node:fs";
-import * as fsPromises from "node:fs/promises";
 import * as path from "node:path";
 
 import { type Api, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
@@ -643,13 +642,13 @@ function writeAgentStateFile(state: TerminalTitleState): void {
 			// Bun.write creates the directory, so no mkdir before it.
 			await Bun.write(pending, body);
 			if (overtaken()) {
-				await fsPromises.rm(pending, { force: true });
+				await fs.promises.rm(pending, { force: true });
 				return;
 			}
-			await fsPromises.rename(pending, file);
+			await fs.promises.rename(pending, file);
 			// The removal may have run while that rename was in flight, finding nothing to
 			// delete. Publishing then would leave a state file for a process that is gone.
-			if (overtaken()) await fsPromises.rm(file, { force: true });
+			if (overtaken()) await fs.promises.rm(file, { force: true });
 		})
 		.catch(err => {
 			logger.debug("Agent state file write failed", { err });

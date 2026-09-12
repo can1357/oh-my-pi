@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
-import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -262,7 +261,7 @@ describe("agent state file", () => {
 		// The stand-in mimics exactly that: the removal happens first, and the rename lands
 		// anyway. A mock that let the rename fail would pass without the guard and prove nothing.
 		setAgentStateFileEnabled(true);
-		const rename = spyOn(fsPromises, "rename");
+		const rename = spyOn(fs.promises, "rename");
 		rename.mockImplementationOnce(async (from, to) => {
 			const body = fs.readFileSync(from as string, "utf8");
 			setAgentStateFileEnabled(false);
