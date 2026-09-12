@@ -1810,4 +1810,77 @@ describe("AgentSession message pipeline", () => {
 		expect(result.assistantMessage.content.some(block => block.type === "toolCall")).toBe(false);
 		expect(result.assistantMessage.content.every(block => block.type !== "toolCall")).toBe(true);
 	});
+	it("consumes inherited subagent context at each real provider boundary without persisting it", async () => {
+		const api = "test-inherited-subagent-context";
+		const contexts: Context[] = [];
+		registerCustomApi(api, (_model, context) => {
+			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("ok");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+		const model = buildModel({
+			id: "inherited-context-model",
+			name: "Inherited context model",
+			api,
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const providerEvents: Array<Record<string, unknown>> = [];
+		let providerCall = 0;
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [],
+					tools: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			agentKind: "sub",
+			agentName: "ordinary-child",
+			agentId: "Child-1",
+			parentAgentId: "Main",
+			beforeSubagentStart: event => {
+				providerEvents.push(event as unknown as Record<string, unknown>);
+				providerCall++;
+				if (providerCall === 1) return Promise.resolve(["parent fallback"]);
+				if (providerCall === 2) return Promise.resolve([]);
+				throw new Error("parent disposed");
+			},
+		});
+		sessions.push(session);
+
+		await session.sendUserMessage("first");
+		await session.sendUserMessage("second");
+		await session.sendUserMessage("third");
+
+		expect(contexts).toHaveLength(3);
+		expect(contexts[0]?.systemPrompt).toEqual(["system prompt", "parent fallback"]);
+		expect(contexts[1]?.systemPrompt).toEqual(["system prompt"]);
+		expect(contexts[2]?.systemPrompt).toEqual(["system prompt"]);
+		expect(session.agent.state.systemPrompt).toEqual(["system prompt"]);
+		expect(providerEvents).toHaveLength(3);
+		expect(providerEvents[0]).toEqual(
+			expect.objectContaining({
+				agentId: "Child-1",
+				agent: "ordinary-child",
+				parentAgentId: "Main",
+				restricted: false,
+				tools: [],
+			}),
+		);
+	});
 });

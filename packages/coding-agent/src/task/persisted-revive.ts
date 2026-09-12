@@ -163,6 +163,7 @@ export function createPersistedSubagentReviverFactory(
 						: ref.displayName,
 				parentTaskPrefix: ref.id,
 				parentAgentId: ref.parentId,
+				beforeSubagentStart: ctx.session.getSubagentContextProvider?.(),
 				expectedAgentRef: expectedRef,
 				taskDepth,
 				toolNames: revivedToolNames,

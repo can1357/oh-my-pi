@@ -216,6 +216,19 @@ pi.on("session_stop", async (event) => {
 });
 ```
 
+Use context-injection events when an extension needs to give the model transient guidance without rewriting a tool result or waking an idle session:
+
+```ts
+if (pi.contextInjectionVersion === 1) {
+  pi.on("before_tool_execution", async (event) => ({
+    additionalContext: `Review ${event.toolName} output using the repository policy.`,
+    requiredTools: ["read"],
+  }));
+}
+```
+
+The host caps and validates injected context, rechecks `requiredTools` at delivery, and drops failed or stale injections without blocking execution. `before_agent_context` runs before each provider call; `before_subagent_start` lets a parent supply context for each child provider call.
+
 Full event catalog: see [extension authoring guide](../extensions.md).
 
 ## Extension vs hook — when to use which

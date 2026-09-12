@@ -33,6 +33,7 @@ import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { ExtensionRunner, PreparedExtension } from "../extensibility/extensions";
 import type { ContextUsage } from "../extensibility/extensions/types";
+import type { SubagentContextProvider } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
@@ -272,6 +273,14 @@ export interface AgentSessionConfig {
 	agentId?: string;
 	/** Whether this is a top-level or subagent session. */
 	agentKind?: "main" | "sub";
+	/** Extension context inherited from the owning parent session. */
+	beforeSubagentStart?: SubagentContextProvider;
+	/** Agent definition name used for lifecycle context. */
+	agentName?: string;
+	/** Parent registry identity used for lifecycle context. */
+	parentAgentId?: string;
+	/** Whether the session tool slate is explicitly restricted. */
+	restrictToolNames?: boolean;
 	/** Provider-facing session ID override. */
 	providerSessionId?: string;
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */

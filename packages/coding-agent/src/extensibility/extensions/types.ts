@@ -768,6 +768,48 @@ export interface BeforeAgentStartEvent {
 	systemPrompt: string[];
 }
 
+export interface ContextInjectionResult {
+	additionalContext?: string;
+	requiredTools?: readonly string[];
+}
+
+export interface BeforeToolExecutionEvent {
+	type: "before_tool_execution";
+	toolName: string;
+	toolCallId: string;
+	input: Readonly<Record<string, unknown>>;
+	signal?: AbortSignal;
+}
+
+export interface BeforeSubagentStartEvent {
+	type: "before_subagent_start";
+	agentId: string;
+	agent: string;
+	parentAgentId?: string;
+	sessionId: string;
+	cwd: string;
+	tools: readonly string[];
+	restricted: boolean;
+	systemPrompt: readonly string[];
+	signal?: AbortSignal;
+}
+
+export interface BeforeAgentContextEvent {
+	type: "before_agent_context";
+	agentId: string;
+	agent: string;
+	parentAgentId?: string;
+	isSubagent: boolean;
+	sessionId: string;
+	cwd: string;
+	tools: readonly string[];
+	restricted: boolean;
+	systemPrompt: readonly string[];
+	signal?: AbortSignal;
+}
+
+export type SubagentContextProvider = (event: BeforeSubagentStartEvent) => Promise<string[]>;
+
 export type {
 	AgentEndEvent,
 	AgentStartEvent,
@@ -991,6 +1033,7 @@ interface ToolResultEventBase {
 	input: Record<string, unknown>;
 	content: (TextContent | ImageContent)[];
 	isError: boolean;
+	signal?: AbortSignal;
 }
 
 export interface BashToolResultEvent extends ToolResultEventBase {
@@ -1080,6 +1123,9 @@ export type ExtensionEvent =
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
+	| BeforeToolExecutionEvent
+	| BeforeSubagentStartEvent
+	| BeforeAgentContextEvent
 	| AgentStartEvent
 	| AgentEndEvent
 	| SessionStopEvent
@@ -1236,6 +1282,7 @@ export interface ExtensionAPI {
 
 	/** Injected pi-coding-agent exports for accessing SDK utilities */
 	pi: typeof PiCodingAgent;
+	readonly contextInjectionVersion: 1;
 
 	// =========================================================================
 	// Event Subscription
@@ -1269,6 +1316,15 @@ export interface ExtensionAPI {
 	): void;
 	on(event: "after_provider_response", handler: ExtensionHandler<AfterProviderResponseEvent>): void;
 	on(event: "before_agent_start", handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>): void;
+	on(
+		event: "before_tool_execution",
+		handler: ExtensionHandler<BeforeToolExecutionEvent, ContextInjectionResult>,
+	): void;
+	on(
+		event: "before_subagent_start",
+		handler: ExtensionHandler<BeforeSubagentStartEvent, ContextInjectionResult>,
+	): void;
+	on(event: "before_agent_context", handler: ExtensionHandler<BeforeAgentContextEvent, ContextInjectionResult>): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
 	on(event: "session_stop", handler: ExtensionHandler<SessionStopEvent, SessionStopEventResult>): void;

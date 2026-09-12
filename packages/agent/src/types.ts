@@ -37,10 +37,13 @@ export const ASIDE_MESSAGE_COMMIT = Symbol("aside-message-commit");
 export const SPECULATIVE_STREAM_SESSION = Symbol("speculative-stream-session");
 /** Called when an aside was drained but the agent loop ended before inserting it. */
 export const ASIDE_MESSAGE_DISCARD = Symbol("aside-message-discard");
+/** False marks an aside as informational context that must not start another model turn. */
+export const ASIDE_MESSAGE_WAKE = Symbol("aside-message-wake");
 
 export type CommittableAsideMessage = AgentMessage & {
 	[ASIDE_MESSAGE_COMMIT]?: () => void;
 	[ASIDE_MESSAGE_DISCARD]?: (error: Error) => void;
+	[ASIDE_MESSAGE_WAKE]?: boolean;
 };
 
 /**

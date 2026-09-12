@@ -189,6 +189,8 @@ Also exposed:
 - `pi.zod` (Zod-compatible builder backed by omptype)
 - `pi.typebox` (legacy TypeBox-compatible shim)
 - `pi.pi` (package exports)
+- `pi.contextInjectionVersion` (currently `1`; feature-detect before registering context-injection handlers)
+- `pi.pi.resolveToCwd(path, cwd)` (the host's path expansion and working-directory resolution semantics)
 
 ### Message delivery semantics
 
@@ -302,6 +304,8 @@ Cancelable pre-events:
 - `input`
 - `before_agent_start`
 - `before_provider_request` (may replace provider request payload — the replacement is applied by every provider that fires the hook, which is all of them except `devin-agent`, which does not fire it)
+- `before_agent_context` (may return transient model context before each real provider call)
+- `before_subagent_start` (runs in the parent before each child provider call and receives child identity, tools, working directory, and prompt)
 - `after_provider_response`
 - `context`
 - `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only
@@ -311,12 +315,25 @@ Cancelable pre-events:
 
 ### Tool lifecycle
 
+- `before_tool_execution` (runs immediately before native execution with an isolated input snapshot; may return informational model context but cannot revise arguments)
 - `tool_call` (pre-exec, may block, or revise the tool's execution `input`; for model-issued calls it fires at arg-prep time in the agent loop, so a revision is revalidated and seen by concurrency scheduling, execution events, the persisted assistant message, and the approval gate alike)
-- `tool_result` (post-exec, may patch content/details/isError)
+- `tool_result` (post-exec, may patch content/details/isError and return informational model context)
 - `tool_execution_start` / `tool_execution_update` / `tool_execution_end` (observability)
 - `tool_approval_requested` / `tool_approval_resolved` (observability; emitted by `wrapper.ts` only when a tool requires approval and an approval handler is registered)
 
 `tool_result` is middleware-style: handlers run in extension order and each sees prior modifications.
+
+### Context injection
+
+`before_tool_execution`, `before_agent_context`, and `before_subagent_start` handlers may return:
+
+```ts
+{ additionalContext: "Current repository policy...", requiredTools: ["read"] }
+```
+
+`tool_result` may return the same fields alongside its existing result edits. `additionalContext` is model-only guidance; `requiredTools` names every enabled tool needed for that guidance to be valid. The host validates tool names when the handler settles and again when context is delivered, so a concurrent tool-set change drops stale guidance.
+
+Context is ordered by extension registration, limited to 64 KiB per collection boundary, and never persisted into the base system prompt. Tool-associated context is stored as an invisible passive message, so it joins the current conversation without starting an extra provider turn. Agent/subagent context is recomputed for each provider call, deduplicated against the current prompt, and discarded after that request. Dedicated context handlers have a five-second timeout and fail open with an extension error.
 
 ### Reliability/runtime signals
 
@@ -802,6 +819,7 @@ Provide `renderCall` / `renderResult` on `registerTool` definitions for custom t
 
 - Runtime actions are unavailable during extension load.
 - `tool_call` errors block execution (fail-closed).
+- Context-injection failures, timeouts, stale session results, and unmet `requiredTools` drop only the proposed context; they do not block the tool or provider call.
 - Command name conflicts with built-ins are skipped with diagnostics.
 - Reserved shortcuts are ignored (`ctrl+c`, `ctrl+d`, `ctrl+z`, `ctrl+k`, `ctrl+p`, `ctrl+l`, `ctrl+o`, `ctrl+t`, `ctrl+g`, `ctrl+q`, `alt+m`, `shift+tab`, `shift+ctrl+p`, `alt+enter`, `escape`, `enter`).
 - Treat `ctx.reload()` as terminal for the current command handler frame.

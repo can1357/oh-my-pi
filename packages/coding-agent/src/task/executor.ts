@@ -558,6 +558,8 @@ export interface ExecutorOptions {
 	 * passes its own `getAgentId()`).
 	 */
 	parentAgentId?: string;
+	/** Parent-bound extension guidance evaluated at each child provider boundary. */
+	beforeSubagentStart?: CreateAgentSessionOptions["beforeSubagentStart"];
 	/**
 	 * Keep the finished subagent addressable in the registry for IRC/revival.
 	 * Defaults to true. Eval bridge agents are programmatic one-shot helpers and
@@ -3542,6 +3544,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
 				parentTaskPrefix: id,
 				parentAgentId: options.parentAgentId,
+				beforeSubagentStart: options.beforeSubagentStart,
 				agentId: id,
 				agentDisplayName: agent.name,
 				agentName: agent.name,

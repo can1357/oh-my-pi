@@ -28,12 +28,16 @@ import type {
 	AssistantThinkingRenderer,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
+	BeforeAgentContextEvent,
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
+	BeforeSubagentStartEvent,
+	BeforeToolExecutionEvent,
 	CompactOptions,
 	ComposerShapeDefinition,
 	ContextEvent,
 	ContextEventResult,
+	ContextInjectionResult,
 	ContextUsage,
 	Extension,
 	ExtensionActions,
@@ -75,6 +79,16 @@ import type {
 	UserPythonEventResult,
 } from "./types";
 
+export type ToolContextSinkFactory = (
+	toolCallId: string,
+	toolName: string,
+	signal?: AbortSignal,
+) => (injections: readonly ContextInjectionResult[]) => void;
+
+export interface ToolResultCombinedResult extends ToolResultEventResult {
+	contextInjections?: ContextInjectionResult[];
+}
+
 /** Combined result from all before_agent_start handlers */
 interface BeforeAgentStartCombinedResult {
 	messages?: NonNullable<BeforeAgentStartEventResult["message"]>[];
@@ -85,6 +99,8 @@ export type ExtensionErrorListener = (error: ExtensionError) => void;
 
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
 let extensionHandlerTimeoutMs = EXTENSION_HANDLER_TIMEOUT_MS;
+const CONTEXT_HANDLER_TIMEOUT_MS = 5_000;
+const MAX_CONTEXT_BYTES = 64 * 1024;
 
 function throwUnsupportedServiceTierAction(): never {
 	throw new Error("This extension host does not support service-tier actions");
@@ -339,6 +355,9 @@ type RunnerEmitEvent = Exclude<
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
+	| BeforeToolExecutionEvent
+	| BeforeSubagentStartEvent
+	| BeforeAgentContextEvent
 	| ResourcesDiscoverEvent
 	| InputEvent
 >;
@@ -457,6 +476,7 @@ export class ExtensionRunner {
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
+	#toolContextSinkFactory: ToolContextSinkFactory = () => () => {};
 	#initialized = false;
 	/**
 	 * Buffer for `credential_disabled` events received via {@link emitCredentialDisabled}
@@ -533,6 +553,18 @@ export class ExtensionRunner {
 	/** Consumes a {@link markToolCallEmitted} marker; true when the loop already emitted. */
 	consumeToolCallEmitted(toolCallId: string, toolName: string): boolean {
 		return this.#emittedToolCalls.delete(`${toolCallId}:${toolName}`);
+	}
+
+	setToolContextSinkFactory(factory: ToolContextSinkFactory): void {
+		this.#toolContextSinkFactory = factory;
+	}
+
+	createToolContextSink(
+		toolCallId: string,
+		toolName: string,
+		signal?: AbortSignal,
+	): (injections: readonly ContextInjectionResult[]) => void {
+		return this.#toolContextSinkFactory(toolCallId, toolName, signal);
 	}
 
 	/**
@@ -1268,10 +1300,6 @@ export class ExtensionRunner {
 		onFailure?: (kind: "timeout" | "error", message: string) => R,
 		outerSignal?: AbortSignal,
 	): Promise<R | undefined> {
-		// `session_stop` carries its own signal on the event; `tool_call` receives
-		// the outer dispatch signal (loop request or wrapper execute) so an abort
-		// while a handler awaits a human dialog cancels the dialog and settles the
-		// gate without executing the underlying tool. Compose whichever apply.
 		const sessionStopSignal =
 			event.type === "session_stop" && "signal" in event && event.signal instanceof AbortSignal
 				? event.signal
@@ -1288,10 +1316,27 @@ export class ExtensionRunner {
 					async (handlerSignal, budget) => {
 						registrationScope.signal = handlerSignal;
 						let result: R | undefined;
+						let handlerEvent = event;
+						if (event.type === "before_tool_execution") {
+							handlerEvent = {
+								...event,
+								input: structuredClone(Reflect.get(event, "input")),
+								signal: handlerSignal,
+							};
+						} else if (event.type === "before_subagent_start" || event.type === "before_agent_context") {
+							handlerEvent = {
+								...event,
+								tools: [...(Reflect.get(event, "tools") as readonly string[])],
+								systemPrompt: [...(Reflect.get(event, "systemPrompt") as readonly string[])],
+								signal: handlerSignal,
+							};
+						} else if (event.type === "tool_result") {
+							handlerEvent = { ...event, signal: handlerSignal };
+						}
 						try {
 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
 								handler(
-									event,
+									handlerEvent,
 									createHandlerContext(ctx, handlerSignal, event.type === "tool_call" ? budget : undefined),
 								),
 							);
@@ -1409,15 +1454,105 @@ export class ExtensionRunner {
 		return result as RunnerEmitResult<TEvent>;
 	}
 
-	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
+	#validatedContextInjection(
+		value: unknown,
+		ext: Extension,
+		eventType: string,
+		usedBytes: number,
+	): ContextInjectionResult | undefined {
+		if (value === undefined || value === null) return undefined;
+		if (typeof value !== "object" || Array.isArray(value)) {
+			this.emitError({ extensionPath: ext.path, event: eventType, error: "handler returned invalid context" });
+			return undefined;
+		}
+		const additionalContext = Reflect.get(value, "additionalContext");
+		if (additionalContext === undefined) return undefined;
+		if (typeof additionalContext !== "string") {
+			this.emitError({ extensionPath: ext.path, event: eventType, error: "additionalContext must be a string" });
+			return undefined;
+		}
+		if (additionalContext.trim().length === 0) return undefined;
+		const rawRequiredTools = Reflect.get(value, "requiredTools");
+		if (
+			rawRequiredTools !== undefined &&
+			(!Array.isArray(rawRequiredTools) ||
+				rawRequiredTools.some(tool => typeof tool !== "string" || tool.length === 0 || tool.trim() !== tool))
+		) {
+			this.emitError({
+				extensionPath: ext.path,
+				event: eventType,
+				error: "requiredTools must contain canonical names",
+			});
+			return undefined;
+		}
+		if (!this.#initialized) return undefined;
+		const requiredTools = rawRequiredTools as string[] | undefined;
+		const enabledTools = new Set(this.runtime.getActiveTools());
+		if (requiredTools?.some(tool => !enabledTools.has(tool))) return undefined;
+		const contextBytes = Buffer.byteLength(additionalContext, "utf8");
+		if (contextBytes > MAX_CONTEXT_BYTES || usedBytes + contextBytes > MAX_CONTEXT_BYTES) {
+			this.emitError({ extensionPath: ext.path, event: eventType, error: "additionalContext exceeds 64 KiB limit" });
+			return undefined;
+		}
+		return {
+			additionalContext,
+			...(requiredTools ? { requiredTools: [...requiredTools] } : {}),
+		};
+	}
+
+	async #emitContextInjections(
+		event: BeforeToolExecutionEvent | BeforeAgentContextEvent | BeforeSubagentStartEvent,
+	): Promise<ContextInjectionResult[]> {
+		if (!this.hasHandlers(event.type)) return [];
+		const ctx = this.createContext();
+		const injections: ContextInjectionResult[] = [];
+		let usedBytes = 0;
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get(event.type);
+			if (!handlers) continue;
+			for (const handler of handlers) {
+				const result = await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					CONTEXT_HANDLER_TIMEOUT_MS,
+					undefined,
+					event.signal,
+				);
+				const injection = this.#validatedContextInjection(result, ext, event.type, usedBytes);
+				if (!injection) continue;
+				usedBytes += Buffer.byteLength(injection.additionalContext!, "utf8");
+				injections.push(injection);
+			}
+		}
+		return injections;
+	}
+
+	emitBeforeToolExecution(event: BeforeToolExecutionEvent): Promise<ContextInjectionResult[]> {
+		return this.#emitContextInjections(event);
+	}
+
+	emitBeforeAgentContext(event: BeforeAgentContextEvent): Promise<ContextInjectionResult[]> {
+		return this.#emitContextInjections(event);
+	}
+
+	async emitBeforeSubagentStart(event: BeforeSubagentStartEvent): Promise<string[]> {
+		const injections = await this.#emitContextInjections(event);
+		return injections.flatMap(injection => injection.additionalContext ?? []);
+	}
+
+	async emitToolResult(event: ToolResultEvent, signal?: AbortSignal): Promise<ToolResultCombinedResult | undefined> {
+		if (!this.hasHandlers("tool_result")) return undefined;
 		const ctx = this.createContext();
 		const currentEvent: ToolResultEvent = { ...event };
+		const contextInjections: ContextInjectionResult[] = [];
+		let contextBytes = 0;
 		let modified = false;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_result");
-			if (!handlers || handlers.length === 0) continue;
-
+			if (!handlers) continue;
 			for (const handler of handlers) {
 				const handlerResult = (await this.#runHandlerWithTimeout(
 					handler,
@@ -1425,9 +1560,16 @@ export class ExtensionRunner {
 					ctx,
 					ext,
 					extensionHandlerTimeoutMs,
+					undefined,
+					signal,
 				)) as ToolResultEventResult | undefined;
 				if (!handlerResult) continue;
 
+				const injection = this.#validatedContextInjection(handlerResult, ext, "tool_result", contextBytes);
+				if (injection) {
+					contextBytes += Buffer.byteLength(injection.additionalContext!, "utf8");
+					contextInjections.push(injection);
+				}
 				if (handlerResult.content !== undefined) {
 					currentEvent.content = handlerResult.content;
 					modified = true;
@@ -1443,12 +1585,16 @@ export class ExtensionRunner {
 			}
 		}
 
-		if (!modified) return undefined;
-
+		if (!modified && contextInjections.length === 0) return undefined;
 		return {
-			content: currentEvent.content,
-			details: currentEvent.details,
-			isError: currentEvent.isError,
+			...(modified
+				? {
+						content: currentEvent.content,
+						details: currentEvent.details,
+						isError: currentEvent.isError,
+					}
+				: {}),
+			...(contextInjections.length > 0 ? { contextInjections } : {}),
 		};
 	}
 

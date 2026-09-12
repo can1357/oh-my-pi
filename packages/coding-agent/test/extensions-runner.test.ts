@@ -66,6 +66,7 @@ describe("ExtensionRunner", () => {
 	afterEach(() => {
 		testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 		testSetSessionShutdownHandlerTimeoutMs(SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS);
+		delete (globalThis as Record<string, unknown>).__ompContextGate;
 		tempDir.removeSync();
 	});
 
@@ -1305,6 +1306,152 @@ describe("ExtensionRunner", () => {
 				details: { source: "ext1" },
 				isError: true,
 			});
+		});
+	});
+	describe("informational tool context", () => {
+		function initializeRunner(runner: ExtensionRunner, getActiveTools: () => string[]): void {
+			runner.initialize(
+				{
+					sendMessage: () => {},
+					sendUserMessage: () => {},
+					appendEntry: () => {},
+					setLabel: () => {},
+					getActiveTools,
+					getAllTools: () => [],
+					setActiveTools: async () => {},
+					getCommands: () => [],
+					setModel: async () => false,
+					getThinkingLevel: () => undefined,
+					setThinkingLevel: () => {},
+					getSessionName: () => undefined,
+					setSessionName: async () => {},
+				},
+				{
+					getModel: () => undefined,
+					isIdle: () => true,
+					abort: () => {},
+					hasPendingMessages: () => false,
+					shutdown: () => {},
+					getContextUsage: () => undefined,
+					compact: async () => {},
+					getSystemPrompt: () => [],
+				},
+			);
+		}
+
+		it("commits ordered context while preserving native arguments and error state", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "context-before.ts"),
+				`export default function(pi) {
+					pi.on("before_tool_execution", event => {
+						event.input.value = "attempted mutation";
+						return { additionalContext: "before", requiredTools: ["native"] };
+					});
+				}`,
+			);
+			fs.writeFileSync(
+				path.join(extensionsDir, "context-after.ts"),
+				`export default function(pi) {
+					pi.on("tool_result", event => ({
+						additionalContext: "after",
+						requiredTools: ["native"],
+						content: [...event.content, { type: "text", text: "edited" }],
+					}));
+				}`,
+			);
+			const loaded = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			initializeRunner(runner, () => ["native"]);
+			const committed: string[] = [];
+			let sinkFactories = 0;
+			runner.setToolContextSinkFactory(() => {
+				sinkFactories++;
+				let used = false;
+				return injections => {
+					if (used) throw new Error("context sink reused");
+					used = true;
+					committed.push(...injections.map(injection => injection.additionalContext ?? ""));
+				};
+			});
+			const executed: Array<Record<string, unknown>> = [];
+			const tool: AgentTool = {
+				name: "native",
+				label: "Native",
+				description: "native test tool",
+				parameters: Type.Object({ value: Type.String() }),
+				execute: async (_id, params) => {
+					executed.push(params as Record<string, unknown>);
+					return {
+						content: [{ type: "text" as const, text: "native" }],
+						isError: true,
+					};
+				},
+			};
+			const result = await new ExtensionToolWrapper(tool, runner).execute("context-call", {
+				value: "original",
+			} as never);
+
+			expect(executed).toEqual([{ value: "original" }]);
+			expect(committed).toEqual(["before", "after"]);
+			expect(sinkFactories).toBe(1);
+			expect(result.content).toEqual([
+				{ type: "text", text: "native" },
+				{ type: "text", text: "edited" },
+			]);
+			expect(result.isError).toBe(true);
+		});
+
+		it("drops context when a required tool is disabled while the handler is pending", async () => {
+			const gate = Promise.withResolvers<void>();
+			const entered = Promise.withResolvers<void>();
+			(globalThis as Record<string, unknown>).__ompContextGate = {
+				promise: gate.promise,
+				entered: entered.resolve,
+			};
+			fs.writeFileSync(
+				path.join(extensionsDir, "context-gated.ts"),
+				`export default function(pi) {
+					pi.on("before_tool_execution", async () => {
+						const gate = globalThis.__ompContextGate;
+						gate.entered();
+						await gate.promise;
+						return { additionalContext: "stale", requiredTools: ["native"] };
+					});
+				}`,
+			);
+			const loaded = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			let active = ["native"];
+			initializeRunner(runner, () => active);
+			const committed: string[] = [];
+			runner.setToolContextSinkFactory(() => injections => {
+				committed.push(...injections.map(injection => injection.additionalContext ?? ""));
+			});
+			const tool: AgentTool = {
+				name: "native",
+				label: "Native",
+				description: "native test tool",
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+			};
+			const execution = new ExtensionToolWrapper(tool, runner).execute("gated-call", {} as never);
+			await entered.promise;
+			active = [];
+			gate.resolve();
+			await execution;
+			expect(committed).toEqual([]);
 		});
 	});
 

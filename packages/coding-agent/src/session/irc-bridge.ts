@@ -1,4 +1,9 @@
-import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
+import {
+	ASIDE_MESSAGE_WAKE,
+	type Agent,
+	type AgentMessage,
+	type CommittableAsideMessage,
+} from "@oh-my-pi/pi-agent-core";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { IrcBus, type IrcMessage } from "../irc/bus";
@@ -47,6 +52,13 @@ export class IrcBridge {
 	/** Whether any undelivered IRC record remains queued. */
 	hasPending(): boolean {
 		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0;
+	}
+
+	/** Whether queued records include anything that should start or extend a model turn. */
+	hasPendingWake(): boolean {
+		return [...this.#interrupts, ...this.#asides, ...this.#deferredWakes].some(
+			record => (record as CommittableAsideMessage)[ASIDE_MESSAGE_WAKE] !== false,
+		);
 	}
 
 	/**

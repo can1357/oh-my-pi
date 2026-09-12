@@ -115,6 +115,7 @@ import {
 	loadExtensionFromFactory,
 	loadExtensions,
 	type PreparedExtension,
+	type SubagentContextProvider,
 	type RegisteredTool,
 	type ToolDefinition,
 	wrapRegisteredTools,
@@ -594,6 +595,8 @@ export interface CreateAgentSessionOptions {
 	 * "main" for a top-level session / "sub" for a subagent.
 	 */
 	agentName?: string;
+	/** Parent-side lifecycle context provider inherited by this session. */
+	beforeSubagentStart?: SubagentContextProvider;
 	/** Optional shared agent registry for IRC routing. Default: AgentRegistry.global(). */
 	agentRegistry?: AgentRegistry;
 	/**
@@ -1847,6 +1850,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getAgentId: () => resolvedAgentId,
+			getSubagentContextProvider: () => session.getSubagentContextProvider(),
 			getToolByName: name => session?.getToolByName(name),
 			getToolForEvalBridge: name => session?.getToolForEvalBridge(name),
 			getEvalBridgeToolNames: () => session?.getEvalBridgeToolNames() ?? [],
@@ -3845,6 +3849,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			obfuscator,
 			agentId: resolvedAgentId,
 			agentKind,
+			beforeSubagentStart: options.beforeSubagentStart,
+			agentName: resolvedAgentName,
+			parentAgentId: options.parentAgentId,
+			restrictToolNames,
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,

@@ -33,7 +33,9 @@ import {
 	type AgentToolResult,
 	type AgentTurnEndContext,
 	AppendOnlyContextManager,
+	ASIDE_MESSAGE_WAKE,
 	type AsideMessage,
+	type CommittableAsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
 	EventLoopKeepalive,
@@ -54,6 +56,7 @@ import {
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
+	Context,
 	ImageContent,
 	Message,
 	Model,
@@ -145,7 +148,12 @@ import type {
 import { emitSessionShutdownEvent } from "../extensibility/extensions";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
-import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import type {
+	CompactOptions,
+	ContextInjectionResult,
+	ContextUsage,
+	SubagentContextProvider,
+} from "../extensibility/extensions/types";
 import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
@@ -319,6 +327,7 @@ import {
 	type FileMentionMessage,
 	type HookMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
+	EXTENSION_TOOL_CONTEXT_MESSAGE_TYPE,
 	type InterruptedThinkingDetails,
 	isEmptyErrorTurn,
 	isUserInterruptAbort,
@@ -388,6 +397,7 @@ import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-
 import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
+const EXTENSION_CONTEXT_MAX_BYTES = 64 * 1024;
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
 const EXPERIMENTAL_CONTEXT_REQUIRED_TOOLS: Record<string, true> = {
@@ -697,6 +707,10 @@ export class AgentSession {
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
+	#agentName = "main";
+	#parentAgentId: string | undefined;
+	#restrictToolNames = false;
+	#inheritedSubagentContextProvider: SubagentContextProvider | undefined;
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
@@ -737,6 +751,11 @@ export class AgentSession {
 	#usagePreflightReadyModel: Model | undefined;
 	#detachUsageBeforeQueueDequeue: (() => void) | undefined;
 	#detachUsageBeforeModelCall: (() => void) | undefined;
+	#detachExtensionBeforeModelCall: (() => void) | undefined;
+	#contextInjectionRuns = new WeakMap<
+		AbortSignal,
+		{ sessionGeneration: number; promise: Promise<ContextInjectionResult[]> }
+	>();
 
 	#transformContext: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	#onPayload: SimpleStreamOptions["onPayload"] | undefined;
@@ -931,38 +950,26 @@ export class AgentSession {
 		if (this.#modeExitDrainSuppressionDepth > 0 || this.#isDisposed || this.isStreaming || !this.#irc.hasPending()) {
 			return;
 		}
-		// A pooled yield contract means a pool turn owns this worker (installed,
-		// dispatching, or dispatch-imminent). Waking here would either emit keyed
-		// yields against its items or re-queue into the deferral path forever, so
-		// leave the records pending until the contract clears.
-		if (this.#workPoolYieldItems.length > 0) {
-			return;
-		}
-		// Session transitions call #disconnectFromAgent() BEFORE `await abort()`, and only bump
-		// #sessionGeneration/clear the IRC queue several awaits later once they reach agent.reset().
-		// A normalization await that resolves in that gap sees an unchanged generation and an idle,
-		// non-streaming session, so without this guard it would wake/fold into the still-old context
-		// and race the transition's own reset — same rationale as #drainStrandedQueuedMessages.
-		if (this.#unsubscribeAgent === undefined) return;
+		if (this.#workPoolYieldItems.length > 0 || this.#unsubscribeAgent === undefined) return;
 		if (this.#canAutoContinueForFollowUp() && this.agent.hasQueuedMessages()) return;
-		// Parked wake records resume alongside ordinary stranded asides; they were
-		// already decided wake-intended at deferral time.
+
 		const records = [...this.#irc.drainDeferredWakes(), ...this.#irc.drainPending()];
+		const passive: AgentMessage[] = [];
+		const waking: AgentMessage[] = [];
+		for (const record of records) {
+			if ((record as CommittableAsideMessage)[ASIDE_MESSAGE_WAKE] === false) passive.push(record);
+			else waking.push(record);
+		}
+		this.#foldStrandedIrcAsidesIntoContext(passive);
+		if (waking.length === 0) return;
 		if (this.#planModeState?.enabled) {
-			// Plan mode: fold stranded IRC asides into context without waking an
-			// autonomous turn. Convergence to ask/resolve stays user-driven.
-			this.#foldStrandedIrcAsidesIntoContext(records);
+			this.#foldStrandedIrcAsidesIntoContext(waking);
 			return;
 		}
 		if (this.#advisors.autoResumeSuppressed) {
-			// A user interrupt is still in effect (clearQueue({ forInterrupt: true }) already
-			// dropped these same records from the agent-core queues to keep the run the user
-			// stopped from auto-resuming). Only a real peer IRC message justifies waking a fresh
-			// turn here; extension/user asides fold into context like the plan-mode branch above,
-			// staying user-driven until the next deliberate prompt.
 			const wake: AgentMessage[] = [];
 			const fold: AgentMessage[] = [];
-			for (const record of records) {
+			for (const record of waking) {
 				if (record.role === "custom" && record.customType === "irc:incoming") wake.push(record);
 				else fold.push(record);
 			}
@@ -970,21 +977,82 @@ export class AgentSession {
 			if (wake.length > 0) this.#wakeForIrc(wake);
 			return;
 		}
-		this.#wakeForIrc(records);
+		this.#wakeForIrc(waking);
 	}
 
-	/** Persist stranded IRC/extension asides into context without starting a turn — shared by the
-	 *  plan-mode branch and the post-interrupt fold branch of #resumeStrandedIrcAsides. All records
-	 *  (custom and non-custom alike) route through emitExternalEvent so message_end both appends to
-	 *  context and notifies event listeners — #persistMessageEnd handles custom-role persistence
-	 *  (sessionManager.appendCustomMessageEntry) from that event, and a displayable custom aside that
-	 *  went stranded mid-stream gets the message_end its sender's rebuild-skip decision expects
-	 *  (extension-ui-controller's #applyCustomMessageDisplay), matching IrcBridge.flushPending(). */
+	/** Persist stranded IRC/extension asides into context without starting a turn. */
 	#foldStrandedIrcAsidesIntoContext(records: AgentMessage[]): void {
 		for (const record of records) {
 			this.agent.emitExternalEvent({ type: "message_start", message: record });
 			this.agent.emitExternalEvent({ type: "message_end", message: record });
 		}
+	}
+
+	#createToolContextSink(
+		toolCallId: string,
+		toolName: string,
+		signal?: AbortSignal,
+	): (injections: readonly ContextInjectionResult[]) => void {
+		const promptGeneration = this.#promptGeneration;
+		const sessionGeneration = this.#sessionGeneration;
+		const sessionId = this.sessionId;
+		const cwd = this.sessionManager.getCwd();
+		let used = false;
+		return injections => {
+			if (used) return;
+			used = true;
+			if (
+				injections.length === 0 ||
+				signal?.aborted ||
+				this.#isDisposed ||
+				this.#abortInProgress ||
+				this.#unsubscribeAgent === undefined ||
+				this.#promptGeneration !== promptGeneration ||
+				this.#sessionGeneration !== sessionGeneration ||
+				this.sessionId !== sessionId ||
+				this.sessionManager.getCwd() !== cwd
+			) {
+				return;
+			}
+			try {
+				const enabledTools = new Set(this.getEnabledToolNames());
+				const parts: string[] = [];
+				let bytes = 0;
+				for (const injection of injections) {
+					const text = injection.additionalContext;
+					if (
+						typeof text !== "string" ||
+						text.trim().length === 0 ||
+						injection.requiredTools?.some(tool => !enabledTools.has(tool))
+					) {
+						continue;
+					}
+					const nextBytes = Buffer.byteLength(text, "utf8");
+					if (bytes + nextBytes > EXTENSION_CONTEXT_MAX_BYTES) continue;
+					bytes += nextBytes;
+					parts.push(text);
+				}
+				if (parts.length === 0) return;
+				const record: CustomMessage = {
+					role: "custom",
+					customType: EXTENSION_TOOL_CONTEXT_MESSAGE_TYPE,
+					content: parts.join("\n\n"),
+					display: false,
+					details: { toolCallId, toolName },
+					attribution: "agent",
+					timestamp: Date.now(),
+				};
+				Object.defineProperty(record, ASIDE_MESSAGE_WAKE, { value: false });
+				if (this.isStreaming) this.#irc.queueAside([record]);
+				else this.#foldStrandedIrcAsidesIntoContext([record]);
+			} catch (error) {
+				this.#extensionRunner?.emitError({
+					extensionPath: "<host>",
+					event: "tool_context",
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		};
 	}
 
 	/** Re-validates a #sessionGeneration snapshot captured before an aside-queueing call's
@@ -1168,12 +1236,6 @@ export class AgentSession {
 			this.#emit(pending);
 			return;
 		}
-
-		// `agent_end` is deferred until the prompt count reaches zero, but it is
-		// emitted immediately before the settle drain schedules work that arrived
-		// after the loop's final queue/aside poll. Such a tail arrival is a real
-		// continuation, not a terminal stop: mark this end non-terminal so
-		// subscribers wait through the queued steer/follow-up or stranded IRC wake.
 		const canDrain =
 			!this.#abortInProgress && this.#unsubscribeAgent !== undefined && this.#modeExitDrainSuppressionDepth === 0;
 		const queuedContinuation =
@@ -1181,7 +1243,8 @@ export class AgentSession {
 			!this.#queuedMessageDrainBlocked &&
 			this.#canAutoContinueForFollowUp() &&
 			this.agent.hasQueuedMessages();
-		const ircContinuation = canDrain && !this.#isDisposed && !this.#planModeState?.enabled && this.#irc.hasPending();
+		const ircContinuation =
+			canDrain && !this.#isDisposed && !this.#planModeState?.enabled && this.#irc.hasPendingWake();
 		this.#emit(queuedContinuation || ircContinuation ? { ...pending, isTerminal: false } : pending);
 	}
 
@@ -1672,6 +1735,16 @@ export class AgentSession {
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
+		this.#extensionRunner?.setToolContextSinkFactory?.((toolCallId, toolName, signal) =>
+			this.#createToolContextSink(toolCallId, toolName, signal),
+		);
+		this.#agentName = config.agentName ?? this.#agentKind;
+		this.#parentAgentId = config.parentAgentId;
+		this.#restrictToolNames = config.restrictToolNames ?? false;
+		this.#inheritedSubagentContextProvider = config.beforeSubagentStart;
+		this.#detachExtensionBeforeModelCall = this.agent.addBeforeModelCall((context, signal) =>
+			this.#injectExtensionModelContext(context, signal),
+		);
 		this.#scoutAllowedBySpawnPolicy = config.scoutAllowedBySpawnPolicy ?? true;
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
@@ -2005,6 +2078,163 @@ export class AgentSession {
 
 	getAgentId(): string | undefined {
 		return this.#agentId;
+	}
+	getSubagentContextProvider(): SubagentContextProvider {
+		if (this.#inheritedSubagentContextProvider) return this.#inheritedSubagentContextProvider;
+		const owner = new WeakRef(this);
+		const sessionId = this.sessionId;
+		const sessionGeneration = this.#sessionGeneration;
+		return async event => {
+			const session = owner.deref();
+			if (
+				!session ||
+				session.#isDisposed ||
+				session.#unsubscribeAgent === undefined ||
+				session.sessionId !== sessionId ||
+				session.#sessionGeneration !== sessionGeneration ||
+				event.signal?.aborted
+			) {
+				return [];
+			}
+			const runner = session.#extensionRunner;
+			if (!runner?.hasHandlers("before_subagent_start")) return [];
+			return runner.emitBeforeSubagentStart({
+				...event,
+				tools: [...event.tools],
+				systemPrompt: [...event.systemPrompt],
+			});
+		};
+	}
+
+	async #injectExtensionModelContext(context: Context, signal?: AbortSignal): Promise<void> {
+		const originalPrompt = [...(context.systemPrompt ?? [])];
+		const sessionGeneration = this.#sessionGeneration;
+		const sessionId = this.sessionId;
+		const cwd = this.sessionManager.getCwd();
+		const runner = this.#extensionRunner;
+		const collectLocal = async (): Promise<ContextInjectionResult[]> => {
+			if (!runner?.hasHandlers("before_agent_context")) return [];
+			return runner.emitBeforeAgentContext({
+				type: "before_agent_context",
+				agentId: this.#agentId ?? (this.#agentKind === "main" ? "Main" : "sub"),
+				agent: this.#agentName,
+				parentAgentId: this.#parentAgentId,
+				isSubagent: this.#agentKind === "sub",
+				sessionId,
+				cwd,
+				tools: [...this.getEnabledToolNames()],
+				restricted: this.#restrictToolNames,
+				systemPrompt: [...originalPrompt],
+				signal,
+			});
+		};
+
+		let localPromise: Promise<ContextInjectionResult[]>;
+		if (signal) {
+			const cached = this.#contextInjectionRuns.get(signal);
+			if (cached?.sessionGeneration === sessionGeneration) {
+				localPromise = cached.promise;
+			} else {
+				localPromise = collectLocal();
+				this.#contextInjectionRuns.set(signal, { sessionGeneration, promise: localPromise });
+			}
+		} else {
+			localPromise = collectLocal();
+		}
+
+		let local: ContextInjectionResult[] = [];
+		try {
+			local = await localPromise;
+		} catch (error) {
+			runner?.emitError({
+				extensionPath: "<host>",
+				event: "before_agent_context",
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		signal?.throwIfAborted();
+		if (
+			this.#isDisposed ||
+			this.#unsubscribeAgent === undefined ||
+			this.#sessionGeneration !== sessionGeneration ||
+			this.sessionId !== sessionId ||
+			this.sessionManager.getCwd() !== cwd
+		) {
+			return;
+		}
+
+		const eligibleLocal = (): string[] => {
+			const enabled = new Set(this.getEnabledToolNames());
+			return local.flatMap(injection => {
+				const text = injection.additionalContext;
+				return typeof text === "string" &&
+					text.trim().length > 0 &&
+					!injection.requiredTools?.some(tool => !enabled.has(tool))
+					? [text]
+					: [];
+			});
+		};
+		const localForParent = eligibleLocal();
+		let parent: string[] = [];
+		if (this.#inheritedSubagentContextProvider) {
+			const controller = new AbortController();
+			const parentSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+			const parentPromise = Promise.resolve().then(() =>
+				this.#inheritedSubagentContextProvider!({
+					type: "before_subagent_start",
+					agentId: this.#agentId ?? "sub",
+					agent: this.#agentName,
+					parentAgentId: this.#parentAgentId,
+					sessionId,
+					cwd,
+					tools: [...this.getEnabledToolNames()],
+					restricted: this.#restrictToolNames,
+					systemPrompt: [...originalPrompt, ...localForParent],
+					signal: parentSignal,
+				}),
+			);
+			void parentPromise.catch(() => undefined);
+			try {
+				parent = await withTimeout(
+					parentPromise,
+					5_000,
+					"Timed out collecting parent subagent context",
+					parentSignal,
+				);
+			} catch (error) {
+				if (signal?.aborted) signal.throwIfAborted();
+				runner?.emitError({
+					extensionPath: "<parent>",
+					event: "before_subagent_start",
+					error: error instanceof Error ? error.message : String(error),
+				});
+			} finally {
+				controller.abort();
+			}
+		}
+		signal?.throwIfAborted();
+		if (
+			this.#isDisposed ||
+			this.#unsubscribeAgent === undefined ||
+			this.#sessionGeneration !== sessionGeneration ||
+			this.sessionId !== sessionId ||
+			this.sessionManager.getCwd() !== cwd
+		) {
+			return;
+		}
+
+		const injected: string[] = [];
+		const seen = new Set(originalPrompt);
+		let bytes = 0;
+		for (const text of [...eligibleLocal(), ...parent]) {
+			if (typeof text !== "string" || text.trim().length === 0 || seen.has(text)) continue;
+			const nextBytes = Buffer.byteLength(text, "utf8");
+			if (bytes + nextBytes > EXTENSION_CONTEXT_MAX_BYTES) continue;
+			bytes += nextBytes;
+			seen.add(text);
+			injected.push(text);
+		}
+		if (injected.length > 0) context.systemPrompt = [...originalPrompt, ...injected];
 	}
 
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
@@ -4529,6 +4759,8 @@ export class AgentSession {
 		this.#detachUsageBeforeQueueDequeue = undefined;
 		this.#detachUsageBeforeModelCall?.();
 		this.#detachUsageBeforeModelCall = undefined;
+		this.#detachExtensionBeforeModelCall?.();
+		this.#detachExtensionBeforeModelCall = undefined;
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();

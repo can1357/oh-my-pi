@@ -57,6 +57,7 @@ export * from "./task/executor";
 export type * from "./task/types";
 // Tools (detail types and utilities)
 export * from "./tools";
+export { resolveToCwd } from "./tools/path-utils";
 export * from "./utils/github";
 // UI components for extensions
 export {

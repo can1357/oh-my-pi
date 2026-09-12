@@ -90,6 +90,7 @@ import type {
 import {
 	ASIDE_MESSAGE_COMMIT,
 	ASIDE_MESSAGE_DISCARD,
+	ASIDE_MESSAGE_WAKE,
 	isSoftToolRequirement,
 	SPECULATIVE_STREAM_SESSION,
 } from "./types";
@@ -1576,10 +1577,21 @@ async function runLoopBody(
 			const lateSteering = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
 			const asideMessages = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.());
 			const followUpMessages = signal?.aborted ? [] : (await config.getFollowUpMessages?.(signal)) || [];
-			if (lateSteering.length > 0 || asideMessages.length > 0 || followUpMessages.length > 0) {
-				// Set as pending so the inner loop processes them before stopping.
+			const wakingAsides = asideMessages.filter(
+				message => (message as CommittableAsideMessage)[ASIDE_MESSAGE_WAKE] !== false,
+			);
+			if (lateSteering.length > 0 || wakingAsides.length > 0 || followUpMessages.length > 0) {
+				// Waking work carries every aside into the next turn in arrival order.
 				pendingMessages = [...lateSteering, ...asideMessages, ...followUpMessages];
 				continue;
+			}
+			if (asideMessages.length > 0) {
+				currentContext.messages.push(...asideMessages);
+				newMessages.push(...asideMessages);
+				for (const message of asideMessages) {
+					(message as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
+				}
+				emitInputMessages(stream, asideMessages);
 			}
 
 			// No more messages, exit

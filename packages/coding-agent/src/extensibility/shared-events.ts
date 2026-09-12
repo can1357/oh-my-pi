@@ -342,6 +342,10 @@ export interface ToolResultEventResult {
 	details?: unknown;
 	/** Override isError flag */
 	isError?: boolean;
+	/** Optional model context contributed without changing the tool result. */
+	additionalContext?: string;
+	/** Canonical enabled tool names required for delivering additionalContext. */
+	requiredTools?: readonly string[];
 }
 
 /** Return type for `session_before_switch` handlers */

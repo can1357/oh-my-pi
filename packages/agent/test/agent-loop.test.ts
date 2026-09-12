@@ -18,7 +18,12 @@ import type {
 	SpeculativePhysicalOutcome,
 	ToolCallContext,
 } from "@oh-my-pi/pi-agent-core/types";
-import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD, SPECULATIVE_STREAM_SESSION } from "@oh-my-pi/pi-agent-core/types";
+import {
+	ASIDE_MESSAGE_COMMIT,
+	ASIDE_MESSAGE_DISCARD,
+	ASIDE_MESSAGE_WAKE,
+	SPECULATIVE_STREAM_SESSION,
+} from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, AssistantMessageEvent, Context, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved, setStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -2810,6 +2815,45 @@ describe("agentLoop with AgentMessage", () => {
 		for await (const _event of stream) {
 			// Drain the loop.
 		}
+	});
+
+	it("commits passive yield context without starting another provider turn", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		const passive = createUserMessage("informational context");
+		let committed = 0;
+		Object.defineProperties(passive, {
+			[ASIDE_MESSAGE_WAKE]: { value: false },
+			[ASIDE_MESSAGE_COMMIT]: { value: () => committed++ },
+		});
+		let delivered = false;
+		const events: AgentEvent[] = [];
+		const stream = agentLoop(
+			[createUserMessage("work")],
+			context,
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				onBeforeYield: () => {
+					delivered = true;
+				},
+				getAsideMessages: async () => (delivered ? [() => passive] : []),
+			},
+			undefined,
+			mock.stream,
+		);
+		for await (const event of stream) events.push(event);
+
+		expect(mock.calls).toHaveLength(1);
+		expect(committed).toBe(1);
+		expect(await stream.result()).toEqual(expect.arrayContaining([passive]));
+		expect(events.filter(event => event.type === "turn_start")).toHaveLength(1);
+		const passiveStart = events.findIndex(event => event.type === "message_start" && event.message === passive);
+		const passiveEnd = events.findIndex(event => event.type === "message_end" && event.message === passive);
+		const agentEnd = events.findIndex(event => event.type === "agent_end");
+		expect(passiveStart).toBeGreaterThan(-1);
+		expect(passiveEnd).toBeGreaterThan(passiveStart);
+		expect(agentEnd).toBeGreaterThan(passiveEnd);
 	});
 
 	it("discards a drained aside when the deadline expires before insertion", async () => {

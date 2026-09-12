@@ -182,6 +182,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<TDetails, TParameters>> {
+		const commitContext = this.runner.createToolContextSink(toolCallId, this.tool.name, signal);
 		// The agent loop emits `tool_call` at arg-prep time (session
 		// `beforeToolCall` wiring) so a handler revision lands before concurrency
 		// scheduling and `tool_execution_start`. Consume the marker
@@ -346,6 +347,20 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 		}
 
+		const contextInjections = this.runner.hasHandlers("before_tool_execution")
+			? await this.runner.emitBeforeToolExecution({
+					type: "before_tool_execution",
+					toolName: this.tool.name,
+					toolCallId,
+					input: normalizeToolEventInput(
+						this.tool.name,
+						resolveToolEventInput(this.tool, toolEventArgs(effectiveParams, context)),
+					),
+					signal,
+				})
+			: [];
+		signal?.throwIfAborted();
+
 		// Execute the actual tool
 		let result: AgentToolResult<TDetails, TParameters>;
 		let executionError: Error | undefined;
@@ -368,50 +383,46 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			};
 		}
 
-		// Emit tool_result event - extensions can modify the result and error status
+		const nativeError = !!executionError || result.isError === true;
+		let resultResult;
 		if (this.runner.hasHandlers("tool_result")) {
-			const resultResult = await this.runner.emitToolResult({
-				type: "tool_result",
-				toolName: this.tool.name,
-				toolCallId,
-				input: normalizeToolEventInput(
-					this.tool.name,
-					resolveToolEventInput(this.tool, toolEventArgs(effectiveParams, context)),
-				),
-				content: result.content,
-				details: result.details,
-				isError: !!executionError,
-			});
+			resultResult = await this.runner.emitToolResult(
+				{
+					type: "tool_result",
+					toolName: this.tool.name,
+					toolCallId,
+					input: normalizeToolEventInput(
+						this.tool.name,
+						resolveToolEventInput(this.tool, toolEventArgs(effectiveParams, context)),
+					),
+					content: result.content,
+					details: result.details,
+					isError: nativeError,
+					signal,
+				},
+				signal,
+			);
+			if (resultResult?.contextInjections) contextInjections.push(...resultResult.contextInjections);
+		}
+		commitContext(contextInjections);
 
-			if (resultResult) {
-				const modifiedContent: (TextContent | ImageContent)[] = resultResult.content ?? result.content;
-				const modifiedDetails = (resultResult.details ?? result.details) as TDetails;
-
-				// Effective error state: an explicit handler override wins; otherwise the
-				// original execution outcome stands. This lets a handler rewrite a failed
-				// call's model-visible content/details while keeping it an error, flip a
-				// failure to success, or flag a success as an error.
-				const effectiveError = resultResult.isError ?? !!executionError;
-
-				// Return the (possibly modified) result carrying the error flag rather than
-				// rethrowing the original exception. The agent loop honors
-				// `AgentToolResult.isError` and surfaces it as a tool error on the wire (see
-				// `coerceToolResult` in agent-loop), so replacement failure content reaches
-				// the model while the call remains an error — the original exception text is
-				// no longer forced through, which previously discarded the replacement.
-				return {
-					content: modifiedContent,
-					details: modifiedDetails,
-					providerMetadata: result.providerMetadata,
-					...(effectiveError ? { isError: true } : {}),
-				};
-			}
+		const hasResultEdits =
+			resultResult?.content !== undefined ||
+			resultResult?.details !== undefined ||
+			resultResult?.isError !== undefined;
+		if (resultResult && hasResultEdits) {
+			const modifiedContent: (TextContent | ImageContent)[] = resultResult.content ?? result.content;
+			const modifiedDetails = (resultResult.details ?? result.details) as TDetails;
+			const effectiveError = resultResult.isError ?? nativeError;
+			return {
+				...result,
+				content: modifiedContent,
+				details: modifiedDetails,
+				isError: effectiveError || undefined,
+			};
 		}
 
-		// No extension modification
-		if (executionError) {
-			throw executionError;
-		}
+		if (executionError) throw executionError;
 		return result;
 	}
 }
