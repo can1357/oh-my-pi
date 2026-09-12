@@ -944,6 +944,19 @@ export interface ProviderInputTransformation {
 	[key: string]: unknown;
 }
 
+/**
+ * Why a request changed the cached prompt prefix, as named by the provider that
+ * shaped the request. `charDelta` is the signed change in total system-prompt
+ * length. `tool` names the tool whose definition changed when the provider
+ * could attribute the change to one, and is absent when only the tool array as
+ * a whole is known to differ.
+ */
+export type CacheBreakReason =
+	| { kind: "system_prompt"; charDelta: number }
+	| { kind: "tools"; tool?: string }
+	| { kind: "history_rewrite" }
+	| { kind: "retention"; from: "5m" | "1h"; to: "5m" | "1h" };
+
 export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
@@ -1065,6 +1078,14 @@ export interface AssistantMessage {
 	disabledFeatures?: string[];
 	/** Provider-reported input rewrites such as dropped bound-thinking blocks. */
 	inputTransformations?: ProviderInputTransformation[];
+	/**
+	 * Only the Anthropic provider populates this. Names the prompt-prefix change
+	 * this request made — a changed system prompt, a changed tool array, a
+	 * rewritten history, or a switched cache retention — so a cold turn can say
+	 * why it went cold. Set whether or not the response actually missed cache;
+	 * consumers decide when to show it.
+	 */
+	cacheBreakReason?: CacheBreakReason;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
 	timestamp: number; // Unix timestamp in milliseconds
