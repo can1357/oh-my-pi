@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- Fixed browser-relay tabs becoming detached, duplicated, or undrivable after relay outages and extension restarts ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+- Fixed recovered tabs losing their active sessions or remaining attached after the last client disconnects ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Claude Code session imports now preserve typed user text stored alongside tool results ([#11854](https://github.com/can1357/oh-my-pi/issues/11854)).
 - Extension commands now settle BTW writes before creating, switching, or branching sessions, preventing side requests from outliving their source session ([#11335](https://github.com/can1357/oh-my-pi/pull/11335) by [@Ant39140](https://github.com/Ant39140)).
 - Session selection and active-session deletion now settle BTW writes before switching or removing history, preventing stale saves from blocking the next session ([#11335](https://github.com/can1357/oh-my-pi/pull/11335) by [@Ant39140](https://github.com/Ant39140)).
@@ -304,9 +306,6 @@
 
 ### Fixed
 
-- Fixed browser-relay tabs becoming detached, duplicated, or undrivable after relay outages and extension restarts ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
-- Fixed recovered tabs losing their active sessions or remaining attached after the last client disconnects ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
-- Fixed user-scope marketplace plugins installed through `omp` losing their skills unless the Claude plugin source was separately enabled ([#10662](https://github.com/can1357/oh-my-pi/issues/10662)).
 - Fixed transient provider retries incorrectly failing with an “Agent is already processing” error.
 - Fixed user-scope marketplace plugins installed through omp losing their skills when the Claude plugin source was not separately enabled.
 - Fixed hashline edits failing when targets included apply_patch markers, while rejecting ambiguous bracketed targets instead of editing the wrong path.
