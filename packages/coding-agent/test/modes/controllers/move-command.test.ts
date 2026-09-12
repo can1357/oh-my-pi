@@ -18,6 +18,7 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 	const moveSession = vi.fn(async (cwd: string) => {
 		state.cwd = cwd;
 		state.movedTo = cwd;
+		return true;
 	});
 	const sessionDir = `${sourceDir}/.sessions`;
 	const captureState = vi.fn(() => ({ cwd: state.cwd, sessionDir, movedTo: state.movedTo }));
@@ -196,6 +197,32 @@ describe("CommandController /move", () => {
 			expect(ctx.ui.requestRender).toHaveBeenCalledWith();
 			expect(present).toHaveBeenCalled();
 			expect(ctx.showError).not.toHaveBeenCalled();
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+			await fs.rm(targetDir, { recursive: true, force: true });
+		}
+	});
+
+	it("stops /move without re-scoping cwd when the session refuses the move", async () => {
+		// A restart-latched moveSession() does not move the session file. If it
+		// reports that refusal only by returning, the caller reads the absent throw
+		// as success and re-scopes the process/UI workspace to the target anyway —
+		// leaving the workspace and the persisted session in different directories.
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-source-"));
+		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-target-"));
+		try {
+			const { ctx, state } = createMoveContext(sourceDir);
+			// Refuse the move exactly as the restart latch does: no throw, no move.
+			vi.spyOn(ctx.session, "moveSession").mockResolvedValue(false);
+			const controller = new CommandController(ctx);
+
+			await controller.handleMoveCommand(targetDir);
+
+			// The session never moved, so the workspace must not follow.
+			expect(ctx.applyCwdChange).not.toHaveBeenCalled();
+			expect(state.cwd).toBe(sourceDir);
+			expect(ctx.updateEditorBorderColor).not.toHaveBeenCalled();
+			expect(ctx.showError).toHaveBeenCalled();
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 			await fs.rm(targetDir, { recursive: true, force: true });

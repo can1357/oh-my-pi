@@ -60,7 +60,45 @@ export interface AgentSessionDisposeOptions {
 	 * (`/quit`, test teardown, subagent completion).
 	 */
 	reason?: postmortem.Reason;
+	/**
+	 * Skip empty-move-session cleanup during disposal. A restart handoff disposes
+	 * the session but must keep the file it just persisted (`ensureOnDisk()`) so
+	 * `onRestartRequested` can hand it to `SessionManager.open()` for
+	 * reconstruction. Without this an SDK host that MOVED an otherwise empty
+	 * session and then requested a restart would have the captured `sessionFile`
+	 * deleted by `cleanupEmptyMoveSession()`, breaking reattachment.
+	 */
+	preserveSessionFile?: boolean;
+	/**
+	 * This disposal recycles the session rather than ending the process.
+	 *
+	 * Set only by the cooperative-restart handoff. Teardown that is layered
+	 * AROUND `AgentSession.dispose()` — notably the SDK factory's wrapper, which
+	 * runs the process-level `AgentLifecycleManager.global().dispose()` for a
+	 * main session — must scope itself to this session instead of the process:
+	 * restart is documented to recycle only the current session, so releasing and
+	 * unregistering the parent's adopted subagents would leave them unresumable
+	 * once the replacement attaches. `AgentSession.#doDispose()` itself does not
+	 * read this flag; it exists for the wrappers.
+	 */
+	recycle?: boolean;
 }
+
+/**
+ * How a cooperative-restart handoff ended, as reported to every teardown a
+ * disposal wrapper deferred until the handoff (see
+ * `AgentSession.deferUntilRestartHandoff`).
+ *
+ * `reattached` — the host's `onRestartRequested` returned, so a replacement
+ * session exists to own the successors of the resources the old parent's
+ * teardown released.
+ *
+ * `failed` — no replacement exists: the callback threw, a step before it threw,
+ * or the disposal was never a recycle. A deferred release that gates something
+ * the replacement was supposed to take over must refuse its waiters in this
+ * case rather than hand them a resource nobody owns.
+ */
+export type RestartHandoffOutcome = "reattached" | "failed";
 
 /** Listener notified when command metadata changes. */
 export type CommandMetadataChangedListener = () => void | Promise<void>;
@@ -248,6 +286,13 @@ export interface AgentSessionConfig {
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	/**
+	 * Cooperative restart hook for embedded hosts. Invoked by
+	 * {@link AgentSession.requestRestart} after OMP has quiesced, flushed, and
+	 * disposed this session, with the data the host needs to re-attach the
+	 * recycled session. Wired from `CreateAgentSessionOptions.onRestartRequested`.
+	 */
+	onRestartRequested?: (info: { sessionId: string; sessionFile: string }) => void | Promise<void>;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */

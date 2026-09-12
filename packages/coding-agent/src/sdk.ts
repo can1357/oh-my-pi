@@ -147,7 +147,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
-import { AgentLifecycleManager } from "./registry/agent-lifecycle";
+import { AgentLifecycleManager, type ParkingBarrierRelease } from "./registry/agent-lifecycle";
 import { type AgentKind, type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
 import {
 	buildSecretObfuscator,
@@ -157,7 +157,13 @@ import {
 	obfuscateProviderContext,
 	type SecretObfuscator,
 } from "./secrets";
-import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
+import {
+	AgentSession,
+	type AgentSessionDisposeOptions,
+	type InitialRetryFallbackState,
+	type PlanYolo,
+	type Prewalk,
+} from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { DateCwdReminderInjector } from "./session/date-cwd-reminder";
@@ -664,6 +670,98 @@ export interface CreateAgentSessionOptions {
 	 * requests, follows it), which is the right granularity for launch timing.
 	 */
 	onFirstChatDispatch?: () => void;
+
+	/**
+	 * Cooperative restart hook for embedded hosts. When the session (or its
+	 * host) calls {@link AgentSession.requestRestart}, OMP latches out new turns,
+	 * waits for the running turn to settle, flushes the session file to disk,
+	 * disposes the session, then invokes this callback with the data needed to
+	 * re-attach. The session is already disposed when this fires, so the host
+	 * re-opens the manager (`await SessionManager.open(sessionFile)`) and recreates
+	 * the session **through the same configured factory / options it used
+	 * originally**, substituting the reopened manager — re-passing this callback
+	 * and all host options (agentDir, event bus, injected settings), and taking
+	 * `cwd` from that manager rather than from the original options (see below).
+	 * A bare `createAgentSession({ sessionManager })` drops every option, so the
+	 * recycled session would restart once and then never again, and silently lose
+	 * host config. Never create the replacement before this callback (it cannot: the
+	 * old session is gone) — that is the create-before-dispose hazard OMP disposes
+	 * first to avoid.
+	 *
+	 * Reconstruction contract — preserve host config, INVALIDATE the
+	 * restart-sensitive preload. Restart exists to re-read surfaces frozen at
+	 * session start, so the replacement MUST let them be rediscovered instead of
+	 * carrying stale values across the boundary:
+	 * - Do NOT re-pass {@link preloadedExtensions}. Its `Extension` instances
+	 *   close over the disposed session's `ExtensionAPI` (cwd, eventBus, runtime)
+	 *   and are documented unsafe across session boundaries; reusing them routes
+	 *   tools/handlers/commands back through the dead session. Omit them so the
+	 *   new session binds fresh extensions to its own runtime.
+	 * - Do NOT re-pass {@link preloadedExtensionPaths} either, when it is a
+	 *   snapshot captured from the outgoing session. Supplying it takes the
+	 *   preload branch and skips `discoverSessionExtensionPaths()` entirely, so
+	 *   an extension added or removed on disk stays absent or present across the
+	 *   restart — and rediscovering extensions is a purpose of the feature. Omit
+	 *   it so discovery runs. Paths the host chose explicitly (not harvested from
+	 *   the old session) belong in {@link additionalExtensionPaths}, which adds
+	 *   to discovery rather than replacing it.
+	 * - Do NOT re-pass {@link contextFiles}, {@link skills},
+	 *   {@link promptTemplates}, or {@link slashCommands} with the values captured
+	 *   at first launch. Each bypasses disk discovery when supplied, so re-passing
+	 *   the stale value defeats the reload — restart would silently keep the old
+	 *   `AGENTS.md`, skills, templates, and commands. Omit them so
+	 *   `createAgentSession` re-runs discovery and picks up the on-disk changes
+	 *   restart promises.
+	 * - Do NOT re-pass the `model` you LAUNCHED with. Any supplied `model` is
+	 *   treated as an explicit selection, so `sessionModelStrings` stays empty and
+	 *   the transcript's last `model_change` is never restored — resetting the
+	 *   replacement to its launch-time model and discarding every `setModel()`
+	 *   switch the user made before restarting. Omit it and the active model is
+	 *   restored from the transcript, or re-pass the session's CURRENT
+	 *   `session.model` together with {@link resolveModelFromRegistry}.
+	 * - Do NOT re-pass the `cwd` you LAUNCHED with. Pass
+	 *   `cwd: reopenedManager.getCwd()` instead. `SessionManager.open()` adopts
+	 *   the transcript's recorded header cwd whenever that directory is
+	 *   enterable, so a session that has since `/move`d from project A to
+	 *   project B reopens pointing at B — while the explicit `cwd` option is
+	 *   what `createAgentSession` uses for extension, skill, context-file,
+	 *   prompt-template, slash-command, and workspace-tree discovery. Re-passing
+	 *   the original `A` therefore builds a replacement combining A's prompt and
+	 *   extensions with B's filesystem; taking it from the reopened manager
+	 *   keeps both halves on the same project.
+	 * Keep genuine host configuration (provider registry, auth, agent id, event
+	 * bus); invalidate the discovery-backed preload fields above and re-derive
+	 * `cwd`.
+	 *
+	 * The {@link modelRegistry} is the restart-sensitive surface you DO re-pass —
+	 * it holds the session-affine auth storage. `requestRestart()` reloads it for
+	 * you before this callback fires, so you do not refresh it manually: without
+	 * that, the preserved instance would carry the `models.yml` and provider
+	 * catalog parsed at first launch into the replacement (the background refresh
+	 * below runs only for a registry `createAgentSession` constructed itself), and
+	 * a restart requested for an on-disk model change would return the stale
+	 * catalog. The reload is offline so the handoff is not blocked on provider
+	 * HTTP; online discovery resumes from the replacement's own startup.
+	 *
+	 * Recycles ONLY this session (same loaded code); picking up a new build is a
+	 * host-process-level operation, never triggered per-agent. Unset =>
+	 * `requestRestart()` refuses (restart unavailable).
+	 */
+	onRestartRequested?: (info: { sessionId: string; sessionFile: string }) => void | Promise<void>;
+	/**
+	 * Re-read `model` from `modelRegistry` by its own provider/id before use.
+	 *
+	 * For a host reconstructing a session (see `onRestartRequested`): it preserves
+	 * the selected `model` across the recycle, but that object holds the
+	 * definition parsed at first launch, so a `models.yml` edit the restart was
+	 * requested FOR would not reach the replacement. Opting in re-reads the
+	 * definition for the same selector.
+	 *
+	 * Off by default: a caller that BUILDS a model — reusing a catalog
+	 * provider/id while overriding `baseUrl`, `contextWindow`, or `maxTokens` —
+	 * owns that definition, and re-reading would replace it with the catalog's.
+	 */
+	resolveModelFromRegistry?: boolean;
 
 	/** Whether to auto-approve all tool calls (--auto-approve CLI flag). Default: false */
 	autoApprove?: boolean;
@@ -1547,7 +1645,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			matchPreferences: modelMatchPreferences,
 		}),
 	);
-	let model = options.model;
+	// Resolve an explicitly supplied model against the registry handed in
+	// alongside it, but only when the caller opts in.
+	//
+	// The restart reconstruction contract preserves both `modelRegistry` and
+	// `model` across the recycle, so a replacement session would otherwise run
+	// the freshly-reparsed catalog while its SELECTED model object still held the
+	// definition from first launch — defeating a restart requested for a
+	// models.yml edit.
+	//
+	// It cannot be inferred. An embedder may pass a model it BUILT itself,
+	// reusing a catalog provider/id while overriding `baseUrl`/`contextWindow`
+	// to point at its own endpoint, and `find()` matches on provider/id alone —
+	// so the SDK cannot tell "customized by the caller" from "catalog definition
+	// has since changed", which is precisely what a restart-for-a-models.yml-edit
+	// looks like. Comparing fields gets one case wrong whichever way it is
+	// written. The host reconstructing a session knows which it is, so it says.
+	const model0 = options.model;
+	let model =
+		options.resolveModelFromRegistry && model0 ? (modelRegistry.find(model0.provider, model0.id) ?? model0) : model0;
 	let modelFallbackMessage: string | undefined;
 	let initialRetryFallback: InitialRetryFallbackState | undefined;
 	// Identify session model strings to restore in fallback order. We do an
@@ -1825,6 +1941,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return session?.skills ?? skills;
 			},
 			refreshSkills: () => session.refreshSkills(),
+			// Bound only when the host wired onRestartRequested, so the restart tool
+			// can guard on the binding's presence.
+			requestRestart: options.onRestartRequested ? () => session.requestRestart() : undefined,
+			// Bound alongside requestRestart so the restart tool can surface a
+			// pre-dispose refusal/failure to the still-open transcript (the model
+			// must learn the recycle did not happen). No-op before the session
+			// exists; after dispose the tool gates on isDisposed() and never calls it.
+			queueDeferredMessage: message => session?.queueDeferredMessage(message),
 			rules: allRules,
 			activeRules: [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()],
 			eventBus,
@@ -3812,6 +3936,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			onRestartRequested: options.onRestartRequested,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
@@ -4010,9 +4135,61 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let unsubscribeMcpNotifications: (() => void) | undefined;
 		let unregisterMcpPostmortem: (() => void) | undefined;
 
+		// One view of this session as a Vibe worker owner, shared by the two ends
+		// of a recycle: the dispose wrapper suspends this scope's process-local
+		// worker records, and the rehydrate below rebuilds them from the same
+		// journal for the replacement. Both must derive the owner scope from the
+		// SAME identity accessors or they would address different scopes and the
+		// suspend would have nothing to restore.
+		const vibeParentSession = {
+			getAgentId: () => resolvedAgentId,
+			getSessionId: () => sessionManager.getSessionId(),
+			getSessionFile: () => sessionManager.getSessionFile() ?? null,
+			sessionManager,
+			asyncJobManager: scopedAsyncJobManager,
+			settings,
+			getActiveModelString,
+		};
+
 		{
 			const originalDispose = session.dispose.bind(session);
-			session.dispose = async () => {
+			// This wrapper's own idempotence, established BEFORE its first await.
+			// `AgentSession.dispose()` coalesces, but only from the moment it is
+			// entered — and this wrapper awaits Vibe/subagent teardown first, so two
+			// concurrent disposals both get past that point and race. Concretely: a
+			// restart calls `dispose({ preserveSessionFile: true, recycle: true })`
+			// and parks in `parkAll()`; a normal host shutdown then calls
+			// `dispose({})` and reaches `originalDispose({})` first, which is the
+			// call the underlying cache keeps. The restart's later invocation merely
+			// JOINS it, so `preserveSessionFile` is silently dropped — empty-move
+			// cleanup deletes the moved session file — while the restart goes on to
+			// invoke `onRestartRequested` with a path nothing can reopen.
+			//
+			// The FIRST caller wins, and its options are the ones that run: a later
+			// caller awaits that same disposal rather than starting a second one, so
+			// whichever teardown began is the one whose options reach
+			// `originalDispose`. Whoever loses learns nothing new — both callers
+			// already treat `dispose()` as idempotent — but the restart's own
+			// `#disposeCall || #isDisposed` re-check after the await sees a disposal
+			// it did not own and refuses `busy`, which is exactly the outcome that
+			// stops it firing the callback over a deleted file.
+			let wrapperDisposal: Promise<void> | undefined;
+			// Forward the caller's disposal options: the wrapper only ADDS teardown
+			// around AgentSession.dispose(), so dropping them would silently change
+			// its behaviour. `preserveSessionFile` is the one that bites — the
+			// restart handoff sets it so the file ensureOnDisk() just persisted
+			// survives for onRestartRequested's SessionManager.open(), and a
+			// swallowed option would let empty-move cleanup delete the captured
+			// sessionFile out from under the reattachment.
+			const runDisposal = async (options: AgentSessionDisposeOptions) => {
+				// Held across `originalDispose(options)` on the recycle path, and —
+				// for a recycle — past this wrapper entirely: the barrier `parkAll()`
+				// raises is what stops a hub `send` waiting in `ensureLive()` from
+				// reviving a child, and the resources that child borrows (kernels,
+				// MCP, LSP) are torn down by the disposal BELOW the parking.
+				// Releasing at `parkAll()`'s resolution would reopen revival for
+				// exactly the span in which they go away.
+				let releaseParkingBarrier: ParkingBarrierRelease | undefined;
 				try {
 					// Reject new session work (eval starts) the moment disposal
 					// begins — the lifecycle await below opens an async gap before
@@ -4024,20 +4201,45 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						// resources (kernels, MCP, LSP) are still live. Subagent disposal
 						// must NOT touch the global lifecycle.
 						const vibeRegistry = VibeSessionRegistry.global();
-						const vibeParentSession = {
-							getAgentId: () => resolvedAgentId,
-							getSessionId: () => sessionManager.getSessionId(),
-							getSessionFile: () => sessionManager.getSessionFile() ?? null,
-							sessionManager,
-							asyncJobManager: scopedAsyncJobManager,
-							settings,
-							getActiveModelString,
-						};
 						await vibeRegistry.suspendScope(vibeRegistry.ownerScope(vibeParentSession), scopedAsyncJobManager);
-						await AgentLifecycleManager.global().dispose();
+						// A recycle is NOT a process teardown: the restart handoff
+						// disposes this session only so the replacement can reopen the
+						// same transcript, and it is documented to leave everything else
+						// alone. `dispose()` here would `release()` every adopted
+						// subagent — unregistering the ref AND dropping the global
+						// manager — so agents that were merely idle become unresumable
+						// and unaddressable the moment the replacement attaches.
+						// `parkAll()` applies the lifecycle's own idle transition
+						// instead: each live session is disposed (it must not outlive
+						// this parent's shared kernels/MCP/LSP), while the ref and its
+						// sessionFile stay registered on the same global manager the
+						// replacement will resolve, so `ensureLive()` revives them on
+						// demand after the recycle.
+						const lifecycle = AgentLifecycleManager.global();
+						if (options.recycle) {
+							releaseParkingBarrier = await lifecycle.parkAll();
+						} else {
+							await lifecycle.dispose();
+						}
 					}
-					await originalDispose();
+					await originalDispose(options);
 				} finally {
+					// A recycle is not finished when this dispose returns: the restart
+					// handoff still has to run `onRestartRequested`, and only that
+					// callback builds the replacement parent whose manager, MCP and
+					// kernels a revived child must borrow. A waiter released here
+					// would revive through the OLD captured reviver, which still
+					// closes over the parent this teardown just disposed. So hand the
+					// release to the session, which runs it once the callback returns;
+					// on any non-recycle disposal AgentSession runs it at the end of
+					// its own teardown, so it can never be stranded.
+					//
+					// The session tells the release which outcome it is running for,
+					// and the barrier needs that: a reattachment that threw leaves the
+					// parked children with no parent to be rebuilt against, so their
+					// waiters must be refused rather than released into a revive
+					// through the disposed parent's own reviver or factory.
+					if (releaseParkingBarrier) session.deferUntilRestartHandoff(releaseParkingBarrier);
 					unregisterUnlessParked();
 					unsubscribeCredentialDisabled?.();
 					unsubscribeMcpNotifications?.();
@@ -4049,6 +4251,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					unsubscribeMcpNotifications = undefined;
 					unregisterMcpPostmortem = undefined;
 				}
+			};
+			// Claim ownership synchronously — no await between the read and the
+			// assignment — so the loser can never slip into `runDisposal` and start a
+			// second teardown of the same session.
+			session.dispose = (options: AgentSessionDisposeOptions = {}) => {
+				wrapperDisposal ??= runDisposal(options);
+				return wrapperDisposal;
 			};
 		}
 
@@ -4324,6 +4533,35 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			await session.initializeCodeMode();
 		} catch (error) {
 			logger.warn("Code Mode initialization at session startup failed", { error: String(error) });
+		}
+
+		// Restore this owner scope's Vibe worker records from the reopened
+		// transcript. A recycle's teardown calls `suspendScope()`, which deletes
+		// every process-local record for the scope, and the AgentRegistry rows with
+		// them; without this the replacement comes back with `vibe_list` empty and
+		// idle workers unreachable even though their conversations are intact on
+		// disk. Mirrors the interactive session-switch reconciliation, which pairs
+		// its own `suspendScope()` with exactly this call — reconciling from the
+		// journal rather than carrying records across, so the parent journal stays
+		// the single source of truth for which workers exist.
+		//
+		// Guarded to `main` like the suspend side: a subagent session neither owns
+		// a Vibe scope nor suspends one. Runs after the registry attachment above
+		// and before the session is handed back, so no caller can observe the
+		// half-restored roster, and reconciliation is complete for the first
+		// `vibe_list` of the replacement. Bounded local work — a scan of the
+		// already-loaded journal plus one `session_init` peek per restorable child,
+		// and nothing at all for a transcript that never entered Vibe mode — so it
+		// cannot pay the recycle's caller a provider round-trip.
+		//
+		// A failure here must not fail session construction: the workers stay
+		// transcript-only, exactly as they were before the reconciliation ran.
+		if (agentKind === "main" && sessionManager.getSessionFile()) {
+			try {
+				await VibeSessionRegistry.global().rehydrate(vibeParentSession);
+			} catch (error) {
+				logger.warn("Failed to restore Vibe worker sessions for this session", { error: String(error) });
+			}
 		}
 
 		return {

@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -250,6 +251,7 @@ import type {
 	PromptOptions,
 	ResetSessionContextResult,
 	ResolvedRoleModel,
+	RestartHandoffOutcome,
 	RestoredQueuedMessage,
 	RoleModelCycle,
 	RoleModelCycleResult,
@@ -533,6 +535,31 @@ export function powerAssertionOptions(mode: "off" | "idle" | "display" | "system
 	};
 }
 
+/**
+ * Outcome of {@link AgentSession.requestRestart}. `ok: true` means the host
+ * `onRestartRequested` callback returned (the host's re-attach is what actually
+ * completes the restart). A refusal is a clean, recoverable no-op — the session
+ * is untouched and the host may retry:
+ * - `unavailable`: no `onRestartRequested` callback is bound.
+ * - `no-session-file`: an in-memory session has no re-attach handle.
+ * - `busy`: unpersisted input is queued (recycling would drop it).
+ */
+export type RequestRestartResult = { ok: true } | { ok: false; reason: "unavailable" | "no-session-file" | "busy" };
+
+/**
+ * One locally-handled slash-command execution, as seen by anything running
+ * inside that handler. `prompt()` holds `#promptInFlightCount` for the window's
+ * whole duration so a concurrent restart blocks on the handler rather than
+ * disposing underneath it, and `released` records that the window's single
+ * decrement has already been made — by a restart requested BY this handler
+ * (which cannot wait for its own caller), or by the handler's normal cleanup.
+ * Either way the flag retires the window, so a detached descendant still
+ * carrying this store on the async context cannot spend it a second time.
+ */
+interface LocalCommandWindow {
+	released: boolean;
+}
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -573,6 +600,51 @@ export class AgentSession {
 	get extensionPaths(): readonly string[] | undefined {
 		return this.#extensionPaths;
 	}
+
+	#onRestartRequested: ((info: { sessionId: string; sessionFile: string }) => void | Promise<void>) | undefined;
+	/**
+	 * Cooperative-restart state. `#restarting` latches out new turns from entry
+	 * through the host callback. `#restartCall` coalesces an in-flight
+	 * `requestRestart()` so the host callback fires exactly once per restart;
+	 * unlike `#disposeCall` it is cleared on a *recoverable* pre-dispose failure
+	 * so the host can retry.
+	 */
+	#restarting = false;
+	#restartCall: Promise<RequestRestartResult> | undefined;
+	/**
+	 * Teardown a disposal wrapper wants held until the RESTART HANDOFF completes,
+	 * not merely until `dispose()` returns. The recycle's child-revival barrier
+	 * is the case: releasing it when the SDK wrapper's `dispose()` returns opens
+	 * revival during the gap before `onRestartRequested` has recreated the
+	 * parent, so a waiter revives a child through the OLD captured reviver, which
+	 * still holds the disposed parent's MCP and other shared dependencies.
+	 * `#doRequestRestart` runs these after the host callback returns — the first
+	 * moment a replacement exists — and `dispose()` runs any that are still held
+	 * when it was NOT a restart, so a non-restart teardown cannot strand them.
+	 *
+	 * Each is invoked with the handoff's OUTCOME, because "the callback returned"
+	 * and "a replacement exists" are not the same event. A reattachment that
+	 * threw leaves no replacement, and reopening revival then is not a lesser
+	 * evil than holding the barrier: the parked children's shared dependencies
+	 * were already disposed, and both routes back to a live session belong to the
+	 * parent that failed to come back, so a waiter released into that state
+	 * revives onto a disconnected MCP and dead kernels. `"failed"` therefore
+	 * lifts the barrier — nothing is stranded — while refusing the waiters it was
+	 * holding, which a host can answer by rebuilding a parent and asking again.
+	 * See {@link deferUntilRestartHandoff}.
+	 */
+	#restartHandoffRelease: Array<(outcome: RestartHandoffOutcome) => void> = [];
+	/**
+	 * The locally-handled slash-command window currently executing on this async
+	 * call chain, if any. `prompt()` holds `#promptInFlightCount` across an
+	 * extension / custom-TS command handler so a concurrent restart waits for it
+	 * instead of disposing underneath — but that same counter is what
+	 * `#doRequestRestart` waits on, so a handler that requests a restart ITSELF
+	 * would make the restart wait for its own caller. `requestRestart()` uses
+	 * this to recognize that case and release the caller's window from the wait
+	 * it owns; see {@link #releaseOwnLocalCommandWindow}.
+	 */
+	readonly #localCommandScope = new AsyncLocalStorage<LocalCommandWindow>();
 
 	#powerAssertion: PowerAssertion | undefined;
 
@@ -775,6 +847,14 @@ export class AgentSession {
 	readonly #streamingEditGuard: StreamingEditGuard;
 	readonly #loopGuards: LoopGuards;
 	#promptInFlightCount = 0;
+	// Counts queued-input (steer/follow-up) calls that have passed the #restarting
+	// latch check and are in async preparation — image normalization, vision
+	// description — BEFORE either agent queue is populated. In that window neither
+	// #hasUnpersistedInput() nor #promptInFlightCount observes the pending input, so
+	// the restart barrier could flush/dispose and #queueUserMessage would then
+	// enqueue into a torn-down agent. The barrier and #hasUnpersistedInput() observe
+	// this counter so the input is never lost to a dead agent.
+	#queuedInputPrepCount = 0;
 	#abortInProgress = false;
 	// Wire-level agent_end emission deferred until #promptInFlightCount drops to 0.
 	// Internal extension hooks and post-emit work (auto-retry, auto-compaction, todo
@@ -803,6 +883,65 @@ export class AgentSession {
 	#skippedPostTurnSpeculationCompletion: Promise<void> | undefined;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
 	#inFlightSettledCallbacks: Array<() => void | Promise<void>> = [];
+	// Resolvers awaiting #promptInFlightCount draining to 0. The cooperative
+	// restart barrier (#doRequestRestart) parks on these so a prompt that has
+	// already passed the #restarting latch check but is still in session-level
+	// setup (API-key resolution, @-mention loading, before_agent_start hooks,
+	// pre-prompt compaction) blocks dispose instead of continuing to append
+	// against a torn-down session. agent.waitForIdle()/recovery-task waits do not
+	// observe this counter, so the barrier must wait on it explicitly.
+	#inFlightIdleWaiters: Array<() => void> = [];
+	// Resolvers awaiting #queuedInputPrepCount draining to 0, mirroring
+	// #inFlightIdleWaiters. The restart barrier parks on these so a steer/follow-up
+	// still normalizing images / building a vision description (before either agent
+	// queue is populated) blocks dispose until it enqueues.
+	#queuedInputPrepWaiters: Array<() => void> = [];
+	// Counts in-flight PUBLIC model mutations (setModel / setModelTemporary /
+	// cycleModel / cycleRoleModels / applyRoleModel). Each awaits
+	// `refreshSelectedModelMetadata()` — a live provider probe for a lazy-load
+	// local backend — BEFORE it reaches `appendModelChange()`, and nothing in
+	// either agent queue reflects it. In that window neither
+	// `#hasUnpersistedInput()` nor `#promptInFlightCount` observes the operation,
+	// so a concurrent restart could flush and dispose first; the mutation would
+	// then resume against the sealed SessionManager, whose `#recordEntry()` drops
+	// the `appendModelChange()` outright (session-manager.ts) while the caller
+	// still observes `{ switched: true }` and the replacement reopens on the
+	// PREVIOUS model. The barrier and `#hasUnpersistedInput()` observe this
+	// counter so the switch is never silently lost across a recycle.
+	#modelMutationCount = 0;
+	// Resolvers awaiting #modelMutationCount draining to 0, mirroring
+	// #queuedInputPrepWaiters.
+	#modelMutationWaiters: Array<() => void> = [];
+	// Counts in-flight session TRANSITIONS (newSession / fork / moveSession /
+	// switchSession / branch / branchFromBtw). Each one checks the `#restarting`
+	// latch at entry, but the check is not atomic with the file swap it performs:
+	// every transition then awaits host-level work (a cancellable
+	// `session_before_switch` / `session_before_branch` extension hook, an
+	// `abort()`, a manager `flush()`) before touching the session file, and
+	// `waitForIdle()` observes none of it. A restart latching inside that window
+	// passes its own coherence check against a file the transition has not
+	// renamed YET, then disposes and hands the host a path the resuming
+	// transition swaps out from under it. The barrier and `#hasUnpersistedInput()`
+	// observe this counter so a restart refuses `busy` instead of racing a
+	// transition that already started.
+	#sessionTransitionCount = 0;
+	// Resolvers awaiting #sessionTransitionCount draining to 0, mirroring
+	// #modelMutationWaiters.
+	#sessionTransitionWaiters: Array<() => void> = [];
+	// Counts in-flight manual HISTORY REWRITES (shake / dropImages). Both mutate
+	// the branch in place and persist it with an awaited
+	// `SessionManager.rewriteEntries()`, and `shake("elide")` awaits an artifact
+	// save before that. The foreground agent is IDLE throughout — an SDK/ACP
+	// caller drives them directly — so `waitForIdle()`, `#promptInFlightCount`
+	// and every input counter observe nothing. A restart landing in that window
+	// flushes and disposes, sealing the SessionManager; `rewriteEntries()` then
+	// returns without writing (its `#released` guard) while the caller still
+	// receives a successful reduction, and the replacement reopens the UNCHANGED
+	// transcript.
+	// `#hasUnpersistedInput()` observes this counter so the recycle refuses
+	// `busy` instead of stepping through the rewrite; see #trackHistoryRewrite
+	// for why the reverse ordering rejects rather than waits.
+	#historyRewriteCount = 0;
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
 	#obfuscator: SecretObfuscator | undefined;
@@ -866,6 +1005,7 @@ export class AgentSession {
 		if (onSettled) this.#inFlightSettledCallbacks.push(onSettled);
 		this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount !== 0) return;
+		this.#resolveInFlightIdleWaiters();
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
@@ -886,6 +1026,243 @@ export class AgentSession {
 				logger.warn("In-flight settle callback failed", { error: String(error) });
 			}
 		}
+	}
+
+	/**
+	 * Resolve when no prompt is mid-flight (#promptInFlightCount === 0). Unlike
+	 * agent.waitForIdle(), which only observes the core agent loop and recovery
+	 * tasks, this covers the session-level setup window a prompt occupies AFTER
+	 * passing the #restarting latch check but BEFORE reaching the agent — API-key
+	 * resolution, @-mention loading, before_agent_start hooks, pre-prompt
+	 * compaction. The restart barrier waits on this so it cannot dispose the
+	 * session out from under a prompt that is still preparing.
+	 */
+	#waitForInFlightIdle(): Promise<void> {
+		if (this.#promptInFlightCount === 0) return Promise.resolve();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this.#inFlightIdleWaiters.push(resolve);
+		return promise;
+	}
+
+	#resolveInFlightIdleWaiters(): void {
+		if (this.#inFlightIdleWaiters.length === 0) return;
+		const waiters = this.#inFlightIdleWaiters;
+		this.#inFlightIdleWaiters = [];
+		for (const resolve of waiters) resolve();
+	}
+
+	// Mark the START of queued-input async preparation (steer/follow-up image
+	// normalization + vision description), BEFORE either agent queue is populated.
+	// Paired with #endQueuedInputPrep in a finally so a preparation that throws
+	// still releases the barrier.
+	//
+	// Reports whether the preparation may proceed. `false` means `beginDispose()`
+	// has already run, so the caller MUST refuse its input instead of preparing
+	// it: past that point there is no restart barrier left to notice the counter
+	// this would bump (the recycle's final busy check has already passed) and
+	// teardown clears the queue the input would land in, so preparing on would
+	// enqueue into a dead agent and resolve as though delivered.
+	//
+	// The guard lives HERE, fused to the counter, rather than at each entry
+	// point: every path that queues input without dispatching a turn has to bump
+	// this counter, so a new sibling cannot reach the queue without deciding what
+	// to do when the session is gone.
+	#beginQueuedInputPrep(): boolean {
+		if (this.#isDisposed) return false;
+		this.#queuedInputPrepCount++;
+		return true;
+	}
+
+	#endQueuedInputPrep(): void {
+		this.#queuedInputPrepCount = Math.max(0, this.#queuedInputPrepCount - 1);
+		if (this.#queuedInputPrepCount !== 0) return;
+		this.#resolveQueuedInputPrepWaiters();
+	}
+
+	/**
+	 * Resolve when no steer/follow-up input is mid-preparation
+	 * (#queuedInputPrepCount === 0). The restart barrier waits on this so it
+	 * cannot dispose the session out from under input that has not yet reached
+	 * either agent queue.
+	 */
+	#waitForQueuedInputPrepIdle(): Promise<void> {
+		if (this.#queuedInputPrepCount === 0) return Promise.resolve();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this.#queuedInputPrepWaiters.push(resolve);
+		return promise;
+	}
+
+	#resolveQueuedInputPrepWaiters(): void {
+		if (this.#queuedInputPrepWaiters.length === 0) return;
+		const waiters = this.#queuedInputPrepWaiters;
+		this.#queuedInputPrepWaiters = [];
+		for (const resolve of waiters) resolve();
+	}
+
+	/**
+	 * Mark the START of a public model mutation, BEFORE its awaited
+	 * `refreshSelectedModelMetadata()` probe and therefore before the
+	 * `appendModelChange()` that persists the switch. Paired with
+	 * {@link #endModelMutation} in a `finally` so a mutation that throws still
+	 * releases the barrier.
+	 */
+	#beginModelMutation(): void {
+		this.#modelMutationCount++;
+	}
+
+	#endModelMutation(): void {
+		this.#modelMutationCount = Math.max(0, this.#modelMutationCount - 1);
+		if (this.#modelMutationCount !== 0) return;
+		this.#resolveModelMutationWaiters();
+	}
+
+	/**
+	 * Resolve when no public model mutation is in flight
+	 * (#modelMutationCount === 0). The restart barrier waits on this so it
+	 * cannot seal the SessionManager out from under a switch that has not yet
+	 * appended its `model_change` entry.
+	 */
+	#waitForModelMutationIdle(): Promise<void> {
+		if (this.#modelMutationCount === 0) return Promise.resolve();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this.#modelMutationWaiters.push(resolve);
+		return promise;
+	}
+
+	#resolveModelMutationWaiters(): void {
+		if (this.#modelMutationWaiters.length === 0) return;
+		const waiters = this.#modelMutationWaiters;
+		this.#modelMutationWaiters = [];
+		for (const resolve of waiters) resolve();
+	}
+
+	/**
+	 * Run a public model mutation inside the restart barrier's model-mutation
+	 * window. Every one of these awaits `refreshSelectedModelMetadata()` before
+	 * reaching `appendModelChange()`, so without the counter a concurrent
+	 * restart can seal the SessionManager in between and silently drop the
+	 * persisted switch. Wrapping at these public delegates counts each operation
+	 * exactly once: the internal `ModelControls` reuse (`applyRoleModel` ->
+	 * `setModel`, `cycleRoleModels` -> `applyRoleModel`) never re-enters here.
+	 *
+	 * The counter only covers the mutation-first ordering. In the REVERSE order —
+	 * a restart already latched `#restarting`, or an external teardown already
+	 * ran `beginDispose()` — admitting the mutation is itself the loss: it parks
+	 * in the metadata probe, the restart's final busy check passes because the
+	 * counter is what the barrier waits on (not a reason to refuse the caller),
+	 * disposal seals the manager, and the resuming mutation reports a switch
+	 * whose `model_change` append is dropped. So refuse up front, synchronously,
+	 * before the increment and before the first await; `refused` is the caller's
+	 * OWN no-op value so no consumer has to learn a new refusal shape.
+	 */
+	async #trackModelMutation<T>(refused: T, mutate: () => Promise<T>): Promise<T> {
+		if (this.#restarting || this.#isDisposed) return refused;
+		this.#beginModelMutation();
+		try {
+			return await mutate();
+		} finally {
+			this.#endModelMutation();
+		}
+	}
+
+	/**
+	 * Run a manual history rewrite (`shake` / `dropImages`) inside the restart
+	 * barrier's rewrite window.
+	 *
+	 * Both orderings have to be handled, and they need opposite treatments —
+	 * the same split {@link #trackModelMutation} makes, for the same reason.
+	 *
+	 * Rewrite first: the counter makes the restart REFUSE `busy`, via
+	 * `#hasUnpersistedInput()`. These operations mutate the branch in place and
+	 * persist it only through an awaited `rewriteEntries()`, with
+	 * `shake("elide")` awaiting an artifact save before that; the foreground
+	 * agent is idle across all of it, so nothing else the barrier watches sees
+	 * the work. Refusing rather than waiting matches the two maintenance getters
+	 * beside it in that predicate (`isCompacting`, `isGeneratingHandoff`): the
+	 * host retries once quiet, and the session is left untouched.
+	 *
+	 * Restart first: admitting the rewrite is itself the loss, so REJECT. It
+	 * would park in its artifact save, disposal would seal the manager, and the
+	 * resuming `rewriteEntries()` would return without writing — its own
+	 * `#released` guard — while the caller still reads a successful reduction off
+	 * the returned counts and the replacement reopens the unchanged transcript.
+	 * That silent successful-looking no-op is the failure to eliminate, and a
+	 * throw is the only honest answer: unlike a model switch there is no no-op
+	 * value to hand back, because zero counts would claim nothing was eligible
+	 * when the truth is that the reduction was dropped. Refused synchronously,
+	 * before the increment and before the first await, so the two directions can
+	 * never both admit.
+	 */
+	async #trackHistoryRewrite<T>(operation: string, rewrite: () => Promise<T>): Promise<T> {
+		if (this.#restarting || this.#isDisposed) {
+			throw new Error(
+				`Cannot ${operation}: this session is being recycled or disposed, so the rewrite could not be persisted. Retry against the replacement session.`,
+			);
+		}
+		this.#historyRewriteCount++;
+		try {
+			return await rewrite();
+		} finally {
+			this.#historyRewriteCount = Math.max(0, this.#historyRewriteCount - 1);
+		}
+	}
+
+	/**
+	 * True once a restart has latched or disposal has begun, i.e. the window in
+	 * which a persisted model control must refuse rather than apply.
+	 *
+	 * The counter {@link #trackModelMutation} keeps exists because an
+	 * *asynchronous* mutation can be sealed mid-flight. The synchronous model
+	 * controls — thinking level, service tier, fast mode — have no such gap:
+	 * they mutate and append in one turn, so they need no counter, only the same
+	 * refusal. Without it they still change this session's observable state
+	 * (`thinkingLevel`, `serviceTierByFamily`, and the events they emit) while
+	 * the sealed SessionManager drops the matching `thinking_level_change` /
+	 * `service_tier_change` entry, so the replacement restores the PREVIOUS
+	 * selection and the user's last change is silently undone. Each caller gets
+	 * its own no-op value, as with the asynchronous delegates.
+	 */
+	get #modelControlsSealed(): boolean {
+		return this.#restarting || this.#isDisposed;
+	}
+
+	/**
+	 * Resolve when no session transition is in flight
+	 * (#sessionTransitionCount === 0). The restart barrier waits on this so it
+	 * cannot capture-and-dispose across a transition that already passed its own
+	 * latch check and is parked in an awaited hook before its file swap.
+	 */
+	#waitForSessionTransitionIdle(): Promise<void> {
+		if (this.#sessionTransitionCount === 0) return Promise.resolve();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this.#sessionTransitionWaiters.push(resolve);
+		return promise;
+	}
+
+	/**
+	 * Enter the restart barrier's session-transition window, or report that a
+	 * restart already owns the session.
+	 *
+	 * `latched` replaces the bare `if (this.#restarting) return …` every
+	 * transition did inline; the counter increments in the SAME synchronous step,
+	 * so a restart latching afterwards observes the transition and refuses `busy`
+	 * instead of capturing-and-disposing across it. `using` releases the counter
+	 * on every exit path — early hook cancel, throw, or success — so a transition
+	 * can never leave the barrier held.
+	 */
+	#enterSessionTransition(): { latched: boolean } & Disposable {
+		if (this.#restarting) return { latched: true, [Symbol.dispose]: () => {} };
+		this.#sessionTransitionCount++;
+		return {
+			latched: false,
+			[Symbol.dispose]: () => {
+				this.#sessionTransitionCount = Math.max(0, this.#sessionTransitionCount - 1);
+				if (this.#sessionTransitionCount !== 0) return;
+				const waiters = this.#sessionTransitionWaiters;
+				this.#sessionTransitionWaiters = [];
+				for (const resolve of waiters) resolve();
+			},
+		};
 	}
 
 	/** A steer/follow-up can land after the agent loop's final queue poll, or
@@ -1010,6 +1387,15 @@ export class AgentSession {
 	 *  because #canAutoContinueForFollowUp suppresses follow-up auto-resume while a user interrupt is
 	 *  in effect, even though the wake left a provider-valid tail. */
 	#wakeForIrc(records: AgentMessage[]): void {
+		// Cooperative restart in progress (or session torn down): do NOT wake a
+		// turn that would append past the durability barrier. Re-queue the records
+		// as asides rather than drop — they flush to the transcript on a successful
+		// restart's dispose (IrcBridge.flushPending) or stay pending for the
+		// resumed session on a recoverable pre-dispose failure.
+		if (this.#restarting || this.#isDisposed) {
+			this.#irc.requeuePending(records);
+			return;
+		}
 		if (this.#modeExitDrainSuppressionDepth > 0) {
 			this.#irc.queueAside(records);
 			return;
@@ -1150,6 +1536,7 @@ export class AgentSession {
 
 	#resetInFlight(): void {
 		this.#promptInFlightCount = 0;
+		this.#resolveInFlightIdleWaiters();
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
@@ -1510,10 +1897,18 @@ export class AgentSession {
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
 		this.yieldQueue = new YieldQueue({
-			isStreaming: () => this.isStreaming,
+			// Suppress idle drain/injection while a cooperative restart is latched,
+			// exactly as an in-flight turn does. The latch must block turn-start AND
+			// leave queued async results in place: a successful restart's dispose()
+			// clears the queue, a recoverable pre-dispose failure leaves them for
+			// the resumed session (nothing lost).
+			isStreaming: () => this.isStreaming || this.#restarting,
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
+				// Defense in depth: never wake a turn past the durability barrier
+				// (restart latched) or re-wake a torn-down session.
+				if (this.#restarting || this.#isDisposed) return;
 				this.#beginInFlight();
 				try {
 					await this.agent.prompt(messages.length === 1 ? first : messages);
@@ -1578,6 +1973,7 @@ export class AgentSession {
 			return thunks;
 		});
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
+		this.#onRestartRequested = config.onRestartRequested;
 		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
 		const sessionToolsHost: SessionToolsHost = {
 			agent: this.agent,
@@ -3807,12 +4203,21 @@ export class AgentSession {
 		});
 		this.#schedulePostPromptTask(
 			async signal => {
-				// Defense in depth: if compaction/handoff slipped onto the post-prompt queue
-				// alongside us (e.g. via a scheduler we don't own), refuse to start a fresh
-				// streaming turn — agent.continue() here would race the handoff's session
-				// reset. The first-class fix is in #checkCompaction/the agent_end handler,
-				// but this guard catches anything that bypasses that path.
-				if (signal.aborted || this.#isDisposed || this.isCompacting || this.isGeneratingHandoff) {
+				// Defense in depth: if compaction/handoff/a cooperative restart slipped
+				// onto the post-prompt queue alongside us (e.g. via a scheduler we don't
+				// own), refuse to start a fresh streaming turn — agent.continue() here
+				// bypasses AgentSession.prompt's #restarting guard, so it would append
+				// past the durability barrier during a restart, or race the handoff's
+				// session reset. The first-class fixes live in #checkCompaction / the
+				// agent_end handler / requestRestart's latch; this guard catches anything
+				// that bypasses those paths.
+				if (
+					signal.aborted ||
+					this.#isDisposed ||
+					this.#restarting ||
+					this.isCompacting ||
+					this.isGeneratingHandoff
+				) {
 					this.#skipAgentContinue("session-unavailable", request);
 					return;
 				}
@@ -4537,6 +4942,52 @@ export class AgentSession {
 		this.agent.hasIrcInterrupts = undefined;
 		this.#advisors.stopRuntime();
 		this.#eval.beginDispose();
+		this.#bash.beginDispose();
+	}
+
+	/**
+	 * Hold a piece of teardown until the cooperative-restart handoff completes —
+	 * the host `onRestartRequested` callback having returned — rather than until
+	 * `dispose()` returns.
+	 *
+	 * For a disposal wrapper whose teardown gates something the REPLACEMENT
+	 * session must own before it is reopened. The recycle's child-revival barrier
+	 * is exactly that: `dispose()` returning means the parent's shared resources
+	 * are gone, but the replacement that will own their successors does not exist
+	 * until the host callback has run, so a barrier released at `dispose()`'s
+	 * return lets a waiting `ensureLive()` revive a child through the old
+	 * captured reviver — one still closed over the disposed parent's MCP and
+	 * other shared dependencies.
+	 *
+	 * `release` MUST be idempotent and MUST NOT throw: it runs on the handoff
+	 * path, where the transcript is already flushed and the session already
+	 * disposed, so there is nothing left to fail into. It runs exactly once —
+	 * after the host callback on a restart, or at the end of `dispose()` on any
+	 * other teardown, so a disposal that is not a recycle never strands it.
+	 *
+	 * It is told which outcome it is running for. `"reattached"` means a
+	 * replacement parent exists to own the successors of whatever this teardown
+	 * released; `"failed"` means none does, because the host callback threw or
+	 * the disposal was never a recycle. A release that gates a resource the
+	 * replacement was supposed to take over must refuse its waiters on
+	 * `"failed"` rather than hand them a resource nobody owns.
+	 */
+	deferUntilRestartHandoff(release: (outcome: RestartHandoffOutcome) => void): void {
+		this.#restartHandoffRelease.push(release);
+	}
+
+	/** Run the {@link deferUntilRestartHandoff} callbacks exactly once, reporting
+	 *  whether the handoff produced a replacement parent. */
+	#flushRestartHandoffRelease(outcome: RestartHandoffOutcome): void {
+		const releases = this.#restartHandoffRelease;
+		this.#restartHandoffRelease = [];
+		for (const release of releases) {
+			try {
+				release(outcome);
+			} catch (error) {
+				logger.warn("Restart handoff release failed", { error: String(error) });
+			}
+		}
 	}
 
 	/**
@@ -4743,7 +5194,12 @@ export class AgentSession {
 		}
 
 		this.#releasePowerAssertion();
-		await cleanupEmptyMoveSession(this.sessionManager, this.#movedFromEmptySessionFile);
+		// A restart handoff (preserveSessionFile) disposes but keeps the file it just
+		// persisted for reattachment; skipping empty-move cleanup keeps the captured
+		// sessionFile on disk so onRestartRequested's SessionManager.open() succeeds.
+		if (!options.preserveSessionFile) {
+			await cleanupEmptyMoveSession(this.sessionManager, this.#movedFromEmptySessionFile);
+		}
 		this.#movedFromEmptySessionFile = undefined;
 		this.#closeAllProviderSessions("dispose");
 		this.#maintenance.cancelSpeculation();
@@ -4840,6 +5296,19 @@ export class AgentSession {
 				this.#releaseRetainedSessionMemory();
 			})().catch(error => logger.warn("Deferred dispose finalization failed", { error: String(error) }));
 		}
+
+		// A recycle's deferred teardown is owned by `#doRequestRestart`, which runs
+		// it after the host callback — this dispose is only the FIRST half of that
+		// handoff, so releasing here is exactly the too-early release the deferral
+		// exists to prevent. Any other disposal has no handoff coming, so run what
+		// a wrapper deferred rather than strand it.
+		//
+		// `failed` because that is what the outcome describes: no replacement
+		// parent is coming, so a release gating something the replacement was to
+		// own must refuse its waiters rather than hand them an unowned resource.
+		// An ordinary process teardown is exactly that case — the manager is being
+		// disposed too, so there is nothing to revive against either way.
+		if (!options.recycle) this.#flushRestartHandoffRelease("failed");
 	}
 
 	/** Drop the in-memory conversation state after the terminal dispose flush. */
@@ -4908,6 +5377,16 @@ export class AgentSession {
 		// after the boundary and re-enter the supposedly empty context. The
 		// sibling boundary op (branchFromBtw) guards on the same predicates.
 		if (this.isStreaming || this.isBashRunning || this.isEvalRunning) return undefined;
+		// Hold the restart barrier for the whole reset, like the sibling boundary
+		// ops. The awaits below (`#cancelPostPromptTasks`, the memory reset) are
+		// real yield points, and this op is not covered by any other counter — so
+		// a restart latching during one would pass its quiescence check on zeros
+		// and dispose mid-reset. The in-memory state is already cleared by then
+		// while `appendResetBoundary()` has not run, so the boundary is dropped
+		// against a sealed manager, this call still reports a successful
+		// `droppedCount`, and the replacement reopens an unreset transcript.
+		using transition = this.#enterSessionTransition();
+		if (transition.latched) return undefined;
 		const droppedCount = this.agent.state.messages.length;
 
 		// Tear down the same per-turn runtime state that newSession() resets across
@@ -5330,6 +5809,510 @@ export class AgentSession {
 	}
 
 	/**
+	 * True while any unpersisted in-memory input is queued — the quiescence
+	 * predicate `requestRestart()` refuses on. Covers BOTH in-memory buffers: the
+	 * raw steering/follow-up queues (`agent.hasQueuedMessages()`, deliberately the
+	 * unfiltered predicate so a non-displayable steer still blocks) AND
+	 * `#pendingNextTurnMessages` (filled by `queueDeferredMessage()` /
+	 * `sendCustomMessage({ deliverAs: "nextTurn" })`). Neither is persisted, so
+	 * recycling with either non-empty would drop it. Also counts steer/follow-up
+	 * input still in async preparation (`#queuedInputPrepCount`): it has not
+	 * reached either queue yet, but disposing under it would enqueue into a dead
+	 * agent, so treat in-flight preparation as unpersisted input too. Also
+	 * counts a buffered foreground bash or Python result
+	 * (`BashRunner`/`EvalRunner.hasPendingMessages`): both append through this
+	 * session's SessionManager, which restart disposal seals, so recycling over
+	 * either drops the result. Counts owned BACKGROUND async work
+	 * (`#hasUnsettledOwnedAsyncWork()`), which restart disposal cancels outright.
+	 * Also counts an in-flight public model mutation
+	 * (`#modelMutationCount`): it has passed no queue at all, but its
+	 * `appendModelChange()` lands only after an awaited
+	 * `refreshSelectedModelMetadata()` probe, so a recycle in that window seals
+	 * the manager and the switch is dropped while the caller still sees success.
+	 * Counts an in-flight session transition
+	 * (`#sessionTransitionCount`): it entered before this restart latched and is
+	 * parked in an awaited hook or manager op, so the re-attach coherence check
+	 * would pass against a file the transition renames only after it resumes.
+	 * Finally counts an in-flight manual history rewrite
+	 * (`#historyRewriteCount`): `shake`/`dropImages` mutate the branch in place
+	 * and persist it only through an awaited `rewriteEntries()`, which a sealed
+	 * manager turns into a no-op while the caller still reads a successful
+	 * reduction and the replacement reopens the unchanged transcript.
+	 */
+	#hasUnpersistedInput(): boolean {
+		return (
+			this.agent.hasQueuedMessages() ||
+			this.#pendingNextTurnMessages.length > 0 ||
+			this.#queuedInputPrepCount > 0 ||
+			// A foreground `executeBash()`/`executePython()` result sitting in its
+			// runner's pending buffer is unpersisted too: restart disposal seals this
+			// SessionManager, so a result appended after the recycle is dropped.
+			// Both buffers fill only while streaming, which is exactly the
+			// restart-vs-turn race; the ordinary prompt path flushes them for the same
+			// reason, and the restart handoff must not step over either.
+			this.#bash.hasPendingMessages ||
+			this.#eval.hasPendingMessages ||
+			// A STILL-RUNNING foreground execution is the same hazard one step
+			// earlier: the agent can be idle while a long command runs, and its
+			// result lands only when the command exits. Disposal neither waits for
+			// nor aborts it, so without this the command outlives the recycle and
+			// appends through the sealed manager after the replacement session is
+			// already open — the result is lost exactly like a buffered one.
+			this.#bash.isRunning ||
+			this.#eval.isRunning ||
+			// Owned background async work is the same loss, off the foreground: the
+			// agent can be idle while an owned `task`/bash/eval job still runs, and
+			// restart disposal calls #disposeOwnedAsyncJobs() -> #cancelOwnAsyncJobs(),
+			// which aborts those jobs and evicts their rows with any queued delivery.
+			// The replacement session can never receive their completion, so treat
+			// unsettled background work as busy until it settles.
+			this.#hasUnsettledOwnedAsyncWork() ||
+			// An in-flight public model mutation (setModel/setModelTemporary/
+			// cycleModel/applyRoleModel/cycleRoleModels) has not yet reached its
+			// appendModelChange(); the sealed manager would drop it, leaving the
+			// caller with a successful switch the replacement never sees.
+			this.#modelMutationCount > 0 ||
+			// Manual context maintenance runs with the foreground agent IDLE, so
+			// none of the counters above observe it. Restart disposal aborts the
+			// pass (abortCompaction covers handoff too), destroying a summary the
+			// SDK caller is still awaiting and reopening without it. `/btw`
+			// already refuses to branch over exactly these two getters.
+			this.isCompacting ||
+			this.isGeneratingHandoff ||
+			// A session transition (newSession/fork/move/switch/branch) that entered
+			// before this restart latched is still parked in an awaited hook or
+			// manager op, so the coherence check below would compare against a file
+			// it has not swapped YET. Refuse until it finishes and the host
+			// re-requests against the settled identity.
+			this.#sessionTransitionCount > 0 ||
+			// A manual history rewrite (shake/dropImages) runs with the foreground
+			// agent IDLE, like the two maintenance getters above, and none of the
+			// counters observe it. Its in-place branch mutation is persisted only
+			// by an awaited rewriteEntries(); recycling first seals the manager, so
+			// that call writes nothing while the caller still reads a successful
+			// reduction and the replacement reopens the unchanged transcript.
+			this.#historyRewriteCount > 0
+		);
+	}
+
+	/**
+	 * True while owned background async work would be destroyed by a recycle.
+	 *
+	 * Deliberately WIDER than {@link #hasPendingAsyncWake}: that predicate asks
+	 * "will this re-wake the run loop?" and so skips suppressed deliveries, but
+	 * `#cancelOwnAsyncJobs()` cancels every running owned job regardless of
+	 * suppression. A job whose delivery is suppressed because an in-flight `hub`
+	 * wait is watching it is exactly the case where aborting it leaves the waiter
+	 * with no result at all, so suppression must NOT excuse a restart here.
+	 */
+	#hasUnsettledOwnedAsyncWork(): boolean {
+		const manager = this.#asyncJobManager;
+		if (!manager) return false;
+		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
+		return (
+			manager.getRunningJobs(ownerFilter).length > 0 ||
+			manager.hasPendingDeliveries(ownerFilter) ||
+			// Delivered but not yet injected: the sink has queued the async-result
+			// follow-up on the yield queue, which `beginDispose()` clears wholesale.
+			this.yieldQueue.has(ASYNC_RESULT_MESSAGE_TYPE)
+		);
+	}
+
+	/**
+	 * Request a cooperative restart of THIS session (session recycle — same
+	 * loaded code; picking up a new build is a host-process operation, never
+	 * per-agent). Latches out new turns, waits for the running turn to settle,
+	 * flushes to disk, disposes, then invokes the host `onRestartRequested`
+	 * callback with the data needed to re-attach. Refuses (clean, recoverable
+	 * no-op) when no callback is bound, there is no session file, or unpersisted
+	 * input is queued.
+	 */
+	requestRestart(): Promise<RequestRestartResult> {
+		// Coalesce: a second call while one is in flight returns the same promise,
+		// so the host callback fires exactly once per restart. Unlike #disposeCall
+		// this is cleared on a recoverable pre-dispose failure.
+		if (this.#restartCall) {
+			// The coalesced restart waits on #promptInFlightCount exactly as our
+			// own would, so a locally-handled slash command that awaits this
+			// promise deadlocks against it the same way: the handler's window is
+			// held until the restart resolves, and the restart cannot resolve until
+			// the counter drains. Releasing only in the committing path below would
+			// make the deadlock depend on which requester arrived first — an
+			// external restart that latched microseconds earlier is the whole
+			// difference — so the caller's own window is dropped before handing
+			// back either promise. Idempotent and scoped to THIS async chain, so a
+			// requester outside a command window releases nothing and every other
+			// in-flight prompt still blocks the recycle.
+			this.#releaseOwnLocalCommandWindow();
+			return this.#restartCall;
+		}
+		// Pre-latch refusals: return WITHOUT latching or caching so the session
+		// stays fully live.
+		if (!this.#onRestartRequested) return Promise.resolve({ ok: false, reason: "unavailable" });
+		const sessionFile = this.sessionFile;
+		if (sessionFile === undefined) return Promise.resolve({ ok: false, reason: "no-session-file" });
+		// Refuse over unpersisted input rather than recycle across a drop.
+		if (this.#hasUnpersistedInput()) return Promise.resolve({ ok: false, reason: "busy" });
+		// Commit: latch first (so no turn can start between the wait and the
+		// callback), then coalesce the committed attempt.
+		this.#restarting = true;
+		// A restart requested from INSIDE a locally-handled slash command must not
+		// wait for its own caller. prompt() holds #promptInFlightCount across such
+		// a handler so an unrelated restart blocks on it instead of disposing
+		// underneath; but when the handler is the requester, its #endInFlight()
+		// cannot run until this restart resolves, and #doRequestRestart's wait
+		// cannot resolve until that counter reaches zero. The restart tool sidesteps
+		// this by firing from an untracked continuation — an SDK extension or
+		// custom-TS command that `await`s requestRestart() cannot, so drop the
+		// caller's own window from the wait it owns. Only that window: any OTHER
+		// in-flight prompt still blocks the recycle, and prompt()'s `released` flag
+		// keeps the counter balanced when the handler finally unwinds.
+		this.#releaseOwnLocalCommandWindow();
+		this.#restartCall = this.#doRequestRestart(this.#onRestartRequested, sessionFile);
+		return this.#restartCall;
+	}
+
+	/**
+	 * Drop the locally-handled slash-command window on the CURRENT async call
+	 * chain from `#promptInFlightCount`, if this call is running inside one.
+	 *
+	 * Only the requester's own window: a restart still has to wait for every
+	 * other in-flight prompt, and dropping this one is sound precisely because
+	 * the handler cannot finish until the restart it is awaiting does. The
+	 * `released` flag it sets makes `prompt()`'s `#endInFlight()` a no-op, so the
+	 * decrement happens exactly once. Idempotent: a handler that requests a
+	 * restart twice releases once.
+	 */
+	#releaseOwnLocalCommandWindow(): void {
+		const window = this.#localCommandScope.getStore();
+		if (!window || window.released) return;
+		window.released = true;
+		this.#endInFlight();
+	}
+
+	async #doRequestRestart(
+		onRestartRequested: (info: { sessionId: string; sessionFile: string }) => void | Promise<void>,
+		sessionFile: string,
+	): Promise<RequestRestartResult> {
+		try {
+			// Quiesce the owning turn so the transcript is complete before capture.
+			await this.waitForIdle();
+			// waitForIdle() watches the core agent loop and recovery tasks but NOT
+			// #promptInFlightCount, #queuedInputPrepCount or #modelMutationCount, so a
+			// prompt that already passed the #restarting latch check yet is still in
+			// session-level setup (API-key resolution, @-mention loading,
+			// before_agent_start hooks, pre-prompt compaction), a steer/follow-up
+			// still in queued-input async preparation (image normalization, vision
+			// description) before either agent queue is populated, a public model
+			// mutation parked in refreshSelectedModelMetadata() before its
+			// appendModelChange(), or a session transition parked in an awaited
+			// session_before_switch / session_before_branch hook before its file
+			// swap, all leave the barrier resolving immediately.
+			// Disposing under the first two would let that input continue into the
+			// agent and append against a torn-down session; disposing under the third
+			// seals the manager and drops the model_change entry while the caller
+			// still observes a successful switch, so the replacement reopens on the
+			// previous model; disposing under the fourth hands the host a path the
+			// resuming transition renames away. Wait for all four to unwind. Loop:
+			// draining the in-flight prompt can schedule follow-up recovery/agent
+			// work that waitForIdle() must re-settle — and a settling transition can
+			// itself start a prompt, so every counter is re-tested each pass.
+			while (
+				this.#promptInFlightCount > 0 ||
+				this.#queuedInputPrepCount > 0 ||
+				this.#modelMutationCount > 0 ||
+				this.#sessionTransitionCount > 0
+			) {
+				await this.#waitForInFlightIdle();
+				await this.#waitForQueuedInputPrepIdle();
+				await this.#waitForModelMutationIdle();
+				await this.#waitForSessionTransitionIdle();
+				await this.waitForIdle();
+			}
+			// Re-check the quiescence gate: input queued *during* the wait (a
+			// host/extension steer/follow-up that calls agent.steer directly, so
+			// the turn-start latch never saw it) would otherwise be lost across the
+			// recycle. A clean recoverable refusal — drop the latch, leave the
+			// session untouched.
+			if (this.#hasUnpersistedInput()) {
+				this.#restarting = false;
+				this.#restartCall = undefined;
+				// Resume the normal queued/IRC drains the latch suppressed: a direct
+				// SDK requestRestart() has no restart-tool refusal message to
+				// incidentally start another turn, so without this the input that
+				// arrived during the wait stays stranded in the agent queue and a
+				// host waits indefinitely for an agent_end that never fires.
+				this.#drainStrandedQueuedMessages();
+				return { ok: false, reason: "busy" };
+			}
+			// Capture the durable re-attach identity — the file-preserved id
+			// SessionManager.open restores, NOT the sessionId getter (which can
+			// return a fresh provider UUID that diverges from it).
+			const sessionId = this.sessionManager.getSessionId();
+			// Durability barrier: the file the host re-opens reflects the full transcript.
+			await this.sessionManager.flush();
+			await this.sessionManager.ensureOnDisk();
+			// Final quiescence re-check, extending the guard across the whole
+			// entry->dispose window. A host/extension steer/follow-up landing during
+			// the flush/ensureOnDisk awaits above calls agent.steer/followUp directly
+			// (never the turn-start latch) and is not persisted by the flush that
+			// already ran. Re-check immediately before the point of no return: if
+			// input arrived, drop the latch and refuse busy — the session is still
+			// alive and untouched, so the host retries once quiet.
+			if (this.#hasUnpersistedInput()) {
+				this.#restarting = false;
+				this.#restartCall = undefined;
+				this.#drainStrandedQueuedMessages();
+				return { ok: false, reason: "busy" };
+			}
+			// Re-attach coherence check: a session transition (fork/move/branch/new/
+			// switch) that passed its own #restarting entry guard *before* this
+			// restart latched can still have been in flight, swapping the current
+			// file/id out from under the captured (sessionFile, sessionId) pair while
+			// the awaits above ran. Handing the host the captured path — one that
+			// moveSession may have renamed away — would reattach to the wrong
+			// conversation or fail outright. Verify the manager still points at the
+			// captured file before the point of no return; if it diverged, refuse
+			// recoverably (unlatch, resume drains) so the host re-requests and
+			// re-captures the current identity.
+			const currentSessionFile = this.sessionManager.getSessionFile();
+			if (currentSessionFile === undefined || path.resolve(currentSessionFile) !== path.resolve(sessionFile)) {
+				this.#restarting = false;
+				this.#restartCall = undefined;
+				this.#drainStrandedQueuedMessages();
+				return { ok: false, reason: "busy" };
+			}
+			// The same gate, one step further: the manager can still POINT at the
+			// captured path while the bytes are gone. The check above compares
+			// strings, not disk, so it passes for a path that was deleted rather
+			// than renamed — an empty MOVED session whose file `cleanupEmptyMoveSession()`
+			// removed during a teardown that ran over this same path while the
+			// awaits above were parked. The `#disposeCall`/`#isDisposed` gate below
+			// catches teardown driven through THIS session; a deletion reaching the
+			// file any other way (a second SessionManager opened on it, host
+			// housekeeping) leaves both flags clear and is invisible until the host
+			// tries to reopen. The documented reattachment is
+			// `SessionManager.open(sessionFile)`, which needs the bytes
+			// `ensureOnDisk()` just wrote, so confirm they are there instead of
+			// handing over a handle that cannot reopen — and refuse with
+			// `no-session-file`, the reason that already means exactly this.
+			//
+			// `Bun.file().exists()` rather than `existsSync`: this runs on the shared
+			// event loop during every committed restart, and a session directory on a
+			// network or FUSE mount would block every other session and all protocol
+			// traffic for the duration. The await reopens the window this closes, so
+			// the two guards above are repeated after it — the same shape the rest of
+			// this method uses across its own awaits.
+			if (!(await Bun.file(sessionFile).exists())) {
+				this.#restarting = false;
+				this.#restartCall = undefined;
+				this.#drainStrandedQueuedMessages();
+				return { ok: false, reason: "no-session-file" };
+			}
+			if (this.#isDisposed || this.#disposeCall !== undefined) {
+				this.#restarting = false;
+				this.#restartCall = undefined;
+				this.#drainStrandedQueuedMessages();
+				return { ok: false, reason: "busy" };
+			}
+			const recheckedSessionFile = this.sessionManager.getSessionFile();
+			if (recheckedSessionFile === undefined || path.resolve(recheckedSessionFile) !== path.resolve(sessionFile)) {
+				this.#restarting = false;
+				this.#restartCall = undefined;
+				this.#drainStrandedQueuedMessages();
+				return { ok: false, reason: "busy" };
+			}
+			if (this.#hasUnpersistedInput()) {
+				this.#restarting = false;
+				this.#restartCall = undefined;
+				this.#drainStrandedQueuedMessages();
+				return { ok: false, reason: "busy" };
+			}
+			// Another teardown may have won the race: an ordinary host shutdown that
+			// called dispose() (WITHOUT preserveSessionFile) after this restart
+			// latched #restarting but before it reaches the join below already owns
+			// #disposeCall. dispose() coalesces on that promise, so the call below
+			// would merely JOIN the host's disposal rather than run restart's own:
+			// preserveSessionFile:true would be ignored (the host's #doDispose runs
+			// empty-move cleanup and deletes the captured sessionFile), yet this path
+			// would still resetCapabilities() and fire onRestartRequested(), so a
+			// compliant host would recreate the session over a now-deleted file
+			// during shutdown. When a non-restart disposal already owns #disposeCall,
+			// stop the restart: do not dispose or fire the callback.
+			//
+			// #disposeCall alone under-detects. A wrapper that awaits other teardown
+			// before delegating (the SDK's createAgentSession dispose override calls
+			// beginDispose(), then awaits the agent lifecycle, and only then invokes
+			// the original dispose()) leaves #disposeCall unset across that whole
+			// async gap while the host is already shutting down. A restart resuming
+			// inside that window would pass a #disposeCall-only check and go on to
+			// fire onRestartRequested(), recreating the session over a dying host.
+			// beginDispose() sets #isDisposed synchronously before the wrapper's
+			// first await, so treat it as an in-progress teardown too. The restart
+			// path has not begun its own disposal by this point — it neither calls
+			// dispose() nor beginDispose() above — so either flag being set here is
+			// necessarily an external teardown.
+			//
+			// Unlatch and clear the coalesce cache (recoverable refusal); the session
+			// is already being torn down, so the queued/IRC drain the other refusal
+			// branches run is moot.
+			if (this.#disposeCall || this.#isDisposed) {
+				this.#restarting = false;
+				this.#restartCall = undefined;
+				return { ok: false, reason: "busy" };
+			}
+			// Dispose BEFORE the callback: create-before-dispose is unsafe in-process
+			// (AsyncJobManager singleton + lock-free append writer). dispose() is
+			// idempotent. preserveSessionFile suppresses empty-move cleanup so the
+			// file just persisted by ensureOnDisk() survives for onRestartRequested's
+			// SessionManager.open() reattachment — a moved-but-empty session would
+			// otherwise have its captured file deleted here.
+			//
+			// `recycle` tells the teardown layered AROUND this dispose that the
+			// session is being replaced, not the process ended: the SDK factory's
+			// wrapper otherwise runs the process-level
+			// `AgentLifecycleManager.global().dispose()`, which releases and
+			// UNREGISTERS every adopted subagent, so agents restart never claimed to
+			// touch become unresumable once the replacement attaches. With the flag
+			// the wrapper parks them instead, keeping each ref + sessionFile
+			// revivable on the same global manager the replacement resolves.
+			await this.dispose({ preserveSessionFile: true, recycle: true });
+			// Drop the process-global discovery/capability caches so the host's
+			// rebuild (a fresh createAgentSession over the reopened file) re-reads
+			// on-disk AGENTS.md/skills/rules instead of the bytes this session
+			// cached — a host may have staged edits that restart exists to pick up.
+			// This is the same resetCapabilities() step newSession() performs across
+			// a conversation boundary (issue #9273); the reconstruction rebuilds via
+			// the SDK factory, not newSession(), so the invalidation has to happen
+			// here on the dispose->callback handoff, leaving caches clear for the
+			// host's re-discovery.
+			resetCapabilities();
+			// Same reasoning, applied to the model/provider registry — the one
+			// restart-sensitive surface a caller-OWNED instance carries across the
+			// boundary unchanged. `createAgentSession` calls `refreshInBackground()`
+			// only when it constructed the registry itself, so an embedder that
+			// supplies `options.modelRegistry` and preserves it (which the
+			// reconstruction contract requires — it holds the session-affine auth
+			// storage) hands the replacement the models.yml and provider catalog
+			// parsed at first launch. A restart advertised for an on-disk
+			// model/provider change would then return the stale registry. Reload it
+			// here, on the same dispose->callback handoff as the capability caches,
+			// so the surface is fresh whoever owns the instance.
+			//
+			// `offline` deliberately: this reload must pick up the local models.yml
+			// edit without blocking the handoff on provider HTTP. Online discovery
+			// still happens after the rebuild — the replacement session's own
+			// startup path drives it.
+			try {
+				await this.#modelRegistry.reapplyModelPolicies();
+			} catch (error) {
+				// A restart must not fail over a registry reload: the transcript is
+				// already flushed and this session is already disposed, so the host
+				// still needs its callback. Worst case the replacement sees the
+				// pre-existing catalog.
+				logger.warn("Failed to reload the model registry during restart", { error: String(error) });
+			}
+			let reattached = false;
+			try {
+				await onRestartRequested({ sessionId, sessionFile });
+				reattached = true;
+			} finally {
+				// Only NOW does a replacement exist to own the shared resources the
+				// old parent's teardown released, so this is the first safe moment to
+				// reopen child revival (see deferUntilRestartHandoff).
+				//
+				// In the `finally`, but reporting the OUTCOME rather than reopening
+				// unconditionally. A callback that threw leaves no replacement
+				// coming, so holding the barrier forever would strand every later
+				// ensureLive() — but simply reopening it is not the safer half of
+				// that trade either: the parked children's shared dependencies were
+				// disposed by the teardown above, and with no replacement BOTH routes
+				// back to a live session belong to the parent that just went away.
+				// The retained reviver closes over it, and the factory that would
+				// have superseded that reviver is its own, because no new parent
+				// installed one. A waiter let through would come back holding a
+				// disconnected MCP and dead kernels. So the barrier is lifted —
+				// nothing is stranded — while the waiters it was holding are refused,
+				// which a host can answer by rebuilding a parent and asking again.
+				this.#flushRestartHandoffRelease(reattached ? "reattached" : "failed");
+			}
+			// The offline reload above is only half of what the reconstruction
+			// contract owes a preserved registry: it reloads models.yml and the
+			// cached discovery rows, but never contacts a provider. And
+			// `createAgentSession` starts discovery only for a registry it
+			// constructed ITSELF, so a caller-supplied instance gets no online pass
+			// on the way into the replacement either — deliberately, because a
+			// caller that owns its registry owns its discovery schedule too. That
+			// skip is right for an ordinary construction and wrong for a recycle:
+			// nobody performs the pass, so a discovery-backed provider comes back
+			// holding its first-launch catalog, and a restart requested FOR a new
+			// model or a newly configured discovery endpoint returns neither.
+			//
+			// So the recycle starts it here rather than changing that skip: it is
+			// the recycle, not construction, that promises freshness, and only the
+			// recycle knows a replacement is taking the registry over.
+			//
+			// AFTER the callback, and off this call's own settle: the handoff must
+			// not pay for provider HTTP, and a pass overlapping the callback would
+			// rewrite the catalog underneath the replacement while it resolves its
+			// model. Same ordering a cold start uses, where discovery begins once
+			// the session exists.
+			//
+			// Deferred to a later macrotask rather than started inline, because
+			// "after the callback" is not yet "after the replacement is exposed":
+			// inline, the reload's synchronous catalog work runs before this
+			// promise resolves and before the awaiting host gets its turn back, so
+			// the recycle's caller is the one paying for it. A macrotask puts it
+			// strictly after the restart has settled and the host has resumed.
+			// Unref'd so a pending pass can never hold the process open.
+			//
+			// Default `online-if-uncached` strategy, exactly what `createAgentSession`
+			// gives a registry it built itself: this closes the gap for a
+			// caller-owned instance, it does not make a recycle a harder refresh
+			// than a cold start. Forcing `online` would re-fetch every provider on
+			// every recycle even with a fresh cache — a per-restart network cost no
+			// launch pays. A caller that wants the cache bypassed still has
+			// `refresh("online")` on the instance it owns.
+			//
+			// `refreshInBackground` owns the promise and swallows discovery errors,
+			// and the registry outlives this session by contract, so nothing here
+			// is left attached to the disposed one.
+			setTimeout(() => this.#modelRegistry.refreshInBackground(), 0).unref?.();
+			return { ok: true };
+		} catch (err) {
+			// A throw between the recycle dispose and the host callback leaves a
+			// deferred release held with no handoff coming — `#doDispose` skipped it
+			// precisely because `recycle` promised this path would run it. Release
+			// now or every later revival is stranded on a barrier nobody owns. It is
+			// idempotent and a no-op before dispose registered anything.
+			//
+			// `failed`: reaching here means no replacement was produced, whether the
+			// throw came from the callback itself (already reported by the `finally`
+			// above, and the release is idempotent) or from a step before it that
+			// never got as far as asking for one.
+			this.#flushRestartHandoffRelease("failed");
+			// Split on dispose ordering. A throw BEFORE dispose began (#disposeCall
+			// still unset) is recoverable: the session is still alive, so unlatch and
+			// clear the coalesce cache, then rethrow — the host may retry. A throw
+			// at/after dispose (the callback) is terminal: the old session is gone,
+			// nothing to unlatch, and the rejection propagates.
+			if (!this.#disposeCall) {
+				this.#restarting = false;
+				this.#restartCall = undefined;
+				// Resume the normal queued/IRC drains the latch suppressed. A steer
+				// can enqueue input while the durability flush/ensureOnDisk awaits
+				// above run under #restarting; if that durability op then rejects, the
+				// input stays stranded — a direct SDK requestRestart() has no
+				// restart-tool refusal message to incidentally start another turn, so
+				// without this the host waits indefinitely for an agent_end that never
+				// fires. Mirror the busy-refusal branches above.
+				this.#drainStrandedQueuedMessages();
+			}
+			throw err;
+		}
+	}
+
+	/**
 	 * Applies Code Mode at session startup: when the initial model activates
 	 * it (`codeMode` `on`, or `auto` matching a `code_mode_only` catalog flag),
 	 * the initial tool surface is routed through the Code Mode-aware path so
@@ -5430,14 +6413,22 @@ export class AgentSession {
 	get compactionSpeculation(): "idle" | "running" | "armed" {
 		return this.#maintenance.speculationState;
 	}
-	/** Strip image content from the current branch and persist the rewrite. */
+	/**
+	 * Strip image content from the current branch and persist the rewrite.
+	 *
+	 * Tracked in the restart barrier — see {@link #trackHistoryRewrite}.
+	 */
 	dropImages(): Promise<{ removed: number }> {
-		return this.#maintenance.dropImages();
+		return this.#trackHistoryRewrite("dropImages", () => this.#maintenance.dropImages());
 	}
 
-	/** Reduce stored context with the selected shake strategy. */
+	/**
+	 * Reduce stored context with the selected shake strategy.
+	 *
+	 * Tracked in the restart barrier — see {@link #trackHistoryRewrite}.
+	 */
 	shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
-		return this.#maintenance.shake(mode, opts);
+		return this.#trackHistoryRewrite("shake", () => this.#maintenance.shake(mode, opts));
 	}
 
 	/** Compact the active session history. */
@@ -6123,6 +7114,16 @@ export class AgentSession {
 	 * the ACP agent) use this to know whether to expect an `agent_end` event.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
+		// Cooperative restart latched: the turn will never start, so a caller
+		// waiting on an `agent_end` must be told (return false), AND a user prompt
+		// must be handed back through the drop hook so the host can restore /
+		// resubmit it after the recycle instead of silently losing it. Synthetic /
+		// agent-initiated input is not replayed across a recycle, so only user
+		// prompts are surfaced. A no-op for the host driving restart, not an error.
+		if (this.#restarting) {
+			if (!options?.synthetic) this.#promptDropped?.({ text, images: options?.images });
+			return false;
+		}
 		// Stamp the operator's submission instant before ANY async preprocessing —
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
@@ -6138,27 +7139,99 @@ export class AgentSession {
 		// so a dropped prompt is handed back exactly as the user typed it.
 		const typedText = text;
 
+		// The manualCompactionCleanup await above is a real yield point: a
+		// concurrent SDK restart can latch #restarting and dispose the session
+		// while it parks here. The slash-command handlers below
+		// (#tryExecuteExtensionCommand / #tryExecuteCustomCommand) run locally and
+		// return WITHOUT reaching #promptWithMessage's shared latch recheck or
+		// #beginInFlight, so an async handler would keep using the disposed
+		// extension/session runtime past the durability barrier. Re-check the latch
+		// here, mirroring the top-of-prompt() guard exactly: hand a
+		// non-synthetic user prompt back through the drop hook with the original
+		// typed text, then no-op signal (return false) rather than throw.
+		if (this.#restarting) {
+			if (!options?.synthetic) this.#promptDropped?.({ text: typedText, images: options?.images });
+			return false;
+		}
+
 		// Handle extension commands first (execute immediately, even during streaming)
 		if (expandPromptTemplates && text.startsWith("/")) {
-			const handled = await this.#tryExecuteExtensionCommand(text);
-			if (handled) {
-				return false;
-			}
+			// Set inside the scoped run below; the callback cannot `return false`
+			// out of prompt() itself, so the locally-consumed outcome is carried
+			// here and applied after the window closes.
+			let localHandled = false;
+			// The latch check above is not enough on its own: it only rejects a
+			// restart latched BEFORE the handler starts. These handlers are async
+			// and return WITHOUT reaching #promptWithMessage's #beginInFlight, so a
+			// restart latching WHILE one awaits I/O observes no counter at all —
+			// waitForIdle() sees an idle agent, the barrier flushes and disposes,
+			// and the handler resumes against a torn-down extension/session runtime
+			// past the durability barrier.
+			//
+			// Hold #promptInFlightCount for the whole locally-handled window: it is
+			// the counter the barrier WAITS on, which is the required semantic here
+			// — the handler is running work that must finish, not queued input that
+			// would be lost, so the restart should block until it completes rather
+			// than refuse. (#queuedInputPrepCount would be wrong twice over: it
+			// feeds #hasUnpersistedInput(), so a handler that latches a restart
+			// itself would refuse `busy` on its own bookkeeping instead of
+			// latching.) This is the same window #beginInFlight covers for a prompt
+			// in post-latch setup, one step earlier in prompt().
+			//
+			// The window is published on the async context so a restart requested
+			// BY this handler can exclude it from the wait it owns: the handler is
+			// awaiting that restart, so its #endInFlight() cannot run until the
+			// restart resolves, while the restart waits for the counter to reach
+			// zero — a permanent latch on both. The restart tool avoids this by
+			// firing from an untracked continuation; a handler that awaits
+			// `session.requestRestart()` directly cannot, so the release happens
+			// inside requestRestart() instead.
+			//
+			// `released` is what keeps the window's single decrement single, from
+			// EITHER end. The restart path sets it before decrementing so the
+			// cleanup below is a no-op; the cleanup sets it before decrementing so
+			// a later requester cannot spend the window twice. That second
+			// direction matters because the store OUTLIVES the handler: a detached
+			// timer or floating promise the handler started still resolves inside
+			// this window's async context, and a requestRestart() from there would
+			// otherwise decrement a window the cleanup had already paid for —
+			// dropping the counter below the number of live prompts and letting the
+			// recycle dispose underneath an unrelated one.
+			const window: LocalCommandWindow = { released: false };
+			this.#beginInFlight();
+			try {
+				await this.#localCommandScope.run(window, async () => {
+					const handled = await this.#tryExecuteExtensionCommand(text);
+					if (handled) {
+						localHandled = true;
+						return;
+					}
 
-			// Try custom commands (TypeScript slash commands)
-			const customResult = await this.#tryExecuteCustomCommand(text);
-			if (customResult !== null) {
-				if (customResult === "") {
-					return false;
+					// Try custom commands (TypeScript slash commands)
+					const customResult = await this.#tryExecuteCustomCommand(text);
+					if (customResult !== null) {
+						if (customResult === "") {
+							localHandled = true;
+							return;
+						}
+						text = customResult;
+					}
+
+					// Try file-based slash commands (markdown files from commands/ directories)
+					// Only if text still starts with "/" (wasn't transformed by custom command)
+					if (text.startsWith("/")) {
+						text = expandSlashCommand(text, this.#slashCommands);
+					}
+				});
+			} finally {
+				// Retire the window before the decrement, not after: a descendant
+				// that outlives the handler must find it already spent.
+				if (!window.released) {
+					window.released = true;
+					this.#endInFlight();
 				}
-				text = customResult;
 			}
-
-			// Try file-based slash commands (markdown files from commands/ directories)
-			// Only if text still starts with "/" (wasn't transformed by custom command)
-			if (text.startsWith("/")) {
-				text = expandSlashCommand(text, this.#slashCommands);
-			}
+			if (localHandled) return false;
 		}
 
 		// Expand file-based prompt templates if requested
@@ -6191,8 +7264,10 @@ export class AgentSession {
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
-			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt);
-			return true;
+			// `true` here means "expect an agent_end", so a queue refused because
+			// disposal began must report `false` instead — the drop hook already
+			// has the text, and nothing will deliver a turn for it.
+			return await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt);
 		}
 
 		// Skip eager preludes when the user has already queued a directive
@@ -6237,11 +7312,10 @@ export class AgentSession {
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
-			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt, {
+			return await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt, {
 				images: normalizedImages,
 				descriptionNotice: imageDescriptionNotice,
 			});
-			return true;
 		}
 
 		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
@@ -6306,7 +7380,12 @@ export class AgentSession {
 			// a message that was never persisted).
 			this.#promptDropped?.({ text: typedText, images: options?.images });
 		}
-		return true;
+		// A dropped prompt (restart latched inside the shared chokepoint after this
+		// prompt passed the top-of-prompt() guard, disposal, or a preflight denial)
+		// never started a turn, so a lifecycle-managing host must be told not to
+		// await an `agent_end` that will never arrive. Propagate the dispatch
+		// outcome rather than an unconditional `true`.
+		return dispatched;
 	}
 
 	/**
@@ -6351,13 +7430,51 @@ export class AgentSession {
 		}
 
 		if (options?.queueOnly) {
+			// Queue-only dispatch is the one prompt path that reaches
+			// #queueCustomMessage without passing #promptWithMessage's latch
+			// re-check, so once disposal has begun nothing else stops it: it
+			// enqueues into an agent whose queue the teardown clears and whose
+			// SessionManager it seals, then answers `true` — "expect an agent_end" —
+			// for a turn that can never run. The input is lost and the caller waits
+			// forever.
+			//
+			// The guard is disposal, NOT the `#restarting` latch, because those two
+			// windows have opposite remedies. While the session is still alive a
+			// latched restart PRESERVES the message: it enqueues, and the barrier's
+			// own unpersisted-input re-check then sees it and refuses the recycle
+			// `busy`, so the message is delivered to the session that is still
+			// there. Refusing in that window would instead abort a recoverable
+			// restart over input the barrier was built to notice. Once
+			// `beginDispose()` has run there is no barrier left to refuse and
+			// nowhere to preserve to, so refusing is the only option that does not
+			// lose the message.
+			//
+			// THROW rather than report `false`: every queue-only caller ignores the
+			// boolean (the compaction-queue flush routes through
+			// `invokeSkillCommandFromText`, which discards it and reports "handled")
+			// but funnels a rejection into `restoreQueue`, which puts the message
+			// back on the pending queue and surfaces the failure. A `false` here is
+			// the one outcome that loses the user's typed invocation silently.
+			// AgentBusyError is the refusal this same branch already raises when it
+			// cannot queue, and it is recoverable — the queue is restored, so the
+			// message is re-delivered against the replacement session.
+			if (this.#isDisposed) throw new AgentBusyError();
 			const streamingBehavior = options?.streamingBehavior;
 			if (!streamingBehavior) throw new AgentBusyError();
 
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
-			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText);
+			// Disposal can also begin DURING the notice/message normalization above,
+			// after the synchronous check passed. A refused queue means the message
+			// is gone, and this branch's contract is "throw so `restoreQueue` puts
+			// it back" — so raise the same recoverable refusal rather than
+			// answering `true` for a turn that can never run.
+			if (!(await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText))) {
+				throw new AgentBusyError();
+			}
+			// Queued behind the running turn — it will be delivered, so the caller
+			// still owes an `agent_end`. Mirrors prompt()'s streaming-queue `true`.
 			return true;
 		}
 		if (this.isStreaming) {
@@ -6367,8 +7484,11 @@ export class AgentSession {
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
-			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
-			return true;
+			// `true` means "expect an agent_end". A queue refused because disposal
+			// began delivers nothing, so report `false` and let the lifecycle host
+			// stop waiting. Unlike the queue-only branch above, this one's callers
+			// read the boolean, so refusing is enough — no throw needed.
+			return await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
 		}
 
 		const customMessage: CustomMessage<T> = {
@@ -6381,10 +7501,48 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 
-		return this.#promptWithMessage(customMessage, textContent, {
+		// A `false` here means the turn never started (restart latched, disposal,
+		// or a usage-preflight denial): propagate it so lifecycle-managing callers
+		// (ACP, skill runners) do not wait for an `agent_end` that never comes.
+		const dispatched = await this.#promptWithMessage(customMessage, textContent, {
 			...options,
 			prependMessages: keywordNotices.length > 0 ? keywordNotices : undefined,
 		});
+		// The interactive `/skill:` path consumes the composer draft BEFORE
+		// dispatching and reports success regardless of the outcome
+		// (input-controller's #invokeSkillCommand), and the compaction-queue flush
+		// only requeues on a rejection (ui-helpers' restoreQueue), so a `false`
+		// would lose the user's typed invocation outright. Hand it back through the
+		// same hook prompt() uses for a dropped typed prompt: the message was never
+		// persisted, so tree/branch cannot offer it, and interactive mode restores
+		// it to the editor for resubmission after the restart.
+		//
+		// Restoring rather than parking (the agent-initiated remedy in
+		// #promptOrParkAgentInitiatedMessage) is deliberate: parking makes the
+		// message unpersisted input, which would make the restart barrier refuse
+		// `busy` and abort the very restart the user asked for.
+		//
+		// Scoped to a user-attributed skill prompt carrying its typed text in
+		// `queueChipText`, which is exactly what the two interactive callers pass.
+		// The expanded SKILL.md body is not what the user typed, so a prompt
+		// without that typed text is not restorable; and collab guest prompts
+		// (user-attributed, but another operator's text) report `false` back over
+		// the wire instead of pasting a guest's input into the host's editor.
+		if (
+			!dispatched &&
+			customMessage.attribution === "user" &&
+			customMessage.customType === SKILL_PROMPT_MESSAGE_TYPE &&
+			options?.queueChipText
+		) {
+			const images = Array.isArray(message.content)
+				? message.content.filter((part): part is ImageContent => part.type === "image")
+				: undefined;
+			this.#promptDropped?.({
+				text: options.queueChipText,
+				images: images && images.length > 0 ? images : undefined,
+			});
+		}
+		return dispatched;
 	}
 
 	async #promptWithMessage(
@@ -6400,6 +7558,14 @@ export class AgentSession {
 		// every pre-dispatch bail (generation bump from abort, disposal, usage
 		// preflight denial) exits silently, and prompt() uses the outcome to hand
 		// the typed text back to the host instead of losing it.
+		// Cooperative restart latched: refuse to begin a turn from ANY entry point
+		// that reaches this chokepoint. prompt() guards at its top, but
+		// promptCustomMessage()'s non-streaming branch dispatches here directly
+		// (skill/collab/ACP prompts), so the shared chokepoint must observe the
+		// latch too or a turn started in the post-idle/pre-dispose drain window
+		// would append past the durability barrier and race dispose. A no-op drop,
+		// not a throw — mirrors the top-of-prompt() guard.
+		if (this.#restarting) return false;
 		this.#beginInFlight();
 		const generation = this.#promptGeneration;
 		this.#promptSequence++;
@@ -6830,27 +7996,53 @@ export class AgentSession {
 		// Synthetic branch: agent-initiated hidden developer message. Bypass
 		// #queueUserMessage (which clears advisor auto-resume suppression and
 		// enqueues as a user-attributed message) and place the developer message
-		// directly on the follow-up queue.
-		const normalizedImages = await this.#normalizeImagesForModel(images);
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
-		if (normalizedImages?.length) {
-			content.push(...normalizedImages);
+		// directly on the follow-up queue. Track the async preparation so the
+		// restart barrier and #hasUnpersistedInput() observe input that has passed
+		// the #restarting latch check but has not yet reached the agent queue,
+		// mirroring #queueUserMessage/#queueCustomMessage. Released in the finally
+		// once the synchronous enqueue below has populated the queue (or the
+		// preparation threw), so there is no window where the barrier sees neither
+		// the counter nor the queue.
+		//
+		// The counter is also the disposal guard: the non-synthetic branch above
+		// reaches it through `#queueUserMessage`, but this branch queues directly,
+		// so once `beginDispose()` has run there is nothing left to preserve into
+		// and the directive would be cleared by teardown while this call resolved
+		// normally. Refuse instead — a hidden agent-authored directive has no
+		// operator text to hand back, so there is nothing to route through the
+		// drop hook, and every caller here already treats "queued" as best-effort.
+		if (!this.#beginQueuedInputPrep()) return;
+		try {
+			const normalizedImages = await this.#normalizeImagesForModel(images);
+			const content: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+			if (normalizedImages?.length) {
+				content.push(...normalizedImages);
+			}
+			const imageDescriptionNotice = normalizedImages?.length
+				? await this.#buildImageDescriptionNotice(normalizedImages)
+				: undefined;
+			// Re-ask after the awaits: `beginDispose()` can run DURING image
+			// normalization / the vision description, which the entry refusal above
+			// cannot see. The enqueue below would then land in a queue teardown
+			// clears. Refused silently and reported the same way — a hidden
+			// agent-authored directive carries no operator text for the drop hook,
+			// and this branch returns void, so the refusal is the whole signal.
+			if (this.#isDisposed) return;
+			this.#allowQueuedMessageDrainRetry();
+			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
+			this.agent.followUp({
+				role: "developer",
+				content,
+				attribution: options.attribution ?? "agent",
+				timestamp: Date.now(),
+				// Run-initiating synthetic prompt (e.g. approved-plan execution queued
+				// behind a busy turn): replay uses the marker to clear the preceding
+				// user's prompt anchor, matching the live agent_start clear.
+				synthetic: true,
+			});
+		} finally {
+			this.#endQueuedInputPrep();
 		}
-		const imageDescriptionNotice = normalizedImages?.length
-			? await this.#buildImageDescriptionNotice(normalizedImages)
-			: undefined;
-		this.#allowQueuedMessageDrainRetry();
-		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
-		this.agent.followUp({
-			role: "developer",
-			content,
-			attribution: options.attribution ?? "agent",
-			timestamp: Date.now(),
-			// Run-initiating synthetic prompt (e.g. approved-plan execution queued
-			// behind a busy turn): replay uses the marker to clear the preceding
-			// user's prompt anchor, matching the live agent_start clear.
-			synthetic: true,
-		});
 		this.#scheduleIdleQueueDrain();
 	}
 
@@ -6881,13 +8073,46 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Queue user-attributed input on the agent's steer / follow-up / aside path.
+	 *
+	 * Reports whether the input was actually queued. `false` means disposal had
+	 * already begun and the input was refused — handed back through the drop hook
+	 * instead of enqueued — so a caller that promised its own consumer a turn
+	 * (`prompt()`'s streaming branches) can report that none is coming.
+	 */
 	async #queueUserMessage(
 		text: string,
 		images: ImageContent[] | undefined,
 		mode: "steer" | "followUp" | "aside",
 		timestamp?: number,
 		preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined },
-	): Promise<void> {
+	): Promise<boolean> {
+		// The chokepoint every direct-injection entry point reaches — `steer()`,
+		// `followUp()`, `sendUserMessage()`'s three `deliverAs` branches, and
+		// `prompt()`'s streaming queue branches — so the disposal guard lives here
+		// rather than being restated at each one, where the next sibling added
+		// would silently miss it.
+		//
+		// Disposal, NOT the `#restarting` latch: while the session is still alive
+		// a latched restart PRESERVES this input — it enqueues, and the barrier's
+		// own unpersisted-input re-check then refuses the recycle `busy`, so the
+		// input reaches the session that is still there. Once `beginDispose()` has
+		// run there is no barrier left to refuse and no queue to preserve into:
+		// the restart's final busy check has already passed, so the counter this
+		// path bumps is no longer observed, and teardown clears the queue it would
+		// land in. The call would resolve normally with its input silently gone.
+		//
+		// Refused in the same shape `prompt()` uses for a dropped user prompt —
+		// hand the text back through the drop hook, then report no-op — rather
+		// than throwing. Every entry point here returns void, so a throw would be
+		// a new failure mode for callers that have no recovery path, while the
+		// hook is the surface a host already implements to restore input the
+		// session could not take.
+		if (this.#isDisposed) {
+			this.#promptDropped?.({ text, images });
+			return false;
+		}
 		// Captured before any await below so the aside branch can detect a
 		// newSession()/switchSession() that completed while normalization/vision
 		// description was in flight and drop a record that would otherwise land in a
@@ -6901,57 +8126,94 @@ export class AgentSession {
 		// branch) until the next deliberate steer/follow-up/prompt, matching the
 		// sendCustomMessage aside path (queueAside), which never touches this flag.
 		if (mode !== "aside") this.#advisors.autoResumeSuppressed = false;
-		// The pre-dispatch re-check in prompt() arrives with normalization and the
-		// vision description already done — reuse them instead of paying a second
-		// vision-model request for the same attachment.
-		const videoAttachmentNotices = this.#createVideoAttachmentNotices(images, timestamp ?? Date.now());
-		const normalizedImages = preprocessed ? preprocessed.images : await this.#normalizeImagesForModel(images);
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
-		if (normalizedImages?.length) {
-			content.push(...normalizedImages);
+		// Track async preparation so the restart barrier and #hasUnpersistedInput()
+		// observe input that has passed the #restarting latch check but has not yet
+		// reached either agent queue. Released in the finally once the synchronous
+		// enqueue below has populated the queue (or the preparation threw), so there
+		// is no window where the barrier sees neither the counter nor the queue.
+		// The counter's own disposal refusal is redundant here — the guard above
+		// already returned, with no await between — but honoring it keeps every
+		// prep site answering the same question the same way.
+		if (!this.#beginQueuedInputPrep()) {
+			this.#promptDropped?.({ text, images });
+			return false;
 		}
-		// Text-only model + image attachment: describe via a vision model and enqueue the
-		// description as a hidden companion immediately before the user message.
-		const imageDescriptionNotice = preprocessed
-			? preprocessed.descriptionNotice
-			: normalizedImages?.length
-				? await this.#buildImageDescriptionNotice(normalizedImages)
-				: undefined;
-		if (mode === "aside") {
-			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
-			const records: AgentMessage[] = [];
-			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
-			records.push({ role: "user", content, attribution: "user", timestamp: timestamp ?? Date.now() });
-			this.#irc.queueAside(records);
-			// The awaits above (image normalization / vision description) can span the run's
-			// settle, so the run may already be idle by the time the record lands in the aside
-			// queue with no loop left to drain it. Resuming here is a no-op while streaming and
-			// wakes/folds correctly once idle (see #resumeStrandedIrcAsides).
-			this.#resumeStrandedIrcAsides();
-			return;
-		}
-		this.#allowQueuedMessageDrainRetry();
-		if (mode === "followUp") {
-			for (const notice of videoAttachmentNotices) this.agent.followUp(notice);
-			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
-			this.agent.followUp({
-				role: "user",
-				content,
-				attribution: "user",
-				timestamp: timestamp ?? Date.now(),
-			});
-		} else {
-			for (const notice of videoAttachmentNotices) this.agent.steer(notice);
-			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
-			this.agent.steer({
-				role: "user",
-				content,
-				steering: true,
-				attribution: "user",
-				timestamp: timestamp ?? Date.now(),
-			});
+		try {
+			// The pre-dispatch re-check in prompt() arrives with normalization and the
+			// vision description already done — reuse them instead of paying a second
+			// vision-model request for the same attachment.
+			const videoAttachmentNotices = this.#createVideoAttachmentNotices(images, timestamp ?? Date.now());
+			const normalizedImages = preprocessed ? preprocessed.images : await this.#normalizeImagesForModel(images);
+			const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+			if (normalizedImages?.length) {
+				content.push(...normalizedImages);
+			}
+			// Text-only model + image attachment: describe via a vision model and enqueue the
+			// description as a hidden companion immediately before the user message.
+			const imageDescriptionNotice = preprocessed
+				? preprocessed.descriptionNotice
+				: normalizedImages?.length
+					? await this.#buildImageDescriptionNotice(normalizedImages)
+					: undefined;
+			// Re-ask after the awaits above: `beginDispose()` can run DURING image
+			// normalization / the vision description, which the entry guard cannot
+			// see, and both branches below then enqueue into a queue teardown
+			// clears while this call answered `true`. Refused in this method's own
+			// shape — hand the text back through the drop hook, then report no-op.
+			if (this.#isDisposed) {
+				this.#promptDropped?.({ text, images });
+				return false;
+			}
+			if (mode === "aside") {
+				// A session transition took the queue this record belonged to. Not a
+				// disposal refusal — the input was superseded, not dropped for want
+				// of somewhere to go — so it reports queued and keeps the drop hook
+				// out of it, exactly as before.
+				if (await this.#sessionGenerationChanged(sessionGeneration)) return true;
+				// That wait can itself span `beginDispose()` (a restart transition is
+				// exactly what it waits out), so re-ask before handing the record to
+				// the aside queue teardown drops.
+				if (this.#isDisposed) {
+					this.#promptDropped?.({ text, images });
+					return false;
+				}
+				const records: AgentMessage[] = [];
+				if (imageDescriptionNotice) records.push(imageDescriptionNotice);
+				records.push({ role: "user", content, attribution: "user", timestamp: timestamp ?? Date.now() });
+				this.#irc.queueAside(records);
+				// The awaits above (image normalization / vision description) can span the run's
+				// settle, so the run may already be idle by the time the record lands in the aside
+				// queue with no loop left to drain it. Resuming here is a no-op while streaming and
+				// wakes/folds correctly once idle (see #resumeStrandedIrcAsides).
+				this.#resumeStrandedIrcAsides();
+				return true;
+			}
+			this.#allowQueuedMessageDrainRetry();
+			if (mode === "followUp") {
+				for (const notice of videoAttachmentNotices) this.agent.followUp(notice);
+				if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
+				this.agent.followUp({
+					role: "user",
+					content,
+					attribution: "user",
+					timestamp: timestamp ?? Date.now(),
+				});
+			} else {
+				for (const notice of videoAttachmentNotices) this.agent.steer(notice);
+				if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
+				this.agent.steer({
+					role: "user",
+					content,
+					steering: true,
+					attribution: "user",
+					timestamp: timestamp ?? Date.now(),
+				});
+			}
+		} finally {
+			this.#endQueuedInputPrep();
 		}
 		this.#scheduleIdleQueueDrain();
+		return true;
 	}
 
 	#scheduleIdleQueueDrain(): void {
@@ -6995,6 +8257,11 @@ export class AgentSession {
 	#canAutoContinueForFollowUp(): boolean {
 		if (this.isStreaming) return false;
 		if (this.isRetrying) return false;
+		// A cooperative restart has latched: no turn may start from entry through
+		// the host callback. The authoritative gate is in #scheduleAgentContinue,
+		// but keep the predicate honest so a queued-drain scheduled before the
+		// latch re-checks here and refuses.
+		if (this.#restarting) return false;
 		// A queued steer resumes from ANY tail: Agent.continue() runs #runLoop(undefined),
 		// whose initial steering poll injects the steer before the first provider call, so the
 		// request tail becomes the steer (valid) regardless of any injected custom / bashExecution
@@ -7123,6 +8390,14 @@ export class AgentSession {
 		message: CustomMessage,
 		options?: { acceptTerminalEmptyStop?: boolean },
 	): Promise<boolean> {
+		// Cooperative restart in progress (or session torn down): this raw-prompt
+		// path bypasses AgentSession.prompt's #restarting guard, so gate it here —
+		// a turn started after the latch would append past the durability barrier.
+		// The caller re-sends after a `busy` refusal; in-memory agent-initiated
+		// input is not replayed across the recycle. Report `false` so callers that
+		// promised a turn (sendCustomMessage({ triggerTurn: true })) learn none
+		// started instead of waiting on an `agent_end` that never fires.
+		if (this.#restarting || this.#isDisposed) return false;
 		this.#beginInFlight();
 		try {
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
@@ -7141,12 +8416,16 @@ export class AgentSession {
 		}
 	}
 
-	/** Queue a custom message without starting a turn, matching steer/follow-up/aside delivery. */
+	/** Queue a custom message without starting a turn, matching steer/follow-up/aside delivery.
+	 *
+	 *  Reports whether the message was queued; `false` means disposal had already
+	 *  begun and it was refused, so a caller that promised its consumer an
+	 *  `agent_end` must report that none is coming. */
 	async #queueCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		deliverAs: "steer" | "followUp" | "aside",
 		queueChipText?: string,
-	): Promise<void> {
+	): Promise<boolean> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
 		const details =
@@ -7168,27 +8447,56 @@ export class AgentSession {
 			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
-		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
-		if (deliverAs === "aside") {
-			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
-			// Non-interrupting: rides the same step-boundary aside poll as
-			// sendCustomMessage's streaming aside branch — not an agent-core queue
-			// entry, so no drain-retry latch and no idle-queue drain scheduling.
-			this.#irc.queueAside([normalizedAppMessage]);
-			// The image-normalization await above can span the run's settle, so the run may
-			// already be idle by the time the record lands in the aside queue with no loop
-			// left to drain it. Resuming here is a no-op while streaming and wakes/folds
-			// correctly once idle, matching #queueUserMessage's aside branch.
-			this.#resumeStrandedIrcAsides();
-			return;
-		}
-		this.#allowQueuedMessageDrainRetry();
-		if (deliverAs === "followUp") {
-			this.agent.followUp(normalizedAppMessage);
-		} else {
-			this.agent.steer(normalizedAppMessage);
+		// Track async preparation (image normalization) so the restart barrier and
+		// #hasUnpersistedInput() observe this custom prompt after it passes the
+		// #restarting latch check but before it reaches either agent queue, mirroring
+		// #queueUserMessage. Without this an SDK/ACP/collaboration prompt parked in
+		// normalization when requestRestart() runs would dispose under an unseen
+		// prompt, which would then enqueue into the dead agent and be lost. Released
+		// in the finally so a preparation that throws still frees the barrier. It
+		// also refuses once `beginDispose()` has run — there is no barrier left to
+		// observe the counter and teardown clears the queue, so the message would
+		// vanish while this call reported success.
+		if (!this.#beginQueuedInputPrep()) return false;
+		try {
+			const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+			// Re-ask after the await: `beginDispose()` can run DURING normalization,
+			// which the entry refusal above cannot see. Both branches below then
+			// deliver into a session teardown is dismantling — the aside queue it
+			// drops, or an agent queue it clears — while this call answers `true`,
+			// i.e. "queued, expect an agent_end". promptCustomMessage turns that
+			// lie into a real `agent_end` promise (queue-only throws AgentBusyError
+			// on `false`, the streaming branch propagates it), so the refusal has to
+			// be the same `false` the entry guard reports.
+			if (this.#isDisposed) return false;
+			if (deliverAs === "aside") {
+				if (await this.#sessionGenerationChanged(sessionGeneration)) return true;
+				// A transition wait can itself span `beginDispose()`, so re-ask
+				// before queueing. `true` above means "superseded, not dropped";
+				// this is a genuine refusal, so it answers `false`.
+				if (this.#isDisposed) return false;
+				// Non-interrupting: rides the same step-boundary aside poll as
+				// sendCustomMessage's streaming aside branch — not an agent-core queue
+				// entry, so no drain-retry latch and no idle-queue drain scheduling.
+				this.#irc.queueAside([normalizedAppMessage]);
+				// The image-normalization await above can span the run's settle, so the run may
+				// already be idle by the time the record lands in the aside queue with no loop
+				// left to drain it. Resuming here is a no-op while streaming and wakes/folds
+				// correctly once idle, matching #queueUserMessage's aside branch.
+				this.#resumeStrandedIrcAsides();
+				return true;
+			}
+			this.#allowQueuedMessageDrainRetry();
+			if (deliverAs === "followUp") {
+				this.agent.followUp(normalizedAppMessage);
+			} else {
+				this.agent.steer(normalizedAppMessage);
+			}
+		} finally {
+			this.#endQueuedInputPrep();
 		}
 		this.#scheduleIdleQueueDrain();
+		return true;
 	}
 
 	/**
@@ -7202,8 +8510,18 @@ export class AgentSession {
 	 * @returns true iff this call synchronously started a new turn (awaited
 	 * `agent.prompt`); false when the message was queued/appended without a turn
 	 * — including when `triggerTurn` is downgraded because the client defers
-	 * agent-initiated turns. Callers that must mirror the resulting `agent_end`
-	 * use this to avoid acting on a turn that never ran.
+	 * agent-initiated turns, or when a cooperative restart is latched / the
+	 * session is disposed so the requested turn cannot start. Callers that must
+	 * mirror the resulting `agent_end` use this to avoid acting on a turn that
+	 * never ran.
+	 *
+	 * `false` does NOT promise the message was delivered: once `beginDispose()`
+	 * has run (including during this call's own image normalization) there is no
+	 * live session to deliver into, so the message is discarded and this reports
+	 * `false`. A caller that must distinguish a discard from an
+	 * appended-without-turn reads {@link isDisposed}; `queueChipText`, when
+	 * given, is also handed back through {@link setPromptDropped} so an
+	 * interactive host can restore it.
 	 */
 	async sendCustomMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
@@ -7236,7 +8554,55 @@ export class AgentSession {
 			attribution: normalizedPayload.attribution,
 			timestamp: Date.now(),
 		};
-		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		// Track the async image-normalization window so the restart barrier and
+		// #hasUnpersistedInput() observe input that has passed the #restarting latch
+		// check but has not yet reached either agent queue or #promptInFlightCount,
+		// mirroring #queueUserMessage/#queueCustomMessage. Without this a host/ACP/
+		// collaboration custom message parked in normalization when requestRestart()
+		// runs would let the barrier dispose under it, and the continuation below
+		// would then enqueue/append/prompt into the torn-down agent. Released in the
+		// finally once normalization resolves (or threw); the dispatch that follows
+		// is synchronous — or, for the turn-starting branches, routed through
+		// #promptOrParkAgentInitiatedMessage, which PARKS the message in
+		// #pendingNextTurnMessages when the latch is up rather than dropping it, so
+		// the barrier still observes it — so there is no window where the barrier
+		// sees neither the counter nor a queue. It also refuses once
+		// `beginDispose()` has run: none of the branches below can deliver into a
+		// torn-down session, and `false` is already this method's "no turn started"
+		// answer, so a lifecycle host stops waiting instead of hanging.
+		if (!this.#beginQueuedInputPrep()) return false;
+		let normalizedAppMessage: CustomMessage<T>;
+		try {
+			normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		} finally {
+			this.#endQueuedInputPrep();
+		}
+		// Re-ask after the await: `beginDispose()` can run DURING normalization —
+		// the SDK wrapper sets it synchronously and then awaits its vibe-scope
+		// suspend and parkAll() — which the entry refusal above cannot see. Every
+		// branch below either appends through a SessionManager teardown seals,
+		// pushes onto an agent queue / #pendingNextTurnMessages teardown clears,
+		// or folds through the event pipeline into that same sealed manager, so
+		// none of them can deliver. The two turn-starting branches re-check
+		// independently inside #promptOrParkAgentInitiatedMessage; this covers the
+		// six that do not.
+		//
+		// Reported the way this method's entry guard and promptCustomMessage's
+		// non-streaming drop already report it, rather than by a third convention:
+		// hand any restorable operator text (the queue chip label) back through
+		// the drop hook, then answer `false`. The boolean keeps its documented
+		// meaning — no turn started, which is true of a discard — and `isDisposed`
+		// is the public flag a host pairs with it to tell a discard from an
+		// append-without-turn. A throw was the alternative and is the wrong one
+		// here: most callers of this method ignore the boolean and install no
+		// rejection handler (the mode-context senders, the skillful notice, the
+		// todo-error reminder dispatched from inside the agent event handler),
+		// so it would turn an ordinary teardown race into an unhandled failure
+		// in the event pipeline.
+		if (this.#isDisposed) {
+			if (options?.queueChipText) this.#promptDropped?.({ text: options.queueChipText });
+			return false;
+		}
 		if (this.isStreaming) {
 			if (options?.deliverAs === "nextTurn") {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, options?.triggerTurn ?? false);
@@ -7244,6 +8610,9 @@ export class AgentSession {
 			}
 			if (options?.deliverAs === "aside") {
 				if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
+				// A transition wait can itself span `beginDispose()`, so re-ask
+				// before queueing into an aside queue teardown drops.
+				if (this.#isDisposed) return false;
 				// Non-interrupting: the agent loop's step-boundary poll (see the setAsideMessageProvider
 				// registration in the constructor) picks this up without interrupting the current tool
 				// batch. Not an agent-core queue entry, so no drain-retry latch and no idle-queue drain
@@ -7268,7 +8637,11 @@ export class AgentSession {
 					this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 					return false;
 				}
-				return await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
+				// Propagate whether a turn actually started: a restart-latched or
+				// disposed session refuses inside #promptAgentInitiatedMessage, and
+				// returning a false `true` would leave a protocol host awaiting an
+				// `agent_end` that never comes.
+				return await this.#promptOrParkAgentInitiatedMessage(normalizedAppMessage, {
 					acceptTerminalEmptyStop: options.acceptTerminalEmptyStop === true,
 				});
 			}
@@ -7285,6 +8658,9 @@ export class AgentSession {
 
 		if (options?.deliverAs === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
+			// A transition wait can itself span `beginDispose()`, so re-ask before
+			// the fold/queue/prompt branches below.
+			if (this.#isDisposed) return false;
 			if (this.#planModeState?.enabled) {
 				// Plan mode stays user-driven: fold into context without an autonomous turn, same as
 				// IrcBridge.deliver()/#resumeStrandedIrcAsides do in plan mode. Routed through the
@@ -7307,7 +8683,7 @@ export class AgentSession {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 				return false;
 			}
-			return await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
+			return await this.#promptOrParkAgentInitiatedMessage(normalizedAppMessage, {
 				acceptTerminalEmptyStop: options.acceptTerminalEmptyStop === true,
 			});
 		}
@@ -7317,7 +8693,7 @@ export class AgentSession {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 				return false;
 			}
-			return await this.#promptAgentInitiatedMessage(normalizedAppMessage);
+			return await this.#promptOrParkAgentInitiatedMessage(normalizedAppMessage);
 		}
 
 		this.agent.appendMessage(normalizedAppMessage);
@@ -7329,6 +8705,29 @@ export class AgentSession {
 			normalizedAppMessage.attribution,
 		);
 		return false;
+	}
+
+	/** Start a turn for an agent-initiated custom message, or PARK it when a cooperative
+	 *  restart is latched / the session is disposed.
+	 *
+	 *  #promptAgentInitiatedMessage refuses under the latch by returning false without
+	 *  appending or queueing, which silently DROPS the message: the restart barrier then
+	 *  sees no pending work and completes the recycle over input a host had already handed
+	 *  us. Parking it in #pendingNextTurnMessages instead makes it visible to
+	 *  #hasUnpersistedInput(), so the barrier refuses `busy` and the message rides the next
+	 *  turn of the still-live session. Mirrors the deferAgentInitiatedTurns branch that
+	 *  precedes each of this method's three call sites, which parks the same way.
+	 *  Still reports false: no turn started, so a protocol host does not await an
+	 *  `agent_end` that never fires. */
+	async #promptOrParkAgentInitiatedMessage(
+		message: CustomMessage,
+		options?: { acceptTerminalEmptyStop?: boolean },
+	): Promise<boolean> {
+		if (this.#restarting || this.#isDisposed) {
+			this.#queueHiddenNextTurnMessage(message, false);
+			return false;
+		}
+		return await this.#promptAgentInitiatedMessage(message, options);
 	}
 
 	/**
@@ -7855,6 +9254,19 @@ export class AgentSession {
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
+		// A cooperative restart latched between its post-idle wait and dispose
+		// captured the current session file up front; a session transition running
+		// in that window would swap the file out from under it, so #doRequestRestart
+		// would later pair the transitioned session's id with the pre-transition
+		// file and the host would reopen the wrong conversation. Refuse the
+		// transition (clean recoverable no-op) until the latch releases, mirroring
+		// the restart-refusal style used elsewhere. Holding the barrier for the
+		// whole transition also stops the inverse race: the awaited
+		// session_before_switch hook below is a real yield point, and a restart
+		// latching during it would otherwise pass its coherence check against the
+		// not-yet-swapped file and dispose while this transition resumes.
+		using transition = this.#enterSessionTransition();
+		if (transition.latched) return false;
 		const previousSessionFile = this.sessionFile;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
@@ -7984,6 +9396,16 @@ export class AgentSession {
 	 */
 	async fork(): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("fork the session");
+		// A cooperative restart latched between its post-idle wait and dispose
+		// captured the current session file up front; forking here would swap the
+		// file/id out from under it, so #doRequestRestart would later pair the
+		// forked session's id with the pre-fork file and the host would reopen the
+		// wrong conversation. Refuse (clean recoverable no-op) until the latch
+		// releases, mirroring the restart-refusal style used elsewhere. The
+		// barrier is held across the awaited hook/flush below so a restart
+		// latching mid-fork refuses instead of disposing over it.
+		using transition = this.#enterSessionTransition();
+		if (transition.latched) return false;
 		const previousSessionFile = this.sessionFile;
 		const previousSessionId = this.sessionManager.getSessionId();
 
@@ -8054,10 +9476,30 @@ export class AgentSession {
 		}
 	}
 
-	/** Move the active session and artifacts after enforcing mode transition invariants. */
-	async moveSession(newCwd: string, targetSessionDir?: string): Promise<void> {
+	/**
+	 * Move the active session and artifacts after enforcing mode transition
+	 * invariants. Returns false when a latched restart refused the move, matching
+	 * the `newSession()`/`switchSession()` refusal shape; callers MUST NOT
+	 * re-scope the process/UI workspace on false, because the session file never
+	 * moved.
+	 */
+	async moveSession(newCwd: string, targetSessionDir?: string): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("move the session");
+		// Refuse while a cooperative restart is latched: the restart captured the
+		// current session file before its post-idle wait, and moveTo renames that
+		// path away, so proceeding would let #doRequestRestart hand the host a path
+		// that no longer exists paired with the current id. Clean recoverable
+		// refusal until the latch releases — reported, never silent: both callers
+		// change the process/UI workspace to the target on success, so a silent
+		// no-op would leave the workspace and the persisted session rooted in
+		// different directories until teardown.
+		// The barrier is held across the awaited `moveTo` rename below, so a
+		// restart latching mid-move refuses `busy` instead of capturing the old
+		// path and handing the host a file this move renamed away.
+		using transition = this.#enterSessionTransition();
+		if (transition.latched) return false;
 		await this.sessionManager.moveTo(newCwd, targetSessionDir);
+		return true;
 	}
 
 	// =========================================================================
@@ -8070,7 +9512,9 @@ export class AgentSession {
 	 * refreshing OAuth or running command-backed key programs). Active switches
 	 * always take effect; if the current transcript is too large for the target
 	 * model, the next prompt's compaction/error path owns that recovery instead
-	 * of leaving the session pinned to the old model.
+	 * of leaving the session pinned to the old model. Reports
+	 * `{ switched: false }` — the same shape as any other refusal — when a
+	 * restart or teardown already owns the session.
 	 * @throws Error if no API key available for the model
 	 */
 	async setModel(
@@ -8082,7 +9526,7 @@ export class AgentSession {
 			persist?: boolean;
 		},
 	): Promise<{ switched: boolean }> {
-		return this.#models.setModel(model, role, options);
+		return this.#trackModelMutation({ switched: false }, () => this.#models.setModel(model, role, options));
 	}
 
 	/** Selects a model for this session without updating persisted model settings. */
@@ -8091,12 +9535,12 @@ export class AgentSession {
 		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean },
 	): Promise<void> {
-		return this.#models.setModelTemporary(model, thinkingLevel, options);
+		return this.#trackModelMutation(undefined, () => this.#models.setModelTemporary(model, thinkingLevel, options));
 	}
 
 	/** Cycles the scoped model set, or all available models when no scope exists. */
 	cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
-		return this.#models.cycleModel(direction);
+		return this.#trackModelMutation(undefined, () => this.#models.cycleModel(direction));
 	}
 
 	/** Resolves configured role models and the currently active role index. */
@@ -8106,7 +9550,7 @@ export class AgentSession {
 
 	/** Applies a resolved role model without changing global settings. */
 	applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
-		return this.#models.applyRoleModel(entry);
+		return this.#trackModelMutation(undefined, () => this.#models.applyRoleModel(entry));
 	}
 
 	/** Cycles the configured role models in the supplied order. */
@@ -8114,7 +9558,7 @@ export class AgentSession {
 		roleOrder: readonly string[],
 		direction: "forward" | "backward" = "forward",
 	): Promise<RoleModelCycleResult | undefined> {
-		return this.#models.cycleRoleModels(roleOrder, direction);
+		return this.#trackModelMutation(undefined, () => this.#models.cycleRoleModels(roleOrder, direction));
 	}
 
 	/** Lists available models after applying the configured enabled-model filter. */
@@ -8122,13 +9566,22 @@ export class AgentSession {
 		return this.#models.getAvailableModels();
 	}
 
-	/** Selects the session thinking level and optionally persists it as the default. */
+	/**
+	 * Selects the session thinking level and optionally persists it as the
+	 * default. Refused once {@link #modelControlsSealed}.
+	 */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
+		if (this.#modelControlsSealed) return;
 		this.#models.setThinkingLevel(level, persist);
 	}
 
-	/** Advances through the thinking selectors supported by the active model. */
+	/**
+	 * Advances through the thinking selectors supported by the active model.
+	 * Refused once {@link #modelControlsSealed}, reported as the same
+	 * `undefined` a model without reasoning returns.
+	 */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
+		if (this.#modelControlsSealed) return undefined;
 		return this.#models.cycleThinkingLevel();
 	}
 
@@ -8142,18 +9595,30 @@ export class AgentSession {
 		return this.#models.isFastModeActive();
 	}
 
-	/** Sets or clears one model family's live service tier. */
+	/**
+	 * Sets or clears one model family's live service tier. Refused once
+	 * {@link #modelControlsSealed}.
+	 */
 	setServiceTierFamily(family: ServiceTierFamily, tier: ServiceTier | undefined): void {
+		if (this.#modelControlsSealed) return;
 		this.#models.setServiceTierFamily(family, tier);
 	}
 
-	/** Enables or disables priority service for the active model family. */
+	/**
+	 * Enables or disables priority service for the active model family. Refused
+	 * once {@link #modelControlsSealed} — reported as the same `false` an
+	 * unsupported model family returns, which callers already treat as "not
+	 * applied". Guarded here as well as in {@link setServiceTierFamily} because
+	 * it reaches the tier through `ModelControls`, not through that delegate.
+	 */
 	setFastMode(enabled: boolean): boolean {
+		if (this.#modelControlsSealed) return false;
 		return this.#models.setFastMode(enabled);
 	}
 
-	/** Toggles priority service for the active model family. */
+	/** Toggles priority service for the active model family. Refused once {@link #modelControlsSealed}. */
 	toggleFastMode(): boolean {
+		if (this.#modelControlsSealed) return false;
 		return this.#models.toggleFastMode();
 	}
 
@@ -9020,6 +10485,17 @@ export class AgentSession {
 			preserveLocalCwd?: boolean;
 		},
 	): Promise<boolean> {
+		// Refuse while a cooperative restart is latched: the restart captured the
+		// current session file before its post-idle wait, so swapping the file here
+		// would let #doRequestRestart pair the switched session's id with the old
+		// file and reopen the wrong conversation. Clean recoverable no-op until the
+		// latch releases.
+		// Held across the awaited session_before_switch hook / abort / flush below
+		// too: a restart latching in that window would otherwise pass its
+		// coherence check against the still-unswapped file and dispose while this
+		// switch resumes and swaps files under the replacement.
+		using transition = this.#enterSessionTransition();
+		if (transition.latched) return false;
 		const previousSessionFile = this.sessionManager.getSessionFile();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
@@ -9391,6 +10867,18 @@ export class AgentSession {
 		const selectedText = this.#extractUserMessageText(selectedEntry.message.content);
 		const selectedImages = this.#extractUserMessageImages(selectedEntry.message.content);
 
+		// Refuse while a cooperative restart is latched: the restart captured the
+		// current session file before its post-idle wait, and branch() swaps in a
+		// new session file, so proceeding would let #doRequestRestart pair the
+		// branched session's id with the old file and reopen the wrong
+		// conversation. Report cancelled (clean recoverable no-op) until the latch
+		// releases.
+		// Held across the awaited session_before_branch hook below as well: a
+		// restart latching there would otherwise dispose against the pre-branch
+		// file while this branch resumes and swaps in the new one.
+		using transition = this.#enterSessionTransition();
+		if (transition.latched) return { selectedText, selectedImages, cancelled: true };
+
 		let skipConversationRestore = false;
 
 		// Emit session_before_branch event (can be cancelled)
@@ -9486,6 +10974,16 @@ export class AgentSession {
 		sessionId: string,
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
 		const previousSessionFile = this.sessionFile;
+		// Refuse while a cooperative restart is latched: the restart captured the
+		// current session file before its post-idle wait, and branchFromBtw swaps
+		// in a new session file, so proceeding would let #doRequestRestart pair the
+		// branched session's id with the old file and reopen the wrong
+		// conversation. Report cancelled (clean recoverable no-op) until the latch
+		// releases.
+		// Held for the whole promotion, so a restart latching during its awaited
+		// steps refuses `busy` rather than capturing the pre-branch file.
+		using transition = this.#enterSessionTransition();
+		if (transition.latched) return { cancelled: true, sessionFile: previousSessionFile };
 		if (!this.sessionManager.getSessionFile()) {
 			throw new Error("Cannot branch /btw: session is not persisted");
 		}
