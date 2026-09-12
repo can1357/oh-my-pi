@@ -197,11 +197,13 @@ export default function (pi: ExtensionAPI) {
     baseUrl: "https://command-provider.invalid/",
     apiKey: "unused-by-extension",
     api: "local-command-api",
-    streamSimple(model, _context, _options) {
+    streamSimple(model, context, options) {
       const stream = new AssistantMessageEventStream();
       // Spawn the command, translate its output, and push canonical OMP events.
-      // The implementation owns process cleanup, cancellation, and errors.
-      void runCommandAndPushEvents(stream, model);
+      // The implementation owns process cleanup, cancellation, and errors; the
+      // helper needs `context` for the conversation and `options` for `signal`,
+      // `cwd`, and the stable `sessionId`.
+      void runCommandAndPushEvents(stream, model, context, options);
       return stream;
     },
     models: [{
@@ -217,14 +219,17 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
-This pattern is useful for a local CLI, stdio service, or JSONL process. A
-command-backed provider should keep its own tool loop inside the child process
-and emit only the resulting assistant events if those tools must remain owned
-by the child. A complete subprocess adapter should also remove credentials it
-must not inherit, honor `options.signal`, use `options.cwd`, map one stable
-session id to one child conversation, and convert non-zero exits into a stream
-error. `models.yml` remains HTTP/configuration-only; extensions are the supported
-escape hatch for non-HTTP transports.
+This pattern is useful for a local CLI, stdio service, or JSONL process. It is
+also how a provider rides a plan the vendor only exposes through its CLI: the
+child authenticates with its own subscription credentials, where the same model
+reached through an API key bills per token even for an account that already pays
+for a plan. A command-backed provider should keep its own tool loop inside the
+child process and emit only the resulting assistant events if those tools must
+remain owned by the child. A complete subprocess adapter should also remove
+credentials it must not inherit, honor `options.signal`, use `options.cwd`, map
+one stable session id to one child conversation, and convert non-zero exits into
+a stream error. `models.yml` remains HTTP/configuration-only; extensions are the
+supported escape hatch for non-HTTP transports.
 
 In interactive mode, `input` handlers run before the built-in first-message auto-title check. Extensions that call `await pi.setSessionName(...)` from `input` can set the persisted session name and prevent the default auto-generated title from running for that session.
 
