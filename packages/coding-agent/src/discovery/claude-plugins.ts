@@ -24,6 +24,7 @@ import {
 	expandEnvVarsDeep,
 	listClaudePluginRoots,
 	loadFilesFromDir,
+	parseMcpBooleanField,
 	scanSkillsFromDir,
 } from "./helpers";
 
@@ -621,7 +622,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			if (!serverCfg || typeof serverCfg !== "object" || Array.isArray(serverCfg)) continue;
 			const raw = serverCfg as {
 				enabled?: boolean;
-				lazy?: boolean;
+				lazy?: boolean | string;
 				timeout?: number;
 				command?: string;
 				args?: string[];
@@ -658,10 +659,24 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				continue;
 			}
 			const resolvedEnv = raw.env !== undefined ? await resolveMarketplaceEnv(raw.env, root.path) : undefined;
+			// Marketplace `.mcp.json` entries may ship `lazy` as one of the
+			// coercible string forms (or an `${ENV_VAR}` placeholder resolving to
+			// one) rather than a real boolean, same as every other JSON discovery
+			// path — forwarding the raw value verbatim let a truthy string like
+			// `"false"` reach `connectServers` and leave the server dormant.
+			let lazy: boolean | undefined;
+			if (raw.lazy !== undefined) {
+				lazy = parseMcpBooleanField(expandEnvVarsDeep(raw.lazy));
+				if (lazy === undefined) {
+					warnings.push(
+						`[claude-plugins] MCP server "${serverName}" in ${sourcePath} has invalid 'lazy' value, ignoring`,
+					);
+				}
+			}
 			const server: MCPServer = {
 				name: namespacedName,
 				...(raw.enabled !== undefined && { enabled: raw.enabled }),
-				...(raw.lazy !== undefined && { lazy: raw.lazy }),
+				...(lazy !== undefined && { lazy }),
 				...(raw.timeout !== undefined && { timeout: raw.timeout }),
 				...(rooted.command !== undefined && { command: rooted.command }),
 				...(raw.args !== undefined && { args: substitutePluginRoot(raw.args, root.path) }),
