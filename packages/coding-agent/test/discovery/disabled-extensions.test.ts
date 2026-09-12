@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { type ContextFile, contextFileCapability } from "@oh-my-pi/pi-coding-agent/capability/context-file";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initializeWithSettings, loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
+import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 function restoreEnvValue(key: string, value: string | undefined): void {
@@ -84,5 +85,25 @@ describe("disabledExtensions runtime filtering", () => {
 
 		expect(result.items).toHaveLength(1);
 		expect(path.basename(result.items[0]!.path)).toBe("AGENTS.md");
+	});
+
+	test("keeps the runtime context winner active in the dashboard when its competitor is disabled", async () => {
+		await fs.rm(path.join(tempDir, ".omp", "AGENTS.md"));
+		await fs.writeFile(path.join(tempDir, "AGENTS.md"), "# active project instructions\n");
+		await fs.mkdir(path.join(tempDir, ".gemini"), { recursive: true });
+		await fs.writeFile(path.join(tempDir, ".gemini", "GEMINI.md"), "# disabled project instructions\n");
+
+		const disabledExtensions = ["context-file:project:GEMINI.md", "context-file:user:GEMINI.md"];
+		const settings = Settings.isolated({ disabledExtensions });
+		initializeWithSettings(settings);
+
+		const runtime = await loadCapability<ContextFile>(contextFileCapability.id, { cwd: tempDir });
+		const dashboard = await loadAllExtensions(tempDir, disabledExtensions);
+		const agents = dashboard.find(extension => extension.path === path.join(tempDir, "AGENTS.md"));
+		const gemini = dashboard.find(extension => extension.path === path.join(tempDir, ".gemini", "GEMINI.md"));
+
+		expect(runtime.items.map(file => path.basename(file.path))).toContain("AGENTS.md");
+		expect(agents?.state).toBe("active");
+		expect(gemini?.state).toBe("disabled");
 	});
 });

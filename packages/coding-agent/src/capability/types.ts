@@ -104,7 +104,7 @@ export interface LoadOptions<T = unknown> {
 	cwd?: string;
 	/** Include items even if they fail validation. Default: false */
 	includeInvalid?: boolean;
-	/** Include items disabled via settings. Default: false */
+	/** Include disabled items without letting them shadow enabled items. Default: false */
 	includeDisabled?: boolean;
 	/** Explicit disabled extension IDs to apply instead of settings. */
 	disabledExtensions?: string[];
