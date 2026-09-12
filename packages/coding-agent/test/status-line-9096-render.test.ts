@@ -504,7 +504,7 @@ test("masks boundary ticks across the reserved compact placeholder width", () =>
 	component.setAutoCompactEnabled(true);
 	component.updateSettings({
 		preset: "custom",
-		leftSegments: ["context_pct"],
+		leftSegments: ["model", "context_pct"],
 		rightSegments: [],
 		separator: "none",
 		sessionAccent: false,
