@@ -1,4 +1,6 @@
-import { logger } from "@oh-my-pi/pi-utils";
+// Subpath import: reachable from cli.ts through the speech smoke probe, where
+// the pi-utils barrel would pull native addons into normal CLI startup.
+import * as logger from "@oh-my-pi/pi-utils/logger";
 
 /**
  * Narrow a value to a thenable so a rejection handler can be attached.

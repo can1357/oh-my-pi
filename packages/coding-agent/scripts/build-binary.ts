@@ -2,6 +2,8 @@
 
 import { createRequire } from "node:module";
 import * as path from "node:path";
+import { canCompileAppleSpeechSidecar } from "../src/stt/apple-speech-compiler";
+import { buildAppleSpeechSidecarBase64 } from "./apple-speech-sidecar";
 import { compileCodingAgent } from "./compile-binary";
 
 const packageDir = path.join(import.meta.dir, "..");
@@ -91,12 +93,24 @@ async function main(): Promise<void> {
 			["bun", "--cwd=../natives", "run", "gen:native"],
 			crossBuild ? { ...Bun.env, TARGET_PLATFORM: crossBuild.platform, TARGET_ARCH: crossBuild.arch } : Bun.env,
 		);
+		const targetPlatform = crossBuild?.platform ?? process.platform;
+		const targetArchitecture = crossBuild?.arch ?? process.arch;
+		let appleSpeechSidecarBase64: string | undefined;
+		// Non-Darwin hosts and Macs without the macOS 26 SDK omit the optional
+		// embed and retain the on-target source fallback.
+		if (targetPlatform === "darwin" && process.platform === "darwin" && (await canCompileAppleSpeechSidecar())) {
+			if (targetArchitecture !== "arm64" && targetArchitecture !== "x64") {
+				throw new Error(`Unsupported Darwin architecture for SpeechAnalyzer: ${targetArchitecture}`);
+			}
+			appleSpeechSidecarBase64 = await buildAppleSpeechSidecarBase64(targetArchitecture);
+		}
 		try {
 			await compileCodingAgent({
 				repoRoot,
 				entrypoint: path.join(packageDir, "src", "cli.ts"),
 				outfile: outputPath,
 				transformersVersion,
+				appleSpeechSidecarBase64,
 				target: crossBuild?.target,
 				executablePath: Bun.env.BUN_COMPILE_EXECUTABLE_PATH || undefined,
 				skipBuiltinCodesign: shouldAdhocSign,

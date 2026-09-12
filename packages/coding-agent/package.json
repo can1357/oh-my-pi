@@ -87,6 +87,7 @@
     "dist/cli.js",
     "dist/docs-index.generated.txt",
     "dist/CHANGELOG-*.md",
+    "dist/omp-speech-analyzer-*",
     "dist/*.node",
     "dist/template-*.css",
     "dist/template-*.html",
