@@ -106,4 +106,22 @@ describe("disabledExtensions runtime filtering", () => {
 		expect(agents?.state).toBe("active");
 		expect(gemini?.state).toBe("disabled");
 	});
+
+	test("deduplicates against the caller's session-local disabled list, not global settings", async () => {
+		await fs.rm(path.join(tempDir, ".omp", "AGENTS.md"));
+		await fs.writeFile(path.join(tempDir, "AGENTS.md"), "# active project instructions\n");
+		await fs.mkdir(path.join(tempDir, ".gemini"), { recursive: true });
+		await fs.writeFile(path.join(tempDir, ".gemini", "GEMINI.md"), "# session-disabled project instructions\n");
+
+		// Process-global settings disable nothing; the disablement is session-local.
+		initializeWithSettings(Settings.isolated({ disabledExtensions: [] }));
+
+		const disabledIds = ["context-file:project:GEMINI.md", "context-file:user:GEMINI.md"];
+		const dashboard = await loadAllExtensions(tempDir, disabledIds);
+		const agents = dashboard.find(extension => extension.path === path.join(tempDir, "AGENTS.md"));
+		const gemini = dashboard.find(extension => extension.path === path.join(tempDir, ".gemini", "GEMINI.md"));
+
+		expect(agents?.state).toBe("active");
+		expect(gemini?.state).toBe("disabled");
+	});
 });
