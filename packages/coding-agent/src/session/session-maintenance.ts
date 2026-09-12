@@ -773,12 +773,17 @@ export class SessionMaintenance {
 	 * Aborts current agent operation first.
 	 * @param customInstructions Optional instructions for the compaction summary
 	 * @param options Optional callbacks for completion/error handling
+	 * @param onCommitted Internal: nested fallback frames report their commit to
+	 * the owning frame the moment the entry lands, so a late rejection (a
+	 * `session_compact` hook or `onComplete` throwing after the append) still
+	 * resumes the interrupted turn exactly as the direct path does.
 	 */
 	async compact(
 		customInstructions?: string,
 		options?: CompactOptions,
 		methodOffset = 0,
 		retryController?: AbortController,
+		onCommitted?: () => void,
 	): Promise<CompactionResult> {
 		const ownsCompactionController = retryController === undefined;
 		if (this.#compactionAbortController && this.#compactionAbortController !== retryController) {
@@ -801,6 +806,10 @@ export class SessionMaintenance {
 		let methods: CompactionMethod[] = [];
 		let selectedMethodIndex = -1;
 		let compactionCommitted = false;
+		const markCommitted = (): void => {
+			compactionCommitted = true;
+			onCommitted?.();
+		};
 		let methodAttempted = false;
 		// Set when this manual pass aborted a live turn: the turn is resumed once the
 		// summary lands (see the `finally`). Generation is captured after the abort
@@ -846,7 +855,7 @@ export class SessionMaintenance {
 				!options?.internalGuidance
 			) {
 				const result = await this.#compactExperimentalContext(activeModel, compactionAbortController);
-				compactionCommitted = true;
+				markCommitted();
 				options?.onComplete?.(result);
 				return result;
 			}
@@ -904,15 +913,14 @@ export class SessionMaintenance {
 					"compaction",
 				);
 				// The nested call runs on this controller, so it never owns the resume;
-				// mark the commit here like the catch-based retry does.
-				const fallback = await this.compact(
+				// it reports its commit back here instead.
+				return await this.compact(
 					customInstructions,
 					options,
 					selectedMethodIndex + 1,
 					compactionAbortController,
+					markCommitted,
 				);
-				compactionCommitted = true;
-				return fallback;
 			}
 			const pathEntries = this.#host.sessionManager.getBranch();
 			const preparation = prepareCompaction(pathEntries, effectiveSettings, activeModel, this.#tokenizer);
@@ -1161,7 +1169,7 @@ export class SessionMaintenance {
 				});
 			}
 
-			compactionCommitted = true;
+			markCommitted();
 			await this.#commitCompactionEntry({
 				summary,
 				shortSummary,
@@ -1200,14 +1208,13 @@ export class SessionMaintenance {
 					`${methods[selectedMethodIndex]} compaction failed; trying the next preferred method`,
 					"compaction",
 				);
-				const retried = await this.compact(
+				return await this.compact(
 					customInstructions,
 					options,
 					selectedMethodIndex + 1,
 					compactionAbortController,
+					markCommitted,
 				);
-				compactionCommitted = true;
-				return retried;
 			}
 			options?.onError?.(err);
 			throw error;
