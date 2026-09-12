@@ -4204,7 +4204,14 @@ export class AuthStorage {
 				const credentialType = entry.credential.type;
 				const providerKey = this.#getProviderTypeKey(provider, credentialType);
 				let blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
-				if (blockedUntil !== undefined && provider !== "openai-codex") {
+				// A block under a scope the strategy can vouch for must still fetch
+				// a probe report, or it outlives the recovery that report would
+				// prove: no report means no reconciliation, so the credential idles
+				// until the clock runs out even after quota is restored.
+				if (
+					blockedUntil !== undefined &&
+					!this.#blockedCredentialCanHeal(provider, providerKey, index, blockScopes)
+				) {
 					return {
 						credentialId: entry.id,
 						credentialType,
@@ -4231,7 +4238,7 @@ export class AuthStorage {
 					planEligibilityByCredential.set(entry.id, getOpenAICodexPlanEligibility(report, planRequirement));
 				}
 
-				if (provider === "openai-codex") {
+				if (this.#supportsUsageBlockHealing(provider)) {
 					blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
 				}
 				if (blockedUntil !== undefined) {
@@ -5011,7 +5018,15 @@ export class AuthStorage {
 				);
 				let usage: UsageReport | null = null;
 				let usageChecked = false;
-				if (blockedUntil !== undefined && args.provider === "openai-codex") {
+				if (
+					blockedUntil !== undefined &&
+					this.#blockedCredentialCanHeal(
+						args.provider,
+						args.providerKey,
+						selection.index,
+						args.blockScopes ?? args.blockScope,
+					)
+				) {
 					usage = await this.#getUsageReport(args.provider, selection.credential, {
 						...args.options,
 						timeoutMs: this.#usageRequestTimeoutMs,
@@ -6613,6 +6628,29 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Whether a fresh report could lift what currently blocks this credential.
+	 *
+	 * A strategy that names healable scopes can only vouch for those scopes, so
+	 * a live unscoped block — an Opus/Sonnet usage limit, a refresh failure —
+	 * keeps the credential unusable whatever the report says about a tier. A
+	 * probe then cannot change the outcome and must not be spent; the tier scope
+	 * heals on a later pass, once the block that actually holds the credential
+	 * has lifted. Codex heals through its meter metadata rather than named
+	 * scopes, so its blocks always qualify.
+	 */
+	#blockedCredentialCanHeal(
+		provider: Provider,
+		providerKey: string,
+		credentialIndex: number,
+		blockScopeOrScopes: string | readonly string[] | undefined,
+	): boolean {
+		if (!this.#supportsUsageBlockHealing(provider)) return false;
+		if (this.#rankingStrategyResolver?.(provider)?.healableBlockScopes === undefined) return true;
+		if (this.#getCredentialBlockedUntil(provider, providerKey, credentialIndex) !== undefined) return false;
+		return this.#getCredentialBlockedUntil(provider, providerKey, credentialIndex, blockScopeOrScopes) !== undefined;
+	}
+
+	/**
 	 * Self-heal stale usage-limit blocks: when a fresh live usage report says a
 	 * scope is below every limit gating it, drop its persisted and in-memory
 	 * blocks so credential selection re-includes the recovered account before
@@ -6626,6 +6664,10 @@ export class AuthStorage {
 		if (credentialIndex < 0) return;
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		if (provider !== "openai-codex") {
+			// Only a live report proves recovery. A broker can serve its retained
+			// last-good report for hours after `/usage` starts failing, and those
+			// healthy limits describe the account before the 429 that blocked it.
+			if (!Number.isFinite(report.fetchedAt) || Date.now() - report.fetchedAt > USAGE_REPORT_TTL_MS) return;
 			for (const { blockScope, limits } of strategy?.healableBlockScopes?.(report) ?? []) {
 				if (limits.length === 0 || this.#isUsageLimitReached(limits)) continue;
 				this.#clearHealedBlockScope(provider, providerKey, credentialId, credentialIndex, blockScope);

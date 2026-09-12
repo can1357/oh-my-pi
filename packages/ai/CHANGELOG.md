@@ -39,6 +39,7 @@
 
 ### Fixed
 
+- A stale Anthropic tier block (`tier:fable`, `tier:mythos`) is now cleared once a live usage report shows headroom on both the tier row and the shared windows, instead of idling a usable account until the reported reset. Healing requires a live report, and a credential held by an unscoped block spends no usage request on a probe that cannot lift it ([#11334](https://github.com/can1357/oh-my-pi/pull/11334) by [@AshishKumar4](https://github.com/AshishKumar4)).
 - Codex SSE streams that end without a terminal completion event now retry when replay-safe and remain transient errors when partial output prevents replay ([#11349](https://github.com/can1357/oh-my-pi/issues/11349)).
 
 ## [18.1.15] - 2026-09-08
