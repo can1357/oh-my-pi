@@ -94,20 +94,22 @@ impl GitRepo {
 				.unwrap_or(&self.info.common_dir)
 				.to_owned();
 		}
-		if self.is_linked_worktree() {
-			// A common dir that is not literally `.git` is a relocated git
-			// dir — a submodule's internal store (`<super>/.git/modules/<name>`)
-			// or a `--separate-git-dir` checkout. Its primary checkout lives
-			// where the common dir's `core.worktree` points (the indirection
-			// git itself follows), not at the common dir. Bare repositories
-			// carry no `core.worktree`, so their worktrees keep collapsing on
-			// the shared common dir.
-			if let Some(worktree) = configured_worktree(&self.info.common_dir) {
-				return worktree;
-			}
-			return self.info.common_dir.clone();
+		// A common dir that is not literally `.git` is a relocated git dir —
+		// a submodule's internal store (`<super>/.git/modules/<name>`) or a
+		// `--separate-git-dir` checkout — whether reached directly or through
+		// one of its linked worktrees. Prefer its explicit `core.worktree`
+		// pointer, the indirection git itself follows. `--separate-git-dir`
+		// alone (with no further override) writes no `core.worktree`, so a
+		// direct access has no way to recover its own checkout path from the
+		// common dir's config, and neither does a linked worktree of it —
+		// both resolve to the common dir path itself, matching what `git
+		// worktree list` itself reports for that checkout, so they still
+		// agree. Bare repositories carry no `core.worktree` either, so their
+		// worktrees keep collapsing on the shared common dir the same way.
+		if let Some(worktree) = configured_worktree(&self.info.common_dir) {
+			return worktree;
 		}
-		self.info.repo_root.clone()
+		self.info.common_dir.clone()
 	}
 
 	/// Linked-worktree metadata, or `None` for the primary checkout.
