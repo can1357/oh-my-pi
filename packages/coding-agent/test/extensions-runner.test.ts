@@ -3711,6 +3711,92 @@ describe("ExtensionRunner", () => {
 			expect(events[0]?.method).toBe("notifications/test/1");
 			expect(events[99]?.method).toBe("notifications/test/100");
 		});
+
+		it("tells a handler which agent its session runs as, so a bridge can steer from the top-level session only", async () => {
+			const eventsPath = path.join(tempDir.path(), "mcp-notification-agent.jsonl");
+			const extCode = `
+				import * as fs from "node:fs";
+
+				export default function(pi) {
+					pi.on("mcp_notification", (event, ctx) => {
+						fs.appendFileSync(${JSON.stringify(eventsPath)}, JSON.stringify(ctx.agent) + "\\n");
+						if (ctx.agent.isSubagent) return;
+						pi.sendMessage("steer from " + ctx.agent.id, { deliverAs: "steer" });
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "mcp-notification-agent.ts"), extCode);
+			const result = await loadTestExtensions();
+			const steers: string[] = [];
+			const actions = {
+				sendMessage: (content: unknown) => {
+					steers.push(String(content));
+				},
+				sendUserMessage: () => {},
+				appendEntry: () => {},
+				setLabel: () => {},
+				getActiveTools: () => [],
+				getAllTools: () => [],
+				setActiveTools: async () => {},
+				getCommands: () => [],
+				setModel: async () => false,
+				getThinkingLevel: () => undefined,
+				setThinkingLevel: () => {},
+				getSessionName: () => sessionManager.getSessionName(),
+				setSessionName: async () => {},
+			};
+			const contextActions = {
+				getModel: () => undefined,
+				isIdle: () => true,
+				abort: () => {},
+				hasPendingMessages: () => false,
+				shutdown: () => {},
+				getContextUsage: () => undefined,
+				compact: async () => {},
+				getSystemPrompt: () => [],
+			};
+			const frame = {
+				server: "sensei",
+				method: "notifications/resources/updated",
+				params: { uri: "sensei://chat" },
+			};
+
+			const topLevel = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			topLevel.initialize(actions, contextActions);
+			await topLevel.emitMcpNotification(frame);
+
+			const subagent = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				{ id: "Research.Scout7", isSubagent: true },
+			);
+			subagent.initialize(actions, contextActions);
+			await subagent.emitMcpNotification(frame);
+
+			const seen = fs
+				.readFileSync(eventsPath, "utf8")
+				.trim()
+				.split("\n")
+				.map(line => JSON.parse(line));
+			expect(seen).toEqual([
+				{ id: "Main", isSubagent: false },
+				{ id: "Research.Scout7", isSubagent: true },
+			]);
+			expect(steers).toEqual(["steer from Main"]);
+		});
 	});
 
 	describe("managed timers (ctx.setInterval / ctx.setTimeout)", () => {

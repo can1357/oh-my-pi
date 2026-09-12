@@ -210,6 +210,7 @@ Handlers and tool `execute` receive `ctx` with:
 
 - `ui`
 - `hasUI`
+- `agent` — `{ id, isSubagent }`: the agent this session runs as. `id` is the registry id (`"Main"` for the top-level session, the task-derived id for a subagent); `isSubagent` is `true` inside a session spawned by `task`/`agent()`/`workpool()`. Process-wide events reach every session's runner, so a handler that must act once for the whole process guards on it (see MCP notifications below).
 - `cwd`
 - `sessionManager` (read-only)
 - `modelRegistry`, `model`
@@ -331,10 +332,13 @@ Cancelable pre-events:
 
 - `mcp_notification` — fired for every JSON-RPC notification received from a connected MCP server, AFTER the manager's own handling of known list/update methods (`notifications/tools/list_changed`, `notifications/resources/list_changed`, `notifications/resources/updated`, `notifications/prompts/list_changed`). Unknown or server-custom methods are also delivered. Payload: `{ server: string; method: string; params: unknown }`. Multiple extensions may subscribe; a handler that throws does not prevent other handlers from firing. Notifications received before any listener attaches are buffered (bounded FIFO, cap 100, drop-oldest) and drained into the first subscriber — so startup-time frames aren't lost even if the extension binds after MCP discovery.
 
+Frames fan out to **every** session sharing the MCP manager: the top-level session and each subagent it spawned all run the same extensions and each receives the same frame. A handler that turns a frame into a steer must therefore check `ctx.agent.isSubagent`, or every parked subagent will answer the same notification — with `triggerTurn`, each answer can itself produce a new frame and the process feeds back on itself.
+
 Bridging a push-capable MCP into a session steer:
 
 ```ts
-pi.on("mcp_notification", (event) => {
+pi.on("mcp_notification", (event, ctx) => {
+  if (ctx.agent.isSubagent) return; // the top-level session owns the conversation
   if (event.server !== "peer-bus") return;
   if (event.method !== "notifications/peer_message") return;
   const params = event.params as { from: string; text: string };

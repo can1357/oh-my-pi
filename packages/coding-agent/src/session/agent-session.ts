@@ -117,6 +117,7 @@ import { getEditStore } from "../edit/store";
 import { releaseCompletionHandles } from "../eval/completion-bridge";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
+import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { WorkPoolRegistry } from "../task/workpool";
 import type { BashPtyOptions, BashResult } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
@@ -6676,6 +6677,7 @@ export class AgentSession {
 		return {
 			ui: noOpUIContext,
 			mode: "print",
+			agent: { id: this.#agentId ?? MAIN_AGENT_ID, isSubagent: this.#agentKind === "sub" },
 			hasUI: false,
 			cwd: this.sessionManager.getCwd(),
 			sessionManager: this.sessionManager,
