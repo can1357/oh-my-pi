@@ -73,6 +73,7 @@ interface MonitorHarness {
 function createHarness(
 	artifact?: { id: string; path: string },
 	outputReady: Promise<void> = Promise.resolve(),
+	daemonSnapshot: DaemonSnapshot = daemon,
 ): MonitorHarness {
 	const allocatedArtifact =
 		artifact ??
@@ -132,8 +133,8 @@ function createHarness(
 			}
 			if (operation.op === "start") {
 				// Starts subscribe before the launch so no early lines are missed.
-				expect(subscription).toMatchObject({ name: daemon.name, owner: OWNER });
-				return { op: "start", daemon, readyTimedOut: false };
+				expect(subscription).toMatchObject({ name: daemonSnapshot.name, owner: OWNER });
+				return { op: "start", daemon: daemonSnapshot, readyTimedOut: false };
 			}
 			if (operation.op === "describe") return { op: "describe", daemon, spec };
 			throw new Error(`Unexpected operation: ${operation.op}`);
@@ -416,6 +417,29 @@ describe("hub process output monitoring", () => {
 		);
 		expect(rendered).toContain("monitor off");
 		expect(rendered).not.toContain("monitor stopped");
+	});
+
+	it("includes a broker exit reason in failed start output", async () => {
+		const failedDaemon: DaemonSnapshot = {
+			...daemon,
+			state: "failed",
+			pid: undefined,
+			exitCode: 58,
+			exitReason: "process exited with code 58 without a reported termination reason",
+			exitedAt: 3,
+		};
+		const harness = createHarness(undefined, Promise.resolve(), failedDaemon);
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		const result = await executeLaunch(harness.session, {
+			op: "start",
+			name: daemon.name,
+			application: process.execPath,
+			pty: false,
+			progress: "wake",
+		});
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("Reason: process exited with code 58 without a reported termination reason");
 	});
 
 	it("never replays output that predates a successful monitor attach", async () => {
