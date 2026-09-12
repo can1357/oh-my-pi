@@ -1,0 +1,45 @@
+{
+  "name": "omp-quota",
+  "version": "1.0.0",
+  "description": "Interactive provider quota dashboard for Oh My Pi (OMP) with health indicators, collapsible accounts, and snapshot mode",
+  "type": "module",
+  "main": "index.ts",
+  "homepage": "https://github.com/osamam-eid/omp-quota",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/osamam-eid/omp-quota.git"
+  },
+  "omp": {
+    "name": "omp-quota",
+    "description": "Interactive provider quota dashboard for Oh My Pi (OMP)",
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "pi": {
+    "name": "omp-quota",
+    "description": "Interactive provider quota dashboard for Oh My Pi (OMP)",
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "keywords": [
+    "omp",
+    "oh-my-pi",
+    "omp-extension",
+    "omp-plugin",
+    "quota",
+    "anthropic",
+    "google-antigravity",
+    "openai-codex",
+    "dashboard"
+  ],
+  "author": "osamam-eid",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}
