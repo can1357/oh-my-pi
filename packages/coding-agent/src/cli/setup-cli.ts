@@ -14,7 +14,7 @@ import { theme } from "../modes/theme/theme";
 import { CLOUD_STT_MODEL_OPTIONS, isCloudSttModel, resolveCloudSttModel } from "../stt/cloud-models";
 import { resolveSttCloudCredential } from "../stt/stt-controller";
 import { downloadSttModel, isSttModelCached } from "../stt/downloader";
-import { isSttModelKey, STT_MODEL_OPTIONS } from "../stt/models";
+import { isSttModelKey, resolveSttModelSpec, STT_MODEL_OPTIONS } from "../stt/models";
 import { downloadTtsModel, isTtsLocalModelKey, isTtsModelCached, TTS_LOCAL_MODEL_OPTIONS } from "../tts";
 import * as setupModelPicker from "./setup-model-picker";
 
@@ -174,7 +174,10 @@ export function buildSpeechComponents(hasCloudCredential: Promise<boolean>): Spe
 				const key = settings.get("stt.modelName");
 				if (settings.get("stt.backend") === "cloud" && (await hasCloudCredential))
 					return `cloud (${resolveCloudSttModel(key)}, no download)`;
-				return (await isSttModelCached(key)) ? key : `${key} — local fallback not downloaded`;
+				// `key` may hold a cloud id (or a stale key) that the local path
+				// silently maps onto the default spec: report the model actually probed.
+				const local = resolveSttModelSpec(key).key;
+				return (await isSttModelCached(local)) ? local : `${local} — local fallback not downloaded`;
 			},
 			pick: async () => {
 				const cloud = settings.get("stt.backend") === "cloud" && (await hasCloudCredential);
