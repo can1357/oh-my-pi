@@ -8,6 +8,18 @@
 - `/usage` now shows prepaid credit balances (e.g. Charm Hyper's `100 credits left`) on the provider cards and account summaries instead of `no data` ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
 - Retry fallback chains now support per-model reasoning efforts: a fallback entry may carry an explicit thinking suffix (`"default": ["openai/gpt-5-mini:low"]`), and pressing `t` on a fallback row in `/models` sets or clears it. Bare entries keep inheriting the failing turn's effort. ([#11842](https://github.com/can1357/oh-my-pi/pull/11842) by [@H4vC](https://github.com/H4vC)).
 
+### Changed
+
+- The `xai` web-search provider now follows the provider's catalog default model (`grok-4.6` — same list price, roughly a third of the server-side tool calls per query) and its model is configurable via `providers.webSearchXaiModel` / `XAI_SEARCH_MODEL`.
+
+### Added
+
+- Registry-less callers of the `xai` web-search provider now honor `XAI_BASE_URL`. Custom endpoints retain their configured `xai-oauth` API keys; only official OAuth/env credentials fall back to an available `xai` key.
+
+### Fixed
+
+- xAI web search keeps custom-endpoint fallback credentials paired with their transport and honors the selected model's reasoning-effort compatibility.
+- GitHub Copilot model-policy 403s (plan, model policy, org restriction) no longer delete stored credentials, so the provider stays listed in `/model` after a per-model access denial instead of disappearing until the next `/login` ([#11280](https://github.com/can1357/oh-my-pi/pull/11280) by [@H4vC](https://github.com/H4vC)).
 ### Fixed
 
 - Extension commands now settle BTW writes before creating, switching, or branching sessions, preventing side requests from outliving their source session ([#11335](https://github.com/can1357/oh-my-pi/pull/11335) by [@Ant39140](https://github.com/Ant39140)).

@@ -5537,6 +5537,16 @@ export const SETTINGS_SCHEMA = {
 			description: "Model ID for Gemini Google Search grounding. Defaults to gemini-2.5-flash.",
 		},
 	},
+	"providers.webSearchXaiModel": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "xAI web_search model",
+			description: "Model ID for Grok web search via the xAI Responses API. Defaults to grok-4.6.",
+		},
+	},
 	"providers.antigravityEndpoint": {
 		type: "enum",
 		values: ["auto", "production", "sandbox"] as const,

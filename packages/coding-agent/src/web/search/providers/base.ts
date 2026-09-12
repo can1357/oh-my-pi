@@ -74,6 +74,8 @@ export interface SearchParams {
 	sessionId?: string;
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
 	geminiModel?: string;
+	/** Model override for the xAI Responses web-search call; see `resolveXAIWebSearchModel`. */
+	xaiModel?: string;
 }
 
 /** Base class for web search providers. */

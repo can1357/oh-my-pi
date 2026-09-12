@@ -4,7 +4,9 @@ import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
-const DEFAULT_BASE_URL = "https://api.x.ai/v1";
+export const XAI_DEFAULT_BASE_URL = "https://api.x.ai/v1";
+
+const DEFAULT_BASE_URL = XAI_DEFAULT_BASE_URL;
 
 interface XAICredentials {
 	provider: "xai-oauth" | "xai";
@@ -20,7 +22,6 @@ export interface XAIHttpTransport {
 	baseURL: string;
 	headers?: Record<string, string>;
 }
-
 /**
  * Resolve the HTTP base URL for an xAI tool call.
  *
@@ -49,14 +50,16 @@ export interface XAIHttpTransport {
  * model id forces `!bundled === true` and short-circuits XAI_BASE_URL
  * silently. Lookup is scoped to (provider, id); matching by id alone would
  * let xai-oauth entries hijack a xai tool call (or vice versa) when the
- * same model id ships under both descriptors.
+ * same model id ships under both descriptors. When `modelRegistry` is absent
+ * (SDK custom-tool callers embedding web search without one, direct callers),
+ * steps 1-2 are skipped and the env/default legs apply unchanged.
  */
 function resolveXAIBaseURL(
-	modelRegistry: ModelRegistry,
+	modelRegistry: ModelRegistry | undefined,
 	provider: XAIHttpProvider,
 	modelId: string | undefined,
 ): string {
-	if (modelId) {
+	if (modelRegistry && modelId) {
 		const merged = modelRegistry.getAll().find(m => m.id === modelId && m.provider === provider);
 		if (merged?.baseUrl) {
 			const bundled = getBundledModels(provider as Parameters<typeof getBundledModels>[0]).find(
@@ -68,7 +71,7 @@ function resolveXAIBaseURL(
 			}
 		}
 	}
-	const providerBaseUrl = modelRegistry.getProviderBaseUrl(provider);
+	const providerBaseUrl = modelRegistry?.getProviderBaseUrl(provider);
 	if (providerBaseUrl) {
 		const normalized = providerBaseUrl.replace(/\/$/, "");
 		if (normalized !== DEFAULT_BASE_URL) return normalized;
@@ -79,15 +82,15 @@ function resolveXAIBaseURL(
  * Resolve an xAI tool endpoint and its provider/model header overrides.
  */
 export function resolveXAIHttpTransport(
-	modelRegistry: ModelRegistry,
+	modelRegistry: ModelRegistry | undefined,
 	provider: XAIHttpProvider,
 	modelId?: string,
 ): XAIHttpTransport {
 	return {
 		baseURL: resolveXAIBaseURL(modelRegistry, provider, modelId),
 		headers:
-			(modelId ? modelRegistry.find(provider, modelId)?.headers : undefined) ??
-			modelRegistry.getProviderHeaders(provider),
+			(modelRegistry && modelId ? modelRegistry.find(provider, modelId)?.headers : undefined) ??
+			modelRegistry?.getProviderHeaders(provider),
 	};
 }
 
