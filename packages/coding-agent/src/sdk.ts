@@ -19,6 +19,7 @@ import type {
 	ModelUsageHealth,
 	ProviderSessionState,
 	ServiceTier,
+	ServiceTierByFamily,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
@@ -183,6 +184,7 @@ import { collectMountedMCPToolRoutes, projectMountedMCPXdevGuidance } from "./se
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
+import { createSpeculativeToolExecutionConfig } from "./speculation/host";
 import { closeAllConnections } from "./ssh/connection-manager";
 import { unmountAll } from "./ssh/sshfs-mount";
 import {
@@ -420,6 +422,15 @@ export interface CreateAgentSessionOptions {
 	thinkingLevelCeiling?: Effort;
 	/** OpenAI service-tier override for this session. `null` omits `service_tier`. */
 	openAIServiceTier?: ServiceTier | null;
+	/**
+	 * Per-family service tiers for this session, replacing the `tier.*` settings
+	 * and any persisted tier history. Called once the initial model is final —
+	 * after deferred `modelPattern` resolution and auth fallback — so the caller
+	 * can scope a tier to that model's provider family. The result is always
+	 * persisted, even when empty, so resume and cold revival restore it instead
+	 * of re-deriving tiers from settings.
+	 */
+	resolveServiceTierByFamily?: (model: Model | undefined) => ServiceTierByFamily;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
@@ -3489,13 +3500,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const openaiWebsocketSetting = settings.get("providers.openaiWebsockets") ?? "off";
 		const preferOpenAICodexWebsockets =
 			openaiWebsocketSetting === "on" ? true : openaiWebsocketSetting === "off" ? false : undefined;
-		const configuredServiceTierByFamily = hasServiceTierEntry
-			? (existingSession.serviceTier ?? {})
-			: buildServiceTierByFamily(
-					settings.get("tier.openai"),
-					settings.get("tier.anthropic"),
-					settings.get("tier.google"),
-				);
+		// `model` is final here: deferred patterns, auth fallback, and extension
+		// role reclaim have all run, so a resolver can scope tiers to its family.
+		const resolvedServiceTierByFamily = options.resolveServiceTierByFamily?.(model);
+		const configuredServiceTierByFamily =
+			resolvedServiceTierByFamily ??
+			(hasServiceTierEntry
+				? (existingSession.serviceTier ?? {})
+				: buildServiceTierByFamily(
+						settings.get("tier.openai"),
+						settings.get("tier.anthropic"),
+						settings.get("tier.google"),
+					));
+		const persistInitialServiceTier =
+			options.openAIServiceTier !== undefined || resolvedServiceTierByFamily !== undefined;
 		const initialServiceTierByFamily = { ...configuredServiceTierByFamily };
 		if (options.openAIServiceTier === null) {
 			delete initialServiceTierByFamily.openai;
@@ -3531,6 +3549,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 		const kimiApiFormatSetting = settings.get("providers.kimiApiFormat");
 		const kimiApiFormat = kimiApiFormatSetting === "auto" ? undefined : kimiApiFormatSetting;
+		// Live-bound speculation config: the Agent captures this object once at
+		// construction but reads `enabled` per turn (and `maxInFlight` per drain)
+		// through getters, so mid-session settings UI toggles take effect without
+		// a session recreate. The single shared host keeps its evidence across
+		// toggles; per-turn coordinator close never touches it.
+		const speculativeToolExecution = createSpeculativeToolExecutionConfig(settings, toolSession, extensionRunner);
+
 		agent = new Agent({
 			initialState: {
 				systemPrompt,
@@ -3615,6 +3640,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			pruneToolDescriptions: inlineToolDescriptors,
 			dialect: resolveDialect(settings.get("tools.format"), model),
 			abortOnFabricatedToolResult: settings.get("tools.abortOnFabricatedResult"),
+			speculativeToolExecution,
 			getToolChoice: () => session?.nextToolChoiceDirective(),
 			onToolChoiceUnavailable: () => session?.toolChoiceQueue.reject("unavailable"),
 			telemetry: options.telemetry,
@@ -3630,7 +3656,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Restore messages if session has existing data
 		if (hasExistingSession) {
 			agent.replaceMessages(existingSession.messages);
-			if (options.openAIServiceTier !== undefined) {
+			if (persistInitialServiceTier) {
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
 				);
@@ -3645,7 +3671,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// classification persists its concrete effort once a real user turn runs.
 				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
 			}
-			if (options.openAIServiceTier !== undefined || Object.keys(initialServiceTierByFamily).length > 0) {
+			if (persistInitialServiceTier || Object.keys(initialServiceTierByFamily).length > 0) {
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
 				);

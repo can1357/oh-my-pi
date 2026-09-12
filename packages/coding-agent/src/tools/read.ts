@@ -1,12 +1,17 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { notebookToEditableText } from "@oh-my-pi/pi-natives";
+import { type EditStore, notebookToEditableText } from "@oh-my-pi/pi-natives";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	SpeculativePhysicalOutcome,
+	ToolSpeculationAssessment,
+	ToolSpeculationCommitContext,
+	ToolSpeculationDiscardContext,
+	ToolSpeculationExecutionContext,
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
@@ -64,7 +69,7 @@ import {
 	scanFileForConflicts,
 } from "./conflict-detect";
 import { executeReadUrl, fetchReadUrl, parseReadUrlTarget } from "./fetch";
-import { type OutputMeta, resolveOutputMaxColumns } from "./output-meta";
+import { postProcessToolResult, type OutputMeta, resolveOutputMaxColumns } from "./output-meta";
 import {
 	expandPath,
 	formatPathRelativeToCwd,
@@ -133,7 +138,13 @@ import {
 } from "./read-selector";
 import { splitAddressableFileLines } from "./hashline-format";
 import { readSqlite, resolveSqliteReadPath } from "./read-sqlite";
-import { isProseSummaryPath, renderSummary, routeReadThroughBridge, trySummarize } from "./read-summary";
+import {
+	getReadTextFileBridge,
+	isProseSummaryPath,
+	renderSummary,
+	routeReadThroughBridge,
+	trySummarize,
+} from "./read-summary";
 import { parseSqlitePathCandidates } from "./sqlite-reader";
 import { formatBytes, shortenPath } from "./render-utils";
 import { REPORT_ISSUE_DEVICE_NAME, reportIssueDeviceUsage } from "./report-tool-issue";
@@ -147,7 +158,7 @@ export { readToolRenderer } from "./read-renderer";
 /** Largest profile (`*.sample.txt`, `*.cpuprofile`) converted to a bottleneck summary; bigger files read as plain text. */
 const MAX_PROFILE_SUMMARY_BYTES = 32 * 1024 * 1024;
 const MAX_ARTIFACT_RAW_INLINE_BYTES = DEFAULT_MAX_BYTES;
-const SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
+export const SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 
 /** LF byte, scanned natively to find line boundaries in a buffered file. */
 const LF_BYTE = 0x0a;
@@ -707,6 +718,110 @@ function appendRepeatReadHint(session: ToolSession, path: string, result: AgentT
 	block.text += `\n\n[You have received this identical output ${entry.count} times. Re-reading '${path}' will not change it — use a narrower selector (path:A-B), or proceed with the edit.]`;
 }
 
+const LOCAL_READ_SPECULATION_INELIGIBLE: ToolSpeculationAssessment = {
+	eligible: false,
+	reason: "read target is not a speculation-safe local path",
+};
+
+export type SpeculativeReadTargetFailure = "local read path is unavailable" | "local read target is unsafe";
+
+/**
+ * Resolve a speculative local-read target and validate it against the workspace.
+ *
+ * Shared by host authorization and speculative execution so both bind the same
+ * target: assessment is metadata-only and the authorize-to-execute window admits
+ * a symlink swap, so execution must re-resolve and re-validate before reading.
+ * Anything else fails into ordinary execution, never commit. Resolution failures
+ * report unavailable; containment/file/size failures report unsafe (reason
+ * strings pinned by speculative-host tests).
+ */
+export async function resolveSpeculativeReadTarget(
+	cwd: string,
+	lexicalPath: string,
+): Promise<{ ok: true; resolved: string } | { ok: false; reason: SpeculativeReadTargetFailure }> {
+	try {
+		const workspace = await fs.realpath(cwd);
+		const resolved = await fs.realpath(path.resolve(cwd, lexicalPath));
+		const workspaceRelativePath = path.relative(workspace, resolved);
+		if (
+			workspaceRelativePath.length === 0 ||
+			workspaceRelativePath === ".." ||
+			workspaceRelativePath.startsWith(`..${path.sep}`) ||
+			path.isAbsolute(workspaceRelativePath)
+		) {
+			return { ok: false, reason: "local read target is unsafe" };
+		}
+		const targetStat = await fs.stat(resolved);
+		if (!targetStat.isFile() || targetStat.size > SNAPSHOT_MAX_BYTES) {
+			return { ok: false, reason: "local read target is unsafe" };
+		}
+		return { ok: true, resolved };
+	} catch {
+		return { ok: false, reason: "local read path is unavailable" };
+	}
+}
+
+export interface LocalReadSpeculationEvidence {
+	kind: "local_read";
+	resource: string;
+	snapshotDigest: string;
+}
+
+function digestSnapshotText(text: string): string {
+	return new Bun.CryptoHasher("sha256").update(text).digest("hex");
+}
+
+async function assessLocalReadSpeculation(
+	session: ToolSession,
+	args: Readonly<Record<string, unknown>>,
+): Promise<ToolSpeculationAssessment> {
+	if (getReadTextFileBridge(session)) return LOCAL_READ_SPECULATION_INELIGIBLE;
+	if (typeof args.path !== "string") return LOCAL_READ_SPECULATION_INELIGIBLE;
+	const target = splitPathAndSel(args.path);
+	if (
+		target.sel !== undefined ||
+		args.path.startsWith("www.") ||
+		/^[a-z][a-z0-9+.-]*:\/\//i.test(args.path) ||
+		args.path.includes(":") ||
+		args.path.includes("?") ||
+		args.path.includes("#")
+	) {
+		return LOCAL_READ_SPECULATION_INELIGIBLE;
+	}
+	// Metadata-only: this assessment performs no filesystem I/O. The
+	// coordinator runs assessment before host authorization, so any
+	// realpath/stat/sniff here would touch disk even for reads the approval
+	// policy or lifecycle handlers go on to deny. Content inspection instead
+	// runs inside host authorization (after those policy gates allow the
+	// candidate), and execution revalidates before anything can commit. A
+	// provisional admission that later fails evidence falls back to ordinary
+	// execution and never commits.
+	const lexicalPath = path.resolve(session.cwd, args.path);
+	const workspaceRelativePath = path.relative(session.cwd, lexicalPath);
+	if (
+		workspaceRelativePath.length === 0 ||
+		workspaceRelativePath === ".." ||
+		workspaceRelativePath.startsWith(`..${path.sep}`) ||
+		path.isAbsolute(workspaceRelativePath)
+	) {
+		return LOCAL_READ_SPECULATION_INELIGIBLE;
+	}
+	if (
+		lexicalPath.toLowerCase().endsWith(".ipynb") ||
+		isSampleProfilePath(lexicalPath) ||
+		isCpuProfilePath(lexicalPath) ||
+		CONVERTIBLE_EXTENSIONS.has(path.extname(lexicalPath).toLowerCase()) ||
+		lexicalPath.endsWith(".svg") ||
+		lexicalPath.endsWith(".svgz")
+	) {
+		return LOCAL_READ_SPECULATION_INELIGIBLE;
+	}
+	return {
+		eligible: true,
+		effect: { kind: "local_read", resources: [{ scheme: "file", path: lexicalPath, access: "read" }] },
+	};
+}
+
 /**
  * Read tool implementation.
  *
@@ -738,6 +853,28 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	}
 	readonly strict = true;
 
+	readonly speculation = {
+		finalized: {
+			assess: ({ args }: { args: Readonly<Record<string, unknown>> }) =>
+				assessLocalReadSpeculation(this.session, args),
+			execute: (context: ToolSpeculationExecutionContext, signal: AbortSignal) =>
+				this.#executeSpeculativeRead(context, signal),
+			commit: (context: ToolSpeculationCommitContext, outcome: SpeculativePhysicalOutcome) =>
+				this.#commitSpeculativeRead(context, outcome),
+			discard: (context: ToolSpeculationDiscardContext) => {
+				const execution = this.#speculativeReadExecutions.get(context.toolCall.id);
+				if (execution) execution.discarded = true;
+				this.#speculativeReads.delete(context.toolCall.id);
+			},
+		},
+	};
+
+	#speculativeReads = new Map<
+		string,
+		{ store: EditStore; snapshotHash: string; absolutePath: string; path: string }
+	>();
+
+	#speculativeReadExecutions = new Map<string, { discarded: boolean }>();
 	readonly #autoResizeImages: boolean;
 	readonly #defaultLimit: number;
 
@@ -753,7 +890,112 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		this.description = this.#renderDescription();
 	}
 
-	/** Render the description for the current file display mode. */
+	async #executeSpeculativeRead(
+		context: ToolSpeculationExecutionContext,
+		signal: AbortSignal,
+	): Promise<SpeculativePhysicalOutcome> {
+		if (context.effect.kind !== "local_read" || context.effect.resources.length !== 1) {
+			throw new Error("Invalid speculative read operation");
+		}
+		const execution = { discarded: false };
+		this.#speculativeReadExecutions.set(context.toolCall.id, execution);
+		const target = await resolveSpeculativeReadTarget(this.session.cwd, context.effect.resources[0].path);
+		if (!target.ok) {
+			throw new Error("Speculative read target is unavailable");
+		}
+		const absolutePath = target.resolved;
+		let snapshotDigest: string | undefined;
+		try {
+			const speculativeSession = Object.create(this.session) as ToolSession;
+			Object.defineProperty(speculativeSession, "editStore", {
+				value: undefined,
+				writable: true,
+				configurable: true,
+			});
+			Object.defineProperty(speculativeSession, "conflictHistory", {
+				value: undefined,
+				writable: true,
+				configurable: true,
+			});
+			Object.defineProperty(speculativeSession, "getClientBridge", {
+				value: () => undefined,
+				configurable: true,
+			});
+			const store = getEditStore(speculativeSession);
+			const speculativeTool = new ReadTool(speculativeSession);
+			// Execute against the requested lexical path so the committed result
+			// renders exactly like an ordinary read (hashline headers, source
+			// metadata). The resolved target above stays a validation gate and
+			// still binds content addressing below; containment and agreement are
+			// enforced by this revalidation plus the capture/execute/commit digest
+			// triple-check, never by the rendered path.
+			const result = await speculativeTool.#executeInner(
+				context.toolCall.id,
+				{ ...(context.args as ReadParams) },
+				signal,
+				undefined,
+				undefined,
+				normalizedText => {
+					snapshotDigest = digestSnapshotText(normalizedText);
+				},
+				() => {
+					throw new Error("Conflict-aware reads require authoritative execution");
+				},
+			);
+			const snapshotHash = store.headHash(absolutePath);
+			if (!signal.aborted && !execution.discarded && snapshotHash) {
+				this.#speculativeReads.set(context.toolCall.id, {
+					store,
+					snapshotHash,
+					absolutePath,
+					path: (context.args as ReadParams).path,
+				});
+			}
+			if (!snapshotDigest) throw new Error("Speculative read did not consume one stable buffered snapshot");
+			return {
+				kind: "result",
+				result,
+				isError: result.isError === true,
+				evidence: {
+					kind: "local_read",
+					resource: absolutePath,
+					snapshotDigest,
+				} satisfies LocalReadSpeculationEvidence,
+			};
+		} finally {
+			if (this.#speculativeReadExecutions.get(context.toolCall.id) === execution) {
+				this.#speculativeReadExecutions.delete(context.toolCall.id);
+			}
+		}
+	}
+
+	async #commitSpeculativeRead(
+		context: ToolSpeculationCommitContext,
+		outcome: SpeculativePhysicalOutcome,
+	): Promise<AgentToolResult<unknown>> {
+		try {
+			if (outcome.kind !== "result") throw new Error("Speculative read produced a staged outcome");
+			const staged = this.#speculativeReads.get(context.toolCall.id);
+			const result = outcome.result as AgentToolResult<ReadToolDetails>;
+			if (staged) {
+				const snapshotText = staged.store.byHashText(staged.absolutePath, staged.snapshotHash);
+				if (snapshotText !== null) {
+					const seenLines = staged.store.seenLines(staged.absolutePath, staged.snapshotHash);
+					getEditStore(this.session).recordSnapshot(staged.absolutePath, snapshotText, seenLines);
+				}
+			}
+			appendRepeatReadHint(this.session, staged?.path ?? (context.args as ReadParams).path, result);
+			return await postProcessToolResult(result, this.name, this.session as unknown as AgentToolContext);
+		} finally {
+			this.#speculativeReads.delete(context.toolCall.id);
+		}
+	}
+
+	/**
+	 * Re-render the tool description for the current display mode and the
+	 * effective inspect_image state (mode setting, `/vision` override, and
+	 * active-model image capability all feed it, so it can change at runtime).
+	 */
 	#renderDescription(): string {
 		const displayMode = resolveFileDisplayMode(this.session);
 		return prompt.render(readDescription, {
@@ -1284,6 +1526,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		_toolContext?: AgentToolContext,
+		onBufferedFile?: (normalizedText: string) => void,
+		onConflictMarkers?: () => void,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		let { path: readPath } = params;
 		if (readPath.startsWith("file://")) {
@@ -1672,6 +1916,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 			// Decode only what survived the sniff.
 			const buffered = wholeFileBytes ? deriveBufferedFileText(wholeFileBytes) : undefined;
+			if (buffered) onBufferedFile?.(buffered.normalizedText);
 
 			if (
 				parsed.kind === "none" &&
@@ -2055,6 +2300,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					if (!firstLineExceedsLimit && collectedLines.length > 0) {
 						const blocks = scanConflictLines(collectedLines, startLineDisplay);
 						if (blocks.length > 0) {
+							onConflictMarkers?.();
 							const history = getConflictHistory(this.session);
 							const displayPathForWarning = formatPathRelativeToCwd(absolutePath, this.session.cwd);
 							const entries = blocks.map(block =>

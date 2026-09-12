@@ -50,6 +50,7 @@ import type {
 	AgentToolContext,
 	AgentTurnEndContext,
 	AsideMessage,
+	SpeculativeToolExecutionConfig,
 	StreamFn,
 	ToolCallContext,
 	ToolChoiceDirective,
@@ -242,6 +243,8 @@ export interface AgentOptions {
 	 * Use for deobfuscating secrets or rewriting arguments.
 	 */
 	transformToolCallArguments?: (args: Record<string, unknown>, toolName: string) => Record<string, unknown>;
+	/** Host authorization and telemetry for opt-in speculative tool execution. */
+	speculativeToolExecution?: SpeculativeToolExecutionConfig;
 
 	/**
 	 * Resolve a tool call whose name matched no advertised tool. Lets hosts
@@ -407,6 +410,7 @@ export class Agent {
 	#kimiApiFormat?: "openai" | "anthropic";
 	#preferWebsockets?: boolean;
 	#transformToolCallArguments?: (args: Record<string, unknown>, toolName: string) => Record<string, unknown>;
+	#speculativeToolExecution?: SpeculativeToolExecutionConfig;
 	#resolveFallbackTool?: (name: string) => AgentTool<any> | undefined;
 	#intentTracing: boolean;
 	#pruneToolDescriptions: boolean;
@@ -496,6 +500,7 @@ export class Agent {
 		this.#kimiApiFormat = opts.kimiApiFormat;
 		this.#preferWebsockets = opts.preferWebsockets;
 		this.#transformToolCallArguments = opts.transformToolCallArguments;
+		this.#speculativeToolExecution = opts.speculativeToolExecution;
 		this.#resolveFallbackTool = opts.resolveFallbackTool;
 		this.#intentTracing = opts.intentTracing === true;
 		this.#pruneToolDescriptions = opts.pruneToolDescriptions === true;
@@ -1461,6 +1466,7 @@ export class Agent {
 			cwd: this.#cwd,
 			getCwd: this.#cwdResolver,
 			transformToolCallArguments: this.#transformToolCallArguments,
+			speculativeToolExecution: this.#speculativeToolExecution,
 			resolveFallbackTool: this.#resolveFallbackTool,
 			intentTracing: this.#intentTracing,
 			pruneToolDescriptions: this.#pruneToolDescriptions,

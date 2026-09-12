@@ -214,6 +214,12 @@ conversation; `/new`, which creates a new session identity and transcript file;
 and `/drop`, which attempts to delete the old persisted session before starting
 a new one.
 
+## BTW history
+
+`/btw` history is stored alongside session artifacts and remains outside the main
+conversation. See the [BTW command reference](slash-command-internals.md#11-built-in-command-note-btw)
+for keyboard controls, follow-ups, persistence, and migration safety.
+
 ## Fork
 
 Interactive `/fork` creates a new session from the current one and switches the active session identity.

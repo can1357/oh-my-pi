@@ -17,7 +17,12 @@ import {
 	type SessionOwners,
 } from "../executor-base";
 import { shouldDetachKernel } from "../py/spawn-options";
+import type { EvalShadowCellSession } from "../speculation/cell-session";
+import { getActiveEvalShadowCell } from "../speculation/runtime-context";
+import type { ShadowPlan } from "../speculation/types";
 import type { EvalToolDescriptor, EvalToolInvokeResult } from "../types";
+import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/runtime";
+import { projectJavaScriptShadowPlan } from "./speculation";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
 import { WorkerCore } from "./worker-core";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
@@ -55,6 +60,7 @@ interface PendingRun {
 	runId: string;
 	runState: VmRunState;
 	toolSession: ToolSession;
+	shadowCell?: EvalShadowCellSession;
 	resolve(value: { value: unknown }): void;
 	reject(error: Error): void;
 	toolCalls: Map<string, AbortController>;
@@ -88,6 +94,8 @@ interface JsSession {
 	worker: WorkerHandle;
 	state: "alive" | "dead";
 	pending: Map<string, PendingRun>;
+	pendingSnapshots: Map<string, PromiseWithResolvers<Extract<WorkerOutbound, { type: "shadow-snapshot" }>>>;
+	pendingShadowRuns: Map<string, PromiseWithResolvers<Extract<WorkerOutbound, { type: "shadow-run" }>>>;
 	ownerIds: Set<string>;
 	hasFallbackOwner: boolean;
 }
@@ -184,6 +192,7 @@ export async function executeInVmContext(options: {
 		options.timeoutMs,
 		options.ownerId,
 	);
+
 	return await runOnce(session, options);
 }
 
@@ -275,6 +284,96 @@ export async function invokeJsTool(
 	return { ok: true, tools, missing };
 }
 
+/**
+ * Captures a retained runtime's safe user-global snapshot without executing user
+ * code. A busy runtime returns `null`; callers must execute normally.
+ */
+export async function snapshotVmContext(options: {
+	sessionKey: string;
+	cwd: string;
+	sessionId: string;
+	localRoots?: Record<string, string>;
+	timeoutMs?: number;
+}): Promise<ShadowSnapshot | null> {
+	const session = sessions.get(options.sessionKey);
+	if (session?.state !== "alive") return null;
+	const id = `snapshot-${Snowflake.next()}`;
+	const deferred = Promise.withResolvers<Extract<WorkerOutbound, { type: "shadow-snapshot" }>>();
+	session.pendingSnapshots.set(id, deferred);
+	try {
+		session.worker.send({
+			type: "shadow-snapshot",
+			id,
+			snapshot: { cwd: options.cwd, sessionId: options.sessionId, localRoots: options.localRoots },
+		});
+		const reply = await raceWithTimeout(
+			deferred.promise,
+			options.timeoutMs ?? WORKER_INIT_TIMEOUT_MS,
+			"JS shadow snapshot timed out",
+		);
+		return reply.eligible ? (reply.snapshot ?? null) : null;
+	} finally {
+		session.pendingSnapshots.delete(id);
+	}
+}
+
+export interface JavaScriptShadowPlanningResult {
+	snapshot: ShadowSnapshot;
+	digest: string;
+	plan: ShadowPlan;
+}
+
+/**
+ * Retained-only planning seam. It never starts a worker and never executes the
+ * candidate source; unavailable or busy runtimes fall back to normal eval.
+ */
+export async function shadowPlanIfPresent(options: {
+	sessionKey: string;
+	cwd: string;
+	sessionId: string;
+	code: string;
+	localRoots?: Record<string, string>;
+	timeoutMs?: number;
+}): Promise<JavaScriptShadowPlanningResult | null> {
+	const snapshot = await snapshotVmContext(options);
+	if (!snapshot) return null;
+	return {
+		snapshot,
+		digest: shadowSnapshotDigest(snapshot),
+		plan: await projectJavaScriptShadowPlan(options.code, {
+			snapshot: snapshot.values,
+			initialGlobals: snapshot.initialGlobals,
+		}),
+	};
+}
+
+/**
+ * Atomically rechecks a retained runtime's snapshot before starting a real
+ * cell. `null` means the caller must discard speculative outcomes and use the
+ * normal execution path.
+ */
+export async function runIfSnapshotMatches(options: {
+	sessionKey: string;
+	sessionId: string;
+	cwd: string;
+	session: ToolSession;
+	localRoots?: Record<string, string>;
+	code: string;
+	filename: string;
+	runState: VmRunState;
+	expectedRevision: number;
+	expectedDigest: string;
+}): Promise<{ value: unknown } | null> {
+	const session = sessions.get(options.sessionKey);
+	if (session?.state !== "alive") return null;
+	try {
+		return await runOnce(session, options);
+	} catch (error) {
+		if (error instanceof ToolError && error.message === "JS shadow snapshot changed") return null;
+		throw error;
+	}
+}
+
 export async function resetVmContext(sessionKey: string): Promise<void> {
 	const session = sessions.get(sessionKey) ?? (await startingSessions.get(sessionKey)?.promise.catch(() => undefined));
 	if (!session) return;
@@ -351,6 +450,8 @@ export async function smokeTestJsEvalWorker(): Promise<void> {
 		worker,
 		state: "alive",
 		pending: new Map(),
+		pendingSnapshots: new Map(),
+		pendingShadowRuns: new Map(),
 		ownerIds: new Set(),
 		hasFallbackOwner: false,
 	};
@@ -383,6 +484,8 @@ async function runOnce(
 		code: string;
 		filename: string;
 		runState: VmRunState;
+		expectedRevision?: number;
+		expectedDigest?: string;
 	},
 ): Promise<{ value: unknown }> {
 	const runId = `r-${Snowflake.next()}`;
@@ -391,6 +494,7 @@ async function runOnce(
 		runId,
 		runState: options.runState,
 		toolSession: options.session,
+		shadowCell: getActiveEvalShadowCell(),
 		resolve,
 		reject,
 		toolCalls: new Map(),
@@ -428,18 +532,39 @@ async function runOnce(
 	}
 
 	try {
-		session.worker.send({
-			type: "run",
-			runId,
-			code: options.code,
-			filename: options.filename,
-			snapshot: {
-				cwd: options.cwd,
-				sessionId: options.sessionId,
-				localRoots: options.localRoots,
-				preludes: javascriptPreludeSources(options.session),
-			},
-		});
+		const snapshot = {
+			cwd: options.cwd,
+			sessionId: options.sessionId,
+			localRoots: options.localRoots,
+			preludes: javascriptPreludeSources(options.session),
+		};
+		if (options.expectedRevision !== undefined && options.expectedDigest !== undefined) {
+			const id = `shadow-run-${Snowflake.next()}`;
+			const admission = Promise.withResolvers<Extract<WorkerOutbound, { type: "shadow-run" }>>();
+			session.pendingShadowRuns.set(id, admission);
+			try {
+				session.worker.send({
+					type: "run-if-snapshot-matches",
+					id,
+					runId,
+					code: options.code,
+					filename: options.filename,
+					snapshot,
+					expectedRevision: options.expectedRevision,
+					expectedDigest: options.expectedDigest,
+				});
+				const reply = await raceWithTimeout(
+					admission.promise,
+					WORKER_INIT_TIMEOUT_MS,
+					"JS shadow admission timed out",
+				);
+				if (!reply.eligible) throw new ToolError("JS shadow snapshot changed");
+			} finally {
+				session.pendingShadowRuns.delete(id);
+			}
+		} else {
+			session.worker.send({ type: "run", runId, code: options.code, filename: options.filename, snapshot });
+		}
 		return await promise;
 	} finally {
 		options.runState.signal?.removeEventListener("abort", onAbort);
@@ -479,6 +604,8 @@ async function acquireSession(
 			worker,
 			state: "alive",
 			pending: new Map(),
+			pendingSnapshots: new Map(),
+			pendingShadowRuns: new Map(),
 			ownerIds: new Set(),
 			hasFallbackOwner: false,
 		};
@@ -595,6 +722,16 @@ function handleSessionMessage(session: JsSession, msg: WorkerOutbound): void {
 		case "result":
 			settlePending(session, msg);
 			return;
+		case "shadow-snapshot": {
+			const pending = session.pendingSnapshots.get(msg.id);
+			if (pending) pending.resolve(msg);
+			return;
+		}
+		case "shadow-run": {
+			const pending = session.pendingShadowRuns.get(msg.id);
+			if (pending) pending.resolve(msg);
+			return;
+		}
 		case "log":
 			logWorkerMessage(msg);
 			return;
@@ -648,6 +785,8 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 		const value = await callSessionTool(msg.name, msg.args, {
 			session: pending.toolSession,
 			signal: ctrl.signal,
+			identity: msg.identity,
+			shadowCell: pending.shadowCell,
 			emitStatus: (event: JsStatusEvent) => {
 				trackDeferPhase(pending, event);
 				pending.runState.onDisplay?.({ type: "status", event });
@@ -712,6 +851,10 @@ async function killSession(session: JsSession, error: Error, options: { force: b
 		pending.reject(error);
 	}
 	session.pending.clear();
+	for (const pending of session.pendingSnapshots.values()) pending.reject(error);
+	session.pendingSnapshots.clear();
+	for (const pending of session.pendingShadowRuns.values()) pending.reject(error);
+	session.pendingShadowRuns.clear();
 	if (options.force) {
 		await session.worker.terminate().catch(() => undefined);
 		return;

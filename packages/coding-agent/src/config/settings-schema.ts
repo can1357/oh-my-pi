@@ -63,6 +63,7 @@ import {
 	SERVICE_TIER_INHERIT_SETTING_VALUES,
 	SERVICE_TIER_OPENAI_OPTIONS,
 	SERVICE_TIER_OPENAI_VALUES,
+	type ServiceTierInheritSettingValue,
 } from "./service-tier";
 
 /** Unified settings schema - single source of truth for all settings.
@@ -403,6 +404,7 @@ export interface ModelTagsSettings {
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
+const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
@@ -4751,6 +4753,35 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tools.speculativeExecution.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Experimental Speculative Execution",
+			description:
+				"Enable the discard-safe first slice: validated local reads through direct read calls and nested eval. Network requests, provider completions, and live filesystem writes are not part of this baseline.",
+		},
+	},
+
+	"tools.speculativeExecution.maxInFlight": {
+		type: "number",
+		default: 2,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Speculative Execution Concurrency",
+			description: "Maximum number of validated local reads allowed to run before normal dispatch.",
+			options: [
+				{ value: "1", label: "1 operation" },
+				{ value: "2", label: "2 operations" },
+				{ value: "3", label: "3 operations" },
+				{ value: "4", label: "4 operations" },
+			],
+		},
+	},
+
 	"tools.maxTimeout": {
 		type: "number",
 		default: 0,
@@ -5327,6 +5358,10 @@ export const SETTINGS_SCHEMA = {
 	"task.agentModelOverrides": {
 		type: "record",
 		default: DEFAULT_AGENT_MODEL_OVERRIDES,
+	},
+	"task.agentServiceTierOverrides": {
+		type: "record",
+		default: EMPTY_AGENT_SERVICE_TIER_OVERRIDES,
 	},
 	"task.agentPrewalk": {
 		type: "record",
