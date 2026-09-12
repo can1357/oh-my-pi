@@ -52,6 +52,27 @@ function linkSubmoduleWorktree(superRoot: string, submoduleCheckout: string, wor
 	fs.writeFileSync(path.join(worktreeRoot, ".git"), `gitdir: ${path.relative(worktreeRoot, gitDir)}\n`, "utf8");
 }
 
+// Builds the on-disk shape of a `git init --separate-git-dir=<commonDir>
+// <primaryRoot>` checkout plus a `git worktree add` linked worktree of it.
+// Unlike a submodule, `--separate-git-dir` alone writes no `core.worktree`
+// into the relocated common dir's config (verified against real git 2.43),
+// so neither the direct checkout nor its linked worktree can recover the
+// checkout's actual path from the common dir's config alone.
+function linkSeparateGitDirWorktree(primaryRoot: string, commonDir: string, worktreeRoot: string): void {
+	fs.mkdirSync(commonDir, { recursive: true });
+	fs.mkdirSync(primaryRoot, { recursive: true });
+	fs.writeFileSync(path.join(commonDir, "HEAD"), "ref: refs/heads/main\n", "utf8");
+	fs.writeFileSync(path.join(commonDir, "config"), "[core]\n\tbare = false\n", "utf8");
+	fs.writeFileSync(path.join(primaryRoot, ".git"), `gitdir: ${path.relative(primaryRoot, commonDir)}\n`, "utf8");
+
+	const gitDir = path.join(commonDir, "worktrees", path.basename(worktreeRoot));
+	fs.mkdirSync(gitDir, { recursive: true });
+	fs.mkdirSync(worktreeRoot, { recursive: true });
+	fs.writeFileSync(path.join(gitDir, "HEAD"), "ref: refs/heads/feature\n", "utf8");
+	fs.writeFileSync(path.join(gitDir, "commondir"), `${path.relative(gitDir, commonDir)}\n`, "utf8");
+	fs.writeFileSync(path.join(worktreeRoot, ".git"), `gitdir: ${path.relative(worktreeRoot, gitDir)}\n`, "utf8");
+}
+
 describe("git linked worktree resolution", () => {
 	let tempRoot: string;
 
@@ -103,5 +124,14 @@ describe("git linked worktree resolution", () => {
 
 		expect(vcs.git(worktreeRoot)?.primaryRoot()).toBe(submoduleCheckout);
 		expect(vcs.git(submoduleCheckout)?.primaryRoot()).toBe(submoduleCheckout);
+	});
+
+	it("resolves a worktree of a --separate-git-dir checkout to the same primary root as direct access", () => {
+		const primaryRoot = path.join(tempRoot, "sep-main");
+		const commonDir = path.join(tempRoot, "sep-gitdir");
+		const worktreeRoot = path.join(tempRoot, ".tree", "sep", "xx");
+		linkSeparateGitDirWorktree(primaryRoot, commonDir, worktreeRoot);
+
+		expect(vcs.git(worktreeRoot)?.primaryRoot()).toBe(vcs.git(primaryRoot)?.primaryRoot());
 	});
 });
