@@ -3,6 +3,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
+import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import {
 	calculateCost,
 	getBundledModel,
@@ -38,6 +41,7 @@ afterAll(async () => {
 	for (const dir of tempRoots) {
 		await removeWithRetries(dir);
 	}
+	clearCustomApis();
 });
 
 async function writeFixtureExtension(source: string): Promise<string> {
@@ -67,25 +71,6 @@ describe("legacy-pi @(scope)/pi-ai root `Type` remap (issue #1437)", () => {
 		expect(loaded.schema.safeParse({ name: "ok" }).success).toBe(true);
 		expect(loaded.schema.safeParse({}).success).toBe(false);
 		expect(loaded.schema.safeParse({ name: "ok", extra: 1 }).success).toBe(false);
-	});
-
-	it("redirects the legacy pi-ai compat entrypoint through the root compatibility shim", async () => {
-		const entry = await writeFixtureExtension(
-			[
-				'import { StringEnum, complete, type Model } from "@earendil-works/pi-ai/compat";',
-				'export const schema = StringEnum(["red", "green"] as const);',
-				"export const completeType = typeof complete;",
-				"export type LegacyModel = Model;",
-			].join("\n"),
-		);
-
-		const loaded = (await loadLegacyPiModule(entry)) as {
-			schema: { safeParse: (input: unknown) => { success: boolean } };
-			completeType: string;
-		};
-		expect(loaded.schema.safeParse("red").success).toBe(true);
-		expect(loaded.schema.safeParse("blue").success).toBe(false);
-		expect(loaded.completeType).toBe("function");
 	});
 
 	it('redirects `import { Type } from "@oh-my-pi/pi-ai"` for plugins published against the canonical scope', async () => {
@@ -386,5 +371,52 @@ describe("legacy pi package root remaps (issue #1474)", () => {
 		const loaded = (await loadLegacyPiModule(entry)) as { probe: () => boolean };
 		expect(typeof loaded.probe).toBe("function");
 		expect(canonicalLookupSeen).toBe(true);
+	});
+});
+it("runs the legacy pi-ai compat `complete` export with SoL-Pi's reducer call shape", async () => {
+	const entry = await writeFixtureExtension(
+		[
+			'import { StringEnum, complete, type Model } from "@earendil-works/pi-ai/compat";',
+			'export const schema = StringEnum(["red", "green"] as const);',
+			"export const completeCompat = complete;",
+			"export type LegacyModel = Model;",
+		].join("\n"),
+	);
+
+	const loaded = (await loadLegacyPiModule(entry)) as {
+		schema: { safeParse: (input: unknown) => { success: boolean } };
+		completeCompat: (
+			model: Model<Api>,
+			context: { systemPrompt?: string; messages: Context["messages"] },
+			options?: SimpleStreamOptions & { timeoutMs?: number },
+		) => Promise<AssistantMessage>;
+	};
+	registerMockApi();
+	const mock = createMockModel({ responses: [{ content: ["reduced output"] }] });
+	const response = await loaded.completeCompat(
+		mock.model,
+		{
+			systemPrompt: "Reduce",
+			messages: [{ role: "user", content: [{ type: "text", text: "payload" }], timestamp: 0 }],
+		},
+		{
+			apiKey: "test-key",
+			cacheRetention: "none",
+			maxTokens: 321,
+			sessionId: "sol-pi-run",
+			signal: AbortSignal.timeout(1000),
+			timeoutMs: 1000,
+		},
+	);
+
+	expect(loaded.schema.safeParse("red").success).toBe(true);
+	expect(loaded.schema.safeParse("blue").success).toBe(false);
+	expect(response.content).toEqual([{ type: "text", text: "reduced output" }]);
+	expect(mock.calls).toHaveLength(1);
+	expect(mock.calls[0]?.options).toMatchObject({
+		apiKey: "test-key",
+		cacheRetention: "none",
+		maxTokens: 321,
+		sessionId: "sol-pi-run",
 	});
 });
