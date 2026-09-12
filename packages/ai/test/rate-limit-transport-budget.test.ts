@@ -13,7 +13,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
-import { __anthropicApiErrorForTesting } from "@oh-my-pi/pi-ai/error";
+import { __anthropicApiErrorForTesting, Flag, is } from "@oh-my-pi/pi-ai/error";
 import {
 	AnthropicApiError,
 	AnthropicMessagesClient,
@@ -122,6 +122,7 @@ async function countCompletionsRequests(respond: (request: number) => Response):
 	retryDelays: number[];
 	stopReason: string;
 	errorStatus?: number;
+	errorId?: number;
 	text?: string;
 }> {
 	let requests = 0;
@@ -141,6 +142,7 @@ async function countCompletionsRequests(respond: (request: number) => Response):
 		requests,
 		retryDelays,
 		stopReason: result.stopReason,
+		errorId: result.errorId,
 		errorStatus: result.errorStatus,
 		text: result.content.find(block => block.type === "text")?.text,
 	};
@@ -218,6 +220,20 @@ describe("transport rate-limit budget", () => {
 		);
 		expect(outcome.requests).toBe(1);
 		expect(outcome.stopReason).toBe("error");
+	});
+
+	it("surfaces an OpenCode FreeUsageLimitError after one request for model fallback", async () => {
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const outcome = await countCompletionsRequests(() =>
+			rateLimited(
+				{ "retry-after-ms": "1" },
+				'{"type":"FreeUsageLimitError","message":"Rate limit exceeded. Please retry in 1ms"}',
+			),
+		);
+		expect(outcome.requests).toBe(1);
+		expect(outcome.stopReason).toBe("error");
+		expect(outcome.errorStatus).toBe(429);
+		expect(is(outcome.errorId, Flag.UsageLimit)).toBe(true);
 	});
 
 	it("spends one request on a 429 whose recovery window is too long to wait out", async () => {
