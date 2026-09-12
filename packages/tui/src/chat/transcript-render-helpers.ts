@@ -7,12 +7,11 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Component } from "../tui";
 import { formatBytes, formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
-import type { JobSnapshot } from "../tools/hub";
-import type { DaemonSnapshot } from "../tools/hub";
+import type { DaemonSnapshot, JobSnapshot } from "../tools/hub";
 import { type CustomMessage, type FileMentionMessage, resolveAbortLabel, shouldRenderAbortReason } from "./messages";
 import { Text } from "../components/text";
 import { TruncatedText } from "../components/truncated-text";
-import { createIrcMessageCard } from "../tools/hub";
+import { createIrcMessageCard, normalizeDaemonExitReason } from "../tools/hub";
 import { formatArtifactErrorNotice, formatStyledArtifactReference, type OutputMeta } from "../tools/output-meta";
 import {
 	capPreviewLines,
@@ -83,9 +82,8 @@ function formatBackgroundWorkName(name: string | undefined, fallback: "unknown" 
 }
 
 function formatBackgroundWorkReason(reason: string | undefined): string | undefined {
-	if (reason === undefined) return undefined;
-	const normalized = shortenEmbeddedPaths(sanitizeText(reason).replace(/\s+/g, " ")).trim();
-	return normalized ? truncateToWidth(normalized, TRUNCATE_LENGTHS.LINE) : undefined;
+	const normalized = normalizeDaemonExitReason(reason);
+	return normalized ? truncateToWidth(shortenEmbeddedPaths(normalized), TRUNCATE_LENGTHS.LINE) : undefined;
 }
 
 /** Terminal-state row for one completed background job or supervised process. */

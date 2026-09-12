@@ -23,6 +23,7 @@ import {
 	type DaemonOutputUnregister,
 	daemonClientForProject,
 } from "../../launch/client";
+import { normalizeExitReason } from "../../launch/exit-reason";
 import type {
 	DaemonMonitorNotification,
 	DaemonOperation,
@@ -36,13 +37,7 @@ import { flattenPreviewText, ProgressPreviewAccumulator } from "../../session/pr
 
 import type { ToolSession } from "..";
 import { resolveToCwd } from "../path-utils";
-import {
-	formatDuration,
-	replaceTabs,
-	shortenPath,
-	TRUNCATE_LENGTHS,
-	truncateToWidth,
-} from "@oh-my-pi/pi-tui/render/render-utils";
+import { formatDuration, replaceTabs, shortenEmbeddedPaths, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
@@ -1194,9 +1189,13 @@ function daemonLabel(daemon: DaemonSnapshot): string {
 	)} restarts=${daemon.restartCount}${daemon.detached ? " detached" : daemon.persist ? " persistent" : ""}`;
 }
 
-function daemonReasonLine(daemon: DaemonSnapshot, indent = ""): string | undefined {
-	if (!daemon.exitReason) return undefined;
-	const reason = truncateToWidth(sanitizeText(daemon.exitReason).replace(/\s+/g, " ").trim(), TRUNCATE_LENGTHS.LINE);
+function normalizedDaemonReason(daemon: DaemonSnapshot): string | undefined {
+	const reason = normalizeExitReason(daemon.exitReason);
+	return reason ? shortenEmbeddedPaths(reason) : undefined;
+}
+
+function daemonReasonText(daemon: DaemonSnapshot, indent = ""): string | undefined {
+	const reason = normalizedDaemonReason(daemon);
 	return reason ? `${indent}Reason: ${reason}` : undefined;
 }
 
@@ -1241,7 +1240,7 @@ function toolContent(
 		case "start": {
 			const daemon = result.daemon;
 			const lines = [`${daemon.state === "failed" ? "Failed to launch" : "Started"} ${daemonLabel(daemon)}`];
-			const reason = daemonReasonLine(daemon);
+			const reason = daemonReasonText(daemon);
 			if (reason) lines.push(reason);
 			if (daemon.readyMatch) lines.push(`Ready log matched: ${daemon.readyMatch}`);
 			if (result.readyTimedOut) {
@@ -1265,7 +1264,7 @@ function toolContent(
 			const lines: string[] = [];
 			for (const daemon of result.daemons) {
 				lines.push(`- ${daemonLabel(daemon)}`);
-				const reason = daemonReasonLine(daemon, "  ");
+				const reason = daemonReasonText(daemon, "  ");
 				if (reason) lines.push(reason);
 				const watchers = result.monitors?.filter(watcher => watcher.name === daemon.name) ?? [];
 				if (watchers.length === 0) continue;
@@ -1281,7 +1280,7 @@ function toolContent(
 		}
 		case "wait": {
 			const lines = [daemonLabel(result.daemon)];
-			const reason = daemonReasonLine(result.daemon);
+			const reason = daemonReasonText(result.daemon);
 			if (reason) lines.push(reason);
 			if (result.matched) lines.push(`Matched: ${result.matched}`);
 			if (result.timedOut) {
@@ -1300,7 +1299,7 @@ function toolContent(
 				if (params.progress !== "off") return `Monitoring ${daemonLabel(result.daemon)}`;
 				return `${detached ? "Stopped monitoring" : "No active monitor for"} ${daemonLabel(result.daemon)}`;
 			}
-			const reason = daemonReasonLine(result.daemon);
+			const reason = daemonReasonText(result.daemon);
 			return [
 				daemonLabel(result.daemon),
 				...(reason ? [reason] : []),
@@ -1579,6 +1578,7 @@ export async function executeLaunch(
 		throw error;
 	}
 }
+
 
 
 

@@ -28,6 +28,7 @@ import {
 	formatExpandHint,
 	previewLine,
 	TRUNCATE_LENGTHS,
+	shortenEmbeddedPaths,
 	shortenPath,
 	formatErrorDetail,
 	type ConfiguredThinkingLevel,
@@ -798,14 +799,32 @@ function daemonMeta(daemon: DaemonSnapshot, theme: Theme): string[] {
 	return meta;
 }
 
+/** Maximum sanitized diagnostic text retained in daemon snapshots and display. */
+const MAX_EXIT_REASON_LENGTH = 1_024;
+
+/**
+ * Mirror of `normalizeExitReason` in `@oh-my-pi/pi-coding-agent`
+ * (`src/launch/exit-reason.ts`): the renderer cannot import the agent package,
+ * so display normalization stays byte-identical to the durable form.
+ */
+export function normalizeDaemonExitReason(reason: string | undefined): string | undefined {
+	if (reason === undefined) return undefined;
+	const normalized = sanitizeText(reason).replace(/\s+/g, " ").trim();
+	if (!normalized) return undefined;
+	return normalized.length > MAX_EXIT_REASON_LENGTH
+		? `${normalized.slice(0, MAX_EXIT_REASON_LENGTH - 1)}…`
+		: normalized;
+}
+
 /**
  * Exit diagnostics survive whatever state the process reached: a nonzero exit
- * explains itself even when the supervisor never marked it `failed`.
+ * explains itself even when the supervisor never marked it `failed`. Bounded to
+ * one status line so a long diagnostic cannot reflow the row.
  */
 function daemonReasonLine(daemon: DaemonSnapshot, indent = ""): string | undefined {
-	if (!daemon.exitReason) return undefined;
-	const reason = truncateToWidth(sanitizeText(daemon.exitReason).replace(/\s+/g, " ").trim(), TRUNCATE_LENGTHS.LINE);
-	return reason ? `${indent}Reason: ${reason}` : undefined;
+	const normalized = normalizeDaemonExitReason(daemon.exitReason);
+	const reason = normalized ? shortenEmbeddedPaths(normalized) : undefined;
+	return reason ? `${indent}Reason: ${truncateToWidth(reason, TRUNCATE_LENGTHS.LINE)}` : undefined;
 }
 
 /** Indented `↳ owner · mode · age · state` row under a process line; owner ids are sanitized like any display text. */
@@ -879,6 +898,9 @@ export function launchRenderResult(
 
 	const meta: string[] = [];
 	const body: string[] = [];
+	// `list` collapses by process, not by row: diagnostic and watcher rows belong
+	// to the process above them, so the limit counts groups.
+	const listGroups: string[][] = [];
 	let description = params.name ?? daemon?.name;
 
 	if (isError) {
@@ -947,14 +969,16 @@ export function launchRenderResult(
 				const daemons = details?.daemons ?? [];
 				description = `${daemons.length || "no"} ${pluralize("process", daemons.length)}`;
 				for (const item of daemons) {
-					body.push(
+					const rows = [
 						`${theme.fg("accent", replaceTabs(item.name))} ${theme.fg("dim", daemonMeta(item, theme).join(theme.sep.dot))}`,
-					);
+					];
 					const itemReason = daemonReasonLine(item);
-					if (itemReason) body.push(theme.fg("error", itemReason));
+					if (itemReason) rows.push(theme.fg("error", itemReason));
 					for (const watcher of details?.monitors ?? []) {
-						if (watcher.name === item.name) body.push(watcherRow(watcher, item, theme));
+						if (watcher.name === item.name) rows.push(watcherRow(watcher, item, theme));
 					}
+					listGroups.push(rows);
+					body.push(...rows);
 				}
 				break;
 			}
@@ -1049,10 +1073,10 @@ export function launchRenderResult(
 		() => options.expanded,
 		(width, expanded) => {
 			let visible = body;
-			if (!expanded && op === "list" && body.length > PREVIEW_LIMITS.COLLAPSED_ITEMS) {
-				const remaining = body.length - PREVIEW_LIMITS.COLLAPSED_ITEMS;
+			if (!expanded && op === "list" && listGroups.length > PREVIEW_LIMITS.COLLAPSED_ITEMS) {
+				const remaining = listGroups.length - PREVIEW_LIMITS.COLLAPSED_ITEMS;
 				visible = [
-					...body.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS),
+					...listGroups.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS).flat(),
 					theme.fg("dim", `${formatMoreItems(remaining, "process")} ${formatExpandHint(theme, false, true)}`),
 				];
 			}
