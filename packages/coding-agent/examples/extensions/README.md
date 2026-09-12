@@ -66,6 +66,12 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 | `with-deps/`      | Extension with its own package.json and dependencies                      |
 | `file-trigger.ts` | Watches a trigger file and injects contents into conversation             |
 
+### Model Providers
+
+| Extension             | Description                                                                                                            |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `command-provider.ts` | Runs a local CLI as a model provider (`muse exec --json`), so a subscription CLI serves requests instead of an API key |
+
 ## Writing Extensions
 
 See [docs/extensions.md](../../docs/extensions.md) for full documentation.
