@@ -959,6 +959,125 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("explicit write selection via setActiveToolsByName clears a stale fullWrite:false downgrade", async () => {
+		const tempDir = makeTempDir();
+		const customAmbient: CustomTool = {
+			name: "custom_ambient",
+			label: "Custom Ambient",
+			description: "Ambient tool",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			loadMode: "discoverable",
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			toolNames: ["read"],
+			customTools: [customAmbient],
+		});
+
+		try {
+			await session.setActiveToolPresentation(["read", "custom_ambient"], ["custom_ambient"], {
+				fullWrite: false,
+			});
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+
+			const blockedTarget = path.join(tempDir, "blocked-before-reselect.txt");
+			await expect(
+				session.getToolByName("write")!.execute("blocked", { path: blockedTarget, content: "blocked" }),
+			).rejects.toThrow("limited to the xd:// device transport");
+			expect(await Bun.file(blockedTarget).exists()).toBe(false);
+
+			await session.setActiveToolsByName(["read", "write"]);
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+
+			const target = path.join(tempDir, "reselected.txt");
+			await session.getToolByName("write")!.execute("reselected", { path: target, content: "reselected-ok" });
+			expect(await Bun.file(target).text()).toBe("reselected-ok");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("explicit write selection retains device-only downgrade for pinned write while plan mode is active", async () => {
+		const tempDir = makeTempDir();
+		const customAmbient: CustomTool = {
+			name: "custom_ambient",
+			label: "Custom Ambient",
+			description: "Ambient tool",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			loadMode: "discoverable",
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			toolNames: ["read", "write"],
+			customTools: [customAmbient],
+		});
+
+		try {
+			await session.setActiveToolPresentation(["read", "custom_ambient"], ["custom_ambient"], {
+				fullWrite: false,
+			});
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+
+			session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+			await session.setActiveToolsByName(["read", "write"]);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			const planTarget = path.join(tempDir, "plan-mode-blocked.txt");
+			await expect(
+				session.getToolByName("write")!.execute("blocked", { path: planTarget, content: "blocked" }),
+			).rejects.toThrow("limited to the xd:// device transport");
+			expect(await Bun.file(planTarget).exists()).toBe(false);
+
+			session.setPlanModeState(undefined);
+			await session.setActiveToolsByName(["read", "write"]);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("explicit write selection with a mounted partition retains device-only downgrade", async () => {
+		const tempDir = makeTempDir();
+		const customAmbient: CustomTool = {
+			name: "custom_ambient",
+			label: "Custom Ambient",
+			description: "Ambient tool",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			loadMode: "discoverable",
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			toolNames: ["read"],
+			customTools: [customAmbient],
+		});
+
+		try {
+			await session.setActiveToolPresentation(["read", "custom_ambient"], ["custom_ambient"], {
+				fullWrite: false,
+			});
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+
+			await session.setActiveToolsByName(["read", "write", "custom_ambient"]);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			const blockedTarget = path.join(tempDir, "mounted-blocked.txt");
+			await expect(
+				session.getToolByName("write")!.execute("blocked", { path: blockedTarget, content: "blocked" }),
+			).rejects.toThrow("limited to the xd:// device transport");
+			expect(await Bun.file(blockedTarget).exists()).toBe(false);
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("custom_ambient");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("preserves preexisting dormant full-write authorization when presentation restoration fails", async () => {
 		const tempDir = makeTempDir();
 		const customAmbient: CustomTool = {
