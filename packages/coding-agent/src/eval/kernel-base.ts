@@ -389,11 +389,11 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 					/* ignore */
 				}
 			}
-			// The leader exiting after SIGTERM does not prove its descendants did.
-			// Always finish an attempted group shutdown with a SIGKILL sweep.
-			killProcessGroup(proc.pid, "SIGKILL");
-			if (result === null) result = await this.#waitForExitWithTimeout(timeoutMs);
 		}
+		// A confirmed leader exit does not prove its descendants exited, even
+		// when the runner honored the shutdown request without any signals.
+		killProcessGroup(proc.pid, "SIGKILL");
+		if (result === null) result = await this.#waitForExitWithTimeout(timeoutMs);
 
 		const confirmed = result !== null;
 		if (!confirmed) {
