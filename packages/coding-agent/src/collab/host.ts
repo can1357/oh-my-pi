@@ -290,7 +290,14 @@ export class CollabHost {
 	/** Broadcast a goodbye, detach all taps, and close the socket. */
 	async stop(reason: string): Promise<void> {
 		if (this.#stopped) return;
-		this.#socket?.send({ t: "bye", reason });
+		const socket = this.#socket;
+		if (socket) {
+			socket.send({ t: "bye", reason });
+			// Flush the goodbye onto the wire before #teardown closes the socket;
+			// otherwise close() drops the queued frame and guests only see the
+			// relay's transient 4001, retrying a room that is gone for good.
+			await socket.flush();
+		}
 		await this.#teardown();
 	}
 
