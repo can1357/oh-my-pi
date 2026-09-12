@@ -7,6 +7,7 @@
 - Added public `acquireFileLock()` and `FileLockHandle` APIs for holding and explicitly releasing exclusive OS-backed file locks.
 ### Fixed
 
+- Fixed SSE streams using CR or mixed line endings failing JSON parsing or losing events across network chunks ([#11863](https://github.com/can1357/oh-my-pi/pull/11863) by [@moodiness](https://github.com/moodiness)).
 - Child-shell environment filtering now tolerates a removed process working directory by retaining the resolved project directory ([#11828](https://github.com/can1357/oh-my-pi/issues/11828)).
 
 ## [18.1.16] - 2026-09-09

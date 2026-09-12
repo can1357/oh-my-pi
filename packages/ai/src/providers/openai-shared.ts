@@ -2474,21 +2474,38 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
  */
 type ResponsesToolCallBlock = ToolCall & { [kStreamingPartialJson]: string; [kStreamingLastParseLen]?: number };
 
+// Proxies sometimes send payloadless progress frames. They carry no text; a
+// supplied non-string payload is malformed output, not an empty delta.
+function optionalResponsesText(value: unknown, field: string): string | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string") throw new TypeError(`Invalid Responses ${field}: expected a string`);
+	return value;
+}
+
 function ensureReasoningSummaryPart(
 	item: ResponseReasoningItem,
-	summaryIndex: number,
+	summaryIndex: number | undefined,
 ): ResponseReasoningItem["summary"][number] {
 	item.summary = item.summary || [];
+	if (summaryIndex === undefined) summaryIndex = Math.max(0, item.summary.length - 1);
+	if (!Number.isSafeInteger(summaryIndex) || summaryIndex < 0) {
+		throw new TypeError("Invalid Responses summary_index: expected a non-negative integer");
+	}
 	while (item.summary.length <= summaryIndex) {
 		item.summary.push({ type: "summary_text", text: "" });
 	}
-	return item.summary[summaryIndex]!;
+	const part = item.summary[summaryIndex]!;
+	part.text = optionalResponsesText(part.text, "summary text") ?? "";
+	return part;
 }
 
 export function appendReasoningSummaryPart(
 	item: ResponseReasoningItem,
-	part: ResponseReasoningItem["summary"][number],
+	part: ResponseReasoningItem["summary"][number] | undefined,
 ): void {
+	if (part === undefined) return;
+	if (part?.type !== "summary_text") throw new TypeError("Invalid Responses reasoning summary part");
+	part.text = optionalResponsesText(part.text, "summary text") ?? "";
 	item.summary = item.summary || [];
 	item.summary.push(part);
 }
@@ -2572,8 +2589,10 @@ export function appendReasoningSummaryTextDelta(
 	stream: AssistantMessageEventStream,
 	output: AssistantMessage,
 	contentIndex: number,
-	summaryIndex = 0,
+	summaryIndex?: number,
 ): void {
+	delta = optionalResponsesText(delta, "reasoning summary delta") ?? "";
+	if (!delta) return;
 	const part = ensureReasoningSummaryPart(item, summaryIndex);
 	block.thinking += delta;
 	part.text += delta;
@@ -2593,6 +2612,9 @@ export function applyReasoningSummaryTextDone(
 	output: AssistantMessage,
 	contentIndex: number,
 ): void {
+	const snapshot = optionalResponsesText(text, "reasoning summary text");
+	if (snapshot === undefined) return;
+	text = snapshot;
 	const part = ensureReasoningSummaryPart(item, summaryIndex);
 	const previous = part.text;
 	part.text = text;
@@ -2602,8 +2624,8 @@ export function applyReasoningSummaryTextDone(
 		stream.push({ type: "thinking_delta", contentIndex, delta: text, partial: output });
 		return;
 	}
-	if (text.startsWith(block.thinking)) {
-		const delta = text.slice(block.thinking.length);
+	if (text.startsWith(previous) && block.thinking.endsWith(previous)) {
+		const delta = text.slice(previous.length);
 		if (!delta) return;
 		block.thinking += delta;
 		stream.push({ type: "thinking_delta", contentIndex, delta, partial: output });
@@ -2680,6 +2702,8 @@ export function appendMessageTextDelta(
 	contentIndex: number,
 	partType: "output_text" | "refusal",
 ): void {
+	delta = optionalResponsesText(delta, "message delta") ?? "";
+	if (!delta) return;
 	item.content = item.content || [];
 	let lastPart = item.content[item.content.length - 1];
 	if (lastPart?.type !== partType) {
@@ -2693,12 +2717,42 @@ export function appendMessageTextDelta(
 	}
 	block.text += delta;
 	if (lastPart.type === "output_text") {
-		lastPart.text += delta;
+		lastPart.text = (optionalResponsesText(lastPart.text, "output text") ?? "") + delta;
 	} else {
-		lastPart.refusal += delta;
+		lastPart.refusal = (optionalResponsesText(lastPart.refusal, "refusal") ?? "") + delta;
 	}
 	stream.push({ type: "text_delta", contentIndex, delta, partial: output });
 }
+
+/** Recover text omitted from delta frames without replaying an already streamed prefix. */
+function applyMessageTextDone(
+	item: ResponseOutputMessage,
+	block: TextContent,
+	text: string,
+	stream: AssistantMessageEventStream,
+	output: AssistantMessage,
+	contentIndex: number,
+	partType: "output_text" | "refusal",
+): void {
+	const snapshot = optionalResponsesText(text, "message text");
+	if (snapshot === undefined) return;
+	const lastPart = item.content?.[item.content.length - 1];
+	const previous =
+		lastPart?.type === partType
+			? (optionalResponsesText(lastPart.type === "output_text" ? lastPart.text : lastPart.refusal, "message text") ??
+				"")
+			: "";
+	if (snapshot.startsWith(previous)) {
+		appendMessageTextDelta(item, block, snapshot.slice(previous.length), stream, output, contentIndex, partType);
+	} else if (lastPart?.type === partType) {
+		// A correction cannot be represented as an append-only delta. Keep it for
+		// the completed block rather than appending contradictory text.
+		if (lastPart.type === "output_text") lastPart.text = snapshot;
+		else lastPart.refusal = snapshot;
+		block.text = finalizeMessageText(item, block.text);
+	}
+}
+
 /** Chooses final message text while treating non-empty terminal content as authoritative. */
 export function finalizeMessageText(item: ResponseOutputMessage, streamedText: string): string {
 	if (!item.content?.length) return streamedText || "";
@@ -2726,6 +2780,8 @@ export function accumulateToolCallArgumentsDelta(
 	output: AssistantMessage,
 	contentIndex: number,
 ): void {
+	delta = optionalResponsesText(delta, "function call arguments delta") ?? "";
+	if (!delta) return;
 	block[kStreamingPartialJson] += delta;
 	const throttled = parseStreamingJsonThrottled(block[kStreamingPartialJson], block[kStreamingLastParseLen] ?? 0);
 	if (throttled) {
@@ -2754,6 +2810,8 @@ export function accumulateCustomToolCallInputDelta(
 	output: AssistantMessage,
 	contentIndex: number,
 ): void {
+	delta = optionalResponsesText(delta, "custom tool input delta") ?? "";
+	if (!delta) return;
 	block[kStreamingPartialJson] += delta;
 	block.arguments = { input: block[kStreamingPartialJson] };
 	stream.push({ type: "toolcall_delta", contentIndex, delta, partial: output });
@@ -3170,12 +3228,13 @@ export async function processResponsesStream<TApi extends Api>(
 			// Raw reasoning text delta from local providers that stream thinking
 			// directly rather than via the OpenAI summary tracking protocol.
 			const entry = lookupOpenItem(event);
-			if (entry?.item.type === "reasoning" && entry.block.type === "thinking") {
-				entry.block.thinking += event.delta;
+			const delta = optionalResponsesText(event.delta, "reasoning delta");
+			if (entry?.item.type === "reasoning" && entry.block.type === "thinking" && delta) {
+				entry.block.thinking += delta;
 				stream.push({
 					type: "thinking_delta",
 					contentIndex: contentIndexOf(entry.block),
-					delta: event.delta,
+					delta,
 					partial: output,
 				});
 			}
@@ -3208,6 +3267,19 @@ export async function processResponsesStream<TApi extends Api>(
 					"refusal",
 				);
 			}
+		} else if (event.type === "response.output_text.done" || event.type === "response.refusal.done") {
+			const entry = lookupOpenItem(event);
+			if (entry?.item.type === "message" && entry.block.type === "text") {
+				applyMessageTextDone(
+					entry.item,
+					entry.block,
+					event.type === "response.output_text.done" ? event.text : event.refusal,
+					stream,
+					output,
+					contentIndexOf(entry.block),
+					event.type === "response.output_text.done" ? "output_text" : "refusal",
+				);
+			}
 		} else if (event.type === "response.function_call_arguments.delta") {
 			const entry = lookupOpenFunctionCallItem(event);
 			if (entry?.item.type === "function_call" && entry.block.type === "toolCall") {
@@ -3215,8 +3287,9 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.function_call_arguments.done") {
 			const entry = lookupOpenFunctionCallItem(event);
-			if (entry?.item.type === "function_call" && entry.block.type === "toolCall") {
-				finalizeToolCallArgumentsDone(entry.block, event.arguments);
+			const args = optionalResponsesText(event.arguments, "function call arguments");
+			if (entry?.item.type === "function_call" && entry.block.type === "toolCall" && args !== undefined) {
+				finalizeToolCallArgumentsDone(entry.block, args);
 				entry.block[kStreamingArgumentsDone] = true;
 			}
 		} else if (event.type === "response.custom_tool_call_input.delta") {
@@ -3226,8 +3299,9 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.custom_tool_call_input.done") {
 			const entry = lookupOpenToolCallAlias(event, "custom_tool_call");
-			if (entry?.item.type === "custom_tool_call" && entry.block.type === "toolCall") {
-				finalizeCustomToolCallInputDone(entry.block, event.input);
+			const input = optionalResponsesText(event.input, "custom tool input");
+			if (entry?.item.type === "custom_tool_call" && entry.block.type === "toolCall" && input !== undefined) {
+				finalizeCustomToolCallInputDone(entry.block, input);
 				entry.block[kStreamingArgumentsDone] = true;
 			}
 		} else if (event.type === "response.output_item.done") {
@@ -3332,7 +3406,12 @@ export async function processResponsesStream<TApi extends Api>(
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
 			} else if (item.type === "custom_tool_call") {
 				const block = entry?.block.type === "toolCall" ? entry.block : undefined;
-				const rawInput = block?.[kStreamingPartialJson] ? block[kStreamingPartialJson] : (item.input ?? "");
+				const rawInput =
+					optionalResponsesText(item.input, "custom tool input") ??
+					(block?.[kStreamingArgumentsDone]
+						? optionalResponsesText(block.arguments.input, "custom tool input")
+						: block?.[kStreamingPartialJson]) ??
+					"";
 				const toolCall: ToolCall = {
 					type: "toolCall",
 					id: encodeResponsesToolCallId(item.call_id, item.id),

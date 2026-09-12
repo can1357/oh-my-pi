@@ -4,6 +4,7 @@ import { abortableSource } from "./abortable";
 import { parseStreamingJson } from "./json-parse";
 
 const LF = 0x0a;
+const CR = 0x0d;
 
 export async function* readLines(stream: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<Uint8Array> {
 	const buffer = new ConcatSink();
@@ -133,7 +134,7 @@ class ConcatSink {
 	}
 
 	appendAndFlushText(chunk: Uint8Array, decoder: TextDecoder): string | undefined {
-		const lastNewline = chunk.lastIndexOf(LF);
+		const lastNewline = Math.max(chunk.lastIndexOf(LF), chunk.lastIndexOf(CR));
 		if (lastNewline === -1) {
 			this.append(chunk);
 			return undefined;
@@ -294,7 +295,7 @@ interface SseEventState {
 }
 
 // Complete lines are decoded in one batch per source chunk. Each batch ends on
-// LF, which cannot split a multi-byte UTF-8 sequence.
+// CR or LF, neither of which can split a multi-byte UTF-8 sequence.
 const SSE_DECODER = new TextDecoder("utf-8");
 
 function flushSseEvent(state: SseEventState): ServerSentEvent | null {
@@ -318,11 +319,6 @@ function flushSseEvent(state: SseEventState): ServerSentEvent | null {
 }
 
 function pushSseLine(line: string, state: SseEventState): ServerSentEvent | null {
-	// Complete-line batches split on LF only; strip a trailing CR so CRLF sources
-	// don't leak `\r` into field values.
-	if (line.charCodeAt(line.length - 1) === 0x0d /* '\r' */) {
-		line = line.slice(0, -1);
-	}
 	if (line.length === 0) return flushSseEvent(state);
 
 	// Comment line: keep in `raw` for diagnostic context, skip parsing.
@@ -392,19 +388,31 @@ export async function* readSseEvents(
 	const lineBuffer = new ConcatSink();
 	const state: SseEventState = { event: null, data: null, raw: [] };
 	const source = abortableSource(stream, signal);
+	let skipLF = false;
 	try {
 		for await (const chunk of source) {
 			const text = lineBuffer.appendAndFlushText(chunk, SSE_DECODER);
 			if (text === undefined) continue;
 			let start = 0;
-			while (start < text.length) {
-				const newline = text.indexOf("\n", start);
-				const event = pushSseLine(text.slice(start, newline), state);
+			for (let index = 0; index < text.length; index++) {
+				const code = text.charCodeAt(index);
+				if (skipLF) {
+					skipLF = false;
+					if (code === LF) {
+						start = index + 1;
+						continue;
+					}
+				}
+				if (code !== LF && code !== CR) continue;
+				const event = pushSseLine(text.slice(start, index), state);
+				start = index + 1;
+				// A CR already ended the line; consume an optional LF, even
+				// when the pair straddles source chunks.
+				skipLF = code === CR;
 				if (event) yield event;
-				start = newline + 1;
 			}
 		}
-		// Treat any trailing partial line (no terminating LF) as a complete line.
+		// Treat any trailing partial line (no line terminator) as a complete line.
 		if (!lineBuffer.isEmpty) {
 			const tail = lineBuffer.flush();
 			if (tail) {
