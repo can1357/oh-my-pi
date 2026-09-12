@@ -5,6 +5,7 @@ import type { Settings } from "../config/settings";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
+import todoReminderPrompt from "../prompts/system/todo-reminder.md" with { type: "text" };
 import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
@@ -36,6 +37,8 @@ const USER_RESPONSE_CUE_RE =
  * as a real user-directed question. Fixes non-Latin prompts going undetected (#7803).
  */
 const NON_ASCII_TEXT_RE = /[^\x00-\x7F]/;
+const COMPLETION_CLAIM_RE =
+	/\b(?:all|everything|work|tasks?)\s+(?:is|are)\s+(?:done|complete)|\b(?:i(?:'ve| have)|we(?:'ve| have))\s+(?:finished|completed)\b/i;
 
 interface PromptLine {
 	text: string;
@@ -60,6 +63,8 @@ export interface TodoTrackerHost {
 	/** Whether prewalk will hand off after its plan nudge owns todo creation. */
 	prewalkWillHandoff(): boolean;
 	consumeLastServedToolChoiceLabel(): string | undefined;
+	forceTodoToolChoice(): boolean;
+	clearForcedTodoToolChoice(): void;
 }
 
 /** Owns canonical todo state, eager preludes, and completion reminders. */
@@ -67,7 +72,6 @@ export class TodoTracker {
 	readonly #host: TodoTrackerHost;
 	#phases: TodoPhase[] = [];
 	#reminderCount = 0;
-	#reminderAwaitingProgress = false;
 	#mutationsSinceLastTouch = 0;
 	#midRunNudgeCount = 0;
 
@@ -98,7 +102,6 @@ export class TodoTracker {
 	/** Resets per-prompt reminder and mutation budgets. */
 	resetCycle(): void {
 		this.#reminderCount = 0;
-		this.#reminderAwaitingProgress = false;
 		this.#mutationsSinceLastTouch = 0;
 		this.#midRunNudgeCount = 0;
 	}
@@ -110,7 +113,6 @@ export class TodoTracker {
 		} else if (!isError && MUTATING_TOOLS[toolName]) {
 			this.#mutationsSinceLastTouch++;
 		}
-		this.#reminderAwaitingProgress = false;
 	}
 
 	/** Detects whether a successful todo result came from an init operation. */
@@ -204,26 +206,14 @@ export class TodoTracker {
 	async checkCompletion(message: AssistantMessage): Promise<boolean> {
 		if (this.#host.consumeLastServedToolChoiceLabel() === "user-force") return false;
 		if (this.#host.planModeEnabled()) return false;
-		if (this.#reminderAwaitingProgress) {
-			logger.debug("Todo completion: prior reminder still awaiting agent action; staying silent", {
-				attempt: this.#reminderCount,
-			});
-			return false;
-		}
 		if (!this.#host.settings.get("todo.reminders") || !this.#host.settings.get("todo.enabled")) {
 			this.#reminderCount = 0;
-			this.#reminderAwaitingProgress = false;
 			return false;
 		}
 		const remindersMax = this.#host.settings.get("todo.remindersMax");
-		if (this.#reminderCount >= remindersMax) {
-			logger.debug("Todo completion: max reminders reached", { count: this.#reminderCount });
-			return false;
-		}
 		const phases = this.phases;
 		if (phases.length === 0) {
 			this.#reminderCount = 0;
-			this.#reminderAwaitingProgress = false;
 			return false;
 		}
 		const incompleteByPhase = phases
@@ -240,10 +230,9 @@ export class TodoTracker {
 		const incomplete = incompleteByPhase.flatMap(phase => phase.tasks);
 		if (incomplete.length === 0) {
 			this.#reminderCount = 0;
-			this.#reminderAwaitingProgress = false;
 			return false;
 		}
-		if (isAwaitingUserAnswer(message)) {
+		if (isAwaitingUserAnswer(message) && !COMPLETION_CLAIM_RE.test(assistantText(message))) {
 			logger.debug("Todo completion: assistant is waiting for user input; skipping reminder", {
 				incomplete: incomplete.length,
 			});
@@ -255,24 +244,29 @@ export class TodoTracker {
 			});
 			return false;
 		}
-		this.#reminderCount++;
+		const afterReminderBudget = this.#reminderCount >= remindersMax;
+		if (!afterReminderBudget) this.#reminderCount++;
 		const todoList = incompleteByPhase
 			.map(phase => `- ${phase.name}\n${phase.tasks.map(task => `  - ${task.content}`).join("\n")}`)
 			.join("\n");
-		const reminder =
-			`<system-reminder>\n` +
-			`You stopped with ${incomplete.length} incomplete todo item(s):\n${todoList}\n\n` +
-			`Please continue working on these tasks or mark them complete if finished.\n` +
-			`(Reminder ${this.#reminderCount}/${remindersMax})\n` +
-			`</system-reminder>`;
+		const escapeHatch = afterReminderBudget;
+		const forcedTodo = escapeHatch && this.#host.forceTodoToolChoice();
+		const reminder = prompt.render(todoReminderPrompt, {
+			incompleteCount: incomplete.length,
+			todoList,
+			afterReminderBudget,
+			forcedTodo,
+			reminderCount: this.#reminderCount,
+			remindersMax,
+		});
 		logger.debug("Todo completion: sending reminder", {
 			incomplete: incomplete.length,
-			attempt: this.#reminderCount,
+			attempt: Math.min(this.#reminderCount, remindersMax),
 		});
 		await this.#host.emitSessionEvent({
 			type: "todo_reminder",
 			todos: incomplete,
-			attempt: this.#reminderCount,
+			attempt: Math.min(this.#reminderCount, remindersMax),
 			maxAttempts: remindersMax,
 		});
 		const reminderMessage: Message = {
@@ -282,7 +276,6 @@ export class TodoTracker {
 			timestamp: Date.now(),
 		};
 		this.#mutationsSinceLastTouch = 0;
-		this.#reminderAwaitingProgress = true;
 		this.#host.agent.appendMessage(reminderMessage);
 		this.#host.sessionManager.appendMessage(reminderMessage);
 		this.#host.scheduleAgentContinue({
