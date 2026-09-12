@@ -215,7 +215,6 @@ export class SessionTools {
 	#xdev: XdevState | undefined;
 	#pendingToolRosterDelta: { added: Set<string>; removed: Set<string> } | undefined;
 	#pendingXdevMountDelta: { added: Set<string>; removed: Set<string> } | undefined;
-	#toolRosterDeltaRevision = 0;
 	#xdevMountDeltaRevision = 0;
 	/**
 	 * Dynamic (`xd://`) devices the model has already been told are mounted.
@@ -1103,7 +1102,7 @@ export class SessionTools {
 				// rebuilt base off the wire (see {@link #applyAgentSystemPrompt}), so
 				// keep the delta then — the notice is the only channel carrying the
 				// roster change on this turn.
-				if (this.#turnSystemPromptOverride === undefined) this.#clearPendingToolRosterDelta();
+				if (this.#turnSystemPromptOverride === undefined) this.#pendingToolRosterDelta = undefined;
 			} else if (frozenSignature) {
 				this.#notifyToolRosterDelta(previousActiveToolNames, appliedNames);
 				this.#lastAppliedToolSignature = frozenSignature;
@@ -1147,13 +1146,6 @@ export class SessionTools {
 			if (!pending.added.delete(name)) pending.removed.add(name);
 		}
 		this.#pendingToolRosterDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
-		this.#toolRosterDeltaRevision++;
-	}
-
-	#clearPendingToolRosterDelta(): void {
-		if (!this.#pendingToolRosterDelta) return;
-		this.#pendingToolRosterDelta = undefined;
-		this.#toolRosterDeltaRevision++;
 	}
 
 	/**
@@ -1262,19 +1254,17 @@ export class SessionTools {
 		}
 	}
 
-	/** Previews the hidden provider-visible roster notice and its immutable pending revision. */
-	peekPendingToolRosterNotice(): PendingNoticePreview<ToolRosterNoticeDetails> | undefined {
+	/**
+	 * Consumes the hidden provider-visible roster notice for the current pending
+	 * delta. Unlike the xd:// mount notice this carries no meaningful payload (a
+	 * short tool-name list), so it is never previewed or deferred for context
+	 * budgeting: it is re-derived from the live delta after pre-prompt maintenance
+	 * and always delivered alongside the schema change it describes, keeping the
+	 * model's stated availability in lockstep with the wire tool list.
+	 */
+	takePendingToolRosterNotice(): CustomMessage<ToolRosterNoticeDetails> | undefined {
 		const notice = this.#buildPendingToolRosterNotice();
-		return notice ? { notice, revision: this.#toolRosterDeltaRevision } : undefined;
-	}
-
-	/** Consumes the roster notice only when no delta mutation followed its preview. */
-	takePendingToolRosterNotice(options: {
-		expectedRevision: number;
-	}): CustomMessage<ToolRosterNoticeDetails> | undefined {
-		if (options.expectedRevision !== this.#toolRosterDeltaRevision) return undefined;
-		const notice = this.#buildPendingToolRosterNotice();
-		if (notice) this.#clearPendingToolRosterDelta();
+		if (notice) this.#pendingToolRosterDelta = undefined;
 		return notice;
 	}
 
@@ -1591,7 +1581,7 @@ export class SessionTools {
 		// `before_agent_start` override keeps the rebuilt base off the wire (see
 		// {@link #applyAgentSystemPrompt}), so keep the delta then so
 		// takePendingToolRosterNotice() still surfaces the change on this turn.
-		if (this.#turnSystemPromptOverride === undefined) this.#clearPendingToolRosterDelta();
+		if (this.#turnSystemPromptOverride === undefined) this.#pendingToolRosterDelta = undefined;
 		this.#promptModelKey = this.#currentPromptModelKey();
 		// Refresh the cached signature so a subsequent `applyActiveToolsByName` with
 		// the same tool set does not re-rebuild on top of the explicit refresh we

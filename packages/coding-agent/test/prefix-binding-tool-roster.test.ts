@@ -276,4 +276,31 @@ describe("prefix-bound tool roster changes", () => {
 		expect(notices).toHaveLength(1);
 		expect(providerText(harness.contexts[1])).toContain("Now available: bash.");
 	});
+
+	it("delivers a roster notice for a change queued during pre-prompt maintenance", async () => {
+		const harness = newSession(createPrefixBindingModel());
+		sessions.push(harness.session);
+		await harness.session.setActiveToolPresentation(["read"], []);
+		await harness.session.prompt("first");
+
+		// The tool list changes mid-maintenance (e.g. an MCP refresh landing during
+		// the await). The roster notice carries no context-budget risk, so it must
+		// ship this turn alongside the schema change rather than deferring — a
+		// deferred notice would leave the wire tool list and stated availability out
+		// of sync, the same divergence as the original bug.
+		const rosterChangeDuringMaintenance = vi
+			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
+			.mockImplementationOnce(async () => {
+				await harness.session.setActiveToolPresentation(["read", "bash"], []);
+			});
+
+		await harness.session.prompt("second");
+
+		expect(rosterChangeDuringMaintenance).toHaveBeenCalledTimes(1);
+		const notices = harness.session.agent.state.messages.filter(
+			message => message.role === "custom" && message.customType === "tool-roster-notice",
+		);
+		expect(notices).toHaveLength(1);
+		expect(providerText(harness.contexts[1])).toContain("Now available: bash.");
+	});
 });

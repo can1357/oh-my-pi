@@ -6580,42 +6580,37 @@ export class AgentSession {
 				}
 			}
 
-			// Deferred notices can carry substantial inline xd:// docs. Preview them
-			// in a copy so context maintenance sees the request's true size without
-			// consuming deltas that a maintenance-triggered rebuild may supersede.
+			// Only the xd:// mount notice can carry substantial inline docs (up to
+			// XDEV_DOCS_TOTAL_BUDGET), so preview it in a copy and let context
+			// maintenance see the request's true size without consuming a delta a
+			// rebuild may supersede. The tool-roster notice is a tiny name list with
+			// no budget impact, so it is not previewed here — it must always ship
+			// alongside the schema change it describes (see below).
 			const previewXdevMountNotice = isUserQueuedMessage(message)
 				? this.#tools.peekPendingXdevMountNotice({ baseCatalogDelivered: baseXdevCatalogDelivered })
 				: undefined;
-			const previewToolRosterNotice = isUserQueuedMessage(message)
-				? this.#tools.peekPendingToolRosterNotice()
-				: undefined;
-			const maintenanceMessages =
-				previewXdevMountNotice?.notice || previewToolRosterNotice?.notice ? [...messages] : messages;
-			if (maintenanceMessages !== messages) {
-				maintenanceMessages.splice(
-					xdevMountNoticeIndex,
-					0,
-					...(previewXdevMountNotice?.notice ? [previewXdevMountNotice.notice] : []),
-					...(previewToolRosterNotice?.notice ? [previewToolRosterNotice.notice] : []),
-				);
+			const maintenanceMessages = previewXdevMountNotice?.notice ? [...messages] : messages;
+			if (maintenanceMessages !== messages && previewXdevMountNotice?.notice) {
+				maintenanceMessages.splice(xdevMountNoticeIndex, 0, previewXdevMountNotice.notice);
 			}
 			await this.#maintenance.runPrePromptCompactionIfNeeded(maintenanceMessages);
 			if (this.#promptGeneration !== generation) {
 				return false;
 			}
-			// Consume only the revisions maintenance estimated. Any delta or catalog
-			// mutation during the await invalidates its preview, leaving the complete
-			// coalesced change pending for the next user turn instead of adding
-			// unbudgeted notice content after the final context check.
+			// Consume the xd:// notice only when its previewed revision still holds:
+			// a mount delta (or catalog rebuild) during the await invalidates it and
+			// defers the whole coalesced change to the next turn so its unbudgeted
+			// docs never bypass the context check. The roster notice is re-derived
+			// from the live delta here and always delivered, keeping the model's
+			// stated availability in lockstep with the wire tool list even when a
+			// roster change landed during maintenance.
 			const xdevMountNotice = previewXdevMountNotice
 				? this.#tools.takePendingXdevMountNotice({
 						baseCatalogDelivered: baseXdevCatalogDelivered,
 						expectedRevision: previewXdevMountNotice.revision,
 					})
 				: undefined;
-			const toolRosterNotice = previewToolRosterNotice
-				? this.#tools.takePendingToolRosterNotice({ expectedRevision: previewToolRosterNotice.revision })
-				: undefined;
+			const toolRosterNotice = isUserQueuedMessage(message) ? this.#tools.takePendingToolRosterNotice() : undefined;
 			if (xdevMountNotice || toolRosterNotice) {
 				messages.splice(
 					xdevMountNoticeIndex,
