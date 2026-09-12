@@ -496,7 +496,10 @@ export class PluginManager {
 			}
 
 			// Step 1: write the spec into plugins/package.json + node_modules.
-			const installProc = Bun.spawn(["bun", "install", packageInstallSpec], {
+			const installCommand = options.force
+				? ["bun", "install", "--force", packageInstallSpec]
+				: ["bun", "install", packageInstallSpec];
+			const installProc = Bun.spawn(installCommand, {
 				cwd: getPluginsDir(),
 				stdin: "ignore",
 				stdout: "pipe",
@@ -990,7 +993,7 @@ export class PluginManager {
 				if (isEnoent(err)) {
 					if (!fs.existsSync(pluginPath)) {
 						if (fromDependencies) {
-							const fixed = options.fix ? await this.#fixMissingPlugin() : false;
+							const fixed = options.fix ? await this.#installPluginDependencies() : false;
 							checks.push({
 								name: `plugin:${name}`,
 								status: "error",
@@ -1017,6 +1020,32 @@ export class PluginManager {
 				}
 				throw err;
 			}
+			// Config-only entries are live local links whose source version may
+			// change without relinking; drift only applies to managed dependencies.
+			// Repair BEFORE the manifest validation below so those checks see the
+			// freshly installed package. The repair re-extracts only this package
+			// (see #reconcileVersionDrift), so sibling plugins already validated in
+			// this loop stay valid.
+			const recordedVersion = config.plugins[name]?.version;
+			if (fromDependencies && recordedVersion && pluginPkg.version && recordedVersion !== pluginPkg.version) {
+				const fixed = options.fix ? await this.#reconcileVersionDrift(name, recordedVersion) : false;
+				checks.push({
+					name: `plugin:${name}:version`,
+					status: fixed ? "ok" : "error",
+					message: fixed
+						? `Reconciled version drift: node_modules now matches lock v${recordedVersion}`
+						: `Version drift: lock records v${recordedVersion} but node_modules has v${pluginPkg.version} (run \`omp plugin install ${name} --force\`)`,
+					fixed,
+				});
+				if (fixed) {
+					try {
+						pluginPkg = await Bun.file(pluginPkgPath).json();
+					} catch {
+						// Keep the pre-repair metadata if the refreshed manifest is unreadable.
+					}
+				}
+			}
+
 			const hasManifest = !!(pluginPkg.omp || pluginPkg.pi);
 			const manifest: PluginManifest | undefined = pluginPkg.omp || pluginPkg.pi;
 
@@ -1086,7 +1115,7 @@ export class PluginManager {
 		return checks;
 	}
 
-	async #fixMissingPlugin(): Promise<boolean> {
+	async #installPluginDependencies(): Promise<boolean> {
 		try {
 			const proc = Bun.spawn(["bun", "install"], {
 				cwd: getPluginsDir(),
@@ -1103,6 +1132,26 @@ export class PluginManager {
 				new Response(proc.stderr).text(),
 			]);
 			return exit === 0;
+		} catch {
+			return false;
+		}
+	}
+
+	/**
+	 * Reconcile lock-vs-disk drift by re-extracting only the drifted package,
+	 * then confirming node_modules matches the lock-recorded version. Removing
+	 * the package first guarantees a real reinstall — a stale or already-satisfied
+	 * range cannot no-op — while leaving sibling plugins untouched, unlike a
+	 * global `bun install --force`, which re-extracts every dependency.
+	 */
+	async #reconcileVersionDrift(name: string, expected: string): Promise<boolean> {
+		await fs.promises.rm(path.join(getPluginsNodeModules(), name), { recursive: true, force: true });
+		if (!(await this.#installPluginDependencies())) return false;
+		try {
+			const pkg: { version?: string } = await Bun.file(
+				path.join(getPluginsNodeModules(), name, "package.json"),
+			).json();
+			return pkg.version === expected;
 		} catch {
 			return false;
 		}

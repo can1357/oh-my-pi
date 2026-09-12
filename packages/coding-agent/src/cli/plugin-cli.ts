@@ -309,8 +309,19 @@ async function handleDiscover(args: string[], _flags: PluginCommandArgs["flags"]
 }
 
 async function handleUpgrade(args: string[], flags: PluginCommandArgs["flags"]): Promise<void> {
-	const manager = await makeMarketplaceManager();
 	const pluginId = args[0];
+	// `upgrade` targets marketplace plugins, whose IDs are `name@marketplace`.
+	// An npm-installed plugin (e.g. a scoped `@scope/pkg`) never parses as one,
+	// so steer the user to the force-reinstall that actually upgrades it instead
+	// of the bare "Expected name@marketplace" parse error (#11090).
+	if (pluginId && !parsePluginId(pluginId)) {
+		console.error(chalk.red(`Invalid plugin ID: "${pluginId}". Marketplace plugins upgrade as "name@marketplace".`));
+		console.error(
+			chalk.yellow(`For an npm-installed plugin, upgrade with: ${APP_NAME} plugin install ${pluginId} --force`),
+		);
+		process.exit(1);
+	}
+	const manager = await makeMarketplaceManager();
 	try {
 		if (pluginId) {
 			if (flags.scope) {
