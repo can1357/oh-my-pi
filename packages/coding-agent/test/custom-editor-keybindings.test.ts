@@ -103,4 +103,15 @@ describe("shipped dequeue defaults", () => {
 
 		expect(onDequeue).toHaveBeenCalledTimes(1);
 	});
+
+	it("routes the configured thinking + tool output details chord through handleInput", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onToggleDetail = vi.fn();
+
+		editor.setActionKeys("app.display.toggleDetail", ["alt+d"]);
+		editor.onToggleDetail = onToggleDetail;
+		editor.handleInput("\x1bd");
+
+		expect(onToggleDetail).toHaveBeenCalledTimes(1);
+	});
 });

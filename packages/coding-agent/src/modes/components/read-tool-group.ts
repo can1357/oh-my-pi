@@ -334,6 +334,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#text: Text;
 	#expanded = false;
 	#toolActivityVisible = true;
+	#toolOutputDetailsHidden = false;
 	#showContentPreview: boolean;
 	// A read group accretes entries across multiple assistant completions for as
 	// long as the run of reads is uninterrupted. It remains active while its
@@ -528,6 +529,18 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	setToolActivityVisible(visible: boolean): void {
 		this.#toolActivityVisible = visible;
 		super.invalidate();
+	}
+
+	/**
+	 * Drop the per-file content previews, leaving the summary rows that name what
+	 * was read. Display-affecting, so the rebuilt children bump the block version
+	 * the transcript's committed-render bypass keys on.
+	 */
+	setToolOutputDetailsHidden(hidden: boolean): void {
+		if (this.#toolOutputDetailsHidden === hidden) return;
+		this.#toolOutputDetailsHidden = hidden;
+		this.#blockVersion++;
+		this.#updateDisplay();
 	}
 
 	getComponent(): Component {
@@ -871,7 +884,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	#shouldRenderPreview(entry: ReadEntry): boolean {
-		return this.#showContentPreview && entry.contentText !== undefined;
+		return this.#showContentPreview && !this.#toolOutputDetailsHidden && entry.contentText !== undefined;
 	}
 
 	#formatStatus(status: ReadEntry["status"]): string {

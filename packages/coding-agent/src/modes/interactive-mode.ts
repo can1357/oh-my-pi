@@ -720,6 +720,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	isBashMode = false;
 	toolOutputExpanded = false;
 	hideToolActivity = false;
+	hideToolOutputDetails = false;
 	todoExpanded = false;
 	planModeEnabled = false;
 	planModePaused = false;
@@ -1214,6 +1215,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.hideToolActivity = settings.get("display.hideToolActivity");
 		this.chatContainer.setToolActivityVisible(!this.hideToolActivity);
+		this.hideToolOutputDetails = settings.get("display.hideToolOutputDetails");
+		this.chatContainer.setToolOutputDetailsHidden(this.hideToolOutputDetails);
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
 		this.proseOnlyThinking = settings.get("proseOnlyThinking");
 
@@ -6459,6 +6462,14 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	toggleThinkingBlockVisibility(): void {
 		this.#inputController.toggleThinkingBlockVisibility();
+	}
+
+	toggleToolOutputDetailsVisibility(): void {
+		this.#inputController.toggleToolOutputDetailsVisibility();
+	}
+
+	toggleDetailVisibility(): void {
+		this.#inputController.toggleDetailVisibility();
 	}
 
 	toggleTodoExpansion(): void {

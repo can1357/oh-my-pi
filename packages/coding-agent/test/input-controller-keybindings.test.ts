@@ -26,6 +26,7 @@ type FakeEditor = {
 	onExpandTools?: () => void;
 	onToggleToolActivity?: () => void;
 	onToggleThinking?: () => void;
+	onToggleDetail?: () => void;
 	onExternalEditor?: () => void;
 	onRetry?: () => void;
 	onChange?: (text: string) => void;
@@ -71,6 +72,7 @@ async function createContext() {
 		"app.clipboard.pasteImage": ["ctrl+v"],
 		"app.tools.toggleVisibility": ["ctrl+shift+o"],
 		"app.tools.expand": ["ctrl+o"],
+		"app.display.toggleDetail": ["ctrl+h"],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();
@@ -214,9 +216,15 @@ async function createContext() {
 		isBashMode: false,
 		isPythonMode: false,
 		hideToolActivity: false,
+		hideToolOutputDetails: false,
 		toolOutputExpanded: false,
 		settings: { set: vi.fn() },
-		chatContainer: { children: [], setToolActivityVisible: vi.fn() },
+		chatContainer: {
+			children: [],
+			setToolActivityVisible: vi.fn(),
+			setToolOutputDetailsHidden: vi.fn(),
+			resetStableEmission: vi.fn(),
+		},
 		handleHotkeysCommand: vi.fn(),
 		handlePlanModeCommand: vi.fn(),
 		handleClearCommand: vi.fn(),
@@ -227,6 +235,7 @@ async function createContext() {
 		showDebugSelector: vi.fn(),
 		showHistorySearch: vi.fn(),
 		toggleThinkingBlockVisibility: vi.fn(),
+		toggleDetailVisibility: vi.fn(),
 		showModelSelector,
 		updateEditorBorderColor: vi.fn(),
 		hasActiveBtw,
@@ -321,6 +330,20 @@ describe("InputController keybinding setup", () => {
 		expect(spies.clearInlineImages).toHaveBeenCalledTimes(1);
 		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
 		expect(ctx.chatContainer.setToolActivityVisible).toHaveBeenCalledWith(false);
+	});
+
+	it("registers the combined thinking + tool output details action", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.display.toggleDetail", ["ctrl+h"]);
+		expect(editor.onToggleDetail).toBeDefined();
+
+		editor.onToggleDetail?.();
+
+		expect(ctx.toggleDetailVisibility).toHaveBeenCalledTimes(1);
 	});
 
 	it("does not mark pasted shell prompts as Python mode while editing", async () => {

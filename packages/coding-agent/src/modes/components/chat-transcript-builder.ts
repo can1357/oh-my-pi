@@ -105,6 +105,7 @@ export class ChatTranscriptBuilder {
 
 	constructor(private readonly deps: ChatTranscriptBuilderDeps) {
 		this.container.setToolActivityVisible(!settings.get("display.hideToolActivity"));
+		this.container.setToolOutputDetailsHidden(settings.get("display.hideToolOutputDetails"));
 	}
 
 	/** Whether the transcript currently holds any rendered rows. */
