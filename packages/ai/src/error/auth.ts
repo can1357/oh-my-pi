@@ -19,6 +19,31 @@ export class MissingApiKeyError extends Error {
 	}
 }
 
+/**
+ * Every signed-in credential of a provider was denied the requested model
+ * (Codex "not supported when using Codex with a ChatGPT account", Cursor plan
+ * policy), so rotation has nowhere left to go.
+ *
+ * Thrown by a credential resolver at the `lastChance` step; the auth-retry
+ * loop surfaces it in place of the provider's bare sentence so the user learns
+ * which accounts were tried, which were signed out recently, and how to get
+ * back in. The message starts with the provider's own sentence so text-based
+ * classification (account-policy rotation, retry policy) keeps matching, and
+ * the same flags the contextualized denial carries are attached structurally.
+ */
+export class ModelEntitlementError extends Error {
+	readonly provider: string;
+	readonly modelId: string;
+
+	constructor(message: string, provider: string, modelId: string) {
+		super(message);
+		this.name = "ModelEntitlementError";
+		this.provider = provider;
+		this.modelId = modelId;
+		attach(this, create(Flag.AccountPolicy | Flag.ContentBlocked));
+	}
+}
+
 /** A user-facing login flow required an `onPrompt` callback that was not supplied. */
 export class OnPromptRequiredError extends Error {
 	constructor(providerLabel: string) {

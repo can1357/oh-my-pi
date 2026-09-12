@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed OpenCode Zen/Go Muse Spark models failing every tool-call turn with a 400 "reasoning encrypted_content was not issued to this caller" error: the gateways proxy the Responses lane to Meta but can't round-trip encrypted reasoning, so those SKUs no longer request or replay it ([#11928](https://github.com/can1357/oh-my-pi/issues/11928)).
+- An authoritative model discovery that no longer advertises a model the previous catalog carried now logs a warning naming the dropped ids, instead of letting the model silently vanish from the picker (the visible symptom when the account holding an entitlement was signed out).
 
 ## [18.1.19] - 2026-09-12
 

@@ -105,7 +105,12 @@ function isDirectCredentialRotationError(error: unknown): boolean {
 	return isUsageLimitOutcome(status, message);
 }
 
-/** Resolve a single retry step, swallowing resolver failures into `undefined`. */
+/**
+ * Resolve a single retry step, swallowing resolver failures into `undefined`.
+ * A {@link AIError.ModelEntitlementError} is the resolver's own terminal
+ * verdict — no credential in the pool can serve the model — and propagates so
+ * the caller surfaces it instead of the provider's bare denial.
+ */
 export async function resolveRetryKey(
 	resolver: ApiKeyResolver,
 	lastChance: boolean,
@@ -116,7 +121,8 @@ export async function resolveRetryKey(
 	try {
 		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
 		return (await resolver({ lastChance: rotateSibling, error, signal, previousKey })) || undefined;
-	} catch {
+	} catch (error) {
+		if (error instanceof AIError.ModelEntitlementError) throw error;
 		return undefined;
 	}
 }

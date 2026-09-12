@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -12,6 +12,7 @@ import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { logger } from "@oh-my-pi/pi-utils";
 
 function completionsSpec(overrides: Partial<ModelSpec<"openai-completions">> = {}): ModelSpec<"openai-completions"> {
 	return {
@@ -1231,6 +1232,48 @@ describe("model cache spec round trip", () => {
 			expect(cached.stale).toBe(false);
 			expect(fetches).toBe(2);
 		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("warns when an authoritative discovery drops a model the previous catalog advertised", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-dropped-discovery-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const keptModel = completionsSpec({ id: "kept-model", provider: "dropped-discovery-test" });
+		const entitledModel = completionsSpec({ id: "entitled-model", provider: "dropped-discovery-test" });
+		let discoveredModels: readonly ModelSpec<"openai-completions">[] = [keptModel, entitledModel];
+		let currentTime = 1_000_000;
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const options = {
+			providerId: "dropped-discovery-test",
+			staticModels: [],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			now: () => currentTime,
+			fetchDynamicModels: async () => discoveredModels,
+		};
+		try {
+			await resolveProviderModels(options, "online");
+			expect(warnSpy).not.toHaveBeenCalled();
+
+			// The account holding the entitlement was signed out: the next
+			// authoritative catalog no longer carries its model.
+			discoveredModels = [keptModel];
+			currentTime += 3 * 60 * 60 * 1_000;
+			const shrunk = await resolveProviderModels(options, "online");
+			expect(shrunk.models.map(model => model.id)).toEqual([keptModel.id]);
+			expect(warnSpy).toHaveBeenCalledWith("Model discovery dropped models the previous catalog advertised", {
+				provider: options.providerId,
+				dropped: [entitledModel.id],
+			});
+
+			// A stable catalog is not news.
+			warnSpy.mockClear();
+			currentTime += 3 * 60 * 60 * 1_000;
+			await resolveProviderModels(options, "online");
+			expect(warnSpy).not.toHaveBeenCalled();
+		} finally {
+			warnSpy.mockRestore();
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});

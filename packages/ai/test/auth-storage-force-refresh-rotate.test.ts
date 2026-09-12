@@ -2,19 +2,23 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { withAuth } from "@oh-my-pi/pi-ai";
+import { registerCustomApi, unregisterCustomApis, withAuth } from "@oh-my-pi/pi-ai";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
+import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
 import type { CredentialRankingStrategy, UsageProvider } from "@oh-my-pi/pi-ai/usage";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const PROVIDER = "unit-rotate-oauth";
 const SOURCE = "auth-storage-force-refresh-rotate-test";
 
 const CODEX_PROVIDER = "openai-codex";
+const CODEX_TEST_API = "auth-storage-rotate-codex-test" as Api;
 const DAYBREAK_MODEL = "gpt-daybreak-blue-latest";
 const CODEX_CHATGPT_MODEL_DENIAL =
 	"The 'gpt-daybreak-blue-latest' model is not supported when using Codex with a ChatGPT account. (code=invalid_request_error)";
@@ -58,6 +62,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		unregisterOAuthProviders(SOURCE);
+		unregisterCustomApis(SOURCE);
 		store?.close();
 		store = undefined;
 		authStorage = undefined;
@@ -891,5 +896,125 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(shortWindow.blockedUntilMs).toBeDefined();
 		expect(shortWindow.blockedUntilMs!).toBeGreaterThan(Date.now() + 7_100_000);
 		expect(shortWindow.blockedUntilMs!).toBeLessThanOrEqual(Date.now() + 7_200_000);
+	});
+
+	test("an exhausted Codex model denial names the tried accounts, the recent sign-out, and the way back in", async () => {
+		if (!store) throw new Error("test setup failed");
+		const codexStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CODEX_PROVIDER] as OAuthCredentials | undefined;
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await codexStorage.set(CODEX_PROVIDER, [
+			{
+				type: "oauth",
+				access: "entitled-access",
+				refresh: "ref-E",
+				expires: farExpiry(),
+				email: "entitled@example.com",
+			},
+			{ type: "oauth", access: "sibling-a", refresh: "ref-A", expires: farExpiry(), email: "a@example.com" },
+			{ type: "oauth", access: "sibling-b", refresh: "ref-B", expires: farExpiry(), email: "b@example.com" },
+		]);
+		const entitledRow = store
+			.listAuthCredentials(CODEX_PROVIDER)
+			.find(row => row.credential.type === "oauth" && row.credential.access === "entitled-access");
+		if (!entitledRow) throw new Error("entitled credential row missing");
+		// The only entitled account was torn down earlier (the incident's silent
+		// sign-out); every remaining sibling is a ChatGPT account without the model.
+		expect(
+			codexStorage.disableCredentialById(entitledRow.id, "oauth refresh failed: OAuthError: invalid_grant"),
+		).toBe(true);
+
+		const keys: unknown[] = [];
+		registerCustomApi(
+			CODEX_TEST_API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				keys.push(options?.apiKey);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const partial: AssistantMessage = {
+						role: "assistant",
+						content: [],
+						api: CODEX_TEST_API,
+						provider: CODEX_PROVIDER,
+						model: DAYBREAK_MODEL,
+						timestamp: 1,
+						stopReason: "stop",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+					};
+					stream.push({ type: "start", partial });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: {
+							...partial,
+							stopReason: "error",
+							errorMessage: CODEX_CHATGPT_MODEL_DENIAL,
+							errorStatus: 400,
+						},
+					});
+				});
+				return stream;
+			},
+			SOURCE,
+		);
+		const codexModel = {
+			id: DAYBREAK_MODEL,
+			name: "Daybreak",
+			api: CODEX_TEST_API,
+			provider: CODEX_PROVIDER,
+			contextWindow: 1000,
+			maxTokens: 100,
+		} as Model<Api>;
+		const sessionId = "daybreak-exhausted";
+		const stream = streamSimple(
+			codexModel,
+			{ systemPrompt: [], messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{ apiKey: codexStorage.resolver(CODEX_PROVIDER, { sessionId, modelId: DAYBREAK_MODEL }) },
+		);
+		for await (const _event of stream) {
+			// drain
+		}
+		const result = await stream.result();
+
+		expect(keys.sort()).toEqual(["sibling-a", "sibling-b"]);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorClassificationMessage).toBe(CODEX_CHATGPT_MODEL_DENIAL);
+		expect(result.errorMessage).toMatch(
+			new RegExp(
+				"^The 'gpt-daybreak-blue-latest' model is not supported when using Codex with a ChatGPT account\\. " +
+					"No other signed-in openai-codex account can serve it: a@example\\.com denied, b@example\\.com denied\\. " +
+					"Recently signed out: entitled@example\\.com \\(OAuthError: invalid_grant, \\S+ ago\\)\\. " +
+					"Sign in with /login openai-codex using an account entitled to this model\\.$",
+			),
+		);
+	});
+
+	test("modelEntitlementError stays silent for errors that are not an exact model-policy denial", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		expect(await authStorage.modelEntitlementError(CODEX_PROVIDER, DAYBREAK_MODEL, authError())).toBeUndefined();
+		expect(
+			await authStorage.modelEntitlementError(
+				CODEX_PROVIDER,
+				"gpt-5.3-codex",
+				new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400),
+			),
+		).toBeUndefined();
+		expect(
+			await authStorage.modelEntitlementError(
+				CODEX_PROVIDER,
+				undefined,
+				new ProviderHttpError(CODEX_CHATGPT_MODEL_DENIAL, 400),
+			),
+		).toBeUndefined();
 	});
 });

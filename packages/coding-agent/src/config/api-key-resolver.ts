@@ -24,7 +24,7 @@ export interface ApiKeyResolverRegistry {
 		sessionId?: string,
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
 	): Promise<string | undefined>;
-	authStorage: Pick<AuthStorage, "rotateSessionCredential">;
+	authStorage: Pick<AuthStorage, "rotateSessionCredential" | "modelEntitlementError">;
 	/**
 	 * Build an {@link ApiKeyResolver} implementing the central a/b/c auth-retry
 	 * policy: initial → resolve; step (b) → force-refresh same account; step (c)
@@ -67,6 +67,10 @@ export function createApiKeyResolver(
 				apiKey: previousKey,
 			});
 			if (!switched) {
+				// A model no account is entitled to is terminal for this request:
+				// re-resolving would only hand back an already-denied bearer.
+				const exhausted = await registry.authStorage.modelEntitlementError(provider, modelId, error);
+				if (exhausted) throw exhausted;
 				const status = AIError.status(error);
 				const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 				// No sibling for an account-quota failure: stop so the outer

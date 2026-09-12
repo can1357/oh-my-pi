@@ -13,6 +13,7 @@ import {
 	$env,
 	$envExact,
 	extractRetryHint,
+	formatDuration,
 	getAgentDbPath,
 	logger,
 	redactSecrets,
@@ -6958,6 +6959,79 @@ export class AuthStorage {
 	}
 
 	/**
+	 * The terminal verdict for an exact model-entitlement denial (Codex ChatGPT
+	 * account, Cursor plan) that {@link AuthStorage.rotateSessionCredential}
+	 * could not rotate away from: every credential of the provider is now
+	 * blocked for the model. Names the accounts that were denied or are parked
+	 * for another reason, the accounts torn down recently, and the way back in,
+	 * so the user is not left with the provider's bare sentence after a silent
+	 * fall-through to whichever sibling account remained. `undefined` for any
+	 * other error, or when no request model is known.
+	 */
+	async modelEntitlementError(
+		provider: string,
+		modelId: string | undefined,
+		error: unknown,
+	): Promise<AIError.ModelEntitlementError | undefined> {
+		if (typeof modelId !== "string") return undefined;
+		const deniedModel = AIError.codexChatGPTAccountPolicyModel(error);
+		const exactCodexModelPolicy =
+			deniedModel !== undefined && AIError.isCodexChatGPTAccountPolicyError(error, provider, modelId);
+		if (!exactCodexModelPolicy && !AIError.isCursorPlanAccountPolicyError(error, provider)) return undefined;
+		const modelPolicyScope = modelAccountPolicyBlockScope(provider, modelId);
+		if (modelPolicyScope === undefined) return undefined;
+
+		const rawMessage = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+		// The provider's own sentence leads so text classification keeps matching.
+		const head = exactCodexModelPolicy
+			? `The '${deniedModel}' model is not supported when using Codex with a ChatGPT account.`
+			: rawMessage.trim().replace(/[.\s]*$/, ".");
+
+		const nowMs = Date.now();
+		const tried: string[] = [];
+		for (const [index, credential] of this.#getCredentialsForProvider(provider).entries()) {
+			const label = credential.type === "oauth" ? credentialAccountLabel(credential) : "API key";
+			const providerKey = this.#getProviderTypeKey(provider, credential.type);
+			if (this.#getCredentialBlockedUntil(provider, providerKey, index, modelPolicyScope) !== undefined) {
+				tried.push(`${label} denied`);
+				continue;
+			}
+			// Rotation also skips siblings parked by a usage limit or backoff.
+			const routing = this.#credentialBlockRouting(provider, credential.type, modelId, modelPolicyScope);
+			const blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, routing.siblingBlockScopes);
+			if (blockedUntil !== undefined) {
+				tried.push(`${label} unavailable for ${formatDuration(Math.max(0, blockedUntil - nowMs))}`);
+			}
+		}
+		const parts = [
+			head,
+			tried.length > 0
+				? `No other signed-in ${provider} account can serve it: ${tried.join(", ")}.`
+				: `No signed-in ${provider} account can serve it.`,
+		];
+
+		let recentlySignedOut: string[] = [];
+		try {
+			recentlySignedOut = (await this.listActionableDisabledCredentials(provider))
+				.sort((a, b) => (b.disabledAtMs ?? 0) - (a.disabledAtMs ?? 0))
+				.slice(0, 3)
+				.map(summary => {
+					const ago =
+						summary.disabledAtMs !== undefined ? `, ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
+					return `${credentialAccountLabel(summary)} (${summarizeDisableCause(summary.cause)}${ago})`;
+				});
+		} catch (listError) {
+			logger.debug("Disabled credential lookup skipped while explaining a model denial", {
+				provider,
+				error: String(listError),
+			});
+		}
+		if (recentlySignedOut.length > 0) parts.push(`Recently signed out: ${recentlySignedOut.join(", ")}.`);
+		parts.push(`Sign in with /login ${provider} using an account entitled to this model.`);
+		return new AIError.ModelEntitlementError(parts.join(" "), provider, modelId);
+	}
+
+	/**
 	 * Rotate away from the credential that failed after a retryable auth error —
 	 * step (c) of the auth-retry policy. Prefer the failed stored row id supplied
 	 * in `options.credentialId`, then the failed bearer supplied in
@@ -7143,6 +7217,10 @@ export class AuthStorage {
 					apiKey: previousKey,
 				});
 				if (!switched) {
+					// A model no account is entitled to is terminal for this request:
+					// re-resolving would only hand back an already-denied bearer.
+					const exhausted = await this.modelEntitlementError(provider, modelId, error);
+					if (exhausted) throw exhausted;
 					const status = AIError.status(error);
 					const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 					// Preserve no-sibling quota backoff instead of re-resolving an

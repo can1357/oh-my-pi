@@ -1,3 +1,4 @@
+import { logger } from "@oh-my-pi/pi-utils";
 import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
@@ -325,6 +326,19 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const resolutionAuthoritative = !hasRemoteFetcher || remoteResolutionComplete || shouldUseFreshCacheAsAuthoritative;
 	const remoteUpdatedAt = anyRemoteFetchSucceeded ? now() : undefined;
 	if (shouldFetchFromNetwork) {
+		if (authoritativeDynamicFetchSucceeded && cache?.authoritative) {
+			// An authoritative catalog that shrinks is how an account that lost
+			// (or was signed out of) an entitlement shows up in the model list;
+			// say so instead of letting the model vanish from the picker.
+			const retained = new Set(models.map(model => model.id));
+			const dropped = usableCachedModels.filter(model => !retained.has(model.id)).map(model => model.id);
+			if (dropped.length > 0) {
+				logger.warn("Model discovery dropped models the previous catalog advertised", {
+					provider: options.providerId,
+					dropped,
+				});
+			}
+		}
 		if (anyRemoteFetchSucceeded) {
 			writeModelCache(
 				cacheProviderId,

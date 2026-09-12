@@ -1558,6 +1558,25 @@ function streamSimpleRequest<TApi extends Api>(
 				outer.fail(failure.error);
 			}
 		};
+		// The resolver's own verdict replaces the provider's sentence on the
+		// terminal event. The original text stays as the classification message
+		// so recovery keys off stable provider wording, not our diagnostics.
+		const explainFailure = (failure: AuthRetryFailure, verdict: AIError.ModelEntitlementError): AuthRetryFailure => {
+			if (!failure.terminalEvent) return { error: verdict, bufferedEvents: failure.bufferedEvents };
+			const original = failure.terminalEvent.error;
+			return {
+				error: verdict,
+				bufferedEvents: failure.bufferedEvents,
+				terminalEvent: {
+					...failure.terminalEvent,
+					error: {
+						...original,
+						errorMessage: verdict.message,
+						errorClassificationMessage: original.errorClassificationMessage ?? original.errorMessage,
+					},
+				},
+			};
+		};
 
 		void (async () => {
 			let lastKey: string | undefined;
@@ -1590,7 +1609,16 @@ function streamSimpleRequest<TApi extends Api>(
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
 				if (signal?.aborted) break;
-				const nextKey = await resolveNextAuthRetryKey(retryState, apiKeyResolver, failure.error, signal);
+				let nextKey: string | undefined;
+				try {
+					nextKey = await resolveNextAuthRetryKey(retryState, apiKeyResolver, failure.error, signal);
+				} catch (error) {
+					failure =
+						error instanceof AIError.ModelEntitlementError
+							? explainFailure(failure, error)
+							: { error, bufferedEvents: failure.bufferedEvents };
+					break;
+				}
 				if (nextKey === undefined) break;
 				const next = await runAttempt(nextKey);
 				if (!next) return;
