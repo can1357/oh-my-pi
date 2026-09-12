@@ -501,9 +501,12 @@ export interface AgentIdentity {
 	readonly parentId?: string;
 	/**
 	 * Ancestor registry ids, nearest-first. Excludes `"Main"` and this agent's
-	 * own id. `[]` for the top-level session and every child of `"Main"`
-	 * (`parentId` is still `"Main"` there). Frozen like the surrounding
-	 * identity: copy rather than mutate.
+	 * own id. Entries are the parent links as supplied at spawn time, so an
+	 * entry can be an id that is not currently registered in the registry —
+	 * chain membership is linkage, not a liveness guarantee. `[]` for the
+	 * top-level session and every child of `"Main"` (`parentId` is still
+	 * `"Main"` there). Frozen like the surrounding identity: copy rather than
+	 * mutate.
 	 */
 	readonly parentChain: readonly string[];
 }
