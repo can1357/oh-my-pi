@@ -106,6 +106,15 @@ export class CollabSocket {
 			});
 	}
 
+	/**
+	 * Resolves once every frame passed to {@link send} so far has been sealed
+	 * and handed to the transport (or dropped because the socket closed). Lets
+	 * a caller send a final frame before {@link close} without racing the seal.
+	 */
+	flush(): Promise<void> {
+		return this.#sendChain;
+	}
+
 	#enqueuePendingSend(envelope: Uint8Array, frameType: CollabFrame["t"]): void {
 		if (this.#pendingSends.length >= MAX_PENDING_SENDS) {
 			logger.debug("collab: dropping frame, reconnect buffer full", { t: frameType });

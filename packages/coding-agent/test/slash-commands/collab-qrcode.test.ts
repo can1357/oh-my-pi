@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { CollabController } from "@oh-my-pi/pi-coding-agent/collab/controller";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -53,8 +54,11 @@ function createRuntimeHarness(options?: { collabHost?: NonNullable<InteractiveMo
 		showError,
 		present,
 		settings: { get: settingsGet },
+		session: { registerSessionChangeCallback: () => () => {} },
 		collabHost: options?.collabHost,
 	} as unknown as InteractiveModeContext;
+	// `/collab` starts rooms through the controller, which builds a real CollabHost.
+	ctx.collabController = new CollabController(ctx);
 	return {
 		ctx,
 		setText,

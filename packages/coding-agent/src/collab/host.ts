@@ -9,7 +9,7 @@
  * and incremental subagent-transcript reads.
  */
 
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -43,6 +43,13 @@ import {
 	generateRoomId,
 	parseCollabLink,
 } from "./protocol";
+import {
+	type CollabAccess,
+	type CollabHostPublication,
+	type CollabHostRegistrySource,
+	type CollabHostSnapshot,
+	publishCollabHost,
+} from "./registry";
 import { CollabSocket } from "./relay-client";
 import { shrinkForReplication } from "./replication-shrink";
 
@@ -121,6 +128,18 @@ const MAX_PENDING_UI_REQUESTS = 64;
  */
 export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseValue } | { kind: "unavailable" };
 
+/**
+ * Identity a host publishes to the local registry. The controller that owns
+ * hosting supplies a process-lifetime `instanceId` and bumps `generation` for
+ * every room it starts; `access` caps what the registry hands out for this
+ * room (the room itself always carries a write token for its own links).
+ */
+export interface CollabHostOptions {
+	instanceId?: string;
+	generation?: number;
+	access?: CollabAccess;
+}
+
 export class CollabHost {
 	#ctx: InteractiveModeContext;
 	#socket: CollabSocket | null = null;
@@ -130,6 +149,14 @@ export class CollabHost {
 	#webViewLink = "";
 	#writeToken: Uint8Array | null = null;
 	#sessionId = "";
+	#startedAt = 0;
+	readonly #instanceId: string;
+	readonly #generation: number;
+	readonly #access: CollabAccess;
+	#relayConnected = false;
+	#registryPublication: CollabHostPublication | null = null;
+	/** Rejects the in-flight first-open wait when `stop()` overtakes `start()`. */
+	#abortStart: ((reason: Error) => void) | null = null;
 	#unsubscribe?: () => void;
 	#peers = new Map<number, { name: string; canWrite: boolean }>();
 	#uiReqSeq = 0;
@@ -142,8 +169,44 @@ export class CollabHost {
 	#registryUnsubscribe?: () => void;
 	#stopped = false;
 
-	constructor(ctx: InteractiveModeContext) {
+	constructor(ctx: InteractiveModeContext, options: CollabHostOptions = {}) {
 		this.#ctx = ctx;
+		this.#instanceId = options.instanceId ?? randomBytes(8).toString("hex");
+		this.#generation = options.generation ?? 1;
+		this.#access = options.access ?? "control";
+	}
+
+	/** Registry identity shared by every room this process hosts. */
+	get instanceId(): string {
+		return this.#instanceId;
+	}
+
+	/** Registry generation of this room; a later room in the same process has a higher one. */
+	get generation(): number {
+		return this.#generation;
+	}
+
+	/** Highest access the registry hands out for this room. */
+	get access(): CollabAccess {
+		return this.#access;
+	}
+
+	/** Session this room mirrors; fixed at `start()`. */
+	get sessionId(): string {
+		return this.#sessionId;
+	}
+
+	get stopped(): boolean {
+		return this.#stopped;
+	}
+
+	/** True while a host-side question is retained for (or shown to) a writable guest. */
+	get inputRequired(): boolean {
+		return this.#pendingUi.size > 0;
+	}
+
+	get relayConnected(): boolean {
+		return this.#relayConnected;
 	}
 
 	get link(): string {
@@ -173,8 +236,14 @@ export class CollabHost {
 		return list;
 	}
 
+	/**
+	 * Mirror a host-side question to writable guests. Accepted from
+	 * construction until teardown — including while the relay connection is
+	 * still being established — so a dialog raised by an extension's
+	 * `session_start` hook is retained for the first writer that joins.
+	 */
 	requestGuestUi(request: CollabUiRequestDraft, signal?: AbortSignal): Promise<CollabGuestUiResult> | null {
-		if (!this.#socket || signal?.aborted || this.#pendingUi.size >= MAX_PENDING_UI_REQUESTS) return null;
+		if (this.#stopped || signal?.aborted || this.#pendingUi.size >= MAX_PENDING_UI_REQUESTS) return null;
 		const reqId = ++this.#uiReqSeq;
 		const fullRequest: CollabUiRequest = { ...request, reqId };
 		const { promise, resolve } = Promise.withResolvers<CollabGuestUiResult>();
@@ -203,6 +272,7 @@ export class CollabHost {
 	}
 
 	async start(relayUrl: string, webUrl = ""): Promise<void> {
+		if (this.#stopped) throw new Error("collab host already stopped");
 		const rawKey = generateRoomKey();
 		const writeToken = generateWriteToken();
 		const roomId = generateRoomId();
@@ -213,15 +283,23 @@ export class CollabHost {
 		this.#webViewLink = formatCollabWebLink(relayUrl, roomId, rawKey, undefined, webUrl);
 		const parsed = parseCollabLink(this.#link);
 		if ("error" in parsed) throw new Error(parsed.error);
+		// Pin the mirrored session before the first await: the frame guard and
+		// the registry snapshot compare against it while the relay is connecting.
+		this.#sessionId = this.#ctx.sessionManager.getSessionId();
+		const firstOpen = Promise.withResolvers<void>();
+		// stop() may reject this before start() reaches its await (during key
+		// import); mark the rejection handled so it can only surface at the await.
+		firstOpen.promise.catch(() => {});
+		this.#abortStart = firstOpen.reject;
 		const key = await importRoomKey(rawKey);
+		if (this.#stopped) throw new Error("collab host stopped during startup");
 
 		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "host", key });
 		this.#socket = socket;
-		this.#sessionId = this.#ctx.sessionManager.getSessionId();
 
-		const firstOpen = Promise.withResolvers<void>();
 		let opened = false;
 		socket.onOpen = () => {
+			this.#relayConnected = true;
 			if (!opened) {
 				opened = true;
 				firstOpen.resolve();
@@ -232,6 +310,7 @@ export class CollabHost {
 			if (msg.t === "peer-left") this.#handlePeerLeft(msg.peer);
 		};
 		socket.onClose = (reason, willReconnect) => {
+			this.#relayConnected = false;
 			if (this.#stopped) return;
 			if (!opened) {
 				firstOpen.reject(new Error(reason));
@@ -256,10 +335,39 @@ export class CollabHost {
 			this.#stopped = true;
 			socket.close();
 			this.#socket = null;
+			// A question retained while connecting has no room to reach anymore.
+			for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
+			this.#pendingUi.clear();
 			throw err;
 		} finally {
 			clearTimeout(timeout);
+			this.#abortStart = null;
 		}
+
+		this.#startedAt = Date.now();
+		// Publish to the local host registry only after the relay connection
+		// succeeded. Publication failure warns but never breaks hosting (#6099).
+		let publication: CollabHostPublication | null = null;
+		try {
+			publication = await publishCollabHost(this.#registrySource(), { instanceId: this.#instanceId });
+		} catch (err) {
+			logger.warn("Collab host registry publication failed", { error: String(err) });
+			this.#ctx.showStatus("Collab host discovery unavailable (omp collab list will not show this session)", {
+				dim: true,
+			});
+		}
+		if (this.#stopped) {
+			// The relay closed fatally (or stop() ran) while publication was in
+			// flight: #teardown had nothing to withdraw, so withdraw here and refuse
+			// to finish startup instead of installing a dead host that stays discoverable.
+			if (publication) {
+				await publication
+					.close()
+					.catch(err => logger.warn("Collab host registry withdrawal failed", { error: String(err) }));
+			}
+			throw new Error("relay connection closed during startup");
+		}
+		this.#registryPublication = publication;
 
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
 			if (isWireAgentEvent(event)) this.#broadcast({ t: "event", event: shrinkForReplication(event) });
@@ -287,16 +395,33 @@ export class CollabHost {
 		this.#updateStatusSegment();
 	}
 
-	/** Broadcast a goodbye, detach all taps, and close the socket. */
+	/** Broadcast a goodbye, detach all taps, withdraw the registry entry, and close the socket. */
 	async stop(reason: string): Promise<void> {
 		if (this.#stopped) return;
-		this.#socket?.send({ t: "bye", reason });
+		this.#abortStart?.(new Error(`collab host stopped: ${reason}`));
+		const socket = this.#socket;
+		if (socket) {
+			// Sealing is asynchronous; without the flush the goodbye would still be
+			// in the send chain when #teardown closes the socket and drops it.
+			socket.send({ t: "bye", reason });
+			await socket.flush();
+		}
 		await this.#teardown();
 	}
 
 	async #teardown(): Promise<void> {
 		if (this.#stopped) return;
 		this.#stopped = true;
+		const publication = this.#registryPublication;
+		this.#registryPublication = null;
+		if (publication) {
+			// close() removes discovery metadata synchronously before awaiting the
+			// server shutdown, so a stopped room disappears from lists immediately;
+			// awaiting it lets a successor room reuse the same instance endpoint.
+			await publication
+				.close()
+				.catch(err => logger.warn("Collab host registry withdrawal failed", { error: String(err) }));
+		}
 		this.#ctx.sessionManager.onEntryAppended = undefined;
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
@@ -315,22 +440,68 @@ export class CollabHost {
 		this.#peers.clear();
 		this.#socket?.close();
 		this.#socket = null;
-		this.#ctx.collabHost = undefined;
+		if (this.#ctx.collabHost === this) this.#ctx.collabHost = undefined;
 		this.#ctx.statusLine.setCollabStatus(null);
 		this.#ctx.ui.requestRender();
 	}
 
-	#broadcast(frame: CollabFrame): void {
-		if (this.#stopped || !this.#socket) return;
-		if (this.#ctx.sessionManager.getSessionId() !== this.#sessionId) {
+	/**
+	 * The session this room mirrors is still the active one. Every path that
+	 * reads or mutates session state on a guest's behalf (broadcasts, joins,
+	 * prompts, registry queries) checks this first: a host that outlived a
+	 * session switch ends itself instead of exposing the successor session
+	 * through the old room.
+	 */
+	#sessionStillCurrent(): boolean {
+		if (this.#ctx.sessionManager.getSessionId() === this.#sessionId) return true;
+		if (!this.#stopped) {
 			void this.stop("session switched");
 			this.#ctx.session.emitNotice("warning", "Collab ended: session switched", "collab");
-			return;
 		}
+		return false;
+	}
+
+	/** Live metadata and capability lookups served over the registry IPC. */
+	#registrySource(): CollabHostRegistrySource {
+		return {
+			snapshot: () => this.#registrySnapshot(),
+			link: access => (access === "view" ? this.#webViewLink : this.#webLink),
+		};
+	}
+
+	/**
+	 * Non-capability snapshot; URLs are only ever returned by `link`. A host
+	 * that switched sessions while idle withdraws on the next discovery query
+	 * instead of describing the new session under the old room's identity.
+	 */
+	#registrySnapshot(): CollabHostSnapshot {
+		if (!this.#sessionStillCurrent()) throw new Error("session switched");
+		const model = this.#ctx.session.model;
+		return {
+			instanceId: this.#instanceId,
+			generation: this.#generation,
+			pid: process.pid,
+			sessionId: this.#sessionId,
+			sessionName: this.#ctx.session.sessionName ?? null,
+			cwd: this.#ctx.sessionManager.getCwd(),
+			model: model ? { provider: model.provider, id: model.id } : null,
+			startedAt: this.#startedAt,
+			participants: this.participants.length,
+			relayConnected: this.#relayConnected,
+			inputRequired: this.inputRequired,
+			access: this.#access,
+		};
+	}
+
+	#broadcast(frame: CollabFrame): void {
+		if (this.#stopped || !this.#socket || !this.#sessionStillCurrent()) return;
 		this.#socket.send(frame);
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
+		// Inbound frames act on the mirrored session (join snapshots, prompts,
+		// aborts, agent control); none may reach a session this room never shared.
+		if (!this.#sessionStillCurrent()) return;
 		switch (frame.t) {
 			case "hello":
 				this.#handleHello(frame.name, frame.proto, frame.writeToken, fromPeer);
