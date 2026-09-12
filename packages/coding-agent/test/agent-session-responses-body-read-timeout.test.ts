@@ -74,7 +74,7 @@ function defaultMessages(): AgentMessage[] {
 	return [
 		{
 			role: "user",
-			content: `<context>\n${"historical fenced context ".repeat(200)}\n</context>`, 
+			content: `<context>\n${"historical fenced context ".repeat(200)}\n</context>`,
 			timestamp: Date.now() - 4,
 		},
 		{ role: "user", content: "before tool history", timestamp: Date.now() - 3 },
@@ -84,7 +84,14 @@ function defaultMessages(): AgentMessage[] {
 			api: "openai-responses",
 			provider: "openai",
 			model: "local-responses-test",
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
 			stopReason: "toolUse",
 			timestamp: Date.now() - 2,
 		},
@@ -201,13 +208,6 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 			const artifactPath = await harness.sessionManager.getArtifactPath(artifactId!);
 			expect(artifactPath).not.toBeNull();
 			expect(await Bun.file(artifactPath!).text()).toContain("historical tool result");
-PUT >197:
-			expect(harness.requests[1]).toContain("historical fenced context");
-			expect(harness.requests[1]).not.toContain("historical tool result");
-PUT 404.=406:
-				expect(activeAfterAbort.some(message => messageContainsText(message, "historical tool result"))).toBe(false);
-				expect(activeAfterAbort.some(message => messageContainsText(message, "historical fenced context"))).toBe(true);
-PUT >425:
 			expect(harness.requests[1]).toContain("historical fenced context");
 			expect(harness.requests[1]).not.toContain("historical tool result");
 			expect(harness.session.agent.state.messages.at(-1)).toMatchObject({
@@ -412,9 +412,8 @@ PUT >425:
 
 			const activeAfterAbort = harness.session.agent.state.messages;
 			expect(activeAfterAbort.some(message => messageContainsText(message, "artifact://"))).toBe(true);
-			expect(activeAfterAbort.some(message => messageContainsText(message, "historical fenced context"))).toBe(
-				false,
-			);
+			expect(activeAfterAbort.some(message => messageContainsText(message, "historical tool result"))).toBe(false);
+			expect(activeAfterAbort.some(message => messageContainsText(message, "historical fenced context"))).toBe(true);
 			const sessionFile = harness.sessionManager.getSessionFile();
 			expect(sessionFile).toBeDefined();
 			const reloaded = await SessionManager.open(sessionFile!, harness.tempDir.path());
@@ -435,6 +434,8 @@ PUT >425:
 			await harness.session.waitForIdle();
 			expect(harness.requests).toHaveLength(2);
 			expect(harness.requests[1]).toContain("artifact://");
+			expect(harness.requests[1]).toContain("historical fenced context");
+			expect(harness.requests[1]).not.toContain("historical tool result");
 			expect(harness.session.agent.state.messages.at(-1)).toMatchObject({
 				role: "assistant",
 				stopReason: "stop",
