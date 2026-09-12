@@ -6584,30 +6584,38 @@ export class AgentSession {
 			// in a copy so context maintenance sees the request's true size without
 			// consuming deltas that a maintenance-triggered rebuild may supersede.
 			const previewXdevMountNotice = isUserQueuedMessage(message)
-				? this.#tools.peekPendingXdevMountNotice(baseXdevCatalogDelivered)
+				? this.#tools.peekPendingXdevMountNotice({ baseCatalogDelivered: baseXdevCatalogDelivered })
 				: undefined;
 			const previewToolRosterNotice = isUserQueuedMessage(message)
 				? this.#tools.peekPendingToolRosterNotice()
 				: undefined;
-			const maintenanceMessages = previewXdevMountNotice || previewToolRosterNotice ? [...messages] : messages;
+			const maintenanceMessages =
+				previewXdevMountNotice?.notice || previewToolRosterNotice?.notice ? [...messages] : messages;
 			if (maintenanceMessages !== messages) {
 				maintenanceMessages.splice(
 					xdevMountNoticeIndex,
 					0,
-					...(previewXdevMountNotice ? [previewXdevMountNotice] : []),
-					...(previewToolRosterNotice ? [previewToolRosterNotice] : []),
+					...(previewXdevMountNotice?.notice ? [previewXdevMountNotice.notice] : []),
+					...(previewToolRosterNotice?.notice ? [previewToolRosterNotice.notice] : []),
 				);
 			}
 			await this.#maintenance.runPrePromptCompactionIfNeeded(maintenanceMessages);
 			if (this.#promptGeneration !== generation) {
 				return false;
 			}
-			// Consume only after maintenance so a promotion/summary rebuild has
-			// already cleared any queued roster delta it now reflects.
-			const xdevMountNotice = isUserQueuedMessage(message)
-				? this.#tools.takePendingXdevMountNotice(baseXdevCatalogDelivered)
+			// Consume only the revisions maintenance estimated. Any delta or catalog
+			// mutation during the await invalidates its preview, leaving the complete
+			// coalesced change pending for the next user turn instead of adding
+			// unbudgeted notice content after the final context check.
+			const xdevMountNotice = previewXdevMountNotice
+				? this.#tools.takePendingXdevMountNotice({
+						baseCatalogDelivered: baseXdevCatalogDelivered,
+						expectedRevision: previewXdevMountNotice.revision,
+					})
 				: undefined;
-			const toolRosterNotice = isUserQueuedMessage(message) ? this.#tools.takePendingToolRosterNotice() : undefined;
+			const toolRosterNotice = previewToolRosterNotice
+				? this.#tools.takePendingToolRosterNotice({ expectedRevision: previewToolRosterNotice.revision })
+				: undefined;
 			if (xdevMountNotice || toolRosterNotice) {
 				messages.splice(
 					xdevMountNoticeIndex,

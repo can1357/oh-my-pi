@@ -1000,6 +1000,40 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(notices[0]).toContain("## Schema");
 	});
 
+	it("defers a mount delta queued after its pre-prompt preview", async () => {
+		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+			xdev: createTestXdevState(),
+			responses: [{ content: ["ok"] }, { content: ["ok"] }],
+		});
+		session.settings.set("tools.xdevDocs", "builtins");
+		session.settings.set("tools.xdevInlineDevices", ["mcp__nucleus_*"]);
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
+		await session.refreshMCPTools([search]);
+
+		// The first prompt previews search for context maintenance. Fetch arrives
+		// during that await, after the only context-size check; consuming the now
+		// larger notice would add unbudgeted inline docs to this request.
+		const maintenanceSpy = vi
+			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
+			.mockImplementationOnce(async () => {
+				await session.refreshMCPTools([search, fetch]);
+			});
+		await session.prompt("first");
+
+		expect(mountNoticesIn(contexts[0])).toHaveLength(0);
+		maintenanceSpy.mockRestore();
+
+		// The complete coalesced delta survives and is previewed afresh on the next
+		// user turn, so both devices and their inline docs are delivered together.
+		await session.prompt("second");
+		const notices = mountNoticesIn(contexts[1]);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("xd://mcp__nucleus_search");
+		expect(notices[0]).toContain("xd://mcp__nucleus_fetch");
+		expect(notices[0]).toContain("## Schema");
+	});
+
 	it("drops a mount delta that cancels out before the next prompt", async () => {
 		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
 			xdev: createTestXdevState(),

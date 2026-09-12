@@ -190,6 +190,11 @@ interface XdevMountNoticeDetails {
 	removed: string[];
 }
 
+interface PendingNoticePreview<T> {
+	notice: CustomMessage<T> | undefined;
+	revision: number;
+}
+
 interface XdevMountNoticeProjection {
 	notice: CustomMessage<XdevMountNoticeDetails> | undefined;
 	announcedMounts: Set<string>;
@@ -210,6 +215,8 @@ export class SessionTools {
 	#xdev: XdevState | undefined;
 	#pendingToolRosterDelta: { added: Set<string>; removed: Set<string> } | undefined;
 	#pendingXdevMountDelta: { added: Set<string>; removed: Set<string> } | undefined;
+	#toolRosterDeltaRevision = 0;
+	#xdevMountDeltaRevision = 0;
 	/**
 	 * Dynamic (`xd://`) devices the model has already been told are mounted.
 	 * Seeded lazily from persisted history on resume (see
@@ -1089,14 +1096,14 @@ export class SessionTools {
 				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 				this.#lastAppliedToolSignature = rebuiltSignature;
 				this.#promptModelKey = this.#currentPromptModelKey();
-				this.#basePromptXdevNames = new Set(rebuiltXdevCatalogNames);
+				this.#setBasePromptXdevNames(rebuiltXdevCatalogNames);
 				// The rebuilt prompt renders the complete current roster, so a delta
 				// queued by an earlier frozen apply is subsumed once that prompt is the
 				// one delivered. A per-turn `before_agent_start` override keeps the
 				// rebuilt base off the wire (see {@link #applyAgentSystemPrompt}), so
 				// keep the delta then — the notice is the only channel carrying the
 				// roster change on this turn.
-				if (this.#turnSystemPromptOverride === undefined) this.#pendingToolRosterDelta = undefined;
+				if (this.#turnSystemPromptOverride === undefined) this.#clearPendingToolRosterDelta();
 			} else if (frozenSignature) {
 				this.#notifyToolRosterDelta(previousActiveToolNames, appliedNames);
 				this.#lastAppliedToolSignature = frozenSignature;
@@ -1118,6 +1125,14 @@ export class SessionTools {
 		for (const name of names) mountedNames.add(name);
 	}
 
+	#setBasePromptXdevNames(names: readonly string[] | undefined): void {
+		this.#basePromptXdevNames = new Set(names);
+		// A rebuild can change whether the final base catalog suppresses a mount
+		// notice. Invalidate any pre-maintenance projection so it is recomputed on
+		// the next user turn rather than growing after the completed estimate.
+		if (this.#pendingXdevMountDelta) this.#xdevMountDeltaRevision++;
+	}
+
 	#notifyToolRosterDelta(previousActiveToolNames: readonly string[], appliedNames: readonly string[]): void {
 		const previous = new Set(previousActiveToolNames);
 		const current = new Set(appliedNames);
@@ -1132,6 +1147,13 @@ export class SessionTools {
 			if (!pending.added.delete(name)) pending.removed.add(name);
 		}
 		this.#pendingToolRosterDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
+		this.#toolRosterDeltaRevision++;
+	}
+
+	#clearPendingToolRosterDelta(): void {
+		if (!this.#pendingToolRosterDelta) return;
+		this.#pendingToolRosterDelta = undefined;
+		this.#toolRosterDeltaRevision++;
 	}
 
 	/**
@@ -1162,6 +1184,7 @@ export class SessionTools {
 			if (!pending.added.delete(name)) pending.removed.add(name);
 		}
 		this.#pendingXdevMountDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
+		this.#xdevMountDeltaRevision++;
 		if (this.#host.settings.get("startup.quiet")) return;
 		const parts: string[] = [];
 		if (addedNames.length > 0) parts.push(`mounted ${addedNames.join(", ")}`);
@@ -1239,15 +1262,19 @@ export class SessionTools {
 		}
 	}
 
-	/** Previews the hidden provider-visible roster notice without consuming its pending delta. */
-	peekPendingToolRosterNotice(): CustomMessage<ToolRosterNoticeDetails> | undefined {
-		return this.#buildPendingToolRosterNotice();
+	/** Previews the hidden provider-visible roster notice and its immutable pending revision. */
+	peekPendingToolRosterNotice(): PendingNoticePreview<ToolRosterNoticeDetails> | undefined {
+		const notice = this.#buildPendingToolRosterNotice();
+		return notice ? { notice, revision: this.#toolRosterDeltaRevision } : undefined;
 	}
 
-	/** Consumes the hidden notice for provider-visible tool-roster changes. */
-	takePendingToolRosterNotice(): CustomMessage<ToolRosterNoticeDetails> | undefined {
+	/** Consumes the roster notice only when no delta mutation followed its preview. */
+	takePendingToolRosterNotice(options: {
+		expectedRevision: number;
+	}): CustomMessage<ToolRosterNoticeDetails> | undefined {
+		if (options.expectedRevision !== this.#toolRosterDeltaRevision) return undefined;
 		const notice = this.#buildPendingToolRosterNotice();
-		if (notice) this.#pendingToolRosterDelta = undefined;
+		if (notice) this.#clearPendingToolRosterDelta();
 		return notice;
 	}
 
@@ -1270,16 +1297,24 @@ export class SessionTools {
 		};
 	}
 
-	/** Previews the hidden `xd://` mount notice without consuming or announcing its pending delta. */
-	peekPendingXdevMountNotice(baseCatalogDelivered: boolean): CustomMessage<XdevMountNoticeDetails> | undefined {
-		return this.#projectPendingXdevMountNotice(baseCatalogDelivered)?.notice;
+	/** Previews the hidden `xd://` mount notice and its immutable pending revision. */
+	peekPendingXdevMountNotice(options: {
+		baseCatalogDelivered: boolean;
+	}): PendingNoticePreview<XdevMountNoticeDetails> | undefined {
+		const projection = this.#projectPendingXdevMountNotice(options.baseCatalogDelivered);
+		return projection ? { notice: projection.notice, revision: this.#xdevMountDeltaRevision } : undefined;
 	}
 
-	/** Consumes the hidden notice for unannounced `xd://` mount changes. */
-	takePendingXdevMountNotice(baseCatalogDelivered: boolean): CustomMessage<XdevMountNoticeDetails> | undefined {
-		const projection = this.#projectPendingXdevMountNotice(baseCatalogDelivered);
+	/** Consumes the mount notice only when no delta or catalog mutation followed its preview. */
+	takePendingXdevMountNotice(options: {
+		baseCatalogDelivered: boolean;
+		expectedRevision: number;
+	}): CustomMessage<XdevMountNoticeDetails> | undefined {
+		if (options.expectedRevision !== this.#xdevMountDeltaRevision) return undefined;
+		const projection = this.#projectPendingXdevMountNotice(options.baseCatalogDelivered);
 		if (!projection) return undefined;
 		this.#pendingXdevMountDelta = undefined;
+		this.#xdevMountDeltaRevision++;
 		this.#announcedMounts = projection.announcedMounts;
 		return projection.notice;
 	}
@@ -1541,7 +1576,7 @@ export class SessionTools {
 		const built = await this.#rebuildSystemPrompt(promptToolNames, this.#toolRegistry, { directToolNames });
 		if (this.#host.isDisposed()) return;
 		this.#baseSystemPrompt = built.systemPrompt;
-		this.#basePromptXdevNames = new Set(built.xdevCatalogNames);
+		this.#setBasePromptXdevNames(built.xdevCatalogNames);
 		this.#host.clearMemoryPromotionSnapshot();
 		if (
 			previousBaseSystemPrompt.length !== this.#baseSystemPrompt.length ||
@@ -1556,7 +1591,7 @@ export class SessionTools {
 		// `before_agent_start` override keeps the rebuilt base off the wire (see
 		// {@link #applyAgentSystemPrompt}), so keep the delta then so
 		// takePendingToolRosterNotice() still surfaces the change on this turn.
-		if (this.#turnSystemPromptOverride === undefined) this.#pendingToolRosterDelta = undefined;
+		if (this.#turnSystemPromptOverride === undefined) this.#clearPendingToolRosterDelta();
 		this.#promptModelKey = this.#currentPromptModelKey();
 		// Refresh the cached signature so a subsequent `applyActiveToolsByName` with
 		// the same tool set does not re-rebuild on top of the explicit refresh we
