@@ -4,7 +4,7 @@ import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { COLLAB_PROTO, formatCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	SPINNER_RENDER_INTERVAL_MS,
 	stopSharedSpinnerTicker,
@@ -36,6 +36,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	afterEach(() => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
+		resetSettingsForTest();
 	});
 
 	it("animates the eval pending cell while the call is live", () => {
