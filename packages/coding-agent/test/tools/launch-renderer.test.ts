@@ -196,6 +196,24 @@ describe("hub launch rendering", () => {
 		expect(rendered.some(line => line.includes("17 more watchers"))).toBe(true);
 	});
 
+	it("preserves list error details in collapsed output", async () => {
+		const uiTheme = await theme();
+		const rendered = lines(
+			hubToolRenderer.renderResult(
+				{
+					content: [{ type: "text", text: "broker unavailable" }],
+					details: { op: "list" } satisfies LaunchToolDetails,
+					isError: true,
+				},
+				{ expanded: false, isPartial: false },
+				uiTheme,
+				{ op: "ps" },
+			),
+		);
+
+		expect(rendered.some(line => line.includes("broker unavailable"))).toBe(true);
+	});
+
 	it("marks a failed start with the daemon's exit reason even though the result is not an error", async () => {
 		const uiTheme = await theme();
 		const rendered = lines(
