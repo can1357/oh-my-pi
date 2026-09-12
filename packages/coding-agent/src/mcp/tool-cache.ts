@@ -28,26 +28,42 @@ function toHex(buffer: ArrayBuffer): string {
 
 /**
  * Fields excluded from cache-identity hashing because they are connection
- * *policy* (when to connect, whether to connect at all), not part of the
- * server's identity — flipping either on an already-cached server must
- * still hit the cache, or an eager-to-lazy transition orphans the cache and
- * starts the server tool-less.
+ * *policy* (when to connect, whether to connect at all, how long to wait
+ * for a response), not part of the server's identity — flipping any of
+ * them on an already-cached server must still hit the cache, or an
+ * eager-to-lazy transition (or a `timeout` tweak on an already-lazy server)
+ * orphans the cache and starts the server tool-less.
  */
-const CURRENT_IDENTITY_EXCLUDED_KEYS: readonly (keyof MCPServerConfig)[] = ["lazy", "enabled"];
+const CURRENT_IDENTITY_EXCLUDED_KEYS: readonly (keyof MCPServerConfig)[] = ["lazy", "enabled", "timeout"];
+
+/**
+ * Policy keys enumerated across every value they could hold at legacy
+ * cache-write time (see {@link policyVariants}): each is two-valued, so
+ * enumeration is exhaustive. `timeout` is deliberately excluded from this
+ * set — it is not boolean, so its legacy candidate in
+ * {@link hashLegacyConfigs} reuses the *current* config's actual value
+ * instead of enumerating an open value space.
+ */
+const ENUMERATED_LEGACY_POLICY_KEYS: readonly (keyof MCPServerConfig)[] = ["lazy", "enabled"];
 
 /**
  * Identity-exclusion sets used by every prior cache-identity hashing scheme,
- * recent first: excluding only `lazy` (before `enabled` was added to the
- * exclusion set), then excluding neither (the shape that shipped before this
- * cache computed a policy-stripped identity at all). Checked on a miss so a
- * cache written under an older release still hits. This is required, not an
- * optimization: an eager server that misses just reconnects in the
- * background and repopulates its cache, but a *lazy* server with no cache
- * registers no tools at all and stays dormant until a manual
- * `/mcp reconnect` (see `connectServers` in `manager.ts`) — every algorithm
- * change here would otherwise strand every already-lazy server on upgrade.
+ * recent first: excluding `lazy` and `enabled` (before `timeout` joined the
+ * exclusion set), excluding only `lazy` (before `enabled` was added), then
+ * excluding neither (the shape that shipped before this cache computed a
+ * policy-stripped identity at all). Checked on a miss so a cache written
+ * under an older release still hits. This is required, not an optimization:
+ * an eager server that misses just reconnects in the background and
+ * repopulates its cache, but a *lazy* server with no cache registers no
+ * tools at all and stays dormant until a manual `/mcp reconnect` (see
+ * `connectServers` in `manager.ts`) — every algorithm change here would
+ * otherwise strand every already-lazy server on upgrade.
  */
-const LEGACY_IDENTITY_EXCLUDED_KEYS: ReadonlyArray<readonly (keyof MCPServerConfig)[]> = [["lazy"], []];
+const LEGACY_IDENTITY_EXCLUDED_KEYS: ReadonlyArray<readonly (keyof MCPServerConfig)[]> = [
+	["lazy", "enabled"],
+	["lazy"],
+	[],
+];
 
 function stripKeys(config: MCPServerConfig, keys: readonly (keyof MCPServerConfig)[]): Record<string, unknown> {
 	const identity: Record<string, unknown> = { ...config };
@@ -62,14 +78,16 @@ async function hashIdentity(identity: Record<string, unknown>): Promise<string> 
 }
 
 /**
- * Every policy-value combination a legacy scheme could have baked into its
- * hash for `keys`: each key absent, `true`, or `false`. Legacy hashes must
- * enumerate these rather than reuse the *current* config's policy values —
- * a version-1 cache written from `{ command, enabled: true }` has to match
- * today's `{ command, lazy: true }` (user dropped the redundant `enabled`
- * while adopting `lazy`), because policy fields are by definition not part
- * of the server's identity. Values are booleans only: discovery coerces the
- * accepted string forms before an `MCPServerConfig` ever reaches hashing.
+ * Every boolean-policy-value combination a legacy scheme could have baked
+ * into its hash for `keys`: each key absent, `true`, or `false`. Legacy
+ * hashes must enumerate these rather than reuse the *current* config's
+ * policy values — a version-1 cache written from `{ command, enabled: true
+ * }` has to match today's `{ command, lazy: true }` (user dropped the
+ * redundant `enabled` while adopting `lazy`), because policy fields are by
+ * definition not part of the server's identity. Values are booleans only:
+ * discovery coerces the accepted string forms before an `MCPServerConfig`
+ * ever reaches hashing. Only {@link ENUMERATED_LEGACY_POLICY_KEYS} are ever
+ * passed in; see {@link hashLegacyConfigs} for the non-boolean policy keys.
  */
 function policyVariants(keys: readonly (keyof MCPServerConfig)[]): Record<string, boolean>[] {
 	let variants: Record<string, boolean>[] = [{}];
@@ -86,8 +104,20 @@ async function hashLegacyConfigs(config: MCPServerConfig): Promise<string[]> {
 	for (const excluded of LEGACY_IDENTITY_EXCLUDED_KEYS) {
 		// Policy keys the legacy scheme still hashed (did not yet exclude).
 		const hashedPolicyKeys = CURRENT_IDENTITY_EXCLUDED_KEYS.filter(key => !excluded.includes(key));
-		for (const variant of policyVariants(hashedPolicyKeys)) {
-			hashes.add(await hashIdentity({ ...identity, ...variant }));
+		const enumeratedKeys = hashedPolicyKeys.filter(key => ENUMERATED_LEGACY_POLICY_KEYS.includes(key));
+		// Non-enumerated policy keys (currently just `timeout`) reuse the
+		// *current* config's actual value: this recovers a cache written just
+		// before this exclusion shipped whose value hasn't changed since,
+		// at the cost of one miss if both happened together — an open value
+		// space can't be enumerated the way a two-valued boolean can.
+		const passthroughValues: Record<string, unknown> = {};
+		for (const key of hashedPolicyKeys) {
+			if (!ENUMERATED_LEGACY_POLICY_KEYS.includes(key) && config[key] !== undefined) {
+				passthroughValues[key] = config[key];
+			}
+		}
+		for (const variant of policyVariants(enumeratedKeys)) {
+			hashes.add(await hashIdentity({ ...identity, ...passthroughValues, ...variant }));
 		}
 	}
 	return [...hashes];
