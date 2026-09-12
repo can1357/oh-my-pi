@@ -4,6 +4,7 @@ import { kNoAuth } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { createLiveConfigHeaders } from "@oh-my-pi/pi-coding-agent/config/model-config-values";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { DEFAULT_CLOUD_STT_MODEL, resolveCloudSttModel } from "@oh-my-pi/pi-coding-agent/stt/cloud-models";
+import { sttClient } from "@oh-my-pi/pi-coding-agent/stt/asr-client";
 import * as downloader from "@oh-my-pi/pi-coding-agent/stt/downloader";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { __resetExtraCaCache } from "@oh-my-pi/pi-utils";
@@ -16,6 +17,7 @@ import {
 import { concatenatePcm, encodeWav } from "@oh-my-pi/pi-coding-agent/tts/wav";
 import { resolveSttCloudCredential, STTController, type SttState } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import { getEventListeners } from "node:events";
 
 function sine16kHz(length = 1600): Float32Array {
 	const out = new Float32Array(length);
@@ -350,6 +352,38 @@ describe("cloud STT stream", () => {
 		handle.cancel();
 		await expect(stopped).resolves.toBe("");
 		expect((stub.calls[0]!.init.signal as AbortSignal).aborted).toBe(true);
+	});
+
+	it("detaches from a shared abort signal once the stream settles", async () => {
+		// A library caller reusing one signal across dictations must not
+		// accumulate a listener (and its buffered-audio closure) per recording.
+		const shared = new AbortController();
+		const okStub = stubFetch("ok");
+		const okStream = startCloudSttStream({
+			credential: { kind: "openai", apiKey: "sk-test" },
+			fetchImpl: okStub.impl,
+			signal: shared.signal,
+		});
+		okStream.pushAudio(sine16kHz(160));
+		await expect(okStream.stop()).resolves.toBe("ok");
+		expect(getEventListeners(shared.signal, "abort")).toHaveLength(0);
+
+		const failedStream = startCloudSttStream({
+			credential: { kind: "openai", apiKey: "sk-test" },
+			fetchImpl: stubFetch("nope", 500).impl,
+			signal: shared.signal,
+		});
+		failedStream.pushAudio(sine16kHz(160));
+		await expect(failedStream.stop()).rejects.toThrow("500");
+		expect(getEventListeners(shared.signal, "abort")).toHaveLength(0);
+
+		const silentStream = startCloudSttStream({
+			credential: { kind: "openai", apiKey: "sk-test" },
+			fetchImpl: stubFetch().impl,
+			signal: shared.signal,
+		});
+		await expect(silentStream.stop()).resolves.toBe("");
+		expect(getEventListeners(shared.signal, "abort")).toHaveLength(0);
 	});
 
 	it("tunnels each credential's upload through its provider-scoped proxy", async () => {
@@ -772,6 +806,57 @@ describe("cloud backend in STTController", () => {
 			controller.dispose();
 			cachedSpy.mockRestore();
 			downloadSpy.mockRestore();
+		}
+	});
+
+	it("aborts a cached local fallback warmup when disposed", async () => {
+		settings.set("stt.modelName", "gpt-4o-transcribe");
+		const cachedSpy = spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		const warmStarted = Promise.withResolvers<AbortSignal | undefined>();
+		const downloadSpy = spyOn(downloader, "downloadSttModel").mockImplementation((_key, _onProgress, options) => {
+			const signal = options?.signal;
+			warmStarted.resolve(signal);
+			const { promise, reject } = Promise.withResolvers<void>();
+			signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+			return promise;
+		});
+		const streamSpy = spyOn(sttClient, "startStream").mockReturnValue({
+			pushAudio(_audio: Float32Array): void {},
+			stop: () => Promise.resolve(""),
+			cancel(): void {},
+		});
+		const editor = {
+			insertText(_text: string): void {},
+			setVolatileText(_text: string): void {},
+			clearVolatileText(): void {},
+			commitVolatileText(_text: string): void {},
+			submit(): void {},
+			deleteBeforeCursor(_count: number): void {},
+		};
+		const options = {
+			showWarning(_message: string): void {},
+			showStatus(_msg: string): void {},
+			onStateChange(_state: SttState): void {},
+		};
+		const controller = new STTController(() => ({ stop(): void {} }), {
+			resolveCloudCredential: () => Promise.resolve(undefined),
+		});
+
+		try {
+			await controller.toggle(editor, options);
+			expect(controller.state).toBe("recording");
+			// The cached warmup is a worker load nobody awaits; without the
+			// recording's signal it would outlive dispose() and pin the worker.
+			const signal = await warmStarted.promise;
+			expect(signal?.aborted).toBe(false);
+			controller.dispose();
+			expect(signal?.aborted).toBe(true);
+			expect(controller.state).toBe("idle");
+		} finally {
+			controller.dispose();
+			cachedSpy.mockRestore();
+			downloadSpy.mockRestore();
+			streamSpy.mockRestore();
 		}
 	});
 

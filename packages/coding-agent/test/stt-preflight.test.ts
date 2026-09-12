@@ -122,7 +122,7 @@ describe("STTController preflight", () => {
 		expect(isCached).toHaveBeenCalledWith("fast");
 		// Background warm calls downloadSttModel with no progress callback.
 		expect(download).toHaveBeenCalledTimes(1);
-		expect(download.mock.calls[0]).toHaveLength(1);
+		expect(download.mock.calls[0]![1]).toBeUndefined();
 		// Nothing was written to the status line, so it must not be cleared.
 		expect(options.showStatus).not.toHaveBeenCalled();
 	});
