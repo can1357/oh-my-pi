@@ -50,6 +50,16 @@ interface TtsrEntry {
 interface InjectionRecord {
 	/** Message count (turn index) when the rule was last injected. */
 	lastInjectedAt: number;
+	/**
+	 * True when `lastInjectedAt` is in journal (branch-lifetime turn)
+	 * coordinates — set by an in-process injection or an explicit branch
+	 * position restore. False when the record was seeded by a resume
+	 * restore without positions (process-local counter starting at 0):
+	 * those coordinates cannot be compared against branch positions, so
+	 * rollback reconciliation must preserve their elapsed gap instead of
+	 * substituting a branch position.
+	 */
+	journalCoords: boolean;
 }
 
 const DEFAULT_SETTINGS: Required<TtsrSettings> = {
@@ -527,9 +537,13 @@ export class TtsrManager {
 			}
 			const record = this.#injectionRecords.get(ruleName);
 			if (!record) {
-				this.#injectionRecords.set(ruleName, { lastInjectedAt: this.#messageCount });
+				this.#injectionRecords.set(ruleName, {
+					lastInjectedAt: this.#messageCount,
+					journalCoords: true,
+				});
 			} else {
 				record.lastInjectedAt = this.#messageCount;
+				record.journalCoords = true;
 			}
 			logger.debug("TTSR rule marked as injected", {
 				ruleName,
@@ -544,10 +558,31 @@ export class TtsrManager {
 		return Array.from(this.#injectionRecords.keys());
 	}
 
-	/** Restore injected state from a list of rule names. */
-	restoreInjected(ruleNames: string[]): void {
+	/**
+	 * Replace injected state with exactly the given rule names. Replacement
+	 * (not merge) keeps the records in lockstep with the journal state a
+	 * session was rewound or reloaded to.
+	 */
+	restoreInjected(ruleNames: string[], injectionPositions?: ReadonlyMap<string, number>): void {
+		// Timing precedence per rule: an explicit branch position (turn
+		// units, from where its last ttsr_injection entry sits) — this is
+		// what a redo reintroduces, since its live record was dropped with
+		// the undo; else the preserved live record for rules that stayed
+		// injected; else zero for genuinely new rules.
+		const previous = new Map(this.#injectionRecords);
+		this.#injectionRecords.clear();
 		for (const name of ruleNames) {
-			this.#injectionRecords.set(name, { lastInjectedAt: 0 });
+			const position = injectionPositions?.get(name);
+			const prev = previous.get(name);
+			const hasPosition = position !== undefined && Number.isInteger(position) && position >= 0;
+			const lastInjectedAt = hasPosition ? position : (prev?.lastInjectedAt ?? 0);
+			// Explicit positions are branch turn indices (journal coords);
+			// otherwise the record inherits its coordinate system — a
+			// resume-seeded record stays process-local, an in-process
+			// injection's stays journal-aligned. Freshly-tracked rules
+			// (neither) start as resume-style process-local records.
+			const journalCoords = hasPosition ? true : (prev?.journalCoords ?? false);
+			this.#injectionRecords.set(name, { lastInjectedAt, journalCoords });
 		}
 		if (ruleNames.length > 0) {
 			logger.debug("TTSR injected state restored", { ruleNames });
@@ -576,6 +611,40 @@ export class TtsrManager {
 	/** Increment message counter (call after each turn). */
 	incrementMessageCount(): void {
 		this.#messageCount++;
+	}
+
+	/**
+	 * Realign the message counter (and any injection timing ahead of it) with
+	 * a rewound branch. Rollback keeps the live counter at its pre-rewind
+	 * value while restored injection records keep their positions — an
+	 * after-gap rule whose injection survives the rewind would otherwise look
+	 * ages old and trigger immediately. Clamping records down to the rewound
+	 * count mirrors what reloading the same branch would produce: the full
+	 * repeatGap has to elapse again.
+	 */
+	rewindMessageCount(count: number): void {
+		this.#messageCount = Math.max(0, count);
+		for (const record of this.#injectionRecords.values()) {
+			if (record.lastInjectedAt > this.#messageCount) record.lastInjectedAt = this.#messageCount;
+		}
+	}
+
+	/**
+	 * Process-local gap per injected rule (counter − lastInjectedAt,
+	 * clamped at zero): the timing distance a rollback must preserve across
+	 * its counter realignment. A resumed process starts both the counter
+	 * and restored records at zero, so live records cannot be compared
+	 * against historical branch positions directly.
+	 */
+	getInjectionGaps(): Map<string, { gap: number; journalCoords: boolean }> {
+		const gaps = new Map<string, { gap: number; journalCoords: boolean }>();
+		for (const [name, record] of this.#injectionRecords) {
+			gaps.set(name, {
+				gap: Math.max(0, this.#messageCount - record.lastInjectedAt),
+				journalCoords: record.journalCoords,
+			});
+		}
+		return gaps;
 	}
 
 	/** Get current message count. */

@@ -174,6 +174,30 @@ export function nextActionableTask(phases: readonly TodoPhase[]): TodoItem | und
 
 export const USER_TODO_EDIT_CUSTOM_TYPE = "user_todo_edit";
 
+/**
+ * Structural equality for todo phase lists. Key order in recorded tool
+ * results follows the model's tool-call JSON, not our object literals, so
+ * stringified comparison would produce false negatives.
+ */
+export function todoPhasesEqual(a: TodoPhase[], b: TodoPhase[]): boolean {
+	return (
+		a.length === b.length &&
+		a.every((phase, i) => {
+			const other = b[i];
+			if (!other || phase.name !== other.name || phase.tasks.length !== other.tasks.length) return false;
+			return phase.tasks.every((task, j) => {
+				const otherTask = other.tasks[j];
+				return (
+					!!otherTask &&
+					task.content === otherTask.content &&
+					task.status === otherTask.status &&
+					task.blocker === otherTask.blocker
+				);
+			});
+		})
+	);
+}
+
 export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPhase[] {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];

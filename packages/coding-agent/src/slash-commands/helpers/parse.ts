@@ -91,3 +91,27 @@ export function parseNamedScopeArgs(rest: string, invalidScopeMessage: string): 
 	}
 	return { name, scope };
 }
+
+/**
+ * Strict positive-integer argument for operator rollback commands. Partial
+ * parses ("/undo 2junk") and non-positive values are rejected rather than
+ * silently mapped to a default that would drop a turn.
+ */
+export function parsePositiveSteps(
+	raw: string | undefined,
+): { ok: true; steps: number } | { ok: false; error: string } {
+	const text = raw?.trim() ?? "";
+	if (text === "") return { ok: true, steps: 1 };
+	if (!/^\d+$/.test(text) || Number(text) < 1) {
+		return { ok: false, error: "Expected a positive integer number of steps (e.g. /undo 2)." };
+	}
+	return { ok: true, steps: Number(text) };
+}
+
+/** Strict 1-based turn number for `/revert <turn#>`. */
+export function parseTurnNumber(raw: string): { ok: true; index: number } | { ok: false; error: string } {
+	if (!/^\d+$/.test(raw) || Number(raw) < 1) {
+		return { ok: false, error: "Expected a positive turn number (see /revert for the listing)." };
+	}
+	return { ok: true, index: Number(raw) - 1 };
+}

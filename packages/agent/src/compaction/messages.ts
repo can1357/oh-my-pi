@@ -24,6 +24,13 @@ export interface CustomMessage<T = unknown> {
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** Persisted rollback ownership, stamped by the coding agent when the
+	 * message enters the prompt flow (`/undo`, `/revert`). Siblings of
+	 * `details` so extension payloads of any shape — including primitives
+	 * and arrays — stay untouched; forwarded verbatim to the journal entry
+	 * and replay. */
+	userTurn?: boolean;
+	promptPrelude?: boolean;
 	timestamp: number;
 }
 

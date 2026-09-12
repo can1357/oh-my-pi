@@ -64,7 +64,7 @@ describe("SessionManager rewrite EPERM replacement fallback", () => {
 		// hits EPERM and exercises the atomic-write fallback.
 		await expect(session.setSessionName("renamed session", "user")).resolves.toBe(true);
 		storage.failNextSessionReplace = true;
-		await expect(session.rewriteEntries()).resolves.toBeUndefined();
+		await expect(session.rewriteEntries()).resolves.toBe(true);
 
 		const rewritten = await storage.readText(sessionFile);
 		expect(rewritten).toContain('"title":"renamed session"');
