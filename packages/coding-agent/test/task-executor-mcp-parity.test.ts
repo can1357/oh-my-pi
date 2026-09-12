@@ -109,12 +109,12 @@ describe("Skill URI reader capability", () => {
 			{ createContext: () => ({}) } as unknown as ExtensionRunner,
 		);
 		const tools = projectSystemPromptToolMetadata(new Map([[definition.name, adapter]]), { mode: "full" });
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-custom-reader-bridge-"));
+		const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-custom-reader-bridge-"));
 		try {
 			const skillDir = path.join(tempDir, "skills", "bridge-skill");
-			fs.mkdirSync(skillDir, { recursive: true });
+			await fs.promises.mkdir(skillDir, { recursive: true });
 			const skillFile = path.join(skillDir, "SKILL.md");
-			fs.writeFileSync(skillFile, "# Bridge Skill\n");
+			await Bun.write(skillFile, "# Bridge Skill\n");
 			const { systemPrompt } = await buildSystemPrompt({
 				cwd: tempDir,
 				contextFiles: [],
@@ -136,7 +136,7 @@ describe("Skill URI reader capability", () => {
 			expect(text).toContain("bridge-skill");
 			expect(text).toContain("`skill://<name>`");
 		} finally {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			await fs.promises.rm(tempDir, { recursive: true, force: true });
 		}
 	});
 });

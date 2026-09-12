@@ -132,7 +132,7 @@ describe("skillful setting and /skillful session toggle", () => {
 	});
 
 	it("announces URI syntax without catalog rows for hidden-only skills mid-session", async () => {
-		fs.writeFileSync(
+		await Bun.write(
 			path.join(tempDir, ".omp", "skills", "test-skill", "SKILL.md"),
 			`---\nname: test-skill\ndescription: A hidden test skill.\ndisable-model-invocation: true\n---\n# Test Skill\n`,
 		);

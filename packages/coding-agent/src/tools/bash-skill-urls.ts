@@ -1,6 +1,10 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { resolveContainedPathSync } from "../discovery/contained-path";
+import {
+	resolveContainedPath,
+	resolveContainedPathSync,
+	type ContainedPathResolution,
+} from "../discovery/contained-path";
 import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
@@ -161,6 +165,82 @@ export function resolveSkillUrlToPath(
 }
 
 /**
+ * Async variant of {@link resolveSkillUrlToPath} for the production
+ * `expandInternalUrls` path: both containment branches run the ASYNC resolver,
+ * so a slow or stalled network/FUSE plugin filesystem cannot block the TUI/RPC
+ * event loop and cancellation can interrupt the lookup. The synchronous
+ * variant is reserved for the exclusively-synchronous callers.
+ */
+export async function resolveSkillUrlToPathAsync(
+	url: string,
+	skills: readonly Skill[],
+	options: { forDirectory?: boolean } = {},
+): Promise<string> {
+	const parsed = /^skill:\/\/([^/?#]+)(\/[^?#]*)?(?:[?#].*)?$/.exec(url);
+	if (!parsed) {
+		throw new ToolError(`Invalid skill:// URL: ${url}`);
+	}
+
+	let rawSkillSegment = parsed[1];
+	if (!rawSkillSegment) {
+		throw new ToolError(`skill:// URL requires a skill name: ${url}`);
+	}
+	try {
+		rawSkillSegment = decodeURIComponent(rawSkillSegment);
+	} catch {
+		// Leave as-is if decoding fails
+	}
+	const { skill, suffix } = matchSkillName(rawSkillSegment, skills);
+	if (!skill) {
+		const available = skills.map(s => s.name);
+		const availableStr = available.length > 0 ? available.join(", ") : "none";
+		throw new ToolError(`Unknown skill: ${rawSkillSegment}. Available: ${availableStr}`);
+	}
+
+	const rawPath = (parsed[2] ?? "") + (suffix ? `/${suffix}` : "");
+	const hasRelativePath = rawPath !== "" && rawPath !== "/";
+	if (!hasRelativePath) {
+		const bareTarget = path.resolve(options.forDirectory === true ? skill.baseDir : skill.filePath);
+		if (skill.containRoot) {
+			return skillContainOrThrow(url, await resolveContainedPath(skill.containRoot, bareTarget));
+		}
+		return bareTarget;
+	}
+	let relativePath: string;
+	try {
+		relativePath = decodeURIComponent(rawPath.slice(1));
+	} catch {
+		throw new ToolError(`Invalid skill:// URL path encoding: ${url}`);
+	}
+	try {
+		validateRelativePath(relativePath);
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		throw new ToolError(message);
+	}
+	const targetPath = path.join(skill.baseDir, relativePath);
+	const resolvedPath = path.resolve(targetPath);
+	const resolvedBaseDir = path.resolve(skill.baseDir);
+	if (!resolvedPath.startsWith(resolvedBaseDir + path.sep) && resolvedPath !== resolvedBaseDir) {
+		throw new ToolError("Path traversal is not allowed in skill:// URLs");
+	}
+	if (skill.containRoot) {
+		return skillContainOrThrow(url, await resolveContainedPath(skill.containRoot, resolvedPath));
+	}
+	return resolvedPath;
+}
+
+function skillContainOrThrow(url: string, contained: ContainedPathResolution): string {
+	if (contained.status === "outside") {
+		throw new SkillContainmentError(`skill:// path resolves outside the plugin root: ${url}`);
+	}
+	if (contained.status === "missing") {
+		throw new SkillContainmentError(`skill:// path does not exist: ${url}`);
+	}
+	return contained.realPath;
+}
+
+/**
  * Match a raw skill segment against registered skills using longest-prefix match.
  * Handles colons in both skill names (namespacing) and suffixes (line ranges).
  *
@@ -310,7 +390,7 @@ async function resolveInternalUrlToPath(
 	}
 
 	if (scheme === "skill") {
-		return resolveSkillUrlToPath(url, skills, { forDirectory: skillUrlForDirectory });
+		return resolveSkillUrlToPathAsync(url, skills, { forDirectory: skillUrlForDirectory });
 	}
 
 	if (scheme === "attachment") {
