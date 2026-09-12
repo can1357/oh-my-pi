@@ -11,3 +11,11 @@ export interface HelloRefreshTabChange {
 export function invalidatesHelloStructurally(changeInfo: HelloRefreshTabChange): boolean {
 	return changeInfo.groupId !== undefined || changeInfo.url !== undefined;
 }
+
+export function shouldSuppressHelloSnapshot(
+	structuralDirty: boolean,
+	urlDirty: boolean,
+	allowStaleUrl: boolean,
+): boolean {
+	return structuralDirty || (urlDirty && !allowStaleUrl);
+}

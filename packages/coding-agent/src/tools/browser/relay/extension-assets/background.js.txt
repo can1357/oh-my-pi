@@ -329,6 +329,9 @@ async function snapshotAfterPendingOperationsSettle(getGeneration, getPendingOpe
 function invalidatesHelloStructurally(changeInfo) {
   return changeInfo.groupId !== undefined || changeInfo.url !== undefined;
 }
+function shouldSuppressHelloSnapshot(structuralDirty, urlDirty, allowStaleUrl) {
+  return structuralDirty || urlDirty && !allowStaleUrl;
+}
 
 // extension/background.ts
 var DEFAULT_PORT = 9224;
@@ -745,19 +748,21 @@ function refreshHello(onSent) {
       helloRefresh.afterSend = onSent;
     return;
   }
-  const startRefresh = (afterSend) => {
+  const startRefresh = (afterSend, allowStaleUrl) => {
     const entry = {
       socket,
       structuralDirty: false,
+      urlDirty: false,
+      allowStaleUrl,
       metaDirty: false,
       done: Promise.resolve(),
       afterSend
     };
     entry.done = buildHello().then(async (hello) => {
-      if (entry.structuralDirty)
+      if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.urlDirty, entry.allowStaleUrl))
         return;
-      await trackAttachments(hello.attachedTabIds, () => helloRefresh === entry && !entry.structuralDirty && ws === socket && socket.readyState === WebSocket.OPEN);
-      if (entry.structuralDirty)
+      await trackAttachments(hello.attachedTabIds, () => helloRefresh === entry && !shouldSuppressHelloSnapshot(entry.structuralDirty, entry.urlDirty, entry.allowStaleUrl) && ws === socket && socket.readyState === WebSocket.OPEN);
+      if (shouldSuppressHelloSnapshot(entry.structuralDirty, entry.urlDirty, entry.allowStaleUrl))
         return;
       if (ws === socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(hello));
@@ -772,19 +777,23 @@ function refreshHello(onSent) {
     }).finally(() => {
       if (helloRefresh !== entry)
         return;
-      if ((entry.structuralDirty || entry.metaDirty) && ws === socket && socket.readyState === WebSocket.OPEN) {
-        startRefresh(entry.afterSend);
+      if ((entry.structuralDirty || entry.urlDirty || entry.metaDirty) && ws === socket && socket.readyState === WebSocket.OPEN) {
+        startRefresh(entry.afterSend, entry.allowStaleUrl || entry.urlDirty);
       } else {
         helloRefresh = null;
       }
     });
     helloRefresh = entry;
   };
-  startRefresh(onSent ?? null);
+  startRefresh(onSent ?? null, false);
 }
 function invalidateHelloRefresh() {
   if (helloRefresh)
     helloRefresh.structuralDirty = true;
+}
+function invalidateHelloUrl() {
+  if (helloRefresh)
+    helloRefresh.urlDirty = true;
 }
 function invalidateHelloMeta() {
   if (helloRefresh)
@@ -1101,7 +1110,9 @@ chrome.tabs.onCreated.addListener((tab) => {
 chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
   const snap = snapshot(tab);
   if (snap) {
-    if (invalidatesHelloStructurally(changeInfo))
+    if (changeInfo.url !== undefined)
+      invalidateHelloUrl();
+    else if (invalidatesHelloStructurally(changeInfo))
       invalidateHelloRefresh();
     else
       invalidateHelloMeta();

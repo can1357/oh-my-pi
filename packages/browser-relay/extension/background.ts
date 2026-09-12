@@ -57,7 +57,10 @@ import {
 	afterPendingOperationsSettle,
 	snapshotAfterPendingOperationsSettle,
 } from "./pending-ops";
-import { invalidatesHelloStructurally } from "./hello-refresh";
+import {
+	invalidatesHelloStructurally,
+	shouldSuppressHelloSnapshot,
+} from "./hello-refresh";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
@@ -739,6 +742,13 @@ let helloRefresh: {
 	 */
 	structuralDirty: boolean;
 	/**
+	 * The URL changed after this hello snapshotted the tab. Suppress the first
+	 * stale snapshot in a refresh chain to preserve event ordering, but allow a
+	 * later retry through if URL churn continues so navigation cannot starve the
+	 * initial handshake. Every allowed stale send is followed by another rebuild.
+	 */
+	urlDirty: boolean;
+	/**
 	 * Only tab metadata (title, favicon, url) changed while this hello was in
 	 * flight. That never alters the advertised attachment set, so the hello is
 	 * still safe to send — suppressing it would let a page that churns its title
@@ -787,16 +797,23 @@ function refreshHello(onSent?: () => void): void {
 		if (onSent) helloRefresh.afterSend = onSent;
 		return;
 	}
-	const startRefresh = (afterSend: (() => void) | null): void => {
+	const startRefresh = (
+		afterSend: (() => void) | null,
+		allowStaleUrl: boolean,
+	): void => {
 		const entry: {
 			socket: WebSocket;
 			done: Promise<void>;
 			structuralDirty: boolean;
+			urlDirty: boolean;
+			allowStaleUrl: boolean;
 			metaDirty: boolean;
 			afterSend: (() => void) | null;
 		} = {
 			socket,
 			structuralDirty: false,
+			urlDirty: false,
+			allowStaleUrl,
 			metaDirty: false,
 			done: Promise.resolve(),
 			afterSend,
@@ -816,7 +833,14 @@ function refreshHello(onSent?: () => void): void {
 				// send: doing so would let a page that churns its title indefinitely
 				// starve the reconnect hello and its orphan-sweep cancellation. The
 				// live tab still carries the freshest metadata via the rebuild below.
-				if (entry.structuralDirty) return;
+				if (
+					shouldSuppressHelloSnapshot(
+						entry.structuralDirty,
+						entry.urlDirty,
+						entry.allowStaleUrl,
+					)
+				)
+					return;
 				// Persist recovery markers only for the hello that is still current.
 				// A detach can invalidate this refresh after `buildHello()` snapshots
 				// targets but before the queued storage write runs; gating the write on
@@ -826,11 +850,22 @@ function refreshHello(onSent?: () => void): void {
 					hello.attachedTabIds,
 					() =>
 						helloRefresh === entry &&
-						!entry.structuralDirty &&
+						!shouldSuppressHelloSnapshot(
+							entry.structuralDirty,
+							entry.urlDirty,
+							entry.allowStaleUrl,
+						) &&
 						ws === socket &&
 						socket.readyState === WebSocket.OPEN,
 				);
-				if (entry.structuralDirty) return;
+				if (
+					shouldSuppressHelloSnapshot(
+						entry.structuralDirty,
+						entry.urlDirty,
+						entry.allowStaleUrl,
+					)
+				)
+					return;
 				if (ws === socket && socket.readyState === WebSocket.OPEN) {
 					socket.send(JSON.stringify(hello));
 					// The relay has now received our attachment state, so it owns
@@ -860,7 +895,7 @@ function refreshHello(onSent?: () => void): void {
 			.finally(() => {
 				if (helloRefresh !== entry) return;
 				if (
-					(entry.structuralDirty || entry.metaDirty) &&
+					(entry.structuralDirty || entry.urlDirty || entry.metaDirty) &&
 					ws === socket &&
 					socket.readyState === WebSocket.OPEN
 				) {
@@ -873,18 +908,22 @@ function refreshHello(onSent?: () => void): void {
 					// discrete attach/detach/tab event (structural), so it cannot spin
 					// without a corresponding browser event. Carry any not-yet-run
 					// post-send callback onto the rebuild.
-					startRefresh(entry.afterSend);
+					startRefresh(entry.afterSend, entry.allowStaleUrl || entry.urlDirty);
 				} else {
 					helloRefresh = null;
 				}
 			});
 		helloRefresh = entry;
 	};
-	startRefresh(onSent ?? null);
+	startRefresh(onSent ?? null, false);
 }
 
 function invalidateHelloRefresh(): void {
 	if (helloRefresh) helloRefresh.structuralDirty = true;
+}
+
+function invalidateHelloUrl(): void {
+	if (helloRefresh) helloRefresh.urlDirty = true;
 }
 
 /**
@@ -1454,7 +1493,8 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
 		// Group membership and URL are reconciliation state, not cosmetic
 		// metadata. A stale hello can otherwise overwrite a grouping RPC's result
 		// or a newly navigated URL and make recovery act on the old target state.
-		if (invalidatesHelloStructurally(changeInfo)) invalidateHelloRefresh();
+		if (changeInfo.url !== undefined) invalidateHelloUrl();
+		else if (invalidatesHelloStructurally(changeInfo)) invalidateHelloRefresh();
 		else invalidateHelloMeta();
 		post({ t: "tabUpdated", tab: snap });
 	}

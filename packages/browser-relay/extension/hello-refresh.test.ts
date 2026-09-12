@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { invalidatesHelloStructurally } from "./hello-refresh";
+import {
+	invalidatesHelloStructurally,
+	shouldSuppressHelloSnapshot,
+} from "./hello-refresh";
 
 describe("hello refresh invalidation", () => {
 	it("treats URL and group changes as reconciliation state", () => {
@@ -9,5 +12,11 @@ describe("hello refresh invalidation", () => {
 
 	it("keeps cosmetic tab churn metadata-only", () => {
 		expect(invalidatesHelloStructurally({})).toBe(false);
+	});
+
+	it("suppresses the first stale URL snapshot but bounds continuous churn", () => {
+		expect(shouldSuppressHelloSnapshot(false, true, false)).toBe(true);
+		expect(shouldSuppressHelloSnapshot(false, true, true)).toBe(false);
+		expect(shouldSuppressHelloSnapshot(true, true, true)).toBe(true);
 	});
 });
