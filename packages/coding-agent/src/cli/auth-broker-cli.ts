@@ -30,6 +30,8 @@ import {
 	type OAuthProviderInfo,
 	PASTE_CODE_LOGIN_PROVIDERS,
 	PROVIDER_REGISTRY,
+	readLocalAntigravityCredential,
+	resolveCredentialIdentityKey,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
@@ -54,6 +56,8 @@ export interface AuthBrokerCommandArgs {
 		via?: string;
 		provider?: string;
 		dryRun?: boolean;
+		/** `import`: import credentials from local Google Antigravity CLI installation. */
+		fromAntigravity?: boolean;
 		/** `login`/`logout`: provider id. `import`: filesystem path. */
 		source?: string;
 		/** `import`: keep credentials whose JSON had `disabled: true`. */
@@ -611,9 +615,133 @@ function describeImportEntry(entry: ImportPlanEntry): string {
 }
 
 async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
+	if (flags.fromAntigravity) {
+		if (flags.provider && flags.provider !== "google-antigravity") {
+			const message = `--from-antigravity only supports provider "google-antigravity" (received "${flags.provider}")`;
+			if (flags.json) {
+				process.stdout.write(`${JSON.stringify({ error: message, provider: flags.provider })}\n`);
+			} else {
+				process.stdout.write(`${chalk.red("failed")} ${flags.provider}: ${message}\n`);
+			}
+			process.exitCode = 1;
+			return;
+		}
+		const targetProvider = "google-antigravity";
+		let cred: OAuthCredential;
+		try {
+			cred = await readLocalAntigravityCredential();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (flags.json) {
+				process.stdout.write(`${JSON.stringify({ error: message, provider: targetProvider })}\n`);
+			} else {
+				process.stdout.write(`${chalk.red("failed")} ${targetProvider}: ${message}\n`);
+			}
+			process.exitCode = 1;
+			return;
+		}
+
+		const ident = cred.email ?? cred.projectId ?? "(no identity)";
+		const stale = cred.expires < Date.now() ? " [expired]" : "";
+
+		if (flags.dryRun === true) {
+			if (flags.json) {
+				process.stdout.write(
+					`${JSON.stringify({
+						dryRun: true,
+						imported: [],
+						plan: [
+							{
+								provider: targetProvider,
+								email: cred.email,
+								projectId: cred.projectId,
+								expiresAt: cred.expires,
+								source: "local-antigravity-cli",
+							},
+						],
+					})}\n`,
+				);
+			} else {
+				process.stdout.write(`Dry run — would import credential:\n`);
+				process.stdout.write(`  ${targetProvider}: ${ident}${stale} from local Antigravity CLI\n`);
+			}
+			return;
+		}
+
+		const targetIdentityKey = resolveCredentialIdentityKey(targetProvider, cred);
+		const brokerConfig = await resolveAuthBrokerConfig();
+		if (brokerConfig) {
+			const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
+			try {
+				const uploadResult = await client.uploadCredential(targetProvider, cred);
+				for (const entry of uploadResult.entries) {
+					const matches =
+						targetIdentityKey !== null
+							? entry.identityKey === targetIdentityKey
+							: entry.credential.type === "oauth" && entry.credential.email === cred.email;
+					if (matches) {
+						await client.deleteCredentialBlocks(entry.id);
+					}
+				}
+				if (flags.json) {
+					process.stdout.write(
+						`${JSON.stringify({
+							imported: [{ provider: targetProvider, email: cred.email, source: "local-antigravity-cli" }],
+						})}\n`,
+					);
+				} else {
+					process.stdout.write(
+						`${chalk.green("uploaded")} ${targetProvider}: ${ident}${stale} → ${brokerConfig.url}\n`,
+					);
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				if (flags.json) {
+					process.stdout.write(`${JSON.stringify({ error: message, provider: targetProvider })}\n`);
+				} else {
+					process.stdout.write(`${chalk.red("failed")} ${targetProvider}: ${message}\n`);
+				}
+				process.exitCode = 1;
+			}
+			return;
+		}
+
+		const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
+		try {
+			const stored = store.upsertAuthCredentialForProvider(targetProvider, cred);
+			for (const row of stored) {
+				const rowIdentityKey = resolveCredentialIdentityKey(targetProvider, row.credential);
+				const matches =
+					targetIdentityKey !== null
+						? rowIdentityKey === targetIdentityKey
+						: row.credential.type === "oauth" &&
+							(row.credential.email === cred.email || row.credential.access === cred.access);
+				if (matches) {
+					store.deleteCredentialBlocks(row.id);
+				}
+			}
+			if (flags.json) {
+				process.stdout.write(
+					`${JSON.stringify({
+						imported: [{ provider: targetProvider, email: cred.email, source: "local-antigravity-cli" }],
+					})}\n`,
+				);
+			} else {
+				process.stdout.write(
+					`${chalk.green("imported")} ${targetProvider}: ${ident}${stale} from local Antigravity CLI\n`,
+				);
+			}
+		} finally {
+			store.close();
+		}
+		return;
+	}
+
 	const target = flags.source;
 	if (!target) {
-		throw new Error("Usage: omp auth-broker import <file|dir> [--provider=<id>] [--include-disabled] [--dry-run]");
+		throw new Error(
+			"Usage: omp auth-broker import <file|dir> [--from-antigravity] [--provider=<id>] [--include-disabled] [--dry-run]",
+		);
 	}
 	const resolvedTarget = path.resolve(target.startsWith("~") ? target.replace(/^~/, os.homedir()) : target);
 	const { entries, skipped } = await loadImportPlan(resolvedTarget, flags.provider, flags.includeDisabled === true);

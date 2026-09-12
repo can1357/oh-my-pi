@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
 	ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
 	googleAntigravityProjectHook,
+	readLocalAntigravityCredential,
 } from "../src/registry/oauth/google-antigravity";
 
 const CLOUD_CODE_ASSIST_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
@@ -218,5 +222,104 @@ describe("Antigravity OAuth project discovery", () => {
 
 		await expect(discoverAntigravityProject()).rejects.toThrow("loadCodeAssist failed: 201 Created: created");
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("readLocalAntigravityCredential", () => {
+	let tempDir: string;
+
+	afterEach(async () => {
+		if (tempDir) {
+			await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+		}
+	});
+
+	it("reads active token and extracts email from oauth_creds.json id_token", async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ag-oauth-test-"));
+		const tokenPath = path.join(tempDir, "antigravity-oauth-token");
+		const credsPath = path.join(tempDir, "oauth_creds.json");
+
+		const tokenData = {
+			token: {
+				access_token: "ya29.test-access-token",
+				refresh_token: "1//test-refresh-token",
+				expiry: "2026-08-01T12:00:00.000Z",
+			},
+			auth_method: "consumer",
+		};
+		await fs.writeFile(tokenPath, JSON.stringify(tokenData));
+
+		// Mock JWT id_token with email
+		const header = Buffer.from(JSON.stringify({ alg: "RS256" })).toString("base64url");
+		const payload = Buffer.from(JSON.stringify({ email: "user@example.com", sub: "12345" })).toString("base64url");
+		const credsData = {
+			access_token: "ya29.other",
+			refresh_token: "1//other",
+			id_token: `${header}.${payload}.signature`,
+		};
+		await fs.writeFile(credsPath, JSON.stringify(credsData));
+
+		const cred = await readLocalAntigravityCredential({ tokenPath, credsPath });
+
+		expect(cred.type).toBe("oauth");
+		expect(cred.access).toBe("ya29.test-access-token");
+		expect(cred.refresh).toBe("1//test-refresh-token");
+		expect(cred.expires).toBe(Date.parse("2026-08-01T12:00:00.000Z"));
+		expect(cred.projectId).toBe("aicode-consumers");
+		expect(cred.email).toBe("user@example.com");
+	});
+
+	it("reads active token when oauth_creds.json is absent", async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ag-oauth-test-"));
+		const tokenPath = path.join(tempDir, "antigravity-oauth-token");
+		const credsPath = path.join(tempDir, "non-existent-creds.json");
+
+		const tokenData = {
+			token: {
+				access_token: "ya29.standalone-access",
+				refresh_token: "1//standalone-refresh",
+			},
+			auth_method: "consumer",
+		};
+		await fs.writeFile(tokenPath, JSON.stringify(tokenData));
+
+		const cred = await readLocalAntigravityCredential({ tokenPath, credsPath });
+
+		expect(cred.type).toBe("oauth");
+		expect(cred.access).toBe("ya29.standalone-access");
+		expect(cred.refresh).toBe("1//standalone-refresh");
+		expect(cred.projectId).toBe("aicode-consumers");
+		expect(cred.email).toBeUndefined();
+	});
+
+	it("throws OAuthError when token file does not exist", async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ag-oauth-test-"));
+		const tokenPath = path.join(tempDir, "missing-token");
+
+		await expect(readLocalAntigravityCredential({ tokenPath })).rejects.toThrow(
+			"Antigravity OAuth token file not found",
+		);
+	});
+
+	it("throws OAuthError when token file is missing refresh_token", async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ag-oauth-test-"));
+		const tokenPath = path.join(tempDir, "antigravity-oauth-token");
+
+		await fs.writeFile(tokenPath, JSON.stringify({ token: { access_token: "ya29.only-access" } }));
+
+		await expect(readLocalAntigravityCredential({ tokenPath })).rejects.toThrow(
+			"missing access_token or refresh_token",
+		);
+	});
+
+	it("preserves non-ENOENT errors (e.g. EISDIR) rather than masking as not found", async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ag-oauth-test-"));
+		// Passing a directory path throws EISDIR
+		await expect(readLocalAntigravityCredential({ tokenPath: tempDir })).rejects.toThrow();
+		try {
+			await readLocalAntigravityCredential({ tokenPath: tempDir });
+		} catch (error) {
+			expect(error instanceof Error ? error.message : "").not.toContain("Antigravity OAuth token file not found");
+		}
 	});
 });
