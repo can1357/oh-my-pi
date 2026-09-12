@@ -63,6 +63,29 @@ export async function withFileLock<T>(
 }
 
 /**
+ * Run synchronous `fn` while holding an OS-backed exclusive lock for
+ * `filePath`. The caller must not yield inside `fn`: the lock is released the
+ * moment `fn` returns, so an `await` would end the critical section early.
+ */
+export function withFileLockSync<T>(filePath: string, fn: () => T, options: FileLockOptions = {}): T {
+	const opts = { ...DEFAULT_OPTIONS, ...options };
+	const lockPath = getLockPath(filePath);
+
+	let lock: NativeFileLock | null = null;
+	for (let attempt = 0; attempt < opts.retries && lock === null; attempt++) {
+		lock = tryAcquireLock(lockPath);
+		if (lock === null && attempt + 1 < opts.retries && opts.retryDelayMs > 0) Bun.sleepSync(opts.retryDelayMs);
+	}
+	if (lock === null) throw new Error(`Failed to acquire lock for ${filePath} after ${opts.retries} attempts`);
+
+	try {
+		return fn();
+	} finally {
+		lock.release();
+	}
+}
+
+/**
  * Test-only acquisition handle for forcing ownership handoffs. This is not
  * part of the supported package API.
  */

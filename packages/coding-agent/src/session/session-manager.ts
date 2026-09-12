@@ -64,6 +64,7 @@ import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo 
 import {
 	loadEntriesFromFile,
 	loadSessionFile,
+	parseSessionContent,
 	resolveBlobRefsInEntries,
 	type SessionLoadResult,
 	visitEntriesFromFile,
@@ -217,7 +218,7 @@ function isAssistantEntry(entry: SessionEntry): boolean {
 	return entry.type === "message" && entry.message.role === "assistant";
 }
 
-function isDraftOnlyMetadataEntry(entry: SessionEntry): boolean {
+function isDraftOnlyMetadataEntry(entry: FileEntry): boolean {
 	// Startup-recorded selector state that does not survive as user intent
 	// once the draft is cleared. `mode_change` covers the `plan.defaultOnStartup`
 	// path (interactive-mode.ts enters plan mode before draft restoration) and
@@ -411,6 +412,7 @@ interface SessionManagerStateSnapshot {
 	onDisk: boolean;
 	needsRewrite: boolean;
 	draftOnlySessionCleanupArmed: boolean;
+	draftOnlyFirstDurablePending: boolean;
 	fallbackRuntimeOnly: boolean;
 	header: SessionHeader;
 	entries: SessionEntry[];
@@ -507,6 +509,17 @@ export class SessionManager {
 	 * ensureOnDisk() callers (ACP session/new, handoff) must survive close().
 	 */
 	#draftOnlySessionCleanupArmed = false;
+
+	/**
+	 * A first durable write out of a draft-only materialization was routed to
+	 * the session-file lock but never published there (WE-e): the failed entry
+	 * stays in #entries, so the entries-derived predicates below can no longer
+	 * recognize the retry. While set, the next durable write takes the lock
+	 * again instead of falling into an unlocked full rewrite that a concurrent
+	 * locked publish or delete could clobber. Cleared by a locked publish that
+	 * leaves the manager current, or by any session reset.
+	 */
+	#draftOnlyFirstDurablePending = false;
 
 	/**
 	 * Collab replication tap: invoked for every appended entry with the
@@ -986,6 +999,78 @@ export class SessionManager {
 			return;
 		}
 
+		// A manager that materialized a file only to hold a draft may still be
+		// racing another process's close-time draft GC (#11497) when its first
+		// durable entry lands. Serialize that one transition on the session-file
+		// lock: the GC then either observes this entry and keeps the file, or has
+		// already removed it and this append rebuilds the header.
+		if (this.#isDraftOnlyFirstDurableEntry(entry)) {
+			this.#appendFirstDurableEntryLocked(entry);
+			return;
+		}
+
+		this.#appendToCurrentSessionFile(entry);
+	}
+
+	/**
+	 * True while `entry` is the first durable entry written out of a draft-only
+	 * materialization. Every other in-memory entry is startup selector state, so
+	 * the on-disk file is still one another manager's close-time GC may drop.
+	 *
+	 * The `.draft-only-session` marker outlives the sidecar a third terminal
+	 * already consumed, so it alone keeps the write on the lock even though
+	 * `#setSessionFile` and a missing sidecar both left the arm flag clear.
+	 * A lock failure leaves the failed entry in memory, which also defeats the
+	 * entries check above; `#draftOnlyFirstDurablePending` keeps the retry on
+	 * the lock until a locked write succeeds.
+	 */
+	#isDraftOnlyFirstDurableEntry(entry: SessionEntry): boolean {
+		return (
+			this.#storage.withSessionFileLockSync !== undefined &&
+			!isDraftOnlyMetadataEntry(entry) &&
+			(this.#draftOnlyFirstDurablePending ||
+				(this.#entries.every(candidate => candidate === entry || isDraftOnlyMetadataEntry(candidate)) &&
+					(this.#draftOnlySessionCleanupArmed || this.#hasDraftOnlySessionMarker())))
+		);
+	}
+
+	/**
+	 * Write the transition entry under the session-file lock, after verifying
+	 * the file the GC inspects. A GC that won the lock removed the draft-only
+	 * file, so rebuild the whole body (header included) instead of appending to
+	 * a path that no longer carries a session header.
+	 */
+	#appendFirstDurableEntryLocked(entry: SessionEntry): void {
+		const sessionFile = this.#sessionFile;
+		const withSessionFileLockSync = this.#storage.withSessionFileLockSync;
+		if (!sessionFile || !withSessionFileLockSync) {
+			this.#appendToCurrentSessionFile(entry);
+			return;
+		}
+		// The entry is now owed a locked publish: a lock failure below leaves it
+		// in memory, so remember to keep the retry on the lock (WE-e).
+		this.#draftOnlyFirstDurablePending = true;
+		try {
+			withSessionFileLockSync.call(this.#storage, sessionFile, () => {
+				if (!this.#storage.existsSync(sessionFile)) {
+					this.#fileIsCurrent = false;
+					this.#rewriteRequired = true;
+				}
+				this.#appendToCurrentSessionFile(entry);
+			});
+			// Only a publish that left the manager current retires the debt; a
+			// lock throw or a failed inner rewrite keeps the next write locked.
+			if (this.#fileIsCurrent && !this.#rewriteRequired) this.#draftOnlyFirstDurablePending = false;
+		} catch (err) {
+			// The lock could not be taken, so the append did not happen. Keep the
+			// entry in memory and let the next durable write republish it.
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			this.#noteDiskFailure(err);
+		}
+	}
+
+	#appendToCurrentSessionFile(entry: SessionEntry): void {
 		// Atomic replacement / move window: do not open a fresh append writer that
 		// a Windows EPERM replace could detach from the current JSONL path.
 		// - moveTo: write a full body to the live relocation path (source pre-
@@ -1062,6 +1147,16 @@ export class SessionManager {
 			return;
 		}
 
+		// A rename right after a resumed draft is the first durable entry of a
+		// draft-only materialization, the same transition #appendToSessionFile
+		// serializes (#11497). Take the session-file lock here too: the append
+		// plus title-slot rewrite below would otherwise recreate a headerless
+		// file and overwrite its first bytes if the draft GC won the race.
+		if (this.#isDraftOnlyFirstDurableEntry(entry)) {
+			this.#persistDraftOnlyTitleChangeLocked(entry, update);
+			return;
+		}
+
 		if (
 			!this.#fileIsCurrent ||
 			this.#rewriteRequired ||
@@ -1093,6 +1188,82 @@ export class SessionManager {
 			},
 			{ epoch },
 		);
+	}
+
+	/**
+	 * Persist a title change that is leaving a draft-only materialization, under
+	 * the session-file lock the draft GC takes. When the GC already removed the
+	 * file the write is a full-body rewrite, because appending to the missing
+	 * path would produce a headerless file. When the file survives, the title
+	 * change is appended and the title slot rewritten in place: a full-body
+	 * rewrite from this manager's entry list would republish a stale view and
+	 * delete an entry a concurrent manager appended after this one read it.
+	 */
+	#persistDraftOnlyTitleChangeLocked(entry: TitleChangeEntry, update: SessionTitleUpdate): void {
+		const sessionFile = this.#sessionFile;
+		const withSessionFileLockSync = this.#storage.withSessionFileLockSync;
+		if (!sessionFile || !withSessionFileLockSync) return;
+		// Same owed-publish debt as #appendFirstDurableEntryLocked (WE-e).
+		this.#draftOnlyFirstDurablePending = true;
+		try {
+			withSessionFileLockSync.call(this.#storage, sessionFile, () =>
+				this.#appendTitleChangeUnderSessionFileLock(entry, update, sessionFile),
+			);
+			if (this.#fileIsCurrent && !this.#rewriteRequired) this.#draftOnlyFirstDurablePending = false;
+		} catch (err) {
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			this.#noteDiskFailure(err);
+		}
+	}
+
+	/**
+	 * Append a title-change entry to an existing session body and rewrite its
+	 * fixed-width title slot in place. Runs inside the session-file lock, where
+	 * only synchronous writes are available; the append leaves entries another
+	 * manager persisted after this one read the file untouched.
+	 */
+	#appendTitleChangeUnderSessionFileLock(
+		entry: TitleChangeEntry,
+		update: SessionTitleUpdate,
+		sessionFile: string,
+	): void {
+		if (!this.#storage.existsSync(sessionFile)) {
+			this.#rewriteSynchronously();
+			return;
+		}
+		const writer = this.#appendWriter();
+		if (!this.#storage.existsSync(sessionFile) || this.#storage.statSync(sessionFile).size === 0) {
+			// The GC removed the file while the writer opened, so the writer's
+			// append-mode open recreated it empty. Appending there would leave a
+			// headerless session `--resume` cannot load; rebuild the body instead.
+			this.#rewriteSynchronously();
+			return;
+		}
+		const line = this.#lineFor(entry);
+		if (writer.appendSync) {
+			writer.appendSync(line);
+		} else {
+			void writer.append(line).catch(err => {
+				this.#fileIsCurrent = false;
+				this.#rewriteRequired = true;
+				this.#noteDiskFailure(err);
+			});
+		}
+		const updateSessionTitleSync = this.#storage.updateSessionTitleSync;
+		if (updateSessionTitleSync) {
+			updateSessionTitleSync.call(this.#storage, sessionFile, update);
+		} else {
+			void this.#storage.updateSessionTitle(sessionFile, update).catch(err => {
+				this.#fileIsCurrent = false;
+				this.#rewriteRequired = true;
+				this.#noteDiskFailure(err);
+			});
+		}
+		this.#clearDiskError();
+		this.#fileIsCurrent = true;
+		this.#rewriteRequired = false;
+		this.#hasTitleSlot = true;
 	}
 
 	#notifyEntryAppended(entry: SessionEntry): void {
@@ -1142,6 +1313,7 @@ export class SessionManager {
 		this.#rewriteRequired = false;
 		this.#forceFileCreation = false;
 		this.#draftOnlySessionCleanupArmed = false;
+		this.#draftOnlyFirstDurablePending = false;
 		this.#turnBudgetTotal = null;
 		this.#turnBudgetHard = false;
 		this.#turnOutputBaseline = 0;
@@ -1314,6 +1486,7 @@ export class SessionManager {
 			onDisk: this.#fileIsCurrent,
 			needsRewrite: this.#rewriteRequired,
 			draftOnlySessionCleanupArmed: this.#draftOnlySessionCleanupArmed,
+			draftOnlyFirstDurablePending: this.#draftOnlyFirstDurablePending,
 			fallbackRuntimeOnly: this.#fallbackRuntimeOnly,
 			// Entries are snapshotted by reference (switch/reload replaces the
 			// array wholesale). The header is cloned: moveTo mutates it in place
@@ -1356,6 +1529,7 @@ export class SessionManager {
 		this.#rewriteRequired = snapshot.needsRewrite;
 		this.#forceFileCreation = snapshot.onDisk;
 		this.#draftOnlySessionCleanupArmed = snapshot.draftOnlySessionCleanupArmed;
+		this.#draftOnlyFirstDurablePending = snapshot.draftOnlyFirstDurablePending;
 		this.#fallbackRuntimeOnly = snapshot.fallbackRuntimeOnly;
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
 		this.#additionalDirectories = snapshot.header.additionalDirectories ?? [];
@@ -1412,6 +1586,7 @@ export class SessionManager {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
+		this.#draftOnlyFirstDurablePending = false;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
 		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
@@ -1535,6 +1710,7 @@ export class SessionManager {
 		this.#rewriteRequired = false;
 		this.#forceFileCreation = true;
 		this.#draftOnlySessionCleanupArmed = false;
+		this.#draftOnlyFirstDurablePending = false;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
 		this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
@@ -1757,7 +1933,7 @@ export class SessionManager {
 			} finally {
 				batch.collecting = false;
 			}
-			await this.#rewriteAtomically();
+			await this.#publishAtomicEntryBatch(batch);
 			if (!this.#fileIsCurrent || this.#rewriteRequired) {
 				throw new Error("Atomic session batch was superseded before commit.");
 			}
@@ -1783,6 +1959,51 @@ export class SessionManager {
 			this.#atomicEntryBatch = undefined;
 			this.#notifyDurableEntries(retainedNotifications);
 			throw error;
+		}
+	}
+
+	/**
+	 * Publish a committed batch. The first durable entry it creates out of a
+	 * draft-only materialization must be serialized on the session-file lock the
+	 * close-time GC takes, exactly like a single first durable append; every
+	 * other batch keeps the fenced asynchronous atomic rewrite.
+	 */
+	async #publishAtomicEntryBatch(batch: AtomicEntryBatch): Promise<void> {
+		if (this.#batchPublishesDraftOnlyFirstDurable(batch)) {
+			this.#publishBatchUnderSessionFileLock();
+			return;
+		}
+		await this.#rewriteAtomically();
+	}
+
+	/**
+	 * True when the batch carries the first durable entry out of a draft-only
+	 * materialization: the batch has a non-metadata entry and every in-memory
+	 * entry is either part of the batch or startup selector state.
+	 */
+	#batchPublishesDraftOnlyFirstDurable(batch: AtomicEntryBatch): boolean {
+		return (
+			this.#storage.withSessionFileLockSync !== undefined &&
+			(this.#draftOnlyFirstDurablePending ||
+				(this.#entries.some(entry => batch.entryIds.has(entry.id) && !isDraftOnlyMetadataEntry(entry)) &&
+					this.#entries.every(entry => batch.entryIds.has(entry.id) || isDraftOnlyMetadataEntry(entry)) &&
+					(this.#draftOnlySessionCleanupArmed || this.#hasDraftOnlySessionMarker())))
+		);
+	}
+
+	#publishBatchUnderSessionFileLock(): void {
+		const sessionFile = this.#sessionFile;
+		const withSessionFileLockSync = this.#storage.withSessionFileLockSync;
+		if (!sessionFile || !withSessionFileLockSync) return;
+		// Same owed-publish debt as #appendFirstDurableEntryLocked (WE-e).
+		this.#draftOnlyFirstDurablePending = true;
+		try {
+			withSessionFileLockSync.call(this.#storage, sessionFile, () => this.#rewriteSynchronously());
+			if (this.#fileIsCurrent && !this.#rewriteRequired) this.#draftOnlyFirstDurablePending = false;
+		} catch (err) {
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			this.#noteDiskFailure(err);
 		}
 	}
 
@@ -1853,8 +2074,42 @@ export class SessionManager {
 			this.#draftOnlySessionCleanupArmed = false;
 			return;
 		}
+		// This manager's in-memory view can be stale: another process may have
+		// consumed the draft and persisted a real conversation, or saved a fresh
+		// draft, since the last time this file was read (#11497). Only a backend
+		// that re-checks and deletes in one locked step may drop the file;
+		// otherwise leave it, because a delete that is not atomic would discard
+		// the other process's write.
+		const deleteSessionWithArtifactsIf = this.#storage.deleteSessionWithArtifactsIf;
+		if (!deleteSessionWithArtifactsIf) {
+			this.#draftOnlySessionCleanupArmed = false;
+			return;
+		}
 		try {
-			await this.#storage.deleteSessionWithArtifacts(sessionFile);
+			// A veto from a late draft leaves the session a draft-only GC target,
+			// so its marker must survive for `consumeDraft` to re-arm cleanup
+			// later. Only durable or invalid content retires the marker.
+			let vetoedByDraft = false;
+			const deleted = await deleteSessionWithArtifactsIf.call(this.#storage, sessionFile, (content, complete) => {
+				const onDisk = parseSessionContent(content);
+				if (!onDisk.entries.slice(1).every(isDraftOnlyMetadataEntry)) return false;
+				// A bounded prefix without durable content only proves the body
+				// still needs reading; the header verdict needs the whole file.
+				if (!complete) return true;
+				if (onDisk.invalidHeader) return false;
+				// The draft sidecar may have been saved after this manager read
+				// the directory; its parent session must survive with it.
+				if (draftPath !== null && this.#storage.existsSync(draftPath)) {
+					vetoedByDraft = true;
+					return false;
+				}
+				return true;
+			});
+			if (!deleted) {
+				if (!vetoedByDraft) await this.#clearDraftOnlySessionMarker();
+				this.#draftOnlySessionCleanupArmed = false;
+				return;
+			}
 			this.#fileIsCurrent = false;
 			this.#forceFileCreation = false;
 			this.#hasTitleSlot = false;
@@ -2160,6 +2415,50 @@ export class SessionManager {
 			this.#entries.every(isDraftOnlyMetadataEntry);
 		// Force the header onto disk so resume can find the file this draft attaches to.
 		await this.ensureOnDisk();
+
+		// A resumed draft-only session stays a GC target even after
+		// `#setSessionFile` cleared the in-memory arm flag: `.draft-only-session`
+		// survives while the draft sidecar does, so the save still takes the lock.
+		const markerBackedResume = this.#hasDraftOnlySessionMarker();
+
+		// A draft-only session file is the close-time GC's target, and that GC
+		// removes this sidecar's whole artifacts directory with it (#11497).
+		// Serialize the save with it: under the lock this manager re-materializes
+		// the parent session when the GC already dropped it, so the draft never
+		// outlives the session `--resume` looks for.
+		if (
+			sessionFile !== undefined &&
+			(draftWillMaterializeMetadataOnlyFile || this.#draftOnlySessionCleanupArmed || markerBackedResume) &&
+			this.#storage.withSessionFileLockSync !== undefined
+		) {
+			const withSessionFileLockSync = this.#storage.withSessionFileLockSync;
+			try {
+				withSessionFileLockSync.call(this.#storage, sessionFile, () => {
+					if (!this.#storage.existsSync(sessionFile)) {
+						this.#forceFileCreation = true;
+						this.#rewriteSynchronously();
+					}
+					if (draftWillMaterializeMetadataOnlyFile || markerBackedResume) {
+						const markerPath = this.#draftOnlySessionMarkerPath();
+						if (markerPath) this.#storage.writeTextSync(markerPath, "");
+						this.#draftOnlySessionCleanupArmed = true;
+					}
+					this.#storage.writeTextSync(draftPath, text);
+				});
+				return;
+			} catch (err) {
+				// Fail closed: a save that cannot take the lock must not write the
+				// sidecar unlocked, because a close-time GC holding the lock can
+				// still delete it after the caller was told the save landed.
+				logger.warn("Failed to persist the session draft under the session-file lock", {
+					sessionFile,
+					draftPath,
+					error: String(err),
+				});
+				throw err;
+			}
+		}
+
 		if (draftWillMaterializeMetadataOnlyFile) {
 			await this.#writeDraftOnlySessionMarker();
 			this.#draftOnlySessionCleanupArmed = true;
