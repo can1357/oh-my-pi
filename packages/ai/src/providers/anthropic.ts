@@ -188,12 +188,13 @@ const contextManagementBeta = "context-management-2025-06-27";
 const structuredOutputsBeta = "structured-outputs-2025-12-15";
 const thinkingTokenCountBeta = "thinking-token-count-2026-05-13";
 const fallbackCreditBeta = "fallback-credit-2026-06-01";
+const promptCachingScopeBeta = "prompt-caching-scope-2026-01-05";
 const claudeCodeUtilityBetaDefaults = [
 	oauthAuthBeta,
 	"interleaved-thinking-2025-05-14",
 	thinkingTokenCountBeta,
 	contextManagementBeta,
-	"prompt-caching-scope-2026-01-05",
+	promptCachingScopeBeta,
 	structuredOutputsBeta,
 ] as const;
 const claudeCodeAgentBetaDefaults = [
@@ -202,7 +203,7 @@ const claudeCodeAgentBetaDefaults = [
 	"interleaved-thinking-2025-05-14",
 	thinkingTokenCountBeta,
 	contextManagementBeta,
-	"prompt-caching-scope-2026-01-05",
+	promptCachingScopeBeta,
 	midConversationSystemBeta,
 ] as const;
 const extendedCacheTtlBeta = "extended-cache-ttl-2025-04-11";
@@ -230,22 +231,34 @@ function buildClaudeCodeBetas({
 	thinkingRequest,
 	disableStrictTools = false,
 	supportsContextManagement = true,
+	dropPromptCacheBetas = false,
 }: {
 	agentRequest: boolean;
 	thinkingRequest: boolean;
 	disableStrictTools?: boolean;
 	supportsContextManagement?: boolean;
+	/**
+	 * Withhold the prompt-cache betas: this endpoint rejected `cache_control`,
+	 * so a request that carries no breakpoint must not advertise caching it
+	 * cannot use. This deviates from Claude Code's header fingerprint, which is
+	 * acceptable here precisely because an endpoint that refuses the field is
+	 * not the first-party API the fingerprint exists to match.
+	 */
+	dropPromptCacheBetas?: boolean;
 }): readonly string[] {
 	// `context-1m-2025-08-07` is intentionally never advertised. OAuth
 	// subscription credentials have no long-context credit balance, so Anthropic
 	// hard-429s ("Usage credits are required for long context requests") on any
 	// beta-gated 1M model regardless of prompt size (#7238). Natively-1M models
 	// (e.g. claude-sonnet-5) serve their full window without the beta anyway.
-	if (!agentRequest && !disableStrictTools && supportsContextManagement) return claudeCodeUtilityBetaDefaults;
+	if (!agentRequest && !disableStrictTools && supportsContextManagement && !dropPromptCacheBetas) {
+		return claudeCodeUtilityBetaDefaults;
+	}
 	const betas: string[] = [];
 	for (const beta of agentRequest ? claudeCodeAgentBetaDefaults : claudeCodeUtilityBetaDefaults) {
 		if (disableStrictTools && beta === structuredOutputsBeta) continue;
 		if (!supportsContextManagement && beta === contextManagementBeta) continue;
+		if (dropPromptCacheBetas && beta === promptCachingScopeBeta) continue;
 		betas.push(beta);
 	}
 	if (!agentRequest) return betas;
@@ -1259,6 +1272,8 @@ export type AnthropicClientOptionsArgs = {
 	thinkingEnabled?: boolean;
 	thinkingDisplay?: AnthropicThinkingDisplay;
 	disableStrictTools?: boolean;
+	/** Withhold the prompt-cache betas; see `buildClaudeCodeBetas`. */
+	dropCacheControl?: boolean;
 	fetch?: FetchImpl;
 	maxRetryDelayMs?: number;
 	sessionId?: string;
@@ -2470,6 +2485,7 @@ const streamAnthropicOnce = (
 						extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
 						options?.promptCacheKey,
 					disableStrictTools,
+					dropCacheControl,
 				});
 			};
 			let { client, isOAuthToken } = resolveClient();
@@ -3617,6 +3633,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		maxRetryDelayMs,
 		sessionId,
 		disableStrictTools: disableStrictToolsOverride,
+		dropCacheControl = false,
 		copilotCacheKey,
 		copilotCacheSnapshot,
 	} = args;
@@ -3736,6 +3753,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 					thinkingRequest: thinkingEnabled,
 					disableStrictTools,
 					supportsContextManagement: model.compat.supportsContextManagement,
+					dropPromptCacheBetas: dropCacheControl,
 				})
 			: [],
 	});

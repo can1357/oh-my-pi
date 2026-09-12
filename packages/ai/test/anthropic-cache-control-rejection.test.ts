@@ -18,6 +18,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withOfficialAnthropicEndpoint } from "./helpers";
 
 const EXTENDED_CACHE_TTL_BETA = "extended-cache-ttl-2025-04-11";
+const PROMPT_CACHING_SCOPE_BETA = "prompt-caching-scope-2026-01-05";
 
 const MODEL: Model<"anthropic-messages"> = buildModel({
 	id: "claude-sonnet-4-6",
@@ -231,6 +232,11 @@ describe("Anthropic cache_control rejection fallback", () => {
 		expect(message.errorMessage).toBeUndefined();
 		expect(capture.bodies).toHaveLength(2);
 		expect(countBreakpoints(capture.bodies[1])).toBe(0);
+		// The OAuth defaults advertise prompt-caching-scope unconditionally; a
+		// replay carrying no breakpoint must not keep claiming caching the
+		// endpoint just refused.
+		expect(capture.betaHeaders[0]).toContain(PROMPT_CACHING_SCOPE_BETA);
+		expect(capture.betaHeaders[1]).not.toContain(PROMPT_CACHING_SCOPE_BETA);
 	});
 });
 
