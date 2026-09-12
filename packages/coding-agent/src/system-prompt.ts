@@ -37,6 +37,7 @@ import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type
 import { normalizeConcurrencyLimit } from "./task/parallel";
 import { type ActiveRepoContext, resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
+import { resolvePromptSource } from "./extensibility/extensions/prompt-overrides";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 
 /** Bundled personality specs, keyed by the `personality` setting value. */
@@ -1030,7 +1031,11 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		autoQaEnabled,
 		writeTransportOnly,
 	};
-	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
+	const resolvedSystemTemplate = resolvePromptSource(
+		resolvedCustomPrompt ? "system.custom" : "system",
+		resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate,
+	);
+	const rendered = prompt.render(resolvedSystemTemplate, data);
 	const systemPrompt = [rendered];
 	if (computerEnabled) {
 		systemPrompt.push(computerSafetyPrompt.trim());

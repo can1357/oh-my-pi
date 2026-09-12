@@ -7,6 +7,11 @@ import { getSkillSlashCommandName, type Skill } from "../extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands } from "../extensibility/slash-commands";
 import { ACP_BUILTIN_RESERVED_NAMES, isAcpBuiltinShadowedName } from "./acp-builtins";
 import { BUILTIN_SLASH_COMMANDS_INTERNAL } from "./builtin-registry";
+import {
+	resolveCommandDescription,
+	resolveCommandHint,
+	resolveCommandSubcommands,
+} from "./command-ui";
 
 export type AvailableSlashCommandSource = "builtin" | "skill" | "extension" | "custom" | "mcp_prompt" | "file";
 
@@ -49,9 +54,14 @@ export async function buildAvailableSlashCommands(
 		appendCommand({
 			name: command.name,
 			aliases: command.aliases,
-			description: command.acpDescription ?? command.description,
-			input: hint ? { hint } : undefined,
-			subcommands: command.subcommands,
+			description: resolveCommandDescription(
+				command.name,
+				command.acpDescription ?? command.description,
+			),
+			input: hint ? { hint: resolveCommandHint(command.name, hint) } : undefined,
+			subcommands: command.subcommands
+				? resolveCommandSubcommands(command.name, command.subcommands)
+				: undefined,
 			source: "builtin",
 		});
 	}
