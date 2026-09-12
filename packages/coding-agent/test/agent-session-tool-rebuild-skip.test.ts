@@ -1154,6 +1154,40 @@ These tools became available:
 		).toHaveLength(0);
 	});
 
+	it("announces an unmount after a maintenance rebuild delivered the pending addition", async () => {
+		const { session, contexts, systemPrompts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+			xdev: createTestXdevState(),
+			responses: [{ content: ["ok"] }, { content: ["ok"] }],
+			exposeXdevCatalog: true,
+		});
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		await session.refreshMCPTools([search]);
+
+		// The pending addition is previewed, then maintenance rebuilds the base
+		// catalog before delivery. The rebuild carries the device to the provider
+		// but invalidates the preview revision.
+		const rebuildDuringMaintenance = vi
+			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
+			.mockImplementationOnce(async () => {
+				await session.refreshBaseSystemPrompt();
+			});
+		await session.prompt("first");
+		expect(rebuildDuringMaintenance).toHaveBeenCalledTimes(1);
+		expect(systemPrompts[0]?.join("\n")).toContain("mcp__nucleus_search");
+		expect(mountNoticesIn(contexts[0] ?? [])).toHaveLength(0);
+		rebuildDuringMaintenance.mockRestore();
+
+		// Since the model learned the device from the delivered base, a subsequent
+		// unmount must produce a removal notice rather than cancelling the stale
+		// pending addition as though it had never been announced.
+		await session.refreshMCPTools([]);
+		await session.prompt("second");
+		const notices = mountNoticesIn(contexts[1] ?? []);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("Unmounted; writes fail:");
+		expect(notices[0]).toContain("xd://mcp__nucleus_search");
+	});
+
 	it("keeps the mount notice when before_agent_start replaces the catalog prompt (#7139)", async () => {
 		const replacementPrompt = ["extension replacement"];
 		const { session, contexts, systemPrompts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {

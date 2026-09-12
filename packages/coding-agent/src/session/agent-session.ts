@@ -6597,13 +6597,13 @@ export class AgentSession {
 			if (this.#promptGeneration !== generation) {
 				return false;
 			}
-			// Consume the xd:// notice only when its previewed revision still holds:
-			// a mount delta (or catalog rebuild) during the await invalidates it and
-			// defers the whole coalesced change to the next turn so its unbudgeted
-			// docs never bypass the context check. The roster notice is re-derived
-			// from the live delta here and always delivered, keeping the model's
-			// stated availability in lockstep with the wire tool list even when a
-			// roster change landed during maintenance.
+			// Consume the xd:// notice only when its previewed revision still holds.
+			// A mount delta or catalog rebuild during the await invalidates it: any
+			// additions carried by the delivered base are recorded as announced,
+			// while remaining notice content waits for the next context check.
+			// The roster notice is re-derived from the live delta here and always
+			// delivered, keeping the model's stated availability in lockstep with
+			// the wire tool list even when a roster change landed during maintenance.
 			const xdevMountNotice = previewXdevMountNotice
 				? this.#tools.takePendingXdevMountNotice({
 						baseCatalogDelivered: baseXdevCatalogDelivered,

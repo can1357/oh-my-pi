@@ -1126,9 +1126,10 @@ export class SessionTools {
 
 	#setBasePromptXdevNames(names: readonly string[] | undefined): void {
 		this.#basePromptXdevNames = new Set(names);
-		// A rebuild can change whether the final base catalog suppresses a mount
-		// notice. Invalidate any pre-maintenance projection so it is recomputed on
-		// the next user turn rather than growing after the completed estimate.
+		// A rebuild can change which pending additions the final base catalog
+		// already announces. Invalidate the projection; the post-maintenance take
+		// records additions carried by a delivered base and defers only the
+		// remaining notice payload.
 		if (this.#pendingXdevMountDelta) this.#xdevMountDeltaRevision++;
 	}
 
@@ -1300,13 +1301,36 @@ export class SessionTools {
 		baseCatalogDelivered: boolean;
 		expectedRevision: number;
 	}): CustomMessage<XdevMountNoticeDetails> | undefined {
-		if (options.expectedRevision !== this.#xdevMountDeltaRevision) return undefined;
+		if (options.expectedRevision !== this.#xdevMountDeltaRevision) {
+			// Maintenance may have rebuilt and delivered the base catalog after the
+			// preview. Commit additions carried by that prompt before deferring the
+			// remaining delta; a later unmount must not cancel an addition the model
+			// has already seen.
+			if (options.baseCatalogDelivered) this.#recordBasePromptXdevAdditions();
+			return undefined;
+		}
 		const projection = this.#projectPendingXdevMountNotice(options.baseCatalogDelivered);
 		if (!projection) return undefined;
 		this.#pendingXdevMountDelta = undefined;
 		this.#xdevMountDeltaRevision++;
 		this.#announcedMounts = projection.announcedMounts;
 		return projection.notice;
+	}
+
+	#recordBasePromptXdevAdditions(): void {
+		const pending = this.#pendingXdevMountDelta;
+		if (!pending) return;
+		this.#ensureAnnouncedMountsSeeded();
+		let changed = false;
+		for (const name of pending.added) {
+			if (!this.#basePromptXdevNames.has(name)) continue;
+			pending.added.delete(name);
+			this.#announcedMounts.add(name);
+			changed = true;
+		}
+		if (!changed) return;
+		this.#pendingXdevMountDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
+		this.#xdevMountDeltaRevision++;
 	}
 
 	#projectPendingXdevMountNotice(baseCatalogDelivered: boolean): XdevMountNoticeProjection | undefined {
