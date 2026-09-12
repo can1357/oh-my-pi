@@ -400,21 +400,37 @@ async function readCurrentWriteSource(
 	}
 }
 
+/**
+ * Byte span (UTF-16 length) of a read projection's shown payload — everything
+ * up to but excluding its trailing `read` truncation notice and the blank
+ * separator before it. Returns `undefined` when the content does not end in
+ * such a notice.
+ *
+ * Excluding the notice matters at the byte-budget boundary: a single line
+ * truncated just past the limit renders as a ~50 KB prefix plus a footer whose
+ * combined length can exceed the original line, yet it still covers strictly
+ * less source. Measuring the shown payload — not the rendered length — is what
+ * the truncation marker, not character count, establishes as incomplete.
+ */
+function readProjectionPayloadLength(content: string): number | undefined {
+	const lines = splitAddressableFileLines(normalizeToLF(content));
+	const noticeIndex = lines.findLastIndex(line => line.trim().length > 0);
+	if (noticeIndex === -1 || !isReadTruncationNotice(lines[noticeIndex]!)) return undefined;
+	let end = noticeIndex;
+	while (end > 0 && lines[end - 1]!.trim().length === 0) end--;
+	return lines.slice(0, end).join("\n").length;
+}
+
 function assertNotShorterReadProjection(
 	displayPath: string,
 	content: string,
-	cleanContent: string,
 	currentContent: string | undefined,
 ): void {
-	if (
-		!endsWithReadTruncationNotice(content) ||
-		currentContent === undefined ||
-		cleanContent.length >= currentContent.length
-	) {
-		return;
-	}
+	const payloadLength = readProjectionPayloadLength(content);
+	if (payloadLength === undefined || currentContent === undefined) return;
+	if (payloadLength >= normalizeToLF(currentContent).length) return;
 	throw new ToolError(
-		`Refusing to overwrite '${displayPath}' with an incomplete read projection: the replacement ends with an omp read truncation notice and is shorter than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use edit for a partial change.`,
+		`Refusing to overwrite '${displayPath}' with an incomplete read projection: the content ends with an omp read truncation notice and covers less than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use edit for a partial change.`,
 	);
 }
 
@@ -424,11 +440,10 @@ async function assertNotTruncatedFileReadProjection(
 	absolutePath: string,
 	displayPath: string,
 	content: string,
-	cleanContent: string,
 ): Promise<void> {
 	if (!endsWithReadTruncationNotice(content)) return;
 	const currentContent = await readCurrentWriteSource(session, requestedPath, absolutePath);
-	assertNotShorterReadProjection(displayPath, content, cleanContent, currentContent);
+	assertNotShorterReadProjection(displayPath, content, currentContent);
 }
 
 /**
@@ -758,7 +773,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const existingBytes =
 				existingTarget instanceof Blob ? new Uint8Array(await existingTarget.arrayBuffer()) : existingTarget;
 			const existingText = typeof existingBytes === "string" ? existingBytes : decodeUtf8Text(existingBytes);
-			assertNotShorterReadProjection(writeTarget, rawContent, content, existingText ?? undefined);
+			assertNotShorterReadProjection(writeTarget, rawContent, existingText ?? undefined);
 		}
 		entries.set(resolvedArchivePath.archiveSubPath, content);
 
@@ -1368,14 +1383,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			if (await fs.exists(absolutePath)) {
 				await assertEditableFile(absolutePath, path, this.session.settings);
 			}
-			await assertNotTruncatedFileReadProjection(
-				this.session,
-				path,
-				absolutePath,
-				displayPath,
-				content,
-				cleanContent,
-			);
+			await assertNotTruncatedFileReadProjection(this.session, path, absolutePath, displayPath, content);
 
 			emitWriteProgress(onUpdate, cleanContent, displayPath, absolutePath);
 

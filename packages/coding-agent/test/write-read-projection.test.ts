@@ -90,7 +90,7 @@ describe("write tool read projection guard", () => {
 
 		await expect(
 			new WriteTool(createSession(tmpDir)).execute("call-1", { path: filePath, content: partial }),
-		).rejects.toThrow("replacement ends with an omp read truncation notice and is shorter than the current source");
+		).rejects.toThrow("incomplete read projection");
 		expect(await Bun.file(filePath).text()).toBe(original);
 	});
 
@@ -108,6 +108,26 @@ describe("write tool read projection guard", () => {
 		await expect(new WriteTool(session).execute("write-1", { path: filePath, content: projection })).rejects.toThrow(
 			"incomplete read projection",
 		);
+		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
+	it("rejects a byte-truncated single-line projection that renders longer than its source", async () => {
+		const filePath = path.join(tmpDir, "oneline.txt");
+		// One line just past the 50KB read byte budget: the shown ~50KB prefix
+		// plus its partial-line footer is longer than the source line, yet covers
+		// strictly less of it. The marker, not rendered length, proves it partial.
+		const original = `${"x".repeat(50 * 1024 + 10)}\n`;
+		await Bun.write(filePath, original);
+		const session = createSession(tmpDir);
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-line", { path: `${filePath}:1-1` }),
+		);
+		expect(projection).toContain("(partial,");
+		expect(projection.length).toBeGreaterThan(original.length);
+
+		await expect(
+			new WriteTool(session).execute("write-line", { path: filePath, content: projection }),
+		).rejects.toThrow("incomplete read projection");
 		expect(await Bun.file(filePath).text()).toBe(original);
 	});
 
