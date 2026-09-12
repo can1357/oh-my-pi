@@ -593,12 +593,36 @@ async function discoverExtensionsInDir(dir: string): Promise<string[]> {
 	for (const entry of entries) {
 		const entryPath = path.join(dir, entry.name);
 
-		if ((entry.isFile() || entry.isSymbolicLink()) && isExtensionFile(entry.name)) {
+		// A symlink is whatever its target is. Treating every link as a directory
+		// candidate made stat("<link-to-file>/index.ts") answer ENOTDIR, which is not
+		// an ignorable code and aborted the whole load; marketplace checkouts carry
+		// `CLAUDE.md -> AGENTS.md`.
+		let isFile = entry.isFile();
+		let isDirectory = entry.isDirectory();
+		if (entry.isSymbolicLink()) {
+			try {
+				const target = await fs.stat(entryPath);
+				isFile = target.isFile();
+				isDirectory = target.isDirectory();
+			} catch (err) {
+				if (
+					isEnoent(err) ||
+					isEacces(err) ||
+					hasFsCode(err, "ENOTDIR") ||
+					hasFsCode(err, "ELOOP") ||
+					hasFsCode(err, "EPERM")
+				)
+					continue;
+				throw err;
+			}
+		}
+
+		if (isFile && isExtensionFile(entry.name)) {
 			discovered.push(entryPath);
 			continue;
 		}
 
-		if (entry.isDirectory() || entry.isSymbolicLink()) {
+		if (isDirectory) {
 			const resolved = await resolveExtensionEntries(entryPath);
 			if (resolved) {
 				discovered.push(...resolved);

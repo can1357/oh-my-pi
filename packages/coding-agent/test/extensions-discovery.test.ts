@@ -523,6 +523,36 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].path).toContain("my-ext.ts");
 	});
 
+	it("scans a configured directory that holds a symlink to a regular file", async () => {
+		// Marketplace checkouts carry `CLAUDE.md -> AGENTS.md`. The one-level scan takes
+		// every symlink as a directory candidate, and stat("CLAUDE.md/index.ts") answers
+		// ENOTDIR rather than ENOENT, which used to abort the whole load.
+		const packageDir = path.join(tempDir.path(), "skills-package");
+		fs.mkdirSync(packageDir, { recursive: true });
+		fs.writeFileSync(path.join(packageDir, "AGENTS.md"), "# agents\n");
+		fs.symlinkSync(path.join(packageDir, "AGENTS.md"), path.join(packageDir, "CLAUDE.md"), "file");
+		fs.writeFileSync(path.join(packageDir, "gate.ts"), extensionCode);
+
+		const result = await discoverForTest([packageDir]);
+
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions).toHaveLength(1);
+		expect(result.extensions[0].path).toContain("gate.ts");
+	});
+
+	it("skips cyclic symlinks while scanning a configured directory", async () => {
+		const packageDir = path.join(tempDir.path(), "extensions-package");
+		fs.mkdirSync(packageDir, { recursive: true });
+		fs.symlinkSync("loop.ts", path.join(packageDir, "loop.ts"), "file");
+		fs.writeFileSync(path.join(packageDir, "gate.ts"), extensionCode);
+
+		const result = await discoverForTest([packageDir]);
+
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions).toHaveLength(1);
+		expect(result.extensions[0].path).toContain("gate.ts");
+	});
+
 	it("resolves 3rd party npm dependencies (chalk)", async () => {
 		// Load the real chalk-logger extension from examples
 		const chalkLoggerPath = path.resolve(import.meta.dirname, "..", "examples", "extensions", "chalk-logger.ts");
