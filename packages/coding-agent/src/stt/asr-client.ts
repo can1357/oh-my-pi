@@ -131,6 +131,7 @@ export class SttClient {
 	#nextRequestId = 0;
 	#refed = false;
 	#spawnWorker: () => RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound>;
+	#terminateWhenIdle = false;
 
 	constructor(spawnWorker: () => RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> = spawnSttWorker) {
 		this.#spawnWorker = spawnWorker;
@@ -194,6 +195,7 @@ export class SttClient {
 			this.#streams.delete(id);
 			signal?.removeEventListener("abort", onAbort);
 			this.#syncWorkerRef();
+			this.#reapWorkerIfRequested();
 			apply();
 		};
 		this.#streams.set(id, {
@@ -236,13 +238,13 @@ export class SttClient {
 			const abort = (): void => {
 				const pending = this.#pending.get(id);
 				if (pending?.kind !== "download") return;
+				// Model loaders do not expose a portable AbortSignal (and the
+				// transformers loader is memoized inside the subprocess). Reap
+				// the subprocess once every request sharing this worker settles
+				// so its in-flight fetch/load is actually cancelled.
+				this.#terminateWhenIdle = true;
 				this.#deletePending(id);
 				pending.resolve({ ok: false });
-				// Model loaders do not expose a portable AbortSignal (and the
-				// transformers loader is memoized inside the subprocess). Once
-				// this was the worker's last active request, reap the subprocess
-				// so its in-flight fetch/load is actually cancelled.
-				if (this.#pending.size === 0 && this.#streams.size === 0) void this.terminate();
 			};
 			options.signal?.addEventListener("abort", abort, { once: true });
 			try {
@@ -276,6 +278,7 @@ export class SttClient {
 			if (pending.kind === "transcribe") pending.reject(new Error("stt worker terminated"));
 			else pending.resolve({ ok: false });
 		}
+		this.#terminateWhenIdle = false;
 		this.#pending.clear();
 		this.#refed = false;
 		this.#failStreams(new Error("stt worker terminated"));
@@ -303,7 +306,15 @@ export class SttClient {
 
 	/** Drop a pending request and unref the worker once no request or stream is active. */
 	#deletePending(id: string): void {
-		if (this.#pending.delete(id)) this.#syncWorkerRef();
+		if (!this.#pending.delete(id)) return;
+		this.#syncWorkerRef();
+		this.#reapWorkerIfRequested();
+	}
+
+	#reapWorkerIfRequested(): void {
+		if (!this.#terminateWhenIdle || this.#pending.size > 0 || this.#streams.size > 0) return;
+		this.#terminateWhenIdle = false;
+		void this.terminate();
 	}
 
 	/**
