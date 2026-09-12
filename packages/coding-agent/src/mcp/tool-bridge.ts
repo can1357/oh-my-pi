@@ -404,7 +404,7 @@ async function reconnectWithAbort(
  * "puppeteer_screenshot"), strips the redundant prefix to produce
  * "mcp__puppeteer_screenshot" instead of "mcp__puppeteer_puppeteer_screenshot".
  */
-function sanitizeMCPToolNamePart(value: string, fallback: string): string {
+export function sanitizeMCPToolNamePart(value: string, fallback: string): string {
 	const sanitized = value
 		.toLowerCase()
 		.replace(/[^a-z_]+/g, "_")

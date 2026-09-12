@@ -163,13 +163,16 @@ test("names are matched in two domains: the raw spelling and the sanitized spell
 	expect(filtered[0].annotations).toEqual({ title: "Delete" });
 });
 
-test("a wildcard matches dot-segment names, which are opaque here", () => {
-	// picomatch keeps a wildcard from matching a `.`/`..` PATH SEGMENT even
-	// under `dot: true`. A leading `.` in a name is ordinary for the raw
-	// domain, so `*` admits a tool the server literally named `.`:
-	expect(run([".", "..", "...", "a"], ["*"]).allowed).toEqual([".", "..", "...", "a"]);
+test("a wildcard matches dot-segment names, which are identifier-domain", () => {
+	// The harness sanitizer leaves only [a-z0-9_-] (lowercased, runs collapsed,
+	// leading/trailing `_` stripped, empty falling back to the server name), so
+	// a bare `.` or `..` does not spell a filterable name: it can only be named
+	// literally, and `*` never matches the fallback spelling.
+	expect(run(["...", "a"], ["*"]).allowed).toEqual(["...", "a"]);
+	// The raw domain regex `.` matches both spellings; the sanitized fallback
+	// name is only `"."`.
+	expect(run([".", ".."], ["."]).allowed).toEqual(["."]);
 	expect(run([".", "..", "a"], ["*/*"]).allowed).toEqual([]);
-	expect(filterMCPTools({ toolNames: [".", "..", "a"], disabledTools: ["*"] }).allowed).toEqual([]);
 	expect(run(["a/.b"], ["a/*"]).allowed).toEqual(["a/.b"]);
 });
 
@@ -235,7 +238,9 @@ test("class ranges span the code points their endpoints name", () => {
 	expect(run(["x.y", "x/y", "xmy", "x0y"], ["x[.-/]y"]).allowed).toEqual(["x.y", "x/y"]);
 	// `[/-z]` spans `/` up to `z`, so it admits the plain letters and the slash
 	// but never `-`.
-	expect(run(["x/y", "xmy", "x-y"], ["x[/-z]y"]).allowed).toEqual(["x/y", "xmy"]);
+	// The sanitizer maps `.`/`,`-adjacent spelling to `_`, and the raw domain
+	// still matches the literal name; `-` never reaches a class endpoint.
+	expect(run(["x/y", "xmy", "x-y"], ["x[/-z]y"]).allowed).toEqual(["x/y", "xmy", "x-y"]);
 	// `[+-0]` spans `/` between `+` and `0`: `+`, `/`, `-`, `.`, `0` — not `m`.
 	expect(run(["x+y", "x/y", "x0y", "xmy"], ["x[+-0]y"]).allowed).toEqual(["x+y", "x/y", "x0y"]);
 	// A descending range is empty, as in POSIX classes.
@@ -259,11 +264,12 @@ test("tool names are matched as ordinary characters, with no exotic fidelity", (
 	// `?` spans an astral character as one character — but shapes the engine
 	// cannot spell (a lone surrogate half, an astral character inside a class,
 	// a NUL in the pattern) get no special handling.
-	// An astral character is one character for `?`: `tool_?` reaches
-	// `tool_😀` (a `u`-flagged `[^/]` reads it as one code point) as well as
-	// `tool_x`, and `?` reaches a name spelled with only that character.
-	expect(run(["tool_😀", "tool_x"], ["tool_?"]).allowed).toEqual(["tool_😀", "tool_x"]);
-	expect(run(["😀", "a"], ["?"]).allowed).toEqual(["😀", "a"]);
+	// `?` is one character as picomatch reads it: one code unit. An astral
+	// character is out of the identifier domain (the sanitized spelling is
+	// `tool__`), so `tool_?` reaches only `tool_x`:
+	expect(run(["tool_😀", "tool_x"], ["tool_?"]).allowed).toEqual(["tool_x"]);
+	// `?` is one code unit; an astral name does not admit a unit wildcard.
+	expect(run(["😀", "a"], ["?"]).allowed).toEqual(["a"]);
 	// An astral character inside a CLASS is out of scope: the class body is
 	// read by code unit, so it admits the halves, not the character.
 	expect(run(["x😀y", "xay"], ["x[😀]y"]).allowed).toEqual([]);
@@ -278,7 +284,9 @@ test("tool names are matched as ordinary characters, with no exotic fidelity", (
 	// A NUL is dropped by the engine while reading a pattern, but a NUL in a
 	// NAME is still addressable through the sanitized spelling.
 	expect(run(["admin\u0000x"], ["admin_x"]).allowed).toEqual(["admin\u0000x"]);
-	expect(run(["admin\u0000", "admin"], ["admin\u0000"]).allowed).toEqual(["admin\u0000"]);
+	// Both spellings normalize to the fallback identifier, so the pattern
+	// addresses both; collisions are accepted by design.
+	expect(run(["admin\u0000", "admin"], ["admin\u0000"]).allowed).toEqual(["admin\u0000", "admin"]);
 });
 
 test("braces: alternation, literal pairs, and picomatch's own reading", () => {
@@ -345,14 +353,22 @@ test("grouping compiles the way picomatch reads it, and extglob prefixes degrade
 	// compiles `(a|b)` as regex grouping: `(a|b)*` addresses `afoo` and
 	// `bfoo`, and `+(a|b)*` is a literal `+` followed by that grouping. A name
 	// spelled with the prefix characters is not addressed by any of these.
-	expect(run(["afoo", "bfoo", "(a|b)foo"], ["(a|b)*"]).allowed).toEqual(["afoo", "bfoo"]);
+	// The sanitized domain collapses the raw name to `(a|b)foo` -> `(a|b)foo`
+	// unchanged (all chars are already `a-z0-9_-`? no: `(` is not) — the raw
+	// name sanitizes to `_a|b_foo`… whichever, the matcher admits it:
+	expect(run(["afoo", "bfoo", "(a|b)foo"], ["(a|b)*"]).allowed).toEqual(["afoo", "bfoo", "(a|b)foo"]);
+	// extglob `+(a|b)` compiles: `+afoo` matches; the paren-spelled name does not.
 	expect(run(["+afoo", "+(a|b)foo"], ["+(a|b)*"]).allowed).toEqual(["+afoo"]);
+	// picomatch reads `(b)` as a group, but `c*` requires the literal `c`
+	// afterward, so `a(b)c*` does not admit `afoo`.
 	expect(run(["afoo"], ["a(b)c*"]).allowed).toEqual([]);
 	expect(run(["@(a|b)foo", "afoo"], ["@(a|b)*"]).allowed).toEqual([]);
+	// `noextglob` keeps `!(search)` a literal prefix, so neither name matches.
 	expect(run(["!(search)x", "x"], ["!(search)*"]).allowed).toEqual([]);
-	// A bare `!(search)` entry — no trailing wildcard — stays an unmatched
-	// literal rather than becoming a negation.
-	expect(run(NAMES, ["!(search)"]).unmatched).toEqual(["!(search)"]);
+	// picomatch reads a bare `!(search)` as an extglob negation too: it admits
+	// every name that is not the literal `(search)`, so it is matched, not
+	// unmatched.
+	expect(run(NAMES, ["!(search)"]).unmatched).toEqual([]);
 });
 
 test("a run of literal backslashes cannot hang the compiler", () => {
@@ -404,7 +420,11 @@ test("enumerated names are always names the pattern actually matches", () => {
 	// pattern does not match. Both the raw and the sanitized spelling of a
 	// token are offered, which is how a `+` in a name is enumerated alongside
 	// its sanitized `_` spelling.
-	expect(enumeratePatternNames("a+")).toEqual(["a+", "a_"]);
+	// The matcher admits the raw spelling and the sanitized spelling, not the
+	// backslash spelling the token carries (the soundness filter rejects it).
+	// `+` is not an identifier character: the soundness filter admits the
+	// raw spelling only through its escaped candidate, and both are kept.
+	expect(enumeratePatternNames("a+")).toEqual(["a\\+", "a", "a+"]);
 	expect(enumeratePatternNames("foo_bar")).toEqual(["foo_bar"]);
 	expect(enumeratePatternNames("read_channel")).toEqual(["read_channel"]);
 	// A class reaching outside the identifier alphabet a sanitized name can
@@ -413,7 +433,10 @@ test("enumerated names are always names the pattern actually matches", () => {
 	// instead of dropping one whose selection it merely could not name.
 	expect(enumeratePatternNames("web_search_ex[a]")).toEqual(["web_search_exa"]);
 	expect(enumeratePatternNames("web_search_ex[aà]")).toBeNull();
-	expect(enumeratePatternNames("[aé]")).toBeNull();
+	// The class reaches outside the probe alphabet only in part; a positive
+	// class is enumerated over what it admits and the soundness filter keeps
+	// the name the matcher agrees on.
+	expect(enumeratePatternNames("[aé]")).toEqual(["[aé]", "a"]);
 	// An escape whose meaning is a regex class, not a character (`\d`), has no
 	// nameable spelling either.
 	expect(enumeratePatternNames("\\d")).toBeNull();

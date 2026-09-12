@@ -1,5 +1,6 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import picomatch from "picomatch";
+import { sanitizeMCPToolNamePart } from "./tool-bridge";
 import type { MCPToolDefinition } from "./types";
 
 /** A tool filter rule set for one server, with the raw advertised tool names. */
@@ -70,12 +71,13 @@ const PARSE_OPTIONS = {
 } as const;
 
 /**
- * A name as the matcher sees it: one `_` per character outside the identifier
- * alphabet, counted by code point, so an astral character collapses to one
- * underscore and `?` spans one name character as it always did.
+ * A name as the matcher sees it: the same identifier spelling the harness
+ * itself normalizes when it mints `mcp__…` tool names, so a pattern written
+ * against the model-visible spelling keeps working. Distinct raw names that
+ * normalize to the same spelling are addressed together.
  */
 function sanitizeToolName(name: string): string {
-	return [...name].map(ch => (/[a-zA-Z0-9_-]/.test(ch) ? ch : "_")).join("");
+	return sanitizeMCPToolNamePart(name, name);
 }
 
 /**
