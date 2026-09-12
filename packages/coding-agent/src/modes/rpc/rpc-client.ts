@@ -7,6 +7,7 @@
 import { isPromise } from "node:util/types";
 import type { AgentEvent, AgentMessage, AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
+import type { OperatorMessageQueue, OperatorQueuedMessageAction } from "@oh-my-pi/pi-wire/operator-types";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { FileSink } from "bun";
@@ -606,6 +607,24 @@ export class RpcClient {
 	 */
 	async followUp(message: string, images?: ImageContent[]): Promise<void> {
 		await this.#send({ type: "follow_up", message, images });
+	}
+
+	/**
+	 * Read the agent's operator-visible queued-message queue (previews, ids, editability).
+	 */
+	async getMessageQueue(sessionId: string): Promise<OperatorMessageQueue> {
+		return this.#getData<OperatorMessageQueue>(
+			await this.#send({ type: "get_message_queue", sessionId }),
+		);
+	}
+
+	/**
+	 * Edit, delete, or send-now one queued message by id.
+	 */
+	async updateMessageQueue(
+		input: { sessionId: string; expectedRevision: string; itemId: string } & OperatorQueuedMessageAction,
+	): Promise<OperatorMessageQueue> {
+		return this.#getData<OperatorMessageQueue>(await this.#send({ type: "update_message_queue", ...input }));
 	}
 
 	/**

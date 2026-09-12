@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Shared operator queued-message contracts: `OperatorMessageQueue` snapshot (`sessionId`, `revision`, per-item `id`/`kind`/`text`/`imageCount`/`editable`), `otherPendingCount` for internal queue work not exposed as editable rows, and the `edit`/`delete`/`send-now` action union.
+
 ## [16.3.0] - 2026-07-02
 
 ### Breaking Changes

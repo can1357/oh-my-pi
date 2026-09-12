@@ -7,6 +7,7 @@
 
 - `/usage` now shows prepaid credit balances (e.g. Charm Hyper's `100 credits left`) on the provider cards and account summaries instead of `no data` ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
 - Retry fallback chains now support per-model reasoning efforts: a fallback entry may carry an explicit thinking suffix (`"default": ["openai/gpt-5-mini:low"]`), and pressing `t` on a fallback row in `/models` sets or clears it. Bare entries keep inheriting the failing turn's effort. ([#11842](https://github.com/can1357/oh-my-pi/pull/11842) by [@H4vC](https://github.com/H4vC)).
+- RPC workers expose queued-message controls: `get_message_queue` returns editable previews with per-item ids, and `update_message_queue` edits, deletes, or sends-now a queued steering/follow-up item by id against an optimistic lock. `get_state` advertises this with `messageQueue: { supported: true, revision }`, so cockpit consumers can degrade gracefully on workers that lack it. The send-now action aborts the active turn with queue preservation and re-dispatches the selected item as a priority steering batch, restoring it if dispatch never starts.
 
 ### Fixed
 
