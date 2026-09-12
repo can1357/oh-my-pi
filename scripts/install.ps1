@@ -16,12 +16,35 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Fail fast on hosts older than Windows PowerShell 5.1: cmdlets used below
+# (e.g. Invoke-WebRequest -TimeoutSec) are missing or unreliable there and
+# fail with cryptic errors halfway through the install. Anything newer,
+# including PowerShell 7+, passes this check.
+if ($PSVersionTable.PSVersion -lt [version]"5.1") {
+    throw "Windows PowerShell 5.1 or newer is required (found $($PSVersionTable.PSVersion)). Install PowerShell 7 from https://aka.ms/powershell and re-run the installer."
+}
+
 $Repo = "can1357/oh-my-pi"
 $Package = "@oh-my-pi/pi-coding-agent"
 $InstallDir = if ($env:PI_INSTALL_DIR) { $env:PI_INSTALL_DIR } else { "$env:LOCALAPPDATA\omp" }
-$NativeArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
-if ($NativeArchitecture -notin @("x64", "arm64")) {
-    throw "Unsupported Windows architecture: $NativeArchitecture"
+# Windows PowerShell 5.1 (.NET Framework) does not reliably resolve
+# [System.Runtime.InteropServices.RuntimeInformation] without an
+# assembly-qualified name, while PowerShell 7+ (Core) loads that type from a
+# different assembly — so read the OS architecture from the environment
+# instead, which works on both. Prefer PROCESSOR_ARCHITEW6432 so a 32-bit
+# host on 64-bit Windows still reports the OS architecture.
+# Note: PROCESSOR_ARCHITEW6432 is only set for 32-bit (WOW64) processes, so
+# x64 PowerShell under ARM64 emulation reports AMD64 and installs the x64
+# binary (runs emulated, not natively). Native ARM64 and x86-on-ARM64 hosts
+# still resolve to arm64.
+$RawArchitecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+if (-not $RawArchitecture) {
+    throw "Unable to determine Windows architecture"
+}
+$NativeArchitecture = switch ($RawArchitecture.ToUpperInvariant()) {
+    "AMD64" { "x64" }
+    "ARM64" { "arm64" }
+    default { throw "Unsupported Windows architecture: $RawArchitecture" }
 }
 $BinaryName = "omp-windows-$NativeArchitecture.exe"
 $MinimumBunVersion = "1.3.14"

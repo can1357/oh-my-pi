@@ -1742,10 +1742,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 		}
 		// Speculative reads open the authorized resolved target (absolutePath)
-		// but must render the requested lexical path exactly like an ordinary
-		// read. All display derivations below use this; filesystem access keeps
-		// using absolutePath. Ordinary callers pass no lexical path, so this
-		// is identical to absolutePath for them.
+		// but must behave exactly like an ordinary read of the requested
+		// lexical path. All display derivations AND format/classification
+		// decisions (extension, prose/markdown detection) below use this;
+		// filesystem access keeps using absolutePath. Ordinary callers pass no
+		// lexical path, so this is identical to absolutePath for them.
 		const renderAbsolutePath = lexicalAbsolutePath ?? absolutePath;
 
 		if (isDirectory) {
@@ -1781,7 +1782,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		const imageMetadata = await readImageMetadata(absolutePath);
 		const mimeType = imageMetadata?.mimeType;
-		const ext = path.extname(absolutePath).toLowerCase();
+		const ext = path.extname(renderAbsolutePath).toLowerCase();
 		const resolvedDisplayPath = formatPathRelativeToCwd(renderAbsolutePath, this.session.cwd);
 		const shouldConvertWithMarkit = CONVERTIBLE_EXTENSIONS.has(ext);
 
@@ -1791,12 +1792,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// the extension falls through to the plain-text path.
 		if (!mimeType && !isRawSelector(parsed) && fileSize <= MAX_PROFILE_SUMMARY_BYTES) {
 			let rendered: string | null = null;
-			if (isSampleProfilePath(absolutePath)) rendered = renderSampleProfile(await Bun.file(absolutePath).text());
-			else if (isCpuProfilePath(absolutePath)) rendered = renderCpuProfile(await Bun.file(absolutePath).text());
+			if (isSampleProfilePath(renderAbsolutePath))
+				rendered = renderSampleProfile(await Bun.file(absolutePath).text());
+			else if (isCpuProfilePath(renderAbsolutePath))
+				rendered = renderCpuProfile(await Bun.file(absolutePath).text());
 			if (rendered) {
 				return buildInMemorySelectorResult(this.session, rendered, parsed, {
-					details: { resolvedPath: absolutePath },
-					sourcePath: absolutePath,
+					details: { resolvedPath: renderAbsolutePath },
+					sourcePath: renderAbsolutePath,
 					entityLabel: "profile summary",
 				});
 			}
@@ -1841,7 +1844,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}));
 		} else if (question !== undefined) {
 			throw new ToolError(IMAGE_QUESTION_SELECTOR_ERROR);
-		} else if (absolutePath.toLowerCase().endsWith(".ipynb") && !isRawSelector(parsed)) {
+		} else if (renderAbsolutePath.toLowerCase().endsWith(".ipynb") && !isRawSelector(parsed)) {
 			let notebookJson: string;
 			try {
 				notebookJson = await Bun.file(absolutePath).text();
@@ -1851,8 +1854,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 			const notebookText = notebookToEditableText(notebookJson, resolvedDisplayPath);
 			return buildInMemorySelectorResult(this.session, notebookText, parsed, {
-				details: { resolvedPath: absolutePath },
-				sourcePath: absolutePath,
+				details: { resolvedPath: renderAbsolutePath },
+				sourcePath: renderAbsolutePath,
 				entityLabel: "notebook",
 			});
 		} else if (shouldConvertWithMarkit) {
@@ -1867,10 +1870,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				// because only `truncateHead` was being applied.
 				return buildInMemorySelectorResult(this.session, renderedContent, parsed, {
 					details: {
-						resolvedPath: absolutePath,
+						resolvedPath: renderAbsolutePath,
 						contentType: this.session.settings.get("read.renderMarkdown") ? "text/markdown" : undefined,
 					},
-					sourcePath: absolutePath,
+					sourcePath: renderAbsolutePath,
 					entityLabel: "document",
 				});
 			} else if (result.error) {
@@ -1915,9 +1918,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			if (
 				parsed.kind === "none" &&
 				this.session.settings.get("read.summarize.enabled") &&
-				(this.session.settings.get("read.summarize.prose") || !isProseSummaryPath(absolutePath))
+				(this.session.settings.get("read.summarize.prose") || !isProseSummaryPath(renderAbsolutePath))
 			) {
-				const summary = await trySummarize(this.session, absolutePath, fileSize, signal, buffered?.strippedText);
+				const summary = await trySummarize(
+					this.session,
+					absolutePath,
+					fileSize,
+					signal,
+					buffered?.strippedText,
+					renderAbsolutePath,
+				);
 				if (summary?.parsed && summary.elided) {
 					const renderedSummary = renderSummary(this.session, summary);
 					const footer = formatSummaryElisionFooter(
@@ -2335,7 +2345,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 
 		details.fileSize = fileSize;
-		markMarkdownContentType(this.session, details, absolutePath);
+		markMarkdownContentType(this.session, details, renderAbsolutePath);
 		if (suffixResolution) {
 			details.suffixResolution = suffixResolution;
 			// Inline resolution notice into first text block so the model sees the actual path

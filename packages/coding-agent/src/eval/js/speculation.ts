@@ -342,7 +342,15 @@ function projectExpression(expression: Expression, state: ProjectionState): Shad
 			args.length === 1
 		) {
 			const input = projectExpression(args[0] as Expression, state);
-			return input ? { kind: "transform", name: "String", input } : undefined;
+			if (!input) return undefined;
+			// String() coerces its input: arrays dispatch join, objects toString.
+			if (
+				coercionNeedsIntrinsics(input) &&
+				(!intrinsicIntact(state, "Array.prototype.join") || !intrinsicIntact(state, "Object.prototype.toString"))
+			) {
+				return undefined;
+			}
+			return { kind: "transform", name: "String", input };
 		}
 		if (
 			isMemberExpression(expression.callee) &&
@@ -367,9 +375,15 @@ function projectExpression(expression: Expression, state: ProjectionState): Shad
 		) {
 			const input = projectExpression(expression.callee.object, state);
 			const argument = args[0] ? projectExpression(args[0], state) : undefined;
-			return input && (!args[0] || argument)
-				? { kind: "transform", name: "Array.join", input, ...(argument ? { argument } : {}) }
-				: undefined;
+			if (!input || (args[0] && !argument)) return undefined;
+			// Elements and the separator stringify: objects reach toString
+			// (nested arrays stay under the join gate above).
+			const elements = input.kind === "array" ? input.items : [input];
+			const coerced = argument === undefined ? elements : [...elements, argument];
+			if (coerced.some(coercionNeedsIntrinsics) && !intrinsicIntact(state, "Object.prototype.toString")) {
+				return undefined;
+			}
+			return { kind: "transform", name: "Array.join", input, ...(argument ? { argument } : {}) };
 		}
 	}
 	return undefined;
