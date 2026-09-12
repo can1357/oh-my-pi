@@ -1373,6 +1373,7 @@ export class CommandController {
 				this.ctx.bashComponent.setComplete(result.exitCode, result.cancelled, {
 					output: result.output,
 					truncation: meta?.truncation,
+					artifactError: meta?.artifactError,
 					images: result.images,
 					showImages: this.ctx.settings.get("terminal.showImages"),
 				});
@@ -1462,6 +1463,7 @@ export class CommandController {
 				this.ctx.pythonComponent.setComplete(result.exitCode, result.cancelled, {
 					output: result.output,
 					truncation: meta?.truncation,
+					artifactError: meta?.artifactError,
 				});
 			}
 		} catch (error) {

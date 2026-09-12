@@ -28,7 +28,7 @@ import { truncateForPrompt } from "./approval";
 import { type EvalBackendsAllowance, resolveEvalBackends } from "./eval-backends";
 import { generateCodeModeDeclarations } from "./eval-format/code-mode-declarations";
 import { upsertStatusEvent } from "./eval-render";
-import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
+import { formatOutputNotice, resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
@@ -492,7 +492,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						void reportProgress(text, { async: { state: "running", jobId, type: "eval" } });
 						if (forwardUpdates) emitToolUpdate?.(text, details);
 					});
-					const finalText = result.content.find(block => block.type === "text")?.text ?? "";
+					const finalText =
+						(result.content.find(block => block.type === "text")?.text ?? "") +
+						formatOutputNotice(result.details?.meta);
 					latestText = finalText;
 					latestDetails = result.details;
 					// Hand the full result (images included) to the foreground waiter
@@ -946,6 +948,7 @@ async function summarizeFinal(
 		outputLines,
 		outputBytes,
 		artifactId: rawSummary.artifactId,
+		artifactError: rawSummary.artifactError,
 		columnDroppedBytes: rawSummary.columnDroppedBytes,
 		columnTruncatedLines: rawSummary.columnTruncatedLines,
 		columnMax: rawSummary.columnMax,

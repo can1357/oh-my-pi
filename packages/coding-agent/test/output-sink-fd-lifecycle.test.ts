@@ -2,8 +2,11 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { OutputSink } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { bashToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { formatOutputNotice, outputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { removeWithRetries, sanitizeText } from "@oh-my-pi/pi-utils";
 
 const createdTempDirs: string[] = [];
 
@@ -28,6 +31,18 @@ function spill(sink: OutputSink): void {
 	sink.push(`${"x".repeat(64)}\n`);
 }
 
+/** Substitute only this artifact's writer, retaining real file/descriptor behavior. */
+function instrumentArtifact(artifactPath: string): Bun.FileSink {
+	const file = Bun.file(artifactPath);
+	const writer = file.writer();
+	vi.spyOn(file, "writer").mockReturnValue(writer);
+	const realFile = Bun.file.bind(Bun);
+	vi.spyOn(Bun, "file").mockImplementation((source, options) => {
+		if (source === artifactPath) return file;
+		return realFile(source as string, options);
+	});
+	return writer;
+}
 describe("OutputSink fd lifecycle", () => {
 	test("dispose() releases the spill descriptor on error/abort paths that skip dump()", async () => {
 		const dir = await createTempDir();
@@ -84,37 +99,18 @@ describe("OutputSink fd lifecycle", () => {
 		expect(content).not.toContain("y".repeat(64));
 	});
 
-	test("dispose() closes the descriptor even when the capped tail replay write throws", async () => {
+	test("dispose() preserves cancellation cleanup when capped tail replay fails", async () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "capped.txt");
-
-		let ended = false;
-		// Mock FileSink: head bytes ("h") write fine; the tail replay (the
-		// `[ARTIFACT TRUNCATED …]` notice + "t" ring) throws, mirroring a disk
-		// write error while closing a capped artifact. Cast to the sink type — a
-		// full FileSink has methods OutputSink never calls.
-		const fakeSink = {
-			write(chunk: string): number {
-				if (chunk.includes("[ARTIFACT TRUNCATED") || chunk.includes("t")) {
-					throw new Error("simulated disk write failure");
-				}
-				return Buffer.byteLength(chunk, "utf-8");
-			},
-			end(): Promise<number> {
-				ended = true;
-				return Promise.resolve(0);
-			},
-		} as unknown as Bun.FileSink;
-		const fakeFile = { writer: () => fakeSink } as unknown as Bun.BunFile;
-
-		const realFile = Bun.file.bind(Bun);
-		vi.spyOn(Bun, "file").mockImplementation((source, options) => {
-			if (source === artifactPath) return fakeFile;
-			return realFile(source as string, options);
+		const writer = instrumentArtifact(artifactPath);
+		const write = writer.write.bind(writer);
+		vi.spyOn(writer, "write").mockImplementation(chunk => {
+			if (typeof chunk === "string" && chunk.includes("[ARTIFACT TRUNCATED")) {
+				throw new Error("simulated disk write failure");
+			}
+			return write(chunk);
 		});
-
-		// Small on-disk cap so head fills, the rest overflows into the tail ring,
-		// and #flushArtifactTailIfCapped replays a truncation notice on close.
+		const end = vi.spyOn(writer, "end");
 		const sink = new OutputSink({
 			artifactPath,
 			artifactId: "capped",
@@ -124,10 +120,151 @@ describe("OutputSink fd lifecycle", () => {
 		});
 		sink.push("h".repeat(30));
 		sink.push("t".repeat(60));
+		await sink.dispose();
+		await sink.dispose();
+		sink.push("late callback");
 
-		// The tail replay throws, but dispose() must still close the sink and must
-		// not surface the replay error (it would mask the original tool error).
-		await expect(sink.dispose()).resolves.toBeUndefined();
-		expect(ended).toBe(true);
+		const summary = await sink.dump();
+		expect(summary.output).toBe("t".repeat(16));
+		expect(summary.artifactId).toBeUndefined();
+		expect(summary.artifactError).toBe("flush");
+		expect(end).toHaveBeenCalledTimes(1);
+		expect(await Bun.file(artifactPath).text()).toBe("h".repeat(20));
+		expect(formatOutputNotice(outputMeta().truncationFromSummary(summary, { direction: "tail" }).get())).toContain(
+			"not saved completely",
+		);
+	});
+
+	test("an artifact open failure is terminal even when its target becomes writable", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "blocked");
+		await fs.mkdir(artifactPath);
+		const sink = new OutputSink({ artifactPath, artifactId: "incomplete", spillThreshold: 4 });
+		sink.push("lost-before-failure");
+		await fs.rmdir(artifactPath);
+		sink.push("tail");
+		const summary = await sink.dump();
+		const notice = formatOutputNotice(outputMeta().truncationFromSummary(summary, { direction: "tail" }).get());
+
+		expect(summary.output).toBe("tail");
+		expect(summary.artifactError).toBe("open");
+		expect(summary.artifactId).toBeUndefined();
+		expect(notice).toContain("not saved completely");
+		expect(notice).not.toContain("artifact://");
+		expect(await Bun.file(artifactPath).exists()).toBe(false);
+	});
+
+	test("a write failure preserves bounded output and stops subsequent capture writes", async () => {
+		const dir = await createTempDir();
+		const writer = instrumentArtifact(path.join(dir, "write.txt"));
+		const sink = new OutputSink({
+			artifactPath: path.join(dir, "write.txt"),
+			artifactId: "write",
+			spillThreshold: 4,
+		});
+		sink.push("prefix");
+		const write = vi.spyOn(writer, "write").mockImplementation(() => {
+			throw new Error("write failed");
+		});
+		const end = vi.spyOn(writer, "end");
+		sink.push("failed");
+		sink.push("tail");
+		const summary = await sink.dump();
+		await sink.dispose();
+
+		expect(summary.output).toBe("tail");
+		expect(summary.totalBytes).toBe(16);
+		expect(summary.artifactError).toBe("write");
+		expect(summary.artifactId).toBeUndefined();
+		expect(write).toHaveBeenCalledTimes(1);
+		expect(end).toHaveBeenCalledTimes(1);
+		expect(await Bun.file(path.join(dir, "write.txt")).text()).toBe("prefix");
+	});
+
+	test("dump waits for rejected asynchronous writes before reporting recovery availability", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "async.txt");
+		const writer = instrumentArtifact(artifactPath);
+		const pendingWrite = Promise.withResolvers<number>();
+		vi.spyOn(writer, "write").mockReturnValue(pendingWrite.promise);
+		const end = vi.spyOn(writer, "end");
+		const sink = new OutputSink({ artifactPath, artifactId: "async", spillThreshold: 4 });
+		sink.push("prefix");
+		const dumping = sink.dump();
+		pendingWrite.reject(new Error("asynchronous write failed"));
+		const summary = await dumping;
+
+		expect(summary.output).toBe("efix");
+		expect(summary.artifactError).toBe("write");
+		expect(summary.artifactId).toBeUndefined();
+		expect(end).toHaveBeenCalledTimes(1);
+	});
+
+	test("flush failure still closes the writer and is surfaced without a recovery link", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "flush.txt");
+		const writer = instrumentArtifact(artifactPath);
+		vi.spyOn(writer, "flush").mockImplementation(() => {
+			throw new Error("flush failed");
+		});
+		const end = vi.spyOn(writer, "end");
+		const sink = new OutputSink({ artifactPath, artifactId: "flush", spillThreshold: 4 });
+		sink.push("prefix");
+		const summary = await sink.dump();
+		await sink.dispose();
+
+		expect(summary.artifactError).toBe("flush");
+		expect(summary.artifactId).toBeUndefined();
+		expect(end).toHaveBeenCalledTimes(1);
+		expect(formatOutputNotice(outputMeta().truncationFromSummary(summary, { direction: "tail" }).get())).toContain(
+			"not saved completely",
+		);
+	});
+
+	test("concurrent finalization waits for end failure even after output was minimized", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "end.txt");
+		const writer = instrumentArtifact(artifactPath);
+		const close = writer.end.bind(writer);
+		const closing = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const end = vi.spyOn(writer, "end").mockImplementation(async () => {
+			await close();
+			closing.resolve();
+			await release.promise;
+			throw new Error("end failed");
+		});
+		const sink = new OutputSink({ artifactPath, artifactId: "end", spillThreshold: 4 });
+		sink.push("prefix");
+		sink.replace("ok");
+		const disposing = sink.dispose();
+		await closing.promise;
+		const dumping = sink.dump();
+		release.resolve();
+		await disposing;
+		const summary = await dumping;
+		await sink.dispose();
+		const notice = formatOutputNotice(outputMeta().truncationFromSummary(summary, { direction: "tail" }).get());
+
+		expect(summary.output).toBe("ok");
+		expect(summary.truncated).toBe(false);
+		expect(summary.artifactError).toBe("end");
+		expect(summary.artifactId).toBeUndefined();
+		expect(notice).toContain("not saved completely");
+		expect(notice).not.toContain("artifact://");
+		expect(end).toHaveBeenCalledTimes(1);
+		expect(await Bun.file(artifactPath).text()).toBe("prefix");
+		const meta = outputMeta().truncationFromSummary(summary, { direction: "tail" }).get();
+		const uiTheme = await getThemeByName("dark");
+		if (!uiTheme) throw new Error("Expected dark theme");
+		const component = bashToolRenderer.renderResult(
+			{ content: [{ type: "text", text: summary.output + notice }], details: { meta }, isError: false },
+			{ expanded: true, isPartial: false, renderContext: { isFullOutput: true } },
+			uiTheme,
+			{ command: "printf ok" },
+		);
+		const rendered = sanitizeText(component.render(160).join("\n"));
+		expect(rendered).toContain("not saved completely");
+		expect(rendered).not.toContain("artifact://");
 	});
 });

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Background job snapshots preserve complete sibling results when a capture fails and show each capture warning only once.
+- Failed raw-output captures now show a warning without failing the command or advertising an incomplete artifact as full output.
+- Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 ### Added
 
 - `/usage` now shows prepaid credit balances (e.g. Charm Hyper's `100 credits left`) on the provider cards and account summaries instead of `no data` ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).

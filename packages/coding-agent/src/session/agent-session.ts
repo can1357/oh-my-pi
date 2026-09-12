@@ -259,6 +259,7 @@ import type {
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
 import { writeArtifact } from "./artifacts";
+import { formatArtifactErrorNotice, type OutputMeta, stripOutputNotice } from "../tools/output-meta";
 import {
 	ASYNC_INLINE_RESULT_MAX_CHARS,
 	ASYNC_PREVIEW_MAX_CHARS,
@@ -2312,7 +2313,7 @@ export class AgentSession {
 		// must not enqueue — the suppression marker alone is unreliable because
 		// job-id reuse clears it.
 		const epoch = this.#asyncDeliveryEpoch;
-		const formatted = await this.#formatAsyncResultForFollowUp(text);
+		const formatted = await this.#formatAsyncResultForFollowUp(text, job?.latestDetails?.meta);
 		if (this.#isDisposed) return;
 		if (epoch !== this.#asyncDeliveryEpoch) return;
 		if (manager.isDeliverySuppressed(jobId)) return;
@@ -2326,11 +2327,15 @@ export class AgentSession {
 		});
 	}
 
-	async #formatAsyncResultForFollowUp(result: string): Promise<string> {
+	async #formatAsyncResultForFollowUp(result: string, meta?: OutputMeta): Promise<string> {
 		if (result.length <= ASYNC_INLINE_RESULT_MAX_CHARS) {
 			return result;
 		}
-		const preview = `${result.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]`;
+		// Strip the already-rendered source notice before taking the smaller preview,
+		// then retain its capture warning once even when the original footer is elided.
+		const body = meta?.artifactError ? stripOutputNotice(result, meta).trimEnd() : result;
+		const preview = `${body.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]`;
+		if (meta?.artifactError) return `${preview}\n[${formatArtifactErrorNotice(meta.artifactError)}]`;
 		try {
 			const { path: artifactPath, id: artifactId } = await this.sessionManager.allocateArtifactPath("async");
 			if (artifactPath && artifactId) {
