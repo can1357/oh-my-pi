@@ -3,6 +3,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import {
 	DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY,
 	getTinyLocalModelSpec,
+	isFoundationModelsSpec,
 	isTinyLocalModelKey,
 	TINY_LOCAL_MODELS,
 	type TinyLocalModelKey,
@@ -56,7 +57,8 @@ export function resolveModels(model: string | undefined, mlx = tinyWorkerUsesMlx
 	// load, so the bulk download stays green when every *usable* model succeeds.
 	if (model === "all")
 		return TINY_LOCAL_MODELS.filter(
-			spec => mlx || !("onnxUnsupportedReason" in spec) || !spec.onnxUnsupportedReason,
+			spec =>
+				!isFoundationModelsSpec(spec) && (mlx || !("onnxUnsupportedReason" in spec) || !spec.onnxUnsupportedReason),
 		).map(spec => spec.key);
 	if (!isTinyLocalModelKey(model)) {
 		const values = TINY_LOCAL_MODELS.map(spec => spec.key).join(", ");

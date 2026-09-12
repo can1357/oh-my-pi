@@ -5,6 +5,7 @@
 ### Added
 
 - `/usage` now shows prepaid credit balances (e.g. Charm Hyper's `100 credits left`) on the provider cards and account summaries instead of `no data` ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
+- Added opt-in Apple Foundation Models (`afm-core`) session title generation for Darwin hosts ([#9683](https://github.com/can1357/oh-my-pi/pull/9683)).
 - Retry fallback chains now support per-model reasoning efforts: a fallback entry may carry an explicit thinking suffix (`"default": ["openai/gpt-5-mini:low"]`), and pressing `t` on a fallback row in `/models` sets or clears it. Bare entries keep inheriting the failing turn's effort. ([#11842](https://github.com/can1357/oh-my-pi/pull/11842) by [@H4vC](https://github.com/H4vC)).
 
 ### Fixed
@@ -35,6 +36,14 @@
 - MCP HTTP reconnects now release obsolete tool generations instead of growing session memory on every reconnect ([#11784](https://github.com/can1357/oh-my-pi/issues/11784)).
 - `/debug` memory reports now keep large heap snapshots out of JavaScript strings and reject empty snapshots instead of saving zero-byte files ([#11785](https://github.com/can1357/oh-my-pi/issues/11785)).
 - `/usage` now honors a provider's configured `baseUrl` when checking credentials before any model has been discovered, so a proxy-scoped API key is no longer sent to the provider's canonical host ([#11656](https://github.com/can1357/oh-my-pi/pull/11656) by [@oldschoola](https://github.com/oldschoola)).
+- Cancelled `afm-core` title generation and readiness probes now kill the sidecar process instead of leaving it running.
+- `afm-core` now reports `unsupported_os` on macOS earlier than 26 instead of launching a 26-target sidecar that dyld rejects.
+- Title generation now emits a terminal progress event when a previously failed local tiny model is skipped, so the download UI can unsubscribe.
+- A contended `afm-core` sidecar compile lock no longer disables title generation for the rest of the process.
+- `afm-core` now validates its sidecar cache under the compile lock so a concurrent install cannot return a mismatched helper.
+- Localized `afm-core` generation errors no longer disable later title requests merely because they mention unavailability.
+- `afm-core` sidecars use build- and architecture-specific cache paths, preventing concurrent installs or interrupted upgrades from replacing a helper another process is about to launch.
+- Transient `afm-core` startup, process, and response errors no longer disable subsequent title requests.
 
 ## [18.1.18] - 2026-09-11
 

@@ -92,6 +92,7 @@
     "dist/template-*.html",
     "dist/template-*.js",
     "dist/tool-views.generated-*.js",
+    "dist/omp-apple-fm-*",
     "scripts",
     "examples",
     "README.md",
