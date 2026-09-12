@@ -9,7 +9,7 @@ import {
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { getTerminalId, isConPTYHosted } from "@oh-my-pi/pi-tui";
-import { getTerminalSessionsDir, setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import { getTerminalSessionsDir, postmortem, setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
 
 const LABEL = "my-project";
@@ -193,6 +193,20 @@ describe("agent state file", () => {
 
 		setAgentStateFileEnabled(false);
 		expect(fs.existsSync(stateFile())).toBe(false);
+	});
+
+	it("survives a keep-alive cleanup pass, because the agent is still running", async () => {
+		// The removal is registered with postmortem so a signal exit - which never reaches
+		// disposeTerminalTitleState - cannot leave the file behind. It is registered exitOnly:
+		// a manual keep-alive pass is not this agent's end, and deleting the file there would
+		// blind a reader in the middle of a session.
+		setAgentStateFileEnabled(true);
+		setTerminalTitleState("attention");
+
+		await postmortem.cleanup();
+
+		expect(fs.existsSync(stateFile())).toBe(true);
+		expect(JSON.parse(fs.readFileSync(stateFile(), "utf8")).state).toBe("attention");
 	});
 
 	it("leaves no file behind when the runtime is disposed", () => {

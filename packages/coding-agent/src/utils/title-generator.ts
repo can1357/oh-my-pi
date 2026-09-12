@@ -8,7 +8,7 @@ import * as path from "node:path";
 import { type Api, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
 import { getTerminalId, isConPTYHosted, writeThroughActiveTerminal } from "@oh-my-pi/pi-tui";
-import { getTerminalSessionsDir, isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
+import { getTerminalSessionsDir, isTerminalHeadless, logger, postmortem, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
 import { resolveRoleSelection } from "../config/model-resolver";
@@ -650,11 +650,29 @@ export function setTerminalTitleState(state: TerminalTitleState): void {
 	writeAgentStateFile(state);
 }
 
+/** Cancels the postmortem registration that removes the file, while one is registered. */
+let agentStateFileCleanupCancel: (() => void) | undefined;
+
 /** Enable/disable the state file (driven by the `tui.stateFile` setting). */
 export function setAgentStateFileEnabled(enabled: boolean): void {
 	agentStateFileEnabled = enabled;
-	if (enabled) writeAgentStateFile(terminalTitleRuntime.state);
-	else removeAgentStateFile();
+	if (enabled) {
+		// A signal exit never reaches disposeTerminalTitleState(): SIGTERM/SIGHUP and the fatal
+		// handler run the postmortem callbacks and leave. Without this the file outlives the
+		// process and goes on reporting `working` or `attention` for ever, which is worse than
+		// having no file at all.
+		//
+		// exitOnly, because a keep-alive cleanup pass is not the end of this agent: its state is
+		// still true and deleting it there would blind a reader mid-session.
+		agentStateFileCleanupCancel ??= postmortem.register("agent-state-file", removeAgentStateFile, {
+			exitOnly: true,
+		});
+		writeAgentStateFile(terminalTitleRuntime.state);
+	} else {
+		agentStateFileCleanupCancel?.();
+		agentStateFileCleanupCancel = undefined;
+		removeAgentStateFile();
+	}
 }
 
 /** Enable/disable the run-state separator (driven by the `tui.titleState` setting). */
@@ -671,7 +689,11 @@ export function disposeTerminalTitleState(): void {
 	disposeWindowsConsoleTitleApi();
 	lastTerminalTitle = undefined;
 	// A state file that outlives its process would report "waiting" forever.
-	if (agentStateFileEnabled) removeAgentStateFile();
+	if (agentStateFileEnabled) {
+		agentStateFileCleanupCancel?.();
+		agentStateFileCleanupCancel = undefined;
+		removeAgentStateFile();
+	}
 }
 
 /**
