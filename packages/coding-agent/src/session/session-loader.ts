@@ -31,6 +31,11 @@ export interface VisitEntriesFromFileStreamOptions {
 	yieldEveryEntries?: number;
 	/** Called once for every malformed JSONL record skipped by the stream. */
 	onMalformedRecord?: () => void;
+	/**
+	 * Called with each stream chunk's byte length as it is consumed. Lets
+	 * callers derive the exact snapshot size without re-stating the file.
+	 */
+	onBytesConsumed?: (bytes: number) => void;
 }
 
 /** Parsed session entries plus corruption metadata needed by writable loaders. */
@@ -38,6 +43,8 @@ export interface SessionLoadResult {
 	entries: FileEntry[];
 	titleSlot: SessionTitleUpdate | undefined;
 	malformedRecords: number;
+	/** Byte length of the snapshot actually parsed, or `null` when the path did not exist. */
+	sourceSize?: number | null;
 	/** Whether non-empty session data was found without a valid leading session header. */
 	invalidHeader: boolean;
 }
@@ -81,6 +88,7 @@ export function parseSessionContent(content: string): SessionLoadResult {
 		entries,
 		titleSlot: slot,
 		malformedRecords,
+		sourceSize: Buffer.byteLength(content, "utf8"),
 		invalidHeader: entries.length > 0 ? !isValidSessionHeader(entries[0]) : malformedRecords > 0,
 	};
 }
@@ -198,6 +206,7 @@ export async function visitEntriesFromFileStream(
 		for await (const chunk of source.stream()) {
 			if (stopped) break;
 			bytesSinceYield += chunk.byteLength;
+			options.onBytesConsumed?.(chunk.byteLength);
 			buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk]);
 			// The optional fixed-width title slot is a physical first line that is
 			// NOT JSON; peel it before the parser would (correctly) reject it. The
@@ -240,6 +249,7 @@ export async function visitEntriesFromFileStream(
 export async function loadEntriesFromFileStream(filePath: string): Promise<SessionLoadResult> {
 	const entries: FileEntry[] = [];
 	let malformedRecords = 0;
+	let bytesConsumed = 0;
 	const titleSlot = await visitEntriesFromFileStream(
 		filePath,
 		entry => {
@@ -249,12 +259,16 @@ export async function loadEntriesFromFileStream(filePath: string): Promise<Sessi
 			onMalformedRecord: () => {
 				malformedRecords++;
 			},
+			onBytesConsumed: bytes => {
+				bytesConsumed += bytes;
+			},
 		},
 	);
 	return {
 		entries,
 		titleSlot,
 		malformedRecords,
+		sourceSize: bytesConsumed,
 		invalidHeader: entries.length > 0 ? !isValidSessionHeader(entries[0]) : malformedRecords > 0,
 	};
 }
@@ -268,11 +282,22 @@ function shouldStreamEntries(storage: SessionStorage, size: number): boolean {
 	return storage instanceof FileSessionStorage && size >= STREAM_LOAD_THRESHOLD_BYTES;
 }
 
-async function loadWithKnownSize(filePath: string, storage: SessionStorage, size: number): Promise<SessionLoadResult> {
-	const loaded = shouldStreamEntries(storage, size)
-		? await loadEntriesFromFileStream(filePath)
-		: parseSessionContent(await storage.readText(filePath));
-	return loaded.invalidHeader ? { ...loaded, entries: [] } : loaded;
+async function loadWithKnownSize(
+	filePath: string,
+	storage: SessionStorage,
+	size: number,
+): Promise<{ loaded: SessionLoadResult; sourceSize: number }> {
+	if (shouldStreamEntries(storage, size)) {
+		const loaded = await loadEntriesFromFileStream(filePath);
+		const sourceSize = loaded.sourceSize ?? 0;
+		return { loaded: loaded.invalidHeader ? { ...loaded, entries: [] } : loaded, sourceSize };
+	}
+	const content = await storage.readText(filePath);
+	const loaded = parseSessionContent(content);
+	return {
+		loaded: loaded.invalidHeader ? { ...loaded, entries: [] } : loaded,
+		sourceSize: Buffer.byteLength(content, "utf8"),
+	};
 }
 
 /** Load and validate a session while retaining malformed-record diagnostics. */
@@ -281,9 +306,19 @@ export async function loadSessionFile(
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<SessionLoadResult> {
 	try {
-		return await loadWithKnownSize(filePath, storage, storage.statSync(filePath).size);
+		const statSize = storage.statSync(filePath).size;
+		const { loaded, sourceSize } = await loadWithKnownSize(filePath, storage, statSize);
+		return { ...loaded, sourceSize };
 	} catch (err) {
-		if (isEnoent(err)) return { entries: [], titleSlot: undefined, malformedRecords: 0, invalidHeader: false };
+		if (isEnoent(err)) {
+			return {
+				entries: [],
+				titleSlot: undefined,
+				malformedRecords: 0,
+				sourceSize: null,
+				invalidHeader: false,
+			};
+		}
 		throw err;
 	}
 }
@@ -318,7 +353,7 @@ export async function visitEntriesFromFile(
 		return;
 	}
 
-	for (const entry of (await loadWithKnownSize(filePath, storage, size)).entries) {
+	for (const entry of (await loadWithKnownSize(filePath, storage, size)).loaded.entries) {
 		if (visit(entry) === false) return;
 	}
 }

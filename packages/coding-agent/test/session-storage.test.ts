@@ -8,7 +8,7 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
-import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { FileSessionStorage, SessionLockError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
 class ControlledTitleUpdateBackend implements SessionStorageBackend {
@@ -319,6 +319,45 @@ describe("FileSessionStorage.writeTextSync", () => {
 			expect(await fsp.readdir(tempDir)).toEqual(["session.jsonl"]);
 		} finally {
 			writeSpy.mockRestore();
+		}
+	});
+
+	it("keeps an open writer appending to the replaced file after a rewrite", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "header\n");
+		const writer = storage.openWriter(sessionPath);
+		try {
+			// A rewrite renames a fresh inode over the path; a writer opened before
+			// it would otherwise keep appending to the orphaned file and lose the
+			// turn. Re-opening the live path under the publish lock must place the
+			// line in the replaced file.
+			storage.writeTextSync(sessionPath, "rewritten\n");
+			const appendSync = writer.appendSync?.bind(writer);
+			if (!appendSync) throw new Error("File writer must expose appendSync");
+			appendSync("appended\n");
+			expect(await Bun.file(sessionPath).text()).toBe("rewritten\nappended\n");
+			expect(await fsp.readdir(tempDir)).toEqual(["session.jsonl"]);
+		} finally {
+			await writer.close();
+		}
+	});
+
+	it("fails closed for a held publish lock instead of writing outside it", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const lockPath = path.join(tempDir, ".session.jsonl.lock");
+		// A live holder (this process) is never stolen: both the writer and the
+		// rewrite must wait out the bounded retry window and then reject rather
+		// than publish around the lock.
+		fs.writeFileSync(lockPath, `${process.pid}:${Date.now()}\n`);
+		try {
+			await expect(storage.writeTextAtomic(sessionPath, "replacement\n")).rejects.toBeInstanceOf(SessionLockError);
+			expect(() => storage.writeTextSync(sessionPath, "replacement\n")).toThrow(SessionLockError);
+			expect(await Bun.file(sessionPath).text()).toBe("original\n");
+		} finally {
+			fs.unlinkSync(lockPath);
 		}
 	});
 });

@@ -1,9 +1,11 @@
 import { toError } from "@oh-my-pi/pi-utils";
-import type {
-	SessionStorage,
-	SessionStorageStat,
-	SessionStorageWriter,
-	WriteTextAtomicOptions,
+import {
+	SessionWriteConflictError,
+	type SessionStorage,
+	type SessionStorageStat,
+	type SessionStorageWriter,
+	type SessionStorageWriteOptions,
+	type WriteTextAtomicOptions,
 } from "./session-storage";
 import {
 	overlayTitleSlotContent,
@@ -27,7 +29,17 @@ export interface SessionStorageBackend {
 	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>>;
 	readFull(path: string): Promise<string | null>;
 	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
-	writeFull(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void>;
+	/**
+	 * Replace content, atomically rejecting when the shared backend's current
+	 * UTF-8 byte length differs from `expectedSize`.
+	 */
+	writeFull(
+		path: string,
+		content: string,
+		mtimeMs: number,
+		title?: SessionTitleUpdate,
+		expectedSize?: number | null,
+	): Promise<void>;
 	append(path: string, line: string, mtimeMs: number): Promise<void>;
 	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void>;
 	truncate(path: string, mtimeMs: number): Promise<void>;
@@ -45,6 +57,12 @@ interface IndexEntry {
 
 interface EnqueueOptions {
 	trackDrain: boolean;
+}
+
+/** Optimistic index entry a queued append installed, kept for failure rollback. */
+interface IndexAppend {
+	mtimeMs: number;
+	previous: IndexEntry | undefined;
 }
 
 const RESOLVED = Promise.resolve();
@@ -89,6 +107,11 @@ function titleUpdateForIndex(entry: IndexEntry): SessionTitleUpdate | undefined 
 }
 
 export class IndexedSessionStorage implements SessionStorage {
+	/**
+	 * Sync writes only update {@link #index} and queue the remote publish, so a
+	 * caller tracking a durable byte size must wait for {@link drain}.
+	 */
+	readonly defersSyncPublish = true;
 	readonly #backend: SessionStorageBackend;
 	readonly #index = new Map<string, IndexEntry>();
 	readonly #writers = new Set<IndexedSessionStorageWriter>();
@@ -97,6 +120,13 @@ export class IndexedSessionStorage implements SessionStorage {
 	readonly #drainPending = new Set<Promise<void>>();
 	#nextMtimeMs = 0;
 	#firstDrainError: Error | undefined;
+	#assertExpectedSize(path: string, expectedSize: number | null | undefined): void {
+		if (expectedSize === undefined) return;
+		const actualSize = this.#index.get(path)?.size ?? null;
+		if (actualSize !== expectedSize) {
+			throw new SessionWriteConflictError(path, expectedSize, actualSize);
+		}
+	}
 
 	constructor(backend: SessionStorageBackend) {
 		this.#backend = backend;
@@ -141,11 +171,30 @@ export class IndexedSessionStorage implements SessionStorage {
 		return this.#index.has(path);
 	}
 
-	writeTextSync(path: string, content: string): void {
+	/**
+	 * Resolve once the publishes queued for `path` have settled, rejecting when
+	 * one failed. The path tail is installed synchronously by `#enqueuePaths`,
+	 * so a caller confirming immediately after `writeTextSync` observes its own
+	 * write rather than a later one.
+	 */
+	confirmWrites(path: string): Promise<void> {
+		return this.#awaitPath(path);
+	}
+
+	writeTextSync(path: string, content: string, options?: SessionStorageWriteOptions): void {
+		this.#assertExpectedSize(path, options?.expectedSize);
+		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
 		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
 		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
-		this.#enqueuePath(path, () => this.#backend.writeFull(path, content, mtimeMs, title), { trackDrain: true });
+		const write = this.#enqueuePath(
+			path,
+			() => this.#backend.writeFull(path, content, mtimeMs, title, options?.expectedSize),
+			{ trackDrain: true },
+		);
+		void write.catch(() => {
+			if (this.#index.get(path)?.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
+		});
 	}
 
 	async updateSessionTitle(path: string, title: SessionTitleUpdate): Promise<void> {
@@ -252,6 +301,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		// awaitPath yield and bumped the epoch. Re-check before touching the
 		// index or enqueueing the backend publish.
 		if (commitGuard && !commitGuard()) return;
+		this.#assertExpectedSize(path, options?.expectedSize);
 		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
 		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
@@ -270,7 +320,7 @@ export class IndexedSessionStorage implements SessionStorage {
 						if (current?.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
 						return;
 					}
-					await this.#backend.writeFull(path, content, mtimeMs, title);
+					await this.#backend.writeFull(path, content, mtimeMs, title, options?.expectedSize);
 				},
 				{ trackDrain: false },
 			);
@@ -375,16 +425,17 @@ export class IndexedSessionStorage implements SessionStorage {
 		);
 	}
 
-	_appendForWriter(path: string, line: string): number {
+	_appendForWriter(path: string, line: string): IndexAppend {
 		const mtimeMs = this.#allocMtimeMs();
-		const existing = this.#index.get(path);
-		const size = (existing?.size ?? 0) + byteLength(line);
+		const previous = this.#index.get(path);
+		const size = (previous?.size ?? 0) + byteLength(line);
 		this.#setIndex(path, size, mtimeMs);
-		return mtimeMs;
+		return { mtimeMs, previous };
 	}
 
-	_queueAppend(path: string, line: string, mtimeMs: number, getError?: () => Error | undefined): Promise<void> {
-		return this.#enqueuePath(
+	_queueAppend(path: string, line: string, append: IndexAppend, getError?: () => Error | undefined): Promise<void> {
+		const { mtimeMs, previous } = append;
+		const tracked = this.#enqueuePath(
 			path,
 			async () => {
 				const error = getError?.();
@@ -393,6 +444,15 @@ export class IndexedSessionStorage implements SessionStorage {
 			},
 			{ trackDrain: true },
 		);
+		// A rejected append never reached the backend, so the optimistic index
+		// entry for it must not survive: rolling it back keeps `statSync` (and
+		// the byte size a caller derives from it) describing durable state, the
+		// same rollback every other publish path here applies. The `mtimeMs`
+		// guard leaves a later append's entry intact.
+		void tracked.catch(() => {
+			if (this.#index.get(path)?.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
+		});
+		return tracked;
 	}
 
 	#restoreIndex(path: string, entry: IndexEntry | undefined): void {
@@ -521,15 +581,15 @@ class IndexedSessionStorageWriter implements SessionStorageWriter {
 		if (this.#error) throw this.#error;
 		// Local index is updated immediately; remote publish stays ordered on the
 		// path queue. Callers that need remote durability still await append()/flush().
-		const mtimeMs = this.#storage._appendForWriter(this.#path, line);
-		void this.#trackPromise(this.#storage._queueAppend(this.#path, line, mtimeMs, () => this.#error));
+		const append = this.#storage._appendForWriter(this.#path, line);
+		void this.#trackPromise(this.#storage._queueAppend(this.#path, line, append, () => this.#error));
 	}
 
 	async append(line: string): Promise<void> {
 		if (this.#closed) throw new Error("Writer closed");
 		if (this.#error) throw this.#error;
-		const mtimeMs = this.#storage._appendForWriter(this.#path, line);
-		await this.#trackPromise(this.#storage._queueAppend(this.#path, line, mtimeMs, () => this.#error));
+		const append = this.#storage._appendForWriter(this.#path, line);
+		await this.#trackPromise(this.#storage._queueAppend(this.#path, line, append, () => this.#error));
 	}
 
 	async flush(): Promise<void> {
