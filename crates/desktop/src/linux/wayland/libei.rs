@@ -9,7 +9,7 @@ use ashpd::desktop::{
 };
 use futures::StreamExt;
 use reis::{
-	ei::{self, button::ButtonState, handshake, keyboard::KeyState},
+	ei::{self, Context, button::ButtonState, handshake, keyboard::KeyState},
 	event::{Device, DeviceCapability, EiEvent},
 	tokio::EiConvertEventStream,
 };
