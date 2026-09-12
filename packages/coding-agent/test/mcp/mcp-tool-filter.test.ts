@@ -194,6 +194,44 @@ test("classes treat the encoding's reserved characters as ordinary raw character
 	expect(run(["x¤y"], ["x[¤]y"]).allowed).toEqual(["x¤y"]);
 });
 
+test("`?` matches one raw character, astral ones included", () => {
+	// The compiled regex is not a `u`-mode one, so a bare negated class would
+	// consume a single UTF-16 code unit and a `?` would claim half of an astral
+	// character: `tool_?` missed `tool_😀` while `tool_??` matched it. One raw
+	// character is one BMP character, one surrogate pair, or one lone surrogate.
+	expect(run(["tool_😀", "tool_x"], ["tool_?"]).allowed).toEqual(["tool_😀", "tool_x"]);
+	expect(run(["tool_😀", "tool_x"], ["tool_??"]).allowed).toEqual([]);
+	expect(run(["😀", "a"], ["?"]).allowed).toEqual(["😀", "a"]);
+	// The deny direction mirrors it.
+	expect(run(["tool_😀", "tool_x"], []).allowed).toEqual(["tool_😀", "tool_x"]);
+	expect(filterMCPTools({ toolNames: ["tool_😀", "tool_x"], disabledTools: ["tool_?"] }).allowed).toEqual([]);
+});
+
+test("a star matches zero characters even after a literal dot", () => {
+	// picomatch emits `(?=.)` before a star following a literal `.`, so `.*` did
+	// not match a tool named exactly `.` and `*.*` missed `report.`. Tool names
+	// are opaque and `*` spans zero characters, so the assertion is stripped and
+	// `.*` addresses a literal dot followed by nothing.
+	expect(run([".", ".a", "a"], [".*"]).allowed).toEqual([".", ".a"]);
+	expect(run(["report.", "report", ".."], ["*.*"]).allowed).toEqual(["report.", ".."]);
+	expect(run([".", "a.", "a"], ["*."]).allowed).toEqual([".", "a."]);
+});
+
+test("braces outside `{a,b}` alternation are literal", () => {
+	// Only `{a,b}` alternates. picomatch compiles an unmatched `{` to a matcher
+	// that never matches, so the literal tool name `{` became unselectable and
+	// `a{b*` turned into an unmatched entry. Those braces must stay literal,
+	// while still matching only the spelling they name.
+	expect(run(["{", "a"], ["{"]).allowed).toEqual(["{"]);
+	expect(run(["a{bX", "aX"], ["a{b*"]).allowed).toEqual(["a{bX"]);
+	expect(run(["a{b", "ab"], ["a{b"]).allowed).toEqual(["a{b"]);
+	expect(run(["}b", "b"], ["}b"]).allowed).toEqual(["}b"]);
+	// Real alternation still works, nesting included.
+	expect(run(["a", "b", "{a,b}"], ["{a,b}"]).allowed).toEqual(["a", "b"]);
+	expect(run(["xay", "xby"], ["x{a,b}y"]).allowed).toEqual(["xay", "xby"]);
+	expect(run(["a", "b", "c"], ["{a,{b,c}}"]).allowed).toEqual(["a", "b", "c"]);
+});
+
 test("POSIX bracket classes expand the way picomatch expands them", () => {
 	// picomatch leaves `posix` on by default, so `[:punct:]` is rewritten to its
 	// table source before compiling and its brackets disappear — `[[:punct:]]`

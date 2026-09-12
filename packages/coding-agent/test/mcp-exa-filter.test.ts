@@ -164,6 +164,27 @@ describe("Exa MCP filtering", () => {
 		expect(Object.keys(result.configs)).toEqual(["exa"]);
 	});
 
+	test("keeps a deny-only exa server unless the denylist denies every name", () => {
+		// The server is mounted for tools the native integration lacks, so a
+		// denylist that leaves any name reachable keeps it — including a broad
+		// pattern like `*probe`, which matches some names but not `web_fetch_exa`.
+		// Only an entry that is built of `*`/`?` and carries a `*` denies them all.
+		for (const disabledTools of [["web_search_exa"], ["*probe"], ["web_*"], ["?*_exa"]]) {
+			const keep = filterExaMCPServers(
+				{ exa: { type: "http", url: "https://mcp.exa.ai/mcp", disabledTools } },
+				{ exa: SOURCE },
+			);
+			expect(Object.keys(keep.configs)).toEqual(["exa"]);
+		}
+		for (const disabledTools of [["*"], ["**"], ["?*"], ["*?"]]) {
+			const drop = filterExaMCPServers(
+				{ exa: { type: "http", url: "https://mcp.exa.ai/mcp", disabledTools } },
+				{ exa: SOURCE },
+			);
+			expect(drop.configs).toEqual({});
+		}
+	});
+
 	test("keeps an exa server restricted only by a denylist", () => {
 		// A denylist selects the complement of what it names, so it always leaves
 		// the server's non-native tools reachable; dropping the server would take

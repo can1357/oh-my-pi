@@ -269,10 +269,19 @@ function getRequestedExaMcpTools(config: MCPServerConfig): string[] | null {
 }
 
 /**
- * A name no real denylist entry targets, used to ask whether a denylist leaves
- * any tool at all: an entry that also denies this probe denies every name.
+ * Does this denylist entry deny every name the server could advertise?
+ *
+ * Recognized structurally rather than by probing one candidate name: `*` and `?`
+ * match any number and exactly one character, so an entry built only from them
+ * that contains at least one `*` matches every non-empty name — `*`, `**`, `?*`,
+ * `*?`. A probe name would answer a different question (does the entry match
+ * *this* name?), so `*probe` would look like deny-all and drop a server whose
+ * non-native tools survive. Patterns outside this shape are left to the
+ * filtering path below, which errs toward keeping the server.
  */
-const DENYLIST_PROBE = "\u0000exa-probe";
+function deniesEveryName(entry: string): boolean {
+	return entry.includes("*") && /^[*?]+$/.test(entry);
+}
 
 /**
  * Does this Exa server still contribute a tool the native integration lacks?
@@ -296,8 +305,9 @@ function keepsExaMCPServer(config: MCPServerConfig): boolean {
 	// otherwise the allowlist it names itself.
 	const pool = requested ?? allowlist;
 	if (pool.length === 0) {
-		if (!config.disabledTools?.length) return false;
-		return filterMCPTools({ toolNames: [DENYLIST_PROBE], disabledTools: config.disabledTools }).allowed.length > 0;
+		const denylist = config.disabledTools ?? [];
+		if (denylist.length === 0) return false;
+		return !denylist.some(deniesEveryName);
 	}
 	const effective = filterMCPTools({
 		toolNames: pool,

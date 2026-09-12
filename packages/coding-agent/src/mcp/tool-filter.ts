@@ -84,11 +84,20 @@ const SLASH_CODE = "§";
 const ESCAPE_MARK = "¤";
 /**
  * Matches exactly one RAW character of an encoded name: one of the two-char
- * escape units (`¤§`, `¤¤`), or any character that is not the escape marker.
- * Written as a group alternation rather than `{…}` so a user's own brace
- * alternation in the same pattern cannot be merged with it by picomatch.
+ * escape units (`¤§`, `¤¤`), or one character that is not the escape marker.
+ *
+ * The non-unit alternatives are spelled per UTF-16 width rather than as the
+ * bare `[^¤]` the encoded domain would suggest. The compiled regex is not a
+ * `u`-mode one (its classes carry picomatch's own Annex-B spellings, which `u`
+ * rejects), so a bare negated class consumes one UTF-16 code unit and a `?`
+ * would claim half of an astral character — `tool_?` missed `tool_😀` while
+ * `tool_??` matched it. One raw character is one BMP character, one surrogate
+ * PAIR, or one UNPAIRED surrogate (the high one only when no low follows, so a
+ * pair can never be consumed as two characters). Written as a group alternation
+ * rather than `{…}` so a user's own brace alternation in the same pattern cannot
+ * be merged with it by picomatch.
  */
-const RAW_CHAR = `(?:${ESCAPE_MARK}${SLASH_CODE}|${ESCAPE_MARK}${ESCAPE_MARK}|[^${ESCAPE_MARK}])`;
+const RAW_CHAR = `(?:${ESCAPE_MARK}${SLASH_CODE}|${ESCAPE_MARK}${ESCAPE_MARK}|[^${ESCAPE_MARK}\\uD800-\\uDFFF]|[\\uD800-\\uDBFF][\\uDC00-\\uDFFF]|[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF])|[\\uDC00-\\uDFFF])`;
 
 /** Translate one literal (non-glob) character into the encoded domain. */
 function translateLiteral(ch: string): string {
@@ -96,6 +105,34 @@ function translateLiteral(ch: string): string {
 	if (ch === SLASH_CODE) return ESCAPE_MARK + SLASH_CODE;
 	if (ch === ESCAPE_MARK) return ESCAPE_MARK + ESCAPE_MARK;
 	return ch;
+}
+
+/**
+ * Locate the `}` closing a `{a,b}` alternation opened at `open`, or -1 when the
+ * braces do not form one.
+ *
+ * Only a brace group that contains a comma at its own nesting level alternates;
+ * `{a}` and `a{b` are literal text with braces, and picomatch itself treats the
+ * unmatched forms as literal only when they do not reach its parser as an
+ * expression. Nested groups count (`{a,{b,c}}` alternates), and `a{b,c}d` does
+ * not alternate because the group is not the whole entry.
+ */
+function findAlternationEnd(pattern: string, open: number): number {
+	let depth = 0;
+	let hasComma = false;
+	for (let i = open; i < pattern.length; i++) {
+		const ch = pattern[i];
+		if (ch === "\\") {
+			i++;
+			continue;
+		}
+		if (ch === "{") depth++;
+		else if (ch === "}") {
+			depth--;
+			if (depth === 0) return hasComma ? i : -1;
+		} else if (ch === "," && depth === 1) hasComma = true;
+	}
+	return -1;
 }
 
 /**
@@ -242,6 +279,9 @@ const NEVER_MATCH = "(?!)";
  */
 function translatePattern(pattern: string): string {
 	let out = "";
+	// Close indices of the alternations emitted so far, so a `}` that terminates
+	// one is not escaped as a literal brace.
+	const openAlternations: number[] = [];
 	for (let i = 0; i < pattern.length; i++) {
 		const ch = pattern[i];
 		if (ch === "\\") {
@@ -262,6 +302,31 @@ function translatePattern(pattern: string): string {
 			if (next === "/" || next === SLASH_CODE || next === ESCAPE_MARK) out += translateLiteral(next);
 			else out += "\\" + next;
 			i++;
+			continue;
+		}
+		if (ch === "{" || ch === "}") {
+			// Only `{a,b}` alternation is special; a brace that does not open such
+			// an expression is an ordinary character. picomatch compiles an
+			// unmatched `{` to a matcher that never matches, so leaving `{` alone
+			// would make the literal tool name `{` unselectable and turn `a{b*`
+			// into an unmatched entry. Escaping the brace keeps it literal.
+			if (ch === "}") {
+				// A `}` closes the alternation opened for it, or is itself literal.
+				if (openAlternations.at(-1) === i) {
+					openAlternations.pop();
+					out += "}";
+				} else {
+					out += "\\}";
+				}
+				continue;
+			}
+			const close = findAlternationEnd(pattern, i);
+			if (close >= 0) {
+				openAlternations.push(close);
+				out += "{";
+			} else {
+				out += "\\{";
+			}
 			continue;
 		}
 		if (ch === "*") {
@@ -346,6 +411,16 @@ const ENCODED_STAR = `(?:${ESCAPE_MARK}${SLASH_CODE}|${ESCAPE_MARK}${ESCAPE_MARK
 const DOT_SEGMENT_GUARDS = ["(?!(?:^|\\/)\\.{1,2}(?:\\/|$))", "(?!\\.{1,2}(?:\\/|$))"] as const;
 
 /**
+ * picomatch's "at least one character here" assertion, removed after compilation.
+ *
+ * The compiler emits `(?=.)` before a star that follows a literal `.` (so `.*`
+ * does not match a bare `.`), carrying over a path-shaped reading of dotfiles.
+ * Tool names are opaque strings and `*` matches zero characters, so `.*` must
+ * address a tool named exactly `.` and `*.*` a name like `report.`.
+ */
+const NONEMPTY_GUARD = "(?=.)";
+
+/**
  * Compile one filter entry into a raw-name matcher.
  *
  * `picomatch.makeRe` is used rather than the matcher factory so the emitted
@@ -367,6 +442,7 @@ function compilePattern(pattern: string): ToolMatcher {
 			// dot-segment guard goes too — MCP tool names are opaque strings.
 			let body = source.source.replaceAll("[^/]*?", ENCODED_STAR);
 			for (const guard of DOT_SEGMENT_GUARDS) body = body.replaceAll(guard, "");
+			body = body.replaceAll(NONEMPTY_GUARD, "");
 			regex = new RegExp(body);
 		} catch {
 			// A syntactically broken pattern never matches: it degrades to an
