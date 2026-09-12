@@ -200,6 +200,39 @@ describe("readSseJson", () => {
 		expect(output).toEqual([{ a: 1 }, { b: 2 }]);
 	});
 
+	it("preserves JSON events with mixed CR, LF, and CRLF framing across every chunk boundary", async () => {
+		const payload = encoder.encode(
+			'data: {"a":"héllo"}\r\r' +
+				"event: ping\rdata:\r\r" +
+				"event: response.output_text.delta\r\n" +
+				"data: {\r" +
+				'data: "type":"response.output_text.delta",\n' +
+				'data: "delta":"world"}\r\n\r\n' +
+				"data: [DONE]\r\r" +
+				'data: {"ignored":true}\n\n',
+		);
+		for (let split = 0; split <= payload.length; split++) {
+			const stream = bytesStreamFromChunks([payload.subarray(0, split), payload.subarray(split)]);
+			const observed: ServerSentEvent[] = [];
+			const output = await collectAsync(readSseJson(stream, undefined, event => observed.push(event)));
+
+			expect(output).toEqual([{ a: "héllo" }, { type: "response.output_text.delta", delta: "world" }]);
+			expect(observed.map(event => event.event)).toEqual([null, "ping", "response.output_text.delta", null]);
+			expect(observed[2].raw).toEqual([
+				"event: response.output_text.delta",
+				"data: {",
+				'data: "type":"response.output_text.delta",',
+				'data: "delta":"world"}',
+			]);
+		}
+	});
+
+	it("surfaces malformed JSON in a CR-dispatched final event", async () => {
+		const stream = bytesStreamFromChunks([encoder.encode('data: {"a":1\r\r')]);
+
+		await expect(collectAsync(readSseJson(stream))).rejects.toThrow(SyntaxError);
+	});
+
 	it("reports raw events to diagnostic observers without changing parsed output", async () => {
 		const stream = bytesStreamFromChunks([
 			encoder.encode('event: message\ndata: {"a":1}\n\n'),

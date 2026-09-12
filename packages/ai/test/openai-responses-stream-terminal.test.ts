@@ -775,6 +775,54 @@ describe("processResponsesStream: reasoning summary recovery", () => {
 		]);
 		expect(emitted.find(event => event.type === "thinking_end")?.content).toBe("Let's check");
 	});
+
+	test("recovers payloadless summary parts and omitted indices across active summary sections", async () => {
+		const output = makeOutput();
+		const deltas: string[] = [];
+		const stream = {
+			push: (event: EmittedEvent) => {
+				if (event.type === "thinking_delta") {
+					const delta = event.delta as string;
+					if (delta.length) deltas.push(delta);
+				}
+			},
+		} as never;
+
+		await processResponsesStream(
+			makeStream([
+				{ type: "response.output_item.added", item: { type: "reasoning", id: "rs_proxy", summary: [] } },
+				{ type: "response.reasoning_summary_part.added" },
+				{ type: "response.reasoning_summary_text.delta" },
+				{ type: "response.reasoning_summary_text.done", text: "First" },
+				{ type: "response.reasoning_summary_part.done" },
+				{ type: "response.reasoning_summary_part.added", part: { type: "summary_text" } },
+				{ type: "response.reasoning_summary_text.delta", delta: "Sec" },
+				{ type: "response.reasoning_summary_text.done", text: "Second" },
+				{ type: "response.output_item.done", item: { type: "reasoning", id: "rs_proxy", summary: [] } },
+				{ type: "response.completed", response: { status: "completed" } },
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+
+		expect(deltas).toEqual(["First", "\n\n", "Sec", "ond"]);
+		expect(output.content).toEqual([expect.objectContaining({ type: "thinking", thinking: "First\n\nSecond" })]);
+	});
+
+	test.each([-1, 0.5, "0"])("rejects malformed summary index %j instead of guessing a section", async summaryIndex => {
+		await expect(
+			processResponsesStream(
+				makeStream([
+					{ type: "response.output_item.added", item: { type: "reasoning", summary: [] } },
+					{ type: "response.reasoning_summary_text.done", summary_index: summaryIndex, text: "Plan" },
+				]),
+				makeOutput(),
+				{ push: () => {} } as never,
+				makeModel(),
+			),
+		).rejects.toBeInstanceOf(TypeError);
+	});
 });
 
 describe("processResponsesStream: lost output_item.added recovery", () => {
@@ -1058,5 +1106,137 @@ describe("processResponsesStream: lost output_item.added recovery", () => {
 
 		expect(onCompletedCalled).toBe(true);
 		expect(output.responseId).toBe("resp_open");
+	});
+});
+
+describe("processResponsesStream: payloadless proxy frames", () => {
+	test.each([
+		{ wireType: "output_text", field: "text", text: "Recovered answer" },
+		{ wireType: "refusal", field: "refusal", text: "Cannot comply" },
+	])("recovers $wireType done snapshots without undefined or duplicate deltas", async ({ wireType, field, text }) => {
+		const output = makeOutput();
+		const deltas: string[] = [];
+		const stream = {
+			push: (event: EmittedEvent) => {
+				if (event.type === "text_delta") {
+					const delta = event.delta as string;
+					if (delta.length) deltas.push(delta);
+				}
+			},
+		} as never;
+		await processResponsesStream(
+			makeStream([
+				{ type: "response.output_item.added", item: { type: "message", id: "msg_proxy", content: [] } },
+				{ type: "response.content_part.added" },
+				{ type: `response.${wireType}.delta` },
+				{ type: `response.${wireType}.done`, [field]: text },
+				{ type: `response.${wireType}.done`, [field]: text },
+				{ type: "response.output_item.done", item: { type: "message", id: "msg_proxy", content: [] } },
+				{ type: "response.completed", response: { status: "completed" } },
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+		expect(deltas).toEqual([text]);
+		expect(output.content).toEqual([expect.objectContaining({ type: "text", text })]);
+	});
+
+	test("keeps function and custom tool snapshots authoritative after missing delta and done payloads", async () => {
+		const output = makeOutput();
+		const deltas: string[] = [];
+		const stream = {
+			push: (event: EmittedEvent) => {
+				if (event.type === "toolcall_delta") {
+					const delta = event.delta as string;
+					if (delta.length) deltas.push(delta);
+				}
+			},
+		} as never;
+		const functionItem = { type: "function_call", id: "fc_proxy", call_id: "call_fn", name: "read" };
+		const customItem = { type: "custom_tool_call", id: "ct_proxy", call_id: "call_custom", name: "patch" };
+		await processResponsesStream(
+			makeStream([
+				{ type: "response.output_item.added", output_index: 0, item: { ...functionItem, arguments: "" } },
+				{ type: "response.function_call_arguments.delta", output_index: 0 },
+				{ type: "response.function_call_arguments.done", output_index: 0 },
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { ...functionItem, arguments: '{"path":"answer.txt"}' },
+				},
+				{ type: "response.output_item.added", output_index: 1, item: { ...customItem, input: "" } },
+				{ type: "response.custom_tool_call_input.delta", output_index: 1, delta: "partial" },
+				{ type: "response.custom_tool_call_input.delta", output_index: 1 },
+				{ type: "response.custom_tool_call_input.done", output_index: 1 },
+				{ type: "response.output_item.done", output_index: 1, item: { ...customItem, input: "complete patch" } },
+				{ type: "response.completed", response: { status: "completed" } },
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+		expect(deltas).toEqual(["partial"]);
+		expect(output.content).toEqual([
+			expect.objectContaining({ type: "toolCall", name: "read", arguments: { path: "answer.txt" } }),
+			expect.objectContaining({ type: "toolCall", name: "patch", arguments: { input: "complete patch" } }),
+		]);
+		expect(output.stopReason).toBe("toolUse");
+	});
+
+	test("ignores missing raw reasoning deltas while retaining the final reasoning snapshot", async () => {
+		const output = makeOutput();
+		const deltas: string[] = [];
+		const stream = {
+			push: (event: EmittedEvent) => {
+				if (event.type === "thinking_delta") {
+					const delta = event.delta as string;
+					if (delta.length) deltas.push(delta);
+				}
+			},
+		} as never;
+		await processResponsesStream(
+			makeStream([
+				{ type: "response.output_item.added", item: { type: "reasoning", id: "rs_raw", summary: [] } },
+				{ type: "response.reasoning_text.delta" },
+				{ type: "response.reasoning_text.delta", delta: "Plan" },
+				{
+					type: "response.output_item.done",
+					item: {
+						type: "reasoning",
+						id: "rs_raw",
+						summary: [],
+						content: [{ type: "reasoning_text", text: "Plan" }],
+					},
+				},
+				{ type: "response.completed", response: { status: "completed" } },
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+		expect(deltas).toEqual(["Plan"]);
+		expect(output.content).toEqual([expect.objectContaining({ type: "thinking", thinking: "Plan" })]);
+	});
+
+	test.each([
+		{ event: "reasoning_summary_text", item: { type: "reasoning", summary: [] } },
+		{ event: "reasoning_text", item: { type: "reasoning", summary: [] } },
+		{ event: "output_text", item: { type: "message", content: [] } },
+		{ event: "refusal", item: { type: "message", content: [] } },
+		{ event: "function_call_arguments", item: { type: "function_call", call_id: "fn", name: "read", arguments: "" } },
+		{ event: "custom_tool_call_input", item: { type: "custom_tool_call", call_id: "ct", name: "patch", input: "" } },
+	])("rejects supplied non-string $event output rather than hiding it", async ({ event, item }) => {
+		await expect(
+			processResponsesStream(
+				makeStream([
+					{ type: "response.output_item.added", item },
+					{ type: `response.${event}.delta`, delta: { text: "not a string" } },
+				]),
+				makeOutput(),
+				{ push: () => {} } as never,
+				makeModel(),
+			),
+		).rejects.toBeInstanceOf(TypeError);
 	});
 });
