@@ -294,4 +294,20 @@ describe("issue #3939 — stt downloads keep the worker referenced", () => {
 			await client.terminate();
 		}
 	});
+
+	it("terminates an otherwise idle worker when a download is aborted", async () => {
+		const requestSent = Promise.withResolvers<void>();
+		const worker = new FakeSttWorker(message => {
+			if (message.type === "download") requestSent.resolve();
+		});
+		const client = new SttClient(() => worker);
+		const abort = new AbortController();
+
+		const download = client.downloadModel("turbo", { signal: abort.signal });
+		await requestSent.promise;
+		abort.abort();
+
+		expect(await download).toEqual({ ok: false });
+		expect(worker.terminated).toBe(true);
+	});
 });

@@ -238,6 +238,11 @@ export class SttClient {
 				if (pending?.kind !== "download") return;
 				this.#deletePending(id);
 				pending.resolve({ ok: false });
+				// Model loaders do not expose a portable AbortSignal (and the
+				// transformers loader is memoized inside the subprocess). Once
+				// this was the worker's last active request, reap the subprocess
+				// so its in-flight fetch/load is actually cancelled.
+				if (this.#pending.size === 0 && this.#streams.size === 0) void this.terminate();
 			};
 			options.signal?.addEventListener("abort", abort, { once: true });
 			try {
