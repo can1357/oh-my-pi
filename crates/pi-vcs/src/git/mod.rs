@@ -269,9 +269,10 @@ fn configured_worktree(git_dir: &Path) -> Option<PathBuf> {
 
 /// Parse `core.worktree` out of git-config text. Sections and keys compare
 /// case-insensitively; subsections (`[core "x"]`) never match; quoted values
-/// unquote, unquoted values drop trailing `#`/`;` comments. Scans the whole
-/// file and keeps the last assignment seen — git's own precedence for a
-/// repeated scalar key — rather than stopping at the first match.
+/// unescape git's backslash escapes, unquoted values drop trailing `#`/`;`
+/// comments. Scans the whole file and keeps the last assignment seen —
+/// git's own precedence for a repeated scalar key — rather than stopping at
+/// the first match.
 fn parse_core_worktree(content: &str) -> Option<String> {
 	let mut in_core = false;
 	let mut worktree = None;
@@ -295,15 +296,41 @@ fn parse_core_worktree(content: &str) -> Option<String> {
 		if !key.trim().eq_ignore_ascii_case("worktree") {
 			continue;
 		}
-		let mut value = value.trim();
-		if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
-			value = value[1..value.len() - 1].trim();
+		let value = value.trim();
+		let value = if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+			unescape_config_value(&value[1..value.len() - 1])
 		} else if let Some(comment) = value.find(['#', ';']) {
-			value = value[..comment].trim_end();
-		}
-		worktree = (!value.is_empty()).then(|| value.to_owned());
+			value[..comment].trim_end().to_owned()
+		} else {
+			value.to_owned()
+		};
+		worktree = if value.is_empty() { None } else { Some(value) };
 	}
 	worktree
+}
+
+/// Unescape a double-quoted git-config value's body: `\\` and `\"` for the
+/// backslash and quote characters the surrounding quotes require escaping,
+/// plus the `\n`/`\t`/`\b` control-character escapes git's own config
+/// parser recognizes. Any other `\x` drops the backslash and keeps `x`
+/// literally, matching git's parser.
+fn unescape_config_value(quoted: &str) -> String {
+	let mut out = String::with_capacity(quoted.len());
+	let mut chars = quoted.chars();
+	while let Some(ch) = chars.next() {
+		if ch != '\\' {
+			out.push(ch);
+			continue;
+		}
+		match chars.next() {
+			Some('n') => out.push('\n'),
+			Some('t') => out.push('\t'),
+			Some('b') => out.push('\u{8}'),
+			Some(escaped) => out.push(escaped),
+			None => {},
+		}
+	}
+	out
 }
 
 /// Lexically normalize `.`/`..` segments without touching the filesystem, so
@@ -420,6 +447,17 @@ mod tests {
 		assert_eq!(
 			parse_core_worktree("[core]\n\tworktree = /wrong\n\tworktree = /main\n"),
 			Some("/main".to_owned())
+		);
+	}
+
+	#[test]
+	fn core_worktree_decodes_quoted_escapes() {
+		// A submodule checkout named `sub"quote` produces this literal text
+		// (verified against real git 2.43): the quote is escaped, and the
+		// backslash preceding it must not survive into the resolved path.
+		assert_eq!(
+			parse_core_worktree("[core]\n\tworktree = \"../../../sub\\\"quote\"\n"),
+			Some(r#"../../../sub"quote"#.to_owned())
 		);
 	}
 }
