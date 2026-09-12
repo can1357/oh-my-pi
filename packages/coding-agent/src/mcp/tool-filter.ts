@@ -87,6 +87,7 @@ const NEUTRALIZE: Record<string, string> = {
 	'"': "\\x22",
 	"(": "\\x28",
 	")": "\\x29",
+	"\u0000": "\\x00",
 };
 
 /** Regex syntax a literal tool-name character must not leave live in the pattern. */
@@ -118,11 +119,17 @@ function parseTokens(pattern: string, options: ParseOptions): Token[] {
 /**
  * Defuse the characters picomatch would read structurally, keeping a user's own
  * escape in front of one meaningful: `\/` and `/` both mean the literal slash.
+ *
+ * A NUL goes last, after the backslash rewrite, because its escape spelling
+ * introduces a backslash of its own. Picomatch silently drops NUL while
+ * tokenizing, so an entry like `*\0` would otherwise compile as a bare `*`
+ * and match every tool.
  */
 function prepare(pattern: string): string {
-	return pattern
+	const neutralized = pattern
 		.replaceAll("\\\\", "\\u005C")
 		.replaceAll(/\\([./|"()])|([./|"()])/g, (_match, escaped: string, bare: string) => NEUTRALIZE[escaped ?? bare]);
+	return neutralized.replaceAll("\u0000", NEUTRALIZE["\u0000"]);
 }
 
 /**

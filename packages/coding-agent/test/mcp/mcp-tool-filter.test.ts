@@ -395,6 +395,20 @@ test("a slash pattern never matches the sentinel character", () => {
 	expect(run(["admin¤delete", "admin§delete"], ["admin§delete"]).allowed).toEqual(["admin§delete"]);
 });
 
+test("a NUL in a pattern addresses a NUL character", () => {
+	// picomatch drops NUL while tokenizing, so `*\0` compiled as a bare `*` and
+	// matched every advertised tool — an allowlist entry meant to select one
+	// name-wide class would over-permit, and the same denylist entry would
+	// exclude everything. Both JSON and the unchecked tool-name type permit the
+	// character, so the pattern must address it rather than lose it.
+	expect(run(["admin\u0000", "admin", "x\u0000"], ["*\u0000"]).allowed).toEqual(["admin\u0000", "x\u0000"]);
+	expect(run(["admin\u0000", "admin"], ["admin\u0000"]).allowed).toEqual(["admin\u0000"]);
+	// The deny direction subtracts exactly the NUL-carrying names.
+	expect(filterMCPTools({ toolNames: ["admin\u0000", "admin"], disabledTools: ["*\u0000"] }).allowed).toEqual([
+		"admin",
+	]);
+});
+
 test("matching is host-independent: windows separators never alter semantics", () => {
 	// picomatch auto-injects `windows: true` on win32 hosts when the option is
 	// unset, making `*`/`?`/negated classes treat `\` as a path separator. Tool
