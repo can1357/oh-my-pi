@@ -5,6 +5,7 @@ import type { Message, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
@@ -56,10 +57,11 @@ function createTool(name: string): AgentTool {
 interface TestSession {
 	session: AgentSession;
 	contexts: Message[][];
+	systemPrompts: string[][];
 	rebuild: Mock<(toolNames: string[]) => Promise<string>>;
 }
 
-function newSession(model: Model): TestSession {
+function newSession(model: Model, options: { beforeAgentStartSystemPrompt?: string[] } = {}): TestSession {
 	const read = createTool("read");
 	const bash = createTool("bash");
 	const toolRegistry = new Map<string, AgentTool>([
@@ -68,6 +70,7 @@ function newSession(model: Model): TestSession {
 	]);
 	const mock = createMockModel({ responses: [{ content: ["ok"] }, { content: ["ok"] }] });
 	const contexts: Message[][] = [];
+	const systemPrompts: string[][] = [];
 	const rebuilder = {
 		async rebuildSystemPrompt(toolNames: string[]): Promise<string> {
 			return `tools:${toolNames.join(",")}`;
@@ -80,6 +83,7 @@ function newSession(model: Model): TestSession {
 		convertToLlm,
 		streamFn: (requestModel, context, streamOptions) => {
 			contexts.push([...context.messages]);
+			systemPrompts.push([...(context.systemPrompt ?? [])]);
 			return mock.stream(requestModel, context, streamOptions);
 		},
 	});
@@ -90,11 +94,17 @@ function newSession(model: Model): TestSession {
 		modelRegistry: { getApiKey: async () => "test-key" } as never,
 		toolRegistry,
 		builtInToolNames: ["read", "bash"],
+		extensionRunner: options.beforeAgentStartSystemPrompt
+			? ({
+					emitBeforeAgentStart: async () => ({ systemPrompt: options.beforeAgentStartSystemPrompt }),
+					emit: async () => undefined,
+				} as unknown as ExtensionRunner)
+			: undefined,
 		rebuildSystemPrompt: async toolNames => ({
 			systemPrompt: [await rebuilder.rebuildSystemPrompt(toolNames)],
 		}),
 	});
-	return { session, contexts, rebuild };
+	return { session, contexts, systemPrompts, rebuild };
 }
 
 function providerText(messages: Message[]): string {
@@ -232,5 +242,38 @@ describe("prefix-bound tool roster changes", () => {
 		expect(notices).toHaveLength(0);
 		const secondRequest = providerText(harness.contexts[1]);
 		expect(secondRequest).not.toContain("Tool availability changed.");
+	});
+
+	it("keeps the roster notice when a turn override hides the rebuilt base", async () => {
+		const override = ["per-turn override prompt"];
+		const harness = newSession(createPrefixBindingModel(), { beforeAgentStartSystemPrompt: override });
+		sessions.push(harness.session);
+		await harness.session.setActiveToolPresentation(["read"], []);
+		await harness.session.prompt("first");
+
+		// A prefix-bound roster change freezes the prompt and queues a hidden delta.
+		await harness.session.setActiveToolPresentation(["read", "bash"], []);
+
+		// A before_agent_start override is active for the turn, so a mid-prompt
+		// rebuild (here a promotion/summary rebuild) re-renders the base but never
+		// puts it on the wire — the override stays. The queued delta must survive
+		// that rebuild so the notice remains the only channel carrying the change.
+		const rebuildDuringCompaction = vi
+			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
+			.mockImplementation(async () => {
+				await harness.session.refreshBaseSystemPrompt();
+			});
+
+		await harness.session.prompt("second");
+
+		expect(rebuildDuringCompaction).toHaveBeenCalledTimes(1);
+		// The provider saw the override, not the rebuilt roster.
+		expect(harness.systemPrompts[1]).toEqual(override);
+		// So the notice must still be delivered.
+		const notices = harness.session.agent.state.messages.filter(
+			message => message.role === "custom" && message.customType === "tool-roster-notice",
+		);
+		expect(notices).toHaveLength(1);
+		expect(providerText(harness.contexts[1])).toContain("Now available: bash.");
 	});
 });

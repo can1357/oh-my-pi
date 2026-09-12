@@ -1090,10 +1090,13 @@ export class SessionTools {
 				this.#lastAppliedToolSignature = rebuiltSignature;
 				this.#promptModelKey = this.#currentPromptModelKey();
 				this.#basePromptXdevNames = new Set(rebuiltXdevCatalogNames);
-				// The rebuilt prompt renders the complete current roster, so any delta
-				// queued by an earlier frozen apply is now subsumed and must not also
-				// ride along as a notice.
-				this.#pendingToolRosterDelta = undefined;
+				// The rebuilt prompt renders the complete current roster, so a delta
+				// queued by an earlier frozen apply is subsumed once that prompt is the
+				// one delivered. A per-turn `before_agent_start` override keeps the
+				// rebuilt base off the wire (see {@link #applyAgentSystemPrompt}), so
+				// keep the delta then — the notice is the only channel carrying the
+				// roster change on this turn.
+				if (this.#turnSystemPromptOverride === undefined) this.#pendingToolRosterDelta = undefined;
 			} else if (frozenSignature) {
 				this.#notifyToolRosterDelta(previousActiveToolNames, appliedNames);
 				this.#lastAppliedToolSignature = frozenSignature;
@@ -1549,8 +1552,11 @@ export class SessionTools {
 		this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 		// An explicit rebuild re-renders the complete current roster, so a delta
 		// queued by an earlier frozen apply (e.g. a Code Mode boundary crossed
-		// mid model-cycle) is subsumed here and must not also surface as a notice.
-		this.#pendingToolRosterDelta = undefined;
+		// mid model-cycle) is subsumed once that base is delivered. A per-turn
+		// `before_agent_start` override keeps the rebuilt base off the wire (see
+		// {@link #applyAgentSystemPrompt}), so keep the delta then so
+		// takePendingToolRosterNotice() still surfaces the change on this turn.
+		if (this.#turnSystemPromptOverride === undefined) this.#pendingToolRosterDelta = undefined;
 		this.#promptModelKey = this.#currentPromptModelKey();
 		// Refresh the cached signature so a subsequent `applyActiveToolsByName` with
 		// the same tool set does not re-rebuild on top of the explicit refresh we
