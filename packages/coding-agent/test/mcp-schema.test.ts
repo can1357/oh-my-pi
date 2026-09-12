@@ -282,4 +282,32 @@ describe("mcp-schema.json", () => {
 			).toBe(false);
 		}
 	});
+
+	// PR #9793 review (Codex, config/mcp-schema.json:115-117): the standalone
+	// mcp.json provider expands env placeholders across the whole server
+	// config (not just `lazy`) before parseMcpBooleanField runs, so
+	// `"enabled": "${MCP_ENABLED}"` already resolves through discovery; the
+	// schema restricted `enabled` to `boolean` and rejected every string form
+	// `lazy` accepts, even though the same parser now handles both fields.
+	test("validates enabled string literals discovery can coerce", () => {
+		for (const enabled of ["true", "false", "1", "0", "${MCP_ENABLED}", "${MCP_ENABLED:-1}"]) {
+			expect(
+				validate({
+					mcpServers: {
+						example: { command: "my-server", enabled },
+					},
+				}),
+			).toBe(true);
+		}
+	});
+
+	test("rejects an enabled string discovery cannot coerce", () => {
+		expect(
+			validate({
+				mcpServers: {
+					example: { command: "my-server", enabled: "yes" },
+				},
+			}),
+		).toBe(false);
+	});
 });
