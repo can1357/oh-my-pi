@@ -1,7 +1,14 @@
-import { type AppKeybinding, type KeybindingsManager, keyHintPlatform, modifierLabel } from "../../config/keybindings";
+import { canonicalKeyId } from "@oh-my-pi/pi-tui";
+import {
+	type AppKeybinding,
+	formatKeyHints,
+	type KeybindingsManager,
+	keyHintPlatform,
+	modifierLabel,
+} from "../../config/keybindings";
 
 export interface HotkeysMarkdownBindings {
-	keybindings: Pick<KeybindingsManager, "getDisplayString">;
+	keybindings: Pick<KeybindingsManager, "getDisplayString" | "getKeys" | "matchesCanonical">;
 }
 
 function appKey(bindings: HotkeysMarkdownBindings, action: AppKeybinding): string {
@@ -13,6 +20,28 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 	const isMac = platform === "darwin";
 	const alt = modifierLabel("alt", platform);
 	const cmd = modifierLabel("super", platform);
+	// CustomEditor tests the chord that was actually pressed, so exit keys split by role: a key
+	// that also carries tui.editor.deleteCharForward (the readline `^D` overlap) forward-deletes
+	// while the prompt holds a draft, any other exit key quits immediately. Mixed bindings such as
+	// `["ctrl+d", "ctrl+q"]` therefore get one row per behavior instead of a single row claiming
+	// both keys delete.
+	const exitKeys = bindings.keybindings.getKeys("app.exit");
+	const deletingExitKeys = exitKeys.filter(key =>
+		bindings.keybindings.matchesCanonical(canonicalKeyId(key), "tui.editor.deleteCharForward"),
+	);
+	const quittingExitKeys = exitKeys.filter(
+		key => !bindings.keybindings.matchesCanonical(canonicalKeyId(key), "tui.editor.deleteCharForward"),
+	);
+	const exitRows: string[] = [];
+	if (deletingExitKeys.length > 0) {
+		exitRows.push(
+			`| \`${formatKeyHints(deletingExitKeys)}\` | Delete char forward (with draft) / exit (empty prompt) |`,
+		);
+	}
+	// An unbound exit action still gets its row, mirroring the `Disabled` hint every other row uses.
+	if (quittingExitKeys.length > 0 || deletingExitKeys.length === 0) {
+		exitRows.push(`| \`${formatKeyHints(quittingExitKeys) || "Disabled"}\` | Exit |`);
+	}
 	return [
 		"**Navigation**",
 		"| Key | Action |",
@@ -39,7 +68,7 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		"| `Tab` | Path completion / accept autocomplete |",
 		`| \`${appKey(bindings, "app.interrupt")}\` | Cancel autocomplete / interrupt active work |`,
 		`| \`${appKey(bindings, "app.clear")}\` | Clear editor (first) / exit (second) |`,
-		`| \`${appKey(bindings, "app.exit")}\` | Exit (saves current prompt as draft) |`,
+		...exitRows,
 		`| \`${appKey(bindings, "app.suspend")}\` | Suspend to background |`,
 		`| \`${appKey(bindings, "app.display.reset")}\` | Reset terminal display |`,
 		`| \`${appKey(bindings, "app.thinking.cycle")}\` | Cycle thinking level |`,

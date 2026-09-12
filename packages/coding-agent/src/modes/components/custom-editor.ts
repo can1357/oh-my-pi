@@ -1156,10 +1156,34 @@ export class CustomEditor extends Editor {
 				return;
 			}
 
-			// Intercept configured exit shortcut. Always consume the shortcut so it
-			// never reaches the parent handler; firing onExit is the controller's
-			// chance to snapshot the current text as a draft before shutting down.
+			// Intercept configured exit shortcut. When the key doubles as
+			// forward-delete (readline ^D: the default app.exit binding overlaps
+			// tui.editor.deleteCharForward) and the buffer is non-empty, perform
+			// the delete here instead of quitting. Invoking the operation directly
+			// — not falling through, not redispatching the raw key — keeps the
+			// exit chord's precedence slot on both sides: a later app action or
+			// extension handler bound to the same chord cannot steal it, and
+			// neither can an earlier base-editor action (e.g. a user-bound
+			// tui.input.submit, which Editor.handleInput checks before
+			// deleteCharForward). Only an empty buffer exits; firing onExit is
+			// the controller's chance to snapshot the current text as a draft
+			// before shutting down. Exit keys with no forward-delete role always
+			// exit. Draft presence is read off the buffer alone: attachments live
+			// as inline chip tokens, while `pendingImages` / `pendingTexts`
+			// intentionally retain deleted records so numbering isn't recycled
+			// (see composerChips) — trusting them would make Ctrl+D a permanent
+			// no-op after the last chip is deleted.
 			if (this.#matchesAction(canonical, "app.exit")) {
+				const doublesAsForwardDelete =
+					canonical !== undefined && getKeybindings().matchesCanonical(canonical, "tui.editor.deleteCharForward");
+				if (doublesAsForwardDelete && !this.textEquals("")) {
+					this.deleteCharForward();
+					// Same post-edit normalization the parent dispatch runs below: an edit that
+					// leaves a bare "->"/"=>" turns it into a reserved queue header, or later
+					// typing lands on the Queueing label instead of the queue body.
+					this.#normalizeQueuePrefix(hadBareQueuePrefix);
+					return;
+				}
 				this.onExit?.();
 				return;
 			}
@@ -1200,11 +1224,17 @@ export class CustomEditor extends Editor {
 
 		// Pass to parent for normal handling
 		super.handleInput(data);
-		if (!hadBareQueuePrefix && (this.textEquals("->") || this.textEquals("=>"))) {
-			const cursor = this.getCursor();
-			if (cursor.line === 0 && cursor.col === 2) {
-				this.insertText("\n");
-			}
+		this.#normalizeQueuePrefix(hadBareQueuePrefix);
+	}
+
+	/** Promote a newly formed bare `->` / `=>` prefix to a reserved header line by opening the
+	 *  queue body beneath it. `hadBareQueuePrefix` is the pre-edit state: a prompt that was
+	 *  already just the prefix is left alone so the user can keep editing it. */
+	#normalizeQueuePrefix(hadBareQueuePrefix: boolean): void {
+		if (hadBareQueuePrefix || !(this.textEquals("->") || this.textEquals("=>"))) return;
+		const cursor = this.getCursor();
+		if (cursor.line === 0 && cursor.col === 2) {
+			this.insertText("\n");
 		}
 	}
 

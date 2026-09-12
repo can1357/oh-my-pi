@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `Editor.deleteCharForward()` exposes the `tui.editor.deleteCharForward` operation to hosts that resolve the chord themselves, applying the same transient-state teardown the key dispatch does (pending character jump, spelling-assist popup) and routing through Vim's `x` in Normal and Visual modes.
+
+### Fixed
+
+- Forward delete no longer leaves the Vim Normal-mode cursor one column past the end of a line after deleting the final grapheme.
+
 ## [18.1.17] - 2026-09-10
 
 ### Added
