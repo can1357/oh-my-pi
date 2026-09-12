@@ -337,4 +337,33 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
 		expect(await drainNudges()).toEqual([]);
 		expect(reminderEvents.length).toBe(1);
 	});
+
+	it.each([false, true])("rearms stop-time reminders after read-only results (isError=%s)", async isError => {
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		emitTextOnlyStop();
+		await session.waitForIdle();
+		emitToolResult("read", { isError });
+		expect(await drainNudges()).toEqual([]);
+		emitTextOnlyStop();
+		await session.waitForIdle();
+		expect(reminderEvents.map(event => event.attempt)).toEqual([1, 2]);
+	});
+
+	it("counts applied AST changes but not previews, discards, or failed applies", async () => {
+		const resolved = (action: "apply" | "discard") => ({
+			xdev: {
+				tool: "resolve",
+				mode: "execute",
+				inner: { action, sourceToolName: "ast_edit", reason: "Review changes" },
+			},
+		});
+		for (let n = 0; n < THRESHOLD; n++) {
+			emitToolResult("write", { details: { xdev: { tool: "ast_edit", mode: "execute" } } });
+			emitToolResult("write", { details: resolved("discard") });
+			emitToolResult("write", { details: resolved("apply"), isError: true });
+		}
+		expect(await drainNudges()).toEqual([]);
+		for (let n = 0; n < THRESHOLD; n++) emitToolResult("write", { details: resolved("apply") });
+		expect((await drainNudges()).map(nudge => nudge.customType)).toEqual([NUDGE_TYPE]);
+	});
 });

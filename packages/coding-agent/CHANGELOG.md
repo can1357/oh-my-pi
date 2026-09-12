@@ -12,10 +12,10 @@
 
 ### Fixed
 
-- Exploration rewind preserves canonical todo updates, including appended tasks, blockers, and explicit clears, through disk reload.
-- Bounded source reads retain their selected lines under a smaller generic artifact-spill policy.
-- Enabled checkpoint and rewind tools expose native schemas; malformed device payloads return their expected schema without execution.
-- Todo reconciliation ignores observational device calls and unknown shell effects, and resets only after canonical todo state changes.
+- Exploration rewind preserves canonical todo updates, including appended tasks, blockers, and explicit clears, through disk reload ([#11885](https://github.com/can1357/oh-my-pi/pull/11885) by [@fatihaziz](https://github.com/fatihaziz)).
+- Bounded source reads retain their selected lines under a smaller generic artifact-spill policy ([#11885](https://github.com/can1357/oh-my-pi/pull/11885) by [@fatihaziz](https://github.com/fatihaziz)).
+- Enabled checkpoint and rewind tools expose native schemas; malformed device payloads return their expected schema without execution ([#11885](https://github.com/can1357/oh-my-pi/pull/11885) by [@fatihaziz](https://github.com/fatihaziz)).
+- Todo mutation accounting distinguishes applied AST edits from previews and observations without disabling stop-time reminders ([#11885](https://github.com/can1357/oh-my-pi/pull/11885) by [@fatihaziz](https://github.com/fatihaziz)).
 - Claude Code session imports now preserve typed user text stored alongside tool results ([#11854](https://github.com/can1357/oh-my-pi/issues/11854)).
 - Extension commands now settle BTW writes before creating, switching, or branching sessions, preventing side requests from outliving their source session ([#11335](https://github.com/can1357/oh-my-pi/pull/11335) by [@Ant39140](https://github.com/Ant39140)).
 - Session selection and active-session deletion now settle BTW writes before switching or removing history, preventing stale saves from blocking the next session ([#11335](https://github.com/can1357/oh-my-pi/pull/11335) by [@Ant39140](https://github.com/Ant39140)).

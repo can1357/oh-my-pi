@@ -300,6 +300,25 @@ describe("ToolCallLoopGuard multi-call turns", () => {
 		}
 	});
 
+	test("productive intervening outcomes prevent stale resource visits accumulating into a loop", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 3, exemptTools: [] });
+		for (let n = 0; n < 8; n++) {
+			expect(guard.recordTurn(observed("config.ts:1-20", "unchanged"))).toBeNull();
+			expect(guard.recordTurn(observed("progress.log:1-20", `completed phase ${n}`))).toBeNull();
+		}
+	});
+
+	test("a new episode must rebuild repetition after an intervening operation", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 3, exemptTools: [] });
+		expect(guard.recordTurn(observed("x.ts:1-20", "unchanged"))).toBeNull();
+		expect(guard.recordTurn(observed("x.ts:1-20", "unchanged"))).toBeNull();
+		expect(guard.recordTurn(observed("x.ts:1-20", "unchanged"))).toMatchObject({ count: 3 });
+		expect(guard.recordTurn(observed("y.ts:1-20", "new evidence"))).toBeNull();
+		expect(guard.recordTurn(observed("x.ts:1-20", "unchanged"))).toBeNull();
+		expect(guard.recordTurn(observed("x.ts:1-20", "unchanged"))).toBeNull();
+		expect(guard.recordTurn(observed("x.ts:1-20", "unchanged"))).toMatchObject({ count: 3 });
+	});
+
 	test("counts consecutive identical multi-call batches toward the threshold", () => {
 		const guard = new ToolCallLoopGuard({ threshold: 3, exemptTools: [] });
 		const batch = () => [toolCall("bash", { command: "echo a" }), toolCall("read", { path: "a.ts" })];

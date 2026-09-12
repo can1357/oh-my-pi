@@ -54,6 +54,8 @@ import { renderError, ToolAbortError, ToolError } from "./tool-errors";
  * (which have no notion of the `xd://` protocol) so hiding it behind dispatch
  * makes it unreachable in practice (issue #5973) — each loses its harness
  * integration or usability if hidden behind dispatch.
+ * `checkpoint` and `rewind` retain native argument schemas so lifecycle control
+ * does not depend on encoding JSON inside the write tool's content string.
  */
 export const XDEV_KEEP_TOP_LEVEL: Record<string, true> = {
 	todo: true,

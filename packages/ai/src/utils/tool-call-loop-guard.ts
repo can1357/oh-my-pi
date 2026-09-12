@@ -68,9 +68,7 @@ function summarizeToolResult(toolResults: readonly ToolResultMessage[], toolCall
 export class ToolCallLoopGuard {
 	#threshold: number;
 	#exemptTools: ReadonlySet<string>;
-	#lastHash: string | undefined;
-	#count = 0;
-	#recent = new Map<string, { outcome: string | undefined; count: number }>();
+	#recent: { hash: string; outcome: string | undefined }[] = [];
 	#warned = false;
 
 	constructor(options: ToolCallLoopGuardOptions) {
@@ -81,17 +79,8 @@ export class ToolCallLoopGuard {
 	/** Records one completed turn and returns the threshold hit, if any. */
 	recordTurn(turn: ToolCallLoopTurn): RepeatedToolCallDetection | null {
 		const toolCalls = turn.message.content.filter((part): part is ToolCall => part.type === "toolCall");
-		if (toolCalls.length === 0) {
-			this.#lastHash = undefined;
-			this.#count = 0;
-			this.#recent.clear();
-			this.#warned = false;
-			return null;
-		}
 		if (toolCalls.every(tc => this.#exemptTools.has(tc.name))) {
-			this.#lastHash = undefined;
-			this.#count = 0;
-			this.#recent.clear();
+			this.#recent.length = 0;
 			this.#warned = false;
 			return null;
 		}
@@ -109,28 +98,38 @@ export class ToolCallLoopGuard {
 		const outcome = outcomes.every(value => value !== undefined)
 			? Bun.hash(outcomes.sort().join("\n")).toString()
 			: undefined;
-		const previous = this.#recent.get(turnHash);
-		const fresh =
-			!previous || (outcome !== undefined && previous.outcome !== undefined && outcome !== previous.outcome);
-		if (fresh) this.#warned = false;
-		const recurring = outcome !== undefined && outcome === previous?.outcome;
-		this.#count =
-			!fresh && (recurring || turnHash === this.#lastHash)
-				? Math.min(this.#threshold, (previous?.count ?? 0) + 1)
-				: 1;
-		this.#lastHash = turnHash;
-		this.#recent.delete(turnHash);
-		this.#recent.set(turnHash, { outcome, count: this.#count });
-		// Bound retained operations by the existing repetition policy, never by session length.
-		if (this.#recent.size > this.#threshold * 2) this.#recent.delete(this.#recent.keys().next().value!);
-
-		if (this.#count !== this.#threshold || this.#warned) return null;
+		this.#recent.push({ hash: turnHash, outcome });
+		// Retain only enough turns to prove cycles bounded by the existing threshold.
+		if (this.#recent.length > this.#threshold * this.#threshold) this.#recent.shift();
+		const end = this.#recent.length;
+		let recurring = false;
+		for (let period = 1; period <= Math.min(this.#threshold, Math.floor(end / this.#threshold)); period++) {
+			recurring = true;
+			for (let index = end - 1; index >= end - period * (this.#threshold - 1); index--) {
+				const current = this.#recent[index]!;
+				const previous = this.#recent[index - period]!;
+				if (
+					current.hash !== previous.hash ||
+					(period > 1 && (current.outcome === undefined || previous.outcome === undefined)) ||
+					(current.outcome !== undefined && previous.outcome !== undefined && current.outcome !== previous.outcome)
+				) {
+					recurring = false;
+					break;
+				}
+			}
+			if (recurring) break;
+		}
+		if (!recurring) {
+			this.#warned = false;
+			return null;
+		}
+		if (this.#warned) return null;
 		this.#warned = true;
 		const reportCall = toolCalls.find(tc => !this.#exemptTools.has(tc.name)) ?? toolCalls[0]!;
 		return {
 			kind: "repeated_tool_call",
 			toolName: reportCall.name,
-			count: this.#count,
+			count: this.#threshold,
 			resultSummary: summarizeToolResult(turn.toolResults, reportCall.id),
 			argumentsSummary: summarizeText(
 				JSON.stringify(canonicalizeToolCallValue(reportCall.arguments)),

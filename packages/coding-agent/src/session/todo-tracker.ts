@@ -6,7 +6,7 @@ import type { Settings } from "../config/settings";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
-import { writeDeviceDispatch } from "../tools/resolve";
+import { resolveDispatchDetails, writeDeviceDispatch } from "../tools/resolve";
 import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
@@ -109,13 +109,17 @@ export class TodoTracker {
 
 	/** Records a completed tool result before asynchronous event processing begins. */
 	onToolResult(toolName: string, isError: boolean, result?: unknown): void {
+		// Stop-time reminders track resumed activity, independently of source mutation accounting.
+		this.#reminderAwaitingProgress = false;
 		if (isError) return;
 		const dispatch = writeDeviceDispatch(toolName, result);
 		// Shell/eval are unknown effects; a write to an observational device is not a file write.
 		const operation = dispatch ? (dispatch.mode === "execute" ? dispatch.tool : undefined) : toolName;
-		if (operation && MUTATING_TOOLS[operation]) {
+		const resolution = resolveDispatchDetails(toolName, result);
+		const appliedAst =
+			dispatch?.mode === "execute" && resolution?.action === "apply" && resolution.sourceToolName === "ast_edit";
+		if ((operation && MUTATING_TOOLS[operation]) || appliedAst) {
 			this.#mutationsSinceLastTouch++;
-			this.#reminderAwaitingProgress = false;
 		}
 	}
 
