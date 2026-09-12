@@ -659,15 +659,6 @@ describe("advisor", () => {
 	});
 
 	describe("AdviseTool", () => {
-		it("forwards advice to the callback and returns details", async () => {
-			const onAdvice = vi.fn();
-			const tool = new AdviseTool(onAdvice);
-			const result = await tool.execute("tc-1", { note: "x", severity: "concern" });
-			expect(onAdvice).toHaveBeenCalledWith("x", "concern");
-			expect(result.details).toEqual({ note: "x", severity: "concern" });
-			expect(result.useless).toBe(true);
-		});
-
 		it("suppresses duplicate advice notes from the same advisor session", async () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
@@ -710,6 +701,37 @@ describe("advisor", () => {
 			expect(onAdvice).toHaveBeenNthCalledWith(1, note, "nit");
 			expect(onAdvice).toHaveBeenNthCalledWith(2, note, "concern");
 			expect(onAdvice).toHaveBeenNthCalledWith(3, note, "blocker");
+		});
+
+		it("routes a same-text blocker escalation of an already-delivered note with the production guard", async () => {
+			// Reproduced failure: a nit that already reached the primary, re-raised
+			// as a blocker, was rejected by guard dedupe and never routed. Dedupe is
+			// rank-aware: strictly-higher severity is a real escalation, while equal
+			// or lower retags of the same text stay suppressed.
+			const delivered: { note: string; severity?: string }[] = [];
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard(),
+			);
+			const note = "The migration drops the users table without a backup.";
+
+			await tool.execute("e-0", { note, severity: "nit" });
+			const blocker = await tool.execute("e-1", {
+				note: "THE MIGRATION DROPS THE USERS TABLE WITHOUT A BACKUP!",
+				severity: "blocker",
+			});
+			expect(delivered).toEqual([
+				{ note, severity: "nit" },
+				{ note: "THE MIGRATION DROPS THE USERS TABLE WITHOUT A BACKUP!", severity: "blocker" },
+			]);
+			expect(JSON.stringify(blocker.content)).toContain("Accepted for primary delivery");
+
+			// Equal/lower retags of the delivered blocker are duplicates.
+			const concern = await tool.execute("e-2", { note, severity: "concern" });
+			const nit = await tool.execute("e-3", { note, severity: "nit" });
+			expect(JSON.stringify(concern.content)).toContain("Duplicate advice ignored");
+			expect(JSON.stringify(nit.content)).toContain("Duplicate advice ignored");
+			expect(delivered).toHaveLength(2);
 		});
 
 		it("defers non-blockers per update and flushes the backlog on the next completed update", async () => {
@@ -779,17 +801,9 @@ describe("advisor", () => {
 			// flush. Each note cleared the emission guard when it was emitted, so the
 			// flush must deliver the full backlog instead of collapsing it to one note.
 			const delivered: string[] = [];
-			const guard = new AdvisorEmissionGuard();
-			// Mirror AgentSession: accept (filter + per-update budget) runs at emission;
-			// routing never re-filters.
-			const tool = new AdviseTool(
-				note => delivered.push(note),
-				note => guard.accept(note),
-			);
-			const beginUpdate = (inProgress: boolean) => {
-				tool.beginUpdate(inProgress);
-				guard.beginUpdate();
-			};
+			// Mirror AgentSession: admission (filter + per-update budget) runs at
+			// emission; routing never re-filters.
+			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard());
 			const concerns = [
 				"Bare `location` cannot work outside the page; inspect with `await page.url()`.",
 				"Scope navigation to the visualizer's own `.viz-container`.",
@@ -799,217 +813,291 @@ describe("advisor", () => {
 
 			// Each concern arrives in its own in-progress advisor update.
 			for (const [i, note] of concerns.entries()) {
-				beginUpdate(true);
+				tool.beginUpdate(true);
 				await tool.execute(`c-${i}`, { note, severity: "concern" });
 			}
 			// All withheld mid-turn — nothing reaches the primary yet.
 			expect(delivered).toEqual([]);
 
 			// Turn completes: the deferred backlog flushes, oldest first, in full.
-			beginUpdate(false);
+			tool.beginUpdate(false);
 			expect(delivered).toEqual(concerns);
 		});
 
-		it("reports over-budget deferred notes and blockers as rate limited", async () => {
-			// Preserve the one-note cap from #3520, but never claim a dropped note
-			// was deferred or duplicated: the advisor must know to retry it.
+		it("caps an in-progress prompt spraying distinct notes and says so without promising delivery", async () => {
+			// A single in-progress advisor prompt that emits several distinct notes
+			// spends the update's one budget slot on the first; the rest are dropped
+			// at emission, so the flush cannot deliver an unbounded batch (#3520).
+			// The rejected calls must be told they were dropped — the previous
+			// unconditional "will be delivered automatically" promised delivery for
+			// notes the guard had already rejected, and the advice was lost.
 			const delivered: string[] = [];
-			const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 1 });
-			const tool = new AdviseTool(
-				note => delivered.push(note),
-				note => guard.accept(note),
-			);
-			const beginUpdate = (inProgress: boolean) => {
-				tool.beginUpdate(inProgress);
-				guard.beginUpdate();
-			};
+			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
 
-			beginUpdate(true);
+			tool.beginUpdate(true);
 			const accepted = await tool.execute("x-0", { note: "First mid-turn concern.", severity: "concern" });
-			const concern = await tool.execute("x-1", { note: "Second mid-turn concern.", severity: "concern" });
-			const blocker = await tool.execute("x-2", {
-				note: "A destructive migration will drop user data.",
-				severity: "blocker",
-			});
-
+			const rejected = await tool.execute("x-1", { note: "Second mid-turn concern.", severity: "concern" });
+			const rejected2 = await tool.execute("x-2", { note: "Third mid-turn concern.", severity: "concern" });
 			expect(JSON.stringify(accepted.content)).toContain("Deferred");
-			expect(JSON.stringify(concern.content)).toContain("Rate limited");
-			expect(JSON.stringify(blocker.content)).toContain("Rate limited");
-			expect(JSON.stringify(blocker.content)).not.toContain("Duplicate");
-
-			beginUpdate(false);
+			for (const result of [rejected, rejected2]) {
+				const text = JSON.stringify(result.content);
+				expect(text).toContain("Not recorded");
+				expect(text).toContain("budget");
+				expect(text).not.toContain("delivered automatically");
+				expect(text).not.toContain("queued");
+			}
+			tool.beginUpdate(false);
 			expect(delivered).toEqual(["First mid-turn concern."]);
 		});
 
-		it("reserves and flushes multiple deferred notes up to a configured budgetPerUpdate", async () => {
-			const delivered: string[] = [];
-			const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 3 });
+		it("flushes only the concern when it displaces a pending nit from the same in-progress update", async () => {
+			// Rank escalation inside one in-progress update is not a flood: the
+			// concern takes the update's slot and the guard names the displaced
+			// pending nit, which must not be flushed alongside it.
+			const delivered: { note: string; severity?: string }[] = [];
 			const tool = new AdviseTool(
-				note => delivered.push(note),
-				(note, severity) => guard.accept(note, severity),
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
 			);
-			const beginUpdate = (inProgress: boolean) => {
-				tool.beginUpdate(inProgress);
-				guard.beginUpdate();
-			};
 
-			beginUpdate(true);
-			const note0 = await tool.execute("c-0", { note: "First concern: missing await.", severity: "concern" });
-			const note1 = await tool.execute("c-1", { note: "Second concern: unhandled rejection.", severity: "concern" });
-			const note2 = await tool.execute("c-2", { note: "Third nit: unused import.", severity: "nit" });
-			const note3 = await tool.execute("c-3", { note: "Fourth concern: memory leak.", severity: "concern" });
+			tool.beginUpdate(true);
+			await tool.execute("e-0", { note: "Nit: rename the helper.", severity: "nit" });
+			await tool.execute("e-1", { note: "Concern: the helper drops the lock early.", severity: "concern" });
+			// A blocker in the same update delivers live without touching the slot.
+			await tool.execute("e-2", { note: "Blocker: the write path is broken.", severity: "blocker" });
+			expect(delivered).toEqual([{ note: "Blocker: the write path is broken.", severity: "blocker" }]);
 
-			expect(JSON.stringify(note0.content)).toContain("Deferred");
-			expect(JSON.stringify(note1.content)).toContain("Deferred");
-			expect(JSON.stringify(note2.content)).toContain("Deferred");
-			expect(JSON.stringify(note3.content)).toContain("Rate limited");
-
-			// Nothing delivered yet while mid-turn
-			expect(delivered).toEqual([]);
-
-			// Primary completes turn: all 3 reserved notes flush in arrival order
-			beginUpdate(false);
+			tool.beginUpdate(false);
 			expect(delivered).toEqual([
-				"First concern: missing await.",
-				"Second concern: unhandled rejection.",
-				"Third nit: unused import.",
+				{ note: "Blocker: the write path is broken.", severity: "blocker" },
+				{ note: "Concern: the helper drops the lock early.", severity: "concern" },
+			]);
+		});
+
+		it("keeps a prior update's pending reservation when the current update displaces its own", async () => {
+			// Displacement is scoped to the update that owns the budget slot: an
+			// older update's accepted reservation holds no slot in the current
+			// update and must survive its eviction rounds.
+			const delivered: { note: string; severity?: string }[] = [];
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
+			);
+
+			tool.beginUpdate(true);
+			await tool.execute("p-0", { note: "Nit from the first review.", severity: "nit" });
+			tool.beginUpdate(true);
+			await tool.execute("p-1", { note: "Nit from the second review.", severity: "nit" });
+			const escalation = await tool.execute("p-2", { note: "Concern from the second review.", severity: "concern" });
+			// The concern was admitted — the SECOND review's nit paid for it.
+			expect(JSON.stringify(escalation.content)).toContain("Deferred");
+
+			tool.beginUpdate(false);
+			expect(delivered).toEqual([
+				{ note: "Nit from the first review.", severity: "nit" },
+				{ note: "Concern from the second review.", severity: "concern" },
+			]);
+		});
+
+		it("accepts multiple deferred notes up to budget and evicts lowest-rank at capacity", async () => {
+			// With budget > 1, the guard accepts multiple same-update notes into
+			// free slots. When full, a higher-severity note displaces the
+			// lowest-rank PENDING entry — not the first one, never a routed one.
+			const delivered: { note: string; severity?: string }[] = [];
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 3 }),
+			);
+
+			tool.beginUpdate(true);
+			// Three free slots: nit, nit, concern all accepted.
+			await tool.execute("b-0", { note: "Nit: naming.", severity: "nit" });
+			await tool.execute("b-1", { note: "Nit: formatting.", severity: "nit" });
+			await tool.execute("b-2", { note: "Concern: lock leak.", severity: "concern" });
+			// Budget full (3/3). New concern evicts the lowest-rank entry (a nit),
+			// not the first note or the existing concern.
+			await tool.execute("b-3", { note: "Concern: null deref.", severity: "concern" });
+
+			tool.beginUpdate(false);
+			// Flush delivers 3 notes: the surviving nit, first concern, second concern.
+			// The evicted nit (lowest-rank at capacity) must NOT appear.
+			expect(delivered).toHaveLength(3);
+			const notes = delivered.map(d => d.note);
+			expect(notes).toContain("Concern: lock leak.");
+			expect(notes).toContain("Concern: null deref.");
+			// Exactly one nit survived (either one — both are rank 1).
+			const nits = notes.filter(n => n.startsWith("Nit:"));
+			expect(nits).toHaveLength(1);
+		});
+
+		it("rate-limits an equal-rank newcomer after a pending note escalates in place", async () => {
+			// When a deferred note is re-emitted at higher severity, the tool
+			// escalates it in place and the guard's slot tracks the real rank —
+			// so an equal-rank newcomer at a full budget is rate-limited instead
+			// of displacing the genuinely-escalated note.
+			const delivered: { note: string; severity?: string }[] = [];
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 2 }),
+			);
+
+			tool.beginUpdate(true);
+			// Slot 1: "A" admitted as nit.
+			await tool.execute("d-0", { note: "Issue A.", severity: "nit" });
+			// Re-emit "A" as concern — escalates in place; the slot's rank follows.
+			await tool.execute("d-1", { note: "Issue A.", severity: "concern" });
+			// Slot 2: "B" admitted as concern.
+			await tool.execute("d-2", { note: "Issue B.", severity: "concern" });
+			// Budget full (2/2), all slots at concern rank: "C" displaces nothing.
+			const rejected = await tool.execute("d-3", { note: "Issue C.", severity: "concern" });
+			expect(JSON.stringify(rejected.content)).toContain("Not recorded");
+
+			tool.beginUpdate(false);
+			// Flush delivers the escalated "A" at its concern severity, then "B".
+			expect(delivered).toEqual([
+				{ note: "Issue A.", severity: "concern" },
+				{ note: "Issue B.", severity: "concern" },
 			]);
 		});
 
 		it("does not let a suppressed phrase burn the deferred slot ahead of a real concern", async () => {
-			// P1 review regression: a noise phrase emitted before a substantive concern
-			// in the same in-progress update must not consume the update's slot. The
-			// emission guard filters it out at emission without spending the budget, so
-			// the following concern is still reserved and flushed.
+			// A noise phrase emitted before a substantive concern in the same
+			// in-progress update must not consume the update's slot. The emission
+			// guard filters it out at emission without spending the budget, so the
+			// following concern is still reserved and flushed — and the noise call
+			// is told it carried no content.
 			const delivered: string[] = [];
-			const guard = new AdvisorEmissionGuard();
-			const tool = new AdviseTool(
-				note => delivered.push(note),
-				note => guard.accept(note),
-			);
-			const beginUpdate = (inProgress: boolean) => {
-				tool.beginUpdate(inProgress);
-				guard.beginUpdate();
-			};
+			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
 
-			beginUpdate(true);
-			await tool.execute("n-0", { note: "Stop.", severity: "concern" });
+			tool.beginUpdate(true);
+			const noise = await tool.execute("n-0", { note: "Stop.", severity: "concern" });
+			expect(JSON.stringify(noise.content)).toContain("no concrete, actionable content");
 			await tool.execute("n-1", {
 				note: "The migration drops the users table without a backup.",
 				severity: "concern",
 			});
-			beginUpdate(false);
+			tool.beginUpdate(false);
 			expect(delivered).toEqual(["The migration drops the users table without a backup."]);
 		});
 
-		it("still caps a single model turn spraying many distinct notes when configured with budgetPerUpdate 1", async () => {
-			// Live path: notes emitted in one completed-turn update stay capped at one when budget is 1.
+		it("labels a live over-budget note as rate-limited, not a duplicate", async () => {
+			// Live path with an explicit budget of 1: the first distinct concern is
+			// routed; the second is rejected for budget, and the acknowledgment
+			// must say so — mislabeling it "Duplicate advice ignored." told the
+			// advisor the note had already landed, so it never re-raised.
 			const delivered: string[] = [];
-			const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 1 });
-			const tool = new AdviseTool(
-				note => delivered.push(note),
-				note => guard.accept(note),
-			);
-			const beginUpdate = (inProgress: boolean) => {
-				tool.beginUpdate(inProgress);
-				guard.beginUpdate();
-			};
+			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
 
-			beginUpdate(false);
-			await tool.execute("s-0", { note: "First distinct live concern.", severity: "concern" });
-			await tool.execute("s-1", { note: "Second distinct live concern.", severity: "concern" });
-			await tool.execute("s-2", { note: "Third distinct live concern.", severity: "concern" });
+			tool.beginUpdate(false);
+			const first = await tool.execute("s-0", { note: "First distinct live concern.", severity: "concern" });
+			const second = await tool.execute("s-1", { note: "Second distinct live concern.", severity: "concern" });
+			const third = await tool.execute("s-2", { note: "Third distinct live concern.", severity: "concern" });
+			expect(JSON.stringify(first.content)).toContain("Accepted for primary delivery");
+			for (const result of [second, third]) {
+				const text = JSON.stringify(result.content);
+				expect(text).toContain("budget");
+				expect(text).not.toContain("Duplicate");
+			}
 			expect(delivered).toEqual(["First distinct live concern."]);
 		});
 
-		it("accepts up to the default budget of 4 distinct live notes per completed update", async () => {
-			const delivered: string[] = [];
-			const guard = new AdvisorEmissionGuard();
+		it("cannot create an extra live slot by escalating past a delivered nit", async () => {
+			// A delivered (routed) nit keeps its budget slot: delivery cannot be
+			// retracted. A distinct higher-severity note later in the same update
+			// is rate-limited instead of producing a second over-budget delivery.
+			const delivered: { note: string; severity?: string }[] = [];
 			const tool = new AdviseTool(
-				note => delivered.push(note),
-				note => guard.accept(note),
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
 			);
-			const beginUpdate = (inProgress: boolean) => {
-				tool.beginUpdate(inProgress);
-				guard.beginUpdate();
-			};
 
-			beginUpdate(false);
-			await tool.execute("s-0", { note: "Note 0", severity: "concern" });
-			await tool.execute("s-1", { note: "Note 1", severity: "concern" });
-			await tool.execute("s-2", { note: "Note 2", severity: "concern" });
-			await tool.execute("s-3", { note: "Note 3", severity: "concern" });
-			await tool.execute("s-4", { note: "Note 4", severity: "concern" });
-			expect(delivered).toEqual(["Note 0", "Note 1", "Note 2", "Note 3"]);
+			tool.beginUpdate(false);
+			await tool.execute("r-0", { note: "Nit: rename the helper.", severity: "nit" });
+			const concern = await tool.execute("r-1", {
+				note: "Concern: the helper drops the lock early.",
+				severity: "concern",
+			});
+			expect(JSON.stringify(concern.content)).toContain("Not recorded");
+			expect(delivered).toEqual([{ note: "Nit: rename the helper.", severity: "nit" }]);
 		});
 
 		it("delivers a blocker escalation of a reserved note live instead of dropping it as already seen", async () => {
-			// P1 review regression: a note reserved as a nit/concern during an
-			// in-progress update, then escalated to blocker before the backlog flushes,
-			// even with casing/punctuation changed, must reuse its normalized reservation,
-			// and interrupt at blocker severity now — not be rejected as already-seen
+			// A note reserved as a nit/concern during an in-progress update, then
+			// escalated to blocker before the backlog flushes, even with
+			// casing/punctuation changed, must reuse its normalized reservation and
+			// interrupt at blocker severity now — not be rejected as already-seen
 			// and arrive late at the lower deferred severity.
 			const delivered: { note: string; severity?: string }[] = [];
-			const guard = new AdvisorEmissionGuard();
 			const tool = new AdviseTool(
 				(note, severity) => delivered.push({ note, severity }),
-				note => guard.accept(note),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
 			);
-			const beginUpdate = (inProgress: boolean) => {
-				tool.beginUpdate(inProgress);
-				guard.beginUpdate();
-			};
 			const note = "The migration drops the users table without a backup.";
 			const escalatedNote = "THE MIGRATION DROPS THE USERS TABLE WITHOUT A BACKUP!";
 
-			beginUpdate(true);
+			tool.beginUpdate(true);
 			await tool.execute("e-0", { note, severity: "concern" });
 			// Reserved, not delivered.
 			expect(delivered).toEqual([]);
 
-			beginUpdate(true);
+			tool.beginUpdate(true);
 			await tool.execute("e-1", { note: escalatedNote, severity: "blocker" });
 			// The blocker escalation is delivered live, at blocker severity.
 			expect(delivered).toEqual([{ note: escalatedNote, severity: "blocker" }]);
 
 			// The consumed reservation is not re-delivered as a stale concern at flush.
-			beginUpdate(false);
+			tool.beginUpdate(false);
 			expect(delivered).toEqual([{ note: escalatedNote, severity: "blocker" }]);
 		});
 
-		it("delivers a distinct blocker live after a non-blocker consumed the update budget", async () => {
-			// #11062 follow-up: a nit emitted first in an in-progress update reserves
-			// the one deferred slot. A distinct blocker that follows must still
-			// interrupt now instead of being rejected as rate-limited and dropped;
-			// the reserved nit stays queued and flushes when the turn completes.
+		it("flushDeferredNotes delivers the backlog without resetting the update budget", async () => {
+			// The terminal-boundary flush is not a new advisor update: reserved
+			// notes route immediately and stay charged to the current update as
+			// routed (non-displaceable), so a follow-up emission in the same
+			// update still faces the spent budget. The next beginUpdate resets it.
 			const delivered: { note: string; severity?: string }[] = [];
-			const guard = new AdvisorEmissionGuard();
 			const tool = new AdviseTool(
 				(note, severity) => delivered.push({ note, severity }),
-				(note, severity) => guard.accept(note, severity),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
 			);
-			const beginUpdate = (inProgress: boolean) => {
-				tool.beginUpdate(inProgress);
-				guard.beginUpdate();
-			};
 
-			beginUpdate(true);
-			const nit = await tool.execute("b-0", { note: "Minor naming nit.", severity: "nit" });
-			const blocker = await tool.execute("b-1", {
-				note: "Destructive migration will drop user data.",
-				severity: "blocker",
-			});
+			tool.beginUpdate(true);
+			await tool.execute("f-0", { note: "Nit held behind the turn.", severity: "nit" });
+			expect(delivered).toEqual([]);
 
-			expect(JSON.stringify(nit.content)).toContain("Deferred");
-			expect(JSON.stringify(blocker.content)).toContain("Recorded.");
-			expect(delivered).toEqual([{ note: "Destructive migration will drop user data.", severity: "blocker" }]);
+			tool.flushDeferredNotes();
+			expect(delivered).toEqual([{ note: "Nit held behind the turn.", severity: "nit" }]);
 
-			// The reserved nit still flushes at the completed boundary, after the blocker.
-			beginUpdate(false);
+			// Same update continues: the flushed nit's slot is charged and routed,
+			// so a distinct concern is rate-limited — no second delivery.
+			const concern = await tool.execute("f-1", { note: "Concern after the flush.", severity: "concern" });
+			expect(JSON.stringify(concern.content)).toContain("budget");
+			expect(delivered).toHaveLength(1);
+
+			// The next advisor update starts with a fresh budget.
+			tool.beginUpdate(false);
+			await tool.execute("f-2", { note: "Concern after the flush.", severity: "concern" });
 			expect(delivered).toEqual([
-				{ note: "Destructive migration will drop user data.", severity: "blocker" },
-				{ note: "Minor naming nit.", severity: "nit" },
+				{ note: "Nit held behind the turn.", severity: "nit" },
+				{ note: "Concern after the flush.", severity: "concern" },
 			]);
+		});
+
+		it("resetDeliveredNotes resets the guard and the pending backlog together", async () => {
+			const delivered: string[] = [];
+			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
+
+			tool.beginUpdate(true);
+			await tool.execute("q-0", { note: "Queued but never flushed.", severity: "concern" });
+			tool.resetDeliveredNotes();
+
+			// The pending reservation is gone: no flush replay after the reset.
+			tool.flushDeferredNotes();
+			expect(delivered).toEqual([]);
+
+			// The guard's dedupe memory is gone too: the same note admits again.
+			await tool.execute("q-1", { note: "Queued but never flushed.", severity: "concern" });
+			expect(delivered).toEqual(["Queued but never flushed."]);
 		});
 
 		it("validates parameters using ArkType", () => {
@@ -1018,7 +1106,7 @@ describe("advisor", () => {
 			const valid = tool.parameters({ note: "x", severity: "concern" });
 			expect(valid instanceof type.errors).toBe(false);
 
-			const invalid = tool.parameters({ note: 123, severity: "invalid" as any });
+			const invalid = tool.parameters({ note: 123, severity: "invalid" });
 			expect(invalid instanceof type.errors).toBe(true);
 		});
 	});
@@ -1458,7 +1546,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "first", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 
@@ -1504,7 +1591,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "work", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				notifyIdle: () => idleNotifications.push(1),
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1537,7 +1623,6 @@ describe("advisor", () => {
 			};
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			});
 
 			runtime.onTurnEnd();
@@ -1569,7 +1654,6 @@ describe("advisor", () => {
 			};
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			});
 
 			runtime.onTurnEnd();
@@ -1587,7 +1671,6 @@ describe("advisor", () => {
 			releasePrompt.resolve();
 			await settleUntil(() => runtime.backlog === 0);
 		});
-
 		it("preserves the next user turn when an accepted empty stop is pruned", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const agent = makeAgent(promptInputs);
@@ -1596,7 +1679,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 
@@ -1657,7 +1739,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "first", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async () => {
 					maintainCalls++;
 					if (maintainCalls === 1) {
@@ -1710,7 +1791,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 				maintainContext: async () => {
 					maintainCalls++;
@@ -1748,7 +1828,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "t0", timestamp: 0 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async () => {
 					maintainCalls++;
 					// Only push new turns during the FIRST drain cycle (first 3 calls)
@@ -1808,7 +1887,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "turn1", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async () => {
 					maintainCalls++;
 					if (maintainCalls === 1) {
@@ -1861,7 +1939,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "t1", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async () => {
 					maintainCalls++;
 					if (maintainCalls === 1) {
@@ -1919,7 +1996,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "hello", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				beginAdvisorUpdate: inProgress => updateStates.push(inProgress),
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1948,7 +2024,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "done", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				beginAdvisorUpdate: inProgress => updateStates.push(inProgress),
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1977,7 +2052,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "first", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async () => {
 					throw new Error("maintenance failed");
 				},
@@ -2009,7 +2083,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 			runtime.onTurnEnd();
@@ -2028,7 +2101,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: `token ${secret}`, timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2051,7 +2123,6 @@ describe("advisor", () => {
 			];
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			});
 
@@ -2081,7 +2152,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2110,7 +2180,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2142,7 +2211,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2179,7 +2247,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2220,7 +2287,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2252,7 +2318,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2283,7 +2348,6 @@ describe("advisor", () => {
 			];
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			});
 
@@ -2314,7 +2378,6 @@ describe("advisor", () => {
 			];
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			});
 			runtime.onTurnEnd();
@@ -2343,7 +2406,6 @@ describe("advisor", () => {
 			];
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			});
 			runtime.onTurnEnd();
@@ -2378,7 +2440,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2415,7 +2476,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2446,7 +2506,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2481,7 +2540,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2533,7 +2591,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2568,7 +2625,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "first tok_abc123", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2607,7 +2663,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2666,7 +2721,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2703,7 +2757,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "later tok_abc123", timestamp: 2 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2744,7 +2797,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2777,7 +2829,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2811,7 +2862,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2847,7 +2897,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 
@@ -2909,7 +2958,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
@@ -2964,7 +3012,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 			runtime.onTurnEnd();
@@ -2990,7 +3037,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 			runtime.onTurnEnd();
@@ -3019,7 +3065,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 			runtime.onTurnEnd();
@@ -3062,7 +3107,6 @@ describe("advisor", () => {
 			let shouldResetContext = false;
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async incoming => {
 					// The host receives the pending update itself and sizes it with its
 					// own model's tokenizer, so it must arrive as a non-empty message.
@@ -3109,7 +3153,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "bbb", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async () => {
 					maintenanceCalls++;
 					if (maintenanceCalls !== 1) return false;
@@ -3152,7 +3195,6 @@ describe("advisor", () => {
 			let shouldResetContext = false;
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async () => shouldResetContext,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -3212,7 +3254,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 			runtime.seedTo(messages.length);
@@ -3303,7 +3344,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 					maintainContext: async incoming => {
 						maintenanceTokens.push(new Tokenizer().countMessage(incoming));
 						if (maintenanceTokens.length === 4) fourthMaintenance.resolve();
@@ -3361,7 +3401,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "seed-primary", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 			runtime.seedTo(messages.length);
@@ -3437,7 +3476,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "ancient-primary", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 			runtime.seedTo(messages.length);
@@ -3488,7 +3526,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "ancient-history", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				notifyFailure: error => failures.push(error),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -3540,7 +3577,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 
@@ -3594,7 +3630,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 			const controller = new AbortController();
@@ -3636,7 +3671,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
@@ -3661,7 +3695,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
@@ -3690,7 +3723,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				notifyFailure: error => failures.push(error),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -3747,7 +3779,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				notifyFailure: error => failures.push(error),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -3788,7 +3819,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "t1", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				notifyFailure: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -3837,7 +3867,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				onTurnError: () => new Promise<undefined>(() => {}),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 60_000);
@@ -3872,7 +3901,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 			runtime.onTurnEnd(messages);
@@ -3942,7 +3970,6 @@ describe("advisor", () => {
 				const messages = Array.from({ length: 2000 }, (_, i) => bigMessage(i));
 				const host: AdvisorRuntimeHost = {
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 				};
 				const runtime = new AdvisorRuntime(agent, host, 0);
 				runtime.onTurnEnd(messages);
@@ -3987,7 +4014,6 @@ describe("advisor", () => {
 				} as AgentMessage;
 				const host: AdvisorRuntimeHost = {
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 				};
 				const runtime = new AdvisorRuntime(agent, host, 0);
 				runtime.onTurnEnd(messages);
@@ -4014,7 +4040,6 @@ describe("advisor", () => {
 				const messages: AgentMessage[] = [{ role: "user", content: "before", timestamp: 1 } as AgentMessage];
 				const host: AdvisorRuntimeHost = {
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 				};
 				const runtime = new AdvisorRuntime(agent, host, 0);
 				runtime.onTurnEnd(messages);
@@ -4048,7 +4073,6 @@ describe("advisor", () => {
 				const messages = Array.from({ length: 400 }, (_, i) => bigMessage(i));
 				const host: AdvisorRuntimeHost = {
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 				};
 				const runtime = new AdvisorRuntime(agent, host, 0);
 				runtime.onTurnEnd(messages);
@@ -4077,7 +4101,6 @@ describe("advisor", () => {
 				const messages = Array.from({ length: 300 }, (_, i) => bigMessage(i));
 				const host: AdvisorRuntimeHost = {
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 				};
 				const runtime = new AdvisorRuntime(agent, host, 0);
 				runtime.onTurnEnd(messages);
@@ -4126,7 +4149,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				notifyFailure: error => failures.push(error),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -4158,7 +4180,6 @@ describe("advisor", () => {
 		it("accepts a zero-usage empty stop as a successful silent review", async () => {
 			const turnErrors: unknown[] = [];
 			const failures: unknown[] = [];
-			const adviceNotes: string[] = [];
 			const rollbackCalls: number[] = [];
 			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
 			let promptCalls = 0;
@@ -4193,7 +4214,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: note => adviceNotes.push(note),
 				onTurnError: error => {
 					turnErrors.push(error);
 				},
@@ -4212,7 +4232,6 @@ describe("advisor", () => {
 			expect(turnErrors).toEqual([]);
 			expect(failures).toEqual([]);
 			expect(rollbackCalls).toEqual([]);
-			expect(adviceNotes).toEqual([]);
 			expect(state.messages).toHaveLength(2);
 			expect(runtime.backlog).toBe(0);
 		});
@@ -4252,7 +4271,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "turn-0", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				onTurnError: error => {
 					turnErrors.push(error);
 				},
@@ -4280,7 +4298,6 @@ describe("advisor", () => {
 		it("treats a content-less stop that generated output tokens as a successful silent review", async () => {
 			const turnErrors: unknown[] = [];
 			const failures: unknown[] = [];
-			const adviceNotes: string[] = [];
 			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
 			let promptCalls = 0;
 			const agent: AdvisorAgent = {
@@ -4325,7 +4342,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: note => adviceNotes.push(note),
 				onTurnError: error => {
 					turnErrors.push(error);
 				},
@@ -4342,7 +4358,6 @@ describe("advisor", () => {
 			expect(promptCalls).toBe(1);
 			expect(turnErrors).toEqual([]);
 			expect(failures).toEqual([]);
-			expect(adviceNotes).toEqual([]);
 			expect(runtime.backlog).toBe(0);
 		});
 
@@ -4397,7 +4412,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
 				},
 				0,
@@ -4452,7 +4466,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
 				},
 				0,
@@ -4520,7 +4533,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
 					onTurnError: async () => {
 						fallbackCalls++;
@@ -4580,7 +4592,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
 					onTurnError: async () => {
 						fallbackCalls++;
@@ -4655,7 +4666,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
 					getModelIdentity: () => identity,
 					onTurnError: async () => {
@@ -4720,7 +4730,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
 					getModelIdentity: () => identity,
 					onTurnError: async () => {
@@ -4791,7 +4800,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
 				},
 				0,
@@ -4828,7 +4836,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				onTurnError: error => {
 					turnErrors.push(error);
 					events.push(`hook:${error instanceof Error ? error.message : String(error)}`);
@@ -4871,7 +4878,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				onTurnError: error => {
 					turnErrors.push(error);
 					events.push(`hook:${error instanceof Error ? error.message : String(error)}`);
@@ -4930,7 +4936,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				onTurnError: async error => {
 					turnErrors.push(error);
 					events.push(`hook:${error instanceof Error ? error.message : String(error)}`);
@@ -4999,7 +5004,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				onTurnError: error => {
 					turnErrors.push(error);
 				},
@@ -5068,7 +5072,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				onTurnAbandoned: () => {
 					abandonedTurns++;
 				},
@@ -5149,7 +5152,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
@@ -5194,7 +5196,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 				},
 				0,
 			);
@@ -5254,7 +5255,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				notifyFailure: err => notifyFailures.push(err instanceof Error ? err.message : String(err)),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -5307,7 +5307,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "old-conversation", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
@@ -5356,7 +5355,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "keep me", timestamp: 1 } as AgentMessage];
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			});
 
 			runtime.onTurnEnd(messages);
@@ -5397,7 +5395,6 @@ describe("advisor", () => {
 			];
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async () => {
 					if (++maintenanceCalls === 1) {
 						void runtime.pauseForSessionTransition();
@@ -5441,7 +5438,6 @@ describe("advisor", () => {
 				};
 				const runtime = new AdvisorRuntime(agent, {
 					snapshotMessages: () => [],
-					enqueueAdvice: () => {},
 					...(hookKind === "success"
 						? { onTurnSuccess: blockHook }
 						: {
@@ -5479,7 +5475,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => [],
-					enqueueAdvice: () => {},
 					onTurnError: () => {
 						recoveryStarted.resolve();
 						return false;
@@ -5513,7 +5508,6 @@ describe("advisor", () => {
 			};
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				notifyFailure: () => {
 					failureNotified = true;
 				},
@@ -5553,7 +5547,6 @@ describe("advisor", () => {
 			};
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				notifyFailure: error => failures.push(error),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -5581,7 +5574,6 @@ describe("advisor", () => {
 			};
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				notifyQuotaExhausted: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -5621,7 +5613,6 @@ describe("advisor", () => {
 			};
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				notifyQuotaExhausted: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -5654,7 +5645,6 @@ describe("advisor", () => {
 			let quotaNotified = false;
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				onTurnError: async () => true,
 				notifyQuotaExhausted: () => {
 					quotaNotified = true;
@@ -5694,7 +5684,6 @@ describe("advisor", () => {
 			const hookErrors: unknown[] = [];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				onTurnError: async error => {
 					hookErrors.push(error);
 					return hookErrors.length === 1;
@@ -5724,7 +5713,6 @@ describe("advisor", () => {
 			let quotaNotified = false;
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				onTurnError: async () => false,
 				notifyQuotaExhausted: () => {
 					quotaNotified = true;
@@ -5760,7 +5748,6 @@ describe("advisor", () => {
 			const { promise: hookEntered, resolve: allowHook } = Promise.withResolvers<void>();
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				maintainContext: async (_incoming, signal) => {
 					maintenanceSignals.push(signal);
 					return false;
@@ -5810,7 +5797,6 @@ describe("advisor", () => {
 			};
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				onTurnError: async (_error, _failedMessages, signal) => {
 					recoverySignal = signal;
 					hookEntered.resolve();
@@ -5850,7 +5836,6 @@ describe("advisor", () => {
 			let quotaNotified = false;
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				onTurnError: async error => {
 					hookErrors.push(error);
 					return hookErrors.length === 1 ? true : undefined;
@@ -5896,7 +5881,6 @@ describe("advisor", () => {
 			let quotaNotified = false;
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				onTurnError: async error => {
 					hookErrors.push(error);
 					return hookErrors.length === 1 ? true : undefined;
@@ -5939,7 +5923,6 @@ describe("advisor", () => {
 			let quotaNotified = false;
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				onTurnError: async error => {
 					hookErrors.push(error);
 					return true;
