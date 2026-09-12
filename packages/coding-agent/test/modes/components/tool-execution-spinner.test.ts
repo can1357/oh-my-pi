@@ -605,7 +605,12 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				hostSocket.send({
 					t: "welcome",
 					proto: COLLAB_PROTO,
-					header: { type: "session", id: "resync-failure-session", timestamp: "2026-06-26T00:00:00Z", cwd: "/tmp" },
+					header: {
+						type: "session",
+						id: "resync-failure-session",
+						timestamp: "2026-06-26T00:00:00Z",
+						cwd: "/tmp",
+					},
 					state: {
 						isStreaming: false,
 						queuedMessageCount: 0,
