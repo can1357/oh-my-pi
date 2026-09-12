@@ -109,6 +109,25 @@ export interface UsageFallbackConfirmation {
  */
 export type UsageFallbackConfirmer = (confirmation: UsageFallbackConfirmation, signal: AbortSignal) => Promise<boolean>;
 
+/**
+ * What {@link AgentSession.reapplyDefaultRoleModel} did about a changed `default`
+ * model role.
+ *
+ * `unchanged` means the role already matched, while `declined` means it was applied
+ * to nothing on purpose: the session's model was chosen deliberately rather than by
+ * the role. The two deferrals apply later, at the next turn boundary and on leaving
+ * plan mode respectively, and `fallback-retargeted` means a live retry cascade will
+ * restore to the new role model instead of the one it started from.
+ */
+export type RoleModelRebindOutcome =
+	| "switched"
+	| "thinking-applied"
+	| "unchanged"
+	| "deferred-turn"
+	| "deferred-plan-mode"
+	| "fallback-retargeted"
+	| "declined";
+
 /** Identifies a retry fallback chain already entered during startup model resolution. */
 export interface InitialRetryFallbackState {
 	/** Role whose configured primary was unavailable. */
@@ -164,6 +183,17 @@ export interface AgentSessionConfig {
 	thinkingLevelCeiling?: Effort;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;
+	/**
+	 * Whether the starting model was selected by the `default` model role, as opposed
+	 * to an explicit `--model` or a restored session's own model.
+	 *
+	 * Only the role case may be rebound when `modelRoles.default` later changes.
+	 * Equality with the role's current model cannot substitute for this: an explicit
+	 * `--model` that happens to match today's default must stay explicit once the
+	 * default moves. Defaults to `false`, so a caller that does not know keeps its
+	 * model.
+	 */
+	modelFromDefaultRole?: boolean;
 	/** Prewalk from the starting model to a fast/cheap target after implementation begins. */
 	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve, then switch to the target. */
