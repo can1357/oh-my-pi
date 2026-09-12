@@ -158,7 +158,11 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 			// Video reads render viewer UI through a separate frame pipeline
 			// that has no lexical render path; a symlink could otherwise route
 			// a text file there with target-named output.
-			isVideoPath(resolved)
+			isVideoPath(resolved) ||
+			// The requested path itself may carry a video extension while the
+			// target does not (or vice versa): classification follows the
+			// lexical path exactly like an ordinary read, so decline either.
+			isVideoPath(resource.path)
 		) {
 			return { allowed: false, reason: "local read target is unsafe" };
 		}
