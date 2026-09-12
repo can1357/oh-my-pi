@@ -474,15 +474,16 @@ export class CollabGuestLink {
 			// takeDisplaceableComponents() above, or a still-animated "waiting" card
 			// would survive the resync with no remaining reference to stop it. A
 			// failed renderInitialMessages() restores the untouched visible
-			// container without disposing its children (its own rollback only
-			// tears down the staged tree that never committed): with no remaining
-			// reference to these blocks, nothing would ever call dispose() on them
-			// again, leaking their shared-ticker registration for the rest of the
-			// process. Stop them in place — the caller's apply-chain catch
-			// preserves the rendered rows, only the ticker registration needs to
-			// go.
+			// container without disposing its children (its own rollback only tears
+			// down the staged tree that never committed), so every orphaned block
+			// here is still a live, rendered row. dispose() would be wrong: it
+			// propagates teardown to a component's own renderer children
+			// (Container.dispose()), releasing resources that row's still-visible
+			// children may use (Codex review on #9377). seal() only unregisters the
+			// shared-ticker registration and stops the animation, leaving the
+			// rendered row and its children intact.
 			for (const handle of orphanedLiveBlocks) {
-				handle.dispose?.();
+				handle.seal();
 			}
 			throw err;
 		}

@@ -826,4 +826,177 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			stopSharedSpinnerTicker();
 		}
 	});
+
+	// Regression (PR #9377 follow-up, codex review): every orphaned block in
+	// this rollback path -- from `pendingTools` or from
+	// `eventController.takeDisplaceableComponents()` -- is still a live,
+	// rendered row in the untouched visible container. Calling `dispose()` on
+	// it propagates teardown to its own renderer children
+	// (`Container.dispose()`), releasing resources a still-visible row's
+	// children may use. Only `seal()`, which stops the shared-ticker
+	// registration without touching children, is safe here.
+	it("seals rather than disposes orphaned blocks when guest resync staging fails", async () => {
+		installInMemoryRelay();
+		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		try {
+			vi.useFakeTimers();
+
+			const chatContainer = new TranscriptContainer();
+			const pendingBlock = new ToolExecutionComponent(
+				"eval",
+				{ language: "py", code: "import time\ntime.sleep(10)" },
+				{},
+				undefined,
+				{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
+				process.cwd(),
+			);
+			chatContainer.addChild(pendingBlock);
+			const displaceableBlock = new ToolExecutionComponent(
+				"eval",
+				{ language: "py", code: "import time\ntime.sleep(10)" },
+				{},
+				undefined,
+				{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
+				process.cwd(),
+			);
+			chatContainer.addChild(displaceableBlock);
+			expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+			const pendingDisposeSpy = spyOn(pendingBlock, "dispose");
+			const displaceableDisposeSpy = spyOn(displaceableBlock, "dispose");
+
+			await Settings.init({ inMemory: true });
+			const ctx = {
+				settings: { get: () => "" },
+				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
+				session: {
+					messages: [],
+					switchSession: () => Promise.resolve(),
+					newSession: () => Promise.resolve(),
+					agent: {
+						state: { model: undefined },
+						setModel: () => {},
+						setThinkingLevel: () => {},
+						setDisableReasoning: () => {},
+					},
+				},
+				statusContainer: { clear: () => {}, disposeChildren: () => {} },
+				pendingMessagesContainer: { clear: () => {}, disposeChildren: () => {} },
+				compactionQueuedMessages: [],
+				streamingComponent: undefined,
+				streamingMessage: undefined,
+				transcriptMessageComponents: new WeakMap(),
+				pendingTools: new Map([["call-1", pendingBlock]]),
+				pendingBashComponents: [],
+				pendingPythonComponents: [],
+				lastAssistantUsage: undefined,
+				initialChatRendered: true,
+				hideToolActivity: false,
+				loadingAnimation: undefined,
+				statusLine: {
+					setCollabStatus: () => {},
+					invalidate: () => {},
+					resetActiveTime: () => {},
+					markActivityStart: () => {},
+					markActivityEnd: () => {},
+				},
+				ui: { requestRender: () => {} },
+				chatContainer,
+				resetObserverRegistry: () => {},
+				eventController: { takeDisplaceableComponents: () => [displaceableBlock] },
+				renderInitialMessages: (options?: { clearTerminalHistory?: boolean }) =>
+					uiHelpers.renderInitialMessages(options),
+				renderSessionContext: (context: unknown, options: unknown) =>
+					(uiHelpers.renderSessionContext as (c: unknown, o: unknown) => void)(context, options),
+				// Fails the staged replay itself, so renderInitialMessages()'s own
+				// rollback runs (restoring the untouched visible container) without
+				// ever reaching the success-path disposeChildren() that would
+				// otherwise unregister the orphaned blocks.
+				renderSessionContextIncrementally: () => Promise.reject(new Error("staged rebuild boom")),
+				viewSession: {
+					isStreaming: false,
+					buildTranscriptSessionContext: () => ({
+						messages: [],
+						thinkingLevel: "off",
+						serviceTier: undefined,
+						models: {},
+						injectedTtsrRules: [],
+						mode: "none",
+					}),
+					getToolByName: () => undefined,
+					hasBuiltInTool: () => true,
+					extensionRunner: undefined,
+					sessionManager: { getEntries: () => [], getCwd: () => "/local" },
+				},
+				reloadTodos: () => Promise.resolve(),
+				showStatus: () => {},
+				showError: () => {},
+				updateEditorTopBorder: () => {},
+				updateEditorBorderColor: () => {},
+				syncRunningSubagentBadge: () => {},
+			} as unknown as InteractiveModeContext;
+			const uiHelpers = new UiHelpers(ctx);
+
+			const roomId = "spinner-resync-seal-room";
+			const roomKey = generateRoomKey();
+			const cryptoKey = await importRoomKey(roomKey);
+			const link = formatCollabLink("ws://localhost:8788", roomId, roomKey);
+			const hostSocket = new CollabSocket({
+				wsUrl: `ws://localhost:8788/r/${roomId}`,
+				role: "host",
+				key: cryptoKey,
+			});
+			const hostOpen = Promise.withResolvers<void>();
+			hostSocket.onOpen = () => hostOpen.resolve();
+			hostSocket.onFrame = frame => {
+				if (frame.t !== "hello") return;
+				hostSocket.send({
+					t: "welcome",
+					proto: COLLAB_PROTO,
+					header: { type: "session", id: "resync-seal-session", timestamp: "2026-06-26T00:00:00Z", cwd: "/tmp" },
+					state: {
+						isStreaming: false,
+						queuedMessageCount: 0,
+						sessionName: "host session",
+						cwd: "/tmp",
+						participants: [{ name: "Host", role: "host" }],
+					},
+					agents: [],
+					entryCount: 0,
+				});
+			};
+			hostSocket.connect();
+			await hostOpen.promise;
+
+			const guest = new CollabGuestLink(ctx);
+			try {
+				let joinError: unknown;
+				try {
+					await guest.join(link);
+				} catch (err) {
+					joinError = err;
+				}
+				expect(joinError).toBeInstanceOf(Error);
+				expect((joinError as Error).message).toContain("staged rebuild boom");
+
+				// Both blocks were stopped in place, not disposed from the tree:
+				// their rendered rows survive the failed resync untouched.
+				expect(chatContainer.children).toContain(pendingBlock);
+				expect(chatContainer.children).toContain(displaceableBlock);
+				// ...but neither holds the shared ticker open any longer.
+				expect(vi.getTimerCount()).toBe(0);
+				// seal(), not dispose(): a rollback-preserved row's own renderer
+				// children must not be torn down.
+				expect(pendingDisposeSpy).not.toHaveBeenCalled();
+				expect(displaceableDisposeSpy).not.toHaveBeenCalled();
+			} finally {
+				hostSocket.close();
+				await guest.leave("test cleanup").catch(() => {});
+			}
+		} finally {
+			writeSpy.mockRestore();
+			uninstallInMemoryRelay();
+			stopSharedSpinnerTicker();
+		}
+	});
 });
