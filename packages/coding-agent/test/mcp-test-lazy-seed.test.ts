@@ -184,7 +184,7 @@ describe("/mcp test seeds first-time lazy servers (PR #9793 review)", () => {
 		vi.spyOn(mcpClient, "disconnectServer").mockImplementation(async () => {
 			order.push("disconnect");
 		});
-		mcpManager.reconnectServer.mockImplementation(async (name: string) => {
+		mcpManager.reconnectServer.mockImplementation(async () => {
 			order.push("reconnect");
 			return {};
 		});
