@@ -159,12 +159,12 @@ export function createSourceMeta(
 	};
 }
 
-export function parseBoolean(value: unknown): boolean | undefined {
+export function parseBoolean(value: unknown, options?: { numeric?: boolean }): boolean | undefined {
 	if (typeof value === "boolean") return value;
 	if (typeof value === "string") {
 		const normalized = value.trim().toLowerCase();
-		if (normalized === "true") return true;
-		if (normalized === "false") return false;
+		if (normalized === "true" || (options?.numeric && normalized === "1")) return true;
+		if (normalized === "false" || (options?.numeric && normalized === "0")) return false;
 	}
 	return undefined;
 }
@@ -186,13 +186,7 @@ export function parseRequestIdFormat(value: unknown): MCPRequestIdFormat | undef
  * default rather than silently taking on the wrong value.
  */
 export function parseMcpBooleanField(value: unknown): boolean | undefined {
-	if (typeof value === "boolean") return value;
-	if (typeof value === "string") {
-		const normalized = value.trim().toLowerCase();
-		if (normalized === "true" || normalized === "1") return true;
-		if (normalized === "false" || normalized === "0") return false;
-	}
-	return undefined;
+	return parseBoolean(value, { numeric: true });
 }
 
 /**
