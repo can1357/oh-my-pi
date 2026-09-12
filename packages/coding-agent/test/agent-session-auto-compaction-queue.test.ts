@@ -501,6 +501,64 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(promptSpy).not.toHaveBeenCalled();
 	});
 
+	it("lets a prompt submitted during the compaction supersede the resume", async () => {
+		// An RPC/SDK prompt sent while a manual compaction runs parks on the cleanup
+		// barrier. It is the user's next intent: it must dispatch once compaction
+		// ends instead of losing the session to the synthetic resume (and, without
+		// a streamingBehavior, surfacing AgentBusyError).
+		session.settings.set("compaction.keepRecentTokens", 1);
+		session.settings.override("compaction.autoContinue", true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		type Dispatched = { role: string; content?: unknown; synthetic?: boolean };
+		const prompted: Dispatched[][] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+		});
+
+		// Park the compaction inside its awaited hook so the prompt below arrives
+		// while it is in flight.
+		const gate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			gate.promise;
+		const compacted = session.compact();
+		while (!getRuntimeSignals().includes("before_compact:enter")) {
+			await Promise.resolve();
+		}
+		const redirected = session.prompt("redirect");
+		gate.resolve();
+		await compacted;
+		await redirected;
+		await session.waitForIdle();
+
+		// Exactly one turn: the user's prompt. No synthetic nudge raced it.
+		expect(prompted).toHaveLength(1);
+		const roles = prompted[0]?.map(message => message.role);
+		expect(roles).toContain("user");
+		expect(prompted[0]?.some(message => message.synthetic === true)).toBe(false);
+	});
+
 	it("cancels an in-flight auto-compaction when manual compact startup aborts", async () => {
 		// Give the branch something to summarize so auto-compaction reaches the
 		// awaited session_before_compact hook, where the test parks it.

@@ -365,6 +365,8 @@ export class SessionMaintenance {
 	#compactionAbortController: AbortController | undefined;
 	/** Resolves after an active manual compaction has reconnected the agent subscription. */
 	#manualCompactionCleanup: Promise<void> | undefined;
+	/** Prompts parked in {@link waitForManualCompactionCleanup}; any waiter supersedes the interrupted-turn resume. */
+	#promptsAwaitingCleanup = 0;
 	#autoCompactionAbortController: AbortController | undefined;
 	/**
 	 * Live tool-loop contexts parked after mid-turn maintenance hit a no-progress
@@ -1226,11 +1228,13 @@ export class SessionMaintenance {
 					this.#manualCompactionCleanup = undefined;
 				}
 				manualCompactionCleanup?.resolve();
-				if (compactionCommitted && resumeInterruptedTurn) {
+				if (compactionCommitted && resumeInterruptedTurn && this.#promptsAwaitingCleanup === 0) {
 					// Same continuation the context-full path uses: a queued steer/follow-up
 					// (drained above) drives the resume, otherwise the auto-continue nudge
 					// does. `terminalTextAnswer` is false by construction — the turn was
-					// cut mid-run, so there is no finished answer to preserve.
+					// cut mid-run, so there is no finished answer to preserve. A prompt
+					// parked on the barrier just resolved is still counted here (its
+					// continuation is a microtask away) and takes the session instead.
 					this.#host.scheduleCompactionContinuation({
 						generation: interruptedTurnGeneration,
 						autoContinue: true,
@@ -1581,13 +1585,23 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Resolves once an in-flight manual compaction has reconnected the agent
-	 * subscription and re-drained its preserved queues; `undefined` when no manual
-	 * compaction is active. Callers that must not start a turn against the
-	 * disconnected session (e.g. ordinary prompts) await this first.
+	 * Park an ordinary prompt until an in-flight manual compaction has reconnected
+	 * the agent subscription and re-drained its preserved queues; returns at once
+	 * when no manual compaction is active. A prompt waiting here is the user's
+	 * next intent, so it supersedes the interrupted-turn resume: the cleanup
+	 * `finally` skips the synthetic continuation while any waiter is parked,
+	 * otherwise the nudge claims the session first and the prompt lands on
+	 * `AgentBusyError`.
 	 */
-	get manualCompactionCleanup(): Promise<void> | undefined {
-		return this.#manualCompactionCleanup;
+	async waitForManualCompactionCleanup(): Promise<void> {
+		const cleanup = this.#manualCompactionCleanup;
+		if (!cleanup) return;
+		this.#promptsAwaitingCleanup++;
+		try {
+			await cleanup;
+		} finally {
+			this.#promptsAwaitingCleanup--;
+		}
 	}
 
 	/** Cancel only automatic maintenance while preserving a manual compaction. */
