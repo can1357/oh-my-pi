@@ -45,6 +45,7 @@ import { replaceFileAtomically } from "../utils/atomic-file";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
 import { stringifyYamlConfig } from "./config-file";
+import { validateAgentServiceTierOverrides } from "./service-tier";
 import {
 	type BashInterceptorRule,
 	type GroupPrefix,
@@ -3108,6 +3109,9 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	},
 	"providers.maxInFlightRequests": value => {
 		configureProviderMaxInFlightRequests(validateProviderMaxInFlightRequests(value));
+	},
+	"task.agentServiceTierOverrides": value => {
+		validateAgentServiceTierOverrides(value);
 	},
 	"secrets.enabled": value => {
 		configureCredentialRedaction(value === true);

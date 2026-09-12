@@ -7,6 +7,9 @@ interface RunnerFrame {
 	id?: string;
 	data?: string;
 	status?: string;
+	revision?: number;
+	digest?: string;
+	admissionRejected?: boolean;
 }
 
 const pythonPath = Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python");
@@ -130,6 +133,151 @@ describe("Python runner request dispatch", () => {
 		}
 	});
 
+	it("preserves cell locals and resets call-site occurrences", async () => {
+		const runner = spawnRunner();
+		const cell = ['path = "cell.txt"', 'tool.read({"path": locals()["path"]})'].join("\n");
+		try {
+			runner.send({
+				id: "setup",
+				code: [
+					"identities = []",
+					"occurrences = {}",
+					"def __omp_reset_call_occurrences__():",
+					"    occurrences.clear()",
+					"def __omp_with_call_site__(site_id, action, args):",
+					"    occurrence = occurrences.get(site_id, 0)",
+					"    occurrences[site_id] = occurrence + 1",
+					"    identities.append((site_id, occurrence, args))",
+					"    return action(args)",
+					"class Tool:",
+					"    def read(self, args):",
+					"        return args['path']",
+					"tool = Tool()",
+				].join("\n"),
+			});
+			await collectDoneOrder(runner, new Set(["setup"]));
+
+			runner.send({ id: "first", code: cell });
+			const [first] = await collectDoneOrder(runner, new Set(["first"]));
+			expect(first.status).toBe("ok");
+			runner.send({ id: "second", code: cell });
+			const [second] = await collectDoneOrder(runner, new Set(["second"]));
+			expect(second.status).toBe("ok");
+
+			runner.send({
+				id: "assert",
+				code: 'assert [identity[1:] for identity in identities] == [(0, {"path": "cell.txt"}), (0, {"path": "cell.txt"})]',
+			});
+			const [assertion] = await collectDoneOrder(runner, new Set(["assert"]));
+			expect(assertion.status).toBe("ok");
+		} finally {
+			await runner.dispose();
+		}
+	});
+
+	it("restores the reserved call-site helper polluted by a retained cell", async () => {
+		const runner = spawnRunner();
+		try {
+			runner.send({
+				id: "setup",
+				code: [
+					"identities = []",
+					"occurrences = {}",
+					"def __omp_reset_call_occurrences__():",
+					"    occurrences.clear()",
+					"def __omp_with_call_site__(site_id, action, args):",
+					"    occurrence = occurrences.get(site_id, 0)",
+					"    occurrences[site_id] = occurrence + 1",
+					"    identities.append((site_id, occurrence, args))",
+					"    return action(args)",
+					"class Tool:",
+					"    def read(self, args):",
+					"        return args['path']",
+					"tool = Tool()",
+				].join("\n"),
+			});
+			await collectDoneOrder(runner, new Set(["setup"]));
+
+			// A retained cell shadows the reserved helper; the cell itself stays
+			// green because instrumentation skips cells that bind the name.
+			runner.send({ id: "pollute", code: "__omp_with_call_site__ = None" });
+			const [polluted] = await collectDoneOrder(runner, new Set(["pollute"]));
+			expect(polluted.status).toBe("ok");
+
+			// The next ordinary read must still resolve the genuine helper
+			// instead of calling the user-controlled None.
+			runner.send({ id: "read", code: 'tool.read({"path": "note.txt"})' });
+			const [read] = await collectDoneOrder(runner, new Set(["read"]));
+			expect(read.status).toBe("ok");
+
+			// Deleting the helper must not break later reads either.
+			runner.send({ id: "delete", code: "del __omp_with_call_site__" });
+			const [deleted] = await collectDoneOrder(runner, new Set(["delete"]));
+			expect(deleted.status).toBe("ok");
+			runner.send({ id: "reread", code: 'tool.read({"path": "note.txt"})' });
+			const [reread] = await collectDoneOrder(runner, new Set(["reread"]));
+			expect(reread.status).toBe("ok");
+
+			runner.send({
+				id: "assert",
+				code: 'assert [identity[2] for identity in identities] == [{"path": "note.txt"}, {"path": "note.txt"}]',
+			});
+			const [assertion] = await collectDoneOrder(runner, new Set(["assert"]));
+			expect(assertion.status).toBe("ok");
+		} finally {
+			await runner.dispose();
+		}
+	});
+
+	it.skipIf(process.platform !== "win32")("handles shadow controls and stale shadow admission", async () => {
+		const runner = spawnRunner();
+		try {
+			runner.send({ id: "seed", code: "window_admission_guard = 1" });
+			await collectDoneOrder(runner, new Set(["seed"]));
+
+			runner.send({ id: "snapshot", type: "shadow_snapshot" });
+			const snapshot = await runner.nextFrame();
+			expect(snapshot).toMatchObject({
+				type: "shadow_snapshot",
+				id: "snapshot",
+				eligible: true,
+			});
+			if (snapshot.revision === undefined || snapshot.digest === undefined) {
+				throw new Error("expected shadow snapshot revision and digest");
+			}
+
+			runner.send({ id: "mutate", code: "window_admission_guard = 2" });
+			await collectDoneOrder(runner, new Set(["mutate"]));
+			runner.send({
+				id: "stale",
+				code: "window_admission_guard = 3",
+				expectedShadowRevision: snapshot.revision,
+				expectedShadowDigest: snapshot.digest,
+			});
+			expect(await runner.nextFrame()).toMatchObject({
+				type: "done",
+				id: "stale",
+				admissionRejected: true,
+			});
+
+			runner.send({ id: "plan", type: "shadow_plan", code: "shadow_control_leak = True" });
+			expect(await runner.nextFrame()).toMatchObject({
+				type: "shadow_plan",
+				id: "plan",
+				eligible: true,
+			});
+
+			runner.send({
+				id: "run",
+				code: "assert window_admission_guard == 2 and 'shadow_control_leak' not in globals()",
+			});
+			const [done] = await collectDoneOrder(runner, new Set(["run"]));
+			expect(done.status).toBe("ok");
+		} finally {
+			await runner.dispose();
+		}
+	});
+
 	it.skipIf(process.platform !== "win32")(
 		"settles requests serially on Windows",
 		async () => {
@@ -181,4 +329,275 @@ describe("Python runner request dispatch", () => {
 		},
 		30_000,
 	);
+	it("plans operations only for awaited tool reads", async () => {
+		// Unawaited `tool.read({...})` never reaches the bridge: the kernel
+		// tool attribute is async, so a bare call only builds a coroutine.
+		// The planner must admit an operation only for the awaited form and
+		// fail closed (barrier, zero operations) otherwise -- a phantom
+		// physical read is planned under the pre-fix implementation, so the
+		// unawaited assertion below fails there.
+		const runner = spawnRunner();
+		try {
+			runner.send({ id: "unawaited", type: "shadow_plan", code: 'result = tool.read({"path": "note.txt"})' });
+			await expect(runner.nextFrame()).resolves.toMatchObject({
+				type: "shadow_plan",
+				id: "unawaited",
+				eligible: true,
+				operations: [],
+				barrier: expect.anything(),
+			});
+
+			runner.send({ id: "awaited", type: "shadow_plan", code: 'result = await tool.read({"path": "note.txt"})' });
+			await expect(runner.nextFrame()).resolves.toMatchObject({
+				type: "shadow_plan",
+				id: "awaited",
+				eligible: true,
+				operations: [expect.anything()],
+				barrier: null,
+			});
+		} finally {
+			await runner.dispose();
+		}
+	});
+
+	it("fails closed when the retained namespace shadows str", async () => {
+		// After an earlier cell binds `str`, name resolution in a later cell
+		// selects the user-owned retained binding, not the builtin -- while
+		// the pre-fix planner only consulted same-cell bindings and still
+		// projected the builtin `Python.str` transform, planning a physical
+		// read that authoritative Python would reject with a TypeError.
+		const runner = spawnRunner();
+		try {
+			runner.send({
+				id: "admitted",
+				type: "shadow_plan",
+				code: 'result = await tool.read({"path": str("secret.txt")})',
+			});
+			expect(await runner.nextFrame()).toMatchObject({
+				type: "shadow_plan",
+				id: "admitted",
+				eligible: true,
+				operations: [expect.anything()],
+				barrier: null,
+			});
+
+			runner.send({ id: "shadow", code: "str = None" });
+			const [shadowed] = await collectDoneOrder(runner, new Set(["shadow"]));
+			expect(shadowed.status).toBe("ok");
+
+			runner.send({
+				id: "rejected",
+				type: "shadow_plan",
+				code: 'result = await tool.read({"path": str("secret.txt")})',
+			});
+			expect(await runner.nextFrame()).toMatchObject({
+				type: "shadow_plan",
+				id: "rejected",
+				eligible: true,
+				operations: [],
+				barrier: expect.anything(),
+			});
+		} finally {
+			await runner.dispose();
+		}
+	});
+
+	it("fails closed when the retained namespace shadows str with a function", async () => {
+		// Function values are never JSON-safe, so a retained `str = lambda ...`
+		// is omitted from the shadow snapshot exactly like an absent binding.
+		// Snapshot absence alone would misread it as the intact builtin and plan
+		// a physical read, while authoritative Python invokes the lambda (here
+		// raising before any bridge call). The planner instead seeds retained
+		// user-namespace bindings and fails closed.
+		const runner = spawnRunner();
+		try {
+			runner.send({ id: "shadow-fn", code: "str = lambda x: 1 / 0" });
+			const [shadowed] = await collectDoneOrder(runner, new Set(["shadow-fn"]));
+			expect(shadowed.status).toBe("ok");
+
+			runner.send({
+				id: "rejected-fn",
+				type: "shadow_plan",
+				code: 'result = await tool.read({"path": str("secret.txt")})',
+			});
+			expect(await runner.nextFrame()).toMatchObject({
+				type: "shadow_plan",
+				id: "rejected-fn",
+				eligible: true,
+				operations: [],
+				barrier: expect.anything(),
+			});
+		} finally {
+			await runner.dispose();
+		}
+	});
+
+	it("fails closed when the retained namespace shadows the tool bridge", async () => {
+		// A retained non-JSON-safe `tool` binding (e.g. `tool = object()`) is
+		// omitted from the shadow snapshot exactly like the genuine prelude
+		// bridge, so snapshot absence alone cannot tell them apart. The
+		// planner must consult the namespace directly and admit speculative
+		// reads only for the marker-tagged (`__omp_tool_bridge__`) genuine
+		// bridge: authoritative execution against the shadow raises
+		// AttributeError before any bridge call, while the pre-fix
+		// `"tool" not in snapshot` check plans a phantom physical read.
+		// Contract note: fakes standing in for the production bridge must
+		// carry the marker to be treated as the genuine bridge (mirroring
+		// the `__omp_tool_bridge__` class attribute on the prelude proxy).
+		const runner = spawnRunner();
+		try {
+			runner.send({ id: "shadow", code: "tool = object()" });
+			const [shadowed] = await collectDoneOrder(runner, new Set(["shadow"]));
+			expect(shadowed.status).toBe("ok");
+
+			runner.send({ id: "rejected", type: "shadow_plan", code: 'result = await tool.read({"path": "note.txt"})' });
+			expect(await runner.nextFrame()).toMatchObject({
+				type: "shadow_plan",
+				id: "rejected",
+				eligible: true,
+				operations: [],
+				barrier: expect.anything(),
+			});
+
+			// Tagged-bridge control: the same shape of binding carrying the
+			// marker (as the production prelude proxy does) still admits.
+			runner.send({
+				id: "retag",
+				code: ["class TaggedTool:", "    __omp_tool_bridge__ = True", "tool = TaggedTool()"].join("\n"),
+			});
+			const [retagged] = await collectDoneOrder(runner, new Set(["retag"]));
+			expect(retagged.status).toBe("ok");
+
+			runner.send({ id: "control", type: "shadow_plan", code: 'result = await tool.read({"path": "note.txt"})' });
+			expect(await runner.nextFrame()).toMatchObject({
+				type: "shadow_plan",
+				id: "control",
+				eligible: true,
+				operations: [expect.anything()],
+				barrier: null,
+			});
+		} finally {
+			await runner.dispose();
+		}
+	});
+
+	it("rejects spoofed bridge markers and invalidates digests on rebinding", async () => {
+		// The marker alone is reproducible by evaluated code, so trust requires
+		// object identity with the first-sighted bridge as well: a later
+		// marker-carrying replacement must fail closed. And since such swaps
+		// leave no JSON-safe trace, the snapshot digest must cover the binding
+		// identity or stale plans would keep verifying.
+		const runner = spawnRunner();
+		try {
+			runner.send({
+				id: "setup",
+				code: ["class TaggedTool:", "    __omp_tool_bridge__ = True", "tool = TaggedTool()"].join("\n"),
+			});
+			await collectDoneOrder(runner, new Set(["setup"]));
+
+			runner.send({ id: "plan1", type: "shadow_plan", code: 'result = await tool.read({"path": "note.txt"})' });
+			const first = await runner.nextFrame();
+			expect(first).toMatchObject({
+				type: "shadow_plan",
+				id: "plan1",
+				eligible: true,
+				operations: [expect.anything()],
+				barrier: null,
+			});
+
+			runner.send({
+				id: "spoof",
+				code: ["class SpoofBridge:", "    __omp_tool_bridge__ = True", "tool = SpoofBridge()"].join("\n"),
+			});
+			await collectDoneOrder(runner, new Set(["spoof"]));
+
+			runner.send({ id: "plan2", type: "shadow_plan", code: 'result = await tool.read({"path": "note.txt"})' });
+			const second = await runner.nextFrame();
+			expect(second).toMatchObject({ type: "shadow_plan", id: "plan2", eligible: true, operations: [] });
+			expect(second.digest).not.toBe(first.digest);
+
+			runner.send({ id: "shadow-str", code: "str = lambda x: 1 / 0" });
+			await collectDoneOrder(runner, new Set(["shadow-str"]));
+
+			runner.send({ id: "plan3", type: "shadow_plan", code: 'result = await tool.read({"path": "note.txt"})' });
+			const third = await runner.nextFrame();
+			expect(third.digest).not.toBe(second.digest);
+		} finally {
+			await runner.dispose();
+		}
+	});
+
+	it("plans zero operations for cells that fail whole-cell compilation", async () => {
+		// `await tool.read({"path": path}); global path` parses with
+		// `ast.parse` but `compile()` rejects it (use-before-global), and
+		// authoritative `_compile_source()` raises SyntaxError before any
+		// bridge call -- while the pre-fix planner admitted the read against
+		// the retained `path`. The shadow path applies the same compile gate
+		// (same filename/mode/flags, so top-level await stays legal) and
+		// fails closed with zero operations plus an invalidating barrier.
+		const runner = spawnRunner();
+		try {
+			runner.send({ id: "seed", code: 'path = "secret.txt"' });
+			const [seeded] = await collectDoneOrder(runner, new Set(["seed"]));
+			expect(seeded.status).toBe("ok");
+
+			runner.send({ id: "valid", type: "shadow_plan", code: 'result = await tool.read({"path": path})' });
+			expect(await runner.nextFrame()).toMatchObject({
+				type: "shadow_plan",
+				id: "valid",
+				eligible: true,
+				operations: [expect.anything()],
+				barrier: null,
+			});
+
+			runner.send({
+				id: "invalid",
+				type: "shadow_plan",
+				code: 'result = await tool.read({"path": path}); global path',
+			});
+			expect(await runner.nextFrame()).toMatchObject({
+				type: "shadow_plan",
+				id: "invalid",
+				eligible: true,
+				operations: [],
+				barrier: expect.anything(),
+			});
+		} finally {
+			await runner.dispose();
+		}
+	});
+	it("plans zero operations when the cell binds the reserved call-site helper", async () => {
+		// Runtime `_compile_source` skips instrumentation for the whole cell
+		// when it binds `__omp_with_call_site__` anywhere, so a speculative
+		// read projected from before the binding would never be claimed by
+		// the authoritative call (file read twice). The planner mirrors the
+		// whole-cell skip and fails closed with zero operations plus an
+		// invalidating barrier.
+		const runner = spawnRunner();
+		try {
+			runner.send({ id: "clean", type: "shadow_plan", code: 'result = await tool.read({"path": "a.txt"})' });
+			expect(await runner.nextFrame()).toMatchObject({
+				type: "shadow_plan",
+				id: "clean",
+				eligible: true,
+				operations: [expect.anything()],
+				barrier: null,
+			});
+
+			runner.send({
+				id: "bound",
+				type: "shadow_plan",
+				code: 'result = await tool.read({"path": "a.txt"})\ndef __omp_with_call_site__(): pass',
+			});
+			expect(await runner.nextFrame()).toMatchObject({
+				type: "shadow_plan",
+				id: "bound",
+				eligible: true,
+				operations: [],
+				barrier: expect.anything(),
+			});
+		} finally {
+			await runner.dispose();
+		}
+	});
 });
