@@ -97,6 +97,18 @@ export interface MnemopiSubprocessEmbeddingModel {
  */
 const EMBED_REQUEST_TIMEOUT_MS = 120_000;
 
+/**
+ * How long an idle worker is kept alive before it is reaped. A session that
+ * embedded once otherwise holds the worker — and its loaded model — for the
+ * rest of its life, and every concurrent session pays that cost again (the
+ * ONNX path measured 0.6–1.7 GB per worker on this box). The protocol is
+ * built for this: every `embed` carries the model + cache dir, so a reaped
+ * worker is respawned and lazily reloaded by the next request, at the cost of
+ * one model load. Kept well above a typical turn gap so interactive use does
+ * not reload per turn.
+ */
+const EMBED_WORKER_IDLE_TTL_MS = 300_000;
+
 /** Race marker for {@link MnemopiEmbedClient.#awaitRequest}. */
 const REQUEST_TIMED_OUT = Symbol("mnemopi.embed.timedOut");
 
@@ -108,13 +120,17 @@ export class MnemopiEmbedClient {
 	#nextRequestId = 0;
 	#spawnWorker: () => MnemopiEmbedWorkerHandle;
 	#requestTimeoutMs: number;
+	#idleTtlMs: number;
+	#idleReapTimer: Timer | null = null;
 
 	constructor(
 		spawnWorker: () => MnemopiEmbedWorkerHandle = spawnMnemopiEmbedWorker,
 		requestTimeoutMs: number = EMBED_REQUEST_TIMEOUT_MS,
+		idleTtlMs: number = EMBED_WORKER_IDLE_TTL_MS,
 	) {
 		this.#spawnWorker = spawnWorker;
 		this.#requestTimeoutMs = requestTimeoutMs;
+		this.#idleTtlMs = idleTtlMs;
 	}
 
 	/**
@@ -140,6 +156,7 @@ export class MnemopiEmbedClient {
 				if (!ok) return null;
 			} finally {
 				this.#pending.delete(id);
+				this.#armIdleReap();
 			}
 		} catch (error) {
 			logger.debug("mnemopi-embed: init failed", {
@@ -152,6 +169,7 @@ export class MnemopiEmbedClient {
 	}
 
 	async terminate(): Promise<void> {
+		this.#clearIdleReap();
 		const worker = this.#worker;
 		this.#worker = null;
 		this.#unsubscribeMessage?.();
@@ -192,7 +210,33 @@ export class MnemopiEmbedClient {
 			return result;
 		} finally {
 			this.#pending.delete(id);
+			this.#armIdleReap();
 		}
+	}
+
+	/**
+	 * Reap the worker once {@link EMBED_WORKER_IDLE_TTL_MS} pass without a
+	 * request. Respawning is the protocol's normal path (every `embed` carries
+	 * the model + cache dir), so this only trades one model load for releasing
+	 * the worker's address space in a session that stopped recalling.
+	 */
+	#armIdleReap(): void {
+		this.#clearIdleReap();
+		const timer = setTimeout(() => {
+			this.#idleReapTimer = null;
+			// A request that started after this timer was armed owns the worker.
+			if (this.#pending.size > 0) return;
+			logger.debug("mnemopi-embed: reaping idle worker", { idleMs: this.#idleTtlMs });
+			void this.terminate();
+		}, this.#idleTtlMs);
+		timer.unref();
+		this.#idleReapTimer = timer;
+	}
+
+	#clearIdleReap(): void {
+		if (this.#idleReapTimer === null) return;
+		clearTimeout(this.#idleReapTimer);
+		this.#idleReapTimer = null;
 	}
 
 	/**
@@ -236,6 +280,7 @@ export class MnemopiEmbedClient {
 	}
 
 	#ensureWorker(): MnemopiEmbedWorkerHandle {
+		this.#clearIdleReap();
 		if (this.#worker) return this.#worker;
 		const worker = this.#spawnWorker();
 		this.#worker = worker;

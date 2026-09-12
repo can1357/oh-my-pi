@@ -579,6 +579,13 @@
 - Fixed a macOS composer display issue where undercurl could remain attached to stale text after rapid typing.
 - Improved `xd://` MCP failure messages with actionable transport stages, failure categories, server and tool context, retryability, trace IDs, and redacted JSON-RPC details.
 - Fixed ACP `read` tool-call locations so clients such as Zed Follow receive the resolved filesystem path rather than the OMP line-range selector.
+### Changed
+
+- The mnemopi embedding worker is now reaped after five idle minutes instead of living as long as the session: a session that stopped recalling releases the worker and its loaded model, and the next recall respawns it and reloads the model. Previously every concurrent session held its own worker for its entire life, measured at 0.6–1.7 GB on the CPU embedding path.
+
+### Fixed
+
+- `bun run build` no longer fails when the ggml embedding backend is present, and compiled binaries can run it: node-llama-cpp is bundled while its per-platform prebuilt llama/ggml libraries stay on disk, found through build-time stand-ins for `@node-llama-cpp/*` and the release manifest the package reads at import time.
 
 ## [18.0.9] - 2026-08-28
 

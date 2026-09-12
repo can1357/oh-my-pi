@@ -1,4 +1,11 @@
-export { configureRecallFeatures, type RecallFeatureFlags } from "../config";
+export {
+	configureRecallFeatures,
+	type EmbeddingBackend,
+	type EmbeddingGpu,
+	embeddingBackend,
+	embeddingGpu,
+	type RecallFeatureFlags,
+} from "../config";
 export * from "./banks";
 export * from "./beam/index";
 export {
@@ -9,6 +16,7 @@ export {
 	type StandardEmbeddingModel,
 	setLocalModelInitializer,
 } from "./embeddings";
+export * from "./ggml-embedding";
 export * from "./memory";
 export {
 	addMemory,

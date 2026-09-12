@@ -169,6 +169,7 @@
 		"check-spoofed-versions": "bun scripts/check-spoofed-versions.ts"
 	},
 	"dependencies": {
+		"node-llama-cpp": "3.20.0",
 		"sherpa-onnx": "1.13.2",
 		"sherpa-onnx-darwin-arm64": "1.13.3",
 		"sherpa-onnx-node": "1.13.2"
