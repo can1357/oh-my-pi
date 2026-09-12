@@ -461,7 +461,32 @@ describe("cloud STT stream", () => {
 
 		await expect(handle.stop()).rejects.toThrow("Cloud transcription failed (502)");
 		expect(cancelled).toBe(true);
-		expect(pulls).toBeLessThanOrEqual(17);
+		// 16 chunks fill the cap, one more proves overflow, one is the stream's own prefetch.
+		expect(pulls).toBeLessThanOrEqual(18);
+	});
+
+	it("rejects an endlessly streaming 200 body instead of buffering it", async () => {
+		// A proxy that streams a "successful" response forever used to be drained
+		// by `response.json()` until the deadline, growing the heap the whole time.
+		let pulls = 0;
+		let cancelled = false;
+		const body = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				pulls += 1;
+				controller.enqueue(new Uint8Array(64 * 1024).fill(0x20));
+			},
+			cancel() {
+				cancelled = true;
+			},
+		});
+		const fetchImpl = (async (_url: string, _init: RequestInit) =>
+			new Response(body, { status: 200, headers: { "Content-Type": "application/json" } })) as typeof fetch;
+		const handle = startCloudSttStream({ credential: { kind: "openai", apiKey: "sk-test" }, fetchImpl });
+		handle.pushAudio(sine16kHz(160));
+
+		await expect(handle.stop()).rejects.toThrow("Cloud transcription response exceeded 1024 KiB.");
+		expect(cancelled).toBe(true);
+		expect(pulls).toBeLessThanOrEqual(18);
 	});
 });
 

@@ -2,6 +2,8 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import {
 	parseJsonlLenient,
+	readBoundedBytes,
+	readBoundedText,
 	readJsonl,
 	readLines,
 	readSseEvents,
@@ -60,6 +62,70 @@ describe("readLines", () => {
 		}
 
 		expect(output).toEqual(["alpha", "beta", "gamma"]);
+	});
+});
+
+describe("readBoundedBytes", () => {
+	function chunked(chunks: Uint8Array[], onCancel?: () => void): ReadableStream<Uint8Array> {
+		return new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const chunk of chunks) controller.enqueue(chunk);
+				controller.close();
+			},
+			cancel: onCancel,
+		});
+	}
+
+	it("cuts at the byte cap mid-chunk and cancels the rest of the source", async () => {
+		let cancelled = false;
+		let pulls = 0;
+		const endless = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				pulls += 1;
+				controller.enqueue(encoder.encode("abcd"));
+			},
+			cancel() {
+				cancelled = true;
+			},
+		});
+
+		const { value, truncated } = await readBoundedBytes(endless, 6);
+
+		expect(new TextDecoder().decode(value)).toBe("abcdab");
+		expect(truncated).toBe(true);
+		expect(cancelled).toBe(true);
+		expect(pulls).toBeLessThanOrEqual(3);
+	});
+
+	it("does not report truncation when the source ends exactly at the cap", async () => {
+		let cancelled = false;
+		const { value, truncated } = await readBoundedBytes(
+			chunked([encoder.encode("abc"), encoder.encode("def")], () => {
+				cancelled = true;
+			}),
+			6,
+		);
+
+		expect(new TextDecoder().decode(value)).toBe("abcdef");
+		expect(truncated).toBe(false);
+		expect(cancelled).toBe(false);
+	});
+
+	it("reads a bodiless response as empty", async () => {
+		const { value, truncated } = await readBoundedBytes(new Response(null, { status: 204 }).body, 16);
+		expect(value.byteLength).toBe(0);
+		expect(truncated).toBe(false);
+	});
+
+	it("decodes multi-byte text split across chunk boundaries intact", async () => {
+		const bytes = encoder.encode("héllo wörld");
+		// Split inside the two-byte "é" (bytes 1-2) and inside "ö".
+		const stream = chunked([bytes.subarray(0, 2), bytes.subarray(2, 9), bytes.subarray(9)]);
+
+		const { value, truncated } = await readBoundedText(stream, 1024);
+
+		expect(value).toBe("héllo wörld");
+		expect(truncated).toBe(false);
 	});
 });
 

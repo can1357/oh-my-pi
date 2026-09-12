@@ -2,7 +2,7 @@
  * Shared types and utilities for web-fetch handlers
  */
 import { scheduler } from "node:timers/promises";
-import { ptree } from "@oh-my-pi/pi-utils";
+import { ptree, readBoundedBytes } from "@oh-my-pi/pi-utils";
 import type TurndownService from "@oh-my-pi/pi-utils/turndown";
 
 import type { AgentStorage } from "../../session/agent-storage";
@@ -113,12 +113,14 @@ function charsetFromContentType(header: string): string | undefined {
  * Decode a response body honoring the declared charset (Content-Type header,
  * then a cheap <meta charset> sniff), falling back to UTF-8.
  */
-function decodeBody(bytes: Buffer, contentTypeHeader: string): string {
+function decodeBody(bytes: Uint8Array, contentTypeHeader: string): string {
 	let label = charsetFromContentType(contentTypeHeader);
 	if (!label) {
 		// All charsets we can decode are ASCII-compatible in the prefix, so a
 		// latin1 view of the first 2KB is enough to find a <meta charset>.
-		label = /<meta[^>]+charset\s*=\s*["']?([\w-]+)/i.exec(bytes.subarray(0, 2048).toString("latin1"))?.[1];
+		label = /<meta[^>]+charset\s*=\s*["']?([\w-]+)/i.exec(
+			new TextDecoder("latin1").decode(bytes.subarray(0, 2048)),
+		)?.[1];
 	}
 	if (label && !/^utf-?8$/i.test(label)) {
 		try {
@@ -129,7 +131,7 @@ function decodeBody(bytes: Buffer, contentTypeHeader: string): string {
 			// Unknown/unsupported label — fall back to UTF-8.
 		}
 	}
-	return bytes.toString("utf-8");
+	return new TextDecoder().decode(bytes);
 }
 
 /**
@@ -193,30 +195,12 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 				return { content: "", contentType, finalUrl, ok: true, status: response.status, bodySkipped: true };
 			}
 
-			const reader = response.body?.getReader();
-			if (!reader) {
+			if (!response.body) {
 				return { content: "", contentType, finalUrl, ok: false, status: response.status };
 			}
 
-			const chunks: Uint8Array[] = [];
-			let totalSize = 0;
-			let truncated = false;
-
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-
-				chunks.push(value);
-				totalSize += value.length;
-
-				if (totalSize > maxBytes) {
-					truncated = true;
-					void reader.cancel().catch(() => {});
-					break;
-				}
-			}
-
-			const content = decodeBody(Buffer.concat(chunks), rawContentType);
+			const { value: bytes, truncated } = await readBoundedBytes(response.body, maxBytes, requestSignal);
+			const content = decodeBody(bytes, rawContentType);
 			if (isBotBlocked(response.status, content) && attempt < USER_AGENTS.length - 1) {
 				continue;
 			}

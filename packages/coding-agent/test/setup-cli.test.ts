@@ -185,6 +185,22 @@ describe("omp setup speech", () => {
 		expect(download).toHaveBeenCalledWith("fast", expect.any(Function));
 	});
 
+	it("reports the local model actually probed when stt.modelName holds a cloud id", async () => {
+		// `--check`/`--json` never run the picker, so a cloud id lingers in
+		// `stt.modelName` after the credential goes away. The local path resolves
+		// it onto the default spec; the status must name that model, not the
+		// remote id it neither probed nor could download.
+		settings.set("stt.modelName", "gpt-4o-mini-transcribe");
+		const cached = vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		const stt = buildSpeechComponents(Promise.resolve(false))[0]!;
+
+		expect(await stt.status()).toBe("parakeet");
+		expect(cached).toHaveBeenLastCalledWith("parakeet");
+
+		cached.mockResolvedValue(false);
+		expect(await stt.status()).toBe("parakeet — local fallback not downloaded");
+	});
+
 	it("offers local fallback models when cloud credentials are unavailable", async () => {
 		const picker = vi.spyOn(setupModelPicker, "selectSetupModel").mockResolvedValue("turbo");
 		const stt = buildSpeechComponents(Promise.resolve(false))[0]!;
