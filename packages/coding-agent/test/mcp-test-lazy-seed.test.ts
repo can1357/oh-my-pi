@@ -170,4 +170,27 @@ describe("/mcp test seeds first-time lazy servers (PR #9793 review)", () => {
 		expect(mcpManager.reconnectServer).toHaveBeenCalledWith("lazysrv");
 		expect(refreshMCPTools).toHaveBeenCalledWith([{ name: "fresh_tool", mcpServerName: "lazysrv" }]);
 	});
+
+	// PR #9793 review (Codex, mcp-command-controller.ts:1330): a server that
+	// permits only one active client would see this temporary test connection
+	// still open while the manager's seeding reconnect races it for the same
+	// slot, and every retry in its ladder could fail.
+	test("closes the test connection before seeding through the manager", async () => {
+		await writeProjectConfig(projectDir, {
+			lazysrv: { type: "stdio", command: "lazy-cmd", lazy: true },
+		});
+		const { controller, mcpManager } = createController();
+		const order: string[] = [];
+		vi.spyOn(mcpClient, "disconnectServer").mockImplementation(async () => {
+			order.push("disconnect");
+		});
+		mcpManager.reconnectServer.mockImplementation(async (name: string) => {
+			order.push("reconnect");
+			return {};
+		});
+
+		await controller.handle("/mcp test lazysrv");
+
+		expect(order).toEqual(["disconnect", "reconnect"]);
+	});
 });
