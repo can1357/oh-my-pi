@@ -212,6 +212,17 @@ test("`?` matches one raw character, astral ones included", () => {
 	expect(run(["😀", "😀x", "a/b"], ["*"]).allowed).toEqual(["😀", "😀x", "a/b"]);
 });
 
+test("a double quote stays an ordinary character", () => {
+	// picomatch's parser reads a bare `"` as a quote and derails: `*"` compiled
+	// as a bare `*` and matched everything, `"*` compiled to a never-match. It is
+	// escaped so both spell the literal.
+	expect(run(['x"', '"', "x"], ['*"']).allowed).toEqual(['x"', '"']);
+	expect(run(['x"', "x"], ['?"']).allowed).toEqual(['x"']);
+	expect(run(['"', "x"], ['"*']).allowed).toEqual(['"']);
+	expect(run(['x"', '"', "a"], ['"']).allowed).toEqual(['"']);
+	expect(run(['a"b', "ab"], ['a"b']).allowed).toEqual(['a"b']);
+});
+
 test("a class body keeps the engine's own reading of its members", () => {
 	// Class bodies are compiled verbatim with the regex engine as the membership
 	// oracle, which is what makes escapes, ranges and Annex-B corners come out

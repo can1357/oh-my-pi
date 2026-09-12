@@ -362,7 +362,18 @@ function translatePattern(pattern: string): string {
 			out += RAW_CHAR;
 			continue;
 		}
-		if (ch === "(" || ch === ")" || ch === "|" || ch === "+" || ch === "@" || ch === "!") {
+		if (
+			ch === "(" ||
+			ch === ")" ||
+			ch === "|" ||
+			ch === "+" ||
+			ch === "@" ||
+			ch === "!" ||
+			// `"` is an ordinary character, but picomatch's parser reads it as a
+			// quote and derails: `*"` compiles as a bare `*` (matching everything)
+			// and `"*` as a never-match. Escaped, both spell the literal.
+			ch === '"'
+		) {
 			// Escaped so grouping, alternation and extglob prefixes stay literal
 			// even beside a wildcard: `+(a|b)*` matches the literal `+(a|b)foo`,
 			// not `+afoo`. `+` is escaped unconditionally because the emitted
