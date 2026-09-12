@@ -14,12 +14,24 @@ import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
+import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { resolveEffectiveSubagentPolicy } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 const tempDirs: TempDir[] = [];
+
+/** Matches `DEFAULT_SPAWN_AGENT` — the agent an unqualified `task` spawn resolves to. */
+const TASK_AGENT: AgentDefinition = {
+	name: "task",
+	description: "Default spawn agent",
+	systemPrompt: "Do the assigned work.",
+	source: "bundled",
+};
 
 function makeTempDir(prefix: string): string {
 	const dir = TempDir.createSync(prefix);
@@ -682,14 +694,33 @@ describe("persisted subagent revival", () => {
 
 	it("stops the depth walk at any unregistered family root, not just the literal MAIN_AGENT_ID", async () => {
 		AgentRegistry.resetGlobalForTests();
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [TASK_AGENT], projectAgentsDir: null });
 		const cwd = makeTempDir("@pi-revive-acp-depth-");
 		const mainChildFile = await createPersistedSession(cwd);
 		const acpChildFile = await createPersistedSession(cwd);
 		const acpGrandchildFile = await createPersistedSession(cwd);
 		const capturedDepths: Record<string, number> = {};
+		const revivedSessions: Record<string, ToolSession> = {};
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedDepths[options?.agentId ?? "?"] = options?.taskDepth ?? -1;
-			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+			const agentId = options?.agentId ?? "?";
+			capturedDepths[agentId] = options?.taskDepth ?? -1;
+			// A full `ToolSession`, not just the constructor args the mock
+			// received: `resolveEffectiveSubagentPolicy` below reads the
+			// revived session's OWN `taskDepth` field, exactly like the real
+			// spawn-preflight path does, so this proves the depth cold revival
+			// computed actually gates that agent's own descendant spawns —
+			// not merely that some number was passed to `createAgentSession`.
+			const session = {
+				...createRevivedSession([]).session,
+				cwd,
+				hasUI: false,
+				taskDepth: options?.taskDepth ?? 0,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				settings: Settings.isolated({ "task.maxRecursionDepth": 2 }),
+			} as unknown as AgentSession;
+			revivedSessions[agentId] = session as unknown as ToolSession;
+			return { session } as CreateAgentSessionResult;
 		});
 
 		// Direct child of the literal "Main" root (`createRef` defaults `parentId` to `MAIN_AGENT_ID`).
@@ -731,6 +762,28 @@ describe("persisted subagent revival", () => {
 		expect(capturedDepths["persisted-restricted"]).toBe(1);
 		expect(capturedDepths.AcpChild).toBe(1);
 		expect(capturedDepths.AcpGrandchild).toBe(2);
+
+		// The consumer-visible contract these depths exist to protect: a direct
+		// ACP child (depth 1, below the default max of 2) can still spawn its
+		// own child through the SAME effective-policy path a real `task` tool
+		// call resolves against, while THAT child's own child (depth 2, at the
+		// max) is refused. Asserting on `capturedDepths` alone would keep
+		// passing even if this wiring broke — the depth computed at revival
+		// time never actually reached the gate a real spawn checks.
+		await expect(
+			resolveEffectiveSubagentPolicy({
+				session: revivedSessions.AcpChild,
+				invocationKind: "task",
+				assignment: "spawn a further child",
+			}),
+		).resolves.toMatchObject({ agentName: "task" });
+		await expect(
+			resolveEffectiveSubagentPolicy({
+				session: revivedSessions.AcpGrandchild,
+				invocationKind: "task",
+				assignment: "spawn a further child",
+			}),
+		).rejects.toThrow("Cannot spawn another agent at task depth 2; maximum depth is 2.");
 		AgentRegistry.resetGlobalForTests();
 	});
 
