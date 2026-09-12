@@ -74,7 +74,8 @@ function resolveState(
  */
 export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): Promise<Extension[]> {
 	const extensions: Extension[] = [];
-	const disabledExtensions = new Set<string>(disabledIds ?? []);
+	const effectiveDisabledIds = disabledIds ?? [];
+	const disabledExtensions = new Set<string>(effectiveDisabledIds);
 
 	// Helper to convert capability items to extensions
 	function addItems<T extends { name: string; path: string; _source: SourceMeta }>(
@@ -112,8 +113,8 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 	}
 
 	const loadOpts = cwd
-		? { cwd, includeDisabled: true, disabledExtensions: disabledIds }
-		: { includeDisabled: true, disabledExtensions: disabledIds };
+		? { cwd, includeDisabled: true, disabledExtensions: effectiveDisabledIds }
+		: { includeDisabled: true, disabledExtensions: effectiveDisabledIds };
 
 	// Load skills
 	try {

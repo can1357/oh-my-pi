@@ -128,6 +128,22 @@ describe("disabledExtensions runtime filtering", () => {
 		expect(gemini?.state).toBe("disabled");
 	});
 
+	test("deduplicates against an empty snapshot when the caller omits disabled IDs", async () => {
+		await fs.rm(path.join(tempDir, ".omp", "AGENTS.md"));
+		await fs.writeFile(path.join(tempDir, "AGENTS.md"), "# lower-priority project instructions\n");
+		await fs.mkdir(path.join(tempDir, ".gemini"), { recursive: true });
+		await fs.writeFile(path.join(tempDir, ".gemini", "GEMINI.md"), "# higher-priority project instructions\n");
+
+		initializeWithSettings(Settings.isolated({ disabledExtensions: ["context-file:project:GEMINI.md"] }));
+
+		const dashboard = await loadAllExtensions(tempDir);
+		const agents = dashboard.find(extension => extension.path === path.join(tempDir, "AGENTS.md"));
+		const gemini = dashboard.find(extension => extension.path === path.join(tempDir, ".gemini", "GEMINI.md"));
+
+		expect(agents?.state).toBe("shadowed");
+		expect(gemini?.state).toBe("active");
+	});
+
 	test("marks a disabled lower-priority row shadowed when an enabled higher-priority item owns the key", async () => {
 		// Enabled builtin .omp/AGENTS.md (priority 100) already exists at project
 		// depth 0 from beforeEach; add a lower-priority .gemini/GEMINI.md at the
