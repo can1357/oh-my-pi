@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed streaming CPU blowup on long Responses turns: per-delta content-index lookups are now O(1) instead of re-scanning the accumulated content blocks, eliminating the quadratic work that could freeze the TUI for tens of seconds to minutes while a subagent streams ([#10605](https://github.com/can1357/oh-my-pi/issues/10605)).
 - Fixed provider streams that die after emitting `toolcall_start` but before any argument content failing validation with empty `{}` arguments; the uncommitted attempt is now discarded and retried ([#11823](https://github.com/can1357/oh-my-pi/pull/11823) by [@justdoGIT](https://github.com/justdoGIT)).
 ### Added
 
