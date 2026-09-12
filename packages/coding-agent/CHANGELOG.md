@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `providers.anthropic.serverSideFallbackModels` makes the Anthropic server-side fallback chain configurable (e.g. `fable-5 -> opus-5 -> opus-4-8`) instead of the catalog's single-hop Opus 5 chain; the setting caps at the wire's three-entry limit and, when unset, follows the catalog chain ([#9376](https://github.com/can1357/oh-my-pi/pull/9376) by [@sjawhar](https://github.com/sjawhar)).
+
 ## [18.3.5] - 2026-09-27
 
 ### Added
