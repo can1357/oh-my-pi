@@ -5,7 +5,7 @@
 ### Added
 
 - Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
-- Added `lazy: true` for MCP servers in `mcp.json`: the server is not spawned at session startup — its tools are served from the tool cache and the first invocation (or `/mcp reconnect`) connects on demand. Useful for servers whose launch has side effects, such as credential prompts or approval flows.
+- Added `lazy: true` for MCP servers in `mcp.json`: the server is not spawned at session startup — its tools are served from the tool cache and the first invocation (or `/mcp reconnect`) connects on demand. Useful for servers whose launch has side effects, such as credential prompts or approval flows. ([#9793](https://github.com/can1357/oh-my-pi/pull/9793) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.2.1] - 2026-09-15
 
