@@ -109,6 +109,24 @@ export class CollabSocket {
 			});
 	}
 
+	/**
+	 * Awaits queued seal/send work, then yields one macrotask so the runtime
+	 * dispatches the buffered socket write before a following {@link close}.
+	 * Callers MUST flush before closing on a graceful shutdown: `send()` only
+	 * queues on `#sendChain`, and `close()` flips `#closed` and tears down the
+	 * socket, so an unflushed goodbye is dropped and the relay's transient
+	 * room-closed code becomes the only signal guests receive — leaving them
+	 * retrying a room that is gone for good.
+	 */
+	async flush(): Promise<void> {
+		await this.#sendChain;
+		// A queued ws.send() is handed to the OS socket on the next event-loop
+		// turn, not synchronously; without this yield close() races ahead and
+		// the frame never leaves. A microtask is not enough — this needs a
+		// timer-backed macrotask.
+		if (this.#ws?.readyState === WebSocket.OPEN) await Bun.sleep(1);
+	}
+
 	#enqueuePendingSend(envelope: Uint8Array, frameType: CollabFrame["t"]): void {
 		if (this.#pendingSends.length >= MAX_PENDING_SENDS) {
 			logger.debug("collab: dropping frame, reconnect buffer full", { t: frameType });
