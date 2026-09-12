@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Mnemopi's `per-project`/`per-project-tagged` memory banks now derive from the repository's primary checkout root, so every linked git worktree and Jujutsu workspace of one repository shares the same bank instead of each getting its own isolated one ([#9424](https://github.com/can1357/oh-my-pi/pull/9424) by [@sjawhar](https://github.com/sjawhar)).
+
 ## [18.2.2] - 2026-09-16
 
 ### Added
