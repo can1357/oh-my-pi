@@ -232,19 +232,26 @@ describe("agent state file", () => {
 		expect(fs.existsSync(stateFile())).toBe(false);
 	});
 
-	it("survives a keep-alive cleanup pass, because the agent is still running", async () => {
-		// The removal is registered with postmortem so a signal exit - which never reaches
-		// disposeTerminalTitleState - cannot leave the file behind. It is registered exitOnly:
-		// a manual keep-alive pass is not this agent's end, and deleting the file there would
-		// blind a reader in the middle of a session.
+	it("registers its removal for an exit that never reaches dispose, and only for a real one", async () => {
+		// SIGTERM/SIGHUP and the fatal handler run the postmortem callbacks and leave, so the
+		// removal has to be one of them. It must also be exitOnly: a keep-alive pass is not this
+		// agent's end, and clearing the file there would blind a reader mid-session.
+		//
+		// Only this registration is invoked. postmortem.cleanup() would run every callback the
+		// shared test process has loaded - shell snapshots, LSP and SSH resources - and this test
+		// has no business tearing those down.
+		const register = spyOn(postmortem, "register");
+
 		setAgentStateFileEnabled(true);
 		setTerminalTitleState("attention");
 		await agentStateFileSettled();
-
-		await postmortem.cleanup();
-
 		expect(fs.existsSync(stateFile())).toBe(true);
-		expect(JSON.parse(fs.readFileSync(stateFile(), "utf8")).state).toBe("attention");
+
+		const registration = register.mock.calls.find(call => call[0] === "agent-state-file");
+		expect(registration?.[2]).toEqual({ exitOnly: true });
+
+		await registration?.[1](postmortem.Reason.SIGTERM);
+		expect(fs.existsSync(stateFile())).toBe(false);
 	});
 
 	it("does not publish an update that a removal overtook mid-flight", async () => {
