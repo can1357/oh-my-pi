@@ -5247,3 +5247,61 @@ describe("ty python lsp", () => {
 		}
 	});
 });
+
+describe("pyrefly python lsp", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("registers pyrefly for .py behind existing Python primaries and before ruff", () => {
+		const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+		const names = getServersForFile(config, "app.py").map(([name]) => name);
+		expect(names).toContain("pyrefly");
+		expect(names).toContain("ruff");
+		// pyrefly is behind all existing Python primaries
+		expect(names.indexOf("pyright")).toBeLessThan(names.indexOf("pyrefly"));
+		expect(names.indexOf("basedpyright")).toBeLessThan(names.indexOf("pyrefly"));
+		expect(names.indexOf("pylsp")).toBeLessThan(names.indexOf("pyrefly"));
+		expect(names.indexOf("ty")).toBeLessThan(names.indexOf("pyrefly"));
+		// ruff (linter) sorts after all primaries including pyrefly
+		expect(names.indexOf("pyrefly")).toBeLessThan(names.indexOf("ruff"));
+	});
+
+	it("registers pyrefly for .pyi stub files", () => {
+		const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+		const names = getServersForFile(config, "app.pyi").map(([name]) => name);
+		expect(names).toContain("pyrefly");
+	});
+
+	it("auto-detects pyrefly when its binary and Python root markers are present", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-pyrefly-detect-");
+		const resolvedPyrefly = path.join(tempDir.path(), "bin", "pyrefly");
+		vi.spyOn(piUtils, "$which").mockImplementation(command => (command === "pyrefly" ? resolvedPyrefly : null));
+		try {
+			await Bun.write(path.join(tempDir.path(), "pyproject.toml"), '[project]\nname = "demo"\n');
+			const config = loadConfig(tempDir.path());
+			expect(config.servers.pyrefly?.resolvedCommand).toBe(resolvedPyrefly);
+			expect(config.servers.pyrefly?.command).toBe("pyrefly");
+			expect(config.servers.pyrefly?.args).toEqual(["lsp"]);
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("auto-detects pyrefly in a pyrefly.toml-only project, resolving via project-local venv bin", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-pyrefly-toml-");
+		const venvBin = process.platform === "win32" ? ".venv/Scripts" : ".venv/bin";
+		const resolvedPyrefly = path.join(tempDir.path(), venvBin, "pyrefly");
+		vi.spyOn(piUtils, "$which").mockImplementation(() => null);
+		try {
+			await Bun.write(path.join(tempDir.path(), "pyrefly.toml"), "[configuration]\n");
+			await Bun.write(resolvedPyrefly, '#!/bin/sh\nexec pyrefly "$@"\n');
+			const config = loadConfig(tempDir.path());
+			expect(config.servers.pyrefly?.resolvedCommand).toBe(resolvedPyrefly);
+			expect(config.servers.pyrefly?.command).toBe("pyrefly");
+			expect(config.servers.pyrefly?.args).toEqual(["lsp"]);
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+});

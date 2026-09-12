@@ -201,6 +201,12 @@
 		"fileTypes": [".py", ".pyi"],
 		"rootMarkers": ["pyproject.toml", "ty.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile"]
 	},
+	"pyrefly": {
+		"command": "pyrefly",
+		"args": ["lsp"],
+		"fileTypes": [".py", ".pyi"],
+		"rootMarkers": ["pyproject.toml", "pyrefly.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile"]
+	},
 	"ruff": {
 		"command": "ruff",
 		"args": ["server"],
