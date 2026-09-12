@@ -9761,11 +9761,15 @@
 				}
 			},
 			{
-				"source": "providers/deepseek.kdl:85",
+				"source": "providers/deepseek.kdl:89",
 				"providers": [
 					"deepseek"
 				],
 				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek-flash"
+					},
 					{
 						"kind": "exact",
 						"value": "deepseek-v4-flash"
@@ -9780,7 +9784,16 @@
 					"reasoningContentField": "reasoning_content",
 					"requiresAssistantContentForToolCalls": true,
 					"requiresReasoningContentForToolCalls": true,
+					"allowsSyntheticReasoningContentForToolCalls": false,
 					"supportsToolChoice": false
+				},
+				"thinking": {
+					"upgradeNeutral": true,
+					"efforts": [
+						"low",
+						"high",
+						"max"
+					]
 				}
 			},
 			{
