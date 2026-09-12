@@ -540,22 +540,29 @@ describe("AgentSession advisor toggle", () => {
 		expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
 		expect(session.formatAdvisorStatus()).toContain("$0.5000");
 	});
-	it("rebuilds the live advisor when a second config is applied over an existing roster", () => {
+	it("applies a replacement advisor roster to the live status", () => {
 		enableAdvisor();
-		const originalAgent = session.getAdvisorAgent();
-		expect(originalAgent).toBeDefined();
 
 		// Apply first roster.
 		expect(session.applyAdvisorConfigs([{ name: "Security" }], undefined)).toBe(1);
-		const firstRosterAgent = session.getAdvisorAgent();
-		expect(firstRosterAgent).toBeDefined();
+		expect(session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["Security"]);
 
 		// Apply a second, different roster over the live one.
-		expect(session.applyAdvisorConfigs([{ name: "Architecture" }, { name: "Testing" }], undefined)).toBe(2);
-		const secondRosterAgent = session.getAdvisorAgent();
-		// The advisor agent must be rebuilt — not the same instance as the first roster.
-		expect(secondRosterAgent).toBeDefined();
-		expect(secondRosterAgent).not.toBe(firstRosterAgent);
+		expect(
+			session.applyAdvisorConfigs(
+				[
+					{ name: "Architecture", instructions: "Review module boundaries." },
+					{ name: "Testing", instructions: "Require regression coverage." },
+				],
+				"Keep advice concrete.",
+			),
+		).toBe(2);
+		expect(session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["Architecture", "Testing"]);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected Architecture advisor");
+		const advisorPrompt = advisor.state.systemPrompt.join("\n");
+		expect(advisorPrompt).toContain("Keep advice concrete.");
+		expect(advisorPrompt).toContain("Review module boundaries.");
 	});
 	it("retains cumulative advisor cost after an in-session history rewrite", async () => {
 		const advisor = enableAdvisor();
@@ -1095,7 +1102,7 @@ describe("AgentSession advisor toggle", () => {
 	it("propagates the resolved budget into the advisor model-visible system prompt", () => {
 		// Contract: SessionAdvisors must render the resolved budget into the
 		// prompt the advisor model actually receives. If the runtime stopped
-		// supplying it, the template falls back to 1 and this fails.
+		// supplying it, the template falls back to 4 and this fails.
 		expect(session.setAdvisorEnabled(true)).toBe(true);
 		session.applyAdvisorConfigs([{ name: "Strict", maxNotesPerUpdate: 1 }], undefined);
 		let advisor = session.getAdvisorAgent();
@@ -1110,29 +1117,41 @@ describe("AgentSession advisor toggle", () => {
 		expect(advisor.state.systemPrompt.join("\n")).toContain("max 3 non-blockers/update (`blocker` exempt)");
 	});
 
-	it("enforces budget precedence in the advisor prompt: per-advisor > shared WATCHDOG.yml > settings > default", () => {
-		const promptBudget = (): string => {
+	it("enforces budget precedence through advisor calls: per-advisor > shared WATCHDOG.yml > settings > default", async () => {
+		const exerciseBudget = async (prefix: string, budget: number): Promise<void> => {
 			const advisor = session.getAdvisorAgent();
 			if (!advisor) throw new Error("Expected advisor agent");
-			const match = advisor.state.systemPrompt.join("\n").match(/max (\d+) non-blockers\/update/);
-			if (!match) throw new Error("budget not rendered into advisor prompt");
-			return match[1]!;
+			const tool = advisor.state.tools?.find(candidate => candidate.name === "advise");
+			if (!(tool instanceof advisorModule.AdviseTool)) throw new Error("Expected advise tool");
+
+			tool.beginUpdate(true);
+			for (let i = 1; i <= budget; i++) {
+				const result = await tool.execute(`${prefix}-${i}`, {
+					note: `${prefix} note ${i}`,
+					severity: "concern",
+				});
+				expect(JSON.stringify(result.content)).toContain("Deferred");
+			}
+			const rejected = await tool.execute(`${prefix}-${budget + 1}`, {
+				note: `${prefix} note ${budget + 1}`,
+				severity: "concern",
+			});
+			expect(JSON.stringify(rejected.content)).toContain("budget is spent");
 		};
 
 		session.settings.set("advisor.maxNotesPerUpdate", 2);
 		expect(session.setAdvisorEnabled(true)).toBe(true);
 
-		session.applyAdvisorConfigs([{ name: "Specific", maxNotesPerUpdate: 5 }], undefined, 3);
-		expect(promptBudget()).toBe("5");
+		// Per-advisor (5) overrides shared (3) and settings (2).
+		expect(session.applyAdvisorConfigs([{ name: "Specific", maxNotesPerUpdate: 5 }], undefined, 3)).toBe(1);
+		await exerciseBudget("specific", 5);
 
-		session.applyAdvisorConfigs([{ name: "Inheriting" }], undefined, 3);
-		expect(promptBudget()).toBe("3");
+		// Shared (3) overrides settings (2) when per-advisor is undefined.
+		expect(session.applyAdvisorConfigs([{ name: "Inheriting" }], undefined, 3)).toBe(1);
+		await exerciseBudget("inheriting", 3);
 
-		session.applyAdvisorConfigs([{ name: "SettingsOnly" }], undefined, undefined);
-		expect(promptBudget()).toBe("2");
-
-		session.settings.set("advisor.maxNotesPerUpdate", 1);
-		expect(session.setAdvisorEnabled(true)).toBe(true);
-		expect(promptBudget()).toBe("1");
+		// Settings (2) overrides the default (4) when shared and per-advisor are undefined.
+		expect(session.applyAdvisorConfigs([{ name: "SettingsOnly" }], undefined, undefined)).toBe(1);
+		await exerciseBudget("settings", 2);
 	});
 });
