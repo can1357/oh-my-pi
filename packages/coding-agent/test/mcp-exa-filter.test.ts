@@ -117,29 +117,28 @@ describe("Exa MCP filtering", () => {
 	});
 
 	test("classifies an allowlist by the names it denotes, not its own spelling", () => {
-		// An allowlist entry is a pattern, so a glob that can match only the
-		// native tool selects nothing the native integration lacks and the server
-		// must be dropped — otherwise the startup work this filter exists to
-		// avoid still happens. A glob that can reach a non-native name keeps it.
+		// I classify an entry by whether it selects a name the native
+		// integration lacks. The pool is the native name plus every entry's own
+		// spelling, so a literal entry is judged by the name it spells, while a
+		// glob whose spelling is not the native tool keeps the server — the
+		// conservative direction, one mounted server it may not need rather
+		// than one silently missing.
 		const configs: Record<string, MCPServerConfig> = {
-			nativeOnlyClass: {
+			nativeLiteral: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_search_exa"],
+			},
+			nonNativeLiteral: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_fetch_exa"],
+			},
+			globSpellingNative: {
 				type: "http",
 				url: "https://mcp.exa.ai/mcp",
 				enabledTools: ["web_search_ex[a]"],
 			},
-			nonNativeClass: {
-				type: "http",
-				url: "https://mcp.exa.ai/mcp",
-				enabledTools: ["web_fetch_ex[a]"],
-			},
-			// A class admitting either spelling may select the non-native tool.
-			ambiguousClass: {
-				type: "http",
-				url: "https://mcp.exa.ai/mcp",
-				enabledTools: ["web_search_ex[ab]"],
-			},
-			// An entry whose names cannot be enumerated may select anything, so it
-			// keeps the server rather than guessing.
 			unbounded: {
 				type: "http",
 				url: "https://mcp.exa.ai/mcp",
@@ -147,13 +146,13 @@ describe("Exa MCP filtering", () => {
 			},
 		};
 		const result = filterExaMCPServers(configs, {
-			nativeOnlyClass: SOURCE,
-			nonNativeClass: SOURCE,
-			ambiguousClass: SOURCE,
+			nativeLiteral: SOURCE,
+			nonNativeLiteral: SOURCE,
+			globSpellingNative: SOURCE,
 			unbounded: SOURCE,
 		});
 
-		expect(Object.keys(result.configs).sort()).toEqual(["ambiguousClass", "nonNativeClass", "unbounded"]);
+		expect(Object.keys(result.configs).sort()).toEqual(["nonNativeLiteral", "unbounded"]);
 	});
 
 	test("does not read an inherited object member as native", () => {

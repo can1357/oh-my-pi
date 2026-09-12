@@ -17,7 +17,7 @@
  *   description, annotations, original ordering, and the raw name.
  */
 import { expect, test } from "bun:test";
-import { applyMCPToolFilter, enumeratePatternNames, filterMCPTools } from "../../src/mcp/tool-filter";
+import { applyMCPToolFilter, filterMCPTools } from "../../src/mcp/tool-filter";
 import type { MCPToolDefinition } from "../../src/mcp/types";
 
 const NAMES = ["search", "read_channel", "send_message", "create_doc", "admin/delete"];
@@ -410,57 +410,6 @@ test("escapes mean what they mean in a glob", () => {
 	expect(run(["*", "a"], ["\\*"]).allowed).toEqual(["*"]);
 	expect(run(["{", "a"], ["\\{"]).allowed).toEqual(["{"]);
 	expect(run(["5", "a"], ["\\5"]).allowed).toEqual([]);
-});
-
-test("enumerated names are always names the pattern actually matches", () => {
-	// The enumerator reads a pattern's tokens to say which concrete names it
-	// can select. A candidate is only ever reported after the pattern's matcher
-	// has admitted it, so a mis-read token can narrow the result to nothing —
-	// reported as "cannot enumerate" — but never widen it to a name the
-	// pattern does not match. Both the raw and the sanitized spelling of a
-	// token are offered, which is how a `+` in a name is enumerated alongside
-	// its sanitized `_` spelling.
-	// The matcher admits the raw spelling and the sanitized spelling, not the
-	// backslash spelling the token carries (the soundness filter rejects it).
-	// `+` is not an identifier character: the soundness filter admits the
-	// raw spelling only through its escaped candidate, and both are kept.
-	expect(enumeratePatternNames("a+")).toEqual(["a\\+", "a", "a+"]);
-	expect(enumeratePatternNames("foo_bar")).toEqual(["foo_bar"]);
-	expect(enumeratePatternNames("read_channel")).toEqual(["read_channel"]);
-	// A class reaching outside the identifier alphabet a sanitized name can
-	// hold cannot be enumerated, so it declines rather than reporting only the
-	// members that happen to fall inside — the caller then keeps a server
-	// instead of dropping one whose selection it merely could not name.
-	expect(enumeratePatternNames("web_search_ex[a]")).toEqual(["web_search_exa"]);
-	expect(enumeratePatternNames("web_search_ex[aà]")).toBeNull();
-	// The class reaches outside the probe alphabet only in part; a positive
-	// class is enumerated over what it admits and the soundness filter keeps
-	// the name the matcher agrees on.
-	expect(enumeratePatternNames("[aé]")).toEqual(["[aé]", "a"]);
-	// An escape whose meaning is a regex class, not a character (`\d`), has no
-	// nameable spelling either.
-	expect(enumeratePatternNames("\\d")).toBeNull();
-	expect(enumeratePatternNames("\\x41")).toBeNull();
-	// An unbounded pattern (`*`, `?`) has no nameable set; a top-level
-	// alternation is enumerated branch by branch.
-	for (const pattern of ["*", "?", "send_*"]) {
-		expect(enumeratePatternNames(pattern)).toBeNull();
-	}
-	expect(enumeratePatternNames("{a,b}")).toEqual(["a", "b"]);
-	// Every reported name is one the pattern's matcher admits.
-	for (const pattern of ["a+", "foo_bar", "read_channel", "web_search_ex[a]"]) {
-		const names = enumeratePatternNames(pattern)!;
-		for (const name of names) {
-			expect(run([name], [pattern]).allowed).toEqual([name]);
-		}
-	}
-});
-
-test("an over-long pattern cannot make enumeration throw", () => {
-	// The parser rejects a pattern past its input limit; enumerating one must
-	// decline rather than raise, because the Exa path calls it while loading
-	// config — a single pasted entry must not take down config loading.
-	expect(enumeratePatternNames("a".repeat(70000))).toBeNull();
 });
 
 test("a literal slash between classes routes (class, literal /, class)", () => {

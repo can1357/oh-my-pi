@@ -10,7 +10,7 @@ import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
 import { readDisabledServers, readEnabledServers } from "./config-writer";
-import { enumeratePatternNames, filterMCPTools } from "./tool-filter";
+import { filterMCPTools } from "./tool-filter";
 import type { MCPServerConfig } from "./types";
 
 /** Options for loading MCP configs */
@@ -310,24 +310,38 @@ function deniesEveryName(entry: string): boolean {
  */
 function keepsExaMCPServer(config: MCPServerConfig): boolean {
 	const requested = getRequestedExaMcpTools(config);
-	// An allowlist entry is matched as a pattern, so the names it can select are
-	// the names it denotes — not its own spelling. `["web_search_ex[a]"]` selects
-	// exactly the native tool and must be classified as such, or the server is
-	// mounted for a selection the native integration already covers. An entry
-	// whose names cannot be enumerated (`web_*`) keeps its spelling: it may
-	// select anything, which errs toward keeping the server.
-	const allowlist = (config.enabledTools ?? []).flatMap(entry => enumeratePatternNames(entry) ?? [entry]);
-	// The names the config selects from: the URL/argv enumeration when present,
-	// otherwise the allowlist it names itself.
-	const pool = requested ?? allowlist;
-	if (pool.length === 0) {
+	const allowlist = config.enabledTools ?? [];
+	if (requested) {
+		// `tools=` enumerates what the server advertises, so the selection is
+		// FROM that set: whatever the filters leave that is not the one native
+		// tool decides whether the server is mounted.
+		const effective = filterMCPTools({
+			toolNames: requested,
+			enabledTools: allowlist,
+			disabledTools: config.disabledTools,
+		}).allowed;
+		return effective.some(tool => !NATIVE_EXA_MCP_TOOLS.has(tool.toLowerCase()));
+	}
+	if (allowlist.length === 0) {
+		// Unrestricted: a denylist leaves the complement of what it denies,
+		// which includes the non-native tools, unless it denies every name.
 		const denylist = config.disabledTools ?? [];
 		if (denylist.length === 0) return false;
 		return !denylist.some(deniesEveryName);
 	}
+	// An entry is a glob over the sanitized names the server may advertise, and
+	// I don't enumerate it: the practical spelling is the entry itself, and a
+	// glob that reaches past the one native tool keeps the server. A literal
+	// I don't enumerate it: the practical spelling is the entry itself, and a
+	// glob that reaches past the one native tool keeps the server. A literal
+	// entry (`web_search_exa`, `web_fetch_ex[a]`) is judged by whether the
+	// native integration provides the name it spells — the only case a drop is
+	// provable. A pattern entry is judged the same way, with the safe bias
+	// that a glob addressing the native name keeps the server mounted.
+	const pool = [...Object.keys(NATIVE_EXA_MCP_TOOLS), ...allowlist];
 	const effective = filterMCPTools({
 		toolNames: pool,
-		enabledTools: requested ? allowlist : undefined,
+		enabledTools: allowlist,
 		disabledTools: config.disabledTools,
 	}).allowed;
 	return effective.some(tool => !NATIVE_EXA_MCP_TOOLS.has(tool.toLowerCase()));
