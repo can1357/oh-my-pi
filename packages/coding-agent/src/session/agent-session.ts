@@ -391,6 +391,16 @@ import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
+const AGENT_START_POLICY_MAX_ATTEMPTS = 3;
+
+/** A failed preparation, not a provider failure: the ordinary input can still be restored. */
+class AgentStartPolicyChangedError extends Error {
+	constructor() {
+		super("System prompt changed repeatedly during before_agent_start; original input was not delivered.");
+		this.name = "AgentStartPolicyChangedError";
+	}
+}
+
 const EXPERIMENTAL_CONTEXT_REQUIRED_TOOLS: Record<string, true> = {
 	context_notes: true,
 	new_context: true,
@@ -6294,6 +6304,11 @@ export class AgentSession {
 							]
 						: undefined,
 			});
+		} catch (error) {
+			if (error instanceof AgentStartPolicyChangedError && message.role === "user") {
+				this.#promptDropped?.({ text: typedText, images: options?.images });
+			}
+			throw error;
 		} finally {
 			// Clean up residual eager-todo directive if the prompt never consumed it
 			// (e.g., compaction aborted, validation failed).
@@ -6439,51 +6454,69 @@ export class AgentSession {
 			(!this.#isDisposed || alreadyDisposing) &&
 			!signal?.aborted;
 		const cancelled = { baseXdevCatalogDelivered: false, commit: () => undefined };
-		await this.#memory.transition;
-		if (!isCurrent()) return cancelled;
-		const basePreparation = await this.#tools.buildSystemPromptForAgentStart(prompt, isCurrent);
-		const basePrompt = basePreparation.systemPrompt;
-		if (!isCurrent()) return cancelled;
-		const result = await this.#extensionRunner?.emitBeforeAgentStart(prompt, images, basePrompt);
-		if (!isCurrent()) return cancelled;
-		const messages: AgentMessage[] = [];
-		const attribution = "attribution" in message ? message.attribution : undefined;
-		for (const payload of result?.messages ?? []) {
-			const normalized = normalizeCustomMessagePayload(payload);
-			const explicitAttribution =
-				payload !== null &&
-				typeof payload === "object" &&
-				!Array.isArray(payload) &&
-				(payload.attribution === "user" || payload.attribution === "agent");
-			messages.push(
-				await this.#normalizeAgentMessageImages({
-					role: "custom",
-					customType: normalized.customType,
-					content: normalized.content,
-					display: normalized.display,
-					details: normalized.details,
-					attribution: explicitAttribution
-						? normalized.attribution
-						: (attribution ?? (message.role === "user" ? "user" : "agent")),
-					timestamp: Date.now(),
-				}),
-			);
+		for (let attempt = 0; attempt < AGENT_START_POLICY_MAX_ATTEMPTS; attempt++) {
+			await this.#memory.transition;
 			if (!isCurrent()) return cancelled;
+			const sourceBase = this.#tools.baseSystemPrompt;
+			const basePreparation = await this.#tools.buildSystemPromptForAgentStart(prompt, isCurrent);
+			if (!isCurrent()) return cancelled;
+			const result = await this.#extensionRunner?.emitBeforeAgentStart(prompt, images, basePreparation.systemPrompt);
+			if (!isCurrent()) return cancelled;
+			// Overrides are opaque replacements, not string patches. Re-run only policy preparation
+			// against the winning base; discard this attempt's returned context and staged memory.
+			const overrideIsCurrent = () => {
+				if (result?.systemPrompt === undefined) return true;
+				const currentBase = this.#tools.baseSystemPrompt;
+				// Refreshing an unchanged tool set may replace the array without changing policy.
+				return (
+					sourceBase === currentBase ||
+					(sourceBase.length === currentBase.length &&
+						sourceBase.every((part, index) => part === currentBase[index]))
+				);
+			};
+			if (!overrideIsCurrent()) continue;
+			const messages: AgentMessage[] = [];
+			const attribution = "attribution" in message ? message.attribution : undefined;
+			for (const payload of result?.messages ?? []) {
+				const normalized = normalizeCustomMessagePayload(payload);
+				const explicitAttribution =
+					payload !== null &&
+					typeof payload === "object" &&
+					!Array.isArray(payload) &&
+					(payload.attribution === "user" || payload.attribution === "agent");
+				messages.push(
+					await this.#normalizeAgentMessageImages({
+						role: "custom",
+						customType: normalized.customType,
+						content: normalized.content,
+						display: normalized.display,
+						details: normalized.details,
+						attribution: explicitAttribution
+							? normalized.attribution
+							: (attribution ?? (message.role === "user" ? "user" : "agent")),
+						timestamp: Date.now(),
+					}),
+				);
+				if (!isCurrent()) return cancelled;
+			}
+			if (!overrideIsCurrent()) continue;
+			return {
+				baseXdevCatalogDelivered: result?.systemPrompt === undefined,
+				commit: () => {
+					// No await may separate ownership validation from publishing memory and policy.
+					if (!isCurrent() || !overrideIsCurrent()) return undefined;
+					if (basePreparation.commit?.() === false) return undefined;
+					if (result?.systemPrompt !== undefined) {
+						this.#tools.setTurnSystemPromptOverride(result.systemPrompt);
+					} else {
+						this.#tools.clearTurnSystemPromptOverride();
+						this.agent.setSystemPrompt(this.#tools.baseSystemPrompt);
+					}
+					return messages;
+				},
+			};
 		}
-		return {
-			baseXdevCatalogDelivered: result?.systemPrompt === undefined,
-			commit: () => {
-				if (!isCurrent()) return undefined;
-				if (basePreparation.commit?.() === false) return undefined;
-				if (result?.systemPrompt !== undefined) {
-					this.#tools.setTurnSystemPromptOverride(result.systemPrompt);
-				} else {
-					this.#tools.clearTurnSystemPromptOverride();
-					this.agent.setSystemPrompt(this.#tools.baseSystemPrompt);
-				}
-				return messages;
-			},
-		};
+		throw new AgentStartPolicyChangedError();
 	}
 
 	async #promptWithMessage(

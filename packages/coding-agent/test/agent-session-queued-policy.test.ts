@@ -27,6 +27,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionProviderBoundary } from "@oh-my-pi/pi-coding-agent/session/session-provider-boundary";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -74,31 +75,26 @@ describe("queued user delivery policy", () => {
 		// Only credential lookup is needed; requests use the local scripted provider.
 		const registry = { getApiKey: async () => "test-key" } as unknown as ModelRegistry;
 		let beforePrepare: (() => Promise<void>) | undefined;
-		const runner = new ExtensionRunner(
-			[
-				extension("policy", async event => {
-					events.push(structuredClone(event));
-					await beforePrepare?.();
-					if (options.policy === false) return undefined;
-					const mode = manager
-						.getBranch()
-						.findLast(entry => entry.type === "custom" && entry.customType === "policy-mode");
-					const data = mode?.type === "custom" ? mode.data : undefined;
-					const enabled = !data || typeof data !== "object" || !("enabled" in data) || data.enabled !== false;
-					return {
-						systemPrompt: enabled ? [...event.systemPrompt, `policy:${event.prompt}`] : event.systemPrompt,
-						message: { customType: "prepared-context", content: `context:${event.prompt}`, display: false },
-					};
-				}),
-				extension("independent", async event =>
-					options.policy === false ? undefined : { systemPrompt: [...event.systemPrompt, "independent policy"] },
-				),
-			],
-			new ExtensionRuntime(),
-			manager.getCwd(),
-			manager,
-			registry,
-		);
+		const extensions = [
+			extension("policy", async event => {
+				events.push(structuredClone(event));
+				await beforePrepare?.();
+				if (options.policy === false) return undefined;
+				const mode = manager
+					.getBranch()
+					.findLast(entry => entry.type === "custom" && entry.customType === "policy-mode");
+				const data = mode?.type === "custom" ? mode.data : undefined;
+				const enabled = !data || typeof data !== "object" || !("enabled" in data) || data.enabled !== false;
+				return {
+					systemPrompt: enabled ? [...event.systemPrompt, `policy:${event.prompt}`] : event.systemPrompt,
+					message: { customType: "prepared-context", content: `context:${event.prompt}`, display: false },
+				};
+			}),
+			extension("independent", async event =>
+				options.policy === false ? undefined : { systemPrompt: [...event.systemPrompt, "independent policy"] },
+			),
+		];
+		const runner = new ExtensionRunner(extensions, new ExtensionRuntime(), manager.getCwd(), manager, registry);
 		const model = buildModel({
 			id: "mock",
 			name: "mock",
@@ -143,6 +139,7 @@ describe("queued user delivery policy", () => {
 			events,
 			delivered,
 			manager,
+			extensions,
 			pausePreparation: (fn: () => Promise<void>) => {
 				beforePrepare = fn;
 			},
@@ -639,20 +636,230 @@ describe("queued user delivery policy", () => {
 		expect(requests[0].systemPrompt).toEqual([...BASE, "updated tool policy"]);
 	});
 
-	it("keeps an explicit extension override ahead of a newer base in the same request", async () => {
-		const { requests, pausePreparation } = await setupMemory("hindsight", async () => "override memory", true);
+	it.each(["ordinary", "queued"] as const)(
+		"rederives %s overrides from current tools and publishes only the successful context and recall",
+		async delivery => {
+			let recalls = 0;
+			const { requests, delivered, extensions, pausePreparation } = await setupMemory(
+				"hindsight",
+				async () => `override-memory-${++recalls}`,
+				true,
+			);
+			let attempts = 0;
+			extensions.push(
+				extension("attempt-context", async () => ({
+					message: { customType: "attempt-context", content: `attempt-context-${++attempts}`, display: false },
+				})),
+			);
+			// Repeating the same tool selection on retry must converge, not invalidate it again.
+			pausePreparation(async () => {
+				await session.setActiveToolsByName(["new_tool"]);
+			});
+			if (delivery === "ordinary") await session.prompt("first");
+			else await session.steer("first");
+			await session.waitForIdle();
+			expect(requests).toHaveLength(1);
+			expect(requests[0].tools?.map(tool => tool.name)).toEqual(["new_tool"]);
+			const prompt = requests[0].systemPrompt?.join("\n");
+			expect(prompt).toContain("policy:first");
+			expect(prompt).toContain("independent policy");
+			expect(prompt).toContain("tools:new_tool");
+			expect(prompt).not.toContain("tools:old_tool");
+			expect(prompt?.match(/override-memory-2/g)).toHaveLength(1);
+			expect(prompt).not.toContain("override-memory-1");
+			const context = JSON.stringify(requests[0].messages);
+			expect(context.match(/attempt-context-2/g)).toHaveLength(1);
+			expect(context).not.toContain("attempt-context-1");
+			expect(context.match(/context:first/g)).toHaveLength(1);
+			expect(delivered.filter(message => message.role === "user")).toMatchObject([
+				{ content: [{ type: "text", text: "first" }] },
+			]);
+
+			await session.prompt("next turn");
+			expect(recalls).toBe(2);
+			expect(requests[1].systemPrompt?.join("\n")).toContain("override-memory-2");
+			expect(requests[1].systemPrompt?.join("\n")).not.toContain("override-memory-1");
+		},
+	);
+
+	it("does not re-enter handlers for a semantic no-op base refresh", async () => {
+		const { requests, events, pausePreparation } = setup(undefined, async () => ({ systemPrompt: [...BASE] }));
+		pausePreparation(async () => {
+			await session.refreshBaseSystemPrompt();
+		});
+		await session.prompt("stable policy");
+		expect(events).toHaveLength(1);
+		expect(requests.map(request => request.systemPrompt)).toEqual([
+			[...BASE, "policy:stable policy", "independent policy"],
+		]);
+	});
+
+	it("preserves absolute overrides and their downstream chain after a source-base retry", async () => {
+		const { requests, extensions, pausePreparation } = await setupMemory(
+			"hindsight",
+			async () => "hidden memory",
+			true,
+		);
+		// An absolute policy can intentionally mention old/base text. Never infer a patch from it.
+		const absolute = "tools:old_tool is a historical example; use only this absolute policy";
+		extensions.push(
+			extension("absolute", async () => ({ systemPrompt: absolute })),
+			extension("after-absolute", async event => ({ systemPrompt: [...event.systemPrompt, "absolute follower"] })),
+		);
 		pausePreparation(async () => {
 			await session.setActiveToolsByName(["new_tool"]);
 		});
-		await session.steer("first");
+		await session.steer("absolute policy");
 		await session.waitForIdle();
 		expect(requests[0].tools?.map(tool => tool.name)).toEqual(["new_tool"]);
+		expect(requests[0].systemPrompt).toEqual([absolute, "absolute follower"]);
+	});
+
+	it("retries a base change during returned-image normalization before publishing the request", async () => {
+		const { requests, extensions } = await setupMemory("hindsight", async () => "image memory", true);
+		const image: ImageContent = {
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD3sAAAAASUVORK5CYII=",
+		};
+		extensions.push(
+			extension("image-context", async () => ({
+				message: { customType: "image-context", content: [image], display: false },
+			})),
+		);
+		const normalizeImages = SessionProviderBoundary.prototype.normalizeImagesForModel;
+		let changed = false;
+		vi.spyOn(SessionProviderBoundary.prototype, "normalizeImagesForModel").mockImplementation(
+			async function (this: SessionProviderBoundary, images) {
+				const normalized = await normalizeImages.call(this, images);
+				if (!changed) {
+					changed = true;
+					await session.setActiveToolsByName(["new_tool"]);
+				}
+				return normalized;
+			},
+		);
+		await session.steer("image policy");
+		await session.waitForIdle();
+		expect(requests).toHaveLength(1);
+		expect(requests[0].tools?.map(tool => tool.name)).toEqual(["new_tool"]);
 		const prompt = requests[0].systemPrompt?.join("\n");
-		expect(prompt).toContain("policy:first");
-		expect(prompt).toContain("independent policy");
-		expect(prompt).toContain("override memory");
-		expect(prompt).toContain("tools:old_tool");
-		expect(prompt).not.toContain("tools:new_tool");
+		expect(prompt).toContain("tools:new_tool");
+		expect(prompt).not.toContain("tools:old_tool");
+		expect(prompt).toContain("policy:image policy");
+		expect(
+			requests[0].messages.flatMap(message =>
+				Array.isArray(message.content) ? message.content.filter(part => part.type === "image") : [],
+			),
+		).toHaveLength(1);
+	});
+
+	it.each(["ordinary", "queued"] as const)(
+		"bounds repeated %s source-base churn and retains the original without publishing staged work",
+		async delivery => {
+			let recalls = 0;
+			const { agent, requests, delivered, events, pausePreparation } = await setupMemory(
+				"hindsight",
+				async () => `churn-memory-${++recalls}`,
+				true,
+			);
+			const dropped: string[] = [];
+			session.setPromptDropped(prompt => dropped.push(prompt.text));
+			let attempts = 0;
+			pausePreparation(async () => {
+				await session.setActiveToolsByName([++attempts % 2 === 1 ? "new_tool" : "old_tool"]);
+			});
+			if (delivery === "ordinary") {
+				await expect(session.prompt("retain original")).rejects.toThrow("System prompt changed");
+				expect(dropped).toEqual(["retain original"]);
+			} else {
+				// Use the real queue transaction without the session's idle scheduler swallowing its error.
+				agent.steer({ role: "user", content: [{ type: "text", text: "retain original" }], timestamp: 1 });
+				await expect(agent.continue()).rejects.toThrow("System prompt changed");
+				expect(agent.peekSteeringQueue()).toMatchObject([{ content: [{ type: "text", text: "retain original" }] }]);
+			}
+			expect(events).toHaveLength(3);
+			expect(requests).toEqual([]);
+			expect(delivered.filter(message => message.role === "user" || message.role === "custom")).toEqual([]);
+			expect(session.systemPrompt.join("\n")).not.toContain("churn-memory-");
+			expect(session.systemPrompt.join("\n")).not.toContain("policy:retain original");
+
+			pausePreparation(async () => {});
+			await session.prompt("resumed original");
+			await session.waitForIdle();
+			expect(requests[0].systemPrompt?.join("\n")).toContain("churn-memory-4");
+			expect(requests[0].systemPrompt?.join("\n")).not.toMatch(/churn-memory-[123]/);
+		},
+	);
+
+	it("lets cancellation during retry retain the queued original without consuming recall", async () => {
+		let recalls = 0;
+		const { agent, requests, delivered, pausePreparation } = await setupMemory(
+			"hindsight",
+			async () => `retry-memory-${++recalls}`,
+			true,
+		);
+		const retryStarted = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let attempts = 0;
+		pausePreparation(async () => {
+			await session.setActiveToolsByName(["new_tool"]);
+			if (++attempts === 2) {
+				retryStarted.resolve();
+				await release.promise;
+			}
+		});
+		await session.steer("cancel retry");
+		// A broken implementation must fail rather than hang waiting for a retry it never starts.
+		await Promise.race([
+			retryStarted.promise,
+			session.waitForIdle().then(() => {
+				throw new Error("Delivery finished before retry");
+			}),
+		]);
+		const abort = session.abort();
+		release.resolve();
+		await abort;
+		expect(requests).toEqual([]);
+		expect(delivered.filter(message => message.role === "user" || message.role === "custom")).toEqual([]);
+		expect(session.systemPrompt.join("\n")).not.toContain("retry-memory-");
+		expect(agent.peekSteeringQueue()).toMatchObject([{ content: [{ type: "text", text: "cancel retry" }] }]);
+
+		pausePreparation(async () => {});
+		await session.prompt("resume cancelled retry");
+		await session.waitForIdle();
+		expect(requests[0].systemPrompt?.join("\n")).toContain("retry-memory-3");
+		expect(requests[0].systemPrompt?.join("\n")).not.toMatch(/retry-memory-[12]/);
+	});
+
+	it("declines a source-base change after preparation without partially committing memory or context", async () => {
+		let recalls = 0;
+		const { agent, requests, delivered } = await setupMemory(
+			"hindsight",
+			async () => `commit-memory-${++recalls}`,
+			true,
+		);
+		const prepare = agent.prepareQueuedMessages;
+		if (!prepare) throw new Error("Session queue preparation was not installed");
+		agent.prepareQueuedMessages = async (messages, signal) => {
+			const preparation = await prepare(messages, signal);
+			await session.setActiveToolsByName(["new_tool"]);
+			return preparation;
+		};
+		await session.steer("changed before commit");
+		await session.waitForIdle();
+		expect(requests).toEqual([]);
+		expect(delivered.filter(message => message.role === "user" || message.role === "custom")).toEqual([]);
+		expect(session.systemPrompt.join("\n")).not.toContain("commit-memory-");
+		expect(session.systemPrompt.join("\n")).not.toContain("policy:changed before commit");
+		expect(agent.peekSteeringQueue()).toMatchObject([{ content: [{ type: "text", text: "changed before commit" }] }]);
+
+		agent.prepareQueuedMessages = prepare;
+		await session.prompt("resume commit");
+		await session.waitForIdle();
+		expect(requests[0].tools?.map(tool => tool.name)).toEqual(["new_tool"]);
+		expect(requests[0].systemPrompt?.join("\n")).toContain("commit-memory-2");
+		expect(requests[0].systemPrompt?.join("\n")).not.toContain("commit-memory-1");
 	});
 
 	it.each(["memory lookup", "prompt rebuild", "extension hook", "extension hook after rebuild"] as const)(
