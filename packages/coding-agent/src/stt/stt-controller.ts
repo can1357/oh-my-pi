@@ -143,7 +143,7 @@ const defaultCloudCredentialResolver: CloudCredentialResolver = async (signal, r
  * held audio is bounded by the cloud upload limit: a stalled credential lookup
  * or model download must not grow this buffer without limit.
  */
-function bufferUntilStreamReady(targetPromise: Promise<SttStreamHandle>): SttStreamHandle {
+function bufferUntilStreamReady(targetPromise: Promise<SttStreamHandle>, abortSetup: () => void): SttStreamHandle {
 	const pending: Float32Array[] = [];
 	let pendingSamples = 0;
 	const { promise: stopPromise, resolve: resolveStop, reject: rejectStop } = Promise.withResolvers<string>();
@@ -197,6 +197,7 @@ function bufferUntilStreamReady(targetPromise: Promise<SttStreamHandle>): SttStr
 			}
 			if (pendingSamples + audio.length > MAX_AUDIO_SAMPLES) {
 				close();
+				abortSetup();
 				settleStop(() => rejectStop(new Error(AUDIO_LIMIT_MESSAGE)));
 				return;
 			}
@@ -499,6 +500,7 @@ export class STTController {
 							onSegment,
 						});
 					}),
+					() => streamAbort.abort(new Error(AUDIO_LIMIT_MESSAGE)),
 				)
 			: sttClient.startStream(modelKey, {
 					language: language || undefined,
