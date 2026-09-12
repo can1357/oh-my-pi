@@ -189,14 +189,16 @@ function isEmptyUserAgentOverride(params: Record<string, unknown> | undefined): 
 	return typeof params?.userAgent === "string" && params.userAgent === "";
 }
 
+function isValidHardwareConcurrency(value: unknown): value is number {
+	return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
 function isDefaultHardwareConcurrency(
 	params: Record<string, unknown> | undefined,
 	defaultHardwareConcurrency: number | undefined,
 ): boolean {
 	return (
-		typeof defaultHardwareConcurrency === "number" &&
-		Number.isInteger(defaultHardwareConcurrency) &&
-		defaultHardwareConcurrency > 0 &&
+		isValidHardwareConcurrency(defaultHardwareConcurrency) &&
 		params?.hardwareConcurrency === defaultHardwareConcurrency
 	);
 }
@@ -2051,6 +2053,23 @@ export class RelayBridge {
 								candidate => candidate.key !== change.key,
 							);
 						}
+						if (
+							queued.previous?.method === "Emulation.setHardwareConcurrencyOverride" &&
+							current === undefined &&
+							!isValidHardwareConcurrency(this.#extInfo?.hardwareConcurrency)
+						) {
+							// Older extensions do not report the browser's real hardware
+							// concurrency. Chrome has no clear RPC for this override, so a
+							// guessed value would leak synthetic state to surviving holders.
+							// Replace the debugger root instead, preserving explicit page
+							// sessions and replaying only their still-owned journal entries.
+							const preserve = this.#sessionHolders(tab.tabId).filter(conn => !conn.autoAttach);
+							tab.forceFreshRootBeforeReplay = true;
+							tab.restorePending = preserve.length > 0;
+							tab.resumeSubscriptionReconcileAfterRestore = tab.pendingSubscriptionReconcile.length > 0;
+							this.#retractTab(tab, preserve);
+							this.#announceTab(tab, true, preserve);
+						}
 						continue;
 					}
 					this.#assertExtensionCurrent(expectedExt);
@@ -2532,11 +2551,7 @@ export class RelayBridge {
 			case "Emulation.setPageScaleFactor":
 				return { method: "Emulation.resetPageScaleFactor" };
 			case "Emulation.setHardwareConcurrencyOverride":
-				if (
-					typeof this.#extInfo?.hardwareConcurrency === "number" &&
-					Number.isInteger(this.#extInfo.hardwareConcurrency) &&
-					this.#extInfo.hardwareConcurrency > 0
-				) {
+				if (isValidHardwareConcurrency(this.#extInfo?.hardwareConcurrency)) {
 					return {
 						method: subscription.method,
 						params: { hardwareConcurrency: this.#extInfo.hardwareConcurrency },

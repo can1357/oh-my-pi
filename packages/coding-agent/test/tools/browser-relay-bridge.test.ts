@@ -93,7 +93,7 @@ function connect(
 			t: "hello",
 			userAgent: "test",
 			browserVersion: "Chrome/151.0.0.0",
-			hardwareConcurrency: options.hardwareConcurrency ?? 8,
+			hardwareConcurrency: "hardwareConcurrency" in options ? options.hardwareConcurrency : 8,
 			tabs,
 			attachedTabIds: options.attachedTabIds ?? [],
 			recoverableTabIds: options.recoverableTabIds ?? [],
@@ -8180,6 +8180,50 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		expect(ext2.rpcs("send")).toHaveLength(0);
+	});
+
+	it("replaces the debugger root when an older extension cannot reset hardware concurrency", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { hardwareConcurrency: undefined });
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		const overrideId = ++msgSeq;
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: overrideId,
+				sessionId: ownerSession,
+				method: "Emulation.setHardwareConcurrencyOverride",
+				params: { hardwareConcurrency: 16 },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "hardware-concurrency override");
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpClosed(ownerConn);
+		await waitFor(() => ext.pending("detach").length === 1, "fresh-root detach");
+		ack(bridge, ext, "detach");
+		await waitFor(() => ext.pending("attach").length === 1, "fresh-root reattach");
+		ack(bridge, ext, "attach");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "holder command after fresh root");
+		expect(ext.rpcs("send").at(-1)).toMatchObject({ method: "Network.getCookies" });
+		ack(bridge, ext, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("drops tab-wide ignore-certificate-errors clears before recovery", async () => {
