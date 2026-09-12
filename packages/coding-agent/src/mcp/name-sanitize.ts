@@ -12,7 +12,7 @@
 export function sanitizeMCPToolNamePart(value: string, fallback: string, keepHyphen = false): string {
 	const folded = keepHyphen ? value.toLowerCase() : value.toLowerCase().replaceAll("-", "_");
 	const sanitized = folded
-		.replace(/[^a-z0-9_]+/g, "_")
+		.replace(keepHyphen ? /[^a-z0-9_-]+/g : /[^a-z0-9_]+/g, "_")
 		.replace(/_+/g, "_")
 		.replace(/^_+|_+$/g, "");
 

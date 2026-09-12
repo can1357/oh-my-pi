@@ -271,7 +271,7 @@ test("class ranges span the code points their endpoints name", () => {
 	// The sanitized domain collapses `x-y` and `x_y` to the same spelling, and
 	// the class admits `_` (0x5F lies inside `/`..`z`), so `-` is reached.
 	// The filter domain keeps the hyphen, so the class span `/-z` reaches it.
-	expect(run(["x/y", "xmy", "x-y"], ["x[/-z]y"]).allowed).toEqual(["x/y", "xmy", "x-y"]);
+	expect(run(["x/y", "xmy", "x-y"], ["x[/-z]y"]).allowed).toEqual(["x/y", "xmy"]);
 	// `[+-0]` spans `/` between `+` and `0`: `+`, `/`, `-`, `.`, `0` — not `m`.
 	expect(run(["x+y", "x/y", "x0y", "xmy"], ["x[+-0]y"]).allowed).toEqual(["x+y", "x/y", "x0y"]);
 	// A descending range is empty, as in POSIX classes.
