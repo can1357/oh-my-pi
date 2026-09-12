@@ -102,6 +102,42 @@ async function defaultCloudCredentialResolver(): Promise<CloudSttCredential | un
 	return apiKey ? { kind: "openai", apiKey } : undefined;
 }
 
+/**
+ * Accept microphone frames immediately while an asynchronous backend preflight
+ * resolves. Frames are replayed in order once the real stream is ready.
+ */
+function bufferUntilStreamReady(targetPromise: Promise<SttStreamHandle>): SttStreamHandle {
+	const pending: Float32Array[] = [];
+	let target: SttStreamHandle | null = null;
+	let cancelled = false;
+	const ready = targetPromise.then(stream => {
+		target = stream;
+		if (cancelled) {
+			stream.cancel();
+		} else {
+			for (const audio of pending) stream.pushAudio(audio);
+		}
+		pending.length = 0;
+		return stream;
+	});
+	void ready.catch(() => {});
+	return {
+		pushAudio(audio): void {
+			if (cancelled || audio.length === 0) return;
+			if (target) target.pushAudio(audio);
+			else pending.push(audio.slice());
+		},
+		async stop(): Promise<string> {
+			return await (await ready).stop();
+		},
+		cancel(): void {
+			cancelled = true;
+			pending.length = 0;
+			target?.cancel();
+		},
+	};
+}
+
 /** Coordinates microphone capture with local or cloud streaming transcription. */
 export class STTController {
 	#state: SttState = "idle";
@@ -113,7 +149,6 @@ export class STTController {
 	readonly #resolveCloudCredential: () => Promise<CloudSttCredential | undefined>;
 	readonly #createCloudFetch: CloudSttStreamOptions["fetchImpl"];
 	#didWarnMissingCloudCredential = false;
-	#cloudCredential: CloudSttCredential | null = null;
 	// Live streaming capture.
 	#stream: SttStreamHandle | null = null;
 	#streamRecorder: CaptureHandle | null = null;
@@ -177,10 +212,7 @@ export class STTController {
 	async #ensureCloudCredential(options: ToggleOptions): Promise<CloudSttCredential | null> {
 		try {
 			const credential = await this.#resolveCloudCredential();
-			if (credential) {
-				this.#cloudCredential = credential;
-				return credential;
-			}
+			if (credential) return credential;
 		} catch (err) {
 			logger.error("STT cloud credential resolution failed", {
 				error: err instanceof Error ? err.message : String(err),
@@ -195,13 +227,7 @@ export class STTController {
 		return null;
 	}
 
-	async #ensureDeps(options: ToggleOptions): Promise<boolean> {
-		if (this.#backend() === "cloud") {
-			// Cloud path needs no local weights; a missing key falls back to local
-			// rather than refusing to record.
-			const credential = await this.#ensureCloudCredential(options);
-			if (credential) return true;
-		}
+	async #ensureLocalDeps(options: ToggleOptions): Promise<boolean> {
 		const modelKey = resolveSttModelSpec(settings.get("stt.modelName") as string | undefined).key;
 		// Keyed on the model rather than a one-shot flag: switching stt.modelName
 		// mid-session must re-run preflight so an uncached new tier downloads here
@@ -255,7 +281,11 @@ export class STTController {
 	}
 
 	async #start(editor: Editor, options: ToggleOptions): Promise<void> {
-		if (!(await this.#ensureDeps(options))) return;
+		if (this.#backend() === "cloud") {
+			await this.#startStreaming(editor, options, this.#ensureCloudCredential(options));
+			return;
+		}
+		if (!(await this.#ensureLocalDeps(options))) return;
 		await this.#startStreaming(editor, options);
 	}
 
@@ -277,7 +307,11 @@ export class STTController {
 		return this.#streamCommitted ? ` ${normalized}` : normalized;
 	}
 
-	async #startStreaming(editor: Editor, options: ToggleOptions): Promise<void> {
+	async #startStreaming(
+		editor: Editor,
+		options: ToggleOptions,
+		cloudCredentialPromise?: Promise<CloudSttCredential | null>,
+	): Promise<void> {
 		const modelKey = resolveSttModelSpec(settings.get("stt.modelName") as string | undefined).key;
 		const language = settings.get("stt.language") as string | undefined;
 		const keywords = String(settings.get("stt.keywords") ?? "")
@@ -305,25 +339,39 @@ export class STTController {
 			}
 			options.requestRender?.();
 		};
-		const useCloud = this.#backend() === "cloud" && this.#cloudCredential !== null;
-		const stream = useCloud
-			? startCloudSttStream({
-					credential: this.#cloudCredential as CloudSttCredential,
-					model: settings.get("stt.modelName") as string | undefined,
-					language: language || undefined,
-					keywords: keywords.length ? keywords : undefined,
-					signal: this.#streamAbort.signal,
-					fetchImpl: this.#createCloudFetch,
-					onPartial,
-					onSegment,
-				})
+		const stream = cloudCredentialPromise
+			? bufferUntilStreamReady(
+					cloudCredentialPromise.then(async credential => {
+						if (credential) {
+							return startCloudSttStream({
+								credential,
+								model: settings.get("stt.modelName") as string | undefined,
+								language: language || undefined,
+								keywords: keywords.length ? keywords : undefined,
+								signal: this.#streamAbort?.signal,
+								fetchImpl: this.#createCloudFetch,
+								onPartial,
+								onSegment,
+							});
+						}
+						if (!(await this.#ensureLocalDeps(options))) {
+							throw new Error("Failed to set up local speech-to-text fallback.");
+						}
+						return sttClient.startStream(modelKey, {
+							language: language || undefined,
+							signal: this.#streamAbort?.signal,
+							onPartial,
+							onSegment,
+						});
+					}),
+				)
 			: sttClient.startStream(modelKey, {
 					language: language || undefined,
 					signal: this.#streamAbort.signal,
 					onPartial,
 					onSegment,
 				});
-		this.#cloudCredential = null;
+
 		this.#stream = stream;
 		let recorder: CaptureHandle;
 		try {
@@ -448,6 +496,5 @@ export class STTController {
 		this.#cleanupStream();
 		this.#state = "idle";
 		this.#resolvedModelKey = null;
-		this.#cloudCredential = null;
 	}
 }
