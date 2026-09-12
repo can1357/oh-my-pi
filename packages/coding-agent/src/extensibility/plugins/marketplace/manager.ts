@@ -15,7 +15,7 @@ import { expandTilde } from "../../../tools/path-utils";
 import { normalizePluginRuntimeConfig } from "../runtime-config";
 import type { PluginRuntimeConfig } from "../types";
 
-import { cachePlugin } from "./cache";
+import { cachePlugin, isValidVersionForCache } from "./cache";
 import { classifySource, fetchMarketplace, parseMarketplaceCatalog, promoteCloneToCache } from "./fetcher";
 import {
 	addInstalledPlugin,
@@ -30,7 +30,7 @@ import {
 	writeInstalledPluginsRegistry,
 	writeMarketplacesRegistry,
 } from "./registry";
-import { resolvePluginSource } from "./source-resolver";
+import { resolvePluginSource, validatePluginSource } from "./source-resolver";
 import type {
 	InstalledPluginEntry,
 	InstalledPluginSummary,
@@ -71,6 +71,17 @@ export interface MarketplaceManagerOptions {
 }
 
 // ── Manager ──────────────────────────────────────────────────────────────────
+
+type InstallValidation = {
+	force: boolean;
+	scope: "user" | "project";
+	registryPath: string;
+	marketplaceClonePath: string;
+	catalog: MarketplaceCatalog;
+	pluginEntry: MarketplacePluginEntry;
+	pluginId: string;
+	existing: InstalledPluginEntry[] | undefined;
+};
 
 export class MarketplaceManager {
 	#opts: MarketplaceManagerOptions;
@@ -238,59 +249,74 @@ export class MarketplaceManager {
 
 	// ── Install / uninstall ───────────────────────────────────────────────────
 
-	async installPlugin(
+	async #validateInstall(
 		name: string,
 		marketplace: string,
 		options?: { force?: boolean; scope?: "user" | "project" },
-	): Promise<InstalledPluginEntry> {
+	): Promise<InstallValidation> {
 		const force = options?.force ?? false;
 		const scope = options?.scope ?? "user";
 		const registryPath = this.#registryPath(scope);
 
-		// 1. Find marketplace entry
 		const mktReg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
 		const mktEntry = getMarketplaceEntry(mktReg, marketplace);
 		if (!mktEntry) {
 			throw new Error(`Marketplace "${marketplace}" not found`);
 		}
 
-		// 2. Find plugin in catalog
 		const catalog = await this.#readCatalog(mktEntry);
 		const pluginEntry = catalog.plugins.find(p => p.name === name);
 		if (!pluginEntry) {
 			throw new Error(`Plugin "${name}" not found in marketplace "${marketplace}"`);
 		}
-
-		const pluginId = buildPluginId(name, marketplace);
-
-		// 3. Check if already installed
-		const instReg = await readInstalledPluginsRegistry(registryPath);
-		const existing = getInstalledPlugin(instReg, pluginId);
-		if (existing && existing.length > 0 && !force) {
-			throw new Error(`Plugin "${pluginId}" is already installed. Use force option to reinstall.`);
+		if (
+			typeof pluginEntry.version === "string" &&
+			pluginEntry.version.length > 0 &&
+			!isValidVersionForCache(pluginEntry.version)
+		) {
+			throw new Error(`Invalid version for cache: "${pluginEntry.version}"`);
 		}
 
-		// 4. Resolve source path.
-		// marketplaceClonePath is the marketplace root — the directory containing .claude-plugin/
-		// catalogPath is <marketplacesCacheDir>/<name>/marketplace.json, so the root is two levels up.
-		// For local sources the content was fetched from a local path; the stored catalog is a copy
-		// under marketplacesCacheDir. We need the original source root for resolving relative paths.
-		// Use: path.dirname(catalogPath) is <cacheDir>/<name>/, and that IS the stored copy root,
-		// so `path.resolve(mktEntry.catalogPath, "../..")` = parent of <name>/ inside cacheDir
-		// which is wrong for local sources. Instead, derive from the stored catalog directory:
-		// stored at: <marketplacesCacheDir>/<catalogName>/marketplace.json
-		// The marketplace root for local sources should be the actual local path, but we only have
-		// sourceUri. For local sources, use path.resolve of sourceUri; for others use the cache dir.
 		const marketplaceClonePath = this.#resolveMarketplaceRoot(mktEntry);
-
-		// URL-sourced marketplaces only cache marketplace.json, not the full plugin tree.
-		// Relative string sources ("./plugins/foo") cannot be resolved against the cache dir.
 		if (mktEntry.sourceType === "url" && typeof pluginEntry.source === "string") {
 			throw new Error(
 				`Plugin "${name}" uses a relative source path but marketplace "${marketplace}" was added via URL. ` +
 					`Relative sources require a git or local marketplace. Re-add the marketplace using its git URL.`,
 			);
 		}
+		const sourcePath = await validatePluginSource(pluginEntry, {
+			marketplaceClonePath,
+			catalogMetadata: catalog.metadata,
+		});
+		await this.#validateEmbeddedConfigPaths(pluginEntry, sourcePath);
+
+		const pluginId = buildPluginId(name, marketplace);
+		const instReg = await readInstalledPluginsRegistry(registryPath);
+		const existing = getInstalledPlugin(instReg, pluginId);
+		if (existing && existing.length > 0 && !force) {
+			throw new Error(`Plugin "${pluginId}" is already installed. Use force option to reinstall.`);
+		}
+
+		return { force, scope, registryPath, catalog, marketplaceClonePath, pluginEntry, pluginId, existing };
+	}
+
+	async validateInstallPlugin(
+		name: string,
+		marketplace: string,
+		options?: { force?: boolean; scope?: "user" | "project" },
+	): Promise<void> {
+		await this.#validateInstall(name, marketplace, options);
+	}
+
+	async installPlugin(
+		name: string,
+		marketplace: string,
+		options?: { force?: boolean; scope?: "user" | "project" },
+	): Promise<InstalledPluginEntry> {
+		const { scope, registryPath, catalog, marketplaceClonePath, pluginEntry, pluginId, existing } =
+			await this.#validateInstall(name, marketplace, options);
+
+		// 4. Resolve source path.
 
 		const { dir: sourcePath, tempCloneRoot } = await resolvePluginSource(pluginEntry, {
 			marketplaceClonePath,
@@ -366,6 +392,31 @@ export class MarketplaceManager {
 
 		logger.debug("Plugin installed", { pluginId, version, cachePath });
 		return installedEntry;
+	}
+
+	async #validateEmbeddedConfigPaths(entry: MarketplacePluginEntry, sourcePath: string | undefined): Promise<void> {
+		if (!sourcePath) return;
+		await this.#validateEmbeddedConfigPath(entry, sourcePath, "lspServers", entry.lspServers);
+		await this.#validateEmbeddedConfigPath(entry, sourcePath, "dapAdapters", entry.dapAdapters);
+	}
+
+	async #validateEmbeddedConfigPath(
+		entry: MarketplacePluginEntry,
+		sourcePath: string,
+		field: "lspServers" | "dapAdapters",
+		value: unknown,
+	): Promise<void> {
+		if (typeof value !== "string" || value.length === 0) return;
+		const resolved = path.resolve(sourcePath, value);
+		if (!pathIsWithin(sourcePath, resolved)) {
+			throw new Error(`Plugin "${entry.name}" ${field} path escapes the plugin directory`);
+		}
+		try {
+			const stat = await fs.stat(resolved);
+			if (!stat.isFile()) throw new Error("not a file");
+		} catch {
+			throw new Error(`Plugin "${entry.name}" ${field} file does not exist`);
+		}
 	}
 
 	async #writeEmbeddedLspConfig(entry: MarketplacePluginEntry, cachePath: string): Promise<void> {

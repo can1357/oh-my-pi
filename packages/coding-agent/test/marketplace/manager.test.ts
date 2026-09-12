@@ -599,6 +599,38 @@ describe("MarketplaceManager", () => {
 		await expect(ctx.manager.installPlugin("hello-plugin", "test-marketplace")).rejects.toThrow(/already installed/);
 	});
 
+	it("validateInstallPlugin checks preconditions without mutating registries", async () => {
+		await ctx.manager.addMarketplace(FIXTURE_DIR);
+		await expect(
+			ctx.manager.validateInstallPlugin("hello-plugin", "test-marketplace", { scope: "project" }),
+		).resolves.toBeUndefined();
+
+		const projectReg = await readInstalledPluginsRegistry(path.join(ctx.tmpDir, "project_installed_plugins.json"));
+		expect(projectReg.plugins["hello-plugin@test-marketplace"]).toBeUndefined();
+
+		await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
+		await expect(ctx.manager.validateInstallPlugin("hello-plugin", "test-marketplace")).rejects.toThrow(
+			/already installed/,
+		);
+		await expect(
+			ctx.manager.validateInstallPlugin("hello-plugin", "test-marketplace", { force: true }),
+		).resolves.toBeUndefined();
+	});
+
+	it("validateInstallPlugin rejects embedded config paths outside the plugin directory", async () => {
+		await ctx.manager.addMarketplace(FIXTURE_DIR);
+		const registry = await readMarketplacesRegistry(path.join(ctx.tmpDir, "marketplaces.json"));
+		const catalogPath = registry.marketplaces[0]?.catalogPath;
+		if (!catalogPath) throw new Error("test marketplace catalog path is missing");
+		const catalog = (await Bun.file(catalogPath).json()) as { plugins: Array<Record<string, unknown>> };
+		catalog.plugins[0].lspServers = "../outside.json";
+		await Bun.write(catalogPath, JSON.stringify(catalog));
+
+		await expect(ctx.manager.validateInstallPlugin("hello-plugin", "test-marketplace")).rejects.toThrow(
+			/lspServers path escapes the plugin directory/,
+		);
+	});
+
 	it("installPlugin with force:true → replaces existing", async () => {
 		await ctx.manager.addMarketplace(FIXTURE_DIR);
 		const first = await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
