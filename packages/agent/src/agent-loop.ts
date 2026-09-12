@@ -2461,8 +2461,10 @@ function resolveToolForCall(
 		tools?.find(t => t.name === toolCall.name) ??
 		tools?.find(t => t.customWireName !== undefined && t.customWireName === toolCall.name) ??
 		// Not in the advertised set: let the host route side-transport tools
-		// (e.g. xd:// device mounts) called by their top-level name.
-		resolveFallbackTool?.(toolCall.name)
+		// (e.g. xd:// device mounts) called by their top-level name. It receives
+		// the snapshot searched above, never the agent's live tools, so a
+		// mid-stream roster change cannot widen what this request can reach.
+		resolveFallbackTool?.(toolCall.name, tools ?? [])
 	);
 }
 
@@ -2472,7 +2474,7 @@ const MIN_TOOL_NAME_SUGGESTION_SEGMENT = 3;
 const MAX_TOOL_NAME_SUGGESTIONS = 3;
 
 /**
- * Advertised tool names sharing a trailing `_`-delimited segment with `name`.
+ * Tool names sharing a trailing `_`-delimited segment with `name`.
  *
  * A model that mis-transcribes a long opaque tool name reliably keeps the
  * trailing verb — that segment is the only part carrying meaning, while any
@@ -2481,14 +2483,27 @@ const MAX_TOOL_NAME_SUGGESTIONS = 3;
  *
  * Both the last `__` and last `_` boundary are tried, so a name that lost only
  * its separator (`…__resolve_library_id`) and one that lost a whole id segment
- * (`…__read`) both recover. Purely advisory: this only builds an error string
- * and never selects a tool, so dispatch semantics are unchanged.
+ * (`…__read`) both recover. `fallbackNames` adds targets the host can route but
+ * never advertises (`xd://` device mounts); without them a corrupted device
+ * call is the one miss with nothing to suggest, because the capability exists
+ * in the session yet appears in no advertised name. Purely advisory: this only
+ * builds an error string and never selects a tool, so dispatch semantics are
+ * unchanged.
  */
 function suggestToolNames(
 	name: string,
 	tools: ReadonlyArray<Pick<AgentTool, "name" | "customWireName">> | undefined,
+	fallbackNames?: Iterable<string>,
 ): string[] {
-	if (!tools || tools.length === 0) return [];
+	const candidates: string[] = [];
+	for (const tool of tools ?? []) {
+		candidates.push(tool.name);
+		if (tool.customWireName !== undefined) candidates.push(tool.customWireName);
+	}
+	// Devices rank after the advertised set: when one verb matches both, the
+	// tool the model was actually offered is the better guess.
+	if (fallbackNames !== undefined) for (const fallbackName of fallbackNames) candidates.push(fallbackName);
+	if (candidates.length === 0) return [];
 	const segments: string[] = [];
 	for (const boundary of ["__", "_"]) {
 		const idx = name.lastIndexOf(boundary);
@@ -2504,25 +2519,24 @@ function suggestToolNames(
 	segments.sort((a, b) => b.length - a.length);
 	const matches: string[] = [];
 	for (const segment of segments) {
-		for (const tool of tools) {
-			for (const candidate of [tool.name, tool.customWireName]) {
-				if (candidate === undefined || candidate === name || matches.includes(candidate)) continue;
-				if (candidate === segment || candidate.endsWith(`_${segment}`)) matches.push(candidate);
-			}
+		for (const candidate of candidates) {
+			if (candidate === name || matches.includes(candidate)) continue;
+			if (candidate === segment || candidate.endsWith(`_${segment}`)) matches.push(candidate);
 		}
 	}
 	return matches;
 }
 
 /**
- * `Tool <name> not found`, plus a suggestion when the advertised set contains a
- * plausible intended target. Exact wording is not a contract; the model reads it.
+ * `Tool <name> not found`, plus a suggestion when the session holds a plausible
+ * intended target. Exact wording is not a contract; the model reads it.
  */
 function formatToolNotFoundMessage(
 	name: string,
 	tools: ReadonlyArray<Pick<AgentTool, "name" | "customWireName">> | undefined,
+	fallbackNames?: Iterable<string>,
 ): string {
-	const suggestions = suggestToolNames(name, tools);
+	const suggestions = suggestToolNames(name, tools, fallbackNames);
 	if (suggestions.length === 0) return `Tool ${name} not found`;
 	if (suggestions.length === 1) return `Tool ${name} not found. Did you mean ${suggestions[0]}?`;
 	return `Tool ${name} not found. Closest available: ${suggestions.slice(0, MAX_TOOL_NAME_SUGGESTIONS).join(", ")}`;
@@ -2544,7 +2558,7 @@ async function prepareToolCallDispatch(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 ): Promise<Map<string, PreparedToolCall>> {
-	const { resolveFallbackTool, intentTracing, beforeToolCall } = config;
+	const { resolveFallbackTool, suggestFallbackToolNames, intentTracing, beforeToolCall } = config;
 	const prepared = new Map<string, PreparedToolCall>();
 	for (const toolCall of assistantMessage.content) {
 		if (toolCall.type !== "toolCall") continue;
@@ -2571,7 +2585,9 @@ async function prepareToolCallDispatch(
 		}
 		const validate = (args: Record<string, unknown>): Record<string, unknown> | undefined => {
 			try {
-				if (!tool) throw new Error(formatToolNotFoundMessage(toolCall.name, context.tools));
+				if (!tool) {
+					throw new Error(formatToolNotFoundMessage(toolCall.name, context.tools, suggestFallbackToolNames?.()));
+				}
 				return validateToolArguments(tool, { ...toolCall, arguments: args });
 			} catch (validationError) {
 				if (tool?.lenientArgValidation) {
@@ -2711,6 +2727,7 @@ async function executeToolCalls(
 
 		transformToolCallArguments,
 		resolveFallbackTool,
+		suggestFallbackToolNames,
 		afterToolCall,
 	} = config;
 	type ToolCallContent = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
@@ -2970,7 +2987,9 @@ async function executeToolCalls(
 
 		await runInActiveSpan(toolSpan, async () => {
 			try {
-				if (!tool) throw new Error(formatToolNotFoundMessage(toolCall.name, tools));
+				if (!tool) {
+					throw new Error(formatToolNotFoundMessage(toolCall.name, tools, suggestFallbackToolNames?.()));
+				}
 				if (record.signal.aborted) {
 					result = createToolSignalAbortedResult(record.signal);
 					isError = true;

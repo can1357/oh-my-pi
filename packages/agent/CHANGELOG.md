@@ -5,6 +5,13 @@
 ### Added
 
 - Added opt-in host authorization and exact-once streamed child execution for discard-safe local reads.
+### Fixed
+
+- Speculative stream sessions are now discarded when a hook or argument transform replaces a call's arguments while keeping its ID, instead of releasing deferred work planned from the original code (by [@h4vc](https://github.com/h4vc)).
+
+### Changed
+
+- `Tool <name> not found` now also suggests mounted `xd://` devices, not just the advertised tool set, via the new `suggestFallbackToolNames` option ([#11516](https://github.com/can1357/oh-my-pi/issues/11516), [#10109](https://github.com/can1357/oh-my-pi/issues/10109) by [@oldschoola](https://github.com/oldschoola)).
 
 ## [18.1.18] - 2026-09-11
 

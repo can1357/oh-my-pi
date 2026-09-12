@@ -20,6 +20,7 @@ import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
 import { type LocalReadSpeculationEvidence, resolveSpeculativeReadTarget, SNAPSHOT_MAX_BYTES } from "../tools/read";
 import { isCpuProfilePath } from "../utils/cpuprofile";
 import { isSampleProfilePath } from "../utils/sample-profile";
+import { isVideoPath } from "../utils/video";
 
 type LocalReadEvidence = {
 	path: string;
@@ -153,7 +154,11 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 			isCpuProfilePath(resolved) ||
 			CONVERTIBLE_EXTENSIONS.has(path.extname(resolved).toLowerCase()) ||
 			resolved.endsWith(".svg") ||
-			resolved.endsWith(".svgz")
+			resolved.endsWith(".svgz") ||
+			// Video reads render viewer UI through a separate frame pipeline
+			// that has no lexical render path; a symlink could otherwise route
+			// a text file there with target-named output.
+			isVideoPath(resolved)
 		) {
 			return { allowed: false, reason: "local read target is unsafe" };
 		}
