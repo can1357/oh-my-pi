@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional queued-message preparation with cancellation-safe delivery and appended context.
+
 ## [18.1.18] - 2026-09-11
 
 ### Added
