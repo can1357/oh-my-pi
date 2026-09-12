@@ -18,6 +18,7 @@ import {
 	logger,
 	normalizePathForComparison,
 	postmortem,
+	sanitizeText,
 	setInteractiveHost,
 	setProjectDir,
 	VERSION,
@@ -32,6 +33,7 @@ import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
 import { findConfigFile } from "./config";
+import { collectDisabledCredentialNotices } from "./config/credential-notices";
 import { ModelRegistry } from "./config/model-registry";
 import {
 	DEFAULT_PREWALK_TARGET,
@@ -606,6 +608,12 @@ async function runInteractiveMode(
 		// Pulled here, not pushed from SessionAdvisors: the constructor-time
 		// `emitNotice` fired before the UI subscribed and was silently lost.
 		mode.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(advisorConfigWarnings).join("; ")}`);
+	}
+	// Same pull-after-subscribe shape: an account torn down while no session was
+	// watching (background refresh, a sibling process) is only recorded as a
+	// tombstone, so announce it here until the user signs in again.
+	for (const notice of await collectDisabledCredentialNotices(session.modelRegistry.authStorage, Date.now())) {
+		mode.showWarning(notice);
 	}
 
 	for (const notify of notifs) {
@@ -2122,6 +2130,14 @@ export async function runRootCommand(
 				// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
 				stopStartupWatchdog();
 				const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
+				// Headless runs have no /login surface, but a silently signed-out account is
+				// exactly what makes a scripted run fail on a model it used yesterday.
+				for (const notice of await collectDisabledCredentialNotices(
+					session.modelRegistry.authStorage,
+					Date.now(),
+				)) {
+					process.stderr.write(`${sanitizeText(notice)}\n`);
+				}
 				const exitCode = await runPrintMode(session, {
 					mode,
 					messages: initialArgs.messages,

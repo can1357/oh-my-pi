@@ -204,6 +204,67 @@ export interface DisabledCredentialSummary {
 	disabledAtMs?: number;
 }
 
+/** Account identity of a live credential, matched against tombstones by {@link isActionableCredentialDisable}. */
+export interface CredentialAccountIdentity {
+	provider: string;
+	email?: string;
+	accountId?: string;
+	orgId?: string;
+}
+
+/**
+ * Whether a tombstone still represents lost capacity the user has to act on:
+ * an OAuth credential torn down automatically (refresh failure, upstream
+ * invalidation) whose identity has not signed in again. Rows the user replaced
+ * or deleted deliberately are lifecycle noise, and a tombstone whose email,
+ * account, or organization matches a live credential of the same provider has
+ * already been recovered.
+ */
+export function isActionableCredentialDisable(
+	summary: DisabledCredentialSummary,
+	activeAccounts: readonly CredentialAccountIdentity[],
+): boolean {
+	if (summary.type !== "oauth") return false;
+	if (/^(replaced by|deleted by user)/i.test(summary.cause)) return false;
+	const summaryEmail = summary.email?.toLowerCase();
+	const summaryAccountId = summary.accountId?.toLowerCase();
+	const summaryOrgId = summary.orgId?.toLowerCase();
+	return !activeAccounts.some(account => {
+		if (account.provider !== summary.provider) return false;
+		const accountEmail = account.email?.toLowerCase();
+		const accountAccountId = account.accountId?.toLowerCase();
+		const accountOrgId = account.orgId?.toLowerCase();
+		if (summaryEmail && accountEmail && summaryEmail === accountEmail) return true;
+		if (summaryAccountId && accountAccountId && summaryAccountId === accountAccountId) return true;
+		// Organization match: the same subscription re-authorized under another member/email.
+		return Boolean(summaryOrgId && accountOrgId && summaryOrgId === accountOrgId);
+	});
+}
+
+/** Human-sized disable cause: the upstream `error_description` when embedded, else the first clause. */
+export function summarizeDisableCause(cause: string): string {
+	const description = cause.match(/\\?"error_description\\?"\s*:\s*\\?"([^"\\]+)/)?.[1];
+	if (description) return description;
+	const stripped = cause.replace(/^oauth refresh failed:\s*/i, "");
+	const clause = stripped.split(/[;\n]/, 1)[0] ?? stripped;
+	return clause.length > 80 ? `${clause.slice(0, 77)}…` : clause;
+}
+
+/**
+ * Display label for an OAuth account: email or account id, qualified by the
+ * organization when it is a distinct value. `mask` runs over each part so
+ * redacting surfaces (`omp usage --redact`) can substitute placeholders.
+ */
+export function credentialAccountLabel(
+	identity: Pick<DisabledCredentialSummary, "email" | "accountId" | "orgId" | "orgName">,
+	mask: (part: string) => string = part => part,
+): string {
+	const base = identity.email ?? identity.accountId ?? "OAuth account";
+	const org = identity.orgName ?? identity.orgId;
+	if (!org || org === base) return mask(base);
+	return `${mask(base)} · ${mask(org)}`;
+}
+
 /**
  * Per-credential health record returned by {@link AuthStorage.checkCredentials}.
  *
@@ -571,9 +632,12 @@ export interface AuthCredentialStore {
 /**
  * Event payload describing a credential that was just soft-disabled.
  *
- * Today the only call site is OAuth refresh failures with a definitive cause
- * (`invalid_grant`, `401/403` not from a network blip, etc.) — the
- * disabled_cause string is the verbatim error captured for forensics.
+ * Fired by every automatic teardown — a definitive OAuth refresh failure
+ * (`invalid_grant`, `revoked`, …), an upstream response that invalidated the
+ * bearer, or a broker-issued disable. The disabled_cause string is the
+ * verbatim error captured for forensics; the identity fields mirror the
+ * tombstone's {@link DisabledCredentialSummary} so a subscriber can name the
+ * account that was signed out.
  *
  * Subscribers can use this to surface a notification, banner, or auto-launch
  * a re-login flow instead of letting the credential silently disappear.
@@ -581,6 +645,36 @@ export interface AuthCredentialStore {
 export interface CredentialDisabledEvent {
 	provider: string;
 	disabledCause: string;
+	/** Database row id of the tombstoned credential (matches {@link StoredAuthCredential.id}). */
+	credentialId: number;
+	/** Named `credentialType`, not `type`: the extension runner spreads this event under its own `type` discriminator. */
+	credentialType: AuthCredential["type"];
+	email?: string;
+	accountId?: string;
+	orgId?: string;
+	orgName?: string;
+}
+
+/** Build the {@link CredentialDisabledEvent} for a row that is being torn down. */
+function credentialDisabledEvent(
+	provider: string,
+	credentialId: number,
+	credential: AuthCredential,
+	disabledCause: string,
+): CredentialDisabledEvent {
+	const event: CredentialDisabledEvent = {
+		provider,
+		disabledCause,
+		credentialId,
+		credentialType: credential.type,
+	};
+	if (credential.type === "oauth") {
+		if (credential.email) event.email = credential.email;
+		if (credential.accountId) event.accountId = credential.accountId;
+		if (credential.orgId) event.orgId = credential.orgId;
+		if (credential.orgName) event.orgName = credential.orgName;
+	}
+	return event;
 }
 
 export type AuthStorageOptions = {
@@ -2443,7 +2537,7 @@ export class AuthStorage {
 		const updated = entries.filter((_value, idx) => idx !== index);
 		this.#setStoredCredentials(provider, updated);
 		this.#resetProviderAssignments(provider);
-		this.#emitCredentialDisabled({ provider, disabledCause });
+		this.#emitCredentialDisabled(credentialDisabledEvent(provider, target.id, expectedCredential, disabledCause));
 		return true;
 	}
 
@@ -2499,6 +2593,11 @@ export class AuthStorage {
 	}
 
 	#emitCredentialDisabled(event: CredentialDisabledEvent): void {
+		// The only log line any automatic teardown produces in a plain session:
+		// extension handlers are optional and the broker daemon is the only
+		// built-in subscriber, so without this an account can vanish from the
+		// pool with no trace in ~/.omp/logs.
+		logger.warn("Auth credential disabled", { ...event });
 		if (this.#credentialDisabledListeners.size === 0) {
 			// No subscribers — buffer for later replay. Cap the backlog so a process that runs
 			// without subscribers for a long time can't grow memory unboundedly; drop oldest
@@ -2751,7 +2850,7 @@ export class AuthStorage {
 									})),
 							);
 							this.#resetProviderAssignments(provider);
-							this.#emitCredentialDisabled({ provider, disabledCause });
+							this.#emitCredentialDisabled(credentialDisabledEvent(provider, row.id, current, disabledCause));
 							return { credential: undefined, refreshed: false, removed: true };
 						}
 						await this.reload();
@@ -6944,6 +7043,8 @@ export class AuthStorage {
 
 		if (target && AIError.isInvalidatedOAuthTokenError(error)) {
 			const disabledCause = message ?? "upstream reported invalidated OAuth token";
+			// The broker persists (and logs) a remote disable on its own host; this
+			// session still observed the invalidation and must announce it here.
 			const deleted = this.#store.deleteAuthCredentialRemote
 				? await this.#store.deleteAuthCredentialRemote(target.id, disabledCause)
 				: this.disableCredentialById(target.id, disabledCause);
@@ -6953,6 +7054,11 @@ export class AuthStorage {
 					provider,
 					latestRows.map(row => ({ id: row.id, credential: row.credential })),
 				);
+				if (this.#store.deleteAuthCredentialRemote) {
+					this.#emitCredentialDisabled(
+						credentialDisabledEvent(provider, target.id, target.credential, disabledCause),
+					);
+				}
 			}
 			return deleted && hasSibling;
 		}
@@ -7065,6 +7171,35 @@ export class AuthStorage {
 	async listDisabledCredentials(provider?: string, signal?: AbortSignal): Promise<DisabledCredentialSummary[]> {
 		if (!this.#store.listDisabledCredentials) return [];
 		return this.#store.listDisabledCredentials(provider, signal);
+	}
+
+	/**
+	 * Tombstones that still need the user's attention (see
+	 * {@link isActionableCredentialDisable}), matched against the live OAuth
+	 * credentials currently loaded for the same provider. Sessions replay these
+	 * at startup so an account signed out while nobody was watching is not
+	 * discovered days later as a missing model.
+	 */
+	async listActionableDisabledCredentials(
+		provider?: string,
+		signal?: AbortSignal,
+	): Promise<DisabledCredentialSummary[]> {
+		const disabled = await this.listDisabledCredentials(provider, signal);
+		if (disabled.length === 0) return [];
+		const activeAccounts: CredentialAccountIdentity[] = [];
+		for (const [entryProvider, entries] of this.#data) {
+			if (provider !== undefined && entryProvider !== provider) continue;
+			for (const entry of entries) {
+				if (entry.credential.type !== "oauth") continue;
+				activeAccounts.push({
+					provider: entryProvider,
+					email: entry.credential.email,
+					accountId: entry.credential.accountId,
+					orgId: entry.credential.orgId,
+				});
+			}
+		}
+		return disabled.filter(summary => isActionableCredentialDisable(summary, activeAccounts));
 	}
 
 	/**
@@ -7197,11 +7332,12 @@ export class AuthStorage {
 		for (const [provider, entries] of this.#data) {
 			const index = entries.findIndex(entry => entry.id === id);
 			if (index === -1) continue;
+			const target = entries[index]!;
 			this.#store.deleteAuthCredential(id, disabledCause);
 			const next = entries.filter((_value, idx) => idx !== index);
 			this.#setStoredCredentials(provider, next);
 			this.#resetProviderAssignments(provider);
-			this.#emitCredentialDisabled({ provider, disabledCause });
+			this.#emitCredentialDisabled(credentialDisabledEvent(provider, id, target.credential, disabledCause));
 			return true;
 		}
 		return false;

@@ -4,9 +4,11 @@ import {
 	type AuthCredentialStore,
 	AuthStorage,
 	type CredentialDisabledEvent,
+	type DisabledCredentialSummary,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
+import { logger } from "@oh-my-pi/pi-utils";
 
 // Env vars short-circuit AuthStorage.getApiKey before the OAuth refresh path runs; suppress
 // them for every test in this file so the credential-disable code path can be exercised.
@@ -19,6 +21,9 @@ const expiredOAuth = () =>
 		access: "expired-access",
 		refresh: "stale-refresh",
 		expires: Date.now() - 60_000,
+		email: "signed-out@example.com",
+		orgId: "org-1",
+		orgName: "Example Org",
 	}) as const;
 
 const failOAuthRefresh = (message = 'HTTP 400 invalid_grant {"error":"invalid_grant"}'): void => {
@@ -34,6 +39,7 @@ const failOAuthRefresh = (message = 'HTTP 400 invalid_grant {"error":"invalid_gr
 class MemoryAuthCredentialStore implements AuthCredentialStore {
 	#rows: StoredAuthCredential[] = [];
 	#nextId = 1;
+	listDisabledCredentials?: (provider?: string) => Promise<DisabledCredentialSummary[]>;
 
 	close(): void {}
 
@@ -408,6 +414,105 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			await Promise.resolve();
 			expect(replayed).toHaveLength(1);
 			expect(replayed[0]?.provider).toBe("openai");
+		});
+	});
+
+	describe("identity and log line", () => {
+		test("a definitive refresh failure names the row and account it tore down, once in the log", async () => {
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			const events: CredentialDisabledEvent[] = [];
+			const authStorage = openStorage({
+				onCredentialDisabled: event => {
+					events.push(event);
+				},
+			});
+			await authStorage.set("anthropic", [expiredOAuth()]);
+			failOAuthRefresh();
+
+			await authStorage.getApiKey("anthropic", "session-identity");
+
+			const expected = expect.objectContaining({
+				provider: "anthropic",
+				credentialId: 1,
+				credentialType: "oauth",
+				email: "signed-out@example.com",
+				orgId: "org-1",
+				orgName: "Example Org",
+				disabledCause: expect.stringContaining("invalid_grant"),
+			});
+			expect(events).toEqual([expected]);
+			const disableLogs = warnSpy.mock.calls.filter(([message]) => message === "Auth credential disabled");
+			expect(disableLogs).toEqual([["Auth credential disabled", expected]]);
+		});
+
+		test("a broker-issued disable by id carries the same identity", async () => {
+			const events: CredentialDisabledEvent[] = [];
+			const authStorage = openStorage({
+				onCredentialDisabled: event => {
+					events.push(event);
+				},
+			});
+			await authStorage.set("anthropic", [expiredOAuth()]);
+			expect(authStorage.disableCredentialById(1, "disabled via auth-broker")).toBe(true);
+
+			expect(events).toEqual([
+				expect.objectContaining({
+					provider: "anthropic",
+					credentialId: 1,
+					credentialType: "oauth",
+					email: "signed-out@example.com",
+					disabledCause: "disabled via auth-broker",
+				}),
+			]);
+		});
+	});
+
+	describe("listActionableDisabledCredentials", () => {
+		const tombstone = (overrides: Partial<DisabledCredentialSummary>): DisabledCredentialSummary => ({
+			id: 7,
+			provider: "anthropic",
+			type: "oauth",
+			email: "signed-out@example.com",
+			cause: "oauth refresh failed: invalid_grant",
+			...overrides,
+		});
+
+		const openStorageWithTombstones = (tombstones: DisabledCredentialSummary[]): AuthStorage => {
+			const store = new MemoryAuthCredentialStore();
+			store.listDisabledCredentials = async () => tombstones;
+			stores.push(store);
+			return new AuthStorage(store);
+		};
+
+		test("reports an automatic tombstone whose account has not signed in again", async () => {
+			const authStorage = openStorageWithTombstones([tombstone({})]);
+			await authStorage.set("anthropic", [{ ...expiredOAuth(), email: "someone-else@example.com", orgId: "org-2" }]);
+
+			const actionable = await authStorage.listActionableDisabledCredentials();
+			expect(actionable.map(summary => summary.id)).toEqual([7]);
+		});
+
+		test("hides tombstones recovered by a live credential with the same email, account, or organization", async () => {
+			const authStorage = openStorageWithTombstones([
+				tombstone({ id: 1, email: "Signed-Out@example.com" }),
+				tombstone({ id: 2, email: undefined, accountId: "acct-1" }),
+				tombstone({ id: 3, email: undefined, orgId: "org-1" }),
+				tombstone({ id: 4, provider: "openai", email: "signed-out@example.com" }),
+			]);
+			await authStorage.set("anthropic", [{ ...expiredOAuth(), accountId: "acct-1" }]);
+
+			const actionable = await authStorage.listActionableDisabledCredentials();
+			expect(actionable.map(summary => summary.id)).toEqual([4]);
+		});
+
+		test("ignores API-key rows and deliberate replacements or deletions", async () => {
+			const authStorage = openStorageWithTombstones([
+				tombstone({ id: 1, type: "api_key", email: undefined }),
+				tombstone({ id: 2, cause: "replaced by newer credential" }),
+				tombstone({ id: 3, cause: "deleted by user" }),
+			]);
+
+			expect(await authStorage.listActionableDisabledCredentials()).toEqual([]);
 		});
 	});
 });

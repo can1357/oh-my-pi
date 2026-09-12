@@ -28,7 +28,18 @@ const expiredOAuth = () =>
 		access: "expired-access",
 		refresh: "stale-refresh",
 		expires: Date.now() - 60_000,
+		email: "signed-out@example.com",
 	}) as const;
+
+/** The enriched event every automatic teardown of `expiredOAuth()` must carry. */
+const disabledEvent = (provider: string) =>
+	expect.objectContaining({
+		provider,
+		disabledCause: expect.stringContaining("invalid_grant"),
+		credentialId: expect.any(Number),
+		credentialType: "oauth",
+		email: "signed-out@example.com",
+	});
 
 const failOAuthRefresh = (): void => {
 	// AuthStorage refreshes through `refreshOAuthToken` before calling
@@ -128,7 +139,13 @@ describe("createAgentSession credential_disabled subscription", () => {
 		const waiters: Array<{ resolve: (event: CredentialDisabledEvent) => void }> = [];
 		const factory: ExtensionFactory = pi => {
 			pi.on("credential_disabled", event => {
-				const observed = { provider: event.provider, disabledCause: event.disabledCause };
+				const observed = {
+					provider: event.provider,
+					disabledCause: event.disabledCause,
+					credentialId: event.credentialId,
+					credentialType: event.credentialType,
+					email: event.email,
+				};
 				events.push(observed);
 				const waiter = waiters.shift();
 				if (waiter) waiter.resolve(observed);
@@ -177,9 +194,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 			await authStorage.getApiKey("anthropic", "session-fanout");
 			const extEvent = await observed;
 
-			expect(embedderEvents).toEqual([
-				{ provider: "anthropic", disabledCause: expect.stringContaining("invalid_grant") },
-			]);
+			expect(embedderEvents).toEqual([disabledEvent("anthropic")]);
 			expect(extEvent.provider).toBe("anthropic");
 			expect(extEvent.disabledCause).toContain("invalid_grant");
 		} finally {
@@ -217,10 +232,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 		// Drain async dispatch turns before asserting absence.
 		await drainCredentialDisabledDispatch();
 
-		expect(embedderEvents).toEqual([
-			{ provider: "anthropic", disabledCause: expect.stringContaining("invalid_grant") },
-			{ provider: "openai", disabledCause: expect.stringContaining("invalid_grant") },
-		]);
+		expect(embedderEvents).toEqual([disabledEvent("anthropic"), disabledEvent("openai")]);
 		expect(ext.events).toHaveLength(1);
 		expect(ext.events[0]?.provider).toBe("anthropic");
 	});
@@ -406,9 +418,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 		await authStorage.getApiKey("anthropic", "post-failure");
 		await drainCredentialDisabledDispatch();
 
-		expect(embedderEvents).toEqual([
-			{ provider: "anthropic", disabledCause: expect.stringContaining("invalid_grant") },
-		]);
+		expect(embedderEvents).toEqual([disabledEvent("anthropic")]);
 	});
 	it("subscribes through the registry's auth storage when only options.modelRegistry is provided", async () => {
 		const dirs = makeDirs("registry-only");
@@ -446,9 +456,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 			await modelRegistry.getApiKeyForProvider("anthropic", "registry-only");
 			const extEvent = await observed;
 
-			expect(embedderEvents).toEqual([
-				{ provider: "anthropic", disabledCause: expect.stringContaining("invalid_grant") },
-			]);
+			expect(embedderEvents).toEqual([disabledEvent("anthropic")]);
 			expect(extEvent.provider).toBe("anthropic");
 			expect(extEvent.disabledCause).toContain("invalid_grant");
 		} finally {
@@ -519,7 +527,12 @@ describe("createAgentSession credential_disabled subscription", () => {
 			const runner = new ExtensionRunner([throwingExtension], runtime, dirs.cwd, sessionManager, modelRegistry);
 
 			// 1. Buffer the event BEFORE initialize so it lands in #pendingCredentialDisabled.
-			await runner.emitCredentialDisabled({ provider: "anthropic", disabledCause: "test" });
+			await runner.emitCredentialDisabled({
+				provider: "anthropic",
+				disabledCause: "test",
+				credentialId: 1,
+				credentialType: "oauth",
+			});
 
 			// 2. initialize(); the flush is queued as a microtask.
 			runner.initialize(

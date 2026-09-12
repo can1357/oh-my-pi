@@ -10,8 +10,11 @@
 import {
 	ANTHROPIC_OAUTH_GRANT_TTL_MS,
 	type AuthStorage,
+	credentialAccountLabel,
 	type DisabledCredentialSummary,
+	isActionableCredentialDisable,
 	resolveUsedFraction,
+	summarizeDisableCause,
 	type UsageHistoryEntry,
 	type UsageLimit,
 	type UsageReport,
@@ -575,59 +578,6 @@ function formatReloginDeadline(
 }
 
 /**
- * Tombstones worth a row in `omp usage`: OAuth credentials torn down
- * automatically (refresh failure, upstream invalidation). Rows the user
- * replaced or deleted deliberately are lifecycle noise, not lost capacity.
- */
-function isActionableDisable(summary: DisabledCredentialSummary, activeAccounts: UsageAccountIdentity[] = []): boolean {
-	if (summary.type !== "oauth") return false;
-	if (/^(replaced by|deleted by user)/i.test(summary.cause)) return false;
-
-	// Do not display tombstone if there is an active account for the same provider
-	// matching the same identity (email, accountId, or org).
-	const summaryEmail = summary.email?.toLowerCase();
-	const summaryAccountId = summary.accountId?.toLowerCase();
-	const summaryOrgId = summary.orgId?.toLowerCase();
-
-	const matchesActive = activeAccounts.some(account => {
-		if (account.provider !== summary.provider) return false;
-
-		const accountEmail = account.email?.toLowerCase();
-		const accountAccountId = account.accountId?.toLowerCase();
-		const accountOrgId = account.orgId?.toLowerCase();
-
-		// If email or accountId match, it's the same identity
-		if (summaryEmail && accountEmail && summaryEmail === accountEmail) return true;
-		if (summaryAccountId && accountAccountId && summaryAccountId === accountAccountId) return true;
-
-		// Fallback: if orgId matches and neither email nor accountId contradicts
-		if (summaryOrgId && accountOrgId && summaryOrgId === accountOrgId) return true;
-
-		return false;
-	});
-
-	return !matchesActive;
-}
-
-/** Human-sized disable cause: the upstream `error_description` when embedded, else the first clause. */
-function shortDisableCause(cause: string): string {
-	const description = cause.match(/\\?"error_description\\?"\s*:\s*\\?"([^"\\]+)/)?.[1];
-	if (description) return description;
-	const stripped = cause.replace(/^oauth refresh failed:\s*/i, "");
-	const clause = stripped.split(/[;\n]/, 1)[0] ?? stripped;
-	return clause.length > 80 ? `${clause.slice(0, 77)}…` : clause;
-}
-
-/** Label for a disabled tombstone, masking each identity part under `--redact`. */
-function disabledIdentityLabel(summary: DisabledCredentialSummary, redaction?: Map<string, string>): string {
-	const base = summary.email ?? summary.accountId ?? "OAuth account";
-	const masked = redaction?.get(base) ?? base;
-	const org = summary.orgName ?? summary.orgId;
-	if (!org || org === base) return masked;
-	return `${masked} · ${redaction?.get(org) ?? org}`;
-}
-
-/**
  * Render the full text breakdown: per provider, per account, every limit
  * with a bar, amounts, and reset times; unattributed credentials trail
  * each provider section as "no usage data" rows.
@@ -654,7 +604,7 @@ export function formatUsageBreakdown(
 	}
 	const disabledByProvider = new Map<string, DisabledCredentialSummary[]>();
 	for (const summary of disabled) {
-		if (!isActionableDisable(summary, accounts)) continue;
+		if (!isActionableCredentialDisable(summary, accounts)) continue;
 		const list = disabledByProvider.get(summary.provider) ?? [];
 		list.push(summary);
 		disabledByProvider.set(summary.provider, list);
@@ -709,10 +659,10 @@ export function formatUsageBreakdown(
 		}
 
 		for (const summary of disabledByProvider.get(provider) ?? []) {
-			const label = disabledIdentityLabel(summary, redaction);
+			const label = credentialAccountLabel(summary, part => redaction?.get(part) ?? part);
 			const ago = summary.disabledAtMs !== undefined ? ` ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
 			lines.push(
-				`  ${chalk.red(`✗ ${label} — disabled${ago}: ${sanitizeText(shortDisableCause(summary.cause))}`)} ${chalk.dim("(re-login to restore)")}`,
+				`  ${chalk.red(`✗ ${label} — disabled${ago}: ${sanitizeText(summarizeDisableCause(summary.cause))}`)} ${chalk.dim("(re-login to restore)")}`,
 			);
 		}
 
@@ -1164,7 +1114,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				const stats = computeProviderWindowStats(filteredReports.filter(peer => peer.provider === report.provider));
 				if (stats.length > 0) capacity[report.provider] = stats;
 			}
-			let disabledForJson = disabled.filter(summary => isActionableDisable(summary, accounts));
+			let disabledForJson = disabled.filter(summary => isActionableCredentialDisable(summary, accounts));
 			if (redaction) {
 				disabledForJson = disabledForJson.map(summary => ({
 					...summary,

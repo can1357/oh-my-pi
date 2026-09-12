@@ -63,6 +63,7 @@ import {
 import { bucketRules } from "./capability/rule-buckets";
 import type { EffectiveExtensionRoots } from "./capability/types";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
+import { formatCredentialDisabledNotice } from "./config/credential-notices";
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
@@ -1371,7 +1372,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// buffer — so we can't rely on it to catch startup events for the extension runner.
 	const startupCredentialDisabledEvents: CredentialDisabledEvent[] = [];
 	let credentialDisabledTarget: ExtensionRunner | undefined;
+	// The session is the user-facing surface: a teardown that happens before it
+	// exists is announced by the tombstone replay each mode runs at startup.
+	let credentialDisabledNoticeTarget: AgentSession | undefined;
 	const unsubscribeCredentialDisabled: (() => void) | undefined = authStorage.onCredentialDisabled(event => {
+		credentialDisabledNoticeTarget?.emitNotice("warning", formatCredentialDisabledNotice(event), "auth");
 		if (credentialDisabledTarget) {
 			// Discard return: any handler error is routed through runner.onError listeners.
 			void credentialDisabledTarget.emitCredentialDisabled(event);
@@ -3900,6 +3905,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;
+		credentialDisabledNoticeTarget = session;
 		// Backfill the resumed advisor spend without blocking startup: the scan
 		// runs after the session is live, so `--resume` no longer scales with the
 		// advisor transcript size (issue #9553).

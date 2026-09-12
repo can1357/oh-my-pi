@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed automatic OAuth credential disables leaving no trace in a plain session: every teardown (definitive refresh failure, upstream token invalidation, broker disable) now logs one warning naming the provider, credential id, account identity, and cause, and `credential_disabled` events carry `credentialId`, `credentialType`, and the account identity. A broker-backed session announces the disable it observed instead of leaving it to the broker host. Added `AuthStorage.listActionableDisabledCredentials` plus the shared `isActionableCredentialDisable`, `summarizeDisableCause`, and `credentialAccountLabel` helpers.
+
 ## [18.1.19] - 2026-09-12
 
 ### Added
