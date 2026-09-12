@@ -95,6 +95,25 @@ function assistantTurn(content: AssistantMessage["content"], timestamp: number):
 	};
 }
 
+/**
+ * Payload hook that returns a replacement body whose `messages[0]` is a
+ * different message and whose system blocks, tool array, retention and later
+ * messages are the ones `buildParams` assembled. A rewritten conversation root
+ * is therefore the only difference between the assembled payload and the sent
+ * one, and the assembled payload keeps its own root — an in-place mutation
+ * would edit the object both sides hold and could not tell them apart.
+ */
+const rewriteWireRoot: NonNullable<AnthropicOptions["onPayload"]> = payload => {
+	const assembled = payload as Record<string, unknown> & { messages: ReadonlyArray<unknown> };
+	return {
+		...assembled,
+		messages: [
+			{ role: "user", content: [{ type: "text", text: "Rewritten root." }] },
+			...assembled.messages.slice(1),
+		],
+	};
+};
+
 const successFetch: FetchImpl = async () => {
 	const events = [
 		{
@@ -337,6 +356,69 @@ describe("anthropic cache-break attribution", () => {
 
 		expect(second.cacheBreakReason).toEqual({ kind: "system_prompt", charDelta: after.length - before.length });
 		expect(third.cacheBreakReason).toEqual({ kind: "system_prompt", charDelta: before.length - after.length });
+	});
+
+	it("reports a rewritten history when a payload hook replaced the conversation root", async () => {
+		const states = createProviderSessionState();
+		const context = contextWithTools([tool("lookup", {})]);
+		await turn(states, context);
+		// The hook rewrites the root after the payload was assembled, so the
+		// request really sends a different prefix than buildParams planned. A
+		// turn that compares the assembled payload instead of the sent one goes
+		// cold with nothing to report.
+		const second = await turn(states, context, undefined, MODEL, successFetch, { onPayload: rewriteWireRoot });
+		// The hook stops firing, so the root reverts to the caller's own: the
+		// stored snapshot has to describe what was sent, or this turn is
+		// compared against a prefix that never reached Anthropic.
+		const third = await turn(states, context);
+
+		expect(second.cacheBreakReason).toEqual({ kind: "history_rewrite" });
+		expect(third.cacheBreakReason).toEqual({ kind: "history_rewrite" });
+	});
+
+	it("blames nothing when a payload hook rewrites the root the same way on every turn", async () => {
+		const states = createProviderSessionState();
+		const base = contextWithTools([tool("lookup", {})]);
+		const messages: Message[] = [{ role: "user", content: "Use the tools", timestamp: 1 }];
+		const hooked = async (): Promise<AssistantMessage> =>
+			await turn(states, { ...base, messages: [...messages] }, undefined, MODEL, successFetch, {
+				onPayload: rewriteWireRoot,
+			});
+		await hooked();
+		messages.push(assistantTurn([{ type: "text", text: "on it" }], 2), {
+			role: "user",
+			content: "keep going",
+			timestamp: 3,
+		});
+		const second = await hooked();
+		messages.push(assistantTurn([{ type: "text", text: "done" }], 4), {
+			role: "user",
+			content: "now summarize",
+			timestamp: 5,
+		});
+		const third = await hooked();
+
+		// Every turn sends the same rewritten root and appends below it, which is
+		// an ordinary append of the history that was actually sent. Snapshotting
+		// one of the two payloads and comparing against the other reports a
+		// rewrite on every hooked turn forever.
+		expect(second.cacheBreakReason).toBeUndefined();
+		expect(third.cacheBreakReason).toBeUndefined();
+	});
+
+	it("reports a hook-rewritten root on a session-less request too", async () => {
+		const states = createProviderSessionState();
+		const context = contextWithTools([tool("lookup", {})]);
+		// Without a session id the snapshot is keyed on the root the caller
+		// supplied. Keying it on the sent root instead would give a rewritten
+		// root its own key, find no previous snapshot, and report nothing.
+		await turn(states, context, undefined, MODEL, successFetch, { sessionId: undefined });
+		const second = await turn(states, context, undefined, MODEL, successFetch, {
+			sessionId: undefined,
+			onPayload: rewriteWireRoot,
+		});
+
+		expect(second.cacheBreakReason).toEqual({ kind: "history_rewrite" });
 	});
 
 	it("reports a change back to an earlier system prefix on the same session", async () => {
