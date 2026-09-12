@@ -16,7 +16,9 @@ import type {
 	AssistantMessage,
 	CacheRetention,
 	Context,
+	DeveloperMessage,
 	FetchImpl,
+	Message,
 	Model,
 	ProviderSessionState,
 	Tool,
@@ -70,6 +72,26 @@ function contextWithTools(tools: Tool[], systemPrompt = "You are a precise assis
 		systemPrompt: [systemPrompt],
 		messages: [{ role: "user", content: "Use the tools", timestamp: 1 }],
 		tools,
+	};
+}
+
+function assistantTurn(content: AssistantMessage["content"], timestamp: number): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: MODEL.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp,
 	};
 }
 
@@ -338,5 +360,136 @@ describe("anthropic cache-break attribution", () => {
 
 		expect(second.cacheBreakReason).toEqual({ kind: "tools" });
 		expect(third.cacheBreakReason).toEqual({ kind: "tools" });
+	});
+
+	it("blames nothing across a long run of turns that only append", async () => {
+		const states = createProviderSessionState();
+		const base = contextWithTools([tool("lookup", {})]);
+		const messages: Message[] = [{ role: "user", content: "Use the tools", timestamp: 1 }];
+		const blamed: string[] = [];
+		// 18 turns crosses the 15-user-turn decimation checkpoint, so the rolling
+		// cache breakpoints really do move off messages that carried one earlier.
+		// An append must still read as an append after they have moved.
+		for (let index = 0; index < 18; index++) {
+			const stamp = index * 4;
+			const appended = await turn(states, { ...base, messages: [...messages] });
+			if (appended.cacheBreakReason) blamed.push(`turn ${index}: ${appended.cacheBreakReason.kind}`);
+			if (index % 3 === 1) {
+				messages.push(
+					assistantTurn(
+						[{ type: "toolCall", id: `call_${index}`, name: "lookup", arguments: { key: `k${index}` } }],
+						stamp + 1,
+					),
+					{
+						role: "toolResult",
+						toolCallId: `call_${index}`,
+						toolName: "lookup",
+						content: [{ type: "text", text: `row ${index}` }],
+						isError: false,
+						timestamp: stamp + 2,
+					},
+				);
+			} else {
+				messages.push(assistantTurn([{ type: "text", text: `reply ${index}` }], stamp + 1));
+				// Continuing from a trailing assistant puts the synthetic `Continue.`
+				// pad on the wire, and the next turn replaces it with the real user
+				// turn — a disappearance that is not a rewrite.
+				if (index % 4 === 3) {
+					const continued = await turn(states, { ...base, messages: [...messages] });
+					if (continued.cacheBreakReason) blamed.push(`continue ${index}: ${continued.cacheBreakReason.kind}`);
+				}
+			}
+			messages.push({ role: "user", content: `follow-up ${index}`, timestamp: stamp + 3 });
+		}
+
+		expect(blamed).toEqual([]);
+	});
+
+	it("reports a rewritten history when a middle message was edited and no control was ever recorded", async () => {
+		const states = createProviderSessionState();
+		const base = contextWithTools([tool("lookup", {})]);
+		const history = (middle: string): Message[] => [
+			{ role: "user", content: "Use the tools", timestamp: 1 },
+			assistantTurn([{ type: "text", text: "on it" }], 2),
+			{ role: "user", content: middle, timestamp: 3 },
+			assistantTurn([{ type: "text", text: "done" }], 4),
+			{ role: "user", content: "now summarize", timestamp: 5 },
+		];
+		await turn(states, { ...base, messages: history("check the second file") });
+		// The tool set, the system prompt and the root all stand still, so no
+		// control transition was ever recorded and nothing but the history
+		// itself can name this turn's cause.
+		const second = await turn(states, { ...base, messages: history("check the third file instead") });
+
+		expect(second.cacheBreakReason).toEqual({ kind: "history_rewrite" });
+	});
+
+	it("reports a rewritten history when a middle message was removed", async () => {
+		const states = createProviderSessionState();
+		const base = contextWithTools([tool("lookup", {})]);
+		const root: Message[] = [
+			{ role: "user", content: "Use the tools", timestamp: 1 },
+			assistantTurn([{ type: "text", text: "on it" }], 2),
+		];
+		const removed: Message[] = [
+			{ role: "user", content: "check the second file", timestamp: 3 },
+			assistantTurn([{ type: "text", text: "second file is clean" }], 4),
+		];
+		const tail: Message[] = [{ role: "user", content: "now summarize", timestamp: 5 }];
+		await turn(states, { ...base, messages: [...root, ...removed, ...tail] });
+		// The removed pair is replaced by an equal-length continuation, so the
+		// wire history is exactly as long as before and only a per-message
+		// comparison can tell the two apart.
+		const second = await turn(states, {
+			...base,
+			messages: [
+				...root,
+				...tail,
+				assistantTurn([{ type: "text", text: "summary" }], 6),
+				{ role: "user", content: "thanks", timestamp: 7 },
+			],
+		});
+
+		expect(second.cacheBreakReason).toEqual({ kind: "history_rewrite" });
+	});
+
+	it("reports a rewritten history when a turn-scoped system message stopped being sent", async () => {
+		const states = createProviderSessionState();
+		const base = contextWithTools([tool("lookup", {})]);
+		const head: Message[] = [{ role: "user", content: "Use the tools", timestamp: 1 }];
+		const scoped: DeveloperMessage = {
+			role: "developer",
+			content: [{ type: "text", text: "Keep this turn brief." }],
+			providerPayload: { type: "anthropicMessage", clearAt: "next_user_message" },
+			timestamp: 2,
+		};
+		const tail: Message[] = [
+			assistantTurn([{ type: "text", text: "brief" }], 3),
+			{ role: "user", content: "carry on", timestamp: 4 },
+		];
+		let turnScopedSent = 0;
+		await turn(states, { ...base, messages: [...head, scoped, ...tail] }, undefined, MODEL, successFetch, {
+			onPayload: payload => {
+				const sent = payload as { messages?: Array<{ clear_at?: string }> };
+				turnScopedSent = (sent.messages ?? []).filter(message => message.clear_at === "next_user_message").length;
+			},
+		});
+		// The caller stops sending it once its turn is over. It sat mid-history,
+		// so everything after it moves and the cached prefix goes with it. This
+		// is reported rather than projected out: omp never emits one itself, so
+		// it cannot mask the other causes, and staying silent here would leave a
+		// genuinely cold turn unexplained.
+		const second = await turn(states, {
+			...base,
+			messages: [
+				...head,
+				...tail,
+				assistantTurn([{ type: "text", text: "still here" }], 5),
+				{ role: "user", content: "again", timestamp: 6 },
+			],
+		});
+
+		expect(turnScopedSent).toBe(1);
+		expect(second.cacheBreakReason).toEqual({ kind: "history_rewrite" });
 	});
 });

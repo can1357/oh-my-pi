@@ -457,8 +457,17 @@ type AnthropicControlState = {
  * neither a system-prompt edit nor a compaction that replaced the root.
  */
 type AnthropicCachePrefixSnapshot = {
-	/** Fingerprint of the first wire message; a change means the whole tail moved. */
-	rootFingerprint: string;
+	/**
+	 * Wire messages {@link historyChain} covers. A trailing `Continue.` pad is
+	 * excluded because the next turn replaces it by definition.
+	 */
+	messageCount: number;
+	/**
+	 * Hash chain folded over the projected wire messages in order. The next
+	 * request re-folds its own history and compares this against the chain's
+	 * value at {@link messageCount}: equal means it merely appended.
+	 */
+	historyChain: bigint;
 	systemFingerprint: string;
 	systemTextLength: number;
 	toolsFingerprint: string;
@@ -3912,24 +3921,33 @@ function applyCacheControlToMessage(message: MessageParam, cacheControl: Anthrop
 	return false;
 }
 
+/**
+ * Wire messages that will still be there next turn. `convertAnthropicMessages`
+ * appends a neutral `Continue.` pad after a trailing assistant because
+ * Anthropic rejects assistant-prefill endings, and the next normal turn
+ * replaces it with the real user turn — so neither a rolling cache breakpoint
+ * nor {@link anthropicHistoryChain} may be anchored on it.
+ */
+function anthropicStableMessageCount(messages: readonly MessageParam[]): number {
+	const trailingIndex = messages.length - 1;
+	const trailingMessage = messages[trailingIndex];
+	const hasTrailingAssistantPad =
+		trailingMessage?.role === "user" &&
+		trailingMessage.content === "Continue." &&
+		!isConversationalUser(trailingMessage) &&
+		messages[trailingIndex - 1]?.role === "assistant";
+	return hasTrailingAssistantPad ? trailingIndex : messages.length;
+}
+
 function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?: AnthropicCacheControl): void {
 	if (!cacheControl) return;
 
 	const headBreakpoints = countHeadBreakpoints(params);
 	const messageBudget = Math.max(0, ANTHROPIC_MAX_BREAKPOINTS - headBreakpoints);
 	if (messageBudget <= 0 || params.messages.length === 0) return;
-	// `convertAnthropicMessages` appends a neutral `Continue.` pad after a trailing
-	// assistant because Anthropic rejects assistant-prefill endings. It is absent
-	// from the next normal turn, so anchor the rolling window on the preceding
-	// real assistant instead.
-	const trailingIndex = params.messages.length - 1;
-	const trailingMessage = params.messages[trailingIndex];
-	const hasTrailingAssistantPad =
-		trailingMessage?.role === "user" &&
-		trailingMessage.content === "Continue." &&
-		!isConversationalUser(trailingMessage) &&
-		params.messages[trailingIndex - 1]?.role === "assistant";
-	const messageEnd = hasTrailingAssistantPad ? trailingIndex - 1 : trailingIndex;
+	// Anchor the rolling window on the last message the next turn will still
+	// carry, so a breakpoint never lands on the transient assistant pad.
+	const messageEnd = anthropicStableMessageCount(params.messages) - 1;
 
 	// Decimation counts conversational turns, so it reads the provenance marker
 	// `convertAnthropicMessages` records rather than the wire role. A wire `user`
@@ -4111,12 +4129,85 @@ function resetAnthropicControlState(state: AnthropicControlState, cacheBreakReas
 	state.currentEffort = undefined;
 }
 
+/**
+ * Canonical hash image of a wire message: the bytes that identify it across
+ * turns, with everything that moves while the conversation stands still taken
+ * out. Never sent — it only feeds fingerprints.
+ *
+ * Three things move on their own. Replayed thinking blocks, which an assistant
+ * turn carries or not depending on signing and demotion. `cache_control`,
+ * whose breakpoints {@link applyPromptCaching} walks down the history every
+ * turn — the same reason {@link anthropicToolPrefixKey} drops it from tools.
+ * And string content, which {@link applyCacheControlToMessage} promotes to a
+ * single text block when a breakpoint lands on it, so the two spellings of one
+ * message must hash alike.
+ */
 function anthropicControlMessageProjection(message: MessageParam): MessageParam {
-	if (message.role !== "assistant" || !Array.isArray(message.content)) return message;
-	return {
-		...message,
-		content: message.content.filter(block => block.type !== "thinking" && block.type !== "redacted_thinking"),
-	};
+	const { content } = message;
+	if (typeof content === "string") return { ...message, content: [{ type: "text", text: content }] };
+	const dropThinking = message.role === "assistant";
+	const projected: ContentBlockParam[] = [];
+	let changed = false;
+	for (const block of content) {
+		if (dropThinking && (block.type === "thinking" || block.type === "redacted_thinking")) {
+			changed = true;
+			continue;
+		}
+		if ("cache_control" in block) {
+			// `undefined` is omitted by JSON.stringify, and this projection is
+			// only ever stringified, so it does not have to drop the key.
+			projected.push({ ...block, cache_control: undefined });
+			changed = true;
+			continue;
+		}
+		projected.push(block);
+	}
+	return changed ? { ...message, content: projected } : message;
+}
+
+/** One request's view of the wire history, from a single pass over it. */
+type AnthropicHistoryChain = {
+	/** Messages the chain covers, excluding a trailing `Continue.` pad. */
+	messageCount: number;
+	/** Chain over all of them, to store for the next request to compare against. */
+	chain: bigint;
+	/** Chain after the first `markAt`; absent when this history is shorter than that. */
+	mark: bigint | undefined;
+};
+
+/**
+ * Fold the projected wire messages into a running hash chain, in one pass and
+ * without keeping a per-message hash array anywhere.
+ *
+ * History grows every turn by design, so whole-history fingerprints cannot be
+ * compared — an ordinary append would read as a rewrite on every turn. A chain
+ * can be: `mark` is this request's chain over its own first `markAt` messages,
+ * so comparing it against the value the previous request stored answers "is
+ * the previous history a prefix of this one" exactly. Equal is an append;
+ * anything else, including a history too short to reach `markAt`, is a rewrite.
+ *
+ * Turn-scoped (`clear_at: "next_user_message"`) messages stay in the chain, so
+ * a caller that stops sending one reads as a rewrite. That is the truthful
+ * answer — the message sits mid-history, and dropping it moves every byte
+ * after it — and it cannot make the report noisy. omp never emits one: the
+ * sole producer of the `clearAt` payload is the Anthropic-compatible server in
+ * `anthropic-messages-server.ts`, copying `clear_at` off an inbound request,
+ * and neither the coding agent nor the agent runtime sets it. Even there,
+ * `convertAnthropicMessages` only puts `clear_at` on the wire behind
+ * `supportsMidConversationSystem`, `supportsTurnScopedSystem`, and its
+ * placement rules. Projecting them out instead would trade that for the one
+ * failure this detection exists to remove: a genuinely cold turn with no cause
+ * to report.
+ */
+function anthropicHistoryChain(messages: readonly MessageParam[], markAt: number): AnthropicHistoryChain {
+	const messageCount = anthropicStableMessageCount(messages);
+	let chain = 0n;
+	let mark = markAt === 0 ? chain : undefined;
+	for (let index = 0; index < messageCount; index++) {
+		chain = Bun.hash.wyhash(JSON.stringify(anthropicControlMessageProjection(messages[index])), chain);
+		if (index + 1 === markAt) mark = chain;
+	}
+	return { messageCount, chain, mark };
 }
 
 /**
@@ -4138,8 +4229,6 @@ function anthropicControlMessageProjection(message: MessageParam): MessageParam 
 type AnthropicConversationIdentity = {
 	conversationKey: string;
 	controlKey: string;
-	/** Fingerprint of the projected root message, compared by diagnostics. */
-	rootFingerprint: string;
 };
 
 function anthropicConversationIdentity(
@@ -4150,12 +4239,10 @@ function anthropicConversationIdentity(
 	const root = messages[0];
 	const rootProjection = root ? anthropicControlMessageProjection(root) : null;
 	const session = sessionId ?? "";
-	const rootFingerprint = String(Bun.hash(JSON.stringify(rootProjection)));
 	const conversationScope = sessionId !== undefined ? [sessionId] : [null, rootProjection];
 	return {
 		conversationKey: String(Bun.hash(JSON.stringify(conversationScope))),
 		controlKey: String(Bun.hash(JSON.stringify([session, system?.map(block => block.text) ?? null, rootProjection]))),
-		rootFingerprint,
 	};
 }
 
@@ -4440,8 +4527,8 @@ const NO_CACHE_BREAK_DETECTION: AnthropicCacheBreakDetection = { reason: undefin
 
 /**
  * Name what this request changed about the cached prompt prefix, for reporting
- * only — nothing here influences the request. Compares the current conversation
- * root, system fingerprint, tool definitions, and cache retention against the
+ * only — nothing here influences the request. Compares the wire history, the
+ * system fingerprint, the tool definitions, and the cache retention against the
  * conversation's last snapshot, folds in the cause a baseline reset recorded
  * while the request was being shaped, and hands back the snapshot to store once
  * the request succeeds.
@@ -4451,11 +4538,24 @@ const NO_CACHE_BREAK_DETECTION: AnthropicCacheBreakDetection = { reason: undefin
  * in the prefix), then `tools`, then `retention` (the prefix text is unchanged
  * but its cache entry is not reusable).
  *
- * `history_rewrite` covers a replaced conversation root and a mismatched
- * recorded control transition (checked by {@link syncAnthropicControlState}).
- * An edit to a middle message with no recorded transition is not detected:
- * hashing every message projection would add O(context) work per request for
- * diagnostics alone, even on contexts of hundreds of thousands of tokens.
+ * `history_rewrite` covers any wire history the previous one is not a prefix
+ * of: a replaced root, an edited or removed middle message, a rewind, a branch
+ * switch, a compaction — whether or not a control transition was ever recorded.
+ * {@link syncAnthropicControlState} still catches the subset that has one,
+ * earlier and together with the baseline reset that belongs to it; the general
+ * case is the hash chain on the snapshot. {@link anthropicHistoryChain} replays
+ * the chain over this request's own messages and reads its value at the
+ * previous message count, so an append matches and anything else does not.
+ * That pass measures 0.9 ms median / 2 ms worst case over a 1,838-message,
+ * 3 MB wire history — the shape of a real 770k-token session — against a
+ * request that already serializes the same payload and then spends seconds on
+ * the wire, so cost is not a reason to narrow what this detects.
+ *
+ * The chain starts at index 0, so it subsumes the conversation-root
+ * fingerprint this used to store alongside it: a replaced root changes the
+ * chain at index 0 and therefore at every later index too. The root
+ * fingerprint survives only inside {@link anthropicConversationIdentity},
+ * where it keys a session-less conversation rather than describing its shape.
  *
  * The tools array is read two different ways depending on the deployment. Where
  * `supportsMidConversationToolChanges` holds, {@link planStableAnthropicTools}
@@ -4501,9 +4601,12 @@ function detectAnthropicCacheBreak(
 	// switching caching on later is not a retention change.
 	const cacheControl = getAnthropicPayloadCacheControl(params);
 	const cacheTtl = cacheControl ? (cacheControl.ttl === "1h" ? "1h" : "5m") : undefined;
-	const { conversationKey, rootFingerprint } = conversation;
+	const { conversationKey } = conversation;
+	const previous = state.cachePrefixDiagnostics.get(conversationKey);
+	const history = anthropicHistoryChain(params.messages, previous?.messageCount ?? 0);
 	const snapshot: AnthropicCachePrefixSnapshot = {
-		rootFingerprint,
+		messageCount: history.messageCount,
+		historyChain: history.chain,
 		systemFingerprint,
 		systemTextLength,
 		toolsFingerprint,
@@ -4518,11 +4621,14 @@ function detectAnthropicCacheBreak(
 			if (oldest !== undefined) state.cachePrefixDiagnostics.delete(oldest);
 		}
 	};
-	const previous = state.cachePrefixDiagnostics.get(conversationKey);
 	if (!previous) return { reason: undefined, commit };
 	if (controlReason?.kind === "history_rewrite") return { reason: controlReason, commit };
-	if (previous.rootFingerprint !== rootFingerprint || previous.systemFingerprint !== systemFingerprint) {
-		if (previous.rootFingerprint !== rootFingerprint) return { reason: { kind: "history_rewrite" }, commit };
+	// `history.mark` is this request's chain over its own first
+	// `previous.messageCount` messages, and is absent when it no longer has
+	// that many. Equal means the previous history is a prefix of this one,
+	// which is an ordinary append and changes nothing already cached.
+	if (history.mark !== previous.historyChain) return { reason: { kind: "history_rewrite" }, commit };
+	if (previous.systemFingerprint !== systemFingerprint) {
 		return {
 			reason: { kind: "system_prompt", charDelta: systemTextLength - previous.systemTextLength },
 			commit,
