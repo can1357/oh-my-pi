@@ -742,4 +742,105 @@ describe("LSP diagnostics freshness", () => {
 			orphanDir.removeSync();
 		}
 	});
+
+	it("WriteTool re-reads lsp.formatOnWrite so a reloaded config formats without restart", async () => {
+		const filePath = path.join(tempDir.path(), "reconfigured-format.ts");
+		const formatter = createFormatter(async () => "export const value = 1;\n");
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["formatter", formatter]]);
+		vi.spyOn(lspClient, "getActiveOrPendingClient").mockResolvedValue(undefined);
+		vi.spyOn(lspClient, "syncContent").mockResolvedValue();
+		vi.spyOn(lspClient, "notifySaved").mockResolvedValue();
+		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+
+		const settings = Settings.isolated();
+		settings.set("lsp.formatOnWrite", false);
+		settings.set("lsp.diagnosticsOnWrite", false);
+		settings.set("lsp.diagnosticsDeduplicate", true);
+		const session: ToolSession = {
+			cwd: tempDir.path(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			enableLsp: true,
+			settings,
+		};
+		const tool = new WriteTool(session);
+		const raw = "export const value=1\n";
+
+		await tool.execute("format-before-enable", { path: filePath, content: raw });
+		expect(await Bun.file(filePath).text()).toBe(raw);
+
+		// No setting moved: the re-read reports a no-op.
+		expect(tool.reconfigure()).toBe(false);
+
+		settings.set("lsp.formatOnWrite", true);
+		expect(tool.reconfigure()).toBe(true);
+
+		await tool.execute("format-after-enable", { path: filePath, content: raw });
+		expect(await Bun.file(filePath).text()).toBe("export const value = 1;\n");
+	});
+
+	it("WriteTool re-reads lsp.diagnosticsOnWrite so reloaded settings defer diagnostics to the agent", async () => {
+		const filePath = path.join(tempDir.path(), "reconfigured-deferred.ts");
+		const uri = fileToUri(filePath);
+		const client = createClient(tempDir.path(), TEST_SERVER);
+		const clock = new VirtualClock(Date.now());
+		installVirtualTime(clock);
+
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", TEST_SERVER]]);
+		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+		vi.spyOn(lspClient, "syncContent").mockImplementation(async (mockClient, syncedFilePath) => {
+			mockClient.openFiles.set(fileToUri(syncedFilePath), { version: 1, languageId: "typescript" });
+		});
+		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
+			clock.in(2000, () => {
+				publishDiagnostics(mockClient, uri, [createDiagnostic("reloaded deferred error")], null);
+			});
+		});
+
+		const queued = Promise.withResolvers<DeferredDiagnosticsEntry>();
+		let queuedCount = 0;
+		const mutationVersions = new Map<string, number>();
+		const settings = Settings.isolated();
+		settings.set("lsp.formatOnWrite", false);
+		settings.set("lsp.diagnosticsOnWrite", false);
+		settings.set("lsp.diagnosticsDeduplicate", true);
+		const session: ToolSession = {
+			cwd: tempDir.path(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			enableLsp: true,
+			settings,
+			queueDeferredDiagnostics: entry => {
+				queuedCount += 1;
+				queued.resolve(entry);
+			},
+			bumpFileMutationVersion: target => {
+				const version = (mutationVersions.get(target) ?? 0) + 1;
+				mutationVersions.set(target, version);
+				return version;
+			},
+			getFileMutationVersion: target => mutationVersions.get(target) ?? 0,
+		};
+		const tool = new WriteTool(session);
+		const content = "export const value: number = 'x';\n";
+
+		await tool.execute("deferred-before-enable", { path: filePath, content });
+		clock.advance(5000);
+		expect(queuedCount).toBe(0);
+
+		settings.set("lsp.diagnosticsOnWrite", true);
+		expect(tool.reconfigure()).toBe(true);
+
+		const result = await tool.execute("deferred-after-enable", { path: filePath, content });
+		expect(result.details?.diagnostics).toBeUndefined();
+		const late = await queued.promise;
+		expect(late.isStale()).toBe(false);
+		expect(late.errored).toBe(true);
+		expect(late.messages.some(message => message.includes("reloaded deferred error"))).toBe(true);
+		expect(await Bun.file(filePath).text()).toBe(content);
+	});
 });

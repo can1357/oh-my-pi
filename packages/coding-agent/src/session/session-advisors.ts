@@ -249,7 +249,7 @@ export interface SessionAdvisorsHost {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	yieldQueue: YieldQueue;
-	obfuscator: SecretObfuscator | undefined;
+	obfuscator(): SecretObfuscator | undefined;
 	providerSessionState: Map<string, ProviderSessionState>;
 	preferWebsockets: boolean | undefined;
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
@@ -395,6 +395,17 @@ export class SessionAdvisors {
 
 	/** Rebuilds live advisors when role assignments alter their resolved runtime inputs. */
 	onModelRolesChanged(): void {
+		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
+		if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
+		this.#buildAdvisorRuntime(true);
+	}
+
+	/**
+	 * Rebuilds live advisor runtimes so they re-read host capabilities that are
+	 * captured once per runtime construction — notably the secret obfuscator
+	 * after a `secrets.enabled` flip rebuilt it mid-session.
+	 */
+	rebuildRuntimesForHostChange(): void {
 		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
 		if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);
@@ -816,9 +827,21 @@ export class SessionAdvisors {
 		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
 		const instructions = config.instructions?.trim() ?? "";
 		const budget = this.#advisorMaxNotesPerUpdate(config);
-		return [config.name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions, budget].join(
-			"\u001f",
-		);
+		// tier.advisor is captured per runtime build (the service-tier resolver
+		// closes over the setting), so it must participate in the rebuild
+		// signature or onModelRolesChanged keeps serving the old tier after a
+		// reload changes it.
+		const tier = this.#host.settings.get("tier.advisor");
+		return [
+			config.name,
+			slug,
+			formatModelStringWithRouting(model),
+			thinkingLevel,
+			tools,
+			instructions,
+			budget,
+			tier,
+		].join("\u001f");
 	}
 
 	#advisorRuntimeMatchesCurrentConfig(): boolean {
@@ -826,6 +849,13 @@ export class SessionAdvisors {
 		if (descriptors.length !== this.#advisors.length) return false;
 		for (let i = 0; i < descriptors.length; i++) {
 			if (descriptors[i].signature !== this.#advisors[i].signature) return false;
+			// A models.yml/discovery refresh re-issues the same provider/id as a new
+			// Model record; the string signature above only sees the selector string,
+			// so a metadata-only edit (baseUrl, limits, compat) would compare equal
+			// and leave the advisor streaming against the stale record. Compare by
+			// reference — the same guard `sameScopedModelCycle` applies to the
+			// Ctrl+P cycle — so any swapped-in record forces a rebuild.
+			if (descriptors[i].model !== this.#advisors[i].model) return false;
 		}
 		return true;
 	}
@@ -1112,7 +1142,7 @@ export class SessionAdvisors {
 				snapshotMessages: () => this.#host.agent.state.messages,
 				enqueueAdvice: (note, severity) => this.#routeAdvice(advisorRef, note, severity),
 				maintainContext: (incoming, signal) => this.#maintainAdvisorContext(advisorRef, incoming, signal),
-				obfuscator: this.#host.obfuscator,
+				obfuscator: this.#host.obfuscator(),
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
 					advisorRef.recorder.beginTurn();

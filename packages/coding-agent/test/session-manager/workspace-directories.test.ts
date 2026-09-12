@@ -192,5 +192,70 @@ describe("SessionManager workspace directories", () => {
 
 		const forked = await SessionManager.forkFrom(source.getSessionFile()!, tempDir.path());
 		expect(forked.getAdditionalDirectories()).toEqual([path.join(tempDir.path(), "extra")]);
+		expect(forked.isSessionSuppliedDirectory(path.join(tempDir.path(), "extra"))).toBe(true);
+	});
+
+	it("reports /add-dir claims as session-supplied, keeps them through settings re-adds, clears on removal", async () => {
+		const session = SessionManager.inMemory();
+		await session.addWorkspaceDirectory("/session/added");
+		expect(session.isSessionSuppliedDirectory("/session/added")).toBe(true);
+
+		// The /reload-settings delta re-adds settings-derived roots with the
+		// "settings" source; the dedup no-op must not downgrade the claim.
+		await expect(session.addWorkspaceDirectory("/session/added", "settings")).resolves.toBeNull();
+		expect(session.isSessionSuppliedDirectory("/session/added")).toBe(true);
+
+		await session.removeWorkspaceDirectory("/session/added");
+		expect(session.isSessionSuppliedDirectory("/session/added")).toBe(false);
+	});
+
+	it("a settings-source add does not claim the root as session-supplied", async () => {
+		const session = SessionManager.inMemory();
+		const added = await session.addWorkspaceDirectory("/settings/owned", "settings");
+		expect(added).toBe(path.resolve("/settings/owned"));
+		expect(session.getAdditionalDirectories()).toEqual([path.resolve("/settings/owned")]);
+		expect(session.isSessionSuppliedDirectory("/settings/owned")).toBe(false);
+
+		// A later /add-dir of the same root still claims it.
+		await session.addWorkspaceDirectory("/settings/owned");
+		expect(session.isSessionSuppliedDirectory("/settings/owned")).toBe(true);
+	});
+
+	it("claims header-restored roots as session-supplied after reopen", async () => {
+		using tempDir = TempDir.createSync("@pi-session-workspace-claim-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		const sibling = path.join(tempDir.path(), "sibling");
+		await session.addWorkspaceDirectory(sibling);
+		session.appendMessage(makeAssistantMessage());
+		await session.flush();
+
+		const reopened = await SessionManager.open(session.getSessionFile()!);
+		expect(reopened.isSessionSuppliedDirectory(sibling)).toBe(true);
+	});
+
+	it("setAdditionalDirectories keeps claims for retained roots and leaves new seeds settings-owned", async () => {
+		const session = SessionManager.inMemory();
+		await session.addWorkspaceDirectory("/claimed");
+		await session.setAdditionalDirectories([path.resolve("/claimed"), path.resolve("/seeded")]);
+		expect(session.isSessionSuppliedDirectory("/claimed")).toBe(true);
+		expect(session.isSessionSuppliedDirectory("/seeded")).toBe(false);
+
+		await session.setAdditionalDirectories([path.resolve("/seeded")]);
+		expect(session.isSessionSuppliedDirectory("/claimed")).toBe(false);
+	});
+
+	it("setAdditionalDirectories claims explicitly session-supplied seeds and a settings withdrawal cannot revoke them", async () => {
+		const session = SessionManager.inMemory();
+		const cliRoot = path.resolve("/cli-supplied");
+		const settingsRoot = path.resolve("/settings-supplied");
+		// Startup seeding: the CLI passes its own roots next to settings-derived ones.
+		await session.setAdditionalDirectories([cliRoot, settingsRoot], [cliRoot]);
+		expect(session.isSessionSuppliedDirectory(cliRoot)).toBe(true);
+		expect(session.isSessionSuppliedDirectory(settingsRoot)).toBe(false);
+
+		// The /reload-settings delta removes exactly the roots this guard does
+		// not protect: the settings root goes, the CLI root survives.
+		await session.removeWorkspaceDirectory(settingsRoot);
+		expect(session.getAdditionalDirectories()).toEqual([cliRoot]);
 	});
 });

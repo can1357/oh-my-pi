@@ -334,14 +334,26 @@ export function disableUserSource(providerId: string): void {
  */
 export function initializeWithSettings(activeSettings: Settings): void {
 	settings = activeSettings;
+	reconcileProviderSets(activeSettings);
+}
+
+/**
+ * Re-seed the disabled/enabled provider sets from the live settings without
+ * rebinding persistence. The sets are module state consumed by
+ * {@link filterProviders}, {@link isProviderEnabled}, and
+ * {@link isUserSourceEnabled}; `initializeWithSettings` seeds them once at
+ * startup, so `/reload-settings` calls this after a layer swap or an edited
+ * `disabledProviders`/`enabledProviders` keeps filtering on the stale sets.
+ */
+export function reconcileProviderSets(activeSettings: Settings): void {
 	// Load disabled providers from settings
-	const disabled = settings.get("disabledProviders");
+	const disabled = activeSettings.get("disabledProviders");
 	disabledProviders.clear();
 	for (const id of disabled) {
 		disabledProviders.add(id);
 	}
 	// Load enabled providers from settings
-	const enabled = settings.get("enabledProviders");
+	const enabled = activeSettings.get("enabledProviders");
 	enabledProviders.clear();
 	for (const id of enabled) {
 		enabledProviders.add(id);

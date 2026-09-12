@@ -1480,16 +1480,20 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Re-run fallback-chain validation once background discovery has settled and
-	 * reconcile `configWarnings`. Startup validation suppresses "unknown model"
-	 * warnings for selectors whose config-declared discovery provider had not yet
-	 * populated the registry (a cold cache after `omp update` bumps the discovery
-	 * namespace, #10048). With discovery done, drop any startup warning discovery
-	 * resolved and surface warnings for selectors that stayed unknown.
+	 * Re-run fallback-chain validation against the live settings and model
+	 * registry and reconcile `configWarnings`. Both inputs go stale after
+	 * construction: startup validation suppresses "unknown model" warnings for
+	 * selectors whose config-declared discovery provider had not yet populated
+	 * the registry (a cold cache after `omp update` bumps the discovery
+	 * namespace, #10048), and a /reload-settings can edit the chains or install
+	 * a refreshed catalog that makes one of its selectors resolvable or unknown.
+	 * Reconciliation drops warnings the fresh validation no longer reports and
+	 * surfaces any it now reports, so the session never carries a verdict a
+	 * catalog refresh has already overturned.
 	 *
 	 * @returns true when `configWarnings` changed and the header must rebuild.
 	 */
-	revalidateRetryFallbackChainsAfterDiscovery(): boolean {
+	reconcileRetryFallbackChains(): boolean {
 		const definitive = new Set<string>();
 		validateRetryFallbackChains(this.#host.settings, this.#host.modelRegistry, message => definitive.add(message));
 		this.#pendingDiscoveryDeferredValidation = false;

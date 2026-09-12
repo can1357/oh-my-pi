@@ -478,6 +478,14 @@ export class SessionManager {
 	#cwd: string;
 	/** Additional workspace directories beyond cwd (multi-root). Normalized absolute, deduped, excludes cwd. */
 	#additionalDirectories: string[] = [];
+	/**
+	 * Roots claimed by a non-settings source: session header restores
+	 * (resume/fork) and in-session adds (/add-dir, default-source
+	 * addWorkspaceDirectory calls). A settings-side withdrawal — the
+	 * /reload-settings delta — must not revoke these; see
+	 * {@link isSessionSuppliedDirectory}.
+	 */
+	#sessionSuppliedDirectories = new Set<string>();
 	#fallbackRuntimeOnly = false;
 	#sessionDir: string;
 	readonly #persist: boolean;
@@ -1131,6 +1139,7 @@ export class SessionManager {
 			directories: options?.additionalDirectories ?? [],
 		});
 		this.#additionalDirectories = additionalWorkspaceDirectories(workspace);
+		this.#sessionSuppliedDirectories = new Set();
 		if (this.#additionalDirectories.length > 0) {
 			this.#header.additionalDirectories = [...this.#additionalDirectories];
 		}
@@ -1359,6 +1368,7 @@ export class SessionManager {
 		this.#fallbackRuntimeOnly = snapshot.fallbackRuntimeOnly;
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
 		this.#additionalDirectories = snapshot.header.additionalDirectories ?? [];
+		this.#sessionSuppliedDirectories = new Set(this.#additionalDirectories);
 		this.#sessionName = snapshot.sessionName;
 
 		this.#titleSource = snapshot.titleSource;
@@ -1465,6 +1475,7 @@ export class SessionManager {
 
 		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
 		this.#additionalDirectories = header.additionalDirectories ?? [];
+		this.#sessionSuppliedDirectories = new Set(this.#additionalDirectories);
 		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
 		this.#hasTitleSlot = titleSlot !== undefined;
 		this.#fileIsCurrent = true;
@@ -1663,6 +1674,7 @@ export class SessionManager {
 				// Re-filter additional roots: the new cwd may have been an
 				// additional root, or it may now contain one.
 				this.#additionalDirectories = this.#additionalDirectories.filter(d => d !== resolvedCwd);
+				this.#sessionSuppliedDirectories.delete(resolvedCwd);
 				this.#header.additionalDirectories =
 					this.#additionalDirectories.length > 0 ? this.#additionalDirectories : undefined;
 			}
@@ -1707,6 +1719,7 @@ export class SessionManager {
 		manager.#header.title = this.#sessionName;
 		manager.#header.titleSource = this.#titleSource;
 		manager.#additionalDirectories = [...this.#additionalDirectories];
+		manager.#sessionSuppliedDirectories = new Set(this.#sessionSuppliedDirectories);
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? [...manager.#additionalDirectories] : undefined;
 		manager.#entries = structuredClone(this.#entries);
@@ -1976,6 +1989,17 @@ export class SessionManager {
 	}
 
 	/**
+	 * Whether a non-settings source (session header restore, /add-dir, a
+	 * default-source add) still claims this root. A settings-side withdrawal
+	 * must not revoke such a root: the header or in-session add that supplied
+	 * it remains in force even though the manager dedupes both into one entry.
+	 */
+	isSessionSuppliedDirectory(directory: string): boolean {
+		const resolved = normalizeWorkspaceDirectory(directory, this.#cwd);
+		return this.#sessionSuppliedDirectories.has(resolved);
+	}
+
+	/**
 	 * Persist a workspace-directory change to the session header. Respects the
 	 * lazy-persistence gate: a session with no durable output yet keeps the
 	 * change in memory (the header lands with the first real write), so seeding
@@ -1993,12 +2017,18 @@ export class SessionManager {
 	 * rewrite so the change survives a crash. Returns the resolved absolute
 	 * path or `null` when the directory was already present (no-op).
 	 */
-	async addWorkspaceDirectory(directory: string): Promise<string | null> {
+	async addWorkspaceDirectory(directory: string, source: "session" | "settings" = "session"): Promise<string | null> {
 		const resolved = normalizeWorkspaceDirectory(directory, this.#cwd);
 		if (resolved === path.resolve(this.#cwd)) {
 			throw new Error("The current working directory is already the primary workspace root.");
 		}
-		if (this.#additionalDirectories.includes(resolved)) return null;
+		const alreadyPresent = this.#additionalDirectories.includes(resolved);
+		// A session-source add claims the root even when it dedupes against an
+		// existing entry (dually-sourced root); settings-source adds never claim.
+		if (source === "session") {
+			this.#sessionSuppliedDirectories.add(resolved);
+		}
+		if (alreadyPresent) return null;
 		this.#additionalDirectories = [...this.#additionalDirectories, resolved];
 		// In fallback the transcript is still in the stale bucket; keep
 		// workspace edits runtime-only until relocation.
@@ -2020,6 +2050,7 @@ export class SessionManager {
 		const idx = this.#additionalDirectories.findIndex(p => path.resolve(p) === resolved);
 		if (idx === -1) return null;
 		this.#additionalDirectories = this.#additionalDirectories.filter((_, i) => i !== idx);
+		this.#sessionSuppliedDirectories.delete(resolved);
 		// In fallback keep edits runtime-only until relocation.
 		if (this.#fallbackRuntimeOnly) {
 			return resolved;
@@ -2033,10 +2064,20 @@ export class SessionManager {
 		return resolved;
 	}
 
-	/** Seed additional directories from settings or a passed list. Also called on resumed sessions with --add-dir; persists the updated header when the session file is already durable. No-op when the normalized list is unchanged (avoids rewriting large session files on every startup). */
-	async setAdditionalDirectories(directories: string[]): Promise<void> {
+	/** Seed additional directories from settings or a passed list. Also called on resumed sessions with --add-dir; persists the updated header when the session file is already durable. No-op when the normalized list is unchanged (avoids rewriting large session files on every startup). `sessionSupplied` names roots owned by a non-settings source (the CLI's `--add-dir`): entries that land in the seeded list are claimed so a later settings-side withdrawal cannot revoke them. */
+	async setAdditionalDirectories(directories: string[], sessionSupplied?: readonly string[]): Promise<void> {
 		const workspace = normalizeSessionWorkspace({ cwd: this.#cwd, directories });
 		const next = additionalWorkspaceDirectories(workspace);
+		const claimed = new Set(
+			(sessionSupplied ?? []).map(d => normalizeWorkspaceDirectory(d, this.#cwd)).filter(d => next.includes(d)),
+		);
+		// Keep claims only for roots this list retains; entries are settings-derived
+		// unless explicitly claimed session-supplied (sdk.ts merges header roots,
+		// which are already present and keep their claims).
+		this.#sessionSuppliedDirectories = new Set([
+			...[...this.#sessionSuppliedDirectories].filter(d => next.includes(d)),
+			...claimed,
+		]);
 		// In fallback keep edits runtime-only until relocation.
 		if (this.#fallbackRuntimeOnly) {
 			this.#additionalDirectories = next;
@@ -2886,6 +2927,8 @@ export class SessionManager {
 		manager.#header.title = sourceHeader?.title;
 		manager.#header.titleSource = sourceHeader?.titleSource;
 		manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
+		// Header-derived roots are session continuity; claim them for the fork.
+		manager.#sessionSuppliedDirectories = new Set(manager.#additionalDirectories);
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
 		manager.#sessionName = manager.#header.title;

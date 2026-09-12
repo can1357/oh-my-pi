@@ -16,6 +16,7 @@ import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import { setTerminalHyperlinks, TERMINAL } from "@oh-my-pi/pi-tui";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -29,6 +30,11 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+	// loadIsolated tests below open an AgentStorage singleton in a per-test
+	// temp dir that their cleanup removes while the handle is live. Closing
+	// here retires the handle before the next file's AgentStorage.close()
+	// would checkpoint it from under a deleted directory (SQLITE_IOERR).
+	AgentStorage.close();
 	restoreSettingsTestState(settingsState);
 	settingsState = undefined;
 });
@@ -55,6 +61,23 @@ describe("selector setting side effects", () => {
 		// The setting-change side effect is a single render request — the lazy
 		// top-border provider rebuilds during paint (#4145).
 		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps statusLine.contextLine when the status line settings are rebuilt", () => {
+		const updateSettings = vi.fn();
+		const controller = new SelectorController({
+			statusLine: { updateSettings },
+			ui: { requestRender: vi.fn() },
+		} as unknown as InteractiveModeContext);
+
+		Settings.instance.override("statusLine.contextLine", "off");
+		controller.handleSettingChange("statusLine.contextLine", "off");
+
+		// updateSettings replaces the whole settings object, so a rebuild that
+		// omits contextLine silently resets the user's choice to "embedded".
+		expect(updateSettings).toHaveBeenCalledWith(
+			expect.objectContaining({ contextLine: Settings.instance.get("statusLine.contextLine") }),
+		);
 	});
 
 	it("invalidates the UI and requests a repaint when tui.tight changes", () => {
@@ -139,6 +162,28 @@ describe("selector setting side effects", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
+	it("re-arms idle compaction when an idle compaction setting changes in /settings", () => {
+		const refreshIdleCompactionTimer = vi.fn();
+		const controller = new SelectorController({
+			eventController: { refreshIdleCompactionTimer },
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("compaction.idleEnabled", false);
+
+		expect(refreshIdleCompactionTimer).toHaveBeenCalledTimes(1);
+	});
+
+	it("re-arms the idle recap when a recap setting changes in /settings", () => {
+		const refreshIdleRecapTimer = vi.fn();
+		const controller = new SelectorController({
+			eventController: { refreshIdleRecapTimer },
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("recap.enabled", false);
+
+		expect(refreshIdleRecapTimer).toHaveBeenCalledTimes(1);
+	});
+
 	for (const id of ["terminal.showImages", "showImages"]) {
 		for (const visible of [false, true]) {
 			it(`updates every image owner and rebuilds the transcript when ${id}=${visible}`, () => {
@@ -220,6 +265,25 @@ describe("selector setting side effects", () => {
 			} as unknown as InteractiveModeContext);
 
 			controller.handleSettingChange("display.showTokenUsage", enabled);
+
+			expect(rebuildChatFromMessages).toHaveBeenCalledTimes(1);
+			expect(resetDisplay).toHaveBeenCalledTimes(1);
+			expect(rebuildChatFromMessages.mock.invocationCallOrder[0]).toBeLessThan(
+				resetDisplay.mock.invocationCallOrder[0],
+			);
+		});
+	}
+
+	for (const enabled of [false, true]) {
+		it(`rebuilds the transcript when display.showTurnTime=${enabled} changes in /settings`, () => {
+			const rebuildChatFromMessages = vi.fn();
+			const resetDisplay = vi.fn();
+			const controller = new SelectorController({
+				rebuildChatFromMessages,
+				ui: { resetDisplay },
+			} as unknown as InteractiveModeContext);
+
+			controller.handleSettingChange("display.showTurnTime", enabled);
 
 			expect(rebuildChatFromMessages).toHaveBeenCalledTimes(1);
 			expect(resetDisplay).toHaveBeenCalledTimes(1);

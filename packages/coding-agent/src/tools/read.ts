@@ -723,19 +723,39 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	}
 	readonly strict = true;
 
-	readonly #autoResizeImages: boolean;
-	readonly #defaultLimit: number;
+	#autoResizeImages = false;
+	#defaultLimit = DEFAULT_MAX_LINES;
 
 	constructor(
 		private readonly session: ToolSession,
 		private readonly completeImageRequest: typeof completeSimple = completeSimple,
 	) {
-		this.#autoResizeImages = session.settings.get("images.autoResize");
-		this.#defaultLimit = Math.max(
-			1,
-			Math.min(session.settings.get("read.defaultLimit") ?? DEFAULT_MAX_LINES, DEFAULT_MAX_LINES),
-		);
+		this.reconfigure();
 		this.description = this.#renderDescription();
+	}
+
+	/**
+	 * Re-reads `read.defaultLimit` and `images.autoResize` into the live tool
+	 * after a settings reload. Both values are snapshotted at construction, so
+	 * without this push a reloaded value would take effect only on restart.
+	 *
+	 * @returns true when a live value changed; the description re-renders when
+	 * the default line limit moved.
+	 */
+	reconfigure(): boolean {
+		const autoResizeImages = this.session.settings.get("images.autoResize");
+		const defaultLimit = Math.max(
+			1,
+			Math.min(this.session.settings.get("read.defaultLimit") ?? DEFAULT_MAX_LINES, DEFAULT_MAX_LINES),
+		);
+		if (autoResizeImages === this.#autoResizeImages && defaultLimit === this.#defaultLimit) {
+			return false;
+		}
+		const defaultChanged = defaultLimit !== this.#defaultLimit;
+		this.#autoResizeImages = autoResizeImages;
+		this.#defaultLimit = defaultLimit;
+		if (defaultChanged) this.description = this.#renderDescription();
+		return true;
 	}
 
 	/** Render the description for the current file display mode. */

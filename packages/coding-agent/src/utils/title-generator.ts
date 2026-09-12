@@ -610,6 +610,11 @@ export function setTerminalTitleStateEnabled(enabled: boolean): void {
 	emitTerminalTitle();
 }
 
+/** Current run-state separator gate; mirrors the `tui.titleState` setting's applied value. */
+export function getTerminalTitleStateEnabled(): boolean {
+	return terminalTitleRuntime.enabled;
+}
+
 /** Release terminal-title runtime resources. */
 export function disposeTerminalTitleState(): void {
 	stopTerminalTitleSpinner();

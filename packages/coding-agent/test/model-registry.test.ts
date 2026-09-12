@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1042,6 +1042,107 @@ describe("ModelRegistry", () => {
 			expect(anthropicModels.some(m => m.id.includes("claude"))).toBe(true);
 		});
 
+		test("refresh() keeps the last-good custom layer when models.json becomes malformed", async () => {
+			writeModelsJson({
+				prov: providerConfig("https://example.com/v1", [{ id: "m1" }]),
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const model = registry.find("prov", "m1");
+			expect(model).toBeDefined();
+			expect(registry.hasConfiguredAuth(model!)).toBe(true);
+
+			// A malformed edit must surface the error but preserve the live catalog
+			// and its config-sourced API key instead of dropping them until repair.
+			fs.writeFileSync(modelsJsonPath, "{ definitely not valid json or yaml[");
+			await registry.refresh("offline");
+
+			expect(registry.getError()).toBeDefined();
+			expect(registry.find("prov", "m1")).toBeDefined();
+			expect(registry.hasConfiguredAuth(registry.find("prov", "m1")!)).toBe(true);
+		});
+
+		test("refresh() keeps the last-good overrides when models.json becomes malformed", async () => {
+			writeRawModelsJson({
+				openrouter: {
+					baseUrl: "https://last-good-gateway.example.com/v1",
+					modelOverrides: {
+						"anthropic/claude-sonnet-4": { name: "Last-Good Sonnet" },
+					},
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const before = registry.find("openrouter", "anthropic/claude-sonnet-4");
+			expect(before?.baseUrl).toBe("https://last-good-gateway.example.com/v1");
+			expect(before?.name).toBe("Last-Good Sonnet");
+
+			// A malformed edit must restore the provider- and model-level overrides
+			// snapshotted before the reload cleared them — not the emptied maps the
+			// late lastGood reference snapshot would capture.
+			fs.writeFileSync(modelsJsonPath, "{ definitely not valid json or yaml[");
+			await registry.refresh("offline");
+
+			expect(registry.getError()).toBeDefined();
+			const after = registry.find("openrouter", "anthropic/claude-sonnet-4");
+			expect(after?.baseUrl).toBe("https://last-good-gateway.example.com/v1");
+			expect(after?.name).toBe("Last-Good Sonnet");
+		});
+
+		test("refresh() keeps the last-good discoverable provider and its discovered models when models.json becomes malformed", async () => {
+			writeRawModelsJson({
+				"custom-local": {
+					auth: "none",
+					baseUrl: "http://127.0.0.1:8080",
+					api: "openai-responses",
+					discovery: { type: "llama.cpp" },
+				},
+			});
+			const fetchMock = mockOpenAiCompatibleModels("http://127.0.0.1:8080/models", ["gpt-5.4"]);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			// Materialize discovery results (and their models.db cache rows) while
+			// the config is still valid.
+			await registry.refreshProvider("custom-local", "online");
+			expect(registry.find("custom-local", "gpt-5.4")).toBeDefined();
+
+			// A malformed edit must restore the discoverable providers snapshotted
+			// before the reload cleared them — not the empty list the late
+			// #loadModels snapshot would capture — so the discovery-backed
+			// provider and its discovered models stay available until repair.
+			fs.writeFileSync(modelsJsonPath, "{ definitely not valid json or yaml[");
+			await registry.refresh("offline");
+
+			expect(registry.getError()).toBeDefined();
+			expect(registry.find("custom-local", "gpt-5.4")).toBeDefined();
+			expect(registry.hasProvider("custom-local")).toBe(true);
+		});
+
+		test("malformed edit does not shadow a restored explicit discovery provider with its implicit twin", async () => {
+			writeRawModelsJson({
+				ollama: {
+					auth: "none",
+					baseUrl: "http://127.0.0.1:9999/v1",
+					api: "openai-responses",
+					discovery: { type: "proxy" },
+				},
+			});
+			const fetchMock = mockOpenAiCompatibleModels("http://127.0.0.1:9999/v1/models", ["shadow-probe"]);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			await registry.refreshProvider("ollama", "online");
+			expect(registry.find("ollama", "shadow-probe")).toBeDefined();
+
+			// The restored explicit ollama entry must win over the implicit one:
+			// no second implicit entry may be appended, or it would clobber the
+			// restored provider's discovery state (and point discovery at the
+			// default endpoint) until the file is repaired.
+			fs.writeFileSync(modelsJsonPath, "{ definitely not valid json or yaml[");
+			await registry.refresh("offline");
+
+			expect(registry.getError()).toBeDefined();
+			expect(registry.find("ollama", "shadow-probe")).toBeDefined();
+			const state = registry.getProviderDiscoveryState("ollama");
+			expect(state?.status).toBe("cached");
+			expect(state?.models).toContain("shadow-probe");
+		});
+
 		test("built-in gpt-5.4 applies the hardcoded context window policy", () => {
 			expect(sharedBuiltin.find("openai", "gpt-5.4")?.contextWindow).toBe(1_000_000);
 		});
@@ -1768,6 +1869,87 @@ describe("ModelRegistry", () => {
 				url => url.includes("127.0.0.1:11434") || url.includes("127.0.0.1:8080") || url.includes("127.0.0.1:1234"),
 			);
 			expect(disabledProbeUrls).toEqual([]);
+		});
+	});
+	describe("settings-scoped refresh", () => {
+		test("refresh with explicit settings probes providers disabled only in those settings", async () => {
+			writeRawModelsJson({
+				ollama: {
+					baseUrl: "http://127.0.0.1:11434/v1",
+					api: "openai-completions",
+					auth: "none",
+					discovery: { type: "ollama" },
+				},
+			});
+			const startupSettings = Settings.isolated({ disabledProviders: ["ollama"] });
+			const workspaceSettings = Settings.isolated();
+			const requestedUrls: string[] = [];
+			const fetchMock: FetchImpl = input => {
+				requestedUrls.push(String(input));
+				throw new Error(`Unexpected URL: ${String(input)}`);
+			};
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				settings: startupSettings,
+				fetch: fetchMock,
+			});
+			await registry.refresh("online", workspaceSettings);
+
+			// The rebuild consumed the passed settings, not the registry's
+			// constructor-bound startup policy: the ollama discovery probe runs.
+			expect(requestedUrls.some(url => url.includes("127.0.0.1:11434"))).toBe(true);
+		});
+
+		test("reapplyModelPolicies with explicit settings does not rebind the registry's policy", async () => {
+			writeRawModelsJson({
+				ollama: {
+					baseUrl: "http://127.0.0.1:11434/v1",
+					api: "openai-completions",
+					auth: "none",
+					discovery: { type: "ollama" },
+				},
+			});
+			await authStorage.set("github-copilot", [
+				{
+					type: "oauth",
+					access: "ghu_test_token_for_scoped_reapply",
+					refresh: "ghu_test_token_for_scoped_reapply",
+					expires: Date.now() + 60_000,
+				},
+			]);
+			// ACP shape: one registry shared across workspaces, each with a cloned
+			// Settings; the registry stays bound to the startup clone.
+			const startupSettings = Settings.isolated({ disabledProviders: ["github-copilot", "ollama"] });
+			const workspaceSettings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: startupSettings });
+
+			await registry.reapplyModelPolicies(workspaceSettings);
+
+			// The rebuild consumed the workspace settings, but the registry's bound
+			// policy stays startup-owned: a permanent rebind here would make the
+			// last-reloading ACP workspace dictate every other workspace's policy.
+			expect(registry.getDiscoverableProviders()).not.toContain("ollama");
+			expect(registry.hasProvider("ollama")).toBe(false);
+			expect(registry.getAvailable().some(model => model.provider === "github-copilot")).toBe(false);
+		});
+
+		test("concurrent reapplies with different settings queue instead of coalescing", async () => {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const refreshCalls: Array<Parameters<ModelRegistry["refresh"]>> = [];
+			vi.spyOn(registry, "refresh").mockImplementation(async (...args) => {
+				refreshCalls.push(args);
+			});
+
+			const workspaceA = Settings.isolated({ disabledProviders: ["ollama"] });
+			const workspaceB = Settings.isolated();
+			await Promise.all([registry.reapplyModelPolicies(workspaceA), registry.reapplyModelPolicies(workspaceB)]);
+
+			// Coalescing onto the in-flight rebuild would hand workspace B a catalog
+			// built for A's policy while reporting success.
+			expect(refreshCalls).toEqual([
+				["offline", workspaceA],
+				["offline", workspaceB],
+			]);
 		});
 	});
 	describe("extended context", () => {

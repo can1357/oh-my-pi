@@ -584,25 +584,55 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		return typeof content === "string" ? content : undefined;
 	}
 
-	readonly #writethrough: WritethroughCallback;
-	readonly #deferredDiagnostics: DeferredDiagnostics | undefined;
+	#enableFormat = false;
+	#enableDiagnostics = false;
+	#dedup = false;
+	#writethrough: WritethroughCallback = writethroughNoop;
+	#deferredDiagnostics: DeferredDiagnostics | undefined;
 
 	constructor(private readonly session: ToolSession) {
-		const enableLsp = session.enableLsp ?? true;
-		const enableFormat = enableLsp && session.settings.get("lsp.formatOnWrite");
-		const enableDiagnostics = enableLsp && session.settings.get("lsp.diagnosticsOnWrite");
-		const dedup = enableDiagnostics && session.settings.get("lsp.diagnosticsDeduplicate");
+		this.reconfigure();
+	}
+
+	/**
+	 * Re-reads the write-time LSP settings (`lsp.formatOnWrite`,
+	 * `lsp.diagnosticsOnWrite`, `lsp.diagnosticsDeduplicate`) into the live
+	 * tool after a settings reload. The writethrough is snapshotted at
+	 * construction, so without this push a reloaded value would take effect
+	 * only on restart.
+	 *
+	 * @returns true when a live setting changed and the writethrough was
+	 * rebuilt.
+	 */
+	reconfigure(): boolean {
+		const enableLsp = this.session.enableLsp ?? true;
+		const enableFormat = enableLsp && this.session.settings.get("lsp.formatOnWrite");
+		const enableDiagnostics = enableLsp && this.session.settings.get("lsp.diagnosticsOnWrite");
+		const dedup = enableDiagnostics && this.session.settings.get("lsp.diagnosticsDeduplicate");
+		if (
+			enableFormat === this.#enableFormat &&
+			enableDiagnostics === this.#enableDiagnostics &&
+			dedup === this.#dedup
+		) {
+			return false;
+		}
+		this.#enableFormat = enableFormat;
+		this.#enableDiagnostics = enableDiagnostics;
+		this.#dedup = dedup;
 		this.#deferredDiagnostics =
-			enableDiagnostics && session.queueDeferredDiagnostics ? new DeferredDiagnostics(session, dedup) : undefined;
+			enableDiagnostics && this.session.queueDeferredDiagnostics
+				? new DeferredDiagnostics(this.session, dedup)
+				: undefined;
 		this.#writethrough = enableLsp
-			? createLspWritethrough(session.cwd, {
+			? createLspWritethrough(this.session.cwd, {
 					enableFormat,
 					enableDiagnostics,
 					transformDiagnostics: dedup
-						? (path, result) => getDiagnosticsLedger(session).reduce(path, result)
+						? (path, result) => getDiagnosticsLedger(this.session).reduce(path, result)
 						: undefined,
 				})
 			: writethroughNoop;
+		return true;
 	}
 
 	async #resolveArchiveWritePath(writePath: string): Promise<ResolvedArchiveWritePath | null> {

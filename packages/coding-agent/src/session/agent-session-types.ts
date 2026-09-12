@@ -158,6 +158,10 @@ export interface AgentSessionConfig {
 	autoApprove?: boolean;
 	/** Models to cycle through with Ctrl+P (from --models flag). */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	/** Frozen `--models` scope patterns: when set, the CLI scope never re-resolves on reload; undefined means settings-derived, re-resolved live. */
+	cliModelScope?: readonly string[];
+	/** The `scopedModels` scope was supplied programmatically by an SDK embedder: a settings-driven reload must never clear it. The CLI resolves `enabledModels` into the same `scopedModels` field but leaves this unset, so clearing the setting unfreezes the cycle. */
+	sdkScopedModels?: boolean;
 	/** Initial session thinking selector. */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); every later change, including retry-fallback recovery, is re-clamped to it. */
@@ -209,6 +213,8 @@ export interface AgentSessionConfig {
 	mcpManagerToolNames?: Iterable<string>;
 	/** Reconcile browser MCP connections after browser prelude availability changes. */
 	reconcileBrowserMcpFilter?: (enabled: boolean) => Promise<CustomTool[]>;
+	/** Session LSP gate (`options.enableLsp ?? !restrictToolNames` in the SDK host); `/reload-settings` re-derives the broker-shared LSP flag from it. */
+	enableLsp?: boolean;
 	/** Updates tool-session predicates from the live active tool set. */
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	/** Registers the built-in write transport when it is needed at runtime. */
@@ -260,6 +266,8 @@ export interface AgentSessionConfig {
 	ttsrManager?: TtsrManager;
 	/** Secret obfuscator for provider and edit content. */
 	obfuscator?: SecretObfuscator;
+	/** Rebuilds the secret obfuscator after `secrets.enabled` changes so a reload redacts without a restart. */
+	rebuildSecretObfuscator?: () => Promise<SecretObfuscator | undefined>;
 	/** Inherited eval executor session id from a parent agent. */
 	parentEvalSessionId?: string;
 	/** Logical owner for retained eval kernels created by this session. */

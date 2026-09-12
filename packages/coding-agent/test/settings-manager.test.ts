@@ -9,6 +9,7 @@ import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stre
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
 	__physicalTargetSegmentsForTesting,
+	getDefault,
 	onAppendOnlyModeChanged,
 	onCodeModeChanged,
 	onModelRolesChanged,
@@ -1163,6 +1164,58 @@ describe("Settings", () => {
 			} finally {
 				unsubscribe();
 			}
+		});
+
+		it("releases host-default overrides when an explicit persisted value appears", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const hostDefault = getDefault("memories.enabled");
+			settings.overrideHostDefault("memories.enabled", hostDefault);
+			expect(settings.get("memories.enabled")).toBe(hostDefault);
+
+			const changes: Array<[SettingPath, unknown, unknown]> = [];
+			const unsubscribe = settings.onEffectiveChange((path, value, previous) => {
+				changes.push([path, value, previous]);
+			});
+
+			try {
+				const persisted = !hostDefault;
+				await writeSettings({ memories: { enabled: persisted } });
+				await settings.reloadFromDisk();
+
+				expect(settings.get("memories.enabled")).toBe(persisted);
+				expect(changes).toContainEqual(["memories.enabled", persisted, hostDefault]);
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("keeps host-default overrides across reloads while no persisted value exists", async () => {
+			await writeSettings({ advisor: { syncBacklog: "1" } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const hostDefault = getDefault("memories.enabled");
+			settings.overrideHostDefault("memories.enabled", hostDefault);
+
+			await settings.reloadFromDisk();
+
+			expect(settings.get("memories.enabled")).toBe(hostDefault);
+			// Still tracked as configured: the fabricated override survived the
+			// reload instead of being released without a persisted replacement.
+			expect(settings.isConfigured("memories.enabled")).toBe(true);
+		});
+
+		it("keeps an explicit override that superseded a host default across reloads", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const hostDefault = getDefault("memories.enabled");
+			const explicit = !hostDefault;
+			settings.overrideHostDefault("memories.enabled", hostDefault);
+			settings.override("memories.enabled", explicit);
+
+			await writeSettings({ memories: { enabled: hostDefault } });
+			await settings.reloadFromDisk();
+
+			// override() superseded the host default, so the release path must not
+			// hand the freshly persisted value precedence over the runtime override.
+			expect(settings.get("memories.enabled")).toBe(explicit);
 		});
 	});
 

@@ -79,6 +79,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import type { ModelRefreshStrategy } from "@oh-my-pi/pi-catalog/model-manager";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { type EditStore, PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
 import {
@@ -102,10 +103,16 @@ import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
-import type { ResolvedModelRoleValue } from "../config/model-resolver";
+import {
+	getModelMatchPreferences,
+	type ResolvedModelRoleValue,
+	resolveModelScope,
+	sameScopedModelCycle,
+	toSessionScopedModels,
+} from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
-import type { Settings, SkillsSettings } from "../config/settings";
+import type { Settings, SkillsSettings, TtsrSettings } from "../config/settings";
 import {
 	onAppendOnlyModeChanged,
 	onCodeModeChanged,
@@ -156,6 +163,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
 import type { DaemonCompletionNotification } from "../launch/protocol";
+import { setSharedLspEnabled } from "../lsp/client";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { containsOrchestrate, renderOrchestrateNotice } from "../modes/orchestrate";
@@ -711,6 +719,8 @@ export class AgentSession {
 	#extensionRunner: ExtensionRunner | undefined = undefined;
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
+	/** Session LSP gate from the SDK host; backs reconcileSharedLsp on settings reload. */
+	#enableLsp: boolean;
 	/**
 	 * Backs `ctx.setInterval`/`setTimeout`/`clearTimer` for the runner-less
 	 * command-context fallback (SDK embeddings with no extension runner). Lazily
@@ -729,6 +739,10 @@ export class AgentSession {
 
 	// Model registry for API key resolution
 	#modelRegistry: ModelRegistry;
+	/** `--models` scope patterns: user-owned, outranks settings; re-resolved against the rebuilt catalog on each reload. */
+	#cliModelScope: readonly string[] | undefined;
+	/** Explicit SDK-supplied scope provenance (`config.sdkScopedModels`); a settings-driven reload must never clear it. */
+	#sdkScopedModels = false;
 	#usageFallbackConfirmer: UsageFallbackConfirmer | undefined;
 	#usagePreflightAbortControllers = new Set<AbortController>();
 	#queuedMessageDrainBlocked = false;
@@ -806,6 +820,9 @@ export class AgentSession {
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
 	#obfuscator: SecretObfuscator | undefined;
+	#rebuildSecretObfuscator: AgentSessionConfig["rebuildSecretObfuscator"];
+	/** Session-start value of `secrets.enabled`; reconcileSecretObfuscator compares it against the live setting. */
+	#secretsEnabled = false;
 	/** Session-start value of `inlineToolDescriptors`; drives handoff tool pruning. */
 	#pruneToolDescriptions = false;
 	#checkpointState: CheckpointState | undefined = undefined;
@@ -1359,10 +1376,13 @@ export class AgentSession {
 			thinkingLevelCeiling: config.thinkingLevelCeiling,
 			serviceTierByFamily: config.serviceTierByFamily,
 		});
+		this.#cliModelScope = config.cliModelScope;
+		this.#sdkScopedModels = config.sdkScopedModels === true;
 
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
+		this.#enableLsp = config.enableLsp ?? true;
 		this.#getEvalPreludes = config.getEvalPreludes;
 		this.#reconcileBrowserMcpFilter = config.reconcileBrowserMcpFilter;
 		this.#customCommands = config.customCommands ?? [];
@@ -1639,6 +1659,8 @@ export class AgentSession {
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
 		this.#obfuscator = config.obfuscator;
+		this.#rebuildSecretObfuscator = config.rebuildSecretObfuscator;
+		this.#secretsEnabled = this.settings.get("secrets.enabled") === true;
 		const providerBoundaryHost: SessionProviderBoundaryHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -1652,14 +1674,13 @@ export class AgentSession {
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
-			obfuscator: this.#obfuscator,
+			obfuscator: () => this.#obfuscator,
 		};
 		this.#providerBoundary = new SessionProviderBoundary(providerBoundaryHost);
 		const streamGuardsHost: StreamGuardsHost = {
 			agent: this.agent,
 			settings: this.settings,
 			sessionManager: this.sessionManager,
-			obfuscator: this.#obfuscator,
 			model: () => this.model,
 			isDisposed: () => this.#isDisposed,
 			promptGeneration: () => this.#promptGeneration,
@@ -1766,7 +1787,7 @@ export class AgentSession {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			yieldQueue: this.yieldQueue,
-			obfuscator: this.#obfuscator,
+			obfuscator: () => this.#obfuscator,
 			providerSessionState: this.#providerSessionState,
 			preferWebsockets: this.#preferWebsockets,
 			onPayload: this.#onPayload,
@@ -1915,7 +1936,7 @@ export class AgentSession {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			sideStreamFn: this.#sideStreamFn,
-			obfuscator: this.#obfuscator,
+			obfuscator: () => this.#obfuscator,
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
 			sessionId: () => this.sessionId,
@@ -1948,11 +1969,11 @@ export class AgentSession {
 		this.#unsubscribeEvalPreludeSettings = this.settings.onEffectiveChange((path, value) => {
 			if (path !== "browser.enabled" && path !== "computer.enabled") return;
 			void (async () => {
-				if (path === "browser.enabled" && this.#reconcileBrowserMcpFilter) {
-					const tools = await this.#reconcileBrowserMcpFilter(value === true);
-					await this.refreshMCPTools(tools);
+				if (path === "browser.enabled") {
+					await this.reconcileBrowserEnabled();
+				} else {
+					await this.reconcileComputerEnabled();
 				}
-				await this.refreshBaseSystemPrompt();
 			})().catch(error => {
 				if (path === "browser.enabled" && value === true && this.settings.get("browser.enabled")) {
 					this.settings.override("browser.enabled", false);
@@ -1963,17 +1984,9 @@ export class AgentSession {
 				});
 			});
 		});
-		this.#unsubscribeIdleCloseSetting = this.settings.onEffectiveChange((path, value) => {
+		this.#unsubscribeIdleCloseSetting = this.settings.onEffectiveChange(path => {
 			if (path !== "browser.idleCloseSec") return;
-			const ownerId = this.sessionManager.getSessionId() ?? "";
-			// Any change invalidates the armed deadline: cancel first (its
-			// sequence bump stops an in-flight sweep re-arming the old
-			// value), then re-arm under the new one. A non-positive value
-			// arms nothing, which is the disable path.
-			cancelIdleCloseForOwner(ownerId);
-			if (typeof value === "number" && value > 0) {
-				armIdleCloseForOwner(ownerId, value * 1000);
-			}
+			this.reconcileBrowserIdleClose();
 		});
 		this.#unsubscribeCodeMode = onCodeModeChanged(() => {
 			void this.#tools.reconcileCodeMode().catch(error => {
@@ -2158,6 +2171,15 @@ export class AgentSession {
 	/** TTSR manager for time-traveling stream rules */
 	get ttsrManager(): TtsrManager | undefined {
 		return this.#ttsr.manager;
+	}
+
+	/**
+	 * Re-applies a reloaded `ttsr.*` settings group to the live TTSR manager.
+	 * Returns whether a manager-level value changed; false when TTSR is
+	 * unavailable in this session and there is nothing to update.
+	 */
+	updateTtsrSettings(settings?: TtsrSettings): boolean {
+		return this.ttsrManager?.updateSettings(settings) ?? false;
 	}
 
 	/** Secret obfuscator, when secrets are configured; /share redaction reuses it. */
@@ -5382,6 +5404,81 @@ export class AgentSession {
 		return this.#tools.setThinkToolEnabled(enabled);
 	}
 
+	/** Re-reads async-execution settings into the live bash tool; see {@link SessionTools.reconcileBashToolSettings}. */
+	reconcileBashToolSettings(): Promise<boolean> {
+		return this.#tools.reconcileBashToolSettings();
+	}
+
+	/** Re-reads read/write tool settings into the live tools; see {@link SessionTools.reconcileToolSettings}. */
+	reconcileToolSettings(): Promise<boolean> {
+		return this.#tools.reconcileToolSettings();
+	}
+
+	/** Rebuilds the secret obfuscator after `secrets.enabled` changes so a reload redacts without a restart. */
+	async reconcileSecretObfuscator(): Promise<boolean> {
+		const enabled = this.settings.get("secrets.enabled") === true;
+		if (enabled === this.#secretsEnabled) return false;
+		if (!this.#rebuildSecretObfuscator) return false;
+		this.#obfuscator = await this.#rebuildSecretObfuscator();
+		this.#secretsEnabled = enabled;
+		// Cached hosts read the live obfuscator through their accessor, but
+		// advisor runtimes copied the value at construction: rebuild them so
+		// advisor requests transform with the rebuilt obfuscator too.
+		this.#advisors.rebuildRuntimesForHostChange();
+		return true;
+	}
+
+	/**
+	 * Re-runs the browser MCP filter and refreshes MCP tools after a
+	 * `browser.enabled` change, then rebuilds the base prompt. Shared by the
+	 * effective-change listener and `/reload-settings`, which does not emit
+	 * effective-change notifications.
+	 */
+	async reconcileBrowserEnabled(): Promise<void> {
+		if (this.#reconcileBrowserMcpFilter) {
+			const tools = await this.#reconcileBrowserMcpFilter(this.settings.get("browser.enabled") === true);
+			await this.refreshMCPTools(tools);
+		}
+		await this.refreshBaseSystemPrompt();
+	}
+
+	/**
+	 * Rebuilds the base prompt after a `computer.enabled` change (the prompt
+	 * embeds the computer-use prelude). Shared by the effective-change listener
+	 * and `/reload-settings`, which does not emit effective-change notifications.
+	 */
+	async reconcileComputerEnabled(): Promise<void> {
+		await this.refreshBaseSystemPrompt();
+	}
+
+	/**
+	 * Re-applies the broker-shared LSP attach flag from the current
+	 * `lsp.shared` setting. The SDK computes `enableLsp && lsp.shared` once at
+	 * session creation into process-global module state consulted on every LSP
+	 * client cold-start; `/reload-settings` does not re-run that path, so this
+	 * mirrors it with this session's frozen LSP gate.
+	 */
+	reconcileSharedLsp(): void {
+		setSharedLspEnabled(this.#enableLsp && this.settings.get("lsp.shared") === true);
+	}
+
+	/**
+	 * Re-arms this session's owned browser idle-close deadline from the current
+	 * `browser.idleCloseSec`. Any change invalidates the armed deadline: cancel
+	 * first (its sequence bump stops an in-flight sweep re-arming the old
+	 * value), then arm under the new one. A non-positive value arms nothing,
+	 * which is the disable path. Shared by the effective-change listener and
+	 * `/reload-settings`, which does not emit effective-change notifications.
+	 */
+	reconcileBrowserIdleClose(): void {
+		const ownerId = this.sessionManager.getSessionId() ?? "";
+		cancelIdleCloseForOwner(ownerId);
+		const idleSec = this.settings.get("browser.idleCloseSec");
+		if (typeof idleSec === "number" && idleSec > 0) {
+			armIdleCloseForOwner(ownerId, idleSec * 1000);
+		}
+	}
+
 	/** Cancels the local rollout-memory startup owned by this session. */
 	cancelLocalMemoryStartup(): void {
 		this.#memory.cancelLocalMemoryStartup();
@@ -5591,6 +5688,135 @@ export class AgentSession {
 	/** Replace the Ctrl+P/`/models` cycle scope (post-discovery rebuild; see {@link ModelControls.setScopedModels}). */
 	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
 		this.#models.setScopedModels(scopedModels);
+	}
+	/**
+	 * Re-resolve the settings-derived scope and push it into the Ctrl+P cycle /
+	 * scoped pickers when the rebuilt list differs. Reads the LIVE `enabledModels`
+	 * value — not the one captured at construction — so a mid-session edit that
+	 * changes the configured scope (A→B) or clears it takes effect on the same
+	 * reload. When the setting becomes empty — or non-empty but resolving to
+	 * zero models, so pickers stop offering models the config excludes — the
+	 * settings-derived scope is cleared and the picker falls back to the full
+	 * catalog. Programmatic scopes are never settings-derived: an SDK-supplied
+	 * `scopedModels` set survives untouched, and a `--models` CLI scope
+	 * re-resolves its own user-owned patterns against the rebuilt catalog so
+	 * models added to models.yml reach the cycle list; when those patterns
+	 * resolve to zero models the CLI-derived scope is cleared the same way —
+	 * the pattern list itself survives, so a later reload that restores a
+	 * match re-resolves it. The active model is re-adopted from the rebuilt
+	 * registry on every path.
+	 */
+	async refreshScopedModels(): Promise<boolean> {
+		if (this.#isDisposed) return false;
+		if (this.#cliModelScope) {
+			// The CLI scope's pattern list is user-owned and outranks settings,
+			// but it must track the rebuilt catalog: re-resolve the same patterns
+			// so models added to models.yml reach the --models cycle list, drop
+			// the scope when the patterns stop resolving, and re-adopt the
+			// active model's record.
+			const rebound = await this.#rebindActiveModelFromRegistry();
+			const resolvedCli = await resolveModelScope(
+				[...this.#cliModelScope],
+				this.#modelRegistry,
+				getModelMatchPreferences(this.settings),
+				this.settings,
+			);
+			const mappedCli = toSessionScopedModels(resolvedCli, this.settings);
+			if (mappedCli.length === 0) {
+				// Patterns that resolve to nothing after a reload: drop the stale
+				// --models scope so Ctrl+P and /switch stop offering records the
+				// rebuilt catalog removed. The pattern list itself stays; a later
+				// reload that restores a match re-resolves it.
+				if (this.#models.scopedModels.length === 0) return rebound;
+				this.#models.setScopedModels([]);
+				return true;
+			}
+			if (sameScopedModelCycle(this.#models.scopedModels, mappedCli)) return rebound;
+			this.#models.setScopedModels(mappedCli);
+			return true;
+		}
+		const patterns = this.settings.get("enabledModels");
+		// Explicitly cleared (or never set and now absent): unfreeze the pickers.
+		// An SDK-supplied scope is programmatic, not settings-derived, so it
+		// survives the clear.
+		if (!patterns || patterns.length === 0) {
+			const rebound = await this.#rebindActiveModelFromRegistry();
+			if (this.#sdkScopedModels || this.#models.scopedModels.length === 0) return rebound;
+			this.#models.setScopedModels([]);
+			return true;
+		}
+		const resolved = await resolveModelScope(
+			[...patterns],
+			this.#modelRegistry,
+			getModelMatchPreferences(this.settings),
+			this.settings,
+		);
+		// Adopt the fresh model records for the active model too: a reload that
+		// edits the current model's metadata (baseUrl, compat, limits) rebuilds
+		// the registry into new objects with the same provider/id, and the next
+		// request must read them rather than the stale construction-time record.
+		// A scope member is re-adopted from the resolved scope; when the active
+		// model fell out of the resolved scope entirely, the registry-backed
+		// rebind still refreshes its record so requests keep the new metadata.
+		const current = this.agent.state.model;
+		if (current) {
+			const fresh = resolved.find(
+				entry => entry.model.provider === current.provider && entry.model.id === current.id,
+			)?.model;
+			if (fresh) await this.#adoptRefreshedActiveModel(fresh);
+			else await this.#rebindActiveModelFromRegistry();
+		}
+		const mapped = toSessionScopedModels(resolved, this.settings);
+		if (mapped.length === 0) {
+			// Non-empty patterns that resolve to nothing: drop the stale
+			// settings-derived scope so /switch and Ctrl+P stop offering models
+			// the new config excludes. An SDK-supplied scope is programmatic and
+			// stays.
+			if (this.#sdkScopedModels || this.#models.scopedModels.length === 0) return false;
+			this.#models.setScopedModels([]);
+			return true;
+		}
+		if (sameScopedModelCycle(this.#models.scopedModels, mapped)) return false;
+		this.#models.setScopedModels(mapped);
+		return true;
+	}
+
+	/**
+	 * Re-adopts the rebuilt registry record for the active model when the
+	 * catalog refresh replaced it (same provider/id, new object). Applies on
+	 * every scope path — the empty-`enabledModels` unscoped case, the
+	 * `--models` CLI scope, and the settings-derived resolution — so the next
+	 * request reads the reloaded baseUrl/headers/limits/compat, not the stale
+	 * construction-time record. Returns whether a rebind happened.
+	 */
+	async #rebindActiveModelFromRegistry(): Promise<boolean> {
+		const current = this.agent.state.model;
+		if (!current) return false;
+		const fresh = this.#modelRegistry.find(current.provider, current.id);
+		if (!fresh) return false;
+		return this.#adoptRefreshedActiveModel(fresh);
+	}
+
+	/**
+	 * Point the agent at an already-resolved refreshed record for the same
+	 * provider/id. Same-selector metadata refreshes take the
+	 * `#rebindActiveModelAfterModelDiscovery` sequence (issue #10488), not
+	 * `#setModelWithProviderSessionReset`: a metadata-only swap must not close
+	 * warm codex/responses provider sessions, completions sessions re-key from
+	 * the live record's baseUrl on the next request anyway, and
+	 * `modelsAreEqual`'s provider/id comparison would suppress the
+	 * `model_changed` emit exactly when subscribers need it. Reconcile
+	 * model-dependent state (append-only context, Code Mode, think tool)
+	 * before the emit so the notification observes the reconciled session.
+	 */
+	async #adoptRefreshedActiveModel(fresh: Model): Promise<boolean> {
+		const current = this.agent.state.model;
+		if (!current || fresh === current) return false;
+		this.agent.setModel(fresh);
+		await this.#reconcileModelDependentState(current, fresh);
+		if (this.#isDisposed) return true;
+		this.#emit({ type: "model_changed" });
+		return true;
 	}
 
 	/** Prompt templates */
@@ -8122,6 +8348,49 @@ export class AgentSession {
 		return this.#models.getAvailableModels();
 	}
 
+	/**
+	 * Rebuild the model catalog from disk after a live config reload: re-parses
+	 * models.yml (custom providers/models) and re-runs provider discovery, then
+	 * re-applies settings-driven policies. Models added mid-session become
+	 * visible to /models and /switch without a restart.
+	 */
+	async refreshModels(strategy: ModelRefreshStrategy = "online-if-uncached"): Promise<void> {
+		// Serialize against startup's refreshInBackground(): a reload issued while
+		// background discovery is still running would start an unsynchronized
+		// refresh, and the older request could finish last and re-add a provider the
+		// reload just disabled (or overwrite the fresh catalog). No-op when no
+		// refresh is in flight.
+		await this.#modelRegistry.awaitBackgroundRefresh();
+		// Force the static rebuild BEFORE the online pass. `refresh()`'s static
+		// reload is mtime-gated, so a reload that only edits settings (e.g.
+		// removing a provider from `disabledProviders`, or toggling `extendedContext`)
+		// would reuse the old `#discoverableProviders` list; `reapplyModelPolicies()`
+		// forces the rebuild for the fresh settings, and the online pass below then
+		// discovers against it. Newly-enabled implicit providers (e.g. ollama) with
+		// no prior cache only surface here.
+		// ACP workspaces share one registry across per-workspace cloned settings;
+		// the policy rebuild consumes THIS session's settings explicitly instead
+		// of rebinding the shared registry, so the last-reloading workspace can
+		// never capture another workspace's policy pointer.
+		await this.#modelRegistry.reapplyModelPolicies(this.settings);
+		await this.#modelRegistry.refresh(strategy, this.settings);
+		// The refreshed catalog is now installed: reconcile retry.fallbackChains
+		// warnings against it, so a reload that makes a selector resolvable
+		// retracts its stale warning and one that invalidates a selector
+		// surfaces a new one, instead of leaving construction-time verdicts in
+		// place while /reload-settings reports the setting as applied.
+		if (this.#recovery.reconcileRetryFallbackChains()) {
+			this.#emit({ type: "config_warnings_changed" });
+		}
+		// refresh() does not reject on a malformed models.yml: the custom layer
+		// comes back empty with a configError. Surface it so callers never report
+		// success while the live custom providers were dropped.
+		const configError = this.#modelRegistry.getError();
+		if (configError) {
+			throw new Error(`models.yml failed to load: ${configError.message}`);
+		}
+	}
+
 	/** Selects the session thinking level and optionally persists it as the default. */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
 		this.#models.setThinkingLevel(level, persist);
@@ -8487,7 +8756,9 @@ export class AgentSession {
 	 */
 	async #reapplyExtendedContextPolicy(): Promise<void> {
 		try {
-			await this.#modelRegistry.reapplyModelPolicies();
+			// Scope the rebuild to this session's settings: ACP workspaces share
+			// one registry, so the listener must not rebind a shared pointer.
+			await this.#modelRegistry.reapplyModelPolicies(this.settings);
 			const currentModel = this.model;
 			if (!currentModel || this.#isDisposed) return;
 			const updated = this.#modelRegistry.find(currentModel.provider, currentModel.id);
@@ -10654,6 +10925,18 @@ export class AgentSession {
 	}
 
 	/**
+	 * Re-resolves role-driven consumers (advisors) against the current registry.
+	 * A reload that changes role assignments resolves them against whatever
+	 * catalog is loaded at signal time; call this after `refreshModels()` so a
+	 * consumer that recorded `no_model` during the stale window heals without
+	 * waiting for the next role change.
+	 */
+	reapplyModelRoles(): void {
+		if (this.#isDisposed) return;
+		this.#advisors.onModelRolesChanged();
+	}
+
+	/**
 	 * Reactivate an advisor that resolved to `no_model` at construction because a
 	 * discovery-backed provider had not populated the model registry yet. Awaits
 	 * the initial background refresh, then rebuilds the advisor and emits
@@ -10679,7 +10962,7 @@ export class AgentSession {
 		if (this.#isDisposed || !this.#recovery.hasPendingDiscoveryDeferredFallbackValidation()) return;
 		await this.#modelRegistry.awaitInitialBackgroundRefresh(this.#modelDiscoveryAbortController.signal);
 		if (this.#isDisposed) return;
-		if (this.#recovery.revalidateRetryFallbackChainsAfterDiscovery()) {
+		if (this.#recovery.reconcileRetryFallbackChains()) {
 			this.#emit({ type: "config_warnings_changed" });
 		}
 	}
