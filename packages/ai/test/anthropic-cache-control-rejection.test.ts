@@ -96,6 +96,23 @@ function createFetch(capture: Capture, modes: Array<"reject" | "ok">): FetchImpl
 	};
 }
 
+/**
+ * A caching-unaware proxy modeled faithfully: every body that carries a
+ * breakpoint anywhere is refused, so the turn can only complete once the
+ * provider ships a body with none at all.
+ */
+function createBreakpointRejectingFetch(capture: Capture): FetchImpl {
+	return async (input, init) => {
+		const raw = init?.body;
+		const text = raw instanceof Uint8Array ? new TextDecoder().decode(raw) : String(raw ?? "{}");
+		const body = JSON.parse(text) as MessageCreateParams;
+		capture.bodies.push(body);
+		const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+		capture.betaHeaders.push(headers.get("anthropic-beta") ?? "");
+		return countBreakpoints(body) > 0 ? cacheControlRejectionResponse() : successResponse();
+	};
+}
+
 function runTurn(fetchImpl: FetchImpl, states: Map<string, ProviderSessionState>): Promise<AssistantMessage> {
 	return streamAnthropic(MODEL, CONTEXT, {
 		apiKey: "sk-ant-api-test",
@@ -172,6 +189,9 @@ describe("Anthropic cache_control rejection fallback", () => {
 		await runTurn(fetchImpl, states);
 
 		expect(capture.betaHeaders[0]).toContain(EXTENDED_CACHE_TTL_BETA);
+		// The immediate retry, not just the next turn: the client's default
+		// headers must be rebuilt alongside the body.
+		expect(capture.betaHeaders[1]).not.toContain(EXTENDED_CACHE_TTL_BETA);
 		expect(capture.betaHeaders[2]).not.toContain(EXTENDED_CACHE_TTL_BETA);
 	});
 
@@ -191,6 +211,26 @@ describe("Anthropic cache_control rejection fallback", () => {
 
 		expect(other.stopReason).toBe("stop");
 		expect(countBreakpoints(capture.bodies[2])).toBeGreaterThan(0);
+	});
+
+	it("strips the OAuth identity block's default breakpoint on the replay", async () => {
+		const capture: Capture = { bodies: [], betaHeaders: [] };
+		const states = new Map<string, ProviderSessionState>();
+
+		// OAuth injects the Claude Code identity system block, whose breakpoint
+		// defaults to `ephemeral` when no lifetime is passed — an undefined
+		// lifetime alone does not remove it.
+		const message = await streamAnthropic(MODEL, CONTEXT, {
+			apiKey: "sk-ant-oat-test",
+			isOAuth: true,
+			providerSessionState: states,
+			fetch: createBreakpointRejectingFetch(capture),
+		}).result();
+
+		expect(message.stopReason).toBe("stop");
+		expect(message.errorMessage).toBeUndefined();
+		expect(capture.bodies).toHaveLength(2);
+		expect(countBreakpoints(capture.bodies[1])).toBe(0);
 	});
 });
 

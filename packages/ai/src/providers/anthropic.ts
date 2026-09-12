@@ -2335,13 +2335,14 @@ const streamAnthropicOnce = (
 			}
 
 			const zeroOutputCacheRefresh = options?.anthropicCacheRefreshRequest === true;
-			let client: AnthropicMessagesClientLike;
-			let isOAuthToken: boolean;
-
-			if (options?.client) {
-				client = options.client;
-				isOAuthToken = false;
-			} else {
+			// The beta set is frozen into the client's default headers, so a
+			// mid-turn fallback that changes which betas apply (dropCacheControl)
+			// must rebuild the client before its retry; rebuilding only the body
+			// would leave the header advertising a beta the body no longer uses.
+			const resolveClient = (): { client: AnthropicMessagesClientLike; isOAuthToken: boolean } => {
+				if (options?.client) {
+					return { client: options.client, isOAuthToken: false };
+				}
 				const extraBetas = normalizeExtraBetas(options?.betas);
 				const wantsAnthropicPriority = model.provider === "anthropic" && options?.serviceTier === "priority";
 				// Skip the fast-mode beta when this session already learned the
@@ -2448,7 +2449,7 @@ const streamAnthropicOnce = (
 					}
 				}
 
-				const created = createClient(model, {
+				return createClient(model, {
 					model,
 					apiKey,
 					extraBetas,
@@ -2470,9 +2471,8 @@ const streamAnthropicOnce = (
 						options?.promptCacheKey,
 					disableStrictTools,
 				});
-				client = created.client;
-				isOAuthToken = created.isOAuthToken;
-			}
+			};
+			let { client, isOAuthToken } = resolveClient();
 			const preparedContext = await prepareAnthropicManyImageContext(context, model.input.includes("image"));
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
 				let nextParams = buildParams(model, preparedContext, isOAuthToken, options, {
@@ -3419,6 +3419,9 @@ const streamAnthropicOnce = (
 							providerSessionState.cacheControlUnsupported = true;
 						}
 						dropCacheControl = true;
+						// Rebuild the client too: the retry must stop advertising the
+						// extended-cache-ttl beta, and that lives in the default headers.
+						({ client, isOAuthToken } = resolveClient());
 						params = await prepareParams();
 						providerRetryAttempt = 0;
 						output.content.length = 0;
@@ -3535,27 +3538,42 @@ type SystemBlockOptions = {
 	extraInstructions?: string[];
 	/** Text of the first user message — used as fingerprint seed for the billing header. */
 	firstUserMessageText?: string;
-	/** Cache lifetime shared by the OAuth system breakpoint and later message breakpoints. */
+	/**
+	 * Cache lifetime shared by the OAuth system breakpoint and later message
+	 * breakpoints. Omitted → the identity block keeps its default `ephemeral`
+	 * breakpoint; see `dropCacheControl` to emit none at all.
+	 */
 	cacheControl?: AnthropicCacheControl;
+	/**
+	 * Emit no `cache_control` on any block: the endpoint rejected the field.
+	 * Distinct from an undefined `cacheControl`, which only means "default".
+	 */
+	dropCacheControl?: boolean;
 };
 
 export function buildAnthropicSystemBlocks(
 	systemPrompt: readonly string[] | undefined,
 	options: SystemBlockOptions = {},
 ): AnthropicSystemBlock[] | undefined {
-	const { includeClaudeCodeInstruction = false, extraInstructions = [], firstUserMessageText, cacheControl } = options;
+	const {
+		includeClaudeCodeInstruction = false,
+		extraInstructions = [],
+		firstUserMessageText,
+		cacheControl,
+		dropCacheControl = false,
+	} = options;
 	const sanitizedPrompts = normalizeSystemPrompts(systemPrompt);
 	const trimmedInstructions = extraInstructions.map(instruction => instruction.trim()).filter(Boolean);
 	const hasBillingHeader = sanitizedPrompts.some(prompt => prompt.startsWith(CLAUDE_BILLING_HEADER_PREFIX));
 
 	if (includeClaudeCodeInstruction && !hasBillingHeader) {
+		const identityBlock: AnthropicSystemBlock = { type: "text", text: claudeCodeSystemInstruction };
+		if (!dropCacheControl) {
+			identityBlock.cache_control = cacheControl ? cloneAnthropicCacheControl(cacheControl) : { type: "ephemeral" };
+		}
 		const blocks: AnthropicSystemBlock[] = [
 			{ type: "text", text: createClaudeBillingHeader(firstUserMessageText ?? "") },
-			{
-				type: "text",
-				text: claudeCodeSystemInstruction,
-				cache_control: cacheControl ? cloneAnthropicCacheControl(cacheControl) : { type: "ephemeral" },
-			},
+			identityBlock,
 		];
 
 		for (const instruction of trimmedInstructions) {
@@ -4356,7 +4374,9 @@ type AnthropicParamBuildOptions = {
 	/**
 	 * Drop every prompt-cache breakpoint: the endpoint rejected `cache_control`
 	 * with a 400. `applyHeadCaching` / `applyPromptCaching` no-op on an
-	 * undefined breakpoint, so nothing else in the body changes.
+	 * undefined breakpoint, and `buildAnthropicSystemBlocks` is told
+	 * explicitly, because an undefined `cacheControl` there means "default
+	 * ephemeral" on the OAuth identity block, not "none".
 	 */
 	dropCacheControl?: boolean;
 	droppedThinkingBlocks?: ReadonlySet<string>;
@@ -4419,6 +4439,7 @@ function buildParams(
 		includeClaudeCodeInstruction: shouldInjectClaudeCodeInstruction,
 		firstUserMessageText,
 		cacheControl,
+		dropCacheControl,
 	});
 
 	// Pre-compute tools.
