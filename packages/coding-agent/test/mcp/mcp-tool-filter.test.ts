@@ -440,6 +440,14 @@ test("an escaped character is that literal character, whatever it spells in a re
 	expect(run(["{", "a"], ["\\{"]).allowed).toEqual(["{"]);
 	// And a class member escapes the same way.
 	expect(run(["d", "5"], ["[\\d]"]).allowed).toEqual(["d"]);
+	// The escape must be as wide as the character it names: a `\xNN` above Latin-1
+	// would be read as two characters (`\x3042` is `0` followed by `42`), and an
+	// astral character has to be spelled as the surrogate pair it occupies or the
+	// escape is read as one half of it.
+	expect(run(["あ", "042", "0"], ["\\あ"]).allowed).toEqual(["あ"]);
+	expect(run(["Ā", "0", "00"], ["\\Ā"]).allowed).toEqual(["Ā"]);
+	expect(run(["😀", "a", "\uD83D"], ["\\😀"]).allowed).toEqual(["😀"]);
+	expect(run(["aあb", "ab"], ["a\\あb"]).allowed).toEqual(["aあb"]);
 });
 test("matching is host-independent: windows separators never alter semantics", () => {
 	// picomatch auto-injects `windows: true` on win32 hosts when the option is

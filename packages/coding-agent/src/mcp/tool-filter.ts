@@ -144,13 +144,15 @@ function parseTokens(pattern: string, options: ParseOptions): Token[] {
  * separator handling, and no `|` means no alternation.
  */
 function prepare(pattern: string): string {
+	const characters = [...pattern];
 	let out = "";
-	for (let i = 0; i < pattern.length; i++) {
-		const ch = pattern[i];
+	for (let i = 0; i < characters.length; i++) {
+		const ch = characters[i];
 		if (ch === "\\") {
-			const next = pattern[i + 1];
-			// A trailing backslash names one literal backslash.
-			out += next === undefined ? "\\u005C" : hexEscape(next);
+			// A trailing backslash names one literal backslash; otherwise the
+			// character it escapes does, whatever that character is.
+			const next = characters[i + 1];
+			out += next === undefined ? escapeLiteral("\\") : escapeLiteral(next);
 			if (next !== undefined) i++;
 			continue;
 		}
@@ -160,15 +162,28 @@ function prepare(pattern: string): string {
 }
 
 /**
- * Spell one character so the engine reads it as itself.
+ * Spell one literal character so the engine reads it as itself.
  *
  * Used for an escaped character, whose meaning is its literal spelling even when
  * that character is a glob metacharacter (`\*` names a literal star rather than
  * a wildcard) or a regex escape (`\d` names `d`).
+ *
+ * The escape has to be as wide as the character: a `\xNN` above Latin-1 would be
+ * read as two characters by the engine (`\x3042` is `0` followed by `42`), and
+ * the compiled regex carries no `u` flag, so an astral character is spelled as
+ * the surrogate pair it occupies.
  */
-function hexEscape(ch: string): string {
-	const code = ch.charCodeAt(0);
-	return code === 0x5c ? "\\u005C" : `\\x${code.toString(16).toUpperCase().padStart(2, "0")}`;
+function escapeLiteral(ch: string): string {
+	const code = ch.codePointAt(0)!;
+	if (code <= 0xff) return `\\x${hex(code, 2)}`;
+	if (code <= 0xffff) return `\\u${hex(code, 4)}`;
+	const offset = code - 0x10000;
+	return `\\u${hex(0xd800 + (offset >> 10), 4)}\\u${hex(0xdc00 + (offset & 0x3ff), 4)}`;
+}
+
+/** Format a code unit as a fixed-width regex escape body. */
+function hex(value: number, width: number): string {
+	return value.toString(16).toUpperCase().padStart(width, "0");
 }
 
 /**
@@ -369,8 +384,17 @@ function unescapePatternText(value: string): string {
  * concluding it selects nothing.
  */
 function classMembers(token: Token): string[] | null {
+	// A negated member list admits nearly every character, and a range may reach
+	// outside the probe alphabet, so neither can be enumerated.
 	if (token.value.startsWith("[^") || token.value.includes("-")) return null;
-	const regex = new RegExp(`^(?:${token.value})$`);
+	let regex: RegExp;
+	try {
+		regex = new RegExp(`^(?:${token.value})$`);
+	} catch {
+		// A class the engine rejects — an unclosed one such as `[]?` — names
+		// nothing this walk can state, so the caller stays conservative.
+		return null;
+	}
 	const members = CLASS_ALPHABET.filter(ch => regex.test(ch));
 	return members.length === 0 ? null : members;
 }
