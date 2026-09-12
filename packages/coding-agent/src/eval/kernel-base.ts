@@ -372,7 +372,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 
 		const exited = this.#waitForExitWithTimeout(timeoutMs);
 		let result = await exited;
-		if (!result) {
+		if (result === null) {
 			try {
 				proc.kill("SIGTERM");
 			} catch {
@@ -382,20 +382,20 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 			// signal above never reaches anything it spawned. Sweep the group too.
 			killProcessGroup(proc.pid, "SIGTERM");
 			result = await this.#waitForExitWithTimeout(timeoutMs);
-			if (!result) {
+			if (result === null) {
 				try {
 					proc.kill("SIGKILL");
 				} catch {
 					/* ignore */
 				}
 			}
-			// The leader exiting after SIGTERM does not prove its descendants did.
-			// Always finish an attempted group shutdown with a SIGKILL sweep.
-			killProcessGroup(proc.pid, "SIGKILL");
-			if (!result) result = await this.#waitForExitWithTimeout(timeoutMs);
 		}
+		// A confirmed leader exit does not prove its descendants exited, even
+		// when the runner honored the shutdown request without any signals.
+		killProcessGroup(proc.pid, "SIGKILL");
+		if (result === null) result = await this.#waitForExitWithTimeout(timeoutMs);
 
-		const confirmed = !!result;
+		const confirmed = result !== null;
 		if (!confirmed) {
 			// Nothing acknowledged the exit. Record the pid so an operator can find
 			// the survivor; the group SIGKILL above is our last automatic recourse.
