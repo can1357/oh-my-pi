@@ -100,6 +100,46 @@ describe("read tool large artifact handling", () => {
 		}
 	});
 
+	it("keeps an ACP-buffer bounded selection visible under a smaller generic spill policy", async () => {
+		const source = Array.from({ length: 56 }, (_, n) => `const declaration_${n} = "${"x".repeat(64)}";`).join("\n");
+		await Bun.write(path.join(testDir, "bounded.ts"), source);
+		const session = makeSession(testDir);
+		session.settings = Settings.isolated({
+			"tools.artifactSpillThreshold": 1,
+			"tools.artifactTailLines": 5,
+		});
+		// The editor buffer is the source of truth and differs from disk, so a
+		// disk fallback cannot mask whether the bridge result was returned.
+		const buffer = source.replace("declaration_28", "buffered_28");
+		const bridgeReads: string[] = [];
+		session.getClientBridge = () => ({
+			capabilities: { readTextFile: true },
+			readTextFile: async ({ path: bridgePath }) => {
+				bridgeReads.push(bridgePath);
+				return buffer;
+			},
+		});
+		const wrapped = wrapToolWithMetaNotice(new ReadTool(session));
+		const context = {
+			settings: session.settings,
+			sessionManager: SessionManager.inMemory(testDir),
+		} as unknown as AgentToolContext;
+		const selectors = [":1-56", ":raw:1-56", ":1-29,31-56"];
+		for (const selector of selectors) {
+			const result = await wrapped.execute(
+				"bounded-bridge",
+				{ path: `bounded.ts${selector}` },
+				undefined,
+				undefined,
+				context,
+			);
+			const output = getTextOutput(result);
+			expect(output).toContain("buffered_28");
+			expect(output).not.toContain("artifact://");
+		}
+		expect(bridgeReads).toEqual(selectors.map(() => path.join(testDir, "bounded.ts")));
+	});
+
 	it("blocks unbounded raw reads and points to bounded artifact workflows", async () => {
 		const result = await tool.execute("call-raw", { path: "artifact://0:raw" });
 		const output = getTextOutput(result);

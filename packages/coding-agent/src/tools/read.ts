@@ -1962,7 +1962,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						suffixResolution,
 						undefined, // plain-file read: deterministic and fast, never abort mid-read
 					);
-					if (multiResult.bridgeResult) return multiResult.bridgeResult;
+					if (multiResult.bridgeResult) {
+						this.#markExplicitBoundedSelection(multiResult.bridgeResult, parsed, absolutePath);
+						return multiResult.bridgeResult;
+					}
 					content = [{ type: "text", text: multiResult.outputText }];
 					sourcePath = absolutePath;
 					details = multiResult.displayContent ? { displayContent: multiResult.displayContent } : {};
@@ -1993,6 +1996,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								const firstText = bridgeResult.content.find((c): c is TextContent => c.type === "text");
 								if (firstText) firstText.text = `${notice}\n${firstText.text}`;
 							}
+							this.#markExplicitBoundedSelection(bridgeResult, parsed, absolutePath);
 							return bridgeResult;
 						} catch (error) {
 							logger.warn("ACP fs readTextFile failed; falling back to disk", { path: absolutePath, error });
@@ -2344,19 +2348,34 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			resultBuilder.limits({ columnMax: columnTruncated });
 		}
 		const result = resultBuilder.done();
+		this.#markExplicitBoundedSelection(result, parsed, sourcePath);
+		return result;
+	}
+
+	/**
+	 * Read already bounded this selection with its own line and byte limits, so
+	 * the generic artifact spill must not re-elide the requested lines. Every
+	 * path that returns such a selection calls this, including the ACP-bridge
+	 * results that return before the common result builder.
+	 */
+	#markExplicitBoundedSelection(
+		result: AgentToolResult<ReadToolDetails>,
+		parsed: ParsedSelector,
+		sourcePath: string | undefined,
+	): void {
 		const boundedSelection =
 			parsed.kind === "tail" ||
 			(parsed.kind === "lines" && parsed.ranges.every(range => range.endLine !== undefined));
-		if (boundedSelection && sourcePath && content.length === 1 && content[0].type === "text") {
-			const selectedText = content[0].text;
-			const selectedLines = countTextLines(selectedText);
-			if (
-				selectedLines <= DEFAULT_MAX_LINES &&
-				Buffer.byteLength(selectedText, "utf-8") <= Math.max(DEFAULT_MAX_BYTES, selectedLines * 512)
-			)
-				markBoundedReadResult(result);
-		}
-		return result;
+		if (!boundedSelection || !sourcePath) return;
+		const [first] = result.content;
+		if (result.content.length !== 1 || first?.type !== "text") return;
+		const selectedText = first.text;
+		const selectedLines = countTextLines(selectedText);
+		if (
+			selectedLines <= DEFAULT_MAX_LINES &&
+			Buffer.byteLength(selectedText, "utf-8") <= Math.max(DEFAULT_MAX_BYTES, selectedLines * 512)
+		)
+			markBoundedReadResult(result);
 	}
 
 	/**
