@@ -11,6 +11,8 @@ import {
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonSpec,
 } from "../../src/launch/protocol";
+import { displayExitReason, MAX_EXIT_REASON_LENGTH } from "../../src/launch/exit-reason";
+
 function restoreEnv(name: string, value: string | undefined): void {
 	if (value === undefined) delete process.env[name];
 	else process.env[name] = value;
@@ -51,6 +53,15 @@ function failingSpec(name: string, cwd: string): DaemonSpec {
 }
 
 describe("daemon broker exit diagnostics", () => {
+	it("shortens a home path before applying the display bound", () => {
+		const home = os.homedir();
+		const prefixLength = MAX_EXIT_REASON_LENGTH - home.length + 1;
+		const prefix = `${"x".repeat(prefixLength - 1)} `;
+		const displayed = displayExitReason(`${prefix}${home}`);
+
+		expect(displayed).toBe(`${prefix}~`);
+	});
+
 	it("records a neutral reason for a non-PTY code without a child diagnostic", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-exit-diagnostic-");
 		const projectDir = path.join(tempDir.path(), "project");
