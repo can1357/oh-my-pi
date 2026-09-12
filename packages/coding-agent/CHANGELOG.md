@@ -21,6 +21,12 @@
 
 ### Fixed
 
+- Fixed protocol handler incorrectly escaping raw text content from agent responses
+- Fixed `<task-result>` previews of structured subagent yields collapsing to a lone `{` when the JSON's second line exceeded the preview budget
+- Fixed `/usage` freezing the TUI for several seconds while it loaded the activity heatmap on a large stats database; the dashboard now opens immediately and the heatmap plus session sync load from a background subprocess.
+- Fixed the status line missing from the first frame at startup and appearing only after the session loaded; the last run's status row is cached per project and painted immediately, then replaced in place by the live one.
+- Fixed Bash builtins (`cut`, `sed`, `ls`, `sort`, `uniq`, `cat`, and the rest) printing `<name>: Broken pipe (os error 32)` / `write error` and exiting 1 when a downstream stage quit early (`cut f | head`, `cut f | sed 'bad'`); they now die silently with status 141 like standalone utilities under SIGPIPE.
+- Fixed turns dying with `undefined is not an object (evaluating 'e.identity.class')` as soon as the model started thinking when an extension provider projects its own catalog through `oauth.modifyModels` (`pi-provider-kiro` and friends); projected models are now materialized like every other catalog source.
 - Provider-native compaction (OpenAI Responses compact, Anthropic server-side compaction) re-issues the system prompt the live turn actually sent — a per-turn `before_agent_start` override included — instead of the rebuilt base prompt, and advisor compaction sends the advisor's own prompt instead of the generic summarizer prompt, so the request reads the live request's cached prefix.
 - The `set_steering_mode`, `set_follow_up_mode`, and `set_interrupt_mode` RPC commands are now session-scoped, so a short-lived RPC client no longer silently writes queue-mode fields to the machine-global `config.yml`. The setters still persist by default, so the settings panel and existing callers are unaffected ([#11555](https://github.com/can1357/oh-my-pi/issues/11555)).
 - Hand-authored `*.openapi.json` files can now be edited without disabling generated-file protection globally ([#11674](https://github.com/can1357/oh-my-pi/issues/11674)).
