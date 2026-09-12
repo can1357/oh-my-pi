@@ -637,7 +637,16 @@ export class SessionMaintenance {
 	 *
 	 * No-op (zero counts) when nothing is eligible.
 	 */
-	async shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
+	async shake(
+		mode: ShakeMode,
+		opts: {
+			config?: ShakeConfig;
+			signal?: AbortSignal;
+			requireArtifact?: boolean;
+			isCurrent?: () => boolean;
+			toolResultsOnly?: boolean;
+		} = {},
+	): Promise<ShakeResult> {
 		if (mode === "images") {
 			const { removed } = await this.#host.dropImages();
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed: 0 };
@@ -670,6 +679,10 @@ export class SessionMaintenance {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: removed, tokensFreed: 0 };
 		}
 
+		const assertCurrent = () => {
+			if (opts.signal?.aborted || opts.isCurrent?.() === false) throw new CompactionCancelledError();
+		};
+		assertCurrent();
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
 		const config = this.#withPlanProtection({
@@ -680,12 +693,21 @@ export class SessionMaintenance {
 			// the active model cannot replay still hides its prefix from the prompt.
 			keepBoundaryId: latestCompaction?.firstKeptEntryId,
 		});
-		const regions = collectShakeRegions(branchEntries, this.#tokenizer, config);
+		let regions = collectShakeRegions(branchEntries, this.#tokenizer, config);
+		if (opts.toolResultsOnly) {
+			regions = regions.filter(region => region.kind === "toolResult");
+			const savings = regions.reduce((total, region) => total + Math.max(0, region.tokens - 16), 0);
+			if (savings < config.minSavings) regions = [];
+		}
 		if (regions.length === 0) {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
 
 		const artifactId = await this.#saveShakeArtifact(regions);
+		assertCurrent();
+		if (opts.requireArtifact && !artifactId) {
+			throw new Error("shake could not save a recovery artifact");
+		}
 		const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, artifactId));
 
 		const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
@@ -722,10 +744,23 @@ export class SessionMaintenance {
 			return { region, replacement };
 		});
 
+		const entrySnapshots = new Map<SessionEntry, SessionEntry>();
+		for (const { region } of items) {
+			if (!entrySnapshots.has(region.entry)) entrySnapshots.set(region.entry, structuredClone(region.entry));
+		}
+		const anchorEntry = anchorIndex >= 0 ? branchEntries[anchorIndex] : undefined;
+		if (anchorEntry && !entrySnapshots.has(anchorEntry))
+			entrySnapshots.set(anchorEntry, structuredClone(anchorEntry));
 		applyShakeRegions(items);
-		this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
-
-		await this.#host.sessionManager.rewriteEntries();
+		try {
+			this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
+			await this.#host.sessionManager.rewriteEntries();
+		} catch (error) {
+			for (const [entry, snapshot] of entrySnapshots) Object.assign(entry, snapshot);
+			const sessionContext = this.#host.buildDisplaySessionContext();
+			this.#host.agent.replaceMessages(sessionContext.messages);
+			throw error;
+		}
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes("shake");
@@ -738,6 +773,28 @@ export class SessionMaintenance {
 			tokensFreed: Math.max(0, originalTokens - replacementTokens),
 			artifactId,
 		};
+	}
+
+	/** One-shot, artifact-backed mechanical reduction for a pre-output Responses body-read timeout. */
+	async shakeForRequestBodyReadTimeout(generation: number): Promise<boolean> {
+		const settings = this.#host.settings.getGroup("compaction");
+		if (!settings.enabled || !resolveCompactionMethodOrder(settings.methodOrder).includes("shake")) return false;
+		const isCurrent = () => !this.#host.isDisposed() && this.#host.promptGeneration() === generation;
+		if (!isCurrent()) return false;
+		try {
+			const result = await this.shake("elide", {
+				config: DEFAULT_SHAKE_CONFIG,
+				requireArtifact: true,
+				isCurrent,
+				toolResultsOnly: true,
+			});
+			return isCurrent() && result.toolResultsDropped + result.blocksDropped > 0;
+		} catch (error) {
+			if (!(error instanceof CompactionCancelledError)) {
+				this.#host.emitNotice("warning", "Could not safely reduce this request before retrying it.", "compaction");
+			}
+			return false;
+		}
 	}
 
 	#shakeElidePlaceholder(region: ShakeRegion, index: number, artifactId: string | undefined): string {

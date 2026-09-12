@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).
+- Fixed eligible full OpenAI Responses request-body timeouts by retrying once after conservative local history elision, while preserving unsafe partial output and existing stateful retries.
 
 ### Added
 
