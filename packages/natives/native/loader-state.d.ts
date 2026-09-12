@@ -18,6 +18,9 @@ export interface EmbeddedAddon {
 	archive?: EmbeddedAddonArchive;
 }
 
+/** Return the native-addon export expected for a package version. */
+export function versionSentinelFor(packageVersion: string): string;
+
 export interface DetectCompiledBinaryInput {
 	embeddedAddon: EmbeddedAddon | null | undefined;
 	env: Record<string, string | undefined>;

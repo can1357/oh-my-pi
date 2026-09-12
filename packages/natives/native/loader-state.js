@@ -77,6 +77,15 @@ function resolveLeafPackageDir(platformTag) {
 // =========================================================================
 
 /**
+ * Return the version sentinel exported by an addon built for `packageVersion`.
+ * @param {string} packageVersion
+ * @returns {string}
+ */
+export function versionSentinelFor(packageVersion) {
+	return `__piNativesV${packageVersion.replace(/[^A-Za-z0-9]/g, "_")}`;
+}
+
+/**
  * @param {{
  *   embeddedAddon: { platformTag: string; version: string; files: unknown[] } | null | undefined;
  *   env: Record<string, string | undefined>;
@@ -837,7 +846,7 @@ export function initLoaderContext(overrides = {}) {
 	// physically cannot expose the symbol this loader is looking for. That
 	// turns the silent `<sym> is not a function` crash from a Windows
 	// locked-file update into an actionable load-time error.
-	const versionSentinelExport = `__piNativesV${packageVersion.replace(/[^A-Za-z0-9]/g, "_")}`;
+	const versionSentinelExport = versionSentinelFor(packageVersion);
 
 	return {
 		platformTag,
