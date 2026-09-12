@@ -7,6 +7,12 @@ declare module "@oh-my-pi/pi-agent-core" {
 		ui?: ExtensionUIContext;
 		hasUI?: boolean;
 		toolNames?: string[];
+		/** Orchestration depth of the session issuing this call: 0 for the
+		 *  top-level agent, >0 for a subagent. Lets policy distinguish the
+		 *  orchestrator from the workers it delegates to. */
+		taskDepth?: number;
+		/** Whether this call comes from the top-level agent or a spawned subagent. */
+		agentKind?: "main" | "sub";
 		toolCall?: ToolCallContext;
 		/** Set on `xd://` device dispatches: the write tool's outer approval gate
 		 *  already resolved this call at the mounted tool's tier, so the inner

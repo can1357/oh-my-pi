@@ -2839,6 +2839,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			autoApprove: options.autoApprove ?? false,
+			// Orchestration depth of the session owning this tool call: 0 for the
+			// top-level agent, >0 for a subagent. Surfaced so extensions can apply
+			// depth-scoped policy (e.g. "the orchestrator delegates file writes")
+			// without blocking the subagents that must perform the work.
+			taskDepth,
+			agentKind,
 		});
 		const toolContextStore = new ToolContextStore(getSessionContext);
 		toolSession.getToolContext = () => toolContextStore.getContext();
@@ -3835,6 +3841,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			obfuscator,
 			agentId: resolvedAgentId,
 			agentKind,
+			taskDepth,
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,

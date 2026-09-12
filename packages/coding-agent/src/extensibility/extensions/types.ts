@@ -938,6 +938,14 @@ export interface ToolApprovalResolvedEvent {
 interface ToolCallEventBase {
 	type: "tool_call";
 	toolCallId: string;
+	/** Orchestration depth of the session issuing the call: 0 for the top-level
+	 *  agent, >0 for a subagent. Undefined when the host does not report it.
+	 *  Enables depth-scoped policy that must not affect delegated work. */
+	taskDepth?: number;
+	/** Whether the call originates from the top-level agent (`"main"`) or a
+	 *  spawned subagent (`"sub"`). Undefined when the host does not report it.
+	 *  Prefer this over {@link taskDepth} for main-vs-delegated policy. */
+	agentKind?: "main" | "sub";
 }
 
 export interface BashToolCallEvent extends ToolCallEventBase {

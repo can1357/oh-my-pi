@@ -1126,6 +1126,10 @@
 - Added `qwenTemplateReasoningEffort` to the `models.yml` `compat` schema, so the auto-enabled Qwen 3.8+ template effort dialect (`chat_template_kwargs.reasoning_effort`) can be switched off per provider/model for strict local servers that reject unknown `chat_template_kwargs`.
 - Extensions can provide a normalized `usage` provider through `pi.registerProvider()`. Its reports now flow through AuthStorage caching, history, and usage displays, and the override is removed when the extension provider is unregistered.
 
+### Added
+
+- Added `agentKind` (`"main"` | `"sub"`) and `taskDepth` to the extension `tool_call` event, so a handler can tell a top-level call from a delegated one. Both fields are optional, and a handler running on a host that does not report them sees `undefined` — letting it fail open rather than break. This makes depth-scoped policy expressible: an extension can block `write`/`edit`/`bash` for `agentKind === "main"` while leaving the subagents that perform the work untouched, which previously was impossible because both paths emitted the same undifferentiated event.
+
 ## [17.4.0] - 2026-08-20
 
 ### Added
