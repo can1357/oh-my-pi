@@ -205,6 +205,20 @@ test("grouping and extglob syntax stay literal beside a supported wildcard", () 
 	expect(run(NAMES, ["!(search)"]).unmatched).toEqual(["!(search)"]);
 });
 
+test("a wildcard never splits an encoded unit", () => {
+	// A raw `§`/`¤` occupies a two-character encoded unit (`¤§`/`¤¤`). A
+	// character-wise star may stop between those two characters, letting a
+	// following literal consume the orphaned half as if it were a whole unit:
+	// `*/` admitted the name `a§`, which has no slash at all.
+	expect(run(["a§", "a/", "a"], ["*/"]).allowed).toEqual(["a/"]);
+	expect(run(["§", "/"], ["**/"]).allowed).toEqual(["/"]);
+	expect(run(["§", "/", "x/"], ["{*,x}/"]).allowed).toEqual(["/", "x/"]);
+	expect(run(["9,§9", "/9"], ["*/9"]).allowed).toEqual(["/9"]);
+	// The same hazard against the escape marker, in the deny direction: `*§`
+	// asked for a raw `§` and admitted `}¤/`, which contains none.
+	expect(run(["}¤/", " §"], ["*§"]).allowed).toEqual([" §"]);
+});
+
 test("slash encoding is injective (sentinel-carrying names cannot collide with slash names)", () => {
 	// A tool name containing the sentinel character (§) is reachable via JSON;
 	// the encoding escapes sentinels (§ → ¤§) before mapping slashes (/ → §),

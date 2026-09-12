@@ -187,7 +187,13 @@ const NEVER_MATCH = "(?!)";
 
 /**
  * Translate a glob pattern into the encoded domain, emitting raw-character
- * semantics for `?` and keeping grouping characters literal.
+ * semantics for `?`, keeping grouping characters literal, and collapsing every
+ * run of `*` to a single star.
+ *
+ * Collapsing matters because picomatch compiles `**` to a globstar that leans
+ * on `.` and on `/` as a separator (e.g. `(?:(?:(?!(?:^|\/)\.{1,2}(?:\/|$)).)*?)`),
+ * neither of which survives into the encoded domain; one star, re-quantified by
+ * `compileGlobMatcher`, is both sufficient and correct here.
  */
 function translatePattern(pattern: string): string {
 	let out = "";
@@ -207,6 +213,13 @@ function translatePattern(pattern: string): string {
 			if (next === "/" || next === SLASH_CODE || next === ESCAPE_MARK) out += translateLiteral(next);
 			else out += "\\" + next;
 			i++;
+			continue;
+		}
+		if (ch === "*") {
+			// Any run of stars is one star: both cross `/`, so `**` has no extra
+			// meaning here. Consuming the run keeps picomatch from seeing `**`.
+			while (pattern[i + 1] === "*") i++;
+			out += "*";
 			continue;
 		}
 		if (ch === "[") {
@@ -259,22 +272,46 @@ type ToolMatcher = (name: string) => boolean;
 
 const compiledPatterns = new Map<string, ToolMatcher>();
 
-/** Compile one filter entry into a raw-name matcher. */
+/**
+ * Matches zero or more ENCODED CHARACTERS: one `¤`-prefixed unit, or any
+ * character that is not the escape marker. This is the star's true meaning in
+ * the encoded domain (`*` spans any run of raw characters, `/` included).
+ *
+ * The star cannot be delegated to picomatch, which compiles it to `[^/]*?` —
+ * a character-wise wildcard that may stop between the two characters of an
+ * encoded unit. A following literal would then consume the orphaned second half
+ * as if it were a whole unit: a star followed by a raw slash wrongly admitted
+ * the name `a` + U+00A7 (whose encoded form is `a` + U+00A4 + U+00A7).
+ */
+const ENCODED_STAR = `(?:${ESCAPE_MARK}${SLASH_CODE}|${ESCAPE_MARK}${ESCAPE_MARK}|[^${ESCAPE_MARK}])*`;
+
+/**
+ * Compile one filter entry into a raw-name matcher.
+ *
+ * `picomatch.makeRe` is used rather than the matcher factory so the emitted
+ * RegExp can be driven directly. The factory re-checks `input === glob` and
+ * falls back to literal matching when the two agree, which the encoding can
+ * make true by accident: `\?` translates to a two-character `\?` that equals
+ * the encoded form of a name reading `\?`. The regex is also the only way to
+ * re-quantify `*` (see {@link ENCODED_STAR}).
+ */
 function compilePattern(pattern: string): ToolMatcher {
 	const cached = compiledPatterns.get(pattern);
 	if (cached !== undefined) return cached;
 	let matcher: ToolMatcher;
 	if (/[*?[\]{}\\]/.test(pattern)) {
-		let compiled: ((name: string) => boolean) | null = null;
+		let regex: RegExp | null = null;
 		try {
-			compiled = picomatch(translatePattern(pattern), MATCH_OPTIONS);
+			const source = picomatch.makeRe(translatePattern(pattern), MATCH_OPTIONS);
+			// `*` is re-quantified: picomatch emitted `[^/]*?` for each one.
+			regex = new RegExp(source.source.replaceAll("[^/]*?", ENCODED_STAR));
 		} catch {
 			// A syntactically broken pattern never matches: it degrades to an
 			// unmatched entry instead of disabling the server.
-			compiled = null;
+			regex = null;
 		}
-		const globMatch = compiled;
-		matcher = globMatch ? (name: string) => globMatch(encodeName(name)) : () => false;
+		const compiled = regex;
+		matcher = compiled ? (name: string) => compiled.test(encodeName(name)) : () => false;
 	} else {
 		matcher = (name: string) => name === pattern;
 	}
@@ -286,8 +323,8 @@ function compilePattern(pattern: string): ToolMatcher {
  * Apply a per-server tool filter.
  *
  * Literal entries match exactly; entries containing glob metacharacters
- * (`*`, `?`, `[...]`, `{...}`) are matched with fnmatch semantics over the raw
- * name — `/` is an ordinary character, and `*`/`?` cross it. Denylist entries
+ * (`* `, ` ? `, `[...]`, `{... }`) are matched with fnmatch semantics over the raw
+ * name — `/ ` is an ordinary character, and ` * `/` ?` cross it. Denylist entries
  * subtract from the allowlist when both are set.
  */
 export function filterMCPTools(input: MCPToolFilterInput): MCPToolFilterResult {
@@ -328,7 +365,7 @@ export function filterMCPTools(input: MCPToolFilterInput): MCPToolFilterResult {
  * configured `enabledTools` / `disabledTools`.
  *
  * Applied at the network reception boundary (`listTools`), so that all
- * downstream consumers (tool cache, custom tools, `/session`, `/mcp test`,
+ * downstream consumers (tool cache, custom tools, `/ session`, ` / mcp test`,
  * runtime snapshots) automatically observe only the allowed tools.
  *
  * Preserves each matching tool's original definition, schema, and order.
@@ -362,7 +399,7 @@ export function applyMCPToolFilter(
 
 	if (filterEmpty) {
 		logger.warn(
-			`MCP server "${serverName}": tool filter (enabledTools=${JSON.stringify(config.enabledTools)}, disabledTools=${JSON.stringify(config.disabledTools)}) excluded all ${tools.length} advertised tools; 0 tools will be contributed to the session.`,
+			`MCP server "${serverName}": tool filter(enabledTools = ${JSON.stringify(config.enabledTools)}, disabledTools = ${JSON.stringify(config.disabledTools)}) excluded all ${tools.length} advertised tools; 0 tools will be contributed to the session.`,
 			{ path: `mcp:${serverName}` },
 		);
 		return [];
