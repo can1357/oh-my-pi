@@ -1,7 +1,12 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { DEFAULT_SHAKE_CONFIG } from "@oh-my-pi/pi-agent-core/compaction";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
+import type { Context, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -10,6 +15,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
+const NATIVE_REPLAY_BULK = "NATIVE_REPLAY_BULK_SENTINEL ".repeat(1000);
 const BODY_READ_TIMEOUT = "Timed out reading request body. Try again, or use a smaller request size.";
 
 function completeResponse(): Response {
@@ -71,6 +77,14 @@ function ordinaryTransientErrorResponse(): Response {
 }
 
 function defaultMessages(): AgentMessage[] {
+	const usage = {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
 	return [
 		{
 			role: "user",
@@ -84,14 +98,7 @@ function defaultMessages(): AgentMessage[] {
 			api: "openai-responses",
 			provider: "openai",
 			model: "local-responses-test",
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
+			usage,
 			stopReason: "toolUse",
 			timestamp: Date.now() - 2,
 		},
@@ -220,6 +227,58 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 		}
 	}, 30_000);
 
+	it("preserves native Responses replay payloads while eliding tool-result text", async () => {
+		const messages = defaultMessages();
+		messages.splice(2, 0, {
+			role: "assistant",
+			content: [{ type: "text", text: "native assistant visible" }],
+			api: "openai-responses",
+			provider: "openai",
+			model: "local-responses-test",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			providerPayload: createOpenAIResponsesHistoryPayload("openai", [
+				{ type: "message", role: "assistant", content: [{ type: "output_text", text: NATIVE_REPLAY_BULK }] },
+			]),
+			timestamp: Date.now() - 3,
+		});
+		const harness = await createSessionHarness({
+			messages,
+			respond: async (_body, requestNumber) => (requestNumber === 2 ? timeoutResponse() : completeResponse()),
+		});
+		try {
+			const activeModel = harness.session.agent.state.model as Model<"openai-responses">;
+			await streamOpenAIResponses(
+				activeModel,
+				{ messages: messages as Context["messages"] },
+				{
+					apiKey: "local-test-key",
+					providerSessionState: harness.session.providerSessionState,
+					sessionId: harness.session.sessionId,
+				},
+			).result();
+			await runPrompt(harness);
+			expect(harness.requests).toHaveLength(3);
+			expect(harness.requests[1]).toContain(NATIVE_REPLAY_BULK);
+			expect(harness.requests[2]).toContain(NATIVE_REPLAY_BULK);
+			expect(harness.requests[2]).not.toContain("historical tool result");
+			const artifactId = /artifact:\/\/([^\s)]+)/.exec(harness.requests[2] ?? "")?.[1];
+			expect(artifactId).toBeDefined();
+			const artifactPath = await harness.sessionManager.getArtifactPath(artifactId!);
+			expect(artifactPath).not.toBeNull();
+			expect(await Bun.file(artifactPath!).text()).toContain("historical tool result");
+		} finally {
+			await harness.cleanup();
+		}
+	}, 30_000);
+
 	for (const [maxRetries, expectedRequests, changedRetry] of [
 		[1, 2, false],
 		[2, 3, true],
@@ -303,6 +362,81 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 		}
 	});
 
+	it("does not retry when the actual artifact placeholder misses minimum savings", async () => {
+		const harness = await createSessionHarness({ messages: [] });
+		const artifactsDir = harness.sessionManager.getArtifactsDir();
+		if (!artifactsDir) throw new Error("Expected session artifacts directory");
+		const artifactId = "artifact-segment-".repeat(20);
+		const allocateArtifactPath = vi
+			.spyOn(harness.sessionManager, "allocateArtifactPath")
+			.mockResolvedValue({ id: artifactId, path: path.join(artifactsDir, "reserved-shake.log") });
+		try {
+			const legacyPlaceholderEstimate = 16;
+			let toolResultText = "";
+			let withinBoundary = false;
+			for (let index = 0; index < DEFAULT_SHAKE_CONFIG.minSavings + 128; index++) {
+				toolResultText += ` item-${index}`;
+				const tokens = harness.session.agent.tokenizer.countTokens([toolResultText]);
+				const placeholder = `[shaken ~${tokens} tokens — recover: artifact://${artifactId} (region 1)]`;
+				const actualSavings = tokens - harness.session.agent.tokenizer.countTokens(placeholder);
+				if (
+					tokens - legacyPlaceholderEstimate >= DEFAULT_SHAKE_CONFIG.minSavings &&
+					actualSavings < DEFAULT_SHAKE_CONFIG.minSavings
+				) {
+					withinBoundary = true;
+					break;
+				}
+			}
+			expect(withinBoundary).toBe(true);
+			const timestamp = Date.now();
+			harness.sessionManager.appendMessage({
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "call_near_threshold",
+						name: "bash",
+						arguments: { command: "printf near-threshold" },
+					},
+				],
+				api: "openai-responses",
+				provider: "openai",
+				model: "local-responses-test",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp,
+			});
+			harness.sessionManager.appendMessage({
+				role: "toolResult",
+				toolCallId: "call_near_threshold",
+				toolName: "bash",
+				content: [{ type: "text", text: toolResultText }],
+				isError: false,
+				timestamp,
+			});
+			harness.sessionManager.appendMessage({
+				role: "user",
+				content: "near threshold tail ".repeat(8_000),
+				timestamp,
+			});
+			harness.session.agent.replaceMessages(harness.sessionManager.buildSessionContext().messages);
+			await runPrompt(harness);
+			expect(harness.requests).toHaveLength(1);
+			expect(await fs.readdir(artifactsDir).catch(() => [])).toEqual([]);
+			assertTerminalErrorState(harness);
+		} finally {
+			allocateArtifactPath.mockRestore();
+			await harness.cleanup();
+		}
+	});
+
 	it("owns a repeated exact 408 after the one changed retry", async () => {
 		const harness = await createSessionHarness({
 			respond: async (_body, requestNumber) => (requestNumber <= 2 ? timeoutResponse() : completeResponse()),
@@ -317,9 +451,69 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 		}
 	});
 
+	it("allows a later independent prompt to recover its own full-replay timeout", async () => {
+		const messages = defaultMessages();
+		const firstTail = messages.at(-1);
+		if (firstTail?.role !== "user") throw new Error("Expected seeded user tail");
+		firstTail.content = "first protected tail ".repeat(8_000);
+		const harness = await createSessionHarness({
+			messages,
+			respond: async (_body, requestNumber) =>
+				requestNumber === 1 || requestNumber === 3 ? timeoutResponse() : completeResponse(),
+		});
+		try {
+			await runPrompt(harness);
+			const priorAssistant = harness.session.agent.state.messages.find(
+				(message): message is Extract<AgentMessage, { role: "assistant" }> =>
+					message.role === "assistant" && message.stopReason === "stop",
+			);
+			expect(priorAssistant).toBeDefined();
+			const callId = "call_independent_prompt";
+			harness.sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "toolCall", id: callId, name: "bash", arguments: { command: "printf fresh" } }],
+				api: priorAssistant!.api,
+				provider: priorAssistant!.provider,
+				model: priorAssistant!.model,
+				usage: priorAssistant!.usage,
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			});
+			harness.sessionManager.appendMessage({
+				role: "toolResult",
+				toolCallId: callId,
+				toolName: "bash",
+				content: [{ type: "text", text: "independent historical tool result ".repeat(5000) }],
+				isError: false,
+				timestamp: Date.now(),
+			});
+			harness.sessionManager.appendMessage({
+				role: "user",
+				content: "next protected tail ".repeat(8_000),
+				timestamp: Date.now(),
+			});
+			harness.session.agent.replaceMessages(harness.sessionManager.buildSessionContext().messages);
+			await harness.session.prompt("next independent prompt");
+			await harness.session.waitForIdle();
+			expect(harness.requests).toHaveLength(4);
+			expect(harness.requests[1]).toContain("artifact://");
+			expect(harness.requests[2]).toContain("independent historical tool result");
+			expect(harness.requests[3]).not.toContain("independent historical tool result");
+			expect(harness.requests[3]).toContain("artifact://");
+			expect(harness.session.agent.state.messages.at(-1)).toMatchObject({
+				role: "assistant",
+				stopReason: "stop",
+				content: [{ type: "text", text: "Recovered" }],
+			});
+		} finally {
+			await harness.cleanup();
+		}
+	});
 	it("does not rewrite when the recovery artifact cannot be saved", async () => {
 		const harness = await createSessionHarness();
-		const saveArtifact = vi.spyOn(harness.sessionManager, "saveArtifact").mockResolvedValue(undefined);
+		const allocateArtifactPath = vi
+			.spyOn(harness.sessionManager, "allocateArtifactPath")
+			.mockResolvedValue({ id: "reserved", path: harness.tempDir.path() });
 		try {
 			await runPrompt(harness);
 			expect(harness.requests).toHaveLength(1);
@@ -334,7 +528,7 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 			).toBe(true);
 			assertTerminalErrorState(harness);
 		} finally {
-			saveArtifact.mockRestore();
+			allocateArtifactPath.mockRestore();
 			await harness.cleanup();
 		}
 	});
@@ -363,26 +557,28 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 		}
 	});
 
-	it("cancels while artifact persistence is pending without rewriting or retrying", async () => {
+	it("cancels while artifact reservation is pending without rewriting or retrying", async () => {
 		const artifactStarted = Promise.withResolvers<void>();
-		const releaseArtifact = Promise.withResolvers<string | undefined>();
+		const releaseArtifact = Promise.withResolvers<{ id?: string; path?: string }>();
 		const harness = await createSessionHarness();
-		const saveArtifact = vi.spyOn(harness.sessionManager, "saveArtifact").mockImplementation(async () => {
-			artifactStarted.resolve();
-			return await releaseArtifact.promise;
-		});
+		const allocateArtifactPath = vi
+			.spyOn(harness.sessionManager, "allocateArtifactPath")
+			.mockImplementation(async () => {
+				artifactStarted.resolve();
+				return await releaseArtifact.promise;
+			});
 		try {
 			const prompt = harness.session.prompt("continue");
 			await artifactStarted.promise;
 			const abort = harness.session.abort({ reason: "negative-test-cancel" });
-			releaseArtifact.resolve(undefined);
+			releaseArtifact.resolve({});
 			await abort;
 			await prompt;
 			await harness.session.waitForIdle();
 			expect(harness.requests).toHaveLength(1);
 			assertTerminalErrorState(harness);
 		} finally {
-			saveArtifact.mockRestore();
+			allocateArtifactPath.mockRestore();
 			await harness.cleanup();
 		}
 	});

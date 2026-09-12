@@ -55,6 +55,7 @@ import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { writeArtifact } from "./artifacts";
 import type { ModelRegistry } from "../config/model-registry";
 import { MODEL_ROLE_IDS } from "../config/model-roles";
 import type { CompactionSettings as ConfiguredCompactionSettings, Settings } from "../config/settings";
@@ -694,22 +695,50 @@ export class SessionMaintenance {
 			keepBoundaryId: latestCompaction?.firstKeptEntryId,
 		});
 		let regions = collectShakeRegions(branchEntries, this.#tokenizer, config);
-		if (opts.toolResultsOnly) {
-			regions = regions.filter(region => region.kind === "toolResult");
-			const savings = regions.reduce((total, region) => total + Math.max(0, region.tokens - 16), 0);
-			if (savings < config.minSavings) regions = [];
-		}
+		if (opts.toolResultsOnly) regions = regions.filter(region => region.kind === "toolResult");
 		if (regions.length === 0) {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
 
-		const artifactId = await this.#saveShakeArtifact(regions);
+		const reservedArtifact = await this.#host.sessionManager.allocateArtifactPath("shake");
 		assertCurrent();
-		if (opts.requireArtifact && !artifactId) {
-			throw new Error("shake could not save a recovery artifact");
+		let artifactId = reservedArtifact.id;
+		const calculateReplacementState = (id: string | undefined) => {
+			const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, id));
+			const replacementTokenCounts = replacements.map(replacement =>
+				replacement.length > 0 ? this.#tokenizer.countTokens(replacement) : 0,
+			);
+			const savings = regions.reduce(
+				(total, region, index) => total + region.tokens - (replacementTokenCounts[index] ?? 0),
+				0,
+			);
+			return { replacements, replacementTokenCounts, savings };
+		};
+		let { replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId);
+		if (opts.toolResultsOnly && savings < config.minSavings) {
+			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
-		const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, artifactId));
+		if (reservedArtifact.path && reservedArtifact.id) {
+			try {
+				await writeArtifact(reservedArtifact.path, this.#shakeArtifactText(regions));
+			} catch {
+				if (opts.requireArtifact) throw new Error("shake could not save a recovery artifact");
+				artifactId = undefined;
+				({ replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId));
+			}
+		} else {
+			artifactId = await this.#saveShakeArtifact(regions);
+			assertCurrent();
+			if (opts.requireArtifact && !artifactId) {
+				throw new Error("shake could not save a recovery artifact");
+			}
+			({ replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId));
+			if (opts.toolResultsOnly && savings < config.minSavings) {
+				return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+			}
+		}
 
+		assertCurrent();
 		const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
 		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
 		let anchorIndex = -1;
@@ -731,7 +760,7 @@ export class SessionMaintenance {
 			else blocksDropped++;
 			originalTokens += region.tokens;
 			const replacement = replacements[index];
-			const replacementTokenCount = replacement.length > 0 ? this.#tokenizer.countTokens(replacement) : 0;
+			const replacementTokenCount = replacementTokenCounts[index] ?? 0;
 			replacementTokens += replacementTokenCount;
 			const entryIndex = entryIndexes.get(region.entry) ?? -1;
 			if (
@@ -803,21 +832,20 @@ export class SessionMaintenance {
 		}
 		return `[shaken ~${region.tokens} tokens]`;
 	}
-
-	/**
-	 * Concatenate the original region contents into one session artifact so the
-	 * agent can read them back via `artifact://<id>`. Returns `undefined` when
-	 * the session is not persisted or the write fails — callers degrade to a
-	 * bare placeholder.
-	 */
-	async #saveShakeArtifact(regions: ShakeRegion[]): Promise<string | undefined> {
+	/** Concatenate original regions into the persisted shake artifact body. */
+	#shakeArtifactText(regions: ShakeRegion[]): string {
 		const parts: string[] = [];
 		for (let i = 0; i < regions.length; i++) {
 			const region = regions[i];
 			parts.push(`### region ${i + 1} (${region.label}, ~${region.tokens} tok)`, "", region.originalText, "");
 		}
+		return parts.join("\n");
+	}
+
+	/** Persist the shake artifact, using the session manager's in-memory fallback when needed. */
+	async #saveShakeArtifact(regions: ShakeRegion[]): Promise<string | undefined> {
 		try {
-			return await this.#host.sessionManager.saveArtifact(parts.join("\n"), "shake");
+			return await this.#host.sessionManager.saveArtifact(this.#shakeArtifactText(regions), "shake");
 		} catch {
 			return undefined;
 		}

@@ -1385,6 +1385,7 @@ export class AgentSession {
 			abortInProgress: () => this.#abortInProgress,
 			streamingEditAbortTriggered: () => this.#streamingEditGuard.abortTriggered,
 			promptGeneration: () => this.#promptGeneration,
+			promptSequence: () => this.#promptSequence,
 			sessionId: () => this.sessionId,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),

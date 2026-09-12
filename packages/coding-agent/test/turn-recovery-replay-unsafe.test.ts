@@ -87,6 +87,7 @@ function createHost(
 		abortInProgress: () => false,
 		streamingEditAbortTriggered: () => false,
 		promptGeneration: () => 0,
+		promptSequence: () => 0,
 		sessionId: () => "test-session",
 		emitSessionEvent: async () => {},
 		scheduleAgentContinue: () => {},
@@ -317,24 +318,6 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		};
 		const recovery = new TurnRecovery(createHost(model, modelRegistry, { messages: [message] }));
 		expect(await recovery.handleResponsesRequestBodyReadTimeout(message)).toBe("not-applicable");
-	});
-
-	it("does not shake a full-replay timeout when native Responses history is active", async () => {
-		const failure = {
-			...makeMessage([], model),
-			api: "openai-responses" as const,
-			errorStatus: 408,
-			errorMessage: "Timed out reading request body.",
-			requestBodyReadTimeoutFullReplay: true,
-		};
-		const native = {
-			...makeMessage([{ type: "text", text: "native replay history" }], model),
-			providerPayload: { type: "openaiResponsesHistory" as const, items: [] },
-		};
-		const host = createHost(model, modelRegistry, { messages: [native, failure] });
-		const recovery = new TurnRecovery(host);
-		expect(await recovery.handleResponsesRequestBodyReadTimeout(failure)).toBe("handled-terminal");
-		expect(host.agent.state.messages).toContain(native);
 	});
 
 	it("does not replay a long OpenCode Go usage limit after committed text", () => {

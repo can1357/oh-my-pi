@@ -198,6 +198,7 @@ export interface TurnRecoveryHost {
 	abortInProgress(): boolean;
 	streamingEditAbortTriggered(): boolean;
 	promptGeneration(): number;
+	promptSequence(): number;
 	sessionId(): string;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	scheduleAgentContinue(options: {
@@ -266,7 +267,7 @@ export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
-	#requestBodyReadTimeoutRecoveryGeneration: number | undefined;
+	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
@@ -1239,6 +1240,7 @@ export class TurnRecovery {
 			return "not-applicable";
 		}
 		const generation = this.#host.promptGeneration();
+		const promptSequence = this.#host.promptSequence();
 		const replayUnsafe = this.#hasReplayUnsafeOutput(message);
 		const terminal = (): RequestBodyReadTimeoutRecovery => {
 			if (!replayUnsafe) this.removeAssistantMessageFromActiveContext(message, "request-body-timeout-terminal");
@@ -1246,7 +1248,7 @@ export class TurnRecovery {
 		};
 		const retrySettings = this.#host.settings.getGroup("retry");
 		if (
-			this.#requestBodyReadTimeoutRecoveryGeneration === generation ||
+			this.#requestBodyReadTimeoutRecoveryPromptSequence === promptSequence ||
 			!retrySettings.enabled ||
 			retrySettings.maxRetries <= this.#retryAttempt ||
 			this.#host.isDisposed() ||
@@ -1257,7 +1259,7 @@ export class TurnRecovery {
 			return terminal();
 		}
 
-		this.#requestBodyReadTimeoutRecoveryGeneration = generation;
+		this.#requestBodyReadTimeoutRecoveryPromptSequence = promptSequence;
 		const shook = await this.#host.shakeForRequestBodyReadTimeout(generation);
 		if (
 			!shook ||
