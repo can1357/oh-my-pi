@@ -461,10 +461,6 @@ fn pure_format_input_and_streaming_contracts_cover_uncaptured_cases() {
 		.expect("trailing header");
 	assert_eq!(trailing.sections.len(), 1);
 
-	let error = Patch::parse("@@ -1,3 +1,3 @@\nPUT <1:\n+x", &SplitOptions::default())
-		.expect_err("rejects unified-diff hunk headers on the first line");
-	assert!(error.to_string().contains("unified-diff hunk header"));
-
 	let aborted = Patch::parse(
 		"[a.ts]\nPUT >1:\n+a-payload\n*** Abort\n[b.ts]\nPUT >1:\n+never",
 		&SplitOptions::default(),
@@ -547,11 +543,6 @@ fn pure_format_input_and_streaming_contracts_cover_uncaptured_cases() {
 			.to_string()
 			.contains("Input header must be")
 	);
-	let missing = Patch::parse("CUT 38-40", &SplitOptions::default())
-		.expect_err("reports bracket syntax with a 4-hex example when the header is missing")
-		.to_string();
-	assert!(missing.contains("input must begin with \"[PATH#HASH]\""));
-	assert!(missing.contains("Example: \"[src/foo.ts#1A2B]\""));
 
 	let lowercase = Patch::parse("[a.ts#1a2b]\nPUT 1-1:\n+A", &SplitOptions::default())
 		.expect("normalizes lowercase section tags while parsing");

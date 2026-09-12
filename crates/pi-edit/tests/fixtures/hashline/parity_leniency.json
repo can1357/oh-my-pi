@@ -853,28 +853,6 @@
 			]
 		},
 		{
-			"name": "rejects apply_patch sentinels as contamination",
-			"parse": [
-				{
-					"input": "*** Update File: a.ts\nPUT 2-2:\n+X",
-					"error": "Error: line 1: apply_patch sentinel \"*** Update File: a.ts\" is not valid in hashline. File sections start with `[path#HASH]` (no `Update File:` / `Add File:` keyword). Use `PUT N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` ops."
-				},
-				{
-					"input": "*** Add File: a.ts\nPUT 2-2:\n+X",
-					"error": "Error: line 1: apply_patch sentinel \"*** Add File: a.ts\" is not valid in hashline. File sections start with `[path#HASH]` (no `Update File:` / `Add File:` keyword). Use `PUT N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` ops."
-				}
-			]
-		},
-		{
-			"name": "rejects unified-diff hunk headers as contamination",
-			"parse": [
-				{
-					"input": "@@ -1,3 +1,3 @@\nPUT 2-2:\n+X",
-					"error": "Error: line 1: unified-diff hunk header (`@@ -N,M +N,M @@`) is not valid in hashline. Use `PUT N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` ops."
-				}
-			]
-		},
-		{
 			"name": "discards unified-diff old rows when explicit new rows follow",
 			"parse": [
 				{

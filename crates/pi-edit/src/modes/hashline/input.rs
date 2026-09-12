@@ -11,9 +11,9 @@ use regex::Regex;
 
 use super::{
 	clipboard::has_clipboard_edit,
-	format::{HL_FILE_HASH_EXAMPLES, HL_FILE_HASH_LENGTH},
+	format::HL_FILE_HASH_LENGTH,
 	messages::{
-		ABORT_MARKER, BEGIN_PATCH_MARKER, CLIPBOARD_INTERLEAVED_SECTIONS, END_PATCH_MARKER,
+		self, ABORT_MARKER, BEGIN_PATCH_MARKER, CLIPBOARD_INTERLEAVED_SECTIONS, END_PATCH_MARKER,
 		json_quote,
 	},
 	parser::parse_patch,
@@ -32,8 +32,6 @@ static APPLY_PATCH_PATH_NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RECOVERY_TAG_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"#([0-9A-Fa-f]{4})\s*$").expect("valid regex"));
-static UNIFIED_HUNK_RE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^@@\s+[-+]?\d+,\d+\s+[-+]?\d+,\d+\s+@@").expect("valid regex"));
 
 /// Parsed edits, optional file operation, and parser warnings for one section.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,18 +345,12 @@ fn split_raw_sections(
 		.collect();
 	let first = lines.first().copied().unwrap_or("");
 	if parse_header_line(first, options.cwd)?.is_none() {
-		if is_unified_header(first.trim_end()) {
-			return Err(EditError::parse(
-				"unified-diff hunk header (`@@ -N,M +N,M @@`) is not valid in hashline. File sections \
-				 start with `[path#HASH]`; use `replace`, `delete`, or `insert` ops.",
-			));
-		}
 		let preview: String = first.chars().take(120).collect();
 		return Err(EditError::parse(format!(
-			"input must begin with \"[PATH#HASH]\" on the first non-blank line for anchored edits; \
-			 got: {}. Example: \"[src/foo.ts#{}]\" then edit ops.",
+			"input must begin with `[PATH#HASH]` on the first non-blank line for anchored edits; \
+			 got: {}. {}",
 			json_quote(&preview),
-			HL_FILE_HASH_EXAMPLES[0]
+			messages::input_format_guidance()
 		)));
 	}
 	let tokenizer = Tokenizer::new();
@@ -450,7 +442,4 @@ fn merge_same_path_sections(sections: Vec<RawSection>) -> Result<Vec<RawSection>
 		result.push(section);
 	}
 	Ok(result)
-}
-fn is_unified_header(line: &str) -> bool {
-	UNIFIED_HUNK_RE.is_match(line)
 }
