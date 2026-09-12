@@ -878,7 +878,7 @@ const streamOpenAIResponsesOnce = (
 							: activeParams,
 					);
 					chainState.lastPromptCacheBreakpointPolicy = promptCacheBreakpointPolicy;
-					if (output.responseId) {
+					if (output.responseId && replayableResponseItems.length === nativeOutputItems.length) {
 						chainState.lastResponseId = output.responseId;
 						chainState.lastResponseItems = replayableResponseItems;
 						chainState.canAppend = true;
@@ -886,8 +886,12 @@ const streamOpenAIResponsesOnce = (
 						// full-context success must not mask categorical rejection.
 						if (sentPreviousResponseId) chainState.staleFailures = 0;
 					} else {
-						// Without a response id the append baseline cannot be trusted.
+						// No response id, or replay sanitization dropped an item the server
+						// still holds. Sanitization is 1:1-or-fewer, so either case makes the
+						// append baseline untrustworthy; next turn must replay in full.
 						chainState.canAppend = false;
+						chainState.lastResponseId = undefined;
+						chainState.lastResponseItems = undefined;
 					}
 				}
 			} else if (chainState) {
