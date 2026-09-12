@@ -43,7 +43,11 @@ export interface SttCredentialRegistry {
 	 * `withOAuthAccess`, which force-refreshes and rotates on rejection.
 	 */
 	authStorage?: OAuthAccessSource;
-	getApiKeyForProvider(provider: string, sessionId?: string): Promise<string | undefined>;
+	getApiKeyForProvider(
+		provider: string,
+		sessionId?: string,
+		options?: { signal?: AbortSignal },
+	): Promise<string | undefined>;
 	/**
 	 * Central a/b/c key resolver. The API-key route carries it (seeded with the
 	 * preflight key) so a server-rejected command-backed or broker-refreshed
@@ -62,16 +66,19 @@ export interface SttCredentialRegistry {
 export async function resolveSttCloudCredential(
 	registry: SttCredentialRegistry,
 	sessionId?: string,
+	signal?: AbortSignal,
 ): Promise<CloudSttCredential | undefined> {
 	const authStorage = registry.authStorage;
 	if (authStorage) {
 		try {
-			const access = await authStorage.getOAuthAccess("openai-codex", sessionId);
+			const access = await authStorage.getOAuthAccess("openai-codex", sessionId, { signal });
 			if (access?.accessToken) return { kind: "codex", access, source: authStorage, sessionId };
-		} catch {}
+		} catch {
+			signal?.throwIfAborted();
+		}
 	}
 	try {
-		const apiKey = await registry.getApiKeyForProvider("openai", sessionId);
+		const apiKey = await registry.getApiKeyForProvider("openai", sessionId, { signal });
 		if (!apiKey) return undefined;
 		const baseUrl = registry.getProviderBaseUrl?.("openai");
 		const headers = registry.getProviderHeaders?.("openai");
@@ -86,17 +93,19 @@ export async function resolveSttCloudCredential(
 			headers,
 		};
 	} catch {
+		signal?.throwIfAborted();
 		return undefined;
 	}
 }
 
 /** Test seam for cloud backend dependencies. */
 export interface SttControllerDeps {
-	resolveCloudCredential?: () => Promise<CloudSttCredential | undefined>;
+	resolveCloudCredential?: (signal: AbortSignal) => Promise<CloudSttCredential | undefined>;
 	createCloudFetch?: CloudSttStreamOptions["fetchImpl"];
 }
 
-async function defaultCloudCredentialResolver(): Promise<CloudSttCredential | undefined> {
+async function defaultCloudCredentialResolver(signal: AbortSignal): Promise<CloudSttCredential | undefined> {
+	signal.throwIfAborted();
 	const env = (typeof Bun !== "undefined" ? Bun.env : process.env) as Record<string, string | undefined>;
 	const apiKey = env["OPENAI_API_KEY"] ?? process.env["OPENAI_API_KEY"];
 	return apiKey ? { kind: "openai", apiKey } : undefined;
@@ -108,32 +117,55 @@ async function defaultCloudCredentialResolver(): Promise<CloudSttCredential | un
  */
 function bufferUntilStreamReady(targetPromise: Promise<SttStreamHandle>): SttStreamHandle {
 	const pending: Float32Array[] = [];
+	const { promise: stopPromise, resolve: resolveStop, reject: rejectStop } = Promise.withResolvers<string>();
+	void stopPromise.catch(() => {});
 	let target: SttStreamHandle | null = null;
 	let cancelled = false;
-	const ready = targetPromise.then(stream => {
-		target = stream;
-		if (cancelled) {
-			stream.cancel();
-		} else {
-			for (const audio of pending) stream.pushAudio(audio);
-		}
-		pending.length = 0;
-		return stream;
-	});
-	void ready.catch(() => {});
+	let stopRequested = false;
+	let stopSettled = false;
+	const settleStop = (apply: () => void): void => {
+		if (stopSettled) return;
+		stopSettled = true;
+		apply();
+	};
+	const stopTarget = (stream: SttStreamHandle): void => {
+		void stream.stop().then(
+			text => settleStop(() => resolveStop(text)),
+			error => settleStop(() => rejectStop(error)),
+		);
+	};
+	void targetPromise.then(
+		stream => {
+			target = stream;
+			if (cancelled) {
+				stream.cancel();
+			} else {
+				for (const audio of pending) stream.pushAudio(audio);
+				if (stopRequested) stopTarget(stream);
+			}
+			pending.length = 0;
+		},
+		error => settleStop(() => rejectStop(error)),
+	);
 	return {
 		pushAudio(audio): void {
-			if (cancelled || audio.length === 0) return;
+			if (cancelled || stopRequested || audio.length === 0) return;
 			if (target) target.pushAudio(audio);
 			else pending.push(audio.slice());
 		},
-		async stop(): Promise<string> {
-			return await (await ready).stop();
+		stop(): Promise<string> {
+			if (!stopRequested) {
+				stopRequested = true;
+				if (target && !cancelled) stopTarget(target);
+			}
+			return stopPromise;
 		},
 		cancel(): void {
+			if (cancelled) return;
 			cancelled = true;
 			pending.length = 0;
 			target?.cancel();
+			settleStop(() => resolveStop(""));
 		},
 	};
 }
@@ -146,7 +178,7 @@ export class STTController {
 	#stopAfterStart = false;
 	#disposed = false;
 	readonly #createCapture: CaptureFactory;
-	readonly #resolveCloudCredential: () => Promise<CloudSttCredential | undefined>;
+	readonly #resolveCloudCredential: (signal: AbortSignal) => Promise<CloudSttCredential | undefined>;
 	readonly #createCloudFetch: CloudSttStreamOptions["fetchImpl"];
 	#didWarnMissingCloudCredential = false;
 	// Live streaming capture.
@@ -209,11 +241,13 @@ export class STTController {
 		const raw = settings.get("stt.backend") as string | undefined;
 		return raw !== undefined && isSttBackend(raw) ? raw : DEFAULT_STT_BACKEND;
 	}
-	async #ensureCloudCredential(options: ToggleOptions): Promise<CloudSttCredential | null> {
+	async #ensureCloudCredential(options: ToggleOptions, signal: AbortSignal): Promise<CloudSttCredential | null> {
 		try {
-			const credential = await this.#resolveCloudCredential();
+			const credential = await this.#resolveCloudCredential(signal);
+			signal.throwIfAborted();
 			if (credential) return credential;
 		} catch (err) {
+			signal.throwIfAborted();
 			logger.error("STT cloud credential resolution failed", {
 				error: err instanceof Error ? err.message : String(err),
 			});
@@ -282,7 +316,7 @@ export class STTController {
 
 	async #start(editor: Editor, options: ToggleOptions): Promise<void> {
 		if (this.#backend() === "cloud") {
-			await this.#startStreaming(editor, options, this.#ensureCloudCredential(options));
+			await this.#startStreaming(editor, options, true);
 			return;
 		}
 		if (!(await this.#ensureLocalDeps(options))) return;
@@ -307,11 +341,7 @@ export class STTController {
 		return this.#streamCommitted ? ` ${normalized}` : normalized;
 	}
 
-	async #startStreaming(
-		editor: Editor,
-		options: ToggleOptions,
-		cloudCredentialPromise?: Promise<CloudSttCredential | null>,
-	): Promise<void> {
+	async #startStreaming(editor: Editor, options: ToggleOptions, cloud = false): Promise<void> {
 		const modelKey = resolveSttModelSpec(settings.get("stt.modelName") as string | undefined).key;
 		const language = settings.get("stt.language") as string | undefined;
 		const keywords = String(settings.get("stt.keywords") ?? "")
@@ -339,9 +369,9 @@ export class STTController {
 			}
 			options.requestRender?.();
 		};
-		const stream = cloudCredentialPromise
+		const stream = cloud
 			? bufferUntilStreamReady(
-					cloudCredentialPromise.then(async credential => {
+					this.#ensureCloudCredential(options, this.#streamAbort.signal).then(async credential => {
 						if (credential) {
 							return startCloudSttStream({
 								credential,
