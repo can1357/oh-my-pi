@@ -325,6 +325,11 @@ async function snapshotAfterPendingOperationsSettle(getGeneration, getPendingOpe
   }
 }
 
+// extension/hello-refresh.ts
+function invalidatesHelloStructurally(changeInfo) {
+  return changeInfo.groupId !== undefined || changeInfo.url !== undefined;
+}
+
 // extension/background.ts
 var DEFAULT_PORT = 9224;
 var PING_INTERVAL_MS = 20000;
@@ -1096,7 +1101,7 @@ chrome.tabs.onCreated.addListener((tab) => {
 chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
   const snap = snapshot(tab);
   if (snap) {
-    if (changeInfo.groupId !== undefined)
+    if (invalidatesHelloStructurally(changeInfo))
       invalidateHelloRefresh();
     else
       invalidateHelloMeta();
