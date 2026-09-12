@@ -1,23 +1,30 @@
 /**
  * Tests for `MCPToolCache` cache-identity hashing.
  *
- * Contract: `lazy` and `enabled` are connection *policy* (when to connect,
- * whether to connect at all), not part of a server's identity. Flipping
- * either on an already-cached server must still hit the cache — otherwise
- * every eager-to-lazy transition (the whole point of adding the option to an
- * existing server) orphans the cache and starts the server tool-less until a
- * manual `/mcp reconnect`, and `/mcp enable` writing an explicit
+ * Contract: `lazy`, `enabled`, and `timeout` are connection *policy* (when
+ * to connect, whether to connect at all, how long to wait for a response),
+ * not part of a server's identity. Flipping any of them on an
+ * already-cached server must still hit the cache — otherwise every
+ * eager-to-lazy transition (the whole point of adding the option to an
+ * existing server) orphans the cache and starts the server tool-less until
+ * a manual `/mcp reconnect`, `/mcp enable` writing an explicit
  * `enabled: true` over a previously-omitted key does the same to a
- * re-enabled lazy server. Changes to fields that actually identify the
- * connection (e.g. `command`) must still miss.
+ * re-enabled lazy server, and raising `timeout` on an already-cached lazy
+ * server does the same again (PR #9793 review). Changes to fields that
+ * actually identify the connection (e.g. `command`) must still miss.
  *
  * A second contract covers the migration itself: the current hashing scheme
- * is the third one this cache has shipped (full config, then excluding only
- * `lazy`, then excluding `lazy` and `enabled`), and `CACHE_VERSION` never
- * changed across those. A cache entry written by an older scheme must still
- * hit under the new one — a miss just costs an eager server a slower
- * startup, but a *lazy* server with no cache registers no tools at all and
- * stays dormant until a manual `/mcp reconnect`.
+ * is the fourth one this cache has shipped (full config, then excluding
+ * only `lazy`, then also `enabled`, then also `timeout`), and
+ * `CACHE_VERSION` never changed across those. A cache entry written by an
+ * older scheme must still hit under the new one — a miss just costs an
+ * eager server a slower startup, but a *lazy* server with no cache
+ * registers no tools at all and stays dormant until a manual
+ * `/mcp reconnect`. `timeout` is numeric, not boolean, so its legacy
+ * candidate is built from the *current* config's value rather than
+ * enumerated (see `hashLegacyConfigs` in `tool-cache.ts`): the migration
+ * test below holds `timeout` unchanged across the upgrade, the case that
+ * scheme covers.
  */
 import { describe, expect, it } from "bun:test";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
@@ -189,6 +196,29 @@ describe("MCPToolCache", () => {
 
 		const currentConfig = config({ lazy: true });
 		const cached = await cache.get("srv", currentConfig);
+
+		expect(cached).toEqual([TOOL_DEF]);
+	});
+
+	it("regression: PR #9793 review — changing timeout on an already-cached server still hits the cache", async () => {
+		const cache = new MCPToolCache(fakeStorage());
+		const lazyConfig = config({ lazy: true, timeout: 30_000 });
+		await cache.set("srv", lazyConfig, [TOOL_DEF]);
+
+		const cached = await cache.get("srv", { ...lazyConfig, timeout: 60_000 });
+
+		expect(cached).toEqual([TOOL_DEF]);
+	});
+
+	it("regression: a round-3 cache (`timeout` still hashed) survives the upgrade to excluding it too, when the value is unchanged", async () => {
+		const { storage, store } = fakeStorageWithStore();
+		const cache = new MCPToolCache(storage);
+		// Round 3 (the scheme shipped before this fix) excluded only `lazy`
+		// and `enabled`; `timeout` was still part of the hashed identity.
+		const lazyConfig = config({ lazy: true, timeout: 45_000 });
+		await seedLegacyCacheEntry(store, "srv", lazyConfig, ["lazy", "enabled"], [TOOL_DEF]);
+
+		const cached = await cache.get("srv", lazyConfig);
 
 		expect(cached).toEqual([TOOL_DEF]);
 	});
