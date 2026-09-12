@@ -413,6 +413,39 @@ describe("AgentSession empty stop guard", () => {
 		});
 	});
 
+	it("does not revive capped empty responses through pending todo reminders", async () => {
+		const { session, mock } = await createHarness(
+			[
+				emptyStop(),
+				emptyStop(),
+				emptyStop(),
+				emptyStop(),
+				{ content: ["Which task should I resume?"], stopReason: "stop" },
+			],
+			{ "todo.enabled": true, "todo.reminders": true, "todo.remindersMax": 3 },
+		);
+		session.setTodoPhases([
+			{ name: "Work", tasks: [{ content: "Finish the pending change", status: "in_progress" }] },
+		]);
+		const retryEnds: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
+		const todoReminders: Array<Extract<AgentSessionEvent, { type: "todo_reminder" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEnds.push(event);
+			if (event.type === "todo_reminder") todoReminders.push(event);
+		});
+
+		await expectPromptCompletes(session.prompt("continue the pending task"));
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(4);
+		expect(retryEnds).toEqual([expect.objectContaining({ success: false, attempt: 3 })]);
+		expect(todoReminders).toEqual([]);
+
+		await session.prompt("I am ready to resume");
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(5);
+	});
+
 	it("waits for capped empty-stop persistence before removing the active branch entry", async () => {
 		const releaseMessageEnd = Promise.withResolvers<void>();
 		const finalMessageEndEntered = Promise.withResolvers<void>();
