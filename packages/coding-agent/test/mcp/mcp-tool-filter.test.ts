@@ -421,6 +421,20 @@ test("a NUL in a pattern addresses a NUL character", () => {
 	]);
 });
 
+test("a wildcard never claims half of a surrogate pair", () => {
+	// A lone high surrogate in the pattern must not consume the high half of a
+	// name whose low half the following wildcard then claims: `"\uD83D?"` is two
+	// raw characters, so it cannot admit the single character `😀`. Both halves
+	// carry the boundary check that makes them whole characters.
+	expect(run(["😀", "😀😀"], ["\uD83D?"]).allowed).toEqual([]);
+	expect(run(["😀"], ["\uD83D*"]).allowed).toEqual([]);
+	expect(run(["😀"], ["\uDE00?"]).allowed).toEqual([]);
+	// The deny direction mirrors it: nothing is subtracted.
+	expect(filterMCPTools({ toolNames: ["😀", "a"], disabledTools: ["\uD83D?"] }).allowed).toEqual(["😀", "a"]);
+	// A whole pair still counts as one character for `?`.
+	expect(run(["😀"], ["?"]).allowed).toEqual(["😀"]);
+});
+
 test("an escaped character is that literal character, whatever it spells in a regex", () => {
 	// A glob escape names the character it escapes: the documented surface is
 	// that only `*`, `?`, `[...]` and `{a,b}` carry meaning, so `\d` addresses a

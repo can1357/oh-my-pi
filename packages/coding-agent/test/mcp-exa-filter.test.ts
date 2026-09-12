@@ -156,6 +156,26 @@ describe("Exa MCP filtering", () => {
 		expect(Object.keys(result.configs).sort()).toEqual(["ambiguousClass", "nonNativeClass", "unbounded"]);
 	});
 
+	test("does not read an inherited object member as native", () => {
+		// The native set is looked up by name, and a tool the server really
+		// advertises may be called `constructor` or `__proto__`. An ordinary
+		// object answers those from `Object.prototype`, which would classify a
+		// selected non-native tool as covered and silently unmount the server.
+		for (const name of ["constructor", "__proto__", "toString", "web_fetch_exa"]) {
+			const configs: Record<string, MCPServerConfig> = {
+				exa: { type: "http", url: "https://mcp.exa.ai/mcp", enabledTools: [name] },
+			};
+			const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+			expect(Object.keys(result.configs)).toEqual(["exa"]);
+		}
+		// The one name that IS native still drops the server.
+		const native: Record<string, MCPServerConfig> = {
+			exa: { type: "http", url: "https://mcp.exa.ai/mcp", enabledTools: ["web_search_exa"] },
+		};
+		expect(filterExaMCPServers(native, { exa: SOURCE }).configs).toEqual({});
+	});
+
 	test("drops an exa server whose restriction and filters leave no non-native tool", () => {
 		// `tools=` enumerates what the server advertises, so an allowlist selects
 		// FROM that set rather than adding to it: a native-only enumeration with

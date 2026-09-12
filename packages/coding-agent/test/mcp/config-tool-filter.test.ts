@@ -92,6 +92,35 @@ test("enabledTools/disabledTools from a standalone .mcp.json reach the transport
 	expect(configs.slack?.enabledTools).toEqual(["read_*"]);
 });
 
+test("a filter entry is not environment-expanded, in either native loader", async () => {
+	// Filter entries are tool-name patterns, so `${…}` in one stays literal even
+	// when the variable is set; the fields that DO expand must still expand. A
+	// whole-object expansion pass would silently rewrite the pattern and select
+	// a different tool than the config asked for.
+	const previous = process.env.OMP_TEST_FILTER_TOOL;
+	process.env.OMP_TEST_FILTER_TOOL = "expanded_name";
+	try {
+		for (const file of [path.join(".omp", "mcp.json"), ".mcp.json"]) {
+			const configs = await loadFrom(file, {
+				slack: {
+					type: "http",
+					url: "https://mcp.slack.com/mcp",
+					enabledTools: ["${OMP_TEST_FILTER_TOOL}"],
+					headers: { Authorization: "Bearer ${OMP_TEST_FILTER_TOOL}" },
+				},
+			});
+
+			expect(configs.slack?.enabledTools).toEqual(["${OMP_TEST_FILTER_TOOL}"]);
+			// The non-pattern field is still expanded.
+			const httpConfig = configs.slack as { headers?: Record<string, string> } | undefined;
+			expect(httpConfig?.headers?.Authorization).toBe("Bearer expanded_name");
+		}
+	} finally {
+		if (previous === undefined) delete process.env.OMP_TEST_FILTER_TOOL;
+		else process.env.OMP_TEST_FILTER_TOOL = previous;
+	}
+});
+
 test("a non-array filter value is dropped rather than passed through", async () => {
 	const configs = await loadFrom(path.join(".omp", "mcp.json"), {
 		bogus: { type: "stdio", command: "/bin/echo", enabledTools: "read, write" },

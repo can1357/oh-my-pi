@@ -79,9 +79,15 @@ const PARSE_OPTIONS = {
  * a user is allowed to write. Without `u` a negated class consumes one UTF-16
  * code unit, so `?` would claim half of an astral character: `tool_?` would
  * miss `tool_😀` while `tool_??` matched it.
+ *
+ * Each surrogate alternative carries the boundary check that makes it a whole
+ * character: the high one only when no low follows, and the low one only when
+ * no high PRECEDES it. Without the preceding check a lone high surrogate in the
+ * pattern could consume the high half of a name whose low half the following
+ * wildcard then claimed — `"\uD83D?"` admitted the single character `😀`.
  */
 const RAW_CHAR =
-	"(?:[\\uD800-\\uDBFF][\\uDC00-\\uDFFF]|[^\\uD800-\\uDFFF]|[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF])|[\\uDC00-\\uDFFF])";
+	"(?:[\\uD800-\\uDBFF][\\uDC00-\\uDFFF]|[^\\uD800-\\uDFFF]|[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF])|(?<![\\uD800-\\uDBFF])[\\uDC00-\\uDFFF])";
 /** Zero or more RAW characters, so a star cannot stop between the halves of a pair. */
 const RAW_STAR = `(?:${RAW_CHAR})*`;
 

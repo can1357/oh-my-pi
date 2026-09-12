@@ -231,8 +231,14 @@ export function extractExaApiKey(config: MCPServerConfig): string | undefined {
 	return undefined;
 }
 
-/** Exa MCP tools already covered by the native Exa integration. */
-const NATIVE_EXA_MCP_TOOLS: Record<string, true> = { web_search_exa: true };
+/**
+ * Exa MCP tools already covered by the native Exa integration.
+ *
+ * A `Set` rather than an object literal: a lookup on an ordinary object answers
+ * `Object.prototype`'s members too, so a tool the server really advertises as
+ * `constructor` or `__proto__` would read as native and drop the server.
+ */
+const NATIVE_EXA_MCP_TOOLS = new Set(["web_search_exa"]);
 
 /**
  * Parse the comma-separated `tools` restriction from an Exa MCP config.
@@ -324,7 +330,7 @@ function keepsExaMCPServer(config: MCPServerConfig): boolean {
 		enabledTools: requested ? allowlist : undefined,
 		disabledTools: config.disabledTools,
 	}).allowed;
-	return effective.some(tool => !NATIVE_EXA_MCP_TOOLS[tool.toLowerCase()]);
+	return effective.some(tool => !NATIVE_EXA_MCP_TOOLS.has(tool.toLowerCase()));
 }
 
 /** Result of filtering Exa MCP servers */
