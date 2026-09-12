@@ -329,6 +329,9 @@ interface DaemonListGroup {
 	collapsedRows: string[];
 }
 
+/** Collapsed `list` line budget: one process line plus one detail line each, and the summary row. */
+const COLLAPSED_LIST_LINE_LIMIT = PREVIEW_LIMITS.COLLAPSED_ITEMS * 2 + 1;
+
 /** Structured launch state retained for compact TUI rendering. */
 export interface LaunchToolDetails {
 	op: LaunchParams["op"];
@@ -1096,7 +1099,18 @@ export function launchRenderResult(
 		(width, expanded) => {
 			let visible = body;
 			if (!isError && !expanded && op === "list") {
-				const visibleGroups = listGroups.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS);
+				const visibleGroups: DaemonListGroup[] = [];
+				let visibleRows = 0;
+				const groupLimit = Math.min(listGroups.length, PREVIEW_LIMITS.COLLAPSED_ITEMS);
+				for (let index = 0; index < groupLimit; index++) {
+					const group = listGroups[index]!;
+					const remainingAfter = listGroups.length - (index + 1);
+					const summaryRows = remainingAfter > 0 ? 1 : 0;
+					const fitsBudget = visibleRows + group.collapsedRows.length + summaryRows <= COLLAPSED_LIST_LINE_LIMIT;
+					if (!fitsBudget && visibleGroups.length > 0) break;
+					visibleGroups.push(group);
+					visibleRows += group.collapsedRows.length;
+				}
 				const remaining = listGroups.length - visibleGroups.length;
 				visible = visibleGroups.flatMap(group => group.collapsedRows);
 				if (remaining > 0) {
