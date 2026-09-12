@@ -73,7 +73,10 @@ describe("cursor effort routing", () => {
 			blobStore: new Map(),
 		});
 		const run = decodeRunRequest(requestBytes).value;
-		expect(run.requestedModel.modelId).toBe("gpt-5.6-terra-none");
-		expect(run.modelDetails.modelId).toBe("gpt-5.6-terra-none");
+		// The routed off-tier sibling still normalizes: suffixed sibling ids
+		// trigger Cursor's 528384, so -none goes out as the bare base id.
+		expect(run.requestedModel.modelId).toBe("gpt-5.6-terra");
+		expect(run.modelDetails.modelId).toBe("gpt-5.6-terra");
+		expect(run.requestedModel.parameters).toEqual([]);
 	});
 });

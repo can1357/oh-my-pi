@@ -8,6 +8,7 @@ import {
 	clearOmpExtensionCliRoots,
 	injectOmpExtensionCliRoots,
 } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
+import { clearClaudePluginRootsCache, injectPluginDirRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -70,6 +71,8 @@ describe("discoverAgents", () => {
 	afterEach(async () => {
 		enableProvider("omp-plugins");
 		clearOmpExtensionCliRoots();
+		await injectPluginDirRoots(tempHome, []);
+		clearClaudePluginRootsCache();
 		clearFsCache();
 		await removeWithRetries(tempHome);
 	});
@@ -170,5 +173,25 @@ describe("discoverAgents", () => {
 
 		expect(names).toContain("explicit-agent");
 		expect(names).not.toEqual(expect.arrayContaining(["stale-agent", "settings-agent", "loom-verify-spec"]));
+	});
+
+	test("discovers agents from a --plugin-dir root with the foreign claude-plugins opt-in off (#11151)", async () => {
+		// `--plugin-dir` roots ride the shared plugin registry as user-scope, origin
+		// "plugin-dir" entries. The claude-plugins foreign opt-in is off by default, so
+		// gating user-scope roots purely on scope (as before) dropped these agents.
+		const pluginDir = path.join(tempHome, "my-plugin");
+		await fs.mkdir(path.join(pluginDir, "agents"), { recursive: true });
+		await fs.writeFile(
+			path.join(pluginDir, "agents", "plugin-dir-agent.md"),
+			["---", "name: plugin-dir-agent", "description: agent shipped in a --plugin-dir plugin.", "---", "body"].join(
+				"\n",
+			),
+		);
+		await injectPluginDirRoots(tempHome, [pluginDir], projectDir);
+
+		const { agents } = await discoverAgents(projectDir, tempHome);
+		const names = agents.map(agent => agent.name);
+
+		expect(names).toContain("plugin-dir-agent");
 	});
 });

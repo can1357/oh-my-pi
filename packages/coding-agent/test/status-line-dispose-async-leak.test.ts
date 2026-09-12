@@ -18,9 +18,11 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import type { StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import type { VcsGitRepo, VcsGitRepoInfo, VcsHeadState, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { StatusLineTestComponents } from "./helpers/status-line";
 
 const originalProjectDir = getProjectDir();
 
@@ -36,11 +38,12 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+	headState = fakeRefHead;
 	defaultBranchMock = vi.fn(async () => null);
 	vi.spyOn(vcs, "gitInfo").mockReturnValue(fakeRepoInfo);
 	const gitRepository = {
 		defaultBranch: defaultBranchMock,
-		headSync: () => fakeRefHead,
+		headSync: () => headState,
 		linkedWorktree: () => null,
 	} as unknown as VcsGitRepo;
 	vi.spyOn(vcs, "git").mockReturnValue(gitRepository);
@@ -105,6 +108,13 @@ const fakeRepoInfo: VcsGitRepoInfo = {
 	repoRoot: "/fake",
 	isReftable: false,
 };
+const featureRefHead: VcsHeadState = {
+	kind: "ref",
+	branch: "feature/x",
+	refName: "refs/heads/feature/x",
+	commit: undefined,
+};
+let headState = fakeRefHead;
 
 let defaultBranchMock = vi.fn(async (): Promise<string | null> => null);
 
@@ -171,5 +181,36 @@ describe("StatusLineComponent dispose guards async callbacks", () => {
 		await Promise.resolve();
 
 		expect(onBranchChange).not.toHaveBeenCalled();
+	});
+
+	it("suppresses a pending PR lookup when tracked file teardown resets settings", async () => {
+		headState = featureRefHead;
+		defaultBranchMock.mockResolvedValue("main");
+		const ghStarted = Promise.withResolvers<void>();
+		const releaseGh = Promise.withResolvers<void>();
+		vi.spyOn(github, "run").mockImplementation(async () => {
+			ghStarted.resolve();
+			await releaseGh.promise;
+			return { exitCode: 1, stdout: "", stderr: "" };
+		});
+
+		const onBranchChange = vi.fn();
+		const components = new StatusLineTestComponents();
+		const component = components.track(new StatusLineComponent(makeSession()));
+		component.updateSettings(gitSegmentSettings);
+		component.watchBranch(onBranchChange);
+		component.getTopBorder(80);
+		await ghStarted.promise;
+		onBranchChange.mockClear();
+
+		components.dispose();
+		resetSettingsForTest();
+		releaseGh.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onBranchChange).not.toHaveBeenCalled();
+		await Settings.init({ inMemory: true });
 	});
 });

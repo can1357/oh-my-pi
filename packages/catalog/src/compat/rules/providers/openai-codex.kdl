@@ -9,6 +9,11 @@ provider "openai-codex" {
 	// Harmony-protocol leak detection/mitigation applies to every Codex model,
 	// current and future; replaces the provider check in harmony-leak.ts.
 	harmony-leak-mitigation #true
+	// Every Codex SKU clamps explicit context-window overrides to the
+	// server-honored ceiling (`min(override, max)`, mirroring upstream
+	// `with_config_overrides`); models without a curated or live maximum
+	// pass through. Replaces the provider check in model-registry.ts.
+	clamp-context-override #true
 	// Subscription (Codex) discovery reports no pricing; the curated Daybreak
 	// aliases carry the standard GPT-5.6 Sol/Cyber API list price so cost
 	// display reads as API-equivalent spend. The `-wm` worker sibling bills
@@ -29,16 +34,15 @@ provider "openai-codex" {
 			cache-write 15.625
 		}
 	}
-	// Codex discovery still reports Astra's stale 272K window with
-	// max_context_window=872000 (client 0.153.1, 2026-09-04) — the same stale
-	// pair it reports for Luna/Sol/Terra. Public docs list a 1.05M window and
-	// live Codex traffic succeeds past the wire maximum (895,302 input tokens
-	// observed, including cached input), so floor to the documented window like
-	// the GPT-5.6 1M floor below. Astra carries no long-context surcharge, so
-	// the window must not be gated behind `/extended-context`; the
-	// `maximum > contextWindow` guard then ignores the stale 872K live maximum.
-	// Pricing stays at the documented credit-equivalent rates, with free cache
-	// writes and no >272K multiplier.
+	// Codex reports a 272K default and a stale 872K maximum for Astra. Keep
+	// the default explicit so cached 1.05M rows from #11089 cannot bypass the
+	// opt-in; the curated maximum is applied only with extended context on.
+	// OpenAI documents 1.05M total context with at most 922K input and 128K
+	// output, so the input ceiling is 922K — not the total. A higher live
+	// maximum still wins as the ceiling.
+	// Subscription credit-equivalent pricing: no per-token billing, free cache
+	// writes, exempt from the API long-context multiplier. The first-party API
+	// route bills the documented >272K tier instead — see providers/openai.kdl.
 	models "gpt-6-astra" "gpt-6-astra-wm" {
 		cost-patch {
 			input 10.0
@@ -50,7 +54,10 @@ provider "openai-codex" {
 			flex 0.5
 			priority 2.5
 		}
-		context-window-floor 1050000
+		limits-patch {
+			context-window 272000
+		}
+		max-context-window 922000
 	}
 	class "openai" {
 		revision ">=5.3 <5.7" {
@@ -141,8 +148,4 @@ provider "openai-codex" {
 	models "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra" {
 		context-window-floor 1000000
 	}
-	// (No `max-context-window` fallback: the 1.05M floor already exceeds the
-	// stale 872K wire maximum, so offline and cached rows compose to the
-	// documented window and the live maximum is ignored by the
-	// `maximum > contextWindow` guard — same as Luna/Sol/Terra above.)
 }

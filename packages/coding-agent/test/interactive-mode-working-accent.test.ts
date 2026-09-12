@@ -62,6 +62,8 @@ async function createHarness(sessionName: string): Promise<Harness> {
 		isStreaming: true,
 		model: undefined,
 		thinkingLevel: undefined,
+		titleGenerationSignal: new AbortController().signal,
+		notifyTitleGenerationStart: () => undefined,
 	} as unknown as AgentSession;
 	const mode = new InteractiveMode(session, "test");
 	harness = { mode, sessionManager, tempDir };
@@ -201,5 +203,22 @@ describe("InteractiveMode working activity", () => {
 		} finally {
 			loader.stop();
 		}
+	});
+
+	it("restarts a working loader detached by transient status cleanup", async () => {
+		const { mode } = await createHarness("Detached loader session");
+		mode.ensureLoadingAnimation();
+		const loader = defined(mode.loadingAnimation);
+		expect(loader.debugState()).toMatchObject({ running: true });
+
+		mode.statusContainer.disposeChildren();
+		expect(loader.debugState()).toMatchObject({ running: false });
+
+		mode.ensureLoadingAnimation();
+
+		expect(mode.loadingAnimation).toBe(loader);
+		expect(mode.statusContainer.children).toContain(loader);
+		expect(loader.debugState()).toMatchObject({ running: true });
+		loader.stop();
 	});
 });

@@ -1,7 +1,14 @@
-import { describe, expect, it } from "bun:test";
+import * as os from "node:os";
+import { beforeAll, describe, expect, it } from "bun:test";
 import type { DailyActivityPoint } from "@oh-my-pi/omp-stats/shared-types";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
-import { buildHeatmapLayout, buildProviderCards } from "@oh-my-pi/pi-coding-agent/modes/components/usage-dashboard";
+import {
+	buildHeatmapLayout,
+	buildProviderCards,
+	formatActivityErrorDetail,
+	UsageDashboardComponent,
+} from "@oh-my-pi/pi-coding-agent/modes/components/usage-dashboard";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
 function day(day: string, cost: number, requests = 1): DailyActivityPoint {
 	return { day, cost, requests, totalTokens: 0 };
@@ -106,5 +113,110 @@ describe("buildProviderCards", () => {
 		expect(idle.sort()).toEqual(["cursor", "ollama-cloud"]);
 		const unlimited = cards.find(card => card.provider === "ollama-cloud");
 		expect(unlimited?.unlimited).toBe(true);
+	});
+
+	it("shows a prepaid balance on the card instead of falling back to no data", () => {
+		// Balance-only limits carry no fraction, so the card used to render the
+		// literal "no data" for providers that sell prepaid credits.
+		const reports = [
+			report("charm-hyper", "a@x.test", [
+				{
+					id: "charm-hyper:credits",
+					label: "Credit balance",
+					scope: { provider: "charm-hyper", windowId: "balance", shared: true },
+					amount: { remaining: 100, unit: "credits" },
+				},
+			]),
+		];
+		const cards = buildProviderCards(reports, now);
+		expect(cards[0].windows[0].usedText).toBe("100 credits left");
+		expect(cards[0].windows[0].fraction).toBeUndefined();
+		// Untouched providers collapse into a tick; a live balance must not.
+		expect(cards[0].idle).toBe(false);
+	});
+
+	it("collapses an account-wide balance reported once per key, whatever the order", () => {
+		// AuthStorage probes every stored key, so a two-key Charm Hyper account
+		// yields two shared rows for one pool. The two probes fire moments
+		// apart against a moving balance, so they rarely agree exactly — the
+		// values differ here deliberately, or reversing them would prove
+		// nothing and a first-wins implementation would still pass.
+		const balance = (remaining: number) => ({
+			id: "charm-hyper:credits",
+			label: "Credit balance",
+			scope: { provider: "charm-hyper" as const, windowId: "balance", shared: true },
+			amount: { remaining, unit: "credits" as const },
+		});
+		const forward = buildProviderCards(
+			[report("charm-hyper", "a@x.test", [balance(100)]), report("charm-hyper", "b@x.test", [balance(95)])],
+			now,
+		);
+		const reversed = buildProviderCards(
+			[report("charm-hyper", "b@x.test", [balance(95)]), report("charm-hyper", "a@x.test", [balance(100)])],
+			now,
+		);
+
+		// One pool, so never the 195 a sum would claim, and never dependent on
+		// which credential happened to be probed first.
+		expect(forward[0].windows[0].usedText).toBe("100 credits left");
+		expect(reversed[0].windows[0].usedText).toBe("100 credits left");
+	});
+});
+describe("UsageDashboardComponent", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+	it("renders specific error reason when activity loading fails instead of generic DB read error", async () => {
+		const { promise: rendered, resolve: markRendered } = Promise.withResolvers<void>();
+		const component = new UsageDashboardComponent({
+			reports: [],
+			renderDetail: () => "",
+			loadActivity: () => Promise.reject(new Error("worker spawn failed")),
+			requestRender: () => markRendered(),
+			onClose: () => {},
+		});
+
+		await rendered;
+		const lines = component.render(80).join("\n");
+		expect(lines).toContain("Usage history unavailable (worker spawn failed).");
+		expect(lines).not.toContain("stats database could not be read");
+	});
+	it("sanitizes control sequences, collapses multiline errors, and shortens paths", async () => {
+		const home = os.homedir();
+		const rawError = `subprocess crashed at ${home}/.omp/stats.db:\n\tfailed to open\x1b[2J\r\nline 2\x1b[31m...`;
+		const { promise: rendered, resolve: markRendered } = Promise.withResolvers<void>();
+		const component = new UsageDashboardComponent({
+			reports: [],
+			renderDetail: () => "",
+			loadActivity: () => Promise.reject(new Error(rawError)),
+			requestRender: () => markRendered(),
+			onClose: () => {},
+		});
+
+		await rendered;
+		const renderedLines = component.render(140);
+		const contentLine = renderedLines.find(l => l.includes("Usage history unavailable"));
+		expect(contentLine).toBeDefined();
+		expect(contentLine).not.toContain("\x1b[2J");
+		expect(contentLine).not.toContain("\n");
+		expect(contentLine).not.toContain("\t");
+		expect(contentLine).not.toContain(home);
+		expect(contentLine).toContain("~/.omp/stats.db");
+		expect(contentLine).toContain(
+			"Usage history unavailable (subprocess crashed at ~/.omp/stats.db: failed to open line 2).",
+		);
+	});
+});
+
+describe("formatActivityErrorDetail", () => {
+	it("strips ANSI control sequences and collapses multiline error text to single line", () => {
+		const input = "worker spawn failed\ntrace\x1b[2J\r\n\tsecond line";
+		expect(formatActivityErrorDetail(input)).toBe("worker spawn failed trace second line");
+	});
+
+	it("shortens home directory paths to tilde and removes trailing dots", () => {
+		const home = "/Users/testuser";
+		const input = `Error: failed to open ${home}/.omp/stats.db...`;
+		expect(formatActivityErrorDetail(input, home)).toBe("Error: failed to open ~/.omp/stats.db");
 	});
 });
