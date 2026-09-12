@@ -603,7 +603,7 @@ const IMAGE_ATTACHMENT_URI_REGEX = /^attachment:\/\/[1-9]\d*$/;
 const IMAGE_QUESTION_SELECTOR_ERROR =
 	"The ?q= selector only supports images (raster files, .svg:img, attachment://N, local:// images, PDF page screenshots).";
 
-function splitImageQuestionTarget(readPath: string): { path: string; question?: string } {
+export function splitImageQuestionTarget(readPath: string): { path: string; question?: string } {
 	const supportsQuestion =
 		!readPath.includes("://") || readPath.startsWith("attachment://") || readPath.startsWith("local://");
 	if (!supportsQuestion || parseSqlitePathCandidates(readPath).length > 0) return { path: readPath };
