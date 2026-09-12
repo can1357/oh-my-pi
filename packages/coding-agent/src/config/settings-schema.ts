@@ -1265,6 +1265,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.stateFile": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Terminal State File",
+			description:
+				"Also write the agent run state to ~/.omp/agent/terminal-sessions/<terminal>.state.json, so a program that is not the terminal can read whether omp is working, idle, or waiting on you",
+		},
+	},
+
 	"tui.hyperlinks": {
 		type: "enum",
 		values: ["off", "auto", "always"] as const,

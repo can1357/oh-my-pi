@@ -2,12 +2,13 @@
  * Generate session titles using a smol, fast model.
  */
 import { dlopen, FFIType, ptr } from "bun:ffi";
+import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { type Api, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
-import { isConPTYHosted, writeThroughActiveTerminal } from "@oh-my-pi/pi-tui";
-import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
+import { getTerminalId, isConPTYHosted, writeThroughActiveTerminal } from "@oh-my-pi/pi-tui";
+import { getTerminalSessionsDir, isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
 import { resolveRoleSelection } from "../config/model-resolver";
@@ -595,11 +596,65 @@ function startTerminalTitleSpinner(): void {
  * turn), and `attention` shows `!` (agent blocked on you). Gated off by
  * `tui.titleState`.
  */
+/** Whether the run state is also offered as a file, driven by the `tui.stateFile` setting. */
+let agentStateFileEnabled = false;
+
+/** Path of this terminal's state file, or null when no terminal can be identified. */
+function agentStateFilePath(): string | null {
+	const terminalId = getTerminalId();
+	return terminalId ? path.join(getTerminalSessionsDir(), `${terminalId}.state.json`) : null;
+}
+
+/**
+ * Offer the run state as a file beside this terminal's breadcrumb, so a program that is not the
+ * terminal can read it.
+ *
+ * The title already carries this state, but only a terminal emulator can see a title. Anything
+ * else driving omp - a supervisor, a status bar, a multiplexer script - has to guess from whether
+ * output is still moving, and that cannot tell a long think from a question nobody answered.
+ *
+ * Best effort and synchronous: it runs on state changes only, not on spinner frames.
+ */
+function writeAgentStateFile(state: TerminalTitleState): void {
+	if (!agentStateFileEnabled) return;
+	const file = agentStateFilePath();
+	if (!file) return;
+	const body = `${JSON.stringify({ state, pid: process.pid, at: new Date().toISOString() })}\n`;
+	try {
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		// Written then renamed: a reader polling this must never catch half a state.
+		const pending = `${file}.${process.pid}.tmp`;
+		fs.writeFileSync(pending, body);
+		fs.renameSync(pending, file);
+	} catch (err) {
+		logger.debug("Agent state file write failed", { err });
+	}
+}
+
+/** Remove this terminal's state file, so nothing reads a state from a process that is gone. */
+function removeAgentStateFile(): void {
+	const file = agentStateFilePath();
+	if (!file) return;
+	try {
+		fs.rmSync(file, { force: true });
+	} catch (err) {
+		logger.debug("Agent state file removal failed", { err });
+	}
+}
+
 export function setTerminalTitleState(state: TerminalTitleState): void {
 	terminalTitleRuntime.state = state;
 	if (state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
 	else stopTerminalTitleSpinner();
 	emitTerminalTitle();
+	writeAgentStateFile(state);
+}
+
+/** Enable/disable the state file (driven by the `tui.stateFile` setting). */
+export function setAgentStateFileEnabled(enabled: boolean): void {
+	agentStateFileEnabled = enabled;
+	if (enabled) writeAgentStateFile(terminalTitleRuntime.state);
+	else removeAgentStateFile();
 }
 
 /** Enable/disable the run-state separator (driven by the `tui.titleState` setting). */
@@ -615,6 +670,8 @@ export function disposeTerminalTitleState(): void {
 	stopTerminalTitleSpinner();
 	disposeWindowsConsoleTitleApi();
 	lastTerminalTitle = undefined;
+	// A state file that outlives its process would report "waiting" forever.
+	if (agentStateFileEnabled) removeAgentStateFile();
 }
 
 /**

@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import {
 	buildTerminalTitleWithState,
 	disposeTerminalTitleState,
+	setAgentStateFileEnabled,
 	setSessionTerminalTitle,
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
-import { isConPTYHosted } from "@oh-my-pi/pi-tui";
-import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import { getTerminalId, isConPTYHosted } from "@oh-my-pi/pi-tui";
+import { getTerminalSessionsDir, setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
 
 const LABEL = "my-project";
@@ -144,5 +147,61 @@ describe("disposeTerminalTitleState", () => {
 		writes.length = 0;
 		vi.advanceTimersByTime(4000);
 		expect(writes.filter(payload => payload.includes(OSC_TITLE_SEQ))).toEqual([]);
+	});
+});
+
+describe("agent state file", () => {
+	// The title already carries the state, but only a terminal emulator can read a title. This is
+	// the same state, offered where any program can poll it.
+	const stateFile = (): string => {
+		const terminalId = getTerminalId();
+		if (!terminalId) throw new Error("no terminal id in this test environment");
+		return path.join(getTerminalSessionsDir(), `${terminalId}.state.json`);
+	};
+
+	// A test runner has no controlling terminal, so `getTerminalId()` would find nothing and the
+	// feature would correctly write nothing. Standing in as a multiplexer pane gives the same
+	// stable identity a real session has.
+	const PANE = "%pi-state-file-test";
+
+	beforeEach(() => {
+		process.env.TMUX_PANE = PANE;
+	});
+
+	afterEach(() => {
+		setAgentStateFileEnabled(false);
+		delete process.env.TMUX_PANE;
+	});
+
+	it("writes nothing while the setting is off", () => {
+		setAgentStateFileEnabled(false);
+		setTerminalTitleState("attention");
+		expect(fs.existsSync(stateFile())).toBe(false);
+	});
+
+	it("records the state the title shows, and removes the file when switched off", () => {
+		setAgentStateFileEnabled(true);
+
+		setTerminalTitleState("working");
+		expect(JSON.parse(fs.readFileSync(stateFile(), "utf8")).state).toBe("working");
+
+		// The one that matters: nothing else can distinguish this from a long think.
+		setTerminalTitleState("attention");
+		const written = JSON.parse(fs.readFileSync(stateFile(), "utf8"));
+		expect(written.state).toBe("attention");
+		expect(written.pid).toBe(process.pid);
+
+		setAgentStateFileEnabled(false);
+		expect(fs.existsSync(stateFile())).toBe(false);
+	});
+
+	it("leaves no file behind when the runtime is disposed", () => {
+		setAgentStateFileEnabled(true);
+		setTerminalTitleState("attention");
+		expect(fs.existsSync(stateFile())).toBe(true);
+
+		// A state file outliving its process would report "waiting on you" for ever.
+		disposeTerminalTitleState();
+		expect(fs.existsSync(stateFile())).toBe(false);
 	});
 });
