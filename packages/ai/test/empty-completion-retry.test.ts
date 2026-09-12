@@ -416,4 +416,61 @@ describe("withReplaySafeStreamRetry", () => {
 
 		await expect(stream.result()).rejects.toBe(configError);
 	});
+
+	it("retries when a toolcall_start fires with no argument content before an error", async () => {
+		let attempts = 0;
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async () => {} },
+			() => {
+				attempts++;
+				if (attempts > 1) return contentAttempt();
+				// Simulate a stream that emits toolcall_start then dies before any delta.
+				const message = assistant();
+				message.stopReason = "error";
+				message.errorMessage = "The socket connection was closed unexpectedly";
+				return streamFromEvents([
+					{ type: "start", partial: message },
+					{ type: "toolcall_start", contentIndex: 0, partial: message },
+					{ type: "error", reason: "error", error: message },
+				] as unknown as AssistantMessageEvent[]);
+			},
+			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+
+		const events = await drain(stream);
+		const result = await stream.result();
+
+		expect(attempts).toBe(2);
+		// The failed attempt's toolcall_start must not reach the consumer.
+		expect(events.some(e => e.type === "toolcall_start")).toBe(false);
+		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+	});
+
+	it("commits on a toolcall_delta with content and does not retry", async () => {
+		let attempts = 0;
+		const message = assistant();
+		message.content = [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "/x" } }];
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async () => {} },
+			() => {
+				attempts++;
+				return streamFromEvents([
+					{ type: "start", partial: message },
+					{ type: "toolcall_start", contentIndex: 0, partial: message },
+					{ type: "toolcall_delta", contentIndex: 0, delta: '{"path":"/x"}', partial: message },
+					{ type: "toolcall_end", contentIndex: 0, toolCall: message.content[0], partial: message },
+					{ type: "done", reason: "stop", message },
+				] as unknown as AssistantMessageEvent[]);
+			},
+			{ retryEmptyCompletion: true },
+		);
+
+		await drain(stream);
+
+		expect(attempts).toBe(1);
+	});
 });

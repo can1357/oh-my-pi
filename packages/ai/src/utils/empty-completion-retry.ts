@@ -4,8 +4,10 @@
  * A provider attempt can be discarded only until meaningful assistant output is
  * emitted. Pre-output markers are buffered so transient transport failures and
  * benign empty completions can re-issue a fresh request without duplicating
- * content; the first text, thinking, image, or tool event commits the attempt
- * and restores live streaming.
+ * content; the first text, thinking, image, or tool-call-delta event commits
+ * the attempt and restores live streaming. `toolcall_start` and `toolcall_end`
+ * markers alone do not commit — if the stream dies before any argument content
+ * arrives, the buffered markers are discarded and the attempt retried.
  *
  * Empty-completion retries remain opt-in because a normal empty stop can be a
  * valid provider result. Transient-error retries use the shared provider error
@@ -35,7 +37,7 @@ export function hasVisibleAssistantContent(message: AssistantMessage): boolean {
 	return false;
 }
 
-/** A streamed event that delivers content worth committing the attempt for. */
+/** A streamed event that delivers content worth committing the attempt for. `toolcall_start` and `toolcall_end` markers are excluded: they carry no argument data, so a stream that dies after the start but before any delta content should be retried rather than committed. A `toolcall_delta` with a non-empty delta string is what commits a tool call. */
 function isMeaningfulCompletionEvent(event: AssistantMessageEvent): boolean {
 	switch (event.type) {
 		case "text_delta":
@@ -49,7 +51,7 @@ function isMeaningfulCompletionEvent(event: AssistantMessageEvent): boolean {
 			return true;
 		case "toolcall_start":
 		case "toolcall_end":
-			return true;
+			return false;
 		default:
 			return false;
 	}
