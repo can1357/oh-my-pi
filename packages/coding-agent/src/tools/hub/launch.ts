@@ -1971,7 +1971,7 @@ export function launchRenderResult(
 		() => options.expanded,
 		(width, expanded) => {
 			let visible = body;
-			if (!expanded && op === "list") {
+			if (!isError && !expanded && op === "list") {
 				const visibleGroups = listGroups.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS);
 				const remaining = listGroups.length - visibleGroups.length;
 				visible = visibleGroups.flatMap(group => group.collapsedRows);
