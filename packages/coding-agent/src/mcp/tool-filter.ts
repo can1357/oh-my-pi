@@ -23,36 +23,36 @@ export interface MCPToolFilterResult {
 }
 
 /**
- * Compiling an `enabledTools` / `disabledTools` entry into a matcher over raw
- * tool names.
+ * Matching a config entry against an advertised tool name.
  *
- * Tool names are opaque strings, not paths: `/` is an ordinary character, `*`
- * and `?` cross it, and a class member list is read against raw characters.
- * Picomatch's tokenizer already implements the whole documented glob grammar —
- * class bodies and POSIX classes, brace alternation, escapes, quotes — so its
- * tokens are what this module consumes. Its matcher assembly is never used:
- * every decoration picomatch adds while assembling one (`[^/]` for a star,
- * `/` appended to a negated class, dot-segment guards, the trailing `\/?`)
- * encodes path semantics that do not apply here.
+ * A name is sanitized before matching: every character outside
+ * `[A-Za-z0-9_-]` becomes one `_`, because every practical MCP server
+ * advertises identifier-like names and picomatch's glob semantics are defined
+ * for such strings. The raw name is kept everywhere else — the filter is a
+ * filter, not a renamer — and a name outside the alphabet matches the pattern
+ * written for its sanitized spelling. Distinct raw names sanitizing to the
+ * same spelling collide by design: the same trade every major agent makes.
  *
- * Two hazards are handled by rewriting the pattern before it is parsed:
- *
- * - Characters picomatch would read structurally are folded into `\xNN`
- *   escapes (`/`, `|`, `(`, `)`, `"`). Each escape is one character wide and
- *   matches its character exactly, so the pattern's meaning is unchanged while
- *   the structural machinery cannot engage at all: no `/` means no separator
- *   handling, and no grouping, quote or alternation reading is available to
- *   distort a pattern that means those characters literally.
- * - A run of `\\` becomes `\u005C`. Picomatch's parser never returns once its
- *   input carries a class followed by four or more consecutive backslashes —
- *   an infinite loop that no `try`/`catch` can rescue, so a config entry could
- *   pin the event loop instead of degrading to an unmatched entry.
- *
- * Entries come from the operator's own config, and a pathological one is
- * matched with the backtracking an equivalent hand-written regex would have:
- * a stack of `{*a,*}` alternations over a long non-matching name takes seconds.
- * That cost is the engine's (picomatch's own matcher is slower still) and
- * unchanged by this module; the patterns a real config uses cost microseconds.
+ * Matching itself is picomatch's, on both spellings of a name (raw and
+ * sanitized — a pattern written for a name's literal spelling addresses that
+ * spelling, while the sanitized domain is how a name holding exotic characters
+ * is reached), with path semantics harmless here (sanitized names hold no `/`
+ * and no leading dot). Picomatch's glob semantics are the contract: an escape
+ * means what it means in a glob (`\d` is a digit, `\n` a newline), a bare `|`
+ * alternates, and a bare `"` is quoted before compiling so it stays ordinary.
+ * A literal entry — no glob metacharacter — is exact equality on the
+ * sanitized spellings, so a tool name containing glob metacharacters still
+ * matches the pattern written for its look. A pattern the compiler rejects
+ * degrades to a never-matching entry instead of disabling the server, and
+ * entries are never environment-expanded.
+ */
+
+/**
+ * The option set `makeRe`/`parse` consume: tool names are opaque strings, so
+ * a leading dot is ordinary (`dot`), `!` never negates (`nonegate`, so
+ * `!(a)` is literal), extglob syntax is literal (`noextglob`), `**` reads as
+ * one star (`noglobstar`), and `\` is an ordinary character in a name
+ * (`windows: false` on every host).
  */
 const PARSE_OPTIONS = {
 	dot: true,
@@ -70,44 +70,22 @@ const PARSE_OPTIONS = {
 } as const;
 
 /**
- * One RAW character: an astral pair, one non-surrogate code unit, an unpaired
- * high surrogate, or a lone low surrogate.
- *
- * Spelled as an alternation rather than a bare negated class because the
- * compiled regex carries no `u` flag — class bodies keep picomatch's Annex-B
- * spellings, which `u` rejects, and `u` would also reject the descending range
- * a user is allowed to write. Without `u` a negated class consumes one UTF-16
- * code unit, so `?` would claim half of an astral character: `tool_?` would
- * miss `tool_😀` while `tool_??` matched it.
- *
- * Each surrogate alternative carries the boundary check that makes it a whole
- * character: the high one only when no low follows, and the low one only when
- * no high PRECEDES it. Without the preceding check a lone high surrogate in the
- * pattern could consume the high half of a name whose low half the following
- * wildcard then claimed — `"\uD83D?"` admitted the single character `😀`.
+ * A name as the matcher sees it: one `_` per character outside the identifier
+ * alphabet, counted by code point, so an astral character collapses to one
+ * underscore and `?` spans one name character as it always did.
  */
-const RAW_CHAR =
-	"(?:[\\uD800-\\uDBFF][\\uDC00-\\uDFFF]|[^\\uD800-\\uDFFF]|[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF])|(?<![\\uD800-\\uDBFF])[\\uDC00-\\uDFFF])";
-/** Zero or more RAW characters, so a star cannot stop between the halves of a pair. */
-const RAW_STAR = `(?:${RAW_CHAR})*`;
+function sanitizeToolName(name: string): string {
+	return [...name].map(ch => (/[a-zA-Z0-9_-]/.test(ch) ? ch : "_")).join("");
+}
 
 /**
- * Characters picomatch reads structurally, and the one-character escape that
- * defuses each. A `.` is included so that a brace range cannot be detected, and
- * a NUL because picomatch drops it while tokenizing.
+ * Picomatch's parser reads a bare `"` as a quote and derails (a lone one
+ * compiles to an empty match); a quoted escape restores the ordinary
+ * character. Applied to every compiled pattern.
  */
-const STRUCTURAL: Record<string, string> = {
-	"/": "\\x2F",
-	".": "\\x2E",
-	"|": "\\x7C",
-	'"': "\\x22",
-	"(": "\\x28",
-	")": "\\x29",
-	"\u0000": "\\x00",
-};
-
-/** Regex syntax a literal tool-name character must not leave live in the pattern. */
-const REGEX_SYNTAX = /[.*+?^${}()|[\]\\]/;
+function quoteDoubles(pattern: string): string {
+	return pattern.replaceAll('"', '\\"');
+}
 
 interface Token {
 	type: string;
@@ -115,480 +93,333 @@ interface Token {
 	output?: string;
 }
 
-/** The option set `parse` consumes; `strictBrackets` is used for re-reads. */
-type ParseOptions = typeof PARSE_OPTIONS & { strictBrackets?: boolean };
-
-/**
- * Parse a pattern into tokens.
- *
- * `@types/picomatch` declares `parse` as taking `{ maxLength?: number }` only,
- * although the runtime accepts the full option set; the cast is that declaration
- * gap and nothing more.
- */
-function parseTokens(pattern: string, options: ParseOptions): Token[] {
-	const state = picomatch.parse(pattern, options as unknown as { maxLength?: number }) as unknown as {
-		tokens: Token[];
-	};
-	return state.tokens;
-}
-
-/**
- * Spell a pattern so that picomatch's structural reading cannot engage, and so
- * that every character keeps its literal meaning.
- *
- * A `\X` is a glob escape: it names the literal character `X`, whatever `X` is.
- * Forwarding the pair into the regex instead would let JavaScript's own escapes
- * take over — `\d` would mean "any digit" and select a tool named `5` rather
- * than the literal `d`, `\n` a newline rather than `n`, `\x41` the character
- * `A` rather than the text `x41`. Each escaped character is therefore spelled as
- * a `\xNN` escape of its own: one character wide, unambiguous to the parser,
- * and literal to the engine. A `\` with nothing after it names a literal
- * backslash.
- *
- * An unescaped structural character is spelled the same way, so `/`, `.`, `|`,
- * `(`, `)`, `"` and NUL cannot engage the machinery they drive — no `/` means no
- * separator handling, and no `|` means no alternation.
- */
-function prepare(pattern: string): string {
-	const characters = [...pattern];
-	let out = "";
-	for (let i = 0; i < characters.length; i++) {
-		const ch = characters[i];
-		if (ch === "\\") {
-			// A trailing backslash names one literal backslash; otherwise the
-			// character it escapes does, whatever that character is.
-			const next = characters[i + 1];
-			out += next === undefined ? escapeLiteral("\\") : escapeLiteral(next);
-			if (next !== undefined) i++;
-			continue;
-		}
-		out += STRUCTURAL[ch] ?? ch;
-	}
-	return out;
-}
-
-/**
- * Spell one literal character so the engine reads it as itself.
- *
- * Used for an escaped character, whose meaning is its literal spelling even when
- * that character is a glob metacharacter (`\*` names a literal star rather than
- * a wildcard) or a regex escape (`\d` names `d`).
- *
- * The escape has to be as wide as the character: a `\xNN` above Latin-1 would be
- * read as two characters by the engine (`\x3042` is `0` followed by `42`), and
- * the compiled regex carries no `u` flag, so an astral character is spelled as
- * the surrogate pair it occupies.
- */
-function escapeLiteral(ch: string): string {
-	const code = ch.codePointAt(0)!;
-	if (code <= 0xff) return `\\x${hex(code, 2)}`;
-	if (code <= 0xffff) return `\\u${hex(code, 4)}`;
-	const offset = code - 0x10000;
-	return `\\u${hex(0xd800 + (offset >> 10), 4)}\\u${hex(0xdc00 + (offset & 0x3ff), 4)}`;
-}
-
-/** Format a code unit as a fixed-width regex escape body. */
-function hex(value: number, width: number): string {
-	return value.toString(16).toUpperCase().padStart(width, "0");
-}
-
-/**
- * Emit text in its raw spelling as regex source.
- *
- * Text tokens come back in raw glob spelling, so regex syntax among them is
- * escaped here: `a{b` stays literal, a literal `(` does not group, and a
- * literal `.` does not become "any character". A `\` the user wrote is regex
- * syntax already, so it passes through with the character it escapes — which
- * also keeps the `\u005C` spelling of a literal backslash intact.
- */
-function emitText(value: string): string {
-	let out = "";
-	for (let i = 0; i < value.length; i++) {
-		const ch = value[i];
-		if (ch !== "\\") {
-			out += REGEX_SYNTAX.test(ch) ? `\\${ch}` : ch;
-			continue;
-		}
-		const next = value[i + 1];
-		if (next === undefined) {
-			// A trailing backslash addresses one literal backslash.
-			out += "\\\\";
-			break;
-		}
-		out += `\\${next}`;
-		i++;
-	}
-	return out;
-}
-
-/** Emit one token that carries no brace or class structure. */
-function emitSimple(token: Token): string {
-	switch (token.type) {
-		// Pattern boundaries, and picomatch's optional trailing separator.
-		case "bos":
-		case "eos":
-		case "maybe_slash":
-			return "";
-		case "star":
-		case "globstar":
-			// Any run of stars is one star: both cross `/`, so `**` carries no
-			// extra meaning for an opaque name.
-			return RAW_STAR;
-		case "qmark":
-			return RAW_CHAR;
-		default:
-			return emitText(token.value);
-	}
-}
-
-/**
- * Emit a class body as regex source.
- *
- * The body is emitted verbatim: the engine's own reading of its members
- * (negation, escapes, ranges, Annex-B corners) is what a user expects, and a `/`
- * member reaches the tool as a slash. Picomatch appends `/` to a negated class,
- * where `/` is an ordinary member here, so that injected member is dropped.
- */
-function emitClass(token: Token): string {
-	let body = token.value;
-	// Picomatch appends `/` to a negated class; `/` is an ordinary member here,
-	// so that injected member is dropped.
-	if (body.startsWith("[^") && body.endsWith("/]")) body = `${body.slice(0, -2)}]`;
-	return emitAstralClass(body) ?? body;
-}
-
-/** A surrogate pair, as the two code units the engine sees. */
-const ASTRAL_PAIR = /[\uD800-\uDBFF][\uDC00-\uDFFF]/;
-
-/**
- * Spell a class body so one class member is one RAW character.
- *
- * The compiled regex carries no `u` flag, so a class body is read by code unit:
- * `[\u{1F600}]` is the two members U+D83D and U+DE00, which admits half of an
- * astral character while rejecting the character itself, and a negated class
- * refuses the character it should admit. Every other member reads correctly by
- * code unit, so only the pairs are lifted out — into an alternation for a
- * positive class, and into exclusions for a negated one, leaving the rest of the
- * body as the engine's to read.
- *
- * Returns null when the body has no pair (the common case, left exactly as
- * written) or holds a range, whose endpoints are the engine's to interpret.
- */
-function emitAstralClass(body: string): string | null {
-	const negated = body.startsWith("[^");
-	const members = negated ? body.slice(2, -1) : body.slice(1, -1);
-	// `prepare` spells an escaped character as a `\xNN`/`\uNNNN` escape of its
-	// own, so a member the user escaped arrives in that form; reading the
-	// spellings back is what lets an escaped pair be recognised as one too.
-	const spelling = decodeGlobEscapes(unescapePatternText(members));
-	// A positive class only needs the rewrite when a member is a pair; every
-	// other member already reads correctly by code unit.
-	if (!negated && !ASTRAL_PAIR.test(spelling)) return null;
-	// A negated class always needs it: reading by code unit would let one member
-	// claim half of an astral character, which the class must refuse, and would
-	// refuse the whole character where it should admit it.
-	if (members.includes("-")) return null;
-	const rewritten = unescapePatternText(members);
-	if (rewritten.includes("-")) return null;
-	// A leading `]` is a member, not the terminator; it is already escaped by
-	// the time a token value is visible, which is why the slice above is safe.
-	const pairs: string[] = [];
-	let units = "";
-	for (const member of [...rewritten]) {
-		if (member.length === 2) pairs.push(member);
-		else units += member;
-	}
-	if (!negated) {
-		const alternatives = [...pairs, ...(units ? [`[${units}]`] : [])];
-		return alternatives.length === 1 ? alternatives[0] : `(?:${alternatives.join("|")})`;
-	}
-	// Every member is excluded, so the class admits exactly one raw character
-	// that is none of them — an astral character included, which a code-unit
-	// reading would have refused.
-	const guards = [...pairs.map(pair => `(?!${pair})`), ...(units ? [`(?![${units}])`] : [])].join("");
-	if (guards === "") return RAW_CHAR;
-	return `(?:${guards}${RAW_CHAR})`;
-}
-
-/**
- * Re-read a class that its own scan never closed.
- *
- * Picomatch reads a `]` directly after `[` or `[^` as a MEMBER, so `[]?` leaves
- * the class open and swallows the rest of the pattern into that one token,
- * whose own repair then escapes the `[` and treats the trailing `?` as a member.
- * A glob's `[` with no closing bracket is a literal that swallows nothing: the
- * `?` stays a one-character wildcard and the entry addresses `[]` followed by
- * any character. Reparsing the token's spelling with its `[` spelled `\x5B`
- * restores that, and the remainder parses as ordinary glob syntax.
- */
-function reparseUnclosedClass(token: Token): string {
-	return emitTokens(parseTokens(`\\x5B${token.value.slice(1)}`, PARSE_OPTIONS));
-}
-
-/**
- * Emit a token stream as regex source in the raw-character domain.
- *
- * Picomatch commits to an expression as soon as it reads a `{`, so an unmatched
- * one still carries a group's spelling — the delimiters are therefore paired
- * here before anything is emitted, and only a matched pair alternates.
- */
-function emitTokens(tokens: Token[]): string {
-	const paired = pairedBraceTokens(tokens);
-	const open: Token[] = [];
-	return tokens
-		.map(token => {
-			switch (token.type) {
-				// A literal brace (`\(`/`\}` inside an alternation, or the escaped
-				// spelling picomatch gives a pair without a comma) never touches the
-				// stack: only a paired delimiter brackets a real branch list.
-				case "brace": {
-					if (!paired.has(token)) return emitText(token.value);
-					if (token.value === "{") {
-						open.push(token);
-						return "(";
-					}
-					open.pop();
-					return ")";
-				}
-				// A comma separates branches only at the top level of a real
-				// alternation; anywhere else it is an ordinary character.
-				case "comma": {
-					const start = open.at(-1);
-					return start !== undefined && paired.has(start) ? "|" : emitText(token.value);
-				}
-				case "bracket":
-					return isClosedClass(token) ? emitClass(token) : reparseUnclosedClass(token);
-				default:
-					return emitSimple(token);
-			}
-		})
-		.join("");
-}
-
-/**
- * The brace tokens that really delimit a `{a,b}` alternation.
- *
- * Only a `{` whose matching `}` follows opens one, so `a{b` stays literal while
- * an alternation nested after it still alternates. A pair that closes without a
- * comma at its own level never reaches here as a group — picomatch has already
- * spelled it escaped.
- */
-function pairedBraceTokens(tokens: Token[]): Set<Token> {
-	const paired = new Set<Token>();
-	const open: Token[] = [];
-	for (const token of tokens) {
-		if (token.type !== "brace") continue;
-		if (token.value === "{" && isAlternationDelimiter(token)) {
-			open.push(token);
-		} else if (token.value === "}" && isAlternationDelimiter(token) && open.length > 0) {
-			paired.add(open.pop()!);
-			paired.add(token);
-		}
-	}
-	return paired;
-}
-
-/**
- * Does this brace token carry an alternation expression's spelling?
- *
- * Picomatch commits to an expression as soon as it reads a `{`, so an unmatched
- * one still carries a group's spelling; pairing them is what tells the two
- * apart.
- */
-function isAlternationDelimiter(token: Token): boolean {
-	return (token.value === "{" && token.output === "(") || (token.value === "}" && token.output === ")");
-}
-
-/**
- * Was this class token closed by a bracket of its own?
- *
- * Picomatch's repair pass leaves its bracket count back at zero, so the token is
- * the only evidence. Asking the parser with `strictBrackets` applies the same
- * boundary rule the class was scanned with: an unclosed class raises where a
- * closed one does not.
- */
-function isClosedClass(token: Token): boolean {
-	try {
-		parseTokens(token.value, { ...PARSE_OPTIONS, strictBrackets: true });
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-/**
- * Characters a class is probed against when its members must be enumerated.
- *
- * The printable ASCII range covers every tool name in practice. A class that
- * reaches outside it cannot be enumerated from this alphabet, so it is declined
- * rather than reported as the members that happen to fall inside.
- */
-const CLASS_ALPHABET = Array.from({ length: 0x7e - 0x20 + 1 }, (_, i) => String.fromCharCode(0x20 + i));
-
-/**
- * The characters a class token admits, or null when it cannot be enumerated.
- *
- * A token value may carry picomatch's own spelling as well as the raw one, so
- * the members are read from the engine rather than from the spelling: the class
- * is compiled and each candidate asked. A negated member list admits nearly
- * every character, a range may reach outside the probe alphabet, and a value
- * spelling any character outside it may admit one, so each of those is declined
- * — the caller then treats the pattern as selecting something it cannot name
- * rather than concluding it selects nothing.
- */
-function classMembers(token: Token): string[] | null {
-	if (token.value.startsWith("[^") || token.value.includes("-")) return null;
-	if ([...token.value].some(ch => !CLASS_ALPHABET.includes(ch))) return null;
-	let regex: RegExp;
-	try {
-		regex = new RegExp(`^(?:${token.value})$`);
-	} catch {
-		// A class the engine rejects — an unclosed one such as `[]?` — names
-		// nothing this walk can state, so the caller stays conservative.
-		return null;
-	}
-	const members = CLASS_ALPHABET.filter(ch => regex.test(ch));
-	return members.length === 0 ? null : members;
-}
-
-/** What one token contributes to the names a pattern can match, or null if unbounded. */
-function enumerateToken(token: Token): string[] | null {
-	switch (token.type) {
-		case "bos":
-		case "eos":
-		case "maybe_slash":
-			return [];
-		// `*` spans any run and `?` any character, so neither has a nameable set.
-		case "star":
-		case "globstar":
-		case "qmark":
-			return null;
-		case "bracket":
-			return classMembers(token);
-		case "brace":
-			// An alternation selects among branches, which this flat walk does
-			// not model; a brace that does not alternate is a literal character.
-			if (isAlternationDelimiter(token)) return null;
-			return [token.value.endsWith("}") ? "}" : "{"];
-		default:
-			// A text token may carry picomatch's own escaping for a character
-			// that is special to a regex (`\+`, `\^`). Reading those candidates
-			// against the matcher, rather than trusting the spelling here, is
-			// what keeps a mis-decoded candidate from being reported as a name.
-			return [...new Set([token.value, unescapePatternText(token.value), decodeGlobEscapes(token.value)])];
-	}
-}
-
-/**
- * Turn a `\xNN`/`\uNNNN` spelling back into the character it names.
- *
- * A candidate only; the caller verifies each one against the matcher, so a
- * spelling that was never one of this module's escapes simply fails that check.
- */
-function unescapePatternText(value: string): string {
-	return value.replaceAll(/\\x([0-9A-F]{2})|\\u([0-9A-F]{4})/g, (_match, byte: string, unit: string) =>
-		String.fromCharCode(Number.parseInt(byte ?? unit, 16)),
-	);
-}
-
-/**
- * Read a glob escape's character: `\\+` names `+`, `\\d` names `d`.
- *
- * Only a candidate; the matcher confirms it, so a backslash that was not an
- * escape in the original pattern is rejected rather than reported.
- */
-function decodeGlobEscapes(value: string): string {
-	return value.replaceAll(/\\(.)/g, "$1");
-}
-
-/**
- * The concrete names a pattern can match, when it can match few enough to name.
- *
- * Returns null when the pattern reaches beyond enumeration: `*` and `?` match an
- * unbounded set, an alternation picks among branches this walk does not model,
- * and a class may admit characters the probe alphabet cannot show. A caller
- * asking whether a filter selects something outside a known name set must read
- * null as "it can" — that is the answer that keeps a server rather than
- * dropping one whose tools were merely not enumerable.
- *
- * Every candidate this walk builds is confirmed against the pattern's own
- * matcher before it is reported, so a mis-read token can only narrow the result
- * to nothing — and an empty result is reported as "cannot enumerate" — never
- * widen it to a name the pattern does not actually match. A pattern the parser
- * rejects cannot be enumerated either.
- */
-export function enumeratePatternNames(pattern: string, limit = 64): string[] | null {
-	let matcher: ToolMatcher;
-	let tokens: Token[];
-	try {
-		matcher = compilePattern(pattern);
-		tokens = parseTokens(prepare(pattern), PARSE_OPTIONS);
-	} catch {
-		// A pattern the parser rejects (an over-long one included) names nothing
-		// this walk can state; the caller stays conservative.
-		return null;
-	}
-	let names = [""];
-	for (const token of tokens) {
-		const parts = enumerateToken(token);
-		if (parts === null) return null;
-		if (parts.length === 0) continue;
-		const next: string[] = [];
-		for (const name of names) {
-			for (const part of parts) {
-				if (next.length >= limit) return null;
-				next.push(name + part);
-			}
-		}
-		names = next;
-	}
-	const matched = names.filter(name => matcher(name));
-	return matched.length === 0 ? null : matched;
-}
-
-/** Per-pattern matcher over raw tool names; cached across filter calls. */
+/** Per-pattern matcher over sanitized tool names; cached across filter calls. */
 type ToolMatcher = (name: string) => boolean;
 
 const compiledPatterns = new Map<string, ToolMatcher>();
 
-/** Compile one filter entry into a matcher over raw tool names. */
+/** Compile one filter entry into a matcher over sanitized tool names. */
+/** Does the pattern hold three or more consecutive backslashes? */
+function backslashRun(pattern: string): boolean {
+	return /\\{3}/.test(pattern);
+}
+
+/** Compile one filter entry into a matcher over sanitized tool names. */
 function compilePattern(pattern: string): ToolMatcher {
 	const cached = compiledPatterns.get(pattern);
 	if (cached !== undefined) return cached;
 
 	let matcher: ToolMatcher;
-	if (/[*?[\]{}\\]/.test(pattern)) {
+	if (backslashRun(pattern)) {
+		// Picomatch's parser never returns once its input carries four or more
+		// consecutive backslashes — an infinite loop no `try`/`catch` can
+		// rescue — so such a pattern is rejected before the parser is entered.
+		// A legitimate identifier entry never holds one: three backslashes
+		// spell two escaped characters, and a backslash is never part of a
+		// sanitized name anyway.
+		matcher = () => false;
+	} else if (/[*?[\]{}\\]/.test(pattern)) {
 		try {
-			matcher = compileGlobMatcher(pattern);
+			// picomatch's own matcher factory; the `picomatch()` wrapper is
+			// avoided for its `input === glob` shortcut, and path decorations
+			// (`[^/]*?`, dot guards, a trailing `\/?`) are inert here because a
+			// sanitized name holds no `/` and no leading dot.
+			//
+			// The raw name is tested too: a pattern written for a name's literal
+			// spelling (`a.b`, `\*`) addresses that spelling, while the
+			// sanitized spelling is the second domain a name outside the
+			// identifier alphabet is reached through.
+			const regex = picomatch.makeRe(quoteDoubles(pattern), PARSE_OPTIONS);
+			matcher = (name: string) => regex.test(name) || regex.test(sanitizeToolName(name));
 		} catch {
 			// A pattern the engine rejects — a descending class range such as
-			// `[z-a]` never matches anything — degrades to an unmatched entry
-			// instead of disabling the server.
+			// `[z-a]`, for instance — never matches anything, and degrading to
+			// an unmatched entry beats disabling the server.
 			matcher = () => false;
 		}
 	} else {
-		// A pattern with no glob metacharacter addresses its own spelling.
-		matcher = (name: string) => name === pattern;
+		// A pattern with no glob metacharacter addresses its own spelling —
+		// and the sanitized spelling of both sides, so a name holding a
+		// metacharacter still matches the pattern written for its look.
+		matcher = (name: string) => sanitizeToolName(name) === sanitizeToolName(pattern);
 	}
 
 	compiledPatterns.set(pattern, matcher);
 	return matcher;
 }
 
-/** Build the matcher for an entry that contains glob metacharacters. */
-function compileGlobMatcher(pattern: string): ToolMatcher {
-	const body = emitTokens(parseTokens(prepare(pattern), PARSE_OPTIONS));
-	const regex = new RegExp(`^(?:${body})$`);
-	return (name: string) => regex.test(name);
+/**
+ * The characters one class admits, or null when it cannot be enumerated: a
+ * negated list, or a range whose endpoints are not single ASCII characters
+ * (a small ASCII range is expanded; anything wider reaches beyond the walk's
+ * alphabet). Picomatch's own regex escapes in the token value (`\+`) are
+ * probed against the compiled class rather than decoded here, so a mis-read
+ * spelling can only narrow the result, never widen it.
+ */
+function classCandidates(value: string): string[] | null {
+	if (value.startsWith("[^")) return null;
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+	if ([...value].some(ch => !alphabet.includes(ch) && !["\\", "-", "[", "]"].includes(ch))) return null;
+	let regex: RegExp;
+	try {
+		regex = new RegExp(`^(?:${value})$`);
+	} catch {
+		// A class the engine rejects — an unclosed one, for instance — names
+		// nothing this walk can state, so the caller stays conservative.
+		return null;
+	}
+	const members = [...alphabet].filter(ch => regex.test(ch));
+	return members.length === 0 ? null : members;
+}
+
+/**
+ * Split a brace body on its top-level commas, with nested braces and classes
+ * opaque; empty when the body holds none, which leaves the group literal.
+ */
+function splitBraceBody(body: string): string[] {
+	const chars = [...body];
+	const branches: string[] = [];
+	let current = "";
+	let depth = 0;
+	for (let i = 0; i < chars.length; i++) {
+		const ch = chars[i];
+		if (ch === "\\") {
+			current += ch + (chars[i + 1] ?? "");
+			i++;
+		} else if (ch === "{") {
+			depth++;
+			current += ch;
+		} else if (ch === "}") {
+			depth--;
+			current += ch;
+		} else if (ch === "[" && depth === 0) {
+			let j = i + 1;
+			if (chars[j] === "^") j++;
+			if (chars[j] === "]") j++;
+			let text = ch;
+			while (j < chars.length) {
+				if (chars[j] === "\\") {
+					text += chars[j] + (chars[j + 1] ?? "");
+					j += 2;
+					continue;
+				}
+				text += chars[j];
+				if (chars[j] === "]") break;
+				j++;
+			}
+			current += text;
+			i = j;
+		} else if (ch === "," && depth === 0) {
+			branches.push(current);
+			current = "";
+		} else current += ch;
+	}
+	branches.push(current);
+	return branches.length === 1 ? [] : branches;
+}
+
+/**
+ * Expand every brace group that holds a top-level comma into one pattern per
+ * branch, or null when the product passes the limit. A group without one is
+ * literal text and stays, as does an unmatched `{`; classes are opaque to
+ * both scans.
+ */
+function expandBraces(pattern: string, limit: number): string[] | null {
+	const chars = [...pattern];
+	let i = 0;
+	while (i < chars.length) {
+		const ch = chars[i];
+		if (ch === "\\") {
+			i += 2;
+			continue;
+		}
+		if (ch === "[") {
+			let j = i + 1;
+			if (chars[j] === "^") j++;
+			if (chars[j] === "]") j++;
+			while (j < chars.length) {
+				if (chars[j] === "\\") {
+					j += 2;
+					continue;
+				}
+				if (chars[j] === "]") break;
+				j++;
+			}
+			i = j + 1;
+			continue;
+		}
+		if (ch !== "{") {
+			i++;
+			continue;
+		}
+		let depth = 0;
+		let j = i + 1;
+		let hasComma = false;
+		while (j < chars.length) {
+			if (chars[j] === "\\") {
+				j += 2;
+				continue;
+			}
+			if (chars[j] === "[") {
+				let k = j + 1;
+				if (chars[k] === "^") k++;
+				if (chars[k] === "]") k++;
+				while (k < chars.length) {
+					if (chars[k] === "\\") {
+						k += 2;
+						continue;
+					}
+					if (chars[k] === "]") break;
+					k++;
+				}
+				j = k + 1;
+				continue;
+			}
+			if (chars[j] === "{") depth++;
+			else if (chars[j] === "}") {
+				if (depth === 0) break;
+				depth--;
+			} else if (chars[j] === "," && depth === 0) hasComma = true;
+			j++;
+		}
+		if (j >= chars.length || !hasComma) {
+			// An unmatched brace, or a literal group: keep scanning past it.
+			i = j >= chars.length ? i + 1 : j + 1;
+			continue;
+		}
+		const prefix = chars.slice(0, i).join("");
+		const suffix = chars.slice(j + 1).join("");
+		const results: string[] = [];
+		for (const branch of splitBraceBody(chars.slice(i + 1, j).join(""))) {
+			const expansions = expandBraces(`${prefix}${branch}${suffix}`, limit);
+			if (expansions === null) return null;
+			for (const expansion of expansions) {
+				if (results.length >= limit) return null;
+				results.push(expansion);
+			}
+		}
+		return results;
+	}
+	return [pattern];
+}
+
+/**
+ * What one token contributes to the names a pattern can match, or null when
+ * it spans a set this flat walk does not name.
+ *
+ * A brace or comma token is offered as text: a real alternation's spelling
+ * never survives the matcher's verification, so the walk can only narrow. A
+ * bracket token offers its class members when enumerable, beside the same
+ * text candidates — picomatch spells an escaped literal bracket (`\[]`) as a
+ * bracket token too, and its spelling is text there.
+ */
+function enumerateToken(token: Token): string[] | null {
+	switch (token.type) {
+		case "bos":
+		case "eos":
+		case "maybe_slash":
+			return [];
+		// A star or question spans an unbounded set; an alternation picks among
+		// branches this walk does not model.
+		case "star":
+		case "globstar":
+		case "qmark":
+			return null;
+		case "bracket": {
+			const members = classCandidates(token.value);
+			return members === null
+				? textCandidates(token.value)
+				: [...new Set([...members, ...textCandidates(token.value)])];
+		}
+		default:
+			return textCandidates(token.value);
+	}
+}
+
+/**
+ * The spellings one text token can address: its own value, and the value with
+ * picomatch's regex escapes (`\+`) read back as the character they name.
+ * Letting the matcher confirm the candidates keeps a mis-read spelling from
+ * being reported as a name the pattern does not select.
+ */
+function textCandidates(value: string): string[] {
+	return [...new Set([value, value.replaceAll(/\\(.)/g, "$1")])];
+}
+
+/**
+ * The concrete names a pattern can match, when it can match few enough to
+ * name.
+ *
+ * Returns null when the pattern reaches beyond enumeration: `*` and `?` match
+ * an unbounded set, an alternation picks among branches this walk does not
+ * model, and a class may admit characters outside the walk's alphabet. A
+ * caller asking whether a filter selects something outside a known name set
+ * must read null as "it can" — that is the answer that keeps a server rather
+ * than dropping one whose tools were merely not enumerable.
+ *
+ * Every candidate is confirmed against the pattern's own matcher before it is
+ * reported, so a mis-read token can only narrow the result to nothing — and an
+ * empty result is reported as "cannot enumerate" — never widen it to a name
+ * the pattern does not actually match. Both the raw and the sanitized spelling
+ * of each candidate are offered, so enumeration and matching agree on the
+ * domain.
+ */
+export function enumeratePatternNames(pattern: string, limit = 64): string[] | null {
+	let matcher: ToolMatcher;
+	try {
+		matcher = compilePattern(pattern);
+	} catch {
+		return null;
+	}
+	const expansions = expandBraces(pattern, limit);
+	if (expansions === null) return null;
+	const candidates: string[] = [];
+	for (const expansion of expansions) {
+		let tokens: Token[];
+		try {
+			tokens = (picomatch.parse as unknown as (p: string, o: typeof PARSE_OPTIONS) => { tokens: Token[] })(
+				quoteDoubles(expansion),
+				PARSE_OPTIONS,
+			).tokens;
+		} catch {
+			// A pattern the parser rejects (an over-long one included) names
+			// nothing this walk can state; the caller stays conservative.
+			return null;
+		}
+		let names = [""];
+		for (const token of tokens) {
+			const parts = enumerateToken(token);
+			if (parts === null) return null;
+			if (parts.length === 0) continue;
+			const next: string[] = [];
+			for (const name of names) {
+				for (const part of parts) {
+					// Sanitized candidates too: the matcher works on that domain.
+					for (const candidate of new Set([name + part, sanitizeToolName(name + part)])) {
+						if (next.length >= limit) return null;
+						next.push(candidate);
+					}
+				}
+			}
+			names = next;
+		}
+		const matched = names.filter(name => matcher(name));
+		for (const name of matched) {
+			if (candidates.length >= limit) return null;
+			candidates.push(name);
+		}
+	}
+	const unique = [...new Set(candidates)];
+	return unique.length === 0 ? null : unique;
 }
 
 /**
  * Apply a per-server tool filter.
  *
  * Literal entries match exactly; entries containing glob metacharacters
- * (`*`, `?`, `[...]`, `{a,b}`) are matched with fnmatch semantics over the raw
- * name — `/` is an ordinary character, and both `*` and `?` cross it. Denylist
- * entries subtract from the allowlist when both are set.
+ * (`*`, `?`, `[...]`, `{a,b}`) are matched with picomatch's glob semantics
+ * over the sanitized name. Denylist entries subtract from the allowlist when
+ * both are set.
  */
 export function filterMCPTools(input: MCPToolFilterInput): MCPToolFilterResult {
 	const { toolNames, enabledTools, disabledTools } = input;
