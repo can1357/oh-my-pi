@@ -151,10 +151,13 @@ def _signed(
     return {HEADER_TIMESTAMP: timestamp, HEADER_SIGNATURE: sig}
 
 
-def _build_app(cfg: Settings, gh_handler: Callable[[httpx.Request], httpx.Response] | None = None):
+def _build_app(
+    cfg: Settings,
+    gh_handler: Callable[[httpx.Request], httpx.Response] | None = None,
+):
     app = create_proxy_app(cfg)
-    transport = httpx.MockTransport(gh_handler) if gh_handler is not None else None
-    app.state.github = GitHubClient(_TOKEN, transport=transport)
+    gh_transport = httpx.MockTransport(gh_handler) if gh_handler is not None else None
+    app.state.github = GitHubClient(_TOKEN, transport=gh_transport)
     app.state.settings = cfg
     return app
 
@@ -1409,6 +1412,76 @@ async def test_git_fetch_ref_allows_slashy_branch_name(proxy_settings: Settings,
         resp = await client.post(
             "/gh/v1/git/fetch_ref",
             content=body,
-            headers={**_signed("POST", "/gh/v1/git/fetch_ref", body), "Content-Type": "application/json"},
+            headers=_signed("POST", "/gh/v1/git/fetch_ref", body),
         )
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 200
+
+
+# ============================================================================
+# git-host port parsing + platform-aware repo validation
+# ============================================================================
+
+
+def test_split_git_host_parses_host_and_port() -> None:
+    from fastapi import HTTPException
+
+    from robomp.proxy import server as proxy_server
+
+    assert proxy_server._split_git_host("github.com") == ("github.com", None)
+    assert proxy_server._split_git_host("git.example.com:3000") == ("git.example.com", 3000)
+    with pytest.raises(HTTPException) as exc:
+        proxy_server._split_git_host("git.example.com:abc")
+    assert exc.value.status_code == 400
+
+
+def test_split_git_host_bracketed_ipv6_with_port() -> None:
+    from robomp.proxy import server as proxy_server
+
+    # Bracketed IPv6 literal with a port: host is the literal, port is parsed.
+    assert proxy_server._split_git_host("[fec0::1]:3000") == ("fec0::1", 3000)
+
+
+def test_split_git_host_bare_ipv6_without_port() -> None:
+    from robomp.proxy import server as proxy_server
+
+    # Bare IPv6 literal (no brackets, no port) must be treated as the whole host.
+    assert proxy_server._split_git_host("2001:db8::1") == ("2001:db8::1", None)
+
+
+def test_validate_repo_name_forgejo_accepts_underscore_owner() -> None:
+    from fastapi import HTTPException
+
+    from robomp.proxy import server as proxy_server
+
+    # GitHub's owner regex forbids `_`; Forgejo's allows it.
+    proxy_server._validate_repo_name("my_org/widget", platform="forgejo")
+    with pytest.raises(HTTPException) as exc:
+        proxy_server._validate_repo_name("my_org/widget")
+    assert exc.value.status_code == 400
+
+
+def test_normalized_github_https_url_accepts_configured_port() -> None:
+    from robomp.proxy import server as proxy_server
+
+    normalized = proxy_server._normalized_github_https_url(
+        "https://git.example.com:3000/my_org/widget.git",
+        "my_org/widget",
+        git_host="git.example.com:3000",
+        platform="forgejo",
+    )
+    assert normalized == "https://git.example.com:3000/my_org/widget.git"
+
+
+def test_normalized_github_https_url_rejects_wrong_port() -> None:
+    from fastapi import HTTPException
+
+    from robomp.proxy import server as proxy_server
+
+    with pytest.raises(HTTPException) as exc:
+        proxy_server._normalized_github_https_url(
+            "https://git.example.com:4000/my_org/widget.git",
+            "my_org/widget",
+            git_host="git.example.com:3000",
+            platform="forgejo",
+        )
+    assert exc.value.status_code == 400

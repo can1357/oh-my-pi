@@ -652,6 +652,39 @@ def test_requeue_claimed_closure_only_flips_claimed(db: Database) -> None:
     assert not db.requeue_claimed_closure(_KEY)
 
 
+# ---- _platform_from_row ----
+
+
+def test_event_row_resolves_forgejo_platform(tmp_path: Path) -> None:
+    db = Database(tmp_path / "test.db")
+    db.record_event(
+        delivery_id="fj-1",
+        event_type="issues",
+        repo="octo/widget",
+        issue_key="octo/widget#1",
+        payload={},
+        platform="forgejo",
+    )
+    row = db.claim_next_event()
+    assert row is not None
+    assert row.platform == "forgejo"
+
+
+def test_event_row_defaults_platform_to_github(tmp_path: Path) -> None:
+    db = Database(tmp_path / "test2.db")
+    now = "2026-01-01T00:00:00Z"
+    # Insert via raw SQL without the platform column (simulating legacy row).
+    with db._lock:
+        db._conn.execute(
+            "INSERT INTO events (delivery_id, event_type, repo, issue_key, payload_json, received_at, state) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("legacy-1", "issues", "octo/widget", "octo/widget#1", "{}", now, "queued"),
+        )
+    row = db.claim_next_event()
+    assert row is not None
+    assert row.platform == "github"
+
+
 def test_release_lifecycle_and_active_selection(db: Database) -> None:
     first = db.upsert_release(
         repo="octo/widget",

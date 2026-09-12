@@ -73,6 +73,7 @@ CPU*.md
 packages/coding-agent/binaries/
 
 # robomp runtime state
+/data/
 python/robomp/data/
 python/robomp/.cache/
 python/robomp/src/robomp/static/

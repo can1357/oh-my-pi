@@ -189,3 +189,50 @@ async def test_start_is_noop_when_disabled(db: Database) -> None:
     # No background task should have been created.
     assert sched._task is None  # type: ignore[attr-defined]
     await sched.stop()  # idempotent
+
+
+def test_backend_for_repo_routes_forgejo_repos_case_insensitively() -> None:
+    """A repo in `forgejo_repos` (any casing, since `backend_for_repo` lowercases)
+    routes to the forgejo backend; everything else falls back to github."""
+    gh = _FakeGitHub()
+    fj = _FakeGitHub()
+    settings = Settings.model_construct(
+        github_token=None,
+        github_webhook_secret=SecretStr("x"),
+        bot_login="robomp-bot",
+        git_author_email="bot@example.invalid",
+        repo_allowlist_raw="octo/widget",
+        gh_proxy_url="http://proxy.invalid",
+        gh_proxy_hmac_key=SecretStr("k" * 32),
+        question_autoclose_enabled=True,
+        question_autoclose_hours=4.0,
+        question_autoclose_scan_seconds=60.0,
+        forgejo_repos_raw="octo/widget",
+    )
+    sched = AutocloseScheduler(settings=settings, db=None, github=gh, forgejo_github=fj)  # type: ignore[arg-type]
+
+    assert sched._gh_for("octo/widget") is fj
+    # backend_for_repo lowercases the repo, so an uppercase variant matches too.
+    assert sched._gh_for("OCTO/WIDGET") is fj
+    assert sched._gh_for("other/repo") is gh
+
+
+def test_backend_for_repo_falls_back_to_github_when_no_forgejo_backend() -> None:
+    """Without a forgejo backend configured, even forgejo repos use github."""
+    gh = _FakeGitHub()
+    settings = Settings.model_construct(
+        github_token=None,
+        github_webhook_secret=SecretStr("x"),
+        bot_login="robomp-bot",
+        git_author_email="bot@example.invalid",
+        repo_allowlist_raw="octo/widget",
+        gh_proxy_url="http://proxy.invalid",
+        gh_proxy_hmac_key=SecretStr("k" * 32),
+        question_autoclose_enabled=True,
+        question_autoclose_hours=4.0,
+        question_autoclose_scan_seconds=60.0,
+        forgejo_repos_raw="octo/widget",
+    )
+    sched = AutocloseScheduler(settings=settings, db=None, github=gh, forgejo_github=None)  # type: ignore[arg-type]
+
+    assert sched._gh_for("octo/widget") is gh
