@@ -74,6 +74,7 @@ export interface MCPRuntimeSource {
 export interface MCPToggleManager {
 	getConnectionStatus(name: string): "connected" | "connecting" | "disconnected";
 	getTools(): CustomTool[];
+	getServerConfig?(name: string): MCPServerConfig | undefined;
 	disconnectServer(name: string): Promise<void>;
 	connectServers(
 		configs: Record<string, MCPServerConfig>,
@@ -139,13 +140,19 @@ export async function applyMcpToggleRuntime(options: ApplyMcpToggleRuntimeOption
  * servers entirely, leaving their cached tools registered and able to
  * reconnect on invocation despite the provider being disabled. A server with
  * any tools currently registered under its name needs teardown regardless of
- * connection status.
+ * connection status. A lazy server with no cached tools *yet* looks
+ * identical to one the manager never touched (disconnected, no tools), but
+ * the manager still preserves its config in `#serverConfigs` for a later
+ * `/mcp reconnect` — without checking that too, the same bulk disable would
+ * skip it and leave `/mcp reconnect <name>` able to start it after its
+ * provider was disabled.
  */
 export function mcpServerNeedsProviderTeardown(manager: MCPToggleManager | undefined, name: string): boolean {
 	if (!manager) return true;
 	return (
 		manager.getConnectionStatus(name) !== "disconnected" ||
-		manager.getTools().some(tool => tool.mcpServerName === name)
+		manager.getTools().some(tool => tool.mcpServerName === name) ||
+		manager.getServerConfig?.(name) !== undefined
 	);
 }
 
