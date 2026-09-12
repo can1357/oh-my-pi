@@ -64,12 +64,14 @@ function summarizeToolResult(toolResults: readonly ToolResultMessage[], toolCall
 	return summarizeText(textParts.join("\n"), RESULT_SUMMARY_LIMIT);
 }
 
-/** Detects consecutive identical assistant tool calls across model turns. */
+/** Detects repeated calls and bounded cycles with unchanged observed outcomes. */
 export class ToolCallLoopGuard {
 	#threshold: number;
 	#exemptTools: ReadonlySet<string>;
 	#lastHash: string | undefined;
 	#count = 0;
+	#recent = new Map<string, { outcome: string | undefined; count: number }>();
+	#warned = false;
 
 	constructor(options: ToolCallLoopGuardOptions) {
 		this.#threshold = Math.max(1, Math.trunc(options.threshold));
@@ -82,26 +84,48 @@ export class ToolCallLoopGuard {
 		if (toolCalls.length === 0) {
 			this.#lastHash = undefined;
 			this.#count = 0;
+			this.#recent.clear();
+			this.#warned = false;
 			return null;
 		}
 		if (toolCalls.every(tc => this.#exemptTools.has(tc.name))) {
 			this.#lastHash = undefined;
 			this.#count = 0;
+			this.#recent.clear();
+			this.#warned = false;
 			return null;
 		}
 
 		const canonicalCalls = toolCalls
 			.map(tc => JSON.stringify([tc.name, canonicalizeToolCallValue(tc.arguments)]))
 			.sort();
-		const turnHash = JSON.stringify(canonicalCalls);
-		if (turnHash === this.#lastHash) {
-			this.#count++;
-		} else {
-			this.#lastHash = turnHash;
-			this.#count = 1;
-		}
+		const turnHash = Bun.hash(JSON.stringify(canonicalCalls)).toString();
+		const outcomes = toolCalls.map(tc => {
+			const result = turn.toolResults.find(candidate => candidate.toolCallId === tc.id);
+			return result
+				? JSON.stringify([tc.name, canonicalizeToolCallValue(tc.arguments), result.isError, result.content])
+				: undefined;
+		});
+		const outcome = outcomes.every(value => value !== undefined)
+			? Bun.hash(outcomes.sort().join("\n")).toString()
+			: undefined;
+		const previous = this.#recent.get(turnHash);
+		const fresh =
+			!previous || (outcome !== undefined && previous.outcome !== undefined && outcome !== previous.outcome);
+		if (fresh) this.#warned = false;
+		const recurring = outcome !== undefined && outcome === previous?.outcome;
+		this.#count =
+			!fresh && (recurring || turnHash === this.#lastHash)
+				? Math.min(this.#threshold, (previous?.count ?? 0) + 1)
+				: 1;
+		this.#lastHash = turnHash;
+		this.#recent.delete(turnHash);
+		this.#recent.set(turnHash, { outcome, count: this.#count });
+		// Bound retained operations by the existing repetition policy, never by session length.
+		if (this.#recent.size > this.#threshold * 2) this.#recent.delete(this.#recent.keys().next().value!);
 
-		if (this.#count !== this.#threshold) return null;
+		if (this.#count !== this.#threshold || this.#warned) return null;
+		this.#warned = true;
 		const reportCall = toolCalls.find(tc => !this.#exemptTools.has(tc.name)) ?? toolCalls[0]!;
 		return {
 			kind: "repeated_tool_call",

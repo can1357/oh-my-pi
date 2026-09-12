@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type { Agent, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, Model, TextContent, ToolChoice } from "@oh-my-pi/pi-ai";
 import { isRecord, logger, prompt, stringProperty } from "@oh-my-pi/pi-utils";
@@ -5,6 +6,7 @@ import type { Settings } from "../config/settings";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
+import { writeDeviceDispatch } from "../tools/resolve";
 import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
@@ -13,11 +15,8 @@ import type { SessionManager } from "./session-manager";
 const MID_RUN_NUDGE_MUTATION_THRESHOLD = 12;
 const MID_RUN_NUDGE_MAX_PER_CYCLE = 2;
 const MUTATING_TOOLS: Record<string, true> = {
-	bash: true,
-	eval: true,
 	edit: true,
 	write: true,
-	ast_edit: true,
 };
 const MID_RUN_NUDGE_MESSAGE_TYPE = "mid-run-todo-nudge";
 const MARKDOWN_PROMPT_PREFIX_RE = /^(?:>\s*)?(?:(?:[-*+]|\d+[.)])\s+)*/;
@@ -82,7 +81,12 @@ export class TodoTracker {
 
 	/** Replaces todo phases with a defensive clone. */
 	setPhases(phases: TodoPhase[]): void {
-		this.#phases = this.#clonePhases(phases);
+		const nextPhases = this.#clonePhases(phases);
+		if (!isDeepStrictEqual(this.#phases, nextPhases)) {
+			this.#mutationsSinceLastTouch = 0;
+			this.#reminderAwaitingProgress = false;
+		}
+		this.#phases = nextPhases;
 	}
 
 	/** Rehydrates todo phases from the current transcript branch. */
@@ -104,13 +108,15 @@ export class TodoTracker {
 	}
 
 	/** Records a completed tool result before asynchronous event processing begins. */
-	onToolResult(toolName: string, isError: boolean): void {
-		if (toolName === "todo") {
-			this.#mutationsSinceLastTouch = 0;
-		} else if (!isError && MUTATING_TOOLS[toolName]) {
+	onToolResult(toolName: string, isError: boolean, result?: unknown): void {
+		if (isError) return;
+		const dispatch = writeDeviceDispatch(toolName, result);
+		// Shell/eval are unknown effects; a write to an observational device is not a file write.
+		const operation = dispatch ? (dispatch.mode === "execute" ? dispatch.tool : undefined) : toolName;
+		if (operation && MUTATING_TOOLS[operation]) {
 			this.#mutationsSinceLastTouch++;
+			this.#reminderAwaitingProgress = false;
 		}
-		this.#reminderAwaitingProgress = false;
 	}
 
 	/** Detects whether a successful todo result came from an init operation. */

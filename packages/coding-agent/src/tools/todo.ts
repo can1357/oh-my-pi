@@ -177,6 +177,10 @@ export const USER_TODO_EDIT_CUSTOM_TYPE = "user_todo_edit";
 export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPhase[] {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
+		if (entry.type === "branch_summary" && isRecord(entry.details)) {
+			const phases = entry.details.checkpointTodoPhases;
+			if (Array.isArray(phases) && phases.every(isTodoPhase)) return clonePhases(phases);
+		}
 		if (entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE) {
 			const data = entry.data as { phases?: unknown } | undefined;
 			if (data && Array.isArray(data.phases)) {

@@ -16,7 +16,14 @@ import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { getDefault, type Settings } from "../config/settings";
 import { formatGroupedDiagnosticMessages } from "../lsp/utils";
 import type { Theme } from "../modes/theme/theme";
-import { type OutputSummary, type TruncationResult, truncateMiddle, truncateTail } from "../session/streaming-output";
+import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	type OutputSummary,
+	type TruncationResult,
+	truncateMiddle,
+	truncateTail,
+} from "../session/streaming-output";
 import { formatBytes, wrapBrackets } from "./render-utils";
 import { renderError } from "./tool-errors";
 
@@ -676,6 +683,14 @@ function getSpillConfig(s: Settings | undefined) {
 	};
 }
 
+// Object identity keeps device/foreign-tool JSON from forging source paging provenance.
+const boundedReadResults = new WeakSet<AgentToolResult>();
+
+/** Mark a source selection after Read has applied its own byte and line limits. */
+export function markBoundedReadResult(result: AgentToolResult): void {
+	boundedReadResults.add(result);
+}
+
 /**
  * Resolve the OutputSink `headBytes` budget from session settings.
  * Exposed so streaming executors (bash/python/ssh/eval) can opt into
@@ -756,6 +771,12 @@ async function spillLargeResultToArtifact(
 
 	const fullText = textParts.length === 1 ? textParts[0] : textParts.join("\n");
 	const totalBytes = Buffer.byteLength(fullText, "utf-8");
+	if (
+		toolName === "read" &&
+		boundedReadResults.has(result) &&
+		totalBytes <= Math.max(DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES * 512)
+	)
+		return result;
 	if (totalBytes <= threshold) return result;
 
 	// Save the full output as an artifact so the elided bytes stay recoverable.

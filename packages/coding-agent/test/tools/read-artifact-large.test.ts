@@ -2,13 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	registerArtifactsDir,
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { formatTruncationMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { formatTruncationMetaNotice, wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -68,6 +70,34 @@ describe("read tool large artifact handling", () => {
 		unregisterArtifactsDir?.();
 		resetRegisteredArtifactDirsForTests();
 		await fs.rm(testDir, { recursive: true, force: true });
+	});
+
+	it("keeps an explicit source range visible under a smaller generic spill policy", async () => {
+		const source = Array.from({ length: 56 }, (_, n) => `const declaration_${n} = "${"x".repeat(64)}";`).join("\n");
+		await Bun.write(path.join(testDir, "bounded.ts"), source);
+		const session = makeSession(testDir);
+		session.settings = Settings.isolated({
+			"tools.artifactSpillThreshold": 1,
+			"tools.artifactTailLines": 5,
+		});
+		const wrapped = wrapToolWithMetaNotice(new ReadTool(session));
+		const context = {
+			settings: session.settings,
+			sessionManager: SessionManager.inMemory(testDir),
+		} as unknown as AgentToolContext;
+		for (const selector of [":1-56", ":raw:1-56"]) {
+			const result = await wrapped.execute(
+				"bounded-source",
+				{ path: `bounded.ts${selector}` },
+				undefined,
+				undefined,
+				context,
+			);
+			const output = getTextOutput(result);
+			expect(output).toContain('const declaration_28 = "');
+			expect(output).not.toContain("artifact://");
+			if (selector.includes("raw")) expect(output).toContain(source);
+		}
 	});
 
 	it("blocks unbounded raw reads and points to bounded artifact workflows", async () => {

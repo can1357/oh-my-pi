@@ -17,13 +17,12 @@ import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
  * gentle MODEL-ONLY hint — deliberately separate from the user-visible
  * stop-time reminder ladder. The contract this defends:
  *
- *   1. Only SUCCESSFUL MUTATING tool results (bash/eval/edit/write/ast_edit)
- *      tick the counter. Read-only exploration (grep/read/glob/lsp) and
- *      errored results never do.
+ *   1. Successful source edits/writes tick the counter. Observational devices,
+ *      unknown shell/eval effects, previews, and errors do not.
  *   2. At {@link MID_RUN_TODO_NUDGE_MUTATION_THRESHOLD} mutations without a
- *      `todo` call, the aside provider injects a hidden custom message
+ *      canonical todo-state change, the aside provider injects a hidden custom message
  *      (`display: false`) — NO `todo_reminder` event, nothing renders.
- *   3. A `todo` tool result resets the counter.
+ *   3. A changed canonical todo snapshot resets the counter; views and failures do not.
  *   4. At most {@link MID_RUN_TODO_NUDGE_MAX_PER_CYCLE} nudges fire per
  *      prompt cycle.
  *   5. The counter update lands synchronously with the message_end emit.
@@ -100,7 +99,7 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
 	}
 
 	/** Production-shaped tool round trip: assistant toolCall turn + toolResult. */
-	function emitToolResult(toolName: string, opts?: { isError?: boolean }): void {
+	function emitToolResult(toolName: string, opts?: { isError?: boolean; details?: unknown }): void {
 		const toolCallId = `call_${toolName}_${Date.now()}_${Math.random()}`;
 		session.agent.emitExternalEvent({ type: "message_end", message: toolUseAssistant(toolName) });
 		const content: TextContent[] = [{ type: "text", text: "ok" }];
@@ -111,6 +110,7 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
 				toolCallId,
 				toolName,
 				content,
+				details: opts?.details,
 				isError: opts?.isError ?? false,
 				timestamp: Date.now(),
 			},
@@ -211,6 +211,24 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
 		expect(reminderEvents).toEqual([]);
 	});
 
+	it("does not treat shell, eval, or device observations as source mutations", async () => {
+		for (let i = 0; i < THRESHOLD; i++) {
+			emitToolResult("bash");
+			emitToolResult("eval");
+			emitToolResult("write", { details: { xdev: { mode: "execute", tool: "lsp", inner: {} } } });
+		}
+		expect(await drainNudges()).toEqual([]);
+	});
+
+	it("todo views, failures, and identical snapshots do not reset pending reconciliation", async () => {
+		for (let i = 0; i < THRESHOLD - 1; i++) emitToolResult("edit");
+		session.setTodoPhases(session.getTodoPhases());
+		emitToolResult("todo");
+		emitToolResult("todo", { isError: true });
+		emitToolResult("edit");
+		expect((await drainNudges()).map(nudge => nudge.customType)).toEqual([NUDGE_TYPE]);
+	});
+
 	it("stays silent below the mutation threshold", async () => {
 		for (let i = 0; i < THRESHOLD - 1; i++) emitToolResult("edit");
 
@@ -249,8 +267,11 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
 		expect(await drainNudges()).toEqual([]);
 	});
 
-	it("does not nudge when a `todo` call has reset the counter mid-window", async () => {
+	it("resets reconciliation when canonical todo state changes", async () => {
 		for (let i = 0; i < THRESHOLD - 1; i++) emitToolResult("write");
+		const phases = session.getTodoPhases();
+		phases[0]!.tasks[0]!.status = "completed";
+		session.setTodoPhases(phases);
 		emitToolResult("todo");
 		for (let i = 0; i < THRESHOLD - 1; i++) emitToolResult("write");
 

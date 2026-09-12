@@ -69,7 +69,7 @@ import {
 	scanFileForConflicts,
 } from "./conflict-detect";
 import { executeReadUrl, fetchReadUrl, parseReadUrlTarget } from "./fetch";
-import { postProcessToolResult, type OutputMeta, resolveOutputMaxColumns } from "./output-meta";
+import { markBoundedReadResult, postProcessToolResult, type OutputMeta, resolveOutputMaxColumns } from "./output-meta";
 import {
 	expandPath,
 	formatPathRelativeToCwd,
@@ -2343,7 +2343,20 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (columnTruncated > 0) {
 			resultBuilder.limits({ columnMax: columnTruncated });
 		}
-		return resultBuilder.done();
+		const result = resultBuilder.done();
+		const boundedSelection =
+			parsed.kind === "tail" ||
+			(parsed.kind === "lines" && parsed.ranges.every(range => range.endLine !== undefined));
+		if (boundedSelection && sourcePath && content.length === 1 && content[0].type === "text") {
+			const selectedText = content[0].text;
+			const selectedLines = countTextLines(selectedText);
+			if (
+				selectedLines <= DEFAULT_MAX_LINES &&
+				Buffer.byteLength(selectedText, "utf-8") <= Math.max(DEFAULT_MAX_BYTES, selectedLines * 512)
+			)
+				markBoundedReadResult(result);
+		}
+		return result;
 	}
 
 	/**
