@@ -37,6 +37,7 @@ import {
 	DEFAULT_PREWALK_TARGET,
 	expandRoleAlias,
 	formatModelSelectorValue,
+	parseModelString,
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveModelRoleValue,
@@ -1267,7 +1268,21 @@ export async function buildSessionOptions(
 			: !restoringSession && activeSettings.get("prewalk.enabled");
 	if (prewalkEnabled) {
 		const rolePattern = expandRoleAlias(parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET, activeSettings);
-		const resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
+		let resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
+		// A target from a configured discovery provider is absent from the cold
+		// startup catalog. Refresh only the provider named by the selector: a
+		// typo, missing role, or extension-only provider must not make startup
+		// await unrelated remote discovery before prewalk degrades (issue #11820).
+		if (resolved.error || !resolved.model) {
+			const requestedProvider = parseModelString(rolePattern)?.provider.toLowerCase();
+			const discoverableProvider = requestedProvider
+				? modelRegistry.getDiscoverableProviders().find(provider => provider.toLowerCase() === requestedProvider)
+				: undefined;
+			if (discoverableProvider) {
+				await modelRegistry.refreshDiscoverableProviders([discoverableProvider], "online-if-uncached");
+				resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
+			}
+		}
 		if (resolved.warning) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
 		}
