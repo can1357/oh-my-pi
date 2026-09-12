@@ -3884,14 +3884,26 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 		params.messages[trailingIndex - 1]?.role === "assistant";
 	const messageEnd = hasTrailingAssistantPad ? trailingIndex - 1 : trailingIndex;
 
+	// A breakpoint caches every preceding byte, not only the decorated message.
+	// Once per-call or turn-scoped content appears, no later message can anchor a
+	// prefix reusable by the next request.
+	let stableMessageEnd = messageEnd;
+	for (let index = 0; index <= messageEnd; index++) {
+		const message = params.messages[index];
+		if (message && (message.clear_at === "next_user_message" || isPerCallContextMessage(message))) {
+			stableMessageEnd = index - 1;
+			break;
+		}
+	}
+
 	// Decimation counts conversational turns, so it reads the provenance marker
 	// `convertAnthropicMessages` records rather than the wire role. A wire `user`
 	// can also be a serialized `developer` message, a tool_result run, or an
 	// interior `Continue.` pad, none of which advance the user turn ordinal.
 	const userIndices: number[] = [];
-	for (let index = 0; index <= messageEnd; index++) {
+	for (let index = 0; index <= stableMessageEnd; index++) {
 		const message = params.messages[index];
-		if (message && message.clear_at !== "next_user_message" && isConversationalUser(message)) {
+		if (message && isConversationalUser(message)) {
 			userIndices.push(index);
 		}
 	}
@@ -3899,11 +3911,11 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 	// Stable historical decimation checkpoint every 15 user turns (15th, 30th, 45th...)
 	const decimationIndices = userIndices.filter((_, ordinal) => (ordinal + 1) % ANTHROPIC_DECIMATION_INTERVAL === 0);
 
-	// Collect eligible trailing candidates (up to 2 messages walking backward from messageEnd).
+	// Collect up to 2 trailing candidates from the reusable prefix.
 	const trailingCandidates: number[] = [];
-	for (let index = messageEnd; index >= 0 && trailingCandidates.length < 2; index--) {
+	for (let index = stableMessageEnd; index >= 0 && trailingCandidates.length < 2; index--) {
 		const message = params.messages[index];
-		if (!message || message.clear_at === "next_user_message" || isPerCallContextMessage(message)) continue;
+		if (!message) continue;
 		trailingCandidates.push(index);
 	}
 
