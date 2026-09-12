@@ -1540,6 +1540,74 @@ export interface ExtensionAPI {
 	 */
 	unregisterProvider(name: string): void;
 
+	/**
+	 * Register UI string overrides for the TUI settings panel and chrome.
+	 *
+	 * Called at extension load time. Keys are free-form stable identifiers
+	 * (e.g. `"tab.appearance"`, `"compaction.group"`, `"settings.title"`).
+	 * Later registrations overwrite earlier ones for the same key.
+	 * Empty keys or empty values are silently skipped.
+	 *
+	 * When the extension is disabled or reloaded, its contributions are
+	 * removed so stale strings never persist.
+	 *
+	 * @example
+	 * // Override a tab label
+	 * pi.registerUiStrings({
+	 *   strings: {
+	 *     "tab.appearance": "\u5916\u89c2",
+	 *     "tab.model": "\u6a21\u578b",
+	 *     "settings.title": "\u8bbe\u7f6e",
+	 *     "settings.searchPlaceholder": "\u641c\u7d22\u8bbe\u7f6e...",
+	 *   },
+	 * });
+	 *
+	 * @example
+	 * // Override setting label and description
+	 * pi.registerUiStrings({
+	 *   strings: {
+	 *     "compaction.enabled.label": "\u538b\u7f29",
+	 *     "compaction.enabled.description": "\u542f\u7528\u4e3b\u52a8\u538b\u7f29...",
+	 *   },
+	 * });
+	 */
+	registerUiStrings(registration: { strings: Record<string, string> }): void;
+
+	/**
+	 * Register model-facing prompt overrides for stable prompt IDs.
+	 *
+	 * Unlike `registerUiStrings` (interface copy) this changes what the model
+	 * sees: the system prompt, subagent prompts, and tool descriptions. An
+	 * override supplies a full replacement template or a text transform for a
+	 * prompt ID; `prompt.render` and all Handlebars expressions, XML tags,
+	 * and dynamic variables in the original template must be preserved by the
+	 * override.
+	 *
+	 * Prompt IDs:
+	 * - `"system"` — the main agent system prompt
+	 * - `"subagent.system"` — the subagent system prompt template
+	 * - `"tools.<toolName>"` — a tool's model-facing description
+	 *
+	 * Example:
+	 * ```ts
+	 * pi.registerPromptOverrides({
+	 *   overrides: [
+	 *     {
+	 *       id: "system",
+	 *       transform: (src) => src.replace("You are an expert", "You are an expert engineer"),
+	 *     },
+	 *   ],
+	 * });
+	 * ```
+	 */
+	registerPromptOverrides(registration: {
+		overrides: Array<{
+			id: string;
+			full?: string;
+			transform?: (source: string) => string;
+		}>;
+	}): void;
+
 	/** Shared event bus for extension communication. */
 	events: EventBus;
 }

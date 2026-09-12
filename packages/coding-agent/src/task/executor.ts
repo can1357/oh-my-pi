@@ -44,6 +44,7 @@ import type { LocalProtocolOptions } from "../internal-urls";
 import { IrcBus } from "../irc/bus";
 import type { MCPManager } from "../mcp/manager";
 import type { MnemopiSessionState } from "../mnemopi/state";
+import { resolvePromptSource } from "../extensibility/extensions/prompt-overrides";
 import { initializeExtensions } from "../modes/runtime-init";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
@@ -2074,10 +2075,12 @@ async function driveSessionToYield(
 				if (lastBeforeReminder?.stopReason === "error") break;
 				try {
 					retryCount++;
-					const reminder = prompt.render(submitReminderTemplate, {
-						retryCount,
-						maxRetries: MAX_YIELD_RETRIES,
-						budgetStop,
+					const reminder = prompt.render(
+						resolvePromptSource("subagent.yieldReminder", submitReminderTemplate),
+						{
+							retryCount,
+							maxRetries: MAX_YIELD_RETRIES,
+							budgetStop,
 					});
 
 					const isFinalRetry = retryCount >= MAX_YIELD_RETRIES;
@@ -2147,11 +2150,14 @@ async function driveSessionToYield(
 				const running = session.getAsyncJobSnapshot()?.running ?? [];
 				if (running.length > 0) {
 					const jobs = running.map(job => `${job.id}${job.label ? ` (${job.label})` : ""}`).join(", ");
-					const notice = prompt.render(subagentAsyncPendingTemplate, {
-						count: running.length,
-						multiple: running.length > 1,
-						jobs,
-					});
+					const notice = prompt.render(
+						resolvePromptSource("subagent.asyncPending", subagentAsyncPendingTemplate),
+						{
+							count: running.length,
+							multiple: running.length > 1,
+							jobs,
+						},
+					);
 					try {
 						await awaitAbortable(session.prompt(notice, { attribution: "agent", synthetic: true }));
 						await awaitAbortable(session.waitForIdle());
@@ -3503,7 +3509,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					const ircRoster = ircEnabled
 						? collectIrcPeerRoster(AgentRegistry.global(), id, ircRootSessionFile)
 						: undefined;
-					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
+					const subagentPrompt = prompt.render(
+						resolvePromptSource("subagent.system", subagentSystemPromptTemplate),
+						{
 						agent: agent.systemPrompt,
 						context: options.context?.trim() ?? "",
 						planReference: options.planReference?.content ?? "",
