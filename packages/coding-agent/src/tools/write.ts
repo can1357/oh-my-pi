@@ -36,10 +36,15 @@ import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" w
 import type { ToolSession } from "../sdk";
 import { fileHyperlink, framedBlock, renderStatusLine } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import { routeWriteThroughBridge } from "./acp-bridge";
+import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
 import { resolveToolTier, truncateForPrompt } from "./approval";
 import { assertEditableFile } from "./auto-generated-guard";
-import { formatHashlineHeader, stripHashlinePrefixes } from "./hashline-format";
+import {
+	formatHashlineHeader,
+	isReadTruncationNotice,
+	splitAddressableFileLines,
+	stripHashlinePrefixes,
+} from "./hashline-format";
 import {
 	type ConflictEntry,
 	conflictRegionPresent,
@@ -65,6 +70,8 @@ import {
 	targetsLocalSandbox,
 	unwrapHashlineHeaderPath,
 } from "./plan-mode-guard";
+import { decodeUtf8Text } from "./read-format";
+import { routeReadThroughBridge } from "./read-summary";
 import {
 	cachedRenderedString,
 	createRenderedStringCache,
@@ -363,6 +370,81 @@ function stripWriteContent(session: ToolSession, content: string): { text: strin
 	}
 	return stripWriteContentWithPotentialLooseHeader(content.split("\n"));
 }
+function endsWithReadTruncationNotice(content: string): boolean {
+	const lines = splitAddressableFileLines(normalizeToLF(content));
+	const noticeIndex = lines.findLastIndex(line => line.trim().length > 0);
+	if (noticeIndex === -1) return false;
+	return isReadTruncationNotice(lines[noticeIndex]!);
+}
+
+async function readCurrentWriteSource(
+	session: ToolSession,
+	requestedPath: string,
+	absolutePath: string,
+): Promise<string | undefined> {
+	const readDisk = async (): Promise<string | undefined> => {
+		try {
+			return await Bun.file(absolutePath).text();
+		} catch (error) {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		}
+	};
+	if (!shouldRouteWriteThroughBridge(session, requestedPath, absolutePath)) return readDisk();
+	const bridgeRead = routeReadThroughBridge(session, absolutePath);
+	if (!bridgeRead) return readDisk();
+	try {
+		return await bridgeRead;
+	} catch {
+		return readDisk();
+	}
+}
+
+/**
+ * Byte span (UTF-16 length) of a read projection's shown payload — everything
+ * up to but excluding its trailing `read` truncation notice and the blank
+ * separator before it. Returns `undefined` when the content does not end in
+ * such a notice.
+ *
+ * Excluding the notice matters at the byte-budget boundary: a single line
+ * truncated just past the limit renders as a ~50 KB prefix plus a footer whose
+ * combined length can exceed the original line, yet it still covers strictly
+ * less source. Measuring the shown payload — not the rendered length — is what
+ * the truncation marker, not character count, establishes as incomplete.
+ */
+function readProjectionPayloadLength(content: string): number | undefined {
+	const lines = splitAddressableFileLines(normalizeToLF(content));
+	const noticeIndex = lines.findLastIndex(line => line.trim().length > 0);
+	if (noticeIndex === -1 || !isReadTruncationNotice(lines[noticeIndex]!)) return undefined;
+	let end = noticeIndex;
+	while (end > 0 && lines[end - 1]!.trim().length === 0) end--;
+	return lines.slice(0, end).join("\n").length;
+}
+
+function assertNotShorterReadProjection(
+	displayPath: string,
+	content: string,
+	currentContent: string | undefined,
+): void {
+	const payloadLength = readProjectionPayloadLength(content);
+	if (payloadLength === undefined || currentContent === undefined) return;
+	if (payloadLength >= normalizeToLF(currentContent).length) return;
+	throw new ToolError(
+		`Refusing to overwrite '${displayPath}' with an incomplete read projection: the content ends with an omp read truncation notice and covers less than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use edit for a partial change.`,
+	);
+}
+
+async function assertNotTruncatedFileReadProjection(
+	session: ToolSession,
+	requestedPath: string,
+	absolutePath: string,
+	displayPath: string,
+	content: string,
+): Promise<void> {
+	if (!endsWithReadTruncationNotice(content)) return;
+	const currentContent = await readCurrentWriteSource(session, requestedPath, absolutePath);
+	assertNotShorterReadProjection(displayPath, content, currentContent);
+}
 
 /**
  * Record a snapshot of the freshly-written `content` for `absolutePath`
@@ -645,6 +727,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 	async #writeArchiveEntry(
 		content: string,
+		rawContent: string,
 		resolvedArchivePath: ResolvedArchiveWritePath,
 	): Promise<AgentToolResult<WriteToolDetails>> {
 		// Resolve symlinks before the tmp+rename swap: renaming over a symlink
@@ -684,6 +767,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const sel = readSelectorForEmptyWrite(writeTarget, content);
 		if (sel !== undefined && !entries.has(resolvedArchivePath.archiveSubPath)) {
 			throwReadSelectorMisfire(writeTarget, sel);
+		}
+		const existingTarget = entries.get(resolvedArchivePath.archiveSubPath);
+		if (existingTarget !== undefined && endsWithReadTruncationNotice(rawContent)) {
+			const existingBytes =
+				existingTarget instanceof Blob ? new Uint8Array(await existingTarget.arrayBuffer()) : existingTarget;
+			const existingText = typeof existingBytes === "string" ? existingBytes : decodeUtf8Text(existingBytes);
+			assertNotShorterReadProjection(writeTarget, rawContent, existingText ?? undefined);
 		}
 		entries.set(resolvedArchivePath.archiveSubPath, content);
 
@@ -1146,6 +1236,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
 				const handler = internalRouter.getHandler(scheme);
 				if (handler?.write) {
+					if (scheme !== "xd" && endsWithReadTruncationNotice(content)) {
+						const currentResource = await internalRouter.resolve(path, {
+							cwd: this.session.cwd,
+							settings: this.session.settings,
+							signal,
+						});
+						assertNotShorterReadProjection(path, content, currentResource.content);
+					}
 					// Handler-owned writes mutate user data outside the local
 					// sandbox. xd:// dispatches retain each wrapped tool's tier.
 					if (scheme !== "xd") {
@@ -1252,7 +1350,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					}`,
 					resolvedArchivePath.absolutePath,
 				);
-				const archiveResult = await this.#writeArchiveEntry(cleanContent, resolvedArchivePath);
+				const archiveResult = await this.#writeArchiveEntry(cleanContent, content, resolvedArchivePath);
 				if (stripped) {
 					const firstText = archiveResult.content.find(
 						(block): block is { type: "text"; text: string } =>
@@ -1286,14 +1384,15 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			await assertNotReadSelectorMisfire(path, cleanContent, this.session.cwd);
 			enforcePlanModeWrite(this.session, path, { op: "create" });
 			const absolutePath = resolvePlanPath(this.session, path);
+			const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
 			const batchRequest = getLspBatchRequest(context?.toolCall);
 
-			// Check if file exists and is auto-generated before overwriting
+			// Check if file exists and is auto-generated before overwriting.
 			if (await fs.exists(absolutePath)) {
 				await assertEditableFile(absolutePath, path, this.session.settings);
 			}
+			await assertNotTruncatedFileReadProjection(this.session, path, absolutePath, displayPath, content);
 
-			const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
 			emitWriteProgress(onUpdate, cleanContent, displayPath, absolutePath);
 
 			// Try ACP bridge first for editor-visible filesystem paths. Internal

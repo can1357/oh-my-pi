@@ -1753,6 +1753,9 @@ export declare function hashlineFormatHeader(path: string, tag: string): string
 /** `N:line` numbered display rows starting at `startLine` (default 1). */
 export declare function hashlineFormatNumberedLines(text: string, startLine?: number | undefined | null): string
 
+/** Whether a row is a truncation notice emitted by `read`. */
+export declare function hashlineIsReadTruncationNotice(line: string): boolean
+
 /** Count of one canonical hashline op header shape in a payload. */
 export interface HashlineOpCount {
   label: string

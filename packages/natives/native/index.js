@@ -73,6 +73,7 @@ export const hashlineCountOps = nativeBindings.hashlineCountOps;
 export const hashlineFileHash = nativeBindings.hashlineFileHash;
 export const hashlineFormatHeader = nativeBindings.hashlineFormatHeader;
 export const hashlineFormatNumberedLines = nativeBindings.hashlineFormatNumberedLines;
+export const hashlineIsReadTruncationNotice = nativeBindings.hashlineIsReadTruncationNotice;
 export const hashlineStripPrefixes = nativeBindings.hashlineStripPrefixes;
 export const hasMatch = nativeBindings.hasMatch;
 export const highlightCode = nativeBindings.highlightCode;
