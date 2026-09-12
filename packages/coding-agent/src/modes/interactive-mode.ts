@@ -3733,12 +3733,25 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	/**
+	 * Warn that a plan session blocks entering goal/vibe mode, distinguishing an
+	 * active session from a paused one. A paused session already restored the
+	 * tools/model and cleared the `xd://propose` handler, so "Exit plan mode
+	 * first." reads as stale right after the user toggled plan mode off (#11692);
+	 * point them at the second `/plan` toggle that fully exits instead.
+	 */
+	#warnPlanModeBlocks(): void {
+		this.showWarning(
+			this.planModePaused ? "Plan mode is paused — run /plan again to fully exit." : "Exit plan mode first.",
+		);
+	}
+
 	async #enterGoalMode(options: { objective?: string; resume?: boolean; silent?: boolean }): Promise<void> {
 		if (this.goalModeEnabled) {
 			return;
 		}
 		if (this.planModeEnabled || this.planModePaused) {
-			this.showWarning("Exit plan mode first.");
+			this.#warnPlanModeBlocks();
 			return;
 		}
 		if (this.vibeModeEnabled) {
@@ -4451,7 +4464,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return false;
 		}
 		if (this.planModeEnabled || this.planModePaused) {
-			this.showWarning("Exit plan mode first.");
+			this.#warnPlanModeBlocks();
 			return false;
 		}
 		if (this.goalModeEnabled || this.goalModePaused) {
@@ -4566,7 +4579,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		if (this.planModeEnabled || this.planModePaused) {
-			this.showWarning("Exit plan mode first.");
+			this.#warnPlanModeBlocks();
 			return;
 		}
 		if (this.goalModeEnabled || this.goalModePaused) {
@@ -4674,7 +4687,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
 	): Promise<boolean> {
 		if (this.planModeEnabled || this.planModePaused) {
-			this.showWarning("Exit plan mode first.");
+			this.#warnPlanModeBlocks();
 			return false;
 		}
 		if (this.vibeModeEnabled) {
@@ -4717,7 +4730,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	): Promise<boolean> {
 		try {
 			if (this.planModeEnabled || this.planModePaused) {
-				this.showWarning("Exit plan mode first.");
+				this.#warnPlanModeBlocks();
 				return false;
 			}
 			if (this.vibeModeEnabled) {
