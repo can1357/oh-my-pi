@@ -282,6 +282,11 @@ export class SessionTools {
 	 * restore cannot revive full access via the stale origin pin.
 	 */
 	#dormantDeviceOnlyWrite = false;
+	/**
+	 * Set when device-only write is injected without a user grant. Cleared only
+	 * by genuine promotion or an explicit user grant, never by internal rebuilds.
+	 */
+	#transportInjectedWrite = false;
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
@@ -930,6 +935,7 @@ export class SessionTools {
 			(options?.fullWrite === true ||
 				(options?.fullWrite !== false &&
 					this.#dormantDeviceOnlyWrite !== true &&
+					this.#transportInjectedWrite !== true &&
 					!(this.#host.planModeEnabled() && !writeLiveBeforeApply) &&
 					(this.#presentationPinnedToolNames?.has("write") === true ||
 						this.#runtimeSelectedToolNames?.has("write") === true)));
@@ -1035,6 +1041,7 @@ export class SessionTools {
 		const previousToolPredicateNames = this.#toolPredicateNames;
 		const previousDormantFullWrite = this.#dormantFullWrite;
 		const previousDormantDeviceOnlyWrite = this.#dormantDeviceOnlyWrite;
+		const previousTransportInjectedWrite = this.#transportInjectedWrite;
 		const previousDeviceOnlyWrite = this.#isDeviceOnlyWrite?.() === true;
 		const writePreviouslyHadFullAccess =
 			options?.fullWrite === false
@@ -1113,6 +1120,7 @@ export class SessionTools {
 		} catch (error) {
 			this.#dormantFullWrite = previousDormantFullWrite;
 			this.#dormantDeviceOnlyWrite = previousDormantDeviceOnlyWrite;
+			this.#transportInjectedWrite = previousTransportInjectedWrite;
 			if (restrictDeviceOnlyWrite || restoreDormantDeviceOnlyWrite)
 				this.#setDeviceOnlyWrite?.(previousDeviceOnlyWrite);
 			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
@@ -1127,6 +1135,7 @@ export class SessionTools {
 		if (this.#host.isDisposed()) {
 			this.#dormantFullWrite = previousDormantFullWrite;
 			this.#dormantDeviceOnlyWrite = previousDormantDeviceOnlyWrite;
+			this.#transportInjectedWrite = previousTransportInjectedWrite;
 			if (restrictDeviceOnlyWrite || restoreDormantDeviceOnlyWrite)
 				this.#setDeviceOnlyWrite?.(previousDeviceOnlyWrite);
 			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
@@ -1160,7 +1169,10 @@ export class SessionTools {
 			if (fullWriteSelected || options?.fullWrite === true) {
 				this.#dormantFullWrite = false;
 				this.#dormantDeviceOnlyWrite = false;
-				if (fullWriteSelected) this.#setDeviceOnlyWrite?.(false);
+				if (fullWriteSelected) {
+					this.#transportInjectedWrite = false;
+					this.#setDeviceOnlyWrite?.(false);
+				}
 			} else {
 				this.#dormantFullWrite = writePreviouslyHadFullAccess;
 				if (
@@ -1179,6 +1191,7 @@ export class SessionTools {
 					this.#dormantDeviceOnlyWrite = false;
 				}
 				if (restrictDeviceOnlyWrite || restoreDormantDeviceOnlyWrite) {
+					this.#transportInjectedWrite = true;
 					this.#setDeviceOnlyWrite?.(true);
 				} else if (deactivateDeviceOnlyWrite) {
 					this.#setDeviceOnlyWrite?.(false);
@@ -1417,27 +1430,36 @@ export class SessionTools {
 		return this.runToolRegistryMutation(async () => {
 			const normalized = normalizeToolNames(toolNames);
 			const mountedCandidates = this.#resolveMountCandidates(normalized);
-			// A genuine explicit `write` grant clears a stale explicit-downgrade marker:
-			// deferrable-only and no-`read` selections still yield zero mount
-			// candidates, yet the transport gate re-decides `write` retention
-			// downstream (`transportWriteActive`), so such grants stay device-only
-			// until a mountable tool or `read` arrives. Pinned or runtime-selected
-			// `write` origins stay fail-closed device-only because a pinned `write`
-			// bypasses the transport gate's plan-mode clause (`pinned !== true`
-			// short-circuits first) and would promote straight to live full write.
-			// Plan-mode selections stay guarded too: plan enter/arm inject `write`
-			// through this same API while plan mode is published, so an unguarded
-			// clear fires on the way into a plan. Restores carrying a mounted
-			// partition keep the marker via `mountedCandidates.size > 0`.
+			// A fresh explicit write grant clears stale markers only when either no
+			// explicit downgrade is in effect, or the selection is mount-free and write
+			// was never pinned/runtime-selected; and when either write is enabled or
+			// no device-only state is live (a wound-down injection leaves no tainted
+			// state behind), or the selection carries mounts and write was never
+			// pinned/runtime-selected.
+			// Mounted restores on pin-free origins with no downgrade clear
+			// (restriction-to-mounted-set restore, omit-and-re-add, upgrade-before-restriction).
+			// The same restore on a pinned origin with write removed stays blocked
+			// (poisoned-snapshot restore); pinned origins with an explicit downgrade stay
+			// blocked (pinned plan-mode reselect, deferrable reapplication); and mount-free
+			// reselects of removed write with a downgrade stay blocked
+			// (deferrable-no-read denial, stale fullWrite:false reselect).
 			const previousDormantDeviceOnlyWrite = this.#dormantDeviceOnlyWrite;
+			const previousTransportInjectedWrite = this.#transportInjectedWrite;
 			if (
 				normalized.includes("write") &&
-				mountedCandidates.size === 0 &&
 				!this.#host.planModeEnabled() &&
-				this.#presentationPinnedToolNames?.has("write") !== true &&
-				this.#runtimeSelectedToolNames?.has("write") !== true
+				(this.#dormantDeviceOnlyWrite !== true ||
+					(mountedCandidates.size === 0 &&
+						this.#presentationPinnedToolNames?.has("write") !== true &&
+						this.#runtimeSelectedToolNames?.has("write") !== true)) &&
+				(this.#enabledToolNames.has("write") ||
+					this.#isDeviceOnlyWrite?.() !== true ||
+					(mountedCandidates.size !== 0 &&
+						this.#presentationPinnedToolNames?.has("write") !== true &&
+						this.#runtimeSelectedToolNames?.has("write") !== true))
 			) {
 				this.#dormantDeviceOnlyWrite = false;
+				this.#transportInjectedWrite = false;
 			}
 			try {
 				// Mounted candidates also retain dormant device-only write after a restriction;
@@ -1448,6 +1470,7 @@ export class SessionTools {
 				});
 			} catch (error) {
 				this.#dormantDeviceOnlyWrite = previousDormantDeviceOnlyWrite;
+				this.#transportInjectedWrite = previousTransportInjectedWrite;
 				throw error;
 			}
 		});

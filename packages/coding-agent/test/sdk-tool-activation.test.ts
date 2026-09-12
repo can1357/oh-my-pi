@@ -1081,6 +1081,126 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("stays device-only when MCP devices disconnect after a parked-grant injection", async () => {
+		const tempDir = makeTempDir();
+		const mcpDevice: CustomTool = {
+			name: "mcp__parked_grant_disconnect",
+			label: "parked-grant/disconnect",
+			description: "MCP device used to exercise parked write grants.",
+			parameters: type({}),
+			mcpServerName: "parked-grant",
+			mcpToolName: "disconnect",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			toolNames: ["read", "write"],
+		});
+
+		try {
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+			await session.setActiveToolsByName(["read"]);
+			await session.refreshMCPTools([mcpDevice]);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+
+			await session.refreshMCPTools([]);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			const blockedTarget = path.join(tempDir, "parked-grant-disconnect-blocked.txt");
+			await expect(
+				session.getToolByName("write")!.execute("parked-grant-disconnect", {
+					path: blockedTarget,
+					content: "blocked",
+				}),
+			).rejects.toThrow();
+			expect(await Bun.file(blockedTarget).exists()).toBe(false);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("restoring a snapshot containing injected write stays device-only", async () => {
+		const tempDir = makeTempDir();
+		const mcpDevice: CustomTool = {
+			name: "mcp__injected_snapshot_restore",
+			label: "injected-snapshot/restore",
+			description: "MCP device used to exercise injected write restoration.",
+			parameters: type({}),
+			mcpServerName: "injected-snapshot",
+			mcpToolName: "restore",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			toolNames: ["read", "write"],
+		});
+
+		try {
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+			await session.setActiveToolsByName(["read"]);
+			await session.refreshMCPTools([mcpDevice]);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			const saved = session.getEnabledToolNames();
+
+			await session.setActiveToolsByName(["read"]);
+			await session.setActiveToolsByName(saved);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+			const blockedTarget = path.join(tempDir, "injected-snapshot-restore-blocked.txt");
+			await expect(
+				session.getToolByName("write")!.execute("injected-snapshot-restore", {
+					path: blockedTarget,
+					content: "blocked",
+				}),
+			).rejects.toThrow();
+			expect(await Bun.file(blockedTarget).exists()).toBe(false);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("genuine explicit write grant still promotes", async () => {
+		const tempDir = makeTempDir();
+		const mcpDevice: CustomTool = {
+			name: "mcp__explicit_write_promotion",
+			label: "explicit-write/promotion",
+			description: "MCP device used to exercise explicit write promotion.",
+			parameters: type({}),
+			mcpServerName: "explicit-write",
+			mcpToolName: "promotion",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "plan.enabled": false }),
+			toolNames: ["read", "write"],
+		});
+
+		try {
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+			await session.setActiveToolsByName(["read"]);
+			await session.refreshMCPTools([mcpDevice]);
+			expect(session.isDeviceOnlyWrite()).toBe(true);
+
+			await session.setActiveToolsByName(["read", "write"]);
+			expect(session.isDeviceOnlyWrite()).toBe(false);
+			const target = path.join(tempDir, "explicit-write-promotion.txt");
+			await session.getToolByName("write")!.execute("explicit-write-promotion", {
+				path: target,
+				content: "promoted",
+			});
+			expect(await Bun.file(target).text()).toBe("promoted");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("explicit write selection with a mounted partition retains device-only downgrade", async () => {
 		const tempDir = makeTempDir();
 		const customAmbient: CustomTool = {
