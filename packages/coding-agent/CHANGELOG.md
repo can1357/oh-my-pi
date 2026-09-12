@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `display.hideToolOutputDetails` renders each tool call as its own one-line summary and hides its output body, and `app.display.toggleDetail` moves that together with the thinking-block toggle from a single key ([#11840](https://github.com/can1357/oh-my-pi/pull/11840) by [@iacore](https://github.com/iacore)).
+
 ### Fixed
 
 - Sessions now stay alive when their working directory is removed instead of crashing while preparing shell tools ([#11828](https://github.com/can1357/oh-my-pi/issues/11828)).

@@ -613,6 +613,12 @@ export class SelectorController {
 				this.ctx.ui.requestRender(true);
 				break;
 			}
+			case "display.hideToolOutputDetails": {
+				this.ctx.hideToolOutputDetails = value as boolean;
+				this.ctx.chatContainer.setToolOutputDetailsHidden(this.ctx.hideToolOutputDetails);
+				this.ctx.ui.requestRender(true);
+				break;
+			}
 			case "terminal.showImages":
 			case "showImages": {
 				const visible = value as boolean;

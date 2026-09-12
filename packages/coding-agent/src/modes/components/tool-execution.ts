@@ -274,6 +274,7 @@ export class ToolExecutionComponent extends Container {
 	#allocation = Number.POSITIVE_INFINITY;
 	#presentationFrame: AnimationFrame = { tick: 0, now: 0 };
 	#toolActivityVisible = true;
+	#toolOutputDetailsHidden = false;
 	#showImages: boolean;
 	#isPartial = true;
 	// A background task whose call already returned; later async job frames are
@@ -798,6 +799,16 @@ export class ToolExecutionComponent extends Container {
 		super.invalidate();
 	}
 
+	/**
+	 * Fold the call into its one-line summary. The card's block is kept intact —
+	 * this only changes which of its two presentations {@link render} returns.
+	 */
+	setToolOutputDetailsHidden(hidden: boolean): void {
+		if (this.#toolOutputDetailsHidden === hidden) return;
+		this.#toolOutputDetailsHidden = hidden;
+		super.invalidate();
+	}
+
 	setShowImages(show: boolean): void {
 		this.#showImages = show;
 		this.#updateDisplay();
@@ -857,6 +868,7 @@ export class ToolExecutionComponent extends Container {
 
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible || this.#allocation === 0) return [];
+		if (this.#toolOutputDetailsHidden) return this.#renderCompact(width, true);
 		let lines = super.render(width);
 		if (this.#allocation < 3) {
 			// A squeezed allocation degrades only blocks that genuinely overflow it.
@@ -873,7 +885,7 @@ export class ToolExecutionComponent extends Container {
 		return lines;
 	}
 
-	#renderCompact(width: number): readonly string[] {
+	#renderCompact(width: number, singleRow: boolean = this.#allocation === 1): readonly string[] {
 		const summary = this.#activitySummary();
 		const detail = summary.detail ? theme.fg("muted", ` · ${summary.detail.replace(/\s+/g, " ")}`) : "";
 		// Elapsed ticks only while the call is genuinely running; a settled
@@ -889,7 +901,7 @@ export class ToolExecutionComponent extends Container {
 			`${theme.fg("toolTitle", theme.bold(summary.label))}${detail}${elapsed}`,
 			Math.max(1, width - 4),
 		);
-		if (this.#allocation === 1) {
+		if (singleRow) {
 			const glyph = this.#spinnerFrame === undefined ? "•" : (theme.spinnerFrames[this.#spinnerFrame] ?? "•");
 			const styledGlyph = theme.fg(this.#spinnerFrame === undefined ? "dim" : "muted", glyph);
 			return [truncateToWidth(`${styledGlyph} ${text}`, width)];

@@ -535,6 +535,11 @@ export class InputController {
 		this.ctx.editor.onHistorySearch = () => this.ctx.showHistorySearch();
 		this.ctx.editor.setActionKeys("app.thinking.toggle", this.ctx.keybindings.getKeys("app.thinking.toggle"));
 		this.ctx.editor.onToggleThinking = () => this.ctx.toggleThinkingBlockVisibility();
+		this.ctx.editor.setActionKeys(
+			"app.display.toggleDetail",
+			this.ctx.keybindings.getKeys("app.display.toggleDetail"),
+		);
+		this.ctx.editor.onToggleDetail = () => this.ctx.toggleDetailVisibility();
 		this.ctx.editor.setActionKeys("app.editor.external", this.ctx.keybindings.getKeys("app.editor.external"));
 		this.ctx.editor.onExternalEditor = () => void this.openExternalEditor();
 		this.ctx.editor.setActionKeys(
@@ -2266,6 +2271,12 @@ export class InputController {
 			this.ctx.showStatus(`Tool activity is hidden — show it with ${visibilityHint} before expanding`);
 			return;
 		}
+		if (this.ctx.hideToolOutputDetails) {
+			const detailsKey = this.ctx.keybindings.getDisplayString("app.display.toggleDetail");
+			const detailsHint = detailsKey ? `${detailsKey} or /settings` : "/settings";
+			this.ctx.showStatus(`Tool output details are hidden — show them with ${detailsHint} before expanding`);
+			return;
+		}
 		this.setToolsExpanded(!this.ctx.toolOutputExpanded);
 		this.ctx.showStatus(`Tool output expansion: ${this.ctx.toolOutputExpanded ? "enabled" : "disabled"}`);
 	}
@@ -2308,41 +2319,84 @@ export class InputController {
 	}
 
 	toggleThinkingBlockVisibility(): void {
-		// When thinking is "off" and the session has not produced reasoning
-		// content, thinking blocks stay auto-hidden; the toggle would only corrupt
-		// the persisted preference. OpenAI-compatible servers can stream reasoning
-		// without advertising model support, so observed thinking content unlocks
-		// the display toggle.
-		const thinkingOff =
-			((this.ctx.viewSession ?? this.ctx.session)?.thinkingLevel ?? ThinkingLevel.Off) === ThinkingLevel.Off;
-		if (thinkingOff && !this.ctx.hasDisplayableThinkingContent) {
+		if (this.#thinkingBlocksUntoggleable()) {
 			this.ctx.showStatus("Thinking is off — enable thinking to show blocks");
 			return;
 		}
-		this.ctx.hideThinkingBlock = !this.ctx.hideThinkingBlock;
-		this.ctx.settings.set("hideThinkingBlock", this.ctx.hideThinkingBlock);
+		this.#applyThinkingBlockVisibility(!this.ctx.hideThinkingBlock);
+		this.#resetTranscriptRendering();
+		this.ctx.showStatus(`Thinking blocks: ${this.ctx.hideThinkingBlock ? "hidden" : "visible"}`);
+	}
+
+	toggleToolOutputDetailsVisibility(): void {
+		this.#applyToolOutputDetailsHidden(!this.ctx.hideToolOutputDetails);
+		this.#resetTranscriptRendering();
+		this.ctx.showStatus(`Tool output details: ${this.ctx.hideToolOutputDetails ? "hidden" : "visible"}`);
+	}
+
+	/**
+	 * Gesture behind `app.display.toggleDetail`: one keystroke folds both halves
+	 * of the assistant's working detail — reasoning blocks and tool output — into
+	 * their collapsed presentation. Single-axis toggles stay on their own keys, so
+	 * this is the only entry point that moves both at once.
+	 */
+	toggleDetailVisibility(): void {
+		const thinkingToggleable = !this.#thinkingBlocksUntoggleable();
+		if (thinkingToggleable) this.#applyThinkingBlockVisibility(!this.ctx.hideThinkingBlock);
+		this.#applyToolOutputDetailsHidden(!this.ctx.hideToolOutputDetails);
+		this.#resetTranscriptRendering();
+		const thinking = thinkingToggleable
+			? `Thinking blocks: ${this.ctx.hideThinkingBlock ? "hidden" : "visible"}`
+			: "Thinking is off";
+		const details = this.ctx.hideToolOutputDetails ? "hidden" : "visible";
+		this.ctx.showStatus(`${thinking} · Tool output details: ${details}`);
+	}
+
+	/**
+	 * When thinking is "off" and the session has not produced reasoning content,
+	 * thinking blocks stay auto-hidden; a toggle would only corrupt the persisted
+	 * preference. OpenAI-compatible servers can stream reasoning without
+	 * advertising model support, so observed thinking content unlocks the
+	 * display toggle.
+	 */
+	#thinkingBlocksUntoggleable(): boolean {
+		const thinkingOff =
+			((this.ctx.viewSession ?? this.ctx.session)?.thinkingLevel ?? ThinkingLevel.Off) === ThinkingLevel.Off;
+		return thinkingOff && !this.ctx.hasDisplayableThinkingContent;
+	}
+
+	#applyThinkingBlockVisibility(hidden: boolean): void {
+		this.ctx.hideThinkingBlock = hidden;
+		this.ctx.settings.set("hideThinkingBlock", hidden);
 
 		for (const child of this.ctx.chatContainer.children) {
 			if (child instanceof AssistantMessageComponent) {
-				child.setHideThinkingBlock(this.ctx.hideThinkingBlock);
+				child.setHideThinkingBlock(hidden);
 			}
 		}
 
 		if (this.ctx.streamingComponent && this.ctx.streamingMessage) {
-			this.ctx.streamingComponent.setHideThinkingBlock(this.ctx.hideThinkingBlock);
+			this.ctx.streamingComponent.setHideThinkingBlock(hidden);
 			this.ctx.streamingComponent.updateContent(this.ctx.streamingMessage);
 		}
+	}
 
-		// This is an explicit user display gesture: rebuild native history so the
-		// visibility change also applies to rows already retired from the viewport.
-		// Append-only thinking heads emitted their stable rows to scrollback while
-		// streaming (visible); forget that emission ledger so the paired scrollback
-		// clear re-renders them under the new visibility instead of replaying the
-		// captured reasoning (#10177).
+	#applyToolOutputDetailsHidden(hidden: boolean): void {
+		this.ctx.hideToolOutputDetails = hidden;
+		this.ctx.settings.set("display.hideToolOutputDetails", hidden);
+		this.ctx.chatContainer.setToolOutputDetailsHidden(hidden);
+	}
+
+	/**
+	 * This is an explicit user display gesture: rebuild native history so the
+	 * change also applies to rows already retired from the viewport. Append-only
+	 * heads emitted their stable rows to scrollback while streaming (visible);
+	 * forget that emission ledger so the paired scrollback clear re-renders them
+	 * under the new presentation instead of replaying the captured rows (#10177).
+	 */
+	#resetTranscriptRendering(): void {
 		this.ctx.chatContainer.resetStableEmission();
 		this.ctx.ui.resetDisplay();
-
-		this.ctx.showStatus(`Thinking blocks: ${this.ctx.hideThinkingBlock ? "hidden" : "visible"}`);
 	}
 
 	async openExternalEditor(): Promise<void> {

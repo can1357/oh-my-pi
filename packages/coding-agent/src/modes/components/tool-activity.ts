@@ -8,7 +8,16 @@ export function isToolActivityComponent(component: Component): component is Comp
 	return typeof (component as Partial<ToolActivityComponent>).setToolActivityVisible === "function";
 }
 
-export class ToolActivityContainer extends Container implements ToolActivityComponent {
+/** Component that renders a tool call's output and can fold it into its call summary. */
+export interface ToolOutputDetailsComponent {
+	setToolOutputDetailsHidden(hidden: boolean): void;
+}
+
+export function supportsToolOutputDetails(component: Component): component is Component & ToolOutputDetailsComponent {
+	return typeof (component as Partial<ToolOutputDetailsComponent>).setToolOutputDetailsHidden === "function";
+}
+
+export class ToolActivityContainer extends Container implements ToolActivityComponent, ToolOutputDetailsComponent {
 	#visible = true;
 
 	constructor(component: Component | Component[]) {
@@ -24,6 +33,13 @@ export class ToolActivityContainer extends Container implements ToolActivityComp
 		if (this.#visible === visible) return;
 		this.#visible = visible;
 		this.invalidate();
+	}
+
+	/** Proxy for the same reason as {@link setExpanded}: wrappers hide transcript children from traversal. */
+	setToolOutputDetailsHidden(hidden: boolean): void {
+		for (const child of this.children) {
+			if (supportsToolOutputDetails(child)) child.setToolOutputDetailsHidden(hidden);
+		}
 	}
 
 	/**

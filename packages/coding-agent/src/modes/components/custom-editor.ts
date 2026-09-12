@@ -34,6 +34,7 @@ type ConfigurableEditorAction = Extract<
 	| "app.exit"
 	| "app.suspend"
 	| "app.display.reset"
+	| "app.display.toggleDetail"
 	| "app.thinking.cycle"
 	| "app.model.cycleForward"
 	| "app.model.cycleBackward"
@@ -56,6 +57,7 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.exit": ["ctrl+d"],
 	"app.suspend": ["ctrl+z"],
 	"app.display.reset": ["alt+l"],
+	"app.display.toggleDetail": [],
 	"app.thinking.cycle": ["shift+tab"],
 	"app.model.cycleForward": ["ctrl+p"],
 	"app.model.cycleBackward": ["shift+ctrl+p"],
@@ -739,6 +741,8 @@ export class CustomEditor extends Editor {
 	onSelectModel?: () => void;
 	onToggleToolActivity?: () => void;
 	onToggleThinking?: () => void;
+	/** Called when the configured thinking + tool-output-details toggle is pressed. */
+	onToggleDetail?: () => void;
 	onExternalEditor?: () => void;
 	onHistorySearch?: () => void;
 	onSuspend?: () => void;
@@ -1091,6 +1095,12 @@ export class CustomEditor extends Editor {
 			// Intercept configured thinking block visibility toggle
 			if (this.#matchesAction(canonical, "app.thinking.toggle") && this.onToggleThinking) {
 				this.onToggleThinking();
+				return;
+			}
+
+			// Intercept configured thinking + tool output details toggle
+			if (this.#matchesAction(canonical, "app.display.toggleDetail") && this.onToggleDetail) {
+				this.onToggleDetail();
 				return;
 			}
 

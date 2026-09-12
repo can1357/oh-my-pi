@@ -109,3 +109,97 @@ describe("InputController tool activity visibility", () => {
 		expect(setToolActivityVisible).toHaveBeenLastCalledWith(true);
 	});
 });
+
+describe("InputController assistant detail toggle", () => {
+	function createContext(overrides: Record<string, unknown> = {}) {
+		const set = vi.fn();
+		const resetStableEmission = vi.fn();
+		const setToolOutputDetailsHidden = vi.fn();
+		const resetDisplay = vi.fn();
+		const showStatus = vi.fn();
+		const assistant = new AssistantMessageComponent();
+		const setHideThinkingBlock = vi.spyOn(assistant, "setHideThinkingBlock");
+		const ctx = {
+			hideToolActivity: false,
+			hideThinkingBlock: false,
+			hideToolOutputDetails: false,
+			hasDisplayableThinkingContent: false,
+			toolOutputExpanded: false,
+			settings: { set },
+			session: { agent: { hideThinkingSummary: false }, thinkingLevel: "high" },
+			chatContainer: { children: [assistant], setToolOutputDetailsHidden, resetStableEmission },
+			streamingComponent: undefined,
+			streamingMessage: undefined,
+			keybindings: { getDisplayString: vi.fn(() => "Ctrl+H") },
+			showStatus,
+			ui: { resetDisplay, requestRender: vi.fn(), clearInlineImages: vi.fn() },
+			...overrides,
+		} as unknown as InteractiveModeContext;
+		return {
+			ctx,
+			set,
+			resetStableEmission,
+			setToolOutputDetailsHidden,
+			resetDisplay,
+			showStatus,
+			setHideThinkingBlock,
+		};
+	}
+
+	it("folds thinking and tool output on one gesture, then restores both", () => {
+		const {
+			ctx,
+			set,
+			resetStableEmission,
+			setToolOutputDetailsHidden,
+			resetDisplay,
+			showStatus,
+			setHideThinkingBlock,
+		} = createContext();
+		const controller = new InputController(ctx);
+
+		controller.toggleDetailVisibility();
+
+		expect(ctx.hideThinkingBlock).toBe(true);
+		expect(ctx.hideToolOutputDetails).toBe(true);
+		expect(set).toHaveBeenCalledWith("hideThinkingBlock", true);
+		expect(set).toHaveBeenCalledWith("display.hideToolOutputDetails", true);
+		expect(setHideThinkingBlock).toHaveBeenCalledWith(true);
+		expect(setToolOutputDetailsHidden).toHaveBeenCalledWith(true);
+		// One replay per gesture, not one per axis.
+		expect(resetStableEmission).toHaveBeenCalledTimes(1);
+		expect(resetDisplay).toHaveBeenCalledTimes(1);
+		expect(showStatus).toHaveBeenLastCalledWith("Thinking blocks: hidden · Tool output details: hidden");
+
+		controller.toggleDetailVisibility();
+
+		expect(ctx.hideThinkingBlock).toBe(false);
+		expect(ctx.hideToolOutputDetails).toBe(false);
+		expect(resetDisplay).toHaveBeenCalledTimes(2);
+		expect(showStatus).toHaveBeenLastCalledWith("Thinking blocks: visible · Tool output details: visible");
+	});
+
+	it("still folds tool output when thinking cannot be toggled", () => {
+		const { ctx, set, resetStableEmission, showStatus } = createContext({
+			session: { agent: { hideThinkingSummary: false }, thinkingLevel: "off" },
+		});
+
+		new InputController(ctx).toggleDetailVisibility();
+
+		expect(ctx.hideThinkingBlock).toBe(false);
+		expect(set).not.toHaveBeenCalledWith("hideThinkingBlock", expect.anything());
+		expect(ctx.hideToolOutputDetails).toBe(true);
+		expect(resetStableEmission).toHaveBeenCalledTimes(1);
+		expect(showStatus).toHaveBeenLastCalledWith("Thinking is off · Tool output details: hidden");
+	});
+
+	it("refuses ctrl+o while tool output details are hidden", () => {
+		const { ctx, showStatus } = createContext({ hideToolOutputDetails: true });
+
+		new InputController(ctx).toggleToolOutputExpansion();
+
+		expect(ctx.toolOutputExpanded).toBe(false);
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Tool output details are hidden"));
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Ctrl+H"));
+	});
+});

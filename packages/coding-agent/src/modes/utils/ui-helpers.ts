@@ -915,6 +915,7 @@ export class UiHelpers {
 		const visibleChatContainer = this.ctx.chatContainer;
 		const stagedChatContainer = new TranscriptContainer();
 		stagedChatContainer.setToolActivityVisible(!this.ctx.hideToolActivity);
+		stagedChatContainer.setToolOutputDetailsHidden(this.ctx.hideToolOutputDetails);
 		const preservedChatChildren = options.preserveExistingChat ? [...visibleChatContainer.children] : undefined;
 		const previousTranscriptMessageComponents = this.ctx.transcriptMessageComponents;
 		const previousPendingTools = this.ctx.pendingTools;
