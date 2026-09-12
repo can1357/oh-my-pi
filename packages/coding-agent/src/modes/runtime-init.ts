@@ -183,6 +183,16 @@ export function createExtensionAgentActions(
 		agentsEnsureLive: async (id, agentOptions) => {
 			const parentSessionFile = agentOptions?.parentSessionFile;
 			const scanEligible = parentSessionFile !== undefined && isOwnSessionFile(parentSessionFile);
+			// A live re-check of the same condition above, not a snapshot of it:
+			// `registerPersistedSubagents` below can await filesystem I/O for a
+			// while, and a `/new` or `ctx.switchSession()` completing during
+			// that await moves `getScopeSessionFile()` on without rebuilding
+			// this scope, leaving `scanEligible` stale. Kept as its own
+			// function (rather than re-deriving `scanEligible`) so TypeScript's
+			// aliased-condition narrowing of `parentSessionFile` below still
+			// applies to `scanEligible`'s own definition.
+			const ownsCurrentTranscript = (): boolean =>
+				parentSessionFile !== undefined && isOwnSessionFile(parentSessionFile);
 			// `scopeAgentId` stays the same across a `/new` or
 			// `ctx.switchSession()` transition, so a persisted child registered
 			// from an OLD transcript remains this scope's descendant forever —
@@ -203,9 +213,24 @@ export function createExtensionAgentActions(
 			// transcript can, in which case the scan must still run so this
 			// session's own CURRENT-transcript child can be registered under its
 			// disambiguated key. Only ever scan under a transcript verified to be
-			// this scope's own — see `isOwnSessionFile`.
+			// this scope's own — see `isOwnSessionFile`. `shouldContinue` re-checks
+			// that ownership on every yield point inside the scan, so a session
+			// transition mid-scan stops it from registering (and thus attributing
+			// to this scope) anything more from the now-foreign transcript.
 			if (scanEligible && (!inScope(id) || stale)) {
-				await registerPersistedSubagents(registry, parentSessionFile, { rootParentId: scopeAgentId });
+				await registerPersistedSubagents(registry, parentSessionFile, {
+					rootParentId: scopeAgentId,
+					shouldContinue: ownsCurrentTranscript,
+				});
+			}
+			// Revalidate after the scan: even a scan the predicate above cut
+			// short can leave `scanEligible` true while this scope no longer owns
+			// `parentSessionFile`. Resolving or reviving against it here would
+			// use the NOW-current session's cwd, settings, and artifact manager
+			// (the scoped reviver reads live context, not a snapshot) to reopen
+			// an agent that belongs to the transcript this scope just left.
+			if (scanEligible && !ownsCurrentTranscript()) {
+				throw new Error(`Agent "${id}" is not visible to this session.`);
 			}
 			// Re-resolve preferring a match still backed by the CURRENT transcript
 			// over a stale same-family sibling; fall back to the prior resolution
