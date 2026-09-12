@@ -47,6 +47,12 @@ export interface MCPToolFilterResult {
  *   input carries a class followed by four or more consecutive backslashes —
  *   an infinite loop that no `try`/`catch` can rescue, so a config entry could
  *   pin the event loop instead of degrading to an unmatched entry.
+ *
+ * Entries come from the operator's own config, and a pathological one is
+ * matched with the backtracking an equivalent hand-written regex would have:
+ * a stack of `{*a,*}` alternations over a long non-matching name takes seconds.
+ * That cost is the engine's (picomatch's own matcher is slower still) and
+ * unchanged by this module; the patterns a real config uses cost microseconds.
  */
 const PARSE_OPTIONS = {
 	dot: true,
