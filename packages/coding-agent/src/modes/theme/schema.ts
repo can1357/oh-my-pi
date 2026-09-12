@@ -18,6 +18,7 @@ const themeColorsSchema = type({
 	muted: "string | number",
 	dim: "string | number",
 	text: "string | number",
+	"assistantMessageText?": "string | number",
 	thinkingText: "string | number",
 	selectedBg: "string | number",
 	userMessageBg: "string | number",
@@ -129,6 +130,7 @@ export type ThemeColor =
 	| "muted"
 	| "dim"
 	| "text"
+	| "assistantMessageText"
 	| "thinkingText"
 	| "userMessageText"
 	| "customMessageText"
@@ -192,6 +194,7 @@ const THEME_COLOR_RECORD = {
 	muted: true,
 	dim: true,
 	text: true,
+	assistantMessageText: true,
 	thinkingText: true,
 	userMessageText: true,
 	customMessageText: true,
@@ -245,6 +248,16 @@ const THEME_COLOR_RECORD = {
 } satisfies Record<ThemeColor, true>;
 
 const VALID_THEME_COLORS: ReadonlySet<string> = new Set(Object.keys(THEME_COLOR_RECORD));
+
+/**
+ * Tokens a theme is allowed to omit. They resolve to the terminal default
+ * foreground, so `Theme.fg()` stays total for callers that paint a token a theme
+ * never declared (e.g. a `modelTags.<role>.color` reference) while
+ * `Theme.hasColor()` still reports them as unset.
+ */
+export const OPTIONAL_THEME_COLOR_RECORD = {
+	assistantMessageText: true,
+} satisfies Partial<Record<ThemeColor, true>>;
 
 /** Check if a string is a valid ThemeColor value */
 export function isValidThemeColor(color: string): color is ThemeColor {
