@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { versionSentinelFor } from "../native/loader-state.js";
+import { containsVersionSentinel, versionSentinelFor } from "../native/loader-state.js";
 
 const outputPath = path.join(import.meta.dir, "../native/embedded-addon.js");
 const packageJsonPath = path.join(import.meta.dir, "../package.json");
@@ -113,7 +113,7 @@ export async function embedNativeAddon({
 	const versionSentinel = versionSentinelFor(version);
 	for (const addon of available) {
 		const bytes = await fs.readFile(addon.path);
-		if (!bytes.includes(versionSentinel)) {
+		if (!containsVersionSentinel(bytes, versionSentinel)) {
 			throw new Error(
 				`Native addon ${addon.path} does not contain the @oh-my-pi/pi-natives@${version} version sentinel ` +
 					`\`${versionSentinel}\`. Rebuild it or fetch @oh-my-pi/pi-natives-${platformTag}@${version} before embedding.`,

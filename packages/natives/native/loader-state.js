@@ -86,6 +86,28 @@ export function versionSentinelFor(packageVersion) {
 }
 
 /**
+ * Check for an exact version sentinel rather than a longer sentinel with the
+ * expected value as its prefix.
+ * @param {Buffer} bytes
+ * @param {string} expected
+ * @returns {boolean}
+ */
+export function containsVersionSentinel(bytes, expected) {
+	if (expected.length === 0) return false;
+	let offset = 0;
+	while (offset < bytes.length) {
+		const index = bytes.indexOf(expected, offset);
+		if (index === -1) return false;
+		const next = bytes[index + expected.length];
+		const isIdentifierByte =
+			next === 95 || (next >= 48 && next <= 57) || (next >= 65 && next <= 90) || (next >= 97 && next <= 122);
+		if (!isIdentifierByte) return true;
+		offset = index + expected.length;
+	}
+	return false;
+}
+
+/**
  * @param {{
  *   embeddedAddon: { platformTag: string; version: string; files: unknown[] } | null | undefined;
  *   env: Record<string, string | undefined>;
@@ -712,7 +734,7 @@ export function validateLoadedBindings(ctx, bindings, candidate) {
 	// the current sentinel; otherwise a restart would simply reload stale disk.
 	let diskHasExpectedSentinel = false;
 	try {
-		diskHasExpectedSentinel = fs.readFileSync(candidate).includes(ctx.versionSentinelExport);
+		diskHasExpectedSentinel = containsVersionSentinel(fs.readFileSync(candidate), ctx.versionSentinelExport);
 	} catch {
 		// The successful require above normally guarantees readability. If the
 		// file disappears concurrently, retain the safe reinstall diagnosis.
