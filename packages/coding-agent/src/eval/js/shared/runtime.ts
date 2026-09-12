@@ -122,6 +122,22 @@ export type ShadowInitialGlobals = Readonly<{
 	JSON: boolean;
 	"JSON.stringify": boolean;
 	"Array.prototype.join": boolean;
+	/**
+	 * Whether `Object.prototype.toString` still has its original identity.
+	 * Implicit string coercion (templates, `+`) dispatches it for objects
+	 * (including arrays containing objects); a retained replacement changes
+	 * authoritative paths while leaving no snapshot trace. Absent only for
+	 * hand-built snapshots, where the intrinsic is assumed intact.
+	 */
+	"Object.prototype.toString"?: boolean;
+	/**
+	 * Whether the prelude tool bridge dispatcher still has its installed
+	 * identity. The proxy resolves `__omp_call_tool__` per call, so the flag
+	 * must track this binding; it also joins the snapshot digest, invalidating
+	 * plans if the installation ever changes under them. Absent only for
+	 * hand-built snapshots, where the bridge is assumed intact.
+	 */
+	__omp_call_tool__?: boolean;
 }>;
 
 export type ShadowSnapshot = Readonly<{
@@ -297,7 +313,9 @@ export class JsRuntime {
 		JSON: globalThis.JSON,
 		stringify: globalThis.JSON.stringify,
 		arrayJoin: Array.prototype.join,
+		objectToString: Object.prototype.toString,
 	};
+	#installedCallTool: unknown;
 
 	snapshotUserGlobals(): ShadowSnapshot {
 		this.#activateGlobals("snapshot user globals");
@@ -324,6 +342,8 @@ export class JsRuntime {
 				currentJSON === this.#initialIntrinsics.JSON &&
 				currentJSON.stringify === this.#initialIntrinsics.stringify,
 			"Array.prototype.join": Array.prototype.join === this.#initialIntrinsics.arrayJoin,
+			"Object.prototype.toString": Object.prototype.toString === this.#initialIntrinsics.objectToString,
+			__omp_call_tool__: (globalThis as Record<string, unknown>).__omp_call_tool__ === this.#installedCallTool,
 		};
 		return Object.freeze({
 			revision: this.#namespaceRevision,
@@ -638,7 +658,10 @@ export class JsRuntime {
 					},
 				});
 				const tableConsole = new Console({ stdout: stream, colorMode: false });
-				(tableConsole.table as (...a: unknown[]) => void)(...args);
+				// `table` is missing from some @types/node Console shapes, but the
+				// Node runtime always provides it.
+				const tableCapable = tableConsole as unknown as { table: (...args: unknown[]) => void };
+				tableCapable.table(...args);
 				hooks.onText(buffer.endsWith("\n") ? buffer : `${buffer}\n`);
 			},
 			__omp_display__: (value: unknown) => this.displayValue(value),
@@ -676,6 +699,14 @@ export class JsRuntime {
 		// onto globalThis. Must run after helpers are in place.
 		indirectEval(JAVASCRIPT_PRELUDE_SOURCE);
 		for (const key of allGlobalKeys) recordGlobalValue(key, this.#globalOwner);
+		// Capture the installed bridge dispatcher for the snapshot identity
+		// flag below. The prelude tool proxy resolves `__omp_call_tool__` per
+		// call, so the flag must track this binding. (Steady-state retained
+		// replacements self-heal: owned-global activation restores the recorded
+		// value before any observation. The `tool` binding itself needs no
+		// flag: the prelude declares it as a lexical const, which shadows any
+		// `globalThis.tool` replacement for bare references.)
+		this.#installedCallTool = (globalThis as Record<string, unknown>).__omp_call_tool__;
 		RUN_HOOK_RESOLVERS.add(this.#runHookResolver);
 		patchStdioOnce();
 	}

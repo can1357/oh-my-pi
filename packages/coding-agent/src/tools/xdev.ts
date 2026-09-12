@@ -265,23 +265,29 @@ export function resolveXdevTool(state: XdevState, name: string): Tool | undefine
 }
 
 /**
- * Resolve a mounted tool for top-level fallback execution.
- *
- * A model may reach a mounted device by emitting a direct tool call instead of
- * a `write`; the fallback in `sdk.ts` routes that here. Names arrive both bare
- * (`github`) and carrying the very `xd://` prefix the device docs advertise
- * (`xd://github`) — strip it so both spellings resolve to the same device.
+ * Resolve a mounted tool by name. Presentation-only: `xd://` docs and renderer
+ * lookup ask for names they already hold in canonical form.
  */
 export function resolveMountedXdevTool(state: XdevState, name: string): Tool | undefined {
 	const canonicalName = stripXdUrlPrefix(name);
 	return state.mountedNames.has(canonicalName) ? state.tools.get(canonicalName) : undefined;
 }
 
-/** Resolve a mounted tool with its execution-only permission decorator. */
+/**
+ * Resolve a mounted tool with its execution-only permission decorator.
+ *
+ * Mounted-only, matching {@link resolveMountedXdevTool}, and a published export
+ * under `@oh-my-pi/pi-coding-agent/tools/xdev`, so its semantics must not
+ * drift. `sdk.ts` composes this with the calling agent's advertised tools to
+ * recover a Claude Code-spelled MCP name: the union has to be resolved in one
+ * pass for the ambiguity rule to hold, so that composition lives with the
+ * caller that knows both presentation sets rather than here.
+ */
 export function resolveMountedXdevExecutable(state: XdevState, name: string): Tool | undefined {
 	const tool = resolveMountedXdevTool(state, name);
 	return tool && state.decorateExecution ? state.decorateExecution(tool) : tool;
 }
+
 /** Mounted tools in presentation order, resolved from the canonical map. */
 export function listXdevTools(state: XdevState): Tool[] {
 	return [...state.mountedNames].flatMap(name => {
