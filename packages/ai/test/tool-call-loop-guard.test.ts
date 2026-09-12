@@ -280,14 +280,24 @@ describe("ToolCallLoopGuard multi-call turns", () => {
 		expect(guard.recordTurn(turn(batch()))).toBeNull();
 	});
 
-	test("resets when every call in a multi-call turn is exempt", () => {
+	test("does not reset when every call in a multi-call turn is exempt", () => {
 		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["read"] });
 		const batch = () => [toolCall("bash", { command: "echo a" }), toolCall("read", { path: "a.ts" })];
 		expect(guard.recordTurn(turn(batch()))).toBeNull();
 		expect(
 			guard.recordTurn(turn([toolCall("read", { path: "x.ts" }), toolCall("read", { path: "y.ts" })])),
 		).toBeNull();
-		expect(guard.recordTurn(turn(batch()))).toBeNull();
+		expect(guard.recordTurn(turn(batch()))).toMatchObject({ toolName: "bash", count: 2 });
+	});
+
+	test("does not reset consecutive counter when an exempt polling turn occurs between identical turns", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["hub"] });
+		expect(guard.recordTurn(turn([toolCall("bash", { command: "pytest" })]))).toBeNull();
+		expect(guard.recordTurn(turn([toolCall("hub", { op: "wait" })]))).toBeNull();
+		expect(guard.recordTurn(turn([toolCall("bash", { command: "pytest" })]))).toMatchObject({
+			toolName: "bash",
+			count: 2,
+		});
 	});
 
 	test("counts a mixed batch and reports the first non-exempt call", () => {
