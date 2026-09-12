@@ -58,13 +58,15 @@ function createController(options: { toolsAfterReconnect?: boolean } = {}) {
 		})),
 		getTools: vi.fn(() => (seeded && toolsFor ? serverTools(toolsFor) : [])),
 		getConnectionStatus: vi.fn(() => "disconnected"),
-		reconnectServer: vi.fn(async (name: string) => {
-			if (options.toolsAfterReconnect !== false) {
-				seeded = true;
-				toolsFor = name;
-			}
-			return {};
-		}),
+		reconnectServer: vi.fn(
+			async (name: string, _options?: { manual?: boolean }): Promise<Record<string, never> | null> => {
+				if (options.toolsAfterReconnect !== false) {
+					seeded = true;
+					toolsFor = name;
+				}
+				return {};
+			},
+		),
 		getSource: vi.fn(() => undefined),
 	};
 	const controller = new MCPCommandController({
@@ -132,7 +134,7 @@ describe("/mcp test seeds first-time lazy servers (PR #9793 review)", () => {
 
 		await controller.handle("/mcp test lazysrv");
 
-		expect(mcpManager.reconnectServer).toHaveBeenCalledWith("lazysrv");
+		expect(mcpManager.reconnectServer).toHaveBeenCalledWith("lazysrv", { manual: true });
 		// The seeded tools reach the session even though the manager still
 		// reports the lazy server itself as disconnected.
 		expect(refreshMCPTools).toHaveBeenCalledWith([{ name: "fixture_tool", mcpServerName: "lazysrv" }]);
@@ -167,7 +169,7 @@ describe("/mcp test seeds first-time lazy servers (PR #9793 review)", () => {
 
 		await controller.handle("/mcp test lazysrv");
 
-		expect(mcpManager.reconnectServer).toHaveBeenCalledWith("lazysrv");
+		expect(mcpManager.reconnectServer).toHaveBeenCalledWith("lazysrv", { manual: true });
 		expect(refreshMCPTools).toHaveBeenCalledWith([{ name: "fresh_tool", mcpServerName: "lazysrv" }]);
 	});
 
@@ -192,5 +194,27 @@ describe("/mcp test seeds first-time lazy servers (PR #9793 review)", () => {
 		await controller.handle("/mcp test lazysrv");
 
 		expect(order).toEqual(["disconnect", "reconnect"]);
+	});
+
+	// PR #9793 review (Codex, mcp-command-controller.ts:1330): a server whose
+	// automatic reconnects had already tripped the crash-burst breaker (see
+	// `#tripReconnectBreaker` in `manager.ts`) must still seed through an
+	// explicit `/mcp test` — `reconnectServer` returns `null` under an open
+	// breaker unless `options.manual` resets it, exactly like `/mcp reconnect`.
+	test("a /mcp test seeds through an open reconnect breaker via manual: true", async () => {
+		await writeProjectConfig(projectDir, {
+			lazysrv: { type: "stdio", command: "lazy-cmd", lazy: true },
+		});
+		const { controller, mcpManager, refreshMCPTools } = createController();
+		mcpManager.reconnectServer.mockImplementation(async (name: string, options?: { manual?: boolean }) => {
+			if (!options?.manual) return null;
+			mcpManager.getTools.mockReturnValue([{ name: "fixture_tool", mcpServerName: name }]);
+			return {};
+		});
+
+		await controller.handle("/mcp test lazysrv");
+
+		expect(mcpManager.reconnectServer).toHaveBeenCalledWith("lazysrv", { manual: true });
+		expect(refreshMCPTools).toHaveBeenCalledWith([{ name: "fixture_tool", mcpServerName: "lazysrv" }]);
 	});
 });

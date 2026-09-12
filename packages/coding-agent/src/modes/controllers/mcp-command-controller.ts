@@ -1327,7 +1327,13 @@ export class MCPCommandController {
 		// rewrites the cache for future startups.
 		if (config.lazy) {
 			try {
-				await this.ctx.mcpManager.reconnectServer(name);
+				// `/mcp test` is an explicit user-driven retry, exactly like
+				// `/mcp reconnect` — it must reset the crash-burst window too, or
+				// a server that already tripped the reconnect breaker reports a
+				// successful test while this seeding call silently no-ops
+				// (`reconnectServer` returns `null` under an open breaker) and
+				// the server stays cache-less and tool-less.
+				await this.ctx.mcpManager.reconnectServer(name, { manual: true });
 			} catch {
 				// The direct test connection succeeded but the manager-side seed
 				// failed; keep the test's own verdict and leave seeding to
