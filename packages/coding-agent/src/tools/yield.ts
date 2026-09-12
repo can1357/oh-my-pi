@@ -358,6 +358,22 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		this.#parameters = parameters;
 	}
 
+	/**
+	 * Clear per-run accumulator state before a kept-alive session continues with a
+	 * new monitored turn. The tool instance is stored once in the session's tool
+	 * registry and reused across follow-up turns (`runSubagentFollowUpTurn`), so a
+	 * prior run's incremental-section flag and retry counters would otherwise leak
+	 * forward: a later thinking-only `{type:"result"}` would skip the empty-last-
+	 * turn and schema guards (which require `!#hasIncrementalSections`) and fail
+	 * the run post-mortem. Workpool submission state resets separately via the
+	 * batch key in {@link #workPoolItems}.
+	 */
+	resetTurnState(): void {
+		this.#hasIncrementalSections = false;
+		this.#schemaValidationFailures = 0;
+		this.#emptyResultFailures = 0;
+	}
+
 	#workPoolItems(): readonly WorkPoolYieldItem[] {
 		const items = this.#session.getWorkPoolYieldItems?.() ?? [];
 		const key = items.map(item => `${item.index}:${item.id}`).join("\0");
@@ -454,6 +470,44 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				"This task requires structured output matching the declared schema; a last-turn result cannot satisfy it. " +
 					`Submit the full object: {"data":<object matching the schema>}.`,
 			);
+		}
+		// A data-less `useLastTurn` yield resolves to the last assistant turn's
+		// text. A thinking-only turn carries none, so accepting an incremental
+		// call records an empty section and accepting a terminal call with no
+		// accumulated sections records an empty result. Finalization would fail
+		// either run post-mortem with SUBAGENT_WARNING_NULL_YIELD, after the child
+		// can no longer correct it. Reject at the boundary so the reminder ladder
+		// re-prompts for `data`. A terminal data-less yield after valid incremental
+		// sections still closes that flow without reading last-turn text.
+		if (
+			status === "success" &&
+			useLastTurn &&
+			(isIncremental || !this.#hasIncrementalSections) &&
+			this.#session.getLastAssistantText !== undefined
+		) {
+			const lastTurnText = this.#session.getLastAssistantText();
+			if (lastTurnText === undefined || lastTurnText.trim().length === 0) {
+				this.#emptyResultFailures++;
+				if (this.#emptyResultFailures > MAX_EMPTY_RESULT_RETRIES) {
+					const attemptCount = this.#emptyResultFailures;
+					this.#emptyResultFailures = 0;
+					const error = `yield resolved to an empty last-turn result after ${attemptCount} consecutive attempt(s); aborting child instead of retrying forever. ${YIELD_FORMAT_HINT}`;
+					return {
+						content: [{ type: "text", text: `Task aborted: ${error}` }],
+						details: {
+							data: undefined,
+							status: "aborted",
+							error,
+							type: yieldType,
+						},
+					};
+				}
+				const remaining = MAX_EMPTY_RESULT_RETRIES - this.#emptyResultFailures;
+				throw new Error(
+					`yield used the last assistant turn as the result, but that turn contains no text (thinking only). ` +
+						`Put your result in \`data\`: ${YIELD_FORMAT_HINT} Empty last-turn result retries remaining before abort: ${remaining}.`,
+				);
+			}
 		}
 		if (status === "success" && !useLastTurn) {
 			const validateData = (value: unknown): JsonSchemaValidationResult | undefined =>
@@ -563,6 +617,21 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		}
 		return undefined;
 	}
+}
+interface TurnStateResettable {
+	resetTurnState(): void;
+}
+
+function canResetTurnState(tool: AgentTool): tool is AgentTool & TurnStateResettable {
+	return "resetTurnState" in tool && typeof tool.resetTurnState === "function";
+}
+
+/**
+ * Reset per-run yield state through either a native tool or an
+ * `ExtensionToolWrapper` proxy.
+ */
+export function resetYieldTurnState(tool: AgentTool | undefined): void {
+	if (tool && canResetTurnState(tool)) tool.resetTurnState();
 }
 
 // Register subprocess tool handler for extraction + termination.

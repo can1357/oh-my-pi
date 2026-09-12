@@ -63,6 +63,7 @@ import { DEFAULT_HUB_LIST_LIMIT } from "../tools/hub/types";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
 import { ToolAbortError } from "../tools/tool-errors";
+import { resetYieldTurnState } from "../tools/yield";
 import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { buildNamedToolChoice } from "../utils/tool-choice";
@@ -2575,6 +2576,10 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const index = options.index ?? 0;
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
 	session.setIrcWakeTurnObserver(records => {
+		// Autonomous IRC wake turns reuse the session's YieldTool just like
+		// runSubagentFollowUpTurn; clear the prior run's incremental-section flag
+		// and retry counters so this wake turn's guards see only its own state.
+		resetYieldTurnState(session.getToolByName("yield"));
 		const ircTask =
 			records
 				.map(record => {
@@ -2905,6 +2910,10 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		session = live;
 		await acquireOwnership();
 	}
+	// A kept-alive session reuses its YieldTool across turns; clear the prior
+	// run's incremental-section flag and retry counters so this turn's guards
+	// evaluate against its own state, not stale accumulators.
+	resetYieldTurnState(session.getToolByName("yield"));
 	const ref = AgentRegistry.global().get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
 
@@ -2962,6 +2971,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 			} else {
 				await session.waitForIdle();
 			}
+			resetYieldTurnState(session.getToolByName("yield"));
 			await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
 			attemptUnsubscribe = monitor.attach(session);
 		});
