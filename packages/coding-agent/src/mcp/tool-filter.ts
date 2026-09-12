@@ -126,6 +126,17 @@ function findAlternationEnd(pattern: string, open: number): number {
 			i++;
 			continue;
 		}
+		if (ch === "[") {
+			// A class is opaque here: its members are not braces or commas, so
+			// `{[}],a}` alternates the class `[}]` with `a` rather than ending at
+			// the class's own `}`. An unclosed class runs to the end of the
+			// pattern, where no alternation can close — the caller then treats the
+			// brace as literal, matching how the class itself degrades.
+			const end = findClassEnd(pattern, i);
+			if (end < 0) return -1;
+			i = end;
+			continue;
+		}
 		if (ch === "{") depth++;
 		else if (ch === "}") {
 			depth--;

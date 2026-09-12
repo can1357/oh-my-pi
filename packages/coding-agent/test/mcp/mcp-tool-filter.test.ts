@@ -230,6 +230,9 @@ test("braces outside `{a,b}` alternation are literal", () => {
 	expect(run(["a", "b", "{a,b}"], ["{a,b}"]).allowed).toEqual(["a", "b"]);
 	expect(run(["xay", "xby"], ["x{a,b}y"]).allowed).toEqual(["xay", "xby"]);
 	expect(run(["a", "b", "c"], ["{a,{b,c}}"]).allowed).toEqual(["a", "b", "c"]);
+	// A class is opaque to the brace scan too: `{[}],a}` alternates the class
+	// `[}]` with `a`, so the class's own `}` must not be read as the terminator.
+	expect(run(["}", "b", "a", "x"], ["{[}b],a}"]).allowed).toEqual(["}", "b", "a"]);
 });
 
 test("POSIX bracket classes expand the way picomatch expands them", () => {
