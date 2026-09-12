@@ -10,6 +10,7 @@ import {
 	projectBankSegment,
 } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
+import * as vcsModule from "@oh-my-pi/pi-natives/vcs";
 
 // Isolate `git` invocations in this file from the host's global config —
 // `~/.gitconfig` commit signing or template hooks would otherwise turn the
@@ -150,6 +151,7 @@ describe("computeMnemopiBankScope (#2412)", () => {
 		expect(a).not.toBe(b);
 	});
 
+
 	it("per-project-tagged opens both the project bank and the shared default", () => {
 		const scope = computeMnemopiBankScope(undefined, "/projects/repo", "per-project-tagged");
 		expect(scope.retainBank).toBe(scope.bank);
@@ -162,6 +164,22 @@ describe("computeMnemopiBankScope (#2412)", () => {
 		const there = computeMnemopiBankScope(undefined, "/elsewhere", "global");
 		expect(here).toEqual(there);
 		expect(here.bank).toBe("default");
+	});
+
+	// Regression: `global` never reads the derived project bank, but the
+	// project root used to be resolved unconditionally before the scoping
+	// switch, so `global` sessions paid for — and could fail on — VCS
+	// filesystem resolution whose result they never use (e.g. a JJ workspace
+	// whose `.jj/repo` pointer is transiently unreadable while being
+	// rewritten would throw from inside `vcs.repo()`).
+	it("never invokes VCS resolution for global scoping", () => {
+		const repoSpy = spyOn(vcsModule, "repo");
+		try {
+			computeMnemopiBankScope(undefined, "/projects/here", "global");
+			expect(repoSpy).not.toHaveBeenCalled();
+		} finally {
+			repoSpy.mockRestore();
+		}
 	});
 });
 
