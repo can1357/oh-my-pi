@@ -10,6 +10,7 @@ import {
 	stripWindowsExtendedLengthPathPrefix,
 	workerHostEntry,
 } from "@oh-my-pi/pi-utils";
+import { stripGitRepoLocationEnv } from "@oh-my-pi/pi-utils/env";
 import type { Subprocess } from "bun";
 
 /**
@@ -156,6 +157,9 @@ export function workerEnvFromParent(overlay?: Record<string, string>): Record<st
 		const value = base[key];
 		if (typeof value === "string") merged[key] = value;
 	}
+	// Inherited repo-location overrides must not reach a worker or the PTY
+	// daemons it hosts (issue #11082); an explicit overlay still wins below.
+	stripGitRepoLocationEnv(merged);
 	if (overlay) {
 		for (const key in overlay) merged[key] = overlay[key];
 	}

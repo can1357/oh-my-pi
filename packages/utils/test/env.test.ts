@@ -4,10 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	$envExact,
+	filterChildShellEnv,
 	filterProcessEnv,
 	getDbBusyTimeoutMs,
 	parseEnvFile,
 	setInteractiveHost,
+	stripGitRepoLocationEnv,
 } from "@oh-my-pi/pi-utils/env";
 
 const tempDirs: string[] = [];
@@ -199,6 +201,28 @@ describe("filterChildShellEnv", () => {
 		expect(JSON.parse(stdout)).toEqual({ UNCHANGED: "parent-value" });
 	});
 
+	it("drops inherited git repo-location overrides", () => {
+		const cwd = path.dirname(writeTempEnv(""));
+		// A bash call with `cwd` in a secondary worktree must not mutate the
+		// primary one: forwarding the agent's own repo-location variables makes
+		// child `git` ignore the command's cwd (issue #11082).
+		expect(
+			filterChildShellEnv(
+				{
+					GIT_DIR: "/primary/.git",
+					GIT_COMMON_DIR: "/primary/.git",
+					GIT_WORK_TREE: "/primary",
+					GIT_INDEX_FILE: "/primary/.git/index",
+					GIT_OBJECT_DIRECTORY: "/primary/.git/objects",
+					GIT_ALTERNATE_OBJECT_DIRECTORIES: "/primary/.git/objects",
+					GIT_EDITOR: "true",
+					GIT_AUTHOR_NAME: "Agent",
+				},
+				cwd,
+			),
+		).toEqual({ GIT_EDITOR: "true", GIT_AUTHOR_NAME: "Agent" });
+	});
+
 	it("uses the launch mode when dotenv changes NODE_ENV", async () => {
 		const cwd = path.dirname(writeTempEnv("NODE_ENV=production\n"));
 		fs.writeFileSync(
@@ -265,6 +289,20 @@ describe("filterChildShellEnv", () => {
 			expect(JSON.parse(stdout)).toEqual({ UNCHANGED: "parent-value" });
 		},
 	);
+});
+
+describe("stripGitRepoLocationEnv", () => {
+	it("matches case-insensitively on win32 and exactly on POSIX", () => {
+		// Windows env lookups are case-insensitive, so a `git_dir` block binds
+		// there; POSIX names are case-sensitive and must not be over-stripped.
+		const win32Env: Record<string, string> = { GIT_DIR: "a", git_dir: "b", GIT_WORK_TREE: "c", KEEP: "d" };
+		stripGitRepoLocationEnv(win32Env, "win32");
+		expect(win32Env).toEqual({ KEEP: "d" });
+
+		const posixEnv: Record<string, string> = { GIT_DIR: "a", git_dir: "b", KEEP: "d" };
+		stripGitRepoLocationEnv(posixEnv, "linux");
+		expect(posixEnv).toEqual({ git_dir: "b", KEEP: "d" });
+	});
 });
 
 describe("isBunTestRuntime", () => {
