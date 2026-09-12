@@ -113,7 +113,7 @@ function compilePattern(pattern: string): ToolMatcher {
 		// spell two escaped characters, and a backslash is never part of a
 		// sanitized name anyway.
 		matcher = () => false;
-	} else if (/[*?[\]{}\\]/.test(pattern)) {
+	} else if (/[*?[\]{}\\|()]/.test(pattern)) {
 		try {
 			// picomatch's own matcher factory; the `picomatch()` wrapper is
 			// avoided for its `input === glob` shortcut, and path decorations
@@ -133,10 +133,10 @@ function compilePattern(pattern: string): ToolMatcher {
 			matcher = () => false;
 		}
 	} else {
-		// A pattern with no glob metacharacter addresses its own spelling —
-		// and the sanitized spelling of both sides, so a name holding a
-		// metacharacter still matches the pattern written for its look.
-		matcher = (name: string) => sanitizeToolName(name) === sanitizeToolName(pattern);
+		// A pattern with no glob metacharacter is exact on the raw name —
+		// `read_v1` stays `read_v1`, never `read_v` — and the sanitized
+		// spelling is only a second domain for names outside the alphabet.
+		matcher = (name: string) => name === pattern || sanitizeToolName(name) === sanitizeToolName(pattern);
 	}
 
 	compiledPatterns.set(pattern, matcher);

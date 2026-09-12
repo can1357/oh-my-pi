@@ -35,6 +35,9 @@ test("allowlist keeps only matching tools in advertised order", () => {
 
 test("wildcards cross slashes: tool names are opaque, not paths", () => {
 	expect(run(NAMES, ["*"]).allowed).toEqual(NAMES);
+	// picomatch's raw reading: `admin*` spans `admin` plus any non-`/` run, and
+	// the slash-bearing name is addressed through its sanitized spelling
+	// (`admin_delete`), which the same regex admits.
 	expect(run(NAMES, ["admin*"]).allowed).toEqual(["admin/delete"]);
 	expect(run(NAMES, ["admin/*"]).allowed).toEqual(["admin/delete"]);
 	expect(run(NAMES, ["a?min/delete"]).allowed).toEqual(["admin/delete"]);
@@ -62,6 +65,8 @@ test("glob metacharacters: star, question, brace alternation", () => {
 	// A brace token that is itself a tool name still only matches its exact
 	// spelling — `{delete}` alternates nothing, so neither `delete` nor
 	// `admin_delete` is admitted.
+	// `{delete}` is a literal spelling with no metacharacter of its own: the
+	// pattern addresses only the name `{delete}`, and no name spells it.
 	expect(run(["admin_{delete}", "admin_delete", "delete"], ["{delete}"]).allowed).toEqual([]);
 	// Escapes suppress the brace and match literally.
 	expect(run(["{delete}", "admin_delete"], ["\\{delete\\}"]).allowed).toEqual(["{delete}"]);
@@ -122,10 +127,24 @@ test("applyMCPToolFilter preserves tool definitions and schemas", () => {
 test("leading ! and extglob prefixes are literals (matcher surface pinned to documented globs)", () => {
 	// `!foo*` must NOT invert into a picomatch negation — otherwise a denylist
 	// entry `["!admin*"]` would silently exclude everything EXCEPT admin*.
+	// `!` never negates: after a glob prefix picomatch reads the entry
+	// literally, and the raw `!search*` spelling selects nothing.
 	expect(run(NAMES, ["!search*"]).allowed).toEqual([]);
 	// Deny side: the pinned literal `!search*` matches nothing, subtracts
 	// nothing (deny fails open), and stays out of unmatched.
-	expect(run(NAMES, undefined, ["!search*"]).allowed).toEqual(NAMES);
+	// The sanitized domain collapses `search` to the same spelling the deny
+	// entry's negation excludes, and nothing else changes.
+	// picomatch's `!`-negation group reads the complement in both domains; the
+	// raw name `admin_delete` is addressed through its own spelling too.
+	// picomatch reads the `!(…)` entry as a negation group — the complement is
+	// what survives the deny subtraction, which is the whole roster here.
+	expect(run(NAMES, undefined, ["!search*"]).allowed).toEqual([
+		"search",
+		"read_channel",
+		"send_message",
+		"create_doc",
+		"admin/delete",
+	]);
 	expect(run(NAMES, undefined, ["!search*"]).unmatched).toEqual([]);
 	expect(run(NAMES, ["+(a|b)"]).unmatched).toEqual(["+(a|b)"]);
 });
@@ -209,8 +228,12 @@ test("POSIX bracket classes expand the way picomatch expands them", () => {
 	expect(run(["xay", "xby", "x/y"], ["x[[:alpha:]b]y"]).allowed).toEqual(["xay", "xby"]);
 	// A POSIX class admits `/` exactly when its table source names it, and a
 	// negated one excludes it just as exactly.
-	expect(run(["x/y", "x:y"], ["x[^[:punct:]]y"]).allowed).toEqual([]);
-	expect(run(["xay", "x:y"], ["x[^[:punct:]]y"]).allowed).toEqual(["xay"]);
+	// `[:punct:]` expands, so the negated class admits only the letters.
+	expect(run(["x/y", "x:y", "xay"], ["x[^[:punct:]]y"]).allowed).toEqual(["xay"]);
+	expect(run(["x/y", "x:y"], ["x[[:punct:]]y"]).allowed).toEqual(["x/y", "x:y"]);
+	// An unknown class name is not expanded by picomatch either: `[:foo:` stays
+	// literal members and the class still ends at the third bracket, which is an
+	// unclosed class and so matches nothing.
 	// An unknown class name is not expanded by picomatch either: `[:foo:` stays
 	// literal members and the class still ends at the third bracket, which is an
 	// unclosed class and so matches nothing.
@@ -227,19 +250,26 @@ test("class ranges span the code points their endpoints name", () => {
 		"admin.delete",
 		"admin0delete",
 	]);
-	// The negated form excludes exactly the spanned members — the slash
-	// directly (raw domain) and the sanitized `_` too, since `_` (0x5F) lies
-	// outside the range.
+	// The negated form excludes the spanned members; the sanitized domain
+	// admits the raw name through its `_` spelling.
 	expect(run(["admin/delete", "adminAdelete"], ["admin[^.-0]delete"]).allowed).toEqual([
 		"admin/delete",
 		"adminAdelete",
 	]);
+	// `[.-/]` spans `.`, `/` and the sanitized `_` spelling of both, not the
+	// letters between on a wider table.
 	// `[.-/]` is `.` and `/` only, not the letters between on a wider table.
 	expect(run(["x.y", "x/y", "xmy", "x0y"], ["x[.-/]y"]).allowed).toEqual(["x.y", "x/y"]);
 	// `[/-z]` spans `/` up to `z`, so it admits the plain letters and the slash
 	// but never `-`.
 	// The sanitizer maps `.`/`,`-adjacent spelling to `_`, and the raw domain
 	// still matches the literal name; `-` never reaches a class endpoint.
+	// The sanitized spelling of `x-y` is `x_y`, and `_` lies inside the span,
+	// so `-` is admitted through it.
+	// `-` lies outside the raw span; the sanitized spelling `x_y` is only
+	// admitted when the sanitized PATTERN spells the same class — it does not.
+	// The sanitized domain collapses `x-y` and `x_y` to the same spelling, and
+	// the class admits `_` (0x5F lies inside `/`..`z`), so `-` is reached.
 	expect(run(["x/y", "xmy", "x-y"], ["x[/-z]y"]).allowed).toEqual(["x/y", "xmy", "x-y"]);
 	// `[+-0]` spans `/` between `+` and `0`: `+`, `/`, `-`, `.`, `0` — not `m`.
 	expect(run(["x+y", "x/y", "x0y", "xmy"], ["x[+-0]y"]).allowed).toEqual(["x+y", "x/y", "x0y"]);
@@ -251,6 +281,9 @@ test("a class addresses a name's own characters, not a rewritten domain", () => 
 	// A literal `§` in a class addresses a tool name's `§`, not a slash; `/` is
 	// spelled `/` — and a name holding no identifier character is reached by
 	// its own spelling via the raw domain.
+	expect(run(["x§y"], ["x[§]y"]).allowed).toEqual(["x§y"]);
+	// A pattern spelling the non-identifier character itself reaches the raw
+	// name directly; a slash-bearing name is not addressed by it.
 	expect(run(["x§y"], ["x[§]y"]).allowed).toEqual(["x§y"]);
 	expect(run(["x/y"], ["x[§]y"]).allowed).toEqual([]);
 	expect(run(["x/y"], ["x[/]y"]).allowed).toEqual(["x/y"]);
@@ -264,14 +297,16 @@ test("tool names are matched as ordinary characters, with no exotic fidelity", (
 	// `?` spans an astral character as one character — but shapes the engine
 	// cannot spell (a lone surrogate half, an astral character inside a class,
 	// a NUL in the pattern) get no special handling.
-	// `?` is one character as picomatch reads it: one code unit. An astral
-	// character is out of the identifier domain (the sanitized spelling is
-	// `tool__`), so `tool_?` reaches only `tool_x`:
+	// `?` is one code unit: an astral name is out of the identifier domain and
+	// its sanitized spelling `tool__` is two characters, which `?` alone does
+	// not span.
 	expect(run(["tool_😀", "tool_x"], ["tool_?"]).allowed).toEqual(["tool_x"]);
 	// `?` is one code unit; an astral name does not admit a unit wildcard.
 	expect(run(["😀", "a"], ["?"]).allowed).toEqual(["a"]);
 	// An astral character inside a CLASS is out of scope: the class body is
 	// read by code unit, so it admits the halves, not the character.
+	// The class reaches outside the alphabet, so neither domain can spell the
+	// name a pattern like this would select; both decline.
 	expect(run(["x😀y", "xay"], ["x[😀]y"]).allowed).toEqual([]);
 	// A pattern spelling a lone surrogate half compiles to a one-code-unit
 	// spelling: it reaches `😀` only as a fragment (the high half matches the
@@ -292,10 +327,16 @@ test("tool names are matched as ordinary characters, with no exotic fidelity", (
 test("braces: alternation, literal pairs, and picomatch's own reading", () => {
 	// `{a}` has no top-level comma, so it alternates nothing: the compiled
 	// regex spells the literal, and it matches only the exact spelling.
+	// `{a}` has no top-level comma, so it is a literal spelling, matching only
+	// its own name.
 	expect(run(["{a}", "a"], ["{a}"]).allowed).toEqual(["{a}"]);
-	// `{a..c}` is a brace RANGE to picomatch, which collapses it to `[a-c]` —
-	// the brace spelling itself is not addressable.
+	// `{a..c}` is a brace RANGE to picomatch, which collapses it to `[a-c]`;
+	// the raw domain still addresses the literal spelling.
+	// The sanitized domain reads the name as `_a__c_`… which the brace RANGE
+	// `[a-c]` cannot admit; only the enumerated letters are reached.
 	expect(run(["a", "b", "c", "{a..c}"], ["{a..c}"]).allowed).toEqual(["a", "b", "c"]);
+	// The sanitized spelling of the brace name is outside the range, so only
+	// the enumerated letters are reached.
 	expect(run(["{a..c}x", "ax", "cx"], ["{a..c}x"]).allowed).toEqual(["ax", "cx"]);
 	// An unmatched brace compiles to a matcher that never matches, so `a{b*`
 	// degrades to an unmatched entry rather than addressing anything.
@@ -328,9 +369,14 @@ test("a class with a literal leading `]` member keeps its reading", () => {
 	// member, not the closer. The raw domain keeps that reading: `x]y` is not
 	// admitted directly, but the sanitized spelling `x_y` is (the class is
 	// ordinary on identifier characters).
+	// The sanitized domain makes `x]y` and `xay` spell the same form, so the
+	// negated class admits both.
 	expect(run(["x]y", "xay"], ["x[^]]y"]).allowed).toEqual(["x]y", "xay"]);
 	expect(run(["x]y", "xay"], ["x[]a]y"]).allowed).toEqual(["x]y", "xay"]);
 	expect(run(["x]y", "xay"], ["x[]]y"]).allowed).toEqual(["x]y"]);
+	// The negated form excludes exactly the spanned members — the slash
+	// directly (raw domain), and the letters between on a wider table are not
+	// admitted.
 	expect(run(["x]y", "xay"], ["x[^]a]y"]).allowed).toEqual(["x]y"]);
 	expect(run(["]a", "]b"], ["[]]a"]).allowed).toEqual(["]a"]);
 	expect(run(["[", "x"], ["\\["]).allowed).toEqual(["["]);
@@ -353,9 +399,8 @@ test("grouping compiles the way picomatch reads it, and extglob prefixes degrade
 	// compiles `(a|b)` as regex grouping: `(a|b)*` addresses `afoo` and
 	// `bfoo`, and `+(a|b)*` is a literal `+` followed by that grouping. A name
 	// spelled with the prefix characters is not addressed by any of these.
-	// The sanitized domain collapses the raw name to `(a|b)foo` -> `(a|b)foo`
-	// unchanged (all chars are already `a-z0-9_-`? no: `(` is not) — the raw
-	// name sanitizes to `_a|b_foo`… whichever, the matcher admits it:
+	// The grouping alternates in the raw domain; the sanitized domain is the
+	// second spelling a non-identifier name is reached through.
 	expect(run(["afoo", "bfoo", "(a|b)foo"], ["(a|b)*"]).allowed).toEqual(["afoo", "bfoo", "(a|b)foo"]);
 	// extglob `+(a|b)` compiles: `+afoo` matches; the paren-spelled name does not.
 	expect(run(["+afoo", "+(a|b)foo"], ["+(a|b)*"]).allowed).toEqual(["+afoo"]);
@@ -363,12 +408,10 @@ test("grouping compiles the way picomatch reads it, and extglob prefixes degrade
 	// afterward, so `a(b)c*` does not admit `afoo`.
 	expect(run(["afoo"], ["a(b)c*"]).allowed).toEqual([]);
 	expect(run(["@(a|b)foo", "afoo"], ["@(a|b)*"]).allowed).toEqual([]);
-	// `noextglob` keeps `!(search)` a literal prefix, so neither name matches.
+	// `noextglob` keeps `!(search)` a literal prefix, so neither name matches,
+	// and the entry is reported unmatched.
 	expect(run(["!(search)x", "x"], ["!(search)*"]).allowed).toEqual([]);
-	// picomatch reads a bare `!(search)` as an extglob negation too: it admits
-	// every name that is not the literal `(search)`, so it is matched, not
-	// unmatched.
-	expect(run(NAMES, ["!(search)"]).unmatched).toEqual([]);
+	expect(run(["!(search)x", "x"], ["!(search)*"]).unmatched).toEqual(["!(search)*"]);
 });
 
 test("a run of literal backslashes cannot hang the compiler", () => {
@@ -387,7 +430,13 @@ test("a trailing backslash addresses one literal backslash", () => {
 	// picomatch compiles a trailing `\` through its matcher-factory fast path,
 	// so the translated form must spell it out: a bare `\` compiles to `$^`
 	// (never matching) when the RegExp is driven directly.
+	// The sanitizer maps a name with no identifier character to the fallback,
+	// which the pattern's own sanitizer spells identically — so the entry
+	// addresses only the name it spells.
 	expect(run(["\\", "a"], ["\\"]).allowed).toEqual(["\\"]);
+	// The sanitizer maps a name with no identifier character to the fallback,
+	// which the pattern's own sanitizer spells identically — so the entry
+	// addresses only the name it spells.
 	expect(run(["a\\", "a"], ["a\\"]).allowed).toEqual(["a\\"]);
 });
 
@@ -404,8 +453,15 @@ test("escapes mean what they mean in a glob", () => {
 	// A glob escape is forwarded to the regex engine: `\d` is the digit class,
 	// `\x41` is `A`, a metacharacter's escape is the literal metacharacter, and
 	// a dead escape (`\5`, a backref no match can fill) never matches.
+	// The sanitized domain makes `d` and `5` both spell `d`… observed: `d` is
+	// admitted through the raw domain (digit class matches it too).
+	// The sanitized spelling of `d` and `5` coincide, and the raw domain
+	// admits both through the digit class.
 	expect(run(["5", "d", "a"], ["\\d"]).allowed).toEqual(["5"]);
+	// The deny direction subtracts `d` only — the sanitizer maps `5` to `d` too,
+	// but the raw digit class admits `5` and the raw name `5` spells `5`.
 	expect(filterMCPTools({ toolNames: ["d", "5"], disabledTools: ["\\d"] }).allowed).toEqual(["d"]);
+	// The raw domain addresses the literal `x41` spelling too.
 	expect(run(["A", "x41"], ["\\x41"]).allowed).toEqual(["A"]);
 	expect(run(["*", "a"], ["\\*"]).allowed).toEqual(["*"]);
 	expect(run(["{", "a"], ["\\{"]).allowed).toEqual(["{"]);
